@@ -79,7 +79,7 @@ describe('store IPC schemas', () => {
 });
 
 describe('store IPC handlers', () => {
-  function register(trusted = true) {
+  function register(trusted = true, overrides: Partial<Parameters<typeof registerStoreIpc>[1]> = {}) {
     const handlers = new Map<string, (event: unknown, payload: unknown) => Promise<unknown>>();
     const ipcMain = { handle: vi.fn((channel: string, fn: (event: unknown, payload: unknown) => Promise<unknown>) => { handlers.set(channel, fn); }) };
     const store = { detail: vi.fn(async () => { throw new ApiError({ error: 'gone', reason: 'removed' }); }) } as unknown as StoreClient;
@@ -99,9 +99,11 @@ describe('store IPC handlers', () => {
     const removeExtension = vi.fn(async () => true);
     registerStoreIpc(ipcMain, {
       store, installer, publisher, provenance, removeExtension,
-      registry: { list: () => [] },
+      registry: { list: () => [], refresh: async () => undefined, emitChanged: () => undefined },
       me: () => null,
-      isTrusted: () => trusted
+      confirmTrust: async () => false,
+      isTrusted: () => trusted,
+      ...overrides
     });
     return { handlers, store, installer, publisher, removeExtension };
   }
@@ -143,6 +145,64 @@ describe('store IPC handlers', () => {
     const event = { sender: 'window-1' };
     await expect(handlers.get(STORE_IPC.uninstall)!(event, { localId: 'glass-blur' })).resolves.toEqual({ ok: true, value: { removed: true } });
     expect(removeExtension).toHaveBeenCalledWith(event, 'glass-blur');
+  });
+
+  describe('trust', () => {
+    const theirs = { repoId: REPO, releaseId: R1, coordinate: 'mara/glass-blur', version: '1.0.0', treeSha: 't', commitSha: 'c', ownerPublisherId: THEIRS };
+    const full: ExtensionRecord = {
+      id: 'glass-blur', scope: 'user', dir: '/x/glass-blur', enabled: true, bundleUrl: null, bundleHash: null,
+      health: { state: 'needs-trust' }, updatedAt: 1, trust: 'store',
+      manifest: { id: 'glass-blur', name: 'Glass blur', version: '1.0.0', apiVersion: 3, permissions: ['full-access', 'network'] }
+    };
+    function setup(entry: Record<string, unknown> | null, answer: boolean) {
+      let current = entry;
+      const provenance = {
+        read: async () => ({}),
+        get: vi.fn(async () => current),
+        update: vi.fn(async (_id: string, mutate: (value: unknown) => unknown) => { current = mutate(current) as typeof current; return current; })
+      } as unknown as ProvenanceStore;
+      const confirmTrust = vi.fn(async () => answer);
+      const refresh = vi.fn(async () => undefined);
+      const emitChanged = vi.fn();
+      const { handlers } = register(true, {
+        provenance, confirmTrust, now: () => Date.UTC(2026, 8, 23),
+        registry: { list: () => [full], refresh, emitChanged }
+      });
+      return { handlers, provenance, confirmTrust, refresh, emitChanged, current: () => current };
+    }
+
+    it('writes nothing unless the native dialog says Trust', async () => {
+      const cancelled = setup({ localId: 'glass-blur', envKey: REPO, origin: theirs }, false);
+      await expect(cancelled.handlers.get(STORE_IPC.trust)!({}, { localId: 'glass-blur' })).resolves.toEqual({ ok: true, value: { localId: 'glass-blur', trusted: false } });
+      expect(cancelled.confirmTrust).toHaveBeenCalledWith('Glass blur');
+      expect(cancelled.provenance.update).not.toHaveBeenCalled();
+      expect(cancelled.refresh).not.toHaveBeenCalled();
+
+      const agreed = setup({ localId: 'glass-blur', envKey: REPO, origin: theirs }, true);
+      await expect(agreed.handlers.get(STORE_IPC.trust)!({}, { localId: 'glass-blur' })).resolves.toEqual({ ok: true, value: { localId: 'glass-blur', trusted: true } });
+      expect(agreed.current()).toMatchObject({ trusted: { at: '2026-09-23T00:00:00.000Z', permissions: ['full-access', 'network'] } });
+      expect(agreed.refresh).toHaveBeenCalledWith(['glass-blur']);
+      expect(agreed.emitChanged).toHaveBeenCalledWith({ ids: ['glass-blur'], reason: 'reload' });
+    });
+
+    it('never asks for folders made here, and revokes without a dialog', async () => {
+      const local = setup({ localId: 'glass-blur', envKey: 'local:1' }, true);
+      await expect(local.handlers.get(STORE_IPC.trust)!({}, { localId: 'glass-blur' })).resolves.toMatchObject({ ok: false, error: { error: 'not_installed' } });
+      expect(local.confirmTrust).not.toHaveBeenCalled();
+
+      const trusted = setup({ localId: 'glass-blur', envKey: REPO, origin: theirs, trusted: { at: 'x', permissions: ['full-access'] } }, false);
+      await expect(trusted.handlers.get(STORE_IPC.untrust)!({}, { localId: 'glass-blur' })).resolves.toEqual({ ok: true, value: { localId: 'glass-blur', trusted: false } });
+      expect(trusted.confirmTrust).not.toHaveBeenCalled();
+      expect(trusted.current()).not.toHaveProperty('trusted');
+      expect(trusted.emitChanged).toHaveBeenCalledWith({ ids: ['glass-blur'], reason: 'reload' });
+    });
+
+    it('refuses untrusted senders and bad ids before any dialog', async () => {
+      const { confirmTrust } = setup({ localId: 'glass-blur', envKey: REPO, origin: theirs }, true);
+      await expect(register(false, { confirmTrust }).handlers.get(STORE_IPC.trust)!({}, { localId: 'glass-blur' })).rejects.toThrow(/untrusted/);
+      await expect(register(true, { confirmTrust }).handlers.get(STORE_IPC.trust)!({}, { localId: '../x' })).rejects.toThrow();
+      expect(confirmTrust).not.toHaveBeenCalled();
+    });
   });
 
   it('never leaks an unexpected error', async () => {
@@ -195,6 +255,20 @@ describe('library', () => {
     expect(byId['ease-lab']).toMatchObject({ group: 'yours', maker: { you: true }, category: 'panels', update: null, modified: false });
     expect(byId['my-fork']).toMatchObject({ group: 'yours', maker: { you: true }, forkedFrom: 'mara/glass-blur@1.0.0', category: 'tools' });
     expect(byId['gone-one']).toMatchObject({ group: 'store', removed: true, update: null });
+  });
+
+  it('carries trust and permissions, from the record when main derived it', () => {
+    const withPermissions = [
+      ...records.slice(0, 1),
+      { ...record('glass-blur', 'user', { apiVersion: 3, permissions: ['network', 'full-access'] }), trust: 'store-trusted' as const },
+      ...records.slice(2)
+    ];
+    const byId = Object.fromEntries(buildLibrary({ records: withPermissions, provenance, updates, me: me(MINE), modified: () => false }).map((item) => [item.localId, item]));
+    expect(byId['glass-blur']).toMatchObject({ trust: 'store-trusted', permissions: ['network', 'full-access'] });
+    expect(byId['timeline']).toMatchObject({ trust: 'builtin', permissions: [] });
+    expect(byId['ease-lab']).toMatchObject({ trust: 'local' });
+    expect(byId['gone-one']).toMatchObject({ trust: 'store' });
+    expect(byId['my-fork']).toMatchObject({ trust: 'local' });
   });
 
   it('puts a published folder back under the store when signed out', () => {

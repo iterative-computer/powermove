@@ -1,3 +1,4 @@
+import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
 import { expect, it, vi } from 'vitest';
 import { prepareVideoPreview, previewVideoElement } from './video-preview';
 
@@ -23,12 +24,14 @@ it('starts previews above 1 GB and releases the upload when the asset is dispose
     releasePlaybackProxy: vi.fn(async () => {}),
   };
   vi.stubGlobal('window', { powermove: { media } });
+  installBridgeForTests((window as any).powermove);
   try {
     const size = 1024 * 1024 * 1024 + 1;
     await prepareVideoPreview({}, { w: 3840, h: 2160 }, { size } as Blob, () => disposed);
     expect(media.beginPreview).toHaveBeenCalledWith(size);
     expect(media.releasePlaybackProxy).toHaveBeenCalledWith('preview');
-  } finally { vi.unstubAllGlobals(); }
+  } finally { vi.unstubAllGlobals();
+  resetBridgeForTests(); }
 });
 
 it('stops reading generated media immediately when its project is closed', async () => {
@@ -40,13 +43,15 @@ it('stops reading generated media immediately when its project is closed', async
     releasePlaybackProxy: vi.fn(async () => {}),
   };
   vi.stubGlobal('window', { powermove: { media } });
+  installBridgeForTests((window as any).powermove);
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
   try {
     await prepareVideoPreview({}, { w: 3840, h: 2160 }, new Blob(['source']), () => disposed);
     expect(media.readPlaybackProxy).toHaveBeenCalledTimes(1);
     expect(media.releasePlaybackProxy).toHaveBeenCalledWith('preview');
     expect(warn).not.toHaveBeenCalled();
-  } finally { vi.unstubAllGlobals(); warn.mockRestore(); }
+  } finally { vi.unstubAllGlobals();
+  resetBridgeForTests(); warn.mockRestore(); }
 });
 
 it('prepares an older HD alpha proxy without waiting behind optional 4K work', async () => {
@@ -64,6 +69,7 @@ it('prepares an older HD alpha proxy without waiting behind optional 4K work', a
     releasePlaybackProxy: vi.fn(async () => {}),
   };
   vi.stubGlobal('window', { powermove: { media } });
+  installBridgeForTests((window as any).powermove);
   const first = prepareVideoPreview({}, { w: 3840, h: 2160 }, new Blob(['source']), () => firstDisposed);
   try {
     await waiting;
@@ -72,6 +78,7 @@ it('prepares an older HD alpha proxy without waiting behind optional 4K work', a
     expect(media.releasePlaybackProxy).toHaveBeenCalledWith('legacy');
   } finally {
     firstDisposed = true; finish({ size: 1 }); await first; vi.unstubAllGlobals();
+  resetBridgeForTests();
   }
 });
 
@@ -96,6 +103,7 @@ it('persists editing media separately and reuses it after reload without convers
   } as any);
   const source = new Blob(['original bytes']); store.set('media:original', source);
   vi.stubGlobal('window', { powermove: { media } });
+  installBridgeForTests((window as any).powermove);
   vi.stubGlobal('document', { createElement: () => {
     const el: any = new EventTarget();
     let frame: () => void;
@@ -115,5 +123,6 @@ it('persists editing media separately and reuses it after reload without convers
     expect(store.get('media:original')).toBe(source);
     expect(PM.MediaStore.put).toHaveBeenCalledOnce();
     URL.revokeObjectURL(first.preview.url); URL.revokeObjectURL(reloaded.preview.url);
-  } finally { vi.unstubAllGlobals(); }
+  } finally { vi.unstubAllGlobals();
+  resetBridgeForTests(); }
 });

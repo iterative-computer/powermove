@@ -18,7 +18,7 @@ import type {
   TreeDto,
   VarDecl
 } from '@powermove/registry/wire';
-import type { ExtensionHealth } from '@powermove/registry/manifest';
+import type { ExtensionHealth, ExtensionPermission, ExtensionRecord } from '@powermove/registry/manifest';
 import type { z } from 'zod';
 
 import type { PublishForm, PublishPlanDto, PublishProgress, StorePublishResult } from './publish';
@@ -39,6 +39,10 @@ export const STORE_IPC = {
   publishPrepare: 'store:publish-prepare',
   publish: 'store:publish',
   yank: 'store:yank',
+  /** Give a store install full access, behind a native dialog main owns. */
+  trust: 'store:trust',
+  /** Take full access back (no dialog). */
+  untrust: 'store:untrust',
   /** main → renderer: the update-check results changed (`StoreUpdates`). */
   updatesChanged: 'store:updates-changed',
   /** main → renderer: a publish moved on (`PublishProgress`). */
@@ -80,7 +84,12 @@ export interface StoreInstallResult {
   warning?: string;
   /** Required values are missing, so it stays off until set up. */
   needsSetup: boolean;
+  /** It declares `full-access` and isn't trusted yet, so it stays off until the user trusts it. */
+  needsTrust: boolean;
 }
+
+/** `trusted: false` means the user cancelled the dialog (or revoked trust). */
+export interface StoreTrustResult { localId: string; trusted: boolean }
 
 export type StoreUpdateResult =
   | { kind: 'updated'; localId: string; version: string }
@@ -109,6 +118,10 @@ export interface LibraryItemDto {
   vars: VarDecl[];
   health: ExtensionHealth;
   enabled: boolean;
+  /** Who wrote it (sandbox design §2); `store-trusted` reads as "Trusted". */
+  trust: NonNullable<ExtensionRecord['trust']>;
+  /** What the manifest declares (apiVersion 3). */
+  permissions: ExtensionPermission[];
   description: string | null;
   group: LibraryGroup;
   maker: LibraryMaker;
@@ -160,6 +173,9 @@ export interface StoreChannels {
   /** The native confirmation follows; `published: false` means it was cancelled. */
   'store:publish': { req: StorePublishRequest; res: StoreResult<StorePublishResult> };
   'store:yank': { req: StoreYankRequest; res: StoreResult<{ version: string }> };
+  /** The native dialog asks first; `trusted: false` means it was cancelled. */
+  'store:trust': { req: StoreLocalRequest; res: StoreResult<StoreTrustResult> };
+  'store:untrust': { req: StoreLocalRequest; res: StoreResult<StoreTrustResult> };
 }
 
 export type StoreChannel = keyof StoreChannels;
@@ -180,6 +196,8 @@ export interface StoreBridge {
   publishPrepare(req: StoreLocalRequest): Promise<StoreChannels['store:publish-prepare']['res']>;
   publish(req: StorePublishRequest): Promise<StoreChannels['store:publish']['res']>;
   yank(req: StoreYankRequest): Promise<StoreChannels['store:yank']['res']>;
+  trust(req: StoreLocalRequest): Promise<StoreChannels['store:trust']['res']>;
+  untrust(req: StoreLocalRequest): Promise<StoreChannels['store:untrust']['res']>;
   onUpdatesChanged(cb: (updates: StoreUpdates) => void): () => void;
   onPublishProgress(cb: (progress: PublishProgress) => void): () => void;
   onLibraryChanged(cb: () => void): () => void;

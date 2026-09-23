@@ -1,3 +1,4 @@
+import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
@@ -293,6 +294,7 @@ describe('agent harness oracle', () => {
         }
       }
     });
+  installBridgeForTests((window as any).powermove);
     const PM = makePM(
       'core/easing', 'core/model', 'core/selection', 'core/anim',
       'core/history', 'core/editing', 'assistant/harness',
@@ -358,6 +360,7 @@ describe('agent harness oracle', () => {
         }
       }
     });
+  installBridgeForTests((window as any).powermove);
     const PM = makePM(
       'core/easing', 'core/model', 'core/selection', 'core/anim',
       'core/history', 'core/editing', 'assistant/harness',

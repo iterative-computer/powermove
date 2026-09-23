@@ -5,7 +5,7 @@ import { CLOUD_UNREACHABLE } from '../../../shared/cloud-ipc';
 import type { LibraryItemDto } from '../../../shared/store-ipc';
 import {
   KINDS, KIND_PLURAL, artFor, detailAction, detailFromDto, groupLibrary, includesText, libraryAction, listingFromDto,
-  loadError, parseLineage, relativeDate, requiresText, statusText
+  loadError, parseLineage, permissionLines, asksFullAccess, relativeDate, requiresText, statusText
 } from './data';
 
 const REPO = '11111111-1111-4111-8111-111111111111';
@@ -15,7 +15,7 @@ const R2 = '44444444-4444-4444-8444-444444444444';
 function item(overrides: Partial<LibraryItemDto> = {}): LibraryItemDto {
   return {
     localId: 'glass-blur', name: 'Glass blur', version: '1.0.0', category: 'effects', contributes: ['effects'], vars: [],
-    health: { state: 'ok' }, enabled: true, description: null, group: 'store', maker: { handle: 'mara' },
+    health: { state: 'ok' }, enabled: true, trust: 'store', permissions: [], description: null, group: 'store', maker: { handle: 'mara' },
     origin: { coordinate: 'mara/glass-blur', version: '1.0.0', repoId: REPO, releaseId: R1 },
     update: null, modified: false,
     ...overrides
@@ -179,5 +179,25 @@ describe('view models', () => {
   it('tells offline from a registry error', () => {
     expect(loadError({ error: 'internal', detail: CLOUD_UNREACHABLE })).toEqual({ offline: true, message: 'Can’t reach the store' });
     expect(loadError({ error: 'gone', reason: 'removed' })).toEqual({ offline: false, message: 'This extension is no longer on the store.' });
+  });
+});
+
+
+describe('access disclosure', () => {
+  it('orders permissions with full access first and highlights it', () => {
+    expect(permissionLines(['network', 'full-access', 'assets'])).toEqual([
+      { label: 'Needs full access to Powermove', warn: true },
+      { label: 'Imports files', warn: false },
+      { label: 'Uses the network', warn: false }
+    ]);
+    expect(asksFullAccess(['network', 'full-access'])).toBe(true);
+    expect(asksFullAccess(['network'])).toBe(false);
+  });
+
+  it('shows trust state in the Library status and action', () => {
+    expect(statusText(item({ trust: 'store-trusted' }))).toContain('Trusted');
+    const blocked = item({ health: { state: 'needs-trust' }, permissions: ['full-access'] });
+    expect(statusText(blocked)).toBe('Needs full access');
+    expect(libraryAction(blocked).label).toBe('Trust…');
   });
 });

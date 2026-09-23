@@ -1,5 +1,6 @@
 import { decodeProjectContainer, encodeProjectContainerBlob, encodeTextChunks, isProjectContainer, projectContainerIndex, type ProjectMediaRange } from '../../../../shared/project-container';
 import { stringifyAsync } from './serialize-async';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 type MediaStore = { get(asset: any): Promise<Blob | null>; put(id: string, blob: Blob, metadata: any): Promise<boolean> };
 
@@ -106,7 +107,7 @@ export async function restoreProjectFileStream(document: any, media: ProjectMedi
   /* A browser served by `powermove serve` stages in memory: OPFS needs a secure
      context, and current Chromium keeps IndexedDB blobs as references to the
      staged file, which is gone once staging is cleaned up. */
-  if ((typeof window !== 'undefined' && (window as any).powermove?.remote) || typeof navigator.storage?.getDirectory !== 'function') {
+  if ((typeof window !== 'undefined' && (hostBridge() as any)?.remote) || typeof navigator.storage?.getDirectory !== 'function') {
     for (const source of sources) {
       const chunks: Uint8Array[] = [];
       for (let offset = 0; offset < source.length;) {

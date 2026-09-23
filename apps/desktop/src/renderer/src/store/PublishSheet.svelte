@@ -255,6 +255,17 @@
         </div>
       {/if}
 
+      {#if plan.permissionFindings.length}
+        <h3 class="pub-title">Permissions to declare</h3>
+        <div class="sg-group pub-group">
+          {#each plan.permissionFindings as finding (`${finding.path}:${finding.line}:${finding.needs}`)}
+            <div class="settings-row pub-row">
+              <span class="settings-copy"><span class="pub-problem">{finding.text}</span></span>
+            </div>
+          {/each}
+        </div>
+      {/if}
+
       {#if plan.blockedFindings.length || plan.waivableFindings.length}
         <h3 class="pub-title">Possible secrets</h3>
         <div class="sg-group pub-group">

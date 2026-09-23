@@ -974,6 +974,8 @@ export interface HostAPI {
   };
   /** Mount a Svelte component into an element (kernel-provided svelte runtime). */
   mount<P extends Record<string, unknown>>(component: Component<P>, target: HTMLElement, props: P): () => void;
+  /** Native haptic feedback (the Mac trackpad's snap tick). Does nothing where there is none. */
+  readonly haptic: { alignment(): void };
 }
 
 export interface PowermoveAPI {

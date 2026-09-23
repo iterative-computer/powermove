@@ -12,12 +12,13 @@
   import {
     KINDS, KIND_ICON, KIND_LABEL, KIND_PLURAL,
     actionErrorText, artFor, coordinate, detailAction, detailFromDto, groupLibrary, includesText, isKind,
-    libraryAction, libraryItemFor, listingFromDto, loadError, makerText, needsAttention, needsSetup,
-    parseLineage, publishErrorText, requiresText, secondaryPublish, statusIsHot, statusText, storeBridge,
+    libraryAction, libraryItemFor, listingFromDto, loadError, makerText, needsAttention, needsSetup, needsTrust,
+    parseLineage, permissionLines, publishErrorText, requiresText, secondaryPublish, statusIsHot, statusText, storeBridge,
     type Action, type Lineage, type LoadError, type StoreDetail, type StoreKind, type StoreListing, type StorePage, type StorePM,
     type VersionEntry
   } from './data';
   import { openPublishSheet } from './publish-sheet';
+  import { bridge } from '../kernel/bridge';
 
   /* Two places and seven kinds. Browse is the storefront; a kind is the store
      narrowed to one shelf; Library is everything on this Mac, in one list. */
@@ -178,7 +179,7 @@
   $effect(() => {
     if (!shown) return;
     const offUpdates = storeBridge()?.onUpdatesChanged(() => void loadLibrary());
-    const offExtensions = window.powermove?.extensions?.onChanged(() => void loadLibrary());
+    const offExtensions = bridge()?.extensions?.onChanged(() => void loadLibrary());
     const offLibrary = storeBridge()?.onLibraryChanged(() => void loadLibrary());
     return () => {
       offUpdates?.();
@@ -408,7 +409,7 @@
 
   async function recordFor(localId: string) {
     try {
-      return (await window.powermove?.extensions?.list())?.find((record) => record.id === localId) ?? null;
+      return (await bridge()?.extensions?.list())?.find((record) => record.id === localId) ?? null;
     } catch {
       return null;
     }
@@ -433,14 +434,52 @@
       else toast(message, true);
       return;
     }
+    /* Full access: the files are here, then main asks. Declining leaves it
+       installed and off, with "Needs full access" in the Library. */
+    if (result.value.needsTrust) {
+      const trusted = await askTrust(result.value.localId);
+      toast(trusted ? result.value.warning ?? `${target.name} is installed.` : `${target.name} is installed. It stays off until you give it full access.`);
+      if (trusted && result.value.needsSetup) void setUp(result.value.localId);
+      return;
+    }
     toast(result.value.warning ?? `${target.name} is installed.`);
     if (result.value.needsSetup) void setUp(result.value.localId);
+  }
+
+  /* The native "Give … full access to Powermove?" dialog is main's; this
+     only asks main to show it. Resolves whether the user said Trust. */
+  async function askTrust(localId: string): Promise<boolean> {
+    setBusy(localId, 'Waiting…');
+    const result = await call(() => storeBridge()?.trust({ localId }));
+    setBusy(localId, null);
+    await loadLibrary();
+    if (!result.ok) {
+      toast(actionErrorText(result.error), true);
+      return false;
+    }
+    return result.value.trusted;
+  }
+
+  async function trust(item: LibraryItemDto): Promise<void> {
+    if (busy[item.localId]) return;
+    if (await askTrust(item.localId)) toast(`${item.name} has full access.`);
+  }
+
+  async function revokeTrust(item: LibraryItemDto): Promise<void> {
+    if (busy[item.localId]) return;
+    const result = await call(() => storeBridge()?.untrust({ localId: item.localId }));
+    await loadLibrary();
+    if (!result.ok) {
+      toast(actionErrorText(result.error), true);
+      return;
+    }
+    toast(`${item.name} no longer has full access.`);
   }
 
   async function update(item: LibraryItemDto): Promise<void> {
     if (!item.update || busy[item.localId]) return;
     if (item.update.modified) {
-      const go = await window.powermove?.confirm?.({
+      const go = await bridge()?.confirm?.({
         message: `Update ${item.name} to ${item.update.version}?`,
         detail: 'You changed its files, so your folder stays as it is. The new version is saved beside it for your agent to merge.',
         confirmLabel: 'Save New Version'
@@ -466,7 +505,7 @@
   async function uninstall(item: LibraryItemDto): Promise<void> {
     if (busy[item.localId]) return;
     const fromStore = item.group === 'store';
-    const go = await window.powermove?.confirm?.({
+    const go = await bridge()?.confirm?.({
       message: `Uninstall ${item.name}?`,
       detail: fromStore
         ? 'Its files are removed from this Mac. You can install it again from the store.'
@@ -489,7 +528,7 @@
 
   async function toggle(item: LibraryItemDto): Promise<void> {
     try {
-      await window.powermove?.extensions?.setEnabled({ id: item.localId, enabled: !item.enabled });
+      await bridge()?.extensions?.setEnabled({ id: item.localId, enabled: !item.enabled });
     } catch {
       toast(`Unable to turn ${item.name} ${item.enabled ? 'off' : 'on'}. Try again.`, true);
     }
@@ -498,7 +537,7 @@
 
   async function reveal(item: LibraryItemDto): Promise<void> {
     try {
-      await window.powermove?.extensions?.reveal({ id: item.localId });
+      await bridge()?.extensions?.reveal({ id: item.localId });
     } catch {
       toast('Unable to show the folder in Finder.', true);
     }
@@ -568,6 +607,7 @@
     if (action.kind === 'install' && listing) void install(listing);
     else if (action.kind === 'update' && item) void update(item);
     else if (action.kind === 'setup' && item) void setUp(item.localId);
+    else if (action.kind === 'trust' && item) void trust(item);
     else if (action.kind === 'toggle' && item) void toggle(item);
     else if (action.kind === 'publish' && item) void publish(item);
   }
@@ -578,6 +618,8 @@
     // The trailing control is Publish: On and Off move here.
     if (libraryAction(item).kind === 'publish') items.push({ label: item.enabled ? 'Turn Off' : 'Turn On', run: () => void toggle(item) });
     if (item.group === 'store') items.push({ label: 'Check for Updates', run: () => void checkForUpdates() });
+    if (item.trust === 'store') items.push({ label: 'Trust…', run: () => void trust(item) });
+    else if (item.trust === 'store-trusted') items.push({ label: 'Revoke Trust', run: () => void revokeTrust(item) });
     items.push({ label: 'Show in Finder', run: () => void reveal(item) });
     items.push('-', { label: 'Uninstall…', run: () => void uninstall(item) });
     openPopoverMenu({ anchor: event.currentTarget, label: `${item.name} actions`, items });
@@ -802,7 +844,7 @@
 {#snippet libraryRow(item: LibraryItemDto)}
   {@const note = statusText(item)}
   {@const lineage = storeLineageOf(item)}
-  <div class="st-row is-library" class:is-off={needsSetup(item) || !item.enabled}>
+  <div class="st-row is-library" class:is-off={needsSetup(item) || needsTrust(item) || !item.enabled}>
     <button class="st-row-open" type="button" onclick={() => openItem(item)}>
       <span class="st-thumb" style={itemArt(item)}></span>
       <span class="st-row-copy">
@@ -900,6 +942,7 @@
   {@const vars = data?.vars ?? item?.vars ?? []}
   {@const contributes = data?.contributes.length ? data.contributes : item?.contributes ?? []}
   {@const apiVersion = data?.apiVersion ?? preview?.apiVersion ?? null}
+  {@const access = permissionLines(data?.permissions ?? preview?.permissions ?? item?.permissions)}
   {@const coord = data ? coordinate(data) : preview ? coordinate(preview) : item?.origin?.coordinate ?? (account?.handle && item ? `${account.handle}/${item.localId}` : item?.localId ?? '')}
 
   <button class="st-back" type="button" onclick={back}>
@@ -917,6 +960,15 @@
       </div>
       <p class="st-byline">{byline(kind, who)}</p>
       {#if lede}<p class="st-lede">{lede}</p>{/if}
+      {#if access.length}
+        <!-- What it declares it uses, beside the one action that installs it. -->
+        <p class="st-access" aria-label="Access">
+          {#each access as line, i (line.label)}
+            {#if i > 0}<span class="st-access-sep" aria-hidden="true">·</span>{/if}
+            <span class:is-warn={line.warn}>{#if line.warn}<Icon {PM} name="warning" />{/if}{line.label}</span>
+          {/each}
+        </p>
+      {/if}
       {#if storeLineage}
         <p class="st-lineage">
           Forked from <button class="st-link" type="button" onclick={() => openLineage(storeLineage)}>{storeLineage.handle}/{storeLineage.slug}</button>
@@ -950,7 +1002,9 @@
     <p class="st-failure" role="alert"><span>{actionError}</span></p>
   {/if}
 
-  {#if item?.removed}
+  {#if item && needsTrust(item)}
+    <p class="st-update-note is-warn">It stays off until you trust it. Trusted extensions run with the same access as the app: your projects, files you open, the network, and other extensions’ values.</p>
+  {:else if item?.removed}
     <p class="st-update-note">This extension is no longer on the store. It stays on this Mac, but won’t get updates.</p>
   {:else if item?.update}
     <p class="st-update-note">
@@ -965,6 +1019,8 @@
         <button class="st-link is-quiet" type="button" aria-expanded={compare?.base === updateCompare.base && compare.head === updateCompare.head} onclick={() => void showCompare(updateCompare.base, updateCompare.head)}>See what changed</button>
       {/if}
     </p>
+  {:else if item?.trust === 'store-trusted'}
+    <p class="st-update-note">Trusted · runs with full access. <button class="st-link is-quiet" type="button" onclick={() => void revokeTrust(item)}>Revoke Trust</button></p>
   {/if}
 
   {#if compare}

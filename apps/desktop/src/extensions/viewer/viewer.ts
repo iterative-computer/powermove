@@ -1961,7 +1961,7 @@ function startMove(e: any, layers: any, T: any, options: any = {}) {
       });
       const nextLines = snap.lines.length ? snap.lines : null;
       if (snapLinesChanged(V.snapLines, nextLines)) {
-        window.powermove?.haptic.alignment();
+        api.host.haptic.alignment();
       }
       V.snapLines = nextLines;
       invalidate();

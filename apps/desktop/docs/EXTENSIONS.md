@@ -71,7 +71,7 @@ reloaded, or removed. Return a `Disposable` or use `api.onDispose` for anything 
 | Field | Required | Notes |
 |---|---|---|
 | `id` | yes | `a-z 0-9 -`, 2–64 chars, equals folder name |
-| `name`, `version` (`x.y.z`), `apiVersion` (`1` or `2`) | yes | |
+| `name`, `version` (`x.y.z`), `apiVersion` (`1`, `2`, or `3`) | yes | |
 | `description` | recommended | shown in the Mods list; one sentence |
 | `entry` | no | default `index.ts`; `.ts` `.js` `.mjs`; may import relative `.ts`, `.js`, `.svelte`, `.css` |
 | `contributes` | recommended | subset of `panels inspector media commands keybindings effects transitions layers themes palette menus status hooks` |
@@ -83,6 +83,34 @@ reloaded, or removed. Return a `Disposable` or use `api.onDispose` for anything 
 
 Imports allowed: `powermove` (types only), `svelte`, `svelte/store`, relative files
 inside the extension folder. No npm packages, no `..` escapes.
+
+## Permissions and the sandbox
+
+Store extensions from other publishers run sandboxed. Declare `apiVersion: 3` for
+new Store-bound extensions and list the access they need in `manifest.json`:
+
+```json
+"permissions": ["network", "assets", "project:write"]
+```
+
+- `network` allows HTTPS and WebSocket requests and remote images and media.
+- `clipboard` allows writing to the clipboard.
+- `assets` allows picking, importing, and reading asset files.
+- `project:write` allows changing the project with `api.project.apply`; project reads remain available.
+- `full-access` allows trusted-only APIs. Store installs that request it stay off
+  until the person installing them accepts Powermove's full-access dialog. They
+  can later revoke trust from the Library.
+
+The trusted-only namespaces are `api.render`, `api.host`, `api.services`,
+`api.inspector`, `api.anim`, `api.model`, `api.history`, `api.edit`,
+`api.groups`, `api.uiState`, `api.dnd`, `api.workspace`,
+`api.ui.controls`, `api.ui.modal`, `api.ui.menu`, `api.ui.drag`,
+`api.ui.gesture`, `api.ui.mount`, `api.media.importFiles`,
+`api.media.assets`, `api.media.audio`, and `api.media.fonts`.
+Publishing scans direct uses of these names and network or clipboard APIs and
+blocks undeclared permissions. This text scan does not detect destructured
+aliases or dynamic property access. Local extensions made or forked on this Mac
+are trusted and keep working without permission declarations.
 
 ## The API (apiVersion 1)
 

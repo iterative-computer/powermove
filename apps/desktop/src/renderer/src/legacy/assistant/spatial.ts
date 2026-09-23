@@ -18,6 +18,7 @@ import { EFFECT_AUTHORING_INSTRUCTIONS, EDITOR_EXTENSION_INSTRUCTIONS } from '..
 import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
 import { AGENT_MODELS, REASONING_EFFORTS, modelEfforts, modelEffort } from '../../../../shared/agent-models';
 import { idlePreload } from './idle-preload';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 const AGENT_EDITABLE_CATALOG_CHARS = 72_000;
 const AGENT_LAYER_INDEX_CHARS = 18_000;
@@ -291,7 +292,7 @@ globalThis.window?.addEventListener('pm-provider-connected', (event: Event) => {
   if (config?.model) updateCompatibleModels(config);
   PM.AgentUI?.setProvider('compatible');
 });
-void globalThis.window?.powermove?.compatible?.status().then(config => {
+void hostBridge()?.compatible?.status().then(config => {
   updateCompatibleModels(config);
   PM.AgentUI?.update();
 }).catch(() => undefined);
@@ -726,7 +727,7 @@ function extensionHealthError(record: any) {
 }
 
 async function requestFix(id: any) {
-  const native: any = (window as any).powermove;
+  const native: any = (hostBridge() as any);
   if (typeof native?.extensions?.readSource !== 'function' || typeof native?.codex?.fixPrompt !== 'function') {
     window.console.warn(`[agent] Fix it is unavailable for extension "${String(id)}"`);
     return;
@@ -746,7 +747,7 @@ async function requestFix(id: any) {
 }
 
 async function requestExtensionRebase(id: any) {
-  const native: any = (window as any).powermove;
+  const native: any = (hostBridge() as any);
   if (typeof native?.codex?.rebasePrompt !== 'function') {
     window.console.warn(`[agent] Fork rebase is unavailable for extension "${String(id)}"`);
     return;
@@ -1841,7 +1842,7 @@ Fix failures in the isolated extension staging directory and return the changed 
 const resumedHostRuns = new Set<string>();
 function scheduleHostRunResume(): void {
   if (typeof window === 'undefined') return;
-  const remote = (window as any).powermove?.remoteRuns;
+  const remote = (hostBridge() as any)?.remoteRuns;
   if (!remote) return;
   window.setTimeout(() => { void resumeHostRuns(remote); }, 0);
 }
@@ -2891,7 +2892,7 @@ async function undoSceneRun() {
   for (const run of [...(S.run.undoRuns || [S.run])].reverse()) {
     if (run.extensionChangeSetId && extensionRestored) {
       try {
-        await (window as any).powermove.codex.restoreChangeSet({ projectId: run.projectId, changeSetId: run.extensionChangeSetId });
+        await (hostBridge() as any).codex.restoreChangeSet({ projectId: run.projectId, changeSetId: run.extensionChangeSetId });
       } catch (error: any) {
         extensionRestored = false;
         extensionError = String(error?.message || error);

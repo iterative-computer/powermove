@@ -4,6 +4,7 @@ import { IPC, type CodexRunRequest, type PowermoveBridge } from '../shared/ipc';
 
 const electronMocks = vi.hoisted(() => ({
   bridge: undefined as PowermoveBridge | undefined,
+  configurable: false,
   invoke: vi.fn(),
   on: vi.fn(),
   removeListener: vi.fn(),
@@ -14,8 +15,13 @@ const electronMocks = vi.hoisted(() => ({
 
 vi.mock('electron', () => ({
   contextBridge: {
-    exposeInMainWorld: vi.fn((_name: string, bridge: PowermoveBridge) => {
-      electronMocks.bridge = bridge;
+    executeInMainWorld: vi.fn(({ func, args }: { func: (value: unknown) => void; args: [PowermoveBridge] }) => {
+      // The page gets a configurable global the renderer kernel can delete.
+      func(args[0]);
+      electronMocks.bridge = (globalThis as unknown as { powermove?: PowermoveBridge }).powermove;
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'powermove');
+      electronMocks.configurable = descriptor?.configurable === true;
+      delete (globalThis as { powermove?: unknown }).powermove;
     })
   },
   ipcRenderer: {
@@ -58,6 +64,11 @@ beforeEach(() => {
 });
 
 describe('preload bridge', () => {
+  it('hands the page a configurable global so the kernel can take it away', () => {
+    expect(electronMocks.configurable).toBe(true);
+    expect(typeof bridge().extensionStore.trust).toBe('function');
+  });
+
   it('forwards built-in extension forks through the dedicated IPC channel', async () => {
     electronMocks.invoke.mockResolvedValue({ id: 'timeline-fork' });
 

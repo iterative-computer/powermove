@@ -11,6 +11,7 @@ import type { CloudBridge, CloudProvider } from '../../../shared/cloud-ipc';
 import { openPopoverMenu, type PopoverMenuHandle } from '../controls/popover-menu';
 import Avatar from './Avatar.svelte';
 import SignInSheet from './SignInSheet.svelte';
+import { bridge as hostBridge } from '../kernel/bridge';
 
 export type AccountProvider = CloudProvider;
 
@@ -184,7 +185,7 @@ export function installCloudAccount(PM: PMRegistry): void {
   registry = PM;
   const store = (PM as any).store;
   if (store?.get?.(LEGACY_STORE_KEY, null) != null) store.set?.(LEGACY_STORE_KEY, null);
-  bridge = (window as { powermove?: { cloud?: CloudBridge } }).powermove?.cloud ?? null;
+  bridge = hostBridge()?.cloud ?? null;
   (PM as any).Account = {
     get user() { return user; },
     get me() { return me; },

@@ -1,3 +1,4 @@
+import { installBridgeForTests, resetBridgeForTests } from '../kernel/bridge';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createServicesRegistry } from '../kernel/services';
@@ -10,6 +11,7 @@ const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  resetBridgeForTests();
   if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow);
   else delete (globalThis as any).window;
 });
@@ -95,6 +97,7 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
     setInterval() { return ++timerId; },
   };
   Object.defineProperty(globalThis, 'window', { value: fakeWindow, configurable: true });
+  installBridgeForTests(bridge);
 
   const raw = bootProject || {
     id: 'P1', name: 'Test', w: 1920, h: 1080, fps: 30, dur: 10, bg: '#000000',
@@ -271,6 +274,7 @@ describe('legacy app install', () => {
     const { PM } = appRegistry();
     const confirmProjectClose = vi.fn(async () => 'cancel');
     (window as any).powermove = { confirmProjectClose };
+  installBridgeForTests((window as any).powermove);
     expect(await PM.confirmCloseProject('P1')).toBe(true);
     expect(confirmProjectClose).not.toHaveBeenCalled();
   });
@@ -279,6 +283,7 @@ describe('legacy app install', () => {
     const { PM } = appRegistry();
     const confirmProjectClose = vi.fn(async () => 'cancel');
     (window as any).powermove = { confirmProjectClose };
+  installBridgeForTests((window as any).powermove);
     PM.proj.name = 'Edited';
     PM.autosave();
     expect(await PM.confirmCloseProject('P1')).toBe(false);
@@ -300,6 +305,7 @@ describe('legacy app install', () => {
     const { PM } = appRegistry(true, recovered, file);
     const confirmProjectClose = vi.fn(async () => 'cancel');
     (window as any).powermove = { confirmProjectClose };
+  installBridgeForTests((window as any).powermove);
     expect(await PM.confirmCloseProject('P1')).toBe(false);
     expect(confirmProjectClose).toHaveBeenCalledOnce();
   });
@@ -310,6 +316,7 @@ describe('legacy app install', () => {
     (window as any).powermove = {
       saveFile: async () => ({ ok: true, path: '/tmp/Test.pmv' }), confirmProjectClose,
     };
+  installBridgeForTests((window as any).powermove);
     await PM.saveProject();
     PM.autosave();
     const recovery = timers.get(PM.app.saveTimer)();
@@ -322,6 +329,7 @@ describe('legacy app install', () => {
     const { PM } = appRegistry();
     const confirmProjectClose = vi.fn(async () => 'cancel');
     (window as any).powermove = { confirmProjectClose };
+  installBridgeForTests((window as any).powermove);
     expect(await Promise.all([PM.confirmCloseProject('P1'), PM.confirmCloseProject('P1')])).toEqual([true, true]);
     expect(confirmProjectClose).not.toHaveBeenCalled();
   });
@@ -330,6 +338,7 @@ describe('legacy app install', () => {
     const { PM, timers } = appRegistry();
     const saveFile = vi.fn(async (_request: any) => ({ ok: true, path: '/tmp/Test.pmv' }));
     (window as any).powermove = { saveFile };
+  installBridgeForTests((window as any).powermove);
     expect(await PM.saveProject()).toBe(true);
     expect(saveFile.mock.calls[0]?.[0]).toMatchObject({ projectId: 'P1', name: 'Test.pmv', saveAs: false });
     expect(PM.app.dirty).toBe(false);
@@ -348,6 +357,7 @@ describe('legacy app install', () => {
     let release!: (result: any) => void;
     const saveFile = vi.fn(() => new Promise(resolve => { release = resolve; }));
     (window as any).powermove = { saveFile };
+  installBridgeForTests((window as any).powermove);
     const saving = PM.saveProject();
     expect(toast).toHaveBeenCalledWith('Saving Test.pmv', 2200, expect.objectContaining({ key: 'project-save', sticky: true, progress: null }));
     await vi.waitFor(() => expect(saveFile).toHaveBeenCalledOnce());
@@ -363,6 +373,7 @@ describe('legacy app install', () => {
   it('does not mark cancellation or a failed write saved', async () => {
     const { PM } = appRegistry();
     (window as any).powermove = { saveFile: async () => ({ ok: false, cancelled: true }) };
+  installBridgeForTests((window as any).powermove);
     PM.autosave();
     expect(await PM.saveProject()).toBe(false);
     expect(PM.app.dirty).toBe(true);
@@ -376,6 +387,7 @@ describe('legacy app install', () => {
     let finish!: (result: any) => void;
     const saveFile = vi.fn(() => new Promise(resolve => { finish = resolve; }));
     (window as any).powermove = { saveFile };
+  installBridgeForTests((window as any).powermove);
     const saving = PM.saveProject();
     await vi.waitFor(() => expect(saveFile).toHaveBeenCalledOnce());
     expect(await PM.saveProject()).toBe(false);
@@ -391,6 +403,7 @@ describe('legacy app install', () => {
     const saveFile = vi.fn(() => new Promise(resolve => { finish = resolve; }));
     const confirmProjectClose = vi.fn(async () => 'cancel');
     (window as any).powermove = { saveFile, confirmProjectClose };
+  installBridgeForTests((window as any).powermove);
     const saving = PM.saveProject();
     await vi.waitFor(() => expect(saveFile).toHaveBeenCalledOnce());
 
@@ -418,6 +431,7 @@ describe('legacy app install', () => {
     const saveFile = vi.fn(() => new Promise(resolve => { finish = resolve; }));
     const confirmProjectClose = vi.fn(async () => 'discard');
     (window as any).powermove = { saveFile, confirmProjectClose };
+  installBridgeForTests((window as any).powermove);
     const saving = PM.saveProject();
     await vi.waitFor(() => expect(saveFile).toHaveBeenCalledOnce());
     const closing = PM.confirmCloseProject('P1');
@@ -433,10 +447,12 @@ describe('legacy app install', () => {
     PM.proj.name = 'Edited';
     PM.autosave();
     (window as any).powermove = { confirmProjectClose: async () => 'cancel' };
+  installBridgeForTests((window as any).powermove);
     expect(await PM.prepareToClose()).toBe(false);
     (window as any).powermove = {
       confirmProjectClose: async () => 'save', saveFile: async () => ({ ok: false, cancelled: true })
     };
+  installBridgeForTests((window as any).powermove);
     expect(await PM.prepareToClose()).toBe(false);
     (window as any).powermove.confirmProjectClose = async () => 'discard';
     expect(await PM.prepareToClose()).toBe(true);
@@ -447,6 +463,7 @@ describe('legacy app install', () => {
     let finish!: (result: any) => void;
     const saveFile = vi.fn((_request: any) => new Promise(resolve => { finish = resolve; }));
     (window as any).powermove = { saveFile };
+  installBridgeForTests((window as any).powermove);
     const saving = PM.saveProject();
     await vi.waitFor(() => expect(saveFile).toHaveBeenCalledOnce());
     PM.proj = { ...PM.proj, id: 'P2', name: 'Another project' }; PM.autosave();
@@ -606,6 +623,7 @@ it('saves real undo and redo history in the native file and local session', asyn
   PM.hist.undo();
   const saveFile = vi.fn(async (_request: any) => ({ ok: true, path: '/tmp/Test.pmv' }));
   (window as any).powermove = { saveFile };
+  installBridgeForTests((window as any).powermove);
   expect(await PM.saveProject()).toBe(true);
   const saved = unpackProjectFile(saveFile.mock.calls[0]![0].data);
   expect(saved.history.index).toBe(0);

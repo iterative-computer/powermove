@@ -1,6 +1,7 @@
 import { IMAGE_SEQUENCE_ACCEPT, orderedSequence, sequenceFrame, sequenceGaps, validSequenceFps } from '../../../../shared/image-sequence';
 import type { PMRegistry } from '../registry';
 import type { ImportProgress } from './import-progress';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 export const importedSequences = new WeakMap<File, { fps: number; frames: number }>();
 
@@ -84,7 +85,7 @@ export function chooseSequence(PM: PMRegistry, files: File[], required: boolean)
 export async function convertImageSequence(files: File[], fps: number, assertCurrent: () => void, onProgress?: (progress: ImportProgress) => void): Promise<File> {
   const frames = orderedSequence(files);
   if (!validSequenceFps(fps)) throw new Error('Frame rate must be between 1 and 240 fps');
-  const media = window.powermove?.media;
+  const media = hostBridge()?.media;
   if (!media?.createImageSequence) throw new Error('Image sequence import requires the desktop app');
   let width = 0, height = 0;
   let checked = 0;

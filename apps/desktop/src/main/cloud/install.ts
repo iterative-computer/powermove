@@ -301,20 +301,23 @@ export function createStoreInstaller(options: StoreInstallerOptions): StoreInsta
       }
 
       const staging = await stage(id, verified.files);
-      try {
-        await rename(staging, folder);
-      } catch {
-        await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
-        throw new StoreLocalError('local', 'Powermove couldn’t move the extension into place. Try again.');
-      }
-
+      /* Provenance lands before the folder does: a watcher refresh between the
+         two must already see someone else's code, never a "local" folder. */
       const origin = originOf(verified);
+      const previous = await provenance.get(id);
       await provenance.update(id, () => ({
         localId: id,
         envKey: origin.repoId,
         origin,
         upstream: { releaseId: origin.releaseId, treeSha: origin.treeSha }
       }));
+      try {
+        await rename(staging, folder);
+      } catch {
+        await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
+        await provenance.update(id, () => previous).catch((error: unknown) => log(`could not restore provenance for ${id}`, error));
+        throw new StoreLocalError('local', 'Powermove couldn’t move the extension into place. Try again.');
+      }
       await fs.rm(path.join(updatesRoot, id), { recursive: true, force: true }).catch(() => undefined);
 
       const record = await refreshRecord(id, 'create');
@@ -329,6 +332,7 @@ export function createStoreInstaller(options: StoreInstallerOptions): StoreInsta
       return {
         localId: id,
         needsSetup: record?.health.state === 'needs-setup',
+        needsTrust: record?.health.state === 'needs-trust',
         ...(replaced.length ? { warning: `While it’s on, ${manifest.name} replaces ${replaced.join(', ')}.` } : {})
       };
     });
@@ -403,8 +407,11 @@ export function createStoreInstaller(options: StoreInstallerOptions): StoreInsta
       const nextOrigin = originOf(verified);
       await provenance.update(localId, (current) => {
         const base = current ?? { localId, envKey: nextOrigin.repoId };
-        const { pendingUpdate: _dropped, ...rest } = base;
-        return { ...rest, origin: nextOrigin, upstream: { releaseId: nextOrigin.releaseId, treeSha: nextOrigin.treeSha } };
+        const { pendingUpdate: _dropped, trusted, ...rest } = base;
+        /* Trust covers what the user agreed to: an update that declares more
+           asks again ("Needs full access"). */
+        const keep = trusted && (verified.manifest.permissions ?? []).every((permission) => trusted.permissions.includes(permission));
+        return { ...rest, ...(keep ? { trusted } : {}), origin: nextOrigin, upstream: { releaseId: nextOrigin.releaseId, treeSha: nextOrigin.treeSha } };
       });
       await fs.rm(path.join(updatesRoot, localId), { recursive: true, force: true }).catch(() => undefined);
       await refreshRecord(localId, 'reload');

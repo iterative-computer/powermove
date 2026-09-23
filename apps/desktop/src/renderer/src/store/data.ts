@@ -4,11 +4,12 @@
    answers to these functions. */
 import type { ExtensionDetailDto, ListingDto, VarDecl } from '@powermove/registry/wire';
 
-import type { ExtensionRecord } from '../../../shared/extensions';
+import type { ExtensionPermission, ExtensionRecord } from '../../../shared/extensions';
 import { CLOUD_UNREACHABLE } from '../../../shared/cloud-ipc';
 import type { LibraryItemDto, StoreBridge, StoreCategory, StoreErrorBody } from '../../../shared/store-ipc';
 import type { PMRegistry } from '../legacy/registry';
 import type { CloudUser } from '../cloud/account';
+import { bridge } from '../kernel/bridge';
 
 export type StoreKind = StoreCategory;
 
@@ -121,11 +122,37 @@ export function includesText(contributes: readonly string[]): string {
 /** The Powermove an extension's `apiVersion` needs. */
 const REQUIRES: Record<number, string> = {
   1: 'Powermove 1.0 or later',
-  2: 'Powermove 1.1 or later'
+  2: 'Powermove 1.1 or later',
+  3: 'Powermove 1.2 or later'
 };
 
 export function requiresText(apiVersion: number): string {
   return REQUIRES[apiVersion] ?? 'A newer version of Powermove';
+}
+
+/* ── permissions ── */
+
+/** What an extension declares it uses, as the Store discloses it. */
+const PERMISSION_LABEL: Record<ExtensionPermission, string> = {
+  network: 'Uses the network',
+  clipboard: 'Uses the clipboard',
+  assets: 'Imports files',
+  'project:write': 'Edits your project',
+  'full-access': 'Needs full access to Powermove'
+};
+const PERMISSION_ORDER: ExtensionPermission[] = ['full-access', 'project:write', 'assets', 'network', 'clipboard'];
+
+export type PermissionLine = { label: string; warn: boolean };
+
+/** One entry per declared permission, full access first (it's the one that matters). */
+export function permissionLines(permissions: readonly string[] | undefined): PermissionLine[] {
+  const declared = new Set(permissions ?? []);
+  return PERMISSION_ORDER.filter((permission) => declared.has(permission))
+    .map((permission) => ({ label: PERMISSION_LABEL[permission], warn: permission === 'full-access' }));
+}
+
+export function asksFullAccess(permissions: readonly string[] | undefined): boolean {
+  return (permissions ?? []).includes('full-access');
 }
 
 /* ── listings ── */
@@ -148,6 +175,8 @@ export type StoreListing = {
   apiVersion: number | null;
   /** Registry lineage: the release this was forked from. */
   forkedFrom?: Lineage;
+  /** What the latest release declares it uses (apiVersion 3). */
+  permissions: ExtensionPermission[];
   /** Variables the extension reads at runtime (from the latest release). */
   vars?: VarDecl[];
   art: [string, string];
@@ -179,6 +208,7 @@ export function listingFromDto(dto: ListingDto, library: readonly LibraryItemDto
     installed: libraryItemFor(dto.repoId, library) !== undefined,
     latestReleaseId: dto.latest?.id ?? null,
     apiVersion: dto.latest?.apiVersion ?? null,
+    permissions: [...(dto.permissions ?? [])],
     art: artFor(dto.repoId),
     iconUrl: dto.iconUrl,
     installCount: dto.installCount,
@@ -250,8 +280,13 @@ export function needsSetup(item: LibraryItemDto): boolean {
   return item.health.state === 'needs-setup';
 }
 
+/** Someone else's extension that declares full access and hasn't been trusted: it stays off. */
+export function needsTrust(item: LibraryItemDto): boolean {
+  return item.health.state === 'needs-trust';
+}
+
 export function needsAttention(item: LibraryItemDto): boolean {
-  return needsSetup(item) || (!!item.update && item.update.state === 'available');
+  return needsSetup(item) || needsTrust(item) || (!!item.update && item.update.state === 'available');
 }
 
 /** Who made it, after the name: "by mara", "By you", "Built in". */
@@ -261,9 +296,16 @@ export function makerText(item: LibraryItemDto): string {
   return 'By you';
 }
 
-/** The third line of a Library row: what's up with it, or nothing. */
+/** The third line of a Library row: what's up with it, or nothing. A trusted install says so. */
 export function statusText(item: LibraryItemDto): string | null {
+  const status = baseStatusText(item);
+  if (item.trust !== 'store-trusted' || needsTrust(item)) return status;
+  return status ? `${status} · Trusted` : 'Trusted';
+}
+
+function baseStatusText(item: LibraryItemDto): string | null {
   if (item.removed) return 'No longer on the store';
+  if (needsTrust(item)) return 'Needs full access';
   if (needsSetup(item)) return 'Needs setup';
   if (item.update?.state === 'staged-for-merge') return `You changed the files · ${item.update.version} is beside your folder`;
   if (item.update?.modified) return `You changed the files · Update to ${item.update.version}`;
@@ -283,7 +325,7 @@ export function statusIsHot(item: LibraryItemDto): boolean {
 
 /* ── actions ── */
 
-export type ActionKind = 'install' | 'setup' | 'update' | 'publish' | 'none' | 'toggle';
+export type ActionKind = 'install' | 'setup' | 'trust' | 'update' | 'publish' | 'none' | 'toggle';
 
 export type Action = {
   label: string;
@@ -300,6 +342,7 @@ export type Action = {
  *
  *   not here, nothing required     Install
  *   not here, required values      Install and set up
+ *   here, needs full access        Trust…
  *   here, values missing           Set up
  *   here, newer version            Update
  *   here, newer version, changed   Update…
@@ -315,6 +358,7 @@ export function detailAction(input: { vars?: readonly VarDecl[] | undefined; ite
       ? { label: 'Install and set up', kind: 'install', primary: true }
       : { label: 'Install', kind: 'install', primary: true };
   }
+  if (needsTrust(item)) return TRUST_ACTION;
   if (needsSetup(item)) return { label: 'Set up', kind: 'setup', primary: true };
   // The original's page, seen from your published fork of it.
   if (item.fork && input.repoId && input.repoId !== item.published?.repoId) return { label: 'Forked', kind: 'none', quiet: true };
@@ -323,6 +367,8 @@ export function detailAction(input: { vars?: readonly VarDecl[] | undefined; ite
   if (item.group === 'store') return { label: 'Installed', kind: 'none', quiet: true };
   return { label: 'Open', kind: 'none', disabled: true };
 }
+
+const TRUST_ACTION: Action = { label: 'Trust…', kind: 'trust', primary: true };
 
 /** Publish… for something new; Publish Update… once it is on the store. */
 export function publishAction(item: LibraryItemDto): Action {
@@ -339,8 +385,9 @@ export function secondaryPublish(item: LibraryItemDto | undefined): Action | nul
   return item.publish === 'first' ? { label: 'Publish Your Version…', kind: 'publish' } : publishAction(item);
 }
 
-/** The trailing control of a Library row: Update, Set up, Publish, or On/Off. */
+/** The trailing control of a Library row: Trust, Update, Set up, Publish, or On/Off. */
 export function libraryAction(item: LibraryItemDto): Action {
+  if (needsTrust(item)) return TRUST_ACTION;
   if (needsSetup(item)) return { label: 'Set up', kind: 'setup', primary: true };
   if (item.update && item.update.state === 'available' && !item.removed) {
     return { label: item.update.modified ? 'Update…' : 'Update', kind: 'update', primary: true };
@@ -377,5 +424,5 @@ export function publishErrorText(error: StoreErrorBody): string {
 /* ── the bridge ── */
 
 export function storeBridge(): StoreBridge | null {
-  return window.powermove?.extensionStore ?? null;
+  return bridge()?.extensionStore ?? null;
 }

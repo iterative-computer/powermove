@@ -5,14 +5,15 @@
  * was published live here, keyed by the folder's local id.
  *
  * `envKey` is minted here; the Store (cloud/install.ts) writes `origin`,
- * `upstream` and `pendingUpdate` through `update`. Fields a newer build wrote
+ * `upstream` and `pendingUpdate` through `update`, and `store:trust` writes
+ * `trusted`. Fields a newer build wrote
  * are preserved untouched.
  */
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { EXTENSION_ID } from '../../shared/extensions';
+import { EXTENSION_ID, type ExtensionPermission } from '../../shared/extensions';
 
 export interface ProvenanceOrigin {
   repoId: string;
@@ -68,6 +69,18 @@ export interface ProvenanceRecord {
   upstream?: ProvenanceUpstream;
   /** Set by a modified update; cleared by the next install, update or uninstall. */
   pendingUpdate?: ProvenancePendingUpdate;
+  /**
+   * The user gave this store install full access (`store:trust`, behind the
+   * native dialog): it runs in-realm. `permissions` is what the manifest
+   * declared when they agreed. Cleared by `store:untrust` and by uninstall.
+   */
+  trusted?: ProvenanceTrusted;
+}
+
+export interface ProvenanceTrusted {
+  /** ISO time the user agreed. */
+  at: string;
+  permissions: ExtensionPermission[];
 }
 
 export type ProvenanceFile = Record<string, ProvenanceRecord>;

@@ -4,13 +4,15 @@ import Menu from './Menu.svelte';
 import type { MenuAction, MenuItem, MenuOptions, OverlayPM } from './types';
 import { consumeMenuTriggerPress, markMenuDismissal } from './dismissal';
 import { canRenderNatively, iconRasterizer, planNativeMenu } from './native-menu';
+import { bridge } from '../kernel/bridge';
+import type { PowermoveBridge } from '../../../shared/ipc';
 
 type MenuInstance = ReturnType<typeof mount> & { element(): HTMLElement };
 
-function nativeMenuBridge(): NonNullable<Window['powermove']['menu']> | null {
+function nativeMenuBridge(): NonNullable<PowermoveBridge['menu']> | null {
   try {
-    const bridge = (globalThis as unknown as Partial<Window>).powermove?.menu;
-    return bridge && typeof bridge.popup === 'function' ? bridge : null;
+    const menu = bridge()?.menu;
+    return menu && typeof menu.popup === 'function' ? menu : null;
   } catch {
     return null;
   }

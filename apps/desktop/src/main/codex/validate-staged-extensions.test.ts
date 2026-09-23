@@ -55,6 +55,17 @@ describe('promotion scan', () => {
     expect(compileExtension).not.toHaveBeenCalled();
   });
 
+  it('warns about undeclared permissions but still promotes', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const layout = await stage({ 'index.ts': 'fetch("https://example.com");\napi.render.draw();\n' });
+      await expect(validateStagedExtensions(layout, [{ id: 'weather', action: 'created' }])).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Uses fetch() at index.ts:1'));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Uses api.render (full access) at index.ts:2'));
+      expect(compileExtension).toHaveBeenCalledTimes(1);
+    } finally { warn.mockRestore(); }
+  });
+
   it('lets a waived high-entropy string through to compilation', async () => {
     const layout = await stage({
       'index.ts': `// powermove-secret-ok: fixture hash for the test palette\nconst id = '${RANDOM}';\nexport default () => id;\n`

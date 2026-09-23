@@ -9,6 +9,8 @@
  */
 import type { ApiErrorBody, Category, Visibility } from '@powermove/registry/wire';
 import type { ScanKind } from '@powermove/registry/scan';
+import type { ExtensionPermission } from './extensions';
+export interface PermissionFinding { path: string; line: number; needs: ExtensionPermission; text: string }
 import type { z } from 'zod';
 
 import { EXTENSION_VERSION } from './extensions';
@@ -73,6 +75,8 @@ export interface PublishPlanDto {
   parent?: string;
   /** Hard findings: no waiver. */
   blockedFindings: PublishFinding[];
+  /** Undeclared capabilities block publishing until the manifest is fixed. */
+  permissionFindings: PermissionFinding[];
   /** Soft findings: each needs a reason, sent as a waiver. One per file and line. */
   waivableFindings: PublishFinding[];
   manifest: { id: string; name: string; description: string | null };

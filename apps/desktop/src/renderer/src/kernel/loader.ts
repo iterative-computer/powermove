@@ -12,7 +12,7 @@
 import type { Disposable, ExtensionModule, UIAPI } from './api';
 import type { ExtensionHealth, ExtensionManifest, ExtensionRecord, ExtensionsBridge, ExtensionsChangedEvent } from '../../../shared/extensions';
 import type { VarsBridge } from '../../../shared/vars-ipc';
-import { MANIFEST_LIMITS } from '../../../shared/extensions';
+import { MANIFEST_LIMITS, needsTrust } from '../../../shared/extensions';
 import { createExtensionAPI, type ExtensionHandle, type HostDeps } from './host';
 
 /* The loader speaks about an extension rather than as one, so it stamps the
@@ -64,7 +64,7 @@ const DEFAULT_WINDOW = 10_000;
 const DEFAULT_LIMIT = 2;
 
 /** Health states that mean "there is nothing worth trying to import". */
-const BLOCKED = new Set(['build-error', 'manifest-error', 'needs-update', 'needs-setup']);
+const BLOCKED = new Set(['build-error', 'manifest-error', 'needs-update', 'needs-setup', 'needs-trust']);
 
 const nameOf = (record: ExtensionRecord | undefined, id: string): string => record?.manifest?.name ?? id;
 
@@ -92,6 +92,13 @@ export function planLoad(records: ExtensionRecord[], builtinOrder: string[]): Lo
       continue;
     }
     if (BLOCKED.has(record.health?.state)) continue; // main already recorded why
+    /* Someone else's code asking for full access runs only once trusted.
+       Main already withholds its bundle; this holds even if a record says
+       otherwise. */
+    if (needsTrust(record)) {
+      skipped.push({ id: record.id, health: { state: 'needs-trust' } });
+      continue;
+    }
     candidates.add(record.id);
   }
 

@@ -420,4 +420,55 @@ describe('extension values', () => {
     await setup.registry.setEnabled({ id: 'colour-match', enabled: true });
     expect(setup.registry.list()[0]).toMatchObject({ bundleUrl: null, health: { state: 'needs-setup', missing: ['API_KEY'] } });
   });
+
+  async function writeFullAccessExtension(root: string, id: string): Promise<void> {
+    const directory = path.join(root, id);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'manifest.json'), JSON.stringify(manifest(id, { apiVersion: 3, permissions: ['full-access'] })));
+    await fs.writeFile(path.join(directory, 'index.ts'), 'export default () => undefined');
+  }
+
+  it('stamps every record with its trust level and holds back untrusted full access', async () => {
+    const levels = new Map<string, 'local' | 'store' | 'store-trusted'>([['theirs', 'store'], ['mine', 'local']]);
+    const trustFor = vi.fn(async (id: string) => levels.get(id) ?? 'local');
+    const setup = await harness({ trustFor });
+    await writeFullAccessExtension(setup.userDir, 'theirs');
+    await writeFullAccessExtension(setup.userDir, 'mine');
+    await writeExtension(setup.userDir, 'plain');
+    levels.set('plain', 'store');
+
+    await setup.registry.refresh();
+    const byId = Object.fromEntries(setup.registry.list().map((record) => [record.id, record]));
+    expect(byId['theirs']).toMatchObject({ trust: 'store', enabled: true, bundleUrl: null, bundleHash: null, health: { state: 'needs-trust' } });
+    // Made here: permissions are ignored.
+    expect(byId['mine']).toMatchObject({ trust: 'local', health: { state: 'ok' } });
+    expect(byId['mine']?.bundleUrl).toMatch(/^app:\/\/powermove\/ext\/mine\//);
+    // Someone else's, but it doesn't ask for full access: runs as today.
+    expect(byId['plain']).toMatchObject({ trust: 'store', health: { state: 'ok' } });
+    expect(trustFor).toHaveBeenCalledWith('theirs', 'user');
+
+    // A stale renderer report can't turn it on.
+    setup.registry.reportHealth({ id: 'theirs', health: { state: 'ok' } });
+    expect(setup.registry.list().find((record) => record.id === 'theirs')?.health.state).toBe('needs-trust');
+
+    levels.set('theirs', 'store-trusted');
+    await setup.registry.refresh(['theirs']);
+    expect(setup.registry.list().find((record) => record.id === 'theirs')).toMatchObject({ trust: 'store-trusted', health: { state: 'ok' } });
+  });
+
+  it('reads as someone else\'s code when trust cannot be decided', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const setup = await harness({ trustFor: async () => { throw new Error('provenance damaged'); } });
+    await writeFullAccessExtension(setup.userDir, 'unknown');
+    await setup.registry.refresh();
+    expect(setup.registry.list()[0]).toMatchObject({ trust: 'store', bundleUrl: null, health: { state: 'needs-trust' } });
+    error.mockRestore();
+  });
+
+  it('without a resolver (powermove serve) every folder is local', async () => {
+    const setup = await harness();
+    await writeFullAccessExtension(setup.userDir, 'agent-made');
+    await setup.registry.refresh();
+    expect(setup.registry.list()[0]).toMatchObject({ trust: 'local', health: { state: 'ok' } });
+  });
 });

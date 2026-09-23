@@ -1,3 +1,4 @@
+import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
@@ -6,6 +7,7 @@ import { makePM } from '../__tests__/make-pm';
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  resetBridgeForTests();
 });
 
 function posterRegistry(): {
@@ -214,6 +216,7 @@ function localSourceRegistry() {
     releaseCloudSource: vi.fn(async () => undefined),
   };
   (window as any).powermove = { media };
+  installBridgeForTests((window as any).powermove);
   return { ...registry, meta, media };
 }
 

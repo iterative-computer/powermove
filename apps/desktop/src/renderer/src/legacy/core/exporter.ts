@@ -22,6 +22,7 @@ import { viewerService } from './services';
 import { createSettingsSection } from '../ui/settings-section';
 import { mountSquircles, SQUIRCLE_SELECTOR } from '../../settings/squircle';
 import { row as settingsRow, select as settingsSelect, numberInput as settingsNumberInput, type SettingsRow } from '../ui/project-settings';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -209,7 +210,7 @@ X.dialog = () => {
   const formatOptions: any[] = [];
   const formatField = select('Format', () => opts.format, (v: any) => { opts.format = v; sync(); }, formatOptions);
   const allFormats = EXPORT_FORMAT_OPTIONS.map((o: any) => {
-      if (o.v === 'mp4') return { v: o.v, label: (window as any).powermove?.render ? 'MP4 · H.264 (frame-exact)' : 'MP4 · H.264 (real-time)' };
+      if (o.v === 'mp4') return { v: o.v, label: (hostBridge() as any)?.render ? 'MP4 · H.264 (frame-exact)' : 'MP4 · H.264 (real-time)' };
       if (o.v === 'webm' && hasWC) return { v: o.v, label: 'WebM · VP9 (frame-exact)' };
       return { ...o };
     });
@@ -402,7 +403,7 @@ async function run(opts: any) {
   if (X.busy) return PM.toast('Export already running');
   X.busy = true;
   X.cancel = false;
-  const bridge = (window as any).powermove;
+  const bridge = (hostBridge() as any);
   try {
     const p = PM.proj;
     if (opts.format === 'prores' || (opts.format === 'mp4' && bridge?.render)) {
@@ -444,7 +445,7 @@ async function run(opts: any) {
 }
 
 async function deliver(blob: Blob, name: string): Promise<boolean> {
-  const bridge = (window as any).powermove;
+  const bridge = (hostBridge() as any);
   let result: any;
   if (destinationToken && bridge.fileUpload && blob.size > 4 * 1024 * 1024) {
     const uploadId = await bridge.fileUpload.begin(blob.size);
@@ -474,7 +475,7 @@ async function runPrepared(opts: any) {
       await PM.app?.importQueue;
       const result = await buildWebExport(PM);
       const name = (p.name || 'powermove') + '-web.zip';
-      const bridge = (window as any).powermove;
+      const bridge = (hostBridge() as any);
       if (bridge?.saveFile) {
         const saved = await bridge.saveFile({ name, data: result.bytes, ...(destinationToken ? { destinationToken } : {}) });
         if (!saved.ok) {
@@ -525,7 +526,7 @@ async function runPrepared(opts: any) {
     ui.prev.width = 640; ui.prev.height = Math.round(640 * H / W);
     const wantsAudio: any = opts.audio !== false && PM.Audio.hasAudibleLayers(PM.proj);
     const needsRecorderAudio: any = opts.format === 'webm' && wantsAudio && !(await PM.Audio.supportsOpus());
-    if(opts.format==='prores'||(opts.format==='mp4'&&(window as any).powermove?.render)){
+    if(opts.format==='prores'||(opts.format==='mp4'&&(hostBridge() as any)?.render)){
       await exportNative({opts,W,H,t0,t1,total,ui,pctx});
     } else if (opts.format === 'mp4' || opts.format === 'rec' || (opts.format === 'webm' && (typeof window.VideoEncoder === 'undefined' || needsRecorderAudio))) {
       await exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate });
@@ -592,7 +593,7 @@ function alphaFrame(T: any, W: any, H: any, mblur: any) {
 }
 
 async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
-  const bridge=(window as any).powermove?.render;if(!bridge)throw new Error('The native encoder requires the updated desktop runtime.');
+  const bridge=(hostBridge() as any)?.render;if(!bridge)throw new Error('The native encoder requires the updated desktop runtime.');
   const token=nativeToken;
   if(!token)throw new Error('Export destination is unavailable');
   const chunks=async(bytes:Uint8Array,audio=false)=>{for(let at=0;at<bytes.length;at+=4*1024*1024)await bridge.write(token,bytes.slice(at,at+4*1024*1024),audio);};

@@ -1,6 +1,7 @@
 import type { ExtensionRecord } from '../../../shared/extensions';
 import type { PowermoveAPI } from '../kernel/api';
 import type { PMRegistry } from '../legacy/registry';
+import { bridge } from '../kernel/bridge';
 
 export type ExtensionSnapshot = Record<string, { version: string | null; enabled: boolean; health: string }>;
 export type ExtensionUpdateNotice = {
@@ -55,7 +56,7 @@ export function extensionUpdateNotices(records: readonly ExtensionRecord[], vers
 /** Persist across restarts; never modify, disable, or repair an extension on the user's behalf. */
 export function installExtensionUpdateNotices(PM: PMRegistry): () => void {
   const api = PM.Kernel?.api?.('extension-update-notices') as PowermoveAPI | undefined;
-  const updates = window.powermove?.updates;
+  const updates = bridge()?.updates;
   if (!api || !updates) return () => {};
   const previous = api.storage.get<SavedState>(STORAGE_KEY);
   const dismissed = new Set(previous?.dismissed ?? []);

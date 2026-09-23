@@ -5,6 +5,7 @@ import { flushSync, mount, unmount } from 'svelte';
 import type { ExtensionRecord } from '../../../shared/extensions';
 import type { VarsBridge } from '../../../shared/vars-ipc';
 import SetupSheet from './SetupSheet.svelte';
+import { bridge } from '../kernel/bridge';
 
 export { usefulHint } from './hint';
 
@@ -17,7 +18,7 @@ export function hasVars(record: ExtensionRecord | null | undefined): boolean {
 }
 
 function varsBridge(): VarsBridge | null {
-  const candidate = (window as unknown as { powermove?: { vars?: VarsBridge } }).powermove?.vars;
+  const candidate = bridge()?.vars;
   return candidate && typeof candidate.status === 'function' ? candidate : null;
 }
 

@@ -1,5 +1,6 @@
 import type { PMRegistry } from '../legacy/registry';
 import type { ConfirmRequest } from '../../../shared/ipc';
+import { bridge } from '../kernel/bridge';
 
 export type ConfirmOptions = ConfirmRequest;
 
@@ -8,10 +9,10 @@ export type ConfirmOptions = ConfirmRequest;
  * fallback for hosts without the Electron bridge (web preview, unit tests).
  */
 export async function confirm(PM: PMRegistry, options: ConfirmOptions): Promise<boolean> {
-  const bridge = (globalThis as Record<string, any>).powermove;
-  if (typeof bridge?.confirm === 'function') {
+  const host = bridge();
+  if (typeof host?.confirm === 'function') {
     try {
-      return !!(await bridge.confirm(options));
+      return !!(await host.confirm(options));
     } catch (error) {
       console.error('[confirm] native sheet failed, falling back to modal', error);
     }

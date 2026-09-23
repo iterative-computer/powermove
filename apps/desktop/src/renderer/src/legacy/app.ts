@@ -12,6 +12,7 @@ import { projectFingerprint } from './core/project-fingerprint';
 import { stringifyAsync } from './core/serialize-async';
 import { createNewProjectForm } from './ui/project-settings';
 import { inspectorService, shaderHooks, timelineService, viewerService } from './core/services';
+import { bridge as hostBridge } from '../kernel/bridge';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -664,11 +665,11 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
       PM.toast('Saved ' + (state.path?.split(/[\\/]/).pop() || suggestedName), 2200, { key: toastKey, icon: 'export', error: false, progress: 1, completed: true });
       return true;
     };
-    if (typeof window.powermove?.saveFile === 'function') {
+    if (typeof hostBridge()?.saveFile === 'function') {
       const metadata = { name: suggestedName, projectId, saveAs };
-      const upload = window.powermove.fileUpload;
+      const upload = hostBridge()!.fileUpload;
       const result = await (async () => {
-        if (!upload || data.size <= 4 * 1024 * 1024) return window.powermove!.saveFile({ ...metadata, data: new Uint8Array(await data.arrayBuffer()) });
+        if (!upload || data.size <= 4 * 1024 * 1024) return hostBridge()!.saveFile({ ...metadata, data: new Uint8Array(await data.arrayBuffer()) });
         const token = await upload.begin(data.size);
         try {
           for (let offset = 0; offset < data.size; offset += 1024 * 1024) {
@@ -715,8 +716,8 @@ PM.saveProject = (options: any = {}) => {
   return save;
 };
 PM.openProject = async () => {
-  if (window.powermove?.openProjectFile) {
-    const result = await window.powermove.openProjectFile();
+  if (hostBridge()?.openProjectFile) {
+    const result = await hostBridge()!.openProjectFile();
     if (result.ok) await openProjectFile({ name: result.path.split(/[\\/]/).pop(), native: result }, result);
     else if (!result.cancelled) PM.toast('Could not open project: ' + result.error, 6000);
     return;
@@ -725,7 +726,7 @@ PM.openProject = async () => {
   inp.onchange = async () => { const f = inp.files[0]; if (f) await openProjectFile(f); };
   inp.click();
 };
-window.powermove?.onProjectOpenExternal?.(async result => {
+hostBridge()?.onProjectOpenExternal?.(async result => {
   if (result.ok) {
     await openProjectFile({ name: result.path.split(/[\\/]/).pop(), native: result }, result);
   } else {
@@ -736,7 +737,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
   try {
     let o: any, mediaRestored = false;
     if (file.native && 'token' in file.native) {
-      const bridge = window.powermove!.projectRead!;
+      const bridge = hostBridge()!.projectRead!;
       const { token, document, media } = file.native;
       try {
         await restoreProjectFileStream(document, media, PM.MediaStore, (offset, length) => bridge.read(token, offset, length));
@@ -878,8 +879,8 @@ PM.confirmCloseProject = async (id: string) => {
   if (activeSave) await activeSave;
   const project = id === PM.proj.id ? PM.proj : PM.Projects.get(id);
   if (!project || !await refreshFileDirty(project)) return true;
-  if (!window.powermove?.confirmProjectClose) return window.confirm?.('Close without saving a project file?') ?? false;
-  const decision = await window.powermove.confirmProjectClose(project.name || 'Untitled');
+  if (!hostBridge()?.confirmProjectClose) return window.confirm?.('Close without saving a project file?') ?? false;
+  const decision = await hostBridge()!.confirmProjectClose(project.name || 'Untitled');
   if (decision === 'cancel') return false;
   if (decision === 'save') {
     if (!await PM.saveProject({ projectId: id })) return false;

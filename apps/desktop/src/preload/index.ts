@@ -387,10 +387,24 @@ const bridge: PowermoveBridge = {
       }
     }),
     yank: (req) => storeInvoke(STORE_IPC.yank, { repoId: req.repoId, version: req.version }),
+    trust: (req) => storeInvoke(STORE_IPC.trust, { localId: req.localId }),
+    untrust: (req) => storeInvoke(STORE_IPC.untrust, { localId: req.localId }),
     onUpdatesChanged: cloudEvent(STORE_IPC.updatesChanged),
     onPublishProgress: cloudEvent(STORE_IPC.publishProgress),
     onLibraryChanged: cloudEvent<void>(STORE_IPC.libraryChanged)
   }
 };
 
-contextBridge.exposeInMainWorld('powermove', bridge);
+/*
+ * The bridge is handed to the page as a *configurable* global, not through
+ * exposeInMainWorld (which pins a read-only, non-configurable property no
+ * one can remove). The renderer's kernel reads it once at boot and deletes
+ * it (renderer/src/kernel/capture-bridge.ts), so extension code never reaches raw
+ * IPC. Arguments cross the context bridge exactly as exposeInMainWorld's do.
+ */
+contextBridge.executeInMainWorld({
+  func: (value: unknown) => {
+    Object.defineProperty(globalThis, 'powermove', { value, configurable: true, enumerable: false, writable: false });
+  },
+  args: [bridge]
+});

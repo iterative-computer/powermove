@@ -158,6 +158,12 @@ body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-main{visibility:hi
 .st-detail-actions .btn{height:32px;padding:0 14px;border-radius:var(--r-pill)}
 .st-detail-actions .btn.is-quiet{color:var(--tx-3)}
 .st-update-note{margin:-24px 0 -8px;max-width:64ch;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);text-wrap:pretty}
+.st-update-note.is-warn{color:var(--tx-2)}
+/* What an extension declares it uses; full access reads as a warning. */
+.st-access{margin-top:6px;display:flex;flex-wrap:wrap;align-items:center;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3)}
+.st-access-sep{margin:0 6px;color:var(--tx-4)}
+.st-access .is-warn{display:inline-flex;align-items:center;gap:4px;color:var(--warning);font-weight:var(--fw-medium)}
+.st-access .is-warn svg{width:14px;height:14px;flex:none}
 .st-lineage-sep{margin:0 6px;color:var(--tx-4)}
 .st-link.is-quiet{font-weight:var(--fw-regular);color:var(--tx-3)}
 .st-about{margin-top:-8px;max-width:68ch;font-size:var(--fs-md);line-height:20px;color:var(--tx-2);text-wrap:pretty}

@@ -20,6 +20,7 @@ import { parseObj } from '../../kernel/obj';
 import { parseSvg } from '../core/svg-import';
 import { inspectorService, viewerService } from '../core/services';
 import { capturePoster } from '../core/poster';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 const posterUrls = new Map<string, string>();
 
@@ -646,7 +647,7 @@ function waitForVideoMetadata(el: any, fileName: any, timeout: any = 15000) {
   });
 }
 async function playbackProxy(file: any, name: string, onStage?: (label: string) => void): Promise<any> {
-  const media = window.powermove?.media;
+  const media = hostBridge()?.media;
   if (!media?.createPlaybackProxy) {
     throw new Error(videoImportFailureMessage(name, { code: 4 }));
   }
@@ -830,7 +831,7 @@ async function prepareImportedAsset(file: any, { id, assertCurrentProject, resol
   const resolved = settled || await resolveAssetKind(file);
   const kind = resolved.kind;
   if (!kind) throw new Error('Unsupported media file');
-  const sourcePath = cloudSourcePaths.get(file) || window.powermove?.media?.sourcePath?.(file) || '';
+  const sourcePath = cloudSourcePaths.get(file) || hostBridge()?.media?.sourcePath?.(file) || '';
   onStage?.('Reading file');
   /* Fingerprint the file the user chose, not the conversion, so re-importing
      the same GIF still resolves to the media already in the project. */

@@ -32,14 +32,15 @@ import { recoverAllInterruptedExtensionTransactions } from './codex/change-histo
 import { extensionAssetCorsHeaders, registerExtensionsIpc, removeUserExtension, serveExtensionAsset } from './extensions';
 import { createExtensionRegistry, type ExtensionRegistry } from './extensions/registry';
 import { createProvenanceStore } from './cloud/provenance';
+import { trustDialog, trustLevelFor } from './cloud/trust';
 import { DEEP_LINK_SCHEME } from './cloud/auth';
 import { createDeepLinkQueue, deepLinksIn, startCloudService, type CloudService } from './cloud/service';
 import { createStoreClient } from './cloud/store-client';
 import { createPublishApi, createPublisher } from './cloud/publish';
 import { createStoreInstaller } from './cloud/install';
 import { registerStoreIpc as registerExtensionStoreIpc } from './cloud/store-ipc';
-import { ApiError } from '@powermove/registry/wire';
-import { CLOUD_UNREACHABLE } from '../shared/cloud-ipc';
+import { ApiError, type MeDto } from '@powermove/registry/wire';
+import { CLOUD_IPC, CLOUD_UNREACHABLE } from '../shared/cloud-ipc';
 import { STORE_IPC } from '../shared/store-ipc';
 import { createEnvStore } from './env/store';
 import { createVarsService } from './env/service';
@@ -658,12 +659,33 @@ if (!hasSingleInstanceLock) {
     let refreshRestoredExtensions: ((ids: string[]) => Promise<void>) | undefined;
     /* One provenance store for values and the Store: its writes are ordered. */
     const provenance = createProvenanceStore(app.getPath('userData'));
+    /* The signed-in account decides whose a store install is (trust.ts). The
+       registry boots before the account does; this reads through once it has. */
+    let currentMe: () => MeDto | null = () => null;
     let storeDeps: {
       registry: ExtensionRegistry;
       builtinIds: string[];
       beforeRemove: ReturnType<typeof createRemoveValuesPrompt>;
       hasValues(id: string): Promise<boolean>;
     } | null = null;
+    /* Signing in or out can make a store install mine, or someone else's
+       again: re-derive trust for user folders when the publisher changes. */
+    let trustPublisher: string | null | undefined;
+    let trustRefresh: Promise<void> = Promise.resolve();
+    const refreshTrust = (): Promise<void> => {
+      const registry = storeDeps?.registry;
+      const publisher = currentMe()?.publisher?.id ?? null;
+      if (!registry || publisher === trustPublisher) return trustRefresh;
+      trustPublisher = publisher;
+      trustRefresh = trustRefresh.then(async () => {
+        const before = new Map(registry.list().filter((record) => record.scope === 'user').map((record) => [record.id, record.trust]));
+        if (!before.size) return;
+        await registry.refresh([...before.keys()]);
+        const changed = registry.list().filter((record) => before.has(record.id) && before.get(record.id) !== record.trust).map((record) => record.id);
+        if (changed.length) registry.emitChanged({ ids: changed, reason: 'reload' });
+      }).catch((error: unknown) => console.error('[extensions] trust refresh failed', error));
+      return trustRefresh;
+    };
     // Extension boot must never prevent the window from appearing: a bad
     // directory or a slow compile degrades to "no user extensions" instead.
     try {
@@ -689,7 +711,8 @@ if (!hasSingleInstanceLock) {
         buildDir,
         builtinIds,
         resourcesDir: builtinResourcesDir,
-        resolveVars: (id, decls) => vars.resolve(id, decls)
+        resolveVars: (id, decls) => vars.resolve(id, decls),
+        trustFor: async (id, scope) => trustLevelFor({ scope }, scope === 'user' ? await provenance.get(id) : null, currentMe())
       });
       const beforeRemove = createRemoveValuesPrompt({ registry: extensionRegistry, vars });
       registerExtensionsIpc(ipcMain, {
@@ -743,6 +766,7 @@ if (!hasSingleInstanceLock) {
         ipcMain,
         isTrusted: isTrustedSender,
         broadcast: (channel, payload) => {
+          if (channel === CLOUD_IPC.accountChanged) void refreshTrust();
           for (const window of editors.all()) {
             if (!window.webContents.isDestroyed()) window.webContents.send(channel, payload);
           }
@@ -767,6 +791,8 @@ if (!hasSingleInstanceLock) {
     if (storeDeps) {
       const deps = storeDeps;
       const cloudSession = cloud?.session ?? null;
+      currentMe = () => cloudSession?.me() ?? null;
+      void refreshTrust();
       const cloudClient = () => {
         if (!cloudSession) throw new ApiError({ error: 'internal', detail: CLOUD_UNREACHABLE });
         return cloudSession.client();
@@ -814,6 +840,12 @@ if (!hasSingleInstanceLock) {
         registry: deps.registry,
         me: () => cloudSession?.me() ?? null,
         isTrusted: isTrustedSender,
+        confirmTrust: async (name) => {
+          const window = currentEditor();
+          const options = trustDialog(name);
+          const result = window && !window.isDestroyed() ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
+          return result.response === 0;
+        },
         removeExtension: async (event, id) => {
           await removeUserExtension({ registry: deps.registry, beforeRemove: deps.beforeRemove }, event, id);
           return true;

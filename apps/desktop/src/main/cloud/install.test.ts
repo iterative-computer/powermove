@@ -87,7 +87,7 @@ const me: MeDto = {
   settings: { rememberInstalls: true }
 };
 
-async function setup(options: { builtins?: string[]; rename?: (from: string, to: string) => Promise<void> } = {}) {
+async function setup(options: { builtins?: string[]; rename?: (from: string, to: string) => Promise<void>; extra?: Built[] } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'powermove-install-'));
   roots.push(root);
   const userDir = path.join(root, 'extensions');
@@ -95,7 +95,7 @@ async function setup(options: { builtins?: string[]; rename?: (from: string, to:
   const v1 = await build(R1, '1.0.0');
   const v2 = await build(R2, '1.1.0', tree('1.1.0', 'glass-blur', 'export default { v: 2 }\n'));
   let head = v1;
-  const client = fakeClient([v1, v2], () => head);
+  const client = fakeClient([v1, v2, ...(options.extra ?? [])], () => head);
   const registry: StoreInstallerRegistry = {
     userDir,
     list: (): ExtensionRecord[] => (options.builtins ?? []).map((id) => ({
@@ -145,7 +145,7 @@ describe('store installer', () => {
   it('installs a release byte for byte and records where it came from', async () => {
     const { userDir, installer, provenance, client, v1 } = await setup();
     const result = await installer.installRelease({ repoId: REPO, releaseId: R1 });
-    expect(result).toEqual({ localId: 'glass-blur', needsSetup: false });
+    expect(result).toEqual({ localId: 'glass-blur', needsSetup: false, needsTrust: false });
     expect(await readFolder(path.join(userDir, 'glass-blur'))).toEqual(expected(v1.files));
     expect(await provenance.get('glass-blur')).toEqual({
       localId: 'glass-blur',
@@ -206,6 +206,53 @@ describe('store installer', () => {
     expect(record?.origin).toMatchObject({ releaseId: R2, version: '1.1.0', treeSha: v2.release.treeSha });
     expect(record?.upstream).toEqual({ releaseId: R2, treeSha: v2.release.treeSha });
     expect(await fs.readdir(path.join(userDir, '.trash'))).toEqual([]);
+  });
+
+  it('records provenance before the folder appears, and forgets it when the move fails', async () => {
+    let seen: unknown = 'unset';
+    let fail = false;
+    const ctx = await setup({
+      rename: async (from, to) => {
+        if (to.endsWith(`${path.sep}glass-blur`)) {
+          // A watcher refresh here must already see someone else's code.
+          seen = (await ctx.provenance.get('glass-blur'))?.origin?.ownerPublisherId ?? null;
+          if (fail) throw new Error('EXDEV');
+        }
+        await fs.rename(from, to);
+      }
+    });
+    fail = true;
+    await expect(ctx.installer.installRelease({ repoId: REPO, releaseId: R1 })).rejects.toMatchObject({ code: 'local' });
+    expect(seen).toBe(OWNER);
+    expect(await ctx.provenance.get('glass-blur')).toBeNull();
+    fail = false;
+    await ctx.installer.installRelease({ repoId: REPO, releaseId: R1 });
+    expect(seen).toBe(OWNER);
+  });
+
+  it('keeps trust across an update unless the update declares more than the user agreed to', async () => {
+    const R3 = '88888888-8888-4888-8888-888888888888';
+    const R4 = '99999999-9999-4999-8999-999999999999';
+    const declaring = (version: string, permissions: string[]): SnapshotInput[] => [
+      { path: 'manifest.json', bytes: text(`${JSON.stringify({ id: 'glass-blur', name: 'Glass blur', version, apiVersion: 3, permissions })}\n`) },
+      { path: 'index.ts', bytes: text(`export default { v: '${version}' }\n`) }
+    ];
+    const same = await build(R3, '1.2.0', declaring('1.2.0', ['full-access']));
+    const more = await build(R4, '1.3.0', declaring('1.3.0', ['full-access', 'clipboard']));
+    const { installer, provenance, setHead } = await setup({ extra: [same, more] });
+    await installer.installRelease({ repoId: REPO, releaseId: R1 });
+    const agreed = { at: '2026-09-23T00:00:00.000Z', permissions: ['full-access' as const, 'network' as const] };
+    await provenance.update('glass-blur', (current) => current && { ...current, trusted: agreed });
+
+    setHead(same);
+    await installer.updateRelease('glass-blur');
+    expect((await provenance.get('glass-blur'))?.trusted).toEqual(agreed);
+
+    setHead(more);
+    await installer.updateRelease('glass-blur');
+    const record = await provenance.get('glass-blur');
+    expect(record?.origin?.releaseId).toBe(R4);
+    expect(record).not.toHaveProperty('trusted');
   });
 
   it('puts the old folder back when the second rename fails', async () => {

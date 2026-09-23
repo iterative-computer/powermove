@@ -182,6 +182,21 @@ describe('planLoad', () => {
     const plan = planLoad([rec('a', { health: { state: 'build-error', error: 'esbuild' } }), rec('b')], []);
     expect(plan.order).toEqual(['b']);
   });
+
+  it('never plans untrusted store code that asks for full access', () => {
+    const full = { manifest: { id: 'x', name: 'x', version: '1.0.0', apiVersion: 3, permissions: ['full-access' as const] } };
+    const plan = planLoad([
+      // Main withholds the bundle and says so...
+      rec('held', { ...full, trust: 'store', health: { state: 'needs-trust' } }),
+      // ...and a record that claims ok is still refused.
+      rec('claims-ok', { ...full, trust: 'store', bundleUrl: 'data:text/javascript,export default () => {}' }),
+      rec('trusted', { ...full, trust: 'store-trusted' }),
+      rec('local', { ...full, trust: 'local' }),
+      rec('plain', { trust: 'store' })
+    ], []);
+    expect(plan.order).toEqual(['local', 'plain', 'trusted']);
+    expect(plan.skipped).toContainEqual({ id: 'claims-ok', health: { state: 'needs-trust' } });
+  });
 });
 
 /* ── boot / activate ─────────────────────────────────────── */
@@ -603,6 +618,22 @@ describe('bridge recovery and bundle CSS ownership', () => {
     bridge.emit({ ids: ['flaky'], reason: 'enable' });
     await loader.whenIdle();
     expect(activations).toBe(2);
+    await loader.dispose();
+  });
+
+  it('skips store + full-access with needs-trust instead of importing it', async () => {
+    const records = [rec('theirs', {
+      trust: 'store',
+      bundleUrl: 'data:text/javascript,globalThis.__trustLeak = true; export default () => {}',
+      manifest: { id: 'theirs', name: 'Theirs', version: '1.0.0', apiVersion: 3, permissions: ['full-access'] }
+    })];
+    const bridge = fakeBridge(records);
+    const loader = createLoader({ kernel, bridge: bridge.bridge, deps: fakeDeps().deps, builtins: {} });
+    await loader.boot();
+    await loader.whenIdle();
+    expect(loader.activeIds()).toEqual([]);
+    expect((globalThis as { __trustLeak?: boolean }).__trustLeak).toBeUndefined();
+    expect(loader.records().find((record) => record.id === 'theirs')?.health).toEqual({ state: 'needs-trust' });
     await loader.dispose();
   });
 

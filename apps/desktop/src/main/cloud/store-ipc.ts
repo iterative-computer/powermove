@@ -13,7 +13,7 @@ import { ApiError, Category, Handle, Visibility, type MeDto, type VarDecl } from
 import { z } from 'zod';
 
 import { IpcValidationError } from '../../shared/guards';
-import { EXTENSION_ID, EXTENSION_VERSION, type ExtensionRecord } from '../../shared/extensions';
+import { EXTENSION_ID, EXTENSION_VERSION, type ExtensionRecord, type ExtensionsChangedEvent } from '../../shared/extensions';
 import {
   STORE_IPC,
   STORE_QUERY_MAX,
@@ -22,6 +22,7 @@ import {
   type StoreChannels,
   type StoreErrorBody,
   type StoreResult,
+  type StoreTrustResult,
   type StoreUpdates
 } from '../../shared/store-ipc';
 import { PUBLISH_LICENCES, PUBLISH_LIMITS } from '../../shared/publish';
@@ -30,6 +31,7 @@ import { isMine } from './ownership';
 import type { Publisher } from './publish';
 import type { ProvenanceFile, ProvenanceRecord, ProvenanceStore } from './provenance';
 import type { StoreClient } from './store-client';
+import { trustLevelFor } from './trust';
 
 type Sender = Pick<IpcMainInvokeEvent, 'sender' | 'senderFrame'>;
 
@@ -89,7 +91,9 @@ export const storeSchemas = {
   'store:check-updates': none,
   'store:publish-prepare': localId,
   'store:publish': z.strictObject({ localId: z.string().regex(EXTENSION_ID), form: publishForm }),
-  'store:yank': z.strictObject({ repoId: uuid, version: z.string().regex(EXTENSION_VERSION) })
+  'store:yank': z.strictObject({ repoId: uuid, version: z.string().regex(EXTENSION_VERSION) }),
+  'store:trust': localId,
+  'store:untrust': localId
 } as const satisfies Record<keyof StoreChannels, z.ZodType>;
 
 function parse<T>(schema: z.ZodType<T>, channel: string, payload: unknown): T {
@@ -225,6 +229,8 @@ export function buildLibrary(input: LibraryInput): LibraryItemDto[] {
       vars: varsOf(record),
       health: record.health,
       enabled: record.enabled,
+      trust: record.trust ?? trustLevelFor(record, provenance, input.me),
+      permissions: [...(record.manifest?.permissions ?? [])],
       description: record.manifest?.description ?? null,
       group,
       maker,
@@ -258,8 +264,18 @@ export interface StoreIpcOptions {
   installer: StoreInstaller;
   publisher: Publisher;
   provenance: ProvenanceStore;
-  registry: { list(): ExtensionRecord[] };
+  registry: {
+    list(): ExtensionRecord[];
+    refresh(ids?: string[]): Promise<void>;
+    emitChanged(event: ExtensionsChangedEvent): void;
+  };
   me(): MeDto | null;
+  /**
+   * The native "Give <name> full access to Powermove?" dialog (`trustDialog`),
+   * owned by main so no renderer can answer it. Resolves true for Trust.
+   */
+  confirmTrust(name: string): Promise<boolean>;
+  now?(): number;
   /** Removes a user extension through the `ext:remove` path for this sender (asks about values). */
   removeExtension(event: IpcMainInvokeEvent, localId: string): Promise<boolean>;
   isTrusted(event: Sender): boolean;
@@ -352,4 +368,43 @@ export function registerStoreIpc(ipcMain: Pick<IpcMain, 'handle'>, options: Stor
     return result;
   }));
   handle(STORE_IPC.yank, storeSchemas['store:yank'], (request) => storeResult(() => options.publisher.yank({ repoId: request.repoId, version: request.version })));
+
+  /* Trust: only a store install someone else wrote can be trusted, and only
+     the native dialog can say yes. */
+  async function storeInstall(localId: string): Promise<{ record: ExtensionRecord; entry: ProvenanceRecord }> {
+    const record = options.registry.list().find((candidate) => candidate.id === localId && candidate.scope === 'user');
+    const entry = record ? await options.provenance.get(localId) : null;
+    if (!record || !entry?.origin) throw new StoreLocalError('not_installed', 'That extension isn’t installed from the store on this Mac.');
+    return { record, entry };
+  }
+  async function applyTrust(localId: string): Promise<void> {
+    await options.registry.refresh([localId]);
+    options.registry.emitChanged({ ids: [localId], reason: 'reload' });
+  }
+  handle(STORE_IPC.trust, storeSchemas['store:trust'], (request) => storeResult(async (): Promise<StoreTrustResult> => {
+    const { localId } = request;
+    const { record, entry } = await storeInstall(localId);
+    const level = trustLevelFor(record, entry, options.me());
+    if (level === 'store-trusted') return { localId, trusted: true };
+    if (level !== 'store') throw new StoreLocalError('not_installed', 'Extensions you made don’t need your trust.');
+    if (!(await options.confirmTrust(record.manifest?.name ?? localId))) return { localId, trusted: false };
+    const permissions = [...(record.manifest?.permissions ?? [])];
+    const at = new Date((options.now ?? Date.now)()).toISOString();
+    await options.provenance.update(localId, (current) => current && { ...current, trusted: { at, permissions } });
+    await applyTrust(localId);
+    return { localId, trusted: true };
+  }));
+  handle(STORE_IPC.untrust, storeSchemas['store:untrust'], (request) => storeResult(async (): Promise<StoreTrustResult> => {
+    const { localId } = request;
+    const { entry } = await storeInstall(localId);
+    if (entry.trusted) {
+      await options.provenance.update(localId, (current) => {
+        if (!current) return null;
+        const { trusted: _revoked, ...rest } = current;
+        return rest;
+      });
+      await applyTrust(localId);
+    }
+    return { localId, trusted: false };
+  }));
 }

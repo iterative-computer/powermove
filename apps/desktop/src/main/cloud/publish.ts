@@ -63,6 +63,7 @@ import type { CloudClient } from './client';
 import { StoreLocalError, type StoreInstallerRegistry } from './install';
 import type { ProvenanceOrigin, ProvenancePublished, ProvenanceRecord, ProvenanceStore } from './provenance';
 import { categoryFor } from './store-ipc';
+import { permissionFindings } from './permission-scan';
 
 /* ── the registry calls publishing needs ─────────────────── */
 
@@ -498,6 +499,9 @@ export function createPublisher(options: PublisherOptions): Publisher {
       sizeBytes: frozen.snap.totalBytes,
       isFork: lineage.fork,
       blockedFindings: frozen.findings.blocked,
+      permissionFindings: permissionFindings(frozen.inputs.flatMap((input) => {
+        try { return [{ path: input.path, text: utf8.decode(input.bytes) }]; } catch { return []; }
+      }), local.manifest.permissions),
       waivableFindings: frozen.findings.waivable,
       manifest: { id: local.manifest.id, name: local.manifest.name, description: local.manifest.description ?? null },
       listing
@@ -610,6 +614,10 @@ export function createPublisher(options: PublisherOptions): Publisher {
       throw new ApiError({ error: 'same_as_origin' });
     }
     const frozen = await freeze(local, version, lineage);
+    const missingPermissions = permissionFindings(frozen.inputs.flatMap((input) => {
+      try { return [{ path: input.path, text: utf8.decode(input.bytes) }]; } catch { return []; }
+    }), local.manifest.permissions);
+    if (missingPermissions.length) throw new StoreLocalError('folder_invalid', missingPermissions[0]!.text);
     const blocked = frozen.findings.blocked;
     if (blocked.length) throw new ApiError({ error: 'scan_blocked', findings: blocked.map(({ path: file, line, kind }) => ({ path: file, line, kind })) });
     const waivers = waiversFor(frozen.findings.waivable, form.waivers);

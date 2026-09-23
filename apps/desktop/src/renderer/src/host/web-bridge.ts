@@ -1,9 +1,9 @@
 /*
  * The browser's stand-in for the Electron preload. When the app is served by
  * `powermove serve`, there is no contextBridge; this module speaks the same
- * IPC contract over one WebSocket and installs itself as window.powermove
- * before the engines boot, so the rest of the renderer does not know the
- * difference.
+ * IPC contract over one WebSocket and installs itself into the kernel's
+ * bridge capture (kernel/bridge.ts) before the engines boot, so the rest of
+ * the renderer does not know the difference. It never touches `window`.
  *
  * What cannot cross the network stays in the browser: confirmations are
  * window.confirm, saves become downloads, dropped files are uploaded first,
@@ -17,6 +17,7 @@ import { WEB, WEB_UPLOAD_CHUNK_BYTES, type WebHello } from '../../../shared/wire
 import { Connection } from '../../../shared/link';
 import { attachRemoteMedia } from './remote-media';
 import { ReconnectingLink, isDisconnectError } from '../../../shared/reconnect';
+import { bridge as capturedBridge, provideBridge } from '../kernel/bridge';
 
 const WS_PATH = '/__powermove/ws';
 const VARS_UNAVAILABLE = 'Variables are not available in powermove serve yet';
@@ -479,6 +480,8 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
       publishPrepare: storeOffline,
       publish: storeOffline,
       yank: storeOffline,
+      trust: storeOffline,
+      untrust: storeOffline,
       onUpdatesChanged: () => () => {},
       onPublishProgress: () => () => {},
       onLibraryChanged: () => () => {}
@@ -518,13 +521,13 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
 }
 
 /**
- * Install window.powermove when the page is served by `powermove serve`.
- * Resolves immediately in Electron (the preload already installed it) and
- * after a short failed probe in a plain browser without a host.
+ * Install the host bridge when the page is served by `powermove serve`.
+ * Runs after `captureBridge`. Resolves immediately in Electron (the preload's
+ * bridge was captured) and after a short failed probe in a plain browser
+ * without a host.
  */
 export async function installWebBridge(): Promise<boolean> {
-  const scope = window as unknown as { powermove?: PowermoveBridge };
-  if (scope.powermove) return false;
+  if (capturedBridge()) return false;
   if (location.protocol !== 'http:' && location.protocol !== 'https:') return false;
   const params = new URLSearchParams(location.search);
   const project = params.get('project');
@@ -554,7 +557,7 @@ export async function installWebBridge(): Promise<boolean> {
   });
   link.adopt(first);
   activeLink = link;
-  scope.powermove = createBridge(link, hello, snapshot, initialProject);
+  provideBridge(createBridge(link, hello, snapshot, initialProject));
   document.documentElement.classList.add('remote-app');
   if (project) history.replaceState(null, '', location.pathname);
   return true;

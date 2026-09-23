@@ -3,6 +3,7 @@ import path from 'node:path';
 import { scanFiles, type ScanFinding, type ScanKind } from '@powermove/registry/scan';
 import type { AgentExtensionChange } from '../../shared/ipc';
 import { EXTENSION_ID, MANIFEST_LIMITS, parseManifest } from '../../shared/extensions';
+import { permissionFindings } from '../cloud/permission-scan';
 import { compileExtension } from '../extensions/compiler';
 import type { AgentWorkspace } from './workspace';
 import { AgentResultValidationError } from './result-repair';
@@ -26,8 +27,10 @@ export async function validateStagedExtensions(
     if (!manifest.ok) throw new AgentResultValidationError(`${change.id}: ${manifest.error}. Nothing was published.`);
     if (manifest.manifest.id !== change.id) throw new AgentResultValidationError(`${change.id}: the manifest id must match its folder. Nothing was published.`);
     // Credentials never reach the library: values are declared and read at runtime.
-    const { blocked } = scanFiles(await readStagedText(dir));
+    const texts = await readStagedText(dir);
+    const { blocked } = scanFiles(texts);
     if (blocked.length) throw new AgentResultValidationError(blocked.map((finding) => credentialLine(change.id, finding)).join('\n'));
+    for (const finding of permissionFindings(texts, manifest.manifest.permissions)) console.warn(`[extension ${change.id}] ${finding.text}`);
     const compiled = await compileExtension({ dir, entry: manifest.manifest.entry || 'index.ts', outDir: path.join(layout.runDirectory, '.compiled') });
     if (!compiled.ok) throw new AgentResultValidationError(`${change.id} failed compilation: ${compiled.error}. Repair its staged source. Nothing was published.`);
   }

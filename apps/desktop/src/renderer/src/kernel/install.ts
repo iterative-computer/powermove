@@ -101,6 +101,7 @@ import {
   restorePanel,
   type Workspace as LayoutWorkspace
 } from '../layout/model';
+import { bridge as hostBridge } from './bridge';
 
 type LegacyPM = Record<string, any>;
 type ExtensionsHostBridge = ExtensionsBridge & Partial<Pick<PowermoveExtensionsBridge, 'fork'>>;
@@ -656,13 +657,13 @@ function makeExtensionsAPI(PM: LegacyPM, bridge: ExtensionsHostBridge | null, ge
 }
 
 function resolveBridge(PM: LegacyPM): ExtensionsHostBridge | null {
-  const candidate = (globalThis as Record<string, any>)?.powermove?.extensions ?? PM?.extensionsBridge ?? null;
+  const candidate = (hostBridge() as Record<string, any> | undefined)?.extensions ?? PM?.extensionsBridge ?? null;
   if (candidate && typeof candidate.list === 'function' && typeof candidate.onChanged === 'function') return candidate as ExtensionsHostBridge;
   return null;
 }
 
 function resolveVarsBridge(): Pick<VarsBridge, 'values'> | null {
-  const candidate = (globalThis as Record<string, any>)?.powermove?.vars;
+  const candidate = (hostBridge() as Record<string, any> | undefined)?.vars;
   return candidate && typeof candidate.values === 'function' ? candidate as VarsBridge : null;
 }
 

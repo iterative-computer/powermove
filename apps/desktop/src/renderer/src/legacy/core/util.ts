@@ -1,5 +1,6 @@
 /* Ported from js/core/util.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 export function install(PM: PMRegistry): void {
 /* Powermove — util: dom, bus, math, time, persistence. */
@@ -313,7 +314,7 @@ PM.drag = (e: any, { move, up, cancel, cursor, infinite = false }: any) => {
 };
 
 PM.download = (blob: any, name: any) => {
-  const upload = window.powermove?.fileUpload;
+  const upload = hostBridge()?.fileUpload;
   if (upload) return (async () => {
     const token = await upload.begin(blob.size);
     try {

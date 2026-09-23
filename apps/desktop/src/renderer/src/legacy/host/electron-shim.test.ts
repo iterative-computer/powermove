@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 
+import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
@@ -87,6 +88,7 @@ function loadShim(options: { snapshotError?: Error; nativeAsyncStore?: boolean; 
     setTimeout,
   };
   vi.stubGlobal('window', shimWindow);
+  installBridgeForTests(bridge);
 
   install(PM);
   return { PM, bridge, window: shimWindow, addEventListener, emitted };
@@ -94,6 +96,7 @@ function loadShim(options: { snapshotError?: Error; nativeAsyncStore?: boolean; 
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  resetBridgeForTests();
 });
 
 describe('legacy Electron shim install', () => {

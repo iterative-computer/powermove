@@ -1,4 +1,5 @@
 import type { ChatGPTAccountStatus, PowermoveBridge } from '../../../../shared/ipc';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 function planLabel(plan: string | null): string | null {
   if (!plan) return null;
@@ -123,13 +124,13 @@ function createAccountSettingsControl(
 export function createChatGPTSettingsControl(
   api?: PowermoveBridge['chatgpt']
 ): ChatGPTSettingsControl {
-  return createAccountSettingsControl('ChatGPT', 'Codex', api ?? window.powermove?.chatgpt);
+  return createAccountSettingsControl('ChatGPT', 'Codex', api ?? hostBridge()?.chatgpt);
 }
 
 export function createClaudeSettingsControl(
   api?: PowermoveBridge['claude']
 ): ChatGPTSettingsControl {
-  return createAccountSettingsControl('Claude', 'Claude Code', api ?? window.powermove?.claude);
+  return createAccountSettingsControl('Claude', 'Claude Code', api ?? hostBridge()?.claude);
 }
 
 export const formatChatGPTPlan = planLabel;

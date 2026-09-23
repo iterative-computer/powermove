@@ -8,6 +8,7 @@
   import iconDark from './icon-dark.png';
   import { CLOUD_HANDLE, CLOUD_OTP, type CloudBridge, type CloudSocialProvider } from '../../../shared/cloud-ipc';
   import { applyAccount, subscribeAccount, userFromMe, PROVIDER_LABEL, type SignInMode } from './account';
+  import { bridge as hostBridge } from '../kernel/bridge';
 
   let { PM, mode: startMode, bridge, me: startMe, onclose }: {
     PM: Record<string, any>;
@@ -249,7 +250,7 @@
   }
 
   function external(url: string): void {
-    const host = (window as any).powermove;
+    const host = hostBridge();
     if (host?.openExternal) void host.openExternal(url);
     else window.open(url, '_blank', 'noopener');
   }

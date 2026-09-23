@@ -1,5 +1,6 @@
 import type { ExtensionRecord, ExtensionsBridge, ExtensionsChangedEvent } from '../../../../shared/extensions';
 import { createSettingsSection } from './settings-section';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 export interface ExtensionSettingsControl {
   element: HTMLElement;
@@ -15,6 +16,7 @@ function displayState(record: ExtensionRecord): DisplayState {
   if (health.state === 'replaced') return { label: 'Replaced', tone: 'quiet', detail: `Replaced by ${health.by}` };
   if (health.state === 'needs-update') return { label: 'Update needed', tone: 'warning', detail: health.error };
   if (health.state === 'needs-setup') return { label: 'Needs setup', tone: 'setup' };
+  if (health.state === 'needs-trust') return { label: 'Needs full access', tone: 'warning', detail: 'Trust it from the Library to turn it on.' };
   return { label: 'Needs attention', tone: 'warning', detail: health.error };
 }
 
@@ -72,7 +74,7 @@ export interface ExtensionSettingsOptions {
 }
 
 export function createExtensionSettingsControl(
-  api: ExtensionsBridge | undefined = window.powermove?.extensions,
+  api: ExtensionsBridge | undefined = hostBridge()?.extensions,
   options: ExtensionSettingsOptions = {}
 ): ExtensionSettingsControl {
   const element = el('div', 'settings-extension-root');

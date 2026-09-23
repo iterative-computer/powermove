@@ -1,4 +1,5 @@
 // @ts-nocheck -- faithful behavioral transplant of exported spatial pure/adapter seams.
+import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
 import assert from 'node:assert/strict';
 import { afterEach, expect, it, vi } from 'vitest';
 
@@ -8,6 +9,7 @@ import { install as installElectronShim } from '../host/electron-shim';
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  resetBridgeForTests();
 });
 
 function spatialHarness(adapterFactory) {
@@ -1081,6 +1083,7 @@ it('continues the same agent to repair and verify loaded extensions before finis
   assert.ok(!PM.AgentUI.state.conversation.some(m => m.fixExtensionId));
   const restoreChangeSet = vi.fn(async () => {});
   (window as any).powermove = { codex: { restoreChangeSet } };
+  installBridgeForTests((window as any).powermove);
   await PM.AgentUI.undoSceneRun();
   assert.deepEqual(restoreChangeSet.mock.calls.map(([arg]) => arg.changeSetId), ['repaired', 'created']);
 });
@@ -1125,6 +1128,7 @@ it('builds and automatically submits an extension Fix-it prompt in project mode'
   const readSource = vi.fn(async () => files);
   const fixPrompt = vi.fn(async () => 'Fix broken-mod without changing its public id.');
   (window as any).powermove = { extensions: { readSource }, codex: { fixPrompt } };
+  installBridgeForTests((window as any).powermove);
   PM.Kernel = { loader: { records: () => [{
     id: 'broken-mod', manifest: { name: 'Broken Mod' },
     health: { state: 'build-error', error: 'Build failed\nstack' },
@@ -1321,6 +1325,7 @@ it('forwards typed extension changes through the Electron shim payload', async (
       documentElement: { classList: { add() {} } },
     },
   });
+  installBridgeForTests((window as any).powermove);
   const PM = { CodexBridge: { resolve, progress: vi.fn() }, toast: vi.fn() };
   installElectronShim(PM as any);
 

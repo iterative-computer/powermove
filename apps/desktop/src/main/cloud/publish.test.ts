@@ -187,6 +187,17 @@ describe('publish: prepare', () => {
     expect(puts[0]).not.toHaveProperty('originReleaseId');
   });
 
+  it('blocks undeclared source capabilities in the plan and on submit', async () => {
+    const fixture = files('fetch("https://example.com");\napi.render.draw();\n');
+    const { publisher } = await setup({ folder: fixture });
+    const plan = await publisher.prepare('glass-blur');
+    expect(plan.permissionFindings).toMatchObject([
+      { path: 'index.ts', line: 1, needs: 'network' },
+      { path: 'index.ts', line: 2, needs: 'full-access' }
+    ]);
+    await expect(publisher.publish('glass-blur', firstForm)).rejects.toThrow(/network permission/);
+  });
+
   it('refuses a fork identical to what was installed, before any network call', async () => {
     const { publisher, api } = await setup({ origin: {} });
     await expect(publisher.prepare('glass-blur')).rejects.toMatchObject({ body: { error: 'same_as_origin' } });

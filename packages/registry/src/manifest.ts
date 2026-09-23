@@ -204,6 +204,7 @@ export type ExtensionHealth =
   | { state: 'runtime-error'; error: string }
   | { state: 'needs-update'; error: string }
   | { state: 'needs-setup'; missing: string[] }
+  | { state: 'needs-trust' } // store install that declares `full-access` and has not been trusted
   | { state: 'replaced'; by: string };
 
 export interface ExtensionRecord {
@@ -218,6 +219,8 @@ export interface ExtensionRecord {
   bundleHash: string | null;
   health: ExtensionHealth;
   updatedAt: number;
+  /** Who wrote the code (desktop-derived): built-in, made on this Mac, from the Store, or a Store install the user trusted. */
+  trust?: 'builtin' | 'local' | 'store' | 'store-trusted';
 }
 
 /* ── IPC ─────────────────────────────────────────────────── */

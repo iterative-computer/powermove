@@ -70,6 +70,19 @@ import { runKernelCommand, type Kernel } from './registries';
 import { mountComponent } from './runtime-globals';
 import { performanceMonitor } from '../runtime/performance-monitor';
 import { IMPORT_DEFAULTS_SERVICE, validatedImportDefaults } from './import-defaults';
+import { bridge as hostBridge } from './bridge';
+
+/* Extensions never see the raw bridge (bridge.ts); haptics is the one bit a
+   built-in (the viewer's snapping) needs, so it goes through the API. */
+const HOST_HAPTIC = Object.freeze({
+  alignment(): void {
+    try {
+      hostBridge()?.haptic?.alignment();
+    } catch {
+      // Haptics are a nicety; a missing or failing host changes nothing.
+    }
+  }
+});
 
 export interface PanelsBackend {
   open(id: string, dock?: PanelDock | PanelOpenOptions): void;
@@ -498,7 +511,8 @@ export function createExtensionAPI(
     host: {
       pm: deps.pm,
       state: deps.state,
-      mount: mountComponent
+      mount: mountComponent,
+      haptic: HOST_HAPTIC
     },
     on: events.on,
     log,

@@ -1,3 +1,6 @@
+/* First, before anything else evaluates: take the host bridge off window so
+   no extension can reach raw IPC (kernel/capture-bridge.ts). */
+import './kernel/capture-bridge-entry';
 import '@powermove/tokens/tokens.css';
 import '../../../css/app.css';
 import '../../../css/settings.css';
@@ -9,7 +12,8 @@ import './legacy/core/image-sequence.css';
 import { installWebBridge, remoteLink } from './host/web-bridge';
 
 // Served by `powermove serve`, the browser has no preload: the bridge has to be
-// on window before the engines read the store during their synchronous boot.
+// in the kernel's capture before the engines read the store during their
+// synchronous boot.
 const remote = await installWebBridge();
 await import('./legacy/bootstrap');
 if (remote) {

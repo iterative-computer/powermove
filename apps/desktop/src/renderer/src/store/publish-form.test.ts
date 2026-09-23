@@ -7,7 +7,7 @@ function plan(overrides: Partial<PublishPlanDto> = {}): PublishPlanDto {
   return {
     localId: 'glass-blur', coordinate: 'jude/glass-blur', version: '1.0.0', suggestedVersion: '1.0.0', lastVersion: null,
     firstPublish: true, treeSha: 'a'.repeat(40), fileCount: 3, sizeBytes: 120, isFork: false,
-    blockedFindings: [], waivableFindings: [],
+    blockedFindings: [], permissionFindings: [], waivableFindings: [],
     manifest: { id: 'glass-blur', name: 'Glass blur', description: 'Frosted glass.' },
     listing: { name: 'Glass blur', tagline: 'Frosted glass.', category: 'effects', licence: 'MIT' },
     ...overrides
@@ -66,6 +66,11 @@ describe('scanner findings', () => {
   it('prefills a reason already written in the file', () => {
     const withReason = plan({ waivableFindings: [{ ...soft, reason: 'fixture hash' }] });
     expect(canPublish(problemsOf(draftFor(withReason), withReason))).toBe(true);
+  });
+
+  it('blocks undeclared permissions in the publish plan', () => {
+    const missing = plan({ permissionFindings: [{ path: 'index.ts', line: 12, needs: 'network', text: 'Declare network.' }] });
+    expect(canPublish(problemsOf(draftFor(missing), missing))).toBe(false);
   });
 
   it('never lets a hard finding through', () => {

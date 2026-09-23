@@ -72,7 +72,7 @@ export function draftFor(plan: PublishPlanDto): PublishDraft {
 }
 
 export function problemsOf(draft: PublishDraft, plan: PublishPlanDto): PublishProblems {
-  const problems: PublishProblems = { reasons: {}, blocked: plan.blockedFindings.length > 0 };
+  const problems: PublishProblems = { reasons: {}, blocked: plan.blockedFindings.length > 0 || plan.permissionFindings.length > 0 };
   const version = versionProblem(draft.version, plan.lastVersion);
   if (version) problems.version = version;
   if (draft.notes.length > PUBLISH_LIMITS.notesChars) problems.notes = `Keep this under ${PUBLISH_LIMITS.notesChars.toLocaleString('en')} characters.`;
