@@ -30,8 +30,11 @@ export function createDeepLinkQueue(): DeepLinkQueue {
   let handler: ((url: string) => void) | null = null;
   return {
     push(url) {
-      if (handler) handler(url);
-      else if (held.length < 8) held.push(url);
+      if (handler) { handler(url); return; }
+      // Only sign-in links are worth holding; when full, keep the newest.
+      if (!/^powermove:\/\/auth\?/i.test(url)) return;
+      if (held.length >= 8) held.shift();
+      held.push(url);
     },
     ready(next) {
       handler = next;
@@ -104,7 +107,8 @@ export async function startCloudService(options: CloudServiceOptions): Promise<C
       const changed = await confirmRegistryChange(origin, {
         setting: registry,
         showMessageBox: options.showMessageBox,
-        beforeChange: () => session.signOut()
+        // Through auth so a sign-in still waiting on the old registry is dropped too.
+        beforeChange: () => auth.signOut()
       });
       if (changed) notifyAccount(null);
       return changed;

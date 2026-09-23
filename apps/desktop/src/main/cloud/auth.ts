@@ -41,6 +41,8 @@ interface PendingSignIn {
   verifier: string;
   expires: number;
   provider: CloudSocialProvider;
+  /** The registry the sign-in started against; a link is only exchanged there. */
+  origin: string;
 }
 
 export interface CloudAuthOptions {
@@ -120,8 +122,9 @@ export function createCloudAuth(options: CloudAuthOptions): CloudAuth {
       const verifier = base64url(random(32));
       const state = Buffer.from(random(16)).toString('hex');
       const challenge = challengeFor(verifier);
-      pending = { state, verifier, expires: now() + PENDING_SIGN_IN_MS, provider };
-      const url = session.client().api.v1.auth.desktop.$url({ query: { provider, state, challenge } });
+      const client = session.client();
+      pending = { state, verifier, expires: now() + PENDING_SIGN_IN_MS, provider, origin: client.origin };
+      const url = client.api.v1.auth.desktop.$url({ query: { provider, state, challenge } });
       await options.openExternal(url.toString());
     },
 
@@ -146,8 +149,13 @@ export function createCloudAuth(options: CloudAuthOptions): CloudAuth {
         return;
       }
       pending = null;
+      const client = session.client();
+      if (client.origin !== current.origin) {
+        log('Ignored a sign-in link: the registry changed since the sign-in started.');
+        return;
+      }
       try {
-        const dto = await session.client().request(Auth.DesktopExchange.Res, (api) =>
+        const dto = await client.request(Auth.DesktopExchange.Res, (api) =>
           api.v1.auth.desktop.exchange.$post({ json: { state: link.state, token: link.token, verifier: current.verifier } })
         );
         await signedIn(dto, current.provider);
@@ -183,6 +191,7 @@ export function createCloudAuth(options: CloudAuthOptions): CloudAuth {
     },
 
     async signOut() {
+      pending = null;
       await session.signOut();
       options.notifyAccount(null);
     },
@@ -190,6 +199,7 @@ export function createCloudAuth(options: CloudAuthOptions): CloudAuth {
     async deleteAccount() {
       if (!session.currentToken()) throw new ApiError({ error: 'unauthorized' });
       if (!(await options.confirmDelete())) return false;
+      pending = null;
       await session.client().request(null, (api) => api.v1.me.$delete());
       await session.clear();
       options.notifyAccount(null);

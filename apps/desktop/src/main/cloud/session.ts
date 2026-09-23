@@ -68,6 +68,9 @@ export function createCloudSession(options: CloudSessionOptions): CloudSession {
   const jsonFile = path.join(options.dir, 'session.json');
   let secret: Secret | null = null;
   let cache: Cache | null = null;
+  /* Bumped by save() and clear(): a refresh that started under an older
+     generation must not write its result over a newer sign-in or sign-out. */
+  let generation = 0;
   let cachedClient: CloudClient | null = null;
 
   const live = (): Secret | null => {
@@ -122,12 +125,14 @@ export function createCloudSession(options: CloudSessionOptions): CloudSession {
       const next: Secret = { origin: options.origin(), token: dto.token, expiresAt: dto.expiresAt };
       await writeAtomic(binFile, storage.encryptString(JSON.stringify(next)));
       secret = next;
+      generation++;
       await writeCache({ origin: next.origin, me: null, fetchedAt: new Date(now()).toISOString(), ...(provider ? { provider } : {}) });
     },
 
     async clear() {
       secret = null;
       cache = null;
+      generation++;
       await Promise.all([rm(binFile, { force: true }), rm(jsonFile, { force: true })]);
     },
 
@@ -153,8 +158,10 @@ export function createCloudSession(options: CloudSessionOptions): CloudSession {
     async refreshMe() {
       const current = live();
       if (!current) return null;
+      const started = generation;
       try {
         const me = await session.client().request(Me.Get.Res, (api) => api.v1.me.$get());
+        if (generation !== started) return null;
         await writeCache({ origin: current.origin, me, fetchedAt: new Date(now()).toISOString(), ...(cache?.provider ? { provider: cache.provider } : {}) });
         return me;
       } catch (error) {

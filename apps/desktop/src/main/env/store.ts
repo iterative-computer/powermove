@@ -16,7 +16,7 @@
  * safeStorage is injected: it only works after `app.whenReady()`, and tests
  * pass a fake.
  */
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
@@ -140,8 +140,15 @@ export function createEnvStore(options: {
   }
 
   async function load(envKey: string): Promise<Line[]> {
+    const file = fileFor(envKey);
     try {
-      return parseEnvText(await readFile(fileFor(envKey), 'utf8'));
+      // Files written by hand or copied from another profile may be too open;
+      // tighten them before reading so the 0700/0600 guarantee holds on load.
+      const info = await lstat(file);
+      if (!info.isFile()) throw Object.assign(new Error(`${file} is not a regular file`), { code: 'ENOTREG' });
+      await chmod(dir, 0o700).catch(() => undefined);
+      if ((info.mode & 0o077) !== 0) await chmod(file, 0o600);
+      return parseEnvText(await readFile(file, 'utf8'));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
       throw error;
@@ -203,7 +210,10 @@ export function createEnvStore(options: {
           continue;
         }
         const secret = secretKeys.has(line.key);
-        if (secret && decoded.value.length > 0 && storage().isEncryptionAvailable()) {
+        if (secret && decoded.value.length > 0) {
+          // A declared secret sitting in plaintext is sealed now, or withheld
+          // until it can be: it is never delivered unsealed.
+          if (!storage().isEncryptionAvailable()) { result.set(line.key, { value: null, secret }); continue; }
           line.stored = seal(decoded.value);
           reseal = true;
         }

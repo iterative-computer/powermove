@@ -55,6 +55,7 @@ function credentialLine(id: string, finding: ScanFinding): string {
    and anything else are skipped without being read. */
 const SCANNED = /(?:\.(?:ts|js|mjs|svelte|json|md|txt|css|html|frag|vert|glsl|wgsl|yml|yaml|toml)|(?:^|\/)\.env[^/]*)$/i;
 const SCAN_FILE_BYTES = 2 * 1024 * 1024;
+const SCAN_MAX_ENTRIES = 4000;
 
 async function readStagedText(root: string): Promise<Array<{ path: string; text: string }>> {
   const files: Array<{ path: string; text: string }> = [];
@@ -64,7 +65,9 @@ async function readStagedText(root: string): Promise<Array<{ path: string; text:
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       if (entry.name === 'node_modules' || entry.name === '.git') continue;
-      if (++visited > MANIFEST_LIMITS.sourceFiles) return;
+      // Promotion copies up to 4,000 entries (change-history.ts). Scan all of
+      // them; refusing beats a silent stop that would let a credential through.
+      if (++visited > SCAN_MAX_ENTRIES) throw new Error(`${path.basename(root)} has more than ${SCAN_MAX_ENTRIES} files; nothing was published.`);
       const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
       const full = path.join(directory, entry.name);
       const metadata = await lstat(full);
