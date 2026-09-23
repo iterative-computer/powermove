@@ -74,8 +74,10 @@ Nothing below has been created yet. Do these once, in order.
    endpoint; unset means moderation is disabled).
 8. **Deploy** `bun run deploy`, then `curl https://cloud.trypowermove.com/health`.
 9. **The `powermove` publisher.** Sign in once from the desktop app with the
-   account that will own the built-ins and claim the handle `powermove`
-   (it is reserved for exactly this; the reserved list is `src/handles.ts`).
+   account that will own the built-ins (skip the handle step), find its user
+   id in the `user` table, then seed the reserved handle with the admin token:
+   `curl -X POST https://cloud.trypowermove.com/v1/admin/publishers -H "X-Admin-Token: …" -H "content-type: application/json" -d '{"handle":"powermove","userId":"<id>"}'`.
+   Reserved handles (`src/handles.ts`) can only be claimed this way.
 10. **Built-ins.** See below.
 
 Without `GOOGLE_*`/`GITHUB_*` the social providers are omitted so local boot

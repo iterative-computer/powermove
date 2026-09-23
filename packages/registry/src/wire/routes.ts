@@ -67,5 +67,7 @@ export const Publish = {
   DeleteRepo: { Req: Req(Coordinate), Res: NoContent }
 } as const;
 export const Admin = {
+  /** Seeds a reserved handle (e.g. `powermove`) for an existing user; bypasses the reserved list. */
+  SeedPublisher: { Req: Req(Empty, Empty, z.object({ handle: Handle, userId: z.string().min(1) })), Res: z.object({ publisher: PublisherDto }) },
   Moderate: { Req: Req(z.object({ repoId: Uuid }), Empty, z.object({ action: z.enum(['hide', 'unhide', 'remove']), reason: z.string().max(1000) })), Res: ListingDto }
 } as const;

@@ -5,6 +5,7 @@ import { storeIcon } from '../objects/icon';
 import { constantTimeEqual } from '../constant-time';
 import type { Env } from '../env';
 import { extensions, moderationLog, publishers, releases, repos, reports } from '../db/schema';
+import { user } from '../db/auth-schema';
 import { lineageFor, toListing, toRelease } from '../dto';
 import { requirePublisher, rateAuth } from './session';
 import { canViewDetail } from '../lifecycle';
@@ -58,7 +59,39 @@ export const repoManagement = new Hono<Env>()
    return c.body(null,204);
  });
 
-export const adminRoutes = new Hono<Env>().post('/repos/:repoId/moderation',async c=>{
+function requireAdmin(c: { env: Env['Bindings']; req: { header(name: string): string | undefined } }): void {
+  if (!c.env.ADMIN_TOKEN || !constantTimeEqual(c.req.header('X-Admin-Token') ?? '', c.env.ADMIN_TOKEN)) {
+    throw new ApiError({ error: 'unauthorized' });
+  }
+}
+
+export const adminRoutes = new Hono<Env>()
+ /* Reserved handles (src/handles.ts) can only be claimed here, by an operator
+    with the admin token, for an existing user: this is how `powermove` gets
+    its publisher before the built-ins are published. */
+ .post('/publishers', async c => {
+   requireAdmin(c);
+   const body = Admin.SeedPublisher.Req.shape.body.parse(await c.req.json().catch(() => null));
+   try {
+     const publisher = await c.var.data.tx(async tx => {
+       const [account] = await tx.select({ id: user.id }).from(user).where(eq(user.id, body.userId)).limit(1);
+       if (!account) throw new ApiError({ error: 'not_found' });
+       const [existing] = await tx.select().from(publishers).where(eq(publishers.userId, body.userId)).limit(1);
+       if (existing) throw new ApiError({ error: 'handle_already_set' });
+       const [p] = await tx.insert(publishers).values({ handle: body.handle, userId: body.userId }).returning();
+       await tx.update(user).set({ username: body.handle, displayUsername: body.handle }).where(eq(user.id, body.userId));
+       return p!;
+     });
+     console.log('admin seeded publisher', { handle: body.handle, userId: body.userId });
+     return c.json({ publisher: { id: publisher.id, handle: publisher.handle, tombstoned: false } }, 201);
+   } catch (e) {
+     if (e instanceof ApiError) throw e;
+     const code = (e as { code?: string; cause?: { code?: string } }).code ?? (e as { cause?: { code?: string } }).cause?.code;
+     if (code === '23505') throw new ApiError({ error: 'handle_taken' });
+     throw e;
+   }
+ })
+ .post('/repos/:repoId/moderation',async c=>{
   if (!c.env.ADMIN_TOKEN || !constantTimeEqual(c.req.header('X-Admin-Token')??'',c.env.ADMIN_TOKEN)) throw new ApiError({error:'unauthorized'});
   const {repoId}=Admin.Moderate.Req.shape.params.parse(c.req.param());
   const body=Admin.Moderate.Req.shape.body.parse(await c.req.json().catch(()=>null));
