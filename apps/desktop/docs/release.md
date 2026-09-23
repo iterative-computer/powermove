@@ -87,6 +87,8 @@ The job uses an arm64 macOS runner, installs the workspace with bun
 `apps/desktop/package.json` with `bun pm version`, tests the update/session
 lifecycle with the desktop Vitest subset, signs and notarizes the app through
 `bun run dist:release`, and verifies the result in `apps/desktop/dist/`.
+It selects Xcode 26.3 on the macOS 15 runner because the Icon Composer catalog
+requires `actool` 26 or newer.
 It uploads the DMG, ZIP, blockmaps, and the channel manifest into a draft
 before publishing the complete release with the workflow's own `GITHUB_TOKEN`.
 Nothing is published by the packager itself. Never publish a partial release
