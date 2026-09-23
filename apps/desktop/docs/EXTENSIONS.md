@@ -71,13 +71,14 @@ reloaded, or removed. Return a `Disposable` or use `api.onDispose` for anything 
 | Field | Required | Notes |
 |---|---|---|
 | `id` | yes | `a-z 0-9 -`, 2–64 chars, equals folder name |
-| `name`, `version` (`x.y.z`), `apiVersion` (`1`) | yes | |
+| `name`, `version` (`x.y.z`), `apiVersion` (`1` or `2`) | yes | |
 | `description` | recommended | shown in the Mods list; one sentence |
 | `entry` | no | default `index.ts`; `.ts` `.js` `.mjs`; may import relative `.ts`, `.js`, `.svelte`, `.css` |
 | `contributes` | recommended | subset of `panels inspector media commands keybindings effects transitions layers themes palette menus status hooks` |
 | `replaces` | no | ids of extensions to deactivate while this one is enabled (e.g. `["timeline"]`) |
 | `dependsOn` | no | ids that must be enabled and load first |
-| `forkedFrom` | no | `"<id>@<version>"` when copied from a built-in |
+| `forkedFrom` | no | `"<id>@<version>"` for a built-in or `"<handle>/<id>@<version>"` for a Store fork |
+| `vars` | no | `apiVersion: 2`; up to 32 declarations `{ key, label, secret?, required?, hint? }`. Keys use uppercase letters, digits and underscores, starting with a letter. Read values through `api.vars`; never put credentials in source. |
 | `author` | no | `powermove` \| `user` \| `agent` |
 
 Imports allowed: `powermove` (types only), `svelte`, `svelte/store`, relative files

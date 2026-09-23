@@ -46,7 +46,7 @@ extraResources:
     to: api-pack/BACKGROUND_TESTING.md
   - from: src/renderer/src/kernel/api.ts
     to: api-pack/api.ts
-  - from: src/shared/extensions.ts
+  - from: ../../packages/registry/src/manifest.ts
     to: api-pack/extensions.ts
   - from: src/renderer/src/core/types/project.ts
     to: api-pack/project.ts

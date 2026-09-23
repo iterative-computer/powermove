@@ -681,7 +681,7 @@ if (!hasSingleInstanceLock) {
       ['EXTENSIONS.md', 'docs/EXTENSIONS.md'],
       ['BACKGROUND_TESTING.md', 'docs/background-testing.md'],
       ['api.ts', 'src/renderer/src/kernel/api.ts'],
-      ['extensions.ts', 'src/shared/extensions.ts'],
+      ['extensions.ts', '../../packages/registry/src/manifest.ts'],
       ['project.ts', 'src/renderer/src/core/types/project.ts'],
       ['commands.ts', 'src/renderer/src/core/types/commands.ts'],
       ['samples/gradient-tint/manifest.json', 'docs/samples/gradient-tint/manifest.json'],

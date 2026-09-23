@@ -24,6 +24,7 @@
     "@motion-core/motion-gpu": "0.15.1",
     "@openai/codex": "0.153.4",
     "@openai/codex-darwin-arm64": "npm:@openai/codex@0.153.4-darwin-arm64",
+    "@powermove/registry": "workspace:*",
     "@powermove/macos-haptics": "workspace:*",
     "@powermove/player": "workspace:*",
     "@powermove/tokens": "workspace:*",
