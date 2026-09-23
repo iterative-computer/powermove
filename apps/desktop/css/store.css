@@ -51,7 +51,7 @@ body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-main{visibility:hi
 .st-search svg{width:14px;height:14px;flex:none}
 .st-search input{min-width:0;flex:1;font-size:var(--fs-md);color:var(--tx)}
 .st-search input::placeholder{color:var(--tx-3)}
-.st-nav{position:relative;min-height:0;flex:1;display:flex;flex-direction:column;gap:2px}
+.st-nav{position:relative;min-height:0;flex:1;display:flex;flex-direction:column;gap:2px;overflow:auto}
 .st-navbtn{position:relative;z-index:1}
 .st-navbtn{height:32px;width:100%;display:flex;align-items:center;gap:9px;padding:0 9px;border:0;border-radius:var(--r-md);color:var(--tx-2);font-size:var(--fs-md);font-weight:var(--fw-medium);text-align:left;transition:background var(--dur-1),color var(--dur-1)}
 .st-navbtn svg{width:15px;height:15px;flex:none;color:var(--tx-3);transition:color var(--dur-1)}
@@ -59,6 +59,10 @@ body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-main{visibility:hi
 .st-navbtn.on{color:var(--tx)}
 .st-navbtn.on svg{color:var(--tx)}
 .st-navbtn:focus-visible{outline:0}
+/* Two groups under Browse: the six kinds, then this Mac. A label heads each. */
+.st-nav-label{margin:12px 0 2px;padding:0 9px;font-size:var(--fs-xs);line-height:14px;font-weight:var(--fw-medium);color:var(--tx-4);user-select:none;-webkit-user-select:none}
+.st-nav-count{margin-left:auto;min-width:18px;padding:0 5px;border-radius:var(--r-pill);background:var(--ink-2);color:var(--tx-2);font-size:var(--fs-xs);line-height:18px;font-weight:var(--fw-medium);text-align:center}
+.st-navbtn.on .st-nav-count{background:var(--ink-3);color:var(--tx)}
 .st-done{margin-top:auto;width:auto;flex:none;color:var(--tx-3)}
 .st-done svg{transform:rotate(180deg)}
 .st-done:hover{color:var(--tx)}
@@ -72,9 +76,6 @@ body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-main{visibility:hi
 .st-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
 .st-heading h2{font-size:22px;line-height:28px;font-weight:var(--fw-medium);letter-spacing:-.015em;color:var(--tx)}
 .st-heading p{margin-top:4px;font-size:var(--fs-md);line-height:18px;color:var(--tx-3);text-wrap:pretty}
-#store-screen .pm-select.st-kind{height:30px;flex:none;padding:0 28px 0 10px;border:0;border-radius:var(--r-md);background:var(--bg-float);box-shadow:none;color:var(--tx-2);font-size:var(--fs-sm);font-weight:var(--fw-medium)}
-#store-screen .pm-select.st-kind:hover,#store-screen .pm-select.st-kind[aria-expanded="true"]{background:var(--bg-row-hi);color:var(--tx)}
-#store-screen .pm-select.st-kind:focus-visible{box-shadow:none}
 
 /* ── artwork ── */
 /* Stand-ins until the registry ships preview renders: two hues per extension. */
@@ -126,28 +127,39 @@ body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-main{visibility:hi
 .st-row-copy{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
 .st-row-copy b{font-size:var(--fs-md);line-height:18px;font-weight:var(--fw-medium);color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .st-row-line{font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.st-row-by{font-size:var(--fs-xs);line-height:14px;color:var(--tx-4)}
+/* The maker sits right after the name, so a row reads "Glass blur by mara"
+   before its one line. */
+.st-row-by{margin-left:4px;font-size:var(--fs-sm);font-weight:var(--fw-regular);color:var(--tx-4)}
 .st-install{flex:none;min-width:68px;border-radius:var(--r-pill)}
 .st-installed{flex:none;min-width:68px;text-align:center;font-size:var(--fs-sm);font-weight:var(--fw-medium);color:var(--tx-4)}
 
-/* ── installed (hosted Settings › Extensions control) ── */
-.st-installed-host{width:auto;margin:-8px 0 0}
-.st-installed-host .settings-extension-root{gap:32px}
-.st-installed-host .settings-section-heading>b{display:none}
+/* ── library ── */
+/* One column of rows; a third line says what's up (an update, setup, or the
+   store's numbers for something you published). */
+.st-list{display:flex;flex-direction:column;gap:2px;margin:0 -10px}
+.st-row.is-library{min-height:64px}
+.st-row-status{margin-top:2px;font-size:var(--fs-xs);line-height:14px;color:var(--tx-4);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.st-row-status.is-hot{color:var(--tx-2)}
+.st-row.is-off .st-thumb{opacity:.55}
+.st-group-empty{padding:12px 2px 0;max-width:56ch;font-size:var(--fs-md);line-height:18px;color:var(--tx-4);text-wrap:pretty}
 
 /* ── detail ── */
 .st-back{align-self:flex-start;display:inline-flex;align-items:center;gap:2px;height:22px;margin:-4px 0 -28px -6px;padding:0 8px 0 3px;border:0;border-radius:var(--r-sm);color:var(--tx-3);font-size:var(--fs-sm);font-weight:var(--fw-medium);transition:color var(--dur-1),background var(--dur-1)}
 .st-back svg{width:12px;height:12px;transform:rotate(180deg)}
 .st-back:hover{color:var(--tx);background:var(--ink-1)}
-.st-detail-head{display:flex;align-items:flex-start;gap:20px}
-.st-detail-copy{flex:1;min-width:0;display:flex;flex-direction:column;padding-top:4px}
+.st-detail-head{display:flex;align-items:center;gap:20px}
+.st-detail-copy{flex:1;min-width:0;display:flex;flex-direction:column}
 .st-detail-title{display:flex;align-items:center;gap:9px}
 .st-detail-title h2{font-size:22px;line-height:28px;font-weight:var(--fw-medium);letter-spacing:-.015em;color:var(--tx)}
 .st-tag{flex:none;margin-top:2px;padding:0 5px;border-radius:var(--r-xs);background:var(--ink-1);color:var(--tx-3);font-size:var(--fs-xs);line-height:16px}
 .st-byline{margin-top:2px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-4)}
 .st-lede{margin-top:2px;font-size:var(--fs-md);line-height:18px;color:var(--tx-2);text-wrap:pretty;max-width:64ch}
-.st-detail-actions{display:flex;gap:6px;margin-top:14px}
+.st-detail-actions{flex:none;display:flex;align-items:center;gap:6px;align-self:center}
 .st-detail-actions .btn{height:32px;padding:0 14px;border-radius:var(--r-pill)}
+.st-detail-actions .btn.is-quiet{color:var(--tx-3)}
+.st-update-note{margin:-24px 0 -8px;max-width:64ch;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);text-wrap:pretty}
+.st-lineage-sep{margin:0 6px;color:var(--tx-4)}
+.st-link.is-quiet{font-weight:var(--fw-regular);color:var(--tx-3)}
 .st-about{margin-top:-8px;max-width:68ch;font-size:var(--fs-md);line-height:20px;color:var(--tx-2);text-wrap:pretty}
 .st-card{margin:0 -14px;display:flex;flex-direction:column;border-radius:var(--r-xl);background:var(--bg-panel);overflow:hidden}
 .st-kv{display:flex;align-items:baseline;gap:16px;min-height:44px;padding:12px 14px}

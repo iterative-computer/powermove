@@ -132,7 +132,7 @@ export function openAccountMenu(anchor: HTMLElement, onClose?: () => void): Popo
     header,
     side: 'top',
     items: [
-      { label: 'Your Extensions', run: () => PM?.StoreUI?.open?.('yours') },
+      { label: 'Your Library', run: () => PM?.StoreUI?.open?.('library') },
       { label: 'Account Settings…', run: () => PM?.SettingsUI?.open?.('accounts') },
       '-',
       { label: 'Sign Out', run: signOut }

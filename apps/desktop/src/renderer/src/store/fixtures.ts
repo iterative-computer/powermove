@@ -26,6 +26,23 @@ export type StoreListing = {
   versions?: Array<{ version: string; date: string; note: string }>;
 };
 
+/** Where an extension on this Mac came from. */
+export type LibraryOrigin = 'store' | 'agent' | 'you' | 'builtin';
+
+/** An extension on this Mac, or one you published from another Mac. The
+ *  listing fields describe it as the store would; the rest is local state. */
+export type LibraryItem = StoreListing & {
+  origin: LibraryOrigin;
+  /** Version in the folder. Missing means it isn't on this Mac. */
+  installedVersion?: string;
+  /** A store install whose required vars aren't set yet. Stays off until then. */
+  needsSetup?: boolean;
+  /** You changed the files since installing, so an update merges. */
+  modified?: boolean;
+  /** Set once you have published it under your handle. */
+  published?: { version: string; installs: number; forks: number };
+};
+
 export const KIND_LABEL: Record<StoreKind, string> = {
   effects: 'Effect',
   transitions: 'Transition',
@@ -43,6 +60,17 @@ export const KIND_PLURAL: Record<StoreKind, string> = {
   commands: 'Commands',
   layers: 'Layers'
 };
+
+export const KIND_ICON: Record<StoreKind, string> = {
+  effects: 'wand',
+  transitions: 'film',
+  panels: 'panel',
+  themes: 'sun',
+  commands: 'return',
+  layers: 'layers'
+};
+
+export const KINDS = Object.keys(KIND_PLURAL) as StoreKind[];
 
 export const FEATURED: StoreListing[] = [
   {
@@ -77,17 +105,21 @@ export const PICKS: StoreListing[] = [
   { publisher: 'mara', id: 'bento', name: 'Bento', kind: 'panels', version: '0.6.0', updated: 'Sep 18',
     tagline: 'Lay out layers on a grid and animate between arrangements.', art: ['oklch(55% .09 140)', 'oklch(78% .07 110)'] },
   { publisher: 'ines', id: 'paper', name: 'Paper', kind: 'themes', version: '1.2.0', updated: 'Sep 16', installed: true,
-    tagline: 'A warm light theme with ink-on-paper contrast.', art: ['oklch(90% .02 80)', 'oklch(75% .04 60)'] },
+    tagline: 'A warm light theme with ink-on-paper contrast.', art: ['oklch(90% .02 80)', 'oklch(75% .04 60)'],
+    versions: [
+      { version: '1.2.0', date: 'Sep 16', note: 'Selection and focus rings warmed to match the paper.' },
+      { version: '1.1.0', date: 'Aug 28', note: 'Dark paper variant.' }
+    ] },
   { publisher: 'theo', id: 'shake', name: 'Shake', kind: 'effects', version: '3.0.0', updated: 'Sep 15',
     tagline: 'Handheld camera shake with a real sensor-motion profile.', art: ['oklch(48% .1 20)', 'oklch(66% .08 0)'] },
-  { publisher: 'kai', id: 'lower-thirds', name: 'Lower thirds', kind: 'layers', version: '1.1.0', updated: 'Sep 12',
+  { publisher: 'kai', id: 'lower-thirds', name: 'Lower thirds', kind: 'layers', version: '1.1.0', updated: 'Sep 12', installed: true,
     tagline: 'Name plates that fit the composition and time themselves.', art: ['oklch(52% .1 230)', 'oklch(74% .08 200)'] }
 ];
 
 export const NEW: StoreListing[] = [
   { publisher: 'ana', id: 'wipe-set', name: 'Wipe set', kind: 'transitions', version: '0.3.0', updated: 'Today',
     tagline: 'Twelve wipes with a shared feather and angle.', art: ['oklch(60% .1 100)', 'oklch(80% .06 90)'] },
-  { publisher: 'kai', id: 'color-match', name: 'Colour match', kind: 'commands', version: '0.1.2', updated: 'Yesterday',
+  { publisher: 'kai', id: 'color-match', name: 'Colour match', kind: 'commands', version: '0.1.2', updated: 'Yesterday', installed: true,
     tagline: 'Pull a palette from one layer onto another.', art: ['oklch(55% .14 10)', 'oklch(72% .12 280)'],
     about: 'Reads the dominant colours of one layer and maps them onto another, keeping luminance. Uses a hosted model for the mapping, so it needs a key.',
     vars: [
@@ -103,12 +135,53 @@ export const NEW: StoreListing[] = [
 
 export const ALL: StoreListing[] = [...FEATURED, ...PICKS, ...NEW];
 
-export const INSTALLED: StoreListing[] = [
-  PICKS.find((l) => l.id === 'paper')!,
+/* Everything on this Mac, plus what you have published from elsewhere. One
+   list, grouped by origin on the Library page. */
+export const LIBRARY: LibraryItem[] = [
+  /* From the store: who made it is the second line; updates replace or merge. */
+  { ...PICKS.find((l) => l.id === 'paper')!, origin: 'store', installedVersion: '1.1.0' },
+  { ...NEW.find((l) => l.id === 'color-match')!, origin: 'store', installedVersion: '0.1.2', needsSetup: true },
+  { ...PICKS.find((l) => l.id === 'lower-thirds')!, origin: 'store', installedVersion: '1.0.2', modified: true },
+  /* Yours: made here with the agent; one is published under your handle, one
+     was published from another Mac and isn't here. */
   { publisher: 'you', id: 'ease-lab', name: 'Ease lab', kind: 'panels', version: '0.2.0', updated: 'Sep 20',
-    tagline: 'Compare easing curves side by side. Made with your agent.', installed: true, art: ['oklch(50% .08 170)', 'oklch(70% .06 190)'] }
+    tagline: 'Compare easing curves side by side.', installed: true, origin: 'agent', installedVersion: '0.2.0',
+    art: ['oklch(50% .08 170)', 'oklch(70% .06 190)'],
+    files: ['manifest.json', 'index.ts', 'EaseLab.svelte', 'curves.ts'] },
+  { publisher: 'you', id: 'timeline-mini', name: 'Timeline mini', kind: 'panels', version: '1.0.0', updated: 'Sep 19',
+    tagline: 'The built-in timeline, cut down to one strip.', installed: true, origin: 'agent', installedVersion: '1.0.0',
+    forkedFrom: 'powermove/timeline@1.0.0', art: ['oklch(35% .03 260)', 'oklch(55% .05 240)'],
+    published: { version: '1.0.0', installs: 128, forks: 3 },
+    about: 'Your cut of the built-in timeline: one track strip, no keyframe lanes, for when the composition is simple and the panel should be small.',
+    files: ['manifest.json', 'timeline.ts', 'Strip.svelte', 'ruler.ts'] },
+  { publisher: 'you', id: 'grain-lite', name: 'Grain lite', kind: 'effects', version: '0.3.1', updated: 'Sep 8',
+    tagline: 'Film grain without the halation, for fast previews.', origin: 'you',
+    forkedFrom: 'noor/film-grain@2.0.0', art: ['oklch(40% .05 60)', 'oklch(65% .09 40)'],
+    published: { version: '0.3.1', installs: 41, forks: 0 } }
 ];
+
+export const BUILTINS: LibraryItem[] = ([
+  ['timeline', 'Timeline', 'panels', 'Tracks, keyframes and the playhead.'],
+  ['inspector', 'Inspector', 'panels', 'Properties for whatever is selected.'],
+  ['viewer', 'Viewer', 'panels', 'The composition, played back.'],
+  ['effects', 'Effects', 'effects', 'Blur, colour, distort and the rest.'],
+  ['transitions', 'Transitions', 'transitions', 'Cuts, dissolves and wipes.'],
+  ['default-theme', 'Default theme', 'themes', 'Powermove’s own appearance.']
+] as const).map(([id, name, kind, tagline]) => ({
+  publisher: 'powermove', id, name, kind, tagline, version: '1.0.0', updated: 'Sep 14',
+  installed: true, origin: 'builtin' as const, installedVersion: '1.0.0',
+  art: ['oklch(45% .03 250)', 'oklch(62% .04 240)'] as [string, string]
+}));
 
 export function coordinate(l: StoreListing): string {
   return `${l.publisher}/${l.id}`;
+}
+
+/** The Library item that corresponds to a listing, if it is on this Mac. */
+export function libraryItemFor(l: StoreListing): LibraryItem | undefined {
+  return LIBRARY.find((item) => item.origin === 'store' && coordinate(item) === coordinate(l));
+}
+
+export function hasUpdate(item: LibraryItem): boolean {
+  return !!item.installedVersion && item.installedVersion !== item.version;
 }
