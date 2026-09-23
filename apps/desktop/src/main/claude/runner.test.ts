@@ -120,7 +120,7 @@ describe('Claude runner', () => {
     expect(result).toEqual({ ok: true, text: '{"message":"hello"}', access: 'editor' });
     expect(spawnProcess).toHaveBeenCalledWith(
       '/bin/claude',
-      expect.arrayContaining(['--print', '--output-format', 'stream-json', '--safe-mode']),
+      expect.arrayContaining(['--print', '--output-format', 'stream-json', '--strict-mcp-config']),
       expect.objectContaining({ detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
     );
     const argv = (spawnProcess.mock.calls[0] as unknown as [string, string[]])[1];

@@ -54,7 +54,6 @@ export function buildClaudeArgv(options: ClaudeArgvOptions): string[] {
     '--output-format', 'stream-json',
     '--include-partial-messages',
     '--verbose',
-    '--safe-mode',
     '--setting-sources', '',
     '--strict-mcp-config',
     '--mcp-config', mcpConfig,
