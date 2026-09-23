@@ -13,13 +13,17 @@ npx powermove-cli@latest serve
 Keep it running on a box:
 
 ```sh
-npx powermove-cli@latest install   # installs globally, registers a service (systemd on Linux, launchd on macOS)
+npx powermove-cli@latest install   # copies the host under ~/.powermove and registers a service (systemd on Linux, launchd on macOS)
 powermove status                   # running? and the address to open
 powermove logs                     # the host log
 powermove uninstall
 ```
 
+No `sudo`: everything lands in your home folder and the service runs as you. Run `install` again to update. The `powermove` command is placed in `~/.local/bin` when that folder exists; otherwise use `npx powermove-cli <command>`.
+
 On Linux, `loginctl enable-linger $USER` keeps the service up while you are logged out.
+
+A browser tab that loses its connection to the host (Wi-Fi blip, closed lid, phone changing networks) reconnects on its own; edits made in the meantime are sent when it is back, and a running agent turn is picked up where its stream left off.
 
 Open the printed URL. Over [Tailscale](https://tailscale.com), use the `100.x` address; on a LAN, the local IP. The URL carries a one-time token that the browser remembers.
 

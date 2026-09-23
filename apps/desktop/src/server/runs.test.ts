@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { IPC } from '../shared/ipc';
+import { WEB } from '../shared/wire';
 import { RunHub, RunOwner, DISPLAY_TOOLS } from './runs';
 import type { RemoteClient } from './clients';
 
@@ -26,6 +27,24 @@ function harness(engine: RemoteClient | null, tabs: RemoteClient[]) {
 const request = { id: 'run-1', projectId: 'p1', mode: 'autonomous', prompt: 'do it' };
 
 describe('RunOwner', () => {
+  it('replays only what a resuming tab missed, and everything to a fresh one', () => {
+    const tab = fakeClient(1);
+    const { hub } = harness(null, [tab]);
+    const owner = hub.begin(request, tab);
+    for (const text of ['one', 'two', 'three']) owner.send(IPC.codexEvent, { id: 'run-1', kind: 'progress', text });
+    tab.destroy();
+    const resumed = fakeClient(2);
+    owner.attach(resumed, { since: 2 });
+    expect(resumed.sent.map((entry) => (entry[1] as { text: string }).text)).toEqual(['three']);
+    const fresh = fakeClient(3);
+    owner.attach(fresh, true);
+    expect(fresh.sent.map((entry) => (entry[1] as { text: string }).text)).toEqual(['one', 'two', 'three']);
+    hub.finish('run-1', { ok: true, text: 'done' } as never);
+    const late = fakeClient(4);
+    owner.attach(late, { since: 3 });
+    expect(late.sent.map((entry) => entry[0])).toEqual([WEB.runFinished]);
+  });
+
   it('buffers events, forwards them to attached tabs, and survives the tab', () => {
     const tab = fakeClient(1);
     const { hub } = harness(null, [tab]);

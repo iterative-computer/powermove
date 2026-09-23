@@ -152,7 +152,7 @@ export async function status(spec: ServiceSpec, log: (line: string) => void): Pr
   try {
     const response = await fetch('https://registry.npmjs.org/powermove-cli/latest', { signal: AbortSignal.timeout(5000) });
     const latest = ((await response.json()) as { version?: string }).version;
-    if (latest) log(`latest on npm: ${latest}${spec.version && latest !== spec.version ? `  (this install: ${spec.version}; update with npm i -g powermove-cli@latest)` : ''}`);
+    if (latest) log(`latest on npm: ${latest}${spec.version && latest !== spec.version ? `  (this install: ${spec.version}; update with npx powermove-cli@latest install)` : ''}`);
   } catch { /* offline */ }
 }
 

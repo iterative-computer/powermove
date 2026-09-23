@@ -4,6 +4,7 @@
  */
 import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
@@ -15,21 +16,58 @@ import { promisify } from 'node:util';
 
 const run = promisify(execFile);
 
-/** A service must point at a durable install, not an npx cache: install globally first when needed. */
-async function durableEntry(entry: string, log: (line: string) => void): Promise<string> {
-  if (detectInstallKind(entry) !== 'npx') return entry;
-  log(`installing ${PACKAGE} globally so the service has a fixed path…`);
-  await run('npm', ['install', '-g', `${PACKAGE}@latest`], { maxBuffer: 16 * 1024 * 1024 });
-  const { stdout } = await run('npm', ['root', '-g']);
-  const installed = path.join(stdout.trim(), PACKAGE, 'bin', 'powermove.mjs');
-  if (!existsSync(installed)) throw new Error(`Global install did not land at ${installed}.`);
-  // The `powermove` command only exists if npm's global bin dir is on PATH.
-  const onPath = await run('sh', ['-c', 'command -v powermove']).then(() => true, () => false);
-  if (!onPath) {
-    const { stdout: prefix } = await run('npm', ['prefix', '-g']);
-    log(`note: \`powermove\` is not on your PATH. Add ${path.join(prefix.trim(), 'bin')} to PATH, or use \`npx ${PACKAGE} <command>\`.`);
+/** Where `install` keeps its own copy of the package: inside the profile, owned by the user. */
+export function managedPrefix(userData: string): string { return path.join(userData, 'host'); }
+export function managedEntry(userData: string): string { return path.join(managedPrefix(userData), 'node_modules', PACKAGE, 'bin', 'powermove.mjs'); }
+
+const NETWORK_ERROR = /ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|network|socket hang up/i;
+
+/**
+ * A service must point at a durable install, not an npx cache. The copy goes
+ * under the profile directory rather than npm's global prefix: that needs no
+ * root (so nobody reaches for sudo, which would register the service in
+ * root's account), and `install` again later is the update.
+ */
+async function durableEntry(entry: string, userData: string, log: (line: string) => void): Promise<string> {
+  const kind = detectInstallKind(entry, managedPrefix(userData));
+  if (kind === 'global' || kind === 'source' || kind === 'managed') return entry;
+  const prefix = managedPrefix(userData);
+  log(`installing ${PACKAGE} into ${prefix} so the service has a fixed path (no root needed)…`);
+  await mkdir(prefix, { recursive: true });
+  // The agent runtimes make this a large download; give slow links time and retries.
+  const flags = ['--no-fund', '--no-audit', '--loglevel', 'error', '--fetch-retries', '5', '--fetch-retry-maxtimeout', '120000', '--fetch-timeout', '600000'];
+  try {
+    await run('npm', ['install', '--prefix', prefix, ...flags, `${PACKAGE}@latest`], { maxBuffer: 16 * 1024 * 1024, timeout: 30 * 60 * 1000 });
+  } catch (error) {
+    const detail = error instanceof Error ? `${error.message}\n${(error as { stderr?: string }).stderr ?? ''}` : String(error);
+    if (NETWORK_ERROR.test(detail)) throw new Error(`npm could not download ${PACKAGE} (network timeout). Nothing was changed; check the connection or proxy and run the same command again.\n\n${detail.trim()}`);
+    throw error;
   }
+  const installed = managedEntry(userData);
+  if (!existsSync(installed)) throw new Error(`Install did not land at ${installed}.`);
+  await installShim(installed, log);
   return installed;
+}
+
+/** A `powermove` command on PATH when ~/.local/bin exists; otherwise the npx form works. */
+async function installShim(entry: string, log: (line: string) => void): Promise<void> {
+  const binDir = path.join(homedir(), '.local', 'bin');
+  const shim = path.join(binDir, 'powermove');
+  if (!existsSync(binDir)) { log(`tip: use \`npx ${PACKAGE} status|logs|uninstall\` for the other commands.`); return; }
+  try {
+    await writeFile(shim, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(entry)} "$@"\n`, { mode: 0o755 });
+    const onPath = await run('sh', ['-c', 'command -v powermove']).then(() => true, () => false);
+    log(onPath ? `\`powermove\` command installed (${shim}).` : `\`powermove\` command written to ${shim}; add ${binDir} to PATH to use it, or use \`npx ${PACKAGE} <command>\`.`);
+  } catch (error) {
+    log(`note: could not write ${shim} (${error instanceof Error ? error.message : String(error)}); use \`npx ${PACKAGE} <command>\`.`);
+  }
+}
+
+/** Under sudo the profile and the service would land in root's account, not the user's. */
+function refuseSudo(command: string): void {
+  if (process.getuid?.() !== 0 || !process.env['SUDO_USER']) return;
+  console.error(`Run \`powermove ${command}\` without sudo. Powermove installs into your home folder (~/.powermove) and registers a per-user service; root is not needed, and under sudo everything would land in root's account.`);
+  process.exit(2);
 }
 
 const require = createRequire(import.meta.url);
@@ -45,8 +83,9 @@ export interface CliLayout {
 const HELP = `powermove — run the Powermove host on this machine and use it from a browser.
 
 Usage:
-  powermove serve [options]      Run the host in this terminal (try it: npx powermove@latest serve)
-  powermove install [options]    Keep it running as a user service (systemd on Linux, launchd on macOS)
+  powermove serve [options]      Run the host in this terminal (try it: npx powermove-cli@latest serve)
+  powermove install [options]    Keep it running as a user service (systemd on Linux, launchd on macOS).
+                                 No sudo: it installs under ~/.powermove. Run it again to update.
   powermove uninstall            Stop and remove the service
   powermove status               Is the service running, and at which address
   powermove logs [-n 200]        Tail the service log
@@ -143,6 +182,7 @@ export async function main(argv: string[], layout: CliLayout): Promise<void> {
   if (parsed.help || parsed.command === 'help') { process.stdout.write(HELP); return; }
   const userData = parsed.userData ?? process.env['POWERMOVE_USER_DATA'] ?? path.join(homedir(), '.powermove');
   if (parsed.command && parsed.command !== 'serve') {
+    refuseSudo(parsed.command);
     const flags: string[] = [];
     if (parsed.port !== undefined) flags.push('--port', String(parsed.port));
     if (parsed.host) flags.push('--host', parsed.host);
@@ -155,7 +195,7 @@ export async function main(argv: string[], layout: CliLayout): Promise<void> {
       switch (parsed.command) {
         case 'install':
           if (parsed.dryRun) { console.log(`# ${unitPath(spec)}\n${unitText(spec)}`); return; }
-          await install({ ...spec, entry: await durableEntry(spec.entry, say) }, say); return;
+          await install({ ...spec, entry: await durableEntry(spec.entry, userData, say) }, say); return;
         case 'uninstall': await uninstall(spec, say); return;
         case 'status': await status(spec, say); return;
         case 'logs': await logs(spec, Number.isInteger(parsed.lines) ? parsed.lines! : 200, say); return;
@@ -179,7 +219,8 @@ export async function main(argv: string[], layout: CliLayout): Promise<void> {
     codexBinary: bundledCodexBinary(),
     claudeBinary: bundledClaudeBinary(),
     engineScript: existsSync(path.join(layout.distDir, 'engine', 'engine.mjs')) ? path.join(layout.distDir, 'engine', 'engine.mjs') : null,
-    installKind: detectInstallKind(layout.entry),
+    installKind: detectInstallKind(layout.entry, managedPrefix(userData)),
+    managedPrefix: managedPrefix(userData),
     ...(parsed.token ? { token: parsed.token } : {}),
     ...(parsed.insecure ? { insecure: true } : {})
   });

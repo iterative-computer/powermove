@@ -21,6 +21,24 @@ describe('updates', () => {
     expect(updateCommand('global')).toBe('npm i -g powermove-cli@latest');
   });
 
+  it('knows the copy `powermove install` keeps under the profile', () => {
+    expect(detectInstallKind('/home/me/.powermove/host/node_modules/powermove-cli/bin/powermove.mjs')).toBe('managed');
+    expect(detectInstallKind('/srv/pm/host/node_modules/powermove-cli/bin/powermove.mjs', '/srv/pm/host')).toBe('managed');
+    expect(detectInstallKind('/srv/pm/host/node_modules/powermove-cli/bin/powermove.mjs')).toBe('global');
+    expect(updateCommand('managed')).toBe('npx powermove-cli@latest install');
+  });
+
+  it('self-updates a managed install through its own prefix', async () => {
+    const selfUpdate = vi.fn(async () => undefined);
+    const exit = vi.fn();
+    const checker = new UpdateChecker({ current: '1.0.3', installKind: 'managed', managedPrefix: '/home/me/.powermove/host', fetchLatest: async () => '1.0.4', selfUpdate, exit });
+    await checker.check();
+    expect(await checker.install()).toEqual({ restarting: true });
+    expect(selfUpdate).toHaveBeenCalledTimes(1);
+    const handed = new UpdateChecker({ current: '1.0.3', installKind: 'managed', fetchLatest: async () => '1.0.4', selfUpdate, exit });
+    expect(await handed.install()).toEqual({ restarting: false, command: 'npx powermove-cli@latest install' });
+  });
+
   it('reports ready when the registry is ahead, idle otherwise', async () => {
     const states: string[] = [];
     const checker = new UpdateChecker({ current: '1.0.1', installKind: 'global', fetchLatest: async () => '1.0.2' });

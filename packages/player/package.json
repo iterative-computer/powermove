@@ -1,6 +1,6 @@
 {
   "name": "@powermove/player",
-  "license": "GPL-3.0-or-later",
+  "license": "AGPL-3.0-or-later",
   "version": "0.0.0",
   "private": true,
   "description": "Powermove web player and SVG adapter, bundled from the desktop app's player sources for browsers.",
