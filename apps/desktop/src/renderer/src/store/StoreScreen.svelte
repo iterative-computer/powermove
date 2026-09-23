@@ -168,7 +168,7 @@
 
   /* Your own extensions read under your handle once you have one. */
   function shownCoordinate(l: StoreListing): string {
-    return l.publisher === 'you' && account ? `${account.handle}/${l.id}` : coordinate(l);
+    return l.publisher === 'you' && account?.handle ? `${account.handle}/${l.id}` : coordinate(l);
   }
 
   /* The one trailing control a row gets, from its local state. */
@@ -297,7 +297,7 @@
               <section class="st-sec">
                 <h3 class="st-sec-title">Publish</h3>
                 <div class="st-card">
-                  <div class="st-kv"><span>Will publish as</span><b>{account ? `@${account.handle}/${l.id}` : 'Sign in to choose a handle'}</b></div>
+                  <div class="st-kv"><span>Will publish as</span><b>{account?.handle ? `@${account.handle}/${l.id}` : account ? 'Choose a handle to publish' : 'Sign in to choose a handle'}</b></div>
                   {#if l.forkedFrom}<div class="st-kv"><span>Forked from</span><b>{l.forkedFrom}</b></div>{/if}
                 </div>
                 <p class="st-note">Publishing puts the source on the store under your name. Setup values stay on this Mac.</p>
@@ -425,7 +425,7 @@
             <header class="st-heading">
               <div>
                 <h2>Library</h2>
-                <p>{account ? `Everything on this Mac, and what you’ve published as @${account.handle}.` : 'Everything on this Mac. Sign in to publish yours.'}</p>
+                <p>{account?.handle ? `Everything on this Mac, and what you’ve published as @${account.handle}.` : account ? 'Everything on this Mac.' : 'Everything on this Mac. Sign in to publish yours.'}</p>
               </div>
               {#if !account}
                 <button class="btn" type="button" onclick={() => openSignIn()}>Sign In…</button>

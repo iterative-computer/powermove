@@ -18,6 +18,7 @@ import { ReconnectingLink, isDisconnectError } from '../../../shared/reconnect';
 
 const WS_PATH = '/__powermove/ws';
 const VARS_UNAVAILABLE = 'Variables are not available in powermove serve yet';
+const CLOUD_UNAVAILABLE = 'Sign in is not available in powermove serve yet';
 
 /** The live link, for modules that attach after the engines boot (remote-sync). It outlives any one socket. */
 let activeLink: ReconnectingLink | null = null;
@@ -439,6 +440,21 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
       delete: () => Promise.reject(new Error(VARS_UNAVAILABLE)),
       reveal: () => Promise.reject(new Error(VARS_UNAVAILABLE)),
       values: () => Promise.reject(new Error(VARS_UNAVAILABLE))
+    },
+
+    /* The session lives in the Mac's keychain-backed store; the served host
+       has no sign-in flow yet. Nobody is signed in here. */
+    cloud: {
+      account: async () => ({ me: null }),
+      signInSocial: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
+      emailSend: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
+      emailVerify: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
+      claimHandle: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
+      setRememberInstalls: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
+      signOut: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
+      deleteAccount: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
+      onAccountChanged: () => () => {},
+      onSignInFailed: () => () => {}
     }
   };
 

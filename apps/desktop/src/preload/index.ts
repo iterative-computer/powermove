@@ -30,6 +30,20 @@ import {
   type ExtensionsChangedEvent
 } from '../shared/extensions';
 import { VARS_IPC, type VarsStatus } from '../shared/vars-ipc';
+import { CLOUD_IPC, type CloudChannel, type CloudChannels } from '../shared/cloud-ipc';
+
+/** One typed invoke for every `cloud:*` channel (store plan §2.7). */
+function cloudInvoke<C extends CloudChannel>(channel: C, request?: CloudChannels[C]['req']): Promise<CloudChannels[C]['res']> {
+  return ipcRenderer.invoke(channel, request);
+}
+
+function cloudEvent<T>(channel: string) {
+  return (cb: (payload: T) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, payload: T): void => cb(payload);
+    ipcRenderer.on(channel, listener);
+    return () => ipcRenderer.removeListener(channel, listener);
+  };
+}
 
 let nextMediaRequest = 0;
 const bridge: PowermoveBridge = {
@@ -315,6 +329,19 @@ const bridge: PowermoveBridge = {
     delete: (req) => ipcRenderer.invoke(VARS_IPC.delete, { id: req.id, key: req.key }) as Promise<VarsStatus>,
     reveal: (req) => ipcRenderer.invoke(VARS_IPC.reveal, { id: req.id, key: req.key }) as Promise<void>,
     values: (req) => ipcRenderer.invoke(VARS_IPC.values, { id: req.id }) as Promise<Record<string, string>>
+  },
+
+  cloud: {
+    account: () => cloudInvoke(CLOUD_IPC.accountGet),
+    signInSocial: (req) => cloudInvoke(CLOUD_IPC.signInSocial, { provider: req.provider }),
+    emailSend: (req) => cloudInvoke(CLOUD_IPC.emailSend, { email: req.email }),
+    emailVerify: (req) => cloudInvoke(CLOUD_IPC.emailVerify, { email: req.email, otp: req.otp }),
+    claimHandle: (req) => cloudInvoke(CLOUD_IPC.claimHandle, { handle: req.handle }),
+    setRememberInstalls: (req) => cloudInvoke(CLOUD_IPC.setRememberInstalls, { value: req.value }),
+    signOut: () => cloudInvoke(CLOUD_IPC.signOut),
+    deleteAccount: () => cloudInvoke(CLOUD_IPC.deleteAccount),
+    onAccountChanged: cloudEvent(CLOUD_IPC.accountChanged),
+    onSignInFailed: cloudEvent(CLOUD_IPC.signInFailed)
   }
 };
 

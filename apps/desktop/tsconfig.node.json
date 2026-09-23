@@ -11,8 +11,13 @@
     "tsBuildInfoFile": "./node_modules/.tsconfig.node.tsbuildinfo",
     "isolatedModules": true,
     "skipLibCheck": true,
-    "types": ["node", "electron-vite/node"]
+    "types": ["node", "electron-vite/node"],
+    /* The cloud's route types, emitted by `apps/cloud` (`bun run types:emit`,
+       also run by this package's `typecheck`). Type-only: main never imports
+       cloud runtime code, only `import type { AppType }` for `hc<AppType>`. */
+    "paths": { "@powermove/cloud-types": ["../cloud/dist/types/index.d.ts"] }
   },
+  "references": [{ "path": "../cloud/tsconfig.types.json" }],
   "include": [
     "electron.vite.config.ts",
     "scripts/player-bundle.ts",

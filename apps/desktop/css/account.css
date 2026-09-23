@@ -105,10 +105,12 @@
 .acct-form .settings-input::placeholder{color:var(--tx-4)}
 .acct-handle-status{transition:color var(--dur-2)}
 .acct-handle-status[data-state="available"]{color:var(--success)}
-.acct-handle-status[data-state="taken"]{color:var(--danger)}
+.acct-handle-status[data-state="error"]{color:var(--danger)}
 .acct-coord{margin-top:10px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3)}
 .acct-coord code{font:var(--fs-sm)/16px var(--f-mono);color:var(--tx-2)}
 .acct-form .acct-submit{margin-top:20px}
+.account-modal .btn.acct-later{width:100%;height:32px;margin-top:6px}
+.acct-email .acct-status{margin:0 2px}
 .acct-legal{margin-top:12px;font-size:var(--fs-xs);line-height:15px;color:var(--tx-4);text-wrap:pretty}
 .acct-legal .acct-link{color:var(--tx-3);font-weight:var(--fw-regular)}
 
@@ -116,6 +118,8 @@
 .acct-profile{gap:12px}
 .acct-profile .settings-copy{padding-left:0}
 .acct-profile>.acct-avatar{margin-left:4px}
+/* Destructive, but quiet until you reach for it. */
+.btn.acct-delete:not(:disabled):is(:hover,:focus-visible){color:var(--danger)}
 
 .account-modal button,.acct-sheet label{cursor:default}
 .acct-sheet :is(.btn,.acct-link,.acct-back,.acct-code),.acct-row{user-select:none;-webkit-user-select:none}

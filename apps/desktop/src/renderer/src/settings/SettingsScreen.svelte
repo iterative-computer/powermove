@@ -9,7 +9,7 @@
   import { mountNavGlide } from '../controls/nav-glide';
   import { clearSettingsSearch, searchSettings } from './search';
   import Avatar from '../cloud/Avatar.svelte';
-  import { openSignIn, signOut, subscribeAccount, type CloudUser } from '../cloud/account';
+  import { applyAccount, cloudBridge, openSignIn, signOut, subscribeAccount, type CloudUser } from '../cloud/account';
 
   export type SettingsPage = 'general' | 'accounts' | 'extensions' | 'project';
 
@@ -72,8 +72,13 @@
   let matchCount = $state(0);
   let lastFocus: HTMLElement | null = null;
   let account = $state<CloudUser | null>(null);
+  let rememberInstalls = $state(true);
+  let accountBusy = $state(false);
 
-  $effect(() => subscribeAccount((user) => { account = user; }));
+  $effect(() => subscribeAccount((user, me) => {
+    account = user;
+    rememberInstalls = me?.settings.rememberInstalls ?? true;
+  }));
 
   const hasProject = $derived(!!controls?.project);
   const groups = $derived(NAV
@@ -265,6 +270,43 @@
     PM.theme?.apply?.(value);
   }
 
+  /* Account actions run in main; failures come back as results, never throws. */
+  async function toggleRememberInstalls(): Promise<void> {
+    const bridge = cloudBridge();
+    if (!bridge || accountBusy) return;
+    const next = !rememberInstalls;
+    rememberInstalls = next;
+    accountBusy = true;
+    try {
+      const result = await bridge.setRememberInstalls({ value: next });
+      if (result.ok) applyAccount(result.value);
+      else throw new Error(result.error.error);
+    } catch {
+      rememberInstalls = !next;
+      PM.toast?.('Unable to change this setting. Check your connection and try again.', 4000, { error: true });
+    } finally {
+      accountBusy = false;
+    }
+  }
+
+  async function deleteAccount(): Promise<void> {
+    const bridge = cloudBridge();
+    if (!bridge || accountBusy) return;
+    accountBusy = true;
+    try {
+      const result = await bridge.deleteAccount();
+      if (!result.ok) throw new Error(result.error.error);
+      if (result.value.deleted) {
+        applyAccount(null);
+        PM.toast?.('Your account was deleted.', 3000, { kind: 'status' });
+      }
+    } catch {
+      PM.toast?.('Unable to delete your account. Check your connection and try again.', 5000, { error: true });
+    } finally {
+      accountBusy = false;
+    }
+  }
+
   function toggleRestoreWindows(): void {
     restoreWindows = !restoreWindows;
     PM.store?.set?.('restoreWindows', restoreWindows);
@@ -434,9 +476,34 @@
                       <Avatar user={account} size={32} />
                       <div class="settings-copy">
                         <b>{account.name}</b>
-                        <span>@{account.handle} · {account.email}</span>
+                        <span>{account.handle ? `@${account.handle} · ${account.email}` : account.email}</span>
                       </div>
-                      <button class="btn" type="button" onclick={signOut}>Sign Out</button>
+                      {#if !account.handle}
+                        <button class="btn" type="button" onclick={() => openSignIn()}>Choose Handle…</button>
+                      {/if}
+                      <button class="btn" type="button" onclick={() => void signOut()}>Sign Out</button>
+                    </div>
+                    <div class="settings-row">
+                      <div class="settings-copy">
+                        <b>Remember installs on this account</b>
+                        <span>Keep a list of the extensions you install from the Store. Turning this off deletes the list.</span>
+                      </div>
+                      <button
+                        class="toggle"
+                        class:on={rememberInstalls}
+                        type="button"
+                        aria-pressed={rememberInstalls}
+                        aria-label="Remember installs on this account"
+                        disabled={accountBusy}
+                        onclick={() => void toggleRememberInstalls()}
+                      ><i aria-hidden="true"></i></button>
+                    </div>
+                    <div class="settings-row">
+                      <div class="settings-copy">
+                        <b>Delete account</b>
+                        <span>Your published extensions stay on the Store under your handle.</span>
+                      </div>
+                      <button class="btn acct-delete" type="button" disabled={accountBusy} onclick={() => void deleteAccount()}>Delete Account…</button>
                     </div>
                   {:else}
                     <div class="settings-row">

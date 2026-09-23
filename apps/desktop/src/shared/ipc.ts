@@ -704,6 +704,9 @@ export interface PowermoveBridge {
 
   /** Values the user entered for extensions that declare `vars`. */
   vars: import('./vars-ipc').VarsBridge;
+
+  /** The Powermove Cloud account: sign in, handle, sign out. */
+  cloud: import('./cloud-ipc').CloudBridge;
 }
 
 export type CloudFileState = 'local' | 'icloud' | 'cloud' | 'missing' | 'unknown';

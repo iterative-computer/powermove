@@ -1,72 +1,107 @@
-/* The Powermove Cloud account. Design pass: signing in is simulated and the
-   signed-in user is a local record in PM.store; nothing talks to a server.
-   One subscribe/notify pair drives every place that shows who you are: the
-   home sidebar, Settings › Accounts and the Store's Yours page. */
+/* The Powermove Cloud account, as the renderer sees it. Main owns the session
+   (src/main/cloud); this module mirrors who is signed in through the
+   `cloud:*` bridge and never sees a token. One subscribe/notify pair drives
+   every place that shows who you are: the home sidebar, Settings › Accounts
+   and the Store's Yours page. */
 import { flushSync, mount, unmount } from 'svelte';
+import type { MeDto } from '@powermove/registry/wire';
 
 import type { PMRegistry } from '../legacy/registry';
+import type { CloudBridge, CloudProvider } from '../../../shared/cloud-ipc';
 import { openPopoverMenu, type PopoverMenuHandle } from '../controls/popover-menu';
 import Avatar from './Avatar.svelte';
 import SignInSheet from './SignInSheet.svelte';
 
-export type AccountProvider = 'apple' | 'google' | 'github' | 'email';
+export type AccountProvider = CloudProvider;
 
+/** Who is signed in, derived from `MeDto`. */
 export type CloudUser = {
   name: string;
-  /** Publisher namespace: extensions publish as `handle/id`. */
-  handle: string;
+  /** Publisher namespace: extensions publish as `handle/id`. Null until claimed. */
+  handle: string | null;
   email: string;
-  provider: AccountProvider;
+  image: string | null;
 };
 
 export type SignInMode = 'sign-in' | 'sign-up';
 
-type Listener = (user: CloudUser | null) => void;
+type Listener = (user: CloudUser | null, me: MeDto | null) => void;
 
-const STORE_KEY = 'cloudAccount';
+/* The design pass kept a simulated user under this store key. Real sessions
+   live in main; the old record is cleared on launch. */
+const LEGACY_STORE_KEY = 'cloudAccount';
 
 export const PROVIDER_LABEL: Record<AccountProvider, string> = {
-  apple: 'Apple',
   google: 'Google',
   github: 'GitHub',
   email: 'email'
 };
 
 let registry: PMRegistry | null = null;
+let bridge: CloudBridge | null = null;
+let me: MeDto | null = null;
 let user: CloudUser | null = null;
+let provider: AccountProvider | undefined;
 let sheet: { close(): void } | null = null;
+let offChanged: (() => void) | null = null;
 const listeners = new Set<Listener>();
 
-function notify(): void {
-  for (const listener of listeners) listener(user);
+/** A display name even when the provider gave none: the email's local part. */
+export function userFromMe(value: MeDto): CloudUser {
+  const name = value.user.name?.trim() || value.user.email.split('@')[0] || value.user.email;
+  return { name, handle: value.publisher?.handle ?? null, email: value.user.email, image: value.user.image };
 }
 
-function valid(value: unknown): value is CloudUser {
-  const v = value as Partial<CloudUser> | null;
-  return !!v && typeof v.name === 'string' && typeof v.handle === 'string' && typeof v.email === 'string';
+function notify(): void {
+  for (const listener of listeners) listener(user, me);
+}
+
+function setMe(next: MeDto | null): void {
+  me = next;
+  user = next ? userFromMe(next) : null;
+  if (!next) provider = undefined;
+  notify();
 }
 
 export function currentUser(): CloudUser | null {
   return user;
 }
 
+export function currentMe(): MeDto | null {
+  return me;
+}
+
+export function currentProvider(): AccountProvider | undefined {
+  return provider;
+}
+
+/** The bridge, or null outside Electron and before install. */
+export function cloudBridge(): CloudBridge | null {
+  return bridge;
+}
+
 /** Calls back now with the current user, then on every change. */
 export function subscribeAccount(listener: Listener): () => void {
   listeners.add(listener);
-  listener(user);
+  listener(user, me);
   return () => listeners.delete(listener);
 }
 
-export function completeSignIn(next: CloudUser): void {
-  user = next;
-  registry?.store?.set?.(STORE_KEY, next);
-  notify();
+/** Apply an account main just returned (verify, claim, settings), ahead of the broadcast. */
+export function applyAccount(next: MeDto | null): void {
+  setMe(next);
 }
 
-export function signOut(): void {
-  user = null;
-  registry?.store?.set?.(STORE_KEY, null);
-  notify();
+export async function signOut(): Promise<void> {
+  const PM = registry as any;
+  if (!bridge) return;
+  try {
+    const result = await bridge.signOut();
+    if (!result.ok) PM?.toast?.('Unable to sign out. Try again.', 4000, { error: true });
+    else setMe(null);
+  } catch {
+    PM?.toast?.('Unable to sign out. Try again.', 4000, { error: true });
+  }
 }
 
 export function initials(name: string): string {
@@ -77,10 +112,12 @@ export function initials(name: string): string {
   return (first + last).toUpperCase();
 }
 
-/** The sign-in and sign-up sheet. One at a time; asking again focuses it. */
+/** The sign-in sheet. One at a time. Signed in without a handle, it opens on
+    the handle step so an interrupted sign-up can finish. */
 export function openSignIn(mode: SignInMode = 'sign-in'): void {
   const PM = registry as any;
-  if (!PM?.modal || sheet) return;
+  if (!PM?.modal || sheet || !bridge) return;
+  if (me?.publisher) return;
   const body = document.createElement('div');
   let component: ReturnType<typeof mount> | null = null;
   const handle = PM.modal({
@@ -100,11 +137,9 @@ export function openSignIn(mode: SignInMode = 'sign-in'): void {
     props: {
       PM,
       mode,
-      onsignedin: (next: CloudUser) => {
-        completeSignIn(next);
-        handle.close();
-      },
-      oncancel: () => handle.close()
+      bridge,
+      me,
+      onclose: () => handle.close()
     }
   });
   flushSync();
@@ -132,10 +167,11 @@ export function openAccountMenu(anchor: HTMLElement, onClose?: () => void): Popo
     header,
     side: 'top',
     items: [
+      ...(user.handle ? [] : [{ label: 'Choose Handle…', run: () => openSignIn() }]),
       { label: 'Your Library', run: () => PM?.StoreUI?.open?.('library') },
       { label: 'Account Settings…', run: () => PM?.SettingsUI?.open?.('accounts') },
       '-',
-      { label: 'Sign Out', run: signOut }
+      { label: 'Sign Out', run: () => void signOut() }
     ],
     onClose: () => {
       /* The menu fades out for a beat; the avatar leaves with it. */
@@ -147,13 +183,29 @@ export function openAccountMenu(anchor: HTMLElement, onClose?: () => void): Popo
 
 export function installCloudAccount(PM: PMRegistry): void {
   registry = PM;
-  const saved = (PM as any).store?.get?.(STORE_KEY, null);
-  user = valid(saved) ? saved : null;
+  const store = (PM as any).store;
+  if (store?.get?.(LEGACY_STORE_KEY, null) != null) store.set?.(LEGACY_STORE_KEY, null);
+  bridge = (window as { powermove?: { cloud?: CloudBridge } }).powermove?.cloud ?? null;
   (PM as any).Account = {
     get user() { return user; },
+    get me() { return me; },
     signIn: openSignIn,
     signOut,
     subscribe: subscribeAccount
   };
+  offChanged?.();
+  offChanged = bridge?.onAccountChanged((next) => setMe(next)) ?? null;
   notify();
+  void bridge?.account().then((account) => {
+    provider = account.me ? account.provider : undefined;
+    setMe(account.me);
+    // Signed in but no handle yet: finish the sign-up, in the window the
+    // user is looking at rather than in every restored window at once.
+    if (!account.me || account.me.publisher) return;
+    const prompt = (): void => { if (me && !me.publisher) openSignIn('sign-up'); };
+    if (document.hasFocus()) prompt();
+    else window.addEventListener('focus', prompt, { once: true });
+  }).catch(() => {
+    // No account service (it failed to boot): stay signed out.
+  });
 }

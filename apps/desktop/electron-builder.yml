@@ -78,6 +78,14 @@ publish:
 
 artifactName: ${productName}-${version}-mac-${arch}.${ext}
 
+# `powermove://auth?state&token` finishes a browser sign-in to Powermove Cloud
+# (src/main/cloud/auth.ts). Dev builds do not claim it unless
+# POWERMOVE_DEV_PROTOCOL=1 (src/main/index.ts).
+protocols:
+  - name: Powermove
+    schemes:
+      - powermove
+
 fileAssociations:
   - ext: pmv
     name: Powermove Project

@@ -7,6 +7,7 @@ import { registerRenderEncoder } from './render-encoder';
 import {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
   protocol,
   safeStorage,
@@ -31,6 +32,8 @@ import { recoverAllInterruptedExtensionTransactions } from './codex/change-histo
 import { extensionAssetCorsHeaders, registerExtensionsIpc, serveExtensionAsset } from './extensions';
 import { createExtensionRegistry } from './extensions/registry';
 import { createProvenanceStore } from './cloud/provenance';
+import { DEEP_LINK_SCHEME } from './cloud/auth';
+import { createDeepLinkQueue, deepLinksIn, startCloudService } from './cloud/service';
 import { createEnvStore } from './env/store';
 import { createVarsService } from './env/service';
 import { createRemoveValuesPrompt, registerVarsIpc } from './env/ipc';
@@ -104,6 +107,10 @@ let projects: ProjectFiles | null = null;
 const pendingOpenFiles: string[] = [];
 const recentOpenFiles = new Map<string, number>();
 let quitPrepared = () => false;
+/* `powermove://auth?state&token` finishes a browser sign-in (store plan §2.3).
+   On a cold start `open-url` fires before `ready`, so links wait here until
+   the account is initialised. */
+const deepLinks = createDeepLinkQueue();
 
 function queueOrOpen(filePath: string): void {
   const mainWindow = currentEditor();
@@ -537,12 +544,36 @@ function restoreWindows(store: Store): void {
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
+  // macOS delivers `powermove://` links as `open-url`, which can fire before
+  // `ready`; the listener must exist by `will-finish-launching`.
+  app.on('will-finish-launching', () => {
+    app.on('open-url', (event, url) => {
+      event.preventDefault();
+      deepLinks.push(url);
+    });
+  });
+  /* Who opens `powermove://`:
+     - Packaged: electron-builder.yml `protocols` writes the scheme into
+       Info.plist, so Launch Services knows the app; claiming it here as well
+       makes the running copy the default when several are installed.
+     - Dev: nothing by default, so a dev build never takes the scheme from the
+       installed app. `POWERMOVE_DEV_PROTOCOL=1` registers this Electron binary
+       with the dev entry script. The registry always opens `powermove://`,
+       never a dev scheme. */
+  if (app.isPackaged) {
+    app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME);
+  } else if (process.env['POWERMOVE_DEV_PROTOCOL'] === '1' && process.argv[1]) {
+    app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME, process.execPath, [path.resolve(process.argv[1])]);
+  }
+
   app.on('open-file', (event, filePath) => {
     event.preventDefault();
     queueOrOpen(filePath);
   });
 
   app.on('second-instance', (_event, argv) => {
+    // Windows and Linux hand a `powermove://` link to the running app this way.
+    for (const url of deepLinksIn(argv)) deepLinks.push(url);
     if (isBackgroundTest) return;
     const projectFiles = argv.filter(candidate => path.isAbsolute(candidate) && candidate.toLowerCase().endsWith('.pmv'));
     // The listener is installed before async startup finishes. Do not let an
@@ -684,6 +715,34 @@ if (!hasSingleInstanceLock) {
     registerLogIpc(ipcMain, ctx);
     registerMediaProxyIpc(ipcMain, mediaProxies, ctx);
     registerRenderEncoder(ipcMain,ctx);
+    // Powermove Cloud account. Boot must never block the window: a broken
+    // profile file degrades to "signed out".
+    try {
+      const cloud = await startCloudService({
+        userData: app.getPath('userData'),
+        appVersion: app.getVersion(),
+        safeStorage: () => safeStorage,
+        ipcMain,
+        isTrusted: isTrustedSender,
+        broadcast: (channel, payload) => {
+          for (const window of editors.all()) {
+            if (!window.webContents.isDestroyed()) window.webContents.send(channel, payload);
+          }
+        },
+        openExternal: (url) => shell.openExternal(url),
+        showMessageBox: (options) => {
+          const window = currentEditor();
+          return window && !window.isDestroyed() ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options);
+        }
+      });
+      deepLinks.ready((url) => {
+        // Coming back from the browser: bring Powermove forward.
+        editors.reveal(currentEditor());
+        void cloud.auth.handleDeepLink(url);
+      });
+    } catch (error) {
+      console.error('[cloud] account boot skipped', error instanceof Error ? error.message : 'unknown error');
+    }
     app.once('will-quit', () => { void mediaProxies.dispose(); });
     // API pack handed to the agent every autonomous run: the extension guide
     // plus the frozen kernel/shared/type contracts.
