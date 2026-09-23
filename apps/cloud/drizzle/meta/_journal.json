@@ -15,6 +15,13 @@
       "when": 1790149005840,
       "tag": "0001_cool_wind_dancer",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790149901451,
+      "tag": "0002_parallel_changeling",
+      "breakpoints": true
     }
   ]
 }
