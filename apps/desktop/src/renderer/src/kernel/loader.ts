@@ -14,6 +14,7 @@ import type { ExtensionHealth, ExtensionManifest, ExtensionRecord, ExtensionsBri
 import type { VarsBridge } from '../../../shared/vars-ipc';
 import { MANIFEST_LIMITS, needsTrust } from '../../../shared/extensions';
 import { createExtensionAPI, type ExtensionHandle, type HostDeps } from './host';
+import { createSandboxRuntime, type SandboxRuntime } from './sandbox-host';
 
 /* The loader speaks about an extension rather than as one, so it stamps the
    attribution itself. `source` is host-side and not part of the extension's
@@ -152,8 +153,9 @@ export function planLoad(records: ExtensionRecord[], builtinOrder: string[]): Lo
 
 interface ActiveEntry {
   record: ExtensionRecord;
-  module: ExtensionModule;
+  module: ExtensionModule | null;
   handle: ExtensionHandle;
+  sandbox?: SandboxRuntime;
 }
 
 export function createLoader(options: LoaderOptions): Loader {
@@ -229,6 +231,18 @@ export function createLoader(options: LoaderOptions): Loader {
   async function activate(record: ExtensionRecord): Promise<boolean> {
     if (disposed || active.has(record.id)) return active.has(record.id);
     const id = record.id;
+
+    if (record.trust === 'store') {
+      try {
+        const sandbox = await withTimeout(createSandboxRuntime(kernel, record, hostDeps, await valuesFor(record)), timeoutMs, `sandbox activation of "${id}" timed out`);
+        active.set(id, { record, module: null, handle: sandbox.handle, sandbox });
+        activationFailures.delete(id);
+        syncActive();
+        reportHealth(id, { state: 'ok' });
+        kernel.events.emit('extension:loaded', { id });
+        return true;
+      } catch (error) { failActivation(record, error); return false; }
+    }
 
     let module: ExtensionModule;
     try {
@@ -311,7 +325,8 @@ export function createLoader(options: LoaderOptions): Loader {
     syncActive();
     if (entry) {
       try {
-        await entry.module.deactivate?.();
+        if (entry.sandbox) entry.sandbox.dispose();
+        else await entry.module?.deactivate?.();
       } catch (error) {
         console.error(`[kernel] extension "${id}" deactivate() threw`, error);
       }

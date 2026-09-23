@@ -21,7 +21,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { IPC, PROJECT_ID, type WindowClaimResult, type WindowInitialProject, type WindowOpenResult } from '../shared/ipc';
 import { WEB, WEB_UPLOAD_CHUNK_BYTES, type WebHello } from '../shared/wire';
 import { isRecord } from '../shared/guards';
-import { CONTENT_SECURITY_POLICY } from '../main/security-policy';
+import { CONTENT_SECURITY_POLICY, extensionSandboxCsp } from '../main/security-policy';
 import { MIME_TYPES } from '../main/mime';
 import { createStore, registerStoreIpc } from '../main/storage';
 import { openProjectForWindow, registerSaveIpc } from '../main/save';
@@ -33,7 +33,7 @@ import { registerRenderEncoder } from '../main/render-encoder';
 import { MediaProxyService, imageSequenceConverter, playbackConverter, previewConverter, registerMediaProxyIpc, stillImageConverter } from '../main/media-proxy';
 import { registerCodexIpc } from '../main/codex';
 import { recoverAllInterruptedExtensionTransactions } from '../main/codex/change-history';
-import { registerExtensionsIpc, serveExtensionAsset } from '../main/extensions';
+import { registerExtensionsIpc, serveExtensionAsset, sandboxManifestFor } from '../main/extensions';
 import { createExtensionRegistry } from '../main/extensions/registry';
 import { startExtensionWatcher } from '../main/extensions/watcher';
 import { EditorWindows } from '../main/windows';
@@ -159,7 +159,7 @@ function text(response: ServerResponse, status: number, body: string): void {
   response.end(body);
 }
 
-async function serveStatic(rendererRoot: string, requestedPath: string, response: ServerResponse): Promise<void> {
+async function serveStatic(rendererRoot: string, requestedPath: string, response: ServerResponse, id = '', origin = '', perms = ''): Promise<void> {
   const filePath = path.resolve(rendererRoot, requestedPath === '' ? 'index.html' : requestedPath);
   const relative = path.relative(rendererRoot, filePath);
   if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) { text(response, 403, 'Forbidden'); return; }
@@ -169,6 +169,15 @@ async function serveStatic(rendererRoot: string, requestedPath: string, response
   const contentType = MIME_TYPES[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream';
   const head = headers(contentType, { 'Content-Length': String(info.size), 'Cache-Control': relative.startsWith('assets/') ? 'public, max-age=31536000, immutable' : 'no-cache' });
   if (relative === SANDBOX_PATH) head['Content-Security-Policy'] = SANDBOX_CSP;
+  if (relative === 'host/ext-sandbox.html') {
+    const manifest = sandboxManifestFor(id);
+    if (!manifest || perms !== (manifest.permissions ?? []).join(',')) { text(response, 404, 'Not found'); return; }
+    head['Content-Security-Policy'] = extensionSandboxCsp(id, manifest.permissions ?? [], origin);
+    head['Cross-Origin-Resource-Policy'] = 'same-origin';
+    delete head['X-Frame-Options'];
+  }
+  if (relative.startsWith('host/') && relative.endsWith('.js')) head['Access-Control-Allow-Origin'] = '*';
+  if (/\.(?:woff2?|ttf|otf)$/i.test(relative)) head['Access-Control-Allow-Origin'] = '*';
   response.writeHead(200, head);
   createReadStream(filePath).pipe(response);
 }
@@ -548,7 +557,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         const asset = await serveExtensionAsset(pathname);
         if (!asset) { text(response, 404, 'Not found'); return; }
         const body = Buffer.from(await asset.arrayBuffer());
-        response.writeHead(asset.status, headers('text/javascript; charset=utf-8', { 'Cache-Control': 'no-store', 'Content-Length': String(body.byteLength) }));
+        response.writeHead(asset.status, headers('text/javascript; charset=utf-8', { 'Cache-Control': 'no-store', 'Content-Length': String(body.byteLength), 'Access-Control-Allow-Origin': '*' }));
         response.end(body);
         return;
       }
@@ -584,7 +593,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         createReadStream(resolved).pipe(response);
         return;
       }
-      await serveStatic(rendererRoot, pathname.replace(/^\/+/, ''), response);
+      await serveStatic(rendererRoot, pathname.replace(/^\/+/, ''), response, url.searchParams.get('id') ?? '', `${options.insecure ? 'http' : 'https'}://${request.headers.host ?? 'localhost'}`, url.searchParams.get('perms') ?? '');
     } catch (error) {
       log(`[serve] ${request.method} ${request.url}: ${error instanceof Error ? error.message : String(error)}`);
       if (!response.headersSent) text(response, 500, 'Internal error');

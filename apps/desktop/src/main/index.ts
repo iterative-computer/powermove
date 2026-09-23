@@ -29,7 +29,7 @@ import {
 import { registerCaptureIpc } from './capture';
 import { registerCodexIpc } from './codex';
 import { recoverAllInterruptedExtensionTransactions } from './codex/change-history';
-import { extensionAssetCorsHeaders, registerExtensionsIpc, removeUserExtension, serveExtensionAsset } from './extensions';
+import { extensionAssetCorsHeaders, registerExtensionsIpc, removeUserExtension, serveExtensionAsset, sandboxManifestFor } from './extensions';
 import { createExtensionRegistry, type ExtensionRegistry } from './extensions/registry';
 import { createProvenanceStore } from './cloud/provenance';
 import { trustDialog, trustLevelFor } from './cloud/trust';
@@ -58,7 +58,7 @@ import { installMenu, installRendererMenuShortcutRouting } from './menu';
 import { openProjectForWindow, registerSaveIpc } from './save';
 import { ProjectFiles } from './project-files';
 import { registerShellIpc } from './shell';
-import { CONTENT_SECURITY_POLICY, SANDBOX_CONTENT_SECURITY_POLICY } from './security-policy';
+import { CONTENT_SECURITY_POLICY, SANDBOX_CONTENT_SECURITY_POLICY, extensionSandboxCsp } from './security-policy';
 import { createStore, installQuitFlush, registerStoreIpc, type Store } from './storage';
 import { registerThemeIpc } from './theme';
 import { backgroundTesting, backgroundWindowOptions } from './background-testing';
@@ -213,6 +213,7 @@ function registerAppProtocol(): void {
         const headers = responseHeaders('text/javascript; charset=utf-8');
         headers['Cache-Control'] = 'no-store';
         Object.assign(headers, extensionAssetCorsHeaders(devRendererUrl));
+        headers['Access-Control-Allow-Origin'] = '*';
         return new Response(asset.body, { status: asset.status, headers });
       }
       const filePath = path.resolve(rendererRoot, requestedPath);
@@ -230,6 +231,16 @@ function registerAppProtocol(): void {
       const contentType = MIME_TYPES[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream';
       const headers = responseHeaders(contentType);
       if (relativePath === SANDBOX_PATH) headers['Content-Security-Policy'] = SANDBOX_CSP;
+      if (relativePath === 'host/ext-sandbox.html') {
+        const id = requestUrl.searchParams.get('id') ?? '';
+        const manifest = sandboxManifestFor(id);
+        if (!manifest || requestUrl.searchParams.get('perms') !== (manifest.permissions ?? []).join(',')) return errorResponse(404, 'Not found');
+        headers['Content-Security-Policy'] = extensionSandboxCsp(id, manifest.permissions ?? []);
+        headers['Cross-Origin-Resource-Policy'] = 'same-origin';
+        delete headers['X-Frame-Options'];
+      }
+      if (relativePath.startsWith('host/') && relativePath.endsWith('.js')) headers['Access-Control-Allow-Origin'] = '*';
+      if (/\.(?:woff2?|ttf|otf)$/i.test(relativePath)) headers['Access-Control-Allow-Origin'] = '*';
       return new Response(contents, { headers });
     } catch {
       return errorResponse(404, 'Not found');

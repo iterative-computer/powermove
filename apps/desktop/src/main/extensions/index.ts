@@ -20,6 +20,12 @@ import { forkBuiltinExtension } from './fork';
 type ExtensionsIpcEvent = IpcMainEvent | IpcMainInvokeEvent;
 
 let assetBuildDir: string | null = null;
+let assetRegistry: ExtensionRegistry | null = null;
+
+/** Main-owned record, never permissions supplied by the iframe URL. */
+export function sandboxManifestFor(id: string) {
+  return assetRegistry?.list().find(record => record.id === id && record.trust === 'store')?.manifest ?? null;
+}
 
 export function registerExtensionsIpc(
   ipcMain: Pick<IpcMain, 'handle' | 'on'>,
@@ -36,6 +42,7 @@ export function registerExtensionsIpc(
 ): void {
   const { registry } = options;
   assetBuildDir = registry.buildDir;
+  assetRegistry = registry;
 
   const requireTrusted = (event: ExtensionsIpcEvent, channel: string): void => {
     if (!options.isTrusted(event)) throw new IpcValidationError(channel, 'untrusted sender');
