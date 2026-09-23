@@ -37,7 +37,10 @@ export const STATIC_KEYS = [
   'agentAccessMode',
   'agentAutoApplyPanels',
   'extensions',
-  'activeTheme'
+  'activeTheme',
+  // Powermove Cloud account. Design pass: a local record of the signed-in
+  // user, no credentials. Real sessions will belong in the keychain.
+  'cloudAccount'
 ] as const;
 
 export type StaticKey = (typeof STATIC_KEYS)[number];

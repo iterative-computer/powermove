@@ -9,7 +9,7 @@
    squircles (settings/squircle.ts); keyboard focus is drawn as SVG. Group
    and control fills carry the hierarchy without resting outlines. */
 
-#settings-screen,.export-modal{
+#settings-screen,.export-modal,.account-modal{
   --ctl-h:30px;
   --sg-group-radius:var(--r-xl);
   --sg-row-padding:var(--gut);
