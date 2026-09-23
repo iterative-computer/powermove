@@ -13,11 +13,8 @@ concurrency:
   cancel-in-progress: false
 jobs:
   release:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
-    env:
-      # Icon Composer catalogs require actool 26+. macos-15 defaults to Xcode 16.4.
-      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
       # Node stays available for electron-builder, the desktop release script,
