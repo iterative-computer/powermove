@@ -19,14 +19,19 @@ function releaseCredentials(environment) {
 }
 
 async function run(command, args) {
-  await execFileAsync(command, args, {
-    cwd: repository,
-    env: process.env,
-    maxBuffer: 20 * 1024 * 1024,
-  }).then(({ stdout, stderr }) => {
+  try {
+    const { stdout, stderr } = await execFileAsync(command, args, {
+      cwd: repository,
+      env: process.env,
+      maxBuffer: 20 * 1024 * 1024,
+    });
     if (stdout) process.stdout.write(stdout);
     if (stderr) process.stderr.write(stderr);
-  });
+  } catch (error) {
+    if (error?.stdout) process.stdout.write(error.stdout);
+    if (error?.stderr) process.stderr.write(error.stderr);
+    throw error;
+  }
 }
 
 async function findPackagedApp() {
