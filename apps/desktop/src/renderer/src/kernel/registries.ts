@@ -21,7 +21,7 @@ import type {
   ThemeDefinition,
   TransitionDefinition
 } from './api';
-import { chordMatches, chordModifierCount, chordOfEvent, hasTextSelection, isFieldTarget, selectableTextRoot, selectTextContents, normalizeChord } from './keychord';
+import { chordMatches, chordModifierCount, chordOfEvent, forwardedKeyField, hasTextSelection, isFieldTarget, selectableTextRoot, selectTextContents, normalizeChord } from './keychord';
 import { Registry } from './registry';
 import * as glslHelpers from './glsl';
 import { validateEffect, validateTransition } from './glsl';
@@ -336,11 +336,13 @@ export function createKernel(): Kernel {
         /* A highlighted transcript or other selectable document surface owns
            Copy just like a focused input. Let Chromium place that text on the
            system clipboard instead of dispatching the editor's Copy Layers. */
-        if ((chord === 'cmd+c' || chord === 'ctrl+c') && hasTextSelection()) return;
+        const forwarded = forwardedKeyField(event);
+        if (forwarded === undefined && (chord === 'cmd+c' || chord === 'ctrl+c') && hasTextSelection()) return;
         /* isFieldTarget also walks to an editable ancestor, so nested markup
-           inside a panel editor stays in the native text-editing context. */
-        const field = isFieldTarget(event.target) || (event.composedPath?.() || []).some(isFieldTarget);
-        const textRoot = !field && selectableTextRoot(event.target);
+           inside a panel editor stays in the native text-editing context. A
+           key forwarded from a sandboxed panel carries its frame's answer. */
+        const field = forwarded ?? (isFieldTarget(event.target) || (event.composedPath?.() || []).some(isFieldTarget));
+        const textRoot = forwarded === undefined && !field && selectableTextRoot(event.target);
         if (textRoot) {
           if (chord === 'cmd+a' || chord === 'ctrl+a') {
             event.preventDefault(); selectTextContents(textRoot);

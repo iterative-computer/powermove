@@ -387,6 +387,13 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .panel-options{display:none}
 .panel > .body{flex:1;min-height:0;overflow:auto;position:relative}
 .panel.noscroll > .body{overflow:hidden}
+/* A sandboxed extension's panel: its view iframe fills the body and scrolls
+   itself. It fades in once the view has mounted (or failed with a message),
+   so an empty document never flashes on open, refresh or a dock move. */
+.panel.frame > .body{overflow:hidden}
+.ext-panel-frame{position:absolute;inset:0;display:block;width:100%;height:100%;border:0;background:transparent;opacity:0;transition:opacity var(--dur-3) var(--ease)}
+.ext-panel-frame[data-state]{opacity:1}
+@media (prefers-reduced-motion:reduce){.ext-panel-frame{transition:none}}
 .panel.headless > header{display:none}
 
 .chip{
@@ -1259,6 +1266,13 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 .library-thumb-icon{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:var(--tx-3)}.library-thumb-icon svg{width:26px;height:26px}
 .library-thumb-icon b{max-width:85%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-sm);font-weight:var(--fw-medium);color:var(--tx-2)}
 .library-live.has-preview>.library-thumb-icon{display:none}
+/* Sandboxed panels have no DOM preview: their icon sits on the extension's
+   Store art (same two-hue gradient as .st-thumb), nested inside the card. */
+.library-live.is-sandboxed.has-art{border-radius:var(--library-inner-radius);background:
+  radial-gradient(120% 90% at 82% 18%, var(--art-b) 0%, transparent 60%),
+  radial-gradient(90% 120% at 12% 100%, color-mix(in oklch, var(--art-a) 70%, black) 0%, transparent 65%),
+  linear-gradient(135deg, var(--art-a), color-mix(in oklch, var(--art-b) 60%, var(--art-a)))}
+.library-live.is-sandboxed.has-art>.library-thumb-icon,.library-live.is-sandboxed.has-art>.library-thumb-icon b{color:rgb(255 255 255 / .94)}
 .library-card[draggable="true"]{cursor:grab}.library-card[draggable="true"]:active{cursor:grabbing}
 .library-card-live,.library-card-live:hover{display:block;break-inside:avoid;margin:0 0 16px;padding:0;overflow:hidden;border:0;background:transparent;box-shadow:none;transform:none}.library-card-live .library-card-hit{position:relative;display:block;width:100%}
 .library-live{position:relative;width:100%;overflow:hidden}

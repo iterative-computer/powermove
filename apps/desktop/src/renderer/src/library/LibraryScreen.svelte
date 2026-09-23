@@ -7,6 +7,8 @@
   import { panelScope } from '../panels/agent/panel-focus';
   import { deletePanel, deletedPanelIds } from './panel-deletion';
   import { panelBelongsInLibrary, panelPreviewSize } from './panel-preview';
+  import { panelFrameOf } from '../kernel/panel-frame';
+  import { artFor, storeBridge } from '../store/data';
 
   let { PM }: { PM: Record<string, any> } = $props();
 
@@ -21,8 +23,22 @@
   let rootEl = $state<HTMLElement | null>(null);
   let deletedIds = $state(new Set<string>());
 
+  /* Sandboxed panels show their icon on the extension's Store art. The art is
+     seeded like the Store's (the listing's repo), so the two surfaces agree. */
+  let artSeeds: Map<string, string> | null = null;
+  async function loadArtSeeds(): Promise<void> {
+    try {
+      const items = (await storeBridge()?.library()) ?? [];
+      artSeeds = new Map(items.map((item) => [item.localId, item.origin?.repoId ?? `local:${item.localId}`]));
+    } catch {
+      artSeeds = new Map();
+    }
+    version += 1;
+  }
+
   export function open(target?: 'panels' | 'workspaces'): void {
     if (target) view = target;
+    if (!artSeeds) void loadArtSeeds();
     deletedIds = deletedPanelIds(PM);
     version += 1;
     lastFocus = document.activeElement as HTMLElement | null;
@@ -326,6 +342,20 @@
       frame = null;
       node.classList.remove('has-preview');
       node.style.aspectRatio = '16 / 10';
+      /* A sandboxed panel's body is another document: a DOM clone would load
+         a second, unconnected copy of it. Show its icon on the art instead. */
+      const sandboxed = panelFrameOf(PM.PANELS?.[id]);
+      node.classList.toggle('is-sandboxed', !!sandboxed);
+      if (sandboxed) {
+        const seed = artSeeds?.get(sandboxed.extensionId);
+        if (seed) {
+          const [a, b] = artFor(seed);
+          node.style.setProperty('--art-a', a);
+          node.style.setProperty('--art-b', b);
+        }
+        node.classList.toggle('has-art', !!seed);
+        return;
+      }
       const element = PM.panelInst?.[id]?.el as HTMLElement | undefined;
       if (!element) return;
       const size = panelPreviewSize(PM.PANELS?.[id] ?? {});

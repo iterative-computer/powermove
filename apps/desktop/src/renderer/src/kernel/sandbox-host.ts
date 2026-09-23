@@ -1,11 +1,13 @@
 import type { ExtensionRecord } from '../../../shared/extensions';
-import { createRpc, type Rpc } from '../../../shared/sandbox-rpc';
-import type { SandboxInit, SandboxMirror } from '../../sandbox/shim-api';
+import { createRpc, rpcTransfers, type Rpc } from '../../../shared/sandbox-rpc';
+import { panelInfo, type SandboxInit, type SandboxKey, type SandboxMirror, type SandboxViewInit } from '../../sandbox/shim-api';
 import type { Disposable } from './api';
 import { createExtensionAPI, type ExtensionHandle, type HostDeps } from './host';
 import type { Kernel } from './registries';
 import { themeScheme, themeTokens } from './theme-apply';
+import { mountSandboxView, type ViewHost, type ViewLink } from './sandbox-view';
 
+const MIRROR_EVENTS = new Set(['project:changed', 'selection', 'time', 'transport']);
 export interface SandboxRuntime { handle: ExtensionHandle; dispose(): void }
 const SAFE_INVOKE: Record<string, Set<string>> = {
   commands: new Set(['run']), project: new Set(['apply', 'select', 'setTime', 'play', 'pause', 'undo', 'redo', 'snapshot']),
@@ -45,6 +47,23 @@ function themeSnapshot(kernel: Kernel): SandboxInit['theme'] {
   const scheme = themeScheme(definition, kernel.theme.scheme);
   return { scheme, tokens: themeTokens(definition, scheme) };
 }
+/* Views sit inside the app's own panels, so they take the theme as the host
+   document shows it: the kernel theme plus the workspace's overrides, both
+   written as inline custom properties on <html>. */
+function viewTheme(kernel: Kernel): SandboxInit['theme'] {
+  const base = themeSnapshot(kernel);
+  const root = document.documentElement;
+  const tokens: Record<string, string> = { ...base.tokens };
+  for (let index = 0; index < root.style.length; index++) {
+    const key = root.style.item(index);
+    if (key.startsWith('--')) tokens[key] = root.style.getPropertyValue(key).trim();
+  }
+  const attribute = root.dataset.theme;
+  return { scheme: attribute === 'dark' || attribute === 'light' ? attribute : base.scheme, tokens };
+}
+function keyTable(kernel: Kernel): SandboxKey[] {
+  return kernel.listBindings().map(({ chord, inFields, repeat, looseModifiers }) => ({ chord, inFields, repeat, looseModifiers: looseModifiers === true }));
+}
 function sandboxTheme(value: Record<string, any>): Record<string, any> {
   if (value.css) {
     const css = String(value.css);
@@ -62,6 +81,8 @@ function sandboxTheme(value: Record<string, any>): Record<string, any> {
 export async function createSandboxRuntime(kernel: Kernel, record: ExtensionRecord, deps: HostDeps, vars: Record<string, string> = {}, test?: {
   frame?: HTMLIFrameElement;
   onPostInit?(port: MessagePort, init: SandboxInit): void;
+  /** Deliver a view's `init` without loading a document (views get no `src`). */
+  onViewInit?(frame: HTMLIFrameElement, message: SandboxViewInit & { t: 'init' }, ports: MessagePort[]): void;
 }): Promise<SandboxRuntime> {
   const host = createExtensionAPI(kernel, record, deps, vars);
   const frame = test?.frame ?? document.createElement('iframe');
@@ -77,9 +98,28 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
   let rejected!: (error: Error) => void;
   const ready = new Promise<void>((resolve, reject) => { activated = resolve; rejected = reject; });
   void ready.catch(() => {}); // a load failure can settle before activation is awaited
-  const rpc = createRpc(channel.port1, {
+  const permissions = record.manifest?.permissions ?? [];
+  const violations = new Set<string>();
+  const invoke = (namespace: string, method: string, args: unknown[]): unknown => {
+    if (!SAFE_INVOKE[namespace]?.has(method)) throw new Error(`Sandbox method unavailable: ${namespace}.${method}`);
+    if (namespace === 'project' && method === 'apply' && !permissions.includes('project:write')) {
+      const error = new Error('project.apply requires project:write permission'); error.name = 'PermissionError'; throw error;
+    }
+    if (namespace === 'assets' && method !== 'get' && !permissions.includes('assets')) {
+      const error = new Error(`assets.${method} requires assets permission`); error.name = 'PermissionError'; throw error;
+    }
+    const receiver = (host.api as unknown as Record<string, Record<string, (...a: any[]) => unknown>>)[namespace];
+    return receiver?.[method]?.(...(Array.isArray(args) ? args : []));
+  };
+  /* Handlers every extension document gets: the runtime iframe and each
+     panel view. Only the runtime may register contributions; a view may only
+     subscribe to events (see shim-api.ts, view mode). */
+  const shared = (link: { rpc: Rpc; registrations: Map<string, Disposable> }, runtime: boolean): Record<string, (...args: any[]) => unknown> => ({
     register(kind: string, token: string, value: Record<string, any>) {
+      const { registrations } = link;
       if (registrations.has(token)) throw new Error('Duplicate sandbox registration');
+      if (!runtime && kind !== 'events') throw new Error(`Panel views cannot register ${kind}`);
+      const rpc = link.rpc;
       let item: Disposable;
       switch (kind) {
         case 'effects': item = host.api.effects.register(value as any); break;
@@ -92,44 +132,115 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
         case 'status': item = host.api.status.register({ ...value, text: cached(rpc, value.text, null), ...(value.onClick ? { onClick: () => void rpc.invokeHandle(value.onClick) } : {}) } as any); break;
         case 'palette': item = host.api.palette.registerProvider(cached(rpc, value.provider, [], result => (result as Array<Record<string, any>>).map(entry => ({ ...entry, run: () => rpc.invokeHandle(entry.run) }))) as any); break;
         case 'menus': item = host.api.menus.contribute(value.location, cached(rpc, value.items, [], result => (result as Array<string | Record<string, any>>).map(entry => typeof entry === 'string' || !entry.run ? entry : { ...entry, run: () => rpc.invokeHandle(entry.run) })) as any); break;
-        case 'events': item = host.api.events.on(value.event, ((payload: unknown) => void rpc.invokeHandle(value.fn, plain(payload))) as any); break;
-        case 'panels': item = host.api.panels.register({ id: value.id, title: value.title, icon: value.icon, build: body => { body.textContent = 'Panel UI arrives with the next update'; } }); break;
+        case 'events': {
+          /* A mirror event reaches the sandbox after the mirror it describes:
+             flush a pending mirror push first (same port, so ordered). */
+          const mirrored = MIRROR_EVENTS.has(value.event);
+          item = host.api.events.on(value.event, ((payload: unknown) => { if (mirrored) flushMirror(); void rpc.invokeHandle(value.fn, plain(payload)).catch(() => {}); }) as any);
+          break;
+        }
+        case 'panels': {
+          const info = panelInfo(value);
+          item = host.registerFramePanel(info, { mount: (body, inst) => mountSandboxView(views, info, body, inst) });
+          break;
+        }
         default: throw new Error(`Unknown sandbox registration: ${kind}`);
       }
       registrations.set(token, item);
     },
-    'dispose-registration'(token: string) { registrations.get(token)?.dispose(); registrations.delete(token); },
-    mountPanel(_viewPort: MessagePort) { throw new Error('Panel UI arrives with the next update'); },
-    invoke(namespace: string, method: string, args: unknown[]) {
-      if (!SAFE_INVOKE[namespace]?.has(method)) throw new Error(`Sandbox method unavailable: ${namespace}.${method}`);
-      if (namespace === 'project' && method === 'apply' && !(record.manifest?.permissions ?? []).includes('project:write')) {
-        const error = new Error('project.apply requires project:write permission'); error.name = 'PermissionError'; throw error;
-      }
-      if (namespace === 'assets' && method !== 'get' && !(record.manifest?.permissions ?? []).includes('assets')) {
-        const error = new Error(`assets.${method} requires assets permission`); error.name = 'PermissionError'; throw error;
-      }
-      const receiver = (host.api as unknown as Record<string, Record<string, (...a: any[]) => unknown>>)[namespace];
-      return receiver?.[method]?.(...args);
-    },
+    'dispose-registration'(token: string) { link.registrations.get(token)?.dispose(); link.registrations.delete(token); },
+    invoke,
     'extensions-list'() { return host.api.extensions.list().map(({ dir: _dir, ...rest }) => rest); },
-    log(level: 'info' | 'warn' | 'error', message: string, data: unknown[]) { host.api.log(level, message, ...data); },
-    activated: () => activated(),
-    'activation-error': (error: { message: string }) => rejected(new Error(error.message)),
-    'runtime-error': (error: { message: string }) => deps.reportRuntimeError(record.id, new Error(error.message)),
-    'csp-violation': (event: { directive: string; blockedURI: string }) => deps.reportRuntimeError(record.id, new Error(`CSP blocked ${event.blockedURI} (${event.directive})`))
+    log(level: 'info' | 'warn' | 'error', message: string, data: unknown[]) { host.api.log(level, message, ...(Array.isArray(data) ? data : [])); },
+    'runtime-error': (error: { message: string }) => deps.reportRuntimeError(record.id, new Error(error?.message)),
+    /* Each open panel replays activate in its own document, so one blocked
+       request can surface once per document. Count it once per extension
+       session, or opening panels alone would trip the auto-disable rule. */
+    'csp-violation': (event: { directive: string; blockedURI: string }) => {
+      const key = `${event?.directive} ${event?.blockedURI}`;
+      if (violations.has(key)) return;
+      violations.add(key);
+      deps.reportRuntimeError(record.id, new Error(`CSP blocked ${event?.blockedURI} (${event?.directive})`));
+    }
   });
+  const runtimeLink = { registrations } as { rpc: Rpc; registrations: Map<string, Disposable> };
+  const rpc = createRpc(channel.port1, {
+    ...shared(runtimeLink, true),
+    activated: () => activated(),
+    'activation-error': (error: { message: string }) => rejected(new Error(error.message))
+  });
+  runtimeLink.rpc = rpc;
+  const snapshot = (): SandboxInit => ({
+    id: record.id, apiVersion: record.manifest?.apiVersion ?? 1, manifest: record.manifest!, vars,
+    theme: themeSnapshot(kernel), activeTheme: kernel.theme.activeId,
+    project: projectMirror(host.api), bundleUrl: record.bundleUrl ?? `${base}/ext/${encodeURIComponent(record.id)}/bundle.js`,
+    catalog: {
+      effects: plain(kernel.effects.list()) as Array<Record<string, any>>,
+      transitions: plain(kernel.transitions.list()) as Array<Record<string, any>>,
+      layers: plain(kernel.layerTypes.list()) as Array<Record<string, any>>,
+      theme: plain(kernel.themes.list()) as Array<Record<string, any>>,
+      keybindings: plain(kernel.listBindings()) as Array<Record<string, any>>,
+      commands: kernel.commands.list().map(({ run: _run, when: _when, ...entry }) => entry),
+      panels: kernel.panels.list().map(({ id, title, icon }) => ({ id, title, icon })),
+      status: kernel.status.list().map(({ id, title, side }) => ({ id, title, side }))
+    }
+  });
+  const links = new Set<ViewLink>();
+  const broadcast = (method: string, value: unknown): void => {
+    for (const link of links) { try { link.rpc.notify(method, value); } catch { /* view closing */ } }
+  };
+  const views: ViewHost = {
+    src: panelId => test?.onViewInit ? null : `${base}/host/ext-sandbox.html?id=${encodeURIComponent(record.id)}&view=${encodeURIComponent(panelId)}&perms=${encodeURIComponent(perms)}`,
+    snapshot,
+    theme: () => viewTheme(kernel),
+    keys: () => keyTable(kernel),
+    links,
+    connectRuntime: (panelId, token, port) => rpc.notify('mountPanel', panelId, token, port, rpcTransfers(port)),
+    disconnectRuntime: token => { try { rpc.notify('unmountPanel', token); } catch { /* runtime already gone */ } },
+    handlers: link => shared(link, false),
+    report: error => deps.reportRuntimeError(record.id, error),
+    ...(test?.onViewInit ? { post: test.onViewInit } : {})
+  };
+  /* Keys and theme follow the host while views are open. */
+  let keysQueued = false;
+  const keysOff = kernel.keybindings.onChange(() => {
+    if (keysQueued || !links.size) return; keysQueued = true;
+    queueMicrotask(() => { keysQueued = false; broadcast('keys', keyTable(kernel)); });
+  });
+  let themeQueued = false;
+  const themeWatch = typeof MutationObserver === 'function' ? new MutationObserver(() => {
+    if (themeQueued || !links.size) return; themeQueued = true;
+    requestAnimationFrame(() => { themeQueued = false; broadcast('theme', viewTheme(kernel)); });
+  }) : null;
+  themeWatch?.observe(document.documentElement, { attributes: true, attributeFilter: ['style', 'data-theme'] });
+  let disposed = false;
   const dispose = (): void => {
-    rpc.notify('dispose'); rpc.close();
+    if (disposed) return; disposed = true;
+    keysOff.dispose(); themeWatch?.disconnect();
+    // Registrations first: panel views tell the runtime to close their ports.
     for (const item of registrations.values()) item.dispose(); registrations.clear();
+    try { rpc.notify('dispose'); } catch { /* already closed */ }
+    rpc.close();
     host.disposeAll(); frame.remove();
   };
+  /* One mirror push per frame to the runtime and every open view. */
+  let dirty = false;
   let scheduled = false;
+  function flushMirror(): void {
+    if (!dirty || disposed) return; dirty = false;
+    try {
+      const mirror = projectMirror(host.api);
+      rpc.notify('mirror', mirror);
+      broadcast('mirror', mirror);
+    } catch (error) { deps.reportRuntimeError(record.id, error); }
+  }
   const push = (): void => {
+    dirty = true;
     if (scheduled) return; scheduled = true;
-    requestAnimationFrame(() => { scheduled = false; try { rpc.notify('mirror', projectMirror(host.api)); } catch (error) { deps.reportRuntimeError(record.id, error); } });
+    requestAnimationFrame(() => { scheduled = false; flushMirror(); });
   };
-  for (const event of ['project:changed', 'selection', 'time', 'transport'] as const) host.api.events.on(event, push as any);
-  host.api.events.on('theme:changed', () => rpc.notify('theme', themeSnapshot(kernel)));
+  for (const event of MIRROR_EVENTS) host.api.events.on(event as 'project:changed', push as any);
+  host.api.events.on('theme:changed', () => { try { rpc.notify('theme', themeSnapshot(kernel)); } catch { /* disposed */ } });
   try {
     host.setActivating(true);
     const loaded = new Promise<void>((resolve, reject) => { frame.addEventListener('load', () => resolve(), { once: true }); frame.addEventListener('error', () => reject(new Error('Sandbox document failed to load')), { once: true }); });
@@ -137,24 +248,9 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
     document.body.append(frame);
     try {
       await loaded;
-    const bundleUrl = record.bundleUrl ?? `${base}/ext/${encodeURIComponent(record.id)}/bundle.js`;
-    const init: SandboxInit = {
-      id: record.id, apiVersion: record.manifest?.apiVersion ?? 1, manifest: record.manifest!, vars,
-      theme: themeSnapshot(kernel), activeTheme: kernel.theme.activeId,
-      project: projectMirror(host.api), bundleUrl,
-      catalog: {
-        effects: plain(kernel.effects.list()) as Array<Record<string, any>>,
-        transitions: plain(kernel.transitions.list()) as Array<Record<string, any>>,
-        layers: plain(kernel.layerTypes.list()) as Array<Record<string, any>>,
-        theme: plain(kernel.themes.list()) as Array<Record<string, any>>,
-        keybindings: plain(kernel.listBindings()) as Array<Record<string, any>>,
-        commands: kernel.commands.list().map(({ run: _run, when: _when, ...entry }) => entry),
-        panels: kernel.panels.list().map(({ id, title, icon }) => ({ id, title, icon })),
-        status: kernel.status.list().map(({ id, title, side }) => ({ id, title, side }))
-      }
-    };
-    if (test?.onPostInit) test.onPostInit(channel.port2, init);
-    else frame.contentWindow?.postMessage({ t: 'init', ...init }, '*', [channel.port2]);
+      const init = snapshot();
+      if (test?.onPostInit) test.onPostInit(channel.port2, init);
+      else frame.contentWindow?.postMessage({ t: 'init', ...init }, '*', [channel.port2]);
       await ready;
     } finally { clearTimeout(timeout); }
     host.setActivating(false);

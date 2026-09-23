@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRpc } from '../../../shared/sandbox-rpc';
 import { createSandboxAPI, PermissionError } from '../../sandbox/shim-api';
+import { installSandboxRuntime } from '../../sandbox/boot';
 import { createSandboxRuntime, projectMirror } from './sandbox-host';
 import { createKernel } from './registries';
 import type { HostDeps } from './host';
@@ -20,6 +21,7 @@ it('registers across a real MessageChannel, caches sync callbacks, scopes vars, 
   expect(compiled.ok).toBe(true);
   if (!compiled.ok) return;
   const source = await readFile(compiled.bundlePath);
+  installSandboxRuntime(); // the fixture's Svelte panel resolves svelte through the runtime table
   vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('network mocked'))));
   const kernel = createKernel();
   const apply = vi.fn(() => ({ ok: true }));

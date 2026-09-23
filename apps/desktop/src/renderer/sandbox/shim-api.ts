@@ -1,5 +1,5 @@
 import type { PowermoveAPI } from '../src/kernel/api';
-import type { Rpc, HandleId } from '../../shared/sandbox-rpc';
+import { createRpc, type Rpc, type HandleId } from '../../shared/sandbox-rpc';
 import { install as installEase } from '../src/legacy/core/easing';
 import { CHANNELS_3D, projectPoint, inversePlane } from '../src/legacy/core/space-3d';
 
@@ -10,6 +10,16 @@ export class PermissionError extends Error {
     this.name = 'PermissionError';
   }
 }
+export interface SandboxControl {
+  update(next: SandboxMirror): void;
+  ready(): Promise<unknown>;
+  dispose(): void;
+  setQuiet(on: boolean): void;
+  panel(id: string): Record<string, any> | undefined;
+  mountPanel(panelId: string, token: string, port: MessagePort): void;
+  unmountPanel(token: string): void;
+}
+export const sandboxControl = (api: PowermoveAPI): SandboxControl => (api as unknown as { __sandbox: SandboxControl }).__sandbox;
 export interface SandboxMirror { project: unknown; revision: number; selection: unknown; time: number; playing: boolean }
 export interface SandboxInit {
   id: string; apiVersion: number; manifest: PowermoveAPI['manifest']; vars: Record<string, string>;
@@ -17,17 +27,61 @@ export interface SandboxInit {
   catalog?: Record<string, Array<Record<string, any>>>;
   activeTheme?: string;
 }
+/** A host keybinding as a view needs it to decide which keydowns to forward. */
+export interface SandboxKey { chord: string; inFields: boolean; repeat: boolean; looseModifiers: boolean }
+/** What a view forwards for a keydown the host has a binding for (or Escape). */
+export interface SandboxKeyEvent { key: string; code: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; repeat: boolean; field: boolean }
+export interface SandboxViewInit extends SandboxInit {
+  mode: 'view'; panelId: string; spec: Record<string, unknown>; keys: SandboxKey[];
+  size: { width: number; height: number }; noscroll?: boolean;
+}
 const trustedOnly = (name: string, alternative?: string): any => new Proxy({}, {
   get(_target, member) {
     if (member === 'then') return undefined;
     throw new PermissionError(`${name}.${String(member)}`, alternative);
   }
 });
+/** Panel layout hints that cross to the kernel; the definition itself never does. */
+export interface SandboxPanelInfo { id: string; title: string; icon?: string; size?: number; min?: number; flush?: boolean; noscroll?: boolean }
+export function panelInfo(def: Record<string, any>): SandboxPanelInfo {
+  const info: SandboxPanelInfo = { id: String(def.id), title: typeof def.title === 'string' && def.title ? def.title : String(def.id) };
+  if (typeof def.icon === 'string') info.icon = def.icon;
+  for (const key of ['size', 'min'] as const) if (typeof def[key] === 'number' && Number.isFinite(def[key])) info[key] = def[key];
+  for (const key of ['flush', 'noscroll'] as const) if (def[key] === true) info[key] = true;
+  return info;
+}
+/*
+ * Two modes, one bundle.
+ *
+ * `runtime` is the extension's single long-lived iframe: `activate(api)` runs
+ * here and every registration is forwarded to the kernel, which owns the
+ * registries.
+ *
+ * `view` is a panel's own iframe. It imports the SAME bundle and runs
+ * `activate(api)` again only so the panel definition (a Svelte component
+ * cannot cross a MessagePort) is recorded locally and can be mounted. So there
+ * are two or more live instances of the extension module: the runtime plus one
+ * per open panel, exactly like a VS Code webview beside its extension host.
+ * Module-level variables are NOT shared between them; shared state goes
+ * through `api.storage` and `api.events`. In view mode:
+ *   - registries (commands, effects, panels, status, keybindings, ...) are
+ *     recorded locally and never forwarded: the runtime already owns them;
+ *   - `events.on` subscriptions are forwarded, so panel UI stays live;
+ *   - reads (project mirror, vars, storage.get, extensions.list, ...) work;
+ *   - while the view's `activate` runs, side-effecting calls (panels.open,
+ *     toasts, storage.set, project edits, events.emit, ...) are dropped,
+ *     because the runtime's own `activate` already performed them once.
+ */
+export type SandboxMode = 'runtime' | 'view';
+const VIEW_READS = new Set(['storage.get', 'assets.get', 'assets.readText', 'media.getImportDefaults', 'ui.icon']);
 const restricted = (name: string) => (..._args: unknown[]) => { throw new PermissionError(name, 'project.apply or the pure matrix helpers'); };
 
 /** A per-iframe API. Only serializable values and callback ids cross the port. */
-export function createSandboxAPI(rpc: Rpc, init: SandboxInit): PowermoveAPI {
+export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode = 'runtime'): PowermoveAPI {
   let mirror = init.project;
+  /** True while a view's `activate` replays; see the mode comment above. */
+  let quiet = false;
+  const panelPorts = new Map<string, Rpc>();
   const disposers: Array<() => void> = [];
   const registrations = new Set<Promise<unknown>>();
   const vars = Object.freeze({ ...init.vars });
@@ -62,7 +116,10 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit): PowermoveAPI {
     hex2rgb: (hex: string) => { const text = hex.replace('#', ''); const full = text.length === 3 ? [...text].map(c => c + c).join('') : text; const value = parseInt(full, 16); return [((value >> 16) & 255) / 255, ((value >> 8) & 255) / 255, (value & 255) / 255]; },
     rgb2hex: (r: number, g: number, b: number) => `#${[r, g, b].map(v => clamp(Math.round(v * 255), 0, 255).toString(16).padStart(2, '0')).join('')}`
   };
-  const send = (method: string, ...args: unknown[]): Promise<any> => rpc.call(method, ...args);
+  const send = (method: string, ...args: unknown[]): Promise<any> => {
+    if (quiet && method === 'invoke' && !VIEW_READS.has(`${args[0]}.${args[1]}`)) return Promise.resolve(undefined);
+    return rpc.call(method, ...args);
+  };
   const fire = (method: string, ...args: unknown[]): void => { void send(method, ...args).catch(error => rpc.notify('runtime-error', { name: error.name, message: error.message, code: error.code })); };
   const registration = (method: string, value: unknown, handles: HandleId[] = [], localValue = value): { dispose(): void } => {
     const token = crypto.randomUUID();
@@ -72,13 +129,19 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit): PowermoveAPI {
       if (!entries) { entries = new Map(); local.set(method, entries); }
       entries.set(item.id, item);
     }
-    const pending = send('register', method, token, value);
-    registrations.add(pending);
-    void pending.finally(() => registrations.delete(pending)).catch(() => {});
+    /* A view records registrations for its own lookup only; the runtime owns
+       the kernel's copy. Event subscriptions are the exception: they are how
+       panel UI hears about the project. */
+    const forwarded = mode === 'runtime' || method === 'events';
+    if (forwarded) {
+      const pending = send('register', method, token, value);
+      registrations.add(pending);
+      void pending.finally(() => registrations.delete(pending)).catch(() => {});
+    }
     let disposed = false;
     const dispose = (): void => {
       if (disposed) return; disposed = true;
-      fire('dispose-registration', token);
+      if (forwarded) fire('dispose-registration', token);
       if (typeof item?.id === 'string') local.get(method)?.delete(item.id);
       for (const handle of handles) rpc.release(handle);
     };
@@ -137,7 +200,15 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit): PowermoveAPI {
       disposers.push(disposable.dispose);
       return disposable;
     }, collect: () => [] },
-    panels: { register(def: Record<string, any>) { return registration('panels', { id: def.id, title: def.title, icon: def.icon }, [], def); }, list: () => list('panels').map(item => item.id), open: (id: string, options?: unknown) => fire('invoke', 'panels', 'open', [id, options]), close: (id: string) => fire('invoke', 'panels', 'close', [id]), refresh: (id: string) => fire('invoke', 'panels', 'refresh', [id]), isOpen: () => false },
+    panels: { register(def: Record<string, any>) {
+      if (!def || typeof def.id !== 'string' || !def.id) throw new Error('panels.register requires an id');
+      if (!def.component && typeof def.build !== 'function') throw new Error(`panel "${def.id}" needs component or build`);
+      /* Only layout hints cross. `header`, `moveSlot`, `headless` and
+         `library.render` touch the app's DOM and do not exist for sandboxed
+         panels: the host draws the header from title, and the Library shows
+         the icon on the extension's art. */
+      return registration('panels', panelInfo(def), [], def);
+    }, list: () => list('panels').map(item => item.id), open: (id: string, options?: unknown) => fire('invoke', 'panels', 'open', [id, options]), close: (id: string) => fire('invoke', 'panels', 'close', [id]), refresh: (id: string) => fire('invoke', 'panels', 'refresh', [id]), isOpen: () => false },
     project: { get: () => mirror.project, revision: () => mirror.revision, selection: () => mirror.selection,
       time: () => mirror.time, playing: () => mirror.playing,
       apply: (...args: unknown[]) => send('invoke', 'project', 'apply', args), select: (...args: unknown[]) => send('invoke', 'project', 'select', args),
@@ -162,6 +233,30 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit): PowermoveAPI {
     perspectiveAmount: restricted('space3d.perspectiveAmount'), planeMatrix: restricted('space3d.planeMatrix'),
     planeContains: restricted('space3d.planeContains') };
   api.on = api.events.on;
-  Object.defineProperty(api, '__sandbox', { value: { update(next: SandboxMirror) { mirror = next; }, ready: () => Promise.all([...registrations]), dispose() { for (const fn of disposers.reverse()) fn(); }, mountPanel(_viewPort: MessagePort) { throw new Error('Panel views arrive with the next update'); } } });
+  const control: SandboxControl = {
+    update(next: SandboxMirror) { mirror = next; },
+    ready: () => Promise.all([...registrations]),
+    dispose() {
+      for (const port of panelPorts.values()) port.close();
+      panelPorts.clear();
+      for (const fn of disposers.reverse()) fn();
+    },
+    setQuiet(on: boolean) { quiet = on; },
+    panel: (id: string) => local.get('panels')?.get(id),
+    /* Runtime side of the brokered port: the kernel hands the runtime one end
+       and the panel's view iframe the other, so they talk directly. */
+    mountPanel(panelId: string, token: string, port: MessagePort) {
+      panelPorts.get(token)?.close();
+      panelPorts.set(token, createRpc(port, {
+        definition(id: string) {
+          if (id !== panelId) return null;
+          const def = local.get('panels')?.get(id);
+          return def ? { ...panelInfo(def), kind: def.component ? 'component' : 'build' } : null;
+        }
+      }));
+    },
+    unmountPanel(token: string) { panelPorts.get(token)?.close(); panelPorts.delete(token); }
+  };
+  Object.defineProperty(api, '__sandbox', { value: control });
   return api as PowermoveAPI;
 }

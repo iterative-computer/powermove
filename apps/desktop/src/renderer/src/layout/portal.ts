@@ -41,16 +41,34 @@ export function restoreFocus(snapshot: SelectionSnapshot): void {
   }
 }
 
+/* Chromium's state-preserving move (Element.moveBefore) keeps a moved
+   panel's iframes, focus, selection and running animations alive. With
+   appendChild an iframe is detached and reloads: a sandboxed extension's panel
+   (a view iframe) would restart on every dock move. Falls back where the
+   move is not possible (another document, a detached node, older engines). */
+export function placePanel(target: HTMLElement, element: HTMLElement): void {
+  const move = (target as HTMLElement & { moveBefore?: (node: Node, child: Node | null) => void }).moveBefore;
+  if (typeof move === 'function' && target.isConnected && element.isConnected && target.ownerDocument === element.ownerDocument) {
+    try {
+      move.call(target, element, null);
+      return;
+    } catch {
+      // Not movable in place (e.g. across a shadow boundary): insert normally.
+    }
+  }
+  target.appendChild(element);
+}
+
 export function movePreservingFocus(element: HTMLElement, target: HTMLElement): void {
   if (element.parentElement === target) return;
   if (target.closest('#pm-panel-pool')) {
     pendingDockFocus.delete(element);
     releaseFocusBeforeParking(element);
-    target.appendChild(element);
+    placePanel(target, element);
     return;
   }
   const snapshot = pendingDockFocus.get(element) ?? snapshotFocus();
-  target.appendChild(element);
+  placePanel(target, element);
   pendingDockFocus.delete(element);
   restoreFocus(snapshot);
 }
@@ -73,7 +91,7 @@ export function stagePanelMove(id: string, element: HTMLElement): void {
   const snapshot = snapshotFocus();
   if (snapshot.active && element.contains(snapshot.active)) pendingDockFocus.set(element, snapshot);
   releaseFocusBeforeParking(element);
-  if (element.parentElement !== park) park.appendChild(element);
+  if (element.parentElement !== park) placePanel(park, element);
 }
 
 export type PanelSlotParams = {
@@ -121,5 +139,5 @@ export function parkPanel(id: string, element: HTMLElement): void {
   // by the live dock-to-dock portal path.
   pendingDockFocus.delete(element);
   releaseFocusBeforeParking(element);
-  if (element.parentElement !== park) park.appendChild(element);
+  if (element.parentElement !== park) placePanel(park, element);
 }

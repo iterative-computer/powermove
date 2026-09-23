@@ -1,4 +1,5 @@
 import type { PowermoveAPI } from 'powermove';
+import Panel from './Panel.svelte';
 
 /* Test fixture for the sandbox. It registers ordinary contributions and then
    publishes a proof of its own isolation as effect data, because a Playwright
@@ -10,6 +11,9 @@ export default function activate(api: PowermoveAPI) {
     return 'ran';
   } });
   api.status.register({ id: 'sandbox-status', text: () => `Sandbox ${api.vars.get('TOKEN') ?? 'ready'}` });
+  /* A Svelte panel: in the sandbox it renders in its own view iframe, which
+     imports this same bundle and mounts the component by this id. */
+  api.panels.register({ id: `${api.id}-panel`, title: 'Sandbox panel', icon: 'puzzle', size: 220, component: Panel });
 
   void (async () => {
     const powermove = (globalThis as { powermove?: unknown }).powermove !== undefined;

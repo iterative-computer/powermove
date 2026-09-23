@@ -71,6 +71,7 @@ import { mountComponent } from './runtime-globals';
 import { performanceMonitor } from '../runtime/performance-monitor';
 import { IMPORT_DEFAULTS_SERVICE, validatedImportDefaults } from './import-defaults';
 import { bridge as hostBridge } from './bridge';
+import { PANEL_FRAME, type PanelFrame } from './panel-frame';
 
 /* Extensions never see the raw bridge (bridge.ts); haptics is the one bit a
    built-in (the viewer's snapping) needs, so it goes through the API. */
@@ -143,7 +144,16 @@ export interface ExtensionHandle {
   disposeAll(): void;
   /** Marks the window during which activate(api) runs. */
   setActivating(on: boolean): void;
+  /**
+   * Kernel-only (never on the extension API): register a panel whose body is
+   * docked by `frame` — the sandboxed extension's view iframe. Host chrome
+   * comes from `title`; `header`, `moveSlot`, `headless` and `library.render`
+   * do not exist for this variant.
+   */
+  registerFramePanel(def: FramePanelDefinition, frame: PanelFrame): Disposable;
 }
+
+export type FramePanelDefinition = Pick<PanelDefinition, 'id' | 'title' | 'icon' | 'size' | 'min' | 'flush' | 'noscroll'>;
 
 const FALLBACK_MANIFEST = (id: string): ExtensionManifest => ({ id, name: id, version: '0.0.0', apiVersion: 1 });
 
@@ -297,6 +307,34 @@ export function createExtensionAPI(
     isOpen: (panelId) => deps.panelsBackend.isOpen(panelId),
     refresh: (panelId) => deps.panelsBackend.refresh(panelId)
   };
+
+  function registerFramePanel(def: FramePanelDefinition, frame: PanelFrame): Disposable {
+    if (!def || typeof def.id !== 'string' || !def.id) throw new Error(`[ext:${id}] panels.register requires an id`);
+    /* One live view per panel id, like the component variant: a rebuild
+       (layout refresh, override swap) disposes the previous view first. */
+    let current: { dispose(): void } | null = null;
+    const release = (): void => {
+      const view = current;
+      current = null;
+      view?.dispose();
+    };
+    const panel: PanelDefinition = {
+      id: def.id,
+      title: typeof def.title === 'string' && def.title ? def.title : def.id,
+      ...(typeof def.icon === 'string' ? { icon: def.icon } : {}),
+      ...(typeof def.size === 'number' ? { size: def.size } : {}),
+      ...(typeof def.min === 'number' ? { min: def.min } : {}),
+      ...(def.flush ? { flush: true } : {}),
+      ...(def.noscroll ? { noscroll: true } : {}),
+      build: guard((body: HTMLElement, inst: { spec: Record<string, unknown> }) => {
+        release();
+        current = frame.mount(body, { spec: inst?.spec ?? {} });
+      }, `panel ${def.id} view`, undefined)
+    };
+    Object.defineProperty(panel, PANEL_FRAME, { value: { extensionId: id }, enumerable: true });
+    const registration = kernel.panels.register(id, panel);
+    return collect({ dispose() { registration.dispose(); release(); } });
+  }
 
   /* ── commands ──────────────────────────────────────────── */
 
@@ -526,6 +564,7 @@ export function createExtensionAPI(
     id,
     api,
     setActivating(on: boolean) { activating = on; },
+    registerFramePanel,
     disposeAll() {
       if (disposed) return;
       disposed = true;
