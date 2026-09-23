@@ -47,6 +47,9 @@ export function scanText(path: string, text: string): ScanFinding[] {
       const value = match[2] ?? '';
       if (value.length < 32 || /\s/.test(value) || !/[A-Za-z]/.test(value) || !/\d/.test(value)) continue;
       if (/^(?:https?:\/\/|data:image\/|\.?\.?\/)/i.test(value) || value.includes('/') || value.includes('\\') || /^#[0-9a-f]+$/i.test(value)) continue;
+      // Credentials are single tokens. Punctuation from CSS, code or prose
+      // (`;`, `:`, brackets, commas) means this is not one.
+      if (/[;:(),{}<>]/.test(value)) continue;
       if (hardPatterns.some(([, p]) => { p.lastIndex = 0; return p.test(value); })) continue;
       if (entropy(value) <= 4.5) continue;
       const reason = waiver(lines, i);

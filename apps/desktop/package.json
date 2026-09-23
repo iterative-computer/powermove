@@ -14,6 +14,8 @@
     "test:e2e": "playwright test",
     "typecheck": "bun run --cwd ../cloud types:emit && svelte-check --tsconfig ./tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
     "lint:boundaries": "node scripts/check-boundaries.mjs",
+    "check:builtins": "bun scripts/check-builtin-versions.mjs",
+    "publish:builtins": "bun scripts/publish-builtins.mjs",
     "dist:mac": "electron-vite build && electron-builder --mac && node scripts/create-dmg.mjs",
     "dist:release": "node scripts/release-mac.mjs"
   },

@@ -1,0 +1,17 @@
+name: Check built-in versions
+on:
+  pull_request:
+    paths:
+      - 'apps/desktop/src/extensions/**'
+      - 'apps/desktop/scripts/check-builtin-versions.mjs'
+      - '.github/workflows/builtins-version.yml'
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - run: bun run --cwd apps/desktop check:builtins

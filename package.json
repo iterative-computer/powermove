@@ -13,6 +13,7 @@
     "build": "bun run --filter '*' build",
     "test": "bun run --filter '*' test",
     "typecheck": "bun run --filter '*' typecheck",
+    "check": "bun run --cwd apps/desktop check:builtins",
     "test:e2e": "bun run --cwd apps/desktop test:e2e",
     "dist:mac": "bun run --cwd apps/desktop dist:mac",
     "dist:release": "bun run --cwd apps/desktop dist:release",

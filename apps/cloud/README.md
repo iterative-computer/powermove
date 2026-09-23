@@ -19,6 +19,14 @@ bun run dev
 
 The generated `worker-configuration.d.ts` is ignored by Git. `bun run types` skips Wrangler's runtime type generation because that step starts a local listener and fails in restricted sandboxes. The TypeScript configs refer to the installed Cloudflare Workers type package in Bun's cache. Regenerate types after changing `wrangler.jsonc`. The Worker bundle aliases Better Auth's unused Kysely fallback to `src/kysely-unavailable.ts`; this Worker always provides the Drizzle adapter, and the alias prevents Kysely's optional PGlite dialect from entering the bundle.
 
+## Publishing built-ins
+
+The ten extensions in `apps/desktop/src/extensions/` are published under `powermove/<id>`. A changed tree requires a new `version` in its `manifest.json`. Run `bun run --cwd apps/desktop check:builtins` before a release and update `.builtin-versions.json` with `bun run --cwd apps/desktop check:builtins --update` when versions have been bumped. The pull request workflow checks this rule.
+
+Run `bun run --cwd apps/desktop publish:builtins --dry-run` to inspect coordinates, versions, tree hashes and file counts without network access. For a real publish, set `POWERMOVE_REGISTRY_TOKEN` to a bearer token for the `powermove` publisher, optionally set `POWERMOVE_REGISTRY_URL` (default `https://cloud.trypowermove.com`), then run `bun run --cwd apps/desktop publish:builtins`. `--notes "text"` overrides the default release notes. The command can be run again; releases with the same version and tree are skipped.
+
+PENDING(provision): Establish a manual process for issuing and delivering the `powermove` publisher token to the release engineer. There is no admin token-creation endpoint or supported keychain export flow yet. Do not put the token in this repository or a workflow secret until provisioning is defined.
+
 ## Provisioning
 
 PENDING(provision): Create Neon `main` and `dev` databases, the R2 buckets `powermove-objects`, `powermove-tars`, and `powermove-icons`, OAuth apps for Google and GitHub, a Resend sender for `users.trypowermove.com`, and DNS for `cloud.trypowermove.com`. Apply `drizzle/0000_*.sql` to each database before deploying.

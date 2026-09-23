@@ -29,3 +29,8 @@ test('nonsecret content and binary skipped', () => {
   expect(scanText('image.png', samples.aws_access_key)).toEqual([]);
   expect(scanText('index.ts', `\0${samples.aws_access_key}`)).toEqual([]);
 });
+
+test('inline CSS declaration lists are not credentials', () => {
+  const css = "el.style.cssText='position:absolute;right:124px;top:7px;z-index:6;display:flex;align-items:center';";
+  expect(scanText('viewer.ts', css)).toEqual([]);
+});
