@@ -4,8 +4,9 @@ import type { Data } from '../src/db/client';
 import { publishers } from '../src/db/schema';
 import { createApp } from '../src/app';
 import { seedSession } from './helpers';
+import type { ExtensionPermission } from '@powermove/registry/manifest';
 const enc=new TextEncoder();
-export function files(slug='demo',version='1.0.0',extra:SnapshotInput[]=[]):SnapshotInput[]{return [{path:'manifest.json',bytes:enc.encode(JSON.stringify({id:slug,name:'Demo',version,apiVersion:1,description:'A test extension'}))},{path:'index.ts',bytes:enc.encode('export default 1\n')},{path:'nested/readme.md',bytes:enc.encode('nested file\n')},...extra];}
+export function files(slug='demo',version='1.0.0',extra:SnapshotInput[]=[],permissions?:ExtensionPermission[]):SnapshotInput[]{return [{path:'manifest.json',bytes:enc.encode(JSON.stringify({id:slug,name:'Demo',version,apiVersion:3,description:'A test extension',...(permissions?{permissions}:{})}))},{path:'index.ts',bytes:enc.encode('export default 1\n')},{path:'nested/readme.md',bytes:enc.encode('nested file\n')},...extra];}
 export async function publisher(data:Data,env:CloudflareBindings,handle:string){const session=await seedSession(data,env,`${handle}@example.com`);const [row]=await data.db.insert(publishers).values({handle,userId:session.id}).returning();return {...session,publisher:row!};}
 export async function uploadTree(data:Data,env:CloudflareBindings,actor:Awaited<ReturnType<typeof publisher>>,input:SnapshotInput[],options:{parents?:string[];treeOverride?:string;author?:string}={}) {
   const snap=await snapshot(input);

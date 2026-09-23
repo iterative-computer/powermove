@@ -118,7 +118,7 @@ describe('library', () => {
 describe('view models', () => {
   const listing: ListingDto = {
     repoId: REPO, owner: { id: '22222222-2222-4222-8222-222222222222', handle: 'mara', tombstoned: false }, slug: 'glass-blur',
-    name: 'Glass blur', tagline: 'Frosted glass.', category: 'tools', iconUrl: null, visibility: 'public',
+    name: 'Glass blur', tagline: 'Frosted glass.', category: 'tools', iconUrl: null, visibility: 'public', permissions: [],
     latest: { id: R2, version: '1.1.0', publishedAt: new Date(2026, 8, 22, 10).toISOString(), apiVersion: 2, yankedAt: null },
     installCount: 3, forkCount: 0, licence: 'MIT',
     forkedFrom: { repoId: '55555555-5555-4555-8555-555555555555', handle: 'noor', slug: 'glass', releaseId: R1, version: '1.0.0' },
@@ -141,7 +141,7 @@ describe('view models', () => {
     const release = (id: string, version: string, yankedAt: string | null) => ({
       id, repoId: REPO, version, commitSha: 'c'.repeat(40), treeSha: 't'.repeat(40), tarSha256: 'a'.repeat(64), apiVersion: 2,
       fileCount: 2, sizeBytes: 10, notes: `Notes for ${version}`, publishedAt: '2026-09-20T00:00:00.000Z', yankedAt, basedOnReleaseId: null,
-      manifest: { id: 'glass-blur', name: 'Glass blur', version, apiVersion: 2, contributes: ['effects', 'inspector'], vars: required, forkedFrom: null, description: null }
+      manifest: { id: 'glass-blur', name: 'Glass blur', version, apiVersion: 2, contributes: ['effects', 'inspector'], vars: required, forkedFrom: null, description: null, permissions: [] }
     });
     const dto: ExtensionDetailDto = { ...listing, about: null, moderation: 'none', releases: [release(R2, '1.1.0', null), release(R1, '1.0.0', '2026-09-21T00:00:00.000Z')] };
     const vm = detailFromDto(dto, [], now);

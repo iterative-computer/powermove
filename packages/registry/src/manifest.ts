@@ -1,13 +1,17 @@
 /*
- * Extension contract shared by main and renderer. FROZEN for apiVersion 1; apiVersion 2 adds `vars`.
+ * Extension contract shared by main and renderer. FROZEN for apiVersion 1; apiVersion 2 adds `vars`;
+ * apiVersion 3 adds permissions and the sandbox-safe API.
  *
  * An extension is a directory containing `manifest.json` and an entry module.
  * Built-ins ship inside the app bundle; user/project extensions live on disk and
  * are compiled by main (esbuild + svelte) and served over app://powermove/ext/.
  */
 
-export const EXTENSION_API_VERSION = 2 as const;
+export const EXTENSION_API_VERSION = 3 as const;
 export const EXTENSION_API_VERSION_VARS = 2 as const;
+/** `full-access` = uses trusted-only namespaces and runs in-realm; the Store requires an explicit trust dialog to install it. */
+export const EXTENSION_PERMISSIONS = ['network', 'clipboard', 'assets', 'project:write', 'full-access'] as const;
+export type ExtensionPermission = (typeof EXTENSION_PERMISSIONS)[number];
 
 export const EXTENSION_ID = /^[a-z0-9][a-z0-9-]{1,63}$/;
 export const EXTENSION_VERSION = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -46,6 +50,7 @@ export interface ExtensionManifest {
   dependsOn?: string[]; // extension ids that must be enabled and load first
   forkedFrom?: string; // "<id>@<version>" or "<handle>/<id>@<version>"
   vars?: ExtensionVarDecl[];
+  permissions?: ExtensionPermission[];
   author?: ExtensionAuthor;
   /** Stable, specific feature identifiers; broad contribution kinds are not features. */
   features?: string[];
@@ -142,6 +147,13 @@ export function parseManifest(raw: unknown): ManifestParse {
       keys.add(v.key);
     }
   }
+  const permissions = m.permissions;
+  if (permissions !== undefined) {
+    if (apiVersion < 3) return { ok: false, error: '"permissions" requires apiVersion 3' };
+    if (!Array.isArray(permissions) || permissions.length > 8 ||
+      !permissions.every((permission) => typeof permission === 'string' && (EXTENSION_PERMISSIONS as readonly string[]).includes(permission)) ||
+      new Set(permissions).size !== permissions.length) return { ok: false, error: 'invalid "permissions"' };
+  }
   const author = m.author;
   if (author !== undefined && author !== 'powermove' && author !== 'user' && author !== 'agent') return { ok: false, error: 'invalid "author"' };
 
@@ -153,6 +165,7 @@ export function parseManifest(raw: unknown): ManifestParse {
   if (dependsOn) manifest.dependsOn = dependsOn;
   if (forkedFrom) manifest.forkedFrom = forkedFrom;
   if (vars) manifest.vars = vars as ExtensionVarDecl[];
+  if (permissions) manifest.permissions = permissions as ExtensionPermission[];
   if (author) manifest.author = author as ExtensionAuthor;
   if (features) manifest.features = [...new Set(features)];
   if (integrates) manifest.integrates = [...new Set(integrates)];

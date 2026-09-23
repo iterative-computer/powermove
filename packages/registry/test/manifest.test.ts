@@ -10,7 +10,7 @@ describe('manifest frozen errors', () => {
     ['name', { ...valid, name: '' }, 'invalid "name"'],
     ['version', { ...valid, version: '1.2' }, 'invalid "version" (x.y.z)'],
     ['apiVersion', { ...valid, apiVersion: 0 }, 'invalid "apiVersion"'],
-    ['newer apiVersion', { ...valid, apiVersion: 3 }, `apiVersion 3 is newer than this app (${EXTENSION_API_VERSION})`],
+    ['newer apiVersion', { ...valid, apiVersion: 4 }, `apiVersion 4 is newer than this app (${EXTENSION_API_VERSION})`],
     ['description', { ...valid, description: 'x'.repeat(401) }, 'invalid "description"'],
     ['entry value', { ...valid, entry: '' }, 'invalid "entry"'],
     ['entry path', { ...valid, entry: '../index.ts' }, 'invalid "entry" path'],
@@ -44,4 +44,14 @@ test('fork origin forms', () => {
   for (const origin of ['Bad/id@1.2.3', 'a/b/c@1.2.3', 'a/b@x', 'a@1.2.3', 'a/b@1.2.3']) expect(parseForkedFrom(origin)).toBeNull();
   expect(bad({ forkedFrom: 'a-handle/store-id@1.2.3' }).ok).toBe(true);
   expect(bad({ forkedFrom: 'x'.repeat(161) })).toEqual({ ok: false, error: 'invalid "forkedFrom"' });
+});
+test('apiVersion 3 permissions parse and version gate', () => {
+  expect(bad({ apiVersion: 3, permissions: ['network', 'clipboard', 'assets', 'project:write', 'full-access'] })).toMatchObject({
+    ok: true, manifest: { apiVersion: 3, permissions: ['network', 'clipboard', 'assets', 'project:write', 'full-access'] }
+  });
+  expect(bad({ apiVersion: 3, permissions: [] })).toMatchObject({ ok: true, manifest: { permissions: [] } });
+  expect(bad({ apiVersion: 2, permissions: [] })).toEqual({ ok: false, error: '"permissions" requires apiVersion 3' });
+  for (const permissions of [null, 'network', ['unknown'], [1], ['network', 'network'], Array(9).fill('network')]) {
+    expect(bad({ apiVersion: 3, permissions })).toEqual({ ok: false, error: 'invalid "permissions"' });
+  }
 });

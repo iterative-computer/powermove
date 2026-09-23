@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { scanFiles, scanText } from '../src/scan';
+import { scanCapabilities, scanFiles, scanText } from '../src/scan';
 /* Fixtures are assembled at runtime so no provider-shaped literal exists in
    the source: GitHub push protection and our own publish scanner would
    otherwise flag this test file. */
@@ -33,4 +33,20 @@ test('nonsecret content and binary skipped', () => {
 test('inline CSS declaration lists are not credentials', () => {
   const css = "el.style.cssText='position:absolute;right:124px;top:7px;z-index:6;display:flex;align-items:center';";
   expect(scanText('viewer.ts', css)).toEqual([]);
+});
+test('capability scanner finds network and clipboard uses in text files', () => {
+  expect(scanCapabilities([
+    { path: 'index.ts', text: 'fetch("https://example.com")\nnew WebSocket("wss://example.com")\nXMLHttpRequest\nnew EventSource("/events")\nnavigator.sendBeacon("/ping")\nnavigator.clipboard.writeText("hi")' },
+    { path: 'panel.svelte', text: '<script>navigator.clipboard.readText()</script>' },
+    { path: 'image.png', text: 'fetch(\nnavigator.clipboard' },
+    { path: 'binary.ts', text: '\0fetch(' }
+  ])).toEqual([
+    { path: 'index.ts', line: 1, capability: 'network' },
+    { path: 'index.ts', line: 2, capability: 'network' },
+    { path: 'index.ts', line: 3, capability: 'network' },
+    { path: 'index.ts', line: 4, capability: 'network' },
+    { path: 'index.ts', line: 5, capability: 'network' },
+    { path: 'index.ts', line: 6, capability: 'clipboard' },
+    { path: 'panel.svelte', line: 1, capability: 'clipboard' }
+  ]);
 });

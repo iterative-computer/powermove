@@ -3,16 +3,16 @@ import { z } from 'zod';
 import * as W from '../src/wire';
 const id = '123e4567-e89b-42d3-a456-426614174000', sha = 'a'.repeat(40), sha256 = 'b'.repeat(64), date = '2026-09-22T10:00:00.000Z';
 const owner = { id, handle: 'my-handle', tombstoned: false };
-const listing = { repoId: id, owner, slug: 'my-extension', name: 'Name', tagline: 'Tag', category: 'effects', iconUrl: null, visibility: 'public', latest: { id, version: '1.0.0', publishedAt: date, apiVersion: 2, yankedAt: null }, installCount: 0, forkCount: 0, licence: 'MIT', forkedFrom: null, createdAt: date, updatedAt: date };
-const manifest = { id: 'my-extension', name: 'Name', version: '1.0.0', apiVersion: 2, contributes: [], vars: [], forkedFrom: null, description: null };
-const release = { id, repoId: id, version: '1.0.0', commitSha: sha, treeSha: sha, tarSha256: sha256, apiVersion: 2, fileCount: 1, sizeBytes: 100, notes: null, publishedAt: date, yankedAt: null, basedOnReleaseId: null, manifest };
+const listing = { repoId: id, owner, slug: 'my-extension', name: 'Name', tagline: 'Tag', category: 'effects', iconUrl: null, visibility: 'public', latest: { id, version: '1.0.0', publishedAt: date, apiVersion: 3, yankedAt: null }, permissions: ['network'], installCount: 0, forkCount: 0, licence: 'MIT', forkedFrom: null, createdAt: date, updatedAt: date };
+const manifest = { id: 'my-extension', name: 'Name', version: '1.0.0', apiVersion: 3, contributes: [], vars: [], permissions: ['network'], forkedFrom: null, description: null };
+const release = { id, repoId: id, version: '1.0.0', commitSha: sha, treeSha: sha, tarSha256: sha256, apiVersion: 3, fileCount: 1, sizeBytes: 100, notes: null, publishedAt: date, yankedAt: null, basedOnReleaseId: null, manifest };
 const tree = { treeSha: sha, files: [{ path: 'index.ts', sha, size: 100 }] };
 const me = { user: { id, name: null, email: 'a@example.com', image: null }, publisher: owner, settings: { rememberInstalls: true } };
 const session = { token: 'abc', expiresAt: date };
 const compare = { baseReleaseId: id, headReleaseId: id, files: [{ path: 'index.ts', status: 'added' }], counts: { added: 1, removed: 0, modified: 0 } };
 const install = { repoId: id, releaseId: id, handle: 'my-handle', slug: 'my-extension', installedAt: date };
 const samples: [string, z.ZodType, unknown][] = [
-  ['Category', W.Category, 'effects'], ['Visibility', W.Visibility, 'public'], ['Moderation', W.Moderation, 'none'], ['Handle', W.Handle, 'my-handle'], ['Slug', W.Slug, 'my-extension'], ['Version', W.Version, '1.0.0'], ['Sha1', W.Sha1, sha], ['Sha256', W.Sha256, sha256], ['Uuid', W.Uuid, id], ['IsoDate', W.IsoDate, date], ['VarDecl', W.VarDecl, { key: 'MY_KEY', label: 'Key' }],
+  ['Category', W.Category, 'effects'], ['Permission', W.Permission, 'network'], ['Visibility', W.Visibility, 'public'], ['Moderation', W.Moderation, 'none'], ['Handle', W.Handle, 'my-handle'], ['Slug', W.Slug, 'my-extension'], ['Version', W.Version, '1.0.0'], ['Sha1', W.Sha1, sha], ['Sha256', W.Sha256, sha256], ['Uuid', W.Uuid, id], ['IsoDate', W.IsoDate, date], ['VarDecl', W.VarDecl, { key: 'MY_KEY', label: 'Key' }],
   ['PublisherDto', W.PublisherDto, owner], ['LineageDto', W.LineageDto, { repoId: id, handle: 'my-handle', slug: 'my-extension', releaseId: id, version: '1.0.0' }], ['ReleaseSummaryDto', W.ReleaseSummaryDto, listing.latest], ['ListingDto', W.ListingDto, listing], ['ManifestSummaryDto', W.ManifestSummaryDto, manifest], ['ReleaseDto', W.ReleaseDto, release], ['ExtensionDetailDto', W.ExtensionDetailDto, { ...listing, about: null, releases: [release], moderation: 'none' }], ['TreeFileDto', W.TreeFileDto, tree.files[0]], ['TreeDto', W.TreeDto, tree], ['CompareStatus', W.CompareStatus, 'added'], ['CompareDto', W.CompareDto, compare], ['InstallDto', W.InstallDto, install], ['MeDto', W.MeDto, me], ['SessionDto', W.SessionDto, session]
 ];
 for (const [name, schema, sample] of samples) test(name, () => { expect(schema.safeParse(sample).success).toBe(true); expect(schema.safeParse(null).success).toBe(false); });
@@ -24,6 +24,7 @@ test('error codes and status are exhaustive', () => {
   expect(W.ApiErrorBody.safeParse({ error: 'client_too_old', minimum: '1.2.0' }).success).toBe(true);
   expect(W.ApiErrorBody.safeParse({ error: 'bogus' }).success).toBe(false);
   expect(new W.ApiError({ error: 'not_found' }).status).toBe(404);
+  expect(new W.ApiError({ error: 'permission_undeclared', findings: [] }).status).toBe(422);
 });
 const e = { params: {}, query: {}, body: {} }, coordinate = { handle: 'my-handle', slug: 'my-extension' }, releaseCoordinate = { ...coordinate, version: '1.0.0' };
 const req: Record<string, unknown> = {
@@ -58,6 +59,7 @@ test('every API error variant parses with its required fields', () => {
     head_moved: { head: sha }, object_conflict: { sha }, gone: { reason: 'yanked' },
     too_large: { limit: 'envelope' }, object_missing: { shas: [sha] },
     scan_blocked: { findings: [{ path: 'index.ts', line: 1, kind: 'github_token' }] },
+    permission_undeclared: { findings: [{ path: 'index.ts', line: 2, capability: 'network' }] },
     limit_exceeded: { code: 'file_too_large' }, client_too_old: { minimum: '1.2.0' }
   };
   for (const error of [...W.API_ERROR_CODES]) {

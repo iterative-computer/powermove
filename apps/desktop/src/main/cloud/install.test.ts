@@ -47,7 +47,7 @@ async function build(releaseId: string, version: string, files = tree(version)):
       id: releaseId, repoId: REPO, version, commitSha: 'c'.repeat(40), treeSha: snap.treeSha, tarSha256: sha256(tar),
       apiVersion: 2, fileCount: files.length, sizeBytes: tar.length, notes: null, publishedAt: '2026-09-20T00:00:00.000Z',
       yankedAt: null, basedOnReleaseId: null, handle: 'mara', slug: 'glass-blur',
-      manifest: { id: manifest.id, name: manifest.name, version, apiVersion: 2, contributes: ['effects'], vars: [], forkedFrom: null, description: null }
+      manifest: { id: manifest.id, name: manifest.name, version, apiVersion: 2, contributes: ['effects'], vars: [], forkedFrom: null, description: null, permissions: [] }
     }
   };
 }

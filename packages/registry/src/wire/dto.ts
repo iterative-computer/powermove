@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { Category, Handle, IsoDate, Moderation, Sha1, Sha256, Slug, Uuid, VarDecl, Version, Visibility } from './common';
+import { Category, Handle, IsoDate, Moderation, Permission, Sha1, Sha256, Slug, Uuid, VarDecl, Version, Visibility } from './common';
 
 export const PublisherDto = z.object({ id: Uuid, handle: Handle, tombstoned: z.boolean() });
 export type PublisherDto = z.infer<typeof PublisherDto>;
@@ -10,13 +10,14 @@ export type ReleaseSummaryDto = z.infer<typeof ReleaseSummaryDto>;
 export const ListingDto = z.object({
   repoId: Uuid, owner: PublisherDto, slug: Slug, name: z.string(), tagline: z.string(), category: Category,
   iconUrl: z.string().nullable(), visibility: Visibility, latest: ReleaseSummaryDto.nullable(),
+  permissions: z.array(Permission),
   installCount: z.number().int().nonnegative(), forkCount: z.number().int().nonnegative(), licence: z.string(),
   forkedFrom: LineageDto.nullable(), createdAt: IsoDate, updatedAt: IsoDate
 });
 export type ListingDto = z.infer<typeof ListingDto>;
 export const ManifestSummaryDto = z.object({
   id: Slug, name: z.string(), version: Version, apiVersion: z.number().int().positive(),
-  contributes: z.array(z.string()), vars: z.array(VarDecl), forkedFrom: z.string().nullable(), description: z.string().nullable()
+  contributes: z.array(z.string()), vars: z.array(VarDecl), permissions: z.array(Permission), forkedFrom: z.string().nullable(), description: z.string().nullable()
 });
 export type ManifestSummaryDto = z.infer<typeof ManifestSummaryDto>;
 export const ReleaseDto = z.object({

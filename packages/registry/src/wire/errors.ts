@@ -1,10 +1,10 @@
 import { z } from 'zod';
 import type { RegistryLimitCode } from '../limits';
 import type { ScanKind } from '../scan';
-import { Sha1 } from './common';
+import { Permission, Sha1 } from './common';
 
 export const API_ERROR_CODES = [
-  'bad_request', 'manifest_invalid', 'tree_invalid', 'handle_invalid', 'handle_reserved', 'version_invalid', 'unauthorized', 'forbidden', 'not_owner', 'not_found', 'head_moved', 'version_exists', 'handle_taken', 'handle_already_set', 'object_conflict', 'id_collision', 'same_as_origin', 'self_origin', 'author_mismatch', 'gone', 'too_large', 'object_missing', 'commit_missing', 'scan_blocked', 'limit_exceeded', 'rate_limited', 'quota_exceeded', 'internal', 'client_too_old'
+  'bad_request', 'manifest_invalid', 'tree_invalid', 'handle_invalid', 'handle_reserved', 'version_invalid', 'unauthorized', 'forbidden', 'not_owner', 'not_found', 'head_moved', 'version_exists', 'handle_taken', 'handle_already_set', 'object_conflict', 'id_collision', 'same_as_origin', 'self_origin', 'author_mismatch', 'gone', 'too_large', 'object_missing', 'commit_missing', 'scan_blocked', 'permission_undeclared', 'limit_exceeded', 'rate_limited', 'quota_exceeded', 'internal', 'client_too_old'
 ] as const;
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
 const limitCode = z.enum(['too_many_files', 'tree_too_large', 'file_too_large', 'path_too_long'] satisfies RegistryLimitCode[]);
@@ -24,6 +24,7 @@ export const ApiErrorBody = z.discriminatedUnion('error', [
   simple('too_large').extend({ limit: z.union([limitCode, z.literal('envelope')]) }),
   simple('object_missing').extend({ shas: z.array(Sha1) }),
   simple('scan_blocked').extend({ findings: z.array(z.object({ path: z.string(), line: z.number().int().positive(), kind: scanKind })) }),
+  simple('permission_undeclared').extend({ findings: z.array(z.object({ path: z.string(), line: z.number().int().positive(), capability: Permission.extract(['network', 'clipboard']) })) }),
   simple('limit_exceeded').extend({ code: limitCode }),
   simple('client_too_old').extend({ minimum: z.string() })
 ]);
@@ -33,7 +34,7 @@ export const API_ERROR_STATUS: Record<ApiErrorCode, number> = {
   unauthorized: 401, forbidden: 403, not_owner: 403, not_found: 404,
   head_moved: 409, version_exists: 409, handle_taken: 409, handle_already_set: 409, object_conflict: 409,
   id_collision: 409, same_as_origin: 409, self_origin: 409, author_mismatch: 409,
-  gone: 410, too_large: 413, object_missing: 422, commit_missing: 422, scan_blocked: 422, limit_exceeded: 422,
+  gone: 410, too_large: 413, object_missing: 422, commit_missing: 422, scan_blocked: 422, permission_undeclared: 422, limit_exceeded: 422,
   rate_limited: 429, quota_exceeded: 429, internal: 500, client_too_old: 426
 } satisfies Record<ApiErrorCode, number>;
 export class ApiError extends Error {

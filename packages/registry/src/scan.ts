@@ -1,6 +1,7 @@
 export type ScanKind = 'openai_key' | 'anthropic_key' | 'aws_access_key' | 'github_token' | 'gitlab_token' | 'slack_token' | 'stripe_key' | 'google_api_key' | 'jwt' | 'pem_private_key' | 'high_entropy';
 export interface ScanFinding { path: string; line: number; kind: ScanKind; hard: boolean; waived?: string }
 export interface ScanResult { blocked: ScanFinding[]; waived: ScanFinding[] }
+export interface CapabilityFinding { path: string; line: number; capability: 'network' | 'clipboard' }
 export const WAIVER_COMMENT = /powermove-secret-ok:\s*(.{3,200})/;
 const textFile = /(?:\.(?:ts|js|mjs|svelte|json|md|txt|css|html|frag|vert|glsl|wgsl|yml|yaml|toml)|(?:^|\/)\.env[^/]*)$/i;
 const hardPatterns: [ScanKind, RegExp][] = [
@@ -62,4 +63,17 @@ export function scanFiles(files: { path: string; text: string }[]): ScanResult {
   const blocked: ScanFinding[] = [], waived: ScanFinding[] = [];
   for (const file of files) for (const finding of scanText(file.path, file.text)) (finding.waived ? waived : blocked).push(finding);
   return { blocked, waived };
+}
+export function scanCapabilities(files: { path: string; text: string }[]): CapabilityFinding[] {
+  const findings: CapabilityFinding[] = [];
+  const network = /\bfetch\s*\(|\bnew\s+WebSocket\s*\(|\bXMLHttpRequest\b|\bnew\s+EventSource\s*\(|\bnavigator\s*\.\s*sendBeacon\b/;
+  const clipboard = /\bnavigator\s*\.\s*clipboard\b/;
+  for (const file of files) {
+    if (!textFile.test(file.path) || file.text.slice(0, 8192).includes('\0')) continue;
+    for (const [index, line] of file.text.split(/\r?\n/).entries()) {
+      if (network.test(line)) findings.push({ path: file.path, line: index + 1, capability: 'network' });
+      if (clipboard.test(line)) findings.push({ path: file.path, line: index + 1, capability: 'clipboard' });
+    }
+  }
+  return findings;
 }

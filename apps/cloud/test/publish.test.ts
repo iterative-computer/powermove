@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { eq } from 'drizzle-orm';
 import { ListingDto, ReleaseDto } from '@powermove/registry/wire';
 import { encodeCommit, encodeLoose, encodeTree, hashObject, sha256Hex } from '@powermove/registry/git';
-import { extensions, moderationLog, objectLeases, refs, releaseObjects, reports, repos } from '../src/db/schema';
+import { extensions, moderationLog, objectLeases, refs, releaseObjects, releases, reports, repos } from '../src/db/schema';
 import { createApp } from '../src/app';
 import { presentShas } from '../src/objects/presence';
 import { withData } from './db';
@@ -25,6 +25,24 @@ test('first publish stores canonical release, tar, refs and reachable objects', 
     expect(await data.db.select().from(releaseObjects)).toHaveLength(built.snap.objects.length + 1);
     const mine = await createApp({ data: () => data }).request('/v1/me/repos', { headers: a.headers }, env);
     expect((await mine.json() as any).items).toHaveLength(1);
+  }));
+test('publish requires declared capabilities and exposes permissions', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), a = await publisher(data, env, 'alice');
+    const source = { path: 'network.ts', bytes: txt('fetch("https://example.com")\n') };
+    const undeclared = await uploadTree(data, env, a, files('demo', '1.0.0', [source]));
+    const rejected = await publishRequest(data, env, a, 'demo', undeclared.commitSha);
+    expect(rejected.status).toBe(422);
+    expect(await rejected.json() as any).toEqual({ error: 'permission_undeclared', findings: [{ path: 'network.ts', line: 1, capability: 'network' }] });
+    const declared = await uploadTree(data, env, a, files('demo', '1.0.0', [source], ['network']));
+    const accepted = await publishRequest(data, env, a, 'demo', declared.commitSha);
+    expect(accepted.status).toBe(201);
+    const body = await accepted.json() as any;
+    expect(body.repo.permissions).toEqual(['network']);
+    expect(body.release.manifest.permissions).toEqual(['network']);
+    expect(body.release.apiVersion).toBe(3);
+    expect((await data.db.select().from(releases))[0]?.permissions).toEqual(['network']);
+    expect((await data.db.select().from(extensions))[0]?.permissions).toEqual(['network']);
   }));
 test('parent, version, author, objects, manifest and scanner failures', () =>
   withData(async (data) => {
@@ -149,6 +167,7 @@ test('yank, patch, tombstone, moderation and reports', () =>
     let r = await app.request('/v1/repos/alice/demo/releases/1.0.0/yank', json({}), env);
     expect(r.status).toBe(200);
     expect((await r.json() as any).repo.latest).toBeNull();
+    expect((await data.db.select().from(extensions))[0]?.permissions).toEqual([]);
     r = await app.request('/v1/repos/alice/demo', {
       method: 'PATCH',
       headers: { ...a.headers, 'Content-Type': 'application/json' },
@@ -227,16 +246,20 @@ test('fork rejects unchanged tree and self origin', () =>
   }));
 test('yank selects previous non-yanked release', () =>
   withData(async (data) => {
-    const env = makeEnv(data), a = await publisher(data, env, 'alice'), first = await uploadTree(data, env, a, files());
+    const env = makeEnv(data), a = await publisher(data, env, 'alice'), first = await uploadTree(data, env, a, files('demo', '1.0.0', [], ['clipboard']));
     const one = await (await publishRequest(data, env, a, 'demo', first.commitSha)).json() as any;
-    const second = await uploadTree(data, env, a, files('demo', '2.0.0'), { parents: [first.commitSha] });
+    const second = await uploadTree(data, env, a, files('demo', '2.0.0', [], ['network']), { parents: [first.commitSha] });
     const r = await publishRequest(data, env, a, 'demo', second.commitSha, { version: '2.0.0' });
     expect(r.status).toBe(201);
+    expect((await r.json() as any).repo.permissions).toEqual(['network']);
     const yank = await createApp({ data: () => data }).request('/v1/repos/alice/demo/releases/2.0.0/yank', {
       method: 'POST',
       headers: a.headers,
     }, env);
-    expect((await yank.json() as any).repo.latest.id).toBe(one.release.id);
+    const yanked = await yank.json() as any;
+    expect(yanked.repo.latest.id).toBe(one.release.id);
+    expect(yanked.repo.permissions).toEqual(['clipboard']);
+    expect((await data.db.select().from(extensions))[0]?.permissions).toEqual(['clipboard']);
   }));
 test('missing walked object, file cap and publish counter', () =>
   withData(async (data) => {

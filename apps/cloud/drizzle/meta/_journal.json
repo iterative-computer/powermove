@@ -43,6 +43,13 @@
       "when": 1790184880777,
       "tag": "0005_lush_magneto",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790188840883,
+      "tag": "0006_release_permissions",
+      "breakpoints": true
     }
   ]
 }

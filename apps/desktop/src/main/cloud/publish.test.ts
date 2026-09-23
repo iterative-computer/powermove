@@ -54,7 +54,7 @@ function files(body = 'export default {}\n'): Record<string, string> {
 function listing(repoId: string): ListingDto {
   return {
     repoId, owner: { id: MINE, handle: 'jude', tombstoned: false }, slug: 'glass-blur', name: 'Glass blur', tagline: 'Frosted glass.',
-    category: 'effects', iconUrl: null, visibility: 'public', latest: null, installCount: 0, forkCount: 0, licence: 'MIT',
+    category: 'effects', iconUrl: null, visibility: 'public', permissions: [], latest: null, installCount: 0, forkCount: 0, licence: 'MIT',
     forkedFrom: null, createdAt: '2026-09-23T12:00:00.000Z', updatedAt: '2026-09-23T12:00:00.000Z'
   };
 }
@@ -64,7 +64,7 @@ function release(body: PutReleaseBody, treeSha: string): ReleaseDto {
     id: MY_RELEASE, repoId: MY_REPO, version: body.version, commitSha: body.commitSha, treeSha, tarSha256: 'a'.repeat(64),
     apiVersion: 2, fileCount: 3, sizeBytes: 100, notes: body.notes ?? null, publishedAt: '2026-09-23T12:00:00.000Z', yankedAt: null,
     basedOnReleaseId: null,
-    manifest: { id: 'glass-blur', name: 'Glass blur', version: body.version, apiVersion: 2, contributes: ['effects'], vars: [], forkedFrom: null, description: null }
+    manifest: { id: 'glass-blur', name: 'Glass blur', version: body.version, apiVersion: 2, contributes: ['effects'], vars: [], forkedFrom: null, description: null, permissions: [] }
   };
 }
 

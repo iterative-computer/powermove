@@ -15,6 +15,7 @@ export function toListing(repo: Repo, extension: Extension, owner: Owner, latest
     name: extension.name, tagline: extension.tagline, category: extension.category as ListingDto['category'],
     iconUrl: extension.iconKey ? `/v1/store/icons/${extension.iconKey}` : null, visibility: repo.visibility,
     latest: latest ? { id: latest.id, version: latest.version, publishedAt: latest.publishedAt.toISOString(), apiVersion: latest.apiVersion, yankedAt: latest.yankedAt?.toISOString() ?? null } : null,
+    permissions: extension.permissions,
     installCount: extension.installCount, forkCount: extension.forkCount, licence: extension.licence, forkedFrom: lineage,
     createdAt: repo.createdAt.toISOString(), updatedAt: repo.updatedAt.toISOString()
   } satisfies ListingDto;
@@ -26,7 +27,7 @@ export function toRelease(row: Release): ReleaseDto {
     apiVersion: row.apiVersion, fileCount: row.fileCount, sizeBytes: row.sizeBytes, notes: row.notes,
     publishedAt: row.publishedAt.toISOString(), yankedAt: row.yankedAt?.toISOString() ?? null, basedOnReleaseId: row.basedOnReleaseId,
     manifest: { id: manifest.id, name: manifest.name, version: manifest.version, apiVersion: manifest.apiVersion,
-      contributes: manifest.contributes ?? [], vars: manifest.vars ?? [], forkedFrom: manifest.forkedFrom ?? null, description: manifest.description ?? null }
+      contributes: manifest.contributes ?? [], vars: manifest.vars ?? [], permissions: row.permissions, forkedFrom: manifest.forkedFrom ?? null, description: manifest.description ?? null }
   } satisfies ReleaseDto;
 }
 export function toDetail(repo: Repo, extension: Extension, owner: Owner, latest: Release | null, lineage: LineageDto | null, releaseRows: Release[]): ExtensionDetailDto {

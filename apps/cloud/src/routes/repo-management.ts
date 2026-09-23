@@ -35,7 +35,7 @@ export const repoManagement = new Hono<Env>()
      if (!release) throw new ApiError({error:'not_found'});
      const [yanked]=await tx.update(releases).set({yankedAt:release.yankedAt ?? new Date()}).where(eq(releases.id,release.id)).returning();
      const [latest]=await tx.select().from(releases).where(and(eq(releases.repoId,repo.id),isNull(releases.yankedAt))).orderBy(desc(releases.publishedAt),desc(releases.id)).limit(1);
-     await tx.update(extensions).set({latestReleaseId:latest?.id ?? null}).where(eq(extensions.repoId,repo.id));
+     await tx.update(extensions).set({latestReleaseId:latest?.id ?? null,permissions:latest?.permissions ?? []}).where(eq(extensions.repoId,repo.id));
      await tx.insert(moderationLog).values({repoId:repo.id,releaseId:release.id,action:'yank',reason:'',actor:owner.id});
      return yanked!;
    });

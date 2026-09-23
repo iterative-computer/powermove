@@ -4,8 +4,8 @@ import { ApiError, Publish } from '@powermove/registry/wire';
 import { decodeLoose, hashObject, parseCommit, parseTree, sha256Hex } from '@powermove/registry/git';
 import { snapshot, SnapshotError, type SnapshotInput } from '@powermove/registry/snapshot';
 import { REGISTRY_LIMITS } from '@powermove/registry/limits';
-import { parseForkedFrom, parseManifest } from '@powermove/registry/manifest';
-import { scanFiles } from '@powermove/registry/scan';
+import { EXTENSION_API_VERSION, parseForkedFrom, parseManifest } from '@powermove/registry/manifest';
+import { scanCapabilities, scanFiles } from '@powermove/registry/scan';
 import { writeTarGz } from '@powermove/registry/tar';
 import type { Env } from '../env';
 import { extensions, objects, publishers, refs, releaseObjects, releases, repos } from '../db/schema';
@@ -229,6 +229,9 @@ export function publishRoutes(deps: PublishDeps = {}) {
         throw new ApiError({ error: 'manifest_invalid', detail: parsed.error });
       }
       const manifest = parsed.manifest;
+      if (manifest.apiVersion > EXTENSION_API_VERSION) {
+        throw new ApiError({ error: 'manifest_invalid', detail: `apiVersion ${manifest.apiVersion} is newer than this app (${EXTENSION_API_VERSION})` });
+      }
       if (!origin && manifest.forkedFrom && parseForkedFrom(manifest.forkedFrom)?.kind === 'store' && !existing) {
         throw new ApiError({ error: 'manifest_invalid', detail: 'store fork requires originReleaseId' });
       }
@@ -284,6 +287,8 @@ export function publishRoutes(deps: PublishDeps = {}) {
           return [];
         }
       });
+      const undeclared = scanCapabilities(textFiles).filter((finding) => !manifest.permissions?.includes(finding.capability));
+      if (undeclared.length) throw new ApiError({ error: 'permission_undeclared', findings: undeclared });
       const scan = scanFiles(textFiles);
       const findings = [...scan.blocked, ...scan.waived];
       for (const waiver of body.waivers) {
@@ -380,6 +385,7 @@ export function publishRoutes(deps: PublishDeps = {}) {
                 tarKey,
                 tarSha256,
                 manifest,
+                permissions: manifest.permissions ?? [],
                 files: snap.files,
                 notes: body.notes ?? null,
                 basedOnReleaseId: body.basedOnReleaseId ?? null,
@@ -410,6 +416,7 @@ export function publishRoutes(deps: PublishDeps = {}) {
               licence: listing.licence ?? 'MIT',
               iconKey: iconKey ?? null,
               latestReleaseId: releaseId,
+              permissions: manifest.permissions ?? [],
             }).onConflictDoUpdate({
               target: extensions.repoId,
               set: {
@@ -420,6 +427,7 @@ export function publishRoutes(deps: PublishDeps = {}) {
                 licence: listing.licence ?? 'MIT',
                 ...(iconKey ? { iconKey } : {}),
                 latestReleaseId: releaseId,
+                permissions: manifest.permissions ?? [],
               },
             });
             if (originRepo && !existing) {
