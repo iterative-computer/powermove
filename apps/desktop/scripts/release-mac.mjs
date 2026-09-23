@@ -8,8 +8,11 @@ const repository = path.resolve(import.meta.dirname, '..');
 
 function releaseCredentials(environment) {
   const missing = [];
-  if (!environment.CSC_LINK) missing.push('CSC_LINK');
-  if (!environment.CSC_KEY_PASSWORD) missing.push('CSC_KEY_PASSWORD');
+  const importedCertificate = environment.CSC_NAME && environment.CSC_KEYCHAIN;
+  if (!importedCertificate) {
+    if (!environment.CSC_LINK) missing.push('CSC_LINK (or CSC_NAME + CSC_KEYCHAIN)');
+    if (!environment.CSC_KEY_PASSWORD) missing.push('CSC_KEY_PASSWORD (or CSC_NAME + CSC_KEYCHAIN)');
+  }
   const apiKey = environment.APPLE_API_KEY && environment.APPLE_API_KEY_ID && environment.APPLE_API_ISSUER;
   const appleId = environment.APPLE_ID && environment.APPLE_APP_SPECIFIC_PASSWORD && environment.APPLE_TEAM_ID;
   if (!apiKey && !appleId) {

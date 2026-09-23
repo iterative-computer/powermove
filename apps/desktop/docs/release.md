@@ -88,7 +88,8 @@ The job uses an arm64 macOS runner, installs the workspace with bun
 lifecycle with the desktop Vitest subset, signs and notarizes the app through
 `bun run dist:release`, and verifies the result in `apps/desktop/dist/`.
 The job uses macOS 26 so its Xcode 26 `actool` can compile the Icon Composer
-catalog.
+catalog. It imports the Developer ID certificate into a temporary keychain and
+points electron-builder at that keychain for signing.
 It uploads the DMG, ZIP, blockmaps, and the channel manifest into a draft
 before publishing the complete release with the workflow's own `GITHUB_TOKEN`.
 Nothing is published by the packager itself. Never publish a partial release
