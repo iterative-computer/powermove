@@ -25,6 +25,9 @@ function item(overrides: Partial<LibraryItemDto> = {}): LibraryItemDto {
 type Update = NonNullable<LibraryItemDto['update']>;
 const available = (modified = false): Update => ({ version: '1.1.0', releaseId: R2, modified, state: 'available' });
 const staged: Update = { version: '1.1.0', releaseId: R2, modified: true, state: 'staged-for-merge' };
+const MY_REPO = '77777777-7777-4777-8777-777777777777';
+const mine = { coordinate: 'jude/glass-blur', version: '1.0.0', releaseId: R2, repoId: MY_REPO };
+const fork = { coordinate: 'mara/glass-blur', version: '1.0.0', releaseId: R1, upstreamReleaseId: R1 };
 const required = [{ key: 'OPENAI_API_KEY', label: 'OpenAI API key', secret: true, required: true }];
 const optional = [{ key: 'PALETTE_SIZE', label: 'Palette size' }];
 
@@ -42,6 +45,10 @@ describe('action labels', () => {
     ['update staged beside the folder', { item: item({ modified: true, update: staged }) }, 'Update…', 'On'],
     ['no longer on the store', { item: item({ removed: true }) }, 'Installed', 'On'],
     ['yours', { item: item({ group: 'yours', maker: { you: true } }) }, 'Open', 'On'],
+    ['yours, never published', { item: item({ group: 'yours', maker: { you: true }, publish: 'first' }) }, 'Publish…', 'Publish…'],
+    ['yours, changed since publishing', { item: item({ group: 'yours', maker: { you: true }, publish: 'update', published: mine }) }, 'Publish Update…', 'Publish Update…'],
+    ['yours, published, unchanged', { item: item({ group: 'yours', maker: { you: true }, publish: null, published: mine }) }, 'Open', 'On'],
+    ['your fork, on the original’s page', { item: item({ group: 'yours', maker: { you: true }, published: mine, fork }), repoId: REPO }, 'Forked', 'On'],
     ['built in', { item: item({ group: 'builtin', maker: { builtin: true } }) }, 'Open', 'On']
   ];
 
@@ -66,6 +73,10 @@ describe('action labels', () => {
       update staged beside the folder   | Update…            | On
       no longer on the store            | Installed          | On
       yours                             | Open               | On
+      yours, never published            | Publish…           | Publish…
+      yours, changed since publishing   | Publish Update…    | Publish Update…
+      yours, published, unchanged       | Open               | On
+      your fork, on the original’s page | Forked             | On
       built in                          | Open               | On
       "
     `);
@@ -97,7 +108,9 @@ describe('library', () => {
     expect(statusText(item({ modified: true }))).toBe('You changed the files');
     expect(statusText(item({ health: { state: 'needs-setup', missing: ['X'] } }))).toBe('Needs setup');
     expect(statusText(item({ removed: true, update: available() }))).toBe('No longer on the store');
-    expect(statusText(item({ group: 'yours', maker: { you: true }, published: { coordinate: null, version: '0.3.0', releaseId: R2 } }))).toBe('Published 0.3.0');
+    expect(statusText(item({ group: 'yours', maker: { you: true }, published: { coordinate: null, version: '0.3.0', releaseId: R2, repoId: REPO } }))).toBe('Published 0.3.0');
+    expect(statusText(item({ group: 'yours', maker: { you: true }, modified: true, publish: 'update', published: { coordinate: 'jude/glass-blur', version: '0.3.0', releaseId: R2, repoId: REPO } })))
+      .toBe('Published 0.3.0 · Changed since');
     expect(statusText(item({ group: 'builtin', maker: { builtin: true } }))).toBeNull();
   });
 });

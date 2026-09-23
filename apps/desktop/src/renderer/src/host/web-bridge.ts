@@ -457,6 +457,8 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
       setRememberInstalls: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
       signOut: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
       deleteAccount: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
+      registryUrl: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
+      setRegistryUrl: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
       onAccountChanged: () => () => {},
       onSignInFailed: () => () => {}
     },
@@ -474,7 +476,12 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
       uninstall: storeOffline,
       library: async () => [],
       checkUpdates: storeOffline,
-      onUpdatesChanged: () => () => {}
+      publishPrepare: storeOffline,
+      publish: storeOffline,
+      yank: storeOffline,
+      onUpdatesChanged: () => () => {},
+      onPublishProgress: () => () => {},
+      onLibraryChanged: () => () => {}
     }
   };
 

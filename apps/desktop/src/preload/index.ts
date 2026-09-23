@@ -346,6 +346,8 @@ const bridge: PowermoveBridge = {
     setRememberInstalls: (req) => cloudInvoke(CLOUD_IPC.setRememberInstalls, { value: req.value }),
     signOut: () => cloudInvoke(CLOUD_IPC.signOut),
     deleteAccount: () => cloudInvoke(CLOUD_IPC.deleteAccount),
+    registryUrl: () => cloudInvoke(CLOUD_IPC.registryUrl),
+    setRegistryUrl: (req) => cloudInvoke(CLOUD_IPC.setRegistryUrl, { origin: req.origin }),
     onAccountChanged: cloudEvent(CLOUD_IPC.accountChanged),
     onSignInFailed: cloudEvent(CLOUD_IPC.signInFailed)
   },
@@ -370,7 +372,24 @@ const bridge: PowermoveBridge = {
     uninstall: (req) => storeInvoke(STORE_IPC.uninstall, { localId: req.localId }),
     library: () => storeInvoke(STORE_IPC.library),
     checkUpdates: () => storeInvoke(STORE_IPC.checkUpdates),
-    onUpdatesChanged: cloudEvent(STORE_IPC.updatesChanged)
+    publishPrepare: (req) => storeInvoke(STORE_IPC.publishPrepare, { localId: req.localId }),
+    publish: (req) => storeInvoke(STORE_IPC.publish, {
+      localId: req.localId,
+      form: {
+        version: req.form.version,
+        waivers: req.form.waivers.map((waiver) => ({ path: waiver.path, line: waiver.line, reason: waiver.reason })),
+        ...(req.form.notes !== undefined ? { notes: req.form.notes } : {}),
+        ...(req.form.listing ? {
+          listing: { name: req.form.listing.name, tagline: req.form.listing.tagline, category: req.form.listing.category, licence: req.form.listing.licence }
+        } : {}),
+        ...(req.form.visibility ? { visibility: req.form.visibility } : {}),
+        ...(req.form.iconPng ? { iconPng: req.form.iconPng } : {})
+      }
+    }),
+    yank: (req) => storeInvoke(STORE_IPC.yank, { repoId: req.repoId, version: req.version }),
+    onUpdatesChanged: cloudEvent(STORE_IPC.updatesChanged),
+    onPublishProgress: cloudEvent(STORE_IPC.publishProgress),
+    onLibraryChanged: cloudEvent<void>(STORE_IPC.libraryChanged)
   }
 };
 

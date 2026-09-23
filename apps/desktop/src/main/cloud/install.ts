@@ -79,6 +79,8 @@ export interface StoreInstaller {
   /** The last update-check results, per local id. */
   updates(): StoreUpdates;
   isModified(localId: string): Promise<boolean>;
+  /** The folder's snapshot tree, or null when it can't be snapshotted. */
+  localTree(localId: string): Promise<string | null>;
   /** Boot check after `delayMs`, then every `everyMs`. Returns a stop function. */
   startUpdateChecks(options?: { delayMs?: number; everyMs?: number }): () => void;
 }
@@ -264,16 +266,20 @@ export function createStoreInstaller(options: StoreInstallerOptions): StoreInsta
     return registry.list().find((record) => record.id === localId);
   }
 
+  async function localTree(localId: string): Promise<string | null> {
+    try {
+      return (await snapshotDir(folderFor(localId))).treeSha;
+    } catch {
+      return null;
+    }
+  }
+
   async function isModified(localId: string): Promise<boolean> {
     const record = await provenance.get(localId);
     const origin = record?.origin;
     if (!origin) return false;
-    try {
-      return (await snapshotDir(folderFor(localId))).treeSha !== origin.treeSha;
-    } catch {
-      // Unreadable, emptied or no longer snapshot-able: it is not what was installed.
-      return true;
-    }
+    // Unreadable, emptied or no longer snapshot-able: it is not what was installed.
+    return (await localTree(localId)) !== origin.treeSha;
   }
 
   function installRelease(request: { repoId: string; releaseId: string }): Promise<StoreInstallResult> {
@@ -464,6 +470,7 @@ export function createStoreInstaller(options: StoreInstallerOptions): StoreInsta
     checkUpdates,
     updates: () => structuredClone(updates),
     isModified,
+    localTree,
     startUpdateChecks({ delayMs = UPDATE_CHECK_DELAY_MS, everyMs = UPDATE_CHECK_EVERY_MS } = {}) {
       const run = (): void => {
         void checkUpdates().catch((error: unknown) => log('update check failed', error));

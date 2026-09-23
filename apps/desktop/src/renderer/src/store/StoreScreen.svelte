@@ -13,9 +13,11 @@
     KINDS, KIND_ICON, KIND_LABEL, KIND_PLURAL,
     actionErrorText, artFor, coordinate, detailAction, detailFromDto, groupLibrary, includesText, isKind,
     libraryAction, libraryItemFor, listingFromDto, loadError, makerText, needsAttention, needsSetup,
-    parseLineage, requiresText, statusIsHot, statusText, storeBridge,
-    type Action, type Lineage, type LoadError, type StoreDetail, type StoreKind, type StoreListing, type StorePage, type StorePM
+    parseLineage, publishErrorText, requiresText, secondaryPublish, statusIsHot, statusText, storeBridge,
+    type Action, type Lineage, type LoadError, type StoreDetail, type StoreKind, type StoreListing, type StorePage, type StorePM,
+    type VersionEntry
   } from './data';
+  import { openPublishSheet } from './publish-sheet';
 
   /* Two places and seven kinds. Browse is the storefront; a kind is the store
      narrowed to one shelf; Library is everything on this Mac, in one list. */
@@ -35,7 +37,9 @@
   /* A detail page: the store's page for a coordinate, a Library item's own
      page, or both when the item came from the store. */
   type DetailTarget = { coord: { handle: string; slug: string } | null; localId: string | null; preview: StoreListing | null };
-  type Compare = { base: string; head: string; state: Loadable<CompareDto> };
+  /* `lineage`: the fork against what it was forked from, where manifest.json
+     always reads as changed (the uploaded copy names its origin). */
+  type Compare = { base: string; head: string; lineage: boolean; state: Loadable<CompareDto> };
   type SourceFile = { path: string; state: Loadable<string> };
 
   let shown = $state(false);
@@ -62,6 +66,8 @@
   let actionError = $state<string | null>(null);
   let busy = $state<Record<string, string>>({});
   let showAllVersions = $state(false);
+  /* The version whose Withdraw is asking "are you sure?" inline. */
+  let withdrawing = $state<string | null>(null);
 
   $effect(() => subscribeAccount((user) => {
     account = user;
@@ -173,9 +179,11 @@
     if (!shown) return;
     const offUpdates = storeBridge()?.onUpdatesChanged(() => void loadLibrary());
     const offExtensions = window.powermove?.extensions?.onChanged(() => void loadLibrary());
+    const offLibrary = storeBridge()?.onLibraryChanged(() => void loadLibrary());
     return () => {
       offUpdates?.();
       offExtensions?.();
+      offLibrary?.();
     };
   });
 
@@ -185,7 +193,9 @@
     remote = null;
     files = null;
     if (!target.coord) return;
-    const coord = target.coord;
+    /* A plain copy: `target` may be the reactive `detail` itself, and a
+       state proxy can't cross the context bridge. */
+    const coord = { handle: target.coord.handle, slug: target.coord.slug };
     remote = { status: 'loading' };
     const result = await call(() => storeBridge()?.detail(coord));
     if (token !== detailToken) return;
@@ -218,15 +228,15 @@
     openFile = { path, state: result.ok ? { status: 'ready', value: result.value } : { status: 'error', error: failed(result.error) } };
   }
 
-  async function showCompare(base: string, head: string): Promise<void> {
+  async function showCompare(base: string, head: string, lineage = false): Promise<void> {
     if (compare && compare.base === base && compare.head === head) {
       compare = null;
       return;
     }
-    compare = { base, head, state: { status: 'loading' } };
+    compare = { base, head, lineage, state: { status: 'loading' } };
     const result = await call(() => storeBridge()?.compare({ base, head }));
     if (compare?.base !== base || compare.head !== head) return;
-    compare = { base, head, state: result.ok ? { status: 'ready', value: result.value } : { status: 'error', error: failed(result.error) } };
+    compare = { base, head, lineage, state: result.ok ? { status: 'ready', value: result.value } : { status: 'error', error: failed(result.error) } };
   }
 
   /* ── screen ── */
@@ -291,6 +301,7 @@
     openFile = null;
     actionError = null;
     showAllVersions = false;
+    withdrawing = null;
     void loadDetail(target);
     scrollTop();
   }
@@ -299,8 +310,11 @@
     pushDetail({ coord: { handle: listing.publisher, slug: listing.id }, localId: null, preview: listing });
   }
 
+  /* Your published folder opens on its own store page; an install on the
+     page it came from. */
   function openItem(item: LibraryItemDto): void {
-    const coord = item.origin ? splitCoordinate(item.origin.coordinate) : null;
+    const published = item.published?.coordinate ? splitCoordinate(item.published.coordinate) : null;
+    const coord = published ?? (item.origin ? splitCoordinate(item.origin.coordinate) : null);
     pushDetail({ coord, localId: item.localId, preview: null });
   }
 
@@ -361,7 +375,11 @@
     return who.startsWith('by ') ? `${KIND_LABEL[kind]} ${who}` : `${KIND_LABEL[kind]} · ${who}`;
   }
 
+  /* A published fork knows its origin from provenance (the folder's own
+     manifest never names it); anything else from its manifest. */
   function storeLineageOf(item: LibraryItemDto | undefined): Lineage | undefined {
+    const fork = item?.fork ? splitCoordinate(item.fork.coordinate) : null;
+    if (item?.fork && fork) return { handle: fork.handle, slug: fork.slug, version: item.fork.version, releaseId: item.fork.releaseId };
     const parsed = item?.forkedFrom ? parseLineage(item.forkedFrom) : null;
     return parsed && 'store' in parsed ? parsed.store : undefined;
   }
@@ -372,7 +390,7 @@
   }
 
   function listingAction(listing: StoreListing): Action {
-    return detailAction({ vars: listing.vars, item: libraryItemFor(listing.repoId, library) });
+    return detailAction({ vars: listing.vars, item: libraryItemFor(listing.repoId, library), repoId: listing.repoId });
   }
 
   /* ── actions ── */
@@ -497,16 +515,68 @@
     toast(count === 0 ? 'Everything is up to date.' : count === 1 ? 'One update is available.' : `${count} updates are available.`);
   }
 
+  /* Publishing: main plans it (snapshot, scan, what is on the store), the
+     sheet fills in the form, and main asks for the native confirmation. */
+  async function publish(item: LibraryItemDto): Promise<void> {
+    const bridge = storeBridge();
+    if (!bridge || busy[item.localId]) return;
+    actionError = null;
+    setBusy(item.localId, 'Preparing…');
+    const result = await call(() => bridge.publishPrepare({ localId: item.localId }));
+    setBusy(item.localId, null);
+    if (!result.ok) {
+      // Signed out, or no handle yet: the account sheet asks for what is missing.
+      if (result.error.error === 'unauthorized' || result.error.error === 'forbidden') {
+        openSignIn();
+        return;
+      }
+      const message = result.error.detail === 'unavailable' ? 'Can’t reach the store. Check your connection and try again.' : publishErrorText(result.error);
+      if (detail) actionError = message;
+      else toast(message, true);
+      return;
+    }
+    openPublishSheet(PM, bridge, result.value, (published) => {
+      void loadLibrary();
+      // The page you published from now has a store page of its own.
+      const current = detail;
+      const coord = splitCoordinate(published.coordinate);
+      if (current?.localId === item.localId && coord) {
+        detail = { ...current, coord };
+        void loadDetail(detail);
+      }
+    });
+  }
+
+  async function withdraw(repoId: string, version: VersionEntry): Promise<void> {
+    const key = `yank:${version.id}`;
+    if (busy[key]) return;
+    actionError = null;
+    setBusy(key, 'Withdrawing…');
+    const result = await call(() => storeBridge()?.yank({ repoId, version: version.version }));
+    setBusy(key, null);
+    withdrawing = null;
+    if (!result.ok) {
+      actionError = publishErrorText(result.error);
+      return;
+    }
+    toast(`Withdrew ${version.version}.`);
+    await loadLibrary();
+    if (detail) void loadDetail(detail);
+  }
+
   function run(action: Action, item: LibraryItemDto | undefined, listing: { repoId: string; releaseId: string | null; name: string } | null): void {
     if (action.kind === 'install' && listing) void install(listing);
     else if (action.kind === 'update' && item) void update(item);
     else if (action.kind === 'setup' && item) void setUp(item.localId);
     else if (action.kind === 'toggle' && item) void toggle(item);
+    else if (action.kind === 'publish' && item) void publish(item);
   }
 
   function rowMenu(event: MouseEvent, item: LibraryItemDto): void {
     if (!(event.currentTarget instanceof HTMLElement)) return;
     const items: PopoverMenuItem[] = [];
+    // The trailing control is Publish: On and Off move here.
+    if (libraryAction(item).kind === 'publish') items.push({ label: item.enabled ? 'Turn Off' : 'Turn On', run: () => void toggle(item) });
     if (item.group === 'store') items.push({ label: 'Check for Updates', run: () => void checkForUpdates() });
     items.push({ label: 'Show in Finder', run: () => void reveal(item) });
     items.push('-', { label: 'Uninstall…', run: () => void uninstall(item) });
@@ -817,10 +887,15 @@
   {@const who = data ? `by ${data.publisher}` : preview ? `by ${preview.publisher}` : item ? makerText(item) : ''}
   {@const lede = data?.tagline ?? preview?.tagline ?? item?.description ?? ''}
   {@const pair = data?.art ?? preview?.art ?? artFor(item?.origin?.repoId ?? `local:${item?.localId ?? ''}`)}
-  {@const act = detailAction({ vars: data?.vars ?? item?.vars, item })}
+  {@const act = detailAction({ vars: data?.vars ?? item?.vars, item, repoId: data?.repoId })}
+  {@const alsoPublish = data && item?.fork && data.repoId !== item.published?.repoId ? null : secondaryPublish(item)}
+  {@const ownPage = !!data && !!item?.published && data.repoId === item.published.repoId}
   {@const storeLineage = data?.forkedFrom ?? storeLineageOf(item)}
   {@const builtinLineage = storeLineage ? undefined : builtinLineageOf(item)}
-  {@const lineageCompare = data?.forkedFrom?.releaseId && data.latestReleaseId && data.forkedFrom.releaseId !== data.latestReleaseId ? { base: data.forkedFrom.releaseId, head: data.latestReleaseId } : null}
+  <!-- A fork compares against the release it was forked from (P0 Q5), or
+       the release it was last merged from once that moves on. -->
+  {@const lineageBase = (ownPage ? item?.fork?.upstreamReleaseId : undefined) ?? data?.forkedFrom?.releaseId}
+  {@const lineageCompare = lineageBase && data?.latestReleaseId && lineageBase !== data.latestReleaseId ? { base: lineageBase, head: data.latestReleaseId } : null}
   {@const updateCompare = item?.origin && item.update ? { base: item.origin.releaseId, head: item.update.releaseId } : null}
   {@const vars = data?.vars ?? item?.vars ?? []}
   {@const contributes = data?.contributes.length ? data.contributes : item?.contributes ?? []}
@@ -847,7 +922,7 @@
           Forked from <button class="st-link" type="button" onclick={() => openLineage(storeLineage)}>{storeLineage.handle}/{storeLineage.slug}</button>
           {#if lineageCompare}
             <span class="st-lineage-sep">·</span>
-            <button class="st-link is-quiet" type="button" aria-expanded={compare?.base === lineageCompare.base && compare.head === lineageCompare.head} onclick={() => void showCompare(lineageCompare.base, lineageCompare.head)}>See what changed</button>
+            <button class="st-link is-quiet" type="button" aria-expanded={compare?.base === lineageCompare.base && compare.head === lineageCompare.head} onclick={() => void showCompare(lineageCompare.base, lineageCompare.head, true)}>See what changed</button>
           {/if}
         </p>
       {:else if builtinLineage}
@@ -861,6 +936,9 @@
         <!-- Nothing to install from here without the store. -->
       {:else}
         {@render control(act, item, data ? { repoId: data.repoId, releaseId: data.latestReleaseId, name: data.name } : null, 'btn')}
+      {/if}
+      {#if item && alsoPublish && !busy[item.localId]}
+        <button class="st-link is-quiet st-uninstall" type="button" onclick={() => void publish(item)}>{alsoPublish.label}</button>
       {/if}
       {#if item && item.group !== 'builtin'}
         <button class="st-link is-quiet st-uninstall" type="button" onclick={() => void uninstall(item)}>Uninstall…</button>
@@ -903,7 +981,10 @@
       {:else if compare.state.value.files.length}
         <div class="st-card">
           {#each compare.state.value.files as file (file.path)}
-            <div class="st-kv is-file"><b>{file.path}</b><span class="st-change is-{file.status}">{COMPARE_LABEL[file.status]}</span></div>
+            <div class="st-kv is-file">
+              <b>{file.path}{#if compare.lineage && file.path === 'manifest.json' && file.status === 'modified'}<i class="st-change-why">Names what it was forked from</i>{/if}</b>
+              <span class="st-change is-{file.status}">{COMPARE_LABEL[file.status]}</span>
+            </div>
           {/each}
         </div>
       {/if}
@@ -939,7 +1020,45 @@
     </section>
   {/if}
 
-  {#if data?.versions.length}
+  {#if ownPage && data}
+    <!-- Yours on the store: how it's doing, and every version with a way
+         to withdraw it. Withdrawing asks inline, next to the version. -->
+    <section class="st-sec">
+      <h3 class="st-sec-title">On the store</h3>
+      <div class="st-card">
+        <div class="st-kv"><span>Installs</span><b>{data.installCount.toLocaleString('en')}</b></div>
+        <div class="st-kv"><span>Forks</span><b>{data.forkCount.toLocaleString('en')}</b></div>
+        <div class="st-kv"><span>Visibility</span><b>{data.visibility === 'public' ? 'Public' : 'Unlisted'}</b></div>
+      </div>
+    </section>
+    <section class="st-sec">
+      <div class="st-sec-head">
+        <h3>Versions</h3>
+        {#if data.versions.length > 5}
+          <button class="btn ghost" type="button" onclick={() => (showAllVersions = !showAllVersions)}>{showAllVersions ? 'Show Fewer' : 'Show All'}</button>
+        {/if}
+      </div>
+      <div class="st-card">
+        {#each showAllVersions ? data.versions : data.versions.slice(0, 5) as v (v.id)}
+          <div class="st-kv is-version is-own" class:is-withdrawn={v.withdrawn}>
+            <span>{v.version}<i>{v.date}</i></span>
+            {#if withdrawing === v.id}
+              <b class="st-withdraw-ask" role="alert">Withdraw {v.version}? People who have it keep it; nobody new gets it.</b>
+              <div class="st-withdraw-actions">
+                <button class="btn ghost" type="button" onclick={() => (withdrawing = null)}>Cancel</button>
+                <button class="btn st-withdraw" type="button" disabled={!!busy[`yank:${v.id}`]} onclick={() => void withdraw(data.repoId, v)}>{busy[`yank:${v.id}`] ? 'Withdrawing…' : 'Withdraw'}</button>
+              </div>
+            {:else}
+              <b>{#if v.withdrawn}<span class="st-var-req">Withdrawn</span> {/if}{v.note ?? ''}</b>
+              {#if !v.withdrawn}
+                <button class="st-link is-quiet st-withdraw-open" type="button" aria-label={`Withdraw ${v.version}…`} onclick={() => (withdrawing = v.id)}>Withdraw…</button>
+              {/if}
+            {/if}
+          </div>
+        {/each}
+      </div>
+    </section>
+  {:else if data?.versions.length}
     {@const latest = data.versions.find((v) => !v.withdrawn)}
     {#if latest?.note}
       <section class="st-sec">

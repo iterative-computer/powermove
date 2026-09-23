@@ -1,0 +1,56 @@
+/* ── Publishing to the Store ────────────────────────────────
+   The publish sheet (renderer/src/store/PublishSheet.svelte) borrows the
+   account sheet's frame (.account-modal) and Settings rows on tinted cards:
+   labels on the left, one control on the right, problems in place of the
+   hint under the label. Plus the Store's own-extension bits: the inline
+   withdraw question and the fork note in "What changed". */
+
+.pub-sheet:focus{outline:0}
+.pub-sheet .acct-head p{max-width:52ch}
+.pub-form{display:flex;flex-direction:column;margin-top:20px}
+.pub-group+.pub-group,.pub-title+.pub-group{margin-top:0}
+.pub-sheet .pub-title{margin:22px 0 8px;padding:0 2px;letter-spacing:0;font-size:var(--fs-sm);line-height:16px;font-weight:var(--fw-medium);color:var(--tx-3)}
+.pub-group.sg-group{margin:0 -14px}
+.pub-group>.settings-row.pub-row{min-height:48px;padding:9px 14px}
+.pub-row.is-stacked{flex-direction:column;align-items:stretch;gap:8px}
+.pub-row .settings-copy>b{display:flex;align-items:baseline;gap:6px;min-width:0}
+.pub-fixed{flex:none;font-size:var(--fs-md);line-height:18px;color:var(--tx-2)}
+.pub-path{font:var(--fs-sm)/18px var(--f-mono);overflow-wrap:anywhere}
+.pub-path>i{font:var(--fs-sm)/18px var(--f-ui);font-style:normal;color:var(--tx-4)}
+.pub-row .settings-copy>.pub-problem{color:var(--danger)}
+
+/* Fields: one quiet well each, the same fill as Settings controls. */
+.pub-input,.pub-select{width:220px;height:30px;flex:none;padding:0 10px;border:0;border-radius:var(--sg-control-radius);background:var(--bg-float);color:var(--tx);font-size:var(--fs-md)}
+.pub-input.is-short{width:100px;font-variant-numeric:tabular-nums}
+.pub-select{appearance:auto;-webkit-appearance:menulist;font-weight:var(--fw-medium)}
+.pub-notes{width:100%;height:auto;min-height:64px;padding:7px 10px;line-height:18px;resize:vertical}
+.pub-input::placeholder{color:var(--tx-4)}
+.pub-input:focus-visible,.pub-select:focus-visible{outline:0;box-shadow:0 0 0 3px var(--ink-2)}
+.pub-input[aria-invalid="true"]{box-shadow:inset 0 0 0 1px var(--danger)}
+.pub-input:disabled,.pub-select:disabled{color:var(--tx-3)}
+
+/* Icon: the preview sits where the artwork will, then the controls. */
+.pub-icon{flex:none;display:flex;align-items:center;gap:10px}
+.pub-icon-preview{width:32px;height:32px;border-radius:var(--r-md);object-fit:cover;outline:1px solid rgb(var(--ink-rgb) / .1);outline-offset:-1px}
+.pub-file{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.pub-icon .btn{height:28px;padding:0 12px;border-radius:var(--sg-control-radius)}
+
+.pub-terms{margin-top:18px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);text-wrap:pretty}
+.pub-error{margin-top:10px;font-size:var(--fs-sm);line-height:16px;color:var(--danger);text-wrap:pretty;overflow-wrap:anywhere}
+.pub-foot{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:20px}
+.pub-foot>:first-child{flex:1;min-width:0}
+.pub-status{font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);font-variant-numeric:tabular-nums}
+.pub-foot .btn{height:30px;padding:0 14px;border-radius:var(--r-md)}
+.publish-modal .btn.pri:disabled{opacity:1;background:var(--ink-1);color:var(--tx-4)}
+.pub-sheet :is(.btn,.acct-link),.pub-sheet label{cursor:default;user-select:none;-webkit-user-select:none}
+
+/* ── the Store: your own extension ── */
+.st-kv.is-own{align-items:center}
+.st-kv.is-own>b{flex:1}
+.st-kv.is-own .st-var-req{margin:0 6px 0 0}
+.st-withdraw-open{flex:none;font-size:var(--fs-sm);line-height:16px;text-decoration:none}
+.st-withdraw-open:hover{text-decoration:underline}
+.st-withdraw-ask{color:var(--tx);text-wrap:pretty}
+.st-withdraw-actions{flex:none;display:flex;gap:6px}
+.st-withdraw-actions .btn{height:28px;padding:0 12px;border-radius:var(--r-pill)}
+.st-kv>b>.st-change-why{display:block;margin-top:2px;font:var(--fs-xs)/14px var(--f-ui);font-style:normal;color:var(--tx-4)}

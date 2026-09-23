@@ -32,6 +32,8 @@ function bridgeWith(over: Partial<CloudBridge> = {}): CloudBridge {
     setRememberInstalls: vi.fn(async () => ({ ok: true as const, value: NO_HANDLE })),
     signOut: vi.fn(async () => ({ ok: true as const, value: null })),
     deleteAccount: vi.fn(async () => ({ ok: true as const, value: { deleted: false } })),
+    registryUrl: vi.fn(async () => ({ origin: 'https://cloud.trypowermove.com', isDefault: true })),
+    setRegistryUrl: vi.fn(async () => ({ ok: true as const, value: { origin: 'https://cloud.trypowermove.com', isDefault: true, changed: false } })),
     onAccountChanged: vi.fn(() => () => {}),
     onSignInFailed: vi.fn(() => () => {}),
     ...over

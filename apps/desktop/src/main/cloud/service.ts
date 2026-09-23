@@ -75,7 +75,7 @@ export interface CloudService {
   session: CloudSession;
   auth: CloudAuth;
   registry: RegistryUrlSetting;
-  /** Settings › Advanced › Registry URL (P10 adds the UI). */
+  /** Settings › Advanced › Registry URL: main's confirmation, then sign out and switch. */
   confirmRegistryChange(origin: string): Promise<boolean>;
 }
 
@@ -98,20 +98,29 @@ export async function startCloudService(options: CloudServiceOptions): Promise<C
     notifySignInFailed: (error: ApiErrorBody) => options.broadcast(CLOUD_IPC.signInFailed, error),
     confirmDelete: async () => (await options.showMessageBox(DELETE_ACCOUNT_DIALOG)).response === 0
   });
-  registerCloudIpc(options.ipcMain, { auth, session, isTrusted: options.isTrusted });
+  const changeRegistry = async (origin: string): Promise<boolean> => {
+    const changed = await confirmRegistryChange(origin, {
+      setting: registry,
+      showMessageBox: options.showMessageBox,
+      // Through auth so a sign-in still waiting on the old registry is dropped too.
+      beforeChange: async () => {
+        await auth.signOut();
+        await session.clear();
+      }
+    });
+    if (changed) notifyAccount(null);
+    return changed;
+  };
+  registerCloudIpc(options.ipcMain, {
+    auth,
+    session,
+    registry: { get: () => registry.get(), change: changeRegistry },
+    isTrusted: options.isTrusted
+  });
   return {
     session,
     auth,
     registry,
-    confirmRegistryChange: async (origin) => {
-      const changed = await confirmRegistryChange(origin, {
-        setting: registry,
-        showMessageBox: options.showMessageBox,
-        // Through auth so a sign-in still waiting on the old registry is dropped too.
-        beforeChange: () => auth.signOut()
-      });
-      if (changed) notifyAccount(null);
-      return changed;
-    }
+    confirmRegistryChange: changeRegistry
   };
 }

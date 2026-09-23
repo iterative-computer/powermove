@@ -21,6 +21,8 @@ export const CLOUD_IPC = {
   setRememberInstalls: 'cloud:set-remember-installs',
   signOut: 'cloud:sign-out',
   deleteAccount: 'cloud:delete-account',
+  registryUrl: 'cloud:registry-url',
+  setRegistryUrl: 'cloud:set-registry-url',
   /** main → renderer: the signed-in account changed (`MeDto | null`). */
   accountChanged: 'cloud:account-changed',
   /** main → renderer: a browser sign-in came back and could not be completed (`ApiErrorBody`). */
@@ -49,7 +51,19 @@ export interface CloudChannels {
   'cloud:sign-out': { req: void; res: CloudResult<null> };
   /** `deleted: false` means the confirmation was cancelled. */
   'cloud:delete-account': { req: void; res: CloudResult<{ deleted: boolean }> };
+  'cloud:registry-url': { req: void; res: CloudRegistry };
+  /** Main asks first (a native dialog naming the origin) and signs out; `changed: false` means it was cancelled. */
+  'cloud:set-registry-url': { req: { origin: string }; res: CloudResult<CloudRegistry & { changed: boolean }> };
 }
+
+/** Which registry this Mac talks to (Settings › Advanced). */
+export interface CloudRegistry {
+  origin: string;
+  isDefault: boolean;
+}
+
+/** Longest registry URL accepted from the renderer. */
+export const CLOUD_REGISTRY_URL_MAX = 2000;
 
 export type CloudChannel = keyof CloudChannels;
 
@@ -72,6 +86,8 @@ export interface CloudBridge {
   setRememberInstalls(req: CloudChannels['cloud:set-remember-installs']['req']): Promise<CloudChannels['cloud:set-remember-installs']['res']>;
   signOut(): Promise<CloudChannels['cloud:sign-out']['res']>;
   deleteAccount(): Promise<CloudChannels['cloud:delete-account']['res']>;
+  registryUrl(): Promise<CloudChannels['cloud:registry-url']['res']>;
+  setRegistryUrl(req: CloudChannels['cloud:set-registry-url']['req']): Promise<CloudChannels['cloud:set-registry-url']['res']>;
   onAccountChanged(cb: (me: MeDto | null) => void): () => void;
   onSignInFailed(cb: (error: ApiErrorBody) => void): () => void;
 }

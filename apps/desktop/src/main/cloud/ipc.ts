@@ -15,11 +15,15 @@ import {
   CLOUD_HANDLE,
   CLOUD_IPC,
   CLOUD_OTP,
+  CLOUD_REGISTRY_URL_MAX,
   type CloudAccount,
   type CloudChannels,
+  type CloudRegistry,
   type CloudResult
 } from '../../shared/cloud-ipc';
 import type { CloudAuth } from './auth';
+import { normalizeOrigin } from './client';
+import { DEFAULT_REGISTRY_ORIGIN } from './registry-url';
 import type { CloudSession } from './session';
 
 type Sender = Pick<IpcMainInvokeEvent, 'sender' | 'senderFrame'>;
@@ -27,7 +31,19 @@ type Sender = Pick<IpcMainInvokeEvent, 'sender' | 'senderFrame'>;
 export interface CloudIpcOptions {
   auth: CloudAuth;
   session: CloudSession;
+  /** Settings › Advanced › Registry URL. `change` shows main's confirmation and signs out first. */
+  registry: { get(): string; change(origin: string): Promise<boolean> };
   isTrusted(event: Sender): boolean;
+}
+
+/** An http(s) URL a registry can live at; anything else is refused before main asks. */
+function isRegistryUrl(value: string): boolean {
+  try {
+    normalizeOrigin(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const email = z.email().max(CLOUD_EMAIL_MAX);
@@ -40,7 +56,9 @@ export const cloudSchemas = {
   'cloud:claim-handle': z.strictObject({ handle: z.string().regex(CLOUD_HANDLE) }),
   'cloud:set-remember-installs': z.strictObject({ value: z.boolean() }),
   'cloud:sign-out': none,
-  'cloud:delete-account': none
+  'cloud:delete-account': none,
+  'cloud:registry-url': none,
+  'cloud:set-registry-url': z.strictObject({ origin: z.string().trim().min(1).max(CLOUD_REGISTRY_URL_MAX).refine(isRegistryUrl, 'invalid registry URL') })
 } as const satisfies Record<keyof CloudChannels, z.ZodType>;
 
 function parse<T>(schema: z.ZodType<T>, channel: string, payload: unknown): T {
@@ -88,4 +106,13 @@ export function registerCloudIpc(ipcMain: Pick<IpcMain, 'handle'>, options: Clou
   handle(CLOUD_IPC.setRememberInstalls, cloudSchemas['cloud:set-remember-installs'], (request) => result(() => auth.setRememberInstalls(request.value)));
   handle(CLOUD_IPC.signOut, cloudSchemas['cloud:sign-out'], () => result(async () => { await auth.signOut(); return null; }));
   handle(CLOUD_IPC.deleteAccount, cloudSchemas['cloud:delete-account'], () => result(async () => ({ deleted: await auth.deleteAccount() })));
+  const registry = (): CloudRegistry => {
+    const origin = options.registry.get();
+    return { origin, isDefault: origin === DEFAULT_REGISTRY_ORIGIN };
+  };
+  handle(CLOUD_IPC.registryUrl, cloudSchemas['cloud:registry-url'], async () => registry());
+  handle(CLOUD_IPC.setRegistryUrl, cloudSchemas['cloud:set-registry-url'], (request) => result(async () => {
+    const changed = await options.registry.change(request.origin);
+    return { ...registry(), changed };
+  }));
 }

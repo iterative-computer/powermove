@@ -5,6 +5,7 @@ import type { ExtensionRecord } from '../../shared/extensions';
 import { STORE_IPC } from '../../shared/store-ipc';
 import { StoreLocalError, type StoreInstaller } from './install';
 import type { ProvenanceFile, ProvenanceStore } from './provenance';
+import type { Publisher } from './publish';
 import type { StoreClient } from './store-client';
 import { buildLibrary, categoryFor, registerStoreIpc, storeResult, storeSchemas } from './store-ipc';
 
@@ -23,6 +24,17 @@ describe('store IPC schemas', () => {
     expect(storeSchemas['store:install'].safeParse({ repoId: REPO, releaseId: R1 }).success).toBe(true);
     expect(storeSchemas['store:compare'].safeParse({ base: R1, head: R2 }).success).toBe(true);
     expect(storeSchemas['store:uninstall'].safeParse({ localId: 'glass-blur' }).success).toBe(true);
+    expect(storeSchemas['store:publish-prepare'].safeParse({ localId: 'glass-blur' }).success).toBe(true);
+    expect(storeSchemas['store:publish'].safeParse({ localId: 'glass-blur', form: { version: '1.2.0', waivers: [] } }).success).toBe(true);
+    expect(storeSchemas['store:publish'].safeParse({
+      localId: 'glass-blur',
+      form: {
+        version: '1.0.0', notes: 'First.', visibility: 'unlisted', iconPng: 'iVBORw0KGgo=',
+        listing: { name: 'Glass blur', tagline: 'Frosted glass.', category: 'effects', licence: 'Apache-2.0' },
+        waivers: [{ path: 'index.ts', line: 3, reason: 'test fixture' }]
+      }
+    }).success).toBe(true);
+    expect(storeSchemas['store:yank'].safeParse({ repoId: REPO, version: '1.2.0' }).success).toBe(true);
   });
 
   it('refuses anything else', () => {
@@ -41,7 +53,24 @@ describe('store IPC schemas', () => {
       ['store:install', { repoId: REPO }],
       ['store:update', { localId: '.staging' }],
       ['store:uninstall', { localId: '../glass-blur' }],
-      ['store:library', 'x']
+      ['store:library', 'x'],
+      ['store:publish-prepare', { localId: '../x' }],
+      ['store:publish-prepare', { localId: 'glass-blur', extra: true }],
+      ['store:publish', { localId: 'glass-blur', form: { version: '1.2', waivers: [] } }],
+      ['store:publish', { localId: 'glass-blur', form: { version: '1.2.0' } }],
+      ['store:publish', { localId: 'glass-blur', form: { version: '1.2.0', waivers: [], token: 'x' } }],
+      ['store:publish', { localId: 'glass-blur', form: { version: '1.2.0', waivers: [{ path: 'a.ts', line: 1, reason: 'ok' }] } }],
+      ['store:publish', { localId: 'glass-blur', form: { version: '1.2.0', waivers: [{ path: 'a.ts', line: 0, reason: 'fixture' }] } }],
+      ['store:publish', { localId: 'glass-blur', form: { version: '1.2.0', waivers: [{ path: 'a.ts', line: 1, reason: 'x'.repeat(201) }] } }],
+      ['store:publish', { localId: 'glass-blur', form: { version: '1.2.0', waivers: [], notes: 'x'.repeat(4001) } }],
+      ['store:publish', { localId: 'glass-blur', form: { version: '1.2.0', waivers: [], visibility: 'private' } }],
+      ['store:publish', { localId: 'glass-blur', form: { version: '1.2.0', waivers: [], iconPng: 'not base64!' } }],
+      ['store:publish', { localId: 'glass-blur', form: { version: '1.2.0', waivers: [], iconPng: 'A'.repeat(400_000) } }],
+      ['store:publish', { localId: 'glass-blur', form: { version: '1.2.0', waivers: [], listing: { name: 'x', tagline: 't'.repeat(161), category: 'effects', licence: 'MIT' } } }],
+      ['store:publish', { localId: 'glass-blur', form: { version: '1.2.0', waivers: [], listing: { name: 'x', tagline: '', category: 'effects', licence: 'WTFPL' } } }],
+      ['store:publish', { localId: 'glass-blur', form: { version: '1.2.0', waivers: [], listing: { name: ' ', tagline: '', category: 'effects', licence: 'MIT' } } }],
+      ['store:yank', { repoId: 'x', version: '1.0.0' }],
+      ['store:yank', { repoId: REPO, version: 'latest' }]
     ];
     for (const [channel, payload] of bad) {
       expect(storeSchemas[channel].safeParse(payload).success, `${channel} ${JSON.stringify(payload)}`).toBe(false);
@@ -58,22 +87,29 @@ describe('store IPC handlers', () => {
       installRelease: vi.fn(async () => { throw new StoreLocalError('integrity', 'nope'); }),
       uninstall: vi.fn(async (_id: string, remove: (id: string) => Promise<boolean>) => ({ removed: await remove('glass-blur') })),
       updates: () => ({}),
-      isModified: async () => false
+      isModified: async () => false,
+      localTree: async () => null
     } as unknown as StoreInstaller;
+    const publisher: Publisher = {
+      prepare: vi.fn(async () => { throw new ApiError({ error: 'forbidden', detail: 'Choose a handle first.' }); }),
+      publish: vi.fn(async () => ({ published: false as const })),
+      yank: vi.fn(async (target: string | { repoId: string; version: string }) => ({ version: typeof target === 'string' ? '1.0.0' : target.version }))
+    };
     const provenance = { read: async () => ({}) } as unknown as ProvenanceStore;
     const removeExtension = vi.fn(async () => true);
     registerStoreIpc(ipcMain, {
-      store, installer, provenance, removeExtension,
+      store, installer, publisher, provenance, removeExtension,
       registry: { list: () => [] },
       me: () => null,
       isTrusted: () => trusted
     });
-    return { handlers, store, installer, removeExtension };
+    return { handlers, store, installer, publisher, removeExtension };
   }
 
   it('registers every channel', () => {
     const { handlers } = register();
-    const expected = Object.values(STORE_IPC).filter((channel) => channel !== STORE_IPC.updatesChanged).sort();
+    const events: string[] = [STORE_IPC.updatesChanged, STORE_IPC.publishProgress, STORE_IPC.libraryChanged];
+    const expected = Object.values(STORE_IPC).filter((channel) => !events.includes(channel)).sort();
     expect([...handlers.keys()].sort()).toEqual(expected);
   });
 
@@ -88,6 +124,18 @@ describe('store IPC handlers', () => {
       .resolves.toEqual({ ok: false, error: { error: 'gone', reason: 'removed' } });
     await expect(handlers.get(STORE_IPC.install)!({}, { repoId: REPO, releaseId: R1 }))
       .resolves.toEqual({ ok: false, error: { error: 'integrity', detail: 'nope' } });
+  });
+
+  it('publishes and yanks through the publisher, with only the fields it asked for', async () => {
+    const { handlers, publisher } = register();
+    await expect(handlers.get(STORE_IPC.publishPrepare)!({}, { localId: 'glass-blur' }))
+      .resolves.toEqual({ ok: false, error: { error: 'forbidden', detail: 'Choose a handle first.' } });
+    await expect(handlers.get(STORE_IPC.publish)!({}, { localId: 'glass-blur', form: { version: '1.1.0', waivers: [], notes: 'Faster.' } }))
+      .resolves.toEqual({ ok: true, value: { published: false } });
+    expect(publisher.publish).toHaveBeenCalledWith('glass-blur', { version: '1.1.0', waivers: [], notes: 'Faster.' });
+    await expect(handlers.get(STORE_IPC.yank)!({}, { repoId: REPO, version: '1.1.0' })).resolves.toEqual({ ok: true, value: { version: '1.1.0' } });
+    expect(publisher.yank).toHaveBeenCalledWith({ repoId: REPO, version: '1.1.0' });
+    await expect(register(false).handlers.get(STORE_IPC.publish)!({}, { localId: 'glass-blur', form: { version: '1.1.0', waivers: [] } })).rejects.toThrow(/untrusted/);
   });
 
   it('uninstalls through the removal path for the asking window', async () => {
@@ -163,6 +211,34 @@ describe('library', () => {
     expect(withCheck.find((item) => item.localId === 'glass-blur')?.update).toEqual({ version: '1.1.0', releaseId: R2, modified: true, state: 'staged-for-merge' });
     const beforeCheck = buildLibrary({ records, provenance: staged, updates: {}, me: null, modified: () => true });
     expect(beforeCheck.find((item) => item.localId === 'glass-blur')?.update).toEqual({ version: '1.1.0', releaseId: R2, modified: true, state: 'staged-for-merge' });
+  });
+
+  it('says what publishing would do for each folder', () => {
+    const folders: ProvenanceFile = {
+      ...provenance,
+      'my-fork': {
+        localId: 'my-fork', envKey: REPO, origin: origin(THEIRS), upstream: { releaseId: R1, treeSha: 't' },
+        published: { repoId: R2, releaseId: R2, version: '1.0.0', ownerPublisherId: MINE, coordinate: 'jude/my-fork', publishedTreeSha: 'p', localTreeSha: 'l' }
+      }
+    };
+    const trees: Record<string, string> = { 'glass-blur': 'changed', 'my-fork': 'l', 'gone-one': 't' };
+    const items = buildLibrary({ records, provenance: folders, updates, me: me(MINE), modified: (id) => trees[id] !== 't', tree: (id) => trees[id] });
+    const byId = Object.fromEntries(items.map((item) => [item.localId, item]));
+    expect(byId['timeline']?.publish).toBeUndefined();
+    expect(byId['ease-lab']?.publish).toBe('first');
+    expect(byId['glass-blur']?.publish).toBe('first');
+    expect(byId['gone-one']?.publish).toBeNull();
+    expect(byId['my-fork']).toMatchObject({
+      publish: null,
+      published: { coordinate: 'jude/my-fork', version: '1.0.0', releaseId: R2, repoId: R2 },
+      fork: { coordinate: 'mara/glass-blur', version: '1.0.0', releaseId: R1, upstreamReleaseId: R1 }
+    });
+    trees['my-fork'] = 'edited';
+    expect(buildLibrary({ records, provenance: folders, updates, me: me(MINE), modified: () => true, tree: (id) => trees[id] })
+      .find((item) => item.localId === 'my-fork')?.publish).toBe('update');
+    // Signed out, nothing is yours to publish.
+    expect(buildLibrary({ records, provenance: folders, updates, me: null, modified: () => true, tree: (id) => trees[id] })
+      .every((item) => !item.publish)).toBe(true);
   });
 
   it('reads a category from what an extension contributes', () => {

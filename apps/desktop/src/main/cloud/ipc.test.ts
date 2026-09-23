@@ -50,10 +50,21 @@ function fakeSession(): CloudSession {
   };
 }
 
-function register(auth: CloudAuth, session: CloudSession, trusted = true) {
+function fakeRegistry(answer = true) {
+  let origin = 'https://cloud.trypowermove.com';
+  return {
+    get: () => origin,
+    change: vi.fn(async (next: string) => {
+      if (answer) origin = new URL(next).origin;
+      return answer;
+    })
+  };
+}
+
+function register(auth: CloudAuth, session: CloudSession, trusted = true, registry = fakeRegistry()) {
   const handlers = new Map<string, (event: unknown, payload: unknown) => Promise<unknown>>();
   const ipcMain = { handle: (channel: string, handler: (event: unknown, payload: unknown) => Promise<unknown>) => void handlers.set(channel, handler) };
-  registerCloudIpc(ipcMain as never, { auth, session, isTrusted: () => trusted });
+  registerCloudIpc(ipcMain as never, { auth, session, registry, isTrusted: () => trusted });
   const call = (channel: string, payload?: unknown) => handlers.get(channel)!({ sender: {}, senderFrame: null }, payload);
   return { handlers, call };
 }
@@ -84,7 +95,13 @@ describe('cloud IPC', () => {
       [CLOUD_IPC.setRememberInstalls, {}],
       [CLOUD_IPC.signOut, { now: true }],
       [CLOUD_IPC.deleteAccount, { confirmed: true }],
-      [CLOUD_IPC.accountGet, [1]]
+      [CLOUD_IPC.accountGet, [1]],
+      [CLOUD_IPC.registryUrl, { origin: 'x' }],
+      [CLOUD_IPC.setRegistryUrl, { origin: 'file:///etc/passwd' }],
+      [CLOUD_IPC.setRegistryUrl, { origin: 'javascript:alert(1)' }],
+      [CLOUD_IPC.setRegistryUrl, { origin: 'not a url' }],
+      [CLOUD_IPC.setRegistryUrl, { origin: `https://${'a'.repeat(2000)}.test` }],
+      [CLOUD_IPC.setRegistryUrl, { origin: 'https://registry.example.test', extra: 1 }]
     ];
     for (const [channel, payload] of bad) {
       await expect(call(channel, payload), `${channel} ${JSON.stringify(payload)}`).rejects.toThrow(/cloud:/);
@@ -137,5 +154,19 @@ describe('cloud IPC', () => {
     const offline: CloudSession = { ...session, currentToken: () => 'bearer', me: () => cached as never, provider: () => 'email', refreshMe: vi.fn(async () => { throw new ApiError({ error: 'internal' }); }) };
     const { call } = register(fakeAuth() as unknown as CloudAuth, offline);
     await expect(call(CLOUD_IPC.accountGet)).resolves.toEqual({ me: cached, provider: 'email' });
+  });
+
+  it('changes the registry only through main’s confirmation', async () => {
+    const registry = fakeRegistry(false);
+    const { call } = register(fakeAuth() as unknown as CloudAuth, fakeSession(), true, registry);
+    await expect(call(CLOUD_IPC.registryUrl)).resolves.toEqual({ origin: 'https://cloud.trypowermove.com', isDefault: true });
+    await expect(call(CLOUD_IPC.setRegistryUrl, { origin: 'https://registry.example.test/path' }))
+      .resolves.toEqual({ ok: true, value: { origin: 'https://cloud.trypowermove.com', isDefault: true, changed: false } });
+    expect(registry.change).toHaveBeenCalledWith('https://registry.example.test/path');
+
+    const accepting = fakeRegistry(true);
+    const next = register(fakeAuth() as unknown as CloudAuth, fakeSession(), true, accepting);
+    await expect(next.call(CLOUD_IPC.setRegistryUrl, { origin: 'https://registry.example.test' }))
+      .resolves.toEqual({ ok: true, value: { origin: 'https://registry.example.test', isDefault: false, changed: true } });
   });
 });

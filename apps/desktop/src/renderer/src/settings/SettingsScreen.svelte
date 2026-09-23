@@ -11,7 +11,7 @@
   import Avatar from '../cloud/Avatar.svelte';
   import { applyAccount, cloudBridge, openSignIn, signOut, subscribeAccount, type CloudUser } from '../cloud/account';
 
-  export type SettingsPage = 'general' | 'accounts' | 'extensions' | 'project';
+  export type SettingsPage = 'general' | 'accounts' | 'extensions' | 'advanced' | 'project';
 
   let { PM, projectBridge }: {
     PM: Record<string, any>;
@@ -34,7 +34,8 @@
       items: [
         { id: 'general', label: 'General', icon: 'gear' },
         { id: 'accounts', label: 'Accounts', icon: 'link' },
-        { id: 'extensions', label: 'Extensions', icon: 'puzzle' }
+        { id: 'extensions', label: 'Extensions', icon: 'puzzle' },
+        { id: 'advanced', label: 'Advanced', icon: 'sliders' }
       ]
     }
   ];
@@ -74,6 +75,14 @@
   let account = $state<CloudUser | null>(null);
   let rememberInstalls = $state(true);
   let accountBusy = $state(false);
+  /* Settings › Advanced › Registry URL. Shown as a host; main owns the value
+     and asks with a native dialog before switching (and signing out). */
+  let registryOrigin = $state<string | null>(null);
+  let registryDraft = $state('');
+  let registryBusy = $state(false);
+  let registryError = $state<string | null>(null);
+  const registryHost = (origin: string): string => origin.replace(/^https:\/\//, '');
+  const registryChanged = $derived(registryOrigin !== null && registryDraft.trim() !== '' && registryDraft.trim() !== registryHost(registryOrigin) && registryDraft.trim() !== registryOrigin);
 
   $effect(() => subscribeAccount((user, me) => {
     account = user;
@@ -129,8 +138,45 @@
     controls = null;
   }
 
+  async function loadRegistry(): Promise<void> {
+    const bridge = cloudBridge();
+    if (!bridge) return;
+    try {
+      const current = await bridge.registryUrl();
+      registryOrigin = current.origin;
+      registryDraft = registryHost(current.origin);
+      registryError = null;
+    } catch {
+      registryOrigin = null;
+    }
+  }
+
+  async function changeRegistry(): Promise<void> {
+    const bridge = cloudBridge();
+    const value = registryDraft.trim();
+    if (!bridge || registryBusy || !value) return;
+    const origin = /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`;
+    registryError = null;
+    registryBusy = true;
+    try {
+      const result = await bridge.setRegistryUrl({ origin });
+      if (!result.ok) throw new Error(result.error.error);
+      registryOrigin = result.value.origin;
+      registryDraft = registryHost(result.value.origin);
+      if (result.value.changed) {
+        applyAccount(null);
+        PM.toast?.(`The Store now uses ${registryHost(result.value.origin)}. Sign in to publish there.`, 4000, { kind: 'status' });
+      }
+    } catch {
+      registryError = 'Enter a web address, like cloud.trypowermove.com.';
+    } finally {
+      registryBusy = false;
+    }
+  }
+
   export function open(target?: SettingsPage): void {
     build();
+    void loadRegistry();
     themeMode = PM.theme?.mode ?? 'system';
     restoreWindows = PM.store?.get?.('restoreWindows', true) !== false;
     autoDownloadCloudMedia = PM.store?.get?.('autoDownloadCloudMedia', false) === true;
@@ -530,6 +576,41 @@
                 <p>Manage extensions and turn them on or off.</p>
               </header>
               <div class="sg-sections" use:host={controls?.extensions.element}></div>
+            {:else if item.id === 'advanced'}
+              <header class="sg-heading">
+                <h2>Advanced</h2>
+                <p>Settings most people never need to change.</p>
+              </header>
+              <section class="sg-section">
+                <h3 class="sg-section-title">Store</h3>
+                <div class="sg-group">
+                  <div class="settings-row">
+                    <label class="settings-copy" for="settings-registry-url">
+                      <b>Registry URL</b>
+                      {#if registryError}
+                        <span class="settings-extension-error" role="alert">{registryError}</span>
+                      {:else}
+                        <span>Where the Store finds and publishes extensions. Changing it signs you out.</span>
+                      {/if}
+                    </label>
+                    <input
+                      id="settings-registry-url"
+                      class="settings-input is-wide"
+                      type="text"
+                      inputmode="url"
+                      autocomplete="off"
+                      autocapitalize="off"
+                      spellcheck="false"
+                      maxlength="2000"
+                      placeholder="cloud.trypowermove.com"
+                      disabled={registryBusy || registryOrigin === null}
+                      bind:value={registryDraft}
+                      onkeydown={(event) => { if (event.key === 'Enter' && registryChanged) { event.preventDefault(); void changeRegistry(); } }}
+                    />
+                    <button class="btn" type="button" disabled={registryBusy || !registryChanged} onclick={() => void changeRegistry()}>Change…</button>
+                  </div>
+                </div>
+              </section>
             {:else if item.id === 'project'}
               <header class="sg-heading">
                 <h2>Project</h2>

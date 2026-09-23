@@ -9,7 +9,7 @@
  * store client before it gets here.
  */
 import type { IpcMain, IpcMainInvokeEvent } from 'electron';
-import { ApiError, Category, Handle, type MeDto, type VarDecl } from '@powermove/registry/wire';
+import { ApiError, Category, Handle, Visibility, type MeDto, type VarDecl } from '@powermove/registry/wire';
 import { z } from 'zod';
 
 import { IpcValidationError } from '../../shared/guards';
@@ -24,8 +24,10 @@ import {
   type StoreResult,
   type StoreUpdates
 } from '../../shared/store-ipc';
+import { PUBLISH_LICENCES, PUBLISH_LIMITS } from '../../shared/publish';
 import { StoreLocalError, type StoreInstaller } from './install';
 import { isMine } from './ownership';
+import type { Publisher } from './publish';
 import type { ProvenanceFile, ProvenanceRecord, ProvenanceStore } from './provenance';
 import type { StoreClient } from './store-client';
 
@@ -39,6 +41,26 @@ const releaseRequest = z.strictObject({ releaseId: uuid });
 const CURSOR_MAX = 512;
 /** Longest source path asked for (the registry's tree paths are capped well below). */
 const PATH_MAX = 1024;
+/** Base64 of at most 256 KiB. */
+const ICON_BASE64_MAX = Math.ceil(PUBLISH_LIMITS.iconBytes / 3) * 4;
+
+const publishForm = z.strictObject({
+  version: z.string().regex(EXTENSION_VERSION),
+  notes: z.string().max(PUBLISH_LIMITS.notesChars).optional(),
+  listing: z.strictObject({
+    name: z.string().trim().min(1).max(PUBLISH_LIMITS.nameChars),
+    tagline: z.string().max(PUBLISH_LIMITS.taglineChars),
+    category: Category,
+    licence: z.enum(PUBLISH_LICENCES)
+  }).optional(),
+  visibility: Visibility.optional(),
+  iconPng: z.string().max(ICON_BASE64_MAX).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/).optional(),
+  waivers: z.array(z.strictObject({
+    path: z.string().min(1).max(PATH_MAX),
+    line: z.number().int().positive().max(10_000_000),
+    reason: z.string().trim().min(PUBLISH_LIMITS.waiverReasonMin).max(PUBLISH_LIMITS.waiverReasonMax)
+  })).max(1000)
+});
 
 export const storeSchemas = {
   'store:browse': none,
@@ -64,7 +86,10 @@ export const storeSchemas = {
   'store:update': localId,
   'store:uninstall': localId,
   'store:library': none,
-  'store:check-updates': none
+  'store:check-updates': none,
+  'store:publish-prepare': localId,
+  'store:publish': z.strictObject({ localId: z.string().regex(EXTENSION_ID), form: publishForm }),
+  'store:yank': z.strictObject({ repoId: uuid, version: z.string().regex(EXTENSION_VERSION) })
 } as const satisfies Record<keyof StoreChannels, z.ZodType>;
 
 function parse<T>(schema: z.ZodType<T>, channel: string, payload: unknown): T {
@@ -131,6 +156,29 @@ export interface LibraryInput {
   me: MeDto | null;
   /** Whether a store install's folder no longer matches what was installed. */
   modified(localId: string): boolean;
+  /** The folder's snapshot tree, when it was taken (folders with provenance); null when unreadable. */
+  tree?(localId: string): string | null | undefined;
+}
+
+/**
+ * What publishing a user folder now would do (store plan §2.2): a folder made
+ * here or a changed install of someone else's release makes a new repo; a
+ * folder already published, or my own release installed here, adds a release
+ * when its tree moved on. Signed out or without a handle, nothing is mine to
+ * publish.
+ */
+function publishStateOf(record: ExtensionRecord, provenance: ProvenanceRecord | undefined, input: LibraryInput, modified: boolean): LibraryItemDto['publish'] {
+  const mine = input.me?.publisher?.id ?? null;
+  if (record.scope !== 'user' || !mine) return null;
+  const published = provenance?.published?.ownerPublisherId === mine ? provenance.published : undefined;
+  const origin = provenance?.origin;
+  if (published) {
+    const base = published.localTreeSha ?? published.publishedTreeSha;
+    const tree = input.tree?.(record.id);
+    return base && typeof tree === 'string' && tree !== base ? 'update' : null;
+  }
+  if (origin) return modified ? (origin.ownerPublisherId === mine ? 'update' : 'first') : null;
+  return 'first';
 }
 
 /**
@@ -185,9 +233,19 @@ export function buildLibrary(input: LibraryInput): LibraryItemDto[] {
     };
     if (origin) item.origin = { coordinate: origin.coordinate, version: origin.version, repoId: origin.repoId, releaseId: origin.releaseId };
     if (record.manifest?.forkedFrom) item.forkedFrom = record.manifest.forkedFrom;
-    if (provenance?.published) {
-      item.published = { coordinate: null, version: provenance.published.version, releaseId: provenance.published.releaseId };
+    const published = provenance?.published;
+    if (published) {
+      item.published = { coordinate: published.coordinate ?? null, version: published.version, releaseId: published.releaseId, repoId: published.repoId };
+      if (origin && origin.ownerPublisherId !== published.ownerPublisherId) {
+        item.fork = {
+          coordinate: origin.coordinate,
+          version: origin.version,
+          releaseId: origin.releaseId,
+          upstreamReleaseId: provenance.upstream?.releaseId ?? origin.releaseId
+        };
+      }
     }
+    if (record.scope === 'user') item.publish = publishStateOf(record, provenance, input, modified);
     if (check?.state === 'removed' || check?.state === 'tombstoned') item.removed = true;
     return item;
   });
@@ -198,6 +256,7 @@ export function buildLibrary(input: LibraryInput): LibraryItemDto[] {
 export interface StoreIpcOptions {
   store: StoreClient;
   installer: StoreInstaller;
+  publisher: Publisher;
   provenance: ProvenanceStore;
   registry: { list(): ExtensionRecord[] };
   me(): MeDto | null;
@@ -209,8 +268,8 @@ export interface StoreIpcOptions {
 export function registerStoreIpc(ipcMain: Pick<IpcMain, 'handle'>, options: StoreIpcOptions): void {
   const { store, installer } = options;
   /* Snapshotting a folder reads every file; the answer holds until the
-     registry sees that folder change (a new `updatedAt`) or a new install. */
-  const modifiedCache = new Map<string, { key: string; modified: boolean }>();
+     registry sees that folder change (a new `updatedAt`). */
+  const treeCache = new Map<string, { key: number; tree: string | null }>();
 
   function handle<C extends keyof StoreChannels, T>(
     channel: C,
@@ -231,26 +290,30 @@ export function registerStoreIpc(ipcMain: Pick<IpcMain, 'handle'>, options: Stor
     } catch (error) {
       console.error('[store] provenance unreadable', error instanceof Error ? error.message : 'unknown error');
     }
-    const modified = new Map<string, boolean>();
+    const trees = new Map<string, string | null>();
     await Promise.all(records.map(async (record) => {
-      const origin = record.scope === 'user' ? provenance[record.id]?.origin : undefined;
-      if (!origin) return;
-      const key = `${record.updatedAt}:${origin.treeSha}`;
-      const cached = modifiedCache.get(record.id);
-      if (cached?.key === key) {
-        modified.set(record.id, cached.modified);
+      const entry = record.scope === 'user' ? provenance[record.id] : undefined;
+      if (!entry?.origin && !entry?.published) return;
+      const cached = treeCache.get(record.id);
+      if (cached?.key === record.updatedAt) {
+        trees.set(record.id, cached.tree);
         return;
       }
-      const value = await installer.isModified(record.id);
-      modifiedCache.set(record.id, { key, modified: value });
-      modified.set(record.id, value);
+      const tree = await installer.localTree(record.id);
+      treeCache.set(record.id, { key: record.updatedAt, tree });
+      trees.set(record.id, tree);
     }));
     return buildLibrary({
       records,
       provenance,
       updates: installer.updates(),
       me: options.me(),
-      modified: (id) => modified.get(id) ?? false
+      // Unreadable is not what was installed.
+      modified: (id) => {
+        const origin = provenance[id]?.origin;
+        return !!origin && trees.has(id) && trees.get(id) !== origin.treeSha;
+      },
+      tree: (id) => trees.get(id)
     });
   }
 
@@ -265,13 +328,28 @@ export function registerStoreIpc(ipcMain: Pick<IpcMain, 'handle'>, options: Stor
   handle(STORE_IPC.install, storeSchemas['store:install'], (request) => storeResult(() => installer.installRelease(request)));
   handle(STORE_IPC.update, storeSchemas['store:update'], (request) => storeResult(async () => {
     const result = await installer.updateRelease(request.localId);
-    modifiedCache.delete(request.localId);
+    treeCache.delete(request.localId);
     return result;
   }));
   handle(STORE_IPC.uninstall, storeSchemas['store:uninstall'], (request, event) => storeResult(async () => {
-    modifiedCache.delete(request.localId);
+    treeCache.delete(request.localId);
     return installer.uninstall(request.localId, (id) => options.removeExtension(event, id));
   }));
   handle(STORE_IPC.library, storeSchemas['store:library'], () => library());
   handle(STORE_IPC.checkUpdates, storeSchemas['store:check-updates'], () => storeResult(() => installer.checkUpdates()));
+  handle(STORE_IPC.publishPrepare, storeSchemas['store:publish-prepare'], (request) => storeResult(() => options.publisher.prepare(request.localId)));
+  handle(STORE_IPC.publish, storeSchemas['store:publish'], (request) => storeResult(async () => {
+    const { form } = request;
+    const result = await options.publisher.publish(request.localId, {
+      version: form.version,
+      waivers: form.waivers,
+      ...(form.notes !== undefined ? { notes: form.notes } : {}),
+      ...(form.listing ? { listing: form.listing } : {}),
+      ...(form.visibility ? { visibility: form.visibility } : {}),
+      ...(form.iconPng ? { iconPng: form.iconPng } : {})
+    });
+    treeCache.delete(request.localId);
+    return result;
+  }));
+  handle(STORE_IPC.yank, storeSchemas['store:yank'], (request) => storeResult(() => options.publisher.yank({ repoId: request.repoId, version: request.version })));
 }

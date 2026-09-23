@@ -152,15 +152,18 @@ export type StoreListing = {
   vars?: VarDecl[];
   art: [string, string];
   iconUrl: string | null;
+  installCount: number;
+  forkCount: number;
+  visibility: 'public' | 'unlisted';
 };
 
 export function coordinate(l: { publisher: string; id: string }): string {
   return `${l.publisher}/${l.id}`;
 }
 
-/** The Library item installed from this repo, if any. */
+/** The Library item for this repo: published from this Mac, or installed from it. */
 export function libraryItemFor(repoId: string, library: readonly LibraryItemDto[]): LibraryItemDto | undefined {
-  return library.find((item) => item.origin?.repoId === repoId);
+  return library.find((item) => item.published?.repoId === repoId) ?? library.find((item) => item.origin?.repoId === repoId);
 }
 
 export function listingFromDto(dto: ListingDto, library: readonly LibraryItemDto[], now: Date = new Date()): StoreListing {
@@ -177,7 +180,10 @@ export function listingFromDto(dto: ListingDto, library: readonly LibraryItemDto
     latestReleaseId: dto.latest?.id ?? null,
     apiVersion: dto.latest?.apiVersion ?? null,
     art: artFor(dto.repoId),
-    iconUrl: dto.iconUrl
+    iconUrl: dto.iconUrl,
+    installCount: dto.installCount,
+    forkCount: dto.forkCount,
+    visibility: dto.visibility
   };
   if (dto.forkedFrom) {
     listing.forkedFrom = { handle: dto.forkedFrom.handle, slug: dto.forkedFrom.slug, version: dto.forkedFrom.version, releaseId: dto.forkedFrom.releaseId };
@@ -262,6 +268,9 @@ export function statusText(item: LibraryItemDto): string | null {
   if (item.update?.state === 'staged-for-merge') return `You changed the files · ${item.update.version} is beside your folder`;
   if (item.update?.modified) return `You changed the files · Update to ${item.update.version}`;
   if (item.update) return `Installed ${item.origin?.version ?? item.version} · Update to ${item.update.version}`;
+  if (item.published && item.group === 'yours') {
+    return item.publish ? `Published ${item.published.version} · Changed since` : `Published ${item.published.version}`;
+  }
   if (item.modified) return 'You changed the files';
   if (item.group === 'store') return `Installed ${item.origin?.version ?? item.version}`;
   if (item.published) return `Published ${item.published.version}`;
@@ -274,7 +283,7 @@ export function statusIsHot(item: LibraryItemDto): boolean {
 
 /* ── actions ── */
 
-export type ActionKind = 'install' | 'setup' | 'update' | 'none' | 'toggle';
+export type ActionKind = 'install' | 'setup' | 'update' | 'publish' | 'none' | 'toggle';
 
 export type Action = {
   label: string;
@@ -295,9 +304,11 @@ export type Action = {
  *   here, newer version            Update
  *   here, newer version, changed   Update…
  *   here, up to date               Installed
+ *   yours, changed since publishing  Publish… / Publish Update…
+ *   the store page of what you forked  Forked
  *   yours or built in              Open (not yet)
  */
-export function detailAction(input: { vars?: readonly VarDecl[] | undefined; item?: LibraryItemDto | undefined }): Action {
+export function detailAction(input: { vars?: readonly VarDecl[] | undefined; item?: LibraryItemDto | undefined; repoId?: string | undefined }): Action {
   const { item } = input;
   if (!item) {
     return input.vars?.some((v) => v.required)
@@ -305,17 +316,36 @@ export function detailAction(input: { vars?: readonly VarDecl[] | undefined; ite
       : { label: 'Install', kind: 'install', primary: true };
   }
   if (needsSetup(item)) return { label: 'Set up', kind: 'setup', primary: true };
+  // The original's page, seen from your published fork of it.
+  if (item.fork && input.repoId && input.repoId !== item.published?.repoId) return { label: 'Forked', kind: 'none', quiet: true };
   if (item.update && !item.removed) return { label: item.update.modified ? 'Update…' : 'Update', kind: 'update', primary: true };
+  if (item.group === 'yours' && item.publish) return { ...publishAction(item), primary: true };
   if (item.group === 'store') return { label: 'Installed', kind: 'none', quiet: true };
   return { label: 'Open', kind: 'none', disabled: true };
 }
 
-/** The trailing control of a Library row: Update, Set up, or On/Off. */
+/** Publish… for something new; Publish Update… once it is on the store. */
+export function publishAction(item: LibraryItemDto): Action {
+  return { label: item.publish === 'update' ? 'Publish Update…' : 'Publish…', kind: 'publish' };
+}
+
+/**
+ * A second, quieter way to publish from the detail page when the primary
+ * action is something else: your changed copy of someone else's extension
+ * (it publishes as a fork) or your own extension installed from the store.
+ */
+export function secondaryPublish(item: LibraryItemDto | undefined): Action | null {
+  if (!item || item.group !== 'store' || !item.publish) return null;
+  return item.publish === 'first' ? { label: 'Publish Your Version…', kind: 'publish' } : publishAction(item);
+}
+
+/** The trailing control of a Library row: Update, Set up, Publish, or On/Off. */
 export function libraryAction(item: LibraryItemDto): Action {
   if (needsSetup(item)) return { label: 'Set up', kind: 'setup', primary: true };
   if (item.update && item.update.state === 'available' && !item.removed) {
     return { label: item.update.modified ? 'Update…' : 'Update', kind: 'update', primary: true };
   }
+  if (item.group === 'yours' && item.publish) return publishAction(item);
   return { label: item.enabled ? 'On' : 'Off', kind: 'toggle', quiet: true };
 }
 
@@ -336,6 +366,12 @@ export function actionErrorText(error: StoreErrorBody): string {
   if (error.error === 'rate_limited') return 'Too many requests. Wait a moment and try again.';
   if (error.error === 'client_too_old') return 'This version of Powermove is too old for the store. Update Powermove and try again.';
   return error.detail ?? 'Something went wrong. Try again.';
+}
+
+/** A publish or withdraw failure: main already wrote the sentence into `detail`. */
+export function publishErrorText(error: StoreErrorBody): string {
+  if (error.error === 'internal' && error.detail === CLOUD_UNREACHABLE) return 'Can’t reach the store. Check your connection and try again.';
+  return error.detail ?? actionErrorText(error);
 }
 
 /* ── the bridge ── */

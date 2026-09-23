@@ -21,6 +21,8 @@ import type {
 import type { ExtensionHealth } from '@powermove/registry/manifest';
 import type { z } from 'zod';
 
+import type { PublishForm, PublishPlanDto, PublishProgress, StorePublishResult } from './publish';
+
 export const STORE_IPC = {
   browse: 'store:browse',
   extensions: 'store:extensions',
@@ -34,8 +36,15 @@ export const STORE_IPC = {
   uninstall: 'store:uninstall',
   library: 'store:library',
   checkUpdates: 'store:check-updates',
+  publishPrepare: 'store:publish-prepare',
+  publish: 'store:publish',
+  yank: 'store:yank',
   /** main → renderer: the update-check results changed (`StoreUpdates`). */
-  updatesChanged: 'store:updates-changed'
+  updatesChanged: 'store:updates-changed',
+  /** main → renderer: a publish moved on (`PublishProgress`). */
+  publishProgress: 'store:publish-progress',
+  /** main → renderer: provenance changed (a publish or a yank); reload the Library. */
+  libraryChanged: 'store:library-changed'
 } as const;
 
 export type StoreCategory = z.infer<typeof Category>;
@@ -57,9 +66,11 @@ export type ReleaseWithCoordinateDto = ReleaseDto & { handle: string; slug: stri
  *   local              the file system refused (disk full, permissions)
  *   no_update          there is nothing newer to update to
  *   not_installed      no store install with that id is on this Mac
+ *   folder_invalid     the folder can't be published as it is (a file, the manifest, a finding)
+ *   upload_rejected    the registry refused an uploaded object
  * `id_collision` (a folder with that id exists) reuses the registry's code.
  */
-export type StoreLocalErrorCode = 'integrity' | 'builtin_collision' | 'local' | 'no_update' | 'not_installed';
+export type StoreLocalErrorCode = 'integrity' | 'builtin_collision' | 'local' | 'no_update' | 'not_installed' | 'folder_invalid' | 'upload_rejected';
 export type StoreErrorBody = ApiErrorBody | { error: StoreLocalErrorCode; detail: string };
 export type StoreResult<T> = { ok: true; value: T } | { ok: false; error: StoreErrorBody };
 
@@ -104,7 +115,15 @@ export interface LibraryItemDto {
   origin?: { coordinate: string; version: string; repoId: string; releaseId: string };
   /** The manifest's `forkedFrom` (`id@version` for a built-in, `handle/slug@version` for the store). */
   forkedFrom?: string;
-  published?: { coordinate: string | null; version: string; releaseId: string };
+  published?: { coordinate: string | null; version: string; releaseId: string; repoId: string };
+  /**
+   * What publishing this folder now would do: `first` creates a repo (a fork
+   * when it came from someone else's release), `update` adds a release to
+   * yours. Null when there is nothing new to publish or it isn't yours to.
+   */
+  publish?: 'first' | 'update' | null;
+  /** A fork you published: the release it was forked from, and the merge base for the compare view. */
+  fork?: { coordinate: string; version: string; releaseId: string; upstreamReleaseId: string };
   update?: { version: string; releaseId: string; modified: boolean; state: 'available' | 'staged-for-merge' } | null;
   /** The origin was removed or deleted from the store; the files stay. */
   removed?: boolean;
@@ -119,6 +138,8 @@ export interface StoreFileRequest { handle: string; slug: string; version: strin
 export interface StoreCompareRequest { base: string; head: string }
 export interface StoreInstallRequest { repoId: string; releaseId: string }
 export interface StoreLocalRequest { localId: string }
+export interface StorePublishRequest { localId: string; form: PublishForm }
+export interface StoreYankRequest { repoId: string; version: string }
 
 /** Request and response types per invoke channel. */
 export interface StoreChannels {
@@ -135,6 +156,10 @@ export interface StoreChannels {
   'store:uninstall': { req: StoreLocalRequest; res: StoreResult<{ removed: boolean }> };
   'store:library': { req: void; res: LibraryItemDto[] };
   'store:check-updates': { req: void; res: StoreResult<StoreUpdates> };
+  'store:publish-prepare': { req: StoreLocalRequest; res: StoreResult<PublishPlanDto> };
+  /** The native confirmation follows; `published: false` means it was cancelled. */
+  'store:publish': { req: StorePublishRequest; res: StoreResult<StorePublishResult> };
+  'store:yank': { req: StoreYankRequest; res: StoreResult<{ version: string }> };
 }
 
 export type StoreChannel = keyof StoreChannels;
@@ -152,7 +177,12 @@ export interface StoreBridge {
   uninstall(req: StoreLocalRequest): Promise<StoreChannels['store:uninstall']['res']>;
   library(): Promise<LibraryItemDto[]>;
   checkUpdates(): Promise<StoreChannels['store:check-updates']['res']>;
+  publishPrepare(req: StoreLocalRequest): Promise<StoreChannels['store:publish-prepare']['res']>;
+  publish(req: StorePublishRequest): Promise<StoreChannels['store:publish']['res']>;
+  yank(req: StoreYankRequest): Promise<StoreChannels['store:yank']['res']>;
   onUpdatesChanged(cb: (updates: StoreUpdates) => void): () => void;
+  onPublishProgress(cb: (progress: PublishProgress) => void): () => void;
+  onLibraryChanged(cb: () => void): () => void;
 }
 
 /** The longest search query sent to the registry. */

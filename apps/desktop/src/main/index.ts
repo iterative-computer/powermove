@@ -35,6 +35,7 @@ import { createProvenanceStore } from './cloud/provenance';
 import { DEEP_LINK_SCHEME } from './cloud/auth';
 import { createDeepLinkQueue, deepLinksIn, startCloudService, type CloudService } from './cloud/service';
 import { createStoreClient } from './cloud/store-client';
+import { createPublishApi, createPublisher } from './cloud/publish';
 import { createStoreInstaller } from './cloud/install';
 import { registerStoreIpc as registerExtensionStoreIpc } from './cloud/store-ipc';
 import { ApiError } from '@powermove/registry/wire';
@@ -766,9 +767,30 @@ if (!hasSingleInstanceLock) {
     if (storeDeps) {
       const deps = storeDeps;
       const cloudSession = cloud?.session ?? null;
-      const storeClient = createStoreClient(() => {
+      const cloudClient = () => {
         if (!cloudSession) throw new ApiError({ error: 'internal', detail: CLOUD_UNREACHABLE });
         return cloudSession.client();
+      };
+      const storeClient = createStoreClient(cloudClient);
+      const toEditors = (channel: string, payload?: unknown): void => {
+        for (const window of editors.all()) {
+          if (!window.webContents.isDestroyed()) window.webContents.send(channel, payload);
+        }
+      };
+      // Publishing: the confirmation is a native sheet owned by main.
+      const publisher = createPublisher({
+        registry: deps.registry,
+        provenance,
+        api: createPublishApi(cloudClient),
+        me: () => cloudSession?.me() ?? null,
+        signedIn: () => cloudSession?.currentToken() != null,
+        confirm: async (options) => {
+          const window = currentEditor();
+          const result = window && !window.isDestroyed() ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
+          return result.response === 0;
+        },
+        notifyProgress: (progress) => toEditors(STORE_IPC.publishProgress, progress),
+        notifyLibrary: () => toEditors(STORE_IPC.libraryChanged)
       });
       const installer = createStoreInstaller({
         registry: deps.registry,
@@ -787,6 +809,7 @@ if (!hasSingleInstanceLock) {
       registerExtensionStoreIpc(ipcMain, {
         store: storeClient,
         installer,
+        publisher,
         provenance,
         registry: deps.registry,
         me: () => cloudSession?.me() ?? null,

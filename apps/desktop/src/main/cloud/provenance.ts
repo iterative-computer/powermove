@@ -29,6 +29,18 @@ export interface ProvenancePublished {
   releaseId: string;
   version: string;
   ownerPublisherId: string;
+  /** The published commit: the parent of the next publish from this folder. */
+  commitSha?: string;
+  /** `<handle>/<slug>`; handles never change, so this stays true. */
+  coordinate?: string;
+  /** The published release's tree. */
+  publishedTreeSha?: string;
+  /**
+   * The folder's own tree at publish. It differs from `publishedTreeSha`
+   * only on a fork, whose uploaded manifest carries `forkedFrom` and whose
+   * folder does not. "Unpublished changes" compares against this.
+   */
+  localTreeSha?: string;
 }
 
 export interface ProvenanceUpstream {
