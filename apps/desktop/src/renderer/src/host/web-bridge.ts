@@ -11,6 +11,8 @@
  */
 import { IPC, type AgentToolRequestEvent, type CodexRunResult, type FileSaveResult, type MediaProxyResult, type PowermoveBridge, type ProjectOpenResult, type RemoteRunRecord, type StoreErrorEvent } from '../../../shared/ipc';
 import { EXT_IPC, type ExtensionRecord } from '../../../shared/extensions';
+import { CLOUD_UNREACHABLE } from '../../../shared/cloud-ipc';
+import type { StoreResult } from '../../../shared/store-ipc';
 import { WEB, WEB_UPLOAD_CHUNK_BYTES, type WebHello } from '../../../shared/wire';
 import { Connection } from '../../../shared/link';
 import { attachRemoteMedia } from './remote-media';
@@ -19,6 +21,8 @@ import { ReconnectingLink, isDisconnectError } from '../../../shared/reconnect';
 const WS_PATH = '/__powermove/ws';
 const VARS_UNAVAILABLE = 'Variables are not available in powermove serve yet';
 const CLOUD_UNAVAILABLE = 'Sign in is not available in powermove serve yet';
+/* The served host installs nothing: the Store shows its offline state. */
+const storeOffline = async <T>(): Promise<StoreResult<T>> => ({ ok: false, error: { error: 'internal', detail: CLOUD_UNREACHABLE } });
 
 /** The live link, for modules that attach after the engines boot (remote-sync). It outlives any one socket. */
 let activeLink: ReconnectingLink | null = null;
@@ -455,6 +459,22 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
       deleteAccount: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
       onAccountChanged: () => () => {},
       onSignInFailed: () => () => {}
+    },
+
+    extensionStore: {
+      browse: storeOffline,
+      extensions: storeOffline,
+      detail: storeOffline,
+      release: storeOffline,
+      tree: storeOffline,
+      file: storeOffline,
+      compare: storeOffline,
+      install: storeOffline,
+      update: storeOffline,
+      uninstall: storeOffline,
+      library: async () => [],
+      checkUpdates: storeOffline,
+      onUpdatesChanged: () => () => {}
     }
   };
 

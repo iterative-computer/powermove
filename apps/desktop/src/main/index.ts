@@ -29,11 +29,17 @@ import {
 import { registerCaptureIpc } from './capture';
 import { registerCodexIpc } from './codex';
 import { recoverAllInterruptedExtensionTransactions } from './codex/change-history';
-import { extensionAssetCorsHeaders, registerExtensionsIpc, serveExtensionAsset } from './extensions';
-import { createExtensionRegistry } from './extensions/registry';
+import { extensionAssetCorsHeaders, registerExtensionsIpc, removeUserExtension, serveExtensionAsset } from './extensions';
+import { createExtensionRegistry, type ExtensionRegistry } from './extensions/registry';
 import { createProvenanceStore } from './cloud/provenance';
 import { DEEP_LINK_SCHEME } from './cloud/auth';
-import { createDeepLinkQueue, deepLinksIn, startCloudService } from './cloud/service';
+import { createDeepLinkQueue, deepLinksIn, startCloudService, type CloudService } from './cloud/service';
+import { createStoreClient } from './cloud/store-client';
+import { createStoreInstaller } from './cloud/install';
+import { registerStoreIpc as registerExtensionStoreIpc } from './cloud/store-ipc';
+import { ApiError } from '@powermove/registry/wire';
+import { CLOUD_UNREACHABLE } from '../shared/cloud-ipc';
+import { STORE_IPC } from '../shared/store-ipc';
 import { createEnvStore } from './env/store';
 import { createVarsService } from './env/service';
 import { createRemoveValuesPrompt, registerVarsIpc } from './env/ipc';
@@ -649,6 +655,14 @@ if (!hasSingleInstanceLock) {
       ? path.join(process.resourcesPath, 'builtin-extensions')
       : path.resolve(app.getAppPath(), 'src/extensions');
     let refreshRestoredExtensions: ((ids: string[]) => Promise<void>) | undefined;
+    /* One provenance store for values and the Store: its writes are ordered. */
+    const provenance = createProvenanceStore(app.getPath('userData'));
+    let storeDeps: {
+      registry: ExtensionRegistry;
+      builtinIds: string[];
+      beforeRemove: ReturnType<typeof createRemoveValuesPrompt>;
+      hasValues(id: string): Promise<boolean>;
+    } | null = null;
     // Extension boot must never prevent the window from appearing: a bad
     // directory or a slow compile degrades to "no user extensions" instead.
     try {
@@ -666,7 +680,7 @@ if (!hasSingleInstanceLock) {
       // Extension values live in the profile, never in an extension folder.
       const vars = createVarsService({
         env: createEnvStore({ dir: path.join(app.getPath('userData'), 'env'), safeStorage: () => safeStorage }),
-        provenance: createProvenanceStore(app.getPath('userData'))
+        provenance
       });
       const extensionRegistry = createExtensionRegistry({
         store,
@@ -676,12 +690,14 @@ if (!hasSingleInstanceLock) {
         resourcesDir: builtinResourcesDir,
         resolveVars: (id, decls) => vars.resolve(id, decls)
       });
+      const beforeRemove = createRemoveValuesPrompt({ registry: extensionRegistry, vars });
       registerExtensionsIpc(ipcMain, {
         registry: extensionRegistry,
         resourcesDir: builtinResourcesDir,
         isTrusted: isTrustedSender,
-        beforeRemove: createRemoveValuesPrompt({ registry: extensionRegistry, vars })
+        beforeRemove
       });
+      storeDeps = { registry: extensionRegistry, builtinIds, beforeRemove, hasValues: (id) => vars.hasValues(id) };
       registerVarsIpc(ipcMain, { registry: extensionRegistry, vars, isTrusted: isTrustedSender });
       refreshRestoredExtensions = async (ids) => {
         await extensionRegistry.refresh(ids);
@@ -717,8 +733,9 @@ if (!hasSingleInstanceLock) {
     registerRenderEncoder(ipcMain,ctx);
     // Powermove Cloud account. Boot must never block the window: a broken
     // profile file degrades to "signed out".
+    let cloud: CloudService | null = null;
     try {
-      const cloud = await startCloudService({
+      cloud = await startCloudService({
         userData: app.getPath('userData'),
         appVersion: app.getVersion(),
         safeStorage: () => safeStorage,
@@ -735,13 +752,52 @@ if (!hasSingleInstanceLock) {
           return window && !window.isDestroyed() ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options);
         }
       });
+      const service = cloud;
       deepLinks.ready((url) => {
         // Coming back from the browser: bring Powermove forward.
         editors.reveal(currentEditor());
-        void cloud.auth.handleDeepLink(url);
+        void service.auth.handleDeepLink(url);
       });
     } catch (error) {
       console.error('[cloud] account boot skipped', error instanceof Error ? error.message : 'unknown error');
+    }
+    // The Store: browse, install, update, uninstall. Needs the extension
+    // registry; without the account service it reads as offline.
+    if (storeDeps) {
+      const deps = storeDeps;
+      const cloudSession = cloud?.session ?? null;
+      const storeClient = createStoreClient(() => {
+        if (!cloudSession) throw new ApiError({ error: 'internal', detail: CLOUD_UNREACHABLE });
+        return cloudSession.client();
+      });
+      const installer = createStoreInstaller({
+        registry: deps.registry,
+        provenance,
+        store: storeClient,
+        builtinIds: () => deps.builtinIds,
+        me: () => cloudSession?.me() ?? null,
+        signedIn: () => cloudSession?.currentToken() != null,
+        hasValues: deps.hasValues,
+        notifyUpdates: (updates) => {
+          for (const window of editors.all()) {
+            if (!window.webContents.isDestroyed()) window.webContents.send(STORE_IPC.updatesChanged, updates);
+          }
+        }
+      });
+      registerExtensionStoreIpc(ipcMain, {
+        store: storeClient,
+        installer,
+        provenance,
+        registry: deps.registry,
+        me: () => cloudSession?.me() ?? null,
+        isTrusted: isTrustedSender,
+        removeExtension: async (event, id) => {
+          await removeUserExtension({ registry: deps.registry, beforeRemove: deps.beforeRemove }, event, id);
+          return true;
+        }
+      });
+      const stopUpdateChecks = installer.startUpdateChecks();
+      app.once('will-quit', stopUpdateChecks);
     }
     app.once('will-quit', () => { void mediaProxies.dispose(); });
     // API pack handed to the agent every autonomous run: the extension guide

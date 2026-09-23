@@ -4,8 +4,9 @@
  * nothing into the extension tree, so where a folder came from and where it
  * was published live here, keyed by the folder's local id.
  *
- * This unit owns the file and `envKey` only. `origin`, `published` and
- * `upstream` are typed for the Store units and preserved untouched.
+ * `envKey` is minted here; the Store (cloud/install.ts) writes `origin`,
+ * `upstream` and `pendingUpdate` through `update`. Fields a newer build wrote
+ * are preserved untouched.
  */
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
@@ -35,6 +36,14 @@ export interface ProvenanceUpstream {
   treeSha: string;
 }
 
+/** A newer release staged beside a folder the user changed (Store 1.0 has no merge). */
+export interface ProvenancePendingUpdate {
+  releaseId: string;
+  version: string;
+  /** `extensions/.updates/<id>`. */
+  path: string;
+}
+
 export interface ProvenanceRecord {
   localId: string;
   /** Names the values file: `origin.repoId` for store installs, `local:<uuid>` otherwise. */
@@ -45,6 +54,8 @@ export interface ProvenanceRecord {
   published?: ProvenancePublished;
   /** Merge base for the next update from origin. */
   upstream?: ProvenanceUpstream;
+  /** Set by a modified update; cleared by the next install, update or uninstall. */
+  pendingUpdate?: ProvenancePendingUpdate;
 }
 
 export type ProvenanceFile = Record<string, ProvenanceRecord>;
@@ -58,6 +69,12 @@ export interface ProvenanceStore {
   /** The folder's env key, created (`local:<uuid>`) and persisted on first use. */
   ensureEnvKey(localId: string): Promise<string>;
   remove(localId: string): Promise<void>;
+  /**
+   * Read-modify-write one record in order with every other write. `mutate`
+   * gets the current record (null when there is none or it is unusable) and
+   * returns the next one; null deletes it.
+   */
+  update(localId: string, mutate: (current: ProvenanceRecord | null) => ProvenanceRecord | null): Promise<ProvenanceRecord | null>;
 }
 
 export function createProvenanceStore(userData: string, options: { uuid?: () => string } = {}): ProvenanceStore {
@@ -146,6 +163,20 @@ export function createProvenanceStore(userData: string, options: { uuid?: () => 
       current[localId] = { ...(existing && typeof existing === 'object' ? existing : {}), localId, envKey } as ProvenanceRecord;
       await save(current);
       return envKey;
+    }),
+    update: (localId, mutate) => serial(async () => {
+      validate(localId);
+      const current = await load();
+      const next = mutate(usable(localId, current[localId]));
+      if (next === null) {
+        if (!(localId in current)) return null;
+        delete current[localId];
+      } else {
+        if (typeof next.envKey !== 'string' || next.envKey.length === 0) throw new Error('A provenance record needs an env key.');
+        current[localId] = { ...next, localId };
+      }
+      await save(current);
+      return next === null ? null : { ...next, localId };
     }),
     remove: (localId) => serial(async () => {
       validate(localId);

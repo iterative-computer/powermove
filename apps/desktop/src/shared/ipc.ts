@@ -707,6 +707,9 @@ export interface PowermoveBridge {
 
   /** The Powermove Cloud account: sign in, handle, sign out. */
   cloud: import('./cloud-ipc').CloudBridge;
+
+  /** The Store: browse the registry; install, update and remove store extensions. */
+  extensionStore: import('./store-ipc').StoreBridge;
 }
 
 export type CloudFileState = 'local' | 'icloud' | 'cloud' | 'missing' | 'unknown';

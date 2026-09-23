@@ -1,36 +1,48 @@
 <script lang="ts">
-  import { tick } from 'svelte';
-  import { fly } from 'svelte/transition';
+  import { tick, untrack } from 'svelte';
+  import { fade, fly } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';
+  import type { CompareDto, CompareStatus, ListingDto, TreeFileDto } from '@powermove/registry/wire';
   import Icon from '../panels/Icon.svelte';
   import { mountSquircles, SQUIRCLE_SELECTOR } from '../settings/squircle';
   import { mountNavGlide } from '../controls/nav-glide';
+  import { openPopoverMenu, type PopoverMenuItem } from '../controls/popover-menu';
   import { openSignIn, subscribeAccount, type CloudUser } from '../cloud/account';
+  import type { LibraryItemDto, StoreErrorBody, StoreResult } from '../../../shared/store-ipc';
   import {
-    ALL, BUILTINS, FEATURED, KINDS, KIND_ICON, KIND_LABEL, KIND_PLURAL, LIBRARY, NEW, PICKS,
-    coordinate, hasUpdate, libraryItemFor,
-    type LibraryItem, type StoreKind, type StoreListing
-  } from './fixtures';
+    KINDS, KIND_ICON, KIND_LABEL, KIND_PLURAL,
+    actionErrorText, artFor, coordinate, detailAction, detailFromDto, groupLibrary, includesText, isKind,
+    libraryAction, libraryItemFor, listingFromDto, loadError, makerText, needsAttention, needsSetup,
+    parseLineage, requiresText, statusIsHot, statusText, storeBridge,
+    type Action, type Lineage, type LoadError, type StoreDetail, type StoreKind, type StoreListing, type StorePage, type StorePM
+  } from './data';
 
-  /* Two places and six kinds. Browse is the storefront; a kind is the store
-     narrowed to one shelf; Library is everything on this Mac and everything
-     you have published, in one list. */
-  export type StorePage = 'browse' | 'library' | `kind:${StoreKind}`;
-
-  let { PM }: { PM: Record<string, any> } = $props();
+  /* Two places and seven kinds. Browse is the storefront; a kind is the store
+     narrowed to one shelf; Library is everything on this Mac, in one list. */
+  let { PM }: { PM: StorePM } = $props();
 
   /* Screen motion: the whole surface glides in from the right over the home,
      and glides back out. Views inside slide the way you moved: deeper goes
      right-to-left, back goes left-to-right, a sibling page just settles. */
   const SLIDE = 24;
+  const SEARCH_DEBOUNCE_MS = 200;
   const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const OFFLINE: LoadError = { offline: true, message: 'Can’t reach the store' };
+
+  type Loadable<T> = { status: 'loading' } | { status: 'ready'; value: T } | { status: 'error'; error: LoadError };
+  type Section = { id: string; title: string; items: ListingDto[] };
+  type Shelf = { items: ListingDto[]; nextCursor: string | null; more: boolean };
+  /* A detail page: the store's page for a coordinate, a Library item's own
+     page, or both when the item came from the store. */
+  type DetailTarget = { coord: { handle: string; slug: string } | null; localId: string | null; preview: StoreListing | null };
+  type Compare = { base: string; head: string; state: Loadable<CompareDto> };
+  type SourceFile = { path: string; state: Loadable<string> };
 
   let shown = $state(false);
   let leaving = $state(false);
   let page = $state<StorePage>('browse');
   let searchText = $state('');
   let featuredIndex = $state(0);
-  let detail = $state<StoreListing | null>(null);
   let direction = $state(0);
   let rootEl = $state<HTMLElement | null>(null);
   let scrollEl = $state<HTMLElement | null>(null);
@@ -38,24 +50,186 @@
   let leaveTimer = 0;
   let account = $state<CloudUser | null>(null);
 
-  $effect(() => subscribeAccount((user) => { account = user; }));
+  let library = $state<LibraryItemDto[]>([]);
+  let browse = $state<Loadable<Section[]>>({ status: 'loading' });
+  let shelf = $state<Loadable<Shelf>>({ status: 'loading' });
+  let search = $state<Loadable<ListingDto[]>>({ status: 'loading' });
+  let detail = $state<DetailTarget | null>(null);
+  let remote = $state<Loadable<StoreDetail> | null>(null);
+  let compare = $state<Compare | null>(null);
+  let files = $state<Loadable<TreeFileDto[]> | null>(null);
+  let openFile = $state<SourceFile | null>(null);
+  let actionError = $state<string | null>(null);
+  let busy = $state<Record<string, string>>({});
+  let showAllVersions = $state(false);
 
-  const query = $derived(searchText.trim().toLowerCase());
-  const featured = $derived(FEATURED[featuredIndex]!);
-  const results = $derived(query
-    ? ALL.filter((l) => `${l.name} ${l.tagline} ${l.publisher}`.toLowerCase().includes(query))
-    : []);
-  const pageKind = $derived(page.startsWith('kind:') ? (page.slice(5) as StoreKind) : null);
-  const viewKey = $derived(detail ? `detail:${coordinate(detail)}` : query ? 'search' : page);
+  $effect(() => subscribeAccount((user) => {
+    account = user;
+    // Signing in or out changes what reads as yours.
+    if (untrack(() => shown)) void loadLibrary();
+  }));
+
+  const query = $derived(searchText.trim());
+  const pageKind = $derived(page.startsWith('kind:') ? kindOf(page.slice(5)) : null);
+  const viewKey = $derived(detail ? `detail:${detail.coord ? `${detail.coord.handle}/${detail.coord.slug}` : detail.localId}` : query ? 'search' : page);
   /* Sibling pages swap in place. Only pushing into and popping out of a
      detail slides, in the direction you moved. */
   const slide = $derived(reduced() || direction === 0 ? { duration: 0 } : { x: direction * SLIDE, duration: 220, easing: cubicOut });
+  /* A status line that changes under you (an update finished) fades in. */
+  const settle = $derived(reduced() ? { duration: 0 } : { duration: 180, easing: cubicOut });
 
-  /* Library groups. Store installs come first because they are the ones that
-     change under you; yours next; built-ins last and quiet. */
-  const fromStore = $derived(LIBRARY.filter((i) => i.origin === 'store'));
-  const yours = $derived(LIBRARY.filter((i) => i.origin === 'agent' || i.origin === 'you'));
-  const attention = $derived(LIBRARY.filter((i) => i.needsSetup || hasUpdate(i)).length);
+  const groups = $derived(groupLibrary(library));
+  const attention = $derived(library.filter(needsAttention).length);
+  const sections = $derived(browse.status === 'ready' ? browse.value.map((section) => ({ ...section, listings: section.items.map(toListing) })) : []);
+  const featured = $derived(sections.find((section) => section.id === 'featured')?.listings ?? []);
+  const hero = $derived(featured[Math.min(featuredIndex, featured.length - 1)] ?? null);
+
+  const detailData = $derived(remote?.status === 'ready' ? remote.value : null);
+  const detailItem = $derived.by(() => {
+    if (!detail) return undefined;
+    const repoId = detailData?.repoId ?? detail.preview?.repoId;
+    const byRepo = repoId ? libraryItemFor(repoId, library) : undefined;
+    return byRepo ?? (detail.localId ? library.find((item) => item.localId === detail?.localId) : undefined);
+  });
+
+  function kindOf(value: string): StoreKind | null {
+    return isKind(value) ? value : null;
+  }
+
+  function toListing(dto: ListingDto): StoreListing {
+    return listingFromDto(dto, library);
+  }
+
+  /* ── bridge calls ── */
+
+  async function call<T>(run: () => Promise<StoreResult<T>> | undefined): Promise<StoreResult<T>> {
+    try {
+      const result = await run();
+      return result ?? { ok: false, error: { error: 'internal', detail: 'unavailable' } };
+    } catch {
+      // No store service in this window (it failed to boot): offline.
+      return { ok: false, error: { error: 'internal', detail: 'unavailable' } };
+    }
+  }
+
+  function failed(error: StoreErrorBody): LoadError {
+    return error.detail === 'unavailable' ? OFFLINE : loadError(error);
+  }
+
+  async function loadLibrary(): Promise<void> {
+    try {
+      library = (await storeBridge()?.library()) ?? [];
+    } catch {
+      // Keep what is shown; the next change reloads it.
+    }
+  }
+
+  async function loadBrowse(): Promise<void> {
+    browse = { status: 'loading' };
+    const result = await call(() => storeBridge()?.browse());
+    browse = result.ok
+      ? { status: 'ready', value: result.value.sections.filter((section) => section.items.length > 0) }
+      : { status: 'error', error: failed(result.error) };
+    featuredIndex = 0;
+  }
+
+  let shelfToken = 0;
+  async function loadShelf(kind: StoreKind, cursor?: string): Promise<void> {
+    const token = ++shelfToken;
+    const previous = cursor && shelf.status === 'ready' ? shelf.value.items : [];
+    if (cursor && shelf.status === 'ready') shelf = { status: 'ready', value: { ...shelf.value, more: true } };
+    else shelf = { status: 'loading' };
+    const result = await call(() => storeBridge()?.extensions({ category: kind, ...(cursor ? { cursor } : {}) }));
+    if (token !== shelfToken) return;
+    shelf = result.ok
+      ? { status: 'ready', value: { items: [...previous, ...result.value.items], nextCursor: result.value.nextCursor, more: false } }
+      : { status: 'error', error: failed(result.error) };
+  }
+
+  let searchToken = 0;
+  async function runSearch(q: string): Promise<void> {
+    const token = ++searchToken;
+    const result = await call(() => storeBridge()?.extensions({ q }));
+    if (token !== searchToken) return;
+    search = result.ok ? { status: 'ready', value: result.value.items } : { status: 'error', error: failed(result.error) };
+  }
+
+  /* Search waits for a pause in typing. */
+  $effect(() => {
+    const q = query;
+    if (!shown || !q) return;
+    untrack(() => { search = { status: 'loading' }; });
+    const timer = window.setTimeout(() => void runSearch(q), SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  });
+
+  $effect(() => {
+    const kind = pageKind;
+    if (shown && kind) untrack(() => void loadShelf(kind));
+  });
+
+  /* The Library follows the folder: installs, removals and update checks. */
+  $effect(() => {
+    if (!shown) return;
+    const offUpdates = storeBridge()?.onUpdatesChanged(() => void loadLibrary());
+    const offExtensions = window.powermove?.extensions?.onChanged(() => void loadLibrary());
+    return () => {
+      offUpdates?.();
+      offExtensions?.();
+    };
+  });
+
+  let detailToken = 0;
+  async function loadDetail(target: DetailTarget): Promise<void> {
+    const token = ++detailToken;
+    remote = null;
+    files = null;
+    if (!target.coord) return;
+    const coord = target.coord;
+    remote = { status: 'loading' };
+    const result = await call(() => storeBridge()?.detail(coord));
+    if (token !== detailToken) return;
+    if (!result.ok) {
+      remote = { status: 'error', error: failed(result.error) };
+      return;
+    }
+    const value = detailFromDto(result.value, library);
+    remote = { status: 'ready', value };
+    if (value.latestReleaseId) void loadFiles(value.latestReleaseId, token);
+  }
+
+  async function loadFiles(releaseId: string, token: number): Promise<void> {
+    files = { status: 'loading' };
+    const result = await call(() => storeBridge()?.tree({ releaseId }));
+    if (token !== detailToken) return;
+    files = result.ok ? { status: 'ready', value: result.value.files } : { status: 'error', error: failed(result.error) };
+  }
+
+  async function toggleFile(path: string): Promise<void> {
+    if (openFile?.path === path) {
+      openFile = null;
+      return;
+    }
+    const data = detailData;
+    if (!data) return;
+    openFile = { path, state: { status: 'loading' } };
+    const result = await call(() => storeBridge()?.file({ handle: data.publisher, slug: data.id, version: data.version, path }));
+    if (openFile?.path !== path) return;
+    openFile = { path, state: result.ok ? { status: 'ready', value: result.value } : { status: 'error', error: failed(result.error) } };
+  }
+
+  async function showCompare(base: string, head: string): Promise<void> {
+    if (compare && compare.base === base && compare.head === head) {
+      compare = null;
+      return;
+    }
+    compare = { base, head, state: { status: 'loading' } };
+    const result = await call(() => storeBridge()?.compare({ base, head }));
+    if (compare?.base !== base || compare.head !== head) return;
+    compare = { base, head, state: result.ok ? { status: 'ready', value: result.value } : { status: 'error', error: failed(result.error) } };
+  }
+
+  /* ── screen ── */
 
   export function open(target: StorePage = 'browse'): void {
     window.clearTimeout(leaveTimer);
@@ -65,9 +239,13 @@
     direction = 0;
     searchText = '';
     if (!shown) {
-      lastFocus = document.activeElement as HTMLElement | null;
+      lastFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       shown = true;
+      void loadBrowse();
+    } else if (browse.status === 'error') {
+      void loadBrowse();
     }
+    void loadLibrary();
     PM.bus?.emit?.('store:screen');
     void tick().then(() => {
       scrollEl?.scrollTo({ top: 0, behavior: 'instant' });
@@ -94,30 +272,53 @@
     return shown;
   }
 
+  function scrollTop(): void {
+    void tick().then(() => scrollEl?.scrollTo({ top: 0, behavior: 'instant' }));
+  }
+
   function show(id: StorePage): void {
     direction = 0;
     page = id;
     detail = null;
     searchText = '';
-    void tick().then(() => scrollEl?.scrollTo({ top: 0, behavior: 'instant' }));
+    scrollTop();
   }
 
-  function openDetail(listing: StoreListing): void {
+  function pushDetail(target: DetailTarget): void {
     direction = 1;
-    detail = listing;
-    void tick().then(() => scrollEl?.scrollTo({ top: 0, behavior: 'instant' }));
+    detail = target;
+    compare = null;
+    openFile = null;
+    actionError = null;
+    showAllVersions = false;
+    void loadDetail(target);
+    scrollTop();
+  }
+
+  function openListing(listing: StoreListing): void {
+    pushDetail({ coord: { handle: listing.publisher, slug: listing.id }, localId: null, preview: listing });
+  }
+
+  function openItem(item: LibraryItemDto): void {
+    const coord = item.origin ? splitCoordinate(item.origin.coordinate) : null;
+    pushDetail({ coord, localId: item.localId, preview: null });
   }
 
   /* "Forked from" leads to the origin's own page, one level deeper. */
-  function openOrigin(forkedFrom: string): void {
-    const coord = forkedFrom.split('@')[0];
-    const origin = ALL.find((l) => coordinate(l) === coord) ?? BUILTINS.find((l) => coordinate(l) === coord);
-    if (origin) openDetail(origin);
+  function openLineage(lineage: Lineage): void {
+    pushDetail({ coord: { handle: lineage.handle, slug: lineage.slug }, localId: null, preview: null });
+  }
+
+  function splitCoordinate(value: string): { handle: string; slug: string } | null {
+    const [handle, slug] = value.split('/');
+    return handle && slug ? { handle, slug } : null;
   }
 
   function back(): void {
     direction = -1;
     detail = null;
+    remote = null;
+    compare = null;
   }
 
   /* Only Escape is ours; app shortcuts such as ⌘, keep working over the Store. */
@@ -146,53 +347,181 @@
     return () => { observer.disconnect(); unmount(); };
   });
 
-  function art(listing: StoreListing): string {
-    const [a, b] = listing.art;
+  function art(pair: [string, string]): string {
+    const [a, b] = pair;
     return `--art-a:${a};--art-b:${b}`;
   }
 
-  /* Who made it, as the store says it: "Effect by mara". Your own read as
-     yours; the agent's as made with your agent. */
-  function maker(l: StoreListing): string {
-    const item = l as LibraryItem;
-    if (item.origin === 'agent') return 'Made with your agent';
-    if (item.origin === 'you') return 'By you';
-    if (item.origin === 'builtin') return 'Built in';
-    return `by ${l.publisher}`;
+  function itemArt(item: LibraryItemDto): string {
+    return art(artFor(item.origin?.repoId ?? `local:${item.localId}`));
   }
 
-  function byline(listing: StoreListing): string {
-    const who = maker(listing);
-    return who.startsWith('by ') ? `${KIND_LABEL[listing.kind]} ${who}` : `${KIND_LABEL[listing.kind]} · ${who}`;
+  /* Who made it, as the store says it: "Effect by mara". */
+  function byline(kind: StoreKind, who: string): string {
+    return who.startsWith('by ') ? `${KIND_LABEL[kind]} ${who}` : `${KIND_LABEL[kind]} · ${who}`;
   }
 
-  /* Your own extensions read under your handle once you have one. */
-  function shownCoordinate(l: StoreListing): string {
-    return l.publisher === 'you' && account?.handle ? `${account.handle}/${l.id}` : coordinate(l);
+  function storeLineageOf(item: LibraryItemDto | undefined): Lineage | undefined {
+    const parsed = item?.forkedFrom ? parseLineage(item.forkedFrom) : null;
+    return parsed && 'store' in parsed ? parsed.store : undefined;
   }
 
-  /* The one trailing control a row gets, from its local state. */
-  type RowAction = { label: string; primary?: boolean; quiet?: boolean };
-  function action(l: StoreListing): RowAction {
-    const item = (l as LibraryItem).origin ? (l as LibraryItem) : libraryItemFor(l);
-    if (!item) return l.installed ? { label: 'Installed', quiet: true } : { label: l.vars?.some((v) => v.required) ? 'Install and set up' : 'Install' };
-    if (item.origin === 'builtin') return { label: 'On', quiet: true };
-    if (item.needsSetup) return { label: 'Set up', primary: true };
-    if (hasUpdate(item)) return { label: item.modified ? 'Update…' : 'Update', primary: true };
-    if (!item.installedVersion) return { label: 'Install' };
-    if (item.origin === 'store') return { label: 'Installed', quiet: true };
-    if (item.published) return { label: item.published.version === item.version ? 'Published' : 'Publish update', quiet: item.published.version === item.version };
-    return { label: 'Publish' };
+  function builtinLineageOf(item: LibraryItemDto | undefined): { id: string; version: string } | undefined {
+    const parsed = item?.forkedFrom ? parseLineage(item.forkedFrom) : null;
+    return parsed && 'builtin' in parsed ? parsed.builtin : undefined;
   }
 
-  /* What a Library row says under the name: the maker, then what's up. */
-  function status(item: LibraryItem): string | null {
-    if (item.needsSetup) return 'Needs setup';
-    if (hasUpdate(item)) return item.modified ? `${item.version} available, you changed the files` : `${item.version} available`;
-    if (!item.installedVersion) return 'Not on this Mac';
-    if (item.published) return `@${account?.handle ?? 'you'}/${item.id} · ${item.published.installs} installs${item.published.forks ? ` · ${item.published.forks} forks` : ''}`;
-    return null;
+  function listingAction(listing: StoreListing): Action {
+    return detailAction({ vars: listing.vars, item: libraryItemFor(listing.repoId, library) });
   }
+
+  /* ── actions ── */
+
+  function toast(message: string, error = false): void {
+    PM.toast?.(message, error ? 5000 : 3200, error ? { error: true } : {});
+  }
+
+  function setBusy(key: string, label: string | null): void {
+    const next = { ...busy };
+    if (label) next[key] = label;
+    else delete next[key];
+    busy = next;
+  }
+
+  async function recordFor(localId: string) {
+    try {
+      return (await window.powermove?.extensions?.list())?.find((record) => record.id === localId) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function setUp(localId: string): Promise<void> {
+    const record = await recordFor(localId);
+    if (record) PM.Vars?.openSetup(record);
+  }
+
+  async function install(target: { repoId: string; releaseId: string | null; name: string }): Promise<void> {
+    const releaseId = target.releaseId;
+    if (!releaseId || busy[target.repoId]) return;
+    actionError = null;
+    setBusy(target.repoId, 'Installing…');
+    const result = await call(() => storeBridge()?.install({ repoId: target.repoId, releaseId }));
+    setBusy(target.repoId, null);
+    await loadLibrary();
+    if (!result.ok) {
+      const message = actionErrorText(result.error);
+      if (detail) actionError = message;
+      else toast(message, true);
+      return;
+    }
+    toast(result.value.warning ?? `${target.name} is installed.`);
+    if (result.value.needsSetup) void setUp(result.value.localId);
+  }
+
+  async function update(item: LibraryItemDto): Promise<void> {
+    if (!item.update || busy[item.localId]) return;
+    if (item.update.modified) {
+      const go = await window.powermove?.confirm?.({
+        message: `Update ${item.name} to ${item.update.version}?`,
+        detail: 'You changed its files, so your folder stays as it is. The new version is saved beside it for your agent to merge.',
+        confirmLabel: 'Save New Version'
+      });
+      if (!go) return;
+    }
+    actionError = null;
+    setBusy(item.localId, 'Updating…');
+    const result = await call(() => storeBridge()?.update({ localId: item.localId }));
+    setBusy(item.localId, null);
+    await loadLibrary();
+    if (!result.ok) {
+      const message = actionErrorText(result.error);
+      if (detail) actionError = message;
+      else toast(message, true);
+      return;
+    }
+    toast(result.value.kind === 'updated'
+      ? `${item.name} is updated to ${result.value.version}.`
+      : 'Update available; you changed the files. The new version is beside your folder for your agent to merge.');
+  }
+
+  async function uninstall(item: LibraryItemDto): Promise<void> {
+    if (busy[item.localId]) return;
+    const fromStore = item.group === 'store';
+    const go = await window.powermove?.confirm?.({
+      message: `Uninstall ${item.name}?`,
+      detail: fromStore
+        ? 'Its files are removed from this Mac. You can install it again from the store.'
+        : 'Its folder is deleted from this Mac. This can’t be undone.',
+      confirmLabel: 'Uninstall',
+      destructive: true
+    });
+    if (!go) return;
+    setBusy(item.localId, 'Uninstalling…');
+    const result = await call(() => storeBridge()?.uninstall({ localId: item.localId }));
+    setBusy(item.localId, null);
+    await loadLibrary();
+    if (!result.ok) {
+      toast(actionErrorText(result.error), true);
+      return;
+    }
+    if (detail?.localId === item.localId && !detail.coord) back();
+    toast(`${item.name} is uninstalled.`);
+  }
+
+  async function toggle(item: LibraryItemDto): Promise<void> {
+    try {
+      await window.powermove?.extensions?.setEnabled({ id: item.localId, enabled: !item.enabled });
+    } catch {
+      toast(`Unable to turn ${item.name} ${item.enabled ? 'off' : 'on'}. Try again.`, true);
+    }
+    await loadLibrary();
+  }
+
+  async function reveal(item: LibraryItemDto): Promise<void> {
+    try {
+      await window.powermove?.extensions?.reveal({ id: item.localId });
+    } catch {
+      toast('Unable to show the folder in Finder.', true);
+    }
+  }
+
+  async function checkForUpdates(): Promise<void> {
+    const result = await call(() => storeBridge()?.checkUpdates());
+    await loadLibrary();
+    if (!result.ok) {
+      toast(actionErrorText(result.error), true);
+      return;
+    }
+    const count = library.filter((item) => item.update?.state === 'available').length;
+    toast(count === 0 ? 'Everything is up to date.' : count === 1 ? 'One update is available.' : `${count} updates are available.`);
+  }
+
+  function run(action: Action, item: LibraryItemDto | undefined, listing: { repoId: string; releaseId: string | null; name: string } | null): void {
+    if (action.kind === 'install' && listing) void install(listing);
+    else if (action.kind === 'update' && item) void update(item);
+    else if (action.kind === 'setup' && item) void setUp(item.localId);
+    else if (action.kind === 'toggle' && item) void toggle(item);
+  }
+
+  function rowMenu(event: MouseEvent, item: LibraryItemDto): void {
+    if (!(event.currentTarget instanceof HTMLElement)) return;
+    const items: PopoverMenuItem[] = [];
+    if (item.group === 'store') items.push({ label: 'Check for Updates', run: () => void checkForUpdates() });
+    items.push({ label: 'Show in Finder', run: () => void reveal(item) });
+    items.push('-', { label: 'Uninstall…', run: () => void uninstall(item) });
+    openPopoverMenu({ anchor: event.currentTarget, label: `${item.name} actions`, items });
+  }
+
+  function compareCounts(value: CompareDto): string {
+    const parts: string[] = [];
+    if (value.counts.modified) parts.push(`${value.counts.modified} changed`);
+    if (value.counts.added) parts.push(`${value.counts.added} added`);
+    if (value.counts.removed) parts.push(`${value.counts.removed} removed`);
+    return parts.length ? parts.join(' · ') : 'No file changes';
+  }
+
+  const COMPARE_LABEL: Record<CompareStatus, string> = { added: 'Added', removed: 'Removed', modified: 'Changed' };
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -209,7 +538,7 @@
   <aside class="st-sidebar">
     <label class="st-search">
       <Icon {PM} name="search" />
-      <input type="search" placeholder="Search extensions" aria-label="Search extensions" bind:value={searchText} />
+      <input type="search" placeholder="Search extensions" aria-label="Search extensions" maxlength="120" bind:value={searchText} />
     </label>
     <nav class="st-nav" aria-label="Store sections" use:glide>
       {@render navbtn('browse', 'Browse', 'sparkle')}
@@ -231,147 +560,33 @@
       {#key viewKey}
         <div class="st-column" in:fly={slide}>
           {#if detail}
-            {@const l = detail}
-            {@const item = (l as LibraryItem).origin ? (l as LibraryItem) : libraryItemFor(l)}
-            {@const act = action(l)}
-            <button class="st-back" type="button" onclick={back}>
-              <Icon {PM} name="chev" /><span>Back</span>
-            </button>
-            <!-- Icon, copy, then the one action at the right edge, all on one
-                 line like the hero card and every row. Anything the action
-                 needs to explain goes under the head as its own line. -->
-            <header class="st-detail-head">
-              <span class="st-thumb is-hero" style={art(l)}></span>
-              <div class="st-detail-copy">
-                <div class="st-detail-title">
-                  <h2>{l.name}</h2>
-                  <span class="st-tag">{l.version}</span>
-                </div>
-                <p class="st-byline">{byline(l)}</p>
-                <p class="st-lede">{l.tagline}</p>
-                {#if l.forkedFrom}
-                  <p class="st-lineage">
-                    Forked from <button class="st-link" type="button" onclick={() => openOrigin(l.forkedFrom!)}>{l.forkedFrom.split('@')[0]}</button>
-                    <span class="st-lineage-sep">·</span>
-                    <button class="st-link is-quiet" type="button">See what changed</button>
-                  </p>
-                {/if}
-              </div>
-              <div class="st-detail-actions">
-                <button class="btn" class:pri={act.primary || (!act.quiet && act.label === 'Install')} class:is-quiet={act.quiet} type="button">{act.label}</button>
-              </div>
-            </header>
-            {#if item && hasUpdate(item)}
-              <p class="st-update-note">
-                {#if item.modified}
-                  You changed the files since installing {item.installedVersion}. Updating merges {item.version} with your changes; your agent resolves anything that overlaps.
-                {:else}
-                  You have {item.installedVersion}. Updating replaces the files with {item.version}.
-                {/if}
-              </p>
-            {/if}
-
-            <dl class="st-facts">
-              <div><dt>Author</dt><dd>{item?.origin === 'agent' || item?.origin === 'you' ? 'You' : l.publisher}</dd></div>
-              <div><dt>Kind</dt><dd>{KIND_LABEL[l.kind]}</dd></div>
-              <div><dt>Updated</dt><dd>{l.updated}</dd></div>
-              <div><dt>{item?.installedVersion && item.installedVersion !== l.version ? 'Installed' : 'Version'}</dt><dd>{item?.installedVersion && item.installedVersion !== l.version ? `${item.installedVersion} of ${l.version}` : l.version}</dd></div>
-            </dl>
-
-            {#if l.about}<p class="st-about">{l.about}</p>{/if}
-
-            {#if item?.published}
-              <!-- Published: the store's numbers for your own extension. -->
-              <section class="st-sec">
-                <h3 class="st-sec-title">On the store</h3>
-                <div class="st-card">
-                  <div class="st-kv"><span>Published as</span><b>@{account?.handle ?? 'you'}/{l.id}</b></div>
-                  <div class="st-kv"><span>Installs</span><b>{item.published.installs}</b></div>
-                  <div class="st-kv"><span>Forks</span><b>{item.published.forks || 'None yet'}</b></div>
-                  {#if item.installedVersion && item.installedVersion !== item.published.version}
-                    <div class="st-kv"><span>This Mac</span><b>{item.installedVersion}, ahead of the published {item.published.version}</b></div>
-                  {/if}
-                </div>
-              </section>
-            {:else if item && (item.origin === 'agent' || item.origin === 'you')}
-              <section class="st-sec">
-                <h3 class="st-sec-title">Publish</h3>
-                <div class="st-card">
-                  <div class="st-kv"><span>Will publish as</span><b>{account?.handle ? `@${account.handle}/${l.id}` : account ? 'Choose a handle to publish' : 'Sign in to choose a handle'}</b></div>
-                  {#if l.forkedFrom}<div class="st-kv"><span>Forked from</span><b>{l.forkedFrom}</b></div>{/if}
-                </div>
-                <p class="st-note">Publishing puts the source on the store under your name. Setup values stay on this Mac.</p>
-              </section>
-            {/if}
-
-            {#if l.versions?.[0]}
-              {@const v = l.versions[0]}
-              <section class="st-sec">
-                <div class="st-sec-head">
-                  <h3>What’s new <span class="st-sec-sub">{v.version}</span></h3>
-                  <button class="btn ghost" type="button">Version history</button>
-                </div>
-                <p class="st-whatsnew">{v.note}</p>
-              </section>
-            {/if}
-
-            {#if l.vars?.length}
-              <!-- Variables: keys the extension reads at runtime. Values live in
-                   the app profile's env files, never in the extension folder,
-                   so publishing never carries them. Required ones gate
-                   activation; the rest can be set here any time. -->
-              <section class="st-sec">
-                <h3 class="st-sec-title">Setup</h3>
-                <div class="st-card">
-                  {#each l.vars as v (v.key)}
-                    <div class="st-var">
-                      <div class="st-var-copy">
-                        <b>{v.label}{#if v.required} <span class="st-var-req">Required</span>{/if}</b>
-                        <span>{v.hint ?? ''} <code>{v.key}</code></span>
-                      </div>
-                      <input class="settings-input st-var-input" type={v.secret ? 'password' : 'text'} placeholder={v.secret ? '••••••••' : 'Not set'} aria-label={v.label} />
-                    </div>
-                  {/each}
-                </div>
-                <p class="st-note">Stays on this Mac. Never included when you publish or share this extension.</p>
-              </section>
-            {/if}
-
-            <section class="st-sec">
-              <h3 class="st-sec-title">Details</h3>
-              <div class="st-card">
-                <div class="st-kv"><span>Identifier</span><b>{shownCoordinate(l)}</b></div>
-                {#if l.forkedFrom}<div class="st-kv"><span>Forked from</span><b>{l.forkedFrom}</b></div>{/if}
-                <div class="st-kv"><span>Includes</span><b>{KIND_PLURAL[l.kind]}, Inspector</b></div>
-                <div class="st-kv"><span>Requires</span><b>Powermove 1.0 or later</b></div>
-              </div>
-              <p class="st-note">Extensions run inside Powermove with the same access as the app. Read the source or install from people you know.</p>
-            </section>
-
-            {#if l.files}
-              <section class="st-sec">
-                <h3 class="st-sec-title">Source</h3>
-                <div class="st-card">
-                  {#each l.files as file (file)}
-                    <button class="st-file" type="button"><span>{file}</span><Icon {PM} name="chev" /></button>
-                  {/each}
-                </div>
-              </section>
-            {/if}
-
+            {@render detailView(detail)}
 
           {:else if query}
             <header class="st-heading">
               <div>
                 <h2>Search</h2>
-                <p>{results.length} {results.length === 1 ? 'extension' : 'extensions'} matching “{searchText.trim()}”</p>
+                {#if search.status === 'ready'}
+                  <p>{search.value.length} {search.value.length === 1 ? 'extension' : 'extensions'} matching “{query}”</p>
+                {/if}
               </div>
             </header>
-            <div class="st-grid">
-              {#each results as l (coordinate(l))}
-                {@render row(l)}
-              {/each}
-            </div>
+            {#if search.status === 'loading'}
+              {@render skeleton(4)}
+            {:else if search.status === 'error'}
+              {@render failure(search.error, () => void runSearch(query))}
+            {:else if search.value.length === 0}
+              <div class="st-empty">
+                <b>No results for “{query}”</b>
+                <span>Try a shorter name, a maker’s handle, or a kind such as “transition”.</span>
+              </div>
+            {:else}
+              <div class="st-grid">
+                {#each search.value.map(toListing) as l (l.repoId)}
+                  {@render row(l)}
+                {/each}
+              </div>
+            {/if}
 
           {:else if page === 'browse'}
             <header class="st-heading">
@@ -381,47 +596,79 @@
               </div>
             </header>
 
-            <!-- One extension at a time: its icon beside its copy, on a card.
-                 The pager and Install share the card's last line. -->
-            <div class="st-hero">
-              <button class="st-hero-open" type="button" aria-label={`Open ${featured.name}`} onclick={() => openDetail(featured)}></button>
-              <span class="st-thumb is-featured" style={art(featured)}></span>
-              <div class="st-hero-copy">
-                <span class="st-hero-kind">{byline(featured)}</span>
-                <b>{featured.name}</b>
-                <span class="st-hero-line">{featured.tagline}</span>
-                <div class="st-pager" role="tablist" aria-label="Featured">
-                  {#each FEATURED as f, i (f.id)}
-                    <button role="tab" type="button" aria-selected={i === featuredIndex} aria-label={f.name} onclick={() => (featuredIndex = i)}></button>
-                  {/each}
-                </div>
+            {#if browse.status === 'loading'}
+              <div class="st-hero is-skeleton" aria-hidden="true"><span class="st-thumb is-featured st-skel"></span><span class="st-skel-lines"><i></i><i></i></span></div>
+              {@render skeleton(6)}
+            {:else if browse.status === 'error'}
+              {@render failure(browse.error, () => void loadBrowse())}
+            {:else if sections.length === 0}
+              <div class="st-empty">
+                <b>Nothing here yet</b>
+                <span>Extensions people publish show up here. Make one with your agent and publish it from your Library.</span>
               </div>
-              <button class="btn pri st-hero-install" type="button">Install</button>
-            </div>
-
-            {@render section('Picks', PICKS)}
-            {@render section('New', NEW)}
-            {@render section('Effects', ALL.filter((l) => l.kind === 'effects'), 'kind:effects')}
-            {@render section('Transitions', ALL.filter((l) => l.kind === 'transitions'), 'kind:transitions')}
+            {:else}
+              {#if hero}
+                {@const act = listingAction(hero)}
+                <!-- One extension at a time: its icon beside its copy, on a card.
+                     The pager and the action share the card's last line. -->
+                <div class="st-hero">
+                  <button class="st-hero-open" type="button" aria-label={`Open ${hero.name}`} onclick={() => openListing(hero)}></button>
+                  <span class="st-thumb is-featured" style={art(hero.art)}></span>
+                  <div class="st-hero-copy">
+                    <span class="st-hero-kind">{byline(hero.kind, `by ${hero.publisher}`)}</span>
+                    <b>{hero.name}</b>
+                    <span class="st-hero-line">{hero.tagline}</span>
+                    {#if featured.length > 1}
+                      <div class="st-pager" role="tablist" aria-label="Featured">
+                        {#each featured as f, i (f.repoId)}
+                          <button role="tab" type="button" aria-selected={i === featuredIndex} aria-label={f.name} onclick={() => (featuredIndex = i)}></button>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                  {@render control(act, libraryItemFor(hero.repoId, library), { repoId: hero.repoId, releaseId: hero.latestReleaseId, name: hero.name }, 'btn st-hero-install')}
+                </div>
+              {/if}
+              {#each sections.filter((section) => section.id !== 'featured') as section (section.id)}
+                {@render shelfSection(section.title, section.listings, isKind(section.id) ? `kind:${section.id}` : undefined)}
+              {/each}
+            {/if}
 
           {:else if pageKind}
-            {@const shelf = ALL.filter((l) => l.kind === pageKind)}
             <header class="st-heading">
               <div>
                 <h2>{KIND_PLURAL[pageKind]}</h2>
-                <p>{shelf.length} {shelf.length === 1 ? 'extension' : 'extensions'}</p>
+                {#if shelf.status === 'ready' && shelf.value.items.length}
+                  <p>{shelf.value.nextCursor ? `${shelf.value.items.length}+` : shelf.value.items.length} {shelf.value.items.length === 1 ? 'extension' : 'extensions'}</p>
+                {/if}
               </div>
             </header>
-            <div class="st-grid">
-              {#each shelf as l (coordinate(l))}
-                {@render row(l)}
-              {/each}
-            </div>
+            {#if shelf.status === 'loading'}
+              {@render skeleton(6)}
+            {:else if shelf.status === 'error'}
+              {@render failure(shelf.error, () => { if (pageKind) void loadShelf(pageKind); })}
+            {:else if shelf.value.items.length === 0}
+              <div class="st-empty">
+                <b>Nothing here yet</b>
+                <span>No one has published {KIND_PLURAL[pageKind].toLowerCase()} yet.</span>
+              </div>
+            {:else}
+              {@const cursor = shelf.value.nextCursor}
+              <div class="st-grid">
+                {#each shelf.value.items.map(toListing) as l (l.repoId)}
+                  {@render row(l)}
+                {/each}
+              </div>
+              {#if cursor}
+                <button class="btn ghost st-more" type="button" disabled={shelf.value.more} onclick={() => { if (pageKind) void loadShelf(pageKind, cursor); }}>
+                  {shelf.value.more ? 'Loading…' : 'Show More'}
+                </button>
+              {/if}
+            {/if}
 
           {:else}
             <!-- Library: one list of everything here, grouped by where it came
-                 from. Each row names its maker and says what's up with it, so
-                 there is no separate Installed or Yours to keep in step. -->
+                 from. Each row names its maker and says what's up with it. -->
             <header class="st-heading">
               <div>
                 <h2>Library</h2>
@@ -432,9 +679,9 @@
               {/if}
             </header>
 
-            {@render group('From the store', fromStore, 'Extensions you install from the store show up here, with updates from their makers.')}
-            {@render group('Yours', yours, 'Extensions you or your agent make show up here. Publish one to put it on the store under your name.')}
-            {@render group('Built in', BUILTINS)}
+            {@render group('From the store', groups.store, 'Extensions you install from the store show up here, with updates from their makers.')}
+            {@render group('Yours', groups.yours, 'Extensions you or your agent make show up here.')}
+            {@render group('Built in', groups.builtin)}
           {/if}
         </div>
       {/key}
@@ -445,7 +692,7 @@
 {#snippet navbtn(id: StorePage, label: string, icon: string, count = 0)}
   <button
     class="st-navbtn"
-    class:on={id === page && !query}
+    class:on={id === page && !query && !detail}
     type="button"
     aria-current={id === page && !query ? 'location' : undefined}
     onclick={() => show(id)}
@@ -456,55 +703,67 @@
   </button>
 {/snippet}
 
+{#snippet control(act: Action, item: LibraryItemDto | undefined, listing: { repoId: string; releaseId: string | null; name: string } | null, cls = 'btn st-install')}
+  {@const pending = busy[item?.localId ?? ''] ?? busy[listing?.repoId ?? '']}
+  {#if pending}
+    <span class="st-installed" aria-live="polite">{pending}</span>
+  {:else if act.kind === 'toggle' && item}
+    <button class="st-toggle" type="button" aria-pressed={item.enabled} aria-label={`${item.name}: ${item.enabled ? 'on' : 'off'}`} onclick={() => void toggle(item)}>{act.label}</button>
+  {:else if act.quiet}
+    <span class="st-installed">{act.label}</span>
+  {:else}
+    <button class={cls} class:pri={act.primary} type="button" disabled={act.disabled} onclick={() => run(act, item, listing)}>{act.label}</button>
+  {/if}
+{/snippet}
+
 {#snippet row(l: StoreListing)}
-  {@const act = action(l)}
   <div class="st-row">
-    <button class="st-row-open" type="button" onclick={() => openDetail(l)}>
-      <span class="st-thumb" style={art(l)}></span>
+    <button class="st-row-open" type="button" onclick={() => openListing(l)}>
+      <span class="st-thumb" style={art(l.art)}></span>
       <span class="st-row-copy">
-        <b>{l.name} <span class="st-row-by">{maker(l)}</span></b>
+        <b>{l.name} <span class="st-row-by">by {l.publisher}</span></b>
         <span class="st-row-line">{l.tagline}</span>
       </span>
     </button>
-    {#if act.quiet}
-      <span class="st-installed">{act.label}</span>
-    {:else}
-      <button class="btn st-install" class:pri={act.primary} type="button">{act.label}</button>
-    {/if}
+    {@render control(listingAction(l), libraryItemFor(l.repoId, library), { repoId: l.repoId, releaseId: l.latestReleaseId, name: l.name })}
   </div>
 {/snippet}
 
-{#snippet libraryRow(item: LibraryItem)}
-  {@const act = action(item)}
-  {@const note = status(item)}
-  <div class="st-row is-library" class:is-off={item.needsSetup}>
-    <button class="st-row-open" type="button" onclick={() => openDetail(item)}>
-      <span class="st-thumb" style={art(item)}></span>
+{#snippet libraryRow(item: LibraryItemDto)}
+  {@const note = statusText(item)}
+  {@const lineage = storeLineageOf(item)}
+  <div class="st-row is-library" class:is-off={needsSetup(item) || !item.enabled}>
+    <button class="st-row-open" type="button" onclick={() => openItem(item)}>
+      <span class="st-thumb" style={itemArt(item)}></span>
       <span class="st-row-copy">
-        <b>{item.name} <span class="st-row-by">{maker(item)}{#if item.forkedFrom}&nbsp;· forked from {item.forkedFrom.split('@')[0]}{/if}</span></b>
-        <span class="st-row-line">{item.tagline}</span>
-        {#if note}<span class="st-row-status" class:is-hot={item.needsSetup || hasUpdate(item)}>{note}</span>{/if}
+        <b>{item.name} <span class="st-row-by">{makerText(item)}{#if lineage}&nbsp;· forked from {lineage.handle}/{lineage.slug}{/if}</span></b>
+        <span class="st-row-line">{item.description ?? KIND_LABEL[item.category]}</span>
+        {#if note}
+          {#key note}
+            <span class="st-row-status" class:is-hot={statusIsHot(item)} in:fade={settle}>{note}</span>
+          {/key}
+        {/if}
       </span>
     </button>
-    {#if act.quiet}
-      <span class="st-installed">{act.label}</span>
+    {@render control(libraryAction(item), item, null)}
+    {#if item.group !== 'builtin'}
+      <button class="st-row-more" type="button" aria-label={`More actions for ${item.name}`} onclick={(event) => rowMenu(event, item)}>
+        <Icon {PM} name="more" />
+      </button>
     {:else}
-      <button class="btn st-install" class:pri={act.primary} type="button">{act.label}</button>
+      <span class="st-row-more is-spacer" aria-hidden="true"></span>
     {/if}
   </div>
 {/snippet}
 
-{#snippet group(title: string, items: LibraryItem[], empty?: string)}
+{#snippet group(title: string, items: LibraryItemDto[], empty?: string)}
   <section class="st-sec">
     <div class="st-sec-head">
       <h3>{title}</h3>
-      {#if title === 'Yours' && items.length}
-        <button class="btn ghost" type="button">Publish…</button>
-      {/if}
     </div>
     {#if items.length}
       <div class="st-list">
-        {#each items as item (`${item.origin}:${coordinate(item)}`)}
+        {#each items as item (item.localId)}
           {@render libraryRow(item)}
         {/each}
       </div>
@@ -514,16 +773,251 @@
   </section>
 {/snippet}
 
-{#snippet section(title: string, items: StoreListing[], more?: StorePage)}
+{#snippet shelfSection(title: string, items: StoreListing[], more?: StorePage)}
   {#if items.length}
     <section class="st-sec">
       <div class="st-sec-head">
         <h3>{title}</h3>
-        {#if more}<button class="btn ghost" type="button" onclick={() => show(more)}>See all</button>{/if}
+        {#if more}<button class="btn ghost" type="button" onclick={() => show(more)}>See All</button>{/if}
       </div>
       <div class="st-grid">
-        {#each items as l (coordinate(l))}
+        {#each items as l (l.repoId)}
           {@render row(l)}
+        {/each}
+      </div>
+    </section>
+  {/if}
+{/snippet}
+
+{#snippet skeleton(count: number)}
+  <div class="st-grid" aria-busy="true" aria-label="Loading">
+    {#each Array.from({ length: count }, (_, i) => i) as i (i)}
+      <div class="st-row is-skeleton" aria-hidden="true">
+        <span class="st-thumb st-skel"></span>
+        <span class="st-skel-lines"><i></i><i></i></span>
+      </div>
+    {/each}
+  </div>
+{/snippet}
+
+{#snippet failure(error: LoadError, retry: () => void)}
+  <p class="st-failure" role="status">
+    <span>{error.offline ? 'Can’t reach the store. Check your connection.' : error.message}</span>
+    <button class="st-link" type="button" onclick={retry}>Retry</button>
+  </p>
+{/snippet}
+
+{#snippet detailView(target: DetailTarget)}
+  {@const data = detailData}
+  {@const item = detailItem}
+  {@const preview = target.preview}
+  {@const name = data?.name ?? item?.name ?? preview?.name ?? ''}
+  {@const kind = data?.kind ?? preview?.kind ?? item?.category ?? 'tools'}
+  {@const version = data?.version || preview?.version || item?.version || ''}
+  {@const who = data ? `by ${data.publisher}` : preview ? `by ${preview.publisher}` : item ? makerText(item) : ''}
+  {@const lede = data?.tagline ?? preview?.tagline ?? item?.description ?? ''}
+  {@const pair = data?.art ?? preview?.art ?? artFor(item?.origin?.repoId ?? `local:${item?.localId ?? ''}`)}
+  {@const act = detailAction({ vars: data?.vars ?? item?.vars, item })}
+  {@const storeLineage = data?.forkedFrom ?? storeLineageOf(item)}
+  {@const builtinLineage = storeLineage ? undefined : builtinLineageOf(item)}
+  {@const lineageCompare = data?.forkedFrom?.releaseId && data.latestReleaseId && data.forkedFrom.releaseId !== data.latestReleaseId ? { base: data.forkedFrom.releaseId, head: data.latestReleaseId } : null}
+  {@const updateCompare = item?.origin && item.update ? { base: item.origin.releaseId, head: item.update.releaseId } : null}
+  {@const vars = data?.vars ?? item?.vars ?? []}
+  {@const contributes = data?.contributes.length ? data.contributes : item?.contributes ?? []}
+  {@const apiVersion = data?.apiVersion ?? preview?.apiVersion ?? null}
+  {@const coord = data ? coordinate(data) : preview ? coordinate(preview) : item?.origin?.coordinate ?? (account?.handle && item ? `${account.handle}/${item.localId}` : item?.localId ?? '')}
+
+  <button class="st-back" type="button" onclick={back}>
+    <Icon {PM} name="chev" /><span>Back</span>
+  </button>
+  <!-- Icon, copy, then the one action at the right edge, all on one line
+       like the hero card and every row. Anything the action needs to
+       explain goes under the head as its own line. -->
+  <header class="st-detail-head">
+    <span class="st-thumb is-hero" style={art(pair)}></span>
+    <div class="st-detail-copy">
+      <div class="st-detail-title">
+        <h2>{name}</h2>
+        {#if version}<span class="st-tag">{version}</span>{/if}
+      </div>
+      <p class="st-byline">{byline(kind, who)}</p>
+      {#if lede}<p class="st-lede">{lede}</p>{/if}
+      {#if storeLineage}
+        <p class="st-lineage">
+          Forked from <button class="st-link" type="button" onclick={() => openLineage(storeLineage)}>{storeLineage.handle}/{storeLineage.slug}</button>
+          {#if lineageCompare}
+            <span class="st-lineage-sep">·</span>
+            <button class="st-link is-quiet" type="button" aria-expanded={compare?.base === lineageCompare.base && compare.head === lineageCompare.head} onclick={() => void showCompare(lineageCompare.base, lineageCompare.head)}>See what changed</button>
+          {/if}
+        </p>
+      {:else if builtinLineage}
+        <p class="st-lineage">Forked from Powermove’s built-in {builtinLineage.id} {builtinLineage.version}</p>
+      {/if}
+    </div>
+    <div class="st-detail-actions">
+      {#if remote?.status === 'loading' && !item}
+        <button class="btn" type="button" disabled>Install</button>
+      {:else if remote?.status === 'error' && !item}
+        <!-- Nothing to install from here without the store. -->
+      {:else}
+        {@render control(act, item, data ? { repoId: data.repoId, releaseId: data.latestReleaseId, name: data.name } : null, 'btn')}
+      {/if}
+      {#if item && item.group !== 'builtin'}
+        <button class="st-link is-quiet st-uninstall" type="button" onclick={() => void uninstall(item)}>Uninstall…</button>
+      {/if}
+    </div>
+  </header>
+
+  {#if actionError}
+    <p class="st-failure" role="alert"><span>{actionError}</span></p>
+  {/if}
+
+  {#if item?.removed}
+    <p class="st-update-note">This extension is no longer on the store. It stays on this Mac, but won’t get updates.</p>
+  {:else if item?.update}
+    <p class="st-update-note">
+      {#if item.update.state === 'staged-for-merge'}
+        Update available; you changed the files. The new version is beside your folder for your agent to merge.
+      {:else if item.update.modified}
+        You changed the files since installing {item.origin?.version}. Updating saves {item.update.version} beside your folder for your agent to merge.
+      {:else}
+        You have {item.origin?.version}. Updating replaces the files with {item.update.version}.
+      {/if}
+      {#if updateCompare}
+        <button class="st-link is-quiet" type="button" aria-expanded={compare?.base === updateCompare.base && compare.head === updateCompare.head} onclick={() => void showCompare(updateCompare.base, updateCompare.head)}>See what changed</button>
+      {/if}
+    </p>
+  {/if}
+
+  {#if compare}
+    <section class="st-sec" aria-live="polite">
+      <div class="st-sec-head">
+        <h3>What changed{#if compare.state.status === 'ready'}<span class="st-sec-sub">{compareCounts(compare.state.value)}</span>{/if}</h3>
+        <button class="btn ghost" type="button" onclick={() => (compare = null)}>Hide</button>
+      </div>
+      {#if compare.state.status === 'loading'}
+        {@render skeleton(2)}
+      {:else if compare.state.status === 'error'}
+        {@const current = compare}
+        {@render failure(compare.state.error, () => { compare = null; void showCompare(current.base, current.head); })}
+      {:else if compare.state.value.files.length}
+        <div class="st-card">
+          {#each compare.state.value.files as file (file.path)}
+            <div class="st-kv is-file"><b>{file.path}</b><span class="st-change is-{file.status}">{COMPARE_LABEL[file.status]}</span></div>
+          {/each}
+        </div>
+      {/if}
+    </section>
+  {/if}
+
+  {#if remote?.status === 'error'}
+    {@render failure(remote.error, () => void loadDetail(target))}
+  {/if}
+
+  <dl class="st-facts">
+    <div><dt>Author</dt><dd>{item && 'you' in item.maker ? 'You' : item && 'builtin' in item.maker ? 'Powermove' : data?.publisher ?? preview?.publisher ?? ''}</dd></div>
+    <div><dt>Kind</dt><dd>{KIND_LABEL[kind]}</dd></div>
+    <div><dt>Updated</dt><dd>{data?.updated ?? preview?.updated ?? '—'}</dd></div>
+    <div>
+      {#if item?.origin && data && item.origin.version !== data.version}
+        <dt>Installed</dt><dd>{item.origin.version} of {data.version}</dd>
+      {:else}
+        <dt>Version</dt><dd>{version || '—'}</dd>
+      {/if}
+    </div>
+  </dl>
+
+  {#if data?.about}<p class="st-about">{data.about}</p>{/if}
+
+  {#if item && item.group === 'yours' && !item.published}
+    <section class="st-sec">
+      <h3 class="st-sec-title">Publish</h3>
+      <div class="st-card">
+        <div class="st-kv"><span>Will publish as</span><b>{account?.handle ? `@${account.handle}/${item.localId}` : account ? 'Choose a handle to publish' : 'Sign in to choose a handle'}</b></div>
+      </div>
+      <p class="st-note">Publishing puts the source on the store under your name. Setup values stay on this Mac.</p>
+    </section>
+  {/if}
+
+  {#if data?.versions.length}
+    {@const latest = data.versions.find((v) => !v.withdrawn)}
+    {#if latest?.note}
+      <section class="st-sec">
+        <div class="st-sec-head"><h3>What’s new <span class="st-sec-sub">{latest.version}</span></h3></div>
+        <p class="st-whatsnew">{latest.note}</p>
+      </section>
+    {/if}
+    <section class="st-sec">
+      <div class="st-sec-head">
+        <h3>Version history</h3>
+        {#if data.versions.length > 5}
+          <button class="btn ghost" type="button" onclick={() => (showAllVersions = !showAllVersions)}>{showAllVersions ? 'Show Fewer' : 'Show All'}</button>
+        {/if}
+      </div>
+      <div class="st-card">
+        {#each showAllVersions ? data.versions : data.versions.slice(0, 5) as v (v.id)}
+          <div class="st-kv is-version" class:is-withdrawn={v.withdrawn}>
+            <span>{v.version}<i>{v.date}</i></span>
+            <b>{#if v.withdrawn}<span class="st-var-req">Withdrawn</span> {/if}{v.note ?? ''}</b>
+          </div>
+        {/each}
+      </div>
+    </section>
+  {/if}
+
+  {#if vars.length}
+    <!-- Values the extension reads at runtime. They live in the app
+         profile, never in the extension folder, so publishing never
+         carries them. Required ones gate activation. -->
+    <section class="st-sec">
+      <div class="st-sec-head">
+        <h3>Setup</h3>
+        {#if item}<button class="btn ghost" type="button" onclick={() => void setUp(item.localId)}>Set Up…</button>{/if}
+      </div>
+      <div class="st-card">
+        {#each vars as v (v.key)}
+          <div class="st-var">
+            <div class="st-var-copy">
+              <b>{v.label}{#if v.required} <span class="st-var-req">Required</span>{/if}</b>
+              <span>{v.hint ?? ''} <code>{v.key}</code></span>
+            </div>
+          </div>
+        {/each}
+      </div>
+      <p class="st-note">{item ? 'Stays on this Mac. Never included when you publish or share this extension.' : 'You’re asked for required values when you install. They stay on this Mac.'}</p>
+    </section>
+  {/if}
+
+  <section class="st-sec">
+    <h3 class="st-sec-title">Details</h3>
+    <div class="st-card">
+      {#if coord}<div class="st-kv"><span>Identifier</span><b>{coord}</b></div>{/if}
+      {#if storeLineage}<div class="st-kv"><span>Forked from</span><b>{storeLineage.handle}/{storeLineage.slug}@{storeLineage.version}</b></div>{/if}
+      {#if contributes.length}<div class="st-kv"><span>Includes</span><b>{includesText(contributes)}</b></div>{/if}
+      {#if apiVersion !== null}<div class="st-kv"><span>Requires</span><b>{requiresText(apiVersion)}</b></div>{/if}
+    </div>
+    {#if data || item?.group === 'store'}
+      <p class="st-note">Extensions run inside Powermove with the same access as the app, and aren’t signed. Read the source, or install from people you know.</p>
+    {/if}
+  </section>
+
+  {#if files?.status === 'ready' && files.value.length}
+    <section class="st-sec">
+      <h3 class="st-sec-title">Source</h3>
+      <div class="st-card">
+        {#each files.value as file (file.path)}
+          <button class="st-file" class:is-open={openFile?.path === file.path} type="button" aria-expanded={openFile?.path === file.path} onclick={() => void toggleFile(file.path)}>
+            <span>{file.path}</span><Icon {PM} name="chev" />
+          </button>
+          {#if openFile?.path === file.path}
+            {#if openFile.state.status === 'loading'}
+              <pre class="st-source" aria-busy="true"></pre>
+            {:else if openFile.state.status === 'error'}
+              <p class="st-failure st-source-error"><span>{openFile.state.error.message}</span></p>
+            {:else}
+              <pre class="st-source">{openFile.state.value}</pre>
+            {/if}
+          {/if}
         {/each}
       </div>
     </section>

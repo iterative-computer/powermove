@@ -31,9 +31,15 @@ import {
 } from '../shared/extensions';
 import { VARS_IPC, type VarsStatus } from '../shared/vars-ipc';
 import { CLOUD_IPC, type CloudChannel, type CloudChannels } from '../shared/cloud-ipc';
+import { STORE_IPC, type StoreChannel, type StoreChannels } from '../shared/store-ipc';
 
 /** One typed invoke for every `cloud:*` channel (store plan §2.7). */
 function cloudInvoke<C extends CloudChannel>(channel: C, request?: CloudChannels[C]['req']): Promise<CloudChannels[C]['res']> {
+  return ipcRenderer.invoke(channel, request);
+}
+
+/** One typed invoke for every `store:*` channel. */
+function storeInvoke<C extends StoreChannel>(channel: C, request?: StoreChannels[C]['req']): Promise<StoreChannels[C]['res']> {
   return ipcRenderer.invoke(channel, request);
 }
 
@@ -342,6 +348,29 @@ const bridge: PowermoveBridge = {
     deleteAccount: () => cloudInvoke(CLOUD_IPC.deleteAccount),
     onAccountChanged: cloudEvent(CLOUD_IPC.accountChanged),
     onSignInFailed: cloudEvent(CLOUD_IPC.signInFailed)
+  },
+
+  /* Each request is rebuilt field by field so nothing else a page put on the
+     object crosses into main. */
+  extensionStore: {
+    browse: () => storeInvoke(STORE_IPC.browse),
+    extensions: (req) => storeInvoke(STORE_IPC.extensions, {
+      ...(req.category ? { category: req.category } : {}),
+      ...(req.q ? { q: req.q } : {}),
+      ...(req.cursor ? { cursor: req.cursor } : {}),
+      ...(req.sort ? { sort: req.sort } : {})
+    }),
+    detail: (req) => storeInvoke(STORE_IPC.detail, { handle: req.handle, slug: req.slug }),
+    release: (req) => storeInvoke(STORE_IPC.release, { releaseId: req.releaseId }),
+    tree: (req) => storeInvoke(STORE_IPC.tree, { releaseId: req.releaseId }),
+    file: (req) => storeInvoke(STORE_IPC.file, { handle: req.handle, slug: req.slug, version: req.version, path: req.path }),
+    compare: (req) => storeInvoke(STORE_IPC.compare, { base: req.base, head: req.head }),
+    install: (req) => storeInvoke(STORE_IPC.install, { repoId: req.repoId, releaseId: req.releaseId }),
+    update: (req) => storeInvoke(STORE_IPC.update, { localId: req.localId }),
+    uninstall: (req) => storeInvoke(STORE_IPC.uninstall, { localId: req.localId }),
+    library: () => storeInvoke(STORE_IPC.library),
+    checkUpdates: () => storeInvoke(STORE_IPC.checkUpdates),
+    onUpdatesChanged: cloudEvent(STORE_IPC.updatesChanged)
   }
 };
 

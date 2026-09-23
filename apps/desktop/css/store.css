@@ -203,6 +203,45 @@ body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-main{visibility:hi
 .st-empty .btn{margin-top:10px}
 .st-empty .st-coord{font:var(--fs-sm)/18px var(--f-mono);color:var(--tx-2)}
 
+/* ── live data: loading, failure, row controls ── */
+/* Skeleton rows hold the shape of what is coming; a slow breath says it is
+   still on its way. */
+.st-thumb.st-skel,.st-skel-lines i{background:var(--ink-1)}
+.st-row.is-skeleton{padding-left:10px;gap:12px;pointer-events:none}
+.st-row.is-skeleton:hover{background:transparent}
+.st-hero.is-skeleton{pointer-events:none}
+.st-skel-lines{flex:1;display:flex;flex-direction:column;gap:6px}
+.st-skel-lines i{display:block;height:10px;width:40%;border-radius:var(--r-pill)}
+.st-skel-lines i+i{width:72%}
+.is-skeleton .st-skel,.is-skeleton .st-skel-lines{animation:st-breathe 1.6s ease-in-out infinite alternate}
+@keyframes st-breathe{from{opacity:1}to{opacity:.55}}
+@media (prefers-reduced-motion:reduce){.is-skeleton .st-skel,.is-skeleton .st-skel-lines{animation:none}}
+.st-failure{display:flex;align-items:baseline;gap:8px;padding:4px 2px;font-size:var(--fs-md);line-height:18px;color:var(--tx-2)}
+.st-more{align-self:flex-start;margin-top:-16px}
+/* On/Off: quiet until you point at it, then it reads as the switch it is. */
+.st-toggle{flex:none;min-width:68px;height:28px;padding:0 10px;border:0;border-radius:var(--r-pill);background:transparent;color:var(--tx-4);font-size:var(--fs-sm);font-weight:var(--fw-medium);transition:background var(--dur-1),color var(--dur-1)}
+.st-toggle[aria-pressed="true"]{color:var(--tx-3)}
+.st-toggle:hover{background:var(--ink-1);color:var(--tx)}
+.st-toggle:focus-visible,.st-row-more:focus-visible{outline:0;box-shadow:0 0 0 2px var(--accent)}
+.st-row-more{flex:none;display:grid;place-items:center;width:26px;height:26px;margin-left:-6px;padding:0;border:0;border-radius:var(--r-pill);background:transparent;color:var(--tx-4);transition:background var(--dur-1),color var(--dur-1)}
+.st-row-more svg{width:14px;height:14px}
+.st-row-more:hover{background:var(--ink-1);color:var(--tx)}
+.st-row-more.is-spacer{visibility:hidden}
+.st-detail-actions:has(.st-uninstall){flex-direction:column;align-items:center;gap:8px}
+.st-uninstall{font-size:var(--fs-sm);line-height:16px;text-decoration:none}
+.st-uninstall:hover{text-decoration:underline}
+.st-kv.is-file{align-items:center;justify-content:space-between;min-height:36px;padding:8px 14px}
+.st-kv.is-file>b{font:var(--fs-sm)/16px var(--f-mono)}
+.st-change{flex:none;font-size:var(--fs-xs);font-weight:var(--fw-medium);color:var(--tx-3)}
+.st-change.is-added{color:var(--tx-2)}
+.st-change.is-removed{color:var(--tx-4)}
+.st-kv.is-withdrawn>span,.st-kv.is-withdrawn>b{color:var(--tx-4)}
+.st-file.is-open svg{transform:rotate(90deg)}
+.st-file svg{transition:transform var(--dur-1)}
+.st-source{max-height:320px;margin:0;padding:10px 14px 14px;overflow:auto;background:var(--bg-float);color:var(--tx-2);font:var(--fs-xs)/16px var(--f-mono);white-space:pre;tab-size:2;user-select:text;-webkit-user-select:text}
+.st-source[aria-busy="true"]{min-height:48px}
+.st-source-error{padding:10px 14px}
+
 #store-screen .btn:not(.pri){box-shadow:none}
 #store-screen .st-row,#store-screen .st-hero,#store-screen .st-navbtn,#store-screen .st-pager,#store-screen .st-facts{user-select:none;-webkit-user-select:none}
 

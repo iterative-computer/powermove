@@ -11,6 +11,7 @@ import {
   type ExtensionCreateRequest,
   type ExtensionHealthReport,
   type ExtensionIdRequest,
+  type ExtensionRecord,
   type ExtensionSetEnabledRequest
 } from '../../shared/extensions';
 import type { ExtensionRegistry } from './registry';
@@ -56,17 +57,7 @@ export function registerExtensionsIpc(
   ipcMain.handle(EXT_IPC.remove, async (event, payload: unknown) => {
     requireTrusted(event, EXT_IPC.remove);
     const request = extensionIdRequest(payload, EXT_IPC.remove);
-    const after = await options.beforeRemove?.(event, request.id);
-    const records = await registry.remove(request);
-    if (after) {
-      try {
-        await after();
-      } catch (error) {
-        // The folder is already gone; a leftover values file is harmless.
-        console.error('[extensions] cleanup after remove failed', error);
-      }
-    }
-    return records;
+    return removeUserExtension({ registry, ...(options.beforeRemove ? { beforeRemove: options.beforeRemove } : {}) }, event, request.id);
   });
 
   ipcMain.handle(EXT_IPC.reload, (event, payload: unknown) => {
@@ -122,6 +113,32 @@ export function registerExtensionsIpc(
       // telemetry must not surface as an uncaught main-process exception.
     }
   });
+}
+
+/**
+ * The one way a user extension is removed: `beforeRemove` first (it may ask
+ * about the extension's values), then the folder, then whatever the prompt
+ * decided. `ext:remove` and the Store's Uninstall both go through here.
+ */
+export async function removeUserExtension(
+  options: {
+    registry: Pick<ExtensionRegistry, 'remove'>;
+    beforeRemove?(event: IpcMainInvokeEvent, id: string): Promise<(() => Promise<void>) | undefined>;
+  },
+  event: IpcMainInvokeEvent,
+  id: string
+): Promise<ExtensionRecord[]> {
+  const after = await options.beforeRemove?.(event, id);
+  const records = await options.registry.remove({ id });
+  if (after) {
+    try {
+      await after();
+    } catch (error) {
+      // The folder is already gone; a leftover values file is harmless.
+      console.error('[extensions] cleanup after remove failed', error);
+    }
+  }
+  return records;
 }
 
 function extensionIdRequest(payload: unknown, channel: string): ExtensionIdRequest {

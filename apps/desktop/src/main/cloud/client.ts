@@ -21,6 +21,8 @@ import type { AppType } from '@powermove/cloud-types';
 import { ApiError, ApiErrorBody, CLIENT_HEADER } from '@powermove/registry/wire';
 import type { z } from 'zod';
 
+import { CLOUD_UNREACHABLE } from '../../shared/cloud-ipc';
+
 export type CloudApi = ReturnType<typeof hc<AppType>>;
 
 export interface CloudClientOptions {
@@ -39,6 +41,13 @@ export interface CloudClient {
   /** Run one call and parse its body. `schema` null means "no body expected". */
   request<T>(schema: z.ZodType<T>, fn: (api: CloudApi) => Promise<Response>): Promise<T>;
   request(schema: null, fn: (api: CloudApi) => Promise<Response>): Promise<void>;
+  /**
+   * Run one call whose success body is not JSON (a tar, a source file) and
+   * return the response unread. Failures are thrown as for `request`. `fetch`
+   * is the origin-bound fetch, for routes the typed client cannot address
+   * (a wildcard path).
+   */
+  raw(fn: (api: CloudApi, fetch: typeof globalThis.fetch) => Promise<Response>): Promise<Response>;
 }
 
 /** The scheme, host and port of a registry URL; throws on anything that is not http(s). */
@@ -92,22 +101,27 @@ export function createCloudClient(options: CloudClientOptions): CloudClient {
 
   const api: CloudApi = hc<AppType>(origin, { fetch: bound });
 
+  async function send(fn: (api: CloudApi, fetch: typeof globalThis.fetch) => Promise<Response>): Promise<Response> {
+    try {
+      return await fn(api, bound);
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw new ApiError({ error: 'internal', detail: CLOUD_UNREACHABLE });
+    }
+  }
+
+  async function failure(response: Response, body: { ok: true; value: unknown } | { ok: false }): Promise<never> {
+    const parsed = body.ok ? ApiErrorBody.safeParse(body.value) : null;
+    if (parsed?.success) throw new ApiError(parsed.data);
+    throw new ApiError({ error: 'internal', detail: `Powermove Cloud is unavailable right now (${response.status}). Try again in a moment.` });
+  }
+
   function request<T>(schema: z.ZodType<T>, fn: (api: CloudApi) => Promise<Response>): Promise<T>;
   function request(schema: null, fn: (api: CloudApi) => Promise<Response>): Promise<void>;
   async function request<T>(schema: z.ZodType<T> | null, fn: (api: CloudApi) => Promise<Response>): Promise<T | void> {
-    let response: Response;
-    try {
-      response = await fn(api);
-    } catch (error) {
-      if (error instanceof ApiError) throw error;
-      throw new ApiError({ error: 'internal', detail: 'Unable to reach Powermove Cloud. Check your connection and try again.' });
-    }
+    const response = await send(fn);
     const body = await readJson(response);
-    if (!response.ok) {
-      const parsed = body.ok ? ApiErrorBody.safeParse(body.value) : null;
-      if (parsed?.success) throw new ApiError(parsed.data);
-      throw new ApiError({ error: 'internal', detail: `Powermove Cloud is unavailable right now (${response.status}). Try again in a moment.` });
-    }
+    if (!response.ok) return failure(response, body);
     if (schema === null) return;
     if (!body.ok) throw new ApiError({ error: 'internal', detail: `Powermove Cloud is unavailable right now (${response.status}). Try again in a moment.` });
     const parsed = schema.safeParse(body.value);
@@ -115,5 +129,11 @@ export function createCloudClient(options: CloudClientOptions): CloudClient {
     return parsed.data;
   }
 
-  return { origin, api, request };
+  async function raw(fn: (api: CloudApi, fetch: typeof globalThis.fetch) => Promise<Response>): Promise<Response> {
+    const response = await send(fn);
+    if (!response.ok) return failure(response, await readJson(response));
+    return response;
+  }
+
+  return { origin, api, request, raw };
 }

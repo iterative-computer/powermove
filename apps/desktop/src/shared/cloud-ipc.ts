@@ -53,6 +53,9 @@ export interface CloudChannels {
 
 export type CloudChannel = keyof CloudChannels;
 
+/** The `detail` of the `internal` error main returns when a request never got an answer (offline, DNS, refused). */
+export const CLOUD_UNREACHABLE = 'Unable to reach Powermove Cloud. Check your connection and try again.';
+
 /** Longest email accepted (RFC 5321 path limit). */
 export const CLOUD_EMAIL_MAX = 254;
 /** The emailed sign-in code. */
