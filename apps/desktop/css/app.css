@@ -628,11 +628,18 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
    the change eases; the body stops scrolling for the duration so a
    scrollbar never flashes mid-motion. */
 .modal.is-measured{transition:height var(--dur-3) var(--ease)}
+/* Sheets arrive the way menus do (pm-menu-in): a fade, a slight scale and a
+   few pixels of drop, from their top centre. `scale` and `translate` compose
+   with the inline centring transform instead of replacing it. */
+.modal{transform-origin:0 0;animation:modal-in .18s cubic-bezier(.23,1,.32,1) both}
+#scrim.on{animation:scrim-in .18s cubic-bezier(.23,1,.32,1) both}
+@keyframes modal-in{from{opacity:0;scale:.96;translate:0 -4px}}
+@keyframes scrim-in{from{opacity:0}}
 .modal.is-resizing .mb{overflow:hidden}
 /* A sheet scrolls without showing a bar; nothing rides over the cards. */
 .modal .mb{scrollbar-width:none}
 .modal .mb::-webkit-scrollbar{display:none}
-@media (prefers-reduced-motion:reduce){.modal.is-measured{transition:none}}
+@media (prefers-reduced-motion:reduce){.modal.is-measured{transition:none}.modal,#scrim.on{animation:none}}
 /* Actions use flat tonal fills; focus and selection provide their own cues. */
 .btn{position:relative;isolation:isolate;height:var(--ctl-h);padding:0 12px;border-radius:var(--r-sm);background:var(--ctl-raised);color:var(--tx);font-size:var(--fs-sm);font-weight:var(--fw-medium);box-shadow:var(--ctl-edge);display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap;transition:color var(--dur-1),box-shadow var(--dur-1),transform var(--dur-1) var(--ease)}
 .btn svg{width:13px;height:13px;flex:none;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
