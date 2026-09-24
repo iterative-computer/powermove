@@ -43,7 +43,7 @@
    and only once there is an address to send to. */
 .acct-providers{display:flex;flex-direction:column;gap:6px;margin-top:24px}
 .account-modal .btn.acct-provider,.account-modal .btn.acct-submit{width:100%;height:36px;padding:0 14px;gap:8px;border-radius:var(--r-md);font-size:var(--fs-md)}
-.acct-provider svg{width:16px;height:16px}
+.acct-provider svg,.acct-provider .acct-provider-mark{width:16px;height:16px}
 /* Optical centring: the apple's leaf lifts its box. */
 .acct-provider[data-provider="apple"] svg{transform:translateY(-1px)}
 .acct-email{display:flex;flex-direction:column;gap:6px;margin-top:18px}
