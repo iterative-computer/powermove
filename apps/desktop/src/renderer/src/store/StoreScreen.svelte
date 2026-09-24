@@ -59,6 +59,11 @@
   let library = $state<LibraryItemDto[]>([]);
   let browse = $state<Loadable<Section[]>>({ status: 'loading' });
   let shelf = $state<Loadable<Shelf>>({ status: 'loading' });
+  /* Stale-while-revalidate for the surfaces you move between: a shelf or a
+     detail page you have seen shows at once from cache while it refreshes.
+     Skeletons only appear the first time something is loaded. */
+  const shelfCache = new Map<StoreKind, Shelf>();
+  const detailCache = new Map<string, StoreDetail>();
   let search = $state<Loadable<ListingDto[]>>({ status: 'loading' });
   let detail = $state<DetailTarget | null>(null);
   let remote = $state<Loadable<StoreDetail> | null>(null);
@@ -133,25 +138,42 @@
   }
 
   async function loadBrowse(): Promise<void> {
-    browse = { status: 'loading' };
+    const hadBrowse = browse.status === 'ready';
+    if (!hadBrowse) browse = { status: 'loading' };
     const result = await call(() => storeBridge()?.browse());
-    browse = result.ok
-      ? { status: 'ready', value: result.value.sections.filter((section) => section.items.length > 0) }
-      : { status: 'error', error: failed(result.error) };
-    featuredIndex = 0;
+    if (result.ok) {
+      const sections = result.value.sections.filter((section) => section.items.length > 0);
+      browse = { status: 'ready', value: sections };
+      // A kind's browse section is that shelf's first page: seed it so the
+      // first visit to a kind is instant rather than a skeleton.
+      for (const section of sections) {
+        const kind = kindOf(section.id);
+        if (kind && !shelfCache.has(kind)) shelfCache.set(kind, { items: section.items, nextCursor: null, more: false });
+      }
+      if (!hadBrowse) featuredIndex = 0;
+    } else if (!hadBrowse) {
+      browse = { status: 'error', error: failed(result.error) };
+    }
   }
 
   let shelfToken = 0;
   async function loadShelf(kind: StoreKind, cursor?: string): Promise<void> {
     const token = ++shelfToken;
     const previous = cursor && shelf.status === 'ready' ? shelf.value.items : [];
+    const cached = cursor ? null : shelfCache.get(kind) ?? null;
     if (cursor && shelf.status === 'ready') shelf = { status: 'ready', value: { ...shelf.value, more: true } };
-    else shelf = { status: 'loading' };
+    else shelf = cached ? { status: 'ready', value: cached } : { status: 'loading' };
     const result = await call(() => storeBridge()?.extensions({ category: kind, ...(cursor ? { cursor } : {}) }));
     if (token !== shelfToken) return;
-    shelf = result.ok
-      ? { status: 'ready', value: { items: [...previous, ...result.value.items], nextCursor: result.value.nextCursor, more: false } }
-      : { status: 'error', error: failed(result.error) };
+    if (result.ok) {
+      const value: Shelf = { items: [...previous, ...result.value.items], nextCursor: result.value.nextCursor, more: false };
+      shelfCache.set(kind, value);
+      shelf = { status: 'ready', value };
+    } else if (!cached) {
+      shelf = { status: 'error', error: failed(result.error) };
+    } else if (cursor) {
+      shelf = { status: 'ready', value: { ...cached, more: false } };
+    }
   }
 
   let searchToken = 0;
@@ -198,22 +220,30 @@
     /* A plain copy: `target` may be the reactive `detail` itself, and a
        state proxy can't cross the context bridge. */
     const coord = { handle: target.coord.handle, slug: target.coord.slug };
-    remote = { status: 'loading' };
+    const key = `${coord.handle}/${coord.slug}`;
+    const cached = detailCache.get(key);
+    remote = cached ? { status: 'ready', value: cached } : { status: 'loading' };
     const result = await call(() => storeBridge()?.detail(coord));
     if (token !== detailToken) return;
     if (!result.ok) {
-      remote = { status: 'error', error: failed(result.error) };
+      if (!cached) remote = { status: 'error', error: failed(result.error) };
       return;
     }
     const value = detailFromDto(result.value, library);
+    detailCache.set(key, value);
     remote = { status: 'ready', value };
     if (value.latestReleaseId) void loadFiles(value.latestReleaseId, token);
   }
 
+  /* Release trees are immutable, so a file list never needs revalidating. */
+  const filesCache = new Map<string, TreeFileDto[]>();
   async function loadFiles(releaseId: string, token: number): Promise<void> {
+    const cached = filesCache.get(releaseId);
+    if (cached) { files = { status: 'ready', value: cached }; return; }
     files = { status: 'loading' };
     const result = await call(() => storeBridge()?.tree({ releaseId }));
     if (token !== detailToken) return;
+    if (result.ok) filesCache.set(releaseId, result.value.files);
     files = result.ok ? { status: 'ready', value: result.value.files } : { status: 'error', error: failed(result.error) };
   }
 
