@@ -14,16 +14,36 @@ export interface Rpc {
 export class SandboxTimeoutError extends Error {
   constructor(method: string) { super(`Sandbox call timed out: ${method}`); this.name = 'SandboxTimeoutError'; }
 }
+export interface RpcBudget { windowStart: number; received: number; excessSince: number; reported: boolean }
+export const createRpcBudget = (): RpcBudget => ({ windowStart: Date.now(), received: 0, excessSince: 0, reported: false });
+export interface RpcLimits { maxIncomingBytes?: number; maxMirrorBytes?: number; maxIncomingPerSecond?: number; maxHandles?: number; budget?: RpcBudget; onSustainedLimit?(): void }
+function messageBytes(value: unknown, limit: number, depth = 0, seen = new WeakSet<object>()): number {
+  if (depth > 64) return Infinity;
+  if (typeof value === 'string') return value.length * 2;
+  if (value === null || typeof value !== 'object') return 8;
+  if (seen.has(value)) return 0;
+  seen.add(value);
+  if (value instanceof ArrayBuffer) return value.byteLength;
+  if (ArrayBuffer.isView(value)) return value.byteLength;
+  if (typeof Blob !== 'undefined' && value instanceof Blob) return value.size;
+  let bytes = 0;
+  for (const [key, item] of Object.entries(value)) {
+    bytes += key.length * 2 + messageBytes(item, limit, depth + 1, seen);
+    if (bytes > limit) return bytes;
+  }
+  return bytes;
+}
 export function serializeRpcError(error: unknown): RpcError {
   const value = error as { name?: unknown; message?: unknown; code?: unknown };
   return { name: typeof value?.name === 'string' ? value.name : 'Error', message: typeof value?.message === 'string' ? value.message : String(error), ...(typeof value?.code === 'string' ? { code: value.code } : {}) };
 }
-export function createRpc(port: MessagePort, handlers: Record<string, (...args: any[]) => unknown>, timeoutMs = 10_000): Rpc {
+export function createRpc(port: MessagePort, handlers: Record<string, (...args: any[]) => unknown>, timeoutMs = 10_000, limits: RpcLimits = {}): Rpc {
   let sequence = 0;
   const handleBase = Math.floor(Math.random() * 1_000_000_000) * 1_000_000;
   let handleSequence = 0;
   let closed = false;
   const functions = new Map<HandleId, (...args: any[]) => unknown>();
+  const budget = limits.budget ?? createRpcBudget();
   const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
   const post = (message: unknown, transfer: Transferable[] = []): void => {
     if (closed) throw new Error('Sandbox RPC is closed');
@@ -46,6 +66,20 @@ export function createRpc(port: MessagePort, handlers: Record<string, (...args: 
   const onMessage = (event: MessageEvent): void => {
     const message = event.data as Record<string, any>;
     if (!message || typeof message !== 'object' || closed) return;
+    const now = Date.now();
+    if (now - budget.windowStart >= 1000) { if (budget.received <= (limits.maxIncomingPerSecond ?? 200)) budget.excessSince = 0; budget.windowStart = now; budget.received = 0; }
+    const byteLimit = message.t === 'notify' && message.m === 'mirror' ? (limits.maxMirrorBytes ?? limits.maxIncomingBytes ?? 1024 * 1024) : (limits.maxIncomingBytes ?? 1024 * 1024);
+    const tooLarge = messageBytes(message, byteLimit) > byteLimit;
+    const tooFast = message.t === 'reply' ? false : ++budget.received > (limits.maxIncomingPerSecond ?? 200);
+    if (tooLarge || tooFast) {
+      if (tooFast) { if (!budget.excessSince) budget.excessSince = now; if (!budget.reported && now - budget.excessSince >= 3000) { budget.reported = true; limits.onSustainedLimit?.(); } }
+      const error = { name: 'ResourceLimitError', message: tooLarge ? 'Sandbox RPC payload exceeds 1 MiB or nesting limit' : 'Sandbox RPC rate exceeds 200 messages per second', code: 'resource_limit' };
+      if (message.t === 'reply') {
+        const entry = pending.get(message.id);
+        if (entry) { clearTimeout(entry.timer); pending.delete(message.id); const failure = new Error(error.message) as Error & { code: string }; failure.name = error.name; failure.code = error.code; entry.reject(failure); }
+      } else if (message.t === 'call' || message.t === 'handle-call') post({ t: 'reply', id: message.id, ok: false, e: error });
+      return;
+    }
     if (message.t === 'reply') {
       const entry = pending.get(message.id);
       if (!entry) return;
@@ -68,7 +102,7 @@ export function createRpc(port: MessagePort, handlers: Record<string, (...args: 
   return {
     call: (m, ...input) => { const { args, transfers } = splitTransfers(input); return request({ t: 'call', m, a: args }, m, transfers); },
     notify: (m, ...input) => { const { args, transfers } = splitTransfers(input); post({ t: 'notify', m, a: args }, transfers); },
-    handle(fn) { const id = handleBase + ++handleSequence; functions.set(id, fn); return id; },
+    handle(fn) { if (functions.size >= (limits.maxHandles ?? 2000)) throw new Error('Sandbox handle limit is 2000'); const id = handleBase + ++handleSequence; functions.set(id, fn); return id; },
     invokeHandle: (h, ...input) => { const { args, transfers } = splitTransfers(input); return request({ t: 'handle-call', h, a: args }, `handle ${h}`, transfers); },
     release(h) { functions.delete(h); post({ t: 'handle-release', h }); },
     close() { if (closed) return; closed = true; port.removeEventListener('message', onMessage as EventListener); for (const entry of pending.values()) { clearTimeout(entry.timer); entry.reject(new Error('Sandbox RPC closed')); } pending.clear(); functions.clear(); port.close(); }

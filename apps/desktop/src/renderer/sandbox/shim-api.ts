@@ -1,4 +1,5 @@
 import type { PowermoveAPI } from '../src/kernel/api';
+import type { PMRegistry } from '../src/legacy/registry';
 import { createRpc, type Rpc, type HandleId } from '../../shared/sandbox-rpc';
 import { install as installEase } from '../src/legacy/core/easing';
 import { CHANNELS_3D, projectPoint, inversePlane } from '../src/legacy/core/space-3d';
@@ -7,6 +8,13 @@ export class PermissionError extends Error {
   readonly code = 'full-access';
   constructor(member: string, alternative = 'project.apply or commands') {
     super(`${member} requires full access. Use ${alternative} in a sandboxed extension.`);
+    this.name = 'PermissionError';
+  }
+}
+export class ProjectWritePermissionError extends Error {
+  readonly code = 'project:write';
+  constructor(member: string) {
+    super(`${member} requires project:write permission. Without it, commands.run may call only commands this extension registered.`);
     this.name = 'PermissionError';
   }
 }
@@ -126,6 +134,7 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
   const panelPorts = new Map<string, Rpc>();
   const disposers: Array<() => void> = [];
   const registrations = new Set<Promise<unknown>>();
+  let registrationFailure: unknown;
   const vars = Object.freeze({ ...init.vars });
   const local = new Map<string, Map<string, any>>();
   const list = (kind: string): any[] => {
@@ -134,7 +143,7 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
     return [...merged.values()];
   };
   const easeRuntime: Record<string, any> = {};
-  installEase(easeRuntime as any);
+  installEase(easeRuntime as unknown as PMRegistry);
   const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
   const util = {
     round: (value: number, places = 2) => Math.round(value * 10 ** places) / 10 ** places,
@@ -149,9 +158,9 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
     parseTc: (value: string, fps = 30) => {
       const parts = String(value).trim().split(':').map(Number);
       if (parts.some(Number.isNaN)) return null;
-      if (parts.length === 4) return parts[0]! * 3600 + parts[1]! * 60 + parts[2]! + parts[3]! / fps;
-      if (parts.length === 3) return parts[0]! * 60 + parts[1]! + parts[2]! / fps;
-      if (parts.length === 2) return parts[0]! + parts[1]! / fps;
+      if (parts.length === 4) return (parts[0] ?? 0) * 3600 + (parts[1] ?? 0) * 60 + (parts[2] ?? 0) + (parts[3] ?? 0) / fps;
+      if (parts.length === 3) return (parts[0] ?? 0) * 60 + (parts[1] ?? 0) + (parts[2] ?? 0) / fps;
+      if (parts.length === 2) return (parts[0] ?? 0) + (parts[1] ?? 0) / fps;
       return parts[0] ?? null;
     },
     uid: (prefix = 'l') => `${prefix}${Math.random().toString(36).slice(2, 9)}`,
@@ -162,6 +171,13 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
   const restricted = (name: string) => (..._args: unknown[]) => { report('permission', name); throw new PermissionError(name, 'project.apply or the pure matrix helpers'); };
   const send = (method: string, ...args: unknown[]): Promise<any> => {
     if (quiet && method === 'invoke' && !VIEW_READS.has(`${args[0]}.${args[1]}`)) return Promise.resolve(undefined);
+    if (method === 'invoke' && !init.manifest.permissions?.includes('project:write')) {
+      const [namespace, member, params] = args;
+      const command = Array.isArray(params) ? params[0] : undefined;
+      if (namespace === 'project' && member !== 'snapshot' || namespace === 'transport' ||
+        namespace === 'commands' && typeof command === 'string' && !command.startsWith(`${init.id}.`) && !command.startsWith(`${init.id}-`))
+        return Promise.reject(new ProjectWritePermissionError(`${String(namespace)}.${String(member)}`));
+    }
     return rpc.call(method, ...args);
   };
   /* Methods that return a value synchronously in-realm and a Promise here.
@@ -172,7 +188,10 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
     const promise = send(method, ...args);
     return legacy ? watchPromise(promise, member, report) : promise;
   };
-  const fire = (method: string, ...args: unknown[]): void => { void send(method, ...args).catch(error => rpc.notify('runtime-error', { name: error.name, message: error.message, code: error.code })); };
+  const fire = (method: string, ...args: unknown[]): void => { void send(method, ...args).catch(error => {
+    try { rpc.notify('runtime-error', { name: error.name, message: error.message, code: error.code }); }
+    catch { /* port closed during teardown */ }
+  }); };
   const registration = (method: string, value: unknown, handles: HandleId[] = [], localValue = value): { dispose(): void } => {
     const token = crypto.randomUUID();
     const item = localValue as Record<string, any>;
@@ -188,7 +207,7 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
     if (forwarded) {
       const pending = send('register', method, token, value);
       registrations.add(pending);
-      void pending.finally(() => registrations.delete(pending)).catch(() => {});
+      void pending.then(() => registrations.delete(pending), error => { registrations.delete(pending); registrationFailure ??= error; });
     }
     let disposed = false;
     const dispose = (): void => {
@@ -213,17 +232,20 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
       return parts.join('+');
     } },
     commands: { register(def: Record<string, any>) {
+      if (mode === 'view') return registration('commands', def, [], def);
       const ids = [handle(def.run)];
       const value: Record<string, any> = { ...def, run: ids[0] };
       if (def.when) { ids.push(handle(def.when)); value.when = ids[1]; }
       return registration('commands', value, ids, def);
     }, run: (id: string, ...args: unknown[]) => later('commands.run', 'invoke', 'commands', 'run', [id, ...args]), has: (id: string) => list('commands').some(item => item.id === id), list: () => list('commands') },
     status: { register(def: Record<string, any>) {
+      if (mode === 'view') return registration('status', def, [], def);
       const ids = [handle(def.text)]; const value: Record<string, any> = { ...def, text: ids[0] };
       if (def.onClick) { ids.push(handle(def.onClick)); value.onClick = ids[1]; }
       return registration('status', value, ids, def);
     }, list: () => list('status') },
     palette: { registerProvider(fn: (...args: any[]) => unknown) {
+      if (mode === 'view') return registration('palette', { provider: 0 }, [], fn);
       let current: HandleId[] = [], previous: HandleId[] = [];
       const id = handle((query: string) => {
         for (const item of previous) rpc.release(item);
@@ -238,6 +260,7 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
       return disposable;
     }, open: (query?: string) => fire('invoke', 'palette', 'open', [query]) },
     menus: { contribute(location: string, fn: (...args: any[]) => unknown) {
+      if (mode === 'view') return registration('menus', { location, items: 0 }, [], fn);
       let current: HandleId[] = [], previous: HandleId[] = [];
       const id = handle((ctx: unknown) => {
         for (const item of previous) rpc.release(item);
@@ -261,7 +284,7 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
          the icon on the extension's art. */
       return registration('panels', panelInfo(def), [], def);
     }, list: () => list('panels').map(item => item.id), open: (id: string, options?: unknown) => fire('invoke', 'panels', 'open', [id, options]), close: (id: string) => fire('invoke', 'panels', 'close', [id]), refresh: (id: string) => fire('invoke', 'panels', 'refresh', [id]), isOpen: () => false },
-    project: { get: () => mirror.project, revision: () => mirror.revision, selection: () => mirror.selection,
+    project: { get: () => { if (mirror.project && typeof mirror.project === 'object' && 'tooLarge' in mirror.project) throw new Error('Project mirror exceeds 8 MiB; project.get() is unavailable at this revision'); return mirror.project; }, revision: () => mirror.revision, selection: () => mirror.selection,
       time: () => mirror.time, playing: () => mirror.playing,
       apply: (...args: unknown[]) => later('project.apply', 'invoke', 'project', 'apply', args), select: (...args: unknown[]) => later('project.select', 'invoke', 'project', 'select', args),
       setTime: (time: number) => later('project.setTime', 'invoke', 'project', 'setTime', [time]), play: () => later('project.play', 'invoke', 'project', 'play', []), pause: () => later('project.pause', 'invoke', 'project', 'pause', []), undo: () => later('project.undo', 'invoke', 'project', 'undo', []), redo: () => later('project.redo', 'invoke', 'project', 'redo', []), snapshot: (...args: unknown[]) => send('invoke', 'project', 'snapshot', args) },
@@ -272,7 +295,8 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
     events: { on(event: string, fn: (...args: any[]) => unknown) { const id = handle(fn); return registration('events', { event, fn: id }, [id]); }, emit: (event: string, payload: unknown) => fire('invoke', 'events', 'emit', [event, payload]) },
     ui: partlyTrusted('ui', { toast: (message: string, options?: unknown) => fire('invoke', 'ui', 'toast', [message, options]), confirm: (...args: unknown[]) => send('invoke', 'ui', 'confirm', args), icon: (...args: unknown[]) => later('ui.icon', 'invoke', 'ui', 'icon', args), controls: trustedOnly('ui.controls', report), modal: trustedOnly('ui.modal', report), menu: trustedOnly('ui.menu', report), drag: trustedOnly('ui.drag', report), gesture: trustedOnly('ui.gesture', report), mount: trustedOnly('ui.mount', report) }, report),
     vars: { get: (key: string) => vars[key], has: (key: string) => Object.hasOwn(vars, key), keys: () => Object.keys(vars) },
-    extensions: { list: () => later('extensions.list', 'extensions-list'), fork: () => { report('permission', 'extensions.fork'); throw new PermissionError('extensions.fork'); }, setEnabled: (...args: unknown[]) => send('invoke', 'extensions', 'setEnabled', args), remove: (...args: unknown[]) => send('invoke', 'extensions', 'remove', args), reload: (...args: unknown[]) => send('invoke', 'extensions', 'reload', args), reveal: (...args: unknown[]) => send('invoke', 'extensions', 'reveal', args) },
+    extensions: { list: () => later('extensions.list', 'extensions-list'), setUp: (id: string) => send('invoke', 'extensions', 'setUp', [id]),
+      fork: restricted('extensions.fork'), setEnabled: restricted('extensions.setEnabled'), remove: restricted('extensions.remove'), reload: restricted('extensions.reload'), reveal: restricted('extensions.reveal'), requestFix: restricted('extensions.requestFix'), rebase: restricted('extensions.rebase') },
     log: (level: string, message: string, ...data: unknown[]) => rpc.notify('log', level, message, data),
     onDispose: (fn: () => void) => { disposers.push(fn); }
   };
@@ -287,7 +311,7 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
   api.on = api.events.on;
   const control: SandboxControl = {
     update(next: SandboxMirror) { mirror = next; },
-    ready: () => Promise.all([...registrations]),
+    ready: async () => { await Promise.all([...registrations]); if (registrationFailure) throw registrationFailure; },
     dispose() {
       for (const port of panelPorts.values()) port.close();
       panelPorts.clear();

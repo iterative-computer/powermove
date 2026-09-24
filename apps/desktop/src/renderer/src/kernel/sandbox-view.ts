@@ -14,10 +14,9 @@
  * view. Tearing a view down closes the kernel's port and tells the runtime to
  * close its end.
  */
-import { createRpc, type Rpc } from '../../../shared/sandbox-rpc';
+import { createRpc, type Rpc, type RpcBudget } from '../../../shared/sandbox-rpc';
 import type { SandboxInit, SandboxKey, SandboxKeyEvent, SandboxPanelInfo, SandboxViewInit } from '../../sandbox/shim-api';
 import type { Disposable } from './api';
-import { markForwardedKey } from './keychord';
 
 export interface ViewLink {
   rpc: Rpc;
@@ -34,6 +33,9 @@ export interface ViewHost {
   theme(): SandboxInit['theme'];
   /** The host's keybindings, reduced to what a view needs to filter keydowns. */
   keys(): SandboxKey[];
+  budget: RpcBudget;
+  forwardKey(payload: SandboxKeyEvent): void;
+  outsideClick(): void;
   /** Live views, for mirror/theme/keys broadcasts. */
   links: Set<ViewLink>;
   connectRuntime(panelId: string, token: string, port: MessagePort): void;
@@ -47,13 +49,17 @@ export interface ViewHost {
   post?(frame: HTMLIFrameElement, message: SandboxViewInit & { t: 'init' }, ports: MessagePort[]): void;
 }
 
-const KEY_FLAGS = ['metaKey', 'ctrlKey', 'altKey', 'shiftKey', 'repeat'] as const;
-
 function sizeOf(body: HTMLElement): { width: number; height: number } {
   return { width: body.clientWidth, height: body.clientHeight };
 }
 
 export function mountSandboxView(host: ViewHost, panel: SandboxPanelInfo, body: HTMLElement, inst: { spec: Record<string, unknown> }): { dispose(): void } {
+  if (host.links.size >= 50) {
+    const message = document.createElement('p');
+    message.textContent = 'This extension has reached its open panel limit.';
+    body.append(message);
+    return { dispose: () => message.remove() };
+  }
   const frame = document.createElement('iframe');
   frame.className = 'ext-panel-frame';
   frame.setAttribute('sandbox', 'allow-scripts');
@@ -67,7 +73,8 @@ export function mountSandboxView(host: ViewHost, panel: SandboxPanelInfo, body: 
     live = null;
     host.links.delete(link);
     try { link.rpc.notify('dispose'); } catch { /* already closed */ }
-    link.rpc.close();
+    // Let the queued disposal notification cross the port before closing it.
+    queueMicrotask(() => link.rpc.close());
     for (const registration of link.registrations.values()) registration.dispose();
     link.registrations.clear();
     host.disconnectRuntime(token);
@@ -83,26 +90,15 @@ export function mountSandboxView(host: ViewHost, panel: SandboxPanelInfo, body: 
     const link = { registrations: new Map<string, Disposable>() } as ViewLink;
     link.rpc = createRpc(toView.port1, {
       ...host.handlers(link),
-      /* Keys arrive only while the view has focus; anything else is not a
-         keystroke the user made in this panel. The event is re-dispatched on
-         the iframe element so every host listener (the chord matcher, menus'
-         Escape) sees it exactly as a keydown from inside the app. */
+      /* The kernel accepts only this extension's bindings. Port messages are
+         never converted into DOM keyboard events. */
       key(payload: SandboxKeyEvent) {
         if (frame.ownerDocument.activeElement !== frame || typeof payload?.key !== 'string') return;
-        const init: KeyboardEventInit = { key: payload.key, code: typeof payload.code === 'string' ? payload.code : '', bubbles: true, cancelable: true };
-        for (const flag of KEY_FLAGS) init[flag] = payload[flag] === true;
-        const event = new KeyboardEvent('keydown', init);
-        markForwardedKey(event, payload.field === true);
-        frame.dispatchEvent(event);
+        host.forwardKey(payload);
       },
       /* Outside-click dismissal for menus and popovers open in the app. */
       pointer(payload: { button?: unknown; x?: unknown; y?: unknown }) {
-        const rect = frame.getBoundingClientRect();
-        const number = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
-        frame.dispatchEvent(new PointerEvent('pointerdown', {
-          bubbles: true, cancelable: true, pointerType: 'mouse', isPrimary: true,
-          button: number(payload?.button), clientX: rect.left + number(payload?.x), clientY: rect.top + number(payload?.y)
-        }));
+        if (frame.ownerDocument.activeElement === frame && payload && payload.button === 0) host.outsideClick();
       },
       mounted() { frame.dataset.state = 'ready'; host.state?.(panel.id, 'ready'); },
       'view-error'(error: { message?: unknown }) {
@@ -111,7 +107,7 @@ export function mountSandboxView(host: ViewHost, panel: SandboxPanelInfo, body: 
         if (host.state) host.state(panel.id, 'error', message);
         else host.report(new Error(`Panel "${panel.id}": ${message}`));
       }
-    });
+    }, 10_000, { budget: host.budget, onSustainedLimit: () => host.report(new Error('Sandbox RPC rate exceeded 200 messages per second for 3 seconds')) });
     host.links.add(link);
     live = { link, token };
     host.connectRuntime(panel.id, token, brokered.port2);
@@ -130,6 +126,10 @@ export function mountSandboxView(host: ViewHost, panel: SandboxPanelInfo, body: 
     ? new ResizeObserver(() => { try { live?.link.rpc.notify('size', sizeOf(body)); } catch { /* closing */ } })
     : null;
   observer?.observe(body);
+  const removalObserver = typeof MutationObserver === 'function' ? new MutationObserver(() => {
+    if (!frame.isConnected) disconnect();
+  }) : null;
+  removalObserver?.observe(body, { childList: true });
   const src = host.src(panel.id);
   if (src) frame.src = src;
   body.append(frame);
@@ -137,6 +137,7 @@ export function mountSandboxView(host: ViewHost, panel: SandboxPanelInfo, body: 
   return {
     dispose() {
       observer?.disconnect();
+      removalObserver?.disconnect();
       frame.removeEventListener('load', connect);
       disconnect();
       frame.remove();

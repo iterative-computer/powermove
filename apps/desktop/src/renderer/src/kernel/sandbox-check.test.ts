@@ -50,16 +50,16 @@ it('reports a trusted-only member even when the fixture catches its error', asyn
 });
 
 it('reports a panel that throws while mounting', async () => {
-  const report = await harness(api => api.panels.register({ id: 'broken', title: 'Broken', build() { throw new Error('panel boom'); } }));
+  const report = await harness(api => api.panels.register({ id: 'check-fixture-broken', title: 'Broken', build() { throw new Error('panel boom'); } }));
   expect(report.activation).toBe('ok');
-  expect(report.panels).toEqual([{ id: 'broken', mounted: false, error: 'panel boom' }]);
+  expect(report.panels).toEqual([{ id: 'check-fixture-broken', mounted: false, error: 'panel boom' }]);
   expect(report.ok).toBe(false);
 });
 
 it('passes a clean fixture with a mounted panel', async () => {
-  const report = await harness(api => api.panels.register({ id: 'clean', title: 'Clean', build(body) { body.textContent = 'Ready'; } }));
+  const report = await harness(api => api.panels.register({ id: 'check-fixture-clean', title: 'Clean', build(body) { body.textContent = 'Ready'; } }));
   expect(report.activation).toBe('ok');
-  expect(report.panels).toEqual([{ id: 'clean', mounted: true }]);
+  expect(report.panels).toEqual([{ id: 'check-fixture-clean', mounted: true }]);
   expect(report.permissionErrors).toEqual([]);
   expect(report.ok).toBe(true);
 });

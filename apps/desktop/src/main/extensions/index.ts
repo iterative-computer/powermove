@@ -1,4 +1,4 @@
-import { realpath, readFile, stat } from 'node:fs/promises';
+import { realpath, readFile, lstat } from 'node:fs/promises';
 import path from 'node:path';
 import type { IpcMain, IpcMainEvent, IpcMainInvokeEvent } from 'electron';
 
@@ -189,17 +189,14 @@ export async function serveExtensionAsset(pathname: string): Promise<Response | 
 
   try {
     const root = await realpath(assetBuildDir);
-    const candidate = await realpath(path.join(root, match[1]!, 'bundle.js'));
-    const relative = path.relative(root, candidate);
-    if (
-      relative === '' ||
-      relative === '..' ||
-      relative.startsWith(`..${path.sep}`) ||
-      path.isAbsolute(relative)
-    ) {
-      return null;
-    }
-    const metadata = await stat(candidate);
+    const id = match[1];
+    if (!id) return null;
+    const directory = path.join(root, id);
+    if (!(await lstat(directory)).isDirectory()) return null;
+    const realDirectory = await realpath(directory);
+    if (realDirectory !== directory) return null;
+    const candidate = path.join(realDirectory, 'bundle.js');
+    const metadata = await lstat(candidate);
     if (!metadata.isFile()) return null;
     const contents = await readFile(candidate);
     return new Response(contents, {

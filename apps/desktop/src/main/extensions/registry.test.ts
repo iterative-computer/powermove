@@ -17,6 +17,8 @@ vi.mock('electron', () => ({
 import type { ExtensionManifest, ExtensionsChangedEvent } from '../../shared/extensions';
 import type { Store } from '../storage';
 import { createExtensionRegistry, type ExtensionRegistryOptions } from './registry';
+import { createProvenanceStore } from '../cloud/provenance';
+import { trustLevelFor } from '../cloud/trust';
 
 const temporaryDirectories: string[] = [];
 
@@ -106,6 +108,20 @@ async function harness(overrides: Partial<ExtensionRegistryOptions> = {}) {
 }
 
 describe('extension registry', () => {
+  it('uses serve-style provenance with no account to keep a full-access Store install off', async () => {
+    const setup = await harness();
+    const provenance = createProvenanceStore(setup.root);
+    await writeExtension(setup.userDir, 'third-party');
+    await fs.writeFile(path.join(setup.userDir, 'third-party', 'manifest.json'), JSON.stringify(manifest('third-party', { apiVersion: 3, permissions: ['full-access'] })));
+    await provenance.update('third-party', () => ({ localId: 'third-party', envKey: 'external', origin: {
+      repoId: 'external', releaseId: 'release', coordinate: 'other/third-party', version: '1.0.0', treeSha: 'tree', commitSha: 'commit', ownerPublisherId: 'someone-else'
+    } }));
+    const registry = createExtensionRegistry({ store: setup.store, userDir: setup.userDir, buildDir: setup.buildDir,
+      builtinIds: [], resourcesDir: setup.resourcesDir, compile: setup.compile,
+      trustFor: async (id, scope) => trustLevelFor({ scope }, scope === 'user' ? await provenance.get(id) : null, null) });
+    await registry.refresh();
+    expect(registry.list()[0]).toMatchObject({ trust: 'store', bundleUrl: null, health: { state: 'needs-trust' } });
+  });
   it('loads enabled intent, persists toggles, and emits one change event', async () => {
     const store = memoryStore({ extensions: { 'sample-ext': false, malformed: 'no' } });
     const setup = await harness({ store });

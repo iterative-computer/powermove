@@ -1,11 +1,13 @@
 import type { ExtensionRecord } from '../../../shared/extensions';
-import { createRpc, rpcTransfers, type Rpc } from '../../../shared/sandbox-rpc';
+import { createRpc, createRpcBudget, rpcTransfers, type Rpc } from '../../../shared/sandbox-rpc';
 import { panelInfo, type SandboxInit, type SandboxKey, type SandboxMirror, type SandboxViewInit } from '../../sandbox/shim-api';
 import type { Disposable } from './api';
 import { createExtensionAPI, type ExtensionHandle, type HostDeps } from './host';
 import type { Kernel } from './registries';
 import { themeScheme, themeTokens } from './theme-apply';
 import { mountSandboxView, type ViewHost, type ViewLink } from './sandbox-view';
+import { chordOfEvent } from './keychord';
+import { menuEntriesSchema, paletteEntriesSchema, parseHostEvent, parseInvoke, parseRegistration } from './sandbox-schemas';
 
 const MIRROR_EVENTS = new Set(['project:changed', 'selection', 'time', 'transport']);
 export interface SandboxRuntime { handle: ExtensionHandle; dispose(): void }
@@ -16,22 +18,58 @@ const SAFE_INVOKE: Record<string, Set<string>> = {
   panels: new Set(['open', 'close', 'refresh']), keybindings: new Set(['unbind']),
   theme: new Set(['activate', 'setScheme']), palette: new Set(['open']),
   media: new Set(['getImportDefaults']), events: new Set(['emit']),
-  extensions: new Set(['setEnabled', 'remove', 'reload', 'reveal'])
+  extensions: new Set(['setUp'])
 };
-function plain(value: unknown, seen = new WeakMap<object, unknown>()): unknown {
-  if (value === null || typeof value !== 'object') return typeof value === 'function' ? undefined : value;
+const HOST_EVENTS = new Set(['project:changed', 'selection', 'time', 'transport', 'theme', 'extensions:changed']);
+const ownId = (extension: string, id: string): boolean => id.startsWith(`${extension}.`) || id.startsWith(`${extension}-`);
+function denied(message: string, code = 'permission_denied'): never {
+  const error = new Error(message) as Error & { code: string };
+  error.name = 'PermissionError'; error.code = code; throw error;
+}
+type PlainMode = 'project' | 'asset-map' | 'asset' | 'secrets';
+const MIRROR_LIMIT = 8 * 1024 * 1024;
+class MirrorTooLargeError extends Error {}
+function chargeMirror(budget: { bytes: number } | undefined, value: string): void {
+  if (!budget) return;
+  if (value.length > MIRROR_LIMIT - budget.bytes) throw new MirrorTooLargeError();
+  budget.bytes += new TextEncoder().encode(value).byteLength;
+  if (budget.bytes > MIRROR_LIMIT) throw new MirrorTooLargeError();
+}
+function plain(value: unknown, seen = new WeakMap<object, unknown>(), mode?: PlainMode, budget?: { bytes: number }): unknown {
+  if (value === null || typeof value !== 'object') {
+    if (typeof value === 'string') chargeMirror(budget, value);
+    return typeof value === 'function' ? undefined : value;
+  }
   if (seen.has(value)) return seen.get(value);
   if (value instanceof Date) return value.toISOString();
-  if (value instanceof Map) { const entries = [...value].map(([key, item]) => [plain(key, seen), plain(item, seen)]); return entries; }
-  if (value instanceof Set) return [...value].map(item => plain(item, seen));
-  const target: any = Array.isArray(value) ? [] : {};
+  if (value instanceof Map) { const entries = [...value].map(([key, item]) => [plain(key, seen, mode, budget), plain(item, seen, mode, budget)]); return entries; }
+  if (value instanceof Set) return [...value].map(item => plain(item, seen, mode, budget));
+  const target: Record<string, unknown> | unknown[] = Array.isArray(value) ? [] : {};
   seen.set(value, target);
-  for (const [key, item] of Object.entries(value)) if (typeof item !== 'function') target[key] = plain(item, seen);
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item === 'function' || mode === 'asset' && /blob|source/i.test(key) || mode === 'secrets' && /token|secret|password|key$/i.test(key)) continue;
+    chargeMirror(budget, key);
+    const nextMode = mode === 'project' ? key === 'assets' ? 'asset-map' : key === 'library' || key === 'notes' ? 'secrets' : undefined
+      : mode === 'asset-map' ? 'asset' : mode;
+    (target as Record<string, unknown>)[key] = plain(item, seen, nextMode, budget);
+  }
   return target;
 }
 export function projectMirror(api: ExtensionHandle['api']): SandboxMirror {
   const start = performance.now();
-  const mirror = { project: plain(api.project.get()), revision: api.project.revision(), selection: plain(api.project.selection()), time: api.project.time(), playing: api.project.playing() } as SandboxMirror;
+  const revision = api.project.revision();
+  let project: unknown;
+  const budget = { bytes: 0 };
+  try { project = plain(api.project.get(), new WeakMap(), 'project', budget); }
+  catch (error) { if (!(error instanceof MirrorTooLargeError)) throw error; project = { tooLarge: true, revision }; }
+  let selection: unknown;
+  try { selection = plain(api.project.selection(), new WeakMap(), undefined, budget); }
+  catch (error) { if (!(error instanceof MirrorTooLargeError)) throw error; selection = null; project = { tooLarge: true, revision }; }
+  const mirror: SandboxMirror = { project, revision, selection, time: api.project.time(), playing: api.project.playing() };
+  if (new TextEncoder().encode(JSON.stringify(mirror)).byteLength > MIRROR_LIMIT) {
+    mirror.project = { tooLarge: true, revision };
+    if (new TextEncoder().encode(JSON.stringify(mirror)).byteLength > MIRROR_LIMIT) mirror.selection = null;
+  }
   if (import.meta.env.DEV && performance.now() - start > 4 && Date.now() - lastCloneLog > 1000) {
     lastCloneLog = Date.now(); console.debug(`[sandbox] mirror clone: ${(performance.now() - start).toFixed(1)} ms`);
   }
@@ -61,10 +99,11 @@ function viewTheme(kernel: Kernel): SandboxInit['theme'] {
   const attribute = root.dataset.theme;
   return { scheme: attribute === 'dark' || attribute === 'light' ? attribute : base.scheme, tokens };
 }
-function keyTable(kernel: Kernel): SandboxKey[] {
-  return kernel.listBindings().map(({ chord, inFields, repeat, looseModifiers }) => ({ chord, inFields, repeat, looseModifiers: looseModifiers === true }));
+function keyTable(kernel: Kernel, id: string): SandboxKey[] {
+  return kernel.listBindings().filter(binding => binding.ownerId === id && ownId(id, binding.command) && kernel.commands.topEntry(binding.command)?.ownerId === id)
+    .map(({ chord, inFields, repeat, looseModifiers }) => ({ chord, inFields, repeat, looseModifiers: looseModifiers === true }));
 }
-function sandboxTheme(value: Record<string, any>): Record<string, any> {
+function sandboxTheme(value: Record<string, unknown>): Record<string, unknown> {
   if (value.css) {
     const css = String(value.css);
     const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)];
@@ -104,59 +143,115 @@ export interface SandboxRuntimeOptions {
 /** Starts a store extension behind an opaque-origin script-only iframe. */
 export async function createSandboxRuntime(kernel: Kernel, record: ExtensionRecord, deps: HostDeps, vars: Record<string, string> = {}, test?: SandboxRuntimeOptions): Promise<SandboxRuntime> {
   const observer = test?.observer;
+  const manifest = record.manifest;
+  if (!manifest) throw new Error('Sandbox manifest missing');
   const host = createExtensionAPI(test?.registry ?? kernel, record, deps, vars);
   const frame = test?.frame ?? document.createElement('iframe');
   frame.hidden = true;
   frame.setAttribute('sandbox', 'allow-scripts');
   frame.setAttribute('aria-hidden', 'true');
   const base = location.protocol === 'app:' ? 'app://powermove' : location.origin;
-  const perms = (record.manifest?.permissions ?? []).join(',');
+  const perms = (manifest.permissions ?? []).join(',');
   if (!test?.frame) frame.src = `${base}/host/ext-sandbox.html?id=${encodeURIComponent(record.id)}&perms=${encodeURIComponent(perms)}`;
   const registrations = new Map<string, Disposable>();
+  let registrationCount = 0;
   const channel = new MessageChannel();
-  let activated!: () => void;
-  let rejected!: (error: Error) => void;
+  const budget = createRpcBudget();
+  let activated: () => void = () => {};
+  let rejected: (error: Error) => void = () => {};
   const ready = new Promise<void>((resolve, reject) => { activated = resolve; rejected = reject; });
   void ready.catch(() => {}); // a load failure can settle before activation is awaited
-  const permissions = record.manifest?.permissions ?? [];
+  const permissions = manifest.permissions ?? [];
   const violations = new Set<string>();
-  const invoke = (namespace: string, method: string, args: unknown[]): unknown => {
+  const persistedStorage = (deps.pm as { store?: { get?: (key: string, fallback: unknown) => unknown } }).store?.get?.(`ext.${record.id}`, {});
+  const storageValues = new Map<string, unknown>(persistedStorage && typeof persistedStorage === 'object' && !Array.isArray(persistedStorage)
+    ? Object.entries(persistedStorage) : []);
+  const invoke = (namespace: string, method: string, args: unknown): unknown => {
     if (!SAFE_INVOKE[namespace]?.has(method)) throw new Error(`Sandbox method unavailable: ${namespace}.${method}`);
-    if (namespace === 'project' && method === 'apply' && !permissions.includes('project:write')) {
-      const error = new Error('project.apply requires project:write permission'); error.name = 'PermissionError'; throw error;
-    }
+    const parsed = parseInvoke(namespace, method, args);
+    if (!permissions.includes('project:write') && (
+      namespace === 'project' && method !== 'snapshot' || namespace === 'transport' ||
+      namespace === 'commands' && !ownId(record.id, String(parsed[0]))))
+      denied(`${namespace}.${method} requires project:write permission; commands.run may call only your own registered commands without it`, 'project:write');
+    if (namespace === 'commands' && ownId(record.id, String(parsed[0])) && kernel.commands.topEntry(String(parsed[0]))?.ownerId !== record.id)
+      denied('commands.run may call only your own registered commands', 'permission_denied');
+    if (namespace === 'extensions' && parsed[0] !== record.id) denied('extensions.setUp accepts only the calling extension id');
+    if (namespace === 'events' && !String(parsed[0]).startsWith(`${record.id}:`)) denied('events.emit requires your own namespace');
+    if (namespace === 'keybindings' && parsed[1] === true) denied('keybindings.unbind cannot affect other owners');
+    if (namespace === 'theme' && method === 'activate' && !ownId(record.id, String(parsed[0]))) denied('theme.activate accepts only your themes');
     if (namespace === 'assets' && method !== 'get' && !permissions.includes('assets')) {
       const error = new Error(`assets.${method} requires assets permission`); error.name = 'PermissionError'; throw error;
     }
-    const receiver = (host.api as unknown as Record<string, Record<string, (...a: any[]) => unknown>>)[namespace];
-    return receiver?.[method]?.(...(Array.isArray(args) ? args : []));
+    if (namespace === 'storage') {
+      const key = String(parsed[0]);
+      if (key.length > 128) denied('storage key exceeds 128 characters', 'resource_limit');
+      if (method === 'set') {
+        const next = new Map(storageValues); next.set(key, parsed[1]);
+        if (new TextEncoder().encode(JSON.stringify(Object.fromEntries(next))).byteLength > 256 * 1024) denied('storage exceeds 256 KiB', 'resource_limit');
+        storageValues.set(key, parsed[1]);
+      }
+      if (method === 'delete') storageValues.delete(key);
+    }
+    const receiver = (host.api as unknown as Record<string, Record<string, (...a: unknown[]) => unknown>>)[namespace];
+    return receiver?.[method]?.(...parsed);
   };
   /* Handlers every extension document gets: the runtime iframe and each
      panel view. Only the runtime may register contributions; a view may only
      subscribe to events (see shim-api.ts, view mode). */
+  let logWindow = 0, logCount = 0;
   const shared = (link: { rpc: Rpc; registrations: Map<string, Disposable> }, runtime: boolean): Record<string, (...args: any[]) => unknown> => ({
-    register(kind: string, token: string, value: Record<string, any>) {
+    register(kind: string, token: string, input: unknown) {
       const { registrations } = link;
+      if (typeof token !== 'string' || !token || token.length > 128) denied('Invalid sandbox registration token', 'resource_limit');
       if (registrations.has(token)) throw new Error('Duplicate sandbox registration');
       if (!runtime && kind !== 'events') throw new Error(`Panel views cannot register ${kind}`);
+      if (registrationCount >= 200) denied('Sandbox registration limit is 200', 'resource_limit');
+      const value = parseRegistration(kind, input);
+      const id = value.id;
+      if (typeof id === 'string') {
+        if (!ownId(record.id, id)) denied(`Registration id must start with ${record.id}. or ${record.id}-`, 'id_collision');
+        const registry = ({ commands: kernel.commands, effects: kernel.effects, transitions: kernel.transitions,
+          layers: kernel.layerTypes, theme: kernel.themes, status: kernel.status, panels: kernel.panels } as Record<string, { topEntry(id: string): { ownerId: string } | undefined }>)[kind];
+        const owner = registry?.topEntry(id)?.ownerId;
+        if (owner && owner !== record.id) denied(`Registration id ${id} belongs to ${owner}`, 'id_collision');
+      }
+      if (kind === 'keybindings' && (!ownId(record.id, String(value.command)) || kernel.commands.topEntry(String(value.command))?.ownerId !== record.id))
+        denied('Keybindings may reference only your registered commands', 'permission_denied');
+      if (kind === 'events' && !String(value.event).startsWith(`${record.id}:`) && !HOST_EVENTS.has(String(value.event)))
+        denied('Event subscriptions require your namespace or a read-only host event');
       const rpc = link.rpc;
       let item: Disposable;
       switch (kind) {
-        case 'effects': item = host.api.effects.register(value as any); break;
-        case 'transitions': item = host.api.transitions.register(value as any); break;
-        case 'layers': item = host.api.layers.register(value as any); break;
-        case 'theme': item = host.api.theme.register(sandboxTheme(value) as any); break;
-        case 'keybindings': item = host.api.keybindings.bind(value as any); break;
-        case 'media-defaults': item = host.api.media.registerImportDefaults(value as any); break;
-        case 'commands': item = host.api.commands.register({ ...value, run: (...args: unknown[]) => rpc.invokeHandle(value.run, ...args), ...(value.when ? { when: cached(rpc, value.when, true) } : {}) } as any); break;
-        case 'status': item = host.api.status.register({ ...value, text: cached(rpc, value.text, null), ...(value.onClick ? { onClick: () => void rpc.invokeHandle(value.onClick) } : {}) } as any); break;
-        case 'palette': item = host.api.palette.registerProvider(cached(rpc, value.provider, [], result => (result as Array<Record<string, any>>).map(entry => ({ ...entry, run: () => rpc.invokeHandle(entry.run) }))) as any); break;
-        case 'menus': item = host.api.menus.contribute(value.location, cached(rpc, value.items, [], result => (result as Array<string | Record<string, any>>).map(entry => typeof entry === 'string' || !entry.run ? entry : { ...entry, run: () => rpc.invokeHandle(entry.run) })) as any); break;
+        case 'effects': item = host.api.effects.register(value as unknown as Parameters<typeof host.api.effects.register>[0]); break;
+        case 'transitions': item = host.api.transitions.register(value as unknown as Parameters<typeof host.api.transitions.register>[0]); break;
+        case 'layers': item = host.api.layers.register(value as unknown as Parameters<typeof host.api.layers.register>[0]); break;
+        case 'theme': item = host.api.theme.register(sandboxTheme(value) as unknown as Parameters<typeof host.api.theme.register>[0]); break;
+        case 'keybindings': item = host.api.keybindings.bind(value as unknown as Parameters<typeof host.api.keybindings.bind>[0]); break;
+        case 'media-defaults': item = host.api.media.registerImportDefaults(value as unknown as Parameters<typeof host.api.media.registerImportDefaults>[0]); break;
+        case 'commands': item = host.api.commands.register({ ...value, id: String(value.id), label: String(value.label), run: (...args: unknown[]) => rpc.invokeHandle(Number(value.run), ...args), ...(value.when ? { when: cached(rpc, Number(value.when), true) } : {}) }); break;
+        case 'status': item = host.api.status.register({ ...value, id: String(value.id), text: cached(rpc, Number(value.text), null), ...(value.onClick ? { onClick: () => void rpc.invokeHandle(Number(value.onClick)) } : {}) }); break;
+        case 'palette': item = host.api.palette.registerProvider(cached(rpc, Number(value.provider), [], result => paletteEntriesSchema.parse(result).map(entry => {
+          if (!ownId(record.id, entry.id) || kernel.commands.topEntry(entry.id)?.ownerId && kernel.commands.topEntry(entry.id)?.ownerId !== record.id) denied('Palette entry id collides with another owner', 'id_collision');
+          return { ...entry, run: () => rpc.invokeHandle(entry.run) };
+        }))); break;
+        case 'menus': item = host.api.menus.contribute(value.location as Parameters<typeof host.api.menus.contribute>[0], cached(rpc, Number(value.items), [], result => menuEntriesSchema.parse(result).map(entry => {
+          if (typeof entry === 'string' || !('run' in entry) || !entry.run) return entry;
+          const run = entry.run;
+          return { ...entry, run: () => rpc.invokeHandle(run) };
+        })) as Parameters<typeof host.api.menus.contribute>[1]); break;
         case 'events': {
           /* A mirror event reaches the sandbox after the mirror it describes:
              flush a pending mirror push first (same port, so ordered). */
-          const mirrored = MIRROR_EVENTS.has(value.event);
-          item = host.api.events.on(value.event, ((payload: unknown) => { if (mirrored) flushMirror(); void rpc.invokeHandle(value.fn, plain(payload)).catch(() => {}); }) as any);
+          const event = String(value.event);
+          const mirrored = MIRROR_EVENTS.has(event);
+          const sourceEvent = event === 'theme' ? 'theme:changed' : event;
+          item = host.api.events.on(sourceEvent as Parameters<typeof host.api.events.on>[0], (payload: unknown) => {
+            let forwarded: unknown;
+            try { forwarded = event.startsWith(`${record.id}:`) ? payload : parseHostEvent(event, payload); }
+            catch { return; }
+            if (mirrored) flushMirror();
+            void rpc.invokeHandle(Number(value.fn), plain(forwarded)).catch(() => {});
+          });
           break;
         }
         case 'panels': {
@@ -166,12 +261,14 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
         }
         default: throw new Error(`Unknown sandbox registration: ${kind}`);
       }
-      registrations.set(token, item);
+      registrationCount += 1;
+      let released = false;
+      registrations.set(token, { dispose() { if (released) return; released = true; registrationCount -= 1; item.dispose(); } });
     },
     'dispose-registration'(token: string) { link.registrations.get(token)?.dispose(); link.registrations.delete(token); },
     invoke,
     'extensions-list'() { return host.api.extensions.list().map(({ dir: _dir, ...rest }) => rest); },
-    log(level: 'info' | 'warn' | 'error', message: string, data: unknown[]) { host.api.log(level, message, ...(Array.isArray(data) ? data : [])); },
+    log(level: unknown, message: unknown, data: unknown) { const now = Date.now(); if (now - logWindow >= 1000) { logWindow = now; logCount = 0; } if (++logCount > 50) return; if (level === 'info' || level === 'warn' || level === 'error') host.api.log(level, String(message).slice(0, 4096), ...(Array.isArray(data) ? data : [])); },
     'runtime-error': (error: { message: string }) => deps.reportRuntimeError(record.id, new Error(error?.message)),
     /* Each open panel replays activate in its own document, so one blocked
        request can surface once per document. Count it once per extension
@@ -203,18 +300,18 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
     ...shared(runtimeLink, true),
     activated: () => activated(),
     'activation-error': (error: { message: string }) => rejected(new Error(error.message))
-  });
+  }, 10_000, { budget, onSustainedLimit: () => deps.reportRuntimeError(record.id, new Error('Sandbox RPC rate exceeded 200 messages per second for 3 seconds')) });
   runtimeLink.rpc = rpc;
   const snapshot = (): SandboxInit => ({
-    id: record.id, apiVersion: record.manifest?.apiVersion ?? 1, manifest: record.manifest!, vars,
+    id: record.id, apiVersion: manifest.apiVersion ?? 1, manifest, vars,
     theme: themeSnapshot(kernel), activeTheme: kernel.theme.activeId,
     project: projectMirror(host.api), bundleUrl: record.bundleUrl ?? `${base}/ext/${encodeURIComponent(record.id)}/bundle.js`,
     catalog: {
-      effects: plain(kernel.effects.list()) as Array<Record<string, any>>,
-      transitions: plain(kernel.transitions.list()) as Array<Record<string, any>>,
-      layers: plain(kernel.layerTypes.list()) as Array<Record<string, any>>,
-      theme: plain(kernel.themes.list()) as Array<Record<string, any>>,
-      keybindings: plain(kernel.listBindings()) as Array<Record<string, any>>,
+      effects: plain(kernel.effects.list()) as Array<Record<string, unknown>>,
+      transitions: plain(kernel.transitions.list()) as Array<Record<string, unknown>>,
+      layers: plain(kernel.layerTypes.list()) as Array<Record<string, unknown>>,
+      theme: plain(kernel.themes.list()) as Array<Record<string, unknown>>,
+      keybindings: plain(kernel.listBindings()) as Array<Record<string, unknown>>,
       commands: kernel.commands.list().map(({ run: _run, when: _when, ...entry }) => entry),
       panels: kernel.panels.list().map(({ id, title, icon }) => ({ id, title, icon })),
       status: kernel.status.list().map(({ id, title, side }) => ({ id, title, side }))
@@ -228,7 +325,22 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
     src: panelId => test?.onViewInit ? null : `${base}/host/ext-sandbox.html?id=${encodeURIComponent(record.id)}&view=${encodeURIComponent(panelId)}&perms=${encodeURIComponent(perms)}`,
     snapshot,
     theme: () => viewTheme(kernel),
-    keys: () => keyTable(kernel),
+    keys: () => keyTable(kernel, record.id),
+    budget,
+    forwardKey: payload => {
+      const chord = chordOfEvent(payload);
+      if (!chord) return;
+      if (chord === 'escape') { (deps.pm as { closeMenus?: () => void }).closeMenus?.(); return; }
+      if (chord === 'tab' || chord === 'shift+tab') return;
+      for (const binding of kernel.bindingsFor(chord)) {
+        if (binding.ownerId !== record.id || !ownId(record.id, binding.command) || kernel.commands.topEntry(binding.command)?.ownerId !== record.id) continue;
+        if (payload.field && !binding.inFields || payload.repeat && !binding.repeat) continue;
+        void Promise.resolve(host.api.commands.run(binding.command, ...(binding.args ?? [])))
+          .catch(error => deps.reportRuntimeError(record.id, error));
+        break;
+      }
+    },
+    outsideClick: () => (deps.pm as { closeMenus?: () => void }).closeMenus?.(),
     links,
     connectRuntime: (panelId, token, port) => rpc.notify('mountPanel', panelId, token, port, rpcTransfers(port)),
     disconnectRuntime: token => { try { rpc.notify('unmountPanel', token); } catch { /* runtime already gone */ } },
@@ -241,7 +353,7 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
   let keysQueued = false;
   const keysOff = kernel.keybindings.onChange(() => {
     if (keysQueued || !links.size) return; keysQueued = true;
-    queueMicrotask(() => { keysQueued = false; broadcast('keys', keyTable(kernel)); });
+    queueMicrotask(() => { keysQueued = false; broadcast('keys', keyTable(kernel, record.id)); });
   });
   let themeQueued = false;
   const themeWatch = typeof MutationObserver === 'function' ? new MutationObserver(() => {
@@ -275,7 +387,7 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
     if (scheduled) return; scheduled = true;
     requestAnimationFrame(() => { scheduled = false; flushMirror(); });
   };
-  for (const event of MIRROR_EVENTS) host.api.events.on(event as 'project:changed', push as any);
+  for (const event of MIRROR_EVENTS) host.api.events.on(event as 'project:changed', push);
   host.api.events.on('theme:changed', () => { try { rpc.notify('theme', themeSnapshot(kernel)); } catch { /* disposed */ } });
   try {
     host.setActivating(true);
