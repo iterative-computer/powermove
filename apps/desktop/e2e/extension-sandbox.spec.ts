@@ -13,7 +13,7 @@ test('store code runs in an opaque iframe and network permission controls fetch'
   await cp(fixture, denied, { recursive: true });
   const manifest = JSON.parse(await readFile(path.join(denied, 'manifest.json'), 'utf8'));
   manifest.id = 'sandbox-no-network';
-  manifest.permissions = ['project:write'];
+  manifest.permissions = [];
   await writeFile(path.join(denied, 'manifest.json'), JSON.stringify(manifest));
   await writeFile(path.join(session.userData, 'extensions-provenance.json'), JSON.stringify({
     'sandboxed-ext': { localId: 'sandboxed-ext', envKey: 'external-repo', origin },
@@ -22,7 +22,7 @@ test('store code runs in an opaque iframe and network permission controls fetch'
   await session.relaunch();
   await session.openEditor();
   const { page } = session;
-  await page.waitForFunction(() => (window as any).PM?.Kernel?.effects?.has('sandbox-tint'));
+  await page.waitForFunction(() => (window as any).PM?.Kernel?.effects?.has('sandboxed-ext-tint'));
   await page.waitForFunction(() => document.querySelectorAll('iframe[src*="/host/ext-sandbox.html"]').length === 2);
   // Sandboxed frames are out-of-process opaque origins; Playwright's Electron
   // driver cannot evaluate inside them, so each fixture publishes its own proof
@@ -35,16 +35,16 @@ test('store code runs in an opaque iframe and network permission controls fetch'
   }
   await page.waitForFunction(() => {
     const list = (window as any).PM?.Kernel?.effects?.list?.() ?? [];
-    return list.filter((e: any) => String(e.id).startsWith('sandbox-proof-')).length === 2;
+    return list.filter((e: any) => String(e.id).endsWith('-proof')).length === 2;
   }, undefined, { timeout: 15_000 });
   const checks = await page.evaluate(() => {
     const list = (window as any).PM?.Kernel?.effects?.list?.() ?? [];
-    return list.filter((e: any) => String(e.id).startsWith('sandbox-proof-'))
-      .map((e: any) => ({ id: String(e.id).slice('sandbox-proof-'.length), ...JSON.parse(e.label) }));
+    return list.filter((e: any) => String(e.id).endsWith('-proof'))
+      .map((e: any) => ({ id: String(e.id).slice(0, -'-proof'.length), ...JSON.parse(e.label) }));
   });
   console.log('SANDBOX PROOF', JSON.stringify(checks));
-  expect(checks).toContainEqual({ id: 'sandboxed-ext', powermove: false, parentDenied: true, cspBlocked: false });
-  expect(checks).toContainEqual({ id: 'sandbox-no-network', powermove: false, parentDenied: true, cspBlocked: true });
+  expect(checks).toContainEqual({ id: 'sandboxed-ext', powermove: false, parentDenied: true, cspBlocked: false, deleteRefused: false });
+  expect(checks).toContainEqual({ id: 'sandbox-no-network', powermove: false, parentDenied: true, cspBlocked: true, deleteRefused: true });
 });
 
 test('a store extension’s Svelte panel renders in its own view iframe with host chrome and keys', async ({ session }, testInfo) => {
@@ -87,26 +87,21 @@ test('a store extension’s Svelte panel renders in its own view iframe with hos
   expect(await frame.getAttribute('data-loads')).toBe(loads);
   await expect(frame).toHaveAttribute('data-state', 'ready');
 
-  // Keys typed inside the view still reach the app's bindings; a text field keeps its own.
-  await page.evaluate(() => {
-    const PM = (window as any).PM;
-    (window as any).__sandboxKeys = [];
-    PM.Kernel.commands.register('e2e', { id: 'e2e.sandbox-key', label: 'Sandbox key probe', run: (...args: unknown[]) => { (window as any).__sandboxKeys.push(String(args[0])); } });
-    PM.Kernel.bind('e2e', { key: 'cmd+shift+9', command: 'e2e.sandbox-key', args: ['chord'] });
-    PM.Kernel.bind('e2e', { key: 'g', command: 'e2e.sandbox-key', args: ['bare'] });
-  });
+  // Only the extension's own bindings cross from its view; a field keeps its own keys.
+  const keyProofCount = () => page.evaluate(() => ((window as any).PM?.Kernel?.effects?.list?.() ?? [])
+    .filter((effect: { id: string }) => effect.id.startsWith('sandboxed-ext-key-')).length);
   const box = (await frame.boundingBox())!;
   await page.mouse.click(box.x + box.width / 2, box.y + box.height - 8); // empty panel area
   await expect.poll(() => page.evaluate(() => document.activeElement?.className)).toBe('ext-panel-frame');
   await page.keyboard.press('Meta+Shift+9');
   await page.keyboard.press('g');
-  await expect.poll(() => page.evaluate(() => (window as any).__sandboxKeys)).toEqual(['chord', 'bare']);
+  await expect.poll(keyProofCount).toBe(2);
   // Click the Note field (third row of the fixture) and type: `g` stays in the field.
   await page.mouse.click(box.x + 40, box.y + 12 + 26 * 2 + 12 + 14);
   await page.keyboard.press('g');
   await page.keyboard.press('Meta+Shift+9');
   await page.waitForTimeout(200);
-  expect(await page.evaluate(() => (window as any).__sandboxKeys)).toEqual(['chord', 'bare']);
+  expect(await keyProofCount()).toBe(2);
   await page.keyboard.press('Escape');
 
   for (const scheme of ['dark', 'light'] as const) {

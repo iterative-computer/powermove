@@ -6,6 +6,7 @@ import path from 'node:path';
 import { bootRuntime, bootView, installSandboxRuntime, type SandboxView } from '../../sandbox/boot';
 import type { SandboxViewInit } from '../../sandbox/shim-api';
 import { createSandboxRuntime, type SandboxRuntime } from './sandbox-host';
+import { mountSandboxView, type ViewHost, type ViewLink } from './sandbox-view';
 import { createKernel, type Kernel } from './registries';
 import { panelFrameOf } from './panel-frame';
 import { ensurePanel } from '../layout/panel';
@@ -35,7 +36,7 @@ async function until(check: () => boolean, label: string): Promise<void> {
 
 interface Harness {
   kernel: Kernel; runtime: SandboxRuntime; panelId: string;
-  views: Array<{ frame: HTMLIFrameElement; message: SandboxViewInit; target: HTMLElement; view: Promise<SandboxView> }>;
+  views: Array<{ frame: HTMLIFrameElement; message: SandboxViewInit; target: HTMLElement; port: MessagePort; view: Promise<SandboxView> }>;
   pm: Record<string, any>;
 }
 
@@ -61,7 +62,7 @@ async function start(): Promise<Harness> {
       const target = document.createElement('div');
       target.dataset.viewDocument = message.panelId;
       document.body.append(target);
-      views.push({ frame, message, target, view: bootView(message, ports[0]!, ports[1]!, { load, target }) });
+      views.push({ frame, message, target, port: ports[0]!, view: bootView(message, ports[0]!, ports[1]!, { load, target }) });
     }
   });
   runtimeFrame.dispatchEvent(new Event('load'));
@@ -108,7 +109,7 @@ it('docks a sandboxed Svelte panel as a frame panel with host chrome, refreshes 
   expect(first.target.textContent).toContain('Project revision');
   expect(first.target.querySelector('b')?.textContent).toBe('7');
   // Its registrations stayed local: the kernel still has exactly one owner per contribution.
-  expect(h.kernel.commands.list().filter(command => command.id === 'sandbox-command')).toHaveLength(1);
+  expect(h.kernel.commands.list().filter(command => command.id === 'sandboxed-ext-command')).toHaveLength(1);
 
   // Panel UI reaches the runtime's command through the kernel.
   (first.target.querySelector('button') as HTMLButtonElement).click();
@@ -117,6 +118,8 @@ it('docks a sandboxed Svelte panel as a frame panel with host chrome, refreshes 
   // Refresh: the layout clears the body and rebuilds; a new iframe replaces the old view.
   const inst = h.pm.panelInst[h.panelId];
   inst.body.textContent = '';
+  // The test's detached view document has no browser unload event.
+  (await first.view).dispose();
   inst.def.build(inst.body, inst);
   const second = inst.body.querySelector('iframe') as HTMLIFrameElement;
   expect(second).not.toBe(frame);
@@ -128,66 +131,46 @@ it('docks a sandboxed Svelte panel as a frame panel with host chrome, refreshes 
 
   // Deactivation releases the panel, the iframe, and the view's port.
   h.runtime.dispose();
+  (await h.views[1]!.view).dispose();
   expect(h.kernel.panels.has(h.panelId)).toBe(false);
   expect(second.isConnected).toBe(false);
   await until(() => h.views[1]!.target.childElementCount === 0, 'view released on dispose');
 });
 
-it('forwards keydowns from a focused view to the host chord matcher with the frame’s field report', async () => {
+it('ignores forged host shortcuts and dispatches only the extension’s own binding', async () => {
   const h = await start();
-  const runs: string[] = [];
+  const calls: string[] = [];
   const { element, frame } = await openPanel(h);
-  // The host listener sits on the panel so this test's view (same realm) cannot reach it directly.
-  cleanup.push(() => listener.dispose());
-  const listener = h.kernel.installKeyListener(command => { runs.push(command); return undefined; }, element);
-  // Forwarded events stop at the panel, as they would at the app's own window.
-  element.addEventListener('keydown', event => event.stopPropagation());
-  h.kernel.bind('app', { key: 'cmd+k', command: 'palette' });
-  h.kernel.bind('app', { key: 'cmd+s', command: 'save', inFields: true });
-  h.kernel.bind('app', { key: 'space', command: 'play' });
-  const view = h.views[0]!;
+  await tick(30); // allow a queued iframe load to replace an earlier port
+  const view = h.views.at(-1)!;
   await view.view;
   await until(() => frame.dataset.state === 'ready', 'view mounted');
+  h.kernel.commands.register('app', { id: 'save-as', label: 'Save As', run: () => calls.push('save') });
+  h.kernel.bind('app', { key: 'cmd+shift+s', command: 'save-as' });
+  h.kernel.commands.register('sandboxed-ext', { id: 'sandboxed-ext-own', label: 'Own', run: () => calls.push('own') });
+  h.kernel.bind('sandboxed-ext', { key: 'h', command: 'sandboxed-ext-own' });
   frame.tabIndex = 0;
   frame.focus();
   expect(document.activeElement).toBe(frame);
-  await tick(); // the binding table reached the view
+  const send = (key: string, metaKey = false, shiftKey = false, field = false) => view.port.postMessage({
+    t: 'notify', m: 'key', a: [{ key, code: '', metaKey, ctrlKey: false, altKey: false, shiftKey, repeat: false, field }]
+  });
+  send('s', true, true);
+  send('h', false, false, true);
+  await tick(30);
+  expect(calls).toEqual([]);
+  send('h');
+  await until(() => calls.length === 1, 'own chord');
+  expect(calls).toEqual(['own']);
+  expect(element.querySelector('iframe')).toBe(frame);
+});
 
-  const press = (target: EventTarget, init: KeyboardEventInit) => {
-    const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init });
-    target.dispatchEvent(event);
-    return event;
-  };
-  const button = view.target.querySelector('button')!;
-  const input = view.target.querySelector('input')!;
-
-  expect(press(button, { key: 'k', metaKey: true }).defaultPrevented).toBe(true);
-  expect(press(button, { key: ' ', code: 'Space' }).defaultPrevented).toBe(true);
-  await until(() => runs.length === 2, 'forwarded chords');
-  expect(runs).toEqual(['palette', 'play']);
-
-  // In a text field only field-aware bindings travel, and the field keeps its default.
-  expect(press(input, { key: ' ', code: 'Space' }).defaultPrevented).toBe(false);
-  expect(press(input, { key: 'k', metaKey: true }).defaultPrevented).toBe(false);
-  expect(press(input, { key: 's', metaKey: true }).defaultPrevented).toBe(false);
-  await until(() => runs.length === 3, 'field-aware chord');
-  expect(runs).toEqual(['palette', 'play', 'save']);
-
-  // Unbound keys stay in the panel; a key the panel handled itself is not forwarded.
-  press(button, { key: 'j' });
-  button.addEventListener('keydown', event => event.preventDefault(), { once: true });
-  press(button, { key: 'k', metaKey: true });
-  // Without focus the host ignores anything the frame claims.
-  frame.blur();
-  press(button, { key: 'k', metaKey: true });
-  await tick(50);
-  expect(runs).toEqual(['palette', 'play', 'save']);
-
-  // Escape always reaches the host (menus close on it) but is not cancelled in the frame.
-  const escapes: KeyboardEvent[] = [];
-  element.addEventListener('keydown', event => escapes.push(event as KeyboardEvent), true);
-  frame.focus();
-  expect(press(button, { key: 'Escape' }).defaultPrevented).toBe(false);
-  await until(() => escapes.length === 1, 'escape forwarded');
-  expect(escapes[0]!.key).toBe('Escape');
+it('caps open views so their handle quotas stay within the extension budget', () => {
+  const body = document.createElement('div');
+  const host = { links: new Set(Array.from({ length: 50 }, () => ({} as ViewLink))) } as ViewHost;
+  const mount = mountSandboxView(host, { id: 'test-panel', title: 'Test' }, body, { spec: {} });
+  expect(body.textContent).toContain('open panel limit');
+  expect(body.querySelector('iframe')).toBeNull();
+  mount.dispose();
+  expect(body.textContent).toBe('');
 });

@@ -175,4 +175,15 @@ describe('extension asset server', () => {
 
     await expect(serveExtensionAsset('ext/valid-id/bundle.js')).resolves.toBeNull();
   });
+
+  it('rejects a bundle symlink into another extension directory', async () => {
+    const buildDir = await temporaryDirectory();
+    await fs.mkdir(path.join(buildDir, 'first-ext'));
+    await fs.mkdir(path.join(buildDir, 'second-ext'));
+    await fs.writeFile(path.join(buildDir, 'second-ext', 'bundle.js'), 'other code');
+    await fs.symlink(path.join(buildDir, 'second-ext', 'bundle.js'), path.join(buildDir, 'first-ext', 'bundle.js'));
+    const { ipcMain } = fakeIpcMain();
+    registerExtensionsIpc(ipcMain, { registry: registryStub(buildDir), resourcesDir: path.join(buildDir, 'builtins'), isTrusted: () => true });
+    await expect(serveExtensionAsset('ext/first-ext/bundle.js')).resolves.toBeNull();
+  });
 });

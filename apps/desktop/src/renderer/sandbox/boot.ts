@@ -44,10 +44,10 @@ export function installSandboxRuntime(): void {
     const error = new Error(`${name} requires full access. Use project.apply or commands in a sandboxed extension.`);
     error.name = 'PermissionError'; (error as Error & { code: string }).code = 'full-access'; throw error;
   }]));
-  (globalThis as any).__powermove_runtime = {
+  Reflect.set(globalThis, '__powermove_runtime', {
     svelte, 'svelte/internal/client': svelteInternalClient, 'svelte/store': svelteStore,
     'svelte/internal/disclose-version': {}, powermove: helpers
-  };
+  });
 }
 
 /** Applies the host's theme; removes whatever the previous push set. */
@@ -85,7 +85,7 @@ export async function bootRuntime(init: SandboxInit, port: MessagePort, load: Bu
     mountPanel: (panelId: string, token: string, viewPort: MessagePort) => control?.mountPanel(panelId, token, viewPort),
     unmountPanel: (token: string) => control?.unmountPanel(token),
     dispose: () => control?.dispose()
-  });
+  }, 10_000, { maxMirrorBytes: 16 * 1024 * 1024 + 8192, maxHandles: 1000 });
   const liveApi = createSandboxAPI(live, init);
   control = sandboxControl(liveApi);
   apply(init.theme);
@@ -99,7 +99,8 @@ export async function bootRuntime(init: SandboxInit, port: MessagePort, load: Bu
     attachStyles(module, liveApi, document);
     const result = await module.default(liveApi) as { dispose?: () => void } | undefined;
     await control.ready();
-    if (result?.dispose) liveApi.onDispose(() => result.dispose!());
+    const dispose = result?.dispose;
+    if (dispose) liveApi.onDispose(() => dispose());
     live.notify('activated');
   } catch (error) { live.notify('activation-error', serializeRpcError(error)); }
 }
@@ -124,7 +125,7 @@ export function keyToForward(event: KeyboardEvent, keys: readonly SandboxKey[]):
   if ((chord === 'cmd+c' || chord === 'ctrl+c') && String(globalThis.getSelection?.() ?? '')) return null;
   const field = isFieldTarget(target) || (event.composedPath?.() ?? []).some(isFieldTarget);
   const match = keys.find(key => (!field || key.inFields) && (!event.repeat || key.repeat) && chordMatches(key.chord, chord, key.looseModifiers));
-  if (!match && chord !== 'escape') return null;
+  if (!match && chord !== 'escape' && chord !== 'tab' && chord !== 'shift+tab') return null;
   return {
     forward: { key: event.key, code: event.code, metaKey: event.metaKey, ctrlKey: event.ctrlKey, altKey: event.altKey, shiftKey: event.shiftKey, repeat: event.repeat, field },
     /* The host cancels ordinary bindings before running them; mirror that
@@ -165,7 +166,7 @@ export async function bootView(init: SandboxViewInit, kernelPort: MessagePort, r
     size: setSize,
     keys: (next: SandboxKey[]) => { keys = next; },
     dispose: teardown
-  });
+  }, 10_000, { maxMirrorBytes: 16 * 1024 * 1024 + 8192, maxHandles: 20 });
   const runtime = createRpc(runtimePort, {});
   const onKey = (event: KeyboardEvent): void => {
     const decision = keyToForward(event, keys);
@@ -200,7 +201,8 @@ export async function bootView(init: SandboxViewInit, kernelPort: MessagePort, r
     control.setQuiet(true);
     try {
       const result = await module.default(api) as { dispose?: () => void } | undefined;
-      if (result?.dispose) api.onDispose(() => result.dispose!());
+      const dispose = result?.dispose;
+      if (dispose) api.onDispose(() => dispose());
     } finally { control.setQuiet(false); }
     const def = control.panel(init.panelId);
     if (!def) throw new Error(`activate() did not register panel "${init.panelId}" in this view.`);

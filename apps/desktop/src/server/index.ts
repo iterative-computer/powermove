@@ -35,6 +35,8 @@ import { registerCodexIpc } from '../main/codex';
 import { recoverAllInterruptedExtensionTransactions } from '../main/codex/change-history';
 import { registerExtensionsIpc, serveExtensionAsset, sandboxManifestFor } from '../main/extensions';
 import { createExtensionRegistry } from '../main/extensions/registry';
+import { createProvenanceStore } from '../main/cloud/provenance';
+import { trustLevelFor } from '../main/cloud/trust';
 import { startExtensionWatcher } from '../main/extensions/watcher';
 import { EditorWindows } from '../main/windows';
 import { app, configureElectronStub, type MessageBoxOptions } from './electron-stub';
@@ -319,7 +321,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     try {
       builtinIds = (await readdir(builtinResourcesDir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && !entry.name.startsWith('.')).map((entry) => entry.name).sort();
     } catch { /* partial checkout: kernel still boots */ }
-    const registry = createExtensionRegistry({ store, userDir, buildDir, builtinIds, resourcesDir: builtinResourcesDir });
+    const provenance = createProvenanceStore(userData);
+    const registry = createExtensionRegistry({ store, userDir, buildDir, builtinIds, resourcesDir: builtinResourcesDir,
+      trustFor: async (id, scope) => trustLevelFor({ scope }, scope === 'user' ? await provenance.get(id) : null, null) });
     registerExtensionsIpc(ipcMain, { registry, resourcesDir: builtinResourcesDir, isTrusted: isTrustedSender });
     refreshRestoredExtensions = async (ids) => { await registry.refresh(ids); registry.emitChanged({ ids, reason: 'reload' }); };
     void registry.refresh().then(() => {

@@ -7,6 +7,8 @@ import { playerBundlePlugin } from './scripts/player-bundle';
 // owns the new TypeScript modules under src/. The svelte plugin compiles
 // *.svelte.ts rune modules and components for unit tests.
 export default defineConfig({
+  // Keep Vite's test cache in this checkout; node_modules may be a read-only symlink.
+  cacheDir: path.resolve(__dirname, '.vite'),
   plugins: [svelte({ hot: false }), playerBundlePlugin()],
   resolve: { conditions: ['browser'], alias: { powermove: path.resolve(__dirname, 'src/renderer/src/kernel/api.ts') } },
   test: {
