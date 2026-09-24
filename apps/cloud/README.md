@@ -70,8 +70,9 @@ bun run local:seed --publish
 ```
 
 This prints a `POWERMOVE_REGISTRY_TOKEN` for Jude and a
-`MARA_REGISTRY_TOKEN` for Mara. It also publishes the ten built-ins to the
-local Store. The publisher needs the Worker on port 8787. In a third terminal:
+`MARA_REGISTRY_TOKEN` for Mara. It publishes the ten built-ins and the four
+sample extensions to the local Store. The publisher needs the Worker on port
+8787. In a third terminal:
 
 ```sh
 cd apps/desktop
@@ -111,6 +112,45 @@ Smoke checklist:
 To delete local Postgres and all local R2 state, stop the Worker and run
 `bun run local:down` from `apps/cloud`. This removes the Compose named volume
 and `.wrangler/state/`. `.dev.vars` is kept so local settings survive a reset.
+
+### Sample extensions
+
+`bun run local:seed --publish` publishes `mara/glass-tint@1.0.0`,
+`mara/ease-lab@1.0.0`, `mara/colour-match@1.0.0`, and
+`mara/wipe-set@1.0.0`. To publish just the samples again, from `apps/cloud`:
+
+```sh
+bun run local:samples
+```
+
+The command uses `MARA_REGISTRY_TOKEN` when set, or reads Mara's latest
+unexpired local session from Postgres. Existing identical versions are skipped.
+Keep the Worker running at `http://localhost:8787`.
+
+Try these flows in the desktop Store:
+
+1. Open `mara/glass-tint` and install 1.0.0. It appears in Library; apply its
+   effect from Effects & Presets. Then run `bun run local:samples --update`
+   from `apps/cloud`. The command publishes 1.1.0 with an Edge control and a
+   What's new note. Return to Library, check for updates, and choose Update.
+2. Install `mara/colour-match`. Install and set up asks for the required OpenAI
+   API key and offers the optional palette size. Run “Check Colour Match
+   connection” from the command palette to see an HTTP status or an offline
+   error toast. The sample does not modify the project.
+3. Install `mara/ease-lab`, open its Ease lab panel, choose a curve, and press
+   Apply. The panel remembers the preset. Alt+Shift+E runs the same command.
+   Install `mara/wipe-set` to try its three layer transitions.
+4. To make a fork under `jude`, sign in with a fresh `@localhost` account and
+   claim the `jude` handle (seeded `jude@localhost` owns `powermove`). Install
+   `mara/ease-lab`, reveal its folder from Library, edit a source file, then
+   choose Publish. The Store shows “Forked from mara/ease-lab” on the new
+   listing. Open your published version's detail page and choose Withdraw…;
+   the installed copy remains available locally. Choose Uninstall… in Library
+   when you are finished.
+
+The Store detail page lists older versions but currently offers installation
+of the latest only, so `--update` publishes Glass Tint 1.1.0 after you install
+1.0.0.
 
 ## Provisioning (PENDING(provision))
 

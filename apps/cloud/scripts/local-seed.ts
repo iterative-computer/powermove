@@ -51,4 +51,10 @@ if (process.argv.includes('--publish')) {
     stdout: 'inherit', stderr: 'inherit',
   });
   if (await publisher.exited !== 0) throw new Error('Built-ins publisher failed.');
+  const samples = Bun.spawn(['bun', 'scripts/local-samples.ts'], {
+    cwd: cloud,
+    env: { ...process.env, MARA_REGISTRY_TOKEN: maraToken },
+    stdout: 'inherit', stderr: 'inherit',
+  });
+  if (await samples.exited !== 0) throw new Error('Sample extensions publisher failed.');
 }

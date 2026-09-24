@@ -10,6 +10,7 @@
     "dev:local": "wrangler dev --port 8787 --test-scheduled",
     "local:up": "bun scripts/local-up.ts",
     "local:seed": "bun scripts/local-seed.ts",
+    "local:samples": "bun scripts/local-samples.ts",
     "local:down": "bun scripts/local-down.ts",
     "dev:emulate": "bun scripts/dev-emulate.ts",
     "build": "wrangler deploy --dry-run --outdir dist",

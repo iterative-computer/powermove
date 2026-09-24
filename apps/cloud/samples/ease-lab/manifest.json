@@ -1,0 +1,11 @@
+{
+  "id": "ease-lab",
+  "name": "Ease Lab",
+  "description": "Preview easing curves in a dockable panel.",
+  "version": "1.0.0",
+  "apiVersion": 3,
+  "entry": "index.ts",
+  "contributes": ["panels", "commands", "keybindings"],
+  "permissions": ["project:write"],
+  "author": "user"
+}

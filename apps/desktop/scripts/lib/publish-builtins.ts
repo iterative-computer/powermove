@@ -9,6 +9,25 @@ import type { Snapshot } from '@powermove/registry/snapshot';
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 type Category = 'panels' | 'effects' | 'transitions' | 'themes' | 'layers' | 'commands' | 'tools';
 export type BuiltinPlan = { coordinate: string; version: string; treeSha: string; fileCount: number; category: Category; status: 'published' | 'skipped' | 'planned' };
+export type ExtensionPlan = BuiltinPlan;
+export interface ExtensionListing {
+  name: string;
+  tagline: string;
+  category: Category;
+  licence: string;
+  visibility?: 'public' | 'unlisted' | 'private';
+}
+export interface PublishExtensionsOptions {
+  fetch: Fetch;
+  dirs: string[];
+  handle: string;
+  token?: string;
+  origin: string;
+  listing?: ExtensionListing | ((manifest: ExtensionManifest, dir: string) => ExtensionListing);
+  notes?: string | ((manifest: ExtensionManifest) => string);
+  dryRun?: boolean;
+  readDir?: (dir: string) => Promise<SnapshotInput[]>;
+}
 export interface PublishBuiltinsOptions {
   fetch: Fetch;
   dirs: string[];
@@ -27,7 +46,7 @@ export function builtinCategory(manifest: ExtensionManifest): Category {
   return 'tools';
 }
 
-function parseBuiltin(input: SnapshotInput[], dir: string): ExtensionManifest {
+function parseExtension(input: SnapshotInput[], dir: string): ExtensionManifest {
   const file = input.find(item => item.path === 'manifest.json');
   if (!file) throw new Error(`${dir}: manifest.json is missing`);
   let raw: unknown;
@@ -38,7 +57,7 @@ function parseBuiltin(input: SnapshotInput[], dir: string): ExtensionManifest {
   return parsed.manifest;
 }
 
-function scanBuiltin(input: SnapshotInput[], coordinate: string): void {
+function scanExtension(input: SnapshotInput[], coordinate: string): void {
   const decoder = new TextDecoder('utf-8', { fatal: true });
   const textFiles = input.flatMap(file => {
     try { return [{ path: file.path, text: decoder.decode(file.bytes) }]; }
@@ -86,19 +105,23 @@ async function uploadObjects(fetcher: Fetch, base: string, token: string, coordi
   }
 }
 
-export async function publishBuiltins(options: PublishBuiltinsOptions): Promise<BuiltinPlan[]> {
+export async function publishExtensions(options: PublishExtensionsOptions): Promise<ExtensionPlan[]> {
   const { fetch: fetcher, dirs, dryRun = false, readDir = walkDir } = options;
-  if (!dryRun && !options.token) throw new Error('POWERMOVE_REGISTRY_TOKEN is required');
+  if (!dryRun && !options.token) throw new Error('Registry token is required');
   const base = options.origin.replace(/\/+$/, '');
   const plans: BuiltinPlan[] = [];
   for (const dir of dirs) {
     const input = await readDir(dir);
-    const manifest = parseBuiltin(input, dir);
-    const coordinate = `powermove/${manifest.id}`;
-    if (basename(dir) !== manifest.id) throw new Error(`${dir}: manifest id ${manifest.id} does not match the directory name`);
-    scanBuiltin(input, coordinate);
+    const manifest = parseExtension(input, dir);
+    const coordinate = `${options.handle}/${manifest.id}`;
+    const folder = basename(dir);
+    if (folder !== manifest.id && folder !== `${manifest.id}@${manifest.version}`)
+      throw new Error(`${dir}: manifest id/version ${manifest.id}@${manifest.version} does not match the directory name`);
+    scanExtension(input, coordinate);
     const snap = await snapshot(input);
-    const category = builtinCategory(manifest);
+    const listing = typeof options.listing === 'function' ? options.listing(manifest, dir) : options.listing;
+    const finalListing = listing ?? { name: manifest.name, tagline: manifest.description ?? manifest.name, category: builtinCategory(manifest), licence: 'MIT' };
+    const category = finalListing.category;
     const plan: BuiltinPlan = { coordinate, version: manifest.version, treeSha: snap.treeSha, fileCount: snap.files.length, category, status: 'planned' };
     if (dryRun) { plans.push(plan); continue; }
 
@@ -119,14 +142,16 @@ export async function publishBuiltins(options: PublishBuiltinsOptions): Promise<
       if (!parent) throw new Error(`${coordinate}: existing repo has no release to use as parent`);
     } else if (detailResponse.status !== 404) failed(coordinate, 'repo lookup', detailResponse, await responseBody(detailResponse));
 
-    const identity = { name: 'powermove', email: 'powermove@users.trypowermove.com', time: Math.floor(Date.now() / 1000), tz: '+0000' };
+    const identity = { name: options.handle, email: `${options.handle}@users.trypowermove.com`, time: Math.floor(Date.now() / 1000), tz: '+0000' };
     const commitBody = encodeCommit({ tree: snap.treeSha, parents: parent ? [parent] : [], author: identity, committer: identity, message: `Publish ${coordinate}@${manifest.version}` });
     const commit = { sha: await hashObject('commit', commitBody), type: 'commit' as const, body: commitBody };
     await uploadObjects(fetcher, base, options.token!, coordinate, snap, commit, repoId);
     const response = await api(fetcher, `${base}/v1/repos/${coordinate}/releases`, options.token!, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ version: manifest.version, commitSha: commit.sha, notes: options.notes ?? `Powermove ${options.appVersion}`,
-        listing: { name: manifest.name, tagline: manifest.description ?? manifest.name, category, licence: 'AGPL-3.0-or-later' }, waivers: [] })
+      body: JSON.stringify({ version: manifest.version, commitSha: commit.sha,
+        notes: typeof options.notes === 'function' ? options.notes(manifest) : options.notes,
+        listing: { name: finalListing.name, tagline: finalListing.tagline, category, licence: finalListing.licence },
+        visibility: finalListing.visibility ?? 'public', waivers: [] })
     });
     if (!response.ok) {
       const body = await responseBody(response);
@@ -136,4 +161,18 @@ export async function publishBuiltins(options: PublishBuiltinsOptions): Promise<
     plans.push({ ...plan, status: 'published' });
   }
   return plans;
+}
+
+export function publishBuiltins(options: PublishBuiltinsOptions): Promise<BuiltinPlan[]> {
+  return publishExtensions({
+    ...options,
+    handle: 'powermove',
+    notes: options.notes ?? `Powermove ${options.appVersion}`,
+    listing: (manifest) => ({
+      name: manifest.name,
+      tagline: manifest.description ?? manifest.name,
+      category: builtinCategory(manifest),
+      licence: 'AGPL-3.0-or-later',
+    }),
+  });
 }
