@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle } from 'drizzle-orm/pglite';
 import { sql } from 'drizzle-orm';
-import { neonData, tables, type Data, type Db } from '../src/db/client';
+import { localData, tables, type Data, type Db } from '../src/db/client';
 export async function pgliteData(): Promise<Data> {
   const client = new PGlite();
   for (const name of readdirSync(resolve(import.meta.dir,'../drizzle')).filter(x=>x.endsWith('.sql')).sort()) {
@@ -15,7 +15,7 @@ export async function pgliteData(): Promise<Data> {
   return data;
 }
 export async function withData<T>(fn: (data: Data) => Promise<T>): Promise<T> {
-  const data = process.env.TEST_DATABASE_URL ? neonData(process.env.TEST_DATABASE_URL) : await pgliteData();
+  const data = process.env.TEST_DATABASE_URL ? localData(process.env.TEST_DATABASE_URL) : await pgliteData();
   try { if (process.env.TEST_DATABASE_URL) await data.authDb().execute(sql`truncate table "user", "session", "account", verification, publishers, repos, refs, extensions, releases, release_objects, objects, object_leases, installs, user_settings, desktop_auth, featured, abuse_counters, moderation_log, reports cascade`); return await fn(data); }
   finally { if (process.env.TEST_DATABASE_URL) await data.end(); else await (data as Data & {close():Promise<void>}).close(); }
 }

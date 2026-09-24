@@ -60,6 +60,7 @@ export interface CloudChannels {
 export interface CloudRegistry {
   origin: string;
   isDefault: boolean;
+  fromEnvironment?: boolean;
 }
 
 /** Longest registry URL accepted from the renderer. */

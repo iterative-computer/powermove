@@ -78,6 +78,7 @@
   /* Settings › Advanced › Registry URL. Shown as a host; main owns the value
      and asks with a native dialog before switching (and signing out). */
   let registryOrigin = $state<string | null>(null);
+  let registryFromEnvironment = $state(false);
   let registryDraft = $state('');
   let registryBusy = $state(false);
   let registryError = $state<string | null>(null);
@@ -144,6 +145,7 @@
     try {
       const current = await bridge.registryUrl();
       registryOrigin = current.origin;
+      registryFromEnvironment = current.fromEnvironment ?? false;
       registryDraft = registryHost(current.origin);
       registryError = null;
     } catch {
@@ -162,6 +164,7 @@
       const result = await bridge.setRegistryUrl({ origin });
       if (!result.ok) throw new Error(result.error.error);
       registryOrigin = result.value.origin;
+      registryFromEnvironment = result.value.fromEnvironment ?? false;
       registryDraft = registryHost(result.value.origin);
       if (result.value.changed) {
         applyAccount(null);
@@ -587,6 +590,7 @@
                   <div class="settings-row">
                     <label class="settings-copy" for="settings-registry-url">
                       <b>Registry URL</b>
+                      {#if registryFromEnvironment}<span>(from environment)</span>{/if}
                       {#if registryError}
                         <span class="settings-extension-error" role="alert">{registryError}</span>
                       {:else}
@@ -603,11 +607,11 @@
                       spellcheck="false"
                       maxlength="2000"
                       placeholder="cloud.trypowermove.com"
-                      disabled={registryBusy || registryOrigin === null}
+                      disabled={registryBusy || registryOrigin === null || registryFromEnvironment}
                       bind:value={registryDraft}
                       onkeydown={(event) => { if (event.key === 'Enter' && registryChanged) { event.preventDefault(); void changeRegistry(); } }}
                     />
-                    <button class="btn" type="button" disabled={registryBusy || !registryChanged} onclick={() => void changeRegistry()}>Change…</button>
+                    <button class="btn" type="button" disabled={registryBusy || !registryChanged || registryFromEnvironment} onclick={() => void changeRegistry()}>Change…</button>
                   </div>
                 </div>
               </section>

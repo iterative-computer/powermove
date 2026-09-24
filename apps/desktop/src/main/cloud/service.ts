@@ -114,7 +114,7 @@ export async function startCloudService(options: CloudServiceOptions): Promise<C
   registerCloudIpc(options.ipcMain, {
     auth,
     session,
-    registry: { get: () => registry.get(), change: changeRegistry },
+    registry: { get: () => registry.get(), fromEnvironment: () => registry.fromEnvironment(), change: changeRegistry },
     isTrusted: options.isTrusted
   });
   return {

@@ -1,5 +1,6 @@
 interface CloudflareBindings {
   DATABASE_URL: string;
+  LOCAL_POSTGRES?: string;
   BETTER_AUTH_SECRET: string;
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;

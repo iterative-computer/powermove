@@ -7,6 +7,7 @@
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
+    "dev:local": "POWERMOVE_REGISTRY_URL=http://localhost:8787 POWERMOVE_DEV_PROTOCOL=1 electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "test": "vitest run",

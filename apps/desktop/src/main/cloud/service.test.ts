@@ -40,6 +40,22 @@ describe('registry URL', () => {
     expect(await value.load()).toBe(DEFAULT_REGISTRY_ORIGIN);
   });
 
+  it('uses the development environment override without changing the saved origin', async () => {
+    process.env.POWERMOVE_REGISTRY_URL = 'http://localhost:8787';
+    try {
+      const value = await setting();
+      expect(await value.load()).toBe('http://localhost:8787');
+      expect(value.fromEnvironment()).toBe(true);
+      expect(await confirmRegistryChange('https://registry.example.test', {
+        setting: value,
+        showMessageBox: async () => { throw new Error('override should not ask'); }
+      })).toBe(false);
+      expect(value.get()).toBe('http://localhost:8787');
+    } finally {
+      delete process.env.POWERMOVE_REGISTRY_URL;
+    }
+  });
+
   it('changes only after the native confirmation, showing the new origin', async () => {
     const value = await setting();
     const beforeChange = vi.fn(async () => undefined);

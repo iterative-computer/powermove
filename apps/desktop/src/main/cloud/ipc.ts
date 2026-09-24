@@ -32,7 +32,7 @@ export interface CloudIpcOptions {
   auth: CloudAuth;
   session: CloudSession;
   /** Settings › Advanced › Registry URL. `change` shows main's confirmation and signs out first. */
-  registry: { get(): string; change(origin: string): Promise<boolean> };
+  registry: { get(): string; fromEnvironment?(): boolean; change(origin: string): Promise<boolean> };
   isTrusted(event: Sender): boolean;
 }
 
@@ -108,7 +108,8 @@ export function registerCloudIpc(ipcMain: Pick<IpcMain, 'handle'>, options: Clou
   handle(CLOUD_IPC.deleteAccount, cloudSchemas['cloud:delete-account'], () => result(async () => ({ deleted: await auth.deleteAccount() })));
   const registry = (): CloudRegistry => {
     const origin = options.registry.get();
-    return { origin, isDefault: origin === DEFAULT_REGISTRY_ORIGIN };
+    return { origin, isDefault: origin === DEFAULT_REGISTRY_ORIGIN,
+      ...(options.registry.fromEnvironment?.() ? { fromEnvironment: true } : {}) };
   };
   handle(CLOUD_IPC.registryUrl, cloudSchemas['cloud:registry-url'], async () => registry());
   handle(CLOUD_IPC.setRegistryUrl, cloudSchemas['cloud:set-registry-url'], (request) => result(async () => {

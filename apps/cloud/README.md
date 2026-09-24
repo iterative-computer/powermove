@@ -12,7 +12,7 @@ them on the desktop.
 ## Layout
 
 - `src/app.ts` builds the app from a data-layer factory; `src/index.ts` binds
-  it to Neon and exports `fetch` + `scheduled` (GC).
+  it to Neon (or local Postgres with `LOCAL_POSTGRES=1`) and exports `fetch` + `scheduled` (GC).
 - `src/routes/` one file per resource: `auth-desktop` (the PKCE hand-off),
   `auth-email`, `auth-signout`, `me`, `objects`, `publish`, `repo-management`
   (yank, patch, tombstone, moderation, reports, icons), `store` (public
@@ -41,7 +41,7 @@ bun run dev:emulate  # seeded Google OAuth emulator on http://localhost:4002
 ```
 
 `bun test` runs on an in-memory PGlite database with the checked-in
-migrations. Set `TEST_DATABASE_URL` to run the same suite against a
+migrations. Set `TEST_DATABASE_URL` to run the same suite with node-postgres against a
 disposable Postgres; the helper truncates tables between tests. Files run
 serially because PGlite has one connection, so the "two racing first
 publishes" invariant is exercised through a test hook rather than real
@@ -50,6 +50,67 @@ concurrency.
 `worker-configuration.d.ts` is generated and git-ignored. The bundle aliases
 Better Auth's unused Kysely fallback to `src/kysely-unavailable.ts` so the
 optional PGlite dialect never enters the Worker.
+
+## Local stack
+
+Requires Bun and OrbStack or Docker Desktop with Docker Compose running. From
+the repository root, run these commands in order:
+
+```sh
+cd apps/cloud
+bun run local:up
+bun run dev:local
+```
+
+Leave the Worker running. In a second terminal:
+
+```sh
+cd apps/cloud
+bun run local:seed --publish
+```
+
+This prints a `POWERMOVE_REGISTRY_TOKEN` for Jude and a
+`MARA_REGISTRY_TOKEN` for Mara. It also publishes the ten built-ins to the
+local Store. The publisher needs the Worker on port 8787. In a third terminal:
+
+```sh
+cd apps/desktop
+bun run dev:local
+```
+
+The desktop's Store now uses `http://localhost:8787`. Settings › Advanced
+shows the Registry URL marked “(from environment)”. The local override is
+active only in the unpackaged development app; it does not replace the stored
+Registry URL. `normalizeOrigin` accepts this HTTP localhost origin.
+
+`local:up` creates `.dev.vars` from `.dev.vars.example` only when missing.
+Local Postgres is at `localhost:54329`; the three R2 buckets, rate limits,
+scheduled handler and Email Sending are simulated by Wrangler. R2 objects
+live under `apps/cloud/.wrangler/state/`. With the example's `DEV_LOG_OTP=1`,
+email sign-in codes appear in the `dev:local` terminal as `OTP for …: …`.
+When `DEV_LOG_OTP` is disabled, Wrangler logs simulated email and prints the
+saved text file path (typically `/tmp/miniflare-…/files/email-text/<id>.txt`).
+
+For Google sign-in instead, run `bun run dev:emulate` from `apps/cloud` in
+another terminal, uncomment the three Google variables in `.dev.vars`, then
+restart `dev:local`. The emulator offers Jude and Mara accounts. The OAuth
+callback returns to the development desktop via `powermove://` because
+`POWERMOVE_DEV_PROTOCOL=1` is set by `dev:local`.
+
+Smoke checklist:
+
+1. Sign in on the desktop with a fresh `@localhost` email and the code printed
+   by Wrangler.
+2. Claim a handle. The seed has already assigned `powermove` to Jude and
+   `mara` to Mara.
+3. Browse the Store and see the ten `powermove/*` built-ins.
+4. Install one built-in.
+5. Publish a local extension under the signed-in handle.
+6. Sign in as `mara@localhost`, then fork and publish someone else's extension.
+
+To delete local Postgres and all local R2 state, stop the Worker and run
+`bun run local:down` from `apps/cloud`. This removes the Compose named volume
+and `.wrangler/state/`. `.dev.vars` is kept so local settings survive a reset.
 
 ## Provisioning (PENDING(provision))
 
@@ -84,7 +145,7 @@ Nothing below has been created yet. Do these once, in order.
 Without `GOOGLE_CLIENT_ID` Google sign-in is omitted so local boot works.
 The Email Sending binding delivers sign-in codes. Local `wrangler dev`
 simulates delivery by logging messages and writing them to local files.
-If the binding is absent locally, `DEV_LOG_OTP=1` prints codes to the console.
+`DEV_LOG_OTP=1` prints codes to the console even when the binding is present.
 Never set that in production.
 
 ## Local sign-in with the Google emulator

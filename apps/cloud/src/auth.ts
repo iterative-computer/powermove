@@ -33,15 +33,15 @@ export function createAuth(data: Data, env: CloudflareBindings, trackOtpDelivery
         storeOTP: 'hashed',
         sendVerificationOTP: async ({ email, otp }) => {
           const delivery = (async () => {
+            if (env.DEV_LOG_OTP === '1') {
+              console.log(`OTP for ${email}: ${otp}`);
+              return true;
+            }
             if (env.OTP_SENDER) {
               await env.OTP_SENDER(email, otp);
               return true;
             }
             if (!env.EMAIL) {
-              if (env.DEV_LOG_OTP === '1') {
-                console.log(`OTP for ${email}: ${otp}`);
-                return true;
-              }
               throw new Error('email delivery unavailable');
             }
             const text = `Your Powermove sign-in code is ${otp}. It expires in 5 minutes. If you didn't ask for this, ignore it.`;

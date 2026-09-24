@@ -11,7 +11,7 @@
  */
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { MessageBoxOptions } from 'electron';
+import { app, type MessageBoxOptions } from 'electron';
 import { z } from 'zod';
 
 import { normalizeOrigin } from './client';
@@ -26,13 +26,18 @@ export interface RegistryUrlSetting {
   load(): Promise<string>;
   /** Persist without asking; callers go through `confirmRegistryChange`. */
   set(origin: string): Promise<string>;
+  fromEnvironment(): boolean;
 }
 
 export function createRegistryUrlSetting(dir: string): RegistryUrlSetting {
   const file = path.join(dir, 'registry.json');
   let current = DEFAULT_REGISTRY_ORIGIN;
+  const override = !app?.isPackaged && process.env.POWERMOVE_REGISTRY_URL
+    ? normalizeOrigin(process.env.POWERMOVE_REGISTRY_URL)
+    : null;
   return {
-    get: () => current,
+    get: () => override ?? current,
+    fromEnvironment: () => override !== null,
     async load() {
       try {
         const parsed = Stored.safeParse(JSON.parse(await readFile(file, 'utf8')));
@@ -40,7 +45,7 @@ export function createRegistryUrlSetting(dir: string): RegistryUrlSetting {
       } catch {
         current = DEFAULT_REGISTRY_ORIGIN;
       }
-      return current;
+      return override ?? current;
     },
     async set(origin) {
       const next = normalizeOrigin(origin);
@@ -48,7 +53,7 @@ export function createRegistryUrlSetting(dir: string): RegistryUrlSetting {
       await writeFile(`${file}.tmp`, JSON.stringify({ origin: next }), { mode: 0o600 });
       await rename(`${file}.tmp`, file);
       current = next;
-      return next;
+      return override ?? next;
     }
   };
 }
@@ -66,6 +71,7 @@ export interface ConfirmRegistryChangeOptions {
  * Returns whether the change was made.
  */
 export async function confirmRegistryChange(origin: string, options: ConfirmRegistryChangeOptions): Promise<boolean> {
+  if (options.setting.fromEnvironment()) return false;
   const next = normalizeOrigin(origin);
   if (next === options.setting.get()) return false;
   const isDefault = next === DEFAULT_REGISTRY_ORIGIN;
