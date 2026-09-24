@@ -86,7 +86,7 @@ body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-main{visibility:hi
     linear-gradient(135deg, var(--art-a), color-mix(in oklch, var(--art-b) 60%, var(--art-a)))}
 .st-thumb{position:relative;display:block;flex:none;width:44px;height:44px;border-radius:var(--r-lg);overflow:hidden}
 .st-thumb.is-featured{width:88px;height:88px;border-radius:var(--r-xl)}
-.st-thumb.is-hero{width:96px;height:96px;border-radius:var(--r-xl)}
+.st-thumb.is-hero{width:72px;height:72px;border-radius:var(--r-xl)}
 
 /* ── featured ── */
 /* One extension at a time, on a card: its icon, its copy, one Install. The

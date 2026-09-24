@@ -686,13 +686,13 @@
       <input type="search" placeholder="Search extensions" aria-label="Search extensions" maxlength="120" bind:value={searchText} />
     </label>
     <nav class="st-nav" aria-label="Store sections" use:glide>
-      {@render navbtn('browse', 'Browse', 'sparkle')}
+      {@render navbtn('browse', 'Browse', 'home')}
       <span class="st-nav-label">Kinds</span>
       {#each KINDS as k (k)}
         {@render navbtn(`kind:${k}`, KIND_PLURAL[k], KIND_ICON[k])}
       {/each}
       <span class="st-nav-label">This Mac</span>
-      {@render navbtn('library', 'Library', 'stack', attention)}
+      {@render navbtn('library', 'Library', 'grid', attention)}
     </nav>
     <button class="st-navbtn st-done" type="button" aria-label="Done" onclick={close}>
       <Icon {PM} name="chev" />

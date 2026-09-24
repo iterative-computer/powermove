@@ -52,8 +52,8 @@ export const KIND_PLURAL: Record<StoreKind, string> = {
 };
 
 export const KIND_ICON: Record<StoreKind, string> = {
-  effects: 'wand',
-  transitions: 'film',
+  effects: 'sparkle',
+  transitions: 'next',
   panels: 'panel',
   themes: 'sun',
   commands: 'return',
