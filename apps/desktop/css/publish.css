@@ -35,6 +35,15 @@
 .pub-file{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
 .pub-icon .btn{height:28px;padding:0 12px;border-radius:var(--sg-control-radius)}
 
+/* Sandbox check: a spinner while it runs, a quiet check when it passes, the
+   exact reason on each problem row when it doesn't. */
+.pub-check{flex-direction:row;align-items:center;gap:10px;color:var(--tx-2)}
+.pub-check.is-ok{color:var(--success)}
+.pub-check>span{font-size:var(--fs-md);line-height:18px;text-wrap:pretty}
+.pub-check-mark{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.pub-sandbox-line{overflow-wrap:anywhere;text-wrap:pretty}
+.pub-sandbox .btn{height:28px;padding:0 12px;flex:none;border-radius:var(--sg-control-radius)}
+
 .pub-terms{margin-top:18px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);text-wrap:pretty}
 .pub-error{margin-top:10px;font-size:var(--fs-sm);line-height:16px;color:var(--danger);text-wrap:pretty;overflow-wrap:anywhere}
 .pub-foot{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:20px}

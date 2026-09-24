@@ -35,12 +35,55 @@ export interface SandboxViewInit extends SandboxInit {
   mode: 'view'; panelId: string; spec: Record<string, unknown>; keys: SandboxKey[];
   size: { width: number; height: number }; noscroll?: boolean;
 }
-const trustedOnly = (name: string, alternative?: string): any => new Proxy({}, {
+/*
+ * What the sandbox check (kernel/sandbox-check.ts) learns from inside the
+ * document: a trusted-only member was reached, or apiVersion ≤ 2 code read a
+ * property of a result that is a Promise here but was a plain value in-realm.
+ * Sent as `sandbox-report` notifications; capped per member so a status
+ * callback that misbehaves every tick cannot flood the port.
+ */
+export type SandboxReportKind = 'permission' | 'async';
+export type SandboxReporter = (kind: SandboxReportKind, member: string) => void;
+const REPORT_CAP = 50;
+export function sandboxReporter(rpc: Pick<Rpc, 'notify'>): SandboxReporter {
+  const counts = new Map<string, number>();
+  return (kind, member) => {
+    const key = `${kind}:${member}`;
+    const count = (counts.get(key) ?? 0) + 1;
+    counts.set(key, count);
+    if (count > REPORT_CAP) return;
+    try { rpc.notify('sandbox-report', { kind, member }); } catch { /* port closed */ }
+  };
+}
+const trustedOnly = (name: string, report: SandboxReporter, alternative?: string): any => new Proxy({}, {
   get(_target, member) {
-    if (member === 'then') return undefined;
-    throw new PermissionError(`${name}.${String(member)}`, alternative);
+    if (member === 'then' || typeof member === 'symbol') return undefined;
+    report('permission', `${name}.${member}`);
+    throw new PermissionError(`${name}.${member}`, alternative);
   }
 });
+/** A sandbox-safe namespace whose other members are trusted-only (`api.ui`, `api.media`). */
+const partlyTrusted = <T extends object>(name: string, safe: T, report: SandboxReporter): T => new Proxy(safe, {
+  get(target, member, receiver) {
+    if (typeof member === 'symbol' || member === 'then' || member === 'toJSON' || member in target) return Reflect.get(target, member, receiver);
+    report('permission', `${name}.${member}`);
+    throw new PermissionError(`${name}.${member}`);
+  }
+});
+/* Promise members any caller may touch; reading anything else off a pending
+   result (`.ok`, `.length`, iterating, string coercion) is sync-era code. */
+const PROMISE_MEMBERS = new Set<PropertyKey>(['then', 'catch', 'finally', 'constructor', Symbol.toStringTag]);
+/** Wrap a Promise so a synchronous read of its "value" is reported, then behaves exactly like the Promise. */
+export function watchPromise<T>(promise: Promise<T>, member: string, report: SandboxReporter): Promise<T> {
+  let reported = false;
+  return new Proxy(promise, {
+    get(target, key) {
+      if (!PROMISE_MEMBERS.has(key) && !reported) { reported = true; report('async', member); }
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    }
+  });
+}
 /** Panel layout hints that cross to the kernel; the definition itself never does. */
 export interface SandboxPanelInfo { id: string; title: string; icon?: string; size?: number; min?: number; flush?: boolean; noscroll?: boolean }
 export function panelInfo(def: Record<string, any>): SandboxPanelInfo {
@@ -74,7 +117,6 @@ export function panelInfo(def: Record<string, any>): SandboxPanelInfo {
  */
 export type SandboxMode = 'runtime' | 'view';
 const VIEW_READS = new Set(['storage.get', 'assets.get', 'assets.readText', 'media.getImportDefaults', 'ui.icon']);
-const restricted = (name: string) => (..._args: unknown[]) => { throw new PermissionError(name, 'project.apply or the pure matrix helpers'); };
 
 /** A per-iframe API. Only serializable values and callback ids cross the port. */
 export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode = 'runtime'): PowermoveAPI {
@@ -116,9 +158,19 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
     hex2rgb: (hex: string) => { const text = hex.replace('#', ''); const full = text.length === 3 ? [...text].map(c => c + c).join('') : text; const value = parseInt(full, 16); return [((value >> 16) & 255) / 255, ((value >> 8) & 255) / 255, (value & 255) / 255]; },
     rgb2hex: (r: number, g: number, b: number) => `#${[r, g, b].map(v => clamp(Math.round(v * 255), 0, 255).toString(16).padStart(2, '0')).join('')}`
   };
+  const report = sandboxReporter(rpc);
+  const restricted = (name: string) => (..._args: unknown[]) => { report('permission', name); throw new PermissionError(name, 'project.apply or the pure matrix helpers'); };
   const send = (method: string, ...args: unknown[]): Promise<any> => {
     if (quiet && method === 'invoke' && !VIEW_READS.has(`${args[0]}.${args[1]}`)) return Promise.resolve(undefined);
     return rpc.call(method, ...args);
+  };
+  /* Methods that return a value synchronously in-realm and a Promise here.
+     apiVersion 3 code awaits them; older code that reads the result at once
+     gets undefined, and the sandbox check names the method. */
+  const legacy = init.apiVersion < 3;
+  const later = (member: string, method: string, ...args: unknown[]): Promise<any> => {
+    const promise = send(method, ...args);
+    return legacy ? watchPromise(promise, member, report) : promise;
   };
   const fire = (method: string, ...args: unknown[]): void => { void send(method, ...args).catch(error => rpc.notify('runtime-error', { name: error.name, message: error.message, code: error.code })); };
   const registration = (method: string, value: unknown, handles: HandleId[] = [], localValue = value): { dispose(): void } => {
@@ -165,7 +217,7 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
       const value: Record<string, any> = { ...def, run: ids[0] };
       if (def.when) { ids.push(handle(def.when)); value.when = ids[1]; }
       return registration('commands', value, ids, def);
-    }, run: (id: string, ...args: unknown[]) => send('invoke', 'commands', 'run', [id, ...args]), has: (id: string) => list('commands').some(item => item.id === id), list: () => list('commands') },
+    }, run: (id: string, ...args: unknown[]) => later('commands.run', 'invoke', 'commands', 'run', [id, ...args]), has: (id: string) => list('commands').some(item => item.id === id), list: () => list('commands') },
     status: { register(def: Record<string, any>) {
       const ids = [handle(def.text)]; const value: Record<string, any> = { ...def, text: ids[0] };
       if (def.onClick) { ids.push(handle(def.onClick)); value.onClick = ids[1]; }
@@ -211,20 +263,20 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
     }, list: () => list('panels').map(item => item.id), open: (id: string, options?: unknown) => fire('invoke', 'panels', 'open', [id, options]), close: (id: string) => fire('invoke', 'panels', 'close', [id]), refresh: (id: string) => fire('invoke', 'panels', 'refresh', [id]), isOpen: () => false },
     project: { get: () => mirror.project, revision: () => mirror.revision, selection: () => mirror.selection,
       time: () => mirror.time, playing: () => mirror.playing,
-      apply: (...args: unknown[]) => send('invoke', 'project', 'apply', args), select: (...args: unknown[]) => send('invoke', 'project', 'select', args),
-      setTime: (time: number) => send('invoke', 'project', 'setTime', [time]), play: () => send('invoke', 'project', 'play', []), pause: () => send('invoke', 'project', 'pause', []), undo: () => send('invoke', 'project', 'undo', []), redo: () => send('invoke', 'project', 'redo', []), snapshot: (...args: unknown[]) => send('invoke', 'project', 'snapshot', args) },
-    transport: { time: () => mirror.time, playing: () => mirror.playing, setTime: (time: number) => send('invoke', 'project', 'setTime', [time]), play: () => send('invoke', 'project', 'play', []), pause: () => send('invoke', 'project', 'pause', []), toggle: () => send('invoke', 'project', mirror.playing ? 'pause' : 'play', []), step: (frames: number) => send('invoke', 'transport', 'step', [frames]) },
-    assets: { pick: (...args: unknown[]) => send('invoke', 'assets', 'pick', args), import: (...args: unknown[]) => send('invoke', 'assets', 'import', args), get: (id: string) => send('invoke', 'assets', 'get', [id]), readText: (id: string) => send('invoke', 'assets', 'readText', [id]) },
-    storage: { get: (key: string) => send('invoke', 'storage', 'get', [key]), set: (key: string, value: unknown) => send('invoke', 'storage', 'set', [key, value]), delete: (key: string) => send('invoke', 'storage', 'delete', [key]) },
-    media: { registerImportDefaults: simpleRegister('media-defaults'), getImportDefaults: () => send('invoke', 'media', 'getImportDefaults', []) },
+      apply: (...args: unknown[]) => later('project.apply', 'invoke', 'project', 'apply', args), select: (...args: unknown[]) => later('project.select', 'invoke', 'project', 'select', args),
+      setTime: (time: number) => later('project.setTime', 'invoke', 'project', 'setTime', [time]), play: () => later('project.play', 'invoke', 'project', 'play', []), pause: () => later('project.pause', 'invoke', 'project', 'pause', []), undo: () => later('project.undo', 'invoke', 'project', 'undo', []), redo: () => later('project.redo', 'invoke', 'project', 'redo', []), snapshot: (...args: unknown[]) => send('invoke', 'project', 'snapshot', args) },
+    transport: { time: () => mirror.time, playing: () => mirror.playing, setTime: (time: number) => later('transport.setTime', 'invoke', 'project', 'setTime', [time]), play: () => later('transport.play', 'invoke', 'project', 'play', []), pause: () => later('transport.pause', 'invoke', 'project', 'pause', []), toggle: () => later('transport.toggle', 'invoke', 'project', mirror.playing ? 'pause' : 'play', []), step: (frames: number) => later('transport.step', 'invoke', 'transport', 'step', [frames]) },
+    assets: { pick: (...args: unknown[]) => send('invoke', 'assets', 'pick', args), import: (...args: unknown[]) => send('invoke', 'assets', 'import', args), get: (id: string) => later('assets.get', 'invoke', 'assets', 'get', [id]), readText: (id: string) => send('invoke', 'assets', 'readText', [id]) },
+    storage: { get: (key: string) => later('storage.get', 'invoke', 'storage', 'get', [key]), set: (key: string, value: unknown) => later('storage.set', 'invoke', 'storage', 'set', [key, value]), delete: (key: string) => later('storage.delete', 'invoke', 'storage', 'delete', [key]) },
+    media: partlyTrusted('media', { registerImportDefaults: simpleRegister('media-defaults'), getImportDefaults: () => later('media.getImportDefaults', 'invoke', 'media', 'getImportDefaults', []) }, report),
     events: { on(event: string, fn: (...args: any[]) => unknown) { const id = handle(fn); return registration('events', { event, fn: id }, [id]); }, emit: (event: string, payload: unknown) => fire('invoke', 'events', 'emit', [event, payload]) },
-    ui: { toast: (message: string, options?: unknown) => fire('invoke', 'ui', 'toast', [message, options]), confirm: (...args: unknown[]) => send('invoke', 'ui', 'confirm', args), icon: (...args: unknown[]) => send('invoke', 'ui', 'icon', args), controls: trustedOnly('ui.controls'), modal: trustedOnly('ui.modal'), menu: trustedOnly('ui.menu'), drag: trustedOnly('ui.drag'), gesture: trustedOnly('ui.gesture'), mount: trustedOnly('ui.mount') },
+    ui: partlyTrusted('ui', { toast: (message: string, options?: unknown) => fire('invoke', 'ui', 'toast', [message, options]), confirm: (...args: unknown[]) => send('invoke', 'ui', 'confirm', args), icon: (...args: unknown[]) => later('ui.icon', 'invoke', 'ui', 'icon', args), controls: trustedOnly('ui.controls', report), modal: trustedOnly('ui.modal', report), menu: trustedOnly('ui.menu', report), drag: trustedOnly('ui.drag', report), gesture: trustedOnly('ui.gesture', report), mount: trustedOnly('ui.mount', report) }, report),
     vars: { get: (key: string) => vars[key], has: (key: string) => Object.hasOwn(vars, key), keys: () => Object.keys(vars) },
-    extensions: { list: () => send('extensions-list'), fork: () => { throw new PermissionError('extensions.fork'); }, setEnabled: (...args: unknown[]) => send('invoke', 'extensions', 'setEnabled', args), remove: (...args: unknown[]) => send('invoke', 'extensions', 'remove', args), reload: (...args: unknown[]) => send('invoke', 'extensions', 'reload', args), reveal: (...args: unknown[]) => send('invoke', 'extensions', 'reveal', args) },
+    extensions: { list: () => later('extensions.list', 'extensions-list'), fork: () => { report('permission', 'extensions.fork'); throw new PermissionError('extensions.fork'); }, setEnabled: (...args: unknown[]) => send('invoke', 'extensions', 'setEnabled', args), remove: (...args: unknown[]) => send('invoke', 'extensions', 'remove', args), reload: (...args: unknown[]) => send('invoke', 'extensions', 'reload', args), reveal: (...args: unknown[]) => send('invoke', 'extensions', 'reveal', args) },
     log: (level: string, message: string, ...data: unknown[]) => rpc.notify('log', level, message, data),
     onDispose: (fn: () => void) => { disposers.push(fn); }
   };
-  for (const name of ['anim', 'model', 'selection', 'groups', 'history', 'edit', 'inspector', 'render', 'uiState', 'dnd', 'workspace', 'services', 'host']) api[name] = trustedOnly(name);
+  for (const name of ['anim', 'model', 'selection', 'groups', 'history', 'edit', 'inspector', 'render', 'uiState', 'dnd', 'workspace', 'services', 'host']) api[name] = trustedOnly(name, report);
   api.util = util;
   api.ease = easeRuntime.Ease;
   api.space3d = { CHANNELS_3D, projectPoint, inversePlane,

@@ -8,6 +8,7 @@ import type { StoreBridge } from '../../../shared/store-ipc';
 import type { ModalHandle, ModalOptions } from '../overlays/types';
 import type { StorePM } from './data';
 import PublishSheet from './PublishSheet.svelte';
+import { checkInSandbox } from './sandbox-check';
 
 let open: { localId: string; close(): void } | null = null;
 
@@ -37,7 +38,7 @@ export function openPublishSheet(
   open = current;
   component = mount(PublishSheet, {
     target: body,
-    props: { plan, bridge, onclose: () => handle.close(), onpublished }
+    props: { plan, bridge, check: () => checkInSandbox(PM, plan.localId), onclose: () => handle.close(), onpublished }
   });
   flushSync();
 }

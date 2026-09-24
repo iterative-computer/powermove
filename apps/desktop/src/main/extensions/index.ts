@@ -22,9 +22,14 @@ type ExtensionsIpcEvent = IpcMainEvent | IpcMainInvokeEvent;
 let assetBuildDir: string | null = null;
 let assetRegistry: ExtensionRegistry | null = null;
 
-/** Main-owned record, never permissions supplied by the iframe URL. */
+/**
+ * Main-owned record, never permissions supplied by the iframe URL. Store
+ * installs run here; local extensions are served too so their author can run
+ * the publish-time sandbox check (renderer kernel/sandbox-check.ts). The
+ * sandbox document grants nothing, so serving it for local code is harmless.
+ */
 export function sandboxManifestFor(id: string) {
-  return assetRegistry?.list().find(record => record.id === id && record.trust === 'store')?.manifest ?? null;
+  return assetRegistry?.list().find(record => record.id === id && (record.trust === 'store' || record.trust === 'local'))?.manifest ?? null;
 }
 
 export function registerExtensionsIpc(

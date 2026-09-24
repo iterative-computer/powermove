@@ -23,10 +23,14 @@
     progressText,
     type PublishDraft
   } from './publish-form';
+  import SandboxCheckStatus from './SandboxCheckStatus.svelte';
+  import { SANDBOX_UNAVAILABLE, type SandboxCheckReport, type SandboxCheckState } from './sandbox-check';
 
-  let { plan, bridge, onclose, onpublished }: {
+  let { plan, bridge, check, onclose, onpublished }: {
     plan: PublishPlanDto;
     bridge: StoreBridge;
+    /** Runs the sandbox check for this extension as it is built now (kernel/sandbox-check.ts). */
+    check: () => Promise<SandboxCheckReport>;
     onclose: () => void;
     onpublished: (result: Extract<StorePublishResult, { published: true }>) => void;
   } = $props();
@@ -48,8 +52,26 @@
   let iconError = $state<string | null>(null);
   let iconInput = $state<HTMLInputElement | null>(null);
 
+  /* Required step: the check runs as the sheet opens, and only a clean (or
+     full-access, skipped) result lets Publish through. */
+  let sandbox = $state<SandboxCheckState>({ status: 'running' });
+  let checkRun = 0;
+  async function runCheck(): Promise<void> {
+    const run = ++checkRun;
+    sandbox = { status: 'running' };
+    let next: SandboxCheckState;
+    try {
+      next = { status: 'done', report: await check() };
+    } catch {
+      next = { status: 'error', message: SANDBOX_UNAVAILABLE };
+    }
+    if (run === checkRun) sandbox = next;
+  }
+  $effect(() => { untrack(() => void runCheck()); });
+
   const problems = $derived(problemsOf(draft, plan));
-  const ready = $derived(canPublish(problems));
+  const sandboxPassed = $derived(sandbox.status === 'done' && sandbox.report.ok);
+  const ready = $derived(canPublish(problems) && sandboxPassed);
   const title = $derived(plan.isFork && plan.firstPublish ? `Publish your version of ${plan.manifest.name}` : plan.firstPublish ? `Publish ${plan.manifest.name}` : `Publish an update to ${plan.listing.name}`);
   const show = (field: string): boolean => attempted || !!touched[field];
 
@@ -255,6 +277,9 @@
         </div>
       {/if}
 
+      <h3 class="pub-title">Sandbox check</h3>
+      <SandboxCheckStatus state={sandbox} onretry={busy ? undefined : () => void runCheck()} />
+
       {#if plan.permissionFindings.length}
         <h3 class="pub-title">Permissions to declare</h3>
         <div class="sg-group pub-group">
@@ -310,7 +335,7 @@
       <footer class="pub-foot">
         <span class="pub-status" aria-live="polite">{busy ? progressText(progress) : ''}</span>
         <button class="btn ghost" type="button" disabled={busy} onclick={onclose}>Cancel</button>
-        <button class="btn pri" type="submit" disabled={busy || problems.blocked || (attempted && !ready)}>Publish…</button>
+        <button class="btn pri" type="submit" disabled={busy || problems.blocked || !sandboxPassed || (attempted && !ready)}>Publish…</button>
       </footer>
     </form>
   {/if}

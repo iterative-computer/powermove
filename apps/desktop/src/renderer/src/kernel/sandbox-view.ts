@@ -41,6 +41,8 @@ export interface ViewHost {
   /** Kernel handlers shared with the runtime iframe (invoke, events, log, errors). */
   handlers(link: ViewLink): Record<string, (...args: any[]) => unknown>;
   report(error: Error): void;
+  /** A sandbox check listens for each view's outcome instead of the error policy. */
+  state?(panelId: string, state: 'ready' | 'error', message?: string): void;
   /** Test seam: deliver `init` without a real document. */
   post?(frame: HTMLIFrameElement, message: SandboxViewInit & { t: 'init' }, ports: MessagePort[]): void;
 }
@@ -102,10 +104,12 @@ export function mountSandboxView(host: ViewHost, panel: SandboxPanelInfo, body: 
           button: number(payload?.button), clientX: rect.left + number(payload?.x), clientY: rect.top + number(payload?.y)
         }));
       },
-      mounted() { frame.dataset.state = 'ready'; },
+      mounted() { frame.dataset.state = 'ready'; host.state?.(panel.id, 'ready'); },
       'view-error'(error: { message?: unknown }) {
         frame.dataset.state = 'error';
-        host.report(new Error(`Panel "${panel.id}": ${typeof error?.message === 'string' ? error.message : 'failed to mount'}`));
+        const message = typeof error?.message === 'string' ? error.message : 'failed to mount';
+        if (host.state) host.state(panel.id, 'error', message);
+        else host.report(new Error(`Panel "${panel.id}": ${message}`));
       }
     });
     host.links.add(link);

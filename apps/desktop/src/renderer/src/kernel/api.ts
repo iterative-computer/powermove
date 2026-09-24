@@ -128,6 +128,7 @@ export interface CommandDefinition {
 
 export interface CommandsAPI {
   register(def: CommandDefinition): Disposable;
+  /** Returns a Promise when the extension runs sandboxed (Store installs). */
   run(id: string, ...args: unknown[]): unknown;
   has(id: string): boolean;
   list(): CommandDefinition[];
@@ -277,6 +278,7 @@ export interface AssetsAPI {
   pick(options?: { accept?: string; multiple?: boolean }): Promise<File[]>;
   /** Import into Powermove's durable project media store. The file remains after layer Undo. */
   import(file: File, options?: { layerDefinition?: string }): Promise<AssetRecord>;
+  /** Returns a Promise when the extension runs sandboxed (Store installs). */
   get(id: string): AssetRecord | undefined;
   /** Read a text asset from the live cache or durable media store. */
   readText(id: string): Promise<string>;
@@ -361,19 +363,25 @@ export interface Selection {
 }
 
 export interface ProjectAPI {
-  /** Current project object graph. Treat as read-only; mutate through `apply`. */
+  /** Current project object graph. Stays synchronous against the sandbox mirror; mutate through `apply`. */
   get(): Project;
   revision(): number;
-  /** Typed, validated, undoable edit. `meta.origin` is forced to `ext:<id>`. */
+  /** Typed, validated, undoable edit. `meta.origin` is forced to `ext:<id>`. Returns a Promise when sandboxed. */
   apply(commands: EditCommand | EditCommand[], meta?: Omit<EditMeta, 'origin'>): EditResult;
   selection(): Selection;
+  /** Returns a Promise when the extension runs sandboxed (Store installs). */
   select(layerIds: string[], add?: boolean): void;
   time(): number;
+  /** Returns a Promise when the extension runs sandboxed (Store installs). */
   setTime(t: number): void;
+  /** Returns a Promise when the extension runs sandboxed (Store installs). */
   play(): void;
+  /** Returns a Promise when the extension runs sandboxed (Store installs). */
   pause(): void;
   playing(): boolean;
+  /** Returns a Promise when the extension runs sandboxed (Store installs). */
   undo(): void;
+  /** Returns a Promise when the extension runs sandboxed (Store installs). */
   redo(): void;
   /** Render the current composition at `t` to a JPEG data URL (≤ maxWidth px). */
   snapshot(t?: number, maxWidth?: number): Promise<string>;
@@ -481,11 +489,16 @@ export interface SetTimeOptions { raw?: boolean; force?: boolean }
  */
 export interface TransportAPI {
   time(): number;
+  /** Transport controls return Promises when the extension runs sandboxed (Store installs). */
   setTime(time: number, options?: SetTimeOptions): void;
+  /** Returns a Promise when the extension runs sandboxed (Store installs). */
   play(): void;
+  /** Returns a Promise when the extension runs sandboxed (Store installs). */
   pause(): void;
+  /** Returns a Promise when the extension runs sandboxed (Store installs). */
   toggle(): void;
   playing(): boolean;
+  /** Returns a Promise when the extension runs sandboxed (Store installs). */
   step(frames: number): void;
   quality: number;
   readonly perf: TransportPerformance;
@@ -553,19 +566,24 @@ export interface FontCatalog {
  * Media exposes timing queries, file import, layer-command creation, waveform drawing, runtime raster assets and fonts. Imports/assets/fonts may perform asynchronous I/O and invalidate caches; command creation and timing helpers do not mutate the project by themselves.
  */
 export interface MediaAPI {
+  /** Only import defaults are sandbox-safe; live media members require full access. */
   /** Applies to future image, video and SVG imports and asset-to-timeline additions. */
   registerImportDefaults(defaults: ImportDefaults): Disposable;
-  /** Latest active mod's override, or null for the native import behavior. */
+  /** Latest active mod's override, or null for the native import behavior. Returns a Promise when sandboxed. */
   getImportDefaults(): ImportDefaults | null;
   readonly timing: { isTimed(layer: Layer): boolean; rate(layer: Layer): number; earliestStart(layer: Layer): number };
+  /** Requires the full-access permission for Store extensions. */
   importFiles(files: FileList | File[], options?: ImportFilesOptions): Promise<unknown>;
   commandForAsset(id?: string, at?: number): EditCommand | undefined;
+  /** Requires the full-access permission for Store extensions. */
   readonly audio: { drawWaveform(ctx: CanvasRenderingContext2D, layer: Layer, options?: WaveformOptions): boolean };
+  /** Requires the full-access permission for Store extensions. */
   readonly assets: {
     get(id: string): RuntimeAsset | undefined;
     add(file: File, options?: Record<string, unknown>): Promise<RuntimeAsset>;
     kind(file: File): 'image' | 'video' | 'audio' | 'model' | null;
   };
+  /** Requires the full-access permission for Store extensions. */
   readonly fonts: FontCatalog;
 }
 
@@ -745,6 +763,8 @@ export interface ControlsAPI {
  * UI exposes kernel controls, overlays, menus and pointer helpers. Most members only mutate transient interface state; parent picking can apply an edit, shader opening mutates workspace state, and gesture coordinates the backing edit/history transaction.
  */
 export interface UIAPI {
+  /** Only toast, confirm and icon are sandbox-safe; other UI members require full access. */
+  /** Requires the full-access permission for Store extensions. */
   readonly controls: ControlsAPI;
   toast(
     text: string,
@@ -771,16 +791,20 @@ export interface UIAPI {
     }
   ): void;
   confirm(title: string, body?: string): Promise<boolean>;
+  /** Requires the full-access permission for Store extensions. */
   menu(anchor: HTMLElement | { x: number; y: number }, items: MenuContribution[]): void;
+  /** Requires the full-access permission for Store extensions. */
   modal(opts: { title?: string; body?: HTMLElement | string; width?: number; actions?: Array<{ label: string; pri?: boolean; run?: () => unknown }> }): { close(): void; body: HTMLElement };
-  /** Icon SVG markup by name from the kernel set. */
+  /** Icon SVG markup by name from the kernel set. Returns a Promise when sandboxed. */
   icon(name: string): string;
+  /** Requires the full-access permission for Store extensions. */
   drag(event: PointerEvent, options: DragOptions): { cancel(): void };
   closeMenus(): void;
   showLayerMenu(layer: Layer, event: { clientX: number; clientY: number }, origin?: string): void;
   showParentMenu(ids: string[], event: { clientX: number; clientY: number }): HTMLElement | undefined;
   beginParentPick(event: PointerEvent, ids: string[]): void;
   openShaderEditor(layer?: Layer): void;
+  /** Requires the full-access permission for Store extensions. */
   readonly gesture: EditGestureConstructor;
 }
 
@@ -856,8 +880,11 @@ export interface ServicesAPI {
 /* ── storage ─────────────────────────────────────────────── */
 
 export interface StorageAPI {
+  /** Returns a Promise when the extension runs sandboxed (Store installs). */
   get<T = unknown>(key: string): T | undefined;
+  /** Returns a Promise when the extension runs sandboxed (Store installs). */
   set(key: string, value: unknown): void;
+  /** Returns a Promise when the extension runs sandboxed (Store installs). */
   delete(key: string): void;
 }
 
@@ -899,6 +926,7 @@ export interface EventsAPI {
 /* ── extensions (introspection) ──────────────────────────── */
 
 export interface ExtensionsAPI {
+  /** Returns a Promise and omits local paths when the extension runs sandboxed (Store installs). */
   list(): ExtensionRecord[];
   fork(id: string): Promise<{ id: string }>;
   setEnabled(id: string, enabled: boolean): Promise<void>;
@@ -980,7 +1008,7 @@ export interface HostAPI {
 
 export interface PowermoveAPI {
   readonly id: string; // extension id
-  readonly apiVersion: 1;
+  readonly apiVersion: 1 | 2 | 3;
   readonly manifest: ExtensionManifest;
 
   readonly panels: PanelsAPI;
@@ -995,29 +1023,43 @@ export interface PowermoveAPI {
   readonly menus: MenusAPI;
   readonly status: StatusAPI;
   readonly project: ProjectAPI;
+  /** Requires the full-access permission for Store extensions. */
   readonly anim: AnimAPI;
+  /** Requires the full-access permission for Store extensions. */
   readonly model: ModelAPI;
+  /** Live graph helpers require the full-access permission for Store extensions. */
   readonly selection: SelectionAPI;
+  /** Requires the full-access permission for Store extensions. */
   readonly groups: GroupsAPI;
   readonly transport: TransportAPI;
+  /** Requires the full-access permission for Store extensions. */
   readonly history: HistoryAPI;
+  /** Requires the full-access permission for Store extensions. */
   readonly edit: EditAPI;
   readonly media: MediaAPI;
+  /** Requires the full-access permission for Store extensions. */
   readonly inspector: InspectorAPI;
+  /** Requires the full-access permission for Store extensions. */
   readonly render: RenderAPI;
+  /** Requires the full-access permission for Store extensions. */
   readonly uiState: UIStateAPI;
   readonly ui: UIAPI;
+  /** Requires the full-access permission for Store extensions. */
   readonly dnd: DndAPI;
+  /** Requires the full-access permission for Store extensions. */
   readonly workspace: WorkspaceAPI;
   readonly util: UtilAPI;
   readonly ease: EaseAPI;
+  /** Pure helpers are sandbox-safe; methods that inspect live layers require full access. */
   readonly space3d: Space3DAPI;
+  /** Requires the full-access permission for Store extensions. */
   readonly services: ServicesAPI;
   readonly storage: StorageAPI;
   readonly events: EventsAPI;
   readonly extensions: ExtensionsAPI;
   /** Values the user entered for this extension's declared `vars`. See VarsAPI. */
   readonly vars: VarsAPI;
+  /** Requires the full-access permission for Store extensions. */
   readonly host: HostAPI;
 
   /** Shorthand for events.on. */

@@ -18,6 +18,7 @@
     type VersionEntry
   } from './data';
   import { openPublishSheet } from './publish-sheet';
+  import { openSandboxCheckSheet } from './sandbox-check-sheet';
   import { bridge } from '../kernel/bridge';
 
   /* Two places and seven kinds. Browse is the storefront; a kind is the store
@@ -620,6 +621,8 @@
     if (item.group === 'store') items.push({ label: 'Check for Updates', run: () => void checkForUpdates() });
     if (item.trust === 'store') items.push({ label: 'Trust…', run: () => void trust(item) });
     else if (item.trust === 'store-trusted') items.push({ label: 'Revoke Trust', run: () => void revokeTrust(item) });
+    // Made on this Mac: try it as the Store will run it for everyone else.
+    if (item.trust === 'local') items.push({ label: 'Test in Sandbox…', run: () => openSandboxCheckSheet(PM, item.localId, item.name) });
     items.push({ label: 'Show in Finder', run: () => void reveal(item) });
     items.push('-', { label: 'Uninstall…', run: () => void uninstall(item) });
     openPopoverMenu({ anchor: event.currentTarget, label: `${item.name} actions`, items });

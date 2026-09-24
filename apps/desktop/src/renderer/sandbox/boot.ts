@@ -17,7 +17,7 @@ import * as svelteInternalClient from 'svelte/internal/client';
 import * as svelteStore from 'svelte/store';
 import type { Component } from 'svelte';
 import { createRpc, serializeRpcError } from '../../shared/sandbox-rpc';
-import { createSandboxAPI, sandboxControl, type SandboxInit, type SandboxKey, type SandboxKeyEvent, type SandboxMirror, type SandboxViewInit } from './shim-api';
+import { createSandboxAPI, sandboxControl, sandboxReporter, type SandboxReporter, type SandboxInit, type SandboxKey, type SandboxKeyEvent, type SandboxMirror, type SandboxViewInit } from './shim-api';
 import { isProperty, canAnimateContent, contentLabel } from '../src/legacy/core/content-properties';
 import { structuredProperties, pathTargets } from '../src/legacy/core/vector-paths';
 import { validMatteSource, MATTE_MODES } from '../src/legacy/core/matte';
@@ -37,10 +37,15 @@ type ExtensionModule = {
 export type BundleImporter = (url: string) => Promise<ExtensionModule>;
 const importBundle: BundleImporter = url => import(/* @vite-ignore */ url);
 
+/* The editor helpers are module imports, not `api` members, so the document's
+   role (runtime or view) hands them its reporter once it has a port. */
+let helperReport: SandboxReporter | null = null;
+
 /** Fill the runtime table the compiled bundle resolves `svelte`/`powermove` against. */
 export function installSandboxRuntime(): void {
   const pure: Record<string, unknown> = { isProperty, canAnimateContent, contentLabel, structuredProperties, pathTargets, validMatteSource, MATTE_MODES, expressionDiagnostic, EXPRESSION_NAMES, axisContentKey, axisPath, isAxisTag, CHANNELS_3D, projectPoint, inversePlane, propertyShortcuts };
   const helpers = Object.fromEntries(EDITOR_HELPER_EXPORTS.map(name => [name, name in pure ? pure[name] : (..._args: unknown[]) => {
+    helperReport?.('permission', `powermove.${name}`);
     const error = new Error(`${name} requires full access. Use project.apply or commands in a sandboxed extension.`);
     error.name = 'PermissionError'; (error as Error & { code: string }).code = 'full-access'; throw error;
   }]));
@@ -88,6 +93,7 @@ export async function bootRuntime(init: SandboxInit, port: MessagePort, load: Bu
   });
   const liveApi = createSandboxAPI(live, init);
   control = sandboxControl(liveApi);
+  helperReport = sandboxReporter(live);
   apply(init.theme);
   const runtimeError = (error: unknown) => live.notify('runtime-error', serializeRpcError(error));
   window.addEventListener('error', event => runtimeError(event.error ?? event.message));
@@ -167,6 +173,7 @@ export async function bootView(init: SandboxViewInit, kernelPort: MessagePort, r
     dispose: teardown
   });
   const runtime = createRpc(runtimePort, {});
+  helperReport = sandboxReporter(kernel);
   const onKey = (event: KeyboardEvent): void => {
     const decision = keyToForward(event, keys);
     if (!decision) return;

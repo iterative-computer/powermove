@@ -87,7 +87,8 @@ inside the extension folder. No npm packages, no `..` escapes.
 ## Permissions and the sandbox
 
 Store extensions from other publishers run sandboxed. Declare `apiVersion: 3` for
-new Store-bound extensions and list the access they need in `manifest.json`:
+new Store-bound extensions and list the access they need in `manifest.json`
+(`permissions` may be an empty array):
 
 ```json
 "permissions": ["network", "assets", "project:write"]
@@ -112,9 +113,39 @@ blocks undeclared permissions. This text scan does not detect destructured
 aliases or dynamic property access. Local extensions made or forked on this Mac
 are trusted and keep working without permission declarations.
 
-## The API (apiVersion 1)
+Extensions you make here run with full access. Anything you publish runs
+sandboxed for other people unless it declares `full-access`. Run **Test in
+Sandbox…** from the Library before publishing; the publish sheet runs the same
+check and blocks a release that fails it.
+
+## The API (apiVersion 1–3)
 
 Full types: `api.ts` (next to this file in the agent API pack). Summary:
+
+### Sandbox API (apiVersion 3)
+
+In a Store sandbox, these methods return Promises. Await them even when the
+in-realm type in `api.ts` shows a synchronous result: `api.commands.run`,
+`api.project.apply/select/setTime/play/pause/undo/redo/snapshot`,
+`api.transport.setTime/play/pause/toggle/step`, `api.assets.get`,
+`api.storage.get/set/delete`, `api.media.getImportDefaults`, `api.ui.icon`,
+and `api.extensions.list`. Methods already typed as asynchronous, such as
+`api.assets.pick/import/readText` and `api.ui.confirm`, remain asynchronous.
+Reads from the project mirror (`api.project.get/revision/selection/time/playing`
+and `api.transport.time/playing`) stay synchronous.
+
+| Sandbox-safe | Trusted-only (`permissions: ["full-access"]`) |
+| --- | --- |
+| `effects`, `transitions`, `layers`, `theme`, `keybindings`, `commands`, `palette`, `menus`, `status`, `panels` | `anim`, `model`, `groups`, `history`, `edit`, `inspector`, `render`, `uiState` |
+| `assets`, `project`, `transport` time and controls, `storage`, `events`, `vars`, `util`, `ease`, pure `space3d` helpers | `selection` live graph helpers, `dnd`, `workspace`, `services`, `host`; live `space3d` methods |
+| `media.registerImportDefaults/getImportDefaults`, `ui.toast/confirm/icon`, `extensions.list`, `log`, `onDispose` | `media.importFiles/assets/audio/fonts`, `ui.controls/modal/menu/drag/gesture/mount` |
+
+Sandboxed panels render their `component` or `build` content in a separate
+view iframe. `panels.header`, `panels.moveSlot`, and `panels.library.render`
+are unavailable there; the host owns the panel chrome. Declare `network`,
+`clipboard`, `assets`, or `project:write` when using their corresponding
+capabilities. `full-access` installs run with the in-realm API after the
+person installing the extension accepts the trust dialog.
 
 - **panels** — `register({ id, title, component?, build?, size, min, flush, noscroll, headless })`, `open(id, dock?)` or `open(id, { dock, index })`, `close`, `isOpen`, `refresh`, `list`.
   `component` is a Svelte 5 component receiving `{ panelId, spec }`. `build(body)` is the imperative alternative.

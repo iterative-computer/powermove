@@ -77,14 +77,34 @@ function sandboxTheme(value: Record<string, any>): Record<string, any> {
   return { ...value, rootAttributes: undefined };
 }
 
-/** Starts a store extension behind an opaque-origin script-only iframe. */
-export async function createSandboxRuntime(kernel: Kernel, record: ExtensionRecord, deps: HostDeps, vars: Record<string, string> = {}, test?: {
+/**
+ * Listens to a sandbox from outside, for the publish-time sandbox check
+ * (sandbox-check.ts). With an observer, CSP violations and panel outcomes go
+ * to it instead of the loader's error policy.
+ */
+export interface SandboxObserver {
+  /** A trusted-only member was reached (`render.gl`, `ui.menu`, `powermove.resolveContent`). */
+  permission?(member: string): void;
+  /** apiVersion ≤ 2 code read a property of a method's result that is a Promise here. */
+  asyncMisuse?(member: string): void;
+  csp?(directive: string, blockedUri: string): void;
+  view?(panelId: string, state: 'ready' | 'error', message?: string): void;
+}
+
+export interface SandboxRuntimeOptions {
   frame?: HTMLIFrameElement;
   onPostInit?(port: MessagePort, init: SandboxInit): void;
   /** Deliver a view's `init` without loading a document (views get no `src`). */
   onViewInit?(frame: HTMLIFrameElement, message: SandboxViewInit & { t: 'init' }, ports: MessagePort[]): void;
-}): Promise<SandboxRuntime> {
-  const host = createExtensionAPI(kernel, record, deps, vars);
+  /** Where registrations land. Defaults to `kernel`; the sandbox check passes a scratch kernel so nothing reaches the app. */
+  registry?: Kernel;
+  observer?: SandboxObserver;
+}
+
+/** Starts a store extension behind an opaque-origin script-only iframe. */
+export async function createSandboxRuntime(kernel: Kernel, record: ExtensionRecord, deps: HostDeps, vars: Record<string, string> = {}, test?: SandboxRuntimeOptions): Promise<SandboxRuntime> {
+  const observer = test?.observer;
+  const host = createExtensionAPI(test?.registry ?? kernel, record, deps, vars);
   const frame = test?.frame ?? document.createElement('iframe');
   frame.hidden = true;
   frame.setAttribute('sandbox', 'allow-scripts');
@@ -160,9 +180,24 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
       const key = `${event?.directive} ${event?.blockedURI}`;
       if (violations.has(key)) return;
       violations.add(key);
-      deps.reportRuntimeError(record.id, new Error(`CSP blocked ${event?.blockedURI} (${event?.directive})`));
+      if (observer?.csp) observer.csp(String(event?.directive ?? ''), String(event?.blockedURI ?? ''));
+      else deps.reportRuntimeError(record.id, new Error(`CSP blocked ${event?.blockedURI} (${event?.directive})`));
+    },
+    /* Trusted-only reach and sync reads of async results (shim-api.ts). Live,
+       they only warn once per member: the throw itself already surfaced. */
+    'sandbox-report': (event: { kind?: unknown; member?: unknown }) => {
+      const member = typeof event?.member === 'string' ? event.member.slice(0, 120) : '';
+      if (!member) return;
+      if (event.kind === 'permission') {
+        if (observer?.permission) observer.permission(member);
+        else if (!warned.has(`p:${member}`)) { warned.add(`p:${member}`); host.api.log('warn', `api.${member} needs full access and is unavailable in the sandbox`); }
+      } else if (event.kind === 'async') {
+        if (observer?.asyncMisuse) observer.asyncMisuse(member);
+        else if (!warned.has(`a:${member}`)) { warned.add(`a:${member}`); host.api.log('warn', `api.${member} returns a Promise in the sandbox; await it (apiVersion 3)`); }
+      }
     }
   });
+  const warned = new Set<string>();
   const runtimeLink = { registrations } as { rpc: Rpc; registrations: Map<string, Disposable> };
   const rpc = createRpc(channel.port1, {
     ...shared(runtimeLink, true),
@@ -199,6 +234,7 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
     disconnectRuntime: token => { try { rpc.notify('unmountPanel', token); } catch { /* runtime already gone */ } },
     handlers: link => shared(link, false),
     report: error => deps.reportRuntimeError(record.id, error),
+    ...(observer?.view ? { state: observer.view.bind(observer) } : {}),
     ...(test?.onViewInit ? { post: test.onViewInit } : {})
   };
   /* Keys and theme follow the host while views are open. */
