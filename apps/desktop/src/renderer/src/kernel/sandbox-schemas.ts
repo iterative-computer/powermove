@@ -4,7 +4,11 @@ const id = z.string().min(1).max(128);
 const label = z.string().min(1).max(512);
 const handle = z.number().int().nonnegative().finite();
 const small = z.string().max(4096);
-const data = z.unknown();
+type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+const data: z.ZodType<Json> = z.lazy(() => z.union([
+  z.null(), z.boolean(), z.number().finite(), z.string(), z.array(data),
+  z.custom<Record<string, unknown>>(value => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype).pipe(z.record(z.string(), data))
+]));
 const shape = <T extends z.ZodRawShape>(fields: T) => z.object(fields).strict();
 
 export const registrationSchemas = {
@@ -12,7 +16,7 @@ export const registrationSchemas = {
   transitions: shape({ id, label, group: small.optional(), params: z.array(data).max(32), frag: z.string().min(1).max(65_536), rawShader: z.boolean().optional() }),
   layers: shape({ id, label, version: z.number().int().nonnegative(), icon: small.optional(), color: small.optional(), width: z.number().finite().optional(), height: z.number().finite().optional(), params: z.array(data).max(32), defaults: z.record(z.string(), data).optional(), renderer: z.union([shape({ kind: z.literal('fragment'), fragment: z.string().max(65_536) }), shape({ kind: z.literal('mesh'), assetField: id })]) }),
   theme: shape({ id, name: label, scheme: z.enum(['light', 'dark', 'auto']), tokens: z.record(z.string().startsWith('--').max(128), small).optional(), darkTokens: z.record(z.string().startsWith('--').max(128), small).optional(), css: z.string().max(65_536).optional() }),
-  keybindings: shape({ key: id, command: id, args: z.array(data).max(32).optional(), inFields: z.boolean().optional(), repeat: z.boolean().optional(), looseModifiers: z.boolean().optional(), priority: z.number().finite().optional() }),
+  keybindings: shape({ key: id, command: id, args: z.array(data).max(32).optional(), repeat: z.boolean().optional() }),
   'media-defaults': shape({ anchor: shape({ x: z.number().finite(), y: z.number().finite() }) }),
   commands: shape({ id, label, category: small.optional(), kb: small.nullable().optional(), run: handle, when: handle.optional() }),
   status: shape({ id, text: handle, title: small.optional(), side: z.enum(['left', 'right']).optional(), onClick: handle.optional() }),
@@ -37,11 +41,11 @@ export const invokeSchemas: Record<string, z.ZodType> = {
   'project.apply': anyArgs, 'project.select': anyArgs, 'project.setTime': z.tuple([z.number().finite()]),
   'project.play': z.tuple([]), 'project.pause': z.tuple([]), 'project.undo': z.tuple([]), 'project.redo': z.tuple([]), 'project.snapshot': anyArgs,
   'transport.step': z.tuple([z.number().finite()]),
-  'assets.pick': anyArgs, 'assets.import': anyArgs, 'assets.get': oneId, 'assets.readText': oneId,
+  'assets.pick': anyArgs, 'assets.import': z.tuple([z.custom<File>(value => typeof File !== 'undefined' && value instanceof File), data.optional()]), 'assets.get': oneId, 'assets.readText': oneId,
   'storage.get': z.tuple([storageKey]), 'storage.set': z.tuple([storageKey, data]), 'storage.delete': z.tuple([storageKey]),
   'ui.toast': anyArgs, 'ui.confirm': anyArgs, 'ui.icon': anyArgs,
   'panels.open': anyArgs, 'panels.close': oneId, 'panels.refresh': oneId,
-  'keybindings.unbind': anyArgs, 'theme.activate': oneId, 'theme.setScheme': z.tuple([z.enum(['light', 'dark', 'system'])]),
+  'keybindings.unbind': oneId, 'theme.activate': oneId,
   'palette.open': anyArgs, 'media.getImportDefaults': z.tuple([]),
   'events.emit': z.tuple([id, data]), 'extensions.setUp': oneId
 };
@@ -61,7 +65,7 @@ const hostEventSchemas: Record<string, z.ZodType> = {
   'project:changed': shape({ kind: z.enum(['values', 'structure', 'project', 'assets', 'library', 'history', 'replace']) }),
   selection: z.unknown(), time: z.number().finite(), transport: shape({ playing: z.boolean() }),
   theme: shape({ id, scheme: z.enum(['light', 'dark']) }),
-  'extensions:changed': shape({ ids: z.array(id).max(200), reason: small })
+  'extensions:changed': shape({ ids: z.array(id).max(2000), reason: small })
 };
 export function parseHostEvent(event: string, payload: unknown): unknown {
   const schema = hostEventSchemas[event];

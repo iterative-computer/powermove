@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { EXT_IPC, type ExtensionRecord } from '../../shared/extensions';
 import { IPC } from '../../shared/ipc';
-import { extensionAssetCorsHeaders, registerExtensionsIpc, serveExtensionAsset } from './index';
+import { extensionAssetCorsHeaders, readRegularBundle, registerExtensionsIpc, serveExtensionAsset } from './index';
 import type { ExtensionRegistry } from './registry';
 
 const temporaryDirectories: string[] = [];
@@ -185,5 +185,14 @@ describe('extension asset server', () => {
     const { ipcMain } = fakeIpcMain();
     registerExtensionsIpc(ipcMain, { registry: registryStub(buildDir), resourcesDir: path.join(buildDir, 'builtins'), isTrusted: () => true });
     await expect(serveExtensionAsset('ext/first-ext/bundle.js')).resolves.toBeNull();
+  });
+  it('opens the bundle descriptor without following a symlink', async () => {
+    const directory = await temporaryDirectory();
+    const target = path.join(directory, 'target.js');
+    const link = path.join(directory, 'bundle.js');
+    await fs.writeFile(target, 'outside');
+    await fs.symlink(target, link);
+    await expect(readRegularBundle(link)).resolves.toBeNull();
+    await expect(readRegularBundle(target)).resolves.toEqual(new TextEncoder().encode('outside'));
   });
 });

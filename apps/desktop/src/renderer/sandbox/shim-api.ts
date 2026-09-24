@@ -64,6 +64,11 @@ export function sandboxReporter(rpc: Pick<Rpc, 'notify'>): SandboxReporter {
   };
 }
 const trustedOnly = (name: string, report: SandboxReporter, alternative?: string): any => new Proxy({}, {
+  has(_target, member) {
+    if (typeof member === 'symbol') return false;
+    report('permission', `${name}.${member}`);
+    return false;
+  },
   get(_target, member) {
     if (member === 'then' || typeof member === 'symbol') return undefined;
     report('permission', `${name}.${member}`);
@@ -72,6 +77,11 @@ const trustedOnly = (name: string, report: SandboxReporter, alternative?: string
 });
 /** A sandbox-safe namespace whose other members are trusted-only (`api.ui`, `api.media`). */
 const partlyTrusted = <T extends object>(name: string, safe: T, report: SandboxReporter): T => new Proxy(safe, {
+  has(target, member) {
+    if (member in target) return true;
+    if (typeof member !== 'symbol') report('permission', `${name}.${member}`);
+    return false;
+  },
   get(target, member, receiver) {
     if (typeof member === 'symbol' || member === 'then' || member === 'toJSON' || member in target) return Reflect.get(target, member, receiver);
     report('permission', `${name}.${member}`);
@@ -226,8 +236,8 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
     effects: { register: simpleRegister('effects'), list: () => list('effects'), get: (id: string) => list('effects').find(item => item.id === id) },
     transitions: { register: simpleRegister('transitions'), list: () => list('transitions'), get: (id: string) => list('transitions').find(item => item.id === id) },
     layers: { register: simpleRegister('layers'), list: () => list('layers'), get: (id: string) => list('layers').find(item => item.id === id) },
-    theme: { register: simpleRegister('theme'), activate: (id: string) => fire('invoke', 'theme', 'activate', [id]), setScheme: (value: string) => fire('invoke', 'theme', 'setScheme', [value]), active: () => init.activeTheme ?? '', scheme: () => init.theme.scheme, list: () => list('theme') },
-    keybindings: { bind: simpleRegister('keybindings'), unbind: (key: string, all?: boolean) => fire('invoke', 'keybindings', 'unbind', [key, all]), list: () => list('keybindings'), chordOf: (event: KeyboardEvent) => {
+    theme: { register: simpleRegister('theme'), activate: (id: string) => fire('invoke', 'theme', 'activate', [id]), setScheme: () => { report('permission', 'theme.setScheme'); throw new PermissionError('theme.setScheme'); }, active: () => init.activeTheme ?? '', scheme: () => init.theme.scheme, list: () => list('theme') },
+    keybindings: { bind: simpleRegister('keybindings'), unbind: (key: string) => fire('invoke', 'keybindings', 'unbind', [key]), list: () => list('keybindings'), chordOf: (event: KeyboardEvent) => {
       const parts = [event.metaKey && 'cmd', event.ctrlKey && 'ctrl', event.altKey && 'alt', event.shiftKey && 'shift', event.key.toLowerCase()].filter(Boolean);
       return parts.join('+');
     } },
@@ -258,7 +268,7 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
       const disposable = { dispose() { registrationHandle.dispose(); for (const item of [...previous, ...current]) rpc.release(item); previous = []; current = []; } };
       disposers.push(disposable.dispose);
       return disposable;
-    }, open: (query?: string) => fire('invoke', 'palette', 'open', [query]) },
+    }, open: (query?: string) => fire('invoke', 'palette', 'open', query === undefined ? [] : [query]) },
     menus: { contribute(location: string, fn: (...args: any[]) => unknown) {
       if (mode === 'view') return registration('menus', { location, items: 0 }, [], fn);
       let current: HandleId[] = [], previous: HandleId[] = [];
@@ -283,7 +293,7 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
          panels: the host draws the header from title, and the Library shows
          the icon on the extension's art. */
       return registration('panels', panelInfo(def), [], def);
-    }, list: () => list('panels').map(item => item.id), open: (id: string, options?: unknown) => fire('invoke', 'panels', 'open', [id, options]), close: (id: string) => fire('invoke', 'panels', 'close', [id]), refresh: (id: string) => fire('invoke', 'panels', 'refresh', [id]), isOpen: () => false },
+    }, list: () => list('panels').map(item => item.id), open: (id: string, options?: unknown) => fire('invoke', 'panels', 'open', options === undefined ? [id] : [id, options]), close: (id: string) => fire('invoke', 'panels', 'close', [id]), refresh: (id: string) => fire('invoke', 'panels', 'refresh', [id]), isOpen: () => false },
     project: { get: () => { if (mirror.project && typeof mirror.project === 'object' && 'tooLarge' in mirror.project) throw new Error('Project mirror exceeds 8 MiB; project.get() is unavailable at this revision'); return mirror.project; }, revision: () => mirror.revision, selection: () => mirror.selection,
       time: () => mirror.time, playing: () => mirror.playing,
       apply: (...args: unknown[]) => later('project.apply', 'invoke', 'project', 'apply', args), select: (...args: unknown[]) => later('project.select', 'invoke', 'project', 'select', args),
@@ -293,7 +303,7 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
     storage: { get: (key: string) => later('storage.get', 'invoke', 'storage', 'get', [key]), set: (key: string, value: unknown) => later('storage.set', 'invoke', 'storage', 'set', [key, value]), delete: (key: string) => later('storage.delete', 'invoke', 'storage', 'delete', [key]) },
     media: partlyTrusted('media', { registerImportDefaults: simpleRegister('media-defaults'), getImportDefaults: () => later('media.getImportDefaults', 'invoke', 'media', 'getImportDefaults', []) }, report),
     events: { on(event: string, fn: (...args: any[]) => unknown) { const id = handle(fn); return registration('events', { event, fn: id }, [id]); }, emit: (event: string, payload: unknown) => fire('invoke', 'events', 'emit', [event, payload]) },
-    ui: partlyTrusted('ui', { toast: (message: string, options?: unknown) => fire('invoke', 'ui', 'toast', [message, options]), confirm: (...args: unknown[]) => send('invoke', 'ui', 'confirm', args), icon: (...args: unknown[]) => later('ui.icon', 'invoke', 'ui', 'icon', args), controls: trustedOnly('ui.controls', report), modal: trustedOnly('ui.modal', report), menu: trustedOnly('ui.menu', report), drag: trustedOnly('ui.drag', report), gesture: trustedOnly('ui.gesture', report), mount: trustedOnly('ui.mount', report) }, report),
+    ui: partlyTrusted('ui', { toast: (message: string, options?: unknown) => fire('invoke', 'ui', 'toast', options === undefined ? [message] : [message, options]), confirm: (...args: unknown[]) => send('invoke', 'ui', 'confirm', args), icon: (...args: unknown[]) => later('ui.icon', 'invoke', 'ui', 'icon', args), controls: trustedOnly('ui.controls', report), modal: trustedOnly('ui.modal', report), menu: trustedOnly('ui.menu', report), drag: trustedOnly('ui.drag', report), gesture: trustedOnly('ui.gesture', report), mount: trustedOnly('ui.mount', report) }, report),
     vars: { get: (key: string) => vars[key], has: (key: string) => Object.hasOwn(vars, key), keys: () => Object.keys(vars) },
     extensions: { list: () => later('extensions.list', 'extensions-list'), setUp: (id: string) => send('invoke', 'extensions', 'setUp', [id]),
       fork: restricted('extensions.fork'), setEnabled: restricted('extensions.setEnabled'), remove: restricted('extensions.remove'), reload: restricted('extensions.reload'), reveal: restricted('extensions.reveal'), requestFix: restricted('extensions.requestFix'), rebase: restricted('extensions.rebase') },

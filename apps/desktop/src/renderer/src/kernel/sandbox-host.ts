@@ -6,7 +6,8 @@ import { createExtensionAPI, type ExtensionHandle, type HostDeps } from './host'
 import type { Kernel } from './registries';
 import { themeScheme, themeTokens } from './theme-apply';
 import { mountSandboxView, type ViewHost, type ViewLink } from './sandbox-view';
-import { chordOfEvent } from './keychord';
+import { chordOfEvent, normalizeChord } from './keychord';
+import { bridge } from './bridge';
 import { menuEntriesSchema, paletteEntriesSchema, parseHostEvent, parseInvoke, parseRegistration } from './sandbox-schemas';
 
 const MIRROR_EVENTS = new Set(['project:changed', 'selection', 'time', 'transport']);
@@ -16,17 +17,18 @@ const SAFE_INVOKE: Record<string, Set<string>> = {
   transport: new Set(['step']), assets: new Set(['pick', 'import', 'get', 'readText']),
   storage: new Set(['get', 'set', 'delete']), ui: new Set(['toast', 'confirm', 'icon']),
   panels: new Set(['open', 'close', 'refresh']), keybindings: new Set(['unbind']),
-  theme: new Set(['activate', 'setScheme']), palette: new Set(['open']),
+  theme: new Set(['activate']), palette: new Set(['open']),
   media: new Set(['getImportDefaults']), events: new Set(['emit']),
   extensions: new Set(['setUp'])
 };
 const HOST_EVENTS = new Set(['project:changed', 'selection', 'time', 'transport', 'theme', 'extensions:changed']);
-const ownId = (extension: string, id: string): boolean => id.startsWith(`${extension}.`) || id.startsWith(`${extension}-`);
+const ownId = (extension: string, id: string): boolean => id.startsWith(`${extension}.`);
+const LEGACY_EDIT_COMMANDS = new Set(['delete', 'duplicate', 'split', 'selectAll', 'deselect', 'groupLayers', 'ungroupLayers', 'nudgeSelection', 'nudgeKeyframes']);
 function denied(message: string, code = 'permission_denied'): never {
   const error = new Error(message) as Error & { code: string };
   error.name = 'PermissionError'; error.code = code; throw error;
 }
-type PlainMode = 'project' | 'asset-map' | 'asset' | 'secrets';
+type PlainMode = 'project' | 'comps' | 'asset-map' | 'asset' | 'secrets';
 const MIRROR_LIMIT = 8 * 1024 * 1024;
 class MirrorTooLargeError extends Error {}
 function chargeMirror(budget: { bytes: number } | undefined, value: string): void {
@@ -35,22 +37,29 @@ function chargeMirror(budget: { bytes: number } | undefined, value: string): voi
   budget.bytes += new TextEncoder().encode(value).byteLength;
   if (budget.bytes > MIRROR_LIMIT) throw new MirrorTooLargeError();
 }
-function plain(value: unknown, seen = new WeakMap<object, unknown>(), mode?: PlainMode, budget?: { bytes: number }): unknown {
+function plain(value: unknown, seen = new WeakMap<object, Map<PlainMode | undefined, unknown>>(), mode?: PlainMode, budget?: { bytes: number }): unknown {
   if (value === null || typeof value !== 'object') {
     if (typeof value === 'string') chargeMirror(budget, value);
     return typeof value === 'function' ? undefined : value;
   }
-  if (seen.has(value)) return seen.get(value);
+  if (seen.get(value)?.has(mode)) return seen.get(value)?.get(mode);
   if (value instanceof Date) return value.toISOString();
-  if (value instanceof Map) { const entries = [...value].map(([key, item]) => [plain(key, seen, mode, budget), plain(item, seen, mode, budget)]); return entries; }
-  if (value instanceof Set) return [...value].map(item => plain(item, seen, mode, budget));
+  if (value instanceof Map || value instanceof Set) {
+    const entries: unknown[] = [];
+    const copies = seen.get(value) ?? new Map<PlainMode | undefined, unknown>();
+    copies.set(mode, entries); seen.set(value, copies);
+    if (value instanceof Map) for (const [key, item] of value) entries.push([plain(key, seen, mode, budget), plain(item, seen, mode, budget)]);
+    else for (const item of value) entries.push(plain(item, seen, mode, budget));
+    return entries;
+  }
   const target: Record<string, unknown> | unknown[] = Array.isArray(value) ? [] : {};
-  seen.set(value, target);
+  const copies = seen.get(value) ?? new Map<PlainMode | undefined, unknown>();
+  copies.set(mode, target); seen.set(value, copies);
   for (const [key, item] of Object.entries(value)) {
     if (typeof item === 'function' || mode === 'asset' && /blob|source/i.test(key) || mode === 'secrets' && /token|secret|password|key$/i.test(key)) continue;
     chargeMirror(budget, key);
-    const nextMode = mode === 'project' ? key === 'assets' ? 'asset-map' : key === 'library' || key === 'notes' ? 'secrets' : undefined
-      : mode === 'asset-map' ? 'asset' : mode;
+    const nextMode = mode === 'project' ? key === 'assets' ? 'asset-map' : key === 'library' || key === 'notes' ? 'secrets' : key === 'comps' ? 'comps' : undefined
+      : mode === 'comps' ? 'project' : mode === 'asset-map' ? 'asset' : mode;
     (target as Record<string, unknown>)[key] = plain(item, seen, nextMode, budget);
   }
   return target;
@@ -76,9 +85,10 @@ export function projectMirror(api: ExtensionHandle['api']): SandboxMirror {
   return mirror;
 }
 let lastCloneLog = 0;
-function cached<T>(rpc: Rpc, id: number, fallback: T, map: (value: unknown) => T = value => value as T): (...args: unknown[]) => T {
+export function cached<T>(rpc: Rpc, id: number, fallback: T, map: (value: unknown) => T = value => value as T): (...args: unknown[]) => T {
   let last = fallback;
-  return (...args) => { void rpc.invokeHandle(id, ...args).then(value => { last = map(value); }).catch(() => {}); return last; };
+  let pending = false;
+  return (...args) => { if (!pending) { pending = true; void rpc.invokeHandle(id, ...args).then(value => { last = map(value); }).catch(() => {}).finally(() => { pending = false; }); } return last; };
 }
 function themeSnapshot(kernel: Kernel): SandboxInit['theme'] {
   const definition = kernel.themes.get(kernel.theme.activeId);
@@ -143,9 +153,10 @@ export interface SandboxRuntimeOptions {
 /** Starts a store extension behind an opaque-origin script-only iframe. */
 export async function createSandboxRuntime(kernel: Kernel, record: ExtensionRecord, deps: HostDeps, vars: Record<string, string> = {}, test?: SandboxRuntimeOptions): Promise<SandboxRuntime> {
   const observer = test?.observer;
+  const reg = test?.registry ?? kernel;
   const manifest = record.manifest;
   if (!manifest) throw new Error('Sandbox manifest missing');
-  const host = createExtensionAPI(test?.registry ?? kernel, record, deps, vars);
+  const host = createExtensionAPI(reg, record, deps, vars);
   const frame = test?.frame ?? document.createElement('iframe');
   frame.hidden = true;
   frame.setAttribute('sandbox', 'allow-scripts');
@@ -154,6 +165,11 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
   const perms = (manifest.permissions ?? []).join(',');
   if (!test?.frame) frame.src = `${base}/host/ext-sandbox.html?id=${encodeURIComponent(record.id)}&perms=${encodeURIComponent(perms)}`;
   const registrations = new Map<string, Disposable>();
+  const remoteHandles = new Set<number>();
+  const claimHandles = (handles: number[]): void => {
+    if (new Set([...remoteHandles, ...handles]).size > 2000) denied('Sandbox handle limit is 2000', 'resource_limit');
+    for (const handle of handles) remoteHandles.add(handle);
+  };
   let registrationCount = 0;
   const channel = new MessageChannel();
   const budget = createRpcBudget();
@@ -169,15 +185,22 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
   const invoke = (namespace: string, method: string, args: unknown): unknown => {
     if (!SAFE_INVOKE[namespace]?.has(method)) throw new Error(`Sandbox method unavailable: ${namespace}.${method}`);
     const parsed = parseInvoke(namespace, method, args);
-    if (!permissions.includes('project:write') && (
-      namespace === 'project' && method !== 'snapshot' || namespace === 'transport' ||
-      namespace === 'commands' && !ownId(record.id, String(parsed[0]))))
-      denied(`${namespace}.${method} requires project:write permission; commands.run may call only your own registered commands without it`, 'project:write');
-    if (namespace === 'commands' && ownId(record.id, String(parsed[0])) && kernel.commands.topEntry(String(parsed[0]))?.ownerId !== record.id)
-      denied('commands.run may call only your own registered commands', 'permission_denied');
+    if (!permissions.includes('project:write') && (namespace === 'project' && method !== 'snapshot' || namespace === 'transport'))
+      denied(`${namespace}.${method} requires project:write permission`, 'project:write');
+    if (namespace === 'commands') {
+      const command = String(parsed[0]);
+      const owner = reg.commands.topEntry(command)?.ownerId;
+      const own = ownId(record.id, command) && owner === record.id;
+      if (!own && !(permissions.includes('project:write') && owner === 'legacy' && LEGACY_EDIT_COMMANDS.has(command)))
+        denied('commands.run may call only your own commands or approved editing commands with project:write', permissions.includes('project:write') ? 'permission_denied' : 'project:write');
+    }
     if (namespace === 'extensions' && parsed[0] !== record.id) denied('extensions.setUp accepts only the calling extension id');
-    if (namespace === 'events' && !String(parsed[0]).startsWith(`${record.id}:`)) denied('events.emit requires your own namespace');
-    if (namespace === 'keybindings' && parsed[1] === true) denied('keybindings.unbind cannot affect other owners');
+    if (namespace === 'events') {
+      if (String(parsed[0]).includes(':')) denied('Extension event names cannot contain a namespace separator');
+      return host.api.events.emit(`ext:${record.id}:${String(parsed[0])}` as Parameters<typeof host.api.events.emit>[0], parsed[1] as never);
+    }
+    if (namespace === 'keybindings') { reg.unbind(record.id, String(parsed[0]), false); return; }
+    if (namespace === 'panels' && !ownId(record.id, String(parsed[0]))) denied('panels may act only on your own ids');
     if (namespace === 'theme' && method === 'activate' && !ownId(record.id, String(parsed[0]))) denied('theme.activate accepts only your themes');
     if (namespace === 'assets' && method !== 'get' && !permissions.includes('assets')) {
       const error = new Error(`assets.${method} requires assets permission`); error.name = 'PermissionError'; throw error;
@@ -207,18 +230,23 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
       if (!runtime && kind !== 'events') throw new Error(`Panel views cannot register ${kind}`);
       if (registrationCount >= 200) denied('Sandbox registration limit is 200', 'resource_limit');
       const value = parseRegistration(kind, input);
+      const handles = ['run', 'when', 'text', 'onClick', 'provider', 'items', 'fn']
+        .map(key => value[key]).filter((handle): handle is number => typeof handle === 'number');
+      if (new Set([...remoteHandles, ...handles]).size > 2000) denied('Sandbox handle limit is 2000', 'resource_limit');
       const id = value.id;
       if (typeof id === 'string') {
-        if (!ownId(record.id, id)) denied(`Registration id must start with ${record.id}. or ${record.id}-`, 'id_collision');
-        const registry = ({ commands: kernel.commands, effects: kernel.effects, transitions: kernel.transitions,
-          layers: kernel.layerTypes, theme: kernel.themes, status: kernel.status, panels: kernel.panels } as Record<string, { topEntry(id: string): { ownerId: string } | undefined }>)[kind];
+        if (!ownId(record.id, id)) denied(`Registration id must start with ${record.id}.`, 'id_collision');
+        const registry = ({ commands: reg.commands, effects: reg.effects, transitions: reg.transitions,
+          layers: reg.layerTypes, theme: reg.themes, status: reg.status, panels: reg.panels } as Record<string, { topEntry(id: string): { ownerId: string } | undefined }>)[kind];
         const owner = registry?.topEntry(id)?.ownerId;
         if (owner && owner !== record.id) denied(`Registration id ${id} belongs to ${owner}`, 'id_collision');
       }
-      if (kind === 'keybindings' && (!ownId(record.id, String(value.command)) || kernel.commands.topEntry(String(value.command))?.ownerId !== record.id))
+      if (kind === 'keybindings' && (!ownId(record.id, String(value.command)) || reg.commands.topEntry(String(value.command))?.ownerId !== record.id))
         denied('Keybindings may reference only your registered commands', 'permission_denied');
-      if (kind === 'events' && !String(value.event).startsWith(`${record.id}:`) && !HOST_EVENTS.has(String(value.event)))
-        denied('Event subscriptions require your namespace or a read-only host event');
+      if (kind === 'keybindings' && reg.bindingsFor(normalizeChord(String(value.key))).some(binding => binding.ownerId !== record.id))
+        denied('Keybinding chord belongs to another owner', 'id_collision');
+      if (kind === 'events' && !HOST_EVENTS.has(String(value.event)) && String(value.event).includes(':'))
+        denied('Extension event names cannot contain a namespace separator');
       const rpc = link.rpc;
       let item: Disposable;
       switch (kind) {
@@ -226,17 +254,19 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
         case 'transitions': item = host.api.transitions.register(value as unknown as Parameters<typeof host.api.transitions.register>[0]); break;
         case 'layers': item = host.api.layers.register(value as unknown as Parameters<typeof host.api.layers.register>[0]); break;
         case 'theme': item = host.api.theme.register(sandboxTheme(value) as unknown as Parameters<typeof host.api.theme.register>[0]); break;
-        case 'keybindings': item = host.api.keybindings.bind(value as unknown as Parameters<typeof host.api.keybindings.bind>[0]); break;
+        case 'keybindings': item = host.api.keybindings.bind({ ...value, priority: 1000 } as unknown as Parameters<typeof host.api.keybindings.bind>[0]); break;
         case 'media-defaults': item = host.api.media.registerImportDefaults(value as unknown as Parameters<typeof host.api.media.registerImportDefaults>[0]); break;
         case 'commands': item = host.api.commands.register({ ...value, id: String(value.id), label: String(value.label), run: (...args: unknown[]) => rpc.invokeHandle(Number(value.run), ...args), ...(value.when ? { when: cached(rpc, Number(value.when), true) } : {}) }); break;
         case 'status': item = host.api.status.register({ ...value, id: String(value.id), text: cached(rpc, Number(value.text), null), ...(value.onClick ? { onClick: () => void rpc.invokeHandle(Number(value.onClick)) } : {}) }); break;
         case 'palette': item = host.api.palette.registerProvider(cached(rpc, Number(value.provider), [], result => paletteEntriesSchema.parse(result).map(entry => {
-          if (!ownId(record.id, entry.id) || kernel.commands.topEntry(entry.id)?.ownerId && kernel.commands.topEntry(entry.id)?.ownerId !== record.id) denied('Palette entry id collides with another owner', 'id_collision');
+          claimHandles([entry.run]);
+          if (!ownId(record.id, entry.id) || reg.commands.topEntry(entry.id)?.ownerId && reg.commands.topEntry(entry.id)?.ownerId !== record.id) denied('Palette entry id collides with another owner', 'id_collision');
           return { ...entry, run: () => rpc.invokeHandle(entry.run) };
         }))); break;
         case 'menus': item = host.api.menus.contribute(value.location as Parameters<typeof host.api.menus.contribute>[0], cached(rpc, Number(value.items), [], result => menuEntriesSchema.parse(result).map(entry => {
           if (typeof entry === 'string' || !('run' in entry) || !entry.run) return entry;
           const run = entry.run;
+          claimHandles([run]);
           return { ...entry, run: () => rpc.invokeHandle(run) };
         })) as Parameters<typeof host.api.menus.contribute>[1]); break;
         case 'events': {
@@ -244,10 +274,10 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
              flush a pending mirror push first (same port, so ordered). */
           const event = String(value.event);
           const mirrored = MIRROR_EVENTS.has(event);
-          const sourceEvent = event === 'theme' ? 'theme:changed' : event;
+          const sourceEvent = HOST_EVENTS.has(event) ? event === 'theme' ? 'theme:changed' : event : `ext:${record.id}:${event}`;
           item = host.api.events.on(sourceEvent as Parameters<typeof host.api.events.on>[0], (payload: unknown) => {
             let forwarded: unknown;
-            try { forwarded = event.startsWith(`${record.id}:`) ? payload : parseHostEvent(event, payload); }
+            try { forwarded = HOST_EVENTS.has(event) ? parseHostEvent(event, payload) : payload; }
             catch { return; }
             if (mirrored) flushMirror();
             void rpc.invokeHandle(Number(value.fn), plain(forwarded)).catch(() => {});
@@ -262,8 +292,9 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
         default: throw new Error(`Unknown sandbox registration: ${kind}`);
       }
       registrationCount += 1;
+      claimHandles(handles);
       let released = false;
-      registrations.set(token, { dispose() { if (released) return; released = true; registrationCount -= 1; item.dispose(); } });
+      registrations.set(token, { dispose() { if (released) return; released = true; registrationCount -= 1; for (const handle of handles) remoteHandles.delete(handle); item.dispose(); } });
     },
     'dispose-registration'(token: string) { link.registrations.get(token)?.dispose(); link.registrations.delete(token); },
     invoke,
@@ -295,26 +326,27 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
     }
   });
   const warned = new Set<string>();
+  let stopForBudget = (): void => {};
   const runtimeLink = { registrations } as { rpc: Rpc; registrations: Map<string, Disposable> };
   const rpc = createRpc(channel.port1, {
     ...shared(runtimeLink, true),
     activated: () => activated(),
     'activation-error': (error: { message: string }) => rejected(new Error(error.message))
-  }, 10_000, { budget, onSustainedLimit: () => deps.reportRuntimeError(record.id, new Error('Sandbox RPC rate exceeded 200 messages per second for 3 seconds')) });
+  }, 10_000, { budget, onSustainedLimit: () => stopForBudget(), onRemoteHandleRelease: id => remoteHandles.delete(id) });
   runtimeLink.rpc = rpc;
   const snapshot = (): SandboxInit => ({
     id: record.id, apiVersion: manifest.apiVersion ?? 1, manifest, vars,
     theme: themeSnapshot(kernel), activeTheme: kernel.theme.activeId,
     project: projectMirror(host.api), bundleUrl: record.bundleUrl ?? `${base}/ext/${encodeURIComponent(record.id)}/bundle.js`,
     catalog: {
-      effects: plain(kernel.effects.list()) as Array<Record<string, unknown>>,
-      transitions: plain(kernel.transitions.list()) as Array<Record<string, unknown>>,
-      layers: plain(kernel.layerTypes.list()) as Array<Record<string, unknown>>,
-      theme: plain(kernel.themes.list()) as Array<Record<string, unknown>>,
-      keybindings: plain(kernel.listBindings()) as Array<Record<string, unknown>>,
-      commands: kernel.commands.list().map(({ run: _run, when: _when, ...entry }) => entry),
-      panels: kernel.panels.list().map(({ id, title, icon }) => ({ id, title, icon })),
-      status: kernel.status.list().map(({ id, title, side }) => ({ id, title, side }))
+      effects: plain(reg.effects.list()) as Array<Record<string, unknown>>,
+      transitions: plain(reg.transitions.list()) as Array<Record<string, unknown>>,
+      layers: plain(reg.layerTypes.list()) as Array<Record<string, unknown>>,
+      theme: plain(reg.themes.list()) as Array<Record<string, unknown>>,
+      keybindings: plain(reg.listBindings()) as Array<Record<string, unknown>>,
+      commands: reg.commands.list().map(({ run: _run, when: _when, ...entry }) => entry),
+      panels: reg.panels.list().map(({ id, title, icon }) => ({ id, title, icon })),
+      status: reg.status.list().map(({ id, title, side }) => ({ id, title, side }))
     }
   });
   const links = new Set<ViewLink>();
@@ -325,15 +357,18 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
     src: panelId => test?.onViewInit ? null : `${base}/host/ext-sandbox.html?id=${encodeURIComponent(record.id)}&view=${encodeURIComponent(panelId)}&perms=${encodeURIComponent(perms)}`,
     snapshot,
     theme: () => viewTheme(kernel),
-    keys: () => keyTable(kernel, record.id),
+    keys: () => keyTable(reg, record.id),
     budget,
+    focus: (focused, field) => bridge()?.sandboxFocus?.({ focused, field, extensionId: record.id }),
+    budgetExceeded: () => stopForBudget(),
+    releaseRemoteHandle: id => remoteHandles.delete(id),
     forwardKey: payload => {
       const chord = chordOfEvent(payload);
       if (!chord) return;
       if (chord === 'escape') { (deps.pm as { closeMenus?: () => void }).closeMenus?.(); return; }
       if (chord === 'tab' || chord === 'shift+tab') return;
-      for (const binding of kernel.bindingsFor(chord)) {
-        if (binding.ownerId !== record.id || !ownId(record.id, binding.command) || kernel.commands.topEntry(binding.command)?.ownerId !== record.id) continue;
+      for (const binding of reg.bindingsFor(chord)) {
+        if (binding.ownerId !== record.id || !ownId(record.id, binding.command) || reg.commands.topEntry(binding.command)?.ownerId !== record.id) continue;
         if (payload.field && !binding.inFields || payload.repeat && !binding.repeat) continue;
         void Promise.resolve(host.api.commands.run(binding.command, ...(binding.args ?? [])))
           .catch(error => deps.reportRuntimeError(record.id, error));
@@ -351,9 +386,9 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
   };
   /* Keys and theme follow the host while views are open. */
   let keysQueued = false;
-  const keysOff = kernel.keybindings.onChange(() => {
+  const keysOff = reg.keybindings.onChange(() => {
     if (keysQueued || !links.size) return; keysQueued = true;
-    queueMicrotask(() => { keysQueued = false; broadcast('keys', keyTable(kernel, record.id)); });
+    queueMicrotask(() => { keysQueued = false; broadcast('keys', keyTable(reg, record.id)); });
   });
   let themeQueued = false;
   const themeWatch = typeof MutationObserver === 'function' ? new MutationObserver(() => {
@@ -371,6 +406,7 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
     rpc.close();
     host.disposeAll(); frame.remove();
   };
+  stopForBudget = () => { deps.reportRuntimeError(record.id, new Error('exceeded the sandbox message budget')); dispose(); };
   /* One mirror push per frame to the runtime and every open view. */
   let dirty = false;
   let scheduled = false;

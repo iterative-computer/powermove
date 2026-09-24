@@ -15,7 +15,7 @@ export type SandboxCheckState =
   | { status: 'done'; report: SandboxCheckReport }
   | { status: 'error'; message: string };
 
-export const SANDBOX_OK = 'Runs in the sandbox';
+export const SANDBOX_OK = 'Compatible with the sandbox';
 export const SANDBOX_SKIPPED = 'Needs full access: installs only after the user trusts it.';
 export const SANDBOX_UNAVAILABLE = 'Powermove couldn’t run the sandbox check in this window. Close this and try again.';
 

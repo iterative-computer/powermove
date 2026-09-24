@@ -11,6 +11,7 @@ import { ApiError, type MeDto } from '@powermove/registry/wire';
 import type { ExtensionRecord } from '../../shared/extensions';
 import { createStoreInstaller, StoreLocalError, type StoreInstallerRegistry } from './install';
 import { createProvenanceStore } from './provenance';
+import { STORE_MARKER } from './trust';
 import type { ReleaseByIdResult, StoreClient, VersionsItem } from './store-client';
 
 const REPO = '11111111-1111-4111-8111-111111111111';
@@ -136,17 +137,26 @@ async function readFolder(dir: string): Promise<Record<string, string>> {
 
 const expected = (files: SnapshotInput[]): Record<string, string> =>
   Object.fromEntries(files.map((file) => [file.path, new TextDecoder().decode(file.bytes)]));
+const installed = (files: SnapshotInput[], releaseId: string): Record<string, string> => ({ ...expected(files), [STORE_MARKER]: JSON.stringify({ repoId: REPO, releaseId }) });
 
 async function exists(target: string): Promise<boolean> {
   return fs.lstat(target).then(() => true, () => false);
 }
 
 describe('store installer', () => {
+  it('refuses reserved host and built-in ids before writing a folder', async () => {
+    const releaseId = '77777777-7777-4777-8777-777777777777';
+    const reserved = await build(releaseId, '1.0.0', tree('1.0.0', 'project'));
+    const { userDir, installer } = await setup({ extra: [reserved] });
+    await expect(installer.installRelease({ repoId: REPO, releaseId })).rejects.toMatchObject({ body: { error: 'id_collision' } });
+    expect(await exists(path.join(userDir, 'project'))).toBe(false);
+  });
   it('installs a release byte for byte and records where it came from', async () => {
     const { userDir, installer, provenance, client, v1 } = await setup();
     const result = await installer.installRelease({ repoId: REPO, releaseId: R1 });
     expect(result).toEqual({ localId: 'glass-blur', needsSetup: false, needsTrust: false });
-    expect(await readFolder(path.join(userDir, 'glass-blur'))).toEqual(expected(v1.files));
+    expect(await readFolder(path.join(userDir, 'glass-blur'))).toEqual(installed(v1.files, R1));
+    expect((await installer.localTree('glass-blur'))).toBe(v1.release.treeSha);
     expect(await provenance.get('glass-blur')).toEqual({
       localId: 'glass-blur',
       envKey: REPO,
@@ -192,7 +202,7 @@ describe('store installer', () => {
 
   it('refuses an id that belongs to a built-in', async () => {
     const { userDir, installer } = await setup({ builtins: ['glass-blur'] });
-    await expect(installer.installRelease({ repoId: REPO, releaseId: R1 })).rejects.toMatchObject({ code: 'builtin_collision' });
+    await expect(installer.installRelease({ repoId: REPO, releaseId: R1 })).rejects.toMatchObject({ body: { error: 'id_collision' } });
     expect(await exists(path.join(userDir, 'glass-blur'))).toBe(false);
   });
 
@@ -201,7 +211,7 @@ describe('store installer', () => {
     await installer.installRelease({ repoId: REPO, releaseId: R1 });
     setHead(v2);
     await expect(installer.updateRelease('glass-blur')).resolves.toEqual({ kind: 'updated', localId: 'glass-blur', version: '1.1.0' });
-    expect(await readFolder(path.join(userDir, 'glass-blur'))).toEqual(expected(v2.files));
+    expect(await readFolder(path.join(userDir, 'glass-blur'))).toEqual(installed(v2.files, R2));
     const record = await provenance.get('glass-blur');
     expect(record?.origin).toMatchObject({ releaseId: R2, version: '1.1.0', treeSha: v2.release.treeSha });
     expect(record?.upstream).toEqual({ releaseId: R2, treeSha: v2.release.treeSha });
@@ -267,7 +277,7 @@ describe('store installer', () => {
     setHead(v2);
     failSwap = true;
     await expect(installer.updateRelease('glass-blur')).rejects.toMatchObject({ code: 'local' });
-    expect(await readFolder(path.join(userDir, 'glass-blur'))).toEqual(expected(v1.files));
+    expect(await readFolder(path.join(userDir, 'glass-blur'))).toEqual(installed(v1.files, R1));
     expect((await provenance.get('glass-blur'))?.origin?.releaseId).toBe(R1);
     expect(await fs.readdir(path.join(userDir, '.staging'))).toEqual([]);
     expect(await fs.readdir(path.join(userDir, '.trash'))).toEqual([]);

@@ -21,7 +21,8 @@ import type {
   ThemeDefinition,
   TransitionDefinition
 } from './api';
-import { chordMatches, chordModifierCount, chordOfEvent, forwardedKeyField, hasTextSelection, isFieldTarget, selectableTextRoot, selectTextContents, normalizeChord } from './keychord';
+import type { SandboxInputKey } from '../../../shared/ipc';
+import { chordMatches, chordModifierCount, chordOfEvent, hasTextSelection, isFieldTarget, selectableTextRoot, selectTextContents, normalizeChord } from './keychord';
 import { Registry } from './registry';
 import * as glslHelpers from './glsl';
 import { validateEffect, validateTransition } from './glsl';
@@ -158,12 +159,15 @@ export interface Kernel {
 
   /** Install the ONE window keydown listener that dispatches keybindings. */
   installKeyListener(runCommand: CommandRunner, target?: EventTarget): Disposable;
+  /** Input certified by Electron's before-input-event while a sandbox frame has focus. */
+  dispatchTrustedKey(input: SandboxInputKey): boolean;
 
   disposeOwner(ownerId: string): void;
   dispose(): void;
 }
 
 export function createKernel(): Kernel {
+  let keyRunner: CommandRunner | null = null;
   const panels = new Registry<PanelDefinition>();
   const inspectorSections = new Registry<InspectorSectionDefinition>();
   const commands = new Registry<CommandDefinition>();
@@ -325,24 +329,29 @@ export function createKernel(): Kernel {
     },
 
     installKeyListener(runCommand, target) {
+      keyRunner = runCommand;
       const host: EventTarget | undefined = target ?? (typeof window === 'undefined' ? undefined : window);
       if (!host) return { dispose: () => {} };
       const handler = (raw: Event): void => {
         const event = raw as KeyboardEvent;
         const chord = chordOfEvent(event);
         if (!chord) return;
+        /* While a sandboxed panel's iframe holds focus, physical keys reach the
+           host through main's before-input-event (dispatchTrustedKey). A keydown
+           that lands here with the iframe element as target is an echo of the
+           same press, so it must not run the binding a second time. */
+        if ((event.target as Element | null)?.classList?.contains('ext-panel-frame')) return;
         // Enter belongs to a focused control before canvas editing shortcuts.
         if (chord === 'enter' && (event.target as Element | null)?.closest?.('button,a[href],select,[role="button"],[role="radio"]')) return;
         /* A highlighted transcript or other selectable document surface owns
            Copy just like a focused input. Let Chromium place that text on the
            system clipboard instead of dispatching the editor's Copy Layers. */
-        const forwarded = forwardedKeyField(event);
-        if (forwarded === undefined && (chord === 'cmd+c' || chord === 'ctrl+c') && hasTextSelection()) return;
+        if ((chord === 'cmd+c' || chord === 'ctrl+c') && hasTextSelection()) return;
         /* isFieldTarget also walks to an editable ancestor, so nested markup
            inside a panel editor stays in the native text-editing context. A
            key forwarded from a sandboxed panel carries its frame's answer. */
-        const field = forwarded ?? (isFieldTarget(event.target) || (event.composedPath?.() || []).some(isFieldTarget));
-        const textRoot = forwarded === undefined && !field && selectableTextRoot(event.target);
+        const field = isFieldTarget(event.target) || (event.composedPath?.() || []).some(isFieldTarget);
+        const textRoot = !field && selectableTextRoot(event.target);
         if (textRoot) {
           if (chord === 'cmd+a' || chord === 'ctrl+a') {
             event.preventDefault(); selectTextContents(textRoot);
@@ -382,11 +391,29 @@ export function createKernel(): Kernel {
           if (disposed) return;
           disposed = true;
           host.removeEventListener('keydown', handler);
+          if (keyRunner === runCommand) keyRunner = null;
           keyListeners.delete(disposable);
         }
       };
       keyListeners.add(disposable);
       return disposable;
+    },
+
+    dispatchTrustedKey(input) {
+      if (input.type !== 'keyDown' || !keyRunner) return false;
+      const modifiers = new Set(input.modifiers);
+      const chord = chordOfEvent({ key: input.key, code: input.code,
+        metaKey: modifiers.has('meta'), ctrlKey: modifiers.has('control'),
+        altKey: modifiers.has('alt'), shiftKey: modifiers.has('shift') });
+      if (!chord) return false;
+      for (const binding of kernel.bindingsFor(chord)) {
+        if (binding.ownerId === input.extensionId) continue;
+        if (input.field && !binding.inFields || input.isAutoRepeat && !binding.repeat) continue;
+        try {
+          if (keyRunner(binding.command, binding.args ?? []) !== false) return true;
+        } catch (error) { console.error(`[kernel] keybinding ${binding.chord} failed`, error); return false; }
+      }
+      return false;
     },
 
     disposeOwner(ownerId) {

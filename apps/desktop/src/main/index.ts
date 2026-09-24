@@ -32,7 +32,7 @@ import { recoverAllInterruptedExtensionTransactions } from './codex/change-histo
 import { extensionAssetCorsHeaders, registerExtensionsIpc, removeUserExtension, serveExtensionAsset, sandboxManifestFor } from './extensions';
 import { createExtensionRegistry, type ExtensionRegistry } from './extensions/registry';
 import { createProvenanceStore } from './cloud/provenance';
-import { trustDialog, trustLevelFor } from './cloud/trust';
+import { trustDialog, trustLevelFor, hasStoreMarker } from './cloud/trust';
 import { DEEP_LINK_SCHEME } from './cloud/auth';
 import { createDeepLinkQueue, deepLinksIn, startCloudService, type CloudService } from './cloud/service';
 import { createStoreClient } from './cloud/store-client';
@@ -393,6 +393,24 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
   window.on('focus', () => editors.touch(window));
   window.webContents.once('did-finish-load', drainPendingOpenFiles);
   installRendererMenuShortcutRouting(window.webContents);
+  let sandboxFocus = { focused: false, field: false, extensionId: '' };
+  const onSandboxFocus = (event: Electron.IpcMainEvent, value: unknown): void => {
+    if (event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || !value || typeof value !== 'object') return;
+    const report = value as { focused?: unknown; field?: unknown; extensionId?: unknown };
+    if (typeof report.focused !== 'boolean' || typeof report.field !== 'boolean' || typeof report.extensionId !== 'string') return;
+    sandboxFocus = { focused: report.focused, field: report.focused && report.field, extensionId: report.extensionId };
+  };
+  ipcMain.on(IPC.storeSandboxFocus, onSandboxFocus);
+  window.on('blur', () => { sandboxFocus = { focused: false, field: false, extensionId: '' }; });
+  window.on('closed', () => ipcMain.off(IPC.storeSandboxFocus, onSandboxFocus));
+  window.webContents.on('before-input-event', (_event, input) => {
+    if (!sandboxFocus.focused || input.type !== 'keyDown' || window.webContents.isDestroyed()) return;
+    window.webContents.send(IPC.inputKey, {
+      type: input.type, key: input.key, code: input.code,
+      modifiers: [input.meta && 'meta', input.control && 'control', input.alt && 'alt', input.shift && 'shift'].filter(Boolean),
+      isAutoRepeat: input.isAutoRepeat, field: sandboxFocus.field, extensionId: sandboxFocus.extensionId
+    });
+  });
   installTextContextMenu(window.webContents);
 
   let closing = false, closePrepared = false;
@@ -723,7 +741,7 @@ if (!hasSingleInstanceLock) {
         builtinIds,
         resourcesDir: builtinResourcesDir,
         resolveVars: (id, decls) => vars.resolve(id, decls),
-        trustFor: async (id, scope) => trustLevelFor({ scope }, scope === 'user' ? await provenance.get(id) : null, currentMe())
+        trustFor: async (id, scope) => trustLevelFor({ scope }, scope === 'user' ? await provenance.get(id) : null, currentMe(), scope === 'user' && await hasStoreMarker(userDir, id))
       });
       const beforeRemove = createRemoveValuesPrompt({ registry: extensionRegistry, vars });
       registerExtensionsIpc(ipcMain, {

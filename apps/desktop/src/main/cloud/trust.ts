@@ -15,20 +15,31 @@
 import type { MessageBoxOptions } from 'electron';
 import type { MeDto } from '@powermove/registry/wire';
 
-import type { ExtensionRecord, TrustLevel } from '../../shared/extensions';
+import { EXTENSION_ID, type ExtensionRecord, type TrustLevel } from '../../shared/extensions';
 import { isMine } from './ownership';
 import type { ProvenanceRecord } from './provenance';
+import { lstat } from 'node:fs/promises';
+import path from 'node:path';
+
+export const STORE_MARKER = '.powermove-store.json';
+export async function hasStoreMarker(userDir: string, id: string): Promise<boolean> {
+  if (!EXTENSION_ID.test(id)) return false;
+  try { return (await lstat(path.join(userDir, id, STORE_MARKER))).isFile(); }
+  catch { return false; }
+}
 
 export type { TrustLevel };
 
 export function trustLevelFor(
   record: Pick<ExtensionRecord, 'scope'>,
   provenance: Pick<ProvenanceRecord, 'origin' | 'published' | 'trusted'> | null | undefined,
-  me: MeDto | null
+  me: MeDto | null,
+  markedStore = false
 ): TrustLevel {
   if (record.scope === 'builtin') return 'builtin';
   // Project folders and folders without a store origin were made here.
-  if (record.scope !== 'user' || !provenance?.origin) return 'local';
+  if (record.scope !== 'user') return 'local';
+  if (!provenance?.origin) return markedStore ? 'store' : 'local';
   if (isMine(provenance, me)) return 'local';
   return provenance.trusted ? 'store-trusted' : 'store';
 }

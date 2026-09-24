@@ -127,10 +127,10 @@ export function createProvenanceStore(userData: string, options: { uuid?: () => 
       raw = JSON.parse(text);
     } catch {
       // Never overwrite a file we cannot read: it may hold store lineage.
-      throw new Error('The extension provenance file is damaged. Move it aside and try again.');
+      throw new Error('The extension provenance file is damaged. Powermove will treat store extensions as untrusted until it is repaired.');
     }
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-      throw new Error('The extension provenance file is damaged. Move it aside and try again.');
+      throw new Error('The extension provenance file is damaged. Powermove will treat store extensions as untrusted until it is repaired.');
     }
     /* Entries this build does not understand are kept as they are, so a
        newer Store unit's fields survive an older writer. */

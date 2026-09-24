@@ -42,6 +42,10 @@ describe('trustLevelFor', () => {
       expect(trustLevelFor({ scope }, provenance, account)).toBe(expected);
     });
   }
+  it('fails closed for a marked Store folder with missing or unusable provenance', () => {
+    expect(trustLevelFor({ scope: 'user' }, null, null, true)).toBe('store');
+    expect(trustLevelFor({ scope: 'user' }, { published: published(MINE) }, me(MINE), true)).toBe('store');
+  });
 });
 
 describe('trustDialog', () => {

@@ -31,7 +31,7 @@ it('renders the success line', async () => {
   document.body.append(target);
   const component = mount(SandboxCheckStatus, { target, props: { state: { status: 'done', report: report({ ok: true }) } } });
   flushSync();
-  expect(target.querySelector('[data-sandbox="ok"]')?.textContent).toContain('Runs in the sandbox');
+  expect(target.querySelector('[data-sandbox="ok"]')?.textContent).toContain('Compatible with the sandbox');
   expect(target.querySelector('[data-sandbox="problem"]')).toBeNull();
   await unmount(component);
   target.remove();

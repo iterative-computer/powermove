@@ -32,6 +32,8 @@ import { EXTENSION_ID, parseManifest, type ExtensionManifest, type ExtensionReco
 import type { StoreInstallResult, StoreLocalErrorCode, StoreUpdateResult, StoreUpdates, StoreUpdateState } from '../../shared/store-ipc';
 import type { ProvenanceOrigin, ProvenanceRecord, ProvenanceStore } from './provenance';
 import type { ReleaseByIdResult, StoreClient, VersionsItem } from './store-client';
+import { RESERVED_STORE_IDS } from './reserved-slugs';
+import { STORE_MARKER } from './trust';
 
 /** A failure decided on this Mac; `detail` is written for the person installing. */
 export class StoreLocalError extends Error {
@@ -287,8 +289,8 @@ export function createStoreInstaller(options: StoreInstallerOptions): StoreInsta
       const verified = await fetchVerified(request.repoId, request.releaseId);
       const { manifest } = verified;
       const id = manifest.id;
-      if (builtinIds().has(id)) {
-        throw new StoreLocalError('builtin_collision', `“${manifest.name}” uses the id “${id}”, which belongs to a built-in extension, so it can’t be installed.`);
+      if (RESERVED_STORE_IDS.has(id) || builtinIds().has(id)) {
+        throw new ApiError({ error: 'id_collision', detail: `“${id}” is a reserved extension id.` });
       }
       const folder = folderFor(id);
       if (await exists(folder)) {
@@ -301,6 +303,7 @@ export function createStoreInstaller(options: StoreInstallerOptions): StoreInsta
       }
 
       const staging = await stage(id, verified.files);
+      await fs.writeFile(path.join(staging, STORE_MARKER), JSON.stringify({ repoId: request.repoId, releaseId: request.releaseId }));
       /* Provenance lands before the folder does: a watcher refresh between the
          two must already see someone else's code, never a "local" folder. */
       const origin = originOf(verified);
@@ -386,6 +389,7 @@ export function createStoreInstaller(options: StoreInstallerOptions): StoreInsta
       }
 
       const staging = await stage(localId, verified.files);
+      await fs.writeFile(path.join(staging, STORE_MARKER), JSON.stringify({ repoId: origin.repoId, releaseId: verified.release.id }));
       await fs.mkdir(trashRoot, { recursive: true });
       const trash = path.join(trashRoot, `${localId}-${now()}`);
       try {

@@ -9,6 +9,14 @@ import { withData } from './db';
 import { makeEnv } from './env';
 import { files, publisher, publishRequest, uploadTree } from './publish-fixture';
 const txt = (s: string) => new TextEncoder().encode(s);
+test('rejects a reserved extension slug at publish', () =>
+  withData(async data => {
+    const env = makeEnv(data), actor = await publisher(data, env, 'alice');
+    const built = await uploadTree(data, env, actor, files('project'));
+    const response = await publishRequest(data, env, actor, 'project', built.commitSha);
+    expect(response.status).toBe(400);
+    expect(await response.json() as unknown).toEqual({ error: 'manifest_invalid', detail: 'reserved id' });
+  }));
 test('first publish stores canonical release, tar, refs and reachable objects', () =>
   withData(async (data) => {
     const env = makeEnv(data), a = await publisher(data, env, 'alice'), built = await uploadTree(data, env, a, files());

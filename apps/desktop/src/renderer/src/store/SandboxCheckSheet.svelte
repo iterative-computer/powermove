@@ -30,8 +30,8 @@
 <!-- svelte-ignore a11y_autofocus -->
 <div class="pub-sheet" tabindex="-1" autofocus>
   <header class="acct-head">
-    <h2>Test {name} in the sandbox</h2>
-    <p>Runs it the way people who install it from the Store will: sandboxed, with only the permissions its manifest declares.</p>
+    <h2>Sandbox compatibility check: {name}</h2>
+    <p>Runs a short check with the permissions in its manifest to find compatibility issues before publishing.</p>
   </header>
   <div class="pub-form">
     <SandboxCheckStatus {state} onretry={() => void start()} />

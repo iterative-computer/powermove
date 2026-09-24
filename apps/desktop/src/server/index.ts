@@ -36,7 +36,7 @@ import { recoverAllInterruptedExtensionTransactions } from '../main/codex/change
 import { registerExtensionsIpc, serveExtensionAsset, sandboxManifestFor } from '../main/extensions';
 import { createExtensionRegistry } from '../main/extensions/registry';
 import { createProvenanceStore } from '../main/cloud/provenance';
-import { trustLevelFor } from '../main/cloud/trust';
+import { trustLevelFor, hasStoreMarker } from '../main/cloud/trust';
 import { startExtensionWatcher } from '../main/extensions/watcher';
 import { EditorWindows } from '../main/windows';
 import { app, configureElectronStub, type MessageBoxOptions } from './electron-stub';
@@ -321,9 +321,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     try {
       builtinIds = (await readdir(builtinResourcesDir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && !entry.name.startsWith('.')).map((entry) => entry.name).sort();
     } catch { /* partial checkout: kernel still boots */ }
-    const provenance = createProvenanceStore(userData);
     const registry = createExtensionRegistry({ store, userDir, buildDir, builtinIds, resourcesDir: builtinResourcesDir,
-      trustFor: async (id, scope) => trustLevelFor({ scope }, scope === 'user' ? await provenance.get(id) : null, null) });
+      trustFor: serveTrustFor(userData) });
     registerExtensionsIpc(ipcMain, { registry, resourcesDir: builtinResourcesDir, isTrusted: isTrustedSender });
     refreshRestoredExtensions = async (ids) => { await registry.refresh(ids); registry.emitChanged({ ids, reason: 'reload' }); };
     void registry.refresh().then(() => {
@@ -698,4 +697,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       await store.flushAll();
     }
   };
+}
+/** Serve has no signed-in publisher or native trust dialog. */
+export function serveTrustFor(userData: string): (id: string, scope: 'user' | 'project') => Promise<import('../shared/extensions').TrustLevel> {
+  const provenance = createProvenanceStore(userData);
+  const userDir = path.join(userData, 'extensions');
+  return async (id, scope) => trustLevelFor({ scope }, scope === 'user' ? await provenance.get(id) : null, null, scope === 'user' && await hasStoreMarker(userDir, id));
 }

@@ -10,7 +10,7 @@
   onDestroy(() => off.dispose());
 
   async function run(): Promise<void> {
-    const result = await api!.commands.run(`${api!.id}-command`);
+    const result = await api!.commands.run(`${api!.id}.command`);
     if (result === 'ran') runs += 1;
   }
 </script>

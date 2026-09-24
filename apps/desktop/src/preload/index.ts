@@ -53,6 +53,12 @@ function cloudEvent<T>(channel: string) {
 
 let nextMediaRequest = 0;
 const bridge: PowermoveBridge = {
+  onInputKey: (cb) => {
+    const listener = (_event: IpcRendererEvent, input: import('../shared/ipc').SandboxInputKey): void => cb(input);
+    ipcRenderer.on(IPC.inputKey, listener);
+    return () => ipcRenderer.removeListener(IPC.inputKey, listener);
+  },
+  sandboxFocus: (focus) => ipcRenderer.send(IPC.storeSandboxFocus, focus),
   compatible: {
     status: () => ipcRenderer.invoke(IPC.compatibleStatus),
     configure: input => ipcRenderer.invoke(IPC.compatibleConfigure, input),

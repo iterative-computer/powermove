@@ -97,12 +97,14 @@ new Store-bound extensions and list the access they need in `manifest.json`
 - `network` allows HTTPS and WebSocket requests and remote images and media.
 - `clipboard` allows writing to the clipboard.
 - `assets` allows picking, importing, and reading asset files.
-- `project:write` allows project mutation through `apply`, `undo`, `redo`, `select`, time and transport controls, and host commands. Without it, `commands.run` can call only commands registered by that extension. Permission errors name the missing permission.
+- `project:write` allows project mutation through `apply`, `undo`, `redo`, `select`, time and transport controls. `commands.run` can call an extension's own commands and, with this permission, the named legacy editing commands. It cannot call another extension's commands or File, app, export, settings, or mods commands.
 - `full-access` allows trusted-only APIs. Store installs that request it stay off
   until the person installing them accepts Powermove's full-access dialog. They
   can later revoke trust from the Library.
 
-Store extensions may subscribe to their own `<extension-id>:*` events and the read-only host events `project:changed`, `selection`, `time`, `transport`, `theme`, and `extensions:changed`; they may emit only their own events. Registration IDs must start with `<extension-id>.` or `<extension-id>-`, and keybindings may invoke only their own commands. Store code can list extensions and call `setUp` for itself; management of other extensions requires a trusted extension.
+Store extensions supply simple event names; the kernel publishes them as `ext:<extension-id>:<name>`. They may subscribe to those events and the validated read-only host events `project:changed`, `selection`, `time`, `transport`, `theme`, and `extensions:changed`. Registration IDs must start with `<extension-id>.`, and keybindings may invoke only their own commands. Store code can list extensions and call `setUp` for itself; management of other extensions requires a trusted extension.
+
+The runtime sandbox is the security boundary. The **Sandbox compatibility check** is a compatibility lint: it runs a short, detectable sample of extension behavior to find problems before publishing. A pass is not a security review or trust signal.
 
 The project mirror is shared data visible to every sandboxed Store extension: it contains the full project except asset blob/source fields and keys matching `token`, `secret`, `password`, or ending in `key` within `library` and `notes`. Keep credentials in extension variables or storage. A mirror above 8 MiB makes `project.get()` throw until the project is smaller. Each extension is limited to 200 registrations, 2,000 live callback handles, 50 open panel views, 200 RPC messages/s, 1 MiB per RPC payload, 256 KiB of storage with keys at most 128 characters, and 50 logs/s.
 

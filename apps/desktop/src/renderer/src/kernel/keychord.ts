@@ -190,14 +190,6 @@ export function isFieldTarget(target: unknown): boolean {
   return field.getAttribute?.('contenteditable') !== 'false';
 }
 
-/* Keydowns forwarded from a sandboxed panel's iframe are re-dispatched on the
-   iframe element. The element is never a field, so the iframe's own report of
-   whether a text field had focus travels beside the event. */
-const forwardedKeys = new WeakMap<Event, boolean>();
-export function markForwardedKey(event: Event, inField: boolean): void { forwardedKeys.set(event, inField); }
-/** The iframe's field report for a forwarded keydown; undefined for ordinary events. */
-export function forwardedKeyField(event: Event): boolean | undefined { return forwardedKeys.get(event); }
-
 /** True when the renderer owns a real, non-collapsed text selection. */
 export function hasTextSelection(): boolean {
   if (typeof window === 'undefined' || typeof window.getSelection !== 'function') return false;

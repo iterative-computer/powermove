@@ -28,6 +28,30 @@ const press = (init: KeyboardEventInit & { key: string }, target: EventTarget = 
 };
 
 describe('installKeyListener', () => {
+  it('dispatches a physical sandbox-frame key through the host chord matcher once', () => {
+    const kernel = createKernel();
+    const { runs } = install(kernel);
+    kernel.bind('legacy', { key: 'cmd+z', command: 'undo', priority: 100 });
+    kernel.bind('sandboxed-ext', { key: 'cmd+z', command: 'sandboxed-ext.undo', priority: 1000 });
+    const input = { type: 'keyDown', key: 'z', code: 'KeyZ', modifiers: ['meta'], isAutoRepeat: false, field: false, extensionId: 'sandboxed-ext' };
+    expect(kernel.dispatchTrustedKey(input)).toBe(true);
+    expect(runs).toEqual([['undo', []]]);
+    expect(kernel.dispatchTrustedKey({ ...input, field: true })).toBe(false);
+    expect(kernel.dispatchTrustedKey({ ...input, type: 'keyUp' })).toBe(false);
+  });
+  it('ignores a keydown echoed onto a sandbox panel iframe (the trusted path already ran it)', () => {
+    const kernel = createKernel();
+    const { runs } = install(kernel);
+    kernel.bind('legacy', { key: 'cmd+z', command: 'undo', priority: 100 });
+    const frame = document.createElement('iframe');
+    frame.className = 'ext-panel-frame';
+    document.body.append(frame);
+    expect(press({ key: 'z', metaKey: true }, frame)).toBe(false);
+    expect(runs).toEqual([]);
+    // The same press from anywhere else still runs.
+    press({ key: 'z', metaKey: true });
+    expect(runs).toEqual([['undo', []]]);
+  });
   it('leaves Enter on a focused button available for native activation', () => {
     const kernel = createKernel();
     const { runs } = install(kernel);

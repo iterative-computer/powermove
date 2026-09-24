@@ -22,7 +22,7 @@ test('store code runs in an opaque iframe and network permission controls fetch'
   await session.relaunch();
   await session.openEditor();
   const { page } = session;
-  await page.waitForFunction(() => (window as any).PM?.Kernel?.effects?.has('sandboxed-ext-tint'));
+  await page.waitForFunction(() => (window as any).PM?.Kernel?.effects?.has('sandboxed-ext.tint'));
   // Two runtime iframes (the fixture's panel adds a view iframe per extension, excluded here).
   await page.waitForFunction(() => [...document.querySelectorAll('iframe[src*="/host/ext-sandbox.html"]')]
     .filter((f) => !(f as HTMLIFrameElement).src.includes('&view=')).length === 2);
@@ -37,12 +37,12 @@ test('store code runs in an opaque iframe and network permission controls fetch'
   }
   await page.waitForFunction(() => {
     const list = (window as any).PM?.Kernel?.effects?.list?.() ?? [];
-    return list.filter((e: any) => String(e.id).endsWith('-proof')).length === 2;
+    return list.filter((e: any) => String(e.id).endsWith('.proof')).length === 2;
   }, undefined, { timeout: 15_000 });
   const checks = await page.evaluate(() => {
     const list = (window as any).PM?.Kernel?.effects?.list?.() ?? [];
-    return list.filter((e: any) => String(e.id).endsWith('-proof'))
-      .map((e: any) => ({ id: String(e.id).slice(0, -'-proof'.length), ...JSON.parse(e.label) }));
+    return list.filter((e: any) => String(e.id).endsWith('.proof'))
+      .map((e: any) => ({ id: String(e.id).slice(0, -'.proof'.length), ...JSON.parse(e.label) }));
   });
   console.log('SANDBOX PROOF', JSON.stringify(checks));
   expect(checks).toContainEqual({ id: 'sandboxed-ext', powermove: false, parentDenied: true, cspBlocked: false, deleteRefused: false });
@@ -59,14 +59,14 @@ test('a store extension’s Svelte panel renders in its own view iframe with hos
   await session.relaunch();
   await session.openEditor();
   const { page } = session;
-  const panelId = 'sandboxed-ext-panel';
+  const panelId = 'sandboxed-ext.panel';
   await page.waitForFunction((id) => (window as any).PM?.Kernel?.panels?.has(id), panelId);
   await page.evaluate((id) => {
     const PM = (window as any).PM;
     PM.WS.mutate((workspace: any) => PM.Layout.addPanel(workspace, id, 'right'));
   }, panelId);
 
-  const panel = page.locator(`#panel-${panelId}`);
+  const panel = page.locator(`[id="panel-${panelId}"]`);
   await expect(panel).toBeVisible();
   await expect(panel).toHaveClass(/\bframe\b/);
   await expect(panel.locator('header .ptitle')).toHaveText('Sandbox panel');
@@ -91,16 +91,35 @@ test('a store extension’s Svelte panel renders in its own view iframe with hos
 
   // Only the extension's own bindings cross from its view; a field keeps its own keys.
   const keyProofCount = () => page.evaluate(() => ((window as any).PM?.Kernel?.effects?.list?.() ?? [])
-    .filter((effect: { id: string }) => effect.id.startsWith('sandboxed-ext-key-')).length);
+    .filter((effect: { id: string }) => effect.id.startsWith('sandboxed-ext.key-')).length);
   const box = (await frame.boundingBox())!;
   await page.mouse.click(box.x + box.width / 2, box.y + box.height - 8); // empty panel area
   await expect.poll(() => page.evaluate(() => document.activeElement?.className)).toBe('ext-panel-frame');
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    (window as any).__sandboxUndoCount = 0;
+    const original = PM.cmd.bind(PM);
+    PM.cmd = (command: string, ...args: unknown[]) => {
+      if (command === 'undo') (window as any).__sandboxUndoCount++;
+      return original(command, ...args);
+    };
+  });
+  // A real keypress reaches main's before-input-event; Playwright's CDP keys
+  // bypass it, so drive the key the way Electron's own tests do.
+  await session.app.evaluate(({ BrowserWindow }) => {
+    const w = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]!;
+    w.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'z', modifiers: ['meta'] });
+    w.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'z', modifiers: ['meta'] });
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).__sandboxUndoCount)).toBe(1);
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(() => (window as any).__sandboxUndoCount)).toBe(1); // exactly once: no echo through the page listener
   await page.keyboard.press('Meta+Shift+9');
-  await page.keyboard.press('g');
+  await page.keyboard.press('Alt+Shift+F10');
   await expect.poll(keyProofCount).toBe(2);
-  // Click the Note field (third row of the fixture) and type: `g` stays in the field.
+  // Click the Note field (third row of the fixture) and type: the chord is ignored in the field.
   await page.mouse.click(box.x + 40, box.y + 12 + 26 * 2 + 12 + 14);
-  await page.keyboard.press('g');
+  await page.keyboard.press('Alt+Shift+F10');
   await page.keyboard.press('Meta+Shift+9');
   await page.waitForTimeout(200);
   expect(await keyProofCount()).toBe(2);

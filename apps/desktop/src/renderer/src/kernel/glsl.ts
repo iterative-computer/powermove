@@ -11,7 +11,7 @@
  */
 import type { EffectDefinition, EffectParamDefinition, TransitionDefinition } from './api';
 
-export const EFFECT_ID = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
+export const EFFECT_ID = /^[a-zA-Z][a-zA-Z0-9._-]{0,63}$/;
 export const PARAM_KEY = /^[a-z][a-zA-Z0-9]*$/;
 export const MAX_PASSES = 8;
 export const MAX_PARAMS = 32;

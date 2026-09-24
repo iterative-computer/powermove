@@ -622,7 +622,7 @@
     if (item.trust === 'store') items.push({ label: 'Trust…', run: () => void trust(item) });
     else if (item.trust === 'store-trusted') items.push({ label: 'Revoke Trust', run: () => void revokeTrust(item) });
     // Made on this Mac: try it as the Store will run it for everyone else.
-    if (item.trust === 'local') items.push({ label: 'Test in Sandbox…', run: () => openSandboxCheckSheet(PM, item.localId, item.name) });
+    if (item.trust === 'local') items.push({ label: 'Sandbox compatibility check…', run: () => openSandboxCheckSheet(PM, item.localId, item.name) });
     items.push({ label: 'Show in Finder', run: () => void reveal(item) });
     items.push('-', { label: 'Uninstall…', run: () => void uninstall(item) });
     openPopoverMenu({ anchor: event.currentTarget, label: `${item.name} actions`, items });

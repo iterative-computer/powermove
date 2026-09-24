@@ -54,6 +54,8 @@ it('caps live handles and rejects oversized or deeply nested incoming messages',
   let nested: unknown = 'leaf';
   for (let i = 0; i < 70; i++) nested = { next: nested };
   await expect(left.call('echo', nested)).rejects.toMatchObject({ code: 'resource_limit' });
+  await expect(left.call('echo', new Map([['blob', 'x'.repeat(2 * 1024 * 1024)]]))).rejects.toMatchObject({ code: 'resource_limit' });
+  await expect(left.call('echo', new Set(['x'.repeat(2 * 1024 * 1024)]))).rejects.toMatchObject({ code: 'resource_limit' });
 });
 it('rejects an oversized reply from a sandbox callback', async () => {
   const { left } = pair({}, { huge: () => 'x'.repeat(2 * 1024 * 1024) }, 500);
@@ -94,6 +96,26 @@ it('reports a sustained over-rate sender after three seconds', async () => {
   for (let second = 0; second < 4; second++) {
     for (let index = 0; index < 201; index++) sender.notify('noise');
     await new Promise(resolve => setTimeout(resolve, 10));
+    now += 1_000;
+  }
+  expect(report).toHaveBeenCalledTimes(1);
+});
+
+it('meters unsolicited replies and caps handles across connected ports', async () => {
+  let now = 2_000;
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  const budget = createRpcBudget();
+  const a = new MessageChannel(), b = new MessageChannel();
+  const report = vi.fn();
+  const receiver = createRpc(a.port1 as unknown as MessagePort, {}, 100, { budget, maxIncomingPerSecond: 2, onSustainedLimit: report, maxHandles: 2 });
+  const view = createRpc(b.port1 as unknown as MessagePort, {}, 100, { budget, maxHandles: 2 });
+  close.push(() => { receiver.close(); view.close(); a.port2.close(); b.port2.close(); clock.mockRestore(); });
+  receiver.handle(() => 1);
+  view.handle(() => 2);
+  expect(() => view.handle(() => 3)).toThrow('handle limit');
+  for (let second = 0; second < 4; second++) {
+    for (let index = 0; index < 3; index++) a.port2.postMessage({ t: 'reply', id: 900 + index, ok: true, v: 'noise' });
+    await new Promise(resolve => setTimeout(resolve, 5));
     now += 1_000;
   }
   expect(report).toHaveBeenCalledTimes(1);

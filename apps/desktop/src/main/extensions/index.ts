@@ -1,4 +1,5 @@
-import { realpath, readFile, lstat } from 'node:fs/promises';
+import { realpath, lstat, open } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import path from 'node:path';
 import type { IpcMain, IpcMainEvent, IpcMainInvokeEvent } from 'electron';
 
@@ -21,6 +22,17 @@ type ExtensionsIpcEvent = IpcMainEvent | IpcMainInvokeEvent;
 
 let assetBuildDir: string | null = null;
 let assetRegistry: ExtensionRegistry | null = null;
+
+/** Open and inspect the same descriptor so a swapped symlink cannot redirect a bundle read. */
+export async function readRegularBundle(candidate: string): Promise<Uint8Array | null> {
+  try {
+    const file = await open(candidate, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      if (!(await file.stat()).isFile()) return null;
+      return new Uint8Array(await file.readFile());
+    } finally { await file.close(); }
+  } catch { return null; }
+}
 
 /**
  * Main-owned record, never permissions supplied by the iframe URL. Store
@@ -196,10 +208,11 @@ export async function serveExtensionAsset(pathname: string): Promise<Response | 
     const realDirectory = await realpath(directory);
     if (realDirectory !== directory) return null;
     const candidate = path.join(realDirectory, 'bundle.js');
-    const metadata = await lstat(candidate);
-    if (!metadata.isFile()) return null;
-    const contents = await readFile(candidate);
-    return new Response(contents, {
+    const contents = await readRegularBundle(candidate);
+    if (!contents) return null;
+    const body = new ArrayBuffer(contents.byteLength);
+    new Uint8Array(body).set(contents);
+    return new Response(body, {
       headers: {
         'Cache-Control': 'no-store',
         'Content-Type': 'text/javascript; charset=utf-8',

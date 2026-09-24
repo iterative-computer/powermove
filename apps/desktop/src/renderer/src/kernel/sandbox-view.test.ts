@@ -68,7 +68,7 @@ async function start(): Promise<Harness> {
   runtimeFrame.dispatchEvent(new Event('load'));
   const runtime = await pending;
   cleanup.push(() => runtime.dispose());
-  const panelId = 'sandboxed-ext-panel';
+  const panelId = 'sandboxed-ext.panel';
   await until(() => kernel.panels.has(panelId), 'panel registration');
   const pm: Record<string, any> = { PANELS: { [panelId]: kernel.panels.get(panelId) }, panelInst: {}, icon: () => null, Layout: { ws: null } };
   return { kernel, runtime, panelId, views, pm };
@@ -109,7 +109,7 @@ it('docks a sandboxed Svelte panel as a frame panel with host chrome, refreshes 
   expect(first.target.textContent).toContain('Project revision');
   expect(first.target.querySelector('b')?.textContent).toBe('7');
   // Its registrations stayed local: the kernel still has exactly one owner per contribution.
-  expect(h.kernel.commands.list().filter(command => command.id === 'sandboxed-ext-command')).toHaveLength(1);
+  expect(h.kernel.commands.list().filter(command => command.id === 'sandboxed-ext.command')).toHaveLength(1);
 
   // Panel UI reaches the runtime's command through the kernel.
   (first.target.querySelector('button') as HTMLButtonElement).click();
@@ -147,8 +147,8 @@ it('ignores forged host shortcuts and dispatches only the extension’s own bind
   await until(() => frame.dataset.state === 'ready', 'view mounted');
   h.kernel.commands.register('app', { id: 'save-as', label: 'Save As', run: () => calls.push('save') });
   h.kernel.bind('app', { key: 'cmd+shift+s', command: 'save-as' });
-  h.kernel.commands.register('sandboxed-ext', { id: 'sandboxed-ext-own', label: 'Own', run: () => calls.push('own') });
-  h.kernel.bind('sandboxed-ext', { key: 'h', command: 'sandboxed-ext-own' });
+  h.kernel.commands.register('sandboxed-ext', { id: 'sandboxed-ext.own', label: 'Own', run: () => calls.push('own') });
+  h.kernel.bind('sandboxed-ext', { key: 'h', command: 'sandboxed-ext.own' });
   frame.tabIndex = 0;
   frame.focus();
   expect(document.activeElement).toBe(frame);

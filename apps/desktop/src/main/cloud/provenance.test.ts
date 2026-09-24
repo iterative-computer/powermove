@@ -56,7 +56,7 @@ describe('provenance', () => {
     await store.remove('one');
     expect(Object.keys(await store.read())).toEqual(['two']);
     await fs.writeFile(path.join(dir, PROVENANCE_FILE), '{not json');
-    await expect(store.ensureEnvKey('three')).rejects.toThrow(/damaged/);
+    await expect(store.ensureEnvKey('three')).rejects.toThrow('Powermove will treat store extensions as untrusted until it is repaired.');
     expect(await fs.readFile(path.join(dir, PROVENANCE_FILE), 'utf8')).toBe('{not json');
     await expect(store.get('../x')).rejects.toThrow(/Invalid extension id/);
   });

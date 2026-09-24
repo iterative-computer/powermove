@@ -755,6 +755,8 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
     typeof PM?.cmd === 'function' ? PM.cmd(command, ...(args ?? [])) : runKernelCommand(kernel, command, args)
   );
   subscriptions.push(() => keyListener.dispose());
+  const inputKeyOff = hostBridge()?.onInputKey?.(input => kernel.dispatchTrustedKey(input));
+  if (inputKeyOff) subscriptions.push(inputKeyOff);
 
   const signals = installKernelSignals(kernel);
   subscriptions.push(() => signals.dispose());

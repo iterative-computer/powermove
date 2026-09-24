@@ -162,6 +162,7 @@ export async function bootView(init: SandboxViewInit, kernelPort: MessagePort, r
   const teardown = (): void => {
     if (torn) return; torn = true;
     win.removeEventListener('keydown', onKey);
+    doc.removeEventListener('focusin', onFocus, true);
     doc.removeEventListener('pointerdown', onPointer, true);
     control?.dispose();
     runtime.close();
@@ -181,10 +182,12 @@ export async function bootView(init: SandboxViewInit, kernelPort: MessagePort, r
     if (decision.prevent) event.preventDefault();
     kernel.notify('key', decision.forward);
   };
+  const onFocus = (): void => kernel.notify('focus', { field: isFieldTarget(doc.activeElement) });
   /* A press inside the panel never reaches the app's document, so menus and
      popovers open there would not hear the outside click. */
   const onPointer = (event: PointerEvent): void => kernel.notify('pointer', { button: event.button, x: event.clientX, y: event.clientY });
   win.addEventListener('keydown', onKey);
+  doc.addEventListener('focusin', onFocus, true);
   doc.addEventListener('pointerdown', onPointer, true);
   win.addEventListener('error', event => kernel.notify('runtime-error', serializeRpcError(event.error ?? event.message)));
   win.addEventListener('unhandledrejection', event => kernel.notify('runtime-error', serializeRpcError(event.reason)));

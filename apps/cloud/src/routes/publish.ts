@@ -15,6 +15,7 @@ import { storeIcon } from '../objects/icon';
 import { canReadFiles } from '../lifecycle';
 import { lineageFor, toListing, toRelease } from '../dto';
 import { requirePublisher, requireSession } from './session';
+import { isReservedExtensionId } from '../handles';
 const invalid = (detail?: string) => new ApiError({ error: 'tree_invalid', detail });
 const missing = (shas: string[]) => new ApiError({ error: 'object_missing', shas });
 const unique = (e: unknown) =>
@@ -237,6 +238,11 @@ export function publishRoutes(deps: PublishDeps = {}) {
       }
       if (manifest.id !== slug) {
         throw new ApiError({ error: 'manifest_invalid', detail: 'manifest id must equal slug' });
+      }
+      // The reserved `powermove` publisher seeds the shipped built-ins. Other
+      // publishers cannot claim their ids or any host event word.
+      if (isReservedExtensionId(manifest.id) && publisher.handle !== 'powermove') {
+        throw new ApiError({ error: 'manifest_invalid', detail: 'reserved id' });
       }
       if (manifest.version !== body.version) {
         throw new ApiError({ error: 'version_invalid' });

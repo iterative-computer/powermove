@@ -34,6 +34,8 @@ export interface ViewHost {
   /** The host's keybindings, reduced to what a view needs to filter keydowns. */
   keys(): SandboxKey[];
   budget: RpcBudget;
+  budgetExceeded(): void;
+  releaseRemoteHandle(id: number): void;
   forwardKey(payload: SandboxKeyEvent): void;
   outsideClick(): void;
   /** Live views, for mirror/theme/keys broadcasts. */
@@ -43,6 +45,7 @@ export interface ViewHost {
   /** Kernel handlers shared with the runtime iframe (invoke, events, log, errors). */
   handlers(link: ViewLink): Record<string, (...args: any[]) => unknown>;
   report(error: Error): void;
+  focus?(focused: boolean, field: boolean): void;
   /** A sandbox check listens for each view's outcome instead of the error policy. */
   state?(panelId: string, state: 'ready' | 'error', message?: string): void;
   /** Test seam: deliver `init` without a real document. */
@@ -66,6 +69,9 @@ export function mountSandboxView(host: ViewHost, panel: SandboxPanelInfo, body: 
   frame.title = panel.title;
   frame.dataset.view = panel.id;
   let live: { link: ViewLink; token: string } | null = null;
+  const focus = (focused: boolean, field = false): void => host.focus?.(focused, field);
+  frame.addEventListener('focus', () => focus(true));
+  frame.addEventListener('blur', () => focus(false));
 
   const disconnect = (): void => {
     if (!live) return;
@@ -100,6 +106,9 @@ export function mountSandboxView(host: ViewHost, panel: SandboxPanelInfo, body: 
       pointer(payload: { button?: unknown; x?: unknown; y?: unknown }) {
         if (frame.ownerDocument.activeElement === frame && payload && payload.button === 0) host.outsideClick();
       },
+      focus(payload: { field?: unknown }) {
+        if (frame.ownerDocument.activeElement === frame && typeof payload?.field === 'boolean') focus(true, payload.field);
+      },
       mounted() { frame.dataset.state = 'ready'; host.state?.(panel.id, 'ready'); },
       'view-error'(error: { message?: unknown }) {
         frame.dataset.state = 'error';
@@ -107,7 +116,7 @@ export function mountSandboxView(host: ViewHost, panel: SandboxPanelInfo, body: 
         if (host.state) host.state(panel.id, 'error', message);
         else host.report(new Error(`Panel "${panel.id}": ${message}`));
       }
-    }, 10_000, { budget: host.budget, onSustainedLimit: () => host.report(new Error('Sandbox RPC rate exceeded 200 messages per second for 3 seconds')) });
+    }, 10_000, { budget: host.budget, onSustainedLimit: host.budgetExceeded, onRemoteHandleRelease: host.releaseRemoteHandle });
     host.links.add(link);
     live = { link, token };
     host.connectRuntime(panel.id, token, brokered.port2);
@@ -136,6 +145,7 @@ export function mountSandboxView(host: ViewHost, panel: SandboxPanelInfo, body: 
 
   return {
     dispose() {
+      if (frame.ownerDocument.activeElement === frame) focus(false);
       observer?.disconnect();
       removalObserver?.disconnect();
       frame.removeEventListener('load', connect);

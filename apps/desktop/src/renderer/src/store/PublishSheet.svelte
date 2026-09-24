@@ -277,7 +277,7 @@
         </div>
       {/if}
 
-      <h3 class="pub-title">Sandbox check</h3>
+      <h3 class="pub-title">Sandbox compatibility check</h3>
       <SandboxCheckStatus state={sandbox} onretry={busy ? undefined : () => void runCheck()} />
 
       {#if plan.permissionFindings.length}

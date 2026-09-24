@@ -5,9 +5,17 @@ import type { ExtensionPermission, ExtensionRecord } from '../../../shared/exten
 import type { HostDeps } from './host';
 import { bootRuntime, bootView } from '../../sandbox/boot';
 import { createKernel } from './registries';
-import { runSandboxCheck } from './sandbox-check';
+import { runSandboxCheck, quietDeps } from './sandbox-check';
 
 afterEach(() => { document.body.replaceChildren(); vi.unstubAllGlobals(); });
+
+it('keeps the live transport still during a compatibility check', () => {
+  const step = vi.fn();
+  const project = { get: () => ({}), revision: () => 1, selection: () => [], time: () => 0, playing: () => false } as unknown as ProjectAPI;
+  const quiet = quietDeps({ project, transport: { step } } as unknown as Omit<HostDeps, 'reportRuntimeError'>, vi.fn());
+  quiet.transport!.step(5);
+  expect(step).not.toHaveBeenCalled();
+});
 
 function harness(activate: (api: PowermoveAPI) => void, permissions: ExtensionPermission[] = []) {
   const kernel = createKernel();
@@ -48,20 +56,35 @@ it('reports a trusted-only member even when the fixture catches its error', asyn
   expect(report.permissionErrors).toEqual([{ namespace: 'render', member: 'gl', count: 1 }]);
   expect(report.ok).toBe(false);
 });
+it('reports trusted-only membership probes during the compatibility check', async () => {
+  const report = await harness(api => { void ('gl' in api.render); });
+  expect(report.permissionErrors).toEqual([{ namespace: 'render', member: 'gl', count: 1 }]);
+  expect(report.ok).toBe(false);
+});
 
 it('reports a panel that throws while mounting', async () => {
-  const report = await harness(api => api.panels.register({ id: 'check-fixture-broken', title: 'Broken', build() { throw new Error('panel boom'); } }));
+  const report = await harness(api => api.panels.register({ id: 'check-fixture.broken', title: 'Broken', build() { throw new Error('panel boom'); } }));
   expect(report.activation).toBe('ok');
-  expect(report.panels).toEqual([{ id: 'check-fixture-broken', mounted: false, error: 'panel boom' }]);
+  expect(report.panels).toEqual([{ id: 'check-fixture.broken', mounted: false, error: 'panel boom' }]);
   expect(report.ok).toBe(false);
 });
 
 it('passes a clean fixture with a mounted panel', async () => {
-  const report = await harness(api => api.panels.register({ id: 'check-fixture-clean', title: 'Clean', build(body) { body.textContent = 'Ready'; } }));
+  const report = await harness(api => api.panels.register({ id: 'check-fixture.clean', title: 'Clean', build(body) { body.textContent = 'Ready'; } }));
   expect(report.activation).toBe('ok');
-  expect(report.panels).toEqual([{ id: 'check-fixture-clean', mounted: true }]);
+  expect(report.panels).toEqual([{ id: 'check-fixture.clean', mounted: true }]);
   expect(report.permissionErrors).toEqual([]);
   expect(report.ok).toBe(true);
+});
+
+it('checks owned keybindings and command calls against the scratch registry', async () => {
+  const report = await harness(async api => {
+    api.commands.register({ id: 'check-fixture.run', label: 'Run', run: () => 'ok' });
+    api.keybindings.bind({ key: 'cmd+shift+9', command: 'check-fixture.run' });
+    await api.commands.run('check-fixture.run');
+  });
+  expect(report.ok).toBe(true);
+  expect(report.activation).toBe('ok');
 });
 
 it('skips a full-access manifest without running the fixture', async () => {
