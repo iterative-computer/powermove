@@ -1,0 +1,50 @@
+{
+  "name": "powermove-cli",
+  "version": "1.0.3",
+  "license": "GPL-3.0-or-later",
+  "description": "Run the Powermove motion editor host on any machine and use it from a browser: `npx powermove serve`.",
+  "type": "module",
+  "bin": {
+    "powermove": "bin/powermove.mjs"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node ../../apps/desktop/scripts/build-serve.mjs",
+    "prepack": "node ../../apps/desktop/scripts/build-serve.mjs",
+    "start": "node bin/powermove.mjs serve"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/iterative-computer/powermove.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://powermove.app",
+  "keywords": [
+    "powermove",
+    "motion",
+    "animation",
+    "editor",
+    "remote",
+    "tailscale"
+  ],
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.261",
+    "@openai/codex": "0.153.4",
+    "esbuild": "0.25.12",
+    "ffmpeg-static": "5.3.0",
+    "svelte": "5.56.10",
+    "ws": "^8.18.0",
+    "happy-dom": "20.11.6"
+  }
+}

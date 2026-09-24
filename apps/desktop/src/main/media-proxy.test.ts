@@ -7,7 +7,7 @@ import type { IpcMain, IpcMainInvokeEvent } from 'electron';
 
 import { IPC } from '../shared/ipc';
 import { MAX_SEQUENCE_FRAMES } from '../shared/animated-image';
-import { MAX_PROXY_CHUNK_BYTES, MediaProxyService, registerMediaProxyIpc, sequenceProgressReader } from './media-proxy';
+import { MAX_PROXY_CHUNK_BYTES, MediaProxyService, imageSequenceConverter, registerMediaProxyIpc, sequenceProgressReader } from './media-proxy';
 
 const roots: string[] = [];
 
@@ -85,6 +85,16 @@ describe('native image sequence conversion', () => {
     await service.release(result.token);
     expect((await readdir(root)).filter(name => name.startsWith('powermove-image-sequence-'))).toEqual([]);
   });
+  it('converts real numbered PNGs with the bundled encoder', async () => {
+    const { root } = await fixture();
+    const source = path.resolve('e2e/fixtures/still-red.png');
+    const files = [path.join(root, 'frame-001.png'), path.join(root, 'frame-002.png')];
+    await Promise.all(files.map(file => copyFile(source, file)));
+    const service = new MediaProxyService(root, async () => {}, imageSequenceConverter(path.resolve('node_modules/ffmpeg-static/ffmpeg')));
+    const result = await service.createSequence(files, 24);
+    expect(result.size).toBeGreaterThan(100);
+    await service.release(result.token);
+  }, 30_000);
   it('rejects invalid inputs and cleans temporary files after failed conversion', async () => {
     const { root } = await fixture();
     const files = [path.join(root, 'f1.png'), path.join(root, 'f2.png')];

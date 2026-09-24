@@ -74,7 +74,7 @@ export function install(PM: PMRegistry): void {
       ? 'editor'
       : (body.access === 'computer' ? 'computer' : 'project');
     const requestedEffort = String(body.reasoningEffort || '');
-    const reasoningEffort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(requestedEffort)
+    const reasoningEffort = ['none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(requestedEffort)
       ? requestedEffort
       : null;
     const attachments = [];

@@ -1,7 +1,8 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
+import { query, type ModelInfo } from '@anthropic-ai/claude-agent-sdk';
 import { spawnClaudeProcess } from './process';
 
-import type { ClaudeAccountStatus } from '../../shared/ipc';
+import type { ClaudeAccountStatus, ClaudeModelOption, ReasoningEffort } from '../../shared/ipc';
 import { isRecord, isString } from '../../shared/guards';
 import { discoverClaudeBinary } from './env';
 import { isolatedClaudeEnvironment, prepareIsolatedClaudeHome } from './isolation';
@@ -9,6 +10,53 @@ import { isolatedClaudeEnvironment, prepareIsolatedClaudeHome } from './isolatio
 const STATUS_TIMEOUT_MS = 15_000;
 const LOGIN_TIMEOUT_MS = 10 * 60_000;
 const MAX_DETAIL_CHARS = 500;
+const MODEL_TIMEOUT_MS = 30_000;
+const MODEL_ID = /^[a-zA-Z0-9][a-zA-Z0-9._:/\[\]-]{0,127}$/;
+const EFFORTS: readonly ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+export function claudeModelsFromSdk(models: ModelInfo[]): ClaudeModelOption[] {
+  const result: ClaudeModelOption[] = [];
+  for (const model of models) {
+    const efforts = Array.isArray(model.supportedEffortLevels)
+      ? model.supportedEffortLevels.filter((effort) => EFFORTS.includes(effort))
+      : [];
+    for (const id of [model.value, model.resolvedModel]) {
+      if (typeof id !== 'string' || !MODEL_ID.test(id) || result.some(item => item.id === id)) continue;
+      result.push({
+        id,
+        label: id === model.value && isString(model.displayName, 120) ? model.displayName : id,
+        reasoningEfforts: efforts
+      });
+    }
+  }
+  return result;
+}
+
+async function discoverClaudeModels(binary: string, home: string): Promise<ClaudeModelOption[]> {
+  // Streaming input lets the SDK answer its control request without sending a user prompt.
+  const session = query({
+    prompt: (async function* () {})(),
+    options: {
+      pathToClaudeCodeExecutable: binary,
+      env: isolatedClaudeEnvironment(home),
+      tools: [],
+      settingSources: []
+    }
+  });
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    const models = await Promise.race([
+      session.supportedModels(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Claude model discovery timed out.')), MODEL_TIMEOUT_MS);
+      })
+    ]);
+    return claudeModelsFromSdk(models);
+  } finally {
+    if (timer) clearTimeout(timer);
+    session.close();
+  }
+}
 
 type SpawnLike = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
 
@@ -52,6 +100,7 @@ export class ClaudeAccountClient {
     state: 'checking', email: null, planType: null, detail: null
   };
   private statusRequest: Promise<ClaudeAccountStatus> | null = null;
+  private modelsRequest: Promise<ClaudeModelOption[]> | null = null;
   private loginChild: ChildProcess | null = null;
   private loginTimer: NodeJS.Timeout | null = null;
 
@@ -79,6 +128,18 @@ export class ClaudeAccountClient {
     if (this.statusRequest !== null) return this.statusRequest;
     this.statusRequest = this.readStatus().finally(() => { this.statusRequest = null; });
     return this.statusRequest;
+  }
+
+  models(): Promise<ClaudeModelOption[]> {
+    if (this.modelsRequest !== null) return this.modelsRequest;
+    this.modelsRequest = (async () => {
+      const [binary, home] = await Promise.all([
+        this.deps.discoverBinary(this.options.claudeBinaryPref()),
+        this.deps.prepareHome(this.options.userData)
+      ]);
+      return discoverClaudeModels(binary, home);
+    })().finally(() => { this.modelsRequest = null; });
+    return this.modelsRequest;
   }
 
   private async readStatus(): Promise<ClaudeAccountStatus> {

@@ -398,6 +398,22 @@ function outputScale(W: number, H: number): [number, number] {
   const comp = PM.curComp?.() || PM.proj;
   return [W / Math.max(1, Number(comp?.w) || W), H / Math.max(1, Number(comp?.h) || H)];
 }
+
+function effectViewportCoordinates(W: number, H: number): { uv: [number, number, number, number]; origin: [number, number]; resolution: [number, number] } {
+  const viewport = activePreviewViewport(W, H);
+  const [sx, sy] = outputScale(W, H);
+  const comp = PM.curComp?.() || PM.proj;
+  const resolution: [number, number] = [
+    Math.max(1, Number(comp?.w) || W) * sx,
+    Math.max(1, Number(comp?.h) || H) * sy,
+  ];
+  const origin: [number, number] = viewport ? [viewport.x * sx, viewport.y * sy] : [0, 0];
+  return {
+    origin,
+    resolution,
+    uv: [origin[0] / resolution[0], origin[1] / resolution[1], W / resolution[0], H / resolution[1]],
+  };
+}
 function scaledWorld(layer: any, time: any, W: number, H: number): [number, number, number, number, number, number] {
   const world = PM.worldMatrix(layer, time);
   const [sx, sy] = outputScale(W, H);
@@ -1014,8 +1030,9 @@ function drawContent(L: any, T: any, W: any, H: any, alpha: any, clip?: RasterWi
 }
 
 /* ── effects chain ─────────────────────────────────────── */
-function runEffects(L: any, T: any, srcF: any, W: any, H: any) {
+function runEffects(L: any, T: any, srcF: any, W: any, H: any, backdropF: any = null) {
   let cur = srcF;
+  const coordinates = effectViewportCoordinates(W, H);
   for (const fx of L.fx) {
     /* `missing` marks an effect whose type is not registered (the extension
        providing it is off or gone). Skip it and keep its data intact. */
@@ -1033,7 +1050,11 @@ function runEffects(L: any, T: any, srcF: any, W: any, H: any) {
       const g = use(p);
       bindTex(0, input.tex); setI(p, 'u_tex', 0);
       if (orig) { bindTex(1, orig.tex); setI(p, 'u_orig', 1); }
-      g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
+      /* Backdrop effects opt into the accumulated lower stack. Keep it on a
+         separate unit from u_orig so an effect may request both references. */
+      if (def.backdrop) { bindTex(2, backdropF?.tex || null); setI(p, 'u_backdrop', 2); }
+      g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', ...coordinates.uv);
+      g.u('u_coordRes', ...coordinates.resolution); g.u('u_pxOrigin', ...coordinates.origin);
       g.u('u_texel', 1 / W, 1 / H);
       g.u('u_time', T);
       setI(p, 'u_pass', pass);
@@ -1198,7 +1219,7 @@ function compositeAdjustment(
   L: any, T: any, acc: any, W: any, H: any,
   alpha: number, hasMasks: boolean, blend: number,
 ) {
-  const adjusted = runEffects(L, T, acc, W, H);
+  const adjusted = runEffects(L, T, acc, W, H, acc);
   /* A missing or failed effect program must leave the composition unchanged,
      including transparent nested compositions. */
   if (adjusted === acc) return acc;
@@ -1449,7 +1470,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
 
       let res = lf;
       if (hasMasks) res = applyMasks(L, T, res, W, H);
-      if (hasFx) { const prior=res;res = runEffects(L, T, res, W, H);if(prior!==lf && res!==prior)free(prior); }
+      if (hasFx) { const prior=res;res = runEffects(L, T, res, W, H, acc);if(prior!==lf && res!==prior)free(prior); }
       if (L.matteSource) {const prior=res;res=applyTrackMatte(L,T,res,W,H,opt.matteProject||proj,opt);if(prior!==lf && prior!==res)free(prior);}
 
       let withLayer = acc;

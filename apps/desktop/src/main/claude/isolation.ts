@@ -17,9 +17,13 @@ export async function prepareIsolatedClaudeHome(userData: string): Promise<strin
 /** Claude Code owns every credential inside this directory. Powermove never
  * reads or copies OAuth material, and logout cannot affect a terminal login. */
 export function isolatedClaudeEnvironment(configDirectory: string): NodeJS.ProcessEnv {
+  // Safe mode suppresses MCP servers, including the run-scoped Powermove tools.
+  // Keep the isolated config directory and let --strict-mcp-config select only
+  // the server supplied for this run.
+  const environment = { ...process.env };
+  delete environment.CLAUDE_CODE_SAFE_MODE;
   return {
-    ...process.env,
-    CLAUDE_CONFIG_DIR: configDirectory,
-    CLAUDE_CODE_SAFE_MODE: '1'
+    ...environment,
+    CLAUDE_CONFIG_DIR: configDirectory
   };
 }

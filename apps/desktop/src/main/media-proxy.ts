@@ -17,6 +17,7 @@ import { IpcValidationError } from '../shared/guards';
 import { orderedSequence, validSequenceFps } from '../shared/image-sequence';
 import { MAX_SEQUENCE_FRAMES } from '../shared/animated-image';
 import { CONVERTED_VIDEO_EXTENSIONS, NATIVE_VIDEO_EXTENSIONS, mediaExtension, needsImageConversion } from '../shared/media-formats';
+import { spawnWithRetry } from './spawn-retry';
 
 const execFileAsync = promisify(execFile);
 const STILL_TIMEOUT_MS = 2 * 60 * 1000;
@@ -89,7 +90,7 @@ export function sequenceProgressReader(count: number, onProgress?: (completed: n
 
 export function imageSequenceConverter(binary: string): ConvertSequence {
   return async (pattern, fps, count, output, onProgress) => {
-    const conversion = execFileAsync(binary, [
+    const child = await spawnWithRetry(binary, [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-progress', 'pipe:1', '-nostats', '-stats_period', '1',
       '-framerate', String(fps), '-start_number', '0', '-i', pattern,
@@ -97,9 +98,21 @@ export function imageSequenceConverter(binary: string): ConvertSequence {
       '-pix_fmt', 'yuva420p', '-lossless', '1', '-b:v', '0',
       '-g', '15', '-deadline', 'good', '-cpu-used', '4', '-row-mt', '1', '-threads', '4',
       '-f', 'webm', '-y', output,
-    ], { timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
-    conversion.child.stdout?.on('data', sequenceProgressReader(count, onProgress));
-    await conversion;
+    ], { stdio: ['ignore', 'pipe', 'pipe'] }, 'image sequence encoder');
+    child.stdout?.on('data', sequenceProgressReader(count, onProgress));
+    await new Promise<void>((resolve, reject) => {
+      let stderr = '';
+      let timedOut = false;
+      child.stderr?.on('data', chunk => { stderr = `${stderr}${String(chunk)}`.slice(-1024 * 1024); });
+      const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, TRANSCODE_TIMEOUT_MS);
+      timer.unref();
+      child.once('error', error => { clearTimeout(timer); reject(error); });
+      child.once('close', code => {
+        clearTimeout(timer);
+        if (code === 0) resolve();
+        else reject(new Error(timedOut ? 'Image sequence conversion timed out.' : stderr.trim() || `Image sequence encoder stopped with code ${code ?? 'unknown'}.`));
+      });
+    });
   };
 }
 

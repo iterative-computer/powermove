@@ -70,13 +70,16 @@ export const IPC = {
   agentToolRequest: 'agent-tool:request', // main → renderer
   agentToolResponse: 'agent-tool:response', // renderer → main
   chatgptStatus: 'chatgpt:status',
+  chatgptModels: 'chatgpt:models',
   chatgptConnect: 'chatgpt:connect',
   chatgptDisconnect: 'chatgpt:disconnect',
   chatgptChanged: 'chatgpt:changed', // main → renderer
   claudeStatus: 'claude:status',
+  claudeModels: 'claude:models',
   claudeConnect: 'claude:connect',
   claudeDisconnect: 'claude:disconnect',
   claudeChanged: 'claude:changed', // main → renderer
+  agentRuntimeUpdate: 'agent-runtime:update',
   compatibleStatus: 'compatible:status',
   compatibleConfigure: 'compatible:configure',
   consentComputer: 'consent:computer',
@@ -236,8 +239,16 @@ export interface MediaProxyReadRequest {
 /* ── codex ───────────────────────────────────────────────── */
 export type CodexMode = 'editor' | 'autonomous';
 export type CodexAccess = 'editor' | 'project' | 'computer';
-export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 export type AgentProviderId = 'chatgpt' | 'claude' | 'compatible';
+
+export interface CodexModelOption {
+  id: string;
+  label: string;
+  reasoningEfforts: ReasoningEffort[];
+}
+
+export type ClaudeModelOption = CodexModelOption;
 
 export interface CodexAttachment {
   name: string;
@@ -634,13 +645,20 @@ export interface PowermoveBridge {
 
   chatgpt: {
     status(): Promise<ChatGPTAccountStatus>;
+    models?(): Promise<CodexModelOption[]>;
     connect(): Promise<ChatGPTAccountStatus>;
     disconnect(): Promise<ChatGPTAccountStatus>;
     onChanged(cb: (status: ChatGPTAccountStatus) => void): () => void;
   };
 
+  /** Install the newest runtime for a provider; resolves with the installed version. */
+  agentRuntime?: {
+    update(provider: 'claude' | 'codex'): Promise<{ provider: 'claude' | 'codex'; version: string }>;
+  };
+
   claude: {
     status(): Promise<ClaudeAccountStatus>;
+    models?(): Promise<ClaudeModelOption[]>;
     connect(): Promise<ClaudeAccountStatus>;
     disconnect(): Promise<ClaudeAccountStatus>;
     onChanged(cb: (status: ClaudeAccountStatus) => void): () => void;

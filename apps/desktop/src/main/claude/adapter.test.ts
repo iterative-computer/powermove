@@ -19,7 +19,7 @@ describe('Claude CLI adapter', () => {
     });
 
     expect(argv).toEqual(expect.arrayContaining([
-      '--print', '--output-format', 'stream-json', '--include-partial-messages', '--safe-mode',
+      '--print', '--output-format', 'stream-json', '--include-partial-messages',
       '--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
       '--json-schema', JSON.stringify(schema), '--model', 'sonnet', '--effort', 'high',
       '--resume', '11111111-1111-4111-8111-111111111111',
@@ -27,6 +27,7 @@ describe('Claude CLI adapter', () => {
       '--add-dir', '/tmp/extensions'
     ]));
     expect(argv).not.toContain('--dangerously-skip-permissions');
+    expect(argv).not.toContain('--safe-mode');
     expect(argv.at(-1)).toContain('/tmp/reference.png');
     expect(JSON.parse(CLAUDE_PROJECT_SANDBOX_SETTINGS)).toMatchObject({
       sandbox: { enabled: true, allowUnsandboxedCommands: false, failIfUnavailable: true }

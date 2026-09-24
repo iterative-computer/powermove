@@ -14,6 +14,7 @@ describe('ChatGPT settings control', () => {
     const stop = vi.fn();
     const api = {
       status: vi.fn(async () => disconnected),
+      models: vi.fn(async () => []),
       connect: vi.fn(async () => ({
         state: 'connecting' as const,
         email: null,

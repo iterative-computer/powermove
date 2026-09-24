@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   release:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -79,8 +79,8 @@ jobs:
       - name: Build, sign, notarize, and verify
         run: bun run dist:release
         env:
-          CSC_LINK: ${{ secrets.APPLE_CERTIFICATE_P12 }}
-          CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          CSC_NAME: Developer ID Application
+          CSC_KEYCHAIN: ${{ runner.temp }}/signing.keychain-db
           APPLE_API_KEY: ${{ runner.temp }}/notary.p8
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER_ID }}
@@ -117,11 +117,15 @@ jobs:
           VERSION: ${{ steps.tag.outputs.version }}
           PRERELEASE: ${{ steps.tag.outputs.prerelease }}
         run: |
-          flags=(--draft --title "Powermove ${VERSION}" --generate-notes)
-          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); else flags+=(--latest); fi
-          gh release create "$GITHUB_REF_NAME" "${flags[@]}" \
-            apps/desktop/dist/*.dmg apps/desktop/dist/*.zip apps/desktop/dist/*.blockmap "apps/desktop/dist/${CHANNEL}-mac.yml"
-          gh release edit "$GITHUB_REF_NAME" --draft=false
+          assets=(apps/desktop/dist/*.dmg apps/desktop/dist/*.zip apps/desktop/dist/*.blockmap "apps/desktop/dist/${CHANNEL}-mac.yml")
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            flags=(--draft --title "Powermove ${VERSION}" --generate-notes)
+            if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); else flags+=(--latest); fi
+            gh release create "$GITHUB_REF_NAME" "${flags[@]}" "${assets[@]}"
+            gh release edit "$GITHUB_REF_NAME" --draft=false
+          fi
       - name: Remove signing material
         if: always()
         run: |

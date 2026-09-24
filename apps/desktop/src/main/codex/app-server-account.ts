@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import readline from 'node:readline';
 
-import type { ChatGPTAccountStatus } from '../../shared/ipc';
+import type { ChatGPTAccountStatus, CodexModelOption, ReasoningEffort } from '../../shared/ipc';
 import { isRecord, isString } from '../../shared/guards';
 import { discoverCodexBinary } from './env';
 import { isolatedCodexEnvironment, prepareIsolatedCodexHome } from './isolation';
@@ -9,6 +9,8 @@ import { isolatedCodexEnvironment, prepareIsolatedCodexHome } from './isolation'
 const REQUEST_TIMEOUT_MS = 15_000;
 const LOGIN_TIMEOUT_MS = 10 * 60_000;
 const MAX_DETAIL_CHARS = 500;
+const MODEL_ID = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/;
+const EFFORTS: readonly ReasoningEffort[] = ['none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 
 type JsonRpcId = number;
 
@@ -73,6 +75,27 @@ function parseAccountStatus(value: unknown): ChatGPTAccountStatus {
   };
 }
 
+function parseModels(value: unknown): CodexModelOption[] {
+  if (!isRecord(value) || !Array.isArray(value.data)) return [];
+  const models: CodexModelOption[] = [];
+  for (const entry of value.data) {
+    if (!isRecord(entry) || entry.hidden === true) continue;
+    const id = typeof entry.model === 'string' ? entry.model : entry.id;
+    if (typeof id !== 'string' || !MODEL_ID.test(id) || models.some(model => model.id === id)) continue;
+    const efforts = Array.isArray(entry.supportedReasoningEfforts)
+      ? entry.supportedReasoningEfforts
+          .map(item => isRecord(item) ? item.reasoningEffort : null)
+          .filter((item): item is ReasoningEffort => EFFORTS.includes(item as ReasoningEffort))
+      : [];
+    models.push({
+      id,
+      label: isString(entry.displayName, 120) ? entry.displayName : id,
+      reasoningEfforts: [...new Set(efforts)]
+    });
+  }
+  return models;
+}
+
 export class ChatGPTAccountClient {
   private readonly deps: AppServerDependencies;
   private child: ChildProcessWithoutNullStreams | null = null;
@@ -120,6 +143,27 @@ export class ChatGPTAccountClient {
     } catch (error) {
       return this.publish(unavailable(errorMessage(error)));
     }
+  }
+
+  /** The app server returns the picker-visible models for this account. */
+  async models(): Promise<CodexModelOption[]> {
+    const models: CodexModelOption[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | null = null;
+    for (let page = 0; page < 5; page++) {
+      const result = await this.request('model/list', {
+        limit: 100,
+        includeHidden: false,
+        ...(cursor ? { cursor } : {})
+      });
+      for (const model of parseModels(result)) {
+        if (!models.some(item => item.id === model.id)) models.push(model);
+      }
+      if (!isRecord(result) || !isString(result.nextCursor, 500) || seenCursors.has(result.nextCursor)) break;
+      cursor = result.nextCursor;
+      seenCursors.add(cursor);
+    }
+    return models;
   }
 
   async connect(): Promise<ChatGPTAccountStatus> {

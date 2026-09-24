@@ -28,6 +28,7 @@ import {
 } from '../shared/ipc';
 import { registerCaptureIpc } from './capture';
 import { registerCodexIpc } from './codex';
+import { configureRuntimeUpdates } from './runtime-updates';
 import { recoverAllInterruptedExtensionTransactions } from './codex/change-history';
 import { extensionAssetCorsHeaders, registerExtensionsIpc, removeUserExtension, serveExtensionAsset, sandboxManifestFor } from './extensions';
 import { createExtensionRegistry, type ExtensionRegistry } from './extensions/registry';
@@ -653,6 +654,7 @@ if (!hasSingleInstanceLock) {
 
     // Boot barrier: the legacy renderer reads PM.store synchronously while its
     // scripts load, so the store must be in memory before the window exists.
+    configureRuntimeUpdates({ root: path.join(app.getPath('userData'), 'runtimes'), appVersion: app.getVersion() });
     const store = createStore(path.join(app.getPath('userData'), 'store'));
     await store.load();
     registerStoreIpc(ipcMain, store, {

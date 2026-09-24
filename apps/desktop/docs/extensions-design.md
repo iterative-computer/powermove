@@ -68,7 +68,7 @@ export default function activate(api: PowermoveAPI): void | Disposable | Promise
 - `api.panels.register(def)` — Svelte component or `build(el)`; `size/min/flush/…`
 - `api.commands.register({id,label,category,run,when?})`
 - `api.keybindings.bind(key, commandId)`; `api.keybindings.unbind`
-- `api.effects.register({id,label,group,params,frag,passes?,keepOrig?})` — name-based uniforms `u_<param>`; kernel generates declarations and validates/compiles eagerly
+- `api.effects.register({id,label,group,params,frag,passes?,keepOrig?,backdrop?})` — name-based uniforms `u_<param>`; kernel generates declarations and validates/compiles eagerly. Set `backdrop: true` to sample the composited pixels beneath the layer through `u_backdrop`.
 - `api.transitions.register({id,label,params,frag})` — two inputs `u_from`,`u_to`,`u_prog`
 - `api.theme.register({id,name,tokens,css?})` / `api.theme.activate(id)`
 - `api.palette.registerProvider(fn)`; `api.menus.contribute(location, items)`; `api.status.register(item)`

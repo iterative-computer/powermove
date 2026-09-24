@@ -8,8 +8,11 @@ const repository = path.resolve(import.meta.dirname, '..');
 
 function releaseCredentials(environment) {
   const missing = [];
-  if (!environment.CSC_LINK) missing.push('CSC_LINK');
-  if (!environment.CSC_KEY_PASSWORD) missing.push('CSC_KEY_PASSWORD');
+  const importedCertificate = environment.CSC_NAME && environment.CSC_KEYCHAIN;
+  if (!importedCertificate) {
+    if (!environment.CSC_LINK) missing.push('CSC_LINK (or CSC_NAME + CSC_KEYCHAIN)');
+    if (!environment.CSC_KEY_PASSWORD) missing.push('CSC_KEY_PASSWORD (or CSC_NAME + CSC_KEYCHAIN)');
+  }
   const apiKey = environment.APPLE_API_KEY && environment.APPLE_API_KEY_ID && environment.APPLE_API_ISSUER;
   const appleId = environment.APPLE_ID && environment.APPLE_APP_SPECIFIC_PASSWORD && environment.APPLE_TEAM_ID;
   if (!apiKey && !appleId) {
@@ -19,14 +22,19 @@ function releaseCredentials(environment) {
 }
 
 async function run(command, args) {
-  await execFileAsync(command, args, {
-    cwd: repository,
-    env: process.env,
-    maxBuffer: 20 * 1024 * 1024,
-  }).then(({ stdout, stderr }) => {
+  try {
+    const { stdout, stderr } = await execFileAsync(command, args, {
+      cwd: repository,
+      env: process.env,
+      maxBuffer: 20 * 1024 * 1024,
+    });
     if (stdout) process.stdout.write(stdout);
     if (stderr) process.stderr.write(stderr);
-  });
+  } catch (error) {
+    if (error?.stdout) process.stdout.write(error.stdout);
+    if (error?.stderr) process.stderr.write(error.stderr);
+    throw error;
+  }
 }
 
 async function findPackagedApp() {

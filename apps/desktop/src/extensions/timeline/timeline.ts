@@ -2234,7 +2234,10 @@ function onDown(e: any) {
     if (L.lock) return;
     return quickOffsetLayers(e);
   }
-  if (!selectLayerForPointer(L, e) || L.lock) return;
+  if (!selectLayerForPointer(L, e)) return;
+  // Locking protects clip content and trim edits, while the clip body remains
+  // movable in time so locked layers can still be arranged in the timeline.
+  if (L.lock && (Math.abs(x - x0) < 5 || Math.abs(x - x1) < 5)) return;
   if (Math.abs(x - x0) < 5) return trim(e, 'in');
   if (Math.abs(x - x1) < 5) return trim(e, 'out');
   if (x > x0 && x < x1) return slide(e);
@@ -2616,7 +2619,7 @@ function gutterDown(e: any, x: any, y: any) {
 function slide(e: any) {
   const selectedIds = new Set(api.groups.expand(api.selection.layers()) || api.selection.layers());
   if (selectedLayers(api).some((layer: any) => layer.type === 'group') && api.project.get().layers.some((layer: any) => selectedIds.has(layer.id) && layer.lock)) return;
-  const layers = api.project.get().layers.filter((l: any) => selectedIds.has(l.id) && l.type !== 'group' && !l.lock && !(api.groups.ancestors(l) || []).some((g: any) => g.lock));
+  const layers = api.project.get().layers.filter((l: any) => selectedIds.has(l.id) && l.type !== 'group' && !(api.groups.ancestors(l) || []).some((g: any) => g.lock));
   const groups = api.project.get().layers.filter((L: any) => selectedIds.has(L.id) && L.type === 'group' && !L.lock && !(api.groups.ancestors(L) || []).some((g: any) => g.lock));
   const groupStart = groups.map((L: any) => ({L, from:L.from}));
   const start = layers.map((L: any) => ({ L, from: L.from }));
@@ -3228,6 +3231,22 @@ function onDbl(e: any) {
       editKeyframeValues(keyframeContextEntries(clicked, api.selection.keys(), selectedKeyEntries()));
     }
     return;
+  }
+  // Double-clicking a keyframe in the timeline should use the same editor as
+  // graph points. When the clicked key is part of the current selection,
+  // keyframeContextEntries expands this to the complete selection so a bulk
+  // value edit is available without opening the context menu first.
+  if (!T.graph && x > T.gut && y >= T.ruler) {
+    const hr = hitRow(y);
+    if (hr?.row.kind === 'prop') {
+      const row = hr.row;
+      const key = row.prop.kf.find((candidate: any) => Math.abs(t2x(row.L.from + candidate.t) - x) < 7);
+      if (key) {
+        const members = key.members ?? [{ key, prop: row.prop, L: row.L }];
+        editKeyframeValues(keyframeContextEntries(members, api.selection.keys(), selectedKeyEntries()));
+        return;
+      }
+    }
   }
   const workHit: any = x > T.gut && workAreaHit(x, y);
   if (workHit?.kind === 'bar') {

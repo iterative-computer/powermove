@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { updatedRuntimeCandidates } from '../runtime-updates';
 
 export const PACKAGED_CLAUDE_RELATIVE_PATH = path.join('claude', 'bin', 'claude');
 export const DEVELOPMENT_CLAUDE_RELATIVE_PATH = path.join(
@@ -57,7 +58,7 @@ export function bundledClaudeCandidates(
 ): string[] {
   const candidates = [path.join(appRoot, DEVELOPMENT_CLAUDE_RELATIVE_PATH)];
   if (resourcesPath) candidates.unshift(path.join(resourcesPath, PACKAGED_CLAUDE_RELATIVE_PATH));
-  return candidates;
+  return [...updatedRuntimeCandidates('claude'), ...candidates];
 }
 
 export async function discoverClaudeBinary(

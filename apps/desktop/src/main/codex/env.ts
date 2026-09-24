@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access, open, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { updatedRuntimeCandidates } from '../runtime-updates';
 
 export const PACKAGED_CODEX_RELATIVE_PATH = path.join('codex', 'bin', 'codex');
 export const DEVELOPMENT_CODEX_RELATIVE_PATH = path.join(
@@ -100,7 +101,7 @@ export function bundledCodexCandidates(
 ): string[] {
   const candidates = [path.join(appRoot, DEVELOPMENT_CODEX_RELATIVE_PATH)];
   if (resourcesPath) candidates.unshift(path.join(resourcesPath, PACKAGED_CODEX_RELATIVE_PATH));
-  return candidates;
+  return [...updatedRuntimeCandidates('codex'), ...candidates];
 }
 
 export async function discoverCodex(
@@ -147,6 +148,11 @@ export function describeCodex(codexBinary: string | null = null): Promise<CodexD
     })();
   }
   return description;
+}
+
+/** A runtime update replaces the binary the cached description names. */
+export function forgetCodexDescription(): void {
+  description = null;
 }
 
 /** Test-only reset for the two deliberately process-wide discovery caches. */

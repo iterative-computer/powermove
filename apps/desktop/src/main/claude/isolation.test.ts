@@ -12,9 +12,15 @@ describe('Claude runtime isolation', () => {
     const home = await prepareIsolatedClaudeHome(userData);
     expect(home).toBe(path.join(userData, 'claude-runtime'));
     expect((await stat(home)).isDirectory()).toBe(true);
-    expect(isolatedClaudeEnvironment(home)).toMatchObject({
-      CLAUDE_CONFIG_DIR: home,
-      CLAUDE_CODE_SAFE_MODE: '1'
-    });
+    const previous = process.env.CLAUDE_CODE_SAFE_MODE;
+    try {
+      process.env.CLAUDE_CODE_SAFE_MODE = '1';
+      const environment = isolatedClaudeEnvironment(home);
+      expect(environment.CLAUDE_CONFIG_DIR).toBe(home);
+      expect(environment.CLAUDE_CODE_SAFE_MODE).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CODE_SAFE_MODE;
+      else process.env.CLAUDE_CODE_SAFE_MODE = previous;
+    }
   });
 });
