@@ -8,7 +8,7 @@ import SignInSheet from './SignInSheet.svelte';
 import { currentUser, installCloudAccount, userFromMe } from './account';
 
 const NO_HANDLE: MeDto = {
-  user: { id: '3f1c9b1e-8f55-4d8f-9d0a-6f1d1c1b2a3e', name: 'Jude Kim', email: 'jude@example.test', image: null },
+  user: { id: '3f1c9b1e-8f55-4d8f-9d0a-6f1d1c1b2a3e', name: '@jude', email: 'jude@example.test', image: null },
   publisher: null,
   settings: { rememberInstalls: true }
 };
@@ -60,7 +60,7 @@ function heading(root: ParentNode): string {
 
 describe('account', () => {
   it('derives the user from MeDto', () => {
-    expect(userFromMe(WITH_HANDLE)).toEqual({ name: 'Jude Kim', handle: 'jude', email: 'jude@example.test', image: null });
+    expect(userFromMe(WITH_HANDLE)).toEqual({ name: '@jude', handle: 'jude', email: 'jude@example.test', image: null });
     expect(userFromMe({ ...NO_HANDLE, user: { ...NO_HANDLE.user, name: null } })).toMatchObject({ name: 'jude', handle: null });
   });
 

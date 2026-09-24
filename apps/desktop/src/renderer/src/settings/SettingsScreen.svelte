@@ -524,8 +524,8 @@
                     <div class="settings-row acct-profile">
                       <Avatar user={account} size={32} />
                       <div class="settings-copy">
-                        <b>{account.name}</b>
-                        <span>{account.handle ? `@${account.handle} · ${account.email}` : account.email}</span>
+                        <b>{account.handle ? `@${account.handle}` : account.email}</b>
+                        {#if account.handle}<span>{account.email}</span>{/if}
                       </div>
                       {#if !account.handle}
                         <button class="btn" type="button" onclick={() => openSignIn()}>Choose Handle…</button>

@@ -46,10 +46,13 @@ let sheet: { close(): void } | null = null;
 let offChanged: (() => void) | null = null;
 const listeners = new Set<Listener>();
 
-/** A display name even when the provider gave none: the email's local part. */
+/** The label every surface shows: the handle when claimed (that is the
+    publisher identity), otherwise the email's local part until it is. The
+    provider's display name is not shown anywhere. */
 export function userFromMe(value: MeDto): CloudUser {
-  const name = value.user.name?.trim() || value.user.email.split('@')[0] || value.user.email;
-  return { name, handle: value.publisher?.handle ?? null, email: value.user.email, image: value.user.image };
+  const handle = value.publisher?.handle ?? null;
+  const name = handle ? `@${handle}` : value.user.email.split('@')[0] || value.user.email;
+  return { name, handle, email: value.user.email, image: value.user.image };
 }
 
 function notify(): void {
