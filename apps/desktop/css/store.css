@@ -249,6 +249,11 @@ body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-main{visibility:hi
 .st-source-error{padding:10px 14px}
 
 #store-screen .btn:not(.pri){box-shadow:none}
+/* The Store's one action per row is still the primary control semantically,
+   but a page of accent pills shouts. Quiet raised surface, like GET pills. */
+#store-screen .btn.pri{background:var(--ink-1);color:var(--tx);box-shadow:none}
+#store-screen .btn.pri:hover{background:var(--ink-2)}
+#store-screen .btn.pri:disabled{opacity:.55}
 #store-screen .st-row,#store-screen .st-hero,#store-screen .st-navbtn,#store-screen .st-pager,#store-screen .st-facts{user-select:none;-webkit-user-select:none}
 
 @media (max-width:760px){.st-sidebar{width:180px}.st-scroll{padding:56px 20px 64px}}
