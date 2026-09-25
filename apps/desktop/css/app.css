@@ -1203,6 +1203,8 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 /* Button menus (controls/popover-menu.ts): the listbox sheet with actions
    instead of options, an optional header, and separators. */
 .pm-popover .pm-menu-item{padding:0 10px 0 8px}
+.pm-popover .pm-menu-item[role=menuitemradio]{padding-right:28px}
+.pm-menu-item[aria-checked=true] .pm-menu-check{opacity:1}
 .pm-menu-header{position:relative;z-index:1;padding:6px 8px 8px}
 .pm-menu-sep{height:1px;margin:4px 8px;background:var(--line)}
 

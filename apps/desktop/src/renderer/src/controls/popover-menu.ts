@@ -2,9 +2,10 @@
 // menu is ours, drawn as the select listbox is (select/menu.ts): a raised
 // sheet, 30px rows on a 6px corner, one hover layer gliding between rows, and
 // the same fade, scale and slide from the trigger's edge. It may carry a
-// header above its rows, such as who you are signed in as.
+// header above its rows, such as who you are signed in as. Rows that carry
+// `checked` are a radio group and show the listbox's check on the chosen one.
 
-export type PopoverMenuItem = '-' | { label: string; run: () => void };
+export type PopoverMenuItem = '-' | { label: string; run: () => void; checked?: boolean };
 
 export interface PopoverMenuRequest {
   anchor: HTMLElement;
@@ -60,12 +61,20 @@ export function openPopoverMenu(req: PopoverMenuRequest): PopoverMenuHandle {
     const index = rows.length;
     const item = document.createElement('div');
     item.className = 'pm-menu-item';
-    item.setAttribute('role', 'menuitem');
+    item.setAttribute('role', entry.checked === undefined ? 'menuitem' : 'menuitemradio');
     item.tabIndex = -1;
     const label = document.createElement('span');
     label.className = 'pm-menu-label';
     label.textContent = entry.label;
     item.append(label);
+    if (entry.checked !== undefined) {
+      item.setAttribute('aria-checked', String(entry.checked));
+      const check = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      check.setAttribute('viewBox', '0 0 16 16');
+      check.setAttribute('class', 'pm-menu-check');
+      check.innerHTML = '<path d="M3.5 8.5l3 3 6-6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>';
+      item.append(check);
+    }
     item.addEventListener('pointermove', () => setActive(index));
     item.addEventListener('click', (event) => { event.stopPropagation(); pick(index); });
     rows.push({ item, run: entry.run });
