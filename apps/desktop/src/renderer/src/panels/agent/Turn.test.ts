@@ -30,6 +30,14 @@ afterEach(() => {
 });
 
 describe('assistant word reveal', () => {
+  it('renders a Claude summary with headings, lists, and bold text', () => {
+    agentState.provider = 'claude';
+    render({ role: 'assistant', text: '## Done\n\n- **One**\n- Two' });
+    expect(target.querySelector('.agent-md-h')?.textContent).toBe('Done');
+    expect([...target.querySelectorAll('.agent-md-li')].map(item => item.textContent?.trim())).toEqual(['One', 'Two']);
+    expect(target.querySelector('.agent-md-li .is-bold')?.textContent).toBe('One');
+  });
+
   it.each(['chatgpt', 'claude', 'compatible'] as const)('offers Project continuation for %s only when the user chooses it', (provider) => {
     agentState.provider = provider;
     const continueWithProject = vi.fn();

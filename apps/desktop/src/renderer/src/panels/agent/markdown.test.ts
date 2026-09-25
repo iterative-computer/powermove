@@ -3,6 +3,14 @@ import { describe, expect, it } from 'vitest';
 import { blocksFromMarkdown, inlineRuns, plainText, wordsFromRuns } from './markdown';
 
 describe('inlineRuns', () => {
+  it('handles escaped Markdown punctuation without leaking backslashes or creating emphasis', () => {
+    expect(inlineRuns('\\*\\*hello\\*\\* and **bold**')).toEqual([
+      { text: '**hello** and ' }, { text: 'bold', b: true }
+    ]);
+    expect(inlineRuns('`\\*literal\\*`')).toEqual([{ text: '\\*literal\\*', c: true }]);
+    expect(inlineRuns('C:\\work\\file')).toEqual([{ text: 'C:\\work\\file' }]);
+  });
+
   it('parses code, bold, italic, and links without leaking markers', () => {
     expect(inlineRuns('run `npm test` then **stop**')).toEqual([
       { text: 'run ' }, { text: 'npm test', c: true }, { text: ' then ' }, { text: 'stop', b: true }

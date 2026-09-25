@@ -1,4 +1,5 @@
 import { createAgentCheckpoint } from './checkpoint';
+import { normalizeAgentSummary } from './agent-prose';
 import { noticeKind, stated } from '../../errors/presentation';
 import { notifyAgentFinished } from '../../panels/agent/notification-preferences';
 /* Ported from js/assistant/spatial.js — behavior-preserving. */
@@ -1360,7 +1361,9 @@ function stopActiveRequest() { stopSession(activeSession()); }
 
 const TRACE_STEP_LIMIT: any = 200;
 const TRACE_THOUGHT_LIMIT: any = 2_000;
-const TRACE_TEXT_LIMIT: any = 6_000;
+// Match final-summary capacity so the streamed path retains closing Markdown
+// delimiters for replies the completed-summary path already accepts.
+const TRACE_TEXT_LIMIT: any = 30_000;
 
 function finishTraceThought(session: any = activeSession()) {
   const last: any = session.trace.at(-1);
@@ -1475,7 +1478,7 @@ function normalizeAutonomousResult(raw: any, rawExtensions: any) {
     ...(item.summary === undefined ? {} : { summary: item.summary }),
   }));
   return {
-    summary: text(raw?.summary || 'The autonomous agent finished its run.').slice(0, 30_000),
+    summary: normalizeAgentSummary(raw?.summary || 'The autonomous agent finished its run.'),
     commands: (Array.isArray(raw?.commands) ? raw.commands : [])
       .map(PM.AgentHarness.cleanCommand).filter(Boolean),
     artifacts: (Array.isArray(raw?.artifacts) ? raw.artifacts : []).map((item: any) => ({

@@ -37,6 +37,11 @@ export function inlineRuns(text: string, flags: InlineFlags = {}): Run[] {
   while (i < text.length) {
     const rest = text.slice(i);
     let m: RegExpExecArray | null;
+    // A backslash escapes ASCII punctuation in prose, but code spans below
+    // keep their contents verbatim. Consume the pair before emphasis parsing.
+    if ((m = /^\\([\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e])/.exec(rest))) {
+      plain += m[1]; i += 2; continue;
+    }
     if ((m = /^`([^`]+)`/.exec(rest))) {
       flush(); runs.push({ text: m[1]!, c: true }); i += m[0].length; continue;
     }
