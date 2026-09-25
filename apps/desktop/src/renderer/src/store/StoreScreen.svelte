@@ -1112,10 +1112,10 @@
         {@render control(act, item, data ? { repoId: data.repoId, releaseId: data.latestReleaseId, name: data.name } : null, 'btn')}
       {/if}
       {#if item && alsoPublish && !busy[item.localId]}
-        <button class="st-link is-quiet st-uninstall" type="button" onclick={() => void publish(item)}>{alsoPublish.label}</button>
+        <button class="btn st-detail-secondary" type="button" onclick={() => void publish(item)}>{alsoPublish.label}</button>
       {/if}
       {#if item && item.group !== 'builtin'}
-        <button class="st-link is-quiet st-uninstall" type="button" onclick={() => void uninstall(item)}>Uninstall…</button>
+        <button class="btn st-detail-secondary" type="button" onclick={() => void uninstall(item)}>Uninstall…</button>
       {/if}
     </div>
   </header>

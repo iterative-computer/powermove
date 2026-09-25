@@ -197,7 +197,9 @@ button.st-plus:hover{background:var(--bg-row-hi)}
 .st-tag{flex:none;margin-top:2px;padding:0 5px;border-radius:var(--r-xs);background:var(--ink-1);color:var(--tx-3);font-size:var(--fs-xs);line-height:16px}
 .st-byline{margin-top:2px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-4)}
 .st-lede{margin-top:2px;font-size:var(--fs-md);line-height:18px;color:var(--tx-2);text-wrap:pretty;max-width:64ch}
-.st-detail-actions{display:flex;gap:6px;margin-top:14px}
+/* The head's actions, on one line at its right edge: the main action or
+   what state it is in, then anything secondary. */
+.st-detail-actions{flex:none;display:flex;align-items:center;gap:8px;padding-top:4px}
 .st-detail-actions .btn{height:32px;padding:0 14px;border-radius:var(--r-pill)}
 .st-about{margin-top:-8px;max-width:68ch;font-size:var(--fs-md);line-height:20px;color:var(--tx-2);text-wrap:pretty}
 .st-card{display:flex;flex-direction:column;border-radius:var(--r-xl);background:var(--bg-panel);overflow:hidden}
@@ -262,9 +264,11 @@ button.st-plus:hover{background:var(--bg-row-hi)}
 .st-toggle[aria-pressed="true"]{color:var(--tx-3)}
 .st-toggle:hover{background:var(--ink-1);color:var(--tx)}
 .st-toggle:focus-visible{outline:0;box-shadow:0 0 0 2px var(--accent)}
-.st-detail-actions:has(.st-uninstall){flex-direction:column;align-items:center;gap:8px}
-.st-uninstall{font-size:var(--fs-sm);line-height:16px;text-decoration:none}
-.st-uninstall:hover{text-decoration:underline}
+/* Installed: a status with a tick, unfilled, so it never reads as a button. */
+.st-detail-actions .st-installed{display:inline-flex;align-items:center;gap:6px;min-width:0;height:32px;margin:0 4px 0 0;padding:0;background:transparent;color:var(--tx-3);font-size:var(--fs-sm);font-weight:var(--fw-medium)}
+.st-detail-actions .st-installed::before{content:"";width:12px;height:12px;background:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-6' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-6' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat}
+#store-screen .st-detail-secondary{color:var(--tx-2)}
+#store-screen .st-detail-secondary:hover{color:var(--tx)}
 .st-kv.is-file{align-items:center;justify-content:space-between;min-height:36px;padding:8px 14px}
 .st-kv.is-file>b{font:var(--fs-sm)/16px var(--f-mono)}
 .st-change{flex:none;font-size:var(--fs-xs);font-weight:var(--fw-medium);color:var(--tx-3)}
@@ -320,7 +324,7 @@ button.st-plus:hover{background:var(--bg-row-hi)}
   transition-property:background-color,color,box-shadow,opacity,transform;transition-duration:var(--dur-1);transition-timing-function:var(--ease)}
 .st-dots button{transition:width var(--dur-3) var(--ease),background-color var(--dur-1) var(--ease)}
 @media (prefers-reduced-motion:no-preference){
-  #store-screen :is(.st-add,.st-explore,.st-show-all,.st-back,.segmented button,.st-empty-go,.st-install):active{transform:scale(.985)}
+  #store-screen :is(.st-add,.st-explore,.st-show-all,.st-back,.segmented button,.st-empty-go,.st-install,.st-detail-actions .btn):active{transform:scale(.985)}
   #store-screen :is(.st-plus,.st-arrow,.st-item-more):active{transform:scale(.94)}
   #store-screen .st-slide-icon:active{transform:translateY(var(--lift)) scale(.94)}
   #store-screen .st-item:has(>.st-item-open:active){transform:scale(.985)}
