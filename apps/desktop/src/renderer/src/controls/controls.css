@@ -41,8 +41,9 @@ select.sel {
 }
 
 /* ── Colour picker ─────────────────────────────────────────
-   A popover with the dropdown menu's surface and motion (pm-menu-in/out from
-   app.css), holding dialkit-style stacked rows: plane, hue, value, swatches. */
+   Paper's picker on the dropdown menu's surface and motion (pm-menu-in/out
+   from app.css): a tabbed header, then plane | hue | details. Paper's greys
+   map onto the ink ladder so both themes hold. */
 .color-picker-layer {
   position: fixed;
   inset: 0;
@@ -52,25 +53,24 @@ select.sel {
 .color-picker-layer[data-state="closed"] { pointer-events: none; }
 
 .color-picker {
-  --cp-gap: 6px;
-  --cp-row: 28px;
-  --cp-radius: 8px;
+  --cp-well: rgb(var(--ink-rgb) / .06);
+  --cp-button: var(--ink-2);
+  --cp-strip: color-mix(in srgb, #000 4%, var(--bg-float));
   position: fixed;
   z-index: 461;
-  width: 280px;
-  display: flex;
-  flex-direction: column;
-  gap: var(--cp-gap);
-  padding: 8px;
-  border-radius: 12px;
+  width: 535px;
+  border-radius: var(--r-md);
   background: var(--bg-float);
   box-shadow: 0 0 0 var(--hairline) var(--line-strong), 0 8px 24px -8px rgb(var(--ink-rgb) / .22), 0 2px 6px rgb(var(--ink-rgb) / .06);
   color: var(--tx);
+  font-family: var(--f-ui);
+  font-size: var(--fs-sm);
   outline: 0;
   user-select: none;
   -webkit-user-select: none;
 }
 :root[data-theme="dark"] .color-picker {
+  --cp-strip: color-mix(in srgb, #000 24%, var(--bg-float));
   box-shadow: 0 0 0 var(--hairline) rgb(255 255 255 / .1), 0 12px 32px -8px rgb(0 0 0 / .6), 0 2px 6px rgb(0 0 0 / .3);
 }
 .color-picker[data-side="bottom"] { transform-origin: top right; }
@@ -78,16 +78,89 @@ select.sel {
 .color-picker[data-state="open"] { animation: pm-menu-in .18s cubic-bezier(.23, 1, .32, 1) both; }
 .color-picker[data-state="closed"] { animation: pm-menu-out .12s cubic-bezier(.4, 0, 1, 1) both; pointer-events: none; }
 
+.color-picker button {
+  padding: 0;
+  border: 0;
+  font: inherit;
+  cursor: default;
+}
 .color-picker :is(button, [role="slider"]):focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
-  outline-offset: 1px;
+  outline: 2px solid color-mix(in srgb, var(--tx) 45%, transparent);
+  outline-offset: 2px;
+}
+
+/* Header: a recessed strip whose selected tab is the picker's own surface. The
+   tab sits flush with the picker's top edge (and left edge, for the first
+   tab), so that edge is its outline there; the rule climbs its inner sides and
+   runs on along the strip. The line is opaque so its joins never double up. */
+.cp-header {
+  --cp-rule: color-mix(in srgb, var(--tx) 12%, var(--cp-strip));
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  height: 26px;
+  border-bottom: 1px solid var(--cp-rule);
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  background: var(--cp-strip);
+}
+.cp-spaces { display: flex; }
+/* Every tab keeps the same outline box, so switching never shifts the row. */
+.cp-spaces button {
+  position: relative;
+  margin-bottom: -1px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-top: 0;
+  border-bottom: 0;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  background: transparent;
+  color: var(--tx-2);
+  transition: color var(--dur-1);
+}
+.cp-spaces button:first-child {
+  border-left: 0;
+  border-top-left-radius: var(--r-md);
+}
+.cp-spaces button[aria-selected="true"] {
+  z-index: 1;
+  border-color: var(--cp-rule);
+  background: var(--bg-float);
+  color: var(--tx);
+}
+.cp-spaces button[aria-selected="false"]:hover { color: var(--tx); }
+.cp-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding-right: 3px;
+}
+.cp-icon {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 21px;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--tx-2);
+  transition: background var(--dur-1), color var(--dur-1);
+}
+.cp-icon:hover,
+.cp-icon[aria-expanded="true"] { background: var(--cp-button); color: var(--tx); }
+.cp-icon:disabled { opacity: var(--disabled); }
+.cp-icon svg { width: 13px; height: 13px; }
+
+.cp-body {
+  display: flex;
+  gap: 10px;
+  padding: 10px 11px 11px;
 }
 
 /* Plane: saturation across, brightness down, in the current hue. */
-.color-sv {
+.cp-plane {
   position: relative;
-  height: 148px;
-  border-radius: var(--cp-radius);
+  flex: none;
+  width: 230px;
+  height: 256px;
   background:
     linear-gradient(to top, #000, transparent),
     linear-gradient(to right, #fff, transparent),
@@ -95,213 +168,210 @@ select.sel {
   cursor: crosshair;
   touch-action: none;
 }
-.color-sv::after {
+.cp-plane i {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgb(0 0 0 / .5);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+/* Checkerboard under anything that can be see-through. */
+.cp-checker {
+  background-color: #f6f6f6;
+  background-image:
+    linear-gradient(45deg, #aaa 25%, transparent 25%, transparent 75%, #aaa 75%),
+    linear-gradient(45deg, #aaa 25%, transparent 25%, transparent 75%, #aaa 75%);
+  background-position: 0 0, 4px 4px;
+  background-size: 8px 8px;
+}
+.color-field .sw.cp-checker {
+  background-color: #f6f6f6;
+  background-image:
+    linear-gradient(var(--sw-color), var(--sw-color)),
+    linear-gradient(45deg, #aaa 25%, transparent 25%, transparent 75%, #aaa 75%),
+    linear-gradient(45deg, #aaa 25%, transparent 25%, transparent 75%, #aaa 75%);
+  background-position: 0 0, 0 0, 4px 4px;
+  background-size: auto, 8px 8px, 8px 8px;
+}
+.color-field-alpha {
+  margin-left: 8px;
+  color: var(--tx-3);
+}
+
+/* Opacity and hue: vertical tracks with a white bar for a handle. */
+.cp-track {
+  position: relative;
+  flex: none;
+  width: 14px;
+  height: 256px;
+  border-radius: var(--r-xs);
+  cursor: ns-resize;
+  touch-action: none;
+}
+.cp-alpha { overflow: hidden; }
+.cp-alpha::before {
   content: '';
   position: absolute;
   inset: 0;
-  border-radius: inherit;
-  box-shadow: inset 0 0 0 var(--hairline) rgb(0 0 0 / .12);
-  pointer-events: none;
+  background: linear-gradient(to bottom, var(--cp-opaque), transparent);
 }
-.color-sv i,
-.cp-hue i {
-  position: absolute;
-  border: 2px solid #fff;
-  background: var(--cp-color);
-  box-shadow: 0 1px 4px rgb(0 0 0 / .35);
-  pointer-events: none;
-}
-.color-sv i {
-  width: 12px;
-  height: 12px;
-  margin: -6px;
-  border-radius: 50%;
-}
-
-/* Hue: a slim spectrum with a swatch thumb that stays inside the track. */
 .cp-hue {
-  display: flex;
-  align-items: center;
-  height: 20px;
-  padding: 0 7px;
-  cursor: ew-resize;
-  touch-action: none;
-  border-radius: var(--cp-radius);
+  background: linear-gradient(to bottom, #f00 0%, #ff0 16.7%, #0f0 33.3%, #0ff 50%, #00f 66.7%, #f0f 83.3%, #f00 100%);
 }
-.cp-hue-track {
-  position: relative;
-  flex: 1;
-  height: 10px;
-  border-radius: 5px;
-  background: linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00);
-  box-shadow: inset 0 0 0 var(--hairline) rgb(0 0 0 / .12);
-}
-.cp-hue i {
-  top: 50%;
-  width: 14px;
-  height: 18px;
-  margin: -9px 0 0 -7px;
-  border-radius: 5px;
-  background: var(--cp-hue);
-}
-
-/* Value: format switch with a gliding pill, one mono field, eyedropper. */
-.cp-value {
-  display: flex;
-  align-items: center;
-  gap: var(--cp-gap);
-  height: var(--cp-row);
-}
-.cp-formats {
-  position: relative;
-  display: flex;
-  flex: none;
-  height: 100%;
-  padding: 2px;
-  border-radius: var(--cp-radius);
-  background: var(--ink-1);
-}
-.cp-formats-pill {
+.cp-track i {
   position: absolute;
-  top: 2px;
-  bottom: 2px;
-  left: 2px;
-  width: calc((100% - 4px) / 3);
-  border-radius: calc(var(--cp-radius) - 2px);
-  background: var(--ctl-raised);
-  box-shadow: var(--ctl-edge);
-  transition: transform .2s cubic-bezier(.25, 1, .5, 1);
+  left: 0;
+  width: 100%;
+  height: 5px;
+  border-radius: var(--r-xs);
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(0 0 0 / .5);
+  transform: translateY(-50%);
   pointer-events: none;
 }
-.cp-format {
-  position: relative;
-  z-index: 1;
-  width: 38px;
-  padding: 0;
-  border: 0;
-  border-radius: calc(var(--cp-radius) - 2px);
-  background: none;
-  color: var(--tx-3);
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-medium);
-  transition: color var(--dur-1);
-}
-.cp-format:hover,
-.cp-format[aria-checked="true"] { color: var(--tx); }
 
-.color-picker .color-hex {
+.cp-details {
   flex: 1;
   min-width: 0;
+}
+
+/* Previous | new; the previous half restores. */
+.cp-preview {
+  position: relative;
+  display: flex;
+  height: 56px;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  box-shadow: inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .12);
+}
+.cp-previous,
+.cp-new {
+  width: 50%;
   height: 100%;
-  padding: 0 10px;
+}
+.cp-clipped {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--bg-float) 82%, transparent);
+  color: var(--tx);
+  font-size: 10px;
+  line-height: 1;
+}
+.cp-preview-labels {
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  height: 28px;
+  color: var(--tx-2);
+  font-size: 10px;
+}
+
+/* Channel rows: three joined wells, their letters beneath, and a copy button. */
+.cp-row {
+  display: flex;
+  gap: 6px;
+  height: 49px;
+}
+.cp-channels {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  height: 25px;
+  border-radius: var(--r-md);
+  background: var(--cp-well);
+}
+.cp-channel {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+.cp-channel + .cp-channel { box-shadow: -1px 0 0 var(--bg-float); }
+.cp-channel input {
+  width: 100%;
+  height: 25px;
+  padding: 0 1px;
   border: 0;
-  border-radius: var(--cp-radius);
-  background: var(--ink-1);
-  box-shadow: none;
+  outline: 0;
+  background: none;
   color: var(--tx);
   font-family: var(--f-mono);
   font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
   font-variant-numeric: tabular-nums;
-  outline: 0;
+  text-align: center;
+  appearance: textfield;
   user-select: text;
   -webkit-user-select: text;
-  transition: background var(--dur-1);
 }
-.color-picker .color-hex:hover { background: var(--ink-2); }
-.color-picker .color-hex:focus { background: var(--ink-2); }
-.color-picker .color-hex[aria-invalid="true"] { color: #ef7777; }
-
-.cp-eyedropper {
+.cp-channel input::-webkit-inner-spin-button,
+.cp-channel input::-webkit-outer-spin-button { appearance: none; margin: 0; }
+.cp-channel:focus-within { border-radius: var(--r-md); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.cp-channel span {
+  position: absolute;
+  top: 30px;
+  right: 0;
+  left: 0;
+  color: var(--tx-3);
+  font-size: 10px;
+  text-align: center;
+  pointer-events: none;
+}
+.cp-square {
   flex: none;
   display: grid;
   place-items: center;
-  width: var(--cp-row);
-  height: var(--cp-row);
-  padding: 0;
-  border: 0;
-  border-radius: var(--cp-radius);
-  background: var(--ink-1);
-  color: var(--tx-2);
-  transition: background var(--dur-1), color var(--dur-1), transform var(--dur-1) var(--ease);
-}
-.cp-eyedropper svg {
-  width: 16px;
-  height: 16px;
-}
-.cp-eyedropper:hover { background: var(--ink-2); color: var(--tx); }
-.cp-eyedropper:active { transform: scale(.94); }
-.cp-eyedropper:disabled { opacity: var(--disabled); }
-
-/* Swatches: the original | new pair, a hairline, then the presets.
-   The pair is the largest chip; presets are smaller and inset so the row reads as
-   "your colour, then a palette" instead of ten equal squares. */
-.cp-swatches {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  height: 22px;
-  margin-top: 4px;
-  padding: 0 2px 2px;
-}
-.cp-compare {
-  display: flex;
-  flex: none;
-  height: 100%;
-  border-radius: 6px;
-  overflow: hidden;
-  box-shadow: inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .16);
-}
-.cp-compare > * {
   width: 26px;
-  height: 100%;
-  padding: 0;
-  border: 0;
-  background: var(--sw-color);
+  height: 25px;
+  border-radius: var(--r-sm);
+  background: var(--cp-button);
+  color: var(--tx-2);
+  transition: background var(--dur-1), color var(--dur-1);
 }
-.cp-swatches-rule {
-  flex: none;
-  width: var(--hairline);
-  height: 14px;
-  background: var(--line-strong);
+.cp-row .cp-square { height: 26px; }
+.cp-square:hover,
+.cp-square[aria-expanded="true"] { background: var(--ink-3); color: var(--tx); }
+.cp-square svg { width: 14px; height: 14px; }
+
+/* The value field: the notation the menu picks, applied on Enter or leaving. */
+.cp-value-row {
+  display: flex;
+  gap: 6px;
+  height: 25px;
 }
-.cp-presets {
+.color-picker .cp-value {
   flex: 1;
-  display: grid;
-  grid-template-columns: repeat(8, minmax(0, 1fr));
-  gap: 7px;
-  height: 18px;
-}
-.cp-preset {
-  position: relative;
-  height: 100%;
-  padding: 0;
+  width: 100%;
+  min-width: 0;
+  padding: 0 6px;
   border: 0;
-  border-radius: 5px;
-  background: var(--sw-color);
-  box-shadow: inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .16);
-  transition: transform var(--dur-2) var(--ease);
+  border-radius: 7px;
+  outline: 0;
+  background: var(--cp-well);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--tx);
+  font-family: var(--f-mono);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  user-select: text;
+  -webkit-user-select: text;
+  transition: box-shadow var(--dur-1);
 }
-.cp-preset:hover { transform: scale(1.1); }
-.cp-preset[aria-pressed="true"]::after {
-  content: '';
-  position: absolute;
-  left: calc(50% - 2px);
-  top: calc(50% - 2px);
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: #fff;
-  mix-blend-mode: difference;
-}
+.color-picker .cp-value:focus { box-shadow: inset 0 0 0 1px var(--tx-3); }
+.color-picker .cp-value[aria-invalid="true"] { color: var(--danger); }
+
+.cp-menu-heading { color: var(--tx-3); font-weight: var(--fw-regular); white-space: nowrap; }
 
 @media (prefers-reduced-motion: reduce) {
   .toggle,
   .toggle i,
-  .fill-spectrum-color,
-  .cp-formats-pill,
-  .cp-preset,
-  .cp-eyedropper {
+  .fill-spectrum-color {
     transition: none;
   }
   .color-picker[data-state] { animation: none; }

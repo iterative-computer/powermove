@@ -366,7 +366,7 @@ describe('picker drafts', () => {
     target.querySelector<HTMLButtonElement>('button.color-field')!.click();
     await tick();
 
-    const sv = document.body.querySelector<HTMLElement>('.color-sv')!;
+    const sv = document.body.querySelector<HTMLElement>('.cp-plane')!;
     vi.spyOn(sv, 'getBoundingClientRect').mockReturnValue({
       x: 0, y: 0, left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100,
       toJSON: () => ({})
@@ -391,7 +391,7 @@ describe('picker drafts', () => {
     target.querySelector<HTMLButtonElement>('button.color-field')!.click();
     await tick();
     expect(document.body.querySelector<HTMLElement>('.color-picker')!.style.top).not.toBe('0px');
-    const hex = document.body.querySelector<HTMLInputElement>('.color-hex')!;
+    const hex = document.body.querySelector<HTMLInputElement>('.cp-value')!;
     hex.value = '#34c759';
     hex.dispatchEvent(new InputEvent('input', { bubbles: true }));
     flushSync();
@@ -419,7 +419,7 @@ describe('picker drafts', () => {
     document.body.querySelector<HTMLButtonElement>('[aria-label="Sample screen color"]')!.click();
     await vi.waitFor(() => expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: '#0A84FF' })));
     expect(open).toHaveBeenCalledOnce();
-    expect(document.body.querySelector<HTMLInputElement>('.color-hex')!.value).toBe('#0A84FF');
+    expect(document.body.querySelector<HTMLInputElement>('.cp-value')!.value).toBe('#0A84FF / 100%');
   });
 
   it('mounts color and fill picker overlays above clipped panel contents', async () => {
@@ -442,6 +442,34 @@ describe('picker drafts', () => {
     fillTarget.querySelector<HTMLButtonElement>('button.color-field')!.click();
     await tick();
     expect(document.body.querySelector('.fill-picker-layer')?.parentElement).toBe(document.body);
+  });
+
+  // Picker preferences are shared across pickers, so this runs after the other ColorField tests.
+  it('ColorField picks in Display P3 and writes the clipped sRGB hex', async () => {
+    const { api, Edit } = fakeAPI();
+    const target = render(ColorField, { api, get: () => '#808080', edit: commandEdit('Color'), label: 'Color' });
+    target.querySelector<HTMLButtonElement>('button.color-field')!.click();
+    await tick();
+    document.body.querySelector<HTMLButtonElement>('[role="tab"]:nth-child(2)')!.click();
+    flushSync();
+
+    const plane = document.body.querySelector<HTMLElement>('.cp-plane')!;
+    vi.spyOn(plane, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 0, left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100,
+      toJSON: () => ({})
+    });
+    const hue = document.body.querySelector<HTMLElement>('.cp-hue')!;
+    vi.spyOn(hue, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 0, left: 0, top: 0, right: 14, bottom: 100, width: 14, height: 100,
+      toJSON: () => ({})
+    });
+    hue.dispatchEvent(pointer('pointerdown', { pointerId: 1, clientX: 7, clientY: 0 }));
+    plane.dispatchEvent(pointer('pointerdown', { pointerId: 1, clientX: 100, clientY: 0 }));
+    flushSync();
+
+    expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: '#FF0000' }));
+    expect(document.body.querySelector('.cp-clipped')?.textContent).toBe('Clipped');
+    expect(document.body.querySelector<HTMLInputElement>('.cp-value')!.getAttribute('aria-label')).toBe('Color OKLCH value');
   });
 
   it('FillField previews color continuously across pointer moves', async () => {
