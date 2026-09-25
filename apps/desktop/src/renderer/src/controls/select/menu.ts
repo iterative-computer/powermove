@@ -23,7 +23,7 @@ export interface MenuHandle {
 
 const GAP = 4;
 const EDGE = 8;
-const MAX_HEIGHT = 320;
+const MAX_HEIGHT = 440;
 
 let current: MenuHandle | null = null;
 
@@ -196,6 +196,11 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
 
   document.body.append(el);
   place();
+  // A list longer than the menu opens scrolled to the current value, not the top.
+  const selected = items[active];
+  if (selected && el.scrollHeight > el.clientHeight) {
+    el.scrollTop = Math.max(0, selected.offsetTop - (el.clientHeight - selected.offsetHeight) / 2);
+  }
   el.dataset.state = 'open';
   // Nothing is lit until the pointer or the arrow keys pick a row; the index still starts on the current value.
   el.addEventListener('pointerleave', rest);
