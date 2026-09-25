@@ -1,4 +1,5 @@
 import { createAgentCheckpoint } from './checkpoint';
+import { normalizeAgentSummary } from './agent-prose';
 import { noticeKind, stated } from '../../errors/presentation';
 import { notifyAgentFinished } from '../../panels/agent/notification-preferences';
 /* Ported from js/assistant/spatial.js — behavior-preserving. */
@@ -1475,7 +1476,7 @@ function normalizeAutonomousResult(raw: any, rawExtensions: any) {
     ...(item.summary === undefined ? {} : { summary: item.summary }),
   }));
   return {
-    summary: text(raw?.summary || 'The autonomous agent finished its run.').slice(0, 30_000),
+    summary: normalizeAgentSummary(raw?.summary || 'The autonomous agent finished its run.'),
     commands: (Array.isArray(raw?.commands) ? raw.commands : [])
       .map(PM.AgentHarness.cleanCommand).filter(Boolean),
     artifacts: (Array.isArray(raw?.artifacts) ? raw.artifacts : []).map((item: any) => ({

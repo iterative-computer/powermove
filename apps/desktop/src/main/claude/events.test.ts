@@ -107,6 +107,25 @@ describe('Claude stream parser', () => {
     ]);
   });
 
+  it('keeps a complete Markdown reply when Claude sends no text deltas', () => {
+    const onTrace = vi.fn();
+    const parser = new ClaudeEventParser({ onTrace });
+    feed(parser, [
+      stream({ type: 'message_start', message: { id: 'first' } }),
+      stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Earlier reply.' } }),
+      stream({ type: 'message_stop' }),
+      { type: 'assistant', message: { id: 'first', content: [{ type: 'text', text: 'Earlier reply.' }] } },
+      stream({ type: 'message_start', message: { id: 'second' } }),
+      stream({ type: 'message_stop' }),
+      { type: 'assistant', message: { id: 'second', content: [{ type: 'text', text: '## Done\n\n- one\n- two' }] } },
+      { type: 'assistant', message: { id: 'second', content: [{ type: 'text', text: '## Done\n\n- one\n- two' }] } }
+    ]);
+    expect(onTrace.mock.calls.map(([event]) => event)).toEqual([
+      { kind: 'answer', text: 'Earlier reply.' },
+      { kind: 'answer', text: '## Done\n\n- one\n- two' }
+    ]);
+  });
+
   it('bounds streamed JSON and marks an oversized tool detail unavailable', () => {
     const onTrace = vi.fn();
     const parser = new ClaudeEventParser({ onTrace });

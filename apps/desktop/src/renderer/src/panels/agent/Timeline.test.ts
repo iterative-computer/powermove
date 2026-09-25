@@ -73,6 +73,12 @@ describe('Timeline', () => {
     expect(target.querySelector('.agent-thinking-word')).toBeNull();
   });
 
+  it('formats Markdown in Claude progress before a trace arrives', () => {
+    render({ provider: 'claude', activity: '**Preparing** the result' });
+    expect(target.querySelector('.agent-trace-loading .is-bold')?.textContent).toBe('Preparing');
+    expect(target.querySelector('.agent-trace-loading')?.textContent).not.toContain('**');
+  });
+
   it('renders thought, text, and grouped tool rows in order', () => {
     render({
       activity: 'ignored once the trace exists',

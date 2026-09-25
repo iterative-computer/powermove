@@ -59,11 +59,12 @@ export class ClaudeEventParser {
   private resultText = '';
   private resultError: string | null = null;
   private streamedMessage: StreamedAssistantMessage | null = null;
-  /* Once the CLI streams one message it streams them all: every later
-     `assistant` event repeats blocks already delivered as deltas. Claude Code
-     may also split one message into several `assistant` events (one per
-     block, same message id), so dedupe on the mode, not per message. */
+  /* A streamed message can finish without any text deltas. In that case its
+     complete assistant block is the only copy of the answer. */
   private streamingMode = false;
+  private streamedAnswer = false;
+  private streamedThought = false;
+  private readonly completedBlocks = new Set<string>();
 
   constructor(private readonly callbacks: ClaudeEventCallbacks = {}) {}
 
@@ -116,8 +117,16 @@ export class ClaudeEventParser {
     }
     if (event.type === 'assistant' && isRecord(event.message) && Array.isArray(event.message.content)) {
       for (const block of event.message.content) {
-        if (this.streamingMode) this.streamedAssistantProgress(block);
-        else this.assistantBlock(block);
+        if (!this.streamingMode) { this.assistantBlock(block); continue; }
+        if (!isRecord(block)) continue;
+        if (block.type !== 'text' && block.type !== 'thinking') continue;
+        if (block.type === 'text' && this.streamedAnswer) this.streamedAssistantProgress(block);
+        if ((block.type === 'text' && this.streamedAnswer)
+          || (block.type === 'thinking' && this.streamedThought)) continue;
+        const key = `${block.type}:${block.type === 'text' ? block.text : block.thinking}`;
+        if (this.completedBlocks.has(key)) continue;
+        this.completedBlocks.add(key);
+        this.assistantBlock(block);
       }
       return;
     }
@@ -143,6 +152,9 @@ export class ClaudeEventParser {
   private streamEvent(event: Record<string, unknown>): void {
     if (event.type === 'message_start') {
       this.streamingMode = true;
+      this.streamedAnswer = false;
+      this.streamedThought = false;
+      this.completedBlocks.clear();
       this.streamedMessage = { tools: new Map() };
       return;
     }
@@ -169,10 +181,12 @@ export class ClaudeEventParser {
 
     if (event.type === 'content_block_delta' && isRecord(event.delta)) {
       if (event.delta.type === 'text_delta') {
+        if (typeof event.delta.text === 'string' && event.delta.text) this.streamedAnswer = true;
         this.emitFragment('answer', event.delta.text);
         return;
       }
       if (event.delta.type === 'thinking_delta') {
+        if (typeof event.delta.thinking === 'string' && event.delta.thinking) this.streamedThought = true;
         this.emitFragment('thought', event.delta.thinking);
         return;
       }

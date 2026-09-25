@@ -1,6 +1,7 @@
 <script lang="ts">
   import { agentState } from './agent-state.svelte';
   import { activityRows, type TraceStep } from './activity-rows';
+  import Markdown from './Markdown.svelte';
   import TextRow from './TextRow.svelte';
   import ToolActivity from './ToolActivity.svelte';
 
@@ -42,10 +43,10 @@
 
 {#if fallback}
   <div class="agent-trace">
-    <p class="agent-trace-loading">
+    <div class="agent-trace-loading">
       <span class="agent-pixel-loader" aria-hidden="true">{#each Array(9) as _, cell (cell)}<i style="--cell-delay:{((cell % 3) + Math.abs(Math.floor(cell / 3) - 1)) * 90}ms"></i>{/each}</span>
-      <span class="agent-trace-thought shimmer-text">{fallback}</span>
-    </p>
+      <div class="agent-trace-thought shimmer-text"><Markdown text={fallback} /></div>
+    </div>
   </div>
 {:else if rows.length}
   <div class="agent-trace is-live">
