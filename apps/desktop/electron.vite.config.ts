@@ -33,6 +33,12 @@ export default defineConfig({
   renderer: {
     root: 'src/renderer',
     publicDir: 'public',
+    /* Development only: extension sandboxes are opaque-origin iframes whose
+       bootstrap modules come from this dev server (main proxies the document
+       over app://). Vite's default CORS allowlist rejects a null origin, so
+       those module requests need a wildcard. Production serves everything
+       from app:// and never uses this server. */
+    server: { cors: { origin: '*' } },
     plugins: [svelte(), playerBundlePlugin(), {
       name: 'extension-sandbox-document',
       closeBundle() {

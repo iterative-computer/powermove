@@ -217,6 +217,28 @@ function registerAppProtocol(): void {
         headers['Access-Control-Allow-Origin'] = '*';
         return new Response(asset.body, { status: asset.status, headers });
       }
+      /* Development: the renderer runs from Vite, which has no built
+         out/renderer/host. Serve the sandbox document from Vite's own entry
+         through app:// so the frame keeps the same origin rules and CSP as a
+         packaged build (Vite answers /host/ext-sandbox.html with the app
+         shell, which is why the frame must not load it directly). */
+      if (devRendererUrl && requestedPath === 'host/ext-sandbox.html') {
+        const id = requestUrl.searchParams.get('id') ?? '';
+        const manifest = sandboxManifestFor(id);
+        if (!manifest || requestUrl.searchParams.get('perms') !== (manifest.permissions ?? []).join(',')) return errorResponse(404, 'Not found');
+        const vite = new URL(devRendererUrl).origin;
+        const upstream = await fetch(`${vite}/sandbox/ext-sandbox.html`);
+        if (!upstream.ok) return errorResponse(502, 'Sandbox document unavailable from the dev server');
+        const html = (await upstream.text())
+          .replace('src="./ext-sandbox.ts"', `src="${vite}/sandbox/ext-sandbox.ts"`)
+          .replace('src="/@vite/client"', `src="${vite}/@vite/client"`);
+        const headers = responseHeaders('text/html; charset=utf-8');
+        headers['Content-Security-Policy'] = extensionSandboxCsp(id, manifest.permissions ?? [], 'app://powermove', vite);
+        headers['Cross-Origin-Resource-Policy'] = 'same-origin';
+        headers['Cache-Control'] = 'no-store';
+        delete headers['X-Frame-Options'];
+        return new Response(html, { headers });
+      }
       const filePath = path.resolve(rendererRoot, requestedPath);
       const relativePath = path.relative(rendererRoot, filePath);
 

@@ -161,7 +161,10 @@ export async function createSandboxRuntime(kernel: Kernel, record: ExtensionReco
   frame.hidden = true;
   frame.setAttribute('sandbox', 'allow-scripts');
   frame.setAttribute('aria-hidden', 'true');
-  const base = location.protocol === 'app:' ? 'app://powermove' : location.origin;
+  // Inside Electron the document always comes from app:// (in development
+  // main proxies it from Vite); only the browser host (powermove serve)
+  // serves it from its own origin.
+  const base = location.protocol === 'app:' || navigator.userAgent.includes('Electron') ? 'app://powermove' : location.origin;
   const perms = (manifest.permissions ?? []).join(',');
   if (!test?.frame) frame.src = `${base}/host/ext-sandbox.html?id=${encodeURIComponent(record.id)}&perms=${encodeURIComponent(perms)}`;
   const registrations = new Map<string, Disposable>();
