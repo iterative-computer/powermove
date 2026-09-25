@@ -1361,7 +1361,9 @@ function stopActiveRequest() { stopSession(activeSession()); }
 
 const TRACE_STEP_LIMIT: any = 200;
 const TRACE_THOUGHT_LIMIT: any = 2_000;
-const TRACE_TEXT_LIMIT: any = 6_000;
+// Match final-summary capacity so the streamed path retains closing Markdown
+// delimiters for replies the completed-summary path already accepts.
+const TRACE_TEXT_LIMIT: any = 30_000;
 
 function finishTraceThought(session: any = activeSession()) {
   const last: any = session.trace.at(-1);

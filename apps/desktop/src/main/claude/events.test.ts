@@ -20,6 +20,51 @@ function feed(parser: ClaudeEventParser, events: readonly Record<string, unknown
 }
 
 describe('Claude stream parser', () => {
+  it.each([false, true])('preserves Markdown closers beyond one IPC fragment (streamed: %s)', streamed => {
+    const trace: any[] = [];
+    const parser = new ClaudeEventParser({ onTrace: step => trace.push(step) });
+    const text = `**${'word '.repeat(500).trim()}**`;
+    feed(parser, [
+      ...(streamed ? [
+        stream({ type: 'message_start', message: { id: 'long' } }),
+        stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } }),
+        stream({ type: 'message_stop' })
+      ] : []),
+      { type: 'assistant', message: { id: 'long', content: [{ type: 'text', text }] } }
+    ]);
+    const answers = trace.filter(step => step.kind === 'answer');
+    expect(answers.map(step => step.text).join('')).toBe(text);
+    expect(answers.every(step => step.text.length <= LIMITS.codexTraceChars)).toBe(true);
+  });
+
+  it('recovers the missing Markdown suffix from a completed assistant block once', () => {
+    const trace: any[] = [];
+    const parser = new ClaudeEventParser({ onTrace: step => trace.push(step) });
+    feed(parser, [
+      stream({ type: 'message_start', message: { id: 'partial' } }),
+      stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '**Done' } }),
+      stream({ type: 'message_stop' }),
+      ...Array(2).fill({ type: 'assistant', message: { id: 'partial', content: [{ type: 'text', text: '**Done**\n\n- One' }] } })
+    ]);
+    expect(trace.filter(step => step.kind === 'answer').map(step => step.text).join('')).toBe('**Done**\n\n- One');
+  });
+
+  it('keeps initial block text and complete-only blocks in a mixed streamed message', () => {
+    const trace: any[] = [];
+    const parser = new ClaudeEventParser({ onTrace: step => trace.push(step) });
+    feed(parser, [
+      stream({ type: 'message_start', message: { id: 'mixed' } }),
+      stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '## Result' } }),
+      stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '\n\n**Done**' } }),
+      stream({ type: 'message_stop' }),
+      { type: 'assistant', message: { id: 'mixed', content: [{ type: 'text', text: '## Result\n\n**Done**' }] } },
+      { type: 'assistant', message: { id: 'mixed', content: [{ type: 'text', text: '\n\n- One' }] } },
+      { type: 'assistant', message: { id: 'unstreamed', content: [{ type: 'text', text: '\n\nA separate reply.' }] } }
+    ]);
+    expect(trace.filter(step => step.kind === 'answer').map(step => step.text).join(''))
+      .toBe('## Result\n\n**Done**\n\n- OneA separate reply.');
+  });
+
   it('streams fragments and tool arguments once while retaining full-message progress', () => {
     const onSessionId = vi.fn();
     const onProgress = vi.fn();

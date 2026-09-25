@@ -5,6 +5,8 @@ import { fragmentText, humanLabel, outputExcerpt, toolDetail } from '../agent-to
 const MAX_LINE_BYTES = 1024 * 1024;
 const MAX_TOOL_BLOCKS = 64;
 const MAX_TOOL_INPUT_BYTES = 64 * 1024;
+const MAX_PROSE_CHARS = 30_000;
+const MAX_RECENT_MESSAGES = 8;
 
 export interface ClaudeEventCallbacks {
   onProgress?: (text: string) => void;
@@ -23,6 +25,8 @@ interface StreamedToolBlock {
 
 interface StreamedAssistantMessage {
   tools: Map<number, StreamedToolBlock>;
+  prose: Map<number, { kind: 'answer' | 'thought'; text: string }>;
+  completed: Set<string>;
 }
 
 function normalizedText(value: unknown, limit: number): string {
@@ -59,12 +63,8 @@ export class ClaudeEventParser {
   private resultText = '';
   private resultError: string | null = null;
   private streamedMessage: StreamedAssistantMessage | null = null;
-  /* A streamed message can finish without any text deltas. In that case its
-     complete assistant block is the only copy of the answer. */
-  private streamingMode = false;
-  private streamedAnswer = false;
-  private streamedThought = false;
-  private readonly completedBlocks = new Set<string>();
+  private lastStreamedMessage: StreamedAssistantMessage | null = null;
+  private readonly recentMessages = new Map<string, StreamedAssistantMessage>();
 
   constructor(private readonly callbacks: ClaudeEventCallbacks = {}) {}
 
@@ -116,17 +116,11 @@ export class ClaudeEventParser {
       return;
     }
     if (event.type === 'assistant' && isRecord(event.message) && Array.isArray(event.message.content)) {
+      const streamed = typeof event.message.id === 'string'
+        ? this.recentMessages.get(event.message.id) : this.lastStreamedMessage;
       for (const block of event.message.content) {
-        if (!this.streamingMode) { this.assistantBlock(block); continue; }
-        if (!isRecord(block)) continue;
-        if (block.type !== 'text' && block.type !== 'thinking') continue;
-        if (block.type === 'text' && this.streamedAnswer) this.streamedAssistantProgress(block);
-        if ((block.type === 'text' && this.streamedAnswer)
-          || (block.type === 'thinking' && this.streamedThought)) continue;
-        const key = `${block.type}:${block.type === 'text' ? block.text : block.thinking}`;
-        if (this.completedBlocks.has(key)) continue;
-        this.completedBlocks.add(key);
-        this.assistantBlock(block);
+        if (streamed) this.completeStreamedBlock(streamed, block);
+        else this.assistantBlock(block);
       }
       return;
     }
@@ -151,11 +145,14 @@ export class ClaudeEventParser {
 
   private streamEvent(event: Record<string, unknown>): void {
     if (event.type === 'message_start') {
-      this.streamingMode = true;
-      this.streamedAnswer = false;
-      this.streamedThought = false;
-      this.completedBlocks.clear();
-      this.streamedMessage = { tools: new Map() };
+      this.streamedMessage = { tools: new Map(), prose: new Map(), completed: new Set() };
+      this.lastStreamedMessage = this.streamedMessage;
+      if (isRecord(event.message) && isString(event.message.id, 200)) {
+        this.recentMessages.set(event.message.id, this.streamedMessage);
+        while (this.recentMessages.size > MAX_RECENT_MESSAGES) {
+          this.recentMessages.delete(this.recentMessages.keys().next().value!);
+        }
+      }
       return;
     }
 
@@ -165,7 +162,13 @@ export class ClaudeEventParser {
     if (event.type === 'content_block_start') {
       const index = blockIndex(event.index);
       const block = event.content_block;
-      if (index === null || !isRecord(block) || block.type !== 'tool_use') return;
+      if (index === null || !isRecord(block)) return;
+      if (block.type === 'text' || block.type === 'thinking') {
+        this.streamProse(current, index, block.type === 'text' ? 'answer' : 'thought',
+          block.type === 'text' ? block.text : block.thinking);
+        return;
+      }
+      if (block.type !== 'tool_use') return;
       if (!isString(block.id, 120) || !isString(block.name, 80)) return;
       if (!current.tools.has(index) && current.tools.size >= MAX_TOOL_BLOCKS) return;
       const name = normalizedText(block.name, 80) || 'tool';
@@ -181,13 +184,11 @@ export class ClaudeEventParser {
 
     if (event.type === 'content_block_delta' && isRecord(event.delta)) {
       if (event.delta.type === 'text_delta') {
-        if (typeof event.delta.text === 'string' && event.delta.text) this.streamedAnswer = true;
-        this.emitFragment('answer', event.delta.text);
+        this.streamProse(current, blockIndex(event.index), 'answer', event.delta.text);
         return;
       }
       if (event.delta.type === 'thinking_delta') {
-        if (typeof event.delta.thinking === 'string' && event.delta.thinking) this.streamedThought = true;
-        this.emitFragment('thought', event.delta.thinking);
+        this.streamProse(current, blockIndex(event.index), 'thought', event.delta.thinking);
         return;
       }
       if (event.delta.type !== 'input_json_delta') return;
@@ -227,9 +228,49 @@ export class ClaudeEventParser {
     if (event.type === 'message_stop') this.finishStreamedMessage();
   }
 
-  private emitFragment(kind: 'answer' | 'thought', value: unknown): void {
-    const text = fragmentText(value).slice(0, LIMITS.codexTraceChars);
-    if (text) this.callbacks.onTrace?.({ kind, text });
+  private emitProse(kind: 'answer' | 'thought', value: string): void {
+    const bounded = value.slice(0, MAX_PROSE_CHARS);
+    // The IPC limit is per event, not per reply. Cutting off a complete block
+    // can discard its closing Markdown markers and leave raw syntax visible.
+    for (let offset = 0; offset < bounded.length;) {
+      let end = Math.min(offset + LIMITS.codexTraceChars, bounded.length);
+      if (end < bounded.length && /[\uD800-\uDBFF]/u.test(bounded[end - 1]!)) end -= 1;
+      const text = fragmentText(bounded.slice(offset, end));
+      if (text) this.callbacks.onTrace?.({ kind, text });
+      offset = end;
+    }
+  }
+
+  private streamProse(message: StreamedAssistantMessage, index: number | null,
+    kind: 'answer' | 'thought', value: unknown): void {
+    if (typeof value !== 'string') return;
+    if (index !== null && (message.prose.has(index) || message.prose.size < MAX_TOOL_BLOCKS)) {
+      const previous = message.prose.get(index);
+      message.prose.set(index, { kind, text: `${previous?.text ?? ''}${value}`.slice(0, MAX_PROSE_CHARS) });
+    }
+    this.emitProse(kind, value);
+  }
+
+  private completeStreamedBlock(message: StreamedAssistantMessage, value: unknown): void {
+    if (!isRecord(value) || (value.type !== 'text' && value.type !== 'thinking')) return;
+    const kind = value.type === 'text' ? 'answer' : 'thought';
+    const raw = kind === 'answer' ? value.text : value.thinking;
+    if (typeof raw !== 'string') return;
+    const text = raw.slice(0, MAX_PROSE_CHARS);
+    const key = `${kind}:${text}`;
+    if (message.completed.has(key)) return;
+    if (message.completed.size >= MAX_TOOL_BLOCKS) return;
+    const candidates = [...message.prose.values()].filter(block => block.kind === kind
+      && !message.completed.has(`${kind}:${block.text}`));
+    message.completed.add(key);
+    // Claude may send one assistant event per block. Match the actual content,
+    // not the position in that event or whether some other block had deltas.
+    const seen = candidates.find(block => block.text === text)
+      ?? candidates.find(block => block.text && text.startsWith(block.text));
+    const missing = seen ? text.slice(seen.text.length) : text;
+    this.emitProse(kind, missing);
+    if (seen) seen.text = text;
+    if (kind === 'answer') this.streamedAssistantProgress(value);
   }
 
   private finishStreamedMessage(): void {
@@ -246,16 +287,16 @@ export class ClaudeEventParser {
   private assistantBlock(value: unknown): void {
     if (!isRecord(value)) return;
     if (value.type === 'text') {
-      const text = normalizedProse(value.text, LIMITS.codexTraceChars);
+      const text = normalizedProse(value.text, MAX_PROSE_CHARS);
       if (!text) return;
-      this.callbacks.onTrace?.({ kind: 'answer', text });
+      this.emitProse('answer', text);
       const progress = normalizedText(value.text, LIMITS.codexProgressChars);
       if (progress) this.callbacks.onProgress?.(progress);
       return;
     }
     if (value.type === 'thinking') {
-      const text = normalizedProse(value.thinking, LIMITS.codexTraceChars);
-      if (text) this.callbacks.onTrace?.({ kind: 'thought', text });
+      const text = normalizedProse(value.thinking, MAX_PROSE_CHARS);
+      this.emitProse('thought', text);
       return;
     }
     if (value.type !== 'tool_use' || !isString(value.id, 120) || !isString(value.name, 80)) return;
