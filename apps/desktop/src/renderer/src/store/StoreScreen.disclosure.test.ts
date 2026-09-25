@@ -33,9 +33,9 @@ it('renders permission disclosure, trust status, and the Library trust action', 
     flushSync(() => screen.open('library'));
     await vi.waitFor(() => expect(target.textContent).toContain('Needs full access'));
     expect(target.textContent).toContain('Glass blur');
-    const row = target.querySelector('.st-row.is-library')!;
+    const row = target.querySelector('.st-item.is-library')!;
     expect(row.textContent).toContain('Trust…');
-    (row.querySelector('.st-row-open') as HTMLButtonElement).click();
+    (row.querySelector('.st-item-open') as HTMLButtonElement).click();
     flushSync();
     await vi.waitFor(() => expect(target.textContent).toContain('Uses the network'));
     expect(target.textContent).toContain('Needs full access to Powermove');
@@ -62,8 +62,8 @@ it('renders Trusted and offers Revoke Trust for a trusted Store install', async 
   const screen = mount(StoreScreen, { target, props: { PM: { bus: { emit() {} } } as unknown as StorePM } });
   try {
     flushSync(() => screen.open('library'));
-    await vi.waitFor(() => expect(target.querySelector('.st-row-status')?.textContent).toContain('Trusted'));
-    (target.querySelector('.st-row-more') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(target.querySelector('.st-item-status')?.textContent).toContain('Trusted'));
+    (target.querySelector('.st-item-more') as HTMLButtonElement).click();
     expect(document.body.textContent).toContain('Revoke Trust');
   } finally { await unmount(screen); target.remove(); }
 });

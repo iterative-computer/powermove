@@ -25,28 +25,43 @@ const S: any = {
   page: 0, queryKey: '',
 };
 if (!['recents', 'projects', 'trash'].includes(S.section)) S.section = 'recents';
+const SECTIONS = ['recents', 'projects', 'trash', 'store'];
 
 PM.ProjectsScreen = {
   get isOpen() { return !!S.el && S.el.classList.contains('on'); },
   get section() { return S.section; },
   show(section: any) {
     ensure();
-    if (section && ['recents', 'projects', 'trash'].includes(section)) S.section = section;
+    if (section && SECTIONS.includes(section)) selectSection(section, false);
     paint(); S.el.classList.add('on'); PM.bus.emit('projects:screen');
   },
   hide() {
     // Nothing to fall back to: this window has no composition behind the screen.
     if (!PM.proj?.id || PM.isHomeProject?.()) return;
+    if (S.section === 'store') (PM as any).StoreUI?.setActive?.(false);
     if (S.el) S.el.classList.remove('on');
     PM.bus.emit('projects:screen');
   },
   toggle() { this.isOpen ? this.hide() : this.show(); },
+  clearSearch() { if (S.search?.value) { S.search.value = ''; paint(); } },
 };
+
+/* The Store is one more section; it has its own search, so this field always
+   searches projects and typing in it from the Store goes back to them. */
+function selectSection(section: string, persist = true) {
+  if (section === S.section) return;
+  if (section === 'store' && S.search) S.search.value = '';
+  S.section = section;
+  if (persist && section !== 'store') PM.store.set('projectsSection', section);
+}
 
 function ensure() {
   if (S.el) return;
   S.search = h('input', { type: 'search', placeholder: 'Search projects', 'aria-label': 'Search projects' });
-  S.search.addEventListener('input', paint);
+  S.search.addEventListener('input', () => {
+    if (S.section === 'store' && S.search.value) selectSection('recents');
+    paint();
+  });
   S.nav = h('div.ps-nav');
   /* Forked built-ins that fell behind the shipped version. The agent does the
      merge; this block only says how many and offers the one action. */
@@ -75,8 +90,8 @@ function ensure() {
       h('button.btn', { onclick: installUpdate }, 'Restart to update'));
   };
   S.offAppUpdate = subscribeAppUpdates(paintAppUpdate);
-  /* The Store is its own screen; from home it reads as one more place to go. */
-  const store = h('div.ps-nav', h('button.ps-navbtn', { onclick: () => (PM as any).StoreUI?.open?.() }, PM.icon('sparkle'), h('span', 'Store')));
+  S.storeBtn = h('button.ps-navbtn', { onclick: () => { selectSection('store'); paint(); } }, PM.icon('basket'), h('span', 'Store'));
+  const store = h('div.ps-nav', S.storeBtn);
   /* One nav block so the highlight can glide from the sections to Store. */
   const nav = h('div.ps-navs', S.nav, store);
   S.offGlide = mountNavGlide(nav, { row: '.ps-navbtn', selected: '.on' });
@@ -98,7 +113,9 @@ function ensure() {
   S.grid = h('div.ps-grid');
   S.pager = h('nav.ps-pagination', { 'aria-label': 'Project pages', hidden: true });
   S.content = h('div.ps-content', S.grid, S.pager);
-  S.el = h('div#projects-screen', sidebar, h('main.ps-main', top, S.content));
+  S.top = top;
+  S.storeHost = h('div.ps-store', { hidden: true });
+  S.el = h('div#projects-screen', sidebar, h('main.ps-main', top, S.content, S.storeHost));
   document.body.appendChild(S.el);
   /* Only Escape is the home's; app shortcuts such as ⌘, keep working over it. */
   S.el.addEventListener('keydown', (e: any) => {
@@ -125,12 +142,20 @@ function viewButton(value: any, label: any, icon: any) {
 }
 function navButton(section: any, label: any, icon: any, count: any) {
   return h('button.ps-navbtn' + (S.section === section ? '.on' : ''), {
-    onclick: () => { S.section = section; PM.store.set('projectsSection', section); paint(); },
+    onclick: () => { selectSection(section); paint(); },
   }, PM.icon(icon), h('span', label), h('span.count', String(count)));
 }
 
 function paint() {
   if (!S.el) return;
+  const inStore = S.section === 'store';
+  const storeUI = (PM as any).StoreUI;
+  if (inStore) storeUI?.attach?.(S.storeHost);
+  S.top.hidden = inStore;
+  S.content.hidden = inStore;
+  S.storeHost.hidden = !inStore;
+  S.storeBtn.classList.toggle('on', inStore);
+  storeUI?.setActive?.(inStore);
   const live = [...PM.Projects.list()], trash = [...PM.Projects.trashList()];
   S.nav.textContent = '';
   S.nav.append(navButton('recents', 'Recents', 'clock', Math.min(12, live.length)),

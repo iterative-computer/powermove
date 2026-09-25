@@ -5,12 +5,11 @@
   import type { CompareDto, CompareStatus, ListingDto, TreeFileDto } from '@powermove/registry/wire';
   import Icon from '../panels/Icon.svelte';
   import { mountSquircles, SQUIRCLE_SELECTOR } from '../settings/squircle';
-  import { mountNavGlide } from '../controls/nav-glide';
   import { openPopoverMenu, type PopoverMenuItem } from '../controls/popover-menu';
   import { openSignIn, subscribeAccount, type CloudUser } from '../cloud/account';
   import type { LibraryItemDto, StoreErrorBody, StoreResult } from '../../../shared/store-ipc';
   import {
-    KINDS, KIND_ICON, KIND_LABEL, KIND_PLURAL,
+    KINDS, KIND_LABEL, KIND_PLURAL,
     actionErrorText, artFor, coordinate, detailAction, detailFromDto, groupLibrary, includesText, isKind,
     libraryAction, libraryItemFor, listingFromDto, loadError, makerText, needsAttention, needsSetup, needsTrust,
     parseLineage, permissionLines, publishErrorText, requiresText, secondaryPublish, statusIsHot, statusText, storeBridge,
@@ -25,10 +24,18 @@
      narrowed to one shelf; Library is everything on this Mac, in one list. */
   let { PM }: { PM: StorePM } = $props();
 
-  /* Screen motion: the whole surface glides in from the right over the home,
-     and glides back out. Views inside slide the way you moved: deeper goes
-     right-to-left, back goes left-to-right, a sibling page just settles. */
+  /* The Store is a section of the home. Its page follows Claude's Customize
+     screen: a large title, Discover | Library beside search and Publish, a carousel of collections, then shelves of cards. Views
+     inside slide deeper and back; sibling pages settle in place. */
+  /* Motion, one vocabulary for the whole Store:
+       page      Discover, Library, a kind or search settles in with a short
+                 rise; a detail slides in the way you moved and back out.
+       settle    content that changes in place (data after its skeleton, the
+                 carousel's next collection, a status line) fades.
+     Hover and press are CSS (store.css › motion). Reduced motion stills it all. */
   const SLIDE = 24;
+  const RISE = 8;
+  const PAGE_MS = 200;
   const SEARCH_DEBOUNCE_MS = 200;
   const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
   const OFFLINE: LoadError = { offline: true, message: 'Can’t reach the store' };
@@ -45,15 +52,12 @@
   type SourceFile = { path: string; state: Loadable<string> };
 
   let shown = $state(false);
-  let leaving = $state(false);
   let page = $state<StorePage>('browse');
   let searchText = $state('');
   let featuredIndex = $state(0);
   let direction = $state(0);
   let rootEl = $state<HTMLElement | null>(null);
   let scrollEl = $state<HTMLElement | null>(null);
-  let lastFocus: HTMLElement | null = null;
-  let leaveTimer = 0;
   let account = $state<CloudUser | null>(null);
 
   let library = $state<LibraryItemDto[]>([]);
@@ -85,17 +89,49 @@
   const query = $derived(searchText.trim());
   const pageKind = $derived(page.startsWith('kind:') ? kindOf(page.slice(5)) : null);
   const viewKey = $derived(detail ? `detail:${detail.coord ? `${detail.coord.handle}/${detail.coord.slug}` : detail.localId}` : query ? 'search' : page);
-  /* Sibling pages swap in place. Only pushing into and popping out of a
-     detail slides, in the direction you moved. */
-  const slide = $derived(reduced() || direction === 0 ? { duration: 0 } : { x: direction * SLIDE, duration: 220, easing: cubicOut });
+  const slide = $derived(reduced() ? { duration: 0 }
+    : direction === 0 ? { y: RISE, duration: PAGE_MS, easing: cubicOut }
+    : { x: direction * SLIDE, duration: PAGE_MS, easing: cubicOut });
   /* A status line that changes under you (an update finished) fades in. */
   const settle = $derived(reduced() ? { duration: 0 } : { duration: 180, easing: cubicOut });
 
   const groups = $derived(groupLibrary(library));
-  const attention = $derived(library.filter(needsAttention).length);
+  /* The Library: what needs you first, then what you installed and what you
+     made. Powermove's own extensions are not listed. */
+  const attention = $derived([...groups.store, ...groups.yours].filter(needsAttention));
+  const installedCalm = $derived(groups.store.filter((item) => !needsAttention(item)));
+  const yoursCalm = $derived(groups.yours.filter((item) => !needsAttention(item)));
   const sections = $derived(browse.status === 'ready' ? browse.value.map((section) => ({ ...section, listings: section.items.map(toListing) })) : []);
-  const featured = $derived(sections.find((section) => section.id === 'featured')?.listings ?? []);
-  const hero = $derived(featured[Math.min(featuredIndex, featured.length - 1)] ?? null);
+  /* The carousel: the curated shelf, then each kind that has something on it.
+     Explore goes to the whole collection. */
+  const slides = $derived(sections
+    .filter((section) => section.id === 'featured' || isKind(section.id))
+    .slice(0, 4)
+    .map((section) => {
+      const kind = kindOf(section.id);
+      return {
+        id: section.id,
+        eyebrow: kind ? 'Collection' : 'Curated by Powermove',
+        title: kind ? KIND_PLURAL[kind] : 'Featured this week',
+        blurb: kind ? KIND_BLURB[kind] : 'Extensions the Powermove team keeps coming back to.',
+        listings: section.listings,
+        explore: () => (kind ? show(`kind:${kind}`) : revealShelf(section.id))
+      };
+    }));
+  const slideAt = $derived(slides[Math.min(featuredIndex, slides.length - 1)] ?? null);
+  /* Icons in a collection sit at staggered sizes and heights, like a shelf of
+     app icons rather than a grid. */
+  const ICON_SIZES = [60, 46, 68, 42, 58, 48, 64];
+  const ICON_LIFTS = [-10, 14, -2, 22, -12, 10, -4];
+  const KIND_BLURB: Record<StoreKind, string> = {
+    effects: 'Blur, grain, light and colour you can key to layer motion.',
+    transitions: 'Cuts, wipes and morphs between layers.',
+    panels: 'New places to work, docked beside the timeline.',
+    themes: 'Powermove in someone else’s colours.',
+    commands: 'One-step actions for the command palette.',
+    layers: 'New kinds of layer: type, shapes, 3D and more.',
+    tools: 'Canvas tools for drawing, measuring and arranging.'
+  };
 
   const detailData = $derived(remote?.status === 'ready' ? remote.value : null);
   const detailItem = $derived.by(() => {
@@ -274,14 +310,11 @@
   /* ── screen ── */
 
   export function open(target: StorePage = 'browse'): void {
-    window.clearTimeout(leaveTimer);
-    leaving = false;
     page = target;
     detail = null;
     direction = 0;
     searchText = '';
     if (!shown) {
-      lastFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       shown = true;
       void loadBrowse();
     } else if (browse.status === 'error') {
@@ -296,22 +329,55 @@
   }
 
   export function close(): void {
-    if (!shown || leaving) return;
-    leaving = true;
-    const finish = () => {
-      shown = false;
-      leaving = false;
-      PM.bus?.emit?.('store:screen');
-      const focus = lastFocus;
-      lastFocus = null;
-      if (focus?.isConnected) focus.focus();
-    };
-    if (reduced()) finish();
-    else leaveTimer = window.setTimeout(finish, 200);
+    PM.ProjectsScreen?.show('recents');
   }
 
   export function isOpen(): boolean {
     return shown;
+  }
+
+  export function setActive(on: boolean): void {
+    if (on === shown) return;
+    shown = on;
+    if (on) {
+      void loadBrowse();
+      void loadLibrary();
+    }
+    PM.bus?.emit?.('store:screen');
+  }
+
+  export function setSearch(text: string): void {
+    if (text && !searchText) detail = null;
+    searchText = text;
+  }
+
+  function stepSlide(delta: number): void {
+    if (slides.length) featuredIndex = (featuredIndex + delta + slides.length) % slides.length;
+  }
+
+  function revealShelf(id: string): void {
+    scrollEl?.querySelector(`#st-shelf-${CSS.escape(id)}`)?.scrollIntoView({ behavior: reduced() ? 'instant' : 'smooth', block: 'start' });
+  }
+
+  /* Publish: pick one of yours that has something to publish. Publishing
+     needs an account; the sheet for that opens instead when signed out. */
+  function publishMenu(event: MouseEvent): void {
+    if (!(event.currentTarget instanceof HTMLElement)) return;
+    if (!account) {
+      openSignIn();
+      return;
+    }
+    const ready = groups.yours.filter((item) => item.publish);
+    if (!ready.length) {
+      show('library');
+      toast('Nothing to publish yet. Extensions you or your agent make show up under Yours.');
+      return;
+    }
+    openPopoverMenu({
+      anchor: event.currentTarget,
+      label: 'Publish',
+      items: ready.map((item) => ({ label: item.publish === 'update' ? `${item.name} (update)` : item.name, run: () => void publish(item) }))
+    });
   }
 
   function scrollTop(): void {
@@ -367,26 +433,20 @@
     compare = null;
   }
 
-  /* Only Escape is ours; app shortcuts such as ⌘, keep working over the Store. */
+  /* Escape leaves a detail; otherwise it is the home's. App shortcuts such as
+     ⌘, keep working over the Store. */
   function keydown(event: KeyboardEvent): void {
-    if (event.key !== 'Escape') return;
+    if (event.key !== 'Escape' || !detail) return;
     event.stopPropagation();
     event.preventDefault();
-    if (detail) back();
-    else close();
-  }
-
-  /* The sidebar highlight glides between rows. */
-  function glide(node: HTMLElement) {
-    const unmount = mountNavGlide(node, { row: '.st-navbtn', selected: '.on' });
-    return { destroy: unmount };
+    back();
   }
 
   /* Lisse squircles on the cards, previews and controls while the screen is up. */
   $effect(() => {
     if (!shown || !rootEl) return;
     const root = rootEl;
-    const selector = `${SQUIRCLE_SELECTOR}, .st-card, .st-thumb, .st-hero, .st-navbtn, .st-search`;
+    const selector = `${SQUIRCLE_SELECTOR}, .st-card, .st-thumb, .st-slide, .st-item, .st-item-icon, .st-detail-banner, .st-search, .st-plus`;
     let unmount = mountSquircles(root, selector);
     const observer = new MutationObserver(() => { unmount(); unmount = mountSquircles(root, selector); });
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
@@ -672,136 +732,129 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
   id="store-screen"
-  class:on={shown}
-  class:leaving
-  role="dialog"
+  role="region"
   aria-label="Store"
   tabindex="-1"
   bind:this={rootEl}
   onkeydown={keydown}
 >
-  <aside class="st-sidebar">
-    <label class="st-search">
-      <Icon {PM} name="search" />
-      <input type="search" placeholder="Search extensions" aria-label="Search extensions" maxlength="120" bind:value={searchText} />
-    </label>
-    <nav class="st-nav" aria-label="Store sections" use:glide>
-      {@render navbtn('browse', 'Browse', 'home')}
-      <span class="st-nav-label">Kinds</span>
-      {#each KINDS as k (k)}
-        {@render navbtn(`kind:${k}`, KIND_PLURAL[k], KIND_ICON[k])}
-      {/each}
-      <span class="st-nav-label">This Mac</span>
-      {@render navbtn('library', 'Library', 'grid', attention)}
-    </nav>
-    <button class="st-navbtn st-done" type="button" aria-label="Done" onclick={close}>
-      <Icon {PM} name="chev" />
-      <span>Done</span>
-    </button>
-  </aside>
-
   <main class="st-main">
     <div class="st-scroll" bind:this={scrollEl}>
+      {#if !detail}
+        <!-- Title, then one toolbar: where you are on the left; search on the
+             right, and Publish beside it in the Library. -->
+        <header class="st-head">
+          <h1 class="st-title">Store</h1>
+          <div class="st-toolbar">
+            <div class="segmented" role="tablist" aria-label="Store pages">
+              <button type="button" role="tab" class:on={page !== 'library'} aria-selected={page !== 'library'} onclick={() => show('browse')}>Discover</button>
+              <button type="button" role="tab" class:on={page === 'library'} aria-selected={page === 'library'} onclick={() => show('library')}>Library</button>
+            </div>
+            <label class="st-search">
+              <Icon {PM} name="search" />
+              <input type="search" placeholder="Search extensions" aria-label="Search extensions" maxlength="120" bind:value={searchText} />
+            </label>
+            {#if page === 'library'}
+              <button class="st-add" type="button" onclick={publishMenu}>
+                <Icon {PM} name="plus" /><span>Publish</span>
+              </button>
+            {/if}
+          </div>
+        </header>
+      {/if}
       {#key viewKey}
         <div class="st-column" in:fly={slide}>
           {#if detail}
             {@render detailView(detail)}
 
           {:else if query}
-            <header class="st-heading">
-              <div>
-                <h2>Search</h2>
-                {#if search.status === 'ready'}
-                  <p>{search.value.length} {search.value.length === 1 ? 'extension' : 'extensions'} matching “{query}”</p>
-                {/if}
-              </div>
-            </header>
+            {@render head(`Results for “${query}”`, search.status === 'ready' ? search.value.length : null)}
             {#if search.status === 'loading'}
               {@render skeleton(4)}
             {:else if search.status === 'error'}
               {@render failure(search.error, () => void runSearch(query))}
             {:else if search.value.length === 0}
-              <div class="st-empty">
+              <div class="st-empty" in:fade={settle}>
                 <b>No results for “{query}”</b>
                 <span>Try a shorter name, a maker’s handle, or a kind such as “transition”.</span>
               </div>
             {:else}
-              <div class="st-grid">
+              <div class="st-cards" in:fade={settle}>
                 {#each search.value.map(toListing) as l (l.repoId)}
-                  {@render row(l)}
+                  {@render card(l)}
                 {/each}
               </div>
             {/if}
 
           {:else if page === 'browse'}
-            <header class="st-heading">
-              <div>
-                <h2>Store</h2>
-                <p>Effects, transitions, panels and themes made by people using Powermove.</p>
-              </div>
-            </header>
-
             {#if browse.status === 'loading'}
-              <div class="st-hero is-skeleton" aria-hidden="true"><span class="st-thumb is-featured st-skel"></span><span class="st-skel-lines"><i></i><i></i></span></div>
+              <div class="st-slide is-skeleton" aria-hidden="true"><span class="st-skel-lines"><i></i><i></i></span></div>
               {@render skeleton(6)}
             {:else if browse.status === 'error'}
               {@render failure(browse.error, () => void loadBrowse())}
             {:else if sections.length === 0}
-              <div class="st-empty">
+              <div class="st-empty" in:fade={settle}>
                 <b>Nothing here yet</b>
                 <span>Extensions people publish show up here. Make one with your agent and publish it from your Library.</span>
               </div>
             {:else}
-              {#if hero}
-                {@const act = listingAction(hero)}
-                <!-- One extension at a time: its icon beside its copy, on a card.
-                     The pager and the action share the card's last line. -->
-                <div class="st-hero">
-                  <button class="st-hero-open" type="button" aria-label={`Open ${hero.name}`} onclick={() => openListing(hero)}></button>
-                  <span class="st-thumb is-featured" style={art(hero.art)}></span>
-                  <div class="st-hero-copy">
-                    <span class="st-hero-kind">{byline(hero.kind, `by ${hero.publisher}`)}</span>
-                    <b>{hero.name}</b>
-                    <span class="st-hero-line">{hero.tagline}</span>
-                    {#if featured.length > 1}
-                      <div class="st-pager" role="tablist" aria-label="Featured">
-                        {#each featured as f, i (f.repoId)}
-                          <button role="tab" type="button" aria-selected={i === featuredIndex} aria-label={f.name} onclick={() => (featuredIndex = i)}></button>
+              <div class="st-stack" in:fade={settle}>
+                {#if slideAt}
+                  {@const at = slideAt}
+                  <section class="st-carousel" aria-roledescription="carousel" aria-label="Collections">
+                    <div class="st-slide">
+                      {#key at.id}
+                        <span class="st-slide-bg" style={art(at.listings[0]?.art ?? artFor(at.id))} aria-hidden="true" in:fade={settle} out:fade={settle}></span>
+                        <div class="st-slide-body" in:fade={settle} out:fade={settle}>
+                          <span class="st-eyebrow">{at.eyebrow}</span>
+                          <h2 class="st-slide-title">{at.title}</h2>
+                          <p class="st-slide-blurb">{at.blurb}</p>
+                          <div class="st-slide-icons">
+                            {#each at.listings.slice(0, ICON_SIZES.length) as l, i (l.repoId)}
+                              <button class="st-slide-icon" type="button" style={`--size:${ICON_SIZES[i]}px;--lift:${ICON_LIFTS[i]}px`} aria-label={`Open ${l.name}`} title={l.name} onclick={() => openListing(l)}>
+                                <span class="st-thumb" style={art(l.art)}></span>
+                              </button>
+                            {/each}
+                          </div>
+                          <button class="st-explore" type="button" onclick={at.explore}>Explore</button>
+                        </div>
+                      {/key}
+                      {#if slides.length > 1}
+                        <button class="st-arrow is-prev" type="button" aria-label="Previous collection" onclick={() => stepSlide(-1)}><Icon {PM} name="chev" /></button>
+                        <button class="st-arrow is-next" type="button" aria-label="Next collection" onclick={() => stepSlide(1)}><Icon {PM} name="chev" /></button>
+                      {/if}
+                    </div>
+                    {#if slides.length > 1}
+                      <div class="st-dots" role="tablist" aria-label="Collections">
+                        {#each slides as s, i (s.id)}
+                          <button role="tab" type="button" aria-selected={i === featuredIndex} aria-label={s.title} onclick={() => (featuredIndex = i)}></button>
                         {/each}
                       </div>
                     {/if}
-                  </div>
-                  {@render control(act, libraryItemFor(hero.repoId, library), { repoId: hero.repoId, releaseId: hero.latestReleaseId, name: hero.name }, 'btn st-hero-install')}
-                </div>
-              {/if}
-              {#each sections.filter((section) => section.id !== 'featured') as section (section.id)}
-                {@render shelfSection(section.title, section.listings, isKind(section.id) ? `kind:${section.id}` : undefined)}
-              {/each}
+                  </section>
+                {/if}
+                {#each sections as section (section.id)}
+                  {@render shelfSection(section.id, section.id === 'featured' ? 'Featured' : section.title, section.listings, isKind(section.id) ? `kind:${section.id}` : undefined)}
+                {/each}
+              </div>
             {/if}
 
           {:else if pageKind}
-            <header class="st-heading">
-              <div>
-                <h2>{KIND_PLURAL[pageKind]}</h2>
-                {#if shelf.status === 'ready' && shelf.value.items.length}
-                  <p>{shelf.value.nextCursor ? `${shelf.value.items.length}+` : shelf.value.items.length} {shelf.value.items.length === 1 ? 'extension' : 'extensions'}</p>
-                {/if}
-              </div>
-            </header>
+            {@render head(KIND_PLURAL[pageKind], shelf.status === 'ready' && shelf.value.items.length ? (shelf.value.nextCursor ? `${shelf.value.items.length}+` : shelf.value.items.length) : null)}
             {#if shelf.status === 'loading'}
               {@render skeleton(6)}
             {:else if shelf.status === 'error'}
               {@render failure(shelf.error, () => { if (pageKind) void loadShelf(pageKind); })}
             {:else if shelf.value.items.length === 0}
-              <div class="st-empty">
+              <div class="st-empty" in:fade={settle}>
                 <b>Nothing here yet</b>
                 <span>No one has published {KIND_PLURAL[pageKind].toLowerCase()} yet.</span>
               </div>
             {:else}
               {@const cursor = shelf.value.nextCursor}
-              <div class="st-grid">
+              <div class="st-cards" in:fade={settle}>
                 {#each shelf.value.items.map(toListing) as l (l.repoId)}
-                  {@render row(l)}
+                  {@render card(l)}
                 {/each}
               </div>
               {#if cursor}
@@ -812,41 +865,50 @@
             {/if}
 
           {:else}
-            <!-- Library: one list of everything here, grouped by where it came
-                 from. Each row names its maker and says what's up with it. -->
-            <header class="st-heading">
-              <div>
-                <h2>Library</h2>
-                <p>{account?.handle ? `Everything on this Mac, and what you’ve published as @${account.handle}.` : account ? 'Everything on this Mac.' : 'Everything on this Mac. Sign in to publish yours.'}</p>
+            {#if attention.length}
+              <section class="st-sec">
+                {@render head('Needs attention', attention.length)}
+                <div class="st-cards">
+                  {#each attention as item (item.localId)}
+                    {@render libraryCard(item)}
+                  {/each}
+                </div>
+              </section>
+            {/if}
+            <section class="st-sec">
+              <div class="st-sec-head">
+                <h3>Installed</h3>
+                {#if groups.store.length}<span class="st-count">{groups.store.length}</span>{/if}
+                {#if groups.store.length}<button class="st-show-all" type="button" onclick={() => void checkForUpdates()}>Check for Updates</button>{/if}
               </div>
-              {#if !account}
-                <button class="btn" type="button" onclick={() => openSignIn()}>Sign In…</button>
+              {#if installedCalm.length}
+                <div class="st-cards">
+                  {#each installedCalm as item (item.localId)}
+                    {@render libraryCard(item)}
+                  {/each}
+                </div>
+              {:else if !groups.store.length}
+                {@render libraryEmpty('basket', 'Nothing installed yet', 'Extensions you install from the store live here, and update when their makers publish.', 'Discover Extensions', () => show('browse'))}
               {/if}
-            </header>
-
-            {@render group('From the store', groups.store, 'Extensions you install from the store show up here, with updates from their makers.')}
-            {@render group('Yours', groups.yours, 'Extensions you or your agent make show up here.')}
-            {@render group('Built in', groups.builtin)}
+            </section>
+            <section class="st-sec">
+              {@render head('Made by you', groups.yours.length || null)}
+              {#if yoursCalm.length}
+                <div class="st-cards">
+                  {#each yoursCalm as item (item.localId)}
+                    {@render libraryCard(item)}
+                  {/each}
+                </div>
+              {:else if !groups.yours.length}
+                {@render libraryEmpty('wand', 'Nothing made yet', 'Ask your agent for an effect, a panel or a theme. What it makes shows up here, ready to publish.')}
+              {/if}
+            </section>
           {/if}
         </div>
       {/key}
     </div>
   </main>
 </div>
-
-{#snippet navbtn(id: StorePage, label: string, icon: string, count = 0)}
-  <button
-    class="st-navbtn"
-    class:on={id === page && !query && !detail}
-    type="button"
-    aria-current={id === page && !query ? 'location' : undefined}
-    onclick={() => show(id)}
-  >
-    <Icon {PM} name={icon} />
-    <span>{label}</span>
-    {#if count}<span class="st-nav-count" aria-label={`${count} need attention`}>{count}</span>{/if}
-  </button>
-{/snippet}
 
 {#snippet control(act: Action, item: LibraryItemDto | undefined, listing: { repoId: string; releaseId: string | null; name: string } | null, cls = 'btn st-install')}
   {@const pending = busy[item?.localId ?? ''] ?? busy[listing?.repoId ?? '']}
@@ -861,73 +923,97 @@
   {/if}
 {/snippet}
 
-{#snippet row(l: StoreListing)}
-  <div class="st-row">
-    <button class="st-row-open" type="button" onclick={() => openListing(l)}>
-      <span class="st-thumb" style={art(l.art)}></span>
-      <span class="st-row-copy">
-        <b>{l.name} <span class="st-row-by">by {l.publisher}</span></b>
-        <span class="st-row-line">{l.tagline}</span>
-      </span>
-    </button>
-    {@render control(listingAction(l), libraryItemFor(l.repoId, library), { repoId: l.repoId, releaseId: l.latestReleaseId, name: l.name })}
+<!-- A card per extension: its icon on a tile, name, what it does and who
+     made it. The whole card opens it; the corner button is the one other
+     target: + to install, a tick once it is here, or whatever it needs. -->
+{#snippet card(l: StoreListing)}
+  {@const act = listingAction(l)}
+  {@const item = libraryItemFor(l.repoId, library)}
+  {@const target = { repoId: l.repoId, releaseId: l.latestReleaseId, name: l.name }}
+  {@const pending = busy[item?.localId ?? ''] ?? busy[l.repoId]}
+  <div class="st-item">
+    <button class="st-item-open" type="button" aria-label={`Open ${l.name}`} onclick={() => openListing(l)}></button>
+    <span class="st-item-icon"><span class="st-thumb" style={art(l.art)}></span></span>
+    <span class="st-item-copy">
+      <b>{l.name}</b>
+      <span class="st-item-line">{l.tagline}</span>
+      <span class="st-item-by">by {l.publisher}</span>
+    </span>
+    <span class="st-item-action">
+      {#if !pending && act.kind === 'install'}
+        <button class="st-plus" type="button" aria-label={`${act.label}: ${l.name}`} title={act.label} onclick={() => run(act, item, target)}><Icon {PM} name="plus" /></button>
+      {:else if !pending && act.quiet && item?.group === 'store'}
+        <span class="st-plus is-done" role="img" aria-label="Installed" title="Installed">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+      {:else}
+        {@render control(act, item, target, 'btn st-install')}
+      {/if}
+    </span>
   </div>
 {/snippet}
 
-{#snippet libraryRow(item: LibraryItemDto)}
+{#snippet head(title: string, count: number | string | null)}
+  <div class="st-sec-head">
+    <h3>{title}</h3>
+    {#if count !== null}<span class="st-count">{count}</span>{/if}
+  </div>
+{/snippet}
+
+<!-- A Library card: the Discover card, plus what is up with it. The corner
+     holds its one action, or its switch when it just runs; the menu has the
+     rest. Turned off or waiting on you, the icon dims. -->
+{#snippet libraryCard(item: LibraryItemDto)}
   {@const note = statusText(item)}
   {@const lineage = storeLineageOf(item)}
-  <div class="st-row is-library" class:is-off={needsSetup(item) || needsTrust(item) || !item.enabled}>
-    <button class="st-row-open" type="button" onclick={() => openItem(item)}>
-      <span class="st-thumb" style={itemArt(item)}></span>
-      <span class="st-row-copy">
-        <b>{item.name} <span class="st-row-by">{makerText(item)}{#if lineage}&nbsp;· forked from {lineage.handle}/{lineage.slug}{/if}</span></b>
-        <span class="st-row-line">{item.description ?? KIND_LABEL[item.category]}</span>
-        {#if note}
-          {#key note}
-            <span class="st-row-status" class:is-hot={statusIsHot(item)} in:fade={settle}>{note}</span>
-          {/key}
-        {/if}
-      </span>
-    </button>
-    {@render control(libraryAction(item), item, null)}
-    {#if item.group !== 'builtin'}
-      <button class="st-row-more" type="button" aria-label={`More actions for ${item.name}`} onclick={(event) => rowMenu(event, item)}>
+  {@const act = libraryAction(item)}
+  <div class="st-item is-library" class:is-off={needsSetup(item) || needsTrust(item) || !item.enabled}>
+    <button class="st-item-open" type="button" aria-label={`Open ${item.name}`} onclick={() => openItem(item)}></button>
+    <span class="st-item-icon"><span class="st-thumb" style={itemArt(item)}></span></span>
+    <span class="st-item-copy">
+      <b>{item.name}</b>
+      <span class="st-item-line">{item.description ?? KIND_LABEL[item.category]}</span>
+      <span class="st-item-by">{makerText(item)}{#if lineage}&nbsp;· forked from {lineage.handle}/{lineage.slug}{/if}</span>
+      {#if note}
+        {#key note}
+          <span class="st-item-status" class:is-hot={statusIsHot(item)} in:fade={settle}>{note}</span>
+        {/key}
+      {/if}
+    </span>
+    <span class="st-item-action">
+      {#if act.kind === 'toggle' && !busy[item.localId]}
+        <button class="toggle" class:on={item.enabled} type="button" role="switch" aria-checked={item.enabled} aria-label={`${item.name}: ${item.enabled ? 'on' : 'off'}`} onclick={() => void toggle(item)}><i></i></button>
+      {:else}
+        {@render control(act, item, null, 'btn st-install')}
+      {/if}
+      <button class="st-item-more" type="button" aria-label={`More actions for ${item.name}`} onclick={(event) => rowMenu(event, item)}>
         <Icon {PM} name="more" />
       </button>
-    {:else}
-      <span class="st-row-more is-spacer" aria-hidden="true"></span>
-    {/if}
+    </span>
   </div>
 {/snippet}
 
-{#snippet group(title: string, items: LibraryItemDto[], empty?: string)}
-  <section class="st-sec">
-    <div class="st-sec-head">
-      <h3>{title}</h3>
-    </div>
-    {#if items.length}
-      <div class="st-list">
-        {#each items as item (item.localId)}
-          {@render libraryRow(item)}
-        {/each}
-      </div>
-    {:else if empty}
-      <p class="st-group-empty">{empty}</p>
-    {/if}
-  </section>
+{#snippet libraryEmpty(icon: string, title: string, body: string, cta?: string, go?: () => void)}
+  <div class="st-empty-card">
+    <span class="st-empty-mark"><Icon {PM} name={icon} /></span>
+    <span class="st-empty-copy">
+      <b>{title}</b>
+      <span>{body}</span>
+    </span>
+    {#if cta && go}<button class="btn st-empty-go" type="button" onclick={go}>{cta}</button>{/if}
+  </div>
 {/snippet}
 
-{#snippet shelfSection(title: string, items: StoreListing[], more?: StorePage)}
+{#snippet shelfSection(id: string, title: string, items: StoreListing[], more?: StorePage)}
   {#if items.length}
-    <section class="st-sec">
+    <section class="st-sec" id={`st-shelf-${id}`}>
       <div class="st-sec-head">
         <h3>{title}</h3>
-        {#if more}<button class="btn ghost" type="button" onclick={() => show(more)}>See All</button>{/if}
+        {#if more}<button class="st-show-all" type="button" onclick={() => show(more)}>Show all <span aria-hidden="true">→</span></button>{/if}
       </div>
-      <div class="st-grid">
+      <div class="st-cards">
         {#each items as l (l.repoId)}
-          {@render row(l)}
+          {@render card(l)}
         {/each}
       </div>
     </section>
@@ -935,10 +1021,10 @@
 {/snippet}
 
 {#snippet skeleton(count: number)}
-  <div class="st-grid" aria-busy="true" aria-label="Loading">
+  <div class="st-cards" aria-busy="true" aria-label="Loading">
     {#each Array.from({ length: count }, (_, i) => i) as i (i)}
-      <div class="st-row is-skeleton" aria-hidden="true">
-        <span class="st-thumb st-skel"></span>
+      <div class="st-item is-skeleton" aria-hidden="true">
+        <span class="st-item-icon st-skel"></span>
         <span class="st-skel-lines"><i></i><i></i></span>
       </div>
     {/each}
@@ -946,7 +1032,7 @@
 {/snippet}
 
 {#snippet failure(error: LoadError, retry: () => void)}
-  <p class="st-failure" role="status">
+  <p class="st-failure" role="status" in:fade={settle}>
     <span>{error.offline ? 'Can’t reach the store. Check your connection.' : error.message}</span>
     <button class="st-link" type="button" onclick={retry}>Retry</button>
   </p>
@@ -981,6 +1067,9 @@
   <button class="st-back" type="button" onclick={back}>
     <Icon {PM} name="chev" /><span>Back</span>
   </button>
+  <div class="st-banner st-banner-art st-detail-banner" style={art(pair)} aria-hidden="true">
+    <span class="st-banner-mark"><span class="st-thumb is-hero" style={art(pair)}></span></span>
+  </div>
   <!-- Icon, copy, then the one action at the right edge, all on one line
        like the hero card and every row. Anything the action needs to
        explain goes under the head as its own line. -->
