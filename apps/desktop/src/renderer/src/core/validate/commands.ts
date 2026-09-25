@@ -573,7 +573,7 @@ function parseSetTransition(source: Record<string, unknown>): SetTransitionComma
     for (const [name, value] of Object.entries(parameters)) {
       if (typeof value === 'number' && Number.isFinite(value)
           || typeof value === 'boolean'
-          || typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)) {
+          || typeof value === 'string' && /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(value)) {
         clean[name] = value;
       } else {
         return invalid('must be a finite number, hex color, or boolean', `transition.p.${name}`);

@@ -2402,13 +2402,13 @@ function controlConnection(target: any, path: any, controlType: any) {
     const channel: any = path.slice('properties.'.length);
     const prop: any = PM.findProp(layer, channel); if (!prop) return null;
     const value: any = PM.evP ? PM.evP(layer, prop, PM.time, channel) : prop.v;
-    control = typeof value === 'number' ? 'slider' : typeof value === 'boolean' ? 'toggle' : /^#[0-9a-f]{6}$/i.test(value) ? 'color' : 'text';
+    control = typeof value === 'number' ? 'slider' : typeof value === 'boolean' ? 'toggle' : /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(value) ? 'color' : 'text';
   } else if (path.startsWith('content.')) {
     const key: any = path.slice('content.'.length);
     const current: any = layer.d?.[key];
     if (!['string', 'number', 'boolean'].includes(typeof current)) return null;
     control = typeof current === 'number' ? 'slider' : typeof current === 'boolean' ? 'toggle'
-      : /^#[0-9a-f]{6}$/i.test(current) ? 'color' : 'text';
+      : /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(current) ? 'color' : 'text';
   } else if (path.startsWith('layer.')) {
     const key: any = path.slice('layer.'.length);
     if (layer.type === 'audio' && ['motionBlur', 'blend', 'parent'].includes(key)) return null;
@@ -2554,7 +2554,7 @@ function sanitizePlan(raw: any, context: any, request: any = '') {
         out.presets = (Array.isArray(c.presets) ? c.presets : Array.isArray(c.options) ? c.options : [])
           .filter((name: any) => typeof name === 'string' && PM.Ease?.PRESETS?.[name]).slice(0, 16);
       } else if (type === 'text') out.def = sourceValue == null ? '' : String(sourceValue).slice(0, 500);
-      else if (type === 'color') out.def = /^#[0-9a-f]{6}$/i.test(sourceValue) ? sourceValue.toUpperCase() : '#FF6B1A';
+      else if (type === 'color') out.def = /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(sourceValue) ? sourceValue.toUpperCase() : '#FF6B1A';
       else if (type === 'toggle') out.def = !!sourceValue;
       else if (type === 'select') {
         out.options = (Array.isArray(c.options) ? c.options : [])
@@ -2578,7 +2578,7 @@ function sanitizePlan(raw: any, context: any, request: any = '') {
     Object.assign(out, connection);
     const sourceValue: any = connection.value !== undefined ? connection.value : c.defaultValue;
     if (type === 'text') out.def = sourceValue == null ? '' : String(sourceValue);
-    else if (type === 'color') out.def = /^#[0-9a-f]{6}$/i.test(sourceValue) ? sourceValue : '#FF6B1A';
+    else if (type === 'color') out.def = /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(sourceValue) ? sourceValue : '#FF6B1A';
     else if (type === 'fill') out.def = sourceValue && typeof sourceValue === 'object' ? sourceValue : null;
     else if (type === 'toggle') out.def = !!sourceValue;
     else if (type === 'select') {

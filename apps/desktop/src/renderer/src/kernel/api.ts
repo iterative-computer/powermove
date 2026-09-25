@@ -707,6 +707,7 @@ export interface UtilAPI {
   tc(seconds: number, fps?: number, showFrames?: boolean): string;
   parseTc(value: string, fps?: number): number | null;
   uid(prefix?: string): string;
+  /** Red, green and blue as 0–1; alpha digits (#RGBA, #RRGGBBAA) are ignored. */
   hex2rgb(hex: string): number[];
   rgb2hex(red: number, green: number, blue: number): string;
 }

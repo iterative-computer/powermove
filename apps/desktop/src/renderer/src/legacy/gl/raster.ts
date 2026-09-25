@@ -424,7 +424,7 @@ function rasterText(d: any, scale: number) {
   if ('letterSpacing' in c) c.letterSpacing = (d.tracking || 0) + 'px';
   c.textBaseline = 'alphabetic'; c.textAlign = g.align; c.fillStyle = d.color || '#fff';
   g.lines.forEach((line: string, i: number) => c.fillText(line, g.x, g.pad + g.lh * i + g.size * .82));
-  const visible = g.lines.some((line: string) => line.trim().length) && !/^(transparent|rgba?\(.*,\s*0\s*\))$/i.test(String(d.color || ''));
+  const visible = g.lines.some((line: string) => line.trim().length) && !/^(transparent|rgba?\(.*,\s*0\s*\)|#[0-9a-f]{6}00)$/i.test(String(d.color || ''));
   const blank = visible && rasterLooksBlank(cv);
   if (blank && !warnedBlank.has(c.font)) {
     warnedBlank.add(c.font);

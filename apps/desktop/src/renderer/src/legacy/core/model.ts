@@ -157,7 +157,7 @@ PM.mkLayer = (type: any, opts: any = {}, comp: any) => {
 
 /* ── project factory ───────────────────────────────────── */
 PM.normalizeFill = (value: any, fallback = '#000000') => {
-  const color = (v: any) => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v) ? v.toUpperCase() : fallback;
+  const color = (v: any) => typeof v === 'string' && /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(v) ? v.toUpperCase() : fallback;
   const raw = value && typeof value === 'object' ? value : {};
   const type = ['solid', 'linear', 'radial', 'none'].includes(raw.type) ? raw.type : 'solid';
   let stops = (Array.isArray(raw.stops) ? raw.stops : []).slice(0, 8).map((stop: any, index: any) => ({

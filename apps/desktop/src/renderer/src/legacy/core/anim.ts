@@ -36,16 +36,22 @@ function evalKfs(kf: any, t: any, interpolateColor = false) {
   temporalKeys(kf,version);
   const a = kf[lo], b = kf[hi];
   if (a.hold) return a.v;
-  const colors = interpolateColor && /^#[0-9a-f]{6}$/i.test(a.v) && /^#[0-9a-f]{6}$/i.test(b.v);
+  const hexColor = (v: any) => typeof v === 'string' && /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(v);
+  const colors = interpolateColor && hexColor(a.v) && hexColor(b.v);
   // Text and toggles remain discrete, including text that looks like a hex color.
   if (!colors && (typeof a.v !== 'number' || !Number.isFinite(a.v) ||
       typeof b.v !== 'number' || !Number.isFinite(b.v))) return a.v;
-  const mix = (amount: number) => colors
-    ? '#' + [1, 3, 5].map(index => {
-      const start = parseInt(a.v.slice(index, index + 2), 16), end = parseInt(b.v.slice(index, index + 2), 16);
-      return Math.round(clamp(start + (end - start) * amount, 0, 255)).toString(16).padStart(2, '0');
-    }).join('')
-    : a.v + (b.v - a.v) * amount;
+  // A key without alpha digits is opaque; alpha is written only while it is below FF.
+  const channel = (v: string, index: number) => index === 7 && v.length === 7 ? 255 : parseInt(v.slice(index, index + 2), 16);
+  const mix = (amount: number) => {
+    if (!colors) return a.v + (b.v - a.v) * amount;
+    const bytes = [1, 3, 5, 7].map(index => {
+      const start = channel(a.v, index), end = channel(b.v, index);
+      return Math.round(clamp(start + (end - start) * amount, 0, 255));
+    });
+    if (bytes[3] === 255) bytes.pop();
+    return '#' + bytes.map(byte => byte.toString(16).padStart(2, '0')).join('');
+  };
   const span = b.t - a.t;
   const u = span <= 0 ? 0 : (t - a.t) / span;
   if (a.spring) {

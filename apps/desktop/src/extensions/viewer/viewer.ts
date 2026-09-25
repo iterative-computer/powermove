@@ -10,7 +10,7 @@ export function visualSelection(api: PowermoveAPI): any[] {
 export function selectionOutlineColor(project: any): string {
   const fill = project.backgroundFill;
   const color = fill?.type !== 'none' && fill?.stops?.[0]?.color || project.bg || '#000000';
-  const hex = /^#[0-9a-f]{6}$/i.test(color) ? color.slice(1) : '000000';
+  const hex = /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(color) ? color.slice(1, 7) : '000000';
   return '#' + [0, 2, 4].map(i => (255 - parseInt(hex.slice(i, i + 2), 16)).toString(16).padStart(2, '0')).join('');
 }
 

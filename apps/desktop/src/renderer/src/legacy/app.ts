@@ -171,7 +171,7 @@ function hydrate(p: any) {
         if (q.max < q.min) [q.min, q.max] = [q.max, q.min];
         q.value = PM.clamp(num(q.value, q.min), q.min, q.max);
       } else if (q.control === 'toggle') q.value = !!q.value;
-      else if (q.control === 'color') q.value = typeof q.value === 'string' && /^#[0-9a-f]{6}$/i.test(q.value) ? q.value : '#FF6B1A';
+      else if (q.control === 'color') q.value = typeof q.value === 'string' && /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(q.value) ? q.value : '#FF6B1A';
       else {
         q.options = Array.isArray(q.options) ? q.options.filter((o: any) => o && typeof o === 'object' && 'v' in o) : [];
         if (q.value === undefined) q.value = q.options.length ? q.options[0].v : '';
@@ -244,7 +244,7 @@ function hydrate(p: any) {
       const saved = savedParams[param.k];
       const source = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : { v: saved };
       const validValue = (raw: any) => {
-        if (param.type === 'color') return typeof raw === 'string' && /^#[0-9a-f]{6}$/i.test(raw) ? raw : fallback;
+        if (param.type === 'color') return typeof raw === 'string' && /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(raw) ? raw : fallback;
         if (param.type === 'toggle') return typeof raw === 'boolean' ? raw : fallback;
         return num(raw, fallback);
       };

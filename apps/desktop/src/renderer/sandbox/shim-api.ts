@@ -174,7 +174,7 @@ export function createSandboxAPI(rpc: Rpc, init: SandboxInit, mode: SandboxMode 
       return parts[0] ?? null;
     },
     uid: (prefix = 'l') => `${prefix}${Math.random().toString(36).slice(2, 9)}`,
-    hex2rgb: (hex: string) => { const text = hex.replace('#', ''); const full = text.length === 3 ? [...text].map(c => c + c).join('') : text; const value = parseInt(full, 16); return [((value >> 16) & 255) / 255, ((value >> 8) & 255) / 255, (value & 255) / 255]; },
+    hex2rgb: (hex: string) => { const text = hex.replace('#', ''); const full = text.length === 3 || text.length === 4 ? [...text].map(c => c + c).join('') : text; return [0, 2, 4].map(i => (parseInt(full.slice(i, i + 2), 16) || 0) / 255); },
     rgb2hex: (r: number, g: number, b: number) => `#${[r, g, b].map(v => clamp(Math.round(v * 255), 0, 255).toString(16).padStart(2, '0')).join('')}`
   };
   const report = sandboxReporter(rpc);
