@@ -175,19 +175,37 @@ Cloudflare provisioned on 2026-09-26 in **Motioner** (`98dbb6e46f4901896327e5ff4
 - Rate-limit bindings, six-hour GC schedule and observability deployed.
   Request query strings are redacted; workers.dev and preview URLs are disabled.
 
-**Still pending:** Neon production/dev databases and migrations, `DATABASE_URL`,
-Google OAuth credentials and packaged-app handoff, reserved publisher bootstrap,
-built-in publication, and real end-to-end production tests. Database-backed
-routes are not operational until Neon is connected. Do not interpret `/health`
-as a release-readiness check.
+Neon is connected to the existing **Powermove** project (`rough-fire-58809767`),
+AWS Ohio, PostgreSQL 18. The `production` branch has all seven migrations (19
+public tables), and a separate `dev` branch was cloned from that migrated
+schema. The Worker uses a pooled Neon connection in its `DATABASE_URL`
+secret. The production Store browse endpoint returns 200 from the real database;
+unauthenticated account requests return 401 as expected.
+
+**Still pending:** Google OAuth credentials and packaged-app handoff, reserved
+publisher bootstrap, built-in publication, and real end-to-end production tests.
+Do not interpret `/health` alone as a release-readiness check. The Neon project
+is currently on its Free plan with six-hour history retention; review capacity
+and recovery requirements before opening the store to users.
 
 The source was merged without squashing. No desktop release tag or app build
-was triggered. Cloudflare deployment is manual via Wrangler; provisioning the
-backend does not publish a desktop update.
+was triggered. Provisioning the backend does not publish a desktop update.
+
+The app release workflow deploys the matching backend before publishing the app:
+cloud tests → database migrations → Wrangler deploy → Worker and Store health
+checks → built-ins → app release. Set `CLOUDFLARE_API_TOKEN` to a dedicated
+Motioner deployment token and `CLOUD_DATABASE_URL` to the **direct** Neon
+production connection in GitHub Actions secrets. Missing credentials or failed
+cloud steps stop publication. Ordinary pushes/merges do not run this workflow.
+Manual backend-only deployments remain available via `bun run deploy`.
+Migrations and API changes must stay compatible with already-installed clients;
+backend deployment and database migrations are not automatically rolled back
+if a later release step fails. Releases share one concurrency group to avoid
+simultaneous production migrations/deployments.
 
 Remaining setup reference (skip resources already listed above):
 
-1. **Neon.** Project with branches `main` (production) and `dev`. Apply the
+1. **Neon.** Project with branches `production` and `dev` (provisioned). Apply the
    migrations in `drizzle/*.sql` in order to each (`bunx drizzle-kit migrate`
    with `DATABASE_URL` set, or `psql -f`). CI may create a branch per run.
 2. **R2.** Buckets `powermove-objects`, `powermove-tars`, `powermove-icons`

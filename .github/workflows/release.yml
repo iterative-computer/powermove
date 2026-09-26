@@ -9,7 +9,7 @@ on:
 permissions:
   contents: write
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: production-release
   cancel-in-progress: false
 jobs:
   release:
@@ -39,6 +39,15 @@ jobs:
               `version=${t.slice(1)}\nchannel=${beta ? "beta" : "latest"}\nprerelease=${beta}\n`);
           '
       - run: bun install --frozen-lockfile
+      - name: Validate cloud deployment credentials
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          DATABASE_URL: ${{ secrets.CLOUD_DATABASE_URL }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'Missing CLOUDFLARE_API_TOKEN'; exit 1; }
+          test -n "$DATABASE_URL" || { echo 'Missing CLOUD_DATABASE_URL'; exit 1; }
+      - name: Test cloud backend
+        run: bun run --cwd apps/cloud test
       - name: Set release version
         working-directory: apps/desktop
         run: |
@@ -92,6 +101,24 @@ jobs:
           test -s "apps/desktop/dist/${CHANNEL}-mac.yml"
           test -s "apps/desktop/dist/Powermove-${VERSION}-mac-arm64.zip"
           test -s "apps/desktop/dist/Powermove-${VERSION}-mac-arm64.dmg"
+      # Deploy the matching backend before publishing an app update. Merges
+      # alone never run this workflow. Database migrations must remain backward
+      # compatible with already-installed desktop versions.
+      - name: Apply production database migrations
+        working-directory: apps/cloud
+        env:
+          DATABASE_URL: ${{ secrets.CLOUD_DATABASE_URL }}
+        run: bunx drizzle-kit migrate
+      - name: Deploy cloud backend
+        working-directory: apps/cloud
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 98dbb6e46f4901896327e5ff4035d637
+        run: bun run deploy
+      - name: Verify cloud backend
+        run: |
+          curl --fail --silent --show-error --retry 3 https://cloud.trypowermove.com/health
+          curl --fail --silent --show-error --retry 3 https://cloud.trypowermove.com/v1/store/browse
       - name: Publish built-in extensions
         env:
           POWERMOVE_REGISTRY_TOKEN: ${{ secrets.POWERMOVE_REGISTRY_TOKEN }}
