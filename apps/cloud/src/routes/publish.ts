@@ -9,6 +9,7 @@ import { scanCapabilities, scanFiles } from '@powermove/registry/scan';
 import { writeTarGz } from '@powermove/registry/tar';
 import type { Env } from '../env';
 import { extensions, objects, publishers, refs, releaseObjects, releases, repos } from '../db/schema';
+import { requireHuman } from '../turnstile';
 import { enforce } from '../abuse';
 import { presentShas } from '../objects/presence';
 import { storeIcon } from '../objects/icon';
@@ -126,6 +127,8 @@ export function publishRoutes(deps: PublishDeps = {}) {
       if (handle !== publisher.handle) {
         throw new ApiError({ error: 'not_owner' });
       }
+      const [prior] = await c.var.data.db.select({ id: releases.id }).from(releases).innerJoin(repos, eq(releases.repoId, repos.id)).where(eq(repos.ownerId, publisher.id)).limit(1);
+      if (!prior) await requireHuman(c, 'first_publish', session.userId);
       const body = Publish.PutRelease.Req.shape.body.parse(await c.req.json().catch(() => null));
       const db = c.var.data.db;
       const [existing] = await db.select().from(repos).where(and(eq(repos.ownerId, publisher.id), eq(repos.slug, slug)))

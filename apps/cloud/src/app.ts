@@ -6,6 +6,7 @@ import { ZodError } from 'zod';
 import type { Env } from './env';
 import type { Data } from './db/client';
 import { createAuth } from './auth';
+import { human } from './turnstile';
 import { health } from './routes/health';
 import { desktop } from './routes/auth-desktop';
 import { email } from './routes/auth-email';
@@ -82,7 +83,7 @@ export function createApp(deps: {
     return c.json({ error: 'internal' }, 500);
   });
   app.notFound((c) => c.json({ error: 'not_found' }, 404));
-  const routes = app.route('/health', health).route('/v1/auth/desktop', desktop).route('/v1/auth/email', email).route(
+  const routes = app.route('/v1/human', human).route('/health', health).route('/v1/auth/desktop', desktop).route('/v1/auth/email', email).route(
     '/v1/auth/sign-out',
     signout,
   ).route('/v1/me', me).route('/v1/objects', objectRoutes).route(

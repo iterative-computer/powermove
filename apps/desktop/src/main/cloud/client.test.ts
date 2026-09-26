@@ -106,3 +106,30 @@ describe('cloud client', () => {
     expect(calls[0]!.headers.get('Authorization')).toBe('Bearer secret-token');
   });
 });
+
+it('solves only same-origin human challenges, retries once and reuses scoped clearance', async () => {
+  const verifyHuman = vi.fn(async () => 'clearance');
+  const sent: Headers[] = [];
+  const fetcher = vi.fn(async (_input, init) => {
+    const headers = new Headers(init?.headers); sent.push(headers);
+    return headers.get('X-Powermove-Human') === 'clearance' ? Response.json({ ok: true })
+      : Response.json({ error: 'human_verification_required', ticket: 'signed-ticket', scope: 'email_send:alice' }, { status: 403 });
+  });
+  const bound = createBoundFetch({ origin: ORIGIN, getToken: () => 'session', appVersion: '1.0.1', fetch: fetcher as typeof fetch, verifyHuman });
+  for (let i = 0; i < 2; i++) expect((await bound(`${ORIGIN}/v1/auth/email/send`, { method: 'POST', body: '{}' })).status).toBe(200);
+  expect(verifyHuman).toHaveBeenCalledTimes(1);
+  expect(verifyHuman).toHaveBeenCalledWith(ORIGIN, 'signed-ticket', 'email_send:alice');
+  expect((await bound('https://other.test/path', { headers: { 'X-Powermove-Human': 'leak' } })).status).toBe(403);
+  expect(sent.at(-1)?.has('Authorization')).toBe(false);
+  expect(sent.at(-1)?.has('X-Powermove-Human')).toBe(false);
+  expect(verifyHuman).toHaveBeenCalledTimes(1);
+});
+
+it('does not loop when verification is rejected', async () => {
+  const fetcher = vi.fn(async () => Response.json({ error: 'human_verification_required', ticket: 'ticket', scope: 'email_send:alice' }, { status: 403 }));
+  const verifyHuman = vi.fn(async () => 'invalid');
+  const bound = createBoundFetch({ origin: ORIGIN, getToken: () => null, appVersion: '1.0.1', fetch: fetcher as typeof fetch, verifyHuman });
+  expect((await bound(`${ORIGIN}/v1/auth/email/send`, { method: 'POST', body: '{}' })).status).toBe(403);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(verifyHuman).toHaveBeenCalledTimes(1);
+});

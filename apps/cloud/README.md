@@ -89,25 +89,29 @@ Local Postgres is at `localhost:54329`; the three R2 buckets, rate limits,
 scheduled handler and Email Sending are simulated by Wrangler. R2 objects
 live under `apps/cloud/.wrangler/state/`. With the example's `DEV_LOG_OTP=1`,
 email sign-in codes appear in the `dev:local` terminal as `OTP for …: …`.
+Use the example’s `EMAIL_FROM` address, which matches the Worker’s allowed sender.
 When `DEV_LOG_OTP` is disabled, Wrangler logs simulated email and prints the
 saved text file path (typically `/tmp/miniflare-…/files/email-text/<id>.txt`).
 
 For Google sign-in instead, run `bun run dev:emulate` from `apps/cloud` in
 another terminal, uncomment the three Google variables in `.dev.vars`, then
 restart `dev:local`. The emulator offers Jude and Mara accounts. The OAuth
-callback returns to the development desktop via `powermove://` because
-`POWERMOVE_DEV_PROTOCOL=1` is set by `dev:local`.
+callback uses `powermove://`. `dev:local` sets `POWERMOVE_DEV_PROTOCOL=1` to
+request registration of the development app. Verify that Return to Powermove
+actually reaches that app: macOS may route to another installed copy or fail
+to recognize an unbundled development runtime. A successful browser callback
+alone does not prove desktop sign-in; verify the packaged app handoff before launch.
 
 Smoke checklist:
 
-1. Sign in on the desktop with a fresh `@localhost` email and the code printed
+1. Sign in on the desktop with a fresh `@example.com` email and the code printed
    by Wrangler.
 2. Claim a handle. The seed has already assigned `powermove` to Jude and
    `mara` to Mara.
 3. Browse the Store and see the ten `powermove/*` built-ins.
-4. Install one built-in.
+4. Built-ins show as Built in. Install a third-party sample such as Glass Tint.
 5. Publish a local extension under the signed-in handle.
-6. Sign in as `mara@localhost`, then fork and publish someone else's extension.
+6. Sign in with a second fresh `@example.com` address, claim another handle, then modify and publish a Store-installed extension as a fork.
 
 To delete local Postgres and all local R2 state, stop the Worker and run
 `bun run local:down` from `apps/cloud`. This removes the Compose named volume
@@ -133,14 +137,14 @@ Try these flows in the desktop Store:
    effect from Effects & Presets. Then run `bun run local:samples --update`
    from `apps/cloud`. The command publishes 1.1.0 with an Edge control and a
    What's new note. Return to Library, check for updates, and choose Update.
-2. Install `mara/colour-match`. Install and set up asks for the required OpenAI
-   API key and offers the optional palette size. Run “Check Colour Match
+2. Install `mara/colour-match`. Install and set up offers an OpenAI
+   API key and palette size; either field can be left blank. Run “Check Colour Match
    connection” from the command palette to see an HTTP status or an offline
    error toast. The sample does not modify the project.
 3. Install `mara/ease-lab`, open its Ease lab panel, choose a curve, and press
    Apply. The panel remembers the preset. Alt+Shift+E runs the same command.
    Install `mara/wipe-set` to try its three layer transitions.
-4. To make a fork under `jude`, sign in with a fresh `@localhost` account and
+4. To make a fork under `jude`, sign in with a fresh `@example.com` account and
    claim the `jude` handle (seeded `jude@localhost` owns `powermove`). Install
    `mara/ease-lab`, reveal its folder from Library, edit a source file, then
    choose Publish. The Store shows “Forked from mara/ease-lab” on the new
@@ -249,3 +253,35 @@ in the build sandbox) and later compared column for column with
 `@better-auth/cli generate` output for core + username + email-otp +
 one-time-token: identical. Regenerate and diff again after a Better Auth
 upgrade.
+
+### Occasional browser verification (Turnstile)
+
+Create a **Managed** Turnstile widget with the hostname from `APP_ORIGIN`
+(for example `cloud.trypowermove.com`). The widget runs on the Worker's
+`/v1/human` page in the user's default browser, not inside the editor.
+Set `TURNSTILE_SITE_KEY` as a Worker variable and `TURNSTILE_SECRET_KEY` as a
+Worker secret. Setting `TURNSTILE_ENABLED=1` makes missing keys fail closed;
+with neither keys nor the flag, verification is disabled so existing local
+setups remain usable. Configure keys before enabling it in production.
+
+The gate protects email-code requests and a publisher's first release.
+Google sign-in, OTP entry, browsing, installs, editing, and subsequent
+publications do not add a Turnstile step. Existing rate limits always apply.
+Managed `interaction-only` appearance requests a checkbox only when needed.
+The desktop automatically picks up the browser result and returns focus to
+the app; it does not depend on custom-protocol routing. Closing/ignoring the
+browser leaves the operation uncompleted and it times out after three minutes.
+
+Successful verification is remembered with OS-encrypted storage on that
+app profile. The signed clearance is bound to the action and email/publisher,
+expires after 30 days by default (`TURNSTILE_CLEARANCE_DAYS`, 1–90), and is
+validated by the Worker on each protected request. It is not an auth session
+or a rate-limit exemption. Clearing the app profile or losing secure-storage
+access requires verification again. The browser only receives an opaque
+signed ticket, not the app's bearer token or the email address.
+
+For local Computer Use testing, the example includes Cloudflare's always-pass
+keys. Those are accepted only on localhost/127.0.0.1; production hostname,
+action and challenge binding remain mandatory with real keys. Automated tests
+mock Siteverify to exercise success, failures, identity binding and expiry.
+Real keys and a deployed-browser check are still required before launch.

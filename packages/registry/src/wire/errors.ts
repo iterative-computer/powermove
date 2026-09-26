@@ -4,13 +4,14 @@ import type { ScanKind } from '../scan';
 import { Permission, Sha1 } from './common';
 
 export const API_ERROR_CODES = [
-  'bad_request', 'manifest_invalid', 'tree_invalid', 'handle_invalid', 'handle_reserved', 'version_invalid', 'unauthorized', 'forbidden', 'not_owner', 'not_found', 'head_moved', 'version_exists', 'handle_taken', 'handle_already_set', 'object_conflict', 'id_collision', 'same_as_origin', 'self_origin', 'author_mismatch', 'gone', 'too_large', 'object_missing', 'commit_missing', 'scan_blocked', 'permission_undeclared', 'limit_exceeded', 'rate_limited', 'quota_exceeded', 'internal', 'client_too_old'
+  'human_verification_required', 'bad_request', 'manifest_invalid', 'tree_invalid', 'handle_invalid', 'handle_reserved', 'version_invalid', 'unauthorized', 'forbidden', 'not_owner', 'not_found', 'head_moved', 'version_exists', 'handle_taken', 'handle_already_set', 'object_conflict', 'id_collision', 'same_as_origin', 'self_origin', 'author_mismatch', 'gone', 'too_large', 'object_missing', 'commit_missing', 'scan_blocked', 'permission_undeclared', 'limit_exceeded', 'rate_limited', 'quota_exceeded', 'internal', 'client_too_old'
 ] as const;
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
 const limitCode = z.enum(['too_many_files', 'tree_too_large', 'file_too_large', 'path_too_long'] satisfies RegistryLimitCode[]);
 const scanKind = z.enum(['openai_key', 'anthropic_key', 'aws_access_key', 'github_token', 'gitlab_token', 'slack_token', 'stripe_key', 'google_api_key', 'jwt', 'pem_private_key', 'high_entropy'] satisfies ScanKind[]);
 const simple = <T extends ApiErrorCode>(code: T) => z.object({ error: z.literal(code), detail: z.string().optional() });
 export const ApiErrorBody = z.discriminatedUnion('error', [
+  simple('human_verification_required').extend({ ticket: z.string().max(2048), scope: z.string().max(128) }),
   simple('bad_request'), simple('manifest_invalid'), simple('tree_invalid'),
   simple('handle_invalid'), simple('handle_reserved'), simple('version_invalid'),
   simple('unauthorized'), simple('forbidden'), simple('not_owner'), simple('not_found'),
@@ -30,7 +31,7 @@ export const ApiErrorBody = z.discriminatedUnion('error', [
 ]);
 export type ApiErrorBody = z.infer<typeof ApiErrorBody>;
 export const API_ERROR_STATUS: Record<ApiErrorCode, number> = {
-  bad_request: 400, manifest_invalid: 400, tree_invalid: 400, handle_invalid: 400, handle_reserved: 400, version_invalid: 400,
+  human_verification_required: 403, bad_request: 400, manifest_invalid: 400, tree_invalid: 400, handle_invalid: 400, handle_reserved: 400, version_invalid: 400,
   unauthorized: 401, forbidden: 403, not_owner: 403, not_found: 404,
   head_moved: 409, version_exists: 409, handle_taken: 409, handle_already_set: 409, object_conflict: 409,
   id_collision: 409, same_as_origin: 409, self_origin: 409, author_mismatch: 409,

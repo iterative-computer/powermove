@@ -7,9 +7,10 @@ import type { Env } from './env';
 
 export type Scope = 'email_send_addr' | 'email_send_ip' | 'email_send_global' | 'email_verify_ip' | 'email_verify_addr'
   | 'auth_start_ip' | 'exchange_ip' | 'handle_claim_user' | 'publish_user_hour' | 'publish_user_day'
-  | 'upload_req_user' | 'missing_req_user' | 'report_ip' | 'report_repo_ip' | 'install_user' | 'admin_ip';
+  | 'human_verify_ip' | 'upload_req_user' | 'missing_req_user' | 'report_ip' | 'report_repo_ip' | 'install_user' | 'admin_ip';
 export interface Rule { scope: Scope; limit: number; windowSeconds: number }
 export const RULES: Record<Scope, Omit<Rule, 'scope'>> = {
+  human_verify_ip: { limit: 30, windowSeconds: 3600 },
   email_send_addr: { limit: 3, windowSeconds: 900 },
   email_send_ip: { limit: 20, windowSeconds: 3600 },
   email_send_global: { limit: 5000, windowSeconds: 86400 },

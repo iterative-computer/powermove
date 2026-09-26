@@ -33,6 +33,7 @@ export interface CloudClientOptions {
   appVersion: string;
   /** Test seam; defaults to the global fetch. */
   fetch?: typeof fetch;
+  verifyHuman?(origin: string, ticket: string, scope: string): Promise<string>;
 }
 
 export interface CloudClient {
@@ -81,17 +82,36 @@ async function readJson(response: Response): Promise<{ ok: true; value: unknown 
 export function createBoundFetch(options: CloudClientOptions): typeof fetch {
   const origin = normalizeOrigin(options.origin);
   const fetchImpl = options.fetch ?? fetch;
+  const clearances = new Map<string, { value: string; expires: number }>();
   const clientHeader = `desktop/${options.appVersion}`;
   return async (input, init) => {
     const url = requestUrl(input);
     const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
     headers.delete('Authorization');
+    headers.delete('X-Powermove-Human');
     headers.set(CLIENT_HEADER, clientHeader);
     if (url.origin === origin) {
       const token = await options.getToken();
       if (token) headers.set('Authorization', `Bearer ${token}`);
     }
-    return fetchImpl(url, { ...init, headers, redirect: 'error' });
+    const response = await fetchImpl(url, { ...init, headers, redirect: 'error' });
+    if (url.origin !== origin || response.status !== 403) return response;
+    const challenge = ApiErrorBody.safeParse(await response.clone().json().catch(() => null));
+    if (!challenge.success || challenge.data.error !== 'human_verification_required') return response;
+    const { ticket, scope } = challenge.data;
+    const cached = clearances.get(scope);
+    const verify = options.verifyHuman ?? (async (target: string, proof: string, key: string) => (await import('./human-verification')).verifyHuman(target, proof, key));
+    const clearance = cached && cached.expires > Date.now() ? cached.value : await verify(origin, ticket, scope);
+    if (clearances.size >= 16 && !clearances.has(scope)) clearances.clear();
+    clearances.set(scope, { value: clearance, expires: cached?.value === clearance ? cached.expires : Date.now() + 9 * 60_000 });
+    // Protected routes reject before their side effects. Retry only once, never loop challenges.
+    headers.set('X-Powermove-Human', clearance);
+    const retried = await fetchImpl(url, { ...init, headers, redirect: 'error' });
+    if (retried.status === 403) {
+      clearances.delete(scope);
+      if (!options.verifyHuman) await (await import('./human-verification')).forgetHumanVerification(origin, scope);
+    }
+    return retried;
   };
 }
 

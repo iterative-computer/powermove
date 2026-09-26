@@ -7,6 +7,7 @@ import { rateAuth } from './session';
 import { session as sessionTable } from '../db/auth-schema';
 import { eq } from 'drizzle-orm';
 import { clientIp, enforce } from '../abuse';
+import { requireHuman } from '../turnstile';
 const verifyDetail = "Couldn't verify the code. Try again.";
 export const email = new Hono<Env>()
   .post(
@@ -19,6 +20,7 @@ export const email = new Hono<Env>()
     async (c) => {
       await rateAuth(c);
       const { email } = c.req.valid('json');
+      await requireHuman(c, 'email_send', email.trim().toLowerCase());
       await enforce(c, 'email_send_addr', email.trim().toLowerCase());
       await enforce(c, 'email_send_ip', clientIp(c));
       await enforce(c, 'email_send_global', '*');
