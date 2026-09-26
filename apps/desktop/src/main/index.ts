@@ -1111,7 +1111,6 @@ if (!hasSingleInstanceLock) {
         return;
       }
       if (editors.size === 0) createWindow();
-      else editors.reveal(currentEditor());
     });
   });
 }
