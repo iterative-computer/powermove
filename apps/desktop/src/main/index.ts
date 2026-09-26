@@ -719,9 +719,13 @@ if (!hasSingleInstanceLock) {
 
   app.on('second-instance', (_event, argv) => {
     // Windows and Linux hand a `powermove://` link to the running app this way.
-    for (const url of deepLinksIn(argv)) deepLinks.push(url);
+    const links = deepLinksIn(argv);
+    for (const url of links) deepLinks.push(url);
     if (isBackgroundTest) return;
     const projectFiles = argv.filter(candidate => path.isAbsolute(candidate) && candidate.toLowerCase().endsWith('.pmv'));
+    // macOS may start a duplicate process in the background. An empty launch
+    // has no document or link to handle and must not pull the editor forward.
+    if (process.platform === 'darwin' && links.length === 0 && projectFiles.length === 0) return;
     // The listener is installed before async startup finishes. Do not let an
     // early second launch create the editor before the first-run gate decides
     // whether onboarding owns startup.
