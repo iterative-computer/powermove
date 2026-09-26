@@ -8,6 +8,8 @@
 
 export const IPC = {
   ping: 'app:ping',
+  inputKey: 'input:key',
+  storeSandboxFocus: 'store:sandbox-focus',
   fontFamilies: 'fonts:families',
 
   onboardingAnimationComplete: 'onboarding:animation-complete',
@@ -546,6 +548,8 @@ export type NativeMenuRequest = {
 };
 
 export interface PowermoveBridge {
+  onInputKey?(cb: (input: SandboxInputKey) => void): () => void;
+  sandboxFocus?(focus: { focused: boolean; field: boolean; extensionId: string }): void;
   compatible?: {
     status(): Promise<import('./compatible-provider').CompatibleProviderConfig>;
     configure(input: import('./compatible-provider').CompatibleProviderInput): Promise<import('./compatible-provider').CompatibleProviderConfig>;
@@ -719,6 +723,25 @@ export interface PowermoveBridge {
   };
 
   extensions: PowermoveExtensionsBridge;
+
+  /** Values the user entered for extensions that declare `vars`. */
+  vars: import('./vars-ipc').VarsBridge;
+
+  /** The Powermove Cloud account: sign in, handle, sign out. */
+  cloud: import('./cloud-ipc').CloudBridge;
+
+  /** The Store: browse the registry; install, update and remove store extensions. */
+  extensionStore: import('./store-ipc').StoreBridge;
+}
+
+export interface SandboxInputKey {
+  type: string;
+  key: string;
+  code: string;
+  modifiers: string[];
+  isAutoRepeat: boolean;
+  field: boolean;
+  extensionId: string;
 }
 
 export type CloudFileState = 'local' | 'icloud' | 'cloud' | 'missing' | 'unknown';

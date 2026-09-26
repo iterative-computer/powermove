@@ -1,4 +1,5 @@
 import type { PowermoveBridge } from '../../../../shared/ipc';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 /** Recovered Files are synthesized from IPC chunks, so webUtils has no path. */
 export const cloudSourcePaths = new WeakMap<File, string>();
@@ -29,7 +30,7 @@ async function readSourceFile(media: MediaBridge, result: { token: string; size:
 
 /** A missing browser cache does not mean the original file is missing. */
 export async function readLocalMediaSource(meta: CloudAsset, current: () => boolean): Promise<File | null> {
-  const media = (window as any).powermove?.media as MediaBridge | undefined;
+  const media = (hostBridge() as any)?.media as MediaBridge | undefined;
   const source = meta.sourcePath || meta.path;
   if (!source || !media?.openLocalSource || !current()) return null;
   const result = await media.openLocalSource(source);
@@ -40,7 +41,7 @@ export function createCloudMedia(PM: Record<string, any>, recover: (meta: any, f
   const statuses = new Map<string, CloudStatus>();
   const pending = new Map<string, Promise<void>>();
   let generation = 0;
-  const bridge = () => (window as any).powermove?.media as MediaBridge | undefined;
+  const bridge = () => (hostBridge() as any)?.media as MediaBridge | undefined;
   const emit = () => PM.bus?.emit?.('assets');
   const source = (meta: CloudAsset) => meta.sourcePath || meta.path || '';
   const currentAsset = (project: any, meta: CloudAsset, epoch: number) =>

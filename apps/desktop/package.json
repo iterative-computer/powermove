@@ -7,13 +7,16 @@
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
+    "dev:local": "POWERMOVE_REGISTRY_URL=http://localhost:8787 POWERMOVE_DEV_PROTOCOL=1 electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "test": "vitest run",
     "test:unit": "vitest run",
     "test:e2e": "playwright test",
-    "typecheck": "svelte-check --tsconfig ./tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
+    "typecheck": "bun run --cwd ../cloud types:emit && svelte-check --tsconfig ./tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
     "lint:boundaries": "node scripts/check-boundaries.mjs",
+    "check:builtins": "bun scripts/check-builtin-versions.mjs",
+    "publish:builtins": "bun scripts/publish-builtins.mjs",
     "dist:mac": "electron-vite build && electron-builder --mac && node scripts/create-dmg.mjs",
     "dist:release": "node scripts/release-mac.mjs"
   },
@@ -27,10 +30,13 @@
     "@openai/codex-darwin-arm64": "npm:@openai/codex@0.156.0-darwin-arm64",
     "@powermove/macos-haptics": "workspace:*",
     "@powermove/player": "workspace:*",
+    "@powermove/registry": "workspace:*",
     "@powermove/tokens": "workspace:*",
     "electron-updater": "6.8.3",
     "esbuild": "0.25.12",
-    "ffmpeg-static": "5.3.0"
+    "ffmpeg-static": "5.3.0",
+    "hono": "4.13.8",
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@electron/fuses": "2.1.3",

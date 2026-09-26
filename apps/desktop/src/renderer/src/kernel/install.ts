@@ -44,6 +44,7 @@ import type {
   WorkspaceAPI
 } from './api';
 import type { ExtensionsBridge } from '../../../shared/extensions';
+import type { VarsBridge } from '../../../shared/vars-ipc';
 import type { PowermoveExtensionsBridge } from '../../../shared/ipc';
 import { createExtensionAPI, type ExtensionHandle, type HostDeps, type PanelsBackend } from './host';
 import { createLoader, type BuiltinFactory, type Loader } from './loader';
@@ -100,6 +101,7 @@ import {
   restorePanel,
   type Workspace as LayoutWorkspace
 } from '../layout/model';
+import { bridge as hostBridge } from './bridge';
 
 type LegacyPM = Record<string, any>;
 type ExtensionsHostBridge = ExtensionsBridge & Partial<Pick<PowermoveExtensionsBridge, 'fork'>>;
@@ -646,14 +648,23 @@ function makeExtensionsAPI(PM: LegacyPM, bridge: ExtensionsHostBridge | null, ge
     rebase: (id) => {
       if (typeof PM?.requestExtensionRebase === 'function') PM.requestExtensionRebase(id);
       else PM?.cmd?.('agent');
+    },
+    setUp: (id) => {
+      const record = storeRecords().find((item) => item.id === id);
+      if (record) PM?.Vars?.openSetup?.(record);
     }
   };
 }
 
 function resolveBridge(PM: LegacyPM): ExtensionsHostBridge | null {
-  const candidate = (globalThis as Record<string, any>)?.powermove?.extensions ?? PM?.extensionsBridge ?? null;
+  const candidate = (hostBridge() as Record<string, any> | undefined)?.extensions ?? PM?.extensionsBridge ?? null;
   if (candidate && typeof candidate.list === 'function' && typeof candidate.onChanged === 'function') return candidate as ExtensionsHostBridge;
   return null;
+}
+
+function resolveVarsBridge(): Pick<VarsBridge, 'values'> | null {
+  const candidate = (hostBridge() as Record<string, any> | undefined)?.vars;
+  return candidate && typeof candidate.values === 'function' ? candidate as VarsBridge : null;
 }
 
 /* ── install ─────────────────────────────────────────────── */
@@ -744,6 +755,8 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
     typeof PM?.cmd === 'function' ? PM.cmd(command, ...(args ?? [])) : runKernelCommand(kernel, command, args)
   );
   subscriptions.push(() => keyListener.dispose());
+  const inputKeyOff = hostBridge()?.onInputKey?.(input => kernel.dispatchTrustedKey(input));
+  if (inputKeyOff) subscriptions.push(inputKeyOff);
 
   const signals = installKernelSignals(kernel);
   subscriptions.push(() => signals.dispose());
@@ -889,6 +902,7 @@ export async function bootExtensions(installed: InstalledKernel, builtins: Recor
   const loader = createLoader({
     kernel: installed,
     bridge: installed.bridge,
+    vars: resolveVarsBridge(),
     builtins,
     deps: installed.deps
   });

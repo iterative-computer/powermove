@@ -1,3 +1,4 @@
+import { installBridgeForTests, resetBridgeForTests } from '../kernel/bridge';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AppUpdateState } from '../../../shared/ipc';
@@ -27,6 +28,7 @@ function harness(initial: AppUpdateState) {
       }
     }
   };
+  installBridgeForTests((window as any).powermove);
   const PM = {
     Kernel: { api: () => ({ ui: { toast }, storage: { get: (k: string) => storage.get(k), set: (k: string, v: unknown) => storage.set(k, v) } }) },
     dismissToast: dismissToastKey,

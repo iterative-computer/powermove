@@ -1,9 +1,9 @@
 /*
  * The browser's stand-in for the Electron preload. When the app is served by
  * `powermove serve`, there is no contextBridge; this module speaks the same
- * IPC contract over one WebSocket and installs itself as window.powermove
- * before the engines boot, so the rest of the renderer does not know the
- * difference.
+ * IPC contract over one WebSocket and installs itself into the kernel's
+ * bridge capture (kernel/bridge.ts) before the engines boot, so the rest of
+ * the renderer does not know the difference. It never touches `window`.
  *
  * What cannot cross the network stays in the browser: confirmations are
  * window.confirm, saves become downloads, dropped files are uploaded first,
@@ -11,12 +11,19 @@
  */
 import { IPC, type AgentToolRequestEvent, type CodexRunResult, type FileSaveResult, type MediaProxyResult, type PowermoveBridge, type ProjectOpenResult, type RemoteRunRecord, type StoreErrorEvent } from '../../../shared/ipc';
 import { EXT_IPC, type ExtensionRecord } from '../../../shared/extensions';
+import { CLOUD_UNREACHABLE } from '../../../shared/cloud-ipc';
+import type { StoreResult } from '../../../shared/store-ipc';
 import { WEB, WEB_UPLOAD_CHUNK_BYTES, type WebHello } from '../../../shared/wire';
 import { Connection } from '../../../shared/link';
 import { attachRemoteMedia } from './remote-media';
 import { ReconnectingLink, isDisconnectError } from '../../../shared/reconnect';
+import { bridge as capturedBridge, provideBridge } from '../kernel/bridge';
 
 const WS_PATH = '/__powermove/ws';
+const VARS_UNAVAILABLE = 'Variables are not available in powermove serve yet';
+const CLOUD_UNAVAILABLE = 'Sign in is not available in powermove serve yet';
+/* The served host installs nothing: the Store shows its offline state. */
+const storeOffline = async <T>(): Promise<StoreResult<T>> => ({ ok: false, error: { error: 'internal', detail: CLOUD_UNREACHABLE } });
 
 /** The live link, for modules that attach after the engines boot (remote-sync). It outlives any one socket. */
 let activeLink: ReconnectingLink | null = null;
@@ -432,6 +439,56 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
       readSource: (req) => link.invoke(EXT_IPC.readSource, req),
       reportHealth: (req) => link.send(EXT_IPC.reportHealth, req),
       onChanged: subscribe(EXT_IPC.changed)
+    },
+
+    /* Values stay on the Mac that runs Powermove; the served host has no
+       setup flow yet (store plan §2.2b). */
+    vars: {
+      status: () => Promise.reject(new Error(VARS_UNAVAILABLE)),
+      set: () => Promise.reject(new Error(VARS_UNAVAILABLE)),
+      delete: () => Promise.reject(new Error(VARS_UNAVAILABLE)),
+      reveal: () => Promise.reject(new Error(VARS_UNAVAILABLE)),
+      values: () => Promise.reject(new Error(VARS_UNAVAILABLE))
+    },
+
+    /* The session lives in the Mac's keychain-backed store; the served host
+       has no sign-in flow yet. Nobody is signed in here. */
+    cloud: {
+      account: async () => ({ me: null }),
+      signInSocial: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
+      emailSend: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
+      emailVerify: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
+      claimHandle: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
+      setRememberInstalls: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
+      signOut: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
+      deleteAccount: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
+      registryUrl: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
+      setRegistryUrl: () => Promise.reject(new Error(CLOUD_UNAVAILABLE)),
+      onAccountChanged: () => () => {},
+      onSignInFailed: () => () => {}
+    },
+
+    extensionStore: {
+      browse: storeOffline,
+      extensions: storeOffline,
+      detail: storeOffline,
+      release: storeOffline,
+      tree: storeOffline,
+      file: storeOffline,
+      compare: storeOffline,
+      install: storeOffline,
+      update: storeOffline,
+      uninstall: storeOffline,
+      library: async () => [],
+      checkUpdates: storeOffline,
+      publishPrepare: storeOffline,
+      publish: storeOffline,
+      yank: storeOffline,
+      trust: storeOffline,
+      untrust: storeOffline,
+      onUpdatesChanged: () => () => {},
+      onPublishProgress: () => () => {},
+      onLibraryChanged: () => () => {}
     }
   };
 
@@ -468,13 +525,13 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
 }
 
 /**
- * Install window.powermove when the page is served by `powermove serve`.
- * Resolves immediately in Electron (the preload already installed it) and
- * after a short failed probe in a plain browser without a host.
+ * Install the host bridge when the page is served by `powermove serve`.
+ * Runs after `captureBridge`. Resolves immediately in Electron (the preload's
+ * bridge was captured) and after a short failed probe in a plain browser
+ * without a host.
  */
 export async function installWebBridge(): Promise<boolean> {
-  const scope = window as unknown as { powermove?: PowermoveBridge };
-  if (scope.powermove) return false;
+  if (capturedBridge()) return false;
   if (location.protocol !== 'http:' && location.protocol !== 'https:') return false;
   const params = new URLSearchParams(location.search);
   const project = params.get('project');
@@ -504,7 +561,7 @@ export async function installWebBridge(): Promise<boolean> {
   });
   link.adopt(first);
   activeLink = link;
-  scope.powermove = createBridge(link, hello, snapshot, initialProject);
+  provideBridge(createBridge(link, hello, snapshot, initialProject));
   document.documentElement.classList.add('remote-app');
   if (project) history.replaceState(null, '', location.pathname);
   return true;

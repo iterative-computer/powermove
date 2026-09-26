@@ -27,3 +27,6 @@ packages/player/dist/
 
 # serve host build (npm package payload)
 packages/cli/dist/
+
+# also match symlinks named node_modules (a worktree once committed one)
+node_modules

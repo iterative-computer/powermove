@@ -746,7 +746,7 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
   /* returns {tex, w, h, ax, ay, uv:[ox,oy,sx,sy], fromFbo, solid, tmp} */
   const d = resolveContent(PM, L, T);
   if (L.type === 'solid') {
-    return { solid: PM.hex2rgb(d.color), w: d.w || W, h: d.h || H, ax: 0, ay: 0 };
+    return { solid: PM.hex2rgb(d.color), solidAlpha: PM.hexAlpha(d.color), w: d.w || W, h: d.h || H, ax: 0, ay: 0 };
   }
   if (L.type === 'shape' && L.d.paths?.length && activePreviewViewport(W, H)
       && (PM.previewResolution === '1' || PM.perf?.auto === false && PM.quality === 1)) {
@@ -786,7 +786,7 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
         if (L.type === 'shape') {
           const plan = previewShapeRaster(d, ss, visibleWorld, clip?.width ?? W, clip?.height ?? H);
           if (plan.kind === 'outside') return null;
-          if (plan.kind === 'solid') return { solid: PM.hex2rgb(d.color), w: W, h: H, ax: 0, ay: 0, screenSpace: true };
+          if (plan.kind === 'solid') return { solid: PM.hex2rgb(d.color), solidAlpha: PM.hexAlpha(d.color), w: W, h: H, ax: 0, ay: 0, screenSpace: true };
           if (plan.kind === 'crop') crop = plan.window;
         } else if (!L.d.animators?.length && !L.d.styles?.length && !L.d.fontAnchorBounds
             && !rasterIntersectsViewport(PM.textRasterGeometry(L, ss, T), visibleWorld, clip?.width ?? W, clip?.height ?? H)) {
@@ -1012,7 +1012,9 @@ function drawContent(L: any, T: any, W: any, H: any, alpha: any, clip?: RasterWi
     if (!p) return false;
     const g = use(p);
     g.u('u_m', projected); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
-    g.u('u_color', c.solid[0] * alpha, c.solid[1] * alpha, c.solid[2] * alpha, alpha);
+    // Premultiplied: the colour's own alpha (#RRGGBBAA) scales with the layer's opacity.
+    const a = alpha * (c.solidAlpha ?? 1);
+    g.u('u_color', c.solid[0] * a, c.solid[1] * a, c.solid[2] * a, a);
     drawSample(additive);
     return true;
   }
@@ -1381,7 +1383,10 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   else {
     const fill = PM.normalizeFill(proj.backgroundFill, proj.bg);
     if (fill.type === 'none') clear(0, 0, 0, 0);
-    else if (fill.type === 'solid') { const bg = PM.hex2rgb(fill.stops[0].color); clear(bg[0], bg[1], bg[2], 1); }
+    else if (fill.type === 'solid') {
+      const bg = PM.hex2rgb(fill.stops[0].color), a = PM.hexAlpha(fill.stops[0].color);
+      clear(bg[0] * a, bg[1] * a, bg[2] * a, a);
+    }
     else {
       clear(0, 0, 0, 1);
       const p = program('background-fill', PM.FRAG_BACKGROUND_FILL);

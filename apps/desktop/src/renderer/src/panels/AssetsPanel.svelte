@@ -2,6 +2,7 @@
   import { doc } from '../state/document.svelte';
   import Icon from './Icon.svelte';
   import type { PanelProps } from './registerSveltePanel';
+  import { bridge } from '../kernel/bridge';
 
   interface Asset {
     id: string;
@@ -224,7 +225,7 @@
     const sourcePath = finderPath(asset);
     if (!sourcePath) return;
     try {
-      await window.powermove.media.revealSource(sourcePath);
+      await bridge()!.media.revealSource(sourcePath);
       status = `Revealed ${asset.name} in Finder`;
     } catch {
       status = `Could not reveal ${asset.name} in Finder`;

@@ -67,7 +67,7 @@ function copyRecord(value: unknown): UnknownRecord {
 
 function normalizeFill(value: unknown, fallback = '#000000'): Fill {
   const color = (candidate: unknown): string =>
-    typeof candidate === 'string' && /^#[0-9a-f]{6}$/i.test(candidate)
+    typeof candidate === 'string' && /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(candidate)
       ? candidate.toUpperCase()
       : fallback;
   const raw = isRecord(value) ? value : {};
@@ -192,7 +192,7 @@ function sanitizeEffect(raw: unknown): Effect | null {
 function isTransitionParamValue(value: unknown): value is ChannelValue {
   return typeof value === 'number' && Number.isFinite(value)
     || typeof value === 'boolean'
-    || typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
+    || typeof value === 'string' && /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(value);
 }
 
 function sanitizeTransitionChannel(raw: unknown): Channel {
@@ -519,7 +519,7 @@ function sanitizeParams(raw: unknown): Record<string, SceneParam> {
     else if (control === 'color') {
       output[key] = {
         ...common, control,
-        value: typeof value.value === 'string' && /^#[0-9a-f]{6}$/i.test(value.value)
+        value: typeof value.value === 'string' && /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(value.value)
           ? value.value : '#FF6B1A'
       };
     } else if (control === 'select') {

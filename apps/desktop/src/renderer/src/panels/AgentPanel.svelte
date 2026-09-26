@@ -10,6 +10,7 @@
   import ThreadPicker from './agent/ThreadPicker.svelte';
   import { agentState } from './agent/agent-state.svelte';
   import { panelFocusContext } from './agent/panel-focus';
+  import { bridge } from '../kernel/bridge';
 
   let { panelId }: PanelProps = $props();
   const PM = window.PM as Record<string, any>;
@@ -69,7 +70,7 @@
   }
 
   function providerApi() {
-    return agentState.provider === 'claude' ? window.powermove?.claude : window.powermove?.chatgpt;
+    return agentState.provider === 'claude' ? bridge()?.claude : bridge()?.chatgpt;
   }
 
   async function connectProvider(): Promise<void> {
@@ -149,7 +150,7 @@
     accountBusy = false;
     accountStatus = { state: 'checking', email: null, planType: null, detail: null };
     if (provider === 'compatible') {
-      const update = () => window.powermove?.compatible?.status().then(config => {
+      const update = () => bridge()?.compatible?.status().then(config => {
         if (alive) accountStatus = { state: config.model ? 'connected' : 'disconnected', email: null, planType: null,
           detail: config.model ? null : 'Connect an API, Ollama, or LM Studio in settings.' };
       }, error => { if (alive) accountStatus = unavailable(error); });
@@ -157,7 +158,7 @@
       window.addEventListener('pm-provider-connected', update);
       return () => { alive = false; window.removeEventListener('pm-provider-connected', update); };
     }
-    const api = provider === 'claude' ? window.powermove?.claude : window.powermove?.chatgpt;
+    const api = provider === 'claude' ? bridge()?.claude : bridge()?.chatgpt;
     if (!api) {
       accountStatus = unavailable(new Error(`Restart Powermove to finish installing ${provider === 'claude' ? 'Claude' : 'ChatGPT'} connection.`));
       return;

@@ -1,4 +1,5 @@
 import { cancelPreviewVideoSeek } from './video-seek';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 /** Full preview resolution and offline rendering always use the source. */
 export function previewVideoElement(PM: any, asset: any): HTMLVideoElement {
@@ -11,7 +12,7 @@ let work: Promise<unknown> = Promise.resolve();
 
 /** Build disposable editing media independently of the portable original. */
 export function prepareVideoPreview(PM: any, asset: any, source: Blob, disposed: () => boolean): Promise<void> {
-  const media = window.powermove?.media;
+  const media = hostBridge()?.media;
   const legacyCutout = asset.playbackProxy && Number(asset.playbackProxyVersion || 0) < 3;
   if (!media?.beginPreview || (!legacyCutout && Math.max(asset.w, asset.h) <= 1920)) return Promise.resolve();
   // Derivatives have their own versioned key; never replace the portable source.

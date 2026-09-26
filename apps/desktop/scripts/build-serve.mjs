@@ -56,7 +56,7 @@ const copies = [
   ['docs/EXTENSIONS.md', 'api-pack/EXTENSIONS.md'],
   ['docs/background-testing.md', 'api-pack/BACKGROUND_TESTING.md'],
   ['src/renderer/src/kernel/api.ts', 'api-pack/api.ts'],
-  ['src/shared/extensions.ts', 'api-pack/extensions.ts'],
+  ['../../packages/registry/src/manifest.ts', 'api-pack/extensions.ts'],
   ['src/renderer/src/core/types/project.ts', 'api-pack/project.ts'],
   ['src/renderer/src/core/types/commands.ts', 'api-pack/commands.ts'],
   ['docs/samples/media-browser', 'api-pack/samples/media-browser'],

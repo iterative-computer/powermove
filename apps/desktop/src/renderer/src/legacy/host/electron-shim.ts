@@ -2,13 +2,14 @@
 import type { PMRegistry } from '../registry';
 import { stringifyAsync } from '../core/serialize-async';
 import { HistoryRecords, packStoredHistory, unpackStoredHistory } from '../../../../shared/history-memory';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 export function install(PM: PMRegistry): void {
   'use strict';
 
-  if (!(window as any).powermove) return;
+  if (!(hostBridge() as any)) return;
 
-  const bridge = (window as any).powermove;
+  const bridge = (hostBridge() as any);
   const encoder = new window.TextEncoder();
   // File commands cannot wait for local-font enumeration or its permission prompt.
   bridge.onMenuCommand((command: any) => {

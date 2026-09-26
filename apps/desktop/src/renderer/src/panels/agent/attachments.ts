@@ -1,3 +1,4 @@
+import { bridge } from '../../kernel/bridge';
 export const ATTACHMENT_HINT = 'Attach images or files';
 
 export interface PromptAttachment {
@@ -28,7 +29,7 @@ export async function readPromptAttachment(file: File, id: string): Promise<Prom
   });
   const item: PromptAttachment = { id, name: file.name || 'Attachment', type, size: file.size };
   let sourcePath: string | null = null;
-  try { sourcePath = window.powermove?.media?.sourcePath?.(file) || null; } catch { /* Clipboard-backed Files have no native path. */ }
+  try { sourcePath = bridge()?.media?.sourcePath?.(file) || null; } catch { /* Clipboard-backed Files have no native path. */ }
   if (sourcePath) item.sourcePath = sourcePath;
   if (image) item.dataUrl = dataUrl.replace(/^data:[^;]*;/, `data:${type};`);
   if (!isAgentImageType(type)) {
@@ -87,12 +88,12 @@ export async function activatePromptAttachment(PM: Record<string, any>, item: Re
   }
   try {
     if (item.sourcePath) {
-      await window.powermove.media.revealSource(item.sourcePath);
+      await bridge()!.media.revealSource(item.sourcePath);
       return;
     }
     const data = attachmentBytes(item);
     if (data) {
-      await window.powermove.attachments.reveal({ name: item.name, data });
+      await bridge()!.attachments.reveal({ name: item.name, data });
       return;
     }
     PM.toast(`The original location for ${item.name} is no longer available.`);

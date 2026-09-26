@@ -1,0 +1,129 @@
+/* ── Powermove account ──────────────────────────────────────
+   The account row at the foot of the home sidebar, its avatar, and the
+   sign-in sheet (cloud/). The row speaks the sidebar's language: a 32px
+   medium row whose glyph is your avatar. The sheet is one text column 28px
+   in; cards bleed 14px past it, as they do in Settings. */
+
+/* ── avatar ── */
+/* Until people upload a photo: initials on one flat neutral step of the ink,
+   the same fill family as the sidebar's selection. No hue, no light. */
+.acct-avatar{
+  --size:20px;
+  flex:none;width:var(--size);height:var(--size);border-radius:50%;display:grid;place-items:center;
+  background:var(--ink-3);color:var(--tx);
+  font-size:calc(var(--size) * .42);line-height:1;font-weight:var(--fw-semibold);letter-spacing:.01em;
+  user-select:none;-webkit-user-select:none}
+
+/* ── sidebar row ── */
+/* Pinned to the foot of the sidebar, under any update notice. */
+.ps-account{margin-top:auto;display:flex;flex-direction:column}
+.ps-updates:not([hidden])~.ps-account{margin-top:0}
+/* The avatar sits in the icon column: centred where the 15px glyphs are,
+   with the name on the same edge as every other row's label. */
+.acct-row.signed-in{padding-left:7px;gap:6px}
+.acct-row.open{background:var(--ink-2);color:var(--tx)}
+.acct-row.open svg{color:var(--tx)}
+/* The account menu's header: who you are, on the sheet's text edge. */
+.acct-menu-head{display:flex;align-items:center;gap:9px}
+.acct-menu-head>div{min-width:0;display:flex;flex-direction:column;gap:1px}
+.acct-menu-head>div>b{font-size:var(--fs-md);line-height:16px;font-weight:var(--fw-medium);color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.acct-menu-head>div>span{font-size:var(--fs-sm);line-height:15px;font-weight:var(--fw-regular);color:var(--tx-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ── sheet ── */
+.account-modal .mb{padding:28px 28px 22px;gap:0}
+.acct-sheet:focus{outline:0}
+.acct-step{display:flex;flex-direction:column}
+.acct-mark{display:block;width:48px;height:48px;margin:0 0 16px -3px;user-select:none;-webkit-user-select:none;-webkit-user-drag:none}
+:root[data-theme="dark"] .acct-mark.is-light,:root:not([data-theme="dark"]) .acct-mark.is-dark{display:none}
+.acct-head h2{font-size:var(--fs-xl);line-height:24px;font-weight:var(--fw-medium);letter-spacing:-.012em;color:var(--tx);text-wrap:balance}
+.acct-head p{margin-top:4px;font-size:var(--fs-md);line-height:18px;color:var(--tx-3);text-wrap:pretty}
+.acct-head b{font-weight:var(--fw-medium);color:var(--tx-2);overflow-wrap:anywhere}
+
+/* Providers: three quiet fills, one per line. Email is the only accent,
+   and only once there is an address to send to. */
+.acct-providers{display:flex;flex-direction:column;gap:6px;margin-top:24px}
+.account-modal .btn.acct-provider,.account-modal .btn.acct-submit{width:100%;height:36px;padding:0 14px;gap:8px;border-radius:var(--r-md);font-size:var(--fs-md)}
+.acct-provider svg,.acct-provider .acct-provider-mark{width:16px;height:16px}
+/* Optical centring: the apple's leaf lifts its box. */
+.acct-provider[data-provider="apple"] svg{transform:translateY(-1px)}
+.acct-email{display:flex;flex-direction:column;gap:6px;margin-top:18px}
+.acct-field{width:100%;height:36px;padding:0 12px;border:0;border-radius:var(--r-md);background:transparent;box-shadow:inset 0 0 0 1px var(--line-2);color:var(--tx);font-size:var(--fs-md);transition:box-shadow var(--dur-1)}
+.acct-field::placeholder{color:var(--tx-4)}
+.acct-field:hover{box-shadow:inset 0 0 0 1px var(--line-strong)}
+.acct-field:focus-visible{outline:0;box-shadow:inset 0 0 0 1px var(--line-strong)}
+.account-modal .btn.pri:disabled{opacity:1;background:var(--ink-1);color:var(--tx-4)}
+.account-modal .btn.pri{transition:background var(--dur-2),color var(--dur-2),transform var(--dur-1) var(--ease)}
+
+.acct-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:22px}
+.acct-foot p{font-size:var(--fs-sm);line-height:16px;color:var(--tx-3)}
+.acct-foot .btn,.acct-code-foot .btn{height:28px;padding:0 10px;margin-right:-10px}
+.acct-link{padding:0;border:0;background:none;color:var(--tx-2);font:inherit;font-weight:var(--fw-medium);text-decoration:underline;text-decoration-color:var(--tx-4);text-underline-offset:2px;cursor:default;transition:color var(--dur-1),text-decoration-color var(--dur-1)}
+.acct-link:hover{color:var(--tx);text-decoration-color:currentColor}
+.acct-link:focus-visible{outline:0;border-radius:2px;box-shadow:0 0 0 2px var(--ink-2)}
+
+/* The way back sits above the title, as in the Store's detail pages. */
+.acct-back{align-self:flex-start;display:inline-flex;align-items:center;gap:2px;height:22px;margin:-6px 0 12px -6px;padding:0 8px 0 3px;border:0;border-radius:var(--r-sm);color:var(--tx-3);font-size:var(--fs-sm);font-weight:var(--fw-medium);transition:color var(--dur-1),background var(--dur-1)}
+.acct-back svg{width:12px;height:12px;transform:rotate(180deg)}
+.acct-back:hover{color:var(--tx);background:var(--ink-1)}
+.acct-back:focus-visible{outline:0;box-shadow:0 0 0 2px var(--ink-2)}
+
+/* Browser hand-off: one card, the native spinner and the one thing to do. */
+.acct-wait{display:flex;align-items:center;gap:10px;min-height:48px;margin:22px -14px 0;padding:0 14px 0 14px;border-radius:var(--r-lg);background:var(--ink-1);color:var(--tx-2);font-size:var(--fs-md);line-height:18px}
+.acct-wait>span{flex:1;min-width:0}
+.acct-wait .btn{height:28px;padding:0 10px;margin-right:-6px}
+.acct-spinner{width:16px;height:16px;flex:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;animation:acct-spin .9s steps(12) infinite}
+@keyframes acct-spin{to{transform:rotate(360deg)}}
+
+/* Code: one real input under six cells, split three and three. */
+.acct-code{position:relative;display:flex;gap:6px;margin-top:22px;cursor:default}
+.acct-code input{position:absolute;inset:0;z-index:1;width:100%;height:100%;padding:0;border:0;opacity:0;cursor:default;caret-color:transparent}
+.acct-cell{flex:1;min-width:0;height:52px;display:grid;place-items:center;border-radius:var(--r-lg);box-shadow:inset 0 0 0 1px var(--line-2);color:var(--tx);font-size:22px;line-height:1;font-weight:var(--fw-medium);font-variant-numeric:tabular-nums;transition:box-shadow var(--dur-1),background var(--dur-1),color var(--dur-2)}
+.acct-cell:nth-of-type(4){margin-left:10px}
+.acct-cell.filled{background:var(--ink-1);box-shadow:none}
+.acct-cell.active{box-shadow:inset 0 0 0 1px var(--line-strong),0 0 0 3px var(--ink-2)}
+.acct-cell.active:not(.filled)::after{content:"";width:1.5px;height:24px;border-radius:1px;background:var(--tx);animation:acct-caret 1.1s steps(1) infinite}
+@keyframes acct-caret{50%{opacity:0}}
+.acct-code.verifying .acct-cell{color:var(--tx-3)}
+.acct-code.wrong .acct-cell{background:transparent;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--danger) 55%,transparent);color:var(--danger)}
+.acct-code-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:28px;margin-top:10px}
+.acct-code-foot .btn{font-variant-numeric:tabular-nums}
+.acct-status{min-width:0;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);text-wrap:pretty}
+.acct-status.is-wrong{color:var(--danger)}
+
+/* Handle: Settings rows on a tinted card, so the fields read as wells. */
+.account-modal{--sg-row:var(--ink-1)}
+.acct-form.sg-column{width:auto;max-width:none;margin:22px 0 0;display:flex;flex-direction:column}
+.acct-form .sg-group{margin:0 -14px;border-radius:var(--r-lg)}
+.acct-form .sg-group>.settings-row{min-height:56px}
+.acct-form .settings-input,.acct-handle-field{width:176px;flex:none}
+.acct-handle-field{display:flex;align-items:center;height:30px;padding:0 0 0 10px;border-radius:var(--sg-control-radius);background:var(--bg-float);color:var(--tx-4);font-size:var(--fs-md);transition:box-shadow var(--dur-1)}
+.acct-handle-field input{min-width:0;flex:1;height:100%;padding:0 10px 0 1px;border:0;background:transparent;color:var(--tx);font-size:var(--fs-md)}
+.acct-handle-field input:focus-visible{outline:0}
+/* Fields show focus by their caret, as Settings fields do. */
+.acct-form .settings-input{text-align:left}
+.acct-form .settings-input:focus-visible{outline:0;box-shadow:none}
+.acct-form .settings-input::placeholder{color:var(--tx-4)}
+.acct-handle-status{transition:color var(--dur-2)}
+.acct-handle-status[data-state="available"]{color:var(--success)}
+.acct-handle-status[data-state="error"]{color:var(--danger)}
+.acct-coord{margin-top:10px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3)}
+.acct-coord code{font:var(--fs-sm)/16px var(--f-mono);color:var(--tx-2)}
+.acct-form .acct-submit{margin-top:20px}
+.account-modal .btn.acct-later{width:100%;height:32px;margin-top:6px}
+.acct-email .acct-status{margin:0 2px}
+.acct-legal{margin-top:12px;font-size:var(--fs-xs);line-height:15px;color:var(--tx-4);text-wrap:pretty}
+.acct-legal .acct-link{color:var(--tx-3);font-weight:var(--fw-regular)}
+
+/* ── Settings › Accounts ── */
+.acct-profile{gap:12px}
+.acct-profile .settings-copy{padding-left:0}
+.acct-profile>.acct-avatar{margin-left:4px}
+/* Destructive, but quiet until you reach for it. */
+.btn.acct-delete:not(:disabled):is(:hover,:focus-visible){color:var(--danger)}
+
+.account-modal button,.acct-sheet label{cursor:default}
+.acct-sheet :is(.btn,.acct-link,.acct-back,.acct-code),.acct-row{user-select:none;-webkit-user-select:none}
+@media (prefers-reduced-motion:reduce){
+  .acct-spinner{animation-duration:1.8s}
+  .acct-cell.active:not(.filled)::after{animation:none}
+}

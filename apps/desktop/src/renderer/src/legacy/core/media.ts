@@ -2,6 +2,7 @@ import { sha256HexOf } from '../../../../shared/sha256';
 import { resolveContent } from './content-properties';
 /* Ported from js/core/media.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 export function install(PM: PMRegistry): void {
 const DB_NAME: any = 'powermove-media';
@@ -106,7 +107,7 @@ PM.MediaStore = {
 /* On a remote host this browser's IndexedDB is one device's cache: the host
    keeps the bytes for every device. Wrapped here, before the first project
    restore, so a miss is filled from the host. */
-if (typeof window !== 'undefined' && (window as any).powermove?.wrapMediaStore) PM.MediaStore = (window as any).powermove.wrapMediaStore(PM.MediaStore);
+if (typeof window !== 'undefined' && (hostBridge() as any)?.wrapMediaStore) PM.MediaStore = (hostBridge() as any).wrapMediaStore(PM.MediaStore);
 
 function normalizedName(value: any) {
   return String(value || '').normalize('NFKC').trim().toLocaleLowerCase();

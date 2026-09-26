@@ -107,7 +107,7 @@ export function normalizeChord(input: string): string {
  * Shift+] arrive as `{` and `}` in `event.key`, but their intended shortcut
  * keys remain `[` and `]`.
  */
-export function chordOfEvent(event: KeyboardEvent): string | null {
+export function chordOfEvent(event: Pick<KeyboardEvent, 'key' | 'code' | 'metaKey' | 'ctrlKey' | 'altKey' | 'shiftKey'>): string | null {
   const raw = event?.key;
   if (typeof raw !== 'string' || raw.length === 0) return null;
   if (BARE_MODIFIERS.has(raw.toLowerCase())) return null;

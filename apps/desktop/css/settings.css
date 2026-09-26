@@ -9,7 +9,7 @@
    squircles (settings/squircle.ts); keyboard focus is drawn as SVG. Group
    and control fills carry the hierarchy without resting outlines. */
 
-#settings-screen,.export-modal{
+#settings-screen,.export-modal,.account-modal{
   --ctl-h:30px;
   --sg-group-radius:var(--r-xl);
   --sg-row-padding:var(--gut);
@@ -36,7 +36,8 @@ body:has(#settings-screen.on) #body,body:has(#settings-screen.on) #status,body:h
 .sg-search svg{width:14px;height:14px;flex:none}
 .sg-search input{min-width:0;flex:1;font-size:var(--fs-md);color:var(--tx)}
 .sg-search input::placeholder{color:var(--tx-3)}
-.sg-nav{min-height:0;flex:1;display:flex;flex-direction:column;gap:12px;overflow-y:auto}
+.sg-nav{position:relative;min-height:0;flex:1;display:flex;flex-direction:column;gap:12px;overflow-y:auto}
+.sg-navbtn{position:relative;z-index:1}
 .sg-nav-group{display:flex;flex-direction:column;gap:2px}
 .sg-nav-title{padding:0 10px 4px;color:var(--tx-3);font-size:var(--fs-sm);line-height:18px}
 .sg-nav-empty{padding:4px 10px;color:var(--tx-3);font-size:var(--fs-sm)}
@@ -44,8 +45,8 @@ body:has(#settings-screen.on) #body,body:has(#settings-screen.on) #status,body:h
 .sg-navbtn{height:32px;width:100%;display:flex;align-items:center;gap:9px;padding:0 9px;border:0;border-radius:var(--r-md);color:var(--tx-2);font-size:var(--fs-md);font-weight:var(--fw-medium);text-align:left;transition:background var(--dur-1),color var(--dur-1)}
 .sg-navbtn svg{width:15px;height:15px;flex:none;color:var(--tx-3);transition:color var(--dur-1)}
 .sg-navbtn span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sg-navbtn:hover{background:var(--bg-row);color:var(--tx)}
-.sg-navbtn.on{background:var(--ink-2);color:var(--tx);box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none}
+.sg-navbtn:hover{color:var(--tx)}
+.sg-navbtn.on{color:var(--tx)}
 .sg-navbtn.on::after{display:none}
 .sg-navbtn.on svg{color:var(--tx)}
 .sg-navbtn:focus-visible{outline:0}

@@ -1,6 +1,7 @@
 import { cloudSourcePaths } from './cloud-media';
 import { MAX_SEQUENCE_FRAMES, animationTiming } from '../../../../shared/animated-image';
 import { imageMimeType, isAnimatedImageExtension, mediaExtension } from '../../../../shared/media-formats';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 /* Formats Chromium cannot put on screen by itself are converted in the main
    process and streamed back as an ordinary File, so everything downstream —
@@ -10,7 +11,7 @@ const UPLOAD_CHUNK = 4 * 1024 * 1024;
 
 /** Stream a finished conversion out of the main process and back into a File. */
 export async function readProxyFile(result: any, name: string, lastModified: number): Promise<File> {
-  const media = (window as any).powermove?.media;
+  const media = (hostBridge() as any)?.media;
   const parts: ArrayBuffer[] = [];
   try {
     for (let offset = 0; offset < result.size; offset += UPLOAD_CHUNK) {
@@ -92,7 +93,7 @@ export interface AnimationConversion { file: File; fps: number; frames: number; 
     converter numbered image sequences use. Each frame repeats for as long as
     its own delay lasts, so variable-delay animations keep their timing. */
 export async function convertAnimatedImage(file: any, { onStage, onProgress }: any = {}): Promise<AnimationConversion> {
-  const media = (window as any).powermove?.media;
+  const media = (hostBridge() as any)?.media;
   if (!media?.beginAnimation) throw new Error('Animated image import is unavailable');
   const opened = await openDecoder(file);
   if (!opened) throw new Error('Could not read the frames in this animated image');
@@ -157,7 +158,7 @@ export async function convertAnimatedImage(file: any, { onStage, onProgress }: a
 
 /** TIFF and HEIF stills become a PNG before the renderer ever sees them. */
 export async function convertStillImage(file: any, { onStage }: any = {}): Promise<File> {
-  const media = (window as any).powermove?.media;
+  const media = (hostBridge() as any)?.media;
   if (!media?.createStillImage) throw new Error('Image conversion is unavailable');
   onStage?.('Converting image');
   const result = await media.createStillImage(file, cloudSourcePaths.get(file));

@@ -23,7 +23,7 @@ export interface MenuHandle {
 
 const GAP = 4;
 const EDGE = 8;
-const MAX_HEIGHT = 320;
+const MAX_HEIGHT = 440;
 
 let current: MenuHandle | null = null;
 
@@ -141,7 +141,11 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
     el.dataset.side = side;
     el.style.maxHeight = `${Math.min(MAX_HEIGHT, side === 'bottom' ? below : above)}px`;
     const top = side === 'bottom' ? a.bottom + GAP : a.top - GAP - el.offsetHeight;
-    const left = Math.max(EDGE, Math.min(a.left, vw - el.offsetWidth - EDGE));
+    // A trigger on the right half of the window hangs its list from its right
+    // edge, so a menu never drifts past the control that opened it.
+    const alignEnd = a.left + a.width / 2 > vw / 2;
+    const wanted = alignEnd ? a.right - el.offsetWidth : a.left;
+    const left = Math.max(EDGE, Math.min(wanted, vw - el.offsetWidth - EDGE));
     el.style.top = `${Math.round(top)}px`;
     el.style.left = `${Math.round(left)}px`;
   }
@@ -192,6 +196,11 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
 
   document.body.append(el);
   place();
+  // A list longer than the menu opens scrolled to the current value, not the top.
+  const selected = items[active];
+  if (selected && el.scrollHeight > el.clientHeight) {
+    el.scrollTop = Math.max(0, selected.offsetTop - (el.clientHeight - selected.offsetHeight) / 2);
+  }
   el.dataset.state = 'open';
   // Nothing is lit until the pointer or the arrow keys pick a row; the index still starts on the current value.
   el.addEventListener('pointerleave', rest);

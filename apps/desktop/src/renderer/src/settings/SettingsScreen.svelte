@@ -6,9 +6,12 @@
   import { createExtensionSettingsControl } from '../legacy/ui/extension-settings';
   import { createProjectSettingsControl, type ProjectSettingsBridge } from '../legacy/ui/project-settings';
   import { mountSquircles } from './squircle';
+  import { mountNavGlide } from '../controls/nav-glide';
   import { clearSettingsSearch, searchSettings } from './search';
+  import Avatar from '../cloud/Avatar.svelte';
+  import { applyAccount, cloudBridge, openSignIn, signOut, subscribeAccount, type CloudUser } from '../cloud/account';
 
-  export type SettingsPage = 'general' | 'accounts' | 'extensions' | 'project';
+  export type SettingsPage = 'general' | 'accounts' | 'extensions' | 'advanced' | 'project';
 
   let { PM, projectBridge }: {
     PM: Record<string, any>;
@@ -31,7 +34,8 @@
       items: [
         { id: 'general', label: 'General', icon: 'gear' },
         { id: 'accounts', label: 'Accounts', icon: 'link' },
-        { id: 'extensions', label: 'Extensions', icon: 'puzzle' }
+        { id: 'extensions', label: 'Extensions', icon: 'puzzle' },
+        { id: 'advanced', label: 'Advanced', icon: 'sliders' }
       ]
     }
   ];
@@ -68,6 +72,23 @@
   let matchedPages = $state<string[]>([]);
   let matchCount = $state(0);
   let lastFocus: HTMLElement | null = null;
+  let account = $state<CloudUser | null>(null);
+  let rememberInstalls = $state(true);
+  let accountBusy = $state(false);
+  /* Settings › Advanced › Registry URL. Shown as a host; main owns the value
+     and asks with a native dialog before switching (and signing out). */
+  let registryOrigin = $state<string | null>(null);
+  let registryFromEnvironment = $state(false);
+  let registryDraft = $state('');
+  let registryBusy = $state(false);
+  let registryError = $state<string | null>(null);
+  const registryHost = (origin: string): string => origin.replace(/^https:\/\//, '');
+  const registryChanged = $derived(registryOrigin !== null && registryDraft.trim() !== '' && registryDraft.trim() !== registryHost(registryOrigin) && registryDraft.trim() !== registryOrigin);
+
+  $effect(() => subscribeAccount((user, me) => {
+    account = user;
+    rememberInstalls = me?.settings.rememberInstalls ?? true;
+  }));
 
   const hasProject = $derived(!!controls?.project);
   const groups = $derived(NAV
@@ -118,8 +139,47 @@
     controls = null;
   }
 
+  async function loadRegistry(): Promise<void> {
+    const bridge = cloudBridge();
+    if (!bridge) return;
+    try {
+      const current = await bridge.registryUrl();
+      registryOrigin = current.origin;
+      registryFromEnvironment = current.fromEnvironment ?? false;
+      registryDraft = registryHost(current.origin);
+      registryError = null;
+    } catch {
+      registryOrigin = null;
+    }
+  }
+
+  async function changeRegistry(): Promise<void> {
+    const bridge = cloudBridge();
+    const value = registryDraft.trim();
+    if (!bridge || registryBusy || !value) return;
+    const origin = /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`;
+    registryError = null;
+    registryBusy = true;
+    try {
+      const result = await bridge.setRegistryUrl({ origin });
+      if (!result.ok) throw new Error(result.error.error);
+      registryOrigin = result.value.origin;
+      registryFromEnvironment = result.value.fromEnvironment ?? false;
+      registryDraft = registryHost(result.value.origin);
+      if (result.value.changed) {
+        applyAccount(null);
+        PM.toast?.(`The Store now uses ${registryHost(result.value.origin)}. Sign in to publish there.`, 4000, { kind: 'status' });
+      }
+    } catch {
+      registryError = 'Enter a web address, like cloud.trypowermove.com.';
+    } finally {
+      registryBusy = false;
+    }
+  }
+
   export function open(target?: SettingsPage): void {
     build();
+    void loadRegistry();
     themeMode = PM.theme?.mode ?? 'system';
     restoreWindows = PM.store?.get?.('restoreWindows', true) !== false;
     autoDownloadCloudMedia = PM.store?.get?.('autoDownloadCloudMedia', false) === true;
@@ -248,10 +308,52 @@
     return { update: place };
   }
 
+  function glide(node: HTMLElement) {
+    const unmount = mountNavGlide(node, { row: '.sg-navbtn', selected: '.on' });
+    return { destroy: unmount };
+  }
+
   function applyAppearance(event: Event): void {
     const value = (event.currentTarget as HTMLSelectElement).value;
     themeMode = value;
     PM.theme?.apply?.(value);
+  }
+
+  /* Account actions run in main; failures come back as results, never throws. */
+  async function toggleRememberInstalls(): Promise<void> {
+    const bridge = cloudBridge();
+    if (!bridge || accountBusy) return;
+    const next = !rememberInstalls;
+    rememberInstalls = next;
+    accountBusy = true;
+    try {
+      const result = await bridge.setRememberInstalls({ value: next });
+      if (result.ok) applyAccount(result.value);
+      else throw new Error(result.error.error);
+    } catch {
+      rememberInstalls = !next;
+      PM.toast?.('Unable to change this setting. Check your connection and try again.', 4000, { error: true });
+    } finally {
+      accountBusy = false;
+    }
+  }
+
+  async function deleteAccount(): Promise<void> {
+    const bridge = cloudBridge();
+    if (!bridge || accountBusy) return;
+    accountBusy = true;
+    try {
+      const result = await bridge.deleteAccount();
+      if (!result.ok) throw new Error(result.error.error);
+      if (result.value.deleted) {
+        applyAccount(null);
+        PM.toast?.('Your account was deleted.', 3000, { kind: 'status' });
+      }
+    } catch {
+      PM.toast?.('Unable to delete your account. Check your connection and try again.', 5000, { error: true });
+    } finally {
+      accountBusy = false;
+    }
   }
 
   function toggleRestoreWindows(): void {
@@ -303,7 +405,7 @@
         bind:value={searchText}
       />
     </label>
-    <nav class="sg-nav" aria-label="Settings sections">
+    <nav class="sg-nav" aria-label="Settings sections" use:glide>
       {#each groups as group (group.title)}
         <div class="sg-nav-group">
           <span class="sg-nav-title">{group.title}</span>
@@ -413,8 +515,56 @@
             {:else if item.id === 'accounts'}
               <header class="sg-heading">
                 <h2>Accounts</h2>
-                <p>Sign in with a subscription, or connect an API or local model.</p>
+                <p>Your Powermove account, and the models your agent works with.</p>
               </header>
+              <section class="sg-section">
+                <h3 class="sg-section-title">Powermove</h3>
+                <div class="sg-group">
+                  {#if account}
+                    <div class="settings-row acct-profile">
+                      <Avatar user={account} size={32} />
+                      <div class="settings-copy">
+                        <b>{account.handle ? `@${account.handle}` : account.email}</b>
+                        {#if account.handle}<span>{account.email}</span>{/if}
+                      </div>
+                      {#if !account.handle}
+                        <button class="btn" type="button" onclick={() => openSignIn()}>Choose Handle…</button>
+                      {/if}
+                      <button class="btn" type="button" onclick={() => void signOut()}>Sign Out</button>
+                    </div>
+                    <div class="settings-row">
+                      <div class="settings-copy">
+                        <b>Remember installs on this account</b>
+                        <span>Keep a list of the extensions you install from the Store. Turning this off deletes the list.</span>
+                      </div>
+                      <button
+                        class="toggle"
+                        class:on={rememberInstalls}
+                        type="button"
+                        aria-pressed={rememberInstalls}
+                        aria-label="Remember installs on this account"
+                        disabled={accountBusy}
+                        onclick={() => void toggleRememberInstalls()}
+                      ><i aria-hidden="true"></i></button>
+                    </div>
+                    <div class="settings-row">
+                      <div class="settings-copy">
+                        <b>Delete account</b>
+                        <span>Your published extensions stay on the Store under your handle.</span>
+                      </div>
+                      <button class="btn acct-delete" type="button" disabled={accountBusy} onclick={() => void deleteAccount()}>Delete Account…</button>
+                    </div>
+                  {:else}
+                    <div class="settings-row">
+                      <div class="settings-copy">
+                        <b>Powermove account</b>
+                        <span>Publish and manage your extensions on the Store.</span>
+                      </div>
+                      <button class="btn" type="button" onclick={() => openSignIn()}>Sign In…</button>
+                    </div>
+                  {/if}
+                </div>
+              </section>
               <section class="sg-section">
                 <h3 class="sg-section-title">Subscriptions</h3>
                 <div class="sg-group" use:host={[controls?.chatgpt.element, controls?.claude.element]}></div>
@@ -429,6 +579,42 @@
                 <p>Manage extensions and turn them on or off.</p>
               </header>
               <div class="sg-sections" use:host={controls?.extensions.element}></div>
+            {:else if item.id === 'advanced'}
+              <header class="sg-heading">
+                <h2>Advanced</h2>
+                <p>Settings most people never need to change.</p>
+              </header>
+              <section class="sg-section">
+                <h3 class="sg-section-title">Store</h3>
+                <div class="sg-group">
+                  <div class="settings-row">
+                    <label class="settings-copy" for="settings-registry-url">
+                      <b>Registry URL</b>
+                      {#if registryFromEnvironment}<span>(from environment)</span>{/if}
+                      {#if registryError}
+                        <span class="settings-extension-error" role="alert">{registryError}</span>
+                      {:else}
+                        <span>Where the Store finds and publishes extensions. Changing it signs you out.</span>
+                      {/if}
+                    </label>
+                    <input
+                      id="settings-registry-url"
+                      class="settings-input is-wide"
+                      type="text"
+                      inputmode="url"
+                      autocomplete="off"
+                      autocapitalize="off"
+                      spellcheck="false"
+                      maxlength="2000"
+                      placeholder="cloud.trypowermove.com"
+                      disabled={registryBusy || registryOrigin === null || registryFromEnvironment}
+                      bind:value={registryDraft}
+                      onkeydown={(event) => { if (event.key === 'Enter' && registryChanged) { event.preventDefault(); void changeRegistry(); } }}
+                    />
+                    <button class="btn" type="button" disabled={registryBusy || !registryChanged || registryFromEnvironment} onclick={() => void changeRegistry()}>Change…</button>
+                  </div>
+                </div>
+              </section>
             {:else if item.id === 'project'}
               <header class="sg-heading">
                 <h2>Project</h2>

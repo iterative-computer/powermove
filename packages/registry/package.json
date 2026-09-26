@@ -1,0 +1,31 @@
+{
+  "name": "@powermove/registry",
+  "license": "AGPL-3.0-or-later",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Powermove extension registry contract shared by the desktop app and the cloud: manifest, snapshot hashing, git object codec, tar, limits, secret scan, wire schemas.",
+  "type": "module",
+  "exports": {
+    "./manifest": "./src/manifest.ts",
+    "./snapshot": "./src/snapshot.ts",
+    "./git": "./src/git/objects.ts",
+    "./tar": "./src/tar.ts",
+    "./limits": "./src/limits.ts",
+    "./scan": "./src/scan.ts",
+    "./diff": "./src/diff.ts",
+    "./wire": "./src/wire/index.ts",
+    "./node": "./src/node/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "@types/node": "26.3.0",
+    "typescript": "5.9.3"
+  }
+}

@@ -135,3 +135,43 @@ describe('extension settings control', () => {
       .toEqual({ label: 'Needs attention', tone: 'warning', detail: 'crashed' });
   });
 });
+
+describe('extension values in settings', () => {
+  const vars = [{ key: 'API_KEY', label: 'API key', secret: true, required: true }];
+
+  it('offers Set up on a row that needs setup and Variables… on the page of a working one', async () => {
+    const openSetup = vi.fn();
+    (window as any).PM = { Vars: { openSetup } };
+    const waiting = record('colour-match', {
+      manifest: { id: 'colour-match', name: 'Colour match', version: '1.0.0', apiVersion: 2, author: 'user', vars },
+      bundleUrl: null,
+      bundleHash: null,
+      health: { state: 'needs-setup', missing: ['API_KEY'] }
+    });
+    const working = record('weather', {
+      manifest: { id: 'weather', name: 'Weather', version: '1.0.0', apiVersion: 2, author: 'user', vars }
+    });
+    const harness = bridge([waiting, working]);
+    const control = createExtensionSettingsControl(harness.api);
+
+    await vi.waitFor(() => expect(control.element.querySelectorAll('[data-extension-id]')).toHaveLength(2));
+    const row = control.element.querySelector('[data-extension-id="colour-match"]')!;
+    expect(row.textContent).toContain('Needs setup');
+    const setUp = row.querySelector<HTMLButtonElement>('.settings-extension-setup')!;
+    expect(setUp.textContent).toBe('Set up');
+    expect(setUp.classList.contains('pri')).toBe(true);
+    setUp.click();
+    expect(openSetup).toHaveBeenCalledWith(expect.objectContaining({ id: 'colour-match' }));
+    expect(control.element.querySelector('.settings-extension-detail')!.hasAttribute('hidden')).toBe(true);
+    expect(control.element.querySelector('[data-extension-id="weather"] .settings-extension-setup')).toBeNull();
+
+    control.element.querySelector<HTMLButtonElement>('[data-extension-id="weather"] .settings-extension-open')!.click();
+    const variables = control.element.querySelector<HTMLButtonElement>('.settings-extension-detail .settings-extension-setup')!;
+    expect(variables.textContent).toBe('Variables…');
+    variables.click();
+    expect(openSetup).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'weather' }));
+    expect(extensionSettingsLabels.displayState(waiting)).toEqual({ label: 'Needs setup', tone: 'setup' });
+    control.destroy();
+    delete (window as any).PM;
+  });
+});

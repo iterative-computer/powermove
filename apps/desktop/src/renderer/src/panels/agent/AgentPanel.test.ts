@@ -230,10 +230,10 @@ describe('AgentPanel', () => {
   });
 
   it('keeps setup visible while checking another provider and restores the saved draft', async () => {
-    const chatgpt = window.powermove!.chatgpt;
+    const chatgpt = (window as any).powermove.chatgpt;
     vi.mocked(chatgpt.status).mockResolvedValue({ state: 'disconnected', email: null, planType: null, detail: null });
     let resolveStatus!: (status: any) => void;
-    Object.assign(window.powermove!, { claude: {
+    Object.assign((window as any).powermove, { claude: {
       status: vi.fn(() => new Promise(resolve => { resolveStatus = resolve; })),
       onChanged: vi.fn(() => () => undefined)
     } });

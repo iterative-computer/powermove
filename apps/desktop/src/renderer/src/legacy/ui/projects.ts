@@ -3,6 +3,9 @@ import type { PMRegistry } from '../registry';
 import { subscribeForkUpdates, updateAll, type ForkUpdate } from '../../shell/fork-updates';
 import { installUpdate, subscribeAppUpdates } from '../../shell/app-updates';
 import type { AppUpdateState } from '../../../../shared/ipc';
+import { mountNavGlide } from '../../controls/nav-glide';
+import { mount, unmount } from 'svelte';
+import AccountButton from '../../cloud/AccountButton.svelte';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -22,28 +25,43 @@ const S: any = {
   page: 0, queryKey: '',
 };
 if (!['recents', 'projects', 'trash'].includes(S.section)) S.section = 'recents';
+const SECTIONS = ['recents', 'projects', 'trash', 'store'];
 
 PM.ProjectsScreen = {
   get isOpen() { return !!S.el && S.el.classList.contains('on'); },
   get section() { return S.section; },
   show(section: any) {
     ensure();
-    if (section && ['recents', 'projects', 'trash'].includes(section)) S.section = section;
+    if (section && SECTIONS.includes(section)) selectSection(section, false);
     paint(); S.el.classList.add('on'); PM.bus.emit('projects:screen');
   },
   hide() {
     // Nothing to fall back to: this window has no composition behind the screen.
     if (!PM.proj?.id || PM.isHomeProject?.()) return;
+    if (S.section === 'store') (PM as any).StoreUI?.setActive?.(false);
     if (S.el) S.el.classList.remove('on');
     PM.bus.emit('projects:screen');
   },
   toggle() { this.isOpen ? this.hide() : this.show(); },
+  clearSearch() { if (S.search?.value) { S.search.value = ''; paint(); } },
 };
+
+/* The Store is one more section; it has its own search, so this field always
+   searches projects and typing in it from the Store goes back to them. */
+function selectSection(section: string, persist = true) {
+  if (section === S.section) return;
+  if (section === 'store' && S.search) S.search.value = '';
+  S.section = section;
+  if (persist && section !== 'store') PM.store.set('projectsSection', section);
+}
 
 function ensure() {
   if (S.el) return;
   S.search = h('input', { type: 'search', placeholder: 'Search projects', 'aria-label': 'Search projects' });
-  S.search.addEventListener('input', paint);
+  S.search.addEventListener('input', () => {
+    if (S.section === 'store' && S.search.value) selectSection('recents');
+    paint();
+  });
   S.nav = h('div.ps-nav');
   /* Forked built-ins that fell behind the shipped version. The agent does the
      merge; this block only says how many and offers the one action. */
@@ -72,7 +90,15 @@ function ensure() {
       h('button.btn', { onclick: installUpdate }, 'Restart to update'));
   };
   S.offAppUpdate = subscribeAppUpdates(paintAppUpdate);
-  const sidebar = h('aside.ps-sidebar', h('label.ps-search', PM.icon('search'), S.search), S.nav, S.appUpdate, S.updates);
+  S.storeBtn = h('button.ps-navbtn', { onclick: () => { selectSection('store'); paint(); } }, PM.icon('basket'), h('span', 'Store'));
+  const store = h('div.ps-nav', S.storeBtn);
+  /* One nav block so the highlight can glide from the sections to Store. */
+  const nav = h('div.ps-navs', S.nav, store);
+  S.offGlide = mountNavGlide(nav, { row: '.ps-navbtn', selected: '.on' });
+  /* Who you are on Powermove Cloud, pinned to the foot of the sidebar. */
+  S.account = h('div.ps-account');
+  S.accountButton = mount(AccountButton, { target: S.account, props: { PM } });
+  const sidebar = h('aside.ps-sidebar', h('label.ps-search', PM.icon('search'), S.search), nav, S.appUpdate, S.updates, S.account);
 
   S.title = h('b'); S.count = h('span');
   const view = h('div.ps-view', { role: 'group', 'aria-label': 'Project layout' },
@@ -87,11 +113,14 @@ function ensure() {
   S.grid = h('div.ps-grid');
   S.pager = h('nav.ps-pagination', { 'aria-label': 'Project pages', hidden: true });
   S.content = h('div.ps-content', S.grid, S.pager);
-  S.el = h('div#projects-screen', sidebar, h('main.ps-main', top, S.content));
+  S.top = top;
+  S.storeHost = h('div.ps-store', { hidden: true });
+  S.el = h('div#projects-screen', sidebar, h('main.ps-main', top, S.content, S.storeHost));
   document.body.appendChild(S.el);
+  /* Only Escape is the home's; app shortcuts such as ⌘, keep working over it. */
   S.el.addEventListener('keydown', (e: any) => {
-    e.stopPropagation();
-    if (e.key === 'Escape') { e.preventDefault(); PM.ProjectsScreen.hide(); }
+    if (e.key !== 'Escape') return;
+    e.stopPropagation(); e.preventDefault(); PM.ProjectsScreen.hide();
   });
   S.el.addEventListener('dragover', (e: any) => { if ([...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
   S.el.addEventListener('drop', async (e: any) => {
@@ -113,12 +142,20 @@ function viewButton(value: any, label: any, icon: any) {
 }
 function navButton(section: any, label: any, icon: any, count: any) {
   return h('button.ps-navbtn' + (S.section === section ? '.on' : ''), {
-    onclick: () => { S.section = section; PM.store.set('projectsSection', section); paint(); },
+    onclick: () => { selectSection(section); paint(); },
   }, PM.icon(icon), h('span', label), h('span.count', String(count)));
 }
 
 function paint() {
   if (!S.el) return;
+  const inStore = S.section === 'store';
+  const storeUI = (PM as any).StoreUI;
+  if (inStore) storeUI?.attach?.(S.storeHost);
+  S.top.hidden = inStore;
+  S.content.hidden = inStore;
+  S.storeHost.hidden = !inStore;
+  S.storeBtn.classList.toggle('on', inStore);
+  storeUI?.setActive?.(inStore);
   const live = [...PM.Projects.list()], trash = [...PM.Projects.trashList()];
   S.nav.textContent = '';
   S.nav.append(navButton('recents', 'Recents', 'clock', Math.min(12, live.length)),
@@ -328,6 +365,8 @@ const offOpen = PM.bus.on('projects:open', () => { if (PM.ProjectsScreen.isOpen)
 PM.__disposeProjectsScreen = () => {
   S.offUpdates?.(); S.offUpdates = null;
   S.offAppUpdate?.(); S.offAppUpdate = null;
+  S.offGlide?.(); S.offGlide = null;
+  if (S.accountButton) void unmount(S.accountButton); S.accountButton = null;
   offOpen?.();
   S.el?.remove?.();
   S.el = null;

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { blocksFromMarkdown, wordsFromRuns, type Block, type Run } from './markdown';
   import { revealText } from './text-reveal';
+  import { bridge } from '../../kernel/bridge';
 
   /* Agent prose as real elements: paragraphs, headings, lists, fenced code,
      quotes, with bold / italic / code / links inline. Words are spans so the
@@ -20,7 +21,7 @@
 
   function openLink(event: MouseEvent, href: string): void {
     event.preventDefault();
-    void window.powermove?.openExternal?.(href);
+    void bridge()?.openExternal?.(href);
   }
 </script>
 

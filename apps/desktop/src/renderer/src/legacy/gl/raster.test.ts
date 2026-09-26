@@ -1,3 +1,4 @@
+import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
@@ -38,6 +39,7 @@ function rasterRegistry(extra: Partial<PMRegistry> = {}): PMRegistry {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  resetBridgeForTests();
 });
 
 describe('legacy raster install', () => {
@@ -351,6 +353,7 @@ describe('legacy raster install', () => {
       powermove: { media: { sourcePath: () => '/replacement/new.wav' } },
       setTimeout, clearTimeout,
     });
+  installBridgeForTests((window as any).powermove);
     const PM = makePM('core/history', 'gl/raster');
     const animatedLayer = {
       id: 'layer-1', type: 'audio', from: 4, dur: 8,
@@ -437,6 +440,7 @@ describe('legacy raster install', () => {
       powermove: { media: { sourcePath: () => '' } },
       setTimeout, clearTimeout,
     });
+  installBridgeForTests((window as any).powermove);
     const PM = makePM('core/history', 'gl/raster');
     const oldRuntime = { id: 'asset-1', name: 'old.wav', kind: 'audio' };
     const projectA: any = {

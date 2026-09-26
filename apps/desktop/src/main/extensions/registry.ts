@@ -10,6 +10,7 @@ import {
   EXTENSIONS_STORE_KEY,
   EXT_IPC,
   MANIFEST_LIMITS,
+  needsTrust,
   parseManifest,
   type ExtensionCreateRequest,
   type ExtensionHealth,
@@ -19,8 +20,11 @@ import {
   type ExtensionRecord,
   type ExtensionSetEnabledRequest,
   type ExtensionSourceFile,
-  type ExtensionsChangedEvent
+  type ExtensionVarDecl,
+  type ExtensionsChangedEvent,
+  type TrustLevel
 } from '../../shared/extensions';
+import { missingKeys, resolveVars, type VarsResolution } from '../env/resolve';
 import type { Store } from '../storage';
 import { compileExtension } from './compiler';
 import { scanExtensionDirs, type DiscoveredExtension } from './discovery';
@@ -44,6 +48,20 @@ export interface ExtensionRegistryOptions {
   broadcast?: (event: ExtensionsChangedEvent) => void;
   revealPath?: (fullPath: string) => void;
   now?: () => number;
+  /**
+   * Resolves a user extension's declared values. Without one (the
+   * `powermove serve` host, where values are not available yet) nothing is
+   * set. Missing values do not prevent activation.
+   */
+  resolveVars?: (id: string, decls: ExtensionVarDecl[]) => Promise<VarsResolution>;
+  /**
+   * Who wrote a user or project extension (design §2): made here, from the
+   * Store, or a Store install the user trusted. Without one (the
+   * `powermove serve` host, which installs nothing from the Store) every
+   * folder is local. A resolver that fails reads as `store`: an unreadable
+   * provenance file must not promote someone else's code.
+   */
+  trustFor?: (id: string, scope: 'user' | 'project') => TrustLevel | Promise<TrustLevel>;
 }
 
 export interface ExtensionRegistry {
@@ -82,6 +100,25 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
   const compiler = options.compile ?? compileExtension;
   const scanner = options.scan ?? scanExtensionDirs;
   const now = options.now ?? Date.now;
+  const resolveFor = async (id: string, decls: ExtensionVarDecl[]): Promise<VarsResolution> => {
+    if (!options.resolveVars) return resolveVars(decls, new Map());
+    try {
+      return await options.resolveVars(id, decls);
+    } catch (error) {
+      // Unreadable values behave as unset: the extension handles missing values.
+      console.error(`[extensions] could not read values for ${id}`, error);
+      return resolveVars(decls, new Map());
+    }
+  };
+  const trustOf = async (id: string, scope: 'user' | 'project'): Promise<TrustLevel> => {
+    if (!options.trustFor) return 'local';
+    try {
+      return await options.trustFor(id, scope);
+    } catch (error) {
+      console.error(`[extensions] could not tell where ${id} came from`, error);
+      return 'store';
+    }
+  };
   let refreshQueue = Promise.resolve();
 
   const enabledFor = (id: string): boolean => enabledState.get(id) ?? true;
@@ -139,6 +176,7 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
       if (candidate.scope === 'builtin') {
         const health = healthForBuiltin(enabled, candidate);
         records.set(id, {
+          trust: 'builtin',
           id,
           scope: 'builtin',
           manifest: candidate.manifest,
@@ -152,8 +190,12 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
         continue;
       }
 
+      const trust = await trustOf(id, candidate.scope);
+      const put = (record: ExtensionRecord): void => void records.set(id, { ...record, trust });
+      enabled = enabledFor(id);
+
       if (candidate.manifest === null) {
-        records.set(id, {
+        put({
           id,
           scope: candidate.scope,
           manifest: null,
@@ -175,7 +217,7 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
       try {
         signature = await directorySignature(candidate.dir);
       } catch (error) {
-        records.set(id, buildErrorRecord(candidate, candidate.manifest, enabledFor(id), errorText(error), updatedAt, update));
+        put(buildErrorRecord(candidate, candidate.manifest, enabledFor(id), errorText(error), updatedAt, update));
         continue;
       }
 
@@ -199,11 +241,52 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
       // Compilation can yield while a runtime health report disables this ID.
       enabled = enabledFor(id);
       if (!result.ok) {
-        records.set(id, buildErrorRecord(candidate, candidate.manifest, enabled, result.error, updatedAt, update));
+        put(buildErrorRecord(candidate, candidate.manifest, enabled, result.error, updatedAt, update));
         continue;
       }
 
-      records.set(id, {
+      /* Someone else's code that asks for full access waits for the user to
+         trust it: no bundle URL, so the loader never imports it. */
+      if (enabled && needsTrust({ trust, manifest: candidate.manifest })) {
+        put({
+          id,
+          scope: candidate.scope,
+          manifest: candidate.manifest,
+          ...(update === undefined ? {} : { update }),
+          dir: candidate.dir,
+          enabled,
+          bundleUrl: null,
+          bundleHash: null,
+          health: { state: 'needs-trust' },
+          updatedAt
+        });
+        continue;
+      }
+
+      /* Resolve values before activation. Missing values are optional;
+         the status field is retained for host compatibility. */
+      const decls = candidate.manifest.vars ?? [];
+      if (candidate.scope === 'user' && decls.length > 0 && enabled) {
+        const resolution = await resolveFor(id, decls);
+        enabled = enabledFor(id);
+        if (enabled && resolution.status === 'needs-setup') {
+          put({
+            id,
+            scope: candidate.scope,
+            manifest: candidate.manifest,
+            ...(update === undefined ? {} : { update }),
+            dir: candidate.dir,
+            enabled,
+            bundleUrl: null,
+            bundleHash: null,
+            health: { state: 'needs-setup', missing: missingKeys(resolution) },
+            updatedAt
+          });
+          continue;
+        }
+      }
+
+      put({
         id,
         scope: candidate.scope,
         manifest: candidate.manifest,
@@ -360,6 +443,8 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
       const id = validateId(report.id);
       const health = validateReportedHealth(report.health);
       const record = requireRecord(records, id);
+      // Nothing of an extension waiting for setup or trust ever ran; a report is stale.
+      if (record.health.state === 'needs-setup' || record.health.state === 'needs-trust') return;
       if (record.enabled && health.state === 'runtime-error') {
         enabledState.set(id, false);
         persistEnabledState(options.store, enabledState);

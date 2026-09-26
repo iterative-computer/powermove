@@ -1,0 +1,19 @@
+class Stored implements R2ObjectBody {
+  readonly version=crypto.randomUUID(); readonly uploaded=new Date(); readonly storageClass='Standard'; readonly httpEtag: string; readonly checksums={} as R2Checksums; readonly bodyUsed=false;
+  constructor(readonly key:string, private readonly data:Uint8Array, readonly etag:string, readonly httpMetadata?:R2HTTPMetadata, readonly customMetadata?:Record<string,string>) { this.httpEtag=`"${etag}"`; }
+  get size(){return this.data.byteLength;} get body(){return new Blob([new Uint8Array(this.data)]).stream();}
+  async arrayBuffer(){return new Uint8Array(this.data).buffer;} async bytes(){return new Uint8Array(this.data);} async text(){return new TextDecoder().decode(this.data);} async json<T>(){return JSON.parse(await this.text()) as T;} async blob(){return new Blob([new Uint8Array(this.data)]);}
+  writeHttpMetadata(headers:Headers){ if(this.httpMetadata?.contentType) headers.set('content-type',this.httpMetadata.contentType); }
+}
+export class FakeR2 implements R2Bucket {
+  private objects=new Map<string,Stored>();
+  async head(key:string){return this.objects.get(key) ?? null;}
+  async get(key:string, options?:R2GetOptions):Promise<R2ObjectBody|null>{const object=this.objects.get(key); if(!object)return null; const onlyIf=options?.onlyIf; if(onlyIf && !(onlyIf instanceof Headers)) { if(onlyIf.etagMatches && onlyIf.etagMatches!==object.etag) return null; if(onlyIf.etagDoesNotMatch && (onlyIf.etagDoesNotMatch==='*'||onlyIf.etagDoesNotMatch===object.etag)) return null; if(onlyIf.uploadedBefore && object.uploaded>=onlyIf.uploadedBefore)return null; if(onlyIf.uploadedAfter && object.uploaded<=onlyIf.uploadedAfter)return null; } return object;}
+  put(key:string,value:ReadableStream|ArrayBuffer|ArrayBufferView|string|null|Blob,options:R2PutOptions & {onlyIf:R2Conditional|Headers}):Promise<R2Object|null>;
+  put(key:string,value:ReadableStream|ArrayBuffer|ArrayBufferView|string|null|Blob,options?:R2PutOptions):Promise<R2Object>;
+  async put(key:string,value:ReadableStream|ArrayBuffer|ArrayBufferView|string|null|Blob,options?:R2PutOptions):Promise<R2Object|null>{const current=this.objects.get(key), onlyIf=options?.onlyIf; if(current && onlyIf && !(onlyIf instanceof Headers)){if(onlyIf.etagDoesNotMatch==='*'||onlyIf.etagDoesNotMatch===current.etag)return null;if(onlyIf.etagMatches && onlyIf.etagMatches!==current.etag)return null;if(onlyIf.uploadedBefore && current.uploaded>=onlyIf.uploadedBefore)return null;} const bytes=typeof value==='string'?new TextEncoder().encode(value):value===null?new Uint8Array():value instanceof Blob?new Uint8Array(await value.arrayBuffer()):value instanceof ReadableStream?new Uint8Array(await new Response(value).arrayBuffer()):new Uint8Array(value instanceof ArrayBuffer?value:value.buffer,value instanceof ArrayBuffer?0:value.byteOffset,value instanceof ArrayBuffer?value.byteLength:value.byteLength); const digest=new Uint8Array(await crypto.subtle.digest('SHA-256',new Uint8Array(bytes)));const etag=Array.from(digest).map(x=>x.toString(16).padStart(2,'0')).join('');const stored=new Stored(key,bytes,etag,options?.httpMetadata instanceof Headers?undefined:options?.httpMetadata,options?.customMetadata);this.objects.set(key,stored);return stored;}
+  async delete(keys:string|string[]){for(const key of Array.isArray(keys)?keys:[keys])this.objects.delete(key);}
+  async list(options?:R2ListOptions):Promise<R2Objects>{const objects=[...this.objects.values()].filter(x=>!options?.prefix||x.key.startsWith(options.prefix)).sort((a,b)=>a.key.localeCompare(b.key));return { objects:objects.slice(0,options?.limit), truncated:false, delimitedPrefixes:[] };}
+  async createMultipartUpload():Promise<R2MultipartUpload>{throw new Error('multipart upload unsupported in fake');}
+  resumeMultipartUpload():R2MultipartUpload{throw new Error('multipart upload unsupported in fake');}
+}

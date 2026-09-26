@@ -22,6 +22,11 @@ export interface PlayerOptions {
   onError?: (error: Error) => void;
 }
 
+const hexDigits = (hex: string): string => {
+  const s = String(hex ?? '').replace('#', '');
+  return s.length === 3 || s.length === 4 ? [...s].map(c => c + c).join('') : s;
+};
+
 /** A private engine per player; never installs window.PM or editor UI. */
 export function createEngine(project: any): any {
   const listeners = new Map<string, Set<(...args: any[]) => void>>();
@@ -31,9 +36,12 @@ export function createEngine(project: any): any {
     uid: (prefix = 'p') => prefix + Math.random().toString(36).slice(2),
     snapF: (t: number, fps: number) => Math.round(t * fps) / fps,
     hex2rgb(hex: string) {
-      const s = hex.replace('#', '');
-      const n = parseInt(s.length === 3 ? [...s].map(c => c + c).join('') : s, 16);
-      return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+      const s = hexDigits(hex);
+      return [0, 2, 4].map(i => (parseInt(s.slice(i, i + 2), 16) || 0) / 255);
+    },
+    hexAlpha(hex: string) {
+      const s = hexDigits(hex);
+      return s.length === 8 ? (parseInt(s.slice(6, 8), 16) || 0) / 255 : 1;
     },
     bus: {
       on(event: string, fn: (...args: any[]) => void) {
@@ -210,7 +218,7 @@ export async function createPlayer(options: PlayerOptions) {
       if (!param) throw new Error(`Unknown parameter: ${name}`);
       if (param.control === 'num' && (typeof value !== 'number' || !Number.isFinite(value)
         || (param.min != null && value < param.min) || (param.max != null && value > param.max))) throw new Error(`Invalid value for ${name}`);
-      if (param.control === 'color' && (typeof value !== 'string' || !/^#[\da-f]{6}$/i.test(value))) throw new Error(`Invalid color for ${name}`);
+      if (param.control === 'color' && (typeof value !== 'string' || !/^#(?:[\da-f]{2}){3,4}$/i.test(value))) throw new Error(`Invalid color for ${name}`);
       if (param.control === 'toggle' && typeof value !== 'boolean') throw new Error(`Invalid toggle for ${name}`);
       if (param.control === 'select' && !param.options?.some((o: any) => o.v === value)) throw new Error(`Invalid option for ${name}`);
       param.value = value; PM.touch(); PM.bus.emit('layers');

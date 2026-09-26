@@ -70,6 +70,20 @@ import { runKernelCommand, type Kernel } from './registries';
 import { mountComponent } from './runtime-globals';
 import { performanceMonitor } from '../runtime/performance-monitor';
 import { IMPORT_DEFAULTS_SERVICE, validatedImportDefaults } from './import-defaults';
+import { bridge as hostBridge } from './bridge';
+import { PANEL_FRAME, type PanelFrame } from './panel-frame';
+
+/* Extensions never see the raw bridge (bridge.ts); haptics is the one bit a
+   built-in (the viewer's snapping) needs, so it goes through the API. */
+const HOST_HAPTIC = Object.freeze({
+  alignment(): void {
+    try {
+      hostBridge()?.haptic?.alignment();
+    } catch {
+      // Haptics are a nicety; a missing or failing host changes nothing.
+    }
+  }
+});
 
 export interface PanelsBackend {
   open(id: string, dock?: PanelDock | PanelOpenOptions): void;
@@ -116,7 +130,7 @@ export interface HostDeps {
   space3d?: Space3DAPI;
   assets: AssetsAPI;
   storage(id: string): StorageAPI;
-  extensions: Omit<ExtensionsAPI, 'fork'> & Partial<Pick<ExtensionsAPI, 'fork'>>;
+  extensions: Omit<ExtensionsAPI, 'fork' | 'setUp'> & Partial<Pick<ExtensionsAPI, 'fork' | 'setUp'>>;
   panelsBackend: PanelsBackend;
   paletteOpen(query?: string): void;
   /** Called for every guarded callback that throws — the loader's error policy hook. */
@@ -130,11 +144,35 @@ export interface ExtensionHandle {
   disposeAll(): void;
   /** Marks the window during which activate(api) runs. */
   setActivating(on: boolean): void;
+  /**
+   * Kernel-only (never on the extension API): register a panel whose body is
+   * docked by `frame` — the sandboxed extension's view iframe. Host chrome
+   * comes from `title`; `header`, `moveSlot`, `headless` and `library.render`
+   * do not exist for this variant.
+   */
+  registerFramePanel(def: FramePanelDefinition, frame: PanelFrame): Disposable;
 }
+
+export type FramePanelDefinition = Pick<PanelDefinition, 'id' | 'title' | 'icon' | 'size' | 'min' | 'flush' | 'noscroll'>;
 
 const FALLBACK_MANIFEST = (id: string): ExtensionManifest => ({ id, name: id, version: '0.0.0', apiVersion: 1 });
 
-export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps: HostDeps): ExtensionHandle {
+/** `api.vars` over a frozen copy of the values delivered for one activation. */
+export function createVarsAPI(values: Readonly<Record<string, string>> = {}): import('./api').VarsAPI {
+  const own = new Map(Object.entries(values).filter(([, value]) => typeof value === 'string'));
+  return Object.freeze({
+    get: (key: string) => own.get(key),
+    has: (key: string) => own.has(key),
+    keys: () => [...own.keys()]
+  });
+}
+
+export function createExtensionAPI(
+  kernel: Kernel,
+  record: ExtensionRecord,
+  deps: HostDeps,
+  vars: Readonly<Record<string, string>> = {}
+): ExtensionHandle {
   const id = record.id;
   const manifest = record.manifest ?? FALLBACK_MANIFEST(id);
   const disposers: Array<() => void> = [];
@@ -200,7 +238,8 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
     ...deps.extensions,
     fork: deps.extensions.fork ?? (async () => {
       throw new Error('Forking built-in extensions is unavailable in this host.');
-    })
+    }),
+    setUp: deps.extensions.setUp ?? (() => undefined)
   };
 
   /* ── panels ────────────────────────────────────────────── */
@@ -268,6 +307,34 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
     isOpen: (panelId) => deps.panelsBackend.isOpen(panelId),
     refresh: (panelId) => deps.panelsBackend.refresh(panelId)
   };
+
+  function registerFramePanel(def: FramePanelDefinition, frame: PanelFrame): Disposable {
+    if (!def || typeof def.id !== 'string' || !def.id) throw new Error(`[ext:${id}] panels.register requires an id`);
+    /* One live view per panel id, like the component variant: a rebuild
+       (layout refresh, override swap) disposes the previous view first. */
+    let current: { dispose(): void } | null = null;
+    const release = (): void => {
+      const view = current;
+      current = null;
+      view?.dispose();
+    };
+    const panel: PanelDefinition = {
+      id: def.id,
+      title: typeof def.title === 'string' && def.title ? def.title : def.id,
+      ...(typeof def.icon === 'string' ? { icon: def.icon } : {}),
+      ...(typeof def.size === 'number' ? { size: def.size } : {}),
+      ...(typeof def.min === 'number' ? { min: def.min } : {}),
+      ...(def.flush ? { flush: true } : {}),
+      ...(def.noscroll ? { noscroll: true } : {}),
+      build: guard((body: HTMLElement, inst: { spec: Record<string, unknown> }) => {
+        release();
+        current = frame.mount(body, { spec: inst?.spec ?? {} });
+      }, `panel ${def.id} view`, undefined)
+    };
+    Object.defineProperty(panel, PANEL_FRAME, { value: { extensionId: id }, enumerable: true });
+    const registration = kernel.panels.register(id, panel);
+    return collect({ dispose() { registration.dispose(); release(); } });
+  }
 
   /* ── commands ──────────────────────────────────────────── */
 
@@ -478,10 +545,12 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
     storage: deps.storage(id),
     events,
     extensions,
+    vars: createVarsAPI(vars),
     host: {
       pm: deps.pm,
       state: deps.state,
-      mount: mountComponent
+      mount: mountComponent,
+      haptic: HOST_HAPTIC
     },
     on: events.on,
     log,
@@ -495,6 +564,7 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
     id,
     api,
     setActivating(on: boolean) { activating = on; },
+    registerFramePanel,
     disposeAll() {
       if (disposed) return;
       disposed = true;

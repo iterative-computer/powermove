@@ -307,7 +307,7 @@ function setContent(command: any) {
 
 function extensionParamValue(definition: any, value: any) {
   if (definition.type === 'color') {
-    if (typeof value !== 'string' || !/^#[0-9a-f]{6}$/i.test(value)) throw new Error(`${definition.label} must be a hex color`);
+    if (typeof value !== 'string' || !/^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(value)) throw new Error(`${definition.label} must be a hex color`);
     return value.toUpperCase();
   }
   if (definition.type === 'toggle') {
@@ -878,7 +878,7 @@ function changed(notify: any = true) {
   if (notify) inspectorService(PM)?.refresh();
 }
 
-const colorValue: any = (value: any) => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
+const colorValue: any = (value: any) => typeof value === 'string' && /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(value);
 const primitiveControl: any = (value: any) => typeof value === 'boolean' ? 'toggle'
   : typeof value === 'number' ? 'slider'
     : colorValue(value) ? 'color'

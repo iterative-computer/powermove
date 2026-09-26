@@ -14,5 +14,5 @@
     "baseUrl": ".",
     "paths": { "powermove": ["src/renderer/src/kernel/api.ts"] }
   },
-  "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.svelte", "src/extensions/**/*.ts", "src/extensions/**/*.svelte", "src/shared/**/*.ts"]
+  "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.svelte", "src/renderer/sandbox/**/*.ts", "src/extensions/**/*.ts", "src/extensions/**/*.svelte", "src/shared/**/*.ts"]
 }

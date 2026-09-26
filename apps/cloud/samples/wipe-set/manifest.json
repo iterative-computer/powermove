@@ -1,0 +1,11 @@
+{
+  "id": "wipe-set",
+  "name": "Wipe Set",
+  "description": "Three simple wipes for incoming layers.",
+  "version": "1.0.0",
+  "apiVersion": 3,
+  "entry": "index.ts",
+  "contributes": ["transitions"],
+  "permissions": [],
+  "author": "user"
+}

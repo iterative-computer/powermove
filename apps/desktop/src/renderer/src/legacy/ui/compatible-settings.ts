@@ -1,5 +1,6 @@
 import type { PowermoveBridge } from '../../../../shared/ipc';
 import { DEFAULT_COMPATIBLE_PROVIDER } from '../../../../shared/compatible-provider';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 const PRESETS: Array<[url: string, name: string]> = [
   ['http://localhost:11434/v1', 'Ollama'],
@@ -39,7 +40,7 @@ function input(label: string, type = 'text', placeholder = ''): HTMLInputElement
  * The API or local model card: connection preset, address, model, key, image
  * support, and one row that tests the connection and reports its state.
  */
-export function createCompatibleSettingsControl(api: PowermoveBridge['compatible'] = window.powermove?.compatible) {
+export function createCompatibleSettingsControl(api: PowermoveBridge['compatible'] = hostBridge()?.compatible) {
   const element = el('div', 'settings-provider-fields');
 
   const preset = el('select', 'settings-select');

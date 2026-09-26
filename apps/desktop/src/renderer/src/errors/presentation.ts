@@ -39,7 +39,7 @@ export function presentError(value: unknown): ErrorPresentation {
     ({ title, message, details, ...extra });
   const outdated = details.match(/(Claude Code|Codex(?: CLI)?)\s+v?(\d+(?:\.\d+)+)\s+does not support this model;?\s*version\s+v?(\d+(?:\.\d+)+)\s+or newer/i);
   if (outdated) {
-    const [, tool, installed, required] = outdated;
+    const [, tool = '', installed = '', required = ''] = outdated;
     const update = /claude/i.test(tool) ? 'claude' : 'codex';
     return result(`Update ${update === 'claude' ? 'Claude Code' : 'Codex'} to use this model`,
       'This model needs a newer version than the one Powermove has. Install the update, then try again.',

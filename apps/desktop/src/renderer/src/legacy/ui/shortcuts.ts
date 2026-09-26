@@ -17,6 +17,7 @@ import { IMPORT_DEFAULTS_SERVICE } from '../../kernel/import-defaults';
 import { hasTextSelection, isFieldTarget, selectableTextRoot, selectTextContents } from '../../kernel/keychord';
 import { ensureKernel, registryView } from '../kernel-view';
 import type { PMRegistry } from '../registry';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 export const LEGACY_OWNER = 'legacy';
 
@@ -66,7 +67,7 @@ const activeTextField = (): boolean => {
 const readingText = () => typeof document !== 'undefined' ? selectableTextRoot(document.activeElement) : null;
 
 const nativeEdit = (action: string): unknown => {
-  const bridge: any = typeof window === 'undefined' ? null : (window as any).powermove;
+  const bridge: any = typeof window === 'undefined' ? null : (hostBridge() as any);
   if (typeof bridge?.nativeEdit === 'function') {
     bridge.nativeEdit(action);
     return true;

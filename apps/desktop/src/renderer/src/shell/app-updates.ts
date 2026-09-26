@@ -7,6 +7,7 @@
 import type { AppUpdateState } from '../../../shared/ipc';
 import type { PowermoveAPI } from '../kernel/api';
 import type { PMRegistry } from '../legacy/registry';
+import { bridge } from '../kernel/bridge';
 
 type Listener = (state: AppUpdateState | null) => void;
 
@@ -65,7 +66,7 @@ function apply(next: AppUpdateState | null): void {
 
 /** Quit normally, install the staged version, relaunch. */
 export function installUpdate(): void {
-  void window.powermove?.updates?.install();
+  void bridge()?.updates?.install();
 }
 
 /** Hide the toast for this version; the home sidebar still shows the update. */
@@ -87,12 +88,12 @@ export function subscribeAppUpdates(listener: Listener): () => void {
 
 export function installAppUpdates(PM: PMRegistry): () => void {
   const kernel = PM.Kernel as { api?: (id: string) => PowermoveAPI } | undefined;
-  const bridge = window.powermove?.updates;
-  if (typeof kernel?.api !== 'function' || !bridge) return () => {};
+  const updates = bridge()?.updates;
+  if (typeof kernel?.api !== 'function' || !updates) return () => {};
   api = kernel.api('app-updates');
   registry = PM;
-  const offChanged = bridge.onChanged(apply);
-  void bridge.status().then(apply).catch(() => undefined);
+  const offChanged = updates.onChanged(apply);
+  void updates.status().then(apply).catch(() => undefined);
   const offScreen = (PM.bus as { on?: (event: string, fn: () => void) => (() => void) | undefined } | undefined)?.on?.('projects:screen', syncToast);
   return () => {
     offChanged();

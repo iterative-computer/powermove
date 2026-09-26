@@ -486,7 +486,7 @@ export function createNewProjectForm(
   options: NewProjectFormOptions = {}
 ): NewProjectForm {
   const seed: NewProjectValues = { ...NEW_PROJECT_DEFAULTS, ...initial };
-  let backgroundValue = /^#[0-9a-f]{6}$/i.test(seed.bg) ? seed.bg.toUpperCase() : NEW_PROJECT_DEFAULTS.bg;
+  let backgroundValue = /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(seed.bg) ? seed.bg.toUpperCase() : NEW_PROJECT_DEFAULTS.bg;
   const element = document.createElement('div');
   element.className = 'new-project-form';
 
@@ -530,7 +530,7 @@ export function createNewProjectForm(
   duration.value = String(seed.dur);
 
   const setBackground = (value: string): void => {
-    if (/^#[0-9a-f]{6}$/i.test(value)) backgroundValue = value.toUpperCase();
+    if (/^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(value)) backgroundValue = value.toUpperCase();
   };
   const background = options.backgroundField?.(() => backgroundValue, setBackground)
     ?? document.createElement('input');

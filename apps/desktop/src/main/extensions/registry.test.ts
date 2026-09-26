@@ -17,6 +17,8 @@ vi.mock('electron', () => ({
 import type { ExtensionManifest, ExtensionsChangedEvent } from '../../shared/extensions';
 import type { Store } from '../storage';
 import { createExtensionRegistry, type ExtensionRegistryOptions } from './registry';
+import { createProvenanceStore } from '../cloud/provenance';
+import { trustLevelFor } from '../cloud/trust';
 
 const temporaryDirectories: string[] = [];
 
@@ -106,6 +108,20 @@ async function harness(overrides: Partial<ExtensionRegistryOptions> = {}) {
 }
 
 describe('extension registry', () => {
+  it('uses serve-style provenance with no account to keep a full-access Store install off', async () => {
+    const setup = await harness();
+    const provenance = createProvenanceStore(setup.root);
+    await writeExtension(setup.userDir, 'third-party');
+    await fs.writeFile(path.join(setup.userDir, 'third-party', 'manifest.json'), JSON.stringify(manifest('third-party', { apiVersion: 3, permissions: ['full-access'] })));
+    await provenance.update('third-party', () => ({ localId: 'third-party', envKey: 'external', origin: {
+      repoId: 'external', releaseId: 'release', coordinate: 'other/third-party', version: '1.0.0', treeSha: 'tree', commitSha: 'commit', ownerPublisherId: 'someone-else'
+    } }));
+    const registry = createExtensionRegistry({ store: setup.store, userDir: setup.userDir, buildDir: setup.buildDir,
+      builtinIds: [], resourcesDir: setup.resourcesDir, compile: setup.compile,
+      trustFor: async (id, scope) => trustLevelFor({ scope }, scope === 'user' ? await provenance.get(id) : null, null) });
+    await registry.refresh();
+    expect(registry.list()[0]).toMatchObject({ trust: 'store', bundleUrl: null, health: { state: 'needs-trust' } });
+  });
   it('loads enabled intent, persists toggles, and emits one change event', async () => {
     const store = memoryStore({ extensions: { 'sample-ext': false, malformed: 'no' } });
     const setup = await harness({ store });
@@ -362,4 +378,112 @@ it('does not overwrite an auto-disable received while compilation is pending', a
   release();
   await refresh;
   expect(setup.registry.list()[0]?.enabled).toBe(false);
+});
+
+describe('extension values', () => {
+  async function writeVarsExtension(root: string, id: string): Promise<void> {
+    const directory = path.join(root, id);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'manifest.json'), JSON.stringify(manifest(id, {
+      apiVersion: 2,
+      vars: [
+        { key: 'API_KEY', label: 'API key', secret: true, required: true },
+        { key: 'REGION', label: 'Region' }
+      ]
+    })));
+    await fs.writeFile(path.join(directory, 'index.ts'), 'export default () => undefined');
+  }
+
+  it('activates with unset, partial, or undecryptable values', async () => {
+    const stored = new Map<string, { value: string | null; secret: boolean }>();
+    const { resolveVars } = await import('../env/resolve');
+    const resolver = vi.fn(async (_id: string, decls: NonNullable<ExtensionManifest['vars']>) => resolveVars(decls, stored));
+    const setup = await harness({ resolveVars: resolver });
+    await writeVarsExtension(setup.userDir, 'colour-match');
+
+    await setup.registry.refresh();
+    expect(setup.registry.list()[0]).toMatchObject({
+      id: 'colour-match',
+      enabled: true,
+      bundleUrl: expect.stringContaining('bundle.js'),
+      health: { state: 'ok' }
+    });
+    expect(resolver).toHaveBeenCalledWith('colour-match', expect.any(Array));
+
+    // Missing values do not hold activation back.
+    setup.registry.reportHealth({ id: 'colour-match', health: { state: 'ok' } });
+    expect(setup.registry.list()[0]?.health.state).toBe('ok');
+
+    stored.set('API_KEY', { value: 'sk-test', secret: true });
+    await setup.registry.refresh(['colour-match']);
+    expect(setup.registry.list()[0]).toMatchObject({ health: { state: 'ok' } });
+    expect(setup.registry.list()[0]?.bundleUrl).toMatch(/^app:\/\/powermove\/ext\/colour-match\/bundle\.js/);
+    expect(setup.compile).toHaveBeenCalledTimes(1);
+
+    // Undecryptable values are omitted without blocking activation.
+    stored.set('REGION', { value: null, secret: true });
+    await setup.registry.refresh(['colour-match']);
+    expect(setup.registry.list()[0]?.health).toEqual({ state: 'ok' });
+  });
+
+  it('without a resolver treats every value as unset, and a disabled extension stays disabled', async () => {
+    const store = memoryStore({ extensions: { 'colour-match': false } });
+    const setup = await harness({ store });
+    await writeVarsExtension(setup.userDir, 'colour-match');
+    await setup.registry.refresh();
+    expect(setup.registry.list()[0]?.health).toEqual({ state: 'disabled' });
+    await setup.registry.setEnabled({ id: 'colour-match', enabled: true });
+    expect(setup.registry.list()[0]).toMatchObject({ bundleUrl: expect.stringContaining('bundle.js'), health: { state: 'ok' } });
+  });
+
+  async function writeFullAccessExtension(root: string, id: string): Promise<void> {
+    const directory = path.join(root, id);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'manifest.json'), JSON.stringify(manifest(id, { apiVersion: 3, permissions: ['full-access'] })));
+    await fs.writeFile(path.join(directory, 'index.ts'), 'export default () => undefined');
+  }
+
+  it('stamps every record with its trust level and holds back untrusted full access', async () => {
+    const levels = new Map<string, 'local' | 'store' | 'store-trusted'>([['theirs', 'store'], ['mine', 'local']]);
+    const trustFor = vi.fn(async (id: string) => levels.get(id) ?? 'local');
+    const setup = await harness({ trustFor });
+    await writeFullAccessExtension(setup.userDir, 'theirs');
+    await writeFullAccessExtension(setup.userDir, 'mine');
+    await writeExtension(setup.userDir, 'plain');
+    levels.set('plain', 'store');
+
+    await setup.registry.refresh();
+    const byId = Object.fromEntries(setup.registry.list().map((record) => [record.id, record]));
+    expect(byId['theirs']).toMatchObject({ trust: 'store', enabled: true, bundleUrl: null, bundleHash: null, health: { state: 'needs-trust' } });
+    // Made here: permissions are ignored.
+    expect(byId['mine']).toMatchObject({ trust: 'local', health: { state: 'ok' } });
+    expect(byId['mine']?.bundleUrl).toMatch(/^app:\/\/powermove\/ext\/mine\//);
+    // Someone else's, but it doesn't ask for full access: runs as today.
+    expect(byId['plain']).toMatchObject({ trust: 'store', health: { state: 'ok' } });
+    expect(trustFor).toHaveBeenCalledWith('theirs', 'user');
+
+    // A stale renderer report can't turn it on.
+    setup.registry.reportHealth({ id: 'theirs', health: { state: 'ok' } });
+    expect(setup.registry.list().find((record) => record.id === 'theirs')?.health.state).toBe('needs-trust');
+
+    levels.set('theirs', 'store-trusted');
+    await setup.registry.refresh(['theirs']);
+    expect(setup.registry.list().find((record) => record.id === 'theirs')).toMatchObject({ trust: 'store-trusted', health: { state: 'ok' } });
+  });
+
+  it('reads as someone else\'s code when trust cannot be decided', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const setup = await harness({ trustFor: async () => { throw new Error('provenance damaged'); } });
+    await writeFullAccessExtension(setup.userDir, 'unknown');
+    await setup.registry.refresh();
+    expect(setup.registry.list()[0]).toMatchObject({ trust: 'store', bundleUrl: null, health: { state: 'needs-trust' } });
+    error.mockRestore();
+  });
+
+  it('without a resolver (powermove serve) every folder is local', async () => {
+    const setup = await harness();
+    await writeFullAccessExtension(setup.userDir, 'agent-made');
+    await setup.registry.refresh();
+    expect(setup.registry.list()[0]).toMatchObject({ trust: 'local', health: { state: 'ok' } });
+  });
 });

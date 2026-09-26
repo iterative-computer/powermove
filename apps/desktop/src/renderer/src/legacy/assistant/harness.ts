@@ -12,6 +12,7 @@ import type {
   AgentToolRequestEvent,
   AgentToolResponseEvent
 } from '../../../../shared/ipc';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 export function install(PM: PMRegistry): void {
 const MAX_REPAIRS = 2;
@@ -624,7 +625,7 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
   throw new Error(`Unknown Powermove agent tool: ${request.tool}`);
 }
 
-const nativeAgentTools = typeof window === 'undefined' ? undefined : window.powermove?.agentTools;
+const nativeAgentTools = typeof window === 'undefined' ? undefined : hostBridge()?.agentTools;
 nativeAgentTools?.onRequest((request) => {
   void handleLiveAgentTool(request).then(
     (result) => nativeAgentTools.respond({ runId: request.runId, callId: request.callId, ...result }),

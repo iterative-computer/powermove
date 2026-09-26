@@ -1,3 +1,4 @@
+import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createCloudMedia, cloudSourcePaths, readLocalMediaSource } from './cloud-media';
 
@@ -14,6 +15,7 @@ function setup(automatic = false) {
     releaseCloudSource: vi.fn(async () => undefined),
   };
   vi.stubGlobal('window', { powermove: { media }, File });
+  installBridgeForTests((window as any).powermove);
   const PM = {
     proj: project, assets: { get: vi.fn() }, bus: { emit: vi.fn() }, toast: vi.fn(), invalidate: vi.fn(),
     store: { get: vi.fn(() => automatic), set: vi.fn() },

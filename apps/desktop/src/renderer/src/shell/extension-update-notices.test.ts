@@ -1,3 +1,4 @@
+import { installBridgeForTests, resetBridgeForTests } from '../kernel/bridge';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { ExtensionRecord } from '../../../shared/extensions';
 import { parseManifest } from '../../../shared/extensions';
@@ -56,6 +57,7 @@ it('waits for extension boot, catches late health errors, and remembers review/d
   let records = [record('custom')];
   const toast = vi.fn(), open = vi.fn(), setEnabled = vi.fn();
   vi.stubGlobal('window', { powermove: { updates: { status: async () => ({ current: '2.0.0' }) } } });
+  installBridgeForTests((window as any).powermove);
   const api = { storage: { get: (key: string) => storage.get(key), set: (key: string, value: unknown) => storage.set(key, value) },
     events: { on: (event: string, callback: () => void) => { handlers.set(event, callback); return { dispose: () => handlers.delete(event) }; } },
     extensions: { list: () => records, setEnabled } };

@@ -1,0 +1,11 @@
+{
+  "id": "glass-tint",
+  "name": "Glass Tint",
+  "description": "A soft, grainy colour wash for any layer.",
+  "version": "1.1.0",
+  "apiVersion": 3,
+  "entry": "index.ts",
+  "contributes": ["effects"],
+  "permissions": [],
+  "author": "user"
+}

@@ -1,0 +1,42 @@
+{
+  "name": "@powermove/cloud",
+  "license": "AGPL-3.0-or-later",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Powermove Cloud: the hosted backend (extension registry first). Hono on Cloudflare Workers.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "dev:local": "wrangler dev --port 8787 --test-scheduled",
+    "local:up": "bun scripts/local-up.ts",
+    "local:seed": "bun scripts/local-seed.ts",
+    "local:samples": "bun scripts/local-samples.ts",
+    "local:down": "bun scripts/local-down.ts",
+    "dev:emulate": "bun scripts/dev-emulate.ts",
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types --env-interface CloudflareBindings --include-runtime false",
+    "typecheck": "bun run types && tsc --noEmit",
+    "test": "bun test",
+    "types:emit": "tsc -p tsconfig.types.json"
+  },
+  "dependencies": {
+    "@hono/zod-validator": "0.9.1",
+    "@powermove/registry": "workspace:*",
+    "@neondatabase/serverless": "1.1.0",
+    "better-auth": "1.7.5",
+    "drizzle-orm": "0.45.3",
+    "hono": "4.13.8",
+    "pg": "8.23.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "@types/bun": "1.4.2",
+    "@types/pg": "8.23.1",
+    "drizzle-kit": "0.31.11",
+    "emulate": "^0.11.2",
+    "typescript": "5.9.3",
+    "wrangler": "4.136.1"
+  }
+}

@@ -11,8 +11,10 @@
  */
 import type { Disposable, ExtensionModule, UIAPI } from './api';
 import type { ExtensionHealth, ExtensionManifest, ExtensionRecord, ExtensionsBridge, ExtensionsChangedEvent } from '../../../shared/extensions';
-import { MANIFEST_LIMITS } from '../../../shared/extensions';
+import type { VarsBridge } from '../../../shared/vars-ipc';
+import { MANIFEST_LIMITS, needsTrust } from '../../../shared/extensions';
 import { createExtensionAPI, type ExtensionHandle, type HostDeps } from './host';
+import { createSandboxRuntime, type SandboxRuntime } from './sandbox-host';
 
 /* The loader speaks about an extension rather than as one, so it stamps the
    attribution itself. `source` is host-side and not part of the extension's
@@ -26,6 +28,8 @@ export type BuiltinFactory = () => Promise<ExtensionModule>;
 export interface LoaderOptions {
   kernel: Kernel;
   bridge: ExtensionsBridge | null;
+  /** Delivers each extension's values to `api.vars` before it activates. */
+  vars?: Pick<VarsBridge, 'values'> | null;
   /** id → dynamic import of the built-in module. Key order IS the load order. */
   builtins: Record<string, BuiltinFactory>;
   deps: Omit<HostDeps, 'reportRuntimeError'>;
@@ -61,7 +65,7 @@ const DEFAULT_WINDOW = 10_000;
 const DEFAULT_LIMIT = 2;
 
 /** Health states that mean "there is nothing worth trying to import". */
-const BLOCKED = new Set(['build-error', 'manifest-error', 'needs-update']);
+const BLOCKED = new Set(['build-error', 'manifest-error', 'needs-update', 'needs-setup', 'needs-trust']);
 
 const nameOf = (record: ExtensionRecord | undefined, id: string): string => record?.manifest?.name ?? id;
 
@@ -89,6 +93,13 @@ export function planLoad(records: ExtensionRecord[], builtinOrder: string[]): Lo
       continue;
     }
     if (BLOCKED.has(record.health?.state)) continue; // main already recorded why
+    /* Someone else's code asking for full access runs only once trusted.
+       Main already withholds its bundle; this holds even if a record says
+       otherwise. */
+    if (needsTrust(record)) {
+      skipped.push({ id: record.id, health: { state: 'needs-trust' } });
+      continue;
+    }
     candidates.add(record.id);
   }
 
@@ -142,8 +153,9 @@ export function planLoad(records: ExtensionRecord[], builtinOrder: string[]): Lo
 
 interface ActiveEntry {
   record: ExtensionRecord;
-  module: ExtensionModule;
+  module: ExtensionModule | null;
   handle: ExtensionHandle;
+  sandbox?: SandboxRuntime;
 }
 
 export function createLoader(options: LoaderOptions): Loader {
@@ -220,6 +232,18 @@ export function createLoader(options: LoaderOptions): Loader {
     if (disposed || active.has(record.id)) return active.has(record.id);
     const id = record.id;
 
+    if (record.trust === 'store') {
+      try {
+        const sandbox = await withTimeout(createSandboxRuntime(kernel, record, hostDeps, await valuesFor(record)), timeoutMs, `sandbox activation of "${id}" timed out`);
+        active.set(id, { record, module: null, handle: sandbox.handle, sandbox });
+        activationFailures.delete(id);
+        syncActive();
+        reportHealth(id, { state: 'ok' });
+        kernel.events.emit('extension:loaded', { id });
+        return true;
+      } catch (error) { failActivation(record, error); return false; }
+    }
+
     let module: ExtensionModule;
     try {
       module = await withTimeout(importModule(record), timeoutMs, `import of "${id}" timed out`);
@@ -229,7 +253,7 @@ export function createLoader(options: LoaderOptions): Loader {
       return false;
     }
 
-    const handle = createExtensionAPI(kernel, record, hostDeps);
+    const handle = createExtensionAPI(kernel, record, hostDeps, await valuesFor(record));
     try {
       // Compiled bundles expose inert CSS. The activation owns every style,
       // including extracted Svelte styles, so cached modules can be re-enabled.
@@ -269,6 +293,20 @@ export function createLoader(options: LoaderOptions): Loader {
     return true;
   }
 
+  /** Fetched once per activation. A declared value that is missing is simply absent. */
+  async function valuesFor(record: ExtensionRecord): Promise<Record<string, string>> {
+    const declared = new Set((record.manifest?.vars ?? []).map((decl) => decl.key));
+    if (!declared.size || record.scope === 'builtin' || !options.vars) return {};
+    try {
+      const values = await withTimeout(options.vars.values({ id: record.id }), timeoutMs, 'values timed out');
+      return Object.fromEntries(Object.entries(values ?? {})
+        .filter(([key, value]) => declared.has(key) && typeof value === 'string'));
+    } catch (error) {
+      console.warn(`[kernel] values for "${record.id}" are unavailable`, error);
+      return {};
+    }
+  }
+
   function failActivation(record: ExtensionRecord, error: unknown): void {
     const id = record.id;
     activationFailures.add(id);
@@ -287,7 +325,8 @@ export function createLoader(options: LoaderOptions): Loader {
     syncActive();
     if (entry) {
       try {
-        await entry.module.deactivate?.();
+        if (entry.sandbox) entry.sandbox.dispose();
+        else await entry.module?.deactivate?.();
       } catch (error) {
         console.error(`[kernel] extension "${id}" deactivate() threw`, error);
       }

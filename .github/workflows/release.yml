@@ -92,6 +92,15 @@ jobs:
           test -s "apps/desktop/dist/${CHANNEL}-mac.yml"
           test -s "apps/desktop/dist/Powermove-${VERSION}-mac-arm64.zip"
           test -s "apps/desktop/dist/Powermove-${VERSION}-mac-arm64.dmg"
+      - name: Publish built-in extensions
+        env:
+          POWERMOVE_REGISTRY_TOKEN: ${{ secrets.POWERMOVE_REGISTRY_TOKEN }}
+        run: |
+          if [ -n "$POWERMOVE_REGISTRY_TOKEN" ]; then
+            bun run --cwd apps/desktop publish:builtins
+          else
+            echo 'PENDING(provision): powermove publisher token is not configured; skipping built-in publish.'
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: powermove-${{ github.ref_name }}

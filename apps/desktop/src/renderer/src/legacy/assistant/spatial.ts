@@ -1,4 +1,5 @@
 import { createAgentCheckpoint } from './checkpoint';
+import { bridge } from '../../kernel/bridge';
 import { noticeKind, stated } from '../../errors/presentation';
 import { notifyAgentFinished } from '../../panels/agent/notification-preferences';
 /* Ported from js/assistant/spatial.js — behavior-preserving. */
@@ -18,6 +19,7 @@ import { EFFECT_AUTHORING_INSTRUCTIONS, EDITOR_EXTENSION_INSTRUCTIONS } from '..
 import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
 import { AGENT_MODELS, REASONING_EFFORTS, modelEfforts, modelEffort, setDiscoveredClaudeModels, setDiscoveredCodexModels } from '../../../../shared/agent-models';
 import { idlePreload } from './idle-preload';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 const AGENT_EDITABLE_CATALOG_CHARS = 72_000;
 const AGENT_LAYER_INDEX_CHARS = 18_000;
@@ -280,7 +282,7 @@ if (S.provider === 'claude') ensureClaudeModelChoice(S.model);
 S.reasoningEffort = modelEffort(S.provider, selectedModelName(S.provider, S.model), S.reasoningEffort) || S.reasoningEffort;
 async function refreshCodexModels(): Promise<void> {
   try {
-    const models = await globalThis.window?.powermove?.chatgpt?.models?.();
+    const models = await bridge()?.chatgpt?.models?.();
     if (!models?.length) return;
     setDiscoveredCodexModels(models);
     if (S.provider === 'chatgpt' && !AGENT_MODELS.chatgpt.some(item => item.id === S.model)) {
@@ -298,7 +300,7 @@ async function refreshCodexModels(): Promise<void> {
 void refreshCodexModels();
 async function refreshClaudeModels(): Promise<void> {
   try {
-    const models = await globalThis.window?.powermove?.claude?.models?.();
+    const models = await bridge()?.claude?.models?.();
     if (!models?.length) return;
     setDiscoveredClaudeModels(models);
     ensureClaudeModelChoice(S.model);
@@ -311,10 +313,10 @@ async function refreshClaudeModels(): Promise<void> {
   }
 }
 void refreshClaudeModels();
-globalThis.window?.powermove?.chatgpt?.onChanged?.((status) => {
+bridge()?.chatgpt?.onChanged?.((status) => {
   if (status.state === 'connected') void refreshCodexModels();
 });
-globalThis.window?.powermove?.claude?.onChanged?.((status) => {
+bridge()?.claude?.onChanged?.((status) => {
   if (status.state === 'connected') void refreshClaudeModels();
 });
 function selectedModelName(provider: string, model: string): string {
@@ -336,7 +338,7 @@ globalThis.window?.addEventListener('pm-provider-connected', (event: Event) => {
   if (config?.model) updateCompatibleModels(config);
   PM.AgentUI?.setProvider('compatible');
 });
-void globalThis.window?.powermove?.compatible?.status().then(config => {
+void hostBridge()?.compatible?.status().then(config => {
   updateCompatibleModels(config);
   PM.AgentUI?.update();
 }).catch(() => undefined);
@@ -776,7 +778,7 @@ function extensionHealthError(record: any) {
 }
 
 async function requestFix(id: any) {
-  const native: any = (window as any).powermove;
+  const native: any = (hostBridge() as any);
   if (typeof native?.extensions?.readSource !== 'function' || typeof native?.codex?.fixPrompt !== 'function') {
     window.console.warn(`[agent] Fix it is unavailable for extension "${String(id)}"`);
     return;
@@ -796,7 +798,7 @@ async function requestFix(id: any) {
 }
 
 async function requestExtensionRebase(id: any) {
-  const native: any = (window as any).powermove;
+  const native: any = (hostBridge() as any);
   if (typeof native?.codex?.rebasePrompt !== 'function') {
     window.console.warn(`[agent] Fork rebase is unavailable for extension "${String(id)}"`);
     return;
@@ -1891,7 +1893,7 @@ Fix failures in the isolated extension staging directory and return the changed 
 const resumedHostRuns = new Set<string>();
 function scheduleHostRunResume(): void {
   if (typeof window === 'undefined') return;
-  const remote = (window as any).powermove?.remoteRuns;
+  const remote = (hostBridge() as any)?.remoteRuns;
   if (!remote) return;
   window.setTimeout(() => { void resumeHostRuns(remote); }, 0);
 }
@@ -2400,13 +2402,13 @@ function controlConnection(target: any, path: any, controlType: any) {
     const channel: any = path.slice('properties.'.length);
     const prop: any = PM.findProp(layer, channel); if (!prop) return null;
     const value: any = PM.evP ? PM.evP(layer, prop, PM.time, channel) : prop.v;
-    control = typeof value === 'number' ? 'slider' : typeof value === 'boolean' ? 'toggle' : /^#[0-9a-f]{6}$/i.test(value) ? 'color' : 'text';
+    control = typeof value === 'number' ? 'slider' : typeof value === 'boolean' ? 'toggle' : /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(value) ? 'color' : 'text';
   } else if (path.startsWith('content.')) {
     const key: any = path.slice('content.'.length);
     const current: any = layer.d?.[key];
     if (!['string', 'number', 'boolean'].includes(typeof current)) return null;
     control = typeof current === 'number' ? 'slider' : typeof current === 'boolean' ? 'toggle'
-      : /^#[0-9a-f]{6}$/i.test(current) ? 'color' : 'text';
+      : /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(current) ? 'color' : 'text';
   } else if (path.startsWith('layer.')) {
     const key: any = path.slice('layer.'.length);
     if (layer.type === 'audio' && ['motionBlur', 'blend', 'parent'].includes(key)) return null;
@@ -2552,7 +2554,7 @@ function sanitizePlan(raw: any, context: any, request: any = '') {
         out.presets = (Array.isArray(c.presets) ? c.presets : Array.isArray(c.options) ? c.options : [])
           .filter((name: any) => typeof name === 'string' && PM.Ease?.PRESETS?.[name]).slice(0, 16);
       } else if (type === 'text') out.def = sourceValue == null ? '' : String(sourceValue).slice(0, 500);
-      else if (type === 'color') out.def = /^#[0-9a-f]{6}$/i.test(sourceValue) ? sourceValue.toUpperCase() : '#FF6B1A';
+      else if (type === 'color') out.def = /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(sourceValue) ? sourceValue.toUpperCase() : '#FF6B1A';
       else if (type === 'toggle') out.def = !!sourceValue;
       else if (type === 'select') {
         out.options = (Array.isArray(c.options) ? c.options : [])
@@ -2576,7 +2578,7 @@ function sanitizePlan(raw: any, context: any, request: any = '') {
     Object.assign(out, connection);
     const sourceValue: any = connection.value !== undefined ? connection.value : c.defaultValue;
     if (type === 'text') out.def = sourceValue == null ? '' : String(sourceValue);
-    else if (type === 'color') out.def = /^#[0-9a-f]{6}$/i.test(sourceValue) ? sourceValue : '#FF6B1A';
+    else if (type === 'color') out.def = /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(sourceValue) ? sourceValue : '#FF6B1A';
     else if (type === 'fill') out.def = sourceValue && typeof sourceValue === 'object' ? sourceValue : null;
     else if (type === 'toggle') out.def = !!sourceValue;
     else if (type === 'select') {
@@ -2942,7 +2944,7 @@ async function undoSceneRun() {
   for (const run of [...(S.run.undoRuns || [S.run])].reverse()) {
     if (run.extensionChangeSetId && extensionRestored) {
       try {
-        await (window as any).powermove.codex.restoreChangeSet({ projectId: run.projectId, changeSetId: run.extensionChangeSetId });
+        await (hostBridge() as any).codex.restoreChangeSet({ projectId: run.projectId, changeSetId: run.extensionChangeSetId });
       } catch (error: any) {
         extensionRestored = false;
         extensionError = String(error?.message || error);

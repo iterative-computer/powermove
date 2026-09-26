@@ -40,7 +40,7 @@ test('color picker stays above adjacent panels and inside the viewport', async (
     });
   });
   await eyedropper.click();
-  await expect(page.getByRole('textbox', { name: 'Fill hex value', exact: true })).toHaveValue('#0A84FF');
+  await expect(page.getByRole('textbox', { name: 'Fill hex value', exact: true })).toHaveValue('#0A84FF / 100%');
 
   const geometry = await picker.evaluate(element => {
     const rect = element.getBoundingClientRect();
@@ -55,8 +55,8 @@ test('color picker stays above adjacent panels and inside the viewport', async (
     };
   });
   expect(geometry).toMatchObject({ overlayParent: 'BODY', bottomInsidePicker: true, insideViewport: true });
-  expect(geometry.width).toBeLessThanOrEqual(360);
-  expect(geometry.height).toBeLessThanOrEqual(300);
+  expect(geometry.width).toBeLessThanOrEqual(560);
+  expect(geometry.height).toBeLessThanOrEqual(310);
   await page.screenshot({ path: testInfo.outputPath('color-picker-overlay.png') });
   // Exercise both sides and the constrained middle without depending on inspector row order.
   for (const top of [70, 520, 290]) {

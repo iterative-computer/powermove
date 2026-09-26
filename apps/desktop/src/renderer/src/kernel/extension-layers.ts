@@ -2,7 +2,7 @@ import type { EffectParamDefinition, ExtensionLayerDefinition } from './api';
 
 const ID = /^[a-z][a-z0-9._-]{0,79}$/;
 const PARAM = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/;
-const COLOR = /^#[0-9a-f]{6}$/i;
+const COLOR = /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i;
 const MAX_FRAGMENT_BYTES = 96_000;
 const MAX_PARAMS = 48;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor']);

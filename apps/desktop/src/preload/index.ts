@@ -31,9 +31,36 @@ import {
   type ExtensionSourceFile,
   type ExtensionsChangedEvent
 } from '../shared/extensions';
+import { VARS_IPC, type VarsStatus } from '../shared/vars-ipc';
+import { CLOUD_IPC, type CloudChannel, type CloudChannels } from '../shared/cloud-ipc';
+import { STORE_IPC, type StoreChannel, type StoreChannels } from '../shared/store-ipc';
+
+/** One typed invoke for every `cloud:*` channel (store plan §2.7). */
+function cloudInvoke<C extends CloudChannel>(channel: C, request?: CloudChannels[C]['req']): Promise<CloudChannels[C]['res']> {
+  return ipcRenderer.invoke(channel, request);
+}
+
+/** One typed invoke for every `store:*` channel. */
+function storeInvoke<C extends StoreChannel>(channel: C, request?: StoreChannels[C]['req']): Promise<StoreChannels[C]['res']> {
+  return ipcRenderer.invoke(channel, request);
+}
+
+function cloudEvent<T>(channel: string) {
+  return (cb: (payload: T) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, payload: T): void => cb(payload);
+    ipcRenderer.on(channel, listener);
+    return () => ipcRenderer.removeListener(channel, listener);
+  };
+}
 
 let nextMediaRequest = 0;
 const bridge: PowermoveBridge = {
+  onInputKey: (cb) => {
+    const listener = (_event: IpcRendererEvent, input: import('../shared/ipc').SandboxInputKey): void => cb(input);
+    ipcRenderer.on(IPC.inputKey, listener);
+    return () => ipcRenderer.removeListener(IPC.inputKey, listener);
+  },
+  sandboxFocus: (focus) => ipcRenderer.send(IPC.storeSandboxFocus, focus),
   compatible: {
     status: () => ipcRenderer.invoke(IPC.compatibleStatus),
     configure: input => ipcRenderer.invoke(IPC.compatibleConfigure, input),
@@ -314,7 +341,84 @@ const bridge: PowermoveBridge = {
       ipcRenderer.on(EXT_IPC.changed, listener);
       return () => ipcRenderer.removeListener(EXT_IPC.changed, listener);
     }
+  },
+
+  vars: {
+    status: (req) => ipcRenderer.invoke(VARS_IPC.status, { id: req.id }) as Promise<VarsStatus>,
+    set: (req) => ipcRenderer.invoke(VARS_IPC.set, { id: req.id, key: req.key, value: req.value }) as Promise<VarsStatus>,
+    delete: (req) => ipcRenderer.invoke(VARS_IPC.delete, { id: req.id, key: req.key }) as Promise<VarsStatus>,
+    reveal: (req) => ipcRenderer.invoke(VARS_IPC.reveal, { id: req.id, key: req.key }) as Promise<void>,
+    values: (req) => ipcRenderer.invoke(VARS_IPC.values, { id: req.id }) as Promise<Record<string, string>>
+  },
+
+  cloud: {
+    account: () => cloudInvoke(CLOUD_IPC.accountGet),
+    signInSocial: (req) => cloudInvoke(CLOUD_IPC.signInSocial, { provider: req.provider }),
+    emailSend: (req) => cloudInvoke(CLOUD_IPC.emailSend, { email: req.email }),
+    emailVerify: (req) => cloudInvoke(CLOUD_IPC.emailVerify, { email: req.email, otp: req.otp }),
+    claimHandle: (req) => cloudInvoke(CLOUD_IPC.claimHandle, { handle: req.handle }),
+    setRememberInstalls: (req) => cloudInvoke(CLOUD_IPC.setRememberInstalls, { value: req.value }),
+    signOut: () => cloudInvoke(CLOUD_IPC.signOut),
+    deleteAccount: () => cloudInvoke(CLOUD_IPC.deleteAccount),
+    registryUrl: () => cloudInvoke(CLOUD_IPC.registryUrl),
+    setRegistryUrl: (req) => cloudInvoke(CLOUD_IPC.setRegistryUrl, { origin: req.origin }),
+    onAccountChanged: cloudEvent(CLOUD_IPC.accountChanged),
+    onSignInFailed: cloudEvent(CLOUD_IPC.signInFailed)
+  },
+
+  /* Each request is rebuilt field by field so nothing else a page put on the
+     object crosses into main. */
+  extensionStore: {
+    browse: () => storeInvoke(STORE_IPC.browse),
+    extensions: (req) => storeInvoke(STORE_IPC.extensions, {
+      ...(req.category ? { category: req.category } : {}),
+      ...(req.q ? { q: req.q } : {}),
+      ...(req.cursor ? { cursor: req.cursor } : {}),
+      ...(req.sort ? { sort: req.sort } : {})
+    }),
+    detail: (req) => storeInvoke(STORE_IPC.detail, { handle: req.handle, slug: req.slug }),
+    release: (req) => storeInvoke(STORE_IPC.release, { releaseId: req.releaseId }),
+    tree: (req) => storeInvoke(STORE_IPC.tree, { releaseId: req.releaseId }),
+    file: (req) => storeInvoke(STORE_IPC.file, { handle: req.handle, slug: req.slug, version: req.version, path: req.path }),
+    compare: (req) => storeInvoke(STORE_IPC.compare, { base: req.base, head: req.head }),
+    install: (req) => storeInvoke(STORE_IPC.install, { repoId: req.repoId, releaseId: req.releaseId }),
+    update: (req) => storeInvoke(STORE_IPC.update, { localId: req.localId }),
+    uninstall: (req) => storeInvoke(STORE_IPC.uninstall, { localId: req.localId }),
+    library: () => storeInvoke(STORE_IPC.library),
+    checkUpdates: () => storeInvoke(STORE_IPC.checkUpdates),
+    publishPrepare: (req) => storeInvoke(STORE_IPC.publishPrepare, { localId: req.localId }),
+    publish: (req) => storeInvoke(STORE_IPC.publish, {
+      localId: req.localId,
+      form: {
+        version: req.form.version,
+        waivers: req.form.waivers.map((waiver) => ({ path: waiver.path, line: waiver.line, reason: waiver.reason })),
+        ...(req.form.notes !== undefined ? { notes: req.form.notes } : {}),
+        ...(req.form.listing ? {
+          listing: { name: req.form.listing.name, tagline: req.form.listing.tagline, category: req.form.listing.category, licence: req.form.listing.licence }
+        } : {}),
+        ...(req.form.visibility ? { visibility: req.form.visibility } : {}),
+        ...(req.form.iconPng ? { iconPng: req.form.iconPng } : {})
+      }
+    }),
+    yank: (req) => storeInvoke(STORE_IPC.yank, { repoId: req.repoId, version: req.version }),
+    trust: (req) => storeInvoke(STORE_IPC.trust, { localId: req.localId }),
+    untrust: (req) => storeInvoke(STORE_IPC.untrust, { localId: req.localId }),
+    onUpdatesChanged: cloudEvent(STORE_IPC.updatesChanged),
+    onPublishProgress: cloudEvent(STORE_IPC.publishProgress),
+    onLibraryChanged: cloudEvent<void>(STORE_IPC.libraryChanged)
   }
 };
 
-contextBridge.exposeInMainWorld('powermove', bridge);
+/*
+ * The bridge is handed to the page as a *configurable* global, not through
+ * exposeInMainWorld (which pins a read-only, non-configurable property no
+ * one can remove). The renderer's kernel reads it once at boot and deletes
+ * it (renderer/src/kernel/capture-bridge.ts), so extension code never reaches raw
+ * IPC. Arguments cross the context bridge exactly as exposeInMainWorld's do.
+ */
+contextBridge.executeInMainWorld({
+  func: (value: unknown) => {
+    Object.defineProperty(globalThis, 'powermove', { value, configurable: true, enumerable: false, writable: false });
+  },
+  args: [bridge]
+});

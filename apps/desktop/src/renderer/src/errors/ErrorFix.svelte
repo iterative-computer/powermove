@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { bridge } from '../kernel/bridge';
   import type { ErrorPresentation } from './presentation';
   /* The part of an error someone acts on: the facts the raw text buried
      mid-sentence, and — when Powermove can fix it itself — the fix. */
@@ -8,7 +9,7 @@
   } = $props();
 
   const names = { claude: 'Claude Code', codex: 'Codex' } as const;
-  const api = typeof window === 'undefined' ? undefined : window.powermove?.agentRuntime;
+  const api = bridge()?.agentRuntime;
   let phase = $state<'idle' | 'updating' | 'done' | 'failed'>('idle');
   let version = $state('');
   let failure = $state('');

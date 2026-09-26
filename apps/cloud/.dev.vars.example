@@ -1,0 +1,23 @@
+LOCAL_POSTGRES=1
+DATABASE_URL=postgres://powermove:powermove@localhost:54329/powermove
+BETTER_AUTH_SECRET=local-development-secret-32-characters-long
+APP_ORIGIN=http://localhost:8787
+ADMIN_TOKEN=local-admin-token
+DEV_LOG_OTP=1
+EMAIL_FROM="Powermove <sign-in@trypowermove.com>"
+
+# To enable Google sign-in, start `bun run dev:emulate` in another terminal
+# and uncomment these lines. The emulator has Jude and Mara accounts.
+# GOOGLE_CLIENT_ID=powermove-local
+# GOOGLE_CLIENT_SECRET=powermove-local-secret
+# GOOGLE_DISCOVERY_URL=http://localhost:4002/.well-known/openid-configuration
+
+# Optional Turnstile: create a Managed widget for APP_ORIGIN's hostname.
+# Set both keys to activate. Never use test keys on a production hostname.
+# TURNSTILE_ENABLED=1
+# TURNSTILE_SITE_KEY=your-public-sitekey
+# TURNSTILE_SECRET_KEY=your-secret-key
+# TURNSTILE_CLEARANCE_DAYS=30
+# Local-only always-pass pair (APP_ORIGIN must be localhost/127.0.0.1):
+# TURNSTILE_SITE_KEY=1x00000000000000000000AA
+# TURNSTILE_SECRET_KEY=1x0000000000000000000000000000000AA

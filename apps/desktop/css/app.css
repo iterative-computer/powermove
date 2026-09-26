@@ -49,14 +49,14 @@ html{background:transparent}
   --glass-edge-hi:none;
   --glass-rim-hi:rgb(var(--paper-rgb) / .09);
 }
-:is(.glass,#doc-strip,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){
+:is(.glass,#doc-strip,#toolbar-strip,.tb-export){
   position:relative;isolation:isolate;
   background:var(--glass-fill);
   box-shadow:var(--glass-edge);
   -webkit-backdrop-filter:var(--glass-backdrop);backdrop-filter:var(--glass-backdrop);
 }
 /* The rim is a flat 1px ring. */
-:is(.glass,#doc-strip,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after{
+:is(.glass,#doc-strip,#toolbar-strip,.tb-export)::after{
   content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;
   padding:1px;background:var(--glass-rim);opacity:1;transition:none;
   -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
@@ -72,8 +72,8 @@ html{background:transparent}
   -webkit-mask-composite:xor;mask-composite:exclude;
 }
 @media (prefers-reduced-transparency: reduce){
-  :is(.glass,#doc-strip,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){background:var(--ink-2);box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none}
-  :is(.glass,#doc-strip,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after,:is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on)::after{display:none}
+  :is(.glass,#doc-strip,#toolbar-strip,.tb-export){background:var(--ink-2);box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none}
+  :is(.glass,#doc-strip,#toolbar-strip,.tb-export)::after,:is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on)::after{display:none}
   :is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on){background:var(--ctl-raised)!important;box-shadow:var(--ctl-edge)!important}
 }
 body{
@@ -387,6 +387,13 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .panel-options{display:none}
 .panel > .body{flex:1;min-height:0;overflow:auto;position:relative}
 .panel.noscroll > .body{overflow:hidden}
+/* A sandboxed extension's panel: its view iframe fills the body and scrolls
+   itself. It fades in once the view has mounted (or failed with a message),
+   so an empty document never flashes on open, refresh or a dock move. */
+.panel.frame > .body{overflow:hidden}
+.ext-panel-frame{position:absolute;inset:0;display:block;width:100%;height:100%;border:0;background:transparent;opacity:0;transition:opacity var(--dur-3) var(--ease)}
+.ext-panel-frame[data-state]{opacity:1}
+@media (prefers-reduced-motion:reduce){.ext-panel-frame{transition:none}}
 .panel.headless > header{display:none}
 
 .chip{
@@ -628,11 +635,18 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
    the change eases; the body stops scrolling for the duration so a
    scrollbar never flashes mid-motion. */
 .modal.is-measured{transition:height var(--dur-3) var(--ease)}
+/* Sheets arrive the way menus do (pm-menu-in): a fade, a slight scale and a
+   few pixels of drop, from their top centre. `scale` and `translate` compose
+   with the inline centring transform instead of replacing it. */
+.modal{transform-origin:0 0;animation:modal-in .18s cubic-bezier(.23,1,.32,1) both}
+#scrim.on{animation:scrim-in .18s cubic-bezier(.23,1,.32,1) both}
+@keyframes modal-in{from{opacity:0;scale:.96;translate:0 -4px}}
+@keyframes scrim-in{from{opacity:0}}
 .modal.is-resizing .mb{overflow:hidden}
 /* A sheet scrolls without showing a bar; nothing rides over the cards. */
 .modal .mb{scrollbar-width:none}
 .modal .mb::-webkit-scrollbar{display:none}
-@media (prefers-reduced-motion:reduce){.modal.is-measured{transition:none}}
+@media (prefers-reduced-motion:reduce){.modal.is-measured{transition:none}.modal,#scrim.on{animation:none}}
 /* Actions use flat tonal fills; focus and selection provide their own cues. */
 .btn{position:relative;isolation:isolate;height:var(--ctl-h);padding:0 12px;border-radius:var(--r-sm);background:var(--ctl-raised);color:var(--tx);font-size:var(--fs-sm);font-weight:var(--fw-medium);box-shadow:var(--ctl-edge);display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap;transition:color var(--dur-1),box-shadow var(--dur-1),transform var(--dur-1) var(--ease)}
 .btn svg{width:13px;height:13px;flex:none;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
@@ -1096,14 +1110,21 @@ p.is-streaming::after,.agent-md-li.is-streaming p::after,.agent-md-quote.is-stre
 /* The screen's canvas is the window material, so it can't cover what sits
    beneath it. Hide the editor and its status line instead of painting over them. */
 body:has(#projects-screen.on) #body,body:has(#projects-screen.on) #status{visibility:hidden}
-.ps-sidebar{width:236px;flex:none;padding:6px 12px 18px;display:flex;flex-direction:column;gap:14px}
-.ps-search{height:32px;display:flex;align-items:center;gap:8px;padding:0 10px;border:0;border-radius:var(--r-md);background:var(--bg-float);color:var(--tx-3);transition:box-shadow var(--dur-1)}
-.ps-search:focus-within{outline:0;box-shadow:var(--focus-ring)}
+.ps-sidebar{width:236px;flex:none;padding:6px 12px 8px;display:flex;flex-direction:column;gap:14px}
+.ps-search{height:32px;flex:none;display:flex;align-items:center;gap:8px;padding:0 10px;border:0;border-radius:var(--r-md);background:var(--bg-float);color:var(--tx-3)}
+.ps-search input::placeholder{color:var(--tx-3)}
 .ps-search svg{width:14px;height:14px;flex:none}.ps-search input{min-width:0;flex:1;font-size:var(--fs-md);color:var(--tx)}
 .ps-search svg,.ps-navbtn svg,.ps-view svg,.ps-more svg,.ps-empty > svg{stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
-.ps-nav{display:flex;flex-direction:column;gap:3px}.ps-navbtn{height:32px;width:100%;display:flex;align-items:center;gap:9px;padding:0 10px;border-radius:var(--r-md);color:var(--tx-2);font-size:var(--fs-md);text-align:left}
-.ps-navbtn:hover{background:var(--bg-row);color:var(--tx)}.ps-navbtn.on{background:var(--ink-2);color:var(--tx);box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none}.ps-navbtn.on::after{display:none}
-.ps-navbtn svg{width:14px;height:14px}.ps-navbtn .count{margin-left:auto;color:var(--tx-4);font-size:var(--fs-xs)}
+/* One sidebar language across the home, the Store and Settings: medium rows, 15px icons in the quiet ink, a filled selection. */
+.ps-nav{display:flex;flex-direction:column;gap:2px}.ps-navbtn{height:32px;width:100%;display:flex;align-items:center;gap:9px;padding:0 9px;border-radius:var(--r-md);color:var(--tx-2);font-size:var(--fs-md);font-weight:var(--fw-medium);text-align:left;transition:background var(--dur-1),color var(--dur-1)}
+.ps-navs{position:relative;display:flex;flex-direction:column;gap:12px}
+.ps-navbtn{position:relative;z-index:1}.ps-navbtn:hover{color:var(--tx)}.ps-navbtn.on{color:var(--tx)}
+/* Sidebar highlight: one layer that glides between rows (controls/nav-glide.ts). */
+.nav-glider{position:absolute;left:0;top:0;width:0;height:0;opacity:0;pointer-events:none;border-radius:var(--r-md);background:var(--ink-2);transition:transform 220ms var(--nav-glide-ease),width 220ms var(--nav-glide-ease),height 220ms var(--nav-glide-ease),opacity 150ms ease}
+.nav-glider.on{opacity:1}
+.nav-glider.settling{transition-duration:340ms,340ms,340ms,150ms}
+@media (prefers-reduced-motion:reduce){.nav-glider{transition:none}}.ps-navbtn.on::after{display:none}
+.ps-navbtn svg{width:15px;height:15px;flex:none;color:var(--tx-3);transition:color var(--dur-1)}.ps-navbtn:hover svg,.ps-navbtn.on svg{color:var(--tx)}.ps-navbtn span:not(.count){min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ps-navbtn .count{margin-left:auto;color:var(--tx-4);font-size:var(--fs-xs)}
 .ps-updates[hidden]{display:none}
 .ps-updates{margin-top:auto;display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:var(--r-md);background:var(--bg-row);color:var(--tx-2);font-size:var(--fs-sm);line-height:1.45}
 .ps-updates b{display:block;color:var(--tx);font-weight:var(--fw-medium)}
@@ -1179,6 +1200,13 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 .pm-menu-check{position:absolute;right:8px;width:13px;height:13px;color:var(--tx);opacity:0}
 .pm-menu-item[aria-selected=true] .pm-menu-check{opacity:1}
 @media(prefers-reduced-motion:reduce){.pm-menu[data-state]{animation:none}.pm-menu-glider{transition:none}}
+/* Button menus (controls/popover-menu.ts): the listbox sheet with actions
+   instead of options, an optional header, and separators. */
+.pm-popover .pm-menu-item{padding:0 10px 0 8px}
+.pm-popover .pm-menu-item[role=menuitemradio]{padding-right:28px}
+.pm-menu-item[aria-checked=true] .pm-menu-check{opacity:1}
+.pm-menu-header{position:relative;z-index:1;padding:6px 8px 8px}
+.pm-menu-sep{height:1px;margin:4px 8px;background:var(--line)}
 
 /* ── titlebar tabs ─────────────────────────────────────── */
 .ps-pagination{display:flex;align-items:center;justify-content:center;gap:16px;padding:24px 0 0;color:var(--tx-3);font-size:var(--fs-sm)}
@@ -1240,6 +1268,13 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 .library-thumb-icon{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:var(--tx-3)}.library-thumb-icon svg{width:26px;height:26px}
 .library-thumb-icon b{max-width:85%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-sm);font-weight:var(--fw-medium);color:var(--tx-2)}
 .library-live.has-preview>.library-thumb-icon{display:none}
+/* Sandboxed panels have no DOM preview: their icon sits on the extension's
+   Store art (same two-hue gradient as .st-thumb), nested inside the card. */
+.library-live.is-sandboxed.has-art{border-radius:var(--library-inner-radius);background:
+  radial-gradient(120% 90% at 82% 18%, var(--art-b) 0%, transparent 60%),
+  radial-gradient(90% 120% at 12% 100%, color-mix(in oklch, var(--art-a) 70%, black) 0%, transparent 65%),
+  linear-gradient(135deg, var(--art-a), color-mix(in oklch, var(--art-b) 60%, var(--art-a)))}
+.library-live.is-sandboxed.has-art>.library-thumb-icon,.library-live.is-sandboxed.has-art>.library-thumb-icon b{color:rgb(255 255 255 / .94)}
 .library-card[draggable="true"]{cursor:grab}.library-card[draggable="true"]:active{cursor:grabbing}
 .library-card-live,.library-card-live:hover{display:block;break-inside:avoid;margin:0 0 16px;padding:0;overflow:hidden;border:0;background:transparent;box-shadow:none;transform:none}.library-card-live .library-card-hit{position:relative;display:block;width:100%}
 .library-live{position:relative;width:100%;overflow:hidden}

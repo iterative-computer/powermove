@@ -1,0 +1,1 @@
+CREATE INDEX "object_leases_sha_idx" ON "object_leases" USING btree ("sha");

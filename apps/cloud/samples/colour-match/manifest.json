@@ -1,0 +1,15 @@
+{
+  "id": "colour-match",
+  "name": "Colour Match",
+  "description": "Try a network command with private setup variables.",
+  "version": "1.0.0",
+  "apiVersion": 3,
+  "entry": "index.ts",
+  "contributes": ["commands"],
+  "vars": [
+    { "key": "OPENAI_API_KEY", "label": "OpenAI API key", "secret": true, "required": true, "hint": "Used for the colour mapping model." },
+    { "key": "PALETTE_SIZE", "label": "Palette size", "hint": "Defaults to 5." }
+  ],
+  "permissions": ["network"],
+  "author": "user"
+}

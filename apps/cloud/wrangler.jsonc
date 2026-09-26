@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "powermove-cloud",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "alias": { "@better-auth/kysely-adapter": "./src/kysely-unavailable.ts" },
+  "account_id": "98dbb6e46f4901896327e5ff4035d637",
+  "r2_buckets": [
+    { "binding": "OBJECTS", "bucket_name": "powermove-objects" },
+    { "binding": "TARS", "bucket_name": "powermove-tars" },
+    { "binding": "ICONS", "bucket_name": "powermove-icons" }
+  ],
+  "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["sign-in@trypowermove.com"] }],
+  "unsafe": { "bindings": [
+    { "name": "RL_UPLOAD", "type": "ratelimit", "namespace_id": "1", "simple": { "limit": 60, "period": 60 } },
+    { "name": "RL_AUTH", "type": "ratelimit", "namespace_id": "2", "simple": { "limit": 10, "period": 60 } }
+  ] },
+  "triggers": { "crons": ["0 */6 * * *"] },
+  // LOCAL_POSTGRES is intentionally unset here. Set it to "1" in .dev.vars only.
+  "vars": { "APP_ORIGIN": "https://cloud.trypowermove.com", "HANDLE_MAIL_DOMAIN": "users.trypowermove.com", "EMAIL_FROM": "Powermove <sign-in@trypowermove.com>" },
+  "observability": { "enabled": true }
+}

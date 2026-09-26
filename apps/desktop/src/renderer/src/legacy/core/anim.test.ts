@@ -50,6 +50,15 @@ describe('legacy animation install', () => {
     expect(PM.wouldCycle(PM.proj.layers[0], null)).toBe(false);
   });
 
+  it('blends colour alpha, treating six-digit keys as opaque', () => {
+    const PM = animRegistry();
+    const key = (t: number, v: string) => ({ t, v, eo: [0, 0], ei: [1, 1] });
+
+    expect(PM.evalKfs([key(0, '#FF000000'), key(1, '#FF0000FF')], .5, true)).toBe('#ff000080');
+    expect(PM.evalKfs([key(0, '#000000'), key(1, '#FFFFFF80')], .5, true)).toBe('#808080c0');
+    expect(PM.evalKfs([key(0, '#000000'), key(1, '#FFFFFF')], .5, true)).toBe('#808080');
+  });
+
   it('clamps keyframe evaluation to the legacy endpoints', () => {
     const PM = animRegistry();
     const keyframes = [

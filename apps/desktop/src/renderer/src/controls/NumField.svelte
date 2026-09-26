@@ -10,6 +10,7 @@
   import './controls.css';
   import { horizontalScrub } from './horizontal-scrub';
   import type { PowermoveAPI } from '../kernel/api';
+  import { bridge } from '../kernel/bridge';
 
   let {
     api,
@@ -167,7 +168,7 @@
         onInput?.(next);
         const shownNext = format(next), now = performance.now();
         if (shownNext !== lastShown && now - lastHaptic >= 40) {
-          window.powermove?.haptic?.alignment();
+          bridge()?.haptic?.alignment();
           lastHaptic = now;
         }
         lastShown = shownNext;

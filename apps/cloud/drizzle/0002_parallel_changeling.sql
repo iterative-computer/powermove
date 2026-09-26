@@ -1,0 +1,1 @@
+ALTER TABLE "repos" ADD CONSTRAINT "repos_fork_pair" CHECK ((forked_from_repo_id is null) = (forked_from_release_id is null));

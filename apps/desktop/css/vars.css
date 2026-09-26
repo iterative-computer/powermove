@@ -1,0 +1,38 @@
+/* ── Extension values ───────────────────────────────────────
+   The Set up sheet (renderer/src/vars). It borrows the account sheet's
+   frame (.account-modal) and Settings rows on a tinted card, so the fields
+   read as wells and a stored value reads as a quiet line of dots. */
+
+.vars-sheet:focus{outline:0}
+.vars-form.sg-column{width:auto;max-width:none;margin:22px 0 0;display:flex;flex-direction:column}
+.vars-form .sg-group{margin:0 -14px;border-radius:var(--r-lg)}
+.vars-form .sg-group>.settings-row{min-height:56px}
+.vars-row .settings-copy>b{display:flex;align-items:center;gap:6px;min-width:0}
+.vars-req{flex:none;padding:0 5px;border-radius:var(--r-xs);background:var(--ink-2);color:var(--tx-3);font-size:var(--fs-xs);font-weight:var(--fw-regular);line-height:16px}
+.vars-row .settings-copy>.vars-attention{color:var(--danger)}
+
+/* The field: one well, the eye inside its trailing edge. */
+.vars-field{position:relative;display:flex;align-items:center;width:200px;height:30px;flex:none;border-radius:var(--sg-control-radius);background:var(--bg-float)}
+.vars-field input{min-width:0;flex:1;height:100%;padding:0 10px;border:0;background:transparent;color:var(--tx);font-size:var(--fs-md)}
+.vars-field input:focus-visible{outline:0}
+.vars-field input:disabled{color:var(--tx-3)}
+.vars-eye{flex:none;width:28px;height:28px;margin-right:1px;display:grid;place-items:center;border-radius:calc(var(--sg-control-radius) - 1px);color:var(--tx-4);transition:color var(--dur-1)}
+.vars-eye svg{width:14px;height:14px}
+.vars-eye:hover,.vars-eye[aria-pressed="true"]{color:var(--tx-2)}
+.vars-eye:focus-visible{outline:0;box-shadow:0 0 0 2px var(--ink-2)}
+
+/* A stored value: dots, then what you can do with it. */
+.vars-stored{display:flex;align-items:center;gap:10px;flex:none;font-size:var(--fs-sm);line-height:16px}
+.vars-dots{color:var(--tx-3);letter-spacing:.08em;user-select:none;-webkit-user-select:none}
+.vars-stored .acct-link:disabled{color:var(--tx-4)}
+
+.vars-note{margin-top:10px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-4);text-wrap:pretty}
+.vars-error{margin-top:10px;font-size:var(--fs-sm);line-height:16px;color:var(--danger);text-wrap:pretty;overflow-wrap:anywhere}
+.vars-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:22px}
+.vars-foot .btn{height:30px;padding:0 14px;border-radius:var(--r-md)}
+.vars-modal .btn.pri:disabled{opacity:1;background:var(--ink-1);color:var(--tx-4)}
+.vars-sheet :is(.btn,.acct-link,.vars-eye),.vars-sheet label{cursor:default;user-select:none;-webkit-user-select:none}
+
+/* ── Settings › Extensions ── */
+.settings-extension-controls>.btn.settings-extension-setup{height:26px;padding:0 12px}
+.settings-extension-copy>.settings-extension-setup-note,.settings-copy>.settings-extension-setup-note{color:var(--tx-2)}

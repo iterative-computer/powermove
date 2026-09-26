@@ -68,10 +68,17 @@
     );
   }
 
+  function setUp(record: ExtensionRecord): void {
+    api.extensions.setUp(record.id);
+  }
+
   function openMenu(record: ExtensionRecord, anchor: HTMLElement): void {
     const items: MenuContribution[] = [
       { label: 'Reload', run: () => void run(() => api.extensions.reload(record.id), `Could not reload ${nameOf(record)}.`) }
     ];
+    if (record.scope === 'user' && record.manifest?.vars?.length) {
+      items.push({ label: record.health.state === 'needs-setup' ? 'Set up…' : 'Variables…', run: () => setUp(record) });
+    }
     if (record.scope !== 'builtin') {
       items.push({
         label: 'Show in Finder',
@@ -101,7 +108,7 @@
     {:else}
       <div class="list" role="list">
         {#each mine as record (record.id)}
-          <ModRow {record} onToggle={toggle} onMenu={openMenu} />
+          <ModRow {record} onToggle={toggle} onMenu={openMenu} onSetup={setUp} />
         {/each}
       </div>
     {/if}

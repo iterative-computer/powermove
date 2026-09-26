@@ -71,21 +71,89 @@ reloaded, or removed. Return a `Disposable` or use `api.onDispose` for anything 
 | Field | Required | Notes |
 |---|---|---|
 | `id` | yes | `a-z 0-9 -`, 2–64 chars, equals folder name |
-| `name`, `version` (`x.y.z`), `apiVersion` (`1`) | yes | |
+| `name`, `version` (`x.y.z`), `apiVersion` (`1`, `2`, or `3`) | yes | |
 | `description` | recommended | shown in the Mods list; one sentence |
 | `entry` | no | default `index.ts`; `.ts` `.js` `.mjs`; may import relative `.ts`, `.js`, `.svelte`, `.css` |
 | `contributes` | recommended | subset of `panels inspector media commands keybindings effects transitions layers themes palette menus status hooks` |
 | `replaces` | no | ids of extensions to deactivate while this one is enabled (e.g. `["timeline"]`) |
 | `dependsOn` | no | ids that must be enabled and load first |
-| `forkedFrom` | no | `"<id>@<version>"` when copied from a built-in |
+| `forkedFrom` | no | `"<id>@<version>"` for a built-in or `"<handle>/<id>@<version>"` for a Store fork |
+| `vars` | no | `apiVersion: 2`; up to 32 declarations `{ key, label, secret?, hint? }`. Keys use uppercase letters, digits and underscores, starting with a letter. Read values through `api.vars`; never put credentials in source. |
 | `author` | no | `powermove` \| `user` \| `agent` |
 
 Imports allowed: `powermove` (types only), `svelte`, `svelte/store`, relative files
 inside the extension folder. No npm packages, no `..` escapes.
 
-## The API (apiVersion 1)
+## Permissions and the sandbox
+
+Store extensions from other publishers run sandboxed. Declare `apiVersion: 3` for
+new Store-bound extensions and list the access they need in `manifest.json`
+(`permissions` may be an empty array):
+
+```json
+"permissions": ["network", "assets", "project:write"]
+```
+
+- `network` allows HTTPS and WebSocket requests and remote images and media.
+- `clipboard` allows writing to the clipboard.
+- `assets` allows picking, importing, and reading asset files.
+- `project:write` allows project mutation through `apply`, `undo`, `redo`, `select`, time and transport controls. `commands.run` can call an extension's own commands and, with this permission, the named legacy editing commands. It cannot call another extension's commands or File, app, export, settings, or mods commands.
+- `full-access` allows trusted-only APIs. Store installs that request it stay off
+  until the person installing them accepts Powermove's full-access dialog. They
+  can later revoke trust from the Library.
+
+Store extensions supply simple event names; the kernel publishes them as `ext:<extension-id>:<name>`. They may subscribe to those events and the validated read-only host events `project:changed`, `selection`, `time`, `transport`, `theme`, and `extensions:changed`. Registration IDs must start with `<extension-id>.`, and keybindings may invoke only their own commands. Store code can list extensions and call `setUp` for itself; management of other extensions requires a trusted extension.
+
+The runtime sandbox is the security boundary. The **Sandbox compatibility check** is a compatibility lint: it runs a short, detectable sample of extension behavior to find problems before publishing. A pass is not a security review or trust signal.
+
+The project mirror is shared data visible to every sandboxed Store extension: it contains the full project except asset blob/source fields and keys matching `token`, `secret`, `password`, or ending in `key` within `library` and `notes`. Keep credentials in extension variables or storage. A mirror above 8 MiB makes `project.get()` throw until the project is smaller. Each extension is limited to 200 registrations, 2,000 live callback handles, 50 open panel views, 200 RPC messages/s, 1 MiB per RPC payload, 256 KiB of storage with keys at most 128 characters, and 50 logs/s.
+
+`powermove serve` derives Store trust from the desktop provenance file and applies the same sandbox document and CSP. A Store install requesting `full-access` remains off as “needs trust”; trust it from the desktop app first, since serve has no trust dialog.
+
+The trusted-only namespaces are `api.render`, `api.host`, `api.services`,
+`api.inspector`, `api.anim`, `api.model`, `api.history`, `api.edit`,
+`api.groups`, `api.uiState`, `api.dnd`, `api.workspace`,
+`api.ui.controls`, `api.ui.modal`, `api.ui.menu`, `api.ui.drag`,
+`api.ui.gesture`, `api.ui.mount`, `api.media.importFiles`,
+`api.media.assets`, `api.media.audio`, and `api.media.fonts`.
+Publishing scans direct uses of these names and network or clipboard APIs and
+blocks undeclared permissions. This text scan does not detect destructured
+aliases or dynamic property access. Local extensions made or forked on this Mac
+are trusted and keep working without permission declarations.
+
+Extensions you make here run with full access. Anything you publish runs
+sandboxed for other people unless it declares `full-access`. Run **Test in
+Sandbox…** from the Library before publishing; the publish sheet runs the same
+check and blocks a release that fails it.
+
+## The API (apiVersion 1–3)
 
 Full types: `api.ts` (next to this file in the agent API pack). Summary:
+
+### Sandbox API (apiVersion 3)
+
+In a Store sandbox, these methods return Promises. Await them even when the
+in-realm type in `api.ts` shows a synchronous result: `api.commands.run`,
+`api.project.apply/select/setTime/play/pause/undo/redo/snapshot`,
+`api.transport.setTime/play/pause/toggle/step`, `api.assets.get`,
+`api.storage.get/set/delete`, `api.media.getImportDefaults`, `api.ui.icon`,
+and `api.extensions.list`. Methods already typed as asynchronous, such as
+`api.assets.pick/import/readText` and `api.ui.confirm`, remain asynchronous.
+Reads from the project mirror (`api.project.get/revision/selection/time/playing`
+and `api.transport.time/playing`) stay synchronous.
+
+| Sandbox-safe | Trusted-only (`permissions: ["full-access"]`) |
+| --- | --- |
+| `effects`, `transitions`, `layers`, `theme`, `keybindings`, `commands`, `palette`, `menus`, `status`, `panels` | `anim`, `model`, `groups`, `history`, `edit`, `inspector`, `render`, `uiState` |
+| `assets`, `project`, `transport` time and controls, `storage`, `events`, `vars`, `util`, `ease`, pure `space3d` helpers | `selection` live graph helpers, `dnd`, `workspace`, `services`, `host`; live `space3d` methods |
+| `media.registerImportDefaults/getImportDefaults`, `ui.toast/confirm/icon`, `extensions.list`, `log`, `onDispose` | `media.importFiles/assets/audio/fonts`, `ui.controls/modal/menu/drag/gesture/mount` |
+
+Sandboxed panels render their `component` or `build` content in a separate
+view iframe. `panels.header`, `panels.moveSlot`, and `panels.library.render`
+are unavailable there; the host owns the panel chrome. Declare `network`,
+`clipboard`, `assets`, or `project:write` when using their corresponding
+capabilities. `full-access` installs run with the in-realm API after the
+person installing the extension accepts the trust dialog.
 
 - **panels** — `register({ id, title, component?, build?, size, min, flush, noscroll, headless })`, `open(id, dock?)` or `open(id, { dock, index })`, `close`, `isOpen`, `refresh`, `list`.
   `component` is a Svelte 5 component receiving `{ panelId, spec }`. `build(body)` is the imperative alternative.
@@ -126,7 +194,8 @@ Full types: `api.ts` (next to this file in the agent API pack). Summary:
 - **services** — LIFO typed runtime service registration; disposing an override restores the previous implementation.
 - **storage** — per-extension `get/set/delete` (persisted).
 - **events / on** — `project:changed`, `selection`, `time`, `transport`, `fonts` (complete family list), `layout`, `theme:changed`, `frame:rendered`, `extension:loaded/unloaded`.
-- **extensions** — introspection: `list`, `fork`, `rebase`, `setEnabled`, `remove`, `reload`, `reveal`, `requestFix`.
+- **extensions** — introspection: `list`, `fork`, `rebase`, `setEnabled`, `remove`, `reload`, `reveal`, `requestFix`, `setUp` (opens the values sheet).
+- **vars** — `get(key)`, `has(key)`, `keys()`: the values the user entered for this extension's declared `vars` (see "Variables").
 - **model.cloneLayer** — `cloneLayer(layer): Layer` deep-clones a layer and refreshes its layer/keyframe ids and numbered name.
 - **model.normalizeFill** — `normalizeFill(value, fallback?): Fill` canonicalizes solid, gradient, radial, and empty fills.
 - **uiState.getShaderMeta** — `getShaderMeta(layer): ShaderMeta | null` reads the compositor metadata cached for a layer.
@@ -313,6 +382,35 @@ Keep controls source-connected and undoable. An explicit user style request
 overrides this default only for the requested surface.
 
 `--accent --bg-window --bg-panel --bg-panel-2 --bg-sunken --bg-field --tx --tx-2 --line --r-base --f-ui --f-mono --row-h --ctl-h --fs-md --dur-2 --ease`
+
+## Variables
+
+An extension that needs an API key, account id or similar value declares it and
+reads it at runtime. It never carries the value in its source.
+
+- **Declare** each value in `manifest.json` with `apiVersion: 2`:
+  `"vars": [{ "key": "OPENAI_API_KEY", "label": "OpenAI API key", "secret": true }]`.
+  `hint` is optional; `secret` masks the field. Users can save any subset, including
+  no values. Legacy `required` flags are ignored and never block activation.
+  Handle missing values at runtime: support alternative credentials or fallback
+  behavior where possible, and explain which value to enter in Set Up when an
+  operation actually needs it.
+- **Read** with `api.vars.get('OPENAI_API_KEY')`, `has(key)` and `keys()`. Values are
+  fetched once per activation; setting or removing one reloads the extension. Only
+  declared keys are delivered.
+- **Never in source.** When the agent saves an extension, its text files are scanned
+  for credentials (provider key prefixes, JWTs, private keys, long high-entropy
+  strings). A finding blocks the change and nothing is published. A long random
+  string that is not a secret can be waived on its line with
+  `// powermove-secret-ok: <reason>`; known key formats cannot be waived.
+- **Values live outside the folder**, in the app profile at `env/<envKey>.env`
+  (mode 600, secrets sealed with the macOS keychain through `safeStorage`). The user
+  enters them in Settings › Extensions (Set up, or Variables… on the extension's
+  page). Removing the extension asks whether to delete them too.
+- **Shared realm.** Extensions run in one renderer, so a value delivered to one
+  extension is readable by any running extension. Treat values as belonging to the
+  Powermove profile.
+- `powermove serve` hosts do not support variables yet.
 
 ## Rules the kernel enforces
 

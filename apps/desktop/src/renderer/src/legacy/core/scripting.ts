@@ -1,5 +1,6 @@
 /* Ported from js/core/scripting.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 export function install(PM: PMRegistry): void {
 const LIMITS = Object.freeze({ source: 40_000, commands: 240, result: 600_000, runtime: 900 });
@@ -150,7 +151,7 @@ function runIsolated(code: any, project: any, input: any = {}) {
     frame.addEventListener('load', () => (frame.contentWindow as any).postMessage({
       channel: CHANNEL, token, code, project, input: clone(input), runId, runtime: LIMITS.runtime,
     }, '*'), { once: true });
-    if ((window as any).powermove) frame.src = 'host/sandbox.html';
+    if ((hostBridge() as any)) frame.src = 'host/sandbox.html';
     else frame.srcdoc = frameDocument();
     window.document.body.appendChild(frame);
   });

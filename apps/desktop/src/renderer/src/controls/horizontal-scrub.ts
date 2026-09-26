@@ -1,4 +1,5 @@
 /** Group a horizontal trackpad gesture into one edit, leaving vertical scrolling alone. */
+import { bridge } from '../kernel/bridge';
 export function horizontalScrub(node: HTMLElement, options: {
   begin: () => void; move: (delta: number, event: WheelEvent) => boolean | void;
   commit: () => void; cancel: () => void; enabled?: () => boolean;
@@ -23,7 +24,7 @@ export function horizontalScrub(node: HTMLElement, options: {
           travel += Math.abs(delta);
           const now = performance.now();
           if (travel >= 6 && now - lastHaptic >= 100) {
-            window.powermove?.haptic?.alignment();
+            bridge()?.haptic?.alignment();
             travel %= 6;
             lastHaptic = now;
           }
@@ -46,7 +47,7 @@ export function horizontalScrub(node: HTMLElement, options: {
       travel += Math.abs(delta);
       const now = performance.now();
       if (travel >= 6 && now - lastHaptic >= 100) {
-        window.powermove?.haptic?.alignment();
+        bridge()?.haptic?.alignment();
         travel %= 6;
         lastHaptic = now;
       }
