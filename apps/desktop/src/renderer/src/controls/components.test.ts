@@ -36,7 +36,7 @@ function fakeAPI() {
   };
   const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
   const normalizeFill = vi.fn((value: any, fallback = '#000000') => {
-    const color = (candidate: any) => typeof candidate === 'string' && /^#[0-9a-f]{6}$/i.test(candidate) ? candidate.toUpperCase() : fallback;
+    const color = (candidate: any) => typeof candidate === 'string' && /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(candidate) ? candidate.toUpperCase() : fallback;
     const raw = value && typeof value === 'object' ? value : {};
     const type = ['solid', 'linear', 'radial', 'none'].includes(raw.type) ? raw.type : 'solid';
     let stops = (Array.isArray(raw.stops) ? raw.stops : []).slice(0, 8).map((stop: any, index: number) => ({
@@ -366,6 +366,8 @@ describe('picker drafts', () => {
     target.querySelector<HTMLButtonElement>('button.color-field')!.click();
     await tick();
 
+    document.body.querySelector<HTMLButtonElement>('[role="tab"]')!.click();
+    flushSync();
     const sv = document.body.querySelector<HTMLElement>('.cp-plane')!;
     vi.spyOn(sv, 'getBoundingClientRect').mockReturnValue({
       x: 0, y: 0, left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100,
@@ -483,7 +485,9 @@ describe('picker drafts', () => {
     target.querySelector<HTMLButtonElement>('button.color-field')!.click();
     await tick();
 
-    const sv = document.body.querySelector<HTMLElement>('.fill-sv')!;
+    document.body.querySelector<HTMLButtonElement>('[role="tab"]')!.click();
+    flushSync();
+    const sv = document.body.querySelector<HTMLElement>('.cp-plane')!;
     vi.spyOn(sv, 'getBoundingClientRect').mockReturnValue({
       x: 0, y: 0, left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100,
       toJSON: () => ({})
@@ -500,6 +504,26 @@ describe('picker drafts', () => {
     document.body.querySelector<HTMLButtonElement>('.fill-picker footer .pri')!.click();
     expect(Edit.commit).toHaveBeenCalledWith('Fill');
     expect(Edit.apply).not.toHaveBeenCalled();
+  });
+
+  it('FillField shares the redesigned editor, preserves opacity, and cancels its transaction', async () => {
+    const { api, Edit } = fakeAPI();
+    const target = render(FillField, { api, get: () => ({ type: 'solid', stops: [{ id: 'red', color: '#FF0000', position: 0 }] }), edit: commandEdit('Fill') });
+    target.querySelector<HTMLButtonElement>('button.color-field')!.click();
+    await tick();
+    expect(document.body.querySelector('.fill-sv')).toBeNull();
+    expect(document.body.querySelector('.cp-embedded')).not.toBeNull();
+    const input = document.body.querySelector<HTMLInputElement>('.cp-value')!;
+    input.value = '#FF6600 / 50%';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    flushSync();
+    expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: expect.objectContaining({ stops: [expect.objectContaining({ color: '#FF660080' })] }) }));
+    document.body.querySelector<HTMLElement>('.cp-embedded')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await tick();
+    expect(Edit.cancel).toHaveBeenCalledOnce();
+    expect(Edit.commit).not.toHaveBeenCalled();
+    expect(document.body.querySelector('.fill-picker')).toBeNull();
   });
 
   it('FillField applies a normalized fill rather than its mutable draft', async () => {

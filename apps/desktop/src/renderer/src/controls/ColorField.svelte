@@ -17,7 +17,7 @@
      hex (#RRGGBBAA below full opacity), so a Display P3 colour outside sRGB is
      written clipped and says so. */
   import { sel } from '../state/selection.svelte';
-  import { tick } from 'svelte';
+  import { tick, onMount, onDestroy, untrack } from 'svelte';
   import { doc } from '../state/document.svelte';
   import { transport } from '../state/transport.svelte';
   import { EditGesture, type EditBinding } from './gesture';
@@ -37,12 +37,14 @@
     get,
     edit,
     label = 'Color',
-    mixed
+    mixed,
+    embedded = false
   }: {
     api: PowermoveAPI;
     get: () => unknown;
     edit: EditBinding;
     label?: string;
+    embedded?: boolean;
     mixed?: (edit: EditBinding, value: unknown) => boolean;
   } = $props();
 
@@ -362,6 +364,7 @@
 
   /* Play the menu's exit, then unmount. A second close while leaving is a no-op. */
   function finishClose(): void {
+    if (embedded) return;
     if (!open || phase === 'closed') return;
     menu?.handle.close();
     phase = 'closed';
@@ -410,6 +413,7 @@
   }
 
   function keydown(event: KeyboardEvent): void {
+    if (embedded && (event.key === 'Escape' || event.key === 'Tab')) return;
     event.stopPropagation();
     if (event.key === 'Escape') { event.preventDefault(); cancelPreview(); }
     // Enter on the plane or a track commits, as it does from the value field.
@@ -421,8 +425,19 @@
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   }
+  $effect(() => {
+    const incoming = value;
+    if (embedded) untrack(() => {
+      const next = parseColor(incoming);
+      if (next && storedHex(next) !== storedHex(color)) setColor(next, false, false);
+    });
+  });
+  onMount(() => { if (embedded) show(); });
+  onDestroy(() => { window.clearTimeout(closeTimer); menu?.handle.close(); });
+  function overlay(node: HTMLElement) { return embedded ? undefined : mountOverlayOnBody(node); }
 </script>
 
+{#if !embedded}
 <button
   bind:this={trigger}
   type="button"
@@ -437,23 +452,25 @@
   <span style="font-family:var(--f-mono);font-size:var(--fs-md);color:var(--tx)">{isMixed ? 'Mixed' : hex(shown)}{#if !isMixed && shown.a < 1}<span class="color-field-alpha">{opacityText(shown.a)}%</span>{/if}</span>
   <span class="sw cp-checker" aria-hidden="true" style={`--sw-color:${cssColor(shown)}`}></span>
 </button>
+{/if}
 
 {#if open}
   <div
-    class="color-picker-layer"
+    class={embedded ? "color-editor-inline" : "color-picker-layer"}
     role="presentation"
     data-state={phase}
-    use:mountOverlayOnBody
+    use:overlay
     onpointerdown={(event) => { if (event.target === event.currentTarget) commitAndClose(); }}
   >
     <div
       bind:this={popover}
       class="color-picker"
+      class:cp-embedded={embedded}
       role="dialog"
       aria-label={label}
       tabindex="-1"
       data-state={phase}
-      use:anchorPicker={trigger}
+      use:anchorPicker={embedded ? undefined : trigger}
       onkeydown={keydown}
     >
       <div class="cp-header">
@@ -491,7 +508,7 @@
               <path d="M224,128a8,8,0,0,1-8,8H40a8,8,0,0,1,0-16H216A8,8,0,0,1,224,128ZM40,72H216a8,8,0,0,0,0-16H40a8,8,0,0,0,0,16ZM216,184H40a8,8,0,0,0,0,16H216a8,8,0,0,0,0-16Z" />
             </svg>
           </button>
-          <button type="button" class="cp-icon" aria-label="Close" title="Close" onclick={commitAndClose}>
+          <button hidden={embedded} type="button" class="cp-icon" aria-label="Close" title="Close" onclick={commitAndClose}>
             <!-- Phosphor regular: X. -->
             <svg viewBox="0 0 256 256" aria-hidden="true" focusable="false" fill="currentColor">
               <path d="M205.66,194.34a8,8,0,0,1-11.32,11.32L128,139.31,61.66,205.66a8,8,0,0,1-11.32-11.32L116.69,128,50.34,61.66A8,8,0,0,1,61.66,50.34L128,116.69l66.34-66.35a8,8,0,0,1,11.32,11.32L139.31,128Z" />

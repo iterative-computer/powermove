@@ -428,3 +428,14 @@ select.sel {
 .onoff > button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .onoff.mixed > button { color: var(--tx-3); }
 @media (prefers-reduced-motion: reduce) { .onoff-pill { transition: none; } }
+
+/* Fill editing shares the color editor, with gradient controls around it. */
+.color-picker.cp-embedded {
+  position: relative;
+  width: 100%;
+  box-shadow: none;
+  border-radius: 0;
+  animation: none;
+}
+.fill-picker:has(.cp-embedded) { width: 535px; }
+.cp-embedded [hidden] { display: none; }
