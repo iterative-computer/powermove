@@ -111,8 +111,8 @@ describe('vars IPC', () => {
   it('reports status without values, sets, re-resolves and delivers', async () => {
     const h = await harness();
     const before = await h.call<VarsStatus>(VARS_IPC.status, { id: 'colour-match' });
-    expect(before.status).toBe('needs-setup');
-    expect(before.keys.map((k) => [k.key, k.set, k.required, k.secret])).toEqual([['API_KEY', false, true, true], ['REGION', false, false, false]]);
+    expect(before.status).toBe('ok');
+    expect(before.keys.map((k) => [k.key, k.set, k.required, k.secret])).toEqual([['API_KEY', false, false, true], ['REGION', false, false, false]]);
 
     const after = await h.call<VarsStatus>(VARS_IPC.set, { id: 'colour-match', key: 'API_KEY', value: 'sk-abcdefghijkl1234' });
     expect(after.status).toBe('ok');
@@ -126,7 +126,7 @@ describe('vars IPC', () => {
     await expect(h.call(VARS_IPC.status, { id: 'builtin-one' })).rejects.toThrow(/no values/);
 
     const removed = await h.call<VarsStatus>(VARS_IPC.delete, { id: 'colour-match', key: 'API_KEY' });
-    expect(removed.status).toBe('needs-setup');
+    expect(removed.status).toBe('ok');
   });
 
   it('reveal shows the value masked in a native dialog and returns nothing', async () => {

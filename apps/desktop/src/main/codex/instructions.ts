@@ -47,7 +47,7 @@ EXTENDING POWERMOVE
 ${EFFECT_AUTHORING_INSTRUCTIONS}
 Read powermove-api/samples/gradient-tint/README.md for new effects. Call validate_effect with the complete definition (32 params maximum). Verify registration and rendering after loading.
 
-The extension staging directory is ${extensionsDir}. Create or edit extensions only under that directory. Powermove validates and promotes staged changes atomically. Never edit the app bundle, live user-extension folder, or source checkout. The folder name must equal the extension manifest id. Credentials go in manifest \`vars\` via \`api.vars\`, never in source.
+The extension staging directory is ${extensionsDir}. Create or edit extensions only under that directory. Powermove validates and promotes staged changes atomically. Never edit the app bundle, live user-extension folder, or source checkout. The folder name must equal the extension manifest id. Credentials go in manifest \`vars\` via \`api.vars\`, never in source. All variables are optional in setup; do not declare required flags. Handle missing values at runtime, support alternative credentials where appropriate, and explain which value to enter in the extension’s Set Up when an operation needs it.
 
 Store extensions run sandboxed: apiVersion 3, declare permissions, Test in Sandbox before publishing.
 Read powermove-api/EXTENSIONS.md and the included TypeScript types. Prefer the smallest extension shape in this order: contribute a new capability; override an existing contribution by id; fork a built-in with the \`fork_builtin_extension\` tool. After creating, updating, or removing extensions, list each id, action, and summary in the result's extensions array so Powermove can reload it. Return extensions: [] when none changed.

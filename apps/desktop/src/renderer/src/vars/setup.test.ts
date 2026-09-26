@@ -61,8 +61,8 @@ describe('SetupSheet', () => {
     await settle();
 
     expect(target.querySelector('h2')!.textContent).toBe('Colour match');
-    expect(target.textContent).toContain('Turns on once required values are set.');
-    expect(target.textContent).toContain('Required');
+    expect(target.textContent).not.toContain('Turns on once required values are set.');
+    expect(target.textContent).not.toContain('Required');
     // A hint that repeats the label is dropped; a useful one stays.
     expect(target.textContent).not.toMatch(/OpenAI API key\s*OpenAI API key/);
     expect(target.textContent).toContain('Where requests are sent');
@@ -90,6 +90,33 @@ describe('SetupSheet', () => {
     expect(bridge.values).not.toHaveBeenCalled();
     expect(onclose).toHaveBeenCalled();
     expect(toast).toHaveBeenCalled();
+  });
+
+  it.each([false, true])('allows saving with a blank API key (another value entered: %s)', async (partial) => {
+    const set: Record<string, boolean> = {};
+    const bridge: VarsBridge = {
+      status: vi.fn(async () => statusOf(set)),
+      set: vi.fn(async ({ key }) => { set[key] = true; return statusOf(set); }),
+      delete: vi.fn(), reveal: vi.fn(), values: vi.fn()
+    };
+    const onclose = vi.fn();
+    const target = document.createElement('div');
+    document.body.append(target);
+    component = mount(SetupSheet, { target, props: { PM: {}, record, bridge, onclose } });
+    await settle();
+    if (partial) {
+      const field = target.querySelector<HTMLInputElement>('input[type="text"]')!;
+      field.value = 'eu';
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+      await settle();
+    }
+    expect(target.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(false);
+    target.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await settle();
+    expect(bridge.set).toHaveBeenCalledTimes(partial ? 1 : 0);
+    if (partial) expect(bridge.set).toHaveBeenCalledWith({ id: record.id, key: 'REGION', value: 'eu' });
+    expect(bridge.delete).not.toHaveBeenCalled();
+    expect(onclose).toHaveBeenCalledOnce();
   });
 
   it('drops hints that only repeat the label', () => {

@@ -394,7 +394,7 @@ describe('extension values', () => {
     await fs.writeFile(path.join(directory, 'index.ts'), 'export default () => undefined');
   }
 
-  it('keeps a user extension with a missing required value off until it is set', async () => {
+  it('activates with unset, partial, or undecryptable values', async () => {
     const stored = new Map<string, { value: string | null; secret: boolean }>();
     const { resolveVars } = await import('../env/resolve');
     const resolver = vi.fn(async (_id: string, decls: NonNullable<ExtensionManifest['vars']>) => resolveVars(decls, stored));
@@ -405,15 +405,14 @@ describe('extension values', () => {
     expect(setup.registry.list()[0]).toMatchObject({
       id: 'colour-match',
       enabled: true,
-      bundleUrl: null,
-      bundleHash: null,
-      health: { state: 'needs-setup', missing: ['API_KEY'] }
+      bundleUrl: expect.stringContaining('bundle.js'),
+      health: { state: 'ok' }
     });
     expect(resolver).toHaveBeenCalledWith('colour-match', expect.any(Array));
 
-    // A stale renderer report cannot flip it to ok.
+    // Missing values do not hold activation back.
     setup.registry.reportHealth({ id: 'colour-match', health: { state: 'ok' } });
-    expect(setup.registry.list()[0]?.health.state).toBe('needs-setup');
+    expect(setup.registry.list()[0]?.health.state).toBe('ok');
 
     stored.set('API_KEY', { value: 'sk-test', secret: true });
     await setup.registry.refresh(['colour-match']);
@@ -421,10 +420,10 @@ describe('extension values', () => {
     expect(setup.registry.list()[0]?.bundleUrl).toMatch(/^app:\/\/powermove\/ext\/colour-match\/bundle\.js/);
     expect(setup.compile).toHaveBeenCalledTimes(1);
 
-    // Undecryptable values need re-entry too.
+    // Undecryptable values are omitted without blocking activation.
     stored.set('REGION', { value: null, secret: true });
     await setup.registry.refresh(['colour-match']);
-    expect(setup.registry.list()[0]?.health).toEqual({ state: 'needs-setup', missing: ['REGION'] });
+    expect(setup.registry.list()[0]?.health).toEqual({ state: 'ok' });
   });
 
   it('without a resolver treats every value as unset, and a disabled extension stays disabled', async () => {
@@ -434,7 +433,7 @@ describe('extension values', () => {
     await setup.registry.refresh();
     expect(setup.registry.list()[0]?.health).toEqual({ state: 'disabled' });
     await setup.registry.setEnabled({ id: 'colour-match', enabled: true });
-    expect(setup.registry.list()[0]).toMatchObject({ bundleUrl: null, health: { state: 'needs-setup', missing: ['API_KEY'] } });
+    expect(setup.registry.list()[0]).toMatchObject({ bundleUrl: expect.stringContaining('bundle.js'), health: { state: 'ok' } });
   });
 
   async function writeFullAccessExtension(root: string, id: string): Promise<void> {

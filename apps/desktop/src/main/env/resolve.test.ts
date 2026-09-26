@@ -22,23 +22,28 @@ describe('resolveVars', () => {
     expect(result).toEqual({ values: { API_KEY: 'sk', ACCOUNT: 'acme' }, missingRequired: [], undecryptable: [], status: 'ok' });
   });
 
-  it('needs setup when a required value is missing or empty', () => {
+  it('accepts missing and empty values, including legacy required declarations', () => {
     const result = resolveVars(decls, env({ API_KEY: { value: '', secret: true }, REGION: { value: 'eu', secret: false } }));
-    expect(result.status).toBe('needs-setup');
-    expect(result.missingRequired).toEqual(['API_KEY', 'ACCOUNT']);
+    expect(result.status).toBe('ok');
+    expect(result.missingRequired).toEqual([]);
     expect(result.values).toEqual({ REGION: 'eu' });
   });
 
-  it('needs setup when any stored value cannot be decrypted', () => {
+  it('omits undecryptable values without blocking other values', () => {
     const result = resolveVars(decls, env({
       API_KEY: { value: null, secret: true },
       ACCOUNT: { value: 'acme', secret: false },
       REGION: { value: null, secret: true }
     }));
-    expect(result.status).toBe('needs-setup');
-    expect(result.missingRequired).toEqual(['API_KEY']);
+    expect(result.status).toBe('ok');
+    expect(result.missingRequired).toEqual([]);
     expect(result.undecryptable).toEqual(['API_KEY', 'REGION']);
     expect(missingKeys(result)).toEqual(['API_KEY', 'REGION']);
+  });
+
+  it('accepts one of two legacy required values, or neither', () => {
+    expect(resolveVars(decls, env({ API_KEY: { value: 'one-key', secret: true } }))).toMatchObject({ status: 'ok', values: { API_KEY: 'one-key' }, missingRequired: [] });
+    expect(resolveVars(decls, new Map())).toMatchObject({ status: 'ok', values: {}, missingRequired: [] });
   });
 
   it('is ok with nothing declared', () => {

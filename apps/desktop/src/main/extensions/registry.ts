@@ -51,7 +51,7 @@ export interface ExtensionRegistryOptions {
   /**
    * Resolves a user extension's declared values. Without one (the
    * `powermove serve` host, where values are not available yet) nothing is
-   * set, so required values keep the extension in "Needs setup".
+   * set. Missing values do not prevent activation.
    */
   resolveVars?: (id: string, decls: ExtensionVarDecl[]) => Promise<VarsResolution>;
   /**
@@ -105,7 +105,7 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
     try {
       return await options.resolveVars(id, decls);
     } catch (error) {
-      // Unreadable values behave as unset: the extension waits for setup.
+      // Unreadable values behave as unset: the extension handles missing values.
       console.error(`[extensions] could not read values for ${id}`, error);
       return resolveVars(decls, new Map());
     }
@@ -263,9 +263,8 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
         continue;
       }
 
-      /* Values gate activation: a user extension missing a required value
-         (or holding one this Mac cannot decrypt) gets no bundle URL, so the
-         loader never imports it. */
+      /* Resolve values before activation. Missing values are optional;
+         the status field is retained for host compatibility. */
       const decls = candidate.manifest.vars ?? [];
       if (candidate.scope === 'user' && decls.length > 0 && enabled) {
         const resolution = await resolveFor(id, decls);

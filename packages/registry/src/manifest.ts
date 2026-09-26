@@ -62,6 +62,7 @@ export interface ExtensionVarDecl {
   key: string;
   label: string;
   secret?: boolean;
+  /** Legacy metadata, accepted for compatibility. All values are optional. */
   required?: boolean;
   hint?: string;
 }

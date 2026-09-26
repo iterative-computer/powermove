@@ -78,7 +78,7 @@ reloaded, or removed. Return a `Disposable` or use `api.onDispose` for anything 
 | `replaces` | no | ids of extensions to deactivate while this one is enabled (e.g. `["timeline"]`) |
 | `dependsOn` | no | ids that must be enabled and load first |
 | `forkedFrom` | no | `"<id>@<version>"` for a built-in or `"<handle>/<id>@<version>"` for a Store fork |
-| `vars` | no | `apiVersion: 2`; up to 32 declarations `{ key, label, secret?, required?, hint? }`. Keys use uppercase letters, digits and underscores, starting with a letter. Read values through `api.vars`; never put credentials in source. |
+| `vars` | no | `apiVersion: 2`; up to 32 declarations `{ key, label, secret?, hint? }`. Keys use uppercase letters, digits and underscores, starting with a letter. Read values through `api.vars`; never put credentials in source. |
 | `author` | no | `powermove` \| `user` \| `agent` |
 
 Imports allowed: `powermove` (types only), `svelte`, `svelte/store`, relative files
@@ -389,9 +389,12 @@ An extension that needs an API key, account id or similar value declares it and
 reads it at runtime. It never carries the value in its source.
 
 - **Declare** each value in `manifest.json` with `apiVersion: 2`:
-  `"vars": [{ "key": "OPENAI_API_KEY", "label": "OpenAI API key", "secret": true, "required": true }]`.
-  `hint` is optional; `secret` masks the field; `required` keeps the extension off,
-  shown as "Needs setup", until the value is set.
+  `"vars": [{ "key": "OPENAI_API_KEY", "label": "OpenAI API key", "secret": true }]`.
+  `hint` is optional; `secret` masks the field. Users can save any subset, including
+  no values. Legacy `required` flags are ignored and never block activation.
+  Handle missing values at runtime: support alternative credentials or fallback
+  behavior where possible, and explain which value to enter in Set Up when an
+  operation actually needs it.
 - **Read** with `api.vars.get('OPENAI_API_KEY')`, `has(key)` and `keys()`. Values are
   fetched once per activation; setting or removing one reloads the extension. Only
   declared keys are delivered.

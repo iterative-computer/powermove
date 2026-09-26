@@ -49,7 +49,7 @@ export function createVarsService(options: { env: EnvStore; provenance: Provenan
             label: decl.label,
             ...(decl.hint ? { hint: decl.hint } : {}),
             secret: decl.secret === true,
-            required: decl.required === true,
+            required: false,
             set: typeof entry?.value === 'string' && entry.value.length > 0,
             undecryptable: entry !== undefined && entry.value === null
           };

@@ -334,7 +334,7 @@ export function createStoreInstaller(options: StoreInstallerOptions): StoreInsta
         registry.list().find((candidate) => candidate.id === other)?.manifest?.name ?? other);
       return {
         localId: id,
-        needsSetup: record?.health.state === 'needs-setup',
+        needsSetup: (record?.manifest?.vars?.length ?? 0) > 0,
         needsTrust: record?.health.state === 'needs-trust',
         ...(replaced.length ? { warning: `While it’s on, ${manifest.name} replaces ${replaced.join(', ')}.` } : {})
       };

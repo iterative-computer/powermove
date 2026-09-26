@@ -28,8 +28,6 @@
   let root: HTMLElement;
 
   const keys = $derived(status?.keys ?? []);
-  const dirty = $derived(keys.some((k) => (drafts[k.key] ?? '').length > 0));
-  const waiting = $derived(status?.status === 'needs-setup');
 
   const message = (cause: unknown, fallback: string): string =>
     cause instanceof Error && cause.message ? cause.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '') : fallback;
@@ -83,7 +81,7 @@
 
   async function save(event: SubmitEvent): Promise<void> {
     event.preventDefault();
-    if (!bridge || busy || !dirty) return;
+    if (!bridge || busy || !status) return;
     busy = true;
     error = '';
     try {
@@ -101,10 +99,8 @@
     } finally {
       busy = false;
     }
-    if (status?.status === 'ok') {
-      PM.toast?.(`Saved values for ${name}`, 2200, { kind: 'status' });
-      onclose();
-    }
+    PM.toast?.(`Saved values for ${name}`, 2200, { kind: 'status' });
+    onclose();
   }
 
   onMount(() => {
@@ -116,7 +112,6 @@
 <div class="vars-sheet" bind:this={root} tabindex="-1" autofocus>
   <header class="acct-head">
     <h2>{name}</h2>
-    {#if waiting}<p>Turns on once required values are set.</p>{/if}
   </header>
 
   <form class="sg-column vars-form" novalidate onsubmit={save}>
@@ -126,7 +121,7 @@
           {@const hint = usefulHint(k.label, k.hint)}
           <div class="settings-row vars-row">
             <label class="settings-copy" for={`${uid}-${k.key}`}>
-              <b>{k.label}{#if k.required}<span class="vars-req">Required</span>{/if}</b>
+              <b>{k.label}</b>
               {#if k.undecryptable}
                 <span class="vars-attention">Needs re-entry</span>
               {:else if hint}
@@ -172,7 +167,7 @@
 
     <footer class="vars-foot">
       <button class="btn ghost" type="button" onclick={onclose}>Cancel</button>
-      <button class="btn pri" type="submit" disabled={!dirty || busy}>{busy ? 'Saving…' : 'Save'}</button>
+      <button class="btn pri" type="submit" disabled={!status || busy}>{busy ? 'Saving…' : 'Save'}</button>
     </footer>
   </form>
 </div>

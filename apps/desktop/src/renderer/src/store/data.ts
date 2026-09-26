@@ -4,6 +4,7 @@
    answers to these functions. */
 import type { ExtensionDetailDto, ListingDto, VarDecl } from '@powermove/registry/wire';
 
+import { EXTENSION_API_VERSION } from '../../../shared/extensions';
 import type { ExtensionPermission, ExtensionRecord } from '../../../shared/extensions';
 import { CLOUD_UNREACHABLE } from '../../../shared/cloud-ipc';
 import type { LibraryItemDto, StoreBridge, StoreCategory, StoreErrorBody } from '../../../shared/store-ipc';
@@ -119,15 +120,11 @@ export function includesText(contributes: readonly string[]): string {
   return contributes.map((kind) => CONTRIBUTION_LABEL[kind] ?? kind).join(', ');
 }
 
-/** The Powermove an extension's `apiVersion` needs. */
-const REQUIRES: Record<number, string> = {
-  1: 'Powermove 1.0 or later',
-  2: 'Powermove 1.1 or later',
-  3: 'Powermove 1.2 or later'
-};
-
+/** API versions are capabilities, not app release numbers. */
 export function requiresText(apiVersion: number): string {
-  return REQUIRES[apiVersion] ?? 'A newer version of Powermove';
+  return apiVersion >= 1 && apiVersion <= EXTENSION_API_VERSION
+    ? 'Supported by this version of Powermove'
+    : 'A newer version of Powermove';
 }
 
 /* ── permissions ── */
@@ -191,8 +188,17 @@ export function coordinate(l: { publisher: string; id: string }): string {
 }
 
 /** The Library item for this repo: published from this Mac, or installed from it. */
-export function libraryItemFor(repoId: string, library: readonly LibraryItemDto[]): LibraryItemDto | undefined {
-  return library.find((item) => item.published?.repoId === repoId) ?? library.find((item) => item.origin?.repoId === repoId);
+export function libraryItemFor(repoId: string, library: readonly LibraryItemDto[], listing?: { publisher: string; id: string }): LibraryItemDto | undefined {
+  return library.find((item) => item.published?.repoId === repoId)
+    ?? library.find((item) => item.origin?.repoId === repoId)
+    ?? (listing?.publisher === 'powermove'
+      ? library.find((item) => item.group === 'builtin' && item.localId === listing.id)
+      : undefined);
+}
+
+/** Local authorship does not grant ownership of a Store repository. */
+export function ownsListing(listing: { publisher: string } | null, account: { handle: string | null } | null): boolean {
+  return !!listing && !!account?.handle && listing.publisher === account.handle;
 }
 
 export function listingFromDto(dto: ListingDto, library: readonly LibraryItemDto[], now: Date = new Date()): StoreListing {
@@ -205,7 +211,7 @@ export function listingFromDto(dto: ListingDto, library: readonly LibraryItemDto
     kind: dto.category,
     version: dto.latest?.version ?? '',
     updated: relativeDate(dto.latest?.publishedAt ?? dto.updatedAt, now),
-    installed: libraryItemFor(dto.repoId, library) !== undefined,
+    installed: libraryItemFor(dto.repoId, library, { publisher: dto.owner.handle, id: dto.slug }) !== undefined,
     latestReleaseId: dto.latest?.id ?? null,
     apiVersion: dto.latest?.apiVersion ?? null,
     permissions: [...(dto.permissions ?? [])],
@@ -340,8 +346,8 @@ export type Action = {
  * The one action for an extension, from what the store says and what is on
  * this Mac:
  *
- *   not here, nothing required     Install
- *   not here, required values      Install and set up
+ *   not here, no declared values     Install
+ *   not here, declared values      Install and set up
  *   here, needs full access        Trust…
  *   here, values missing           Set up
  *   here, newer version            Update
@@ -354,10 +360,11 @@ export type Action = {
 export function detailAction(input: { vars?: readonly VarDecl[] | undefined; item?: LibraryItemDto | undefined; repoId?: string | undefined }): Action {
   const { item } = input;
   if (!item) {
-    return input.vars?.some((v) => v.required)
+    return input.vars?.length
       ? { label: 'Install and set up', kind: 'install', primary: true }
       : { label: 'Install', kind: 'install', primary: true };
   }
+  if (item.group === 'builtin') return { label: 'Built in', kind: 'none', quiet: true };
   if (needsTrust(item)) return TRUST_ACTION;
   if (needsSetup(item)) return { label: 'Set up', kind: 'setup', primary: true };
   // The original's page, seen from your published fork of it.

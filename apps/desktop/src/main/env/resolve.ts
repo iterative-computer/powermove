@@ -10,7 +10,7 @@ import type { EnvEntry } from './store';
 export interface VarsResolution {
   /** Declared keys with a usable, non-empty value. Undeclared keys are never delivered. */
   values: Record<string, string>;
-  /** Required keys without a usable value (unset, empty or undecryptable). */
+  /** Legacy compatibility field; all values are optional, so this is always empty. */
   missingRequired: string[];
   /** Declared keys whose stored value this Mac cannot decrypt. */
   undecryptable: string[];
@@ -29,14 +29,13 @@ export function resolveVars(
     if (entry && entry.value === null) undecryptable.push(decl.key);
     const value = entry?.value;
     if (typeof value === 'string' && value.length > 0) values[decl.key] = value;
-    else if (decl.required) missingRequired.push(decl.key);
   }
   return {
     values,
     missingRequired,
     undecryptable,
-    // A value that can no longer be opened must be entered again, required or not.
-    status: missingRequired.length || undecryptable.length ? 'needs-setup' : 'ok'
+    // Extensions decide which values their current operation needs.
+    status: 'ok'
   };
 }
 

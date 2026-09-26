@@ -5,7 +5,7 @@ import { CLOUD_UNREACHABLE } from '../../../shared/cloud-ipc';
 import type { LibraryItemDto } from '../../../shared/store-ipc';
 import {
   KINDS, KIND_PLURAL, artFor, detailAction, detailFromDto, groupLibrary, includesText, libraryAction, listingFromDto,
-  loadError, parseLineage, permissionLines, asksFullAccess, relativeDate, requiresText, statusText
+  loadError, libraryItemFor, ownsListing, parseLineage, permissionLines, asksFullAccess, relativeDate, requiresText, statusText
 } from './data';
 
 const REPO = '11111111-1111-4111-8111-111111111111';
@@ -35,7 +35,7 @@ describe('action labels', () => {
   /* state → the detail's primary action and the Library row's trailing control. */
   const matrix: Array<[state: string, input: Parameters<typeof detailAction>[0], detail: string, row: string | null]> = [
     ['not installed', {}, 'Install', null],
-    ['not installed, optional values', { vars: optional }, 'Install', null],
+    ['not installed, optional values', { vars: optional }, 'Install and set up', null],
     ['not installed, required values', { vars: required }, 'Install and set up', null],
     ['installed', { item: item() }, 'Installed', 'On'],
     ['installed, turned off', { item: item({ enabled: false }) }, 'Installed', 'Off'],
@@ -49,7 +49,7 @@ describe('action labels', () => {
     ['yours, changed since publishing', { item: item({ group: 'yours', maker: { you: true }, publish: 'update', published: mine }) }, 'Publish Update…', 'Publish Update…'],
     ['yours, published, unchanged', { item: item({ group: 'yours', maker: { you: true }, publish: null, published: mine }) }, 'Open', 'On'],
     ['your fork, on the original’s page', { item: item({ group: 'yours', maker: { you: true }, published: mine, fork }), repoId: REPO }, 'Forked', 'On'],
-    ['built in', { item: item({ group: 'builtin', maker: { builtin: true } }) }, 'Open', 'On']
+    ['built in', { item: item({ group: 'builtin', maker: { builtin: true } }) }, 'Built in', 'On']
   ];
 
   it.each(matrix)('%s', (_state, input, detail, row) => {
@@ -63,7 +63,7 @@ describe('action labels', () => {
     expect(`\n${table}\n`).toMatchInlineSnapshot(`
       "
       not installed                     | Install            | —
-      not installed, optional values    | Install            | —
+      not installed, optional values    | Install and set up | —
       not installed, required values    | Install and set up | —
       installed                         | Installed          | On
       installed, turned off             | Installed          | Off
@@ -77,7 +77,7 @@ describe('action labels', () => {
       yours, changed since publishing   | Publish Update…    | Publish Update…
       yours, published, unchanged       | Open               | On
       your fork, on the original’s page | Forked             | On
-      built in                          | Open               | On
+      built in                          | Built in           | On
       "
     `);
   });
@@ -152,8 +152,10 @@ describe('view models', () => {
   });
 
   it('writes requirements and dates the way people say them', () => {
-    expect(requiresText(2)).toBe('Powermove 1.1 or later');
-    expect(requiresText(1)).toBe('Powermove 1.0 or later');
+    expect(requiresText(2)).toBe('Supported by this version of Powermove');
+    expect(requiresText(3)).toBe('Supported by this version of Powermove');
+    expect(requiresText(4)).toBe('A newer version of Powermove');
+    expect(requiresText(1)).toBe('Supported by this version of Powermove');
     expect(relativeDate(new Date(2026, 8, 23, 1).toISOString(), now)).toBe('Today');
     expect(relativeDate(new Date(2026, 8, 19, 12).toISOString(), now)).toBe('4 days ago');
     expect(relativeDate(new Date(2026, 7, 2, 12).toISOString(), now)).toBe('Aug 2');
@@ -199,5 +201,27 @@ describe('access disclosure', () => {
     const blocked = item({ health: { state: 'needs-trust' }, permissions: ['full-access'] });
     expect(statusText(blocked)).toBe('Needs full access');
     expect(libraryAction(blocked).label).toBe('Trust…');
+  });
+});
+
+
+describe('Store identity boundaries', () => {
+  it('recognizes bundled packages only in the official namespace', () => {
+    const builtin = item({ localId: 'effects-basic', group: 'builtin', maker: { builtin: true }, origin: undefined });
+    const library = [builtin];
+    const matched = libraryItemFor(REPO, library, { publisher: 'powermove', id: 'effects-basic' });
+    expect(matched).toBe(builtin);
+    expect(detailAction({ item: matched }).kind).toBe('none');
+    expect(detailAction({ item: matched }).label).toBe('Built in');
+    expect(libraryItemFor(REPO, library, { publisher: 'mara', id: 'effects-basic' })).toBeUndefined();
+    expect(libraryItemFor(REPO, library, { publisher: 'powermove', id: 'not-bundled' })).toBeUndefined();
+  });
+
+  it('does not grant Store ownership to another account or a signed-out author', () => {
+    const listing = { publisher: 'jude' };
+    expect(ownsListing(listing, { handle: 'jude' })).toBe(true);
+    expect(ownsListing(listing, { handle: 'mara' })).toBe(false);
+    expect(ownsListing(listing, { handle: null })).toBe(false);
+    expect(ownsListing(listing, null)).toBe(false);
   });
 });

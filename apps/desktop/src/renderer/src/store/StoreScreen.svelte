@@ -11,7 +11,7 @@
   import {
     KINDS, KIND_LABEL, KIND_PLURAL,
     actionErrorText, artFor, coordinate, detailAction, detailFromDto, groupLibrary, includesText, isKind,
-    libraryAction, libraryItemFor, listingFromDto, loadError, makerText, needsAttention, needsSetup, needsTrust,
+    libraryAction, libraryItemFor, listingFromDto, loadError, makerText, needsAttention, needsSetup, needsTrust, ownsListing,
     parseLineage, permissionLines, publishErrorText, requiresText, secondaryPublish, statusIsHot, statusText, storeBridge,
     type Action, type Lineage, type LoadError, type StoreDetail, type StoreKind, type StoreListing, type StorePage, type StorePM,
     type VersionEntry
@@ -137,7 +137,7 @@
   const detailItem = $derived.by(() => {
     if (!detail) return undefined;
     const repoId = detailData?.repoId ?? detail.preview?.repoId;
-    const byRepo = repoId ? libraryItemFor(repoId, library) : undefined;
+    const byRepo = repoId ? libraryItemFor(repoId, library, detailData ?? detail.preview ?? undefined) : undefined;
     return byRepo ?? (detail.localId ? library.find((item) => item.localId === detail?.localId) : undefined);
   });
 
@@ -462,9 +462,9 @@
     return art(artFor(item.origin?.repoId ?? `local:${item.localId}`));
   }
 
-  /* Who made it, as the store says it: "Effect by mara". */
+  /* Classify the whole package, not an individual contribution. */
   function byline(kind: StoreKind, who: string): string {
-    return who.startsWith('by ') ? `${KIND_LABEL[kind]} ${who}` : `${KIND_LABEL[kind]} · ${who}`;
+    return `${KIND_PLURAL[kind]} extension · ${who}`;
   }
 
   /* A published fork knows its origin from provenance (the folder's own
@@ -482,7 +482,7 @@
   }
 
   function listingAction(listing: StoreListing): Action {
-    return detailAction({ vars: listing.vars, item: libraryItemFor(listing.repoId, library), repoId: listing.repoId });
+    return detailAction({ vars: listing.vars, item: libraryItemFor(listing.repoId, library, listing), repoId: listing.repoId });
   }
 
   /* ── actions ── */
@@ -928,7 +928,7 @@
      target: + to install, a tick once it is here, or whatever it needs. -->
 {#snippet card(l: StoreListing)}
   {@const act = listingAction(l)}
-  {@const item = libraryItemFor(l.repoId, library)}
+  {@const item = libraryItemFor(l.repoId, library, l)}
   {@const target = { repoId: l.repoId, releaseId: l.latestReleaseId, name: l.name }}
   {@const pending = busy[item?.localId ?? ''] ?? busy[l.repoId]}
   <div class="st-item">
@@ -1050,7 +1050,7 @@
   {@const pair = data?.art ?? preview?.art ?? artFor(item?.origin?.repoId ?? `local:${item?.localId ?? ''}`)}
   {@const act = detailAction({ vars: data?.vars ?? item?.vars, item, repoId: data?.repoId })}
   {@const alsoPublish = data && item?.fork && data.repoId !== item.published?.repoId ? null : secondaryPublish(item)}
-  {@const ownPage = !!data && !!item?.published && data.repoId === item.published.repoId}
+  {@const ownPage = ownsListing(data, account)}
   {@const storeLineage = data?.forkedFrom ?? storeLineageOf(item)}
   {@const builtinLineage = storeLineage ? undefined : builtinLineageOf(item)}
   <!-- A fork compares against the release it was forked from (P0 Q5), or
@@ -1174,7 +1174,7 @@
   {/if}
 
   <dl class="st-facts">
-    <div><dt>Author</dt><dd>{item && 'you' in item.maker ? 'You' : item && 'builtin' in item.maker ? 'Powermove' : data?.publisher ?? preview?.publisher ?? ''}</dd></div>
+    <div><dt>Author</dt><dd>{data ? (ownPage ? 'You' : data.publisher) : preview ? preview.publisher : item && 'builtin' in item.maker ? 'Powermove' : item && 'you' in item.maker ? 'You' : ''}</dd></div>
     <div><dt>Kind</dt><dd>{KIND_LABEL[kind]}</dd></div>
     <div><dt>Updated</dt><dd>{data?.updated ?? preview?.updated ?? '—'}</dd></div>
     <div>
@@ -1265,7 +1265,7 @@
   {#if vars.length}
     <!-- Values the extension reads at runtime. They live in the app
          profile, never in the extension folder, so publishing never
-         carries them. Required ones gate activation. -->
+         carries them. Users may leave any value blank. -->
     <section class="st-sec">
       <div class="st-sec-head">
         <h3>Setup</h3>
@@ -1275,13 +1275,13 @@
         {#each vars as v (v.key)}
           <div class="st-var">
             <div class="st-var-copy">
-              <b>{v.label}{#if v.required} <span class="st-var-req">Required</span>{/if}</b>
+              <b>{v.label}</b>
               <span>{v.hint ?? ''} <code>{v.key}</code></span>
             </div>
           </div>
         {/each}
       </div>
-      <p class="st-note">{item ? 'Stays on this Mac. Never included when you publish or share this extension.' : 'You’re asked for required values when you install. They stay on this Mac.'}</p>
+      <p class="st-note">{item ? 'Stays on this Mac. Never included when you publish or share this extension.' : 'You can set these values when you install. They stay on this Mac.'}</p>
     </section>
   {/if}
 
@@ -1291,10 +1291,14 @@
       {#if coord}<div class="st-kv"><span>Identifier</span><b>{coord}</b></div>{/if}
       {#if storeLineage}<div class="st-kv"><span>Forked from</span><b>{storeLineage.handle}/{storeLineage.slug}@{storeLineage.version}</b></div>{/if}
       {#if contributes.length}<div class="st-kv"><span>Includes</span><b>{includesText(contributes)}</b></div>{/if}
-      {#if apiVersion !== null}<div class="st-kv"><span>Requires</span><b>{requiresText(apiVersion)}</b></div>{/if}
+      {#if apiVersion !== null}<div class="st-kv"><span>Compatibility</span><b>{requiresText(apiVersion)}</b></div>{/if}
     </div>
-    {#if data || item?.group === 'store'}
-      <p class="st-note">Extensions run inside Powermove with the same access as the app, and aren’t signed. Read the source, or install from people you know.</p>
+    {#if item?.group !== 'builtin' && (data || item?.group === 'store')}
+      {#if (data?.permissions ?? preview?.permissions ?? item?.permissions ?? []).includes('full-access') || (apiVersion !== null && apiVersion < 3)}
+        <p class="st-note">This extension needs full access to Powermove. Only trust code from people you trust.</p>
+      {:else if apiVersion === 3}
+        <p class="st-note">This extension runs in a sandbox with the permissions listed above.</p>
+      {/if}
     {/if}
   </section>
 
