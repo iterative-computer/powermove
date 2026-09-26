@@ -2,6 +2,9 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "powermove-cloud",
   "main": "src/index.ts",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "cloud.trypowermove.com", "custom_domain": true }],
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat"],
   "alias": { "@better-auth/kysely-adapter": "./src/kysely-unavailable.ts" },
@@ -18,6 +21,6 @@
   ] },
   "triggers": { "crons": ["0 */6 * * *"] },
   // LOCAL_POSTGRES is intentionally unset here. Set it to "1" in .dev.vars only.
-  "vars": { "APP_ORIGIN": "https://cloud.trypowermove.com", "HANDLE_MAIL_DOMAIN": "users.trypowermove.com", "EMAIL_FROM": "Powermove <sign-in@trypowermove.com>" },
-  "observability": { "enabled": true }
+  "vars": { "TURNSTILE_ENABLED": "1", "TURNSTILE_SITE_KEY": "0x4AAAAAAFEFmLgsfY1Hnm3q", "TURNSTILE_CLEARANCE_DAYS": "30", "APP_ORIGIN": "https://cloud.trypowermove.com", "HANDLE_MAIL_DOMAIN": "users.trypowermove.com", "EMAIL_FROM": "Powermove <sign-in@trypowermove.com>" },
+  "observability": { "enabled": true, "redact_query_string": true }
 }
