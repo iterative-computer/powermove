@@ -182,8 +182,18 @@ schema. The Worker uses a pooled Neon connection in its `DATABASE_URL`
 secret. The production Store browse endpoint returns 200 from the real database;
 unauthenticated account requests return 401 as expected.
 
-**Still pending:** Google OAuth credentials and packaged-app handoff, reserved
-publisher bootstrap, built-in publication, and real end-to-end production tests.
+Google OAuth is configured in the dedicated `powermove-509806` project with
+external audience and publishing status **In production**. The production web
+client uses `https://cloud.trypowermove.com/v1/auth/oauth2/callback/google`;
+`GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are installed as Worker secrets.
+The real browser flow completed Google sign-in and returned a desktop handoff;
+the PKCE exchange and authenticated `/v1/me` both returned 200. The reserved
+`powermove` publisher is provisioned for the signed-in owner account. Google
+confirms sensitive-scope verification is not required; branding is not yet
+verified, so the consent screen currently identifies the app by its domain.
+
+**Still pending:** packaged-app handoff, built-in publication, production email
+OTP delivery, and end-to-end production Store installation/publishing tests.
 Do not interpret `/health` alone as a release-readiness check. The Neon project
 is currently on its Free plan with six-hour history retention; review capacity
 and recovery requirements before opening the store to users.
