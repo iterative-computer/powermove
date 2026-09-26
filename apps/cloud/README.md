@@ -156,9 +156,36 @@ The Store detail page lists older versions but currently offers installation
 of the latest only, so `--update` publishes Glass Tint 1.1.0 after you install
 1.0.0.
 
-## Provisioning (PENDING(provision))
+## Production provisioning
 
-Nothing below has been created yet. Do these once, in order.
+Cloudflare provisioned on 2026-09-26 in **Motioner** (`98dbb6e46f4901896327e5ff4035d637`):
+
+- Worker `powermove-cloud`, custom domain `https://cloud.trypowermove.com`.
+  The HTTPS `/health` endpoint returns 200. It checks the Worker only, not Postgres.
+- Private R2 buckets `powermove-objects`, `powermove-tars`, `powermove-icons`,
+  Standard storage in WNAM. No public bucket endpoints are needed.
+- Email Sending enabled for `trypowermove.com`, with SPF, DKIM, DMARC and bounce MX
+  DNS configured. Sender restricted to `sign-in@trypowermove.com`.
+  The account dashboard currently shows a **200-message daily sending quota**;
+  check capacity before launch. Actual inbox delivery is still to be tested.
+- Managed Turnstile widget `Powermove production`, restricted to
+  `cloud.trypowermove.com`. Production enforcement and 30-day clearance are set.
+- Worker secrets `BETTER_AUTH_SECRET`, `ADMIN_TOKEN`, `TURNSTILE_SECRET_KEY`
+  installed. Values are never in this repository.
+- Rate-limit bindings, six-hour GC schedule and observability deployed.
+  Request query strings are redacted; workers.dev and preview URLs are disabled.
+
+**Still pending:** Neon production/dev databases and migrations, `DATABASE_URL`,
+Google OAuth credentials and packaged-app handoff, reserved publisher bootstrap,
+built-in publication, and real end-to-end production tests. Database-backed
+routes are not operational until Neon is connected. Do not interpret `/health`
+as a release-readiness check.
+
+The source was merged without squashing. No desktop release tag or app build
+was triggered. Cloudflare deployment is manual via Wrangler; provisioning the
+backend does not publish a desktop update.
+
+Remaining setup reference (skip resources already listed above):
 
 1. **Neon.** Project with branches `main` (production) and `dev`. Apply the
    migrations in `drizzle/*.sql` in order to each (`bunx drizzle-kit migrate`
@@ -168,7 +195,7 @@ Nothing below has been created yet. Do these once, in order.
 3. **OAuth app.** Google, redirect URI
    `https://cloud.trypowermove.com/v1/auth/oauth2/callback/google`.
 4. **Cloudflare Email Service.** Onboard the sending domain
-   `trypowermove.com` (PENDING(provision)). The `send_email` binding allows
+   `trypowermove.com` (configured). The `send_email` binding allows
    `sign-in@trypowermove.com` as its sender and requires Workers Paid.
 5. **DNS.** `cloud.trypowermove.com` as the Worker's custom domain.
 6. **Workers Paid plan** (interactive Postgres transactions and the Rate
@@ -256,7 +283,7 @@ upgrade.
 
 ### Occasional browser verification (Turnstile)
 
-Create a **Managed** Turnstile widget with the hostname from `APP_ORIGIN`
+The production **Managed** Turnstile widget is configured with the hostname from `APP_ORIGIN`
 (for example `cloud.trypowermove.com`). The widget runs on the Worker's
 `/v1/human` page in the user's default browser, not inside the editor.
 Set `TURNSTILE_SITE_KEY` as a Worker variable and `TURNSTILE_SECRET_KEY` as a
@@ -280,8 +307,9 @@ or a rate-limit exemption. Clearing the app profile or losing secure-storage
 access requires verification again. The browser only receives an opaque
 signed ticket, not the app's bearer token or the email address.
 
-For local Computer Use testing, the example includes Cloudflare's always-pass
-keys. Those are accepted only on localhost/127.0.0.1; production hostname,
+For local Computer Use testing, `.dev.vars.example` includes Cloudflare's always-pass
+keys, which override the production widget variables in `wrangler.jsonc`. Existing
+local `.dev.vars` files must include these overrides too. Those are accepted only on localhost/127.0.0.1; production hostname,
 action and challenge binding remain mandatory with real keys. Automated tests
 mock Siteverify to exercise success, failures, identity binding and expiry.
 Real keys and a deployed-browser check are still required before launch.
