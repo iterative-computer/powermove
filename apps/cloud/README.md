@@ -193,9 +193,12 @@ was triggered. Provisioning the backend does not publish a desktop update.
 
 The app release workflow deploys the matching backend before publishing the app:
 cloud tests → database migrations → Wrangler deploy → Worker and Store health
-checks → built-ins → app release. Set `CLOUDFLARE_API_TOKEN` to a dedicated
-Motioner deployment token and `CLOUD_DATABASE_URL` to the **direct** Neon
-production connection in GitHub Actions secrets. Missing credentials or failed
+checks → built-ins → app release. GitHub Actions secrets are configured:
+`CLOUDFLARE_API_TOKEN` is the dedicated `powermove-github-release` account token
+(Individual Workers Editor for `powermove-cloud`, Workers Routes Write and
+Zone Read for `trypowermove.com` only); `CLOUD_DATABASE_URL` is the **direct**
+Neon production connection. A backend-only Wrangler deployment using this
+exact token succeeded, followed by successful live health and Store checks. Missing credentials or failed
 cloud steps stop publication. Ordinary pushes/merges do not run this workflow.
 Manual backend-only deployments remain available via `bun run deploy`.
 Migrations and API changes must stay compatible with already-installed clients;
