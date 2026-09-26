@@ -23,11 +23,10 @@ html,body{height:100%;overflow:hidden}
 html{background:transparent}
 
 /* ── glass chrome ──────────────────────────────────────── */
-/* Floating chrome (tab strip, tool cluster, Export, sidebar selection) reads
-   like Tahoe's toolbar buttons: a flat fill a step lighter than the canvas
-   and one uniform hairline. No gradients, no glint, no bloom, no hover
-   states. The backdrop is blurred and saturated so content passing beneath
-   reads through the material. */
+/* Floating chrome uses a flat fill a step lighter than the canvas. Titlebar
+   tabs and tools have no decorative rim; other glass surfaces keep theirs.
+   The backdrop is blurred and saturated so content passing beneath reads
+   through the material. */
 /* One flat hairline all the way round; no directional glint. */
 :root{
   --glass-fill:rgb(var(--paper-rgb) / .45);
@@ -55,15 +54,15 @@ html{background:transparent}
   box-shadow:var(--glass-edge);
   -webkit-backdrop-filter:var(--glass-backdrop);backdrop-filter:var(--glass-backdrop);
 }
-/* The rim is a flat 1px ring. */
-:is(.glass,#doc-strip,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after{
+/* Keep the hairline on other glass surfaces; titlebar tabs and tools use fill alone. */
+:is(.glass,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after{
   content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;
   padding:1px;background:var(--glass-rim);opacity:1;transition:none;
   -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
   -webkit-mask-composite:xor;mask-composite:exclude;
 }
 :is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on){position:relative;isolation:isolate;background:var(--glass-fill-hi)!important;box-shadow:var(--glass-edge-hi)!important}
-:is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on)::after{
+.glass-hi::after{
   content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;
   padding:1px;background:var(--glass-rim-hi);opacity:1;transition:none;
   -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
@@ -71,8 +70,9 @@ html{background:transparent}
 }
 @media (prefers-reduced-transparency: reduce){
   :is(.glass,#doc-strip,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){background:var(--ink-2);box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none}
-  :is(.glass,#doc-strip,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after,:is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on)::after{display:none}
-  :is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on){background:var(--ctl-raised)!important;box-shadow:var(--ctl-edge)!important}
+  :is(.glass,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after,.glass-hi::after{display:none}
+  .glass-hi{background:var(--ctl-raised)!important;box-shadow:var(--ctl-edge)!important}
+  :is(#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on){background:var(--ctl-raised)!important;box-shadow:none!important}
 }
 body{
   background:var(--bg-window);color:var(--tx);
