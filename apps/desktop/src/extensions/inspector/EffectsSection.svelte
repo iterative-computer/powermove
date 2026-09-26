@@ -189,10 +189,63 @@
     focusEffect(next.id);
   }
 
+  /* Effects render in stack order, so the list index is the render order. */
+  function reorder(effect: any, index: number): void {
+    const from = effects.findIndex((candidate: any) => candidate.id === effect.id);
+    const to = Math.max(0, Math.min(effects.length - 1, index));
+    if (from < 0 || from === to) return;
+    const result = inspectorEdit.apply(
+      { type: 'set_effect', target: layer.id, effect: effect.id, patch: { index: to } },
+      { label: 'Reorder effect', origin: 'inspector' }
+    );
+    if (result?.ok === false) return;
+    focusEffect(effect.id);
+    api.transport.invalidate?.();
+  }
+
+  let draggingId = $state<string | null>(null);
+  /* Insertion slot between rows: 0 = above the first effect, length = below the last. */
+  let dropSlot = $state<number | null>(null);
+
+  function dragStart(event: DragEvent, effect: any): void {
+    draggingId = effect.id;
+    event.dataTransfer?.setData('application/x-powermove-effect', effect.id);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+  }
+
+  function dragOver(event: DragEvent, effect: any): void {
+    if (!draggingId) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    const row = event.currentTarget as HTMLElement;
+    const bounds = row.getBoundingClientRect();
+    const index = effects.findIndex((candidate: any) => candidate.id === effect.id);
+    dropSlot = index + (event.clientY > bounds.top + bounds.height / 2 ? 1 : 0);
+  }
+
+  function drop(event: DragEvent): void {
+    if (!draggingId || dropSlot == null) return dragEnd();
+    event.preventDefault();
+    const effect = effects.find((candidate: any) => candidate.id === draggingId);
+    const from = effects.indexOf(effect);
+    const slot = dropSlot;
+    dragEnd();
+    if (effect) reorder(effect, slot > from ? slot - 1 : slot);
+  }
+
+  function dragEnd(): void {
+    draggingId = null;
+    dropSlot = null;
+  }
+
   function effectKeydown(event: KeyboardEvent, effect: any): void {
     const key = event.key.toLowerCase();
     const command = event.metaKey || event.ctrlKey;
-    if (key === 'arrowup' || key === 'arrowdown') moveSelection(event, effect, key === 'arrowup' ? -1 : 1);
+    if (event.altKey && (key === 'arrowup' || key === 'arrowdown')) {
+      const index = effects.findIndex((candidate: any) => candidate.id === effect.id);
+      reorder(effect, index + (key === 'arrowup' ? -1 : 1));
+    }
+    else if (key === 'arrowup' || key === 'arrowdown') moveSelection(event, effect, key === 'arrowup' ? -1 : 1);
     else if (key === 'backspace' || key === 'delete') deleteSelected(effect);
     else if (command && key === 'c') copySelected(effect);
     else if (command && key === 'v') pasteEffects();
@@ -223,7 +276,7 @@
 
   {#if effects.length > 0}
   <div class="fx-list" role="listbox" aria-label="Effects" aria-multiselectable="true">
-    {#each effects as effect (effect.id)}
+    {#each effects as effect, index (effect.id)}
       {@const definition = api.effects.get(effect.type)}
       {#if definition}
       {@const expanded = isOpen(effect)}
@@ -231,6 +284,14 @@
       <div
         class="row fx-head"
         class:selected={selected(effect)}
+        class:dragging={draggingId === effect.id}
+        class:drop-before={dropSlot === index && draggingId !== null}
+        class:drop-after={dropSlot === effects.length && index === effects.length - 1 && draggingId !== null}
+        draggable="true"
+        ondragstart={(event) => dragStart(event, effect)}
+        ondragover={(event) => dragOver(event, effect)}
+        ondrop={drop}
+        ondragend={dragEnd}
         data-effect-id={effect.id}
         data-selected={selected(effect) ? 'true' : undefined}
         tabindex="0"
@@ -327,6 +388,7 @@
   }
 
   .fx-head {
+    position: relative;
     margin-top: 4px;
     background: var(--ink-1);
     cursor: default;
@@ -336,6 +398,30 @@
   .fx-head.selected {
     background: var(--accent-dim);
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 52%, transparent);
+  }
+
+  .fx-head.dragging {
+    opacity: 0.45;
+  }
+
+  .fx-head.drop-before::before,
+  .fx-head.drop-after::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--accent);
+    pointer-events: none;
+  }
+
+  .fx-head.drop-before::before {
+    top: -3px;
+  }
+
+  .fx-head.drop-after::after {
+    bottom: -3px;
   }
 
   .fx-head:focus-visible {

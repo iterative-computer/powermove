@@ -186,6 +186,8 @@ export interface SetEffectCommand extends LayerTargetedCommand {
   patch: {
     enabled?: boolean;
     open?: boolean;
+    /** New position in the layer's effect stack (0 = applied first). */
+    index?: number;
   };
 }
 

@@ -185,6 +185,11 @@ it('all 19 source operations apply successfully and have an observable effect', 
   assert.deepEqual(Object.keys(toggleEffect.p), Array.from(PM.FX.blur.params, parameter => parameter.k));
   assert.equal(toggleEffect.on, false);
 
+  const secondEffect = PM.mkEffect('blur');
+  text.fx.push(secondEffect);
+  applyOne(PM, { type: 'set_effect', target: text.id, effect: secondEffect.id, patch: { index: 0 } });
+  assert.deepEqual(text.fx.map((effect: any) => effect.id), [secondEffect.id, toggleEffect.id]);
+
   applyOne(PM, {
     type: 'set_transition', layer: text.id, edge: 'in',
     transition: { type: 'crossfade', dur: .4 },

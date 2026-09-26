@@ -771,6 +771,41 @@ describe('InspectorPanel', () => {
     );
   });
 
+  it('reorders effects by drag and by option-arrow', () => {
+    const candidate = layer('A');
+    candidate.fx.push(
+      { id: 'fx-1', type: 'blur', on: true, p: {} },
+      { id: 'fx-2', type: 'blur', on: true, p: {} },
+      { id: 'fx-3', type: 'blur', on: true, p: {} }
+    );
+    const { apply } = setup([candidate], ['A']);
+    const row = (id: string) => target.querySelector<HTMLElement>(`[data-effect-id="${id}"]`)!;
+
+    row('fx-1').dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'ArrowDown', altKey: true, bubbles: true, cancelable: true
+    }));
+    expect(apply).toHaveBeenCalledExactlyOnceWith(
+      { type: 'set_effect', target: 'A', effect: 'fx-1', patch: { index: 1 } },
+      { label: 'Reorder effect', origin: 'inspector' }
+    );
+
+    apply.mockClear();
+    const drag = (type: string, element: HTMLElement, clientY = 0) => {
+      const event = new Event(type, { bubbles: true, cancelable: true }) as DragEvent;
+      Object.defineProperty(event, 'clientY', { value: clientY });
+      element.dispatchEvent(event);
+    };
+    drag('dragstart', row('fx-3'));
+    drag('dragover', row('fx-1'), -1);
+    flushSync();
+    expect(row('fx-1').classList.contains('drop-before')).toBe(true);
+    drag('drop', row('fx-1'), -1);
+    expect(apply).toHaveBeenCalledExactlyOnceWith(
+      { type: 'set_effect', target: 'A', effect: 'fx-3', patch: { index: 0 } },
+      { label: 'Reorder effect', origin: 'inspector' }
+    );
+  });
+
   it('selects multiple effects and routes copy, paste, and delete before layer shortcuts', () => {
     const candidate = layer('A');
     const channel = (value: number, id: string) => ({

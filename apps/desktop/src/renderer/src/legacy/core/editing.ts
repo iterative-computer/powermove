@@ -608,13 +608,22 @@ function setEffect(command: any) {
   const effect: any = layer.fx.find((item: any) => item.id === command.effect || item.type === command.effect);
   if (!effect) throw new Error(`Effect not found: ${command.effect}`);
   const patch: any = safePatch(command.patch, 'effect patch');
-  const allowed: any = new Set(['enabled', 'open']);
+  const allowed: any = new Set(['enabled', 'open', 'index']);
   for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new Error(`Effect field “${key}” is not editable`);
   if (patch.enabled != null) {
     if (isProperty(effect.on)) setProperty({ target: layer.id, path: `${effect.id}.$enabled`, value: !!patch.enabled, preserveHandEdits: false });
     else effect.on = !!patch.enabled;
   }
   if (patch.open != null) effect.open = !!patch.open;
+  if (patch.index != null) {
+    const to: any = PM.clamp(Math.round(finite(patch.index, 'effect index')), 0, layer.fx.length - 1);
+    const from: any = layer.fx.indexOf(effect);
+    if (from !== to) {
+      const next: any = layer.fx.filter((item: any) => item !== effect);
+      next.splice(to, 0, effect);
+      layer.fx = next;
+    }
+  }
   PM.touch();
   return { id: layer.id, effectId: effect.id };
 }

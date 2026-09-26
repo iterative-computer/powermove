@@ -66,7 +66,7 @@ const COMPOSITION_FIELDS = new Set([
   'name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill',
   'shutter', 'workArea'
 ]);
-const EFFECT_FIELDS = new Set(['enabled', 'open']);
+const EFFECT_FIELDS = new Set(['enabled', 'open', 'index']);
 const EASING_PRESETS = new Set([
   'linear', 'ease', 'easeIn', 'easeOut', 'easeInOut', 'quadIn', 'quadOut', 'quadInOut',
   'cubicIn', 'cubicOut', 'cubicInOut', 'quartIn', 'quartOut', 'quartInOut', 'expoIn',
@@ -546,6 +546,11 @@ function parseSetEffect(source: Record<string, unknown>): SetEffectCommand | Val
   if (targetError) return targetError;
   if (patch.enabled != null) out.patch.enabled = Boolean(patch.enabled);
   if (patch.open != null) out.patch.open = Boolean(patch.open);
+  if (patch.index != null) {
+    const index = finite(patch.index, 'patch.index');
+    if (index instanceof ValidationError) return index;
+    out.patch.index = Math.round(index);
+  }
   return out;
 }
 
