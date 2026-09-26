@@ -110,7 +110,8 @@ export function appMenuTemplate(
           click: () => windows?.newWindow()
         },
         commandItem('Open Project…', 'CommandOrControl+O', 'open', send),
-        { role: 'close', accelerator: 'CommandOrControl+W' },
+        { type: 'separator' },
+        commandItem('Close Tab', 'CommandOrControl+W', 'closeTab', send),
         { type: 'separator' },
         commandItem('Save Project', 'CommandOrControl+S', 'save', send),
         commandItem('Save Project As…', 'CommandOrControl+Shift+S', 'saveAs', send),
@@ -123,7 +124,7 @@ export function appMenuTemplate(
         {
           id: 'closeWindow',
           label: 'Close Window',
-          accelerator: 'CommandOrControl+W',
+          accelerator: 'CommandOrControl+Shift+W',
           enabled: !!windows,
           click: () => windows?.closeWindow()
         }
@@ -156,6 +157,15 @@ export function appMenuTemplate(
       submenu: [
         { role: 'minimize' },
         { role: 'zoom' },
+        { type: 'separator' },
+        commandItem('Show Next Tab', 'Control+Tab', 'nextTab', send),
+        commandItem('Show Previous Tab', 'Control+Shift+Tab', 'previousTab', send),
+        {
+          id: 'moveTabToNewWindow',
+          label: 'Move Tab to New Window',
+          enabled: !!windows,
+          click: () => send('moveTabToNewWindow')
+        },
         { type: 'separator' },
         {
           id: 'windowNewWindow',

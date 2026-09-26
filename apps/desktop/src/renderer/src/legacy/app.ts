@@ -129,11 +129,15 @@ function emptyHomeProject() {
 /** True while this window holds the unnamed placeholder composition rather than
  *  a project of the user's, which is when Projects has nothing to go back to. */
 PM.isHomeProject = () => !!homeProjectId && PM.proj?.id === homeProjectId;
-/* A window is either told which document it is for — a restored session, or an
+/* This window's project tabs in strip order. The placeholder composition is
+   never a tab. Main mirrors the list so no project is a tab in two windows. */
+let tabIds: string[] = [];
+/* A window is either told which documents it is for — a restored session, or an
    Open in New Window — or left to choose, skipping whatever the other windows
    already have open. */
 function loadBootProject() {
-  const request = PM.windows?.initialProject?.() ?? { projectId: null, taken: [] };
+  const request = PM.windows?.initialProject?.() ?? { projectId: null, tabs: [], taken: [] };
+  tabIds = [...new Set((Array.isArray(request.tabs) ? request.tabs : []).filter((id: any) => typeof id === 'string'))] as string[];
   if (request.projectId) {
     const requested = PM.Projects.get(request.projectId);
     if (requested) {
@@ -817,34 +821,96 @@ PM.newProject = () => {
   window.setTimeout(() => form.focus(), 30);
 };
 /**
- * Binds the document now on screen to this window. A refusal means a sibling
- * window owns it and has been raised — reached through File ▸ Open on a file
- * another window already has, or two windows restoring the same id — so this
- * window steps back to an empty composition rather than running a second editor
- * over one storage slot.
+ * Tells main which document this window is showing; null while it shows only
+ * the placeholder. A refusal means a sibling window owns it and has been
+ * raised — reached through File ▸ Open on a file another window already has, or
+ * two windows restoring the same id — so this window drops the tab rather than
+ * running a second editor over one storage slot.
  */
-function claimForThisWindow(id: string): void {
+function claimForThisWindow(id: string | null): void {
   void Promise.resolve(PM.windows?.claimProject?.(id) ?? { claimed: true }).then((claim: any) => {
-    if (claim?.claimed || PM.proj?.id !== id) return;
+    if (claim?.claimed || !id) return;
+    tabIds = tabIds.filter(tab => tab !== id);
+    PM.bus.emit('projects:open');
+    if (PM.proj?.id !== id) return;
     PM.toast('That project is already open in another window.');
-    switchProject(emptyHomeProject());
-    PM.ProjectsScreen?.show?.('recents');
+    showNeighbourOf(-1);
   });
 }
 
-function switchProject(p: any, history?: any) {
+/* ── live tabs ──────────────────────────────────────────── */
+/* A tab left for another keeps its document, undo stack and loaded media in
+   memory, so going back to it is instant: nothing is re-read from storage and
+   no media is decoded again. Only the most recently used few stay live, to
+   bound memory; an older one has already been written out and comes back from
+   storage the ordinary way. */
+const LIVE_TABS = 4;
+type ParkedTab = { project: any; history: any; media: any };
+const parkedTabs = new Map<string, ParkedTab>();
+function discardParked(id: string) {
+  const tab = parkedTabs.get(id);
+  if (!tab) return;
+  parkedTabs.delete(id);
+  PM.hist.discard?.(tab.history);
+  PM.assets.discard?.(tab.media);
+}
+function park(project: any) {
+  parkedTabs.set(project.id, { project, history: PM.hist.suspend(), media: PM.assets.suspend() });
+  // Oldest first in insertion order; the one on screen is the fourth live tab.
+  while (parkedTabs.size > LIVE_TABS - 1) discardParked(parkedTabs.keys().next().value!);
+}
+/** Brings a tab to the front, resumed from memory while it is still live. */
+function showTab(id: string): boolean {
+  const live = parkedTabs.get(id);
+  if (live) {
+    parkedTabs.delete(id);
+    switchProject(live.project, undefined, live);
+    return true;
+  }
+  const project = PM.Projects.get(id);
+  if (!project) return false;
+  switchProject(project);
+  return true;
+}
+
+/**
+ * Puts a project on screen. `p` is the document to show; a parked tab passes
+ * its own live state as `live`. Anything else — a file just opened, a new
+ * composition — is authoritative, so a parked copy of the same id is dropped.
+ */
+function switchProject(p: any, history?: any, live?: ParkedTab) {
+  const previous = PM.proj;
   PM.pause();
-  if (PM.proj?.id && PM.proj.id !== p.id && !PM.Projects.trashList?.().some((item: any) => item.id === PM.proj.id)) captureProjectSession();
+  const leaving = !!previous?.id && previous.id !== p.id;
+  const trashed = leaving && PM.Projects.trashList?.().some((item: any) => item.id === previous.id);
+  if (leaving && !trashed) captureProjectSession();
   closeProjectTransients();
-  PM.proj = hydrate(p);
-  claimForThisWindow(PM.proj.id);
+  if (!live) discardParked(p.id);
+  // A tab still in the strip keeps running in the background; a closed or
+  // trashed one, or the placeholder, is let go as before.
+  const parkable = leaving && !trashed && previous.id !== homeProjectId && tabIds.includes(previous.id)
+    && typeof PM.hist.suspend === 'function' && typeof PM.assets.suspend === 'function';
+  if (parkable) park(previous);
+  PM.proj = live ? live.project : hydrate(p);
+  if (live) {
+    // Renamed from Projects while in the background: the library has the name.
+    const name = PM.Projects.list().find((meta: any) => meta.id === PM.proj.id)?.name;
+    if (name) PM.proj.name = name;
+  }
+  const isTab = PM.proj.id !== homeProjectId;
+  // Opening something new adds it after the other tabs; an existing tab keeps its place.
+  if (isTab && !tabIds.includes(PM.proj.id)) tabIds.push(PM.proj.id);
+  claimForThisWindow(isTab ? PM.proj.id : null);
   const session = PM.Projects.getState(PM.proj.id);
   PM.Projects.putState(PM.proj.id, { ...session, lastActiveAt: Date.now() });
   const projectWorkspace = PM.store.get(`projectWorkspace.${PM.proj.id}`, null) || session?.workspace;
-  if (projectWorkspace) PM.WS.restoreSnapshot(projectWorkspace);
-  else PM.WS.activate('design', true);
-  PM.hist.import?.(history ?? session?.history);
-  persistCurrent(false);
+  // Rebuilding the docks remounts every panel; tabs that share a layout skip it.
+  if (projectWorkspace) {
+    if (JSON.stringify(projectWorkspace) !== JSON.stringify(PM.WS.snapshot())) PM.WS.restoreSnapshot(projectWorkspace);
+  } else PM.WS.activate('design', true);
+  if (live) PM.hist.resume(live.history);
+  else PM.hist.import?.(history ?? session?.history);
+  if (!live) persistCurrent(false);
   PM.bus.emit('projects:open');
   PM.time = Number.isFinite(session?.time) ? PM.clamp(session.time, 0, PM.proj.dur) : 0;
   PM.sel.layers = (session?.selection?.layers || []).filter((id: any) => PM.L(id));
@@ -859,7 +925,8 @@ function switchProject(p: any, history?: any) {
     timeline.graph = !!session?.timeline?.graph;
   }
   PM.rasterClear();
-  PM.assets.clear();
+  if (live) PM.assets.resume(live.media);
+  else if (!parkable) PM.assets.clear();
   APP.fileHandle = null;
   APP.dirty = fileState().dirty;
   PM.bus.emit('project');
@@ -870,8 +937,17 @@ function switchProject(p: any, history?: any) {
   viewerService(PM)?.layout();
   PM.invalidate('all');
   PM.invalidate('status');
-  restoreProjectAssets(PM.proj);
-  PM.autosave();
+  // A live tab only reads what was still loading when it was left, and has
+  // already said what was missing.
+  PM.projectAssetsReady = restoreProjectAssets(PM.proj, !live);
+  // Showing a document is not an edit. A new one is written once; a live one
+  // already was when it was set aside.
+  if (live) fileUI();
+  else PM.autosave();
+  // A tab left before its autosave settled still needs its unsaved dot checked.
+  if (previous?.id && previous.id !== PM.proj.id && previous.id !== homeProjectId && tabIds.includes(previous.id)) {
+    void refreshFileDirty(previous).catch(() => undefined);
+  }
 }
 
 PM.confirmCloseProject = async (id: string) => {
@@ -893,7 +969,153 @@ PM.confirmCloseProject = async (id: string) => {
   }
   return true;
 };
-PM.prepareToClose = async () => PM.confirmCloseProject(PM.proj.id);
+/* Closing the window closes every tab, so each one with unsaved file changes
+   gets its own chance to be saved. */
+PM.prepareToClose = async () => {
+  const ids = [...new Set([PM.proj.id, ...tabIds])];
+  for (const id of ids) if (!await PM.confirmCloseProject(id)) return false;
+  return true;
+};
+
+/* ── project tabs ──────────────────────────────────────── */
+/** Tabs that still name a live project. A project trashed or deleted from
+ *  another window drops out of the strip rather than leaving a dead tab. */
+function liveTabs(): string[] {
+  const known = new Set(PM.Projects.list().map((meta: any) => meta?.id));
+  return tabIds.filter(id => known.has(id) || (id === PM.proj?.id && id !== homeProjectId));
+}
+/** After the tab at `index` goes away, shows the tab that slid into its place,
+ *  else the one before it, else Projects over the placeholder composition. */
+function showNeighbourOf(index: number) {
+  const tabs = liveTabs().filter(id => id !== PM.proj?.id);
+  const next = tabs[Math.max(0, Math.min(index, tabs.length - 1))];
+  if (next && showTab(next)) return;
+  switchProject(emptyHomeProject());
+  PM.ProjectsScreen?.show?.('recents');
+}
+/** Takes a tab out of this window without asking about unsaved changes. The
+ *  caller has already decided: it was confirmed, trashed, or moved. */
+async function dropTab(id: string) {
+  const index = liveTabs().indexOf(id);
+  if (index < 0 && !tabIds.includes(id)) return false;
+  const active = id === PM.proj?.id;
+  tabIds = tabIds.filter(tab => tab !== id);
+  discardParked(id);
+  if (active) showNeighbourOf(index);
+  await PM.windows?.releaseProject?.(id);
+  PM.bus.emit('projects:open');
+  return true;
+}
+const closingTabs = new Set<string>();
+PM.Tabs = {
+  list: liveTabs,
+  /** The tab on screen, or null while this window shows only Projects. */
+  get active() { return PM.proj?.id && PM.proj.id !== homeProjectId ? PM.proj.id : null; },
+  async activate(id: string) {
+    const opened = await PM.openProjectHere(id);
+    if (opened) PM.ProjectsScreen?.hide?.();
+    return opened;
+  },
+  async close(id: string) {
+    if (!id || closingTabs.has(id) || !tabIds.includes(id)) return false;
+    closingTabs.add(id);
+    try {
+      if (!await PM.confirmCloseProject(id)) return false;
+      return await dropTab(id);
+    } catch (error: any) {
+      PM.toast('Could not close project: ' + (error?.message || 'Unknown error'));
+      return false;
+    } finally { closingTabs.delete(id); }
+  },
+  /** ⌘W: the tab on screen, or the window once no tab is left. */
+  closeCurrent() {
+    const id = PM.Tabs.active;
+    if (id) return PM.Tabs.close(id);
+    PM.closeWindow?.();
+    return true;
+  },
+  async closeOthers(id: string) {
+    for (const other of liveTabs().filter(tab => tab !== id)) {
+      if (!await PM.Tabs.close(other)) return false;
+    }
+    return true;
+  },
+  step(delta: number) {
+    const tabs = liveTabs();
+    if (!tabs.length) return false;
+    const index = tabs.indexOf(PM.Tabs.active ?? '');
+    const next = index < 0 ? (delta > 0 ? 0 : tabs.length - 1) : (index + delta + tabs.length) % tabs.length;
+    void PM.Tabs.activate(tabs[next]);
+    return true;
+  },
+  /** Drops a tab at a new position in the strip. */
+  move(id: string, to: number) {
+    const from = tabIds.indexOf(id);
+    if (from < 0) return;
+    const order = tabIds.filter(tab => tab !== id);
+    const target = liveTabs().filter(tab => tab !== id)[Math.max(0, to)];
+    order.splice(target ? order.indexOf(target) : order.length, 0, id);
+    if (order.every((tab, index) => tab === tabIds[index])) return;
+    tabIds = order;
+    void PM.windows?.reorderTabs?.(tabIds);
+    PM.bus.emit('projects:open');
+  },
+  /** Hands a tab to a window of its own. A lone tab stays: moving it would
+   *  leave this window empty for nothing. */
+  async moveToNewWindow(id: string) {
+    if (!id || !PM.windows?.supported || !tabIds.includes(id) || liveTabs().length < 2) return false;
+    if (id === PM.proj.id) {
+      // The session is captured on the way out, so the new window picks up
+      // the same Undo history, selection and playhead.
+      PM.bus.emit('project:flush-edits');
+      await APP.importQueue;
+    }
+    await dropTab(id);
+    await PM.store.flush?.();
+    return PM.windows.openProject(id).then((result: any) => {
+      if (!result.opened && !result.focused) PM.toast(result.error || 'The window could not be opened');
+      return result.opened || result.focused;
+    });
+  },
+  /**
+   * A tab dragged out of the strip and let go at a screen point: onto another
+   * window's strip, or into a window of its own there. A lone tab only moves
+   * onto another window — tearing it off would leave this one empty for
+   * nothing — and this window then closes, having nothing left to show.
+   */
+  async detach(id: string, point: { x: number; y: number }) {
+    if (!id || !PM.windows?.supported || !tabIds.includes(id)) return null;
+    const lone = liveTabs().length < 2;
+    if (lone && !await PM.windows.tabDropTarget(point)) return null;
+    if (id === PM.proj.id) {
+      PM.bus.emit('project:flush-edits');
+      await APP.importQueue;
+    }
+    await dropTab(id);
+    await PM.store.flush?.();
+    const { placed } = await PM.windows.placeTab(id, point);
+    if (!placed) {
+      PM.toast('The tab could not be moved');
+      await PM.openProjectHere(id);
+      PM.ProjectsScreen?.hide?.();
+      return null;
+    }
+    if (lone) PM.closeWindow?.();
+    return placed;
+  },
+  /** A trashed project leaves the strip; Trash is its only close. */
+  forget: dropTab,
+};
+/* A tab another window let go of over this window's strip. It opens here and
+   takes the place along the strip where it was dropped. */
+PM.windows?.onAdoptTab?.(async ({ projectId, x }: { projectId: string; x: number }) => {
+  const before = [...window.document.querySelectorAll<HTMLElement>('#tabs [data-tab-id]:not([data-tab-id="home"])')]
+    .filter(tab => tab.dataset.tabId !== projectId);
+  const index = before.filter(tab => { const box = tab.getBoundingClientRect(); return box.left + box.width / 2 < x; }).length;
+  if (!await PM.openProjectHere(projectId)) return;
+  PM.ProjectsScreen?.hide?.();
+  PM.Tabs.move(projectId, index);
+});
 
 /* ── media import ──────────────────────────────────────── */
 PM.pickFiles = (sequence = false, { replaceAssetId }: { replaceAssetId?: string } = {}) => {
@@ -1045,8 +1267,7 @@ window.addEventListener('pm-open-project', (e: any) => {
  */
 PM.openProjectHere = async (id: string) => {
   if (!id || id === PM.proj.id) return true;
-  const project = PM.Projects.get(id);
-  if (!project) {
+  if (!parkedTabs.has(id) && !PM.Projects.list().some((meta: any) => meta.id === id)) {
     PM.toast('Could not open this project because its local data is missing.');
     return false;
   }
@@ -1055,17 +1276,20 @@ PM.openProjectHere = async (id: string) => {
     if (!claim.focused) PM.toast('That project is already open in another window.');
     return false;
   }
-  switchProject(project);
+  if (!showTab(id)) {
+    PM.toast('Could not open this project because its local data is missing.');
+    return false;
+  }
   return true;
 };
 
-/** Opens a project in a window of its own, or raises the one that has it. */
+/** Opens a project in a window of its own, or raises the one that has it. A
+ *  tab of this window moves across rather than opening a second copy. */
 PM.openProjectInNewWindow = async (id: string) => {
   if (!id) return false;
   if (!PM.windows?.supported) return PM.openProjectHere(id);
-  if (id === PM.proj.id) {
-    // The document is already here; handing it to a new window would mean two
-    // editors on one slot, so this window keeps it.
+  if (tabIds.includes(id)) {
+    if (liveTabs().length > 1) return PM.Tabs.moveToNewWindow(id);
     PM.toast('This project is already open in this window.');
     return false;
   }
@@ -1088,7 +1312,31 @@ if (PM.proj.id === homeProjectId) {
 }
 /* Two windows restored onto one document would autosave over each other, so the
    window it was handed to confirms the claim the moment it boots. */
-if (PM.proj.id !== homeProjectId) claimForThisWindow(PM.proj.id);
+if (PM.proj.id !== homeProjectId) {
+  if (!tabIds.includes(PM.proj.id)) tabIds.push(PM.proj.id);
+  claimForThisWindow(PM.proj.id);
+}
+// Restore the strip first, then check inactive tabs' files one at a time, so a
+// long strip does not clone and hash every document in the first frame.
+const restoredTabs = tabIds.filter(id => id !== PM.proj.id);
+let restoredIndex = 0;
+async function refreshNextRestoredTab() {
+  const id = restoredTabs[restoredIndex++];
+  if (!id) return;
+  try {
+    if (!fileStates.has(id) && tabIds.includes(id)) {
+      const project = PM.Projects.get(id);
+      if (project) await refreshFileDirty(project);
+    }
+  } catch (error) { console.warn('Could not check restored project', error); }
+  scheduleRestoredTab();
+}
+function scheduleRestoredTab() {
+  if (restoredIndex >= restoredTabs.length) return;
+  if (window.requestIdleCallback) window.requestIdleCallback(() => { void refreshNextRestoredTab(); }, { timeout: 2000 });
+  else window.setTimeout(() => { void refreshNextRestoredTab(); }, 50);
+}
+scheduleRestoredTab();
 PM.bus.on('project:saved', () => PM.bus.emit('projects:open'));
 /* Another window renaming, trashing or saving a project changes what this one
    should be showing. Repaint on the keys that describe the shared library. */

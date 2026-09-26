@@ -179,8 +179,11 @@ describe('legacy Electron shim install', () => {
     // Without the bridge a claim still succeeds, so a lone window keeps working.
     const plain = loadShim();
     expect(plain.PM.windows.supported).toBe(false);
-    expect(plain.PM.windows.initialProject()).toEqual({ projectId: null, taken: [] });
+    expect(plain.PM.windows.initialProject()).toEqual({ projectId: null, tabs: [], taken: [] });
     await expect(plain.PM.windows.claimProject('P1')).resolves.toEqual({ claimed: true, focused: false });
+    // Closing and reordering tabs have no one to tell, and never fail the tab strip.
+    await expect(plain.PM.windows.releaseProject('P1')).resolves.toBe(true);
+    await expect(plain.PM.windows.reorderTabs(['P1'])).resolves.toBe(true);
     await expect(plain.PM.windows.create()).resolves.toBe(false);
   });
 

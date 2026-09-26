@@ -23,6 +23,7 @@ import {
   IPC,
   PROJECT_ID,
   type WindowClaimResult,
+  type WindowPlaceTabResult,
   type WindowInitialProject,
   type WindowOpenResult
 } from '../shared/ipc';
@@ -63,7 +64,7 @@ import { CONTENT_SECURITY_POLICY, SANDBOX_CONTENT_SECURITY_POLICY, extensionSand
 import { createStore, installQuitFlush, registerStoreIpc, type Store } from './storage';
 import { registerThemeIpc } from './theme';
 import { backgroundTesting, backgroundWindowOptions } from './background-testing';
-import { EditorWindows, restorableProjects } from './windows';
+import { EditorWindows, restorableSessions, windowUnderTabDrop } from './windows';
 import { isPanelPopoutRequest } from './panel-popout';
 import { OnboardingFlow, onboardingCompleted, onboardingEnabled, persistOnboardingCompleted } from './onboarding';
 
@@ -100,9 +101,9 @@ if (userDataOverride && path.isAbsolute(userDataOverride)) {
 }
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
-/* One project per window, any number of windows. `editors` is the whole of the
-   app's window state; nothing below may assume a single "main" window. */
-const editors = new EditorWindows<BrowserWindow>();
+/* Any number of windows, each with its own project tabs. `editors` is the whole
+   of the app's window state; nothing below may assume a single "main" window. */
+const editors = new EditorWindows<BrowserWindow>({ quiet: isBackgroundTest });
 /** The window a menu command or a Dock activation belongs to. */
 const currentEditor = (): BrowserWindow | null => {
   const focused = BrowserWindow.getFocusedWindow();
@@ -363,6 +364,21 @@ interface EditorWindowOptions {
   /** The project this window opens. Null lets the renderer pick, the way a
    *  single-window launch did. */
   projectId?: string | null;
+  /** Tabs a restored window comes back with, in strip order. */
+  tabs?: string[];
+  /** Screen point for the window's top-left corner: a tab torn off into a
+   *  window of its own opens where it was dropped. */
+  at?: { x: number; y: number };
+}
+
+/* A torn-off tab's window opens under the pointer but never off the display
+   it was dropped on, so its titlebar is always reachable. */
+function boundsAt(point: { x: number; y: number }, width: number, height: number): { x: number; y: number } {
+  const area = screen.getDisplayNearestPoint(point).workArea;
+  return {
+    x: Math.round(Math.min(Math.max(point.x, area.x), area.x + Math.max(0, area.width - width))),
+    y: Math.round(Math.min(Math.max(point.y, area.y), area.y + Math.max(0, area.height - height)))
+  };
 }
 
 /* Windows after the first are offset so a new one never lands exactly on the
@@ -382,9 +398,9 @@ function cascadeBounds(): { x: number; y: number } | null {
 }
 
 function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
-  const { entrance = false, onEntranceReady, projectId = null } = options;
+  const { entrance = false, onEntranceReady, projectId = null, tabs = [], at } = options;
   const testOptions = backgroundWindowOptions(isBackgroundTest);
-  const cascade = editors.size > 0 ? cascadeBounds() : null;
+  const cascade = at ? boundsAt(at, 1440, 900) : editors.size > 0 ? cascadeBounds() : null;
   const window = new BrowserWindow({
     ...testOptions,
     ...(entrance ? { show: false } : {}),
@@ -411,7 +427,7 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
     }
   });
 
-  editors.add(window, projectId);
+  editors.add(window, projectId, tabs);
   persistOpenWindows();
   window.on('focus', () => editors.touch(window));
   window.webContents.once('did-finish-load', drainPendingOpenFiles);
@@ -527,18 +543,21 @@ function registerWindowIpc(): void {
     const window = isTrustedSender(event) ? senderWindow(event) : null;
     if (!window) {
       // Nothing about the open documents is told to a sender we do not trust.
-      event.returnValue = { projectId: null, taken: [] } satisfies WindowInitialProject;
+      event.returnValue = { projectId: null, tabs: [], taken: [] } satisfies WindowInitialProject;
       return;
     }
     const projectId = editors.projectOf(window);
+    const tabs = editors.tabsOf(window);
     event.returnValue = {
       projectId,
-      taken: editors.openProjectIds().filter((id) => id !== projectId)
+      tabs,
+      taken: editors.openProjectIds().filter((id) => !tabs.includes(id))
     } satisfies WindowInitialProject;
   });
 
-  // A window taking a document over as its own. Refused when another window
-  // already has it, because two editors autosaving one slot would lose edits.
+  // A window showing a document, as a new tab or one it already has. Refused
+  // when another window has it, because two editors autosaving one slot would
+  // lose edits.
   ipcMain.handle(IPC.windowClaimProject, (event, payload: unknown): WindowClaimResult => {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     const window = senderWindow(event);
@@ -552,6 +571,73 @@ function registerWindowIpc(): void {
     editors.claim(window, projectId);
     persistOpenWindows();
     return { claimed: true, focused: false };
+  });
+
+  // Closing a tab frees its project for any window.
+  ipcMain.handle(IPC.windowReleaseProject, (event, payload: unknown): boolean => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    const window = senderWindow(event);
+    const projectId = readProjectId(payload, IPC.windowReleaseProject);
+    if (!window || !projectId) return false;
+    const released = editors.release(window, projectId);
+    if (released) persistOpenWindows();
+    return released;
+  });
+
+  ipcMain.handle(IPC.windowReorderTabs, (event, payload: unknown): boolean => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    const window = senderWindow(event);
+    const order = payload && typeof payload === 'object' ? (payload as { order?: unknown }).order : null;
+    if (!window || !Array.isArray(order) || order.length > 500) return false;
+    const ids = order.filter((id): id is string => typeof id === 'string' && PROJECT_ID.test(id));
+    const reordered = editors.reorder(window, ids);
+    if (reordered) persistOpenWindows();
+    return reordered;
+  });
+
+  /* A tab dragged out of its window. The renderer first asks whether it is over
+     another window's strip — a lone tab only moves if so, since tearing off a
+     window's last tab would just leave an empty window behind — then lets the
+     tab go and asks for it to be placed. */
+  const readPoint = (payload: unknown): { x: number; y: number } | null => {
+    const { x, y } = (payload && typeof payload === 'object' ? payload : {}) as { x?: unknown; y?: unknown };
+    return typeof x === 'number' && typeof y === 'number' && Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+  };
+  const dropTarget = (from: BrowserWindow, point: { x: number; y: number }): BrowserWindow | null =>
+    windowUnderTabDrop(editors.byRecency(), from, point, (window) =>
+      window.isDestroyed() || window.isMinimized() ? null : window.getContentBounds());
+
+  ipcMain.handle(IPC.windowTabDropTarget, (event, payload: unknown): boolean => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    const window = senderWindow(event);
+    const point = readPoint(payload);
+    return !!window && !!point && !!dropTarget(window, point);
+  });
+
+  ipcMain.handle(IPC.windowPlaceTab, (event, payload: unknown): WindowPlaceTabResult => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    const window = senderWindow(event);
+    const point = readPoint(payload);
+    const projectId = readProjectId(payload, IPC.windowPlaceTab);
+    if (!window || !point || !projectId) return { placed: null };
+    // The sender lets go before asking; anything still holding it keeps it.
+    editors.release(window, projectId);
+    const holder = editors.windowForProject(projectId);
+    if (holder) {
+      editors.reveal(holder);
+      return { placed: 'window' };
+    }
+    const target = dropTarget(window, point);
+    if (target) {
+      const bounds = target.getContentBounds();
+      target.webContents.send(IPC.windowAdoptTab, { projectId, x: point.x - bounds.x });
+      editors.reveal(target);
+      persistOpenWindows();
+      return { placed: 'window' };
+    }
+    // The new window's first tab sits where the pointer let go of it.
+    createWindow({ projectId, at: { x: point.x - 150, y: point.y - 22 } });
+    return { placed: 'new' };
   });
 
   ipcMain.handle(IPC.windowOpenProject, (event, payload: unknown): WindowOpenResult => {
@@ -579,11 +665,11 @@ function registerWindowIpc(): void {
   });
 }
 
-/** Reopens last session's windows, or opens one window when the preference is
- *  off, nothing was open, or those projects are gone. */
+/** Reopens last session's windows and their tabs, or opens one window when the
+ *  preference is off, nothing was open, or those projects are gone. */
 function restoreWindows(store: Store): void {
   const snapshot = store.get
-    ? Object.fromEntries(['restoreWindows', 'projects', 'openWindows', 'openTabs'].map(key => [key, store.get!(key)]))
+    ? Object.fromEntries(['restoreWindows', 'projects', 'windowTabs', 'openWindows', 'openTabs'].map(key => [key, store.get!(key)]))
     : store.snapshot();
   if (snapshot['restoreWindows'] === false) {
     createWindow();
@@ -593,12 +679,12 @@ function restoreWindows(store: Store): void {
   const known = new Set(
     metas.map((meta) => (meta as { id?: unknown } | null)?.id).filter((id): id is string => typeof id === 'string')
   );
-  const ids = restorableProjects(snapshot['openWindows'], snapshot['openTabs'], (id) => known.has(id));
-  if (!ids.length) {
+  const sessions = restorableSessions(snapshot['windowTabs'], snapshot['openWindows'], snapshot['openTabs'], (id) => known.has(id));
+  if (!sessions.length) {
     createWindow();
     return;
   }
-  for (const projectId of ids) createWindow({ projectId });
+  for (const { tabs, active } of sessions) createWindow({ projectId: active, tabs });
 }
 
 if (!hasSingleInstanceLock) {
@@ -696,7 +782,10 @@ if (!hasSingleInstanceLock) {
     app.on('before-quit', () => { quitting = true; });
     persistOpenWindows = () => {
       if (quitting) return;
+      // The flat list is what renderers read to know what is open anywhere;
+      // the per-window tabs are only for putting the windows back at launch.
       store.set('openWindows', editors.openProjectIds());
+      store.set('windowTabs', editors.openSessions());
     };
     registerWindowIpc();
     const quitBarrier = installQuitFlush(app, store, async () => {

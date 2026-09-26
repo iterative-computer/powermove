@@ -49,21 +49,19 @@ html{background:transparent}
   --glass-edge-hi:none;
   --glass-rim-hi:rgb(var(--paper-rgb) / .09);
 }
-:is(.glass,#doc-strip,#toolbar-strip,.tb-export){
+:is(.glass,#doc-strip,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){
   position:relative;isolation:isolate;
   background:var(--glass-fill);
   box-shadow:var(--glass-edge);
   -webkit-backdrop-filter:var(--glass-backdrop);backdrop-filter:var(--glass-backdrop);
 }
 /* The rim is a flat 1px ring. */
-:is(.glass,#doc-strip,#toolbar-strip,.tb-export)::after{
+:is(.glass,#doc-strip,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after{
   content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;
   padding:1px;background:var(--glass-rim);opacity:1;transition:none;
   -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
   -webkit-mask-composite:xor;mask-composite:exclude;
 }
-/* Glass does not react to hover: Export drops the button wash. */
-.tb-export:hover::after{opacity:1}
 :is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on){position:relative;isolation:isolate;background:var(--glass-fill-hi)!important;box-shadow:var(--glass-edge-hi)!important}
 :is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on)::after{
   content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;
@@ -72,8 +70,8 @@ html{background:transparent}
   -webkit-mask-composite:xor;mask-composite:exclude;
 }
 @media (prefers-reduced-transparency: reduce){
-  :is(.glass,#doc-strip,#toolbar-strip,.tb-export){background:var(--ink-2);box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none}
-  :is(.glass,#doc-strip,#toolbar-strip,.tb-export)::after,:is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on)::after{display:none}
+  :is(.glass,#doc-strip,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){background:var(--ink-2);box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none}
+  :is(.glass,#doc-strip,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after,:is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on)::after{display:none}
   :is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on){background:var(--ctl-raised)!important;box-shadow:var(--ctl-edge)!important}
 }
 body{
@@ -113,57 +111,82 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 #app{display:flex;flex-direction:column;height:100vh;background:transparent}
 
 #titlebar{
-  --titlebar-h:44px;--traffic-inset:96px;
+  --titlebar-h:44px;--traffic-inset:88px;
   height:var(--titlebar-h);flex:0 0 var(--titlebar-h);display:flex;align-items:center;gap:8px;
   padding:0 var(--pad) 0 var(--traffic-inset);
   position:relative;z-index:40;-webkit-app-region:no-drag;
 }
-/* The tool strip sits between two flexible drag spacers inside a rail that
-   spans the window, so it is centred on the window without a transform and
-   never overlapped by a drag rectangle. Tabs and the right-hand actions are
-   in flow and paint above the rail. */
-#tools-center{position:absolute;top:0;bottom:0;left:0;right:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
-#tools-center #toolbar-strip{pointer-events:auto}
-/* Tabs lead the row. Their width is capped so they stop short of the centred
-   tool strip at any window width the app supports. */
-#doc-strip{
-  position:relative;pointer-events:auto;
-  height:30px;width:max-content;display:flex;align-items:center;gap:2px;flex:0 1 auto;max-width:calc(50% - var(--traffic-inset) - 150px);min-width:0;
-  padding:2px;border:0;border-radius:var(--r-md);
-  overflow:hidden;-webkit-app-region:no-drag;
+/* Two sides: where you are on the left (tabs), and what you do on the right
+   (tools, then the panel library, settings and Export). The tabs take all the
+   room up to the drag spacer that separates them from the right side. */
+#tabs{
+  position:relative;
+  height:30px;display:flex;align-items:center;gap:2px;flex:0 1 auto;min-width:0;
+  -webkit-app-region:no-drag;
 }
-#doc-strip :is([role="button"],button):focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.project-tablist{display:flex;align-items:center;gap:6px;min-width:0;flex:0 1 auto}
+.project-tab-scroll{
+  position:relative;display:flex;align-items:center;gap:2px;min-width:0;height:30px;
+  overflow-x:auto;overflow-y:hidden;scrollbar-width:none;overscroll-behavior-x:contain;
+}
+.project-tab-scroll::-webkit-scrollbar{display:none}
+/* Tabs that run past the strip fade out at the edge they continue from. */
+.project-tab-scroll.fade-start{-webkit-mask-image:linear-gradient(to right,transparent,#000 28px);mask-image:linear-gradient(to right,transparent,#000 28px)}
+.project-tab-scroll.fade-end{-webkit-mask-image:linear-gradient(to left,transparent,#000 28px);mask-image:linear-gradient(to left,transparent,#000 28px)}
+.project-tab-scroll.fade-start.fade-end{-webkit-mask-image:linear-gradient(to right,transparent,#000 28px,#000 calc(100% - 28px),transparent);mask-image:linear-gradient(to right,transparent,#000 28px,#000 calc(100% - 28px),transparent)}
+#tabs :is([role="tab"],button):focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 .titlebar-drag{flex:1 1 0;align-self:stretch;min-width:24px;pointer-events:auto;-webkit-app-region:drag}
 .titlebar-drag-traffic{position:absolute;left:0;top:0;bottom:0;width:var(--traffic-inset);flex:none}
 /* Served to a browser there are no traffic lights to leave room for. */
 .remote-app #titlebar{--traffic-inset:var(--pad)}
 #titlebar button,#titlebar input,#titlebar a{-webkit-app-region:no-drag}
-.project-strip-btn{width:26px;height:26px;flex:none;display:grid;place-items:center;border-radius:var(--r-sm);color:var(--tx-3);transition:background var(--dur-1),color var(--dur-1),transform var(--dur-1) var(--ease)}
-.project-strip-btn:hover{background:var(--bg-row-hi);color:var(--tx)}
+.project-strip-btn{width:28px;height:28px;flex:none;display:grid;place-items:center;border-radius:var(--r-md);color:var(--tx-3);transition:background var(--dur-1),color var(--dur-1),transform var(--dur-1) var(--ease)}
+.project-strip-btn:hover{background:var(--ink-1);color:var(--tx)}
 .project-strip-btn:active{transform:scale(.94)}
 .project-strip-btn.on{background:var(--ctl-raised);color:var(--tx);box-shadow:var(--ctl-edge)}
-.project-strip-btn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.project-strip-btn svg{width:15px;height:15px}
+.project-new{margin-left:2px}
+/* A tab is its name on the bare titlebar; only the one on screen is raised.
+   Unsaved changes read as "Edited" after the name, the way a macOS document
+   window titles itself; the name gives way before the word does. */
 .project-doc{
-  position:relative;height:26px;min-width:88px;max-width:220px;flex:0 1 auto;
-  display:flex;align-items:center;gap:7px;padding:0 9px;border:0;border-radius:var(--r-sm);
-  color:var(--tx-3);font-size:var(--fs-sm);font-weight:var(--fw-medium);white-space:nowrap;transition:background var(--dur-1),color var(--dur-1),box-shadow var(--dur-1),transform var(--dur-1) var(--ease);
+  position:relative;height:28px;flex:0 1 184px;width:184px;min-width:106px;container-type:inline-size;
+  display:flex;align-items:center;gap:4px;padding:0 5px 0 11px;border:0;border-radius:var(--r-md);
+  color:var(--tx-3);font-size:var(--fs-sm);font-weight:var(--fw-medium);white-space:nowrap;
+  transition:background var(--dur-1),color var(--dur-1),box-shadow var(--dur-1);
 }
-/* Unsaved work reads as a dot beside the name, the way a document window's
-   close button does on macOS. The tab strip used to carry this on its close
-   button, which no longer exists. */
-.project-doc.dirty::before{content:"";width:6px;height:6px;flex:none;border-radius:50%;background:var(--tx-4)}
-.project-doc.dirty.on::before{background:var(--accent)}
 .project-doc:hover{background:var(--ink-1);color:var(--tx-2)}
-.project-doc:active{transform:scale(.985)}
+/* Over Projects, the tab you came from keeps a brighter name so the way back is plain. */
+.project-doc.current:not(.on){color:var(--tx-2)}
 .project-doc.on{background:var(--ctl-raised);color:var(--tx);box-shadow:var(--ctl-edge)}
-.project-doc-label{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis}
-.project-doc.renaming{transform:none;border-color:color-mix(in srgb,var(--accent) 58%,var(--line-2));box-shadow:0 0 0 2px var(--accent-dim)}
+/* The tab being dragged rides above its neighbours as they make room. */
+.project-doc.lifted{z-index:2;transition:none;background:var(--bg-float)!important;color:var(--tx);box-shadow:var(--shadow-lift)!important}
+.project-tab-scroll.dragging .project-doc:not(.lifted){pointer-events:none}
+/* Pulled out of the strip, the tab's slot empties and a ghost of it follows
+   the pointer; letting go moves it to another window or a new one. */
+.project-doc.torn{opacity:.3}
+.tab-ghost{position:fixed;z-index:400;width:184px;pointer-events:none;background:var(--bg-float);color:var(--tx);box-shadow:var(--shadow-float);transform:rotate(-1.5deg)}
+.project-doc-label{min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis}
+.project-doc-close{position:relative;width:18px;height:18px;flex:none;margin-left:auto;display:grid;place-items:center;border-radius:var(--r-xs);color:var(--tx-3);opacity:0;transition:opacity var(--dur-1),background var(--dur-1),color var(--dur-1)}
+.project-doc-close svg{width:10px;height:10px;transition:opacity var(--dur-1)}
+.project-doc:is(:hover,.on,:focus-visible) .project-doc-close{opacity:1}
+.project-doc-close:hover{background:var(--ink-2);color:var(--tx)}
+.project-doc.lifted .project-doc-close{opacity:0}
+.project-doc-state{flex:none;color:var(--tx-4);font-weight:var(--fw-regular)}
+.project-doc.on .project-doc-state{color:var(--tx-3)}
+/* Too narrow for the word, the name itself leans instead. */
+@container (max-width:150px){
+  .project-doc-state{display:none}
+  .project-doc.dirty .project-doc-label{font-style:italic}
+}
+.project-doc.renaming{box-shadow:0 0 0 2px var(--accent-dim)}
 .project-doc-input{min-width:0;width:100%;height:20px;color:var(--tx);font:inherit;line-height:20px;background:transparent}
+@media (prefers-reduced-motion:reduce){.project-doc,.project-doc-close,.project-doc-close svg{transition:none}}
 
 .tb-right{display:flex;align-items:center;gap:2px;margin-left:auto;position:relative;-webkit-app-region:no-drag}
-/* Export is the app's terminal action, so it is the one labelled control in the
-   titlebar; the icon-only buttons beside it stay secondary. */
-.tb-export{padding:0 10px;margin-right:6px}
+/* Export is the app's terminal action: the one labelled, filled control in the
+   titlebar, at the trailing edge. Everything beside it stays an icon. */
+.tb-export{height:28px;padding:0 12px 0 10px;margin-left:8px;border-radius:var(--r-md)}
 
 /* ── export dialog ─────────────────────────────────────────
    The Settings › Project page in a sheet: the same group cards, title-and-
@@ -234,11 +257,10 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .iconbtn.dis{opacity:var(--disabled);pointer-events:none}
 .iconbtn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 
-/* ── tool toolbar, centred in the native titlebar ──────── */
+/* ── tool toolbar, leading the titlebar's right side ───── */
 #toolbar-strip{
   flex:0 0 auto;min-width:0;height:30px;display:flex;align-items:center;
-  margin:0;padding:2px;border:0;border-radius:var(--r-md);
-  /* Stay in the rail's flex flow so native drag spacers stop at the tools. */
+  margin:0 8px 0 0;padding:2px;border:0;border-radius:var(--r-md);
   position:relative;z-index:30;-webkit-app-region:no-drag;
 }
 #toolbar-strip[hidden]{display:none}

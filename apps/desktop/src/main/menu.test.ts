@@ -95,7 +95,9 @@ describe('application menu', () => {
     );
     expect(appItems.find((item) => item.role === 'quit')?.accelerator).toBe('Command+Q');
     expect(appItems.find((item) => item.id === 'settings')).toMatchObject({ label: 'Settings…', accelerator: 'CommandOrControl+,', registerAccelerator: false });
-    expect(fileItems.find((item) => item.role === 'close')?.accelerator).toBe('CommandOrControl+W');
+    // ⌘W closes the tab; the window has ⇧⌘W.
+    expect(fileItems.find((item) => item.id === 'closeTab')?.accelerator).toBe('CommandOrControl+W');
+    expect(fileItems.find((item) => item.id === 'closeWindow')?.accelerator).toBe('CommandOrControl+Shift+W');
     const replay = appItems.find((item) => item.id === 'replayOnboarding');
     expect(replay).toBeUndefined();
 
@@ -103,7 +105,8 @@ describe('application menu', () => {
       'New Project',
       'New Window',
       'Open Project…',
-      'close',
+      'separator',
+      'Close Tab',
       'separator',
       'Save Project',
       'Save Project As…',
@@ -119,18 +122,19 @@ describe('application menu', () => {
       'CommandOrControl+N',
       'CommandOrControl+Shift+N',
       'CommandOrControl+O',
+      'CommandOrControl+W',
       'CommandOrControl+S',
       'CommandOrControl+Shift+S',
       'CommandOrControl+I',
       undefined,
       'CommandOrControl+E',
-      'CommandOrControl+W'
+      'CommandOrControl+Shift+W'
     ]);
     for (const item of fileItems) {
       item.click?.({} as never, undefined, {} as never);
     }
     // Making and closing windows is main's own work, so neither reaches the renderer.
-    expect(sent).toEqual(['newProject', 'open', 'save', 'saveAs', 'import', 'importSequence', 'export']);
+    expect(sent).toEqual(['newProject', 'open', 'closeTab', 'save', 'saveAs', 'import', 'importSequence', 'export']);
 
     const editItems = submenu(topLevel(template, 'Edit'));
     const undo = editItems.find((item) => item.label === 'Undo');
@@ -148,7 +152,7 @@ describe('application menu', () => {
     undo?.click?.({} as never, undefined, {} as never);
     redo?.click?.({} as never, undefined, {} as never);
     expect(sent).toEqual([
-      'newProject', 'open', 'save', 'saveAs', 'import', 'importSequence', 'export', 'contextUndo', 'contextRedo',
+      'newProject', 'open', 'closeTab', 'save', 'saveAs', 'import', 'importSequence', 'export', 'contextUndo', 'contextRedo',
     ]);
     expect(editItems.filter((item) => item.role)).toEqual([]);
     const contextCommands = editItems.slice(3, 7);
@@ -213,6 +217,22 @@ describe('application menu', () => {
     const unwired = submenu(topLevel(appMenuTemplate(() => undefined), 'File'));
     expect(unwired.find((item) => item.label === 'New Window')?.enabled).toBe(false);
     expect(unwired.find((item) => item.label === 'Close Window')?.enabled).toBe(false);
+  });
+
+  it('walks and moves tabs from the Window menu through the renderer', () => {
+    const sent: string[] = [];
+    const template = appMenuTemplate((command) => sent.push(command), { newWindow: vi.fn(), closeWindow: vi.fn() });
+    const windowItems = submenu(topLevel(template, 'Window'));
+    const tabItems = windowItems.filter((item) => ['nextTab', 'previousTab', 'moveTabToNewWindow'].includes(String(item.id)));
+    expect(tabItems.map((item) => [item.label, item.accelerator])).toEqual([
+      ['Show Next Tab', 'Control+Tab'],
+      ['Show Previous Tab', 'Control+Shift+Tab'],
+      ['Move Tab to New Window', undefined]
+    ]);
+    for (const item of tabItems) item.click?.({} as never, undefined, {} as never);
+    expect(sent).toEqual(['nextTab', 'previousTab', 'moveTabToNewWindow']);
+    const unwired = submenu(topLevel(appMenuTemplate(() => undefined), 'Window'));
+    expect(unwired.find((item) => item.id === 'moveTabToNewWindow')?.enabled).toBe(false);
   });
 
   it('includes development view tools only in unpackaged builds', () => {

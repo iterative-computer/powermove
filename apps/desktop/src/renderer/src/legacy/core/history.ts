@@ -31,7 +31,7 @@ function valueAt(root: any, path: PathPart[]): { exists: boolean; value?: any } 
 }
 
 export function install(PM: PMRegistry): void {
-  const records = new HistoryRecords();
+  let records = new HistoryRecords();
   let maxBytes = PM.Memory?.budget?.('history') || DEFAULT_MAX_BYTES;
   type Entry = {
     id: string;
@@ -339,6 +339,35 @@ export function install(PM: PMRegistry): void {
       records.clear();
       totalBytes = 0;
       publish();
+    },
+    /**
+     * Sets the live undo stack aside, untouched, for a project going into a
+     * background tab, and leaves an empty one. Unlike export(), this keeps the
+     * session-only entries (a media replacement, say) and their retained
+     * runtimes, so resuming the tab puts back exactly what it had.
+     */
+    suspend() {
+      const parked = { stack, idx, totalBytes, records };
+      stack = [];
+      idx = -1;
+      pending = null;
+      depth = 0;
+      totalBytes = 0;
+      records = new HistoryRecords();
+      publish();
+      return parked;
+    },
+    /** Puts back a stack set aside by suspend(), replacing the current one. */
+    resume(parked: any) {
+      if (!parked || !Array.isArray(parked.stack)) return false;
+      H.clear();
+      ({ stack, idx, totalBytes, records } = parked);
+      publish();
+      return true;
+    },
+    /** Lets go of a parked stack that will never be resumed. */
+    discard(parked: any) {
+      parked?.stack?.forEach?.((entry: Entry) => entry.cleanup?.());
     },
     list: () => stack.map(entry => entry.label),
     stats: () => ({ entries: stack.length, bytes: totalBytes, maxBytes, estimated: false, byteKind: 'serialized' }),

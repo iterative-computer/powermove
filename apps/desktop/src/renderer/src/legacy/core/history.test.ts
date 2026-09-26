@@ -41,6 +41,29 @@ describe('legacy history install', () => {
       expect(PM.proj.text).toBe('3'.repeat(100_000));
     } finally { (globalThis as any).window = previous; }
   });
+  it('parks a background tab\'s undo stack and resumes it untouched', () => {
+    const PM = historyRegistry();
+    const cleanup = vi.fn();
+    PM.hist.do('Set value', () => { PM.proj.value = 2; });
+    // A runtime-only entry, the kind export() cannot carry across a reload.
+    PM.hist.external('Replace media', vi.fn(), vi.fn(), { bytes: 1, cleanup });
+
+    const parked = PM.hist.suspend();
+    expect(PM.hist.list()).toEqual([]);
+    expect(PM.hist.canUndo()).toBe(false);
+    // Another tab's edits live on their own stack meanwhile.
+    PM.hist.do('Other tab', () => { PM.proj.value = 9; });
+
+    expect(PM.hist.resume(parked)).toBe(true);
+    expect(PM.hist.list()).toEqual(['Set value', 'Replace media']);
+    expect(PM.hist.label()).toBe('Replace media');
+    // Parking and resuming is not closing: nothing was cleaned up.
+    expect(cleanup).not.toHaveBeenCalled();
+
+    PM.hist.discard(PM.hist.suspend());
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
   it('records one source transaction and reverses and reapplies it', () => {
     const PM = historyRegistry();
 

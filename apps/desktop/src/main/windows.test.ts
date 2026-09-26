@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { EditorWindows, restorableProjects } from './windows';
+import { EditorWindows, restorableSessions, TAB_STRIP_BAND, windowUnderTabDrop } from './windows';
 
 function fakeWindow(name: string) {
   return {
@@ -35,10 +35,55 @@ describe('editor window registry', () => {
     expect(editors.claim(second, 'titles')).toBe(true);
     expect(editors.openProjectIds()).toEqual(['hero', 'titles']);
 
-    // Letting a document go frees it for another window.
+    // Showing nothing keeps the tab; only closing it frees the document.
     expect(editors.claim(first, null)).toBe(true);
+    expect(editors.claim(second, 'hero')).toBe(false);
+    expect(editors.release(first, 'hero')).toBe(true);
     expect(editors.claim(second, 'hero')).toBe(true);
-    expect(editors.openProjectIds()).toEqual(['hero']);
+    expect(editors.openProjectIds()).toEqual(['titles', 'hero']);
+  });
+
+  it('keeps a window\'s tabs in strip order and shows one of them', () => {
+    const editors = new EditorWindows<ReturnType<typeof fakeWindow>>();
+    const window = fakeWindow('one');
+    editors.add(window, 'b', ['a', 'b', 'a', '']);
+    expect(editors.tabsOf(window)).toEqual(['a', 'b']);
+    expect(editors.projectOf(window)).toBe('b');
+
+    // A new document is appended; switching to an existing tab leaves the strip alone.
+    editors.claim(window, 'c');
+    editors.claim(window, 'a');
+    expect(editors.tabsOf(window)).toEqual(['a', 'b', 'c']);
+    expect(editors.projectOf(window)).toBe('a');
+
+    // Closing the tab on screen leaves the window showing nothing until it picks.
+    expect(editors.release(window, 'a')).toBe(true);
+    expect(editors.release(window, 'a')).toBe(false);
+    expect(editors.projectOf(window)).toBeNull();
+    expect(editors.tabsOf(window)).toEqual(['b', 'c']);
+  });
+
+  it('reorders only the tabs a window has', () => {
+    const editors = new EditorWindows<ReturnType<typeof fakeWindow>>();
+    const window = fakeWindow('one');
+    editors.add(window, 'a', ['a', 'b', 'c']);
+    editors.reorder(window, ['c', 'a', 'stranger', 'c']);
+    // Unknown ids are ignored and a tab left out keeps its place at the end.
+    expect(editors.tabsOf(window)).toEqual(['c', 'a', 'b']);
+  });
+
+  it('remembers every window\'s tabs for the next launch', () => {
+    const editors = new EditorWindows<ReturnType<typeof fakeWindow>>();
+    const first = fakeWindow('first');
+    const empty = fakeWindow('empty');
+    const second = fakeWindow('second');
+    editors.add(first, 'b', ['a', 'b']);
+    editors.add(empty);
+    editors.add(second, 'c');
+    expect(editors.openSessions()).toEqual([
+      { tabs: ['a', 'b'], active: 'b' },
+      { tabs: ['c'], active: 'c' }
+    ]);
   });
 
   it('restores the list in window order and forgets closed windows', () => {
@@ -95,25 +140,52 @@ describe('editor window registry', () => {
     expect(editors.reveal(window)).toBe(false);
     expect(editors.reveal(null)).toBe(false);
   });
+
+  it('never shows or focuses a window when quiet, as in background tests', () => {
+    const editors = new EditorWindows<ReturnType<typeof fakeWindow>>({ quiet: true });
+    const window = fakeWindow('hidden');
+    window.minimized = true;
+    editors.add(window, 'a');
+    expect(editors.reveal(window)).toBe(true);
+    expect([window.minimized, window.shown, window.focused]).toEqual([true, 0, 0]);
+  });
 });
 
-describe('restorableProjects', () => {
+describe('restorableSessions', () => {
   const known = (id: string) => id !== 'gone';
 
-  it('prefers the window-era key and falls back to a pre-window profile', () => {
-    expect(restorableProjects(['a', 'b'], ['x'], known)).toEqual(['a', 'b']);
-    expect(restorableProjects([], ['x', 'y'], known)).toEqual(['x', 'y']);
-    expect(restorableProjects(undefined, undefined, known)).toEqual([]);
+  it('puts each window back with its own tabs', () => {
+    expect(restorableSessions([{ tabs: ['a', 'b'], active: 'a' }, { tabs: ['c'], active: 'c' }], ['x'], ['y'], known)).toEqual([
+      { tabs: ['a', 'b'], active: 'a' },
+      { tabs: ['c'], active: 'c' }
+    ]);
+  });
+
+  it('falls back to one window per project, then to a single-window tab strip', () => {
+    expect(restorableSessions(undefined, ['a', 'b'], ['x'], known)).toEqual([
+      { tabs: ['a'], active: 'a' },
+      { tabs: ['b'], active: 'b' }
+    ]);
+    expect(restorableSessions([], [], ['x', 'y'], known)).toEqual([{ tabs: ['x', 'y'], active: 'y' }]);
+    expect(restorableSessions(undefined, undefined, undefined, known)).toEqual([]);
   });
 
   it('never asks for one document twice, or for one that is no longer there', () => {
-    expect(restorableProjects(['a', 'a', 'gone', null, 7, ''], null, known)).toEqual(['a']);
+    expect(restorableSessions([
+      { tabs: ['a', 'a', 'gone', null, 7, ''], active: 'gone' },
+      { tabs: ['a'], active: 'a' },
+      'junk'
+    ], null, null, known)).toEqual([{ tabs: ['a'], active: 'a' }]);
+    expect(restorableSessions(null, ['a', 'a', 'gone', null, 7, ''], null, known)).toEqual([{ tabs: ['a'], active: 'a' }]);
   });
 
-  it('caps how many windows a launch may open', () => {
+  it('caps how many windows and tabs a launch may open', () => {
     const many = Array.from({ length: 40 }, (_, index) => `p${index}`);
-    expect(restorableProjects(many, null, known)).toHaveLength(12);
-    expect(restorableProjects(many, null, known, 3)).toEqual(['p0', 'p1', 'p2']);
+    expect(restorableSessions(null, many, null, known)).toHaveLength(12);
+    expect(restorableSessions(null, many, null, known, { windows: 3 }).map(session => session.active)).toEqual(['p0', 'p1', 'p2']);
+    expect(restorableSessions([{ tabs: many, active: 'p39' }], null, null, known, { tabs: 5 })).toEqual([
+      { tabs: ['p0', 'p1', 'p2', 'p3', 'p4'], active: 'p4' }
+    ]);
   });
 });
 
@@ -133,5 +205,37 @@ describe('window bookkeeping is not a source of surprise', () => {
     editors.add(window, 'b');
     expect(editors.size).toBe(1);
     expect(editors.projectOf(window)).toBe('a');
+  });
+});
+
+describe('windowUnderTabDrop', () => {
+  const bounds: Record<string, { x: number; y: number; width: number; height: number } | null> = {
+    from: { x: 0, y: 0, width: 800, height: 600 },
+    front: { x: 600, y: 100, width: 800, height: 600 },
+    back: { x: 500, y: 50, width: 800, height: 600 },
+    minimized: null
+  };
+  const drop = (order: string[], x: number, y: number) =>
+    windowUnderTabDrop(order, 'from', { x, y }, (window) => bounds[window] ?? null);
+
+  it('lands on the strip of the window under the point', () => {
+    expect(drop(['front', 'from'], 700, 110)).toBe('front');
+    expect(drop(['front', 'from'], 700, 100 + TAB_STRIP_BAND + 1)).toBeNull();
+    // Where the source window is in front, the drop stays with it.
+    expect(drop(['from', 'front'], 700, 110)).toBeNull();
+  });
+
+  it('lets the front-most window take the drop, and its body block the strip behind', () => {
+    // The point is on both strips' height, but the front window is on top.
+    expect(drop(['front', 'back'], 650, 105)).toBe('front');
+    // Over the front window's body: the back window's strip there is hidden.
+    expect(drop(['front', 'back'], 700, 300)).toBeNull();
+    expect(drop(['back', 'front'], 700, 60)).toBe('back');
+  });
+
+  it('never drops onto the window the tab came from, or one that is minimized', () => {
+    expect(drop(['from', 'front'], 100, 10)).toBeNull();
+    expect(drop(['minimized'], 10, 10)).toBeNull();
+    expect(drop(['front'], 5000, 5000)).toBeNull();
   });
 });

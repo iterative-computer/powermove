@@ -104,6 +104,11 @@ export const IPC = {
 
   windowInitialProject: 'window:initial-project', // ipcRenderer.sendSync, boot barrier only
   windowClaimProject: 'window:claim-project',
+  windowReleaseProject: 'window:release-project',
+  windowReorderTabs: 'window:reorder-tabs',
+  windowTabDropTarget: 'window:tab-drop-target',
+  windowPlaceTab: 'window:place-tab',
+  windowAdoptTab: 'window:adopt-tab', // main → renderer, a tab dropped on this window's strip
   windowOpenProject: 'window:open-project',
   windowNew: 'window:new',
   windowClose: 'window:close',
@@ -135,9 +140,11 @@ export interface AppUpdateState {
 /** What a window is asked to show when it boots. `projectId` is null for a
  * window that picks its own project the way a single-window launch did; it then
  * has to skip everything in `taken`, because those documents belong to the
- * windows that already have them. */
+ * windows that already have them. `tabs` are the window's restored tabs in
+ * strip order. */
 export interface WindowInitialProject {
   projectId: string | null;
+  tabs?: string[];
   taken: string[];
 }
 
@@ -149,9 +156,21 @@ export type WindowOpenResult =
   | { opened: false; focused: true }
   | { opened: false; focused: false; error: string };
 
-/** Outcome of a window asking to take a project over as its own document.
- * A refused claim always means another window has it and was raised instead, so
- * the asking window keeps whatever it already had open. */
+/** Outcome of a window asking to show a project as one of its tabs. A refused
+ * claim always means another window has it and was raised instead, so the
+ * asking window keeps whatever it already had open. */
+/** Where a tab dragged out of its window ended up: another window's strip, a
+ *  window of its own, or nowhere because it could not be placed. */
+export interface WindowPlaceTabResult {
+  placed: 'window' | 'new' | null;
+}
+
+/** A tab dropped on this window's strip, and where along it in window pixels. */
+export interface WindowAdoptTab {
+  projectId: string;
+  x: number;
+}
+
 export interface WindowClaimResult {
   claimed: boolean;
   focused: boolean;
@@ -494,7 +513,11 @@ export type MenuCommand =
   | 'actualSize'
   | 'fitComposition'
   | 'fitView'
-  | 'settings';
+  | 'settings'
+  | 'closeTab'
+  | 'nextTab'
+  | 'previousTab'
+  | 'moveTabToNewWindow';
 export type NativeEditAction = 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'selectAll';
 
 export interface RemoteRunRecord {
@@ -690,12 +713,22 @@ export interface PowermoveBridge {
     onChanged?(cb: (keys: string[]) => void): () => void;
   };
 
-  /** This renderer's own window. One project per window; opening a document
+  /** This renderer's own window and its project tabs. Opening a document
    *  another window already has raises that window instead. */
   windows?: {
-    /** The project this window was created for, read during boot. */
+    /** The project and tabs this window was created with, read during boot. */
     initialProject(): WindowInitialProject;
     claimProject(projectId: string | null): Promise<WindowClaimResult>;
+    /** Closes a tab, freeing the project for other windows. Optional: a
+     *  browser-served editor is one window and has no one to free it for. */
+    releaseProject?(projectId: string): Promise<boolean>;
+    reorderTabs?(order: string[]): Promise<boolean>;
+    /** Whether a screen point is over another window's tab strip. */
+    tabDropTarget?(point: { x: number; y: number }): Promise<boolean>;
+    /** Hands a tab this window has let go of to the window under a screen
+     *  point, or to a new window there. */
+    placeTab?(projectId: string, point: { x: number; y: number }): Promise<WindowPlaceTabResult>;
+    onAdoptTab?(cb: (tab: WindowAdoptTab) => void): () => void;
     openProject(projectId: string): Promise<WindowOpenResult>;
     create(): Promise<void>;
     close(): void;

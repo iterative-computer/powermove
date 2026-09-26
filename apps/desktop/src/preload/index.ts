@@ -21,7 +21,9 @@ import {
   type PowermoveBridge,
   type StoreErrorEvent,
   type StoreSnapshot,
+  type WindowAdoptTab,
   type WindowClaimResult,
+  type WindowPlaceTabResult,
   type WindowInitialProject,
   type WindowOpenResult
 } from '../shared/ipc';
@@ -281,6 +283,19 @@ const bridge: PowermoveBridge = {
     initialProject: () => ipcRenderer.sendSync(IPC.windowInitialProject) as WindowInitialProject,
     claimProject: (projectId) =>
       ipcRenderer.invoke(IPC.windowClaimProject, { projectId }) as Promise<WindowClaimResult>,
+    releaseProject: (projectId) =>
+      ipcRenderer.invoke(IPC.windowReleaseProject, { projectId }) as Promise<boolean>,
+    reorderTabs: (order) =>
+      ipcRenderer.invoke(IPC.windowReorderTabs, { order }) as Promise<boolean>,
+    tabDropTarget: (point) =>
+      ipcRenderer.invoke(IPC.windowTabDropTarget, point) as Promise<boolean>,
+    placeTab: (projectId, point) =>
+      ipcRenderer.invoke(IPC.windowPlaceTab, { projectId, ...point }) as Promise<WindowPlaceTabResult>,
+    onAdoptTab: (cb) => {
+      const listener = (_event: IpcRendererEvent, tab: WindowAdoptTab): void => cb(tab);
+      ipcRenderer.on(IPC.windowAdoptTab, listener);
+      return () => ipcRenderer.removeListener(IPC.windowAdoptTab, listener);
+    },
     openProject: (projectId) =>
       ipcRenderer.invoke(IPC.windowOpenProject, { projectId }) as Promise<WindowOpenResult>,
     create: () => ipcRenderer.invoke(IPC.windowNew) as Promise<void>,

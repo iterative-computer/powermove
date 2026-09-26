@@ -454,13 +454,13 @@ test('layer-strip clicks do not replace the curve focused in the Graph Editor', 
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
-test('project rename is available from the document menu and persists the live document', async ({ session }) => {
+test('project rename is available from the tab menu and persists the live document', async ({ session }) => {
   await session.openEditor();
   const { page } = session;
   await scaleFixture(page);
-  const chip = page.locator('#doc-strip .project-doc');
+  const chip = page.locator('#tabs .project-doc.on');
   const id = await chip.getAttribute('data-project-id');
-  await chooseNativeMenu(session, 'Rename project…', () => chip.click({ button: 'right' }));
+  await chooseNativeMenu(session, 'Rename Project…', () => chip.click({ button: 'right' }));
   const input = page.getByRole('textbox', { name: 'Rename project', exact: true });
   await input.fill('Renamed composition');
   await input.press('Enter');
@@ -469,7 +469,7 @@ test('project rename is available from the document menu and persists the live d
   expect(await page.evaluate((id) => (window as any).PM.Projects.get(id).name, id)).toBe('Renamed composition');
   await session.relaunch();
   await session.openEditor();
-  await expect(session.page.locator('#doc-strip .project-doc')).toContainText('Renamed composition');
+  await expect(session.page.locator('#tabs .project-doc.on')).toContainText('Renamed composition');
 });
 
 test('empty timeline clicks preserve the playhead and marquee selection still works', async ({ session }) => {

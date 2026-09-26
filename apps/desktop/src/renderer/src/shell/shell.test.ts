@@ -90,21 +90,42 @@ describe('Svelte shell', () => {
     expect(PM.Projects.openProjects).not.toHaveBeenCalled();
   });
 
-  it('names only this window\'s document, whatever else is open', () => {
+  it('lists this window\'s tabs in strip order and raises the one on screen', () => {
     const { PM } = fakePM();
+    PM.Tabs = { list: vi.fn(() => ['p2', 'p1']), activate: vi.fn(), close: vi.fn(async () => true) };
     const target = document.getElementById('titlebar')!;
     target.replaceChildren();
     instances.push(mount(Titlebar, { target, props: { PM } }));
     flushSync();
 
-    const documents = target.querySelectorAll('.project-doc');
-    expect(documents).toHaveLength(1);
-    expect(documents[0]!.getAttribute('data-project-id')).toBe('p1');
-    expect(target.querySelector('.project-doc-label')?.textContent).toBe('First');
-    expect(target.querySelector('[role="tablist"]')).toBeNull();
-    expect(target.querySelector('.project-doc-close')).toBeNull();
-    expect(target.querySelector('.project-new')).toBeNull();
-    expect(documents[0]!.classList.contains('dirty')).toBe(false);
+    const tabs = [...target.querySelectorAll<HTMLElement>('#tabs [role="tablist"] .project-doc')];
+    expect(tabs.map((tab) => tab.dataset.tabId)).toEqual(['p2', 'p1']);
+    expect(tabs.map((tab) => tab.querySelector('.project-doc-label')?.textContent)).toEqual(['Second', 'First']);
+    expect(tabs.map((tab) => tab.getAttribute('aria-selected'))).toEqual(['false', 'true']);
+    expect(tabs[1]!.classList.contains('on')).toBe(true);
+    expect(target.querySelector('.project-new')).not.toBeNull();
+
+    // Clicking another tab asks for it; its close button closes only it.
+    flushSync(() => tabs[0]!.click());
+    expect(PM.Tabs.activate).toHaveBeenCalledWith('p2');
+    flushSync(() => tabs[0]!.querySelector<HTMLButtonElement>('.project-doc-close')!.click());
+    expect(PM.Tabs.close).toHaveBeenCalledWith('p2');
+    expect(PM.Tabs.activate).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows no tab while the window has only the placeholder composition', () => {
+    const { PM } = fakePM();
+    PM.Tabs = { list: vi.fn(() => []) };
+    PM.ProjectsScreen.isOpen = true;
+    const target = document.getElementById('titlebar')!;
+    target.replaceChildren();
+    instances.push(mount(Titlebar, { target, props: { PM } }));
+    flushSync();
+
+    expect(target.querySelectorAll('.project-doc')).toHaveLength(0);
+    expect(target.querySelector('.project-home')?.getAttribute('aria-selected')).toBe('true');
+    // Export has nothing to export from Projects.
+    expect(target.querySelector('.tb-export')).toBeNull();
   });
 
   it('updates the window document from the same mutable file state after the file bridge appears', () => {
@@ -123,9 +144,12 @@ describe('Svelte shell', () => {
     expect(tab.title).toBe('First — /tmp/First.pmv');
     expect(tab.classList.contains('dirty')).toBe(false);
 
+    expect(tab.querySelector('.project-doc-state')).toBeNull();
     file.dirty = true;
     flushSync(() => PM.bus.emit('projects:open'));
     expect(tab.classList.contains('dirty')).toBe(true);
+    // Unsaved reads as a word after the name, not a coloured mark.
+    expect(tab.querySelector('.project-doc-state')?.textContent).toBe('Edited');
     expect(tab.getAttribute('aria-label')).toBe('First, unsaved');
 
     file.dirty = false;
@@ -135,7 +159,7 @@ describe('Svelte shell', () => {
     expect(tab.title).toBe('First — /tmp/First-renamed.pmv');
   });
 
-  it('goes back to the composition from Projects when the document is clicked', () => {
+  it('goes back to the composition from Projects when its tab is clicked', () => {
     const { PM } = fakePM();
     PM.ProjectsScreen.isOpen = true;
     const target = document.getElementById('titlebar')!;
@@ -147,7 +171,7 @@ describe('Svelte shell', () => {
     expect(PM.ProjectsScreen.hide).toHaveBeenCalledOnce();
   });
 
-  it('offers rename and a new window from the document context menu', () => {
+  it('offers closing, renaming and moving from the tab context menu', () => {
     const { PM } = fakePM();
     const target = document.getElementById('titlebar')!;
     target.replaceChildren();
@@ -158,7 +182,10 @@ describe('Svelte shell', () => {
       .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true })));
     const items = PM.menu.mock.calls[0]![1] as Array<any>;
     expect(items.filter((item) => typeof item === 'object').map((item) => item.label))
-      .toEqual(['Rename project…', 'New Window']);
+      .toEqual(['Close Tab', 'Close Other Tabs', 'Rename Project…', 'Move to New Window', 'New Window']);
+    // A lone tab has no others to close and nothing to leave behind by moving.
+    expect(items.find((item: any) => item?.label === 'Close Other Tabs').disabled).toBe(true);
+    expect(items.find((item: any) => item?.label === 'Move to New Window').disabled).toBe(true);
     items.find((item: any) => item?.label === 'New Window').run();
     expect(PM.newWindow).toHaveBeenCalledOnce();
   });

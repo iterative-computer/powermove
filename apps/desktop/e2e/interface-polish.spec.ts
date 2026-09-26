@@ -36,7 +36,7 @@ test('agent controls, independent hover states, media icons, and titlebar spacin
     expect(waveformBars.every(count => count === 120)).toBe(true);
     await expect(page.locator('.asset-preview.video [data-icon="film"]').first()).toBeVisible();
     const titlebar = await page.locator('#titlebar').evaluate(el => ({ left: parseFloat(getComputedStyle(el).paddingLeft), height: el.getBoundingClientRect().height }));
-    expect(titlebar).toEqual({ left: 96, height: 44 });
+    expect(titlebar).toEqual({ left: 88, height: 44 });
     await page.getByRole('button', { name: 'Open panel library' }).click();
     await page.screenshot({ path: info.outputPath(`panel-icons-${theme}.png`) });
     await page.keyboard.press('Escape');

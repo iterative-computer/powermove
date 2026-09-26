@@ -1128,8 +1128,48 @@ PM.assets = {
     PM.GL?.dropTextures?.('video:');
     for (const id of [...posterUrls.keys()]) revokePoster(id);
   },
+  /**
+   * Sets this project's loaded media aside for a background tab and leaves the
+   * cache empty for the next one. Nothing is disposed: switching back resumes
+   * the decoded media as it was. GPU copies are dropped, because two projects
+   * can share asset ids (a duplicate does) and textures are keyed by id; they
+   * re-upload from the kept media on the next draw.
+   */
+  suspend() {
+    assetEpoch++;
+    cloudMedia.clear();
+    const parked = { map: PM.assets.map, errors: PM.assets.errors, posters: new Map(posterUrls) };
+    PM.assets.map = new Map();
+    PM.assets.loading = new Set();
+    PM.assets.errors = new Map();
+    posterUrls.clear();
+    PM.GL?.dropTextures?.('a:');
+    PM.GL?.dropTextures?.('video:');
+    for (const id of parked.map.keys()) PM.GL?.dropMesh?.(id);
+    PM.preparedVideoFrames?.clear?.();
+    return parked;
+  },
+  /** Puts back media set aside by suspend(), replacing what is loaded now. */
+  resume(parked: any) {
+    if (!parked?.map) return false;
+    PM.assets.clear();
+    PM.assets.map = parked.map;
+    PM.assets.errors = parked.errors || new Map();
+    for (const [id, url] of parked.posters || []) posterUrls.set(id, url);
+    return true;
+  },
+  /** Lets go of parked media that will never be resumed. */
+  discard(parked: any) {
+    for (const asset of parked?.map?.values?.() || []) disposeAsset(asset);
+    for (const url of parked?.posters?.values?.() || []) {
+      try { window.URL?.revokeObjectURL?.(url); } catch (error) { }
+    }
+  },
   async restoreProject(project: any) {
     const epoch = assetEpoch;
+    // The cache this pass fills. A tab switch parks it whole, so a pass that
+    // goes stale must take back only what it added, and only from here.
+    const cache = PM.assets.map;
     const metas: any[] = Object.values(project && project.assets || {})
       .filter((meta: any) => meta && meta.id && ['image', 'video', 'audio', 'model'].includes(meta.kind));
     const restored: any[] = [], missing: any[] = [];
@@ -1139,6 +1179,12 @@ PM.assets = {
     const results = await PM.MediaImport.mapBounded(metas, 3, async (meta: any) => {
       const current = () => epoch === assetEpoch && PM.proj === project && project.assets?.[meta.id] === meta;
       if (!current()) return { stale: true };
+      // A tab brought back keeps what it had loaded; only the rest is read.
+      const kept = PM.assets.map.get(meta.id);
+      if (kept) {
+        loading.delete(String(meta.id));
+        return { asset: kept, meta, kept: true };
+      }
       PM.assets.errors.delete(meta.id);
       let posterBlob: any = null;
       let cacheError: unknown;
@@ -1193,7 +1239,11 @@ PM.assets = {
       else if (result.missing) missing.push(result.meta);
     });
     if (epoch !== assetEpoch || PM.proj !== project) {
-      restored.forEach(disposeAsset);
+      results.forEach((result: any) => {
+        if (!result.asset || result.kept) return;
+        if (cache.get(result.asset.id) === result.asset) cache.delete(result.asset.id);
+        disposeAsset(result.asset);
+      });
       return { restored: [], missing: [], stale: true };
     }
     let repairedPosterMetadata = false;
@@ -1216,7 +1266,7 @@ PM.assets = {
       const meta: any = project.assets?.[a.id];
       if (a.format && meta && meta.format !== a.format) meta.format = a.format;
     });
-    const backfill = results.filter((result: any) => result.asset && !result.posterBlob);
+    const backfill = results.filter((result: any) => result.asset && !result.posterBlob && !result.kept);
     if (backfill.length) setTimeout(() => {
       void (async () => {
         if (epoch !== assetEpoch || PM.proj !== project) return;

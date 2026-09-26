@@ -384,6 +384,10 @@ def('open', 'Open project…', '⌘O', () => PM.openProject(), 'File');
 def('export', 'Export…', '⌘E', () => PM.Export.dialog(), 'File');
 def('projects', 'Projects screen', '⌘P', () => PM.ProjectsScreen && PM.ProjectsScreen.toggle(), 'File');
 def('newProject', 'New project', '⌘N', () => PM.newProject(), 'File');
+def('closeTab', 'Close tab', '⌘W', () => PM.Tabs?.closeCurrent(), 'File');
+def('nextTab', 'Show next tab', '⌃Tab', () => PM.Tabs?.step(1), 'View');
+def('previousTab', 'Show previous tab', '⌃⇧Tab', () => PM.Tabs?.step(-1), 'View');
+def('moveTabToNewWindow', 'Move tab to new window', '', () => PM.Tabs?.moveToNewWindow(PM.proj?.id), 'View');
 def('takeSave', 'Save take', '', () => { PM.takes.save(); PM.toast('Take saved'); }, 'File');
 
 /* ── AE layer timing ───────────────────────────────────── */

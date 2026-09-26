@@ -176,7 +176,7 @@ function paint() {
   S.el.querySelectorAll('.ps-view button').forEach((b: any) => b.classList.toggle('on', b.dataset.view === S.view));
   S.grid.className = 'ps-grid' + (S.view === 'list' ? ' list' : '') + (!metas.length ? ' empty' : '');
   S.grid.textContent = '';
-  const openIds = new Set<string>(PM.Projects.openProjects());
+  const openIds = new Set<string>([...PM.Projects.openProjects(), ...(PM.Tabs?.list?.() ?? [])]);
   metas.slice(S.page * PAGE_SIZE, (S.page + 1) * PAGE_SIZE)
     .forEach((m: any) => S.grid.appendChild(card(m, S.section === 'trash', openIds)));
   if (!metas.length) S.grid.appendChild(emptyState(q));
@@ -198,7 +198,7 @@ function paint() {
 
 function card(m: any, trashed: any, openIds: Set<string>) {
   const active = !trashed && m.id === PM.proj.id;
-  /* "Open" is now a window somewhere, which may be this one or another. */
+  /* "Open" is a tab somewhere, in this window or another. */
   const open = !trashed && (active || openIds.has(m.id));
   const file = !trashed ? PM.projectFileState?.(m.id, { initialize: false }) : null;
   // Dimensions belong in the index; cards must never clone whole compositions.
@@ -212,7 +212,7 @@ function card(m: any, trashed: any, openIds: Set<string>) {
   const sub = projectSub(m, raw, trashed, file);
   /* Where the project is (Active, Open) is a quiet tag beside the name, so
      every card keeps one silhouette and the frame stays clean. */
-  const tag = active || open ? h('span.ps-tag', active ? 'This window' : 'Open') : null;
+  const tag = active || open ? h('span.ps-tag', active ? 'Active' : 'Open') : null;
   const meta = h('div.ps-meta', h('div.ps-meta-copy',
     h('div.ps-name-row', h('div.ps-name', { title: m.name || 'Untitled' }, m.name || 'Untitled'), tag),
     h('div.ps-sub', { title: sub.title }, sub.text)), more);
@@ -245,7 +245,7 @@ function projectMenu(anchor: any, m: any, trashed: any, x?: any, y?: any) {
   ] : [
     { label: 'Open', disabled: m.id === PM.proj.id, run: () => openLocalProject(m) },
     ...(PM.windows?.supported
-      ? [{ label: 'Open in New Window', disabled: m.id === PM.proj.id, run: () => openInNewWindow(m) }]
+      ? [{ label: 'Open in New Window', disabled: m.id === PM.proj.id && (PM.Tabs?.list?.().length ?? 1) < 2, run: () => openInNewWindow(m) }]
       : []),
     { label: 'Save', run: () => save(m, false) },
     { label: 'Save As…', run: () => save(m, true) },
@@ -261,9 +261,9 @@ async function openProjectFromDisk() {
   await PM.openProject?.();
   if (PM.proj.id !== before) PM.ProjectsScreen.hide();
 }
-/* A click loads the project into this window. A document lives in one window at
-   a time, so one already open elsewhere brings its own window forward instead
-   and this window keeps what it had. */
+/* A click opens the project as a tab of this window, or shows the tab it
+   already has. A document lives in one window at a time, so one open elsewhere
+   brings its own window forward instead and this window keeps what it had. */
 function openLocalProject(m: any) {
   if (m.id === PM.proj.id) {
     PM.ProjectsScreen.hide();
@@ -339,7 +339,9 @@ function trashDialog(m: any): Promise<void> {
       }
     }
     if (!PM.Projects.trash(m.id)) return PM.toast('Could not move this project to Trash.');
-    if (m.id === PM.proj.id) switchUnderlying(); paint(); PM.bus.emit('projects:open');
+    if (PM.Tabs?.list?.().includes(m.id)) await PM.Tabs.forget(m.id);
+    else if (m.id === PM.proj.id) switchUnderlying();
+    paint(); PM.bus.emit('projects:open');
   });
 }
 function destroyDialog(m: any): Promise<void> {

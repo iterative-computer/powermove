@@ -84,14 +84,14 @@ test('titlebar layout and explicit effect actions keep legacy hidden layers acce
   for (const width of [1440, 980]) {
     await session.app.evaluate(({ BrowserWindow }, width) => BrowserWindow.getAllWindows()[0]!.setSize(width, 900), width);
     await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(width);
-    const toolbar = await page.locator('#toolbar-strip').boundingBox();
-    const documents = await page.locator('#doc-strip').boundingBox();
-    const actions = await page.locator('#tb-right').boundingBox();
-    // The tools are the centred strip; the window's document sits left of them
-    // and the actions right, with neither overlapping the toolbar.
-    expect(Math.abs(toolbar!.x + toolbar!.width / 2 - width / 2)).toBeLessThan(1);
-    expect(documents!.x + documents!.width).toBeLessThanOrEqual(toolbar!.x);
-    expect(toolbar!.x + toolbar!.width).toBeLessThanOrEqual(actions!.x);
+    const toolbar = (await page.locator('#toolbar-strip').boundingBox())!;
+    const documents = (await page.locator('#tabs').boundingBox())!;
+    const settings = (await page.locator('#tb-right [aria-label="Open settings"]').boundingBox())!;
+    // The tools lead the right side: after the tabs, before the settings and
+    // Export buttons, and hard against the window's right edge with them.
+    expect(documents.x + documents.width).toBeLessThanOrEqual(toolbar.x);
+    expect(toolbar.x + toolbar.width).toBeLessThanOrEqual(settings.x);
+    expect(toolbar.x).toBeGreaterThan(width / 2);
   }
   await expect(page.locator('.project-strip-divider')).toHaveCount(0);
   const effect = page.locator('.fxb-row[data-id="blur"]');

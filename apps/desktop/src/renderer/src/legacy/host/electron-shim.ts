@@ -395,15 +395,15 @@ export function install(PM: PMRegistry): void {
     }
   };
 
-  /* One project per window. Everything that opens, swaps or closes a document
-     goes through here so the native side stays the single source of truth for
-     which window owns what. A build without the native bridge keeps the older
-     one-window behaviour: claims always succeed and nothing else is offered. */
+  /* Each window holds its own project tabs. Everything that opens, swaps or
+     closes a document goes through here so the native side stays the single
+     source of truth for which window owns what. A build without the native
+     bridge keeps one window: claims always succeed and nothing else is offered. */
   PM.windows = {
     get supported() { return !!bridge.windows; },
     initialProject() {
-      try { return bridge.windows?.initialProject() ?? { projectId: null, taken: [] }; }
-      catch { return { projectId: null, taken: [] }; }
+      try { return bridge.windows?.initialProject() ?? { projectId: null, tabs: [], taken: [] }; }
+      catch { return { projectId: null, tabs: [], taken: [] }; }
     },
     async claimProject(projectId: string | null) {
       if (!bridge.windows) return { claimed: true, focused: false };
@@ -412,6 +412,35 @@ export function install(PM: PMRegistry): void {
         bridge.log('warn', `window claim failed: ${errorText(error, 'unknown error')}`);
         return { claimed: true, focused: false };
       }
+    },
+    async releaseProject(projectId: string) {
+      if (!bridge.windows?.releaseProject) return true;
+      try { return await bridge.windows.releaseProject(projectId); }
+      catch (error) {
+        bridge.log('warn', `window release failed: ${errorText(error, 'unknown error')}`);
+        return false;
+      }
+    },
+    async reorderTabs(order: string[]) {
+      if (!bridge.windows?.reorderTabs) return true;
+      try { return await bridge.windows.reorderTabs(order); }
+      catch { return false; }
+    },
+    async tabDropTarget(point: { x: number; y: number }) {
+      if (!bridge.windows?.tabDropTarget) return false;
+      try { return await bridge.windows.tabDropTarget(point); }
+      catch { return false; }
+    },
+    async placeTab(projectId: string, point: { x: number; y: number }) {
+      if (!bridge.windows?.placeTab) return { placed: null };
+      try { return await bridge.windows.placeTab(projectId, point); }
+      catch (error) {
+        bridge.log('warn', `tab placement failed: ${errorText(error, 'unknown error')}`);
+        return { placed: null };
+      }
+    },
+    onAdoptTab(cb: (tab: { projectId: string; x: number }) => void) {
+      return bridge.windows?.onAdoptTab?.(cb) ?? (() => undefined);
     },
     async openProject(projectId: string) {
       if (!bridge.windows) return { opened: false, focused: false, error: 'Windows are not available' };
