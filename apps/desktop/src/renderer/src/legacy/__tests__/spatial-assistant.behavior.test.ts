@@ -953,6 +953,83 @@ it('binds the first typed draft to the boot project before it can target an olde
   assert.ok(PM.AgentUI.state.conversation.some(message => message.text === 'Earlier request'));
 });
 
+it('keeps a project-tab run alive and applies its result only after returning', async () => {
+  const { PM, jobs } = placementHarness();
+  const original = PM.proj;
+  const command = { type: 'set_composition', patch: { bg: '#123456' } };
+  PM.Edit = { apply: vi.fn(() => { Object.assign(PM.proj, command.patch); return { ok: true }; }) };
+  PM.Tabs = { list: () => [original.id, 'other-project'] };
+  PM.AgentUI.submit('Keep working on the original project');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  const first = PM.AgentUI.state.threadId;
+  PM.proj = { id: 'other-project', name: 'Other', revision: 0, layers: [] };
+  PM.bus.emit('project');
+  assert.equal(jobs[0].options.signal.aborted, false);
+  assert.equal(PM.AgentUI.state.backgroundRuns, 1);
+  assert.equal(PM.AgentUI.state.conversation.length, 0);
+  assert.throws(() => {
+    jobs[0].options.onStart('original-run');
+    PM.SpatialAssistant.assertRunProject('original-run');
+  }, /background/);
+  await assert.rejects(PM.AgentHarness.test.handleLiveAgentTool({
+    runId: 'original-run', callId: 'background-read', tool: 'get_project_state', arguments: {}, baseRevision: 0,
+  }), /background/);
+  PM.AgentUI.setDraft('Other project draft');
+  jobs[0].options.onProgress('Still working in the original tab');
+  jobs[0].resolve({ text: JSON.stringify({ summary: 'Done', commands: [command], artifacts: [], externalActions: [], notes: [] }) });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(PM.Edit.apply.mock.calls.length, 0);
+  assert.equal(PM.proj.bg, undefined);
+  await vi.waitFor(() => assert.equal(PM.store.get(`agentThreads.${original.id}`).threads[0].conversation[0].text, 'Keep working on the original project'));
+  assert.equal(PM.AgentUI.state.composerDraft, 'Other project draft');
+  assert.equal(PM.AgentUI.state.conversation.length, 0);
+  PM.proj = original;
+  PM.bus.emit('project');
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+  assert.equal(PM.AgentUI.state.threadId, first);
+  assert.equal(PM.AgentUI.state.run.projectId, original.id);
+  assert.equal(PM.AgentUI.state.conversation.at(-1).text, 'Done');
+  assert.equal(PM.Edit.apply.mock.calls.length, 1);
+  assert.equal(original.bg, '#123456');
+  assert.equal(jobs.length, 1, 'returning never restarts the model request');
+  assert.equal(jobs[0].options.signal.aborted, false);
+});
+
+it('cancels a waiting run when its background project tab is closed', async () => {
+  const { PM, jobs } = placementHarness();
+  const original = PM.proj;
+  let tabs = [original.id, 'other-project'];
+  PM.Tabs = { list: () => tabs };
+  PM.AgentUI.submit('Keep working');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  PM.proj = { id: 'other-project', name: 'Other', revision: 0, layers: [] };
+  PM.bus.emit('project');
+  jobs[0].resolve(emptyAgentResult);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  tabs = ['other-project'];
+  PM.bus.emit('projects:open');
+  assert.equal(jobs[0].options.signal.aborted, true);
+  assert.equal(PM.AgentUI.state.backgroundRuns, 0);
+  assert.equal(PM.AgentUI.state.conversation.length, 0);
+});
+
+it('keeps the request bound to its original project when switching during send', async () => {
+  const { PM, jobs } = placementHarness();
+  const original = PM.proj;
+  PM.Tabs = { list: () => [original.id, 'other-project'] };
+  PM.AgentUI.submit('Switch immediately after sending');
+  PM.proj = { id: 'other-project', name: 'Other', revision: 0, layers: [] };
+  PM.bus.emit('project');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  assert.equal(jobs[0].options.projectId, original.id);
+  assert.equal(JSON.parse(jobs[0].options.projectJSON).id, original.id);
+  assert.equal(jobs[0].options.signal.aborted, false);
+  PM.proj = original;
+  PM.bus.emit('project');
+  jobs[0].resolve(emptyAgentResult);
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+});
+
 it('project switches retain the old transcript and reject its late result', async () => {
   const { PM, jobs } = placementHarness();
   PM.AgentUI.submit('Old project request');

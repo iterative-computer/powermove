@@ -250,3 +250,39 @@ test('thread transcripts and titles survive a hidden relaunch without leaking in
   await expect(page.getByRole('textbox', {name:'Message Powermove agent',exact:true})).toHaveText('Last keystroke');
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
+
+test('agent run survives clicking another project tab and resumes on return', async ({ session }) => {
+  await session.openEditor();
+  const page = session.page;
+  const { first, second } = await page.evaluate(async () => {
+    const PM = (window as any).PM;
+    const first = PM.proj.id;
+    const project = PM.mkProject({ name: 'Other agent project', dur: 4, w: 640, h: 360, fps: 24, bg: '#09090A' });
+    PM.Projects.put(project);
+    await PM.Tabs.activate(project.id);
+    await PM.Tabs.activate(first);
+    PM.SpatialAssistant.open();
+    PM.AgentHarness.observe = async () => ({ state: {}, times: [], images: [] });
+    PM.CodexBridge.request = (_prompt: string, _schema: unknown, _images: unknown[], options: any) => new Promise(resolve => {
+      (window as any).__tabRun = {
+        signal: options.signal,
+        finish: () => resolve({ text: JSON.stringify({ summary: 'Original project finished', commands: [], artifacts: [], externalActions: [], notes: [] }) }),
+      };
+    });
+    return { first, second: project.id };
+  });
+  await page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).fill('Keep working while I switch projects');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => Boolean((window as any).__tabRun))).toBe(true);
+  await page.locator(`#tabs .project-doc[data-tab-id="${second}"]`).click();
+  await expect.poll(() => page.evaluate(() => (window as any).PM.proj.id)).toBe(second);
+  expect(await page.evaluate(() => (window as any).__tabRun.signal.aborted)).toBe(false);
+  await page.evaluate(() => (window as any).__tabRun.finish());
+  await expect.poll(() => page.evaluate(() => (window as any).PM.AgentUI.state.backgroundRuns)).toBe(1);
+  expect(await page.evaluate(() => (window as any).PM.AgentUI.state.conversation)).toEqual([]);
+  await page.locator(`#tabs .project-doc[data-tab-id="${first}"]`).click();
+  await expect.poll(() => page.evaluate(() => (window as any).PM.AgentUI.state.phase)).toBe('result');
+  expect(await page.evaluate(() => (window as any).PM.AgentUI.state.run.projectId)).toBe(first);
+  await expect(page.getByRole('log')).toContainText('Original project finished');
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});

@@ -371,15 +371,26 @@ let agentContext: 'app' | 'project' = PM.isHomeProject?.() ? 'app' : 'project';
 const contextProjectId = () => agentContext === 'app' || PM.isHomeProject?.()
   ? APP_AGENT_PROJECT_ID : PM.proj?.id || '';
 
-const threads = new AgentThreads({
-  get: (key, fallback) => PM.store?.get?.(key, fallback) ?? fallback,
-  set: (key, value) => PM.store?.set?.(key, value),
-}, () => PM.uid('thread-'));
-threads.load(contextProjectId());
+const threadStore = {
+  get: (key: string, fallback: unknown) => PM.store?.get?.(key, fallback) ?? fallback,
+  set: (key: string, value: unknown) => PM.store?.set?.(key, value),
+};
+const threadArchives = new Map<string, AgentThreads>();
+function archiveFor(projectId: string): AgentThreads {
+  let archive = threadArchives.get(projectId);
+  if (!archive) {
+    archive = new AgentThreads(threadStore, () => PM.uid('thread-'));
+    archive.load(projectId);
+    threadArchives.set(projectId, archive);
+  }
+  return archive;
+}
+let threads = archiveFor(contextProjectId());
 scheduleHostRunResume();
 let threadSaveError = false;
 let threadSaveTimer: ReturnType<typeof setTimeout> | undefined;
 let changingThreadProject = false;
+const dirtyThreadArchives = new Set<AgentThreads>();
 const pendingThreadTitles = new Set<string>();
 
 /* Every thread owns its run. A run writes only into its own session, so an
@@ -392,8 +403,10 @@ const RUN_FIELDS = [
 ] as const;
 
 function newRunSession(threadId: string): any {
+  const archive = threads;
   return {
     threadId,
+    projectId: threads.projectId,
     requestToken: 0,
     activeRequest: null,
     codexRequestId: null,
@@ -418,8 +431,8 @@ function newRunSession(threadId: string): any {
     reasoningEffort: '',
     /* The conversation is the thread's own, so a background run appends
        straight into the history the thread will show when you return. */
-    get conversation(): any[] { return sessionThread(threadId).conversation; },
-    set conversation(value: any[]) { sessionThread(threadId).conversation = value; },
+    get conversation(): any[] { return (archive.threads.find(thread => thread.id === threadId)?.conversation || []); },
+    set conversation(value: any[]) { const thread = archive.threads.find(thread => thread.id === threadId); if (thread) thread.conversation = value; },
     revision: 0,
   };
 }
@@ -429,10 +442,6 @@ function newRunSession(threadId: string): any {
 let runToken = 0;
 const sessions = new Map<string, any>();
 const sessionKey = (threadId: string) => `${threads.projectId}/${threadId}`;
-
-function sessionThread(threadId: string): any {
-  return threads.threads.find(thread => thread.id === threadId) || { conversation: [] };
-}
 
 function sessionFor(threadId: string): any {
   const key = sessionKey(threadId);
@@ -450,7 +459,7 @@ function sessionBusy(session: any): boolean {
 /** Runs still working in threads other than the one on screen. */
 function backgroundSessions(): any[] {
   return [...sessions.values()].filter(session =>
-    session.threadId !== threads.activeId && sessionBusy(session));
+    (session.projectId !== threads.projectId || session.threadId !== threads.activeId) && sessionBusy(session));
 }
 
 for (const field of RUN_FIELDS) {
@@ -465,6 +474,15 @@ for (const field of RUN_FIELDS) {
    thread you are reading; it still refreshes the picker so its progress shows. */
 function touch(session: any, options: any = {}): void {
   closeSettledQuestions(session);
+  if (session.projectId !== threads.projectId) {
+    const archive = threadArchives.get(session.projectId);
+    if (archive) {
+      if (options.flush) archive.save();
+      else dirtyThreadArchives.add(archive);
+    }
+    PM.AgentUI?.update({ flush: options.flush });
+    return;
+  }
   if (session.threadId === threads.activeId) { PM.AgentUI?.update(options); return; }
   const { focusComposer, ...rest } = options;
   PM.AgentUI?.update(rest);
@@ -487,15 +505,16 @@ function generateThreadTitle(projectId: string, threadId: string, firstRequest: 
   if (!PM.AgentThreadTitles?.generate || pendingThreadTitles.has(threadId)) return;
   pendingThreadTitles.add(threadId);
   void PM.AgentThreadTitles.generate(firstRequest, provider).then((raw: any) => {
-    if (threads.projectId !== projectId) return;
+    const archive = threadArchives.get(projectId);
+    if (!archive) return;
     let decoded: any;
     try { decoded = JSON.parse(String(raw || '')); } catch { return; }
     const title = normalizeGeneratedThreadTitle(decoded?.title);
-    const thread = threads.threads.find(item => item.id === threadId);
+    const thread = archive.threads.find(item => item.id === threadId);
     if (!title || !thread || thread.conversation.find(message => message.role === 'user')?.text !== firstRequest) return;
     thread.title = title;
     thread.updatedAt = Date.now();
-    persistThreads();
+    archive.save();
     PM.AgentUI?.update({ flush: true });
   }).catch(() => {
     // Keep the first-request fallback when offline or signed out.
@@ -506,6 +525,8 @@ function persistThreads() {
   clearTimeout(threadSaveTimer); threadSaveTimer = undefined;
   captureThread();
   threadSaveError = !threads.save();
+  for (const archive of dirtyThreadArchives) if (!archive.save()) threadSaveError = true;
+  dirtyThreadArchives.clear();
 }
 
 /** Each thread keeps the provider, model and effort it was last using. */
@@ -544,22 +565,41 @@ function restoreThread() {
   }
 }
 
-/** Stop every run, in this thread and any background thread. */
-function stopAllRequests(): void {
-  for (const session of [...sessions.values()]) if (sessionBusy(session)) stopSession(session);
+/** Editor operations resume on their own tab; model/file work keeps running. */
+function waitForSessionProject(session: any, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(new DOMException('Run stopped', 'AbortError'));
+  if (PM.proj?.id === session.projectId) return Promise.resolve();
+  session.activity = 'Ready to continue in this project tab'; touch(session);
+  return new Promise((resolve, reject) => {
+    const cleanup = () => { off?.(); signal.removeEventListener('abort', abort); };
+    const abort = () => { cleanup(); reject(new DOMException('Run stopped', 'AbortError')); };
+    const off = PM.bus.on('project', () => {
+      if (PM.proj?.id !== session.projectId) return;
+      cleanup(); resolve();
+    });
+    signal.addEventListener('abort', abort, { once: true });
+  });
+}
+
+function releaseClosedProjectRuns(): void {
+  const open = new Set(PM.Tabs?.list?.() || []);
+  for (const [key, session] of sessions) {
+    if (session.projectId === APP_AGENT_PROJECT_ID || session.projectId === contextProjectId() || open.has(session.projectId)) continue;
+    if (sessionBusy(session)) stopSession(session);
+    sessions.delete(key);
+    threadArchives.delete(session.projectId);
+  }
 }
 
 function ensureThreadProject(): boolean {
   const projectId = contextProjectId();
   if (changingThreadProject || projectId === threads.projectId) return false;
   changingThreadProject = true;
-  // A run is bound to the project it was started against: none survive a switch.
-  stopAllRequests();
   persistThreads();
-  sessions.clear();
-  threads.load(projectId);
+  threads = archiveFor(projectId);
   restoreThread();
   changingThreadProject = false;
+  releaseClosedProjectRuns();
   scheduleHostRunResume();
   return true;
 }
@@ -617,6 +657,7 @@ function switchThread(id?: string) {
 
 restoreThread();
 PM.bus?.on?.('project', () => { ensureThreadProject(); PM.AgentUI?.update({ flush: true }); });
+PM.bus?.on?.('projects:open', releaseClosedProjectRuns);
 PM.bus?.on?.('storage:error', (event: any) => {
   if (event?.key === threads.key) { threadSaveError = true; PM.AgentUI?.update({ flush: true }); }
 });
@@ -633,6 +674,12 @@ const Spatial: any = {
   /* Small pure seams are exposed for deterministic regression tests. */
   math: { selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, sanitizePanelEdit, applyPanelEdit, applyChromeEdit, hintPosition, clampFloatingPosition, textareaLayout, composerMode, normalizeAutonomousResult, boundedEditableSource, boundedAgentPrompt },
   lifecycle: { applyExtensionChanges, reduceTrace, sealTrace },
+  assertRunProject(runId: string) {
+    const session = [...sessions.values()].find(item => item.codexRequestId === runId);
+    if (session && session.projectId !== APP_AGENT_PROJECT_ID && session.projectId !== PM.proj?.id) {
+      throw new Error('The run’s project tab is in the background. Continue file, shell or web work; retry editor tools when that project tab is active.');
+    }
+  },
 };
 PM.SpatialAssistant = Spatial;
 PM.requestExtensionFix = requestFix;
@@ -1855,9 +1902,13 @@ async function runAppRequest({ session, request, token, controller, threadId, or
 }
 
 async function runAutonomousRequest({ session, request, token, controller, access, focus, context, threadId, originalRequest = request, priorRuns = [], pendingProjectEdit = null }: any) {
+  if (PM.proj?.id !== session.projectId) await waitForSessionProject(session, controller.signal);
+  if (token !== session.requestToken) return;
   const baseRevision: any = Number(PM.proj.revision) || 0;
   const checkpointLabel: any = `Before autonomous agent · ${request.slice(0, 42)}`;
   const checkpoint = createAgentCheckpoint(PM, checkpointLabel);
+  const projectJSON = JSON.stringify(PM.proj);
+  const placementInstructions = uiPlacementInstructions(PM.WS?.current);
   const observationPromise: any = PM.AgentHarness ? PM.AgentHarness.observe() : Promise.resolve({ state: {}, times: [], images: [] });
   let [observation]: any = await Promise.all([
     observationPromise,
@@ -1900,7 +1951,7 @@ async function runAutonomousRequest({ session, request, token, controller, acces
   };
   let latestProjectChange: any = null;
   const offProjectChanges: any = PM.bus?.on?.('history:project-patch', (entry: any) => {
-    if (!watchingProject || token !== session.requestToken || entry?.projectId !== PM.proj?.id || agentAuthoredProjectChange(entry)) return;
+    if (!watchingProject || token !== session.requestToken || entry?.projectId !== session.projectId || agentAuthoredProjectChange(entry)) return;
     latestProjectChange = entry;
     projectChangeSerial += 1;
     session.activity = 'Project changed — updating the agent…'; touch(session);
@@ -1914,11 +1965,11 @@ async function runAutonomousRequest({ session, request, token, controller, acces
 
   try {
     const attachedImages: any = [...userImages, ...(session.regionImage ? [session.regionImage] : []), ...observation.images].slice(0, 6);
-    const raw: any = await PM.CodexBridge.request(`${request}\n\n${AGENT_TESTING_INSTRUCTIONS}\n\nCONVERSATION IN THIS THREAD\n${JSON.stringify(conversationForAgent(session.conversation.slice(0, -1)))}\n\n${panelFocusPrompt(focus)}\n\nSELECTED REGION REFERENCE\n${JSON.stringify(context)}\n\n${NATIVE_PANEL_DESIGN}\n\n${uiPlacementInstructions(PM.WS?.current)}`, null, attachedImages, {
+    const raw: any = await PM.CodexBridge.request(`${request}\n\n${AGENT_TESTING_INSTRUCTIONS}\n\nCONVERSATION IN THIS THREAD\n${JSON.stringify(conversationForAgent(session.conversation.slice(0, -1)))}\n\n${panelFocusPrompt(focus)}\n\nSELECTED REGION REFERENCE\n${JSON.stringify(context)}\n\n${NATIVE_PANEL_DESIGN}\n\n${placementInstructions}`, null, attachedImages, {
       mode: 'autonomous', access,
       threadId,
-      projectId: PM.proj.id, projectName: PM.proj.name || 'Untitled',
-      projectJSON: JSON.stringify(PM.proj),
+      projectId: session.projectId, projectName: JSON.parse(projectJSON).name || 'Untitled',
+      projectJSON,
       attachments: requestFileAttachments(session.requestAttachments),
       provider: session.provider,
       model: session.model, reasoningEffort: session.reasoningEffort, signal: controller.signal,
@@ -1934,6 +1985,8 @@ async function runAutonomousRequest({ session, request, token, controller, acces
       },
     });
     if (token !== session.requestToken) return;
+    await waitForSessionProject(session, controller.signal);
+    if (token !== session.requestToken) return;
     const responseText: any = typeof raw === 'string' ? raw : raw?.text;
     let decoded: any;
     try { decoded = JSON.parse(responseText); }
@@ -1948,6 +2001,7 @@ async function runAutonomousRequest({ session, request, token, controller, acces
       proposalRevision = pendingProjectEdit.revision;
     }
     await applyExtensionChanges(result.extensions);
+    await waitForSessionProject(session, controller.signal);
     if (token !== session.requestToken) return;
     const dependencies = new Map<string, any>();
     for (const change of [...priorRuns.flatMap((run: any) => run.extensions), ...result.extensions]) dependencies.set(change.id, change);
@@ -1970,6 +2024,8 @@ async function runAutonomousRequest({ session, request, token, controller, acces
       proposalChangeSerial = projectChangeSerial;
       session.activity = 'Project changed — reconciling with the latest version…'; touch(session);
       observation = PM.AgentHarness ? await PM.AgentHarness.observe() : { state: {}, times: [], images: [] };
+      await waitForSessionProject(session, controller.signal);
+      if (token !== session.requestToken) return;
       const reconcileRequest: any = `Reconcile the autonomous agent's proposed Powermove source edits with the project as it exists now.
 
 ORIGINAL USER REQUEST
@@ -1984,7 +2040,7 @@ ${JSON.stringify(result.commands)}
 The user edited the project during the autonomous run. Return kind=scene and a complete replacement sceneEdit for the current source. Preserve the user's newer work and unrelated edits. Do not create panels, workspaces, extensions, files, or external actions in this reconciliation pass.`;
       const reconcileImages: any = [...userImages, ...(session.regionImage ? [session.regionImage] : []), ...observation.images].slice(0, 6);
       const reconciledRaw: any = await PM.CodexBridge.request(
-        agentPrompt(reconcileRequest, observation, false, focus, context), responseSchema(), reconcileImages,
+        agentPrompt(reconcileRequest, observation, false, focus, context, session), responseSchema(), reconcileImages,
         {
           threadId,
           attachments: requestFileAttachments(session.requestAttachments),
@@ -2001,6 +2057,7 @@ The user edited the project during the autonomous run. Return kind=scene and a c
           },
         },
       );
+      await waitForSessionProject(session, controller.signal);
       if (token !== session.requestToken) return;
       let reconciledDecoded: any;
       try { reconciledDecoded = JSON.parse(reconciledRaw); }
@@ -2061,6 +2118,8 @@ The user edited the project during the autonomous run. Return kind=scene and a c
         const project = PM.proj;
         const file: any = await PM.AgentArtifacts.load(artifact);
         if (token !== session.requestToken || controller.signal.aborted) return;
+        await waitForSessionProject(session, controller.signal);
+        if (token !== session.requestToken) return;
         if (PM.proj !== project || project.id !== artifact.projectId) throw new Error('The active project changed before media import.');
         if (!PM.assetKind(file)) throw stated(`${artifact.name} is not supported project media`, 'alert');
         const before = new Set(project.layers.map((layer: any) => layer.id));
@@ -2080,6 +2139,7 @@ The user edited the project during the autonomous run. Return kind=scene and a c
       ? (typeof raw === 'object' ? raw?.liveEditHistoryId || null : null)
       : (changed ? PM.hist.squash(historyMark, 'Autonomous agent') : null);
     const finalFrames: any = changed && PM.AgentHarness ? await PM.AgentHarness.observe() : observation;
+    await waitForSessionProject(session, controller.signal);
     if (token !== session.requestToken || controller.signal.aborted) return;
     const run: any = {
       autonomous: true, summary: result.summary, checkpoint,
@@ -2390,7 +2450,7 @@ async function sendRequest(input: any) {
   S.pendingEntering = true;
   promoteToConversation(); touch(session, { focusComposer: true });
   try {
-    if (contextProjectId() === APP_AGENT_PROJECT_ID) {
+    if (session.projectId === APP_AGENT_PROJECT_ID) {
       await runAppRequest({ session, request, token, controller, threadId: threadIdAtStart });
       if (token === session.requestToken && !controller.signal.aborted) notifyAgentFinished();
       return;
@@ -2409,12 +2469,14 @@ async function sendRequest(input: any) {
       new Promise((resolve: any) => window.setTimeout(resolve, SEND_TRANSITION_MS)),
     ]);
     if (token !== session.requestToken) return;
+    await waitForSessionProject(session, controller.signal);
+    if (token !== session.requestToken) return;
     session.steps[0].status = 'complete'; session.steps[1].status = 'active';
     session.activity = steering ? 'Reworking the editable change…' : 'Designing an editable change…'; touch(session, { focusComposer: true });
     const userImages: any = session.requestAttachments.filter(isAgentImageAttachment).map((item: any) => item.dataUrl);
     const attachedImages: any = [...userImages, ...(session.regionImage ? [session.regionImage] : []), ...observation.images].slice(0, 6);
     const raw: any = await PM.CodexBridge.request(
-      agentPrompt(request, observation, steering, focus, context) + '\nFor questions, explanations, greetings, or requests needing clarification, use operation=noop and put your natural-language answer in message. No edit is required for an ordinary conversation.', responseSchema(), attachedImages,
+      agentPrompt(request, observation, steering, focus, context, session) + '\nFor questions, explanations, greetings, or requests needing clarification, use operation=noop and put your natural-language answer in message. No edit is required for an ordinary conversation.', responseSchema(), attachedImages,
       {
         threadId: threadIdAtStart,
         attachments: requestFileAttachments(session.requestAttachments),
@@ -2431,6 +2493,8 @@ async function sendRequest(input: any) {
         },
       },
     );
+    if (token !== session.requestToken) return;
+    await waitForSessionProject(session, controller.signal);
     if (token !== session.requestToken) return;
     let decoded: any;
     try { decoded = JSON.parse(raw); } catch { throw new Error('The coding agent returned an invalid section'); }
@@ -2532,10 +2596,10 @@ function responseSchema() {
   };
 }
 
-function agentPrompt(request: any, observation: any, steering: any = false, focus: PanelFocusContext = panelFocusContext(S.scope, PM.WS?.current, PM.PANELS || {}), context: any = S.context) {
+function agentPrompt(request: any, observation: any, steering: any = false, focus: PanelFocusContext = panelFocusContext(S.scope, PM.WS?.current, PM.PANELS || {}), context: any = S.context, session: any = activeSession()) {
   const workspace: any = PM.WS.current;
   const commands: any = Object.values(PM.commands || {}).map((c: any) => ({ id: c.id, label: c.label }));
-  const attachedFiles: any = S.requestAttachments.slice(0, 6).map((item: any) => ({
+  const attachedFiles: any = session.requestAttachments.slice(0, 6).map((item: any) => ({
     name: item.name, type: item.type, content: item.content ? item.content.slice(0, 30_000) : undefined,
     image: !!item.dataUrl,
   }));
@@ -2545,7 +2609,7 @@ function agentPrompt(request: any, observation: any, steering: any = false, focu
     Array.isArray(PM.sel?.layers) ? PM.sel.layers : [],
   );
   const capabilities: any = PM.Capabilities?.catalog?.() || {};
-  const conversation: any = S.conversation.slice(0, -1).slice(-12).map((message: any) => ({
+  const conversation: any = session.conversation.slice(0, -1).slice(-12).map((message: any) => ({
     role: message.role, text: message.text,
     attachments: (message.attachments || []).map((item: any) => typeof item === 'string' ? item : item.name),
   }));
