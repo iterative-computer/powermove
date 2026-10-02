@@ -6,6 +6,7 @@
 
 .sequence-import p { margin: 0; }
 .sequence-import-intro { color: var(--tx-2); }
+.sequence-import .sequence-import-note { margin-top: -14px; color: var(--tx-4); font-size: var(--fs-xs); }
 
 .sequence-import-source {
   display: flex;

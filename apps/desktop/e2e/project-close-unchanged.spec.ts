@@ -34,3 +34,44 @@ test('closing an unchanged local project skips the save prompt, while edits stil
     dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false });
   });
 });
+
+test('Don’t Save removes a never-saved project from Recents and recovery across restart', async ({ session }) => {
+  await session.app.evaluate(({ dialog }) => {
+    dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false });
+  });
+  const id = await session.page.evaluate(async () => {
+    const PM = (window as any).PM;
+    PM.proj.name = 'Discarded new project';
+    PM.autosave();
+    await PM.flushProject();
+    return PM.proj.id;
+  });
+  expect(await session.page.evaluate(async (id) => (window as any).PM.Tabs.close(id), id)).toBe(true);
+  await expect(session.page.getByText('Discarded new project', { exact: true })).toHaveCount(0);
+  expect(await session.page.evaluate((id) => {
+    const PM = (window as any).PM;
+    return { project: PM.Projects.get(id), state: PM.Projects.getState(id), listed: PM.Projects.list().some((p: any) => p.id === id) };
+  }, id)).toEqual({ project: null, state: null, listed: false });
+  await session.relaunch();
+  await expect(session.page.getByText('Discarded new project', { exact: true })).toHaveCount(0);
+  expect(await session.page.evaluate((id) => (window as any).PM.Projects.get(id), id)).toBeNull();
+});
+
+test('Don’t Save on window close survives the final recovery flush', async ({ session }) => {
+  await session.app.evaluate(({ dialog }) => {
+    dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false });
+  });
+  const id = await session.page.evaluate(async () => {
+    const PM = (window as any).PM;
+    PM.proj.name = 'Discarded window project';
+    PM.autosave();
+    await PM.flushProject();
+    const id = PM.proj.id;
+    if (!await PM.prepareToClose()) throw new Error('Close was cancelled');
+    await PM.flushProject();
+    return id;
+  });
+  await session.relaunch();
+  await expect(session.page.getByText('Discarded window project', { exact: true })).toHaveCount(0);
+  expect(await session.page.evaluate((id) => (window as any).PM.Projects.get(id), id)).toBeNull();
+});

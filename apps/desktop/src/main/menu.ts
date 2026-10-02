@@ -118,6 +118,7 @@ export function appMenuTemplate(
         { type: 'separator' },
         commandItem('Import Media…', 'CommandOrControl+I', 'import', send),
         { id: 'importSequence', label: 'Import Image Sequence…', click: () => send('importSequence') },
+        { id: 'importFolder', label: 'Import Folder…', click: () => send('importFolder') },
         { type: 'separator' },
         commandItem('Export…', 'CommandOrControl+E', 'export', send),
         { type: 'separator' },

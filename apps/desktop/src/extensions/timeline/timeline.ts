@@ -450,6 +450,17 @@ export function planKeyframeMove<Property>(
   return { delta, moves, removed };
 }
 
+/** As in After Effects, Option-dragging the first or last key of a multi-key
+    selection stretches its timing about the key at the opposite end. */
+export function keyframeStretchAnchor(selectedTimes: number[], grabbed: number): { anchor: number; grabbed: number } | null {
+  if (selectedTimes.length < 2) return null;
+  const first = Math.min(...selectedTimes), last = Math.max(...selectedTimes);
+  if (last - first < 1e-9) return null;
+  if (Math.abs(grabbed - last) < 1e-6) return { anchor: first, grabbed: last };
+  if (Math.abs(grabbed - first) < 1e-6) return { anchor: last, grabbed: first };
+  return null;
+}
+
 /** Materialize a plan without mutating its source. Useful for tests and for
     consumers that keep their own keyframe storage. */
 export function applyKeyframeMovePlan<Property>(
@@ -2505,7 +2516,8 @@ function bind(cv: any, wrap: any) {
       const result = api.edit.apply(command, { label: 'Add ' + asset.name, origin: 'command' });
       if (result?.ok === false) api.ui.toast(result.message || 'Could not add ' + asset.name);
     } else {
-      api.media.importFiles(files, { placement: { at, index } });
+      // The DataTransfer itself carries any dropped folders' contents.
+      api.media.importFiles(dt, { placement: { at, index }, asFolder: e.altKey });
     }
   }, undefined, canvasCleanups);
   listen(cv, 'wheel', (e: any) => {
@@ -3349,13 +3361,26 @@ function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
   const snapshot = captureKeyframeGesture(entries);
   const quickOffset = quickModifier && new Set(snapshot.items
     .filter((item: any) => item.selected).map((item: any) => item.offsetIndex)).size > 1;
+  const stretch = !quickModifier && !additive && e.altKey ? keyframeStretchAnchor(
+    snapshot.items.filter((item: any) => item.selected).map((item: any) => item.compositionTime),
+    r.L.from + hit.t,
+  ) : null;
+  const eases = stretch ? captureKeyframeEases(snapshot) : [];
+  const label = stretch ? 'Stretch keyframes' : quickOffset ? 'Quick offset keyframes' : 'Move keyframe';
   let snapLock: KeyframeGroupSnapLock | null = null;
   let moved = false;
   const clearQuickOffset = () => { T.quickOffset = null; };
   beginDrag(e, {
     move: (dx: any, dy: any, event: PointerEvent) => {
       if (!moved && Math.hypot(dx, dy) < 3) return;
-      if (!moved) { moved = true; api.history.begin(quickOffset ? 'Quick offset keyframes' : 'Move keyframe'); }
+      if (!moved) { moved = true; api.history.begin(label); }
+      if (stretch) {
+        applyGraphKeyframeScale(snapshot, {
+          anchorTime: stretch.anchor, anchorValue: 0, valueScale: 1,
+          timeScale: (stretch.grabbed + dx / T.pps - stretch.anchor) / (stretch.grabbed - stretch.anchor),
+        }, eases);
+        return;
+      }
       let delta = dx / T.pps;
       if (!quickOffset && shiftSnapping(event)) {
         const snap = snapKeyframeGesture(snapshot, delta, snapLock);
@@ -3373,13 +3398,13 @@ function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
     },
     up: () => {
       clearQuickOffset();
-      if (moved) api.history.commit(quickOffset ? 'Quick offset keyframes' : 'Move keyframe');
+      if (moved) api.history.commit(label);
       else if (additive && wasSelected) setSelectedKeys(selectionAfterKeyGesture(baseSelection, hitIds, true, false));
       invalidate('timeline');
     },
     cancel: () => {
       clearQuickOffset();
-      if (moved) { restoreKeyframeGesture(snapshot); api.history.cancel(); api.anim.touch(); }
+      if (moved) { restoreKeyframeGesture(snapshot); restoreKeyframeEases(eases); api.history.cancel(); api.anim.touch(); }
       invalidate('timeline');
     },
   });
@@ -3481,12 +3506,27 @@ function dragGraphSelection(e: any, g: any, L: any, click?: () => void) {
 
 /* Rebuild from the pointer-down snapshot on every move, like the move gesture:
    a scale the box later backs away from leaves nothing behind. */
+/* restoreKeyframeGesture only knows times and values; a scale also rescales
+   the stored ease speeds, so those are captured and put back separately. */
+function captureKeyframeEases(snapshot: any) {
+  return snapshot.items.filter((item: any) => item.selected).map((item: any) => ({
+    key: item.key, inSpeed: item.key.inEase?.speed, outSpeed: item.key.outEase?.speed,
+  }));
+}
+function restoreKeyframeEases(eases: any[]) {
+  for (const ease of eases) {
+    if (typeof ease.inSpeed === 'number' && ease.key.inEase) ease.key.inEase.speed = ease.inSpeed;
+    if (typeof ease.outSpeed === 'number' && ease.key.outEase) ease.key.outEase.speed = ease.outSpeed;
+  }
+}
+
 function applyGraphKeyframeScale(snapshot: any, request: any, eases: any[]) {
   restoreKeyframeGesture(snapshot);
   const plan = planGraphKeyframeScale(snapshot.items, request, api.project.get().fps);
   plan.moves.forEach(({ item, time, value }: any) => {
     item.key.t = time;
-    if (typeof item.key.v === 'number' && Number.isFinite(value)) item.key.v = api.util.round(value, 3);
+    // A time-only stretch leaves values exactly as they were, unrounded.
+    if (plan.valueScale !== 1 && typeof item.key.v === 'number' && Number.isFinite(value)) item.key.v = api.util.round(value, 3);
   });
   /* Influence is a ratio and survives a scale untouched, but the stored speed
      is value-per-second, so it has to follow value over time to keep the drawn
@@ -3513,9 +3553,7 @@ function dragGraphTransform(e: any, g: any, grip: GraphTransformHandle) {
   const entries = selectedKeyEntries().filter((entry: any) => !entry.L.lock && visibleProperties.has(entry.prop));
   if (!box || entries.length < 2) return;
   const snapshot = captureKeyframeGesture(entries);
-  const eases = snapshot.items.filter((item: any) => item.selected).map((item: any) => ({
-    key: item.key, inSpeed: item.key.inEase?.speed, outSpeed: item.key.outEase?.speed,
-  }));
+  const eases = captureKeyframeEases(snapshot);
   /* y grows downward, so the northern grips carry the *highest* value. */
   const east = grip.includes('e'), west = grip.includes('w');
   const north = grip.includes('n'), south = grip.includes('s');
@@ -3558,13 +3596,8 @@ function dragGraphTransform(e: any, g: any, grip: GraphTransformHandle) {
     },
     cancel: () => {
       if (moved) {
-        /* restoreKeyframeGesture only knows times and values; the eases this
-           gesture rescaled have to be put back by hand. */
         restoreKeyframeGesture(snapshot);
-        for (const ease of eases) {
-          if (typeof ease.inSpeed === 'number' && ease.key.inEase) ease.key.inEase.speed = ease.inSpeed;
-          if (typeof ease.outSpeed === 'number' && ease.key.outEase) ease.key.outEase.speed = ease.outSpeed;
-        }
+        restoreKeyframeEases(eases);
         api.history.cancel(); api.anim.touch();
       }
       T.graphDragBounds = null; T.graphReadout = null;

@@ -642,22 +642,49 @@ The bundled **3D Layers** extension provides this as **Import OBJ Model…**. Po
 
 **Override just a piece** — don't fork; register the same panel/command/effect `id`. The latest registration wins; disabling yours restores the original.
 
+## Native panel design
+
+Unless the user's prompt explicitly asks for a different style, every new or
+modified panel must look like a built-in Powermove panel: same layout, controls,
+spacing, type and states. A generated panel that looks hand-made is a defect,
+just like a build error. An explicit user style request overrides this default
+only for the surface it names.
+
+**Reuse before you build.** Open the built-in panel closest to the job with
+`get_panel_state`/`capture_panel` and copy its structure. Let
+`api.panels.register` supply the frame, header, docking and scrolling. Wherever
+an existing component covers the need, use it: `api.ui.controls` (`Row`,
+`Section`, `TextField`, `NumField`, `SelectField`, `ToggleField`, `ColorField`,
+`FillField`, `FontField`), `api.ui.menu`, `api.ui.modal`, `api.ui.icon` and
+`api.ui.toast`. Hand-write a control only when no existing component fits or the
+user asks for it. Sandboxed Store panels cannot use the trusted-only components.
+They must still reproduce the native control's look and behavior with theme
+tokens, not invent a new one.
+
+**Match the native look.**
+- Use the theme tokens for color, radius, type, row and control height
+  (`--row-h`, `--ctl-h`, `--fs-md`, `--r-base`, `--f-ui`). Do not hardcode
+  colors or sizes, and do not add a palette of your own.
+- Lay out label and control rows like Properties. Labels sit in `--tx-2`;
+  values and controls align to the same column.
+- Buttons are flat tonal fills or transparent. Do not add outlines, bevels,
+  gradients or raised shadows. A choice among a few options is a segmented
+  control on a sunken track, with the selected segment shown as a tonal fill.
+  Never use separate outlined pills or an accent-colored ring for it.
+- Group content with spacing and `--bg-panel-2`/`--bg-sunken` fills, not
+  hairline dividers, nested cards or a second title bar.
+- Leave out helper captions, attribution footers, status sentences and
+  implementation details. Report results in the content itself or with
+  `api.ui.toast`. Put recovery actions inside the error surface they act on.
+- Inherit light and dark themes, and keep hover, selected, disabled and keyboard
+  focus states visible.
+- Keep controls source-connected and undoable.
+
+Before you finish, capture the panel next to a built-in panel at a normal and a
+narrow width and fix every visible difference. See
+[the interface language](design-language.md).
+
 ## Theme tokens (subset; the full set is `@powermove/tokens/tokens.css`)
-
-### Native panels by default
-
-Unless the user's prompt explicitly requests a different style, new and modified
-panels must match regular Powermove panels one to one. Let `api.panels.register`
-supply the existing frame, header, docking, and scrolling. Reuse `api.ui.controls`
-and the closest built-in panel's rows, fields, sections, buttons, and icons.
-Match the same spacing, type sizes, label alignment, control heights, radii,
-borders, and surfaces using the app's tokens. Inherit light/dark mode; do not
-introduce a nested card, duplicate title bar, custom palette, or decorative UI.
-Use flat tonal fills or transparent buttons without bevels, decorative gradients,
-or raised shadows. Put recovery actions inside their borderless error surface.
-Keep keyboard focus and selection indicators visible. See [the interface language](design-language.md).
-Keep controls source-connected and undoable. An explicit user style request
-overrides this default only for the requested surface.
 
 `--accent --bg-window --bg-panel --bg-panel-2 --bg-sunken --bg-field --tx --tx-2 --line --r-base --f-ui --f-mono --row-h --ctl-h --fs-md --dur-2 --ease`
 

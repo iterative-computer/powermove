@@ -4,6 +4,10 @@
   import type { PanelProps } from './registerSveltePanel';
   import { bridge } from '../kernel/bridge';
   import { createCompThumbnails } from './comp-thumbnails.svelte';
+  import {
+    assetFolder, childFolders, createFolder, deleteFolder, folderItemCount, folderPath, isWithin, moveItems,
+    renameFolder, validFolder, type AssetFolder
+  } from '../legacy/core/asset-folders';
 
   interface Asset {
     id: string;
@@ -41,8 +45,32 @@
   let selectedCompId = $state<string | null>(null);
   const compThumbs = createCompThumbnails(PM);
   let draggingCompId = $state<string | null>(null);
-  const assets = $derived((doc.tick.assets, doc.proj, Object.values(doc.proj?.assets ?? {}) as Asset[]));
+  /* Media folders work like Finder's icon view: the grid shows one folder's
+     contents, and the path above it leads back out. Undo can delete the open
+     folder, so every read goes through validFolder. */
+  let openFolderId = $state<string | null>(null);
+  const folderView = $derived.by(() => {
+    // Folder edits happen in place, so the ticks are what re-run this.
+    const version = doc.tick.assets + doc.tick.history + doc.tick.project;
+    const project = doc.proj ?? {};
+    const current = validFolder(project, openFolderId);
+    const folders = childFolders(project, current);
+    return {
+      version, current, folders,
+      crumbs: folderPath(project, current),
+      counts: new Map(folders.map((folder) => [folder.id, folderItemCount(project, folder.id)]))
+    };
+  });
+  const currentFolder = $derived(folderView.current);
+  const folders = $derived(folderView.folders);
+  const crumbs = $derived(folderView.crumbs);
+  const allAssets = $derived((doc.tick.assets, doc.tick.history, doc.proj, Object.values(doc.proj?.assets ?? {}) as Asset[]));
+  const assets = $derived(allAssets.filter((asset) => assetFolder(doc.proj ?? {}, asset) === currentFolder));
   let selectedAssetId = $state<string | null>(null);
+  let selectedFolderId = $state<string | null>(null);
+  let renamingFolderId = $state<string | null>(null);
+  let draggingFolderId = $state<string | null>(null);
+  let folderDropTarget = $state<string | null>(null);
   const activeAssetId = $derived(
     selectedAssetId && assets.some((asset) => asset.id === selectedAssetId) ? selectedAssetId : null
   );
@@ -75,6 +103,7 @@
   $effect(() => {
     const project = doc.proj;
     if (project !== observedProject) {
+      if (project?.id !== observedProject?.id) openFolderId = null;
       observedProject = project;
       clearSelection();
     }
@@ -159,6 +188,7 @@
         ...(asset.kind === 'audio' || asset.kind === 'model' ? [] : [{ label: 'New Comp from Selection', run: () => PM.cmd('newCompFromMedia', asset.id) }]),
       ]),
       { label: offline ? 'Locate File…' : 'Replace File…', run: () => PM.pickFiles(false, { replaceAssetId: asset.id }) },
+      ...(currentFolder ? [{ label: 'Move Out of Folder', run: () => moveInto({ assets: [asset.id] }, crumbs.at(-2)?.id ?? null) }] : []),
       ...(sourcePath ? [{ label: 'Reveal in Finder', run: () => revealAssetSource(asset) }] : []),
       '-',
       { label: 'Delete media…', run: () => requestDelete(asset) },
@@ -225,6 +255,7 @@
 
   function selectAsset(id: string, row?: HTMLElement): void {
     selectedCompId = null;
+    selectedFolderId = null;
     selectedAssetId = id;
     row?.focus();
     status = `Selected ${assets.find((asset) => asset.id === id)?.name ?? 'media'}`;
@@ -305,7 +336,8 @@
     const dt = event.dataTransfer;
     if (!dt) return;
     dt.setData('application/x-powermove-asset', JSON.stringify({ id: asset.id, name: asset.name, kind: asset.kind, dur: asset.dur }));
-    dt.effectAllowed = 'copy';
+    // Copy onto the timeline, move into a media folder.
+    dt.effectAllowed = 'copyMove';
     /* The ghost is just the tile, not the whole card: it reads as the thing
        you'll get on the timeline. */
     const tile = (event.currentTarget as HTMLElement).querySelector<HTMLElement>('.asset-preview');
@@ -315,7 +347,7 @@
     /* dragover can't read payload data, so the timeline ghost reads this. */
     PM.mediaDrag = { id: asset.id, name: asset.name, kind: asset.kind, dur: asset.dur };
   }
-  function handleDragEnd(): void { draggingId = null; PM.mediaDrag = null; }
+  function handleDragEnd(): void { draggingId = null; folderDropTarget = null; PM.mediaDrag = null; }
 
   /* ── drop in: OS files → project media only, no layer ── */
   let dropDepth = 0;
@@ -346,10 +378,7 @@
     if (!fileDrag(event)) return;
     event.preventDefault();
     event.stopPropagation();
-    const files = Array.from(event.dataTransfer?.files ?? []);
-    if (!files.length) return;
-    PM.importFiles(files, { placement: null });
-    status = `Importing ${files.length === 1 ? files[0]?.name : `${files.length} files`}`;
+    importDrop(event, currentFolder);
   }
 
   /* Select on pointerdown so a press anywhere on the tile (image, video,
@@ -364,6 +393,7 @@
     const shouldClearPreview = selectedAssetId !== null || !!preview?.activeId;
     selectedAssetId = null;
     selectedCompId = null;
+    selectedFolderId = null;
     status = '';
     if (shouldClearPreview) preview?.clear?.();
     (document.activeElement as HTMLElement | null)?.blur?.();
@@ -375,6 +405,11 @@
      The source monitor itself is part of that ownership — its transport and
      close button must survive the press that reaches them. */
   function handleWindowPointerDown(event: PointerEvent): void {
+    if (selectedFolderId) {
+      const card = event.target instanceof Element ? event.target.closest<HTMLElement>('.asset-card[data-folder-id]') : null;
+      if (card?.dataset.folderId !== selectedFolderId) selectedFolderId = null;
+      return;
+    }
     if (selectedCompId) {
       const card = event.target instanceof Element ? event.target.closest<HTMLElement>('.asset-card[data-comp-id]') : null;
       if (card?.dataset.compId !== selectedCompId) selectedCompId = null;
@@ -419,7 +454,7 @@
   }
 
   function focusAsset(index: number): void {
-    const options = listElement.querySelectorAll<HTMLElement>('.asset-card');
+    const options = listElement.querySelectorAll<HTMLElement>('.asset-card[data-asset-id]');
     options[index]?.focus();
   }
 
@@ -476,8 +511,161 @@
     event.stopPropagation();
     PM.menu(event.currentTarget, [
       { label: 'New Composition…', kb: '⌘N', run: () => PM.cmd('newComposition') },
+      { label: 'New Folder', run: () => newFolder(currentFolder) },
+      '-',
       { label: 'Import Media…', kb: '⌘I', run: () => PM.pickFiles() },
+      { label: 'Import Folder…', run: () => PM.pickFolder({ folder: currentFolder }) },
     ], { x: event.clientX, y: event.clientY });
+  }
+
+  /* ── media folders ── */
+  /** Dropped files and folders, filed into `folder`. ⌥ keeps a dropped folder
+      as a folder of individual files instead of an image sequence, as in AE. */
+  function importDrop(event: DragEvent, folder: string | null): void {
+    const dt = event.dataTransfer;
+    if (!dt?.files.length) return;
+    const count = dt.files.length;
+    status = `Importing ${count === 1 ? dt.files[0]?.name : `${count} items`}`;
+    PM.importFiles(dt, { placement: null, folder, asFolder: event.altKey });
+  }
+
+  function folderEdit(label: string, edit: (project: Record<string, any>) => unknown): unknown {
+    const result = PM.hist.do(label, () => edit(PM.proj));
+    PM.bus.emit('assets');
+    return result;
+  }
+
+  function newFolder(parent: string | null): void {
+    const id = folderEdit('New folder', (project) => createFolder(project, 'Untitled Folder', parent)) as string;
+    openFolderId = parent;
+    selectedAssetId = null;
+    selectedCompId = null;
+    selectedFolderId = id;
+    renamingFolderId = id;
+    status = 'Created a folder';
+  }
+
+  function openFolder(id: string | null): void {
+    clearSelection();
+    openFolderId = id;
+    status = id ? `Opened ${folderPath(PM.proj, id).at(-1)?.name ?? 'folder'}` : 'Showing all media';
+  }
+
+  function selectFolder(id: string, row?: HTMLElement): void {
+    selectedAssetId = null;
+    selectedCompId = null;
+    PM.Kernel?.services.get('viewer')?.preview?.clear?.();
+    selectedFolderId = id;
+    row?.focus();
+  }
+
+  function commitRename(folder: AssetFolder, value: string): void {
+    if (renamingFolderId !== folder.id) return;
+    renamingFolderId = null;
+    if (value.trim() && value.trim() !== folder.name) folderEdit('Rename folder', (project) => renameFolder(project, folder.id, value));
+  }
+
+  function removeFolder(folder: AssetFolder): void {
+    folderEdit('Delete folder', (project) => deleteFolder(project, folder.id));
+    if (selectedFolderId === folder.id) selectedFolderId = null;
+    status = `Deleted ${folder.name}; its contents moved up a level`;
+    PM.toast(status);
+  }
+
+  function moveInto(items: { assets?: string[]; folders?: string[] }, target: string | null): void {
+    const moved = folderEdit('Move to folder', (project) => moveItems(project, items, target));
+    if (moved) status = `Moved to ${target ? folderPath(PM.proj, target).at(-1)?.name : 'Media'}`;
+  }
+
+  function showFolderMenu(event: MouseEvent, folder: AssetFolder): void {
+    event.preventDefault();
+    event.stopPropagation();
+    selectFolder(folder.id, event.currentTarget as HTMLElement);
+    PM.menu(event.currentTarget, [
+      { header: folder.name },
+      { label: 'Open', run: () => openFolder(folder.id) },
+      { label: 'Rename', run: () => { renamingFolderId = folder.id; } },
+      { label: 'New Folder Inside', run: () => newFolder(folder.id) },
+      { label: 'Import Folder Into…', run: () => PM.pickFolder({ folder: folder.id }) },
+      ...(currentFolder ? [{ label: 'Move Out of Folder', run: () => moveInto({ folders: [folder.id] }, crumbs.at(-2)?.id ?? null) }] : []),
+      '-',
+      { label: 'Delete folder', run: () => removeFolder(folder) },
+    ], { x: event.clientX, y: event.clientY });
+  }
+
+  /** What is being dragged inside the panel, for a folder or path drop. */
+  function draggedItems(): { assets?: string[]; folders?: string[] } | null {
+    if (draggingId) return { assets: [draggingId] };
+    if (draggingFolderId) return { folders: [draggingFolderId] };
+    return null;
+  }
+
+  function canDropInto(event: DragEvent, target: string | null): boolean {
+    if (fileDrag(event)) return true;
+    if (draggingFolderId && target && isWithin(PM.proj, target, draggingFolderId)) return false;
+    return !!draggedItems();
+  }
+
+  function handleFolderDragOver(event: DragEvent, target: string | null): void {
+    if (!canDropInto(event, target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = fileDrag(event) ? 'copy' : 'move';
+    folderDropTarget = target ?? '';
+  }
+
+  function handleFolderDragLeave(event: DragEvent): void {
+    const next = event.relatedTarget as Node | null;
+    if (!next || !(event.currentTarget as Node).contains(next)) folderDropTarget = null;
+  }
+
+  function handleFolderDrop(event: DragEvent, target: string | null): void {
+    if (!canDropInto(event, target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    folderDropTarget = null;
+    dropDepth = 0;
+    dropOver = false;
+    if (fileDrag(event)) { importDrop(event, target); return; }
+    const items = draggedItems();
+    if (items) moveInto(items, target);
+  }
+
+  function handleFolderDragStart(event: DragEvent, folder: AssetFolder): void {
+    if (renamingFolderId === folder.id || (event.target as Element).closest('button, input')) { event.preventDefault(); return; }
+    const dt = event.dataTransfer;
+    if (!dt) return;
+    dt.setData('application/x-powermove-folder', folder.id);
+    dt.effectAllowed = 'move';
+    const tile = (event.currentTarget as HTMLElement).querySelector<HTMLElement>('.asset-preview');
+    if (tile) dt.setDragImage(tile, tile.offsetWidth / 2, tile.offsetHeight / 2);
+    draggingFolderId = folder.id;
+    selectFolder(folder.id);
+  }
+
+  function handleFolderKeydown(event: KeyboardEvent, folder: AssetFolder): void {
+    if (event.target !== event.currentTarget) return;
+    if (event.key === 'Enter') { event.preventDefault(); openFolder(folder.id); }
+    else if (event.key === 'Delete' || event.key === 'Backspace') {
+      event.preventDefault(); event.stopPropagation();
+      removeFolder(folder);
+    } else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); clearSelection(); }
+  }
+
+  function handleRenameKeydown(event: KeyboardEvent, folder: AssetFolder): void {
+    event.stopPropagation();
+    if (event.key === 'Enter') { event.preventDefault(); commitRename(folder, (event.currentTarget as HTMLInputElement).value); }
+    else if (event.key === 'Escape') { event.preventDefault(); renamingFolderId = null; }
+  }
+
+  function focusRename(input: HTMLInputElement) {
+    input.focus();
+    input.select();
+  }
+
+  function folderDetails(folder: AssetFolder): string {
+    const count = folderView.counts.get(folder.id) ?? 0;
+    return count ? `${count} ${count === 1 ? 'item' : 'items'}` : 'Empty';
   }
 
   function compDetails(comp: CompItem): string {
@@ -487,6 +675,7 @@
 
   function selectComp(id: string, row?: HTMLElement): void {
     selectedAssetId = null;
+    selectedFolderId = null;
     PM.Kernel?.services.get('viewer')?.preview?.clear?.();
     selectedCompId = id;
     row?.focus();
@@ -560,8 +749,69 @@
   ondrop={handleDrop}
   oncontextmenu={showProjectMenu}
 >
+  {#if currentFolder}
+    <nav class="asset-path" aria-label="Folder path">
+      <button class="asset-path-up" type="button" title="Up one level" aria-label="Up one level"
+        onclick={() => openFolder(crumbs.at(-2)?.id ?? null)}
+        ondragover={(event) => handleFolderDragOver(event, crumbs.at(-2)?.id ?? null)}
+        ondragleave={handleFolderDragLeave}
+        ondrop={(event) => handleFolderDrop(event, crumbs.at(-2)?.id ?? null)}>
+        <Icon {PM} name="chev" />
+      </button>
+      <button class="asset-path-crumb" type="button" class:is-drop-target={folderDropTarget === ''}
+        onclick={() => openFolder(null)}
+        ondragover={(event) => handleFolderDragOver(event, null)}
+        ondragleave={handleFolderDragLeave}
+        ondrop={(event) => handleFolderDrop(event, null)}>Media</button>
+      {#each crumbs as crumb, index (crumb.id)}
+        <span class="asset-path-sep" aria-hidden="true">/</span>
+        <button class="asset-path-crumb" type="button" class:is-drop-target={folderDropTarget === crumb.id}
+          aria-current={index === crumbs.length - 1 ? 'location' : undefined}
+          onclick={() => openFolder(crumb.id)}
+          ondragover={(event) => handleFolderDragOver(event, crumb.id)}
+          ondragleave={handleFolderDragLeave}
+          ondrop={(event) => handleFolderDrop(event, crumb.id)}>{crumb.name}</button>
+      {/each}
+    </nav>
+  {/if}
   <div class="asset-list" role="listbox" tabindex="-1" aria-label="Project media" bind:this={listElement} onpointerdown={handleListPointerDown}>
-    {#each comps as comp (comp.id)}
+    {#each folders as folder (folder.id)}
+      <div
+        class="asset-card is-folder"
+        class:is-dragging={draggingFolderId === folder.id}
+        class:is-drop-target={folderDropTarget === folder.id}
+        role="option"
+        tabindex="-1"
+        aria-selected={selectedFolderId === folder.id}
+        data-folder-id={folder.id}
+        draggable={renamingFolderId !== folder.id}
+        title={`${folder.name} · double-click to open, or drop media onto it`}
+        ondragstart={(event) => handleFolderDragStart(event, folder)}
+        ondragend={() => { draggingFolderId = null; folderDropTarget = null; }}
+        ondragover={(event) => handleFolderDragOver(event, folder.id)}
+        ondragleave={handleFolderDragLeave}
+        ondrop={(event) => handleFolderDrop(event, folder.id)}
+        onpointerdown={(event) => { if (event.button === 0 && !(event.target as Element).closest('button, input')) selectFolder(folder.id, event.currentTarget as HTMLElement); }}
+        oncontextmenu={(event) => showFolderMenu(event, folder)}
+        ondblclick={(event) => { if ((event.target as Element).closest('button, input')) return; event.preventDefault(); openFolder(folder.id); }}
+        onkeydown={(event) => handleFolderKeydown(event, folder)}
+      >
+        <span class="asset-preview folder">
+          <Icon {PM} name="project" />
+        </span>
+        <span class="asset-copy">
+          {#if renamingFolderId === folder.id}
+            <input class="asset-rename" value={folder.name} aria-label="Folder name" use:focusRename
+              onkeydown={(event) => handleRenameKeydown(event, folder)}
+              onblur={(event) => commitRename(folder, event.currentTarget.value)} />
+          {:else}
+            <b title={folder.name}>{folder.name}</b>
+          {/if}
+          <small>{folderDetails(folder)}</small>
+        </span>
+      </div>
+    {/each}
+    {#each currentFolder ? [] : comps as comp (comp.id)}
       <div
         class="asset-card is-comp"
         class:is-dragging={draggingCompId === comp.id}
@@ -698,11 +948,13 @@
         </span>
       </div>
     {:else}
-      <div class="asset-empty">
-        <Icon {PM} name="project" />
-        <b>Add media</b>
-        <span>Drag files here or import from your computer.</span>
-      </div>
+      {#if !folders.length}
+        <div class="asset-empty">
+          <Icon {PM} name="project" />
+          <b>{currentFolder ? 'This folder is empty' : 'Add media'}</b>
+          <span>{currentFolder ? 'Drag media or files here.' : 'Drag files here or import from your computer.'}</span>
+        </div>
+      {/if}
     {/each}
   </div>
   <div class="asset-drop-overlay" aria-hidden="true">

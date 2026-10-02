@@ -61,6 +61,8 @@ describe('autonomous agent contract', () => {
     expect(instructions).toMatch(/contribute.+override.+fork_builtin_extension/s);
     expect(instructions).toContain('folder name must equal the extension manifest id');
     expect(instructions).toContain('Never edit the app bundle');
+    expect(instructions).toContain('Native panel design');
+    expect(instructions).toContain('reuse existing components');
     expect(instructions).toContain("result's extensions array");
   });
 

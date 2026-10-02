@@ -13,6 +13,7 @@ import {
   resolveEdgeSnap,
   playheadSnapTargets,
   firstFrameTime,
+  keyframeStretchAnchor,
   lastFrameTime,
   shouldDrawClipLabel,
   timelinePropertyTargets,
@@ -636,5 +637,18 @@ describe('keyframe move planning', () => {
     expect(plan.delta).toBe(1.9);
     expect(plan.moves.map(move => move.time)).toEqual([2.9, 3.9]);
     expect(plan.removed).toEqual([]);
+  });
+});
+
+describe('Option-drag keyframe stretch', () => {
+  it('anchors at the opposite end when the first or last selected key is grabbed', () => {
+    expect(keyframeStretchAnchor([1, 2, 3], 3)).toEqual({ anchor: 1, grabbed: 3 });
+    expect(keyframeStretchAnchor([1, 2, 3], 1)).toEqual({ anchor: 3, grabbed: 1 });
+  });
+
+  it('falls back to an ordinary move for a middle key, one key, or keys at one time', () => {
+    expect(keyframeStretchAnchor([1, 2, 3], 2)).toBeNull();
+    expect(keyframeStretchAnchor([2], 2)).toBeNull();
+    expect(keyframeStretchAnchor([2, 2], 2)).toBeNull();
   });
 });

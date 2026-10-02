@@ -610,7 +610,13 @@ export interface InspectorAPI {
   registerSection(section: InspectorSectionDefinition): Disposable;
   sections(): InspectorSectionDefinition[];
 }
-export interface ImportFilesOptions { project?: Project; placement?: ImportPlacement | null; sequence?: boolean; replaceAssetId?: string }
+export interface ImportFilesOptions {
+  project?: Project; placement?: ImportPlacement | null; sequence?: boolean; replaceAssetId?: string;
+  /** Media folder (`project.assetFolders` id) that receives the imported media. */
+  folder?: string | null;
+  /** For a dropped folder: keep it as a media folder of individual files rather than an image sequence. */
+  asFolder?: boolean;
+}
 export interface RuntimeAsset extends AssetRecord { blob?: Blob; sourceText?: string; [key: string]: unknown }
 export interface WaveformOptions { [key: string]: unknown }
 export interface FontCatalog {
@@ -633,7 +639,8 @@ export interface MediaAPI {
   getImportDefaults(): ImportDefaults | null;
   readonly timing: { isTimed(layer: Layer): boolean; rate(layer: Layer): number; earliestStart(layer: Layer): number };
   /** Requires the full-access permission for Store extensions. */
-  importFiles(files: FileList | File[], options?: ImportFilesOptions): Promise<unknown>;
+  /** Pass a drop's DataTransfer to import dropped folders as well as files. */
+  importFiles(files: FileList | File[] | DataTransfer, options?: ImportFilesOptions): Promise<unknown>;
   commandForAsset(id?: string, at?: number): EditCommand | undefined;
   /** Requires the full-access permission for Store extensions. */
   readonly audio: { drawWaveform(ctx: CanvasRenderingContext2D, layer: Layer, options?: WaveformOptions): boolean };

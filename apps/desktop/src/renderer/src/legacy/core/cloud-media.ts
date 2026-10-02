@@ -1,7 +1,8 @@
 import type { PowermoveBridge } from '../../../../shared/ipc';
 import { bridge as hostBridge } from '../../kernel/bridge';
 
-/** Recovered Files are synthesized from IPC chunks, so webUtils has no path. */
+/** Recovered Files are synthesized from IPC chunks, so webUtils has no path.
+ *  Files read out of a dropped folder may also need their path named here. */
 export const cloudSourcePaths = new WeakMap<File, string>();
 type MediaBridge = PowermoveBridge['media'];
 export interface CloudAsset { id: string; name: string; sourcePath?: string; path?: string }

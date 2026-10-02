@@ -420,8 +420,10 @@ function frame(now: any) {
   // A saved composition frame may bypass compositor readiness entirely.
   // Keep its live decoder ready for Play even when its pixels are cached.
   if (!PM.playing) scrubVideos(renderTime);
+  // Scrubbing keeps the same blur as the settled frame. Dropping it while the
+  // playhead moves made every blurred layer flicker sharp, then soft again.
   const renderOptions = {
-    mblur: !interactive, mbSamples: PM.playing ? 6 : 12,
+    mblur: true, mbSamples: PM.playing ? 6 : 12,
     shutter: p.shutter || .5, hideShy: false,
   };
   PM.playbackVideoFrame = null;

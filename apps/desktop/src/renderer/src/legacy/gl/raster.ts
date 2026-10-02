@@ -899,7 +899,8 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
     if (kind === 'audio' && PM.Audio) PM.Audio.rebalanceCache();
   }
   Object.assign(asset, identity, { id, persisted });
-  PM.proj.assets[id] = { id, ...identity, persisted };
+  // Re-importing media keeps the media folder it was filed in.
+  PM.proj.assets[id] = { id, ...identity, persisted, ...(existingMeta?.folder ? { folder: existingMeta.folder } : {}) };
   if (posterBlob) setPoster(id, posterBlob);
   const relinkedLayers = PM.MediaImport.coalesce(PM.proj, id, plan.aliases);
   plan.aliases.forEach((alias: any) => {
@@ -1025,7 +1026,10 @@ PM.assets = {
         catch (error) { }
       }
       assertCurrentProject();
-      const nextMeta = assetIdentity(id, file, kind, prepared, fingerprint, storageKey, sourcePath, true, currentMeta.layerDefinition);
+      const nextMeta = {
+        ...assetIdentity(id, file, kind, prepared, fingerprint, storageKey, sourcePath, true, currentMeta.layerDefinition),
+        ...(currentMeta.folder ? { folder: currentMeta.folder } : {}),
+      };
       Object.assign(prepared, nextMeta);
 
       const applyVersion = (meta: any, runtime: any, poster: Blob | null) => {

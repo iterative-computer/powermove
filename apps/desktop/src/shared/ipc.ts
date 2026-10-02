@@ -572,6 +572,7 @@ export type MenuCommand =
   | 'open'
   | 'import'
   | 'importSequence'
+  | 'importFolder'
   | 'export'
   | 'contextUndo'
   | 'contextRedo'
@@ -728,7 +729,8 @@ export interface PowermoveBridge {
     sourcePath(file: File): string | null;
     revealSource(sourcePath: string): Promise<void>;
     createPlaybackProxy(file: File, sourcePath?: string): Promise<MediaProxyResult>;
-    createImageSequence(files: File[], fps: number, onProgress?: (completed: number) => void): Promise<MediaProxyResult>;
+    /** `originalPaths[i]`, when given, names files[i] on disk for Files the host cannot map itself. */
+    createImageSequence(files: File[], fps: number, onProgress?: (completed: number) => void, originalPaths?: Array<string | undefined>): Promise<MediaProxyResult>;
     /** Encode frames the renderer decoded from an animated image into a proxy. */
     beginAnimation(fps: number, repeats: number[]): Promise<string>;
     writeAnimationFrame(token: string, index: number, offset: number, data: Uint8Array): Promise<void>;

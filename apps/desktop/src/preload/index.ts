@@ -153,8 +153,8 @@ const bridge: PowermoveBridge = {
         name: file.name
       }) as Promise<MediaProxyResult>;
     },
-    createImageSequence: async (files, fps, onProgress) => {
-      const sourcePaths = files.map(file => webUtils.getPathForFile(file));
+    createImageSequence: async (files, fps, onProgress, originalPaths) => {
+      const sourcePaths = files.map((file, index) => originalPaths?.[index] || webUtils.getPathForFile(file));
       if (sourcePaths.some(source => !source)) return { ok: false, error: 'The original image files are no longer available' };
       const requestId = `sequence-${Date.now()}-${++nextMediaRequest}`;
       const listener = (_event: IpcRendererEvent, progress: { requestId: string; completed: number }) => {

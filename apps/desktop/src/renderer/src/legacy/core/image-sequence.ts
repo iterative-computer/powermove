@@ -2,10 +2,11 @@ import { IMAGE_SEQUENCE_ACCEPT, orderedSequence, sequenceFrame, sequenceGaps, va
 import type { PMRegistry } from '../registry';
 import type { ImportProgress } from './import-progress';
 import { bridge as hostBridge } from '../../kernel/bridge';
+import { cloudSourcePaths } from './cloud-media';
 
 export const importedSequences = new WeakMap<File, { fps: number; frames: number }>();
 
-export function chooseSequence(PM: PMRegistry, files: File[], required: boolean): Promise<{ files: File[]; fps: number | null } | null> {
+export function chooseSequence(PM: PMRegistry, files: File[], required: boolean, note?: string): Promise<{ files: File[]; fps: number | null } | null> {
   return new Promise(resolve => {
     const h = PM.h;
     let selected = files;
@@ -57,6 +58,7 @@ export function chooseSequence(PM: PMRegistry, files: File[], required: boolean)
     };
     const body = h('div.sequence-import',
       h('p.sequence-import-intro', 'Turn your numbered images into one clip.'),
+      ...(note ? [h('p.sequence-import-note', note)] : []),
       h('div.sequence-import-source', h('span.sequence-import-icon', PM.icon('film')),
         h('div.sequence-import-source-text', count, filenames)),
       h('div.sequence-import-settings',
@@ -103,7 +105,7 @@ export async function convertImageSequence(files: File[], fps: number, assertCur
   onProgress?.({ label: 'Creating image sequence…' });
   const result = await media.createImageSequence(frames, fps, completed => {
     onProgress?.({ label: `Creating sequence · ${completed} of ${frames.length} frames`, completed, total: frames.length });
-  });
+  }, frames.map(file => cloudSourcePaths.get(file)));
   if (!result.ok) throw new Error(result.error);
   try {
     assertCurrent();
