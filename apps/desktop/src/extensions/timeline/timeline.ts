@@ -573,6 +573,7 @@ if (sessionTimeline) {
 T.mode = normalizeTimelineMode(previous?.mode ?? api.storage.get('mode'));
 T.trackSnap = previous?.trackSnap ?? api.storage.get('trackSnap') !== false;
 T.trackDrag = null; T.trackDrop = null; T.trackHover = null;
+T.trackScrollY = Number.isFinite(previous?.trackScrollY) ? previous.trackScrollY : 0;
 const tracksMode = () => T.mode === 'tracks';
 runtimes.set(api, T);
 mountedRuntime = T;
@@ -810,13 +811,13 @@ function buildHead(head: any) {
   syncGraphControls = () => {
     syncModeControls();
     const tracks = tracksMode();
-    const shown = Boolean(T.graph) && !tracks;
-    const mode = tracks ? `tracks:${T.trackSnap !== false}` : shown ? (T.graphCombined ? 'both' : 'graph') : 'dope';
+    const shown = Boolean(T.graph);
+    const view = shown ? (T.graphCombined ? 'both' : 'graph') : 'dope';
+    const mode = tracks ? `tracks:${T.trackSnap !== false}:${view}` : view;
     if (graphShown === mode) return;
     graphShown = mode;
-    /* The track timeline has no property rows, so it trades the dope-sheet /
-       graph switch for Premiere's snapping magnet. */
-    for (const node of [dope, both, graph]) { node.hidden = tracks; node.style.display = tracks ? 'none' : ''; }
+    /* The track timeline unfolds keyframes inside its tracks, so the dope
+       sheet / graph switch applies there too; it adds Premiere's magnet. */
     snap.hidden = !tracks; snap.style.display = tracks ? '' : 'none';
     snap.classList.toggle('on', T.trackSnap !== false); snap.setAttribute('aria-pressed', String(T.trackSnap !== false));
     graph.classList.toggle('on', mode === 'graph');
@@ -906,10 +907,13 @@ function setMode(next: unknown) {
   T.mode = mode;
   api.storage.set('mode', mode);
   /* The two views have unrelated row geometry; keep only the time viewport. */
-  T.scrollY = 0;
+  T.scrollY = 0; T.trackScrollY = 0;
   T.trackDrag = null; T.trackDrop = null; T.trackHover = null; T.reorder = null; T.drop = null; T.dropRow = null;
   rowsDirty = true;
   syncGraphControls();
+  /* Paint now: gutter width and lane geometry are resolved while drawing, and
+     pointer hit tests must not see the previous mode's layout meanwhile. */
+  if (T.ctx) draw();
   invalidate('timeline');
 }
 T.setMode = setMode;
@@ -1067,6 +1071,8 @@ const rowShift = (idx: any) => T.drop && !T.graph && idx >= T.drop.rowIdx ? 1 : 
 const rowY = (idx: any) => rawRowY(idx + rowShift(idx));
 const graphTop = () => graphPlotTop(T.ruler, T.hgt, Boolean(T.graphCombined), T.graphSplit);
 const inGraph = (x: number, y: number) => Boolean(T.graph && x >= T.gut && y >= graphTop());
+/* Bottom of the track view: the graph, when shown, takes the space below it. */
+const tracksBottom = () => T.graph ? graphTop() : T.hgt;
 
 /* ── draw ──────────────────────────────────────────────── */
 onEvent('project:changed', () => { rowsDirty = true; invalidate('timeline'); });
@@ -1135,10 +1141,40 @@ function refreshInk() {
 }
 refreshInk();
 
+const clipKeyTimes = new WeakMap<object, { version: unknown; times: number[] }>();
+function layerKeyTimes(L: any): number[] {
+  const version = api.anim.version();
+  const cached = clipKeyTimes.get(L);
+  if (cached && cached.version === version) return cached.times;
+  const times = new Set<number>();
+  for (const row of timelineProperties(api, L, space3d)) {
+    for (const axis of trackChannels(row)) for (const key of axis.prop.kf) times.add(key.t);
+  }
+  const sorted = [...times].sort((a, b) => a - b);
+  clipKeyTimes.set(L, { version, times: sorted });
+  return sorted;
+}
 const trackView = createTrackView({
   api, T, t2x, x2t,
   theme: () => theme, ink: INK,
   drawClip: (c, L, y, height) => drawClip(c, L, y, height),
+  keyTimes: (L) => layerKeyTimes(L),
+  props: (L) => visibleProps(L).map((p: any) => ({ kind: 'prop', L, ...p })),
+  keyframeSize: () => T.style.keyframeSize,
+  keySelected: (key) => keySelected(key),
+  rowSelected: (row) => api.selection.layers().includes(row.L.id) && trackSelected(row, api.selection.chan() ?? ''),
+  keyDown: (e, row, x, y) => keyDown(e, row, x, y, -1),
+  keyMarquee: (e) => marquee(e, { additive: e.shiftKey || e.metaKey }),
+  editKeyAt: (row, x) => editKeyAt(row, x),
+  focusRow: (row) => {
+    api.selection.set({ chan: row.key });
+    T.focusGraph(row.L, row.key);
+    if (!api.selection.layers().includes(row.L.id)) api.selection.select(row.L.id);
+    T.keySelectionActive = true;
+  },
+  toggleAnimation: (row) => togglePropertyAnimation(row),
+  icoAnimationDiamond: (c, x, y, animated, current) => icoAnimationDiamond(c, x, y, animated, current),
+  fitValue: (c, value, unit, width) => fittedPropertyValue(c, value, unit, width),
   clipPalette: (L) => clipPalette(L) as any,
   roundRect, clipText, rgba,
   fui: () => fui(), fmono: () => fmono(), niceStep,
@@ -1169,13 +1205,14 @@ function timelineBackdropKey(): unknown[] | null {
   // Graph curves and active drag adornments keep their full drawing path.
   // One bounded viewport bitmap is sufficient; no frame history is retained.
   if (T.graph || T.drop || T.reorder || T.marquee || T.quickOffset || T.trackDrag || T.trackDrop || !api.uiState.timelineVersion
+      || (tracksMode() && trackView.unfolded())
       || T.cv.width * T.cv.height * 4 > 32 * 1024 * 1024) return null;
   const p = api.project.get();
   const key: unknown[] = [T.cv, T.ctx, T.cv.width, T.cv.height, T.w, T.hgt, T.dpr,
     T.rows, T.gut, T.row, T.ruler, T.pps, T.scrollT, T.scrollY, T.hoverRow, T.dropRow,
     T.style.clipRadius, T.style.keyframeSize, T.style.showLayerNumbers, T.style.showTypeBadges,
     theme, p, p.dur, p.fps, p.work?.[0], p.work?.[1], api.project.revision(),
-    api.anim.version(), api.uiState.timelineVersion(), T.mode, T.trackHover?.area, T.trackHover?.lane];
+    api.anim.version(), api.uiState.timelineVersion(), T.mode, T.trackHover?.area, T.trackHover?.lane, T.trackScrollY];
   const [first, end] = visibleRowRange();
   for (let i = first; i < end; i++) {
     const row = T.rows[i];
@@ -1260,10 +1297,11 @@ function drawInner(preview?: TimelinePreviewTarget) {
   } else syncHeadGeometry();
 
   const tracks = tracksMode() && !preview;
-  const rowBottom = T.graph && T.graphCombined && !tracks ? graphTop() : H;
+  const rowBottom = T.graph && T.graphCombined ? graphTop() : H;
   const contentHeight = tracks ? trackView.contentHeight() : T.rows.length * T.row;
   const maxScroll = Math.max(0, contentHeight - (rowBottom - T.ruler));
-  T.scrollY = clamp(T.scrollY, 0, maxScroll);
+  if (tracks) T.trackScrollY = clamp(Number(T.trackScrollY) || 0, 0, maxScroll);
+  else T.scrollY = clamp(T.scrollY, 0, maxScroll);
 
   /* Keep the playhead visible by advancing a page at the edge. Pinning it to
      the edge moved every clip, ruler label and waveform every display tick,
@@ -1298,9 +1336,23 @@ function drawInner(preview?: TimelinePreviewTarget) {
     }
   } else {
     c.fillStyle = theme.panel; c.fillRect(0, 0, W, H);
-    if (tracks) trackView.draw(c, W, H);
+    if (tracks) {
+      /* The track view draws its own lanes, clips, unfolded keyframes and
+         headers; the graph editor, when shown, sits below it. */
+      const bottom = tracksBottom();
+      if (bottom > T.ruler) {
+        c.save(); c.beginPath(); c.rect(0, 0, W, bottom); c.clip();
+        trackView.draw(c, W, bottom);
+        c.restore();
+      }
+      if (T.graph) {
+        drawGraph(c, W, H);
+        c.fillStyle = theme.panel; c.fillRect(0, graphTop(), T.gut, H - graphTop());
+        c.strokeStyle = theme.line; c.beginPath(); c.moveTo(T.gut - .5, graphTop()); c.lineTo(T.gut - .5, H); c.stroke();
+      }
+    }
     else drawTracksBg(c, W, H);
-    if (tracks) { /* the track view draws its own lanes, clips and headers */ }
+    if (tracks) { /* drawn above */ }
     else if (T.graph) {
       if (T.graphCombined) {
         c.save(); c.beginPath(); c.rect(T.gut, T.ruler, W - T.gut, graphTop() - T.ruler); c.clip();
@@ -1310,7 +1362,7 @@ function drawInner(preview?: TimelinePreviewTarget) {
     }
     else { drawClips(c, W, H); drawDropGhost(c, W, H); }
     if (!tracks) drawGutter(c, W, H);
-    if (T.graph && !tracks) drawGraphReadout(c, W, H);
+    if (T.graph) drawGraphReadout(c, W, H);
     if (T.reorder) {
       const d = T.reorder, y = rowY(d.row), left = 74 + Math.min(48, d.depth * 12);
       c.save(); c.beginPath(); c.rect(0, T.ruler, W, H - T.ruler); c.clip();
@@ -1340,7 +1392,7 @@ function drawInner(preview?: TimelinePreviewTarget) {
     else delete T.cv.dataset.snapTarget;
   }
   drawQuickOffset(c, W, H);
-  drawScrollThumb(c, W, rowBottom, maxScroll, contentHeight);
+  drawScrollThumb(c, W, rowBottom, tracks ? T.trackScrollY : T.scrollY, maxScroll, contentHeight);
   if ((window as any).__tlDebug) {
     const px = t2x(api.transport.time());
     const msg = '[tl] t=' + api.transport.time().toFixed(3) + ' px=' + (isFinite(px) ? px.toFixed(1) : String(px)) + ' gut=' + T.gut + ' W=' + W + ' sT=' + T.scrollT.toFixed(3) + ' pps=' + T.pps + ' rows=' + T.rows.length + ' graph=' + T.graph;
@@ -1402,11 +1454,11 @@ T.renderPreview = (canvas: HTMLCanvasElement, width: number, height: number) => 
 };
 
 /* Thin scrollbar on the right edge of the track area when rows overflow. */
-function drawScrollThumb(c: any, W: any, H: any, maxScroll: any, total: number) {
+function drawScrollThumb(c: any, W: any, H: any, scroll: number, maxScroll: any, total: number) {
   if (maxScroll <= 0) return;
   const trackH = H - T.ruler;
   const th = Math.max(18, trackH * trackH / total);
-  const ty = T.ruler + (trackH - th) * (T.scrollY / maxScroll);
+  const ty = T.ruler + (trackH - th) * (scroll / maxScroll);
   c.fillStyle = INK.thumb;
   roundRect(c, W - 5, ty, 3, th, 1.5); c.fill();
 }
@@ -2641,7 +2693,8 @@ function bind(cv: any, wrap: any) {
         const pixels = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? T.hgt : 1);
         const delta = g.y2v(pixels) - g.y2v(0);
         T.graphViewBounds = [g.vmin + delta, g.vmax + delta];
-      } else T.scrollY += e.deltaY;
+      } else if (tracksMode()) T.trackScrollY += e.deltaY;
+      else T.scrollY += e.deltaY;
       T.scrollT += e.deltaX / T.pps;
     }
     T.scrollT = Math.max(-.4, T.scrollT);
@@ -2656,7 +2709,7 @@ function setHoverRow(index: number | null) {
 }
 function onMove(e: any) {
   const x = e.offsetX, y = e.offsetY;
-  if (tracksMode()) {
+  if (tracksMode() && y < tracksBottom() - (T.graph && T.graphCombined ? 4 : 0)) {
     const workHit = x > T.gut && workAreaHit(x, y);
     const next = workHit ? { cursor: workHit.kind === 'handle' ? 'ew-resize' : 'grab', title: '' }
       : y < T.ruler ? { cursor: x > T.gut ? 'ew-resize' : 'default', title: '' }
@@ -2664,8 +2717,9 @@ function onMove(e: any) {
     T.cv.title = next.title; T.cv.style.cursor = next.cursor;
     return;
   }
-  setHoverRow(hitRow(y)?.i ?? null);
+  if (!tracksMode()) setHoverRow(hitRow(y)?.i ?? null);
   if (T.graph && T.graphCombined && x > T.gut && Math.abs(y - graphTop()) < 4) { T.cv.style.cursor = 'ns-resize'; return; }
+  if (tracksMode() && !inGraph(x, y)) { T.cv.style.cursor = 'default'; T.cv.title = ''; return; }
   if (inGraph(x, y)) {
     const graph = T._graph;
     const grip = graph?.transform ? graphTransformHandleAtPoint(graph.selectionBounds, x, y) : null;
@@ -2754,7 +2808,10 @@ function onDown(e: any) {
     if (hit?.kind === 'bar') return workAreaMove(e);
     return scrub(e);
   }
-  if (tracksMode()) return y >= T.ruler ? trackView.down(e, x, y) : undefined;
+  if (tracksMode() && !(T.graph && T.graphCombined && x > T.gut && Math.abs(y - graphTop()) < 4)) {
+    if (y < tracksBottom()) return trackView.down(e, x, y);
+    return inGraph(x, y) ? graphDown(e, x, y) : undefined;
+  }
   if (x < T.gut) return gutterDown(e, x, y);
   if (T.graph && T.graphCombined && Math.abs(y - graphTop()) < 4) {
     const start = graphTop();
@@ -3839,6 +3896,7 @@ function keysInMarquee(m: any, graph: any = false) {
     });
     return picked;
   }
+  if (tracksMode()) return trackView.keysIn(m);
   T.rows.forEach((row: any, i: any) => {
     if (row.kind !== 'prop') return;
     const cy = rowY(i) + T.row / 2;
@@ -3893,7 +3951,7 @@ function marquee(e: any, opt: any = {}) {
       } else if (graphPoints && !additive) {
         const nextKeys = graphPickedIds.length ? graphPickedIds : originalKeys;
         setSelectedKeys(nextKeys, layersForKeys(nextKeys));
-      } else if (T.marquee && !api.selection.keys().length) {
+      } else if (T.marquee && !api.selection.keys().length && !tracksMode()) {
         const m = T.marquee;
         const picked: any[] = [];
         T.rows.forEach((row: any, i: any) => {
@@ -3917,7 +3975,7 @@ function marquee(e: any, opt: any = {}) {
 
 function onDbl(e: any) {
   const x = e.offsetX, y = e.offsetY;
-  if (tracksMode() && y >= T.ruler) { trackView.doubleClick(x, y); return; }
+  if (tracksMode() && y >= T.ruler && y < tracksBottom()) { trackView.doubleClick(x, y); return; }
   if (inGraph(x, y) && y >= graphTop() + 28) {
     const hit = [...(T._graph?.points || [])]
       .map((point: any) => ({ point, distance: Math.hypot(x - point.x, y - point.y) }))
@@ -3934,15 +3992,7 @@ function onDbl(e: any) {
   // value edit is available without opening the context menu first.
   if (!inGraph(x, y) && x > T.gut && y >= T.ruler) {
     const hr = hitRow(y);
-    if (hr?.row.kind === 'prop') {
-      const row = hr.row;
-      const key = row.prop.kf.find((candidate: any) => Math.abs(t2x(row.L.from + candidate.t) - x) < 7);
-      if (key) {
-        const members = key.members ?? [{ key, prop: row.prop, L: row.L }];
-        editKeyframeValues(keyframeContextEntries(members, api.selection.keys(), selectedKeyEntries()));
-        return;
-      }
-    }
+    if (hr?.row.kind === 'prop' && editKeyAt(hr.row, x)) return;
   }
   const workHit: any = x > T.gut && workAreaHit(x, y);
   if (workHit?.kind === 'bar') {
@@ -3956,6 +4006,15 @@ function onDbl(e: any) {
     if (hr && hr.row.kind === 'layer' && hr.row.L.type === 'precomp' && hr.row.L.d?.comp) { api.commands.run('openComposition', hr.row.L.d.comp); return; }
     if (hr && hr.row.kind === 'layer' && x > 90) renameLayer(hr.row.L, hr.i);
   }
+}
+/* Double-clicking a key opens the value editor, for the whole selection when
+   the key is part of it. Shared by layer rows and unfolded tracks. */
+function editKeyAt(row: any, x: number) {
+  const key = row.prop.kf.find((candidate: any) => Math.abs(t2x(row.L.from + candidate.t) - x) < 7);
+  if (!key) return false;
+  const members = key.members ?? [{ key, prop: row.prop, L: row.L }];
+  editKeyframeValues(keyframeContextEntries(members, api.selection.keys(), selectedKeyEntries()));
+  return true;
 }
 function renameLayer(L: any, rowIdx: any) {
   const wrap = document.querySelector<HTMLElement>('#tl-canvas-wrap');
@@ -4087,16 +4146,18 @@ function pushKeyframeMenu(items: any[], clickedEntries: any[]) {
 T.layerAtPoint = (clientX: number, clientY: number) => {
   const rect = T.cv?.getBoundingClientRect();
   if (!rect || clientX < rect.left || clientX > rect.right || clientY < rect.top + T.ruler || clientY > rect.bottom) return null;
-  if (tracksMode()) return trackView.layerAt(clientX - rect.left, clientY - rect.top);
+  if (tracksMode()) return trackView.layerAt(clientX - rect.left, clientY - rect.top) ?? trackView.rowAt(clientX - rect.left, clientY - rect.top)?.L ?? null;
   return hitRow(clientY - rect.top)?.row?.L || null;
 };
 
 function onCtx(e: any) {
   e.preventDefault();
   const x = e.offsetX, y = e.offsetY;
-  const trackLayer = tracksMode() && y >= T.ruler ? trackView.layerAt(x, y) : null;
+  const inTracks = tracksMode() && y >= T.ruler && y < tracksBottom();
+  const trackLayer = inTracks ? trackView.layerAt(x, y) : null;
   if (trackLayer) { api.ui.showLayerMenu(trackLayer, e, 'timeline'); return; }
-  const hr = tracksMode() ? null : hitRow(y);
+  const trackRow = inTracks ? trackView.rowAt(x, y) : null;
+  const hr = tracksMode() ? trackRow && { row: trackRow, i: -1 } : hitRow(y);
   const items: any[] = [];
   const graphPoint = inGraph(x, y)
     ? [...(T._graph?.points || [])]

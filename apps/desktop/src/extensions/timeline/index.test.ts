@@ -286,7 +286,8 @@ describe('timeline extension', () => {
     modes[1]!.click();
     expect(modes[1]!.getAttribute('aria-checked')).toBe('true');
     expect(value.api.storage.get('mode')).toBe('tracks');
-    expect(graph.hidden).toBe(true);
+    // Keyframes unfold inside the tracks, so the dope sheet / graph switch stays.
+    expect(graph.hidden).toBe(false);
     expect(snap.hidden).toBe(false);
     expect(snap.getAttribute('aria-pressed')).toBe('true');
 
