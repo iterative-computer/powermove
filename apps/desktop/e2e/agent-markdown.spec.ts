@@ -2,7 +2,7 @@ import { test, expect } from './helpers/app';
 
 for (const theme of ['dark', 'light']) {
   test(`Markdown appears throughout the agent panel in ${theme} mode`, async ({ session }, testInfo) => {
-    await session.openEditor();
+    await session.openEditor(); await session.openAgent();
     const { page } = session;
     await page.evaluate((theme) => {
       const PM = (window as any).PM;
@@ -26,7 +26,7 @@ for (const theme of ['dark', 'light']) {
     }, theme);
     await page.setViewportSize({ width: 1440, height: 1100 });
     const panel = page.locator('#panel-agent');
-    await panel.evaluate(el => (el as HTMLElement).style.setProperty('--set-panel-height', '950px'));
+    await panel.evaluate(el => (el.closest('#agent-popover') as HTMLElement).style.height = '950px');
     for (const selector of ['.agent-trace.is-archived .agent-trace-prose:not(.agent-thought-prose)', '.agent-msg.assistant .agent-reply', '.agent-trace.is-live .agent-trace-prose:not(.agent-thought-prose)']) {
       const prose = panel.locator(selector).first();
       await expect(prose.locator('.agent-md-h')).toHaveText('Review');
@@ -47,7 +47,7 @@ for (const theme of ['dark', 'light']) {
     await expect(panel.locator('.alert-text .is-bold')).toHaveText('Attention');
     await expect(panel.locator('.agent-thought-prose .is-bold')).toHaveText(['Saved', 'Live']);
     for (const width of [240, 320, 480]) {
-      await panel.evaluate((el, width) => { (el.closest('.dock') as HTMLElement).style.flex = `0 0 ${width}px`; }, width);
+      await panel.evaluate((el, width) => { (el.closest('#agent-popover') as HTMLElement).style.width = `${width}px`; }, width);
       const styles = await panel.locator('.agent-trace.is-live .agent-md-h').evaluate(el => {
         const prose = el.parentElement!;
         const bold = prose.querySelector('.is-bold')!;

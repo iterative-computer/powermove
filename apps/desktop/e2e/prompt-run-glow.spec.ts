@@ -1,29 +1,25 @@
 import { expect, test } from './helpers/app';
 
-test.beforeEach(async ({ session }) => { await session.openEditor(); });
+test.beforeEach(async ({ session }) => { await session.openEditor(); await session.openAgent(); });
 
 test.describe('@prompt-glow run halo around the prompt being answered', () => {
   test('wraps the live prompt, stays out of the way, and settles out when the run lands', async ({ session }) => {
     const { page } = session;
     await page.evaluate(() => {
       const PM = (window as any).PM;
-      if (!PM.Layout.findPanel(PM.WS.current, 'agent')) {
-        const dock = PM.WS.current.layout.docks.find((d: any) => d.id !== 'center') ?? PM.WS.current.layout.docks[0];
-        PM.WS.mutate((w: any) => PM.Layout.addPanel(w, 'agent', dock.id));
-      }
       // Deterministic stalled run; no real Codex call or user-data writes.
       PM.CodexBridge.request = (prompt: string, _schema: any, _images: any, options: any) => new Promise((resolve, reject) => {
         (window as any).__glowRun = { prompt, options, resolve, reject };
       });
       PM.CodexBridge.steer = async () => true;
     });
-    const panel = page.locator('#panel-agent [data-svelte-panel="agent"]');
+    const panel = page.locator('#agent-popover #panel-agent [data-svelte-panel="agent"]');
     await expect(panel).toHaveCount(1);
     const glow = panel.locator('.agent-prompt-signal');
     await expect(glow).toHaveCount(0);
 
     await panel.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).fill('Make the timeline controls clearer');
-    await panel.locator('button.agent-send').click();
+    await panel.locator('button.agent-send').click(); await session.openAgent();
     await page.waitForFunction(() => Boolean((window as any).__glowRun));
 
     await expect(glow).toHaveCount(1);
@@ -53,7 +49,7 @@ test.describe('@prompt-glow run halo around the prompt being answered', () => {
     // A steering follow-up hands the halo to the prompt now being answered.
     // Mid-run the send control is the stop button, so steering goes in on Enter.
     await panel.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).fill('Actually make them larger too');
-    await panel.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).press('Enter');
+    await panel.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).press('Enter'); await session.openAgent();
     await expect(glow).toHaveCount(1);
     await expect.poll(async () => glow.evaluate(element =>
       element.parentElement!.querySelector('.agent-bubble')!.textContent

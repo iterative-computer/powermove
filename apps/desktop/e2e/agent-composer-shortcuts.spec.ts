@@ -2,7 +2,7 @@ import { test, expect } from './helpers/app';
 
 for (const surface of ['viewer', 'timeline']) {
   test(`Space returns to playback after leaving the agent for the ${surface}`, async ({ session }) => {
-    await session.openEditor();
+    await session.openEditor(); await session.openAgent();
     const { page } = session;
     await page.evaluate(() => {
       const PM = (window as any).PM;
@@ -13,30 +13,35 @@ for (const surface of ['viewer', 'timeline']) {
     });
     const input = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
     const destination = page.locator(surface === 'viewer' ? '#viewer-stage, #stage' : '#tl-canvas-wrap canvas').first();
+    const draft = page.locator('#agent-popover .agent-inline-prompt');
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      await session.openAgent();
       await input.fill('Keep this draft');
       await input.press('Space');
       await expect(input).toHaveText('Keep this draft ');
       await destination.click({ position: { x: 40, y: 40 } });
       await page.keyboard.press('Space');
-      await expect(input).toHaveText('Keep this draft ');
-      await expect(input).not.toBeFocused();
+      await expect(page.locator('#agent-popover')).toBeHidden();
+      await expect(draft).toHaveText('Keep this draft ');
+      await expect(draft).not.toBeFocused();
       expect(await page.evaluate(() => (window as any).__playbackToggles)).toBe(attempt + 1);
     }
+    await session.openAgent();
     await input.fill('/');
     await input.press('Escape');
     await expect(input).toBeFocused();
     await input.press('Escape');
-    await expect(input).not.toBeFocused();
+    await expect(page.locator('#agent-popover')).toBeHidden();
+    await expect(draft).not.toBeFocused();
     await page.keyboard.press('Space');
-    await expect(input).toHaveText('/');
+    await expect(draft).toHaveText('/');
     expect(await page.evaluate(() => (window as any).__playbackToggles)).toBe(4);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 }
 
 test('slash shortcuts support keyboard selection, dismissal, pointer selection, and multiline drafts', async ({ session }, testInfo) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   const { page } = session;
   const input = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
   await page.evaluate(() => {
@@ -64,7 +69,7 @@ test('slash shortcuts support keyboard selection, dismissal, pointer selection, 
   await input.press('Tab');
   await expect(input).toHaveText('/model ');
   await expect(menu.getByRole('option').first()).toBeVisible();
-  await input.press('Enter');
+  await input.press('Enter'); await session.openAgent();
   await expect(input).toHaveText('');
   await expect(input).toBeFocused();
   expect(await page.evaluate(() => (window as any).__composerActions.length)).toBe(1);
@@ -87,7 +92,7 @@ test('slash shortcuts support keyboard selection, dismissal, pointer selection, 
 });
 
 test('inline file tokens preserve their place, bytes, and two-step deletion in the desktop editor', async ({ session }) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   const { page } = session;
   await page.evaluate(() => {
     const PM = (window as any).PM;
@@ -123,7 +128,7 @@ test('inline file tokens preserve their place, bytes, and two-step deletion in t
 });
 
 test('file-only drafts keep their caret and new text on the same line', async ({ session }) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   const { page } = session;
   await page.evaluate(() => { (window as any).PM.AgentUI.state.conversation = [{ role: 'assistant', text: 'Ready.' }]; });
   const input = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });

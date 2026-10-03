@@ -1,3 +1,4 @@
+import { setPanelLayout } from './workspace-layout';
 import { createAgentCheckpoint } from './checkpoint';
 import { openPanel, readPanel, interactPanel, panelBounds, preparePanelInput } from './panel-tools';
 import { records as extensionRecords } from '../../kernel/extensions.svelte';
@@ -505,6 +506,10 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     if (currentRevision() !== transaction.revision) throw new Error('The project changed. Read get_project_state before using another panel control.');
     transaction.panelActions = true;
     return { ok: true, content: [toolText(target)], revision: currentRevision() };
+  }
+  if (request.tool === 'set_panel_layout') {
+    const result = setPanelLayout(PM, request.arguments);
+    return { ok: true, content: [toolText({ ...result, layout: panelLayoutDigest() })], revision: currentRevision() };
   }
   if (request.tool === 'get_panel_layout') {
     return { ok: true, content: [toolText(panelLayoutDigest())], revision: currentRevision() };

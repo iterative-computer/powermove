@@ -977,6 +977,9 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 /* Streaming caret: solid while text lands, gone once it settles. */
 p.is-streaming::after,.agent-md-li.is-streaming p::after,.agent-md-quote.is-streaming p::after{content:"";display:inline-block;width:2px;height:.9em;margin-left:2px;border-radius:1px;background:var(--tx);vertical-align:-0.12em;animation:agent-caret-in 150ms ease-out both}
 @keyframes agent-caret-in{from{opacity:0}}
+/* Room for the caret, so a line that exactly fills the column never hangs it
+   past the edge; reserved always, so text does not re-wrap when it settles. */
+.agent-shell :is(.agent-md-p,.agent-md-li p,.agent-md-quote p){padding-inline-end:4px}
 /* Pre-trace shimmer line with the pixel-grid loader (harness LoadingState). */
 .agent-trace-loading{display:flex;align-items:center;gap:9px;min-width:0;padding:2px 0}
 .agent-trace-loading .agent-trace-thought{min-width:0;font-size:var(--fs-sm);font-weight:var(--fw-medium);color:var(--tx-2)}

@@ -19,6 +19,7 @@ import { doc } from '../../renderer/src/state/document.svelte';
 import { setSelection, sel } from '../../renderer/src/state/selection.svelte';
 import { perf, transport } from '../../renderer/src/state/transport.svelte';
 import { clearEffectClipboard } from './effect-clipboard';
+import EffectsPanel from './EffectsPanel.svelte';
 import InspectorPanel from './InspectorPanel.svelte';
 import activate from './index';
 
@@ -81,6 +82,7 @@ const CHANNELS = [
 
 let target: HTMLDivElement;
 let instance: Record<string, any> | undefined;
+let effectsInstance: Record<string, any> | undefined;
 let activeApi: PowermoveAPI | undefined;
 
 function bump(kind: 'values' | 'structure') {
@@ -263,7 +265,7 @@ function project(layers: TestLayer[]) {
 function setup(
   testLayers: TestLayer[],
   selected = testLayers.map(({ id }) => id),
-  options: { fxOpen?: boolean } = {}
+  options: { fxOpen?: boolean; effects?: boolean } = {}
 ) {
   let dragOptions: { up(): void; move?(dx: number, dy: number, event: PointerEvent): void; cancel?(): void } | undefined;
   const currentProject = project(testLayers);
@@ -348,6 +350,8 @@ function setup(
   activeApi = api;
   activate(api);
   instance = mount(InspectorPanel, { target, props: { panelId: 'inspector', spec: {}, api } });
+  /* Applied effects live in their own panel; mount it alongside Properties. */
+  if (options.effects) effectsInstance = mount(EffectsPanel, { target, props: { panelId: 'layer-effects', spec: {}, api } });
   flushSync();
 
   return { runtime, api, apply, menu, drag: () => dragOptions! };
@@ -387,6 +391,8 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  if (effectsInstance) await unmount(effectsInstance);
+  effectsInstance = undefined;
   if (instance) await unmount(instance);
   instance = undefined;
   activeApi = undefined;
@@ -504,13 +510,13 @@ describe('InspectorPanel', () => {
   it('exposes effects, masks, blend, motion blur and track mattes for groups', () => {
     const group = layer('G'); group.type = 'group'; group.name = 'Group'; group.d = {};
     const matte = layer('M'); matte.name = 'Matte';
-    const { runtime } = setup([group, matte], ['G']);
+    const { runtime } = setup([group, matte], ['G'], { effects: true });
     runtime.groupBounds = vi.fn(() => ({ x0: 20, y0: 30, x1: 220, y1: 130, w: 200, h: 100, ax: 0, ay: 0 }));
 
     const headings = [...target.querySelectorAll('.sec')].map((item) => item.textContent?.trim());
-    expect(headings).toContain('Effects');
     expect(headings).toContain('Masks');
     expect(target.querySelector('[aria-label="Add effect"]')).not.toBeNull();
+    expect(target.querySelector('[data-effects-layer="G"] [data-effects-section]')).not.toBeNull();
     expect(labelledSelect('Blend mode')).not.toBeNull();
     expect([...target.querySelectorAll('button[aria-labelledby], [role="radiogroup"][aria-labelledby]')].some((control) =>
       document.getElementById(control.getAttribute('aria-labelledby')!)?.textContent?.trim() === 'Motion blur'
@@ -540,15 +546,21 @@ describe('InspectorPanel', () => {
     );
   });
 
-  it('activates by registering the inspector panel contribution', () => {
+  it('activates by registering the Properties and Layer Effects panel contributions', () => {
     const register = vi.fn(() => ({ dispose: vi.fn() }));
 
     activate(apiFor({}, register));
 
-    expect(register).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+    expect(register).toHaveBeenCalledTimes(2);
+    expect(register).toHaveBeenNthCalledWith(1, expect.objectContaining({
       id: 'inspector',
       title: 'Properties',
       component: InspectorPanel
+    }));
+    expect(register).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      id: 'layer-effects',
+      title: 'Layer Effects',
+      component: EffectsPanel
     }));
   });
 
@@ -560,13 +572,13 @@ describe('InspectorPanel', () => {
     };
 
     const register = vi.fn((next: Record<string, any>) => {
-      definition = next;
+      definition ??= next;
       return { dispose: vi.fn() };
     });
     const api = apiFor(runtime, register);
     activate(api);
 
-    expect(register).toHaveBeenCalledOnce();
+    expect(register).toHaveBeenCalledTimes(2);
     expect(definition).toMatchObject({ id: 'inspector', title: 'Properties' });
     expect(definition?.component).toBe(InspectorPanel);
     expect(definition?.header).toBeTypeOf('function');
@@ -607,7 +619,8 @@ describe('InspectorPanel', () => {
     const { apply, runtime } = setup([candidate]);
     const headings = [...target.querySelectorAll('.sec')].map((section) => section.textContent?.trim());
 
-    expect(headings.slice(0, 5)).toEqual(['Transform', 'Path', 'Fill', 'Stroke', 'Effects']);
+    expect(headings.slice(0, 4)).toEqual(['Transform', 'Path', 'Fill', 'Stroke']);
+    expect(headings).not.toContain('Effects');
     expect(target.querySelector('[aria-label="Edit Powermove mark vertices"]')).not.toBeNull();
     expect(target.querySelector('details.advanced')?.hasAttribute('open')).toBe(false);
     expect(target.querySelector('[aria-label="Remove Powermove mark"]')).toBeNull();
@@ -834,7 +847,7 @@ describe('InspectorPanel', () => {
 
   it('sends the exact legacy add-effect and remove-effect commands', () => {
     const candidate = layer('A');
-    const { apply, menu } = setup([candidate], ['A']);
+    const { apply, menu } = setup([candidate], ['A'], { effects: true });
     target.querySelector<HTMLButtonElement>('[aria-label="Add effect"]')!.dispatchEvent(
       new PointerEvent('pointerdown', { bubbles: true, button: 0 })
     );
@@ -863,7 +876,7 @@ describe('InspectorPanel', () => {
       { id: 'fx-2', type: 'blur', on: true, p: {} },
       { id: 'fx-3', type: 'blur', on: true, p: {} }
     );
-    const { apply } = setup([candidate], ['A']);
+    const { apply } = setup([candidate], ['A'], { effects: true });
     const row = (id: string) => target.querySelector<HTMLElement>(`[data-effect-id="${id}"]`)!;
 
     row('fx-1').dispatchEvent(new KeyboardEvent('keydown', {
@@ -902,7 +915,7 @@ describe('InspectorPanel', () => {
       { id: 'fx-1', type: 'blur', on: false, open: false, p: { amount: channel(12, 'key-1') } },
       { id: 'fx-2', type: 'blur', on: true, open: true, p: { amount: channel(24, 'key-2') } }
     );
-    const { apply } = setup([candidate], ['A']);
+    const { apply } = setup([candidate], ['A'], { effects: true });
     const first = target.querySelector<HTMLElement>('[data-effect-id="fx-1"]')!;
     const second = target.querySelector<HTMLElement>('[data-effect-id="fx-2"]')!;
 
@@ -949,7 +962,7 @@ describe('InspectorPanel', () => {
       id: 'fx-1', type: 'blur', on: true, open: true,
       p: { amount: { v: 18, expr: null, kf: [] } }
     });
-    const { runtime, api, apply } = setup([source, destination], ['A']);
+    const { runtime, api, apply } = setup([source, destination], ['A'], { effects: true });
     const effect = target.querySelector<HTMLElement>('[data-effect-id="fx-1"]')!;
     effect.click();
     expect(api.services.get<InspectorService>('inspector')?.copySelectedEffects()).toBe(true);
@@ -984,7 +997,7 @@ describe('InspectorPanel', () => {
   it('routes transform, effect, layer, and content fields through exact typed commands', () => {
     const candidate = layer('A', 40);
     candidate.fx.push({ id: 'fx-1', type: 'blur', on: true, p: { amount: { v: 5, kf: [], expr: null } } });
-    const { runtime, apply } = setup([candidate], ['A'], { fxOpen: true });
+    const { runtime, apply } = setup([candidate], ['A'], { fxOpen: true, effects: true });
     transport.time = 2;
     flushSync();
 
@@ -1036,7 +1049,7 @@ describe('InspectorPanel', () => {
       { id: 'fx-duotone', type: 'duotone', on: true, p: { shadow: { v: '#1B2A4A', kf: [], expr: null } } },
       { id: 'fx-gradient', type: 'gradient', on: true, p: { radial: { v: false, kf: [], expr: null } } }
     );
-    const { apply, runtime } = setup([candidate], ['A'], { fxOpen: true });
+    const { apply, runtime } = setup([candidate], ['A'], { fxOpen: true, effects: true });
     runtime.findProp = (_layer: any, path: string) => { const [id, key] = path.split('.'); return candidate.fx.find((fx: any) => fx.id === id)?.p[key!]; };
     bump('values');
     transport.time = 2;
@@ -1068,7 +1081,7 @@ describe('InspectorPanel', () => {
   it('uses set_effect for toggles and exposes one controlled expansion button', () => {
     const candidate = layer('A');
     candidate.fx.push({ id: 'fx-1', type: 'blur', on: true, p: { amount: { v: 5, kf: [], expr: null } } });
-    const { runtime, apply } = setup([candidate], ['A'], { fxOpen: true });
+    const { runtime, apply } = setup([candidate], ['A'], { fxOpen: true, effects: true });
     const head = target.querySelector<HTMLElement>('[data-effect-id="fx-1"]')!;
     const expanders = head.querySelectorAll<HTMLButtonElement>('button[aria-expanded]');
     expect(expanders).toHaveLength(1);
@@ -1089,7 +1102,7 @@ describe('InspectorPanel', () => {
   it('selects effect rows without changing disclosure and reserves disclosure for the chevron', () => {
     const candidate = layer('A');
     candidate.fx.push({ id: 'fx-1', type: 'blur', on: true, p: { amount: { v: 5, kf: [], expr: null } } });
-    const { runtime } = setup([candidate], ['A']);
+    const { runtime } = setup([candidate], ['A'], { effects: true });
     const head = target.querySelector<HTMLElement>('[data-effect-id="fx-1"]')!;
     const label = head.querySelector<HTMLElement>('.k')!;
     const chevron = head.querySelector<HTMLButtonElement>('button[aria-expanded]')!;
@@ -1109,7 +1122,7 @@ describe('InspectorPanel', () => {
   it('clears effect selection when clicking anywhere outside it but not from nested controls', () => {
     const candidate = layer('A');
     candidate.fx.push({ id: 'fx-1', type: 'blur', on: true, p: { amount: { v: 5, kf: [], expr: null } } });
-    setup([candidate], ['A'], { fxOpen: true });
+    setup([candidate], ['A'], { fxOpen: true, effects: true });
     const head = target.querySelector<HTMLElement>('[data-effect-id="fx-1"]')!;
 
     head.click();

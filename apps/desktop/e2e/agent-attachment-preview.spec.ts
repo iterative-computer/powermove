@@ -1,7 +1,7 @@
 import { test, expect } from './helpers/app';
 
 test('agent image attachments open a fitted preview and Escape returns focus', async ({ session }, testInfo) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   await session.page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   const { page } = session;
   await page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).waitFor();
@@ -32,7 +32,7 @@ test('agent image attachments open a fitted preview and Escape returns focus', a
   });
   const trigger = page.getByRole('button', { name: 'View reference.png', exact: true });
   await trigger.click();
-  const preview = page.getByRole('dialog');
+  const preview = page.getByRole('dialog', { name: 'reference.png', exact: true });
   await expect(preview).toBeVisible();
   const image = preview.getByRole('img', { name: 'reference.png', exact: true });
   await expect(image).toBeVisible();

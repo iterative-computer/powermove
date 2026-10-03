@@ -1,64 +1,55 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { installAgentShell } from './agent-shell';
-import { AGENT_FEATURES } from './agent-features';
-vi.mock('./agent-features', () => ({ AGENT_FEATURES: { floating: true } }));
-import { parseStoreKey } from '../../../shared/store-keys';
 
 type Shell = ReturnType<typeof installAgentShell>;
 let shell: Shell | null = null;
 
-function fixture(savedMode: 'floating' | 'docked' = 'floating', globalScreen = false) {
-  const values = new Map<string, unknown>([['agentPresentation', savedMode]]);
-  const subscriptions = new Map<string, Set<() => void>>();
+function fixture() {
+  const events: Array<[string, unknown]> = [];
+  const subscriptions = new Map<string, Set<(value?: unknown) => void>>();
   const panel = document.createElement('div');
   panel.id = 'panel-agent';
-  const header = document.createElement('header');
-  const options = document.createElement('button');
-  options.className = 'panel-options';
-  header.append(options);
   const body = document.createElement('div');
   body.className = 'body';
-  body.append(document.createElement('input'));
-  panel.append(header, body);
+  const prompt = document.createElement('div');
+  prompt.className = 'agent-inline-prompt';
+  prompt.tabIndex = 0;
+  body.append(prompt);
+  panel.append(document.createElement('header'), body);
   const park = document.createElement('div');
   park.id = 'pm-panel-pool';
   const host = document.createElement('div');
   host.dataset.panelHost = 'agent';
   host.append(panel);
   park.append(host);
-  document.body.append(park);
+  const launcher = document.createElement('button');
+  launcher.id = 'agent-launcher';
+  launcher.getBoundingClientRect = () => ({ left: 300, top: 7, width: 240, height: 30, right: 540, bottom: 37, x: 300, y: 7, toJSON: () => ({}) });
+  const outside = document.createElement('button');
+  document.body.append(park, launcher, outside);
   const PM: Record<string, any> = {
-    icon: () => document.createElement('svg'),
     panelInst: { agent: { el: panel } },
-    store: {
-      get: (key: string, fallback: unknown) => values.get(key) ?? fallback,
-      set: (key: string, value: unknown) => {
-        if (!parseStoreKey(key)) throw new Error(`Unregistered store key: ${key}`);
-        values.set(key, value);
-      }
-    },
     bus: {
-      on: (name: string, listener: () => void) => {
+      on: (name: string, listener: (value?: unknown) => void) => {
         const group = subscriptions.get(name) ?? new Set();
         group.add(listener);
         subscriptions.set(name, group);
         return () => group.delete(listener);
       },
-      emit: (name: string) => subscriptions.get(name)?.forEach((listener) => listener())
-    },
-    Layout: { ws: {}, apply: vi.fn() },
-    ProjectsScreen: { isOpen: globalScreen },
-    SpatialAssistant: { open: vi.fn() }
+      emit: (name: string, value?: unknown) => {
+        events.push([name, value]);
+        subscriptions.get(name)?.forEach((listener) => listener(value));
+      }
+    }
   };
-  return { PM, panel, values };
+  return { PM, panel, prompt, launcher, outside, events };
 }
 
 beforeEach(() => {
-  AGENT_FEATURES.floating = true;
   document.body.innerHTML = '';
-  vi.stubGlobal('innerWidth', 800);
-  vi.stubGlobal('innerHeight', 600);
+  vi.stubGlobal('innerWidth', 1200);
+  vi.stubGlobal('innerHeight', 800);
 });
 
 afterEach(() => {
@@ -67,163 +58,110 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('agent shell', () => {
-  it('ignores saved floating preferences and hides controls when the experiment is disabled', async () => {
-    AGENT_FEATURES.floating = false;
-    const { PM, panel } = fixture('floating');
-    shell = installAgentShell(PM);
-    await Promise.resolve();
-    expect(shell.getPreference()).toBe('docked');
-    shell.setMode('floating');
-    expect(shell.getMode()).toBe('docked');
-    expect(document.querySelector<HTMLButtonElement>('.agent-floating-bubble')!.hidden).toBe(true);
-    expect(panel.querySelector('.agent-docked-presentation')).toBeNull();
-    shell.openGlobal();
-    expect(shell.isOpen()).toBe(true);
-    expect(document.querySelector<HTMLButtonElement>('.agent-floating-control')!.hidden).toBe(true);
-    shell.minimize();
-    expect(shell.getMode()).toBe('docked');
-    expect(document.querySelector<HTMLButtonElement>('.agent-floating-bubble')!.hidden).toBe(true);
-  });
-
-  it('moves one live panel between floating and docked presentation', async () => {
+describe('agent popover', () => {
+  it('hosts the one live agent panel and reclaims it after layout passes', async () => {
     const { PM, panel } = fixture();
     shell = installAgentShell(PM);
     await Promise.resolve();
-    expect(document.querySelector('.agent-floating-panel-host > #panel-agent')).toBe(panel);
-    expect(document.querySelector<HTMLButtonElement>('.agent-floating-bubble')?.hidden).toBe(false);
+    expect(document.querySelector('#agent-popover .agent-popover-panel-host > #panel-agent')).toBe(panel);
+    document.querySelector<HTMLElement>('[data-panel-host="agent"]')!.append(panel);
+    PM.bus.emit('layout:applied');
+    expect(panel.closest('#agent-popover')).not.toBeNull();
+    shell.destroy();
+    shell = null;
+    expect(panel.closest('#pm-panel-pool')).not.toBeNull();
+  });
 
+  it('opens centred under the launcher, focuses the composer and reports its state', async () => {
+    const { PM, prompt, launcher, events } = fixture();
+    shell = installAgentShell(PM);
+    await Promise.resolve();
+    const surface = document.getElementById('agent-popover')!;
+    expect(surface.inert).toBe(true);
     shell.open();
+    await Promise.resolve();
     expect(shell.isOpen()).toBe(true);
-    shell.minimize();
-    expect(shell.isOpen()).toBe(false);
-    shell.setMode('docked');
-    expect(shell.getMode()).toBe('docked');
-    expect(panel.closest('#pm-panel-pool')).not.toBeNull();
-    expect(PM.Layout.apply).toHaveBeenCalled();
+    expect(surface.inert).toBe(false);
+    expect(surface.style.width).toBe('440px');
+    expect(surface.style.left).toBe(`${420 - 220}px`);
+    expect(surface.style.top).toBe('43px');
+    expect(launcher.getAttribute('aria-expanded')).toBe('true');
+    expect(document.activeElement).toBe(prompt);
+    expect(events).toContainEqual(['agent:popover', true]);
   });
 
-  it('uses floating presentation temporarily for global chat without changing the saved preference', () => {
-    const { PM, values } = fixture('docked', true);
-    shell = installAgentShell(PM);
-    const bubble = document.querySelector<HTMLButtonElement>('.agent-floating-bubble')!;
-    expect(bubble.hidden).toBe(true);
-    shell.openGlobal();
-    expect(shell.getMode()).toBe('floating');
-    expect(shell.getPreference()).toBe('docked');
-    expect(values.get('agentPresentation')).toBe('docked');
-    expect(bubble.hidden).toBe(true);
-    shell.minimize();
-    expect(shell.getMode()).toBe('docked');
-    expect(shell.isOpen()).toBe(false);
-    expect(bubble.hidden).toBe(true);
-  });
-
-  it('defaults to a docked panel with no launcher when no preference is saved', () => {
-    const { PM, values, panel } = fixture();
-    values.delete('agentPresentation');
-    shell = installAgentShell(PM);
-    expect(shell.getPreference()).toBe('docked');
-    expect(panel.closest('#pm-panel-pool')).not.toBeNull();
-    expect(document.querySelector<HTMLButtonElement>('.agent-floating-bubble')!.hidden).toBe(true);
-  });
-
-  it('clamps pointer dragging and keyboard movement to the viewport', () => {
-    const { PM, values } = fixture();
-    shell = installAgentShell(PM);
-    const bubble = document.querySelector<HTMLButtonElement>('.agent-floating-bubble')!;
-    const pointer = (name: string, x: number, y: number) => new PointerEvent(name, {
-      bubbles: true, button: 0, pointerId: 1, clientX: x, clientY: y
-    });
-    bubble.dispatchEvent(pointer('pointerdown', 730, 530));
-    expect(document.activeElement).toBe(bubble);
-    bubble.dispatchEvent(pointer('pointermove', 3000, 3000));
-    bubble.dispatchEvent(pointer('pointerup', 3000, 3000));
-    expect(Number.parseFloat(bubble.style.left)).toBe(724);
-    expect(Number.parseFloat(bubble.style.top)).toBe(524);
-    bubble.click();
-    expect(PM.SpatialAssistant.open).not.toHaveBeenCalled();
-    bubble.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowLeft' }));
-    expect(Number.parseFloat(bubble.style.left)).toBe(708);
-    expect(values.get('agentBubblePosition')).toEqual({ x: 708, y: 524 });
-  });
-
-  it('keeps floating control shortcuts out of the editor', () => {
+  it('keeps the popover inside narrow windows', async () => {
+    vi.stubGlobal('innerWidth', 400);
+    vi.stubGlobal('innerHeight', 300);
     const { PM } = fixture();
     shell = installAgentShell(PM);
     shell.open();
-    const handle = document.querySelector<HTMLButtonElement>('.agent-floating-drag')!;
-    const editorShortcut = vi.fn();
-    window.addEventListener('keydown', editorShortcut);
-    try {
-      handle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1 }));
-      expect(document.activeElement).toBe(handle);
-      handle.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowLeft' }));
-      handle.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Delete' }));
-      expect(editorShortcut).not.toHaveBeenCalled();
-      handle.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
-      expect(shell.isOpen()).toBe(false);
-    } finally {
-      window.removeEventListener('keydown', editorShortcut);
-    }
+    const surface = document.getElementById('agent-popover')!;
+    expect(surface.style.width).toBe('376px');
+    expect(surface.style.left).toBe('12px');
+    expect(surface.style.height).toBe(`${300 - 43 - 12}px`);
   });
 
-  it('keeps the chosen window position across reopen and restart', () => {
-    const { PM, values } = fixture();
-    values.set('agentFloatingPosition', { x: 120, y: 52 });
-    values.set('agentBubblePosition', { x: 120, y: 524 });
+  it('collapses into the launcher on send and pulses it when already closed', async () => {
+    const { PM, events } = fixture();
     shell = installAgentShell(PM);
     shell.open();
-    const surface = document.querySelector<HTMLElement>('.agent-floating-window')!;
-    expect(surface.style.left).toBe('120px');
-    shell.minimize();
-    shell.open();
-    expect(surface.style.left).toBe('120px');
-    shell.destroy();
-    shell = installAgentShell(PM);
-    shell.open();
-    expect(document.querySelector<HTMLElement>('.agent-floating-window')!.style.left).toBe('120px');
+    shell.collapse();
+    expect(shell.isOpen()).toBe(false);
+    expect(document.getElementById('agent-popover-root')!.dataset.collapsing).toBe('true');
+    expect(events.filter(([name]) => name === 'agent:collapse')).toHaveLength(1);
+    shell.collapse();
+    expect(events.filter(([name]) => name === 'agent:collapse')).toHaveLength(2);
   });
 
-  it('opens from the launcher instead of an unrelated saved panel position', () => {
-    const { PM, values } = fixture();
-    values.set('agentFloatingPosition', { x: 376, y: 52 });
-    values.set('agentBubblePosition', { x: 60, y: 60 });
+  it('closes on Escape and on outside presses, but not on the launcher or its menus', async () => {
+    const { PM, launcher, outside } = fixture();
     shell = installAgentShell(PM);
     shell.open();
-    const surface = document.querySelector<HTMLElement>('.agent-floating-window')!;
-    expect(surface.style.left).toBe('60px');
-    expect(surface.style.top).toBe('52px');
-    shell.minimize();
-    const bubble = document.querySelector<HTMLElement>('.agent-floating-bubble')!;
-    expect(bubble.style.left).toBe('60px');
-    expect(bubble.style.top).toBe('524px');
+    await Promise.resolve();
+    launcher.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    expect(shell.isOpen()).toBe(true);
+    const menu = document.createElement('div');
+    menu.className = 'pm-menu';
+    document.body.append(menu);
+    menu.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    expect(shell.isOpen()).toBe(true);
+    outside.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    expect(shell.isOpen()).toBe(false);
+
     shell.open();
-    expect(surface.style.left).toBe('60px');
-    expect(surface.style.top).toBe('52px');
+    await Promise.resolve();
+    document.querySelector('.agent-inline-prompt')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(shell.isOpen()).toBe(false);
+    expect(document.activeElement).toBe(launcher);
   });
 
-  it('fits the entire panel after edge dragging, rapid reopen, and viewport shrinking', () => {
-    const { PM, values } = fixture();
-    values.set('agentFloatingPosition', { x: 2000, y: 2000 });
+  it('stands aside for a docked agent and reveals it instead of opening', async () => {
+    const { PM, panel, prompt } = fixture();
+    let docked = false;
+    const dock = document.createElement('div');
+    dock.className = 'dock';
+    document.body.append(dock);
+    Object.assign(PM, {
+      WS: { current: { layout: { docks: [] } } },
+      Layout: { findPanel: () => docked ? { dock: { id: 'right' }, spec: { id: 'agent' } } : null }
+    });
     shell = installAgentShell(PM);
+    await Promise.resolve();
     shell.open();
-    const surface = document.querySelector<HTMLElement>('.agent-floating-window')!;
-    // Stale transformed geometry must never determine the final position.
-    surface.getBoundingClientRect = () => ({ width: 180, height: 200 } as DOMRect);
-    shell.minimize(); shell.open();
-    expect(surface.style.left).toBe('376px');
-    expect(surface.style.top).toBe('52px');
-    expect(surface.style.width).toBe('400px');
-    expect(surface.style.height).toBe('524px');
-    shell.minimize();
-    vi.stubGlobal('innerWidth', 360);
-    vi.stubGlobal('innerHeight', 450);
-    window.dispatchEvent(new Event('resize'));
-    shell.open();
-    expect(surface.style.left).toBe('24px');
-    expect(surface.style.width).toBe('312px');
-    expect(surface.style.height).toBe('374px');
-    expect(Number.parseFloat(surface.style.top) + Number.parseFloat(surface.style.height)).toBe(426);
+    expect(shell.isOpen()).toBe(true);
+    docked = true;
+    dock.append(panel);
+    PM.bus.emit('layout:applied');
+    expect(shell.isOpen()).toBe(false);
+    expect(panel.parentElement).toBe(dock);
+    expect(shell.isDocked()).toBe(true);
+    shell.toggle();
+    expect(shell.isOpen()).toBe(false);
+    expect(document.activeElement).toBe(prompt);
+    docked = false;
+    document.querySelector<HTMLElement>('[data-panel-host="agent"]')!.append(panel);
+    PM.bus.emit('layout:applied');
+    expect(panel.closest('#agent-popover')).not.toBeNull();
   });
 });

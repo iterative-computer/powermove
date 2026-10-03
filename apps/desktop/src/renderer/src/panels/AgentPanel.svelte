@@ -49,6 +49,9 @@
   $effect(() => {
     if (accountStatus.state !== 'checking') connectionRequired = accountStatus.state !== 'connected';
   });
+  $effect(() => {
+    if (accountStatus.state === 'connected') PM.AgentUI?.resumeWorkspaceImport?.();
+  });
   const showConnectionGate = $derived(accountStatus.state === 'checking' ? connectionRequired : accountStatus.state !== 'connected');
   const showSetup = $derived(showConnectionGate && agentState.phase === 'idle' && !agentState.conversation.length && !agentState.activity && !agentState.composerDraft);
 
@@ -209,16 +212,26 @@
       {/if}
       {#if showPreview}<PlanPreview {PM} />{/if}
       {#if showResult}<ResultActions {PM} />{/if}
-      <Composer {PM} {panelId} />
+      <!-- In the popover, sending folds it into the titlebar launcher and Escape
+           closes it; docked, the composer keeps its usual focus behavior. -->
+      <Composer {PM} {panelId} onsubmit={() => {
+        const popover = !!PM.AgentShell?.isOpen?.();
+        PM.AgentShell?.collapse?.();
+        return popover;
+      }} onescape={() => {
+        if (!PM.AgentShell?.isOpen?.()) return false;
+        PM.AgentShell.close();
+        return true;
+      }} />
     </div>
   {/if}
 </div>
 
 <style>
   .agent-setup-scroll { padding: 10px 16px 16px; mask-image: none; }
-  /* The set-height variable is updated by explicit splitter resizing. The
-     important basis also pins older live sessions whose inline style is fluid. */
-  :global(#panel-agent:not([data-collapsed="1"])) {
+  /* Docked, the set-height variable is updated by explicit splitter resizing;
+     the popover sizes the panel itself (agent-shell.css). */
+  :global(.dock #panel-agent:not([data-collapsed="1"])) {
     flex: 0 0 var(--set-panel-height, 350px) !important;
   }
 </style>

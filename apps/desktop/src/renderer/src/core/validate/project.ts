@@ -490,6 +490,7 @@ function sanitizeLayer(raw: unknown, index: number, comp: Pick<Comp, 'w' | 'h' |
     matteSource: typeof source.matteSource === 'string' ? source.matteSource : null,
     matteMode: sanitizeLooseChannel(source.matteMode, 'alpha') as any,
     group: typeof source.group === 'string' && source.group !== id ? source.group : null,
+    ...(Number.isInteger(source.track) && (source.track as number) >= 0 ? { track: source.track as number } : {}),
     collapsed: source.collapsed !== false,
     color: stringOr(source.color, TYPE_META[type].color),
     blend: type === 'audio' ? 'normal' : isProperty(source.blend) ? sanitizeLooseChannel(source.blend, 'normal') : blend,

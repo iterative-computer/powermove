@@ -7,7 +7,7 @@ test('connection setup owns the empty panel and stays usable when resized', asyn
     POWERMOVE_FAKE_CHATGPT_STATUS: 'disconnected'
   } });
   try {
-    await session.openEditor();
+    await session.openEditor(); await session.openAgent();
     const { page } = session;
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.evaluate(() => {
@@ -24,7 +24,7 @@ test('connection setup owns the empty panel and stays usable when resized', asyn
     for (const width of [240, 320, 480]) {
       await panel.evaluate((el, width) => {
         Object.assign((el as HTMLElement).style, { width: `${width}px`, maxWidth: `${width}px`, minWidth: '0' });
-        (el.closest('.dock') as HTMLElement).style.flex = `0 0 ${width}px`;
+        (el.closest('#agent-popover') as HTMLElement).style.width = `${width}px`;
       }, width);
       for (const provider of ['chatgpt', 'compatible']) {
         await gate.getByRole('button', { name: provider === 'chatgpt' ? 'Codex' : 'API / local', exact: true }).click();
@@ -38,7 +38,7 @@ test('connection setup owns the empty panel and stays usable when resized', asyn
     }
     await page.evaluate(() => { (window as any).PM.theme.apply('light'); });
     await panel.screenshot({ path: testInfo.outputPath('connection-light.png') });
-    await panel.evaluate(el => (el as HTMLElement).style.setProperty('--set-panel-height', '220px'));
+    await panel.evaluate(el => (el.closest('#agent-popover') as HTMLElement).style.height = '220px');
     const settingsButton = gate.getByRole('button', { name: 'Open settings', exact: true });
     await settingsButton.scrollIntoViewIfNeeded();
     await expect(settingsButton).toBeInViewport();

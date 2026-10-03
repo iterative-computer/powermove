@@ -11,6 +11,8 @@ import { installAgentShell } from './agent-shell';
 
 export interface AgentLegacyBridge {
   openGlobal?(): void;
+  importWorkspace?(appId: 'after-effects'): Promise<boolean>;
+  resumeWorkspaceImport?(): void;
   repairExtension?(request: { id: string; name?: string; diagnostics?: string[] }): Promise<boolean>;
   newThread?(): void;
   switchThread?(id: string): void;
@@ -58,6 +60,8 @@ export function registerAgentPanel(PM: LegacyPM, bridge: AgentLegacyBridge): voi
 
   PM.AgentUI = {
     openGlobal: bridge.openGlobal,
+    importWorkspace: bridge.importWorkspace,
+    resumeWorkspaceImport: bridge.resumeWorkspaceImport,
     repairExtension: bridge.repairExtension,
     newThread: bridge.newThread,
     switchThread: bridge.switchThread,
@@ -121,11 +125,14 @@ export function registerAgentPanel(PM: LegacyPM, bridge: AgentLegacyBridge): voi
     keepSceneRun: bridge.keepSceneRun
   };
 
+  /* Opens from the titlebar launcher as a popover; dragging the launcher onto
+     the workspace docks it like any panel (closing it returns to the popover). */
   registerSveltePanel(PM, 'agent', {
     title: 'Powermove agent',
     size: 350,
     min: 240,
     noscroll: true,
+    library: false,
     component: AgentPanel
   });
   if (typeof document !== 'undefined' && document.body) installAgentShell(PM);

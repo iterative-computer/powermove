@@ -20,7 +20,7 @@ test('flat controls remain consistent across home, editor, settings, library, an
       PM.ProjectsScreen.show();
     }, theme);
     await inspect(`home-${theme}`);
-    await session.openEditor();
+    await session.openEditor(); await session.openAgent();
     await page.evaluate(() => {
       const PM = (window as any).PM;
       const text = PM.mkLayer('text', { name: 'Design review', text: 'Make a clear move' });

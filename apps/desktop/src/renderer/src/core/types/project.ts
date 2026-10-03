@@ -287,6 +287,8 @@ interface LayerBase<T extends LayerType, D extends object> {
   blend: BlendMode;
   mblur: boolean;
   group?: string | null;
+  /** Preferred lane in the track timeline, relative to the layer's group. */
+  track?: number;
   parent: string | null;
   p: T extends 'audio' ? Record<never, never> : TransformChannels;
   fx: Effect[];

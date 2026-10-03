@@ -74,7 +74,7 @@ import { registerThemeIpc } from './theme';
 import { backgroundTesting, backgroundWindowOptions } from './background-testing';
 import { EditorWindows, restorableSessions, windowUnderTabDrop } from './windows';
 import { isPanelPopoutRequest } from './panel-popout';
-import { OnboardingFlow, onboardingCompleted, onboardingEnabled, persistOnboardingCompleted } from './onboarding';
+import { OnboardingFlow, onboardingCompleted, onboardingEnabled } from './onboarding';
 
 const APP_ORIGIN = 'app://powermove';
 
@@ -1219,6 +1219,47 @@ if (!hasSingleInstanceLock) {
           });
         });
       },
+      importWorkspace: async (window, appId) => {
+        const prepared = await window.webContents.executeJavaScript(`window.PM?.AgentUI?.importWorkspace?.(${JSON.stringify(appId)}) ?? false`);
+        if (!prepared) throw new Error('The workspace agent is not ready. Try again.');
+      },
+      applyTimelineMode: async (window, mode) => {
+        /* The editor window resolves before its renderer boots. Wait for the
+           persistent store; the timeline extension may still be activating and
+           reads the same extension storage when it does. */
+        const ready = 'Boolean(window.PM?.store?.set)';
+        for (const started = Date.now(); !window.isDestroyed() && Date.now() - started < 20_000;) {
+          if (await window.webContents.executeJavaScript(ready).catch(() => false)) break;
+          await new Promise(resolve => setTimeout(resolve, 150));
+        }
+        if (window.isDestroyed()) return;
+        const applied = await window.webContents.executeJavaScript(`(() => {
+          const PM = window.PM, mode = ${JSON.stringify(mode)};
+          const timeline = PM?.Kernel?.services?.get?.('timeline');
+          if (typeof timeline?.setMode === 'function') { timeline.setMode(mode); return true; }
+          if (typeof PM?.store?.set !== 'function') return false;
+          PM.store.set('ext.timeline', { ...(PM.store.get('ext.timeline', {}) || {}), mode });
+          return true;
+        })()`);
+        if (!applied) throw new Error('The editor is not ready for timeline preferences.');
+      },
+      applyAgent: async (window, agent) => {
+        // The agent UI registers after the store; wait for it like the timeline mode does.
+        const ready = 'Boolean(window.PM?.AgentUI?.setProvider && window.PM?.AgentUI?.setModel)';
+        for (const started = Date.now(); !window.isDestroyed() && Date.now() - started < 20_000;) {
+          if (await window.webContents.executeJavaScript(ready).catch(() => false)) break;
+          await new Promise(resolve => setTimeout(resolve, 150));
+        }
+        if (window.isDestroyed()) return;
+        const applied = await window.webContents.executeJavaScript(`(() => {
+          const ui = window.PM?.AgentUI, agent = ${JSON.stringify(agent)};
+          if (typeof ui?.setProvider !== 'function') return false;
+          ui.setProvider(agent.provider);
+          if (agent.provider !== 'compatible') ui.setModel(agent.model, ui.state.reasoningEffort);
+          return ui.state.provider === agent.provider;
+        })()`);
+        if (!applied) throw new Error('The editor is not ready for the agent choice.');
+      },
       secure: (window) => secureWebContents(window.webContents, devRendererUrl)
     });
     const menu = installMenu(() => currentEditor(), {
@@ -1231,10 +1272,6 @@ if (!hasSingleInstanceLock) {
     if (isBackgroundTest) app.dock?.hide();
     const completedOnboarding = await onboardingCompleted(app.getPath('userData'));
     if (onboardingEnabled(process.env, isBackgroundTest, completedOnboarding)) {
-      // Record the first launch, even if the welcome is closed before Begin.
-      await persistOnboardingCompleted(app.getPath('userData')).catch(error => {
-        console.error('[onboarding] could not persist first launch', error);
-      });
       onboardingFlow.start();
     } else {
       restoreWindows(store);

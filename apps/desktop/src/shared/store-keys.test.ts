@@ -5,6 +5,12 @@ it('accepts the global panel visibility preference', () => {
   expect(parseStoreKey('panelVisibility')).toEqual({ kind: 'static', key: 'panelVisibility' });
 });
 
+it('persists the imported workspace preference', () => {
+  const parsed = parseStoreKey('defaultWorkspace');
+  expect(parsed).toEqual({ kind: 'static', key: 'defaultWorkspace' });
+  expect(storeFileName(parsed!)).toBe('defaultWorkspace.json');
+});
+
 it('allows project-local thread archives without allowing filesystem traversal', () => {
   const parsed = parseStoreKey('agentThreads.project-123');
   expect(parsed).toEqual({kind:'dynamic',prefix:'agentThreads',id:'project-123'});

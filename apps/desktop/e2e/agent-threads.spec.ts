@@ -1,7 +1,7 @@
 import { test, expect } from './helpers/app';
 
 test('background run badge stays compact when creating and switching threads', async ({ session }) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   const page = session.page;
   await page.evaluate(() => {
     const PM = (window as any).PM;
@@ -18,7 +18,7 @@ test('background run badge stays compact when creating and switching threads', a
   const badge = picker.locator('.thread-running');
   const first = await page.evaluate(() => (window as any).PM.AgentUI.state.threadId);
   await composer.fill('Keep working while I create another thread');
-  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await page.getByRole('button', { name: 'Send message', exact: true }).click(); await session.openAgent();
   await expect.poll(() => page.evaluate(() => typeof (window as any).__finishBackgroundRun)).toBe('function');
   await page.getByRole('button', { name: 'New thread', exact: true }).click();
   await expect(composer).toHaveText('');
@@ -54,7 +54,7 @@ test('background run badge stays compact when creating and switching threads', a
 });
 
 test('Command+A selects the full agent composer draft', async ({ session }) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   const page = session.page;
   await page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
@@ -68,7 +68,7 @@ test('Command+A selects the full agent composer draft', async ({ session }) => {
 });
 
 test('selected agent text copies and pastes normally without copying layers', async ({ session }) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   const page = session.page;
   const reply = 'Selection-ready agent reply';
   await session.app.evaluate(({ clipboard }) => clipboard.writeText(''));
@@ -83,7 +83,7 @@ test('selected agent text copies and pastes normally without copying layers', as
 
   const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
   await composer.fill('Give me selectable text');
-  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await page.getByRole('button', { name: 'Send message', exact: true }).click(); await session.openAgent();
   const answer = page.locator('.agent-msg.assistant p').filter({ hasText: reply });
   await expect(answer).toBeVisible();
   await answer.evaluate((element) => {
@@ -107,7 +107,7 @@ test('selected agent text copies and pastes normally without copying layers', as
 });
 
 test('steering stays in the active run and preserves the transcript before it', async ({ session }, testInfo) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   const page = session.page;
   await page.evaluate(() => {
     const PM = (window as any).PM;
@@ -127,13 +127,13 @@ test('steering stays in the active run and preserves the transcript before it', 
 
   const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
   await composer.fill('Make a progressive blur effect');
-  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await page.getByRole('button', { name: 'Send message', exact: true }).click(); await session.openAgent();
   await expect(page.getByRole('button', { name: 'Stop current run', exact: true })).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as any).__steeringProof.requests)).toBe(1);
   await expect(page.locator('.agent-trace-text')).toHaveText('I have started building the blur.');
 
   await composer.fill('continue');
-  await composer.press('Enter');
+  await composer.press('Enter'); await session.openAgent();
   await expect.poll(() => page.evaluate(() => (window as any).__steeringProof.steering.length)).toBe(1);
   const userTurns = page.locator('.agent-msg.user');
   await expect(userTurns).toHaveCount(2);
@@ -166,7 +166,7 @@ test('steering stays in the active run and preserves the transcript before it', 
 });
 
 test('hidden renderer switches threads, keeps drafts, and restores history after relaunch', async ({ session }) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   const page = session.page;
   await page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   const picker = page.getByRole('button', { name: 'Switch thread', exact: true });
@@ -194,7 +194,7 @@ test('hidden renderer switches threads, keeps drafts, and restores history after
     return PM.store.get(`agentThreads.${PM.proj.id}`)?.activeId;
   })).toBe(second);
   await session.relaunch();
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   await expect.poll(() => session.page.evaluate(() => {
     const state = (window as any).PM.AgentUI.state;
     return { activeId: state.threadId, threadIds: state.threads.map((thread: any) => thread.id) };
@@ -207,7 +207,7 @@ test('hidden renderer switches threads, keeps drafts, and restores history after
 });
 
 test('background app is never visible or focused, but can draw and accept input', async ({ session }, testInfo) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   const state = () => session.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map(w => ({
     visible: w.isVisible(), focused: w.isFocused(), devtools: w.webContents.isDevToolsOpened(),
   })));
@@ -221,7 +221,7 @@ test('background app is never visible or focused, but can draw and accept input'
 });
 
 test('thread transcripts and titles survive a hidden relaunch without leaking into another thread', async ({ session }) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   let page = session.page;
   await page.evaluate(() => {
     const PM = (window as any).PM;
@@ -231,7 +231,7 @@ test('thread transcripts and titles survive a hidden relaunch without leaking in
     PM.CodexBridge.request = async () => ({text:JSON.stringify({summary:'A saved test reply',commands:[],artifacts:[],externalActions:[],notes:[]})});
   });
   await page.getByRole('textbox', {name:'Message Powermove agent',exact:true}).fill('First conversation request');
-  await page.getByRole('button', {name:'Send message',exact:true}).click();
+  await page.getByRole('button', {name:'Send message',exact:true}).click(); await session.openAgent();
   await expect(page.getByRole('log')).toContainText('A saved test reply');
   await expect(page.getByRole('button', {name:'Switch thread',exact:true})).toContainText('First conversation request');
   await page.getByRole('button', {name:'New thread',exact:true}).click();
@@ -243,7 +243,7 @@ test('thread transcripts and titles survive a hidden relaunch without leaking in
   // flush the draft before its debounce timer fires.
   await page.getByRole('textbox', {name:'Message Powermove agent',exact:true}).fill('Last keystroke');
   await session.relaunch(); page = session.page;
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   await page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   await expect(page.getByRole('log')).toContainText('First conversation request');
   await expect(page.getByRole('log')).toContainText('A saved test reply');
@@ -252,7 +252,7 @@ test('thread transcripts and titles survive a hidden relaunch without leaking in
 });
 
 test('agent run survives clicking another project tab and resumes on return', async ({ session }) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   const page = session.page;
   const { first, second } = await page.evaluate(async () => {
     const PM = (window as any).PM;
@@ -272,7 +272,7 @@ test('agent run survives clicking another project tab and resumes on return', as
     return { first, second: project.id };
   });
   await page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).fill('Keep working while I switch projects');
-  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await page.getByRole('button', { name: 'Send message', exact: true }).click(); await session.openAgent();
   await expect.poll(() => page.evaluate(() => Boolean((window as any).__tabRun))).toBe(true);
   await page.locator(`#tabs .project-doc[data-tab-id="${second}"]`).click();
   await expect.poll(() => page.evaluate(() => (window as any).PM.proj.id)).toBe(second);
@@ -283,6 +283,7 @@ test('agent run survives clicking another project tab and resumes on return', as
   await page.locator(`#tabs .project-doc[data-tab-id="${first}"]`).click();
   await expect.poll(() => page.evaluate(() => (window as any).PM.AgentUI.state.phase)).toBe('result');
   expect(await page.evaluate(() => (window as any).PM.AgentUI.state.run.projectId)).toBe(first);
+  await session.openAgent();
   await expect(page.getByRole('log')).toContainText('Original project finished');
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

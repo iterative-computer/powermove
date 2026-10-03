@@ -17,6 +17,8 @@ export interface SveltePanelDef {
   flush?: boolean;
   noscroll?: boolean;
   headless?: boolean;
+  /** false keeps a panel out of the Library and the add-panel menu. */
+  library?: false;
   hideMoveHandle?: boolean;
   moveSlot?: string;
   /** Optional registry header hook retained for imperative panel consumers. */

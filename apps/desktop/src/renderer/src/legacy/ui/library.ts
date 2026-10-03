@@ -44,7 +44,7 @@ const WorkspaceEditor: any = {
   show() {
     this.el?.remove();
     const add: any = h('button.btn', { onclick: () => {
-      PM.menu(add, Object.values(PM.PANELS).filter((panel: any) => panel.id !== 'toolbar' && !PM.Layout.hasPanel(PM.WS.current, panel.id))
+      PM.menu(add, Object.values(PM.PANELS).filter((panel: any) => panel.id !== 'toolbar' && panel.library !== false && !PM.Layout.hasPanel(PM.WS.current, panel.id))
         .map((panel: any) => ({ label: panel.title, run: () => PM.WS.mutate((workspace: any) => PM.Layout.addPanel(workspace, panel.id, 'right')) })));
     } }, 'Add panel');
     const remove: any = h('button.btn', { onclick: () => {

@@ -49,7 +49,13 @@ const TIMELINE_STYLES = `
 #tl-time.edit{color:var(--accent)}
 #tl-canvas-wrap{flex:1;position:relative;min-height:0;overflow:hidden}
 #tl-canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
-${COMP_TABS_STYLES}`;
+${COMP_TABS_STYLES}
+#tl-comp-tabs{padding-right:168px}
+#tl-mode{position:absolute;z-index:4;top:4px;right:8px;height:20px;display:flex;align-items:stretch;padding:1px;gap:1px;border-radius:var(--r-sm);background:color-mix(in srgb,var(--tx) 6%,var(--bg-panel))}
+#tl-mode .tl-mode-button{display:flex;align-items:center;gap:5px;padding:0 9px;border:0;border-radius:calc(var(--r-sm) - 1px);background:none;color:var(--tx-3);font:inherit;font-size:var(--fs-xs);line-height:1;cursor:default}
+#tl-mode .tl-mode-button svg{width:12px;height:12px;flex:none}
+#tl-mode .tl-mode-button:hover{color:var(--tx)}
+#tl-mode .tl-mode-button.on{color:var(--tx);background:var(--bg-panel);box-shadow:0 0 0 1px var(--line)}`;
 
 export function toggleLayerStrips(api: PowermoveAPI): void {
   const layers = selectedLayers(api);
@@ -132,6 +138,24 @@ export default function activate(api: PowermoveAPI): void {
     run: () => revealProperty('m')
   });
   api.keybindings?.bind({ key: 'm', command: 'toggleLayerStrips', priority: 90 });
+  api.commands.register({
+    id: 'timeline.mode:layers',
+    label: 'Use layer timeline (After Effects)',
+    category: 'Timeline',
+    run: () => timeline.setMode('layers'),
+  });
+  api.commands.register({
+    id: 'timeline.mode:tracks',
+    label: 'Use track timeline (Premiere)',
+    category: 'Timeline',
+    run: () => timeline.setMode('tracks'),
+  });
+  api.commands.register({
+    id: 'timeline.toggleMode',
+    label: 'Toggle layer / track timeline',
+    category: 'Timeline',
+    run: () => timeline.setMode(timeline.mode === 'tracks' ? 'layers' : 'tracks'),
+  });
   /* Kernel deactivation runs before replacement activation. Capture this
      module instance's disposer so disabling/reloading the extension cannot
      leave its bus, window, observer, or DOM listeners alive. */
@@ -177,13 +201,15 @@ export default function activate(api: PowermoveAPI): void {
       wrap.appendChild(canvas);
 
       const tabs = document.createElement('div');
-      body.replaceChildren(styles, tabs, head, wrap);
+      const modes = document.createElement('div');
+      body.replaceChildren(styles, tabs, modes, head, wrap);
       if (moveHandle) head.prepend(moveHandle);
       disposeTabs?.();
       disposeTabs = mountCompTabs(api, tabs);
 
       timeline.attachHead(head);
       timeline.attachCanvas(wrap);
+      timeline.attachModeSwitch(modes);
     }
   });
 }

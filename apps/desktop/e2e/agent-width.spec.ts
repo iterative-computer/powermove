@@ -1,7 +1,7 @@
 import { test, expect } from './helpers/app';
 
 test('agent content wraps without horizontal scroll at narrow and normal widths', async ({ session }) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   const page = session.page;
   const token = 'long_command_or_path_'.repeat(60);
   await page.evaluate((token) => {
@@ -16,12 +16,12 @@ test('agent content wraps without horizontal scroll at narrow and normal widths'
   }, token);
   const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
   await composer.fill(token);
-  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await page.getByRole('button', { name: 'Send message', exact: true }).click(); await session.openAgent();
   await expect(page.locator('.agent-tool-details')).toBeVisible();
   await composer.fill(token);
   for (const width of [240, 320, 480]) {
     await page.locator('#panel-agent').evaluate((panel, width) => {
-      Object.assign((panel as HTMLElement).style, { width: `${width}px`, maxWidth: `${width}px`, minWidth: '0' });
+      (panel.closest('#agent-popover') as HTMLElement).style.width = `${width}px`;
     }, width);
     const overflow = await page.locator('.agent-shell').evaluate((root) =>
       [root, ...root.querySelectorAll('*')].filter((el) => {

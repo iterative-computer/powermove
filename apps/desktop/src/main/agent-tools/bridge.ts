@@ -17,6 +17,7 @@ import { EXTENSION_ID } from '../../shared/extensions';
 import { forkBuiltinExtension } from '../extensions/fork';
 import { POWERMOVE_AGENT_TOOLS, POWERMOVE_APP_AGENT_TOOLS, POWERMOVE_STORE_TOOL_NAMES, type NativeMcpServerConfig } from './spec';
 import type { StoreAgentGateway, StoreInstallInput, StorePublishInput, StoreSearchInput } from '../cloud/store-agent';
+import { inspectCreativeWorkspace } from '../creative-workspace';
 import { userInput, type UserInput } from '../user-input';
 
 const STORE_TOOL_NAMES = new Set<string>(POWERMOVE_STORE_TOOL_NAMES);
@@ -407,6 +408,10 @@ export class PowermoveAgentToolBridge {
     if (!POWERMOVE_AGENT_TOOLS.some(spec => spec.name === tool)) throw new Error(`Unknown Powermove tool: ${tool}`);
     if (session.context === 'app' && !POWERMOVE_APP_AGENT_TOOLS.some(spec => spec.name === tool)) {
       throw new Error('This agent has no project attached. Open a project to use composition tools.');
+    }
+    if (tool === 'inspect_creative_workspace') {
+      return { runId: session.runId, callId: `tool-${randomUUID()}`, ok: true,
+        content: [{ type: 'text', text: JSON.stringify(await inspectCreativeWorkspace(args)) }] };
     }
     if (tool === 'fork_builtin_extension') {
       const request: ToolSocketRequest = { token: session.token, runId: session.runId, id: null, tool, arguments: args, workspace };

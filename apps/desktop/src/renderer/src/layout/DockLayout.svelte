@@ -11,7 +11,6 @@
   let manifest = $state.raw<Workspace | null>(null);
   let tick = $state(0);
 
-  onMount(() => PM.bus.on('agent:presentation', () => { tick += 1; }));
 
   onMount(() => {
     const body = document.getElementById('body');
@@ -53,7 +52,7 @@
     if (!manifest) return [] as Array<{ dock: DockSpec; specs: PanelSpec[] }>;
     return PM.Layout.visibleDockPlan(
       manifest,
-      (id: string) => PM.Popout?.isOpen?.(id) === true || (id === 'agent' && PM.AgentShell?.getMode?.() === 'floating'),
+      (id: string) => PM.Popout?.isOpen?.(id) === true,
       (id: string) => !!PM.PANELS?.[id]
     ) as Array<{ dock: DockSpec; specs: PanelSpec[] }>;
   });

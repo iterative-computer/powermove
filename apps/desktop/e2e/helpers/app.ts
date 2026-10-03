@@ -52,6 +52,9 @@ export type LaunchedApp = {
   /** A fresh profile boots to the Projects home screen. Specs that exercise
    * editor panels open an empty composition first, the way a user would. */
   openEditor(): Promise<void>;
+  /** Opens the agent popover under its titlebar launcher. Sending a message
+   * folds it away, so call again to read the conversation after a send. */
+  openAgent(): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -191,6 +194,14 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
         const PM = (window as any).PM;
         return Boolean(PM.GL?.gl && PM.Kernel.services.get('viewer')?.stage?.isConnected);
       });
+    },
+    async openAgent() {
+      const { page } = session;
+      await page.waitForFunction(() => Boolean((window as any).PM?.AgentShell));
+      await page.evaluate(() => { const PM = (window as any).PM; if (!PM.AgentShell.isOpen()) PM.SpatialAssistant?.open?.() ?? PM.AgentShell.open(); });
+      await page.locator('#agent-popover #panel-agent').waitFor({ state: 'visible' });
+      // Measure the settled popover, not its opening scale.
+      await page.waitForFunction(() => document.getElementById('agent-popover')!.getAnimations().length === 0);
     },
     async close() {
       if (closed) return;

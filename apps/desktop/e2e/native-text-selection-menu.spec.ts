@@ -14,6 +14,7 @@ const test = base.extend({
 for (const surface of ['agent', 'floating agent', 'text tool'] as const) {
   test(`${surface} uses native selection menu actions and supplies the text services frame`, async ({ session }) => {
     await session.openEditor();
+    if (surface !== 'text tool') await session.openAgent();
     const { page, app } = session;
     await app.evaluate(({ Menu, BrowserWindow, shell }) => {
       const state = (globalThis as any).__selectionMenu = { items: [], frameMatches: false, lookup: 0, searches: [] };

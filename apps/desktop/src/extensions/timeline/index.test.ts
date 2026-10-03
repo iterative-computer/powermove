@@ -209,7 +209,7 @@ describe('timeline extension', () => {
   it('builds the exact canvas skeleton and rebinds the runtime to replacement hosts', () => {
     const value = activate();
     const first = build(value);
-    expect([...first.children].filter((element) => element.tagName !== 'STYLE').map((element) => element.id)).toEqual(['tl-comp-tabs', 'tl-head', 'tl-canvas-wrap']);
+    expect([...first.children].filter((element) => element.tagName !== 'STYLE').map((element) => element.id)).toEqual(['tl-comp-tabs', 'tl-mode', 'tl-head', 'tl-canvas-wrap']);
     expect(first.querySelector('#tl-canvas-wrap > #tl-canvas')).not.toBeNull();
     expect(value.state.timeline?.cv).toBe(first.querySelector('#tl-canvas'));
 
@@ -258,7 +258,10 @@ describe('timeline extension', () => {
     const body = build(value);
     const graph = body.querySelector<HTMLButtonElement>('button[title="Graph editor (Shift+F3)"]')!;
     const slot = graph.closest('.tl-graph-slot')!;
-    expect(slot.lastElementChild).toBe(graph);
+    // The track timeline's snap magnet shares the slot, hidden in layer mode.
+    expect(slot.lastElementChild?.previousElementSibling).toBe(graph);
+    expect((slot.lastElementChild as HTMLElement).classList.contains('tl-snap')).toBe(true);
+    expect((slot.lastElementChild as HTMLElement).hidden).toBe(true);
     expect(slot.firstElementChild).toBe(body.querySelector('button[title="Graph options"]'));
     expect(slot.previousElementSibling?.classList.contains('tl-transport')).toBe(true);
     expect(graph.closest('.tl-transport')).toBeNull();
@@ -269,6 +272,29 @@ describe('timeline extension', () => {
     expect(body.querySelector('#tl-time')).not.toBeNull();
     expect(body.querySelector<HTMLElement>('#tl-head')?.style.getPropertyValue('--tl-gutter')).toBe('224px');
     expect(body.querySelector<HTMLElement>('#tl-head')?.style.getPropertyValue('--tl-ruler')).toBe('28px');
+  });
+
+  it('switches between the layer and track timelines from the panel and the command palette', () => {
+    const value = activate();
+    const body = build(value);
+    const modes = body.querySelectorAll<HTMLButtonElement>('#tl-mode [role="radio"]');
+    expect([...modes].map(button => button.dataset.mode)).toEqual(['layers', 'tracks']);
+    expect(modes[0]!.getAttribute('aria-checked')).toBe('true');
+    const graph = body.querySelector<HTMLButtonElement>('button[title="Graph editor (Shift+F3)"]')!;
+    const snap = body.querySelector<HTMLButtonElement>('.tl-snap')!;
+
+    modes[1]!.click();
+    expect(modes[1]!.getAttribute('aria-checked')).toBe('true');
+    expect(value.api.storage.get('mode')).toBe('tracks');
+    expect(graph.hidden).toBe(true);
+    expect(snap.hidden).toBe(false);
+    expect(snap.getAttribute('aria-pressed')).toBe('true');
+
+    const registered = vi.mocked(value.api.commands.register).mock.calls.map(([command]) => command);
+    registered.find(command => command.id === 'timeline.toggleMode')!.run();
+    expect(modes[0]!.getAttribute('aria-checked')).toBe('true');
+    expect(graph.hidden).toBe(false);
+    expect(snap.hidden).toBe(true);
   });
 
   it('preserves the live panel move handle when the extension rebuilds in place', () => {

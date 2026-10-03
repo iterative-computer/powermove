@@ -1,3 +1,4 @@
+import type { OnboardingChoice } from './creative-workspace';
 /*
  * Frozen Phase 1 IPC contract between the sandboxed renderer and the main
  * process. Every channel here is the ONLY way the renderer reaches native
@@ -19,6 +20,7 @@ export const IPC = {
   onboardingLogoTarget: 'onboarding:logo-target',
   onboardingLogoTargetReport: 'onboarding:logo-target-report',
   onboardingBegin: 'onboarding:begin',
+  onboardingAppearance: 'onboarding:appearance',
 
   fileSave: 'file:save',
   exportChoose: 'export:choose',
@@ -223,7 +225,8 @@ export interface OnboardingBridge {
   animationFailed(message: string): void;
   reportLogoTarget(target: OnboardingLogoTarget): void;
   onLogoTarget(callback: (target: OnboardingLogoTarget) => void): () => void;
-  begin(): Promise<void>;
+  begin(choice?: OnboardingChoice): Promise<void>;
+  appearance(): Promise<'light' | 'dark'>;
 }
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];

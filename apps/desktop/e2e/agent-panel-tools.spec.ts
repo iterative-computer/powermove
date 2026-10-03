@@ -1,7 +1,7 @@
 import { expect, test } from './helpers/app';
 
 test('agent opens and uses an extension panel through its real controls', async ({ session }) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   await session.page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   await session.page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).waitFor();
   const result = await session.page.evaluate(async () => {

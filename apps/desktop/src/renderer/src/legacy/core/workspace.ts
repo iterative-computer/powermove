@@ -172,10 +172,49 @@ function isLegacyBrokenTextSplitter(panel: any) {
     && labels.includes('Undo last split step');
 }
 
+/* One-time panel migrations for saved workspaces, applied at load and versioned
+   by `agentDockMigration` (normalization stamps the current version, so new and
+   edited workspaces are never migrated):
+   1. A docked agent from before the titlebar launcher hands its slot to Layer
+      Effects; an agent docked from the launcher since then stays put.
+   2. Layer Effects joins its default place below Media, unless the workspace
+      already has it, docked or hidden. */
+const AGENT_DOCK_MIGRATION = 2;
+const panelId = (spec: any) => typeof spec === 'string' ? spec : spec?.id;
+function migrateDockedAgent(workspace: any) {
+  if (!workspace || typeof workspace !== 'object') return workspace;
+  const version = Number.isInteger(workspace.agentDockMigration) ? workspace.agentDockMigration : 0;
+  if (version >= AGENT_DOCK_MIGRATION) return workspace;
+  let docks: any = workspace.layout && Array.isArray(workspace.layout.docks)
+    ? workspace.layout.docks.map((dock: any) => dock && Array.isArray(dock.panels) ? { ...dock, panels: [...dock.panels] } : dock)
+    : null;
+  let hiddenPanels: any = Array.isArray(workspace.hiddenPanels) ? workspace.hiddenPanels : null;
+  if (version < 1) {
+    docks = docks?.map((dock: any) => dock?.panels ? { ...dock, panels: dock.panels.map((spec: any) => panelId(spec) === 'agent'
+      ? { ...(spec && typeof spec === 'object' ? spec : {}), id: 'layer-effects' } : spec) } : dock);
+    hiddenPanels = hiddenPanels?.filter((item: any) => item?.id !== 'agent') ?? null;
+  }
+  if (version < 2 && docks) {
+    const present = docks.some((dock: any) => dock?.panels?.some((spec: any) => panelId(spec) === 'layer-effects'))
+      || hiddenPanels?.some((item: any) => item?.id === 'layer-effects');
+    const media = docks.find((dock: any) => dock?.panels?.some((spec: any) => panelId(spec) === 'assets'));
+    if (!present && media) {
+      const index = media.panels.findIndex((spec: any) => panelId(spec) === 'assets');
+      media.panels.splice(index + 1, 0, { id: 'layer-effects', size: 350 });
+    }
+  }
+  return {
+    ...workspace,
+    ...(docks ? { layout: { ...workspace.layout, docks } } : {}),
+    ...(hiddenPanels ? { hiddenPanels } : {}),
+  };
+}
+
 function normalizeWorkspace(workspace: any, fallback?: any) {
   const raw: any = workspace && typeof workspace === 'object' ? copy(workspace) : {};
   const backup: any = fallback && typeof fallback === 'object' ? copy(fallback) : null;
   raw.schemaVersion = 1;
+  raw.agentDockMigration = AGENT_DOCK_MIGRATION;
   raw.id = text(raw.id, PM.uid('ws'));
   raw.name = text(raw.name, 'Workspace');
   raw.density = ['compact', 'normal', 'comfy'].includes(raw.density) ? raw.density : 'normal';
@@ -307,10 +346,11 @@ const PRESETS: any = () => ([
     features: { autosave: true, adaptiveQuality: true },
     layout: {
       docks: [
-        /* Default shape: project media above a tall agent on the left, the
-           composition + timeline in the middle, and properties over effects
-           on the right — the agent is a primary surface, not a footnote. */
-        dock('left', [p('assets', { flex: true }), p('agent', { size: 350 })], 300),
+        /* Default shape: project media above the selected layer's applied
+           effects on the left, the composition + timeline in the middle, and
+           properties over the effects browser on the right. The agent opens
+           from the titlebar and can be dragged into any dock. */
+        dock('left', [p('assets', { flex: true }), p('layer-effects', { size: 350 })], 300),
         dock('center', [p('viewer', { flex: true }), p('timeline', { size: 340 })]),
         dock('right', [p('inspector', { flex: true }), p('fxbrowser', { size: 380 })], 320),
       ],
@@ -419,7 +459,7 @@ WS.isLegacyGradient = (w: any) => {
 
 WS.init = () => {
   const saved: any = PM.store.get('workspaces', null);
-  WS.all = saved && saved.length ? saved.map((w: any) => normalizeWorkspace(w)) : PRESETS();
+  WS.all = saved && saved.length ? saved.map((w: any) => normalizeWorkspace(migrateDockedAgent(w))) : PRESETS();
   const lastSavedId: any = PM.store.get('workspace', 'design');
   const legacyGradientIds: any = new Set(WS.all.filter(WS.isLegacyGradient).map((w: any) => w.id));
   if (legacyGradientIds.size) WS.all = WS.all.filter((w: any) => !legacyGradientIds.has(w.id));

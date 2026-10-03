@@ -41,7 +41,7 @@ describe('inspector extension', () => {
       model: { P: vi.fn((value: unknown) => ({ v: value, kf: [] })) },
       uiState: { setShaderMeta },
       services: harness.services,
-      panels: { register: vi.fn((definition: PanelDefinition) => void (panel = definition)) },
+      panels: { register: vi.fn((definition: PanelDefinition) => void (panel ??= definition)) },
       log: vi.fn()
     } as unknown as PowermoveAPI;
 

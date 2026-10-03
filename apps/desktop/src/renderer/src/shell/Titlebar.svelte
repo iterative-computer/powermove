@@ -2,6 +2,7 @@
   import { tick } from 'svelte';
   import { flip } from 'svelte/animate';
   import Icon from '../panels/Icon.svelte';
+  import AgentLauncher from './AgentLauncher.svelte';
   import ToolbarMount from './ToolbarMount.svelte';
 
   let { PM }: { PM: Record<string, any> } = $props();
@@ -492,6 +493,7 @@
 <div class="titlebar-drag" aria-hidden="true"></div>
 
 <div class="tb-right" id="tb-right">
+  <AgentLauncher {PM} />
   <ToolbarMount {PM} />
   {#if !homeOpen}
     <button class="iconbtn" type="button" title="Panel library" aria-label="Open panel library" onclick={() => PM.LibraryUI?.open?.()}>

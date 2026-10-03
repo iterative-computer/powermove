@@ -3,7 +3,7 @@ import path from 'node:path';
 import { test, expect } from './helpers/app';
 
 test('studio agent keeps suggestions, steering, activity and narrow layouts usable', async ({ session }, testInfo) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   const { page } = session;
   const artifacts = process.env.POWERMOVE_AGENT_ARTIFACTS || testInfo.outputPath('visuals');
   await mkdir(artifacts, { recursive: true });
@@ -42,7 +42,7 @@ test('studio agent keeps suggestions, steering, activity and narrow layouts usab
     PM.CodexBridge.steer = async (prompt: string) => { (window as any).__redesignSteers.push(prompt); return true; };
   });
   await composer.fill('Give the title a confident entrance');
-  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await page.getByRole('button', { name: 'Send message', exact: true }).click(); await session.openAgent();
   await expect(page.locator('.agent-tool-details')).toBeVisible();
   await expect(page.locator('.agent-tool-details .is-failed')).toContainText('Check the first preview render');
   await expect(page.getByRole('button', { name: 'Stop current run', exact: true })).toBeVisible();
@@ -55,14 +55,14 @@ test('studio agent keeps suggestions, steering, activity and narrow layouts usab
     renderer: (document.querySelector('.agent-prompt-signal') as HTMLElement)?.dataset,
     canvas: [...document.querySelectorAll('.agent-prompt-signal canvas')].map(c => ({ width: (c as HTMLCanvasElement).width, height: (c as HTMLCanvasElement).height })),
   })), null, 2));
-  await panel.evaluate(el => (el as HTMLElement).style.setProperty('--set-panel-height', '580px'));
+  await panel.evaluate(el => (el.closest('#agent-popover') as HTMLElement).style.height = '580px');
   await page.locator('.agent-scroll').evaluate(el => { el.scrollTop = 0; });
   await expect.poll(() => page.locator('.agent-prompt-signal').getAttribute('data-glow-renderer')).toBe('motion-gpu');
   await expect(page.locator('.agent-prompt-signal canvas')).toHaveCount(1);
   // Capture the settled 450 ms shader entrance, rather than its transparent first frame.
   await page.waitForTimeout(600);
   await panel.screenshot({ path: path.join(artifacts, 'agent-working-expanded.png') });
-  await panel.evaluate(el => (el as HTMLElement).style.removeProperty('--set-panel-height'));
+  await panel.evaluate(el => (el.closest('#agent-popover') as HTMLElement).style.height = '680px');
 
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await expect(page.locator('.agent-prompt-signal canvas')).toHaveCount(0);
@@ -73,7 +73,7 @@ test('studio agent keeps suggestions, steering, activity and narrow layouts usab
   for (const width of [240, 320, 480]) {
     await panel.evaluate((el, width) => {
       Object.assign((el as HTMLElement).style, { width: `${width}px`, maxWidth: `${width}px`, minWidth: '0' });
-      (el.closest('.dock') as HTMLElement).style.flex = `0 0 ${width}px`;
+      (el.closest('#agent-popover') as HTMLElement).style.width = `${width}px`;
     }, width);
     await composer.fill('Keep the entrance subtle');
     await expect(page.getByRole('button', { name: 'Steer current run', exact: true })).toBeVisible();
@@ -87,7 +87,7 @@ test('studio agent keeps suggestions, steering, activity and narrow layouts usab
     expect(overflow, `horizontal overflow at ${width}px`).toEqual([]);
     await panel.screenshot({ path: path.join(artifacts, `agent-working-${width}.png`) });
   }
-  await page.getByRole('button', { name: 'Steer current run', exact: true }).click();
+  await page.getByRole('button', { name: 'Steer current run', exact: true }).click(); await session.openAgent();
   await expect.poll(() => page.evaluate(() => (window as any).__redesignSteers.length)).toBe(1);
   await expect(page.locator('.agent-trace.is-archived .agent-trace-text')).toContainText('every property editable');
 
@@ -103,7 +103,7 @@ test('studio agent keeps suggestions, steering, activity and narrow layouts usab
   await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeVisible();
   await panel.evaluate(el => {
     for (const name of ['width', 'max-width', 'min-width']) (el as HTMLElement).style.removeProperty(name);
-    (el.closest('.dock') as HTMLElement).style.flex = '0 0 320px';
+    (el.closest('#agent-popover') as HTMLElement).style.width = '320px';
   });
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.evaluate(() => { (window as any).PM.theme.apply('light'); });

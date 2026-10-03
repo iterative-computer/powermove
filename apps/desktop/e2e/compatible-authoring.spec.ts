@@ -43,7 +43,7 @@ test('an API connection creates a keyframeable effect and verifies it through li
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
     const port = (server.address() as { port: number }).port;
-    await session.openEditor();
+    await session.openEditor(); await session.openAgent();
     await session.page.evaluate(async port => {
       const w = window as any;
       await w.powermove.compatible.configure({ baseUrl: `http://127.0.0.1:${port}/v1`, model: 'test-author', vision: true });

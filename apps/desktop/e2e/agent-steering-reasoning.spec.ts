@@ -2,7 +2,7 @@ import { expect, test } from './helpers/app';
 
 for (const accepted of [true, false]) {
   test(`steering keeps reasoning visible with ${accepted ? 'live transport' : 'replacement runs'}`, async ({ session }) => {
-    await session.openEditor();
+    await session.openEditor(); await session.openAgent();
     const { page } = session;
     await page.evaluate(() => {
       const PM = (window as any).PM;
@@ -15,7 +15,7 @@ for (const accepted of [true, false]) {
     });
     const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
     await composer.fill('Inspect the composition');
-    await composer.press('Enter');
+    await composer.press('Enter'); await session.openAgent();
     await expect.poll(() => page.evaluate(() => (window as any).__reasoningRuns.length)).toBe(1);
 
     for (let index = 0; index < 2; index++) {
@@ -25,7 +25,7 @@ for (const accepted of [true, false]) {
       }, index);
       await expect(page.locator('.agent-trace.is-live .agent-thought-prose')).toContainText(`Inspecting timing ${index}.`);
       await composer.fill(`Refine timing ${index}`);
-      await composer.press('Enter');
+      await composer.press('Enter'); await session.openAgent();
       await page.waitForFunction(() => typeof (window as any).__resolveReasoningSteer === 'function');
       const archivedThought = page.locator('.agent-trace.is-archived .agent-trace-text').filter({ hasText: `Inspecting timing ${index}.` });
       // Presence in the DOM is insufficient: a closed work log hides the text.
@@ -35,6 +35,7 @@ for (const accepted of [true, false]) {
         (window as any).__resolveReasoningSteer(accepted);
       }, { accepted, index });
       await expect.poll(() => page.evaluate(() => (window as any).__reasoningRuns.length)).toBe(accepted ? 1 : index + 2);
+      await session.openAgent();
       await expect(archivedThought).toBeVisible();
       if (!accepted) {
         await expect(page.locator('.agent-trace.is-archived .agent-trace-text').filter({ hasText: `Checking alignment ${index}.` })).toBeVisible();

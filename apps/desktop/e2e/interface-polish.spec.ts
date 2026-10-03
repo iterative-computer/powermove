@@ -11,14 +11,13 @@ test('agent controls, independent hover states, media icons, and titlebar spacin
   await importFixture(page, 'tone.wav');
   await importFixture(page, 'h264-aac.mp4');
   await page.waitForFunction(() => Object.keys((window as any).PM.proj.assets).length >= 2);
-  await page.evaluate(() => {
-    const PM = (window as any).PM;
-    PM.SpatialAssistant.open();
-  });
+  await session.openAgent();
   const model = page.locator('#panel-agent .agent-modelbar').getByRole('combobox', { name: 'Model', exact: true });
   const effort = page.locator('#panel-agent .agent-modelbar').getByRole('combobox', { name: 'Reasoning effort', exact: true });
   for (const theme of ['dark', 'light']) {
     await page.evaluate(theme => (window as any).PM.theme.apply(theme), theme);
+    // The panel library below is outside the popover, so each pass reopens it.
+    await session.openAgent();
     await model.hover();
     expect(await model.evaluate(el => getComputedStyle(el).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
     expect(await effort.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgba(0, 0, 0, 0)');

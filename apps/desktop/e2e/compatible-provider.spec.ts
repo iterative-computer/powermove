@@ -34,16 +34,17 @@ test('connects a local model, streams chat, recovers after a broken stream and r
     await expect(settings).toContainText('Connected model: local-test');
     await settings.getByRole('main').getByRole('button', { name: 'Done', exact: true }).click();
     await expect(page.locator('.agent-modelbar select[aria-label="Provider"]')).toHaveValue('compatible');
+    await session.openAgent();
     const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
-    await composer.fill('Hello'); await page.getByRole('button', { name: 'Send message', exact: true }).click();
+    await composer.fill('Hello'); await page.getByRole('button', { name: 'Send message', exact: true }).click(); await session.openAgent();
     await expect(page.getByRole('log', { name: 'Agent conversation' })).toContainText('Hello from your local model.');
     await expect(page.getByRole('button', { name: 'Stop current run' })).toHaveCount(0);
     fail = true;
-    await composer.fill('Try a broken connection'); await page.getByRole('button', { name: 'Send message', exact: true }).click();
+    await composer.fill('Try a broken connection'); await page.getByRole('button', { name: 'Send message', exact: true }).click(); await session.openAgent();
     const conversation = page.getByRole('log', { name: 'Agent conversation' });
     await expect(conversation).toContainText('before the model finished');
     fail = false;
-    await conversation.getByRole('button', { name: 'Try again', exact: true }).last().click();
+    await conversation.getByRole('button', { name: 'Try again', exact: true }).last().click(); await session.openAgent();
     await expect(conversation.getByText('Hello from your local model.', { exact: true })).toHaveCount(2);
     await session.relaunch();
     await expect(session.page.locator('.agent-modelbar select[aria-label="Provider"]')).toHaveValue('compatible');
@@ -71,7 +72,7 @@ test('provider models, reasoning, and flat error actions remain usable in a narr
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
-    await session.openEditor();
+    await session.openEditor(); await session.openAgent();
     const { page } = session;
     const address = server.address() as { port: number };
     await page.evaluate(async port => {
@@ -86,7 +87,7 @@ test('provider models, reasoning, and flat error actions remain usable in a narr
     const panel = page.locator('#panel-agent');
     await panel.evaluate(el => {
       Object.assign((el as HTMLElement).style, { width: '300px', maxWidth: '300px', minWidth: '0' });
-      (el.closest('.dock') as HTMLElement).style.flex = '0 0 300px';
+      (el.closest('#agent-popover') as HTMLElement).style.width = '300px';
     });
     await page.getByRole('combobox', { name: 'Model', exact: true }).click();
     await page.getByRole('option', { name: 'gpt-5.6-sol', exact: true }).click();
@@ -95,12 +96,12 @@ test('provider models, reasoning, and flat error actions remain usable in a narr
     await expect(page.locator('select[aria-label="Reasoning effort"]')).toHaveValue('max');
     const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
     await composer.fill('Check selected settings');
-    await page.getByRole('button', { name: 'Send message', exact: true }).click();
+    await page.getByRole('button', { name: 'Send message', exact: true }).click(); await session.openAgent();
     await expect(panel).toContainText('Selection verified.');
     expect(requests.find(body => body.stream)).toMatchObject({ model: 'gpt-5.6-sol', reasoning_effort: 'max' });
     fail = true;
     await composer.fill('Check error actions');
-    await page.getByRole('button', { name: 'Send message', exact: true }).click();
+    await page.getByRole('button', { name: 'Send message', exact: true }).click(); await session.openAgent();
     const card = panel.locator('.error-notice').last();
     await expect(card.getByRole('button', { name: 'Try again', exact: true })).toBeVisible();
     expect(await card.evaluate(el => getComputedStyle(el).borderTopWidth)).toBe('0px');

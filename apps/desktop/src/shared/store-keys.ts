@@ -21,6 +21,7 @@ export const STATIC_KEYS = [
   'takes',
   'workspaces',
   'workspace',
+  'defaultWorkspace',
   'workspaceTrash',
   'panelVisibility',
   'theme',

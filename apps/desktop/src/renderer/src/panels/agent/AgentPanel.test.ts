@@ -307,9 +307,10 @@ describe('AgentPanel', () => {
     flushSync(() => picker.click());
     await tick(); flushSync();
     flushSync(() => target.querySelector<HTMLElement>('.thread-row')!.click());
-    await new Promise((resolve) => setTimeout(resolve, BLINK_MS * 2 + 10));
-    flushSync();
-    expect(picker.getAttribute('aria-expanded')).toBe('false');
+    await vi.waitFor(() => {
+      flushSync();
+      expect(picker.getAttribute('aria-expanded')).toBe('false');
+    });
     flushSync(() => picker.click());
     await tick(); flushSync();
     const popup = target.querySelector<HTMLElement>('.thread-popup')!;
@@ -438,7 +439,8 @@ describe('AgentPanel', () => {
     expect(document.activeElement).toBe(textarea);
   });
 
-  it('leaves the composer on Escape after dismissing slash commands', () => {
+  it('closes the popover on Escape after dismissing slash commands, keeping the draft', () => {
+    PM.AgentShell = { close: vi.fn(), collapse: vi.fn(), isOpen: () => true };
     renderPanel(snapshot({ composerDraft: '/' }));
     const textarea = target.querySelector<HTMLDivElement>('.agent-inline-prompt')!;
     flushSync(() => textarea.focus());
@@ -448,10 +450,34 @@ describe('AgentPanel', () => {
     escape();
     expect(target.querySelector('.agent-slash-menu')).toBeNull();
     expect(document.activeElement).toBe(textarea);
+    expect(PM.AgentShell.close).not.toHaveBeenCalled();
     escape();
-    expect(document.activeElement).not.toBe(textarea);
+    expect(PM.AgentShell.close).toHaveBeenCalledOnce();
     expect(textarea.textContent).toBe('/');
     expect(PM.AgentUI.submit).not.toHaveBeenCalled();
+  });
+
+  it('blurs on Escape and keeps focus after sending when the agent is docked', () => {
+    PM.AgentShell = { close: vi.fn(), collapse: vi.fn(), isOpen: () => false };
+    renderPanel(snapshot({ composerDraft: 'Make the title bigger' }));
+    const textarea = target.querySelector<HTMLDivElement>('.agent-inline-prompt')!;
+    flushSync(() => textarea.focus());
+    flushSync(() => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })));
+    expect(PM.AgentUI.submit).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(textarea);
+    flushSync(() => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
+    expect(PM.AgentShell.close).not.toHaveBeenCalled();
+    expect(document.activeElement).not.toBe(textarea);
+  });
+
+  it('folds the popover into the launcher when a message is sent', () => {
+    PM.AgentShell = { close: vi.fn(), collapse: vi.fn(), isOpen: () => true };
+    renderPanel(snapshot({ composerDraft: 'Make the title bigger' }));
+    const textarea = target.querySelector<HTMLDivElement>('.agent-inline-prompt')!;
+    flushSync(() => textarea.focus());
+    flushSync(() => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })));
+    expect(PM.AgentUI.submit).toHaveBeenCalledOnce();
+    expect(PM.AgentShell.collapse).toHaveBeenCalledOnce();
   });
 
   it('renders steering as a compact continuation of the active user request', () => {

@@ -1,6 +1,6 @@
 import { test, expect } from './helpers/app';
 
-test.beforeEach(async ({ session }) => { await session.openEditor(); });
+test.beforeEach(async ({ session }) => { await session.openEditor(); await session.openAgent(); });
 
 test('native pointer selection in the agent copies into its composer', async ({ session }) => {
   const page = session.page;
@@ -12,7 +12,7 @@ test('native pointer selection in the agent copies into its composer', async ({ 
   });
   const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
   await composer.fill('Show text');
-  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await page.getByRole('button', { name: 'Send message', exact: true }).click(); await session.openAgent();
   const reply = page.locator('.agent-msg.assistant p').filter({ hasText: 'Native selection works across words.' });
   await expect(reply).toBeVisible();
   // Actual browser drag selection, starting while the composer retains focus.

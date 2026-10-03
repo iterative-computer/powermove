@@ -1,8 +1,9 @@
-import { BrowserWindow, type IpcMain, type Rectangle } from 'electron';
+import { BrowserWindow, nativeTheme, type IpcMain, type Rectangle } from 'electron';
 import { access, mkdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { IPC, type OnboardingLogoTarget } from '../shared/ipc';
+import { onboardingChoice, type CreativeAppId, type OnboardingAgentChoice, type OnboardingChoice, type OnboardingTimelineMode } from '../shared/creative-workspace';
 import { LIGHT_BACKGROUND } from './theme';
 
 export const ONBOARDING_VERSION = 1;
@@ -27,11 +28,11 @@ export async function onboardingCompleted(userData: string): Promise<boolean> {
   }
 }
 
-export async function persistOnboardingCompleted(userData: string): Promise<void> {
+export async function persistOnboardingCompleted(userData: string, choice?: OnboardingChoice): Promise<void> {
   await mkdir(userData, { recursive: true });
   const destination = path.join(userData, ONBOARDING_MARKER);
   const temporary = `${destination}.${process.pid}.tmp`;
-  await writeFile(temporary, `${JSON.stringify({ version: ONBOARDING_VERSION })}\n`, {
+  await writeFile(temporary, `${JSON.stringify({ version: ONBOARDING_VERSION, ...(choice ?? {}) })}\n`, {
     encoding: 'utf8',
     mode: 0o600
   });
@@ -109,6 +110,9 @@ export interface OnboardingFlowOptions {
   userData: string;
   createEditor(): BrowserWindow | Promise<BrowserWindow>;
   secure(window: BrowserWindow): void;
+  importWorkspace?(window: BrowserWindow, appId: CreativeAppId): Promise<void>;
+  applyTimelineMode?(window: BrowserWindow, mode: OnboardingTimelineMode): Promise<void>;
+  applyAgent?(window: BrowserWindow, agent: OnboardingAgentChoice): Promise<void>;
 }
 
 export class OnboardingFlow {
@@ -149,13 +153,17 @@ export class OnboardingFlow {
       if (!converted || !animation || animation.isDestroyed()) return;
       animation.webContents.send(IPC.onboardingLogoTarget, converted);
     });
-    this.ipc.handle(IPC.onboardingBegin, async (event) => {
+    this.ipc.handle(IPC.onboardingBegin, async (event, rawChoice: unknown) => {
       if (!this.isMainFrameOf(event, this.welcomeWindow)) {
         throw new Error('Unauthorized onboarding sender');
       }
-      await this.begin();
+      await this.begin(onboardingChoice(rawChoice));
     });
 
+    this.ipc.handle(IPC.onboardingAppearance, async (event) => {
+      if (!this.isMainFrameOf(event, this.welcomeWindow)) throw new Error('Unauthorized onboarding sender');
+      return nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
+    });
   }
 
   private isMainFrameOf(
@@ -323,26 +331,35 @@ export class OnboardingFlow {
     }
   }
 
-  private async begin(): Promise<void> {
+  private async begin(choice: OnboardingChoice): Promise<void> {
     if (this.transitioning) return;
+    if (choice.workspaceImport && !this.options.importWorkspace) throw new Error('Workspace import is unavailable.');
     const generation = this.generation;
     this.transitioning = true;
     try {
-      await persistOnboardingCompleted(this.options.userData);
+      const editor = await this.options.createEditor();
+      if (generation !== this.generation) return;
+      // A missed preference only costs the default timeline; never block the editor on it.
+      await this.options.applyTimelineMode?.(editor, choice.timelineMode).catch(error => {
+        console.error('[onboarding] could not apply the timeline mode', error);
+      });
+      if (generation !== this.generation) return;
+      // The import runs on the chosen agent, so choose it first. A miss keeps the default.
+      if (choice.agent) await this.options.applyAgent?.(editor, choice.agent).catch(error => {
+        console.error('[onboarding] could not apply the agent choice', error);
+      });
+      if (generation !== this.generation) return;
+      if (choice.workspaceImport) await this.options.importWorkspace!(editor, choice.workspaceImport);
+      if (generation !== this.generation) return;
+      await persistOnboardingCompleted(this.options.userData, choice).catch(error => {
+        // A failed marker write must not trap the user on a broken disk.
+        console.error('[onboarding] could not persist completion', error);
+      });
     } catch (error) {
-      // Let the user into the editor; the welcome will return next launch if
-      // persistence failed instead of trapping them on a broken disk.
-      console.error('[onboarding] could not persist completion', error);
-    }
-    // A native Replay command can arrive while the marker write is pending.
-    // Leave that newer animation and its audio/window lifecycle untouched.
-    if (generation !== this.generation) return;
-    try {
-      await this.options.createEditor();
-    } catch (error) {
-      this.transitioning = false;
+      if (generation === this.generation) this.transitioning = false;
       throw error;
     }
+    if (generation !== this.generation) return;
     this.firstRunPending = false;
     this.finishAnimation(generation);
     const welcome = this.welcomeWindow;

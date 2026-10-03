@@ -3,7 +3,8 @@ import { expect, test } from './helpers/app';
 test('the agent overlay leaves the titlebar grab area draggable', async ({ session }) => {
   const { page } = session;
   await session.openEditor();
-  await expect(page.locator('#agent-floating-root')).toHaveCount(1);
+  await expect(page.locator('#agent-popover-root')).toHaveCount(1);
+  await expect(page.locator('#agent-launcher')).toBeVisible();
 
   // Native app regions use rectangles, even for pointer-events:none overlays.
   // elementsFromPoint() misses those overlays, so inspect their bounds too.

@@ -2,7 +2,7 @@ import { expect, test } from './helpers/app';
 
 test.describe('@ui-placement early panel loading', () => {
   test('a broad panel target preserves its controls and never reopens the app', async ({ session }) => {
-    await session.openEditor();
+    await session.openEditor(); await session.openAgent();
     const { page, app } = session;
     const pid = app.process().pid;
     await page.evaluate(() => {
@@ -36,7 +36,7 @@ test.describe('@ui-placement early panel loading', () => {
   });
 
   test('places a new-panel skeleton at its dock insertion point and clears it on Stop', async ({ session }, testInfo) => {
-    await session.openEditor();
+    await session.openEditor(); await session.openAgent();
     const { page } = session;
     await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
     await page.evaluate(() => {
@@ -82,7 +82,7 @@ test.describe('@ui-placement early panel loading', () => {
   });
 
   test('targets one panel area, then reserves a local new section without persisting layout', async ({ session }, testInfo) => {
-    await session.openEditor();
+    await session.openEditor(); await session.openAgent();
     const { page } = session;
     await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
     await page.evaluate(() => {

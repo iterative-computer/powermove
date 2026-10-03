@@ -1,6 +1,5 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import { AGENT_FEATURES } from '../panels/agent-features';
   import Icon from '../panels/Icon.svelte';
   import { createChatGPTSettingsControl, createClaudeSettingsControl } from '../legacy/ui/chatgpt-settings';
   import { createCompatibleSettingsControl } from '../legacy/ui/compatible-settings';
@@ -59,7 +58,6 @@
   let searchText = $state('');
   const query = $derived(searchText.trim().toLowerCase());
   let themeMode = $state<string>('system');
-  let agentPresentation = $state<'floating' | 'docked'>('docked');
   /* Reopening last session's windows is the default; the store only ever holds
      the opt-out, so an untouched profile needs no migration. */
   let restoreWindows = $state(true);
@@ -79,10 +77,6 @@
   $effect(() => subscribeAccount((user, me) => {
     account = user;
     rememberInstalls = me?.settings.rememberInstalls ?? true;
-  }));
-
-  $effect(() => PM.bus?.on?.('agent:presentation', () => {
-    agentPresentation = PM.AgentShell?.getPreference?.() ?? 'docked';
   }));
 
   const hasProject = $derived(!!controls?.project);
@@ -137,7 +131,6 @@
   export function open(target?: SettingsPage): void {
     build();
     themeMode = PM.theme?.mode ?? 'system';
-    agentPresentation = PM.AgentShell?.getPreference?.() ?? 'docked';
     restoreWindows = PM.store?.get?.('restoreWindows', true) !== false;
     autoDownloadCloudMedia = PM.store?.get?.('autoDownloadCloudMedia', false) === true;
     previewMemoryMiB = (PM.Memory?.budget?.('preview') ?? 256 * 1024 * 1024) / (1024 * 1024);
@@ -270,13 +263,6 @@
     const value = (event.currentTarget as HTMLSelectElement).value;
     themeMode = value;
     PM.theme?.apply?.(value);
-  }
-
-  function applyAgentPresentation(event: Event): void {
-    const next = (event.currentTarget as HTMLSelectElement).value;
-    if (next !== 'floating' && next !== 'docked') return;
-    agentPresentation = next;
-    PM.AgentShell?.setMode?.(next);
   }
 
   /* Account actions run in main; failures come back as results, never throws. */
@@ -461,23 +447,6 @@
                   </div>
                 </div>
               </section>
-              {#if AGENT_FEATURES.floating}
-              <section class="sg-section">
-                <h3 class="sg-section-title">Agent</h3>
-                <div class="sg-group">
-                  <div class="settings-row">
-                    <div class="settings-copy">
-                      <b>Agent presentation</b>
-                      <span>Keep the agent in a movable chat or in the editor dock.</span>
-                    </div>
-                    <select class="settings-select" aria-label="Agent presentation" value={agentPresentation} onchange={applyAgentPresentation}>
-                      <option value="floating">Floating</option>
-                      <option value="docked">Docked</option>
-                    </select>
-                  </div>
-                </div>
-              </section>
-              {/if}
               <section class="sg-section">
                 <h3 class="sg-section-title">Media</h3>
                 <div class="sg-group">

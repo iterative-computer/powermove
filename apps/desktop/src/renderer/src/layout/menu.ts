@@ -1,4 +1,3 @@
-import { AGENT_FEATURES } from '../panels/agent-features';
 import type { MenuContribution } from '../kernel/api';
 import type { PMRegistry } from '../legacy/registry';
 import {
@@ -26,10 +25,6 @@ export function openPanelMenu(
   }) ?? []) as MenuContribution[] | Promise<MenuContribution[]>;
   const items = (contributed: MenuContribution[]): MenuContribution[] => [
     { header: def.title },
-    ...(spec.id === 'agent' && AGENT_FEATURES.floating ? [{
-      label: 'Use floating agent',
-      run: () => { PM.AgentShell?.setMode?.('floating'); PM.AgentShell?.open?.(); }
-    }] : []),
     ...(canPopoutPanel(spec.id) ? [{
       label: 'Pop out to window',
       icon: 'export',

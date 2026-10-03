@@ -1,7 +1,7 @@
 import { test, expect } from './helpers/app';
 
 test('Sol 6.1 and Astra selections reach the request and Claude selections preserve capabilities', async ({ session }) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   const page = session.page;
   await page.evaluate(() => {
     const PM = (window as any).PM;
@@ -15,13 +15,13 @@ test('Sol 6.1 and Astra selections reach the request and Claude selections prese
   await page.locator('select[aria-label="Model"]').selectOption('gpt-6.1-sol');
   await page.locator('select[aria-label="Reasoning effort"]').selectOption('ultra');
   await page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).fill('Check Sol 6.1 routing');
-  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await page.getByRole('button', { name: 'Send message', exact: true }).click(); await session.openAgent();
   await expect.poll(() => page.evaluate(() => (window as any).__selectedModel)).toEqual({ model: 'gpt-6.1-sol', effort: 'ultra' });
   await expect(page.locator('.agent-msg.assistant')).toContainText('Model routing verified');
   await page.locator('select[aria-label="Model"]').selectOption('gpt-6-astra');
   await page.locator('select[aria-label="Reasoning effort"]').selectOption('max');
   await page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).fill('Check routing');
-  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await page.getByRole('button', { name: 'Send message', exact: true }).click(); await session.openAgent();
   await expect.poll(() => page.evaluate(() => (window as any).__selectedModel)).toEqual({ model: 'gpt-6-astra', effort: 'max' });
   await expect(page.locator('.agent-msg.assistant').last()).toContainText('Model routing verified');
   const claude = await page.evaluate(() => {

@@ -10,7 +10,8 @@ const CHANNEL = {
   animationFailed: 'onboarding:animation-failed',
   logoTarget: 'onboarding:logo-target',
   logoTargetReport: 'onboarding:logo-target-report',
-  begin: 'onboarding:begin'
+  begin: 'onboarding:begin',
+  appearance: 'onboarding:appearance'
 } as const;
 
 const bridge: OnboardingBridge = {
@@ -25,9 +26,10 @@ const bridge: OnboardingBridge = {
     ipcRenderer.on(CHANNEL.logoTarget, listener);
     return () => ipcRenderer.removeListener(CHANNEL.logoTarget, listener);
   },
-  begin: async () => {
-    await ipcRenderer.invoke(CHANNEL.begin);
-  }
+  begin: async (choice) => {
+    await ipcRenderer.invoke(CHANNEL.begin, choice);
+  },
+  appearance: () => ipcRenderer.invoke(CHANNEL.appearance)
 };
 
 contextBridge.exposeInMainWorld('onboarding', bridge);

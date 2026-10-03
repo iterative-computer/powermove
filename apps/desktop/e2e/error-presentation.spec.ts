@@ -19,10 +19,13 @@ test.afterEach(async ({ session }) => {
 test('agent errors and app failures remain readable, inspectable and dismissible', async ({ session }) => {
   const { page } = session;
   await page.setViewportSize({ width: 1440, height: 1000 });
+  await session.openAgent();
   await page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).waitFor();
   await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.theme.apply('dark');
+    // Keep the injected transcript; async model discovery would re-sync it.
+    PM.AgentUI.update = () => {};
     Object.assign(PM.AgentUI.state, {
       phase: 'result', legacyPhase: 'conversation', activity: '', trace: [], panelRun: null,
       conversation: [
@@ -32,18 +35,18 @@ test('agent errors and app failures remain readable, inspectable and dismissible
     });
   });
   const panel = page.locator('#panel-agent');
-  await panel.evaluate(el => (el as HTMLElement).style.setProperty('--set-panel-height', '700px'));
+  await panel.evaluate(el => (el.closest('#agent-popover') as HTMLElement).style.height = '700px');
   for (const width of [240, 320, 480]) {
-    await panel.evaluate((el, width) => { (el.closest('.dock') as HTMLElement).style.flex = `0 0 ${width}px`; }, width);
+    await panel.evaluate((el, width) => { (el.closest('#agent-popover') as HTMLElement).style.width = `${width}px`; }, width);
     const notice = panel.locator('.error-notice');
     await expect(notice.locator('strong')).toHaveText('Agent session couldn’t reopen');
     await expect(notice.locator('pre')).not.toBeVisible();
     await panel.screenshot({ path: `/tmp/powermove-error-${width}.png` });
-    await notice.getByText('Technical details', { exact: true }).click();
+    await notice.getByRole('button', { name: 'Details', exact: true }).click();
     await expect(notice.locator('pre')).toContainText('-32600');
     const overflow = await notice.evaluate(el => el.scrollWidth > el.clientWidth + 1);
     expect(overflow).toBe(false);
-    await notice.getByText('Technical details', { exact: true }).click();
+    await notice.getByRole('button', { name: 'Details', exact: true }).click();
   }
   await page.evaluate(() => {
     const PM = (window as any).PM;
@@ -83,6 +86,7 @@ test('failed asynchronous dialog actions keep the input and allow another attemp
 
 test('sending a message leaves the saved Takes archive untouched and keeps Undo available', async ({ session }) => {
   const { page } = session;
+  await session.openAgent();
   await page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).waitFor();
   await page.evaluate(() => {
     const PM = (window as any).PM;

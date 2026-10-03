@@ -101,7 +101,7 @@ describe('native Powermove agent tool bridge', () => {
 
     const listed = await rpc(child, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     expect(listed.result.tools.map((tool: any) => tool.name)).toEqual([
-      'fork_builtin_extension', 'get_project_state', 'select_layers', 'get_panel_layout', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes', 'validate_effect', 'stage_fork_rebase',
+      'fork_builtin_extension', 'get_project_state', 'select_layers', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes', 'validate_effect', 'stage_fork_rebase',
       'store_search', 'store_extension', 'store_source', 'store_library', 'store_install', 'store_update', 'store_uninstall', 'store_publish_prepare', 'store_publish'
     ]);
 
@@ -143,7 +143,7 @@ describe('native Powermove agent tool bridge', () => {
       params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } } });
     const listed = await rpc(child, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     expect(listed.result.tools.map((tool: any) => tool.name)).toEqual([
-      'fork_builtin_extension', 'validate_effect', 'stage_fork_rebase',
+      'fork_builtin_extension', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'validate_effect', 'stage_fork_rebase',
       'store_search', 'store_extension', 'store_source', 'store_library', 'store_install', 'store_update', 'store_uninstall', 'store_publish_prepare', 'store_publish'
     ]);
     for (const name of ['get_project_state', 'apply_commands']) {

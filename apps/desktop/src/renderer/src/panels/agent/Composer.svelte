@@ -8,8 +8,12 @@
   import SlashMenu from './SlashMenu.svelte';
   import { slashCommands, type SlashCommand } from './slash-commands';
 
-  /* `placeholder` names what an idle draft will change; working copy always wins. */
-  let { PM, panelId, placeholder }: { PM: Record<string, any>; panelId: string; placeholder?: string } = $props();
+  /* `placeholder` names what an idle draft will change; working copy always wins.
+     `onsubmit` and `onescape` run after a send and on Escape; returning true
+     means the host took focus away, so the field neither refocuses nor blurs. */
+  let { PM, panelId, placeholder, onsubmit, onescape }: {
+    PM: Record<string, any>; panelId: string; placeholder?: string; onsubmit?: () => boolean; onescape?: () => boolean;
+  } = $props();
   let textarea = $state<HTMLDivElement>(null!);
   let editor = $state<InlinePrompt>();
   let editorThread: string | undefined;
@@ -96,7 +100,7 @@
     if (showCommands && commands[commandIndex]) { chooseCommand(commands[commandIndex]!); return; }
     if (!draft.trim() && !agentState.attachments.length) return;
     PM.AgentUI?.submit(editor?.requestText() ?? draft);
-    textarea.focus();
+    if (!onsubmit?.()) textarea.focus();
   }
 
   function keydown(event: KeyboardEvent): void {
@@ -120,7 +124,7 @@
     }
     if (event.key === 'Escape') {
       event.preventDefault();
-      textarea.blur();
+      if (!onescape?.()) textarea.blur();
       return;
     }
     if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === 'a') {

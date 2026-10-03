@@ -915,6 +915,12 @@ PM.newProject = () => {
   ] });
   window.setTimeout(() => form.focus(), 30);
 };
+/** A default-format project without the New project dialog. Onboarding opens
+ * one so an imported workspace is arranged around a real composition. */
+PM.newBlankProject = () => {
+  switchProject(PM.mkProject({}));
+  PM.ProjectsScreen?.hide?.();
+};
 /**
  * Tells main which document this window is showing; null while it shows only
  * the placeholder. A refusal means a sibling window owns it and has been
@@ -1002,7 +1008,10 @@ function switchProject(p: any, history?: any, live?: ParkedTab) {
   // Rebuilding the docks remounts every panel; tabs that share a layout skip it.
   if (projectWorkspace) {
     if (JSON.stringify(projectWorkspace) !== JSON.stringify(PM.WS.snapshot())) PM.WS.restoreSnapshot(projectWorkspace);
-  } else PM.WS.activate('design', true);
+  } else {
+    const preferred = PM.store.get('defaultWorkspace', 'design');
+    PM.WS.activate(PM.WS.get(preferred) ? preferred : 'design', true);
+  }
   if (live) PM.hist.resume(live.history);
   else PM.hist.import?.(history ?? session?.history);
   if (!live) persistCurrent(false);

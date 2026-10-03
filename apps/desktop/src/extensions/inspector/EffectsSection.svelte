@@ -12,7 +12,7 @@
   import { inspectorRefresh } from './refresh.svelte.js';
 
   const { api, doc, transport, mixed, edit: inspectorEdit, inspector } = inspectorContext();
-  const { ColorField, Section, ToggleField } = api.ui.controls;
+  const { ColorField, ToggleField } = api.ui.controls;
 
   let { layer }: { layer: any } = $props();
 
@@ -262,18 +262,6 @@
   role="group"
   aria-label="Effects section"
 >
-  <Section {api} title="Effects" />
-  {#if effects.length === 0}
-    <button
-      type="button"
-      class="chip wide"
-      onpointerdown={(event) => {
-        event.preventDefault();
-        showFxMenu(api, event.currentTarget, layer);
-      }}
-    ><Icon name="plus" />Add effect</button>
-  {/if}
-
   {#if effects.length > 0}
   <div class="fx-list" role="listbox" aria-label="Effects" aria-multiselectable="true">
     {#each effects as effect, index (effect.id)}
@@ -371,6 +359,14 @@
     {/each}
   </div>
   {/if}
+  <button
+    type="button"
+    class="chip wide add-effect"
+    onpointerdown={(event) => {
+      event.preventDefault();
+      showFxMenu(api, event.currentTarget, layer);
+    }}
+  ><Icon name="plus" />Add effect</button>
 </div>
 
 <style>
@@ -380,11 +376,8 @@
     gap: 4px;
   }
 
-  /* The heading is wrapped by this component, so the global :first-child
-     reset would otherwise erase the divider between Stroke and Effects. */
-  .effects-section :global(.sec) {
-    margin-top: 8px;
-    border-top: 1px solid var(--section-line);
+  .add-effect {
+    margin-top: 4px;
   }
 
   .fx-head {

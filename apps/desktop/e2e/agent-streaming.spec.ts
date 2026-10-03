@@ -1,7 +1,7 @@
 import { test, expect } from './helpers/app';
 
 test('streamed text stays inline and keeps existing nodes as chunks arrive', async ({ session }) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   const page = session.page;
   await page.evaluate(() => {
     const PM = (window as any).PM;
@@ -21,7 +21,7 @@ test('streamed text stays inline and keeps existing nodes as chunks arrive', asy
     };
   });
   await page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).fill('Stream a reply');
-  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await page.getByRole('button', { name: 'Send message', exact: true }).click(); await session.openAgent();
   await expect.poll(() => page.evaluate(() => typeof (window as any).__streamChunk)).toBe('function');
   await expect(page.locator('.agent-prompt')).toHaveText('Stream a reply');
   await page.evaluate(() => (window as any).__streamChunk('Hello '));

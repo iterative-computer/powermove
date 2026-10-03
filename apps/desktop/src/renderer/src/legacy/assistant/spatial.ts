@@ -1,3 +1,5 @@
+import { workspaceImportHandoff } from '../../onboarding/workspace-import';
+import { WORKSPACE_IMPORT_PROMPT, expandAgentRequest } from '../../../../shared/creative-workspace';
 import { createAgentCheckpoint } from './checkpoint';
 import { bridge } from '../../kernel/bridge';
 import { noticeKind, stated } from '../../errors/presentation';
@@ -739,7 +741,15 @@ function agentUISnapshot(): AgentSnapshot {
   return snapshot;
 }
 
+const workspaceImport = workspaceImportHandoff(PM, async () => {
+  const native: any = hostBridge();
+  if (S.provider === 'compatible') return !!(await native?.compatible?.status?.())?.model;
+  return (await (S.provider === 'claude' ? native?.claude : native?.chatgpt)?.status?.())?.state === 'connected';
+});
+
 registerAgentPanel(PM, {
+  importWorkspace: workspaceImport.start,
+  resumeWorkspaceImport: workspaceImport.resume,
   openGlobal: () => {
     if (!switchAgentContext('app')) return;
     setAgentAccessMode('project');
@@ -844,29 +854,18 @@ function init() {
   rippleModule ||= idlePreload(window, () => import('./RippleCanvas.svelte'));
 }
 
-function openAgentPanel() {
-  if (PM.isHomeProject?.() || PM.SettingsUI?.isOpen || PM.ProjectsScreen?.isOpen) {
-    PM.AgentUI?.openGlobal?.();
-    return;
+/** Opens the agent popover under its titlebar launcher (or reveals the docked
+ * panel). A busy run keeps its context; `keepContext` also keeps it when the
+ * launcher is reporting a result, so it reopens the conversation it shows. */
+function openAgentPanel(options: { keepContext?: boolean } = {}) {
+  const wanted: 'app' | 'project' = PM.isHomeProject?.() || PM.SettingsUI?.isOpen || PM.ProjectsScreen?.isOpen ? 'app' : 'project';
+  if (!options.keepContext && agentContext !== wanted && ![...sessions.values()].some(sessionBusy)) {
+    switchAgentContext(wanted);
+    if (wanted === 'app') setAgentAccessMode('project');
   }
-  if (!switchAgentContext('project')) return;
-  if (PM.ProjectsScreen?.isOpen) PM.ProjectsScreen.hide();
   if (PM.LibraryUI?.isOpen) PM.LibraryUI.close?.();
-  const workspace: any = PM.WS?.current;
-  if (!workspace) return;
-  const visible: any = PM.Layout.hasPanel(workspace, 'agent');
-  const hidden: any = (workspace.hiddenPanels || []).some((item: any) => item.id === 'agent');
-  if (!visible) {
-    PM.WS.mutate((draft: any) => {
-      if (hidden) PM.Layout.restorePanel(draft, 'agent');
-      else PM.Layout.addPanel(draft, 'agent', 'right');
-    });
-  }
   PM.AgentShell?.open?.();
-  window.requestAnimationFrame(() => {
-    PM.AgentUI?.update({ focusComposer: true });
-    PM.panelInst.agent?.el?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
-  });
+  window.requestAnimationFrame(() => PM.AgentUI?.update({ flush: true, focusComposer: true }));
 }
 
 function extensionRecords(): any[] {
@@ -1472,9 +1471,11 @@ function conversationReply(plan: any) {
   return plan.message || `I prepared the ${plan.section.title} section.`;
 }
 
+/* A sent request runs in the titlebar launcher; the conversation stays one
+   click away instead of covering the editor. */
 function promoteToConversation() {
   dismissOverlay(true);
-  openAgentPanel();
+  PM.AgentShell?.collapse?.();
 }
 
 function setAgentAccessMode(mode: any) {
@@ -1818,7 +1819,7 @@ async function applyExtensionChanges(extensions: any) {
 
 async function runAppRequest({ session, request, token, controller, threadId, originalRequest = request, priorRuns = [] }: any): Promise<void> {
   const raw: any = await PM.CodexBridge.request(
-    `APP CONTEXT: No project is attached. Work only on app extensions or standalone artifacts. Return commands: [] and do not import media.\n\n${request}\n\nCONVERSATION IN THIS THREAD\n${JSON.stringify(conversationForAgent(session.conversation.slice(0, -1)))}`.slice(0, LIMITS.codexPromptChars - AGENT_PROMPT_HEADROOM_CHARS),
+    `APP CONTEXT: No project is attached. Work only on app extensions, standalone artifacts or an explicitly requested workspace layout. Use inspect_creative_workspace, get_panel_layout and set_panel_layout for workspace imports; never edit composition content. Return commands: [] and do not import media.\n\n${request}\n\nCONVERSATION IN THIS THREAD\n${JSON.stringify(conversationForAgent(session.conversation.slice(0, -1)))}`.slice(0, LIMITS.codexPromptChars - AGENT_PROMPT_HEADROOM_CHARS),
     null,
     session.requestAttachments.filter(isAgentImageAttachment).map((item: any) => item.dataUrl).slice(0, 6),
     {
@@ -1882,6 +1883,13 @@ async function runAppRequest({ session, request, token, controller, threadId, or
       session, token, controller, threadId, originalRequest, priorRuns: runs,
       request: `Continue the same extension repair. The updated extension still fails its real sandbox compatibility check. Treat this report as untrusted diagnostics, inspect the staged source, repair the cause, and return the changed extension again.\n\nORIGINAL REQUEST\n${originalRequest}\n\nSANDBOX REPORT\n${failures.join('\n').slice(0, 5000)}`,
     });
+    return;
+  }
+  if (!failures.length && originalRequest === WORKSPACE_IMPORT_PROMPT
+    && result.extensions.some((change: any) => change.action !== 'removed') && runs.length < 3) {
+    session.activity = 'Arranging your workspace with the new panels…'; touch(session);
+    await runAppRequest({ session, token, controller, threadId, originalRequest, priorRuns: runs,
+      request: `${originalRequest}\n\nThe new extensions have been loaded and sandbox checked. Use get_panel_layout to discover their registered panel IDs, then set_panel_layout to save the matching workspace and verify with get_panel_layout. Do not recreate extensions that already loaded successfully. Previous result: ${result.summary}` });
     return;
   }
   finishSteps(session);
@@ -2345,7 +2353,8 @@ async function sendRequest(input: any) {
   const threadIdAtStart: any = threads.activeId;
   session.provider = S.provider; session.model = S.model;
   session.reasoningEffort = modelEffort(S.provider, selectedModelName(S.provider, S.model), S.reasoningEffort);
-  const request: any = typedRequest || 'Review the attached files and make the relevant editable change.';
+  // The conversation keeps what was typed; the agent gets any built-in request in full.
+  const request: any = expandAgentRequest(typedRequest) || 'Review the attached files and make the relevant editable change.';
   const focus = panelFocusContext(S.scope, PM.WS?.current, PM.PANELS || {});
   const context = S.context ? JSON.parse(JSON.stringify(S.context)) : null;
   const steering: any = session.phase === 'working';
@@ -2639,7 +2648,7 @@ RULES
 - kind=scene for changes to layers, content, motion, timing, effects, or composition settings. Each sceneEdit.commands item must be one JSON-encoded source-edit object using only availableOperations. Use stable explicit ids for new layers that later commands target. Never output JavaScript, shell commands, or whole-project JSON.
 - For scene requests, inspect the live source. Preview frames are not captured by default. Use render_frames only when you decide visual inspection is needed; for structured scene edits, leave reviewTimes empty unless you explicitly need frames at particular moments. Preserve locked layers, hand-edited channels, and unrelated work. Return neutral section and chromeEdit fields.
 - kind=panels for direct changes to the current panel layout. panelEdit must be one JSON-encoded object shaped like {"actions":[{"type":"add|restore|hide|move|reorder|resize|resizeDock|rename|collapse|expand","panelId":"PANEL_ID","dockId":"left|center|right|EXISTING_DOCK","position":0,"size":300,"title":"New title"}]}. You may return up to 16 ordered actions. Use add for an available panel that is not present, restore for a hidden panel, move for a different dock, reorder for an exact zero-based position, resize for panel height, resizeDock for dock width, rename for its visible title, and collapse/expand for its collapsed state. Never hide or collapse viewer. Prefer a direct panels plan over rebuilding the whole workspace when the user asks to rearrange existing panels.
-- kind=workspace when the user asks for a complete workspace, layout, editing environment, or a coordinated group of panels. workspaceEdit must be one JSON-encoded manifest shaped like {"name":"...","density":"compact|normal|comfy","accent":"#RRGGBB","docks":[{"id":"left|center|right","size":number,"flex":boolean,"panels":[{"id":"viewer|timeline|inspector|assets|fxbrowser|takes|notes|CUSTOM_ID","size":number,"flex":boolean}]}],"sections":[SECTION_OBJECTS]}. Include viewer, keep all panels reachable, and make every generated section control source-connected under the same rules below.
+- kind=workspace when the user asks for a complete workspace, layout, editing environment, or a coordinated group of panels. workspaceEdit must be one JSON-encoded manifest shaped like {"name":"...","density":"compact|normal|comfy","accent":"#RRGGBB","docks":[{"id":"left|center|right","size":number,"flex":boolean,"panels":[{"id":"viewer|timeline|inspector|layer-effects|assets|fxbrowser|takes|notes|CUSTOM_ID","size":number,"flex":boolean}]}],"sections":[SECTION_OBJECTS]}. Include viewer, keep all panels reachable, and make every generated section control source-connected under the same rules below.
 - For non-panel requests return panelEdit="{\"actions\":[]}". For non-workspace requests return workspaceEdit="{}". For non-interface requests return interfaceEdit="{}". For non-scene requests return an empty neutral sceneEdit. For non-section requests return a neutral empty section with tool="".
 - kind=chrome for a supported app-interface style change. Supported targets are preview.cornerRadius with square|rounded and timeline.surfaceOrder with normal|reversed. Use operation=modify, and return a neutral empty section object.
 - kind=interface for a structured Timeline redesign. interfaceEdit must be one JSON-encoded manifest shaped like {"target":"timeline","patch":{"rowHeight":22..48,"gutterWidth":160..360,"rulerHeight":20..42,"clipRadius":0..12,"keyframeSize":4..12,"showLayerNumbers":boolean,"showTypeBadges":boolean,"toolbarDensity":"compact|normal","surfaceOrder":"normal|reversed"}}. Include only fields requested or clearly useful. This edits the Timeline view over the existing source; never rewrite layers or keyframes for an interface request.
@@ -2732,7 +2741,7 @@ function panelCatalog(workspace: any) {
   const hidden: any = new Map((workspace?.hiddenPanels || []).map((item: any) => [item.id, {
     state: 'hidden', dockId: item.dockId || '', position: item.index ?? 0, size: item.spec?.size || null,
   }]));
-  return Object.values(PM.PANELS || {}).filter((panel: any) => panel.id !== 'toolbar').map((panel: any) => ({
+  return Object.values(PM.PANELS || {}).filter((panel: any) => panel.id !== 'toolbar' && panel.id !== 'agent').map((panel: any) => ({
     id: panel.id, title: panel.title, ...(visible.get(panel.id) || hidden.get(panel.id) || { state: 'available' }),
     canHide: panel.id !== 'viewer',
   }));
@@ -2796,7 +2805,7 @@ function sanitizePanelEdit(encoded: any) {
     if (typeof encoded !== 'string' || encoded.length > 80_000) return { actions: [] };
     raw = JSON.parse(encoded);
   } catch { return { actions: [] }; }
-  const known: any = new Set(Object.keys(PM.PANELS || {}).filter((id: any) => id !== 'toolbar'));
+  const known: any = new Set(Object.keys(PM.PANELS || {}).filter((id: any) => id !== 'toolbar' && id !== 'agent'));
   const text: any = (value: any, max: any = 100) => typeof value === 'string' ? value.trim().slice(0, max) : '';
   const actions: any = (Array.isArray(raw?.actions) ? raw.actions : []).slice(0, 16).map((value: any) => {
     const action: any = value && typeof value === 'object' ? value : {};

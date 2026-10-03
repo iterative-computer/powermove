@@ -4,7 +4,7 @@ import { expect, test, repoRoot } from './helpers/app';
 test.use({ desktopLaunchOptions: { env: { CODEX_BINARY: path.join(repoRoot, 'src/main/codex/__fixtures__/fake-codex-app-server.sh') } } });
 
 test('sending messages preserves the paused playhead without capturing preview frames', async ({ session }) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   const { page } = session;
   await page.evaluate(() => {
     const PM = (window as any).PM;
@@ -30,6 +30,7 @@ test('sending messages preserves the paused playhead without capturing preview f
       await composer.fill('Hello');
       if (method === 'click') await page.getByRole('button', { name: 'Send message', exact: true }).click();
       else await composer.press('Enter');
+      await session.openAgent();
       await expect.poll(() => page.evaluate(() => (window as any).PM.AgentUI.state.legacyPhase)).toBe(access === 'editor' ? 'conversation' : 'result');
       expect(await page.evaluate(() => ({ time: (window as any).PM.time, playing: (window as any).PM.playing, events: (window as any).__sendTimes }))).toEqual({ time: 1.5, playing: false, events: [] });
       expect(await page.evaluate(() => (window as any).__agentCaptures)).toBe(0);
@@ -40,7 +41,7 @@ test('sending messages preserves the paused playhead without capturing preview f
 });
 
 test('thinking remains visible when steering falls back and another message is sent', async ({ session }) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   const { page } = session;
   await page.evaluate(() => {
     const PM = (window as any).PM;
@@ -53,17 +54,18 @@ test('thinking remains visible when steering falls back and another message is s
   });
   const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
   await composer.fill('Inspect the composition');
-  await composer.press('Enter');
+  await composer.press('Enter'); await session.openAgent();
   await expect.poll(() => page.evaluate(() => (window as any).__traceRuns.length)).toBe(1);
   await page.evaluate(() => (window as any).__traceRuns[0].options.onTrace({ kind: 'thought', text: 'Inspecting the composition' }));
   await composer.fill('Focus on timing');
-  await composer.press('Enter');
+  await composer.press('Enter'); await session.openAgent();
   await page.waitForFunction(() => typeof (window as any).__finishSteer === 'function');
   await page.evaluate(() => {
     (window as any).__traceRuns[0].options.onTrace({ kind: 'thought', text: 'Checking the timing' });
     (window as any).__finishSteer(false);
   });
   await expect.poll(() => page.evaluate(() => (window as any).__traceRuns.length)).toBe(2);
+  await session.openAgent();
   const archived = page.locator('.agent-trace.is-archived');
   await expect(archived).toHaveCount(2);
   await expect(archived.nth(0)).toContainText('Inspecting the composition');
@@ -73,7 +75,7 @@ test('thinking remains visible when steering falls back and another message is s
   // A provider can deliver a final reasoning fragment after its result.
   await page.evaluate(() => (window as any).__traceRuns[1].options.onTrace({ kind: 'thought', text: 'Finished checking' }));
   await composer.fill('Continue');
-  await composer.press('Enter');
+  await composer.press('Enter'); await session.openAgent();
   await expect.poll(() => page.evaluate(() => (window as any).__traceRuns.length)).toBe(3);
   await expect(archived).toHaveCount(3);
   await expect(archived.nth(2)).toContainText('Finished checking');

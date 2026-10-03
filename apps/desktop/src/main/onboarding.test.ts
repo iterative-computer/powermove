@@ -115,6 +115,112 @@ async function settle(): Promise<void> {
 }
 
 describe('first-run onboarding', () => {
+  it('hands off an opted-in After Effects import before saving the choice', async () => {
+    const userData = await temporaryDirectory();
+    const { ipc, listeners, handlers } = fakeIpc();
+    const editor = {} as Electron.BrowserWindow;
+    let finishImport!: () => void;
+    const importWorkspace = vi.fn(() => new Promise<void>(resolve => { finishImport = resolve; }));
+    const flow = new OnboardingFlow(ipc as never, {
+      appOrigin: 'app://powermove', displayBounds: () => ({ x: 0, y: 0, width: 1920, height: 1080 }),
+      backgroundTest: true, userData, createEditor: () => editor, importWorkspace, secure: vi.fn()
+    });
+    const animation = flow.start() as unknown as InstanceType<typeof electronMocks.FakeBrowserWindow>;
+    await listeners.get(IPC.onboardingAnimationComplete)!({ sender: animation.webContents, senderFrame: animation.webContents.mainFrame });
+    await settle();
+    const welcome = electronMocks.FakeBrowserWindow.windows[1]!;
+    const event = { sender: welcome.webContents, senderFrame: welcome.webContents.mainFrame };
+    const begin = handlers.get(IPC.onboardingBegin)!;
+    await expect(begin(event, { workspaceImport: 'unsupported' })).rejects.toThrow('not supported');
+    expect(importWorkspace).not.toHaveBeenCalled();
+    const opening = begin(event, { workspaceImport: 'after-effects' });
+    await vi.waitFor(() => expect(importWorkspace).toHaveBeenCalledExactlyOnceWith(editor, 'after-effects'));
+    await begin(event, { workspaceImport: 'after-effects' });
+    expect(importWorkspace).toHaveBeenCalledOnce();
+    await expect(onboardingCompleted(userData)).resolves.toBe(false);
+    finishImport(); await opening;
+    expect(JSON.parse(await readFile(path.join(userData, 'onboarding-v1.json'), 'utf8'))).toEqual({ version: 1, workspaceImport: 'after-effects', timelineMode: 'layers', agent: null });
+    expect(welcome.destroyed).toBe(true);
+  });
+
+  it('keeps onboarding retryable after a failed handoff and allows starting fresh', async () => {
+    const userData = await temporaryDirectory();
+    const { ipc, listeners, handlers } = fakeIpc();
+    const importWorkspace = vi.fn(async () => { throw new Error('Agent not ready'); });
+    const flow = new OnboardingFlow(ipc as never, {
+      appOrigin: 'app://powermove', displayBounds: () => ({ x: 0, y: 0, width: 1920, height: 1080 }),
+      backgroundTest: true, userData, createEditor: () => ({}) as Electron.BrowserWindow, importWorkspace, secure: vi.fn()
+    });
+    const animation = flow.start() as unknown as InstanceType<typeof electronMocks.FakeBrowserWindow>;
+    await listeners.get(IPC.onboardingAnimationComplete)!({ sender: animation.webContents, senderFrame: animation.webContents.mainFrame });
+    await settle();
+    const welcome = electronMocks.FakeBrowserWindow.windows[1]!;
+    const event = { sender: welcome.webContents, senderFrame: welcome.webContents.mainFrame };
+    await expect(handlers.get(IPC.onboardingAppearance)!({ ...event, senderFrame: {} })).rejects.toThrow('Unauthorized');
+    await expect(handlers.get(IPC.onboardingAppearance)!(event)).resolves.toBe('dark');
+    const begin = handlers.get(IPC.onboardingBegin)!;
+    await expect(begin(event, { workspaceImport: 'after-effects' })).rejects.toThrow('Agent not ready');
+    expect(welcome.destroyed).toBe(false);
+    await expect(onboardingCompleted(userData)).resolves.toBe(false);
+    await begin(event, { workspaceImport: null });
+    expect(importWorkspace).toHaveBeenCalledOnce();
+    expect(welcome.destroyed).toBe(true);
+    expect(JSON.parse(await readFile(path.join(userData, 'onboarding-v1.json'), 'utf8'))).toEqual({ version: 1, workspaceImport: null, timelineMode: 'layers', agent: null });
+  });
+
+  it('applies the chosen timeline style to the new editor and never blocks on it', async () => {
+    const userData = await temporaryDirectory();
+    const { ipc, listeners, handlers } = fakeIpc();
+    const editor = {} as Electron.BrowserWindow;
+    const applyTimelineMode = vi.fn(async () => { throw new Error('Editor still loading'); });
+    const importWorkspace = vi.fn(async () => undefined);
+    const flow = new OnboardingFlow(ipc as never, {
+      appOrigin: 'app://powermove', displayBounds: () => ({ x: 0, y: 0, width: 1920, height: 1080 }),
+      backgroundTest: true, userData, createEditor: () => editor, importWorkspace, applyTimelineMode, secure: vi.fn()
+    });
+    const animation = flow.start() as unknown as InstanceType<typeof electronMocks.FakeBrowserWindow>;
+    await listeners.get(IPC.onboardingAnimationComplete)!({ sender: animation.webContents, senderFrame: animation.webContents.mainFrame });
+    await settle();
+    const welcome = electronMocks.FakeBrowserWindow.windows[1]!;
+    const event = { sender: welcome.webContents, senderFrame: welcome.webContents.mainFrame };
+    const begin = handlers.get(IPC.onboardingBegin)!;
+    await expect(begin(event, { workspaceImport: null, timelineMode: 'storyboard' })).rejects.toThrow('timeline style');
+    expect(applyTimelineMode).not.toHaveBeenCalled();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await begin(event, { workspaceImport: 'after-effects', timelineMode: 'tracks' });
+    error.mockRestore();
+    expect(applyTimelineMode).toHaveBeenCalledExactlyOnceWith(editor, 'tracks');
+    expect(importWorkspace).toHaveBeenCalledOnce();
+    expect(welcome.destroyed).toBe(true);
+    expect(JSON.parse(await readFile(path.join(userData, 'onboarding-v1.json'), 'utf8'))).toEqual({ version: 1, workspaceImport: 'after-effects', timelineMode: 'tracks', agent: null });
+  });
+
+  it('applies the chosen agent before the import runs on it', async () => {
+    const userData = await temporaryDirectory();
+    const { ipc, listeners, handlers } = fakeIpc();
+    const editor = {} as Electron.BrowserWindow;
+    const order: string[] = [];
+    const applyAgent = vi.fn(async () => { order.push('agent'); });
+    const importWorkspace = vi.fn(async () => { order.push('import'); });
+    const flow = new OnboardingFlow(ipc as never, {
+      appOrigin: 'app://powermove', displayBounds: () => ({ x: 0, y: 0, width: 1920, height: 1080 }),
+      backgroundTest: true, userData, createEditor: () => editor, importWorkspace, applyAgent, secure: vi.fn()
+    });
+    const animation = flow.start() as unknown as InstanceType<typeof electronMocks.FakeBrowserWindow>;
+    await listeners.get(IPC.onboardingAnimationComplete)!({ sender: animation.webContents, senderFrame: animation.webContents.mainFrame });
+    await settle();
+    const welcome = electronMocks.FakeBrowserWindow.windows[1]!;
+    const event = { sender: welcome.webContents, senderFrame: welcome.webContents.mainFrame };
+    const begin = handlers.get(IPC.onboardingBegin)!;
+    await expect(begin(event, { workspaceImport: null, agent: { provider: 'gemini', model: 'x' } })).rejects.toThrow('agent and model');
+    await expect(begin(event, { workspaceImport: null, agent: { provider: 'claude', model: 'bad model; rm' } })).rejects.toThrow('agent and model');
+    const agent = { provider: 'claude', model: 'claude-opus-5-5' };
+    await begin(event, { workspaceImport: 'after-effects', agent });
+    expect(applyAgent).toHaveBeenCalledExactlyOnceWith(editor, agent);
+    expect(order).toEqual(['agent', 'import']);
+    expect(JSON.parse(await readFile(path.join(userData, 'onboarding-v1.json'), 'utf8'))).toEqual({ version: 1, workspaceImport: 'after-effects', timelineMode: 'layers', agent });
+  });
+
   it('skips background runs unless explicitly enabled and skips every completed profile', () => {
     expect(onboardingEnabled({}, false, false)).toBe(true);
     expect(onboardingEnabled({}, true, false)).toBe(false);
@@ -146,7 +252,7 @@ describe('first-run onboarding', () => {
     expect(ONBOARDING_ANIMATION_SECONDS).toBeCloseTo(9.766666666666667, 12);
   });
 
-  it('moves from animation to welcome, rejects subframe Begin, then persists before creating the editor', async () => {
+  it('moves from animation to welcome, rejects subframe Begin, then persists after the editor is ready', async () => {
     const userData = await temporaryDirectory();
     const { ipc, listeners, handlers } = fakeIpc();
     let ready!: (window: Electron.BrowserWindow) => void;
@@ -177,6 +283,7 @@ describe('first-run onboarding', () => {
     await vi.waitFor(() => expect(createEditor).toHaveBeenCalledOnce());
     expect(welcome.destroyed).toBe(false);
     expect(flow.isFirstRunPending()).toBe(true);
+    await expect(onboardingCompleted(userData)).resolves.toBe(false);
     ready({} as Electron.BrowserWindow);
     await opening;
     expect(createEditor).toHaveBeenCalledOnce();

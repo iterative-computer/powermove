@@ -9,6 +9,7 @@ import { graphAxisColor, graphValueTicks, graphKeyShape, graphPlotTop } from './
 import { adjacentKeyframe } from './keyframe-navigation';
 import { draggedPropertyValue, propertyMetadata } from './property-values';
 import { element, iconNode, normalizeTimelineChrome, selectedLayers } from './api-helpers';
+import { createTrackView, normalizeTimelineMode, TIMELINE_MODES, TRACK_GUTTER, type TimelineMode } from './track-view';
 /* Ported from js/ui/timeline.js — behavior-preserving. */
 import { expandScaleKeyIds, keyMembers, timelineProperties, trackChannels, trackSelected } from './property-tracks';
 import {
@@ -567,6 +568,12 @@ if (sessionTimeline) {
   T.graph = !!sessionTimeline.graph;
   T.graphCombined = !!sessionTimeline.graphCombined;
 }
+/* Layer (After Effects) vs track (Premiere) presentation is a personal working
+   style, so it follows the user across projects rather than the session. */
+T.mode = normalizeTimelineMode(previous?.mode ?? api.storage.get('mode'));
+T.trackSnap = previous?.trackSnap ?? api.storage.get('trackSnap') !== false;
+T.trackDrag = null; T.trackDrop = null; T.trackHover = null;
+const tracksMode = () => T.mode === 'tracks';
 runtimes.set(api, T);
 mountedRuntime = T;
 T.keySelectionActive = !!(T.keySelectionActive || api.selection.keys().length);
@@ -671,6 +678,12 @@ const SNAP_ACQUIRE_PX = 10;
 const SNAP_RELEASE_PX = 15;
 function shiftSnapping(event?: any) {
   return shiftHeld || !!event?.shiftKey || !!event?.getModifierState?.('Shift');
+}
+/* Strip moves and trims snap with Shift in the layer timeline. The track
+   timeline follows Premiere instead: its magnet toggle snaps by default and
+   Shift inverts it for one gesture. */
+function edgeSnapping(event?: any) {
+  return tracksMode() ? T.trackSnap !== false ? !shiftSnapping(event) : shiftSnapping(event) : shiftSnapping(event);
 }
 function beginDrag(event: any, options: any) {
   let control: any;
@@ -787,12 +800,25 @@ function buildHead(head: any) {
       T.graphViewBounds = null; invalidate('timeline');
     } },
   ]), 'Graph options');
+  const snap = btn('magnet', () => {
+    T.trackSnap = !T.trackSnap;
+    api.storage.set('trackSnap', T.trackSnap);
+    syncGraphControls();
+  }, 'Snap clips to edges, markers and the playhead (hold Shift to invert)');
+  snap.classList.add('tl-snap');
   let graphShown: string | undefined;
   syncGraphControls = () => {
-    const shown = Boolean(T.graph);
-    const mode = shown ? (T.graphCombined ? 'both' : 'graph') : 'dope';
+    syncModeControls();
+    const tracks = tracksMode();
+    const shown = Boolean(T.graph) && !tracks;
+    const mode = tracks ? `tracks:${T.trackSnap !== false}` : shown ? (T.graphCombined ? 'both' : 'graph') : 'dope';
     if (graphShown === mode) return;
     graphShown = mode;
+    /* The track timeline has no property rows, so it trades the dope-sheet /
+       graph switch for Premiere's snapping magnet. */
+    for (const node of [dope, both, graph]) { node.hidden = tracks; node.style.display = tracks ? 'none' : ''; }
+    snap.hidden = !tracks; snap.style.display = tracks ? '' : 'none';
+    snap.classList.toggle('on', T.trackSnap !== false); snap.setAttribute('aria-pressed', String(T.trackSnap !== false));
     graph.classList.toggle('on', mode === 'graph');
     for (const [button, active] of [[dope, mode === 'dope'], [both, mode === 'both']] as const) {
       button.classList.toggle('on', active); button.setAttribute('aria-pressed', String(active));
@@ -801,7 +827,7 @@ function buildHead(head: any) {
     graphOptions.hidden = !shown;
     graphOptions.style.display = shown ? '' : 'none';
   };
-  const graphSlot = h('div.tl-group.tl-graph-slot', graphOptions, dope, both, graph);
+  const graphSlot = h('div.tl-group.tl-graph-slot', graphOptions, dope, both, graph, snap);
   const transport = h('div.tl-group.tl-transport',
     playBtn,
     time,
@@ -863,6 +889,46 @@ function buildHead(head: any) {
     beginDrag(e, { cursor: 'ew-resize', move: (dx: any) => api.transport.setTime(startTime + dx / 12 / api.project.get().fps) });
   }, undefined, headCleanups);
 }
+
+let modeButtons: Array<[TimelineMode, HTMLElement]> = [];
+function syncModeControls() {
+  for (const [mode, button] of modeButtons) {
+    const on = T.mode === mode;
+    if (button.getAttribute('aria-checked') === String(on)) continue;
+    button.classList.toggle('on', on); button.setAttribute('aria-checked', String(on));
+  }
+  const panel = (attachedWrap ?? document.querySelector('#tl-canvas-wrap'))?.closest?.('.panel') as HTMLElement | null;
+  if (panel && panel.dataset.timelineMode !== T.mode) panel.dataset.timelineMode = T.mode;
+}
+function setMode(next: unknown) {
+  const mode = normalizeTimelineMode(next);
+  if (T.mode === mode) return;
+  T.mode = mode;
+  api.storage.set('mode', mode);
+  /* The two views have unrelated row geometry; keep only the time viewport. */
+  T.scrollY = 0;
+  T.trackDrag = null; T.trackDrop = null; T.trackHover = null; T.reorder = null; T.drop = null; T.dropRow = null;
+  rowsDirty = true;
+  syncGraphControls();
+  invalidate('timeline');
+}
+T.setMode = setMode;
+let modeCleanups: Array<() => void> = [];
+runtimeCleanups.push(() => runCleanups(modeCleanups));
+T.attachModeSwitch = (host: HTMLElement) => {
+  runCleanups(modeCleanups);
+  host.id = 'tl-mode';
+  host.setAttribute('role', 'radiogroup');
+  host.setAttribute('aria-label', 'Timeline mode');
+  modeButtons = TIMELINE_MODES.map(mode => {
+    const button = h('button.tl-mode-button', { type: 'button', role: 'radio', title: mode.title, 'data-mode': mode.id },
+      iconNode(api, mode.icon), h('span', {}, mode.label));
+    listen(button, 'click', () => setMode(mode.id), undefined, modeCleanups);
+    return [mode.id, button] as [TimelineMode, HTMLElement];
+  });
+  host.replaceChildren(...modeButtons.map(([, button]) => button));
+  syncModeControls();
+};
 
 function refreshTimelineManifest() {
   syncGraphControls();
@@ -1069,6 +1135,21 @@ function refreshInk() {
 }
 refreshInk();
 
+const trackView = createTrackView({
+  api, T, t2x, x2t,
+  theme: () => theme, ink: INK,
+  drawClip: (c, L, y, height) => drawClip(c, L, y, height),
+  clipPalette: (L) => clipPalette(L) as any,
+  roundRect, clipText, rgba,
+  fui: () => fui(), fmono: () => fmono(), niceStep,
+  icoEye, icoLock, icoSpeaker,
+  visible: (L) => !!evaluatedValue(L, L.on, api.transport.time(), 'l.on'),
+  beginDrag, invalidate, edgeSnapping,
+  layerEdgeSnapper: (ids) => layerEdgeSnapper(ids),
+  trim: (e, side) => trim(e, side),
+});
+T.trackView = trackView;
+
 function draw() {
   try { drawInner(); } catch (e: any) { console.error('[timeline draw]', e, e.stack); }
 }
@@ -1087,14 +1168,14 @@ function animatedTimelineFlag(value: any): boolean {
 function timelineBackdropKey(): unknown[] | null {
   // Graph curves and active drag adornments keep their full drawing path.
   // One bounded viewport bitmap is sufficient; no frame history is retained.
-  if (T.graph || T.drop || T.reorder || T.marquee || T.quickOffset || !api.uiState.timelineVersion
+  if (T.graph || T.drop || T.reorder || T.marquee || T.quickOffset || T.trackDrag || T.trackDrop || !api.uiState.timelineVersion
       || T.cv.width * T.cv.height * 4 > 32 * 1024 * 1024) return null;
   const p = api.project.get();
   const key: unknown[] = [T.cv, T.ctx, T.cv.width, T.cv.height, T.w, T.hgt, T.dpr,
     T.rows, T.gut, T.row, T.ruler, T.pps, T.scrollT, T.scrollY, T.hoverRow, T.dropRow,
     T.style.clipRadius, T.style.keyframeSize, T.style.showLayerNumbers, T.style.showTypeBadges,
     theme, p, p.dur, p.fps, p.work?.[0], p.work?.[1], api.project.revision(),
-    api.anim.version(), api.uiState.timelineVersion()];
+    api.anim.version(), api.uiState.timelineVersion(), T.mode, T.trackHover?.area, T.trackHover?.lane];
   const [first, end] = visibleRowRange();
   for (let i = first; i < end; i++) {
     const row = T.rows[i];
@@ -1170,15 +1251,18 @@ function drawInner(preview?: TimelinePreviewTarget) {
   }
   const labelWidth = propertyLabelWidth;
   T.propertyValueX = 100 + labelWidth + 12;
-  T.gut = Math.max(T.gut, T.propertyValueX + 90);
+  /* Track headers carry no property columns; they keep a fixed, narrower width. */
+  T.gut = tracksMode() && !preview ? TRACK_GUTTER : Math.max(T.gut, T.propertyValueX + 90);
   if (preview) {
     T.scrollT = 0;
     T.scrollY = 0;
     T.pps = Math.max(.01, (W - T.gut - 16) / Math.max(.5, Number(api.project.get().dur) || .5));
   } else syncHeadGeometry();
 
-  const rowBottom = T.graph && T.graphCombined ? graphTop() : H;
-  const maxScroll = Math.max(0, T.rows.length * T.row - (rowBottom - T.ruler));
+  const tracks = tracksMode() && !preview;
+  const rowBottom = T.graph && T.graphCombined && !tracks ? graphTop() : H;
+  const contentHeight = tracks ? trackView.contentHeight() : T.rows.length * T.row;
+  const maxScroll = Math.max(0, contentHeight - (rowBottom - T.ruler));
   T.scrollY = clamp(T.scrollY, 0, maxScroll);
 
   /* Keep the playhead visible by advancing a page at the edge. Pinning it to
@@ -1200,7 +1284,7 @@ function drawInner(preview?: TimelinePreviewTarget) {
     // dimensions; scaling to W/H would soften the entire cached timeline.
     c.drawImage(backdrop, 0, 0, backdrop.width / T.dpr, backdrop.height / T.dpr);
     // Only property readouts and animated gutter indicators follow time.
-    if (drawGutter(c, W, H, true)) {
+    if (!tracks && drawGutter(c, W, H, true)) {
       // Retain the latest readouts too. Otherwise restoring the backdrop on
       // the next tick would replace unchanged values with their initial text.
       const context = backdrop.getContext('2d');
@@ -1214,8 +1298,10 @@ function drawInner(preview?: TimelinePreviewTarget) {
     }
   } else {
     c.fillStyle = theme.panel; c.fillRect(0, 0, W, H);
-    drawTracksBg(c, W, H);
-    if (T.graph) {
+    if (tracks) trackView.draw(c, W, H);
+    else drawTracksBg(c, W, H);
+    if (tracks) { /* the track view draws its own lanes, clips and headers */ }
+    else if (T.graph) {
       if (T.graphCombined) {
         c.save(); c.beginPath(); c.rect(T.gut, T.ruler, W - T.gut, graphTop() - T.ruler); c.clip();
         drawClips(c, W, graphTop()); c.restore();
@@ -1223,8 +1309,8 @@ function drawInner(preview?: TimelinePreviewTarget) {
       drawGraph(c, W, H);
     }
     else { drawClips(c, W, H); drawDropGhost(c, W, H); }
-    drawGutter(c, W, H);
-    if (T.graph) drawGraphReadout(c, W, H);
+    if (!tracks) drawGutter(c, W, H);
+    if (T.graph && !tracks) drawGraphReadout(c, W, H);
     if (T.reorder) {
       const d = T.reorder, y = rowY(d.row), left = 74 + Math.min(48, d.depth * 12);
       c.save(); c.beginPath(); c.rect(0, T.ruler, W, H - T.ruler); c.clip();
@@ -1254,7 +1340,7 @@ function drawInner(preview?: TimelinePreviewTarget) {
     else delete T.cv.dataset.snapTarget;
   }
   drawQuickOffset(c, W, H);
-  drawScrollThumb(c, W, rowBottom, maxScroll);
+  drawScrollThumb(c, W, rowBottom, maxScroll, contentHeight);
   if ((window as any).__tlDebug) {
     const px = t2x(api.transport.time());
     const msg = '[tl] t=' + api.transport.time().toFixed(3) + ' px=' + (isFinite(px) ? px.toFixed(1) : String(px)) + ' gut=' + T.gut + ' W=' + W + ' sT=' + T.scrollT.toFixed(3) + ' pps=' + T.pps + ' rows=' + T.rows.length + ' graph=' + T.graph;
@@ -1286,7 +1372,7 @@ T.renderPreview = (canvas: HTMLCanvasElement, width: number, height: number) => 
   const saved = {
     cv: T.cv, ctx: T.ctx, w: T.w, hgt: T.hgt, dpr: T.dpr,
     gut: T.gut, row: T.row, ruler: T.ruler, pps: T.pps,
-    scrollT: T.scrollT, scrollY: T.scrollY, graph: T.graph,
+    scrollT: T.scrollT, scrollY: T.scrollY, graph: T.graph, mode: T.mode,
     style: T.style, rows: T.rows, propertyValueX: T.propertyValueX,
     hover: T.hover, marquee: T.marquee, dropRow: T.dropRow, drop: T.drop, reorder: T.reorder,
     quickOffset: T.quickOffset,
@@ -1296,6 +1382,7 @@ T.renderPreview = (canvas: HTMLCanvasElement, width: number, height: number) => 
     T.row = 30;
     T.ruler = 28;
     T.graph = false;
+    T.mode = 'layers';
     T.hover = null;
     T.marquee = null;
     T.dropRow = null;
@@ -1315,10 +1402,9 @@ T.renderPreview = (canvas: HTMLCanvasElement, width: number, height: number) => 
 };
 
 /* Thin scrollbar on the right edge of the track area when rows overflow. */
-function drawScrollThumb(c: any, W: any, H: any, maxScroll: any) {
+function drawScrollThumb(c: any, W: any, H: any, maxScroll: any, total: number) {
   if (maxScroll <= 0) return;
   const trackH = H - T.ruler;
-  const total = T.rows.length * T.row;
   const th = Math.max(18, trackH * trackH / total);
   const ty = T.ruler + (trackH - th) * (T.scrollY / maxScroll);
   c.fillStyle = INK.thumb;
@@ -1579,11 +1665,11 @@ function clipPalette(L: any) {
   };
 }
 
-function drawClip(c: any, L: any, y: any) {
+function drawClip(c: any, L: any, y: any, rowHeight = T.row) {
   const x0 = t2x(L.from), x1 = t2x(L.from + L.dur);
   if (x1 < T.gut || x0 > T.w) return;
   /* Clips fill their row with a 1px breath between neighbours. */
-  const hh = T.row - 2;
+  const hh = rowHeight - 2;
   const yy = y + 1;
   const sel = api.selection.layers().includes(L.id);
   const r = Math.min(4, T.style.clipRadius);
@@ -2409,7 +2495,10 @@ function hitRow(y: any) {
 function bind(cv: any, wrap: any) {
   listen(cv, 'pointerdown', onDown, undefined, canvasCleanups);
   listen(cv, 'pointermove', onMove, undefined, canvasCleanups);
-  listen(cv, 'pointerleave', () => setHoverRow(null), undefined, canvasCleanups);
+  listen(cv, 'pointerleave', () => {
+    setHoverRow(null);
+    if (T.trackHover && !T.trackDrag) { T.trackHover = null; invalidate('timeline'); }
+  }, undefined, canvasCleanups);
   listen(cv, 'dblclick', onDbl, undefined, canvasCleanups);
   listen(cv, 'contextmenu', onCtx, undefined, canvasCleanups);
   /* FX browser drops. Non-fx drags (OS files) fall through to the window
@@ -2419,7 +2508,11 @@ function bind(cv: any, wrap: any) {
     T.dropRow = index;
     invalidate('timeline');
   };
-  const dropLayerAt = (y: number) => {
+  const dropLayerAt = (y: number, x = T.gut + 1) => {
+    if (tracksMode()) {
+      const layer = trackView.layerAt(x, y);
+      return layer ? { layer, index: -1 } : null;
+    }
     const hr = hitRow(y);
     return hr?.row?.L ? { layer: hr.row.L, index: hr.i } : null;
   };
@@ -2469,8 +2562,8 @@ function bind(cv: any, wrap: any) {
     const dt = e.dataTransfer;
     if (api.dnd.hasFxDrag(dt)) {
       e.preventDefault(); dt.dropEffect = 'copy';
-      const hit = e.offsetX > T.gut ? dropLayerAt(e.offsetY) : null;
-      setDropRow(hit ? hit.index : null);
+      const hit = e.offsetX > T.gut ? dropLayerAt(e.offsetY, e.offsetX) : null;
+      setDropRow(hit && !tracksMode() ? hit.index : null);
       return;
     }
     if (!api.dnd.hasMediaDrag(dt)) return;
@@ -2478,18 +2571,25 @@ function bind(cv: any, wrap: any) {
     /* Payload data is unreadable during dragover; the drag source parks a
        description on api so the ghost can carry its name, kind and length. */
     const src = api.dnd.mediaDrag || { name: 'Media', kind: 'file', dur: undefined };
+    if (tracksMode()) {
+      trackView.setDrop({ ...trackView.dropTarget(e.offsetX, e.offsetY, src.kind), name: src.name, kind: src.kind, dur: src.dur });
+      return;
+    }
     setMediaDrop({ ...mediaDropAt(e), name: src.name, kind: src.kind, dur: src.dur });
   }, undefined, canvasCleanups);
-  listen(cv, 'dragleave', () => { setDropRow(null); setMediaDrop(null); }, undefined, canvasCleanups);
+  listen(cv, 'dragleave', () => { setDropRow(null); setMediaDrop(null); trackView.setDrop(null); }, undefined, canvasCleanups);
   listen(cv, 'drop', (e: any) => {
     const dt = e.dataTransfer;
     const fx = api.dnd.readFxDrag(dt);
     /* resolve while the slot is still open so the drop lands where the ghost showed */
-    const placement = mediaDropAt(e);
-    setDropRow(null); setMediaDrop(null);
+    /* The track view always adds new media on top of the stack, then lifts
+       it to the hovered track; packing keeps it clear of every clip below. */
+    const trackDrop = tracksMode() ? trackView.dropTarget(e.offsetX, e.offsetY, api.dnd.mediaDrag?.kind ?? 'file') : null;
+    const placement = trackDrop ? { at: trackDrop.at, index: 0, rowIdx: 0 } : mediaDropAt(e);
+    setDropRow(null); setMediaDrop(null); trackView.setDrop(null);
     if (fx) {
       e.preventDefault(); e.stopPropagation();
-      const hit = dropLayerAt(e.offsetY);
+      const hit = dropLayerAt(e.offsetY, e.offsetX);
       const L = hit?.layer || api.selection.first();
       let edge: 'in' | 'out' | undefined;
       if (L && fx.kind === 'transition') {
@@ -2504,9 +2604,11 @@ function bind(cv: any, wrap: any) {
     if (!asset && !files.length) return;
     e.preventDefault(); e.stopPropagation();
     const { at, index } = placement;
+    const before = new Set(api.project.get().layers.map((layer: any) => layer.id));
     if (asset?.kind === 'comp') {
       /* A composition from the Project panel nests as a precomp layer. */
       api.commands.run('addCompositionToTimeline', asset.id, { from: at, index });
+      if (trackDrop) trackView.placeOnTrack(before, trackDrop.lane);
       return;
     }
     if (asset) {
@@ -2515,6 +2617,7 @@ function bind(cv: any, wrap: any) {
       command.index = index;
       const result = api.edit.apply(command, { label: 'Add ' + asset.name, origin: 'command' });
       if (result?.ok === false) api.ui.toast(result.message || 'Could not add ' + asset.name);
+      else if (trackDrop) trackView.placeOnTrack(before, trackDrop.lane);
     } else {
       // The DataTransfer itself carries any dropped folders' contents.
       api.media.importFiles(dt, { placement: { at, index }, asFolder: e.altKey });
@@ -2553,6 +2656,14 @@ function setHoverRow(index: number | null) {
 }
 function onMove(e: any) {
   const x = e.offsetX, y = e.offsetY;
+  if (tracksMode()) {
+    const workHit = x > T.gut && workAreaHit(x, y);
+    const next = workHit ? { cursor: workHit.kind === 'handle' ? 'ew-resize' : 'grab', title: '' }
+      : y < T.ruler ? { cursor: x > T.gut ? 'ew-resize' : 'default', title: '' }
+      : trackView.hover(x, y);
+    T.cv.title = next.title; T.cv.style.cursor = next.cursor;
+    return;
+  }
   setHoverRow(hitRow(y)?.i ?? null);
   if (T.graph && T.graphCombined && x > T.gut && Math.abs(y - graphTop()) < 4) { T.cv.style.cursor = 'ns-resize'; return; }
   if (inGraph(x, y)) {
@@ -2643,6 +2754,7 @@ function onDown(e: any) {
     if (hit?.kind === 'bar') return workAreaMove(e);
     return scrub(e);
   }
+  if (tracksMode()) return y >= T.ruler ? trackView.down(e, x, y) : undefined;
   if (x < T.gut) return gutterDown(e, x, y);
   if (T.graph && T.graphCombined && Math.abs(y - graphTop()) < 4) {
     const start = graphTop();
@@ -3156,7 +3268,7 @@ function slide(e: any) {
     move: (dx: any, dy: any, ev: any) => {
       moved = true;
       const requested = dx / T.pps;
-      const { delta, snapped } = shiftSnapping(ev) ? snapper.resolve(probes, requested) : snapper.release(requested);
+      const { delta, snapped } = edgeSnapping(ev) ? snapper.resolve(probes, requested) : snapper.release(requested);
       const dt = Math.max(delta, -earliest);
       if (Math.abs(dt - delta) > 1e-9) T.snapGuide = null;
       const at = (from: number) => snapped ? Math.max(0, from + dt) : Math.max(0, api.util.snapF(from + dt, api.project.get().fps));
@@ -3220,7 +3332,7 @@ function trim(e: any, side: any) {
     move: (dx: any, _dy: any, ev: any) => {
       moved = true;
       const requested = dx / T.pps;
-      const { delta, snapped } = shiftSnapping(ev) ? snapper.resolve(probes, requested) : snapper.release(requested);
+      const { delta, snapped } = edgeSnapping(ev) ? snapper.resolve(probes, requested) : snapper.release(requested);
       const dt = snapped ? delta : api.util.snapF(delta, api.project.get().fps);
       start.forEach((s: any) => {
         if (side === 'in') {
@@ -3805,6 +3917,7 @@ function marquee(e: any, opt: any = {}) {
 
 function onDbl(e: any) {
   const x = e.offsetX, y = e.offsetY;
+  if (tracksMode() && y >= T.ruler) { trackView.doubleClick(x, y); return; }
   if (inGraph(x, y) && y >= graphTop() + 28) {
     const hit = [...(T._graph?.points || [])]
       .map((point: any) => ({ point, distance: Math.hypot(x - point.x, y - point.y) }))
@@ -3974,13 +4087,16 @@ function pushKeyframeMenu(items: any[], clickedEntries: any[]) {
 T.layerAtPoint = (clientX: number, clientY: number) => {
   const rect = T.cv?.getBoundingClientRect();
   if (!rect || clientX < rect.left || clientX > rect.right || clientY < rect.top + T.ruler || clientY > rect.bottom) return null;
+  if (tracksMode()) return trackView.layerAt(clientX - rect.left, clientY - rect.top);
   return hitRow(clientY - rect.top)?.row?.L || null;
 };
 
 function onCtx(e: any) {
   e.preventDefault();
   const x = e.offsetX, y = e.offsetY;
-  const hr = hitRow(y);
+  const trackLayer = tracksMode() && y >= T.ruler ? trackView.layerAt(x, y) : null;
+  if (trackLayer) { api.ui.showLayerMenu(trackLayer, e, 'timeline'); return; }
+  const hr = tracksMode() ? null : hitRow(y);
   const items: any[] = [];
   const graphPoint = inGraph(x, y)
     ? [...(T._graph?.points || [])]
@@ -4009,7 +4125,10 @@ function onCtx(e: any) {
   } else if (!inGraph(x, y)) {
     items.push({ label: 'Set work area start', icon: 'frame', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(api.transport.time(), api.project.get().work[1] - 1 / api.project.get().fps), api.project.get().work[1]] } }, { label: 'Work area', origin: 'timeline' }) },
       { label: 'Set work area end', icon: 'frame', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [api.project.get().work[0], Math.max(api.transport.time(), api.project.get().work[0] + 1 / api.project.get().fps)] } }, { label: 'Work area', origin: 'timeline' }) },
-      { label: 'Reset work area', icon: 'undo', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [0, api.project.get().dur] } }, { label: 'Work area', origin: 'timeline' }) });
+      { label: 'Reset work area', icon: 'undo', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [0, api.project.get().dur] } }, { label: 'Work area', origin: 'timeline' }) },
+      '-', tracksMode()
+        ? { label: 'Switch to Layer timeline', icon: 'layers', run: () => setMode('layers') }
+        : { label: 'Switch to Track timeline', icon: 'film', run: () => setMode('tracks') });
   }
   /* Extension contributions land at the end, so the positions a user has
      learned for the built-in rows never move. `layer:context` only fires over a

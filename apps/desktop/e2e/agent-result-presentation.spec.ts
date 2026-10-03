@@ -3,7 +3,7 @@ import path from 'node:path';
 import { test, expect } from './helpers/app';
 
 test('agent results preserve work above the reply and omit file and external activity panels', async ({ session }, testInfo) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   await session.page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   const { page } = session;
   const output = process.env.POWERMOVE_AGENT_ARTIFACTS || testInfo.outputPath('visuals');
@@ -43,9 +43,9 @@ test('agent results preserve work above the reply and omit file and external act
     });
   });
   const panel = page.locator('#panel-agent');
-  await panel.evaluate(el => (el as HTMLElement).style.setProperty('--set-panel-height', '700px'));
+  await panel.evaluate(el => (el.closest('#agent-popover') as HTMLElement).style.height = '700px');
   for (const width of [240, 320, 480]) {
-    await panel.evaluate((el, width) => { (el.closest('.dock') as HTMLElement).style.flex = `0 0 ${width}px`; }, width);
+    await panel.evaluate((el, width) => { (el.closest('#agent-popover') as HTMLElement).style.width = `${width}px`; }, width);
     await page.locator('.agent-scroll').evaluate(el => { el.scrollTop = 0; });
     await panel.screenshot({ path: path.join(output, `result-layout-${width}.png`) });
     await expect(page.locator('.agent-work-log')).toHaveCount(0);
@@ -89,7 +89,7 @@ test('agent results preserve work above the reply and omit file and external act
 });
 
 test('a completed response stays visible when the user sends a follow-up', async ({ session }) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   const { page } = session;
   await page.evaluate(() => {
     const PM = (window as any).PM;
@@ -102,7 +102,7 @@ test('a completed response stays visible when the user sends a follow-up', async
   });
   const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
   await composer.fill('Inspect the composition');
-  await composer.press('Enter');
+  await composer.press('Enter'); await session.openAgent();
   await expect.poll(() => page.evaluate(() => (window as any).__responseRuns.length)).toBe(1);
   await page.evaluate(() => {
     const run = (window as any).__responseRuns[0];
@@ -117,7 +117,7 @@ test('a completed response stays visible when the user sends a follow-up', async
   await expect(response.getByText('The composition is ready for review.', { exact: true })).toBeVisible();
   const before = await response.innerText();
   await composer.fill('Make it as editable layers');
-  await composer.press('Enter');
+  await composer.press('Enter'); await session.openAgent();
   await expect.poll(() => page.evaluate(() => (window as any).__responseRuns.length)).toBe(2);
   await expect(response.getByText('The clip is placed full-frame, 0–22 s, centered.', { exact: true })).toBeVisible();
   await expect(response.getByText('The composition is ready for review.', { exact: true })).toBeVisible();

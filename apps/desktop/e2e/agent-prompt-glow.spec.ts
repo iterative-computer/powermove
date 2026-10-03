@@ -3,7 +3,7 @@ import path from 'node:path';
 import { test, expect } from './helpers/app';
 
 test('prompt halo sits outside the message bubble and stays within the panel', async ({ session }, testInfo) => {
-  await session.openEditor();
+  await session.openEditor(); await session.openAgent();
   await session.page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   const { page } = session;
   const output = process.env.POWERMOVE_AGENT_ARTIFACTS || testInfo.outputPath('visuals');
@@ -21,7 +21,7 @@ test('prompt halo sits outside the message bubble and stays within the panel', a
   });
   const panel = page.locator('#panel-agent');
   for (const width of [240, 320, 480]) {
-    await panel.evaluate((el, width) => { (el.closest('.dock') as HTMLElement).style.flex = `0 0 ${width}px`; }, width);
+    await panel.evaluate((el, width) => { (el.closest('#agent-popover') as HTMLElement).style.width = `${width}px`; }, width);
     const bounds = await page.locator('.agent-prompt').evaluate(el => {
       const bubble = el.getBoundingClientRect();
       const halo = el.querySelector('.agent-prompt-signal')!.getBoundingClientRect();

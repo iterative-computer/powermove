@@ -9,7 +9,7 @@ test('Settings reads a ChatGPT subscription through the real main-process bridge
     }
   });
   try {
-    await session.openEditor();
+    await session.openEditor(); await session.openAgent();
     const { page } = session;
     await page.evaluate(() => {
       const PM = (window as any).PM;
@@ -58,7 +58,7 @@ test('Connect opens the trusted ChatGPT browser flow and enters waiting state', 
     }
   });
   try {
-    await session.openEditor();
+    await session.openEditor(); await session.openAgent();
     await session.app.evaluate(({ shell }) => {
       (globalThis as any).__powermoveOpenedAuthUrl = null;
       shell.openExternal = async (url: string) => {
@@ -129,7 +129,7 @@ test('Claude subscription status and structured runs cross the real hidden app b
     }
   });
   try {
-    await session.openEditor();
+    await session.openEditor(); await session.openAgent();
     const { page } = session;
     await page.evaluate(() => {
       const PM = (window as any).PM;
@@ -141,6 +141,8 @@ test('Claude subscription status and structured runs cross the real hidden app b
     await expect(settings).toContainText('Claude');
     await expect(settings).toContainText('claude@example.com · Max plan');
     await settings.getByRole('main').getByRole('button', { name: 'Done', exact: true }).click();
+
+    await session.openAgent();
 
     const provider = page.locator('.agent-modelbar select[aria-label="Provider"]');
     await provider.selectOption('claude');
