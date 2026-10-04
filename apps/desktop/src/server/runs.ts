@@ -13,6 +13,7 @@ import { EventEmitter } from 'node:events';
 
 import { IPC, type AgentToolRequestEvent, type AgentToolResponseEvent, type CodexProgressEvent, type CodexRunResult } from '../shared/ipc';
 import { WEB } from '../shared/wire';
+import { MEDIA_SOURCE_TOOL } from '../shared/media-tools';
 import type { RemoteClient } from './clients';
 
 /** Tools that need a real UI: pixels, panel DOM, synthetic input. */
@@ -20,6 +21,11 @@ export const DISPLAY_TOOLS = new Set([
   'get_panel_layout', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel',
   'render_frames', '__panel_bounds', '__prepare_panel_input'
 ]);
+
+/* Agent media tools resolve an asset to a host file through a renderer: a
+   tab can upload bytes the host lacks, the engine can only find the host's
+   own copy, so a tab is preferred when one is open (media-tools lane). */
+export const TAB_FIRST_TOOLS = new Set([MEDIA_SOURCE_TOOL]);
 
 const MAX_BUFFERED_EVENTS = 5000;
 
@@ -169,6 +175,7 @@ export class RunHub {
 
   targetFor(tool: string, _owner: RunOwner): RemoteClient | null {
     if (DISPLAY_TOOLS.has(tool)) return this.deps.tabs()[0] ?? null;
+    if (TAB_FIRST_TOOLS.has(tool)) return this.deps.tabs()[0] ?? this.deps.engine() ?? null;
     return this.deps.engine() ?? this.deps.tabs()[0] ?? null;
   }
 

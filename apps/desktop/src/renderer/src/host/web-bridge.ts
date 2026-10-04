@@ -12,6 +12,7 @@
 import { IPC, type AgentToolRequestEvent, type CodexRunResult, type FileSaveResult, type MediaProxyResult, type PowermoveBridge, type ProjectOpenResult, type RemoteRunRecord, type StoreErrorEvent } from '../../../shared/ipc';
 import { EXT_IPC, type ExtensionRecord } from '../../../shared/extensions';
 import { CLOUD_UNREACHABLE } from '../../../shared/cloud-ipc';
+import { MEDIA_PATH_IPC, type MediaPathResult } from '../../../shared/media-tools';
 import type { StoreResult } from '../../../shared/store-ipc';
 import { WEB, WEB_UPLOAD_CHUNK_BYTES, type WebHello } from '../../../shared/wire';
 import { Connection } from '../../../shared/link';
@@ -330,6 +331,20 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
       },
       readPlaybackProxy: (token, offset, length) => link.invoke(IPC.mediaProxyRead, { token, offset, length }),
       releasePlaybackProxy: (token) => link.invoke(IPC.mediaProxyRelease, token)
+    },
+    /* ── agent media tools: asset → readable file (media-tools lane) ──
+       The host keeps every project's media bytes under their store key, so a
+       lookup usually finds them; a miss is uploaded once and filed there. */
+    mediaPath: {
+      lookup: (request) => link.invoke<MediaPathResult | null>(MEDIA_PATH_IPC.lookup, request),
+      stageFile: async (file, request) => {
+        const hostPath = await upload(link, file, 'media');
+        if (!request.storageKey) return { path: hostPath, origin: 'host' };
+        await link.invoke(WEB.mediaCommit, { key: request.storageKey, path: hostPath, type: file.type || 'application/octet-stream' });
+        const filed = await link.invoke<MediaPathResult | null>(MEDIA_PATH_IPC.lookup, { assetId: request.assetId, storageKey: request.storageKey });
+        if (!filed) throw new Error('The host did not keep the uploaded media.');
+        return filed;
+      }
     },
     attachments: {
       // Nothing to reveal on this machine: hand the bytes to the browser instead.

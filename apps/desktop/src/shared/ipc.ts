@@ -440,6 +440,8 @@ export type CodexTraceEvent =
       label: string;
       /** The tool's primary argument in mono: a command, a file path, a query. ≤ LIMITS.codexToolDetailChars */
       detail?: string;
+      /** Agent media tools only: the sanitized target, so the row can name the clip. */
+      subject?: import('./media-tools').AgentMediaToolSubject;
     }
   | {
       kind: 'tool-end';
@@ -747,6 +749,10 @@ export interface PowermoveBridge {
     /** Materialize bytes in app-owned cache storage and reveal that file. */
     reveal(request: AttachmentRevealRequest): Promise<void>;
   };
+
+  /* ── agent media tools: asset → readable file (media-tools lane) ── */
+  /** Resolve media assets to files main/the host can read (renderer/src/media/media-path.ts). */
+  mediaPath?: import('./media-tools').MediaPathBridge;
 
   codex: {
     run(
