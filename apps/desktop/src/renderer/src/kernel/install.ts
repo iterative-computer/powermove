@@ -318,7 +318,9 @@ function makeMedia(PM: LegacyPM): MediaAPI {
     timing: {
       isTimed: (layer) => !!PM?.MediaTiming?.isTimed?.(layer),
       rate: (layer) => Number(PM?.MediaTiming?.rate?.(layer) ?? 1),
-      earliestStart: (layer) => Number(PM?.MediaTiming?.earliestStart?.(layer) ?? layer.from ?? 0)
+      earliestStart: (layer) => Number(PM?.MediaTiming?.earliestStart?.(layer) ?? layer.from ?? 0),
+      startPatch: (layer, nextFrom) => PM?.MediaTiming?.startPatch?.(layer, nextFrom) ?? null,
+      endPatch: (layer, cut) => PM?.MediaTiming?.endPatch?.(layer, cut) ?? null
     },
     importFiles: (...args) => PM?.importFiles?.(...args) ?? Promise.resolve(undefined),
     commandForAsset: (...args) => PM?.commandForAsset?.(...args),

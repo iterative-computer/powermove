@@ -637,7 +637,13 @@ export interface MediaAPI {
   registerImportDefaults(defaults: ImportDefaults): Disposable;
   /** Latest active mod's override, or null for the native import behavior. Returns a Promise when sandboxed. */
   getImportDefaults(): ImportDefaults | null;
-  readonly timing: { isTimed(layer: Layer): boolean; rate(layer: Layer): number; earliestStart(layer: Layer): number };
+  readonly timing: {
+    isTimed(layer: Layer): boolean; rate(layer: Layer): number; earliestStart(layer: Layer): number;
+    /** Content patch keeping the clip's content in place when its In point moves to `nextFrom` (media trim, caption cues); null when untimed. */
+    startPatch(layer: Layer, nextFrom: number): JsonObject | null;
+    /** Content patch for the head of a split at composition time `cut` (caption cues past the cut leave); null when nothing changes. */
+    endPatch(layer: Layer, cut: number): JsonObject | null;
+  };
   /** Requires the full-access permission for Store extensions. */
   /** Pass a drop's DataTransfer to import dropped folders as well as files. */
   importFiles(files: FileList | File[] | DataTransfer, options?: ImportFilesOptions): Promise<unknown>;

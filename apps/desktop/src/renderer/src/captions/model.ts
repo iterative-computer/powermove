@@ -516,3 +516,22 @@ export function shiftAllCues(cues: readonly CaptionCue[], by: number): CaptionCu
     ...(cue.words ? { words: cue.words.map(word => ({ ...word, start: word.start + by, end: word.end + by })) } : {})
   })));
 }
+
+/**
+ * Cues for a clip whose In point moves by `delta` seconds (trim-in, the tail
+ * of a split). Cues keep their composition time: everything shifts by
+ * -delta, cues that end before the new In point are dropped and the cue
+ * spanning it is clipped. A negative delta (extending the In point) shifts
+ * the cues later, so they stay where they were heard.
+ */
+export function rebaseCuesForStart(cues: readonly CaptionCue[], delta: number): CaptionCue[] {
+  if (!Number.isFinite(delta) || !delta) return cues.map(cue => ({ ...cue }));
+  return shiftAllCues(cues, -delta);
+}
+
+/** Cues for the head of a split at layer time `end`: later cues belong to the
+    tail, and the cue spanning the cut is clipped to it. */
+export function clipCuesToEnd(cues: readonly CaptionCue[], end: number): CaptionCue[] {
+  if (!Number.isFinite(end)) return cues.map(cue => ({ ...cue }));
+  return normalizeCues(cues.filter(cue => cue.start < end - EPS).map(cue => cue.end <= end ? cue : { ...cue, end }));
+}

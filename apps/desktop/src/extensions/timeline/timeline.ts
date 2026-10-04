@@ -3438,7 +3438,10 @@ function layerEdgeSnapper(movingIds: string[]) {
 function trim(e: any, side: any) {
   const selectedIds = new Set(api.groups.expand(api.selection.layers()) || api.selection.layers());
   const layers = api.project.get().layers.filter((l: any) => selectedIds.has(l.id) && l.type !== 'group' && !l.lock && !(api.groups.ancestors(l) || []).some((g: any) => g.lock));
-  const start = layers.map((L: any) => ({ L, from: L.from, dur: L.dur, trim: Number(L.d && L.d.trim) || 0 }));
+  /* Caption cues live in layer time; keep the gesture's starting cues so
+     every move re-bases from them and an in-edge drag that comes back
+     restores what it passed over. */
+  const start = layers.map((L: any) => ({ L, from: L.from, dur: L.dur, trim: Number(L.d && L.d.trim) || 0, d: { ...L.d } }));
   api.edit.begin('Trim clip', { origin: 'timeline' });
   const snapper = layerEdgeSnapper(start.map((s: any) => s.L.id));
   const probes: EdgeSnapProbe[] = start.map((s: any) => side === 'in'
@@ -3460,6 +3463,9 @@ function trim(e: any, side: any) {
           if (api.media.timing.isTimed(s.L)) {
             const rate = api.media.timing.rate(s.L);
             api.edit.dispatch({ type: 'set_content', target: s.L.id, patch: { trim: Math.max(0, s.trim + (nf - s.from) * rate) } });
+          } else {
+            const content = api.media.timing.startPatch({ ...s.L, from: s.from, d: s.d }, nf);
+            if (content) api.edit.dispatch({ type: 'set_content', target: s.L.id, patch: content });
           }
         } else api.edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { duration: Math.max(1 / api.project.get().fps, s.dur + dt) } });
       });

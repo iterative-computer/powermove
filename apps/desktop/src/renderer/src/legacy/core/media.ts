@@ -1,5 +1,6 @@
 import { sha256HexOf } from '../../../../shared/sha256';
 import { resolveContent } from './content-properties';
+import { clipCuesToEnd, rebaseCuesForStart } from '../../captions/model';
 /* Ported from js/core/media.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { bridge as hostBridge } from '../../kernel/bridge';
@@ -292,6 +293,25 @@ PM.MediaTiming = {
   earliestStart(L: any) {
     const trim: any = Math.max(0, Number(L ? resolveContent(PM, L, PM.time).trim : 0) || 0);
     return Math.max(0, Number(L.from || 0) - trim / this.rate(L));
+  },
+  /* Content patch that keeps a clip's content where it was in composition
+     time when its In point moves to `nextFrom` (trim-in, a split's tail, the
+     timeline's in-edge drag). Media continue at the matching source time;
+     captions re-base their layer-time cues. Null for untimed content. */
+  startPatch(L: any, nextFrom: any): Record<string, unknown> | null {
+    if (this.isTimed(L)) return { trim: this.trimAtStart(L, nextFrom) };
+    if (L?.type === 'captions' && Array.isArray(L.d?.cues)) {
+      return { cues: rebaseCuesForStart(L.d.cues, Number(nextFrom) - Number(L.from || 0)) };
+    }
+    return null;
+  },
+  /* Content patch for the head of a split at composition time `cut`: content
+     that now belongs to the tail leaves the head. Null when nothing changes. */
+  endPatch(L: any, cut: any): Record<string, unknown> | null {
+    if (L?.type === 'captions' && Array.isArray(L.d?.cues)) {
+      return { cues: clipCuesToEnd(L.d.cues, Number(cut) - Number(L.from || 0)) };
+    }
+    return null;
   },
 };
 }
