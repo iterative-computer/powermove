@@ -47,12 +47,31 @@ function styleFrom(PM: any, raw: unknown, current?: CaptionStyle): CaptionStyle 
   return patchStyle(current, patch, compHeight(PM));
 }
 
-/** Keep the clip long enough to show every cue. */
-function fitDuration(PM: any, layer: any): void {
-  const end = captionsEnd(layer.d.cues);
+/**
+ * Keep the clip long enough to show the cues an edit placed. Only cues the
+ * edit added or retimed count (every cue for a wholesale replace): cues the
+ * user hid by trimming the Out point stay hidden when an earlier cue is
+ * retyped or restyled.
+ */
+function fitDuration(PM: any, layer: any, before: readonly CaptionCue[] | null): void {
+  let end = 0;
+  if (!before) end = captionsEnd(layer.d.cues);
+  else {
+    const unchanged = new Set<CaptionCue>(before);
+    let previous: Map<string, CaptionCue> | null = null;
+    for (const cue of layer.d.cues as CaptionCue[]) {
+      // Untouched cues are the same objects; only look up the rest by id.
+      if (unchanged.has(cue) || cue.end <= end) continue;
+      previous ??= new Map(before.map(item => [item.id, item]));
+      const old = previous.get(cue.id);
+      if (!old || old.start !== cue.start || old.end !== cue.end) end = cue.end;
+    }
+  }
   if (end > layer.dur) layer.dur = Math.round(end * 1e6) / 1e6;
   PM.ProjectIndex?.invalidate?.();
 }
+
+const normalized = new WeakSet<object>();
 
 export function addCaptions({ PM }: Context, command: any) {
   const from = command.from == null ? 0 : Math.max(0, Number(command.from) || 0);
@@ -62,6 +81,7 @@ export function addCaptions({ PM }: Context, command: any) {
   const cues = normalizeCues(toLayerTime(source as CueInput[], from));
   const layer = PM.mkLayer('captions', { name: command.name || 'Captions' });
   layer.d = normalizeCaptionsContent({ cues, style: styleFrom(PM, command.style), ...(command.language ? { language: command.language } : {}) });
+  normalized.add(layer.d.cues);
   if (command.id != null) {
     if (PM.L(command.id)) throw new Error(`Layer id already exists: ${command.id}`);
     layer.id = String(command.id);
@@ -81,7 +101,10 @@ export function editCaptions({ PM, findLayer }: Context, command: any) {
   const layer = findLayer(command.target);
   if (!layer) throw new Error('Captions layer not found');
   if (layer.type !== 'captions') throw new Error(`“${layer.name}” is not a captions layer`);
-  layer.d = normalizeCaptionsContent(layer.d);
+  /* Content is normalised once per cue list; every edit below produces a
+     normal list again, so a live drag does not re-normalise thousands of
+     cues on each pointer move. */
+  if (!normalized.has(layer.d?.cues)) layer.d = normalizeCaptionsContent(layer.d);
   const shift = Number(layer.from) || 0;
   const cues: CaptionCue[] = layer.d.cues;
   const op = command.op as CaptionEditOp;
@@ -137,7 +160,8 @@ export function editCaptions({ PM, findLayer }: Context, command: any) {
     if (command.language) layer.d.language = String(command.language); else delete layer.d.language;
     layer.d = normalizeCaptionsContent(layer.d);
   }
-  fitDuration(PM, layer);
+  normalized.add(layer.d.cues);
+  fitDuration(PM, layer, op === 'replace' || (op === 'import' && command.replace !== false) ? null : cues);
   PM.touch?.();
   return { ...result, cues: layer.d.cues.length };
 }

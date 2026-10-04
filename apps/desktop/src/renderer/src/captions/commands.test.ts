@@ -115,4 +115,43 @@ describe('caption commands', () => {
     PM.hist.undo();
     expect(captions().d.cues[0]).toMatchObject({ start: 1, end: 2 });
   });
+
+  it('does not regrow a trimmed Out point when an earlier cue is edited', () => {
+    PM.Edit.apply({ type: 'add_captions', text: [SRT, '3\n00:00:06,000 --> 00:00:07,000\nThree'].join('\n\n'), from: 0 });
+    const layer = captions();
+    PM.Edit.apply({ type: 'set_layer', target: layer.id, patch: { duration: 5.5 } });
+    const first = layer.d.cues[0].id;
+    PM.Edit.apply({ type: 'edit_captions', target: layer.id, op: 'update', cues: [{ id: first, text: 'Uno' }] });
+    PM.Edit.apply({ type: 'edit_captions', target: layer.id, op: 'update', cues: [{ id: first, start: 1.2, end: 2.2 }] });
+    PM.Edit.apply({ type: 'edit_captions', target: layer.id, op: 'style', style: { preset: 'boxed' } });
+    PM.Edit.apply({ type: 'edit_captions', target: layer.id, op: 'delete', ids: [first] });
+    expect(layer.dur).toBe(5.5);
+    // A cue the edit itself places past the Out point still grows the clip.
+    PM.Edit.apply({ type: 'edit_captions', target: layer.id, op: 'insert', cues: [{ start: 8, end: 9, text: 'Late' }] });
+    expect(layer.dur).toBe(9);
+  });
+
+  it('keeps a live cue drag cheap on a long word-timed transcript', () => {
+    PM.proj.dur = 20000;
+    const cues = Array.from({ length: 5000 }, (_, index) => ({
+      id: `c${index}`, start: index * 3, end: index * 3 + 2.5,
+      text: Array.from({ length: 10 }, (_, word) => `word${word}`).join(' '),
+      words: Array.from({ length: 10 }, (_, word) => ({ text: `word${word}`, start: index * 3 + word * 0.25, end: index * 3 + word * 0.25 + 0.2 }))
+    }));
+    PM.Edit.apply({ type: 'add_captions', cues });
+    const layer = captions();
+    const untouched = layer.d.cues[10];
+    PM.Edit.begin('Move caption', { origin: 'timeline' });
+    const started = performance.now();
+    for (let step = 1; step <= 40; step++) {
+      PM.Edit.dispatch({ type: 'edit_captions', target: layer.id, op: 'update', cues: [{ id: 'c2500', start: 7500 + step * 0.01, end: 7502.5 + step * 0.01 }] });
+    }
+    const perMove = (performance.now() - started) / 40;
+    PM.Edit.commit();
+    // Untouched cues are shared rather than re-normalised and copied per move.
+    expect(layer.d.cues[10]).toBe(untouched);
+    expect(layer.d.cues[2500]).toMatchObject({ start: 7500.4, end: 7502.9 });
+    expect(layer.d.cues[2500].words[0]).toMatchObject({ start: 7500.4 });
+    expect(perMove).toBeLessThan(6);
+  });
 });

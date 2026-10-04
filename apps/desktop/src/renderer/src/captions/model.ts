@@ -354,11 +354,17 @@ export interface CuePatch {
     cue is clamped between its neighbours instead of pushing them. */
 export function updateCues(cues: readonly CaptionCue[], patches: readonly CuePatch[]): CaptionCue[] {
   const byId = new Map(patches.map(patch => [patch.id, patch]));
-  const out = cues.map(cue => ({ ...cue, ...(cue.words ? { words: cue.words.map(word => ({ ...word })) } : {}) }));
+  /* Untouched cues are shared, not copied: cue objects are never mutated in
+     place, and a drag on a long transcript patches one or two of thousands. */
+  const out = cues.slice();
+  const touched: number[] = [];
   for (let index = 0; index < out.length; index++) {
     const patch = byId.get(out[index]!.id);
     if (!patch) continue;
-    const cue = out[index]!;
+    const source = out[index]!;
+    const cue: CaptionCue = { ...source, ...(source.words ? { words: source.words.map(word => ({ ...word })) } : {}) };
+    out[index] = cue;
+    touched.push(index);
     if (patch.text !== undefined) {
       const text = cleanCueText(patch.text);
       if (text !== cue.text) {
@@ -388,7 +394,19 @@ export function updateCues(cues: readonly CaptionCue[], patches: readonly CuePat
       if (words) cue.words = words; else delete cue.words;
     }
   }
-  return normalizeCues(out.filter(cue => cue.text), cueId);
+  return stillNormal(out, touched) ? out : normalizeCues(out.filter(cue => cue.text), cueId);
+}
+
+/** Whether the cues patched at `touched` still leave the list sorted,
+    disjoint and valid, so the full normalisation pass can be skipped. */
+function stillNormal(cues: readonly CaptionCue[], touched: readonly number[]): boolean {
+  for (const index of touched) {
+    const cue = cues[index]!, previous = cues[index - 1], next = cues[index + 1];
+    if (!cue.text || cue.end - cue.start < MIN_CUE_DURATION - EPS) return false;
+    if (previous && previous.end > cue.start + EPS) return false;
+    if (next && cue.end > next.start + EPS) return false;
+  }
+  return true;
 }
 
 /** Add cues without moving existing ones; new cues are clipped to the gaps. */
