@@ -15,15 +15,8 @@ import {
 import { isRecord, isString } from '../../shared/guards';
 import { EXTENSION_ID } from '../../shared/extensions';
 import { forkBuiltinExtension } from '../extensions/fork';
-import {
-  OUTSIDE_SANDBOX_CALL_MS,
-  OUTSIDE_SANDBOX_TOOL,
-  OUTSIDE_SANDBOX_TOOL_NAME,
-  POWERMOVE_AGENT_TOOLS,
-  POWERMOVE_APP_AGENT_TOOLS,
-  POWERMOVE_STORE_TOOL_NAMES,
-  type NativeMcpServerConfig
-} from './spec';
+import { OUTSIDE_SANDBOX_CALL_MS, OUTSIDE_SANDBOX_TOOL, OUTSIDE_SANDBOX_TOOL_NAME, POWERMOVE_AGENT_TOOLS, POWERMOVE_APP_AGENT_TOOLS, POWERMOVE_LIVE_INSPECTION_TOOL_NAMES, POWERMOVE_STORE_TOOL_NAMES, type NativeMcpServerConfig } from './spec';
+import { ORCHESTRATION_TOOL_NAMES } from '../../shared/agent-orchestration';
 import type { StoreAgentGateway, StoreInstallInput, StorePublishInput, StoreSearchInput } from '../cloud/store-agent';
 import { inspectCreativeWorkspace } from '../creative-workspace';
 import { userInput, type UserInput } from '../user-input';
@@ -81,7 +74,9 @@ export class PowermoveAgentToolSession {
     readonly context: 'app' | 'project',
     private readonly bridge: PowermoveAgentToolBridge,
     mcpConfig: NativeMcpServerConfig,
-    private readonly resolveStagingDirectory?: (forkId: string) => Promise<string>
+    private readonly resolveStagingDirectory?: (forkId: string) => Promise<string>,
+    readonly transactionSession?: PowermoveAgentToolSession,
+    readonly inspectionOnly = false
   ) {
     this.mcpConfig = mcpConfig;
   }
@@ -96,7 +91,7 @@ export class PowermoveAgentToolSession {
   private async finishOnce(commit: boolean): Promise<AgentToolFinishResult> {
     let response: AgentToolResponseEvent | null = null;
     try {
-      if (!this.owner.isDestroyed()) {
+      if (!this.transactionSession && !this.owner.isDestroyed()) {
         response = await this.bridge.callRenderer(this, '__finish_run', { commit });
       }
     } finally {
@@ -115,6 +110,7 @@ export class PowermoveAgentToolSession {
 
   noteResponse(response: AgentToolResponseEvent): void {
     if (typeof response.changed === 'boolean') this.changed = response.changed;
+    this.transactionSession?.noteResponse(response);
   }
 
   isClosed(): boolean { return this.closed; }
@@ -142,6 +138,7 @@ export interface PowermoveAgentToolBridgeOptions {
   storeAgent?: StoreAgentGateway | null;
   /** Test seam: the app windows' input record. */
   userInput?: Pick<UserInput, 'drive'>;
+  orchestrate?(runId: string, tool: string, args: Record<string, unknown>): Promise<unknown>;
 }
 
 export class PowermoveAgentToolBridge {
@@ -169,6 +166,8 @@ export class PowermoveAgentToolBridge {
     context?: 'app' | 'project';
     resolveStagingDirectory?: (forkId: string) => Promise<string>;
     outsideSandbox?: OutsideSandboxRunner;
+    transactionSession?: PowermoveAgentToolSession;
+    inspectionOnly?: boolean;
   }): Promise<PowermoveAgentToolSession> {
     if (!REQUEST_ID.test(options.runId)) throw new Error('Invalid agent tool run id.');
     if (this.sessionsByRun.has(options.runId)) throw new Error('Agent tool session already exists.');
@@ -194,7 +193,9 @@ export class PowermoveAgentToolBridge {
       options.context ?? 'project',
       this,
       mcpConfig,
-      options.resolveStagingDirectory
+      options.resolveStagingDirectory,
+      options.transactionSession,
+      options.inspectionOnly
     );
     session.outsideSandbox = options.outsideSandbox ?? null;
     this.sessionsByToken.set(token, session);
@@ -228,6 +229,7 @@ export class PowermoveAgentToolBridge {
     tool: string,
     args: Record<string, unknown>
   ): Promise<AgentToolResponseEvent> {
+    if (session.transactionSession) return this.callRenderer(session.transactionSession, tool, args);
     if (session.isClosed()) throw new Error('Agent tool session is closed.');
     if (session.owner.isDestroyed()) throw new Error('Powermove window is no longer available.');
     const callId = `tool-${randomUUID()}`;
@@ -402,7 +404,8 @@ export class PowermoveAgentToolBridge {
     }
     if (request.tool === '__list_tools') {
       const tools = session.context === 'app' ? POWERMOVE_APP_AGENT_TOOLS : POWERMOVE_AGENT_TOOLS;
-      return { id: request.id, ok: true, tools: session.outsideSandbox ? [...tools, OUTSIDE_SANDBOX_TOOL] : tools };
+      const available = session.inspectionOnly ? tools.filter(tool => (POWERMOVE_LIVE_INSPECTION_TOOL_NAMES as readonly string[]).includes(tool.name)) : tools;
+      return { id: request.id, ok: true, tools: session.outsideSandbox && !session.inspectionOnly ? [...available, OUTSIDE_SANDBOX_TOOL] : available };
     }
     if (request.tool === OUTSIDE_SANDBOX_TOOL_NAME) {
       // It waits on the person, far longer than any other tool call.
@@ -425,10 +428,19 @@ export class PowermoveAgentToolBridge {
    * staging handlers, not just the renderer's editing dispatcher. */
   async callTool(session: PowermoveAgentToolSession, tool: string, args: Record<string, unknown>, workspace = ''): Promise<AgentToolResponseEvent> {
     if (session.isClosed() || session.owner.isDestroyed()) throw new Error('Powermove tool session is not active.');
-    if (tool === OUTSIDE_SANDBOX_TOOL_NAME) return this.runOutsideSandbox(session, args);
+    if (tool === OUTSIDE_SANDBOX_TOOL_NAME) {
+      if (session.inspectionOnly) throw new Error('This planning run can only inspect the project.');
+      return this.runOutsideSandbox(session, args);
+    }
     if (!POWERMOVE_AGENT_TOOLS.some(spec => spec.name === tool)) throw new Error(`Unknown Powermove tool: ${tool}`);
+    if (session.inspectionOnly && !(POWERMOVE_LIVE_INSPECTION_TOOL_NAMES as readonly string[]).includes(tool)) throw new Error('This planning run can only inspect the project.');
     if (session.context === 'app' && !POWERMOVE_APP_AGENT_TOOLS.some(spec => spec.name === tool)) {
       throw new Error('This agent has no project attached. Open a project to use composition tools.');
+    }
+    if ((ORCHESTRATION_TOOL_NAMES as readonly string[]).includes(tool)) {
+      if (!this.options.orchestrate) throw new Error('Subagent orchestration is unavailable in this connection.');
+      const result = await this.options.orchestrate(session.runId, tool, args);
+      return { runId: session.runId, callId: `tool-${randomUUID()}`, ok: true, content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
     if (tool === 'inspect_creative_workspace') {
       return { runId: session.runId, callId: `tool-${randomUUID()}`, ok: true,

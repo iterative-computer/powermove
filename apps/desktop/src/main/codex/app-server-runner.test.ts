@@ -1,3 +1,4 @@
+import { ORCHESTRATION_TOOL_NAMES } from '../../shared/agent-orchestration';
 // Keep runner tests independent of the developer's configured external services.
 vi.mock('../agent-tools/user-mcp', async importOriginal => ({
   ...await importOriginal<typeof import('../agent-tools/user-mcp')>(),
@@ -146,8 +147,10 @@ describe('CodexAppServerRunner steering', () => {
           tool_timeout_sec: 120,
           required: true,
           enabled_tools: [
+            ...ORCHESTRATION_TOOL_NAMES,
             'get_project_state', 'get_panel_layout', 'open_panel', 'get_panel_state',
-            'capture_panel', 'get_workspace_state', 'validate_effect', 'render_frames'
+            'capture_panel', 'get_workspace_state', 'validate_effect', 'render_frames',
+            'store_search', 'store_extension', 'store_source', 'store_library'
           ],
           default_tools_approval_mode: 'approve'
         }

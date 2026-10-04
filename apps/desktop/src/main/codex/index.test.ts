@@ -191,6 +191,7 @@ describe('registerCodexIpc', () => {
       IPC.codexSteer,
       IPC.codexAnswer,
       IPC.codexCancel,
+      IPC.codexCancelTask,
       IPC.codexFixPrompt,
       IPC.codexRebasePrompt,
       IPC.codexRestoreChangeSet,
@@ -214,6 +215,7 @@ describe('registerCodexIpc', () => {
     expect(mocks.toolShutdown).not.toHaveBeenCalled();
     emit('before-quit');
     expect(mocks.appShutdown).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     mocks.resolve({ ok: true, text: '{}', access: 'editor' });
     await expect(pending).resolves.toEqual({ ok: true, text: '{}', access: 'editor' });
     emit('will-quit');
@@ -244,6 +246,7 @@ describe('registerCodexIpc', () => {
     const stranger = new Sender();
     const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
 
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     expect(mocks.run).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'ipc-run-1234' }),
       expect.objectContaining({
@@ -266,8 +269,9 @@ describe('registerCodexIpc', () => {
       step: { kind: 'thought', text: 'Inspecting source' }
     });
 
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     mocks.resolve({ ok: true, text: '{}', access: 'editor' });
-    await expect(pending).resolves.toEqual({ ok: true, text: '{}', access: 'editor' });
+    await expect(pending).resolves.toMatchObject({ ok: false, cancelled: true });
   });
 
   it('commits completed live edits before a steering fallback replaces the run', async () => {
@@ -285,14 +289,17 @@ describe('registerCodexIpc', () => {
     const owner = new Sender();
     const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
 
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     await handlers.get(IPC.codexCancel)!({ sender: owner }, {
       id: 'ipc-run-1234', preserveChanges: true
     });
 
     expect(mocks.toolFinishRun).toHaveBeenCalledExactlyOnceWith('ipc-run-1234', true);
     expect(mocks.cancel).toHaveBeenCalledWith('ipc-run-1234');
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     mocks.resolve({ ok: false, error: 'cancelled', cancelled: true });
     await pending;
+    expect(mocks.toolFinish).toHaveBeenCalledWith(true);
   });
 
   it('gives editor App Server runs a live inspection tool session', async () => {
@@ -313,12 +320,13 @@ describe('registerCodexIpc', () => {
     const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
 
     expect(mocks.toolOpenSession).toHaveBeenCalledWith({
-      runId: 'ipc-run-1234', owner, baseRevision: 0
+      runId: 'ipc-run-1234', owner, baseRevision: 0, context: 'project', inspectionOnly: true
     });
     await vi.waitFor(() => expect(mocks.run).toHaveBeenCalledWith(
       expect.objectContaining({ mode: 'editor' }),
       expect.objectContaining({ nativeTools: mocks.toolSession.mcpConfig })
     ));
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     mocks.resolve({ ok: true, text: '{"kind":"panels"}', access: 'editor' });
 
     await expect(pending).resolves.toEqual({
@@ -356,6 +364,7 @@ describe('registerCodexIpc', () => {
       expect.anything(),
       expect.objectContaining({ nativeTools: mocks.toolSession.mcpConfig })
     ));
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     mocks.resolve({
       ok: true,
       access: 'project',
@@ -388,6 +397,7 @@ describe('registerCodexIpc', () => {
       .resolves.toEqual({ accepted: true });
     expect(mocks.appSteer).toHaveBeenCalledExactlyOnceWith(steering);
 
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     mocks.resolve({ ok: true, text: '{}', access: 'editor' });
     await pending;
   });
@@ -397,8 +407,7 @@ describe('registerCodexIpc', () => {
     const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
     owner.destroy();
     expect(mocks.cancel).toHaveBeenCalledWith('ipc-run-1234');
-    mocks.resolve({ ok: false, error: 'cancelled', cancelled: true });
-    await pending;
+    await expect(pending).resolves.toMatchObject({ ok: false, cancelled: true });
   });
 
   it('builds a fix prompt from a validated extension failure', async () => {
@@ -439,6 +448,7 @@ describe('registerCodexIpc', () => {
       openExternal: async () => undefined
     }, mocks.account, mocks.account, mocks.appRunner as never);
     const pending = handlers.get(IPC.codexRun)!({ sender: new Sender() }, runRequest());
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     mocks.resolve({
       ok: true, text: '{}', access: 'editor',
       extensions: [{ id: 'my-fork', action: 'updated' }]

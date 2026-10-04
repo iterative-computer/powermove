@@ -364,6 +364,7 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
       steer: (req) => link.invoke(IPC.codexSteer, req),
       answer: (req) => link.invoke(IPC.codexAnswer, req),
       cancel: (id, preserveChanges = false) => link.invoke(IPC.codexCancel, { id, preserveChanges }),
+      cancelTask: (requestId, taskId) => link.invoke(IPC.codexCancelTask, { requestId, taskId }),
       fixPrompt: (req) => link.invoke(IPC.codexFixPrompt, req),
       rebasePrompt: (req) => link.invoke(IPC.codexRebasePrompt, req),
       restoreChangeSet: (req) => link.invoke(IPC.codexRestoreChangeSet, req),
