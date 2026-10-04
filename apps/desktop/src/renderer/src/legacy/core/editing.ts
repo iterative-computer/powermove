@@ -20,7 +20,7 @@ const AUDIO_CONTENT_FIELDS: any = new Set(['asset', 'trim', 'gain', 'fadeIn', 'f
 const ORIGIN_TRUST: any = Object.freeze({
   interface: 'human', inspector: 'human', canvas: 'human', timeline: 'human',
   command: 'human', 'command-palette': 'human', 'effects-panel': 'human',
-  'shader-panel': 'human', library: 'human', import: 'human',
+  'shader-panel': 'human', library: 'human', import: 'human', mixer: 'human',
   agent: 'generated', 'generated-ui': 'generated',
   'generated-tool': 'generated', 'generated-script': 'generated',
 });
