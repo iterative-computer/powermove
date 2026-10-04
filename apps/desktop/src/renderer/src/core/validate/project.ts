@@ -271,8 +271,14 @@ function normalizeAudioContent(raw: unknown): AudioContent {
 }
 
 /** Video soundtracks and nested compositions carry an optional, animatable level. */
+/** `source` without its raw `audioGain`; spread `audioLevel(source)` after it. */
+function withoutLevel(source: UnknownRecord): UnknownRecord {
+  const { audioGain: _level, ...rest } = source;
+  return rest;
+}
+
 function audioLevel(source: UnknownRecord): { audioGain?: number | Channel } {
-  if (source.audioGain === undefined) return {};
+  if (source.audioGain == null) return {};
   if (isProperty(source.audioGain)) return { audioGain: sanitizeLooseChannel(source.audioGain, 1) };
   return { audioGain: clamp(finite(source.audioGain, 1), 0, 4) };
 }
@@ -392,7 +398,7 @@ function staticContentFor(type: LayerType, raw: unknown, comp: Pick<Comp, 'w' | 
       };
     case 'video':
       return {
-        ...source,
+        ...withoutLevel(source),
         asset: typeof source.asset === 'string' && source.asset ? source.asset : null,
         fit: source.fit === 'contain' || source.fit === 'stretch' ? source.fit : 'cover',
         trim: finite(source.trim), speed: finite(source.speed, 1),
@@ -432,7 +438,7 @@ function staticContentFor(type: LayerType, raw: unknown, comp: Pick<Comp, 'w' | 
     }
     case 'precomp':
       return {
-        ...source,
+        ...withoutLevel(source),
         comp: typeof source.comp === 'string' && source.comp ? source.comp : null,
         ...audioLevel(source),
         ...(source.audioMuted === true ? { audioMuted: true } : {}),

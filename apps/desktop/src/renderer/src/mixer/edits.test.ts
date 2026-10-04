@@ -43,6 +43,24 @@ describe('mixer edits', () => {
     expect(PM.proj.audioGain).toBe(4);
   });
 
+  it('normalises a soundtrack level written through set_content', () => {
+    const { PM } = editor();
+    // A refused edit rolls the project back to a copy, so always re-read the layer.
+    const clip = () => PM.L('clip');
+    const set = (patch: any) => PM.Edit.apply({ type: 'set_content', target: 'clip', patch }, { label: 'Agent', origin: 'agent' });
+    expect(set({ audioGain: 100 }).ok).toBe(true);
+    expect(clip().d.audioGain).toBe(4);
+    expect(set({ audioGain: -1 }).ok).toBe(true);
+    expect(clip().d.audioGain).toBe(0);
+    expect(set({ audioGain: '0.5' }).ok).toBe(false);
+    expect(clip().d.audioGain).toBe(0);
+    expect(set({ audioGain: null }).ok).toBe(true);
+    expect(Object.hasOwn(clip().d, 'audioGain')).toBe(false);
+    expect(set({ audioMuted: 'yes' }).ok).toBe(false);
+    expect(set({ audioMuted: true }).ok).toBe(true);
+    expect(clip().d.audioMuted).toBe(true);
+  });
+
   it('writes an animated level as a keyframe at the gesture time, not the moving playhead', () => {
     const { PM, music, apply } = editor();
     expect(apply(addKeyCommand(strip('music', 'audio'), 1, 1)).ok).toBe(true);

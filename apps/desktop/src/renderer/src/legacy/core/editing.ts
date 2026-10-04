@@ -286,17 +286,41 @@ function setExpression(command: any) {
   return { id: layer.id, channel, expression: prop.expr };
 }
 
+/* Video soundtracks and precomps carry an optional audio level (absent = unity)
+   and a mute switch. Normalise them before they reach the layer so the engine
+   and the mixer never see a null, a string or an out-of-range level. Returns
+   true when the patch clears the level. */
+function normalizeAudioLevelPatch(layer: any, patch: any) {
+  if (layer.type !== 'video' && layer.type !== 'precomp') return false;
+  if (Object.hasOwn(patch, 'audioMuted') && typeof patch.audioMuted !== 'boolean') {
+    if (patch.audioMuted == null) patch.audioMuted = false;
+    else throw new Error('Audio mute must be on or off');
+  }
+  if (!Object.hasOwn(patch, 'audioGain')) return false;
+  const value: any = patch.audioGain;
+  if (value == null) { delete patch.audioGain; return true; }
+  if (isProperty(value)) return false;
+  if (typeof value !== 'number') throw new Error('Audio gain must be a finite number');
+  patch.audioGain = PM.clamp(finite(value, 'Audio gain'), 0, 4);
+  return false;
+}
+
 function setContent(command: any) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
   const patch: any = safePatch(command.patch, 'content patch');
+  const clearsLevel = normalizeAudioLevelPatch(layer, patch);
+  if (clearsLevel) delete layer.d.audioGain;
   for (const key of Object.keys(patch)) {
     if (isProperty(layer.d?.[key]) && !isProperty(patch[key]) && canAnimateContent(layer, key)) {
       setProperty({ target: layer.id, path: `c.${key}`, value: patch[key], preserveHandEdits: false });
       delete patch[key];
     }
   }
-  if (!Object.keys(patch).length) return { id: layer.id };
+  if (!Object.keys(patch).length) {
+    if (clearsLevel) PM.touch();
+    return { id: layer.id };
+  }
   if (layer.type === 'audio') setAudioContent(layer, patch);
   else if (layer.type === 'extension') setExtensionContent(layer, patch);
   else Object.assign(layer.d, patch);

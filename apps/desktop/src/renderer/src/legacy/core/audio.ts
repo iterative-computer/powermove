@@ -157,8 +157,13 @@ function context() {
 
 /* The open composition's output level is the master fader. It lives on the
    master node so moving it never re-schedules a voice. */
+/* An optional level field: absent or null means unity. */
+function levelOf(value: any) {
+  return value == null ? 1 : clamp(finite(value, 1), 0, 4);
+}
+
 function masterLevel() {
-  return clamp(finite(PM.proj?.audioGain, 1), 0, 4);
+  return levelOf(PM.proj?.audioGain);
 }
 
 function rampParam(param: any, value: number) {
@@ -472,8 +477,8 @@ function disposeAsset(asset: any) {
 function chainGain(layer: any, time: number) {
   let gain = 1;
   for (const { layer: precomp, offset, comp } of layer._audioChain || []) {
-    gain *= clamp(finite(evaluatedValue(PM, precomp, precomp.d?.audioGain, time - offset, 'c.audioGain'), 1), 0, 4);
-    gain *= clamp(finite(comp?.audioGain, 1), 0, 4);
+    gain *= levelOf(evaluatedValue(PM, precomp, precomp.d?.audioGain, time - offset, 'c.audioGain'));
+    gain *= levelOf(comp?.audioGain);
   }
   return gain;
 }
