@@ -1,4 +1,13 @@
-import { TRANSCRIPTION_MODEL_MISSING, type TranscribeRequest, type Transcript, type TranscriptionStatus } from '../../../shared/transcription';
+import {
+  TRANSCRIPTION_MODEL_MISSING,
+  type TranscribeRequest,
+  type Transcript,
+  type TranscriptionStatus
+} from '../../../shared/transcription';
+import { transcriptionBridge } from './host';
+import { openModelSheet } from './sheet';
+
+export { transcriptionBridge };
 
 /*
  * Renderer seam for transcription. Captions and any panel call these; the
@@ -14,18 +23,54 @@ import { TRANSCRIPTION_MODEL_MISSING, type TranscribeRequest, type Transcript, t
  *   `ensureTranscriptionModel` first.
  */
 
+const UNAVAILABLE: TranscriptionStatus = { models: [], activeModelId: null, available: false };
+
 export async function transcriptionStatus(): Promise<TranscriptionStatus> {
-  return { models: [], activeModelId: null };
+  const host = transcriptionBridge();
+  if (!host) return { ...UNAVAILABLE, models: [] };
+  try {
+    return await host.status();
+  } catch {
+    return { ...UNAVAILABLE, models: [] };
+  }
 }
 
-export async function ensureTranscriptionModel(_reason: string): Promise<boolean> {
-  return false;
+export async function ensureTranscriptionModel(reason: string): Promise<boolean> {
+  const status = await transcriptionStatus();
+  if (status.available === false) return false;
+  if (status.activeModelId) return true;
+  return openModelSheet(reason, status);
 }
+
+function failure(message: string, code?: string): Error {
+  const error = new Error(message) as Error & { code?: string };
+  if (code) error.code = code;
+  if (code === 'aborted') error.name = 'AbortError';
+  return error;
+}
+
+let sequence = 0;
 
 export async function transcribe(
-  _request: TranscribeRequest,
-  _onProgress?: (progress: number) => void,
-  _signal?: AbortSignal
+  request: TranscribeRequest,
+  onProgress?: (progress: number) => void,
+  signal?: AbortSignal
 ): Promise<Transcript> {
-  throw Object.assign(new Error('Transcription is not available yet.'), { code: TRANSCRIPTION_MODEL_MISSING });
+  const host = transcriptionBridge();
+  if (!host) throw failure('Transcription is not available here.', TRANSCRIPTION_MODEL_MISSING);
+  if (signal?.aborted) throw failure('Transcription was cancelled.', 'aborted');
+  const requestId = request.requestId ?? `tr-${Date.now().toString(36)}-${++sequence}`;
+  const offProgress = onProgress
+    ? host.onProgress((event) => { if (event.requestId === requestId) onProgress(event.progress); })
+    : null;
+  const abort = () => { void host.cancelTranscribe(requestId).catch(() => undefined); };
+  signal?.addEventListener('abort', abort, { once: true });
+  try {
+    const result = await host.transcribe({ ...request, requestId });
+    if (result.ok) return result.transcript;
+    throw failure(result.message, result.code);
+  } finally {
+    offProgress?.();
+    signal?.removeEventListener('abort', abort);
+  }
 }

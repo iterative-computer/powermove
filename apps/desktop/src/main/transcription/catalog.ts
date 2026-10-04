@@ -51,7 +51,7 @@ export const CATALOG: readonly CatalogModel[] = [
   {
     id: 'parakeet-tdt-0.6b-v3',
     name: 'Parakeet V3',
-    description: 'Fast and accurate. Detects and transcribes 25 European languages.',
+    description: 'Fast and accurate in 25 European languages.',
     kind: 'nemo-transducer',
     languages: 'multi',
     languageCodes: PARAKEET_V3_LANGUAGES,
@@ -70,7 +70,7 @@ export const CATALOG: readonly CatalogModel[] = [
   {
     id: 'parakeet-tdt-0.6b-v2',
     name: 'Parakeet V2',
-    description: 'English only. The most accurate choice for English speech.',
+    description: 'English only. The most accurate for English.',
     kind: 'nemo-transducer',
     languages: 'en',
     languageCodes: ['en'],

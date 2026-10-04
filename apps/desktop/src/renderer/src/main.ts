@@ -8,6 +8,7 @@ import '../../../css/store.css';
 import '../../../css/account.css';
 import '../../../css/vars.css';
 import '../../../css/publish.css';
+import '../../../css/transcription.css';
 import './legacy/core/image-sequence.css';
 import { installWebBridge, remoteLink } from './host/web-bridge';
 
