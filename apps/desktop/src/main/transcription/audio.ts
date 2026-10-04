@@ -28,6 +28,11 @@ export function parseDuration(stderr: string): number | null {
   return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
 }
 
+/** Seconds that will actually be decoded: the requested span, cut short where the media ends. */
+export function spanLength(duration: number, start: number, end?: number): number {
+  return Math.max(0, Math.min(end ?? Infinity, duration) - start);
+}
+
 /** A short, human reason from ffmpeg's error output. */
 export function decodeError(stderr: string): string {
   if (/does not contain any stream|matches no streams|Output file #0 does not contain/i.test(stderr)) return 'This file has no audio to transcribe.';

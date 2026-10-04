@@ -10,7 +10,7 @@
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
 
-import { decodeArgs, decodeError, parseDuration } from './audio';
+import { decodeArgs, decodeError, parseDuration, spanLength } from './audio';
 import { Chunker, SAMPLE_RATE, appendAtSeam, wordsWithin, type AudioWindow } from './chunking';
 import { tokensToWords, wordsToSegments } from './words';
 import type { WorkerRequest, WorkerResponse } from './worker-protocol';
@@ -82,12 +82,18 @@ async function transcribe(request: Extract<WorkerRequest, { type: 'transcribe' }
   const ffmpeg = spawn(request.ffmpeg, decodeArgs(request.file, { start: request.start, end: request.end }), { stdio: ['ignore', 'pipe', 'pipe'] });
   active = { id, ffmpeg };
   let stderr = '';
+  /* The span to decode: the requested end until ffmpeg's banner gives the
+     real duration, which wins when the request runs past the media. */
   let total = request.end !== undefined ? request.end - offset : null;
+  let measured = false;
   ffmpeg.stderr.on('data', (chunk: Buffer) => {
     stderr = (stderr + chunk.toString()).slice(-16_000);
-    if (total === null) {
+    if (!measured) {
       const duration = parseDuration(stderr);
-      if (duration !== null) total = Math.max(0, duration - offset);
+      if (duration !== null) {
+        measured = true;
+        total = spanLength(duration, offset, request.end);
+      }
     }
   });
   const exited = new Promise<number | null>((resolve, reject) => {

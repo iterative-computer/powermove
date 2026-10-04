@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { Chunker, SAMPLE_RATE, appendAtSeam, findCut, wordsWithin } from './chunking';
-import { decodeArgs, decodeError, parseDuration } from './audio';
+import { decodeArgs, decodeError, parseDuration, spanLength } from './audio';
 
 /** Tone with silent gaps at the given seconds (each 0.4 s long). */
 function speech(seconds: number, gaps: number[]): Float32Array {
@@ -95,5 +95,13 @@ describe('ffmpeg decoding', () => {
     expect(parseDuration('nothing')).toBeNull();
     expect(decodeError("Stream map '0:a:0' matches no streams.")).toBe('This file has no audio to transcribe.');
     expect(decodeError('/x: No such file or directory')).toBe('The media file could not be found.');
+  });
+
+  it('measures progress against the span that really decodes', () => {
+    // An end past the media's end stops where the media does (264 s file, 200 → 9999).
+    expect(spanLength(264, 200, 9999)).toBe(64);
+    expect(spanLength(264, 200, 230)).toBe(30);
+    expect(spanLength(264, 0)).toBe(264);
+    expect(spanLength(100, 150)).toBe(0);
   });
 });
