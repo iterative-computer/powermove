@@ -41,6 +41,9 @@ export const MAX_SAMPLED_FRAMES = 8;
 export const MAX_SHEET_CELLS = 48;
 const DEFAULT_SHEET_CELLS = 12;
 const PROCESS_TIMEOUT_MS = 90_000;
+/** One call answers within this, under the clients' ~120 s tool timeout
+ * (Codex tool_timeout_sec, the MCP socket), whatever staging or ffmpeg cost. */
+export const CALL_BUDGET_MS = 105_000;
 /** Decoding every frame of the scanned window costs about this many pixel-frames at most
  * (~5 min of 1080p30, ~40 s of 4K60); past it, auto scans keyframes only. */
 const FULL_SCAN_PIXEL_FRAMES = 1.2e10;
@@ -61,7 +64,14 @@ export interface MediaToolContext {
   renderFrames(times: number[], width: number): Promise<Array<{ data: Uint8Array; mimeType: 'image/png' | 'image/jpeg' }>>;
   composition(): Promise<CompositionInfo>;
   signal?: AbortSignal;
+  /** Epoch ms by which the call must answer; `call` sets it from CALL_BUDGET_MS. */
+  deadline?: number;
 }
+
+/** What bounds one ffmpeg run: the call's cancellation and its deadline. */
+interface Budget { signal?: AbortSignal; deadline?: number }
+
+const remaining = (budget?: Budget): number => budget?.deadline === undefined ? Infinity : budget.deadline - Date.now();
 
 export interface AgentMediaToolsOptions {
   ffmpegPath: string;
@@ -74,6 +84,8 @@ export interface AgentMediaToolsOptions {
 }
 
 interface ProcessResult { code: number | null; stdout: Buffer; stderr: string }
+
+const TOO_LONG = 'ffmpeg took too long on this media for one tool call. Narrow the window with start/end, or ask for fewer frames, and try again.';
 
 export class MediaToolError extends Error {}
 
@@ -103,7 +115,8 @@ export class AgentMediaTools {
     this.jobs.clear();
   }
 
-  async call(tool: string, args: Args, context: MediaToolContext): Promise<AgentToolContent[]> {
+  async call(tool: string, args: Args, given: MediaToolContext): Promise<AgentToolContent[]> {
+    const context: MediaToolContext = { ...given, deadline: given.deadline ?? Date.now() + CALL_BUDGET_MS };
     switch (tool) {
       case 'probe_media': return this.probeMedia(args, context);
       case 'sample_media_frames': return this.sampleFrames(args, context);
@@ -116,9 +129,12 @@ export class AgentMediaTools {
 
   /* ── plumbing ───────────────────────────────────────────── */
 
-  private run(args: string[], signal?: AbortSignal, maxStdout = 256 * 1024 * 1024): Promise<ProcessResult> {
+  private run(args: string[], budget?: Budget, maxStdout = 256 * 1024 * 1024): Promise<ProcessResult> {
+    const signal = budget?.signal;
+    const timeout = Math.min(PROCESS_TIMEOUT_MS, remaining(budget));
     return new Promise((resolve, reject) => {
       if (signal?.aborted) { reject(new MediaToolError('The tool call was cancelled.')); return; }
+      if (timeout <= 0) { reject(new MediaToolError(TOO_LONG)); return; }
       const child = spawn(this.options.ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
       const chunks: Buffer[] = [];
       let size = 0, stderr = '', settled = false;
@@ -131,7 +147,7 @@ export class AgentMediaTools {
         else resolve({ code, stdout: Buffer.concat(chunks), stderr });
       };
       const abort = () => { child.kill('SIGKILL'); finish(new MediaToolError('The tool call was cancelled.')); };
-      const timer = setTimeout(() => { child.kill('SIGKILL'); finish(new MediaToolError('ffmpeg took too long on this media. Narrow the window with start/end and try again.')); }, PROCESS_TIMEOUT_MS);
+      const timer = setTimeout(() => { child.kill('SIGKILL'); finish(new MediaToolError(TOO_LONG)); }, timeout);
       timer.unref();
       signal?.addEventListener('abort', abort, { once: true });
       child.stdout.on('data', (chunk: Buffer) => {
@@ -146,8 +162,8 @@ export class AgentMediaTools {
     });
   }
 
-  private async ffmpeg(args: string[], signal?: AbortSignal): Promise<ProcessResult> {
-    const result = await this.run(args, signal);
+  private async ffmpeg(args: string[], budget?: Budget): Promise<ProcessResult> {
+    const result = await this.run(args, budget);
     if (result.code !== 0) {
       const detail = result.stderr.trim().split('\n').filter(Boolean).slice(-2).join(' ').slice(0, 400);
       throw new MediaToolError(`ffmpeg could not read this media${detail ? `: ${detail}` : '.'}`);
@@ -156,18 +172,18 @@ export class AgentMediaTools {
   }
 
   /** One decoded frame to `options.output`; ffmpeg exits cleanly even when nothing was decoded. */
-  private async frame(options: Parameters<typeof frameArgs>[0], signal?: AbortSignal): Promise<void> {
+  private async frame(options: Parameters<typeof frameArgs>[0], budget?: Budget): Promise<void> {
     // A container often runs a little past its last video frame (audio, rounding):
     // a seek there decodes nothing, so step back to the frame that is on screen.
     for (const back of [0, 0.05, 0.25, 1]) {
       if (back && options.time - back < 0) break;
-      await this.ffmpeg(frameArgs({ ...options, time: Math.max(0, options.time - back) }), signal);
+      await this.ffmpeg(frameArgs({ ...options, time: Math.max(0, options.time - back) }), budget);
       if ((await stat(options.output).catch(() => null))?.size) return;
     }
     throw new MediaToolError(`No frame could be decoded at ${round(options.time, 3)}s.`);
   }
 
-  private async probe(file: string, signal?: AbortSignal): Promise<MediaProbe> {
+  private async probe(file: string, budget?: Budget): Promise<MediaProbe> {
     const info = await stat(file).catch(() => null);
     if (!info?.isFile()) throw new MediaToolError('The media file is no longer readable.');
     const key = `${file}|${info.size}|${info.mtimeMs}`;
@@ -175,7 +191,7 @@ export class AgentMediaTools {
     if (!pending) {
       pending = (async () => {
         // `-i` with no output exits non-zero by design; the banner is the probe.
-        const result = await this.run(['-hide_banner', '-nostdin', '-i', file], signal);
+        const result = await this.run(['-hide_banner', '-nostdin', '-i', file], budget);
         const probe = parseProbe(result.stderr);
         if (!probe.format && !probe.video.length && !probe.audio.length) throw new MediaToolError('ffmpeg does not recognise this media.');
         return probe;
@@ -201,6 +217,20 @@ export class AgentMediaTools {
   private async withTemp<T>(work: (directory: string) => Promise<T>): Promise<T> {
     const directory = await mkdtemp(path.join(this.options.tempRoot ?? os.tmpdir(), 'powermove-media-tool-'));
     try { return await work(directory); } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+
+  /** The renderer names the file; staging a large asset can outlast the call, so stop waiting at the deadline. */
+  private async resolve(context: MediaToolContext, target: { assetId?: string; layerId?: string }): Promise<AgentMediaSource> {
+    const pending = context.resolve(target);
+    const wait = remaining(context);
+    if (wait === Infinity) return pending;
+    pending.catch(() => undefined);
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new MediaToolError('Powermove is still copying this media for tools to read (its original file is not on disk, so the stored copy is used). The copy continues; call this tool again in a minute.')), Math.max(0, wait));
+      timer.unref?.();
+    });
+    try { return await Promise.race([pending, late]); } finally { clearTimeout(timer); }
   }
 
   private target(args: Args): { assetId?: string; layerId?: string } {
@@ -232,8 +262,8 @@ export class AgentMediaTools {
   /* ── probe_media ────────────────────────────────────────── */
 
   private async probeMedia(args: Args, context: MediaToolContext): Promise<AgentToolContent[]> {
-    const source = await context.resolve(this.target(args));
-    const probe = await this.probe(source.path, context.signal);
+    const source = await this.resolve(context, this.target(args));
+    const probe = await this.probe(source.path, context);
     return [text(clean({
       asset: this.assetSummary(source),
       ...(source.asset.proxy ? { note: 'The original file is not on disk; these are Powermove\'s stored playback proxy\'s codecs. Timing and content match the original.' } : {}),
@@ -269,7 +299,7 @@ export class AgentMediaTools {
     });
   }
 
-  private async autoTimes(source: AgentMediaSource, duration: number, frameRate: number, pixels: number, args: Args, max: number, signal?: AbortSignal) {
+  private async autoTimes(source: AgentMediaSource, duration: number, frameRate: number, pixels: number, args: Args, max: number, budget?: Budget) {
     const layer = source.layer;
     let from = finite(args.start) ? args.start : layer ? layer.from : 0;
     let to = finite(args.end) ? args.end : layer ? layer.from + layer.duration : duration;
@@ -283,7 +313,7 @@ export class AgentMediaTools {
     if (to - from < 0.05) throw new MediaToolError('The window is too short to scan for scene changes.');
     const keyframesOnly = (to - from) * frameRate * pixels > FULL_SCAN_PIXEL_FRAMES;
     const scanFps = keyframesOnly ? 1 : 2;
-    const { stdout } = await this.ffmpeg(triageScanArgs(source.path, from, to - from, scanFps, keyframesOnly), signal);
+    const { stdout } = await this.ffmpeg(triageScanArgs(source.path, from, to - from, scanFps, keyframesOnly), budget);
     const { picks, states } = pickInformativeTimes(new Uint8Array(stdout.buffer, stdout.byteOffset, stdout.byteLength), from, scanFps, max);
     if (!picks.length) throw new MediaToolError('No frames could be decoded for scene detection.');
     return {
@@ -297,8 +327,8 @@ export class AgentMediaTools {
   }
 
   private async sampleFrames(args: Args, context: MediaToolContext): Promise<AgentToolContent[]> {
-    const source = await context.resolve(this.target(args));
-    const probe = await this.probe(source.path, context.signal);
+    const source = await this.resolve(context, this.target(args));
+    const probe = await this.probe(source.path, context);
     const video = probe.video[0];
     const size = displaySize(video);
     if (!video || !size) throw new MediaToolError(`“${source.asset.name}” has no video stream. Use media_waveform or transcribe_media for audio.`);
@@ -309,7 +339,7 @@ export class AgentMediaTools {
     let frames: Array<{ source: number; composition?: number; since?: number }>;
     let auto: { states: number; scan: string; window: [number, number] } | null = null;
     if (args.auto === true) {
-      const found = await this.autoTimes(source, duration, fps, size.width * size.height, args, Math.min(MAX_SAMPLED_FRAMES, Math.max(1, int(args.count) ?? MAX_SAMPLED_FRAMES)), context.signal);
+      const found = await this.autoTimes(source, duration, fps, size.width * size.height, args, Math.min(MAX_SAMPLED_FRAMES, Math.max(1, int(args.count) ?? MAX_SAMPLED_FRAMES)), context);
       frames = found.picks;
       auto = { states: found.states, scan: found.scan, window: found.window };
     } else {
@@ -320,7 +350,7 @@ export class AgentMediaTools {
     const dims = fitBudget(size.width, size.height, FRAME_QUALITY[quality]);
     const images = await this.withTemp(async (directory) => mapLimit(frames, 3, async (frame, index) => {
       const output = path.join(directory, `frame-${index}.jpg`);
-      await this.frame({ input: source.path, time: frame.source, width: dims.width, height: dims.height, format: 'jpeg', output }, context.signal);
+      await this.frame({ input: source.path, time: frame.source, width: dims.width, height: dims.height, format: 'jpeg', output }, context);
       return readFile(output);
     }));
     const timeBase = source.layer ? 'composition' : 'source';
@@ -358,10 +388,10 @@ export class AgentMediaTools {
         for (const [index, frame] of rendered.entries()) {
           const input = path.join(directory, `render-${index}.${frame.mimeType === 'image/png' ? 'png' : 'jpg'}`);
           await writeFile(input, frame.data);
-          await this.frame({ input, time: 0, width: plan.cellWidth, height: plan.cellHeight, pad: true, label: formatClock(cells[index]!), fontFile: font, format: 'jpeg', output: path.join(directory, `cell-${String(index).padStart(3, '0')}.jpg`) }, context.signal);
+          await this.frame({ input, time: 0, width: plan.cellWidth, height: plan.cellHeight, pad: true, label: formatClock(cells[index]!), fontFile: font, format: 'jpeg', output: path.join(directory, `cell-${String(index).padStart(3, '0')}.jpg`) }, context);
         }
         const output = path.join(directory, 'sheet.jpg');
-        await this.ffmpeg(tileArgs(path.join(directory, 'cell-%03d.jpg'), plan, output), context.signal);
+        await this.ffmpeg(tileArgs(path.join(directory, 'cell-%03d.jpg'), plan, output), context);
         return readFile(output);
       });
       return [
@@ -369,8 +399,8 @@ export class AgentMediaTools {
         { type: 'image', data: new Uint8Array(sheet), mimeType: 'image/jpeg' }
       ];
     }
-    const source = await context.resolve(this.target(args));
-    const probe = await this.probe(source.path, context.signal);
+    const source = await this.resolve(context, this.target(args));
+    const probe = await this.probe(source.path, context);
     const size = displaySize(probe.video[0]);
     if (!size) throw new MediaToolError(`“${source.asset.name}” has no video stream. Use media_waveform for audio.`);
     const duration = this.duration(source, probe);
@@ -379,10 +409,10 @@ export class AgentMediaTools {
     const plan = planSheet(cells.length, size.width / size.height, columns);
     const sheet = await this.withTemp(async (directory) => {
       await mapLimit(cells, 3, async (cell, index) => {
-        await this.frame({ input: source.path, time: cell.source, width: plan.cellWidth, height: plan.cellHeight, pad: true, label: formatClock(cell.composition ?? cell.source), fontFile: font, format: 'jpeg', output: path.join(directory, `cell-${String(index).padStart(3, '0')}.jpg`) }, context.signal);
+        await this.frame({ input: source.path, time: cell.source, width: plan.cellWidth, height: plan.cellHeight, pad: true, label: formatClock(cell.composition ?? cell.source), fontFile: font, format: 'jpeg', output: path.join(directory, `cell-${String(index).padStart(3, '0')}.jpg`) }, context);
       });
       const output = path.join(directory, 'sheet.jpg');
-      await this.ffmpeg(tileArgs(path.join(directory, 'cell-%03d.jpg'), plan, output), context.signal);
+      await this.ffmpeg(tileArgs(path.join(directory, 'cell-%03d.jpg'), plan, output), context);
       return readFile(output);
     });
     return [
@@ -420,14 +450,14 @@ export class AgentMediaTools {
   }
 
   private async waveform(args: Args, context: MediaToolContext): Promise<AgentToolContent[]> {
-    const source = await context.resolve(this.target(args));
-    const probe = await this.probe(source.path, context.signal);
+    const source = await this.resolve(context, this.target(args));
+    const probe = await this.probe(source.path, context);
     if (!probe.audio.length) throw new MediaToolError(`“${source.asset.name}” has no audio stream.`);
     const duration = this.duration(source, probe);
     const [from, to] = this.sourceWindow(source, duration, args);
     const thresholdDb = finite(args.silenceThresholdDb) ? Math.max(-90, Math.min(-10, args.silenceThresholdDb)) : -40;
     const minDuration = finite(args.minSilence) ? Math.max(0.05, Math.min(10, args.minSilence)) : 0.4;
-    const analysis = await this.ffmpeg(analysisArgs(source.path, from, to - from, { thresholdDb, minDuration }), context.signal);
+    const analysis = await this.ffmpeg(analysisArgs(source.path, from, to - from, { thresholdDb, minDuration }), context);
     const silences = parseSilences(analysis.stderr, from, to);
     const loudness = parseLoudness(analysis.stderr);
     const silent = silences.reduce((sum, [start, end]) => sum + end - start, 0);
@@ -451,7 +481,7 @@ export class AgentMediaTools {
     const font = await this.fontFile();
     const image = await this.withTemp(async (directory) => {
       const output = path.join(directory, 'waveform.png');
-      await this.ffmpeg(waveformArgs({ input: source.path, start: from, duration: to - from, width, height: 200, silences, fontFile: font, output }), context.signal);
+      await this.ffmpeg(waveformArgs({ input: source.path, start: from, duration: to - from, width, height: 200, silences, fontFile: font, output }), context);
       return readFile(output);
     });
     return [
@@ -480,9 +510,9 @@ export class AgentMediaTools {
     // Without a ready model, say so before staging any media for it.
     const status = await this.service().status().catch(() => null);
     if (status && status.activeModelId === null && !status.models.some((model) => model.state === 'ready')) throw this.modelRequired('speech in this project');
-    const source = await context.resolve(target);
+    const source = await this.resolve(context, target);
     const layer = source.layer;
-    const probe = await this.probe(source.path, context.signal);
+    const probe = await this.probe(source.path, context);
     if (!probe.audio.length) throw new MediaToolError(`“${source.asset.name}” has no audio to transcribe.`);
     const duration = this.duration(source, probe);
     const [from, to] = layer || finite(args.start) || finite(args.end) ? this.sourceWindow(source, duration, args) : [0, duration];
@@ -496,7 +526,8 @@ export class AgentMediaTools {
     let transcript = this.transcripts.get(key);
     if (!transcript) {
       const job = this.jobs.get(key) ?? this.startTranscription(key, source, { from, to, whole, ...(language ? { language } : {}) });
-      const waitMs = this.options.transcribeWaitMs ?? 80_000;
+      // Whatever resolving and probing used comes out of the wait, so the answer beats the client's timeout.
+      const waitMs = Math.max(0, Math.min(this.options.transcribeWaitMs ?? 80_000, remaining(context) - 2_000));
       let timer: NodeJS.Timeout | undefined;
       const waited = await Promise.race([
         job.promise.then((value) => ({ value })),

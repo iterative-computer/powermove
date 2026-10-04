@@ -264,6 +264,23 @@ describe('transcribe_media against the transcription seam', () => {
     expect(second.cursor).toBe(first.nextCursor);
   });
 
+  it('answers within the call budget whatever resolving the media cost', async () => {
+    const transcribe = vi.fn(() => new Promise<Transcript>(() => {}));
+    const media = tools({ transcription: () => service(transcribe) });
+    // Resolving left 2.3 s of the budget: the wait shrinks to fit instead of the default 80 s.
+    const started = Date.now();
+    const pending = json(await media.call('transcribe_media', { assetId: 'a1' }, { ...context(source()), deadline: Date.now() + 2_300 }));
+    expect(pending).toMatchObject({ status: 'transcribing' });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    // A staging that outlasts the budget is not waited for; the copy carries on.
+    let staged: (value: AgentMediaSource) => void = () => {};
+    const slow = context(source(), { resolve: vi.fn(() => new Promise<AgentMediaSource>((resolve) => { staged = resolve; })) });
+    await expect(media.call('probe_media', { assetId: 'a1' }, { ...slow, deadline: Date.now() + 50 })).rejects.toThrow(/still copying/);
+    staged(source());
+    // ffmpeg runs get only what is left of the budget.
+    await expect(media.call('media_waveform', { assetId: 'a1' }, { ...context(source()), deadline: Date.now() - 1 })).rejects.toThrow(/too long/);
+  });
+
   it('answers "still transcribing" for a long job and hands over the result on the next call', async () => {
     let finish: (value: Transcript) => void = () => {};
     const transcribe = vi.fn(() => new Promise<Transcript>((resolve) => { finish = resolve; }));
