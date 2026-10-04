@@ -6,6 +6,8 @@ import { editVideo, videoAssets } from './video-editing';
 import { validateEffect } from '../../kernel/glsl';
 import { COMMAND_JSON_LIMIT } from '../../../../shared/edit-limits';
 import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
+import { TRANSCRIPTION_MODEL_MISSING } from '../../../../shared/transcription';
+import { ensureTranscriptionModel, transcriptionStatus } from '../../transcription/client';
 /* Ported from js/assistant/harness.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import type {
@@ -595,6 +597,52 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
         message: applied.message || 'Applied editable Powermove commands.',
         revision: transaction.revision
       })],
+      changed: true,
+      revision: transaction.revision
+    };
+  }
+  /* ── captions ─────────────────────────────────────────────── */
+  if (request.tool === 'export_captions') {
+    const layer = PM.L(String(request.arguments.layerId || ''));
+    if (!layer || layer.type !== 'captions') throw new Error('Read a captions layer ID from get_project_state.');
+    const format = request.arguments.format === 'vtt' ? 'vtt' : 'srt';
+    const text = PM.Captions.exportText(layer, format);
+    return { ok: true, content: [toolText({ layerId: layer.id, format, cues: layer.d.cues.length, text })], revision: currentRevision() };
+  }
+  if (request.tool === 'generate_captions') {
+    const ids = Array.isArray(request.arguments.layerIds) ? request.arguments.layerIds.map(String) : [];
+    const layers = ids.map((id: string) => PM.L(id));
+    if (!ids.length || layers.some((layer: any) => !layer || (layer.type !== 'audio' && layer.type !== 'video') || !layer.d?.asset)) {
+      throw new Error('generate_captions needs audio or video layer IDs with media, from get_project_state.');
+    }
+    const missing = () => new Error(`${TRANSCRIPTION_MODEL_MISSING}: No transcription model is installed. Powermove has asked the user to download one (Settings › Transcription). Tell them, and try again after the download finishes.`);
+    const status = await transcriptionStatus();
+    if (!status.activeModelId) {
+      void ensureTranscriptionModel(`The agent wants to caption ${layers.map((layer: any) => `“${layer.name}”`).join(', ')}`);
+      throw missing();
+    }
+    const label = text(request.arguments.label, 'Generate captions', 80);
+    const transaction = beginLiveTransaction(request, label);
+    if (currentRevision() !== transaction.revision) {
+      throw new Error(`The project changed during the agent run (expected revision ${transaction.revision}, found ${currentRevision()}). Read get_project_state and retry.`);
+    }
+    const preset = typeof request.arguments.style === 'string' ? request.arguments.style : null;
+    const result = await PM.Captions.generate(ids, {
+      interactive: false,
+      apply: (command: any) => {
+        if (currentRevision() !== transaction.revision) return { ok: false, message: 'The project changed while transcribing. Read get_project_state and retry.' };
+        return PM.Edit.apply(preset ? { ...command, style: { preset } } : command,
+          { label, origin: 'agent', baseRevision: transaction.revision, historyGroup: transaction.historyGroup });
+      }
+    });
+    if (!result.ok) throw result.status === 'model-missing' ? missing() : new Error(result.message || 'Could not generate captions.');
+    transaction.label = label;
+    transaction.revision = currentRevision();
+    transaction.changed = true;
+    const layer = PM.L(result.layerId);
+    return {
+      ok: true,
+      content: [toolText({ layerId: result.layerId, cues: layer?.d?.cues?.length ?? 0, language: layer?.d?.language ?? null, revision: transaction.revision })],
       changed: true,
       revision: transaction.revision
     };

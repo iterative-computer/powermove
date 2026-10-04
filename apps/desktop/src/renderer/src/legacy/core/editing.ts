@@ -156,10 +156,10 @@ function rememberLive(command: any) {
   const mergeable: any = new Set(['set_property', 'set_layer', 'set_content', 'set_composition', 'set_scene_parameter', 'reorder_layer']);
   /* A cue drag dispatches absolute times for the same cues every frame; only
      the last one describes the edit. */
-  const captionDrag = copy.type === 'edit_captions' && copy.op === 'update';
+  const captionDrag = copy.type === 'edit_captions' && (copy.op === 'update' || copy.op === 'style');
   if (!mergeable.has(copy.type) && !captionDrag) { live.commands.push(copy); return; }
   const key: any = captionDrag
-    ? `${copy.type}:${target}:${(copy.cues || []).map((cue: any) => cue.id).sort().join(',')}`
+    ? `${copy.type}:${target}:${copy.op}:${copy.op === 'style' ? Object.keys(copy.style || {}).sort().join(',') : (copy.cues || []).map((cue: any) => cue.id).sort().join(',')}`
     : copy.type === 'set_property'
     ? `${copy.type}:${target}:${copy.path || copy.channel}`
     : copy.type === 'set_scene_parameter'

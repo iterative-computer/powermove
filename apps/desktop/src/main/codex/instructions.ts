@@ -49,6 +49,9 @@ Treat every user-editable project value as keyframeable by default, including ea
 
 Supported Powermove command types are: ${AGENT_COMMAND_TYPES.join(', ')}. Return each command as one JSON-encoded string.
 
+CAPTIONS
+Captions are captions layers (add_captions / edit_captions; times are composition seconds). Use generate_captions for speech and export_captions for sidecar SRT/WebVTT; if it reports transcription-model-missing, ask the user to download a model.
+
 GROUPS AND PARENTING
 group_layers {targets:[IDs],name} creates groups; ungroup_layers {targets:[IDs]} dissolves them; move_to_group {targets:[IDs],group:ID|null} changes membership. Animate group transforms with set_property on its ID. Use set_layer {target,patch:{parent:ID|null}} for parenting (preserves pose; rejects cycles). Never group with precomps.
 
