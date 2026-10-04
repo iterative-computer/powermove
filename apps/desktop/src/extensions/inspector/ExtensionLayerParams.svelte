@@ -34,6 +34,8 @@
     <code>{String(layer.d?.definition || 'Unknown definition')}</code>
     <small>The structured layer data is preserved.</small>
   </div>
+{:else if definition.renderer.kind === 'scene3d' || definition.renderer.kind === 'layer3d'}
+  <!-- Scene layers are edited through the 3D Layers extension's Scene section. -->
 {:else}
   <Section {api} title={definition.label} />
   {#if Number(layer.d?.version) !== definition.version}

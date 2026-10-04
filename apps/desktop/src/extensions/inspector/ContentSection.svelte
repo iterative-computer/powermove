@@ -25,6 +25,7 @@
   let { layer, fontsVersion = 0 }: { layer: any; fontsVersion?: number } = $props();
 
   const content = $derived((doc.tick.values, doc.proj, transport.time, api.anim.resolveContent(layer, transport.time) as Record<string, any>));
+  const modelLayer = $derived((doc.tick.structure, doc.proj, layer.type==='extension' && api.layers.get(String(layer.d?.definition || ''))?.renderer.kind==='layer3d'));
   const shape = $derived((doc.tick.values, doc.proj, content.shape));
   const assets = $derived((doc.tick.assets, doc.tick.structure, doc.proj, Object.values(api.project.get()?.assets ?? {}) as any[]));
   const shaderMeta = $derived((doc.tick.values, doc.proj, api.uiState.getShaderMeta(layer)));
@@ -190,7 +191,7 @@
 
 </script>
 
-{#if !(layer.type === 'shape' && layer.d.paths?.length)}<Section {api} title="Content" />{/if}
+{#if !modelLayer && !(layer.type === 'shape' && layer.d.paths?.length)}<Section {api} title="Content" />{/if}
 
 {#if layer.type === 'text'}
   <AnimatedRow {layer} label="Text" path="c.text">
@@ -367,7 +368,7 @@
   {/if}
   <AnimatedRow {layer} label="Width" path="c.w"><NumField {api} {mixed} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></AnimatedRow>
   <AnimatedRow {layer} label="Height" path="c.h"><NumField {api} {mixed} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></AnimatedRow>
-{:else if layer.type === 'extension'}
+{:else if layer.type === 'extension' && !modelLayer}
   <AnimatedRow {layer} label="Width" path="c.w"><NumField {api} {mixed} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></AnimatedRow>
   <AnimatedRow {layer} label="Height" path="c.h"><NumField {api} {mixed} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></AnimatedRow>
 {/if}

@@ -1,6 +1,8 @@
 import { installLayerMenu } from './layer-menu';
 import { installParentPickwhip } from './parent-pickwhip';
 import { evaluatedValue } from '../core/content-properties';
+import { createObject } from '../../core/scene3d/schema';
+import { LAYER3D_DEFINITIONS } from '../../core/scene3d/layers';
 import { materializeSvgPaths } from '../core/svg-import';
 import { temporalKeys } from '../core/temporal-bridge';
 import { inspectorService, timelineService, toolService, viewerService } from '../core/services';
@@ -170,13 +172,15 @@ const nativeCommandForAsset = (id?: any, at: any = PM.time) => {
   const meta: any = PM.proj.assets[id]; if (!meta) return;
   const a: any = PM.assets?.get?.(id) || meta;
   if (a.kind === 'model') {
-    const definition = a.layerDefinition || 'powermove.3d.obj-model';
+    const definition = a.layerDefinition || LAYER3D_DEFINITIONS.object;
     if (!PM.layerDefinition?.(definition)) return;
     return {
       type: 'add_layer', layerType: 'extension', name: a.name,
       from: PM.snapF(at, PM.proj.fps),
       duration: Math.max(1 / PM.proj.fps, PM.proj.dur - at),
-      content: { definition, data: { assetId: id, objects: [{ id: 'model', assetId: id }] } },
+      content: definition === LAYER3D_DEFINITIONS.object
+        ? {definition,data:{object:{source:{assetId:id},material:createObject('model').material,useSourceMaterials:a.format==='glb'||a.format==='gltf',castShadow:true,receiveShadow:true}}}
+        : { definition, data: { assetId: id, objects: [{ id: 'model', assetId: id }] } },
       select: true,
     };
   }

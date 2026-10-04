@@ -192,11 +192,12 @@ function layerLists(project: any) {
 }
 
 function layerAssetId(layer: any) {
-  return layer?.d?.asset || (layer?.type === 'extension' ? layer?.d?.data?.assetId : null) || null;
+  return layer?.d?.asset || (layer?.type === 'extension' ? (layer?.d?.data?.object?.source?.assetId || layer?.d?.data?.assetId) : null) || null;
 }
 
 function replaceLayerAssetId(layer: any, assetId: any) {
   if (layer?.d?.asset) layer.d.asset = assetId;
+  else if(layer?.d?.data?.object?.source?.assetId)layer.d.data.object.source.assetId=assetId;
   else if (layer?.type === 'extension' && layer?.d?.data?.assetId) layer.d.data.assetId = assetId;
 }
 
@@ -204,6 +205,11 @@ function referenceCount(project: any, assetId: any) {
   let count: any = 0;
   layerLists(project).forEach((layers: any) => layers.forEach((layer: any) => {
     if (layerAssetId(layer) === assetId) count++;
+    for(const texture of Object.values(layer?.d?.data?.object?.material?.maps || {}))if(texture===assetId)count++;
+    for(const object of layer?.d?.data?.scene?.objects || []) {
+      if(object.source?.assetId===assetId)count++;
+      for(const texture of Object.values(object.material?.maps || {}))if(texture===assetId)count++;
+    }
   }));
   return count;
 }
@@ -214,6 +220,14 @@ function removeAsset(project: any, assetId: any) {
   layerLists(project).forEach((layers: any) => {
     for (let index: any = layers.length - 1; index >= 0; index--) {
       const layer: any = layers[index];
+      for(const [slot,id] of Object.entries(layer?.d?.data?.object?.material?.maps || {}))if(id===assetId)delete layer.d.data.object.material.maps[slot];
+      const scene=layer?.d?.data?.scene;
+      if(scene) {
+        const removedObjects=new Set(scene.objects.filter((o:any)=>o.source?.assetId===assetId).map((o:any)=>o.id));
+        for(let n=0;n<scene.objects.length;n++)for(const o of scene.objects)if(removedObjects.has(o.parent))removedObjects.add(o.id);
+        scene.objects=scene.objects.filter((o:any)=>!removedObjects.has(o.id));
+        for(const o of scene.objects)for(const [slot,id] of Object.entries(o.material?.maps || {}))if(id===assetId)delete o.material.maps[slot];
+      }
       if (layerAssetId(layer) === assetId) {
         removedLayerIds.push(layer.id);
         layers.splice(index, 1);

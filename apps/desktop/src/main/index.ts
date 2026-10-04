@@ -1140,6 +1140,10 @@ if (!hasSingleInstanceLock) {
       : app.getAppPath();
     const apiPackEntries: Array<[name: string, devPath: string]> = [
       ['EXTENSIONS.md', 'docs/EXTENSIONS.md'],
+      ['SCENE3D.md', 'docs/SCENE3D.md'],
+      ['scene3d-schema.ts', 'src/renderer/src/core/scene3d/schema.ts'],
+      ['scene3d-layers.ts', 'src/renderer/src/core/scene3d/layers.ts'],
+      ['scene3d-operations.ts', 'src/renderer/src/core/scene3d/operations.ts'],
       ['BACKGROUND_TESTING.md', 'docs/background-testing.md'],
       ['api.ts', 'src/renderer/src/kernel/api.ts'],
       ['extensions.ts', '../../packages/registry/src/manifest.ts'],

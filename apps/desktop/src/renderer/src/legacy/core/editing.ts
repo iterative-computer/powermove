@@ -7,10 +7,14 @@ import { preserveParentPose } from './parenting';
 import { expressionDiagnostic } from './expression';
 import { inspectorService, shaderHooks } from './services';
 import { compactEditLog } from '../../core/edit-log';
+import { layer3DRole, parseLayer3DData, initializeLayer3D, validateLayer3DChannel } from '../../core/scene3d/layers';
+import { validateSceneLayer } from '../../core/scene3d/operations';
+import { sceneProperties,parseScene,validateSceneChannel,SCENE3D_DEFINITION } from '../../core/scene3d/schema';
 /* Ported from js/core/editing.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
 export function install(PM: PMRegistry): void {
+const validate3DChannel=(layer:any,path:string,prop:any)=>layer3DRole(layer)?validateLayer3DChannel(layer,path,prop):validateSceneChannel(path,prop);
 const FORBIDDEN_KEYS: any = new Set(['__proto__', 'prototype', 'constructor']);
 const AUDIO_CONTENT_FIELDS: any = new Set(['asset', 'trim', 'gain', 'fadeIn', 'fadeOut']);
 /* Trust classification for every command origin. Trust decisions use the RAW
@@ -192,6 +196,7 @@ function setProperty(command: any) {
   const current: any = PM.evP(layer, prop, command.time == null ? PM.time : command.time, channel);
   let value: any = command.value;
   if (typeof current === 'number') value = finite(value, channel);
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer)))validate3DChannel(layer,channel,{...prop,v:value});
   const time: any = command.time == null ? PM.time : finite(command.time, 'time');
   const mode: any = command.mode || 'auto';
   if (mode === 'keyframe' || (mode === 'auto' && prop.kf.length)) {
@@ -227,6 +232,11 @@ function replaceKeyframes(command: any) {
     const value: any = typeof prop.v === 'number' ? finite(key.value, `keyframe ${index + 1} value`) : key.value;
     return { time, value, ease: key.ease || 'linear', hold: !!key.hold };
   });
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer))){
+    const candidate={...prop,kf:[...(command.replace===false?prop.kf:[]),...next.map((k:any)=>({t:k.time,v:k.value}))]};
+    if(command.expression!==undefined){const diagnostic=command.expression?expressionDiagnostic(command.expression):null;if(diagnostic)throw new Error(diagnostic);candidate.expr=command.expression || null;}
+    validate3DChannel(layer,channel,candidate);
+  }
   if (command.replace !== false) {
     if (prop.kf.length && !next.length) prop.v = PM.evP(layer, prop, PM.time, channel);
     prop.kf = [];
@@ -236,6 +246,7 @@ function replaceKeyframes(command: any) {
     made.hold = key.hold;
   }
   if (command.expression !== undefined) {const diagnostic=command.expression?expressionDiagnostic(command.expression):null;if(diagnostic)throw new Error(diagnostic);prop.expr=command.expression||null;}
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer)))validate3DChannel(layer,channel,prop);
   PM.touch();
   return { id: layer.id, channel, keyframes: prop.kf.length };
 }
@@ -272,22 +283,40 @@ function setEasing(command: any) {
   return { keyframes: found.length, curve };
 }
 
-function setExpression(command: any) {
+function setExpression(command: any, meta: any = {}) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
   const { channel, prop }: any = property(layer, command.path || command.channel);
   if (!prop) throw new Error(`Property “${channel}” was not found on “${layer.name}”`);
   const diagnostic = command.expression ? expressionDiagnostic(command.expression) : null;
   if (diagnostic) throw new Error(diagnostic);
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer))){
+    if(isGeneratedOrigin(meta.origin)&&lockedIntent(layer,channel))throw new Error(`Preserved hand-edited ${channel}`);
+    validate3DChannel(layer,channel,{...prop,expr:command.expression || null});
+  }
   prop.expr = command.expression || null;
   PM.touch();
   return { id: layer.id, channel, expression: prop.expr };
 }
 
-function setContent(command: any) {
+function setContent(command: any, meta: any = {}) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
   const patch: any = safePatch(command.patch, 'content patch');
+  const role3d=layer3DRole(layer);
+  if(role3d && patch.data){
+    patch.data=parseLayer3DData(role3d,{...layer.d.data,...patch.data});
+    if(isGeneratedOrigin(meta.origin)){
+      const future=new Map(sceneProperties({d:{...layer.d,data:patch.data}}).map(p=>[p.key,p.prop]));
+      for(const {key,prop} of sceneProperties(layer))if(lockedIntent(layer,key)&&JSON.stringify(prop)!==JSON.stringify(future.get(key)))throw new Error(`Preserved hand-edited ${key}`);
+    }
+  }
+  if(layer.d?.definition===SCENE3D_DEFINITION && patch.data?.scene)patch.data.scene=parseScene(patch.data.scene);
+  if(layer.d?.definition===SCENE3D_DEFINITION && patch.data?.scene && isGeneratedOrigin(meta.origin)) {
+    const next=parseScene(patch.data.scene),future=new Map(sceneProperties({d:{data:{scene:next}}}).map(p=>[p.key,p.prop]));
+    for(const {key,prop} of sceneProperties(layer)) if(lockedIntent(layer,key) && JSON.stringify(prop)!==JSON.stringify(future.get(key)))
+      throw new Error(`Preserved hand-edited ${key}; edit unprotected 3D channels instead`);
+  }
   for (const key of Object.keys(patch)) {
     if (isProperty(layer.d?.[key]) && !isProperty(patch[key]) && canAnimateContent(layer, key)) {
       setProperty({ target: layer.id, path: `c.${key}`, value: patch[key], preserveHandEdits: false });
@@ -407,6 +436,7 @@ function setLayer(command: any) {
   }
   if (patch.color != null) layer.color = String(patch.color);
   if (patch.collapsed != null) layer.collapsed = !!patch.collapsed;
+  if (patch.threeD === false && layer3DRole(layer)) throw new Error('Models, lights and cameras are always 3D layers');
   if (patch.threeD != null) {
     if (layer.type === 'audio' || layer.type === 'adjustment') throw new Error('This layer cannot be a 3D layer');
     layer.threeD = !!patch.threeD;
@@ -497,6 +527,7 @@ function addLayer(command: any) {
     }
     if (!command.color && extensionDefinition.color) layer.color = extensionDefinition.color;
   }
+  initializeLayer3D(layer, opts.p);
   if (command.id != null) {
     if (PM.L(command.id)) throw new Error(`Layer id already exists: ${command.id}`);
     layer.id = String(command.id);
@@ -836,8 +867,8 @@ function runOne(sourceCommand: any, meta: any = {}) {
     case 'set_property': data = setProperty(command); break;
     case 'replace_keyframes': data = replaceKeyframes(command); break;
     case 'set_easing': data = setEasing(command); break;
-    case 'set_expression': data = setExpression(command); break;
-    case 'set_content': data = setContent(command); break;
+    case 'set_expression': data = setExpression(command,meta); break;
+    case 'set_content': data = setContent(command, meta); break;
     case 'set_layer': data = setLayer(command); break;
     case 'set_composition': data = setComposition(command); break;
     case 'add_layer': data = addLayer(command); break;
@@ -880,6 +911,12 @@ function runOne(sourceCommand: any, meta: any = {}) {
       ref[end] = ref[start] + referenceSpan;
     }
     PM.touch();
+  }
+  const sceneTarget = findLayer(command.target || command.layer || command.targetId);
+  if (sceneTarget && command.type==='set_content') validateSceneLayer(sceneTarget,PM);
+  if (command.type === 'add_layer') {
+    const created = PM.proj.layers.find((l: any) => l.id === data?.id);
+    if (created) validateSceneLayer(created,PM);
   }
   if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group'].includes(command.type)
       || command.type === 'set_layer' && Object.keys(command.patch || {}).some((key: any) => ['name', 'from', 'duration', 'visible', 'parent'].includes(key))) {

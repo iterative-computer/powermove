@@ -146,8 +146,9 @@ describe('CodexAppServerRunner steering', () => {
           tool_timeout_sec: 120,
           required: true,
           enabled_tools: [
-            'get_project_state', 'get_panel_layout', 'open_panel', 'get_panel_state',
-            'capture_panel', 'get_workspace_state', 'validate_effect', 'render_frames'
+            'get_project_state', 'get_3d_scene', 'get_panel_layout', 'open_panel', 'get_panel_state',
+            'capture_panel', 'get_workspace_state', 'validate_effect', 'render_frames',
+            'store_search', 'store_extension', 'store_source', 'store_library'
           ],
           default_tools_approval_mode: 'approve'
         }

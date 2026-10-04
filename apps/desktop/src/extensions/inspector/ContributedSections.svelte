@@ -29,8 +29,14 @@
 
 {#each sections as section (section)}
   {#key JSON.stringify(layerIds)}
-    <section class="sec" data-inspector-section={section.id} aria-label={section.title}>
+    <!-- A plain column: the `.sec` header style is a fixed 40px row, so
+         multi-row contributions overflowed onto the sections below. -->
+    <section class="contributed-section" data-inspector-section={section.id} aria-label={section.title}>
       <div use:mountSection={section}></div>
     </section>
   {/key}
 {/each}
+
+<style>
+  .contributed-section { display: flex; flex-direction: column; min-width: 0; }
+</style>

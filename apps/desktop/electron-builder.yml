@@ -42,6 +42,14 @@ extraResources:
       - "**/*"
   - from: docs/EXTENSIONS.md
     to: api-pack/EXTENSIONS.md
+  - from: docs/SCENE3D.md
+    to: api-pack/SCENE3D.md
+  - from: src/renderer/src/core/scene3d/schema.ts
+    to: api-pack/scene3d-schema.ts
+  - from: src/renderer/src/core/scene3d/layers.ts
+    to: api-pack/scene3d-layers.ts
+  - from: src/renderer/src/core/scene3d/operations.ts
+    to: api-pack/scene3d-operations.ts
   - from: docs/background-testing.md
     to: api-pack/BACKGROUND_TESTING.md
   - from: src/renderer/src/kernel/api.ts

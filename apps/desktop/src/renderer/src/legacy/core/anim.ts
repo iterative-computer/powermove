@@ -1,4 +1,5 @@
 import { structuredProperties } from './vector-paths';
+import { sceneProperties } from '../../core/scene3d/schema';
 /* Ported from js/core/anim.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { canAnimateContent, contentLabel, isProperty, resolveContent } from './content-properties';
@@ -14,6 +15,7 @@ let version = 0;
 let parentIndexes = new WeakMap<object, any>();
 let staticTransforms = new WeakMap<object, { values: any[]; matrix: number[] }>();
 PM.touch = () => {
+  PM._scene3dRevision=(PM._scene3dRevision || 0)+1;
   version++;
   PM.ProjectIndex?.invalidateKeyframes?.();
   /* hierarchy memos must never outlive an edit */
@@ -447,9 +449,11 @@ PM.allProps = (L: any) => {
     for (const k in transition?.p || {}) out.push({ key: `${field}.p.${k}`, prop: transition.p[k], label: k, group: label });
   }
   out.push(...structuredProperties(L));
+  out.push(...sceneProperties(L));
   return out;
 };
 PM.findProp = (L: any, key: any) => {
+  if (/^(?:m\.[^.]+$|(?:o|light|camera|environment)\.)/.test(key)) return sceneProperties(L).find(p=>p.key===key)?.prop ?? null;
   if (/^(g|mp|ta|ts)\./.test(key)) return structuredProperties(L).find(p=>p.key===key)?.prop ?? null;
   if (L.p?.[key]) return L.p[key];
   if (key === 'l.blend' || key === 'l.mblur' || key === 'l.matteMode') return isProperty(L[key.slice(2)]) ? L[key.slice(2)] : null;

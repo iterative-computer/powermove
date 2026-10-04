@@ -390,6 +390,8 @@ Transitions, motion and `prefersReducedMotion` behave the same in both.
 
 ## The API (apiVersion 1–3)
 
+For built-in editable 3D model, light and camera layers, use `edit_3d`/`get_3d_scene` and `api.scene3d`; see `SCENE3D.md` for geometry, materials, lighting and animation examples.
+
 Full types: `api.ts` (next to this file in the agent API pack). Summary:
 
 ### Sandbox API (apiVersion 3)

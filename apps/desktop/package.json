@@ -38,6 +38,7 @@
     "hono": "4.13.8",
     "node-diff3": "3.2.1",
     "smol-toml": "1.9.0",
+    "three": "0.180.0",
     "zod": "4.6.5"
   },
   "devDependencies": {
@@ -46,6 +47,7 @@
     "@scritto/svelte": "0.1.0",
     "@sveltejs/vite-plugin-svelte": "6.2.4",
     "@types/node": "26.3.0",
+    "@types/three": "0.180.0",
     "@types/ws": "^8.18.1",
     "create-dmg": "^8.1.0",
     "electron": "44.0.0",

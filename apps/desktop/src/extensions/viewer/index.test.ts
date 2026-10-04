@@ -90,7 +90,7 @@ describe('viewer extension', () => {
 
     vi.resetModules();
     const replacement = apiHarness();
-    replacement.api.render.gl = original.api.render.gl;
+    Object.assign(replacement.api.render, { gl: original.api.render.gl });
     const { default: activateUpdated } = await import('./index');
     activateUpdated(replacement.api);
     replacement.panel!.build!(body, { spec: {} });

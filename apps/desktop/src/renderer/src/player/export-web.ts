@@ -2,6 +2,8 @@ import playerSource from 'virtual:powermove-player';
 import { validateScene, type WebScene } from './scene';
 import { zipFiles } from './archive';
 import { agentHandoff } from './agent-handoff';
+import { layer3DAssetIds } from '../core/scene3d/layers';
+import { sceneAssetIds, parseScene } from '../core/scene3d/schema';
 
 const utf8 = (text: string) => new TextEncoder().encode(text);
 const literal = (value: unknown) => JSON.stringify(value).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
@@ -65,6 +67,8 @@ export function inspectWebExport(PM: any) {
       if (layer.type === 'extension') {
         const def = getDef('layerTypes', layer.d.definition, layer.name);
         if (def?.renderer?.kind === 'mesh' && layer.d.data?.[def.renderer.assetField]) assets.add(layer.d.data[def.renderer.assetField]);
+        if (def?.renderer?.kind === 'layer3d') for(const id of layer3DAssetIds(layer))assets.add(id);
+        if (def?.renderer?.kind === 'scene3d') for(const id of sceneAssetIds(parseScene(layer.d.data?.scene))) assets.add(id);
       }
       if (layer.type === 'precomp') {
         const sub = comp.comps?.[layer.d.comp] || PM.proj.comps?.[layer.d.comp];
@@ -117,7 +121,7 @@ export async function buildWebExport(PM: any) {
        proxy keeps the name the user chose while holding WebM, and a static host
        serves these files by extension alone. */
     const extension = STORED_EXTENSIONS[String(blob.type || '').toLowerCase()]
-      || /\.(png|jpg|jpeg|webp|gif|svg|mp4|webm|mov|wav|mp3|m4a|ogg|flac|obj)$/i.exec(meta.name || '')?.[1]?.toLowerCase()
+      || /\.(png|jpg|jpeg|webp|gif|svg|mp4|webm|mov|wav|mp3|m4a|ogg|flac|obj|glb|gltf)$/i.exec(meta.name || '')?.[1]?.toLowerCase()
       || 'bin';
     const location = `assets/media-${index++}.${extension}`;
     put(location, new Uint8Array(await blob.arrayBuffer())); scene.assets[id] = location;
