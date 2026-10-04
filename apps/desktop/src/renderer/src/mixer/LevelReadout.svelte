@@ -67,12 +67,15 @@
     });
   }
 
+  /* Keys belong to the text field only while it is being edited; otherwise
+     app shortcuts (Space, Cmd+Z, …) keep working. Keyboard focus (Tab) opens
+     the editor, like every number field, so a focused readout is a field. */
   function keydown(event: KeyboardEvent): void {
-    event.stopPropagation();
     if (!editing) {
-      if (event.key === 'Enter') { event.preventDefault(); openEditor(); }
+      if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); openEditor(); }
       return;
     }
+    event.stopPropagation();
     if (event.key === 'Enter') { event.preventDefault(); finish(true); input?.blur(); }
     else if (event.key === 'Escape') { event.preventDefault(); finish(false); input?.blur(); }
   }
@@ -92,6 +95,7 @@
   aria-label={label}
   title={disabled ? undefined : 'Drag to adjust · Click to type'}
   onpointerdown={pointerdown}
+  onfocus={() => { if (!editing && !handle) openEditor(); }}
   oninput={(event) => { if (editing) draft = event.currentTarget.value; }}
   onblur={() => finish(true)}
   onkeydown={keydown}
