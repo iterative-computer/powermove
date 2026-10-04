@@ -39,6 +39,11 @@
   let handle: { cancel(): void } | undefined;
   let keyGesture = false;
   let keyDb = 0;
+  /* A click on the rail jumps there. Its edit stays open for the length of a
+     double-click, so a double-click on the rail is one Undo step to unity
+     rather than a jump followed by a reset. */
+  const DOUBLE_CLICK_MS = 500;
+  let jumpTimer: ReturnType<typeof setTimeout> | undefined;
 
   const db = $derived(gainToDb(gain));
   /* Marks of the taper, then halves and quarters between them; the finer
@@ -93,18 +98,47 @@
     return dbToGain(value);
   }
 
+  /* Anything else the user does ends a held rail jump first. */
+  function settleOutside(event: Event): void {
+    if (event.type === 'pointerdown' && root?.contains(event.target as Node)) return;
+    settleJump();
+  }
+
+  function holdJump(): void {
+    jumpTimer = setTimeout(settleJump, DOUBLE_CLICK_MS);
+    window.addEventListener('pointerdown', settleOutside, true);
+    window.addEventListener('keydown', settleOutside, true);
+  }
+
+  /* Stop waiting for a second click. True when a jump was still open. */
+  function releaseJump(): boolean {
+    if (jumpTimer === undefined) return false;
+    clearTimeout(jumpTimer);
+    jumpTimer = undefined;
+    window.removeEventListener('pointerdown', settleOutside, true);
+    window.removeEventListener('keydown', settleOutside, true);
+    return true;
+  }
+
+  function settleJump(): void {
+    if (releaseJump()) control.commit();
+  }
+
   function pointerdown(event: PointerEvent): void {
     if (disabled || event.button !== 0 || travel <= 0) return;
+    // The second click of a double-click continues the held jump's edit.
+    const continuing = releaseJump();
     event.preventDefault();
     root?.focus({ preventScroll: true });
     const onKnob = !!knob && knob.contains(event.target as Node);
     // One layout read per gesture, never per move.
     const rect = root!.getBoundingClientRect();
     let position = faderPosition(db);
-    if (!control.begin()) return;
+    if (!continuing && !control.begin()) return;
     dragging = true;
     lastDetent = Math.abs(db) < 1e-9;
     let moved = false;
+    let dragged = false;
     let lastY = event.clientY;
     const write = (next: number, snap: boolean) => {
       const level = levelAt(next, snap);
@@ -121,15 +155,19 @@
       move: (_dx: number, dy: number, next: PointerEvent) => {
         const step = next.clientY - lastY;
         lastY = next.clientY;
-        if (!moved && Math.abs(dy) < 2) return;
+        if (!dragged && Math.abs(dy) < 2) return;
         moved = true;
+        dragged = true;
         position = clamp01(position - step / travel * (next.altKey ? 0.1 : 1));
         write(position, !next.altKey);
       },
       up: () => {
         dragging = false;
         handle = undefined;
-        if (moved) control.commit();
+        // A click that only jumped (or the knob click that follows it) waits
+        // for a possible double-click; a drag commits at once.
+        if (dragged) control.commit();
+        else if (moved || continuing) holdJump();
         else control.cancel();
         place(gain);
       },
@@ -142,12 +180,14 @@
     });
   }
 
-  /* Double-click anywhere on the fader returns to unity. Both clicks of it
-     began and cancelled empty gestures, so only this edit is recorded. */
+  /* Double-click anywhere on the fader returns to unity as one edit. On the
+     knob both clicks began and cancelled empty gestures; on the rail the
+     clicks' jump is still open and simply ends at unity. */
   function dblclick(event: MouseEvent): void {
     if (disabled || event.button !== 0) return;
     event.preventDefault();
-    control.once(1);
+    if (releaseJump()) { control.write(1); control.commit(); }
+    else control.once(1);
     place(1);
     bridge()?.haptic?.alignment();
   }
@@ -186,6 +226,7 @@
 
   onDestroy(() => {
     handle?.cancel();
+    settleJump();
     finishKeys();
   });
 </script>
