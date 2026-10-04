@@ -14,8 +14,8 @@
 
   let status = $state<TranscriptionStatus | null>(null);
   let chosen = $state<string | null>(null);
-  /** The download this step started, so "Not now" after going back can undo it. */
-  let started = $state<string | null>(null);
+  /** Downloads this step started, so changing course or "Not now" leaves nothing behind. */
+  let started: string[] = [];
 
   const models = $derived(status?.models ?? []);
   const ready = $derived(models.find((model) => model.id === status?.activeModelId) ?? null);
@@ -28,18 +28,26 @@
     return model.description;
   }
 
+  /* Deletes what this step downloaded, partial bytes included: the user has declined it. */
+  function discard(ids: string[]): void {
+    if (!bridge) return;
+    for (const id of ids) void bridge.remove(id).catch(() => undefined);
+  }
+
   async function choose(): Promise<void> {
     const model = selected;
     if (model && bridge && model.state !== 'ready' && model.state !== 'downloading') {
-      started = model.id;
+      /* Went back and picked another model: drop the one started before. */
+      discard(started.filter((id) => id !== model.id));
+      started = [model.id];
       void bridge.download(model.id).catch(() => undefined);
     }
     oncontinue();
   }
 
   function skip(): void {
-    if (started && bridge) void bridge.cancelDownload(started).catch(() => undefined);
-    started = null;
+    discard(started);
+    started = [];
     oncontinue();
   }
 

@@ -273,6 +273,21 @@ test('onboarding starts the chosen model download and it finishes after onboardi
       await welcome.waitForTimeout(900);
       if (shots) await welcome.screenshot({ path: path.join(shots, `onboarding-${mode}.png`) });
     }
+    // Download, go back, then decline: nothing of that download stays on disk.
+    const partial = path.join(home, 'profile', 'models', 'transcription', '.partial', 'parakeet-tdt-0.6b-v3');
+    const v3State = () => welcome.evaluate(async () => (await (window as any).onboarding.transcription.status()).models[0].state);
+    await step.getByRole('button', { name: 'Download' }).click();
+    await expect(welcome.locator('#workspace-title')).toBeFocused();
+    await expect.poll(v3State).toBe('downloading');
+    await expect.poll(() => existsSync(partial)).toBe(true);
+    await welcome.locator('#workspace-step').getByRole('button', { name: /Back/ }).click();
+    await expect(welcome.locator('#transcription-title')).toBeFocused();
+    await step.getByRole('button', { name: 'Not now' }).click();
+    await expect(welcome.locator('#workspace-title')).toBeFocused();
+    await expect.poll(v3State).toBe('absent');
+    await expect.poll(() => existsSync(partial)).toBe(false);
+    // Changing course again: download after all, and it outlives onboarding.
+    await welcome.locator('#workspace-step').getByRole('button', { name: /Back/ }).click();
     await step.getByRole('button', { name: 'Download' }).click();
     await expect(welcome.locator('#workspace-title')).toBeFocused();
     await welcome.getByRole('button', { name: 'Start fresh' }).click();

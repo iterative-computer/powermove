@@ -17,6 +17,7 @@ const CHANNEL = {
   transcriptionStatus: 'transcription:status',
   transcriptionDownload: 'transcription:download',
   transcriptionCancelDownload: 'transcription:cancel-download',
+  transcriptionRemove: 'transcription:remove',
   transcriptionStatusChanged: 'transcription:status-changed'
 } as const;
 
@@ -40,6 +41,7 @@ const bridge: OnboardingBridge = {
     status: () => ipcRenderer.invoke(CHANNEL.transcriptionStatus) as Promise<TranscriptionStatus>,
     download: (modelId) => ipcRenderer.invoke(CHANNEL.transcriptionDownload, String(modelId)) as Promise<TranscriptionStatus>,
     cancelDownload: (modelId) => ipcRenderer.invoke(CHANNEL.transcriptionCancelDownload, String(modelId)) as Promise<TranscriptionStatus>,
+    remove: (modelId) => ipcRenderer.invoke(CHANNEL.transcriptionRemove, String(modelId)) as Promise<TranscriptionStatus>,
     onStatus: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, status: TranscriptionStatus) => callback(status);
       ipcRenderer.on(CHANNEL.transcriptionStatusChanged, listener);

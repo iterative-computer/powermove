@@ -146,4 +146,4 @@ export interface TranscriptionBridge {
 }
 
 /** The onboarding window's slice: pick and start a download, watch it. */
-export type OnboardingTranscriptionBridge = Pick<TranscriptionBridge, 'status' | 'download' | 'cancelDownload' | 'onStatus'>;
+export type OnboardingTranscriptionBridge = Pick<TranscriptionBridge, 'status' | 'download' | 'cancelDownload' | 'remove' | 'onStatus'>;
