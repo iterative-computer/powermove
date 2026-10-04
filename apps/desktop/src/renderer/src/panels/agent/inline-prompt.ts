@@ -248,14 +248,16 @@ export class InlinePrompt {
         }
       }
     }
-    if (event.inputType === 'deleteContentBackward' || event.inputType === 'deleteContentForward') {
-      const key = new KeyboardEvent('keydown', { key: event.inputType === 'deleteContentBackward' ? 'Backspace' : 'Delete', cancelable: true });
-      if (this.keydown(key)) { event.preventDefault(); return; }
-      // Chromium inserts a placeholder <br> when native deletion empties the
-      // text before a noneditable token. Apply its exact deletion range ourselves
-      // so a file-only line does not acquire an unintended blank line above it.
+    if (event.inputType.startsWith('delete')) {
+      if (event.inputType === 'deleteContentBackward' || event.inputType === 'deleteContentForward') {
+        const key = new KeyboardEvent('keydown', { key: event.inputType === 'deleteContentBackward' ? 'Backspace' : 'Delete', cancelable: true });
+        if (this.keydown(key)) { event.preventDefault(); return; }
+      }
+      // Chromium inserts a placeholder <br> when native deletion empties a
+      // line. Apply its exact deletion range ourselves, including word/line
+      // shortcuts, so only intentional newlines enter the draft.
       const target = event.getTargetRanges?.()[0];
-      if (target && this.element.querySelector('[data-attachment-id]')) {
+      if (target) {
         const deletion = document.createRange();
         deletion.setStart(target.startContainer, target.startOffset);
         deletion.setEnd(target.endContainer, target.endOffset);
