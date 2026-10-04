@@ -165,7 +165,9 @@
     transition: background var(--dur-1), color var(--dur-1);
   }
   .caption-preset:hover { background: var(--ink-1); color: var(--tx-2); }
-  .caption-preset[aria-checked="true"] { background: var(--bg-float); color: var(--tx); box-shadow: var(--ctl-edge); }
+  .caption-preset[aria-checked="true"] { color: var(--tx); }
+  .caption-preset[aria-checked="true"]:hover { background: transparent; }
+  .caption-preset[aria-checked="true"] .caption-preview { box-shadow: 0 0 0 1.5px var(--bg-panel), 0 0 0 3px rgb(var(--ink-rgb) / .45); }
   .caption-preset:focus-visible { outline: 0; box-shadow: 0 0 0 2px var(--ink-2); }
   .caption-preview {
     position: relative; display: grid; place-items: end center; height: 44px; padding-bottom: 6px; overflow: hidden;

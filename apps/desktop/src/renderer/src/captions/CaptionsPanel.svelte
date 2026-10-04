@@ -167,7 +167,7 @@
           {@const position = first + offset}
           <!-- svelte-ignore a11y_click_events_have_key_events (the listbox owns the keyboard) -->
           <div class="captions-row" role="option" aria-selected={selected.has(entry.cue.id)} tabindex="-1"
-            class:sel={selected.has(entry.cue.id)} class:now={entry.index === playing} class:focus={position === focusIndex}
+            class:picked={selected.has(entry.cue.id)} class:now={entry.index === playing} class:focus={position === focusIndex}
             style={`top:${position * ROW}px`} data-cue-id={entry.cue.id}
             onclick={(event) => { if (editing !== entry.cue.id) choose(position, event); }}
             ondblclick={() => edit(position)}>
@@ -222,7 +222,7 @@
     border-radius: var(--r-sm); color: var(--tx-2); cursor: default; user-select: none; -webkit-user-select: none;
   }
   .captions-row:hover { background: var(--ink-1); }
-  .captions-row.sel { background: var(--bg-row-hi, var(--ink-2)); color: var(--tx); }
+  .captions-row.picked { background: var(--bg-row-hi, var(--ink-2)); color: var(--tx); }
   .captions-row.now .tx { color: var(--tx); }
   .captions-list:focus-visible .captions-row.focus { box-shadow: inset 0 0 0 1px var(--line-strong); }
   .tc { flex: none; width: 74px; color: var(--tx-4); font-family: var(--f-mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
