@@ -103,6 +103,9 @@ export interface AgentMediaTiming {
 export interface AgentMediaSource {
   path: string;
   origin: MediaPathOrigin;
+  /** What the bytes are (import fingerprint, else store key), stable when the
+   * same asset is staged again to a new file; results are cached by it. */
+  contentKey?: string;
   asset: {
     id: string;
     name: string;

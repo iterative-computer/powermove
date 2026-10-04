@@ -55,9 +55,12 @@ export async function agentMediaSource(PM: PMRegistry, args: Record<string, unkn
   const meta = PM.proj.assets?.[assetId] || {};
   const runtime = PM.assets?.get?.(assetId);
   const duration = Number(runtime?.dur ?? meta.dur);
+  const contentKey = typeof meta.fingerprint === 'string' && meta.fingerprint ? meta.fingerprint
+    : typeof meta.storageKey === 'string' && meta.storageKey ? meta.storageKey : undefined;
   const source: AgentMediaSource = {
     path: resolved.path,
     origin: resolved.origin,
+    ...(contentKey ? { contentKey } : {}),
     asset: {
       id: assetId, name: resolved.name, kind: resolved.kind,
       duration: Number.isFinite(duration) && duration > 0 ? duration : null,

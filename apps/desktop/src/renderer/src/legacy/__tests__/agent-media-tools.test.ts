@@ -60,9 +60,12 @@ describe('__media_source', () => {
 
   it('is served by the live tool harness', async () => {
     const PM = editor();
-    PM.proj.assets = { aud1: { id: 'aud1', name: 'aud1.mov', kind: 'audio', dur: 3 } };
+    PM.proj.assets = { aud1: { id: 'aud1', name: 'aud1.mov', kind: 'audio', dur: 3, storageKey: 'media:v2:3:abc' } };
     const response = await PM.AgentHarness.test.handleLiveAgentTool({ runId: 'media-src', callId: 'c1', tool: '__media_source', arguments: { assetId: 'aud1' }, baseRevision: 0 });
-    expect(JSON.parse(response.content[0].text)).toMatchObject({ path: '/media/aud1.mov', asset: { kind: 'audio', hasAudio: true } });
+    expect(JSON.parse(response.content[0].text)).toMatchObject({ path: '/media/aud1.mov', contentKey: 'media:v2:3:abc', asset: { kind: 'audio', hasAudio: true } });
+    PM.proj.assets.aud1.fingerprint = 'v2:3:abc';
+    const fingerprinted = await PM.AgentHarness.test.handleLiveAgentTool({ runId: 'media-src', callId: 'c2', tool: '__media_source', arguments: { assetId: 'aud1' }, baseRevision: 0 });
+    expect(JSON.parse(fingerprinted.content[0].text).contentKey).toBe('v2:3:abc');
   });
 });
 

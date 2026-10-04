@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -227,6 +227,20 @@ describe('transcribe_media against the transcription seam', () => {
     expect(transcribe).toHaveBeenCalledWith({ path: footage }, expect.any(Function), expect.any(AbortSignal));
     await media.call('transcribe_media', { assetId: 'a1' }, context(source()));
     expect(transcribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('reuses a transcript when the same asset comes back as a newly staged copy', async () => {
+    const transcribe = vi.fn(async () => transcript);
+    const media = tools({ transcription: () => service(transcribe) });
+    const copy = path.join(directory, 'restaged.mp4');
+    await copyFile(footage, copy);
+    const staged = (file: string): AgentMediaSource => ({ ...source(), path: file, origin: 'cache', contentKey: 'v2:1:abc' });
+    await media.call('transcribe_media', { assetId: 'a1' }, context(staged(footage)));
+    const again = json(await media.call('transcribe_media', { assetId: 'a1' }, context(staged(copy))));
+    expect(again.segmentCount).toBe(2);
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    await media.call('transcribe_media', { assetId: 'a1' }, context({ ...staged(copy), contentKey: 'v2:1:def' }));
+    expect(transcribe).toHaveBeenCalledTimes(2);
   });
 
   it('maps a retimed clip\'s words into composition time and drops what the clip does not play', async () => {

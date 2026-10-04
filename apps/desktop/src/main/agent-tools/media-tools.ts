@@ -488,8 +488,10 @@ export class AgentMediaTools {
     const [from, to] = layer || finite(args.start) || finite(args.end) ? this.sourceWindow(source, duration, args) : [0, duration];
     const whole = from <= 0.001 && to >= duration - 0.001;
     const language = typeof args.language === 'string' && /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test(args.language) ? args.language : undefined;
-    const info = await stat(source.path);
-    const key = [source.path, info.size, info.mtimeMs, whole ? '' : `${from}-${to}`, language ?? ''].join('|');
+    // By content when the renderer knows it: a re-staged copy (new path, new
+    // mtime) of the same asset reuses its transcript.
+    const identity = source.contentKey ? [`content:${source.asset.id}`, source.contentKey] : await stat(source.path).then((info) => [source.path, info.size, info.mtimeMs]);
+    const key = [...identity, whole ? '' : `${from}-${to}`, language ?? ''].join('|');
 
     let transcript = this.transcripts.get(key);
     if (!transcript) {

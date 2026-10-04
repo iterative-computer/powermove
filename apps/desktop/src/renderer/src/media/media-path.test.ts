@@ -83,13 +83,40 @@ describe('resolveMediaPath', () => {
     await expect(resolveMediaPath('v1')).rejects.toThrow(/no media bytes.*Locate File/);
   });
 
-  it('aborts a failed staging and lets main drop a closed project\'s files', async () => {
-    const PM = registry({ a1: { id: 'a1', name: 'Clip.mov', kind: 'video' } }, { a1: new Blob(['abc']) });
+  it('aborts a failed staging', async () => {
+    registry({ a1: { id: 'a1', name: 'Clip.mov', kind: 'video' } }, { a1: new Blob(['abc']) });
     const { media } = mediaBridge({ stageChunk: vi.fn(async () => { throw new Error('disk full'); }) });
     await expect(resolveMediaPath('a1')).rejects.toThrow('disk full');
     expect(media.stageAbort).toHaveBeenCalledWith('t1');
+  });
+
+  it('keeps staged files across tab switches and lets main drop them once the project is closed', async () => {
+    const PM = registry({ a1: { id: 'a1', name: 'Clip.mov', kind: 'video' } }, { a1: new Blob(['abc']) }) as any;
+    let tabs = ['P1', 'P2'];
+    PM.Tabs = { list: () => tabs };
+    const { media } = mediaBridge();
+    await resolveMediaPath('a1');
+    PM.bus.emit('projects:open');
+    // P1 → P2 → P1: P1 stays open as a parked tab, so its copies stay.
+    PM.proj = { id: 'P2', assets: {} };
+    PM.bus.emit('projects:open');
+    PM.proj = { id: 'P1', assets: PM.proj.assets };
+    PM.bus.emit('projects:open');
+    PM.proj = { id: 'P2', assets: {} };
     PM.bus.emit('projects:open');
     expect(media.release).not.toHaveBeenCalled();
+    // Closing P1's tab lets them go, once.
+    tabs = ['P2'];
+    PM.bus.emit('projects:open');
+    PM.bus.emit('projects:open');
+    expect(media.release).toHaveBeenCalledTimes(1);
+    expect(media.release).toHaveBeenCalledWith('P1');
+  });
+
+  it('without a tab strip, holds only the project on screen', async () => {
+    const PM = registry({ a1: { id: 'a1', name: 'Clip.mov', kind: 'video' } }, { a1: new Blob(['abc']) });
+    const { media } = mediaBridge();
+    await resolveMediaPath('a1');
     PM.proj = { id: 'P2', assets: {} } as never;
     PM.bus.emit('projects:open');
     expect(media.release).toHaveBeenCalledWith('P1');

@@ -34,7 +34,8 @@ const registry = (): Registry | undefined => (globalThis as { window?: { PM?: Re
 
 /* One staging per asset at a time: captions and the agent may ask together. */
 const inflight = new Map<string, Promise<ResolvedMediaSource>>();
-let watchedProject: string | null = null;
+/* Projects this window resolved media for, so their staged files can be let go. */
+const usedProjects = new Set<string>();
 let watching = false;
 
 /** Same as resolveMediaPath, plus where the path came from. */
@@ -55,8 +56,8 @@ async function resolve(PM: Registry | undefined, assetId: string): Promise<Resol
   if (meta.kind !== 'video' && meta.kind !== 'audio') throw new Error(`“${meta.name || assetId}” is ${meta.kind === 'image' ? 'an image' : `a ${meta.kind}`} asset, not audio or video.`);
   const media = hostBridge()?.mediaPath as MediaPathBridge | undefined;
   if (!media) throw new Error('This Powermove host cannot hand media files to tools.');
-  watchProjectChanges(PM, media);
   const projectId = typeof PM.proj.id === 'string' && PM.proj.id ? PM.proj.id : undefined;
+  watchProjectChanges(PM, media, projectId);
   const runtime = PM.assets?.get?.(assetId);
   const name = String(meta.name || assetId);
   const describe = (path: string, origin: MediaPathOrigin, proxy: boolean): ResolvedMediaSource =>
@@ -111,24 +112,39 @@ async function stage(media: MediaPathBridge, blob: Blob, request: MediaPathStage
   }
 }
 
-/* Staged files belong to the project that asked for them: when this window
-   moves to another project (or home), main drops the old project's files. */
-function watchProjectChanges(PM: Registry, media: MediaPathBridge): void {
-  watchedProject = typeof PM.proj?.id === 'string' ? PM.proj.id : null;
+/* Staged files belong to the project that asked for them, and live as long as
+   this window holds that project: on screen or parked as a tab. Switching tabs
+   keeps them; closing the tab, trashing the project or moving it to another
+   window lets main drop them (the window closing or the app quitting drops
+   everything in main). */
+function watchProjectChanges(PM: Registry, media: MediaPathBridge, projectId: string | undefined): void {
+  if (projectId) usedProjects.add(projectId);
   if (watching || typeof PM.bus?.on !== 'function') return;
   watching = true;
   PM.bus.on('projects:open', () => {
-    const next = typeof PM.proj?.id === 'string' ? PM.proj.id : null;
-    if (next === watchedProject) return;
-    const previous = watchedProject;
-    watchedProject = next;
-    if (previous) void media.release?.(previous).catch(() => undefined);
+    const held = heldProjects(PM);
+    for (const id of [...usedProjects]) {
+      if (held.has(id)) continue;
+      usedProjects.delete(id);
+      void media.release?.(id).catch(() => undefined);
+    }
   });
+}
+
+/** The projects this window still has open: the one on screen plus its tabs. */
+function heldProjects(PM: Registry): Set<string> {
+  const held = new Set<string>();
+  if (typeof PM.proj?.id === 'string') held.add(PM.proj.id);
+  try {
+    const tabs: unknown = PM.Tabs?.list?.();
+    if (Array.isArray(tabs)) for (const id of tabs) if (typeof id === 'string') held.add(id);
+  } catch { /* no tab strip (document engine): the project on screen is all */ }
+  return held;
 }
 
 /** Test seam. */
 export function resetMediaPathForTests(): void {
   inflight.clear();
-  watchedProject = null;
+  usedProjects.clear();
   watching = false;
 }
