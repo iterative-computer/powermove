@@ -266,6 +266,86 @@ describe('AssetsPanel', () => {
     expect(rows().map((row) => row.getAttribute('aria-selected'))).toEqual(['false', 'true']);
   });
 
+  it('toggles media with Command/Control-click and selects a range with Shift-click', () => {
+    setup([IMAGE, AUDIO, VIDEO]);
+    const click = (index: number, modifiers = {}) => {
+      rows()[index]!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, ...modifiers }));
+      flushSync();
+    };
+    const selected = () => rows().map(row => row.getAttribute('aria-selected'));
+    click(0);
+    click(2, { metaKey: true });
+    expect(selected()).toEqual(['true', 'false', 'true']);
+    click(0, { ctrlKey: true });
+    expect(selected()).toEqual(['false', 'false', 'true']);
+    click(2, { shiftKey: true });
+    expect(selected()).toEqual(['true', 'true', 'true']);
+  });
+
+  it('selects all visible media and deletes them in one history entry', () => {
+    const { PM, removeAsset, events } = setup([IMAGE, AUDIO, VIDEO]);
+    const list = target.querySelector<HTMLElement>('.asset-list')!;
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', metaKey: true, bubbles: true }));
+    flushSync();
+    expect(rows().every(row => row.getAttribute('aria-selected') === 'true')).toBe(true);
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }));
+    flushSync();
+    expect(removeAsset).toHaveBeenCalledTimes(3);
+    expect(PM.hist.do).toHaveBeenCalledOnce();
+    expect(events).toEqual(['assets', 'layers', 'sel', 'project']);
+    expect(rows()).toHaveLength(0);
+  });
+
+  it('preserves the bulk selection when deleting from a selected card or its context menu', () => {
+    const { PM, removeAsset } = setup([IMAGE, AUDIO, VIDEO]);
+    rows()[0]!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+    rows()[1]!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, metaKey: true }));
+    flushSync();
+    rows()[0]!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    expect(PM.menu.mock.calls[0][1][1].label).toBe('Delete selected media…');
+    const button = rows()[0]!.querySelector<HTMLButtonElement>('.asset-delete')!;
+    button.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+    button.click();
+    flushSync();
+    expect(removeAsset.mock.calls.map(call => call[1])).toEqual([IMAGE.id, AUDIO.id]);
+    expect(rows()[0]!.dataset.assetId).toBe(VIDEO.id);
+  });
+
+  it('confirms bulk deletion once and leaves all files when canceled', async () => {
+    const { PM, removeAsset } = setup([IMAGE, AUDIO], { references: { [IMAGE.id]: 1, [AUDIO.id]: 2 } });
+    PM.confirm.mockResolvedValue(false);
+    const list = target.querySelector<HTMLElement>('.asset-list')!;
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', ctrlKey: true, bubbles: true }));
+    flushSync();
+    target.querySelector<HTMLButtonElement>('[aria-label="Delete selected media"]')!.click();
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
+    expect(PM.confirm).toHaveBeenCalledOnce();
+    expect(PM.confirm.mock.calls[0][0].message).toBe('Delete 2 media files?');
+    await PM.confirm.mock.results[0].value;
+    flushSync();
+    expect(removeAsset).not.toHaveBeenCalled();
+    expect(rows()).toHaveLength(2);
+  });
+
+  it('selects intersecting media with a box and keeps keyboard deletion in the panel', () => {
+    const { removeAsset } = setup([IMAGE, AUDIO, VIDEO]);
+    const list = target.querySelector<HTMLElement>('.asset-list')!;
+    const rect = (x: number, y: number, width: number, height: number) => ({ left: x, top: y, right: x + width, bottom: y + height, width, height, x, y, toJSON() {} });
+    vi.spyOn(list, 'getBoundingClientRect').mockReturnValue(rect(0, 0, 300, 300));
+    rows().forEach((row, index) => vi.spyOn(row, 'getBoundingClientRect').mockReturnValue(rect(20 + index * 90, 20, 80, 80)));
+    list.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1, clientX: 10, clientY: 10 }));
+    window.dispatchEvent(new PointerEvent('pointermove', { pointerId: 1, clientX: 195, clientY: 110 }));
+    flushSync();
+    expect(rows().map(row => row.getAttribute('aria-selected'))).toEqual(['true', 'true', 'false']);
+    expect(target.querySelector('.asset-selection-box')).not.toBeNull();
+    window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1 }));
+    flushSync();
+    expect(target.querySelector('.asset-selection-box')).toBeNull();
+    expect(document.activeElement).toBe(list);
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
+    expect(removeAsset.mock.calls.map(call => call[1])).toEqual([IMAGE.id, AUDIO.id]);
+  });
+
   it('clears selection and source preview when a pointer action starts outside the selected card', () => {
     const { PM } = setup([AUDIO, VIDEO]);
     rows()[1]!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
