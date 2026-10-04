@@ -3,6 +3,7 @@ import { canAnimateContent, isProperty } from '../../legacy/core/content-propert
 import { adoptTemporalEase } from '../anim/temporal-ease';
 import { compactEditLog } from '../edit-log';
 import { normalizeCompositions } from '../../legacy/core/compositions';
+import { normalizeCaptionsContent } from '../../captions/model';
 import {
   BLEND_MODES,
   TYPE_META,
@@ -438,6 +439,8 @@ function staticContentFor(type: LayerType, raw: unknown, comp: Pick<Comp, 'w' | 
       };
     case 'group':
       return source;
+    case 'captions':
+      return normalizeCaptionsContent(source);
   }
 }
 

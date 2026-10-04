@@ -91,7 +91,7 @@ describe('WebVTT', () => {
       { id: 'b', start: 2, end: 6, text: 'across' },
       { id: 'c', start: 9, end: 10, text: 'after' }
     ];
-    expect(parseVtt(formatVtt(cues, { from: 3, to: 8 })).cues.map(cue => [cue.start, cue.end, cue.text])).toEqual([[0, 3, 'across']]);
+    expect(parseVtt(formatVtt(cues, { from: 3, to: 8, rebase: 3 })).cues.map(cue => [cue.start, cue.end, cue.text])).toEqual([[0, 3, 'across']]);
   });
 });
 

@@ -23,7 +23,9 @@ export const COMMAND_TYPES = [
   'add_marker',
   'create_section',
   'update_section',
-  'transform_layers'
+  'transform_layers',
+  'add_captions',
+  'edit_captions'
 ] as const;
 
 export type EditCommandType = (typeof COMMAND_TYPES)[number];
@@ -264,6 +266,64 @@ export interface TransformLayersCommand {
   state?: Record<string, JsonValue>;
 }
 
+/* ── captions ──────────────────────────────────────────────
+   Cue times in caption commands are composition seconds. */
+export interface CaptionCueInput {
+  id?: string;
+  start: number;
+  end: number;
+  text: string;
+  words?: Array<{ text: string; start: number; end: number }>;
+}
+
+export interface CaptionCuePatch {
+  id: string;
+  start?: number;
+  end?: number;
+  text?: string;
+}
+
+export interface AddCaptionsCommand {
+  type: 'add_captions';
+  id?: string;
+  name?: string;
+  cues?: CaptionCueInput[];
+  /** SRT or WebVTT source to import instead of `cues`. */
+  text?: string;
+  format?: 'srt' | 'vtt' | 'auto';
+  /** Seconds added to every imported or listed cue. */
+  offset?: number;
+  /** A preset id plus any style overrides. */
+  style?: JsonObject;
+  language?: string;
+  from?: number;
+  duration?: number;
+  index?: number;
+  select?: boolean;
+}
+
+export interface EditCaptionsCommand extends LayerTargetedCommand, LockableCommand {
+  type: 'edit_captions';
+  op: 'replace' | 'insert' | 'update' | 'delete' | 'split' | 'merge' | 'move' | 'import' | 'style';
+  /** replace / insert: cues; update: patches by id. */
+  cues?: Array<CaptionCueInput | CaptionCuePatch>;
+  /** delete / merge / move. Move without ids shifts every cue. */
+  ids?: string[];
+  /** split: the cue and the composition time to cut it at. */
+  id?: string;
+  at?: number;
+  /** move: seconds. */
+  by?: number;
+  /** import: SRT or WebVTT source; replaces the cues unless replace is false. */
+  text?: string;
+  format?: 'srt' | 'vtt' | 'auto';
+  replace?: boolean;
+  offset?: number;
+  /** style: a preset id and/or overrides. */
+  style?: JsonObject;
+  language?: string | null;
+}
+
 export interface GroupLayersCommand { type: 'group_layers' | 'ungroup_layers' | 'move_to_group'; targets: string[]; name?: string; group?: string | null; }
 
 export type EditCommand =
@@ -286,7 +346,9 @@ export type EditCommand =
   | AddMarkerCommand
   | CreateSectionCommand
   | UpdateSectionCommand
-  | TransformLayersCommand;
+  | TransformLayersCommand
+  | AddCaptionsCommand
+  | EditCaptionsCommand;
 
 export interface EditMeta {
   label?: string;

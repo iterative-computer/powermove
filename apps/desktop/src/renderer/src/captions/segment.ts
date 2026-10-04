@@ -54,7 +54,10 @@ export function segmentWords(input: readonly CaptionWord[], options: Partial<Seg
       if (gap >= o.pause || SENTENCE_END.test(last.text) && textOf(current).length >= 12) flush();
       else if (length > capacity || duration > o.maxDuration) {
         // Prefer the last clause break in the back half of the cue.
-        const clause = current.findLastIndex((item, index) => index >= current.length / 2 && CLAUSE_END.test(item.text));
+        let clause = -1;
+        for (let index = current.length - 1; index >= current.length / 2; index--) {
+          if (CLAUSE_END.test(current[index]!.text)) { clause = index; break; }
+        }
         if (clause >= 0 && clause < current.length - 1) {
           const rest = current.slice(clause + 1);
           current = current.slice(0, clause + 1);

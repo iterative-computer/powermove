@@ -22,7 +22,7 @@ const SCENE_OPERATIONS = new Set([
   'set_layer', 'set_composition', 'add_layer', 'delete_layers',
   'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_effect', 'remove_effect', 'set_effect', 'set_transition',
   'set_scene_parameter', 'add_marker', 'create_section', 'update_section',
-  'transform_layers',
+  'transform_layers', 'add_captions', 'edit_captions',
 ]);
 const FIELDS: any = {
   set_property: ['type', 'target', 'path', 'value', 'time', 'mode', 'ease', 'hold', 'preserveHandEdits'],
@@ -47,6 +47,8 @@ const FIELDS: any = {
   create_section: ['type', 'section'],
   update_section: ['type', 'sectionId', 'layers', 'thumb', 'at', 'version'],
   transform_layers: ['type', 'transform', 'state'],
+  add_captions: ['type', 'id', 'name', 'cues', 'text', 'format', 'offset', 'style', 'language', 'from', 'duration', 'index', 'select'],
+  edit_captions: ['type', 'target', 'op', 'cues', 'ids', 'id', 'at', 'by', 'text', 'format', 'replace', 'offset', 'style', 'language'],
 };
 
 const clone = (value: any) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
@@ -89,6 +91,26 @@ function propertyDigest(layer: any, options: any = {}) {
   }));
 }
 
+/* Caption layers can hold thousands of cues; page them like keyframes.
+   Times are composition seconds, matching the caption commands. */
+function captionsDigest(layer: any, options: any) {
+  const cues = Array.isArray(layer.d?.cues) ? layer.d.cues : [];
+  const offset = Math.max(0, Math.trunc(Number(options.cueOffset) || 0));
+  const limit = Math.max(0, Math.trunc(Number(options.cueLimit ?? 200)));
+  const from = Number(layer.from) || 0;
+  return {
+    style: clone(layer.d?.style || {}),
+    language: layer.d?.language ?? null,
+    cueCount: cues.length,
+    cueOffset: offset,
+    cueTimes: 'composition seconds',
+    cues: cues.slice(offset, offset + limit).map((cue: any) => ({
+      id: cue.id, start: PM.round(cue.start + from, 3), end: PM.round(cue.end + from, 3), text: cue.text,
+      ...(cue.words?.length ? { words: cue.words.length } : {}),
+    })),
+  };
+}
+
 function projectState(options: any = {}) {
   const p = PM.proj;
   const selectedIds = new Set(PM.sel?.layers || []);
@@ -108,7 +130,7 @@ function projectState(options: any = {}) {
       index: p.layers.indexOf(layer), id: layer.id, name: layer.name, type: layer.type, from: layer.from,
       duration: layer.dur, visible: layer.on, locked: layer.lock, parent: layer.parent, group: layer.group || null,
       blend: layer.blend, motionBlur: layer.mblur, color: layer.color,
-      content: clone(layer.d || {}),
+      content: layer.type === 'captions' ? captionsDigest(layer, options) : clone(layer.d || {}),
       masks: (layer.masks || []).map((m: any) => ({ id: m.id, shape: m.shape, mode: m.mode, hasPath: !!m.path, vertices: m.path?.vertices?.length || 0 })),
       propertyCount: PM.allProps(layer).length,
       properties: propertyDigest(layer, options),
@@ -198,7 +220,7 @@ function describeCommand(command: any) {
     add_effect: 'Add effect', remove_effect: 'Remove effect', set_effect: 'Edit effect',
     set_scene_parameter: 'Set scene control', add_marker: 'Add marker',
     create_section: 'Create section', update_section: 'Update section',
-    transform_layers: 'Transform layers',
+    transform_layers: 'Transform layers', add_captions: 'Add captions', edit_captions: 'Edit captions',
   };
   return [labels[command.type] || command.type, target, detail].filter(Boolean).join(' · ').slice(0, 150);
 }

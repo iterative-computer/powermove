@@ -185,11 +185,13 @@ export interface WriteOptions {
   /** Cues starting at or after this time (after offset) are left out; the last
       one is cut to it. */
   to?: number;
+  /** Seconds subtracted after clipping, e.g. a work-area start. */
+  rebase?: number;
 }
 
 function timed(cues: readonly CaptionCue[], options: WriteOptions) {
   const offset = options.offset ?? 0, from = options.from ?? -Infinity, to = options.to ?? Infinity;
-  const base = Number.isFinite(from) && from > 0 ? from : 0;
+  const base = options.rebase ?? 0;
   return cues
     .map(cue => ({ text: cue.text, start: Math.max(cue.start + offset, from), end: Math.min(cue.end + offset, to) }))
     .filter(cue => cue.end - cue.start >= MIN_CUE_DURATION / 2)

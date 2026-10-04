@@ -12,7 +12,7 @@ const OPERATIONS = [
   'set_content', 'set_layer', 'set_composition', 'add_layer',
   'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_effect', 'remove_effect',
   'set_effect', 'set_transition', 'set_scene_parameter', 'add_marker', 'create_section',
-  'update_section', 'transform_layers',
+  'update_section', 'transform_layers', 'add_captions', 'edit_captions',
 ];
 
 const OPERATION_CONTRACT = {
@@ -39,6 +39,8 @@ const OPERATION_CONTRACT = {
   create_section: { target: 'project', fields: ['section'] },
   update_section: { target: 'project', fields: ['sectionId', 'layers', 'thumb', 'version', 'at'] },
   transform_layers: { target: 'layer-collection', fields: ['transform', 'state'] },
+  add_captions: { target: 'project', fields: ['cues', 'text', 'format', 'offset', 'style', 'language', 'name', 'from', 'duration'] },
+  edit_captions: { target: 'layer', fields: ['op', 'cues', 'ids', 'id', 'at', 'by', 'text', 'format', 'replace', 'offset', 'style', 'language'] },
 };
 
 function editor() {
