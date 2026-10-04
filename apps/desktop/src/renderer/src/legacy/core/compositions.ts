@@ -17,6 +17,10 @@ import type { Patch, PathPart } from '../../../../shared/patch';
 
 /** Fields that belong to a composition rather than to the project. */
 export const COMP_FIELDS = ['w', 'h', 'fps', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter', 'audioGain'] as const;
+/** Composition fields that may be absent (absent = default). When the open
+ * composition changes they must be cleared rather than inherited, or one
+ * composition's value would leak into the next. */
+const OPTIONAL_COMP_FIELDS: ReadonlySet<string> = new Set(['audioGain']);
 /** Top-level project key → key on a stored composition. */
 const ROOT_TO_COMP: Record<string, string> = {
   compId: 'id', compName: 'name',
@@ -43,7 +47,10 @@ export function rotateProject(project: any, id: string): any {
   for (const [key, comp] of Object.entries(project.comps || {})) if (key !== id) comps[key] = comp;
   if (project.compId) comps[project.compId] = rootComp(project);
   const next: any = { ...project, comps, compId: id, compName: target.name || 'Comp' };
-  for (const key of COMP_FIELDS) if (Object.hasOwn(target, key)) next[key] = target[key];
+  for (const key of COMP_FIELDS) {
+    if (Object.hasOwn(target, key)) next[key] = target[key];
+    else if (OPTIONAL_COMP_FIELDS.has(key)) delete next[key];
+  }
   next.layers = Array.isArray(next.layers) ? next.layers : [];
   next.markers = Array.isArray(next.markers) ? next.markers : [];
   next.work = Array.isArray(next.work) && next.work.length === 2 ? next.work : [0, next.dur];
@@ -107,6 +114,7 @@ export function realizePatches(patches: Patch[], project: any): Patch[] {
             const rootKey = COMP_TO_ROOT[key];
             if (rootKey && rootKey !== 'compId') out.push({ path: [rootKey], exists: true, value });
           }
+          for (const key of OPTIONAL_COMP_FIELDS) if (!Object.hasOwn(patch.value, key)) out.push({ path: [key], exists: false });
         }
         continue;
       }
