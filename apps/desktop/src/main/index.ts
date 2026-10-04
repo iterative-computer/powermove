@@ -56,6 +56,8 @@ import { MIME_TYPES } from './mime';
 import { registerHapticsIpc } from './haptics';
 import { registerContextMenuIpc } from './context-menu';
 import { registerCloudMediaIpc } from './cloud-media';
+import { MediaPathCache, registerMediaPathIpc } from './media-path-cache';
+import { cloudFileState } from '@powermove/macos-haptics';
 import { registerConfirmIpc } from './native-confirm';
 import { registerClipboardIpc } from './clipboard';
 import { userInput } from './user-input';
@@ -1012,6 +1014,12 @@ if (!hasSingleInstanceLock) {
     registerNativeEditIpc(ipcMain, ctx);
     registerLogIpc(ipcMain, ctx);
     registerMediaProxyIpc(ipcMain, mediaProxies, ctx);
+    /* agent media tools: an asset's bytes as a file path (media-tools lane) */
+    const mediaPaths = new MediaPathCache(path.join(app.getPath('userData'), 'Media Tool Cache'), {
+      isLocal: async (file) => { const state = await cloudFileState(file); return state !== 'icloud' && state !== 'cloud'; }
+    });
+    registerMediaPathIpc(ipcMain, mediaPaths, ctx);
+    app.once('will-quit', () => { void mediaPaths.dispose(); });
     registerRenderEncoder(ipcMain,ctx);
     // Powermove Cloud account. Boot must never block the window: a broken
     // profile file degrades to "signed out".
@@ -1186,6 +1194,7 @@ if (!hasSingleInstanceLock) {
         : path.join(app.getAppPath(), 'src/main/agent-tools/mcp-server.mjs'),
       agentToolCommand: process.execPath,
       agentToolCommandArgs: [...(app.isPackaged ? [] : [app.getAppPath()]), '--powermove-agent-tools'],
+      agentMediaFfmpeg: proxyEncoder,
       refreshExtensions: refreshRestoredExtensions,
       storeAgent: () => storeAgentGateway,
       openExternal: async (url) => { await shell.openExternal(url); }

@@ -3,6 +3,9 @@ import { createAgentCheckpoint } from './checkpoint';
 import { openPanel, readPanel, interactPanel, panelBounds, preparePanelInput } from './panel-tools';
 import { records as extensionRecords } from '../../kernel/extensions.svelte';
 import { editVideo, videoAssets } from './video-editing';
+import { agentMediaSource } from './media-source';
+import { checkProject } from './project-check';
+import { CHECK_PROJECT_TOOL, MEDIA_SOURCE_TOOL } from '../../../../shared/media-tools';
 import { validateEffect } from '../../kernel/glsl';
 import { COMMAND_JSON_LIMIT } from '../../../../shared/edit-limits';
 import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
@@ -471,6 +474,14 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     const content = toolText(projectState(request.arguments));
     refreshLiveTransaction(request);
     return { ok: true, content: [content], revision: currentRevision() };
+  }
+  /* ── agent media tools (media-tools lane) ── */
+  if (request.tool === MEDIA_SOURCE_TOOL) {
+    const source = await agentMediaSource(PM, request.arguments);
+    return { ok: true, content: [toolText(source)], revision: currentRevision() };
+  }
+  if (request.tool === CHECK_PROJECT_TOOL) {
+    return { ok: true, content: [toolText(checkProject(PM))], revision: currentRevision() };
   }
   if (request.tool === 'get_workspace_state') {
     const file = PM.projectFileState?.(PM.proj.id);

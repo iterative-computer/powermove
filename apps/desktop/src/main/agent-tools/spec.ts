@@ -151,6 +151,65 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
     description: 'Stage a stale user fork for a three-way rebase onto the built-in version shipped by this Powermove app. Returns only run-private working/base/ours paths plus sorted user, upstream, and conflict file lists. Call this before editing the fork.',
     inputSchema: closedObject({ id: { type: 'string', pattern: '^[a-z0-9][a-z0-9-]{1,63}$' } }, ['id'])
   },
+  /* ── watch and listen: footage understanding (media-tools lane) ── */
+  {
+    name: 'probe_media',
+    description: 'Read a video or audio asset\'s technical metadata without decoding: container, duration, bitrate, and per stream codec/profile, width×height, fps, pixel format, alpha, rotation, audio channels/layout/sample rate/bitrate. Pass assetId (mediaAssets in get_project_state) or a clip\'s layerId (adds the clip\'s composition span and source range). Text only.',
+    inputSchema: closedObject({ assetId: { type: 'string' }, layerId: { type: 'string' } })
+  },
+  {
+    name: 'sample_media_frames',
+    description: 'Decode real frames from SOURCE footage (the asset\'s own pixels, not the composition) and return them as images. Choose explicit times (seconds; negative counts back from the end), count evenly spaced frames across start/end, or auto: true for one frame per distinct visual state (scene detection that skips mid-transition frames; count caps it; since marks where each change began, e.g. a cut). Times are composition seconds for layerId, source seconds for assetId. At most 8 frames; quality small (default) | medium | large. Prefer media_contact_sheet for an overview.',
+    inputSchema: closedObject({
+      assetId: { type: 'string' }, layerId: { type: 'string' },
+      times: { type: 'array', maxItems: 8, items: { type: 'number' } },
+      count: { type: 'integer', minimum: 1, maximum: 8 },
+      auto: { type: 'boolean' },
+      start: { type: 'number' }, end: { type: 'number' },
+      quality: { type: 'string', enum: ['small', 'medium', 'large'] }
+    })
+  },
+  {
+    name: 'media_contact_sheet',
+    description: 'One image: a grid of timecode-labelled thumbnails, the cheapest way to see a whole clip or the live composition at once. target source (default) samples an asset/clip\'s footage; target composition renders the live composition (no asset needed). count frames evenly across start/end (default 12, max 48) or explicit times; columns optional. Times are composition seconds for layerId and composition, source seconds for assetId.',
+    inputSchema: closedObject({
+      target: { type: 'string', enum: ['source', 'composition'] },
+      assetId: { type: 'string' }, layerId: { type: 'string' },
+      count: { type: 'integer', minimum: 1, maximum: 48 },
+      times: { type: 'array', maxItems: 48, items: { type: 'number' } },
+      start: { type: 'number' }, end: { type: 'number' },
+      columns: { type: 'integer', minimum: 1, maximum: 10 }
+    })
+  },
+  {
+    name: 'media_waveform',
+    description: 'Listen to an asset\'s or clip\'s audio: silent ranges (ffmpeg silencedetect, below silenceThresholdDb for at least minSilence seconds; defaults -40 dB, 0.4 s), integrated loudness (LUFS), loudness range, true/sample peak, RMS and a clipping flag, plus a waveform image with silences shaded. image: false returns the JSON only. For layerId, start/end are composition seconds and silences are also mapped to composition time; for assetId they are source seconds.',
+    inputSchema: closedObject({
+      assetId: { type: 'string' }, layerId: { type: 'string' },
+      start: { type: 'number' }, end: { type: 'number' },
+      silenceThresholdDb: { type: 'number', minimum: -90, maximum: -10 },
+      minSilence: { type: 'number', minimum: 0.05, maximum: 10 },
+      image: { type: 'boolean' },
+      width: { type: 'integer', minimum: 400, maximum: 1600 }
+    })
+  },
+  {
+    name: 'transcribe_media',
+    description: 'Transcribe speech on this Mac. For layerId, only what the clip plays is transcribed and every time is composition seconds (trim, speed and retiming applied), ready for edit_video; for assetId, times are source seconds (optional start/end narrow it). format text (default): one timestamped line per segment; words: segments with [text, start, end] words. Long transcripts are paged: pass nextCursor back as cursor. If no transcription model is downloaded, the result says so and Powermove asks the user to download one; tell the user and retry after. A long job may answer status transcribing: call again with the same arguments.',
+    inputSchema: closedObject({
+      assetId: { type: 'string' }, layerId: { type: 'string' },
+      start: { type: 'number' }, end: { type: 'number' },
+      language: { type: 'string', maxLength: 16 },
+      format: { type: 'string', enum: ['text', 'words'] },
+      cursor: { type: 'integer', minimum: 0 }
+    })
+  },
+  {
+    name: 'check_project',
+    description: 'Lint the live composition for structural problems the editor can prove: spans where no layer is visible (only the background shows), layers that never show (opacity 0 throughout, outside the composition or work area, zero duration), missing, failed, offline or cloud-only media, clips that play past the end of their media, and audio driven over full scale by its gain. Returns issues with layer IDs and composition-time ranges; ok: true when clean. Run it before finishing an edit.',
+    inputSchema: closedObject({})
+  },
+  /* ── end watch and listen ── */
   {
     name: 'store_search',
     description: 'Search the Powermove Store for published extensions (effects, transitions, panels, themes, commands, layers, tools). Returns matching listings with their handle/slug, name, tagline, install count, verified publisher flag, declared permissions and latest releaseId. Use this to find an extension that does what the user needs before installing.',
@@ -210,6 +269,12 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   }
 ] as const;
 
+/** Footage-understanding tools (media-tools lane): read-only, project runs
+ * only. All but check_project run in main against a resolved media file. */
+export const POWERMOVE_MEDIA_TOOL_NAMES = [
+  'probe_media', 'sample_media_frames', 'media_contact_sheet', 'media_waveform', 'transcribe_media', 'check_project'
+] as const;
+
 /** Store tools are not tied to a composition: they work in both app and
  * project runs, so they join the app subset below. The read-only four also
  * join the editor/planning inspection subset. */
@@ -239,6 +304,7 @@ export const POWERMOVE_LIVE_INSPECTION_TOOL_NAMES = [
   'get_workspace_state',
   'validate_effect',
   'render_frames',
+  ...POWERMOVE_MEDIA_TOOL_NAMES,
   ...POWERMOVE_STORE_READONLY_TOOL_NAMES
 ] as const;
 
