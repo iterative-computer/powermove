@@ -5,6 +5,8 @@ export interface NativeMcpServerConfig {
   command: string;
   args: string[];
   env: Record<string, string>;
+  /** Codex's per-server tool timeout; longer while a tool may wait on the person. */
+  toolTimeoutSec?: number;
 }
 
 export interface PowermoveAgentToolSpec {
@@ -213,6 +215,22 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
 /** Store tools are not tied to a composition: they work in both app and
  * project runs, so they join the app subset below. The read-only four also
  * join the editor/planning inspection subset. */
+export const OUTSIDE_SANDBOX_TOOL_NAME = 'run_outside_sandbox';
+/** How long run_outside_sandbox may hold a tool call: the person's answer plus the command. */
+export const OUTSIDE_SANDBOX_CALL_MS = 3_600_000 + 600_000;
+
+/** Offered only to supervised Project runs whose provider cannot ask the
+ * person itself. It is not in POWERMOVE_AGENT_TOOLS, so no other run lists it. */
+export const OUTSIDE_SANDBOX_TOOL: PowermoveAgentToolSpec = {
+  name: OUTSIDE_SANDBOX_TOOL_NAME,
+  description: 'Ask the user to approve one shell command that the project sandbox blocks, such as installing a font or writing outside the workspace, then run it without the sandbox in the workspace folder. Use only after the sandboxed attempt fails and only for what the request needs. Waits for the user. Returns the exit code and output, or their refusal; never retry a refused command.',
+  inputSchema: closedObject({
+    command: { type: 'string', minLength: 1, maxLength: 20_000 },
+    reason: { type: 'string', minLength: 1, maxLength: 600, description: 'Why this command must run outside the sandbox, in a sentence the user will read.' },
+    timeoutMs: { type: 'integer', minimum: 1, maximum: 600_000 }
+  }, ['command', 'reason'])
+};
+
 export const POWERMOVE_STORE_TOOL_NAMES = [
   'store_search', 'store_extension', 'store_source', 'store_library',
   'store_install', 'store_update', 'store_uninstall', 'store_publish_prepare', 'store_publish'

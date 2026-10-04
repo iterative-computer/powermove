@@ -135,6 +135,7 @@ PM.CodexBridge = {
         threadId: options.threadId || '',
         model: options.model || '', reasoningEffort: options.reasoningEffort || '',
         mode: options.mode || 'editor', access: options.access || 'editor',
+        approval: options.approval || S.approvalMode,
         context: options.context || 'project',
         projectId: options.projectId || '', projectName: options.projectName || '',
         projectJSON: options.projectJSON || '', attachments: (options.attachments || []).slice(0, 6),
@@ -263,9 +264,12 @@ PM.WindowCapture = {
   },
 };
 
-/* Broad access is the default: the agent can use project tools and the web
-   without a picker. Computer access still requires its per-run confirmation. */
+/* Project access is the default: the agent can use project tools and the web
+   inside a sandbox, and the approval mode decides who allows what the sandbox
+   blocks. Full access ('computer') asks in a native dialog once per app
+   session and holds until the person picks another level. */
 const storedAccessMode: any = PM.store?.get?.('agentAccessMode', 'project');
+const storedApprovalMode: any = PM.store?.get?.('agentApprovalMode', 'auto');
 const storedProvider: any = PM.store?.get?.('agentProvider', 'chatgpt');
 const initialProvider: any = ['chatgpt', 'claude', 'compatible'].includes(storedProvider) ? storedProvider : 'chatgpt';
 const S: any = {
@@ -285,7 +289,8 @@ const S: any = {
   provider: initialProvider,
   model: PM.store?.get?.(`agentModel.${initialProvider}`, initialProvider === 'compatible' ? 'configured' : initialProvider === 'claude' ? 'sonnet' : 'gpt-5.6-sol') || (initialProvider === 'compatible' ? 'configured' : initialProvider === 'claude' ? 'sonnet' : 'gpt-5.6-sol'),
   reasoningEffort: PM.store?.get?.('agentReasoningEffort', 'high') || 'high',
-  accessMode: ['editor', 'project'].includes(storedAccessMode) ? storedAccessMode : 'project',
+  accessMode: ['editor', 'project', 'computer'].includes(storedAccessMode) ? storedAccessMode : 'project',
+  approvalMode: storedApprovalMode === 'supervised' ? 'supervised' : 'auto',
 };
 
 const AGENT_PROVIDERS: any = [
@@ -363,10 +368,14 @@ void hostBridge()?.compatible?.status().then(config => {
   PM.AgentUI?.update();
 }).catch(() => undefined);
 const AGENT_ACCESS_MODES: any = [
-  { id: 'editor', label: 'Edit project', detail: 'Edit the current composition' },
-  { id: 'project', label: 'Change Powermove (project)', detail: 'Create or edit mods with files, shell, web, and integrations' },
-  { id: 'computer', label: 'Computer', detail: 'Full Mac access for one explicitly approved run' },
+  { id: 'editor', label: 'Composition only', detail: 'Edit the composition. No shell, files or web.', icon: 'pen' },
+  { id: 'supervised', label: 'Supervised', detail: 'Ask before anything outside the project sandbox.', icon: 'hand' },
+  { id: 'auto', label: 'Auto', detail: 'Codex approves routine actions; Claude and API models still ask.', icon: 'shieldCheck' },
+  { id: 'full', label: 'Full access', detail: 'Run commands and edit files anywhere without prompts.', icon: 'warning', tone: 'warning' },
 ];
+function agentPermission(): string {
+  return S.accessMode === 'editor' ? 'editor' : S.accessMode === 'computer' ? 'full' : S.approvalMode;
+}
 const SEND_TRANSITION_MS: any = 240;
 const APP_AGENT_PROJECT_ID = 'powermove-global';
 let agentContext: 'app' | 'project' = PM.isHomeProject?.() ? 'app' : 'project';
@@ -729,6 +738,7 @@ function agentUISnapshot(): AgentSnapshot {
     model: S.model,
     reasoningEffort: S.reasoningEffort,
     accessMode: S.accessMode,
+    permission: agentPermission(),
     composerDraft: S.composerDraft,
     pendingEntering: S.pendingEntering,
     models: AGENT_MODELS[S.provider as keyof typeof AGENT_MODELS],
@@ -1478,10 +1488,28 @@ function promoteToConversation() {
   PM.AgentShell?.collapse?.();
 }
 
+/* `project` (from older callers) keeps the current approval mode. Full access
+   waits for main's native dialog and stays put if it is declined. */
 function setAgentAccessMode(mode: any) {
-  if (mode === 'computer' || !AGENT_ACCESS_MODES.some((item: any) => item.id === mode)) return;
-  S.accessMode = mode;
-  PM.store.set('agentAccessMode', mode);
+  if (mode === 'project') mode = S.approvalMode;
+  if (!AGENT_ACCESS_MODES.some((item: any) => item.id === mode)) return;
+  if (mode === 'full') { void grantFullAccess(); return; }
+  const leavingFull = S.accessMode === 'computer';
+  S.accessMode = mode === 'editor' ? 'editor' : 'project';
+  if (mode !== 'editor') { S.approvalMode = mode; PM.store.set('agentApprovalMode', mode); }
+  PM.store.set('agentAccessMode', S.accessMode);
+  if (leavingFull) void hostBridge()?.codex?.requestComputerConsent({ projectName: '', summary: '', revoke: true }).catch(() => undefined);
+  PM.AgentUI?.update({ focusComposer: true });
+}
+
+async function grantFullAccess() {
+  if (S.accessMode === 'computer') return;
+  const consent: any = await hostBridge()?.codex?.requestComputerConsent({
+    projectName: PM.proj?.name || 'Untitled', summary: '', standing: true
+  }).catch(() => null);
+  if (!consent?.granted) { PM.AgentUI?.update({ focusComposer: true }); return; }
+  S.accessMode = 'computer';
+  PM.store.set('agentAccessMode', 'computer');
   PM.AgentUI?.update({ focusComposer: true });
 }
 
@@ -2555,10 +2583,6 @@ async function sendRequest(input: any) {
       sealTrace(session);
       if (session.activeRequest === controller) { session.activeRequest = null; session.codexRequestId = null; }
       touch(session, { flush: true });
-    }
-    if (accessAtStart === 'computer' && token === session.requestToken) {
-      S.accessMode = 'project';
-      if (token === session.requestToken && session.phase !== 'working') touch(session);
     }
   }
 }

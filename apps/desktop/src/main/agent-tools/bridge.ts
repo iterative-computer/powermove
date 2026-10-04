@@ -15,7 +15,15 @@ import {
 import { isRecord, isString } from '../../shared/guards';
 import { EXTENSION_ID } from '../../shared/extensions';
 import { forkBuiltinExtension } from '../extensions/fork';
-import { POWERMOVE_AGENT_TOOLS, POWERMOVE_APP_AGENT_TOOLS, POWERMOVE_STORE_TOOL_NAMES, type NativeMcpServerConfig } from './spec';
+import {
+  OUTSIDE_SANDBOX_CALL_MS,
+  OUTSIDE_SANDBOX_TOOL,
+  OUTSIDE_SANDBOX_TOOL_NAME,
+  POWERMOVE_AGENT_TOOLS,
+  POWERMOVE_APP_AGENT_TOOLS,
+  POWERMOVE_STORE_TOOL_NAMES,
+  type NativeMcpServerConfig
+} from './spec';
 import type { StoreAgentGateway, StoreInstallInput, StorePublishInput, StoreSearchInput } from '../cloud/store-agent';
 import { inspectCreativeWorkspace } from '../creative-workspace';
 import { userInput, type UserInput } from '../user-input';
@@ -45,6 +53,9 @@ interface PendingToolCall {
   timer: NodeJS.Timeout;
 }
 
+/** Asks the person, then runs one command without the sandbox; returns its report. */
+export type OutsideSandboxRunner = (args: { command: string; reason: string; timeoutMs: number }) => Promise<string>;
+
 export interface AgentToolFinishResult {
   changed: boolean;
   revision?: number;
@@ -59,6 +70,8 @@ export class PowermoveAgentToolSession {
   private finishing: Promise<AgentToolFinishResult> | null = null;
   readonly openedAt = Date.now();
   stagingDirectory: string | null = null;
+  /** Set for supervised Project runs that ask through run_outside_sandbox. */
+  outsideSandbox: OutsideSandboxRunner | null = null;
 
   constructor(
     readonly runId: string,
@@ -155,6 +168,7 @@ export class PowermoveAgentToolBridge {
     baseRevision: number;
     context?: 'app' | 'project';
     resolveStagingDirectory?: (forkId: string) => Promise<string>;
+    outsideSandbox?: OutsideSandboxRunner;
   }): Promise<PowermoveAgentToolSession> {
     if (!REQUEST_ID.test(options.runId)) throw new Error('Invalid agent tool run id.');
     if (this.sessionsByRun.has(options.runId)) throw new Error('Agent tool session already exists.');
@@ -169,7 +183,8 @@ export class PowermoveAgentToolBridge {
         POWERMOVE_AGENT_TOOL_TOKEN: token,
         POWERMOVE_AGENT_RUN_ID: options.runId,
         POWERMOVE_AGENT_TOOL_TIMEOUT_MS: String(this.timeoutMs)
-      }
+      },
+      ...(options.outsideSandbox ? { toolTimeoutSec: Math.ceil(OUTSIDE_SANDBOX_CALL_MS / 1000) } : {})
     };
     const session = new PowermoveAgentToolSession(
       options.runId,
@@ -181,6 +196,7 @@ export class PowermoveAgentToolBridge {
       mcpConfig,
       options.resolveStagingDirectory
     );
+    session.outsideSandbox = options.outsideSandbox ?? null;
     this.sessionsByToken.set(token, session);
     this.sessionsByRun.set(options.runId, session);
     return session;
@@ -366,7 +382,7 @@ export class PowermoveAgentToolBridge {
       const newline = input.indexOf('\n');
       if (newline < 0) return;
       handled = true;
-      void this.dispatchSocket(input.slice(0, newline)).then(
+      void this.dispatchSocket(input.slice(0, newline), socket).then(
         (value) => this.writeSocket(socket, value),
         (error) => this.writeSocket(socket, {
           ok: false,
@@ -376,7 +392,7 @@ export class PowermoveAgentToolBridge {
     });
   }
 
-  private async dispatchSocket(line: string): Promise<Record<string, unknown>> {
+  private async dispatchSocket(line: string, socket?: Socket): Promise<Record<string, unknown>> {
     let value: unknown;
     try { value = JSON.parse(line); } catch { throw new Error('Invalid Powermove tool request.'); }
     const request = this.parseSocketRequest(value);
@@ -385,9 +401,13 @@ export class PowermoveAgentToolBridge {
       throw new Error('Powermove tool session is not active.');
     }
     if (request.tool === '__list_tools') {
-      return { id: request.id, ok: true, tools: session.context === 'app' ? POWERMOVE_APP_AGENT_TOOLS : POWERMOVE_AGENT_TOOLS };
+      const tools = session.context === 'app' ? POWERMOVE_APP_AGENT_TOOLS : POWERMOVE_AGENT_TOOLS;
+      return { id: request.id, ok: true, tools: session.outsideSandbox ? [...tools, OUTSIDE_SANDBOX_TOOL] : tools };
     }
-    if (!POWERMOVE_AGENT_TOOLS.some((tool) => tool.name === request.tool)) {
+    if (request.tool === OUTSIDE_SANDBOX_TOOL_NAME) {
+      // It waits on the person, far longer than any other tool call.
+      socket?.setTimeout(OUTSIDE_SANDBOX_CALL_MS + 5_000);
+    } else if (!POWERMOVE_AGENT_TOOLS.some((tool) => tool.name === request.tool)) {
       throw new Error(`Unknown Powermove tool: ${request.tool}`);
     }
     const response = await this.callTool(session, request.tool, request.arguments, request.workspace);
@@ -405,6 +425,7 @@ export class PowermoveAgentToolBridge {
    * staging handlers, not just the renderer's editing dispatcher. */
   async callTool(session: PowermoveAgentToolSession, tool: string, args: Record<string, unknown>, workspace = ''): Promise<AgentToolResponseEvent> {
     if (session.isClosed() || session.owner.isDestroyed()) throw new Error('Powermove tool session is not active.');
+    if (tool === OUTSIDE_SANDBOX_TOOL_NAME) return this.runOutsideSandbox(session, args);
     if (!POWERMOVE_AGENT_TOOLS.some(spec => spec.name === tool)) throw new Error(`Unknown Powermove tool: ${tool}`);
     if (session.context === 'app' && !POWERMOVE_APP_AGENT_TOOLS.some(spec => spec.name === tool)) {
       throw new Error('This agent has no project attached. Open a project to use composition tools.');
@@ -434,6 +455,17 @@ export class PowermoveAgentToolBridge {
         : await this.callRenderer(session, tool, args);
     session.noteResponse(response);
     return response;
+  }
+
+  private async runOutsideSandbox(session: PowermoveAgentToolSession, args: Record<string, unknown>): Promise<AgentToolResponseEvent> {
+    if (!session.outsideSandbox) throw new Error(`${OUTSIDE_SANDBOX_TOOL_NAME} is not available in this run.`);
+    const { command, reason, timeoutMs } = args;
+    if (!isString(command, 20_000) || !command.trim() || !isString(reason, 600) || !reason.trim()
+      || (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || (timeoutMs as number) < 1 || (timeoutMs as number) > 600_000))) {
+      throw new Error(`${OUTSIDE_SANDBOX_TOOL_NAME} expects { command, reason, timeoutMs? }.`);
+    }
+    const text = await session.outsideSandbox({ command, reason, timeoutMs: (timeoutMs as number | undefined) ?? 120_000 });
+    return { runId: session.runId, callId: `tool-${randomUUID()}`, ok: true, content: [{ type: 'text', text }] };
   }
 
   /** Store tools run entirely in main (network/install/publish), never the

@@ -7,6 +7,7 @@ import ThreadPicker from './ThreadPicker.svelte';
 import { BLINK_MS } from '../../controls/menu-blink';
 import { install as installSpatial } from '../../legacy/assistant/spatial';
 import { registerAgentPanel } from '../register-agent';
+import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
 import {
   agentState,
   resetAgentState,
@@ -75,6 +76,7 @@ function snapshot(overrides: Partial<AgentSnapshot> = {}): AgentSnapshot {
     model: 'gpt-5.6-sol',
     reasoningEffort: 'high',
     accessMode: 'editor',
+    permission: 'editor',
     composerDraft: '',
     pendingEntering: false,
     models: [
@@ -861,7 +863,7 @@ describe('agent bridge', () => {
     expect(store.set).not.toHaveBeenCalledWith('agentAccessMode', 'computer');
   });
 
-  it('labels the two persistent agent authorities by what they change', () => {
+  it('offers the access levels as approval modes, most restricted first', () => {
     const registry: Record<string, any> = {
       store: { get: vi.fn((_key: string, fallback: unknown) => fallback), set: vi.fn() },
       uid: PM.uid,
@@ -869,9 +871,42 @@ describe('agent bridge', () => {
     };
     installSpatial(registry);
 
-    expect(agentState.accessModes.slice(0, 2).map(({ id, label }) => ({ id, label }))).toEqual([
-      { id: 'editor', label: 'Edit project' },
-      { id: 'project', label: 'Change Powermove (project)' }
+    expect(agentState.accessModes.map(({ id, label }) => ({ id, label }))).toEqual([
+      { id: 'editor', label: 'Composition only' },
+      { id: 'supervised', label: 'Supervised' },
+      { id: 'auto', label: 'Auto' },
+      { id: 'full', label: 'Full access' }
     ]);
   });
+
+  it('keeps the approval mode with Project access and asks main once for Full access', async () => {
+    const store = { get: vi.fn((_key: string, fallback: unknown) => fallback), set: vi.fn() };
+    const consent = vi.fn(async (request: { standing?: boolean; revoke?: boolean }) =>
+      request.standing ? { granted: true, token: 't', expiresAt: 1 } : { granted: false });
+    installBridgeForTests({ codex: { requestComputerConsent: consent } } as any);
+    try {
+      const registry: Record<string, any> = { store, registerPanel: vi.fn(), uid: PM.uid };
+      installSpatial(registry);
+
+      registry.AgentUI.setAccess('supervised');
+      expect(agentState.accessMode).toBe('project');
+      expect(agentState.permission).toBe('supervised');
+      expect(store.set).toHaveBeenCalledWith('agentApprovalMode', 'supervised');
+      // Older callers asking for Project keep the chosen approval mode.
+      registry.AgentUI.setAccess('project');
+      expect(agentState.permission).toBe('supervised');
+
+      registry.AgentUI.setAccess('full');
+      await vi.waitFor(() => expect(agentState.permission).toBe('full'));
+      expect(consent).toHaveBeenCalledWith(expect.objectContaining({ standing: true }));
+      expect(store.set).toHaveBeenCalledWith('agentAccessMode', 'computer');
+
+      registry.AgentUI.setAccess('auto');
+      expect(agentState.permission).toBe('auto');
+      expect(consent).toHaveBeenLastCalledWith(expect.objectContaining({ revoke: true }));
+    } finally {
+      resetBridgeForTests();
+    }
+  });
+
 });

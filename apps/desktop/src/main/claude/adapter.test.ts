@@ -100,6 +100,37 @@ describe('Claude CLI adapter', () => {
     expect(prompt).not.toMatch(/download only|pexels/);
   });
 
+  it('keeps Write and Edit to the workspace through acceptEdits instead of allowing them everywhere', () => {
+    const argv = buildClaudeArgv({
+      schema, prompt: 'Build', imagePaths: [], model: null, reasoningEffort: null,
+      sessionId: null, access: 'project', instructions: 'Work inside Powermove.'
+    });
+    expect(argv[argv.indexOf('--permission-mode') + 1]).toBe('acceptEdits');
+    const allowed = argv[argv.indexOf('--allowedTools') + 1]!.split(',');
+    expect(allowed).not.toContain('Write');
+    expect(allowed).not.toContain('Edit');
+  });
+
+  it('lets a run that asks retry a blocked command outside the sandbox, never without a prompt', () => {
+    const argv = buildClaudeArgv({
+      schema, prompt: 'Install DM Sans', imagePaths: [], model: null, reasoningEffort: null,
+      sessionId: null, access: 'project', instructions: 'Work inside Powermove.', askOutsideSandbox: true
+    });
+    const settings = JSON.parse(argv[argv.indexOf('--settings') + 1]!);
+    expect(settings.sandbox).toMatchObject({ enabled: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: true });
+    // An allowed Bash would run the unsandboxed retry without asking.
+    const allowed = argv[argv.indexOf('--allowedTools') + 1]!.split(',');
+    expect(allowed).not.toContain('Bash');
+    expect(allowed).toEqual(expect.arrayContaining(['WebSearch', 'WebFetch']));
+    expect(argv[argv.indexOf('--system-prompt') + 1]).toContain('dangerouslyDisableSandbox');
+
+    const editor = buildClaudeArgv({
+      schema, prompt: 'Look', imagePaths: [], model: null, reasoningEffort: null,
+      sessionId: null, access: 'editor', askOutsideSandbox: true
+    });
+    expect(editor[editor.indexOf('--settings') + 1]).toBe(CLAUDE_EDITOR_SANDBOX_SETTINGS);
+  });
+
   it('keeps editor runs without shell network', () => {
     const argv = buildClaudeArgv({
       schema, prompt: 'Inspect', imagePaths: [], model: null, reasoningEffort: null,

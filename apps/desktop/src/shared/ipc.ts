@@ -304,6 +304,10 @@ export type CodexMode = 'editor' | 'autonomous';
 export type CodexAccess = 'editor' | 'project' | 'computer';
 export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 export type AgentProviderId = 'chatgpt' | 'claude' | 'compatible';
+/** Who approves an action the Project sandbox blocks: the person each time
+ * (`supervised`), or a provider's automatic reviewer where one exists (`auto`;
+ * providers without one still ask the person). */
+export type AgentApproval = 'supervised' | 'auto';
 
 export interface CodexModelOption {
   id: string;
@@ -336,6 +340,8 @@ export interface CodexRunRequest {
   context?: 'app' | 'project';
   attachments: CodexAttachment[];
   consentToken: string | null; // required when access === 'computer'
+  /** Project access only; omitted by older renderers, which meant `auto`. */
+  approval?: AgentApproval;
 }
 
 export interface AgentExtensionChange {
@@ -518,10 +524,14 @@ export interface ClaudeAccountStatus {
 }
 
 /* Computer authority: main shows a native confirmation and mints a one-use,
-   short-lived token. It is never persisted. */
+   short-lived token. It is never persisted. A `standing` request asks once
+   for Full access and then mints tokens without asking again, until `revoke`
+   or the app quits. */
 export interface ConsentRequest {
   projectName: string;
   summary: string;
+  standing?: boolean;
+  revoke?: boolean;
 }
 export type ConsentResult = { granted: true; token: string; expiresAt: number } | { granted: false };
 
