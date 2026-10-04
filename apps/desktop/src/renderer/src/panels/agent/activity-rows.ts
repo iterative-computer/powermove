@@ -11,6 +11,7 @@
 export type { TraceStep } from './agent-state.svelte';
 import type { TraceStep } from './agent-state.svelte';
 import { splitUIPlacementText } from './ui-placement';
+import { settleMediaLabel } from '../../../../shared/media-tools';
 
 export type ToolsRowStatus = 'running' | 'partial' | 'error' | 'done';
 
@@ -53,9 +54,13 @@ export interface ToolsRow {
 
 /* Icon family for a tool row. Coarser than `toolAction`: the glyph only needs
    to say "shell", "file", "search" — the label says the rest. */
-export type ToolFamily = 'run' | 'edit' | 'read' | 'search' | 'image' | 'computer' | 'panel' | 'think' | 'tool';
+export type ToolFamily = 'run' | 'edit' | 'read' | 'search' | 'image' | 'computer' | 'panel' | 'think' | 'watch' | 'listen' | 'tool';
 
 const FAMILY_RULES: Array<[RegExp, ToolFamily]> = [
+  // Watching and listening to footage: frames and probes vs. sound and speech.
+  [/^(probe_media|sample_media_frames|media_contact_sheet)$/, 'watch'],
+  [/^(media_waveform|transcribe_media)$/, 'listen'],
+  [/^check_project$/, 'panel'],
   [/panel|workspace|project_state|render_frames|apply_commands|edit_video|rollback/, 'panel'],
   [/^(web|search|browse|fetch|grep|glob|find|ls$|list)|url/, 'search'],
   [/^(bash|command|shell|terminal|exec|run|process)/, 'run'],
@@ -118,6 +123,12 @@ const ACTION_RULES: Array<[RegExp, string]> = [
   [/^computer_use_panel$/, 'tested panel controls'],
   [/^get_workspace_state$/, 'inspected the workspace'],
   [/^render_frames$/, 'previewed composition frames'],
+  [/^probe_media$/, 'probed media'],
+  [/^sample_media_frames$/, 'sampled footage'],
+  [/^media_contact_sheet$/, 'built contact sheets'],
+  [/^media_waveform$/, 'mapped silences'],
+  [/^transcribe_media$/, 'transcribed speech'],
+  [/^check_project$/, 'checked the project'],
   [/^apply_commands$/, 'edited the composition'],
   [/^edit_video$/, 'edited video clips'],
   [/^rollback_changes$/, 'undid agent changes'],
@@ -223,7 +234,7 @@ export function groupedToolRow(work: WorkStep[]): ToolsRow {
       ? thoughtDetail(step)
       : {
           kind: 'tool' as const,
-          id: step.id, label: step.label, status: step.status, toolName: step.toolName,
+          id: step.id, label: settleMediaLabel(step.toolName, step.label, step.status), status: step.status, toolName: step.toolName,
           detail: step.detail, output: step.output, startedAt: step.startedAt, endedAt: step.endedAt,
           family: toolFamily(step.toolName)
         }).filter((detail) => Boolean(detail.label)),
@@ -240,8 +251,8 @@ export function groupedToolRow(work: WorkStep[]): ToolsRow {
     row.detail = [row.summary, ...steps
       .filter((step) => Boolean(step.label))
       .map((step) => failedCount > 0
-        ? `${step.status === 'error' ? 'Failed' : step.status === 'continued' ? 'Continued' : 'Succeeded'} · ${step.label}`
-        : step.label)];
+        ? `${step.status === 'error' ? 'Failed' : step.status === 'continued' ? 'Continued' : 'Succeeded'} · ${settleMediaLabel(step.toolName, step.label, step.status)}`
+        : settleMediaLabel(step.toolName, step.label, step.status))];
   }
   return row;
 }

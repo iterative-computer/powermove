@@ -23,6 +23,7 @@ import { EFFECT_AUTHORING_INSTRUCTIONS, EDITOR_EXTENSION_INSTRUCTIONS } from '..
 import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
 import { AGENT_MODELS, REASONING_EFFORTS, modelEfforts, modelEffort, setDiscoveredClaudeModels, setDiscoveredCodexModels } from '../../../../shared/agent-models';
 import { idlePreload } from './idle-preload';
+import { mediaStepLabels } from '../../panels/agent/media-activity';
 import { bridge as hostBridge } from '../../kernel/bridge';
 
 const AGENT_EDITABLE_CATALOG_CHARS = 72_000;
@@ -1612,13 +1613,18 @@ function reduceTrace(step: CodexTraceEvent, session: any = activeSession()) {
   } else if (step.kind === 'tool-start') {
     finishTraceThought(session);
     const tool: any = session.trace.find((entry: any) => entry.kind === 'tool' && entry.id === step.itemId);
+    // Media tools name the clip they work on; their raw argument is an id.
+    const media = mediaStepLabels(PM, step);
+    const label = media ? media.running : step.label;
+    const detail = media ? media.detail : step.detail;
     if (tool) {
-      tool.label = step.label;
-      if (step.detail !== undefined) tool.detail = step.detail;
+      tool.label = label;
+      if (media) { if (detail === undefined) delete tool.detail; else tool.detail = detail; }
+      else if (detail !== undefined) tool.detail = detail;
     } else {
       session.trace.push({
         kind: 'tool', id: step.itemId, toolName: step.toolName,
-        label: step.label, ...(step.detail === undefined ? {} : { detail: step.detail }),
+        label, ...(detail === undefined ? {} : { detail }),
         status: 'running', startedAt: Date.now(),
       });
     }
