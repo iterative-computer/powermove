@@ -866,6 +866,17 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) 
     const tex = texFor('viewport-path:' + L.id, raster.cv, { version: raster.version });
     return { tex, w: W, h: H, ax: 0, ay: 0, uv: [0, 0, 1, 1], screenSpace: true };
   }
+  if (L.type === 'captions') {
+    /* The cue showing now, at the density it occupies in this output. Between
+       cues there is nothing to draw. */
+    const r = PM.raster(L, continuousRasterScale(scaledWorld(L, T, W, H)), T, (key: string) => GL.texes.get('r:' + key)?.raster);
+    if (!r) return null;
+    if (r.blank) frameFailed = true;
+    const tex = texFor('r:' + r.key, r.cv, { version: r.blank ? 0 : 1 });
+    const uploaded = GL.texes.get('r:' + r.key);
+    if (!uploaded.raster && !r.blank) { const { cv: _canvas, ...metadata } = r; uploaded.raster = metadata; }
+    return { tex, w: r.w, h: r.h, ax: r.anchorX, ay: r.anchorY, uv: [0, 0, 1, 1] };
+  }
   if (L.type === 'text' || L.type === 'shape') {
     /* Render editable text/shape source at the density it occupies in this
        output. This is continuous rasterization: no fixed-resolution layer
@@ -1861,6 +1872,7 @@ function nativeBounds(L: any, T: any) {
   if (L.type === 'solid' || L.type === 'shader' || L.type === 'extension') { w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = 0; ay = 0; }
   else if (L.type === 'null') { w = d.w || 100; h = d.h || 100; ax = 0; ay = 0; }
   else if (L.type === 'precomp') { w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = 0; ay = 0; }
+  else if (L.type === 'captions') return PM.captionBounds(L, T);
   else if (L.type === 'text') {
     const r = PM.raster(L, 1, T);
     if (r.selection) return { ...r.selection, ax: r.anchorX, ay: r.anchorY };
