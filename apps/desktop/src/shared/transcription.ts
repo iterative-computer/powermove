@@ -124,3 +124,26 @@ export const TRANSCRIPTION_IPC = {
   /** renderer → main: show the models folder in Finder. */
   reveal: 'transcription:reveal'
 } as const;
+
+/* ── additive (transcription lane): the preload bridge ── */
+
+/** `transcription` on the editor bridge (preload/index.ts, web-bridge.ts). */
+export interface TranscriptionBridge {
+  status(): Promise<TranscriptionStatus>;
+  /** Starts the download in main (it outlives the window); resolves at once. */
+  download(modelId: string): Promise<TranscriptionStatus>;
+  cancelDownload(modelId: string): Promise<TranscriptionStatus>;
+  remove(modelId: string): Promise<TranscriptionStatus>;
+  setActive(modelId: string): Promise<TranscriptionStatus>;
+  setLanguage(language: string): Promise<TranscriptionStatus>;
+  /** Shows the models folder in Finder. */
+  reveal(): Promise<void>;
+  transcribe(request: TranscribeRequest): Promise<TranscribeResult>;
+  cancelTranscribe(requestId: string): Promise<void>;
+  onStatus(callback: (status: TranscriptionStatus) => void): () => void;
+  onProgress(callback: (progress: TranscribeProgress) => void): () => void;
+  onModelRequested(callback: (request: { reason: string }) => void): () => void;
+}
+
+/** The onboarding window's slice: pick and start a download, watch it. */
+export type OnboardingTranscriptionBridge = Pick<TranscriptionBridge, 'status' | 'download' | 'cancelDownload' | 'onStatus'>;

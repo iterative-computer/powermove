@@ -227,6 +227,9 @@ export interface OnboardingBridge {
   onLogoTarget(callback: (target: OnboardingLogoTarget) => void): () => void;
   begin(choice?: OnboardingChoice): Promise<void>;
   appearance(): Promise<'light' | 'dark'>;
+  /* ── transcription lane ── */
+  /** The Transcription step: start a model download that outlives onboarding. */
+  transcription?: import('./transcription').OnboardingTranscriptionBridge;
 }
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
@@ -885,6 +888,10 @@ export interface PowermoveBridge {
 
   /** The Store: browse the registry; install, update and remove store extensions. */
   extensionStore: import('./store-ipc').StoreBridge;
+
+  /* ── transcription lane ── */
+  /** On-device transcription: models, downloads, transcribe (absent on hosts without the engine). */
+  transcription?: import('./transcription').TranscriptionBridge;
 }
 
 export interface SandboxInputKey {

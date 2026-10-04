@@ -22,6 +22,7 @@ import { bridge as capturedBridge, provideBridge } from '../kernel/bridge';
 const WS_PATH = '/__powermove/ws';
 const VARS_UNAVAILABLE = 'Variables are not available in powermove serve yet';
 const CLOUD_UNAVAILABLE = 'Sign in is not available in powermove serve yet';
+const TRANSCRIPTION_UNAVAILABLE = 'Transcription is not available in powermove serve yet';
 /* The served host installs nothing: the Store shows its offline state. */
 const storeOffline = async <T>(): Promise<StoreResult<T>> => ({ ok: false, error: { error: 'internal', detail: CLOUD_UNREACHABLE } });
 
@@ -500,6 +501,24 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
       onUpdatesChanged: () => () => {},
       onPublishProgress: () => () => {},
       onLibraryChanged: () => () => {}
+    },
+
+    /* ── transcription lane: speech models run in the Mac app; this host
+       reports itself unavailable and the UI says so instead of offering
+       downloads. ── */
+    transcription: {
+      status: async () => ({ models: [], activeModelId: null, available: false }),
+      download: () => Promise.reject(new Error(TRANSCRIPTION_UNAVAILABLE)),
+      cancelDownload: () => Promise.reject(new Error(TRANSCRIPTION_UNAVAILABLE)),
+      remove: () => Promise.reject(new Error(TRANSCRIPTION_UNAVAILABLE)),
+      setActive: () => Promise.reject(new Error(TRANSCRIPTION_UNAVAILABLE)),
+      setLanguage: () => Promise.reject(new Error(TRANSCRIPTION_UNAVAILABLE)),
+      reveal: () => Promise.reject(new Error(TRANSCRIPTION_UNAVAILABLE)),
+      transcribe: async () => ({ ok: false, code: 'unavailable', message: TRANSCRIPTION_UNAVAILABLE }),
+      cancelTranscribe: async () => {},
+      onStatus: () => () => {},
+      onProgress: () => () => {},
+      onModelRequested: () => () => {}
     }
   };
 

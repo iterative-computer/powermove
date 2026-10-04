@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 import type { OnboardingBridge, OnboardingLogoTarget } from '../shared/ipc';
+import type { TranscriptionStatus } from '../shared/transcription';
 
 // Keep this preload self-contained. Electron's sandboxed preload loader cannot
 // require a Rollup shared chunk, so these mirror the frozen shared IPC names.
@@ -11,7 +12,12 @@ const CHANNEL = {
   logoTarget: 'onboarding:logo-target',
   logoTargetReport: 'onboarding:logo-target-report',
   begin: 'onboarding:begin',
-  appearance: 'onboarding:appearance'
+  appearance: 'onboarding:appearance',
+  /* Mirrors TRANSCRIPTION_IPC (shared/transcription.ts). */
+  transcriptionStatus: 'transcription:status',
+  transcriptionDownload: 'transcription:download',
+  transcriptionCancelDownload: 'transcription:cancel-download',
+  transcriptionStatusChanged: 'transcription:status-changed'
 } as const;
 
 const bridge: OnboardingBridge = {
@@ -29,7 +35,17 @@ const bridge: OnboardingBridge = {
   begin: async (choice) => {
     await ipcRenderer.invoke(CHANNEL.begin, choice);
   },
-  appearance: () => ipcRenderer.invoke(CHANNEL.appearance)
+  appearance: () => ipcRenderer.invoke(CHANNEL.appearance),
+  transcription: {
+    status: () => ipcRenderer.invoke(CHANNEL.transcriptionStatus) as Promise<TranscriptionStatus>,
+    download: (modelId) => ipcRenderer.invoke(CHANNEL.transcriptionDownload, String(modelId)) as Promise<TranscriptionStatus>,
+    cancelDownload: (modelId) => ipcRenderer.invoke(CHANNEL.transcriptionCancelDownload, String(modelId)) as Promise<TranscriptionStatus>,
+    onStatus: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, status: TranscriptionStatus) => callback(status);
+      ipcRenderer.on(CHANNEL.transcriptionStatusChanged, listener);
+      return () => ipcRenderer.removeListener(CHANNEL.transcriptionStatusChanged, listener);
+    }
+  }
 };
 
 contextBridge.exposeInMainWorld('onboarding', bridge);
