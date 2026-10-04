@@ -1,5 +1,7 @@
 import { COMMAND_JSON_LIMIT } from '../../shared/edit-limits';
 import { EXTENSION_ID } from '../../shared/extensions';
+import { ORCHESTRATION_TOOL_NAMES } from '../../shared/agent-orchestration';
+import { ORCHESTRATION_TOOLS } from './orchestration-spec';
 
 export interface NativeMcpServerConfig {
   command: string;
@@ -23,6 +25,7 @@ const closedObject = (properties: Record<string, unknown>, required: string[] = 
 });
 
 export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
+  ...ORCHESTRATION_TOOLS,
   {
     name: 'fork_builtin_extension',
     description: 'Copy a shipped built-in extension into this run\'s isolated extension staging directory, rewrite it as a user fork, and retain a pristine merge base. Edit the returned directory, then report the fork id in the final extensions array with action created.',
@@ -243,12 +246,13 @@ export const POWERMOVE_STORE_READONLY_TOOL_NAMES = [
 /** App runs may inspect and stage extensions and use the Store, but never
  * touch a composition. */
 export const POWERMOVE_APP_AGENT_TOOLS = POWERMOVE_AGENT_TOOLS.filter((tool) =>
-  ['fork_builtin_extension', 'stage_fork_rebase', 'validate_effect', 'inspect_creative_workspace', 'get_panel_layout', 'set_panel_layout', ...POWERMOVE_STORE_TOOL_NAMES].includes(tool.name));
+  ['fork_builtin_extension', 'stage_fork_rebase', 'validate_effect', 'inspect_creative_workspace', 'get_panel_layout', 'set_panel_layout', ...POWERMOVE_STORE_TOOL_NAMES, ...ORCHESTRATION_TOOL_NAMES].includes(tool.name));
 
 /** Read-only project inspection plus the minimum layout action required to
  * make a hidden panel observable. Editor/planning runs must never receive the
  * project- or control-mutating tools from the complete agent tool set. */
 export const POWERMOVE_LIVE_INSPECTION_TOOL_NAMES = [
+  ...ORCHESTRATION_TOOL_NAMES,
   'get_project_state',
   'get_panel_layout',
   'open_panel',

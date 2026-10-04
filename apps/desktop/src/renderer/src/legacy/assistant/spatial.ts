@@ -17,13 +17,14 @@ import { flushSync, mount, unmount } from 'svelte';
 import AgentOptions from '../../panels/agent/AgentOptions.svelte';
 import { isAgentImageAttachment, mountPromptAttachments, readPromptAttachment, requestFileAttachments } from '../../panels/agent/attachments';
 import { intersectingPanels, NATIVE_PANEL_DESIGN, panelFocusContext, panelFocusPrompt, panelScope, type PanelFocusContext } from '../../panels/agent/panel-focus';
-import { AgentThreads, conversationForAgent, normalizeGeneratedThreadTitle, threadTitle } from '../../panels/agent/threads';
+import { AgentThreads, conversationForAgent, normalizeGeneratedThreadTitle, threadTitle, threadMessageText } from '../../panels/agent/threads';
 import { AGENT_TESTING_INSTRUCTIONS } from '../../../../shared/agent-testing';
 import { EFFECT_AUTHORING_INSTRUCTIONS, EDITOR_EXTENSION_INSTRUCTIONS } from '../../../../shared/effect-authoring';
 import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
 import { AGENT_MODELS, REASONING_EFFORTS, modelEfforts, modelEffort, setDiscoveredClaudeModels, setDiscoveredCodexModels } from '../../../../shared/agent-models';
 import { idlePreload } from './idle-preload';
 import { bridge as hostBridge } from '../../kernel/bridge';
+import { taskTrace } from '../../panels/agent/task-trace';
 
 const AGENT_EDITABLE_CATALOG_CHARS = 72_000;
 const AGENT_LAYER_INDEX_CHARS = 18_000;
@@ -157,7 +158,8 @@ PM.CodexBridge = {
   },
   async answer(requestId: any, itemId: string, answers: Record<string, string[]>) {
     const bridge: any = (window as any).webkit?.messageHandlers?.pmCodexAnswer;
-    if (!requestId || !pending.has(requestId) || !bridge) return false;
+    // Child runs are owned in main and do not have a renderer pending job.
+    if (!requestId || !bridge) return false;
     return await new Promise((resolve: any) => {
       const replyId: any = PM.uid('spatial-answer-');
       const timer: any = window.setTimeout(() => { pendingSteering.delete(replyId); resolve(false); }, 30_000);
@@ -403,6 +405,7 @@ let threadSaveTimer: ReturnType<typeof setTimeout> | undefined;
 let changingThreadProject = false;
 const dirtyThreadArchives = new Set<AgentThreads>();
 const pendingThreadTitles = new Set<string>();
+const threadControlQueues = new Map<string, Promise<unknown>>();
 
 /* Every thread owns its run. A run writes only into its own session, so an
    agent keeps working — trace, steps, result and all — while you compose in
@@ -459,6 +462,167 @@ function sessionFor(threadId: string): any {
   let session = sessions.get(key);
   if (!session) { session = newRunSession(threadId); sessions.set(key, session); }
   return session;
+}
+
+function recordThreadRunStart(session: any, id: string): void {
+  session.codexRequestId = id;
+  const archive = threadArchives.get(session.projectId);
+  const thread = archive?.threads.find(item => item.id === session.threadId);
+  if (thread) { thread.lastRunId = id; thread.lastRunStatus = 'running'; }
+  session.onNativeStart?.(id);
+}
+
+function describeControlledThread(thread: any, projectId = threads.projectId): any {
+  const session = sessions.get(`${projectId}/${thread.id}`);
+  const summary = conversationForAgent(thread.conversation).filter(message => message.role === 'assistant').at(-1)?.text ?? null;
+  return {
+    threadId: thread.id, title: thread.title, updatedAt: thread.updatedAt,
+    provider: thread.provider ?? session?.provider, model: thread.model ?? session?.model,
+    reasoningEffort: thread.reasoningEffort ?? session?.reasoningEffort,
+    access: session?.access ?? thread.access ?? 'editor', approval: session?.approval ?? thread.approval, busy: sessionBusy(session),
+    runId: session?.codexRequestId ?? thread.lastRunId ?? null,
+    status: sessionBusy(session) ? 'running' : thread.lastRunStatus ?? 'idle', summary,
+  };
+}
+
+/** Internal, authenticated main-to-renderer thread commands use the very same
+ * execution paths as chat. They never switch the person's visible thread. */
+async function controlThread(args: any): Promise<any> {
+  ensureThreadProject();
+  if (args.projectId !== threads.projectId) throw new Error('Open this project tab before controlling its threads.');
+  const key = `${args.projectId}/${args.threadId ?? 'launch'}`;
+  const previous = threadControlQueues.get(key) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(() => performThreadControl(args));
+  threadControlQueues.set(key, next);
+  try { return await next; }
+  finally { if (threadControlQueues.get(key) === next) threadControlQueues.delete(key); }
+}
+
+async function performThreadControl(args: any): Promise<any> {
+  if (args.projectId !== threads.projectId) throw new Error('The active project changed before this thread command arrived.');
+  const archive = threads;
+  if (args.tool === 'thread_list') {
+    return { threads: threads.threads.slice(args.offset, args.offset + args.limit).map(thread => describeControlledThread(thread)), total: threads.threads.length, nextOffset: args.offset + args.limit < threads.threads.length ? args.offset + args.limit : null };
+  }
+  let thread = args.threadId ? threads.threads.find(item => item.id === args.threadId) : undefined;
+  if (args.threadId && !thread) throw new Error('This thread does not exist in the current project.');
+  if (args.tool === 'thread_read') {
+    const messages = thread!.conversation.slice(args.offset, args.offset + args.limit).map((message, index) => {
+      const source = threadMessageText(message), start = args.textOffset ?? 0;
+      const text = source.slice(start, start + Math.min(args.maxCharsPerMessage ?? 12_000, Math.floor(160_000 / args.limit)));
+      return { position: args.offset + index, role: message.role === 'trace' ? 'assistant' : message.role, text, truncated: start + text.length < source.length, nextTextOffset: start + text.length < source.length ? start + text.length : null };
+    });
+    const session = sessions.get(`${args.projectId}/${thread!.id}`);
+    return { thread: describeControlledThread(thread), messages,
+      activity: sessionBusy(session) ? threadMessageText({ role: 'trace', steps: session.trace }).slice(-20_000) : '',
+      questions: session ? openQuestions(session).map(question => ({ itemId: question.id, blocking: question.blocking, questions: question.questions })) : [],
+      nextOffset: args.offset + args.limit < thread!.conversation.length ? args.offset + args.limit : null };
+  }
+  if (args.tool === 'thread_cancel') {
+    const session = sessionFor(thread!.id);
+    if (sessionBusy(session)) stopSession(session);
+    thread!.lastRunStatus = 'cancelled';
+    persistThreads();
+    return describeControlledThread(thread);
+  }
+  if (args.tool !== 'thread_launch' && args.tool !== 'thread_send') throw new Error('Unknown thread command.');
+  if (args.projectId === APP_AGENT_PROJECT_ID && args.access === 'editor') throw new Error('Start an app thread with Project access. Planning threads need an attached project.');
+  const bytes = new TextEncoder().encode(JSON.stringify({ title: args.title, message: args.message, provider: args.provider, model: args.model, reasoningEffort: args.reasoningEffort, access: args.access, approval: args.approval }));
+  const fingerprint = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), byte => byte.toString(16).padStart(2, '0')).join('');
+  if (threads !== archive) throw new Error('The active project changed before this thread command arrived.');
+  if (args.clientRequestId) {
+    if (args.tool === 'thread_launch') {
+      const previous = threads.threads.find(item => item.orchestration?.callerThreadId === args.callerThreadId && item.orchestration?.clientRequestId === args.clientRequestId);
+      if (previous) {
+        if (previous.orchestration?.fingerprint !== fingerprint) throw new Error('This clientRequestId belongs to another thread launch.');
+        return describeControlledThread(previous);
+      }
+    } else {
+      const previous = thread!.controls?.find(item => item.callerThreadId === args.callerThreadId && item.clientRequestId === args.clientRequestId);
+      if (previous) {
+        if (previous.fingerprint !== fingerprint) throw new Error('This clientRequestId belongs to another message.');
+        return { ...describeControlledThread(thread), runId: previous.runId, delivery: 'already_sent' };
+      }
+      if ((thread!.controls?.length ?? 0) >= 64) throw new Error('This thread has reached its saved update limit. Start a new thread for further orchestrated work.');
+    }
+  }
+  if (!thread) {
+    thread = { id: PM.uid('agent-thread-'), title: args.title, updatedAt: Date.now(), conversation: [], composerDraft: '', attachments: [], scope: 'workspace',
+      ...(args.clientRequestId ? { orchestration: { callerThreadId: args.callerThreadId, clientRequestId: args.clientRequestId, fingerprint } } : {}) };
+    threads.threads.unshift(thread);
+  }
+  const session = sessionFor(thread.id);
+  if (session.phase === 'applying') throw new Error('This thread is applying its current change. Wait before sending new direction.');
+  if (sessionBusy(session) && (session.access === 'computer' || args.access === 'editor' && session.access !== 'editor')) throw new Error('This thread has broader permissions than the caller.');
+  const canSteer = sessionBusy(session) && !args.reconfigure && session.provider === args.provider && selectedModelName(session.provider, session.model) === args.model && session.reasoningEffort === args.reasoningEffort && session.approval === args.approval;
+  if (openQuestions(session).some(question => question.id.includes('approval-') && question.blocking)) throw new Error('This thread needs a human approval in its conversation before it can continue.');
+  const waiting = canSteer && openQuestions(session).find(question => question.transport === 'reply' && question.blocking);
+  if (waiting) {
+    const answers = Object.fromEntries(waiting.questions.map((item: any) => [item.id, [args.message]]));
+    const accepted = await PM.CodexBridge.answer(waiting.requestId, waiting.id, answers);
+    if (accepted) {
+      waiting.status = 'answered'; waiting.answers = shownAnswers(waiting, answers);
+      if (args.clientRequestId) (thread.controls ??= []).push({ callerThreadId: args.callerThreadId, clientRequestId: args.clientRequestId, fingerprint, runId: session.codexRequestId });
+      session.activity = 'Continuing with the answer…';
+      archive.save(); touch(session);
+      return { ...describeControlledThread(thread), delivery: 'answered' };
+    }
+    waiting.status = 'closed';
+  }
+  archiveTrace(true, session, sessionBusy(session));
+  session.conversation.push({ role: 'user', text: args.message, steering: sessionBusy(session), entering: true });
+  thread.updatedAt = Date.now();
+  if (canSteer) {
+    const accepted = await PM.CodexBridge.steer(args.message, [], session.codexRequestId);
+    if (accepted) {
+      if (args.clientRequestId) (thread.controls ??= []).push({ callerThreadId: args.callerThreadId, clientRequestId: args.clientRequestId, fingerprint, runId: session.codexRequestId });
+      persistThreads(); touch(session);
+      return { ...describeControlledThread(thread), delivery: 'live' };
+    }
+  }
+  const previousRequest = session.activeRequest;
+  const token = session.requestToken = ++runToken;
+  const controller = new window.AbortController();
+  session.activeRequest = controller;
+  previousRequest?.abort('steering-replacement');
+  Object.assign(thread, { provider: args.provider, model: args.model, reasoningEffort: args.reasoningEffort, access: args.access, approval: args.approval });
+  // The visible picker's snapshot must not overwrite a model-controlled change.
+  if (thread.id === threads.activeId) {
+    if (!AGENT_MODELS[args.provider as keyof typeof AGENT_MODELS].some(model => model.id === args.model)) AGENT_MODELS[args.provider as keyof typeof AGENT_MODELS].push({ id: args.model, label: args.model });
+    S.provider = args.provider; S.model = args.model; S.reasoningEffort = args.reasoningEffort || modelEffort(args.provider, args.model, null) || 'medium';
+  }
+  Object.assign(session, { provider: args.provider, model: args.model, reasoningEffort: args.reasoningEffort, access: args.access, approval: args.approval, requestText: args.message,
+    requestAttachments: [], requestStartedAt: Date.now(), phase: 'working', activity: '', plan: null, panelRun: null, uiPlacement: null, codexRequestId: null });
+  updateSteps(['Understand the request and project', 'Carry out the work', 'Review the result'], 0, session);
+  let started!: (id: string) => void;
+  const ready = new Promise<string>(resolve => { started = resolve; });
+  session.onNativeStart = started;
+  persistThreads(); touch(session);
+  const focus = panelFocusContext(thread.scope, PM.WS?.current, PM.PANELS || {});
+  const job = (async () => {
+    try {
+      if (session.projectId === APP_AGENT_PROJECT_ID) await runAppRequest({ session, request: args.message, token, controller, threadId: thread.id });
+      else if (args.access === 'editor') await runEditorRequest({ session, request: args.message, token, controller, focus, context: null, threadId: thread.id });
+      else await runAutonomousRequest({ session, request: args.message, token, controller, access: args.access, focus, context: null, threadId: thread.id });
+      if (token === session.requestToken) thread.lastRunStatus = 'completed';
+    } catch (error: any) {
+      if (token !== session.requestToken) return;
+      thread.lastRunStatus = controller.signal.aborted ? 'cancelled' : 'failed';
+      archiveTrace(false, session);
+      session.conversation.push({ role: 'assistant', error: !controller.signal.aborted, text: controller.signal.aborted ? 'Stopped.' : String(error?.message ?? error).slice(0, 4000) });
+      session.phase = 'conversation'; session.activity = '';
+    } finally {
+      if (token === session.requestToken) {
+        session.onNativeStart = null; session.activeRequest = null; session.codexRequestId = null;
+        sealTrace(session); touch(session, { flush: true });
+      }
+    }
+  })();
+  await Promise.race([ready, job]);
+  session.onNativeStart = null;
+  if (args.clientRequestId && args.tool === 'thread_send' && thread.lastRunId) (thread.controls ??= []).push({ callerThreadId: args.callerThreadId, clientRequestId: args.clientRequestId, fingerprint, runId: thread.lastRunId });
+  archive.save(); touch(session);
+  return { ...describeControlledThread(thread, args.projectId), delivery: previousRequest ? 'resumed' : 'started' };
 }
 
 function activeSession(): any { return sessionFor(threads.activeId); }
@@ -542,7 +706,8 @@ function persistThreads() {
 
 /** Each thread keeps the provider, model and effort it was last using. */
 function restoreThreadModel(thread: any): void {
-  const { provider, model } = thread;
+  const { provider } = thread;
+  const model = provider === 'compatible' && thread.model === AGENT_MODELS.compatible[0]?.label ? 'configured' : thread.model;
   if (!AGENT_PROVIDERS.some((item: any) => item.id === provider) || typeof model !== 'string') return;
   if (provider === 'claude') ensureClaudeModelChoice(model);
   if (!AGENT_MODELS[provider as keyof typeof AGENT_MODELS]?.some(item => item.id === model)) return;
@@ -681,6 +846,7 @@ const Spatial: any = {
   requestFix,
   requestRebase: requestExtensionRebase,
   cancel,
+  controlThread,
   get active() { return S.active; },
   /* Small pure seams are exposed for deterministic regression tests. */
   math: { selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, sanitizePanelEdit, applyPanelEdit, applyChromeEdit, hintPosition, clampFloatingPosition, textareaLayout, composerMode, normalizeAutonomousResult, boundedEditableSource, boundedAgentPrompt },
@@ -1552,6 +1718,8 @@ function removeAttachment(id: any) {
 
 function stopSession(session: any) {
   if (session.phase !== 'working') return;
+  const thread = threadArchives.get(session.projectId)?.threads.find(item => item.id === session.threadId);
+  if (thread) thread.lastRunStatus = 'cancelled';
   const active: any = session.activeRequest;
   session.activeRequest = null;
   session.codexRequestId = null;
@@ -1629,7 +1797,7 @@ function reduceTrace(step: CodexTraceEvent, session: any = activeSession()) {
     session.trace.push({
       kind: 'question', id: step.itemId, questions: step.questions, transport,
       blocking: transport === 'reply' && step.blocking === true, status: 'open',
-      ...(transport === 'reply' && session.codexRequestId ? { requestId: session.codexRequestId } : {}),
+      ...(transport === 'reply' && (step.requestId || session.codexRequestId) ? { requestId: step.requestId || session.codexRequestId } : {}),
     });
     if (transport === 'reply' && step.blocking) session.activity = 'Waiting for your answer…';
     // Any question needs the person back, even one the agent keeps working through.
@@ -1637,6 +1805,13 @@ function reduceTrace(step: CodexTraceEvent, session: any = activeSession()) {
   } else if (step.kind === 'question-closed') {
     const question: any = findQuestion(session, step.itemId);
     if (question?.status === 'open') question.status = 'closed';
+  } else if (step.kind === 'task') {
+    finishTraceThought(session);
+    const next = taskTrace(step.task);
+    const previous = session.trace.find((entry: any) => entry.kind === 'tool' && entry.id === next.id)
+      ?? session.conversation.flatMap((message: any) => message.steps || []).find((entry: any) => entry.kind === 'tool' && entry.id === next.id);
+    if (previous) Object.assign(previous, next);
+    else session.trace.push(next);
   } else if (step.kind === 'tool-start') {
     finishTraceThought(session);
     const tool: any = session.trace.find((entry: any) => entry.kind === 'tool' && entry.id === step.itemId);
@@ -1676,7 +1851,8 @@ function openQuestions(session: any): any[] {
 // A held question dies with its run: main settles it with no answer.
 function closeSettledQuestions(session: any) {
   for (const question of openQuestions(session)) {
-    if (question.transport === 'reply' && !pending.has(question.requestId)) question.status = 'closed';
+    const liveChild = session.trace.some((step: any) => step.task?.childRunId === question.requestId && step.status === 'running');
+    if (question.transport === 'reply' && !pending.has(question.requestId) && !liveChild) question.status = 'closed';
   }
 }
 
@@ -1865,9 +2041,9 @@ async function runAppRequest({ session, request, token, controller, threadId, or
       mode: 'autonomous', access: 'project', context: 'app', threadId,
       projectId: APP_AGENT_PROJECT_ID, projectName: 'Powermove app', projectJSON: '{}',
       attachments: requestFileAttachments(session.requestAttachments),
-      provider: session.provider, model: session.model, reasoningEffort: session.reasoningEffort,
+      provider: session.provider, approval: session.approval, model: session.model, reasoningEffort: session.reasoningEffort,
       signal: controller.signal, timeoutMs: 3_600_000,
-      onStart: (id: any) => { session.codexRequestId = id; },
+      onStart: (id: any) => { recordThreadRunStart(session, id); },
       onProgress: (summary: any) => {
         if (token !== session.requestToken || !summary || isUIPlacementMessage(summary)) return;
         session.activity = summary; touch(session);
@@ -2018,10 +2194,10 @@ async function runAutonomousRequest({ session, request, token, controller, acces
       projectId: session.projectId, projectName: JSON.parse(projectJSON).name || 'Untitled',
       projectJSON,
       attachments: requestFileAttachments(session.requestAttachments),
-      provider: session.provider,
+      provider: session.provider, approval: session.approval,
       model: session.model, reasoningEffort: session.reasoningEffort, signal: controller.signal,
       timeoutMs: 3_600_000,
-      onStart: (id: any) => { session.codexRequestId = id; },
+      onStart: (id: any) => { recordThreadRunStart(session, id); },
       onProgress: (summary: any) => {
         if (token !== session.requestToken || !summary || isUIPlacementMessage(summary)) return;
         session.activity = summary; touch(session);
@@ -2091,9 +2267,9 @@ The user edited the project during the autonomous run. Return kind=scene and a c
         {
           threadId,
           attachments: requestFileAttachments(session.requestAttachments),
-          provider: session.provider,
+          provider: session.provider, approval: session.approval,
           model: session.model, reasoningEffort: session.reasoningEffort, signal: controller.signal,
-          onStart: (id: any) => { session.codexRequestId = id; },
+          onStart: (id: any) => { recordThreadRunStart(session, id); },
           onProgress: (summary: any) => {
             if (token !== session.requestToken || !summary || isUIPlacementMessage(summary)) return;
             session.activity = summary; touch(session);
@@ -2313,7 +2489,7 @@ async function resumeHostRuns(remote: any): Promise<void> {
 }
 function resumeHostRun(remote: any, session: any, record: any): void {
   const token: any = ++session.requestToken;
-  session.codexRequestId = record.id;
+  recordThreadRunStart(session, record.id);
   session.requestStartedAt = record.startedAt || Date.now();
   session.uiPlacement = null;
   updateSteps([
@@ -2337,6 +2513,8 @@ function resumeHostRun(remote: any, session: any, record: any): void {
     },
   }).then((raw: any) => {
     if (token !== session.requestToken) return;
+    const thread = threadArchives.get(session.projectId)?.threads.find(item => item.id === session.threadId);
+    if (thread) thread.lastRunStatus = raw?.ok ? 'completed' : raw?.cancelled ? 'cancelled' : 'failed';
     finishSteps(session);
     if (!raw?.ok) {
       const current: any = session.steps.find((step: any) => step.status === 'active'); if (current) current.status = 'error';
@@ -2379,6 +2557,81 @@ function resumeHostRun(remote: any, session: any, record: any): void {
   }).finally(() => {
     if (token === session.requestToken) { sealTrace(session); session.codexRequestId = null; touch(session, { flush: true }); }
   });
+}
+
+async function runEditorRequest({ session, request, token, controller, focus, context, threadId, steering = false }: any): Promise<void> {
+    /* Let the send handoff finish before the next progress render replaces the
+       message DOM. Observation still runs immediately, so the beat adds only
+       the portion of the 240 ms transition that useful work did not consume. */
+    const observationPromise: any = PM.AgentHarness ? PM.AgentHarness.observe() : Promise.resolve({ state: {}, times: [], images: [] });
+    const [observation]: any = await Promise.all([
+      observationPromise,
+      new Promise((resolve: any) => window.setTimeout(resolve, SEND_TRANSITION_MS)),
+    ]);
+    if (token !== session.requestToken) return;
+    await waitForSessionProject(session, controller.signal);
+    if (token !== session.requestToken) return;
+    session.steps[0].status = 'complete'; session.steps[1].status = 'active';
+    session.activity = steering ? 'Reworking the editable change…' : 'Designing an editable change…'; touch(session, { focusComposer: true });
+    const userImages: any = session.requestAttachments.filter(isAgentImageAttachment).map((item: any) => item.dataUrl);
+    const attachedImages: any = [...userImages, ...(session.regionImage ? [session.regionImage] : []), ...observation.images].slice(0, 6);
+    const raw: any = await PM.CodexBridge.request(
+      agentPrompt(request, observation, steering, focus, context, session) + '\nFor questions, explanations, greetings, or requests needing clarification, use operation=noop and put your natural-language answer in message. No edit is required for an ordinary conversation.', responseSchema(), attachedImages,
+      {
+        threadId,
+        attachments: requestFileAttachments(session.requestAttachments),
+        provider: session.provider, approval: session.approval,
+        model: session.model, reasoningEffort: session.reasoningEffort, signal: controller.signal,
+        onStart: (id: any) => { recordThreadRunStart(session, id); },
+        onProgress: (summary: any) => {
+          if (token !== session.requestToken || !summary || isUIPlacementMessage(summary)) return;
+          session.activity = summary; touch(session);
+        },
+        onTrace: (step: CodexTraceEvent) => {
+          if (token !== session.requestToken) return;
+          reduceTrace(step, session); touch(session);
+        },
+      },
+    );
+    if (token !== session.requestToken) return;
+    await waitForSessionProject(session, controller.signal);
+    if (token !== session.requestToken) return;
+    let decoded: any;
+    try { decoded = JSON.parse(raw); } catch { throw new Error('The coding agent returned an invalid section'); }
+    // A capability request cannot carry a partial panel/scene substitute. The
+    // user chooses Project access explicitly; the original prompt is retained.
+    if (decoded?.operation === 'requires_project') {
+      finishSteps(session); archiveTrace(false, session);
+      session.conversation.push({ entering: true, role: 'assistant', requiresProject: true,
+        text: 'Creating or changing this effect or extension needs Project access, which lets the agent write extension files. Continue with Project access to complete your original request.' });
+      session.activity = ''; session.plan = null; session.phase = 'conversation';
+      touch(session, { focusComposer: true });
+      return;
+    }
+    const plan: any = sanitizePlan(decoded, { ...context, targetPanelId: focus.panels[0]?.id || context?.targetPanelId || '' }, request);
+    if (plan.operation === 'noop') {
+      finishSteps(session); archiveTrace(false, session);
+      session.conversation.push({ entering: true, role: 'assistant', text: plan.message || 'What would you like to work on?' });
+      session.activity = ''; session.plan = null; session.phase = 'conversation';
+      touch(session, { focusComposer: true });
+      return;
+    }
+    /* The agent's own account of what it could not make. Nothing is broken and
+       nothing was lost, so these are the agent speaking, not the editor failing. */
+    if (plan.kind === 'scene' && !plan.sceneEdit.commands.length) throw stated(plan.message || 'I could not prepare the composition edit', 'alert');
+    if (plan.kind === 'section' && !plan.section.controls.length) throw stated('The generated section had no controls connected to editable source', 'alert');
+    if (plan.kind === 'workspace' && !plan.workspaceEdit) throw stated('The generated workspace was not safe or complete enough to preview', 'alert');
+    if (plan.kind === 'panels' && !plan.panelEdit.actions.length) throw stated('I could not find a valid panel action to perform', 'plain');
+    updateSteps(plan.steps, -1, session);
+    archiveTrace(false, session);
+    session.stepsExpanded = session.steps.length > 1;
+    session.conversation.push({ entering: true, role: 'assistant', text: conversationReply(plan) });
+    session.activity = ''; session.plan = plan; session.phase = 'conversation';
+    session.revision = Number(PM.proj?.revision || 0);
+    if (plan.kind === 'panels' && S.autoApplyPanels && session.threadId === threads.activeId) await applyPlan();
+    else showPreview(session);
+    if (token === session.requestToken && !controller.signal.aborted) notifyAgentFinished();
+
 }
 
 async function sendRequest(input: any) {
@@ -2470,6 +2723,10 @@ async function sendRequest(input: any) {
     generateThreadTitle(threads.projectId, threadIdAtStart, typedRequest, session.provider);
   }
   const accessAtStart: any = S.accessMode;
+  session.access = accessAtStart;
+  session.approval = S.approvalMode;
+  threads.active.access = accessAtStart;
+  threads.active.approval = S.approvalMode;
   const autonomous: any = accessAtStart !== 'editor';
   updateSteps(autonomous ? [
     'Understand the request and project',
@@ -2505,77 +2762,7 @@ async function sendRequest(input: any) {
       if (token === session.requestToken && !controller.signal.aborted) notifyAgentFinished();
       return;
     }
-    /* Let the send handoff finish before the next progress render replaces the
-       message DOM. Observation still runs immediately, so the beat adds only
-       the portion of the 240 ms transition that useful work did not consume. */
-    const observationPromise: any = PM.AgentHarness ? PM.AgentHarness.observe() : Promise.resolve({ state: {}, times: [], images: [] });
-    const [observation]: any = await Promise.all([
-      observationPromise,
-      new Promise((resolve: any) => window.setTimeout(resolve, SEND_TRANSITION_MS)),
-    ]);
-    if (token !== session.requestToken) return;
-    await waitForSessionProject(session, controller.signal);
-    if (token !== session.requestToken) return;
-    session.steps[0].status = 'complete'; session.steps[1].status = 'active';
-    session.activity = steering ? 'Reworking the editable change…' : 'Designing an editable change…'; touch(session, { focusComposer: true });
-    const userImages: any = session.requestAttachments.filter(isAgentImageAttachment).map((item: any) => item.dataUrl);
-    const attachedImages: any = [...userImages, ...(session.regionImage ? [session.regionImage] : []), ...observation.images].slice(0, 6);
-    const raw: any = await PM.CodexBridge.request(
-      agentPrompt(request, observation, steering, focus, context, session) + '\nFor questions, explanations, greetings, or requests needing clarification, use operation=noop and put your natural-language answer in message. No edit is required for an ordinary conversation.', responseSchema(), attachedImages,
-      {
-        threadId: threadIdAtStart,
-        attachments: requestFileAttachments(session.requestAttachments),
-        provider: session.provider,
-        model: session.model, reasoningEffort: session.reasoningEffort, signal: controller.signal,
-        onStart: (id: any) => { session.codexRequestId = id; },
-        onProgress: (summary: any) => {
-          if (token !== session.requestToken || !summary || isUIPlacementMessage(summary)) return;
-          session.activity = summary; touch(session);
-        },
-        onTrace: (step: CodexTraceEvent) => {
-          if (token !== session.requestToken) return;
-          reduceTrace(step, session); touch(session);
-        },
-      },
-    );
-    if (token !== session.requestToken) return;
-    await waitForSessionProject(session, controller.signal);
-    if (token !== session.requestToken) return;
-    let decoded: any;
-    try { decoded = JSON.parse(raw); } catch { throw new Error('The coding agent returned an invalid section'); }
-    // A capability request cannot carry a partial panel/scene substitute. The
-    // user chooses Project access explicitly; the original prompt is retained.
-    if (decoded?.operation === 'requires_project') {
-      finishSteps(session); archiveTrace(false, session);
-      session.conversation.push({ entering: true, role: 'assistant', requiresProject: true,
-        text: 'Creating or changing this effect or extension needs Project access, which lets the agent write extension files. Continue with Project access to complete your original request.' });
-      session.activity = ''; session.plan = null; session.phase = 'conversation';
-      touch(session, { focusComposer: true });
-      return;
-    }
-    const plan: any = sanitizePlan(decoded, { ...context, targetPanelId: focus.panels[0]?.id || context?.targetPanelId || '' }, request);
-    if (plan.operation === 'noop') {
-      finishSteps(session); archiveTrace(false, session);
-      session.conversation.push({ entering: true, role: 'assistant', text: plan.message || 'What would you like to work on?' });
-      session.activity = ''; session.plan = null; session.phase = 'conversation';
-      touch(session, { focusComposer: true });
-      return;
-    }
-    /* The agent's own account of what it could not make. Nothing is broken and
-       nothing was lost, so these are the agent speaking, not the editor failing. */
-    if (plan.kind === 'scene' && !plan.sceneEdit.commands.length) throw stated(plan.message || 'I could not prepare the composition edit', 'alert');
-    if (plan.kind === 'section' && !plan.section.controls.length) throw stated('The generated section had no controls connected to editable source', 'alert');
-    if (plan.kind === 'workspace' && !plan.workspaceEdit) throw stated('The generated workspace was not safe or complete enough to preview', 'alert');
-    if (plan.kind === 'panels' && !plan.panelEdit.actions.length) throw stated('I could not find a valid panel action to perform', 'plain');
-    updateSteps(plan.steps, -1, session);
-    archiveTrace(false, session);
-    session.stepsExpanded = session.steps.length > 1;
-    session.conversation.push({ entering: true, role: 'assistant', text: conversationReply(plan) });
-    session.activity = ''; session.plan = plan; session.phase = 'conversation';
-    session.revision = Number(PM.proj?.revision || 0);
-    if (plan.kind === 'panels' && S.autoApplyPanels && session.threadId === threads.activeId) await applyPlan();
-    else showPreview(session);
-    if (token === session.requestToken && !controller.signal.aborted) notifyAgentFinished();
+    await runEditorRequest({ session, request, token, controller, focus, context, threadId: threadIdAtStart, steering });
   } catch (error: any) {
     if (token !== session.requestToken) return;
     if (error?.name === 'AbortError') return;
@@ -2587,6 +2774,8 @@ async function sendRequest(input: any) {
     touch(session, { focusComposer: true });
   } finally {
     if (token === session.requestToken) {
+      const thread = threadArchives.get(session.projectId)?.threads.find(item => item.id === session.threadId);
+      if (thread?.lastRunStatus === 'running') thread.lastRunStatus = controller.signal.aborted ? 'cancelled' : session.conversation.at(-1)?.error ? 'failed' : 'completed';
       session.uiPlacement = null;
       sealTrace(session);
       if (session.activeRequest === controller) { session.activeRequest = null; session.codexRequestId = null; }

@@ -35,6 +35,8 @@ export interface AgentApiPackFile {
 export interface PrepareAgentWorkspaceOptions {
   extensionsDir: string;
   apiPackFiles: readonly AgentApiPackFile[];
+  /** Main-owned child identity; keeps sibling inputs and result files apart. */
+  workspaceId?: string;
 }
 
 const byteLength = (value: string): number => Buffer.byteLength(value, 'utf8');
@@ -225,7 +227,7 @@ export async function prepareAgentWorkspace(
     return true;
   });
 
-  const root = agentWorkspaceRoot(userData, req.projectId);
+  const root = agentWorkspaceRoot(userData, options.workspaceId ?? req.projectId);
   return oneAtATime(root, async () => {
     const checkpointPath = `${sessionPathFor(root, authority, req.threadId, req.provider ?? 'chatgpt')}.checkpoint.json`;
     let checkpoint: ExtensionStage | null = null;

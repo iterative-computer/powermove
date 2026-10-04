@@ -95,6 +95,8 @@ export interface ClaudeRunOptions {
   spawnProcess?: SpawnLike;
   consumeConsentToken?: (token: string) => boolean;
   nativeTools?: NativeMcpServerConfig;
+  workspaceId?: string;
+  additionalInstructions?: string;
   externalMcpServers?: UserMcpServers;
   /** Asks the person before a Project run steps outside its sandbox. */
   requestApproval?: RequestApproval;
@@ -228,6 +230,7 @@ export class ClaudeRunner {
           sessionId: null,
           access: 'editor',
           nativeTools: options.nativeTools,
+          additionalInstructions: options.additionalInstructions,
           externalMcpServers
         }), claudeUserMessage(req.prompt, editor.imagePaths), null, options);
         if (this.cancelled.has(req.id)) return failure('The Claude run was cancelled.', true);
@@ -246,6 +249,7 @@ export class ClaudeRunner {
       catch (error) { options.onWarning?.(`API pack unavailable: ${String(error)}`); }
       const layout = await prepareAgentWorkspace(req, options.userData, authority, agentResultSchema(), {
         extensionsDir: options.extensionsDir,
+        workspaceId: options.workspaceId,
         apiPackFiles
       });
       state.layout = layout;
@@ -270,6 +274,7 @@ export class ClaudeRunner {
             extensionsDir: layout.extensionsDir
           }),
           nativeTools: options.nativeTools,
+          additionalInstructions: options.additionalInstructions,
           externalMcpServers,
           askOutsideSandbox: state.requestApproval !== null
         }), claudeUserMessage(prompt, layout.imagePaths), layout, options);

@@ -3,6 +3,7 @@
   import { durationLabel } from './activity-rows';
   import { toolGlyph, type ToolGlyph } from './tool-icons';
   import Markdown from './Markdown.svelte';
+  import { bridge } from '../../kernel/bridge';
 
   /* One stretch of agent work, in the beautiful-ui ToolChips grammar: a quiet
      header ("4 tool calls · 1 failed · 21s"), then flat rows
@@ -23,7 +24,7 @@
      ending is not the agent moving on). It settles closed once prose lands
      after it or the run ends. A manual toggle wins for the group's lifetime. */
   let manualOpen = $state<boolean | null>(null);
-  const open = $derived(manualOpen ?? live);
+  const open = $derived(manualOpen ?? (live || row.details.some(detail => detail.task && detail.status === 'error')));
   function onToggle(event: Event): void {
     const element = event.currentTarget as HTMLDetailsElement;
     if (element.open !== open) manualOpen = element.open;
@@ -40,10 +41,23 @@
   /* Manual toggles win; otherwise a live thought is open so its reasoning is
      readable as it streams, and everything else is closed. */
   let manual = $state<Record<string, boolean>>({});
+  let stopping = $state<Record<string, boolean>>({});
+  let stopErrors = $state<Record<string, string>>({});
+  async function stopTask(detail: ToolDetail): Promise<void> {
+    if (!detail.task || stopping[detail.id]) return;
+    stopping[detail.id] = true;
+    stopErrors[detail.id] = '';
+    try {
+      const cancel = bridge()?.codex.cancelTask;
+      if (!cancel) throw new Error('Subagent controls are unavailable in this connection.');
+      await cancel(detail.task.requestId, detail.task.taskId);
+    } catch (error) { stopErrors[detail.id] = error instanceof Error ? error.message : 'Could not stop this task.'; }
+    finally { stopping[detail.id] = false; }
+  }
   const rowKey = (detail: ToolDetail, index: number): string => `${detail.id}-${index}`;
   const expandable = (detail: ToolDetail): boolean => Boolean(detail.output);
   const isOpen = (detail: ToolDetail, key: string): boolean =>
-    key in manual ? manual[key]! : detail.kind === 'thought' && detail.status === 'running';
+    key in manual ? manual[key]! : detail.task && detail.status === 'error' ? true : detail.kind === 'thought' && detail.status === 'running';
   function toggleRow(detail: ToolDetail, key: string): void {
     manual = { ...manual, [key]: !isOpen(detail, key) };
   }
@@ -69,6 +83,10 @@
   {/if}
   {#if detail.status === 'error'}
     <em>Failed</em>
+  {:else if detail.task?.status === 'cancelled'}
+    <em>Stopped</em>
+  {:else if detail.task?.status === 'waiting'}
+    <em>Waiting</em>
   {:else if detail.status === 'continued'}
     <em>Continued</em>
   {:else if callSpan(detail)}
@@ -80,7 +98,9 @@
   <div class="agent-tool-details" aria-label="Tool activity details">
     {#each row.details as detail, index (rowKey(detail, index))}
       {@const key = rowKey(detail, index)}
-      {@const glyph = toolGlyph(detail.family)}
+      {@const glyph = detail.task && detail.status !== 'running'
+        ? { d: detail.task.status === 'cancelled' ? 'M7 7h10v10H7z' : detail.status === 'error' ? 'M6 6l12 12M18 6L6 18' : 'M5 12l4 4L19 6' }
+        : toolGlyph(detail.family)}
       {@const canOpen = expandable(detail)}
       {@const open = canOpen && isOpen(detail, key)}
       <div
@@ -88,7 +108,10 @@
         class:is-running={detail.status === 'running'}
         class:is-open={open}
         class:is-thought={detail.kind === 'thought'}
+        class:is-subtask={Boolean(detail.task?.parentTaskId)}
+        class:is-task={Boolean(detail.task)}
       >
+        <div class="agent-tool-line">
         {#if canOpen}
           <button class="agent-tool-row" type="button" aria-expanded={open} onclick={() => toggleRow(detail, key)}>
             {@render call(detail, glyph, true, open)}
@@ -98,11 +121,19 @@
             {@render call(detail, glyph, false, false)}
           </div>
         {/if}
+        {#if detail.task && detail.status === 'running'}
+          <button type="button" class="agent-btn agent-task-stop" aria-label={`Stop ${detail.label}`} disabled={stopping[detail.id]} onclick={() => void stopTask(detail)}>Stop</button>
+        {/if}
+        </div>
+        {#if detail.task && detail.status === 'running' && !open && detail.task.progress}
+          <p class="agent-task-progress">{detail.task.progress}</p>
+        {/if}
+        {#if stopErrors[detail.id]}<p class="agent-task-error" role="alert">{stopErrors[detail.id]}</p>{/if}
         {#if canOpen}
           <div class="agent-tool-output" class:is-open={open}>
             <div>
-              {#if detail.kind === 'thought'}
-                <div class="agent-tool-thought"><Markdown text={String(detail.output)} streaming={detail.status === 'running'} {animated} /></div>
+              {#if detail.kind === 'thought' || detail.task}
+                <div class="agent-tool-thought" class:is-task-result={Boolean(detail.task)}><Markdown text={String(detail.output)} streaming={detail.status === 'running'} {animated} /></div>
               {:else}
                 <pre>{detail.output}</pre>
               {/if}
@@ -204,6 +235,12 @@
     -webkit-user-select: text;
   }
   .agent-tool-details > div { min-width: 0; animation: agent-fade-up 300ms cubic-bezier(.23, 1, .32, 1) both; }
+  .agent-tool-details > .is-subtask { margin-left: 16px; }
+  .agent-tool-line { display: flex; align-items: center; min-width: 0; }
+  .agent-tool-line > .agent-tool-row { flex: 1; min-width: 0; }
+  .agent-task-stop { flex: none; font-size: var(--fs-xs); }
+  .agent-task-error { margin: 3px 6px; color: var(--danger); font-size: var(--fs-xs); }
+  .agent-task-progress { margin: 0 6px 3px 25px; color: var(--tx-3); font-size: var(--fs-xs); overflow-wrap: anywhere; }
   .agent-tool-row {
     position: relative;
     display: flex;
@@ -222,14 +259,15 @@
     text-align: left;
     transition: background var(--dur-2);
   }
-  button.agent-tool-row:hover, .is-open > .agent-tool-row { background: var(--ink-1); }
+  button.agent-tool-row:hover, .is-open > .agent-tool-line > .agent-tool-row { background: var(--ink-1); }
   button.agent-tool-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
   .agent-tool-row > span { min-width: 0; flex: 0 1 auto; overflow-wrap: anywhere; font-weight: var(--fw-medium); color: var(--tx); }
   /* The label keeps its width and the chip takes the rest, truncating; only a
      label with nothing beside it may wrap. */
   .agent-tool-row > span:has(+ .agent-tool-chip) { flex-shrink: 0; overflow-wrap: normal; }
+  .is-task > .agent-tool-line > .agent-tool-row > span { flex-shrink: 1; overflow-wrap: anywhere; }
   .agent-tool-row > em { flex: none; margin-left: auto; font-style: normal; font-size: var(--fs-xs); color: var(--tx-3); font-variant-numeric: tabular-nums; }
-  .is-thought > .agent-tool-row > span { color: var(--tx-2); }
+  .is-thought > .agent-tool-line > .agent-tool-row > span { color: var(--tx-2); }
   .agent-tool-glyph, .agent-tool-spinner { width: 13px; height: 13px; flex: none; }
   .agent-tool-glyph { color: var(--tx-3); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: opacity var(--dur-2); }
   .agent-tool-spinner { border-radius: 50%; border: 1.5px solid var(--line-2); border-top-color: var(--tx-2); animation: agent-spin .7s linear infinite; }
@@ -238,9 +276,9 @@
     fill: none; stroke: var(--tx-3); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round;
     opacity: 0; transform: rotate(-90deg); transition: opacity var(--dur-2), transform 200ms var(--ease);
   }
-  button.agent-tool-row:hover > :is(.agent-tool-glyph, .agent-tool-spinner), .is-open > .agent-tool-row > :is(.agent-tool-glyph, .agent-tool-spinner) { opacity: 0; }
-  button.agent-tool-row:hover > .agent-tool-row-chevron, .is-open > .agent-tool-row > .agent-tool-row-chevron { opacity: 1; }
-  .is-open > .agent-tool-row > .agent-tool-row-chevron { transform: rotate(0deg); }
+  button.agent-tool-row:hover > :is(.agent-tool-glyph, .agent-tool-spinner), .is-open > .agent-tool-line > .agent-tool-row > :is(.agent-tool-glyph, .agent-tool-spinner) { opacity: 0; }
+  button.agent-tool-row:hover > .agent-tool-row-chevron, .is-open > .agent-tool-line > .agent-tool-row > .agent-tool-row-chevron { opacity: 1; }
+  .is-open > .agent-tool-line > .agent-tool-row > .agent-tool-row-chevron { transform: rotate(0deg); }
 
   /* The chip: a field-toned pill with a hairline ring, roomy enough to read. */
   .agent-tool-chip {
@@ -260,7 +298,7 @@
     text-overflow: ellipsis;
   }
   .agent-tool-chip.is-prose { font-family: var(--f-ui); font-size: var(--fs-xs); color: var(--tx-3); }
-  .is-failed > .agent-tool-row > span, .is-failed > .agent-tool-row > em, .is-failed > .agent-tool-row > .agent-tool-glyph { color: var(--danger); }
+  .is-failed > .agent-tool-line > .agent-tool-row > span, .is-failed > .agent-tool-line > .agent-tool-row > em, .is-failed > .agent-tool-line > .agent-tool-row > .agent-tool-glyph { color: var(--danger); }
 
   .agent-tool-output {
     display: grid;
@@ -280,6 +318,7 @@
   }
   .agent-tool-output pre { font: var(--fs-xs)/1.6 var(--f-mono); }
   .agent-tool-thought { font-size: var(--fs-sm); line-height: 1.55; color: var(--tx-3); }
+  .agent-tool-thought.is-task-result { color: var(--tx-2); }
 
   .agent-tool-files { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0 2px 4px; padding-top: 8px; border-top: 1px solid var(--line); }
   .agent-tool-file {

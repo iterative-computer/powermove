@@ -1,4 +1,5 @@
 import type { OnboardingChoice } from './creative-workspace';
+import type { AgentTask } from './agent-orchestration';
 /*
  * Frozen Phase 1 IPC contract between the sandboxed renderer and the main
  * process. Every channel here is the ONLY way the renderer reaches native
@@ -78,6 +79,7 @@ export const IPC = {
   codexSteer: 'codex:steer',
   codexAnswer: 'codex:answer',
   codexCancel: 'codex:cancel',
+  codexCancelTask: 'codex:cancel-task',
   codexFixPrompt: 'codex:fix-prompt',
   codexRebasePrompt: 'codex:rebase-prompt',
   codexRestoreChangeSet: 'codex:restore-change-set',
@@ -436,6 +438,7 @@ export interface CodexRebasePromptRequest {
    known (label only), then again once the arguments are complete (with
    `detail`); the renderer patches the existing row instead of adding one. */
 export type CodexTraceEvent =
+  | { kind: 'task'; task: AgentTask }
   | { kind: 'thought'; text: string }
   | { kind: 'answer'; text: string }
   | {
@@ -461,6 +464,8 @@ export type CodexTraceEvent =
   | {
       kind: 'question';
       itemId: string;
+      /** A child can hold a question on behalf of the root conversation. */
+      requestId?: string;
       questions: CodexQuestion[];
       transport: 'reply' | 'message';
       blocking: boolean;
@@ -767,6 +772,7 @@ export interface PowermoveBridge {
     steer(req: CodexSteerRequest): Promise<CodexSteerResult>;
     answer(req: CodexAnswerRequest): Promise<CodexSteerResult>;
     cancel(id: string, preserveChanges?: boolean): Promise<void>;
+    cancelTask?(requestId: string, taskId: string): Promise<void>;
     fixPrompt(req: CodexFixPromptRequest): Promise<string>;
     rebasePrompt(req: CodexRebasePromptRequest): Promise<string>;
     restoreChangeSet(req: AgentChangeSetRestoreRequest): Promise<AgentChangeSetRestoreResult>;

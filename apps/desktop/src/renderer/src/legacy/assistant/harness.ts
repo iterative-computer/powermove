@@ -450,6 +450,10 @@ async function rollBackLiveTransaction(transaction: LiveToolTransaction): Promis
 
 async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit<AgentToolResponseEvent, 'runId' | 'callId'>> {
   PM.SpatialAssistant?.assertRunProject?.(request.runId);
+  if (request.tool === '__agent_thread_control') {
+    if (!PM.SpatialAssistant?.controlThread) throw new Error('Thread controls are unavailable.');
+    return { ok: true, content: [toolText(await PM.SpatialAssistant.controlThread(request.arguments))] };
+  }
   if (request.tool === 'select_layers') {
     const ids = request.arguments.layerIds;
     if (!Array.isArray(ids) || !ids.every(id => typeof id === 'string' && PM.L(id))) {

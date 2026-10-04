@@ -58,6 +58,7 @@ interface ClaudeArgvOptions {
   access: CodexAccess;
   extensionsDir?: string;
   instructions?: string;
+  additionalInstructions?: string;
   nativeTools?: NativeMcpServerConfig;
   externalMcpServers?: UserMcpServers;
   /** Project access only: ask the person before leaving the sandbox. */
@@ -140,7 +141,7 @@ export function buildClaudeArgv(options: ClaudeArgvOptions): string[] {
   const systemPrompt = options.instructions
     ? `${options.instructions}${network}\n\nReturn the final answer only through the requested JSON schema.`
     : `${AGENT_TESTING_INSTRUCTIONS}\n\nUse the supplied reference files as read-only context. Return only a value matching the requested JSON schema.`;
-  argv.push('--system-prompt', systemPrompt);
+  argv.push('--system-prompt', systemPrompt + (options.additionalInstructions ? `\n\n${options.additionalInstructions}` : ''));
   return argv;
 }
 
