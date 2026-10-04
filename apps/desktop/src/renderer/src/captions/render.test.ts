@@ -118,6 +118,15 @@ describe('createCaptionRasterizer', () => {
     expect(rasterizer.frame(still, 1.2, 1920, 1080)!.key).toBe(rasterizer.frame(still, 2.9, 1920, 1080)!.key);
   });
 
+  it('changes its cache key when the text changes but the width does not', () => {
+    // Fixed-advance metrics: 'form' and 'from' measure the same.
+    const typo = { cues: [cue('read form left', { start: 0, end: 2 })], style: presetStyle('classic') };
+    const fixed = { cues: [cue('read from left', { start: 0, end: 2 })], style: presetStyle('classic') };
+    const before = rasterizer.frame(typo, 1, 1920, 1080)!, after = rasterizer.frame(fixed, 1, 1920, 1080)!;
+    expect(after.layout.width).toBe(before.layout.width);
+    expect(after.key).not.toBe(before.key);
+  });
+
   it('gives idle bounds between cues for selection', () => {
     const bounds = rasterizer.idleBounds(content, 1920, 1080);
     expect(bounds.x1 - bounds.x0).toBeCloseTo(1920 * 0.8);

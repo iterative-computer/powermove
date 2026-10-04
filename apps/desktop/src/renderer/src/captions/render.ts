@@ -172,6 +172,9 @@ export function createCaptionRasterizer(deps: CaptionRasterDeps) {
   return { frame, draw, idleBounds, clear };
 }
 
+/* The bitmap depends on the words drawn and where lines break, not only on
+   the block size: 'form' → 'from' keeps the width but must redraw. */
 function layoutKey(layout: CaptionLayout): string {
-  return `${layout.size.toFixed(2)}:${layout.lines.length}:${layout.width.toFixed(1)}`;
+  const text = layout.lines.map(line => line.words.map(word => word.text).join(' ')).join('\n');
+  return `${layout.size.toFixed(2)}:${layout.lines.length}:${layout.width.toFixed(1)}:${text}`;
 }
