@@ -20,6 +20,13 @@ export const CHECK_PROJECT_TOOL = 'check_project';
 /** Internal renderer round trip: asset/layer → readable file + timing. */
 export const MEDIA_SOURCE_TOOL = '__media_source';
 
+/** Internal renderer round trip: composition size, rate, duration and work area.
+ * Unlike get_project_state it is not a read the run acknowledges, so it never
+ * moves the run's edit baseline past changes the agent has not seen. */
+export const COMPOSITION_INFO_TOOL = '__composition_info';
+
+export interface AgentCompositionInfo { width: number; height: number; fps: number; duration: number; workArea?: [number, number] }
+
 const MEDIA_TOOL_SET = new Set<string>([...AGENT_MEDIA_TOOL_NAMES, CHECK_PROJECT_TOOL]);
 
 /** `mcp__powermove__probe_media`, `probe_media` → `probe_media`; anything else → null. */

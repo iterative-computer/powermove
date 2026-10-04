@@ -20,7 +20,7 @@ import type { StoreAgentGateway, StoreInstallInput, StorePublishInput, StoreSear
 import { inspectCreativeWorkspace } from '../creative-workspace';
 import { userInput, type UserInput } from '../user-input';
 import { AgentMediaTools, type CompositionInfo, type MediaToolContext } from './media-tools';
-import { AGENT_MEDIA_TOOL_NAMES, MEDIA_SOURCE_TOOL, type AgentMediaSource } from '../../shared/media-tools';
+import { AGENT_MEDIA_TOOL_NAMES, COMPOSITION_INFO_TOOL, MEDIA_SOURCE_TOOL, type AgentMediaSource } from '../../shared/media-tools';
 import type { TranscriptionService } from '../transcription/service';
 
 const STORE_TOOL_NAMES = new Set<string>(POWERMOVE_STORE_TOOL_NAMES);
@@ -505,8 +505,9 @@ export class PowermoveAgentToolBridge {
         return frames;
       },
       composition: async () => {
-        const { json } = await rendererJson('get_project_state', { layerLimit: 1, propertyLimit: 1, keyframeLimit: 0 });
-        const comp = json.composition ?? {};
+        // Not get_project_state: that read moves the run's edit baseline (see harness.ts).
+        const { json } = await rendererJson(COMPOSITION_INFO_TOOL, {});
+        const comp = json ?? {};
         const work = Array.isArray(comp.workArea) && comp.workArea.length === 2 && comp.workArea.every(Number.isFinite) ? comp.workArea as [number, number] : undefined;
         return { duration: Number(comp.duration) || 0, fps: Number(comp.fps) || 30, width: Number(comp.width) || 1920, height: Number(comp.height) || 1080, ...(work ? { workArea: work } : {}) } satisfies CompositionInfo;
       }

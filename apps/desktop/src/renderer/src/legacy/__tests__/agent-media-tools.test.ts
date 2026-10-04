@@ -66,6 +66,19 @@ describe('__media_source', () => {
   });
 });
 
+describe('__composition_info', () => {
+  it('answers composition size and timing without acknowledging changes the agent has not read', async () => {
+    const PM = editor();
+    PM.proj.revision = 6;
+    const call = (tool: string, args: any = {}) => PM.AgentHarness.test.handleLiveAgentTool({ runId: 'comp-info', callId: tool, tool, arguments: args, baseRevision: 3 });
+    const info = JSON.parse((await call('__composition_info')).content[0].text);
+    expect(info).toEqual({ width: 1920, height: 1080, fps: 30, duration: 6, workArea: [0, 6] });
+    // A contact sheet of the composition must not let an edit through against state the agent never saw.
+    await expect(call('apply_commands', { commands: [{ type: 'add_layer', id: 'fresh', layerType: 'text' }] })).rejects.toThrow('revision 3');
+    expect(PM.L('fresh')).toBeFalsy();
+  });
+});
+
 describe('check_project', () => {
   it('reports a clean composition as ok', () => {
     const PM = editor();

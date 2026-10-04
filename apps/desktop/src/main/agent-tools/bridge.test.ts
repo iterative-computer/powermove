@@ -190,6 +190,38 @@ describe('native Powermove agent tool bridge', () => {
     await expect(bridge.callTool(appSession, 'transcribe_media', { assetId: 'a1' })).rejects.toThrow('no project attached');
   });
 
+  it('reads composition info for a composition contact sheet without a project-state read', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'powermove-agent-media-'));
+    temporaryDirectories.push(root);
+    const still = path.join(root, 'frame.png');
+    const ffmpegPath = path.resolve(__dirname, '../../../node_modules/ffmpeg-static/ffmpeg');
+    await new Promise<void>((resolve, reject) => spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=blue:s=320x180', '-frames:v', '1', still])
+      .once('close', (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg ${code}`))));
+    const png = new Uint8Array(await fs.readFile(still));
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    owner.send = (channel: string, request: AgentToolRequestEvent) => {
+      owner.requests.push(request);
+      const times = Array.isArray(request.arguments.times) ? request.arguments.times : [];
+      const content = request.tool === '__composition_info'
+        ? [{ type: 'text' as const, text: JSON.stringify({ width: 1280, height: 720, fps: 30, duration: 4, workArea: [0, 4] }) }]
+        : request.tool === 'render_frames'
+          ? [{ type: 'text' as const, text: '{}' }, ...times.map(() => ({ type: 'image' as const, data: png, mimeType: 'image/png' as const }))]
+          : [];
+      queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: owner }, { runId: request.runId, callId: request.callId, ok: content.length > 0, content, ...(content.length ? {} : { error: 'unexpected' }) }));
+    };
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '/resources/agent-tools/mcp-server.mjs', ffmpegPath, mediaFontFile: null });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'media-run-comp', owner: owner as never, baseRevision: 0 });
+
+    const response = await bridge.callTool(session, 'media_contact_sheet', { target: 'composition', count: 4 });
+
+    expect(response.ok).toBe(true);
+    expect(owner.requests.map((request) => request.tool)).toEqual(['__composition_info', 'render_frames']);
+    expect(JSON.parse((response.content[0] as { text: string }).text)).toMatchObject({ target: 'composition', columns: 2, rows: 2 });
+    expect(response.content[1]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' });
+  });
+
   it('reports media tools as unavailable without a bundled ffmpeg', async () => {
     const ipc = new FakeIpcMain();
     const owner = new FakeWebContents(ipc);
