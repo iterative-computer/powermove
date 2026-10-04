@@ -79,22 +79,22 @@ export function faderDb(position: number): number {
 }
 
 /**
- * Meter deflection, IEC 60268-18 (the digital peak programme meter scale):
- * 0 dBFS at the top, the top 20 dB over the upper half, -60 near the floor.
+ * Meter deflection: the fader's own taper, so each strip has one scale. 0 dBFS
+ * sits level with the fader's unity mark, and anything louder climbs into the
+ * travel above it (a hot strip feeding the master, or an over on the master).
  */
 export function meterPosition(db: number): number {
-  if (!(db >= -70)) return 0;
-  if (db < -60) return (db + 70) * 0.0025;
-  if (db < -50) return (db + 60) * 0.005 + 0.025;
-  if (db < -40) return (db + 50) * 0.0075 + 0.075;
-  if (db < -30) return (db + 40) * 0.015 + 0.15;
-  if (db < -20) return (db + 30) * 0.02 + 0.3;
-  if (db < 0) return (db + 20) * 0.025 + 0.5;
-  return 1;
+  return faderPosition(db);
 }
 
-/** Labelled meter marks, dBFS. */
-export const METER_MARKS: readonly number[] = [0, -6, -12, -20, -30, -40, -60];
+/** Labelled scale marks, dB, top to bottom: the fader's marks. */
+export const METER_MARKS: readonly number[] = FADER_MARKS.map(([db]) => db);
+
+/** A scale label the way consoles print them: "+6", "0", "6" (below unity). */
+export function scaleLabel(db: number): string {
+  return db > 0 ? `+${db}` : String(Math.abs(db));
+}
+
 /** Meter colour zones, dBFS: below WARN is nominal, CLIP_ZONE up is hot. */
 export const METER_WARN_DB = -12;
 export const METER_HOT_DB = -3;

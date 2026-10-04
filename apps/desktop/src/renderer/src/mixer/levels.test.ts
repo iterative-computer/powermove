@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CLIP_LEVEL, FADER_MARKS, MAX_GAIN, PEAK_FALL_DB_PER_S, PEAK_HOLD_S, SILENCE_DB,
   createChannelMeter, dbToGain, faderDb, faderPosition, formatDb, gainToDb, measureBlock,
-  meterPosition, meterRmsDb, meterSettled, parseDb, resetChannelMeter, stepChannelMeter
+  METER_MARKS, meterPosition, meterRmsDb, meterSettled, parseDb, resetChannelMeter, scaleLabel, stepChannelMeter
 } from './levels';
 
 describe('gain and decibels', () => {
@@ -71,21 +71,25 @@ describe('fader taper', () => {
 });
 
 describe('meter scale', () => {
-  it('follows the IEC 60268-18 deflection', () => {
-    expect(meterPosition(0)).toBe(1);
-    expect(meterPosition(3)).toBe(1);
-    expect(meterPosition(-20)).toBeCloseTo(0.5, 12);
-    expect(meterPosition(-30)).toBeCloseTo(0.3, 12);
-    expect(meterPosition(-40)).toBeCloseTo(0.15, 12);
-    expect(meterPosition(-60)).toBeCloseTo(0.025, 12);
-    expect(meterPosition(-80)).toBe(0);
+  it('shares the fader taper, so 0 dBFS lines up with the unity mark', () => {
+    expect(meterPosition(0)).toBe(faderPosition(0));
+    expect(meterPosition(0)).toBeCloseTo(0.72, 12);
+    expect(meterPosition(12)).toBe(1);
+    expect(meterPosition(20)).toBe(1);
+    expect(meterPosition(-20)).toBeCloseTo(0.33, 12);
+    expect(meterPosition(-60)).toBeCloseTo(0.04, 12);
+    expect(meterPosition(-120)).toBe(0);
     expect(meterPosition(-Infinity)).toBe(0);
     let previous = -1;
-    for (let db = -70; db <= 0; db += 0.5) {
+    for (let db = -110; db <= 14; db += 0.5) {
       const position = meterPosition(db);
       expect(position).toBeGreaterThanOrEqual(previous);
       previous = position;
     }
+  });
+
+  it('labels marks the way consoles do', () => {
+    expect(METER_MARKS.map(scaleLabel)).toEqual(['+12', '+6', '0', '6', '12', '20', '30', '40', '60']);
   });
 });
 

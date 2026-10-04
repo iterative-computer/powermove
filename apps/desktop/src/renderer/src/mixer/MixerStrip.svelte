@@ -1,12 +1,12 @@
 <script lang="ts">
-  /* One channel strip: level readout, fader beside a stereo meter with its
-     dBFS scale, mute and solo, and the layer's name. The master strip is the
+  /* One channel strip: level readout, fader beside a stereo meter on one
+     shared dB scale, mute and solo, and the layer's name. The master strip is the
      same anatomy without mute and solo. */
   import type { PowermoveAPI } from '../kernel/api';
   import Fader from './Fader.svelte';
   import LevelReadout from './LevelReadout.svelte';
   import type { LevelControl } from './level-control';
-  import { METER_MARKS, meterPosition } from './levels';
+  import { METER_MARKS, meterPosition, scaleLabel } from './levels';
   import type { MeterLoop } from './meter-loop';
   import type { MixerStrip } from './strips';
 
@@ -76,7 +76,9 @@
     return () => { observer.disconnect(); detach(); };
   });
 
-  const scale = METER_MARKS.map((mark) => ({ mark, position: meterPosition(mark), minor: mark === -6 || mark === -30 || mark === -40 }));
+  /* One scale per strip: the labels read the fader and the meter alike. The
+     in-between marks drop out on short strips. */
+  const scale = METER_MARKS.map((mark) => ({ mark, label: scaleLabel(mark), position: meterPosition(mark), minor: mark === 6 || mark === -6 || mark === -30 || mark === -40 }));
 </script>
 
 <div class="mx-strip" class:master class:quiet={!!quiet} class:selected data-mixer-strip={id} title={quiet || undefined}>
@@ -114,7 +116,7 @@
     </div>
     <div class="mx-scale" aria-hidden="true">
       {#each scale as mark (mark.mark)}
-        <span class:minor={mark.minor} style:bottom={`${mark.position * 100}%`}>{Math.abs(mark.mark)}</span>
+        <span class:minor={mark.minor} class:unity={mark.mark === 0} style:bottom={`${mark.position * 100}%`}>{mark.label}</span>
       {/each}
     </div>
   </div>
@@ -203,15 +205,19 @@
     column-gap: 5px;
   }
 
+  /* The fader, the meter and the scale share one geometry: the knob's centre
+     travels from 6px below the top to half a knob (4.5px) above the bottom,
+     and the meter canvas and scale span exactly that, so a mark, the meter
+     at that level and the knob at that level sit on one line. */
   .mx-meter {
     min-height: 0;
     display: grid;
     grid-template-rows: 3px minmax(0, 1fr);
     row-gap: 3px;
+    padding-bottom: 4.5px;
   }
 
-  /* The fader's travel and the meter's scale both span the canvas height. */
-  .mx-body > :global(.mx-fader) { margin-top: 2px; height: calc(100% - 2px); }
+  .mx-body > :global(.mx-fader) { margin-top: 1.5px; height: calc(100% - 1.5px); }
 
   .mx-clip {
     position: relative;
@@ -237,7 +243,7 @@
 
   .mx-scale {
     position: relative;
-    margin: 6px 0 0;
+    margin: 6px 0 4.5px;
     min-height: 0;
   }
 
@@ -250,6 +256,8 @@
     color: var(--tx-4);
     white-space: nowrap;
   }
+
+  .mx-scale span.unity { color: var(--tx-3); }
 
   .mx-switches {
     display: flex;
