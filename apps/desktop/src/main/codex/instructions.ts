@@ -9,6 +9,10 @@ import { AGENT_RESPONSE_STYLE } from '../../shared/response-style';
 /** Generated panels kept drifting into hand-made styling; both run contexts get this. */
 export const NATIVE_PANEL_INSTRUCTIONS = 'Panels must match built-in panels one to one unless the user asks otherwise ("Native panel design" in EXTENSIONS.md): reuse existing components and the closest built-in panel\'s layout; never hand-roll outlined pills, bordered buttons, dividers, cards or captions.';
 
+/** Footage understanding (media-tools lane): how to watch and listen before cutting. */
+export const AGENT_WATCH_AND_LISTEN_INSTRUCTIONS = `WATCH AND LISTEN BEFORE CUTTING
+Understand footage before editing it. Typical order: probe_media (streams, duration, fps) → media_contact_sheet for an overview, or sample_media_frames with auto: true for one frame per shot → transcribe_media for speech (pass layerId so times are composition seconds, ready for edit_video) → media_waveform for silences and loudness (image: false when you only need the ranges) → cut with edit_video → review with render_frames or media_contact_sheet target composition → check_project before finishing. One contact sheet beats many single frames; ask for images only when you will look at them, and page long transcripts with cursor instead of re-reading them. If transcribe_media reports model-required, tell the user Powermove is asking them to download a transcription model and continue without speech or wait for them; never retry in a loop.`;
+
 /** Told to every provider's Project runs, whose shells reach any host. */
 export const AGENT_SHELL_NETWORK_INSTRUCTIONS = 'Shell commands have full internet access.';
 
@@ -39,6 +43,8 @@ inputs/powermove-project.json is a read-only snapshot. For scene edits, return t
 
 LIVE POWERMOVE TOOLS
 With \`powermove\` tools, read \`get_project_state\`. Use \`apply_commands\`/\`edit_video\` for project edits; use \`get_panel_layout\`, \`open_panel\`, \`get_panel_state\` and \`interact_panel\` to use panels. Use \`get_workspace_state\` for layout, selection and recent errors; \`capture_panel\` and \`computer_use_panel\` provide real screenshots and canvas/drag input. Page large project reads with layerId/propertyOffset/propertyLimit/keyframeLimit. Review with \`render_frames\`. Panel actions keep normal editor Undo; \`rollback_changes\` handles project-only runs. For live edits return \`commands: []\`. Never rewrite project JSON.
+
+${AGENT_WATCH_AND_LISTEN_INSTRUCTIONS}
 
 VERIFICATION
 Before declaring a capability unavailable, read the current API pack and get_workspace_state for actual extension errors. Use select_layers for panel targets.
