@@ -35,17 +35,26 @@ test('onboarding lets a new user choose the track timeline before opening the ed
     await welcome.getByText('Claude', { exact: true }).click();
     await welcome.getByLabel('Claude model').selectOption('claude-sonnet-5-5');
     await welcome.locator('#agent-step').getByRole('button', { name: 'Continue' }).click();
+    // The optional speech model step: Parakeet V3 preselected, skipped here.
+    await expect(welcome.locator('#transcription-title')).toBeFocused();
+    await expect(welcome.locator('input[value="parakeet-tdt-0.6b-v3"]')).toBeChecked();
+    await welcome.locator('#transcription-step').getByRole('button', { name: 'Not now' }).click();
     await expect(welcome.locator('#workspace-title')).toBeFocused();
-    await welcome.getByRole('button', { name: 'Back to agent choice' }).click();
+    await welcome.getByRole('button', { name: 'Back to speech model choice' }).click();
+    await expect(welcome.locator('#transcription-title')).toBeFocused();
+    await welcome.locator('#transcription-step').getByRole('button', { name: 'Back to agent choice' }).click();
     await expect(welcome.locator('input[value="claude"]')).toBeChecked();
     await welcome.getByRole('button', { name: 'Back to timeline choice' }).click();
     await expect(welcome.locator('input[value="tracks"]')).toBeChecked();
     await welcome.locator('#timeline-step').getByRole('button', { name: 'Continue' }).click();
     await welcome.locator('#agent-step').getByRole('button', { name: 'Continue' }).click();
+    await welcome.locator('#transcription-step').getByRole('button', { name: 'Not now' }).click();
     await welcome.getByRole('button', { name: 'Start fresh' }).click();
     const editor = await find(url => !/onboarding/.test(url) && url.startsWith('app:'));
     await editor.waitForFunction(() => Boolean((window as any).PM?.Kernel?.services?.get?.('timeline')), undefined, { timeout: 30000 });
     const mode = await editor.evaluate(() => (window as any).PM.Kernel.services.get('timeline').mode);
+    // Main writes the marker after applying the agent choice, which can land after the timeline is up.
+    await expect.poll(() => readFile(path.join(userData, 'onboarding-v1.json'), 'utf8').then(() => true, () => false)).toBe(true);
     const saved = JSON.parse(await readFile(path.join(userData, 'onboarding-v1.json'), 'utf8'));
     expect(mode).toBe('tracks');
     expect(saved.timelineMode).toBe('tracks');
