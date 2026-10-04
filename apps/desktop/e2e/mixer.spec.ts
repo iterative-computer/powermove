@@ -87,11 +87,78 @@ test('the agent opens the mixer, which shows a strip per audible layer and an un
   await readout.press('Enter');
   expect(await gain(page, ids.tone)).toBeCloseTo(10 ** (-6 / 20), 4);
 
-  // The master fader is the composition's output level and reaches the engine.
+  // A double-click on the rail (away from the knob) is one step to unity,
+  // not a jump followed by a reset.
+  const typed = await gain(page, ids.tone);
+  const steps = await page.evaluate(() => (window as any).PM.hist.list().length);
+  const rail = (await fader.boundingBox())!;
+  await fader.dblclick({ position: { x: rail.width / 2, y: rail.height - 3 } });
+  expect(await gain(page, ids.tone)).toBe(1);
+  expect(await page.evaluate(() => (window as any).PM.hist.list().length)).toBe(steps + 1);
+  await page.evaluate(() => (window as any).PM.hist.undo());
+  expect(await gain(page, ids.tone)).toBeCloseTo(typed, 6);
+
+  // A single click on the rail jumps there and settles as its own step once
+  // the double-click window has passed.
+  const busy = () => page.evaluate(() => (window as any).PM.hist.busy());
+  await fader.click({ position: { x: rail.width / 2, y: rail.height - 3 } });
+  expect(await gain(page, ids.tone)).toBeLessThan(typed);
+  await page.waitForFunction(() => !(window as any).PM.hist.busy());
+  await page.evaluate(() => (window as any).PM.hist.undo());
+  expect(await gain(page, ids.tone)).toBeCloseTo(typed, 6);
+  // Cmd+Z straight after a rail click settles the jump first, then undoes it.
+  await fader.click({ position: { x: rail.width / 2, y: rail.height - 3 } });
+  expect(await busy()).toBe(true);
+  await page.keyboard.press('Meta+z');
+  expect(await busy()).toBe(false);
+  expect(await gain(page, ids.tone)).toBeCloseTo(typed, 6);
+
+  // The master fader is the composition's output level and reaches the engine
+  // while it plays; Undo restores both.
+  const masterLevels = () => page.evaluate(() => {
+    const PM = (window as any).PM;
+    return { project: PM.proj.audioGain ?? 1, engine: PM.Audio.inspect().master };
+  });
+  await page.evaluate(() => { const PM = (window as any).PM; PM.setTime(0); PM.play(); });
+  await page.waitForFunction(() => (window as any).PM.Audio.inspect().voices.length > 0);
   await panel.getByRole('slider', { name: 'Master level' }).focus();
   await page.keyboard.press('PageDown');
-  const master = await page.evaluate(() => ({ project: (window as any).PM.proj.audioGain, engine: (window as any).PM.Audio.inspect().master }));
-  expect(master.project).toBeCloseTo(10 ** (-6 / 20), 4);
+  await page.waitForFunction(() => {
+    const PM = (window as any).PM;
+    return Math.abs(PM.Audio.inspect().master - PM.proj.audioGain) < 1e-6;
+  });
+  const lowered = await masterLevels();
+  expect(lowered.project).toBeCloseTo(10 ** (-6 / 20), 4);
+  expect(lowered.engine).toBeCloseTo(lowered.project, 6);
+  await page.evaluate(() => (window as any).PM.hist.undo());
+  await page.waitForFunction(() => (window as any).PM.Audio.inspect().master === 1);
+  expect(await masterLevels()).toEqual({ project: 1, engine: 1 });
+
+  // Each composition keeps its own output level: opening a precomp plays it at
+  // unity, and the parent's level is still there when you come back.
+  await panel.getByRole('slider', { name: 'Master level' }).focus();
+  await page.keyboard.press('PageDown');
+  const parent = await page.evaluate(() => (window as any).PM.proj.audioGain);
+  const nested = await page.evaluate((id) => {
+    const PM = (window as any).PM;
+    const root = PM.proj.compId;
+    const comp = PM.Comps.precompose([id], { name: 'Tone Comp' });
+    const precomp = PM.proj.layers.find((layer: any) => layer.type === 'precomp');
+    PM.Comps.open(precomp.d.comp);
+    PM.setTime(0); PM.play();
+    return { root, comp: precomp.d.comp, made: !!comp, level: PM.proj.audioGain ?? null };
+  }, ids.tone);
+  expect(nested).toMatchObject({ made: true, level: null });
+  await page.waitForFunction(() => (window as any).PM.Audio.inspect().voices.length > 0);
+  await page.waitForFunction(() => (window as any).PM.Audio.inspect().master === 1);
+  await expect(panel.getByRole('slider', { name: 'Master level' })).toHaveAttribute('aria-valuenow', /^0(\.0+)?$/);
+  const back = await page.evaluate(({ root, comp }) => {
+    const PM = (window as any).PM;
+    PM.Comps.open(root);
+    return { level: PM.proj.audioGain, child: Object.hasOwn(PM.proj.comps[comp], 'audioGain') };
+  }, nested);
+  expect(back).toEqual({ level: parent, child: false });
+  await page.evaluate(() => (window as any).PM.pause());
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
@@ -107,19 +174,29 @@ test('mute and solo change what plays, and meters run only while sound plays', a
   // Meters tap the strip while it is visible and playing.
   await page.waitForFunction((id) => (window as any).PM.Audio.inspect().taps.includes(id), ids.tone);
 
-  // Mute writes the layer's own switch; its voice stops.
-  await panel.getByRole('button', { name: 'Mute Tone' }).click();
+  // Mute writes the layer's own switch; its voice stops. Undo brings it back.
+  const mute = panel.getByRole('button', { name: 'Mute Tone' });
+  await mute.click();
   await page.waitForFunction((id) => !(window as any).PM.Audio.inspect().voices.some((v: any) => v.strip === id), ids.tone);
   expect(await page.evaluate((id) => (window as any).PM.L(id).on, ids.tone)).toBe(false);
-  await panel.getByRole('button', { name: 'Mute Tone' }).click();
+  await expect(mute).toHaveAttribute('aria-pressed', 'true');
+  await page.evaluate(() => (window as any).PM.hist.undo());
+  await page.waitForFunction((id) => (window as any).PM.Audio.inspect().voices.some((v: any) => v.strip === id), ids.tone);
+  expect(await page.evaluate((id) => (window as any).PM.L(id).on, ids.tone)).toBe(true);
+  await expect(mute).toHaveAttribute('aria-pressed', 'false');
+  // And the button toggles it back the same way.
+  await mute.click();
+  await page.waitForFunction((id) => !(window as any).PM.Audio.inspect().voices.some((v: any) => v.strip === id), ids.tone);
+  await mute.click();
   await page.waitForFunction((id) => (window as any).PM.Audio.inspect().voices.some((v: any) => v.strip === id), ids.tone);
 
   // Solo is a listening aid: the other strips go quiet, the project does not change.
   const revision = await page.evaluate(() => (window as any).PM.proj.revision);
   await panel.getByRole('button', { name: 'Solo Interview' }).click();
+  // The solo gain glides (a few ms), so wait for it to settle rather than racing it.
+  await page.waitForFunction((id) => ((window as any).PM.Audio.inspect().strips.find((s: any) => s.id === id)?.solo ?? 0) < 0.5, ids.tone);
   const soloed = await page.evaluate(() => (window as any).PM.Audio.inspect());
   expect(soloed.monitorSolo).toEqual([ids.video]);
-  expect(soloed.strips.find((s: any) => s.id === ids.tone)?.solo ?? 0).toBeLessThan(0.5);
   await expect(panel.locator(`[data-mixer-strip="${ids.tone}"]`)).toHaveClass(/quiet/);
   expect(await page.evaluate(() => (window as any).PM.proj.revision)).toBe(revision);
   expect(await page.evaluate(() => (window as any).PM.proj.layers.some((l: any) => l.solo))).toBe(false);
