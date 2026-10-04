@@ -7,7 +7,7 @@ vi.mock('electron', () => ({}));
 
 import { TRANSCRIPTION_IPC, TRANSCRIPTION_MODEL_MISSING, type TranscribeResult } from '../../shared/transcription';
 import { TranscriptCache } from './cache';
-import { TranscriptionAbortedError, TranscriptionEngine, validateRequest, type WorkerChannel } from './engine';
+import { TranscriptionAbortedError, TranscriptionEngine, transcriptLanguage, validateRequest, type WorkerChannel } from './engine';
 import { registerTranscriptionIpc } from './ipc';
 import type { ModelStore } from './models';
 import type { WorkerRequest, WorkerResponse } from './worker-protocol';
@@ -37,7 +37,7 @@ class FakeWorker implements WorkerChannel {
 }
 
 function fakeModels(ready = true, language = 'auto'): ModelStore {
-  const model = { id: 'parakeet', languages: 'multi' };
+  const model = { id: 'parakeet', languages: 'multi', languageCodes: ['en', 'de', 'fr'] };
   return {
     load: async () => undefined,
     status: () => ({ models: [], activeModelId: ready ? 'parakeet' : null }),
@@ -110,10 +110,10 @@ describe('TranscriptionEngine', () => {
     const other = path.join(dir, 'other.wav');
     await writeFile(other, 'other');
     const first = instance.transcribe({ path: media });
+    await until(() => workers[0]?.posted.length === 1);
     const twin = instance.transcribe({ path: media });
     const second = instance.transcribe({ path: other });
-    await until(() => workers[0]?.posted.length === 1);
-    await flush();
+    for (let tries = 0; tries < 20; tries++) await flush();
     expect(workers[0]!.posted).toHaveLength(1);
     workers[0]!.reply({ type: 'done', id: workers[0]!.last().id, duration: 1, segments });
     await until(() => workers[0]!.posted.length === 2);
@@ -132,12 +132,62 @@ describe('TranscriptionEngine', () => {
     controller.abort();
     expect(workers[0]!.posted.at(-1)).toMatchObject({ type: 'cancel' });
     await expect(pending).rejects.toBeInstanceOf(TranscriptionAbortedError);
+    await until(() => workers[0]!.killed);
     expect(workers[0]!.killed).toBe(true);
     // The next job gets a fresh worker.
     void instance.transcribe({ path: media }).catch(() => undefined);
     await until(() => workers.length === 2);
     expect(workers[1]!.posted).toHaveLength(1);
     instance.dispose();
+  });
+
+  it('shares one job between callers that each pass their own signal', async () => {
+    const { instance, workers } = engine();
+    const a = new AbortController();
+    const b = new AbortController();
+    const progressA: number[] = [];
+    const progressB: number[] = [];
+    const first = instance.transcribe({ path: media }, (value) => progressA.push(value), a.signal);
+    const second = instance.transcribe({ path: media }, (value) => progressB.push(value), b.signal);
+    await until(() => workers[0]?.posted.length === 1);
+    await flush();
+    expect(workers[0]!.posted).toHaveLength(1);
+    workers[0]!.reply({ type: 'progress', id: workers[0]!.last().id, progress: 0.4 });
+    // One caller leaving does not stop the job the other still waits on.
+    a.abort();
+    await expect(first).rejects.toBeInstanceOf(TranscriptionAbortedError);
+    expect(workers[0]!.posted.some((message) => message.type === 'cancel')).toBe(false);
+    workers[0]!.reply({ type: 'done', id: workers[0]!.last().id, duration: 1, segments });
+    expect((await second).segments).toEqual(segments);
+    expect(progressA).toEqual([0.4]);
+    expect(progressB).toEqual([0.4, 1]);
+    instance.dispose();
+  });
+
+  it('cancels a job once every caller has left', async () => {
+    const { instance, workers } = engine();
+    const a = new AbortController();
+    const b = new AbortController();
+    const first = instance.transcribe({ path: media }, undefined, a.signal);
+    const second = instance.transcribe({ path: media }, undefined, b.signal);
+    await until(() => workers[0]?.posted.length === 1);
+    a.abort();
+    b.abort();
+    await expect(first).rejects.toBeInstanceOf(TranscriptionAbortedError);
+    await expect(second).rejects.toBeInstanceOf(TranscriptionAbortedError);
+    expect(workers[0]!.posted.filter((message) => message.type === 'cancel')).toHaveLength(1);
+    instance.dispose();
+  });
+
+  it('honours a cancel that lands while the request is being looked up', async () => {
+    const { instance, workers } = engine();
+    const controller = new AbortController();
+    const pending = instance.transcribe({ path: media }, undefined, controller.signal);
+    // Abort before the engine has reached the queue (it is awaiting the model store and cache).
+    controller.abort();
+    await expect(pending).rejects.toBeInstanceOf(TranscriptionAbortedError);
+    await flush();
+    expect(workers).toHaveLength(0);
   });
 
   it('reports a crashed worker and keeps going', async () => {
@@ -160,6 +210,24 @@ describe('TranscriptionEngine', () => {
     await pending;
     await new Promise((resolve) => setTimeout(resolve, 80));
     expect(workers[0]!.killed).toBe(true);
+  });
+});
+
+describe('transcriptLanguage', () => {
+  const v3 = { languages: 'multi' as const, languageCodes: ['en', 'de', 'fr'] };
+  const v2 = { languages: 'en' as const, languageCodes: ['en'] };
+
+  it('labels only languages the model can produce', () => {
+    // German was chosen while V3 was active; V2 can only ever produce English.
+    expect(transcriptLanguage(v2, undefined, 'de')).toBe('en');
+    expect(transcriptLanguage(v2, 'fr', 'auto')).toBe('en');
+    expect(transcriptLanguage(v3, undefined, 'de')).toBe('de');
+    expect(transcriptLanguage(v3, 'fr', 'de')).toBe('fr');
+    expect(transcriptLanguage(v3, 'fr-CA', 'auto')).toBe('fr-CA');
+    // Outside the model's languages: the hint falls back to the setting, else unlabelled.
+    expect(transcriptLanguage(v3, 'ja', 'de')).toBe('de');
+    expect(transcriptLanguage(v3, 'ja', 'auto')).toBeUndefined();
+    expect(transcriptLanguage(v3, undefined, 'auto')).toBeUndefined();
   });
 });
 

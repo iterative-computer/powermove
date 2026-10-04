@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { TranscribeRequest, Transcript, TranscriptionStatus } from '../../shared/transcription';
 import { TranscriptionModelMissingError, type TranscriptionService } from './service';
 import { transcriptKey, type TranscriptCache } from './cache';
+import type { CatalogModel } from './catalog';
 import type { ModelStore } from './models';
 import type { WorkerRequest, WorkerResponse } from './worker-protocol';
 
@@ -39,16 +40,23 @@ export class TranscriptionAbortedError extends Error {
   constructor() { super('Transcription was cancelled.'); }
 }
 
+type JobResult = { duration: number; segments: Transcript['segments'] };
+
+/** One caller waiting on a job, with its own progress and cancel. */
+interface Subscriber {
+  onProgress?: (progress: number) => void;
+  resolve(value: Transcript): void;
+  reject(error: unknown): void;
+}
+
 interface Job {
   id: string;
   request: TranscribeRequest;
   modelId: string;
   modelDir: string;
-  key: string | null;
-  onProgress?: (progress: number) => void;
-  signal?: AbortSignal;
-  resolve(value: { duration: number; segments: Transcript['segments'] }): void;
-  reject(error: unknown): void;
+  key: string;
+  /** Everyone waiting on this file and span; the job is cancelled when the last one leaves. */
+  subscribers: Set<Subscriber>;
   started: boolean;
   cancelTimer?: ReturnType<typeof setTimeout>;
 }
@@ -87,8 +95,8 @@ export class TranscriptionEngine implements TranscriptionService {
   private readonly queue: Job[] = [];
   private current: Job | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Identical requests in flight share one job. */
-  private readonly inflight = new Map<string, Promise<Transcript>>();
+  /** Queued and running jobs by transcript key, so identical requests share one. */
+  private readonly jobs = new Map<string, Job>();
 
   constructor(private readonly options: EngineOptions) {}
 
@@ -112,59 +120,72 @@ export class TranscriptionEngine implements TranscriptionService {
       if (code === 'ENOENT') throw new Error('The media file could not be found.');
       throw error;
     });
-    const language = request.language
-      ?? (this.options.models.language() !== 'auto' ? this.options.models.language() : active.model.languages === 'en' ? 'en' : undefined);
+    const language = transcriptLanguage(active.model, request.language, this.options.models.language());
     const finish = (transcript: Transcript): Transcript => ({ ...transcript, ...(language ? { language } : {}) });
     const cached = await this.options.cache.get(key);
     if (cached) {
       onProgress?.(1);
       return finish(cached);
     }
-    /* A second caller for the same file and span waits on the first job. */
-    const shared = this.inflight.get(key);
-    if (shared && !signal) return finish(await shared);
-    const run = new Promise<{ duration: number; segments: Transcript['segments'] }>((resolve, reject) => {
-      const job: Job = {
-        id: `t${++sequence}`,
-        request,
-        modelId: active.model.id,
-        modelDir: active.dir,
-        key,
-        ...(onProgress ? { onProgress } : {}),
-        ...(signal ? { signal } : {}),
-        resolve,
-        reject,
-        started: false
-      };
-      signal?.addEventListener('abort', () => this.abort(job), { once: true });
-      this.queue.push(job);
+    return finish(await new Promise<Transcript>((resolve, reject) => {
+      /* The caller may have cancelled while the cache was read: its abort event has already fired. */
+      if (signal?.aborted) {
+        reject(new TranscriptionAbortedError());
+        return;
+      }
+      const subscriber: Subscriber = { resolve, reject, ...(onProgress ? { onProgress } : {}) };
+      /* Identical requests (same file, model and span) share one job; each caller can still cancel its own wait. */
+      let job = this.jobs.get(key);
+      if (!job) {
+        job = {
+          id: `t${++sequence}`,
+          request,
+          modelId: active.model.id,
+          modelDir: active.dir,
+          key,
+          subscribers: new Set(),
+          started: false
+        };
+        this.jobs.set(key, job);
+        this.queue.push(job);
+      }
+      job.subscribers.add(subscriber);
+      const joined = job;
+      signal?.addEventListener('abort', () => this.leave(joined, subscriber), { once: true });
       this.pump();
-    }).then(async ({ duration, segments }) => {
-      const transcript: Transcript = { modelId: active.model.id, duration, segments };
-      await this.options.cache.set(key, transcript).catch((error: unknown) => console.warn('[transcription] cache write failed', error));
-      return transcript;
-    });
-    if (!signal) {
-      this.inflight.set(key, run);
-      void run.catch(() => undefined).finally(() => { if (this.inflight.get(key) === run) this.inflight.delete(key); });
-    }
-    return finish(await run);
+    }));
   }
 
   /** Stops the process and fails anything still queued (app quit). */
   dispose(): void {
-    for (const job of [...this.queue]) job.reject(new TranscriptionAbortedError());
+    const jobs = [...this.queue, ...(this.current ? [this.current] : [])];
     this.queue.length = 0;
-    this.current?.reject(new TranscriptionAbortedError());
     this.current = null;
+    for (const job of jobs) this.settle(job, new TranscriptionAbortedError());
     this.stopWorker();
   }
 
-  private abort(job: Job): void {
+  /** Resolves or fails every caller waiting on the job. */
+  private settle(job: Job, outcome: Transcript | Error): void {
+    if (job.cancelTimer) clearTimeout(job.cancelTimer);
+    if (this.jobs.get(job.key) === job) this.jobs.delete(job.key);
+    const subscribers = [...job.subscribers];
+    job.subscribers.clear();
+    for (const subscriber of subscribers) {
+      if (outcome instanceof Error) subscriber.reject(outcome);
+      else subscriber.resolve(structuredClone(outcome));
+    }
+  }
+
+  /** One caller cancelled. The job itself stops only once nobody is waiting on it. */
+  private leave(job: Job, subscriber: Subscriber): void {
+    if (!job.subscribers.delete(subscriber)) return;
+    subscriber.reject(new TranscriptionAbortedError());
+    if (job.subscribers.size) return;
+    if (this.jobs.get(job.key) === job) this.jobs.delete(job.key);
     const index = this.queue.indexOf(job);
     if (index >= 0) {
       this.queue.splice(index, 1);
-      job.reject(new TranscriptionAbortedError());
       return;
     }
     if (this.current !== job) return;
@@ -173,7 +194,6 @@ export class TranscriptionEngine implements TranscriptionService {
     job.cancelTimer = setTimeout(() => {
       if (this.current !== job) return;
       this.current = null;
-      job.reject(new TranscriptionAbortedError());
       this.stopWorker();
       this.pump();
     }, this.options.cancelGraceMs ?? 3000);
@@ -190,9 +210,7 @@ export class TranscriptionEngine implements TranscriptionService {
       const job = this.current;
       if (job) {
         this.current = null;
-        if (job.cancelTimer) clearTimeout(job.cancelTimer);
-        job.reject(job.signal?.aborted ? new TranscriptionAbortedError()
-          : new Error(`The transcription process stopped unexpectedly${code !== null ? ` (code ${code})` : ''}. Try again.`));
+        this.settle(job, new Error(`The transcription process stopped unexpectedly${code !== null ? ` (code ${code})` : ''}. Try again.`));
         this.pump();
       }
     });
@@ -237,19 +255,38 @@ export class TranscriptionEngine implements TranscriptionService {
     const job = this.current;
     if (!job || job.id !== message.id) return;
     if (message.type === 'progress') {
-      job.onProgress?.(message.progress);
+      for (const subscriber of job.subscribers) subscriber.onProgress?.(message.progress);
       return;
     }
     this.current = null;
     if (job.cancelTimer) clearTimeout(job.cancelTimer);
     if (message.type === 'done') {
-      job.onProgress?.(1);
-      job.resolve({ duration: message.duration, segments: message.segments });
-    } else if (message.type === 'cancelled') {
-      job.reject(new TranscriptionAbortedError());
+      void this.complete(job, { duration: message.duration, segments: message.segments });
     } else {
-      job.reject(new Error(message.message));
+      this.settle(job, message.type === 'cancelled' ? new TranscriptionAbortedError() : new Error(message.message));
     }
     this.pump();
   }
+
+  /** Caches the transcript before answering, so a request arriving meanwhile still joins this job. */
+  private async complete(job: Job, result: JobResult): Promise<void> {
+    const transcript: Transcript = { modelId: job.modelId, duration: result.duration, segments: result.segments };
+    await this.options.cache.set(job.key, transcript).catch((error: unknown) => console.warn('[transcription] cache write failed', error));
+    for (const subscriber of job.subscribers) subscriber.onProgress?.(1);
+    this.settle(job, transcript);
+  }
+}
+
+/**
+ * The language a transcript is labelled with. Only a language the model can
+ * actually produce: an English-only model is always English, a multilingual
+ * one takes the caller's hint or the saved setting when it lists that
+ * language, and otherwise leaves it unset (detected, unlabelled).
+ */
+export function transcriptLanguage(model: Pick<CatalogModel, 'languages' | 'languageCodes'>, requested: string | undefined, setting: string): string | undefined {
+  if (model.languages === 'en') return 'en';
+  const supported = (tag: string | undefined): tag is string => !!tag && tag !== 'auto' && model.languageCodes.includes(tag.split('-')[0]!.toLowerCase());
+  if (supported(requested)) return requested;
+  if (supported(setting)) return setting;
+  return undefined;
 }
