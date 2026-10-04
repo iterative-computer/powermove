@@ -246,7 +246,7 @@ def('duplicate', 'Duplicate layers', '⌘D', () => {
   return pasteLayers(PM, () => selected, { atPlayhead: false });
 }, 'Edit');
 def('delete', 'Delete selection', '⌫', () => deleteSelection(PM), 'Edit');
-def('split', 'Split at playhead', '⌘⇧D', () => splitLayers(PM), 'Edit');
+def('split', 'Split at playhead', '⌘⇧D', () => PM.Captions?.splitAtPlayhead?.() || splitLayers(PM), 'Edit');
 def('separateAudio', 'Separate audio', null, (id?: any) => separateVideoAudio(PM, id), 'Edit', hidden);
 def('selectAll', 'Select all layers', '⌘A', () => PM.selectLayers(PM.proj.layers.map((l: any) => l.id)), 'Edit');
 def('deselect', 'Deselect', '⎋', () => { PM.selectLayers([]); PM.sel.keys = []; }, 'Edit');
@@ -1335,6 +1335,9 @@ function commandView(kernel: ReturnType<typeof ensureKernel>, id: string, put: (
 /** A keyframe deletion never falls through to its owning layer, including a
  * held Delete key after the first keyframe has already been removed. */
 export function deleteSelection(PM: PMRegistry): unknown {
+  // Selected caption cues delete before their layer does.
+  const cues = PM.Captions?.deleteSelectedCues?.();
+  if (cues) return cues;
   const timeline = timelineService(PM);
   if (PM.sel.keys.length || timeline?.keySelectionActive) {
     if (timeline) timeline.keySelectionActive = true;

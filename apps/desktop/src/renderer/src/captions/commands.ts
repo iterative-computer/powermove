@@ -143,8 +143,11 @@ export function editCaptions({ PM, findLayer }: Context, command: any) {
 }
 
 /** Sidecar text for a captions layer, in composition time. */
-export function exportCaptionsText(layer: any, format: CaptionFormat, range?: { from?: number; to?: number }): string {
+export function exportCaptionsText(layer: any, format: CaptionFormat, range?: { from?: number; to?: number; rebase?: number }): string {
   const content = normalizeCaptionsContent(layer?.d);
   const shown = { from: Math.max(range?.from ?? -Infinity, layer.from), to: Math.min(range?.to ?? Infinity, layer.from + layer.dur) };
-  return formatCaptions(format, content.cues, { offset: Number(layer.from) || 0, ...shown, ...(content.language ? { language: content.language } : {}) });
+  return formatCaptions(format, content.cues, {
+    offset: Number(layer.from) || 0, ...shown, rebase: range?.rebase ?? 0,
+    ...(content.language ? { language: content.language } : {})
+  });
 }

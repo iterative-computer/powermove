@@ -97,6 +97,11 @@ describe('operations', () => {
     expect(spans(deleteCues(base, ['b']))).toEqual([['a', 0, 1], ['c', 4, 5]]);
   });
 
+  it('carries word timings when a cue moves as a whole', () => {
+    const timed = [cue('a', 1, 2, 'hi there', { words: [{ text: 'hi', start: 1, end: 1.4 }, { text: 'there', start: 1.5, end: 2 }] })];
+    expect(updateCues(timed, [{ id: 'a', start: 3, end: 4 }])[0]!.words).toEqual([{ text: 'hi', start: 3, end: 3.4 }, { text: 'there', start: 3.5, end: 4 }]);
+  });
+
   it('inserts into gaps without moving existing cues', () => {
     const out = insertCues(base, [{ start: 0.5, end: 2.5, text: 'new' }, { start: 6, end: 7, text: 'tail' }], ids());
     expect(out.map(item => [item.start, item.end, item.text])).toEqual([[0, 1, 'alpha beta'], [1, 2, 'new'], [2, 3, 'gamma'], [4, 5, 'delta'], [6, 7, 'tail']]);

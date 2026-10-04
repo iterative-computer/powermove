@@ -49,6 +49,7 @@ const TIMELINE_STYLES = `
 #tl-time.edit{color:var(--accent)}
 #tl-canvas-wrap{flex:1;position:relative;min-height:0;overflow:hidden}
 #tl-canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+#tl-canvas-wrap .tl-caption-editor{position:absolute;z-index:9;margin:0;padding:3px 7px;border:0;border-radius:var(--r-sm);background:var(--bg-float);color:var(--tx);font-family:inherit;font-size:11.5px;line-height:16px;resize:none;overflow:hidden;outline:0;box-shadow:var(--shadow-float,0 4px 14px rgb(0 0 0 / .18)),inset 0 0 0 1px var(--line);cursor:text}
 ${COMP_TABS_STYLES}
 #tl-comp-tabs{padding-right:168px}
 #tl-mode{position:absolute;z-index:4;top:4px;right:8px;height:20px;display:flex;align-items:stretch;padding:1px;gap:1px;border-radius:var(--r-sm);background:color-mix(in srgb,var(--tx) 6%,var(--bg-panel))}

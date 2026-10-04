@@ -947,6 +947,31 @@ export interface ToolService { tool: string; toolShape: string; setTool(tool: st
 export interface ShaderHooks { syncShaderUniforms(layer: Layer): void }
 
 /**
+ * Captions service, registered by the host as `captions`. The timeline and
+ * any panel read and change the cue selection through it and reach the
+ * caption workflows (import, export, generation, inline editing). Cue edits
+ * themselves are ordinary `add_captions` / `edit_captions` commands.
+ */
+export interface CaptionSelection { layerId: string | null; cues: string[] }
+export interface CaptionsService {
+  selection(): CaptionSelection;
+  /** Select cues of one captions layer (also selects the layer); null clears. */
+  select(layerId: string | null, cues: string[]): void;
+  /** Called after the cue selection changes. Returns an unsubscribe. */
+  onChange(listener: () => void): () => void;
+  /** Ask the surface showing the cue to start editing its text in place. */
+  editCue(layerId: string, cueId: string): void;
+  /** The surface that owns inline editing registers here; returns unregister. */
+  onEditRequest(listener: (request: { layerId: string; cueId: string }) => boolean | void): () => void;
+  /** Import an SRT or WebVTT file as a new captions layer. */
+  importFile(file?: File, options?: { at?: number }): Promise<string | null>;
+  /** Export a captions layer as a sidecar file (asks for options when omitted). */
+  exportFile(layerId?: string, format?: 'srt' | 'vtt'): Promise<boolean>;
+  /** Transcribe audio/video layers into a new captions layer. */
+  generate(layerIds?: string[]): Promise<{ ok: boolean; layerId?: string; message?: string }>;
+}
+
+/**
  * Services is a typed LIFO compatibility registry for extension-owned runtime capabilities. Registering the same name shadows the prior implementation; disposing restores it. Registration itself has no project side effects.
  * The host registers `raster` (RenderAPI['raster']). Capture that service before
  * wrapping it; calling api.render.raster from inside its override would recurse.

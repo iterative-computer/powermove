@@ -1286,6 +1286,11 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
     if (replaceAssetId != null && files.length !== 1) throw new Error('Choose one file or one image sequence to replace this media');
     const mediaFiles: any = [];
     for (const f of files) {
+      // Subtitles become a captions layer, placed where the file was dropped.
+      if (PM.Captions?.isCaptionFile?.(f) && replaceAssetId == null) {
+        await PM.Captions.importFile(f, { at: placement ? placement.at : 0 });
+        continue;
+      }
       if (/\.pmv$/i.test(f.name)) {
         if (replaceAssetId != null) throw new Error('Choose a media file to replace this media');
         await openProjectFile(f);

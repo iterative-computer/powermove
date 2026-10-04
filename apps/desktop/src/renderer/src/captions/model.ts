@@ -375,6 +375,11 @@ export function updateCues(cues: readonly CaptionCue[], patches: readonly CuePat
     let end = patch.end !== undefined ? finite(patch.end, cue.end) : cue.end;
     start = clamp(start, lower, upper - MIN_CUE_DURATION);
     end = clamp(end, start + MIN_CUE_DURATION, Math.max(start + MIN_CUE_DURATION, upper));
+    const shift = Math.max(0, start) - cue.start;
+    // A cue moved as a whole carries its word timings with it.
+    if (cue.words && patch.words === undefined && shift && Math.abs(end - cue.end - shift) < 1e-6) {
+      cue.words = cue.words.map(word => ({ ...word, start: word.start + shift, end: word.end + shift }));
+    }
     cue.start = round(Math.max(0, start));
     cue.end = round(end);
     if (Array.isArray(patch.words)) cue.words = patch.words.map(word => ({ ...word }));
