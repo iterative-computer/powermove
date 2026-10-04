@@ -5,6 +5,7 @@ import { installWhatsNew, whatsNewOptions } from './whats-new';
 import { installTextContextMenu } from './text-context-menu';
 import { installPermissionHandlers } from './permissions';
 import { registerRenderEncoder } from './render-encoder';
+import { registerExportSidecar } from './export-sidecar';
 import {
   app,
   BrowserWindow,
@@ -1013,6 +1014,7 @@ if (!hasSingleInstanceLock) {
     registerLogIpc(ipcMain, ctx);
     registerMediaProxyIpc(ipcMain, mediaProxies, ctx);
     registerRenderEncoder(ipcMain,ctx);
+    registerExportSidecar(ipcMain, ctx);
     // Powermove Cloud account. Boot must never block the window: a broken
     // profile file degrades to "signed out".
     let cloud: CloudService | null = null;

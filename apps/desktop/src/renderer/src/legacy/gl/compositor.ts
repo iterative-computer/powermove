@@ -868,7 +868,9 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) 
   }
   if (L.type === 'captions') {
     /* The cue showing now, at the density it occupies in this output. Between
-       cues there is nothing to draw. */
+       cues there is nothing to draw; an export without burned-in captions
+       draws none. */
+    if (PM.captionsHidden) return null;
     const r = PM.raster(L, continuousRasterScale(scaledWorld(L, T, W, H)), T, (key: string) => GL.texes.get('r:' + key)?.raster);
     if (!r) return null;
     if (r.blank) frameFailed = true;

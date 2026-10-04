@@ -15,6 +15,7 @@ import {
 import { isBytes, isRecord, isString, IpcValidationError } from '../shared/guards';
 import { IPC, LIMITS, PROJECT_ID, type FileSaveResult, type ProjectOpenResult, type CloseDecision, type ProjectSaveBeginResult } from '../shared/ipc';
 import { atomicWrite, type ProjectFiles } from './project-files';
+import { rememberExport } from './export-sidecar';
 import { FileUpload, FILE_CHUNK_BYTES } from './file-upload';
 import { validateSaveMedia, type ProjectSave } from './project-save';
 
@@ -362,6 +363,7 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
         return { ok: true, path: await ctx.projects.save(projectId, stream || data as Uint8Array, selectedPath) };
       }
       await atomicWrite(selectedPath!, stream || data as Uint8Array);
+      if (destination && !destination.directory) rememberExport(event.sender.id, selectedPath!);
       return { ok: true, path: selectedPath! };
     } catch (error: any) {
       return { ok: false, cancelled: false, error: error.message || 'Save failed. Check disk space and folder permissions.' };

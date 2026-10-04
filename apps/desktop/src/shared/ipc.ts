@@ -25,6 +25,8 @@ export const IPC = {
   fileSave: 'file:save',
   exportChoose: 'export:choose',
   exportRelease: 'export:release',
+  /* Captions: an .srt/.vtt beside a video this window just exported. */
+  exportSidecar: 'export:sidecar',
   fileSaveUpload: 'file:save-upload',
   fileSaveChunk: 'file:save-chunk',
   fileSaveAbort: 'file:save-abort',
@@ -263,6 +265,8 @@ export interface FileSaveRequest {
   destinationToken?: string;
 }
 export type FileSaveResult = { ok: true; path: string } | { ok: false; cancelled: boolean; error?: string };
+/** Captions sidecar: `path` is the exported video; `suffix` adds ".en" etc. */
+export interface ExportSidecarRequest { path: string; extension: 'srt' | 'vtt'; suffix?: string; text: string }
 export interface ProjectSaveRequest {
   name: string; projectId: string; saveAs?: boolean; documentBytes: number;
   media: import('./project-incremental').SaveMedia[];
@@ -697,6 +701,8 @@ export interface PowermoveBridge {
     choose(name: string, directory?: boolean): Promise<string | null>;
     release(token: string): Promise<void>;
   };
+  /** Captions: write a subtitle sidecar next to an exported video. */
+  exportSidecar?(request: ExportSidecarRequest): Promise<FileSaveResult>;
   saveFile(req: FileSaveRequest): Promise<FileSaveResult>;
   openProjectFile(): Promise<ProjectOpenResult>;
   /** Opens a project file the user already picked, keeping its path for Save.

@@ -24,6 +24,7 @@ import { createSettingsSection } from '../ui/settings-section';
 import { mountSquircles, SQUIRCLE_SELECTOR } from '../../settings/squircle';
 import { row as settingsRow, select as settingsSelect, numberInput as settingsNumberInput, type SettingsRow } from '../ui/project-settings';
 import { bridge as hostBridge } from '../../kernel/bridge';
+import { captionSidecars } from '../../captions/sidecar';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -265,6 +266,21 @@ X.dialog = () => {
     toggle(() => opts.audio !== false, (v: any) => { opts.audio = v; sync(); }, 'Include audio'));
   mk(rendering, 'alpha', 'Transparent background', 'Keep the background see-through, with straight alpha.',
     toggle(() => !!opts.alpha, (v: any) => { opts.alpha = v; sync(); }, 'Transparent background'));
+  /* Captions: burned in by default, optionally also delivered as a sidecar. */
+  const captionLayers = (p.layers || []).filter((layer: any) => layer.type === 'captions');
+  const captionsSection = createSettingsSection('Captions');
+  if (captionLayers.length) {
+    body.insertBefore(captionsSection.element, presetSection.element);
+    opts.captionsBurn ??= true;
+    opts.captionsSidecar ??= 'none';
+    mk(captionsSection, 'captionsBurn', 'Burn in captions', 'Draw captions into the picture.',
+      toggle(() => opts.captionsBurn !== false, (v: any) => { opts.captionsBurn = v; sync(); }, 'Burn in captions'));
+    mk(captionsSection, 'captionsSidecar', 'Caption file', captionLayers.length > 1
+      ? 'Also write one subtitle file per captions layer beside the video.'
+      : 'Also write a subtitle file beside the video.',
+      select('Caption file', () => opts.captionsSidecar, (v: any) => { opts.captionsSidecar = v; sync(); },
+        [{ v: 'none', label: 'None' }, { v: 'srt', label: 'SubRip (.srt)' }, { v: 'vtt', label: 'WebVTT (.vtt)' }]));
+  }
 
   let presets=PM.store.get('renderPresets',[]);
   let chosenPreset='';const presetOptions=[{v:'',label:'Choose preset'},...presets.map((preset:any)=>({v:preset.id,label:preset.name}))];
@@ -298,12 +314,13 @@ X.dialog = () => {
     const support: any = exportFieldSupport(opts.format);
     for (const key of Object.keys(rows)) {
       if (key === 'format' || key === 'size' || key === 'preset' || key === 'presetSave') continue;
+      if (key === 'captionsBurn' || key === 'captionsSidecar') { rows[key]!.element.hidden = kind !== 'video' && !(key === 'captionsBurn' && kind === 'images'); continue; }
       rows[key]!.element.hidden = !support[key];
     }
     rows.format!.element.hidden = settingsFree;
     sizeRow.element.hidden = !support.scale || !customOpen;
     presetRow.element.hidden = saveRow.element.hidden = settingsFree;
-    for (const section of [output, rendering, presetSection]) {
+    for (const section of [output, rendering, captionsSection, presetSection]) {
       section.element.hidden = settingsFree || ![...section.body.children].some((child) => !(child as HTMLElement).hidden);
     }
     const est: any = plan();
@@ -397,6 +414,8 @@ function progressUI(total: any) {
 }
 
 let destinationToken: string | null = null;
+/** The file the last export wrote, for caption sidecars beside it. */
+let lastOutputPath: string | null = null;
 let nativeToken: string | null = null;
 let sequenceDirectory: any = null;
 
@@ -427,6 +446,8 @@ async function run(opts: any) {
       try { sequenceDirectory = await (window as any).showDirectoryPicker({ mode: 'readwrite' }); }
       catch (error: any) { if (error?.name === 'AbortError') return { cancelled: true }; throw error; }
     }
+    // A clean picture for a separate caption file: the compositor skips captions.
+    PM.captionsHidden = opts.captionsBurn === false;
     return await runPrepared(opts);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -440,6 +461,7 @@ async function run(opts: any) {
       nativeToken = null;
       destinationToken = null;
       sequenceDirectory = null;
+      PM.captionsHidden = false;
       X.busy = false;
     }
   }
@@ -463,6 +485,7 @@ async function deliver(blob: Blob, name: string): Promise<boolean> {
   }
   if (result?.cancelled) return false;
   if (result?.ok === false) throw new Error(result.error || 'Save failed');
+  lastOutputPath = typeof result?.path === 'string' ? result.path : null;
   return true;
 }
 
@@ -518,6 +541,7 @@ async function runPrepared(opts: any) {
   let ui: any;
   const bitrate: any = exportBitrateMbps(opts.quality) * 1e6;
   const t: any = window.performance.now();
+  lastOutputPath = null;
 
   try {
     PM.pause();
@@ -537,7 +561,10 @@ async function runPrepared(opts: any) {
       await exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate });
     }
     if (X.cancel) PM.toast('Export cancelled');
-    else PM.toast(`Export finished in ${((window.performance.now() - t) / 1000).toFixed(1)}s`, 3400);
+    else {
+      const sidecars = await writeCaptionSidecars(opts, t0, t1);
+      PM.toast(`Export finished in ${((window.performance.now() - t) / 1000).toFixed(1)}s${sidecars ? ` · ${sidecars} caption ${sidecars === 1 ? 'file' : 'files'}` : ''}`, 3400);
+    }
     return {cancelled:X.cancel};
   } catch (e: any) {
     window.console.error(e);
@@ -554,6 +581,25 @@ async function runPrepared(opts: any) {
     viewerService(PM)?.layout();
     if (wasPlaying) PM.play();
   }
+}
+
+/** Subtitle files beside the exported video, one per captions layer. */
+async function writeCaptionSidecars(opts: any, t0: number, t1: number): Promise<number> {
+  const format = opts.captionsSidecar;
+  if ((format !== 'srt' && format !== 'vtt') || !lastOutputPath) return 0;
+  const bridge = (hostBridge() as any);
+  const files = captionSidecars(PM.proj, format, { from: t0, to: t1 });
+  if (!bridge?.exportSidecar) {
+    for (const file of files) await PM.download(new Blob([file.text], { type: 'text/plain' }), `${PM.proj.name || 'Captions'}${file.suffix ? `.${file.suffix}` : ''}.${format}`);
+    return files.length;
+  }
+  let written = 0;
+  for (const file of files) {
+    const result = await bridge.exportSidecar({ path: lastOutputPath, extension: format, ...(file.suffix ? { suffix: file.suffix } : {}), text: file.text });
+    if (result?.ok) written++;
+    else PM.toast(`Could not write the caption file: ${result?.error || 'unknown error'}`, 5000, { error: true });
+  }
+  return written;
 }
 
 function renderInto(T: any, W: any, H: any, mblur: any) {
@@ -640,6 +686,7 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
     nativeToken = null;
     if (result.cancelled) X.cancel = true;
     else if (!result.path) throw new Error('Could not save video');
+    lastOutputPath = result.path || null;
   } finally {
     if (preview) { preview.width = 0; preview.height = 0; }
   }
