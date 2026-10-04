@@ -54,7 +54,8 @@ export function checkProject(PM: PMRegistry): CheckReport {
   if (span[1] <= span[0]) { span[0] = 0; span[1] = duration; }
   const layers: any[] = project.layers || [];
   const issues: CheckIssue[] = [];
-  const runtime = PM.assets && typeof PM.assets.get === 'function' && PM.assets.map instanceof Map ? PM.assets : null;
+  // The live editor's media registry (gl/raster); the document engine has none.
+  const runtime = PM.assets && typeof PM.assets.get === 'function' && PM.assets.map instanceof Map && PM.assets.errors instanceof Map ? PM.assets : null;
   const assetName = (id: string) => project.assets?.[id]?.name || id;
 
   /* ── media ───────────────────────────────────────────── */

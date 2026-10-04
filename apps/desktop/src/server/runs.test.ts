@@ -81,6 +81,14 @@ describe('RunOwner', () => {
     expect(responded).toMatchObject([{ callId: 'c2', ok: false, error: expect.stringContaining('needs an open Powermove tab') }]);
   });
 
+  it('resolves media for the agent on a tab when one is open, else on the engine', () => {
+    const engine = fakeClient(10);
+    const tab = fakeClient(11);
+    expect(harness(engine, [tab]).hub.targetFor('__media_source', null as never)).toBe(tab);
+    expect(harness(engine, []).hub.targetFor('__media_source', null as never)).toBe(engine);
+    expect(harness(null, []).hub.targetFor('__media_source', null as never)).toBeNull();
+  });
+
   it('records results and prunes finished runs after the retention window', () => {
     const tab = fakeClient(1);
     const { hub } = harness(null, [tab]);

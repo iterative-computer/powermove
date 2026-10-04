@@ -159,6 +159,47 @@ describe('native Powermove agent tool bridge', () => {
     expect(owner.requests.map(item => item.tool)).toEqual(['validate_effect']);
   });
 
+  it('runs media tools in main on the file the renderer resolves', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'powermove-agent-media-'));
+    temporaryDirectories.push(root);
+    const tone = path.join(root, 'tone.wav');
+    const ffmpegPath = path.resolve(__dirname, '../../../node_modules/ffmpeg-static/ffmpeg');
+    await new Promise<void>((resolve, reject) => spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'sine=f=220:d=1', tone])
+      .once('close', (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg ${code}`))));
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    owner.send = (channel: string, request: AgentToolRequestEvent) => {
+      owner.requests.push(request);
+      queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: owner }, {
+        runId: request.runId, callId: request.callId, ok: true,
+        content: [{ type: 'text', text: JSON.stringify({ path: tone, origin: 'source', asset: { id: 'a1', name: 'tone.wav', kind: 'audio', duration: 1, hasAudio: true, proxy: false } }) }]
+      }));
+    };
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '/resources/agent-tools/mcp-server.mjs', ffmpegPath });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'media-run-1', owner: owner as never, baseRevision: 0 });
+
+    const response = await bridge.callTool(session, 'probe_media', { assetId: 'a1' });
+
+    expect(owner.requests.map((request) => [request.tool, request.arguments])).toEqual([['__media_source', { assetId: 'a1' }]]);
+    expect(response.ok).toBe(true);
+    const result = JSON.parse((response.content[0] as { text: string }).text);
+    expect(result).toMatchObject({ asset: { id: 'a1', name: 'tone.wav' }, format: 'wav', audio: [{ codec: 'pcm_s16le', channels: 1 }] });
+
+    const appSession = await bridge.openSession({ runId: 'media-run-app', owner: owner as never, baseRevision: 0, context: 'app' });
+    await expect(bridge.callTool(appSession, 'transcribe_media', { assetId: 'a1' })).rejects.toThrow('no project attached');
+  });
+
+  it('reports media tools as unavailable without a bundled ffmpeg', async () => {
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '/resources/agent-tools/mcp-server.mjs' });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'media-run-2', owner: owner as never, baseRevision: 0 });
+    await expect(bridge.callTool(session, 'media_waveform', { assetId: 'a1' })).rejects.toThrow(/unavailable/);
+    expect(owner.requests).toHaveLength(0);
+  });
+
   it('routes store tools to the gateway in main, never the renderer', async () => {
     const ipc = new FakeIpcMain();
     const owner = new FakeWebContents(ipc);

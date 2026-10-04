@@ -1272,6 +1272,17 @@ it('accretes adjacent thoughts and seals them before tool and text steps', () =>
   ]);
 });
 
+it('names the clip a media tool works on, replacing the raw tool argument', () => {
+  const { PM, assistant } = spatialHarness();
+  PM.proj = { ...(PM.proj || {}), assets: { a1: { id: 'a1', name: 'interview.mov', kind: 'video' } } };
+  assistant.lifecycle.reduceTrace({ kind: 'tool-start', itemId: 'media-1', toolName: 'transcribe_media', label: 'Transcribe media', detail: 'transcribe_media' });
+  assistant.lifecycle.reduceTrace({ kind: 'tool-start', itemId: 'media-1', toolName: 'transcribe_media', label: 'Transcribe media', detail: 'transcribe_media', subject: { assetId: 'a1', start: 30, end: 70 } });
+  PM.AgentUI.update({ flush: true });
+  const step = PM.AgentUI.state.trace.find((entry: any) => entry.id === 'media-1');
+  assert.equal(step.label, 'Transcribing interview.mov…');
+  assert.equal(step.detail, '0:30.00–1:10.00');
+});
+
 it('concatenates answer fragments without changing their whitespace', () => {
   const { PM, assistant } = spatialHarness();
   assistant.lifecycle.reduceTrace({ kind: 'answer', text: 'Reading ' });

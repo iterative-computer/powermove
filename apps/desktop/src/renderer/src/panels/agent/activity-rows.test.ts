@@ -304,4 +304,23 @@ describe('joinActions', () => {
     expect(joinActions(['a', 'b'])).toBe('a and b');
     expect(joinActions(['a', 'b', 'c'])).toBe('a, b, and c');
   });
+
+  it('shows media tools as specific, live rows that settle when done', () => {
+    const running = activityRows([tool({ id: 'm1', toolName: 'mcp__powermove__transcribe_media', label: 'Transcribing interview.mov…', detail: '0:30.00–1:10.00', status: 'running' })]);
+    expect(at(running).currentLabel).toBe('Transcribing interview.mov…');
+    expect(at(running).details[0]).toMatchObject({ label: 'Transcribing interview.mov…', detail: '0:30.00–1:10.00', family: 'listen' });
+    const settled = activityRows([
+      tool({ id: 'm1', toolName: 'transcribe_media', label: 'Transcribing interview.mov…', status: 'done' }),
+      tool({ id: 'm2', toolName: 'sample_media_frames', label: 'Sampling 12 frames from b-roll.mp4…', status: 'error' }),
+      tool({ id: 'm3', toolName: 'check_project', label: 'Checking the project…', status: 'done' })
+    ]);
+    expect(at(settled).details.map((detail: any) => [detail.label, detail.family])).toEqual([
+      ['Transcribed interview.mov', 'listen'], ['Sample 12 frames from b-roll.mp4', 'watch'], ['Checked the project', 'panel']
+    ]);
+    expect(at(settled).summary).toBe('Transcribed speech, sampled footage, and checked the project');
+    expect(at(settled).detail).toContain('Failed · Sample 12 frames from b-roll.mp4');
+    expect(toolFamily('media_contact_sheet')).toBe('watch');
+    expect(toolAction('media_waveform')).toBe('mapped silences');
+  });
 });
+
