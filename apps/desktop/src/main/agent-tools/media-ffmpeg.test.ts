@@ -174,6 +174,28 @@ describe('contact sheet plans', () => {
     expect(plan.cellHeight).toBe(Math.round(plan.cellWidth / (16 / 9) / 2) * 2);
     expect(planSheet(7, 9 / 16, 7)).toMatchObject({ columns: 7, rows: 1 });
   });
+
+  it('keeps every sheet within the image size providers accept', () => {
+    const bounds = (plan: ReturnType<typeof planSheet>) => ({
+      width: plan.columns * plan.cellWidth + 4 * (plan.columns + 1),
+      height: plan.rows * plan.cellHeight + 4 * (plan.rows + 1)
+    });
+    for (const [count, aspect, columns] of [[48, 16 / 9, 1], [48, 9 / 16, 2], [48, 9 / 16, undefined], [48, 0.25, 1], [30, 4, 10], [1, 9 / 16, 1], [5, 1, 1]] as const) {
+      const plan = planSheet(count, aspect, columns);
+      const size = bounds(plan);
+      expect(size.width).toBeLessThanOrEqual(1600);
+      expect(size.height).toBeLessThanOrEqual(2400);
+      expect(plan.columns * plan.rows).toBeGreaterThanOrEqual(count);
+      expect(Math.min(plan.cellWidth, plan.cellHeight)).toBeGreaterThanOrEqual(90);
+      // Cells keep the footage's aspect (to the even-pixel rounding ffmpeg needs).
+      expect(Math.abs(plan.cellWidth / plan.cellHeight - Math.min(4, Math.max(0.25, aspect)))).toBeLessThan(0.1 * Math.max(1, aspect));
+    }
+    // One column of 48 landscape frames would be 17k px tall; the grid widens instead.
+    expect(planSheet(48, 16 / 9, 1).columns).toBeGreaterThan(1);
+    expect(planSheet(48, 9 / 16, 2).columns).toBeGreaterThan(2);
+    // A single tall frame fits the height too.
+    expect(bounds(planSheet(1, 9 / 16, 1)).height).toBeLessThanOrEqual(2400);
+  });
 });
 
 describe('audio analysis parsing', () => {

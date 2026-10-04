@@ -338,18 +338,45 @@ export function pickInformativeTimes(raw: Uint8Array, start: number, scanFps: nu
 /* ── contact sheets ──────────────────────────────────────── */
 
 export const SHEET_MAX_WIDTH = 1600;
+/** Providers reject images past ~8000 px a side, and a tall sheet stays in the history: keep it well under. */
+export const SHEET_MAX_HEIGHT = 2400;
+const SHEET_GAP = 4;
+/** A cell's short side below this is too small to read; the plan adds columns instead. */
+const SHEET_MIN_CELL_SIDE = 90;
 
 export interface SheetPlan { columns: number; rows: number; cellWidth: number; cellHeight: number }
 
+/** A grid within SHEET_MAX_WIDTH × SHEET_MAX_HEIGHT whose cells keep the footage's aspect. */
 export function planSheet(count: number, aspect: number, columns?: number): SheetPlan {
-  const n = Math.max(1, count);
-  const auto = n <= 3 ? n : n <= 4 ? 2 : n <= 9 ? 3 : n <= 16 ? 4 : n <= 25 ? 5 : n <= 36 ? 6 : 8;
-  const cols = Math.max(1, Math.min(n, Math.trunc(columns ?? auto), 10));
-  const rows = Math.ceil(n / cols);
+  const n = Math.max(1, Math.trunc(count));
   const safeAspect = Number.isFinite(aspect) && aspect > 0 ? Math.min(4, Math.max(0.25, aspect)) : 16 / 9;
-  const cellWidth = Math.max(120, Math.min(640, Math.floor((SHEET_MAX_WIDTH - 4 * (cols + 1)) / cols / 2) * 2));
-  const cellHeight = Math.max(68, Math.round(cellWidth / safeAspect / 2) * 2);
-  return { columns: cols, rows, cellWidth, cellHeight };
+  const auto = n <= 3 ? n : n <= 4 ? 2 : n <= 9 ? 3 : n <= 16 ? 4 : n <= 25 ? 5 : n <= 36 ? 6 : 8;
+  const requested = Math.max(1, Math.min(n, 10, Math.trunc(columns !== undefined && Number.isFinite(columns) ? columns : auto)));
+  const fit = (cols: number): SheetPlan => {
+    const rows = Math.ceil(n / cols);
+    let cellWidth = Math.min(640, Math.floor((SHEET_MAX_WIDTH - SHEET_GAP * (cols + 1)) / cols / 2) * 2);
+    let cellHeight = Math.round(cellWidth / safeAspect / 2) * 2;
+    const maxHeight = Math.floor((SHEET_MAX_HEIGHT - SHEET_GAP * (rows + 1)) / rows / 2) * 2;
+    if (cellHeight > maxHeight) {
+      cellWidth = Math.min(cellWidth, Math.floor(maxHeight * safeAspect / 2) * 2);
+      cellHeight = Math.min(maxHeight, Math.round(cellWidth / safeAspect / 2) * 2);
+    }
+    return { columns: cols, rows, cellWidth: Math.max(2, cellWidth), cellHeight: Math.max(2, cellHeight) };
+  };
+  const side = (plan: SheetPlan) => Math.min(plan.cellWidth, plan.cellHeight);
+  const wanted = fit(requested);
+  if (side(wanted) >= SHEET_MIN_CELL_SIDE) return wanted;
+  // The requested grid would be too tall (or too wide) to read: take the nearest
+  // column count that keeps cells legible, else the one with the largest cells.
+  let best = wanted;
+  for (let cols = 1; cols <= n; cols++) {
+    const plan = fit(cols);
+    const legible = side(plan) >= SHEET_MIN_CELL_SIDE;
+    const bestLegible = side(best) >= SHEET_MIN_CELL_SIDE;
+    if (legible && (!bestLegible || Math.abs(cols - requested) < Math.abs(best.columns - requested))) best = plan;
+    else if (!legible && !bestLegible && side(plan) > side(best)) best = plan;
+  }
+  return best;
 }
 
 export function tileArgs(pattern: string, plan: SheetPlan, output: string): string[] {
