@@ -38,6 +38,7 @@
   let dragging = false;
   let handle: { cancel(): void } | undefined;
   let keyGesture = false;
+  let keyDb = 0;
 
   const db = $derived(gainToDb(gain));
   const ticks = [
@@ -87,11 +88,6 @@
     if (disabled || event.button !== 0 || travel <= 0) return;
     event.preventDefault();
     root?.focus({ preventScroll: true });
-    if (event.detail === 2) {
-      control.once(1);
-      bridge()?.haptic?.alignment();
-      return;
-    }
     const onKnob = !!knob && knob.contains(event.target as Node);
     // One layout read per gesture, never per move.
     const rect = root!.getBoundingClientRect();
@@ -137,6 +133,16 @@
     });
   }
 
+  /* Double-click anywhere on the fader returns to unity. Both clicks of it
+     began and cancelled empty gestures, so only this edit is recorded. */
+  function dblclick(event: MouseEvent): void {
+    if (disabled || event.button !== 0) return;
+    event.preventDefault();
+    control.once(1);
+    place(1);
+    bridge()?.haptic?.alignment();
+  }
+
   const NUDGE: Record<string, number> = { ArrowUp: 0.5, ArrowDown: -0.5, PageUp: 6, PageDown: -6 };
 
   function keydown(event: KeyboardEvent): void {
@@ -145,13 +151,15 @@
     event.preventDefault();
     event.stopPropagation();
     const scaled = event.altKey ? step / 5 : event.shiftKey ? step * 6 : step;
-    const current = Number.isFinite(db) ? db : -100;
-    const next = Math.max(-100, Math.min(12, Math.round((current + scaled) * 10) / 10));
-    // A held or repeated nudge is one Undo step, committed on key release.
+    // A held or repeated nudge is one Undo step, committed on key release. The
+    // gesture keeps its own running level: repeats can outpace the redraw.
     if (!keyGesture) {
       if (!control.begin()) return;
       keyGesture = true;
+      keyDb = Number.isFinite(db) ? db : -100;
     }
+    const next = Math.max(-100, Math.min(12, Math.round((keyDb + scaled) * 10) / 10));
+    keyDb = next;
     const level = dbToGain(next <= -100 ? -Infinity : next);
     place(level);
     control.write(level);
@@ -187,6 +195,7 @@
   aria-valuetext={`${formatDb(db)} dB`}
   aria-disabled={disabled}
   onpointerdown={pointerdown}
+  ondblclick={dblclick}
   onkeydown={keydown}
   onkeyup={keyup}
   onblur={finishKeys}
