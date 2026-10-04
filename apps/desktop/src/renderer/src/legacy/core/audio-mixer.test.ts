@@ -147,6 +147,21 @@ describe('audio mixer routing', () => {
     expect(PM.Audio.envelopePoints(animated, 0, 1, 10).length).toBeGreaterThan(20);
   });
 
+  it('plays a nested video soundtrack from the precomp\'s start, like a nested audio clip', () => {
+    const nested = project();
+    nested.layers = [{ ...nested.layers[2]!, from: 2 }];
+    nested.comps.inner.layers = [
+      { id: 'voice', name: 'Voice', type: 'audio', on: true, from: 0, dur: 10, d: { asset: 'tone', trim: 0, gain: 1, fadeIn: 0, fadeOut: 0 } },
+      { id: 'shot', name: 'Shot', type: 'video', on: true, from: 0, dur: 10, d: { asset: 'tone', trim: 0, embeddedAudio: true } }
+    ] as any;
+    const { PM, ctx } = mixerRegistry(nested);
+    PM.time = 3;
+    PM.Audio.start(3);
+    const offsets = ctx.created.filter((node): node is FakeSource => node instanceof FakeSource).map((source) => source.started?.[1]);
+    // One second into the precomp, both nested clips are one second into their media.
+    expect(offsets).toEqual([1, 1]);
+  });
+
   it('silences a muted precomp and a muted video soundtrack', () => {
     const muted = project();
     muted.layers[1]!.d.audioMuted = true;

@@ -76,6 +76,9 @@ function audioLayers(project: any = PM.proj) {
           ...layer,
           type: 'audio',
           id: `${itemPath}:embedded-audio`,
+          /* In parent time, like a nested audio clip, so a soundtrack inside a
+             precomp that does not start at 0 plays from the right point. */
+          from: naturalStart,
           d: {
             asset: layer.d.asset,
             trim: Math.max(0, finite(evaluatedValue(PM, layer, layer.d.trim, PM.time, 'c.trim'))),
