@@ -127,6 +127,8 @@ export interface CompositionPatch {
   backgroundFill?: JsonValue;
   shutter?: number;
   workArea?: [number, number];
+  /** Linear output level of the composition's audio mix, 0–4 (1 is unity). */
+  audioGain?: number;
 }
 
 export interface SetCompositionCommand {

@@ -270,6 +270,13 @@ function normalizeAudioContent(raw: unknown): AudioContent {
   };
 }
 
+/** Video soundtracks and nested compositions carry an optional, animatable level. */
+function audioLevel(source: UnknownRecord): { audioGain?: number | Channel } {
+  if (source.audioGain === undefined) return {};
+  if (isProperty(source.audioGain)) return { audioGain: sanitizeLooseChannel(source.audioGain, 1) };
+  return { audioGain: clamp(finite(source.audioGain, 1), 0, 4) };
+}
+
 const OMIT_JSON_VALUE = Symbol('omit-json-value');
 
 function sanitizeJsonValue(
@@ -391,6 +398,7 @@ function staticContentFor(type: LayerType, raw: unknown, comp: Pick<Comp, 'w' | 
         trim: finite(source.trim), speed: finite(source.speed, 1),
         embeddedAudio: source.embeddedAudio === true,
         audioMuted: source.audioMuted === true,
+        ...audioLevel(source),
         w: finite(source.w, 1920), h: finite(source.h, 1080)
       };
     case 'audio':
@@ -426,6 +434,8 @@ function staticContentFor(type: LayerType, raw: unknown, comp: Pick<Comp, 'w' | 
       return {
         ...source,
         comp: typeof source.comp === 'string' && source.comp ? source.comp : null,
+        ...audioLevel(source),
+        ...(source.audioMuted === true ? { audioMuted: true } : {}),
         w: finite(source.w, comp.w), h: finite(source.h, comp.h)
       };
     case 'null':
@@ -605,7 +615,8 @@ function sanitizeComp(raw: unknown, id: string, root: Pick<Project, 'w' | 'h' | 
     revision: finite(raw.revision),
     edits: sanitizeEdits(raw.edits),
     created: finite(raw.created, Date.now()),
-    shutter: raw.shutter == null ? 0.5 : finite(raw.shutter, 0.5)
+    shutter: raw.shutter == null ? 0.5 : finite(raw.shutter, 0.5),
+    ...(raw.audioGain != null ? { audioGain: clamp(finite(raw.audioGain, 1), 0, 4) } : {})
   } as Comp;
   if (isRecord(raw.comps)) {
     for (const [childId, childRaw] of Object.entries(raw.comps)) {
@@ -660,7 +671,8 @@ export function sanitizeProject(raw: unknown): Project {
     revision: finite(source.revision),
     edits: sanitizeEdits(source.edits),
     created: finite(source.created, Date.now()),
-    shutter: source.shutter == null ? 0.5 : finite(source.shutter, 0.5)
+    shutter: source.shutter == null ? 0.5 : finite(source.shutter, 0.5),
+    ...(source.audioGain != null ? { audioGain: clamp(finite(source.audioGain, 1), 0, 4) } : {})
   };
   if (isRecord(source.comps)) {
     for (const [id, value] of Object.entries(source.comps)) {

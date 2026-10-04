@@ -16,7 +16,7 @@ import type { PMRegistry } from '../registry';
 import type { Patch, PathPart } from '../../../../shared/patch';
 
 /** Fields that belong to a composition rather than to the project. */
-export const COMP_FIELDS = ['w', 'h', 'fps', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter'] as const;
+export const COMP_FIELDS = ['w', 'h', 'fps', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter', 'audioGain'] as const;
 /** Top-level project key → key on a stored composition. */
 const ROOT_TO_COMP: Record<string, string> = {
   compId: 'id', compName: 'name',

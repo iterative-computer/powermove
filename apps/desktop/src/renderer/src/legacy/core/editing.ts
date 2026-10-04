@@ -418,7 +418,7 @@ function setLayer(command: any) {
 
 function setComposition(command: any) {
   const patch: any = safePatch(command.patch, 'composition patch');
-  const allowed: any = new Set(['name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill', 'shutter', 'workArea']);
+  const allowed: any = new Set(['name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill', 'shutter', 'workArea', 'audioGain']);
   for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new Error(`Composition field “${key}” is not editable`);
   const p: any = PM.proj;
   if (patch.name != null) p.name = String(patch.name).trim() || p.name;
@@ -438,6 +438,7 @@ function setComposition(command: any) {
     p.bg = p.backgroundFill.stops[0].color;
   }
   if (patch.shutter != null) p.shutter = PM.clamp(finite(patch.shutter, 'shutter'), 0, 2);
+  if (patch.audioGain != null) p.audioGain = PM.clamp(finite(patch.audioGain, 'audio gain'), 0, 4);
   if (patch.workArea != null) {
     if (!Array.isArray(patch.workArea) || patch.workArea.length !== 2) throw new Error('workArea must contain start and end');
     const start: any = Math.max(0, finite(patch.workArea[0], 'work area start'));

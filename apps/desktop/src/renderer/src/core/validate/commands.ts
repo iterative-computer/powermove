@@ -64,7 +64,7 @@ const LAYER_FIELDS = new Set([
 ]);
 const COMPOSITION_FIELDS = new Set([
   'name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill',
-  'shutter', 'workArea'
+  'shutter', 'workArea', 'audioGain'
 ]);
 const EFFECT_FIELDS = new Set(['enabled', 'open', 'index']);
 const EASING_PRESETS = new Set([
@@ -421,7 +421,7 @@ function parseCompositionPatch(value: unknown): CompositionPatch | ValidationErr
     if (!COMPOSITION_FIELDS.has(key)) return invalid(`unknown composition field "${key}"`, 'patch');
   }
   const out: CompositionPatch = {};
-  for (const key of ['width', 'height', 'fps', 'duration', 'shutter'] as const) {
+  for (const key of ['width', 'height', 'fps', 'duration', 'shutter', 'audioGain'] as const) {
     if (patch[key] == null) continue;
     const number = finite(patch[key], `patch.${key}`);
     if (number instanceof ValidationError) return number;
