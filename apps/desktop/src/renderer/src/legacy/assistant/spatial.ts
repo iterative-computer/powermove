@@ -1712,6 +1712,17 @@ function archiveTrace(preserveText = false, session: any = activeSession(), stee
   });
 }
 
+/* All public reply text belongs in durable conversation history. Result
+   controls disappear on the next send and are not saved with the thread. */
+function archiveAutonomousReply(session: any, summary: string, notes: string[] = []): boolean {
+  sealTrace(session);
+  const spoke = session.trace.some((step: any) => step.kind === 'text' && String(step.text || '').trim());
+  archiveTrace(spoke, session);
+  const text = [...(spoke ? [] : [summary]), ...notes].filter(part => part.trim()).join('\n\n');
+  if (text) session.conversation.push({ entering: true, role: 'assistant', text });
+  return spoke;
+}
+
 function normalizeAutonomousResult(raw: any, rawExtensions: any) {
   const text: any = (value: any) => String(value || '').replace(/\s+/g, ' ').trim();
   const prose: any = (value: any) => String(value || '')
@@ -1855,7 +1866,7 @@ async function runAppRequest({ session, request, token, controller, threadId, or
     extensionChangeSetId: typeof raw === 'object' ? raw?.extensionChangeSetId : undefined,
     projectId: APP_AGENT_PROJECT_ID, applied: [], changed: false,
     artifacts: result.artifacts, externalActions: result.externalActions, extensions: result.extensions,
-    review: { message: result.notes.join(' ') || 'The app agent run completed.' },
+    review: { message: '' }, // Reply notes are saved in the conversation below.
     frames: { state: {}, times: [], images: [] }, reviewError: '',
   };
   const runs = [...priorRuns, run];
@@ -1893,12 +1904,12 @@ async function runAppRequest({ session, request, token, controller, threadId, or
     return;
   }
   finishSteps(session);
-  archiveTrace(false, session);
   const outcome = failures.length
     ? `Sandbox verification did not pass: ${failures.join(' ').slice(0, 2500)}`
     : verified.length ? `Sandbox check passed for ${verified.join(', ')}.`
       : 'No sandbox verification was required for this result.';
-  session.conversation.push({ entering: true, role: 'assistant', text: `${result.summary}\n\n${outcome}` });
+  const spoke = archiveAutonomousReply(session, `${result.summary}\n\n${outcome}`, result.notes);
+  if (spoke && (failures.length || verified.length)) session.conversation.push({ entering: true, role: 'assistant', text: outcome });
   const allChanges = new Map<string, any>();
   for (const entry of runs) for (const change of entry.extensions) {
     const previous = allChanges.get(change.id);
@@ -2156,7 +2167,7 @@ The user edited the project during the autonomous run. Return kind=scene and a c
       projectId: PM.proj.id,
       applied: appliedCommands, changed, artifacts: result.artifacts,
       externalActions: result.externalActions, extensions: result.extensions,
-      review: { message: result.notes.join('\n\n') || (changed ? 'The editable Powermove result is ready to review.' : 'The agent run completed without changing Powermove source.') },
+      review: { message: '' }, // Reply notes are saved in the conversation below.
       frames: finalFrames, reviewError,
     };
     const runs = [...priorRuns, run];
@@ -2211,9 +2222,7 @@ Fix failures in the isolated extension staging directory and return the changed 
     if (token !== session.requestToken) return;
     run.reviewError = runs.map(entry => entry.reviewError).filter(Boolean).join(' ');
     finishSteps(session);
-    const spoke: any = session.trace.some((step: any) => step.kind === 'text' && String(step.text || '').trim());
-    archiveTrace(spoke, session);
-    if (!spoke) session.conversation.push({ entering: true, role: 'assistant', text: result.summary });
+    archiveAutonomousReply(session, result.summary, result.notes);
     // Refresh earlier contributions' health after the last verification, without
     // reloading them (which would invalidate the evidence just gathered).
     for (const change of allChanges.values()) {
@@ -2318,9 +2327,8 @@ function resumeHostRun(remote: any, session: any, record: any): void {
         if (Array.isArray(decoded.notes)) notes = decoded.notes.filter((note: any) => typeof note === 'string');
       }
     } catch { /* editor-mode replies are prose */ }
-    const spoke: any = session.trace.some((step: any) => step.kind === 'text' && String(step.text || '').trim());
-    archiveTrace(spoke, session);
-    if (!spoke) session.conversation.push({ entering: true, role: 'assistant', text: summary });
+    archiveAutonomousReply(session, summary, notes.length ? notes : raw.liveEditsApplied
+      ? ['The result is in the project. It was made on the host, so Undo here does not cover it.'] : []);
     // The host's engine made the edits and they arrived through project sync,
     // so this tab holds no checkpoint for them: extension changes stay
     // reversible through the host, project edits are not undoable from here.
@@ -2328,7 +2336,7 @@ function resumeHostRun(remote: any, session: any, record: any): void {
       autonomous: true, summary, checkpoint: null, projectId: PM.proj.id, applied: [], changed: false,
       extensionChangeSetId: raw.extensionChangeSetId,
       artifacts: [], externalActions: [], extensions: raw.extensions || [], undoRuns: [],
-      review: { message: notes.join('\n\n') || (raw.liveEditsApplied ? 'The result is in the project. It was made on the host, so Undo here does not cover it.' : 'The agent run completed.') },
+      review: { message: '' }, // Reply notes are saved in the conversation above.
       frames: { state: {}, times: [], images: [] }, reviewError: '',
     };
     session.revision = Number(PM.proj?.revision || 0);
