@@ -12,7 +12,9 @@ import {
 import type { UserMcpServers } from '../agent-tools/user-mcp';
 import { AGENT_SHELL_NETWORK_INSTRUCTIONS } from '../codex/instructions';
 
-const PROJECT_TOOLS = 'Read,Glob,Grep,Write,Edit,Bash,WebSearch,WebFetch,Skill,Agent,Task';
+// Write and Edit stay off the allow list: acceptEdits accepts them inside the
+// workspace and --add-dir folders, and an allowed tool would write anywhere.
+const PROJECT_TOOLS = 'Read,Glob,Grep,Bash,WebSearch,WebFetch,Skill,Agent,Task';
 const EDITOR_TOOLS = 'Read,Glob,Grep,Skill,Agent,Task';
 
 const STRICT_SANDBOX_SETTINGS = {
@@ -37,6 +39,13 @@ const PROJECT_SANDBOX_SETTINGS = {
 } satisfies SandboxSettings;
 const PROJECT_SANDBOX = JSON.stringify({ sandbox: PROJECT_SANDBOX_SETTINGS });
 
+// A run that asks before leaving its sandbox lets Bash retry a blocked command
+// with dangerouslyDisableSandbox. Sandboxed Bash still runs without a prompt
+// (autoAllowBashIfSandboxed), but Bash must stay off the allow list: an
+// allowed tool would run the unsandboxed retry without asking anyone.
+const ASKING_SANDBOX = JSON.stringify({ sandbox: { ...PROJECT_SANDBOX_SETTINGS, allowUnsandboxedCommands: true } satisfies SandboxSettings });
+const ASKING_INSTRUCTIONS = 'APPROVALS\nThe sandbox confines writes to this workspace. When a command genuinely needs to run outside it, such as installing a font or writing to the user\'s home folder, retry that one command with dangerouslyDisableSandbox: true and a clear description. Powermove asks the user to approve it; if they decline, do not retry it.';
+
 const PROJECT_NETWORK_INSTRUCTIONS = `SHELL NETWORK\n${AGENT_SHELL_NETWORK_INSTRUCTIONS}`;
 
 interface ClaudeArgvOptions {
@@ -51,6 +60,8 @@ interface ClaudeArgvOptions {
   instructions?: string;
   nativeTools?: NativeMcpServerConfig;
   externalMcpServers?: UserMcpServers;
+  /** Project access only: ask the person before leaving the sandbox. */
+  askOutsideSandbox?: boolean;
 }
 
 function promptWithImages(prompt: string, imagePaths: readonly string[]): string {
@@ -82,9 +93,11 @@ export function buildClaudeArgv(options: ClaudeArgvOptions): string[] {
   } });
   const externalTools = Object.keys(external).map(name => `mcp__${name}__*`);
   const withExternal = (tools: string): string => [tools, ...externalTools].join(',');
+  const asking = options.access === 'project' && options.askOutsideSandbox === true;
+  const baseProjectTools = asking ? PROJECT_TOOLS.split(',').filter(tool => tool !== 'Bash').join(',') : PROJECT_TOOLS;
   const projectTools = options.nativeTools
-    ? `${PROJECT_TOOLS},${POWERMOVE_MCP_TOOL_NAMES.join(',')}`
-    : PROJECT_TOOLS;
+    ? `${baseProjectTools},${POWERMOVE_MCP_TOOL_NAMES.join(',')}`
+    : baseProjectTools;
   const editorTools = options.nativeTools
     ? `${EDITOR_TOOLS},${POWERMOVE_LIVE_INSPECTION_MCP_TOOL_NAMES.join(',')}`
     : EDITOR_TOOLS;
@@ -113,7 +126,7 @@ export function buildClaudeArgv(options: ClaudeArgvOptions): string[] {
       // it (and anything unlisted) to the permission prompt, which the runner
       // answers: questions go to the person, everything else is denied.
       '--permission-mode', options.access === 'editor' ? 'default' : 'acceptEdits',
-      '--settings', options.access === 'editor' ? EDITOR_SANDBOX : PROJECT_SANDBOX,
+      '--settings', options.access === 'editor' ? EDITOR_SANDBOX : asking ? ASKING_SANDBOX : PROJECT_SANDBOX,
       '--tools', 'default',
       '--allowedTools', withExternal(options.access === 'editor' ? editorTools : projectTools)
     );
@@ -121,7 +134,9 @@ export function buildClaudeArgv(options: ClaudeArgvOptions): string[] {
   }
 
   if (options.extensionsDir) argv.push('--add-dir', options.extensionsDir);
-  const network = options.access === 'project' ? `\n\n${PROJECT_NETWORK_INSTRUCTIONS}` : '';
+  const network = options.access === 'project'
+    ? `\n\n${PROJECT_NETWORK_INSTRUCTIONS}${asking ? `\n\n${ASKING_INSTRUCTIONS}` : ''}`
+    : '';
   const systemPrompt = options.instructions
     ? `${options.instructions}${network}\n\nReturn the final answer only through the requested JSON schema.`
     : `${AGENT_TESTING_INSTRUCTIONS}\n\nUse the supplied reference files as read-only context. Return only a value matching the requested JSON schema.`;

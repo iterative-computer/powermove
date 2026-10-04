@@ -32,6 +32,7 @@ import { ClaudeEventParser } from './events';
 import { isolatedClaudeEnvironment, prepareIsolatedClaudeHome } from './isolation';
 import type { NativeMcpServerConfig } from '../agent-tools/spec';
 import { imageExtension } from '../image-extension';
+import type { ApprovalRequest, RequestApproval } from '../agent-approvals';
 
 const DEFAULT_TIMEOUT_MS = 3_600_000;
 const MAX_DIAGNOSTIC_BYTES = 2 * 1024 * 1024;
@@ -39,6 +40,22 @@ const QUESTION_LIMITS = { questions: 6, options: 8, header: 80, question: 1_000,
 
 function clip(value: unknown, limit: number): string {
   return typeof value === 'string' ? value.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim().slice(0, limit) : '';
+}
+
+/** A Claude permission prompt, as the person will read it. */
+function describePermission(request: Record<string, unknown>, input: Record<string, unknown>): ApprovalRequest {
+  const tool = isString(request.display_name, 80) ? request.display_name : isString(request.tool_name, 80) ? request.tool_name : 'a tool';
+  if (request.tool_name === 'Bash' && isString(input.command)) {
+    const reason = clip(input.description, 600) || undefined;
+    return {
+      title: input.dangerouslyDisableSandbox === true ? 'Run a command outside the project sandbox?' : 'Run this command?',
+      detail: input.command,
+      ...(reason ? { reason } : {})
+    };
+  }
+  const file = isString(input.file_path) ? input.file_path : isString(input.notebook_path) ? input.notebook_path : null;
+  if (file) return { title: `Allow ${tool} to change a file outside the project?`, detail: file };
+  return { title: `Allow ${tool}?`, detail: JSON.stringify(input, null, 2) };
 }
 
 /** AskUserQuestion input, bounded for the renderer. Claude always accepts a typed "Other". */
@@ -79,6 +96,8 @@ export interface ClaudeRunOptions {
   consumeConsentToken?: (token: string) => boolean;
   nativeTools?: NativeMcpServerConfig;
   externalMcpServers?: UserMcpServers;
+  /** Asks the person before a Project run steps outside its sandbox. */
+  requestApproval?: RequestApproval;
 }
 
 /** An AskUserQuestion call held open on the CLI's permission prompt. */
@@ -94,6 +113,9 @@ interface ActiveRun {
   child: ChildProcess | null;
   /** Held questions by tool_use id (the trace item id). */
   questions: Map<string, HeldQuestion>;
+  /** Permission prompts waiting on the person, by control request id. */
+  approvals: Map<string, AbortController>;
+  requestApproval: RequestApproval | null;
   layout: AgentWorkspace | null;
   killTimer: NodeJS.Timeout | null;
   userData: string;
@@ -177,7 +199,10 @@ export class ClaudeRunner {
     }
 
     const state: ActiveRun = {
-      request: req, child: null, questions: new Map(), layout: null, killTimer: null,
+      request: req, child: null, questions: new Map(), approvals: new Map(),
+      // Only Project runs ask; Edit runs and Full access never prompt.
+      requestApproval: req.mode === 'autonomous' && req.access === 'project' ? options.requestApproval ?? null : null,
+      layout: null, killTimer: null,
       userData: options.userData, sessionWrite: Promise.resolve()
     };
     this.active.set(req.id, state);
@@ -245,7 +270,8 @@ export class ClaudeRunner {
             extensionsDir: layout.extensionsDir
           }),
           nativeTools: options.nativeTools,
-          externalMcpServers
+          externalMcpServers,
+          askOutsideSandbox: state.requestApproval !== null
         }), claudeUserMessage(prompt, layout.imagePaths), layout, options);
         if (this.cancelled.has(req.id)) throw new Error('The Claude run was cancelled.');
         return result;
@@ -360,12 +386,15 @@ export class ClaudeRunner {
   }
 
   /* The stdio permission prompt. AskUserQuestion becomes a question card and
-     waits for the person; every other prompt is denied, as --print would
-     without a prompt tool, so this channel never widens a run's access. */
+     waits for the person. In a Project run that asks before leaving its
+     sandbox, every other prompt (a command retried outside the sandbox, a
+     write outside the workspace) becomes an approval card; otherwise it is
+     denied, as --print would without a prompt tool. */
   private control(state: ActiveRun, event: Record<string, unknown>, onTrace?: (step: CodexTraceEvent) => void): void {
     const requestId = isString(event.request_id, 200) ? event.request_id : null;
     if (!requestId) return;
     if (event.type === 'control_cancel_request') {
+      state.approvals.get(requestId)?.abort();
       for (const [itemId, held] of state.questions) {
         if (held.controlId !== requestId) continue;
         state.questions.delete(itemId);
@@ -390,6 +419,18 @@ export class ClaudeRunner {
         onTrace({ kind: 'question', itemId, questions, transport: 'reply', blocking: true });
         return;
       }
+    }
+    if (state.requestApproval && !state.approvals.has(requestId)) {
+      const controller = new AbortController();
+      state.approvals.set(requestId, controller);
+      void state.requestApproval(describePermission(request, input), controller.signal).then(decision => {
+        state.approvals.delete(requestId);
+        if (controller.signal.aborted) return;
+        this.respondControl(state, requestId, decision.allowed
+          ? { behavior: 'allow', updatedInput: input }
+          : { behavior: 'deny', message: decision.message });
+      });
+      return;
     }
     this.respondControl(state, requestId, {
       behavior: 'deny',
@@ -461,6 +502,8 @@ export class ClaudeRunner {
         parser.finish();
         // Held questions die with the process; the renderer closes their cards.
         state.questions.clear();
+        for (const approval of state.approvals.values()) approval.abort();
+        state.approvals.clear();
         void state.sessionWrite.then(() => resolve({
           code,
           signal,

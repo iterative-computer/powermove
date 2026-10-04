@@ -4,11 +4,20 @@
 // the same fade, scale and slide from the trigger's edge. It may carry a
 // header above its rows, such as who you are signed in as. Rows that carry
 // `checked` are a radio group and show the listbox's check on the chosen one.
-// A pick blinks its row before the menu closes, as the listbox's does.
+// A pick blinks its row before the menu closes, as the listbox's does. A row
+// may lead with an icon and carry a line of detail under its label; a
+// `warning` row tints both.
 
 import { blink } from './menu-blink';
 
-export type PopoverMenuItem = '-' | { label: string; run: () => void; checked?: boolean };
+export type PopoverMenuItem = '-' | {
+  label: string;
+  run: () => void;
+  checked?: boolean;
+  detail?: string;
+  icon?: Element;
+  tone?: 'warning';
+};
 
 export interface PopoverMenuRequest {
   anchor: HTMLElement;
@@ -19,6 +28,8 @@ export interface PopoverMenuRequest {
   header?: HTMLElement;
   /** Which edge of the anchor to open from, when there is room. */
   side?: 'top' | 'bottom';
+  /** Line the menu up with the anchor's left (default) or right edge. */
+  align?: 'start' | 'end';
   onClose?: () => void;
 }
 
@@ -78,7 +89,21 @@ export function openPopoverMenu(req: PopoverMenuRequest): PopoverMenuHandle {
     const label = document.createElement('span');
     label.className = 'pm-menu-label';
     label.textContent = entry.label;
-    item.append(label);
+    if (entry.icon) {
+      entry.icon.classList.add('pm-menu-icon');
+      item.append(entry.icon);
+    }
+    if (entry.detail) {
+      item.classList.add('has-detail');
+      const text = document.createElement('span');
+      text.className = 'pm-menu-text';
+      const detail = document.createElement('span');
+      detail.className = 'pm-menu-detail';
+      detail.textContent = entry.detail;
+      text.append(label, detail);
+      item.append(text);
+    } else item.append(label);
+    if (entry.tone) item.dataset.tone = entry.tone;
     if (entry.checked !== undefined) {
       item.setAttribute('aria-checked', String(entry.checked));
       const check = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -141,7 +166,8 @@ export function openPopoverMenu(req: PopoverMenuRequest): PopoverMenuHandle {
     const side = (req.side ?? 'bottom') === 'top' ? (fitsTop || !fitsBottom ? 'top' : 'bottom') : (fitsBottom || !fitsTop ? 'bottom' : 'top');
     el.dataset.side = side;
     const top = side === 'bottom' ? a.bottom + GAP : a.top - GAP - h;
-    const left = Math.max(EDGE, Math.min(a.left, vw - el.offsetWidth - EDGE));
+    const wanted = req.align === 'end' ? a.right - el.offsetWidth : a.left;
+    const left = Math.max(EDGE, Math.min(wanted, vw - el.offsetWidth - EDGE));
     el.style.top = `${Math.round(Math.max(EDGE, top))}px`;
     el.style.left = `${Math.round(left)}px`;
   }

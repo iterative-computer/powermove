@@ -28,6 +28,7 @@ function baseSnapshot(overrides: Record<string, any> = {}): AgentSnapshot {
     provider: 'chatgpt',
     reasoningEffort: 'high',
     accessMode: 'editor',
+    permission: 'editor',
     composerDraft: '',
     pendingEntering: false,
     models: [],

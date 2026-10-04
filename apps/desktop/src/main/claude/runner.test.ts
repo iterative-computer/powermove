@@ -19,6 +19,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { CodexRunRequest } from '../../shared/ipc';
 import { ClaudeRunner } from './runner';
+import type { RequestApproval } from '../agent-approvals';
 
 function request(overrides: Partial<CodexRunRequest> = {}): CodexRunRequest {
   return {
@@ -249,6 +250,60 @@ describe('Claude runner', () => {
     child.stdout.end();
     child.emit('close', 0, null);
     await expect(result).resolves.toEqual({ ok: true, text: '{"message":"done"}', access: 'editor' });
+  });
+
+  it('asks the person before a Project run leaves its sandbox, and passes their answer to the CLI', async () => {
+    const userData = await mkdtemp(path.join(tmpdir(), 'claude-approval-'));
+    try {
+      const runner = new ClaudeRunner();
+      const child = fakeChild();
+      const line = (value: unknown) => child.stdout.write(`${JSON.stringify(value)}\n`);
+      const argvs: string[][] = [];
+      const requestApproval = vi.fn<RequestApproval>()
+        .mockResolvedValueOnce({ allowed: true })
+        .mockResolvedValueOnce({ allowed: false, message: 'The user declined.' });
+      const result = runner.run(request({ id: 'claude-approval', mode: 'autonomous', access: 'project', projectJSON: '{}', threadId: 'approval' }), {
+        userData, extensionsDir: path.join(userData, 'extensions'), apiPackFiles: async () => [], binary: '/fake/claude',
+        requestApproval, spawnProcess: (_binary, args) => { argvs.push([...args]); return child as never; }
+      });
+      await vi.waitFor(() => expect(argvs).toHaveLength(1));
+      expect(argvs[0]![argvs[0]!.indexOf('--allowedTools') + 1]!.split(',')).not.toContain('Bash');
+      const bash = { command: 'cp DMSans.ttf ~/Library/Fonts/', description: 'Install DM Sans', dangerouslyDisableSandbox: true };
+      line({ type: 'control_request', request_id: 'perm-bash', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: bash, tool_use_id: 'toolu_b' } });
+      line({ type: 'control_request', request_id: 'perm-write', request: { subtype: 'can_use_tool', tool_name: 'Write', input: { file_path: '/Users/me/notes.txt', content: 'x' }, tool_use_id: 'toolu_w' } });
+      const responses = () => child.written().split('\n').filter(Boolean).map((text) => JSON.parse(text)).filter((message) => message.type === 'control_response');
+      await vi.waitFor(() => expect(responses()).toHaveLength(2));
+      expect(requestApproval.mock.calls.map(([asked]) => asked)).toEqual([
+        { title: 'Run a command outside the project sandbox?', detail: bash.command, reason: 'Install DM Sans' },
+        { title: 'Allow Write to change a file outside the project?', detail: '/Users/me/notes.txt' }
+      ]);
+      expect(responses()).toEqual([
+        { type: 'control_response', response: { subtype: 'success', request_id: 'perm-bash', response: { behavior: 'allow', updatedInput: bash } } },
+        { type: 'control_response', response: { subtype: 'success', request_id: 'perm-write', response: { behavior: 'deny', message: 'The user declined.' } } }
+      ]);
+      line({ type: 'result', subtype: 'success', is_error: false, result: '{}', structured_output: { summary: 'Done', commands: [], artifacts: [], externalActions: [], notes: [] } });
+      child.stdout.end();
+      child.emit('close', 0, null);
+      await expect(result).resolves.toMatchObject({ ok: true });
+    } finally { await rm(userData, { recursive: true, force: true }); }
+  });
+
+  it('never asks from an editor run, even when approvals are available', async () => {
+    const runner = new ClaudeRunner();
+    const child = fakeChild();
+    const requestApproval = vi.fn<RequestApproval>();
+    const result = runner.run(request({ id: 'claude-editor-approval' }), {
+      userData: '/tmp/powermove-claude-editor-approval', extensionsDir: '/tmp/powermove-extensions', apiPackFiles: async () => [],
+      binary: '/bin/claude', spawnProcess: () => child as never, requestApproval
+    });
+    await vi.waitFor(() => expect(child.written()).toContain('Return a greeting'));
+    child.stdout.write(`${JSON.stringify({ type: 'control_request', request_id: 'perm-bash', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'ls' }, tool_use_id: 'toolu_b' } })}\n`);
+    await vi.waitFor(() => expect(child.written()).toContain('Powermove does not allow Bash in this run.'));
+    expect(requestApproval).not.toHaveBeenCalled();
+    child.stdout.write(`${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: '{"message":"ok"}', structured_output: { message: 'ok' } })}\n`);
+    child.stdout.end();
+    child.emit('close', 0, null);
+    await expect(result).resolves.toMatchObject({ ok: true });
   });
 
   it('declines a skipped question and closes one the CLI withdraws', async () => {
