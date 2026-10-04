@@ -115,6 +115,8 @@ const property: any = (layer: any, path: any) => {
   const channel: any = channelPath(path);
   if (channel.startsWith('c.')) {
     const key = channel.slice(2);
+    /* Optional levels are unity until first set, so they can be keyframed from absent. */
+    if (canAnimateContent(layer, key) && layer.d[key] == null && key === 'audioGain') layer.d[key] = 1;
     if (canAnimateContent(layer, key) && !isProperty(layer.d[key]) && layer.d[key] != null) layer.d[key] = PM.P(layer.d[key]);
   }
   if (channel === 'l.blend' || channel === 'l.mblur' || channel === 'l.matteMode') {

@@ -348,6 +348,7 @@
     <AnimatedRow {layer} label="Speed" path="c.speed"><NumField {api} {mixed} get={get('speed', 1)} edit={edit('speed', 'Speed')} label="Speed" step={0.05} precision={2} min={0.05} /></AnimatedRow>
     {#if content.embeddedAudio === true}
       <AnimatedRow {layer} label="Mute audio"><ToggleField {api} {mixed} get={get('audioMuted', false)} edit={edit('audioMuted', 'Mute audio')} label="Mute audio" /></AnimatedRow>
+      <AnimatedRow {layer} label="Audio gain" path="c.audioGain"><NumField {api} {mixed} get={get('audioGain', 1)} edit={edit('audioGain', 'Audio gain')} label="Audio gain" step={0.05} precision={2} min={0} max={4} /></AnimatedRow>
     {/if}
   {/if}
 {:else if layer.type === 'audio'}

@@ -16,7 +16,7 @@ export function installSveltePanels(PM: LegacyPM): void {
   PM.fxDrop = { hasFxDrag, readFxDrag, applyFxDrop };
   PM.mediaDrop = { hasAssetDrag, hasFileDrag, hasMediaDrag, readAssetDrag };
   registerSveltePanel(PM, 'perf', { title: 'Performance', size: 150, component: PerfPanel });
-  registerSimplePanels(PM); // notes, takes, workspaces, assets, fxbrowser
+  registerSimplePanels(PM); // notes, takes, workspaces, assets, fxbrowser, mixer
   registerShaderPanel(PM);
   installGeneratedPanels(PM); // patches PM.WS.registerCustom → GeneratedPanel
   // The agent panel self-registers from legacy/assistant/spatial.ts (it owns the bridge).
