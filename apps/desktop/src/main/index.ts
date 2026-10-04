@@ -10,11 +10,13 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
+  net,
   protocol,
   safeStorage,
   screen,
   session,
   shell,
+  utilityProcess,
   webContents as allWebContents,
   type WebContents
 } from 'electron';
@@ -75,6 +77,9 @@ import { backgroundTesting, backgroundWindowOptions } from './background-testing
 import { EditorWindows, restorableSessions, windowUnderTabDrop } from './windows';
 import { isPanelPopoutRequest } from './panel-popout';
 import { OnboardingFlow, onboardingCompleted, onboardingEnabled } from './onboarding';
+/* ── transcription (on-device speech models) ── */
+import { installTranscription, utilityWorker } from './transcription/install';
+import { TRANSCRIPTION_IPC } from '../shared/transcription';
 
 const APP_ORIGIN = 'app://powermove';
 
@@ -1013,6 +1018,32 @@ if (!hasSingleInstanceLock) {
     registerLogIpc(ipcMain, ctx);
     registerMediaProxyIpc(ipcMain, mediaProxies, ctx);
     registerRenderEncoder(ipcMain,ctx);
+    /* ── transcription: models download on request into userData; inference
+       runs in a utility process so neither main nor a window ever blocks. ── */
+    const transcription = installTranscription({
+      userData: app.getPath('userData'),
+      ffmpeg: proxyEncoder,
+      fetch: (url, init) => net.fetch(url, init),
+      spawnWorker: utilityWorker(
+        (modulePath) => utilityProcess.fork(modulePath, [], { serviceName: 'Powermove Transcription', stdio: ['ignore', 'ignore', 'pipe'] }),
+        path.join(__dirname, 'transcription-worker.js')
+      ),
+      ipc: ipcMain,
+      isTrustedSender,
+      broadcast: (channel, payload) => {
+        for (const window of BrowserWindow.getAllWindows()) {
+          if (!window.isDestroyed() && isTrustedSenderContents(window.webContents)) window.webContents.send(channel, payload);
+        }
+      },
+      requestModel: (reason) => {
+        const editor = currentEditor();
+        if (!editor || editor.isDestroyed()) return;
+        editor.webContents.send(TRANSCRIPTION_IPC.modelRequested, { reason });
+      },
+      reveal: async (dir) => { await shell.openPath(dir); },
+      catalogFile: isBackgroundTest ? process.env['POWERMOVE_TEST_TRANSCRIPTION_CATALOG'] ?? null : null
+    });
+    app.once('will-quit', () => { void transcription.dispose(); });
     // Powermove Cloud account. Boot must never block the window: a broken
     // profile file degrades to "signed out".
     let cloud: CloudService | null = null;

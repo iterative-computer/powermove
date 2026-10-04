@@ -5,6 +5,14 @@ directories:
   output: dist
 
 asar: true
+# On-device transcription runs sherpa-onnx (with ONNX Runtime), a native addon
+# loaded by the transcription utility process. dlopen cannot map a library
+# out of the asar, so keep the addon and its dylibs unpacked; they then sit in
+# the bundle where codesign signs them with the app's Developer ID and passes
+# hardened-runtime library validation. Speech models are never bundled: they
+# are downloaded on request into userData (src/main/transcription/catalog.ts).
+asarUnpack:
+  - node_modules/sherpa-onnx-darwin-arm64/**
 electronLanguages:
   - en
 files:
