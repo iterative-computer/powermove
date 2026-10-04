@@ -10,8 +10,9 @@ import { clampGain } from './levels';
 
 export type StripKind = 'audio' | 'video' | 'precomp';
 
-/** Why a strip is silent although its own mute is off. */
-export type StripSilence = 'solo' | 'off' | null;
+/** Why a strip is silent although its own mute is off. `remap`: the engine
+ * does not play the soundtrack of a time-remapped video or precomp. */
+export type StripSilence = 'solo' | 'off' | 'remap' | null;
 
 export interface MixerStrip {
   id: string;
@@ -75,7 +76,8 @@ export function deriveStrips(project: any, context: StripContext): MixerStrip[] 
     const gainKey = kind === 'audio' ? 'gain' : 'audioGain';
     const raw = layer.d[gainKey];
     const animated = isProperty(raw) && raw.kf.length > 0;
-    const evaluated = Number(context.evaluate(layer, raw, time, `c.${gainKey}`));
+    const value = context.evaluate(layer, raw, time, `c.${gainKey}`);
+    const evaluated = value == null ? NaN : Number(value);
     const gain = clampGain(Number.isFinite(evaluated) ? evaluated : 1);
     const groups = context.groupAncestors(layer, layers) || [];
 
@@ -92,6 +94,7 @@ export function deriveStrips(project: any, context: StripContext): MixerStrip[] 
     const switchedOff = (kind !== 'audio' && context.evaluate(layer, layer.on, time, 'l.on') === false)
       || groups.some((group: any) => context.evaluate(group, group.on, time, 'l.on') === false);
     if (switchedOff) silencedBy = 'off';
+    else if (kind !== 'audio' && context.evaluate(layer, layer.d.timeRemap, time, 'c.timeRemap')) silencedBy = 'remap';
     else if (soloing && !layer.solo && !groups.some((group: any) => group.solo)) silencedBy = 'solo';
 
     strips.push({

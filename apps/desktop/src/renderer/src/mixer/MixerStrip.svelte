@@ -57,6 +57,7 @@
     if (!strip) return '';
     if (strip.muted) return 'Muted';
     if (strip.silencedBy === 'off') return 'Switched off on the timeline';
+    if (strip.silencedBy === 'remap') return 'Time remapping mutes the sound';
     if (strip.silencedBy === 'solo') return 'Silenced by a soloed layer';
     if (soloActive && !soloed) return 'Silenced by solo';
     return '';

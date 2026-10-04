@@ -99,6 +99,22 @@ describe('mixer strips', () => {
     expect(deriveStrips(project, context(project)).map((strip) => strip.silencedBy)).toEqual(['off', 'off', null]);
   });
 
+  it('explains why a time-remapped soundtrack is silent', () => {
+    const project = base();
+    project.layers[3].d.timeRemap = true;
+    project.layers[5].d.timeRemap = P(1, [{ t: 0, v: 1 }]);
+    expect(deriveStrips(project, context(project)).map((strip) => strip.silencedBy)).toEqual([null, 'remap', 'remap']);
+    // An audio layer has no remap; the field never silences it.
+    project.layers[1].d.timeRemap = true;
+    expect(deriveStrips(project, context(project))[0]!.silencedBy).toBeNull();
+  });
+
+  it('reads a null level as unity instead of silence', () => {
+    const project = base();
+    project.layers[3].d.audioGain = null;
+    expect(deriveStrips(project, context(project))[1]!.gain).toBe(1);
+  });
+
   it('marks locked strips, including through a locked group', () => {
     const project = base();
     project.layers.push({ id: 'group', type: 'group', on: true, lock: true, d: {} });
