@@ -247,7 +247,8 @@ export function frameArgs(options: FrameArgsOptions): string[] {
   }
   return [
     '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
-    '-ss', String(Math.max(0, options.time)), '-i', options.input,
+    // No seek at 0: stills (rendered composition frames) decode nothing after `-ss 0`.
+    ...(options.time > 0 ? ['-ss', String(options.time)] : []), '-i', options.input,
     '-frames:v', '1', '-an', '-sn', '-dn', '-vf', filters.join(','),
     ...(options.format === 'jpeg' ? ['-pix_fmt', 'yuvj420p', '-q:v', '3', '-f', 'image2', '-c:v', 'mjpeg'] : ['-f', 'image2', '-c:v', 'png']),
     options.output

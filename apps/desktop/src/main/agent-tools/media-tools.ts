@@ -155,6 +155,18 @@ export class AgentMediaTools {
     return result;
   }
 
+  /** One decoded frame to `options.output`; ffmpeg exits cleanly even when nothing was decoded. */
+  private async frame(options: Parameters<typeof frameArgs>[0], signal?: AbortSignal): Promise<void> {
+    // A container often runs a little past its last video frame (audio, rounding):
+    // a seek there decodes nothing, so step back to the frame that is on screen.
+    for (const back of [0, 0.05, 0.25, 1]) {
+      if (back && options.time - back < 0) break;
+      await this.ffmpeg(frameArgs({ ...options, time: Math.max(0, options.time - back) }), signal);
+      if ((await stat(options.output).catch(() => null))?.size) return;
+    }
+    throw new MediaToolError(`No frame could be decoded at ${round(options.time, 3)}s.`);
+  }
+
   private async probe(file: string, signal?: AbortSignal): Promise<MediaProbe> {
     const info = await stat(file).catch(() => null);
     if (!info?.isFile()) throw new MediaToolError('The media file is no longer readable.');
@@ -308,8 +320,8 @@ export class AgentMediaTools {
     const dims = fitBudget(size.width, size.height, FRAME_QUALITY[quality]);
     const images = await this.withTemp(async (directory) => mapLimit(frames, 3, async (frame, index) => {
       const output = path.join(directory, `frame-${index}.jpg`);
-      await this.ffmpeg(frameArgs({ input: source.path, time: frame.source, width: dims.width, height: dims.height, format: 'jpeg', output }), context.signal);
-      return readFile(output).catch(() => { throw new MediaToolError(`No frame decoded at ${frame.source}s.`); });
+      await this.frame({ input: source.path, time: frame.source, width: dims.width, height: dims.height, format: 'jpeg', output }, context.signal);
+      return readFile(output);
     }));
     const timeBase = source.layer ? 'composition' : 'source';
     return [
@@ -346,7 +358,7 @@ export class AgentMediaTools {
         for (const [index, frame] of rendered.entries()) {
           const input = path.join(directory, `render-${index}.${frame.mimeType === 'image/png' ? 'png' : 'jpg'}`);
           await writeFile(input, frame.data);
-          await this.ffmpeg(frameArgs({ input, time: 0, width: plan.cellWidth, height: plan.cellHeight, pad: true, label: formatClock(cells[index]!), fontFile: font, format: 'jpeg', output: path.join(directory, `cell-${String(index).padStart(3, '0')}.jpg`) }), context.signal);
+          await this.frame({ input, time: 0, width: plan.cellWidth, height: plan.cellHeight, pad: true, label: formatClock(cells[index]!), fontFile: font, format: 'jpeg', output: path.join(directory, `cell-${String(index).padStart(3, '0')}.jpg`) }, context.signal);
         }
         const output = path.join(directory, 'sheet.jpg');
         await this.ffmpeg(tileArgs(path.join(directory, 'cell-%03d.jpg'), plan, output), context.signal);
@@ -367,7 +379,7 @@ export class AgentMediaTools {
     const plan = planSheet(cells.length, size.width / size.height, columns);
     const sheet = await this.withTemp(async (directory) => {
       await mapLimit(cells, 3, async (cell, index) => {
-        await this.ffmpeg(frameArgs({ input: source.path, time: cell.source, width: plan.cellWidth, height: plan.cellHeight, pad: true, label: formatClock(cell.composition ?? cell.source), fontFile: font, format: 'jpeg', output: path.join(directory, `cell-${String(index).padStart(3, '0')}.jpg`) }), context.signal);
+        await this.frame({ input: source.path, time: cell.source, width: plan.cellWidth, height: plan.cellHeight, pad: true, label: formatClock(cell.composition ?? cell.source), fontFile: font, format: 'jpeg', output: path.join(directory, `cell-${String(index).padStart(3, '0')}.jpg`) }, context.signal);
       });
       const output = path.join(directory, 'sheet.jpg');
       await this.ffmpeg(tileArgs(path.join(directory, 'cell-%03d.jpg'), plan, output), context.signal);
@@ -454,8 +466,21 @@ export class AgentMediaTools {
     return (this.options.transcription ?? defaultTranscriptionService)();
   }
 
+  /** Ask the user for a model (the app shows its download sheet) and tell the agent to wait. */
+  private modelRequired(what: string): MediaToolError {
+    try { this.service().requestModel(`The agent wants to transcribe ${what}.`); } catch { /* the sheet is best effort */ }
+    return new MediaToolError(JSON.stringify({
+      status: 'model-required', code: TRANSCRIPTION_MODEL_MISSING,
+      message: 'No transcription model is downloaded yet. Powermove has asked the user to download one (a sheet is open in the app; also in Settings › Transcription). Tell the user, and call transcribe_media again once the download finishes. Do not retry before then.'
+    }));
+  }
+
   private async transcribe(args: Args, context: MediaToolContext): Promise<AgentToolContent[]> {
-    const source = await context.resolve(this.target(args));
+    const target = this.target(args);
+    // Without a ready model, say so before staging any media for it.
+    const status = await this.service().status().catch(() => null);
+    if (status && status.activeModelId === null && !status.models.some((model) => model.state === 'ready')) throw this.modelRequired('speech in this project');
+    const source = await context.resolve(target);
     const layer = source.layer;
     const probe = await this.probe(source.path, context.signal);
     if (!probe.audio.length) throw new MediaToolError(`“${source.asset.name}” has no audio to transcribe.`);
@@ -504,13 +529,7 @@ export class AgentMediaTools {
         }
         return transcript;
       } catch (error) {
-        if ((error as { code?: unknown })?.code === TRANSCRIPTION_MODEL_MISSING) {
-          try { this.service().requestModel(`The agent wants to transcribe “${source.asset.name}”.`); } catch { /* the sheet is best effort */ }
-          throw new MediaToolError(JSON.stringify({
-            status: 'model-required', code: TRANSCRIPTION_MODEL_MISSING,
-            message: 'No transcription model is downloaded yet. Powermove has asked the user to download one (a sheet is open in the app; also in Settings › Transcription). Tell the user, and call transcribe_media again once the download finishes. Do not retry before then.'
-          }));
-        }
+        if ((error as { code?: unknown })?.code === TRANSCRIPTION_MODEL_MISSING) throw this.modelRequired(`“${source.asset.name}”`);
         throw error instanceof Error ? error : new Error(String(error));
       } finally {
         this.jobs.delete(key);

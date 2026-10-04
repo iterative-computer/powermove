@@ -6,7 +6,6 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { MEDIA_PATH_IPC, MEDIA_STAGE_CHUNK_BYTES } from '../shared/media-tools';
-import { install as installMedia } from '../renderer/src/legacy/core/media';
 import { MediaPathCache, mediaFingerprint, parseLookupRequest, parseStageRequest, registerMediaPathIpc } from './media-path-cache';
 
 const roots: string[] = [];
@@ -19,8 +18,11 @@ afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root,
 
 /** The renderer's own import fingerprint, for parity. */
 async function rendererFingerprint(bytes: Uint8Array): Promise<string> {
+  // The renderer module is outside main's TypeScript project; load it by path.
+  const module = '../renderer/src/legacy/core/media';
+  const { install } = await import(/* @vite-ignore */ module) as { install(PM: unknown): void };
   const PM: Record<string, any> = {};
-  installMedia(PM as never);
+  install(PM);
   return PM.MediaImport.fingerprint(new Blob([bytes as BlobPart]));
 }
 

@@ -192,10 +192,22 @@ describe('transcribe_media against the transcription seam', () => {
       { text: 'Second line.', start: 4, end: 5, words: [{ text: 'Second', start: 4, end: 4.4 }, { text: 'line.', start: 4.5, end: 5 }] }
     ]
   };
-  const service = (transcribe: TranscriptionService['transcribe']): TranscriptionService & { requestModel: ReturnType<typeof vi.fn> } =>
-    ({ status: async () => ({ models: [], activeModelId: null }), transcribe, requestModel: vi.fn() });
+  const ready = { models: [], activeModelId: 'test-model' };
+  const service = (transcribe: TranscriptionService['transcribe'], status: Awaited<ReturnType<TranscriptionService['status']>> = ready) =>
+    ({ status: async () => status, transcribe, requestModel: vi.fn<(reason: string) => void>() });
 
-  it('asks the user for a model and tells the agent to wait when none is downloaded', async () => {
+  it('asks for a model before resolving any media when none is ready', async () => {
+    const transcribe = vi.fn(async () => transcript);
+    const seam = service(transcribe, { models: [], activeModelId: null });
+    const ctx = context(source());
+    const error = await tools({ transcription: () => seam }).call('transcribe_media', { assetId: 'a1' }, ctx).then(() => null, (reason: Error) => reason);
+    expect(JSON.parse(error!.message)).toMatchObject({ status: 'model-required', code: TRANSCRIPTION_MODEL_MISSING });
+    expect(seam.requestModel).toHaveBeenCalledTimes(1);
+    expect(ctx.resolve).not.toHaveBeenCalled();
+    expect(transcribe).not.toHaveBeenCalled();
+  });
+
+  it('asks the user for a model and tells the agent to wait when the engine reports none', async () => {
     const seam = service(async () => { throw new TranscriptionModelMissingError(); });
     const call = tools({ transcription: () => seam }).call('transcribe_media', { assetId: 'a1' }, context(source()));
     const error = await call.then(() => null, (reason: Error) => reason);
