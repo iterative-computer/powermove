@@ -603,13 +603,32 @@ function stopAll() {
   publishState();
 }
 
-function applyEnvelope(param: any, layer: any, localStart: any, duration: any, at: any, audibleDuration: any) {
+/* Live level changes glide into the new envelope over this long instead of
+   stepping: a fader drag retunes ~60 times a second, and hard steps on a
+   sustained sound are audible as zipper noise. */
+const RETUNE_GLIDE = .012;
+
+/* Schedule a voice's gain envelope from `at`. With `glide`, the param leaves
+   its current value on a short ramp (live retune only; starts and the offline
+   export always begin exactly on the envelope). */
+function applyEnvelope(param: any, layer: any, localStart: any, duration: any, at: any, audibleDuration: any, glide = 0) {
   const points: any = envelopePoints(layer, localStart, duration, audibleDuration);
   try {
-    param.cancelScheduledValues(at);
-    param.setValueAtTime(points[0].value, at);
+    let first = 1;
+    if (glide > 0 && duration > glide && typeof param.linearRampToValueAtTime === 'function') {
+      if (typeof param.cancelAndHoldAtTime === 'function') param.cancelAndHoldAtTime(at);
+      else { param.cancelScheduledValues(at); param.setValueAtTime(param.value, at); }
+      const local: any = localStart + glide;
+      while (first < points.length && points[first].local <= local) first++;
+      const a: any = points[first - 1], b: any = points[first];
+      const value: any = b ? a.value + (b.value - a.value) * (local - a.local) / Math.max(1e-9, b.local - a.local) : a.value;
+      param.linearRampToValueAtTime(value, at + glide);
+    } else {
+      param.cancelScheduledValues(at);
+      param.setValueAtTime(points[0].value, at);
+    }
     if (duration > .002 && typeof param.linearRampToValueAtTime === 'function') {
-      for (let index: any = 1; index < points.length; index++) {
+      for (let index: any = first; index < points.length; index++) {
         param.linearRampToValueAtTime(points[index].value, at + points[index].local - localStart);
       }
     } else if (duration > .002 && typeof param.setValueCurveAtTime === 'function') {
@@ -689,7 +708,7 @@ function retuneVoice(voice: any, clip: any, time: any, level: string) {
     startVoice(clip, time);
     return;
   }
-  voice.curve = applyEnvelope(voice.gain.gain, clip.layer, clip.localStart, clip.duration, ctx.currentTime, clip.audibleDuration);
+  voice.curve = applyEnvelope(voice.gain.gain, clip.layer, clip.localStart, clip.duration, ctx.currentTime, clip.audibleDuration, RETUNE_GLIDE);
   voice.level = level;
 }
 

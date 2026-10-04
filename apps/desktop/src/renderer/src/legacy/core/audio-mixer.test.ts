@@ -170,6 +170,20 @@ describe('audio mixer routing', () => {
     expect(voiceGain(music).gain.value).toBeCloseTo(1.5);
   });
 
+  it('glides a live level change instead of stepping it', () => {
+    const { PM, ctx } = mixerRegistry(project());
+    PM.Audio.start(0);
+    const music = ctx.created.find((node): node is FakeSource => node instanceof FakeSource && voiceGain(node).outputs[0] !== undefined)!;
+    const param = voiceGain(music).gain;
+    expect(param.value).toBeCloseTo(0.5);
+    param.events = [];
+    PM.proj.layers[0].d.gain = 1.5;
+    PM.Audio.retune();
+    // Hold the current value, then ramp to the new level; never a hard set to 1.5.
+    expect(param.events.slice(0, 3)).toEqual([['cancel', 0], ['set', 0.5], ['ramp', 1.5]]);
+    expect(param.events.some(([kind, value]) => kind === 'set' && value === 1.5)).toBe(false);
+  });
+
   it('restarts a voice when what it plays changes', () => {
     const { PM, ctx } = mixerRegistry(project());
     PM.Audio.start(0);
