@@ -41,9 +41,18 @@
   let keyDb = 0;
 
   const db = $derived(gainToDb(gain));
+  /* Marks of the taper, then halves and quarters between them; the finer
+     ticks only show when the fader is tall enough to keep them apart. */
   const ticks = [
-    ...FADER_MARKS.map(([mark, position]) => ({ position, major: true, unity: mark === 0 })),
-    ...FADER_MARKS.slice(1).map(([, position], index) => ({ position: (position + FADER_MARKS[index]![1]) / 2, major: false, unity: false }))
+    ...FADER_MARKS.map(([mark, position]) => ({ position, kind: mark === 0 ? 'unity' : 'major' })),
+    ...FADER_MARKS.slice(1).flatMap(([, low], index) => {
+      const high = FADER_MARKS[index]![1];
+      return [
+        { position: low + (high - low) / 2, kind: 'minor' },
+        { position: low + (high - low) / 4, kind: 'fine' },
+        { position: low + (high - low) * 3 / 4, kind: 'fine' }
+      ];
+    })
   ];
 
   function place(value: number): void {
@@ -201,7 +210,7 @@
   onblur={finishKeys}
 >
   {#each ticks as tick (tick.position)}
-    <span class="mx-tick" class:major={tick.major} class:unity={tick.unity}
+    <span class="mx-tick {tick.kind}"
       style:bottom={`calc(${tick.position} * (100% - ${KNOB}px) + ${(KNOB - 1) / 2}px)`}></span>
   {/each}
   <div bind:this={knob} class="mx-knob"><span></span></div>
@@ -238,7 +247,8 @@
   }
 
   .mx-tick.major { width: 10px; right: 1px; background: var(--tx-4); }
-  .mx-tick.unity { width: 18px; right: 0; height: 1.5px; background: var(--tx-2); }
+  /* Unity reads as home without looking like a second knob. */
+  .mx-tick.unity { width: 12px; right: 0; background: var(--tx-3); }
 
   .mx-knob {
     position: absolute;
@@ -261,7 +271,13 @@
     opacity: .9;
   }
 
+  .mx-tick.fine { display: none; }
+
+  @container mixer (min-height: 440px) {
+    .mx-tick.fine { display: block; }
+  }
+
   @container mixer (max-height: 210px) {
-    .mx-tick:not(.major) { display: none; }
+    .mx-tick.minor { display: none; }
   }
 </style>

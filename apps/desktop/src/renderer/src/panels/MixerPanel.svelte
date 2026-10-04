@@ -181,7 +181,7 @@
     root.appendChild(probe);
     const read = (value: string) => { probe.style.color = value; return getComputedStyle(probe).color; };
     const palette: MeterPalette = {
-      track: read('var(--ink-1)'),
+      track: read('var(--mx-track)'),
       nominal: read('var(--success)'),
       warn: read('var(--warning)'),
       hot: read('var(--danger)')
@@ -238,6 +238,8 @@
 
 <style>
   .mixer {
+    /* The unlit meter: a visible channel on paper, a quiet one in the dark. */
+    --mx-track: var(--ink-2);
     container: mixer / size;
     width: 100%;
     height: 100%;
@@ -245,6 +247,8 @@
     display: flex;
     align-items: stretch;
   }
+
+  :global(:root[data-theme="dark"]) .mixer { --mx-track: var(--ink-1); }
 
   .mixer-strips {
     flex: 1;
