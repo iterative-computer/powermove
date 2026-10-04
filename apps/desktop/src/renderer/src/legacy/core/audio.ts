@@ -799,6 +799,8 @@ function tick(time: any) { sync(time, false); }
 
 function reconcile(force: boolean = true) {
   state.project = PM.proj || null;
+  // An undone or agent-set master level reaches the master node even while paused.
+  applyMasterLevel();
   if (PM.audioDisabled || !PM.playing) { pause(); requestContextWarmup(); return; }
   state.generation++;
   sync(PM.time, force);

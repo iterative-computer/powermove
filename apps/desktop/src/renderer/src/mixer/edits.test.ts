@@ -89,6 +89,20 @@ describe('mixer edits', () => {
     expect(clip.d.audioMuted).toBe(true);
   });
 
+  it('records the master level and mutes as undoable steps', () => {
+    const { PM, apply } = editor();
+    expect(apply(levelCommand('master', 0.5, 2)).ok).toBe(true);
+    expect(PM.proj.audioGain).toBe(0.5);
+    expect(PM.hist.undo()).toBe(true);
+    expect(Object.hasOwn(PM.proj, 'audioGain')).toBe(false);
+    expect(PM.hist.redo()).toBe(true);
+    expect(PM.proj.audioGain).toBe(0.5);
+    expect(apply(muteCommand(strip('clip', 'video'))).ok).toBe(true);
+    expect(PM.L('clip').d.audioMuted).toBe(true);
+    expect(PM.hist.undo()).toBe(true);
+    expect(PM.L('clip').d.audioMuted).not.toBe(true);
+  });
+
   it('refuses a level change on a locked layer', () => {
     const { music, apply } = editor();
     music.lock = true;

@@ -93,7 +93,7 @@ function commandScopes(command: any): any[][] {
   const type = command?.type;
   if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group'].includes(type)) return [['layers'], ['comps']];
   if (type === 'set_composition') {
-    return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work']];
+    return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work'], ['audioGain']];
   }
   if (type === 'set_scene_parameter') return [['params', String(command.name || '').trim()]];
   if (type === 'add_marker') return [['markers']];
