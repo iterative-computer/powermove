@@ -229,3 +229,33 @@ export function settleMediaLabel(toolName: unknown, label: string, status: 'runn
   const rest = label.slice(rule[0].length).replace(/…$/, '');
   return `${status === 'error' ? rule[2] : rule[1]}${rest}`;
 }
+
+/* Non-final answers. transcribe_media can answer before there is a transcript:
+   a long job is still running ("status":"transcribing", a successful call) or
+   no model is downloaded ("status":"model-required", a failed call). Neither
+   is "Transcribed x" nor a failure, so the row says what actually happened. */
+export type MediaToolOutcome = { state: 'pending'; progress?: number } | { state: 'needs-model' };
+
+/* The answer's own first key: at most a short provider prefix ("Error: ")
+   before its opening brace, so a transcript that quotes this never matches. */
+const OUTCOME_STATUS = /^[^{]{0,80}\{\s*"status"\s*:\s*"(transcribing|model-required)"/;
+const OUTCOME_PROGRESS = /"progress"\s*:\s*([0-9]*\.?[0-9]+)/;
+
+/** Reads a non-final outcome from a tool-end excerpt; the status is the answer's first key. */
+export function mediaToolOutcome(toolName: unknown, output: unknown): MediaToolOutcome | null {
+  if (mediaToolName(toolName) !== 'transcribe_media' || typeof output !== 'string') return null;
+  const status = OUTCOME_STATUS.exec(output)?.[1];
+  if (status === 'model-required') return { state: 'needs-model' };
+  if (status !== 'transcribing') return null;
+  const progress = Number(OUTCOME_PROGRESS.exec(output)?.[1]);
+  return Number.isFinite(progress) && progress > 0 && progress <= 1 ? { state: 'pending', progress } : { state: 'pending' };
+}
+
+/** "Transcribing interview.mov…" → "Still transcribing interview.mov" (chip "42%"), or "Needs a transcription model for interview.mov". */
+export function mediaOutcomeLabels(label: string, detail: string | undefined, outcome: MediaToolOutcome): { label: string; detail?: string } {
+  const what = label.replace(/^Transcribing /, '').replace(/…$/, '').trim() || 'media';
+  if (outcome.state === 'needs-model') return { label: `Needs a transcription model for ${what}`, ...(detail ? { detail } : {}) };
+  const percent = outcome.progress !== undefined ? `${Math.round(outcome.progress * 100)}%` : undefined;
+  const chip = [detail, percent].filter(Boolean).join(' · ');
+  return { label: `Still transcribing ${what}`, ...(chip ? { detail: chip } : {}) };
+}

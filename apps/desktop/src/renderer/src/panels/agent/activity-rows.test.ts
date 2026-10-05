@@ -322,5 +322,18 @@ describe('joinActions', () => {
     expect(toolFamily('media_contact_sheet')).toBe('watch');
     expect(toolAction('media_waveform')).toBe('mapped silences');
   });
+
+  it('never calls a pending transcription done or a model request a failure', () => {
+    const rows = activityRows([
+      tool({ id: 'm1', toolName: 'transcribe_media', label: 'Still transcribing interview.mov', detail: '42%', status: 'done', outcome: 'pending' }),
+      tool({ id: 'm2', toolName: 'transcribe_media', label: 'Needs a transcription model for b-roll.mp4', status: 'done', outcome: 'needs-model' })
+    ]);
+    expect(at(rows).status).toBe('done');
+    expect(at(rows).failedCount).toBe(0);
+    expect(at(rows).details.map((detail: any) => [detail.label, detail.status])).toEqual([
+      ['Still transcribing interview.mov', 'done'], ['Needs a transcription model for b-roll.mp4', 'done']
+    ]);
+    expect(at(rows).summary).toBe('Started a transcription and asked for a transcription model');
+  });
 });
 

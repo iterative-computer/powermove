@@ -24,6 +24,7 @@ import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
 import { AGENT_MODELS, REASONING_EFFORTS, modelEfforts, modelEffort, setDiscoveredClaudeModels, setDiscoveredCodexModels } from '../../../../shared/agent-models';
 import { idlePreload } from './idle-preload';
 import { mediaStepLabels } from '../../panels/agent/media-activity';
+import { mediaOutcomeLabels, mediaToolOutcome } from '../../../../shared/media-tools';
 import { bridge as hostBridge } from '../../kernel/bridge';
 
 const AGENT_EDITABLE_CATALOG_CHARS = 72_000;
@@ -1634,6 +1635,16 @@ function reduceTrace(step: CodexTraceEvent, session: any = activeSession()) {
       tool.status = step.isError ? 'error' : 'done';
       tool.endedAt = Date.now();
       if (step.output !== undefined) tool.output = String(step.output).slice(0, 600);
+      // A transcription still running or waiting on a model download is
+      // neither done nor failed: say which (media-tools lane).
+      const outcome = mediaToolOutcome(tool.toolName, step.output);
+      if (outcome) {
+        const labels = mediaOutcomeLabels(tool.label, tool.detail, outcome);
+        tool.status = 'done';
+        tool.outcome = outcome.state;
+        tool.label = labels.label;
+        if (labels.detail === undefined) delete tool.detail; else tool.detail = labels.detail;
+      }
     }
   }
   trimTrace(session);

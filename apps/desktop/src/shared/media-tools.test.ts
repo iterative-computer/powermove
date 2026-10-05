@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { formatClock, mediaToolLabels, mediaToolName, mediaToolSubject, settleMediaLabel } from './media-tools';
+import { formatClock, mediaOutcomeLabels, mediaToolLabels, mediaToolName, mediaToolOutcome, mediaToolSubject, settleMediaLabel } from './media-tools';
 
 describe('media tool activity wording', () => {
   it('recognises media tools under every provider naming', () => {
@@ -36,5 +36,28 @@ describe('media tool activity wording', () => {
     expect(formatClock(4.2)).toBe('0:04.20');
     expect(formatClock(3723.4)).toBe('1:02:03.40');
     expect(formatClock(-1.5)).toBe('-0:01.50');
+  });
+});
+
+describe('non-final transcription answers', () => {
+  it('reads a pending job or a missing model from the result excerpt', () => {
+    expect(mediaToolOutcome('mcp__powermove__transcribe_media', '{"status":"transcribing","asset":{"id":"a1"},"progress":0.42,"note":"…"}')).toEqual({ state: 'pending', progress: 0.42 });
+    expect(mediaToolOutcome('transcribe_media', '{"status":"transcribing","asset":{"id":"a1"},"progress":0}')).toEqual({ state: 'pending' });
+    expect(mediaToolOutcome('transcribe_media', 'Error: {"status":"model-required","code":"transcription-model-missing"}')).toEqual({ state: 'needs-model' });
+  });
+
+  it('leaves real transcripts and other tools alone', () => {
+    expect(mediaToolOutcome('transcribe_media', '{"asset":{"id":"a1"},"timeBase":"source","text":"[0:00.00–0:01.00] {\\"status\\":\\"transcribing\\"}"}')).toBeNull();
+    expect(mediaToolOutcome('transcribe_media', '{"asset":{"id":"a1"},"text":"{\"status\":\"transcribing\"}"}')).toBeNull();
+    expect(mediaToolOutcome('probe_media', '{"status":"transcribing"}')).toBeNull();
+    expect(mediaToolOutcome('transcribe_media', undefined)).toBeNull();
+  });
+
+  it('words the row for what actually happened', () => {
+    expect(mediaOutcomeLabels('Transcribing interview.mov…', '0:30.00–1:10.00', { state: 'pending', progress: 0.42 }))
+      .toEqual({ label: 'Still transcribing interview.mov', detail: '0:30.00–1:10.00 · 42%' });
+    expect(mediaOutcomeLabels('Transcribing interview.mov…', undefined, { state: 'pending' })).toEqual({ label: 'Still transcribing interview.mov' });
+    expect(mediaOutcomeLabels('Transcribing interview.mov…', undefined, { state: 'needs-model' })).toEqual({ label: 'Needs a transcription model for interview.mov' });
+    expect(settleMediaLabel('transcribe_media', 'Still transcribing interview.mov', 'done')).toBe('Still transcribing interview.mov');
   });
 });

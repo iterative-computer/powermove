@@ -130,7 +130,7 @@ test('the agent watches and listens to imported footage through the media tools'
       .filter((step: any) => step.kind === 'tool').map((step: any) => step.label));
     expect(rows).toEqual(expect.arrayContaining([
       'Probing interview.mp4…', 'Finding scene changes in interview.mp4…', 'Building a contact sheet of interview.mp4…',
-      'Mapping silences in interview.mp4…', 'Transcribing interview.mp4…', 'Building a contact sheet of the composition…', 'Checking the project…'
+      'Mapping silences in interview.mp4…', 'Needs a transcription model for interview.mp4', 'Building a contact sheet of the composition…', 'Checking the project…'
     ]));
 
     if (SCREENSHOTS) {

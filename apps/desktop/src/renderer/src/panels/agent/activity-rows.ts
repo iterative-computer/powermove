@@ -192,7 +192,9 @@ function thoughtDetail(step: ThoughtStep): ToolDetail {
 export function groupedToolRow(work: WorkStep[]): ToolsRow {
   const steps = work.filter((step): step is ToolStep => step.kind === 'tool');
   const thoughts = work.filter((step): step is ThoughtStep => step.kind === 'thought');
-  const actions = [...new Set(steps.map((step) => toolAction(step.toolName)))];
+  const actions = [...new Set(steps.map((step) => step.outcome === 'pending'
+    ? 'started a transcription'
+    : step.outcome === 'needs-model' ? 'asked for a transcription model' : toolAction(step.toolName)))];
   const failedCount = steps.filter((step) => step.status === 'error').length;
   const successCount = steps.filter((step) => step.status === 'done').length;
   const settledCount = steps.filter((step) => step.status !== 'running').length;
