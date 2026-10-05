@@ -1,4 +1,4 @@
-import { mediaToolLabels, mediaToolName, type AgentMediaToolSubject, type MediaToolLabels } from '../../../../shared/media-tools';
+import { activityToolName, mediaToolLabels, type AgentMediaToolSubject, type MediaToolLabels } from '../../../../shared/media-tools';
 
 /* Media tool rows name the clip they work on ("Transcribing interview.mov…").
    Main only knows ids; the project knows names. */
@@ -16,8 +16,8 @@ export function mediaSubjectName(PM: Registry | undefined, subject: AgentMediaTo
   return asset?.name ? String(asset.name) : null;
 }
 
-/** Live labels for a media tool's tool-start event, or null for any other tool. */
+/** Live labels for a media or caption tool's tool-start event, or null for any other tool. */
 export function mediaStepLabels(PM: Registry | undefined, step: { toolName: string; subject?: AgentMediaToolSubject }): MediaToolLabels | null {
-  if (!mediaToolName(step.toolName)) return null;
+  if (!activityToolName(step.toolName)) return null;
   return mediaToolLabels(step.toolName, step.subject, mediaSubjectName(PM, step.subject));
 }

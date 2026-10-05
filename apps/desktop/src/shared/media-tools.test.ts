@@ -32,6 +32,19 @@ describe('media tool activity wording', () => {
     expect(settleMediaLabel('bash', 'Building things…', 'done')).toBe('Building things…');
   });
 
+  it('names the clips the caption tools work on instead of showing a raw id', () => {
+    expect(mediaToolSubject('mcp__powermove__generate_captions', { layerIds: ['L1', 'L2'], style: 'boxed' })).toEqual({ layerId: 'L1', clips: 2 });
+    expect(mediaToolSubject('generate_captions', { jobId: 'captions-job-1' })).toEqual({});
+    expect(mediaToolSubject('export_captions', { layerId: 'C1', format: 'vtt' })).toEqual({ layerId: 'C1', format: 'vtt' });
+    expect(mediaToolLabels('generate_captions', { layerId: 'L1', clips: 1 }, 'interview.mov')?.running).toBe('Captioning interview.mov…');
+    expect(mediaToolLabels('generate_captions', { layerId: 'L1', clips: 3 }, 'interview.mov')?.done).toBe('Captioned 3 clips');
+    expect(mediaToolLabels('generate_captions', {}, null)?.running).toBe('Captioning the clips…');
+    expect(mediaToolLabels('export_captions', { layerId: 'C1', format: 'vtt' }, 'Interview Captions')?.done).toBe('Exported Interview Captions as WebVTT');
+    expect(settleMediaLabel('export_captions', 'Exporting Interview Captions as SRT…', 'done')).toBe('Exported Interview Captions as SRT');
+    expect(settleMediaLabel('generate_captions', 'Captioning interview.mov…', 'error')).toBe('Caption interview.mov');
+    expect(mediaToolName('generate_captions')).toBeNull();
+  });
+
   it('formats clock times for labels', () => {
     expect(formatClock(4.2)).toBe('0:04.20');
     expect(formatClock(3723.4)).toBe('1:02:03.40');

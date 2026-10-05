@@ -349,7 +349,8 @@ test.describe('with a real speech model', () => {
       const rows = await page.evaluate(() => (window as any).PM.AgentUI.state.conversation
         .flatMap((message: any) => message.role === 'trace' ? message.steps || [] : [])
         .filter((step: any) => step.kind === 'tool').map((step: any) => step.label));
-      expect(rows).toEqual(expect.arrayContaining(['Probing speech.mp4…', 'Mapping silences in speech.mp4…', 'Checking the project…']));
+      expect(rows).toEqual(expect.arrayContaining(['Probing speech.mp4…', 'Mapping silences in speech.mp4…', 'Checking the project…',
+        'Captioning speech.mp4…', 'Exporting speech.mp4 Captions as WebVTT…']));
       if (shots) {
         await session.openAgent();
         await page.evaluate(() => { for (const details of document.querySelectorAll('details.agent-tool-activity')) (details as HTMLDetailsElement).open = true; });

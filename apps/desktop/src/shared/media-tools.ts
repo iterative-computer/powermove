@@ -29,12 +29,25 @@ export interface AgentCompositionInfo { width: number; height: number; fps: numb
 
 const MEDIA_TOOL_SET = new Set<string>([...AGENT_MEDIA_TOOL_NAMES, CHECK_PROJECT_TOOL]);
 
-/** `mcp__powermove__probe_media`, `probe_media` → `probe_media`; anything else → null. */
-export function mediaToolName(toolName: unknown): string | null {
+const shortToolName = (toolName: unknown): string | null => {
   if (typeof toolName !== 'string') return null;
   const lower = toolName.trim().toLowerCase();
-  const short = lower.startsWith('mcp__') ? (lower.split('__').at(-1) ?? lower) : lower;
-  return MEDIA_TOOL_SET.has(short) ? short : null;
+  return lower.startsWith('mcp__') ? (lower.split('__').at(-1) ?? lower) : lower;
+};
+
+/** `mcp__powermove__probe_media`, `probe_media` → `probe_media`; anything else → null. */
+export function mediaToolName(toolName: unknown): string | null {
+  const short = shortToolName(toolName);
+  return short && MEDIA_TOOL_SET.has(short) ? short : null;
+}
+
+/** Caption tools also work on a named clip, so their rows are worded the same way. */
+const CAPTION_ACTIVITY_TOOLS = new Set<string>(['generate_captions', 'export_captions']);
+
+/** Tools whose activity rows name what they work on: the media tools and the caption tools. */
+export function activityToolName(toolName: unknown): string | null {
+  const short = shortToolName(toolName);
+  return short && (MEDIA_TOOL_SET.has(short) || CAPTION_ACTIVITY_TOOLS.has(short)) ? short : null;
 }
 
 /* ── media paths (renderer ⇄ main) ──────────────────────── */
@@ -140,16 +153,30 @@ export interface AgentMediaToolSubject {
   start?: number;
   end?: number;
   target?: 'source' | 'composition';
+  /** generate_captions: how many clips are captioned (layerId is the first). */
+  clips?: number;
+  /** export_captions: the subtitle format. */
+  format?: 'srt' | 'vtt';
 }
 
 const ID = /^[A-Za-z0-9_.:-]{1,120}$/;
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 
 export function mediaToolSubject(toolName: unknown, args: unknown): AgentMediaToolSubject | undefined {
-  const tool = mediaToolName(toolName);
+  const tool = activityToolName(toolName);
   if (!tool || tool === CHECK_PROJECT_TOOL || !args || typeof args !== 'object' || Array.isArray(args)) return undefined;
   const input = args as Record<string, unknown>;
   const subject: AgentMediaToolSubject = {};
+  if (tool === 'generate_captions') {
+    const ids = Array.isArray(input.layerIds) ? input.layerIds.filter((id): id is string => typeof id === 'string' && ID.test(id)) : [];
+    if (ids.length) { subject.layerId = ids[0]!; subject.clips = Math.min(999, ids.length); }
+    return subject;
+  }
+  if (tool === 'export_captions') {
+    if (typeof input.layerId === 'string' && ID.test(input.layerId)) subject.layerId = input.layerId;
+    subject.format = input.format === 'vtt' ? 'vtt' : 'srt';
+    return subject;
+  }
   if (typeof input.assetId === 'string' && ID.test(input.assetId)) subject.assetId = input.assetId;
   if (typeof input.layerId === 'string' && ID.test(input.layerId)) subject.layerId = input.layerId;
   if (Array.isArray(input.times) && input.times.length) subject.frames = Math.min(999, input.times.length);
@@ -182,7 +209,7 @@ export interface MediaToolLabels { running: string; done: string; failed: string
  * layer the call targets, resolved by the caller (the renderer knows names).
  */
 export function mediaToolLabels(toolName: unknown, subject: AgentMediaToolSubject | undefined, name: string | null): MediaToolLabels | null {
-  const tool = mediaToolName(toolName);
+  const tool = activityToolName(toolName);
   if (!tool) return null;
   const what = name || (subject?.layerId ? 'a clip' : 'media');
   const span = subject && (subject.start !== undefined || subject.end !== undefined)
@@ -205,6 +232,16 @@ export function mediaToolLabels(toolName: unknown, subject: AgentMediaToolSubjec
     case 'media_waveform': return make(`Mapping silences in ${what}`, `Mapped silences in ${what}`, `Map silences in ${what}`);
     case 'transcribe_media': return make(`Transcribing ${what}`, `Transcribed ${what}`, `Transcribe ${what}`);
     case CHECK_PROJECT_TOOL: return { running: 'Checking the project…', done: 'Checked the project', failed: 'Check the project' };
+    case 'generate_captions': {
+      // A follow-up call with only a jobId keeps waiting on the same clips.
+      const clips = (subject?.clips ?? 0) > 1 ? `${subject!.clips} clips` : subject?.layerId ? what : 'the clips';
+      return make(`Captioning ${clips}`, `Captioned ${clips}`, `Caption ${clips}`);
+    }
+    case 'export_captions': {
+      const as = subject?.format === 'vtt' ? 'WebVTT' : 'SRT';
+      const captions = name || 'captions';
+      return make(`Exporting ${captions} as ${as}`, `Exported ${captions} as ${as}`, `Export ${captions} as ${as}`);
+    }
     default: return null;
   }
 }
@@ -219,11 +256,13 @@ const SETTLED_VERBS: Array<[string, string, string]> = [
   ['Building ', 'Built ', 'Build '],
   ['Mapping ', 'Mapped ', 'Map '],
   ['Transcribing ', 'Transcribed ', 'Transcribe '],
-  ['Checking ', 'Checked ', 'Check ']
+  ['Checking ', 'Checked ', 'Check '],
+  ['Captioning ', 'Captioned ', 'Caption '],
+  ['Exporting ', 'Exported ', 'Export ']
 ];
 
 export function settleMediaLabel(toolName: unknown, label: string, status: 'running' | 'done' | 'error' | 'continued'): string {
-  if (!mediaToolName(toolName) || status === 'running') return label;
+  if (!activityToolName(toolName) || status === 'running') return label;
   const rule = SETTLED_VERBS.find(([running]) => label.startsWith(running));
   if (!rule) return label;
   const rest = label.slice(rule[0].length).replace(/…$/, '');
