@@ -141,10 +141,31 @@ describe('media tools on generated footage', () => {
     const ctx = context(source(), { renderFrames, composition: async () => ({ duration: 10, fps: 30, width: 1920, height: 1080, workArea: [0, 10] }) });
     const content = await tools().call('media_contact_sheet', { target: 'composition', count: 4 }, ctx);
     expect(ctx.resolve).not.toHaveBeenCalled();
-    expect(renderFrames).toHaveBeenCalledWith([0, 3.322, 6.644, 9.967], expect.any(Number));
+    expect(renderFrames).toHaveBeenCalledWith([0, 3.322, 6.644, 9.967], expect.any(Number), expect.any(Number));
     expect(json(content)).toMatchObject({ target: 'composition', columns: 2, rows: 2 });
     const [r] = await meanColor(images(content)[0]!.data);
     expect(r).toBeGreaterThan(150);
+  });
+
+  it('builds a composition sheet from the cells that rendered in time, and says which are missing', async () => {
+    const still = path.join(directory, 'comp-partial.png');
+    await run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=red:s=320x180:d=1', '-frames:v', '1', still]);
+    const png = new Uint8Array(await readFile(still));
+    const deadline = Date.now() + 60_000;
+    const renderFrames = vi.fn(async (times: number[], _width: number, _until?: number) => times.slice(0, 2).map(() => ({ data: png, mimeType: 'image/png' as const })));
+    const ctx = context(source(), { deadline, renderFrames, composition: async () => ({ duration: 10, fps: 30, width: 1920, height: 1080, workArea: [0, 10] }) });
+    const content = await tools().call('media_contact_sheet', { target: 'composition', count: 4 }, ctx);
+    const until = renderFrames.mock.calls[0]![2]!;
+    expect(until).toBeLessThanOrEqual(deadline - 10_000);
+    const result = json(content);
+    expect(result.cells).toEqual([{ index: 0, time: 0 }, { index: 1, time: 3.322 }]);
+    expect(result.omitted).toEqual([6.644, 9.967]);
+    expect(result.incomplete).toContain('2 of 4 cells');
+    expect(result).toMatchObject({ columns: 2, rows: 1 });
+    expect(images(content)).toHaveLength(1);
+
+    const none = context(source(), { renderFrames: async () => [], composition: async () => ({ duration: 10, fps: 30, width: 1920, height: 1080 }) });
+    await expect(tools().call('media_contact_sheet', { target: 'composition', count: 4 }, none)).rejects.toThrow(/did not render in time/);
   });
 
   it('measures silences and loudness, with a shaded waveform', async () => {

@@ -222,6 +222,43 @@ describe('native Powermove agent tool bridge', () => {
     expect(response.content[1]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' });
   });
 
+  it('stops rendering a composition sheet at the call deadline and answers with the cells that finished', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'powermove-agent-media-'));
+    temporaryDirectories.push(root);
+    const still = path.join(root, 'frame.png');
+    const ffmpegPath = path.resolve(__dirname, '../../../node_modules/ffmpeg-static/ffmpeg');
+    await new Promise<void>((resolve, reject) => spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=blue:s=320x180', '-frames:v', '1', still])
+      .once('close', (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg ${code}`))));
+    const png = new Uint8Array(await fs.readFile(still));
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    let renders = 0;
+    owner.send = (channel: string, request: AgentToolRequestEvent) => {
+      owner.requests.push(request);
+      const times = Array.isArray(request.arguments.times) ? request.arguments.times : [];
+      if (request.tool === 'render_frames' && ++renders > 1) return; // a heavy composition: the second batch never finishes
+      const content = request.tool === '__composition_info'
+        ? [{ type: 'text' as const, text: JSON.stringify({ width: 1280, height: 720, fps: 30, duration: 8 }) }]
+        : [{ type: 'text' as const, text: '{}' }, ...times.map(() => ({ type: 'image' as const, data: png, mimeType: 'image/png' as const }))];
+      queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: owner }, { runId: request.runId, callId: request.callId, ok: true, content }));
+    };
+    // 15 s of the budget is kept for assembling the sheet, so rendering gets 1.5 s.
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '/resources/agent-tools/mcp-server.mjs', ffmpegPath, mediaFontFile: null, mediaCallBudgetMs: 16_500 });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'media-run-deadline', owner: owner as never, baseRevision: 0 });
+
+    const started = Date.now();
+    const response = await bridge.callTool(session, 'media_contact_sheet', { target: 'composition', count: 8 });
+
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(response.ok).toBe(true);
+    expect(renders).toBe(2);
+    const result = JSON.parse((response.content[0] as { text: string }).text);
+    expect(result.cells).toHaveLength(5);
+    expect(result.omitted).toHaveLength(3);
+    expect(response.content[1]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' });
+  });
+
   it('reports media tools as unavailable without a bundled ffmpeg', async () => {
     const ipc = new FakeIpcMain();
     const owner = new FakeWebContents(ipc);

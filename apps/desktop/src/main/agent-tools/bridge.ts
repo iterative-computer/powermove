@@ -19,7 +19,7 @@ import { POWERMOVE_AGENT_TOOLS, POWERMOVE_APP_AGENT_TOOLS, POWERMOVE_STORE_TOOL_
 import type { StoreAgentGateway, StoreInstallInput, StorePublishInput, StoreSearchInput } from '../cloud/store-agent';
 import { inspectCreativeWorkspace } from '../creative-workspace';
 import { userInput, type UserInput } from '../user-input';
-import { AgentMediaTools, type CompositionInfo, type MediaToolContext } from './media-tools';
+import { AgentMediaTools, CALL_BUDGET_MS, type CompositionInfo, type MediaToolContext } from './media-tools';
 import { AGENT_MEDIA_TOOL_NAMES, COMPOSITION_INFO_TOOL, MEDIA_SOURCE_TOOL, type AgentMediaSource } from '../../shared/media-tools';
 import type { TranscriptionService } from '../transcription/service';
 
@@ -139,6 +139,8 @@ export interface PowermoveAgentToolBridgeOptions {
   transcription?: () => TranscriptionService;
   transcribeWaitMs?: number;
   mediaFontFile?: string | null;
+  /** Test seam: how long one media tool call may take (defaults to CALL_BUDGET_MS). */
+  mediaCallBudgetMs?: number;
 }
 
 export class PowermoveAgentToolBridge {
@@ -494,14 +496,38 @@ export class PowermoveAgentToolBridge {
     };
     const context: MediaToolContext = {
       signal: controller.signal,
+      deadline: Date.now() + (this.options.mediaCallBudgetMs ?? CALL_BUDGET_MS),
       resolve: async (target) => (await rendererJson(MEDIA_SOURCE_TOOL, target)).json as AgentMediaSource,
-      renderFrames: async (times, width) => {
+      renderFrames: async (times, width, until) => {
+        // render_frames takes 5 times a call. With a deadline, a batch that
+        // would not finish in time is not started, and one still rendering at
+        // the deadline is abandoned, so the tool answers within the client's
+        // tool timeout with the frames that did finish.
         const frames: Array<{ data: Uint8Array; mimeType: 'image/png' | 'image/jpeg' }> = [];
+        let slowest = 0;
         for (let offset = 0; offset < times.length; offset += 5) {
-          const { response } = await rendererJson('render_frames', { times: times.slice(offset, offset + 5), width });
-          for (const item of response.content) if (item.type === 'image') frames.push({ data: item.data, mimeType: item.mimeType });
+          const left = until === undefined ? Infinity : until - Date.now();
+          if (left <= 0 || (frames.length && left < slowest)) break;
+          const batch = times.slice(offset, offset + 5);
+          const started = Date.now();
+          const pending = rendererJson('render_frames', { times: batch, width });
+          let response: AgentToolResponseEvent | null;
+          if (left === Infinity) response = (await pending).response;
+          else {
+            pending.catch(() => undefined);
+            let timer: NodeJS.Timeout | undefined;
+            response = await Promise.race([
+              pending.then((value) => value.response as AgentToolResponseEvent),
+              new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), left); timer.unref?.(); })
+            ]).finally(() => clearTimeout(timer));
+          }
+          if (!response) break;
+          const images = response.content.filter((item) => item.type === 'image');
+          if (images.length !== batch.length) throw new Error('The composition did not render every requested frame.');
+          for (const item of images) frames.push({ data: item.data, mimeType: item.mimeType });
+          slowest = Math.max(slowest, Date.now() - started);
         }
-        if (frames.length !== times.length) throw new Error('The composition did not render every requested frame.');
+        if (!frames.length) throw new Error('The composition did not render in time for one tool call. Ask for fewer cells or a shorter span.');
         return frames;
       },
       composition: async () => {

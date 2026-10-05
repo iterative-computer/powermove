@@ -60,8 +60,10 @@ export interface CompositionInfo { duration: number; fps: number; width: number;
 
 export interface MediaToolContext {
   resolve(target: { assetId?: string; layerId?: string }): Promise<AgentMediaSource>;
-  /** Live composition frames (render_frames), any number of times. */
-  renderFrames(times: number[], width: number): Promise<Array<{ data: Uint8Array; mimeType: 'image/png' | 'image/jpeg' }>>;
+  /** Live composition frames (render_frames), any number of times. With
+   * `until` (epoch ms) it stops at that time and returns the frames rendered
+   * so far, always the first ones in order; it throws when none finished. */
+  renderFrames(times: number[], width: number, until?: number): Promise<Array<{ data: Uint8Array; mimeType: 'image/png' | 'image/jpeg' }>>;
   composition(): Promise<CompositionInfo>;
   signal?: AbortSignal;
   /** Epoch ms by which the call must answer; `call` sets it from CALL_BUDGET_MS. */
@@ -84,6 +86,9 @@ export interface AgentMediaToolsOptions {
 }
 
 interface ProcessResult { code: number | null; stdout: Buffer; stderr: string }
+
+/** Kept back from a composition sheet's render budget for labelling and tiling the cells. */
+const SHEET_ASSEMBLY_MS = 15_000;
 
 const TOO_LONG = 'ffmpeg took too long on this media for one tool call. Narrow the window with start/end, or ask for fewer frames, and try again.';
 
@@ -382,8 +387,14 @@ export class AgentMediaTools {
       const window = comp.workArea ?? [0, comp.duration];
       const cells = [...new Set(resolveSampleTimes({ duration: comp.duration, fps: comp.fps, ...(times?.length ? { times } : { count }),
         start: finite(args.start) ? args.start : window[0], end: finite(args.end) ? args.end : window[1] }))];
-      const plan = planSheet(cells.length, comp.width / comp.height, columns);
-      const rendered = await context.renderFrames(cells, Math.min(1280, Math.max(160, plan.cellWidth)));
+      const planned = planSheet(cells.length, comp.width / comp.height, columns);
+      // Rendering stops in time to assemble the sheet within the call; a heavy
+      // composition gets the cells that finished, and the answer says so.
+      const until = context.deadline === undefined ? undefined : context.deadline - SHEET_ASSEMBLY_MS;
+      const rendered = (await context.renderFrames(cells, Math.min(1280, Math.max(160, planned.cellWidth)), until)).slice(0, cells.length);
+      if (!rendered.length) throw new MediaToolError('The composition did not render in time for one tool call. Ask for fewer cells or a shorter span.');
+      const shown = cells.slice(0, rendered.length);
+      const plan = shown.length === cells.length ? planned : planSheet(shown.length, comp.width / comp.height, columns);
       const sheet = await this.withTemp(async (directory) => {
         for (const [index, frame] of rendered.entries()) {
           const input = path.join(directory, `render-${index}.${frame.mimeType === 'image/png' ? 'png' : 'jpg'}`);
@@ -395,7 +406,14 @@ export class AgentMediaTools {
         return readFile(output);
       });
       return [
-        text({ target: 'composition', timeBase: 'composition', cells: cells.map((time, index) => ({ index, time })), columns: plan.columns, rows: plan.rows, cellWidth: plan.cellWidth, cellHeight: plan.cellHeight, note: 'Cells read left to right, top to bottom, each labelled with its composition time.' }),
+        text({
+          target: 'composition', timeBase: 'composition', cells: shown.map((time, index) => ({ index, time })), columns: plan.columns, rows: plan.rows, cellWidth: plan.cellWidth, cellHeight: plan.cellHeight,
+          ...(shown.length < cells.length ? {
+            omitted: cells.slice(shown.length),
+            incomplete: `The composition rendered ${shown.length} of ${cells.length} cells within one tool call. Call again with the omitted times, or fewer cells, for the rest.`
+          } : {}),
+          note: 'Cells read left to right, top to bottom, each labelled with its composition time.'
+        }),
         { type: 'image', data: new Uint8Array(sheet), mimeType: 'image/jpeg' }
       ];
     }
