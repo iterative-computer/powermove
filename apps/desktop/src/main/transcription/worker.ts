@@ -58,6 +58,7 @@ function load(model: WorkerModel, threads: number, library: string | undefined):
     const instance = await tc.TranscribeModel.load(model.file, { backend: 'auto' });
     try {
       const session = instance.createSession({ nThreads: threads });
+      send({ type: 'loaded', file: model.file });
       return { key, model: instance, session, languages: instance.capabilities.languages ?? [] };
     } catch (error) {
       instance.dispose();

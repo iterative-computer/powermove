@@ -6,7 +6,7 @@ import { TranscriptionModelMissingError, type TranscriptionService } from './ser
 import { transcriptKey, type TranscriptCache } from './cache';
 import { decodeLanguage, modelFile, type CatalogModel } from './catalog';
 import type { ModelStore } from './models';
-import type { WorkerRequest, WorkerResponse } from './worker-protocol';
+import type { WorkerModel, WorkerRequest, WorkerResponse } from './worker-protocol';
 
 /*
  * The real TranscriptionService: checks the request, answers from the cache,
@@ -32,6 +32,8 @@ export interface EngineOptions {
   idleMs?: number;
   /** After a cancel, kill the process if the job has not stopped by then. */
   cancelGraceMs?: number;
+  /** The same while the job's model is still loading (a first load compiles the Metal shaders). */
+  loadGraceMs?: number;
   threads?: number;
   /** Packaged app: the unpacked libtranscribe.dylib for the worker to load. */
   runtime?: string;
@@ -108,6 +110,12 @@ export class TranscriptionEngine implements TranscriptionService {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   /** Queued and running jobs by transcript key, so identical requests share one. */
   private readonly jobs = new Map<string, Job>();
+  /** The model file the running process last finished loading. */
+  private loadedFile: string | null = null;
+  /** warm() callers waiting for a model file to load. */
+  private warming: Array<{ file: string; resolve: (loaded: boolean) => void }> = [];
+  /** Stop the process once the warm-up load lands, if nothing else wants it. */
+  private releaseAfterWarm = false;
 
   constructor(private readonly options: EngineOptions) {}
 
@@ -174,6 +182,31 @@ export class TranscriptionEngine implements TranscriptionService {
     }));
   }
 
+  /**
+   * Loads the active model in the transcription process before anything
+   * asks for it. The first load under a new app identity compiles ggml's
+   * Metal shaders (about 15 s; macOS then caches them), which would
+   * otherwise hold the first caption run at 0%. `release` stops the process
+   * again once loaded when nothing is waiting: the launch warm-up is for the
+   * compile, not for keeping a model in memory. Resolves true once loaded;
+   * false when there is nothing to load, a job is already loading one, or
+   * the load fails.
+   */
+  async warm(options: { release?: boolean } = {}): Promise<boolean> {
+    await this.options.models.load();
+    const active = this.options.models.activeModel();
+    if (!active) return false;
+    const model = this.workerModel(active.model, active.dir);
+    if (this.worker && this.loadedFile === model.file) return true;
+    if (this.current || this.queue.length) return false;
+    const worker = this.ensureWorker();
+    this.releaseAfterWarm = options.release === true;
+    const loaded = new Promise<boolean>((resolve) => this.warming.push({ file: model.file, resolve }));
+    worker.post({ type: 'warm', model, threads: this.threads(), ...(this.options.runtime ? { runtime: this.options.runtime } : {}) });
+    this.idle();
+    return loaded;
+  }
+
   /** Stops the process and fails anything still queued (app quit). */
   dispose(): void {
     const jobs = [...this.queue, ...(this.current ? [this.current] : [])];
@@ -208,13 +241,17 @@ export class TranscriptionEngine implements TranscriptionService {
     }
     if (this.current !== job) return;
     this.worker?.post({ type: 'cancel', id: job.id });
-    /* A long native decode cannot be interrupted: past the grace period, end the process. */
+    /* A long native decode cannot be interrupted: past the grace period, end
+       the process. A model still loading is given longer (the worker answers
+       'cancelled' as soon as it lands): ending a first load would throw away
+       the shader compile, and the next try would wait through it again. */
+    const loading = this.loadedFile !== this.workerModel(job.model, job.modelDir).file;
     job.cancelTimer = setTimeout(() => {
       if (this.current !== job) return;
       this.current = null;
       this.stopWorker();
       this.pump();
-    }, this.options.cancelGraceMs ?? 3000);
+    }, loading ? this.options.loadGraceMs ?? 60_000 : this.options.cancelGraceMs ?? 3000);
   }
 
   private ensureWorker(): WorkerChannel {
@@ -225,6 +262,7 @@ export class TranscriptionEngine implements TranscriptionService {
     worker.onExit((code) => {
       if (this.worker !== worker) return;
       this.worker = null;
+      this.forgetLoaded();
       const job = this.current;
       if (job) {
         this.current = null;
@@ -240,29 +278,53 @@ export class TranscriptionEngine implements TranscriptionService {
     this.worker = null;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
+    this.forgetLoaded();
     worker?.kill();
+  }
+
+  /** The process is gone: nothing is loaded, and warm-ups waiting on it never land. */
+  private forgetLoaded(): void {
+    this.loadedFile = null;
+    this.releaseAfterWarm = false;
+    const waiting = this.warming;
+    this.warming = [];
+    for (const waiter of waiting) waiter.resolve(false);
+  }
+
+  private threads(): number {
+    return this.options.threads ?? Math.max(1, Math.min(6, availableParallelism() - 2));
+  }
+
+  private workerModel(model: CatalogModel, dir: string): WorkerModel {
+    return { file: path.join(dir, modelFile(model).name), timing: model.timing, ...(model.lag ? { lag: model.lag } : {}) };
+  }
+
+  /** Stop the process after a quiet spell, so its model memory goes back. */
+  private idle(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => this.stopWorker(), this.options.idleMs ?? 3 * 60_000);
   }
 
   private pump(): void {
     if (this.current) return;
     const job = this.queue.shift();
     if (!job) {
-      if (this.idleTimer) clearTimeout(this.idleTimer);
-      this.idleTimer = setTimeout(() => this.stopWorker(), this.options.idleMs ?? 3 * 60_000);
+      this.idle();
       return;
     }
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
+    this.releaseAfterWarm = false;
     this.current = job;
     job.started = true;
-    const threads = this.options.threads ?? Math.max(1, Math.min(6, availableParallelism() - 2));
+    const threads = this.threads();
     this.ensureWorker().post({
       type: 'transcribe',
       id: job.id,
       file: job.request.path,
       ...(job.request.start !== undefined ? { start: job.request.start } : {}),
       ...(job.request.end !== undefined ? { end: job.request.end } : {}),
-      model: { file: path.join(job.modelDir, modelFile(job.model).name), timing: job.model.timing, ...(job.model.lag ? { lag: job.model.lag } : {}) },
+      model: this.workerModel(job.model, job.modelDir),
       ...(job.decodeLanguage ? { language: job.decodeLanguage } : {}),
       threads,
       ffmpeg: this.options.ffmpeg,
@@ -272,6 +334,14 @@ export class TranscriptionEngine implements TranscriptionService {
 
   private receive(worker: WorkerChannel, message: WorkerResponse): void {
     if (worker !== this.worker || message.type === 'ready') return;
+    if (message.type === 'loaded') {
+      this.loadedFile = message.file;
+      const landed = this.warming.filter((waiter) => waiter.file === message.file);
+      this.warming = this.warming.filter((waiter) => waiter.file !== message.file);
+      for (const waiter of landed) waiter.resolve(true);
+      if (this.releaseAfterWarm && !this.current && !this.queue.length) this.stopWorker();
+      return;
+    }
     const job = this.current;
     if (!job || job.id !== message.id) return;
     if (message.type === 'progress') {

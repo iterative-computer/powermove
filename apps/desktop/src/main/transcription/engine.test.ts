@@ -196,6 +196,7 @@ describe('TranscriptionEngine', () => {
     const controller = new AbortController();
     const pending = instance.transcribe({ path: media }, undefined, controller.signal);
     await until(() => workers[0]?.posted.length === 1);
+    workers[0]!.reply({ type: 'loaded', file: '/models/parakeet/parakeet.gguf' });
     controller.abort();
     expect(workers[0]!.posted.at(-1)).toMatchObject({ type: 'cancel' });
     await expect(pending).rejects.toBeInstanceOf(TranscriptionAbortedError);
@@ -205,6 +206,76 @@ describe('TranscriptionEngine', () => {
     void instance.transcribe({ path: media }).catch(() => undefined);
     await until(() => workers.length === 2);
     expect(workers[1]!.posted).toHaveLength(1);
+    instance.dispose();
+  });
+
+  it('lets a cancelled job finish loading its model instead of killing the shader compile', async () => {
+    const { instance, workers } = engine();
+    const controller = new AbortController();
+    const pending = instance.transcribe({ path: media }, undefined, controller.signal);
+    await until(() => workers[0]?.posted.length === 1);
+    controller.abort();
+    await expect(pending).rejects.toBeInstanceOf(TranscriptionAbortedError);
+    // Well past the decode grace (30 ms): the process still loading is kept.
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(workers[0]!.killed).toBe(false);
+    // A retry queues behind it and runs on the same process once it lands.
+    const retry = instance.transcribe({ path: media });
+    workers[0]!.reply({ type: 'loaded', file: '/models/parakeet/parakeet.gguf' });
+    workers[0]!.reply({ type: 'cancelled', id: (workers[0]!.posted[0] as { id: string }).id });
+    await until(() => workers[0]!.posted.filter((message) => message.type === 'transcribe').length === 2);
+    workers[0]!.reply({ type: 'done', id: workers[0]!.last().id, duration: 1, segments });
+    expect(await retry).toMatchObject({ modelId: 'parakeet' });
+    expect(workers).toHaveLength(1);
+    instance.dispose();
+  });
+
+  it('warms the active model ahead of the first request, and releases a launch warm-up once loaded', async () => {
+    const { instance, workers } = engine();
+    const warmed = instance.warm({ release: true });
+    await until(() => workers[0]?.posted.length === 1);
+    expect(workers[0]!.posted[0]).toEqual({ type: 'warm', model: { file: '/models/parakeet/parakeet.gguf', timing: 'word' }, threads: 2 });
+    workers[0]!.reply({ type: 'loaded', file: '/models/parakeet/parakeet.gguf' });
+    expect(await warmed).toBe(true);
+    expect(workers[0]!.killed).toBe(true);
+
+    // Without release the loaded process stays for the next request, and warming again is a no-op.
+    const kept = instance.warm();
+    await until(() => workers[1]?.posted.length === 1);
+    workers[1]!.reply({ type: 'loaded', file: '/models/parakeet/parakeet.gguf' });
+    expect(await kept).toBe(true);
+    expect(workers[1]!.killed).toBe(false);
+    expect(await instance.warm()).toBe(true);
+    expect(workers[1]!.posted).toHaveLength(1);
+    const pending = instance.transcribe({ path: media });
+    await until(() => workers[1]!.posted.length === 2);
+    workers[1]!.reply({ type: 'done', id: workers[1]!.last().id, duration: 1, segments });
+    await pending;
+    expect(workers).toHaveLength(2);
+    instance.dispose();
+  });
+
+  it('a request arriving during a launch warm-up keeps the process', async () => {
+    const { instance, workers } = engine();
+    const warmed = instance.warm({ release: true });
+    await until(() => workers[0]?.posted.length === 1);
+    const pending = instance.transcribe({ path: media });
+    await until(() => workers[0]!.posted.length === 2);
+    workers[0]!.reply({ type: 'loaded', file: '/models/parakeet/parakeet.gguf' });
+    expect(await warmed).toBe(true);
+    expect(workers[0]!.killed).toBe(false);
+    workers[0]!.reply({ type: 'done', id: workers[0]!.last().id, duration: 1, segments });
+    await pending;
+    instance.dispose();
+  });
+
+  it('a warm-up with nothing to load, or whose process dies, resolves false', async () => {
+    expect(await engine({ ready: false }).instance.warm()).toBe(false);
+    const { instance, workers } = engine();
+    const warmed = instance.warm();
+    await until(() => workers[0]?.posted.length === 1);
+    workers[0]!.crash();
+    expect(await warmed).toBe(false);
     instance.dispose();
   });
 

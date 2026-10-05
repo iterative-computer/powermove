@@ -1051,6 +1051,9 @@ if (!hasSingleInstanceLock) {
       },
       reveal: async (dir) => { await shell.openPath(dir); },
       catalogFile: isBackgroundTest ? process.env['POWERMOVE_TEST_TRANSCRIPTION_CATALOG'] ?? null : null,
+      /* Once per app version, load the model in use shortly after launch so
+         the first transcription does not wait on the Metal shader compile. */
+      ...(isBackgroundTest ? {} : { warmKey: app.getVersion() }),
       /* electron-builder flattens transcribe-cpp's platform package into the
          app's node_modules and keeps it unpacked (electron-builder.yml). */
       ...(app.isPackaged ? { runtime: path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', '@transcribe-cpp', 'darwin-arm64-metal', 'libtranscribe.dylib') } : {})

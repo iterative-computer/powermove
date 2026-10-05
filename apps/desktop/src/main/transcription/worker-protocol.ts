@@ -28,11 +28,14 @@ export type WorkerRequest =
     runtime?: string;
   }
   | { type: 'cancel'; id: string }
-  /** Load the model ahead of the first request. */
+  /** Load the model ahead of the first request, so the one-time Metal
+   *  shader compile happens off the critical path. Answered with 'loaded'. */
   | { type: 'warm'; model: WorkerModel; threads: number; runtime?: string };
 
 export type WorkerResponse =
   | { type: 'ready' }
+  /** A model finished loading (the first load in a fresh app compiles the Metal shaders, ~15 s). */
+  | { type: 'loaded'; file: string }
   | { type: 'progress'; id: string; progress: number }
   | { type: 'done'; id: string; duration: number; segments: TranscriptSegment[]; /** Detected by the model, when it says. */ language?: string }
   | { type: 'error'; id: string; message: string }
