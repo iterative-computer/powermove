@@ -5,7 +5,6 @@ import {
   type TranscriptionStatus
 } from '../../../shared/transcription';
 import { transcriptionBridge } from './host';
-import { openModelSheet } from './sheet';
 
 export { transcriptionBridge };
 
@@ -39,6 +38,9 @@ export async function ensureTranscriptionModel(reason: string): Promise<boolean>
   const status = await transcriptionStatus();
   if (status.available === false) return false;
   if (status.activeModelId) return true;
+  // The sheet is Svelte UI; loading it on demand keeps it out of headless
+  // importers of this seam (the agent harness in the document engine).
+  const { openModelSheet } = await import('./sheet');
   return openModelSheet(reason, status);
 }
 
