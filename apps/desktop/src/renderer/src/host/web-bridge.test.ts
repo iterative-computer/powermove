@@ -13,6 +13,6 @@ describe('upload toasts', () => {
       'Copied cut.mov to the host for the agent.',
       'Could not copy cut.mov to the host for the agent: offline'
     ]);
-    expect(Object.values(agent).some((value) => String(typeof value === 'function' ? value(1) : value).includes('Opening'))).toBe(false);
+    expect([agent.start, agent.progress(1), agent.done, agent.failed('x')].some((line) => line.includes('Opening'))).toBe(false);
   });
 });
