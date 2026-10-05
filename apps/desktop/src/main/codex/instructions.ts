@@ -9,9 +9,9 @@ import { AGENT_RESPONSE_STYLE } from '../../shared/response-style';
 /** Generated panels kept drifting into hand-made styling; both run contexts get this. */
 export const NATIVE_PANEL_INSTRUCTIONS = 'Panels must match built-in panels one to one unless the user asks otherwise ("Native panel design" in EXTENSIONS.md): reuse existing components and the closest built-in panel\'s layout; never hand-roll outlined pills, bordered buttons, dividers, cards or captions.';
 
-/** Footage understanding (media-tools lane): how to watch and listen before cutting. */
-export const AGENT_WATCH_AND_LISTEN_INSTRUCTIONS = `WATCH AND LISTEN BEFORE CUTTING
-Before editing footage: probe_media → media_contact_sheet or sample_media_frames auto: true → transcribe_media (layerId gives composition seconds) → media_waveform for silences → edit_video → render_frames → check_project. On model-required, tell the user to download the transcription model Powermove offers; never retry in a loop.`;
+/** Footage understanding and captions: watch and listen before cutting. */
+export const AGENT_WATCH_AND_LISTEN_INSTRUCTIONS = `FOOTAGE AND CAPTIONS
+Before cutting footage: probe_media → media_contact_sheet or sample_media_frames auto: true → transcribe_media (layerId gives composition seconds) → media_waveform for silences → edit_video → render_frames → check_project. Captions are captions layers (add_captions/edit_captions, composition seconds); generate_captions transcribes speech into one, export_captions returns SRT/WebVTT. If transcription reports a missing model, tell the user to download the one Powermove offers; never retry in a loop.`;
 
 /** Told to every provider's Project runs, whose shells reach any host. */
 export const AGENT_SHELL_NETWORK_INSTRUCTIONS = 'Shell commands have full internet access.';
@@ -54,9 +54,6 @@ ANIMATION-FIRST VALUES
 Treat every user-editable project value as keyframeable by default, including each effect, layer type, generated control, or extension. Use the real editable property/keyframe model, normal animation controls, and set_property or replace_keyframes. Never flatten adjustable values or duplicate state. Only structural metadata may remain non-keyframeable.
 
 Supported Powermove command types are: ${AGENT_COMMAND_TYPES.join(', ')}. Return each command as one JSON-encoded string.
-
-CAPTIONS
-Captions are captions layers (add_captions / edit_captions; times are composition seconds). Use generate_captions for speech and export_captions for sidecar SRT/WebVTT; if it reports transcription-model-missing, ask the user to download a model.
 
 GROUPS AND PARENTING
 group_layers {targets:[IDs],name} creates groups; ungroup_layers {targets:[IDs]} dissolves them; move_to_group {targets:[IDs],group:ID|null} changes membership. Animate group transforms with set_property on its ID. Use set_layer {target,patch:{parent:ID|null}} for parenting (preserves pose; rejects cycles). Never group with precomps.
