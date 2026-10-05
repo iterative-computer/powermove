@@ -84,11 +84,31 @@ const toast: Toast = (text, ms, options) => {
 
 const UPLOAD_PARALLEL = 4;
 
+/** What the upload toasts say: opening a file, or copying media for the agent in the background. */
+type UploadPurpose = 'open' | 'agent';
+
+export function uploadWording(label: string, megabytes: string, purpose: UploadPurpose) {
+  return purpose === 'agent'
+    ? {
+        start: `Copying ${label} (${megabytes} MB) to the host for the agent…`,
+        progress: (percent: number) => `Copying ${label} for the agent… ${percent}%`,
+        done: `Copied ${label} to the host for the agent.`,
+        failed: (reason: string) => `Could not copy ${label} to the host for the agent: ${reason}`
+      }
+    : {
+        start: `Uploading ${label} (${megabytes} MB) to the host…`,
+        progress: (percent: number) => `Uploading ${label}… ${percent}%`,
+        done: `Uploaded ${label}. Opening on the host…`,
+        failed: (reason: string) => `Upload of ${label} failed: ${reason}`
+      };
+}
+
 /** A server-side path for a browser File: uploaded in 1 MiB chunks, a few in flight. */
-async function upload(link: ReconnectingLink, file: File, kind: 'media' | 'project'): Promise<string> {
+async function upload(link: ReconnectingLink, file: File, kind: 'media' | 'project', purpose: UploadPurpose = 'open'): Promise<string> {
   const label = file.name || (kind === 'project' ? 'project' : 'media');
   const megabytes = (file.size / 1048576).toFixed(file.size < 10 * 1048576 ? 1 : 0);
-  toast(`Uploading ${label} (${megabytes} MB) to the host…`, 60_000, { error: false });
+  const wording = uploadWording(label, megabytes, purpose);
+  toast(wording.start, 60_000, { error: false });
   const id = await link.invoke<string>(WEB.uploadBegin, { name: file.name, size: file.size, kind });
   try {
     let sent = 0, lastShown = -1;
@@ -104,17 +124,17 @@ async function upload(link: ReconnectingLink, file: File, kind: 'media' | 'proje
         const percent = Math.floor((sent / file.size) * 100);
         if (percent !== lastShown && (percent - lastShown >= 5 || percent === 100)) {
           lastShown = percent;
-          toast(`Uploading ${label}… ${percent}%`, 60_000, { error: false });
+          toast(wording.progress(percent), 60_000, { error: false });
         }
       }
     };
     await Promise.all(Array.from({ length: Math.min(UPLOAD_PARALLEL, offsets.length || 1) }, worker));
     const hostPath = await link.invoke<string>(WEB.uploadFinish, id);
-    toast(`Uploaded ${label}. Opening on the host…`, 4000, { error: false });
+    toast(wording.done, 4000, { error: false });
     return hostPath;
   } catch (error) {
     await link.invoke(WEB.uploadAbort, id).catch(() => undefined);
-    toast(`Upload of ${label} failed: ${error instanceof Error ? error.message : String(error)}`, 8000);
+    toast(wording.failed(error instanceof Error ? error.message : String(error)), 8000);
     throw error;
   }
 }
@@ -338,7 +358,7 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
     mediaPath: {
       lookup: (request) => link.invoke<MediaPathResult | null>(MEDIA_PATH_IPC.lookup, request),
       stageFile: async (file, request) => {
-        const hostPath = await upload(link, file, 'media');
+        const hostPath = await upload(link, file, 'media', 'agent');
         if (!request.storageKey) return { path: hostPath, origin: 'host' };
         await link.invoke(WEB.mediaCommit, { key: request.storageKey, path: hostPath, type: file.type || 'application/octet-stream' });
         const filed = await link.invoke<MediaPathResult | null>(MEDIA_PATH_IPC.lookup, { assetId: request.assetId, storageKey: request.storageKey });
