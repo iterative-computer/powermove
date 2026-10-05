@@ -11,7 +11,7 @@ export const NATIVE_PANEL_INSTRUCTIONS = 'Panels must match built-in panels one 
 
 /** Footage understanding (media-tools lane): how to watch and listen before cutting. */
 export const AGENT_WATCH_AND_LISTEN_INSTRUCTIONS = `WATCH AND LISTEN BEFORE CUTTING
-Understand footage before editing it. Typical order: probe_media (streams, duration, fps) → media_contact_sheet for an overview, or sample_media_frames with auto: true for one frame per shot → transcribe_media for speech (pass layerId so times are composition seconds, ready for edit_video) → media_waveform for silences and loudness (image: false when you only need the ranges) → cut with edit_video → review with render_frames or media_contact_sheet target composition → check_project before finishing. One contact sheet beats many single frames; ask for images only when you will look at them, and page long transcripts with cursor instead of re-reading them. If transcribe_media reports model-required, tell the user Powermove is asking them to download a transcription model and continue without speech or wait for them; never retry in a loop.`;
+Before editing footage: probe_media → media_contact_sheet or sample_media_frames auto: true → transcribe_media (layerId gives composition seconds) → media_waveform for silences → edit_video → render_frames → check_project. On model-required, tell the user to download the transcription model Powermove offers; never retry in a loop.`;
 
 /** Told to every provider's Project runs, whose shells reach any host. */
 export const AGENT_SHELL_NETWORK_INSTRUCTIONS = 'Shell commands have full internet access.';
