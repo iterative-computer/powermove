@@ -139,6 +139,7 @@ export class ModelStore {
     for (const model of this.options.catalog) {
       if (await this.complete(model)) this.ready.add(model.id);
       else {
+        await this.removeStale(model);
         const partial = await this.partialSize(model);
         if (partial > 0) this.partialBytes.set(model.id, partial);
       }
@@ -168,6 +169,23 @@ export class ModelStore {
     }
   }
 
+  /**
+   * A finished folder whose manifest names other files is an older build of
+   * the model (the ONNX files of the sherpa-onnx engine, or a re-pinned
+   * revision): it can never load again, so give its space back.
+   */
+  private async removeStale(model: CatalogModel): Promise<void> {
+    const dir = this.modelDir(model.id);
+    try {
+      const manifest = JSON.parse(await readFile(path.join(dir, 'model.json'), 'utf8')) as { files?: Array<{ name: string; sha256: string }> };
+      const current = new Set(model.files.map((file) => `${file.name}:${file.sha256}`));
+      if ((manifest.files ?? []).some((file) => current.has(`${file.name}:${file.sha256}`))) return;
+    } catch {
+      return;
+    }
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+
   private async partialSize(model: CatalogModel): Promise<number> {
     const dir = this.partialDir(model.id);
     let total = 0;
@@ -191,6 +209,9 @@ export class ModelStore {
       accuracy: model.accuracy,
       recommended: model.recommended,
       wordTimestamps: model.wordTimestamps,
+      timing: model.timing,
+      detectsLanguage: model.detectsLanguage,
+      featured: model.featured,
       state: 'absent'
     };
     if (this.ready.has(model.id)) return { ...base, state: 'ready' };
@@ -226,6 +247,20 @@ export class ModelStore {
     const id = this.settings.activeModelId;
     if (!id || !this.ready.has(id)) return null;
     return { model: this.model(id), dir: this.modelDir(id) };
+  }
+
+  /**
+   * The model a request runs on: the active one, unless the request needs
+   * word timing it lacks; then a downloaded model that times words, one that
+   * lists the language first. Null when nothing ready fits.
+   */
+  modelFor(needs: { wordTimestamps?: boolean; language?: string } = {}): { model: CatalogModel; dir: string } | null {
+    const active = this.activeModel();
+    if (!needs.wordTimestamps || active?.model.wordTimestamps) return active;
+    const timed = this.options.catalog.filter((model) => model.wordTimestamps && this.ready.has(model.id));
+    const base = needs.language && needs.language !== 'auto' ? needs.language.split('-')[0]!.toLowerCase() : '';
+    const model = (base ? timed.find((entry) => entry.languageCodes.includes(base)) : undefined) ?? timed[0];
+    return model ? { model, dir: this.modelDir(model.id) } : null;
   }
 
   language(): string { return this.settings.language; }

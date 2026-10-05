@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { TranscribeRequest, Transcript, TranscriptionStatus } from '../../shared/transcription';
 import { TranscriptionModelMissingError, type TranscriptionService } from './service';
 import { transcriptKey, type TranscriptCache } from './cache';
-import type { CatalogModel } from './catalog';
+import { decodeLanguage, modelFile, type CatalogModel } from './catalog';
 import type { ModelStore } from './models';
 import type { WorkerRequest, WorkerResponse } from './worker-protocol';
 
@@ -33,6 +33,8 @@ export interface EngineOptions {
   /** After a cancel, kill the process if the job has not stopped by then. */
   cancelGraceMs?: number;
   threads?: number;
+  /** Packaged app: the unpacked libtranscribe.dylib for the worker to load. */
+  runtime?: string;
 }
 
 export class TranscriptionAbortedError extends Error {
@@ -40,7 +42,7 @@ export class TranscriptionAbortedError extends Error {
   constructor() { super('Transcription was cancelled.'); }
 }
 
-type JobResult = { duration: number; segments: Transcript['segments'] };
+type JobResult = { duration: number; segments: Transcript['segments']; language?: string };
 
 /** One caller waiting on a job, with its own progress and cancel. */
 interface Subscriber {
@@ -52,8 +54,10 @@ interface Subscriber {
 interface Job {
   id: string;
   request: TranscribeRequest;
-  modelId: string;
+  model: CatalogModel;
   modelDir: string;
+  /** Tag handed to the model; undefined lets it detect. */
+  decodeLanguage?: string;
   key: string;
   /** Everyone waiting on this file and span; the job is cancelled when the last one leaves. */
   subscribers: Set<Subscriber>;
@@ -79,13 +83,20 @@ export function validateRequest(request: TranscribeRequest): TranscribeRequest {
     throw new Error('Transcription language must be a language tag such as “en”.');
   }
   if (request.requestId !== undefined && (typeof request.requestId !== 'string' || request.requestId.length > 128)) throw new Error('Invalid transcription request id.');
+  if (request.wordTimestamps !== undefined && typeof request.wordTimestamps !== 'boolean') throw new Error('Invalid transcription request.');
   return {
     path: request.path,
     ...(start !== undefined ? { start } : {}),
     ...(end !== undefined ? { end } : {}),
     ...(request.language ? { language: request.language } : {}),
-    ...(request.requestId ? { requestId: request.requestId } : {})
+    ...(request.requestId ? { requestId: request.requestId } : {}),
+    ...(request.wordTimestamps ? { wordTimestamps: true } : {})
   };
+}
+
+/** A model's identity for the transcript cache: a re-pinned file misses. */
+export function modelKey(model: Pick<CatalogModel, 'id' | 'files'>): string {
+  return `${model.id}@${model.files[0]?.sha256 ?? ''}`;
 }
 
 let sequence = 0;
@@ -113,14 +124,20 @@ export class TranscriptionEngine implements TranscriptionService {
     const request = validateRequest(raw);
     if (signal?.aborted) throw new TranscriptionAbortedError();
     await this.options.models.load();
-    const active = this.options.models.activeModel();
-    if (!active) throw new TranscriptionModelMissingError();
-    const key = await transcriptKey(request.path, active.model.id, request).catch((error: unknown) => {
+    const setting = this.options.models.language();
+    const active = this.options.models.modelFor({ ...(request.wordTimestamps ? { wordTimestamps: true } : {}), language: request.language ?? setting });
+    if (!active) {
+      throw new TranscriptionModelMissingError(request.wordTimestamps && this.options.models.activeModel()
+        ? 'Captions need a speech model that times each word.'
+        : undefined);
+    }
+    const spoken = decodeLanguage(active.model, request.language ?? setting);
+    const key = await transcriptKey(request.path, modelKey(active.model), { ...request, ...(spoken ? { language: spoken } : {}) }).catch((error: unknown) => {
       const code = (error as NodeJS.ErrnoException)?.code;
       if (code === 'ENOENT') throw new Error('The media file could not be found.');
       throw error;
     });
-    const language = transcriptLanguage(active.model, request.language, this.options.models.language());
+    const language = transcriptLanguage(active.model, request.language, setting);
     const finish = (transcript: Transcript): Transcript => ({ ...transcript, ...(language ? { language } : {}) });
     const cached = await this.options.cache.get(key);
     if (cached) {
@@ -140,8 +157,9 @@ export class TranscriptionEngine implements TranscriptionService {
         job = {
           id: `t${++sequence}`,
           request,
-          modelId: active.model.id,
+          model: active.model,
           modelDir: active.dir,
+          ...(spoken ? { decodeLanguage: spoken } : {}),
           key,
           subscribers: new Set(),
           started: false
@@ -244,9 +262,11 @@ export class TranscriptionEngine implements TranscriptionService {
       file: job.request.path,
       ...(job.request.start !== undefined ? { start: job.request.start } : {}),
       ...(job.request.end !== undefined ? { end: job.request.end } : {}),
-      modelDir: job.modelDir,
+      model: { file: path.join(job.modelDir, modelFile(job.model).name), timing: job.model.timing, ...(job.model.lag ? { lag: job.model.lag } : {}) },
+      ...(job.decodeLanguage ? { language: job.decodeLanguage } : {}),
       threads,
-      ffmpeg: this.options.ffmpeg
+      ffmpeg: this.options.ffmpeg,
+      ...(this.options.runtime ? { runtime: this.options.runtime } : {})
     });
   }
 
@@ -261,7 +281,7 @@ export class TranscriptionEngine implements TranscriptionService {
     this.current = null;
     if (job.cancelTimer) clearTimeout(job.cancelTimer);
     if (message.type === 'done') {
-      void this.complete(job, { duration: message.duration, segments: message.segments });
+      void this.complete(job, { duration: message.duration, segments: message.segments, ...(message.language ? { language: message.language } : {}) });
     } else {
       this.settle(job, message.type === 'cancelled' ? new TranscriptionAbortedError() : new Error(message.message));
     }
@@ -270,7 +290,9 @@ export class TranscriptionEngine implements TranscriptionService {
 
   /** Caches the transcript before answering, so a request arriving meanwhile still joins this job. */
   private async complete(job: Job, result: JobResult): Promise<void> {
-    const transcript: Transcript = { modelId: job.modelId, duration: result.duration, segments: result.segments };
+    /* The model's own detection labels the transcript when nothing else will (finish() overrides it with a chosen language). */
+    const detected = detectedLanguage(job.model, result.language);
+    const transcript: Transcript = { modelId: job.model.id, ...(detected ? { language: detected } : {}), duration: result.duration, segments: result.segments };
     await this.options.cache.set(job.key, transcript).catch((error: unknown) => console.warn('[transcription] cache write failed', error));
     for (const subscriber of job.subscribers) subscriber.onProgress?.(1);
     this.settle(job, transcript);
@@ -283,6 +305,12 @@ export class TranscriptionEngine implements TranscriptionService {
  * one takes the caller's hint or the saved setting when it lists that
  * language, and otherwise leaves it unset (detected, unlabelled).
  */
+/** A detected tag the model lists, as its base language (Nemotron's de-DE is de). */
+export function detectedLanguage(model: Pick<CatalogModel, 'languageCodes'>, detected: string | undefined): string | undefined {
+  const base = detected?.split(/[-_]/)[0]?.toLowerCase();
+  return base && model.languageCodes.includes(base) ? base : undefined;
+}
+
 export function transcriptLanguage(model: Pick<CatalogModel, 'languages' | 'languageCodes'>, requested: string | undefined, setting: string): string | undefined {
   if (model.languages === 'en') return 'en';
   const supported = (tag: string | undefined): tag is string => !!tag && tag !== 'auto' && model.languageCodes.includes(tag.split('-')[0]!.toLowerCase());

@@ -61,22 +61,33 @@ async function signingInfo(file) {
   };
 }
 
-/* The transcription utility process loads sherpa-onnx's native addon and its
-   ONNX Runtime dylibs from app.asar.unpacked. Under the hardened runtime,
-   library validation refuses them unless they carry the app's own Team ID,
-   so prove the signing pass covered them before anything ships. */
+/* The transcription utility process loads koffi's native addon, which
+   dlopens transcribe.cpp's libtranscribe and ggml dylibs from
+   app.asar.unpacked. Under the hardened runtime, library validation refuses
+   them unless they carry the app's own Team ID, so prove the signing pass
+   covered every one before anything ships. */
+const NATIVE_RUNTIME = [
+  { dir: 'node_modules/@transcribe-cpp/darwin-arm64-metal', expect: ['libtranscribe.dylib', 'libggml.dylib', 'libggml-base.dylib', 'libggml-cpu.dylib', 'libggml-metal.dylib'] },
+  { dir: 'node_modules/@koromix/koffi-darwin-arm64/darwin_arm64', expect: ['koffi.node'] }
+];
+
 async function verifyNativeAddons(app) {
   const appInfo = await signingInfo(app);
-  const dir = path.join(app, 'Contents/Resources/app.asar.unpacked/node_modules/sherpa-onnx-darwin-arm64');
-  const binaries = (await readdir(dir)).filter((name) => name.endsWith('.node') || name.endsWith('.dylib'));
-  if (!binaries.length) throw new Error(`No transcription runtime binaries found in ${dir}.`);
-  for (const name of binaries) {
-    const info = await signingInfo(path.join(dir, name));
-    if (info.team !== appInfo.team || !info.runtime) {
-      throw new Error(`${name} is not signed for library validation (team ${info.team}, app team ${appInfo.team}, runtime ${info.runtime}).`);
+  const signed = [];
+  for (const { dir: relative, expect } of NATIVE_RUNTIME) {
+    const dir = path.join(app, 'Contents/Resources/app.asar.unpacked', relative);
+    const binaries = (await readdir(dir)).filter((name) => name.endsWith('.node') || name.endsWith('.dylib'));
+    const missing = expect.filter((name) => !binaries.includes(name));
+    if (missing.length) throw new Error(`Transcription runtime binaries missing from ${dir}: ${missing.join(', ')}.`);
+    for (const name of binaries) {
+      const info = await signingInfo(path.join(dir, name));
+      if (info.team !== appInfo.team || !info.runtime) {
+        throw new Error(`${name} is not signed for library validation (team ${info.team}, app team ${appInfo.team}, runtime ${info.runtime}).`);
+      }
+      signed.push(name);
     }
   }
-  process.stdout.write(`Transcription runtime signed with team ${appInfo.team}: ${binaries.join(', ')}\n`);
+  process.stdout.write(`Transcription runtime signed with team ${appInfo.team}: ${signed.join(', ')}\n`);
 }
 
 async function main() {

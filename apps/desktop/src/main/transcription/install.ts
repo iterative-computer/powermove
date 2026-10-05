@@ -31,6 +31,8 @@ export interface TranscriptionHost {
   reveal(dir: string): Promise<void> | void;
   /** e2e only: a JSON catalog that replaces the pinned one. */
   catalogFile?: string | null;
+  /** Packaged app: libtranscribe.dylib in app.asar.unpacked (dlopen cannot read the asar). */
+  runtime?: string;
 }
 
 export interface InstalledTranscription {
@@ -61,7 +63,8 @@ export function installTranscription(host: TranscriptionHost): InstalledTranscri
     cache: new TranscriptCache(path.join(host.userData, 'transcription-cache')),
     ffmpeg: host.ffmpeg,
     spawnWorker: host.spawnWorker,
-    requestModel: (reason) => host.requestModel(String(reason ?? '').slice(0, 300))
+    requestModel: (reason) => host.requestModel(String(reason ?? '').slice(0, 300)),
+    ...(host.runtime ? { runtime: host.runtime } : {})
   });
   void models.load().catch((error: unknown) => console.error('[transcription] model scan failed', error));
   registerTranscriptionIpc(host.ipc, { service: engine, models, isTrustedSender: host.isTrustedSender, reveal: host.reveal });

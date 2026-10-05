@@ -1,6 +1,16 @@
 import type { TranscriptSegment } from '../../shared/transcription';
+import type { CatalogTiming } from './catalog';
 
 /* Messages between main and the transcription process (worker.ts). */
+
+export interface WorkerModel {
+  /** Absolute path of the model's GGUF file. */
+  file: string;
+  /** How finely the model times its output; picks the windowing and how words get their times. */
+  timing: CatalogTiming;
+  /** Seconds the model reports words late, [start, end] (CatalogModel.lag). */
+  lag?: [number, number];
+}
 
 export type WorkerRequest =
   | {
@@ -9,17 +19,21 @@ export type WorkerRequest =
     file: string;
     start?: number;
     end?: number;
-    modelDir: string;
+    model: WorkerModel;
+    /** Language tag to hand the model; omitted lets it detect. */
+    language?: string;
     threads: number;
     ffmpeg: string;
+    /** Packaged app: libtranscribe.dylib outside the asar, where dlopen can map it. */
+    runtime?: string;
   }
   | { type: 'cancel'; id: string }
   /** Load the model ahead of the first request. */
-  | { type: 'warm'; modelDir: string; threads: number };
+  | { type: 'warm'; model: WorkerModel; threads: number; runtime?: string };
 
 export type WorkerResponse =
   | { type: 'ready' }
   | { type: 'progress'; id: string; progress: number }
-  | { type: 'done'; id: string; duration: number; segments: TranscriptSegment[] }
+  | { type: 'done'; id: string; duration: number; segments: TranscriptSegment[]; /** Detected by the model, when it says. */ language?: string }
   | { type: 'error'; id: string; message: string }
   | { type: 'cancelled'; id: string };

@@ -9,7 +9,8 @@ import { TRANSCRIPTION_IPC, TRANSCRIPTION_MODEL_MISSING, type TranscribeResult }
 import { TranscriptCache } from './cache';
 import { TranscriptionAbortedError, TranscriptionEngine, transcriptLanguage, validateRequest, type WorkerChannel } from './engine';
 import { registerTranscriptionIpc } from './ipc';
-import type { ModelStore } from './models';
+import type { CatalogModel } from './catalog';
+import { ModelStore } from './models';
 import type { WorkerRequest, WorkerResponse } from './worker-protocol';
 
 let dir = '';
@@ -36,20 +37,33 @@ class FakeWorker implements WorkerChannel {
   last() { return this.posted.at(-1) as Extract<WorkerRequest, { type: 'transcribe' }>; }
 }
 
-function fakeModels(ready = true, language = 'auto'): ModelStore {
-  const model = { id: 'parakeet', languages: 'multi', languageCodes: ['en', 'de', 'fr'] };
-  return {
+const fakeModel = (id: string, extra: Partial<CatalogModel> = {}): CatalogModel => ({
+  id, name: id, description: '', family: 'parakeet', languages: 'multi', languageCodes: ['en', 'de', 'fr'], detectsLanguage: true,
+  timing: 'word', speed: 0.8, accuracy: 0.8, recommended: false, featured: false, wordTimestamps: true, license: '',
+  files: [{ name: `${id}.gguf`, url: `https://example.com/${id}.gguf`, size: 10, sha256: 'a'.repeat(64) }],
+  ...extra
+});
+
+/** A ModelStore over the real ModelStore.modelFor: `ready` in catalog order, the first one active. */
+function fakeModels(ready: CatalogModel[] | boolean = true, language = 'auto'): ModelStore {
+  const models = ready === true ? [fakeModel('parakeet')] : ready === false ? [] : ready;
+  const store = {
     load: async () => undefined,
-    status: () => ({ models: [], activeModelId: ready ? 'parakeet' : null }),
-    activeModel: () => (ready ? { model, dir: '/models/parakeet' } : null),
-    language: () => language
-  } as unknown as ModelStore;
+    status: () => ({ models: [], activeModelId: models[0]?.id ?? null }),
+    activeModel: () => (models[0] ? { model: models[0], dir: `/models/${models[0].id}` } : null),
+    language: () => language,
+    modelDir: (id: string) => `/models/${id}`,
+    options: { catalog: models },
+    ready: new Set(models.map((model) => model.id))
+  };
+  (store as unknown as { modelFor: ModelStore['modelFor'] }).modelFor = ModelStore.prototype.modelFor.bind(store as unknown as ModelStore);
+  return store as unknown as ModelStore;
 }
 
 const segments = [{ text: 'Hello there.', start: 0.5, end: 1.2, words: [{ text: 'Hello', start: 0.5, end: 0.8 }, { text: 'there.', start: 0.8, end: 1.2 }] }];
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-function engine(options: { ready?: boolean; language?: string } = {}) {
+function engine(options: { ready?: boolean | CatalogModel[]; language?: string } = {}) {
   const workers: FakeWorker[] = [];
   const requestModel = vi.fn();
   const instance = new TranscriptionEngine({
@@ -81,6 +95,8 @@ describe('TranscriptionEngine', () => {
     expect(() => validateRequest({ path: '/a.wav', start: Number.NaN })).toThrow();
     expect(() => validateRequest({ path: '/a.wav', language: 'English' })).toThrow();
     expect(validateRequest({ path: '/a.wav', start: 1, end: 2, language: 'de', requestId: 'r1' })).toEqual({ path: '/a.wav', start: 1, end: 2, language: 'de', requestId: 'r1' });
+    expect(validateRequest({ path: '/a.wav', wordTimestamps: true })).toEqual({ path: '/a.wav', wordTimestamps: true });
+    expect(() => validateRequest({ path: '/a.wav', wordTimestamps: 'yes' as never })).toThrow();
   });
 
   it('runs a job in the worker, reports progress, and answers repeats from the cache', async () => {
@@ -89,19 +105,70 @@ describe('TranscriptionEngine', () => {
     const pending = instance.transcribe({ path: media, start: 2, end: 9 }, (value) => progress.push(value));
     await until(() => workers.length === 1 && workers[0]!.posted.length === 1);
     const job = workers[0]!.last();
-    expect(job).toMatchObject({ type: 'transcribe', file: media, start: 2, end: 9, modelDir: '/models/parakeet', threads: 2, ffmpeg: '/bin/ffmpeg' });
+    expect(job).toMatchObject({ type: 'transcribe', file: media, start: 2, end: 9, model: { file: '/models/parakeet/parakeet.gguf', timing: 'word' }, language: 'de', threads: 2, ffmpeg: '/bin/ffmpeg' });
     workers[0]!.reply({ type: 'progress', id: job.id, progress: 0.5 });
     workers[0]!.reply({ type: 'done', id: job.id, duration: 7, segments });
     const transcript = await pending;
     expect(transcript).toEqual({ modelId: 'parakeet', duration: 7, segments, language: 'de' });
     expect(progress).toEqual([0.5, 1]);
 
-    const again = await instance.transcribe({ path: media, start: 2, end: 9, language: 'fr' });
-    expect(again).toEqual({ ...transcript, language: 'fr' });
+    const again = await instance.transcribe({ path: media, start: 2, end: 9, language: 'de' });
+    expect(again).toEqual(transcript);
     expect(workers[0]!.posted).toHaveLength(1);
     // A different span is a different transcript.
     void instance.transcribe({ path: media, start: 3 }).catch(() => undefined);
     await until(() => workers[0]!.posted.length === 2);
+    instance.dispose();
+  });
+
+  it('keys the cache by the language a model is told, and passes it and the lag to the worker', async () => {
+    const canary = fakeModel('canary', { family: 'canary', detectsLanguage: false, timing: 'none', wordTimestamps: false, lag: [0.1, 0.05] });
+    const { instance, workers } = engine({ ready: [canary] });
+    const english = instance.transcribe({ path: media });
+    await until(() => workers[0]?.posted.length === 1);
+    expect(workers[0]!.last()).toMatchObject({ model: { file: '/models/canary/canary.gguf', timing: 'none', lag: [0.1, 0.05] }, language: 'en' });
+    workers[0]!.reply({ type: 'done', id: workers[0]!.last().id, duration: 1, segments });
+    await english;
+    // German is a different transcript for a model that must be told: not a cache hit.
+    const german = instance.transcribe({ path: media, language: 'de' });
+    await until(() => workers[0]!.posted.length === 2);
+    expect(workers[0]!.last()).toMatchObject({ language: 'de' });
+    workers[0]!.reply({ type: 'done', id: workers[0]!.last().id, duration: 1, segments, language: 'de' });
+    expect(await german).toMatchObject({ modelId: 'canary', language: 'de' });
+    instance.dispose();
+  });
+
+  it('uses a downloaded word-timed model when the request needs word timing and the active one lacks it', async () => {
+    const cohere = fakeModel('cohere', { family: 'cohere', detectsLanguage: false, timing: 'none', wordTimestamps: false });
+    const english = fakeModel('unified', { languages: 'en', languageCodes: ['en'], detectsLanguage: false });
+    const multi = fakeModel('nemotron');
+    const { instance, workers } = engine({ ready: [cohere, english, multi], language: 'de' });
+    const pending = instance.transcribe({ path: media, wordTimestamps: true });
+    await until(() => workers[0]?.posted.length === 1);
+    // German is the setting: the timed model that lists German wins over the first timed one.
+    expect(workers[0]!.last().model.file).toBe('/models/nemotron/nemotron.gguf');
+    workers[0]!.reply({ type: 'done', id: workers[0]!.last().id, duration: 1, segments });
+    expect(await pending).toMatchObject({ modelId: 'nemotron', language: 'de' });
+    instance.dispose();
+
+    const untimed = engine({ ready: [cohere] });
+    await expect(untimed.instance.transcribe({ path: media, wordTimestamps: true })).rejects.toMatchObject({
+      code: TRANSCRIPTION_MODEL_MISSING, message: 'Captions need a speech model that times each word.'
+    });
+    // Without the requirement the active model runs as usual.
+    void untimed.instance.transcribe({ path: media }).catch(() => undefined);
+    await until(() => untimed.workers[0]?.posted.length === 1);
+    expect(untimed.workers[0]!.last().model.timing).toBe('none');
+    untimed.instance.dispose();
+  });
+
+  it('labels a transcript with the language the model detected', async () => {
+    const { instance, workers } = engine();
+    const pending = instance.transcribe({ path: media });
+    await until(() => workers[0]?.posted.length === 1);
+    expect(workers[0]!.last().language).toBeUndefined();
+    workers[0]!.reply({ type: 'done', id: workers[0]!.last().id, duration: 1, segments, language: 'de-DE' });
+    expect(await pending).toMatchObject({ language: 'de' });
     instance.dispose();
   });
 

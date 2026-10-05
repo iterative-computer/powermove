@@ -50,8 +50,8 @@ afterEach(async () => {
 function model(id: string, entries: Record<string, Buffer>): CatalogModel {
   for (const [name, body] of Object.entries(entries)) files[`/${id}/${name}`] = { body, requests: [] };
   return {
-    id, name: id, description: '', kind: 'nemo-transducer', languages: 'multi', languageCodes: ['en', 'de'],
-    speed: 0.8, accuracy: 0.8, recommended: false, wordTimestamps: true, license: '',
+    id, name: id, description: '', family: 'parakeet', languages: 'multi', languageCodes: ['en', 'de'], detectsLanguage: true,
+    timing: 'word', speed: 0.8, accuracy: 0.8, recommended: false, featured: false, wordTimestamps: true, license: '',
     files: Object.entries(entries).map(([name, body]) => ({ name, url: `${origin}/${id}/${name}`, size: body.length, sha256: sha(body) }))
   };
 }
@@ -183,5 +183,35 @@ describe('ModelStore', () => {
     await reopened.load();
     expect(reopened.status()).toMatchObject({ activeModelId: null });
     expect(reopened.status().models[0]!.state).toBe('absent');
+    // An older build of the model can never load again: its folder is gone.
+    expect(await readdir(root)).not.toContain('theta');
+  });
+
+  it('keeps a folder whose manifest still names the current file (a damaged copy, not an old build)', async () => {
+    const body = bytes(100, 13);
+    const catalog = [model('iota', { 'model.gguf': body })];
+    await store(catalog).instance.download('iota');
+    await writeFile(path.join(root, 'iota', 'model.gguf'), body.subarray(0, 50));
+    const reopened = store(catalog).instance;
+    await reopened.load();
+    expect(reopened.status().models[0]!.state).toBe('absent');
+    expect(await readdir(root)).toContain('iota');
+  });
+
+  it('reports timing, language detection and the curated flag, and picks a word-timed model on request', async () => {
+    const untimed = { ...model('cohere', { 'model.gguf': bytes(100, 14) }), timing: 'none' as const, wordTimestamps: false, detectsLanguage: false, featured: true };
+    const english = { ...model('unified', { 'model.gguf': bytes(100, 15) }), languages: 'en' as const, languageCodes: ['en'] };
+    const german = model('nemotron', { 'model.gguf': bytes(100, 16) });
+    const { instance } = store([untimed, english, german]);
+    await instance.download('cohere');
+    expect(instance.status().models[0]).toMatchObject({ timing: 'none', wordTimestamps: false, detectsLanguage: false, featured: true });
+    expect(instance.modelFor({ wordTimestamps: true })).toBeNull();
+    expect(instance.modelFor()?.model.id).toBe('cohere');
+    await instance.download('unified');
+    await instance.download('nemotron');
+    expect(instance.modelFor({ wordTimestamps: true })?.model.id).toBe('unified');
+    expect(instance.modelFor({ wordTimestamps: true, language: 'de-AT' })?.model.id).toBe('nemotron');
+    await instance.setActive('nemotron');
+    expect(instance.modelFor({ wordTimestamps: true, language: 'en' })?.model.id).toBe('nemotron');
   });
 });

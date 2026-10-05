@@ -35,14 +35,15 @@ function modelId(channel: string, value: unknown): string {
 
 export function transcribeRequest(value: unknown): TranscribeRequest {
   if (!isRecord(value)) throw new IpcValidationError(TRANSCRIPTION_IPC.transcribe, 'expected a request');
-  const { path, start, end, language, requestId } = value;
+  const { path, start, end, language, requestId, wordTimestamps } = value;
   if (!isString(path, 4096)) throw new IpcValidationError(TRANSCRIPTION_IPC.transcribe, 'expected a path');
   return validateRequest({
     path,
     ...(start !== undefined ? { start: start as number } : {}),
     ...(end !== undefined ? { end: end as number } : {}),
     ...(language !== undefined ? { language: language as string } : {}),
-    ...(requestId !== undefined ? { requestId: requestId as string } : {})
+    ...(requestId !== undefined ? { requestId: requestId as string } : {}),
+    ...(wordTimestamps !== undefined ? { wordTimestamps: wordTimestamps as boolean } : {})
   });
 }
 

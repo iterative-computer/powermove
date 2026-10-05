@@ -6,20 +6,23 @@ import type { Transcript } from '../../shared/transcription';
 
 /*
  * Finished transcripts, so asking again is instant. The key is the file's
- * identity (real path, size, modification time, inode), the model and the
- * span: editing or replacing the file, or switching models, misses.
+ * identity (real path, size, modification time, inode), the model (its id
+ * and file checksum), the language it was told and the span: editing or
+ * replacing the file, switching or re-pinning models, or choosing another
+ * language for a model that must be told, misses.
  */
 
-/** Bumped when the engine's output changes, so old transcripts miss. */
-const VERSION = 2;
+/** Bumped when the engine's output changes, so old transcripts miss.
+ *  3: transcribe.cpp replaced sherpa-onnx. */
+const VERSION = 3;
 
-export interface CacheSpan { start?: number; end?: number }
+export interface CacheSpan { start?: number; end?: number; language?: string }
 
 export async function transcriptKey(file: string, modelId: string, span: CacheSpan): Promise<string> {
   const real = await realpath(file);
   const info = await stat(real);
   if (!info.isFile()) throw new Error('Only files can be transcribed.');
-  const identity = [VERSION, real, info.size, Math.round(info.mtimeMs), info.ino, modelId, span.start ?? 0, span.end ?? null];
+  const identity = [VERSION, real, info.size, Math.round(info.mtimeMs), info.ino, modelId, span.start ?? 0, span.end ?? null, span.language ?? null];
   return createHash('sha256').update(JSON.stringify(identity)).digest('hex');
 }
 
