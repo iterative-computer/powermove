@@ -113,6 +113,20 @@ test("Blender models, editable materials, regeneration and engine renders work i
     }, theme);
     await page.screenshot({ path: `/tmp/powermove-blender-${theme}.png` });
   }
+  // Inspect the completed worker's own engine, rather than trusting UI settings.
+  await session.app.evaluate(({ ipcMain }) => {
+    const ipc = ipcMain as any,
+      original = ipc._invokeHandlers.get("blender:run"),
+      proof: any[] = [];
+    (globalThis as any).__blenderEngineProof = proof;
+    ipc.removeHandler("blender:run");
+    ipc.handle("blender:run", async (event: any, job: any) => {
+      const result = await original(event, job);
+      if (job.operation === "render")
+        proof.push({ requested: job.snapshot.settings.engine, actual: result.manifest.renderEngine });
+      return result;
+    });
+  });
   for (const engine of ["eevee", "cycles"]) {
     const render = await page.evaluate(
       async ({ engine, body }) => {
@@ -182,6 +196,12 @@ test("Blender models, editable materials, regeneration and engine renders work i
     expect(render.difference).toBeGreaterThan(1000);
     expect(render.snapshot).toBe(true);
     expect(render.exported).toBe(true);
+    const proof = await session.app.evaluate(() => (globalThis as any).__blenderEngineProof);
+    const jobs = proof.filter((job: any) => job.requested === engine);
+    expect(jobs.length).toBeGreaterThan(0);
+    for (const job of jobs)
+      if (engine === "cycles") expect(job.actual).toBe("CYCLES");
+      else expect(job.actual).toMatch(/^BLENDER_EEVEE/);
   }
   const source = await page.evaluate(async () => {
     const PM = (window as any).PM,

@@ -375,7 +375,9 @@ def execute(req):
             # Holdouts preserve depth and inter-object shadows in the layer stack.
             filename=layer_id+'.png';bpy.context.scene.render.filepath=os.path.join(directory,filename);bpy.ops.render.render(write_still=True)
             files.append({'id':layer_id,'name':filename})
-        manifest={'files':files,'engine':req['snapshot']['settings']['engine']}
+        scene=bpy.context.scene
+        manifest={'files':files,'engine':req['snapshot']['settings']['engine'],'renderEngine':scene.render.engine}
+        if scene.render.engine=='CYCLES':manifest.update(samples=scene.cycles.samples,device=scene.cycles.device)
     else:raise ValueError('Unsupported Blender operation')
     with open(os.path.join(directory,'manifest.json'),'w') as file:json.dump(manifest,file)
 
