@@ -33,6 +33,31 @@ describe('caption commands', () => {
     expect(PM.proj.edits.at(-1).operations[0].type).toBe('add_captions');
   });
 
+  it('normalises set_content on a captions layer, so raw patches cannot corrupt the cue list', () => {
+    PM.Edit.apply({ type: 'add_captions', text: SRT, style: { preset: 'boxed' } });
+    const layer = captions();
+    const result = PM.Edit.apply({ type: 'set_content', target: layer.id, patch: { cues: [
+      { id: 'b', start: 4, end: 6, text: 'Second' },
+      { id: 'a', start: 0, end: 5, text: 5 },
+      { id: 'x', start: 'soon', end: 2, text: 'Bad time' },
+      { id: 'y', start: 7, end: 8, text: '   ' }
+    ] } }, { label: 'Agent patch', origin: 'agent' });
+    expect(result.ok).toBe(true);
+    expect(layer.d.cues.map((cue: any) => [cue.id, cue.start, cue.end, cue.text])).toEqual([['a', 0, 4, '5'], ['b', 4, 6, 'Second']]);
+    // A partial style merges, and bad values fall back to defaults.
+    PM.Edit.apply({ type: 'set_content', target: layer.id, patch: { style: { fill: 'not a colour', size: 90 } } }, { origin: 'agent' });
+    expect(layer.d.style.box).toBe(true);
+    expect(layer.d.style.size).toBe(90);
+    expect(typeof layer.d.style.fill).toBe('string');
+    expect(layer.d.style.fill).not.toBe('not a colour');
+    const refused = PM.Edit.apply({ type: 'set_content', target: layer.id, patch: { src: 'x' } }, { origin: 'agent' });
+    expect(refused.ok).toBe(false);
+    expect(refused.message).toMatch(/edit_captions/);
+    PM.hist.undo();
+    PM.hist.undo();
+    expect(texts()).toEqual(['Hello there', 'General Kenobi']);
+  });
+
   it('uses composition time in commands and layer time in storage', () => {
     PM.Edit.apply({ type: 'add_captions', from: 2, cues: [{ start: 3, end: 4, text: 'At three' }] });
     const layer = captions();

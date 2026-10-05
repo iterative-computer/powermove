@@ -73,6 +73,24 @@ function fitDuration(PM: any, layer: any, before: readonly CaptionCue[] | null):
 
 const normalized = new WeakSet<object>();
 
+const CONTENT_KEYS = new Set(['cues', 'style', 'language']);
+
+/**
+ * set_content on a captions layer (the timeline's trim/split re-basing, source
+ * transforms, scripts, the agent). The result is always normalised, so cues
+ * stay sorted, disjoint and well-formed whatever the patch held; a partial
+ * style merges into the current one. Other fields are refused.
+ */
+export function setCaptionsContent(layer: any, patch: Record<string, unknown>): void {
+  for (const key of Object.keys(patch)) {
+    if (!CONTENT_KEYS.has(key)) throw new Error(`Captions content field “${key}” is not editable; use edit_captions`);
+  }
+  const next: Record<string, unknown> = { ...layer.d, ...patch };
+  if (patch.style && typeof patch.style === 'object' && !Array.isArray(patch.style)) next.style = { ...layer.d?.style, ...patch.style };
+  layer.d = normalizeCaptionsContent(next);
+  normalized.add(layer.d.cues);
+}
+
 export function addCaptions({ PM }: Context, command: any) {
   const from = command.from == null ? 0 : Math.max(0, Number(command.from) || 0);
   const offset = Number(command.offset) || 0;

@@ -7,7 +7,7 @@ import { preserveParentPose } from './parenting';
 import { expressionDiagnostic } from './expression';
 import { inspectorService, shaderHooks } from './services';
 import { compactEditLog } from '../../core/edit-log';
-import { addCaptions, editCaptions } from '../../captions/commands';
+import { addCaptions, editCaptions, setCaptionsContent } from '../../captions/commands';
 /* Ported from js/core/editing.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
@@ -303,6 +303,7 @@ function setContent(command: any) {
   if (!Object.keys(patch).length) return { id: layer.id };
   if (layer.type === 'audio') setAudioContent(layer, patch);
   else if (layer.type === 'extension') setExtensionContent(layer, patch);
+  else if (layer.type === 'captions') setCaptionsContent(layer, patch);
   else Object.assign(layer.d, patch);
   if (layer.type === 'shader' && Object.hasOwn(patch, 'code')) {
     shaderHooks(PM)?.syncShaderUniforms(layer);
