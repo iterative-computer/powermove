@@ -68,20 +68,32 @@ export function tokensToWords(result: RecognizedTokens, offset = 0): TranscriptW
   });
 }
 
+/** A gap at least this long (as reported) makes the next word an onset after a pause. */
+const LAG_PAUSE = 0.2;
+
 /**
- * Takes a model's reporting delay off its words: starts move back by
- * `start` seconds and ends by `end`, never before the previous word ends
- * and never shorter than 20 ms.
+ * Takes a model's reporting delay off its words, `lag` = [onset, inner,
+ * end] seconds. Every start moves back first, kept in order: by `onset` for
+ * the first word and a word after a pause, by `inner` inside continuous
+ * speech. Then each word ends `end` earlier, but never past the next word's
+ * new start and never shorter than 20 ms where there is room. Shifting the
+ * starts before any clamping keeps words in continuous speech near their
+ * own length (clamping each start to the previous end instead pinned it
+ * there: the word before ran long and the next came out squeezed).
  */
-export function removeLag(words: TranscriptWord[], start: number, end: number): TranscriptWord[] {
-  const out: TranscriptWord[] = [];
-  for (const word of words) {
-    const previous = out[out.length - 1];
-    const from = Math.max(previous ? previous.end : -Infinity, word.start - start);
-    const to = Math.max(from + 0.02, word.end - end);
-    out.push({ ...word, start: round(from), end: round(to) });
-  }
-  return out;
+export function removeLag(words: TranscriptWord[], lag: readonly [onset: number, inner: number, end: number]): TranscriptWord[] {
+  const [onset, inner, end] = lag;
+  const starts: number[] = [];
+  words.forEach((word, index) => {
+    const previous = words[index - 1];
+    const shift = !previous || word.start - previous.end >= LAG_PAUSE ? onset : inner;
+    starts.push(Math.max(starts[index - 1] ?? -Infinity, word.start - shift));
+  });
+  return words.map((word, index) => {
+    const from = starts[index]!;
+    const to = Math.min(starts[index + 1] ?? Infinity, Math.max(from + 0.02, word.end - end));
+    return { ...word, start: round(from), end: round(Math.max(from, to)) };
+  });
 }
 
 /**

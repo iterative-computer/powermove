@@ -1,5 +1,6 @@
 import type { TranscriptWord } from '../../shared/transcription';
 import type { TranscriptionTiming as CatalogTiming } from '../../shared/transcription';
+import type { WordLag } from './catalog';
 import { removeLag, spreadWords, tokensToWords } from './words';
 
 /*
@@ -27,7 +28,7 @@ export interface WindowTiming {
   soundTo: number;
 }
 
-export function windowWords(result: EngineResult, timing: CatalogTiming, window: WindowTiming, lag?: [number, number]): TranscriptWord[] {
+export function windowWords(result: EngineResult, timing: CatalogTiming, window: WindowTiming, lag?: WordLag): TranscriptWord[] {
   if (timing === 'word' && result.tokens.length) {
     const words = tokensToWords({
       tokens: result.tokens.map((token) => token.text),
@@ -35,7 +36,7 @@ export function windowWords(result: EngineResult, timing: CatalogTiming, window:
       durations: result.tokens.map((token) => Math.max(0, token.t1Ms - token.t0Ms) / 1000),
       logProbs: result.tokens.map((token) => Math.log(Math.max(1e-6, Math.min(1, token.p))))
     }, window.offset);
-    return lag ? removeLag(words, lag[0], lag[1]) : words;
+    return lag ? removeLag(words, lag) : words;
   }
   const clamp = (value: number) => Math.min(window.soundTo, Math.max(window.soundFrom, value));
   if (timing !== 'none') {

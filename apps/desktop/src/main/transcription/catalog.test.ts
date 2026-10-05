@@ -77,10 +77,10 @@ describe('parseCatalog', () => {
   const file = { name: 'a.gguf', url: 'http://127.0.0.1/a.gguf', size: 10, sha256: 'a'.repeat(64) };
 
   it('fills defaults and derives word timing from the timing kind', () => {
-    const [model] = parseCatalog([{ id: 'a', files: [file], timing: 'segment', languages: 'multi', languageCodes: ['en', 'de', 'English'], lag: [0.2, 0.1] }]);
+    const [model] = parseCatalog([{ id: 'a', files: [file], timing: 'segment', languages: 'multi', languageCodes: ['en', 'de', 'English'], lag: [0.2, 0.1, 0] }]);
     expect(model).toMatchObject({ id: 'a', timing: 'segment', wordTimestamps: false, detectsLanguage: true, languageCodes: ['en', 'de'], featured: false, family: 'parakeet' });
     // A lag on a model without word timing is kept; the worker ignores it.
-    expect(model!.lag).toEqual([0.2, 0.1]);
+    expect(model!.lag).toEqual([0.2, 0.1, 0]);
     expect(parseCatalog([{ id: 'b', files: [file] }])[0]).toMatchObject({ timing: 'word', wordTimestamps: true });
     expect(parseCatalog([{ id: 'c', files: [file], languages: 'en', languageCodes: ['de'] }])[0]!.languageCodes).toEqual(['en']);
   });
@@ -91,6 +91,7 @@ describe('parseCatalog', () => {
     expect(() => parseCatalog([{ id: 'a', files: [file, file] }])).toThrow(/exactly one/);
     expect(() => parseCatalog([{ id: 'a', files: [{ ...file, sha256: 'nope' }] }])).toThrow();
     expect(() => parseCatalog([{ id: 'a', files: [{ ...file, name: '../a.gguf' }] }])).toThrow();
-    expect(parseCatalog([{ id: 'a', files: [file], lag: [5, 0] }])[0]!.lag).toBeUndefined();
+    expect(parseCatalog([{ id: 'a', files: [file], lag: [5, 0, 0] }])[0]!.lag).toBeUndefined();
+    expect(parseCatalog([{ id: 'a', files: [file], lag: [0.3, 0.08] }])[0]!.lag).toBeUndefined();
   });
 });

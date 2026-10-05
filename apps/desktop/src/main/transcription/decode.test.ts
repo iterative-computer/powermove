@@ -20,9 +20,10 @@ describe('windowWords', () => {
     expect(words[0]).toMatchObject({ start: 10.32, end: 10.48 });
     expect(words[1]).toMatchObject({ start: 10.72, end: 10.88 });
     expect(words[0]!.confidence).toBeCloseTo(Math.sqrt(0.99 * 0.98), 3);
-    const late = windowWords(result, 'word', window, [0.3, 0.08]);
+    const late = windowWords(result, 'word', window, [0.3, 0.2, 0.08]);
     expect(late[0]).toMatchObject({ start: 10.02, end: 10.4 });
-    // Never before the previous word ends.
+    // “20” follows a 240 ms gap: an onset, 0.3 back. Never before the previous word ends.
+    expect(late[1]).toMatchObject({ start: 10.42 });
     expect(late[1]!.start).toBeGreaterThanOrEqual(late[0]!.end);
   });
 

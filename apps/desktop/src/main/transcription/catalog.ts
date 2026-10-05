@@ -25,6 +25,9 @@ export type CatalogTiming = 'word' | 'segment' | 'none';
 
 export type CatalogFamily = 'parakeet' | 'canary' | 'cohere' | 'whisper';
 
+/** Reporting lag in seconds: a word after a pause, a word inside speech, every word's end. */
+export type WordLag = [onset: number, inner: number, end: number];
+
 export interface CatalogFile {
   /** File name inside the model folder. */
   name: string;
@@ -54,12 +57,14 @@ export interface CatalogModel {
   /** Derived from timing: only 'word' models time each word. */
   wordTimestamps: boolean;
   /**
-   * Seconds this model reports words late, as [start, end]. Streaming RNNT
-   * models (Unified EN, Nemotron) emit a token a little after they hear it;
-   * measured against Parakeet TDT V2 and the audio's own onsets on say(1)
-   * speech (feat/transcription-catalog report), then taken off every word.
+   * Seconds this model reports words late (removeLag). Streaming RNNT
+   * models (Unified EN, Nemotron) emit a word's first token after hearing
+   * it: furthest behind for a word after a pause, less inside continuous
+   * speech, and their ends need no shift once each runs to the next start.
+   * Fitted against Parakeet TDT V2's times and the audio's own onsets on
+   * say(1) speech (a 43-word clip and a 4.5 min file).
    */
-  lag?: [start: number, end: number];
+  lag?: WordLag;
   license: string;
   /** Exactly one file: the GGUF the worker loads. */
   files: CatalogFile[];
@@ -112,7 +117,7 @@ export const CATALOG: readonly CatalogModel[] = [
     recommended: true,
     featured: true,
     wordTimestamps: true,
-    lag: [0.32, 0.08],
+    lag: [0.32, 0.2, 0],
     license: NVIDIA,
     files: gguf('handy-computer/parakeet-unified-en-0.6b-gguf', '7e948f21b7bdbac698d3318db9d350f1096f3b6c',
       'parakeet-unified-en-0.6b-Q8_0.gguf', 731_357_568, '4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795')
@@ -131,7 +136,7 @@ export const CATALOG: readonly CatalogModel[] = [
     recommended: true,
     featured: true,
     wordTimestamps: true,
-    lag: [0.3, 0.08],
+    lag: [0.3, 0.2, 0],
     license: 'OpenMDW 1.1 · NVIDIA',
     files: gguf('handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf', '6d44e540bc31b0de1dbe174a3cea87f53a7f22fb',
       'nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf', 751_094_240, 'b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c')
@@ -259,8 +264,8 @@ const TAG = /^[a-z]{2,3}$/;
 const FAMILIES: readonly CatalogFamily[] = ['parakeet', 'canary', 'cohere', 'whisper'];
 const TIMINGS: readonly CatalogTiming[] = ['word', 'segment', 'none'];
 
-function validLag(value: unknown): value is [number, number] {
-  return Array.isArray(value) && value.length === 2 && value.every((entry) => typeof entry === 'number' && Number.isFinite(entry) && Math.abs(entry) <= 1);
+function validLag(value: unknown): value is WordLag {
+  return Array.isArray(value) && value.length === 3 && value.every((entry) => typeof entry === 'number' && Number.isFinite(entry) && Math.abs(entry) <= 1);
 }
 
 /** Validates a catalog read from disk (the e2e override). Throws on anything off. */
@@ -293,7 +298,7 @@ export function parseCatalog(value: unknown): CatalogModel[] {
       recommended: model.recommended === true,
       featured: model.featured === true,
       wordTimestamps: timing === 'word',
-      ...(validLag(model.lag) ? { lag: [model.lag[0], model.lag[1]] as [number, number] } : {}),
+      ...(validLag(model.lag) ? { lag: [model.lag[0], model.lag[1], model.lag[2]] as WordLag } : {}),
       license: String(model.license ?? ''),
       files: model.files.map((file) => ({ name: file.name, url: file.url, size: file.size, sha256: file.sha256 }))
     };

@@ -122,11 +122,11 @@ describe('TranscriptionEngine', () => {
   });
 
   it('keys the cache by the language a model is told, and passes it and the lag to the worker', async () => {
-    const canary = fakeModel('canary', { family: 'canary', detectsLanguage: false, timing: 'none', wordTimestamps: false, lag: [0.1, 0.05] });
+    const canary = fakeModel('canary', { family: 'canary', detectsLanguage: false, timing: 'none', wordTimestamps: false, lag: [0.1, 0.1, 0.05] });
     const { instance, workers } = engine({ ready: [canary] });
     const english = instance.transcribe({ path: media });
     await until(() => workers[0]?.posted.length === 1);
-    expect(workers[0]!.last()).toMatchObject({ model: { file: '/models/canary/canary.gguf', timing: 'none', lag: [0.1, 0.05] }, language: 'en' });
+    expect(workers[0]!.last()).toMatchObject({ model: { file: '/models/canary/canary.gguf', timing: 'none', lag: [0.1, 0.1, 0.05] }, language: 'en' });
     workers[0]!.reply({ type: 'done', id: workers[0]!.last().id, duration: 1, segments });
     await english;
     // German is a different transcript for a model that must be told: not a cache hit.

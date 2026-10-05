@@ -79,9 +79,31 @@ describe('word boundaries and phrase-timed words', () => {
   });
 
   it('removes a reporting lag without overlapping words', () => {
-    const words = removeLag([{ text: 'a', start: 1.3, end: 1.4 }, { text: 'b', start: 1.5, end: 1.6 }, { text: 'c', start: 0.1, end: 0.12 }], 0.3, 0.08);
-    expect(words[0]).toEqual({ text: 'a', start: 1, end: 1.32 });
-    expect(words[1]).toEqual({ text: 'b', start: 1.32, end: 1.52 });
-    expect(words[2]!.end - words[2]!.start).toBeCloseTo(0.02, 5);
+    const words = removeLag([{ text: 'a', start: 1.3, end: 1.4 }, { text: 'b', start: 1.5, end: 1.6 }, { text: 'c', start: 0.1, end: 0.12 }], [0.3, 0.2, 0.08]);
+    // a is the first word (an onset): 0.3 back. b follows a 100 ms gap, inside speech: 0.2 back.
+    expect(words[0]).toEqual({ text: 'a', start: 1, end: 1.3 });
+    // Out of order input stays in order: c is held at b's start, and b gets no room.
+    expect(words[1]).toEqual({ text: 'b', start: 1.3, end: 1.3 });
+    expect(words[2]).toEqual({ text: 'c', start: 1.3, end: 1.32 });
+    // A word after a pause shifts by the onset lag; an end never passes the next start.
+    const after = removeLag([{ text: 'x', start: 1, end: 1.2 }, { text: 'y', start: 2, end: 2.3 }], [0.3, 0.2, 0]);
+    expect(after).toEqual([{ text: 'x', start: 0.7, end: 1.2 }, { text: 'y', start: 1.7, end: 2.3 }]);
+  });
+
+  it('keeps words in continuous speech near their own length (Unified EN on the say clip, against Parakeet V2)', () => {
+    // Unified EN's raw words for “The quick brown fox jumps” (lead-in removed): tokens come late and in bursts.
+    const raw = [
+      { text: 'The', start: 0.48, end: 0.56 }, { text: 'quick', start: 0.56, end: 0.64 }, { text: 'brown', start: 0.72, end: 0.88 },
+      { text: 'fox', start: 0.96, end: 1.12 }, { text: 'jumps', start: 1.36, end: 1.44 }
+    ];
+    const v2 = [[0, 0.08], [0.08, 0.4], [0.4, 0.72], [0.72, 1.12], [1.12, 1.44]];
+    const words = removeLag(raw, [0.32, 0.2, 0]);
+    expect(words.map((word) => [word.start, word.end])).toEqual([[0.16, 0.36], [0.36, 0.52], [0.52, 0.76], [0.76, 1.04], [1.04, 1.44]]);
+    // No word squeezed under half its V2 length (the old rule left “quick” 80 ms of V2's 320).
+    words.forEach((word, index) => {
+      expect(word.end - word.start).toBeGreaterThanOrEqual((v2[index]![1]! - v2[index]![0]!) / 2 - 1e-9);
+    });
+    // Words meet: each ends where the next starts.
+    for (let index = 1; index < words.length; index++) expect(words[index]!.start).toBe(words[index - 1]!.end);
   });
 });

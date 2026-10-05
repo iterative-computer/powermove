@@ -1,5 +1,5 @@
 import type { TranscriptSegment } from '../../shared/transcription';
-import type { CatalogTiming } from './catalog';
+import type { CatalogTiming, WordLag } from './catalog';
 
 /* Messages between main and the transcription process (worker.ts). */
 
@@ -8,8 +8,8 @@ export interface WorkerModel {
   file: string;
   /** How finely the model times its output; picks the windowing and how words get their times. */
   timing: CatalogTiming;
-  /** Seconds the model reports words late, [start, end] (CatalogModel.lag). */
-  lag?: [number, number];
+  /** Seconds the model reports words late (CatalogModel.lag). */
+  lag?: WordLag;
 }
 
 export type WorkerRequest =

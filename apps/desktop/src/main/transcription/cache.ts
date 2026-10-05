@@ -13,8 +13,8 @@ import type { Transcript } from '../../shared/transcription';
  */
 
 /** Bumped when the engine's output changes, so old transcripts miss.
- *  3: transcribe.cpp replaced sherpa-onnx. */
-const VERSION = 3;
+ *  3: transcribe.cpp replaced sherpa-onnx. 4: streaming models' word lag. */
+const VERSION = 4;
 
 export interface CacheSpan { start?: number; end?: number; language?: string }
 
