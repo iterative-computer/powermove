@@ -1,6 +1,6 @@
 <script lang="ts">
   import AnimatedRow from './AnimatedRow.svelte';
-  import { anchorPicker, mountOverlayOnBody } from '../../renderer/src/controls/overlay';
+  import { anchorPicker, mountOverlayOnBody } from 'powermove';
   import { onDestroy } from 'svelte';
   import { inspectorContext, type EditBinding, type SelectOption } from './context';
   import TypeSettings from './TypeSettings.svelte';

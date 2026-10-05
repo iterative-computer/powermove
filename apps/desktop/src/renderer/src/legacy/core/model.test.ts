@@ -13,6 +13,7 @@ function projectModel(): PMRegistry {
     SHADER_TEMPLATE: 'void main(){}',
     bus: { emit() {} },
     invalidate() {},
+    touch() {},
     selectLayers() {},
   };
   install(PM);

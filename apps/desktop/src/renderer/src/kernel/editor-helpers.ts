@@ -9,3 +9,6 @@ export { axisContentKey, axisPath, isAxisTag, inspectFont } from '../typography/
 export { CHANNELS_3D, is3DLayer, planeMatrix, planeContains, projectPoint, inversePlane } from '../legacy/core/space-3d';
 export type { FontAxis, FontInspection, FontStyle } from '../typography/font-catalog';
 export { propertyShortcuts } from './property-shortcuts';
+export { mountOverlayOnBody, anchorPicker } from '../controls/overlay';
+export { TEXT_ANIMATOR_PROPERTIES, animatorMode, countTextUnits, staggerLength, staggerWindow } from '../legacy/core/text-animation';
+export type { TextAnimatorMode, TextAnimatorOrder, TextAnimatorProperty, TextAnimatorUnit } from '../legacy/core/text-animation';

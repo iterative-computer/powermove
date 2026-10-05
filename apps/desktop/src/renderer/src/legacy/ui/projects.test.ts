@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+// Keep the account component outside this legacy DOM fixture; test the project actions here.
+vi.mock('svelte', async (importOriginal) => ({ ...await importOriginal<typeof import('svelte')>(), mount: vi.fn(), unmount: vi.fn() }));
+
 import type { PMRegistry } from '../registry';
 import { install } from './projects';
 

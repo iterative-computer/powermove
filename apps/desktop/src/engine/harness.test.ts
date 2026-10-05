@@ -1,9 +1,16 @@
 // @vitest-environment happy-dom
-import { describe, expect, it } from 'vitest';
+import { Storage } from 'happy-dom';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+// Load the rune store in the DOM environment before the parallel boot imports.
+import '../renderer/src/kernel/extensions.svelte';
 import type { PMRegistry } from '../renderer/src/legacy/registry';
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe('document engine chain', () => {
   it('boots the editing chain plus the agent tool harness without a browser', async () => {
+    // Give this document isolated storage, including on Node versions without localStorage.
+    vi.stubGlobal('localStorage', new Storage());
     const requests: Array<(request: any) => void> = [];
     const responses: any[] = [];
     (window as any).powermove = { agentTools: { onRequest: (cb: any) => { requests.push(cb); return () => {}; }, respond: (r: any) => responses.push(r) } };

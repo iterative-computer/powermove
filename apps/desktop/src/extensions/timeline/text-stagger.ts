@@ -1,5 +1,5 @@
 import type { PowermoveAPI } from 'powermove';
-import { animatorMode, countTextUnits, staggerWindow } from '../../renderer/src/legacy/core/text-animation';
+import { animatorMode, countTextUnits, staggerWindow } from 'powermove';
 
 /* Stagger text animators have no keyframes, so the clip shows each one as a
    cascade: the first unit's interval along the top edge, the last unit's

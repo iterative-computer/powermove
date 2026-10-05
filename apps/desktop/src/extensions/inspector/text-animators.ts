@@ -7,7 +7,7 @@ import {
   type TextAnimatorOrder,
   type TextAnimatorProperty,
   type TextAnimatorUnit
-} from '../../renderer/src/legacy/core/text-animation';
+} from 'powermove';
 
 export { TEXT_ANIMATOR_PROPERTIES, animatorMode };
 export type { TextAnimatorMode, TextAnimatorProperty };
