@@ -26,7 +26,7 @@ describe('captionsFromSpeech', () => {
     const d = deps(transcript([['Before.', 18, 19], ['Hello', 21, 21.4], ['there.', 21.5, 22], ['After', 27, 28]]));
     const result = await captionsFromSpeech([clip()], d);
     expect(d.ensureModel).toHaveBeenCalledWith('Captions for “Interview”');
-    expect(d.transcribe).toHaveBeenCalledWith(expect.objectContaining({ path: '/media/asset-1.mov', start: 20, end: 26 }), expect.any(Function), undefined);
+    expect(d.transcribe).toHaveBeenCalledWith(expect.objectContaining({ path: '/media/asset-1.mov', start: 20, end: 26, wordTimestamps: true }), expect.any(Function), undefined);
     expect(result.status).toBe('ok');
     if (result.status !== 'ok') return;
     expect(result.language).toBe('en');

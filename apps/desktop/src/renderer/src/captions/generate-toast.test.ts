@@ -44,6 +44,15 @@ describe('caption generation progress', () => {
     // Nothing ran, so there is no progress to complete: a plain notice with its icon.
     expect(last().options).toMatchObject({ key: 'captions-generate', icon: 'captions' });
     expect(last().options.completed).toBeUndefined();
+    expect(client.ensureTranscriptionModel).toHaveBeenCalledWith(expect.any(String), { wordTimestamps: true });
+  });
+
+  it('says a word-timed model is needed when the model in use cannot time words', async () => {
+    client.ensureTranscriptionModel.mockResolvedValue(false);
+    client.transcriptionStatus.mockResolvedValueOnce({ models: [], activeModelId: 'whisper-medium' });
+    const result = await PM.Captions.generate([clip().id]);
+    expect(result).toMatchObject({ status: 'model-missing', message: expect.stringMatching(/word-timed model/) });
+    expect(last().text).toBe('Captions need a speech model that times each word');
   });
 
   it('completes the progress toast when the project changes mid-transcription', async () => {

@@ -59,7 +59,8 @@ export async function captionsFromSpeech(layers: any[], deps: GenerateDeps): Pro
     let transcript: Transcript;
     try {
       transcript = await deps.transcribe(
-        { path, start, end, requestId: `captions-${layer.id}`, ...(deps.language ? { language: deps.language } : {}) },
+        // Cues are cut on word times: the engine runs a model that times each word.
+        { path, start, end, requestId: `captions-${layer.id}`, wordTimestamps: true, ...(deps.language ? { language: deps.language } : {}) },
         progress => deps.progress?.((index + Math.max(0, Math.min(1, progress))) / targets.length, layer),
         deps.signal
       );
