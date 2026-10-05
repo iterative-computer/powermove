@@ -211,12 +211,13 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   /* ── Captions ─────────────────────────────────────────────── */
   {
     name: 'generate_captions',
-    description: 'Transcribe the speech of audio/video layers on this Mac and add the result as a new captions layer on top, mapped through each clip\'s trim, speed and time remapping and split into readable cues. Returns the new captions layer id and cue count. If no transcription model is installed it returns the error code transcription-model-missing and opens the model download sheet; tell the user to download a model (Settings › Transcription) and do not retry until they have. Restyle or edit the result with edit_captions.',
+    description: 'Transcribe the speech of audio/video layers on this Mac and add the result as a new captions layer on top, mapped through each clip\'s trim, speed and time remapping and split into readable cues. Transcription runs in the background: a call waits up to a minute, then returns { status: "done", layerId, cues } or { status: "running", jobId, progress }. While it is running, call generate_captions again with only { jobId } to keep waiting; never start a second generation. Ending or rolling back the run cancels it. If no transcription model is installed it returns the error code transcription-model-missing and opens the model download sheet; tell the user to download a model (Settings › Transcription) and do not retry until they have. Restyle or edit the result with edit_captions.',
     inputSchema: closedObject({
       layerIds: { type: 'array', items: { type: 'string' }, minItems: 1, uniqueItems: true },
+      jobId: { type: 'string' },
       style: { type: 'string', enum: ['classic', 'boxed', 'whisper', 'spotlight', 'pop', 'paper'] },
       label: { type: 'string', maxLength: 80 }
-    }, ['layerIds'])
+    })
   },
   {
     name: 'export_captions',

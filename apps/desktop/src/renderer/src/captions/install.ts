@@ -249,7 +249,15 @@ export function installCaptions(PM: PMRegistry): void {
   }
 
   let generating: AbortController | null = null;
-  async function generate(layerIds?: string[], options: { origin?: string; apply?: (command: any) => any; interactive?: boolean } = {}): Promise<{ ok: boolean; layerId?: string; message?: string; status?: GenerateResult['status'] }> {
+  async function generate(layerIds?: string[], options: {
+    origin?: string;
+    /** Applies the add_captions command instead of PM.Edit (the agent's transaction). */
+    apply?: (command: any) => any;
+    interactive?: boolean;
+    /** Aborts the generation from outside (an agent run that ended). */
+    signal?: AbortSignal;
+    onProgress?: (fraction: number) => void;
+  } = {}): Promise<{ ok: boolean; layerId?: string; message?: string; status?: GenerateResult['status'] }> {
     const ids = layerIds?.length ? layerIds : (PM.sel?.layers || []);
     const layers = ids.map((id: string) => layer(id)).filter(captionableLayer);
     if (!layers.length) {
@@ -261,42 +269,67 @@ export function installCaptions(PM: PMRegistry): void {
     const project = PM.proj;
     const controller = new AbortController();
     generating = controller;
+    const stop = () => controller.abort();
+    if (options.signal?.aborted) controller.abort();
+    else options.signal?.addEventListener('abort', stop, { once: true });
     const key = 'captions-generate';
-    const progress = (fraction: number) => toast('Generating captions', {
-      key, sticky: true, progress: fraction, icon: 'captions',
-      action: { label: 'Cancel', run: () => controller.abort() }
-    });
+    /* The sticky progress toast appears once a model is ready (not behind the
+       download sheet) and every exit replaces it with a completed one. */
+    let shown = false, settled = false;
+    const progress = (fraction: number) => {
+      if (settled || controller.signal.aborted) return;
+      shown = true;
+      options.onProgress?.(fraction);
+      toast('Generating captions', {
+        key, sticky: true, progress: fraction, icon: 'captions',
+        action: { label: 'Cancel', run: () => controller.abort() }
+      });
+    };
+    const finish = (text: string, extra: Record<string, unknown> = {}) => {
+      settled = true;
+      toast(text, { key, completed: true, ...extra });
+    };
     try {
-      progress(0);
       const result = await captionsFromSpeech(layers, {
-        ensureModel: reason => ensureTranscriptionModel(reason),
+        ensureModel: async reason => {
+          const ready = await ensureTranscriptionModel(reason);
+          if (ready && PM.proj === project) progress(0);
+          return ready;
+        },
         resolvePath: resolveMediaPath,
         transcribe,
         clipTiming: (item: any) => clipTiming(PM, item),
         progress: fraction => progress(fraction),
         signal: controller.signal
       });
-      if (PM.proj !== project) return { ok: false, message: 'The project changed before captions were ready.' };
+      if (PM.proj !== project) {
+        const message = 'The project changed before captions were ready.';
+        if (shown) finish('Caption generation stopped: the project changed');
+        return { ok: false, message };
+      }
       if (result.status === 'model-missing') {
-        toast('Captions need a transcription model', { key, completed: true });
+        finish('Captions need a transcription model');
         return { ok: false, status: 'model-missing', message: 'No transcription model is installed. Download one in Settings › Transcription.' };
       }
       if (result.status === 'empty') {
-        toast('No speech was found in the selected clips', { key, completed: true });
+        finish('No speech was found in the selected clips');
         return { ok: false, status: 'empty', message: 'No speech was found in the selected clips.' };
       }
+      if (controller.signal.aborted) throw new DOMException('Caption generation was cancelled', 'AbortError');
       const name = layers.length === 1 ? `${layers[0].name} Captions` : 'Captions';
       const command = { type: 'add_captions', name, from: 0, cues: result.cues, ...(result.language ? { language: result.language } : {}) };
       const applied = options.apply ? options.apply(command) : apply(command, 'Generate captions', options.origin ?? 'command');
       if (!applied?.ok) throw new Error(applied?.message || 'Could not add the captions');
-      toast(`Added ${result.cues.length} ${result.cues.length === 1 ? 'caption' : 'captions'}`, { key, completed: true });
+      finish(`Added ${result.cues.length} ${result.cues.length === 1 ? 'caption' : 'captions'}`);
       return { ok: true, status: 'ok', layerId: applied.data?.results?.[0]?.data?.id };
     } catch (error: any) {
-      const cancelled = error?.name === 'AbortError';
+      const cancelled = error?.name === 'AbortError' || controller.signal.aborted;
       const message = cancelled ? 'Caption generation was cancelled.' : error?.message || 'Could not generate captions.';
-      toast(cancelled ? 'Caption generation cancelled' : message, { key, completed: true, ...(cancelled ? {} : { error: true }) });
+      finish(cancelled ? 'Caption generation cancelled' : message, cancelled ? {} : { error: true });
       return { ok: false, message };
     } finally {
+      options.signal?.removeEventListener('abort', stop);
+      if (shown && !settled) finish('Caption generation stopped');
       if (generating === controller) generating = null;
     }
   }

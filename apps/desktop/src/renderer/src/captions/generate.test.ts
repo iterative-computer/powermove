@@ -46,6 +46,17 @@ describe('captionsFromSpeech', () => {
     expect(await captionsFromSpeech([clip()], deps(transcript([['far', 50, 51]])))).toEqual({ status: 'empty' });
   });
 
+  it('honours Cancel even when the engine resolves afterwards', async () => {
+    const controller = new AbortController();
+    const d = deps(transcript([['Hello', 21, 21.4]]));
+    d.transcribe.mockImplementation(async () => { controller.abort(); return transcript([['Hello', 21, 21.4]]); });
+    await expect(captionsFromSpeech([clip()], { ...d, signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' });
+    // An empty transcript after Cancel is a cancellation, not silence.
+    const empty = new AbortController();
+    d.transcribe.mockImplementation(async () => { empty.abort(); return { modelId: 'test', duration: 0, segments: [] }; });
+    await expect(captionsFromSpeech([clip()], { ...d, signal: empty.signal })).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
   it('treats segments without word timings as one word', () => {
     expect(transcriptWords({ modelId: 'm', duration: 2, segments: [{ text: ' Whole line ', start: 1, end: 2, words: [] }] }))
       .toEqual([{ text: 'Whole line', start: 1, end: 2 }]);

@@ -30,6 +30,8 @@ export type GenerateResult =
 export const isModelMissing = (error: unknown) =>
   !!error && typeof error === 'object' && (error as { code?: unknown }).code === TRANSCRIPTION_MODEL_MISSING;
 
+const cancelled = () => new DOMException('Caption generation was cancelled', 'AbortError');
+
 export function captionableLayer(layer: any): boolean {
   return !!layer && (layer.type === 'audio' || layer.type === 'video') && typeof layer.d?.asset === 'string' && !!layer.d.asset;
 }
@@ -50,7 +52,7 @@ export async function captionsFromSpeech(layers: any[], deps: GenerateDeps): Pro
   const words: CaptionWord[] = [];
   let language: string | undefined;
   for (const [index, layer] of targets.entries()) {
-    if (deps.signal?.aborted) throw new DOMException('Caption generation was cancelled', 'AbortError');
+    if (deps.signal?.aborted) throw cancelled();
     const clip = deps.clipTiming(layer);
     const [start, end] = visibleSourceRange(clip);
     const path = await deps.resolvePath(layer.d.asset);
@@ -65,9 +67,12 @@ export async function captionsFromSpeech(layers: any[], deps: GenerateDeps): Pro
       if (isModelMissing(error)) return { status: 'model-missing' };
       throw error;
     }
+    // An engine may resolve (with a partial or empty transcript) after Cancel.
+    if (deps.signal?.aborted) throw cancelled();
     language ??= transcript.language;
     words.push(...mapWordsToComposition(transcriptWords(transcript), clip));
   }
+  if (deps.signal?.aborted) throw cancelled();
   if (!words.length) return { status: 'empty' };
   const cues = segmentWords(words.sort((a, b) => a.start - b.start), deps.segment);
   return { status: 'ok', cues, ...(language ? { language } : {}) };

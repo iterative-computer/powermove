@@ -357,6 +357,62 @@ interface LiveToolTransaction {
 const liveToolTransactions = new Map<string, LiveToolTransaction>();
 const liveToolObservations = new Map<string, { projectId: string; revision: number }>();
 
+/* Caption generation can outlast one tool call (the bridge fails a call after
+   120 s), so the agent gets a job: each generate_captions call waits up to
+   CAPTION_JOB_WAIT_MS, then reports progress and a jobId to wait on again.
+   The transcript is applied inside the run's transaction when it is ready;
+   rolling back or ending the run cancels the job. */
+interface CaptionJob {
+  id: string;
+  runId: string;
+  controller: AbortController;
+  progress: number;
+  promise: Promise<{ ok: boolean; layerId?: string; message?: string; status?: string }>;
+  outcome?: { ok: boolean; layerId?: string; message?: string; status?: string };
+}
+const captionJobs = new Map<string, CaptionJob>();
+const CAPTION_JOB_WAIT_MS = 60_000;
+
+function captionModelMissing(): Error {
+  return new Error(`${TRANSCRIPTION_MODEL_MISSING}: No transcription model is installed. Powermove has asked the user to download one (Settings › Transcription). Tell them, and try again after the download finishes.`);
+}
+
+function cancelCaptionJobs(runId: string): void {
+  for (const job of captionJobs.values()) {
+    if (job.runId !== runId) continue;
+    job.controller.abort();
+    captionJobs.delete(job.id);
+  }
+}
+
+async function awaitCaptionJob(job: CaptionJob, waitMs = CAPTION_JOB_WAIT_MS): Promise<Omit<AgentToolResponseEvent, 'runId' | 'callId'>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const waited = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), waitMs); });
+  const result = await Promise.race([job.promise, waited]).finally(() => clearTimeout(timer));
+  if (!result) {
+    return {
+      ok: true,
+      content: [toolText({
+        jobId: job.id,
+        status: 'running',
+        progress: Math.round(job.progress * 100) / 100,
+        message: 'Still transcribing. Call generate_captions with this jobId to keep waiting; do not start another generation.'
+      })],
+      changed: false,
+      revision: currentRevision()
+    };
+  }
+  captionJobs.delete(job.id);
+  if (!result.ok) throw result.status === 'model-missing' ? captionModelMissing() : new Error(result.message || 'Could not generate captions.');
+  const layer = PM.L(result.layerId);
+  return {
+    ok: true,
+    content: [toolText({ status: 'done', layerId: result.layerId, cues: layer?.d?.cues?.length ?? 0, language: layer?.d?.language ?? null, revision: currentRevision() })],
+    changed: true,
+    revision: currentRevision()
+  };
+}
+
 function assertTransactionProject(transaction: { projectId: string }): void {
   if (transaction.projectId !== PM.proj.id) {
     throw new Error('The active project changed. Start a new agent run in this project.');
@@ -610,16 +666,23 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     return { ok: true, content: [toolText({ layerId: layer.id, format, cues: layer.d.cues.length, text })], revision: currentRevision() };
   }
   if (request.tool === 'generate_captions') {
+    const jobId = typeof request.arguments.jobId === 'string' ? request.arguments.jobId : '';
+    if (jobId) {
+      const job = captionJobs.get(jobId);
+      if (!job || job.runId !== request.runId) throw new Error(`Unknown caption job ${jobId}. Start one with generate_captions { layerIds }.`);
+      return awaitCaptionJob(job);
+    }
+    const running = [...captionJobs.values()].find(job => job.runId === request.runId && !job.outcome);
+    if (running) throw new Error(`Captions are already being generated (jobId ${running.id}). Call generate_captions with { jobId: "${running.id}" } to keep waiting.`);
     const ids = Array.isArray(request.arguments.layerIds) ? request.arguments.layerIds.map(String) : [];
     const layers = ids.map((id: string) => PM.L(id));
     if (!ids.length || layers.some((layer: any) => !layer || (layer.type !== 'audio' && layer.type !== 'video') || !layer.d?.asset)) {
       throw new Error('generate_captions needs audio or video layer IDs with media, from get_project_state.');
     }
-    const missing = () => new Error(`${TRANSCRIPTION_MODEL_MISSING}: No transcription model is installed. Powermove has asked the user to download one (Settings › Transcription). Tell them, and try again after the download finishes.`);
     const status = await transcriptionStatus();
     if (!status.activeModelId) {
       void ensureTranscriptionModel(`The agent wants to caption ${layers.map((layer: any) => `“${layer.name}”`).join(', ')}`);
-      throw missing();
+      throw captionModelMissing();
     }
     const label = text(request.arguments.label, 'Generate captions', 80);
     const transaction = beginLiveTransaction(request, label);
@@ -627,27 +690,38 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
       throw new Error(`The project changed during the agent run (expected revision ${transaction.revision}, found ${currentRevision()}). Read get_project_state and retry.`);
     }
     const preset = typeof request.arguments.style === 'string' ? request.arguments.style : null;
-    const result = await PM.Captions.generate(ids, {
+    const runId = request.runId;
+    const controller = new AbortController();
+    const job: CaptionJob = { id: PM.uid('captions-job-'), runId, controller, progress: 0, promise: Promise.resolve({ ok: false }) };
+    job.promise = PM.Captions.generate(ids, {
       interactive: false,
+      signal: controller.signal,
+      onProgress: (fraction: number) => { job.progress = fraction; },
+      /* Applied when the transcript is ready, inside the run's transaction —
+         unless the run ended, or someone else changed the project meanwhile. */
       apply: (command: any) => {
-        if (currentRevision() !== transaction.revision) return { ok: false, message: 'The project changed while transcribing. Read get_project_state and retry.' };
-        return PM.Edit.apply(preset ? { ...command, style: { preset } } : command,
+        if (controller.signal.aborted || liveToolTransactions.get(runId) !== transaction) {
+          return { ok: false, message: 'The agent run ended before the captions were ready.' };
+        }
+        if (transaction.projectId !== PM.proj.id || currentRevision() !== transaction.revision) {
+          return { ok: false, message: 'The project changed while transcribing. Read get_project_state and retry.' };
+        }
+        const applied = PM.Edit.apply(preset ? { ...command, style: { preset } } : command,
           { label, origin: 'agent', baseRevision: transaction.revision, historyGroup: transaction.historyGroup });
+        if (applied.ok) {
+          transaction.label = label;
+          transaction.revision = currentRevision();
+          transaction.changed = true;
+        }
+        return applied;
       }
-    });
-    if (!result.ok) throw result.status === 'model-missing' ? missing() : new Error(result.message || 'Could not generate captions.');
-    transaction.label = label;
-    transaction.revision = currentRevision();
-    transaction.changed = true;
-    const layer = PM.L(result.layerId);
-    return {
-      ok: true,
-      content: [toolText({ layerId: result.layerId, cues: layer?.d?.cues?.length ?? 0, language: layer?.d?.language ?? null, revision: transaction.revision })],
-      changed: true,
-      revision: transaction.revision
-    };
+    }).catch((error: any) => ({ ok: false, message: error?.message || 'Could not generate captions.' }))
+      .then((result: any) => { job.outcome = result; return result; });
+    captionJobs.set(job.id, job);
+    return awaitCaptionJob(job);
   }
   if (request.tool === 'rollback_changes') {
+    cancelCaptionJobs(request.runId);
     const transaction = liveToolTransactions.get(request.runId);
     if (transaction) await rollBackLiveTransaction(transaction);
     return {
@@ -658,6 +732,7 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     };
   }
   if (request.tool === '__finish_run') {
+    cancelCaptionJobs(request.runId);
     liveToolObservations.delete(request.runId);
     const transaction = liveToolTransactions.get(request.runId);
     if (!transaction) {
