@@ -30,7 +30,10 @@ describe('the pinned catalog', () => {
     expect(recommended.map((model) => model.languages).sort()).toEqual(['en', 'multi']);
     expect(recommended.find((model) => model.languages === 'en')!.id).toBe(DEFAULT_MODEL_ID);
     expect(recommended.every((model) => model.wordTimestamps && model.featured)).toBe(true);
-    expect(CATALOG.filter((model) => model.featured).length).toBeLessThanOrEqual(3);
+    const featured = CATALOG.filter((model) => model.featured);
+    expect(featured.length).toBeLessThanOrEqual(3);
+    // Onboarding and the sheet promise captions: every curated model times words.
+    expect(featured.every((model) => model.wordTimestamps)).toBe(true);
   });
 
   it('claims word timestamps only for token-timed models', () => {

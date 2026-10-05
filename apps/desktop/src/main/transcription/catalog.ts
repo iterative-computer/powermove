@@ -47,7 +47,9 @@ export interface CatalogModel {
   accuracy: number;
   /** The default for its kind: one English, one multilingual. */
   recommended: boolean;
-  /** Shown in the download sheet and onboarding (at most three). */
+  /** Shown in the download sheet and onboarding (at most three, all
+   *  word-timed so whatever is picked there can make captions). The rest
+   *  are in Settings › Transcription. */
   featured: boolean;
   /** Derived from timing: only 'word' models time each word. */
   wordTimestamps: boolean;
@@ -135,24 +137,6 @@ export const CATALOG: readonly CatalogModel[] = [
       'nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf', 751_094_240, 'b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c')
   },
   {
-    id: 'whisper-medium',
-    name: 'Whisper Medium',
-    description: 'The broadest language coverage, a little slower.',
-    family: 'whisper',
-    languages: 'multi',
-    languageCodes: WHISPER_LANGUAGES,
-    detectsLanguage: true,
-    timing: 'segment',
-    speed: 0.42,
-    accuracy: 0.84,
-    recommended: false,
-    featured: true,
-    wordTimestamps: false,
-    license: 'Apache 2.0 · OpenAI',
-    files: gguf('handy-computer/whisper-medium-gguf', 'ec78f06fded51aa82cde751678b78f76f78c8b7f',
-      'whisper-medium-Q8_0.gguf', 831_538_144, '09e6a65e7de377aa5b10bae24608bc6f8ca2ed04b3993ef10d4a02bcd9a82adf')
-  },
-  {
     id: 'parakeet-tdt-0.6b-v3',
     name: 'Parakeet V3',
     description: 'Fast and accurate in 25 European languages.',
@@ -164,7 +148,7 @@ export const CATALOG: readonly CatalogModel[] = [
     speed: 0.79,
     accuracy: 0.88,
     recommended: false,
-    featured: false,
+    featured: true,
     wordTimestamps: true,
     license: NVIDIA,
     files: gguf('handy-computer/parakeet-tdt-0.6b-v3-gguf', '85ac09ea12fc4b1112fa76810059364bc6adc9de',
@@ -187,6 +171,24 @@ export const CATALOG: readonly CatalogModel[] = [
     license: NVIDIA,
     files: gguf('handy-computer/parakeet-tdt-0.6b-v2-gguf', '07cee0616125a08ef619729bb47f40ef747e4bc4',
       'parakeet-tdt-0.6b-v2-Q8_0.gguf', 729_574_912, 'f0d0e99cebb6d3b83f1f7069b82b5d3c2e39a54545b0da039cb4bafd9c4e5caa')
+  },
+  {
+    id: 'whisper-medium',
+    name: 'Whisper Medium',
+    description: 'The broadest language coverage, a little slower.',
+    family: 'whisper',
+    languages: 'multi',
+    languageCodes: WHISPER_LANGUAGES,
+    detectsLanguage: true,
+    timing: 'segment',
+    speed: 0.42,
+    accuracy: 0.84,
+    recommended: false,
+    featured: false,
+    wordTimestamps: false,
+    license: 'Apache 2.0 · OpenAI',
+    files: gguf('handy-computer/whisper-medium-gguf', 'ec78f06fded51aa82cde751678b78f76f78c8b7f',
+      'whisper-medium-Q8_0.gguf', 831_538_144, '09e6a65e7de377aa5b10bae24608bc6f8ca2ed04b3993ef10d4a02bcd9a82adf')
   },
   {
     id: 'canary-180m-flash',
