@@ -130,6 +130,22 @@ describe('MediaPathCache', () => {
     await cache.dispose();
     await expect(readdir(path.join(root, 'cache'))).rejects.toThrow();
   });
+
+  it('stops a copy still in flight when its project is closed, so nothing outlives the project', async () => {
+    const root = await temp();
+    const cache = new MediaPathCache(path.join(root, 'cache'));
+    const closing = await cache.begin(1, { assetId: 'big', projectId: 'P1', name: 'a.wav', size: 8 });
+    const staying = await cache.begin(1, { assetId: 'other', projectId: 'P2', name: 'b.wav', size: 4 });
+    if (!('token' in closing) || !('token' in staying)) throw new Error('expected staging tokens');
+    await cache.chunk(1, closing.token, 0, bytes(4));
+    await cache.release(1, 'P1');
+    await expect(cache.chunk(1, closing.token, 4, bytes(4))).rejects.toThrow(/Unknown/);
+    await expect(cache.finish(1, closing.token)).rejects.toThrow();
+    await cache.chunk(1, staying.token, 0, bytes(4));
+    const kept = await cache.finish(1, staying.token);
+    expect(await readdir(path.join(root, 'cache'))).toEqual([path.basename(kept.path)]);
+    await cache.dispose();
+  });
 });
 
 describe('media path IPC', () => {

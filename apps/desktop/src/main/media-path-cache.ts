@@ -184,7 +184,9 @@ export class MediaPathCache {
       this.entries.delete(key);
       await rm(entry.file, { force: true });
     }
-    if (tag === null) for (const [token, job] of [...this.staging]) if (job.owner === owner) await this.abort(owner, token);
+    // A copy still in flight for what was released would be kept by finish()
+    // under a tag nothing releases again, so it stops here too.
+    for (const [token, job] of [...this.staging]) if (job.owner === owner && (tag === null || job.tag === tag)) await this.abort(owner, token);
   }
 
   async dispose(): Promise<void> {
