@@ -35,9 +35,9 @@ test('onboarding lets a new user choose the track timeline before opening the ed
     await welcome.getByText('Claude', { exact: true }).click();
     await welcome.getByLabel('Claude model').selectOption('claude-sonnet-5-5');
     await welcome.locator('#agent-step').getByRole('button', { name: 'Continue' }).click();
-    // The optional speech model step: Parakeet V3 preselected, skipped here.
+    // The optional speech model step: Parakeet Unified EN preselected, skipped here.
     await expect(welcome.locator('#transcription-title')).toBeFocused();
-    await expect(welcome.locator('input[value="parakeet-tdt-0.6b-v3"]')).toBeChecked();
+    await expect(welcome.locator('input[value="parakeet-unified-en-0.6b"]')).toBeChecked();
     await welcome.locator('#transcription-step').getByRole('button', { name: 'Not now' }).click();
     await expect(welcome.locator('#workspace-title')).toBeFocused();
     await welcome.getByRole('button', { name: 'Back to speech model choice' }).click();

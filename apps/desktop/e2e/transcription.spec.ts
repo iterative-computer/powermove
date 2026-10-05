@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { _electron, type Page } from 'playwright';
 
+import { CATALOG, DEFAULT_MODEL_ID } from '../src/main/transcription/catalog';
 import { expect, launchApp, repoRoot, test, type LaunchedApp } from './helpers/app';
 
 /*
@@ -16,8 +17,8 @@ import { expect, launchApp, repoRoot, test, type LaunchedApp } from './helpers/a
  * background tests), so nothing here touches the network.
  *
  * PM_E2E_SHOTS=/some/dir saves screenshots there (never inside the repo).
- * POWERMOVE_E2E_PARAKEET_DIR=<folder with the real Parakeet V3 sherpa files>
- * also runs a real transcription through the sheet-downloaded model.
+ * POWERMOVE_E2E_PARAKEET_DIR=<folder with the pinned parakeet-unified-en-0.6b
+ * GGUF> also runs a real transcription through the sheet-downloaded model.
  */
 
 const shots = process.env.PM_E2E_SHOTS;
@@ -51,34 +52,28 @@ async function fileSha(file: string): Promise<string> {
   return hash.digest('hex');
 }
 
+/**
+ * The pinned catalog with every file served from the local server: fake
+ * blobs, or for `real`, the parakeet-unified-en-0.6b GGUF from
+ * POWERMOVE_E2E_PARAKEET_DIR. The metadata (curation, timing, languages)
+ * is the shipped catalog's, so the UI under test is the real one.
+ */
 async function catalog(dir: string, origin: string, files: Record<string, Hosted>, real: boolean): Promise<string> {
-  const entry = (id: string, name: string, description: string, recommended: boolean, languages: 'en' | 'multi', names: string[]) => ({
-    id, name, description, recommended, languages,
-    languageCodes: languages === 'en' ? ['en'] : ['en', 'de', 'fr', 'es', 'it'],
-    speed: 0.85, accuracy: languages === 'en' ? 0.85 : 0.8, wordTimestamps: true, license: 'CC BY 4.0 · NVIDIA',
-    files: names.map((file) => ({ name: file, url: `${origin}/${id}/${file}`, size: files[`/${id}/${file}`]!.size, sha256: files[`/${id}/${file}`]!.sha256 }))
-  });
-  const names = ['encoder.int8.onnx', 'decoder.int8.onnx', 'joiner.int8.onnx', 'tokens.txt'];
-  if (!real) {
-    names.forEach((name, index) => {
-      for (const id of ['parakeet-tdt-0.6b-v3', 'parakeet-tdt-0.6b-v2']) {
-        const body = blob(index === 0 ? 3_000_000 : 40_000, index + id.length);
-        files[`/${id}/${name}`] = { body, size: body.length, sha256: sha(body) };
-      }
-    });
-  } else {
-    for (const name of names) {
+  const entries = [];
+  for (const [index, model] of CATALOG.entries()) {
+    const name = model.files[0]!.name;
+    const url = `/${model.id}/${name}`;
+    if (real && model.id === DEFAULT_MODEL_ID) {
       const file = path.join(parakeetDir!, name);
-      files[`/parakeet-tdt-0.6b-v3/${name}`] = { file, size: (await stat(file)).size, sha256: await fileSha(file) };
-      const body = blob(1000, name.length);
-      files[`/parakeet-tdt-0.6b-v2/${name}`] = { body, size: body.length, sha256: sha(body) };
+      files[url] = { file, size: (await stat(file)).size, sha256: await fileSha(file) };
+    } else {
+      const body = blob(model.id === DEFAULT_MODEL_ID ? 3_000_000 : 40_000, index);
+      files[url] = { body, size: body.length, sha256: sha(body) };
     }
+    entries.push({ ...model, files: [{ name, url: `${origin}${url}`, size: files[url]!.size, sha256: files[url]!.sha256 }] });
   }
   const out = path.join(dir, 'catalog.json');
-  await writeFile(out, JSON.stringify([
-    entry('parakeet-tdt-0.6b-v3', 'Parakeet V3', 'Fast and accurate in 25 European languages.', true, 'multi', names),
-    entry('parakeet-tdt-0.6b-v2', 'Parakeet V2', 'English only. The most accurate for English.', false, 'en', names)
-  ]));
+  await writeFile(out, JSON.stringify(entries));
   return out;
 }
 
@@ -92,6 +87,9 @@ async function theme(page: Page, mode: 'light' | 'dark'): Promise<void> {
   await page.evaluate((value) => (window as any).PM.theme.apply(value), mode);
   await page.waitForFunction((value) => (document.documentElement.dataset.theme ?? 'light') === value, mode);
 }
+
+const curated = CATALOG.filter((model) => model.featured);
+const row = (region: ReturnType<Page['locator']>, id: string) => region.locator(`[data-model="${id}"]`);
 
 test('the download sheet downloads a model, closes itself, and Settings manages it', async () => {
   test.setTimeout(120_000);
@@ -112,7 +110,11 @@ test('the download sheet downloads a model, closes itself, and Settings manages 
       const sheet = page.locator('.transcription-modal');
       await expect(sheet).toBeVisible();
       await expect(sheet.getByText('Captions need a speech model to transcribe “Interview.mov”.')).toBeVisible();
-      await expect(sheet.getByRole('radio', { name: /Parakeet V3/ })).toBeChecked();
+      // The curated few, the English default first and chosen; the rest are in Settings.
+      await expect(sheet.getByRole('radio')).toHaveCount(curated.length);
+      await expect(sheet.getByRole('radio', { name: /Parakeet Unified EN/ })).toBeChecked();
+      await expect(sheet.getByText('3 MB · English only')).toBeVisible();
+      await expect(sheet.getByRole('radio', { name: /Whisper Medium/ })).toHaveCount(0);
       await expect(sheet.getByRole('meter', { name: 'Speed' }).first()).toBeVisible();
       await shot(page, `sheet-${mode}`);
       if (mode === 'light') {
@@ -136,19 +138,23 @@ test('the download sheet downloads a model, closes itself, and Settings manages 
     await expect(sheet).toBeHidden({ timeout: 20_000 });
     expect(await page.evaluate(() => (window as any).__sheetResult)).toBe(true);
     const status = await page.evaluate(() => (window as any).PM.Transcription.status());
-    expect(status.activeModelId).toBe('parakeet-tdt-0.6b-v3');
-    // Ready: no sheet the next time.
+    expect(status.activeModelId).toBe(DEFAULT_MODEL_ID);
+    // Ready: no sheet the next time, and none for captions either (it times words).
     expect(await page.evaluate(() => (window as any).PM.Transcription.ensureModel('again'))).toBe(true);
+    expect(await page.evaluate(() => (window as any).PM.Transcription.ensureModel('captions', { wordTimestamps: true }))).toBe(true);
 
-    // Settings › Transcription.
+    // Settings › Transcription: Downloaded, then Available to Download with a language filter.
     for (const mode of ['dark', 'light'] as const) {
       await theme(page, mode);
       await page.evaluate(() => (window as any).PM.SettingsUI.open('transcription'));
       const pageRegion = page.locator('#settings-page-transcription');
       await expect(pageRegion.getByRole('heading', { name: 'Transcription' })).toBeVisible();
-      await expect(pageRegion.locator('[data-model="parakeet-tdt-0.6b-v3"]').getByText('In use')).toBeVisible();
-      await expect(pageRegion.locator('[data-model="parakeet-tdt-0.6b-v2"]').getByRole('button', { name: 'Download' })).toBeVisible();
-      await pageRegion.scrollIntoViewIfNeeded();
+      await expect(pageRegion.getByRole('heading', { name: 'Downloaded' })).toBeVisible();
+      await expect(pageRegion.getByRole('heading', { name: 'Available to Download' })).toBeVisible();
+      await expect(row(pageRegion, DEFAULT_MODEL_ID).getByText('In use')).toBeVisible();
+      await expect(row(pageRegion, 'whisper-medium').getByText('40 KB · 99 languages · Not for captions')).toBeVisible();
+      await expect(row(pageRegion, 'parakeet-tdt-0.6b-v2').getByRole('button', { name: 'Download' })).toBeVisible();
+      await expect(pageRegion.locator('.tr-settings-row')).toHaveCount(CATALOG.length);
       await page.locator('#settings-tab-transcription').click();
       await shot(page, `settings-${mode}`);
       await page.evaluate(() => (window as any).PM.SettingsUI.close());
@@ -156,17 +162,88 @@ test('the download sheet downloads a model, closes itself, and Settings manages 
     await page.evaluate(() => (window as any).PM.SettingsUI.open('transcription'));
     const region = page.locator('#settings-page-transcription');
     await expect(region.getByText(/MB in Powermove’s data folder/)).toBeVisible();
-    // Language: the active model's languages.
+    // The filter keeps the models that transcribe a language.
+    const filter = region.getByRole('combobox', { name: 'Show models for' });
+    await expect(filter).toHaveText(/All Languages/);
+    await region.locator('select[aria-label="Show models for"]').selectOption('ja', { force: true });
+    await expect(filter).toHaveText(/Japanese/);
+    const japanese = CATALOG.filter((model) => model.id !== DEFAULT_MODEL_ID && model.languageCodes.includes('ja')).map((model) => model.id);
+    await expect(region.locator('.tr-settings-row')).toHaveCount(1 + japanese.length);
+    for (const id of japanese) await expect(row(region, id)).toBeVisible();
+    await expect(row(region, 'parakeet-tdt-0.6b-v3')).toHaveCount(0);
+    await shot(page, 'settings-filtered-light');
+    await region.locator('select[aria-label="Show models for"]').selectOption('all', { force: true });
+    // An English-only model in use: the language is English.
     const language = region.getByRole('combobox', { name: 'Spoken language' });
+    await expect(language).toBeDisabled();
+    // A second, multilingual model downloads in place, moves to Downloaded and can be put to use.
+    const nemotron = 'nemotron-3.5-asr-streaming-0.6b';
+    await row(region, nemotron).getByRole('button', { name: 'Download' }).click();
+    await expect(row(region, nemotron).getByRole('button', { name: 'Use' })).toBeVisible({ timeout: 20_000 });
+    await expect(region.locator('section', { has: page.getByRole('heading', { name: 'Downloaded' }) }).locator('.tr-settings-row')).toHaveCount(2);
+    await row(region, nemotron).getByRole('button', { name: 'Use' }).click();
+    await expect(row(region, nemotron).getByText('In use')).toBeVisible();
+    // Its languages, by name.
     await region.locator('select[aria-label="Spoken language"]').selectOption('de', { force: true });
     await expect(language).toHaveText(/German/);
     await expect.poll(() => page.evaluate(async () => (await (window as any).PM.Transcription.status()).language)).toBe('de');
-    // A second model downloads in place and can be put to use.
-    await region.locator('[data-model="parakeet-tdt-0.6b-v2"]').getByRole('button', { name: 'Download' }).click();
-    await expect(region.locator('[data-model="parakeet-tdt-0.6b-v2"]').getByRole('button', { name: 'Use' })).toBeVisible({ timeout: 20_000 });
-    await region.locator('[data-model="parakeet-tdt-0.6b-v2"]').getByRole('button', { name: 'Use' }).click();
-    await expect(region.locator('[data-model="parakeet-tdt-0.6b-v2"]').getByText('In use')).toBeVisible();
-    await expect(language).toBeDisabled();
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  } finally {
+    await session?.close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('captions ask for a word-timed model when the one in use only times phrases', async () => {
+  test.setTimeout(120_000);
+  const home = await mkdtemp(path.join(os.tmpdir(), 'pm-transcription-timing-'));
+  const files: Record<string, Hosted> = {};
+  const { server, origin } = await serve(files);
+  const catalogFile = await catalog(home, origin, files, false);
+  let session: LaunchedApp | null = null;
+  try {
+    session = await launchApp({ userData: path.join(home, 'profile'), env: { POWERMOVE_TEST_TRANSCRIPTION_CATALOG: catalogFile } });
+    await session.openEditor();
+    const page = session.page;
+    // Whisper Medium, downloaded from Settings (it is not in the curated set).
+    await page.evaluate(() => (window as any).PM.SettingsUI.open('transcription'));
+    const region = page.locator('#settings-page-transcription');
+    await expect(region.getByRole('heading', { name: 'Models' })).toBeVisible();
+    await row(region, 'whisper-medium').getByRole('button', { name: 'Download' }).click();
+    await expect(row(region, 'whisper-medium').getByText('In use')).toBeVisible({ timeout: 20_000 });
+    // Only here does the UI explain word timing.
+    await expect(region.getByText('Whisper Medium doesn’t time each word, so captions need a model that does, such as Parakeet Unified EN.')).toBeVisible();
+    await shot(page, 'settings-untimed-light');
+    await page.evaluate(() => (window as any).PM.SettingsUI.close());
+
+    // Plain transcription is satisfied; captions are not.
+    expect(await page.evaluate(() => (window as any).PM.Transcription.ensureModel('agent'))).toBe(true);
+    for (const mode of ['light', 'dark'] as const) {
+      await theme(page, mode);
+      await page.evaluate(() => { void (window as any).PM.Transcription.ensureModel('Captions for “Interview”', { wordTimestamps: true }).then((ready: boolean) => { (window as any).__captionsReady = ready; }); });
+      const sheet = page.locator('.transcription-modal');
+      await expect(sheet.getByText('Whisper Medium doesn’t time each word, which captions need.')).toBeVisible();
+      await expect(sheet.getByRole('radio')).toHaveCount(curated.length);
+      await shot(page, `sheet-captions-${mode}`);
+      if (mode === 'light') {
+        // The full list is one step away, in Settings.
+        await sheet.getByRole('button', { name: 'Show All Models' }).click();
+        await expect(sheet).toBeHidden();
+        await expect(page.locator('#settings-page-transcription')).toBeVisible();
+        expect(await page.evaluate(() => (window as any).__captionsReady)).toBe(false);
+        await page.evaluate(() => (window as any).PM.SettingsUI.close());
+      }
+    }
+    const sheet = page.locator('.transcription-modal');
+    await sheet.getByRole('button', { name: 'Download' }).click();
+    await expect(sheet).toBeHidden({ timeout: 20_000 });
+    expect(await page.evaluate(() => (window as any).__captionsReady)).toBe(true);
+    // Whisper stays in use; captions run on the word-timed model, and Settings says so.
+    expect((await page.evaluate(() => (window as any).PM.Transcription.status())).activeModelId).toBe('whisper-medium');
+    await page.evaluate(() => (window as any).PM.SettingsUI.open('transcription'));
+    await expect(region.getByText('Whisper Medium doesn’t time each word, so captions use Parakeet Unified EN.')).toBeVisible();
     expect(session.diagnostics.pageErrors).toEqual([]);
   } finally {
     await session?.close();
@@ -187,8 +264,8 @@ test('main asks the focused editor for a model with a reason', async ({ session 
   await expect(sheet).toBeHidden();
 });
 
-test('a real Parakeet model transcribes speech in the utility process', async () => {
-  test.skip(!parakeetDir || !existsSync(path.join(parakeetDir, 'encoder.int8.onnx')), 'POWERMOVE_E2E_PARAKEET_DIR is not set');
+test('a real Parakeet Unified EN model transcribes speech in the utility process', async () => {
+  test.skip(!parakeetDir || !existsSync(path.join(parakeetDir, CATALOG.find((model) => model.id === DEFAULT_MODEL_ID)!.files[0]!.name)), 'POWERMOVE_E2E_PARAKEET_DIR is not set');
   test.setTimeout(180_000);
   const home = await mkdtemp(path.join(os.tmpdir(), 'pm-transcription-real-'));
   const files: Record<string, Hosted> = {};
@@ -267,24 +344,26 @@ test('onboarding starts the chosen model download and it finishes after onboardi
     await welcome.locator('#agent-step').getByRole('button', { name: 'Continue' }).click();
     const step = welcome.locator('#transcription-step');
     await expect(welcome.locator('#transcription-title')).toBeFocused();
-    await expect(step.getByText('Parakeet V2')).toBeVisible();
+    await expect(step.getByRole('radio')).toHaveCount(curated.length);
+    await expect(step.getByText('Parakeet Unified EN')).toBeVisible();
+    await expect(step.getByText('Whisper Medium')).toHaveCount(0);
     for (const mode of ['light', 'dark']) {
       await welcome.evaluate((value) => { document.documentElement.dataset.theme = value; }, mode);
       await welcome.waitForTimeout(900);
       if (shots) await welcome.screenshot({ path: path.join(shots, `onboarding-${mode}.png`) });
     }
     // Download, go back, then decline: nothing of that download stays on disk.
-    const partial = path.join(home, 'profile', 'models', 'transcription', '.partial', 'parakeet-tdt-0.6b-v3');
-    const v3State = () => welcome.evaluate(async () => (await (window as any).onboarding.transcription.status()).models[0].state);
+    const partial = path.join(home, 'profile', 'models', 'transcription', '.partial', DEFAULT_MODEL_ID);
+    const modelState = () => welcome.evaluate(async (id) => (await (window as any).onboarding.transcription.status()).models.find((model: any) => model.id === id).state, DEFAULT_MODEL_ID);
     await step.getByRole('button', { name: 'Download' }).click();
     await expect(welcome.locator('#workspace-title')).toBeFocused();
-    await expect.poll(v3State).toBe('downloading');
+    await expect.poll(modelState).toBe('downloading');
     await expect.poll(() => existsSync(partial)).toBe(true);
     await welcome.locator('#workspace-step').getByRole('button', { name: /Back/ }).click();
     await expect(welcome.locator('#transcription-title')).toBeFocused();
     await step.getByRole('button', { name: 'Not now' }).click();
     await expect(welcome.locator('#workspace-title')).toBeFocused();
-    await expect.poll(v3State).toBe('absent');
+    await expect.poll(modelState).toBe('absent');
     await expect.poll(() => existsSync(partial)).toBe(false);
     // Changing course again: download after all, and it outlives onboarding.
     await welcome.locator('#workspace-step').getByRole('button', { name: /Back/ }).click();
@@ -294,9 +373,9 @@ test('onboarding starts the chosen model download and it finishes after onboardi
     const editor = await find(url => !/onboarding/.test(url) && url.startsWith('app:'));
     await editor.waitForFunction(() => Boolean((window as any).PM?.Transcription));
     // Still downloading after onboarding has closed; finishing it makes the model active.
-    expect((await editor.evaluate(() => (window as any).PM.Transcription.status())).models[0].state).toBe('downloading');
+    expect((await editor.evaluate(async (id) => (await (window as any).PM.Transcription.status()).models.find((model: any) => model.id === id).state, DEFAULT_MODEL_ID))).toBe('downloading');
     release();
-    await expect.poll(() => editor.evaluate(async () => (await (window as any).PM.Transcription.status()).activeModelId), { timeout: 20_000 }).toBe('parakeet-tdt-0.6b-v3');
+    await expect.poll(() => editor.evaluate(async () => (await (window as any).PM.Transcription.status()).activeModelId), { timeout: 20_000 }).toBe(DEFAULT_MODEL_ID);
     expect(errors).toEqual([]);
   } finally {
     await app.close().catch(() => undefined);

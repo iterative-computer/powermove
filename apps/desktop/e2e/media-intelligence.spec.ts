@@ -8,24 +8,26 @@ import { promisify } from 'node:util';
 
 import type { Page } from 'playwright';
 
+import { CATALOG, DEFAULT_MODEL_ID } from '../src/main/transcription/catalog';
 import { expect, launchApp, repoRoot, test, type LaunchedApp } from './helpers/app';
 
 /*
  * The media-intelligence lanes working together on real pieces: spoken media
  * made with `say`, the bundled ffmpeg, the real transcription utility process
- * with a real Parakeet model, captions generated through the UI, the agent's
+ * with a real Parakeet Unified EN model, captions generated through the UI, the agent's
  * media and caption tools called by a model through the live tool bridge,
  * subtitle files round-tripping, and the Mixer metering real playback.
  *
- * POWERMOVE_E2E_PARAKEET_DIR=<folder with the Parakeet V3 sherpa files> runs
- * the tests that need a downloaded model; the rest run without one.
+ * POWERMOVE_E2E_PARAKEET_DIR=<folder with the pinned parakeet-unified-en-0.6b
+ * GGUF> runs the tests that need a downloaded model; the rest run without one.
  * PM_E2E_SHOTS=/some/dir saves review screenshots there (never in the repo).
  */
 
 const run = promisify(execFile);
 const ffmpeg = path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg');
 const parakeetDir = process.env.POWERMOVE_E2E_PARAKEET_DIR;
-const hasModel = !!parakeetDir && existsSync(path.join(parakeetDir, 'encoder.int8.onnx'));
+const pinned = CATALOG.find((model) => model.id === DEFAULT_MODEL_ID)!;
+const hasModel = !!parakeetDir && existsSync(path.join(parakeetDir, pinned.files[0]!.name));
 const shots = process.env.PM_E2E_SHOTS;
 
 const SENTENCE_A = 'The quick brown fox jumps over the lazy dog.';
@@ -59,12 +61,14 @@ async function speech(directory: string): Promise<Speech> {
   return { file, audio, gapStart: first, gapEnd: first + GAP, duration: await seconds(file) };
 }
 
-/** A downloaded model, put where the app's ModelStore looks for it. */
+/** A downloaded model, put where the app's ModelStore looks for it (the GGUF linked, its manifest written as a download would). */
 async function installModel(userData: string): Promise<void> {
   const root = path.join(userData, 'models', 'transcription');
-  await mkdir(root, { recursive: true });
-  await symlink(parakeetDir!, path.join(root, 'parakeet-tdt-0.6b-v3'));
-  await writeFile(path.join(root, 'settings.json'), JSON.stringify({ activeModelId: 'parakeet-tdt-0.6b-v3', language: 'auto' }));
+  const dir = path.join(root, pinned.id);
+  await mkdir(dir, { recursive: true });
+  for (const file of pinned.files) await symlink(path.join(parakeetDir!, file.name), path.join(dir, file.name));
+  await writeFile(path.join(dir, 'model.json'), JSON.stringify({ id: pinned.id, files: pinned.files.map(({ name, size, sha256 }) => ({ name, size, sha256 })) }));
+  await writeFile(path.join(root, 'settings.json'), JSON.stringify({ activeModelId: pinned.id, language: 'auto' }));
 }
 
 async function open(session: LaunchedApp, duration = 20): Promise<void> {
@@ -164,7 +168,7 @@ test.describe('with a real speech model', () => {
       session = await launchApp({ userData: path.join(home, 'profile') });
       await open(session);
       const { page } = session;
-      expect((await page.evaluate(() => (window as any).PM.Transcription.status())).activeModelId).toBe('parakeet-tdt-0.6b-v3');
+      expect((await page.evaluate(() => (window as any).PM.Transcription.status())).activeModelId).toBe(pinned.id);
       const clip = await importMedia(page, media.file);
 
       // The reference: the engine's own words for the whole source file.
@@ -385,7 +389,10 @@ test('without a model, Generate Captions asks for one and dismissing changes not
     const sheet = page.locator('.transcription-modal');
     await expect(sheet).toBeVisible();
     await expect(sheet.getByText(/Captions for “speech\.mp4”|speech\.mp4/)).toBeVisible();
-    await expect(sheet.getByRole('radio', { name: /Parakeet V3/ })).toBeChecked();
+    await expect(sheet.getByRole('radio', { name: /Parakeet Unified EN/ })).toBeChecked();
+    // Captions see only the curated word-timed models; Settings has the rest.
+    await expect(sheet.getByRole('radio')).toHaveCount(CATALOG.filter((model) => model.featured && model.wordTimestamps).length);
+    await expect(sheet.getByRole('button', { name: 'Show All Models' })).toBeVisible();
     await sheet.getByRole('button', { name: 'Not Now' }).click();
     await expect(sheet).toBeHidden();
     await expect.poll(() => page.evaluate(() => (window as any).PM.hist.list().length)).toBe(before.history);
