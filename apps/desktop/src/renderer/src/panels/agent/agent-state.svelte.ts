@@ -58,6 +58,8 @@ export type TraceStep =
       detail?: string;
       /** Bounded result excerpt, set on tool-end. */
       output?: string;
+      /** Agent media tools: settled without a final result (a transcription still running, or waiting on a model). */
+      outcome?: 'pending' | 'needs-model';
       startedAt?: number;
       endedAt?: number;
     }

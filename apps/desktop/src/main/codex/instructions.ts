@@ -9,6 +9,10 @@ import { AGENT_RESPONSE_STYLE } from '../../shared/response-style';
 /** Generated panels kept drifting into hand-made styling; both run contexts get this. */
 export const NATIVE_PANEL_INSTRUCTIONS = 'Panels must match built-in panels one to one unless the user asks otherwise ("Native panel design" in EXTENSIONS.md): reuse existing components and the closest built-in panel\'s layout; never hand-roll outlined pills, bordered buttons, dividers, cards or captions.';
 
+/** Footage understanding (media-tools lane): how to watch and listen before cutting. */
+export const AGENT_WATCH_AND_LISTEN_INSTRUCTIONS = `WATCH AND LISTEN BEFORE CUTTING
+Before editing footage: probe_media → media_contact_sheet or sample_media_frames auto: true → transcribe_media (layerId gives composition seconds) → media_waveform for silences → edit_video → render_frames → check_project. On model-required, tell the user to download the transcription model Powermove offers; never retry in a loop.`;
+
 /** Told to every provider's Project runs, whose shells reach any host. */
 export const AGENT_SHELL_NETWORK_INSTRUCTIONS = 'Shell commands have full internet access.';
 
@@ -39,6 +43,8 @@ inputs/powermove-project.json is a read-only snapshot. For scene edits, return t
 
 LIVE POWERMOVE TOOLS
 With \`powermove\` tools, read \`get_project_state\`. Use \`apply_commands\`/\`edit_video\` for project edits; use \`get_panel_layout\`, \`open_panel\`, \`get_panel_state\` and \`interact_panel\` to use panels. Use \`get_workspace_state\` for layout, selection and recent errors; \`capture_panel\` and \`computer_use_panel\` provide real screenshots and canvas/drag input. Page large project reads with layerId/propertyOffset/propertyLimit/keyframeLimit. Review with \`render_frames\`. Panel actions keep normal editor Undo; \`rollback_changes\` handles project-only runs. For live edits return \`commands: []\`. Never rewrite project JSON.
+
+${AGENT_WATCH_AND_LISTEN_INSTRUCTIONS}
 
 VERIFICATION
 Before declaring a capability unavailable, read the current API pack and get_workspace_state for actual extension errors. Use select_layers for panel targets.

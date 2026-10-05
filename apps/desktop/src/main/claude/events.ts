@@ -1,6 +1,7 @@
 import { LIMITS, type CodexTraceEvent } from '../../shared/ipc';
 import { isRecord, isString } from '../../shared/guards';
 import { fragmentText, humanLabel, outputExcerpt, toolDetail } from '../agent-tools/trace-format';
+import { mediaToolSubject } from '../../shared/media-tools';
 
 const MAX_LINE_BYTES = 1024 * 1024;
 const MAX_TOOL_BLOCKS = 64;
@@ -245,12 +246,14 @@ export class ClaudeEventParser {
         try { input = JSON.parse(tool.partialJson); } catch { input = undefined; }
       }
       const detail = input === undefined ? '' : toolDetail(tool.name, input, this.callbacks.projectCwd);
+      const subject = mediaToolSubject(tool.name, input);
       this.callbacks.onTrace?.({
         kind: 'tool-start',
         itemId: tool.id,
         toolName: tool.name.toLowerCase(),
         label: humanLabel(tool.name),
-        ...(detail ? { detail } : {})
+        ...(detail ? { detail } : {}),
+        ...(subject ? { subject } : {})
       });
       this.callbacks.onProgress?.(`Using ${humanLabel(tool.name)}…`);
       return;
@@ -294,12 +297,14 @@ export class ClaudeEventParser {
     if (value.name === QUESTION_TOOL) { this.hiddenToolIds.add(value.id); return; }
     const name = normalizedText(value.name, 80) || 'tool';
     const detail = toolDetail(name, value.input, this.callbacks.projectCwd);
+    const subject = mediaToolSubject(name, value.input);
     this.callbacks.onTrace?.({
       kind: 'tool-start',
       itemId: value.id,
       toolName: name.toLowerCase(),
       label: humanLabel(name),
-      ...(detail ? { detail } : {})
+      ...(detail ? { detail } : {}),
+      ...(subject ? { subject } : {})
     });
     this.callbacks.onProgress?.(`Using ${humanLabel(name)}…`);
   }

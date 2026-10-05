@@ -27,8 +27,12 @@ import {
 import type { StoreAgentGateway, StoreInstallInput, StorePublishInput, StoreSearchInput } from '../cloud/store-agent';
 import { inspectCreativeWorkspace } from '../creative-workspace';
 import { userInput, type UserInput } from '../user-input';
+import { AgentMediaTools, CALL_BUDGET_MS, type CompositionInfo, type MediaToolContext } from './media-tools';
+import { AGENT_MEDIA_TOOL_NAMES, COMPOSITION_INFO_TOOL, MEDIA_SOURCE_TOOL, type AgentMediaSource } from '../../shared/media-tools';
+import type { TranscriptionService } from '../transcription/service';
 
 const STORE_TOOL_NAMES = new Set<string>(POWERMOVE_STORE_TOOL_NAMES);
+const MEDIA_TOOL_NAMES = new Set<string>(AGENT_MEDIA_TOOL_NAMES);
 
 const TOOL_TIMEOUT_MS = 120_000;
 const MAX_SOCKET_REQUEST_BYTES = 2 * 1024 * 1024;
@@ -142,6 +146,14 @@ export interface PowermoveAgentToolBridgeOptions {
   storeAgent?: StoreAgentGateway | null;
   /** Test seam: the app windows' input record. */
   userInput?: Pick<UserInput, 'drive'>;
+  /** Bundled ffmpeg for the media tools; absent disables them with a clear error. */
+  ffmpegPath?: string;
+  /** Test seams for the media tools. */
+  transcription?: () => TranscriptionService;
+  transcribeWaitMs?: number;
+  mediaFontFile?: string | null;
+  /** Test seam: how long one media tool call may take (defaults to CALL_BUDGET_MS). */
+  mediaCallBudgetMs?: number;
 }
 
 export class PowermoveAgentToolBridge {
@@ -152,6 +164,8 @@ export class PowermoveAgentToolBridge {
   private server: Server | null = null;
   private starting: Promise<number> | null = null;
   private readonly onRendererResponseBound: (event: IpcMainEvent, value: unknown) => void;
+  private mediaTools: AgentMediaTools | null = null;
+  private readonly mediaCalls = new Map<PowermoveAgentToolSession, Set<AbortController>>();
 
   constructor(
     private readonly ipcMain: IpcMain,
@@ -211,6 +225,8 @@ export class PowermoveAgentToolBridge {
       this.pending.delete(callId);
     }
     this.ipcMain.removeListener(IPC.agentToolResponse, this.onRendererResponseBound);
+    this.mediaTools?.dispose();
+    this.mediaTools = null;
     const server = this.server;
     this.server = null;
     this.starting = null;
@@ -328,6 +344,8 @@ export class PowermoveAgentToolBridge {
   }
 
   closeSession(session: PowermoveAgentToolSession): void {
+    for (const controller of this.mediaCalls.get(session) ?? []) controller.abort();
+    this.mediaCalls.delete(session);
     if (this.sessionsByToken.get(session.token) === session) this.sessionsByToken.delete(session.token);
     if (this.sessionsByRun.get(session.runId) === session) this.sessionsByRun.delete(session.runId);
     for (const [callId, pending] of this.pending) {
@@ -446,6 +464,9 @@ export class PowermoveAgentToolBridge {
     if (STORE_TOOL_NAMES.has(tool)) {
       return this.callStoreTool(session, tool, args);
     }
+    if (MEDIA_TOOL_NAMES.has(tool)) {
+      return this.callMediaTool(session, tool, args);
+    }
     const response = tool === 'stage_fork_rebase'
       ? await this.callStageForkRebase(session, args, workspace)
       : tool === 'capture_panel'
@@ -480,6 +501,81 @@ export class PowermoveAgentToolBridge {
       ok: true,
       content: [{ type: 'text', text: JSON.stringify(result ?? { ok: true }) }]
     };
+  }
+
+  /* ── watch and listen (media-tools lane) ──
+     Media tools run here, against a file the renderer names: the original
+     source, or the stored bytes staged once (see media-path-cache.ts). They
+     read the project but never change it, so no revision bookkeeping. */
+  private async callMediaTool(session: PowermoveAgentToolSession, tool: string, args: Record<string, unknown>): Promise<AgentToolResponseEvent> {
+    if (!this.options.ffmpegPath) throw new Error('Media tools are unavailable in this Powermove build.');
+    this.mediaTools ??= new AgentMediaTools({
+      ffmpegPath: this.options.ffmpegPath,
+      ...(this.options.transcription ? { transcription: this.options.transcription } : {}),
+      ...(this.options.transcribeWaitMs !== undefined ? { transcribeWaitMs: this.options.transcribeWaitMs } : {}),
+      ...(this.options.mediaFontFile !== undefined ? { fontFile: this.options.mediaFontFile } : {})
+    });
+    const controller = new AbortController();
+    const calls = this.mediaCalls.get(session) ?? new Set<AbortController>();
+    calls.add(controller);
+    this.mediaCalls.set(session, calls);
+    const rendererJson = async (name: string, rendererArgs: Record<string, unknown>): Promise<any> => {
+      const response = await this.callRenderer(session, name, rendererArgs);
+      if (!response.ok) throw new Error(response.error || `${name} failed.`);
+      const item = response.content.find((entry) => entry.type === 'text');
+      if (item?.type !== 'text') throw new Error(`${name} returned no data.`);
+      return { json: JSON.parse(item.text), response };
+    };
+    const context: MediaToolContext = {
+      signal: controller.signal,
+      deadline: Date.now() + (this.options.mediaCallBudgetMs ?? CALL_BUDGET_MS),
+      resolve: async (target) => (await rendererJson(MEDIA_SOURCE_TOOL, target)).json as AgentMediaSource,
+      renderFrames: async (times, width, until) => {
+        // render_frames takes 5 times a call. With a deadline, a batch that
+        // would not finish in time is not started, and one still rendering at
+        // the deadline is abandoned, so the tool answers within the client's
+        // tool timeout with the frames that did finish.
+        const frames: Array<{ data: Uint8Array; mimeType: 'image/png' | 'image/jpeg' }> = [];
+        let slowest = 0;
+        for (let offset = 0; offset < times.length; offset += 5) {
+          const left = until === undefined ? Infinity : until - Date.now();
+          if (left <= 0 || (frames.length && left < slowest)) break;
+          const batch = times.slice(offset, offset + 5);
+          const started = Date.now();
+          const pending = rendererJson('render_frames', { times: batch, width });
+          let response: AgentToolResponseEvent | null;
+          if (left === Infinity) response = (await pending).response;
+          else {
+            pending.catch(() => undefined);
+            let timer: NodeJS.Timeout | undefined;
+            response = await Promise.race([
+              pending.then((value) => value.response as AgentToolResponseEvent),
+              new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), left); timer.unref?.(); })
+            ]).finally(() => clearTimeout(timer));
+          }
+          if (!response) break;
+          const images = response.content.filter((item) => item.type === 'image');
+          if (images.length !== batch.length) throw new Error('The composition did not render every requested frame.');
+          for (const item of images) frames.push({ data: item.data, mimeType: item.mimeType });
+          slowest = Math.max(slowest, Date.now() - started);
+        }
+        if (!frames.length) throw new Error('The composition did not render in time for one tool call. Ask for fewer cells or a shorter span.');
+        return frames;
+      },
+      composition: async () => {
+        // Not get_project_state: that read moves the run's edit baseline (see harness.ts).
+        const { json } = await rendererJson(COMPOSITION_INFO_TOOL, {});
+        const comp = json ?? {};
+        const work = Array.isArray(comp.workArea) && comp.workArea.length === 2 && comp.workArea.every(Number.isFinite) ? comp.workArea as [number, number] : undefined;
+        return { duration: Number(comp.duration) || 0, fps: Number(comp.fps) || 30, width: Number(comp.width) || 1920, height: Number(comp.height) || 1080, ...(work ? { workArea: work } : {}) } satisfies CompositionInfo;
+      }
+    };
+    try {
+      const content = await this.mediaTools.call(tool, args, context);
+      return { runId: session.runId, callId: `main-${randomUUID()}`, ok: true, content };
+    } finally {
+      calls.delete(controller);
+    }
   }
 
   private dispatchStoreTool(store: StoreAgentGateway, tool: string, args: Record<string, unknown>): Promise<unknown> {

@@ -82,6 +82,8 @@ export interface CodexIpcContext {
   agentToolCommandArgs?: string[];
   /** Test seam; production resolves the same built-in resource root as main boot. */
   builtinExtensionsDir?: string;
+  /** The bundled ffmpeg the agent's media tools run (probe, frames, waveform). */
+  agentMediaFfmpeg?: string;
 }
 
 export interface ChatGPTAccountController {
@@ -351,6 +353,7 @@ export function registerCodexIpc(
         ...(ctx.agentToolCommand ? { command: ctx.agentToolCommand } : {}),
         ...(ctx.agentToolCommandArgs ? { commandArgs: ctx.agentToolCommandArgs } : {}),
         storeAgent: ctx.storeAgent?.() ?? null,
+        ...(ctx.agentMediaFfmpeg ? { ffmpegPath: ctx.agentMediaFfmpeg } : {}),
         stageForkRebase: ({ forkId, stagingDirectory }) => stageForkRebase({
           forkId,
           stagingDirectory,
