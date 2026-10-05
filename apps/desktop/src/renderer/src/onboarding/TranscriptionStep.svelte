@@ -2,10 +2,11 @@
   import { onMount } from 'svelte';
   import type { OnboardingTranscriptionBridge, TranscriptionModelInfo, TranscriptionStatus } from '../../../shared/transcription';
   import ModelMeters from '../transcription/ModelMeters.svelte';
-  import { formatBytes } from '../transcription/format';
+  import { curatedModels, formatBytes } from '../transcription/format';
 
   /* Optional: a speech model for captions and the agent. Choosing one starts
-     its download in main right away; it keeps going after onboarding ends. */
+     its download in main right away; it keeps going after onboarding ends.
+     Only the curated few are offered; Settings › Transcription has the rest. */
   let { bridge, onback, oncontinue }: {
     bridge: OnboardingTranscriptionBridge | null;
     onback: () => void;
@@ -17,7 +18,7 @@
   /** Downloads this step started, so changing course or "Not now" leaves nothing behind. */
   let started: string[] = [];
 
-  const models = $derived(status?.models ?? []);
+  const models = $derived(curatedModels(status?.models ?? []));
   const ready = $derived(models.find((model) => model.id === status?.activeModelId) ?? null);
   const selected = $derived(models.find((model) => model.id === chosen)
     ?? ready ?? models.find((model) => model.state === 'downloading') ?? models.find((model) => model.recommended) ?? models[0] ?? null);
@@ -94,7 +95,7 @@
     {/if}
     <button class="secondary" type="button" onclick={skip}>{models.length ? 'Not now' : 'Continue'}</button>
   </div>
-  <p class="note">Runs on this Mac. Your audio is never uploaded.</p>
+  <p class="note">Runs on this Mac. Your audio is never uploaded.{#if models.length}{' More models are in Settings.'}{/if}</p>
 </main>
 
 <style>
