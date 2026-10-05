@@ -698,10 +698,12 @@ export function separateVideoAudio(PM: PMRegistry, layerId?: any): unknown {
       content: {
         asset: video.d.asset,
         trim: Math.max(0, Number(video.d.trim) || 0),
-        gain: 1,
+        /* The soundtrack keeps the level and mute it had in the mixer. */
+        gain: video.d.audioGain == null ? 1 : structuredClone(video.d.audioGain),
         fadeIn: 0,
         fadeOut: 0,
       },
+      ...(video.d.audioMuted === true ? { visible: false } : {}),
       select: true,
     },
   ], { label: 'Separate audio', origin: 'command' });

@@ -21,7 +21,7 @@ const AUDIO_CONTENT_FIELDS: any = new Set(['asset', 'trim', 'gain', 'fadeIn', 'f
 const ORIGIN_TRUST: any = Object.freeze({
   interface: 'human', inspector: 'human', canvas: 'human', timeline: 'human',
   command: 'human', 'command-palette': 'human', 'effects-panel': 'human',
-  'shader-panel': 'human', library: 'human', import: 'human',
+  'shader-panel': 'human', library: 'human', import: 'human', mixer: 'human',
   agent: 'generated', 'generated-ui': 'generated',
   'generated-tool': 'generated', 'generated-script': 'generated',
 });
@@ -94,7 +94,7 @@ function commandScopes(command: any): any[][] {
   const type = command?.type;
   if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_captions'].includes(type)) return [['layers'], ['comps']];
   if (type === 'set_composition') {
-    return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work']];
+    return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work'], ['audioGain']];
   }
   if (type === 'set_scene_parameter') return [['params', String(command.name || '').trim()]];
   if (type === 'add_marker') return [['markers']];
@@ -116,6 +116,8 @@ const property: any = (layer: any, path: any) => {
   const channel: any = channelPath(path);
   if (channel.startsWith('c.')) {
     const key = channel.slice(2);
+    /* Optional levels are unity until first set, so they can be keyframed from absent. */
+    if (canAnimateContent(layer, key) && layer.d[key] == null && key === 'audioGain') layer.d[key] = 1;
     if (canAnimateContent(layer, key) && !isProperty(layer.d[key]) && layer.d[key] != null) layer.d[key] = PM.P(layer.d[key]);
   }
   if (channel === 'l.blend' || channel === 'l.mblur' || channel === 'l.matteMode') {
@@ -290,17 +292,41 @@ function setExpression(command: any) {
   return { id: layer.id, channel, expression: prop.expr };
 }
 
+/* Video soundtracks and precomps carry an optional audio level (absent = unity)
+   and a mute switch. Normalise them before they reach the layer so the engine
+   and the mixer never see a null, a string or an out-of-range level. Returns
+   true when the patch clears the level. */
+function normalizeAudioLevelPatch(layer: any, patch: any) {
+  if (layer.type !== 'video' && layer.type !== 'precomp') return false;
+  if (Object.hasOwn(patch, 'audioMuted') && typeof patch.audioMuted !== 'boolean') {
+    if (patch.audioMuted == null) patch.audioMuted = false;
+    else throw new Error('Audio mute must be on or off');
+  }
+  if (!Object.hasOwn(patch, 'audioGain')) return false;
+  const value: any = patch.audioGain;
+  if (value == null) { delete patch.audioGain; return true; }
+  if (isProperty(value)) return false;
+  if (typeof value !== 'number') throw new Error('Audio gain must be a finite number');
+  patch.audioGain = PM.clamp(finite(value, 'Audio gain'), 0, 4);
+  return false;
+}
+
 function setContent(command: any) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
   const patch: any = safePatch(command.patch, 'content patch');
+  const clearsLevel = normalizeAudioLevelPatch(layer, patch);
+  if (clearsLevel) delete layer.d.audioGain;
   for (const key of Object.keys(patch)) {
     if (isProperty(layer.d?.[key]) && !isProperty(patch[key]) && canAnimateContent(layer, key)) {
       setProperty({ target: layer.id, path: `c.${key}`, value: patch[key], preserveHandEdits: false });
       delete patch[key];
     }
   }
-  if (!Object.keys(patch).length) return { id: layer.id };
+  if (!Object.keys(patch).length) {
+    if (clearsLevel) PM.touch();
+    return { id: layer.id };
+  }
   if (layer.type === 'audio') setAudioContent(layer, patch);
   else if (layer.type === 'extension') setExtensionContent(layer, patch);
   else if (layer.type === 'captions') setCaptionsContent(layer, patch);
@@ -425,7 +451,7 @@ function setLayer(command: any) {
 
 function setComposition(command: any) {
   const patch: any = safePatch(command.patch, 'composition patch');
-  const allowed: any = new Set(['name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill', 'shutter', 'workArea']);
+  const allowed: any = new Set(['name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill', 'shutter', 'workArea', 'audioGain']);
   for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new Error(`Composition field “${key}” is not editable`);
   const p: any = PM.proj;
   if (patch.name != null) p.name = String(patch.name).trim() || p.name;
@@ -445,6 +471,7 @@ function setComposition(command: any) {
     p.bg = p.backgroundFill.stops[0].color;
   }
   if (patch.shutter != null) p.shutter = PM.clamp(finite(patch.shutter, 'shutter'), 0, 2);
+  if (patch.audioGain != null) p.audioGain = PM.clamp(finite(patch.audioGain, 'audio gain'), 0, 4);
   if (patch.workArea != null) {
     if (!Array.isArray(patch.workArea) || patch.workArea.length !== 2) throw new Error('workArea must contain start and end');
     const start: any = Math.max(0, finite(patch.workArea[0], 'work area start'));

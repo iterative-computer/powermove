@@ -201,6 +201,11 @@ export interface ImageContent {
 export interface VideoContent extends ImageContent {
   trim: number;
   speed: number;
+  /** The file carries a soundtrack that plays with the clip. */
+  embeddedAudio?: boolean;
+  audioMuted?: boolean;
+  /** Linear level of the embedded soundtrack, 0–4 (absent is unity). */
+  audioGain?: number | Channel<number>;
 }
 
 export interface AudioContent {
@@ -260,6 +265,9 @@ export interface PrecompContent {
   trim?: Channel<number>;
   timeRemap?: Channel<boolean>;
   sourceTime?: Channel<number>;
+  /** Linear level of the nested composition's sound, 0–4 (absent is unity). */
+  audioGain?: number | Channel<number>;
+  audioMuted?: boolean;
   [key: string]: unknown;
   comp: string | null;
   w: number;
@@ -433,6 +441,9 @@ export interface Comp {
   created: number;
   /** hydrate() supplies this migration default; mkProject itself does not. */
   shutter?: number;
+  /** Composition output level (linear, 0–4; absent is unity). Applied to the
+   * mix wherever the composition plays: preview, export, and when nested. */
+  audioGain?: number;
   /** Per-project export settings; nested comps carry the field but never use it. */
   exportDefaults?: ExportDefaults;
   /** The legacy library module installs this lazily. */
