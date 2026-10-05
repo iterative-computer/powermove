@@ -14,31 +14,11 @@ This repository is a bun workspace monorepo containing the desktop editor, the m
 
 ## Get Powermove
 
-### Download for Mac (recommended)
+### Download for Mac
 
 Grab the latest release from [GitHub Releases](https://github.com/iterative-computer/powermove/releases/latest) or [trypowermove.com](https://trypowermove.com). Apple Silicon.
 
-### Run it on another machine
-
-If you also want Powermove on a box you leave on, a Linux server or a spare Mac, the `powermove-cli` package runs the same editor as a host you use from a browser on any device. The agents run on the host, so a request keeps going after you close your laptop, and edits, media and fonts stay in sync across every device with the project open.
-
-#### Try it
-
-```sh
-npx powermove-cli@latest serve
-```
-
-Open the printed URL. Over Tailscale, use the `100.x` address.
-
-#### Keep it running
-
-```sh
-npx powermove-cli@latest install
-```
-
-Installs it and registers a service (systemd on Linux, launchd on macOS) that starts now and after reboots. `powermove status` shows whether it is running and the address to open.
-
-Details in [packages/cli/README.md](packages/cli/README.md); architecture in [apps/desktop/docs/remote-serve.md](apps/desktop/docs/remote-serve.md).
+Running Powermove as a host you use from a browser (`powermove-cli`) is on pause for now; it will come back in a future release.
 
 ## Repository layout
 
@@ -89,7 +69,6 @@ To run a script in one workspace, use `bun run --cwd apps/desktop <script>` (or 
 - [Website](apps/www/README.md): the SvelteKit marketing site.
 - [Design language](docs/design.md): the implementation guide for every Powermove interface.
 - [macOS release process](apps/desktop/docs/release.md): signing, notarization, and the beta workflow.
-- [Remote host](apps/desktop/docs/remote-serve.md): how `powermove serve` runs the editor without Electron and what changes in a browser.
 
 ## License
 
