@@ -81,12 +81,23 @@ describe('RunOwner', () => {
     expect(responded).toMatchObject([{ callId: 'c2', ok: false, error: expect.stringContaining('needs an open Powermove tab') }]);
   });
 
-  it('resolves media for the agent on a tab when one is open, else on the engine', () => {
+  it('resolves media on a tab showing the run\'s project, else on the engine, never on another project\'s tab', () => {
     const engine = fakeClient(10);
-    const tab = fakeClient(11);
-    expect(harness(engine, [tab]).hub.targetFor('__media_source', null as never)).toBe(tab);
-    expect(harness(engine, []).hub.targetFor('__media_source', null as never)).toBe(engine);
-    expect(harness(null, []).hub.targetFor('__media_source', null as never)).toBeNull();
+    const onProject = fakeClient(11);
+    const elsewhere = fakeClient(12);
+    const make = (engineClient: RemoteClient | null, open: Record<string, RemoteClient[]>) => {
+      const hub = new RunHub({ engine: () => engineClient, tabs: () => [elsewhere, onProject], tabsOn: (projectId) => open[projectId] ?? [], respond: () => undefined });
+      return { hub, owner: hub.begin(request, elsewhere) };
+    };
+    let built = make(engine, { p1: [onProject], p2: [elsewhere] });
+    expect(built.hub.targetFor('__media_source', built.owner)).toBe(onProject);
+    built = make(engine, { p2: [elsewhere] });
+    expect(built.hub.targetFor('__media_source', built.owner)).toBe(engine);
+    built = make(null, { p2: [elsewhere] });
+    expect(built.hub.targetFor('__media_source', built.owner)).toBeNull();
+    onProject.destroy();
+    built = make(engine, { p1: [onProject] });
+    expect(built.hub.targetFor('__media_source', built.owner)).toBe(engine);
   });
 
   it('records results and prunes finished runs after the retention window', () => {

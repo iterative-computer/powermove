@@ -266,6 +266,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   const runs = new RunHub({
     engine: () => ipc.engine(),
     tabs: () => [...ipc.all()].reverse(),
+    tabsOn: (projectId) => sessions.members(projectId).filter((member): member is RemoteClient => member instanceof RemoteClient && member.kind === 'tab').reverse(),
     respond: (owner, response) => ipc.emitOn(IPC.agentToolResponse, { sender: owner as unknown as RemoteClient, senderFrame: owner.mainFrame, preventDefault() {} }, response),
     log
   });
