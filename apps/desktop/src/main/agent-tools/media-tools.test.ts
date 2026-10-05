@@ -271,6 +271,15 @@ describe('transcribe_media against the transcription seam', () => {
     expect(transcribe).toHaveBeenCalledWith({ path: footage, start: 3, end: 6 }, expect.any(Function), expect.any(AbortSignal));
     expect(result.timeBase).toBe('composition');
     expect(result.segments).toEqual([{ start: 10.5, end: 11, text: 'Second line.', words: [['Second', 10.5, 10.7], ['line.', 10.75, 11]] }]);
+    expect(result.wordTiming).toBeUndefined();
+  });
+
+  it('tells the agent when word times are estimates from a phrase-timed model', async () => {
+    const media = tools({ transcription: () => service(async () => ({ ...transcript, timing: 'segment' })) });
+    const words = json(await media.call('transcribe_media', { assetId: 'a1', format: 'words' }, context(source())));
+    expect(words).toMatchObject({ wordTiming: 'estimated', wordTimingNote: expect.stringMatching(/word-timed model/) });
+    const text = json(await media.call('transcribe_media', { assetId: 'a1' }, context(source())));
+    expect(text.wordTiming).toBeUndefined();
   });
 
   it('pages long transcripts with a cursor', async () => {

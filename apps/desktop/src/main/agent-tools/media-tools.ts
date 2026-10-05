@@ -611,7 +611,11 @@ export class AgentMediaTools {
       asset: this.assetSummary(source), layer: this.layerSummary(source),
       timeBase: layer ? 'composition' : 'source',
       modelId: transcript.modelId, language: transcript.language,
-      segmentCount: segments.length, cursor
+      segmentCount: segments.length, cursor,
+      ...(format === 'words' && transcript.timing && transcript.timing !== 'word' ? {
+        wordTiming: 'estimated',
+        wordTimingNote: 'The speech model in use does not time each word: word times are spread over each phrase. Cut on segment times, or ask the user to download a word-timed model in Settings › Transcription for exact word times.'
+      } : {})
     });
     if (!segments.length) return { ...header, ...(format === 'text' ? { text: '' } : { segments: [] }), note: 'No speech detected.' };
     let used = 0, index = cursor;

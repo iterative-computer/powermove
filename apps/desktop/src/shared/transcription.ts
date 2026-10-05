@@ -31,6 +31,10 @@ export interface Transcript {
   /** Duration of the transcribed span in seconds. */
   duration: number;
   segments: TranscriptSegment[];
+  /** Additive: how the model timed the words. 'word' is measured per word;
+   *  'segment' and 'none' words are spread over their phrase or window, so
+   *  their times are estimates. Omitted on older transcripts. */
+  timing?: TranscriptionTiming;
 }
 
 export type TranscriptionModelState = 'absent' | 'downloading' | 'ready' | 'error';

@@ -292,7 +292,7 @@ export class TranscriptionEngine implements TranscriptionService {
   private async complete(job: Job, result: JobResult): Promise<void> {
     /* The model's own detection labels the transcript when nothing else will (finish() overrides it with a chosen language). */
     const detected = detectedLanguage(job.model, result.language);
-    const transcript: Transcript = { modelId: job.model.id, ...(detected ? { language: detected } : {}), duration: result.duration, segments: result.segments };
+    const transcript: Transcript = { modelId: job.model.id, ...(detected ? { language: detected } : {}), duration: result.duration, segments: result.segments, timing: job.model.timing };
     await this.options.cache.set(job.key, transcript).catch((error: unknown) => console.warn('[transcription] cache write failed', error));
     for (const subscriber of job.subscribers) subscriber.onProgress?.(1);
     this.settle(job, transcript);

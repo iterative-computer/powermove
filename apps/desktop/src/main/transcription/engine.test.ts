@@ -109,7 +109,7 @@ describe('TranscriptionEngine', () => {
     workers[0]!.reply({ type: 'progress', id: job.id, progress: 0.5 });
     workers[0]!.reply({ type: 'done', id: job.id, duration: 7, segments });
     const transcript = await pending;
-    expect(transcript).toEqual({ modelId: 'parakeet', duration: 7, segments, language: 'de' });
+    expect(transcript).toEqual({ modelId: 'parakeet', duration: 7, segments, language: 'de', timing: 'word' });
     expect(progress).toEqual([0.5, 1]);
 
     const again = await instance.transcribe({ path: media, start: 2, end: 9, language: 'de' });
