@@ -165,4 +165,15 @@ test('timeline cue gestures keep neighbours apart and Delete removes selected cu
   await expect.poll(async () => (await captionsLayer(page))?.cues.length).toBe(2);
   await page.evaluate(() => (window as any).PM.hist.undo());
   await expect.poll(async () => (await captionsLayer(page))?.cues.length).toBe(3);
+
+  // Clicking the layer's empty lane selects the layer instead of the cue, so
+  // Delete removes the captions layer rather than a cue the user moved past.
+  const cue = await point(3);
+  await page.mouse.click(cue.x, cue.y);
+  await expect.poll(() => page.evaluate(() => (window as any).PM.Captions.selection().cues.length)).toBe(1);
+  const gap = await point(4.2);
+  await page.mouse.click(gap.x, gap.y);
+  expect(await page.evaluate(() => (window as any).PM.Captions.selection())).toEqual({ layerId: null, cues: [] });
+  await page.keyboard.press('Backspace');
+  await expect.poll(() => captionsLayer(page)).toBeNull();
 });

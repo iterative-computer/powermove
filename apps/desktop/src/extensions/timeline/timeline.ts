@@ -2987,6 +2987,9 @@ function quickOffsetLayers(e: any) {
 
 function selectLayerForPointer(L: any, event: PointerEvent) {
   T.keySelectionActive = false;
+  // A click on a layer (its name, clip body or empty lane) selects the layer,
+  // not the cues picked before it.
+  if (captionTrack.selection().layerId) captionTrack.select(null, []);
   api.selection.set({ keys: [] });
   const selected = api.selection.layers().includes(L.id);
   const toggle = event.metaKey || event.ctrlKey;

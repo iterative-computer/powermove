@@ -615,6 +615,7 @@ export function createTrackView(host: TrackViewHost) {
   /* ── selection ──────────────────────────────────────────── */
   function selectForPointer(id: string, event: PointerEvent) {
     T.keySelectionActive = false;
+    if (host.captions.selection().layerId) host.captions.select(null, []);
     api.selection.set({ keys: [] });
     const selected = api.selection.layers();
     if (event.shiftKey || event.metaKey || event.ctrlKey) {

@@ -63,16 +63,19 @@ export function installCaptions(PM: PMRegistry): void {
     const next = target?.type === 'captions' ? { layerId: target.id, cues: [...new Set(cues)] } : { layerId: null, cues: [] };
     const same = next.layerId === selection.layerId && next.cues.length === selection.cues.length && next.cues.every((id, i) => id === selection.cues[i]);
     selection.layerId = next.layerId; selection.cues = next.cues;
-    if (target && !(PM.sel?.layers || []).includes(target.id)) PM.selectLayers?.([target.id]);
+    // Cues are selected on their own: the layer becomes the only selected one.
+    if (target && !onlySelected(target.id)) PM.selectLayers?.([target.id]);
     if (!same) notify();
   }
+  const onlySelected = (id: string) => { const layers = PM.sel?.layers || []; return layers.length === 1 && layers[0] === id; };
 
-  /* Selecting other layers, deleting the layer, or an Undo that removes the
-     cues ends the cue selection. */
+  /* Selecting any other layer (alone or alongside), deleting the layer, or an
+     Undo that removes the cues ends the cue selection, so Delete and Split
+     never act on cues the user is no longer looking at. */
   const prune = () => {
     if (!selection.layerId) return;
     const target = layer(selection.layerId);
-    if (!target || target.type !== 'captions' || !(PM.sel?.layers || []).includes(target.id)) {
+    if (!target || target.type !== 'captions' || !onlySelected(target.id)) {
       selection.layerId = null; selection.cues = []; notify(); return;
     }
     const ids = new Set((target.d?.cues || []).map((cue: any) => cue.id));
@@ -87,7 +90,7 @@ export function installCaptions(PM: PMRegistry): void {
 
   function deleteSelectedCues(): unknown {
     const target = layer(selection.layerId);
-    if (!target || !selection.cues.length || !(PM.sel?.layers || []).includes(target.id)) return false;
+    if (!target || !selection.cues.length || !onlySelected(target.id)) return false;
     const ids = [...selection.cues];
     const result = apply({ type: 'edit_captions', target: target.id, op: 'delete', ids }, ids.length === 1 ? 'Delete caption' : 'Delete captions', 'timeline');
     if (result?.ok) { selection.cues = []; notify(); }
