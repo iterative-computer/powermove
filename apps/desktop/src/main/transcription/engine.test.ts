@@ -153,7 +153,7 @@ describe('TranscriptionEngine', () => {
 
     const untimed = engine({ ready: [cohere] });
     await expect(untimed.instance.transcribe({ path: media, wordTimestamps: true })).rejects.toMatchObject({
-      code: TRANSCRIPTION_MODEL_MISSING, message: 'Captions need a speech model that times each word.'
+      code: TRANSCRIPTION_MODEL_MISSING, message: 'Captions need a speech model that times each word in the spoken language.'
     });
     // Without the requirement the active model runs as usual.
     void untimed.instance.transcribe({ path: media }).catch(() => undefined);

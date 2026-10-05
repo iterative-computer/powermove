@@ -214,4 +214,24 @@ describe('ModelStore', () => {
     await instance.setActive('nemotron');
     expect(instance.modelFor({ wordTimestamps: true, language: 'en' })?.model.id).toBe('nemotron');
   });
+
+  it('never captions a multilingual model’s unknown speech on an English-only model', async () => {
+    const whisper = { ...model('whisper', { 'model.gguf': bytes(100, 17) }), timing: 'segment' as const, wordTimestamps: false };
+    const english = { ...model('unified', { 'model.gguf': bytes(100, 18) }), languages: 'en' as const, languageCodes: ['en'], detectsLanguage: false };
+    const many = { ...model('nemotron', { 'model.gguf': bytes(100, 19) }), languageCodes: ['en', 'de', 'ko'] };
+    const { instance } = store([english, many, whisper]);
+    await instance.download('unified');
+    await instance.download('whisper');
+    await instance.setActive('whisper');
+    // Whisper on automatic, only Unified EN times words: nothing fits, so the sheet opens.
+    expect(instance.modelFor({ wordTimestamps: true })).toBeNull();
+    expect(instance.modelFor({ wordTimestamps: true, language: 'ko' })).toBeNull();
+    // English chosen: Unified EN hears it.
+    expect(instance.modelFor({ wordTimestamps: true, language: 'en-GB' })?.model.id).toBe('unified');
+    await instance.download('nemotron');
+    expect(instance.modelFor({ wordTimestamps: true })?.model.id).toBe('nemotron');
+    expect(instance.modelFor({ wordTimestamps: true, language: 'ko' })?.model.id).toBe('nemotron');
+    // Plain transcription stays on the model in use.
+    expect(instance.modelFor()?.model.id).toBe('whisper');
+  });
 });

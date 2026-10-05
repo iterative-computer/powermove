@@ -376,8 +376,10 @@ interface CaptionJob {
 const captionJobs = new Map<string, CaptionJob>();
 const CAPTION_JOB_WAIT_MS = 60_000;
 
-function captionModelMissing(): Error {
-  return new Error(`${TRANSCRIPTION_MODEL_MISSING}: No transcription model is installed. Powermove has asked the user to download one (Settings › Transcription). Tell them, and try again after the download finishes.`);
+/** `detail` says why captions could not run (none installed, or the one in use cannot time words). */
+function captionModelMissing(detail?: string): Error {
+  const why = detail ? `${detail} Powermove has asked the user to download one.` : 'No transcription model is installed. Powermove has asked the user to download one (Settings › Transcription).';
+  return new Error(`${TRANSCRIPTION_MODEL_MISSING}: ${why} Tell them, and try again after the download finishes.`);
 }
 
 function cancelCaptionJobs(runId: string): void {
@@ -406,7 +408,7 @@ async function awaitCaptionJob(job: CaptionJob, waitMs = CAPTION_JOB_WAIT_MS): P
     };
   }
   captionJobs.delete(job.id);
-  if (!result.ok) throw result.status === 'model-missing' ? captionModelMissing() : new Error(result.message || 'Could not generate captions.');
+  if (!result.ok) throw result.status === 'model-missing' ? captionModelMissing(result.message) : new Error(result.message || 'Could not generate captions.');
   const layer = PM.L(result.layerId);
   return {
     ok: true,

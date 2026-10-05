@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import type { TranscriptionBridge, TranscriptionModelInfo, TranscriptionStatus } from '../../../shared/transcription';
   import ModelMeters from './ModelMeters.svelte';
-  import { curatedModels, downloadLine, modelFacts, modelFor, type ModelNeeds } from './format';
+  import { captionGap, captionGapLine, downloadLine, modelFacts, modelFor, sheetModels, type ModelNeeds } from './format';
 
   /* The on-demand sheet: one line on why it appeared, the curated models to
      choose from (Settings › Transcription has the rest), and the download's
@@ -35,12 +35,12 @@
   }
 
   const all = $derived(status?.models ?? []);
-  const models = $derived(curatedModels(all, needs));
+  const models = $derived(sheetModels(status, needs));
   const downloading = $derived(all.find((model) => model.state === 'downloading') ?? null);
   const selected = $derived(models.find((model) => model.id === chosen)
     ?? models.find((model) => model.id === downloading?.id) ?? models.find((model) => model.recommended) ?? models[0] ?? null);
-  /* Captions asked, and the model in use cannot time words: say why it is not enough. */
-  const untimed = $derived(needs.wordTimestamps ? all.find((model) => model.id === status?.activeModelId && model.state === 'ready' && !model.wordTimestamps) ?? null : null);
+  /* Captions asked, and the model in use cannot time words: say why it (and any word-timed model on this Mac) is not enough. */
+  const gap = $derived(needs.wordTimestamps ? captionGap(status) : null);
   const selectedError = $derived(selected?.state === 'error' ? selected.error ?? 'The download failed. Try again.' : '');
 
   const message = (cause: unknown, fallback: string): string =>
@@ -91,7 +91,7 @@
   <header class="acct-head">
     <h2>Download a speech model</h2>
     <p>{reason}</p>
-    {#if untimed}<p class="tr-why">{untimed.name} doesn’t time each word, which captions need.</p>{/if}
+    {#if gap}<p class="tr-why">{captionGapLine(gap)}</p>{/if}
   </header>
 
   <div class="sg-column tr-form">

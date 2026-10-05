@@ -4,6 +4,7 @@ import { mkdir, readFile, readdir, rename, rm, stat, statfs, truncate, writeFile
 import path from 'node:path';
 
 import type { TranscriptionModelInfo, TranscriptionStatus } from '../../shared/transcription';
+import { pickModel } from '../../shared/transcription-pick';
 import { modelSize, type CatalogFile, type CatalogModel } from './catalog';
 
 /*
@@ -251,15 +252,13 @@ export class ModelStore {
 
   /**
    * The model a request runs on: the active one, unless the request needs
-   * word timing it lacks; then a downloaded model that times words, one that
-   * lists the language first. Null when nothing ready fits.
+   * word timing it lacks; then a downloaded word-timed model that hears the
+   * same speech (pickModel). Null when nothing ready fits.
    */
   modelFor(needs: { wordTimestamps?: boolean; language?: string } = {}): { model: CatalogModel; dir: string } | null {
     const active = this.activeModel();
-    if (!needs.wordTimestamps || active?.model.wordTimestamps) return active;
-    const timed = this.options.catalog.filter((model) => model.wordTimestamps && this.ready.has(model.id));
-    const base = needs.language && needs.language !== 'auto' ? needs.language.split('-')[0]!.toLowerCase() : '';
-    const model = (base ? timed.find((entry) => entry.languageCodes.includes(base)) : undefined) ?? timed[0];
+    const ready = this.options.catalog.filter((model) => this.ready.has(model.id));
+    const model = pickModel(active?.model ?? null, ready, needs);
     return model ? { model, dir: this.modelDir(model.id) } : null;
   }
 

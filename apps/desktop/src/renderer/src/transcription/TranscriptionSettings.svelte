@@ -3,7 +3,7 @@
   import type { TranscriptionModelInfo, TranscriptionStatus } from '../../../shared/transcription';
   import ModelMeters from './ModelMeters.svelte';
   import { transcriptionBridge } from './host';
-  import { catalogLanguages, downloadLine, formatBytes, languageName, languageOptions, modelFacts, modelFor, modelsFor, percent } from './format';
+  import { captionGap, captionSuggestion, catalogLanguages, downloadLine, formatBytes, languageName, languageOptions, modelFacts, modelFor, modelsFor, percent } from './format';
 
   /* Settings › Transcription: the models on this Mac (the one in use first
      among them), the ones to download, filterable by language once the list
@@ -35,8 +35,14 @@
     if (!active || active.state !== 'ready' || active.wordTimestamps) return '';
     const timed = modelFor(status, { wordTimestamps: true });
     if (timed) return `${active.name} doesn’t time each word, so captions use ${timed.name}.`;
-    const suggestion = models.find((model) => model.recommended && model.wordTimestamps) ?? models.find((model) => model.wordTimestamps);
-    return `${active.name} doesn’t time each word, so captions need a model that does${suggestion ? `, such as ${suggestion.name}` : ''}.`;
+    const gap = captionGap(status);
+    const suggestion = captionSuggestion(status);
+    const such = suggestion ? ` such as ${suggestion.name}` : '';
+    if (!gap?.unfit) return `${active.name} doesn’t time each word, so captions need a model that does${such ? `,${such}` : ''}.`;
+    /* A word-timed model is here but cannot hear this speech. */
+    return gap.language
+      ? `${active.name} doesn’t time each word and ${gap.unfit.name} doesn’t transcribe ${languageName(gap.language)}, so captions need a model${such}.`
+      : `${active.name} doesn’t time each word and ${gap.unfit.name} transcribes only English, so captions need a multilingual model${such}, or English as the spoken language.`;
   });
 
   const message = (cause: unknown, fallback: string): string =>

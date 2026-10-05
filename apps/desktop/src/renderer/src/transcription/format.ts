@@ -1,4 +1,5 @@
 import type { TranscriptionModelInfo, TranscriptionStatus } from '../../../shared/transcription';
+import { pickModel, spokenLanguage } from '../../../shared/transcription-pick';
 
 /* Words and numbers the transcription UI shows, in one place. */
 
@@ -49,21 +50,68 @@ export function modelFacts(model: TranscriptionModelInfo): string {
 /** What a request needs from a model. Captions need every word timed. */
 export interface ModelNeeds { wordTimestamps?: boolean }
 
-const baseLanguage = (tag: string | undefined): string =>
-  tag && tag !== 'auto' ? tag.split('-')[0]!.toLowerCase() : '';
-
 /**
- * The model a request would run on, as main picks it (ModelStore.modelFor):
- * the active one, unless the request needs word timing it lacks; then a
- * downloaded word-timed model, one listing the language first.
+ * The model a request would run on, as main picks it (ModelStore.modelFor,
+ * both through pickModel): the active one, unless the request needs word
+ * timing it lacks; then a downloaded word-timed model that hears the same
+ * speech, never an English-only one for a multilingual model left on
+ * automatic.
  */
 export function modelFor(status: TranscriptionStatus | null | undefined, needs: ModelNeeds = {}): TranscriptionModelInfo | null {
   const models = status?.models ?? [];
   const active = models.find((model) => model.id === status?.activeModelId && model.state === 'ready') ?? null;
-  if (!needs.wordTimestamps || active?.wordTimestamps) return active;
-  const timed = models.filter((model) => model.wordTimestamps && model.state === 'ready');
-  const base = baseLanguage(status?.language);
-  return (base ? timed.find((model) => model.languageCodes?.includes(base)) : undefined) ?? timed[0] ?? null;
+  const ready = models.filter((model) => model.state === 'ready');
+  return pickModel(active, ready, { ...needs, ...(status?.language ? { language: status.language } : {}) });
+}
+
+/**
+ * Why captions cannot run on what is downloaded, when the model in use
+ * cannot time words: that model, and a word-timed one that is downloaded but
+ * cannot hear the speech (English only, or not the chosen language). Null
+ * when captions can run, or when nothing is in use.
+ */
+export function captionGap(status: TranscriptionStatus | null | undefined): { active: TranscriptionModelInfo; unfit: TranscriptionModelInfo | null; language: string } | null {
+  const models = status?.models ?? [];
+  const active = models.find((model) => model.id === status?.activeModelId && model.state === 'ready') ?? null;
+  if (!active || active.wordTimestamps || modelFor(status, { wordTimestamps: true })) return null;
+  const unfit = models.find((model) => model.state === 'ready' && model.wordTimestamps) ?? null;
+  return { active, unfit, language: spokenLanguage(active, status?.language) };
+}
+
+/** One line on why captions need another model, for the sheet and Settings. */
+export function captionGapLine(gap: NonNullable<ReturnType<typeof captionGap>>): string {
+  const head = `${gap.active.name} doesn’t time each word, which captions need`;
+  if (!gap.unfit) return `${head}.`;
+  if (gap.language) return `${head}, and ${gap.unfit.name} doesn’t transcribe ${languageName(gap.language)}.`;
+  return `${head}, and ${gap.unfit.name} transcribes only English.`;
+}
+
+/** Whether downloading a model would let captions run: a word-timed model main would then pick. */
+function closesGap(model: TranscriptionModelInfo, status: TranscriptionStatus | null | undefined): boolean {
+  if (!model.wordTimestamps || model.state === 'ready' || !status) return false;
+  const after = status.models.map((entry) => entry.id === model.id ? { ...entry, state: 'ready' as const } : entry);
+  return modelFor({ ...status, models: after }, { wordTimestamps: true }) !== null;
+}
+
+/** A model to suggest for captions: recommended, word-timed, not yet downloaded, and able to hear the speech. */
+export function captionSuggestion(status: TranscriptionStatus | null | undefined): TranscriptionModelInfo | null {
+  const models = status?.models ?? [];
+  const fits = (model: TranscriptionModelInfo) => closesGap(model, status);
+  return models.find((model) => fits(model) && model.recommended) ?? models.find(fits) ?? null;
+}
+
+/**
+ * What the download sheet offers. Captions see the curated models that
+ * would let them run (a downloaded one that cannot hear the speech is left
+ * out); with none curated, every model that would.
+ */
+export function sheetModels(status: TranscriptionStatus | null | undefined, needs: ModelNeeds = {}): TranscriptionModelInfo[] {
+  const models = status?.models ?? [];
+  const curated = curatedModels(models, needs);
+  if (!needs.wordTimestamps) return curated;
+  const fits = (model: TranscriptionModelInfo) => model.wordTimestamps && (model.state === 'downloading' || closesGap(model, status));
+  const offered = curated.filter(fits);
+  return offered.length ? offered : models.filter(fits);
 }
 
 /**

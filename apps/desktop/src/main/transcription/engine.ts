@@ -128,7 +128,7 @@ export class TranscriptionEngine implements TranscriptionService {
     const active = this.options.models.modelFor({ ...(request.wordTimestamps ? { wordTimestamps: true } : {}), language: request.language ?? setting });
     if (!active) {
       throw new TranscriptionModelMissingError(request.wordTimestamps && this.options.models.activeModel()
-        ? 'Captions need a speech model that times each word.'
+        ? 'Captions need a speech model that times each word in the spoken language.'
         : undefined);
     }
     const spoken = decodeLanguage(active.model, request.language ?? setting);

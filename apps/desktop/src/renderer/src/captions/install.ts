@@ -12,6 +12,7 @@ import { createSettingsSection } from '../legacy/ui/settings-section';
 import { row as settingsRow, select as settingsSelect } from '../legacy/ui/project-settings';
 import { mountSquircles, SQUIRCLE_SELECTOR } from '../settings/squircle';
 import { ensureTranscriptionModel, transcribe, transcriptionStatus } from '../transcription/client';
+import { captionSuggestion } from '../transcription/format';
 import { resolveMediaPath } from '../media/media-path';
 import { exportCaptionsText } from './commands';
 import { parseCaptions, type CaptionFormat } from './formats';
@@ -299,14 +300,17 @@ export function installCaptions(PM: PMRegistry): void {
       settled = true;
       toast(text, shown ? { key, progress: 1, completed: true, ...extra } : { key, icon: 'captions', ...extra });
     };
-    /* A model is in use but cannot time words (Whisper, Canary, Cohere). */
-    let untimed = false;
+    /* A model is in use but cannot time words (Whisper, Canary, Cohere): a word-timed one to suggest instead. */
+    let untimed = null as { suggestion: string | null } | null;
     try {
       const result = await captionsFromSpeech(layers, {
         ensureModel: async reason => {
           const ready = await ensureTranscriptionModel(reason, { wordTimestamps: true });
           if (ready && PM.proj === project) progress(0);
-          if (!ready) untimed = !!(await Promise.resolve(transcriptionStatus()).catch(() => null))?.activeModelId;
+          if (!ready) {
+            const status = await Promise.resolve(transcriptionStatus()).catch(() => null);
+            untimed = status?.activeModelId ? { suggestion: captionSuggestion(status)?.name ?? null } : null;
+          }
           return ready;
         },
         resolvePath: resolveMediaPath,
@@ -323,7 +327,7 @@ export function installCaptions(PM: PMRegistry): void {
       if (result.status === 'model-missing') {
         finish(untimed ? 'Captions need a speech model that times each word' : 'Captions need a transcription model');
         return { ok: false, status: 'model-missing', message: untimed
-          ? 'The speech model in use does not time each word. Download a word-timed model, such as Parakeet Unified EN, in Settings › Transcription.'
+          ? `The speech model in use does not time each word. Download a word-timed model${untimed.suggestion ? `, such as ${untimed.suggestion},` : ''} in Settings › Transcription.`
           : 'No transcription model is installed. Download one in Settings › Transcription.' };
       }
       if (result.status === 'empty') {

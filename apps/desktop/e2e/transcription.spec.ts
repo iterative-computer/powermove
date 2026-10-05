@@ -214,8 +214,13 @@ test('captions ask for a word-timed model when the one in use only times phrases
     await row(region, 'whisper-medium').getByRole('button', { name: 'Download' }).click();
     await expect(row(region, 'whisper-medium').getByText('In use')).toBeVisible({ timeout: 20_000 });
     // Only here does the UI explain word timing.
-    await expect(region.getByText('Whisper Medium doesn’t time each word, so captions need a model that does, such as Parakeet Unified EN.')).toBeVisible();
+    await expect(region.getByText('Whisper Medium doesn’t time each word, so captions need a model that does, such as Nemotron Streaming 3.5.')).toBeVisible();
     await shot(page, 'settings-untimed-light');
+    // Unified EN times words but only hears English: on automatic, Whisper’s speech is never sent to it.
+    await row(region, DEFAULT_MODEL_ID).getByRole('button', { name: 'Download' }).click();
+    await expect(row(region, DEFAULT_MODEL_ID).getByRole('button', { name: 'Use' })).toBeVisible({ timeout: 20_000 });
+    await expect(region.getByText('Whisper Medium doesn’t time each word and Parakeet Unified EN transcribes only English, so captions need a multilingual model such as Nemotron Streaming 3.5, or English as the spoken language.')).toBeVisible();
+    await shot(page, 'settings-untimed-english-light');
     await page.evaluate(() => (window as any).PM.SettingsUI.close());
 
     // Plain transcription is satisfied; captions are not.
@@ -224,8 +229,11 @@ test('captions ask for a word-timed model when the one in use only times phrases
       await theme(page, mode);
       await page.evaluate(() => { void (window as any).PM.Transcription.ensureModel('Captions for “Interview”', { wordTimestamps: true }).then((ready: boolean) => { (window as any).__captionsReady = ready; }); });
       const sheet = page.locator('.transcription-modal');
-      await expect(sheet.getByText('Whisper Medium doesn’t time each word, which captions need.')).toBeVisible();
-      await expect(sheet.getByRole('radio')).toHaveCount(curated.length);
+      await expect(sheet.getByText('Whisper Medium doesn’t time each word, which captions need, and Parakeet Unified EN transcribes only English.')).toBeVisible();
+      // Only the curated models that would let captions run: the multilingual ones that detect the language.
+      const multilingual = curated.filter((model) => model.languages === 'multi' && model.detectsLanguage);
+      await expect(sheet.getByRole('radio')).toHaveCount(multilingual.length);
+      await expect(sheet.locator('label', { hasText: 'Parakeet Unified EN' })).toHaveCount(0);
       await shot(page, `sheet-captions-${mode}`);
       if (mode === 'light') {
         // The full list is one step away, in Settings.
@@ -243,7 +251,7 @@ test('captions ask for a word-timed model when the one in use only times phrases
     // Whisper stays in use; captions run on the word-timed model, and Settings says so.
     expect((await page.evaluate(() => (window as any).PM.Transcription.status())).activeModelId).toBe('whisper-medium');
     await page.evaluate(() => (window as any).PM.SettingsUI.open('transcription'));
-    await expect(region.getByText('Whisper Medium doesn’t time each word, so captions use Parakeet Unified EN.')).toBeVisible();
+    await expect(region.getByText('Whisper Medium doesn’t time each word, so captions use Nemotron Streaming 3.5.')).toBeVisible();
     expect(session.diagnostics.pageErrors).toEqual([]);
   } finally {
     await session?.close();
