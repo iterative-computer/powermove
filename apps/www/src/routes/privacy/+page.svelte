@@ -2,7 +2,7 @@
   import Header from '$lib/Header.svelte';
   import { GITHUB } from '$lib/links';
 
-  const updated = 'September 15, 2026';
+  const updated = 'October 4, 2026';
 </script>
 
 <svelte:head>
@@ -40,7 +40,7 @@
 
   <h2>This website</h2>
   <p>
-    trypowermove.com is a static site served by Cloudflare. We run no analytics and set no cookies. Cloudflare may log requests to operate the network. The download button links to GitHub Releases.
+    trypowermove.com is a static site served by Cloudflare. We use <a href="https://www.cloudflare.com/web-analytics/" target="_blank" rel="noopener">Cloudflare Web Analytics</a> to count page views. It sets no cookies and does not track you across sites. Cloudflare may also log requests to operate the network. The download button links to GitHub Releases.
   </p>
 
   <h2>Children</h2>
