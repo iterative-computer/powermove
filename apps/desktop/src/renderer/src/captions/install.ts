@@ -293,9 +293,11 @@ export function installCaptions(PM: PMRegistry): void {
         action: { label: 'Cancel', run: () => controller.abort() }
       });
     };
+    /* A run that showed progress completes it (the check replaces the icon);
+       one that never started says so with the captions icon. */
     const finish = (text: string, extra: Record<string, unknown> = {}) => {
       settled = true;
-      toast(text, { key, completed: true, ...extra });
+      toast(text, shown ? { key, progress: 1, completed: true, ...extra } : { key, icon: 'captions', ...extra });
     };
     try {
       const result = await captionsFromSpeech(layers, {

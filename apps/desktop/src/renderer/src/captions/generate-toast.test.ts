@@ -41,7 +41,9 @@ describe('caption generation progress', () => {
     const result = await PM.Captions.generate([clip().id]);
     expect(result.status).toBe('model-missing');
     expect(sticky()).toEqual([]);
-    expect(last().options.completed).toBe(true);
+    // Nothing ran, so there is no progress to complete: a plain notice with its icon.
+    expect(last().options).toMatchObject({ key: 'captions-generate', icon: 'captions' });
+    expect(last().options.completed).toBeUndefined();
   });
 
   it('completes the progress toast when the project changes mid-transcription', async () => {
@@ -60,7 +62,7 @@ describe('caption generation progress', () => {
     const result = await PM.Captions.generate([clip().id]);
     expect(result.ok).toBe(true);
     expect(PM.L(result.layerId).d.cues.map((cue: any) => cue.text)).toEqual(['Hello there.']);
-    expect(last()).toMatchObject({ text: 'Added 1 caption', options: { completed: true } });
+    expect(last()).toMatchObject({ text: 'Added 1 caption', options: { completed: true, progress: 1 } });
 
     const controller = new AbortController();
     client.transcribe.mockImplementation(async () => { controller.abort(); return { modelId: 'base', duration: 5, segments: [] }; });
