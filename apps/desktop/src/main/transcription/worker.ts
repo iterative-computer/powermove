@@ -10,8 +10,8 @@
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
 
-import { decodeArgs, decodeError, parseDuration, spanLength } from './audio';
-import { Chunker, SAMPLE_RATE, appendAtSeam, wordsWithin, type AudioWindow } from './chunking';
+import { decodeArgs, decodeError, paddedSpan, parseDuration, spanLength } from './audio';
+import { Chunker, LEAD_IN_SECONDS, SAMPLE_RATE, appendAtSeam, withLeadIn, wordsWithin, type AudioWindow } from './chunking';
 import { tokensToWords, wordsToSegments } from './words';
 import type { WorkerRequest, WorkerResponse } from './worker-protocol';
 import type { TranscriptWord } from '../../shared/transcription';
@@ -59,15 +59,18 @@ function recognizer(request: Extract<WorkerRequest, { type: 'transcribe' }>): Pr
 
 async function decodeWindow(model: SherpaRecognizer, window: AudioWindow, offset: number): Promise<TranscriptWord[]> {
   const stream = model.createStream();
-  stream.acceptWaveform({ samples: window.samples, sampleRate: SAMPLE_RATE });
+  stream.acceptWaveform({ samples: withLeadIn(window.samples), sampleRate: SAMPLE_RATE });
   const result = await model.decodeAsync(stream);
   const words = tokensToWords({
     tokens: result.tokens ?? [],
     timestamps: result.timestamps ?? [],
     ...(result.durations ? { durations: result.durations } : {}),
     ...(result.ys_log_probs ? { logProbs: result.ys_log_probs } : {})
-  }, window.start / SAMPLE_RATE);
-  return wordsWithin(words, window.ownFrom, window.ownTo).map((word) => ({ ...word, start: round(word.start + offset), end: round(word.end + offset) }));
+  }, window.start / SAMPLE_RATE - LEAD_IN_SECONDS);
+  /* The first window owns everything before it too: a word the model times
+     a little early (into the lead-in) is still the first word. */
+  return wordsWithin(words, window.ownFrom > 0 ? window.ownFrom : -Infinity, window.ownTo)
+    .map((word) => ({ ...word, start: round(Math.max(0, word.start + offset)), end: round(Math.max(0, word.end + offset)) }));
 }
 
 function round(value: number): number { return Math.round(value * 1000) / 1000; }
@@ -76,15 +79,17 @@ class Cancelled extends Error {}
 
 async function transcribe(request: Extract<WorkerRequest, { type: 'transcribe' }>): Promise<void> {
   const { id } = request;
-  const offset = request.start && request.start > 0 ? request.start : 0;
+  /* Decoded with a little audio either side; the span's own words are kept at the end. */
+  const span = paddedSpan({ start: request.start, end: request.end });
+  const offset = span.start;
   const model = await recognizer(request);
   if (cancelled.has(id)) throw new Cancelled();
-  const ffmpeg = spawn(request.ffmpeg, decodeArgs(request.file, { start: request.start, end: request.end }), { stdio: ['ignore', 'pipe', 'pipe'] });
+  const ffmpeg = spawn(request.ffmpeg, decodeArgs(request.file, { start: span.start, end: span.end }), { stdio: ['ignore', 'pipe', 'pipe'] });
   active = { id, ffmpeg };
   let stderr = '';
   /* The span to decode: the requested end until ffmpeg's banner gives the
      real duration, which wins when the request runs past the media. */
-  let total = request.end !== undefined ? request.end - offset : null;
+  let total = span.end !== undefined ? span.end - offset : null;
   let measured = false;
   ffmpeg.stderr.on('data', (chunk: Buffer) => {
     stderr = (stderr + chunk.toString()).slice(-16_000);
@@ -92,7 +97,7 @@ async function transcribe(request: Extract<WorkerRequest, { type: 'transcribe' }
       const duration = parseDuration(stderr);
       if (duration !== null) {
         measured = true;
-        total = spanLength(duration, offset, request.end);
+        total = spanLength(duration, offset, span.end);
       }
     }
   });
@@ -151,8 +156,8 @@ async function transcribe(request: Extract<WorkerRequest, { type: 'transcribe' }
   const rest = chunker.finish();
   if (rest && rest.samples.length >= SAMPLE_RATE / 10) appendAtSeam(words, await decodeWindow(model, rest, offset));
   if (cancelled.has(id)) throw new Cancelled();
-  const duration = round(chunker.received);
-  send({ type: 'done', id, duration, segments: wordsToSegments(words) });
+  const duration = round(Math.max(0, Math.min(span.keepTo, offset + chunker.received) - span.keepFrom));
+  send({ type: 'done', id, duration, segments: wordsToSegments(span.keepFrom > 0 || span.keepTo !== Infinity ? wordsWithin(words, span.keepFrom > 0 ? span.keepFrom : -Infinity, span.keepTo) : words) });
 }
 
 function handle(message: unknown): void {

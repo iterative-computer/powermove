@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { Chunker, SAMPLE_RATE, appendAtSeam, findCut, wordsWithin } from './chunking';
-import { decodeArgs, decodeError, parseDuration, spanLength } from './audio';
+import { Chunker, LEAD_IN_SECONDS, SAMPLE_RATE, appendAtSeam, findCut, withLeadIn, wordsWithin } from './chunking';
+import { decodeArgs, decodeError, paddedSpan, parseDuration, spanLength } from './audio';
 
 /** Tone with silent gaps at the given seconds (each 0.4 s long). */
 function speech(seconds: number, gaps: number[]): Float32Array {
@@ -65,6 +65,16 @@ describe('Chunker', () => {
   });
 });
 
+describe('withLeadIn', () => {
+  it('puts silence ahead of the window so speech never starts abruptly', () => {
+    const padded = withLeadIn(new Float32Array([0.5, -0.5]));
+    const pad = LEAD_IN_SECONDS * SAMPLE_RATE;
+    expect(padded.length).toBe(pad + 2);
+    expect(padded.subarray(0, pad).every((value) => value === 0)).toBe(true);
+    expect([...padded.subarray(pad)]).toEqual([0.5, -0.5]);
+  });
+});
+
 describe('appendAtSeam', () => {
   const word = (text: string, start: number, end: number) => ({ text, start, end });
   it('drops a seam word both windows kept (seen in a 4-minute smoke test)', () => {
@@ -88,6 +98,12 @@ describe('ffmpeg decoding', () => {
     expect(args.join(' ')).toContain('-ss 12.500 -t 7.500 -i /media/clip.mov -map 0:a:0');
     expect(args.slice(-7)).toEqual(['-ac', '1', '-ar', '16000', '-f', 'f32le', 'pipe:1']);
     expect(decodeArgs('/a.wav')).not.toContain('-ss');
+  });
+
+  it('decodes a second either side of a span and keeps the span itself for the words', () => {
+    expect(paddedSpan({ start: 12.5, end: 20 })).toEqual({ start: 11.5, end: 21, keepFrom: 12.5, keepTo: 20 });
+    expect(paddedSpan({ start: 0.4 })).toEqual({ start: 0, keepFrom: 0.4, keepTo: Infinity });
+    expect(paddedSpan({})).toEqual({ start: 0, keepFrom: 0, keepTo: Infinity });
   });
 
   it('reads the duration banner and explains failures', () => {

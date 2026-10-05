@@ -21,6 +21,30 @@ export function decodeArgs(file: string, span: DecodeSpan = {}): string[] {
   return args;
 }
 
+/** Seconds of real audio decoded on each side of a requested span. */
+export const SPAN_CONTEXT_SECONDS = 1;
+
+export interface PaddedSpan {
+  /** What to decode (seconds into the source). */
+  start: number;
+  end?: number;
+  /** The requested span: words are kept when their midpoint lies in it. */
+  keepFrom: number;
+  keepTo: number;
+}
+
+/**
+ * A span starting or ending inside a word cuts that word, and Parakeet
+ * answers an abrupt start by dropping the whole phrase after it. Decoding a
+ * little audio either side keeps the edge words whole; the caller then keeps
+ * the words that belong to the span by their midpoint.
+ */
+export function paddedSpan(span: DecodeSpan, context = SPAN_CONTEXT_SECONDS): PaddedSpan {
+  const keepFrom = span.start && span.start > 0 ? span.start : 0;
+  const keepTo = span.end !== undefined && span.end > keepFrom ? span.end : Infinity;
+  return { start: Math.max(0, keepFrom - context), ...(keepTo !== Infinity ? { end: keepTo + context } : {}), keepFrom, keepTo };
+}
+
 /** The input duration from ffmpeg's banner ("Duration: 00:01:02.03"), or null. */
 export function parseDuration(stderr: string): number | null {
   const match = /Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)/.exec(stderr);

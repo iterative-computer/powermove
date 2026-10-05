@@ -59,6 +59,18 @@ export function findCut(samples: Float32Array, bufferStart: number, from: number
   return lo + (best + SMOOTH_FRAMES / 2) * FRAME;
 }
 
+/** Silence fed ahead of every window: Parakeet drops whole phrases when its
+    audio starts abruptly (a span or window edge inside speech). A whole
+    number of the encoder's 80 ms frames, so word times do not shift. */
+export const LEAD_IN_SECONDS = 0.48;
+
+export function withLeadIn(samples: Float32Array, seconds = LEAD_IN_SECONDS): Float32Array {
+  const pad = Math.round(seconds * SAMPLE_RATE);
+  const out = new Float32Array(pad + samples.length);
+  out.set(samples, pad);
+  return out;
+}
+
 /** Keeps the words whose midpoint lies in [from, to) (seconds, absolute). */
 export function wordsWithin(words: TranscriptWord[], from: number, to: number): TranscriptWord[] {
   return words.filter((word) => {
