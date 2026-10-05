@@ -3,6 +3,9 @@ import { createAgentCheckpoint } from './checkpoint';
 import { openPanel, readPanel, interactPanel, panelBounds, preparePanelInput } from './panel-tools';
 import { records as extensionRecords } from '../../kernel/extensions.svelte';
 import { editVideo, videoAssets } from './video-editing';
+import { editModel,MODEL_RECIPES } from '../../core/scene3d/modeling';
+import {renderSettings,setRenderSettings} from '../../core/scene3d/rendering';
+import {MATERIAL_PRESETS,listMaterials} from '../../core/scene3d/materials';
 import { editScene } from '../../core/scene3d/operations';
 import { compositionScene,layer3DRole } from '../../core/scene3d/layers';
 import { SCENE3D_DEFINITION, sceneProperties,parseScene } from '../../core/scene3d/schema';
@@ -21,7 +24,7 @@ import { bridge as hostBridge } from '../../kernel/bridge';
 export function install(PM: PMRegistry): void {
 const MAX_REPAIRS = 2;
 const SCENE_OPERATIONS = new Set([
-  'set_property', 'replace_keyframes', 'set_easing', 'set_expression', 'set_content',
+  'set_property', 'replace_keyframes', 'offset_property', 'set_easing', 'set_expression', 'set_content',
   'set_layer', 'set_composition', 'add_layer', 'delete_layers',
   'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_effect', 'remove_effect', 'set_effect', 'set_transition',
   'set_scene_parameter', 'add_marker', 'create_section', 'update_section',
@@ -30,6 +33,7 @@ const SCENE_OPERATIONS = new Set([
 const FIELDS: any = {
   set_property: ['type', 'target', 'path', 'value', 'time', 'mode', 'ease', 'hold', 'preserveHandEdits'],
   replace_keyframes: ['type', 'target', 'path', 'keyframes', 'replace', 'expression', 'preserveHandEdits'],
+  offset_property: ['type', 'target', 'path', 'delta', 'preserveHandEdits'],
   set_easing: ['type', 'keyframes', 'curve'],
   set_expression: ['type', 'target', 'path', 'expression'],
   set_content: ['type', 'target', 'patch'],
@@ -177,7 +181,7 @@ function cleanCommand(raw: any) {
     if (!out.sectionId || !Array.isArray(out.layers) || !out.layers.length) return null;
   }
   /* Model-authored edits preserve hand intent by default; explicit overrides survive. */
-  if (out.type === 'set_property' || out.type === 'replace_keyframes') out.preserveHandEdits = out.preserveHandEdits !== false;
+  if (out.type === 'set_property' || out.type === 'replace_keyframes' || out.type === 'offset_property') out.preserveHandEdits = out.preserveHandEdits !== false;
   return out;
 }
 
@@ -477,10 +481,10 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     })], revision: currentRevision() };
   }
   if (request.tool === 'get_3d_scene') {
-    const layers=PM.proj.layers.filter((l:any)=>layer3DRole(l));
-    const state={layerId:request.arguments.target || null,scene:compositionScene(PM,PM.time),
+    const comp=PM.curComp?.()||PM.proj;const layers=comp.layers.filter((l:any)=>layer3DRole(l));
+    const state={modelRecipes:MODEL_RECIPES,materialPresets:MATERIAL_PRESETS,materials:listMaterials(PM),rendering:renderSettings(comp),modelGroups:comp.layers.filter((l:any)=>l.d?.modeling).map((l:any)=>({id:l.id,name:l.name,parent:l.parent,model:l.d.modeling})),layerId:request.arguments.target || null,scene:compositionScene(PM,PM.time),
       layers:layers.map((l:any)=>({id:l.id,name:l.name,role:layer3DRole(l),parent:l.parent,visible:l.on,locked:l.lock,from:l.from,duration:l.dur,content:l.d.data})),
-      channels:layers.flatMap((layer:any)=>PM.allProps(layer).map((p:any)=>({layerId:layer.id,path:p.key,value:PM.evP(layer,p.prop,PM.time,p.key),keyframeCount:p.prop.kf.length}))),
+      channels:[...layers,...comp.layers.filter((layer:any)=>layer.d?.modeling)].flatMap((layer:any)=>PM.allProps(layer).map((p:any)=>({layerId:layer.id,path:p.key,value:PM.evP(layer,p.prop,PM.time,p.key),keyframeCount:p.prop.kf.length}))),
       assets:Object.values<any>(PM.proj.assets || {}).filter(a=>['model','image'].includes(a.kind)).map(a=>({id:a.id,name:a.name,kind:a.kind,format:a.format})),
       revision:currentRevision()};
     refreshLiveTransaction(request);
@@ -577,7 +581,7 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
       baseRevision: transaction.revision,
       historyGroup: transaction.historyGroup
     };
-    const applied = request.tool === 'edit_3d' ? editScene(PM,request.arguments as any,editMeta) : request.tool === 'edit_video'
+    const applied = request.tool === 'edit_3d' ? ['create_model','regenerate_model','import_blend'].includes(String(request.arguments.operation)) ? await editModel(PM,request.arguments as any,editMeta) : request.arguments.operation==='set_rendering'?setRenderSettings(PM,request.arguments.settings as any,editMeta):editScene(PM,request.arguments as any,editMeta) : request.tool === 'edit_video'
       ? editVideo(PM, request.arguments, editMeta)
       : PM.Edit.apply(commands, editMeta);
     if (!applied.ok) throw new Error(applied.message);

@@ -1293,6 +1293,7 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
     if (replaceAssetId != null && files.length !== 1) throw new Error('Choose one file or one image sequence to replace this media');
     const mediaFiles: any = [];
     for (const f of files) {
+      if(/\.blend$/i.test(f.name)){if(replaceAssetId!=null)throw new Error('Import Blender files as model groups; use OBJ or GLB to replace a single model asset');const result=await PM.Kernel.api('media-import').scene3d.model({operation:'import_blend',file:f,name:f.name.replace(/\.blend$/i,'')});if(!result.ok)throw new Error(result.message);assertCurrent();continue;}
       if (/\.pmv$/i.test(f.name)) {
         if (replaceAssetId != null) throw new Error('Choose a media file to replace this media');
         await openProjectFile(f);

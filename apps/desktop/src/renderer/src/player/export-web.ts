@@ -10,7 +10,7 @@ const literal = (value: unknown) => JSON.stringify(value).replace(/</g, '\\u003c
 
 /** Only render source crosses the boundary; workspace, notes and edit history stay in the app. */
 function cleanProject(comp: any): any {
-  const fields = ['id', 'name', 'w', 'h', 'fps', 'dur', 'bg', 'backgroundFill', 'layers', 'assets', 'params', 'shutter'];
+  const fields = ['id', 'name', 'w', 'h', 'fps', 'dur', 'bg', 'backgroundFill', 'layers', 'assets', 'params', 'shutter', 'render3d'];
   const copy = Object.fromEntries(fields.filter(key => comp[key] !== undefined).map(key => [key, structuredClone(comp[key])]));
   copy.comps = Object.fromEntries(Object.entries(comp.comps || {}).map(([id, sub]) => [id, cleanProject(sub)]));
   for (const layer of copy.layers) delete layer.locked_intent;
@@ -38,6 +38,7 @@ export function inspectWebExport(PM: any) {
     if (active.has(comp)) { errors.add('Nested compositions contain a cycle'); return; }
     if (visited.has(comp)) return;
     visited.add(comp); active.add(comp);
+    if(comp.render3d?.enabled)warnings.add('Interactive web output uses native 3D shading. Export video or image frames for full Blender materials and rendering.');
     for (const layer of comp.layers) {
       inspectChannels(layer, layer.name);
       if (layer.d?.asset) assets.add(layer.d.asset);
@@ -67,7 +68,8 @@ export function inspectWebExport(PM: any) {
       if (layer.type === 'extension') {
         const def = getDef('layerTypes', layer.d.definition, layer.name);
         if (def?.renderer?.kind === 'mesh' && layer.d.data?.[def.renderer.assetField]) assets.add(layer.d.data[def.renderer.assetField]);
-        if (def?.renderer?.kind === 'layer3d') for(const id of layer3DAssetIds(layer))assets.add(id);
+        if (def?.renderer?.kind === 'layer3d') for(const id of layer3DAssetIds(layer))if(PM.proj.assets?.[id]?.format!=='blend'&&comp.assets?.[id]?.format!=='blend')assets.add(id);
+        if(layer.d.data?.object?.material?.shader||layer.d.data?.object?.slots?.some((slot:any)=>slot.material?.shader))warnings.add('Interactive web output uses native 3D shading. Export video or image frames for full Blender materials and rendering.');
         if (def?.renderer?.kind === 'scene3d') for(const id of sceneAssetIds(parseScene(layer.d.data?.scene))) assets.add(id);
       }
       if (layer.type === 'precomp') {

@@ -13,6 +13,7 @@ import { PreviewFrames } from './preview-frames';
 import { previewPlan } from './preview-plan';
 import { sourceTime } from '../core/retiming';
 import { layer3DRole } from '../../core/scene3d/layers';
+import {blenderSurface,blenderRevision,renderState} from '../../core/scene3d/rendering';
 import { sceneRuntime, pruneSceneRuntimes, compositionRuntime, compositionDepthIds,compositionOrderedLayers } from '../../core/scene3d/service';
 import { evaluatedValue, isProperty, resolveContent } from '../core/content-properties';
 /* Ported from js/gl/compositor.js — behavior-preserving. */
@@ -206,7 +207,7 @@ for (const event of ['project', 'layers', 'assets', 'quality', 'fonts']) PM.bus?
   previewFrames.clear(); previewSignature = ''; scenePreviewPlan = null;
 });
 const previewStateKey = () => JSON.stringify([PM.animVersion?.(), sourceGeneration, GL.canvas?.width, GL.canvas?.height,
-  GL.previewViewport, PM.quality, PM.previewResolution, PM.previewFps, PM.proj.fps, PM.proj.layers.length,viewportRevision(PM)]);
+  GL.previewViewport, PM.quality, PM.previewResolution, PM.previewFps, PM.proj.fps, PM.proj.layers.length,viewportRevision(PM),blenderRevision(PM)]);
 const canCachePreview = (opt: any) => opt.previewReuse !== false && !opt.exporting && !PM.Export?.busy && !PM.agentFrameCapture
   && !PM.Preview?.preparing && !PM.Preview?.active && !PM.preparedVideoFrames && !PM.assets?.loading?.size;
 function previewFrameKey(T: number, opt: any, key?: string | number): string {
@@ -1031,11 +1032,13 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) 
       try {
         const runtime=compositionRuntime(PM,T),depthIds=compositionDepthIds(PM,L,T);
         const bottom=(PM._renderComposition3DPass || compositionOrderedLayers(PM,(PM._renderComposition3D || PM.proj).layers.filter((l:any)=>l.type!=='group'),T)).filter((l:any)=>depthIds.has(l.id)).at(-1)?.id;
-        const canvas=runtime.render(W,H,L.id,depthIds,L.id===bottom,PM._renderCamera3D||runtime.camera);
-        const tex=texFor(`layer3d:${L.id}`,canvas,{version:`${runtime.revision}:${W}:${H}:${PM._renderCamera3D?.matrixWorld.elements}:${PM._renderCamera3D?.projectionMatrix.elements}`});
+        const rendered=PM._renderOptions3D?.draft3d?null:blenderSurface(PM,L,T,W,H);
+        if(!rendered&&!PM._renderOptions3D?.draft3d&&!PM._renderBlenderPreview&&(PM._renderComposition3D||PM.proj).render3d?.enabled)throw new Error('The Blender frame is not prepared. Render this frame before capturing it.');
+        const canvas=rendered?.surface||runtime.render(W,H,L.id,depthIds,L.id===bottom,PM._renderCamera3D||runtime.camera);
+        const tex=texFor(`layer3d:${L.id}`,canvas,{version:rendered?.version||`${runtime.revision}:${W}:${H}:${PM._renderCamera3D?.matrixWorld.elements}:${PM._renderCamera3D?.projectionMatrix.elements}`});
         PM.UIState?.setShaderMeta?.(L,{definition,missing:false,sceneWarnings:runtime.warnings});
-        return {tex,w:W,h:H,ax:0,ay:0,uv:[0,0,1,1],fromFbo:false,screenSpace:true};
-      }catch(error){PM.UIState?.setShaderMeta?.(L,{definition,missing:true,sceneError:String(error)});frameFailed=true;return null;}
+        return {tex,w:W,h:H,ax:0,ay:0,uv:[0,0,1,1],fromFbo:false,screenSpace:true,screenRect:rendered?.rect};
+      }catch(error){PM.UIState?.setShaderMeta?.(L,{definition,missing:true,sceneError:String(error)});frameFailed=true;PM._blenderCaptureError=error;return null;}
     }
     if(definition?.renderer?.kind==='mesh'){
       const mesh=meshExtensionQuad(L,T,w,hh,targetW,targetH,definition);
@@ -1108,7 +1111,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) 
     videoPath += L.id + '/';
     pmScopePush(sub);
     try {
-      const inner = GL.renderProject(sub, sourceTime(PM,L,T), targetW, targetH, { transparent: true });
+      const inner = GL.renderProject(sub, sourceTime(PM,L,T), targetW, targetH, { ...PM._renderOptions3D, transparent: true, groupParent:undefined, explicitLayers:false, mattePass:false, matteProject:undefined });
       /* blit the nested result into our FBO so ownership stays with this level */
       bind(f);
       const p = program('copyA', PM.FRAG_DRAW);
@@ -1146,7 +1149,7 @@ function drawContent(L: any, T: any, W: any, H: any, alpha: any, clip?: RasterWi
   const c: any = contentQuad(L, T, W, H, clip);
   if (!c) return false;
   const world = scaledWorld(L, T, W, H);
-  const M = c.screenSpace ? [W, 0, 0, H, 0, 0] : PM.mul(world, [c.w, 0, 0, c.h, -c.ax, -c.ay]);
+  const M = c.screenSpace ? c.screenRect?[c.screenRect[2]*W,0,0,c.screenRect[3]*H,c.screenRect[0]*W,c.screenRect[1]*H]:[W, 0, 0, H, 0, 0] : PM.mul(world, [c.w, 0, 0, c.h, -c.ax, -c.ay]);
   let projected = m3(M);
   if (!c.screenSpace && is3DLayer(PM,L)) {
     const h = planeMatrix(PM, L, T), [sx, sy] = outputScale(W, H);
@@ -1489,7 +1492,8 @@ function reportLayerFailure(layer: any, error: unknown): void {
 
 GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   if(proj===PM.proj && !opt.groupParent && !opt.mattePass)pruneSceneRuntimes(PM);
-  const previous3DComposition=PM._renderComposition3D,previous3DPass=PM._renderComposition3DPass,previous3DCamera=PM._renderCamera3D;PM._renderComposition3D=proj;
+  const previous3DOptions=PM._renderOptions3D;PM._renderOptions3D=opt;
+  const previous3DComposition=PM._renderComposition3D,previous3DPass=PM._renderComposition3DPass,previous3DCamera=PM._renderCamera3D,previousBlenderPreview=PM._renderBlenderPreview;PM._renderComposition3D=proj;PM._renderBlenderPreview=!!opt.editorViewport;
   try {
   PM._renderCamera3D=opt.editorViewport&&(proj===PM.proj||opt.matteProject===PM.proj)&&getViewportMode(PM)==='editor'?viewportCamera(PM,compositionRuntime(PM,T,PM.proj).camera):null;
   const gl = GL.gl;
@@ -1590,7 +1594,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
       const hasFx = hasRenderableEffects(L.fx, PM, L, T);
       const hasMasks = (L.masks || []).some((m: any) => evaluatedValue(PM, L, m.on, T, `m.${m.id}.on`) !== false);
       const blend = (BLEND_ID as any)[isProperty(L.blend) ? PM.evP(L, L.blend, T, 'l.blend') : L.blend] || 0;
-      const mb = (isProperty(L.mblur) ? PM.evP(L, L.mblur, T, 'l.mblur') : L.mblur) && opt.mblur !== false;
+      const mb = !(opt.editorViewport&&renderState(PM).mode==='rendered') && (isProperty(L.mblur) ? PM.evP(L, L.mblur, T, 'l.mblur') : L.mblur) && opt.mblur !== false;
       const transition = activeTransition(L, T);
 
       /* Adjustment layers are full-frame processors over the already-rendered
@@ -1681,7 +1685,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
     } catch (error) { reportLayerFailure(L, error); }
   }
   return acc;
-  }finally{PM._renderComposition3D=previous3DComposition;PM._renderComposition3DPass=previous3DPass;PM._renderCamera3D=previous3DCamera;}
+  }finally{PM._renderOptions3D=previous3DOptions;PM._renderComposition3D=previous3DComposition;PM._renderComposition3DPass=previous3DPass;PM._renderCamera3D=previous3DCamera;PM._renderBlenderPreview=previousBlenderPreview;}
 };
 
 const requestSourceWarmup = createPreviewWarmup(
@@ -1763,7 +1767,7 @@ GL.render = (T: any, opt: any = {}) => {
   GL.stats.draws = 0; GL.stats.passes = 0; GL.stats.viewportVectors = 0;
   viewportPathFrame++;
 
-  PM.beginEval(T);
+  PM.beginEval(T);PM._blenderCaptureError=null;
   PM.scope.push(PM.proj);
   previewViewportActive = !!GL.previewViewport;
   // Full sources remain available as a reference for pixel/performance checks.
@@ -1781,6 +1785,8 @@ GL.render = (T: any, opt: any = {}) => {
     previewViewportActive = false;
     previewSourceClipping = false;
   }
+
+  if(opt.exporting&&PM._blenderCaptureError){if(acc&&!acc.previewCached)free(acc);throw PM._blenderCaptureError;}
 
   /* present */
   bind(null);
@@ -1821,12 +1827,13 @@ GL.renderToPixels = (T: any, W: any, H: any, opt: any = {}) => {
   const gl = GL.gl; if (!gl) return null;
   const previousPreviews = useVideoPreviews; useVideoPreviews = false;
   const comp = opt.comp || PM.proj;
-  PM.beginEval(T);
+  PM.beginEval(T);PM._blenderCaptureError=null;
   let acc;
   try {
     PM.scope.push(comp);
     try { acc = GL.renderProject(comp, T, W, H, opt); }
     finally { PM.scope.pop(); }
+    if(PM._blenderCaptureError)throw PM._blenderCaptureError;
     bind(acc);
     const px = new Uint8Array(W * H * 4);
     if (opt.opaque) {

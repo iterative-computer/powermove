@@ -172,6 +172,7 @@ const nativeCommandForAsset = (id?: any, at: any = PM.time) => {
   const meta: any = PM.proj.assets[id]; if (!meta) return;
   const a: any = PM.assets?.get?.(id) || meta;
   if (a.kind === 'model') {
+    if (a.format === 'blend') return;
     const definition = a.layerDefinition || LAYER3D_DEFINITIONS.object;
     if (!PM.layerDefinition?.(definition)) return;
     return {
@@ -236,6 +237,13 @@ PM.commandForAsset = (id?: any, at: any = PM.time) => {
   } };
 };
 def('addFromAsset', 'Add layer from asset', null, (id?: any) => {
+  const asset = PM.proj.assets[id];
+  if (asset?.format === 'blend') {
+    return PM.Kernel.api('media-import').scene3d.model({operation:'import_blend',sourceAssetId:id,name:asset.name.replace(/\.blend$/i,'')}).then((result:any)=>{
+      if (!result.ok) PM.toast(result.message,{error:true});
+      return result.ok ? PM.L(result.data?.result?.id) : null;
+    });
+  }
   const command: any = PM.commandForAsset(id);
   if (!command) return;
   const result: any = PM.Edit.apply(command, { label: 'New ' + command.layerType, origin: 'command' });
@@ -763,6 +771,12 @@ export function pasteLayers(PM: PMRegistry, getClipboard: () => any[] | null = (
       else clone.parent = source.parent && currentIds.has(source.parent) ? source.parent : null;
       clone.group = idMap.get(source.group) || (currentIds.has(source.group) ? source.group : null);
       if (source.matteSource && idMap.has(source.matteSource)) clone.matteSource = idMap.get(source.matteSource);
+      if(clone.d?.modeling)for(const part of Object.values<any>(clone.d.modeling.parts))if(idMap.has(part.layerId))part.layerId=idMap.get(part.layerId);
+      const generation=clone.d?.data?.object?.generation;
+      if(generation&&idMap.has(generation.groupId))generation.groupId=idMap.get(generation.groupId);
+      else if(generation&&!currentIds.has(generation.groupId))delete clone.d.data.object.generation;
+      // Shared material animation belongs to composition time when pasting later.
+      if(offset)for(const item of PM.allProps(clone))if(/^(shader|slots\.[^.]+\.shader)\./.test(item.key))for(const key of item.prop.kf)key.t-=offset;
       return clone;
     });
     layers.splice(insertAt, 0, ...pasted);

@@ -62,7 +62,8 @@ export default function activate(api: PowermoveAPI): void {
         if (styles) styles.textContent = VIEWER_STYLES;
         const overlay = stage.querySelector('#overlay');
         if (overlay && overlay.parentElement !== stage) stage.appendChild(overlay);
-        body.replaceChildren(stage);
+        const toolbar = stage.parentElement?.querySelector('[data-3d-toolbar]');
+        body.replaceChildren(...(toolbar ? [toolbar, stage] : [stage]));
         runtime.layout();
         installSourcePreview(api, runtime, stage);
         return;

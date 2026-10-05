@@ -1,3 +1,5 @@
+import {animatedPart} from './recipe-preview';
+import { generatedModelSchema } from '../../../../shared/blender';
 import { objectSchema, lightSchema, cameraSchema, environmentSchema, parseScene, validateSceneChannel, type Scene3D } from './schema';
 
 export const LAYER3D_DEFINITIONS = {
@@ -42,19 +44,29 @@ export function parseLayer3DData(role: Layer3DRole, raw: any): any {
 }
 export function layer3DProperties(layer: any): any[] {
   const role=layer3DRole(layer),data=layer?.d?.data;
-  if(!role)return [];
+  if(!role && !layer?.d?.modeling)return [];
   const out:any[]=[];
   const collect=(p:any,prefix:string,group:string)=>{
     for(const [key,prop] of Object.entries<any>(p || {})) if(prop && Array.isArray(prop.kf))
       out.push({key:`${prefix}.${key}`,prop,label:key,group});
   };
-  if(role==='object')collect(data.object?.material?.p,'m','Material');
+  if(layer?.d?.modeling)collect(layer.d.modeling.p,'model','Model');
+  if(role==='object'){
+    collect(data.object?.material?.p,'m','Material');
+    collect(data.object?.material?.shader?.p,'shader','Shader');
+    for(const slot of data.object?.slots || []){collect(slot.material.p,`slots.${slot.id}`,slot.name);collect(slot.material.shader?.p,`slots.${slot.id}.shader`,slot.name);}
+  }
   if(role==='light')collect(data.light?.p,'light','Light');
   if(role==='camera'){collect(data.camera?.p,'camera','Camera');collect(data.environment?.p,'environment','Environment');}
   return out;
 }
 /** Validate before mutating live channels, including the camera's coupled clip planes. */
 export function validateLayer3DChannel(layer:any,path:string,property:any):void {
+  if(path.startsWith('shader.')||path.startsWith('slots.')||path.startsWith('model.')){
+    const candidate=clone(layer);const field=layer3DProperties(candidate).find(f=>f.key===path);if(!field)throw new Error(`Unknown 3D channel: ${path}`);
+    Object.assign(field.prop,property);
+    if(path.startsWith('model.'))generatedModelSchema.parse(candidate.d.modeling);else parseLayer3DData('object',candidate.d.data);return;
+  }
   const alias=Object.keys(TRANSFORM_PATHS).find(key=>TRANSFORM_PATHS[key]===path);
   if(alias){
     const factor=alias.startsWith('s')?.01:1;
@@ -80,7 +92,8 @@ export function initializeLayer3D(layer:any, properties:any={}): void {
 }
 export function layer3DAssetIds(layer:any):string[] {
   const node=layer?.d?.data?.object;
-  return node?[...new Set<string>([node.source?.assetId,...Object.values<string>(node.material?.maps || {})].filter(Boolean))]:[];
+  const materialIds=(m:any)=>[...Object.values<string>(m?.maps || {}),m?.shader?.source?.assetId,...(m?.shader?.graph?.nodes || []).map((n:any)=>n.image)];
+  return node?[...new Set<string>([node.source?.assetId,node.blender?.assetId,...materialIds(node.material),...(node.slots || []).flatMap((s:any)=>materialIds(s.material))].filter(Boolean))]:[];
 }
 
 /** Assemble a transient world for rendering; there is no scene container in project data. */
@@ -103,11 +116,13 @@ export function compositionScene(PM:any,time=PM.time || 0, composition=PM.curCom
   const allObjectIds=new Set(objectLayers.map((l:any)=>l.id));
   const objects=objectLayers.map((layer:any)=>{
     const node=layer.d.data.object;
-    const p=transform(layer);
+    const p=transform(layer),part=animatedPart(PM,layer,time);
+    if(part)for(const key of Object.keys(p))if(key in part.base)p[key]!.v+=part.base[key]!-part.prior[key]!;
     // Native orientation is applied before the separately animated rotation.
     for(const [key,axis] of [['rx','x'],['ry','y'],['rz','z']] as const) if(layer.p[`orientation.${axis}`])p[key]!.v+=ev(layer,layer.p[`orientation.${axis}`],`orientation.${axis}`);
-    return {...node,id:layer.id,name:layer.name,parent:allObjectIds.has(layer.parent)?layer.parent:null,p,
-      material:{...node.material,p:values(layer,node.material.p,'m')}};
+    return {...node,...(part?{source:part.source}:{}),id:layer.id,name:layer.name,parent:allObjectIds.has(layer.parent)?layer.parent:null,p,
+      material:{...node.material,p:values(layer,node.material.p,'m'),...(node.material.shader?{shader:{...node.material.shader,p:values(layer,node.material.shader.p,'shader')}}:{})},
+      slots:(node.slots || []).map((slot:any)=>({...slot,material:{...slot.material,p:values(layer,slot.material.p,`slots.${slot.id}`),...(slot.material.shader?{shader:{...slot.material.shader,p:values(layer,slot.material.shader.p,`slots.${slot.id}.shader`)}}:{})}}))};
   });
   const lights=lightLayers.map((layer:any)=>{
     const node=layer.d.data.light,p=values(layer,node.p,'light'),t=transform(layer);

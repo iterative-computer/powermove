@@ -26,7 +26,7 @@
     origin: 'inspector',
     command: (next: unknown) => ({
       type: 'set_property', target: layer.id, path, value: next as ChannelValue,
-      time: api.transport.time(), mode: 'auto', preserveHandEdits: false
+      time: api.transport.time(), mode:api.scene3d.getAutoKey()?'keyframe':'auto', preserveHandEdits: false,markIntent:'human'
     })
   });
 
@@ -36,14 +36,15 @@
     const time = api.transport.time();
     const label = `${atKey ? 'Remove keyframe for' : 'Add keyframe for'} ${field.label}`;
     if (!animated) {
-      api.edit.apply({ type: 'set_property', target: layer.id, path, value: value as ChannelValue, time, mode: 'keyframe', preserveHandEdits: false }, { label, origin: 'inspector' });
+      api.edit.apply({ type: 'set_property', target: layer.id, path, value: value as ChannelValue, time, mode: 'keyframe', preserveHandEdits: false,markIntent:'human' }, { label, origin: 'inspector' });
     } else {
-      api.history.do(label, () => {
+      if (atKey) {
         const key = api.anim.hasKeyAt(layer, prop, time);
-        if (key) api.anim.removeKey(prop, key);
-        else api.anim.setKeyOn(prop, time - layer.from, value as ChannelValue, 'linear', api.project.get().fps);
-        api.anim.touch();
-      });
+        const keyframes = channel!.kf.filter(k => k !== key).map((k: any) => ({time:k.t,value:k.v,hold:!!k.hold,eo:k.eo,ei:k.ei,spring:k.spring}));
+        api.edit.apply({type:'replace_keyframes',target:layer.id,path,keyframes,preserveHandEdits:false},{label,origin:'inspector'});
+      } else {
+        api.edit.apply({type:'set_property',target:layer.id,path,value:value as ChannelValue,time,mode:'keyframe',preserveHandEdits:false,markIntent:'human'},{label,origin:'inspector'});
+      }
     }
     api.transport.invalidate();
   }

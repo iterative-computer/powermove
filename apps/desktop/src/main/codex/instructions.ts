@@ -44,7 +44,7 @@ VERIFICATION
 Before declaring a capability unavailable, read the API pack and get_workspace_state for extension errors. Use select_layers for panel targets. Reproduce failures and inspect actual output; builds, clicks and Done labels are not proof. For tracking/rotoscoping inspect source-colored cutouts at beginning, middle and end, including subject motion; white mattes alone do not qualify. Never silently replace segmentation with weaker outline tracking. After a failed tool, inspect errors and capture the panel; do not repeat a potentially completed mutation.
 
 ANIMATION-FIRST VALUES
-Treat every user-editable project value as keyframeable by default, including each effect, layer type, generated control, or extension. Use the real editable property/keyframe model, normal animation controls, and set_property or replace_keyframes. Never flatten adjustable values or duplicate state. Only structural metadata may remain non-keyframeable.
+Treat every user-editable project value as keyframeable by default, including each effect, layer type, generated control, or extension. Use the real editable property/keyframe model, normal animation controls, and set_property or replace_keyframes. Never flatten adjustable values or duplicate state. Structural metadata can be non-keyframeable.
 
 Supported Powermove command types are: ${AGENT_COMMAND_TYPES.join(', ')}. Return each command as one JSON-encoded string.
 

@@ -16,7 +16,7 @@ import type { PMRegistry } from '../registry';
 import type { Patch, PathPart } from '../../../../shared/patch';
 
 /** Fields that belong to a composition rather than to the project. */
-export const COMP_FIELDS = ['w', 'h', 'fps', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter'] as const;
+export const COMP_FIELDS = ['w', 'h', 'fps', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter', 'render3d'] as const;
 /** Top-level project key → key on a stored composition. */
 const ROOT_TO_COMP: Record<string, string> = {
   compId: 'id', compName: 'name',
@@ -44,6 +44,7 @@ export function rotateProject(project: any, id: string): any {
   if (project.compId) comps[project.compId] = rootComp(project);
   const next: any = { ...project, comps, compId: id, compName: target.name || 'Comp' };
   for (const key of COMP_FIELDS) if (Object.hasOwn(target, key)) next[key] = target[key];
+  if(!Object.hasOwn(target,'render3d'))delete next.render3d;
   next.layers = Array.isArray(next.layers) ? next.layers : [];
   next.markers = Array.isArray(next.markers) ? next.markers : [];
   next.work = Array.isArray(next.work) && next.work.length === 2 ? next.work : [0, next.dur];
@@ -282,6 +283,7 @@ export function install(PM: PMRegistry): void {
       id: PM.uid('C'), name: String(settings.name || nextName('Comp')).trim(),
       w, h, fps, dur, bg, backgroundFill: PM.normalizeFill({ type: 'solid', color: bg }, bg),
       layers: [], comps: {}, markers: [], work: [0, dur], shutter: base.shutter ?? .5,
+      ...(settings.render3d?{render3d:structuredClone(settings.render3d)}:{}),
     };
   };
 
@@ -457,7 +459,7 @@ export function install(PM: PMRegistry): void {
       start = Math.min(...picked.map((layer: any) => layer.from));
       dur = Math.max(1 / host.fps, Math.max(...picked.map((layer: any) => layer.from + layer.dur)) - start);
     }
-    const comp: any = blankComp({ name, w: host.w, h: host.h, fps: host.fps, dur, bg: host.bg });
+    const comp: any = blankComp({ name, w: host.w, h: host.h, fps: host.fps, dur, bg: host.bg, render3d:host.render3d });
     comp.name = name;
     const index = host.layers.findIndex((layer: any) => pickedIds.has(layer.id));
     let layer: any = null;
@@ -501,7 +503,7 @@ export function install(PM: PMRegistry): void {
     const ax = Number(bounds?.ax) || 0, ay = Number(bounds?.ay) || 0;
     /* The new comp spans the layer; the layer's source timing (trim, speed,
        time remap) moves inside with the source, so every frame is unchanged. */
-    const comp: any = blankComp({ name, w, h, fps: PM.proj.fps, dur: layer.dur, bg: PM.proj.bg });
+    const comp: any = blankComp({ name, w, h, fps: PM.proj.fps, dur: layer.dur, bg: PM.proj.bg, render3d:PM.proj.render3d });
     comp.name = name;
     const inner = PM.mkLayer(layer.type, { name: layer.name, d: JSON.parse(JSON.stringify(layer.d)) }, comp);
     inner.from = 0;

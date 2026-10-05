@@ -5,6 +5,7 @@ import { installWhatsNew, whatsNewOptions } from './whats-new';
 import { installTextContextMenu } from './text-context-menu';
 import { installPermissionHandlers } from './permissions';
 import { registerRenderEncoder } from './render-encoder';
+import { registerBlenderIpc } from './blender-ipc';
 import {
   app,
   BrowserWindow,
@@ -1013,6 +1014,7 @@ if (!hasSingleInstanceLock) {
     registerLogIpc(ipcMain, ctx);
     registerMediaProxyIpc(ipcMain, mediaProxies, ctx);
     registerRenderEncoder(ipcMain,ctx);
+    registerBlenderIpc(ipcMain,ctx);
     // Powermove Cloud account. Boot must never block the window: a broken
     // profile file degrades to "signed out".
     let cloud: CloudService | null = null;
@@ -1141,6 +1143,9 @@ if (!hasSingleInstanceLock) {
     const apiPackEntries: Array<[name: string, devPath: string]> = [
       ['EXTENSIONS.md', 'docs/EXTENSIONS.md'],
       ['SCENE3D.md', 'docs/SCENE3D.md'],
+      ['blender-schema.ts', 'src/shared/blender.ts'],
+      ['scene3d-materials.ts', 'src/renderer/src/core/scene3d/materials.ts'],
+      ['scene3d-modeling.ts', 'src/renderer/src/core/scene3d/modeling.ts'],
       ['scene3d-schema.ts', 'src/renderer/src/core/scene3d/schema.ts'],
       ['scene3d-layers.ts', 'src/renderer/src/core/scene3d/layers.ts'],
       ['scene3d-operations.ts', 'src/renderer/src/core/scene3d/operations.ts'],

@@ -54,6 +54,9 @@ const resources = path.join(outDir, 'resources');
 const copies = [
   ['src/extensions', 'builtin-extensions'],
   ['docs/EXTENSIONS.md', 'api-pack/EXTENSIONS.md'],
+  ['src/shared/blender.ts', 'api-pack/blender-schema.ts'],
+  ['src/renderer/src/core/scene3d/materials.ts', 'api-pack/scene3d-materials.ts'],
+  ['src/renderer/src/core/scene3d/modeling.ts', 'api-pack/scene3d-modeling.ts'],
   ['docs/SCENE3D.md', 'api-pack/SCENE3D.md'],
   ['src/renderer/src/core/scene3d/schema.ts', 'api-pack/scene3d-schema.ts'],
   ['src/renderer/src/core/scene3d/layers.ts', 'api-pack/scene3d-layers.ts'],

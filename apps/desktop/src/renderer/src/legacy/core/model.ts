@@ -1,3 +1,4 @@
+import {sceneProperties} from '../../core/scene3d/schema';
 import { CHANNELS_3D } from './space-3d';
 /* Ported from js/core/model.js — behavior-preserving. */
 import { normalizeExportDefaults } from '../../core/export-defaults';
@@ -256,6 +257,7 @@ PM.cloneLayer = (L: any) => {
   (c.masks || []).forEach((mask: any) => { renew(mask.shape); renew(mask.mode); renew(mask.on); });
   Object.values(c.d?.uniforms || {}).forEach(renew);
   Object.values(c.d?.params || {}).forEach(renew);
+  for(const {prop} of sceneProperties(c))renew(prop);
   for (const field of ['transitionIn', 'transitionOut']) Object.values(c[field]?.p || {}).forEach(renew);
   return c;
 };

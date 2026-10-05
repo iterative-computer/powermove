@@ -374,11 +374,11 @@ PM.setKey = (L: any, key: any, T: any, value: any, ease: any) => {
   if (!p) return null;
   return PM.setKeyOn(p, T - L.from, value, ease, PM.proj.fps);
 };
-PM.setKeyOn = (p: any, tLocal: any, value: any, ease: any = 'linear', fps: any = 30) => {
+PM.setKeyOn = (p: any, tLocal: any, value: any, ease: any = 'linear', fps: any = 30, minTime = 0) => {
   if (!p || typeof p !== 'object') return null;
   p.kf = Array.isArray(p.kf) ? p.kf : [];
   const safeFps = Number.isFinite(Number(fps)) && Number(fps) > 0 ? Number(fps) : 30;
-  const t = Math.max(0, PM.snapF(Number.isFinite(Number(tLocal)) ? Number(tLocal) : 0, safeFps));
+  const t = Math.max(minTime, PM.snapF(Number.isFinite(Number(tLocal)) ? Number(tLocal) : 0, safeFps));
   let k = p.kf.find((k: any) => Math.abs(k.t - t) < .5 / safeFps);
   if (k) { k.v = value; }
   else { k = PM.KF(t, value, ease); p.kf.push(k); sortKf(p); }
@@ -453,7 +453,7 @@ PM.allProps = (L: any) => {
   return out;
 };
 PM.findProp = (L: any, key: any) => {
-  if (/^(?:m\.[^.]+$|(?:o|light|camera|environment)\.)/.test(key)) return sceneProperties(L).find(p=>p.key===key)?.prop ?? null;
+  if (/^(?:m\.[^.]+$|(?:o|light|camera|environment|shader|slots|model)\.)/.test(key)) return sceneProperties(L).find(p=>p.key===key)?.prop ?? null;
   if (/^(g|mp|ta|ts)\./.test(key)) return structuredProperties(L).find(p=>p.key===key)?.prop ?? null;
   if (L.p?.[key]) return L.p[key];
   if (key === 'l.blend' || key === 'l.mblur' || key === 'l.matteMode') return isProperty(L[key.slice(2)]) ? L[key.slice(2)] : null;

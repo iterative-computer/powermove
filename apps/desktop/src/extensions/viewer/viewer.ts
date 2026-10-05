@@ -862,9 +862,9 @@ V.attach = (stage: HTMLElement) => {
     zoomControl.style.cssText = 'position:absolute;right:8px;top:7px;z-index:6;width:110px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui)';
     V.zoomControl = zoomControl;
     if(api.scene3d){
-      gizmoToolbarHost=document.createElement('div');gizmoToolbarHost.id='composition-3d-controls';
-      gizmoToolbarHost.style.cssText='position:absolute;right:212px;top:7px;z-index:6;display:none;align-items:center;gap:6px';
-      zoomHost.append(gizmoToolbarHost);gizmoToolbar=mount(GizmoToolbar,{target:gizmoToolbarHost,props:{api}});
+      gizmoToolbarHost=document.createElement('div');gizmoToolbarHost.id='composition-3d-controls';gizmoToolbarHost.dataset['3dToolbar']='';
+      gizmoToolbarHost.style.cssText='position:relative;z-index:6;display:none;align-items:center;gap:6px;flex-wrap:wrap;padding:26px 8px 6px;flex-shrink:0;min-width:0';
+      stage.parentElement!.insertBefore(gizmoToolbarHost,stage);gizmoToolbar=mount(GizmoToolbar,{target:gizmoToolbarHost,props:{api}});
     }
 
     let preview=zoomHost.querySelector<HTMLElement>('#preview-controls');

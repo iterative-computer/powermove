@@ -46,6 +46,7 @@ const lockedCases = {
     type: 'set_property', target: layer.id, path: 'position.x', value: 100,
     mode: 'static', preserveHandEdits: false,
   }),
+  offset_property: ({ layer }) => ({type:'offset_property',target:layer.id,path:'position.x',delta:1,preserveHandEdits:false}),
   replace_keyframes: ({ layer }) => ({
     type: 'replace_keyframes', target: layer.id, path: 'opacity',
     keyframes: [{ time: 0, value: 10 }, { time: 1, value: 90 }], preserveHandEdits: false,
@@ -88,11 +89,12 @@ const lockedCases = {
   },
 };
 
-it('the locked-layer operation matrix is frozen for all 22 operations', () => {
+it('the locked-layer operation matrix is frozen for all 23 operations', () => {
   const outcomes = {
     group_layers: 'blocked', ungroup_layers: 'blocked', move_to_group: 'blocked',
     set_property: 'blocked',
     replace_keyframes: 'blocked',
+    offset_property: 'blocked',
     set_easing: 'blocked',
     set_expression: 'blocked',
     set_content: 'blocked',

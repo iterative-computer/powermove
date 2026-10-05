@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import {animatedPart} from './recipe-preview';
 import { world3D,parent3D,depthOrderedLayers } from '../../legacy/core/space-3d';
 import { SceneRuntime } from './runtime';
 import { createScene,parseScene,SCENE3D_DEFINITION,type Scene3D } from './schema';
@@ -22,6 +23,8 @@ export function compositionRuntime(PM:any,time=PM.time || 0,composition?:any):Sc
     // Flattening the evaluated world avoids applying parent transforms twice.
     for(const l of models){const object=runtime.objects.get(l.id);if(!object)continue;
       runtime.scene.add(object);object.matrixAutoUpdate=false;object.matrix.fromArray(world3D(PM,l,time));
+      const part=animatedPart(PM,l,time);if(part){const delta=new THREE.Vector3(part.base.x!-part.prior.x!,part.base.y!-part.prior.y!,part.base.z!-part.prior.z!);const parent=new THREE.Matrix4().fromArray(parent3D(PM,l,time));const origin=new THREE.Vector3().applyMatrix4(parent);delta.applyMatrix4(parent).sub(origin);object.matrix.elements[12]!+=delta.x;object.matrix.elements[13]!+=delta.y;object.matrix.elements[14]!+=delta.z;}
+
       object.matrix.decompose(object.position,object.quaternion,object.scale);object.rotation.order='ZYX';
       object.userData.layerOpacity=PM.worldOpacity?PM.worldOpacity(l,time):1;
       object.userData.layerOccludes=!(l.masks || []).some((mask:any)=>typeof mask.on==='object'?PM.evP(l,mask.on,time,`m.${mask.id}.on`)!==false:mask.on!==false);

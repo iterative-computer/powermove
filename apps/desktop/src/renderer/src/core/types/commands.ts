@@ -4,6 +4,7 @@ import type { TransformInput } from './transform';
 export const COMMAND_TYPES = [
   'set_property',
   'replace_keyframes',
+  'offset_property',
   'set_easing',
   'set_expression',
   'set_content',
@@ -43,6 +44,9 @@ export interface CommandKeyframe {
   value: JsonValue;
   ease?: string;
   hold?: boolean;
+  eo?: [number,number];
+  ei?: [number,number];
+  spring?: JsonObject;
 }
 
 interface LayerTargetedCommand {
@@ -67,6 +71,8 @@ export interface SetPropertyCommand extends LayerTargetedCommand, LockableComman
   hold?: boolean;
   markIntent?: boolean | string;
 }
+
+export interface OffsetPropertyCommand extends LayerTargetedCommand, LockableCommand, IntentAwareCommand {type:'offset_property';path:string;delta:number;}
 
 export interface ReplaceKeyframesCommand extends LayerTargetedCommand, LockableCommand, IntentAwareCommand {
   type: 'replace_keyframes';
@@ -117,6 +123,7 @@ export interface SetLayerCommand extends LayerTargetedCommand {
 }
 
 export interface CompositionPatch {
+  render3d?:import('../../../../shared/blender').Render3DSettings;
   name?: string;
   width?: number;
   height?: number;
@@ -266,7 +273,7 @@ export interface TransformLayersCommand {
 
 export interface GroupLayersCommand { type: 'group_layers' | 'ungroup_layers' | 'move_to_group'; targets: string[]; name?: string; group?: string | null; }
 
-export type EditCommand =
+export type EditCommand = OffsetPropertyCommand
   | GroupLayersCommand
   | SetPropertyCommand
   | ReplaceKeyframesCommand

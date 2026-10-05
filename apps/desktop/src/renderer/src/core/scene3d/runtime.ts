@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import {materialPreview} from './materials';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { parseScene, type Scene3D, type SceneObject, type SceneSource } from './schema';
 
@@ -17,6 +18,7 @@ export function primitiveGeometry(source: SceneSource): THREE.BufferGeometry {
     if (m.indices) g.setIndex(m.indices);
     if (m.normals) g.setAttribute('normal',new THREE.Float32BufferAttribute(m.normals,3)); else g.computeVertexNormals();
     if (m.uvs) g.setAttribute('uv',new THREE.Float32BufferAttribute(m.uvs,2));
+    for(const group of m.groups || [])g.addGroup(group.start,group.count,group.materialIndex);
     return g;
   }
   if ('lathe' in source) return new THREE.LatheGeometry(source.lathe.map(v=>new THREE.Vector2(...v)),source.segments || 48);
@@ -142,27 +144,38 @@ export class SceneRuntime {
       const v = values(node.p,`o.${node.id}`);
       object.position.set(v.x,v.y,v.z);object.rotation.set(radians(v.rx),radians(v.ry),radians(v.rz),'XYZ');
       object.scale.set(v.sx,v.sy,v.sz);object.visible=v.visible !== false;
-      const m = values(node.material.p,`o.${node.id}.m`), maps=node.material.maps;
       this.traverseOwned(object,(c:any)=>{
         c.userData.sceneId=node.id;
         if (!c.isMesh) return;
         c.castShadow=node.castShadow;c.receiveShadow=node.receiveShadow;
-        if (c.userData.missing || node.useSourceMaterials) return;
-        if (!(c.material instanceof THREE.MeshStandardMaterial) || Array.isArray(c.material)) {
-          for (const material of Array.isArray(c.material)?c.material:[c.material]) material.dispose();
-          c.material=new THREE.MeshStandardMaterial();
-        }
-        const material=c.material as THREE.MeshStandardMaterial;
-        material.color.set(m.color);material.roughness=m.roughness;material.metalness=m.metalness;
-        material.emissive.set(m.emissive);material.emissiveIntensity=m.emissiveIntensity;
-        const transparent=m.opacity<1,side=node.material.doubleSided?THREE.DoubleSide:THREE.FrontSide;
-        if (transparent!==material.transparent || side!==material.side) material.needsUpdate=true;
-        material.opacity=m.opacity;material.transparent=transparent;material.depthWrite=!transparent;material.side=side;
-        for (const [key,slot,isColor] of [['color','map',true],['normal','normalMap',false],['roughness','roughnessMap',false],
-          ['metalness','metalnessMap',false],['emissive','emissiveMap',true],['ao','aoMap',false]] as const) {
-          const texture=this.texture(maps[key],isColor);
-          if (material[slot]!==texture) { material[slot]=texture;material.needsUpdate=true; }
-        }
+        if(c.userData.missing)return;
+        const definitions=node.slots?.length?node.slots.map(s=>s.material):[node.material];
+        if(node.useSourceMaterials && !node.slots?.length)return;
+        const existing=Array.isArray(c.material)?c.material:[c.material];
+        const list=definitions.map((definition,index)=>{
+          const preview=materialPreview(definition),m=values(preview.p,`o.${node.id}.m`),maps=definition.maps;
+          const material=existing[index] instanceof THREE.MeshStandardMaterial?existing[index]:new THREE.MeshStandardMaterial();
+          material.name=node.slots?.[index]?.name || definition.shader?.name || 'Surface';
+          material.color.set(m.color);material.roughness=m.roughness;material.metalness=m.metalness;
+          material.emissive.set(m.emissive);material.emissiveIntensity=m.emissiveIntensity;
+          const transparent=m.opacity<1,side=definition.doubleSided?THREE.DoubleSide:THREE.FrontSide;
+          if(transparent!==material.transparent||side!==material.side)material.needsUpdate=true;
+          material.opacity=m.opacity;material.transparent=transparent;material.depthWrite=!transparent;material.side=side;
+          for(const [key,slot,isColor] of [['color','map',true],['normal','normalMap',false],['roughness','roughnessMap',false],['metalness','metalnessMap',false],['emissive','emissiveMap',true],['ao','aoMap',false]] as const){
+            const texture=this.texture(maps[key],isColor);
+            const placement=definition.placement,placementKey=texture&&placement?JSON.stringify([maps[key],placement]):null;
+            const previous=material[slot];
+            if(placementKey&&placement){
+              if(material.userData[slot+'Placement']!==placementKey){
+                if(previous?.userData.scenePlacement)previous.dispose();
+                const copy=texture!.clone();copy.repeat.set(placement.scaleX,placement.scaleY);copy.offset.set(placement.offsetX,placement.offsetY);copy.rotation=radians(placement.rotation);copy.userData.scenePlacement=true;copy.needsUpdate=true;material[slot]=copy;material.needsUpdate=true;material.userData[slot+'Placement']=placementKey;
+              }
+            }else if(previous!==texture){if(previous?.userData.scenePlacement)previous.dispose();material[slot]=texture;material.needsUpdate=true;delete material.userData[slot+'Placement'];}
+          }
+          return material;
+        });
+        for(const material of existing)if(!list.includes(material))material.dispose();
+        c.material=node.slots?.length?list:list[0];
       });
       this.mixers.get(node.id)?.mixer.setTime(Math.max(0,animationTime?.(node.id) ?? time));
     }
@@ -207,7 +220,7 @@ export class SceneRuntime {
     this.scene.background=data.environment.background?new THREE.Color(data.environment.background):null;
     if (this.renderer) { this.renderer.toneMappingExposure=environment.exposure;this.renderer.shadowMap.enabled=data.environment.shadows; }
     this.scene.updateMatrixWorld(true);this.camera.updateMatrixWorld(true);this.revision++;
-    const textureKeys=new Set(data.objects.flatMap(o=>Object.entries(o.material.maps).map(([slot,id])=>`${id}:${slot==='color'||slot==='emissive'}`)));
+    const textureKeys=new Set(data.objects.flatMap(o=>[o.material,...(o.slots||[]).map(s=>s.material)].flatMap(m=>Object.entries(m.maps).map(([slot,id])=>`${id}:${slot==='color'||slot==='emissive'}`))));
     for(const [key,entry] of this.textures)if(!textureKeys.has(key)){entry.texture.dispose();this.textures.delete(key);}
   }
 

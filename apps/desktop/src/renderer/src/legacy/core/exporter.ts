@@ -367,7 +367,7 @@ function progressUI(total: any) {
     dismissible: false,
     onClose: () => { if (X.busy) X.cancel = true; stopPreview(); },
     actions: [{ label: 'Cancel', run: () => {
-      X.cancel = true;
+      X.cancel = true;void hostBridge()?.blender?.cancel();
       label.textContent = 'Cancelling…'; eta.textContent = '';
       const button = mod.el.querySelector('.mf button');
       if (button) { button.disabled = true; button.textContent = 'Cancelling…'; }
@@ -503,8 +503,8 @@ async function runPrepared(opts: any) {
   }
   if (opts.format === 'still') {
     const wasPlaying=PM.playing,at=PM.time;PM.pause();
-    try{await prepareFrame(PM,at);
-      const cv: any = opts.alpha ? alphaFrame(at, W, H, opts.mblur) : PM.renderFrameTo(at, W, H);
+    try{await prepareFrame(PM,at,PM.proj,{width:W,height:H,mblur:opts.mblur,mbSamples:opts.alpha?20:16});
+      const cv: any = opts.alpha ? alphaFrame(at, W, H, opts.mblur) : PM.renderFrameTo(at, W, H,{mblur:opts.mblur});
       const blob=await new Promise<Blob>((resolve,reject)=>cv.toBlob((b:Blob|null)=>b?resolve(b):reject(new Error('Could not encode frame'))));
       if (!await deliver(blob, `${p.name}_${PM.tc(at, p.fps).replace(/:/g, '-')}.png`)) return { cancelled: true };
       PM.toast('Frame exported');return {cancelled:false};
@@ -559,7 +559,7 @@ async function runPrepared(opts: any) {
 function renderInto(T: any, W: any, H: any, mblur: any) {
   PM.quality = 1;
   PM.GL.resize(W, H);
-  PM.GL.render(T, { mblur, mbSamples: 20, shutter: PM.proj.shutter || .5 });
+  PM.GL.render(T, { exporting:true, mblur, mbSamples: 20, shutter: PM.proj.shutter || .5 });
   return PM.GL.canvas;
 }
 
@@ -618,7 +618,7 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
     for (let i = 0; i < total; i++) {
       if (X.cancel) break;
       const T = t0 + i / opts.fps;
-      await prepareFrame(PM, T);
+      await prepareFrame(PM,T,PM.proj,{width:W,height:H,mblur:opts.mblur,mbSamples:opts.alpha?20:16});
       if (X.cancel) break;
       // Preserve Canvas2D's established premultiply/unpremultiply rounding for
       // alpha delivery. Opaque frames have no such round trip to preserve.
@@ -673,7 +673,7 @@ async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }:
   for (let i: any = 0; i < total; i++) {
     if (X.cancel) break;
     const T: any = t0 + i / opts.fps;
-    await prepareFrame(PM,T);
+    await prepareFrame(PM,T,PM.proj,{width:W,height:H,mblur:opts.mblur,mbSamples:20});
     const cv: any = renderInto(T, W, H, opts.mblur);
     const frame: any = new window.VideoFrame(cv, { timestamp: Math.round(i / opts.fps * 1e6), duration: Math.round(1e6 / opts.fps) });
     try { if (encoderError) throw encoderError; enc.encode(frame, { keyFrame: i % Math.round(opts.fps * 2) === 0 }); } finally { frame.close(); }
@@ -742,7 +742,7 @@ async function exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate }: 
     for (let i: any = 0; i < total; i++) {
       if (X.cancel) break;
       const T: any = t0 + i / opts.fps;
-    await prepareFrame(PM,T);
+    await prepareFrame(PM,T,PM.proj,{width:W,height:H,mblur:opts.mblur,mbSamples:20});
       const cv: any = renderInto(T, W, H, opts.mblur);
       if (track.requestFrame) track.requestFrame();
       const target: any = start + i * frameDur;
@@ -772,7 +772,7 @@ async function exportPNGs({ opts, W, H, t0, total, ui, pctx }: any) {
   for (let i: any = 0; i < total; i++) {
     if (X.cancel) break;
     const T: any = t0 + i / opts.fps;
-    await prepareFrame(PM,T);
+    await prepareFrame(PM,T,PM.proj,{width:W,height:H,mblur:opts.mblur,mbSamples:opts.alpha?20:16});
     let cv: any;
     if (opts.alpha) cv = alphaFrame(T, W, H, opts.mblur);
     if (!cv) cv = PM.renderFrameTo(T, W, H, { mblur: opts.mblur });
@@ -808,7 +808,7 @@ X.snapshotAsync = async (T: number, maxW = 480) => {
   PM.pause();
   PM.agentFrameCapture = true;
   try {
-    await prepareFrame(PM, T);
+    const scale=Math.min(1,maxW/PM.proj.w);await prepareFrame(PM,T,PM.proj,{width:Math.max(2,Math.round(PM.proj.w*scale)),height:Math.max(2,Math.round(PM.proj.h*scale)),mblur:false});
     return X.snapshot(T, maxW);
   } finally {
     PM.agentFrameCapture = false;

@@ -303,6 +303,25 @@ export interface Scene3DGizmo {
   dispose():void;
 }
 export interface Scene3DAPI {
+  model(args:{operation:'create_model'|'regenerate_model'|'import_blend';recipe?:unknown;target?:string;name?:string;file?:File;sourceAssetId?:string},meta?:EditMeta):Promise<EditResult>;
+  modelRecipes:ReadonlyArray<{id:string;label:string;parameters:Record<string,string|number>}>;
+  modelFieldsFor(kind:string):Record<string,{label?:string;min?:number;max?:number;step?:number;kind?:string}>;
+  getAutoKey():boolean;
+  setAutoKey(enabled:boolean):void;
+  modelFields:Record<string,{label:string;min?:number;max?:number;step?:number;kind?:string}>;
+  materialPresets:ReadonlyArray<{id:string;label:string}>;
+  createMaterial(preset?:import('../../../shared/blender').BlenderMaterial['preset']):import('../../../shared/blender').BlenderMaterial;
+  materials():Array<{id:string;name:string;users:number;material:any}>;
+  setMaterial(target:string,slot:string,material:any,shared?:boolean):EditResult;
+  getRendering():import('../../../shared/blender').Render3DSettings;
+  setRendering(patch:Partial<import('../../../shared/blender').Render3DSettings>,meta?:EditMeta):EditResult;
+  blenderStatus():Promise<import('../../../shared/blender').BlenderStatus>;
+  chooseBlender():Promise<import('../../../shared/blender').BlenderStatus|null>;
+  previewState():{mode:'draft'|'rendered';busy:boolean;error:string|null;engine:'eevee'|'cycles'};
+  setPreviewMode(mode:'draft'|'rendered'):void;
+  onPreviewChange(listener:(state:{mode:'draft'|'rendered';busy:boolean;error:string|null;engine:'eevee'|'cycles'})=>void):Disposable;
+  renderFrame():Promise<void>;
+  cancelRender():Promise<void>;
   isGroup(layerId:string):boolean;
   getView():'camera'|'editor';
   setView(mode:'camera'|'editor'):void;

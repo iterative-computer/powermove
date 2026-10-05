@@ -124,6 +124,7 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
       transformPatch(patch.p);delete patch.p;
       if(patch.material?.p){for(const [key,value] of Object.entries(patch.material.p))setChannel(`m.${key}`,value);delete patch.material.p;}
       const next={...content.object,...patch,material:patch.material?{...content.object.material,...patch.material}:content.object.material};
+      if(patch.source){delete next.generation;delete next.blender;}
       delete next.name;delete next.parent;
       content.object=next;
       break;

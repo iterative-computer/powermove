@@ -71,3 +71,135 @@ Right-click the composition or timeline and choose Add 3D layer for primitives, 
 Extensions use `api.scene3d.edit`, `describe()`, `prepareImport(files)`, template factories `createScene/createObject/createLight`, and ordinary `api.selection`. `createGizmo(element)` provides the shared composition overlay. `getMode/setMode`, `getSpace/setSpace` and `onGizmoChange` keep native controls synchronized. Extensions must use the public API instead of importing Three.js or modifying editor internals.
 
 Existing OBJ/scene layers retain their compatibility renderer. Convert to 3D Layers, also available by double-clicking a legacy layer, splits them into ordinary layers in one Undo. Model/material channels are preserved; camera and auto-rotation animation is sampled at project FPS (up to 2,398 frames). Move a keyed legacy background to a separate layer before converting. Preview, native frame export and portable web export use the same renderer.
+
+## Blender-powered motion modeling
+
+Blender 4.5 or newer is an optional local modeling and rendering engine. Powermove keeps the
+composition, individual 3D layers, groups, materials, and animation. Install
+Blender, or use **Choose Blender…** in the Rendering section for a custom install.
+The chosen executable is remembered locally. Powermove runs one background worker
+per editor, with project scripts disabled; agents provide validated JSON, never
+Python or shell commands.
+
+**Add 3D layer** includes Rocket, Staircase, and 3D Text. Select the resulting
+group to change its model parameters and add Bevel, Subdivision, Solidify, Array,
+or Mirror modifiers. Regenerate refreshes its mesh parts in one Undo, retaining
+their IDs, material assignments, transforms, keyframes, and easing. Removed parts
+are hidden and recovered when the recipe includes them again. Count/topology
+controls require regeneration; continuous numeric parameters can be animated.
+Select a part to edit its materials, or use its Model button to return to the
+construction controls. Imported Blender groups offer **Replace source…** instead, letting you choose an updated `.blend` while keeping matching part IDs and edits.
+
+Agents can also construct turned profiles, extruded outlines, or indexed meshes:
+
+```json
+{"operation":"create_model","name":"Product pedestal","recipe":{"kind":"lathe","parameters":{"segments":48},"profile":[[0,-0.5],[0.8,-0.5],[0.8,-0.35],[0.55,-0.3],[0.55,0.5],[0,0.5]],"modifiers":[{"type":"bevel","width":0.025,"segments":3}]}}
+```
+
+`create_model` returns the group ID and part count. Read `get_3d_scene` for the
+part IDs, model recipes, materials, and keyframe channel paths. Animate a group's
+`model.length`, `model.radius`, `model.rise`, or other returned numeric parameter
+using `apply_commands`. `regenerate_model {target,recipe?}` refreshes that group.
+Its existing numeric parameter animation remains authoritative when present.
+If the project changes during generation, the operation stops before applying
+its result so the user's intervening edits survive.
+
+`import_blend {sourceAssetId,name?,target?}` imports a durable, packed `.blend`
+asset. The normal file importer also accepts `.blend`. Pack external textures in
+Blender first. Mesh, text, curve, surface, and metaball objects become native
+model layers; parent world transforms are preserved. Actual Blender material
+graphs and exposed node-group inputs remain in the packed source. Blender scene
+cameras, lights, physics, constraints, and imported scene animation are not
+converted into Powermove animation; the import captures evaluated model geometry.
+
+## Actual Blender materials
+
+The native Material section offers Surface, Noise, Checker, Brushed metal,
+Glass, and Glow presets. These are real Blender shader graphs. Their exposed
+inputs have the same fields and keyframe stopwatches as other properties.
+Materials may have several surface slots. Choose an existing material to reuse
+it, or **Make unique** to edit one independently. Shared input edits affect all
+users, remain aligned to composition time, and undo together; locked users block
+shared edits. Texture slots support color, normal, roughness, metalness,
+emission, and ambient occlusion, with editable UV scale, offset, and rotation.
+
+Agents can author or replace a material graph through `edit_3d update_object`.
+Set `patch.material.shader` for the base material, or `patch.slots` for a model
+with surface slots. Obtain the complete current slots from `get_3d_scene` before
+replacing them. Preserve their IDs and any existing animation. A shader is:
+
+```json
+{
+  "id":"product_paint",
+  "name":"Product paint",
+  "graph":{
+    "nodes":[
+      {"id":"noise","type":"ShaderNodeTexNoise","inputs":{"Scale":5,"Detail":2}},
+      {"id":"bump","type":"ShaderNodeBump","inputs":{"Strength":0.2,"Distance":0.1}},
+      {"id":"surface","type":"ShaderNodeBsdfPrincipled","inputs":{"Base Color":"#FF6B30","Roughness":0.3,"Metallic":0.15}},
+      {"id":"output","type":"ShaderNodeOutputMaterial"}
+    ],
+    "links":[
+      {"from":"noise","output":"Fac","to":"bump","input":"Height"},
+      {"from":"bump","output":"Normal","to":"surface","input":"Normal"},
+      {"from":"surface","output":"BSDF","to":"output","input":"Surface"}
+    ]
+  },
+  "inputs":[
+    {"id":"scale","label":"Pattern scale","kind":"number","node":"noise","socket":"Scale","min":0.01,"max":100},
+    {"id":"color","label":"Color","kind":"color","node":"surface","socket":"Base Color"}
+  ],
+  "p":{"scale":{"v":5,"kf":[],"expr":null},"color":{"v":"#FF6B30","kf":[],"expr":null}}
+}
+```
+
+Animate `shader.scale` or `slots.slot0.shader.scale` on the actual model layer.
+Only whitelisted shader nodes and properties are accepted. The packaged
+`blender-schema.ts` lists them and defines graph, exposed input, recipe, modifier,
+and rendering contracts. Nodes include procedural textures, coordinate mapping,
+math/vector operations, ramps, normal/bump, mixing, Principled/Glass/Emission,
+and output. Image nodes reference durable image asset IDs and accept
+`colorSpace:"sRGB"|"Non-Color"`. A Color Ramp node accepts
+`ramp:{interpolation:"LINEAR",stops:[{position:0,color:"#112233"},{position:1,color:"#FFEEDD"}]}`.
+Graphs are bounded, must have an output, and cannot contain cycles or executable
+nodes. Full graph authoring is available to agents; manual editing uses presets,
+exposed inputs, slots, and textures rather than a node-canvas editor or UV painter.
+
+## Draft, rendered previews, and output
+
+**Draft** uses native GPU geometry and approximate surface shading for responsive
+playback and manipulation. **Rendered** uses EEVEE or Cycles for the current
+paused frame, including actual shader graphs and evaluated procedural modifiers.
+Paused rendered previews show one sharp frame; motion blur is applied during export.
+Changes schedule a refreshed render. Orbiting continues to change only the
+independent Editor viewpoint. Rendered output and agent captures use the actual
+composition camera. Transparent backgrounds, per-layer masks/effects, group
+transforms, depth, and shadows remain part of the composition pipeline.
+
+The Rendering section selects **Native**, **EEVEE**, or **Cycles** for the
+composition, with separate final/preview sample counts, preview resolution,
+Cycles denoising, and CPU/GPU selection. Generated or imported Blender models
+start with EEVEE output unless the composition already has render settings.
+Choose Native for a composition that should use draft shading for delivery.
+Blender lighting uses physical inverse-square falloff; point and spot ranges
+limit influence. Native-only falloff controls stay in Native compositions.
+Engine settings are saved with the project and undo normally. Render jobs can
+be cancelled; a stopped worker restarts on the next request.
+
+```json
+{"operation":"set_rendering","settings":{"enabled":true,"engine":"cycles","samples":128,"previewSamples":16,"previewScale":0.5,"denoise":true,"device":"auto"}}
+```
+
+Video, still, and image-sequence export prepares evaluated Blender surfaces at
+output resolution before compositing, including shutter samples for 3D motion
+blur. Frame captures fail if a required Blender surface is unavailable rather
+than delivering draft shading. Cached surfaces are cropped to their occupied
+rectangles and kept under a memory budget. Large modifier combinations and mesh
+outputs are bounded before allocation; reduce detail or copies if a recipe
+exceeds its geometry budget.
+
+Interactive **web/code** output runs in a browser without Blender and uses
+native material approximations. Its export warnings call out this difference;
+packed `.blend` sources are excluded from that delivery. Use video or image
+frames for complete Blender shading. Project files retain the packed sources
+and all editable model/material metadata for later editing.

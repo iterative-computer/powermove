@@ -127,6 +127,12 @@ const bridge: PowermoveBridge = {
   confirm: (request) => ipcRenderer.invoke(IPC.dialogConfirm, request) as Promise<boolean>,
   clipboardWriteText: (text) => ipcRenderer.invoke(IPC.clipboardWriteText, text) as Promise<void>,
 
+  blender: {
+    status: () => ipcRenderer.invoke(IPC.blenderStatus),
+    choose: () => ipcRenderer.invoke(IPC.blenderChoose),
+    run: job => ipcRenderer.invoke(IPC.blenderRun, job),
+    cancel: () => ipcRenderer.invoke(IPC.blenderCancel),
+  },
   render: {
     start: options => ipcRenderer.invoke(IPC.renderStart,options),
     write: (token,data,audio) => ipcRenderer.invoke(IPC.renderWrite,{token,data,audio}),

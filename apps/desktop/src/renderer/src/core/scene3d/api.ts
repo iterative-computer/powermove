@@ -1,5 +1,9 @@
+import {bridge} from '../../kernel/bridge';
+import {editModel,MODEL_RECIPES,MODEL_FIELDS,modelFieldsFor} from './modeling';
+import {materialPreset,MATERIAL_PRESETS,listMaterials,materialSlots,assignedMaterial} from './materials';
+import {renderSettings,setRenderSettings,blenderStatus,renderState,setPreviewMode,onRenderState,renderBlenderPreview,cancelBlender} from './rendering';
 import {getViewportMode,setViewportMode,onViewportChange} from './viewport';
-import { createSceneGizmo,getGizmoMode,getGizmoSpace,setGizmoMode,setGizmoSpace,onGizmoState } from './gizmo';
+import { createSceneGizmo,getAutoKey,setAutoKey,getGizmoMode,getGizmoSpace,setGizmoMode,setGizmoSpace,onGizmoState } from './gizmo';
 import { compositionRuntime } from './service';
 import { createScene,createObject,createLight,parseScene,SCENE3D_DEFINITION } from './schema';
 import { convertLegacyScene } from './migration';
@@ -20,7 +24,17 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection',selection:
     PM.selectLayers?.(selected.filter(id=>layer3DRole(PM.L?.(id)) || isModelGroup(PM,PM.L?.(id))));
     emit('scene3d:selection',selection());PM.bus?.emit?.('scene3d:selection');PM.invalidate?.();
   };
-  return {getMode:getGizmoMode,setMode:setGizmoMode,getSpace:getGizmoSpace,setSpace:setGizmoSpace,onGizmoChange:listener=>({dispose:onGizmoState(listener)}),createGizmo:element=>createSceneGizmo(PM,element,time=>compositionRuntime(PM,time)),createScene,createObject,createLight,prepareImport:prepareModelImport,convert:layerId=>convertLegacyScene(PM,layerId),edit:(args,meta)=>editScene(PM,args,{origin:'interface',...meta}),
+  return {model:(args,meta)=>editModel(PM,args,{origin:'interface',...meta}),modelRecipes:MODEL_RECIPES,modelFields:MODEL_FIELDS,modelFieldsFor,materialPresets:MATERIAL_PRESETS,createMaterial:materialPreset,materials:()=>listMaterials(PM),
+    setMaterial(target,slotId,material,shared=false){
+      const layer=PM.L(target),slot=materialSlots(layer).find(s=>s.id===slotId);if(!slot)return {ok:false,message:'Choose a material slot'};
+      const source=(PM.curComp?.()||PM.proj).layers.find((candidate:any)=>materialSlots(candidate).some(s=>s.material===material))||layer;
+      const matches=shared?(PM.curComp?.()||PM.proj).layers.filter((l:any)=>materialSlots(l).some(s=>s.material.shader?.id===slot.material.shader?.id)):[layer];
+      const commands=matches.map((l:any)=>{const data=JSON.parse(JSON.stringify(l.d.data)),object=data.object;if(object.slots?.length)object.slots=object.slots.map((s:any)=>(!shared&&l===layer?s.id===slotId:s.material.shader?.id===slot.material.shader?.id)?{...s,material:assignedMaterial(PM,material,source,l,s.material)}:s);else object.material=assignedMaterial(PM,material,source,l,object.material);return {type:'set_content',target:l.id,patch:{data}};});
+      return PM.Edit.apply(commands,{origin:'inspector',label:'Edit material'});
+    },
+    getRendering:()=>renderSettings(PM.curComp?.()||PM.proj),setRendering:(patch,meta)=>setRenderSettings(PM,patch,meta),blenderStatus,chooseBlender:()=>bridge()?.blender?.choose()||Promise.resolve(null),
+    previewState:()=>renderState(PM),setPreviewMode:mode=>setPreviewMode(PM,mode),onPreviewChange:listener=>({dispose:onRenderState(PM,listener)}),renderFrame:()=>renderBlenderPreview(PM),cancelRender:()=>cancelBlender(PM),
+    getAutoKey:()=>getAutoKey(PM),setAutoKey:value=>setAutoKey(PM,value),getMode:getGizmoMode,setMode:setGizmoMode,getSpace:getGizmoSpace,setSpace:setGizmoSpace,onGizmoChange:listener=>({dispose:onGizmoState(listener)}),createGizmo:element=>createSceneGizmo(PM,element,time=>compositionRuntime(PM,time)),createScene,createObject,createLight,prepareImport:prepareModelImport,convert:layerId=>convertLegacyScene(PM,layerId),edit:(args,meta)=>editScene(PM,args,{origin:'interface',...meta}),
     isGroup:layerId=>isModelGroup(PM,PM.L?.(layerId)),
     getView:()=>getViewportMode(PM),setView:mode=>{navigation?.cancel();if(mode==='camera')setNavigationMode(PM,'select');setViewportMode(PM,mode);},onViewChange:listener=>({dispose:onViewportChange(PM,listener)}),
     getNavigationMode:()=>getNavigationMode(PM),setNavigationMode:mode=>setNavigationMode(PM,mode),

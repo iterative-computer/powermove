@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { blenderMaterialSchema,blenderSourceSchema,identifier } from '../../../../shared/blender';
 import { layer3DProperties } from './layers';
 
 /** The scene is project data, never executable code or a live Three.js object. */
@@ -6,13 +7,13 @@ export const SCENE3D_DEFINITION = 'powermove.3d.scene';
 const id = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/);
 const color = z.string().regex(/^#[0-9a-f]{6}$/i);
 const num = (min = -100_000, max = 100_000) => z.number().finite().min(min).max(max);
-const channel = (value: z.ZodType) => z.union([value, z.object({
-  v: value, kf: z.array(z.object({ t: num(0), v: value }).passthrough()).max(2400),
+const channel = (value: z.ZodType, minTime = 0) => z.union([value, z.object({
+  v: value, kf: z.array(z.object({ t: num(minTime), v: value }).passthrough()).max(2400),
   expr: z.string().max(2000).nullable().optional()
 }).passthrough()]).transform((raw: any) => typeof raw === 'object' && raw !== null && 'v' in raw
   ? { ...raw, expr: raw.expr ?? null } : { v: raw, kf: [], expr: null });
-const p = (fields: Record<string, [z.ZodType, unknown]>) => z.object(Object.fromEntries(
-  Object.entries(fields).map(([key, [type, fallback]]) => [key, channel(type).default(() => ({ v: fallback, kf: [], expr: null }))])
+const p = (fields: Record<string, [z.ZodType, unknown]>, minTime = 0) => z.object(Object.fromEntries(
+  Object.entries(fields).map(([key, [type, fallback]]) => [key, channel(type, minTime).default(() => ({ v: fallback, kf: [], expr: null }))])
 )).strict();
 const transform = {
   x: [num(), 0], y: [num(), 0], z: [num(), 0],
@@ -33,20 +34,24 @@ export const sourceSchema = z.union([
   z.object({ mesh: z.object({
     positions: z.array(num()).min(9).max(300_000),
     indices: z.array(z.number().int().nonnegative()).min(3).max(300_000).optional(),
+    groups:z.array(z.object({start:z.number().int().nonnegative(),count:z.number().int().nonnegative(),materialIndex:z.number().int().min(0).max(63)}).strict()).max(64).optional(),
     normals: z.array(num(-1, 1)).max(300_000).optional(), uvs: z.array(num()).max(200_000).optional()
   }).strict().superRefine((m, ctx) => {
     const count = m.positions.length / 3;
     if (!Number.isInteger(count)) ctx.addIssue({ code: 'custom', message: 'Positions must contain xyz triples' });
     if (m.indices ? m.indices.length % 3 || m.indices.some(i => i >= count) : count % 3) ctx.addIssue({ code:'custom', message:'Faces must contain valid triangle indices' });
     if (m.normals && m.normals.length !== m.positions.length) ctx.addIssue({ code:'custom', message:'Each vertex needs one normal' });
+    if(m.groups?.some(g=>g.start+g.count>(m.indices?.length ?? count)||g.start%3||g.count%3))ctx.addIssue({code:'custom',message:'Invalid material face ranges'});
     if (m.uvs && m.uvs.length !== count * 2) ctx.addIssue({ code:'custom', message:'Each vertex needs one UV pair' });
   }) }).strict(),
   z.object({ lathe: points2, segments: z.number().int().min(3).max(128).optional() }).strict(),
   z.object({ extrude: points2.refine(v => v.length >= 3), depth: num(.0001,10000), bevel: num(0,100).optional() }).strict()
 ]);
 export const materialSchema = z.object({
-  p: p({ color: [color,'#C7C4FF'], roughness: [num(.02,1),.4], metalness: [num(0,1),.1],
-    emissive: [color,'#000000'], emissiveIntensity: [num(0,100),1], opacity: [num(0,1),1] }).default({} as any),
+  shader:blenderMaterialSchema.optional(),
+  placement:z.object({scaleX:num(.001,1000).default(1),scaleY:num(.001,1000).default(1),offsetX:num().default(0),offsetY:num().default(0),rotation:num(-360000,360000).default(0)}).strict().optional(),
+  p: p({ color: [color,'#C7C4FF'], roughness: [num(0,1),.4], metalness: [num(0,1),.1],
+    emissive: [color,'#000000'], emissiveIntensity: [num(0,100),1], opacity: [num(0,1),1] }, -100000000).default({} as any),
   maps: z.object(Object.fromEntries(['color','normal','roughness','metalness','emissive','ao'].map(k => [k,z.string().min(1).max(160).optional()]))).strict().default({}),
   doubleSided: z.boolean().default(true)
 }).strict();
@@ -54,6 +59,9 @@ export const objectSchema = z.object({
   id, name: z.string().min(1).max(160).default('Object'), parent: id.nullable().default(null),
   source: sourceSchema, p: p(transform).default({} as any), material: materialSchema.default({} as any),
   useSourceMaterials: z.boolean().default(false),
+  blender:blenderSourceSchema.optional(),
+  generation:z.object({groupId:identifier,partId:identifier}).strict().optional(),
+  slots:z.array(z.object({id:identifier,name:z.string().min(1).max(160),material:materialSchema}).strict()).max(64).default([]),
   castShadow: z.boolean().default(true), receiveShadow: z.boolean().default(true)
 }).strict();
 export const lightSchema = z.object({
@@ -88,7 +96,7 @@ export function parseScene(raw: unknown): Scene3D {
   if ((JSON.stringify(raw)?.length ?? 0) > 8_000_000) throw new Error('3D scene exceeds the 8 MB geometry budget');
   const scene = schema.parse(raw);
   // Zod's default bypasses transforms; parse nested defaults explicitly.
-  scene.objects = scene.objects.map(o => ({...o,p:p(transform).parse(o.p || {}),material:materialSchema.parse({ ...o.material,p:materialSchema.shape.p.parse(o.material?.p || {}) })}));
+  scene.objects = scene.objects.map(o => ({...o,slots:(o.slots || []).map(slot=>({...slot,material:materialSchema.parse({...slot.material,p:materialSchema.shape.p.parse(slot.material?.p || {})})})),p:p(transform).parse(o.p || {}),material:materialSchema.parse({ ...o.material,p:materialSchema.shape.p.parse(o.material?.p || {}) })}));
   scene.camera = cameraSchema.parse({...scene.camera,p:cameraSchema.shape.p.parse(scene.camera.p || {})});
   scene.environment = environmentSchema.parse({...scene.environment,p:environmentSchema.shape.p.parse(scene.environment.p || {})});
   scene.lights = scene.lights.map(l => lightSchema.parse({...l,p:lightSchema.shape.p.parse(l.p || {})}));

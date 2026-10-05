@@ -78,6 +78,7 @@ const validCommands: unknown[] = [
     state: { scale: 2 }
   },
 
+  {type:'offset_property', target:'a', path:'position.x', delta:2},
   {type: 'group_layers', targets: ['a'], name: 'Group'},
   {type: 'ungroup_layers', targets: ['g']},
   {type: 'move_to_group', targets: ['a'], group: null},
@@ -85,6 +86,7 @@ const validCommands: unknown[] = [
 ];
 
 const invalidCommands: unknown[] = [
+  {type:'offset_property',path:'position.x',delta:NaN},
   {type: 'group_layers', targets: []},
   {type: 'ungroup_layers', targets: [12]},
   {type: 'move_to_group', targets: ['a'], group: 12},
@@ -111,6 +113,7 @@ const invalidCommands: unknown[] = [
 
 const huge = 'x'.repeat(COMMAND_JSON_LIMIT + 1);
 const oversizedCommands: unknown[] = [
+  {type:'offset_property',path:huge,delta:1},
   {type: 'group_layers', targets: [huge]},
   {type: 'ungroup_layers', targets: [huge]},
   {type: 'move_to_group', targets: [huge], group: null},
@@ -142,6 +145,7 @@ function exhaustivelyName(command: EditCommand): string {
   switch (command.type) {
     case 'set_property': return command.type;
     case 'replace_keyframes': return command.type;
+    case 'offset_property': return command.type;
     case 'set_easing': return command.type;
     case 'set_expression': return command.type;
     case 'set_content': return command.type;
@@ -322,6 +326,13 @@ describe('parseEditCommand', () => {
     expect(deleted).not.toBeInstanceOf(ValidationError);
     if (!(deleted instanceof ValidationError) && deleted.type === 'delete_layers') {
       expect(deleted.targets).toHaveLength(25);
+    }
+  });
+
+  it('retains negative local times only for reused material channels', () => {
+    for (const path of ['shader.roughness', 'm.roughness', 'slots.paint.shader.roughness', 'slots.paint.color', 'opacity']) {
+      const command = parseEditCommand({ type: 'replace_keyframes', path, keyframes: [{ time: -2, value: 0.5 }] });
+      expect(command).toMatchObject({ keyframes: [{ time: path === 'opacity' ? 0 : -2, value: 0.5 }] });
     }
   });
 

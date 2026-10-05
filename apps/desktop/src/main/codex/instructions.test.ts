@@ -16,8 +16,8 @@ function normalizeText(value: string): string {
 
 describe('autonomous agent contract', () => {
   it('keeps every distinct edit command reachable by the agent', () => {
-    expect(EDIT_COMMAND_TYPES).toHaveLength(22);
-    expect(new Set(EDIT_COMMAND_TYPES).size).toBe(22);
+    expect(EDIT_COMMAND_TYPES).toHaveLength(23);
+    expect(new Set(EDIT_COMMAND_TYPES).size).toBe(23);
     expect(AGENT_COMMAND_TYPES).toEqual(EDIT_COMMAND_TYPES);
   });
 

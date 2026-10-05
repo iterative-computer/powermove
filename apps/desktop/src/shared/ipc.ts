@@ -43,6 +43,10 @@ export const IPC = {
   dialogConfirm: 'dialog:confirm',
   clipboardWriteText: 'clipboard:write-text',
 
+  blenderStatus: 'blender:status',
+  blenderChoose: 'blender:choose',
+  blenderRun: 'blender:run',
+  blenderCancel: 'blender:cancel',
   renderStart: 'render:start',
   renderWrite: 'render:write',
   renderFinish: 'render:finish',
@@ -720,6 +724,12 @@ export interface PowermoveBridge {
   /** Writes plain text to the system clipboard while the window has focus; nothing is ever read back. */
   clipboardWriteText?(text: string): Promise<void>;
 
+  blender?: {
+    status(): Promise<import('./blender').BlenderStatus>;
+    choose(): Promise<import('./blender').BlenderStatus | null>;
+    run(job: import('./blender').BlenderJob): Promise<import('./blender').BlenderOutput>;
+    cancel(): Promise<void>;
+  };
   render: {
     start(options:{width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number}):Promise<string | null>;
     write(token:string,data:Uint8Array,audio?:boolean):Promise<void>;

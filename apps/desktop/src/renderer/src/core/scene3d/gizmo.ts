@@ -38,6 +38,8 @@ type GizmoState = {mode:GizmoMode;space:GizmoSpace};
 let state:GizmoState={mode:'translate',space:'world'};
 const stateListeners=new Set<(state:GizmoState)=>void>();
 const publish=()=>{for(const listener of stateListeners)listener({...state});};
+export const getAutoKey=(PM:any):boolean=>!!PM.autokey;
+export function setAutoKey(PM:any,enabled:boolean){PM.autokey=!!enabled;publish();}
 export const getGizmoMode=():GizmoMode=>state.mode;
 export const getGizmoSpace=():GizmoSpace=>state.space;
 export function setGizmoMode(mode:GizmoMode):void {
