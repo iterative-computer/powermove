@@ -5,7 +5,7 @@
  * Pure apart from the injected `measure`, which must use the same canvas
  * font settings the rasterizer paints with, so preview and export agree.
  */
-import { applyTextCase, cueWords, type CaptionCue, type CaptionStyle, type CaptionWord } from './model';
+import { applyTextCase, cueWords, textTokens, type CaptionCue, type CaptionStyle, type CaptionWord } from './model';
 
 export type Measure = (text: string, size: number) => number;
 
@@ -30,13 +30,14 @@ export interface CaptionLayout {
   words: CaptionWord[];
 }
 
-interface Token { index: number; text: string; width: number; breakBefore: boolean }
+/** `gap`: a space precedes the token on its line (none between CJK characters). */
+interface Token { index: number; text: string; width: number; breakBefore: boolean; gap: boolean }
 
 function wrap(tokens: Token[], space: number, limit: number): Token[][] {
   const lines: Token[][] = [];
   let line: Token[] = [], width = 0;
   for (const token of tokens) {
-    const next = line.length ? width + space + token.width : token.width;
+    const next = line.length ? width + (token.gap ? space : 0) + token.width : token.width;
     if (line.length && (token.breakBefore || next > limit)) {
       lines.push(line); line = [token]; width = token.width;
     } else { line.push(token); width = next; }
@@ -45,7 +46,7 @@ function wrap(tokens: Token[], space: number, limit: number): Token[][] {
   return lines;
 }
 
-const lineWidth = (line: Token[], space: number) => line.reduce((sum, token, index) => sum + token.width + (index ? space : 0), 0);
+const lineWidth = (line: Token[], space: number) => line.reduce((sum, token, index) => sum + token.width + (index && token.gap ? space : 0), 0);
 
 export interface LayoutOptions {
   compositionWidth: number;
@@ -64,8 +65,8 @@ export function layoutCaption(cue: CaptionCue, style: CaptionStyle, measure: Mea
     let index = 0;
     const tokens: Token[] = [];
     for (const paragraph of paragraphs) {
-      paragraph.split(/\s+/).filter(Boolean).forEach((token, position) => {
-        tokens.push({ index: index++, text: token, width: measure(token, size), breakBefore: position === 0 && tokens.length > 0 });
+      textTokens(paragraph).forEach((token, position) => {
+        tokens.push({ index: index++, text: token.text, width: measure(token.text, size), breakBefore: position === 0 && tokens.length > 0, gap: token.gap });
       });
     }
     return { tokens, space: measure(' ', size) };
@@ -100,9 +101,10 @@ export function layoutCaption(cue: CaptionCue, style: CaptionStyle, measure: Mea
   const laid: LaidLine[] = lines.map((line, row) => {
     const w = widths[row]!;
     let x = style.align === 'left' ? 0 : style.align === 'right' ? width - w : (width - w) / 2;
-    const placed = line.map(token => {
+    const placed = line.map((token, position) => {
+      if (position && token.gap) x += space;
       const word = { index: token.index, text: token.text, x, width: token.width };
-      x += token.width + space;
+      x += token.width;
       return word;
     });
     return { words: placed, width: w, y: row * lineHeight };

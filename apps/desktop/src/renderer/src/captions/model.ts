@@ -318,17 +318,86 @@ export function applyTextCase(text: string, textCase: CaptionStyle['textCase']):
   return text;
 }
 
+/* ── text units ──────────────────────────────────────────
+   Chinese and Japanese are written without spaces between words: transcript
+   tokens join without a space, a line may break between any two characters,
+   and each character takes about two Latin characters of line length.
+   (Korean is written with spaces and follows the Latin rules.) */
+
+const CJK = /[\u2E80-\u2FFF\u3000-\u303F\u3040-\u30FF\u31F0-\u31FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF\u{20000}-\u{2FFFF}]/u;
+/** Punctuation that may not start a line; it stays with the character before. */
+const CJK_CLOSING = /[、。，．！？：；」』）】〕〉》〙〗〛…‥・ーぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ々〻!?.,;:)\]}%'"”’]/u;
+/** Punctuation that may not end a line; it stays with the character after. */
+const CJK_OPENING = /[「『（【〔〈《〘〖〚(\[{“‘]/u;
+
+export const isCjkChar = (char: string | undefined) => !!char && CJK.test(char);
+
+/** Words as cue text: spaced, except where Chinese or Japanese meet. */
+export function joinWords(texts: readonly string[]): string {
+  let out = '';
+  for (const raw of texts) {
+    const text = raw.trim();
+    if (!text) continue;
+    if (out && !isCjkChar(Array.from(out).at(-1)) && !isCjkChar(Array.from(text)[0])) out += ' ';
+    out += text;
+  }
+  return out;
+}
+
+/** Line length for segmentation: CJK characters count double. */
+export function displayLength(text: string): number {
+  let length = 0;
+  for (const char of text) length += isCjkChar(char) ? 2 : 1;
+  return length;
+}
+
+export interface TextToken {
+  text: string;
+  /** A space separates this token from the previous one on the same line. */
+  gap: boolean;
+}
+
+/** Units a line may break between: space-separated words, and single
+    Chinese/Japanese characters (closing punctuation stays with the
+    character before it, opening punctuation with the one after). */
+export function textTokens(paragraph: string): TextToken[] {
+  const tokens: TextToken[] = [];
+  for (const chunk of paragraph.split(/\s+/).filter(Boolean)) {
+    let current = '', gap = tokens.length > 0, opening = false;
+    const push = () => { if (current) { tokens.push({ text: current, gap }); gap = false; current = ''; } };
+    for (const char of chunk) {
+      const cjk = isCjkChar(char), last = Array.from(current).at(-1);
+      if (!current || opening) current += char;
+      else if (CJK_CLOSING.test(char) && (cjk || isCjkChar(last))) current += char;
+      else if (cjk || isCjkChar(last)) { push(); current = char; }
+      else current += char;
+      opening = CJK_OPENING.test(char);
+    }
+    push();
+  }
+  return tokens;
+}
+
+/** Every token of cue text, paragraph after paragraph, as layout numbers them. */
+export function cueTokens(text: string): TextToken[] {
+  return text.split('\n').flatMap(textTokens);
+}
+
 /**
- * Word timings for highlight and word animation. Transcribed cues carry real
- * timings; otherwise each word gets a share of the cue proportional to its
- * length, which reads naturally for imported subtitles.
+ * Word timings for highlight and word animation, one per layout token.
+ * Transcribed cues carry real timings: they are used as they are when they
+ * line up with the tokens, and spread over the tokens by character position
+ * when they do not (Chinese/Japanese words cover several characters).
+ * Otherwise each token gets a share of the cue proportional to its length,
+ * which reads naturally for imported subtitles.
  */
 export function cueWords(cue: CaptionCue): CaptionWord[] {
-  const tokens = cue.text.split(/\s+/).filter(Boolean);
+  const tokens = cueTokens(cue.text).map(token => token.text);
   if (cue.words?.length && cue.words.length === tokens.length) {
     return cue.words.map((word, index) => ({ ...word, text: tokens[index]! }));
   }
-  if (cue.words?.length) return cue.words;
+  const mapped = cue.words?.length ? wordsByCharacter(cue.words, tokens) : null;
+  if (mapped) return mapped;
   const total = tokens.reduce((sum, token) => sum + token.length + 1, 0) || 1;
   const span = cue.end - cue.start;
   let at = cue.start;
@@ -337,6 +406,33 @@ export function cueWords(cue: CaptionCue): CaptionWord[] {
     const word = { text: token, start: round(at), end: round(at + length) };
     at += length;
     return word;
+  });
+}
+
+/** Token timings from word timings that spell the same characters. */
+function wordsByCharacter(words: readonly CaptionWord[], tokens: readonly string[]): CaptionWord[] | null {
+  const squash = (text: string) => Array.from(text.replace(/\s+/g, '').toLocaleLowerCase());
+  const owner: number[] = [];
+  words.forEach((word, index) => { for (const _ of squash(word.text)) owner.push(index); });
+  const characters = tokens.flatMap(token => squash(token));
+  if (characters.length !== owner.length || squash(words.map(word => word.text).join('')).join('') !== characters.join('')) return null;
+  // Characters of one word share its time evenly.
+  const share = new Map<number, number>();
+  for (const index of owner) share.set(index, (share.get(index) ?? 0) + 1);
+  const seen = new Map<number, number>();
+  let position = 0;
+  return tokens.map(token => {
+    const count = squash(token).length;
+    let start = Infinity, end = -Infinity;
+    for (let i = 0; i < count; i++, position++) {
+      const index = owner[position]!, word = words[index]!;
+      const n = share.get(index)!, k = seen.get(index) ?? 0;
+      seen.set(index, k + 1);
+      const step = (word.end - word.start) / n;
+      start = Math.min(start, word.start + step * k);
+      end = Math.max(end, word.start + step * (k + 1));
+    }
+    return { text: token, start: round(start), end: round(end) };
   });
 }
 
@@ -458,9 +554,9 @@ export function splitCue(cues: readonly CaptionCue[], id: string, at: number, ma
   if (words.length > 1) cut = clamp(cut, 1, words.length - 1);
   const head = words.slice(0, cut), tail = words.slice(cut);
   const lines = cue.text.split('\n');
-  const join = (part: CaptionWord[]) => part.map(word => word.text).join(' ');
+  const join = (part: CaptionWord[]) => joinWords(part.map(word => word.text));
   const headText = words.length > 1 ? join(head) : lines[0] ?? cue.text;
-  const tailText = words.length > 1 ? join(tail) : lines.slice(1).join(' ') || cue.text;
+  const tailText = words.length > 1 ? join(tail) : joinWords(lines.slice(1)) || cue.text;
   const tailId = makeId();
   const first: CaptionCue = { id: cue.id, start: cue.start, end: round(at), text: headText };
   const second: CaptionCue = { id: tailId, start: round(at), end: cue.end, text: tailText };
@@ -488,7 +584,7 @@ export function mergeCues(cues: readonly CaptionCue[], ids: readonly string[]): 
     id: run[0]!.id,
     start: run[0]!.start,
     end: run[run.length - 1]!.end,
-    text: run.map(cue => cue.text.replace(/\n/g, ' ')).join(' ')
+    text: joinWords(run.map(cue => joinWords(cue.text.split('\n'))))
   };
   if (run.every(cue => cue.words?.length)) merged.words = run.flatMap(cue => cue.words!.map(word => ({ ...word })));
   const out = cues.map(cue => ({ ...cue }));

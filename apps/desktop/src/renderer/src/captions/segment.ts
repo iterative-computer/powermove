@@ -4,7 +4,7 @@
  * a new cue after a pause or at the end of a sentence, and a cue never left
  * dangling for a single trailing word when a comma offered a better break.
  */
-import { MIN_CUE_DURATION, cueId, normalizeCues, type CaptionCue, type CaptionWord } from './model';
+import { MIN_CUE_DURATION, cueId, displayLength, joinWords, normalizeCues, type CaptionCue, type CaptionWord } from './model';
 
 export interface SegmentOptions {
   maxCharsPerLine: number;
@@ -31,7 +31,10 @@ export const DEFAULT_SEGMENT_OPTIONS: SegmentOptions = {
 const SENTENCE_END = /[.!?…。！？]["'”’)\]]*$/;
 const CLAUSE_END = /[,;:—–、，；：]["'”’)\]]*$/;
 
-const textOf = (words: readonly CaptionWord[]) => words.map(word => word.text).join(' ');
+/* Spaced words, except Chinese/Japanese, which run together; a CJK
+   character counts as two characters of line length. */
+const textOf = (words: readonly CaptionWord[]) => joinWords(words.map(word => word.text));
+const lengthOf = (words: readonly CaptionWord[]) => displayLength(textOf(words));
 
 export function segmentWords(input: readonly CaptionWord[], options: Partial<SegmentOptions> = {}, makeId: () => string = cueId): CaptionCue[] {
   const o = { ...DEFAULT_SEGMENT_OPTIONS, ...options };
@@ -49,9 +52,9 @@ export function segmentWords(input: readonly CaptionWord[], options: Partial<Seg
     if (current.length) {
       const last = current[current.length - 1]!;
       const gap = word.start - last.end;
-      const length = textOf(current).length + 1 + word.text.length;
+      const length = lengthOf([...current, word]);
       const duration = word.end - current[0]!.start;
-      if (gap >= o.pause || SENTENCE_END.test(last.text) && textOf(current).length >= 12) flush();
+      if (gap >= o.pause || SENTENCE_END.test(last.text) && lengthOf(current) >= 12) flush();
       else if (length > capacity || duration > o.maxDuration) {
         // Prefer the last clause break in the back half of the cue.
         let clause = -1;
