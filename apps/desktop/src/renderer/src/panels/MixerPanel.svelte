@@ -11,7 +11,7 @@
   import { controlTime, transport } from '../state/transport.svelte';
   import { isProperty } from '../legacy/core/content-properties';
   import MixerStrip from '../mixer/MixerStrip.svelte';
-  import { addKeyCommand, MIXER_ORIGIN, muteCommand, nextSolo } from '../mixer/edits';
+  import { addKeyCommand, levelLabel, MIXER_ORIGIN, muteCommand, nextSolo } from '../mixer/edits';
   import { levelControl } from '../mixer/level-control';
   import { clampGain } from '../mixer/levels';
   import { MeterLoop, type LevelSource, type MeterPalette } from '../mixer/meter-loop';
@@ -110,15 +110,16 @@
     if (!layer) return;
     const time = api.transport.time();
     const raw = layer.d?.[strip.gainKey];
+    const name = levelLabel(strip);
     if (strip.keyAtTime && isProperty(raw)) {
       const key = api.anim.hasKeyAt(layer, raw, time);
       if (!key) return;
-      api.history.do('Remove keyframe for Gain', () => { api.anim.removeKey(raw, key); });
+      api.history.do(`Remove keyframe for ${name}`, () => { api.anim.removeKey(raw, key); });
       api.transport.invalidate?.();
       audio()?.retune?.();
       return;
     }
-    apply(addKeyCommand(strip, strip.gain, time), 'Add keyframe for Gain');
+    apply(addKeyCommand(strip, strip.gain, time), `Add keyframe for ${name}`);
   }
 
   function select(strip: Strip): void {

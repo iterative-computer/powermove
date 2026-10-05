@@ -203,8 +203,14 @@ test('mute and solo change what plays, and meters run only while sound plays', a
   await panel.getByRole('button', { name: 'Solo Interview' }).click();
   await page.waitForFunction(() => (window as any).PM.Audio.inspect().monitorSolo.length === 0);
 
-  // After a stop the meters fall, then the taps are released.
+  // The keyframe toggle names the property it animates in History.
   await page.evaluate(() => (window as any).PM.pause());
+  await panel.getByRole('button', { name: 'Add Interview level keyframe' }).click();
+  expect(await page.evaluate(() => (window as any).PM.hist.label())).toBe('Add keyframe for Audio gain');
+  await panel.getByRole('button', { name: 'Remove Interview level keyframe' }).click();
+  expect(await page.evaluate(() => (window as any).PM.hist.label())).toBe('Remove keyframe for Audio gain');
+
+  // After a stop the meters fall, then the taps are released.
   await page.waitForFunction(() => (window as any).PM.Audio.inspect().taps.length === 0, null, { timeout: 15_000 });
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
