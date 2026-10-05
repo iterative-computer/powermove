@@ -9,8 +9,9 @@
   import { clearSettingsSearch, searchSettings } from './search';
   import Avatar from '../cloud/Avatar.svelte';
   import { applyAccount, cloudBridge, openSignIn, signOut, subscribeAccount, type CloudUser } from '../cloud/account';
+  import TranscriptionSettings from '../transcription/TranscriptionSettings.svelte';
 
-  export type SettingsPage = 'general' | 'accounts' | 'extensions' | 'project';
+  export type SettingsPage = 'general' | 'accounts' | 'transcription' | 'extensions' | 'project';
 
   let { PM, projectBridge }: {
     PM: Record<string, any>;
@@ -33,6 +34,7 @@
       items: [
         { id: 'general', label: 'General', icon: 'gear' },
         { id: 'accounts', label: 'Accounts', icon: 'link' },
+        { id: 'transcription', label: 'Transcription', icon: 'waveform' },
         { id: 'extensions', label: 'Extensions', icon: 'puzzle' }
       ]
     }
@@ -543,6 +545,12 @@
                 <h3 class="sg-section-title">API or local model</h3>
                 <div class="sg-group" use:host={[controls?.compatible.element]}></div>
               </section>
+            {:else if item.id === 'transcription'}
+              <header class="sg-heading">
+                <h2>Transcription</h2>
+                <p>Turn speech into text for captions and your agent, on this Mac.</p>
+              </header>
+              <TranscriptionSettings {PM} />
             {:else if item.id === 'extensions'}
               <header class="sg-heading">
                 <h2>Extensions</h2>

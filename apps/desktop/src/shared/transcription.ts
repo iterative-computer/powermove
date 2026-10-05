@@ -52,12 +52,27 @@ export interface TranscriptionModelInfo {
   /** 0..1 while downloading. */
   progress?: number;
   error?: string;
+  /* ── additive (transcription lane) ── */
+  /** BCP-47 tags the model transcribes, for the language picker. */
+  languageCodes?: string[];
+  /** Bytes received so far while downloading. */
+  downloadedBytes?: number;
 }
 
 export interface TranscriptionStatus {
   models: TranscriptionModelInfo[];
   /** The model transcription uses, or null when none is ready. */
   activeModelId: string | null;
+  /* ── additive (transcription lane) ── */
+  /** False when this host cannot run on-device transcription at all (a
+   *  browser host without the engine, an unsupported platform). Omitted
+   *  means available. */
+  available?: boolean;
+  /** Spoken-language preference: 'auto' or a BCP-47 tag from the active
+   *  model's `languageCodes`. Used when a request carries no language. */
+  language?: string;
+  /** Bytes the downloaded models (and partial downloads) take on disk. */
+  storageBytes?: number;
 }
 
 export interface TranscribeRequest {
@@ -71,6 +86,12 @@ export interface TranscribeRequest {
   /** Opaque id echoed on progress events. */
   requestId?: string;
 }
+
+/** What the transcribe IPC returns: errors keep their `code` across the
+ *  process boundary (a thrown Error would lose it). Additive. */
+export type TranscribeResult =
+  | { ok: true; transcript: Transcript }
+  | { ok: false; code?: string; message: string };
 
 export interface TranscribeProgress {
   requestId: string;
@@ -96,5 +117,33 @@ export const TRANSCRIPTION_IPC = {
   progress: 'transcription:progress',
   /** main → renderer: an agent tool needs a model; show the download sheet.
    * Payload: { reason: string }. */
-  modelRequested: 'transcription:model-requested'
+  modelRequested: 'transcription:model-requested',
+  /* ── additive (transcription lane) ── */
+  /** renderer → main: 'auto' or a BCP-47 tag. */
+  setLanguage: 'transcription:set-language',
+  /** renderer → main: show the models folder in Finder. */
+  reveal: 'transcription:reveal'
 } as const;
+
+/* ── additive (transcription lane): the preload bridge ── */
+
+/** `transcription` on the editor bridge (preload/index.ts, web-bridge.ts). */
+export interface TranscriptionBridge {
+  status(): Promise<TranscriptionStatus>;
+  /** Starts the download in main (it outlives the window); resolves at once. */
+  download(modelId: string): Promise<TranscriptionStatus>;
+  cancelDownload(modelId: string): Promise<TranscriptionStatus>;
+  remove(modelId: string): Promise<TranscriptionStatus>;
+  setActive(modelId: string): Promise<TranscriptionStatus>;
+  setLanguage(language: string): Promise<TranscriptionStatus>;
+  /** Shows the models folder in Finder. */
+  reveal(): Promise<void>;
+  transcribe(request: TranscribeRequest): Promise<TranscribeResult>;
+  cancelTranscribe(requestId: string): Promise<void>;
+  onStatus(callback: (status: TranscriptionStatus) => void): () => void;
+  onProgress(callback: (progress: TranscribeProgress) => void): () => void;
+  onModelRequested(callback: (request: { reason: string }) => void): () => void;
+}
+
+/** The onboarding window's slice: pick and start a download, watch it. */
+export type OnboardingTranscriptionBridge = Pick<TranscriptionBridge, 'status' | 'download' | 'cancelDownload' | 'remove' | 'onStatus'>;

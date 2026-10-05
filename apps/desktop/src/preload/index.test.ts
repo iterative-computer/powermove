@@ -300,3 +300,27 @@ describe('preload bridge', () => {
     expect(electronMocks.send).toHaveBeenCalledExactlyOnceWith(IPC.nativeEdit, 'paste');
   });
 });
+
+/* ── transcription lane ── */
+describe('transcription bridge', () => {
+  it('invokes each TRANSCRIPTION_IPC channel and rebuilds the request field by field', async () => {
+    const { TRANSCRIPTION_IPC } = await import('../shared/transcription');
+    const transcription = bridge().transcription!;
+    electronMocks.invoke.mockClear();
+    void transcription.download('parakeet-tdt-0.6b-v3');
+    void transcription.setLanguage('de');
+    void transcription.transcribe({ path: '/clip.mov', start: 1, requestId: 'r1', extra: 'dropped' } as never);
+    void transcription.cancelTranscribe('r1');
+    expect(electronMocks.invoke.mock.calls).toEqual([
+      [TRANSCRIPTION_IPC.download, 'parakeet-tdt-0.6b-v3'],
+      [TRANSCRIPTION_IPC.setLanguage, 'de'],
+      [TRANSCRIPTION_IPC.transcribe, { path: '/clip.mov', start: 1, requestId: 'r1' }],
+      [TRANSCRIPTION_IPC.cancelTranscribe, 'r1']
+    ]);
+    electronMocks.on.mockClear();
+    const off = transcription.onModelRequested(() => undefined);
+    expect(electronMocks.on).toHaveBeenCalledWith(TRANSCRIPTION_IPC.modelRequested, expect.any(Function));
+    off();
+    expect(electronMocks.removeListener).toHaveBeenCalledWith(TRANSCRIPTION_IPC.modelRequested, expect.any(Function));
+  });
+});

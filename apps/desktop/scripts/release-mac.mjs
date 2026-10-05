@@ -52,6 +52,33 @@ async function findPackagedApp() {
   throw new Error('The signed Powermove.app was not found in dist/.');
 }
 
+async function signingInfo(file) {
+  // codesign prints its details on stderr.
+  const { stderr } = await execFileAsync('/usr/bin/codesign', ['-dv', '--verbose=2', file]);
+  return {
+    team: /TeamIdentifier=(.+)/.exec(stderr)?.[1]?.trim() ?? 'not set',
+    runtime: /flags=0x[0-9a-f]+\([^)]*runtime[^)]*\)/.test(stderr)
+  };
+}
+
+/* The transcription utility process loads sherpa-onnx's native addon and its
+   ONNX Runtime dylibs from app.asar.unpacked. Under the hardened runtime,
+   library validation refuses them unless they carry the app's own Team ID,
+   so prove the signing pass covered them before anything ships. */
+async function verifyNativeAddons(app) {
+  const appInfo = await signingInfo(app);
+  const dir = path.join(app, 'Contents/Resources/app.asar.unpacked/node_modules/sherpa-onnx-darwin-arm64');
+  const binaries = (await readdir(dir)).filter((name) => name.endsWith('.node') || name.endsWith('.dylib'));
+  if (!binaries.length) throw new Error(`No transcription runtime binaries found in ${dir}.`);
+  for (const name of binaries) {
+    const info = await signingInfo(path.join(dir, name));
+    if (info.team !== appInfo.team || !info.runtime) {
+      throw new Error(`${name} is not signed for library validation (team ${info.team}, app team ${appInfo.team}, runtime ${info.runtime}).`);
+    }
+  }
+  process.stdout.write(`Transcription runtime signed with team ${appInfo.team}: ${binaries.join(', ')}\n`);
+}
+
 async function main() {
   const missing = releaseCredentials(process.env);
   if (missing.length) {
@@ -82,6 +109,7 @@ async function main() {
 
   const app = await findPackagedApp();
   await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', app]);
+  await verifyNativeAddons(app);
   await run('/usr/sbin/spctl', ['--assess', '--type', 'execute', '--verbose=4', app]);
   await run('/usr/bin/xcrun', ['stapler', 'validate', app]);
 

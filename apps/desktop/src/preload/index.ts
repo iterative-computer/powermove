@@ -37,6 +37,7 @@ import {
 import { VARS_IPC, type VarsStatus } from '../shared/vars-ipc';
 import { CLOUD_IPC, type CloudChannel, type CloudChannels } from '../shared/cloud-ipc';
 import { STORE_IPC, type StoreChannel, type StoreChannels } from '../shared/store-ipc';
+import { TRANSCRIPTION_IPC, type TranscribeProgress, type TranscribeResult, type TranscriptionStatus } from '../shared/transcription';
 
 /** One typed invoke for every `cloud:*` channel (store plan §2.7). */
 function cloudInvoke<C extends CloudChannel>(channel: C, request?: CloudChannels[C]['req']): Promise<CloudChannels[C]['res']> {
@@ -452,6 +453,28 @@ const bridge: PowermoveBridge = {
     onUpdatesChanged: cloudEvent(STORE_IPC.updatesChanged),
     onPublishProgress: cloudEvent(STORE_IPC.publishProgress),
     onLibraryChanged: cloudEvent<void>(STORE_IPC.libraryChanged)
+  },
+
+  /* ── transcription lane: on-device speech models and transcribe ── */
+  transcription: {
+    status: () => ipcRenderer.invoke(TRANSCRIPTION_IPC.status) as Promise<TranscriptionStatus>,
+    download: (modelId) => ipcRenderer.invoke(TRANSCRIPTION_IPC.download, String(modelId)) as Promise<TranscriptionStatus>,
+    cancelDownload: (modelId) => ipcRenderer.invoke(TRANSCRIPTION_IPC.cancelDownload, String(modelId)) as Promise<TranscriptionStatus>,
+    remove: (modelId) => ipcRenderer.invoke(TRANSCRIPTION_IPC.remove, String(modelId)) as Promise<TranscriptionStatus>,
+    setActive: (modelId) => ipcRenderer.invoke(TRANSCRIPTION_IPC.setActive, String(modelId)) as Promise<TranscriptionStatus>,
+    setLanguage: (language) => ipcRenderer.invoke(TRANSCRIPTION_IPC.setLanguage, String(language)) as Promise<TranscriptionStatus>,
+    reveal: () => ipcRenderer.invoke(TRANSCRIPTION_IPC.reveal) as Promise<void>,
+    transcribe: (request) => ipcRenderer.invoke(TRANSCRIPTION_IPC.transcribe, {
+      path: request.path,
+      ...(request.start !== undefined ? { start: request.start } : {}),
+      ...(request.end !== undefined ? { end: request.end } : {}),
+      ...(request.language !== undefined ? { language: request.language } : {}),
+      ...(request.requestId !== undefined ? { requestId: request.requestId } : {})
+    }) as Promise<TranscribeResult>,
+    cancelTranscribe: (requestId) => ipcRenderer.invoke(TRANSCRIPTION_IPC.cancelTranscribe, String(requestId)) as Promise<void>,
+    onStatus: cloudEvent<TranscriptionStatus>(TRANSCRIPTION_IPC.statusChanged),
+    onProgress: cloudEvent<TranscribeProgress>(TRANSCRIPTION_IPC.progress),
+    onModelRequested: cloudEvent<{ reason: string }>(TRANSCRIPTION_IPC.modelRequested)
   }
 };
 

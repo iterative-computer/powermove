@@ -37,6 +37,7 @@
     "ffmpeg-static": "5.3.0",
     "hono": "4.13.8",
     "node-diff3": "3.2.1",
+    "sherpa-onnx-node": "1.13.8",
     "smol-toml": "1.9.0",
     "zod": "4.6.5"
   },
