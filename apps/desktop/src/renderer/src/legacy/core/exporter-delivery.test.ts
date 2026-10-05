@@ -305,7 +305,7 @@ describe('export delivery', () => {
       stop() { this.ondataavailable?.({ data: new Blob(['video']) }); this.onstop?.(); }
     }
     (window as any).MediaRecorder = Recorder;
-    const exportSidecar = vi.fn(async () => ({ ok: true }));
+    const exportSidecar = vi.fn(async (_request: any) => ({ ok: true }));
     (window as any).powermove = { exportSidecar };
 
     expect(await X.run({ ...options, format: 'png', captionsSidecar: 'srt' })).toEqual({ cancelled: false });
