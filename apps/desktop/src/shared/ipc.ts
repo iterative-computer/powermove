@@ -267,6 +267,8 @@ export interface FileSaveRequest {
 export type FileSaveResult = { ok: true; path: string } | { ok: false; cancelled: boolean; error?: string };
 /** Captions sidecar: `path` is the exported video; `suffix` adds ".en" etc. */
 export interface ExportSidecarRequest { path: string; extension: 'srt' | 'vtt'; suffix?: string; text: string }
+/** The only suffixes a sidecar may carry ("en", "pt-BR", "Notes-2"). */
+export const SIDECAR_SUFFIX_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
 export interface ProjectSaveRequest {
   name: string; projectId: string; saveAs?: boolean; documentBytes: number;
   media: import('./project-incremental').SaveMedia[];

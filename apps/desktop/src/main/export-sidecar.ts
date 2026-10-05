@@ -6,7 +6,7 @@
  */
 import path from 'node:path';
 import type { IpcMain } from 'electron';
-import { IPC, type ExportSidecarRequest, type FileSaveResult } from '../shared/ipc';
+import { IPC, SIDECAR_SUFFIX_PATTERN, type ExportSidecarRequest, type FileSaveResult } from '../shared/ipc';
 import { atomicWrite } from './project-files';
 
 const MAX_SIDECAR_BYTES = 32 * 1024 * 1024;
@@ -26,7 +26,7 @@ export function forgetExports(owner: number): void {
 
 export function sidecarPath(videoPath: string, extension: 'srt' | 'vtt', suffix?: string): string {
   const base = path.basename(videoPath, path.extname(videoPath));
-  const tag = suffix && /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(suffix) ? `.${suffix}` : '';
+  const tag = suffix && SIDECAR_SUFFIX_PATTERN.test(suffix) ? `.${suffix}` : '';
   return path.join(path.dirname(videoPath), `${base}${tag}.${extension}`);
 }
 
@@ -37,9 +37,14 @@ export async function writeSidecar(owner: number, request: unknown): Promise<Fil
   }
   if (value.extension !== 'srt' && value.extension !== 'vtt') return { ok: false, cancelled: false, error: 'Unsupported caption format.' };
   if (typeof value.text !== 'string') return { ok: false, cancelled: false, error: 'Caption text is missing.' };
+  // A bad suffix is refused rather than dropped, so two layers' files can
+  // never silently land on the same unsuffixed name.
+  if (value.suffix !== undefined && (typeof value.suffix !== 'string' || !SIDECAR_SUFFIX_PATTERN.test(value.suffix))) {
+    return { ok: false, cancelled: false, error: 'Invalid caption file name.' };
+  }
   const bytes = new TextEncoder().encode(value.text);
   if (bytes.byteLength > MAX_SIDECAR_BYTES) return { ok: false, cancelled: false, error: 'The caption file is too large.' };
-  const target = sidecarPath(value.path, value.extension, typeof value.suffix === 'string' ? value.suffix : undefined);
+  const target = sidecarPath(value.path, value.extension, value.suffix);
   try {
     await atomicWrite(target, bytes);
     return { ok: true, path: target };

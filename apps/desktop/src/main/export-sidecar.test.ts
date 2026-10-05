@@ -22,6 +22,8 @@ describe('caption sidecars', () => {
     rememberExport(7, video);
     expect((await writeSidecar(8, { path: video, extension: 'srt', text: 'x' })).ok).toBe(false);
     expect((await writeSidecar(7, { path: video, extension: 'exe', text: 'x' } as any)).ok).toBe(false);
+    expect(await writeSidecar(7, { path: video, extension: 'srt', suffix: '_notes', text: 'x' })).toMatchObject({ ok: false, error: 'Invalid caption file name.' });
+    expect((await writeSidecar(7, { path: video, extension: 'srt', suffix: 'x'.repeat(33), text: 'x' })).ok).toBe(false);
     const result = await writeSidecar(7, { path: video, extension: 'srt', suffix: 'en', text: '1\n00:00:00,000 --> 00:00:01,000\nHi\n' });
     expect(result).toEqual({ ok: true, path: path.join(dir, 'Film.en.srt') });
     expect(await readFile(path.join(dir, 'Film.en.srt'), 'utf8')).toContain('Hi');

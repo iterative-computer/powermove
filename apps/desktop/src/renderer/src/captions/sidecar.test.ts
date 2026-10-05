@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { captionSidecars } from './sidecar';
 import { parseSrt } from './formats';
 import { presetStyle } from './model';
+import { SIDECAR_SUFFIX_PATTERN } from '../../../shared/ipc';
 
 const layer = (id: string, name: string, language: string | undefined, cues: Array<[number, number, string]>, from = 0) => ({
   id, name, type: 'captions', from, dur: 20, on: true,
@@ -26,5 +27,21 @@ describe('captionSidecars', () => {
     ] }, 'vtt', { from: 0, to: 20 });
     expect(files.map(file => file.suffix)).toEqual(['en', 'fr', 'Notes', 'en-2']);
     expect(files[1]!.text.startsWith('WEBVTT\nLanguage: fr')).toBe(true);
+  });
+
+  it('builds suffixes main accepts, distinct even for long, accented or symbol-led names', () => {
+    const long = 'A very long layer name that goes on and on';
+    const files = captionSidecars({ layers: [
+      layer('a', long, undefined, [[0, 1, 'one']]),
+      layer('b', long, undefined, [[0, 1, 'two']]),
+      layer('c', '__Français', undefined, [[0, 1, 'trois']]),
+      layer('d', '日本語', undefined, [[0, 1, 'yon']]),
+      layer('e', 'notes', undefined, [[0, 1, 'five']]),
+      layer('f', 'NOTES', undefined, [[0, 1, 'six']])
+    ] }, 'srt', { from: 0, to: 20 });
+    const suffixes = files.map(file => file.suffix!);
+    expect(suffixes.every(suffix => SIDECAR_SUFFIX_PATTERN.test(suffix))).toBe(true);
+    expect(new Set(suffixes.map(suffix => suffix.toLowerCase())).size).toBe(suffixes.length);
+    expect(suffixes.slice(2)).toEqual(['Francais', 'captions', 'notes', 'NOTES-2']);
   });
 });
