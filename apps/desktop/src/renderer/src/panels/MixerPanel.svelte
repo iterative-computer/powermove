@@ -145,10 +145,11 @@
   let intersecting = false;
   const pageVisible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden';
   function syncVisibility(): void {
-    const visible = intersecting && pageVisible() && !root?.closest('#pm-panel-pool');
-    loop.setVisible(visible);
-    // Solo is a listening aid; it never outlives the strips you could see.
-    if (!visible && solo.size) setSolo(new Set());
+    const shown = intersecting && !root?.closest('#pm-panel-pool');
+    loop.setVisible(shown && pageVisible());
+    // Solo is a listening aid; it never outlives the panel being closed or
+    // hidden. A minimised or covered window keeps it: playback carries on.
+    if (!shown && solo.size) setSolo(new Set());
   }
   $effect(() => {
     if (!root) return;

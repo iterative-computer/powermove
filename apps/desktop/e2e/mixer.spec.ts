@@ -200,6 +200,16 @@ test('mute and solo change what plays, and meters run only while sound plays', a
   await expect(panel.locator(`[data-mixer-strip="${ids.tone}"]`)).toHaveClass(/quiet/);
   expect(await page.evaluate(() => (window as any).PM.proj.revision)).toBe(revision);
   expect(await page.evaluate(() => (window as any).PM.proj.layers.some((l: any) => l.solo))).toBe(false);
+  // A minimised or covered window hides the page, not the panel: solo stays.
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  expect(await page.evaluate(() => (window as any).PM.Audio.inspect().monitorSolo)).toEqual([ids.video]);
+  await page.evaluate(() => {
+    delete (document as any).visibilityState;
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
   await panel.getByRole('button', { name: 'Solo Interview' }).click();
   await page.waitForFunction(() => (window as any).PM.Audio.inspect().monitorSolo.length === 0);
 
