@@ -583,10 +583,14 @@ async function runPrepared(opts: any) {
   }
 }
 
+const isVideoExport = (format: string) => !['web', 'json', 'png', 'still'].includes(format);
+
 /** Subtitle files beside the exported video, one per captions layer. */
 async function writeCaptionSidecars(opts: any, t0: number, t1: number): Promise<number> {
   const format = opts.captionsSidecar;
-  if ((format !== 'srt' && format !== 'vtt') || !lastOutputPath) return 0;
+  // Only beside a video: the choice survives switching to a still, an image
+  // sequence or a code/project export, where a subtitle file means nothing.
+  if ((format !== 'srt' && format !== 'vtt') || !lastOutputPath || !isVideoExport(opts.format)) return 0;
   const bridge = (hostBridge() as any);
   const files = captionSidecars(PM.proj, format, { from: t0, to: t1 });
   if (!bridge?.exportSidecar) {
