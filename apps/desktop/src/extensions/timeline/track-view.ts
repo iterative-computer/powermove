@@ -7,7 +7,10 @@
    Keyframes live with their clip. An opened clip unfolds its track: one lane
    per animated property, labelled in the track header, with the clip's keys
    and the shape of the value drawn directly beneath it. Opening a clip is the
-   layer timeline's disclosure, so U / P / S reveals and twirls carry over. */
+   layer timeline's disclosure, so U / P / S reveals and twirls carry over.
+
+   Captions layers get caption tracks above the video tracks (C1, C2…), one
+   per layer, each showing its cues; see caption-track.ts. */
 import type { PowermoveAPI } from 'powermove';
 import {
   layoutTracks, planTrackMove,
@@ -15,6 +18,7 @@ import {
 } from './track-layout';
 import type { EdgeSnapProbe } from './timeline';
 import { trackChannels } from './property-tracks';
+import type { CaptionTrack } from './caption-track';
 
 export type TimelineMode = 'layers' | 'tracks';
 export const TIMELINE_MODES: ReadonlyArray<{ id: TimelineMode; label: string; icon: string; title: string }> = [
@@ -47,6 +51,7 @@ export interface TrackViewHost {
   roundRect(c: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void;
   clipText(c: CanvasRenderingContext2D, text: string, x: number, y: number, max: number): void;
   rgba(hex: string, alpha: number): string;
+  captions: CaptionTrack;
   fui(): string;
   fmono(): string;
   niceStep(pps: number): number;
@@ -80,7 +85,7 @@ export interface TrackViewHost {
 }
 
 interface Lane { area: TrackArea; lane: number; y: number; h: number }
-interface TrackDrag { plan: TrackMovePlan; layout: TrackLayout; moving: Set<string>; video: number; audio: number }
+interface TrackDrag { plan: TrackMovePlan; layout: TrackLayout; moving: Set<string>; video: number; audio: number; captions: number }
 /** An unfolded track: its property lanes, and each open clip's row for them. */
 interface Drawer { lanes: Array<{ key: string; label: string }>; rows: Map<string, Map<string, any>> }
 interface DrawerHit { lane: Lane; index: number; key: string; label: string; cy: number; layer: any | null; row: any | null }
@@ -121,6 +126,8 @@ export function createTrackView(host: TrackViewHost) {
     return {
       video: Math.max(MIN_VIDEO_TRACKS, current.video + 1, drag?.video ?? 0),
       audio: Math.max(MIN_AUDIO_TRACKS, current.audio + 1, drag?.audio ?? 0),
+      // Caption tracks exist only while there are captions, as in Premiere.
+      captions: Math.max(current.captions, drag?.captions ?? 0),
     };
   }
   const layerOf = (id: string) => api.model.layer(id);
@@ -163,9 +170,9 @@ export function createTrackView(host: TrackViewHost) {
   /* ── geometry ───────────────────────────────────────────── */
   let laneCache: { signature: unknown[]; lanes: Lane[] } | null = null;
   function lanes(): Lane[] {
-    const { video, audio } = counts();
+    const { video, audio, captions } = counts();
     const map = drawers();
-    const signature: unknown[] = [map, video, audio, scroll(), T.ruler, rowH()];
+    const signature: unknown[] = [map, video, audio, captions, scroll(), T.ruler, rowH()];
     if (laneCache && laneCache.signature.every((value, i) => value === signature[i])) return laneCache.lanes;
     const result: Lane[] = [];
     let y = T.ruler - scroll();
@@ -174,6 +181,8 @@ export function createTrackView(host: TrackViewHost) {
       result.push({ area, lane, y, h });
       y += h;
     };
+    for (let lane = captions - 1; lane >= 0; lane--) push('captions', lane);
+    if (captions) y += DIVIDER;
     for (let lane = video - 1; lane >= 0; lane--) push('video', lane);
     y += DIVIDER;
     for (let lane = 0; lane < audio; lane++) push('audio', lane);
@@ -187,7 +196,7 @@ export function createTrackView(host: TrackViewHost) {
   /** Extrapolates past the drawn tracks with plain track heights. */
   function laneYIn(list: Lane[], area: TrackArea, lane: number) {
     const own = list.filter(entry => entry.area === area);
-    if (area === 'video') {
+    if (area !== 'audio') {
       const top = own[0];
       return top ? top.y - (lane - top.lane) * rowH() : T.ruler - scroll();
     }
@@ -209,8 +218,8 @@ export function createTrackView(host: TrackViewHost) {
     if (hit) return hit.lane;
     const first = own[0], last = own.at(-1);
     if (!first || !last) return 0;
-    if (area === 'video') {
-      // own[0] is the top track; own.at(-1) is V1.
+    if (area !== 'audio') {
+      // own[0] is the top track; own.at(-1) is V1 (or C1).
       if (y < first.y) return first.lane + Math.ceil((first.y - y) / rowH());
       return -1 - Math.floor((y - last.y - last.h) / rowH());
     }
@@ -334,6 +343,13 @@ export function createTrackView(host: TrackViewHost) {
       const y = laneY(item.area, item.lane);
       if (y + h < T.ruler || y > H) continue;
       const from = planned?.get(item.id)?.from ?? layer.from;
+      if (item.area === 'captions' && item.kind === 'clip') {
+        if (drag?.moving.has(item.id)) c.globalAlpha = .85;
+        host.drawClip(c, { ...layer, from }, y, h);
+        host.captions.draw(c, { ...layer, from }, y, h, W);
+        c.globalAlpha = 1;
+        continue;
+      }
       if (item.kind === 'group') {
         const collapsed = api.uiState.getGroupCollapsed(layer);
         host.drawClip(c, { ...layer, from: item.from, dur: item.dur, name: `${collapsed ? '▸' : '▾'}  ${layer.name}` }, y, h);
@@ -477,11 +493,16 @@ export function createTrackView(host: TrackViewHost) {
 
   function drawDivider(c: CanvasRenderingContext2D, left: number, right: number) {
     const theme = host.theme();
-    const y = laneY('audio', 0) - DIVIDER;
-    c.fillStyle = theme.panel; c.fillRect(left, y, right - left, DIVIDER);
-    c.strokeStyle = theme.line; c.beginPath();
-    c.moveTo(left, y + .5); c.lineTo(right, y + .5);
-    c.moveTo(left, y + DIVIDER - .5); c.lineTo(right, y + DIVIDER - .5); c.stroke();
+    const rule = (y: number) => {
+      c.fillStyle = theme.panel; c.fillRect(left, y, right - left, DIVIDER);
+      c.strokeStyle = theme.line; c.beginPath();
+      c.moveTo(left, y + .5); c.lineTo(right, y + .5);
+      c.moveTo(left, y + DIVIDER - .5); c.lineTo(right, y + DIVIDER - .5); c.stroke();
+    };
+    rule(laneY('audio', 0) - DIVIDER);
+    // Caption tracks sit apart from the picture tracks, above V tracks.
+    const lastCaption = lanes().find(lane => lane.area === 'captions' && lane.lane === 0);
+    if (lastCaption) rule(lastCaption.y + lastCaption.h);
   }
 
   function laneState(area: TrackArea, lane: number) {
@@ -521,7 +542,7 @@ export function createTrackView(host: TrackViewHost) {
       host.icoLock(c, 16, cy, state.locked);
       if (state.animated.length) drawTwirl(c, 34, cy, state.open, state.open || hovered ? theme.tx2 : theme.tx3);
       // Track name chip, Premiere's "V1" / "A1".
-      const label = `${lane.area === 'video' ? 'V' : 'A'}${lane.lane + 1}`;
+      const label = `${lane.area === 'video' ? 'V' : lane.area === 'captions' ? 'C' : 'A'}${lane.lane + 1}`;
       c.font = '500 11px ' + host.fmono();
       const chipW = Math.max(28, c.measureText(label).width + 12);
       c.fillStyle = state.selected ? host.rgba(theme.accent, .18) : ink.over2;
@@ -533,7 +554,7 @@ export function createTrackView(host: TrackViewHost) {
         const names = state.layers.length === 1 ? state.layers[0]!.name : `${state.layers.length} clips`;
         host.clipText(c, names, 52 + chipW, cy + .5, T.gut - 52 - chipW - 34);
       }
-      if (lane.area === 'video') host.icoEye(c, T.gut - 18, cy, state.visible);
+      if (lane.area !== 'audio') host.icoEye(c, T.gut - 18, cy, state.visible);
       else host.icoSpeaker(c, T.gut - 18, cy, state.visible);
       drawPropertyLabels(c, lane);
     }
@@ -594,6 +615,7 @@ export function createTrackView(host: TrackViewHost) {
   /* ── selection ──────────────────────────────────────────── */
   function selectForPointer(id: string, event: PointerEvent) {
     T.keySelectionActive = false;
+    if (host.captions.selection().layerId) host.captions.select(null, []);
     api.selection.set({ keys: [] });
     const selected = api.selection.layers();
     if (event.shiftKey || event.metaKey || event.ctrlKey) {
@@ -630,6 +652,10 @@ export function createTrackView(host: TrackViewHost) {
       api.uiState.setGroupCollapsed(layer, !api.uiState.getGroupCollapsed(layer));
       host.invalidate('timeline');
       return;
+    }
+    if (hit.item.area === 'captions' && host.captions.hit(layer, x)) {
+      const additive = event.shiftKey || event.metaKey || event.ctrlKey;
+      if (!additive || api.selection.layers().includes(layer.id)) { host.captions.down(event, layer, x); return; }
     }
     if (hit.item.kind === 'clip' && !hit.edge && openable(layer) && onDisclosure(hit.item, x)) return toggleOpen([layer]);
     if (!selectForPointer(layer.id, event)) return;
@@ -707,11 +733,12 @@ export function createTrackView(host: TrackViewHost) {
         if (Number.isFinite(earliest)) dt = Math.max(dt, -earliest);
         const y = startY + dy;
         const shift = (area: TrackArea) => laneIndexIn(startLanes, area, y) - laneIndexIn(startLanes, area, startY);
-        plan = planTrackMove(source, layoutOptions, { ids, dt, lanes: { video: shift('video'), audio: shift('audio') } });
+        plan = planTrackMove(source, layoutOptions, { ids, dt, lanes: { video: shift('video'), audio: shift('audio'), captions: shift('captions') } });
         const preview = layoutTracks(plan.layers, layoutOptions);
         T.trackDrag = {
           plan, layout: preview, moving,
           video: Math.max(start.video, preview.video + 1), audio: Math.max(start.audio, preview.audio + 1),
+          captions: Math.max(start.captions, preview.captions),
         } satisfies TrackDrag;
         T.trackHover = { area: startArea, lane: laneIndexIn(startLanes, startArea, y) };
         host.invalidate('timeline');
@@ -818,12 +845,16 @@ export function createTrackView(host: TrackViewHost) {
       if (!state.layers.length) return { cursor: 'default', title: '' };
       if (x < 26) return { cursor: 'pointer', title: state.locked ? 'Unlock track' : 'Lock track' };
       if (x < 42 && state.animated.length) return { cursor: 'pointer', title: state.open ? 'Fold keyframes' : 'Unfold keyframes' };
-      if (x >= T.gut - 30) return { cursor: 'pointer', title: lane.area === 'audio' ? 'Mute track' : 'Toggle track output' };
+      if (x >= T.gut - 30) return { cursor: 'pointer', title: lane.area === 'audio' ? 'Mute track' : lane.area === 'captions' ? 'Show or hide captions' : 'Toggle track output' };
       return { cursor: 'pointer', title: 'Select all clips on this track' };
     }
     const hit = hitItem(x, y);
     if (!hit) return { cursor: 'default', title: '' };
     const layer = layerOf(hit.item.id);
+    if (hit.item.area === 'captions' && layer) {
+      const cue = host.captions.hover(layer, x);
+      if (cue) return cue;
+    }
     if (hit.item.kind === 'group' && onDisclosure(hit.item, x)) {
       return { cursor: 'pointer', title: api.uiState.getGroupCollapsed(layer!) ? 'Expand group' : 'Collapse group' };
     }
@@ -846,6 +877,7 @@ export function createTrackView(host: TrackViewHost) {
       return true;
     }
     if (layer.type === 'precomp' && layer.d?.comp) { api.commands.run('openComposition', layer.d.comp); return true; }
+    if (layer.type === 'captions' && hit) return host.captions.doubleClick(layer, x, laneY(hit.item.area, hit.item.lane), rowH());
     // Double-clicking an animated clip unfolds or folds its keyframes.
     if (openable(layer)) { toggleOpen([layer]); return true; }
     return false;
@@ -869,7 +901,8 @@ export function createTrackView(host: TrackViewHost) {
   /** After a drop lands at the top of the stack, lift it to the hovered track. */
   function placeOnTrack(before: Set<string>, lane: number) {
     const added = api.project.get().layers.find((layer: any) => !before.has(layer.id) && !layer.group);
-    if (!added || lane <= 0) return;
+    // Imported subtitles get a caption track of their own instead.
+    if (!added || lane <= 0 || added.type === 'captions') return;
     if ((layout().byId.get(added.id)?.lane ?? 0) >= lane) return;
     api.edit.mutate('Place clip on track', () => { (added as any).track = lane; api.anim.touch(); }, { origin: 'timeline' });
   }

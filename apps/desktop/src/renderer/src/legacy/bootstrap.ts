@@ -52,6 +52,7 @@ import { install as installStoreUi } from '../store/install';
 import { installCloudAccount } from '../cloud/account';
 import { installVars } from '../vars/setup';
 import { installTranscription } from '../transcription/install';
+import { installCaptions } from '../captions/install';
 
 declare global {
   interface Window {
@@ -96,6 +97,7 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['ui/layout', installLayout],
   ['ui/library', installLibraryUi],
   ['ui/shortcuts', installShortcuts],
+  ['captions', installCaptions],
   ['core/workspace', installWorkspace],
   ['core/exporter', installExporter],
   ['assistant/harness', installHarness],

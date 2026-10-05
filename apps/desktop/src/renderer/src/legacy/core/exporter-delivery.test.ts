@@ -290,6 +290,31 @@ describe('export delivery', () => {
     expect(await X.run({ ...options, format: 'rec' })).toEqual({ error: 'Disk full' });
   });
 
+  it('writes caption sidecars beside a video, never beside an image sequence', async () => {
+    const videoTrack = { requestFrame() {}, stop() {} };
+    const download = vi.fn(async (_blob: Blob, name: string) => ({ ok: true, path: `/tmp/${name}` }));
+    const { X, PM, frame } = setup(download);
+    PM.active = () => false;
+    PM.proj.layers.push({ id: 'cc', type: 'captions', name: 'Captions', from: 0, dur: 1, d: { cues: [{ id: 'a', start: 0, end: 0.5, text: 'Hi' }], style: {} } });
+    (frame as any).captureStream = () => ({ getVideoTracks: () => [videoTrack] });
+    class Recorder {
+      static isTypeSupported() { return true; }
+      onstop?: () => void;
+      ondataavailable?: (event: any) => void;
+      start() {}
+      stop() { this.ondataavailable?.({ data: new Blob(['video']) }); this.onstop?.(); }
+    }
+    (window as any).MediaRecorder = Recorder;
+    const exportSidecar = vi.fn(async (_request: any) => ({ ok: true }));
+    (window as any).powermove = { exportSidecar };
+
+    expect(await X.run({ ...options, format: 'png', captionsSidecar: 'srt' })).toEqual({ cancelled: false });
+    expect(exportSidecar).not.toHaveBeenCalled();
+    expect(await X.run({ ...options, format: 'rec', captionsSidecar: 'srt' })).toEqual({ cancelled: false });
+    expect(exportSidecar).toHaveBeenCalledOnce();
+    expect(exportSidecar.mock.calls[0]![0]).toMatchObject({ extension: 'srt', text: expect.stringContaining('Hi') });
+  });
+
   it('does not claim a still frame was exported when native save is cancelled', async () => {
     const { X, toast, download } = setup();
     download.mockResolvedValueOnce({ ok: false, cancelled: true });

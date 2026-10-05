@@ -637,7 +637,13 @@ export interface MediaAPI {
   registerImportDefaults(defaults: ImportDefaults): Disposable;
   /** Latest active mod's override, or null for the native import behavior. Returns a Promise when sandboxed. */
   getImportDefaults(): ImportDefaults | null;
-  readonly timing: { isTimed(layer: Layer): boolean; rate(layer: Layer): number; earliestStart(layer: Layer): number };
+  readonly timing: {
+    isTimed(layer: Layer): boolean; rate(layer: Layer): number; earliestStart(layer: Layer): number;
+    /** Content patch keeping the clip's content in place when its In point moves to `nextFrom` (media trim, caption cues); null when untimed. */
+    startPatch(layer: Layer, nextFrom: number): JsonObject | null;
+    /** Content patch for the head of a split at composition time `cut` (caption cues past the cut leave); null when nothing changes. */
+    endPatch(layer: Layer, cut: number): JsonObject | null;
+  };
   /** Requires the full-access permission for Store extensions. */
   /** Pass a drop's DataTransfer to import dropped folders as well as files. */
   importFiles(files: FileList | File[] | DataTransfer, options?: ImportFilesOptions): Promise<unknown>;
@@ -945,6 +951,31 @@ export interface InspectorService {
 }
 export interface ToolService { tool: string; toolShape: string; setTool(tool: string, detail?: string): void }
 export interface ShaderHooks { syncShaderUniforms(layer: Layer): void }
+
+/**
+ * Captions service, registered by the host as `captions`. The timeline and
+ * any panel read and change the cue selection through it and reach the
+ * caption workflows (import, export, generation, inline editing). Cue edits
+ * themselves are ordinary `add_captions` / `edit_captions` commands.
+ */
+export interface CaptionSelection { layerId: string | null; cues: string[] }
+export interface CaptionsService {
+  selection(): CaptionSelection;
+  /** Select cues of one captions layer (also selects the layer); null clears. */
+  select(layerId: string | null, cues: string[]): void;
+  /** Called after the cue selection changes. Returns an unsubscribe. */
+  onChange(listener: () => void): () => void;
+  /** Ask the surface showing the cue to start editing its text in place. */
+  editCue(layerId: string, cueId: string): void;
+  /** The surface that owns inline editing registers here; returns unregister. */
+  onEditRequest(listener: (request: { layerId: string; cueId: string }) => boolean | void): () => void;
+  /** Import an SRT or WebVTT file as a new captions layer. */
+  importFile(file?: File, options?: { at?: number }): Promise<string | null>;
+  /** Export a captions layer as a sidecar file (asks for options when omitted). */
+  exportFile(layerId?: string, format?: 'srt' | 'vtt'): Promise<boolean>;
+  /** Transcribe audio/video layers into a new captions layer. */
+  generate(layerIds?: string[]): Promise<{ ok: boolean; layerId?: string; message?: string }>;
+}
 
 /**
  * Services is a typed LIFO compatibility registry for extension-owned runtime capabilities. Registering the same name shadows the prior implementation; disposing restores it. Registration itself has no project side effects.

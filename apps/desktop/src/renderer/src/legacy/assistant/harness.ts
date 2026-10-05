@@ -9,6 +9,8 @@ import { CHECK_PROJECT_TOOL, COMPOSITION_INFO_TOOL, MEDIA_SOURCE_TOOL, type Agen
 import { validateEffect } from '../../kernel/glsl';
 import { COMMAND_JSON_LIMIT } from '../../../../shared/edit-limits';
 import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
+import { TRANSCRIPTION_MODEL_MISSING } from '../../../../shared/transcription';
+import { ensureTranscriptionModel, transcriptionStatus } from '../../transcription/client';
 /* Ported from js/assistant/harness.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import type {
@@ -25,7 +27,7 @@ const SCENE_OPERATIONS = new Set([
   'set_layer', 'set_composition', 'add_layer', 'delete_layers',
   'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_effect', 'remove_effect', 'set_effect', 'set_transition',
   'set_scene_parameter', 'add_marker', 'create_section', 'update_section',
-  'transform_layers',
+  'transform_layers', 'add_captions', 'edit_captions',
 ]);
 const FIELDS: any = {
   set_property: ['type', 'target', 'path', 'value', 'time', 'mode', 'ease', 'hold', 'preserveHandEdits'],
@@ -50,6 +52,8 @@ const FIELDS: any = {
   create_section: ['type', 'section'],
   update_section: ['type', 'sectionId', 'layers', 'thumb', 'at', 'version'],
   transform_layers: ['type', 'transform', 'state'],
+  add_captions: ['type', 'id', 'name', 'cues', 'text', 'format', 'offset', 'style', 'language', 'from', 'duration', 'index', 'select'],
+  edit_captions: ['type', 'target', 'op', 'cues', 'ids', 'id', 'at', 'by', 'text', 'format', 'replace', 'offset', 'style', 'language'],
 };
 
 const clone = (value: any) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
@@ -92,6 +96,26 @@ function propertyDigest(layer: any, options: any = {}) {
   }));
 }
 
+/* Caption layers can hold thousands of cues; page them like keyframes.
+   Times are composition seconds, matching the caption commands. */
+function captionsDigest(layer: any, options: any) {
+  const cues = Array.isArray(layer.d?.cues) ? layer.d.cues : [];
+  const offset = Math.max(0, Math.trunc(Number(options.cueOffset) || 0));
+  const limit = Math.max(0, Math.trunc(Number(options.cueLimit ?? 200)));
+  const from = Number(layer.from) || 0;
+  return {
+    style: clone(layer.d?.style || {}),
+    language: layer.d?.language ?? null,
+    cueCount: cues.length,
+    cueOffset: offset,
+    cueTimes: 'composition seconds',
+    cues: cues.slice(offset, offset + limit).map((cue: any) => ({
+      id: cue.id, start: PM.round(cue.start + from, 3), end: PM.round(cue.end + from, 3), text: cue.text,
+      ...(cue.words?.length ? { words: cue.words.length } : {}),
+    })),
+  };
+}
+
 function projectState(options: any = {}) {
   const p = PM.proj;
   const selectedIds = new Set(PM.sel?.layers || []);
@@ -111,7 +135,7 @@ function projectState(options: any = {}) {
       index: p.layers.indexOf(layer), id: layer.id, name: layer.name, type: layer.type, from: layer.from,
       duration: layer.dur, visible: layer.on, locked: layer.lock, parent: layer.parent, group: layer.group || null,
       blend: layer.blend, motionBlur: layer.mblur, color: layer.color,
-      content: clone(layer.d || {}),
+      content: layer.type === 'captions' ? captionsDigest(layer, options) : clone(layer.d || {}),
       masks: (layer.masks || []).map((m: any) => ({ id: m.id, shape: m.shape, mode: m.mode, hasPath: !!m.path, vertices: m.path?.vertices?.length || 0 })),
       propertyCount: PM.allProps(layer).length,
       properties: propertyDigest(layer, options),
@@ -201,7 +225,7 @@ function describeCommand(command: any) {
     add_effect: 'Add effect', remove_effect: 'Remove effect', set_effect: 'Edit effect',
     set_scene_parameter: 'Set scene control', add_marker: 'Add marker',
     create_section: 'Create section', update_section: 'Update section',
-    transform_layers: 'Transform layers',
+    transform_layers: 'Transform layers', add_captions: 'Add captions', edit_captions: 'Edit captions',
   };
   return [labels[command.type] || command.type, target, detail].filter(Boolean).join(' · ').slice(0, 150);
 }
@@ -335,6 +359,62 @@ interface LiveToolTransaction {
 
 const liveToolTransactions = new Map<string, LiveToolTransaction>();
 const liveToolObservations = new Map<string, { projectId: string; revision: number }>();
+
+/* Caption generation can outlast one tool call (the bridge fails a call after
+   120 s), so the agent gets a job: each generate_captions call waits up to
+   CAPTION_JOB_WAIT_MS, then reports progress and a jobId to wait on again.
+   The transcript is applied inside the run's transaction when it is ready;
+   rolling back or ending the run cancels the job. */
+interface CaptionJob {
+  id: string;
+  runId: string;
+  controller: AbortController;
+  progress: number;
+  promise: Promise<{ ok: boolean; layerId?: string; message?: string; status?: string }>;
+  outcome?: { ok: boolean; layerId?: string; message?: string; status?: string };
+}
+const captionJobs = new Map<string, CaptionJob>();
+const CAPTION_JOB_WAIT_MS = 60_000;
+
+function captionModelMissing(): Error {
+  return new Error(`${TRANSCRIPTION_MODEL_MISSING}: No transcription model is installed. Powermove has asked the user to download one (Settings › Transcription). Tell them, and try again after the download finishes.`);
+}
+
+function cancelCaptionJobs(runId: string): void {
+  for (const job of captionJobs.values()) {
+    if (job.runId !== runId) continue;
+    job.controller.abort();
+    captionJobs.delete(job.id);
+  }
+}
+
+async function awaitCaptionJob(job: CaptionJob, waitMs = CAPTION_JOB_WAIT_MS): Promise<Omit<AgentToolResponseEvent, 'runId' | 'callId'>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const waited = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), waitMs); });
+  const result = await Promise.race([job.promise, waited]).finally(() => clearTimeout(timer));
+  if (!result) {
+    return {
+      ok: true,
+      content: [toolText({
+        jobId: job.id,
+        status: 'running',
+        progress: Math.round(job.progress * 100) / 100,
+        message: 'Still transcribing. Call generate_captions with this jobId to keep waiting; do not start another generation.'
+      })],
+      changed: false,
+      revision: currentRevision()
+    };
+  }
+  captionJobs.delete(job.id);
+  if (!result.ok) throw result.status === 'model-missing' ? captionModelMissing() : new Error(result.message || 'Could not generate captions.');
+  const layer = PM.L(result.layerId);
+  return {
+    ok: true,
+    content: [toolText({ status: 'done', layerId: result.layerId, cues: layer?.d?.cues?.length ?? 0, language: layer?.d?.language ?? null, revision: currentRevision() })],
+    changed: true,
+    revision: currentRevision()
+  };
+}
 
 function assertTransactionProject(transaction: { projectId: string }): void {
   if (transaction.projectId !== PM.proj.id) {
@@ -595,7 +675,71 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
       revision: transaction.revision
     };
   }
+  /* ── captions ─────────────────────────────────────────────── */
+  if (request.tool === 'export_captions') {
+    const layer = PM.L(String(request.arguments.layerId || ''));
+    if (!layer || layer.type !== 'captions') throw new Error('Read a captions layer ID from get_project_state.');
+    const format = request.arguments.format === 'vtt' ? 'vtt' : 'srt';
+    const text = PM.Captions.exportText(layer, format);
+    return { ok: true, content: [toolText({ layerId: layer.id, format, cues: layer.d.cues.length, text })], revision: currentRevision() };
+  }
+  if (request.tool === 'generate_captions') {
+    const jobId = typeof request.arguments.jobId === 'string' ? request.arguments.jobId : '';
+    if (jobId) {
+      const job = captionJobs.get(jobId);
+      if (!job || job.runId !== request.runId) throw new Error(`Unknown caption job ${jobId}. Start one with generate_captions { layerIds }.`);
+      return awaitCaptionJob(job);
+    }
+    const running = [...captionJobs.values()].find(job => job.runId === request.runId && !job.outcome);
+    if (running) throw new Error(`Captions are already being generated (jobId ${running.id}). Call generate_captions with { jobId: "${running.id}" } to keep waiting.`);
+    const ids = Array.isArray(request.arguments.layerIds) ? request.arguments.layerIds.map(String) : [];
+    const layers = ids.map((id: string) => PM.L(id));
+    if (!ids.length || layers.some((layer: any) => !layer || (layer.type !== 'audio' && layer.type !== 'video') || !layer.d?.asset)) {
+      throw new Error('generate_captions needs audio or video layer IDs with media, from get_project_state.');
+    }
+    const status = await transcriptionStatus();
+    if (!status.activeModelId) {
+      void ensureTranscriptionModel(`The agent wants to caption ${layers.map((layer: any) => `“${layer.name}”`).join(', ')}`);
+      throw captionModelMissing();
+    }
+    const label = text(request.arguments.label, 'Generate captions', 80);
+    const transaction = beginLiveTransaction(request, label);
+    if (currentRevision() !== transaction.revision) {
+      throw new Error(`The project changed during the agent run (expected revision ${transaction.revision}, found ${currentRevision()}). Read get_project_state and retry.`);
+    }
+    const preset = typeof request.arguments.style === 'string' ? request.arguments.style : null;
+    const runId = request.runId;
+    const controller = new AbortController();
+    const job: CaptionJob = { id: PM.uid('captions-job-'), runId, controller, progress: 0, promise: Promise.resolve({ ok: false }) };
+    job.promise = PM.Captions.generate(ids, {
+      interactive: false,
+      signal: controller.signal,
+      onProgress: (fraction: number) => { job.progress = fraction; },
+      /* Applied when the transcript is ready, inside the run's transaction —
+         unless the run ended, or someone else changed the project meanwhile. */
+      apply: (command: any) => {
+        if (controller.signal.aborted || liveToolTransactions.get(runId) !== transaction) {
+          return { ok: false, message: 'The agent run ended before the captions were ready.' };
+        }
+        if (transaction.projectId !== PM.proj.id || currentRevision() !== transaction.revision) {
+          return { ok: false, message: 'The project changed while transcribing. Read get_project_state and retry.' };
+        }
+        const applied = PM.Edit.apply(preset ? { ...command, style: { preset } } : command,
+          { label, origin: 'agent', baseRevision: transaction.revision, historyGroup: transaction.historyGroup });
+        if (applied.ok) {
+          transaction.label = label;
+          transaction.revision = currentRevision();
+          transaction.changed = true;
+        }
+        return applied;
+      }
+    }).catch((error: any) => ({ ok: false, message: error?.message || 'Could not generate captions.' }))
+      .then((result: any) => { job.outcome = result; return result; });
+    captionJobs.set(job.id, job);
+    return awaitCaptionJob(job);
+  }
   if (request.tool === 'rollback_changes') {
+    cancelCaptionJobs(request.runId);
     const transaction = liveToolTransactions.get(request.runId);
     if (transaction) await rollBackLiveTransaction(transaction);
     return {
@@ -606,6 +750,7 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     };
   }
   if (request.tool === '__finish_run') {
+    cancelCaptionJobs(request.runId);
     liveToolObservations.delete(request.runId);
     const transaction = liveToolTransactions.get(request.runId);
     if (!transaction) {

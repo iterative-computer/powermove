@@ -8,6 +8,7 @@ import { canAnimateContent, isProperty } from './core/content-properties';
 /* Ported from js/app.js — behavior-preserving. */
 import { normalizeExportDefaults, type ExportDefaults } from '../core/export-defaults';
 import { compactEditLog } from '../core/edit-log';
+import { normalizeCaptionsContent } from '../captions/model';
 import type { PMRegistry } from './registry';
 import { packProjectFileBlob, saveIncrementalProject, restoreProjectFileMedia, restoreProjectFileStream, unpackProjectFileBlob, unpackProjectFile } from './core/project-file';
 import { projectFingerprint } from './core/project-fingerprint';
@@ -348,6 +349,7 @@ function hydrate(p: any) {
         L.d.params = sanitizeLooseParams(L.d.params, -L.from);
         L.d.data = sanitizeJson(L.d.data) || {};
       }
+      if (L.type === 'captions') L.d = normalizeCaptionsContent(L.d);
     });
   };
   base.comps = p.comps && typeof p.comps === 'object' ? p.comps : {};
@@ -1284,6 +1286,11 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
     if (replaceAssetId != null && files.length !== 1) throw new Error('Choose one file or one image sequence to replace this media');
     const mediaFiles: any = [];
     for (const f of files) {
+      // Subtitles become a captions layer, placed where the file was dropped.
+      if (PM.Captions?.isCaptionFile?.(f) && replaceAssetId == null) {
+        await PM.Captions.importFile(f, { at: placement ? placement.at : 0 });
+        continue;
+      }
       if (/\.pmv$/i.test(f.name)) {
         if (replaceAssetId != null) throw new Error('Choose a media file to replace this media');
         await openProjectFile(f);

@@ -246,7 +246,7 @@ def('duplicate', 'Duplicate layers', '⌘D', () => {
   return pasteLayers(PM, () => selected, { atPlayhead: false });
 }, 'Edit');
 def('delete', 'Delete selection', '⌫', () => deleteSelection(PM), 'Edit');
-def('split', 'Split at playhead', '⌘⇧D', () => splitLayers(PM), 'Edit');
+def('split', 'Split at playhead', '⌘⇧D', () => PM.Captions?.splitAtPlayhead?.() || splitLayers(PM), 'Edit');
 def('separateAudio', 'Separate audio', null, (id?: any) => separateVideoAudio(PM, id), 'Edit', hidden);
 def('selectAll', 'Select all layers', '⌘A', () => PM.selectLayers(PM.proj.layers.map((l: any) => l.id)), 'Edit');
 def('deselect', 'Deselect', '⎋', () => { PM.selectLayers([]); PM.sel.keys = []; }, 'Edit');
@@ -534,18 +534,32 @@ function crossesPlayhead(span: { from: number; dur: number }, time: number): boo
     && time > span.from && time < span.from + span.dur;
 }
 
+/** Content patch keeping a clip's content in place when its In point moves to
+ * `at`: timed media continue at the matching source time, caption cues are
+ * re-based (see PM.MediaTiming.startPatch). */
+function startContentPatch(PM: PMRegistry, layer: any, at: number): Record<string, unknown> | null {
+  if (PM.MediaTiming?.isTimed?.(layer)) {
+    return typeof PM.MediaTiming.trimAtStart === 'function' ? { trim: PM.MediaTiming.trimAtStart(layer, at) } : null;
+  }
+  return PM.MediaTiming?.startPatch?.(layer, at) ?? null;
+}
+
 function splitLayerClone(PM: PMRegistry, layer: any, tail: any, time: number): void {
   const sourceEnd = Number(layer.from) + Number(layer.dur);
   const sourceOffset = time - Number(layer.from);
   tail.from = time;
   tail.dur = sourceEnd - time;
   rebaseTailAnimation(PM, tail, sourceOffset);
-  if (PM.MediaTiming?.isTimed?.(layer)) {
+  /* Timed content continues across the cut: media at the matching source
+     time, caption cues re-based to the tail's In point (and trimmed from the
+     head), so neither half replays or loses what was heard there. */
+  const tailPatch = startContentPatch(PM, layer, time);
+  if (PM.MediaTiming?.isTimed?.(layer) || tailPatch) {
     tail.d = tail.d && typeof tail.d === 'object' ? tail.d : {};
-    if (typeof PM.MediaTiming.trimAtStart === 'function') {
-      tail.d.trim = PM.MediaTiming.trimAtStart(layer, time);
-    }
+    if (tailPatch) Object.assign(tail.d, tailPatch);
   }
+  const headPatch = PM.MediaTiming?.endPatch?.(layer, time);
+  if (headPatch && layer.d && typeof layer.d === 'object') Object.assign(layer.d, headPatch);
   /* The cut is an internal boundary, not a new entrance/exit. Keep the
      original entrance on the head and the original exit on the tail. */
   layer.transitionOut = null;
@@ -920,10 +934,9 @@ export function editSelectedLayerTiming(PM: PMRegistry, mode: LayerTimingEdit): 
     } else if (mode === 'outToEnd') {
       commands.push({ type: 'set_layer', target: layer.id, patch: { from: Math.max(0, Number(PM.proj.dur) - duration) } });
     } else if (mode === 'trimIn' && now > from && now < out) {
+      const content = startContentPatch(PM, layer, now);
       commands.push({ type: 'set_layer', target: layer.id, patch: { from: now, duration: out - now } });
-      if (PM.MediaTiming?.isTimed?.(layer)) {
-        commands.push({ type: 'set_content', target: layer.id, patch: { trim: PM.MediaTiming.trimAtStart(layer, now) } });
-      }
+      if (content) commands.push({ type: 'set_content', target: layer.id, patch: content });
     } else if (mode === 'trimOut' && now > from) {
       commands.push({ type: 'set_layer', target: layer.id, patch: { duration: Math.max(frame, now - from) } });
     }
@@ -1335,6 +1348,9 @@ function commandView(kernel: ReturnType<typeof ensureKernel>, id: string, put: (
 /** A keyframe deletion never falls through to its owning layer, including a
  * held Delete key after the first keyframe has already been removed. */
 export function deleteSelection(PM: PMRegistry): unknown {
+  // Selected caption cues delete before their layer does.
+  const cues = PM.Captions?.deleteSelectedCues?.();
+  if (cues) return cues;
   const timeline = timelineService(PM);
   if (PM.sel.keys.length || timeline?.keySelectionActive) {
     if (timeline) timeline.keySelectionActive = true;

@@ -34,7 +34,7 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   {
     name: 'get_project_state',
     description: 'Read the live Powermove composition, selection, layers, editable properties, keyframes, effects, markers, and current revision. Call this again after edits or a revision conflict to refresh the edit baseline, then adjust commands to the observed state and retry. Results are paged: use layerOffset/layerLimit, layerId, propertyOffset/propertyLimit and keyframeOffset/keyframeLimit; counts indicate omitted data.',
-    inputSchema: closedObject({ layerOffset: { type: 'integer', minimum: 0 }, layerLimit: { type: 'integer', minimum: 1 }, keyframeOffset: { type: 'integer', minimum: 0 }, layerId: { type: 'string' }, propertyOffset: { type: 'integer', minimum: 0 }, propertyLimit: { type: 'integer', minimum: 1 }, keyframeLimit: { type: 'integer', minimum: 0 } })
+    inputSchema: closedObject({ layerOffset: { type: 'integer', minimum: 0 }, layerLimit: { type: 'integer', minimum: 1 }, keyframeOffset: { type: 'integer', minimum: 0 }, layerId: { type: 'string' }, propertyOffset: { type: 'integer', minimum: 0 }, propertyLimit: { type: 'integer', minimum: 1 }, keyframeLimit: { type: 'integer', minimum: 0 }, cueOffset: { type: 'integer', minimum: 0 }, cueLimit: { type: 'integer', minimum: 0 } })
   },
   {
     name: 'select_layers',
@@ -103,7 +103,7 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   },
   {
     name: 'apply_commands',
-    description: 'Apply typed Powermove edit commands to the live composition as a guarded transaction. Commands remain editable and keyframeable and are grouped into one Undo for uninterrupted project-only runs; interleaved edits and panel controls retain normal editor Undo. Batches are never silently truncated. On a revision conflict, read get_project_state and retry against the refreshed state. Never edit the project JSON directly.',
+    description: 'Apply typed Powermove edit commands to the live composition as a guarded transaction. Commands remain editable and keyframeable and are grouped into one Undo for uninterrupted project-only runs; interleaved edits and panel controls retain normal editor Undo. Batches are never silently truncated. On a revision conflict, read get_project_state and retry against the refreshed state. Never edit the project JSON directly. Captions: add_captions {name?, cues:[{start,end,text}] | text (SRT/WebVTT) + format?, style?:{preset:classic|boxed|whisper|spotlight|pop|paper, ...overrides}, language?, from?} adds a captions layer on top (it moves to a free position, e.g. top, when another captions layer shows at the same time, unless style sets placement); edit_captions {target, op} with op replace|insert {cues}, update {cues:[{id,start?,end?,text?}]}, delete|merge {ids}, split {id, at}, move {ids?, by}, import {text, format?, replace?}, style {style}. Caption times are composition seconds; get_project_state lists cue ids (page with cueOffset/cueLimit).',
     inputSchema: closedObject({
       label: { type: 'string', minLength: 1, maxLength: 80 },
       commands: {
@@ -268,6 +268,25 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
       listing: closedObject({ name: { type: 'string', maxLength: 80 }, tagline: { type: 'string', maxLength: 160 }, category: { type: 'string', enum: ['effects', 'transitions', 'panels', 'themes', 'commands', 'layers', 'tools'] }, licence: { type: 'string', enum: ['MIT'] } }, ['name', 'tagline', 'category', 'licence']),
       visibility: { type: 'string', enum: ['public', 'unlisted'] }
     }, ['localId'])
+  },
+  /* ── Captions ─────────────────────────────────────────────── */
+  {
+    name: 'generate_captions',
+    description: 'Transcribe the speech of audio/video layers on this Mac and add the result as a new captions layer on top, mapped through each clip\'s trim, speed and time remapping and split into readable cues. Transcription runs in the background: a call waits up to a minute, then returns { status: "done", layerId, cues } or { status: "running", jobId, progress }. While it is running, call generate_captions again with only { jobId } to keep waiting; never start a second generation. Ending or rolling back the run cancels it. If no transcription model is installed it returns the error code transcription-model-missing and opens the model download sheet; tell the user to download a model (Settings › Transcription) and do not retry until they have. Restyle or edit the result with edit_captions.',
+    inputSchema: closedObject({
+      layerIds: { type: 'array', items: { type: 'string' }, minItems: 1, uniqueItems: true },
+      jobId: { type: 'string' },
+      style: { type: 'string', enum: ['classic', 'boxed', 'whisper', 'spotlight', 'pop', 'paper'] },
+      label: { type: 'string', maxLength: 80 }
+    })
+  },
+  {
+    name: 'export_captions',
+    description: 'Read a captions layer as SubRip (srt) or WebVTT (vtt) text in composition time, for a sidecar file. Does not change the project. Write the returned text to the artifact directory when the user wants a file.',
+    inputSchema: closedObject({
+      layerId: { type: 'string' },
+      format: { type: 'string', enum: ['srt', 'vtt'] }
+    }, ['layerId'])
   }
 ] as const;
 
@@ -323,6 +342,7 @@ export const POWERMOVE_LIVE_INSPECTION_TOOL_NAMES = [
   'validate_effect',
   'render_frames',
   ...POWERMOVE_MEDIA_TOOL_NAMES,
+  'export_captions',
   ...POWERMOVE_STORE_READONLY_TOOL_NAMES
 ] as const;
 

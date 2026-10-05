@@ -70,7 +70,7 @@ export function installLayerMenu(PM: PMRegistry): void {
         { label: 'Split at playhead', icon: 'scissors', kb: '⌘⇧D', disabled: !inside, run: () => PM.cmd('split') },
         { label: 'Trim in to playhead', disabled: !inside, run: () => apply(selected.flatMap((item: any) => [
           { type: 'set_layer', target: item.id, patch: { from: PM.time, duration: item.dur - (PM.time - item.from) } },
-          ...(PM.MediaTiming.isTimed(item) ? [{ type: 'set_content', target: item.id, patch: { trim: PM.MediaTiming.trimAtStart(item, PM.time) } }] : [])
+          ...((patch => patch ? [{ type: 'set_content', target: item.id, patch }] : [])(PM.MediaTiming.startPatch(item, PM.time)))
         ]), 'Trim in') },
         { label: 'Trim out to playhead', disabled: !inside, run: () => apply(selected.map((item: any) => ({ type: 'set_layer', target: item.id, patch: { duration: PM.time - item.from } })), 'Trim out') },
         { label: 'Fit to composition', run: () => patch({ from: 0, duration: PM.proj.dur }, 'Fit duration') },

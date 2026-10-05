@@ -1,4 +1,7 @@
 import type { ExportDefaults } from '../export-defaults';
+import type { CaptionsContent } from './captions';
+
+export type { CaptionCue, CaptionStyle, CaptionWord, CaptionsContent } from './captions';
 
 /**
  * Serializable Powermove project source.
@@ -22,7 +25,8 @@ export const TYPE_META = {
   extension: { icon: 'layers', color: '#9B8CFF', label: 'Extension' },
   null: { icon: 'dot', color: '#6a6a70', label: 'Null', visual: false, pickable: true },
   group: { icon: 'layers', color: '#3FCF8E', label: 'Group', visual: false, transform: true, pickable: false },
-  precomp: { icon: 'layers', color: '#3FCF8E', label: 'Precomp' }
+  precomp: { icon: 'layers', color: '#3FCF8E', label: 'Precomp' },
+  captions: { icon: 'captions', color: '#F2C14E', label: 'Captions' }
 } as const;
 
 export type LayerType = keyof typeof TYPE_META;
@@ -310,6 +314,7 @@ export type ShaderLayer = LayerBase<'shader', ShaderContent>;
 export type ExtensionLayer = LayerBase<'extension', ExtensionLayerContent>;
 export type NullLayer = LayerBase<'null', NullContent>;
 export type PrecompLayer = LayerBase<'precomp', PrecompContent>;
+export type CaptionsLayer = LayerBase<'captions', CaptionsContent>;
 
 /** `type` and `d` narrow together, matching mkLayer's DEFAULTS table. */
 export type Layer =
@@ -324,7 +329,8 @@ export type Layer =
   | ExtensionLayer
   | NullLayer
   | LayerBase<'group', GroupContent>
-  | PrecompLayer;
+  | PrecompLayer
+  | CaptionsLayer;
 
 export interface FillStop {
   id: string;

@@ -1,5 +1,5 @@
 /** Named runtime exports for the public powermove module. Keep in sync with editor-helpers.ts. */
-export const EDITOR_HELPER_EXPORTS = ['isProperty', 'canAnimateContent', 'resolveContent', 'contentLabel', 'evaluatedValue', 'makeVectorPath', 'makeVertex', 'structuredProperties', 'pathValues', 'groupMatrix', 'tracePath', 'pathTargets', 'temporalKeys', 'enableTimeRemap', 'validMatteSource', 'MATTE_MODES', 'expressionDiagnostic', 'EXPRESSION_NAMES', 'axisContentKey', 'axisPath', 'isAxisTag', 'inspectFont', 'CHANNELS_3D', 'is3DLayer', 'planeMatrix', 'planeContains', 'projectPoint', 'inversePlane', 'propertyShortcuts'] as const;
+export const EDITOR_HELPER_EXPORTS = ['isProperty', 'canAnimateContent', 'resolveContent', 'contentLabel', 'evaluatedValue', 'makeVectorPath', 'makeVertex', 'structuredProperties', 'pathValues', 'groupMatrix', 'tracePath', 'pathTargets', 'temporalKeys', 'enableTimeRemap', 'validMatteSource', 'MATTE_MODES', 'expressionDiagnostic', 'EXPRESSION_NAMES', 'axisContentKey', 'axisPath', 'isAxisTag', 'inspectFont', 'CHANNELS_3D', 'is3DLayer', 'planeMatrix', 'planeContains', 'projectPoint', 'inversePlane', 'propertyShortcuts', 'CAPTION_PRESETS', 'MIN_CUE_DURATION', 'cueIndexAt', 'cueRange', 'moveLimits', 'normalizeCaptionStyle', 'presetStyle'] as const;
 
 /**
  * Svelte entry points an extension bundle may import: every public client-side

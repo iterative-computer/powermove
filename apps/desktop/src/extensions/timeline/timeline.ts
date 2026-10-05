@@ -10,6 +10,7 @@ import { adjacentKeyframe } from './keyframe-navigation';
 import { draggedPropertyValue, propertyMetadata } from './property-values';
 import { element, iconNode, normalizeTimelineChrome, selectedLayers } from './api-helpers';
 import { createTrackView, normalizeTimelineMode, TIMELINE_MODES, TRACK_GUTTER, type TimelineMode } from './track-view';
+import { createCaptionTrack } from './caption-track';
 /* Ported from js/ui/timeline.js — behavior-preserving. */
 import { expandScaleKeyIds, keyMembers, timelineProperties, trackChannels, trackSelected } from './property-tracks';
 import {
@@ -528,9 +529,10 @@ export const timelinePanelOptions = {
   library: { width: 800, height: 440 },
 } as const;
 
-/** Audio clips are read by their waveform; a name label only crowds it. */
+/** Audio clips are read by their waveform and captions by their cue text;
+    a name label only crowds them. */
 export function shouldDrawClipLabel(layerType: unknown): boolean {
-return layerType !== 'audio';
+return layerType !== 'audio' && layerType !== 'captions';
 }
 
 /** Compatibility name for tests and downstream forks of the legacy runtime. */
@@ -1154,6 +1156,45 @@ function layerKeyTimes(L: any): number[] {
   clipKeyTimes.set(L, { version, times: sorted });
   return sorted;
 }
+/* Caption cues on captions strips, in both timeline views. */
+const captionTrack = createCaptionTrack({
+  api, T, t2x, x2t,
+  theme: () => theme,
+  roundRect, clipText,
+  clipPalette: (L) => clipPalette(L) as any,
+  mix: (color, toward, amount) => mixHex(color, toward, amount),
+  fui: () => fui(),
+  beginDrag, invalidate, edgeSnapping,
+  wrap: () => document.querySelector<HTMLElement>('#tl-canvas-wrap'),
+  cleanup: (dispose) => { runtimeCleanups.push(dispose); },
+});
+T.captionTrack = captionTrack;
+/* Programmatic "edit this cue" requests (Add Caption, the agent) open the
+   inline editor here when the cue's strip is on screen. */
+{
+  const captionsService = api.services.get<any>('captions');
+  const stop = captionsService?.onEditRequest?.(({ layerId, cueId }: { layerId: string; cueId: string }) => {
+    const L: any = api.model.layer(layerId);
+    const cue = L?.d?.cues?.find((item: any) => item.id === cueId);
+    if (!L || !cue || !T.cv?.isConnected || !T.w) return false;
+    const at = L.from + cue.start;
+    if (t2x(at) < T.gut || t2x(at) > T.w - 40) { T.scrollT = Math.max(-.4, at - (T.w - T.gut) * .25 / T.pps); }
+    let top: number | null = null, height = T.row;
+    if (tracksMode()) {
+      const item = trackView.layout().byId.get(L.id);
+      if (item) { top = trackView.laneY(item.area, item.lane); height = trackView.rowHeight(); }
+    } else {
+      buildRows();
+      const index = T.rows.findIndex((row: any) => row.kind === 'layer' && row.L.id === L.id);
+      if (index >= 0) { keepRowsVisible(index, 0); top = rowY(index); }
+    }
+    if (top == null || top < T.ruler || top > T.hgt - 10) return false;
+    draw();
+    return captionTrack.edit(L, cueId, top, height);
+  });
+  if (stop) runtimeCleanups.push(stop);
+}
+
 const trackView = createTrackView({
   api, T, t2x, x2t,
   theme: () => theme, ink: INK,
@@ -1177,6 +1218,7 @@ const trackView = createTrackView({
   fitValue: (c, value, unit, width) => fittedPropertyValue(c, value, unit, width),
   clipPalette: (L) => clipPalette(L) as any,
   roundRect, clipText, rgba,
+  captions: captionTrack,
   fui: () => fui(), fmono: () => fmono(), niceStep,
   icoEye, icoLock, icoSpeaker,
   visible: (L) => !!evaluatedValue(L, L.on, api.transport.time(), 'l.on'),
@@ -1212,7 +1254,8 @@ function timelineBackdropKey(): unknown[] | null {
     T.rows, T.gut, T.row, T.ruler, T.pps, T.scrollT, T.scrollY, T.hoverRow, T.dropRow,
     T.style.clipRadius, T.style.keyframeSize, T.style.showLayerNumbers, T.style.showTypeBadges,
     theme, p, p.dur, p.fps, p.work?.[0], p.work?.[1], api.project.revision(),
-    api.anim.version(), api.uiState.timelineVersion(), T.mode, T.trackHover?.area, T.trackHover?.lane, T.trackScrollY];
+    api.anim.version(), api.uiState.timelineVersion(), T.mode, T.trackHover?.area, T.trackHover?.lane, T.trackScrollY,
+    captionTrack.version()];
   const [first, end] = visibleRowRange();
   for (let i = first; i < end; i++) {
     const row = T.rows[i];
@@ -1583,7 +1626,10 @@ function drawClips(c: any, W: any, H: any) {
     const y = rowY(i);
     if (y + T.row < T.ruler || y > H) continue;
     const r = T.rows[i];
-    if (r.kind === 'layer') drawClip(c, r.L.type === 'group' ? { ...r.L, ...api.groups.span(r.L) } : r.L, y);
+    if (r.kind === 'layer') {
+      drawClip(c, r.L.type === 'group' ? { ...r.L, ...api.groups.span(r.L) } : r.L, y);
+      if (r.L.type === 'captions') captionTrack.draw(c, r.L, y, T.row, W);
+    }
     else drawPropKeys(c, r, y);
   }
   c.restore();
@@ -1696,6 +1742,7 @@ const CLIP_TYPES: Record<string, { body: string; primary: string; foreground: st
   shader: { body: '#413B60', primary: '#A99AE0', foreground: '#ECE8F8' },
   extension: { body: '#40395D', primary: '#B2A6EF', foreground: '#F0EDFF' },
   null:   { body: '#3E434B', primary: '#A2A9B3', foreground: '#EEF0F3' },
+  captions: { body: '#4C4430', primary: '#D8BD74', foreground: '#F5EFDD' },
 };
 const CLIP_FALLBACK = { body: '#34505A', primary: '#8DB8C6', foreground: '#E6F1F4' };
 function mixHex(color: string, toward: [number, number, number], amount: number) {
@@ -1735,6 +1782,8 @@ function drawClip(c: any, L: any, y: any, rowHeight = T.row) {
      body, inner top highlight, hairline ring one shade under the body. */
   c.shadowColor = dark ? 'rgba(0,0,0,.35)' : 'rgba(15,15,20,.12)';
   c.shadowBlur = 4; c.shadowOffsetY = 2;
+  /* A captions strip is the lane its cues sit on: a quieter body. */
+  if (L.type === 'captions') c.globalAlpha *= .55;
   roundRect(c, x0, yy, w, hh, r);
   const g = c.createLinearGradient(0, yy, 0, yy + hh);
   g.addColorStop(0, mixHex(pal.body, [255, 255, 255], dark ? .06 : .04));
@@ -2750,7 +2799,9 @@ function onMove(e: any) {
       const L = hr.row.L;
       const x0 = t2x(L.from), x1 = t2x(L.from + L.dur);
       const stagger = L.lock ? null : textStagger.hit(L, x, y, t2x, rowY(hr.i) + 1, T.row - 2);
-      if (Math.abs(x - x0) < 5 || Math.abs(x - x1) < 5) cur = 'ew-resize';
+      const cueHover = L.type === 'captions' ? captionTrack.hover(L, x) : null;
+      if (cueHover) { cur = cueHover.cursor; title = cueHover.title; }
+      else if (Math.abs(x - x0) < 5 || Math.abs(x - x1) < 5) cur = 'ew-resize';
       else if (stagger) { cur = stagger.part === 'end' ? 'ew-resize' : 'grab'; title = stagger.band.animator.name; }
       else if (x > x0 && x < x1) cur = 'grab';
     } else if (!workHit && hr && hr.row.kind === 'prop') {
@@ -2832,6 +2883,16 @@ function onDown(e: any) {
   if (quickOffsetModifiers(e) && api.selection.layers().includes(L.id) && quickOffsetLayerGroups().length > 1) {
     if (L.lock) return;
     return quickOffsetLayers(e);
+  }
+  // A captions strip's cues take the pointer; its empty lane moves the layer.
+  if (L.type === 'captions' && !e.shiftKey && !e.metaKey && !e.ctrlKey && captionTrack.hit(L, x)) {
+    if (!api.selection.layers().includes(L.id)) api.selection.select([L.id]);
+    captionTrack.down(e, L, x);
+    return;
+  }
+  if (L.type === 'captions' && (e.shiftKey || e.metaKey || e.ctrlKey) && captionTrack.hit(L, x) && api.selection.layers().includes(L.id)) {
+    captionTrack.down(e, L, x);
+    return;
   }
   if (!selectLayerForPointer(L, e)) return;
   // Locking protects clip content and trim edits, while the clip body remains
@@ -2926,6 +2987,9 @@ function quickOffsetLayers(e: any) {
 
 function selectLayerForPointer(L: any, event: PointerEvent) {
   T.keySelectionActive = false;
+  // A click on a layer (its name, clip body or empty lane) selects the layer,
+  // not the cues picked before it.
+  if (captionTrack.selection().layerId) captionTrack.select(null, []);
   api.selection.set({ keys: [] });
   const selected = api.selection.layers().includes(L.id);
   const toggle = event.metaKey || event.ctrlKey;
@@ -3377,7 +3441,10 @@ function layerEdgeSnapper(movingIds: string[]) {
 function trim(e: any, side: any) {
   const selectedIds = new Set(api.groups.expand(api.selection.layers()) || api.selection.layers());
   const layers = api.project.get().layers.filter((l: any) => selectedIds.has(l.id) && l.type !== 'group' && !l.lock && !(api.groups.ancestors(l) || []).some((g: any) => g.lock));
-  const start = layers.map((L: any) => ({ L, from: L.from, dur: L.dur, trim: Number(L.d && L.d.trim) || 0 }));
+  /* Caption cues live in layer time; keep the gesture's starting cues so
+     every move re-bases from them and an in-edge drag that comes back
+     restores what it passed over. */
+  const start = layers.map((L: any) => ({ L, from: L.from, dur: L.dur, trim: Number(L.d && L.d.trim) || 0, d: { ...L.d } }));
   api.edit.begin('Trim clip', { origin: 'timeline' });
   const snapper = layerEdgeSnapper(start.map((s: any) => s.L.id));
   const probes: EdgeSnapProbe[] = start.map((s: any) => side === 'in'
@@ -3399,6 +3466,9 @@ function trim(e: any, side: any) {
           if (api.media.timing.isTimed(s.L)) {
             const rate = api.media.timing.rate(s.L);
             api.edit.dispatch({ type: 'set_content', target: s.L.id, patch: { trim: Math.max(0, s.trim + (nf - s.from) * rate) } });
+          } else {
+            const content = api.media.timing.startPatch({ ...s.L, from: s.from, d: s.d }, nf);
+            if (content) api.edit.dispatch({ type: 'set_content', target: s.L.id, patch: content });
           }
         } else api.edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { duration: Math.max(1 / api.project.get().fps, s.dur + dt) } });
       });
@@ -3993,6 +4063,7 @@ function onDbl(e: any) {
   if (!inGraph(x, y) && x > T.gut && y >= T.ruler) {
     const hr = hitRow(y);
     if (hr?.row.kind === 'prop' && editKeyAt(hr.row, x)) return;
+    if (hr?.row.kind === 'layer' && hr.row.L.type === 'captions' && captionTrack.doubleClick(hr.row.L, x, rowY(hr.i), T.row)) return;
   }
   const workHit: any = x > T.gut && workAreaHit(x, y);
   if (workHit?.kind === 'bar') {

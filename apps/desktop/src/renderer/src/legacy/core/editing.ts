@@ -7,6 +7,7 @@ import { preserveParentPose } from './parenting';
 import { expressionDiagnostic } from './expression';
 import { inspectorService, shaderHooks } from './services';
 import { compactEditLog } from '../../core/edit-log';
+import { addCaptions, editCaptions, setCaptionsContent } from '../../captions/commands';
 /* Ported from js/core/editing.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
@@ -91,7 +92,7 @@ function layerPath(target: any): any[] | null {
 
 function commandScopes(command: any): any[][] {
   const type = command?.type;
-  if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group'].includes(type)) return [['layers'], ['comps']];
+  if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_captions'].includes(type)) return [['layers'], ['comps']];
   if (type === 'set_composition') {
     return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work']];
   }
@@ -153,8 +154,13 @@ function rememberLive(command: any) {
   const copy: any = clone(command);
   const target: any = copy.target || copy.layer || copy.targetId || '';
   const mergeable: any = new Set(['set_property', 'set_layer', 'set_content', 'set_composition', 'set_scene_parameter', 'reorder_layer']);
-  if (!mergeable.has(copy.type)) { live.commands.push(copy); return; }
-  const key: any = copy.type === 'set_property'
+  /* A cue drag dispatches absolute times for the same cues every frame; only
+     the last one describes the edit. */
+  const captionDrag = copy.type === 'edit_captions' && (copy.op === 'update' || copy.op === 'style');
+  if (!mergeable.has(copy.type) && !captionDrag) { live.commands.push(copy); return; }
+  const key: any = captionDrag
+    ? `${copy.type}:${target}:${copy.op}:${copy.op === 'style' ? Object.keys(copy.style || {}).sort().join(',') : (copy.cues || []).map((cue: any) => cue.id).sort().join(',')}`
+    : copy.type === 'set_property'
     ? `${copy.type}:${target}:${copy.path || copy.channel}`
     : copy.type === 'set_scene_parameter'
       ? `${copy.type}:${copy.name}`
@@ -297,6 +303,7 @@ function setContent(command: any) {
   if (!Object.keys(patch).length) return { id: layer.id };
   if (layer.type === 'audio') setAudioContent(layer, patch);
   else if (layer.type === 'extension') setExtensionContent(layer, patch);
+  else if (layer.type === 'captions') setCaptionsContent(layer, patch);
   else Object.assign(layer.d, patch);
   if (layer.type === 'shader' && Object.hasOwn(patch, 'code')) {
     shaderHooks(PM)?.syncShaderUniforms(layer);
@@ -854,6 +861,8 @@ function runOne(sourceCommand: any, meta: any = {}) {
     case 'add_marker': data = addMarker(command); break;
     case 'create_section': data = createSection(command); break;
     case 'update_section': data = updateSection(command); break;
+    case 'add_captions': data = addCaptions({ PM, findLayer }, command); break;
+    case 'edit_captions': data = editCaptions({ PM, findLayer }, command); break;
     default: throw new Error(`Unknown source edit: ${command.type}`);
   }
   if (anchorRaster?.fontOffset && anchorRaster.selection) {
@@ -881,7 +890,7 @@ function runOne(sourceCommand: any, meta: any = {}) {
     }
     PM.touch();
   }
-  if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group'].includes(command.type)
+  if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_captions', 'edit_captions'].includes(command.type)
       || command.type === 'set_layer' && Object.keys(command.patch || {}).some((key: any) => ['name', 'from', 'duration', 'visible', 'parent'].includes(key))) {
     PM.ProjectIndex?.invalidate();
   } else if (['replace_keyframes', 'add_effect', 'remove_effect', 'set_transition'].includes(command.type)
@@ -1048,6 +1057,8 @@ const Edit: any = {
     create_section: { target: 'project', fields: ['section'] },
     update_section: { target: 'project', fields: ['sectionId', 'layers', 'thumb', 'version', 'at'] },
     transform_layers: { target: 'layer-collection', fields: ['transform', 'state'] },
+    add_captions: { target: 'project', fields: ['cues', 'text', 'format', 'offset', 'style', 'language', 'name', 'from', 'duration'] },
+    edit_captions: { target: 'layer', fields: ['op', 'cues', 'ids', 'id', 'at', 'by', 'text', 'format', 'replace', 'offset', 'style', 'language'] },
   }),
 
   apply(input: any, meta: any = {}) {
