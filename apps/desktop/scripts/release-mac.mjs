@@ -71,7 +71,24 @@ const NATIVE_RUNTIME = [
   { dir: 'node_modules/@koromix/koffi-darwin-arm64/darwin_arm64', expect: ['koffi.node'] }
 ];
 
+/* The packaged worker points transcribe-cpp at the unpacked library through
+   TRANSCRIBE_LIBRARY, which skips the binding's own contract check (the
+   worker repeats it at runtime, runtime-contract.ts). Fail the release
+   rather than ship a library its binding does not match. */
+async function verifyRuntimeContract(app) {
+  const binding = path.join(repository, 'node_modules/transcribe-cpp');
+  const { version } = JSON.parse(await readFile(path.join(binding, 'package.json'), 'utf8'));
+  const headerHash = /PUBLIC_HEADER_HASH\s*=\s*["']([0-9a-f]+)["']/.exec(await readFile(path.join(binding, 'dist/_generated.js'), 'utf8'))?.[1];
+  const contract = JSON.parse(await readFile(path.join(app, 'Contents/Resources/app.asar.unpacked', NATIVE_RUNTIME[0].dir, 'contract.json'), 'utf8'));
+  const base = (value) => /^\d+(?:\.\d+)*/.exec(String(value).trim())?.[0];
+  if (!headerHash || contract.header_hash !== headerHash || base(contract.version) !== base(version)) {
+    throw new Error(`The unpacked transcription runtime (${contract.version}, header ${contract.header_hash}) does not match transcribe-cpp ${version} (header ${headerHash}).`);
+  }
+  process.stdout.write(`Transcription runtime ${contract.version} matches its binding (header ${headerHash}).\n`);
+}
+
 async function verifyNativeAddons(app) {
+  await verifyRuntimeContract(app);
   const appInfo = await signingInfo(app);
   const signed = [];
   for (const { dir: relative, expect } of NATIVE_RUNTIME) {

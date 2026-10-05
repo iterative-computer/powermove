@@ -9,12 +9,14 @@
  * dylibs ship unpacked inside the app and are signed with it.
  */
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import { createRequire } from 'node:module';
 import type { Readable } from 'node:stream';
 import type * as Transcribe from 'transcribe-cpp';
 
 import { decodeArgs, decodeError, paddedSpan, parseDuration, spanLength } from './audio';
 import { Chunker, LEAD_IN_SECONDS, SAMPLE_RATE, appendAtSeam, chunkingFor, speechBounds, withLeadIn, wordsWithin, type AudioWindow } from './chunking';
 import { windowWords, type EngineResult } from './decode';
+import { findBinding, verifyRuntime } from './runtime-contract';
 import { wordsToSegments } from './words';
 import type { WorkerModel, WorkerRequest, WorkerResponse } from './worker-protocol';
 import type { TranscriptWord } from '../../shared/transcription';
@@ -41,9 +43,17 @@ const cancelled = new Set<string>();
 let active: { id: string; ffmpeg: ChildProcessByStdio<null, Readable, Readable> | null; abort: AbortController } | null = null;
 
 function binding(library: string | undefined): Promise<typeof Transcribe> {
-  /* dlopen cannot map a library inside the asar: point the binding at the unpacked copy. */
-  if (library && !process.env['TRANSCRIBE_LIBRARY']) process.env['TRANSCRIBE_LIBRARY'] = library;
-  runtime ??= import('transcribe-cpp');
+  runtime ??= (async () => {
+    /* dlopen cannot map a library inside the asar: point the binding at the
+       unpacked copy, after the contract check the override would skip. */
+    if (library && !process.env['TRANSCRIBE_LIBRARY']) {
+      const dir = findBinding(createRequire(__filename).resolve.paths('transcribe-cpp') ?? []);
+      if (!dir) throw new Error('The transcription binding is missing. Reinstall Powermove.');
+      await verifyRuntime(library, dir);
+      process.env['TRANSCRIBE_LIBRARY'] = library;
+    }
+    return import('transcribe-cpp');
+  })();
   return runtime;
 }
 
