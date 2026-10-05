@@ -68,5 +68,7 @@ describe('caption file names', () => {
     expect(captionFileInfo('Interview.en.srt')).toEqual({ name: 'Interview', language: 'en' });
     expect(captionFileInfo('Episode 1.pt-BR.vtt')).toEqual({ name: 'Episode 1', language: 'pt-BR' });
     expect(captionFileInfo('notes.srt')).toEqual({ name: 'notes' });
+    expect(captionFileInfo('clip.mov.srt')).toEqual({ name: 'clip' });
+    expect(captionFileInfo('Song.mp3.vtt')).toEqual({ name: 'Song' });
   });
 });

@@ -21,8 +21,10 @@ import { linearClip, type ClipTiming } from './time-map';
 import CaptionsPanel from './CaptionsPanel.svelte';
 import { registerSveltePanel } from '../panels/registerSveltePanel';
 import { openPopoverMenu } from '../controls/popover-menu';
+import { AUDIO_EXTENSIONS, isImageExtension, isVideoExtension } from '../../../shared/media-formats';
 
 export const CAPTION_FILE = /\.(srt|vtt)$/i;
+const isMediaExtension = (extension: string) => isVideoExtension(extension) || isImageExtension(extension) || (AUDIO_EXTENSIONS as readonly string[]).includes(extension);
 const OWNER = 'captions';
 
 /** Composition timing of a clip, sampled only when its speed is animated or time-remapped. */
@@ -41,6 +43,9 @@ export function clipTiming(PM: any, layer: any): ClipTiming {
 /** "Interview.en.srt" → { name: "Interview", language: "en" }. */
 export function captionFileInfo(fileName: string): { name: string; language?: string } {
   const base = fileName.replace(CAPTION_FILE, '');
+  // "clip.mov.srt" names its video, not a language.
+  const media = /^(.+)\.([A-Za-z0-9]{2,5})$/.exec(base);
+  if (media?.[2] && isMediaExtension(media[2].toLowerCase())) return { name: media[1]! };
   const match = /^(.*)\.([a-z]{2,3}(?:-[A-Za-z0-9]{2,8})?)$/.exec(base);
   return match && match[1] ? { name: match[1], language: match[2] } : { name: base || 'Captions' };
 }
