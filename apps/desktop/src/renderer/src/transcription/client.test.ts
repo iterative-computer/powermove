@@ -51,6 +51,16 @@ describe('transcription client', () => {
     expect(await ensureTranscriptionModel('why')).toBe(false);
   });
 
+  it('asks for a word-timed model only when captions need one and none is downloaded', async () => {
+    const whisper = model('ready', { id: 'whisper-medium', name: 'Whisper Medium', wordTimestamps: false, timing: 'segment' });
+    install(host({ models: [whisper], activeModelId: 'whisper-medium' }));
+    expect(await ensureTranscriptionModel('why')).toBe(true);
+    // No sheet host in this test: the sheet cannot open, so the answer is no.
+    expect(await ensureTranscriptionModel('why', { wordTimestamps: true })).toBe(false);
+    install(host({ models: [whisper, model('ready')], activeModelId: 'whisper-medium' }));
+    expect(await ensureTranscriptionModel('why', { wordTimestamps: true })).toBe(true);
+  });
+
   it('turns an error envelope into an error with its code', async () => {
     install(host({ models: [], activeModelId: null }, {
       transcribe: vi.fn(async () => ({ ok: false as const, code: TRANSCRIPTION_MODEL_MISSING, message: 'No transcription model is downloaded yet.' }))

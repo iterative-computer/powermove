@@ -2,16 +2,20 @@
   import { onMount } from 'svelte';
   import type { TranscriptionBridge, TranscriptionModelInfo, TranscriptionStatus } from '../../../shared/transcription';
   import ModelMeters from './ModelMeters.svelte';
-  import { downloadLine, formatBytes } from './format';
+  import { curatedModels, downloadLine, modelFacts, modelFor, type ModelNeeds } from './format';
 
-  /* The on-demand sheet: one line on why it appeared, the models to choose
-     from, and the download's progress. It closes itself once a model is in
-     use; hiding it mid-download leaves the download running. */
-  let { host, initial, reason: initialReason, onfinish }: {
+  /* The on-demand sheet: one line on why it appeared, the curated models to
+     choose from (Settings › Transcription has the rest), and the download's
+     progress. It closes itself once a model that fits is ready; hiding it
+     mid-download leaves the download running. */
+  let { host, initial, reason: initialReason, needs = {}, onfinish, onbrowse }: {
     host: TranscriptionBridge;
     initial: TranscriptionStatus | null;
     reason: string;
+    /** Captions pass { wordTimestamps: true }: only word-timed models fit. */
+    needs?: ModelNeeds;
     onfinish: (ready: boolean) => void;
+    onbrowse?: () => void;
   } = $props();
 
   let status = $state<TranscriptionStatus | null>(null);
@@ -30,9 +34,13 @@
     if (next) reason = next;
   }
 
-  const models = $derived(status?.models ?? []);
-  const downloading = $derived(models.find((model) => model.state === 'downloading') ?? null);
-  const selected = $derived(models.find((model) => model.id === chosen) ?? downloading ?? models.find((model) => model.recommended) ?? models[0] ?? null);
+  const all = $derived(status?.models ?? []);
+  const models = $derived(curatedModels(all, needs));
+  const downloading = $derived(all.find((model) => model.state === 'downloading') ?? null);
+  const selected = $derived(models.find((model) => model.id === chosen)
+    ?? models.find((model) => model.id === downloading?.id) ?? models.find((model) => model.recommended) ?? models[0] ?? null);
+  /* Captions asked, and the model in use cannot time words: say why it is not enough. */
+  const untimed = $derived(needs.wordTimestamps ? all.find((model) => model.id === status?.activeModelId && model.state === 'ready' && !model.wordTimestamps) ?? null : null);
   const selectedError = $derived(selected?.state === 'error' ? selected.error ?? 'The download failed. Try again.' : '');
 
   const message = (cause: unknown, fallback: string): string =>
@@ -40,7 +48,7 @@
 
   function apply(next: TranscriptionStatus): void {
     status = next;
-    if (next.activeModelId) onfinish(true);
+    if (modelFor(next, needs)) onfinish(true);
   }
 
   async function download(): Promise<void> {
@@ -83,6 +91,7 @@
   <header class="acct-head">
     <h2>Download a speech model</h2>
     <p>{reason}</p>
+    {#if untimed}<p class="tr-why">{untimed.name} doesn’t time each word, which captions need.</p>{/if}
   </header>
 
   <div class="sg-column tr-form">
@@ -102,7 +111,7 @@
           <span class="settings-copy">
             <b>{model.name}{#if model.recommended}<span class="tr-tag">Recommended</span>{/if}</b>
             <span>{model.description}</span>
-            <span class="tr-size">{formatBytes(model.size)}{model.languages === 'en' ? ' · English' : ` · ${model.languageCodes?.length ?? 'Many'} languages`}</span>
+            <span class="tr-size">{modelFacts(model)}</span>
           </span>
           <ModelMeters speed={model.speed} accuracy={model.accuracy} />
         </label>
@@ -125,6 +134,7 @@
     <p class="tr-note">Runs on this Mac. Your audio is never uploaded.</p>
 
     <footer class="tr-foot">
+      {#if onbrowse}<button class="btn ghost tr-browse" type="button" onclick={onbrowse}>Show All Models</button>{/if}
       {#if downloading}
         <button class="btn ghost" type="button" disabled={busy} onclick={() => cancel(downloading)}>Cancel Download</button>
         <button class="btn pri" type="button" onclick={() => onfinish(false)}>Hide</button>

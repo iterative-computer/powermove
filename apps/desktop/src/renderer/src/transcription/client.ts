@@ -4,6 +4,7 @@ import {
   type Transcript,
   type TranscriptionStatus
 } from '../../../shared/transcription';
+import { modelFor, type ModelNeeds } from './format';
 import { transcriptionBridge } from './host';
 
 export { transcriptionBridge };
@@ -13,10 +14,11 @@ export { transcriptionBridge };
  * transcription engine lane owns the implementation (bridge wiring, the
  * download sheet). Contract:
  *
- * - `ensureTranscriptionModel(reason)` resolves true once a model is ready.
- *   With none ready it opens the download sheet (a Settings-style sheet with
- *   the model picker) and resolves when the user finishes the download, or
- *   false if they dismiss it.
+ * - `ensureTranscriptionModel(reason, needs?)` resolves true once a model is
+ *   ready (with `{ wordTimestamps: true }`, one that times each word, as
+ *   captions need). With none it opens the download sheet (a Settings-style
+ *   sheet with the model picker) and resolves when the user finishes the
+ *   download, or false if they dismiss it.
  * - `transcribe` rejects with an error whose `code` is
  *   TRANSCRIPTION_MODEL_MISSING when no model is ready. Prefer calling
  *   `ensureTranscriptionModel` first.
@@ -34,14 +36,14 @@ export async function transcriptionStatus(): Promise<TranscriptionStatus> {
   }
 }
 
-export async function ensureTranscriptionModel(reason: string): Promise<boolean> {
+export async function ensureTranscriptionModel(reason: string, needs: ModelNeeds = {}): Promise<boolean> {
   const status = await transcriptionStatus();
   if (status.available === false) return false;
-  if (status.activeModelId) return true;
+  if (modelFor(status, needs)) return true;
   // The sheet is Svelte UI; loading it on demand keeps it out of headless
   // importers of this seam (the agent harness in the document engine).
   const { openModelSheet } = await import('./sheet');
-  return openModelSheet(reason, status);
+  return openModelSheet(reason, status, needs);
 }
 
 function failure(message: string, code?: string): Error {

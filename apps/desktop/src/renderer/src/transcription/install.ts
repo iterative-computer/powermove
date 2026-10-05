@@ -3,6 +3,7 @@
    that was hidden) as a progress notice like a project save. */
 import type { TranscriptionModelInfo, TranscriptionStatus } from '../../../shared/transcription';
 import { ensureTranscriptionModel, transcribe, transcriptionStatus } from './client';
+import type { ModelNeeds } from './format';
 import { transcriptionBridge } from './host';
 import { isModelSheetOpen, openModelSheet, setSheetHost } from './sheet';
 
@@ -30,7 +31,7 @@ export function installTranscription(PM: PMLike): void {
     status: transcriptionStatus,
     ensureModel: ensureTranscriptionModel,
     transcribe,
-    openSheet: (reason?: string) => openModelSheet(reason ?? '')
+    openSheet: (reason?: string, needs?: ModelNeeds) => openModelSheet(reason ?? '', null, needs ?? {})
   };
   const host = transcriptionBridge();
   if (!host) return;

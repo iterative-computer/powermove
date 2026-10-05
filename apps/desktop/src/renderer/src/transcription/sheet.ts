@@ -4,6 +4,7 @@
 import { flushSync, mount, unmount } from 'svelte';
 
 import type { TranscriptionStatus } from '../../../shared/transcription';
+import type { ModelNeeds } from './format';
 import { transcriptionBridge } from './host';
 import ModelSheet from './ModelSheet.svelte';
 
@@ -22,7 +23,7 @@ export function isModelSheetOpen(): boolean {
 
 export const DEFAULT_REASON = 'Transcription turns speech into text on this Mac. Choose a model to download.';
 
-export function openModelSheet(reason: string, status: TranscriptionStatus | null = null): Promise<boolean> {
+export function openModelSheet(reason: string, status: TranscriptionStatus | null = null, needs: ModelNeeds = {}): Promise<boolean> {
   const text = String(reason || '').trim().slice(0, 300) || DEFAULT_REASON;
   if (open) {
     open.setReason(text);
@@ -61,10 +62,18 @@ export function openModelSheet(reason: string, status: TranscriptionStatus | nul
       host: bridge,
       initial: status,
       reason: text,
+      needs,
       onfinish: (ready: boolean) => {
         result = ready;
         handle?.close();
-      }
+      },
+      /* The full catalog lives in Settings › Transcription. */
+      ...(PM.SettingsUI?.open ? {
+        onbrowse: () => {
+          handle?.close();
+          PM.SettingsUI.open('transcription');
+        }
+      } : {})
     }
   }) as unknown as SheetInstance;
   flushSync();
