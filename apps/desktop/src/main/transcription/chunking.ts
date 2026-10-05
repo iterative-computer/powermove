@@ -22,6 +22,20 @@ export interface ChunkingOptions {
 
 export const DEFAULT_CHUNKING: ChunkingOptions = { minSeconds: 18, maxSeconds: 28, overlapSeconds: 1 };
 
+/**
+ * Windows by how finely the model times words. Word-timed models get long
+ * overlapping windows (seam words are settled by their times). The others
+ * cannot settle a seam word by time, so their windows meet at the cut
+ * without overlap: Whisper's stay under its 30 s input, and text-only models
+ * get short, phrase-sized windows so each window's time span is the best
+ * timing their words have.
+ */
+export function chunkingFor(timing: 'word' | 'segment' | 'none'): ChunkingOptions {
+  if (timing === 'segment') return { minSeconds: 16, maxSeconds: 26, overlapSeconds: 0 };
+  if (timing === 'none') return { minSeconds: 5, maxSeconds: 12, overlapSeconds: 0 };
+  return DEFAULT_CHUNKING;
+}
+
 const FRAME = SAMPLE_RATE / 100; // 10 ms
 const SMOOTH_FRAMES = 20; // judge quietness over 200 ms, not a single stop consonant
 
@@ -69,6 +83,32 @@ export function withLeadIn(samples: Float32Array, seconds = LEAD_IN_SECONDS): Fl
   const out = new Float32Array(pad + samples.length);
   out.set(samples, pad);
   return out;
+}
+
+/**
+ * The stretch of a window that holds sound, as sample indices into
+ * `samples`, or null when it is all silence. A 10 ms frame counts as sound
+ * when its energy is within 40 dB of the loudest frame (and above a floor,
+ * so room tone in a silent window does not count).
+ */
+export function speechBounds(samples: Float32Array): { from: number; to: number } | null {
+  const frames = Math.floor(samples.length / FRAME);
+  if (!frames) return null;
+  const energy = new Float64Array(frames);
+  let peak = 0;
+  for (let frame = 0; frame < frames; frame++) {
+    let sum = 0;
+    for (let index = frame * FRAME; index < (frame + 1) * FRAME; index++) sum += samples[index]! * samples[index]!;
+    energy[frame] = sum / FRAME;
+    if (energy[frame]! > peak) peak = energy[frame]!;
+  }
+  const threshold = Math.max(peak * 1e-4, 1e-7);
+  if (peak < 1e-6) return null;
+  let first = 0;
+  while (first < frames && energy[first]! < threshold) first++;
+  let last = frames - 1;
+  while (last > first && energy[last]! < threshold) last--;
+  return { from: first * FRAME, to: Math.min(samples.length, (last + 1) * FRAME) };
 }
 
 /** Keeps the words whose midpoint lies in [from, to) (seconds, absolute). */

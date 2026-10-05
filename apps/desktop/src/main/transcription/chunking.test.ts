@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { Chunker, LEAD_IN_SECONDS, SAMPLE_RATE, appendAtSeam, findCut, withLeadIn, wordsWithin } from './chunking';
+import { Chunker, LEAD_IN_SECONDS, SAMPLE_RATE, appendAtSeam, chunkingFor, findCut, speechBounds, withLeadIn, wordsWithin } from './chunking';
 import { decodeArgs, decodeError, paddedSpan, parseDuration, spanLength } from './audio';
 
 /** Tone with silent gaps at the given seconds (each 0.4 s long). */
@@ -119,5 +119,41 @@ describe('ffmpeg decoding', () => {
     expect(spanLength(264, 200, 230)).toBe(30);
     expect(spanLength(264, 0)).toBe(264);
     expect(spanLength(100, 150)).toBe(0);
+  });
+});
+
+describe('windowing by timing kind', () => {
+  it('overlaps only word-timed windows, keeps Whisper under 30 s and text-only windows phrase-sized', () => {
+    expect(chunkingFor('word')).toMatchObject({ overlapSeconds: 1 });
+    expect(chunkingFor('segment').overlapSeconds).toBe(0);
+    expect(chunkingFor('segment').maxSeconds + LEAD_IN_SECONDS).toBeLessThan(30);
+    expect(chunkingFor('none')).toMatchObject({ overlapSeconds: 0, maxSeconds: 12 });
+  });
+
+  it('tiles long media without overlap for models that cannot settle a seam by time', () => {
+    const options = chunkingFor('none');
+    const chunker = new Chunker(options);
+    const audio = speech(61, [6, 13.5, 19, 27, 33.2, 41, 48, 55]);
+    const windows = [...chunker.push(audio.subarray(0, 30 * SAMPLE_RATE)), ...chunker.push(audio.subarray(30 * SAMPLE_RATE))];
+    const rest = chunker.finish();
+    if (rest) windows.push(rest);
+    expect(windows.length).toBeGreaterThanOrEqual(5);
+    for (const [index, window] of windows.entries()) {
+      expect(window.samples.length / SAMPLE_RATE).toBeLessThanOrEqual(options.maxSeconds + 0.01);
+      if (index) expect(window.start / SAMPLE_RATE).toBeCloseTo(windows[index - 1]!.ownTo, 5);
+      expect(window.start / SAMPLE_RATE).toBeCloseTo(window.ownFrom, 5);
+    }
+    // Cuts land in the gaps.
+    expect(windows.slice(0, -1).every((window) => audio[Math.round(window.ownTo * SAMPLE_RATE)] === 0)).toBe(true);
+  });
+
+  it('finds where a window\'s sound starts and ends, and calls silence silence', () => {
+    const samples = new Float32Array(3 * SAMPLE_RATE);
+    for (let index = SAMPLE_RATE; index < 2 * SAMPLE_RATE; index++) samples[index] = 0.2 * Math.sin(index * 0.05);
+    const bounds = speechBounds(samples)!;
+    expect(bounds.from / SAMPLE_RATE).toBeCloseTo(1, 1);
+    expect(bounds.to / SAMPLE_RATE).toBeCloseTo(2, 1);
+    expect(speechBounds(new Float32Array(SAMPLE_RATE))).toBeNull();
+    expect(speechBounds(new Float32Array(SAMPLE_RATE).fill(0.0001))).toBeNull();
   });
 });

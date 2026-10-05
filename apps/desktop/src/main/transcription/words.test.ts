@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { joinWords, tokensToWords, wordsToSegments } from './words';
+import { joinWords, removeLag, spreadWords, tokensToWords, wordsToSegments } from './words';
 
 /* Real Parakeet V3 output (sherpa-onnx 1.13.8) for macOS `say`, trimmed. */
 const sample = {
@@ -55,5 +55,33 @@ describe('wordsToSegments', () => {
 
   it('joins CJK characters without spaces', () => {
     expect(joinWords([{ text: '你', start: 0, end: 1 }, { text: '好', start: 1, end: 2 }, { text: 'Powermove', start: 2, end: 3 }])).toBe('你好 Powermove');
+  });
+});
+
+describe('word boundaries and phrase-timed words', () => {
+  it('starts a new word after a token that is only a space (Parakeet numbers)', () => {
+    const words = tokensToWords({ tokens: [' of', ' ', '5', '%', ',', ' or', ' ', '2', '0'], timestamps: [0, 0.2, 0.2, 0.3, 0.4, 0.5, 0.7, 0.7, 0.8] });
+    expect(words.map((word) => word.text)).toEqual(['of', '5%,', 'or', '20']);
+  });
+
+  it('spreads a phrase over its words by length and joins detached punctuation', () => {
+    const words = spreadWords('Bonjour à tous , ça va ?', 0, 2.2);
+    expect(words.map((word) => word.text)).toEqual(['Bonjour', 'à', 'tous,', 'ça', 'va?']);
+    // Weighted by letters + 1: Bonjour takes 8 of 21 parts.
+    expect(words[0]).toEqual({ text: 'Bonjour', start: 0, end: 0.838 });
+    expect(words.at(-1)!.end).toBe(2.2);
+    expect(spreadWords('  ', 0, 1)).toEqual([]);
+    expect(spreadWords('…', 0, 1)).toEqual([]);
+  });
+
+  it('splits CJK text per character', () => {
+    expect(spreadWords('你好，世界。OK', 0, 1).map((word) => word.text)).toEqual(['你', '好，', '世', '界。', 'OK']);
+  });
+
+  it('removes a reporting lag without overlapping words', () => {
+    const words = removeLag([{ text: 'a', start: 1.3, end: 1.4 }, { text: 'b', start: 1.5, end: 1.6 }, { text: 'c', start: 0.1, end: 0.12 }], 0.3, 0.08);
+    expect(words[0]).toEqual({ text: 'a', start: 1, end: 1.32 });
+    expect(words[1]).toEqual({ text: 'b', start: 1.32, end: 1.52 });
+    expect(words[2]!.end - words[2]!.start).toBeCloseTo(0.02, 5);
   });
 });

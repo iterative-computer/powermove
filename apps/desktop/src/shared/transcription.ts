@@ -57,7 +57,18 @@ export interface TranscriptionModelInfo {
   languageCodes?: string[];
   /** Bytes received so far while downloading. */
   downloadedBytes?: number;
+  /** How finely the model times what it hears: 'word' (captions can use it),
+   *  'segment' (phrases only) or 'none' (text only). Words of the coarser
+   *  kinds still carry times, spread evenly over their phrase or window. */
+  timing?: TranscriptionTiming;
+  /** False when the model cannot detect the spoken language and must be
+   *  told it (the language setting then defaults to English). */
+  detectsLanguage?: boolean;
+  /** One of the few models the download sheet and onboarding offer. */
+  featured?: boolean;
 }
+
+export type TranscriptionTiming = 'word' | 'segment' | 'none';
 
 export interface TranscriptionStatus {
   models: TranscriptionModelInfo[];
@@ -85,6 +96,10 @@ export interface TranscribeRequest {
   language?: string;
   /** Opaque id echoed on progress events. */
   requestId?: string;
+  /** Needs per-word timing (captions). The active model is used when it
+   *  times words; otherwise a downloaded model that does, and with none the
+   *  request fails with TRANSCRIPTION_MODEL_MISSING. Additive. */
+  wordTimestamps?: boolean;
 }
 
 /** What the transcribe IPC returns: errors keep their `code` across the

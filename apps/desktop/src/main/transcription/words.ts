@@ -29,14 +29,22 @@ const FALLBACK_TOKEN_SECONDS = 0.08;
 export function tokensToWords(result: RecognizedTokens, offset = 0): TranscriptWord[] {
   const words: Array<TranscriptWord & { logSum: number; count: number }> = [];
   const { tokens, timestamps, durations, logProbs } = result;
+  /* A token that is only a word boundary (Parakeet emits " " then "2" for a
+     number) starts the next word. */
+  let boundary = false;
   for (let index = 0; index < tokens.length; index++) {
     const raw = tokens[index] ?? '';
     const start = (timestamps[index] ?? 0) + offset;
     const duration = durations?.[index] && durations[index]! > 0 ? durations[index]! : FALLBACK_TOKEN_SECONDS;
     const end = start + duration;
     const logProb = logProbs?.[index];
-    const text = raw.replace(/▁/g, ' ');
-    if (!text.trim()) continue;
+    let text = raw.replace(/▁/g, ' ');
+    if (!text.trim()) {
+      if (text) boundary = true;
+      continue;
+    }
+    if (boundary && !/^\s/.test(text) && !ATTACHED.test(text.trim())) text = ` ${text}`;
+    boundary = false;
     const current = words[words.length - 1];
     const startsWord = !current || /^\s/.test(text) || (CJK.test(text) && !ATTACHED.test(text.trim()));
     const trimmed = text.trim();
@@ -57,6 +65,63 @@ export function tokensToWords(result: RecognizedTokens, offset = 0): TranscriptW
     const out: TranscriptWord = { text: word.text, start: round(word.start), end: round(Math.max(word.start, end)) };
     if (word.count) out.confidence = round(Math.exp(word.logSum / word.count));
     return out;
+  });
+}
+
+/**
+ * Takes a model's reporting delay off its words: starts move back by
+ * `start` seconds and ends by `end`, never before the previous word ends
+ * and never shorter than 20 ms.
+ */
+export function removeLag(words: TranscriptWord[], start: number, end: number): TranscriptWord[] {
+  const out: TranscriptWord[] = [];
+  for (const word of words) {
+    const previous = out[out.length - 1];
+    const from = Math.max(previous ? previous.end : -Infinity, word.start - start);
+    const to = Math.max(from + 0.02, word.end - end);
+    out.push({ ...word, start: round(from), end: round(to) });
+  }
+  return out;
+}
+
+/**
+ * The words of a phrase whose model times only the phrase (Whisper segments)
+ * or nothing at all (a text-only model's window): split the text into words
+ * and spread [start, end] over them by length. Punctuation set off by spaces
+ * ("warm ." from Canary) joins its word; CJK text splits per character.
+ */
+export function spreadWords(text: string, start: number, end: number): TranscriptWord[] {
+  const pieces: string[] = [];
+  for (const chunk of text.trim().split(/\s+/)) {
+    if (!chunk) continue;
+    if (ATTACHED.test(chunk)) {
+      if (pieces.length) pieces[pieces.length - 1] += chunk;
+      continue;
+    }
+    if (!CJK.test(chunk)) { pieces.push(chunk); continue; }
+    let run = '';
+    for (const char of chunk) {
+      if (CJK.test(char)) {
+        if (run) pieces.push(run);
+        run = '';
+        pieces.push(char);
+      } else if (ATTACHED.test(char) && !run && pieces.length) {
+        pieces[pieces.length - 1] += char;
+      } else {
+        run += char;
+      }
+    }
+    if (run) pieces.push(run);
+  }
+  if (!pieces.length) return [];
+  const span = Math.max(0, end - start);
+  const weights = pieces.map((piece) => piece.replace(/[\p{P}\p{S}]/gu, '').length + 1);
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  let at = start;
+  return pieces.map((piece, index) => {
+    const from = at;
+    at += span * (weights[index]! / total);
+    return { text: piece, start: round(from), end: round(index === pieces.length - 1 ? end : at) };
   });
 }
 
