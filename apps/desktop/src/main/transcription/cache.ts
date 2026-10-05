@@ -10,7 +10,8 @@ import type { Transcript } from '../../shared/transcription';
  * span: editing or replacing the file, or switching models, misses.
  */
 
-const VERSION = 1;
+/** Bumped when the engine's output changes, so old transcripts miss. */
+const VERSION = 2;
 
 export interface CacheSpan { start?: number; end?: number }
 
