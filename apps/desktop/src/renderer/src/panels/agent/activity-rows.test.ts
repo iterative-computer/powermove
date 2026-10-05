@@ -321,6 +321,8 @@ describe('joinActions', () => {
     expect(at(settled).detail).toContain('Failed · Sample 12 frames from b-roll.mp4');
     expect(toolFamily('media_contact_sheet')).toBe('watch');
     expect(toolAction('media_waveform')).toBe('mapped silences');
+    expect([toolFamily('generate_captions'), toolAction('mcp__powermove__generate_captions')]).toEqual(['listen', 'captioned speech']);
+    expect([toolFamily('export_captions'), toolAction('export_captions')]).toEqual(['panel', 'exported captions']);
   });
 
   it('never calls a pending transcription done or a model request a failure', () => {

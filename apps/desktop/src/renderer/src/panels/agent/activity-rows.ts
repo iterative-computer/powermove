@@ -59,7 +59,8 @@ export type ToolFamily = 'run' | 'edit' | 'read' | 'search' | 'image' | 'compute
 const FAMILY_RULES: Array<[RegExp, ToolFamily]> = [
   // Watching and listening to footage: frames and probes vs. sound and speech.
   [/^(probe_media|sample_media_frames|media_contact_sheet)$/, 'watch'],
-  [/^(media_waveform|transcribe_media)$/, 'listen'],
+  [/^(media_waveform|transcribe_media|generate_captions)$/, 'listen'],
+  [/^export_captions$/, 'panel'],
   [/^check_project$/, 'panel'],
   [/panel|workspace|project_state|render_frames|apply_commands|edit_video|rollback/, 'panel'],
   [/^(web|search|browse|fetch|grep|glob|find|ls$|list)|url/, 'search'],
@@ -129,6 +130,8 @@ const ACTION_RULES: Array<[RegExp, string]> = [
   [/^media_waveform$/, 'mapped silences'],
   [/^transcribe_media$/, 'transcribed speech'],
   [/^check_project$/, 'checked the project'],
+  [/^generate_captions$/, 'captioned speech'],
+  [/^export_captions$/, 'exported captions'],
   [/^apply_commands$/, 'edited the composition'],
   [/^edit_video$/, 'edited video clips'],
   [/^rollback_changes$/, 'undid agent changes'],
