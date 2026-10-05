@@ -46,4 +46,13 @@
 .tr-settings-progress{display:flex;flex-direction:column;gap:5px;margin-top:6px;max-width:300px}
 .tr-settings-row .settings-copy>.tr-row-error,.settings-note.tr-row-error{color:var(--danger)}
 
+/* Downloaded, then Available to Download with a language filter once the list is long. */
+.tr-section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:28px;padding-bottom:4px}
+.tr-section-head>.sg-section-title{padding-bottom:0}
+.sg-column .tr-section-head .pm-select.settings-select,.sg-column .tr-section-head .settings-select{height:26px;font-size:var(--fs-sm)}
+.tr-empty{margin-top:0}
+
+/* The sheet's way to the full list in Settings. */
+.tr-foot .tr-browse{margin-right:auto}
+
 @media (prefers-reduced-motion:reduce){.tr-bar>i,.tr-radio,.tr-radio::after,.tr-model{transition:none}}
