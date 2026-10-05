@@ -194,6 +194,25 @@ describe('Codex CLI adapter', () => {
     }
   });
 
+  it('turns Codex approvals off in a supervised run, which asks through run_outside_sandbox instead', () => {
+    const common = {
+      schemaPath: '/workspace/schema.json', outputPath: '/workspace/result.json', prompt: 'Install DM Sans',
+      imagePaths: [], model: null, reasoningEffort: null, extensionsDir: '/user-data/extensions', instructions: 'AGENT INSTRUCTIONS',
+      nativeTools: { command: '/Applications/Powermove.app/Contents/MacOS/Powermove', args: ['mcp-server.mjs'], env: {}, toolTimeoutSec: 4200 },
+      sessionId: null
+    };
+    const argv = buildAutonomousArgv({ ...common, access: 'project', shellNetwork: true, approval: 'supervised' });
+    expect(argv).toContain('approval_policy="never"');
+    expect(argv).not.toContain('approvals_reviewer="auto_review"');
+    expect(argv).toContain('default_permissions="powermove"');
+    expect(argv).toContain('mcp_servers.powermove.tool_timeout_sec=4200');
+    expect(argv.at(-1)).toContain('run_outside_sandbox');
+
+    const auto = buildAutonomousArgv({ ...common, access: 'project', shellNetwork: true, approval: 'auto' });
+    expect(auto).toContain('approvals_reviewer="auto_review"');
+    expect(auto.at(-1)).not.toContain('run_outside_sandbox');
+  });
+
   it('passes the session id after -- and refuses one that is not an id', () => {
     const common = {
       schemaPath: '/workspace/schema.json', outputPath: '/workspace/result.json', prompt: '--help',

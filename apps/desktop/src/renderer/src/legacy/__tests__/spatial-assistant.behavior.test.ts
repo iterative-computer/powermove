@@ -920,7 +920,7 @@ it('preserves Project and Editor access when switching to and from an API provid
   PM.AgentUI.setAccess('project');
   PM.AgentUI.setProvider('compatible');
   assert.equal(PM.AgentUI.state.accessMode, 'project');
-  assert.ok(PM.AgentUI.state.accessModes.some((mode: any) => mode.id === 'project'));
+  assert.ok(PM.AgentUI.state.accessModes.some((mode: any) => mode.id === PM.AgentUI.state.permission));
   PM.AgentUI.setProvider('claude');
   assert.equal(PM.AgentUI.state.accessMode, 'project');
   PM.AgentUI.setAccess('editor');

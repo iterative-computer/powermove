@@ -447,4 +447,45 @@ describe('native Powermove agent tool bridge', () => {
     expect(owner.requests).toHaveLength(0);
     await session.finish(false);
   });
+
+  it('lists and runs run_outside_sandbox only in a session that asks, in main', async () => {
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    const bridge = new PowermoveAgentToolBridge(ipc as never, {
+      command: process.execPath,
+      mcpServerPath: path.join(__dirname, 'mcp-server.mjs'),
+      timeoutMs: 2_000
+    });
+    bridges.push(bridge);
+    const plain = await bridge.openSession({ runId: 'plain-run-1', owner: owner as never, baseRevision: 0 });
+    expect(plain.mcpConfig.toolTimeoutSec).toBeUndefined();
+    await expect(bridge.callTool(plain, 'run_outside_sandbox', { command: 'true', reason: 'x' })).rejects.toThrow(/not available/);
+
+    const outsideSandbox = vi.fn(async ({ command }: { command: string }) => `Exit code: 0\nran ${command}`);
+    const asking = await bridge.openSession({ runId: 'asking-run-1', owner: owner as never, baseRevision: 0, outsideSandbox });
+    expect(asking.mcpConfig.toolTimeoutSec).toBeGreaterThan(3_600);
+    const child = spawn(asking.mcpConfig.command, asking.mcpConfig.args, {
+      env: { ...process.env, ...asking.mcpConfig.env },
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+    children.push(child);
+    const listed = await rpc(child, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
+    expect(listed.result.tools.map((tool: { name: string }) => tool.name)).toContain('run_outside_sandbox');
+    const called = await rpc(child, {
+      jsonrpc: '2.0', id: 2, method: 'tools/call',
+      params: { name: 'run_outside_sandbox', arguments: { command: 'echo hi', reason: 'Testing.' } }
+    });
+    expect(called.result).toMatchObject({ isError: false, content: [{ type: 'text', text: 'Exit code: 0\nran echo hi' }] });
+    expect(outsideSandbox).toHaveBeenCalledWith({ command: 'echo hi', reason: 'Testing.', timeoutMs: 120_000 });
+
+    outsideSandbox.mockRejectedValueOnce(new Error('The user declined.'));
+    const declined = await rpc(child, {
+      jsonrpc: '2.0', id: 3, method: 'tools/call',
+      params: { name: 'run_outside_sandbox', arguments: { command: 'echo no', reason: 'Testing.' } }
+    });
+    expect(declined.result).toMatchObject({ isError: true });
+    expect(declined.result.content[0].text).toContain('The user declined.');
+    expect(owner.requests.filter(request => request.tool === 'run_outside_sandbox')).toHaveLength(0);
+    await Promise.all([plain.finish(false), asking.finish(false)]);
+  });
 });

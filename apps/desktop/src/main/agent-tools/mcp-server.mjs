@@ -4,6 +4,8 @@ const port = Number.parseInt(process.env.POWERMOVE_AGENT_TOOL_PORT || '', 10);
 const token = process.env.POWERMOVE_AGENT_TOOL_TOKEN || '';
 const runId = process.env.POWERMOVE_AGENT_RUN_ID || '';
 const timeoutMs = Number.parseInt(process.env.POWERMOVE_AGENT_TOOL_TIMEOUT_MS || '120000', 10);
+// run_outside_sandbox waits for the person's approval (spec.ts OUTSIDE_SANDBOX_CALL_MS).
+const LONG_CALLS = new Map([['run_outside_sandbox', 4_200_000]]);
 
 if (!Number.isInteger(port) || port < 1 || port > 65535 || !token || !runId) {
   process.stderr.write('Powermove MCP bridge environment is incomplete.\n');
@@ -18,7 +20,7 @@ function bridgeCall(tool, args, id) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection({ host: '127.0.0.1', port });
     socket.setEncoding('utf8');
-    socket.setTimeout(Number.isFinite(timeoutMs) ? timeoutMs + 5000 : 125000, () => {
+    socket.setTimeout(LONG_CALLS.get(tool) ?? (Number.isFinite(timeoutMs) ? timeoutMs + 5000 : 125000), () => {
       socket.destroy(new Error('Powermove tool call timed out.'));
     });
     let output = '';

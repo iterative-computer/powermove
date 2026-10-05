@@ -32,12 +32,13 @@ import {
   type CodexRunRequest,
   type CodexAnswerRequest,
   type CodexSteerRequest,
+  type CodexTraceEvent,
   type ConsentRequest
 } from '../../shared/ipc';
 import { EXTENSION_ID } from '../../shared/extensions';
 import { IpcValidationError, isRecord, isString } from '../../shared/guards';
 import { readArtifact, revealArtifact } from './artifacts';
-import { requestComputerConsent } from './consent';
+import { requestComputerConsent, revokeStandingConsent } from './consent';
 import { CodexRunner, isCodexRunRequest } from './runner';
 import { ChatGPTAccountClient } from './app-server-account';
 import { discoverCodexBinary, forgetCodexDescription } from './env';
@@ -48,7 +49,9 @@ import { discoverClaudeBinary } from '../claude/env';
 import { buildFixPrompt, buildRebasePrompt } from './instructions';
 import { restoreExtensionChangeSet } from './change-history';
 import { agentWorkspaceRoot, safeAgentComponent, sessionPathFor, type AgentApiPackFile } from './workspace';
-import { PowermoveAgentToolBridge, type PowermoveAgentToolSession } from '../agent-tools/bridge';
+import { PowermoveAgentToolBridge, type OutsideSandboxRunner, type PowermoveAgentToolSession } from '../agent-tools/bridge';
+import { AgentApprovals, type RequestApproval } from '../agent-approvals';
+import { runWorkspaceCommand } from '../compatible-workspace';
 import type { StoreAgentGateway } from '../cloud/store-agent';
 import { readForkRebaseInfo, stageForkRebase } from '../extensions/rebase';
 
@@ -256,10 +259,15 @@ async function prepareStagingSnapshot(
 }
 
 function requireConsentRequest(value: unknown): ConsentRequest {
-  if (!isRecord(value) || !isString(value.projectName) || !isString(value.summary)) {
+  if (!isRecord(value) || !isString(value.projectName) || !isString(value.summary)
+    || (value.standing !== undefined && typeof value.standing !== 'boolean')
+    || (value.revoke !== undefined && typeof value.revoke !== 'boolean')) {
     throw new IpcValidationError(IPC.consentComputer, 'invalid request');
   }
-  return { projectName: value.projectName, summary: value.summary };
+  return {
+    projectName: value.projectName, summary: value.summary,
+    ...(value.standing ? { standing: true } : {}), ...(value.revoke ? { revoke: true } : {})
+  };
 }
 
 function requireArtifactRef(channel: string, value: unknown): ArtifactRef {
@@ -307,6 +315,16 @@ function amendLiveResult(text: string, dropCommands: boolean, warning?: string):
   }
 }
 
+/** Asks the person, then runs one command in the run's workspace without the sandbox. */
+function outsideSandboxRunner(root: string, requestApproval: RequestApproval, signal: AbortSignal): OutsideSandboxRunner {
+  return async ({ command, reason, timeoutMs }) => {
+    const decision = await requestApproval({ title: 'Run a command outside the project sandbox?', detail: command, reason }, signal);
+    if (!decision.allowed) throw new Error(decision.message);
+    const result = await runWorkspaceCommand(root, 'computer', command, timeoutMs, signal);
+    return `Exit code: ${result.exitCode ?? 'none'}${result.truncated ? ' (output truncated)' : ''}\n${result.output}`;
+  };
+}
+
 /** Registers the frozen renderer contract without modifying the main bootstrap. */
 export function registerCodexIpc(
   ipcMain: IpcMain,
@@ -323,6 +341,7 @@ export function registerCodexIpc(
   appServerRunner: CodexAppServerRunner = new CodexAppServerRunner()
 ): void {
   const compatible = new CompatibleProvider(ctx.userData);
+  const approvals = new AgentApprovals();
   const runner = new CodexRunner();
   const claudeRunner = new ClaudeRunner();
   const owners = new Map<string, WebContents>();
@@ -450,6 +469,17 @@ export function registerCodexIpc(
     const owner = event.sender;
     owners.set(req.id, owner);
     let toolSession: PowermoveAgentToolSession | null = null;
+    const emitTrace = (step: CodexTraceEvent): void => {
+      if (!owner.isDestroyed()) owner.send(IPC.codexEvent, { id: req.id, kind: 'trace', step });
+    };
+    const runEnded = new AbortController();
+    const requestApproval = approvals.requester(req.id, emitTrace);
+    // Codex exec and API models cannot ask the person themselves, so a
+    // supervised Project run asks through Powermove's run_outside_sandbox.
+    const outsideSandbox = req.mode === 'autonomous' && req.access === 'project'
+      && (req.provider === 'compatible' || ((req.provider ?? 'chatgpt') === 'chatgpt' && req.approval === 'supervised'))
+      ? outsideSandboxRunner(agentWorkspaceRoot(ctx.userData, req.projectId), requestApproval, runEnded.signal)
+      : undefined;
     const rendererDestroyed = (): void => {
       compatible.cancel(req.id);
       void Promise.all([runner.cancel(req.id), appServerRunner.cancel(req.id), claudeRunner.cancel(req.id)]);
@@ -471,13 +501,14 @@ export function registerCodexIpc(
           // finishes its lookup lazily, so opening the session is not delayed.
           ...(req.mode === 'autonomous'
             ? { resolveStagingDirectory: createStagingDirectoryResolver(req, ctx.userData) }
-            : {})
+            : {}),
+          ...(outsideSandbox ? { outsideSandbox } : {})
         });
       }
       let result = req.provider === 'compatible'
-        ? await compatible.run(req, step => { if (!owner.isDestroyed()) owner.send(IPC.codexEvent, { id: req.id, kind: 'trace', step }); },
+        ? await compatible.run(req, emitTrace,
           toolSession && toolBridge ? (name, args) => toolBridge.callTool(toolSession!, name, args) : undefined,
-          { extensionsDir: ctx.extensionsDir, apiPackFiles: ctx.apiPackFiles,
+          { extensionsDir: ctx.extensionsDir, apiPackFiles: ctx.apiPackFiles, outsideSandbox: !!(toolSession && outsideSandbox),
             onWorkspace: directory => { if (toolSession) toolSession.stagingDirectory = directory; } })
         : await selectedRunner.run(req, {
         userData: ctx.userData,
@@ -486,16 +517,13 @@ export function registerCodexIpc(
         codexBinaryPref: ctx.codexBinaryPref(),
         claudeBinaryPref: ctx.claudeBinaryPref?.() ?? null,
         ...(toolSession ? { nativeTools: toolSession.mcpConfig } : {}),
+        requestApproval,
         onProgress: (text) => {
           if (!owner.isDestroyed()) {
             owner.send(IPC.codexEvent, { id: req.id, kind: 'progress', text });
           }
         },
-        onTrace: (step) => {
-          if (!owner.isDestroyed()) {
-            owner.send(IPC.codexEvent, { id: req.id, kind: 'trace', step });
-          }
-        }
+        onTrace: emitTrace
       });
       if (toolSession) {
         const changedBeforeFinish = toolSession.changed;
@@ -521,6 +549,8 @@ export function registerCodexIpc(
       }
       return result;
     } finally {
+      runEnded.abort();
+      approvals.closeRun(req.id);
       if (toolSession) await toolSession.finish(false).catch(() => undefined);
       owner.removeListener('destroyed', rendererDestroyed);
       if (owners.get(req.id) === owner) owners.delete(req.id);
@@ -538,7 +568,7 @@ export function registerCodexIpc(
     requireTrusted(event, ctx);
     const req = requireAnswerRequest(rawRequest);
     if (owners.get(req.id) !== event.sender) return { accepted: false };
-    return { accepted: appServerRunner.answer(req) || claudeRunner.answer(req) };
+    return { accepted: approvals.answer(req) || appServerRunner.answer(req) || claudeRunner.answer(req) };
   });
 
   ipcMain.handle(IPC.codexCancel, async (event, rawRequest: unknown) => {
@@ -584,6 +614,7 @@ export function registerCodexIpc(
   ipcMain.handle(IPC.consentComputer, async (event, rawRequest: unknown) => {
     requireTrusted(event, ctx);
     const req = requireConsentRequest(rawRequest);
+    if (req.revoke) { revokeStandingConsent(); return { granted: false }; }
     const window = ctx.getWindow();
     if (window === null || window.isDestroyed()) throw new Error('No Powermove window is available.');
     return await requestComputerConsent(window, req);

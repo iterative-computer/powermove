@@ -36,3 +36,8 @@ hashed assets under `_app/`). It works on any static host (Netlify, Vercel
 static, GitHub Pages, S3, nginx...). If Cloudflare Pages is chosen,
 `@sveltejs/adapter-cloudflare` is a drop-in replacement for `adapter-static`
 in `svelte.config.js`; the prerender settings stay the same.
+
+Cloudflare Web Analytics is included only when `VITE_CF_BEACON_TOKEN` is set
+at build time. Put it in the gitignored `apps/www/.env`; the token comes from
+`cf rum site-info list` on the Motioner account. Builds without it print a
+warning and ship no beacon.
