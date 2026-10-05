@@ -8,7 +8,7 @@ it('accepts every documented EffectDefinition field in the sandbox', () => {
   // the sandbox registration schema is .strict(), so any it omits would reject a
   // valid effect with unrecognized_keys (regression: `backdrop` did exactly that).
   const parsed = registrationSchemas.effects.safeParse({
-    ...base, passes: 2, keepOrig: true, backdrop: true, rawShader: true, viewportSafe: true, viewportPadding: ['radius']
+    ...base, passes: 2, keepOrig: true, backdrop: true, rawShader: true, viewportSafe: true, viewportPadding: ['radius'], ui: [{kind:'point',x:'x',y:'y'}]
   });
   expect(parsed.success).toBe(true);
 });

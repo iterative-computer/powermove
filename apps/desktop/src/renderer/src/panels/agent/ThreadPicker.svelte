@@ -187,9 +187,19 @@
     if (id !== agentState.threadId) PM.AgentUI?.switchThread(id);
   }
 
-  function remove(id: string): void {
-    const remaining = matches.filter(thread => thread.id !== id);
-    PM.AgentUI?.deleteThread?.(id);
+  async function remove(thread: { id: string; title: string; busy?: boolean }): Promise<void> {
+    const ok = await PM.confirm?.({
+      message: `Delete “${thread.title}”?`,
+      detail: thread.busy
+        ? 'This stops its run and removes the thread’s history. This cannot be undone.'
+        : 'This removes the thread’s history. This cannot be undone.',
+      confirmLabel: 'Delete Thread',
+      destructive: true
+    });
+    if (!ok) { if (open) search?.focus(); return; }
+    const remaining = matches.filter(item => item.id !== thread.id);
+    PM.AgentUI?.deleteThread?.(thread.id);
+    if (!open) return;
     if (remaining.length) search?.focus(); else close();
   }
 
@@ -297,7 +307,7 @@
             type="button"
             aria-label={`Delete thread: ${thread.title}`}
             title={thread.busy ? 'Delete thread and stop its run' : 'Delete thread'}
-            onclick={(event) => { event.stopPropagation(); remove(thread.id); }}
+            onclick={(event) => { event.stopPropagation(); void remove(thread); }}
           >
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5 5 13h6l.5-8.5M6.75 6.75v3.75M9.25 6.75v3.75" /></svg>
           </button>

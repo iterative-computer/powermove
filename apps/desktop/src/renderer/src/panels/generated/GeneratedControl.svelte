@@ -1,7 +1,7 @@
 <script lang="ts">
   import ColorField from '../../controls/ColorField.svelte';
   import FillField from '../../controls/FillField.svelte';
-  import NumField from '../../controls/NumField.svelte';
+  import SliderField from '../../controls/SliderField.svelte';
   import Row from '../../controls/Row.svelte';
   import SelectField from '../../controls/SelectField.svelte';
   import TextField from '../../controls/TextField.svelte';
@@ -53,11 +53,12 @@
   <Row {api} label={control.label}><SelectField {api} {get} {edit} label={control.label} options={control.options} /></Row>
 {:else if get && edit && control.type === 'slider'}
   <Row {api} label={control.label}>
-    <NumField
+    <SliderField
       {api}
       {get}
       {edit}
       label={control.label}
+      angle={control.unit === '°'}
       min={control.min}
       max={control.max}
       step={control.step || ((control.max - control.min) / 100) || .01}

@@ -485,7 +485,7 @@ select.sel {
 }
 .fill-stop {
   display: grid;
-  grid-template-columns: 18px 84px minmax(60px, 1fr) 34px 22px;
+  grid-template-columns: 18px minmax(60px, 1fr) 64px 22px;
   align-items: center;
   gap: 6px;
   height: 28px;
@@ -562,3 +562,6 @@ select.sel {
   padding: 14px 11px 15px;
   color: var(--tx-3);
 }
+
+/* Composite position controls need two input lines without overlapping the next row. */
+.row.split:has(.point-field) { height:auto; min-height:calc(var(--ctl-h) * 2 + 8px); align-items:center; padding-block:4px; }

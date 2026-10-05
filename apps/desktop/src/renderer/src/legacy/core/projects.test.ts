@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
 import type { PMRegistry } from '../registry';
 import { install } from './projects';
 
@@ -19,6 +20,21 @@ function projectsRegistry(): { PM: PMRegistry; memory: Map<string, any> } {
 }
 
 describe('legacy project registry install', () => {
+  it('removes the agent workspace when a project is destroyed, not when trashed', () => {
+    const forget = vi.fn(async () => undefined);
+    installBridgeForTests({ artifacts: { forget } } as any);
+    try {
+      const { PM } = projectsRegistry();
+      PM.Projects.put({ id: 'Pone', name: 'One', layers: [] });
+      PM.Projects.trash('Pone');
+      expect(forget).not.toHaveBeenCalled();
+      PM.Projects.destroy('Pone');
+      expect(forget).toHaveBeenCalledWith('Pone');
+    } finally {
+      resetBridgeForTests();
+    }
+  });
+
   it('validates many restored windows in one metadata read and removes duplicates and stale ids', () => {
     const { PM, memory } = projectsRegistry();
     const ids = Array.from({ length: 1000 }, (_, index) => `P${index}`);

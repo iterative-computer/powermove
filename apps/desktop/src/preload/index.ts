@@ -214,6 +214,7 @@ const bridge: PowermoveBridge = {
     steer: (req) => ipcRenderer.invoke(IPC.codexSteer, req),
     answer: (req) => ipcRenderer.invoke(IPC.codexAnswer, req),
     cancel: (id, preserveChanges = false) => ipcRenderer.invoke(IPC.codexCancel, { id, preserveChanges }) as Promise<void>,
+    cancelTask: (requestId, taskId) => ipcRenderer.invoke(IPC.codexCancelTask, { requestId, taskId }),
     fixPrompt: (req) => ipcRenderer.invoke(IPC.codexFixPrompt, req) as Promise<string>,
     rebasePrompt: (req) => ipcRenderer.invoke(IPC.codexRebasePrompt, req) as Promise<string>,
     restoreChangeSet: (req) => ipcRenderer.invoke(IPC.codexRestoreChangeSet, req),
@@ -267,7 +268,9 @@ const bridge: PowermoveBridge = {
 
   artifacts: {
     read: (ref) => ipcRenderer.invoke(IPC.artifactRead, ref) as Promise<ArtifactFile>,
-    reveal: (ref) => ipcRenderer.invoke(IPC.artifactReveal, ref) as Promise<void>
+    reveal: (ref) => ipcRenderer.invoke(IPC.artifactReveal, ref) as Promise<void>,
+    forget: (projectId) => ipcRenderer.invoke(IPC.artifactForget, projectId) as Promise<void>,
+    sweep: (liveProjectIds) => ipcRenderer.invoke(IPC.artifactSweep, liveProjectIds) as Promise<string[]>
   },
 
   captureWindow: () => ipcRenderer.invoke(IPC.captureWindow) as Promise<CaptureResult>,

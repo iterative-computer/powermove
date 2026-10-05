@@ -398,6 +398,15 @@ PM.hydrateProject = hydrate;
   PM.Projects.list().forEach((m: any) => { if (!PM.Projects.get(m.id)) PM.Projects.remove(m.id); });
 })();
 
+/* Agent workspaces for projects that no longer exist (deleted before cleanup
+   followed the project, or interrupted by a crash) are removed once idle. */
+window.setTimeout(() => {
+  const live = [...PM.Projects.list(), ...PM.Projects.trashList()].map((m: any) => m?.id);
+  if (PM.proj?.id) live.push(PM.proj.id);
+  void hostBridge()?.artifacts?.sweep?.([...new Set(live.filter((id: any) => typeof id === 'string'))])
+    ?.catch?.((error: any) => console.warn('Agent workspace sweep failed', error));
+}, 30_000);
+
 /* Exposed for the remote host sync: a document that arrives with assets this
    tab has not loaded needs the same restore pass a project open gets. */
 PM.restoreProjectAssets = (project: any, warn: any = true) => restoreProjectAssets(project, warn);

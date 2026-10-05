@@ -344,7 +344,7 @@ function trashDialog(m: any): Promise<void> {
   });
 }
 function destroyDialog(m: any): Promise<void> {
-  return PM.confirm({ message: 'Delete “' + m.name + '” forever?', detail: 'This permanently removes the local project. This cannot be undone.', confirmLabel: 'Delete Forever', destructive: true })
+  return PM.confirm({ message: 'Delete “' + m.name + '” forever?', detail: 'This permanently removes the local project and the files its agents made. This cannot be undone.', confirmLabel: 'Delete Forever', destructive: true })
     .then((ok: boolean) => { if (ok) { PM.Projects.destroy(m.id); paint(); } });
 }
 /* Trashing the composition this window is editing leaves it with nothing, so it

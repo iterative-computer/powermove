@@ -45,6 +45,24 @@ afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
+it('isolates parallel child inputs, result schemas, sessions and stages from the parent workspace', async () => {
+  const userData = await temporaryDirectory();
+  const options = { ...workspaceOptions(), extensionsDir: path.join(userData, 'extensions') };
+  const [parent, first, second] = await Promise.all([
+    prepareAgentWorkspace(request({ threadId: 'parent' }), userData, 'project', { title: 'parent-schema' }, options),
+    prepareAgentWorkspace(request({ threadId: 'first', projectJSON: '{"child":1}' }), userData, 'project', { title: 'first-schema' }, { ...options, workspaceId: 'subagent-first' }),
+    prepareAgentWorkspace(request({ threadId: 'second', projectJSON: '{"child":2}' }), userData, 'project', { title: 'second-schema' }, { ...options, workspaceId: 'subagent-second' })
+  ]);
+  expect(new Set([parent.root, first.root, second.root]).size).toBe(3);
+  expect(await readFile(path.join(parent.inputsDirectory, 'powermove-project.json'), 'utf8')).toBe('{"layers":[]}');
+  expect(await readFile(path.join(first.inputsDirectory, 'powermove-project.json'), 'utf8')).toBe('{"child":1}');
+  expect(await readFile(path.join(second.inputsDirectory, 'powermove-project.json'), 'utf8')).toBe('{"child":2}');
+  expect(JSON.parse(await readFile(parent.schemaPath, 'utf8')).title).toBe('parent-schema');
+  expect(JSON.parse(await readFile(first.schemaPath, 'utf8')).title).toBe('first-schema');
+  expect(new Set([parent.sessionPath, first.sessionPath, second.sessionPath]).size).toBe(3);
+  expect(new Set([parent.stagingDirectory, first.stagingDirectory, second.stagingDirectory]).size).toBe(3);
+});
+
 function request(overrides: Partial<CodexRunRequest> = {}): CodexRunRequest {
   return {
     id: 'request-1234',

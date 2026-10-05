@@ -52,7 +52,11 @@ const mocks = vi.hoisted(() => {
     forkId, forkedFrom: 'timeline', base: '1.0.0', current: '2.0.0'
   }));
   const stageForkRebase = vi.fn();
+  const forgetWorkspace = vi.fn(async () => undefined);
+  const sweepWorkspaces = vi.fn(async () => ['orphan']);
   return {
+    forgetWorkspace,
+    sweepWorkspaces,
     appOnce: vi.fn(),
     cancel,
     cancelAll,
@@ -116,6 +120,11 @@ vi.mock('../agent-tools/bridge', () => ({
 vi.mock('../extensions/rebase', () => ({
   readForkRebaseInfo: mocks.readForkRebaseInfo,
   stageForkRebase: mocks.stageForkRebase
+}));
+
+vi.mock('./workspace-lifetime', () => ({
+  forgetProjectWorkspace: mocks.forgetWorkspace,
+  sweepOrphanWorkspaces: mocks.sweepWorkspaces
 }));
 
 import { registerCodexIpc } from './index';
@@ -191,13 +200,42 @@ describe('registerCodexIpc', () => {
       IPC.codexSteer,
       IPC.codexAnswer,
       IPC.codexCancel,
+      IPC.codexCancelTask,
       IPC.codexFixPrompt,
       IPC.codexRebasePrompt,
       IPC.codexRestoreChangeSet,
       IPC.consentComputer,
       IPC.artifactRead,
-      IPC.artifactReveal
+      IPC.artifactReveal,
+      IPC.artifactForget,
+      IPC.artifactSweep
     ]);
+  });
+
+  it('removes a forgotten project workspace only after its running agent finishes', async () => {
+    const owner = new Sender();
+    const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
+    await handlers.get(IPC.artifactForget)!({ sender: owner }, 'ipc-project');
+    expect(mocks.forgetWorkspace).not.toHaveBeenCalled();
+    await expect(handlers.get(IPC.artifactSweep)!({ sender: owner }, ['other'])).resolves.toEqual(['orphan']);
+    expect(mocks.sweepWorkspaces).toHaveBeenCalledWith('/tmp/powermove-index-test', ['other'], new Set(['ipc-project']));
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
+    mocks.resolve({ ok: true, text: '{}' });
+    await pending;
+    await vi.waitFor(() => expect(mocks.forgetWorkspace).toHaveBeenCalledWith('/tmp/powermove-index-test', 'ipc-project'));
+
+    await handlers.get(IPC.artifactForget)!({ sender: owner }, 'idle-project');
+    expect(mocks.forgetWorkspace).toHaveBeenLastCalledWith('/tmp/powermove-index-test', 'idle-project');
+  });
+
+  it('never sweeps on an empty library and rejects malformed project ids', async () => {
+    const owner = new Sender();
+    await expect(handlers.get(IPC.artifactSweep)!({ sender: owner }, [])).resolves.toEqual([]);
+    expect(mocks.sweepWorkspaces).not.toHaveBeenCalled();
+    await expect(handlers.get(IPC.artifactSweep)!({ sender: owner }, ['../escape'])).rejects.toThrow();
+    await expect(handlers.get(IPC.artifactForget)!({ sender: owner }, '../escape')).rejects.toThrow();
+    expect(mocks.forgetWorkspace).not.toHaveBeenCalled();
   });
 
   it('keeps agent services alive through a cancelled quit and cleans up only on confirmed shutdown', async () => {
@@ -214,6 +252,7 @@ describe('registerCodexIpc', () => {
     expect(mocks.toolShutdown).not.toHaveBeenCalled();
     emit('before-quit');
     expect(mocks.appShutdown).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     mocks.resolve({ ok: true, text: '{}', access: 'editor' });
     await expect(pending).resolves.toEqual({ ok: true, text: '{}', access: 'editor' });
     emit('will-quit');
@@ -244,6 +283,7 @@ describe('registerCodexIpc', () => {
     const stranger = new Sender();
     const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
 
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     expect(mocks.run).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'ipc-run-1234' }),
       expect.objectContaining({
@@ -266,8 +306,9 @@ describe('registerCodexIpc', () => {
       step: { kind: 'thought', text: 'Inspecting source' }
     });
 
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     mocks.resolve({ ok: true, text: '{}', access: 'editor' });
-    await expect(pending).resolves.toEqual({ ok: true, text: '{}', access: 'editor' });
+    await expect(pending).resolves.toMatchObject({ ok: false, cancelled: true });
   });
 
   it('commits completed live edits before a steering fallback replaces the run', async () => {
@@ -285,14 +326,17 @@ describe('registerCodexIpc', () => {
     const owner = new Sender();
     const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
 
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     await handlers.get(IPC.codexCancel)!({ sender: owner }, {
       id: 'ipc-run-1234', preserveChanges: true
     });
 
     expect(mocks.toolFinishRun).toHaveBeenCalledExactlyOnceWith('ipc-run-1234', true);
     expect(mocks.cancel).toHaveBeenCalledWith('ipc-run-1234');
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     mocks.resolve({ ok: false, error: 'cancelled', cancelled: true });
     await pending;
+    expect(mocks.toolFinish).toHaveBeenCalledWith(true);
   });
 
   it('gives editor App Server runs a live inspection tool session', async () => {
@@ -313,12 +357,13 @@ describe('registerCodexIpc', () => {
     const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
 
     expect(mocks.toolOpenSession).toHaveBeenCalledWith({
-      runId: 'ipc-run-1234', owner, baseRevision: 0
+      runId: 'ipc-run-1234', owner, baseRevision: 0, context: 'project', inspectionOnly: true
     });
     await vi.waitFor(() => expect(mocks.run).toHaveBeenCalledWith(
       expect.objectContaining({ mode: 'editor' }),
       expect.objectContaining({ nativeTools: mocks.toolSession.mcpConfig })
     ));
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     mocks.resolve({ ok: true, text: '{"kind":"panels"}', access: 'editor' });
 
     await expect(pending).resolves.toEqual({
@@ -356,6 +401,7 @@ describe('registerCodexIpc', () => {
       expect.anything(),
       expect.objectContaining({ nativeTools: mocks.toolSession.mcpConfig })
     ));
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     mocks.resolve({
       ok: true,
       access: 'project',
@@ -388,6 +434,7 @@ describe('registerCodexIpc', () => {
       .resolves.toEqual({ accepted: true });
     expect(mocks.appSteer).toHaveBeenCalledExactlyOnceWith(steering);
 
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     mocks.resolve({ ok: true, text: '{}', access: 'editor' });
     await pending;
   });
@@ -397,8 +444,7 @@ describe('registerCodexIpc', () => {
     const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
     owner.destroy();
     expect(mocks.cancel).toHaveBeenCalledWith('ipc-run-1234');
-    mocks.resolve({ ok: false, error: 'cancelled', cancelled: true });
-    await pending;
+    await expect(pending).resolves.toMatchObject({ ok: false, cancelled: true });
   });
 
   it('builds a fix prompt from a validated extension failure', async () => {
@@ -439,6 +485,7 @@ describe('registerCodexIpc', () => {
       openExternal: async () => undefined
     }, mocks.account, mocks.account, mocks.appRunner as never);
     const pending = handlers.get(IPC.codexRun)!({ sender: new Sender() }, runRequest());
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     mocks.resolve({
       ok: true, text: '{}', access: 'editor',
       extensions: [{ id: 'my-fork', action: 'updated' }]

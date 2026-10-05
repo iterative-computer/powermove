@@ -3,6 +3,9 @@ import { createAgentCheckpoint } from './checkpoint';
 import { openPanel, readPanel, interactPanel, panelBounds, preparePanelInput } from './panel-tools';
 import { records as extensionRecords } from '../../kernel/extensions.svelte';
 import { editVideo, videoAssets } from './video-editing';
+import { editScene } from '../../core/scene3d/operations';
+import { compositionScene,layer3DRole } from '../../core/scene3d/layers';
+import { SCENE3D_DEFINITION, sceneProperties,parseScene } from '../../core/scene3d/schema';
 import { validateEffect } from '../../kernel/glsl';
 import { COMMAND_JSON_LIMIT } from '../../../../shared/edit-limits';
 import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
@@ -103,6 +106,8 @@ function projectState(options: any = {}) {
     layerCount: p.layers.length,
     mediaAssets: videoAssets(PM),
     videoEditingTool: 'edit_video',
+    threeDEditingTool:'edit_3d',
+    modelAssets:Object.values<any>(p.assets || {}).filter(a=>a.kind==='model'||a.kind==='image').map(a=>({id:a.id,name:a.name,kind:a.kind,format:a.format})),
     selection: clone(PM.sel),
     layers: p.layers.filter((layer: any) => !options.layerId || layer.id === options.layerId).slice(layerOffset, layerOffset + layerLimit).map((layer: any) => ({
       index: p.layers.indexOf(layer), id: layer.id, name: layer.name, type: layer.type, from: layer.from,
@@ -450,6 +455,10 @@ async function rollBackLiveTransaction(transaction: LiveToolTransaction): Promis
 
 async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit<AgentToolResponseEvent, 'runId' | 'callId'>> {
   PM.SpatialAssistant?.assertRunProject?.(request.runId);
+  if (request.tool === '__agent_thread_control') {
+    if (!PM.SpatialAssistant?.controlThread) throw new Error('Thread controls are unavailable.');
+    return { ok: true, content: [toolText(await PM.SpatialAssistant.controlThread(request.arguments))] };
+  }
   if (request.tool === 'select_layers') {
     const ids = request.arguments.layerIds;
     if (!Array.isArray(ids) || !ids.every(id => typeof id === 'string' && PM.L(id))) {
@@ -466,6 +475,16 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
       valid: true, id: definition.id, parameterCount: definition.params.length,
       note: 'Definition validation only. This does not register the effect or compile/render its shader.'
     })], revision: currentRevision() };
+  }
+  if (request.tool === 'get_3d_scene') {
+    const layers=PM.proj.layers.filter((l:any)=>layer3DRole(l));
+    const state={layerId:request.arguments.target || null,scene:compositionScene(PM,PM.time),
+      layers:layers.map((l:any)=>({id:l.id,name:l.name,role:layer3DRole(l),parent:l.parent,visible:l.on,locked:l.lock,from:l.from,duration:l.dur,content:l.d.data})),
+      channels:layers.flatMap((layer:any)=>PM.allProps(layer).map((p:any)=>({layerId:layer.id,path:p.key,value:PM.evP(layer,p.prop,PM.time,p.key),keyframeCount:p.prop.kf.length}))),
+      assets:Object.values<any>(PM.proj.assets || {}).filter(a=>['model','image'].includes(a.kind)).map(a=>({id:a.id,name:a.name,kind:a.kind,format:a.format})),
+      revision:currentRevision()};
+    refreshLiveTransaction(request);
+    return {ok:true,content:[toolText(state)],revision:currentRevision()};
   }
   if (request.tool === 'get_project_state') {
     const content = toolText(projectState(request.arguments));
@@ -538,7 +557,7 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
       revision: currentRevision()
     };
   }
-  if (request.tool === 'apply_commands' || request.tool === 'edit_video') {
+  if (request.tool === 'apply_commands' || request.tool === 'edit_video' || request.tool === 'edit_3d') {
     const rawCommands = Array.isArray(request.arguments.commands) ? request.arguments.commands : [];
     const commands = rawCommands.map(cleanCommand);
     const invalidIndex = commands.indexOf(null);
@@ -558,7 +577,7 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
       baseRevision: transaction.revision,
       historyGroup: transaction.historyGroup
     };
-    const applied = request.tool === 'edit_video'
+    const applied = request.tool === 'edit_3d' ? editScene(PM,request.arguments as any,editMeta) : request.tool === 'edit_video'
       ? editVideo(PM, request.arguments, editMeta)
       : PM.Edit.apply(commands, editMeta);
     if (!applied.ok) throw new Error(applied.message);
@@ -569,7 +588,7 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
       ok: true,
       content: [toolText({
         applied: commands.map(describeCommand),
-        clip: applied.data?.result ?? null,
+        ...(request.tool === 'edit_3d' ? {layer:applied.data?.result ?? null,scene:applied.data?.result ?? null} : {clip:applied.data?.result ?? null}),
         message: applied.message || 'Applied editable Powermove commands.',
         revision: transaction.revision
       })],

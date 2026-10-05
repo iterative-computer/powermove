@@ -3,6 +3,7 @@
   import ChannelRow from './ChannelRow.svelte';
   import AnimatedRow from './AnimatedRow.svelte';
   import Icon from './Icon.svelte';
+  import SectionHeading from './SectionHeading.svelte';
   import { pathTargets, structuredProperties } from 'powermove';
   import { inspectorRefresh } from './refresh.svelte';
   import TextAnimators from './TextAnimators.svelte';
@@ -43,7 +44,7 @@
 </script>
 
 {#if layer.type==='shape' && activeTarget}
-  <div class="section-head"><Section {api} title={shapeTargets.length===1?'Path':'Paths'} /><button class="section-action" onclick={addPath} aria-label="Add path" title="Add path"><Icon name="plus" /></button></div>
+  <SectionHeading title={shapeTargets.length===1?'Path':'Paths'}><button class="section-action" onclick={addPath} aria-label="Add path" title="Add path"><Icon name="plus" /></button></SectionHeading>
   <div class="path-list" class:multiple={shapeTargets.length>1}>
     {#each shapeTargets as target (target.path.id)}
       <div class="path-item" class:active={target.path.id===activeTarget.path.id}>
@@ -80,13 +81,13 @@
     {/if}
   </details>
 
-  <div class="section-head"><Section {api} title="Fill" /><button class="section-action" onclick={()=>applyPathValue('fillEnabled',!activeValues.fillEnabled,activeValues.fillEnabled?'Remove fill':'Add fill')} aria-label={activeValues.fillEnabled?'Remove fill':'Add fill'} title={activeValues.fillEnabled?'Remove fill':'Add fill'}><span aria-hidden="true">{activeValues.fillEnabled?'−':'+'}</span></button></div>
+  <SectionHeading title="Fill" empty={!activeValues.fillEnabled}><button class="section-action" onclick={()=>applyPathValue('fillEnabled',!activeValues.fillEnabled,activeValues.fillEnabled?'Remove fill':'Add fill')} aria-label={activeValues.fillEnabled?'Remove fill':'Add fill'} title={activeValues.fillEnabled?'Remove fill':'Add fill'}>{#if activeValues.fillEnabled}<span aria-hidden="true">−</span>{:else}<Icon name="plus" />{/if}</button></SectionHeading>
   {#if activeValues.fillEnabled}
     <AnimatedRow {layer} path={channel('fill')} label="Color"><ColorField {api} {mixed} label="Fill color" get={()=>activeValues.fill} edit={bind(channel('fill'))} /></AnimatedRow>
     <ChannelRow {layer} channel={channel('fillOpacity')} property={property('fillOpacity')} label="Opacity" step={1} min={0} max={100} unit="%" />
   {/if}
 
-  <div class="section-head"><Section {api} title="Stroke" /><button class="section-action" onclick={()=>applyPathValue('strokeWidth',Number(activeValues.strokeWidth)>0?0:1,Number(activeValues.strokeWidth)>0?'Remove stroke':'Add stroke')} aria-label={Number(activeValues.strokeWidth)>0?'Remove stroke':'Add stroke'} title={Number(activeValues.strokeWidth)>0?'Remove stroke':'Add stroke'}><span aria-hidden="true">{Number(activeValues.strokeWidth)>0?'−':'+'}</span></button></div>
+  <SectionHeading title="Stroke" empty={!(Number(activeValues.strokeWidth)>0)}><button class="section-action" onclick={()=>applyPathValue('strokeWidth',Number(activeValues.strokeWidth)>0?0:1,Number(activeValues.strokeWidth)>0?'Remove stroke':'Add stroke')} aria-label={Number(activeValues.strokeWidth)>0?'Remove stroke':'Add stroke'} title={Number(activeValues.strokeWidth)>0?'Remove stroke':'Add stroke'}>{#if Number(activeValues.strokeWidth)>0}<span aria-hidden="true">−</span>{:else}<Icon name="plus" />{/if}</button></SectionHeading>
   {#if Number(activeValues.strokeWidth)>0}
     <AnimatedRow {layer} path={channel('stroke')} label="Color"><ColorField {api} {mixed} label="Stroke color" get={()=>activeValues.stroke} edit={bind(channel('stroke'))} /></AnimatedRow>
     <ChannelRow {layer} channel={channel('strokeWidth')} property={property('strokeWidth')} label="Weight" step={0.5} min={0} unit="px" />
@@ -113,50 +114,6 @@
 {/if}
 
 <style>
-  .section-head {
-    position: relative;
-  }
-
-  /* Section.svelte suppresses the rule when it is the first child of a
-     wrapper. These nested SVG sections still need Motioner's full-width
-     separators, so opt them back in explicitly. */
-  .section-head :global(.sec) {
-    margin-top: 8px;
-    border-top: 1px solid var(--section-line);
-  }
-
-  .section-head:first-of-type :global(.sec) {
-    margin-top: 6px;
-  }
-
-  .section-action {
-    position: absolute;
-    right: 0;
-    top: 50%;
-    display: grid;
-    width: 24px;
-    height: 24px;
-    padding: 0;
-    place-items: center;
-    transform: translateY(-50%);
-    border: 0;
-    border-radius: var(--r-xs);
-    background: transparent;
-    color: var(--tx-3);
-    font-size: 18px;
-  }
-
-  .section-action:hover {
-    background: var(--ink-1);
-    color: var(--tx);
-  }
-
-  /* Icons have no intrinsic size; match the panel header actions. */
-  .section-action :global(svg) {
-    width: 13px;
-    height: 13px;
-  }
-
   .path-list {
     display: flex;
     flex-direction: column;

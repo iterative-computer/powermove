@@ -10,7 +10,7 @@
   import { inspectorContext, type EditBinding } from './context';
 
   const { api, doc, transport, mixed, edit: inspectorEdit, inspector, timeline } = inspectorContext();
-  const { NumField, Row } = api.ui.controls;
+  const { NumField, SliderField, Row } = api.ui.controls;
   const { channelBinding } = api.ui.controls.binding;
 
   let {
@@ -19,6 +19,7 @@
     label,
     property,
     getValue,
+    defaultValue,
     step,
     min,
     max,
@@ -26,13 +27,15 @@
     precision,
     allowContextMenu = true,
     compact = false,
-    prefix
+    prefix,
+    visual = !!property
   }: {
     layer: any;
     channel: string;
     label: string;
     property?: any;
     getValue?: (time: number) => unknown;
+    defaultValue?: number;
     step?: number;
     min?: number;
     max?: number;
@@ -43,6 +46,7 @@
     compact?: boolean;
     /** Single-letter gutter label inside the well (X, Y, W, H). */
     prefix?: string;
+    visual?: boolean;
   } = $props();
 
   const instance = `channel-${++instanceSequence}`;
@@ -221,14 +225,40 @@
   }
 
   function resetChannel(): void {
-    const commands: EditCommand[] = channels.map((path) => ({
-      type: 'replace_keyframes',
-      target: layer.id,
-      path,
-      keyframes: [],
-      expression: null,
-      preserveHandEdits: false
-    }));
+    const comp = api.model.curComp();
+    const defaults: Record<string, number> = {
+      'anchor.x': layer.type === 'null' ? 50 : 0,
+      'anchor.y': layer.type === 'null' ? 50 : 0,
+      'anchor.z': 0,
+      'position.x': ['group', 'adjustment'].includes(layer.type) ? 0 : comp.w / 2,
+      'position.y': ['group', 'adjustment'].includes(layer.type) ? 0 : comp.h / 2,
+      'position.z': 0,
+      'scale.x': 100, 'scale.y': 100, 'scale.z': 100,
+      rotation: 0, 'rotation.x': 0, 'rotation.y': 0,
+      'orientation.x': 0, 'orientation.y': 0, 'orientation.z': 0,
+      opacity: layer.type === 'null' ? 0 : 100,
+      skew: 0, perspective: 50
+    };
+    const commands: EditCommand[] = channels.flatMap((path) => {
+      const value = defaultValue ?? (!property ? defaults[path] : undefined);
+      const reset: EditCommand[] = [{
+        type: 'replace_keyframes',
+        target: layer.id,
+        path,
+        keyframes: [],
+        expression: null,
+        preserveHandEdits: false
+      }];
+      if (value !== undefined) reset.push({
+        type: 'set_property',
+        target: layer.id,
+        path,
+        value,
+        mode: 'static',
+        preserveHandEdits: false
+      });
+      return reset;
+    });
     inspectorEdit.apply(commands.length > 1 ? commands : commands[0]!, { label: 'Reset', origin: 'inspector' });
     refreshValues();
   }
@@ -263,8 +293,10 @@
 </script>
 
 {#snippet well(fieldLabel: string, fieldEdit: EditBinding, getter: () => unknown, linked: boolean, gutter?: string)}
+  {@const Field = visual && Number.isFinite(min) && Number.isFinite(max) && max! > min! ? SliderField : NumField}
   <div class="well" data-prefix={gutter}>
-    <NumField
+    <Field
+      angle={visual && unit === '°'}
       {api}
       {mixed}
 

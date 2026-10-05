@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { EXTENSION_ID } from '../../shared/extensions';
@@ -35,6 +35,8 @@ export interface AgentApiPackFile {
 export interface PrepareAgentWorkspaceOptions {
   extensionsDir: string;
   apiPackFiles: readonly AgentApiPackFile[];
+  /** Main-owned child identity; keeps sibling inputs and result files apart. */
+  workspaceId?: string;
 }
 
 const byteLength = (value: string): number => Buffer.byteLength(value, 'utf8');
@@ -225,7 +227,7 @@ export async function prepareAgentWorkspace(
     return true;
   });
 
-  const root = agentWorkspaceRoot(userData, req.projectId);
+  const root = agentWorkspaceRoot(userData, options.workspaceId ?? req.projectId);
   return oneAtATime(root, async () => {
     const checkpointPath = `${sessionPathFor(root, authority, req.threadId, req.provider ?? 'chatgpt')}.checkpoint.json`;
     let checkpoint: ExtensionStage | null = null;
@@ -363,6 +365,11 @@ export async function prepareAgentWorkspace(
 export async function discardPartialRun(workspace: Pick<AgentWorkspace, 'root' | 'runDirectory' | 'stagingDirectory'>): Promise<void> {
   await discardWithin(workspace.root, workspace.runDirectory);
   await discardWithin(workspace.root, workspace.stagingDirectory);
+}
+
+/** Drop a run's artifact folder when the agent left nothing in it; a resumed run recreates it. */
+export async function removeEmptyRunDirectory(workspace: AgentWorkspace): Promise<void> {
+  try { await rmdir(workspace.runDirectory); } catch { /* holds files, or is already gone */ }
 }
 
 export async function preserveCancelledRun(workspace: AgentWorkspace): Promise<void> {

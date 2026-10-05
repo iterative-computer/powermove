@@ -70,7 +70,7 @@ const FX: Record<string, Omit<EffectDefinition, 'id' | 'rawShader'>> = {
   },
   glow: {
     label: 'Glow', group: 'Light & Shadow', passes: 3,
-    params: [{ k: 'threshold', label: 'Threshold', def: 55, min: 0, max: 100, step: 1, unit: '%' },
+    params: [{ k: 'threshold', advanced: true, label: 'Threshold', def: 55, min: 0, max: 100, step: 1, unit: '%' },
              { k: 'radius', label: 'Radius', def: 60, min: 0, max: 400, step: 1, unit: 'px' },
              { k: 'intensity', label: 'Intensity', def: 90, min: 0, max: 400, step: 1, unit: '%' }],
     frag: F(`
@@ -98,7 +98,7 @@ const FX: Record<string, Omit<EffectDefinition, 'id' | 'rawShader'>> = {
              { k: 'contrast', label: 'Contrast', def: 0, min: -100, max: 100, step: 1, unit: '' },
              { k: 'saturation', label: 'Saturation', def: 0, min: -100, max: 200, step: 1, unit: '' },
              { k: 'hue', label: 'Hue', def: 0, min: -180, max: 180, step: 1, unit: '°' },
-             { k: 'temperature', label: 'Temperature', def: 0, min: -100, max: 100, step: 1, unit: '' }],
+             { k: 'temperature', advanced: true, label: 'Temperature', def: 0, min: -100, max: 100, step: 1, unit: '' }],
     frag: F(`
       vec4 c = texture(u_tex, v_st); if (c.a < .0005) { o = c; return; }
       vec3 x = c.rgb / c.a;
@@ -227,16 +227,17 @@ const FX: Record<string, Omit<EffectDefinition, 'id' | 'rawShader'>> = {
   },
   gradient: {
     label: 'Gradient Ramp', group: 'Generate', passes: 1,
+    ui: [{ kind: 'ramp', start: 'startColor', end: 'endColor', midpoint: 'midpoint', mode: 'radial' }, { kind: 'point', x: 'centerX', y: 'centerY', label: 'Center', advanced: true }],
     params: [{ k: 'startColor', label: 'Start Color', def: '#FFFFFF', type: 'color' },
              { k: 'endColor', label: 'End Color', def: '#000000', type: 'color' },
              { k: 'angle', label: 'Angle', def: 90, min: -360, max: 360, step: 1, unit: '°' },
-             { k: 'centerX', label: 'Center X', def: 0, min: -100, max: 100, step: .5, unit: '%' },
-             { k: 'centerY', label: 'Center Y', def: 0, min: -100, max: 100, step: .5, unit: '%' },
-             { k: 'spread', label: 'Spread', def: 100, min: 1, max: 400, step: 1, unit: '%' },
+             { k: 'centerX', advanced: true, label: 'Center X', def: 0, min: -100, max: 100, step: .5, unit: '%' },
+             { k: 'centerY', advanced: true, label: 'Center Y', def: 0, min: -100, max: 100, step: .5, unit: '%' },
+             { k: 'spread', advanced: true, label: 'Spread', def: 100, min: 1, max: 400, step: 1, unit: '%' },
              { k: 'midpoint', label: 'Midpoint', def: 50, min: 1, max: 99, step: .5, unit: '%' },
              { k: 'radial', label: 'Radial', def: false, type: 'toggle' },
-             { k: 'shade', label: 'Keep Luminance', def: false, type: 'toggle' },
-             { k: 'dither', label: 'Dither', def: 1, min: 0, max: 20, step: .1, unit: '' },
+             { k: 'shade', advanced: true, label: 'Keep Luminance', def: false, type: 'toggle' },
+             { k: 'dither', advanced: true, label: 'Dither', def: 1, min: 0, max: 20, step: .1, unit: '' },
              { k: 'amount', label: 'Amount', def: 100, min: 0, max: 100, step: 1, unit: '%' }],
     /* Named uniforms (the current param contract) rather than the positional
        u_p<i> of the older effects above — eleven params read better by name.

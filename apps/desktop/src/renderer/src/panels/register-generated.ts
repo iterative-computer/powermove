@@ -29,7 +29,12 @@ function dispose(PM: LegacyPM, id: string): void {
   }
   // The panel pool caches persistent panels by this entry. Removing it makes
   // the next apply rebuild the panel with the new section manifest.
-  if (PM.panelInst) delete PM.panelInst[id];
+  if (PM.panelInst) {
+    // The layout keeps panel shells alive. Retire the old shell too, otherwise
+    // rebuilding a generated tool leaves an empty duplicate in its dock.
+    PM.panelInst[id]?.el?.remove();
+    delete PM.panelInst[id];
+  }
 }
 
 function registerGeneratedPanel(PM: LegacyPM, section: GeneratedSection): void {

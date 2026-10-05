@@ -70,6 +70,9 @@
 }
 #agent-popover .agent-popover-panel-host > #panel-agent > header { display: none; }
 #agent-popover .agent-popover-panel-host > #panel-agent > .body { flex: 1; min-height: 0; }
+/* Without the panel header above it, the thread bar takes the same inset from
+   the top as from the right edge. */
+#agent-popover .thread-bar { margin-top: 10px; }
 
 /* ── floating window chrome, shared with the extension repair chat ── */
 .agent-floating-window {

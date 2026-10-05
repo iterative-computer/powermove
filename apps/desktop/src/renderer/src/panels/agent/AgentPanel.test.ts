@@ -279,8 +279,14 @@ describe('AgentPanel', () => {
     expect(rows[0]!.textContent).toContain('Current');
     expect(rows[1]!.textContent).toContain('Opened 5 days ago');
 
-    flushSync(() => rows[0]!.querySelector<HTMLButtonElement>('[aria-label="Delete thread: Animate the title"]')!.click());
-    expect(PM.AgentUI.deleteThread).toHaveBeenCalledWith('first');
+    const deleteFirst = rows[0]!.querySelector<HTMLButtonElement>('[aria-label="Delete thread: Animate the title"]')!;
+    PM.confirm = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    flushSync(() => deleteFirst.click());
+    await Promise.resolve();
+    expect(PM.confirm).toHaveBeenCalledWith(expect.objectContaining({ message: 'Delete “Animate the title”?', destructive: true }));
+    expect(PM.AgentUI.deleteThread).not.toHaveBeenCalled();
+    flushSync(() => deleteFirst.click());
+    await vi.waitFor(() => expect(PM.AgentUI.deleteThread).toHaveBeenCalledWith('first'));
     expect(PM.AgentUI.switchThread).not.toHaveBeenCalled();
 
     flushSync(() => rows[1]!.click());
@@ -694,7 +700,7 @@ describe('AgentPanel', () => {
     expect(log.querySelector('details img')?.getAttribute('alt')).toBe('Rendered composition at 0 seconds');
   });
 
-  it('omits files and external activity after completion while keeping review notes', () => {
+  it('lists the run\'s files but omits external activity after completion', () => {
     PM.assetKind.mockReturnValue('video');
     renderPanel(snapshot({
       legacyPhase: 'result',
@@ -712,12 +718,15 @@ describe('AgentPanel', () => {
     expect(log.textContent).toContain('Review the license before publishing.');
     expect(log.textContent).toContain('The clip could not be imported.');
     expect(log.textContent).not.toContain('Downloaded reference footage');
-    expect(log.querySelector('.agent-artifacts')).toBeNull();
+    const files = log.querySelector('.agent-run-files')!;
+    expect(files.querySelector('summary')!.textContent).toBe('1 file');
+    expect(files.textContent).toContain('clip.mp4');
+    (files.querySelector('[aria-label="Reveal clip.mp4 in Finder"]') as HTMLButtonElement).click();
+    expect(PM.AgentUI.revealArtifact).toHaveBeenCalledOnce();
     expect(log.querySelector('.agent-external-actions')).toBeNull();
     expect(target.textContent).not.toContain('Undo change');
     expect(target.textContent).not.toContain('Done');
     expect(log.querySelector('[aria-label="Add clip.mp4 to timeline"]')).toBeNull();
-    expect(log.querySelector('[aria-label="Reveal clip.mp4 in Finder"]')).toBeNull();
     expect(target.querySelector('.agent-inline-prompt')?.getAttribute('aria-disabled')).toBe('false');
 
     flushSync(() => setAgentSnapshot(snapshot({

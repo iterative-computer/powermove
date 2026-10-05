@@ -8,6 +8,10 @@
  */
 
 import type { Component } from 'svelte';
+import type { Scene3D, SceneObject, SceneLight, SceneSource } from '../core/scene3d/schema';
+import type { Scene3DEdit } from '../core/scene3d/operations';
+export type { Scene3D, SceneObject, SceneLight, SceneSource, SceneChannel } from '../core/scene3d/schema';
+export type { Scene3DEdit } from '../core/scene3d/operations';
 import type {
   BlendMode,
   Channel,
@@ -171,10 +175,21 @@ export interface KeybindingsAPI {
 
 /* ── effects & transitions ───────────────────────────────── */
 
-export type EffectParamDefinition =
+export interface ParameterPresentation {
+  /** Secondary controls live under More. Explicit false keeps a control visible. */
+  advanced?: boolean;
+  /** Numeric choices, or boolean choices for an existing toggle. */
+  options?: { v: number | boolean; label: string }[];
+}
+
+export type ParameterWidget =
+  | { kind: 'ramp'; start: string; end: string; midpoint?: string; mode?: string }
+  | { kind: 'point'; x: string; y: string; label?: string; advanced?: boolean };
+
+export type EffectParamDefinition = ParameterPresentation & (
   | { k: string; label: string; def: number; min: number; max: number; step?: number; unit?: string; type?: 'number' }
   | { k: string; label: string; def: string; type: 'color' }
-  | { k: string; label: string; def: boolean; type: 'toggle' };
+  | { k: string; label: string; def: boolean; type: 'toggle' });
 
 /**
  * Fragment shader body contract (GLSL ES 3.00). The kernel prepends the common
@@ -196,6 +211,8 @@ export interface EffectDefinition {
   group: string;
   /** At most 32 params; keys must be unique and match /^[a-z][a-zA-Z0-9]*$/. */
   params: EffectParamDefinition[];
+  /** Visual controls bind existing keys; project data and animation paths stay the same. */
+  ui?: ParameterWidget[];
   /** Non-empty shader body, at most 65,536 characters. */
   frag: string;
   passes?: number; // 1..8
@@ -222,6 +239,8 @@ export interface TransitionDefinition {
   group?: string;
   /** Same 32-param limit and key restrictions as effects. */
   params: EffectParamDefinition[];
+  /** Visual controls bind existing keys; project data and animation paths stay the same. */
+  ui?: ParameterWidget[];
   frag: string;
   rawShader?: boolean;
 }
@@ -254,6 +273,8 @@ export interface ExtensionLayerDefinition {
   width?: number;
   height?: number;
   params: EffectParamDefinition[];
+  /** Visual controls bind existing keys; project data and animation paths stay the same. */
+  ui?: ParameterWidget[];
   defaults?: JsonObject;
   renderer: {
     kind: 'fragment';
@@ -263,7 +284,59 @@ export interface ExtensionLayerDefinition {
     kind: 'mesh';
     /** Key inside layer `data` containing the durable model asset id. */
     assetField: string;
+  } | {
+    /** Kernel-owned physically based scene renderer; data.scene is validated project source. */
+    kind: 'scene3d';
+  } | {
+    kind: 'layer3d';
+    role: 'object'|'light'|'camera';
   };
+}
+
+export interface Scene3DGizmo {
+  update(rect:{x:number;y:number;width:number;height:number},selection?:string[]):void;
+  hover(clientX:number,clientY:number):boolean;
+  pointerDown(event:PointerEvent):boolean;
+  active():boolean;
+  covers(ids:readonly string[]):boolean;
+  cancel():void;
+  dispose():void;
+}
+export interface Scene3DAPI {
+  isGroup(layerId:string):boolean;
+  getView():'camera'|'editor';
+  setView(mode:'camera'|'editor'):void;
+  onViewChange(listener:(mode:'camera'|'editor')=>void):Disposable;
+  getNavigationMode():'select'|'orbit'|'pan'|'dolly';
+  setNavigationMode(mode:'select'|'orbit'|'pan'|'dolly'):void;
+  onNavigationChange(listener:(mode:'select'|'orbit'|'pan'|'dolly')=>void):Disposable;
+  createNavigation(element:HTMLElement):{
+    update(rect:{width:number;height:number},selection:string[]):void;
+    pointerDown(event:PointerEvent):boolean;
+    wheel(event:WheelEvent):boolean;
+    frame(selected?:boolean):void;
+    active():boolean;
+    cancel():void;
+    dispose():void;
+  };
+  frame(selected?:boolean):void;
+  getMode(): 'translate'|'rotate'|'scale';
+  setMode(mode:'translate'|'rotate'|'scale'):void;
+  getSpace():'world'|'local';
+  setSpace(space:'world'|'local'):void;
+  onGizmoChange(listener:(state:{mode:'translate'|'rotate'|'scale';space:'world'|'local'})=>void):Disposable;
+  createGizmo(element:HTMLElement):Scene3DGizmo;
+  /** Pack selected OBJ/MTL/texture files into a durable GLB, or return a standalone model. */
+  prepareImport(files: File[]): Promise<File>;
+  /** Explicit undoable upgrade of a v1 model layer, preserving channels and baking camera animation. */
+  convert(layerId: string): EditResult;
+  createScene(): Scene3D;
+  createObject(id: string,source?: SceneSource,name?: string): SceneObject;
+  createLight(id: string,type?: SceneLight['type'],name?: string): SceneLight;
+  edit(args: Scene3DEdit,meta?: EditMeta): EditResult;
+  describe(layerId?: string): Scene3D|null;
+  selection(): {layerId: string|null;ids: string[]};
+  select(layerId: string|null,ids: string[]): void;
 }
 
 export interface ExtensionLayersAPI {
@@ -803,10 +876,15 @@ export interface ControlBindingOptions {
 }
 
 export interface ControlsAPI {
+  readonly Segmented: Component<{options:{id:string;label:string}[];value:string;onChange:(id:string)=>void;label?:string}>;
   /** Kernel-provided control components; props match src/renderer/src/controls — stable within apiVersion 1. */
   readonly NumField: ControlComponent;
   readonly ColorField: ControlComponent;
   readonly FillField: ControlComponent;
+  readonly RampField: ControlComponent;
+  readonly PointField: ControlComponent;
+  readonly SliderField: ControlComponent;
+  readonly Disclosure: ControlComponent;
   readonly FontField: ControlComponent;
   readonly SelectField: ControlComponent;
   readonly TextField: ControlComponent;
@@ -973,6 +1051,7 @@ export interface StorageAPI {
 /* ── events ──────────────────────────────────────────────── */
 
 export interface KernelEvents {
+  'scene3d:selection': {layerId: string|null;ids: string[]};
   'inspector:changed': undefined;
   'project:changed': { kind: 'values' | 'structure' | 'project' | 'assets' | 'library' | 'history' | 'replace' };
   selection: Selection;
@@ -1101,6 +1180,7 @@ export interface PowermoveAPI {
   readonly effects: EffectsAPI;
   readonly transitions: TransitionsAPI;
   readonly layers: ExtensionLayersAPI;
+  readonly scene3d: Scene3DAPI;
   readonly assets: AssetsAPI;
   readonly theme: ThemeAPI;
   readonly palette: PaletteAPI;

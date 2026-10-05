@@ -1,3 +1,5 @@
+import {mount,unmount} from 'svelte';
+import GizmoToolbar from './GizmoToolbar.svelte';
 import type { EditCommand, InspectorService, PowermoveAPI, Space3DAPI, ToolService, ViewerService } from 'powermove';
 
 type ViewerSpace3D = Pick<Space3DAPI, 'is3DLayer' | 'planeMatrix' | 'planeContains' | 'projectPoint' | 'inversePlane'>;
@@ -772,9 +774,15 @@ const displayViewport = (viewport: PreviewViewport, zoom = viewport.cssWidth / v
 };
 const eventOffs: Array<() => void> = [];
 
+let sceneGizmo:ReturnType<PowermoveAPI['scene3d']['createGizmo']>|null=null;
+let sceneNavigation:ReturnType<PowermoveAPI['scene3d']['createNavigation']>|null=null;
+let gizmoToolbar:any=null,gizmoToolbarHost:HTMLElement|null=null;
+const isModel3D=(layer:any)=>['powermove.3d.object','powermove.3d.light','powermove.3d.camera'].includes(layer?.d?.definition) || !!api.scene3d?.isGroup?.(layer?.id);
 const disposeRuntime = () => {
   if (disposed) return;
   disposed = true;
+  sceneGizmo?.dispose();sceneGizmo=null;if(gizmoToolbar)void unmount(gizmoToolbar);gizmoToolbarHost?.remove();
+  sceneNavigation?.dispose();sceneNavigation=null;
   activeDrag?.cancel(); activeDrag = null;
   unbindStage?.(); unbindStage = null;
   resizeObserver?.disconnect(); resizeObserver = null;
@@ -830,6 +838,8 @@ V.attach = (stage: HTMLElement) => {
       recovery.innerHTML = '<span>Composition is out of view</span><b>Fit composition</b>';
       stage.appendChild(recovery);
     }
+    if(api.scene3d?.createGizmo)sceneGizmo=api.scene3d.createGizmo(stage);V.sceneGizmo=sceneGizmo;
+    if(api.scene3d?.createNavigation)sceneNavigation=api.scene3d.createNavigation(stage);V.sceneNavigation=sceneNavigation;
     V.el = gl; V.ov = ov; V.octx = ov.getContext('2d'); V.inner = inner; V.stage = stage;
     V.recovery = recovery;
     const zoomHost = stage.closest<HTMLElement>('.panel') ?? stage;
@@ -851,6 +861,12 @@ V.attach = (stage: HTMLElement) => {
     zoomHost.append(zoomControl);
     zoomControl.style.cssText = 'position:absolute;right:8px;top:7px;z-index:6;width:110px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui)';
     V.zoomControl = zoomControl;
+    if(api.scene3d){
+      gizmoToolbarHost=document.createElement('div');gizmoToolbarHost.id='composition-3d-controls';
+      gizmoToolbarHost.style.cssText='position:absolute;right:212px;top:7px;z-index:6;display:none;align-items:center;gap:6px';
+      zoomHost.append(gizmoToolbarHost);gizmoToolbar=mount(GizmoToolbar,{target:gizmoToolbarHost,props:{api}});
+    }
+
     let preview=zoomHost.querySelector<HTMLElement>('#preview-controls');
     if(!preview){preview=document.createElement('div');preview.id='preview-controls';zoomHost.append(preview);}
     preview.style.cssText='position:absolute;right:124px;top:7px;z-index:6;display:flex;align-items:center';
@@ -1082,6 +1098,12 @@ function drawOverlay() {
   if (!overlayGeometry) return;
   const selectionInk = selectionOutlineColor(api.project.get());
   const p = api.project.get(), dpr = V.ov.width / overlayGeometry.width;
+  const gizmoSelection=api.selection.layers();
+  const gizmoVisible=V.showControls!==false && !!sceneGizmo?.covers(gizmoSelection);
+  sceneGizmo?.update({x:overlayGeometry.x,y:overlayGeometry.y,width:p.w*V.shown,height:p.h*V.shown},gizmoVisible?gizmoSelection:[]);
+  sceneNavigation?.update({width:p.w*V.shown,height:p.h*V.shown},gizmoSelection);
+  if(gizmoToolbarHost)gizmoToolbarHost.style.display=api.model.curComp().layers.some((l:any)=>l.d?.definition==='powermove.3d.object')?'flex':'none';
+
   c.setTransform(1, 0, 0, 1, 0, 0);
   c.clearRect(0, 0, V.ov.width, V.ov.height);
   if (V.zoomRect) {
@@ -1131,7 +1153,7 @@ function drawOverlay() {
   }
 
   const hovered = hoverId ? api.model.layer(hoverId) : null;
-  if (hovered && api.anim.active(hovered, api.transport.time()) && hovered.id !== V.canvasTextEditing) {
+  if (hovered && !isModel3D(hovered) && api.anim.active(hovered, api.transport.time()) && hovered.id !== V.canvasTextEditing) {
     const geometry = resolveSelectionGeometry(api, [hovered], api.transport.time(), space3d);
     if (geometry) {
       c.strokeStyle = selectionInk;
@@ -1144,7 +1166,7 @@ function drawOverlay() {
     }
   }
 
-  const sels = visualSelection(api).filter((L: any) => api.anim.active(L, api.transport.time()) && L.id !== V.canvasTextEditing);
+  const sels = visualSelection(api).filter((L: any) => !isModel3D(L) && api.anim.active(L, api.transport.time()) && L.id !== V.canvasTextEditing);
   const selection = resolveSelectionGeometry(api, sels, api.transport.time(), space3d);
   /* Multi-selection keeps light per-layer outlines for orientation, but owns
      exactly one common transform box and one set of controls. */
@@ -1480,7 +1502,7 @@ function bindStage(stage: any, inner: any): () => void {
     listeners.push([target, type, handler, options]);
   };
   const guarded = (handler: (event: any) => void) => ((event: any) => {
-    if ((event.target as Element)?.closest?.('#composition-zoom, #preview-controls, [contenteditable]')) return;
+    if ((event.target as Element)?.closest?.('#composition-zoom, #preview-controls, #composition-3d-controls, [contenteditable]')) return;
     handler(event);
   }) as EventListener;
   const capture = undefined;
@@ -1501,8 +1523,18 @@ function bindStage(stage: any, inner: any): () => void {
     const point = pointerComp({ clientX, clientY });
     return api.render.gl.pick(point.x, point.y, api.transport.time());
   };
+  listen(stage,'pointerdown',guarded((event:any)=>{
+    if(sceneGizmo?.active())return;
+    if(sceneNavigation?.pointerDown(event))return;
+    if(sceneGizmo?.pointerDown(event))return;
+  }),true);
   listen(stage, 'pointerdown', guarded(onDown), capture);
   listen(stage, 'pointermove', guarded((e: any) => {
+    const navigationMode=api.scene3d?.getNavigationMode?.();
+    if(navigationMode && navigationMode!=='select' && api.model.curComp().layers.some((l:any)=>l.d?.definition==='powermove.3d.object')){
+      setStageCursor(navigationMode==='dolly'?'ns-resize':'grab');return;
+    }
+    if(sceneGizmo?.hover(e.clientX,e.clientY)){setStageCursor('pointer');return;}
     updateStageCursor(e);
     hoverPointer = { clientX: e.clientX, clientY: e.clientY, deep: e.metaKey || e.ctrlKey };
     scheduleHover();
@@ -1511,6 +1543,8 @@ function bindStage(stage: any, inner: any): () => void {
   listen(stage, 'pointerleave', guarded(() => { V.pointerOver = false; hoverPointer = null; setHover(null); setStageCursor(''); }), capture);
   listen(stage, 'wheel', guarded((e: any) => {
     e.preventDefault();
+    if(sceneGizmo?.active())return;
+    if(sceneNavigation?.wheel(e))return;
     if (viewerWheelMode(e) === 'zoom') {
       zoomGestureUntil = window.performance.now() + 80;
       navigationUntil = window.performance.now() + 250;
@@ -1587,6 +1621,15 @@ function bindStage(stage: any, inner: any): () => void {
       e.preventDefault();
       e.stopPropagation();
       api.commands.run('openComposition', hit.d.comp);
+      return;
+    }
+    /* Double-clicking a 3D scene layer opens it in the 3D Scene editor; a
+       legacy OBJ layer is first converted to a scene (one Undo). */
+    const renderer = hit?.type === 'extension' ? api.layers.get(String(hit.d?.definition ?? ''))?.renderer.kind : null;
+    if (renderer === 'scene3d' || renderer === 'mesh') {
+      e.preventDefault();
+      e.stopPropagation();
+      api.commands.run('3d.convert-layer', hit.id);
     }
   }), capture);
   /* FX browser drops (effects / transitions). Non-fx drags (OS files) are left
@@ -1648,7 +1691,7 @@ function hoverTargetId(): string | null {
   if ((V.temporaryTool || toolService()?.tool || 'select') !== 'select') return null;
   const T = api.transport.time();
   const point = pointerComp(hoverPointer);
-  const selection = resolveSelectionGeometry(api, visualSelection(api), T, space3d);
+  const selection = resolveSelectionGeometry(api, visualSelection(api).filter((l:any)=>!isModel3D(l)), T, space3d);
   if (selection?.transformable && handleAt(selection, point.x, point.y)) return null;
   const target = resolvePickTarget(api, api.render.gl.pick(point.x, point.y, T), { deep: hoverPointer.deep });
   if (!target || visualSelection(api).some((layer: any) => layer.id === target.id)) return null;
@@ -1679,7 +1722,7 @@ function updateStageCursor(e: any) {
   if (tool === 'shape') { setStageCursor('crosshair'); return; }
   if (tool === 'text') { setStageCursor('text'); return; }
   const [x, y] = toComp(e), T = api.transport.time();
-  const selection = resolveSelectionGeometry(api, visualSelection(api), T, space3d);
+  const selection = resolveSelectionGeometry(api, visualSelection(api).filter((l:any)=>!isModel3D(l)), T, space3d);
   if (selection?.transformable) {
     const hit = handleAt(selection, x, y);
     if (hit) { setStageCursor(cursorForHit(selection, hit)); return; }
@@ -1763,13 +1806,15 @@ function onDown(e: any) {
   if (tool === 'pen') return startPathEdit(api,V,e,pointerComp,beginDrag,V.shown);
   if (tool === 'shape') return startShape(e);
   if (tool === 'text') return startText(e);
+  if (tool === 'rotate' && visualSelection(api).some(isModel3D)){api.scene3d.setMode('rotate');return;}
   if (tool === 'rotate') return startRotationTool(e);
+  if (tool === 'anchor' && visualSelection(api).some(isModel3D))return;
   if (tool === 'anchor') return startAnchorTool(e);
 
   const [x, y] = toComp(e);
   const T = api.transport.time();
 
-  const selection = resolveSelectionGeometry(api, visualSelection(api), T, space3d);
+  const selection = resolveSelectionGeometry(api, visualSelection(api).filter((l:any)=>!isModel3D(l)), T, space3d);
   if (selection?.transformable) {
     const hit = handleAt(selection, x, y);
     if (hit) return startTransform(e, selection, hit, T);
@@ -1800,6 +1845,7 @@ function onDown(e: any) {
     return;
   }
   selectLayers(L.id, e.shiftKey);
+  if(isModel3D(L))return;
   const nextSelection = resolveSelectionGeometry(api, visualSelection(api), T, space3d);
   if (nextSelection) startMove(e, nextSelection.roots, T, { selectionLayers: nextSelection.layers });
 }

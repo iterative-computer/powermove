@@ -1,10 +1,9 @@
 <script lang="ts">
-  import { inspectorContext, type EditBinding } from './context';
-  import AnimatedRow from './AnimatedRow.svelte';
-  import ChannelRow from './ChannelRow.svelte';
+  import { inspectorContext } from './context';
+  import ParameterList from './ParameterList.svelte';
 
-  const { api, doc, transport, mixed } = inspectorContext();
-  const { ColorField, Section, ToggleField } = api.ui.controls;
+  const { api, doc } = inspectorContext();
+  const { Section } = api.ui.controls;
 
   let { layer }: { layer: any } = $props();
   const definition = $derived((doc.tick.structure, doc.proj, api.layers.get(String(layer.d?.definition || ''))));
@@ -14,17 +13,7 @@
     return api.assets.get(String(layer.d?.data?.[definition.renderer.assetField] || '')) ?? null;
   });
 
-  function fieldBinding(path: string, label: string): EditBinding {
-    return {
-      mode: 'command',
-      label,
-      origin: 'inspector',
-      command: (value: unknown) => ({
-        type: 'set_property', target: layer.id, path, value: value as any,
-        time: api.transport.time(), preserveHandEdits: false
-      })
-    };
-  }
+
 </script>
 
 {#if !definition}
@@ -34,6 +23,8 @@
     <code>{String(layer.d?.definition || 'Unknown definition')}</code>
     <small>The structured layer data is preserved.</small>
   </div>
+{:else if definition.renderer.kind === 'scene3d' || definition.renderer.kind === 'layer3d'}
+  <!-- Scene layers are edited through the 3D Layers extension's Scene section. -->
 {:else}
   <Section {api} title={definition.label} />
   {#if Number(layer.d?.version) !== definition.version}
@@ -48,46 +39,7 @@
       {#if meshAsset?.triangles}<small>{Number(meshAsset.triangles).toLocaleString()} triangles</small>{/if}
     </div>
   {/if}
-  {#each definition.params as parameter (parameter.k)}
-    {@const property = layer.d?.params?.[parameter.k]}
-    {#if property}
-      {@const path = `x.${parameter.k}`}
-      {#if parameter.type === 'color'}
-        <AnimatedRow {layer} {path} label={parameter.label}>
-          <ColorField
-            {api}
-            {mixed}
-            get={() => (doc.tick.values, doc.proj, transport.time, api.anim.evP(layer, property, transport.time, path))}
-            edit={fieldBinding(path, parameter.label)}
-            label={parameter.label}
-          />
-        </AnimatedRow>
-      {:else if parameter.type === 'toggle'}
-        <AnimatedRow {layer} {path} label={parameter.label}>
-          <ToggleField
-            {api}
-            {mixed}
-            get={() => (doc.tick.values, doc.proj, transport.time, api.anim.evP(layer, property, transport.time, path))}
-            edit={fieldBinding(path, parameter.label)}
-            label={parameter.label}
-          />
-        </AnimatedRow>
-      {:else}
-        <ChannelRow
-          {layer}
-          channel={path}
-          label={parameter.label}
-          {property}
-          getValue={(time) => api.anim.evP(layer, property, time, parameter.k)}
-          step={parameter.step ?? ((parameter.max - parameter.min) / 200 || 0.01)}
-          min={parameter.min}
-          max={parameter.max}
-          unit={parameter.unit}
-          precision={3}
-        />
-      {/if}
-    {/if}
-  {/each}
+  <ParameterList {layer} params={definition.params} properties={layer.d?.params ?? {}} prefix="x" ui={definition.ui} />
 {/if}
 
 <style>

@@ -49,6 +49,7 @@ import type { PowermoveExtensionsBridge } from '../../../shared/ipc';
 import { createExtensionAPI, type ExtensionHandle, type HostDeps, type PanelsBackend } from './host';
 import { createLoader, type BuiltinFactory, type Loader } from './loader';
 import { createKernel, runKernelCommand, type Kernel } from './registries';
+import { makeScene3DAPI } from '../core/scene3d/api';
 import { records as storeRecords } from './extensions.svelte';
 import { installRuntimeGlobals } from './runtime-globals';
 import { installKernelSignals } from './signals.svelte';
@@ -56,12 +57,17 @@ import { DEFAULT_THEME, installThemeApply, type ThemeApplyHandle } from './theme
 import NumField from '../controls/NumField.svelte';
 import ColorField from '../controls/ColorField.svelte';
 import FillField from '../controls/FillField.svelte';
+import RampField from '../controls/RampField.svelte';
+import PointField from '../controls/PointField.svelte';
+import SliderField from '../controls/SliderField.svelte';
+import Disclosure from '../controls/Disclosure.svelte';
 import FontField from '../controls/FontField.svelte';
 import SelectField from '../controls/SelectField.svelte';
 import TextField from '../controls/TextField.svelte';
 import ToggleField from '../controls/ToggleField.svelte';
 import Row from '../controls/Row.svelte';
 import Section from '../controls/Section.svelte';
+import Segmented from '../controls/Segmented.svelte';
 import { channelBinding, compositionBinding, contentBinding, layerFieldBinding, type ControlBindingAPI } from '../controls/binding';
 import { doc } from '../state/document.svelte';
 import { sel } from '../state/selection.svelte';
@@ -126,9 +132,14 @@ export interface InstalledKernel extends Kernel {
 const STORE_PREFIX = 'ext.';
 
 const controls: ControlsAPI = {
+  Segmented,
   NumField: NumField as unknown as ControlsAPI['NumField'],
   ColorField: ColorField as unknown as ControlsAPI['ColorField'],
   FillField: FillField as unknown as ControlsAPI['FillField'],
+  RampField: RampField as unknown as ControlsAPI['RampField'],
+  PointField: PointField as unknown as ControlsAPI['PointField'],
+  SliderField: SliderField as unknown as ControlsAPI['SliderField'],
+  Disclosure: Disclosure as unknown as ControlsAPI['Disclosure'],
   FontField: FontField as unknown as ControlsAPI['FontField'],
   SelectField: SelectField as unknown as ControlsAPI['SelectField'],
   TextField: TextField as unknown as ControlsAPI['TextField'],
@@ -723,6 +734,7 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
     util,
     ease: makeEase(PM),
     space3d: makeSpace3D(PM),
+    scene3d: makeScene3DAPI(PM,(event,payload)=>kernel.events.emit(event,payload)),
     assets: makeAssets(PM),
     storage: makeStorage(PM),
     extensions: makeExtensionsAPI(PM, bridge, () => box.loader),

@@ -1,4 +1,4 @@
-import { test, expect } from './helpers/app';
+import { test, expect, chooseNativeMenu } from './helpers/app';
 import type { Page } from '@playwright/test';
 
 async function setup(page: Page) {
@@ -31,11 +31,41 @@ const timing = (page: Page) => page.evaluate(() => {
   return { delay: p.delay.v, duration: p.duration.v, stagger: p.stagger.v };
 });
 
-test('a stagger preset plays without keyframes and its timeline band edits timing with one Undo each', async ({ session }) => {
+test('a stagger preset plays without keyframes and its timeline band edits timing with one Undo each', async ({ session }, testInfo) => {
   await session.openEditor();
   const { page } = session;
   const id = await setup(page);
-  await page.getByRole('group', { name: 'Text animator presets' }).getByRole('button', { name: 'Rise', exact: true }).click();
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.evaluate((scheme) => (window as any).PM.theme.apply(scheme), scheme);
+    const empty = page.locator('[data-empty-section="Text animators"]');
+    await expect(empty).toBeVisible();
+    const layout = await page.evaluate(() => {
+      const animator = document.querySelector<HTMLElement>('[data-empty-section="Text animators"]')!;
+      const masks = document.querySelector<HTMLElement>('[data-empty-section="Masks"]')!;
+      const header = animator.querySelector<HTMLElement>('.sec')!;
+      const next = masks.nextElementSibling as HTMLElement;
+      const action = header.querySelector<HTMLElement>('button')!;
+      const h = header.getBoundingClientRect(), a = action.getBoundingClientRect();
+      return { height: h.height, footprint: animator.getBoundingClientRect().height, gap: masks.getBoundingClientRect().top - animator.getBoundingClientRect().bottom,
+        centered: Math.abs((a.top + a.height / 2) - (h.top + h.height / 2)) < 1,
+        maskButtons: masks.querySelectorAll('button').length,
+        nextGap: next.getBoundingClientRect().top - masks.getBoundingClientRect().bottom,
+        matchingTitleColor: getComputedStyle(header).color === getComputedStyle(next).color };
+    });
+    expect(layout).toEqual({ height: 33, footprint: 33, gap: 0, centered: true, maskButtons: 1, nextGap: 0, matchingTitleColor: true });
+    await page.locator('[data-empty-section="Masks"]').scrollIntoViewIfNeeded();
+    const a = (await empty.boundingBox())!;
+    const m = (await page.locator('[data-empty-section="Masks"]').boundingBox())!;
+    await testInfo.attach(`compact-inspector-${scheme}`, { contentType: 'image/png',
+      body: await page.screenshot({ clip: { x: a.x, y: a.y, width: a.width, height: m.y + m.height - a.y } }) });
+  }
+  await page.getByRole('button', { name: 'Add mask', exact: true }).click();
+  await expect(page.locator('[data-mask-id]')).toHaveCount(1);
+  await expect(page.locator('[data-empty-section="Masks"]')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Delete mask 1', exact: true }).click();
+  await expect(page.locator('[data-empty-section="Masks"]')).toBeVisible();
+  await expect(page.getByRole('group', { name: 'Text animator presets' })).toHaveCount(0);
+  await chooseNativeMenu(session, 'Rise', () => page.getByRole('button', { name: 'Add text animator', exact: true }).click());
   await expect(page.getByRole('button', { name: 'Collapse Rise', exact: true })).toBeVisible();
 
   const coverage = await page.evaluate(() => {

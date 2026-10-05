@@ -380,10 +380,14 @@ describe('generated panel registration', () => {
     flushSync();
     expect(firstBody.querySelector('[data-svelte-panel="generated"]')).toBeTruthy();
 
-    PM.panelInst.generated = { built: true, body: firstBody };
+    const firstShell = document.createElement('section');
+    firstShell.append(firstBody);
+    document.body.append(firstShell);
+    PM.panelInst.generated = { built: true, body: firstBody, el: firstShell };
     const second = { ...first, title: 'Updated', note: 'Fresh manifest' };
     registerGeneratedPanels(PM, { custom: [second] });
     expect(PM.panelInst.generated).toBeUndefined();
+    expect(firstShell.isConnected).toBe(false);
     expect(firstBody.childElementCount).toBe(0);
 
     const secondBody = document.createElement('div');

@@ -4,6 +4,7 @@
   import ChannelRow from './ChannelRow.svelte';
   import AnimatedRow from './AnimatedRow.svelte';
   import Icon from './Icon.svelte';
+  import SectionHeading from './SectionHeading.svelte';
   import { structuredProperties } from 'powermove';
   import { inspectorRefresh } from './refresh.svelte';
   import {
@@ -13,7 +14,7 @@
   } from './text-animators';
 
   const { api, doc, transport, mixed, edit: inspectorEdit, viewer } = inspectorContext();
-  const { Section, Row, SelectField, ColorField } = api.ui.controls;
+  const { Row, SelectField, ColorField } = api.ui.controls;
   let { layer }: { layer: any } = $props();
 
   const MODES: Array<{ v: TextAnimatorMode; label: string }> = [
@@ -160,7 +161,6 @@
   function focusSelect(node: HTMLInputElement) { node.focus(); node.select(); }
 
   const label = (key: string) => key.replace(/([A-Z])/g, ' $1').replace(/^./, (x) => x.toUpperCase());
-  const quickPresets = ANIMATOR_PRESETS.filter((preset) => preset.group !== 'custom');
 </script>
 
 {#snippet segmented(options: Array<{ v: string; label: string }>, current: string, name: string, pick: (value: any) => void)}
@@ -176,18 +176,9 @@
     step={options.step ?? 1} min={options.min} max={options.max} precision={options.precision} />
 {/snippet}
 
-<div class="section-head">
-  <Section {api} title="Text animators" />
+<SectionHeading title="Text animators" empty={!views.length && !styles.length}>
   <button class="section-action" onpointerdown={(event) => { event.preventDefault(); api.ui.menu(event.currentTarget as HTMLElement, presetMenu()); }} aria-label="Add text animator" title="Add text animator"><Icon name="plus" /></button>
-</div>
-
-{#if !views.length}
-  <div class="presets" role="group" aria-label="Text animator presets">
-    {#each quickPresets as preset (preset.id)}
-      <button type="button" class="preset" onclick={() => addPreset(preset)}>{preset.label}</button>
-    {/each}
-  </div>
-{/if}
+</SectionHeading>
 
 {#each views as view (view.animator.id)}
   {@const animator = view.animator}
@@ -298,29 +289,6 @@
 {/if}
 
 <style>
-  .section-head { position: relative; }
-  .section-head :global(.sec) { margin-top: 8px; border-top: 1px solid var(--section-line); }
-
-  /* Center on the title, below the heading's 8px margin and 1px rule. */
-  .section-action {
-    position: absolute; right: 0; top: calc(50% + 4.5px);
-    display: grid; width: 24px; height: 24px; padding: 0; place-items: center;
-    transform: translateY(-50%);
-    border: 0; border-radius: var(--r-xs); background: transparent; color: var(--tx-3);
-  }
-  .section-action:hover { background: var(--ink-1); color: var(--tx); }
-  /* Icons have no intrinsic size; match the panel header actions. */
-  .section-action :global(svg) { width: 13px; height: 13px; }
-
-  .presets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
-  .preset {
-    height: var(--ctl-h); padding: 0 6px; overflow: hidden;
-    border: 0; border-radius: var(--r-sm); background: var(--bg-field); color: var(--tx-2);
-    font: inherit; font-size: var(--fs-xs); white-space: nowrap; text-overflow: ellipsis;
-  }
-  .preset:hover { background: var(--bg-row-hi); color: var(--tx); }
-  .preset:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-
   .ta-head { margin-top: 4px; background: var(--ink-1); }
   .ta-head.off .ta-label { color: var(--tx-3); }
   .ta-expand { display: grid; flex: none; align-self: stretch; width: 18px; padding: 0; place-items: center; border: 0; background: transparent; color: inherit; }

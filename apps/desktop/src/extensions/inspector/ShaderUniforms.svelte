@@ -1,10 +1,9 @@
 <script lang="ts">
-  import { inspectorContext, type EditBinding } from './context';
-  import AnimatedRow from './AnimatedRow.svelte';
-  import ChannelRow from './ChannelRow.svelte';
+  import { inspectorContext } from './context';
+  import ParameterList from './ParameterList.svelte';
 
-  const { api, doc, transport, mixed, inspector } = inspectorContext();
-  const { ColorField, Section, ToggleField } = api.ui.controls;
+  const { api, doc, inspector } = inspectorContext();
+  const { Section } = api.ui.controls;
 
   let { layer }: { layer: any } = $props();
 
@@ -19,65 +18,10 @@
     definitions = service?.shaderDefinitions(layer as any) ?? [];
   });
 
-  function fieldBinding(path: string, label: string): EditBinding {
-    return {
-      mode: 'command',
-      label,
-      origin: 'inspector',
-      command: (value: unknown) => ({
-        type: 'set_property',
-        target: layer.id,
-        path,
-        value: value as any,
-        time: api.transport.time(),
-        preserveHandEdits: false
-      })
-    };
-  }
+
 </script>
 
 {#if definitions.length}
   <Section {api} title="Shader" />
-  {#each definitions as definition (definition.name)}
-    {@const property = layer.d?.uniforms?.[definition.name]}
-    {#if property}
-      {@const path = `u.${definition.name}`}
-      {#if definition.control === 'color'}
-        <AnimatedRow {layer} {path} label={definition.label}>
-          <ColorField
-            {api}
-            {mixed}
-
-            get={() => (doc.tick.values, doc.proj, transport.time, api.anim.evP(layer, property, transport.time, path))}
-            edit={fieldBinding(path, definition.label)}
-            label={definition.label}
-          />
-        </AnimatedRow>
-      {:else if definition.control === 'toggle'}
-        <AnimatedRow {layer} {path} label={definition.label}>
-          <ToggleField
-            {api}
-            {mixed}
-
-            get={() => (doc.tick.values, doc.proj, transport.time, api.anim.evP(layer, property, transport.time, path))}
-            edit={fieldBinding(path, definition.label)}
-            label={definition.label}
-          />
-        </AnimatedRow>
-      {:else}
-        <ChannelRow
-
-          {layer}
-          channel={path}
-          label={definition.label}
-          {property}
-          getValue={(time) => api.anim.evP(layer, property, time, definition.name)}
-          step={(definition.max - definition.min) / 200 || .01}
-          min={definition.min}
-          max={definition.max}
-          precision={3}
-        />
-      {/if}
-    {/if}
-  {/each}
+  <ParameterList {layer} prefix="u" properties={layer.d?.uniforms ?? {}} params={definitions.map(d=>({k:d.name,label:d.label,def:d.def,type:d.control==='color'?'color':d.control==='toggle'?'toggle':'number',min:d.min,max:d.max,step:(d.max-d.min)/200||.01}))} />
 {/if}

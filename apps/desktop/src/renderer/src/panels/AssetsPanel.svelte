@@ -67,6 +67,10 @@
   const allAssets = $derived((doc.tick.assets, doc.tick.history, doc.proj, Object.values(doc.proj?.assets ?? {}) as Asset[]));
   const assets = $derived(allAssets.filter((asset) => assetFolder(doc.proj ?? {}, asset) === currentFolder));
   let selectedAssetId = $state<string | null>(null);
+  let selectedAssetIds = $state<string[]>([]);
+  const selectedAssets = $derived(assets.filter(asset => selectedAssetIds.includes(asset.id)));
+  let selectionAnchor: string | null = null;
+  let deleting = $state(false);
   let selectedFolderId = $state<string | null>(null);
   let renamingFolderId = $state<string | null>(null);
   let draggingFolderId = $state<string | null>(null);
@@ -176,7 +180,14 @@
   function showAssetMenu(event: MouseEvent, asset: Asset): void {
     event.preventDefault();
     event.stopPropagation();
-    selectAsset(asset.id, event.currentTarget as HTMLElement);
+    if (!selectedAssetIds.includes(asset.id)) selectAsset(asset.id, event.currentTarget as HTMLElement);
+    if (selectedAssets.length > 1) {
+      PM.menu(event.currentTarget, [
+        { header: `${selectedAssets.length} media files` },
+        { label: 'Delete selected media…', run: () => requestDelete() },
+      ], { x: event.clientX, y: event.clientY });
+      return;
+    }
     const sourcePath = finderPath(asset);
     if (isLoading(asset)) return;
     const offline = isOffline(asset);
@@ -253,12 +264,26 @@
     return out;
   }
 
-  function selectAsset(id: string, row?: HTMLElement): void {
+  function selectAsset(id: string, row?: HTMLElement, modifiers?: MouseEvent | KeyboardEvent): void {
+    const previousAssetId = selectedAssetId;
     selectedCompId = null;
     selectedFolderId = null;
-    selectedAssetId = id;
+    if (modifiers?.shiftKey && selectionAnchor && assets.some(asset => asset.id === selectionAnchor)) {
+      const from = assets.findIndex(asset => asset.id === selectionAnchor);
+      const to = assets.findIndex(asset => asset.id === id);
+      const range = assets.slice(Math.min(from, to), Math.max(from, to) + 1).map(asset => asset.id);
+      selectedAssetIds = modifiers.metaKey || modifiers.ctrlKey ? [...new Set([...selectedAssetIds, ...range])] : range;
+    } else if (modifiers?.metaKey || modifiers?.ctrlKey) {
+      selectedAssetIds = selectedAssetIds.includes(id) ? selectedAssetIds.filter(value => value !== id) : [...selectedAssetIds, id];
+      selectionAnchor = id;
+    } else {
+      selectedAssetIds = [id];
+      selectionAnchor = id;
+    }
+    selectedAssetId = selectedAssetIds.includes(id) ? id : selectedAssetIds.at(-1) ?? null;
+    if (selectedAssetIds.length !== 1 || (previousAssetId && previousAssetId !== selectedAssetId)) PM.Kernel?.services.get('viewer')?.preview?.clear?.();
     row?.focus();
-    status = `Selected ${assets.find((asset) => asset.id === id)?.name ?? 'media'}`;
+    status = selectedAssetIds.length === 1 ? `Selected ${assets.find(asset => asset.id === selectedAssetId)?.name ?? 'media'}` : `${selectedAssetIds.length} media files selected`;
   }
 
   function addAsset(event: MouseEvent | KeyboardEvent, asset: Asset): void {
@@ -294,39 +319,49 @@
     }
   }
 
-  function deleteAsset(asset: Asset, project = PM.proj): void {
+  function deleteAssets(items: Asset[], project: any): void {
     if (PM.proj !== project) {
       status = 'Deletion stopped because you switched projects';
       PM.toast(status);
       return;
     }
-    const result = PM.hist.do('Delete media', () => PM.MediaImport.removeAsset(PM.proj, asset.id));
-    selectedAssetId = null;
-    PM.sel.layers = PM.sel.layers.filter((id: string) => !result.removedLayerIds.includes(id));
+    const liveItems = items.filter(asset => project.assets?.[asset.id]);
+    if (!liveItems.length) return;
+    const removedLayerIds = PM.hist.do('Delete media', () => {
+      const ids: string[] = [];
+      for (const asset of liveItems) ids.push(...PM.MediaImport.removeAsset(project, asset.id).removedLayerIds);
+      return ids;
+    }) as string[];
+    clearSelection();
+    PM.sel.layers = PM.sel.layers.filter((id: string) => !removedLayerIds.includes(id));
     PM.bus.emit('assets');
     PM.bus.emit('layers');
     PM.bus.emit('sel');
     PM.bus.emit('project');
-    const message = result.removedLayers
-      ? `Deleted ${asset.name} and ${result.removedLayers} ${result.removedLayers === 1 ? 'layer' : 'layers'}`
-      : `Deleted ${asset.name}`;
-    status = message;
-    PM.toast(message);
+    const name = liveItems.length === 1 ? liveItems[0]!.name : `${liveItems.length} media files`;
+    status = `Deleted ${name}${removedLayerIds.length ? ` and ${removedLayerIds.length} ${removedLayerIds.length === 1 ? 'layer' : 'layers'}` : ''}`;
+    PM.toast(status);
   }
 
-  function requestDelete(asset: Asset): void {
+  function requestDelete(asset?: Asset): void {
+    if (deleting) return;
+    const items = asset && !selectedAssetIds.includes(asset.id) ? [asset] : selectedAssets.length ? [...selectedAssets] : asset ? [asset] : [];
+    if (!items.length) return;
     const project = PM.proj;
-    const references = PM.MediaImport.referenceCount(project, asset.id);
-    if (!references) {
-      deleteAsset(asset);
-      return;
-    }
+    const references = items.reduce((count, item) => count + PM.MediaImport.referenceCount(project, item.id), 0);
+    if (!references) { deleteAssets(items, project); return; }
+    deleting = true;
+    const name = items.length === 1 ? items[0]!.name : `${items.length} media files`;
+    status = `Confirm deletion of ${name}`;
     void PM.confirm({
-      message: `Delete “${asset.name}”?`,
-      detail: `This also removes ${references} ${references === 1 ? 'layer that uses' : 'layers that use'} this media. You can undo this.`,
+      message: items.length === 1 ? `Delete “${name}”?` : `Delete ${name}?`,
+      detail: items.length === 1
+        ? `This also removes ${references} ${references === 1 ? 'layer that uses' : 'layers that use'} this media. You can undo this.`
+        : 'This also removes layers that use the selected media. You can undo this.',
       confirmLabel: 'Delete'
-    }).then((ok: boolean) => { if (ok) deleteAsset(asset, project); });
-    status = `Confirm deletion of ${asset.name}`;
+    }).then((ok: boolean) => {
+      if (ok) deleteAssets(items, project);
+    }).finally(() => { deleting = false; });
   }
 
   /* ── drag out: asset cards → timeline / viewer ── */
@@ -343,7 +378,7 @@
     const tile = (event.currentTarget as HTMLElement).querySelector<HTMLElement>('.asset-preview');
     if (tile) dt.setDragImage(tile, tile.offsetWidth / 2, tile.offsetHeight / 2);
     draggingId = asset.id;
-    selectedAssetId = asset.id;
+    selectAsset(asset.id);
     /* dragover can't read payload data, so the timeline ghost reads this. */
     PM.mediaDrag = { id: asset.id, name: asset.name, kind: asset.kind, dur: asset.dur };
   }
@@ -385,13 +420,16 @@
      waveform) selects, not only on the card's own box. */
   function handleRowPointerDown(event: PointerEvent, asset: Asset): void {
     if (event.button !== 0 || (event.target as Element).closest('button')) return;
-    selectAsset(asset.id, event.currentTarget as HTMLElement);
+    selectAsset(asset.id, event.currentTarget as HTMLElement, event);
   }
 
   function clearSelection(): void {
+    endMarquee();
     const preview = PM.Kernel?.services.get('viewer')?.preview;
     const shouldClearPreview = selectedAssetId !== null || !!preview?.activeId;
     selectedAssetId = null;
+    selectedAssetIds = [];
+    selectionAnchor = null;
     selectedCompId = null;
     selectedFolderId = null;
     status = '';
@@ -399,8 +437,8 @@
     (document.activeElement as HTMLElement | null)?.blur?.();
   }
 
-  /* Selection is temporary ownership: preserve it only while the next press
-     is inside the currently selected card. Capture runs before timeline drags
+  /* Selection is temporary ownership: preserve it while the next press
+     is inside the media panel. Capture runs before timeline drags
      and titlebar handlers, so the preview disappears at pointerdown.
      The source monitor itself is part of that ownership — its transport and
      close button must survive the press that reaches them. */
@@ -418,16 +456,100 @@
     if (!selectedAssetId) return;
     const target = event.target;
     if (!(target instanceof Element)) { clearSelection(); return; }
-    if (target.closest('#source-preview')) return;
+    if (rootElement.contains(target) || target.closest('#source-preview')) return;
     const card = target.closest<HTMLElement>('.asset-card[data-asset-id]');
     if (card?.dataset.assetId === selectedAssetId) return;
     clearSelection();
   }
 
-  /* A press on empty list space unfocuses, like clicking the desktop. */
+  // Start a selection box only on empty space, leaving card drags intact.
+  let marquee = $state<{ pointerId: number; x: number; y: number; left: number; top: number; width: number; height: number; base: string[] } | null>(null);
+  let marqueeClient = { x: 0, y: 0 };
+  let scrollFrame = 0;
+
   function handleListPointerDown(event: PointerEvent): void {
-    if ((event.target as Element).closest('.asset-card')) return;
+    if (event.button !== 0 || (event.target as Element).closest('.asset-card, button, input')) return;
+    event.preventDefault();
+    const base = event.metaKey || event.ctrlKey || event.shiftKey ? [...selectedAssetIds] : [];
     clearSelection();
+    selectedAssetIds = base;
+    selectedAssetId = base.at(-1) ?? null;
+    listElement.focus();
+    const rect = listElement.getBoundingClientRect();
+    const x = event.clientX - rect.left + listElement.scrollLeft;
+    const y = event.clientY - rect.top + listElement.scrollTop;
+    marqueeClient = { x: event.clientX, y: event.clientY };
+    marquee = { pointerId: event.pointerId, x, y, left: x, top: y, width: 0, height: 0, base };
+    listElement.setPointerCapture?.(event.pointerId);
+    scrollFrame = requestAnimationFrame(scrollMarquee);
+  }
+
+  function updateMarquee(): void {
+    if (!marquee) return;
+    const rect = listElement.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, marqueeClient.x - rect.left)) + listElement.scrollLeft;
+    const y = Math.max(0, Math.min(rect.height, marqueeClient.y - rect.top)) + listElement.scrollTop;
+    const left = Math.min(marquee.x, x), top = Math.min(marquee.y, y);
+    const width = Math.abs(x - marquee.x), height = Math.abs(y - marquee.y);
+    marquee = { ...marquee, left, top, width, height };
+    if (width < 4 && height < 4) {
+      selectedAssetIds = [...marquee.base];
+      selectedAssetId = selectedAssetIds.at(-1) ?? null;
+      return;
+    }
+    const hits = [...listElement.querySelectorAll<HTMLElement>('[data-asset-id]')].filter(card => {
+      const box = card.getBoundingClientRect();
+      const cardLeft = box.left - rect.left + listElement.scrollLeft;
+      const cardTop = box.top - rect.top + listElement.scrollTop;
+      return cardLeft < left + width && cardLeft + box.width > left && cardTop < top + height && cardTop + box.height > top;
+    }).map(card => card.dataset.assetId!);
+    selectedAssetIds = [...new Set([...marquee.base, ...hits])];
+    selectedAssetId = selectedAssetIds.at(-1) ?? null;
+    selectionAnchor = selectedAssetIds[0] ?? null;
+    status = `${selectedAssetIds.length} media files selected`;
+  }
+
+  function scrollMarquee(): void {
+    if (!marquee) return;
+    const rect = listElement.getBoundingClientRect();
+    if ((marquee.width >= 4 || marquee.height >= 4) && marqueeClient.y < rect.top + 24) listElement.scrollTop -= 10;
+    else if ((marquee.width >= 4 || marquee.height >= 4) && marqueeClient.y > rect.bottom - 24) listElement.scrollTop += 10;
+    updateMarquee();
+    scrollFrame = requestAnimationFrame(scrollMarquee);
+  }
+
+  function moveMarquee(event: PointerEvent): void {
+    if (!marquee || event.pointerId !== marquee.pointerId) return;
+    event.preventDefault();
+    marqueeClient = { x: event.clientX, y: event.clientY };
+    updateMarquee();
+  }
+
+  function endMarquee(event?: PointerEvent): void {
+    if (event && event.pointerId !== marquee?.pointerId) return;
+    if (marquee && listElement.hasPointerCapture?.(marquee.pointerId)) listElement.releasePointerCapture(marquee.pointerId);
+    marquee = null;
+    cancelAnimationFrame(scrollFrame);
+  }
+  $effect(() => () => cancelAnimationFrame(scrollFrame));
+
+  function handleListKeydown(event: KeyboardEvent): void {
+    if ((event.target as Element).closest('button, input, textarea, [contenteditable="true"]')) return;
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') {
+      event.preventDefault();
+      event.stopPropagation();
+      selectedCompId = selectedFolderId = null;
+      selectedAssetIds = assets.map(asset => asset.id);
+      selectedAssetId = selectedAssetIds.at(-1) ?? null;
+      selectionAnchor = selectedAssetIds[0] ?? null;
+      PM.Kernel?.services.get('viewer')?.preview?.clear?.();
+      status = `${selectedAssetIds.length} media files selected`;
+    } else if (event.target === listElement && ['Delete', 'Backspace', 'Escape'].includes(event.key)) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === 'Escape') clearSelection();
+      else void requestDelete();
+    }
   }
 
   function previewToggle(asset: Asset): void {
@@ -470,7 +592,7 @@
     event.stopPropagation();
     const asset = assets[next];
     if (!asset) return false;
-    selectAsset(asset.id);
+    selectAsset(asset.id, undefined, event);
     focusAsset(next);
     return true;
   }
@@ -539,6 +661,7 @@
     const id = folderEdit('New folder', (project) => createFolder(project, 'Untitled Folder', parent)) as string;
     openFolderId = parent;
     selectedAssetId = null;
+    selectedAssetIds = [];
     selectedCompId = null;
     selectedFolderId = id;
     renamingFolderId = id;
@@ -553,6 +676,7 @@
 
   function selectFolder(id: string, row?: HTMLElement): void {
     selectedAssetId = null;
+    selectedAssetIds = [];
     selectedCompId = null;
     PM.Kernel?.services.get('viewer')?.preview?.clear?.();
     selectedFolderId = id;
@@ -674,6 +798,7 @@
   }
 
   function selectComp(id: string, row?: HTMLElement): void {
+    selectedAssetIds = [];
     selectedAssetId = null;
     selectedFolderId = null;
     PM.Kernel?.services.get('viewer')?.preview?.clear?.();
@@ -735,6 +860,8 @@
 
 </script>
 
+<svelte:window onpointermove={moveMarquee} onpointerup={endMarquee} onpointercancel={endMarquee} onblur={() => endMarquee()} />
+
 <div
   class="assets-panel-body"
   class:is-drop-over={dropOver}
@@ -774,7 +901,10 @@
       {/each}
     </nav>
   {/if}
-  <div class="asset-list" role="listbox" tabindex="-1" aria-label="Project media" bind:this={listElement} onpointerdown={handleListPointerDown}>
+  <div class="asset-list" role="listbox" tabindex="-1" aria-label="Project media" aria-multiselectable="true" bind:this={listElement} onpointerdown={handleListPointerDown} onkeydown={handleListKeydown} onscroll={updateMarquee}>
+    {#if marquee && (marquee.width >= 4 || marquee.height >= 4)}
+      <div class="asset-selection-box" aria-hidden="true" style={`left:${marquee.left}px;top:${marquee.top}px;width:${marquee.width}px;height:${marquee.height}px`}></div>
+    {/if}
     {#each folders as folder (folder.id)}
       <div
         class="asset-card is-folder"
@@ -871,7 +1001,7 @@
         ondragstart={(event) => handleDragStart(event, asset)}
         ondragend={handleDragEnd}
         tabindex={activeAssetId ? (activeAssetId === asset.id ? 0 : -1) : (index === 0 ? 0 : -1)}
-        aria-selected={activeAssetId === asset.id}
+        aria-selected={selectedAssetIds.includes(asset.id)}
         data-asset-id={asset.id}
         title={loading ? 'Loading media…' : offline ? detail : 'Select media · double-click to preview, or drag onto the timeline'}
         onpointerdown={(event) => handleRowPointerDown(event, asset)}
@@ -928,7 +1058,6 @@
               aria-label={`Delete ${asset.name}`}
               onclick={(event) => {
                 event.stopPropagation();
-                selectAsset(asset.id);
                 requestDelete(asset);
               }}
             >
@@ -957,6 +1086,15 @@
       {/if}
     {/each}
   </div>
+  {#if selectedAssets.length > 1}
+    <div class="asset-selection-actions">
+      <span>{selectedAssets.length} selected</span>
+      <button type="button" class="asset-delete" disabled={deleting} onclick={() => requestDelete()} aria-label="Delete selected media" title="Delete selected media"
+        onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') event.stopPropagation(); }}>
+        <Icon {PM} name="trash" />
+      </button>
+    </div>
+  {/if}
   <div class="asset-drop-overlay" aria-hidden="true">
     <span class="asset-drop-card">
       <Icon {PM} name="plus" />
