@@ -133,17 +133,26 @@ export function presetStyle(id: string, compositionHeight = 1080): CaptionStyle 
   return style;
 }
 
-/** A style patch keeps its preset label only while it still matches it. */
+/** Where a caption block sits. A preset brings its own position, but moving
+    a layer (a second language on top) keeps its look and preset label, and a
+    moved layer stays where it is when it switches presets. */
+export const CAPTION_POSITION_KEYS = ['placement', 'offsetX', 'offsetY'] as const;
+const samePosition = (a: CaptionStyle, b: CaptionStyle) => CAPTION_POSITION_KEYS.every(key => a[key] === b[key]);
+
+/** A style patch keeps its preset label only while its look still matches it. */
 export function patchStyle(style: CaptionStyle, patch: Partial<CaptionStyle>, compositionHeight = 1080): CaptionStyle {
   if (typeof patch.preset === 'string' && patch.preset !== style.preset && captionPreset(patch.preset)) {
     const { preset, ...rest } = patch;
-    return normalizeCaptionStyle({ ...presetStyle(preset, compositionHeight), ...rest });
+    const moved = !samePosition(style, presetStyle(style.preset, compositionHeight));
+    const position = moved ? Object.fromEntries(CAPTION_POSITION_KEYS.map(key => [key, style[key]])) : {};
+    return normalizeCaptionStyle({ ...presetStyle(preset, compositionHeight), ...position, ...rest });
   }
   const next = normalizeCaptionStyle({ ...style, ...patch });
   if (patch.preset === undefined && next.preset !== 'custom') {
     const reference = presetStyle(next.preset, compositionHeight);
+    const position = new Set<string>(CAPTION_POSITION_KEYS);
     const changed = (Object.keys(patch) as Array<keyof CaptionStyle>)
-      .some(key => key !== 'preset' && reference[key] !== next[key]);
+      .some(key => key !== 'preset' && !position.has(key) && reference[key] !== next[key]);
     if (changed) next.preset = 'custom';
   }
   return next;

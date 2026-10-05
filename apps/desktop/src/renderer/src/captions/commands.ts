@@ -91,6 +91,35 @@ export function setCaptionsContent(layer: any, patch: Record<string, unknown>): 
   normalized.add(layer.d.cues);
 }
 
+/** Composition-time span where a captions layer actually shows text. */
+function shownSpan(layer: any): [number, number] {
+  const from = Number(layer.from) || 0, to = from + (Number(layer.dur) || 0);
+  const cues: CaptionCue[] = Array.isArray(layer.d?.cues) ? layer.d.cues : [];
+  if (!cues.length) return [from, to];
+  return [Math.max(from, from + cues[0]!.start), Math.min(to, from + cues[cues.length - 1]!.end)];
+}
+
+/**
+ * A new captions layer that would cover another one showing at the same time
+ * (a second language, a second speaker's transcript) takes the next free
+ * position — bottom, then top, then middle — instead of drawing on top of
+ * it. An explicit placement or offset is always respected.
+ */
+function stackPlacement(layer: any, comp: any): void {
+  const [start, end] = shownSpan(layer);
+  const taken = new Set<string>();
+  for (const other of comp?.layers || []) {
+    if (other === layer || other.type !== 'captions' || other.on === false || !other.d?.cues?.length) continue;
+    const [a, b] = shownSpan(other);
+    if (a < end && start < b) taken.add(other.d.style?.placement ?? 'bottom');
+  }
+  const style: CaptionStyle = layer.d.style;
+  if (!taken.has(style.placement)) return;
+  const free = (['bottom', 'top', 'middle'] as const).find(placement => !taken.has(placement));
+  if (!free) return;
+  layer.d.style = { ...style, placement: free, offsetY: 0 };
+}
+
 export function addCaptions({ PM }: Context, command: any) {
   const from = command.from == null ? 0 : Math.max(0, Number(command.from) || 0);
   const offset = Number(command.offset) || 0;
@@ -109,6 +138,8 @@ export function addCaptions({ PM }: Context, command: any) {
   layer.dur = command.duration != null
     ? Math.max(1 / (comp.fps || 30), Number(command.duration) || 0)
     : Math.max(0.1, (comp.dur || 0) - from, captionsEnd(cues));
+  const asked = command.style && typeof command.style === 'object' ? command.style : {};
+  if (!('placement' in asked) && !('offsetY' in asked)) stackPlacement(layer, comp);
   // Captions sit above the picture, like a caption track above V1.
   PM.addLayer(layer, command.index == null ? 0 : PM.clamp(Math.round(command.index), 0, PM.proj.layers.length));
   if (command.select !== false) PM.selectLayers(layer.id);

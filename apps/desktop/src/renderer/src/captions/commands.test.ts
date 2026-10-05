@@ -58,6 +58,22 @@ describe('caption commands', () => {
     expect(texts()).toEqual(['Hello there', 'General Kenobi']);
   });
 
+  it('stacks a second captions layer showing at the same time instead of covering the first', () => {
+    PM.Edit.apply({ type: 'add_captions', name: 'English', cues: [{ start: 0, end: 4, text: 'Hello' }], style: { preset: 'boxed' } });
+    PM.Edit.apply({ type: 'add_captions', name: 'French', cues: [{ start: 1, end: 3, text: 'Bonjour' }], style: { preset: 'whisper' } });
+    PM.Edit.apply({ type: 'add_captions', name: 'Later', cues: [{ start: 6, end: 8, text: 'After' }] });
+    PM.Edit.apply({ type: 'add_captions', name: 'Pinned', cues: [{ start: 0, end: 2, text: 'Here' }], style: { placement: 'bottom' } });
+    const byName = (name: string) => PM.proj.layers.find((layer: any) => layer.name === name).d.style;
+    expect(byName('English').placement).toBe('bottom');
+    expect(byName('French')).toMatchObject({ placement: 'top', offsetY: 0, preset: 'whisper' });
+    expect(byName('Later').placement).toBe('bottom');
+    expect(byName('Pinned').placement).toBe('bottom');
+    // A moved layer keeps its place when it switches look.
+    const french = PM.proj.layers.find((layer: any) => layer.name === 'French');
+    PM.Edit.apply({ type: 'edit_captions', target: french.id, op: 'style', style: { preset: 'paper' } });
+    expect(french.d.style).toMatchObject({ preset: 'paper', placement: 'top', box: true });
+  });
+
   it('uses composition time in commands and layer time in storage', () => {
     PM.Edit.apply({ type: 'add_captions', from: 2, cues: [{ start: 3, end: 4, text: 'At three' }] });
     const layer = captions();

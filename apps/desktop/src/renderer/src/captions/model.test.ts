@@ -128,5 +128,9 @@ describe('styles', () => {
     expect(boxed.preset).toBe('boxed');
     expect(patchStyle(boxed, { fill: '#FF0000' }).preset).toBe('custom');
     expect(patchStyle(boxed, { box: true }).preset).toBe('boxed');
+    // Position is the layer's own: moving it keeps the look's name.
+    expect(patchStyle(boxed, { placement: 'top', offsetY: 0 }).preset).toBe('boxed');
+    expect(patchStyle(patchStyle(boxed, { placement: 'top' }), { preset: 'pop' })).toMatchObject({ preset: 'pop', placement: 'top', textCase: 'upper' });
+    expect(patchStyle(boxed, { preset: 'pop' }).placement).toBe('middle');
   });
 });
