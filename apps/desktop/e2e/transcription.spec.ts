@@ -252,6 +252,12 @@ test('captions ask for a word-timed model when the one in use only times phrases
     expect((await page.evaluate(() => (window as any).PM.Transcription.status())).activeModelId).toBe('whisper-medium');
     await page.evaluate(() => (window as any).PM.SettingsUI.open('transcription'));
     await expect(region.getByText('Whisper Medium doesn’t time each word, so captions use Nemotron Streaming 3.5.')).toBeVisible();
+    // A model that cannot detect the language hears English on automatic: English is offered once.
+    await row(region, 'canary-180m-flash').getByRole('button', { name: 'Download' }).click();
+    await row(region, 'canary-180m-flash').getByRole('button', { name: 'Use' }).click({ timeout: 20_000 });
+    await expect(row(region, 'canary-180m-flash').getByText('In use')).toBeVisible();
+    const spoken = region.locator('select[aria-label="Spoken language"] option');
+    await expect(spoken).toHaveText(['English', 'French', 'German', 'Spanish']);
     expect(session.diagnostics.pageErrors).toEqual([]);
   } finally {
     await session?.close();

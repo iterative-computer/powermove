@@ -17,8 +17,10 @@
 
   const models = $derived(status?.models ?? []);
   const active = $derived(models.find((model) => model.id === status?.activeModelId) ?? null);
-  const languages = $derived(languageOptions(active));
-  const language = $derived(status?.language ?? 'auto');
+  /* A model that cannot detect hears English on 'auto', so that option is English and 'en' is not listed again. */
+  const hearsEnglish = $derived(active?.detectsLanguage === false);
+  const languages = $derived(languageOptions(active).filter((option) => !hearsEnglish || option.code !== 'en'));
+  const language = $derived(hearsEnglish && status?.language === 'en' ? 'auto' : status?.language ?? 'auto');
   const unavailable = $derived(!host || status?.available === false);
 
   /* On this Mac; a download in flight stays where it was started until it lands. */
@@ -191,7 +193,7 @@
           {#if active?.languages === 'en'}
             <option value="en">English</option>
           {:else}
-            <option value="auto">{active?.detectsLanguage === false ? 'English' : 'Detect automatically'}</option>
+            <option value="auto">{hearsEnglish ? 'English' : 'Detect automatically'}</option>
             {#each languages as option (option.code)}<option value={option.code}>{option.name}</option>{/each}
           {/if}
         </select>
