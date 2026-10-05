@@ -72,6 +72,13 @@ describe('caption commands', () => {
     const french = PM.proj.layers.find((layer: any) => layer.name === 'French');
     PM.Edit.apply({ type: 'edit_captions', target: french.id, op: 'style', style: { preset: 'paper' } });
     expect(french.d.style).toMatchObject({ preset: 'paper', placement: 'top', box: true });
+    // A preset whose own position would cover another layer moves aside too.
+    const english = PM.proj.layers.find((layer: any) => layer.name === 'English');
+    PM.Edit.apply({ type: 'edit_captions', target: english.id, op: 'style', style: { preset: 'spotlight' } });
+    expect(english.d.style.placement).toBe('middle');
+    const later = PM.proj.layers.find((layer: any) => layer.name === 'Pinned');
+    PM.Edit.apply({ type: 'edit_captions', target: later.id, op: 'style', style: { preset: 'pop' } });
+    expect(later.d.style.placement).toBe('bottom');
   });
 
   it('uses composition time in commands and layer time in storage', () => {

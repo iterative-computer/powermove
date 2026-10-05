@@ -199,9 +199,15 @@ export function editCaptions({ PM, findLayer }: Context, command: any) {
       layer.d.cues = command.replace === false ? insertCues(cues, imported) : normalizeCues(imported);
       break;
     }
-    case 'style':
+    case 'style': {
+      const before = layer.d.style.placement;
       layer.d.style = styleFrom(PM, command.style, layer.d.style);
+      // A preset that brings its own position must not land it on another
+      // captions layer showing at the same time.
+      const asked = command.style && typeof command.style === 'object' ? command.style : {};
+      if (layer.d.style.placement !== before && !('placement' in asked) && !('offsetY' in asked)) stackPlacement(layer, PM.curComp?.() ?? PM.proj);
       break;
+    }
     default:
       throw new Error(`Unknown captions operation: ${String(op)}`);
   }
