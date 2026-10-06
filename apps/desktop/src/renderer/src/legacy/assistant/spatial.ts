@@ -23,6 +23,8 @@ import { EFFECT_AUTHORING_INSTRUCTIONS, EDITOR_EXTENSION_INSTRUCTIONS } from '..
 import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
 import { AGENT_MODELS, REASONING_EFFORTS, modelEfforts, modelEffort, setDiscoveredClaudeModels, setDiscoveredCodexModels } from '../../../../shared/agent-models';
 import { idlePreload } from './idle-preload';
+import { mediaStepLabels } from '../../panels/agent/media-activity';
+import { mediaOutcomeLabels, mediaToolOutcome } from '../../../../shared/media-tools';
 import { bridge as hostBridge } from '../../kernel/bridge';
 
 const AGENT_EDITABLE_CATALOG_CHARS = 72_000;
@@ -1640,13 +1642,18 @@ function reduceTrace(step: CodexTraceEvent, session: any = activeSession()) {
   } else if (step.kind === 'tool-start') {
     finishTraceThought(session);
     const tool: any = session.trace.find((entry: any) => entry.kind === 'tool' && entry.id === step.itemId);
+    // Media tools name the clip they work on; their raw argument is an id.
+    const media = mediaStepLabels(PM, step);
+    const label = media ? media.running : step.label;
+    const detail = media ? media.detail : step.detail;
     if (tool) {
-      tool.label = step.label;
-      if (step.detail !== undefined) tool.detail = step.detail;
+      tool.label = label;
+      if (media) { if (detail === undefined) delete tool.detail; else tool.detail = detail; }
+      else if (detail !== undefined) tool.detail = detail;
     } else {
       session.trace.push({
         kind: 'tool', id: step.itemId, toolName: step.toolName,
-        label: step.label, ...(step.detail === undefined ? {} : { detail: step.detail }),
+        label, ...(detail === undefined ? {} : { detail }),
         status: 'running', startedAt: Date.now(),
       });
     }
@@ -1656,6 +1663,16 @@ function reduceTrace(step: CodexTraceEvent, session: any = activeSession()) {
       tool.status = step.isError ? 'error' : 'done';
       tool.endedAt = Date.now();
       if (step.output !== undefined) tool.output = String(step.output).slice(0, 600);
+      // A transcription still running or waiting on a model download is
+      // neither done nor failed: say which (media-tools lane).
+      const outcome = mediaToolOutcome(tool.toolName, step.output);
+      if (outcome) {
+        const labels = mediaOutcomeLabels(tool.label, tool.detail, outcome);
+        tool.status = 'done';
+        tool.outcome = outcome.state;
+        tool.label = labels.label;
+        if (labels.detail === undefined) delete tool.detail; else tool.detail = labels.detail;
+      }
     }
   }
   trimTrace(session);
@@ -2678,9 +2695,10 @@ RULES
 - Return 2–6 short steps that describe the actual work you will carry out. Each step must start with a verb and be specific enough to show in the interface as a to-do item.
 - While working, emit user-visible reasoning summaries in the RESPONSE STYLE above: one short clause each about what you are inspecting, deciding, or validating. Do not expose private chain-of-thought.
 - kind=scene for changes to layers, content, motion, timing, effects, or composition settings. Each sceneEdit.commands item must be one JSON-encoded source-edit object using only availableOperations. Use stable explicit ids for new layers that later commands target. Never output JavaScript, shell commands, or whole-project JSON.
+- When footage content matters (cuts, pacing, what is said or shown), watch and listen with the media tools instead of guessing: media_contact_sheet or sample_media_frames for source pictures, transcribe_media (layerId gives composition times) and media_waveform for speech and silences, probe_media for formats; check_project lints the result.
 - For scene requests, inspect the live source. Preview frames are not captured by default. Use render_frames only when you decide visual inspection is needed; for structured scene edits, leave reviewTimes empty unless you explicitly need frames at particular moments. Preserve locked layers, hand-edited channels, and unrelated work. Return neutral section and chromeEdit fields.
 - kind=panels for direct changes to the current panel layout. panelEdit must be one JSON-encoded object shaped like {"actions":[{"type":"add|restore|hide|move|reorder|resize|resizeDock|rename|collapse|expand","panelId":"PANEL_ID","dockId":"left|center|right|EXISTING_DOCK","position":0,"size":300,"title":"New title"}]}. You may return up to 16 ordered actions. Use add for an available panel that is not present, restore for a hidden panel, move for a different dock, reorder for an exact zero-based position, resize for panel height, resizeDock for dock width, rename for its visible title, and collapse/expand for its collapsed state. Never hide or collapse viewer. Prefer a direct panels plan over rebuilding the whole workspace when the user asks to rearrange existing panels.
-- kind=workspace when the user asks for a complete workspace, layout, editing environment, or a coordinated group of panels. workspaceEdit must be one JSON-encoded manifest shaped like {"name":"...","density":"compact|normal|comfy","accent":"#RRGGBB","docks":[{"id":"left|center|right","size":number,"flex":boolean,"panels":[{"id":"viewer|timeline|inspector|layer-effects|assets|fxbrowser|takes|notes|CUSTOM_ID","size":number,"flex":boolean}]}],"sections":[SECTION_OBJECTS]}. Include viewer, keep all panels reachable, and make every generated section control source-connected under the same rules below.
+- kind=workspace when the user asks for a complete workspace, layout, editing environment, or a coordinated group of panels. workspaceEdit must be one JSON-encoded manifest shaped like {"name":"...","density":"compact|normal|comfy","accent":"#RRGGBB","docks":[{"id":"left|center|right","size":number,"flex":boolean,"panels":[{"id":"viewer|timeline|inspector|layer-effects|assets|fxbrowser|mixer|takes|notes|CUSTOM_ID","size":number,"flex":boolean}]}],"sections":[SECTION_OBJECTS]}. Include viewer, keep all panels reachable, and make every generated section control source-connected under the same rules below.
 - For non-panel requests return panelEdit="{\"actions\":[]}". For non-workspace requests return workspaceEdit="{}". For non-interface requests return interfaceEdit="{}". For non-scene requests return an empty neutral sceneEdit. For non-section requests return a neutral empty section with tool="".
 - kind=chrome for a supported app-interface style change. Supported targets are preview.cornerRadius with square|rounded and timeline.surfaceOrder with normal|reversed. Use operation=modify, and return a neutral empty section object.
 - kind=interface for a structured Timeline redesign. interfaceEdit must be one JSON-encoded manifest shaped like {"target":"timeline","patch":{"rowHeight":22..48,"gutterWidth":160..360,"rulerHeight":20..42,"clipRadius":0..12,"keyframeSize":4..12,"showLayerNumbers":boolean,"showTypeBadges":boolean,"toolbarDensity":"compact|normal","surfaceOrder":"normal|reversed"}}. Include only fields requested or clearly useful. This edits the Timeline view over the existing source; never rewrite layers or keyframes for an interface request.

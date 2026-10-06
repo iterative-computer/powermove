@@ -30,3 +30,7 @@ it('accepts immutable agent attachment payloads with validated ids', () => {
   expect(parseStoreKey('agentAttachment.attachment-123')).toEqual({ kind: 'dynamic', prefix: 'agentAttachment', id: 'attachment-123' });
   expect(parseStoreKey('agentAttachment../escape')).toBeNull();
 });
+
+it('persists the agent approval mode (an unknown key fails the quit flush and keeps the app open)', () => {
+  expect(parseStoreKey('agentApprovalMode')).toEqual({ kind: 'static', key: 'agentApprovalMode' });
+});

@@ -11,6 +11,7 @@ import { AGENT_SHELL_NETWORK_INSTRUCTIONS, agentInstructions, agentResultSchema 
 import { prepareAgentWorkspace, discardExtensionStage, preserveCancelledRun, type AgentApiPackFile } from './codex/workspace';
 import { consumeToken } from './codex/consent';
 import { fragmentText, humanLabel, outputExcerpt, toolDetail } from './agent-tools/trace-format';
+import { mediaToolSubject } from '../shared/media-tools';
 import { modelEffort } from '../shared/agent-models';
 
 
@@ -174,9 +175,10 @@ export class CompatibleProvider {
             argumentError = error instanceof Error ? error : new Error('Invalid tool arguments');
           }
           const detail = toolDetail(tool.function.name, args);
+          const subject = mediaToolSubject(tool.function.name, args);
           onTrace({
             kind: 'tool-start', itemId: tool.id, toolName: tool.function.name.toLowerCase(),
-            label: humanLabel(tool.function.name), ...(detail ? { detail } : {})
+            label: humanLabel(tool.function.name), ...(detail ? { detail } : {}), ...(subject ? { subject } : {})
           });
           let result: AgentToolResponseEvent;
           let completed: CodexRunResult | undefined;

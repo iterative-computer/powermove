@@ -42,6 +42,7 @@ export const STATIC_KEYS = [
   'agentModel',
   'agentReasoningEffort',
   'agentAccessMode',
+  'agentApprovalMode',
   'agentAutoApplyPanels',
   'extensions',
   'activeTheme',

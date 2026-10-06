@@ -5,16 +5,19 @@ import { installWhatsNew, whatsNewOptions } from './whats-new';
 import { installTextContextMenu } from './text-context-menu';
 import { installPermissionHandlers } from './permissions';
 import { registerRenderEncoder } from './render-encoder';
+import { registerExportSidecar } from './export-sidecar';
 import {
   app,
   BrowserWindow,
   dialog,
   ipcMain,
+  net,
   protocol,
   safeStorage,
   screen,
   session,
   shell,
+  utilityProcess,
   webContents as allWebContents,
   type WebContents
 } from 'electron';
@@ -56,6 +59,8 @@ import { MIME_TYPES } from './mime';
 import { registerHapticsIpc } from './haptics';
 import { registerContextMenuIpc } from './context-menu';
 import { registerCloudMediaIpc } from './cloud-media';
+import { MediaPathCache, registerMediaPathIpc } from './media-path-cache';
+import { cloudFileState } from '@powermove/macos-haptics';
 import { registerConfirmIpc } from './native-confirm';
 import { registerClipboardIpc } from './clipboard';
 import { userInput } from './user-input';
@@ -75,6 +80,9 @@ import { backgroundTesting, backgroundWindowOptions } from './background-testing
 import { EditorWindows, restorableSessions, windowUnderTabDrop } from './windows';
 import { isPanelPopoutRequest } from './panel-popout';
 import { OnboardingFlow, onboardingCompleted, onboardingEnabled } from './onboarding';
+/* ── transcription (on-device speech models) ── */
+import { installTranscription, utilityWorker } from './transcription/install';
+import { TRANSCRIPTION_IPC } from '../shared/transcription';
 
 const APP_ORIGIN = 'app://powermove';
 
@@ -1012,7 +1020,47 @@ if (!hasSingleInstanceLock) {
     registerNativeEditIpc(ipcMain, ctx);
     registerLogIpc(ipcMain, ctx);
     registerMediaProxyIpc(ipcMain, mediaProxies, ctx);
+    /* agent media tools: an asset's bytes as a file path (media-tools lane) */
+    const mediaPaths = new MediaPathCache(path.join(app.getPath('userData'), 'Media Tool Cache'), {
+      isLocal: async (file) => { const state = await cloudFileState(file); return state !== 'icloud' && state !== 'cloud'; }
+    });
+    registerMediaPathIpc(ipcMain, mediaPaths, ctx);
+    app.once('will-quit', () => { void mediaPaths.dispose(); });
     registerRenderEncoder(ipcMain,ctx);
+    /* ── transcription: models download on request into userData; inference
+       runs in a utility process so neither main nor a window ever blocks. ── */
+    const transcription = installTranscription({
+      userData: app.getPath('userData'),
+      ffmpeg: proxyEncoder,
+      fetch: (url, init) => net.fetch(url, init),
+      spawnWorker: utilityWorker(
+        (modulePath) => utilityProcess.fork(modulePath, [], { serviceName: 'Powermove Transcription', stdio: ['ignore', 'ignore', 'pipe'] }),
+        path.join(__dirname, 'transcription-worker.js')
+      ),
+      ipc: ipcMain,
+      isTrustedSender,
+      broadcast: (channel, payload) => {
+        for (const window of BrowserWindow.getAllWindows()) {
+          if (!window.isDestroyed() && isTrustedSenderContents(window.webContents)) window.webContents.send(channel, payload);
+        }
+      },
+      requestModel: (reason) => {
+        const editor = currentEditor();
+        if (!editor || editor.isDestroyed()) return;
+        editor.webContents.send(TRANSCRIPTION_IPC.modelRequested, { reason });
+      },
+      reveal: async (dir) => { await shell.openPath(dir); },
+      catalogFile: isBackgroundTest ? process.env['POWERMOVE_TEST_TRANSCRIPTION_CATALOG'] ?? null : null,
+      /* Once per app version, load the model in use shortly after launch so
+         the first transcription does not wait on the Metal shader compile. */
+      ...(isBackgroundTest ? {} : { warmKey: app.getVersion() }),
+      /* electron-builder flattens transcribe-cpp's platform package into the
+         app's node_modules and keeps it unpacked (electron-builder.yml). */
+      ...(app.isPackaged ? { runtime: path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', '@transcribe-cpp', 'darwin-arm64-metal', 'libtranscribe.dylib') } : {})
+    });
+    app.once('will-quit', () => { void transcription.dispose(); });
+
+    registerExportSidecar(ipcMain, ctx);
     // Powermove Cloud account. Boot must never block the window: a broken
     // profile file degrades to "signed out".
     let cloud: CloudService | null = null;
@@ -1186,6 +1234,7 @@ if (!hasSingleInstanceLock) {
         : path.join(app.getAppPath(), 'src/main/agent-tools/mcp-server.mjs'),
       agentToolCommand: process.execPath,
       agentToolCommandArgs: [...(app.isPackaged ? [] : [app.getAppPath()]), '--powermove-agent-tools'],
+      agentMediaFfmpeg: proxyEncoder,
       refreshExtensions: refreshRestoredExtensions,
       storeAgent: () => storeAgentGateway,
       openExternal: async (url) => { await shell.openExternal(url); }

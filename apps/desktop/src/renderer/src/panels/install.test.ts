@@ -34,9 +34,10 @@ describe('unconditional Svelte panel install', () => {
     const PM = registry();
 
     expect(Object.keys(PM.PANELS)).toEqual([
-      'perf', 'assets', 'fxbrowser', 'workspaces', 'takes', 'notes',
+      'perf', 'assets', 'fxbrowser', 'mixer', 'workspaces', 'takes', 'notes',
       'shader'
     ]);
+    expect(PM.PANELS.mixer).toMatchObject({ title: 'Mixer', icon: 'speaker', noscroll: true, persist: true });
     expect(PM.PANELS.assets).toMatchObject({ title: 'Media', size: 200, persist: true });
     expect(PM.PANELS.shader).toMatchObject({ title: 'Shader', size: 320, persist: true });
   });

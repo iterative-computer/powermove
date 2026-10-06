@@ -9,3 +9,6 @@ export { axisContentKey, axisPath, isAxisTag, inspectFont } from '../typography/
 export { CHANNELS_3D, is3DLayer, planeMatrix, planeContains, projectPoint, inversePlane } from '../legacy/core/space-3d';
 export type { FontAxis, FontInspection, FontStyle } from '../typography/font-catalog';
 export { propertyShortcuts } from './property-shortcuts';
+/* Captions: pure cue lookups and presets shared by the timeline and inspector. */
+export { CAPTION_PRESETS, MIN_CUE_DURATION, cueIndexAt, cueRange, moveLimits, normalizeCaptionStyle, presetStyle } from '../captions/model';
+export type { CaptionCue, CaptionStyle, CaptionWord, CaptionsContent } from '../captions/model';

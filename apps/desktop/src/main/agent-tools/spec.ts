@@ -34,7 +34,7 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   {
     name: 'get_project_state',
     description: 'Read the live Powermove composition, selection, layers, editable properties, keyframes, effects, markers, and current revision. Call this again after edits or a revision conflict to refresh the edit baseline, then adjust commands to the observed state and retry. Results are paged: use layerOffset/layerLimit, layerId, propertyOffset/propertyLimit and keyframeOffset/keyframeLimit; counts indicate omitted data.',
-    inputSchema: closedObject({ layerOffset: { type: 'integer', minimum: 0 }, layerLimit: { type: 'integer', minimum: 1 }, keyframeOffset: { type: 'integer', minimum: 0 }, layerId: { type: 'string' }, propertyOffset: { type: 'integer', minimum: 0 }, propertyLimit: { type: 'integer', minimum: 1 }, keyframeLimit: { type: 'integer', minimum: 0 } })
+    inputSchema: closedObject({ layerOffset: { type: 'integer', minimum: 0 }, layerLimit: { type: 'integer', minimum: 1 }, keyframeOffset: { type: 'integer', minimum: 0 }, layerId: { type: 'string' }, propertyOffset: { type: 'integer', minimum: 0 }, propertyLimit: { type: 'integer', minimum: 1 }, keyframeLimit: { type: 'integer', minimum: 0 }, cueOffset: { type: 'integer', minimum: 0 }, cueLimit: { type: 'integer', minimum: 0 } })
   },
   {
     name: 'select_layers',
@@ -103,7 +103,7 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   },
   {
     name: 'apply_commands',
-    description: 'Apply typed Powermove edit commands to the live composition as a guarded transaction. Commands remain editable and keyframeable and are grouped into one Undo for uninterrupted project-only runs; interleaved edits and panel controls retain normal editor Undo. Batches are never silently truncated. On a revision conflict, read get_project_state and retry against the refreshed state. Never edit the project JSON directly.',
+    description: 'Apply typed Powermove edit commands to the live composition as a guarded transaction. Commands remain editable and keyframeable and are grouped into one Undo for uninterrupted project-only runs; interleaved edits and panel controls retain normal editor Undo. Batches are never silently truncated. On a revision conflict, read get_project_state and retry against the refreshed state. Never edit the project JSON directly. Captions: add_captions {name?, cues:[{start,end,text}] | text (SRT/WebVTT) + format?, style?:{preset:classic|boxed|whisper|spotlight|pop|paper, ...overrides}, language?, from?} adds a captions layer on top (it moves to a free position, e.g. top, when another captions layer shows at the same time, unless style sets placement); edit_captions {target, op} with op replace|insert {cues}, update {cues:[{id,start?,end?,text?}]}, delete|merge {ids}, split {id, at}, move {ids?, by}, import {text, format?, replace?}, style {style}. Caption times are composition seconds; get_project_state lists cue ids (page with cueOffset/cueLimit).',
     inputSchema: closedObject({
       label: { type: 'string', minLength: 1, maxLength: 80 },
       commands: {
@@ -153,6 +153,65 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
     description: 'Stage a stale user fork for a three-way rebase onto the built-in version shipped by this Powermove app. Returns only run-private working/base/ours paths plus sorted user, upstream, and conflict file lists. Call this before editing the fork.',
     inputSchema: closedObject({ id: { type: 'string', pattern: '^[a-z0-9][a-z0-9-]{1,63}$' } }, ['id'])
   },
+  /* ── watch and listen: footage understanding (media-tools lane) ── */
+  {
+    name: 'probe_media',
+    description: 'Read a video or audio asset\'s technical metadata without decoding: container, duration, bitrate, and per stream codec/profile, width×height, fps, pixel format, alpha, rotation, audio channels/layout/sample rate/bitrate. Pass assetId (mediaAssets in get_project_state) or a clip\'s layerId (adds the clip\'s composition span and source range). Text only.',
+    inputSchema: closedObject({ assetId: { type: 'string' }, layerId: { type: 'string' } })
+  },
+  {
+    name: 'sample_media_frames',
+    description: 'Decode real frames from SOURCE footage (the asset\'s own pixels, not the composition) and return them as images. Choose explicit times (seconds; negative counts back from the end), count evenly spaced frames across start/end, or auto: true for one frame per distinct visual state (scene detection that skips mid-transition frames; count caps it; since marks where each change began, e.g. a cut). Times are composition seconds for layerId, source seconds for assetId. At most 8 frames; quality small (default) | medium | large. Prefer media_contact_sheet for an overview.',
+    inputSchema: closedObject({
+      assetId: { type: 'string' }, layerId: { type: 'string' },
+      times: { type: 'array', maxItems: 8, items: { type: 'number' } },
+      count: { type: 'integer', minimum: 1, maximum: 8 },
+      auto: { type: 'boolean' },
+      start: { type: 'number' }, end: { type: 'number' },
+      quality: { type: 'string', enum: ['small', 'medium', 'large'] }
+    })
+  },
+  {
+    name: 'media_contact_sheet',
+    description: 'One image: a grid of timecode-labelled thumbnails, the cheapest way to see a whole clip or the live composition at once. target source (default) samples an asset/clip\'s footage; target composition renders the live composition (no asset needed). count frames evenly across start/end (default 12, max 48) or explicit times; columns optional. Times are composition seconds for layerId and composition, source seconds for assetId.',
+    inputSchema: closedObject({
+      target: { type: 'string', enum: ['source', 'composition'] },
+      assetId: { type: 'string' }, layerId: { type: 'string' },
+      count: { type: 'integer', minimum: 1, maximum: 48 },
+      times: { type: 'array', maxItems: 48, items: { type: 'number' } },
+      start: { type: 'number' }, end: { type: 'number' },
+      columns: { type: 'integer', minimum: 1, maximum: 10 }
+    })
+  },
+  {
+    name: 'media_waveform',
+    description: 'Listen to an asset\'s or clip\'s audio: silent ranges (ffmpeg silencedetect, below silenceThresholdDb for at least minSilence seconds; defaults -40 dB, 0.4 s), integrated loudness (LUFS), loudness range, true/sample peak, RMS and a clipping flag, plus a waveform image with silences shaded. image: false returns the JSON only. For layerId, start/end are composition seconds and silences are also mapped to composition time; for assetId they are source seconds.',
+    inputSchema: closedObject({
+      assetId: { type: 'string' }, layerId: { type: 'string' },
+      start: { type: 'number' }, end: { type: 'number' },
+      silenceThresholdDb: { type: 'number', minimum: -90, maximum: -10 },
+      minSilence: { type: 'number', minimum: 0.05, maximum: 10 },
+      image: { type: 'boolean' },
+      width: { type: 'integer', minimum: 400, maximum: 1600 }
+    })
+  },
+  {
+    name: 'transcribe_media',
+    description: 'Transcribe speech on this Mac. For layerId, only what the clip plays is transcribed and every time is composition seconds (trim, speed and retiming applied), ready for edit_video; for assetId, times are source seconds (optional start/end narrow it). format text (default): one timestamped line per segment; words: segments with [text, start, end] words. Long transcripts are paged: pass nextCursor back as cursor. If no transcription model is downloaded, the result says so and Powermove asks the user to download one; tell the user and retry after. A long job may answer status transcribing: call again with the same arguments.',
+    inputSchema: closedObject({
+      assetId: { type: 'string' }, layerId: { type: 'string' },
+      start: { type: 'number' }, end: { type: 'number' },
+      language: { type: 'string', maxLength: 16 },
+      format: { type: 'string', enum: ['text', 'words'] },
+      cursor: { type: 'integer', minimum: 0 }
+    })
+  },
+  {
+    name: 'check_project',
+    description: 'Lint the live composition for structural problems the editor can prove: spans where no layer is visible (only the background shows), layers that never show (opacity 0 throughout, outside the composition or work area, zero duration), missing, failed, offline or cloud-only media, clips that play past the end of their media, and audio driven over full scale by its gain. Returns issues with layer IDs and composition-time ranges; ok: true when clean. Run it before finishing an edit.',
+    inputSchema: closedObject({})
+  },
+  /* ── end watch and listen ── */
   {
     name: 'store_search',
     description: 'Search the Powermove Store for published extensions (effects, transitions, panels, themes, commands, layers, tools). Returns matching listings with their handle/slug, name, tagline, install count, verified publisher flag, declared permissions and latest releaseId. Use this to find an extension that does what the user needs before installing.',
@@ -209,7 +268,32 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
       listing: closedObject({ name: { type: 'string', maxLength: 80 }, tagline: { type: 'string', maxLength: 160 }, category: { type: 'string', enum: ['effects', 'transitions', 'panels', 'themes', 'commands', 'layers', 'tools'] }, licence: { type: 'string', enum: ['MIT'] } }, ['name', 'tagline', 'category', 'licence']),
       visibility: { type: 'string', enum: ['public', 'unlisted'] }
     }, ['localId'])
+  },
+  /* ── Captions ─────────────────────────────────────────────── */
+  {
+    name: 'generate_captions',
+    description: 'Transcribe the speech of audio/video layers on this Mac and add the result as a new captions layer on top, mapped through each clip\'s trim, speed and time remapping and split into readable cues. Transcription runs in the background: a call waits up to a minute, then returns { status: "done", layerId, cues } or { status: "running", jobId, progress }. While it is running, call generate_captions again with only { jobId } to keep waiting; never start a second generation. Ending or rolling back the run cancels it. If no transcription model is installed it returns the error code transcription-model-missing and opens the model download sheet; tell the user to download a model (Settings › Transcription) and do not retry until they have. Restyle or edit the result with edit_captions.',
+    inputSchema: closedObject({
+      layerIds: { type: 'array', items: { type: 'string' }, minItems: 1, uniqueItems: true },
+      jobId: { type: 'string' },
+      style: { type: 'string', enum: ['classic', 'boxed', 'whisper', 'spotlight', 'pop', 'paper'] },
+      label: { type: 'string', maxLength: 80 }
+    })
+  },
+  {
+    name: 'export_captions',
+    description: 'Read a captions layer as SubRip (srt) or WebVTT (vtt) text in composition time, for a sidecar file. Does not change the project. Write the returned text to the artifact directory when the user wants a file.',
+    inputSchema: closedObject({
+      layerId: { type: 'string' },
+      format: { type: 'string', enum: ['srt', 'vtt'] }
+    }, ['layerId'])
   }
+] as const;
+
+/** Footage-understanding tools (media-tools lane): read-only, project runs
+ * only. All but check_project run in main against a resolved media file. */
+export const POWERMOVE_MEDIA_TOOL_NAMES = [
+  'probe_media', 'sample_media_frames', 'media_contact_sheet', 'media_waveform', 'transcribe_media', 'check_project'
 ] as const;
 
 /** Store tools are not tied to a composition: they work in both app and
@@ -257,6 +341,8 @@ export const POWERMOVE_LIVE_INSPECTION_TOOL_NAMES = [
   'get_workspace_state',
   'validate_effect',
   'render_frames',
+  ...POWERMOVE_MEDIA_TOOL_NAMES,
+  'export_captions',
   ...POWERMOVE_STORE_READONLY_TOOL_NAMES
 ] as const;
 

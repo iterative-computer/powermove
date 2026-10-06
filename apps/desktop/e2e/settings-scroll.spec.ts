@@ -6,7 +6,7 @@ test('Settings is a continuous page with section navigation and highlighted sear
   await page.getByRole('button', { name: 'Open settings', exact: true }).click();
   const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
   // Every section participates in layout, even before navigating to it.
-  await expect(settings.locator('.sg-page:not([hidden])')).toHaveCount(4);
+  await expect(settings.locator('.sg-page:not([hidden])')).toHaveCount(5);
   const navigation = settings.getByRole('navigation', { name: 'Settings sections' });
   const project = navigation.getByRole('button', { name: 'Project', exact: true });
   await project.click();
@@ -38,7 +38,7 @@ test('Settings is a continuous page with section navigation and highlighted sear
   await expect(settings.getByRole('status').filter({ hasText: 'No settings' })).toContainText('zz-no-such-setting');
   await expect(settings.locator('.sg-page:visible')).toHaveCount(0);
   await search.fill('');
-  await expect(settings.locator('.sg-page:visible')).toHaveCount(4);
+  await expect(settings.locator('.sg-page:visible')).toHaveCount(5);
   await expect(settings.getByLabel('Frame rate', { exact: true })).toHaveValue('48');
   expect(await page.evaluate(() => CSS.highlights.has('settings-search'))).toBe(false);
 

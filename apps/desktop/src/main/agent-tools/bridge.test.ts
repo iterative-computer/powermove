@@ -102,7 +102,9 @@ describe('native Powermove agent tool bridge', () => {
     const listed = await rpc(child, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     expect(listed.result.tools.map((tool: any) => tool.name)).toEqual([
       'fork_builtin_extension', 'get_project_state', 'select_layers', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes', 'validate_effect', 'stage_fork_rebase',
-      'store_search', 'store_extension', 'store_source', 'store_library', 'store_install', 'store_update', 'store_uninstall', 'store_publish_prepare', 'store_publish'
+      'probe_media', 'sample_media_frames', 'media_contact_sheet', 'media_waveform', 'transcribe_media', 'check_project',
+      'store_search', 'store_extension', 'store_source', 'store_library', 'store_install', 'store_update', 'store_uninstall', 'store_publish_prepare', 'store_publish',
+      'generate_captions', 'export_captions'
     ]);
 
     const state = await rpc(child, {
@@ -156,6 +158,116 @@ describe('native Powermove agent tool bridge', () => {
     const allowed = await bridge.callTool(session, 'validate_effect', { definition: {} });
     expect(allowed.ok).toBe(true);
     expect(owner.requests.map(item => item.tool)).toEqual(['validate_effect']);
+  });
+
+  it('runs media tools in main on the file the renderer resolves', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'powermove-agent-media-'));
+    temporaryDirectories.push(root);
+    const tone = path.join(root, 'tone.wav');
+    const ffmpegPath = path.resolve(__dirname, '../../../node_modules/ffmpeg-static/ffmpeg');
+    await new Promise<void>((resolve, reject) => spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'sine=f=220:d=1', tone])
+      .once('close', (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg ${code}`))));
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    owner.send = (channel: string, request: AgentToolRequestEvent) => {
+      owner.requests.push(request);
+      queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: owner }, {
+        runId: request.runId, callId: request.callId, ok: true,
+        content: [{ type: 'text', text: JSON.stringify({ path: tone, origin: 'source', asset: { id: 'a1', name: 'tone.wav', kind: 'audio', duration: 1, hasAudio: true, proxy: false } }) }]
+      }));
+    };
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '/resources/agent-tools/mcp-server.mjs', ffmpegPath });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'media-run-1', owner: owner as never, baseRevision: 0 });
+
+    const response = await bridge.callTool(session, 'probe_media', { assetId: 'a1' });
+
+    expect(owner.requests.map((request) => [request.tool, request.arguments])).toEqual([['__media_source', { assetId: 'a1' }]]);
+    expect(response.ok).toBe(true);
+    const result = JSON.parse((response.content[0] as { text: string }).text);
+    expect(result).toMatchObject({ asset: { id: 'a1', name: 'tone.wav' }, format: 'wav', audio: [{ codec: 'pcm_s16le', channels: 1 }] });
+
+    const appSession = await bridge.openSession({ runId: 'media-run-app', owner: owner as never, baseRevision: 0, context: 'app' });
+    await expect(bridge.callTool(appSession, 'transcribe_media', { assetId: 'a1' })).rejects.toThrow('no project attached');
+  });
+
+  it('reads composition info for a composition contact sheet without a project-state read', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'powermove-agent-media-'));
+    temporaryDirectories.push(root);
+    const still = path.join(root, 'frame.png');
+    const ffmpegPath = path.resolve(__dirname, '../../../node_modules/ffmpeg-static/ffmpeg');
+    await new Promise<void>((resolve, reject) => spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=blue:s=320x180', '-frames:v', '1', still])
+      .once('close', (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg ${code}`))));
+    const png = new Uint8Array(await fs.readFile(still));
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    owner.send = (channel: string, request: AgentToolRequestEvent) => {
+      owner.requests.push(request);
+      const times = Array.isArray(request.arguments.times) ? request.arguments.times : [];
+      const content = request.tool === '__composition_info'
+        ? [{ type: 'text' as const, text: JSON.stringify({ width: 1280, height: 720, fps: 30, duration: 4, workArea: [0, 4] }) }]
+        : request.tool === 'render_frames'
+          ? [{ type: 'text' as const, text: '{}' }, ...times.map(() => ({ type: 'image' as const, data: png, mimeType: 'image/png' as const }))]
+          : [];
+      queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: owner }, { runId: request.runId, callId: request.callId, ok: content.length > 0, content, ...(content.length ? {} : { error: 'unexpected' }) }));
+    };
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '/resources/agent-tools/mcp-server.mjs', ffmpegPath, mediaFontFile: null });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'media-run-comp', owner: owner as never, baseRevision: 0 });
+
+    const response = await bridge.callTool(session, 'media_contact_sheet', { target: 'composition', count: 4 });
+
+    expect(response.ok).toBe(true);
+    expect(owner.requests.map((request) => request.tool)).toEqual(['__composition_info', 'render_frames']);
+    expect(JSON.parse((response.content[0] as { text: string }).text)).toMatchObject({ target: 'composition', columns: 2, rows: 2 });
+    expect(response.content[1]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' });
+  });
+
+  it('stops rendering a composition sheet at the call deadline and answers with the cells that finished', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'powermove-agent-media-'));
+    temporaryDirectories.push(root);
+    const still = path.join(root, 'frame.png');
+    const ffmpegPath = path.resolve(__dirname, '../../../node_modules/ffmpeg-static/ffmpeg');
+    await new Promise<void>((resolve, reject) => spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=blue:s=320x180', '-frames:v', '1', still])
+      .once('close', (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg ${code}`))));
+    const png = new Uint8Array(await fs.readFile(still));
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    let renders = 0;
+    owner.send = (channel: string, request: AgentToolRequestEvent) => {
+      owner.requests.push(request);
+      const times = Array.isArray(request.arguments.times) ? request.arguments.times : [];
+      if (request.tool === 'render_frames' && ++renders > 1) return; // a heavy composition: the second batch never finishes
+      const content = request.tool === '__composition_info'
+        ? [{ type: 'text' as const, text: JSON.stringify({ width: 1280, height: 720, fps: 30, duration: 8 }) }]
+        : [{ type: 'text' as const, text: '{}' }, ...times.map(() => ({ type: 'image' as const, data: png, mimeType: 'image/png' as const }))];
+      queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: owner }, { runId: request.runId, callId: request.callId, ok: true, content }));
+    };
+    // 15 s of the budget is kept for assembling the sheet, so rendering gets 1.5 s.
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '/resources/agent-tools/mcp-server.mjs', ffmpegPath, mediaFontFile: null, mediaCallBudgetMs: 16_500 });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'media-run-deadline', owner: owner as never, baseRevision: 0 });
+
+    const started = Date.now();
+    const response = await bridge.callTool(session, 'media_contact_sheet', { target: 'composition', count: 8 });
+
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(response.ok).toBe(true);
+    expect(renders).toBe(2);
+    const result = JSON.parse((response.content[0] as { text: string }).text);
+    expect(result.cells).toHaveLength(5);
+    expect(result.omitted).toHaveLength(3);
+    expect(response.content[1]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' });
+  });
+
+  it('reports media tools as unavailable without a bundled ffmpeg', async () => {
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '/resources/agent-tools/mcp-server.mjs' });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'media-run-2', owner: owner as never, baseRevision: 0 });
+    await expect(bridge.callTool(session, 'media_waveform', { assetId: 'a1' })).rejects.toThrow(/unavailable/);
+    expect(owner.requests).toHaveLength(0);
   });
 
   it('routes store tools to the gateway in main, never the renderer', async () => {

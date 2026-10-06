@@ -49,6 +49,7 @@ const TIMELINE_STYLES = `
 #tl-time.edit{color:var(--accent)}
 #tl-canvas-wrap{flex:1;position:relative;min-height:0;overflow:hidden}
 #tl-canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+#tl-canvas-wrap .tl-caption-editor{position:absolute;z-index:9;margin:0;padding:3px 7px;border:0;border-radius:var(--r-sm);background:var(--bg-float);color:var(--tx);font-family:inherit;font-size:11.5px;line-height:16px;resize:none;overflow:hidden;outline:0;box-shadow:var(--shadow-float,0 4px 14px rgb(0 0 0 / .18)),inset 0 0 0 1px var(--line);cursor:text}
 ${COMP_TABS_STYLES}
 #tl-comp-tabs{padding-right:168px}
 #tl-mode{position:absolute;z-index:4;top:4px;right:8px;height:20px;display:flex;align-items:stretch;padding:1px;gap:1px;border-radius:var(--r-sm);background:color-mix(in srgb,var(--tx) 6%,var(--bg-panel))}
@@ -83,12 +84,16 @@ export function splitSelectedLayersAtPlayhead(api: PowermoveAPI): string[] {
       for (const { prop } of api.anim.allProps(right)) {
         for (const key of prop.kf ?? []) key.t -= offset;
       }
-      right.from = api.transport.time();
-      right.dur = layer.from + layer.dur - api.transport.time();
-      if (api.media.timing.isTimed(layer)) {
-        (right.d as LayerWithTrim['d']).trim = trimAtStart(api, layer, api.transport.time());
-      }
-      layer.dur = api.transport.time() - layer.from;
+      const cut = api.transport.time();
+      const tailContent = api.media.timing.isTimed(layer)
+        ? { trim: trimAtStart(api, layer, cut) }
+        : api.media.timing.startPatch(layer, cut);
+      const headContent = api.media.timing.endPatch(layer, cut);
+      right.from = cut;
+      right.dur = layer.from + layer.dur - cut;
+      if (tailContent) Object.assign(right.d as Record<string, unknown>, tailContent);
+      if (headContent) Object.assign(layer.d as Record<string, unknown>, headContent);
+      layer.dur = cut - layer.from;
       api.project.get().layers.splice(api.project.get().layers.indexOf(layer), 0, right);
       rightIds.push(right.id);
     }
@@ -100,7 +105,6 @@ export function splitSelectedLayersAtPlayhead(api: PowermoveAPI): string[] {
   return rightIds;
 }
 
-type LayerWithTrim = { d: { trim?: number } };
 export default function activate(api: PowermoveAPI): void {
   activeApi = api;
   const timeline = createTimelineRuntime(api);

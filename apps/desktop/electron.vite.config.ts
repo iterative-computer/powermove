@@ -14,7 +14,7 @@ export default defineConfig({
       // and may only require electron).
       externalizeDeps: { exclude: ['@powermove/registry'] },
       outDir: 'out/main',
-      rollupOptions: { input: { index: path.resolve(__dirname, 'src/main/entry.ts'), editor: path.resolve(__dirname, 'src/main/index.ts') }, output: { format: 'cjs', entryFileNames: '[name].js' } }
+      rollupOptions: { input: { index: path.resolve(__dirname, 'src/main/entry.ts'), editor: path.resolve(__dirname, 'src/main/index.ts'), 'transcription-worker': path.resolve(__dirname, 'src/main/transcription/worker.ts') }, output: { format: 'cjs', entryFileNames: '[name].js' } }
     }
   },
   preload: {

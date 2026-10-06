@@ -62,4 +62,6 @@ export const MEDIA_ACCEPT = [
     ...NATIVE_VIDEO_EXTENSIONS, ...CONVERTED_VIDEO_EXTENSIONS,
     ...AUDIO_EXTENSIONS].map(extension => `.${extension}`),
   '.obj', '.pmv',
+  // Subtitles import as a captions layer.
+  '.srt', '.vtt',
 ].join(',');

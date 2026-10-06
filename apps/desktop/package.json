@@ -38,6 +38,7 @@
     "hono": "4.13.8",
     "node-diff3": "3.2.1",
     "smol-toml": "1.9.0",
+    "transcribe-cpp": "0.3.1",
     "zod": "4.6.5"
   },
   "devDependencies": {

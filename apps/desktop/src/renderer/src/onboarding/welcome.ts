@@ -1,6 +1,7 @@
 import { mount } from 'svelte';
 import AgentStep from './AgentStep.svelte';
 import TimelineStep from './TimelineStep.svelte';
+import TranscriptionStep from './TranscriptionStep.svelte';
 import WorkspaceStep from './WorkspaceStep.svelte';
 import type { OnboardingAgentChoice, OnboardingTimelineMode } from '../../../shared/creative-workspace';
 import '@powermove/tokens/tokens.css';
@@ -10,13 +11,14 @@ const button = document.querySelector<HTMLButtonElement>('#begin');
 const welcome = document.querySelector<HTMLElement>('.welcome-card');
 const timelineStep = document.querySelector<HTMLElement>('#timeline-step');
 const agentStep = document.querySelector<HTMLElement>('#agent-step');
+const transcriptionStep = document.querySelector<HTMLElement>('#transcription-step');
 const step = document.querySelector<HTMLElement>('#workspace-step');
 let timelineMode: OnboardingTimelineMode = 'layers';
 let agent: OnboardingAgentChoice | null = null;
 
-/* Welcome → timeline style → agent → workspace suitcase. Only the last step begins. */
+/* Welcome → timeline style → agent → speech model → workspace suitcase. Only the last step begins. */
 const show = (next: HTMLElement | null, focus: string) => {
-  for (const view of [welcome, timelineStep, agentStep, step]) if (view) view.hidden = view !== next;
+  for (const view of [welcome, timelineStep, agentStep, transcriptionStep, step]) if (view) view.hidden = view !== next;
   next?.querySelector<HTMLElement>(focus)?.focus();
 };
 
@@ -28,10 +30,16 @@ if (timelineStep) mount(TimelineStep, { target: timelineStep, props: {
 } });
 if (agentStep) mount(AgentStep, { target: agentStep, props: {
   onback: () => show(timelineStep, '#timeline-title'),
-  oncontinue: choice => { agent = choice; show(step, '#workspace-title'); }
+  oncontinue: choice => { agent = choice; show(transcriptionStep ?? step, transcriptionStep ? '#transcription-title' : '#workspace-title'); }
+} });
+/* Optional: choosing a model starts its download in main; it outlives onboarding. */
+if (transcriptionStep) mount(TranscriptionStep, { target: transcriptionStep, props: {
+  bridge: window.onboarding?.transcription ?? null,
+  onback: () => show(agentStep, '#agent-title'),
+  oncontinue: () => show(step, '#workspace-title')
 } });
 if (step) mount(WorkspaceStep, { target: step, props: {
-  onback: () => show(agentStep, '#agent-title'),
+  onback: () => show(transcriptionStep ?? agentStep, transcriptionStep ? '#transcription-title' : '#agent-title'),
   onbegin: choice => window.onboarding.begin({ ...choice, timelineMode, agent })
 } });
 const mark = document.querySelector<SVGPathElement>('.welcome-mark path');

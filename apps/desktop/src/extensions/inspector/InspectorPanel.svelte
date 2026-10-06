@@ -5,6 +5,7 @@
   import { provideInspectorContext } from './context';
   import CompositionSection from './CompositionSection.svelte';
   import ContentSection from './ContentSection.svelte';
+  import CaptionsSection from './CaptionsSection.svelte';
   import ExtensionLayerParams from './ExtensionLayerParams.svelte';
   import InspectorHeader from './InspectorHeader.svelte';
   import AlignmentStrip from './AlignmentStrip.svelte';
@@ -52,6 +53,8 @@
           <button class="chip" onclick={() => api.selection.select(api.groups.expand([firstLayer.id]).filter((id) => id !== firstLayer.id))}>Select contents</button>
           <button class="chip" onclick={() => api.commands.run('ungroupLayers')}>Ungroup</button>
         </div>
+      {:else if firstLayer.type === 'captions'}
+        <CaptionsSection layer={firstLayer} {fontsVersion} />
       {:else}
         <ContentSection layer={firstLayer} {fontsVersion} />
       {/if}

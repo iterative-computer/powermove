@@ -11,6 +11,7 @@ import {
 import { fontAnchorOffset } from '../core/font-anchor';
 import { animatedGlyphs, isIdentityGlyph, textAnimationKey, textAnimationState } from '../core/text-animation';
 import { glyphLayout, textSourceLines } from '../core/text-layout';
+import { createCaptionRasterizer } from '../../captions/render';
 import { rasterPaths, pathValues, groupMatrix } from '../core/vector-paths';
 import { createVariableFontRenderer, variationEntries, variationSettings } from '../../typography/font-renderer';
 export { variationEntries as textVariationEntries, variationSettings as formatFontVariationSettings } from '../../typography/font-renderer';
@@ -456,8 +457,55 @@ function rasterShape(d: any, scale: any, crop?: RasterWindow) {
   return { cv, w, h: hh, anchorX: pad, anchorY: pad, selection, uv };
 }
 
+/* ── captions ──────────────────────────────────────────── */
+const captions = createCaptionRasterizer({
+  canvas: getCanvas,
+  font: (style) => fontStr(style),
+  fontReady: (font, text) => {
+    const fonts = window.document.fonts;
+    return typeof fonts?.check !== 'function' || fonts.check(font, text);
+  },
+});
+const captionComp = () => PM.curComp?.() || PM.proj;
+/** The caption showing at `time`, rasterized, or null between cues. */
+function rasterCaptions(L: any, scale: number, time: number, uploaded?: (key: string) => any) {
+  const comp = captionComp();
+  const frame = captions.frame(L.d, time - L.from, comp.w, comp.h);
+  if (!frame) return null;
+  const key = 'cap|' + frame.key + '|' + Math.round(scale * 1000) / 1000;
+  let e = cache.get(key);
+  if (e?.blank && Date.now() >= e.retryAt) { release(key, e); e = null; }
+  if (!e) { const stub = uploaded?.(key); if (stub && !stub.blank) e = stub; }
+  if (!e) {
+    e = captions.draw(frame, scale);
+    e.dirty = true;
+    e.bytes = Math.max(0, Number(e.cv?.width || 0) * Number(e.cv?.height || 0) * 4);
+    if (e.blank) {
+      e.retryAt = Date.now() + BLANK_RETRY_MS;
+      window.setTimeout(() => PM.invalidate?.('render'), BLANK_RETRY_MS + 16);
+      (window.document as any)?.fonts?.ready?.then?.(() => PM.invalidate?.('render'));
+    }
+    cache.set(key, e);
+    cacheBytes += e.bytes;
+    if (PM.Memory?.maintain) PM.Memory.maintain('raster', cache.size > MAX);
+    else evict();
+  }
+  e.used = ++tick;
+  e.key = key;
+  return e;
+}
+/** Selection bounds of a captions layer at `time`, in layer space. */
+PM.captionBounds = (L: any, time: any = PM.time) => {
+  const comp = captionComp();
+  const frame = captions.frame(L.d, time - L.from, comp.w, comp.h);
+  if (!frame) return captions.idleBounds(L.d, comp.w, comp.h);
+  const { x0, y0, x1, y1 } = frame.block;
+  return { x0, y0, x1, y1, w: x1 - x0, h: y1 - y0, ax: 0, ay: 0 };
+};
+
 /** Get (and cache) a rasterized bitmap for a layer. `scale` = render supersample. */
 PM.raster = (L: any, scale: any = 1, time: any = PM.time, uploaded?: (key: string) => any, crop?: RasterWindow) => {
+  if (L.type === 'captions') return rasterCaptions(L, scale, time, uploaded);
   const d = L.type === 'text' ? resolvedTextContent(L, time) : resolveContent(PM, L, time);
   const animation=L.type==='text'&&(L.d.animators?.length||L.d.styles?.length)?textAnimation(L,d,time):null;
   // Above the bitmap dimension limit, different requested zoom densities
@@ -513,6 +561,7 @@ PM.raster = (L: any, scale: any = 1, time: any = PM.time, uploaded?: (key: strin
 };
 PM.rasterStats = () => ({ size: cache.size, bytes: cacheBytes, maxBytes: MAX_BYTES });
 PM.rasterClear = () => {
+  captions.clear();
   textGeometryCache.clear();
   textLayoutCache.clear();
   for (const [key, entry] of [...cache]) release(key, entry);

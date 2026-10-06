@@ -4,7 +4,9 @@ import {
   POWERMOVE_AGENT_TOOLS,
   POWERMOVE_APP_AGENT_TOOLS,
   POWERMOVE_LIVE_INSPECTION_TOOL_NAMES,
+  POWERMOVE_LIVE_INSPECTION_MCP_TOOL_NAMES,
   POWERMOVE_MCP_TOOL_NAMES,
+  POWERMOVE_MEDIA_TOOL_NAMES,
   POWERMOVE_STORE_READONLY_TOOL_NAMES,
   POWERMOVE_STORE_TOOL_NAMES
 } from './spec';
@@ -49,5 +51,26 @@ describe('Powermove agent tool spec', () => {
     for (const write of ['store_install', 'store_update', 'store_uninstall', 'store_publish', 'store_publish_prepare']) {
       expect(inspection.has(write), write).toBe(false);
     }
+  });
+
+  it('declares the watch-and-listen tools as closed, read-only inspection tools for project runs', () => {
+    const appNames = new Set(POWERMOVE_APP_AGENT_TOOLS.map((tool) => tool.name));
+    const inspection = new Set<string>(POWERMOVE_LIVE_INSPECTION_TOOL_NAMES);
+    for (const name of POWERMOVE_MEDIA_TOOL_NAMES) {
+      const tool = POWERMOVE_AGENT_TOOLS.find((candidate) => candidate.name === name);
+      expect(tool, name).toBeDefined();
+      expect(tool?.inputSchema['additionalProperties'], name).toBe(false);
+      expect(tool!.description.length, name).toBeLessThan(800);
+      expect(inspection.has(name), name).toBe(true);
+      expect(appNames.has(name), name).toBe(false);
+      expect(POWERMOVE_MCP_TOOL_NAMES).toContain(`mcp__powermove__${name}`);
+      expect(POWERMOVE_LIVE_INSPECTION_MCP_TOOL_NAMES).toContain(`mcp__powermove__${name}`);
+    }
+    const frames = POWERMOVE_AGENT_TOOLS.find((tool) => tool.name === 'sample_media_frames')!.inputSchema as any;
+    expect(frames.properties.times.maxItems).toBe(8);
+    expect(frames.properties.quality.enum).toEqual(['small', 'medium', 'large']);
+    const sheet = POWERMOVE_AGENT_TOOLS.find((tool) => tool.name === 'media_contact_sheet')!.inputSchema as any;
+    expect(sheet.properties.count.maximum).toBe(48);
+    expect(sheet.properties.target.enum).toEqual(['source', 'composition']);
   });
 });

@@ -5,6 +5,17 @@ directories:
   output: dist
 
 asar: true
+# On-device transcription runs transcribe.cpp (ggml with Metal) in the
+# transcription utility process: koffi's addon loads libtranscribe.dylib and
+# its ggml dylibs. dlopen cannot map a library out of the asar, so keep the
+# addon and the dylibs unpacked; they then sit in the bundle where codesign
+# signs them with the app's Developer ID and passes hardened-runtime library
+# validation (scripts/release-mac.mjs checks). Main points the binding at the
+# unpacked libtranscribe.dylib. Speech models are never bundled: they are
+# downloaded on request into userData (src/main/transcription/catalog.ts).
+asarUnpack:
+  - node_modules/@transcribe-cpp/darwin-arm64-metal/**
+  - node_modules/@koromix/koffi-darwin-arm64/**
 electronLanguages:
   - en
 files:

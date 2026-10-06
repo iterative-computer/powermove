@@ -1,5 +1,6 @@
 import AssetsPanel from './AssetsPanel.svelte';
 import FxBrowserPanel from './FxBrowserPanel.svelte';
+import MixerPanel from './MixerPanel.svelte';
 import NotesPanel from './NotesPanel.svelte';
 import TakesPanel from './TakesPanel.svelte';
 import WorkspacesPanel from './WorkspacesPanel.svelte';
@@ -48,6 +49,8 @@ export function registerSimplePanels(PM: LegacyPM): void {
       if (!fxBrowser.searchOpen) fxBrowser.query = '';
     })
   });
+  /* Channel strips with live meters; docks anywhere (a tall sidebar or a wide strip under the viewer). */
+  registerSveltePanel(PM, 'mixer', { title: 'Mixer', size: 300, min: 150, noscroll: true, component: MixerPanel });
   registerSveltePanel(PM, 'workspaces', { title: 'Workspaces', size: 200, component: WorkspacesPanel });
   registerSveltePanel(PM, 'takes', { title: 'Takes', size: 180, component: TakesPanel });
   registerSveltePanel(PM, 'notes', { title: 'Notes', size: 180, component: NotesPanel });

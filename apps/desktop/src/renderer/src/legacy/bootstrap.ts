@@ -51,6 +51,8 @@ import { install as installSettingsUi } from '../settings/install';
 import { install as installStoreUi } from '../store/install';
 import { installCloudAccount } from '../cloud/account';
 import { installVars } from '../vars/setup';
+import { installTranscription } from '../transcription/install';
+import { installCaptions } from '../captions/install';
 
 declare global {
   interface Window {
@@ -95,6 +97,7 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['ui/layout', installLayout],
   ['ui/library', installLibraryUi],
   ['ui/shortcuts', installShortcuts],
+  ['captions', installCaptions],
   ['core/workspace', installWorkspace],
   ['core/exporter', installExporter],
   ['assistant/harness', installHarness],
@@ -117,6 +120,8 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['ui/store', installStoreUi],
   ['cloud/account', installCloudAccount],
   ['vars', installVars],
+  /* On-device transcription: the download sheet and background download notices. */
+  ['transcription', installTranscription],
   ['shell/whats-new', (PM) => void installWhatsNew(PM)],
   /* Extensions load last: every kernel registry is populated and the whole
      legacy UI is mounted, so an extension can override any of it. */
