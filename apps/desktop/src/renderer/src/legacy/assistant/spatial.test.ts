@@ -111,4 +111,14 @@ describe('legacy spatial assistant install', () => {
     expect(result).toContain('Earlier project context was clipped');
     expect(result.endsWith(`USER REQUEST\n${request}`)).toBe(true);
   });
+  it('keeps automatic control grouping unspecified while preserving explicit overrides', () => {
+    const math = spatialRegistry().SpatialAssistant.math;
+    const plan = math.sanitizePlan({operation:'create',section:{title:'Settings',controls:
+      [null,false,true].map((advanced,index)=>({type:'slider',label:`Value ${index}`,stateKey:`value${index}`,min:0,max:1,defaultValue:.5,advanced}))
+    }},{});
+    expect(plan.section.controls).toHaveLength(3);
+    expect(plan.section.controls[0]).not.toHaveProperty('advanced');
+    expect(plan.section.controls[1].advanced).toBe(false);
+    expect(plan.section.controls[2].advanced).toBe(true);
+  });
 });

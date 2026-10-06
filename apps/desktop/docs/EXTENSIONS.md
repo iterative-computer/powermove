@@ -683,7 +683,9 @@ and `Disclosure`. All visual fields accept `api`, live `get`, and `edit`, using
 the same undoable binding as `NumField`. SliderField accepts `min`, `max`, `step`,
 `unit`, and `angle: true` for a dial. PointField reads `[x,y]`, uses a composite
 `edit` writing both keys in one transaction, and separate `xEdit`/`yEdit` bindings
-for exact numbers. RampField reads `{id,color,position}[]`; omit `edit` for fixed
+for exact numbers. PointField accepts separate `stepX`/`stepY`; omitted steps use
+one hundredth of each axis range. A shared `step` still sets both axes. RampField
+reads `{id,color,position}[]`; omit `edit` for fixed
 endpoints and use `onSelect(id)` to open the existing color editor. Optional
 `midpoint()`/`midpointEdit` edit the midpoint. FillField already uses draggable
 stops in its shared color picker. Disclosure accepts `label`, `count`, `changed`,

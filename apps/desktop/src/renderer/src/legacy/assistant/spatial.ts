@@ -2787,7 +2787,7 @@ function responseSchema() {
               type: { type: 'string', enum: ['slider', 'text', 'color', 'fill', 'toggle', 'select', 'button', 'readout', 'curve'] }, label: { type: 'string' },
               parameter: { type: 'string' }, defaultValue: { anyOf: [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }, { type: 'null' }] }, min: { type: 'number' }, max: { type: 'number' }, step: { type: 'number' },
               options: { type: 'array', items: { type: 'string' } }, target: { type: 'string' }, path: { type: 'string' }, command: { type: 'string' },
-              stateKey: { type: 'string' }, source: { type: 'string' }, action: { type: 'string' }, primary: { type: 'boolean' }, advanced: { type: 'boolean' },
+              stateKey: { type: 'string' }, source: { type: 'string' }, action: { type: 'string' }, primary: { type: 'boolean' }, advanced: { type: ['boolean', 'null'] },
             },
           } },
         },
@@ -2848,7 +2848,7 @@ RULES
 - kind=interface for a structured Timeline redesign. interfaceEdit must be one JSON-encoded manifest shaped like {"target":"timeline","patch":{"rowHeight":22..48,"gutterWidth":160..360,"rulerHeight":20..42,"clipRadius":0..12,"keyframeSize":4..12,"showLayerNumbers":boolean,"showTypeBadges":boolean,"toolbarDensity":"compact|normal","surfaceOrder":"normal|reversed"}}. Include only fields requested or clearly useful. This edits the Timeline view over the existing source; never rewrite layers or keyframes for an interface request.
 - kind=section for editable panels/controls. For a known reusable generated tool, set section.tool to an id from GENERATED TOOL CAPABILITIES and leave controls empty. The tool recipe supplies validated selection state, settings, Preview, Apply, and Undo controls. Return a neutral chromeEdit of {"target":"preview.cornerRadius","value":"square"}.
 - operation=create when adding a section; operation=modify when replacing or changing an existing source surface.
-- Use visual editors first, about five primary controls, and advanced:true for secondary controls under More. Sliders are visual tracks with precise number entry; fill opens the shared visual gradient editor. Avoid exposing every shader parameter as a primary row.
+- Use visual editors first, about five primary controls, and advanced:true for secondary controls under More. Use advanced:null for automatic grouping, or advanced:false only to explicitly keep a control visible. Sliders are filled fields with precise number entry and labels outside; fill opens the shared visual gradient editor. Avoid exposing every shader parameter as a primary row.
 - A section is a compact native Powermove panel made from slider, text, color, fill, toggle, select, button, readout, and visual curve controls.
 - Every non-button control that edits project data must bind to real editable source. Use target="$selection" for the selected layer, an exact layer id from EDITABLE SOURCE CATALOG, or target="$composition" for composition paths. A visual tool control may instead use stateKey only when a validated source-action button consumes that state.
 - The EDITABLE SOURCE CATALOG below is authoritative for every included layer. Large projects also include a compact layerIndex; selected layers and layers named in the request are prioritized. If a requested field is listed, create the working control; never claim it is unavailable. Choose each control type and range from its catalog entry.
