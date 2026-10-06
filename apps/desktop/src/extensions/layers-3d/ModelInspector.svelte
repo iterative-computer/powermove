@@ -3,7 +3,6 @@
   import type {PowermoveAPI,Layer} from 'powermove';
   import type {SceneUiState} from './scene-state.svelte';
   import SceneField from './SceneField.svelte';
-  import RenderingControls from './RenderingControls.svelte';
   let {api,ui,layerId}:{api:PowermoveAPI;ui:SceneUiState;layerId:string}=$props();
   const {Section,Row,TextField,NumField,ToggleField}=untrack(()=>api.ui.controls);
   const layer=$derived((ui.version,api.model.layer(layerId)) as Layer);
@@ -50,5 +49,4 @@
   {/if}
   <Row {api} label="Geometry"><button type="button" class="chip" disabled={busy} onclick={regenerate}>{busy?'Generating…':model.recipe.kind==='mesh'&&!model.recipe.mesh?'Replace source…':'Regenerate'}</button>{#if busy}<button type="button" class="chip" onclick={()=>api.scene3d.cancelRender()}>Cancel</button>{/if}</Row>
   {#if model.retired.length}<Row {api} label="Hidden parts"><span class="k">{model.retired.length}</span></Row>{/if}
-  <RenderingControls {api} {ui} />
 {/if}

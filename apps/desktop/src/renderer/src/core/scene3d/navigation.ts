@@ -1,128 +1,209 @@
 import * as THREE from 'three';
-import { compositionRuntime } from './service';
-import { layer3DRole } from './layers';
-import {viewportCamera,viewportPose,applyViewportPose,getViewportMode,setViewportMode,type ViewPose,type ViewMode} from './viewport';
-export type {ViewPose} from './viewport';
+import {compositionRuntime} from './service';
+import {layer3DRole} from './layers';
+import {parent3D,world3D} from '../../legacy/core/space-3d';
+import {viewportPose,applyViewportPose,getViewportMode,setViewportMode,viewportState,activeCameraLayer,viewPosition,orbitPose,type ViewPose} from './viewport';
+import {viewportPreferences,selected3D} from './editor-state';
+import {editableLayer,propertyCommand} from './targets';
+
+/*
+ * Blender viewport navigation. MMB orbits, Shift+MMB pans, Ctrl+MMB zooms;
+ * Alt+LMB emulates the middle button. In a user view the mouse wheel zooms
+ * and a trackpad orbits (Shift pans, Ctrl or pinch zooms). Camera view keeps
+ * the composition's own 2D zoom and pan, exactly as Blender pans and zooms the
+ * camera frame; orbiting leaves it for a user view. With Lock Camera to View
+ * every navigation in camera view moves the real camera layer instead.
+ */
 
 export const navigationNotice='scene3d-navigation';
-export type NavigationMode='select'|'orbit'|'pan'|'dolly';
+export type NavigationKind='orbit'|'pan'|'dolly';
+const ORBIT_DEGREES_PER_PIXEL=.45;
+
+export const orbitView=(start:ViewPose,dx:number,dy:number):ViewPose=>orbitPose(start,-dx*ORBIT_DEGREES_PER_PIXEL,-dy*ORBIT_DEGREES_PER_PIXEL);
+/** The scene follows the pointer: world units per pixel at the pivot's depth. */
+export function panView(start:ViewPose,dx:number,dy:number,fov:number,height:number):ViewPose {
+  const perPixel=2*start.distance*Math.tan(THREE.MathUtils.degToRad(fov)/2)/Math.max(1,height);
+  const right=new THREE.Vector3(1,0,0).applyQuaternion(start.rotation),up=new THREE.Vector3(0,1,0).applyQuaternion(start.rotation);
+  return {...start,rotation:start.rotation.clone(),target:start.target.clone().addScaledVector(right,-dx*perPixel).addScaledVector(up,dy*perPixel)};
+}
+/** Positive delta moves away from the pivot. */
+export function dollyView(start:ViewPose,delta:number,scale=.005):ViewPose {
+  const factor=Math.exp(Math.max(-2,Math.min(2,delta*scale)));
+  return {...start,rotation:start.rotation.clone(),target:start.target.clone(),distance:Math.min(1e5,Math.max(.01,start.distance*factor))};
+}
+/** Keep the view's rotation and fit the bounding sphere into the narrower field of view. */
+export function frameView(start:ViewPose,box:THREE.Box3,fov:number,aspect:number):ViewPose {
+  const target=box.getCenter(new THREE.Vector3()),radius=Math.max(.1,box.getBoundingSphere(new THREE.Sphere()).radius);
+  const vertical=THREE.MathUtils.degToRad(fov)/2,horizontal=Math.atan(Math.tan(vertical)*aspect);
+  return {target,rotation:start.rotation.clone(),distance:radius*1.15/Math.sin(Math.min(vertical,horizontal))};
+}
+
+const comp=(PM:any)=>PM.curComp?.()||PM.proj;
+/** World bounds of the selection (or everything, like Blender's View All); lights and cameras count as points. */
+export function viewportBounds(PM:any,selected=true,exclude:string|null=null):THREE.Box3 {
+  const world=compositionRuntime(PM),ids=new Set<string>(selected?selected3D(PM):[]),box=new THREE.Box3();
+  for(const layer of comp(PM).layers){
+    const role=layer3DRole(layer);if(!role||!PM.active(layer,PM.time)||layer.id===exclude)continue;
+    if(selected&&!ids.has(layer.id)&&!(PM.groupAncestors?.(layer)||[]).some((g:any)=>ids.has(g.id)))continue;
+    if(role==='object'){const object=world.objects.get(layer.id);if(object)box.expandByObject(object);}
+    else box.expandByPoint(new THREE.Vector3().setFromMatrixPosition(new THREE.Matrix4().fromArray(world3D(PM,layer,PM.time))));
+  }
+  return box;
+}
+const viewAspect=(PM:any)=>{const c=comp(PM);return (c?.w||16)/Math.max(1,c?.h||9);};
+const viewFov=(PM:any)=>{
+  if(getViewportMode(PM)==='editor')return viewportState(PM).fov;
+  const camera=compositionRuntime(PM).camera;return camera instanceof THREE.PerspectiveCamera?camera.fov:50;
+};
+/** Numpad . (View Selected) and Home (View All). Returns false when there is nothing to frame. */
+export function frameComposition(PM:any,selected=true):boolean {
+  const box=viewportBounds(PM,selected,lockedCamera(PM)?.id??null);if(box.isEmpty())return false;
+  const pose=frameView(viewportPose(PM),box,viewFov(PM),viewAspect(PM));
+  if(lockedCamera(PM))writeCameraPose(PM,pose,'View camera');else applyViewportPose(PM,pose);
+  return true;
+}
+
+/* ── the real camera ─────────────────────────────────── */
+/** The camera layer navigation edits when Lock Camera to View is on in camera view. */
+export function lockedCamera(PM:any):any|null {
+  if(getViewportMode(PM)!=='camera'||!viewportPreferences(PM).lockCamera)return null;
+  const layer=activeCameraLayer(PM);return layer&&editableLayer(PM,layer)?layer:null;
+}
+/** Edits that place the camera layer at a view pose (position and aim), keyed when animated or auto-keying. */
+export function cameraPoseCommands(PM:any,layer:any,pose:ViewPose):any[] {
+  const inverse=new THREE.Matrix4().fromArray(parent3D(PM,layer,PM.time)).invert();
+  const position=viewPosition(pose).applyMatrix4(inverse),target=pose.target.clone().applyMatrix4(inverse);
+  return [...(['x','y','z'] as const).map(axis=>propertyCommand(PM,layer.id,`position.${axis}`,position[axis])),
+    ...(['X','Y','Z'] as const).map(axis=>propertyCommand(PM,layer.id,`camera.target${axis}`,target[axis.toLowerCase() as 'x'|'y'|'z']))];
+}
+export function writeCameraPose(PM:any,pose:ViewPose,label:string,layer=activeCameraLayer(PM)):boolean {
+  if(!layer)throw new Error('Add a camera first');
+  if(!editableLayer(PM,layer))throw new Error('Unlock the camera first');
+  const result=PM.Edit.apply(cameraPoseCommands(PM,layer,pose),{origin:'canvas',label});
+  if(!result.ok)throw new Error(result.message);
+  return true;
+}
+/** Ctrl+Alt+Numpad 0: move the active camera to the current view, then look through it. */
+export function alignCameraToView(PM:any):boolean {
+  const layer=activeCameraLayer(PM);if(!layer)throw new Error('Add a camera first');
+  const pose=viewportPose(PM);writeCameraPose(PM,pose,'Align camera to view',layer);
+  setViewportMode(PM,'camera');
+  return true;
+}
+/** Ctrl+Numpad 0: the selected camera becomes the composition camera (topmost camera layer). */
+export function setActiveCamera(PM:any,id:string):boolean {
+  const layers=comp(PM).layers,layer=PM.L(id);
+  if(layer3DRole(layer)!=='camera')throw new Error('Select a camera');
+  const first=layers.findIndex((l:any)=>layer3DRole(l)==='camera');
+  if(first<0||layers[first]===layer)return true;
+  const result=PM.Edit.apply({type:'reorder_layer',target:id,index:first},{origin:'command',label:'Set active camera'});
+  if(!result.ok)throw new Error(result.message);
+  return true;
+}
+
+export interface NavigationHost {
+  /** Composition rectangle height in CSS pixels, for pan speed. */
+  height():number;
+  /** Camera view: Blender pans and zooms the camera frame; Powermove pans and zooms the composition. */
+  panComposition(dx:number,dy:number):void;
+  zoomComposition(factor:number,clientX:number,clientY:number):void;
+}
 export interface SceneNavigation {
-  update(rect:{width:number;height:number},selection:string[]):void;
   pointerDown(event:PointerEvent):boolean;
   wheel(event:WheelEvent):boolean;
-  frame(selected?:boolean):void;
+  /** Start a drag from the navigation gizmo's buttons. */
+  drag(event:PointerEvent,kind:NavigationKind):void;
   active():boolean;
   cancel():void;
   dispose():void;
 }
-const states=new WeakMap<object,{mode:NavigationMode;listeners:Set<(mode:NavigationMode)=>void>}>();
-function state(PM:any){let entry=states.get(PM);if(!entry){entry={mode:'select',listeners:new Set()};states.set(PM,entry);}return entry;}
-export const getNavigationMode=(PM:any)=>state(PM).mode;
-export function setNavigationMode(PM:any,mode:NavigationMode):void {
-  if(!['select','orbit','pan','dolly'].includes(mode))throw new Error('Unknown 3D navigation tool');
-  const entry=state(PM);entry.mode=mode;for(const listener of entry.listeners)listener(mode);
-}
-export function onNavigationMode(PM:any,listener:(mode:NavigationMode)=>void):()=>void {const entry=state(PM);entry.listeners.add(listener);return()=>entry.listeners.delete(listener);}
+const isTrackpad=(event:WheelEvent)=>{
+  if(event.deltaMode!==0)return false;
+  const legacy=Math.abs(Number((event as any).wheelDeltaY)||0);
+  return !(legacy>=119&&Math.abs(legacy/120-Math.round(legacy/120))<.05);
+};
 
-export function orbitView(start:ViewPose,dx:number,dy:number):ViewPose {
-  const sphere=new THREE.Spherical().setFromVector3(start.position.clone().sub(start.target));
-  sphere.radius=Math.max(.05,sphere.radius);sphere.theta-=dx*.008;sphere.phi=Math.max(.01,Math.min(Math.PI-.01,sphere.phi-dy*.008));
-  return {...start,position:new THREE.Vector3().setFromSpherical(sphere).add(start.target)};
-}
-export function panView(start:ViewPose,dx:number,dy:number,camera:THREE.Camera,height:number):ViewPose {
-  const scale=camera instanceof THREE.PerspectiveCamera?2*start.position.distanceTo(start.target)*Math.tan(THREE.MathUtils.degToRad(camera.fov/2))/camera.zoom
-    :camera instanceof THREE.OrthographicCamera?(camera.top-camera.bottom)/camera.zoom:6;
-  const right=new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld,0),up=new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld,1);
-  const offset=right.multiplyScalar(-dx).addScaledVector(up,dy).multiplyScalar(scale/Math.max(1,height));
-  return {...start,position:start.position.clone().add(offset),target:start.target.clone().add(offset)};
-}
-export function dollyView(start:ViewPose,delta:number,camera:THREE.Camera):ViewPose {
-  const factor=Math.exp(Math.max(-2,Math.min(2,delta*.005)));
-  if(camera instanceof THREE.OrthographicCamera)return {...start,zoom:Math.max(.01,Math.min(1000,start.zoom/factor))};
-  const offset=start.position.clone().sub(start.target),distance=offset.length(),lens=camera as THREE.PerspectiveCamera;
-  if(distance<1e-9)offset.set(0,0,1);
-  offset.setLength(Math.max(lens.near*2,.05,Math.min(lens.far*.8,Math.max(.05,distance)*factor)));
-  return {...start,position:offset.add(start.target)};
-}
-export function frameView(start:ViewPose,box:THREE.Box3,camera:THREE.Camera):ViewPose {
-  const target=box.getCenter(new THREE.Vector3()),radius=Math.max(.1,box.getBoundingSphere(new THREE.Sphere()).radius),direction=start.position.clone().sub(start.target);
-  if(direction.lengthSq()<1e-9)direction.set(0,0,1);direction.normalize();
-  if(camera instanceof THREE.OrthographicCamera){
-    const extent=Math.min(camera.right-camera.left,camera.top-camera.bottom)/2;
-    return {position:target.clone().addScaledVector(direction,Math.max(1,start.position.distanceTo(start.target))),target,zoom:extent/(radius*1.25)};
-  }
-  const lens=camera as THREE.PerspectiveCamera,vertical=Math.atan(Math.tan(THREE.MathUtils.degToRad(lens.fov/2))/lens.zoom),horizontal=Math.atan(Math.tan(vertical)*lens.aspect);
-  return {position:target.clone().addScaledVector(direction,radius*1.25/Math.sin(Math.min(vertical,horizontal))),target,zoom:start.zoom};
-}
-
-export function frameComposition(PM:any,selected=true):void {
-  const world=compositionRuntime(PM),ids=new Set<string>(PM.sel?.layers || []),box=new THREE.Box3();
-  for(const [id,object] of world.objects){
-    const layer=PM.L(id);if(layer3DRole(layer)!=='object')continue;
-    if(selected&&!ids.has(id)&&!(PM.groupAncestors?.(layer)||[]).some((g:any)=>ids.has(g.id)))continue;
-    box.expandByObject(object);
-  }
-  if(box.isEmpty())return;
-  const start=viewportPose(PM);
-  applyViewportPose(PM,frameView(start,box,viewportCamera(PM,world.camera)));
-}
-
-/** Navigation changes only the transient editor viewpoint, never the shot. */
-export function createSceneNavigation(PM:any,stage:HTMLElement):SceneNavigation {
-  const previousTabIndex=stage.getAttribute('tabindex');
-  if(previousTabIndex===null)stage.tabIndex=-1;
-  let height=1,over=false,gesture:null|{start:ViewPose;viewMode:ViewMode;camera:THREE.Camera;x:number;y:number;mode:NavigationMode}=null;
-  let disposed=false;
+export function createSceneNavigation(PM:any,stage:HTMLElement,host:NavigationHost,available:()=>boolean):SceneNavigation {
+  let gesture:null|{start:ViewPose;kind:NavigationKind;x:number;y:number;camera:any|null;fov:number;composition:boolean}=null;
+  let disposed=false,wheelEdit:{camera:any;timer:ReturnType<typeof setTimeout>|null}|null=null;
   const offs:(()=>void)[]=[],dragOffs:(()=>void)[]=[];
-  const listen=(target:EventTarget,event:string,fn:EventListener,options?:boolean)=>{target.addEventListener(event,fn,options);offs.push(()=>target.removeEventListener(event,fn,options));};
-  const available=()=>!disposed&&(PM.curComp?.()||PM.proj).layers.some((l:any)=>layer3DRole(l)==='object'&&PM.active(l,PM.time));
   const warn=(error:unknown)=>PM.toast?.(error instanceof Error?error.message:String(error),{key:navigationNotice,error:true});
   const endListeners=()=>{for(const off of dragOffs.splice(0))off();};
-  function cancel(){if(!gesture)return;const {start,viewMode}=gesture;gesture=null;endListeners();applyViewportPose(PM,start);setViewportMode(PM,viewMode);}
-  listen(stage,'pointerenter',()=>{over=true;});listen(stage,'pointerleave',()=>{over=false;});
-  listen(window,'blur',()=>cancel());
-  listen(window,'keydown',((event:KeyboardEvent)=>{
-    const focused=document.activeElement as HTMLElement|null;
-    if(focused?.matches('input,textarea,select,[contenteditable="true"]'))return;
-    if(event.key==='Escape'&&gesture){event.preventDefault();event.stopImmediatePropagation();cancel();return;}
-    if(!over||!available()||getNavigationMode(PM)==='select'||gesture)return;
-    if(focused?.matches('[role="combobox"],[role="listbox"]'))return;
-    if(event.key==='Escape'){event.preventDefault();event.stopImmediatePropagation();setNavigationMode(PM,'select');return;}
-    if((event.key.toLowerCase()==='f'||event.key==='Home')&&!event.metaKey&&!event.ctrlKey&&!event.altKey){
-      event.preventDefault();event.stopImmediatePropagation();try{frameComposition(PM,event.key!=='Home');}catch(error){warn(error);}
-    }
-  }) as EventListener,true);
-  return {
-    update(rect){height=Math.max(1,rect.height);},
-    pointerDown(event){
-      if(!available()||gesture||![0,1].includes(event.button))return false;
-      const mode=event.button===1||event.altKey?(event.shiftKey?'pan':'orbit'):getNavigationMode(PM);
-      if(mode==='select')return false;
-      stage.focus({preventScroll:true});
+  function cancel(){
+    if(!gesture)return;const {start,camera}=gesture;gesture=null;endListeners();
+    if(camera)PM.Edit.cancel();else if(getViewportMode(PM)==='editor')applyViewportPose(PM,start);
+  }
+  const onBlur=()=>cancel();window.addEventListener('blur',onBlur);offs.push(()=>window.removeEventListener('blur',onBlur));
+  const onKey=(event:KeyboardEvent)=>{if(event.key==='Escape'&&gesture){event.preventDefault();event.stopImmediatePropagation();cancel();}};
+  window.addEventListener('keydown',onKey,true);offs.push(()=>window.removeEventListener('keydown',onKey,true));
+  function flushWheelEdit(){if(!wheelEdit)return;const edit=wheelEdit;wheelEdit=null;if(edit.timer)clearTimeout(edit.timer);try{PM.Edit.commit('View camera');}catch(error){warn(error);}}
+  function apply(pose:ViewPose,camera:any|null){
+    if(camera){const result=PM.Edit.apply(cameraPoseCommands(PM,camera,pose),{origin:'canvas',label:'View camera'});if(!result.ok)throw new Error(result.message);}
+    else applyViewportPose(PM,pose);
+  }
+  function begin(event:PointerEvent,kind:NavigationKind):boolean {
+    flushWheelEdit();
+    const camera=lockedCamera(PM),inCamera=getViewportMode(PM)==='camera';
+    // Camera view without a lock: pan/zoom the composition frame; orbiting leaves for a user view.
+    const composition=inCamera&&!camera&&kind!=='orbit';
+    stage.focus?.({preventScroll:true});
+    const start=viewportPose(PM),fov=viewFov(PM);
+    if(camera)PM.Edit.begin('View camera',{origin:'canvas'});
+    gesture={start,kind,x:event.clientX,y:event.clientY,camera,fov,composition};
+    let last={x:event.clientX,y:event.clientY};
+    const move=(e:PointerEvent)=>{
+      if(!gesture)return;e.preventDefault();e.stopImmediatePropagation();
+      const slow=e.shiftKey&&kind!=='pan'?.1:1,dx=(e.clientX-gesture.x)*slow,dy=(e.clientY-gesture.y)*slow;
       try{
-        const world=compositionRuntime(PM),viewMode=getViewportMode(PM),start=viewportPose(PM);
-        gesture={start,viewMode,camera:viewportCamera(PM,world.camera).clone(),x:event.clientX,y:event.clientY,mode};
-        const move=(e:PointerEvent)=>{if(!gesture)return;e.preventDefault();e.stopImmediatePropagation();
-          const dx=(e.clientX-gesture.x)*(e.shiftKey&&mode!=='pan'?.1:1),dy=(e.clientY-gesture.y)*(e.shiftKey&&mode!=='pan'?.1:1);
-          try{applyViewportPose(PM,mode==='orbit'?orbitView(gesture.start,dx,dy):mode==='pan'?panView(gesture.start,dx,dy,gesture.camera,height):dollyView(gesture.start,dy,gesture.camera));}catch(error){warn(error);cancel();}
-        };
-        const up=(e:PointerEvent)=>{if(!gesture)return;e.preventDefault();e.stopImmediatePropagation();gesture=null;endListeners();};
-        const lost=()=>cancel();
-        window.addEventListener('pointermove',move,true);window.addEventListener('pointerup',up,true);window.addEventListener('pointercancel',lost,true);
-        dragOffs.push(()=>window.removeEventListener('pointermove',move,true),()=>window.removeEventListener('pointerup',up,true),()=>window.removeEventListener('pointercancel',lost,true));
-        event.preventDefault();event.stopImmediatePropagation();return true;
-      }catch(error){if(gesture)cancel();warn(error);event.preventDefault();event.stopImmediatePropagation();return true;}
+        if(gesture.composition){
+          if(kind==='pan')host.panComposition(e.clientX-last.x,e.clientY-last.y);
+          else host.zoomComposition(Math.exp(-(e.clientY-last.y)*.01),event.clientX,event.clientY);
+        }else apply(kind==='orbit'?orbitView(gesture.start,dx,dy):kind==='pan'?panView(gesture.start,dx,dy,gesture.fov,host.height()):dollyView(gesture.start,dy),gesture.camera);
+      }catch(error){warn(error);cancel();}
+      last={x:e.clientX,y:e.clientY};
+    };
+    const up=(e:PointerEvent)=>{
+      if(!gesture)return;e.preventDefault();e.stopImmediatePropagation();
+      const {camera}=gesture;gesture=null;endListeners();
+      if(camera){try{PM.Edit.commit('View camera');}catch(error){warn(error);}}
+    };
+    const lost=()=>cancel();
+    window.addEventListener('pointermove',move,true);window.addEventListener('pointerup',up,true);window.addEventListener('pointercancel',lost,true);
+    dragOffs.push(()=>window.removeEventListener('pointermove',move,true),()=>window.removeEventListener('pointerup',up,true),()=>window.removeEventListener('pointercancel',lost,true));
+    event.preventDefault();event.stopImmediatePropagation();
+    return true;
+  }
+  return {
+    pointerDown(event){
+      if(disposed||gesture||!available())return false;
+      const middle=event.button===1,emulated=event.button===0&&event.altKey&&!event.metaKey;
+      if(!middle&&!emulated)return false;
+      const kind:NavigationKind=event.shiftKey?'pan':event.ctrlKey||event.metaKey?'dolly':'orbit';
+      try{return begin(event,kind);}catch(error){warn(error);cancel();event.preventDefault();return true;}
     },
+    drag(event,kind){if(!disposed&&!gesture){try{begin(event,kind);}catch(error){warn(error);cancel();}}},
     wheel(event){
-      if(!available()||(getNavigationMode(PM)==='select'&&!event.altKey))return false;
+      if(disposed||!available())return false;
+      const camera=lockedCamera(PM);
+      if(getViewportMode(PM)==='camera'&&!camera)return false;
       event.preventDefault();event.stopImmediatePropagation();if(gesture)return true;
       try{
-        const delta=event.deltaY*(event.deltaMode===1?16:event.deltaMode===2?height:1),start=viewportPose(PM);
-        applyViewportPose(PM,dollyView(start,delta,viewportCamera(PM,compositionRuntime(PM).camera)));
-      }catch(error){cancel();warn(error);}return true;
+        const scale=event.deltaMode===1?16:event.deltaMode===2?host.height():1,dx=event.deltaX*scale,dy=event.deltaY*scale;
+        const start=viewportPose(PM),trackpad=isTrackpad(event);
+        let pose:ViewPose;
+        if(event.ctrlKey||event.metaKey)pose=dollyView(start,dy,trackpad?.01:.002);
+        else if(!trackpad)pose=dollyView(start,dy,.002);
+        else if(event.shiftKey)pose=panView(start,-dx,-dy,viewFov(PM),host.height());
+        else pose=orbitPose(start,dx*.35,dy*.35);
+        if(camera){
+          if(!wheelEdit){PM.Edit.begin('View camera',{origin:'canvas'});wheelEdit={camera,timer:null};}
+          if(wheelEdit.timer)clearTimeout(wheelEdit.timer);wheelEdit.timer=setTimeout(flushWheelEdit,350);
+          apply(pose,camera);
+        }else applyViewportPose(PM,pose);
+      }catch(error){warn(error);}
+      return true;
     },
     active:()=>!!gesture,cancel,
-    frame(selected=true){if(gesture)cancel();frameComposition(PM,selected);},
-    dispose(){cancel();disposed=true;for(const off of offs.splice(0))off();if(previousTabIndex===null)stage.removeAttribute('tabindex');else stage.setAttribute('tabindex',previousTabIndex);}
+    dispose(){cancel();flushWheelEdit();disposed=true;for(const off of offs.splice(0))off();}
   };
 }

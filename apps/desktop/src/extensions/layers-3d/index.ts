@@ -2,8 +2,7 @@ import { mount, unmount } from 'svelte';
 import type { ExtensionLayerDefinition, PowermoveAPI } from 'powermove';
 import { OBJ_MODEL } from './obj-model';
 import { STUDIO_CUBE } from './studio-cube';
-import LayerInspector from './LayerInspector.svelte';
-import ModelInspector from './ModelInspector.svelte';
+import Properties3D from './Properties3D.svelte';
 import {addPrimitive,addLight,addCamera,importModelIntoScene,duplicateItems,removeItems,is3DLayer,addMenuItems} from './scene-actions';
 import {PRIMITIVES,LIGHT_TYPES} from './scene-model';
 import {createSceneUiState} from './scene-state.svelte';
@@ -40,7 +39,7 @@ export default function activate(api:PowermoveAPI):void {
   ];
   for(const c of commands)api.commands.register({...c,category:'Layer'});
   api.inspector.registerSection({id:'3d-model',title:'3D',after:'content',when:({layerIds})=>layerIds.length===1&&(is3DLayer(api.model.layer(layerIds[0]!))||!!(api.model.layer(layerIds[0]!)?.d as any)?.modeling),
-    build(target,{layerIds}){const ui=createSceneUiState(api),component=mount((api.model.layer(layerIds[0]!)?.d as any)?.modeling?ModelInspector:LayerInspector,{target,props:{api,ui,layerId:layerIds[0]!}});return()=>{void unmount(component);ui.dispose();};}});
+    build(target,{layerIds}){const ui=createSceneUiState(api),component=mount(Properties3D,{target,props:{api,ui,layerId:layerIds[0]!}});return()=>{void unmount(component);ui.dispose();};}});
   api.menus.contribute('timeline:context',()=>[{label:'Add 3D layer',icon:'cube',run:()=>api.commands.run('3d.add-menu')}] as any);
   api.menus.contribute('viewer:context',()=>[{label:'Add 3D layer',icon:'cube',run:()=>api.commands.run('3d.add-menu')}] as any);
   api.palette.registerProvider(query=>{

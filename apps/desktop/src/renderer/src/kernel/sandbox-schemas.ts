@@ -22,7 +22,7 @@ export const registrationSchemas = {
   // inFields/looseModifiers/priority are deliberately NOT accepted: sandboxed
   // bindings are forced to priority >= 1000 and may not fire in fields, so an
   // untrusted extension cannot hijack a chord (see sandbox-host.test.ts).
-  keybindings: shape({ key: id, command: id, args: z.array(data).max(32).optional(), repeat: z.boolean().optional() }),
+  keybindings: shape({ key: id, command: id, args: z.array(data).max(32).optional(), repeat: z.boolean().optional(), contextual: z.boolean().optional() }),
   'media-defaults': shape({ anchor: shape({ x: z.number().finite(), y: z.number().finite() }) }),
   commands: shape({ id, label, category: small.optional(), kb: small.nullable().optional(), run: handle, when: handle.optional() }),
   status: shape({ id, text: handle, title: small.optional(), side: z.enum(['left', 'right']).optional(), onClick: handle.optional() }),

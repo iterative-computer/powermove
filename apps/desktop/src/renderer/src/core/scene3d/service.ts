@@ -38,6 +38,7 @@ export function compositionRuntime(PM:any,time=PM.time || 0,composition?:any):Sc
       const target=new THREE.Vector3(ev('targetX'),ev('targetY'),ev('targetZ')).applyMatrix4(parent);
       if(role==='camera'){node.up.set(0,1,0).transformDirection(new THREE.Matrix4().fromArray(world3D(PM,l,time)));node.lookAt(target);node.updateMatrixWorld(true);}
       else if((node as THREE.DirectionalLight).target)(node as THREE.DirectionalLight).target.position.copy(target);
+      else if((node as THREE.RectAreaLight).isRectAreaLight)node.lookAt(target);
     }
     runtime.scene.updateMatrixWorld(true);
     compositionCache.set(runtime,{comp,time,revision,assets:PM.proj.assets,references});

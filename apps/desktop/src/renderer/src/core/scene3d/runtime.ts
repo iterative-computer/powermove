@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
+let areaLightsReady=false;
 import {materialPreview} from './materials';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { parseScene, type Scene3D, type SceneObject, type SceneSource } from './schema';
@@ -189,7 +191,8 @@ export class SceneRuntime {
       let object=this.objects.get(node.id) as THREE.Light|undefined;
       if (!object || object.userData.lightType!==node.type) {
         if (object) this.remove(node.id,object);
-        object=node.type==='sun'?new THREE.DirectionalLight():node.type==='spot'?new THREE.SpotLight():new THREE.PointLight();
+        if(node.type==='area'&&!areaLightsReady){RectAreaLightUniformsLib.init();areaLightsReady=true;}
+        object=node.type==='sun'?new THREE.DirectionalLight():node.type==='spot'?new THREE.SpotLight():node.type==='area'?new THREE.RectAreaLight():new THREE.PointLight();
         object.userData.lightType=node.type;object.userData.sceneId=node.id;this.objects.set(node.id,object);this.scene.add(object);
         if ('target' in object) this.scene.add((object as THREE.DirectionalLight).target);
       }
@@ -199,6 +202,8 @@ export class SceneRuntime {
       const light=object as any;
       light.castShadow=node.castShadow && data.environment.shadows && shadowLights++<4;
       if (light.target) light.target.position.set(v.targetX,v.targetY,v.targetZ);
+      // Area lights face their target and have a real size; they cast no native shadows.
+      if (light.isRectAreaLight) { light.width=v.width;light.height=v.height;light.castShadow=false;light.lookAt(v.targetX,v.targetY,v.targetZ); }
       if ('distance' in light) { light.distance=v.distance;light.decay=v.decay; }
       if ('angle' in light) { light.angle=radians(v.angle);light.penumbra=v.penumbra; }
       if (light.shadow) {
@@ -230,7 +235,23 @@ export class SceneRuntime {
     else { camera.left=-3*aspect;camera.right=3*aspect;camera.top=3;camera.bottom=-3; }
     camera.updateProjectionMatrix();camera.updateMatrixWorld();
   }
-  render(w:number,h:number,objectId?:string,depthIds?:Set<string>,background=true,camera=this.camera): HTMLCanvasElement {
+  /** `look` is the editor's Wireframe shading and X-ray; output never sets it. */
+  render(w:number,h:number,objectId?:string,depthIds?:Set<string>,background=true,camera=this.camera,look:{wireframe?:boolean;xray?:boolean}={}): HTMLCanvasElement {
+    const saved:[any,{wireframe:boolean;transparent:boolean;opacity:number;depthWrite:boolean}][]=[];
+    if(look.wireframe||look.xray)this.scene.traverse((child:any)=>{
+      if(!child.isMesh)return;
+      for(const material of Array.isArray(child.material)?child.material:[child.material]){
+        if(!material||saved.some(([m])=>m===material))continue;
+        saved.push([material,{wireframe:!!material.wireframe,transparent:material.transparent,opacity:material.opacity,depthWrite:material.depthWrite}]);
+        if(look.wireframe&&'wireframe' in material)material.wireframe=true;
+        // X-ray: models become see-through and stop hiding one another.
+        if(look.xray){material.transparent=true;material.opacity*=.45;material.depthWrite=false;}
+      }
+    });
+    try{return this.renderPass(w,h,objectId,depthIds,background,camera);}
+    finally{for(const [material,old] of saved)Object.assign(material,old);}
+  }
+  private renderPass(w:number,h:number,objectId:string|undefined,depthIds:Set<string>|undefined,background:boolean,camera:THREE.PerspectiveCamera|THREE.OrthographicCamera): HTMLCanvasElement {
     if (!this.renderer) {
       // Output passes share one GPU context; a project can contain many 3D layers.
       outputRenderer ??= new THREE.WebGLRenderer({alpha:true,antialias:true,preserveDrawingBuffer:true,premultipliedAlpha:true});

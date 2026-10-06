@@ -16,11 +16,15 @@ import { compositionScene, layer3DRole } from "./layers";
 import { evaluatedRecipe } from "./modeling";
 import { viewportCamera, getViewportMode } from "./viewport";
 
+/** Blender's viewport shading: Wireframe and Solid draw natively; Material Preview (EEVEE) and Rendered (the composition's engine) use Blender. */
+export type ViewportShading = "wireframe" | "solid" | "material" | "rendered";
+export const VIEWPORT_SHADINGS: ViewportShading[] = ["wireframe", "solid", "material", "rendered"];
 export type RenderPreviewState = {
   mode: "draft" | "rendered";
   busy: boolean;
   error: string | null;
   engine: "eevee" | "cycles";
+  shading: ViewportShading;
 };
 type Surface = { surface: ImageBitmap; rect: [number, number, number, number] };
 type Frame = {
@@ -34,6 +38,7 @@ type Frame = {
 };
 type State = {
   mode: RenderPreviewState["mode"];
+  shading: ViewportShading;
   busy: boolean;
   error: string | null;
   listeners: Set<(state: RenderPreviewState) => void>;
@@ -49,6 +54,7 @@ const state = (PM: any) => {
   if (!s) {
     s = {
       mode: "draft",
+      shading: "solid",
       busy: false,
       error: null,
       listeners: new Set(),
@@ -70,9 +76,14 @@ export const renderState = (PM: any): RenderPreviewState => {
     mode: s.mode,
     busy: s.busy,
     error: s.error,
-    engine: renderSettings(PM.curComp?.() || PM.proj).engine,
+    engine: previewEngine(PM) ?? renderSettings(PM.curComp?.() || PM.proj).engine,
+    shading: s.shading,
   };
 };
+/** Material Preview always uses EEVEE; Rendered uses the composition's engine. */
+export const previewEngine = (PM: any): "eevee" | null =>
+  state(PM).shading === "material" ? "eevee" : null;
+export const wireframePreview = (PM: any) => state(PM).shading === "wireframe";
 export const blenderRevision = (PM: any) => PM._blenderRevision || 0;
 const emit = (PM: any) => {
   PM._blenderRevision = (PM._blenderRevision || 0) + 1;
@@ -110,6 +121,13 @@ export async function blenderStatus(): Promise<BlenderStatus> {
 }
 export function setPreviewMode(PM: any, mode: RenderPreviewState["mode"]) {
   const s = state(PM);
+  setShading(PM, mode === "rendered" ? "rendered" : s.shading === "wireframe" ? "wireframe" : "solid");
+}
+export function setShading(PM: any, shading: ViewportShading) {
+  if (!VIEWPORT_SHADINGS.includes(shading)) throw new Error(`Unknown viewport shading "${String(shading)}"`);
+  const s = state(PM),
+    mode = shading === "material" || shading === "rendered" ? "rendered" : "draft";
+  s.shading = shading;
   s.mode = mode;
   s.error = null;
   s.request++;
@@ -128,7 +146,7 @@ const frameKey = (
   width?: number,
   height?: number,
 ) =>
-  `${PM.proj.id}:${comp.compId || comp.id || "root"}:${time}:${preview ? "preview" : `output:${width || comp.w}x${height || comp.h}`}`;
+  `${PM.proj.id}:${comp.compId || comp.id || "root"}:${time}:${preview ? `preview:${previewEngine(PM) || "scene"}` : `output:${width || comp.w}x${height || comp.h}`}`;
 const cameraKey = (camera: THREE.Camera) =>
   JSON.stringify([
     camera.matrixWorld.elements,
@@ -264,7 +282,10 @@ export async function renderSnapshot(
         runtime = compositionRuntime(PM, time, comp),
         scene = compositionScene(PM, time, comp),
         camera = chosenCamera(PM, time, comp, preview),
-        settings = renderSettings(comp);
+        settings = {
+          ...renderSettings(comp),
+          ...(preview && previewEngine(PM) ? { engine: previewEngine(PM)! } : {}),
+        };
       const ids = new Set<string>(
         scene.objects.flatMap((node) => {
           const materials = node.slots.length
@@ -454,6 +475,8 @@ export async function renderSnapshot(
           distance: node.p.distance!.v,
           angle: node.p.angle!.v,
           penumbra: node.p.penumbra!.v,
+          width: node.p.width?.v ?? 1,
+          height: node.p.height?.v ?? 1,
           castShadow: node.castShadow && scene.environment.shadows,
         };
       });
@@ -753,6 +776,7 @@ export async function cancelBlender(PM: any) {
   const s = state(PM);
   s.request++;
   s.mode = "draft";
+  s.shading = s.shading === "wireframe" ? "wireframe" : "solid";
   s.error = null;
   if (s.timer) clearTimeout(s.timer);
   s.timer = null;
@@ -768,6 +792,7 @@ export function disposeBlenderFrames(PM: any) {
   s.frames.clear();
   s.captureKeys.clear();
   s.mode = "draft";
+  s.shading = "solid";
   s.error = null;
   s.timer = null;
   s.request++;

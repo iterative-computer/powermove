@@ -4,6 +4,7 @@ import {addPrimitive,addLight,addCamera,importModelIntoScene,duplicateItems,remo
 import {createObject,createLight,createScene} from '../../renderer/src/core/scene3d/schema';
 import {MODEL_RECIPES} from '../../renderer/src/core/scene3d/modeling';
 import {MATERIAL_FIELDS,lightFields,cameraFields} from './scene-model';
+import {tabsFor} from './property-tabs';
 function harness(){
   const definitions:any[]=[],commands:any[]=[],sections:any[]=[],menus:any[]=[],layers:any[]=[];
   let selected:string[]=[];
@@ -55,5 +56,12 @@ describe('3D layer UI and commands',()=>{
     expect(MATERIAL_FIELDS.map(f=>f.key)).toContain('roughness');expect(MATERIAL_FIELDS.map(f=>f.key)).toContain('emissive');
     expect(lightFields('spot').map(f=>f.key)).toContain('angle');expect(lightFields('point').map(f=>f.key)).not.toContain('angle');
     expect(cameraFields('perspective').map(f=>f.key)).toContain('fov');expect(cameraFields('orthographic').map(f=>f.key)).toContain('zoom');
+  });
+  it('offers Blender Properties tabs that fit each kind of 3D layer',()=>{
+    expect(tabsFor({object:true,light:false,camera:false,model:false})).toEqual(['render','world','object','material']);
+    expect(tabsFor({object:true,light:false,camera:false,model:true})).toEqual(['render','world','object','modifiers','material']);
+    expect(tabsFor({object:false,light:false,camera:false,model:true})).toEqual(['render','world','modifiers']);
+    expect(tabsFor({object:false,light:true,camera:false,model:false})).toEqual(['render','world','data']);
+    expect(tabsFor({object:false,light:false,camera:true,model:false})).toEqual(['render','world','data']);
   });
 });

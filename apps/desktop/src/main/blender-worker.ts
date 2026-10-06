@@ -303,7 +303,7 @@ def build_snapshot(req):
             data.use_custom_distance=True;data.cutoff_distance=light['distance']
         if light['type']=='sun':data.angle=.08
         if light['type']=='spot':data.spot_size=light.get('angle',45)*math.pi/180*2;data.spot_blend=light.get('penumbra',.4)
-        if light['type']=='area':data.shape='DISK';data.size=light.get('size',3)
+        if light['type']=='area':data.shape='RECTANGLE';data.size=light.get('width',1);data.size_y=light.get('height',1)
         if light['type'] in ('sun','spot','area'):
             direction=Vector(light.get('target',[0,0,0]))-obj.location
             if direction.length>1e-9:obj.rotation_euler=direction.to_track_quat('-Z','Y').to_euler()

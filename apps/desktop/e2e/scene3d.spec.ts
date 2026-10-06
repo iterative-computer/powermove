@@ -15,7 +15,7 @@ test('3D groups rotate with one gizmo and preserve their members and Undo',async
   });
   expect(initial.groupedPixels).toEqual(initial.pixels);
   await expect(page.locator('#composition-3d-controls')).toBeVisible();
-  await page.getByRole('tab',{name:'Rotate',exact:true}).click();
+  await page.getByRole('radio',{name:'Rotate',exact:true}).click();
   const handle=await page.evaluate(()=>{
     const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer'),canvas=document.querySelector('#gl')!.getBoundingClientRect(),cx=canvas.left+canvas.width/2,cy=canvas.top+canvas.height/2;
     for(let y=cy-3;y<cy+8;y+=2)for(let x=cx+35;x<cx+130;x+=2)
@@ -24,7 +24,7 @@ test('3D groups rotate with one gizmo and preserve their members and Undo',async
   });
   await page.keyboard.down('Control');await page.mouse.move(handle.x,handle.y);await page.mouse.down();await page.mouse.move(handle.cx,handle.cy+90,{steps:10});await page.mouse.up();await page.keyboard.up('Control');
   const rotated=await page.evaluate(id=>{const PM=(window as any).PM;return {rotation:PM.L(id).p.rotation.v,count:PM.hist.list().length,members:['left','right'].map(id=>JSON.stringify(PM.L(id).p)),pixels:[...PM.GL.renderToPixels(0,160,90,{transparent:true,mblur:false})]};},initial.id);
-  expect(Math.abs(rotated.rotation)).toBeGreaterThan(45);expect(rotated.rotation/15).toBeCloseTo(Math.round(rotated.rotation/15));
+  expect(Math.abs(rotated.rotation)).toBeGreaterThan(45);expect(rotated.rotation/5).toBeCloseTo(Math.round(rotated.rotation/5));
   expect(rotated.members).toEqual(initial.members);expect(rotated.count).toBe(initial.count+1);expect(rotated.pixels).not.toEqual(initial.pixels);
   await page.evaluate(()=>(window as any).PM.hist.undo());
   expect(await page.evaluate(()=>[...(window as any).PM.GL.renderToPixels(0,160,90,{transparent:true,mblur:false})])).toEqual(initial.pixels);
@@ -54,7 +54,7 @@ test('3D groups rotate with one gizmo and preserve their members and Undo',async
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
-test('editor orbit, pan, dolly and framing preserve the render camera, project and export',async({session})=>{
+test('Blender navigation: MMB orbit, Shift+MMB pan, numpad views and framing preserve the render camera, project and export',async({session})=>{
   await session.openEditor();const {page}=session;
   const initial=await page.evaluate(()=>{
     const PM=(window as any).PM,api=PM.Kernel.api('navigation-proof');
@@ -70,42 +70,54 @@ test('editor orbit, pan, dolly and framing preserve the render camera, project a
     gl.readPixels(0,0,gl.drawingBufferWidth,gl.drawingBufferHeight,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
     let hash=2166136261;for(const value of pixels)hash=Math.imul(hash^value,16777619);return hash;
   });
+  const label=page.locator('.vp-label span').first();
+  await expect(label).toHaveText('Camera Perspective');
+  await expect(page.getByRole('img',{name:/Navigation gizmo/})).toBeVisible();
   const original=await sample();
-  const view=page.getByRole('combobox',{name:'3D view',exact:true});await expect(view).toBeVisible();
-  const tool=async(name:string,mode:string)=>{await view.click();await page.getByRole('option',{name,exact:true}).click();
-    await expect.poll(()=>page.evaluate(()=>(window as any).PM.Kernel.api('navigation-proof').scene3d.getNavigationMode())).toBe(mode);};
-  await tool('Orbit','orbit');
-  const box=await page.locator('#stage').boundingBox(),point={x:box!.x+box!.width*.7,y:box!.y+box!.height*.6};
-  const drag=async(dx:number,dy:number)=>{await page.mouse.move(point.x,point.y);await page.mouse.down();await page.mouse.move(point.x+dx,point.y+dy,{steps:8});await page.mouse.up();};
-  await drag(65,-30);await expect(page.getByRole('tab',{name:'Editor',exact:true})).toHaveAttribute('aria-selected','true');
+  const box=await page.locator('#stage').boundingBox(),point={x:box!.x+box!.width*.6,y:box!.y+box!.height*.6};
+  const drag=async(dx:number,dy:number,shift=false)=>{
+    await page.mouse.move(point.x,point.y);if(shift)await page.keyboard.down('Shift');
+    await page.mouse.down({button:'middle'});await page.mouse.move(point.x+dx,point.y+dy,{steps:8});await page.mouse.up({button:'middle'});
+    if(shift)await page.keyboard.up('Shift');
+  };
+  await drag(65,-30);await expect(label).toHaveText('User Perspective');
   await expect.poll(sample).not.toBe(original);const orbited=await sample();
-  await page.mouse.move(point.x,point.y);await page.mouse.down();await page.mouse.move(point.x+45,point.y,{steps:5});await page.keyboard.press('Escape');await page.mouse.up();
+  await page.mouse.move(point.x,point.y);await page.mouse.down({button:'middle'});await page.mouse.move(point.x+45,point.y,{steps:5});await page.keyboard.press('Escape');await page.mouse.up({button:'middle'});
   expect(await sample()).toBe(orbited);
-  await tool('Pan','pan');await drag(40,25);await expect.poll(sample).not.toBe(orbited);const panned=await sample();
-  await page.mouse.wheel(0,100);await expect.poll(sample).not.toBe(panned);const dollied=await sample();
-  await view.click();await page.getByRole('option',{name:'Frame selection',exact:true}).click();await expect.poll(sample).not.toBe(dollied);
-  await drag(30,0);const beforeFrame=await sample();await page.keyboard.press('f');await expect.poll(sample).not.toBe(beforeFrame);
-  await page.getByRole('tab',{name:'Move',exact:true}).click();
+  await drag(40,25,true);await expect.poll(sample).not.toBe(orbited);const panned=await sample();
+  await page.mouse.move(point.x,point.y);await page.keyboard.press('7');await expect(label).toHaveText('Top Orthographic');
+  await expect.poll(sample).not.toBe(panned);
+  await page.keyboard.press('5');await expect(label).toHaveText('Top Perspective');
+  await page.keyboard.press('1');await expect(label).toHaveText('Front Orthographic');
+  await page.keyboard.press('Control+3');await expect(label).toHaveText('Left Orthographic');
+  const beforeFrame=await sample();
+  // Playwright's NumpadDecimal has no NumLock; send the period a numpad actually produces.
+  await page.evaluate(()=>{for(const type of ['keydown','keyup'])document.body.dispatchEvent(new KeyboardEvent(type,{key:'.',code:'NumpadDecimal',bubbles:true}));});await expect.poll(sample).not.toBe(beforeFrame);
+  await page.keyboard.press('Home');
+  await page.getByRole('radio',{name:'Move',exact:true}).click();
+  await page.keyboard.press('1');
   const aligned=await page.evaluate(()=>{
     const PM=(window as any).PM,b=PM.GL.bounds(PM.L('model'),0),viewer=PM.Kernel.services.get('viewer'),canvas=document.querySelector('#gl')!.getBoundingClientRect();
     const picked=PM.GL.pick((b.x0+b.x1)/2,(b.y0+b.y1)/2,0)?.id;
     let handle=null;
-    for(let y=canvas.top+canvas.height*.3;y<canvas.top+canvas.height*.7&&!handle;y+=4)
-      for(let x=canvas.left+canvas.width*.3;x<canvas.left+canvas.width*.7;x+=4)
+    for(let y=canvas.top+canvas.height*.2;y<canvas.top+canvas.height*.8&&!handle;y+=4)
+      for(let x=canvas.left+canvas.width*.2;x<canvas.left+canvas.width*.8;x+=4)
         if(viewer.sceneGizmo.hover(x,y)&&(document.querySelector('[data-scene-gizmo]') as HTMLElement).dataset.gizmoAxis==='X'){handle={x,y};break;}
     return {picked,handle};
   });
   expect(aligned.picked).toBe('model');expect(aligned.handle).not.toBeNull();
-  // Editing in an orbited view still edits the real object and gets one Undo.
+  // Editing in a user view still edits the real object and gets one Undo.
   await page.mouse.move(aligned.handle!.x,aligned.handle!.y);await page.mouse.down();await page.mouse.move(aligned.handle!.x+35,aligned.handle!.y,{steps:8});await page.mouse.up();
   expect(await page.evaluate(()=>(window as any).PM.hist.list().length)).toBe(initial.count+1);
   await page.evaluate(()=>(window as any).PM.hist.undo());
   const unchanged=await page.evaluate(()=>{const PM=(window as any).PM;return {layers:JSON.stringify(PM.proj.layers),pixels:[...PM.GL.renderToPixels(0,160,90,{transparent:true,mblur:false})]};});
   expect(unchanged.layers).toBe(initial.layers);expect(unchanged.pixels).toEqual(initial.pixels);
-  await page.getByRole('tab',{name:'Camera',exact:true}).click();await expect.poll(sample).toBe(original);
-  expect(await page.evaluate(()=>(window as any).PM.Kernel.api('navigation-proof').scene3d.getNavigationMode())).toBe('select');
-  await page.mouse.move(point.x,point.y);await page.mouse.wheel(0,80);
+  await page.mouse.move(point.x,point.y);await page.keyboard.press('0');await expect(label).toHaveText('Camera Perspective');
+  await expect.poll(sample).toBe(original);
+  await page.mouse.wheel(0,80);
   expect(await page.evaluate(()=>(window as any).PM.Kernel.api('navigation-proof').scene3d.getView())).toBe('camera');
+  await page.keyboard.press('0');await expect(label).toHaveText('Front Orthographic');
+  await page.getByRole('button',{name:/Toggle camera view/}).click();await expect(label).toHaveText('Camera Perspective');
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
@@ -151,7 +163,7 @@ test('selecting an imported model shows composition gizmos; drag, cancel and und
     const target=imported.data.result.id;PM.selectLayers([target]);PM.invalidate();return {target,count:PM.hist.list().length};
   });
   await expect(page.locator('#composition-3d-controls')).toBeVisible();
-  await expect(page.getByRole('tab',{name:'Move',exact:true})).toBeVisible();
+  await page.getByRole('radio',{name:'Move',exact:true}).click();
   const findHandle=(axis:string)=>page.evaluate((axis)=>{
     const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer'),stage=document.querySelector('#stage')!,rect=stage.getBoundingClientRect();
     const canvas=document.querySelector('#gl')!.getBoundingClientRect(),cx=canvas.left+canvas.width/2,cy=canvas.top+canvas.height/2;
@@ -166,24 +178,26 @@ test('selecting an imported model shows composition gizmos; drag, cancel and und
   expect(await page.evaluate(()=>(window as any).PM.hist.list().length)).toBe(initial.count+1);
   await page.evaluate(()=>(window as any).PM.hist.undo());expect(await position()).toBe(0);
   await page.mouse.move(handle.x,handle.y);await page.mouse.down();await page.mouse.move(handle.x+50,handle.y,{steps:5});await page.keyboard.press('Escape');await page.mouse.up();expect(await position()).toBe(0);
-  await page.getByRole('tab',{name:'Rotate',exact:true}).click();
+  await page.getByRole('radio',{name:'Rotate',exact:true}).click();
   const rotate=await findHandle('Z');await page.mouse.move(rotate.x,rotate.y);await page.mouse.down();await page.mouse.move(rotate.cx,rotate.cy+80,{steps:8});await page.mouse.up();
   expect(Math.abs(await page.evaluate(id=>(window as any).PM.L(id).p.rotation.v,initial.target))).toBeGreaterThan(10);
   await page.evaluate(()=>(window as any).PM.hist.undo());
-  await page.getByRole('tab',{name:'Scale',exact:true}).click();
+  await page.getByRole('radio',{name:'Scale',exact:true}).click();
   const scale=await findHandle('X');await page.mouse.move(scale.x,scale.y);await page.mouse.down();await page.mouse.move(scale.x+35,scale.y,{steps:8});await page.mouse.up();
   expect(await page.evaluate(id=>(window as any).PM.L(id).p['scale.x'].v,initial.target)).toBeGreaterThan(100);
   await page.evaluate(()=>(window as any).PM.hist.undo());
   expect(await page.evaluate(id=>(window as any).PM.L(id).p['scale.x'].v,initial.target)).toBe(100);
-  await page.getByRole('tab',{name:'Move',exact:true}).click();
+  await page.getByRole('radio',{name:'Move',exact:true}).click();
   await page.keyboard.down('Control');await page.mouse.move(handle.x,handle.y);await page.mouse.down();await page.mouse.move(handle.x+90,handle.y,{steps:8});await page.mouse.up();await page.keyboard.up('Control');
   expect(await position()).not.toBe(0);expect(await position()).toBeCloseTo(Math.round(await position()),6);await page.evaluate(()=>(window as any).PM.hist.undo());
   await page.evaluate(()=>{const PM=(window as any).PM;PM.Kernel.services.get('viewer').setZoom(1);PM.invalidate();});
   const zoomed=await findHandle('X');await page.mouse.move(zoomed.x,zoomed.y);await page.mouse.down();await page.mouse.move(zoomed.x+30,zoomed.y,{steps:5});await page.mouse.up();expect(await position()).not.toBe(0);await page.evaluate(()=>(window as any).PM.hist.undo());
   await page.evaluate(()=>(window as any).PM.Kernel.services.get('viewer').returnToComposition());
 
-  await page.getByRole('tab',{name:'Local',exact:true}).click();
-  expect(await page.evaluate(()=>(window as any).PM.Kernel.api('gizmo-state').scene3d.getSpace())).toBe('local');
+  await page.evaluate(()=>(window as any).PM.Kernel.api('gizmo-state').scene3d.viewport.run('orientation','local'));
+  expect(await page.evaluate(()=>(window as any).PM.Kernel.api('gizmo-state').scene3d.viewport.state().orientation)).toBe('local');
+  await expect(page.getByRole('button',{name:'Transform orientation: Local'})).toBeVisible();
+  await page.evaluate(()=>(window as any).PM.Kernel.api('gizmo-state').scene3d.viewport.run('orientation','global'));
   expect(await page.evaluate(()=>(window as any).PM.GL.renderToPixels(0,160,90,{transparent:true})[3])).toBe(0);
   const repeated=await page.evaluate(()=>{
     const PM=(window as any).PM;return [0,1,2].map(()=>PM.GL.renderToPixels(0,160,90,{transparent:true,mblur:false})[(45*160+80)*4+3]);

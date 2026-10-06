@@ -103,7 +103,7 @@ test("Blender models, editable materials, regeneration and engine renders work i
     page.getByRole("group", { name: "Pattern scale property", exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("tab", { name: "Draft", exact: true }),
+    page.getByRole("radio", { name: "Solid", exact: true }),
   ).toBeVisible();
   for (const theme of ["dark", "light"]) {
     await page.evaluate((theme) => {

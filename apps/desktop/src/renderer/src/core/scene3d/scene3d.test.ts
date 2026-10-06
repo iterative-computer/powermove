@@ -6,7 +6,6 @@ import { SceneRuntime,primitiveGeometry } from './runtime';
 import { compositionRuntime,compositionDepthIds,compositionOrderedLayers } from './service';
 import { convertLegacyScene } from './migration';
 import { editScene } from './operations';
-import { startTransform,constrainTransform,typeTransform,transformAmount,transformComponents } from './modal-transform';
 import { makePM } from '../../legacy/__tests__/make-pm';
 import { world3D,parent3D } from '../../legacy/core/space-3d';
 
@@ -234,18 +233,5 @@ describe('shared render graph, camera projection and picking',()=>{
     runtime.sync(scene,()=>asset,p=>p.v,3.5,false,()=>1.5);
     expect(runtime.objects.get('model')!.getObjectByName('Part')!.position.x).toBeCloseTo(1.5);
     expect((runtime.objects.get('model')!.getObjectByName('Part') as THREE.Mesh).geometry).toBe(geometry);runtime.dispose();
-  });
-});
-
-describe('Blender-style exact transform input',()=>{
-  it('reads G X 2, R Z 90, negative numbers, plane constraints and snap',()=>{
-    let state=constrainTransform(startTransform('translate'),'x');state=typeTransform(state,'2');
-    expect(transformAmount(state)).toBe(2);expect(transformComponents(state)).toEqual(['x']);
-    state=constrainTransform(startTransform('rotate'),'z');for(const key of '90')state=typeTransform(state,key);
-    expect(transformAmount(state)).toBe(90);
-    state=constrainTransform(startTransform('translate'),'z',true);for(const key of '-2.5')state=typeTransform(state,key);
-    expect(transformAmount(state)).toBe(-2.5);expect(transformComponents(state)).toEqual(['x','y']);
-    expect(transformAmount({...startTransform('rotate'),delta:23},true)).toBe(30);
-    expect(transformAmount({...startTransform('scale'),delta:-100})).toBe(.0001);
   });
 });

@@ -162,6 +162,12 @@ export interface KeybindingDefinition {
   looseModifiers?: boolean;
   /** Lower runs first; extension bindings default to 0, built-ins to 100. */
   priority?: number;
+  /**
+   * The command applies only in some context and returns false otherwise.
+   * The key's browser default is then cancelled only when the command handles
+   * it, so a declined key keeps its normal behavior (e.g. Shift+Tab focus).
+   */
+  contextual?: boolean;
 }
 
 export interface KeybindingsAPI {
@@ -293,14 +299,64 @@ export interface ExtensionLayerDefinition {
   };
 }
 
-export interface Scene3DGizmo {
-  update(rect:{x:number;y:number;width:number;height:number},selection?:string[]):void;
-  hover(clientX:number,clientY:number):boolean;
+export type Scene3DViewportShading='wireframe'|'solid'|'material'|'rendered';
+export type Scene3DViewportTool='tweak'|'box'|'cursor'|'move'|'rotate'|'scale';
+/** Blender viewport state. Preferences persist locally; view, cursor and active object are per composition. */
+export interface Scene3DViewportState {
+  tool:Scene3DViewportTool;
+  orientation:'global'|'local'|'view';
+  pivot:'median'|'individual'|'cursor'|'active'|'bounds';
+  snap:boolean;
+  overlays:boolean;
+  toolbar:boolean;
+  sidebar:boolean;
+  lockCamera:boolean;
+  xray:boolean;
+  shading:Scene3DViewportShading;
+  /** The composition contains 3D layers; the viewport UI is shown only then. */
+  hasScene:boolean;
+  /** Blender keys apply: pointer over the viewer, 3D composition, no 2D layers selected. */
+  inContext:boolean;
+  view:{mode:'camera'|'editor';projection:'perspective'|'orthographic';axis:'front'|'back'|'right'|'left'|'top'|'bottom'|null;label:string;fov:number};
+  cursor:[number,number,number];
+  active:string|null;
+  selected:string[];
+  modal:boolean;
+  hasCamera:boolean;
+  /** Edit Mode: the edited model and its selected/total points. */
+  editMode:{layer:string;selected:number;total:number}|null;
+}
+/** The 3D viewport attached over a composition stage. */
+export interface Scene3DViewportController {
+  update(rect:{x:number;y:number;width:number;height:number},selection?:readonly string[]):void;
   pointerDown(event:PointerEvent):boolean;
-  active():boolean;
+  objectPress(event:PointerEvent,layerId:string):boolean;
+  hover(clientX:number,clientY:number):boolean;
+  cursorAt(clientX:number,clientY:number):string|null;
+  wheel(event:WheelEvent):boolean;
+  contextMenu(event:MouseEvent):boolean;
+  startTransform(mode:'translate'|'rotate'|'scale'|'trackball'):boolean;
+  armBoxSelect():boolean;
+  armZoomBorder():boolean;
+  startWalk():boolean;
+  extrude():boolean;
+  takeBoxSelect():boolean;
+  modalActive():boolean;
+  pointer():{clientX:number;clientY:number}|null;
   covers(ids:readonly string[]):boolean;
+  glyphsIn(box:{x0:number;y0:number;x1:number;y1:number}):string[];
+  active():boolean;
   cancel():void;
   dispose():void;
+}
+export interface Scene3DViewportAPI {
+  attach(stage:HTMLElement,host:{panComposition(dx:number,dy:number):void;zoomComposition(factor:number,clientX:number,clientY:number):void}):Scene3DViewportController;
+  state():Scene3DViewportState;
+  onChange(listener:(state:Scene3DViewportState)=>void):Disposable;
+  inContext():boolean;
+  readonly operators:readonly string[];
+  /** Run a Blender viewport operator by name, e.g. `view.front`, `transform.translate`, `select.all`. False when it does not apply. */
+  run(operator:string,...args:unknown[]):boolean;
 }
 export interface Scene3DAPI {
   model(args:{operation:'create_model'|'regenerate_model'|'import_blend';recipe?:unknown;target?:string;name?:string;file?:File;sourceAssetId?:string},meta?:EditMeta):Promise<EditResult>;
@@ -317,34 +373,18 @@ export interface Scene3DAPI {
   setRendering(patch:Partial<import('../../../shared/blender').Render3DSettings>,meta?:EditMeta):EditResult;
   blenderStatus():Promise<import('../../../shared/blender').BlenderStatus>;
   chooseBlender():Promise<import('../../../shared/blender').BlenderStatus|null>;
-  previewState():{mode:'draft'|'rendered';busy:boolean;error:string|null;engine:'eevee'|'cycles'};
+  previewState():{mode:'draft'|'rendered';busy:boolean;error:string|null;engine:'eevee'|'cycles';shading:Scene3DViewportShading};
   setPreviewMode(mode:'draft'|'rendered'):void;
-  onPreviewChange(listener:(state:{mode:'draft'|'rendered';busy:boolean;error:string|null;engine:'eevee'|'cycles'})=>void):Disposable;
+  onPreviewChange(listener:(state:{mode:'draft'|'rendered';busy:boolean;error:string|null;engine:'eevee'|'cycles';shading:Scene3DViewportShading})=>void):Disposable;
   renderFrame():Promise<void>;
   cancelRender():Promise<void>;
   isGroup(layerId:string):boolean;
   getView():'camera'|'editor';
   setView(mode:'camera'|'editor'):void;
   onViewChange(listener:(mode:'camera'|'editor')=>void):Disposable;
-  getNavigationMode():'select'|'orbit'|'pan'|'dolly';
-  setNavigationMode(mode:'select'|'orbit'|'pan'|'dolly'):void;
-  onNavigationChange(listener:(mode:'select'|'orbit'|'pan'|'dolly')=>void):Disposable;
-  createNavigation(element:HTMLElement):{
-    update(rect:{width:number;height:number},selection:string[]):void;
-    pointerDown(event:PointerEvent):boolean;
-    wheel(event:WheelEvent):boolean;
-    frame(selected?:boolean):void;
-    active():boolean;
-    cancel():void;
-    dispose():void;
-  };
   frame(selected?:boolean):void;
-  getMode(): 'translate'|'rotate'|'scale';
-  setMode(mode:'translate'|'rotate'|'scale'):void;
-  getSpace():'world'|'local';
-  setSpace(space:'world'|'local'):void;
-  onGizmoChange(listener:(state:{mode:'translate'|'rotate'|'scale';space:'world'|'local'})=>void):Disposable;
-  createGizmo(element:HTMLElement):Scene3DGizmo;
+  /** Blender-style 3D viewport: view, tools, selection, transforms and editor settings. */
+  readonly viewport:Scene3DViewportAPI;
   /** Pack selected OBJ/MTL/texture files into a durable GLB, or return a standalone model. */
   prepareImport(files: File[]): Promise<File>;
   /** Explicit undoable upgrade of a v1 model layer, preserving channels and baking camera animation. */

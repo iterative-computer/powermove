@@ -3,18 +3,27 @@ import {editModel,MODEL_RECIPES,MODEL_FIELDS,modelFieldsFor} from './modeling';
 import {materialPreset,MATERIAL_PRESETS,listMaterials,materialSlots,assignedMaterial} from './materials';
 import {renderSettings,setRenderSettings,blenderStatus,renderState,setPreviewMode,onRenderState,renderBlenderPreview,cancelBlender} from './rendering';
 import {getViewportMode,setViewportMode,onViewportChange} from './viewport';
-import { createSceneGizmo,getAutoKey,setAutoKey,getGizmoMode,getGizmoSpace,setGizmoMode,setGizmoSpace,onGizmoState } from './gizmo';
-import { compositionRuntime } from './service';
+import {onViewportSettings,notifyViewport} from './editor-state';
+import {attachViewport,inViewportContext} from './controller';
+import {runViewportOperator,viewportSnapshot,VIEWPORT_OPERATORS} from './commands';
+import {frameComposition,navigationNotice} from './navigation';
 import { createScene,createObject,createLight,parseScene,SCENE3D_DEFINITION } from './schema';
 import { convertLegacyScene } from './migration';
 import { prepareModelImport } from './import-bundle';
 import { compositionScene,layer3DRole,isModelGroup } from './layers';
 import { editScene } from './operations';
 import type { Scene3DAPI } from '../../kernel/api';
-import {navigationNotice,createSceneNavigation,getNavigationMode,setNavigationMode,onNavigationMode,frameComposition,type SceneNavigation} from './navigation';
 
+const warn=(PM:any,error:unknown)=>PM.toast?.(error instanceof Error?error.message:String(error),{key:navigationNotice,error:true});
+/** Coalesced viewport state notifications for header, toolbar and sidebar UI. */
+function onViewportState(PM:any,listener:(state:ReturnType<typeof viewportSnapshot>)=>void):()=>void {
+  let queued=false,live=true;
+  const fire=()=>{if(queued||!live)return;queued=true;queueMicrotask(()=>{queued=false;if(live)listener(viewportSnapshot(PM));});};
+  const offs=[onViewportSettings(PM,fire),onViewportChange(PM,fire),onRenderState(PM,fire),
+    ...['sel','selection','scene3d:selection','scene3d:viewport','project','composition','layers'].map(event=>PM.bus?.on?.(event,fire))];
+  return()=>{live=false;for(const off of offs)if(typeof off==='function')off();};
+}
 export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection',selection:{layerId:string|null;ids:string[]})=>void):Scene3DAPI {
-  let navigation:SceneNavigation|null=null;
   const selection=()=>{
     const ids=(PM.sel?.layers || []).filter((id:string)=>layer3DRole(PM.L?.(id)) || isModelGroup(PM,PM.L?.(id)));
     return {layerId:ids[0] || null,ids};
@@ -34,13 +43,18 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection',selection:
     },
     getRendering:()=>renderSettings(PM.curComp?.()||PM.proj),setRendering:(patch,meta)=>setRenderSettings(PM,patch,meta),blenderStatus,chooseBlender:()=>bridge()?.blender?.choose()||Promise.resolve(null),
     previewState:()=>renderState(PM),setPreviewMode:mode=>setPreviewMode(PM,mode),onPreviewChange:listener=>({dispose:onRenderState(PM,listener)}),renderFrame:()=>renderBlenderPreview(PM),cancelRender:()=>cancelBlender(PM),
-    getAutoKey:()=>getAutoKey(PM),setAutoKey:value=>setAutoKey(PM,value),getMode:getGizmoMode,setMode:setGizmoMode,getSpace:getGizmoSpace,setSpace:setGizmoSpace,onGizmoChange:listener=>({dispose:onGizmoState(listener)}),createGizmo:element=>createSceneGizmo(PM,element,time=>compositionRuntime(PM,time)),createScene,createObject,createLight,prepareImport:prepareModelImport,convert:layerId=>convertLegacyScene(PM,layerId),edit:(args,meta)=>editScene(PM,args,{origin:'interface',...meta}),
+    getAutoKey:()=>!!PM.autokey,setAutoKey:value=>{PM.autokey=!!value;notifyViewport(PM);},createScene,createObject,createLight,prepareImport:prepareModelImport,convert:layerId=>convertLegacyScene(PM,layerId),edit:(args,meta)=>editScene(PM,args,{origin:'interface',...meta}),
     isGroup:layerId=>isModelGroup(PM,PM.L?.(layerId)),
-    getView:()=>getViewportMode(PM),setView:mode=>{navigation?.cancel();if(mode==='camera')setNavigationMode(PM,'select');setViewportMode(PM,mode);},onViewChange:listener=>({dispose:onViewportChange(PM,listener)}),
-    getNavigationMode:()=>getNavigationMode(PM),setNavigationMode:mode=>setNavigationMode(PM,mode),
-    onNavigationChange:listener=>({dispose:onNavigationMode(PM,listener)}),
-    createNavigation:element=>(navigation=createSceneNavigation(PM,element)),
-    frame:selected=>{try{navigation?navigation.frame(selected):frameComposition(PM,selected);}catch(error){PM.toast?.(error instanceof Error?error.message:String(error),{key:navigationNotice,error:true});}},
+    getView:()=>getViewportMode(PM),setView:mode=>setViewportMode(PM,mode),onViewChange:listener=>({dispose:onViewportChange(PM,listener)}),
+    frame:selected=>{try{frameComposition(PM,selected);}catch(error){warn(PM,error);}},
+    viewport:{
+      attach:(stage,host)=>attachViewport(PM,stage,host),
+      state:()=>viewportSnapshot(PM),
+      onChange:listener=>({dispose:onViewportState(PM,listener)}),
+      inContext:()=>inViewportContext(PM),
+      operators:VIEWPORT_OPERATORS,
+      run(operator,...args){try{return runViewportOperator(PM,operator,args);}catch(error){warn(PM,error);return true;}}
+    },
     describe(){return compositionScene(PM,PM.time);},
     selection,select};
 }
