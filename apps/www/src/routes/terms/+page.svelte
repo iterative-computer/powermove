@@ -1,5 +1,6 @@
 <script lang="ts">
   import Header from '$lib/Header.svelte';
+  import Footer from '$lib/Footer.svelte';
   import { GITHUB } from '$lib/links';
 
   const updated = 'September 21, 2026';
@@ -62,6 +63,8 @@
   <h2>Contact</h2>
   <p>Iterative Computer · <a href="mailto:hello@iterative.computer">hello@iterative.computer</a> · <a href="/privacy">Privacy Policy</a></p>
 </main>
+
+<Footer />
 
 <style>
   .legal { max-width: 68ch; padding-block: 120px 96px; }

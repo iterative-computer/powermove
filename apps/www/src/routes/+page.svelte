@@ -1,13 +1,11 @@
 <script lang="ts">
-  import { ArrowUpRight } from '@lucide/svelte';
   import Header from '$lib/Header.svelte';
   import Hero from '$lib/Hero.svelte';
+  import Footer from '$lib/Footer.svelte';
   import Features from '$lib/Features.svelte';
   import { GITHUB } from '$lib/links';
   import { download, resolveDownload, stars } from '$lib/download.svelte';
 
-
-  const year = new Date().getFullYear();
 
   $effect(() => { resolveDownload(); });
 
@@ -69,8 +67,12 @@
 
   <Features />
 
-  <section class="principles" aria-label="The layers you can change">
-    <div class="wrap principles-layout">
+  <section class="kernel" aria-labelledby="kernel-title">
+    <div class="wrap kernel-layout">
+      <div class="kernel-copy">
+        <h2 id="kernel-title" class="chapter-title"><span class="strong">A deliberately tiny kernel.</span> Everything above it is an extension, including the parts we wrote.</h2>
+        <p class="lead">Timeline, effects, inspector, the UI itself. The agent writes new extensions the way we built the editor, through a typed, undoable tool layer that inspects, renders, and edits the live project.</p>
+      </div>
       <div class="stack" bind:this={stack} data-in={stackIn ? '' : undefined} aria-hidden="true">
         <div class="slab yours" style="--i:4"><span class="slab-name">Your mods</span><span class="slab-note">Yours to add. Same API as everything below</span></div>
         <div class="slab" style="--i:3"><span class="slab-name">Panels</span><span class="slab-note">Timeline, inspector, agent, media</span></div>
@@ -80,30 +82,6 @@
       </div>
     </div>
   </section>
-
-  <section class="final" aria-labelledby="final-title">
-    <div class="wrap">
-      <h2 id="final-title">Your move.</h2>
-      <p class="final-note">Free and open source for macOS.</p>
-      <div class="cta center">
-        <a class="button primary lg" href={download.href}>Download for macOS</a>
-        <a class="button lg" href={GITHUB} target="_blank" rel="noopener">Star on GitHub{#if stars.label} <span class="muted">{stars.label}</span>{/if} <ArrowUpRight size={15} /></a>
-      </div>
-    </div>
-  </section>
-
-  <footer>
-    <div class="wrap foot">
-      <a class="logo" href="/#top" aria-label="Powermove home"><img src="/powermove-logo.svg" width="24" height="21" alt="" /></a>
-      <div>
-        <span class="foot-title">Product</span>
-        <ul><li><a href="#editor">Editor</a></li><li><a href="#agent">Agent</a></li><li><a href="#extensions">Extensions</a></li><li><a href="#export">Export</a></li></ul>
-      </div>
-      <div>
-        <span class="foot-title">Company</span>
-        <ul><li><a href={GITHUB} target="_blank" rel="noopener">GitHub</a></li><li><a href="mailto:hello@iterative.computer">hello@iterative.computer</a></li><li><a href="/privacy">Privacy</a></li><li><a href="/terms">Terms</a></li></ul>
-      </div>
-      <div class="foot-copy">© Iterative Computer {year}. Open source.</div>
-    </div>
-  </footer>
 </main>
+
+<Footer />

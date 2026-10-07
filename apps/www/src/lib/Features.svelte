@@ -25,21 +25,17 @@
 
 <section class="features" aria-labelledby="features-title">
   <div class="wrap">
-    <h2 id="features-title" class="section-heading"><span class="strong">Welcome to malleable software.</span></h2>
-    <div class="feature-layout">
-      <div class="blocks">
-        {#each features as f (f.id)}
-          <article class="block" id={f.id}>
-            <AppPreview kind={f.id} />
-            <div class="copy">
-              <div>
-                <h3>{f.label}</h3>
-                <p class="lead"><span class="strong">{f.lead}</span> {f.text}</p>
-              </div>
-            </div>
-          </article>
-        {/each}
-      </div>
+    <h2 id="features-title" class="chapter-title"><span class="strong">Welcome to malleable software.</span> Ask for a panel, an effect, or a whole workflow, and it loads into the app you’re already using.</h2>
+    <div class="blocks">
+      {#each features as f (f.id)}
+        <article class="block" id={f.id}>
+          <div class="copy">
+            <h3>{f.label}</h3>
+            <p class="lead"><span class="strong">{f.lead}</span> {f.text}</p>
+          </div>
+          <AppPreview kind={f.id} />
+        </article>
+      {/each}
     </div>
   </div>
 </section>
