@@ -1,14 +1,10 @@
 <script lang="ts">
-  import { ArrowUpRight } from '@lucide/svelte';
   import Header from '$lib/Header.svelte';
-  import HeroAnimation from '$lib/HeroAnimation.svelte';
-  import LogoCloud from '$lib/LogoCloud.svelte';
+  import Hero from '$lib/Hero.svelte';
+  import Footer from '$lib/Footer.svelte';
   import Features from '$lib/Features.svelte';
-  import { GITHUB } from '$lib/links';
-  import { download, resolveDownload, stars } from '$lib/download.svelte';
+  import { resolveDownload } from '$lib/download.svelte';
 
-
-  const year = new Date().getFullYear();
 
   $effect(() => { resolveDownload(); });
 
@@ -45,63 +41,49 @@
   <meta name="twitter:image" content="https://trypowermove.com/og.png" />
 </svelte:head>
 
-<Header />
+<Header onDark />
 
 <main id="top">
-  <section class="hero" aria-labelledby="headline">
-    <a class="eyebrow" href={GITHUB} target="_blank" rel="noopener">Free and open source{#if stars.label}<span class="eyebrow-sep" aria-hidden="true"></span><span class="muted">{stars.label} stars on GitHub</span>{/if}</a>
-    <h1 id="headline" class="sr-only">Shape your video editor</h1>
-    <HeroAnimation />
-    <div class="wrap hero-intro">
-      <p class="lede">Powermove is a video editing app that lets you shape the featureset. Simply connect an agent and ask.</p>
-      <div class="cta center">
-        <a class="button primary lg" href={download.href}>Download for macOS{#if download.version} <span class="muted">{download.version}</span>{/if}</a>
-        <a class="button lg" href={GITHUB} target="_blank" rel="noopener">Star on GitHub <ArrowUpRight size={15} /></a>
-      </div>
-    </div>
-    <figure class="stage" id="editor">
-      <img class="editor-screenshot" src="/editor-screenshot.png" alt="Powermove editor in a light theme, showing the Change literally anything composition, agent conversation, timeline, properties, and effects." width="1920" height="1305" fetchpriority="high" />
+  <div class="top">
+    <div class="top-glow" aria-hidden="true"></div>
+    <section class="hero" aria-labelledby="headline">
+      <h1 id="headline" class="sr-only">Shape your video editor</h1>
+      <Hero />
+    </section>
+    <figure class="stage-window">
+      <img src="/editor-window.png" alt="The Powermove editor: media, the agent conversation, the Change literally anything composition on the canvas, its timeline, properties, and effects." width="1782" height="1168" fetchpriority="high" />
     </figure>
-    <LogoCloud />
+  </div>
+
+  <section class="rows" id="features" aria-labelledby="features-title">
+    <h2 id="features-title" class="rows-title"><span class="strong">Welcome to malleable software.</span> A real motion editor, with an agent that adds what it’s missing.</h2>
+
+    <article class="row" id="editor" aria-labelledby="editor-title">
+      <div class="row-copy">
+        <h3 id="editor-title">A real motion editor</h3>
+        <p><span class="strong">Layers, keyframes, curves, and effects.</span> All on a timeline, with the agent in a panel beside them.</p>
+      </div>
+      <div class="row-media"><img src="/editor-hero.png" alt="The Powermove editor in its dark theme over a desert night wallpaper: media, the agent conversation, a canvas with blur controls, the timeline, properties, and effects." width="1920" height="1280" loading="lazy" /></div>
+    </article>
+
+    <Features />
+
+    <article class="row" aria-labelledby="kernel-title">
+      <div class="row-copy">
+        <h3 id="kernel-title">A deliberately tiny kernel</h3>
+        <p><span class="strong">Everything above it is an extension,</span> including the parts we wrote. The agent builds new ones through the same typed, undoable tool layer.</p>
+      </div>
+      <div class="row-media kernel-body">
+        <div class="stack" bind:this={stack} data-in={stackIn ? '' : undefined} aria-hidden="true">
+          <div class="slab yours" style="--i:4"><span class="slab-name">Your mods</span><span class="slab-note">Yours to add. Same API as everything below</span></div>
+          <div class="slab" style="--i:3"><span class="slab-name">Panels</span><span class="slab-note">Timeline, inspector, agent, media</span></div>
+          <div class="slab" style="--i:2"><span class="slab-name">Effects and transitions</span><span class="slab-note">Blur, grain, whip pan, dissolve</span></div>
+          <div class="slab" style="--i:1"><span class="slab-name">Theme and keymap</span><span class="slab-note">Dusk, Vim, yours</span></div>
+          <div class="slab kernel" style="--i:0"><span class="slab-name">Kernel</span><span class="slab-note">Project store, typed edits, undo, compositor</span></div>
+        </div>
+      </div>
+    </article>
   </section>
-
-  <Features />
-
-  <section class="principles" aria-label="The layers you can change">
-    <div class="wrap principles-layout">
-      <div class="stack" bind:this={stack} data-in={stackIn ? '' : undefined} aria-hidden="true">
-        <div class="slab yours" style="--i:4"><span class="slab-name">Your mods</span><span class="slab-note">Yours to add. Same API as everything below</span></div>
-        <div class="slab" style="--i:3"><span class="slab-name">Panels</span><span class="slab-note">Timeline, inspector, agent, media</span></div>
-        <div class="slab" style="--i:2"><span class="slab-name">Effects and transitions</span><span class="slab-note">Blur, grain, whip pan, dissolve</span></div>
-        <div class="slab" style="--i:1"><span class="slab-name">Theme and keymap</span><span class="slab-note">Dusk, Vim, yours</span></div>
-        <div class="slab kernel" style="--i:0"><span class="slab-name">Kernel</span><span class="slab-note">Project store, typed edits, undo, compositor</span></div>
-      </div>
-    </div>
-  </section>
-
-  <section class="final" aria-labelledby="final-title">
-    <div class="wrap">
-      <h2 id="final-title">Your move.</h2>
-      <p class="final-note">Free and open source for macOS.</p>
-      <div class="cta center">
-        <a class="button primary lg" href={download.href}>Download for macOS</a>
-        <a class="button lg" href={GITHUB} target="_blank" rel="noopener">Star on GitHub{#if stars.label} <span class="muted">{stars.label}</span>{/if} <ArrowUpRight size={15} /></a>
-      </div>
-    </div>
-  </section>
-
-  <footer>
-    <div class="wrap foot">
-      <a class="logo" href="/#top" aria-label="Powermove home"><img src="/powermove-logo.svg" width="24" height="21" alt="" /></a>
-      <div>
-        <span class="foot-title">Product</span>
-        <ul><li><a href="#editor">Editor</a></li><li><a href="#agent">Agent</a></li><li><a href="#extensions">Extensions</a></li><li><a href="#export">Export</a></li></ul>
-      </div>
-      <div>
-        <span class="foot-title">Company</span>
-        <ul><li><a href={GITHUB} target="_blank" rel="noopener">GitHub</a></li><li><a href="mailto:hello@iterative.computer">hello@iterative.computer</a></li><li><a href="/privacy">Privacy</a></li><li><a href="/terms">Terms</a></li></ul>
-      </div>
-      <div class="foot-copy">© Iterative Computer {year}. Open source.</div>
-    </div>
-  </footer>
 </main>
+
+<Footer />
