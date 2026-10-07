@@ -47,37 +47,34 @@
 <main id="top">
   <div class="top">
     <div class="top-glow" aria-hidden="true"></div>
-    <section class="hero" aria-label="Introduction">
+    <section class="hero" aria-labelledby="headline">
+      <h1 id="headline" class="sr-only">Shape your video editor</h1>
       <Hero />
     </section>
-    <div class="cards">
+    <div class="stage-window">
       <Film />
     </div>
   </div>
 
-  <div class="cards" id="features">
-    <article class="card" id="editor" aria-labelledby="editor-title">
-      <header class="card-head">
-        <div>
-          <h2 id="editor-title">A real motion editor</h2>
-          <p>Layers, keyframes, curves, and effects on a timeline, with the agent in a panel beside them.</p>
-        </div>
-      </header>
-      <div class="card-body">
-        <img src="/editor-hero.png" alt="The Powermove editor in its dark theme over a desert night wallpaper: media, the agent conversation, a canvas with blur controls, the timeline, properties, and effects." width="1920" height="1280" loading="lazy" />
+  <section class="rows" id="features" aria-labelledby="features-title">
+    <h2 id="features-title" class="rows-title"><span class="strong">Welcome to malleable software.</span> A real motion editor, with an agent that adds what it’s missing.</h2>
+
+    <article class="row" id="editor" aria-labelledby="editor-title">
+      <div class="row-copy">
+        <h3 id="editor-title">A real motion editor</h3>
+        <p><span class="strong">Layers, keyframes, curves, and effects.</span> All on a timeline, with the agent in a panel beside them.</p>
       </div>
+      <div class="row-media"><img src="/editor-hero.png" alt="The Powermove editor in its dark theme over a desert night wallpaper: media, the agent conversation, a canvas with blur controls, the timeline, properties, and effects." width="1920" height="1280" loading="lazy" /></div>
     </article>
 
     <Features />
 
-    <article class="card" aria-labelledby="kernel-title">
-      <header class="card-head">
-        <div>
-          <h2 id="kernel-title">A deliberately tiny kernel</h2>
-          <p>Everything above it is an extension, including the parts we wrote. The agent builds new ones through the same typed, undoable tool layer.</p>
-        </div>
-      </header>
-      <div class="card-body kernel-body">
+    <article class="row" aria-labelledby="kernel-title">
+      <div class="row-copy">
+        <h3 id="kernel-title">A deliberately tiny kernel</h3>
+        <p><span class="strong">Everything above it is an extension,</span> including the parts we wrote. The agent builds new ones through the same typed, undoable tool layer.</p>
+      </div>
+      <div class="row-media kernel-body">
         <div class="stack" bind:this={stack} data-in={stackIn ? '' : undefined} aria-hidden="true">
           <div class="slab yours" style="--i:4"><span class="slab-name">Your mods</span><span class="slab-note">Yours to add. Same API as everything below</span></div>
           <div class="slab" style="--i:3"><span class="slab-name">Panels</span><span class="slab-note">Timeline, inspector, agent, media</span></div>
@@ -87,7 +84,7 @@
         </div>
       </div>
     </article>
-  </div>
+  </section>
 </main>
 
 <Footer />

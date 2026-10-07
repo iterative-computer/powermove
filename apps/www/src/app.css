@@ -13,7 +13,7 @@ ul,ol{padding:0;list-style:none}
 a{color:inherit;text-decoration:none}
 button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
 a,button{touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-:root{--paper:#FAF8F5;--bg-window:var(--paper);--col:960px;font-family:var(--font-geist-sans),Geist,sans-serif;font-synthesis:none;background:var(--paper);color:var(--tx);font-kerning:normal}
+:root{--paper:#FAF8F5;--bg-window:var(--paper);--col:1040px;font-family:var(--font-geist-sans),Geist,sans-serif;font-synthesis:none;background:var(--paper);color:var(--tx);font-kerning:normal}
 ::selection{background:var(--accent-dim);color:var(--accent-tx)}
 a:focus-visible,button:focus-visible{outline:0;box-shadow:var(--focus-ring);border-radius:var(--r-sm)}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
@@ -76,60 +76,81 @@ main{overflow:clip}
   .sheet .pill{width:100%;height:44px;margin-top:28px}
 }
 
-/* ---- top: the dusk gradient, the headline, and the first card rising out of it ---- */
-.top{position:relative;isolation:isolate}
-/* Ends behind the film card, so the card's lower half sits on paper. Interpolated in
-   oklab and eased with many stops, the ember never bands on its way to orange. */
-.top-glow{position:absolute;inset:0 0 auto;z-index:-1;height:calc(100% - min(28vw,300px));
-  background:linear-gradient(in oklab,#160401 0%,#1E0502 10%,#2B0702 20%,#3F0B03 30%,#5A1103 40%,#7E1A04 49%,#A92807 57%,#D23F0A 64%,#F0580A 69%,#FF7531 74%,#FF9E6B 79%,#FFC6A4 85%,#FDE6D7 91%,#FBF2EA 96%,var(--paper) 100%)}
-.hero{position:relative;padding:clamp(168px,22vh,232px) 0 0}
-.hero-copy{position:relative;max-width:var(--col);margin-inline:auto;padding-inline:24px}
-@media(max-width:640px){.hero-copy{padding-inline:16px}}
-.headline{display:flex;flex-direction:column;font-size:clamp(34px,4.6vw,56px);font-weight:500;line-height:1;letter-spacing:-.048em;color:rgb(255 255 255 / .3);text-wrap:balance}
-.headline-line{position:relative}
-.headline-line+.headline-line{margin-top:.02em}
-.headline-line.punch{color:rgb(255 255 255 / .95)}
-.headline .unset{color:transparent}
-.js .headline[data-pending]{visibility:hidden}
-/* A zero-width caret: it never pushes the text it sits in. */
-.caret{position:relative;display:inline-block;width:0}
-.caret::after{content:'';position:absolute;left:.04em;bottom:-.1em;width:.05em;min-width:2px;height:.84em;border-radius:1px;background:rgb(255 255 255 / .9)}
-.hero-cta{display:flex;flex-wrap:wrap;gap:8px;margin-top:56px}
-@media(max-width:640px){.hero-cta{margin-top:40px}}
+/* ---- top: the stage ----
+   Powermove's near-black with the brand orange rising as a glow behind the
+   editor window, the way a lit canvas spills onto a dark room. The headline
+   is the app's own composition, played by its own player. */
+.top{position:relative;isolation:isolate;padding-bottom:1px}
+.top-glow{position:absolute;inset:0 0 auto;z-index:-1;height:calc(100% - min(22vw,260px));background:
+  linear-gradient(to bottom,transparent 72%,#0C0A09 99%),
+  radial-gradient(52% 34% at 50% 84%,rgb(255 107 26 / .5),rgb(240 88 10 / .2) 45%,transparent 75%),
+  radial-gradient(90% 60% at 50% 96%,rgb(150 44 8 / .4),transparent 70%),
+  #0C0A09}
+.hero{position:relative;padding:clamp(140px,19vh,200px) 0 0;text-align:center;color:#F5F5F4}
+.hero-art,.hero-cta,.stage-window{animation:hero-in .8s cubic-bezier(.16,1,.3,1) both}
+.hero-cta{animation-delay:90ms}
+.stage-window{animation-delay:180ms}
+@keyframes hero-in{from{opacity:0;filter:blur(10px);transform:translateY(16px)}to{opacity:1;filter:none;transform:none}}
 
-/* Prompts typing in the margins: ambient, off the measure, and gone where there's no margin. */
-.margins{position:absolute;inset:0;pointer-events:none;user-select:none}
-.margin{position:absolute;max-width:26ch;font-family:var(--font-geist-mono);font-size:11px;line-height:1.45;color:rgb(255 255 255 / .55);white-space:pre}
-.margin[data-side=left]{left:max(20px,calc(50% - var(--col) / 2 - 196px))}
-.margin[data-side=right]{right:max(20px,calc(50% - var(--col) / 2 - 196px));text-align:right}
-.margin-caret{color:rgb(255 255 255 / .8)}
-@media(max-width:1279px){.margins{display:none}}
+.hero-art{--w:min(calc(100% - 32px),980px);display:flex;flex-direction:column;align-items:center}
+.artboard{position:relative;display:block;width:var(--w);aspect-ratio:1520/240;cursor:default}
+.artboard:focus-visible{box-shadow:none;outline:0}
+.artboard:focus-visible .hero-vector{opacity:.8}
+.hero-vector{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
+/* At rest the type spans x 343–1600, so the line is inset to the words, not the crop. */
+.scrubber{position:relative;width:calc(var(--w) * .83);height:28px;margin-top:14px;outline:0;touch-action:none;user-select:none;-webkit-user-select:none;container-type:inline-size}
+.scrub-track{position:absolute;inset-inline:0;top:50%;height:1px;background:rgb(255 255 255 / .12)}
+.scrub-track::after{content:'';position:absolute;inset:0;background:rgb(255 255 255 / .38);transform-origin:left;scale:var(--p) 1}
+.scrub-cut{position:absolute;top:calc(50% - 2px);left:calc(var(--t) * 100%);width:1px;height:5px;background:rgb(255 255 255 / .28)}
+.scrub-head{position:absolute;top:calc(50% - 6px);left:0;width:2px;height:12px;margin-left:-1px;border-radius:1px;background:var(--accent);box-shadow:0 0 10px rgb(255 107 26 / .7);translate:calc(var(--p) * 100cqw) 0;transition:scale var(--dur-3) var(--ease)}
+.scrub-time{position:absolute;bottom:calc(100% + 7px);left:50%;translate:-50% 3px;font-family:var(--font-geist-mono);font-size:11px;line-height:1;letter-spacing:.02em;color:rgb(255 255 255 / .55);white-space:nowrap;opacity:0;transition:opacity var(--dur-3),translate var(--dur-3) var(--ease)}
+.scrubber:hover .scrub-time,.scrubber:focus-visible .scrub-time,.hero-art[data-scrubbing] .scrub-time,.hero-art[data-paused] .scrub-time{opacity:1;translate:-50% 0}
+.scrubber:hover .scrub-head,.hero-art[data-scrubbing] .scrub-head{scale:1 1.35}
+.scrubber:focus-visible .scrub-track{background:rgb(255 255 255 / .3)}
+.hero-cta{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-top:36px}
 
-/* ---- cards ---- */
-.cards{display:grid;gap:56px;max-width:var(--col);margin-inline:auto;padding-inline:24px}
-@media(max-width:640px){.cards{gap:32px;padding-inline:12px}}
-.top .cards{margin-top:clamp(64px,9vh,96px)}
-#features{margin-top:56px;scroll-margin-top:32px}
-.card{overflow:hidden;border-radius:24px;background:#fff;box-shadow:0 0 0 1px rgb(28 18 12 / .05),0 1px 2px rgb(28 18 12 / .04),0 32px 64px -32px rgb(28 18 12 / .22);scroll-margin-top:32px}
-.card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;padding:40px 44px 34px}
-.card-head h2{font-size:17px;font-weight:500;line-height:1.35;letter-spacing:-.012em;color:var(--tx)}
-.card-head p{max-width:58ch;margin-top:4px;font-size:17px;line-height:1.45;letter-spacing:-.012em;color:var(--tx-3);text-wrap:pretty}
-.card-head p .strong{color:var(--tx-2)}
-@media(max-width:640px){.card-head{padding:24px 20px 22px}.card-head h2,.card-head p{font-size:15px}}
-.card-controls{display:flex;gap:6px;flex:none}
-.round{display:grid;place-items:center;width:36px;height:36px;border-radius:50%;background:rgb(28 18 12 / .05);color:var(--tx);transition:background var(--dur-3),scale var(--dur-2) var(--ease)}
-.round:hover{background:rgb(28 18 12 / .09)}
-.round:active{scale:.94}
-.round:focus-visible{border-radius:50%}
-.card-body{border-top:1px solid rgb(28 18 12 / .06)}
-.card-body>img,.card-body>video{width:100%;height:auto}
-.film video{aspect-ratio:16/9;background:#fff}
-.kernel-body{padding:56px 44px 64px;background:#F6F4F1}
+/* The film as an editor window: title bar, picture, and a transport in the timeline's language. */
+.stage-window{max-width:var(--col);margin:clamp(64px,9vh,96px) auto 0;padding-inline:24px}
+@media(max-width:640px){.stage-window{padding-inline:12px}}
+.window{overflow:hidden;border-radius:12px;background:#FDFDFE;box-shadow:0 0 0 1px rgb(0 0 0 / .5),inset 0 1px 0 rgb(255 255 255 / .6),0 40px 80px -24px rgb(0 0 0 / .55),0 0 120px -20px rgb(255 107 26 / .35)}
+.window-bar{position:relative;display:flex;align-items:center;justify-content:center;height:38px;background:#F3F3F6;border-bottom:1px solid rgb(20 22 28 / .07)}
+.lights{position:absolute;left:14px;display:flex;gap:8px}
+.lights i{width:12px;height:12px;border-radius:50%;background:#FF5F57;box-shadow:inset 0 0 0 .5px rgb(0 0 0 / .12)}
+.lights i:nth-child(2){background:#FEBC2E}
+.lights i:nth-child(3){background:#28C840}
+.window-title{font-size:13px;font-weight:500;color:var(--tx-2)}
+.window video{width:100%;height:auto;aspect-ratio:16/9;background:#fff}
+.transport{--p:0;display:flex;align-items:center;gap:10px;height:44px;padding-inline:10px 12px;border-top:1px solid rgb(20 22 28 / .07);background:#FDFDFE}
+.t-button{display:grid;place-items:center;flex:none;width:26px;height:26px;border-radius:var(--r-sm);color:var(--tx-2);transition:color var(--dur-2),background var(--dur-2)}
+.t-button:hover{color:var(--tx);background:var(--ink-1)}
+.t-time{flex:none;font-family:var(--font-geist-mono);font-size:11.5px;letter-spacing:.02em;color:var(--tx-2)}
+.t-bar{position:relative;flex:1;height:26px;outline:0;touch-action:none;container-type:inline-size;border-radius:var(--r-xs)}
+.t-bar:focus-visible{box-shadow:var(--focus-ring)}
+.t-track{position:absolute;inset-inline:0;top:50%;height:3px;margin-top:-1.5px;border-radius:2px;background:var(--ink-2);overflow:hidden}
+.t-track::after{content:'';position:absolute;inset:0;background:var(--tx-4);transform-origin:left;scale:var(--p) 1}
+.t-head{position:absolute;top:50%;left:0;width:2px;height:14px;margin:-7px 0 0 -1px;border-radius:1px;background:var(--accent);translate:calc(var(--p) * 100cqw) 0}
+
+/* ---- rows: copy beside each product graphic, on paper ---- */
+.rows{display:grid;gap:clamp(72px,9vw,112px);max-width:var(--col);margin:clamp(104px,12vw,152px) auto 0;padding-inline:24px}
+@media(max-width:640px){.rows{padding-inline:16px}}
+.rows-title{max-width:30ch;font-size:clamp(26px,3vw,36px);font-weight:500;line-height:1.15;letter-spacing:-.03em;color:var(--tx-3);text-wrap:balance}
+.rows-title .strong{color:var(--tx)}
+.row{display:grid;gap:24px;scroll-margin-top:32px}
+@media(min-width:900px){.row{grid-template-columns:minmax(0,4fr) minmax(0,8fr);gap:48px;align-items:start}}
+.row-copy{display:grid;gap:10px}
+@media(min-width:900px){.row-copy{position:sticky;top:48px;padding-top:4px}}
+.row-copy h3{font-size:var(--fs-md);font-weight:500;color:var(--tx-3)}
+.row-copy p{max-width:34ch;font-size:17px;line-height:1.5;letter-spacing:-.011em;color:var(--tx-3);text-wrap:pretty}
+.row-copy .strong{color:var(--tx)}
+.row-media{overflow:hidden;border-radius:16px;background:#fff;box-shadow:0 0 0 1px rgb(28 18 12 / .06),0 24px 48px -28px rgb(28 18 12 / .2)}
+.row-media>img{width:100%;height:auto}
+.kernel-body{padding:48px 32px 56px;background:#F6F4F1}
+@media(max-width:640px){.kernel-body{padding:32px 16px 40px}}
 .kernel-body .slab{background:#fff;box-shadow:0 0 0 1px rgb(28 18 12 / .06),0 1px 2px rgb(28 18 12 / .04)}
 .kernel-body .slab.kernel{background:#fff;box-shadow:0 0 0 1px rgb(28 18 12 / .08),0 12px 24px -12px rgb(28 18 12 / .2)}
 .kernel-body .slab.kernel .slab-name{color:var(--tx)}
 .kernel-body .slab.yours{background:transparent;box-shadow:none}
-@media(max-width:640px){.kernel-body{padding:32px 16px 40px}}
+.site-footer{margin-top:clamp(40px,6vw,80px)}
 
 /* Stack of slabs seen head-on: the kernel is the widest plate, each layer above is a little narrower,
    and the top one is an outlined slot rather than a filled plate, because it's the reader's to fill.

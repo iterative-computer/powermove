@@ -24,13 +24,11 @@
 </script>
 
 {#each features as f (f.id)}
-  <article class="card" id={f.id} aria-labelledby="{f.id}-title">
-    <header class="card-head">
-      <div>
-        <h2 id="{f.id}-title">{f.label}</h2>
-        <p><span class="strong">{f.lead}</span> {f.text}</p>
-      </div>
-    </header>
-    <div class="card-body"><AppPreview kind={f.id} bare /></div>
+  <article class="row" id={f.id} aria-labelledby="{f.id}-title">
+    <div class="row-copy">
+      <h3 id="{f.id}-title">{f.label}</h3>
+      <p><span class="strong">{f.lead}</span> {f.text}</p>
+    </div>
+    <div class="row-media"><AppPreview kind={f.id} bare /></div>
   </article>
 {/each}
