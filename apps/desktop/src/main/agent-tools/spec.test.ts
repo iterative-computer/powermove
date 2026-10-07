@@ -73,4 +73,14 @@ describe('Powermove agent tool spec', () => {
     expect(sheet.properties.count.maximum).toBe(48);
     expect(sheet.properties.target.enum).toEqual(['source', 'composition']);
   });
+  it('offers media listing for planning, while media mutations require a project editing run', () => {
+    for (const name of ['list_media', 'replace_media', 'import_media', 'manage_media']) {
+      const tool = POWERMOVE_AGENT_TOOLS.find(tool => tool.name === name)!;
+      expect(tool.inputSchema.additionalProperties).toBe(false);
+      expect(POWERMOVE_MCP_TOOL_NAMES).toContain(`mcp__powermove__${name}`);
+      expect(POWERMOVE_APP_AGENT_TOOLS.some(tool => tool.name === name)).toBe(false);
+      expect((POWERMOVE_LIVE_INSPECTION_TOOL_NAMES as readonly string[]).includes(name)).toBe(name === 'list_media');
+    }
+  });
+
 });

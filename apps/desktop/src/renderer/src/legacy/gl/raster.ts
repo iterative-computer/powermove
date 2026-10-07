@@ -906,10 +906,11 @@ async function prepareImportedAsset(file: any, { id, assertCurrentProject, resol
   const persisted = persistedResult.value;
   return { prepared, kind, fingerprint, storageKey, sourcePath, persisted };
 }
-async function ingestAsset(file: any, { silent = false, layerDefinition, onStage }: any = {}) {
+async function ingestAsset(file: any, { silent = false, layerDefinition, onStage, assertCurrent, requirePersisted = false, newAsset = false }: any = {}) {
   const targetProject = PM.proj;
   const targetEpoch = assetEpoch;
   const assertCurrentProject = () => {
+    assertCurrent?.();
     if (PM.proj !== targetProject || assetEpoch !== targetEpoch) {
       const error = new Error('Import stopped because you switched projects · import the file again in the intended project');
       (error as any).code = 'STALE_MEDIA_IMPORT';
@@ -920,6 +921,10 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
   const { prepared, kind, fingerprint, storageKey, sourcePath, persisted } = await prepareImportedAsset(file, {
     id: provisionalId, assertCurrentProject, onStage,
   });
+  if (requirePersisted && !persisted) {
+    disposeAsset(prepared);
+    throw new Error('Could not store imported media; no media was added');
+  }
   let posterBlob: Blob | null = null;
   try {
     posterBlob = await capturePoster(prepared);
@@ -935,7 +940,7 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
   const { id: _identityId, persisted: _identityPersisted, ...identity } = assetIdentity(
     provisionalId, file, kind, prepared, fingerprint, storageKey, sourcePath, persisted, layerDefinition,
   );
-  const plan = PM.MediaImport.match(PM.proj, PM.assets.map, identity);
+  const plan = newAsset ? { canonicalId: null, aliases: [] } : PM.MediaImport.match(PM.proj, PM.assets.map, identity);
   const existingMeta = plan.canonicalId && PM.proj.assets[plan.canonicalId];
   const existingLive = plan.canonicalId && PM.assets.map.get(plan.canonicalId);
   const wasMissing = !!(existingMeta && !existingLive);
@@ -1039,7 +1044,7 @@ PM.assets = {
     }
     return results;
   },
-  async replace(id: any, file: any, { onStage }: any = {}) {
+  async replace(id: any, file: any, { onStage, assertCurrent }: any = {}) {
     const targetProject = PM.proj;
     const targetProjectId = targetProject?.id;
     const targetEpoch = assetEpoch;
@@ -1053,6 +1058,7 @@ PM.assets = {
       throw new Error(`Choose ${article} ${currentMeta.kind} file to replace this ${currentMeta.kind} media`);
     }
     const assertCurrentProject = () => {
+      assertCurrent?.();
       if (PM.proj !== targetProject || assetEpoch !== targetEpoch || PM.proj?.assets?.[id] !== currentMeta) {
         const error = new Error('Replacement stopped because you switched projects · replace the file again in the intended project');
         (error as any).code = 'STALE_MEDIA_REPLACEMENT';
@@ -1114,6 +1120,7 @@ PM.assets = {
         PM.autosave?.();
       };
 
+      assertCurrentProject();
       applyVersion(nextMeta, prepared, nextPoster);
       const retainedRuntimes = [...new Set([previousRuntime, prepared].filter(Boolean))];
       retainedRuntimes.forEach(retainHistoryAsset);
@@ -1131,6 +1138,7 @@ PM.assets = {
         retainedRuntimes.forEach(runtime => releaseHistoryAsset(runtime, id));
         throw new Error('Could not add the replacement to Undo history · the original file is unchanged');
       }
+      PM.assets.errors.delete(id);
       if (kind === 'audio' && PM.Audio) PM.Audio.rebalanceCache();
       return { asset: prepared, previous: previousRuntime, previousName: currentMeta.name, meta: nextMeta, persisted: true };
     } catch (error) {

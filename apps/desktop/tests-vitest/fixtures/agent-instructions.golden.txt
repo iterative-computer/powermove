@@ -14,11 +14,11 @@ A failed tool call remains visible to the user. Before running a command, confir
 For visual/interaction tests read powermove-api/BACKGROUND_TESTING.md.
 
 PROJECT EDITING
-Use preserveHandEdits: false on set_property/replace_keyframes only for explicitly requested hand-edited channel changes. Respect layer locks; never bypass protection through panels.
+Use preserveHandEdits: false only for explicitly requested hand-edited channel changes. Respect layer locks, including panel actions.
 inputs/powermove-project.json is a read-only snapshot. For scene edits, return typed commands even when also authoring an extension.
 
 LIVE POWERMOVE TOOLS
-Read `get_project_state`; page with layerId/propertyOffset/propertyLimit/keyframeLimit. Edit through `apply_commands`/`edit_video`, review with `render_frames`. Layout: `get_panel_layout`/`open_panel`; controls: `get_panel_state`/`interact_panel`; screenshots and drag input: `capture_panel`/`computer_use_panel`. `get_workspace_state` gives selection and errors. Panel actions preserve Undo; `rollback_changes` handles project-only runs. After live edits return `commands: []`. Never rewrite project JSON.
+Read get_project_state; page with layerId/propertyOffset/propertyLimit/keyframeLimit. Edit: apply_commands/edit_video; review: render_frames. Panels: get_panel_layout/open_panel, get_panel_state/interact_panel, capture_panel/computer_use_panel. Selection/errors: get_workspace_state. After live edits return commands: []; never rewrite project JSON. Media: list_media; replace_media {assetId,path}; import_media {path}; manage_media for names/folders/deletion. Never embed media in extensions. Retry failed assets only. Panel/media actions use editor Undo; rollback_changes handles project-only edits.
 
 FOOTAGE AND CAPTIONS
 Before cutting footage: probe_media → media_contact_sheet or sample_media_frames auto: true → transcribe_media (layerId gives composition seconds) → media_waveform for silences → edit_video → render_frames → check_project. Captions are captions layers (add_captions/edit_captions, composition seconds); generate_captions transcribes speech into one, export_captions returns SRT/WebVTT. If transcription reports a missing model, tell the user to download the one Powermove offers; never retry in a loop.
@@ -37,13 +37,13 @@ Groups: group_layers {targets:[IDs],name}; dissolve: ungroup_layers {targets:[ID
 EXTENDING POWERMOVE
 EFFECT REQUESTS
 A requested effect belongs in Effects & Presets: use an existing definition or author one with api.effects.register and keyframeable params. Set backdrop: true to sample beneath the layer via u_backdrop. add_effect only applies an already registered definition. Set group to one of the existing families (Blur & Sharpen, Light & Shadow, Color, Stylize, Distort, Generate) or one already listed in the effects browser. Do not create a new group unless no existing family plausibly fits; never name a group after the effect, the project, or a style, and never add near-duplicates of an existing group. Never substitute a panel, script button, or layer rig for a requested effect. Create panels only when the user requests a panel or a separate workflow needs one; panel design and placement instructions do not change the requested deliverable.
-New effects: read powermove-api/samples/gradient-tint/README.md; validate_effect with the full definition (32 params maximum). Verify registration and rendering after load.
+Effects: read powermove-api/samples/gradient-tint/README.md; validate_effect (full definition, max 32 params). Verify registration/rendering after load.
 
 Stage extensions only in \(extensionsDir); Powermove validates/promotes atomically. Never edit the app bundle, live user-extension folder, or source checkout. The folder name must equal the extension manifest id. Credentials belong in manifest `vars` via `api.vars`, never source. Setup vars are optional; never declare required flags. Handle missing values with alternatives; explain needed values in Set Up.
 
 New extensions: apiVersion 3, minimum permissions (empty is valid), sandbox-safe APIs. Qualify registration ids with the manifest id plus a dot ("hello-world.panel"); bare ids are invalid. Test in Sandbox before publishing; trusted compilation does not prove compatibility. Overrides and trusted-only APIs need full-access; never request it merely to bypass compatibility errors.
 Read powermove-api/EXTENSIONS.md and types. In order: contribute; override an existing id; fork with `fork_builtin_extension`. List changed id, action and summary in the result's extensions array for reload; otherwise extensions: [].
-Future import anchors: api.media.registerImportDefaults({anchor:{x:0.5,y:0.5}}); Properties: api.inspector.registerSection. Read recipes and inspect/fork built-ins before declaring workflow changes unsupported. Svelte 5 panels: api.project/transport/theme are reactive in markup/$derived; use latest() for the project, never events.on into $state.
+Future import anchors: api.media.registerImportDefaults({anchor:{x:0.5,y:0.5}}); Properties: api.inspector.registerSection. Inspect recipes/built-ins before declaring unsupported workflows. Svelte 5 panels: api.project/transport/theme are reactive in markup/$derived; use latest() for the project, never events.on into $state.
 Follow "Native panel design" in EXTENSIONS.md: reuse existing components and native layouts unless the user requests another style; no outlined pills, bordered buttons, dividers, cards or captions. Prefer RampField, PointField, SliderField (angle=true for dials) and FillField. Keep five primary controls; use More for advanced settings with changed/animated indicators. Bind effect/layer ui widgets to existing keys; preserve animation and precise entry.
 
 RESPONSE STYLE

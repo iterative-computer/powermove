@@ -38,11 +38,11 @@ ${AGENT_TESTING_INSTRUCTIONS}
 For visual/interaction tests read powermove-api/BACKGROUND_TESTING.md.
 
 PROJECT EDITING
-Use preserveHandEdits: false on set_property/replace_keyframes only for explicitly requested hand-edited channel changes. Respect layer locks; never bypass protection through panels.
+Use preserveHandEdits: false only for explicitly requested hand-edited channel changes. Respect layer locks, including panel actions.
 inputs/powermove-project.json is a read-only snapshot. For scene edits, return typed commands even when also authoring an extension.
 
 LIVE POWERMOVE TOOLS
-Read \`get_project_state\`; page with layerId/propertyOffset/propertyLimit/keyframeLimit. Edit through \`apply_commands\`/\`edit_video\`, review with \`render_frames\`. Layout: \`get_panel_layout\`/\`open_panel\`; controls: \`get_panel_state\`/\`interact_panel\`; screenshots and drag input: \`capture_panel\`/\`computer_use_panel\`. \`get_workspace_state\` gives selection and errors. Panel actions preserve Undo; \`rollback_changes\` handles project-only runs. After live edits return \`commands: []\`. Never rewrite project JSON.
+Read get_project_state; page with layerId/propertyOffset/propertyLimit/keyframeLimit. Edit: apply_commands/edit_video; review: render_frames. Panels: get_panel_layout/open_panel, get_panel_state/interact_panel, capture_panel/computer_use_panel. Selection/errors: get_workspace_state. After live edits return commands: []; never rewrite project JSON. Media: list_media; replace_media {assetId,path}; import_media {path}; manage_media for names/folders/deletion. Never embed media in extensions. Retry failed assets only. Panel/media actions use editor Undo; rollback_changes handles project-only edits.
 
 ${AGENT_WATCH_AND_LISTEN_INSTRUCTIONS}
 
@@ -59,13 +59,13 @@ Groups: group_layers {targets:[IDs],name}; dissolve: ungroup_layers {targets:[ID
 
 EXTENDING POWERMOVE
 ${EFFECT_AUTHORING_INSTRUCTIONS}
-New effects: read powermove-api/samples/gradient-tint/README.md; validate_effect with the full definition (32 params maximum). Verify registration and rendering after load.
+Effects: read powermove-api/samples/gradient-tint/README.md; validate_effect (full definition, max 32 params). Verify registration/rendering after load.
 
 Stage extensions only in ${extensionsDir}; Powermove validates/promotes atomically. Never edit the app bundle, live user-extension folder, or source checkout. The folder name must equal the extension manifest id. Credentials belong in manifest \`vars\` via \`api.vars\`, never source. Setup vars are optional; never declare required flags. Handle missing values with alternatives; explain needed values in Set Up.
 
 New extensions: apiVersion 3, minimum permissions (empty is valid), sandbox-safe APIs. Qualify registration ids with the manifest id plus a dot ("hello-world.panel"); bare ids are invalid. Test in Sandbox before publishing; trusted compilation does not prove compatibility. Overrides and trusted-only APIs need full-access; never request it merely to bypass compatibility errors.
 Read powermove-api/EXTENSIONS.md and types. In order: contribute; override an existing id; fork with \`fork_builtin_extension\`. List changed id, action and summary in the result's extensions array for reload; otherwise extensions: [].
-Future import anchors: api.media.registerImportDefaults({anchor:{x:0.5,y:0.5}}); Properties: api.inspector.registerSection. Read recipes and inspect/fork built-ins before declaring workflow changes unsupported. Svelte 5 panels: api.project/transport/theme are reactive in markup/$derived; use latest() for the project, never events.on into $state.
+Future import anchors: api.media.registerImportDefaults({anchor:{x:0.5,y:0.5}}); Properties: api.inspector.registerSection. Inspect recipes/built-ins before declaring unsupported workflows. Svelte 5 panels: api.project/transport/theme are reactive in markup/$derived; use latest() for the project, never events.on into $state.
 ${NATIVE_PANEL_INSTRUCTIONS}
 
 ${AGENT_RESPONSE_STYLE}

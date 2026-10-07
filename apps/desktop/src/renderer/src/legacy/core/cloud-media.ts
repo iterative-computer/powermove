@@ -12,8 +12,9 @@ export interface CloudStatus {
   error?: string;
 }
 
-async function readSourceFile(media: MediaBridge, result: { token: string; size: number }, meta: CloudAsset, current: () => boolean) {
+async function readSourceFile(media: MediaBridge, result: { token: string; size: number }, meta: CloudAsset, current: () => boolean, maxBytes = Infinity) {
   try {
+    if (result.size > maxBytes) throw new Error(`Media file exceeds the ${maxBytes} byte import limit`);
     const parts: ArrayBuffer[] = [];
     for (let offset = 0; offset < result.size;) {
       if (!current()) return null;
@@ -30,12 +31,12 @@ async function readSourceFile(media: MediaBridge, result: { token: string; size:
 }
 
 /** A missing browser cache does not mean the original file is missing. */
-export async function readLocalMediaSource(meta: CloudAsset, current: () => boolean): Promise<File | null> {
+export async function readLocalMediaSource(meta: CloudAsset, current: () => boolean, maxBytes = Infinity): Promise<File | null> {
   const media = (hostBridge() as any)?.media as MediaBridge | undefined;
   const source = meta.sourcePath || meta.path;
   if (!source || !media?.openLocalSource || !current()) return null;
   const result = await media.openLocalSource(source);
-  return result ? readSourceFile(media, result, meta, current) : null;
+  return result ? readSourceFile(media, result, meta, current, maxBytes) : null;
 }
 
 export function createCloudMedia(PM: Record<string, any>, recover: (meta: any, file: File, current: () => boolean) => Promise<void>) {

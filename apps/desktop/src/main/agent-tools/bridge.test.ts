@@ -103,7 +103,7 @@ describe('native Powermove agent tool bridge', () => {
     const listed = await rpc(child, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     expect(listed.result.tools.map((tool: any) => tool.name)).toEqual([
       ...ORCHESTRATION_TOOL_NAMES,
-      'get_3d_scene', 'edit_3d', 'fork_builtin_extension', 'get_project_state', 'select_layers', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes', 'validate_effect', 'stage_fork_rebase',
+      'get_3d_scene', 'edit_3d', 'fork_builtin_extension', 'get_project_state', 'list_media', 'replace_media', 'import_media', 'manage_media', 'select_layers', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes', 'validate_effect', 'stage_fork_rebase',
       'probe_media', 'sample_media_frames', 'media_contact_sheet', 'media_waveform', 'transcribe_media', 'check_project',
       'store_search', 'store_extension', 'store_source', 'store_library', 'store_install', 'store_update', 'store_uninstall', 'store_publish_prepare', 'store_publish',
       'generate_captions', 'export_captions'

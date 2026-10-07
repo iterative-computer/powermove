@@ -4,6 +4,7 @@ import { openPanel, readPanel, interactPanel, panelBounds, preparePanelInput } f
 import { records as extensionRecords } from '../../kernel/extensions.svelte';
 import { editVideo, videoAssets } from './video-editing';
 import { agentMediaSource } from './media-source';
+import { listMedia, importMedia, manageMedia } from './media-management';
 import { checkProject } from './project-check';
 import { CHECK_PROJECT_TOOL, COMPOSITION_INFO_TOOL, MEDIA_SOURCE_TOOL, type AgentCompositionInfo } from '../../../../shared/media-tools';
 import { editModel,MODEL_RECIPES } from '../../core/scene3d/modeling';
@@ -579,6 +580,28 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     const content = toolText(projectState(request.arguments));
     refreshLiveTransaction(request);
     return { ok: true, content: [content], revision: currentRevision() };
+  }
+  if (request.tool === 'list_media') {
+    const result = listMedia(PM, request.arguments);
+    refreshLiveTransaction(request);
+    return { ok: true, content: [toolText(result)], revision: currentRevision() };
+  }
+  if (['replace_media', 'import_media', 'manage_media'].includes(request.tool)) {
+    const transaction = beginLiveTransaction(request, 'Manage media');
+    if (currentRevision() !== transaction.revision) throw new Error('The project changed. Read get_project_state before managing media.');
+    // Replacement owns retained runtime versions in native Undo. A snapshot
+    // rollback would restore metadata without restoring those runtime bytes.
+    transaction.panelActions = true;
+    try {
+      const active = () => liveToolTransactions.get(request.runId) === transaction;
+      const result = request.tool === 'manage_media' ? manageMedia(PM, request.arguments)
+        : await importMedia(PM, request.arguments, request.tool === 'replace_media', active);
+      transaction.changed ||= ('changed' in result && result.changed === true) || ('status' in result && ['replaced', 'imported'].includes(result.status));
+      return { ok: true, content: [toolText(result)], changed: transaction.changed || currentRevision() !== transaction.baseRevision, revision: currentRevision() };
+    } finally {
+      transaction.revision = currentRevision();
+      transaction.changed ||= transaction.revision !== transaction.baseRevision;
+    }
   }
   /* ── agent media tools (media-tools lane) ── */
   if (request.tool === MEDIA_SOURCE_TOOL) {

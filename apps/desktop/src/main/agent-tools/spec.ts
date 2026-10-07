@@ -51,6 +51,26 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
     inputSchema: closedObject({ layerOffset: { type: 'integer', minimum: 0 }, layerLimit: { type: 'integer', minimum: 1 }, keyframeOffset: { type: 'integer', minimum: 0 }, layerId: { type: 'string' }, propertyOffset: { type: 'integer', minimum: 0 }, propertyLimit: { type: 'integer', minimum: 1 }, keyframeLimit: { type: 'integer', minimum: 0 }, cueOffset: { type: 'integer', minimum: 0 }, cueLimit: { type: 'integer', minimum: 0 } })
   },
   {
+    name: 'list_media',
+    description: 'List project media with stable asset IDs, missing/failed/loading/cloud status, durable storage status, original source paths, fingerprints, folders and layer references (including locks and nested compositions). Page with offset/limit, filter by assetId or missingOnly. Read before replacing or deleting media.',
+    inputSchema: closedObject({ offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 200 }, assetId: { type: 'string' }, missingOnly: { type: 'boolean' } })
+  },
+  {
+    name: 'replace_media',
+    description: 'Replace or relink one existing media asset from an absolute local file path. Preserves its asset ID, all timeline references, timing, animation and folder. Uses durable storage and normal editor Undo; never packages bytes into an extension or opens a file picker. Requires the same media kind and unlocked referencing layers. missingOnly skips available assets; expectedFingerprint verifies file identity against list_media. Returns verified persisted status; errors leave the original unchanged. Retry individual failed assets, never repeat successful replacements. Media actions use editor Undo, not rollback_changes. Local files up to 512 MiB; download cloud files first.',
+    inputSchema: closedObject({ assetId: { type: 'string' }, path: { type: 'string', minLength: 1, maxLength: 4096 }, missingOnly: { type: 'boolean' }, expectedFingerprint: { type: 'string', maxLength: 200 } }, ['assetId', 'path'])
+  },
+  {
+    name: 'import_media',
+    description: 'Import a local media file into durable project media without adding timeline layers or packaging bytes into extension code. Supply an absolute path, optional folderId and expectedFingerprint. Returns assetId and verified persisted status; already imported matching bytes are reused. Place the asset with apply_commands/edit_video. Import survives timeline Undo, like normal imports; use manage_media delete to remove it. Local files up to 512 MiB; download cloud files first.',
+    inputSchema: closedObject({ path: { type: 'string', minLength: 1, maxLength: 4096 }, folderId: { type: ['string', 'null'] }, expectedFingerprint: { type: 'string', maxLength: 200 } }, ['path'])
+  },
+  {
+    name: 'manage_media',
+    description: 'Manage project media with normal editor Undo: rename one asset, move assetIds to folderId (null = root), delete assets, create_folder/rename_folder/delete_folder, or move_folder with folderId and parentId (null = root). Deleting a folder keeps its contents. Deleting referenced media requires removeReferenced: true and the user request to remove its referencing layers; locked references always block deletion. Read list_media first. No files on disk are deleted. Media actions cannot be snapshot-rolled back; use editor Undo.',
+    inputSchema: closedObject({ operation: { type: 'string', enum: ['rename', 'move', 'delete', 'create_folder', 'rename_folder', 'move_folder', 'delete_folder'] }, assetIds: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 100, uniqueItems: true }, name: { type: 'string', minLength: 1, maxLength: 160 }, folderId: { type: ['string', 'null'] }, parentId: { type: ['string', 'null'] }, removeReferenced: { type: 'boolean' } }, ['operation'])
+  },
+  {
     name: 'select_layers',
     description: 'Select existing layers by their IDs from get_project_state, or clear selection with an empty array. Use before inspecting or operating selection-based panel controls. Does not change layer properties, locks, or animation.',
     inputSchema: closedObject({ layerIds: { type: 'array', items: { type: 'string' }, uniqueItems: true }, add: { type: 'boolean' } }, ['layerIds'])
@@ -349,6 +369,7 @@ export const POWERMOVE_APP_AGENT_TOOLS = POWERMOVE_AGENT_TOOLS.filter((tool) =>
 export const POWERMOVE_LIVE_INSPECTION_TOOL_NAMES = [
   ...ORCHESTRATION_TOOL_NAMES,
   'get_project_state',
+  'list_media',
   'get_3d_scene',
   'get_panel_layout',
   'open_panel',

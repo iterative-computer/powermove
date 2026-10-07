@@ -215,7 +215,7 @@ function referenceCount(project: any, assetId: any) {
   return count;
 }
 
-function removeAsset(project: any, assetId: any) {
+function removeAsset(project: any, assetId: any, { preserveRuntime = false }: { preserveRuntime?: boolean } = {}) {
   if (!project || !project.assets || !project.assets[assetId]) return { removedLayers: 0, removedLayerIds: [] };
   const removedLayerIds: any = [];
   layerLists(project).forEach((layers: any) => {
@@ -240,7 +240,7 @@ function removeAsset(project: any, assetId: any) {
     if (layer && removed.has(layer.parent)) layer.parent = null;
   }));
   delete project.assets[assetId];
-  PM.assets?.revokePoster?.(assetId);
+  if (!preserveRuntime) PM.assets?.revokePoster?.(assetId);
   return { removedLayers: removedLayerIds.length, removedLayerIds };
 }
 
