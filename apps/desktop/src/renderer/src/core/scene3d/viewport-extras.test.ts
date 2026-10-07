@@ -63,3 +63,16 @@ describe('Blender viewport extras',()=>{
     setViewportPreferences(PM,{xray:false});
   });
 });
+
+describe('editor looks never reach output',()=>{
+  it('keeps the shared depth prepass separate for X-ray',()=>{
+    const PM=editor();
+    for(const [id,z] of [['front',1],['back',-1]] as const)expect(editScene(PM,{operation:'add_object',object:{id,source:{primitive:'box'},p:{z}}}).ok).toBe(true);
+    const runtime=compositionRuntime(PM) as any,keys:string[]=[];
+    const original=runtime.renderPass.bind(runtime);
+    runtime.renderPass=(...args:any[])=>{keys.push(args[6]);return original(...args);};
+    try{runtime.render(64,36,'front',undefined,true,runtime.camera,{xray:true});}catch{/* no WebGL in unit tests */}
+    try{runtime.render(64,36,'front',undefined,true,runtime.camera);}catch{/* no WebGL in unit tests */}
+    expect(keys).toEqual(['false:true','false:false']);
+  });
+});

@@ -28,6 +28,7 @@ function reducedMotion(): boolean {
 export function installAgentShell(PM: PM) {
   activeShell?.destroy();
   let open = false;
+  let floatingPosition: { left: number; top: number; height: number } | null = null;
   let collapseTimer: ReturnType<typeof setTimeout> | undefined;
 
   const root = document.createElement('div');
@@ -58,10 +59,11 @@ export function installAgentShell(PM: PM) {
     const view = viewport();
     const anchor = launcher()?.getBoundingClientRect();
     const width = Math.max(1, Math.min(WIDTH, view.width - EDGE * 2));
-    const top = (anchor ? anchor.bottom : 44) + GAP;
-    const height = Math.max(1, Math.min(HEIGHT, view.height - top - EDGE));
+    const anchorTop = (anchor ? anchor.bottom : 44) + GAP;
+    const height = Math.max(1, Math.min(floatingPosition?.height ?? HEIGHT, view.height - (floatingPosition ? EDGE : anchorTop) - EDGE));
+    const top = floatingPosition ? clamp(floatingPosition.top, EDGE, view.height - height - EDGE) : anchorTop;
     const centre = anchor ? anchor.left + anchor.width / 2 : view.width / 2;
-    const left = clamp(centre - width / 2, EDGE, view.width - width - EDGE);
+    const left = clamp(floatingPosition?.left ?? centre - width / 2, EDGE, view.width - width - EDGE);
     Object.assign(surface.style, { left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px` });
     // Open and collapse grow from, and fold into, the launcher.
     const originX = anchor ? clamp(anchor.left + anchor.width / 2 - left, 0, width) : width / 2;
@@ -191,6 +193,28 @@ export function installAgentShell(PM: PM) {
     beginPanelDrag(PM as never, event, { id: 'agent' }, { id: 'titlebar', panels: [] }, source);
   }
 
+  /** Move the live popover; the normal dock previews let it become a panel. */
+  function dragFloating(event: PointerEvent): void {
+    if (event.button !== 0 || !open || docked()) return;
+    const previous = floatingPosition;
+    const left = parseFloat(surface.style.left);
+    const top = parseFloat(surface.style.top);
+    const height = parseFloat(surface.style.height);
+    beginPanelDrag(PM as never, event, { id: 'agent' }, { id: 'titlebar', panels: [] }, surface, {
+      move: (dx, dy) => {
+        floatingPosition = { left: left + dx, top: top + dy, height };
+        position();
+      },
+      cancel: () => { floatingPosition = previous; position(); },
+      dockIds: PM.ProjectsScreen?.isOpen || !PM.WS?.current ? [] : ['left', 'right']
+    });
+  }
+
+  function pin(): void {
+    if (docked() || PM.ProjectsScreen?.isOpen || !PM.WS?.current) return;
+    PM.WS.mutate((workspace: any) => PM.Layout.addPanel(workspace, 'agent', 'right'));
+  }
+
   /** True once after a launcher press that became a drag. */
   function consumeDrag(): boolean {
     const was = dragged;
@@ -235,6 +259,8 @@ export function installAgentShell(PM: PM) {
     attach,
     reveal,
     dragToDock,
+    dragFloating,
+    pin,
     consumeDrag,
     isDocked: docked,
     isOpen: () => open,

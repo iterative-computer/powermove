@@ -24,7 +24,7 @@ test('restores each project layout after quit and when reopening its saved file'
     const PM = (window as any).PM;
     PM.WS.mutate((ws: any) => {
       ws.layout.docks.find((dock: any) => dock.id === 'left').size = 411;
-      PM.Layout.movePanel(ws, 'agent', 'right');
+      PM.Layout.addPanel(ws, 'agent', 'right');
       PM.Layout.hidePanel(ws, 'assets');
       ws.layout.docks.find((dock: any) => dock.id === 'right').panels.find((panel: any) => panel.id === 'agent').size = 290;
       ws.layout.docks.find((dock: any) => dock.id === 'right').panels.find((panel: any) => panel.id === 'fxbrowser').collapsed = true;

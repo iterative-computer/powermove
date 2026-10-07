@@ -1807,7 +1807,9 @@ function onDown(e: any) {
     };
   }
 
-  const tool = V.temporaryTool || toolService()?.tool || 'select';
+  const chosen = V.temporaryTool || toolService()?.tool || 'select';
+  /* The Pen edits 2D paths; with models, lights or cameras selected it selects like the Select tool. */
+  const tool = chosen === 'pen' && visualSelection(api).some(isModel3D) ? 'select' : chosen;
   if (tool === 'hand') return startPan(e);
   if (tool === 'zoom') return startZoom(e);
   if (tool === 'pen' && visualSelection(api).some((layer: any) => space3d.is3DLayer(layer))) { api.ui.toast('Turn off 3D temporarily to edit path vertices'); return; }

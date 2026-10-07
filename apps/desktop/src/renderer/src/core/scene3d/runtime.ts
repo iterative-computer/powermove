@@ -248,10 +248,10 @@ export class SceneRuntime {
         if(look.xray){material.transparent=true;material.opacity*=.45;material.depthWrite=false;}
       }
     });
-    try{return this.renderPass(w,h,objectId,depthIds,background,camera);}
+    try{return this.renderPass(w,h,objectId,depthIds,background,camera,`${!!look.wireframe}:${!!look.xray}`);}
     finally{for(const [material,old] of saved)Object.assign(material,old);}
   }
-  private renderPass(w:number,h:number,objectId:string|undefined,depthIds:Set<string>|undefined,background:boolean,camera:THREE.PerspectiveCamera|THREE.OrthographicCamera): HTMLCanvasElement {
+  private renderPass(w:number,h:number,objectId:string|undefined,depthIds:Set<string>|undefined,background:boolean,camera:THREE.PerspectiveCamera|THREE.OrthographicCamera,lookKey=''): HTMLCanvasElement {
     if (!this.renderer) {
       // Output passes share one GPU context; a project can contain many 3D layers.
       outputRenderer ??= new THREE.WebGLRenderer({alpha:true,antialias:true,preserveDrawingBuffer:true,premultipliedAlpha:true});
@@ -275,7 +275,8 @@ export class SceneRuntime {
       const saved=new Map<THREE.Material,{colorWrite:boolean;depthWrite:boolean;visible:boolean}>();
       const originalBackground=this.scene.background,originalAutoClear=this.renderer.autoClear;
       const autoShadow=this.renderer.shadowMap.autoUpdate;
-      const depthKey=`${this.revision}:${width}:${height}:${camera.matrixWorld.elements}:${camera.projectionMatrix.elements}:${[...(depthIds || this.objects.keys())].sort().join(',')}`;
+      // The editor's X-ray writes no depth; its prepass must never be reused for output.
+      const depthKey=`${lookKey}:${this.revision}:${width}:${height}:${camera.matrixWorld.elements}:${camera.projectionMatrix.elements}:${[...(depthIds || this.objects.keys())].sort().join(',')}`;
       const visit=(phase:'depth'|'color')=>{
         this.scene.traverse((child:any)=>{
           if(!child.isMesh)return;

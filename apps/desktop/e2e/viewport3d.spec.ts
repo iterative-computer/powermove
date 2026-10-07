@@ -39,6 +39,14 @@ test('Blender keys transform, duplicate, hide, select and key models over the vi
   await page.mouse.move(center.x,center.y);
   await expect.poll(async()=>(await state()).inContext).toBe(true);
 
+  // G on the camera you look through explains why instead of falling through to the Pen tool.
+  await page.evaluate(()=>{const PM=(window as any).PM;PM.selectLayers([PM.proj.layers.find((l:any)=>l.d?.definition==='powermove.3d.camera').id]);});
+  await page.keyboard.press('g');
+  await expect(page.getByText(/camera you are looking through/)).toBeVisible();
+  expect(await page.evaluate(()=>(window as any).PM.Kernel.services.get('tool').tool)).toBe('select');
+  await page.evaluate(()=>(window as any).PM.selectLayers(['cube']));
+  const steps=await page.evaluate(()=>(window as any).PM.hist.list().length);
+
   // G X 2 Enter, R Z 90 Enter, S 2 Enter — each one Undo.
   await page.keyboard.press('g');await expect(page.locator('.vp-op-header')).toBeVisible();
   await page.keyboard.press('x');await page.keyboard.press('2');
@@ -50,7 +58,7 @@ test('Blender keys transform, duplicate, hide, select and key models over the vi
   expect(await value('rotation')).toBeCloseTo(90);
   await page.keyboard.press('s');await page.keyboard.press('2');await page.keyboard.press('Enter');
   expect(await value('scale.x')).toBeCloseTo(200);
-  expect(await page.evaluate(()=>(window as any).PM.hist.list().length)).toBe(count+3);
+  expect(await page.evaluate(()=>(window as any).PM.hist.list().length)).toBe(steps+3);
 
   // Pointer-driven grab: right click cancels, left click confirms.
   await page.keyboard.press('g');await page.mouse.move(center.x+120,center.y,{steps:6});

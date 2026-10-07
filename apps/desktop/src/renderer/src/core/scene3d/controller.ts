@@ -231,6 +231,15 @@ export function attachViewport(PM:any,stage:HTMLElement,host:ViewportHost):Viewp
       selectPoints(PM,[hit],event.shiftKey?'toggle':'set');
     });
   }
+  function transformBlocker(mode:ModalMode,editing:string|null,ids:string[]):string {
+    if(editing)return 'Select points to transform';
+    const layers=ids.map(id=>PM.L?.(id)).filter(Boolean);
+    if(layers.some((l:any)=>l.lock||(PM.groupAncestors?.(l)||[]).some((g:any)=>g.lock)))return 'Unlock the selected layer first';
+    if(ids.includes(excluded()??''))return 'This is the camera you are looking through. Press 0 for a user view, or turn on Lock Camera to View, to move it';
+    if(mode==='translate'&&layers.some((l:any)=>l.d?.data?.light?.type==='sun'))return 'Sun lights only rotate; their position does not change the light';
+    if(layers.some((l:any)=>!PM.active(l,PM.time)))return 'Move the playhead into the layer’s time range to transform it';
+    return 'The selection cannot be transformed this way';
+  }
   /** Arm a press: a drag past the threshold runs `drag`, a release without one runs `click`. */
   function press(event:PointerEvent,drag:(start:Point,e:PointerEvent)=>void,click:()=>void){
     const start=stagePoint(event.clientX,event.clientY);let done=false;
@@ -312,8 +321,13 @@ export function attachViewport(PM:any,stage:HTMLElement,host:ViewportHost):Viewp
       return true;
     },
     startTransform(mode){
-      if(!pointer)return false;
-      return startModal(mode,pointer);
+      // Keys only reach here over the viewer; before the first pointer move, start from the frame's centre.
+      if(startModal(mode,pointer??{x:rect.x+rect.width/2,y:rect.y+rect.height/2}))return true;
+      if(modal||gizmo.active()||navigation.active())return true;
+      // With something selected, explain instead of letting G/R/S fall through to an unrelated 2D tool.
+      const editing=editModeLayer(PM),ids=selected3D(PM);
+      if(!editing&&!ids.length)return false;
+      throw new Error(transformBlocker(mode,editing,ids));
     },
     armBoxSelect(){
       if(!available()||modal||boxArmed)return !!boxArmed;
