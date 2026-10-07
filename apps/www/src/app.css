@@ -81,11 +81,11 @@ main{overflow:clip}
    editor window, the way a lit canvas spills onto a dark room. The headline
    is the app's own composition, played by its own player. */
 .top{position:relative;isolation:isolate;padding-bottom:1px}
-.top-glow{position:absolute;inset:0 0 auto;z-index:-1;height:calc(100% - min(22vw,260px));background:
-  linear-gradient(to bottom,transparent 72%,#0C0A09 99%),
-  radial-gradient(52% 34% at 50% 84%,rgb(255 107 26 / .5),rgb(240 88 10 / .2) 45%,transparent 75%),
-  radial-gradient(90% 60% at 50% 96%,rgb(150 44 8 / .4),transparent 70%),
-  #0C0A09}
+/* Powermove's near-black warming through ember into the brand orange behind the
+   window, then out to paper. Interpolated in oklab so the ramp never bands. */
+.top-glow{position:absolute;inset:0 0 auto;z-index:-1;height:calc(100% - min(24vw,280px));background:
+  radial-gradient(60% 30% at 50% 82%,rgb(255 120 40 / .35),transparent 70%),
+  linear-gradient(in oklab,#0C0A09 0%,#120907 12%,#1D0A05 24%,#2E0D05 36%,#481306 47%,#6C1C07 57%,#9A2B08 65%,#CB420A 72%,#F0580A 78%,#FF8746 84%,#FFC2A0 90%,#FCEBE0 95%,var(--paper) 100%)}
 .hero{position:relative;padding:clamp(140px,19vh,200px) 0 0;text-align:center;color:#F5F5F4}
 .hero-art,.hero-cta,.stage-window{animation:hero-in .8s cubic-bezier(.16,1,.3,1) both}
 .hero-cta{animation-delay:90ms}
@@ -109,26 +109,12 @@ main{overflow:clip}
 .scrubber:focus-visible .scrub-track{background:rgb(255 255 255 / .3)}
 .hero-cta{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-top:36px}
 
-/* The film as an editor window: title bar, picture, and a transport in the timeline's language. */
-.stage-window{max-width:var(--col);margin:clamp(64px,9vh,96px) auto 0;padding-inline:24px}
+/* The editor window, cropped to its own bounds so it sits on the stage like a real one.
+   Its corners are the capture's; the radius only shapes the shadow to match (18px at 1782px). */
+.stage-window{max-width:var(--col);margin:clamp(64px,9vh,96px) auto 0;padding-inline:24px;container-type:inline-size}
 @media(max-width:640px){.stage-window{padding-inline:12px}}
-.window{overflow:hidden;border-radius:12px;background:#FDFDFE;box-shadow:0 0 0 1px rgb(0 0 0 / .5),inset 0 1px 0 rgb(255 255 255 / .6),0 40px 80px -24px rgb(0 0 0 / .55),0 0 120px -20px rgb(255 107 26 / .35)}
-.window-bar{position:relative;display:flex;align-items:center;justify-content:center;height:38px;background:#F3F3F6;border-bottom:1px solid rgb(20 22 28 / .07)}
-.lights{position:absolute;left:14px;display:flex;gap:8px}
-.lights i{width:12px;height:12px;border-radius:50%;background:#FF5F57;box-shadow:inset 0 0 0 .5px rgb(0 0 0 / .12)}
-.lights i:nth-child(2){background:#FEBC2E}
-.lights i:nth-child(3){background:#28C840}
-.window-title{font-size:13px;font-weight:500;color:var(--tx-2)}
-.window video{width:100%;height:auto;aspect-ratio:16/9;background:#fff}
-.transport{--p:0;display:flex;align-items:center;gap:10px;height:44px;padding-inline:10px 12px;border-top:1px solid rgb(20 22 28 / .07);background:#FDFDFE}
-.t-button{display:grid;place-items:center;flex:none;width:26px;height:26px;border-radius:var(--r-sm);color:var(--tx-2);transition:color var(--dur-2),background var(--dur-2)}
-.t-button:hover{color:var(--tx);background:var(--ink-1)}
-.t-time{flex:none;font-family:var(--font-geist-mono);font-size:11.5px;letter-spacing:.02em;color:var(--tx-2)}
-.t-bar{position:relative;flex:1;height:26px;outline:0;touch-action:none;container-type:inline-size;border-radius:var(--r-xs)}
-.t-bar:focus-visible{box-shadow:var(--focus-ring)}
-.t-track{position:absolute;inset-inline:0;top:50%;height:3px;margin-top:-1.5px;border-radius:2px;background:var(--ink-2);overflow:hidden}
-.t-track::after{content:'';position:absolute;inset:0;background:var(--tx-4);transform-origin:left;scale:var(--p) 1}
-.t-head{position:absolute;top:50%;left:0;width:2px;height:14px;margin:-7px 0 0 -1px;border-radius:1px;background:var(--accent);translate:calc(var(--p) * 100cqw) 0}
+.stage-window img{width:100%;height:auto;border-radius:calc(100cqw * 18 / 1782);box-shadow:0 0 0 1px rgb(0 0 0 / .35),0 40px 80px -24px rgb(40 10 0 / .55),0 0 140px -30px rgb(255 107 26 / .45)}
+.pill-count{opacity:.6;font-weight:400}
 
 /* ---- rows: copy beside each product graphic, on paper ---- */
 .rows{display:grid;gap:clamp(72px,9vw,112px);max-width:var(--col);margin:clamp(104px,12vw,152px) auto 0;padding-inline:24px}

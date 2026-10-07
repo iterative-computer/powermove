@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import { download } from '$lib/download.svelte';
+  import { download, stars } from '$lib/download.svelte';
+  import { GITHUB } from '$lib/links';
 
   type Player = { duration: number; seek(time: number): void; destroy(): void };
   type Clip = { name: string; from: number; to: number };
@@ -172,8 +173,5 @@
 
 <div class="hero-cta">
   <a class="pill light" href={download.href}>Download for Mac</a>
-  <a class="pill glass" href="#film">
-    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path fill="currentColor" d="M4.5 2.8v10.4a.7.7 0 0 0 1.06.6l8.2-5.2a.7.7 0 0 0 0-1.2l-8.2-5.2a.7.7 0 0 0-1.06.6Z" /></svg>
-    Watch the film
-  </a>
+  <a class="pill glass" href={GITHUB} target="_blank" rel="noopener">Star on GitHub{#if stars.label} <span class="pill-count tabular">{stars.label}</span>{/if}</a>
 </div>

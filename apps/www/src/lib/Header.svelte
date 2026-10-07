@@ -7,7 +7,7 @@
   let { onDark = false }: { onDark?: boolean } = $props();
 
   const items = [
-    { label: 'Film', href: '/#film' },
+    { label: 'Editor', href: '/#editor' },
     { label: 'Features', href: '/#features' },
   ];
 

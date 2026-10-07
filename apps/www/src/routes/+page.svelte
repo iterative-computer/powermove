@@ -1,7 +1,6 @@
 <script lang="ts">
   import Header from '$lib/Header.svelte';
   import Hero from '$lib/Hero.svelte';
-  import Film from '$lib/Film.svelte';
   import Footer from '$lib/Footer.svelte';
   import Features from '$lib/Features.svelte';
   import { resolveDownload } from '$lib/download.svelte';
@@ -51,9 +50,9 @@
       <h1 id="headline" class="sr-only">Shape your video editor</h1>
       <Hero />
     </section>
-    <div class="stage-window">
-      <Film />
-    </div>
+    <figure class="stage-window">
+      <img src="/editor-window.png" alt="The Powermove editor: media, the agent conversation, the Change literally anything composition on the canvas, its timeline, properties, and effects." width="1782" height="1168" fetchpriority="high" />
+    </figure>
   </div>
 
   <section class="rows" id="features" aria-labelledby="features-title">
