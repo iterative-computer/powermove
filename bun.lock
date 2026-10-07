@@ -98,6 +98,7 @@
       "name": "@powermove/www",
       "version": "0.0.0",
       "dependencies": {
+        "@lisse/core": "0.7.2",
         "@lucide/svelte": "1.45.0",
         "@powermove/player": "workspace:*",
         "@powermove/tokens": "workspace:*",

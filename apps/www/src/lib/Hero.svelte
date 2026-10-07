@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { squircle } from '$lib/squircle';
   import { onMount, untrack } from 'svelte';
   import { download, stars } from '$lib/download.svelte';
   import { GITHUB } from '$lib/links';
@@ -172,6 +173,6 @@
 </div>
 
 <div class="hero-cta">
-  <a class="pill light" href={download.href}>Download for Mac</a>
-  <a class="pill glass" href={GITHUB} target="_blank" rel="noopener">Star on GitHub{#if stars.label} <span class="pill-count tabular">{stars.label}</span>{/if}</a>
+  <a class="pill light" use:squircle href={download.href}>Download for Mac</a>
+  <a class="pill glass" use:squircle href={GITHUB} target="_blank" rel="noopener">Star on GitHub{#if stars.label} <span class="pill-count tabular">{stars.label}</span>{/if}</a>
 </div>
