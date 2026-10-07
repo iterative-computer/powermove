@@ -81,11 +81,12 @@ main{overflow:clip}
    editor window, the way a lit canvas spills onto a dark room. The headline
    is the app's own composition, played by its own player. */
 .top{position:relative;isolation:isolate;padding-bottom:1px}
-/* Powermove's near-black warming through ember into the brand orange behind the
-   window, then out to paper. Interpolated in oklab so the ramp never bands. */
-.top-glow{position:absolute;inset:0 0 auto;z-index:-1;height:calc(100% - min(24vw,280px));background:
-  radial-gradient(60% 30% at 50% 82%,rgb(255 120 40 / .35),transparent 70%),
-  linear-gradient(in oklab,#0C0A09 0%,#120907 12%,#1D0A05 24%,#2E0D05 36%,#481306 47%,#6C1C07 57%,#9A2B08 65%,#CB420A 72%,#F0580A 78%,#FF8746 84%,#FFC2A0 90%,#FCEBE0 95%,var(--paper) 100%)}
+/* Built only from two tokens: the dark theme's #0C0A09 and the light theme's --accent
+   #F0580A, mixed in oklab. No hand-picked reds, so every in-between is our own orange
+   cooling into our own black. The stops ease in so the warmth gathers behind the window. */
+.top-glow{--ink-0:#0C0A09;--ember:#F0580A;position:absolute;inset:0 0 auto;z-index:-1;height:calc(100% - min(24vw,280px));background:
+  radial-gradient(60% 30% at 50% 82%,color-mix(in oklab,var(--ember) 40%,transparent),transparent 70%),
+  linear-gradient(in oklab,var(--ink-0) 0%,color-mix(in oklab,var(--ember) 6%,var(--ink-0)) 20%,color-mix(in oklab,var(--ember) 16%,var(--ink-0)) 38%,color-mix(in oklab,var(--ember) 34%,var(--ink-0)) 54%,color-mix(in oklab,var(--ember) 62%,var(--ink-0)) 67%,var(--ember) 78%,color-mix(in oklab,var(--ember) 55%,var(--paper)) 86%,color-mix(in oklab,var(--ember) 14%,var(--paper)) 94%,var(--paper) 100%)}
 .hero{position:relative;padding:clamp(140px,19vh,200px) 0 0;text-align:center;color:#F5F5F4}
 .hero-art,.hero-cta,.stage-window{animation:hero-in .8s cubic-bezier(.16,1,.3,1) both}
 .hero-cta{animation-delay:90ms}
