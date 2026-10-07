@@ -1,89 +1,170 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { download } from '$lib/download.svelte';
+  import { onMount, untrack } from 'svelte';
 
-  // Three claims set back in the gradient, then the one that matters, bright.
-  const lines = [
-    'Keyframe real layers.',
-    'Direct an agent on the timeline.',
-    'Ask for the features you’re missing.',
-    'Shape your video editor.',
-  ];
-  const headline = lines.join(' ');
+  type Player = { duration: number; seek(time: number): void; destroy(): void };
+  type Clip = { name: string; from: number; to: number };
 
-  // Prompts typed in the margins, the kind people actually send the agent.
-  const margins = [
-    { side: 'left', top: 11, text: 'Make the title spring in.\n0.4s, no bounce.' },
-    { side: 'right', top: 15, text: 'Keyframe scale 100 → 112\nat 00:02:10.' },
-    { side: 'left', top: 44, text: 'Add a whip pan between\nshots 2 and 3.' },
-    { side: 'right', top: 50, text: 'Build me a beat-sync panel.' },
-    { side: 'left', top: 74, text: 'Grain at 0.35,\nheadline only.' },
-    { side: 'right', top: 78, text: 'Fork the inspector.\nHide what I don’t use.' },
-  ] as const;
+  const FPS = 30;
+  const DURATION = 15;
+  // Where /hero/scene.json cuts from one noun to the next.
+  const cuts = [3, 6, 9, 12];
+  // The band every frame's type stays inside (measured x 219–1718, y 411–631),
+  // so the type, not the 1080p frame, decides how big the headline sets.
+  const CROP = '200 400 1520 240';
 
-  let typed = $state(Infinity);
-  let caret = $state(false);
-  let marginTyped = $state<number[]>(margins.map(m => m.text.length));
-  let pending = $state(true);
+  let root: SVGSVGElement | undefined = $state();
+  let scrubber: HTMLElement | undefined = $state();
+  let ready = $state(false);
+  let time = $state(0);
+  let playing = $state(true);
+  let scrubbing = $state(false);
 
-  // Characters before each line starts, so one counter drives all four.
-  const starts = lines.reduce<number[]>((acc, line, i) => [...acc, i ? acc[i - 1] + lines[i - 1].length : 0], []);
-  const total = starts[lines.length - 1] + lines[lines.length - 1].length;
+  const frames = $derived(Math.round(time * FPS));
+  const timecode = $derived(
+    [Math.floor(frames / FPS / 60), Math.floor(frames / FPS) % 60, frames % FPS]
+      .map(n => String(n).padStart(2, '0')).join(':'),
+  );
+
+  let seek: (t: number) => void = () => {};
+  let sync = () => {};
 
   onMount(() => {
-    pending = false;
-    if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    let alive = true;
-    const timers: ReturnType<typeof setTimeout>[] = [];
-    const later = (fn: () => void, ms: number) => timers.push(setTimeout(() => alive && fn(), ms));
+    let cancelled = false, visible = true, frame = 0, last = 0;
+    let player: Player | undefined;
+    const abort = new AbortController();
+    const motion = matchMedia('(prefers-reduced-motion: reduce)');
+    const svg = root!;
+    // Reduced motion lands on the final hold, which reads as the full headline.
+    if (motion.matches) { playing = false; time = DURATION - 1; }
 
-    // Headline: a steady hand with a little human jitter, a breath at each line end.
-    typed = 0; caret = true;
-    const step = () => {
-      typed += 1;
-      if (typed >= total) { later(() => (caret = false), 1400); return; }
-      const atLineEnd = starts.includes(typed);
-      later(step, atLineEnd ? 260 : 22 + Math.random() * 26);
+    function fail(error: unknown) {
+      if (cancelled) return;
+      cancelAnimationFrame(frame);
+      player?.destroy(); player = undefined;
+      ready = false;
+      console.error('[Powermove hero]', error);
+    }
+    seek = t => {
+      time = Math.min(Math.max(t, 0), DURATION - 1 / FPS);
+      try { player?.seek(time); } catch (error) { fail(error); }
     };
-    later(step, 380);
-
-    // Margins: each prompt types, holds, clears, and comes back on its own clock.
-    marginTyped = margins.map(() => 0);
-    margins.forEach((m, i) => {
-      const cycle = () => {
-        let n = 0;
-        const tick = () => {
-          marginTyped[i] = ++n;
-          if (n < m.text.length) later(tick, 34 + Math.random() * 40);
-          else later(() => { marginTyped[i] = 0; later(cycle, 1600 + Math.random() * 2400); }, 3200 + Math.random() * 2000);
-        };
-        tick();
-      };
-      later(cycle, 900 + i * 700 + Math.random() * 600);
-    });
-    return () => { alive = false; timers.forEach(clearTimeout); };
+    function tick(now: number) {
+      if (!player) return;
+      if (last) time = (time + (now - last) / 1000) % DURATION;
+      last = now;
+      try { player.seek(time); frame = requestAnimationFrame(tick); }
+      catch (error) { fail(error); }
+    }
+    sync = () => {
+      cancelAnimationFrame(frame); last = 0;
+      if (!player || cancelled) return;
+      if (playing && !scrubbing && visible && !document.hidden) frame = requestAnimationFrame(tick);
+      else seek(time);
+    };
+    const observer = new IntersectionObserver(([entry]) => { visible = entry.isIntersecting; sync(); });
+    observer.observe(svg);
+    document.fonts.addEventListener('loadingdone', sync);
+    document.addEventListener('visibilitychange', sync);
+    void (async () => {
+      try {
+        const [{ createSvgPlayer }, response] = await Promise.all([
+          import('$lib/player'), fetch('/hero/scene.json', { signal: abort.signal }),
+        ]);
+        if (!response.ok) throw new Error('Scene unavailable');
+        const scene = await response.json();
+        // A slow font must not hold playback. Each seek remeasures glyphs,
+        // so a font that arrives later is picked up on the next frame.
+        let fontTimeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            document.fonts.load('400 128px Geist').catch(() => []),
+            new Promise(resolve => { fontTimeout = setTimeout(resolve, 1500); }),
+          ]);
+        } finally { clearTimeout(fontTimeout); }
+        if (cancelled) return;
+        player = createSvgPlayer(svg, scene);
+        svg.setAttribute('viewBox', CROP);
+        player.seek(time); ready = true; sync();
+      } catch (error) { fail(error); }
+    })();
+    return () => {
+      cancelled = true; abort.abort(); cancelAnimationFrame(frame); observer.disconnect();
+      document.removeEventListener('visibilitychange', sync);
+      document.fonts.removeEventListener('loadingdone', sync);
+      player?.destroy();
+    };
   });
+
+  // Declared after onMount so it first runs once the player wiring exists.
+  $effect(() => { void playing; void scrubbing; untrack(sync); });
+
+  function timeAt(x: number) {
+    const box = scrubber!.getBoundingClientRect();
+    return ((x - box.left) / box.width) * DURATION;
+  }
+  function scrubStart(event: PointerEvent) {
+    if (event.button !== 0) return;
+    scrubber!.setPointerCapture(event.pointerId);
+    scrubbing = true;
+    seek(timeAt(event.clientX));
+  }
+  function scrubMove(event: PointerEvent) {
+    if (scrubbing) seek(timeAt(event.clientX));
+  }
+  function scrubEnd() { scrubbing = false; }
+  function keys(event: KeyboardEvent) {
+    const step = event.shiftKey ? 1 : 1 / FPS;
+    const to = { ArrowLeft: time - step, ArrowRight: time + step, Home: 0, End: DURATION }[event.key];
+    if (to !== undefined) { playing = false; seek(to); }
+    else if (event.key === ' ' || event.key === 'k') playing = !playing;
+    else return;
+    event.preventDefault();
+  }
 </script>
 
-<div class="margins" aria-hidden="true">
-  {#each pending ? [] : margins as m, i (m.text)}
-    <p class="margin" data-side={m.side} style:top="{m.top}%">{m.text.slice(0, marginTyped[i])}{#if marginTyped[i] > 0 && marginTyped[i] < m.text.length}<span class="margin-caret">▌</span>{/if}</p>
-  {/each}
-</div>
+<div class="hero-art" data-paused={playing ? undefined : ''} data-scrubbing={scrubbing ? '' : undefined} style:--p={time / DURATION}>
+  <button class="artboard" type="button" aria-label={playing ? 'Pause the headline animation' : 'Play the headline animation'} onclick={() => (playing = !playing)}>
+    {#if !ready}
+      <!-- The player's opening hold, laid out as separate layers so the handoff
+           keeps its word spacing, anchors, and baselines. -->
+      <svg class="hero-vector" viewBox={CROP} aria-hidden="true">
+        <g fill="#F5F5F4" font-family="Geist" font-size="128" font-weight="600" letter-spacing="-4" style="font-variation-settings:'wght' 398.334">
+          <g transform="translate(342.9186172485351 470.1759932556153)">
+            <text y="104.96" text-anchor="end" transform="translate(309.7305908203125 1.0422963714599547)">Shape</text>
+          </g>
+          <g transform="translate(686.2853775024414 470.1759932556153)">
+            <text y="104.96" text-anchor="start">your</text>
+          </g>
+          <g transform="translate(967.8048477172852 470.1759932556153)">
+            <text y="104.96" text-anchor="start">video editor</text>
+          </g>
+        </g>
+      </svg>
+    {/if}
+    <svg bind:this={root} class="hero-vector" viewBox={CROP} aria-hidden="true" style:visibility={ready ? 'visible' : 'hidden'}></svg>
+  </button>
 
-<div class="hero-copy">
-  <h1 class="headline" aria-label={headline} data-pending={pending ? '' : undefined}>
-    {#each lines as line, i (line)}
-      {@const shown = Math.max(0, Math.min(line.length, typed - starts[i]))}
-      {@const here = caret && (typed < total ? typed >= starts[i] && typed < starts[i] + line.length : i === lines.length - 1)}
-      <span class="headline-line" class:punch={i === lines.length - 1} aria-hidden="true"><span>{line.slice(0, shown)}</span>{#if here}<span class="caret"></span>{/if}<span class="unset">{line.slice(shown)}</span></span>
-    {/each}
-  </h1>
-  <div class="hero-cta">
-    <a class="pill light" href={download.href}>Download for Mac</a>
-    <a class="pill glass" href="#film">
-      <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path fill="currentColor" d="M4.5 2.8v10.4a.7.7 0 0 0 1.06.6l8.2-5.2a.7.7 0 0 0 0-1.2l-8.2-5.2a.7.7 0 0 0-1.06.6Z" /></svg>
-      Watch the film
-    </a>
+  <!-- One hairline for the whole timeline. The cuts are ticks, the playhead is
+       the only colour, and the timecode surfaces only when it's being read. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <div
+    class="scrubber"
+    bind:this={scrubber}
+    role="slider"
+    tabindex="0"
+    aria-label="Headline animation playhead"
+    aria-valuemin={0}
+    aria-valuemax={DURATION}
+    aria-valuenow={Number(time.toFixed(2))}
+    aria-valuetext={timecode}
+    onpointerdown={scrubStart}
+    onpointermove={scrubMove}
+    onpointerup={scrubEnd}
+    onpointercancel={scrubEnd}
+    onkeydown={keys}
+  >
+    <span class="scrub-track" aria-hidden="true"></span>
+    {#each cuts as cut (cut)}<span class="scrub-cut" style:--t={cut / DURATION} aria-hidden="true"></span>{/each}
+    <span class="scrub-head" aria-hidden="true"><span class="scrub-time tabular">{timecode}</span></span>
   </div>
 </div>

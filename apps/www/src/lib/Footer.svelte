@@ -53,7 +53,7 @@
         <h2>Your move.</h2>
         <p>Free and open source, for Macs with Apple silicon.</p>
         <div class="cta">
-          <a class="pill dark" href={download.href}>Download for Mac</a>
+          <a class="button primary lg" href={download.href}>Download for macOS{#if download.version} <span class="muted">{download.version}</span>{/if}</a>
           <a class="button lg" href={GITHUB} target="_blank" rel="noopener">Star on GitHub{#if stars.label} <span class="muted">{stars.label}</span>{/if}</a>
         </div>
       </div>
@@ -79,7 +79,7 @@
     </div>
 
     <div class="foot-base">
-      <a class="foot-mark" href="/#top" aria-label="Powermove home"><span aria-hidden="true"></span></a>
+      <a class="foot-mark" href="/#top" aria-label="Powermove home"><img src="/powermove-logo.svg" width="16" height="14" alt="" /></a>
       <span>© <span class="tabular">{year}</span> Iterative Computer</span>
       <span class="foot-meta">
         {#if download.version}<a href={RELEASES} target="_blank" rel="noopener">Powermove <span class="tabular">{download.version}</span></a>{/if}

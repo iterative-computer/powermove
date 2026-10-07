@@ -1,10 +1,10 @@
 <script lang="ts">
   import Header from '$lib/Header.svelte';
   import Hero from '$lib/Hero.svelte';
-  import Film from '$lib/Film.svelte';
   import Footer from '$lib/Footer.svelte';
   import Features from '$lib/Features.svelte';
-  import { resolveDownload } from '$lib/download.svelte';
+  import { GITHUB } from '$lib/links';
+  import { download, resolveDownload, stars } from '$lib/download.svelte';
 
 
   $effect(() => { resolveDownload(); });
@@ -42,52 +42,43 @@
   <meta name="twitter:image" content="https://trypowermove.com/og.png" />
 </svelte:head>
 
-<Header onDark />
+<Header />
 
 <main id="top">
-  <div class="top">
-    <div class="top-glow" aria-hidden="true"></div>
-    <section class="hero" aria-label="Introduction">
+  <section class="hero" aria-labelledby="headline">
+    <div class="wrap">
+      <h1 id="headline" class="sr-only">Shape your video editor</h1>
       <Hero />
-    </section>
-    <div class="cards">
-      <Film />
+      <div class="hero-intro">
+        <p class="lede">An iterative video editor for macOS. Ask an agent to add or fork panels, effects, and workflows, and it loads them into the running app. Steer it when it’s wrong, undo anything.</p>
+        <div class="cta">
+          <a class="button primary lg" href={download.href}>Download for Mac{#if download.version} <span class="muted">{download.version}</span>{/if}</a>
+          <a class="button lg" href={GITHUB} target="_blank" rel="noopener">GitHub{#if stars.label} <span class="muted">{stars.label}</span>{/if}</a>
+        </div>
+      </div>
     </div>
-  </div>
+    <figure class="stage" id="editor">
+      <img class="editor-screenshot" src="/editor-screenshot.png" alt="Powermove editor in a light theme, showing the Change literally anything composition, agent conversation, timeline, properties, and effects." width="1920" height="1305" fetchpriority="high" />
+    </figure>
+  </section>
 
-  <div class="cards" id="features">
-    <article class="card" id="editor" aria-labelledby="editor-title">
-      <header class="card-head">
-        <div>
-          <h2 id="editor-title">A real motion editor</h2>
-          <p>Layers, keyframes, curves, and effects on a timeline, with the agent in a panel beside them.</p>
-        </div>
-      </header>
-      <div class="card-body">
-        <img src="/editor-hero.png" alt="The Powermove editor in its dark theme over a desert night wallpaper: media, the agent conversation, a canvas with blur controls, the timeline, properties, and effects." width="1920" height="1280" loading="lazy" />
+  <Features />
+
+  <section class="kernel" aria-labelledby="kernel-title">
+    <div class="wrap kernel-layout">
+      <div class="kernel-copy">
+        <h2 id="kernel-title" class="chapter-title"><span class="strong">A deliberately tiny kernel.</span> Everything above it is an extension, including the parts we wrote.</h2>
+        <p class="lead">Timeline, effects, inspector, the UI itself. The agent writes new extensions the way we built the editor, through a typed, undoable tool layer that inspects, renders, and edits the live project.</p>
       </div>
-    </article>
-
-    <Features />
-
-    <article class="card" aria-labelledby="kernel-title">
-      <header class="card-head">
-        <div>
-          <h2 id="kernel-title">A deliberately tiny kernel</h2>
-          <p>Everything above it is an extension, including the parts we wrote. The agent builds new ones through the same typed, undoable tool layer.</p>
-        </div>
-      </header>
-      <div class="card-body kernel-body">
-        <div class="stack" bind:this={stack} data-in={stackIn ? '' : undefined} aria-hidden="true">
-          <div class="slab yours" style="--i:4"><span class="slab-name">Your mods</span><span class="slab-note">Yours to add. Same API as everything below</span></div>
-          <div class="slab" style="--i:3"><span class="slab-name">Panels</span><span class="slab-note">Timeline, inspector, agent, media</span></div>
-          <div class="slab" style="--i:2"><span class="slab-name">Effects and transitions</span><span class="slab-note">Blur, grain, whip pan, dissolve</span></div>
-          <div class="slab" style="--i:1"><span class="slab-name">Theme and keymap</span><span class="slab-note">Dusk, Vim, yours</span></div>
-          <div class="slab kernel" style="--i:0"><span class="slab-name">Kernel</span><span class="slab-note">Project store, typed edits, undo, compositor</span></div>
-        </div>
+      <div class="stack" bind:this={stack} data-in={stackIn ? '' : undefined} aria-hidden="true">
+        <div class="slab yours" style="--i:4"><span class="slab-name">Your mods</span><span class="slab-note">Yours to add. Same API as everything below</span></div>
+        <div class="slab" style="--i:3"><span class="slab-name">Panels</span><span class="slab-note">Timeline, inspector, agent, media</span></div>
+        <div class="slab" style="--i:2"><span class="slab-name">Effects and transitions</span><span class="slab-note">Blur, grain, whip pan, dissolve</span></div>
+        <div class="slab" style="--i:1"><span class="slab-name">Theme and keymap</span><span class="slab-note">Dusk, Vim, yours</span></div>
+        <div class="slab kernel" style="--i:0"><span class="slab-name">Kernel</span><span class="slab-note">Project store, typed edits, undo, compositor</span></div>
       </div>
-    </article>
-  </div>
+    </div>
+  </section>
 </main>
 
 <Footer />
