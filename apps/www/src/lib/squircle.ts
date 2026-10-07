@@ -2,8 +2,7 @@
  * Corner smoothing with Lisse (Figma's squircle curve), the same recipe the
  * desktop app's Settings uses: the radius is whatever CSS `border-radius`
  * computes to, smoothing is 0.5 on controls up to 40px tall and 0.85 above,
- * the element is clipped to the curve and re-measured on resize. A caller
- * can pass its own smoothing where the default reads too subtle.
+ * the element is clipped to the curve and re-measured on resize.
  *
  * A clip also cuts off box-shadow focus rings, so keyboard focus is drawn by
  * Lisse as an inner edge in `--squircle-focus`, and only for :focus-visible,
@@ -25,7 +24,7 @@ const CARD_SMOOTHING = 0.85;
 const CONTROL_SMOOTHING = 0.5;
 const CONTROL_HEIGHT = 40;
 
-export const squircle: Action<HTMLElement, { smoothing?: number } | undefined> = (el, params) => {
+export const squircle: Action<HTMLElement> = (el) => {
   const anchor = el.parentElement;
   const radius = parseFloat(getComputedStyle(el).borderTopLeftRadius);
   if (!anchor || !(radius > 0)) return;
@@ -37,7 +36,7 @@ export const squircle: Action<HTMLElement, { smoothing?: number } | undefined> =
   function paint() {
     const { width, height } = getLayoutSize(el);
     if (width <= 0 || height <= 0) return;
-    const smoothing = params?.smoothing ?? (height <= CONTROL_HEIGHT ? CONTROL_SMOOTHING : CARD_SMOOTHING);
+    const smoothing = height <= CONTROL_HEIGHT ? CONTROL_SMOOTHING : CARD_SMOOTHING;
     const options = { radius: Math.min(radius, Math.min(width, height) / 2), smoothing };
     el.style.clipPath = generateClipPath(width, height, options);
     const color = getComputedStyle(el).getPropertyValue('--squircle-focus').trim();
