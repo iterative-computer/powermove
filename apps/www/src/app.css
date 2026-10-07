@@ -88,33 +88,25 @@ main{overflow:clip}
   radial-gradient(60% 30% at 50% 82%,color-mix(in oklab,var(--ember) 40%,transparent),transparent 70%),
   linear-gradient(in oklab,var(--ink-0) 0%,color-mix(in oklab,var(--ember) 6%,var(--ink-0)) 20%,color-mix(in oklab,var(--ember) 16%,var(--ink-0)) 38%,color-mix(in oklab,var(--ember) 34%,var(--ink-0)) 54%,color-mix(in oklab,var(--ember) 62%,var(--ink-0)) 67%,var(--ember) 78%,color-mix(in oklab,var(--ember) 55%,var(--paper)) 86%,color-mix(in oklab,var(--ember) 14%,var(--paper)) 94%,var(--paper) 100%)}
 .hero{position:relative;padding:clamp(140px,19vh,200px) 0 0;text-align:center;color:#F5F5F4}
-.hero-art,.hero-cta,.stage-window{animation:hero-in .8s cubic-bezier(.16,1,.3,1) both}
+.hero-art,.hero-description,.hero-cta{animation:hero-in .8s cubic-bezier(.16,1,.3,1) both}
+.hero-description{animation-delay:60ms}
 .hero-cta{animation-delay:90ms}
-.stage-window{animation-delay:180ms}
-@keyframes hero-in{from{opacity:0;filter:blur(10px);transform:translateY(16px)}to{opacity:1;filter:none;transform:none}}
+@keyframes hero-in{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
 
 .hero-art{--w:min(calc(100% - 32px),980px);display:flex;flex-direction:column;align-items:center}
 .artboard{position:relative;display:block;width:var(--w);aspect-ratio:1520/240;cursor:default}
 .artboard:focus-visible{box-shadow:none;outline:0}
 .artboard:focus-visible .hero-vector{opacity:.8}
 .hero-vector{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
-/* At rest the type spans x 343–1600, so the line is inset to the words, not the crop. */
-.scrubber{position:relative;width:calc(var(--w) * .83);height:28px;margin-top:14px;outline:0;touch-action:none;user-select:none;-webkit-user-select:none;container-type:inline-size}
-.scrub-track{position:absolute;inset-inline:0;top:50%;height:1px;background:rgb(255 255 255 / .12)}
-.scrub-track::after{content:'';position:absolute;inset:0;background:rgb(255 255 255 / .38);transform-origin:left;scale:var(--p) 1}
-.scrub-cut{position:absolute;top:calc(50% - 2px);left:calc(var(--t) * 100%);width:1px;height:5px;background:rgb(255 255 255 / .28)}
-.scrub-head{position:absolute;top:calc(50% - 6px);left:0;width:2px;height:12px;margin-left:-1px;border-radius:1px;background:var(--accent);box-shadow:0 0 10px rgb(255 107 26 / .7);translate:calc(var(--p) * 100cqw) 0;transition:scale var(--dur-3) var(--ease)}
-.scrub-time{position:absolute;bottom:calc(100% + 7px);left:50%;translate:-50% 3px;font-family:var(--font-geist-mono);font-size:11px;line-height:1;letter-spacing:.02em;color:rgb(255 255 255 / .55);white-space:nowrap;opacity:0;transition:opacity var(--dur-3),translate var(--dur-3) var(--ease)}
-.scrubber:hover .scrub-time,.scrubber:focus-visible .scrub-time,.hero-art[data-scrubbing] .scrub-time,.hero-art[data-paused] .scrub-time{opacity:1;translate:-50% 0}
-.scrubber:hover .scrub-head,.hero-art[data-scrubbing] .scrub-head{scale:1 1.35}
-.scrubber:focus-visible .scrub-track{background:rgb(255 255 255 / .3)}
-.hero-cta{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-top:36px}
+.hero-description{max-width:44ch;margin:28px auto 0;padding-inline:24px;font-size:17px;line-height:1.5;letter-spacing:-.011em;color:rgb(255 255 255 / .72);text-wrap:balance}
+.hero-cta{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-top:24px}
 
 /* The editor window, cropped to its own bounds so it sits on the stage like a real one.
    Its corners are the capture's; the radius only shapes the shadow to match (18px at 1782px). */
 .stage-window{max-width:var(--col);margin:clamp(64px,9vh,96px) auto 0;padding-inline:24px;container-type:inline-size}
 @media(max-width:640px){.stage-window{padding-inline:12px}}
-.stage-window img{width:100%;height:auto;border-radius:calc(100cqw * 18 / 1782);box-shadow:0 0 0 1px rgb(0 0 0 / .35),0 40px 80px -24px rgb(40 10 0 / .55),0 0 140px -30px rgb(255 107 26 / .45)}
+/* Keep the image and its shadow in one stable layer while mobile browsers scroll. */
+.stage-window img{width:100%;height:auto;border-radius:calc(100cqw * 18 / 1782);transform:translateZ(0);backface-visibility:hidden;box-shadow:0 0 0 1px rgb(0 0 0 / .35),0 40px 80px -24px rgb(40 10 0 / .55),0 0 140px -30px rgb(255 107 26 / .45)}
 .pill-count{opacity:.6;font-weight:400}
 
 /* ---- rows: copy beside each product graphic, on paper ---- */
