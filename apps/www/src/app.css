@@ -78,10 +78,11 @@ h1 .muted{color:var(--tx-3)}
 }
 
 /* ---- hero ----
-   The headline is a real Powermove composition on its artboard, with the
-   project's timeline under it. Scrub the playhead and the scene follows. */
-.hero{padding-top:112px;padding-bottom:0;text-align:left}
-@media(min-width:1024px){.hero{padding-top:136px}}
+   The headline is a real Powermove composition. Nothing frames it: one
+   hairline under the type is the whole timeline, and it only says more
+   (the timecode) while someone is holding or reading it. */
+.hero{padding-top:128px;padding-bottom:0;text-align:center}
+@media(min-width:1024px){.hero{padding-top:152px}}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .tabular{font-variant-numeric:tabular-nums}
 .hero-art,.hero-intro,.stage{animation:hero-in .72s cubic-bezier(.16,1,.3,1) both}
@@ -89,56 +90,26 @@ h1 .muted{color:var(--tx-3)}
 .stage{animation-delay:160ms}
 @keyframes hero-in{from{opacity:0;filter:blur(10px);transform:translateY(14px)}to{opacity:1;filter:none;transform:none}}
 
-/* artboard: frame name above the top-left corner, as the canvas labels it */
-.artboard-label{display:flex;justify-content:space-between;margin-bottom:8px;font-size:var(--fs-xs);line-height:1;color:var(--tx-4)}
-.artboard{position:relative;aspect-ratio:1920/500;background:#0C0A09}
-.artboard>.hero-vector{clip-path:inset(0)}
-/* crop marks at the four corners instead of a box, so the frame never reads as an empty embed */
-.artboard::before{content:'';position:absolute;inset:-1px;z-index:1;pointer-events:none;--m:linear-gradient(var(--tx-4) 0 0);
-  background:var(--m) 0 0/10px 1px,var(--m) 0 0/1px 10px,var(--m) 100% 0/10px 1px,var(--m) 100% 0/1px 10px,var(--m) 0 100%/10px 1px,var(--m) 0 100%/1px 10px,var(--m) 100% 100%/10px 1px,var(--m) 100% 100%/1px 10px;background-repeat:no-repeat}
-.hero-vector{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.hero-art{--w:min(100%,760px);display:flex;flex-direction:column;align-items:center}
+.artboard{position:relative;display:block;width:var(--w);aspect-ratio:1520/240;cursor:default}
+.artboard:focus-visible{box-shadow:none;outline:0}
+.artboard:focus-visible .hero-vector{opacity:.8}
+.hero-vector{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
 
-/* timeline: transport over track names on the left, ruler over lanes on the right */
-.timeline{--rul:24px;--row:22px;display:grid;grid-template-columns:112px minmax(0,1fr);grid-template-rows:var(--rul) auto;margin-top:12px;border-radius:var(--r-lg);background:var(--bg-panel-2);box-shadow:0 0 0 1px var(--line);font-size:var(--fs-xs);line-height:1;user-select:none;-webkit-user-select:none}
-.transport{display:flex;align-items:center;gap:6px;padding-inline:6px 10px;border-bottom:1px solid var(--line);border-right:1px solid var(--line)}
-.play{display:grid;place-items:center;width:20px;height:20px;border-radius:var(--r-xs);color:var(--tx-2);transition:color var(--dur-1),background var(--dur-1)}
-.play:hover{color:var(--tx);background:var(--ink-1)}
-.timecode{font-family:var(--font-geist-mono);font-size:var(--fs-xs);color:var(--tx-2);letter-spacing:.02em}
-.track-names{display:grid;grid-auto-rows:var(--row);gap:2px;padding-block:6px;border-right:1px solid var(--line);color:var(--tx-3)}
-.track-names li{display:flex;align-items:center;padding-inline:12px}
-.lanes{position:relative;grid-row:1/span 2;grid-column:2;container-type:inline-size;display:grid;grid-template-rows:var(--rul);grid-auto-rows:var(--row);row-gap:2px;padding-bottom:6px;border-radius:0 var(--r-lg) var(--r-lg) 0;outline:0;touch-action:none}
-.lanes:focus-visible{box-shadow:var(--focus-ring)}
-.ruler{position:relative;margin-bottom:4px;border-bottom:1px solid var(--line);color:var(--tx-4)}
-.tick{position:absolute;bottom:0;left:calc(var(--t) * 100%);width:1px;height:4px;background:var(--line-strong)}
-.tick.major{height:8px}
-.tick span{position:absolute;bottom:10px;left:5px;font-family:var(--font-geist-mono);font-size:10px;white-space:nowrap}
-.lane{position:relative}
-.clip{box-sizing:border-box;position:absolute;inset-block:0;display:block;line-height:var(--row);left:calc(var(--from) * 100% + 1px);width:calc(var(--len) * 100% - 2px);padding-inline:8px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;border-radius:var(--r-xs);background:var(--bg-row);box-shadow:inset 0 0 0 1px var(--line);color:var(--tx-3);transition:color var(--dur-3),background var(--dur-3)}
-.clip[data-active]{background:var(--bg-row-hi);color:var(--tx)}
-/* The playhead rides on translate in container units, so moving it never relayouts the lanes. */
-.playhead{position:absolute;top:0;bottom:0;left:0;width:1px;margin-left:-.5px;background:var(--accent);translate:calc(var(--p) * 100cqw) 0;pointer-events:none;box-shadow:0 0 6px var(--accent-dim)}
-.playhead::before{content:'';position:absolute;top:4px;left:-4.5px;width:10px;height:12px;border-radius:2px 2px 5px 5px;background:var(--accent)}
-.timeline[data-scrubbing] .clip{transition:none}
-@media(max-width:640px){
-  .timeline{grid-template-columns:88px minmax(0,1fr)}
-  .hero-actions .cta{display:grid}
-  .timecode{font-size:10px}
-  .track-names li{padding-inline:8px}
-  .clip{padding-inline:5px;font-size:10px}
-  .tick.major:nth-child(6n+4) span{display:none}
-}
+/* At rest the type spans x 343–1600, so the line is inset to the words, not the crop. */
+.scrubber{position:relative;width:calc(var(--w) * .83);height:28px;margin-top:10px;outline:0;touch-action:none;user-select:none;-webkit-user-select:none;container-type:inline-size}
+.scrub-track{position:absolute;inset-inline:0;top:50%;height:1px;background:var(--line-2)}
+.scrub-track::after{content:'';position:absolute;inset:0;background:var(--tx-4);transform-origin:left;scale:var(--p) 1}
+.scrub-cut{position:absolute;top:calc(50% - 2px);left:calc(var(--t) * 100%);width:1px;height:5px;background:var(--line-strong)}
+.scrub-head{position:absolute;top:calc(50% - 6px);left:0;width:2px;height:12px;margin-left:-1px;border-radius:1px;background:var(--accent);translate:calc(var(--p) * 100cqw) 0;transition:scale var(--dur-3) var(--ease)}
+.scrub-time{position:absolute;bottom:calc(100% + 7px);left:50%;translate:-50% 3px;font-family:var(--font-geist-mono);font-size:11px;line-height:1;letter-spacing:.02em;color:var(--tx-3);white-space:nowrap;opacity:0;transition:opacity var(--dur-3),translate var(--dur-3) var(--ease)}
+.scrubber:hover .scrub-time,.scrubber:focus-visible .scrub-time,.hero-art[data-scrubbing] .scrub-time,.hero-art[data-paused] .scrub-time{opacity:1;translate:-50% 0}
+.scrubber:hover .scrub-head,.hero-art[data-scrubbing] .scrub-head{scale:1 1.35}
+.scrubber:focus-visible .scrub-track{background:var(--line-strong)}
 
-/* intro: copy on the left, actions on the right, both under the timeline */
-.hero-intro{display:grid;gap:28px;margin-top:40px}
-@media(min-width:900px){.hero-intro{grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:64px}}
-.hero-intro .lede{margin:0;max-width:40ch;font-size:clamp(17px,1.4vw,19px);line-height:1.5;letter-spacing:-.011em}
-.hero-intro .lede .strong{font-weight:500}
-.hero-actions{display:flex;flex-direction:column;gap:14px}
-@media(min-width:900px){.hero-actions{align-items:flex-end}}
-.hero-actions .cta{margin-top:0}
-.agents{font-size:var(--fs-sm);color:var(--tx-3)}
-.agent{color:var(--tx-2);white-space:nowrap}
-.agent svg{display:inline-block;vertical-align:-2px;margin-right:4px}
+.hero-intro{display:flex;flex-direction:column;align-items:center;margin-top:28px}
+.hero-intro .lede{margin:0;max-width:44ch;font-size:16px;line-height:1.55;letter-spacing:-.011em;color:var(--tx-2)}
+.hero-intro .cta{justify-content:center;margin-top:28px}
 .button .muted{color:var(--tx-3);font-weight:400}
 .button.primary .muted{color:var(--on-accent);opacity:.7;font-weight:400}
 
