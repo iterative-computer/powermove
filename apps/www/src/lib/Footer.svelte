@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { squircle } from '$lib/squircle';
   import { GITHUB, RELEASES } from '$lib/links';
   import { download, resolveDownload, stars } from '$lib/download.svelte';
 
@@ -47,8 +46,8 @@
       <a class="foot-mark" href="/#top" aria-label="Powermove home"><span aria-hidden="true"></span></a>
       <p class="foot-line">Powermove is free and open source, for Macs with Apple silicon.</p>
       <div class="foot-cta">
-        <a class="pill light" use:squircle href={download.href}>Download for Mac</a>
-        <a class="pill glass" use:squircle href={GITHUB} target="_blank" rel="noopener">Star on GitHub{#if stars.label} <span class="pill-count tabular">{stars.label}</span>{/if}</a>
+        <a class="pill light" href={download.href}>Download for Mac</a>
+        <a class="pill glass" href={GITHUB} target="_blank" rel="noopener">Star on GitHub{#if stars.label} <span class="pill-count tabular">{stars.label}</span>{/if}</a>
       </div>
     </div>
 
