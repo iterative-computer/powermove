@@ -137,7 +137,6 @@ main{overflow:clip}
 .kernel-body .slab.kernel{background:#fff;box-shadow:0 0 0 1px rgb(28 18 12 / .08),0 12px 24px -12px rgb(28 18 12 / .2)}
 .kernel-body .slab.kernel .slab-name{color:var(--tx)}
 .kernel-body .slab.yours{background:transparent;box-shadow:none}
-.site-footer{margin-top:clamp(40px,6vw,80px)}
 
 /* Stack of slabs seen head-on: the kernel is the widest plate, each layer above is a little narrower,
    and the top one is an outlined slot rather than a filled plate, because it's the reader's to fill.
@@ -164,44 +163,36 @@ main{overflow:clip}
 }
 
 /* ---- footer ----
-   The page's close: the call to action, then the index, then the colophon.
-   A ruler across the top answers the hero's timeline; its playhead scrubs in
-   with the footer and parks on the last frame when the page bottoms out. */
-.site-footer{padding:clamp(64px,8vw,112px) 0 40px;view-timeline:--foot block}
-.foot-ruler{position:relative;height:9px;border-bottom:1px solid var(--line);container-type:inline-size}
-.foot-ruler .tick{position:absolute;bottom:0;left:calc(var(--t) * 100%);width:1px;height:4px;margin-left:-.5px;background:var(--line-strong)}
-.foot-ruler .tick.major{height:8px}
-.foot-ruler .tick:first-child{margin-left:0}
-.foot-ruler .tick:nth-last-child(2){margin-left:-1px}
-.foot-playhead{position:absolute;top:-6px;bottom:-1px;right:0;width:1px;background:var(--accent);translate:0 0}
-.foot-playhead::before{content:'';position:absolute;top:0;left:-3.5px;width:8px;height:9px;border-radius:2px 2px 4px 4px;background:var(--accent)}
-@supports(animation-timeline:view()){
-  .foot-playhead{animation:foot-scrub linear both;animation-timeline:--foot;animation-range:entry 0% entry 100%}
-  @keyframes foot-scrub{from{translate:-100cqw 0}to{translate:0 0}}
-}
-.foot-main{display:grid;gap:56px;padding-top:56px}
-@media(min-width:900px){.foot-main{grid-template-columns:minmax(0,5fr) minmax(0,6fr);gap:64px}}
-.foot-cta h2{font-size:clamp(40px,5vw,64px);line-height:1;letter-spacing:-.04em;color:var(--tx)}
-.foot-cta p{margin-top:16px;font-size:var(--fs-lg);color:var(--tx-3)}
-.foot-cta .cta{margin-top:28px;align-items:center}
-.foot-cta .button.lg{min-height:36px;border-radius:8px;font-size:15px}
-.foot-nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:40px 24px;font-size:14px}
+   The hero in reverse: paper warms through our orange and settles into
+   near-black, so the page ends on the stage it opened on. Type stays at the
+   header's scale; the only display moment on the page is the headline. */
+:root{--ink-0:#0C0A09;--ember:#F0580A}
+.site-footer{position:relative;isolation:isolate;margin-top:clamp(64px,8vw,112px);padding-top:340px;color:#F5F5F4;overflow:hidden}
+.foot-dusk{position:absolute;inset:0;z-index:-1;background:linear-gradient(in oklab,
+  var(--paper) 0px,color-mix(in oklab,var(--ember) 8%,var(--paper)) 70px,color-mix(in oklab,var(--ember) 30%,var(--paper)) 150px,color-mix(in oklab,var(--ember) 70%,var(--paper)) 215px,var(--ember) 260px,
+  color-mix(in oklab,var(--ember) 62%,var(--ink-0)) 325px,color-mix(in oklab,var(--ember) 34%,var(--ink-0)) 400px,color-mix(in oklab,var(--ember) 16%,var(--ink-0)) 485px,
+  color-mix(in oklab,var(--ember) 6%,var(--ink-0)) 580px,var(--ink-0) 690px)}
+.foot-inner{display:grid;gap:56px;max-width:var(--col);margin-inline:auto;padding:0 24px 32px}
+@media(min-width:900px){.foot-inner{grid-template-columns:minmax(0,5fr) minmax(0,6fr);gap:64px}}
+@media(max-width:640px){.foot-inner{padding-inline:16px}}
+.foot-mark{display:inline-grid;place-items:center;width:32px;height:32px;margin:-5px 0 0 -5px;border-radius:var(--r-sm);color:#fff}
+.foot-mark span{width:24px;height:20px;background:currentColor;-webkit-mask:url(/powermove-logo.svg) center/contain no-repeat;mask:url(/powermove-logo.svg) center/contain no-repeat}
+.foot-line{margin-top:18px;max-width:30ch;font-size:15px;line-height:1.5;letter-spacing:-.01em;color:rgb(255 255 255 / .62);text-wrap:pretty}
+.foot-cta{display:flex;flex-wrap:wrap;gap:8px;margin-top:24px}
+.foot-nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:36px 24px}
 @media(min-width:640px){.foot-nav{grid-template-columns:repeat(3,minmax(0,1fr))}}
-@media(min-width:900px){.foot-nav{padding-top:12px}}
-.foot-nav h3{font-size:var(--fs-sm);font-weight:500;line-height:1;color:var(--tx-4)}
-.foot-nav ul{display:grid;gap:4px;margin-top:14px}
-/* Rows are 28px tall so every link is an honest hit target, not just its glyphs. */
-.foot-nav a{display:inline-flex;align-items:center;min-height:28px;color:var(--tx-2);transition:color var(--dur-2)}
-.foot-nav a:hover{color:var(--tx)}
-.ext{margin-left:3px;font-size:.85em;color:var(--tx-4);transition:color var(--dur-2),translate var(--dur-3) var(--ease)}
-.foot-nav a:hover .ext{color:var(--tx-3);translate:1px -1px}
-.foot-base{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin-top:96px;font-size:var(--fs-sm);line-height:1;color:var(--tx-4)}
-.foot-mark{display:inline-flex;color:var(--tx-4);transition:color var(--dur-2)}
-.foot-mark span{width:16px;height:14px;background:currentColor;-webkit-mask:url(/powermove-logo.svg) center/contain no-repeat;mask:url(/powermove-logo.svg) center/contain no-repeat}
-.foot-mark:hover{color:var(--tx)}
-.foot-meta{display:flex;gap:16px;margin-left:auto}
-.foot-base a:not(.foot-mark){color:var(--tx-4);transition:color var(--dur-2)}
-.foot-base a:not(.foot-mark):hover{color:var(--tx-2)}
+.foot-nav h2{font-size:13px;font-weight:500;line-height:1;letter-spacing:0;color:rgb(255 255 255 / .38)}
+.foot-nav ul{display:grid;gap:2px;margin-top:12px}
+/* 28px rows, so each link is an honest hit target rather than just its glyphs. */
+.foot-nav a{display:inline-flex;align-items:center;min-height:28px;font-size:14px;letter-spacing:-.005em;color:rgb(255 255 255 / .72);transition:color var(--dur-2)}
+.foot-nav a:hover{color:#fff}
+.ext{margin-left:3px;font-size:.85em;color:rgb(255 255 255 / .3);transition:color var(--dur-2),translate var(--dur-3) var(--ease)}
+.foot-nav a:hover .ext{color:rgb(255 255 255 / .6);translate:1px -1px}
+.foot-base{grid-column:1/-1;display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px 16px;margin-top:40px;padding-top:20px;border-top:1px solid rgb(255 255 255 / .08);font-size:12px;line-height:1;color:rgb(255 255 255 / .36)}
+.foot-meta{display:flex;gap:16px}
+.foot-base a{transition:color var(--dur-2)}
+.foot-base a:hover{color:rgb(255 255 255 / .8)}
+.site-footer a:focus-visible{box-shadow:0 0 0 2px var(--ink-0),0 0 0 4px rgb(255 255 255 / .7)}
 
 /* ---- showcase (pinned; scroll progress picks the step, the rail dot arcs to it, the card follows) ---- */
 .showcase{height:360vh;padding:0}

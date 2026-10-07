@@ -33,56 +33,47 @@
       ],
     },
   ];
-  // Fifteen seconds of ruler, the same span as the hero's timeline.
-  const ticks = Array.from({ length: 16 }, (_, i) => i);
 
   $effect(() => { resolveDownload(); });
 </script>
 
+<!-- The page sinks back into the stage it opened on: paper warming through our
+     orange into near-black, with everything set at the header's scale. -->
 <footer class="site-footer">
-  <div class="wrap">
-    <!-- Bookends the hero: the playhead travels as the footer scrolls in and
-         parks on the last frame at the bottom of the page. -->
-    <div class="foot-ruler" aria-hidden="true">
-      {#each ticks as t (t)}<span class="tick" class:major={t % 3 === 0} style:--t={t / 15}></span>{/each}
-      <span class="foot-playhead"></span>
-    </div>
-
-    <div class="foot-main">
+  <div class="foot-dusk" aria-hidden="true"></div>
+  <div class="foot-inner">
+    <div class="foot-lead">
+      <a class="foot-mark" href="/#top" aria-label="Powermove home"><span aria-hidden="true"></span></a>
+      <p class="foot-line">Powermove is free and open source, for Macs with Apple silicon.</p>
       <div class="foot-cta">
-        <h2>Your move.</h2>
-        <p>Free and open source, for Macs with Apple silicon.</p>
-        <div class="cta">
-          <a class="pill dark" href={download.href}>Download for Mac</a>
-          <a class="button lg" href={GITHUB} target="_blank" rel="noopener">Star on GitHub{#if stars.label} <span class="muted">{stars.label}</span>{/if}</a>
-        </div>
+        <a class="pill light" href={download.href}>Download for Mac</a>
+        <a class="pill glass" href={GITHUB} target="_blank" rel="noopener">Star on GitHub{#if stars.label} <span class="pill-count tabular">{stars.label}</span>{/if}</a>
       </div>
-
-      <nav class="foot-nav" aria-label="Footer">
-        {#each columns as column (column.title)}
-          <div>
-            <h3>{column.title}</h3>
-            <ul>
-              {#each column.links as link (link.href)}
-                <li>
-                  {#if link.external}
-                    <a href={link.href} target="_blank" rel="noopener">{link.label}<span class="ext" aria-hidden="true">↗</span></a>
-                  {:else}
-                    <a href={link.href}>{link.label}</a>
-                  {/if}
-                </li>
-              {/each}
-            </ul>
-          </div>
-        {/each}
-      </nav>
     </div>
+
+    <nav class="foot-nav" aria-label="Footer">
+      {#each columns as column (column.title)}
+        <div>
+          <h2>{column.title}</h2>
+          <ul>
+            {#each column.links as link (link.href)}
+              <li>
+                {#if link.external}
+                  <a href={link.href} target="_blank" rel="noopener">{link.label}<span class="ext" aria-hidden="true">↗</span></a>
+                {:else}
+                  <a href={link.href}>{link.label}</a>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        </div>
+      {/each}
+    </nav>
 
     <div class="foot-base">
-      <a class="foot-mark" href="/#top" aria-label="Powermove home"><span aria-hidden="true"></span></a>
       <span>© <span class="tabular">{year}</span> Iterative Computer</span>
       <span class="foot-meta">
-        {#if download.version}<a href={RELEASES} target="_blank" rel="noopener">Powermove <span class="tabular">{download.version}</span></a>{/if}
+        {#if download.version}<a href={RELEASES} target="_blank" rel="noopener">Version <span class="tabular">{download.version}</span></a>{/if}
         <a href="{GITHUB}/blob/main/LICENSE" target="_blank" rel="noopener">AGPL-3.0</a>
       </span>
     </div>
