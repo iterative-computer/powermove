@@ -35,7 +35,7 @@
   });
 </script>
 
-<InspectorSurface {panelId}>
+<InspectorSurface {panelId} scrollKey={JSON.stringify(selectedLayers.map(layer => layer.id))}>
   {#if firstLayer}<InspectorHeader layer={firstLayer} />{/if}
   {#if firstLayer && selectedLayers.every((layer: any) => layer.type !== 'audio')}<AlignmentStrip layers={selectedLayers} />{/if}
 
@@ -91,6 +91,10 @@
   }
 
   .inspector-layer > :global(.sec:first-child) {
+    margin-top: 0;
+  }
+
+  .inspector-layer > :global(.inspector-section-heading.is-empty + .sec) {
     margin-top: 0;
   }
 

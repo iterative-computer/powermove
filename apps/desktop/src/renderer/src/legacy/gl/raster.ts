@@ -21,6 +21,9 @@ import { cornerRadii, isUniformCircular, roundedRectPath } from './corner-geomet
 /* Ported from js/gl/raster.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { parseObj } from '../../kernel/obj';
+import { loadGltf,disposeModel } from '../../core/scene3d/import-model';
+import {disposeBlenderFrames} from '../../core/scene3d/rendering';
+import { disposeSceneRuntimes } from '../../core/scene3d/service';
 import { parseSvg } from '../core/svg-import';
 import { inspectorService, viewerService } from '../core/services';
 import { capturePoster } from '../core/poster';
@@ -580,7 +583,7 @@ function assetKind(file: any) {
   if (mime.startsWith('video/')) return 'video';
   if (PM.Audio && PM.Audio.accepts(file)) return 'audio';
   const ext = mediaExtension(file.name);
-  if (ext === 'obj' || mime === 'model/obj' || mime === 'text/plain+obj') return 'model';
+  if (['obj','glb','gltf','blend'].includes(ext) || ['application/x-blender','model/obj','text/plain+obj','model/gltf-binary','model/gltf+json'].includes(mime)) return 'model';
   if (isImageExtension(ext)) return 'image';
   if (isVideoExtension(ext)) return 'video';
   return null;
@@ -604,6 +607,7 @@ function disposeAsset(a: any) {
     if (disposedAssets.has(a)) return;
     disposedAssets.add(a);
   }
+  if(a?.object3d)disposeModel(a.object3d);
   disposeVideoInstances(a);
   if (a.preview) {
     cancelPreviewVideoSeek(a.preview.el);
@@ -674,6 +678,12 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
   const imageSequence = importedSequences.get(blob) || meta.imageSequence;
   if (kind === 'audio') return PM.Audio.prepareAsset({ id, name, blob, meta });
   if (kind === 'model') {
+    if(/\.blend$/i.test(name)||meta.format==='blend'){if(blob.size>256*1024*1024)throw new Error('Blender sources must be smaller than 256 MB');return {id,name,kind,format:'blend',blob,size:blob.size};}
+    if(blob.size>128*1024*1024)throw new Error('3D models must be smaller than 128 MB');
+    if(/\.(glb|gltf)$/i.test(name) || /^model\/gltf/.test(blob.type)) {
+      const loaded=await loadGltf(blob);
+      return {id,name,kind,format:/\.gltf$/i.test(name)?'gltf':'glb',blob,...loaded,size:blob.size};
+    }
     const sourceText = await blob.text();
     const mesh = parseObj(sourceText);
     return {
@@ -1132,6 +1142,7 @@ PM.assets = {
   poster: (id: any) => posterUrls.get(String(id)) || '',
   revokePoster,
   clear() {
+    disposeSceneRuntimes(PM);disposeBlenderFrames(PM);
     assetEpoch++;
     cloudMedia.clear();
     for (const [id, a] of PM.assets.map) {

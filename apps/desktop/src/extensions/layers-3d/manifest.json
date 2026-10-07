@@ -1,10 +1,16 @@
 {
   "id": "layers-3d",
   "name": "3D Layers",
-  "version": "1.0.0",
+  "version": "1.4.0",
   "apiVersion": 1,
-  "description": "Structured, keyframeable 3D scenes rendered by an extension layer.",
+  "description": "Blender-powered motion models, editable materials, lighting, EEVEE/Cycles rendering and composition gizmos.",
   "entry": "index.ts",
-  "contributes": ["layers", "commands", "palette"],
+  "contributes": [
+    "layers",
+    "inspector",
+    "commands",
+    "palette",
+    "menus"
+  ],
   "author": "powermove"
 }

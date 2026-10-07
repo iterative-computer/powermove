@@ -36,6 +36,7 @@ interface AppServerRunOptions extends RunCallbacks {
   userData: string;
   codexBinaryPref?: string | null;
   nativeTools?: NativeMcpServerConfig;
+  additionalInstructions?: string;
   externalMcpServers?: UserMcpServers;
 }
 
@@ -329,7 +330,7 @@ export class CodexAppServerRunner {
         approvalPolicy: 'never',
         sandbox: 'read-only',
         ephemeral: true,
-        config: liveInspectionConfig(options.nativeTools, externalMcpServers),
+        config: { ...liveInspectionConfig(options.nativeTools, externalMcpServers), ...(options.additionalInstructions ? { developer_instructions: options.additionalInstructions } : {}) },
         ...(req.model ? { model: req.model } : {}),
         serviceName: 'powermove'
       });

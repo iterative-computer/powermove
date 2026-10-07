@@ -1,4 +1,5 @@
 import type { CodexQuestion } from '../../../../shared/ipc';
+import type { AgentTask } from '../../../../shared/agent-orchestration';
 import type { NoticeKind } from '../../errors/presentation';
 import type { AgentModResult } from './mod-result';
 import type { UIPlacement } from './ui-placement';
@@ -62,6 +63,7 @@ export type TraceStep =
       outcome?: 'pending' | 'needs-model';
       startedAt?: number;
       endedAt?: number;
+      task?: AgentTask;
     }
   | {
       kind: 'question';
@@ -226,7 +228,7 @@ function reconcileTrace(next: TraceStep[]): void {
       assignChangedFields(currentStep, nextStep, ['text']);
     } else {
       assignChangedFields(currentStep, nextStep, [
-        'toolName', 'label', 'status', 'detail', 'output', 'startedAt', 'endedAt'
+        'toolName', 'label', 'status', 'detail', 'output', 'startedAt', 'endedAt', 'task'
       ]);
     }
   }

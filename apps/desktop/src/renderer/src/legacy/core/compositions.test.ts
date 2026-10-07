@@ -34,6 +34,17 @@ describe('compositions', () => {
     expect(PM.Comps.openTabs()).toEqual([mainId, id]);
   });
 
+  it('keeps render engines per composition and retains them when precomposing',()=>{
+    const PM=composer(),main=PM.proj.compId;
+    PM.proj.render3d={enabled:true,engine:'cycles',samples:32};
+    const id=PM.Comps.create({name:'Native'},{open:false});
+    PM.Comps.open(id);expect(PM.proj.render3d).toBeUndefined();
+    PM.Comps.open(main);expect(PM.proj.render3d.engine).toBe('cycles');
+    const model=PM.mkLayer('solid');PM.addLayer(model);
+    const nested=PM.Comps.precompose([model.id]);
+    expect(PM.proj.comps[nested].render3d).toEqual(PM.proj.render3d);
+    expect(PM.proj.comps[nested].render3d).not.toBe(PM.proj.render3d);
+  });
   it('keeps undo attached to the composition an edit was made in', () => {
     const PM = composer();
     const mainId = PM.proj.compId;

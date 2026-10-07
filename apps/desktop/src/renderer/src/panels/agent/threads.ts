@@ -11,6 +11,12 @@ export interface AgentThread {
   provider?: string;
   model?: string;
   reasoningEffort?: string;
+  access?: string;
+  lastRunId?: string;
+  lastRunStatus?: 'running' | 'completed' | 'failed' | 'cancelled';
+  /** Retry keys for model-controlled launches and follow-ups; no prompt bytes. */
+  orchestration?: { callerThreadId: string; clientRequestId: string; fingerprint: string };
+  controls?: Array<{ callerThreadId: string; clientRequestId: string; fingerprint: string; runId: string }>;
 }
 
 interface ThreadArchive { version: 1; activeId: string; threads: AgentThread[] }
@@ -27,6 +33,14 @@ function stepTranscript(step: TraceStep): string {
     const answer = step.answers?.[item.id];
     return `You asked: ${item.question}${answer ? `\nUser answered: ${answer}` : step.status === 'closed' ? '\n(Unanswered)' : ''}`;
   }).join('\n');
+}
+
+/** Explicit thread reads can recover complete messages instead of the bounded
+ * history excerpt automatically included in a provider prompt. */
+export function threadMessageText(message: AgentMessage): string {
+  return message.role === 'trace'
+    ? (message.steps || []).map(step => step.kind === 'tool' ? `${step.label}\n${typeof step.output === 'string' ? step.output : ''}` : stepTranscript(step)).filter(Boolean).join('\n\n')
+    : message.text || '';
 }
 
 export function conversationForAgent(messages: AgentMessage[]): Array<{ role: string; text: string }> {

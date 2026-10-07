@@ -1,15 +1,43 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { tick, type Snippet } from 'svelte';
   import { inspectorContext } from './context';
   import { inspectorRefresh } from './refresh.svelte.js';
 
   /* Shared body for the Properties and Layer Effects panels: one surface owns
      the row, chip and stopwatch styling so both panels stay identical. */
-  let { panelId, children }: { panelId: string; children: Snippet } = $props();
-  const { syncTime } = inspectorContext();
+  let { panelId, children, scrollKey }: { panelId: string; children: Snippet; scrollKey?: string } = $props();
+  const { doc, syncTime } = inspectorContext();
+  const scrollProject = $derived(doc.proj);
+  let surface = $state<HTMLDivElement>();
+  const positions = new Map<string, number>();
+  let previousProject: typeof doc.proj | undefined;
+  let previousKey: string | undefined;
+  let restoring = false;
+
+  $effect.pre(() => {
+    const key = scrollKey;
+    const project = scrollProject;
+    const body = surface?.closest<HTMLElement>('.body');
+    if (key === undefined || !body) return;
+    if (project === previousProject && key === previousKey) return;
+
+    // Save before shorter incoming content can clamp the outgoing scroll.
+    if (project !== previousProject) positions.clear();
+    else if (previousKey !== undefined && !restoring) positions.set(previousKey, body.scrollTop);
+    previousProject = project;
+    previousKey = key;
+    restoring = true;
+    let cancelled = false;
+    void tick().then(() => {
+      if (cancelled) return;
+      body.scrollTop = positions.get(key) ?? 0;
+      restoring = false;
+    });
+    return () => { cancelled = true; };
+  });
 </script>
 
-<div class="insp" data-svelte-panel={panelId} data-inspector-refresh={inspectorRefresh.version}
+<div bind:this={surface} class="insp" data-svelte-panel={panelId} data-inspector-refresh={inspectorRefresh.version}
   onpointerdowncapture={syncTime} onkeydowncapture={syncTime} onwheelcapture={syncTime}>
   {@render children()}
 </div>
@@ -34,10 +62,9 @@
   .insp :global(.row.split:has(textarea)) { height: auto; min-height: 54px; align-items: start; }
   .insp :global(.row.split:has(textarea) > .k) { height: 28px; }
   .insp :global(.row.split:has(textarea) > .stopwatch) { margin-top: 5px; }
-  /* Rows without a keyframe diamond keep their label at the same x, but the
-     control column starts where it does on animated rows (18px diamond + 8px
-     gap), so every well in a section shares one left edge. */
-  .insp :global(.row.split:not(:has(> .stopwatch)) > .k) { width: 114px; }
+  /* Reserve the diamond's 18px + 6px gap even on non-animated rows.
+     Border-box padding keeps both the text and control columns aligned. */
+  .insp :global(.row.split:not(:has(> .stopwatch)) > .k) { width: 114px; padding-left: 24px; }
   .insp :global(.property-stopwatch) { width: 18px; height: 24px; }
 
   /* Panel actions use the same flat material as property fields. */

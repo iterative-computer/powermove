@@ -7,9 +7,14 @@ import type { InspectorRuntimeService } from './context';
 
 import ColorField from '../../renderer/src/controls/ColorField.svelte';
 import FillField from '../../renderer/src/controls/FillField.svelte';
+import RampField from '../../renderer/src/controls/RampField.svelte';
+import PointField from '../../renderer/src/controls/PointField.svelte';
+import SliderField from '../../renderer/src/controls/SliderField.svelte';
+import Disclosure from '../../renderer/src/controls/Disclosure.svelte';
 import FontField from '../../renderer/src/controls/FontField.svelte';
 import NumField from '../../renderer/src/controls/NumField.svelte';
 import Row from '../../renderer/src/controls/Row.svelte';
+import Segmented from '../../renderer/src/controls/Segmented.svelte';
 import Section from '../../renderer/src/controls/Section.svelte';
 import SelectField from '../../renderer/src/controls/SelectField.svelte';
 import TextField from '../../renderer/src/controls/TextField.svelte';
@@ -91,6 +96,10 @@ function bump(kind: 'values' | 'structure') {
 }
 
 const controlsFor = (getAPI: () => PowermoveAPI): ControlsAPI => ({
+  RampField: RampField as ControlsAPI['RampField'],
+  PointField: PointField as ControlsAPI['PointField'],
+  SliderField: SliderField as ControlsAPI['SliderField'],
+  Disclosure: Disclosure as ControlsAPI['Disclosure'],
   NumField: NumField as ControlsAPI['NumField'],
   ColorField: ColorField as ControlsAPI['ColorField'],
   FillField: FillField as ControlsAPI['FillField'],
@@ -99,7 +108,7 @@ const controlsFor = (getAPI: () => PowermoveAPI): ControlsAPI => ({
   TextField: TextField as ControlsAPI['TextField'],
   ToggleField: ToggleField as ControlsAPI['ToggleField'],
   Row: Row as ControlsAPI['Row'],
-  Section: Section as ControlsAPI['Section'],
+  Section: Section as ControlsAPI['Section'], Segmented: Segmented as ControlsAPI['Segmented'],
   binding: {
     channelBinding: (layerId, channel, options) => channelBinding(getAPI(), layerId, channel, options),
     compositionBinding: (field, options) => compositionBinding(getAPI(), field as any, options),
@@ -265,7 +274,7 @@ function project(layers: TestLayer[]) {
 function setup(
   testLayers: TestLayer[],
   selected = testLayers.map(({ id }) => id),
-  options: { fxOpen?: boolean; effects?: boolean } = {}
+  options: { fxOpen?: boolean; effects?: boolean; definitions?: Record<string, any> } = {}
 ) {
   let dragOptions: { up(): void; move?(dx: number, dy: number, event: PointerEvent): void; cancel?(): void } | undefined;
   const currentProject = project(testLayers);
@@ -280,7 +289,7 @@ function setup(
     BLENDS: ['normal', 'screen'],
     MASK_SHAPES: ['rect', 'ellipse'],
     TYPE_META: { solid: { label: 'Solid' }, text: { label: 'Text' }, shape: { label: 'Shape' }, null: { label: 'Null' }, group: { label: 'Group', transform: true } },
-    FX: {
+    FX: options.definitions ?? {
       blur: { label: 'Gaussian Blur', group: 'Blur', params: [{ k: 'amount', label: 'Amount', step: 1, min: 0, max: 100 }] },
       duotone: { label: 'Duotone', group: 'Color', params: [{ k: 'shadow', label: 'Shadow', type: 'color' }] },
       gradient: { label: 'Gradient Ramp', group: 'Generate', params: [{ k: 'radial', label: 'Radial', type: 'toggle' }] }
@@ -617,10 +626,12 @@ describe('InspectorPanel', () => {
   it('presents imported SVG paths as Motioner-style property sections', () => {
     const candidate = shapeLayer('SVG');
     const { apply, runtime } = setup([candidate]);
-    const headings = [...target.querySelectorAll('.sec')].map((section) => section.textContent?.trim());
+    const headings = [...target.querySelectorAll('.sec')].map((section) => section.firstChild?.textContent?.trim());
 
     expect(headings.slice(0, 4)).toEqual(['Transform', 'Path', 'Fill', 'Stroke']);
     expect(headings).not.toContain('Effects');
+    expect(target.querySelector('[data-empty-section="Stroke"]')).not.toBeNull();
+    expect(target.querySelector('[data-empty-section="Fill"]')).toBeNull();
     expect(target.querySelector('[aria-label="Edit Powermove mark vertices"]')).not.toBeNull();
     expect(target.querySelector('details.advanced')?.hasAttribute('open')).toBe(false);
     expect(target.querySelector('[aria-label="Remove Powermove mark"]')).toBeNull();
@@ -792,6 +803,40 @@ describe('InspectorPanel', () => {
     }
   });
 
+  it.each([
+    ['anchor.y', 963, 0],
+    ['position.x', 123, 960],
+    ['position.y', 456, 540],
+    ['rotation', 45, 0],
+    ['opacity', 30, 100]
+  ] as const)('resets static %s to its default', (path, value, expected) => {
+    const candidate = layer('A');
+    candidate.p[path]!.v = value;
+    const { apply, menu } = setup([candidate]);
+    channelRow('A', path).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    const items = menu.mock.calls.at(-1)![1] as Array<{ label?: string; run?: () => void }>;
+    items.find((item) => item.label === 'Reset')!.run!();
+    expect(apply).toHaveBeenCalledWith(expect.arrayContaining([
+      expect.objectContaining({ type: 'replace_keyframes', path, keyframes: [], expression: null }),
+      expect.objectContaining({ type: 'set_property', path, value: expected, mode: 'static' })
+    ]), { label: 'Reset', origin: 'inspector' });
+  });
+
+  it('resets an animated effect parameter to its defined default', () => {
+    const candidate = layer('A');
+    candidate.fx.push({ id: 'fx-1', type: 'blur', on: true, p: { amount: { v: 42, kf: [{ t: 0, v: 42 }], expr: 'value * 2' } } });
+    const { apply, menu } = setup([candidate], ['A'], { fxOpen: true, effects: true, definitions: {
+      blur: { label: 'Gaussian Blur', group: 'Blur', params: [{ k: 'amount', label: 'Amount', def: 5, min: 0, max: 100 }] }
+    } });
+    channelRow('A', 'fx-1.amount').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    const items = menu.mock.calls.at(-1)![1] as Array<{ label?: string; run?: () => void }>;
+    items.find((item) => item.label === 'Reset')!.run!();
+    expect(apply).toHaveBeenCalledWith([
+      expect.objectContaining({ type: 'replace_keyframes', path: 'fx-1.amount', keyframes: [], expression: null }),
+      expect.objectContaining({ type: 'set_property', path: 'fx-1.amount', value: 5, mode: 'static' })
+    ], { label: 'Reset', origin: 'inspector' });
+  });
+
   it('applies the unified Scale context menu to both axes', () => {
     const candidate = layer('A');
     candidate.scaleLinked = true;
@@ -813,7 +858,9 @@ describe('InspectorPanel', () => {
     items.find((item) => item.label === 'Reset')!.run!();
     expect(apply).toHaveBeenCalledWith([
       expect.objectContaining({ type: 'replace_keyframes', path: 'scale.x', keyframes: [] }),
-      expect.objectContaining({ type: 'replace_keyframes', path: 'scale.y', keyframes: [] })
+      expect.objectContaining({ type: 'set_property', path: 'scale.x', value: 100, mode: 'static' }),
+      expect.objectContaining({ type: 'replace_keyframes', path: 'scale.y', keyframes: [] }),
+      expect.objectContaining({ type: 'set_property', path: 'scale.y', value: 100, mode: 'static' })
     ], { label: 'Reset', origin: 'inspector' });
   });
 
@@ -1076,6 +1123,24 @@ describe('InspectorPanel', () => {
       expect.objectContaining({ type: 'set_property', path: 'fx-gradient.radial', value: true }),
       expect.objectContaining({ origin: 'inspector' })
     );
+  });
+
+  it('keeps paired visual effect coordinates precise and independently animatable', () => {
+    const candidate = layer('A');
+    candidate.fx.push({ id: 'fx-point', type: 'point', on: true, p: {
+      centerX: { v: 0, kf: [], expr: null }, centerY: { v: 0, kf: [], expr: null }
+    } });
+    setup([candidate], ['A'], { fxOpen: true, effects: true, definitions: {
+      point: { label: 'Point', params: ['X', 'Y'].map(axis => ({
+        k: `center${axis}`, label: `Center ${axis}`, type: 'number', def: 0, min: -100, max: 100, step: 1
+      })) }
+    } });
+    const point = target.querySelector('.point-field')!;
+    expect(point).not.toBeNull();
+    expect(point.querySelectorAll('[role="spinbutton"]')).toHaveLength(2);
+    expect(point.querySelectorAll('.visual-track')).toHaveLength(0);
+    expect(point.querySelector('[aria-label="Add keyframe for Center X"]')).not.toBeNull();
+    expect(point.querySelector('[aria-label="Add keyframe for Center Y"]')).not.toBeNull();
   });
 
   it('uses set_effect for toggles and exposes one controlled expansion button', () => {

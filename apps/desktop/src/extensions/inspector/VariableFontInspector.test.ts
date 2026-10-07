@@ -5,9 +5,14 @@ import type { ControlsAPI, PowermoveAPI } from 'powermove';
 
 import ColorField from '../../renderer/src/controls/ColorField.svelte';
 import FillField from '../../renderer/src/controls/FillField.svelte';
+import RampField from '../../renderer/src/controls/RampField.svelte';
+import PointField from '../../renderer/src/controls/PointField.svelte';
+import SliderField from '../../renderer/src/controls/SliderField.svelte';
+import Disclosure from '../../renderer/src/controls/Disclosure.svelte';
 import FontField from '../../renderer/src/controls/FontField.svelte';
 import NumField from '../../renderer/src/controls/NumField.svelte';
 import Row from '../../renderer/src/controls/Row.svelte';
+import Segmented from '../../renderer/src/controls/Segmented.svelte';
 import Section from '../../renderer/src/controls/Section.svelte';
 import SelectField from '../../renderer/src/controls/SelectField.svelte';
 import TextField from '../../renderer/src/controls/TextField.svelte';
@@ -36,11 +41,15 @@ interface VariableFontTestBackend {
 }
 
 const controlsFor = (getAPI: () => PowermoveAPI): ControlsAPI => ({
+  RampField: RampField as ControlsAPI['RampField'],
+  PointField: PointField as ControlsAPI['PointField'],
+  SliderField: SliderField as ControlsAPI['SliderField'],
+  Disclosure: Disclosure as ControlsAPI['Disclosure'],
   NumField: NumField as ControlsAPI['NumField'], ColorField: ColorField as ControlsAPI['ColorField'],
   FillField: FillField as ControlsAPI['FillField'], FontField: FontField as ControlsAPI['FontField'],
   SelectField: SelectField as ControlsAPI['SelectField'], TextField: TextField as ControlsAPI['TextField'],
   ToggleField: ToggleField as ControlsAPI['ToggleField'], Row: Row as ControlsAPI['Row'],
-  Section: Section as ControlsAPI['Section'],
+  Section: Section as ControlsAPI['Section'], Segmented: Segmented as ControlsAPI['Segmented'],
   binding: {
     channelBinding: (layerId, channel, options) => channelBinding(getAPI(), layerId, channel, options),
     compositionBinding: (field, options) => compositionBinding(getAPI(), field as any, options),

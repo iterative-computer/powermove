@@ -8,7 +8,7 @@ import { makePM } from './make-pm';
 import { install as installTransitions } from '../gl/transitions';
 
 const OPERATIONS = [
-  'set_property', 'replace_keyframes', 'set_easing', 'set_expression',
+  'set_property', 'replace_keyframes', 'offset_property', 'set_easing', 'set_expression',
   'set_content', 'set_layer', 'set_composition', 'add_layer',
   'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_effect', 'remove_effect',
   'set_effect', 'set_transition', 'set_scene_parameter', 'add_marker', 'create_section',
@@ -16,6 +16,7 @@ const OPERATIONS = [
 ];
 
 const OPERATION_CONTRACT = {
+  offset_property: {target:'layer',fields:['path','delta']},
   set_property: { target: 'layer', fields: ['path', 'value', 'time', 'mode', 'ease'] },
   replace_keyframes: { target: 'layer', fields: ['path', 'keyframes', 'replace', 'expression'] },
   set_easing: { target: 'keyframes', fields: ['keyframes', 'curve'] },

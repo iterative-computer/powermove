@@ -19,7 +19,7 @@ import type { RemoteClient } from './clients';
 /** Tools that need a real UI: pixels, panel DOM, synthetic input. */
 export const DISPLAY_TOOLS = new Set([
   'get_panel_layout', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel',
-  'render_frames', '__panel_bounds', '__prepare_panel_input'
+  'render_frames', '__panel_bounds', '__prepare_panel_input', '__agent_thread_control'
 ]);
 
 /* Agent media tools resolve an asset to a host file through a renderer: a
@@ -75,6 +75,7 @@ export class RunOwner extends EventEmitter {
     if (this.destroyed) return;
     if (channel === IPC.codexEvent) {
       const event = payload as CodexProgressEvent;
+      if (event.kind === 'trace' && event.step.kind === 'task') this.hub.noteChildOwner(event.step.task.childRunId, this, ['queued', 'running', 'waiting'].includes(event.step.task.status));
       this.record.events.push(event);
       if (this.record.events.length > MAX_BUFFERED_EVENTS) {
         const excess = this.record.events.length - MAX_BUFFERED_EVENTS;
@@ -137,6 +138,7 @@ export class RunHub {
   private readonly owners = new Map<string, RunOwner>();
   private readonly records = new Map<string, RunRecord>();
   private readonly pendingCalls = new Map<string, RunOwner>();
+  private readonly childOwners = new Map<string, RunOwner>();
 
   constructor(readonly deps: RunHubDeps) {}
 
@@ -162,6 +164,11 @@ export class RunHub {
   }
 
   owner(runId: string): RunOwner | null { return this.owners.get(runId) ?? null; }
+  controlOwner(runId: string): RunOwner | null { return this.owner(runId) ?? this.childOwners.get(runId) ?? null; }
+  noteChildOwner(childRunId: string, owner: RunOwner, active: boolean): void {
+    if (active) this.childOwners.set(childRunId, owner);
+    else if (this.childOwners.get(childRunId) === owner) this.childOwners.delete(childRunId);
+  }
   record(runId: string): RunRecord | null { return this.records.get(runId) ?? null; }
 
   /** Runs for a project: live ones first, then finished ones a tab may not have seen. */
@@ -178,6 +185,7 @@ export class RunHub {
   expectResponse(callId: string, owner: RunOwner): void { this.pendingCalls.set(callId, owner); }
 
   targetFor(tool: string, owner: RunOwner): RemoteClient | null {
+    if (tool === '__agent_thread_control') return owner.attachedTabs[0] ?? this.deps.tabs()[0] ?? null;
     if (DISPLAY_TOOLS.has(tool)) return this.deps.tabs()[0] ?? null;
     if (TAB_FIRST_TOOLS.has(tool)) {
       const tab = this.deps.tabsOn?.(owner.record.projectId).find((client) => !client.isDestroyed());
@@ -193,6 +201,7 @@ export class RunHub {
         this.records.delete(id);
         this.owners.get(id)?.destroy();
         this.owners.delete(id);
+        for (const [childId, owner] of this.childOwners) if (owner.record.id === id) this.childOwners.delete(childId);
       }
     }
   }
@@ -200,5 +209,6 @@ export class RunHub {
   shutdown(): void {
     for (const owner of this.owners.values()) owner.destroy();
     this.owners.clear();
+    this.childOwners.clear();
   }
 }

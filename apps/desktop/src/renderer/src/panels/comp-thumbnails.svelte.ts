@@ -62,7 +62,7 @@ export function createCompThumbnails(PM: PMLike): CompThumbnails {
     try {
       PM.quality = 1;
       pixels = PM.GL.renderToPixels(posterTime(comp), width, height, {
-        comp, mblur: false, mbSamples: 1, opaque: true, topDownOpaque: true,
+        comp, draft3d:true, mblur: false, mbSamples: 1, opaque: true, topDownOpaque: true,
       });
     } finally {
       PM.quality = quality;

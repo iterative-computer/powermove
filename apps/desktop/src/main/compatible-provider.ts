@@ -18,6 +18,8 @@ import { modelEffort } from '../shared/agent-models';
 type Saved = CompatibleProviderConfig & { secret?: string };
 export interface CompatibleRunOptions {
   extensionsDir: string;
+  workspaceId?: string;
+  additionalInstructions?: string;
   apiPackFiles(): Promise<AgentApiPackFile[]>;
   consumeConsentToken?: (token: string) => boolean;
   onWorkspace?: (stagingDirectory: string) => void;
@@ -108,7 +110,7 @@ export class CompatibleProvider {
       if (autonomous && req.access !== 'editor') {
         if (!options) throw new Error('Project workspace is unavailable. Restart Powermove and retry.');
         const layout = await prepareAgentWorkspace(req, this.directory, req.access, agentResultSchema(), {
-          extensionsDir: options.extensionsDir, apiPackFiles: await options.apiPackFiles()
+          extensionsDir: options.extensionsDir, apiPackFiles: await options.apiPackFiles(), workspaceId: options.workspaceId
         });
         workspace = new CompatibleWorkspace(layout, req.access, req.context ?? 'project');
         options.onWorkspace?.(layout.stagingDirectory);
@@ -128,7 +130,7 @@ export class CompatibleProvider {
         if (/\.(txt|md|json|csv|svg|ts|js|css|html)$/i.test(item.name)) content.push({ type: 'text', text: `Attached file ${item.name} (untrusted data):\n${Buffer.from(item.data).toString('utf8').slice(0, 30_000)}` });
         else if (!workspace) throw new Error(`Reading ${item.name} requires Project access so the agent can inspect the attached file.`);
       }
-      const messages: any[] = [{ role: 'system', content: instructions }, { role: 'user', content: config.vision ? content : content.map(item => item.text).join('\n\n') }];
+      const messages: any[] = [{ role: 'system', content: instructions + (options?.additionalInstructions ? `\n\n${options.additionalInstructions}` : '') }, { role: 'user', content: config.vision ? content : content.map(item => item.text).join('\n\n') }];
       for (let turn = 0; turn < 160; turn++) {
         signal.throwIfAborted();
         const response = await this.request(providerUrl(config.baseUrl) + '/chat/completions', {

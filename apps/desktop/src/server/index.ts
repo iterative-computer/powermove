@@ -284,11 +284,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   });
   const ownerFor = (_client: RemoteClient, args: unknown[]) => {
     const request = args[0] as { id?: string } | undefined;
-    return typeof request?.id === 'string' ? runs.owner(request.id) : null;
+    return typeof request?.id === 'string' ? runs.controlOwner(request.id) : null;
   };
   ipc.intercept(IPC.codexSteer, { sender: ownerFor });
   ipc.intercept(IPC.codexAnswer, { sender: ownerFor });
   ipc.intercept(IPC.codexCancel, { sender: ownerFor });
+  ipc.intercept(IPC.codexCancelTask, {
+    sender: (_client, args) => {
+      const request = args[0] as { requestId?: string } | undefined;
+      return typeof request?.requestId === 'string' ? runs.controlOwner(request.requestId) : null;
+    }
+  });
   ipc.intercept(IPC.agentToolResponse, {
     sender: (_client, args) => {
       const response = args[0] as { callId?: string } | undefined;

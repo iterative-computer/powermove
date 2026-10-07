@@ -162,7 +162,7 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
       return (Array.isArray(keys) ? keys : []).filter((key: any) =>
         key && Number.isFinite(key.t) && key.t >= 0 && typeof key.v === typeof fallback);
     },
-    WS: { init() {}, restoreSnapshot() {}, snapshot: () => ({}), editing: false },
+    WS: { init() {}, restoreSnapshot() {}, snapshot: () => ({}), get: (id: string) => ({ id }), activate() {}, editing: false },
     selectLayers() {},
     L: () => null,
     sel: { layers: [], keys: [], chan: null },

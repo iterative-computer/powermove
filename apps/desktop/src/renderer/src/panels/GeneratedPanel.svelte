@@ -7,8 +7,13 @@
     type PreviewModel
   } from '../core/generated-bindings';
   import type { GeneratedControl, GeneratedSection } from '../core/types/workspace';
-  import type { EditBinding } from '../controls/gesture';
+  import { EditGesture, type EditBinding } from '../controls/gesture';
   import { sel } from '../state/selection.svelte';
+  import Disclosure from '../controls/Disclosure.svelte';
+  import RampField from '../controls/RampField.svelte';
+  import PointField from '../controls/PointField.svelte';
+  import Row from '../controls/Row.svelte';
+  import { doc } from '../state/document.svelte';
   import GeneratedControlView from './generated/GeneratedControl.svelte';
   import PreviewList from './generated/PreviewList.svelte';
   import type { PanelProps } from './registerSveltePanel';
@@ -97,7 +102,32 @@
     };
   }
 
-  const controls = section.controls.map(prepare);
+  const controls: PreparedControl[] = section.controls.map(prepare);
+  let primaryCount = 0;
+  const secondary = new Set(controls.filter(({control})=>{
+    if (control.type === 'button' || control.type === 'readout') return control.advanced === true;
+    const advanced = control.advanced ?? primaryCount >= 5;
+    if (!advanced) primaryCount++;
+    return advanced;
+  }).map(item=>item.key));
+
+  const name = (item: PreparedControl) => String(item.control.stateKey || item.control.param || item.control.label).replace(/[^a-z0-9]/gi,'').toLowerCase();
+  const startColor = controls.find(item=>item.control.type==='color'&&name(item)==='startcolor');
+  const endColor = controls.find(item=>item.control.type==='color'&&name(item)==='endcolor');
+  const pointPairs = controls.filter(item=>item.control.type==='slider'&&name(item).endsWith('x')).flatMap(x=>{
+    const y=controls.find(item=>item.control.type==='slider'&&name(item)===name(x).slice(0,-1)+'y');
+    if (!y || !x.get || !y.get || !x.edit || !y.edit || x.edit.mode !== y.edit.mode) return [];
+    const cx=x.control as any, cy=y.control as any;
+    if (!(cx.max>cx.min&&cy.max>cy.min)) return [];
+    return [{x,y,label:x.control.label.replace(/\s*X$/i,''),advanced:secondary.has(x.key)||secondary.has(y.key)}];
+  });
+  const paired = new Set(pointPairs.flatMap(pair=>[pair.x.key,pair.y.key]));
+  const secondaryChanged = $derived((doc.tick.values, doc.proj, controls.filter(item=>secondary.has(item.key)).some(item=>item.get && JSON.stringify(item.get())!==JSON.stringify(defaults[String(item.control.stateKey ?? '')] ?? item.control.def))));
+  function pointEdit(x: PreparedControl, y: PreparedControl): EditBinding {
+    const bindings=[x.edit!,y.edit!];
+    if (bindings.every(binding=>binding.mode==='command')) return {mode:'command',label:'Move position',origin:'generated-ui',command:(next:any)=>bindings.flatMap((binding:any,index)=>typeof binding.command==='function'?binding.command(next[index]):{...binding.command,value:next[index]})};
+    return {mode:'local',label:'Move position',set:(next:any)=>bindings.forEach((binding,index)=>new EditGesture(api,binding).write(next[index]))};
+  }
 
   function reset(): void {
     for (const key of Object.keys(toolState)) delete toolState[key];
@@ -111,17 +141,23 @@
   {#if section.note}
     <div style="color:var(--tx-3);font-size:var(--fs-sm);line-height:1.6;padding:2px 4px 8px">{section.note}</div>
   {/if}
-  {#each controls as prepared (prepared.key)}
-    <GeneratedControlView
-      {PM}
-      {api}
-      control={prepared.control}
-      get={prepared.get}
-      edit={prepared.edit}
-      {toolState}
-      onPreview={(next) => preview = next}
-      onReset={reset}
-    />
-  {/each}
+  {#snippet field(prepared: PreparedControl)}
+    <div data-generated-key={prepared.key}><GeneratedControlView {PM} {api} control={prepared.control} get={prepared.get} edit={prepared.edit} {toolState} onPreview={(next) => preview = next} onReset={reset} /></div>
+  {/snippet}
+  {#snippet point(pair: typeof pointPairs[number])}
+    {@const x=pair.x.control as any}{@const y=pair.y.control as any}
+    <Row {api} label={pair.label}><PointField {api} label={pair.label} get={()=>[Number(pair.x.get!()),Number(pair.y.get!())]} edit={pointEdit(pair.x,pair.y)} xEdit={pair.x.edit!} yEdit={pair.y.edit!} xLabel={pair.x.control.label} yLabel={pair.y.control.label} minX={x.min} maxX={x.max} minY={y.min} maxY={y.max} step={x.step} unit={x.unit} /></Row>
+  {/snippet}
+  {#if startColor?.get && endColor?.get && !secondary.has(startColor.key) && !secondary.has(endColor.key)}
+    <RampField {api} label="Gradient" get={()=>[{id:'start',color:String(startColor.get!()),position:0},{id:'end',color:String(endColor.get!()),position:100}]} onSelect={(id)=>document.querySelector<HTMLElement>(`[data-svelte-panel="${CSS.escape(panelId)}"] [data-generated-key="${CSS.escape(id==='start'?startColor.key:endColor.key)}"] .color-field`)?.click()} />
+  {/if}
+  {#each pointPairs.filter(pair=>!pair.advanced) as pair}{@render point(pair)}{/each}
+  {#each controls.filter(item=>!secondary.has(item.key)&&!paired.has(item.key)) as prepared (prepared.key)}{@render field(prepared)}{/each}
+  {#if secondary.size}
+    <Disclosure count={secondary.size} changed={secondaryChanged} remember={`generated:${section.id}`}>
+      {#each pointPairs.filter(pair=>pair.advanced) as pair}{@render point(pair)}{/each}
+      {#each controls.filter(item=>secondary.has(item.key)&&!paired.has(item.key)) as prepared (prepared.key)}{@render field(prepared)}{/each}
+    </Disclosure>
+  {/if}
   <PreviewList {preview} />
 </div>

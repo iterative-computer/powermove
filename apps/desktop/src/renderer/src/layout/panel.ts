@@ -1,4 +1,5 @@
 import type { PMRegistry } from '../legacy/registry';
+import { attachAreaCorners } from './area-drag';
 import { beginPanelDrag } from './drag';
 import { openPanelMenu } from './menu';
 import { dismissedMenu } from '../overlays/dismissal';
@@ -183,6 +184,7 @@ export function ensurePanel(PM: PMRegistry, spec: PanelSpec, dock: DockSpec): HT
   });
   header.addEventListener('contextmenu', showMenu);
   syncPanelMoveHandle(PM, spec.id);
+  attachAreaCorners(PM, element, spec.id);
   if (spec.collapsed) setPanelCollapsed(PM, spec.id, true, false);
   return element;
 }

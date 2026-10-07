@@ -1,4 +1,5 @@
 import type { OnboardingChoice } from './creative-workspace';
+import type { AgentTask } from './agent-orchestration';
 /*
  * Frozen Phase 1 IPC contract between the sandboxed renderer and the main
  * process. Every channel here is the ONLY way the renderer reaches native
@@ -44,6 +45,10 @@ export const IPC = {
   dialogConfirm: 'dialog:confirm',
   clipboardWriteText: 'clipboard:write-text',
 
+  blenderStatus: 'blender:status',
+  blenderChoose: 'blender:choose',
+  blenderRun: 'blender:run',
+  blenderCancel: 'blender:cancel',
   renderStart: 'render:start',
   renderWrite: 'render:write',
   renderFinish: 'render:finish',
@@ -80,6 +85,7 @@ export const IPC = {
   codexSteer: 'codex:steer',
   codexAnswer: 'codex:answer',
   codexCancel: 'codex:cancel',
+  codexCancelTask: 'codex:cancel-task',
   codexFixPrompt: 'codex:fix-prompt',
   codexRebasePrompt: 'codex:rebase-prompt',
   codexRestoreChangeSet: 'codex:restore-change-set',
@@ -104,6 +110,8 @@ export const IPC = {
 
   artifactRead: 'agent:artifact:read',
   artifactReveal: 'agent:reveal',
+  artifactForget: 'agent:artifacts:forget',
+  artifactSweep: 'agent:artifacts:sweep',
 
   captureWindow: 'capture:window',
 
@@ -445,6 +453,7 @@ export interface CodexRebasePromptRequest {
    known (label only), then again once the arguments are complete (with
    `detail`); the renderer patches the existing row instead of adding one. */
 export type CodexTraceEvent =
+  | { kind: 'task'; task: AgentTask }
   | { kind: 'thought'; text: string }
   | { kind: 'answer'; text: string }
   | {
@@ -472,6 +481,8 @@ export type CodexTraceEvent =
   | {
       kind: 'question';
       itemId: string;
+      /** A child can hold a question on behalf of the root conversation. */
+      requestId?: string;
       questions: CodexQuestion[];
       transport: 'reply' | 'message';
       blocking: boolean;
@@ -736,6 +747,12 @@ export interface PowermoveBridge {
   /** Writes plain text to the system clipboard while the window has focus; nothing is ever read back. */
   clipboardWriteText?(text: string): Promise<void>;
 
+  blender?: {
+    status(): Promise<import('./blender').BlenderStatus>;
+    choose(): Promise<import('./blender').BlenderStatus | null>;
+    run(job: import('./blender').BlenderJob): Promise<import('./blender').BlenderOutput>;
+    cancel(): Promise<void>;
+  };
   render: {
     start(options:{width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number}):Promise<string | null>;
     write(token:string,data:Uint8Array,audio?:boolean):Promise<void>;
@@ -784,6 +801,7 @@ export interface PowermoveBridge {
     steer(req: CodexSteerRequest): Promise<CodexSteerResult>;
     answer(req: CodexAnswerRequest): Promise<CodexSteerResult>;
     cancel(id: string, preserveChanges?: boolean): Promise<void>;
+    cancelTask?(requestId: string, taskId: string): Promise<void>;
     fixPrompt(req: CodexFixPromptRequest): Promise<string>;
     rebasePrompt(req: CodexRebasePromptRequest): Promise<string>;
     restoreChangeSet(req: AgentChangeSetRestoreRequest): Promise<AgentChangeSetRestoreResult>;
@@ -821,6 +839,10 @@ export interface PowermoveBridge {
   artifacts: {
     read(ref: ArtifactRef): Promise<ArtifactFile>;
     reveal(ref: ArtifactRef): Promise<void>;
+    /** Delete a project's agent workspace; called when the project is destroyed. */
+    forget(projectId: string): Promise<void>;
+    /** Remove idle workspaces for projects not in `liveProjectIds`. */
+    sweep(liveProjectIds: string[]): Promise<string[]>;
   };
 
   captureWindow(): Promise<CaptureResult>;

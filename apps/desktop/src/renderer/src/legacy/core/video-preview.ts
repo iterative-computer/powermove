@@ -21,8 +21,10 @@ export function prepareVideoPreview(PM: any, asset: any, source: Blob, disposed:
   const media = hostBridge()?.media;
   const legacyCutout = asset.playbackProxy && Number(asset.playbackProxyVersion || 0) < 3;
   // Long GOPs make HD footage expensive to seek too. Build editing media for
-  // ordinary videos regardless of size; sequences already have a frame grid.
-  if (!media?.beginPreview || (!legacyCutout && asset.imageSequence)) return Promise.resolve();
+  // ordinary videos regardless of size. Large sequences still need smaller
+  // editing copies: their frame grid does not make full-resolution decoding cheap.
+  const smallSequence = asset.imageSequence && Math.max(asset.w, asset.h) <= 1920;
+  if (!media?.beginPreview || (!legacyCutout && smallSequence)) return Promise.resolve();
   // Derivatives have their own versioned key; never replace the portable source.
   const cacheKey = asset.storageKey
     ? `${asset.storageKey}:preview:intra-1280-v1:${asset.playbackProxyVersion || 0}:${source.size}` : null;

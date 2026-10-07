@@ -57,10 +57,10 @@ test.describe('@extensions structured programmable layers', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
-  test('imports a durable OBJ asset and renders its structured mesh layer', async ({ session }) => {
+  test('imports a durable OBJ asset and renders its editable transparent scene', async ({ session }) => {
     await session.openEditor();
     const { page } = session;
-    await page.waitForFunction(() => Boolean((window as any).PM?.layerDefinition?.('powermove.3d.obj-model')));
+    await page.waitForFunction(() => Boolean((window as any).PM?.layerDefinition?.('powermove.3d.object')));
 
     const proof = await page.evaluate(async () => {
       const PM = (window as any).PM;
@@ -83,13 +83,14 @@ f 5 1 4 8
 `;
       const file = new File([source], 'proof-cube.obj', { type: 'model/obj' });
       const result = await PM.cmd('3d.import-obj', file);
-      const layer = PM.proj.layers.find((candidate: any) => candidate.d?.definition === 'powermove.3d.obj-model');
-      const assetId = layer.d.data.assetId;
+      const layer = PM.proj.layers.find((candidate: any) => candidate.d?.definition === 'powermove.3d.object');
+      const object = layer.d.data.object;
+      const assetId = object.source.assetId;
       const asset = PM.proj.assets[assetId];
       const first = PM.Export.snapshot(0, 320);
-      const shaderKey = PM.UIState.getShaderMeta(layer)?.shaderKey;
+      const renderMeta = PM.UIState.getShaderMeta(layer);
       const recolor = PM.Edit.apply({
-        type: 'set_property', target: layer.id, path: 'x.objectColor', value: '#22CC88', mode: 'static'
+        type: 'set_property', target: layer.id, path: 'm.color', value: '#22CC88', mode: 'static'
       }, { label: 'Recolor OBJ', origin: 'interface' });
       const second = PM.Export.snapshot(0, 320);
       const serialized = JSON.parse(PM.serialize());
@@ -100,7 +101,7 @@ f 5 1 4 8
       const missingMeta = PM.UIState.getShaderMeta(layer);
       const referenceCount = PM.MediaImport.referenceCount(PM.proj, assetId);
       PM.hist.undo();
-      const colorAfterEditUndo = PM.L(layer.id)?.d?.params?.objectColor?.v;
+      const colorAfterEditUndo = PM.L(layer.id)?.d?.data?.object?.material?.p?.color?.v;
       PM.hist.undo();
       return {
         result,
@@ -110,11 +111,11 @@ f 5 1 4 8
         asset: { kind: asset.kind, format: asset.format, vertices: asset.vertices, triangles: asset.triangles },
         rendered: first.length > 2_000,
         changedPixels: first !== second,
-        compileError: shaderKey ? PM.GL.compileError(shaderKey) ?? null : 'mesh renderer did not run',
+        compileError: renderMeta.sceneError ?? null,
         savedData: savedLayer.d.data,
         savedAsset,
         savedLayerHasGeometry: JSON.stringify(savedLayer).includes('positions'),
-        missingAsset: missingMeta.missing === true && missingMeta.missingAsset === assetId,
+        missingAsset: missingMeta.sceneWarnings?.includes(`Missing model: ${assetId}`),
         referenceCount,
         colorAfterEditUndo,
         layerAfterUndo: Boolean(PM.L(layer.id)),
@@ -126,12 +127,12 @@ f 5 1 4 8
     expect(proof.recolor.ok).toBe(true);
     expect(proof).toMatchObject({
       layerType: 'extension',
-      definition: 'powermove.3d.obj-model',
+      definition: 'powermove.3d.object',
       asset: { kind: 'model', format: 'obj', vertices: 8, triangles: 12 },
       rendered: true,
       changedPixels: true,
       compileError: null,
-      savedData: { assetId: proof.savedAsset.id },
+      savedData: { object: { source: { assetId: proof.savedAsset.id } } },
       savedLayerHasGeometry: false,
       missingAsset: true,
       referenceCount: 1,

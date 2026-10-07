@@ -5,6 +5,9 @@ import { doc } from '../state/document.svelte';
 import { transport, updateControlTime } from '../state/transport.svelte';
 import ColorField from './ColorField.svelte';
 import FillField from './FillField.svelte';
+import SliderField from './SliderField.svelte';
+import RampField from './RampField.svelte';
+import PointField from './PointField.svelte';
 import { BLINK_MS } from './menu-blink';
 import FontField from './FontField.svelte';
 import NumField from './NumField.svelte';
@@ -684,5 +687,68 @@ describe('picker drafts', () => {
     expect(Edit.dispatch).not.toHaveBeenCalled();
     flushSync();
     expect(document.body.querySelector('.fill-picker')).toBeNull();
+  });
+});
+
+
+describe('visual fields', () => {
+  it('commits a continuous slider drag once, then cancels a second drag with Escape', () => {
+    const { api, Edit } = fakeAPI();
+    const target = render(SliderField, {api, get:()=>25, edit:commandEdit(), min:0, max:100, step:1, label:'Amount'});
+    const slider = target.querySelector<HTMLElement>('[role="slider"]')!;
+    const surface = target.querySelector<HTMLElement>('.filled-slider')!;
+    vi.spyOn(surface,'getBoundingClientRect').mockReturnValue({left:0,top:0,width:100,height:28} as DOMRect);
+    slider.dispatchEvent(pointer('pointerdown',{clientX:30,pointerId:1}));
+    window.dispatchEvent(pointer('pointermove',{clientX:70,pointerId:1}));
+    window.dispatchEvent(pointer('pointerup',{clientX:80,pointerId:1}));
+    expect(Edit.begin).toHaveBeenCalledOnce();
+    expect(Edit.commit).toHaveBeenCalledOnce();
+    expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({value:80}));
+    slider.dispatchEvent(pointer('pointerdown',{clientX:10,pointerId:2}));
+    window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+    window.dispatchEvent(pointer('pointerup',{clientX:100,pointerId:2}));
+    expect(Edit.cancel).toHaveBeenCalledOnce();
+    expect(Edit.commit).toHaveBeenCalledOnce();
+    slider.dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true,cancelable:true}));
+    expect(Edit.apply).toHaveBeenLastCalledWith(expect.objectContaining({value:100}),expect.anything());
+    expect(target.querySelector('[role="spinbutton"]')).not.toBeNull();
+  });
+  it('edits a ramp midpoint by keyboard and restores local state when a stop drag is cancelled',()=>{
+    const {api,Edit}=fakeAPI();
+    let stops=[{id:'a',color:'#FF0000',position:0},{id:'b',color:'#0000FF',position:100}];
+    const target=render(RampField,{api,get:()=>stops,edit:{mode:'local',label:'Stops',set:(next:any)=>stops=next},midpoint:()=>50,midpointEdit:commandEdit('Midpoint')});
+    target.querySelector('[aria-label="Gradient midpoint"]')!.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',shiftKey:true,bubbles:true,cancelable:true}));
+    expect(Edit.apply).toHaveBeenLastCalledWith(expect.objectContaining({value:60}),expect.anything());
+    const track=target.querySelector<HTMLElement>('.ramp-bar')!;
+    vi.spyOn(track,'getBoundingClientRect').mockReturnValue({left:0,top:0,width:100,height:28} as DOMRect);
+    const stop=target.querySelector<HTMLElement>('.ramp-stop')!;
+    stop.dispatchEvent(pointer('pointerdown',{clientX:40,pointerId:1}));
+    expect(stops[0]!.position).toBe(40);
+    window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+    expect(stops[0]!.position).toBe(0);
+  });
+  it('writes both point axes in a single command batch and supports exact fields',()=>{
+    const {api,Edit}=fakeAPI();
+    const edit:EditBinding={mode:'command',label:'Center',command:(value:any)=>['centerX','centerY'].map((path,index)=>({type:'set_property',target:'L1',path,value:value[index]}))};
+    const target=render(PointField,{api,get:()=>[10,20],edit,xEdit:commandEdit('X'),yEdit:commandEdit('Y'),step:1,label:'Center'});
+    target.querySelector<HTMLElement>('.point-pad')!.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',shiftKey:true,bubbles:true,cancelable:true}));
+    expect(Edit.apply).toHaveBeenLastCalledWith([{type:'set_property',target:'L1',path:'centerX',value:10},{type:'set_property',target:'L1',path:'centerY',value:30}],expect.anything());
+    expect(target.querySelectorAll('[role="spinbutton"]')).toHaveLength(2);
+  });
+});
+
+
+describe('angle field ranges',()=>{
+  it('wraps a positive full-turn dial and uses a track for a narrow angle',()=>{
+    const {api,Edit}=fakeAPI();
+    const target=render(SliderField,{api,get:()=>0,edit:commandEdit(),min:0,max:360,step:1,unit:'°',angle:true});
+    const dial=target.querySelector<HTMLElement>('.dial')!;
+    vi.spyOn(dial,'getBoundingClientRect').mockReturnValue({left:0,top:0,width:28,height:28} as DOMRect);
+    dial.dispatchEvent(pointer('pointerdown',{clientX:14,clientY:0,pointerId:1}));
+    window.dispatchEvent(pointer('pointerup',{clientX:14,clientY:0,pointerId:1}));
+    expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({value:270}));
+    const narrow=render(SliderField,{api,get:()=>45,edit:commandEdit(),min:1,max:89,step:1,unit:'°',angle:true});
+    expect(narrow.querySelector('.dial')).toBeNull();
+    expect(narrow.querySelector('.visual-track')).not.toBeNull();
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AgentThreads, normalizeGeneratedThreadTitle, threadTitle } from './threads';
+import { AgentThreads, normalizeGeneratedThreadTitle, threadTitle, threadMessageText } from './threads';
 
 function setup() {
   const saved = new Map<string, unknown>(); let id = 0;
@@ -9,6 +9,18 @@ function setup() {
 }
 
 describe('agent thread archive', () => {
+  it('keeps model-controlled settings and retry metadata across restart', () => {
+    const { make } = setup(); const threads = make(); threads.load('project');
+    Object.assign(threads.active, { provider: 'claude', model: 'claude-sonnet-5-5', reasoningEffort: 'high', access: 'project', lastRunId: 'controlled-run', lastRunStatus: 'completed', orchestration: { callerThreadId: 'parent', clientRequestId: 'launch', fingerprint: 'a'.repeat(64) }, controls: [{ callerThreadId: 'parent', clientRequestId: 'followup', fingerprint: 'b'.repeat(64), runId: 'controlled-run' }] });
+    threads.save(); const restored = make(); restored.load('project');
+    expect(restored.active).toMatchObject({ provider: 'claude', reasoningEffort: 'high', lastRunId: 'controlled-run', orchestration: threads.active.orchestration, controls: threads.active.controls });
+  });
+
+  it('makes full message and task output available for paginated explicit reads', () => {
+    const text = 'Complete reply '.repeat(3000);
+    expect(threadMessageText({ role: 'assistant', text })).toBe(text);
+    expect(threadMessageText({ role: 'trace', steps: [{ kind: 'tool', id: 'task', toolName: 'delegate_task', status: 'done', label: 'Timing review', output: 'Timing is consistent.' }, { kind: 'text', id: 'reply', text: 'Ready.' }] })).toBe('Timing review\nTiming is consistent.\n\nReady.');
+  });
   it('creates, switches, and restores independent drafts, attachments, and conversations', () => {
     const { make } = setup(); const threads = make(); threads.load('project-a');
     const first = threads.activeId;

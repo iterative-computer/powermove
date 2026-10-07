@@ -1,7 +1,38 @@
-import { is3DLayer, world3D, parent3D, poseValues3D, CHANNELS_3D } from './space-3d';
+import { is3DLayer, world3D, parent3D, poseValues3D, CHANNELS_3D,inverse3D } from './space-3d';
+import {layer3DRole} from '../../core/scene3d/layers';
+export function aimProperties3D(layer:any):Array<{key:string;prop:any}> {
+  const role=layer3DRole(layer);if(role!=='camera'&&role!=='light')return [];
+  const p=layer.d.data[role].p;
+  return ['X','Y','Z'].map(axis=>({key:`target${axis}`,prop:p[`target${axis}`]}));
+}
+function transformAim(matrix:readonly number[],point:number[]):number[]{
+  return [0,1,2].map(i=>matrix[i]!*point[0]!+matrix[i+4]!*point[1]!+matrix[i+8]!*point[2]!+matrix[i+12]!);
+}
+export function worldAim3D(PM:any,layer:any,time:number):number[]|null {
+  const props=aimProperties3D(layer);if(!props.length)return null;
+  const role=layer3DRole(layer),point=props.map(({key,prop})=>Number(PM.evP(layer,prop,time,`${role}.${key}`)));
+  return transformAim(parent3D(PM,layer,time),point);
+}
+export function aimValues3D(PM:any,layer:any,world:number[],time:number,parent=parent3D(PM,layer,time)):Record<string,number> {
+  const inverse=inverse3D(parent);if(!inverse)throw new Error('Increase the camera or light parent’s zero scale before changing its hierarchy');
+  const values=transformAim(inverse,world);
+  return Object.fromEntries(aimProperties3D(layer).map(({key},i)=>[key,values[i]!]));
+}
+export function preserveWorldAim(PM:any,layer:any,world:number[]|null,time:number,parent=parent3D(PM,layer,time)):void {
+  if(!world)return;
+  const values=aimValues3D(PM,layer,world,time,parent),role=layer3DRole(layer);
+  for(const {key,prop} of aimProperties3D(layer)){
+    const offset=values[key]!-Number(PM.evP(layer,prop,time,`${role}.${key}`));if(Math.abs(offset)<1e-10)continue;
+    if(prop.expr)prop.expr=`(${prop.expr}) + ${offset}`;
+    else{prop.v+=offset;for(const k of prop.kf)k.v+=offset;}
+  }
+  PM.touch();
+}
 /** Reparent using ordinary editable channels, keeping key identities and easing. */
 export function preserveParentPose(PM: any, layer: any, parent: any, time: number): void {
+  const aim=worldAim3D(PM,layer,time);
   preserveWorldPose(PM, layer, is3DLayer(PM,layer) ? world3D(PM,layer,time) : PM.worldMatrix(layer, time), time, parent);
+  preserveWorldAim(PM,layer,aim,time,parent3D(PM,layer,time,parent));
 }
 
 /** Rebase editable channels into a new grouping/parent coordinate space. */

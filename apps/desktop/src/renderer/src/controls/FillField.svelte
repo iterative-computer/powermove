@@ -1,6 +1,9 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import ColorField from './ColorField.svelte';
+  import RampField from './RampField.svelte';
+  import SliderField from './SliderField.svelte';
+  import NumField from './NumField.svelte';
   import { parseColor, storedHex } from './color-space';
   import { doc } from '../state/document.svelte';
   import { controlTime } from '../state/transport.svelte';
@@ -167,21 +170,20 @@
 
           {#if draft.type === 'linear' || draft.type === 'radial'}
             <div class="fill-gradient">
-              <div class="fill-preview cp-checker" aria-label="Fill preview"><span style:background={fillCss(draft)}></span></div>
+              <RampField {api} label="Fill gradient" get={()=>draft.stops} {selected} onSelect={(id)=>selected=id} edit={{mode:'local',label:'Move gradient stop',set:(stops)=>{draft.stops=stops as FillValue['stops'];previewDraft();}}} />
               <div class="fill-stops">
                 {#each draft.stops as stop, index (stop.id)}
                   <div class="fill-stop" class:on={stop.id === selected}>
                     <button type="button" class="fill-stop-swatch cp-checker" aria-label={`Select stop ${index + 1}`} style={`--sw-color:${stop.color}`} onclick={() => { selected = stop.id; }}></button>
                     <input class="fill-stop-color" aria-label={`Stop ${index + 1} color`} value={stop.color} oninput={(event) => { if (/^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(event.currentTarget.value)) { stop.color = event.currentTarget.value.toUpperCase(); previewDraft(); } }} />
-                    <input type="range" min="0" max="100" aria-label={`Stop ${index + 1} position`} bind:value={stop.position} oninput={previewDraft} onchange={() => draft.stops.sort((a, b) => a.position - b.position)} />
-                    <span class="mono">{stop.position}%</span>
+                    <NumField {api} label={`Stop ${index+1} position`} get={()=>stop.position} min={0} max={100} step={1} unit="%" edit={{mode:'local',label:'Move stop',set:(next)=>{stop.position=Number(next);previewDraft();}}} />
                     <button type="button" class="iconbtn fill-stop-remove" aria-label={`Remove stop ${index + 1}`} title="Remove stop" disabled={draft.stops.length <= 2} onclick={() => removeStop(index)}>×</button>
                   </div>
                 {/each}
               </div>
               <div class="fill-picker-tools">
                 {#if draft.type === 'linear'}
-                  <label class="fill-angle"><span>Angle</span><input type="range" min="-180" max="180" bind:value={draft.angle} aria-label="Gradient angle" oninput={previewDraft} /><span class="mono">{draft.angle}°</span></label>
+                  <div class="fill-angle"><span>Angle</span><SliderField {api} angle label="Gradient angle" get={()=>draft.angle} min={-180} max={180} step={1} unit="°" edit={{mode:'local',label:'Gradient angle',set:(next)=>{draft.angle=Number(next);previewDraft();}}} /></div>
                 {/if}
                 <button type="button" class="btn fill-add-stop" disabled={draft.stops.length >= 8} onclick={addStop}>Add stop</button>
               </div>

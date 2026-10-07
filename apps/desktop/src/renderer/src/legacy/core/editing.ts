@@ -1,3 +1,5 @@
+import {shaderPeers} from '../../core/scene3d/materials';
+import { generatedModelSchema, render3DSchema, materialKeyframeMinimum } from '../../../../shared/blender';
 import { captureFontAnchor } from './font-anchor';
 import { captureSizeAnchor, sizeAnchorOffset, sizeBounds } from './size-anchor';
 import { temporalKeys } from './temporal-bridge';
@@ -8,10 +10,14 @@ import { expressionDiagnostic } from './expression';
 import { inspectorService, shaderHooks } from './services';
 import { compactEditLog } from '../../core/edit-log';
 import { addCaptions, editCaptions, setCaptionsContent } from '../../captions/commands';
+import { layer3DRole, parseLayer3DData, initializeLayer3D, validateLayer3DChannel } from '../../core/scene3d/layers';
+import { validateSceneLayer } from '../../core/scene3d/operations';
+import { sceneProperties,parseScene,validateSceneChannel,SCENE3D_DEFINITION } from '../../core/scene3d/schema';
 /* Ported from js/core/editing.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
 export function install(PM: PMRegistry): void {
+const validate3DChannel=(layer:any,path:string,prop:any)=>(layer3DRole(layer)||layer.d?.modeling)?validateLayer3DChannel(layer,path,prop):validateSceneChannel(path,prop);
 const FORBIDDEN_KEYS: any = new Set(['__proto__', 'prototype', 'constructor']);
 const AUDIO_CONTENT_FIELDS: any = new Set(['asset', 'trim', 'gain', 'fadeIn', 'fadeOut']);
 /* Trust classification for every command origin. Trust decisions use the RAW
@@ -94,15 +100,16 @@ function commandScopes(command: any): any[][] {
   const type = command?.type;
   if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_captions'].includes(type)) return [['layers'], ['comps']];
   if (type === 'set_composition') {
-    return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work'], ['audioGain']];
+    return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work'], ['audioGain'], ['render3d']];
   }
   if (type === 'set_scene_parameter') return [['params', String(command.name || '').trim()]];
   if (type === 'add_marker') return [['markers']];
   if (type === 'create_section' || type === 'update_section') return [['library']];
-  if (type === 'set_easing') return keyframeLayers(command).map((layer: any) => layerPath(layer)).filter(Boolean);
+  if (type === 'set_easing') return keyframeLayers(command).flatMap((layer:any)=>[layer,...PM.allProps(layer).flatMap((item:any)=>shaderPeers(PM,layer,item.key).map(p=>p.layer))]).map((layer:any)=>layerPath(layer)).filter(Boolean);
   const layer = findLayer(command?.target || command?.layer || command?.targetId);
   const path = layerPath(layer);
-  return path ? [path] : [[]];
+  const peers=layer?shaderPeers(PM,layer,channelPath(command.path || command.channel)):[];
+  return path ? [path,...peers.map(p=>layerPath(p.layer)).filter((path):path is any[]=>!!path)] : [[]];
 }
 
 function trackCommands(list: any[]) {
@@ -189,7 +196,19 @@ function record(label: any, origin: any, applied: any, detail: any = {}) {
   PM.proj.edits = compactEditLog([...PM.proj.edits, clone(entry)]);
 }
 
-function setProperty(command: any) {
+function materialPeers(layer:any,channel:string,meta:any){
+  const peers=shaderPeers(PM,layer,channel);
+  for(const peer of peers){if(peer.layer.lock||(PM.groupAncestors?.(peer.layer)||[]).some((g:any)=>g.lock))throw new Error('This material is used by a locked layer. Make it unique first.');if(isGeneratedOrigin(meta.origin)&&lockedIntent(peer.layer,peer.path))throw new Error(`Preserved hand-edited ${peer.path}`);}
+  return peers;
+}
+function synchronizePeers(peers:any[],prop:any,source:any){
+  for(const peer of peers)if(peer.prop!==prop){
+    const next=clone(prop),old=peer.prop.kf;
+    next.kf=next.kf.map((key:any)=>{const time=key.t+source.from-peer.layer.from;return {...key,t:time,i:old.find((k:any)=>Math.abs(k.t-time)<1e-8)?.i||PM.uid('k')};});
+    Object.assign(peer.prop,next);
+  }
+}
+function setProperty(command: any, meta:any={}) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
   const { channel, prop }: any = property(layer, command.path || command.channel);
@@ -197,13 +216,15 @@ function setProperty(command: any) {
   if (command.preserveHandEdits !== false && lockedIntent(layer, channel)) {
     throw new Error(`Preserved hand-edited ${channel}; explicitly allow overwrite to change it`);
   }
+  const peers=materialPeers(layer,channel,meta);
   const current: any = PM.evP(layer, prop, command.time == null ? PM.time : command.time, channel);
   let value: any = command.value;
   if (typeof current === 'number') value = finite(value, channel);
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || layer.d?.modeling))validate3DChannel(layer,channel,{...prop,v:value});
   const time: any = command.time == null ? PM.time : finite(command.time, 'time');
   const mode: any = command.mode || 'auto';
   if (mode === 'keyframe' || (mode === 'auto' && prop.kf.length)) {
-    const key: any = PM.setKeyOn(prop, time - layer.from, value, command.ease || 'linear', PM.proj.fps);
+    const key: any = PM.setKeyOn(prop, time - layer.from, value, command.ease || 'linear', PM.proj.fps, materialKeyframeMinimum(channel));
     if (command.hold != null) key.hold = !!command.hold;
   } else {
     prop.v = value;
@@ -217,10 +238,18 @@ function setProperty(command: any) {
       t: PM.round(time - layer.from, 3),
     };
   }
+  synchronizePeers(peers,prop,layer);
+  if(command.markIntent)for(const peer of peers){peer.layer.locked_intent||={};peer.layer.locked_intent[peer.path]=clone(layer.locked_intent[channel]);}
   return { id: layer.id, channel, value };
 }
 
-function replaceKeyframes(command: any) {
+function offsetProperty(command:any,meta:any={}){
+  const layer=findLayer(command.target);if(!layer)throw new Error('Layer not found');const {channel,prop}=property(layer,command.path);if(!prop||typeof prop.v!=='number')throw new Error('Choose a numeric channel');
+  const peers=materialPeers(layer,channel,meta);if(lockedIntent(layer,channel)&&command.preserveHandEdits!==false)throw new Error(`Preserved hand-edited ${channel}`);const delta=finite(command.delta,'Offset');
+  const next={...prop,v:prop.v+delta,kf:prop.kf.map((k:any)=>({...k,v:k.v+delta}))};validate3DChannel(layer,channel,next);
+  prop.v+=delta;for(const key of prop.kf)key.v+=delta;synchronizePeers(peers,prop,layer);PM.touch();return {id:layer.id,channel,delta};
+}
+function replaceKeyframes(command: any,meta:any={}) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
   const { channel, prop }: any = property(layer, command.path || command.channel);
@@ -228,23 +257,33 @@ function replaceKeyframes(command: any) {
   if (command.preserveHandEdits !== false && lockedIntent(layer, channel)) {
     throw new Error(`Preserved hand-edited ${channel}; explicitly allow overwrite to change it`);
   }
+  const peers=materialPeers(layer,channel,meta);
   if (!Array.isArray(command.keyframes)) throw new Error('keyframes must be an array');
   const next: any = command.keyframes.map((key: any, index: any) => {
     if (!key || typeof key !== 'object') throw new Error(`Keyframe ${index + 1} is invalid`);
-    const time: any = Math.max(0, finite(key.time, `keyframe ${index + 1} time`));
+    const time: any = Math.max(materialKeyframeMinimum(channel), finite(key.time, `keyframe ${index + 1} time`));
     const value: any = typeof prop.v === 'number' ? finite(key.value, `keyframe ${index + 1} value`) : key.value;
-    return { time, value, ease: key.ease || 'linear', hold: !!key.hold };
+    return { time, value, ease: key.ease || 'linear', hold: !!key.hold, ...(Array.isArray(key.eo)&&Array.isArray(key.ei)?{eo:easingCurve([...key.eo,...key.ei]).slice(0,2),ei:easingCurve([...key.eo,...key.ei]).slice(2)}:{}), ...(key.spring?{spring:clone(key.spring)}:{}) };
   });
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || layer.d?.modeling)){
+    const candidate={...prop,kf:[...(command.replace===false?prop.kf:[]),...next.map((k:any)=>({t:k.time,v:k.value}))]};
+    if(command.expression!==undefined){const diagnostic=command.expression?expressionDiagnostic(command.expression):null;if(diagnostic)throw new Error(diagnostic);candidate.expr=command.expression || null;}
+    validate3DChannel(layer,channel,candidate);
+  }
   if (command.replace !== false) {
     if (prop.kf.length && !next.length) prop.v = PM.evP(layer, prop, PM.time, channel);
     prop.kf = [];
   }
+  const madeKeys:any[]=[];
   for (const key of next) {
-    const made: any = PM.setKeyOn(prop, key.time, key.value, key.ease, PM.proj.fps);
-    made.hold = key.hold;
+    const made: any = PM.setKeyOn(prop, key.time, key.value, key.ease, PM.proj.fps, materialKeyframeMinimum(channel));
+    made.hold = key.hold;madeKeys.push({made,key});
   }
+  for(const {made,key} of madeKeys){if(key.eo){made.eo=key.eo;made.ei=key.ei;}if(key.spring)made.spring=key.spring;}
   if (command.expression !== undefined) {const diagnostic=command.expression?expressionDiagnostic(command.expression):null;if(diagnostic)throw new Error(diagnostic);prop.expr=command.expression||null;}
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || layer.d?.modeling))validate3DChannel(layer,channel,prop);
   PM.touch();
+  synchronizePeers(peers,prop,layer);
   return { id: layer.id, channel, keyframes: prop.kf.length };
 }
 
@@ -258,15 +297,15 @@ function easingCurve(value: any) {
   return curve;
 }
 
-function setEasing(command: any) {
+function setEasing(command: any,meta:any={}) {
   const ids: any = new Set((Array.isArray(command.keyframes) ? command.keyframes : [])
     .filter((id: any) => typeof id === 'string' && id).slice(0, 1000));
   if (!ids.size) throw new Error('Select at least one keyframe');
   const curve: any = easingCurve(command.curve);
-  const found: any = [];
+  const found: any = [],shared:any[]=[];
   for (const layer of projectLayers()) {
     for (const item of PM.allProps(layer)) {
-      if(item.prop.kf.some((key:any)=>ids.has(key.i))) temporalKeys(item.prop.kf);
+      if(item.prop.kf.some((key:any)=>ids.has(key.i))){temporalKeys(item.prop.kf);shared.push({layer,prop:item.prop,peers:materialPeers(layer,item.key,meta)});}
       for (const key of item.prop.kf) if (ids.has(key.i)) found.push(key);
     }
   }
@@ -276,19 +315,26 @@ function setEasing(command: any) {
     key.ei = [curve[2], curve[3]];
     key.hold = false;
   });
+  for(const item of shared)synchronizePeers(item.peers,item.prop,item.layer);
   PM.touch();
   return { keyframes: found.length, curve };
 }
 
-function setExpression(command: any) {
+function setExpression(command: any, meta: any = {}) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
   const { channel, prop }: any = property(layer, command.path || command.channel);
   if (!prop) throw new Error(`Property “${channel}” was not found on “${layer.name}”`);
+  const peers=materialPeers(layer,channel,meta);
   const diagnostic = command.expression ? expressionDiagnostic(command.expression) : null;
   if (diagnostic) throw new Error(diagnostic);
+  if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer) || layer.d?.modeling)){
+    if(isGeneratedOrigin(meta.origin)&&lockedIntent(layer,channel))throw new Error(`Preserved hand-edited ${channel}`);
+    validate3DChannel(layer,channel,{...prop,expr:command.expression || null});
+  }
   prop.expr = command.expression || null;
   PM.touch();
+  synchronizePeers(peers,prop,layer);
   return { id: layer.id, channel, expression: prop.expr };
 }
 
@@ -311,10 +357,28 @@ function normalizeAudioLevelPatch(layer: any, patch: any) {
   return false;
 }
 
-function setContent(command: any) {
+function setContent(command: any, meta: any = {}) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
   const patch: any = safePatch(command.patch, 'content patch');
+  if(patch.modeling){
+    if(layer.type!=='group')throw new Error('Model recipes belong to groups');patch.modeling=generatedModelSchema.parse(patch.modeling);
+    if(isGeneratedOrigin(meta.origin))for(const [key,prop] of Object.entries(layer.d?.modeling?.p||{}))if(lockedIntent(layer,`model.${key}`)&&JSON.stringify(prop)!==JSON.stringify(patch.modeling.p[key]))throw new Error(`Preserved hand-edited model.${key}`);
+  }
+  const role3d=layer3DRole(layer);
+  if(role3d && patch.data){
+    patch.data=parseLayer3DData(role3d,{...layer.d.data,...patch.data});
+    if(isGeneratedOrigin(meta.origin)){
+      const future=new Map(sceneProperties({d:{...layer.d,data:patch.data}}).map(p=>[p.key,p.prop]));
+      for(const {key,prop} of sceneProperties(layer))if(lockedIntent(layer,key)&&JSON.stringify(prop)!==JSON.stringify(future.get(key)))throw new Error(`Preserved hand-edited ${key}`);
+    }
+  }
+  if(layer.d?.definition===SCENE3D_DEFINITION && patch.data?.scene)patch.data.scene=parseScene(patch.data.scene);
+  if(layer.d?.definition===SCENE3D_DEFINITION && patch.data?.scene && isGeneratedOrigin(meta.origin)) {
+    const next=parseScene(patch.data.scene),future=new Map(sceneProperties({d:{data:{scene:next}}}).map(p=>[p.key,p.prop]));
+    for(const {key,prop} of sceneProperties(layer)) if(lockedIntent(layer,key) && JSON.stringify(prop)!==JSON.stringify(future.get(key)))
+      throw new Error(`Preserved hand-edited ${key}; edit unprotected 3D channels instead`);
+  }
   const clearsLevel = normalizeAudioLevelPatch(layer, patch);
   if (clearsLevel) delete layer.d.audioGain;
   for (const key of Object.keys(patch)) {
@@ -440,6 +504,7 @@ function setLayer(command: any) {
   }
   if (patch.color != null) layer.color = String(patch.color);
   if (patch.collapsed != null) layer.collapsed = !!patch.collapsed;
+  if (patch.threeD === false && layer3DRole(layer)) throw new Error('Models, lights and cameras are always 3D layers');
   if (patch.threeD != null) {
     if (layer.type === 'audio' || layer.type === 'adjustment') throw new Error('This layer cannot be a 3D layer');
     layer.threeD = !!patch.threeD;
@@ -451,9 +516,10 @@ function setLayer(command: any) {
 
 function setComposition(command: any) {
   const patch: any = safePatch(command.patch, 'composition patch');
-  const allowed: any = new Set(['name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill', 'shutter', 'workArea', 'audioGain']);
+  const allowed: any = new Set(['name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill', 'shutter', 'workArea', 'audioGain', 'render3d']);
   for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new Error(`Composition field “${key}” is not editable`);
   const p: any = PM.proj;
+  if(patch.render3d!=null)p.render3d=render3DSchema.parse(patch.render3d);
   if (patch.name != null) p.name = String(patch.name).trim() || p.name;
   if (patch.width != null) p.w = Math.max(16, Math.round(finite(patch.width, 'width')));
   if (patch.height != null) p.h = Math.max(16, Math.round(finite(patch.height, 'height')));
@@ -496,6 +562,7 @@ function addLayer(command: any) {
   if (type === 'audio' && (command.parent != null || (command.blend != null && command.blend !== 'normal') || command.motionBlur === true)) {
     throw new Error('Audio layers do not support parenting, blend modes, or motion blur');
   }
+  if(requestedContent.modeling){if(type!=='group')throw new Error('Model recipes belong to groups');requestedContent.modeling=generatedModelSchema.parse(requestedContent.modeling);}
   const opts: any = {
     name: command.name || extensionDefinition?.label,
     from: command.from,
@@ -531,6 +598,7 @@ function addLayer(command: any) {
     }
     if (!command.color && extensionDefinition.color) layer.color = extensionDefinition.color;
   }
+  initializeLayer3D(layer, opts.p);
   if (command.id != null) {
     if (PM.L(command.id)) throw new Error(`Layer id already exists: ${command.id}`);
     layer.id = String(command.id);
@@ -867,11 +935,12 @@ function runOne(sourceCommand: any, meta: any = {}) {
   } : null;
   let data: any;
   switch (command.type) {
-    case 'set_property': data = setProperty(command); break;
-    case 'replace_keyframes': data = replaceKeyframes(command); break;
-    case 'set_easing': data = setEasing(command); break;
-    case 'set_expression': data = setExpression(command); break;
-    case 'set_content': data = setContent(command); break;
+    case 'offset_property': data = offsetProperty(command,meta); break;
+    case 'set_property': data = setProperty(command,meta); break;
+    case 'replace_keyframes': data = replaceKeyframes(command,meta); break;
+    case 'set_easing': data = setEasing(command,meta); break;
+    case 'set_expression': data = setExpression(command,meta); break;
+    case 'set_content': data = setContent(command, meta); break;
     case 'set_layer': data = setLayer(command); break;
     case 'set_composition': data = setComposition(command); break;
     case 'add_layer': data = addLayer(command); break;
@@ -916,6 +985,12 @@ function runOne(sourceCommand: any, meta: any = {}) {
       ref[end] = ref[start] + referenceSpan;
     }
     PM.touch();
+  }
+  const sceneTarget = findLayer(command.target || command.layer || command.targetId);
+  if (sceneTarget && command.type==='set_content') validateSceneLayer(sceneTarget,PM);
+  if (command.type === 'add_layer') {
+    const created = PM.proj.layers.find((l: any) => l.id === data?.id);
+    if (created) validateSceneLayer(created,PM);
   }
   if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_captions', 'edit_captions'].includes(command.type)
       || command.type === 'set_layer' && Object.keys(command.patch || {}).some((key: any) => ['name', 'from', 'duration', 'visible', 'parent'].includes(key))) {
@@ -1064,6 +1139,7 @@ const Edit: any = {
   operations: Object.freeze({
     set_property: { target: 'layer', fields: ['path', 'value', 'time', 'mode', 'ease'] },
     replace_keyframes: { target: 'layer', fields: ['path', 'keyframes', 'replace', 'expression'] },
+    offset_property: {target:'layer',fields:['path','delta']},
     set_easing: { target: 'keyframes', fields: ['keyframes', 'curve'] },
     set_expression: { target: 'layer', fields: ['path', 'expression'] },
     set_content: { target: 'layer', fields: ['patch'] },

@@ -2,6 +2,8 @@
 import { describe, expect, it } from 'vitest';
 import { createEngine } from './player';
 import { buildWebExport, inspectWebExport } from './export-web';
+import {createObject} from '../core/scene3d/schema';
+import {materialPreset} from '../core/scene3d/materials';
 import { zipFiles } from './archive';
 import { exportActionLabel, exportFieldSupport, normalizeExportDefaults, planExport } from '../core/export-defaults';
 
@@ -71,6 +73,21 @@ describe('portable web export', () => {
     expect(result.scene.project.assets.image).not.toHaveProperty('storageKey');
     expect(result.scene.project.assets.image).toMatchObject({ format: 'svg' });
     expect(result.scene.assets.image).toMatch(/\.svg$/);
+  });
+
+  it('keeps native 3D geometry while excluding packed Blender sources and explaining rendering limits',async()=>{
+    const PM=fixture();
+    PM.Kernel.layerTypes.register('test',{id:'powermove.3d.object',label:'3D',version:1,params:[],defaults:{},renderer:{kind:'layer3d',role:'object'}});
+    const object=createObject('model',{primitive:'box'});object.material.shader=materialPreset('surface');object.blender={assetId:'source',object:'Cube'};
+    PM.proj.layers.push(PM.mkLayer('extension',{d:{definition:'powermove.3d.object',data:{object}}},PM.proj));
+    PM.proj.assets={source:{id:'source',kind:'model',format:'blend',name:'Model.blend'}};
+    PM.proj.render3d={enabled:true,engine:'eevee'};
+    const result=await buildWebExport(PM);
+    expect(result.scene.assets).toEqual({});
+    expect(result.scene.project.assets).toEqual({});
+    expect(result.scene.warnings.join('\n')).toContain('native 3D shading');
+    expect([...result.files.keys()].some(name=>name.endsWith('.blend'))).toBe(false);
+    expect((result.scene.project.layers[1] as any).d.data.object.source).toMatchObject({primitive:'box'});
   });
 
   it('rejects unsafe zip entry paths', () => {

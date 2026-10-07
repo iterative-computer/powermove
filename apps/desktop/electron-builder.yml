@@ -53,6 +53,20 @@ extraResources:
       - "**/*"
   - from: docs/EXTENSIONS.md
     to: api-pack/EXTENSIONS.md
+  - from: src/shared/blender.ts
+    to: api-pack/blender-schema.ts
+  - from: src/renderer/src/core/scene3d/materials.ts
+    to: api-pack/scene3d-materials.ts
+  - from: src/renderer/src/core/scene3d/modeling.ts
+    to: api-pack/scene3d-modeling.ts
+  - from: docs/SCENE3D.md
+    to: api-pack/SCENE3D.md
+  - from: src/renderer/src/core/scene3d/schema.ts
+    to: api-pack/scene3d-schema.ts
+  - from: src/renderer/src/core/scene3d/layers.ts
+    to: api-pack/scene3d-layers.ts
+  - from: src/renderer/src/core/scene3d/operations.ts
+    to: api-pack/scene3d-operations.ts
   - from: docs/background-testing.md
     to: api-pack/BACKGROUND_TESTING.md
   - from: src/renderer/src/kernel/api.ts

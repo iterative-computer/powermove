@@ -91,7 +91,9 @@ function placePreview(
   }
 }
 
-export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelSpec, dock: DockSpec, element: HTMLElement): void {
+type FloatingDrag = { move(dx: number, dy: number): void; cancel(): void; dockIds: string[] };
+
+export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelSpec, dock: DockSpec, element: HTMLElement, floating?: FloatingDrag): void {
   const ghost = document.createElement('div');
   ghost.className = 'panel-ghost';
   const card = document.createElement('div');
@@ -120,8 +122,9 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
     const next = pending;
     pending = null;
     if (!next) return;
-    const docks = liveTargets(PM);
+    const docks = liveTargets(PM).filter(target => !floating || floating.dockIds.includes(target.id));
     dropTarget = PM.Layout.hitTestDockPlacement(docks, next.clientX, next.clientY);
+    if (floating) ghost.classList.toggle('on', !!dropTarget);
     if (!dropTarget) {
       preview.classList.remove('on');
       previewTarget.key = '';
@@ -154,10 +157,12 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
     document.body.classList.remove('panel-dragging');
     if (!moved) return;
     if (cancelled) {
-      PM.toast('Move cancelled');
+      floating?.cancel();
+      if (!floating) PM.toast('Move cancelled');
       return;
     }
     if (!dropTarget) {
+      if (floating) return;
       PM.toast(`Drop on a panel or dock to move ${PM.PANELS[spec.id]?.title || spec.id}`);
       return;
     }
@@ -167,6 +172,7 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
       return;
     }
     const previous = panelRects();
+    PM.Layout.rememberPanelOpen?.(spec.id);
     PM.WS.mutate((workspace: Workspace) => {
       removePanel(workspace, spec.id);
       insertPanel(workspace, spec, dropTarget!.dockId, index);
@@ -183,11 +189,13 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
         destination.textContent = 'Move panel';
         document.body.classList.add('panel-dragging');
       }
-      ghost.classList.add('on');
+      floating?.move(dx, dy);
+      if (!floating) ghost.classList.add('on');
       queue(next);
     },
     up: (_dx: number, _dy: number, next: PointerEvent) => {
       if (moved) {
+        floating?.move(_dx, _dy);
         pending = next;
         render();
       }

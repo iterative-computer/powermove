@@ -1,6 +1,8 @@
 import { is3DLayer, world3D, local3D, perspectiveAmount, CHANNELS_3D } from './space-3d';
 import type { PMRegistry } from '../registry';
-import { preserveWorldPose, worldPoseValues } from './parenting';
+import { preserveWorldPose, worldPoseValues,worldAim3D,preserveWorldAim,aimProperties3D,aimValues3D } from './parenting';
+import { isModelGroup } from '../../core/scene3d/layers';
+import { modelGroupBounds } from '../../core/scene3d/service';
 
 /** Membership supplies a transform space without changing parent links or layer time. */
 export function groupAncestors(layer: any, layers: any[], byId?: Map<string, any>): any[] {
@@ -38,6 +40,7 @@ export function installLayerGroups(PM: PMRegistry): void {
   PM.bus?.on?.('project', () => { indexes = new WeakMap(); });
   const worldPose = (layer: any, time: number): number[] => is3DLayer(PM,layer) ? world3D(PM,layer,time) : PM.worldMatrix(layer,time);
   PM.groupBounds = (group: any, time: number) => {
+    if(isModelGroup(PM,group))return modelGroupBounds(PM,group,time);
     if (!PM.worldMatrix) return null;
     const m = PM.worldMatrix(group, time), det = m[0]*m[3]-m[1]*m[2];
     if (Math.abs(det) < 1e-10) return null;
@@ -121,11 +124,14 @@ export function installLayerGroups(PM: PMRegistry): void {
     // Keep selected layers in stack order and gather them at the first selected row.
     layers.splice(layers.indexOf(roots[0]), 0, group);
     roots.forEach((layer: any) => { layer.group = group.id; });
+    if(isModelGroup(PM,group))group.threeD=true;
+    PM.touch();
     changed();
     const bounds = PM.groupBounds(group, PM.time);
     if (bounds) {
       group.p['position.x'].v = group.p['anchor.x'].v = (bounds.x0 + bounds.x1) / 2;
       group.p['position.y'].v = group.p['anchor.y'].v = (bounds.y0 + bounds.y1) / 2;
+      if(group.threeD && bounds.z0!==undefined)group.p['position.z'].v=group.p['anchor.z'].v=(bounds.z0+bounds.z1)/2;
     }
     PM.touch?.(); PM.selectLayers(group.id); return group;
   };
@@ -144,13 +150,14 @@ export function installLayerGroups(PM: PMRegistry): void {
       const members = PM.proj.layers.filter((layer: any) => layer.group === group.id);
       // Ungrouping animation bakes editable channel keys at composition frames.
       // Include the playhead so this operation never jumps between frames either.
-      const hasAnimation = (layer: any) => Object.values(layer.p).some((prop: any) => prop.kf.length || prop.expr);
+      const hasAnimation = (layer: any) => [...Object.values(layer.p),...aimProperties3D(layer).map(x=>x.prop)].some((prop: any) => prop.kf.length || prop.expr);
       const changes3D = is3DLayer(PM,group) && local3D(PM,group,PM.time).some((value,index)=>Math.abs(value-[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1][index]!)>1e-8);
       const changesPose = changes3D || PM.localMatrix(group,PM.time).some((value: number,index: number) => Math.abs(value-[1,0,0,1,0,0][index]!)>1e-8) || PM.ev(group,'opacity',PM.time)!==100;
       const animated = hasAnimation(group) || changesPose && PM.proj.layers.some(hasAnimation);
       const times = animated ? [...new Set([PM.time, ...Array.from({length:Math.ceil(PM.proj.dur*PM.proj.fps)+1}, (_,i)=>i/PM.proj.fps)])].sort((a,b)=>a-b) : [];
-      const samples = times.map(time => ({time, values:new Map<string,{world:number[];opacity:number;perspective:number}>(members.filter((layer:any)=>layer.type!=='audio').map((layer:any)=>[layer.id,{world:worldPose(layer,time),perspective:perspectiveAmount(PM,layer,time),opacity:PM.ev(layer,'opacity',time)*PM.ev(group,'opacity',time)/100}]))}));
+      const samples = times.map(time => ({time, values:new Map<string,{world:number[];opacity:number;perspective:number;aim:number[]|null}>(members.filter((layer:any)=>layer.type!=='audio').map((layer:any)=>[layer.id,{world:worldPose(layer,time),aim:worldAim3D(PM,layer,time),perspective:perspectiveAmount(PM,layer,time),opacity:PM.ev(layer,'opacity',time)*PM.ev(group,'opacity',time)/100}]))}));
       const poses = new Map<string,number[]>(members.filter((layer: any) => layer.type !== 'audio').map((layer: any) => [layer.id, worldPose(layer,PM.time)]));
+      const aims = new Map<string,number[]|null>(members.map((layer:any)=>[layer.id,worldAim3D(PM,layer,PM.time)]));
       const perspectives = new Map(members.map((layer: any) => [layer.id, perspectiveAmount(PM,layer,PM.time)]));
       for (const layer of members) {
         layer.group = group.group || null; children.push(layer.id);
@@ -180,6 +187,7 @@ export function installLayerGroups(PM: PMRegistry): void {
         members.forEach(visit);
         const channelsFor=(layer:any)=>['position.x','position.y','scale.x','scale.y','rotation','skew','opacity', ...(poses.get(layer.id)?.length===16 ? ['perspective','position.z','scale.z','rotation.x','rotation.y','orientation.x','orientation.y','orientation.z'] : [])];
         for (const layer of ordered) for (const key of channelsFor(layer)) layer.p[key]={v:layer.p[key].v,kf:[],expr:null};
+        for(const layer of ordered)for(const {prop} of aimProperties3D(layer)){prop.kf=[];prop.expr=null;}
         for (const sample of samples) for (const layer of ordered) {
           const source=sample.values.get(layer.id)!;
           const values: Record<string,number>={...worldPoseValues(PM,layer,source.world,sample.time,undefined,true),opacity:source.opacity,perspective:source.perspective};
@@ -188,9 +196,13 @@ export function installLayerGroups(PM: PMRegistry): void {
             if ((key==='rotation' || key.startsWith('rotation.')) && prop.kf.length) value += Math.round((prop.kf[prop.kf.length-1].v-value)/360)*360;
             prop.kf.push(PM.KF(sample.time-layer.from,value,'linear')); prop.v=value;
           }
+          if(source.aim){
+            const aim=aimValues3D(PM,layer,source.aim,sample.time);
+            for(const {key,prop} of aimProperties3D(layer)){prop.kf.push(PM.KF(sample.time-layer.from,aim[key],'linear'));prop.v=aim[key];}
+          }
           PM.touch();
         }
-      } else rebase(members, poses);
+      } else {rebase(members, poses);for(const layer of members)preserveWorldAim(PM,layer,aims.get(layer.id) || null,PM.time);}
       PM.proj.layers = PM.proj.layers.filter((layer: any) => layer.id !== group.id);
     }
     changed(); PM.selectLayers(children.filter(id => PM.L(id))); return { ids: children };
@@ -205,8 +217,10 @@ export function installLayerGroups(PM: PMRegistry): void {
     const roots = selected.filter((layer: any) => !ancestors(layer, PM.proj.layers).some(item => ids.includes(item.id)));
     const poses = new Map<string,number[]>(roots.filter((layer: any) => layer.type !== 'audio').map((layer: any) => [layer.id, worldPose(layer,PM.time)]));
     const perspectives = new Map(roots.map((layer: any) => [layer.id, perspectiveAmount(PM,layer,PM.time)]));
+    const aims = new Map<string,number[]|null>(roots.map((layer:any)=>[layer.id,worldAim3D(PM,layer,PM.time)]));
     roots.forEach((layer: any) => { layer.group = group?.id || null; });
     PM.touch(); rebase(roots, poses);
+    for(const layer of roots)preserveWorldAim(PM,layer,aims.get(layer.id) || null,PM.time);
     for (const layer of roots) if (layer.threeD && !ancestors(layer,PM.proj.layers).some(group => group.threeD)) layer.p.perspective = PM.P(perspectives.get(layer.id));
     changed(); return { ids: selected.map((layer: any) => layer.id), group: target };
   };

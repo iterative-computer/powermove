@@ -156,18 +156,19 @@
     display: flex; align-items: center; gap: 6px;
     max-width: 200px; height: 28px; padding: 0 8px 0 7px; box-sizing: border-box;
     border: 0; border-radius: var(--r-sm);
-    background: var(--glass-fill-hi); box-shadow: var(--glass-edge-hi);
+    background: transparent; box-shadow: none;
     color: var(--tx); font: inherit; font-size: var(--fs-sm); text-align: start; cursor: default; touch-action: none;
     transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
   }
-  /* Idle: one icon on a filled square, the size of the titlebar's icon buttons. */
-  .agent-launcher.compact { width: 28px; padding: 0; justify-content: center; color: var(--tx-2); }
+  /* Idle: one icon, the size of the titlebar's icon buttons. */
+  .agent-launcher.compact { width: 28px; padding: 0; justify-content: center; }
   .agent-launcher:hover, .agent-launcher.on { background: var(--ink-2); }
   .agent-launcher:active { transform: scale(.96); }
   .agent-launcher:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   :global(.agent-launcher.drag-src) { opacity: .5; }
 
   .agent-launcher-mark { display: grid; place-items: center; flex: none; width: 16px; height: 16px; color: var(--accent); }
+  .agent-launcher.compact:not(.on) .agent-launcher-mark { color: var(--tx-2); }
   .agent-launcher-mark :global(.pm-icon) { width: 14px; height: 14px; fill: currentColor; }
   .agent-launcher-mark svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
   .agent-launcher-spinner circle { opacity: .22; }

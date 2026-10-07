@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import type { ChatGPTAccountStatus } from '../../../shared/ipc';
   import type { PanelProps } from './registerSveltePanel';
+  import Icon from './Icon.svelte';
   import Composer from './agent/Composer.svelte';
   import ConnectionGate from './agent/ConnectionGate.svelte';
   import Conversation from './agent/Conversation.svelte';
@@ -27,6 +28,7 @@
 
   /* The transcript owns its vertical scroll. Only edits awaiting review belong
      in the footer; autonomous replies stay in the thread. */
+  let canPin = $state(false);
   let scroller = $state<HTMLDivElement>();
   let showJump = $state(false);
   let userScrolled = false;
@@ -56,13 +58,17 @@
   const showSetup = $derived(showConnectionGate && agentState.phase === 'idle' && !agentState.conversation.length && !agentState.activity && !agentState.composerDraft);
 
   onMount(() => {
+    const syncWorkspace = () => { canPin = !!PM.WS?.current && !PM.ProjectsScreen?.isOpen; };
+    syncWorkspace();
+    const offLayout = PM.bus?.on?.('layout:applied', syncWorkspace);
+    const offProjects = PM.bus?.on?.('projects:screen', syncWorkspace);
     // Panels mount before app.ts chooses the boot project. Synchronize on the
     // first frame so saved threads are present before the composer is usable.
     const frame = window.requestAnimationFrame(() => PM.AgentUI?.update?.({ flush: true }));
     const endSelection = () => { selectingText = false; };
     window.addEventListener('pointerup', endSelection);
     window.addEventListener('pointercancel', endSelection);
-    return () => { window.cancelAnimationFrame(frame); window.removeEventListener('pointerup', endSelection); window.removeEventListener('pointercancel', endSelection); };
+    return () => { offLayout?.(); offProjects?.(); window.cancelAnimationFrame(frame); window.removeEventListener('pointerup', endSelection); window.removeEventListener('pointercancel', endSelection); };
   });
 
   function unavailable(error: unknown): ChatGPTAccountStatus {
@@ -181,7 +187,17 @@
 </script>
 
 <div class="agent-panel-body agent-shell" data-svelte-panel={panelId} data-agent-panel data-agent-phase={agentState.phase}>
-  <ThreadPicker {PM} />
+  <div class="agent-panel-toolbar">
+    <button class="agent-popover-control agent-popover-grip" type="button" aria-label="Move agent panel" title="Drag to move or pin to workspace"
+      onpointerdown={(event) => PM.AgentShell?.dragFloating?.(event)}>
+      <Icon {PM} name="grip" />
+    </button>
+    <ThreadPicker {PM} />
+    <button class="agent-popover-control" type="button" aria-label="Pin agent to workspace" title="Pin to workspace" disabled={!canPin}
+      onclick={() => PM.AgentShell?.pin?.()}>
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 2 6 0-1 4 2 3H4l2-3-1-4ZM8 9v5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
+    </button>
+  </div>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex (The scrollable transcript needs keyboard focus for text selection and scrolling.) -->
   <div
     class="agent-scroll"
@@ -228,6 +244,8 @@
 </div>
 
 <style>
+  .agent-panel-toolbar { flex: none; min-width: 0; }
+  .agent-popover-control { display: none; }
   .agent-setup-scroll { padding: 10px 16px 16px; mask-image: none; }
   /* Docked, the set-height variable is updated by explicit splitter resizing;
      the popover sizes the panel itself (agent-shell.css). */

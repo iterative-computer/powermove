@@ -361,7 +361,7 @@ describe('installKernel', () => {
     await expect(confirmed).resolves.toBe(true);
     expect(api.ui.icon('play')).toContain('data-icon="play"');
     expect(Object.keys(api.ui.controls)).toEqual([
-      'NumField', 'ColorField', 'FillField', 'FontField', 'SelectField',
+      'Segmented', 'NumField', 'ColorField', 'FillField', 'RampField', 'PointField', 'SliderField', 'Disclosure', 'FontField', 'SelectField',
       'TextField', 'ToggleField', 'Row', 'Section', 'binding'
     ]);
     expect(api.ui.controls.binding).toEqual(expect.objectContaining({

@@ -400,6 +400,7 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
       steer: (req) => link.invoke(IPC.codexSteer, req),
       answer: (req) => link.invoke(IPC.codexAnswer, req),
       cancel: (id, preserveChanges = false) => link.invoke(IPC.codexCancel, { id, preserveChanges }),
+      cancelTask: (requestId, taskId) => link.invoke(IPC.codexCancelTask, { requestId, taskId }),
       fixPrompt: (req) => link.invoke(IPC.codexFixPrompt, req),
       rebasePrompt: (req) => link.invoke(IPC.codexRebasePrompt, req),
       restoreChangeSet: (req) => link.invoke(IPC.codexRestoreChangeSet, req),
@@ -429,7 +430,9 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
     },
     artifacts: {
       read: (ref) => link.invoke(IPC.artifactRead, ref),
-      reveal: (ref) => link.invoke(IPC.artifactReveal, ref)
+      reveal: (ref) => link.invoke(IPC.artifactReveal, ref),
+      forget: (projectId) => link.invoke(IPC.artifactForget, projectId),
+      sweep: (liveProjectIds) => link.invoke(IPC.artifactSweep, liveProjectIds)
     },
 
     captureWindow: () => Promise.resolve(null),

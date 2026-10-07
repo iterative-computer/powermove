@@ -49,6 +49,7 @@ import type {
   SelectionAPI,
   ServicesAPI,
   Space3DAPI,
+  Scene3DAPI,
   StatusAPI,
   StatusItem,
   StorageAPI,
@@ -132,6 +133,7 @@ export interface HostDeps {
   util?: UtilAPI;
   ease?: EaseAPI;
   space3d?: Space3DAPI;
+  scene3d?: Scene3DAPI;
   assets: AssetsAPI;
   storage(id: string): StorageAPI;
   extensions: Omit<ExtensionsAPI, 'fork' | 'setUp'> & Partial<Pick<ExtensionsAPI, 'fork' | 'setUp'>>;
@@ -587,6 +589,7 @@ export function createExtensionAPI(
     util: deps.util as UtilAPI,
     ease: deps.ease as EaseAPI,
     space3d: deps.space3d as Space3DAPI,
+    scene3d: deps.scene3d as Scene3DAPI,
     services,
     storage: deps.storage(id),
     events,

@@ -390,6 +390,8 @@ Transitions, motion and `prefersReducedMotion` behave the same in both.
 
 ## The API (apiVersion 1–3)
 
+For built-in editable 3D model, light and camera layers, use `edit_3d`/`get_3d_scene` and `api.scene3d`; see `SCENE3D.md` for geometry, materials, lighting and animation examples.
+
 Full types: `api.ts` (next to this file in the agent API pack). Summary:
 
 ### Sandbox API (apiVersion 3)
@@ -649,6 +651,43 @@ modified panel must look like a built-in Powermove panel: same layout, controls,
 spacing, type and states. A generated panel that looks hand-made is a defect,
 just like a build error. An explicit user style request overrides this default
 only for the surface it names.
+
+**Visual editing first.** A panel is an editor, not a list of every parameter.
+Use a gradient ramp for colors and midpoint, a point pad for X/Y, a dial for
+angles, sliders for bounded values, and visual curves for easing. Keep roughly
+five primary controls visible. Put secondary settings under a quiet **More**
+disclosure; indicate changed or animated values even while it is closed. Use
+`advanced: true` on secondary effect/layer params or generated panel controls;
+`advanced: false` explicitly keeps a control visible. Older definitions receive
+an automatic compact layout. All underlying keys, commands and animation paths
+remain unchanged; preserve independent keyframing and precise number entry.
+
+Effects and extension layers accept optional visual hints:
+```ts
+ui: [
+  { kind: 'ramp', start: 'startColor', end: 'endColor', midpoint: 'midpoint', mode: 'radial' },
+  { kind: 'point', x: 'centerX', y: 'centerY', label: 'Center', advanced: true }
+]
+```
+Ramp endpoints must reference color params, midpoint a bounded number, and mode
+an existing boolean toggle (`false` = Linear, `true` = Radial). They do not add
+movable color-stop positions to a shader that has no position parameters. Point
+widgets bind two bounded numeric params. Invalid or overlapping hints fall back
+to the ordinary controls without losing parameters. Start/end color pairs and
+numeric X/Y pairs are recognized automatically in older definitions. A param's
+optional `options: [{v: false, label: 'Linear'}, {v: true, label: 'Radial'}]`
+(or numeric `v` values) renders a select without changing its stored type.
+
+Trusted panels can reuse `api.ui.controls.RampField`, `PointField`, `SliderField`
+and `Disclosure`. All visual fields accept `api`, live `get`, and `edit`, using
+the same undoable binding as `NumField`. SliderField accepts `min`, `max`, `step`,
+`unit`, and `angle: true` for a dial. PointField reads `[x,y]`, uses a composite
+`edit` writing both keys in one transaction, and separate `xEdit`/`yEdit` bindings
+for exact numbers. RampField reads `{id,color,position}[]`; omit `edit` for fixed
+endpoints and use `onSelect(id)` to open the existing color editor. Optional
+`midpoint()`/`midpointEdit` edit the midpoint. FillField already uses draggable
+stops in its shared color picker. Disclosure accepts `label`, `count`, `changed`,
+`remember` and a children snippet. Keep controls connected to real source values.
 
 **Reuse before you build.** Open the built-in panel closest to the job with
 `get_panel_state`/`capture_panel` and copy its structure. Let

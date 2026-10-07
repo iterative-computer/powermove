@@ -130,6 +130,12 @@ const bridge: PowermoveBridge = {
   confirm: (request) => ipcRenderer.invoke(IPC.dialogConfirm, request) as Promise<boolean>,
   clipboardWriteText: (text) => ipcRenderer.invoke(IPC.clipboardWriteText, text) as Promise<void>,
 
+  blender: {
+    status: () => ipcRenderer.invoke(IPC.blenderStatus),
+    choose: () => ipcRenderer.invoke(IPC.blenderChoose),
+    run: job => ipcRenderer.invoke(IPC.blenderRun, job),
+    cancel: () => ipcRenderer.invoke(IPC.blenderCancel),
+  },
   render: {
     start: options => ipcRenderer.invoke(IPC.renderStart,options),
     write: (token,data,audio) => ipcRenderer.invoke(IPC.renderWrite,{token,data,audio}),
@@ -227,6 +233,7 @@ const bridge: PowermoveBridge = {
     steer: (req) => ipcRenderer.invoke(IPC.codexSteer, req),
     answer: (req) => ipcRenderer.invoke(IPC.codexAnswer, req),
     cancel: (id, preserveChanges = false) => ipcRenderer.invoke(IPC.codexCancel, { id, preserveChanges }) as Promise<void>,
+    cancelTask: (requestId, taskId) => ipcRenderer.invoke(IPC.codexCancelTask, { requestId, taskId }),
     fixPrompt: (req) => ipcRenderer.invoke(IPC.codexFixPrompt, req) as Promise<string>,
     rebasePrompt: (req) => ipcRenderer.invoke(IPC.codexRebasePrompt, req) as Promise<string>,
     restoreChangeSet: (req) => ipcRenderer.invoke(IPC.codexRestoreChangeSet, req),
@@ -280,7 +287,9 @@ const bridge: PowermoveBridge = {
 
   artifacts: {
     read: (ref) => ipcRenderer.invoke(IPC.artifactRead, ref) as Promise<ArtifactFile>,
-    reveal: (ref) => ipcRenderer.invoke(IPC.artifactReveal, ref) as Promise<void>
+    reveal: (ref) => ipcRenderer.invoke(IPC.artifactReveal, ref) as Promise<void>,
+    forget: (projectId) => ipcRenderer.invoke(IPC.artifactForget, projectId) as Promise<void>,
+    sweep: (liveProjectIds) => ipcRenderer.invoke(IPC.artifactSweep, liveProjectIds) as Promise<string[]>
   },
 
   captureWindow: () => ipcRenderer.invoke(IPC.captureWindow) as Promise<CaptureResult>,

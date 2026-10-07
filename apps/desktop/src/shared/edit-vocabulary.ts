@@ -1,6 +1,7 @@
 export const EDIT_COMMAND_TYPES = [
   'set_property',
   'replace_keyframes',
+  'offset_property',
   'set_easing',
   'set_expression',
   'set_content',
@@ -33,6 +34,7 @@ export const EDIT_COMMAND_TYPES = [
 export const AGENT_COMMAND_TYPES = [
   'set_property',
   'replace_keyframes',
+  'offset_property',
   'set_easing',
   'set_expression',
   'set_content',

@@ -4,6 +4,7 @@ import { IPC } from '../shared/ipc';
 import { WEB } from '../shared/wire';
 import { RunHub, RunOwner, DISPLAY_TOOLS } from './runs';
 import type { RemoteClient } from './clients';
+import type { AgentTask } from '../shared/agent-orchestration';
 
 function fakeClient(id: number): RemoteClient & { sent: unknown[][]; destroy(): void } {
   let destroyed = false;
@@ -27,6 +28,22 @@ function harness(engine: RemoteClient | null, tabs: RemoteClient[]) {
 const request = { id: 'run-1', projectId: 'p1', mode: 'autonomous', prompt: 'do it' };
 
 describe('RunOwner', () => {
+  it('routes active child question controls to the root owner without making a separate user run', () => {
+    const tab = fakeClient(1);
+    const { hub } = harness(null, [tab]);
+    const owner = hub.begin(request, tab);
+    const task: AgentTask = {
+      taskId: 'task', parentThreadId: 'root-thread', childThreadId: 'child-thread', childRunId: 'child-run', parentTaskId: null,
+      requestId: request.id, title: 'Review', providerInstanceId: 'claude', model: 'sonnet', status: 'running', workState: 'working',
+      hasPendingChildRuns: false, summary: null, progress: '', startedAt: 1, waitTimedOut: false
+    };
+    owner.send(IPC.codexEvent, { id: request.id, kind: 'trace', step: { kind: 'task', task } });
+    expect(hub.controlOwner('child-run')).toBe(owner);
+    expect(hub.owner('child-run')).toBeNull();
+    expect(hub.runsFor('p1')).toHaveLength(1);
+    owner.send(IPC.codexEvent, { id: request.id, kind: 'trace', step: { kind: 'task', task: { ...task, status: 'completed', workState: 'result_available', summary: 'Done' } } });
+    expect(hub.controlOwner('child-run')).toBeNull();
+  });
   it('replays only what a resuming tab missed, and everything to a fresh one', () => {
     const tab = fakeClient(1);
     const { hub } = harness(null, [tab]);
@@ -98,6 +115,21 @@ describe('RunOwner', () => {
     onProject.destroy();
     built = make(engine, { p1: [onProject] });
     expect(built.hub.targetFor('__media_source', built.owner)).toBe(engine);
+  });
+
+  it('routes conversation controls to the real tab rather than the document engine', () => {
+    const engine = fakeClient(9); engine.kind = 'engine';
+    const tab = fakeClient(1);
+    const other = fakeClient(2);
+    const { hub, responded } = harness(engine, [other, tab]);
+    const owner = hub.begin(request, tab);
+    owner.send(IPC.agentToolRequest, { runId: request.id, callId: 'launch', tool: '__agent_thread_control', arguments: { tool: 'thread_launch' }, baseRevision: 0 });
+    expect(engine.sent).toEqual([]);
+    expect(other.sent).toEqual([]);
+    expect(tab.sent).toMatchObject([[IPC.agentToolRequest, { tool: '__agent_thread_control' }]]);
+    tab.destroy(); other.destroy();
+    owner.send(IPC.agentToolRequest, { runId: request.id, callId: 'read', tool: '__agent_thread_control', arguments: { tool: 'thread_read' }, baseRevision: 0 });
+    expect(responded).toMatchObject([{ callId: 'read', ok: false, error: expect.stringContaining('needs an open Powermove tab') }]);
   });
 
   it('records results and prunes finished runs after the retention window', () => {

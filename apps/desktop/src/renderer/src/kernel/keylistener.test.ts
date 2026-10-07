@@ -28,6 +28,17 @@ const press = (init: KeyboardEventInit & { key: string }, target: EventTarget = 
 };
 
 describe('installKeyListener', () => {
+  it('keeps the browser default for a contextual binding that declines, and cancels it when handled', () => {
+    const kernel = createKernel();
+    let applies = false;
+    const runs: string[] = [];
+    listeners.push(kernel.installKeyListener((command) => { runs.push(command); return command === '3d.key' && !applies ? false : undefined; }));
+    kernel.bind('viewer', { key: 'shift+tab', command: '3d.key', priority: 50, contextual: true });
+    expect(press({ key: 'Tab', shiftKey: true })).toBe(false);
+    applies = true;
+    expect(press({ key: 'Tab', shiftKey: true })).toBe(true);
+    expect(runs).toEqual(['3d.key', '3d.key']);
+  });
   it('dispatches a physical sandbox-frame key through the host chord matcher once', () => {
     const kernel = createKernel();
     const { runs } = install(kernel);

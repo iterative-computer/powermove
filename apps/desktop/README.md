@@ -51,6 +51,45 @@ its separate opaque-origin sandbox with no network or native bridge.
 
 ## Agent tools
 
+Agents can delegate tasks to Codex, Claude, or a connected API/local model,
+including models from another provider. Ask naturally, for example: “Have
+Claude review the animation while Codex builds it.” Connect each provider in
+Settings first. Tasks appear inside the conversation with their model, progress,
+result, and a Stop control. Stopping the parent also stops its child tasks.
+
+The app-owned `orchestrator_capabilities`, `delegate_task`, `task_status`, and
+`task_cancel` tools use the same model catalog as the composer. Delegation can
+run asynchronously or wait up to 90 seconds; a wait timeout keeps the task alive.
+Async results automatically resume the parent after its turn. Children inherit
+the project, planning mode, and access, receive the supplied brief rather than
+the parent's chat history, and have isolated provider sessions and workspaces.
+Nested work remains active until its descendants finish. Task IDs, retry keys,
+and results are saved locally; unfinished tasks become interrupted after restart.
+Each run permits 32 tasks, eight active children, and four levels of nesting.
+Use a new delegation call and retry key for each new review round.
+
+Use `task_send` to send follow-up instructions to an active subagent or change
+its provider, model, or supported reasoning level. Direction uses native live
+steering when available; otherwise the current turn is interrupted and resumed
+in the same task and workspace. Live project edits stay in the parent's Undo
+transaction. Completed task results stay immutable.
+
+Agents can also start ordinary conversations with `thread_launch`, inspect them
+with `thread_list` and `thread_read`, send direction/settings with `thread_send`,
+and stop their current runs with `thread_cancel`. For example: “Start a separate
+Claude thread to review the timing, watch it, and use its feedback here.” These
+threads appear in the normal picker, keep their own conversation, model choice,
+isolated workspace and Undo transaction, and keep working when the parent stops.
+New threads inherit planning/project access; a one-run Computer grant is not
+copied. Thread controls are scoped to the current project and require its tab.
+
+`thread_watch` binds to one run and automatically resumes the watcher with its
+result after the current turn. Waiting can time out without cancelling the work;
+`thread_unwatch` removes monitoring without stopping that thread. Reading a
+terminal run acknowledges its delivery. A later turn needs another watch, watch
+cycles are rejected, and active watches end when the parent stops or Powermove
+closes. Launch/message retry keys are stored with the thread history.
+
 Codex and Claude agents can use all enabled user-scoped MCP servers configured
 for that provider, alongside Powermove's built-in tools. Registrations are read
 again on each message; there is no Powermove-specific external-tool allowlist.

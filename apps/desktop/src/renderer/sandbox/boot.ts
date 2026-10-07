@@ -21,6 +21,7 @@ import { validMatteSource, MATTE_MODES } from '../src/legacy/core/matte';
 import { expressionDiagnostic, EXPRESSION_NAMES } from '../src/legacy/core/expression';
 import { axisContentKey, axisPath, isAxisTag } from '../src/typography/font-catalog';
 import { CHANNELS_3D, projectPoint, inversePlane } from '../src/legacy/core/space-3d';
+import { TEXT_ANIMATOR_PROPERTIES, animatorMode, countTextUnits, staggerLength, staggerWindow } from '../src/legacy/core/text-animation';
 import { propertyShortcuts } from '../src/kernel/property-shortcuts';
 import { svelteRuntime } from '../src/kernel/svelte-runtime';
 import { chordMatches, chordOfEvent, isFieldTarget } from '../src/kernel/keychord';
@@ -41,7 +42,7 @@ let helperReport: SandboxReporter | null = null;
 
 /** Fill the runtime table the compiled bundle resolves `svelte`/`powermove` against. */
 export function installSandboxRuntime(): void {
-  const pure: Record<string, unknown> = { isProperty, canAnimateContent, contentLabel, structuredProperties, pathTargets, validMatteSource, MATTE_MODES, expressionDiagnostic, EXPRESSION_NAMES, axisContentKey, axisPath, isAxisTag, CHANNELS_3D, projectPoint, inversePlane, propertyShortcuts };
+  const pure: Record<string, unknown> = { isProperty, canAnimateContent, contentLabel, structuredProperties, pathTargets, validMatteSource, MATTE_MODES, expressionDiagnostic, EXPRESSION_NAMES, axisContentKey, axisPath, isAxisTag, CHANNELS_3D, projectPoint, inversePlane, propertyShortcuts, TEXT_ANIMATOR_PROPERTIES, animatorMode, countTextUnits, staggerLength, staggerWindow };
   const helpers = Object.fromEntries(EDITOR_HELPER_EXPORTS.map(name => [name, name in pure ? pure[name] : (..._args: unknown[]) => {
     helperReport?.('permission', `powermove.${name}`);
     const error = new Error(`${name} requires full access. Use project.apply or commands in a sandboxed extension.`);

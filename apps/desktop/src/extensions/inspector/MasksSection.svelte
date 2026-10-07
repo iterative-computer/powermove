@@ -6,10 +6,11 @@
   import { isProperty } from 'powermove';
   import { evaluatedValue } from './multi-edit';
   import Icon from './Icon.svelte';
+  import SectionHeading from './SectionHeading.svelte';
   import { inspectorRefresh } from './refresh.svelte.js';
 
   const { api, doc, transport, mixed, edit: inspectorEdit } = inspectorContext();
-  const { Row, Section, SelectField, ToggleField } = api.ui.controls;
+  const { Row, SelectField, ToggleField } = api.ui.controls;
 
   let { layer }: { layer: any } = $props();
 
@@ -66,12 +67,10 @@
 
 </script>
 
-<Section {api} title="Masks" />
-{#if masks.length === 0}
-  <button type="button" class="chip wide" aria-label="Add mask"  onclick={addMask}>
-    <Icon name="plus" />Add mask
-  </button>
-{:else}
+<SectionHeading title="Masks" empty={!masks.length}>
+  <button type="button" class="section-action" aria-label="Add mask" title="Add mask" onclick={addMask}><Icon name="plus" /></button>
+</SectionHeading>
+{#if masks.length}
   {#each masks as mask, index (mask.id ?? index)}
     {@const maskId = mask.id ?? index}
     <div class="row mask-head" style="margin-top:4px;background:var(--ink-1)" data-mask-id={maskId}>
@@ -126,7 +125,4 @@
       {/each}
     </div>
   {/each}
-  <button type="button" class="chip wide" aria-label="Add mask" onclick={addMask}>
-    <Icon name="plus" />Add mask
-  </button>
 {/if}

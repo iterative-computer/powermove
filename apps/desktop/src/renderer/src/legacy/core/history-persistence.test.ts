@@ -61,5 +61,5 @@ it('embeds media that exists only in an undo step', async () => {
   const saved = unpackProjectFile(await packProjectFile({ proj: PM.proj, history: PM.hist.export() }, { get, put }));
   expect(get).toHaveBeenCalledOnce();
   await restoreProjectFileMedia(saved, { get, put });
-  expect(put).toHaveBeenCalledWith('image', expect.any(Blob), { id: 'image', name: 'image.png' });
+  expect(put).toHaveBeenCalledWith('image', expect.any(Blob), { id: 'image', name: 'image.png' }, undefined);
 });

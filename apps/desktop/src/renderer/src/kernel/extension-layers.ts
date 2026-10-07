@@ -68,7 +68,11 @@ export function validateExtensionLayerDefinition(definition: ExtensionLayerDefin
   const seen = new Set<string>();
   for (const param of definition.params) validateParam(param, seen);
   if (definition.defaults != null) validateJson(definition.defaults, 'defaults', new WeakSet(), { nodes: 0 });
-  if (definition.renderer?.kind === 'mesh') {
+  if (definition.renderer?.kind === 'layer3d') {
+    if (!['object','light','camera'].includes(definition.renderer.role)) throw new Error('Invalid 3D layer role');
+  } else if (definition.renderer?.kind === 'scene3d') {
+    // Scene graphs are validated by the kernel's typed edit boundary.
+  } else if (definition.renderer?.kind === 'mesh') {
     if (!PARAM.test(definition.renderer.assetField)) {
       throw new Error(`extension layer "${definition.id}" mesh renderer needs a safe assetField`);
     }

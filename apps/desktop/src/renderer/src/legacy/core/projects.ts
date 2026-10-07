@@ -1,5 +1,6 @@
 /* Ported from js/core/projects.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { bridge as hostBridge } from '../../kernel/bridge';
 
 export function install(PM: PMRegistry): void {
 const R: any = {
@@ -237,6 +238,9 @@ R.destroy = (id: any) => {
     try { PM.store.del(prefix + id); } catch (e) { }
   }
   try { PM.store.del(R.JOURNAL + id); } catch (e) { }
+  /* The agent's workspace and artifacts live exactly as long as the project.
+     Imported media was copied into the project, so nothing it uses is lost. */
+  void hostBridge()?.artifacts?.forget?.(id)?.catch?.((error: any) => console.warn('Agent workspace cleanup failed', error));
 };
 
 /* ── open windows ──────────────────────────────────────── */

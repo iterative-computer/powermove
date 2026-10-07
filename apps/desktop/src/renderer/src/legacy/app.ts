@@ -400,6 +400,15 @@ PM.hydrateProject = hydrate;
   PM.Projects.list().forEach((m: any) => { if (!PM.Projects.get(m.id)) PM.Projects.remove(m.id); });
 })();
 
+/* Agent workspaces for projects that no longer exist (deleted before cleanup
+   followed the project, or interrupted by a crash) are removed once idle. */
+window.setTimeout(() => {
+  const live = [...PM.Projects.list(), ...PM.Projects.trashList()].map((m: any) => m?.id);
+  if (PM.proj?.id) live.push(PM.proj.id);
+  void hostBridge()?.artifacts?.sweep?.([...new Set(live.filter((id: any) => typeof id === 'string'))])
+    ?.catch?.((error: any) => console.warn('Agent workspace sweep failed', error));
+}, 30_000);
+
 /* Exposed for the remote host sync: a document that arrives with assets this
    tab has not loaded needs the same restore pass a project open gets. */
 PM.restoreProjectAssets = (project: any, warn: any = true) => restoreProjectAssets(project, warn);
@@ -1291,6 +1300,7 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
         await PM.Captions.importFile(f, { at: placement ? placement.at : 0 });
         continue;
       }
+      if(/\.blend$/i.test(f.name)){if(replaceAssetId!=null)throw new Error('Import Blender files as model groups; use OBJ or GLB to replace a single model asset');const result=await PM.Kernel.api('media-import').scene3d.model({operation:'import_blend',file:f,name:f.name.replace(/\.blend$/i,'')});if(!result.ok)throw new Error(result.message);assertCurrent();continue;}
       if (/\.pmv$/i.test(f.name)) {
         if (replaceAssetId != null) throw new Error('Choose a media file to replace this media');
         await openProjectFile(f);

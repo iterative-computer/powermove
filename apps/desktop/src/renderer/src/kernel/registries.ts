@@ -464,7 +464,7 @@ export function createKernel(): Kernel {
              through and leaves the browser default intact when every
              candidate is suppressed or declines. Ordinary keydowns retain
              the historical prevent-before-run behavior. */
-          if (!event.repeat && !binding.inFields) event.preventDefault();
+          if (!event.repeat && !binding.inFields && !binding.contextual) event.preventDefault();
           let result: unknown;
           try {
             result = runCommand(binding.command, binding.args ?? []);
@@ -473,7 +473,7 @@ export function createKernel(): Kernel {
             return;
           }
           if (result === false) continue;
-          if (binding.inFields || event.repeat) event.preventDefault();
+          if (binding.inFields || event.repeat || binding.contextual) event.preventDefault();
           return;
         }
       };

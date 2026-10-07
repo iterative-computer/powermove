@@ -34,6 +34,7 @@ import {
   clearSession,
   discardExtensionStage,
   preserveCancelledRun,
+  removeEmptyRunDirectory,
   prepareAgentWorkspace,
   readSession,
   sessionPathFor,
@@ -71,6 +72,8 @@ export interface CodexRunOptions {
   spawnProcess?: SpawnLike;
   consumeConsentToken?: (token: string) => boolean;
   nativeTools?: NativeMcpServerConfig;
+  workspaceId?: string;
+  additionalInstructions?: string;
   externalMcpServers?: UserMcpServers;
 }
 
@@ -420,7 +423,7 @@ export class CodexRunner {
         options.userData,
         authority,
         agentResultSchema(),
-        { extensionsDir: options.extensionsDir, apiPackFiles }
+        { extensionsDir: options.extensionsDir, apiPackFiles, workspaceId: options.workspaceId }
       );
       state.layout = layout;
       if (this.cancelled.has(req.id)) {
@@ -443,7 +446,7 @@ export class CodexRunner {
             access: authority,
             context: req.context,
             extensionsDir: layout.extensionsDir
-          }),
+          }) + (options.additionalInstructions ? `\n\n${options.additionalInstructions}` : ''),
           prompt,
           imagePaths: layout.imagePaths,
           model: req.model,
@@ -545,6 +548,7 @@ export class CodexRunner {
       this.active.delete(req.id);
       this.cancelled.delete(req.id);
       release();
+      if (state.layout) await removeEmptyRunDirectory(state.layout);
       if (editorDirectory) await rm(editorDirectory, { recursive: true, force: true });
     }
   }

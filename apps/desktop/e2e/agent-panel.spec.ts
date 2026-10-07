@@ -59,6 +59,78 @@ test.describe('@agent-panel Svelte agent panel drives a real editor-mode run', (
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
+  test('the floating grip moves, cancels and docks the same conversation', async ({ session }) => {
+    await session.openEditor(); await session.openAgent();
+    const { page } = session;
+    const panel = page.locator('#agent-popover');
+    const grip = page.getByRole('button', { name: 'Move agent panel', exact: true });
+    await expect(grip).toBeVisible();
+    for (const theme of ['dark', 'light']) {
+      await page.evaluate(theme => (window as any).PM.theme.apply(theme), theme);
+      await page.screenshot({ path: `/tmp/powermove-agent-grip-${theme}.png` });
+    }
+    await page.evaluate(() => (window as any).PM.theme.apply('dark'));
+    await page.evaluate(() => { (window as any).__originalAgent = document.getElementById('panel-agent'); });
+    const start = (await panel.boundingBox())!;
+    const handle = (await grip.boundingBox())!;
+    const center = (await page.locator('#dock-center').boundingBox())!;
+    const x = center.x + center.width / 2;
+    const y = center.y + 90;
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(x, y, { steps: 12 });
+    await page.mouse.up();
+    await expect(panel).toBeVisible();
+    const moved = (await panel.boundingBox())!;
+    expect(Math.abs(moved.x - start.x)).toBeGreaterThan(30);
+    // Layout passes and reopening keep the user's floating placement.
+    await page.evaluate(() => (window as any).PM.bus.emit('layout:applied'));
+    await page.keyboard.press('Escape'); await session.openAgent();
+    expect((await panel.boundingBox())!.x).toBeCloseTo(moved.x, 0);
+    const next = (await grip.boundingBox())!;
+    await page.mouse.move(next.x + next.width / 2, next.y + next.height / 2);
+    await page.mouse.down(); await page.mouse.move(x + 80, y + 70, { steps: 8 });
+    await page.keyboard.press('Escape'); await page.mouse.up();
+    await expect(panel).toBeVisible();
+    expect((await panel.boundingBox())!.x).toBeCloseTo(moved.x, 0);
+    const dock = (await page.locator('#dock-right').boundingBox())!;
+    const last = (await grip.boundingBox())!;
+    await page.mouse.move(last.x + last.width / 2, last.y + last.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(dock.x + dock.width / 2, dock.y + dock.height - 40, { steps: 16 });
+    await expect(page.locator('.panel-drop-preview')).toHaveClass(/on/);
+    await page.mouse.up();
+    await expect(page.locator('#dock-right #panel-agent')).toBeVisible();
+    await expect(panel).toBeHidden();
+    expect(await page.evaluate(() => (window as any).__originalAgent === document.getElementById('panel-agent'))).toBe(true);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
+  test('the pin button keeps the conversation in the workspace', async ({ session }) => {
+    await session.openEditor(); await session.openAgent();
+    let { page } = session;
+    await page.getByRole('button', { name: 'Pin agent to workspace', exact: true }).click();
+    await expect(page.locator('#dock-right #panel-agent')).toBeVisible();
+    await expect(page.locator('#agent-popover')).toBeHidden();
+    await expect(page.locator('#agent-launcher')).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).PM.store.get('panelVisibility').agent)).toBe(true);
+    await session.relaunch(); await session.openEditor();
+    page = session.page;
+    await expect(page.locator('#body > .dock #panel-agent')).toBeVisible();
+    await page.evaluate(() => (window as any).PM.newProject());
+    await expect(page.locator('#body > .dock #panel-agent')).toBeVisible();
+    await page.evaluate(() => (window as any).PM.WS.activate('design', true));
+    await expect(page.locator('#body > .dock #panel-agent')).toBeVisible();
+    await page.evaluate(() => { const PM = (window as any).PM; PM.WS.mutate((ws: any) => PM.Layout.closePanel(ws, 'agent')); });
+    await session.openAgent();
+    await expect(page.getByRole('button', { name: 'Move agent panel', exact: true })).toBeVisible();
+    expect(await page.evaluate(() => (window as any).PM.store.get('panelVisibility').agent)).toBe(false);
+    await page.evaluate(() => (window as any).PM.newProject());
+    await expect(page.locator('#body > .dock #panel-agent')).toHaveCount(0);
+    await expect(page.locator('#agent-launcher')).toBeVisible();
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
   test('composer submit → progress → result phase, all through the Svelte UI', async ({ session }) => {
     test.skip(!process.env.POWERMOVE_E2E_LIVE, 'live codex run — set POWERMOVE_E2E_LIVE=1 (excluded from the 2-minute CI suite)');
     test.setTimeout(240_000);

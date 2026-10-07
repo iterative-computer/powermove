@@ -1,4 +1,5 @@
 import type { BlendMode, Layer, LayerType } from '../types/project';
+import { materialKeyframeMinimum } from '../../../../shared/blender';
 import type {
   Transform,
   TransformAggregate,
@@ -31,6 +32,7 @@ import {
   type LayerPatch,
   type LayerTarget,
   type ReplaceKeyframesCommand,
+  type OffsetPropertyCommand,
   type SectionManifest,
   type SectionVersion,
   type SetCompositionCommand,
@@ -48,6 +50,7 @@ import {
   type EditCaptionsCommand
 } from '../types/commands';
 
+import { render3DSchema } from '../../../../shared/blender';
 import { COMMAND_JSON_LIMIT } from '../../../../shared/edit-limits';
 export { COMMAND_JSON_LIMIT } from '../../../../shared/edit-limits';
 export const MAX_EXPRESSION_CHARS = 2_000;
@@ -66,7 +69,7 @@ const LAYER_FIELDS = new Set([
 ]);
 const COMPOSITION_FIELDS = new Set([
   'name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill',
-  'shutter', 'workArea', 'audioGain'
+  'shutter', 'workArea', 'audioGain', 'render3d'
 ]);
 const EFFECT_FIELDS = new Set(['enabled', 'open', 'index']);
 const EASING_PRESETS = new Set([
@@ -85,6 +88,7 @@ const COMMAND_FIELDS: Record<(typeof COMMAND_TYPES)[number], readonly string[]> 
     'type', 'target', 'path', 'keyframes', 'replace', 'expression',
     'overrideLock', 'preserveHandEdits'
   ],
+  offset_property: ['type', 'target', 'path', 'delta', 'overrideLock', 'preserveHandEdits'],
   set_easing: ['type', 'keyframes', 'curve'],
   set_expression: ['type', 'target', 'path', 'expression'],
   set_content: ['type', 'target', 'patch', 'overrideLock'],
@@ -116,6 +120,7 @@ const COMMAND_FIELDS: Record<(typeof COMMAND_TYPES)[number], readonly string[]> 
 const AGENT_COMMAND_FIELDS = {
   set_property: ['type', 'target', 'path', 'value', 'time', 'mode', 'ease', 'hold', 'preserveHandEdits'],
   replace_keyframes: ['type', 'target', 'path', 'keyframes', 'replace', 'expression', 'preserveHandEdits'],
+  offset_property: ['type', 'target', 'path', 'delta', 'preserveHandEdits'],
   set_expression: COMMAND_FIELDS.set_expression,
   set_content: ['type', 'target', 'patch'],
   set_layer: COMMAND_FIELDS.set_layer,
@@ -296,6 +301,21 @@ function parseSetProperty(source: Record<string, unknown>): SetPropertyCommand |
   return out;
 }
 
+function parseOffsetProperty(source: Record<string, unknown>): OffsetPropertyCommand | ValidationError {
+  const path = requiredString(source.path, 'path');
+  if (path instanceof ValidationError) return path;
+  const delta = finite(source.delta, 'delta');
+  if (delta instanceof ValidationError) return delta;
+  const out: OffsetPropertyCommand = { type: 'offset_property', path, delta };
+  const targetError = optionalTarget(source, out);
+  if (targetError) return targetError;
+  for (const key of ['overrideLock', 'preserveHandEdits'] as const) {
+    const error = optionalBoolean(source, out, key);
+    if (error) return error;
+  }
+  return out;
+}
+
 function parseReplaceKeyframes(source: Record<string, unknown>): ReplaceKeyframesCommand | ValidationError {
   const path = requiredString(source.path, 'path');
   if (path instanceof ValidationError) return path;
@@ -308,9 +328,18 @@ function parseReplaceKeyframes(source: Record<string, unknown>): ReplaceKeyframe
     if (!owns(item, 'value')) return invalid('is required', `keyframes[${index}].value`);
     const value = cloneJson(item.value, `keyframes[${index}].value`);
     if (value instanceof ValidationError) return value;
-    const keyframe: CommandKeyframe = { time: Math.max(0, time), value };
+    const keyframe: CommandKeyframe = { time: Math.max(materialKeyframeMinimum(path), time), value };
     if (owns(item, 'ease') && item.ease != null) keyframe.ease = stringified(item.ease);
     if (owns(item, 'hold')) keyframe.hold = Boolean(item.hold);
+    if (item.eo !== undefined || item.ei !== undefined) {
+      if (![item.eo,item.ei].every(h=>Array.isArray(h)&&h.length===2&&h.every(v=>typeof v==='number'&&Number.isFinite(v)))) return invalid('invalid easing handles',`keyframes[${index}]`);
+      keyframe.eo = [...item.eo as [number,number]]; keyframe.ei = [...item.ei as [number,number]];
+    }
+    if (item.spring !== undefined) {
+      const spring = safePatch(item.spring,`keyframes[${index}].spring`);
+      if (spring instanceof ValidationError) return spring;
+      keyframe.spring = spring;
+    }
     keyframes.push(keyframe);
   }
   const out: ReplaceKeyframesCommand = { type: 'replace_keyframes', path, keyframes };
@@ -434,6 +463,11 @@ function parseCompositionPatch(value: unknown): CompositionPatch | ValidationErr
     out[key] = number;
   }
   for (const key of ['name', 'background'] as const) if (patch[key] != null) out[key] = stringified(patch[key]);
+  if (patch.render3d != null) {
+    const result = render3DSchema.safeParse(patch.render3d);
+    if (!result.success) return invalid('invalid 3D rendering settings', 'patch.render3d');
+    out.render3d = result.data;
+  }
   if (patch.backgroundFill != null) out.backgroundFill = patch.backgroundFill;
   if (patch.workArea != null) {
     if (!Array.isArray(patch.workArea) || patch.workArea.length !== 2) {
@@ -1087,6 +1121,7 @@ function parseObject(source: Record<string, unknown>): EditCommand | ValidationE
   }
   switch (source.type) {
     case 'set_property': return parseSetProperty(source);
+    case 'offset_property': return parseOffsetProperty(source);
     case 'replace_keyframes': return parseReplaceKeyframes(source);
     case 'set_easing': return parseSetEasing(source);
     case 'set_expression': return parseSetExpression(source);
@@ -1151,7 +1186,7 @@ export function parseAgentEditCommand(raw: unknown): EditCommand | ValidationErr
   for (const key of fields) if (source[key] !== undefined) selected[key] = source[key];
   const command = parseEditCommand(selected);
   if (command instanceof ValidationError) return command;
-  if (command.type === 'set_property' || command.type === 'replace_keyframes') {
+  if (command.type === 'set_property' || command.type === 'replace_keyframes' || command.type === 'offset_property') {
     command.preserveHandEdits = command.preserveHandEdits !== false;
   }
   return command;

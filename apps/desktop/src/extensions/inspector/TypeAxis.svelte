@@ -2,7 +2,7 @@
   import { inspectorContext } from './context';
   import { axisContentKey, axisPath, type ControlEditBinding, type FontAxis } from 'powermove';
   const { api, doc, transport, mixed, edit: inspectorEdit, timeline } = inspectorContext();
-  const { NumField, Row } = api.ui.controls;
+  const { NumField, SliderField, Row } = api.ui.controls;
   let { layer, axis }: { layer: any; axis: Pick<FontAxis, 'tag' | 'label' | 'default'> & Partial<FontAxis> } = $props();
   const key = $derived(axisContentKey(axis.tag)), path = $derived(axisPath(axis.tag));
   const property = $derived((doc.tick.values, doc.tick.history, doc.proj, layer.d[key]));
@@ -37,7 +37,8 @@
         aria-label={`${current ? 'Remove keyframe for' : 'Add keyframe for'} ${axis.label} · ${axis.tag}`}
         aria-pressed={current} onclick={toggle}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 12 12 21 4 12Z"/></svg></button>
     {/snippet}
-    <NumField {api} {mixed} get={() => value} {edit} label={`${axis.label} axis`} min={axis.min} max={axis.max} {step} speed={axis.min != null && axis.max != null ? Math.max(.01, (axis.max - axis.min) / 300) / step : 50} precision={2} />
+    {@const Field = axis.min != null && axis.max != null && axis.max > axis.min ? SliderField : NumField}
+    <Field {api} {mixed} get={() => value} {edit} label={`${axis.label} axis`} min={axis.min} max={axis.max} {step} speed={axis.min != null && axis.max != null ? Math.max(.01, (axis.max - axis.min) / 300) / step : 50} precision={2} />
   </Row>
 
 </div>
