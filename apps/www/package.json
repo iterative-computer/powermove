@@ -16,10 +16,9 @@
     "typecheck": "bun run check"
   },
   "dependencies": {
-    "@lisse/core": "0.7.2",
     "@lucide/svelte": "1.45.0",
-    "@powermove/player": "workspace:*",
-    "@powermove/tokens": "workspace:*"
+    "@powermove/tokens": "workspace:*",
+    "@powermove/player": "workspace:*"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "3.0.10",

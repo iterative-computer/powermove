@@ -39,17 +39,13 @@ main{overflow:clip}
 .cta.center{justify-content:center}
 
 /* Small solid pills: white on the gradient, ink on paper, frosted for the secondary. */
-.pill{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:36px;padding:0 14px;border-radius:10px;font-size:15px;font-weight:500;letter-spacing:-.01em;white-space:nowrap;transition:background var(--dur-3),color var(--dur-3),scale var(--dur-2) var(--ease)}
+.pill{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:36px;padding:0 14px;border-radius:8px;font-size:15px;font-weight:500;letter-spacing:-.01em;white-space:nowrap;transition:background var(--dur-3),color var(--dur-3),scale var(--dur-2) var(--ease)}
 .pill:active{scale:.98}
 .pill.light{background:#fff;color:#16110E}
 .pill.light:hover{background:rgb(255 255 255 / .86)}
 .pill.glass{background:rgb(255 255 255 / .13);color:#fff;-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
 .pill.glass:hover{background:rgb(255 255 255 / .2)}
 .pill.dark{background:#16110E;color:#fff}
-/* Smoothed pills draw keyboard focus as a Lisse inner edge; a box-shadow ring would be clipped. */
-.pill.light{--squircle-focus:var(--accent)}
-.pill.glass{--squircle-focus:rgb(255 255 255 / .9)}
-.pill[data-squircle]:focus-visible{box-shadow:none}
 
 /* ---- header ---- */
 .site-header{position:absolute;inset:0 0 auto;z-index:50;color:var(--tx)}
