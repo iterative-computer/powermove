@@ -50,7 +50,7 @@ export function playbackConverter(binary: string): Convert {
       // make timeline scrubbing and frame-by-frame exports decode seconds repeatedly.
       '-g', '15', '-deadline', 'good', '-cpu-used', '4', '-row-mt', '1', '-threads', '4',
       '-c:a', 'libopus', '-b:a', '192k', '-f', 'webm', '-y', output
-    ], { timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+    ], { windowsHide: true, timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
   };
 }
 
@@ -66,7 +66,7 @@ export function previewConverter(binary: string): Convert {
       '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-b:v', '0', '-crf', '18',
       '-g', '1', '-deadline', 'realtime', '-cpu-used', '6', '-row-mt', '1', '-threads', '4',
       '-f', 'webm', '-y', output,
-    ], { timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+    ], { windowsHide: true, timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
   };
 }
 
@@ -100,7 +100,7 @@ export function imageSequenceConverter(binary: string): ConvertSequence {
       '-pix_fmt', 'yuva420p', '-lossless', '1', '-b:v', '0',
       '-g', '15', '-deadline', 'good', '-cpu-used', '4', '-row-mt', '1', '-threads', '4',
       '-f', 'webm', '-y', output,
-    ], { stdio: ['ignore', 'pipe', 'pipe'] }, 'image sequence encoder');
+    ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }, 'image sequence encoder');
     child.stdout?.on('data', sequenceProgressReader(count, onProgress));
     await new Promise<void>((resolve, reject) => {
       let stderr = '';
@@ -138,7 +138,7 @@ export function stillImageConverter(binary: string, platform: NodeJS.Platform = 
       // FFmpeg 6 cannot open the HEIF variants Apple devices write; sips, which
       // ships with macOS, reads them through the same decoder Preview uses.
       await execFileAsync('/usr/bin/sips', ['-s', 'format', 'png', source, '--out', output],
-        { timeout: STILL_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+        { windowsHide: true, timeout: STILL_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
       return;
     }
     if (extension === 'heic' || extension === 'heif') {
@@ -158,7 +158,7 @@ export function stillImageConverter(binary: string, platform: NodeJS.Platform = 
     await execFileAsync(binary, [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-i', source, '-frames:v', '1', '-update', '1', '-c:v', 'png', '-f', 'image2', '-y', output,
-    ], { timeout: STILL_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+    ], { windowsHide: true, timeout: STILL_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
   };
 }
 

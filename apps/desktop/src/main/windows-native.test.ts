@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { copyFile, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -17,6 +17,7 @@ import { encoderBinary } from './platform';
 import { fileVersion, publishFile, syncDirectory } from './durable-file';
 import { killProcessFamily } from './process-family';
 import { runWorkspaceCommand } from './compatible-workspace';
+import { prepareUserResources } from './agent-tools/user-resources';
 
 const run = promisify(execFile);
 const roots: string[] = [];
@@ -33,6 +34,21 @@ describe('portable HEIC import', () => {
 });
 
 describe.runIf(process.platform === 'win32')('native Windows x64 integration', () => {
+  it('shares skills through a stable junction and refreshes copied instructions', async () => {
+    const source = await folder(); const runtime = await folder();
+    await mkdir(path.join(source, 'skills'));
+    await writeFile(path.join(source, 'AGENTS.md'), 'first');
+    await prepareUserResources(runtime, source, 'chatgpt');
+    expect((await lstat(path.join(runtime, 'skills'))).isSymbolicLink()).toBe(true);
+    await prepareUserResources(runtime, source, 'chatgpt');
+    await expect(stat(path.join(runtime, '.powermove-resource-backups'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await writeFile(path.join(source, 'AGENTS.md'), 'second');
+    await prepareUserResources(runtime, source, 'chatgpt');
+    expect(await readFile(path.join(runtime, 'AGENTS.md'), 'utf8')).toBe('second');
+    await rm(path.join(source, 'skills'), { recursive: true });
+    await prepareUserResources(runtime, source, 'chatgpt');
+    await expect(lstat(path.join(runtime, 'skills'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
   it('finds and launches both bundled agents and the video encoder', async () => {
     const codex = await discoverCodexBinary(null, { bundledCandidates: bundledCodexCandidates(process.cwd(), undefined) });
     const claude = await discoverClaudeBinary(null, { bundledCandidates: bundledClaudeCandidates(process.cwd(), undefined) });
@@ -93,7 +109,7 @@ describe.runIf(process.platform === 'win32')('native Windows x64 integration', (
     const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
     const insideFile = path.join(root, 'allowed.txt'); const outsideFile = path.join(outside, 'denied.txt');
     const result = await runWorkspaceCommand(root, 'project', `$ErrorActionPreference='Stop'; Set-Content -LiteralPath ${quote(insideFile)} -Value 'allowed'; Set-Content -LiteralPath ${quote(outsideFile)} -Value 'denied'`, 60_000, new AbortController().signal);
-    expect(await readFile(insideFile, 'utf8')).toContain('allowed');
+    await expect(readFile(insideFile, 'utf8'), result.output).resolves.toContain('allowed');
     expect(result.exitCode).not.toBe(0);
     await expect(stat(outsideFile)).rejects.toMatchObject({ code: 'ENOENT' });
   }, 90_000);

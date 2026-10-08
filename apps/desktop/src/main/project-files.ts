@@ -100,7 +100,8 @@ export class ProjectFiles {
         const file = path.join(directory, name);
         await copySnapshot(destination, file);
         try {
-          const handle = await open(file, 'r');
+          // FlushFileBuffers requires a writable handle on Windows.
+          const handle = await open(file, process.platform === 'win32' ? 'r+' : 'r');
           try { await syncFile(handle); } finally { await handle.close(); }
           await syncDirectory(directory);
         } catch (error) {

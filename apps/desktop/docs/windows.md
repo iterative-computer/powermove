@@ -39,6 +39,7 @@ the existing per-run confirmation. See the [Windows sandbox documentation](https
 ## Build and validate
 
 ```powershell
+bun run --cwd apps/cloud types
 bun run --cwd apps/desktop typecheck
 bun run --cwd apps/desktop test -- src/main/windows-native.test.ts src/main/platform.test.ts src/renderer/src/platform.test.ts
 bun run dist:win

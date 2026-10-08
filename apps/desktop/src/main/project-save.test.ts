@@ -227,10 +227,14 @@ describe('incremental project transactions', () => {
       const files = new ProjectFiles(process.argv[2], process.argv[3]);
       const save = await files.beginIncremental('one', [], 1000);
       await save.write(null, new Uint8Array([123, 34, 112]));
+      console.log('upload-started');
       process.kill(process.pid, 'SIGKILL');
     ` }, bundle: true, platform: 'node', format: 'esm', packages: 'external', write: false });
     await writeFile(worker, bundle.outputFiles[0]!.contents);
-    await expect(promisify(execFile)(process.execPath, [worker, registry, path.join(directory, 'backups')])).rejects.toMatchObject({ signal: 'SIGKILL' });
+    await expect(promisify(execFile)(process.execPath, [worker, registry, path.join(directory, 'backups')])).rejects.toMatchObject({
+      stdout: expect.stringContaining('upload-started'),
+      ...(process.platform === 'win32' ? { code: 1 } : { signal: 'SIGKILL' })
+    });
     expect(await readFile(destination)).toEqual(before);
     files = new ProjectFiles(registry, path.join(directory, 'backups'));
     const reopened = await files.open(destination);

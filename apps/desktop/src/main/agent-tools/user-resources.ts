@@ -14,9 +14,16 @@ async function exists(file: string): Promise<boolean> {
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
 }
 
+function sameResourcePath(a: string, b: string): boolean {
+  const normalize = (value: string) => process.platform === 'win32'
+    ? path.resolve(value.replace(/^\\\\\?\\UNC\\/i, '\\\\').replace(/^\\\\\?\\/, '')).toLowerCase()
+    : path.resolve(value);
+  return normalize(a) === normalize(b);
+}
+
 async function linkResource(source: string, target: string): Promise<void> {
   if (!await exists(source)) {
-    if (await exists(target) && (await lstat(target)).isSymbolicLink() && await readlink(target) === source) {
+    if (await exists(target) && (await lstat(target)).isSymbolicLink() && sameResourcePath(await readlink(target), source)) {
       await unlink(target);
     }
     return;
@@ -24,7 +31,7 @@ async function linkResource(source: string, target: string): Promise<void> {
   if (await exists(target)) {
     if (process.platform === 'win32' && (await lstat(source)).isFile() && (await lstat(target)).isFile()
       && await readFile(source, 'utf8') === await readFile(target, 'utf8')) return;
-    if ((await lstat(target)).isSymbolicLink() && await readlink(target) === source) return;
+    if ((await lstat(target)).isSymbolicLink() && sameResourcePath(await readlink(target), source)) return;
     // Preserve resources created by an older private runtime before linking the
     // normal user installation. Never move or replace account/session files.
     const backupRoot = path.join(path.dirname(target), '.powermove-resource-backups');

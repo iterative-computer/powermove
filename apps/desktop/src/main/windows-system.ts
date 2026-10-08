@@ -10,10 +10,10 @@ export function powershellPath(environment: NodeJS.ProcessEnv = process.env): st
 /** Scripts are application code. Data crosses through one encoded JSON value,
  * never through interpolated PowerShell or cmd.exe command text. */
 export async function windowsScript(script: string, data: unknown = null): Promise<string> {
-  const source = "$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [Text.UTF8Encoding]::new(); "
+  const source = "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; [Console]::OutputEncoding = [Text.UTF8Encoding]::new(); "
     + "$data = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:POWERMOVE_SCRIPT_DATA)) | ConvertFrom-Json; " + script;
   const { stdout } = await run(powershellPath(), ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')], {
-    encoding: 'utf8', timeout: 15_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true,
+    encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true,
     env: { ...process.env, POWERMOVE_SCRIPT_DATA: Buffer.from(JSON.stringify(data)).toString('base64') }
   });
   return stdout.trim();

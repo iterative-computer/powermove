@@ -113,7 +113,8 @@ export class FontStore {
     await this.load();
     const familyDir = path.join(this.dir, safe(face.family));
     await mkdir(familyDir, { recursive: true });
-    const file = path.join(safe(face.family), `${safe(face.postscriptName)}${extension}`);
+    // Stored paths also travel to browsers and project files.
+    const file = path.posix.join(safe(face.family), `${safe(face.postscriptName)}${extension}`);
     const target = path.join(this.dir, file);
     await rename(source, target).catch(async () => { await copyFile(source, target); });
     await rm(path.dirname(source), { recursive: true, force: true });

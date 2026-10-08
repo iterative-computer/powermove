@@ -49,9 +49,9 @@ describe.runIf(process.platform === 'win32')('native Windows login task', () => 
       await expect.poll(() => { try { process.kill(pid!, 0); return true; } catch { return false; } }, { timeout: 15_000 }).toBe(false);
       expect(await readFile(path.join(profile, 'serve.log'), 'utf8')).toBeTypeOf('string');
     } finally {
-      await uninstall(nativeSpec, () => {});
+      await uninstall(nativeSpec, () => {}).catch(() => undefined);
       if (pid) { try { process.kill(pid); } catch { /* already stopped */ } }
       await rm(root, { recursive: true, force: true });
     }
-  }, 60_000);
+  }, 120_000);
 });

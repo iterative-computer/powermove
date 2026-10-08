@@ -6,7 +6,7 @@ import path from 'node:path';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 const native = vi.hoisted(() => ({ showSaveDialog: vi.fn(), window: { isDestroyed: () => false } }));
-vi.mock('electron',()=>({app:{ getAppPath: () => '.', getPath: () => '/tmp', on: vi.fn() },
+vi.mock('electron',()=>({app:{ getAppPath: () => '.', getPath: () => os.tmpdir(), on: vi.fn() },
   BrowserWindow: { fromWebContents: () => native.window }, dialog:{ showSaveDialog: native.showSaveDialog }}));
 afterEach(() => vi.restoreAllMocks());
 import {registerRenderEncoder,RenderEncoder,validateEncoderOptions,encoderArgs} from './render-encoder';

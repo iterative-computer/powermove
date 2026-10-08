@@ -25,8 +25,8 @@ describe('Windows executable and window layout', () => {
     const command = ['C:\\Program Files\\Claude\\claude.exe', 'a"b', '& echo dangerous'];
     const args = windowsSandboxArgs('C:\\My Project', command, ['C:\\Private Runtime']);
     expect(args.slice(args.indexOf('--') + 1)).toEqual(command);
-    expect(args).toContain('sandbox_mode="workspace-write"');
-    expect(args).toContain('sandbox_workspace_write.writable_roots=["C:\\\\Private Runtime"]');
+    expect(args).toContain('powermove-project');
+    expect(args.find(value => value.startsWith('permissions.powermove-project='))).toContain('"C:\\\\Private Runtime" = "write"');
     expect(args.join(' ')).not.toContain('dangerously');
   });
 });

@@ -14,7 +14,7 @@ export default async function afterPack(context) {
     for (const file of ['encoder/ffmpeg.exe', 'codex/bin/codex.exe', 'codex/bin/codex-code-mode-host.exe', 'claude/bin/claude.exe']) {
       const binary = path.join(resources, file);
       if (!(await stat(binary)).isFile()) throw new Error(`Missing Windows runtime: ${file}`);
-      if (process.platform === 'win32' && !file.includes('code-mode-host')) await execFileAsync(binary, ['--version'], { timeout: 15_000, windowsHide: true });
+      if (process.platform === 'win32' && !file.includes('code-mode-host')) await execFileAsync(binary, [file.startsWith('encoder/') ? '-version' : '--version'], { timeout: 15_000, windowsHide: true });
     }
   }
   if (!windows && context.electronPlatformName !== 'darwin') return;
