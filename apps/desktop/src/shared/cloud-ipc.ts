@@ -34,7 +34,7 @@ export type CloudProvider = CloudSocialProvider | 'email';
 
 export interface CloudAccount {
   me: MeDto | null;
-  /** How this Mac signed in, when known. */
+  /** How this computer signed in, when known. */
   provider?: CloudProvider;
 }
 
@@ -56,7 +56,7 @@ export interface CloudChannels {
   'cloud:set-registry-url': { req: { origin: string }; res: CloudResult<CloudRegistry & { changed: boolean }> };
 }
 
-/** Which registry this Mac talks to (Settings › Advanced). */
+/** Which registry this computer talks to (Settings › Advanced). */
 export interface CloudRegistry {
   origin: string;
   isDefault: boolean;

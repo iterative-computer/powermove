@@ -20,7 +20,7 @@ export function providerUrl(value: string): string {
   const url = new URL(value);
   const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
   if (url.username || url.password || url.search || url.hash || !(url.protocol === 'https:' || local && url.protocol === 'http:')) {
-    throw new Error('Use an HTTPS API address, or HTTP for a local model on this Mac.');
+    throw new Error('Use an HTTPS API address, or HTTP for a local model on this computer.');
   }
   // Gateways such as Sub2API commonly provide the server origin as their
   // base URL. Accept that and a pasted Chat Completions endpoint as well as

@@ -52,11 +52,10 @@ jobs:
           src/server/install.test.ts
           src/server/fonts.test.ts
           src/server/updates.test.ts
+          src/server/tls.test.ts
           --pool=threads
       - name: Check extension boundaries
         run: bun run --cwd apps/desktop lint:boundaries
-      - name: Build Windows installer (no publishing)
-        run: bun run dist:win
       - name: Run Electron smoke tests
         working-directory: apps/desktop
         run: >-
@@ -71,6 +70,8 @@ jobs:
         run: node packages/cli/bin/powermove.mjs --help
       - name: Check browser host startup
         run: node apps/desktop/scripts/smoke-serve.mjs
+      - name: Build Windows installer (no publishing)
+        run: bun run dist:win
       - uses: actions/upload-artifact@v4
         with:
           name: powermove-windows-x64-test-installer

@@ -54,7 +54,7 @@ export function presentError(value: unknown): ErrorPresentation {
   if (/env: node: No such file|spawn node ENOENT|node: (?:command )?not found/i.test(details)) {
     // Discovery fell back to an npm launcher script; Powermove's own native
     // runtime needs no Node.js, so installing it is the whole repair.
-    return result('Codex needs Node.js to start', 'Powermove found a Codex install that runs on Node.js, which apps on this Mac can’t reach. Powermove can install its own copy of Codex that doesn’t need Node.js.',
+    return result('Codex needs Node.js to start', 'Powermove found a Codex install that runs on Node.js, which apps on this computer can’t reach. Powermove can install its own copy of Codex that doesn’t need Node.js.',
       { update: 'codex', updateLabel: 'Fix it for me' });
   }
   if (/active writer|saved agent session couldn[’']t reopen/i.test(details)) {

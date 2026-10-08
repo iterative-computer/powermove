@@ -77,3 +77,5 @@ and starts the current host.
 Windows `install` registers a normal-user Task Scheduler task that starts at
 login. The hidden host restarts after crashes or self-updates. Uninstall removes
 the task without deleting projects, saved credentials, or profile data.
+The host creates its HTTPS certificate automatically; a separate OpenSSL
+installation is not needed.

@@ -25,7 +25,7 @@
   import { STORE_FLAGS } from './flags';
 
   /* Two places and seven kinds. Browse is the storefront; a kind is the store
-     narrowed to one shelf; Library is everything on this Mac, in one list. */
+     narrowed to one shelf; Library is everything on this computer, in one list. */
   let { PM }: { PM: StorePM } = $props();
 
   /* The Store is a section of the home. Its page follows Claude's Customize
@@ -767,8 +767,8 @@
     const go = await bridge()?.confirm?.({
       message: `Uninstall ${item.name}?`,
       detail: fromStore
-        ? 'Its files are removed from this Mac. You can install it again from the store.'
-        : 'Its folder is deleted from this Mac. This can’t be undone.',
+        ? 'Its files are removed from this computer. You can install it again from the store.'
+        : 'Its folder is deleted from this computer. This can’t be undone.',
       confirmLabel: 'Uninstall',
       destructive: true
     });
@@ -798,7 +798,7 @@
     try {
       await bridge()?.extensions?.reveal({ id: item.localId });
     } catch {
-      toast('Unable to show the folder in Finder.', true);
+      toast('Unable to show the folder.', true);
     }
   }
 
@@ -895,9 +895,9 @@
     if (item.group === 'store') items.push({ label: 'Check for Updates', run: () => void checkForUpdates() });
     if (item.trust === 'store') items.push({ label: 'Trust…', run: () => void trust(item) });
     else if (item.trust === 'store-trusted') items.push({ label: 'Revoke Trust', run: () => void revokeTrust(item) });
-    // Made on this Mac: try it as the Store will run it for everyone else.
+    // Made on this computer: try it as the Store will run it for everyone else.
     if (item.trust === 'local') items.push({ label: 'Sandbox compatibility check…', run: () => openSandboxCheckSheet(PM, item.localId, item.name) });
-    items.push({ label: 'Show in Finder', run: () => void reveal(item) });
+    items.push({ label: 'Show in Folder', run: () => void reveal(item) });
     items.push('-', { label: 'Uninstall…', run: () => void uninstall(item) });
     openPopoverMenu({ anchor: event.currentTarget, label: `${item.name} actions`, items });
   }
@@ -1375,7 +1375,7 @@
   {#if item && needsTrust(item)}
     <p class="st-update-note is-warn">It stays off until you trust it. Trusted extensions run with the same access as the app: your projects, files you open, the network, and other extensions’ values.</p>
   {:else if item?.removed}
-    <p class="st-update-note">This extension is no longer on the store. It stays on this Mac, but won’t get updates.</p>
+    <p class="st-update-note">This extension is no longer on the store. It stays on this computer, but won’t get updates.</p>
   {:else if item?.update}
     <p class="st-update-note">
       {#if item.update.state === 'staged-for-merge'}
@@ -1429,7 +1429,7 @@
       <div class="st-card">
         <div class="st-kv"><span>Will publish as</span><b>{account?.handle ? `@${account.handle}/${item.localId}` : account ? 'Choose a handle to publish' : 'Sign in to choose a handle'}</b></div>
       </div>
-      <p class="st-note">Publishing puts the source on the store under your name. Setup values stay on this Mac.</p>
+      <p class="st-note">Publishing puts the source on the store under your name. Setup values stay on this computer.</p>
     </section>
   {/if}
 
@@ -1510,7 +1510,7 @@
           </div>
         {/each}
       </div>
-      <p class="st-note">{item ? 'Stays on this Mac. Never included when you publish or share this extension.' : 'You can set these values when you install. They stay on this Mac.'}</p>
+      <p class="st-note">{item ? 'Stays on this computer. Never included when you publish or share this extension.' : 'You can set these values when you install. They stay on this computer.'}</p>
     </section>
   {/if}
 

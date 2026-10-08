@@ -20,7 +20,7 @@
  *
  * Updates are a git pull (pull.ts): the installed release, the folder and the
  * new release are compared per file, only what the release changed is
- * fetched, and changes made on this Mac are kept. Only a real conflict falls
+ * fetched, and changes made on this computer are kept. Only a real conflict falls
  * back to leaving the new release beside the folder.
  */
 import { createHash } from 'node:crypto';
@@ -42,7 +42,7 @@ import type { ReleaseByIdResult, StoreClient, VersionsItem } from './store-clien
 import { RESERVED_STORE_IDS } from './reserved-slugs';
 import { STORE_MARKER } from './trust';
 
-/** A failure decided on this Mac; `detail` is written for the person installing. */
+/** A failure decided on this computer; `detail` is written for the person installing. */
 export class StoreLocalError extends Error {
   constructor(public readonly code: StoreLocalErrorCode, public readonly detail: string) {
     super(detail);
@@ -68,7 +68,7 @@ export interface StoreInstallerOptions {
   notifyUpdates?(updates: StoreUpdates): void;
   /** The built-in ids, from the built-in registry list. Defaults to the registry's built-in records. */
   builtinIds?(): readonly string[];
-  /** Whether the extension still has a values file on this Mac. */
+  /** Whether the extension still has a values file on this computer. */
   hasValues?(localId: string): Promise<boolean>;
   log?(message: string, error?: unknown): void;
   now?(): number;
@@ -184,7 +184,7 @@ export function createStoreInstaller(options: StoreInstallerOptions): StoreInsta
   };
 
   const folderFor = (localId: string): string => {
-    if (!EXTENSION_ID.test(localId)) throw new StoreLocalError('not_installed', 'That extension isn’t on this Mac.');
+    if (!EXTENSION_ID.test(localId)) throw new StoreLocalError('not_installed', 'That extension isn’t on this computer.');
     return path.join(userDir, localId);
   };
 
@@ -319,7 +319,7 @@ export function createStoreInstaller(options: StoreInstallerOptions): StoreInsta
         const name = existing?.manifest?.name ?? id;
         throw new ApiError({
           error: 'id_collision',
-          detail: `“${name}” is already on this Mac with the id “${id}”. Remove it from your Library to install this one.`
+          detail: `“${name}” is already on this computer with the id “${id}”. Remove it from your Library to install this one.`
         });
       }
 
@@ -377,7 +377,7 @@ export function createStoreInstaller(options: StoreInstallerOptions): StoreInsta
 
   /**
    * The update as a git pull: plan per file from the three trees, fetch only
-   * the release's blobs this Mac doesn't already hold, merge files both sides
+   * the release's blobs this computer doesn't already hold, merge files both sides
    * changed, and prove every byte. Resolves null when a pull isn't the right
    * tool (the base tree is gone, the folder can't be read, or so much changed
    * that one archive is cheaper); the caller then takes the whole release.
@@ -486,7 +486,7 @@ export function createStoreInstaller(options: StoreInstallerOptions): StoreInsta
       const record = await provenance.get(localId);
       const origin = record?.origin;
       if (!record || !origin || !(await exists(folder))) {
-        throw new StoreLocalError('not_installed', 'That extension isn’t installed from the store on this Mac.');
+        throw new StoreLocalError('not_installed', 'That extension isn’t installed from the store on this computer.');
       }
       const latest = await latestFor({ ...record, origin });
       const pulled = await pullUpdate(localId, origin, latest.releaseId).catch((error: unknown) => {

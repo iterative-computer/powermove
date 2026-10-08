@@ -62,7 +62,7 @@ export interface VarsKeyStatus {
   required: boolean;
   /** A usable value is stored. */
   set: boolean;
-  /** A value is stored but this Mac can no longer decrypt it. */
+  /** A value is stored but this computer can no longer decrypt it. */
   undecryptable: boolean;
 }
 

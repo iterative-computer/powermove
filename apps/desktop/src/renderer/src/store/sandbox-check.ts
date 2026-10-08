@@ -31,7 +31,7 @@ async function valuesFor(record: ExtensionRecord): Promise<Record<string, string
   }
 }
 
-/** Run the check for an extension on this Mac, as it is built right now. */
+/** Run the check for an extension on this computer, as it is built right now. */
 export async function checkInSandbox(PM: StorePM, localId: string): Promise<SandboxCheckReport> {
   const kernel = (PM as { Kernel?: InstalledKernel }).Kernel;
   const record = recordFor(localId) ?? kernel?.loader?.records().find((candidate) => candidate.id === localId);

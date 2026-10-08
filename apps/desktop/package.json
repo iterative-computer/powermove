@@ -39,7 +39,8 @@
     "smol-toml": "1.9.0",
     "three": "0.180.0",
     "zod": "4.6.5",
-    "heic-convert": "2.1.0"
+    "heic-convert": "2.1.0",
+    "selfsigned": "5.5.0"
   },
   "devDependencies": {
     "@electron/fuses": "2.1.3",

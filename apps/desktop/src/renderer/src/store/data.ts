@@ -1,5 +1,5 @@
 /* View models for the Store, built from the registry's DTOs and the Library
-   main assembles from this Mac (LibraryItemDto). Nothing here talks to a
+   main assembles from this computer (LibraryItemDto). Nothing here talks to a
    server; StoreScreen.svelte calls the `extensionStore` bridge and hands the
    answers to these functions. */
 import type { ExtensionDetailDto, ListingDto, VarDecl } from '@powermove/registry/wire';
@@ -199,7 +199,7 @@ export function coordinate(l: { publisher: string; id: string }): string {
   return `${l.publisher}/${l.id}`;
 }
 
-/** The Library item for this repo: published from this Mac, or installed from it. */
+/** The Library item for this repo: published from this computer, or installed from it. */
 export function libraryItemFor(repoId: string, library: readonly LibraryItemDto[], listing?: { publisher: string; id: string }): LibraryItemDto | undefined {
   return library.find((item) => item.published?.repoId === repoId)
     ?? library.find((item) => item.origin?.repoId === repoId)
@@ -360,7 +360,7 @@ export type Action = {
 
 /**
  * The one action for an extension, from what the store says and what is on
- * this Mac:
+ * this computer:
  *
  *   not here, no declared values     Install
  *   not here, declared values      Install and set up

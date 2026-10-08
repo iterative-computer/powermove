@@ -12,7 +12,7 @@ export interface VarsResolution {
   values: Record<string, string>;
   /** Legacy compatibility field; all values are optional, so this is always empty. */
   missingRequired: string[];
-  /** Declared keys whose stored value this Mac cannot decrypt. */
+  /** Declared keys whose stored value this computer cannot decrypt. */
   undecryptable: string[];
   status: VarsResolutionStatus;
 }

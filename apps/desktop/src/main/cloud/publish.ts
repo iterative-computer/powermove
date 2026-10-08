@@ -339,7 +339,7 @@ export function createPublisher(options: PublisherOptions): Publisher {
   }
 
   async function readFolder(localId: string): Promise<LocalFolder> {
-    if (!EXTENSION_ID.test(localId)) throw new StoreLocalError('not_installed', 'That extension isn’t on this Mac.');
+    if (!EXTENSION_ID.test(localId)) throw new StoreLocalError('not_installed', 'That extension isn’t on this computer.');
     const record = registry.list().find((candidate) => candidate.id === localId);
     if (!record || record.scope !== 'user') throw new StoreLocalError('not_installed', 'Only extensions in your Library can be published.');
     const folder = path.join(registry.userDir, localId);
@@ -431,7 +431,7 @@ export function createPublisher(options: PublisherOptions): Publisher {
     }
     const declared = local.manifest.forkedFrom ? parseForkedFrom(local.manifest.forkedFrom) : null;
     if (declared?.kind === 'store' && !lineage.fork && !lineage.existing) {
-      throw new StoreLocalError('folder_invalid', `manifest.json says this was forked from ${local.manifest.forkedFrom}, but it wasn’t installed from there on this Mac. Remove “forkedFrom” and try again.`);
+      throw new StoreLocalError('folder_invalid', `manifest.json says this was forked from ${local.manifest.forkedFrom}, but it wasn’t installed from there on this computer. Remove “forkedFrom” and try again.`);
     }
     // Scanner and snapshot first; the network only after.
     const frozen = await freeze(local, local.manifest.version, lineage);
@@ -444,7 +444,7 @@ export function createPublisher(options: PublisherOptions): Publisher {
     }
     if (detail && detail.owner.id !== who.publisherId) detail = null;
     if (detail && !lineage.existing) {
-      throw new StoreLocalError('folder_invalid', `You already have ${coordinate} on the store. Remove this folder and install ${coordinate} from the store to publish updates from this Mac.`);
+      throw new StoreLocalError('folder_invalid', `You already have ${coordinate} on the store. Remove this folder and install ${coordinate} from the store to publish updates from this computer.`);
     }
     if (!detail && lineage.existing) {
       /* The repo this folder was published to isn't there (another
@@ -751,7 +751,7 @@ export function createPublisher(options: PublisherOptions): Publisher {
       let version: string;
       if (typeof target === 'string') {
         const published = (await provenance.get(target))?.published;
-        if (!published) throw new StoreLocalError('not_installed', 'This extension hasn’t been published from this Mac.');
+        if (!published) throw new StoreLocalError('not_installed', 'This extension hasn’t been published from this computer.');
         repoId = published.repoId;
         version = published.version;
       } else {

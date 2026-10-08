@@ -87,7 +87,7 @@ describe('env store', () => {
     expect(text).toMatch(/^API_KEY=enc:/m);
   });
 
-  it('marks a sealed value this Mac cannot open as undecryptable', async () => {
+  it('marks a sealed value this computer cannot open as undecryptable', async () => {
     const dir = await tempDir();
     const store = createEnvStore({ dir, safeStorage: fakeSafeStorage() });
     await fs.mkdir(dir, { recursive: true });

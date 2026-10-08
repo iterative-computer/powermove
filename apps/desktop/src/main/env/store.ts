@@ -27,7 +27,7 @@ export interface SafeStorageLike {
 }
 
 export interface EnvEntry {
-  /** null when the value is sealed and this Mac can no longer open it. */
+  /** null when the value is sealed and this computer can no longer open it. */
   value: string | null;
   secret: boolean;
 }
@@ -47,7 +47,7 @@ export interface EnvStore {
 
 export class SecretStorageUnavailableError extends Error {
   constructor() {
-    super('Secret values can’t be saved because secure storage is unavailable. Unlock your Mac and try again.');
+    super('Secret values can’t be saved because secure storage is unavailable. Unlock your computer and try again.');
     this.name = 'SecretStorageUnavailableError';
   }
 }

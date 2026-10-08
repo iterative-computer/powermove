@@ -73,7 +73,7 @@ async function result<T>(run: () => Promise<T>): Promise<CloudResult<T>> {
   } catch (error) {
     const body: ApiErrorBody = error instanceof ApiError
       ? error.body
-      : { error: 'internal', detail: 'Something went wrong on this Mac. Try again.' };
+      : { error: 'internal', detail: 'Something went wrong on this computer. Try again.' };
     if (!(error instanceof ApiError)) console.error('[cloud] account action failed', error instanceof Error ? error.message : 'unknown error');
     return { ok: false, error: body };
   }

@@ -235,7 +235,7 @@ import googleMark from './google.svg';
         case 'handle_reserved': handleProblem = 'reserved'; break;
         case 'handle_invalid': handleProblem = 'invalid'; break;
         case 'handle_already_set': {
-          // Claimed from another Mac meanwhile: take the account as it is.
+          // Claimed from another computer meanwhile: take the account as it is.
           const account = await bridge.account();
           applyAccount(account.me);
           arrived(account.me);

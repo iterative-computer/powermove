@@ -2,6 +2,8 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { X509Certificate } from 'node:crypto';
+import { createServer, get } from 'node:https';
 
 import { ensureCertificate, subjectAltNames } from './tls';
 
@@ -25,8 +27,24 @@ describe('ensureCertificate', () => {
     expect((await readFile(path.join(dir, 'serve-cert.sans'), 'utf8'))).toContain('IP:192.168.1.9');
   });
 
-  it('explains a missing openssl', async () => {
+  it('serves a verifiable TLS connection without an openssl executable', async () => {
     dir = await mkdtemp(path.join(tmpdir(), 'pm-tls-'));
-    await expect(ensureCertificate(dir, ['127.0.0.1'], '/nonexistent/openssl')).rejects.toThrow(/openssl/);
+    const material = await ensureCertificate(dir, ['127.0.0.1']);
+    const cert = new X509Certificate(material.cert);
+    expect(cert.checkHost('localhost')).toBe('localhost');
+    expect(cert.checkIP('127.0.0.1')).toBe('127.0.0.1');
+    expect(cert.ca).toBe(false);
+    const server = createServer(material, (_request, response) => response.end('secure'));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('No TLS listening address');
+      const body = await new Promise<string>((resolve, reject) => {
+        get({ host: '127.0.0.1', port: address.port, ca: material.cert, servername: 'localhost' }, response => {
+          let data = ''; response.on('data', chunk => { data += chunk; }); response.on('end', () => resolve(data));
+        }).on('error', reject);
+      });
+      expect(body).toBe('secure');
+    } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
   });
 });

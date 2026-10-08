@@ -81,7 +81,7 @@
     }
     if (record.scope !== 'builtin') {
       items.push({
-        label: 'Show in Finder',
+        label: 'Show in Folder',
         run: () => void run(() => api.extensions.reveal(record.id), `Could not show ${nameOf(record)}.`)
       });
       items.push('-');

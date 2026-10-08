@@ -44,7 +44,7 @@ export class CompatibleProvider {
     if (!input || typeof input.baseUrl !== 'string' || input.baseUrl.length > 2000 || typeof input.model !== 'string' || input.model.length > 200 || !input.model.trim() || typeof input.vision !== 'boolean' || input.apiKey !== undefined && (typeof input.apiKey !== 'string' || input.apiKey.length > 8192)) throw new Error('Enter the API address and model name.');
     const old = await this.read(), baseUrl = providerUrl(input.baseUrl.trim());
     const key = input.apiKey?.trim() || (providerUrl(old.baseUrl) === baseUrl ? this.key(old) : '');
-    if (key && !safeStorage.isEncryptionAvailable()) throw new Error('Secure key storage is unavailable. Unlock your Mac and try again.');
+    if (key && !safeStorage.isEncryptionAvailable()) throw new Error('Secure key storage is unavailable. Unlock your computer and try again.');
     const config: Saved = { baseUrl, model: input.model.trim(), vision: input.vision, hasKey: !!key,
       ...(key ? { secret: safeStorage.encryptString(key).toString('base64') } : {}) };
     // Exercise the same route used by chat; not every compatible service has /models.

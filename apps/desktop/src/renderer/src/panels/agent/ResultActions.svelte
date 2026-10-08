@@ -93,12 +93,12 @@
         <ul>
           {#each files as artifact (artifact.path)}
             <li>
-              <button class="agent-run-file-name" type="button" title={isPreviewableImageType(artifact.mime) ? `View ${artifact.name}` : 'Reveal in Finder'} onclick={() => void openFile(artifact)}>{artifact.name}</button>
+              <button class="agent-run-file-name" type="button" title={isPreviewableImageType(artifact.mime) ? `View ${artifact.name}` : 'Show in Folder'} onclick={() => void openFile(artifact)}>{artifact.name}</button>
               <small>{fileSize(artifact.size)}</small>
               {#if PM.proj && PM.assetKind({ name: artifact.name, type: artifact.mime })}
                 <button type="button" disabled={artifact.importing || artifact.imported} aria-label={artifact.imported ? `${artifact.name} is already on the timeline` : `Add ${artifact.name} to timeline`} title={artifact.imported ? 'Already added to the timeline' : 'Add to timeline'} onclick={() => PM.AgentUI?.importArtifact(artifact)}><Icon {PM} name={artifact.imported ? 'link' : 'plus'} /></button>
               {/if}
-              <button type="button" aria-label={`Reveal ${artifact.name} in Finder`} title="Reveal in Finder" onclick={() => PM.AgentUI?.revealArtifact(artifact)}><Icon {PM} name="project" /></button>
+              <button type="button" aria-label={`Reveal ${artifact.name} in its folder`} title="Show in Folder" onclick={() => PM.AgentUI?.revealArtifact(artifact)}><Icon {PM} name="project" /></button>
             </li>
           {/each}
         </ul>

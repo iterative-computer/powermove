@@ -159,7 +159,7 @@
           </div>
         {/each}
       </div>
-      <p class="vars-note">Stays on this Mac. Never included when you publish or share this extension.</p>
+      <p class="vars-note">Stays on this computer. Never included when you publish or share this extension.</p>
     {/if}
 
     {#if error}<p class="vars-error" role="alert">{error}</p>{/if}

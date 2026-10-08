@@ -22,8 +22,8 @@
     <button
       class="agent-attachment-open"
       type="button"
-      aria-label={item.dataUrl ? `View ${item.name}` : `Reveal ${item.name} in Finder`}
-      title={item.dataUrl ? `View ${item.name}` : `Reveal ${item.name} in Finder`}
+      aria-label={item.dataUrl ? `View ${item.name}` : `Reveal ${item.name} in its folder`}
+      title={item.dataUrl ? `View ${item.name}` : `Reveal ${item.name} in its folder`}
       onclick={() => void activatePromptAttachment(PM, item)}
     >
       {#if item.dataUrl}

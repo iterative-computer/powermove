@@ -726,7 +726,7 @@ async function exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate }: 
   const mime: any = types.find((m: any) => window.MediaRecorder.isTypeSupported(m));
   if (!mime) {
     audioMix && audioMix.stop();
-    throw new Error(isMp4 ? 'H.264 MP4 export is unavailable on this Mac' : 'No supported realtime WebM recorder');
+    throw new Error(isMp4 ? 'H.264 MP4 export is unavailable on this computer' : 'No supported realtime WebM recorder');
   }
   const rec: any = new window.MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: bitrate });
   const chunks: any = [];

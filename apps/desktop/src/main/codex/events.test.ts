@@ -270,7 +270,7 @@ describe('Codex progress mapping', () => {
   it.each([
     ['command_execution', 'Working with project files and shell tools…'],
     ['web_search', 'Researching on the web…'],
-    ['computer_use', 'Operating an application on this Mac…'],
+    ['computer_use', 'Operating an application on this computer…'],
     ['image_generation', 'Generating a visual deliverable…'],
     ['file_change', 'Preparing project files…']
   ])('maps an item.started %s event', (type, expected) => {

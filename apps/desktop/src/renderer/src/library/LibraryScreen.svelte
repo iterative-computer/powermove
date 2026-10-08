@@ -43,7 +43,7 @@
   let rootEl = $state<HTMLElement | null>(null);
   let deletedIds = $state(new Set<string>());
 
-  /* What the Store knows about this Mac's extensions: which shelf a panel
+  /* What the Store knows about this computer's extensions: which shelf a panel
      stands on, who made it, and the art a sandboxed panel shows (seeded like
      the Store's, from the listing's repo, so the two surfaces agree). */
   let storeItems = $state<LibraryItemDto[]>([]);

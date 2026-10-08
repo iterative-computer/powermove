@@ -29,7 +29,7 @@ describe('planPull', () => {
     expect(planPull([], [e('a', '1')], [e('a', '2')]).merge).toEqual([{ path: 'a', base: null, ours: '1', theirs: '2' }]);
   });
 
-  it('is a fast-forward when this Mac changed nothing', () => {
+  it('is a fast-forward when this computer changed nothing', () => {
     const base = [e('a', '1'), e('b', '1')];
     const plan = planPull(base, base, [e('a', '2'), e('c', '3')]);
     expect(plan).toEqual({ take: [e('a', '2'), e('c', '3')], keep: [], drop: ['b'], merge: [], conflicts: [] });

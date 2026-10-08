@@ -79,13 +79,18 @@ test.describe('@export-mp4 H.264 delivery', () => {
       const PM = (window as any).PM;
       const exported = await (window as any).__exportResult;
       PM.setTime(0, { force: true }); PM.play();
-      await new Promise(resolve => setTimeout(resolve, 500));
-      const advanced = PM.time; PM.pause();
-      return { exported, busy: PM.Export.busy, advanced };
+      return { exported, busy: PM.Export.busy, playing: PM.playing, loading: PM.assets.loading?.size ?? 0 };
     });
     expect(result.exported).toEqual({ cancelled: true });
     expect(result.busy).toBe(false);
-    expect(result.advanced).toBeGreaterThan(0.2);
+    expect(result.loading).toBe(0);
+    expect(result.playing).toBe(true);
+    // A software GPU on the Windows runner can take more than 500 ms to
+    // present the first preview frame after an export. Observe transport
+    // progress instead of sampling it at one fixed wall-clock instant.
+    try {
+      await expect.poll(() => page.evaluate(() => (window as any).PM.time), { timeout: 10_000 }).toBeGreaterThan(0.2);
+    } finally { await page.evaluate(() => (window as any).PM.pause()); }
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 });

@@ -171,7 +171,7 @@ describe('AssetsPanel', () => {
     /* Import lives in the panel header (register-simple), not in the body. */
     expect([...target.querySelectorAll('button')].some((button) => button.textContent?.trim() === 'Import')).toBe(false);
     expect(target.querySelector('button[aria-label="Add Backdrop.png to timeline"]')).not.toBeNull();
-    expect(target.querySelector('button[aria-label="Reveal Backdrop.png in Finder"]')).not.toBeNull();
+    expect(target.querySelector('button[aria-label="Reveal Backdrop.png in its folder"]')).not.toBeNull();
     expect(target.querySelector('button[aria-label="Delete Backdrop.png"]')).not.toBeNull();
   });
 
@@ -402,7 +402,7 @@ describe('AssetsPanel', () => {
   it('reveals the original media file in Finder without adding it to the timeline', async () => {
     const { PM, revealSource } = setup();
 
-    target.querySelector<HTMLButtonElement>('button[aria-label="Reveal Backdrop.png in Finder"]')?.click();
+    target.querySelector<HTMLButtonElement>('button[aria-label="Reveal Backdrop.png in its folder"]')?.click();
     await Promise.resolve();
 
     expect(revealSource).toHaveBeenCalledWith('/Users/editor/Backdrop.png');
@@ -421,7 +421,7 @@ describe('AssetsPanel', () => {
     expect(anchor).toBe(row);
     expect(position).toEqual({ x: 37, y: 49 });
     expect(items.filter((item: any) => item?.label).map((item: any) => item.label)).toEqual([
-      'Add to timeline', 'New Comp from Selection', 'Replace File…', 'Reveal in Finder', 'Delete media…'
+      'Add to timeline', 'New Comp from Selection', 'Replace File…', 'Show in Folder', 'Delete media…'
     ]);
 
     items.find((item: any) => item?.label === 'Replace File…').run();

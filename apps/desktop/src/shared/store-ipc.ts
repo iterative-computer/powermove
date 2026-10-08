@@ -1,6 +1,6 @@
 /*
  * Store IPC: browsing the registry, and installing, updating and removing
- * store extensions on this Mac (store plan §2.2, §2.6, §6).
+ * store extensions on this computer (store plan §2.2, §2.6, §6).
  *
  * Every channel is renderer-reachable and therefore hostile input: main
  * validates each payload with zod and checks the sender
@@ -64,12 +64,12 @@ export interface ExtensionsPageDto { items: ListingDto[]; nextCursor: string | n
 export type ReleaseWithCoordinateDto = ReleaseDto & { handle: string; slug: string };
 
 /**
- * Errors made on this Mac rather than by the registry:
+ * Errors made on this computer rather than by the registry:
  *   integrity          the download did not match the release's hashes, or its manifest
  *   builtin_collision  the extension's id is a built-in's
  *   local              the file system refused (disk full, permissions)
  *   no_update          there is nothing newer to update to
- *   not_installed      no store install with that id is on this Mac
+ *   not_installed      no store install with that id is on this computer
  *   folder_invalid     the folder can't be published as it is (a file, the manifest, a finding)
  *   upload_rejected    the registry refused an uploaded object
  * `id_collision` (a folder with that id exists) reuses the registry's code.
@@ -110,7 +110,7 @@ export type StoreUpdates = Record<string, StoreUpdateState>;
 export type LibraryGroup = 'store' | 'yours' | 'builtin';
 export type LibraryMaker = { handle: string } | { builtin: true } | { you: true };
 
-/** An extension on this Mac, as the Library shows it. */
+/** An extension on this computer, as the Library shows it. */
 export interface LibraryItemDto {
   localId: string;
   name: string;

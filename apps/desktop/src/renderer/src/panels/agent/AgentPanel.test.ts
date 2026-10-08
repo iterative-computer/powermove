@@ -721,7 +721,7 @@ describe('AgentPanel', () => {
     const files = log.querySelector('.agent-run-files')!;
     expect(files.querySelector('summary')!.textContent).toBe('1 file');
     expect(files.textContent).toContain('clip.mp4');
-    (files.querySelector('[aria-label="Reveal clip.mp4 in Finder"]') as HTMLButtonElement).click();
+    (files.querySelector('[aria-label="Reveal clip.mp4 in its folder"]') as HTMLButtonElement).click();
     expect(PM.AgentUI.revealArtifact).toHaveBeenCalledOnce();
     expect(log.querySelector('.agent-external-actions')).toBeNull();
     expect(target.textContent).not.toContain('Undo change');

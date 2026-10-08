@@ -209,7 +209,7 @@ describe('store IPC handlers', () => {
   it('never leaks an unexpected error', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     await expect(storeResult(async () => { throw new Error('/Users/jude/secret'); }))
-      .resolves.toEqual({ ok: false, error: { error: 'internal', detail: 'Something went wrong on this Mac. Try again.' } });
+      .resolves.toEqual({ ok: false, error: { error: 'internal', detail: 'Something went wrong on this computer. Try again.' } });
     error.mockRestore();
   });
 });

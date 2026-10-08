@@ -277,7 +277,7 @@ export function createExtensionSettingsControl(
 
     if (record.scope !== 'builtin') {
       const files = createSettingsSection('Files');
-      const reveal = el('button', 'btn', 'Show in Finder');
+      const reveal = el('button', 'btn', 'Show in Folder');
       reveal.type = 'button';
       const filesRow = rowOf('Extension files', reveal);
       const filesHint = el('span', '', record.dir || 'On this computer.');

@@ -3,7 +3,7 @@
  * therefore where it runs.
  *
  *   builtin        ships in the app
- *   local          made or forked on this Mac, by the user or their agent
+ *   local          made or forked on this computer, by the user or their agent
  *   store          installed from the Store: someone else's code
  *   store-trusted  a store install the user gave full access, behind the
  *                  native dialog below; recorded in provenance

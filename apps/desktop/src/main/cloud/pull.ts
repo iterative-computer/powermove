@@ -1,13 +1,13 @@
 /*
  * Updates as a git pull (store plan §2.6). An installed extension has three
- * trees: the release it was installed from (base), the folder on this Mac
+ * trees: the release it was installed from (base), the folder on this computer
  * (ours) and the new release (theirs). Comparing blob shas per path decides
  * each file the way git's three-way merge does, so only what the new release
  * changed is fetched, and changes made here survive an update:
  *
  *   ours = theirs          keep (nothing to do)
  *   ours = base            take theirs (or drop it if the release removed it)
- *   theirs = base          keep ours (only this Mac changed it)
+ *   theirs = base          keep ours (only this computer changed it)
  *   otherwise              both changed it: merge the lines, or it conflicts
  *
  * A conflict means the update can't be applied here; the installer then
@@ -21,9 +21,9 @@ export interface PullEntry { path: string; sha: string }
 export interface PullPlan {
   /** Files that become the release's blob. */
   take: PullEntry[];
-  /** Files left exactly as they are on this Mac. */
+  /** Files left exactly as they are on this computer. */
   keep: string[];
-  /** Files the release removed that this Mac hadn't changed. */
+  /** Files the release removed that this computer hadn't changed. */
   drop: string[];
   /** Files both sides changed: base is null when both added the path. */
   merge: Array<{ path: string; base: string | null; ours: string; theirs: string }>;

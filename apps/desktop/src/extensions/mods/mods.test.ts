@@ -255,7 +255,7 @@ describe('ModsPanel', () => {
     rowFor(target, 'Timeline').querySelector<HTMLButtonElement>('.more')?.click();
     flushSync();
 
-    expect(labels(harness.menus[0]!.items)).toEqual(['Reload', 'Show in Finder', '-', 'Remove…']);
+    expect(labels(harness.menus[0]!.items)).toEqual(['Reload', 'Show in Folder', '-', 'Remove…']);
     expect(labels(harness.menus[1]!.items)).toEqual(['Reload']);
     expect(harness.menus[0]!.anchor).toBe(rowFor(target, 'Bounce').querySelector('.more'));
   });

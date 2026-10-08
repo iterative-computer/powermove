@@ -334,7 +334,7 @@ describe('publish: confirmation and upload', () => {
       body: {
         error: 'head_moved',
         head: 'b'.repeat(40),
-        detail: 'This extension was published from another Mac since you last published here. Reinstall that version from the store first, then make your changes and publish.'
+        detail: 'This extension was published from another computer since you last published here. Reinstall that version from the store first, then make your changes and publish.'
       }
     });
   });

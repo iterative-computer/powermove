@@ -111,7 +111,7 @@ export async function storeResult<T>(run: () => Promise<T>): Promise<StoreResult
     else if (error instanceof StoreLocalError) body = { error: error.code, detail: error.detail };
     else {
       console.error('[store] action failed', error instanceof Error ? error.message : 'unknown error');
-      body = { error: 'internal', detail: 'Something went wrong on this Mac. Try again.' };
+      body = { error: 'internal', detail: 'Something went wrong on this computer. Try again.' };
     }
     return { ok: false, error: body };
   }
@@ -186,7 +186,7 @@ function publishStateOf(record: ExtensionRecord, provenance: ProvenanceRecord | 
 }
 
 /**
- * Everything on this Mac, grouped per plan §2.2: published and mine → Yours;
+ * Everything on this computer, grouped per plan §2.2: published and mine → Yours;
  * else installed from the store → From the store; else made here → Yours;
  * built-ins → Built in.
  */
@@ -375,7 +375,7 @@ export function registerStoreIpc(ipcMain: Pick<IpcMain, 'handle'>, options: Stor
   async function storeInstall(localId: string): Promise<{ record: ExtensionRecord; entry: ProvenanceRecord }> {
     const record = options.registry.list().find((candidate) => candidate.id === localId && candidate.scope === 'user');
     const entry = record ? await options.provenance.get(localId) : null;
-    if (!record || !entry?.origin) throw new StoreLocalError('not_installed', 'That extension isn’t installed from the store on this Mac.');
+    if (!record || !entry?.origin) throw new StoreLocalError('not_installed', 'That extension isn’t installed from the store on this computer.');
     return { record, entry };
   }
   async function applyTrust(localId: string): Promise<void> {

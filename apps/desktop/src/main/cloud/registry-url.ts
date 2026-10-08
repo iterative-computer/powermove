@@ -1,5 +1,5 @@
 /*
- * Which Powermove Cloud this Mac talks to. A released build talks only to
+ * Which Powermove Cloud this computer talks to. A released build talks only to
  * Powermove Cloud: the Store, accounts and publishing are Powermove's
  * service, and another registry could serve updates to extensions installed
  * from ours. So a packaged build ignores `<userData>/cloud/registry.json`

@@ -98,7 +98,7 @@ export async function activatePromptAttachment(PM: Record<string, any>, item: Re
     }
     PM.toast(`The original location for ${item.name} is no longer available.`);
   } catch (error) {
-    PM.toast(error instanceof Error ? error.message : `Could not reveal ${item.name} in Finder`, 6000);
+    PM.toast(error instanceof Error ? error.message : `Could not reveal ${item.name} in its folder`, 6000);
   }
 }
 
@@ -130,7 +130,7 @@ export function mountPromptAttachments(PM: Record<string, any>, card: HTMLElemen
     for (const item of items()) {
       const chip = document.createElement('span'); chip.className = 'agent-attachment';
       const open = document.createElement('button'); open.type = 'button'; open.className = 'agent-attachment-open';
-      open.setAttribute('aria-label', item.dataUrl ? `View ${item.name}` : `Reveal ${item.name} in Finder`);
+      open.setAttribute('aria-label', item.dataUrl ? `View ${item.name}` : `Reveal ${item.name} in its folder`);
       open.title = open.getAttribute('aria-label') || '';
       open.onclick = () => { void activatePromptAttachment(PM, item); };
       if (item.dataUrl) { const img = document.createElement('img'); img.src = item.dataUrl; img.alt = item.name; open.append(img); }

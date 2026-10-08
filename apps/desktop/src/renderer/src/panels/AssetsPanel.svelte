@@ -200,7 +200,7 @@
       ]),
       { label: offline ? 'Locate File…' : 'Replace File…', run: () => PM.pickFiles(false, { replaceAssetId: asset.id }) },
       ...(currentFolder ? [{ label: 'Move Out of Folder', run: () => moveInto({ assets: [asset.id] }, crumbs.at(-2)?.id ?? null) }] : []),
-      ...(sourcePath ? [{ label: 'Reveal in Finder', run: () => revealAssetSource(asset) }] : []),
+      ...(sourcePath ? [{ label: 'Show in Folder', run: () => revealAssetSource(asset) }] : []),
       '-',
       { label: 'Delete media…', run: () => requestDelete(asset) },
     ], { x: event.clientX, y: event.clientY });
@@ -312,10 +312,10 @@
     if (!sourcePath) return;
     try {
       await bridge()!.media.revealSource(sourcePath);
-      status = `Revealed ${asset.name} in Finder`;
+      status = `Revealed ${asset.name} in its folder`;
     } catch {
-      status = `Could not reveal ${asset.name} in Finder`;
-      PM.toast(`Could not reveal ${asset.name} in Finder`);
+      status = `Could not reveal ${asset.name} in its folder`;
+      PM.toast(`Could not reveal ${asset.name} in its folder`);
     }
   }
 
@@ -1034,7 +1034,7 @@
           {:else if asset.dur}<span class="asset-badge">{mediaDuration(asset.dur)}</span>{/if}
           <span class="asset-actions">
             {#if finderPath(asset)}
-              <button class="asset-reveal" type="button" title="Reveal in Finder" aria-label={`Reveal ${asset.name} in Finder`} onclick={(event) => revealAsset(event, asset)}>
+              <button class="asset-reveal" type="button" title="Show in Folder" aria-label={`Reveal ${asset.name} in its folder`} onclick={(event) => revealAsset(event, asset)}>
                 <Icon {PM} name="project" />
               </button>
             {/if}

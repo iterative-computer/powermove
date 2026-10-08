@@ -36,7 +36,7 @@ await build({
   // Bundle the shared TypeScript packages and their JS dependencies. The
   // standalone npm package must not depend on unpublished workspace modules.
   // Keep native/process-backed dependencies in node_modules.
-  external: ['@anthropic-ai/claude-agent-sdk', 'esbuild', 'ws', '@powermove/macos-haptics'],
+  external: ['@anthropic-ai/claude-agent-sdk', 'esbuild', 'ws', 'selfsigned', '@powermove/macos-haptics'],
   alias: { electron: path.join(desktop, 'src/server/electron-stub.ts') },
   define: { 'process.env.NODE_ENV': '"production"' },
   sourcemap: true,

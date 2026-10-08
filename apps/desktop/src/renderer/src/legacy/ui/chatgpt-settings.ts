@@ -70,7 +70,7 @@ function createAccountSettingsControl(
       // text stays out of Settings, where there is no room for diagnostics.
       description.textContent = status.detail
         ? (status.state === 'unavailable' ? presentError(status.detail).message : status.detail)
-        : status.state === 'unavailable' ? `${runtime} could not be reached on this Mac.`
+        : status.state === 'unavailable' ? `${runtime} could not be reached on this computer.`
           : `Use your ${name} subscription with Powermove.`;
       action.textContent = status.state === 'unavailable' ? 'Retry' : 'Connect';
       action.disabled = false;
@@ -115,7 +115,7 @@ function createAccountSettingsControl(
   });
   void accountApi.status().then(render, (error) => render({
     state: 'unavailable', email: null, planType: null,
-    detail: error instanceof Error ? error.message : `${runtime} could not be reached on this Mac.`
+    detail: error instanceof Error ? error.message : `${runtime} could not be reached on this computer.`
   }));
 
   return {

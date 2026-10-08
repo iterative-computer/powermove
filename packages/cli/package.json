@@ -48,6 +48,7 @@
     "svelte": "5.56.10",
     "ws": "^8.18.0",
     "happy-dom": "20.11.6",
-    "heic-convert": "2.1.0"
+    "heic-convert": "2.1.0",
+    "selfsigned": "5.5.0"
   }
 }

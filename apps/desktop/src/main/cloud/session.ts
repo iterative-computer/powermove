@@ -1,5 +1,5 @@
 /*
- * The Powermove Cloud session on this Mac (store plan §2.3 step 6, P0 amendments).
+ * The Powermove Cloud session on this computer (store plan §2.3 step 6, P0 amendments).
  *
  *   <userData>/cloud/session.bin   safeStorage-sealed JSON { origin, token, expiresAt }
  *   <userData>/cloud/session.json  non-secret cache { origin, me, fetchedAt, provider? }
@@ -105,7 +105,7 @@ export function createCloudSession(options: CloudSessionOptions): CloudSession {
           if (parsed.success) secret = parsed.data;
         }
       } catch {
-        // Missing, unreadable or sealed by another Mac: signed out.
+        // Missing, unreadable or sealed by another computer: signed out.
       }
       try {
         const parsed = Cache.safeParse(JSON.parse(await readFile(jsonFile, 'utf8')));

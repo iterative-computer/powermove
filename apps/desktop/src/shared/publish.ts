@@ -181,7 +181,7 @@ export interface PublishErrorContext {
 export function publishErrorText(error: ApiErrorBody, context: PublishErrorContext = {}): string {
   switch (error.error) {
     case 'head_moved':
-      return 'This extension was published from another Mac since you last published here. Reinstall that version from the store first, then make your changes and publish.';
+      return 'This extension was published from another computer since you last published here. Reinstall that version from the store first, then make your changes and publish.';
     case 'version_exists':
       return context.version ? `Version ${context.version} is already on the store. Choose a higher version.` : 'That version is already on the store. Choose a higher version.';
     case 'version_invalid':

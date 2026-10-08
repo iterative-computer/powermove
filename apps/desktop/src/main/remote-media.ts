@@ -2,7 +2,7 @@
  * `assets.importUrl`: main downloads a remote image, video or audio file for
  * an extension, so the bytes reach the normal asset import without CORS.
  *
- * The request leaves from this Mac, so it can reach what the Mac can reach.
+ * The request leaves from this computer, so it can reach what the computer can reach.
  * The guard keeps it on the public internet:
  *
  *  - https only (the shared extension-URL rule), the default port only, no

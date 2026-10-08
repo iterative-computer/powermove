@@ -405,7 +405,7 @@
             {#if item.id === 'general'}
               <header class="sg-heading">
                 <h2>General</h2>
-                <p>How Powermove looks and works on this Mac.</p>
+                <p>How Powermove looks and works on this computer.</p>
               </header>
               <section class="sg-section">
                 <h3 class="sg-section-title">Appearance</h3>
