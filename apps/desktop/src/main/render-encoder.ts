@@ -4,6 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { app, BrowserWindow, dialog, type IpcMain } from 'electron';
 import { IPC } from '../shared/ipc';
+import { encoderBinary } from './platform';
 
 export type EncoderOptions={width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number};
 type Job={destination?:string;dir:string;file:string;audio:string;process:ChildProcessWithoutNullStreams;done:Promise<void>;bytes:number;frameBytes:number;frames:number;options:EncoderOptions;owner:number;error:string};
@@ -36,8 +37,8 @@ export class RenderEncoder {
   // kill it outright; otherwise release never settles and the export stays busy.
   async release(token:string,owner:number){const job=this.job(token,owner);this.jobs.delete(token);if(job.process.exitCode===null&&job.process.signalCode===null){job.process.stdin.destroy();job.process.kill('SIGKILL');}await job.done.catch(()=>undefined);await rm(job.dir,{recursive:true,force:true});}
 }
-export function registerRenderEncoder(ipc:IpcMain,ctx:{isTrustedSender:(event:any)=>boolean}) {
-  const binary=app.isPackaged?path.join(process.resourcesPath,'encoder','ffmpeg'):path.join(app.getAppPath(),'node_modules','ffmpeg-static','ffmpeg');
+export function registerRenderEncoder(ipc:IpcMain,ctx:{isTrustedSender:(event:any)=>boolean;binary?:string}) {
+  const binary=ctx.binary??encoderBinary(app.getAppPath(),app.isPackaged?process.resourcesPath:undefined);
   const encoder=new RenderEncoder(binary,app.getPath('temp'));
   const trusted=(event:any)=>{if(!ctx.isTrustedSender(event))throw new Error('Unauthorized encoder request');return event.sender.id;};
   ipc.handle(IPC.renderStart,async(e,r)=>{

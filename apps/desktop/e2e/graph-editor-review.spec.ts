@@ -72,7 +72,7 @@ test('graph editor exposes its state and keeps value and speed navigation usable
   const after = await page.evaluate(() => (window as any).PM.proj.layers[0].p['scale.x'].kf.map((key: any) => ({ t: key.t, v: key.v, speed: key.outEase.speed })));
   expect(after.map(({ t, v }: any) => ({ t, v }))).toEqual(before.map(({ t, v }: any) => ({ t, v })));
   expect(after.map((key: any) => key.speed)).not.toEqual(before.map((key: any) => key.speed));
-  await page.keyboard.press('Meta+z');
+  await page.keyboard.press('ControlOrMeta+z');
   expect(await page.evaluate(() => (window as any).PM.proj.layers[0].p['scale.x'].kf.map((key: any) => ({ t: key.t, v: key.v, speed: key.outEase.speed })))).toEqual(before);
   await chooseNativeMenu(session, 'Value graph', () => options.click());
   await page.screenshot({ path: info.outputPath('value-graph-fitted.png') });

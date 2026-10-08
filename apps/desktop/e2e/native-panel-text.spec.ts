@@ -25,15 +25,15 @@ test('native pointer selection in the agent copies into its composer', async ({ 
   await page.mouse.move(points.end, points.y, { steps: 12 }); await page.mouse.up();
   await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toBe('Native');
   await session.app.evaluate(({ clipboard }) => clipboard.writeText('sentinel'));
-  await page.keyboard.press('Meta+C');
+  await page.keyboard.press('ControlOrMeta+C');
   await expect.poll(() => session.app.evaluate(({ clipboard }) => clipboard.readText())).toBe('Native');
-  await composer.click(); await page.keyboard.press('Meta+V');
+  await composer.click(); await page.keyboard.press('ControlOrMeta+V');
   await expect(composer).toHaveText('Native');
   const layersBefore = await page.evaluate(() => (window as any).PM.proj.layers.map((l: any) => l.id));
   const selectedBefore = await page.evaluate(() => [...(window as any).PM.sel.layers]);
-  await reply.click(); await page.keyboard.press('Meta+A');
+  await reply.click(); await page.keyboard.press('ControlOrMeta+A');
   await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toContain('Native selection works across words.');
-  await page.keyboard.press('Meta+X');
+  await page.keyboard.press('ControlOrMeta+X');
   expect(await page.evaluate(() => (window as any).PM.proj.layers.map((l: any) => l.id))).toEqual(layersBefore);
   expect(await page.evaluate(() => [...(window as any).PM.sel.layers])) .toEqual(selectedBefore);
 });
@@ -53,15 +53,15 @@ for (const field of ['input', 'textarea', 'contenteditable', 'shadow']) test(`na
     if (kind === 'shadow') { const root = control.attachShadow({ mode: 'open' }); root.innerHTML = '<input value="Original text">'; }
   }, field);
   const control = page.locator('#native-text-fixture').locator(field === 'contenteditable' ? '[contenteditable]' : field === 'shadow' ? 'input' : field);
-  await control.click(); await page.keyboard.press('Meta+A');
+  await control.click(); await page.keyboard.press('ControlOrMeta+A');
   await session.app.evaluate(({ clipboard }) => clipboard.writeText('sentinel'));
-  await page.keyboard.press('Meta+C');
+  await page.keyboard.press('ControlOrMeta+C');
   await expect.poll(() => session.app.evaluate(({ clipboard }) => clipboard.readText())).toBe('Original text');
-  await page.keyboard.press('Meta+X');
+  await page.keyboard.press('ControlOrMeta+X');
   await expect.poll(() => control.evaluate((el: any) => el.value ?? el.textContent)).toBe('');
-  await page.keyboard.press('Meta+V');
+  await page.keyboard.press('ControlOrMeta+V');
   await expect.poll(() => control.evaluate((el: any) => el.value ?? el.textContent)).toBe('Original text');
-  await page.keyboard.press('Meta+Z');
+  await page.keyboard.press('ControlOrMeta+Z');
   await expect.poll(() => control.evaluate((el: any) => el.value ?? el.textContent)).toBe('');
 });
 

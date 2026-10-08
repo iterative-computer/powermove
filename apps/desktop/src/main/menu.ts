@@ -63,7 +63,8 @@ export interface WindowActions {
 
 export function appMenuTemplate(
   send: (command: MenuCommand) => void,
-  windows?: WindowActions
+  windows?: WindowActions,
+  platform: NodeJS.Platform = process.platform
 ): MenuItemConstructorOptions[] {
   const viewItems: MenuItemConstructorOptions[] = [
     commandItem('Zoom In', 'CommandOrControl+=', 'zoomIn', send, false),
@@ -90,12 +91,13 @@ export function appMenuTemplate(
         { type: 'separator' },
         commandItem('Settings…', 'CommandOrControl+,', 'settings', send, false),
         { type: 'separator' },
-        { role: 'services' },
-        { type: 'separator' },
-        { role: 'hide', accelerator: 'Command+H' },
-        { role: 'hideOthers', accelerator: 'Command+Alt+H' },
-        { type: 'separator' },
-        { role: 'quit', accelerator: 'Command+Q' }
+        ...(platform === 'darwin' ? [{ role: 'services' as const },
+        { type: 'separator' as const },
+        { role: 'hide' as const, accelerator: 'Command+H' },
+        { role: 'hideOthers' as const, accelerator: 'Command+Alt+H' },
+        { type: 'separator' as const },
+        ] : []),
+        { role: 'quit', accelerator: platform === 'darwin' ? 'Command+Q' : 'Alt+F4' }
       ]
     },
     {
@@ -184,7 +186,7 @@ export function appMenuTemplate(
           click: () => windows?.newWindow()
         },
         { type: 'separator' },
-        { role: 'front' }
+        ...(platform === 'darwin' ? [{ role: 'front' as const }] : [])
       ]
     }
   ];

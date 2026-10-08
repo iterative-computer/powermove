@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { shortcutLabel } from '../platform';
   import { tick } from 'svelte';
   import { flip } from 'svelte/animate';
   import Icon from '../panels/Icon.svelte';
@@ -387,7 +388,7 @@
       type="button"
       role="tab"
       data-tab-id="home"
-      title="Projects (⌘P)"
+      title={shortcutLabel('Projects (⌘P)')}
       aria-label="Projects"
       aria-selected={homeOpen}
       tabindex={tabIndex('home')}
@@ -461,7 +462,7 @@
             <button
               class="project-doc-close"
               type="button"
-              title="Close tab (⌘W)"
+              title={shortcutLabel('Close tab (⌘W)')}
               aria-label={`Close ${tabName}`}
               tabindex="-1"
               onclick={(event) => {
@@ -484,7 +485,7 @@
   <button
     class="project-strip-btn project-new"
     type="button"
-    title="New project (⌥⌘N)"
+    title={shortcutLabel('New project (⌥⌘N)')}
     aria-label="New project"
     onclick={() => PM.newProject?.()}
   ><Icon {PM} name="plus" /></button>
@@ -504,7 +505,7 @@
     class="iconbtn"
     class:on={settingsOpen}
     type="button"
-    title="Settings (⌘,)"
+    title={shortcutLabel('Settings (⌘,)')}
     aria-label="Open settings"
     aria-pressed={settingsOpen}
     onclick={() => (settingsOpen ? PM.SettingsUI?.close?.() : PM.SettingsUI?.open?.())}
@@ -512,7 +513,7 @@
     <Icon {PM} name="gear" />
   </button>
   {#if !homeOpen}
-    <button class="btn pri tb-export" type="button" title="Export… (⌘E)" aria-label="Export…" onclick={() => PM.Export?.dialog?.()}>
+    <button class="btn pri tb-export" type="button" title={shortcutLabel('Export… (⌘E)')} aria-label="Export…" onclick={() => PM.Export?.dialog?.()}>
       <Icon {PM} name="export" />Export
     </button>
   {/if}

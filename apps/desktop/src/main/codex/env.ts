@@ -3,16 +3,17 @@ import { constants } from 'node:fs';
 import { access, open, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { updatedRuntimeCandidates } from '../runtime-updates';
+import { agentPlatform, executableName } from '../platform';
 
-export const PACKAGED_CODEX_RELATIVE_PATH = path.join('codex', 'bin', 'codex');
+export const PACKAGED_CODEX_RELATIVE_PATH = path.join('codex', 'bin', executableName('codex'));
 export const DEVELOPMENT_CODEX_RELATIVE_PATH = path.join(
   'node_modules',
   '@openai',
-  'codex-darwin-arm64',
+  `codex-${agentPlatform().suffix}`,
   'vendor',
-  'aarch64-apple-darwin',
+  agentPlatform().triple,
   'bin',
-  'codex'
+  executableName('codex')
 );
 
 export const KNOWN_CODEX_PATHS = [
@@ -61,7 +62,7 @@ async function executable(candidate: string | null | undefined): Promise<string 
 async function executableRuntime(candidate: string | null | undefined): Promise<string | null> {
   const binary = await executable(candidate);
   if (binary === null) return null;
-  const host = path.join(path.dirname(binary), 'codex-code-mode-host');
+  const host = path.join(path.dirname(binary), executableName('codex-code-mode-host'));
   const companion = await executable(host);
   if (companion === null) return null;
   let file;
@@ -81,7 +82,9 @@ async function probeLoginShell(): Promise<string | null> {
   if (loginShellProbe === null) {
     loginShellProbe = (async () => {
       try {
-        const stdout = await execFileText('/bin/zsh', ['-ilc', 'command -v codex']);
+        const stdout = process.platform === 'win32'
+          ? await execFileText('where.exe', ['codex.exe'])
+          : await execFileText(process.platform === 'darwin' ? '/bin/zsh' : '/bin/sh', ['-ilc', 'command -v codex']);
         const lines = stdout
           .split(/\r?\n/u)
           .map((line) => line.trim())

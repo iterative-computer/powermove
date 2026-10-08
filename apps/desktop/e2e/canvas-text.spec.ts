@@ -53,14 +53,14 @@ test('edits existing text in place: caret, selection, clipboard, multiline, comm
   for (let i = 0; i < 5; i++) await page.keyboard.press('Shift+ArrowLeft');
   expect((await state()).selection).toEqual({ layer: id, start: 4, end: 9 });
   await page.screenshot({ path: testInfo.outputPath('canvas-selection.png') });
-  await page.keyboard.press('Meta+C');
+  await page.keyboard.press('ControlOrMeta+C');
   expect(await session.app.evaluate(({ clipboard }) => clipboard.readText())).toBe('arrag');
   await session.app.evaluate(({ clipboard }) => clipboard.writeText(' works'));
-  await page.keyboard.press('Meta+V');
+  await page.keyboard.press('ControlOrMeta+V');
   await page.keyboard.press('Enter');
   await page.keyboard.type('Second line');
   expect(await source()).toBe('ffag works\nSecond line');
-  await page.keyboard.press('Meta+Enter');
+  await page.keyboard.press('ControlOrMeta+Enter');
   await expect(editor).toHaveCount(0);
   expect((await state()).editing).toBeNull();
   await page.evaluate(() => (window as any).PM.hist.undo()); expect(await source()).toBe('ffagarrag');
@@ -140,7 +140,7 @@ test('text tool: dragging creates a fixed-width paragraph with automatic height'
   expect(created.boxHeight).toBe(0);
   await page.keyboard.type('Wrapped paragraph text that runs past the box width and grows downward');
   expect(await source(created.id)).toContain('grows downward');
-  await page.keyboard.press('Meta+Enter');
+  await page.keyboard.press('ControlOrMeta+Enter');
   await expect(editor).toHaveCount(0);
   expect((await state()).layers).toHaveLength(2);
   expect(session.diagnostics.pageErrors).toEqual([]);
@@ -177,9 +177,9 @@ test('Enter edits the selected text layer; Command+A selects all inside the edit
   expect((await state()).selection).toEqual({ layer: id, start: 0, end: 9 });
   await page.keyboard.press('End');
   expect((await state()).selection).toEqual({ layer: id, start: 9, end: 9 });
-  await page.keyboard.press('Meta+A');
+  await page.keyboard.press('ControlOrMeta+A');
   expect((await state()).selection).toEqual({ layer: id, start: 0, end: 9 });
-  await page.keyboard.press('Meta+B');
+  await page.keyboard.press('ControlOrMeta+B');
   expect(await page.evaluate(id => { const d = (window as any).PM.L(id).d; return d.weight?.v ?? d.weight; }, id)).toBe(700);
   // Drop focus to the body the way a toast or save can; the editor takes it back.
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());

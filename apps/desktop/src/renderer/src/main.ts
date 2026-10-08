@@ -15,6 +15,7 @@ import { installWebBridge, remoteLink } from './host/web-bridge';
 // in the kernel's capture before the engines read the store during their
 // synchronous boot.
 const remote = await installWebBridge();
+if (/^Win/i.test(navigator.platform)) document.documentElement.classList.add('windows-app');
 await import('./legacy/bootstrap');
 if (remote) {
   // Other tabs on the same host edit the same document; keep this one in step.

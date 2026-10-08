@@ -2,7 +2,7 @@
   "name": "powermove-monorepo",
   "license": "AGPL-3.0-or-later",
   "private": true,
-  "description": "Powermove: an AI-native motion editor for macOS, its website, and shared packages.",
+  "description": "Powermove: an AI-native motion editor for macOS and Windows, its website, and shared packages.",
   "workspaces": [
     "apps/*",
     "packages/*"
@@ -18,7 +18,8 @@
     "dist:mac": "bun run --cwd apps/desktop dist:mac",
     "dist:release": "bun run --cwd apps/desktop dist:release",
     "build:cli": "bun run --cwd packages/cli build",
-    "serve": "bun run --cwd packages/cli build && node packages/cli/bin/powermove.mjs serve"
+    "serve": "bun run --cwd packages/cli build && node packages/cli/bin/powermove.mjs serve",
+    "dist:win": "bun run --cwd apps/desktop dist:win"
   },
   "trustedDependencies": [
     "@anthropic-ai/claude-code",

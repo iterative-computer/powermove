@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import path from 'node:path';
+import { windowsScript } from './windows-system';
 
 /** `started` is ps's lstart: with the pid, it names one process for its whole life. */
 export type ProcessRow = { pid: number; ppid: number; pgid: number; uid: number; started: string };
@@ -16,6 +17,11 @@ export function parseProcessTable(stdout: string): ProcessRow[] {
 }
 
 function processTable(): Promise<ProcessRow[]> {
+  if (process.platform === 'win32') return windowsScript('ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -gt 1 -and $_.CreationDate } | ForEach-Object { @{ pid = [int]$_.ProcessId; ppid = [int]$_.ParentProcessId; pgid = [int]$_.ProcessId; uid = 0; started = $_.CreationDate.ToUniversalTime().ToString("o") } })').then(source => {
+    const rows: unknown = JSON.parse(source);
+    if (!Array.isArray(rows)) throw new Error('Windows returned an invalid process table.');
+    return rows.filter((row): row is ProcessRow => !!row && typeof row.pid === 'number' && typeof row.ppid === 'number' && typeof row.started === 'string');
+  });
   return new Promise((resolve, reject) => {
     execFile('/bin/ps', ['-A', '-o', 'pid=,ppid=,pgid=,uid=,lstart='],
       { encoding: 'utf8', timeout: 5_000, maxBuffer: 16 * 1024 * 1024, env: { LC_ALL: 'C', ...(process.env.TZ ? { TZ: process.env.TZ } : {}) } },
@@ -119,7 +125,7 @@ export class ProcessFamily {
     // A group id outlives its leader only while members remain; later reuse starts later.
     const floor = this.options.since - 1_000;
     for (const row of rows) {
-      if (row.pid !== process.pid && row.pgid === this.group && !(Date.parse(row.started) < floor)) this.members.set(row.pid, row.started);
+      if (row.pid !== process.pid && row.pgid === this.group && (process.platform === 'win32' || !(Date.parse(row.started) < floor))) this.members.set(row.pid, row.started);
     }
     for (let grew = true; grew;) {
       grew = false;
@@ -168,6 +174,21 @@ export class ProcessFamily {
   }
 
   private async killOnce(): Promise<void> {
+    if (process.platform === 'win32') {
+      // Windows has no POSIX groups or SIGSTOP. Kill verified process trees,
+      // including descendants recorded before their parent exited.
+      for (let round = 0; round < 3; round++) {
+        const rows = await processTable();
+        this.record(rows);
+        const alive = rows.filter(row => this.members.get(row.pid) === row.started);
+        if (!alive.length) break;
+        await Promise.all(alive.map(row => new Promise<void>(resolve => {
+          execFile('taskkill.exe', ['/PID', String(row.pid), '/T', '/F'], { windowsHide: true, timeout: 5_000 }, () => resolve());
+        })));
+      }
+      this.members.clear();
+      return;
+    }
     const frozen = new Set<number>();
     // The whole group stops at once, but only while it is still this command's.
     let group = false;

@@ -34,7 +34,7 @@ test('Command+V pastes text into a panel search field without pasting layers', a
   await field.evaluate((input: HTMLInputElement) => {
     input.setSelectionRange(input.value.length, input.value.length);
   });
-  await page.keyboard.press('Meta+V');
+  await page.keyboard.press('ControlOrMeta+V');
 
   await expect(field).toHaveValue('Before pasted text');
   expect(await session.app.evaluate(() => (globalThis as any).__panelNativePasteCalls)).toBe(1);

@@ -95,15 +95,18 @@ async function entries(directory: string) {
   }
 }
 
-export interface CreativeWorkspaceOptions { home?: string; applications?: string; platform?: NodeJS.Platform }
+export interface CreativeWorkspaceOptions { home?: string; applications?: string; platform?: NodeJS.Platform; appData?: string; programFilesX86?: string }
 
 /** Reads only layout files, the current-workspace preference and tool labels. */
 export async function inspectCreativeWorkspace(args: Record<string, unknown>, options: CreativeWorkspaceOptions = {}) {
   if (args.appId !== 'after-effects') throw new Error('Choose After Effects. More creative apps will be supported later.');
   if (args.workspaceName !== undefined && (typeof args.workspaceName !== 'string' || args.workspaceName.length > 200)) throw new Error('Provide a workspace name of at most 200 characters.');
-  if ((options.platform ?? process.platform) !== 'darwin') return { status: 'unavailable', message: 'After Effects workspace import currently supports macOS.' };
+  const platform = options.platform ?? process.platform;
+  if (!['darwin', 'win32'].includes(platform)) return { status: 'unavailable', message: 'After Effects workspace import supports macOS and Windows.' };
+  const windows = platform === 'win32';
   const home = options.home ?? os.homedir();
-  const preferences = path.join(home, 'Library/Preferences/Adobe/After Effects');
+  const appData = options.appData ?? process.env.APPDATA ?? path.join(home, 'AppData', 'Roaming');
+  const preferences = windows ? path.join(appData, 'Adobe', 'After Effects') : path.join(home, 'Library/Preferences/Adobe/After Effects');
   const versions = (await entries(preferences)).filter(entry => entry.isDirectory() && /^\d+\.\d+$/.test(entry.name))
     .map(entry => entry.name).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
   if (!versions.length) return { status: 'unavailable', message: 'No saved After Effects setup found. Save a workspace in After Effects, then try again.' };
@@ -134,7 +137,7 @@ export async function inspectCreativeWorkspace(args: Record<string, unknown>, op
 
   const scripts = new Set<string>();
   const scriptDirectories = [path.join(directory, 'Scripts/ScriptUI Panels')];
-  const applications = options.applications ?? '/Applications';
+  const applications = options.applications ?? (windows ? path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Adobe') : '/Applications');
   for (const entry of (await entries(applications)).filter(entry => entry.isDirectory() && /^Adobe After Effects/.test(entry.name)).slice(0, 12)) {
     const base = path.join(applications, entry.name);
     scriptDirectories.push(path.join(base, 'Scripts/ScriptUI Panels'));
@@ -146,7 +149,8 @@ export async function inspectCreativeWorkspace(args: Record<string, unknown>, op
     if (file.isFile() && /\.jsx(?:bin)?$/i.test(file.name) && scripts.size < 128) scripts.add(file.name);
   }
   const extensions: Array<{ id: string; name: string }> = [];
-  for (const folder of [path.join(home, 'Library/Application Support/Adobe/CEP/extensions'), '/Library/Application Support/Adobe/CEP/extensions']) {
+  const cepFolders = windows ? [path.join(appData, 'Adobe', 'CEP', 'extensions'), path.join(options.programFilesX86 ?? process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)', 'Common Files', 'Adobe', 'CEP', 'extensions')] : [path.join(home, 'Library/Application Support/Adobe/CEP/extensions'), '/Library/Application Support/Adobe/CEP/extensions'];
+  for (const folder of cepFolders) {
     for (const entry of (await entries(folder)).filter(item => item.isDirectory()).slice(0, 128)) {
       const manifest = await smallFile(path.join(folder, entry.name, 'CSXS/manifest.xml'));
       if (!manifest || !/<Host\b[^>]*\bName\s*=\s*['"]AEFT['"]/.test(manifest)) continue;

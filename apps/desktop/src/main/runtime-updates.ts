@@ -1,10 +1,11 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createWriteStream, readFileSync } from 'node:fs';
-import { chmod, cp, mkdir, mkdtemp, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import os from 'node:os';
+import { agentPlatform, executableName } from './platform';
 import path from 'node:path';
 
 /* The agent runtimes ship inside the signed app bundle, which Powermove can't
@@ -23,6 +24,7 @@ export interface RuntimeUpdateResult {
 interface InstalledRuntime {
   version: string;
   appVersion: string;
+  directory?: string;
 }
 
 interface Release {
@@ -33,8 +35,8 @@ interface Release {
 
 const REGISTRY = 'https://registry.npmjs.org';
 const RELATIVE_BINARY: Record<RuntimeProvider, string> = {
-  claude: path.join('claude', 'bin', 'claude'),
-  codex: path.join('codex', 'bin', 'codex')
+  claude: path.join('claude', 'bin', executableName('claude')),
+  codex: path.join('codex', 'bin', executableName('codex'))
 };
 
 let root: string | null = null;
@@ -58,11 +60,10 @@ function installed(provider: RuntimeProvider): InstalledRuntime | null {
 /** The downloaded runtime, when one exists for this app version. Synchronous so
     the bundled-candidate lists can include it without changing their shape. */
 export function updatedRuntimeCandidates(provider: RuntimeProvider): string[] {
-  return root !== null && installed(provider) ? [path.join(root, RELATIVE_BINARY[provider])] : [];
-}
-
-function darwinArch(): 'arm64' | 'x64' {
-  return process.arch === 'x64' ? 'x64' : 'arm64';
+  const value = installed(provider);
+  if (root === null || !value) return [];
+  if (value.directory && /^\.versions[\\/][A-Za-z0-9._-]+$/.test(value.directory)) return [path.join(root, value.directory, 'bin', executableName(provider))];
+  return [path.join(root, RELATIVE_BINARY[provider])];
 }
 
 async function registry(name: string, tag: string): Promise<Release> {
@@ -70,7 +71,7 @@ async function registry(name: string, tag: string): Promise<Release> {
   if (!response.ok) throw new Error(`Couldn’t check for the latest ${name} (${response.status}).`);
   const body = await response.json() as { version?: unknown; dist?: { tarball?: unknown; integrity?: unknown } };
   const { version, dist } = body;
-  if (typeof version !== 'string' || typeof dist?.tarball !== 'string' || typeof dist.integrity !== 'string'
+  if (typeof version !== 'string' || !/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(version) || typeof dist?.tarball !== 'string' || typeof dist.integrity !== 'string'
     || !dist.tarball.startsWith(`${REGISTRY}/`)) {
     throw new Error(`The registry returned an unexpected release for ${name}.`);
   }
@@ -78,11 +79,11 @@ async function registry(name: string, tag: string): Promise<Release> {
 }
 
 async function latestRelease(provider: RuntimeProvider): Promise<Release> {
-  const arch = darwinArch();
-  if (provider === 'claude') return registry(`@anthropic-ai/claude-code-darwin-${arch}`, 'latest');
+  const { suffix } = agentPlatform();
+  if (provider === 'claude') return registry(`@anthropic-ai/claude-code-${suffix}`, 'latest');
   // Codex publishes each platform build as a prerelease tag of the main package.
   const { version } = await registry('@openai/codex', 'latest');
-  const release = await registry('@openai/codex', `${version}-darwin-${arch}`);
+  const release = await registry('@openai/codex', `${version}-${suffix}`);
   return { ...release, version };
 }
 
@@ -136,7 +137,7 @@ export async function installRuntimeIfNewer(
   provider: RuntimeProvider,
   currentBinary: string
 ): Promise<RuntimeUpdateResult | null> {
-  if (root === null || process.platform !== 'darwin') return null;
+  if (root === null || !['darwin', 'win32', 'linux'].includes(process.platform)) return null;
   const current = installed(provider)?.version
     ?? (await run(currentBinary, ['--version'], 15_000)).match(/\d+\.\d+\.\d+\S*/)?.[0];
   const release = await latestRelease(provider);
@@ -147,7 +148,7 @@ export async function installRuntimeIfNewer(
 /** Download, verify, and activate the newest runtime for a provider. */
 export async function installLatestRuntime(provider: RuntimeProvider): Promise<RuntimeUpdateResult> {
   if (root === null) throw new Error('Runtime updates aren’t available in this build.');
-  if (process.platform !== 'darwin') throw new Error('Runtime updates are only available on macOS.');
+  agentPlatform();
   return installRelease(provider, await latestRelease(provider));
 }
 
@@ -157,38 +158,30 @@ async function installRelease(provider: RuntimeProvider, release: Release): Prom
   try {
     const archive = path.join(scratch, 'package.tgz');
     await download(release, archive);
-    await run('/usr/bin/tar', ['-xzf', archive, '-C', scratch]);
+    await run(process.platform === 'win32' ? path.win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe') : 'tar', ['-xzf', archive, '-C', scratch]);
 
     const versions = path.join(root, '.versions');
-    const target = path.join(versions, `${provider}-${release.version}`);
+    const target = path.join(versions, `${provider}-${release.version}-${randomUUID()}`);
     await rm(target, { recursive: true, force: true });
     await mkdir(target, { recursive: true });
     if (provider === 'claude') {
       await mkdir(path.join(target, 'bin'));
-      await cp(path.join(scratch, 'package', 'claude'), path.join(target, 'bin', 'claude'));
+      await cp(path.join(scratch, 'package', executableName('claude')), path.join(target, 'bin', executableName('claude')));
     } else {
-      const triple = darwinArch() === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
+      const { triple } = agentPlatform();
       await cp(path.join(scratch, 'package', 'vendor', triple), target, { recursive: true });
     }
-    const binary = path.join(target, 'bin', provider);
+    const binary = path.join(target, 'bin', executableName(provider));
     await chmod(binary, 0o755);
     await run(binary, ['--version'], 15_000);
 
-    // Swap the provider link atomically so a run starting now sees either
-    // the old runtime or the new one, never a half-written directory.
-    const link = path.join(root, provider);
-    const staged = `${link}.${process.pid}.tmp`;
-    await rm(staged, { force: true });
-    await symlink(target, staged);
-    await rename(staged, link);
-    await writeFile(path.join(root, `${provider}.json`),
-      JSON.stringify({ version: release.version, appVersion } satisfies InstalledRuntime));
-
-    for (const entry of await readdir(versions)) {
-      if (entry.startsWith(`${provider}-`) && entry !== path.basename(target)) {
-        await rm(path.join(versions, entry), { recursive: true, force: true });
-      }
-    }
+    // Activate with a small atomic manifest, avoiding administrator-only
+    // symlinks and replacement of executables Windows may still have open.
+    const manifest = path.join(root, `${provider}.json`);
+    const staged = `${manifest}.${randomUUID()}.tmp`;
+    await writeFile(staged, JSON.stringify({ version: release.version, appVersion, directory: path.relative(root, target) } satisfies InstalledRuntime));
+    await rename(staged, manifest);
+    // Keep older directories: an active run may still be using one of them.
     return { provider, version: release.version };
   } finally {
     await rm(scratch, { recursive: true, force: true });

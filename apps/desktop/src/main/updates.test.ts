@@ -52,6 +52,19 @@ describe('macOS updates', () => {
     expect(mocks.check).not.toHaveBeenCalled();
     expect(mocks.handlers.size).toBe(0);
   });
+  it('announces Windows NSIS downloads and quits through the save barrier', () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    const win = window(); mocks.windows.push(win);
+    installUpdates(menu as unknown as Menu);
+    (autoUpdater as EventEmitter).emit('update-available', { version: '1.0.2' });
+    nativeUpdater.emit('update-downloaded');
+    expect(item.label).not.toContain('Quit to Install');
+    (autoUpdater as EventEmitter).emit('update-downloaded', { version: '1.0.2' });
+    expect(mocks.handlers.get(IPC.updateStatus)?.()).toMatchObject({ status: 'ready', version: '1.0.2' });
+    mocks.handlers.get(IPC.updateInstall)?.();
+    expect(mocks.app.quit).toHaveBeenCalledOnce();
+    expect(autoUpdater.autoRunAppAfterInstall).toBe(true);
+  });
   it('checks beta releases without downgrades and coalesces checks', async () => {
     installUpdates(menu as unknown as Menu);
     expect(autoUpdater.allowPrerelease).toBe(true);

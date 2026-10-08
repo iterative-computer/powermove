@@ -12,6 +12,14 @@ afterEach(async () => {
 });
 
 describe('resolvePackagedEsbuildBinary', () => {
+  it('finds the Windows executable at the package root', async () => {
+    const resourcesPath = await mkdtemp(path.join(os.tmpdir(), 'powermove-esbuild-win-'));
+    temporaryDirectories.push(resourcesPath);
+    const binary = path.join(resourcesPath, 'app.asar.unpacked', 'node_modules', '@esbuild', 'win32-x64', 'esbuild.exe');
+    await mkdir(path.dirname(binary), { recursive: true });
+    await writeFile(binary, 'fixture');
+    expect(resolvePackagedEsbuildBinary(resourcesPath, 'win32', 'x64')).toBe(binary);
+  });
   it('resolves the executable electron-builder unpacked outside app.asar', async () => {
     const resourcesPath = await mkdtemp(path.join(os.tmpdir(), 'powermove-esbuild-test-'));
     temporaryDirectories.push(resourcesPath);

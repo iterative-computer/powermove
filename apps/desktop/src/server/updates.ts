@@ -10,12 +10,10 @@
  * itself and restart (a service brings it back; a terminal run is told to
  * restart). An `npx` run cannot, so the tab is handed the command.
  */
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { runNpm } from './npm';
 
 import type { AppUpdateState } from '../shared/ipc';
 
-const run = promisify(execFile);
 
 export const PACKAGE = 'powermove-cli';
 /** 'managed' is the copy `powermove install` keeps under the profile (userData/host). */
@@ -133,7 +131,7 @@ export class UpdateChecker {
     try {
       const target = `${PACKAGE}@${this.state.version}`;
       const args = kind === 'managed' ? ['install', '--prefix', this.options.managedPrefix!, '--no-fund', '--no-audit', '--loglevel', 'error', target] : ['i', '-g', target];
-      await (this.options.selfUpdate ?? (async () => { await run('npm', args, { timeout: 30 * 60 * 1000 }); }))();
+      await (this.options.selfUpdate ?? (async () => { await runNpm(args, { timeout: 30 * 60 * 1000 }); }))();
     } catch (error) {
       this.options.log?.(`[updates] self-update failed: ${error instanceof Error ? error.message : String(error)}`);
       this.set({ ...this.state, status: 'ready' });

@@ -1164,7 +1164,7 @@ const trackView = createTrackView({
   keySelected: (key) => keySelected(key),
   rowSelected: (row) => api.selection.layers().includes(row.L.id) && trackSelected(row, api.selection.chan() ?? ''),
   keyDown: (e, row, x, y) => keyDown(e, row, x, y, -1),
-  keyMarquee: (e) => marquee(e, { additive: e.shiftKey || e.metaKey }),
+  keyMarquee: (e) => marquee(e, { additive: e.shiftKey || e.metaKey || e.ctrlKey }),
   editKeyAt: (row, x) => editKeyAt(row, x),
   focusRow: (row) => {
     api.selection.set({ chan: row.key });
@@ -2823,14 +2823,14 @@ function onDown(e: any) {
   }
   if (inGraph(x, y)) return graphDown(e, x, y);
   const hr = hitRow(y);
-  if (!hr) return marquee(e, { additive: e.shiftKey || e.metaKey });
+  if (!hr) return marquee(e, { additive: e.shiftKey || e.metaKey || e.ctrlKey });
   const r = hr.row;
   if (r.kind === 'prop') return keyDown(e, r, x, y, hr.i);
   const L = r.L;
   const span = L.type === 'group' ? api.groups.span(L) : L;
   const x0 = t2x(span.from), x1 = t2x(span.from + span.dur);
   const onClip = x >= x0 - 5 && x <= x1 + 5;
-  if (!onClip) return marquee(e, { additive: e.shiftKey || e.metaKey });
+  if (!onClip) return marquee(e, { additive: e.shiftKey || e.metaKey || e.ctrlKey });
   if (quickOffsetModifiers(e) && api.selection.layers().includes(L.id) && quickOffsetLayerGroups().length > 1) {
     if (L.lock) return;
     return quickOffsetLayers(e);
@@ -3211,7 +3211,7 @@ function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0) {
 
 function gutterDown(e: any, x: any, y: any) {
   const hr = hitRow(y);
-  if (!hr) { if (!e.shiftKey && !e.metaKey) clearTimelineSelection(); return; }
+  if (!hr) { if (!e.shiftKey && !e.metaKey && !e.ctrlKey) clearTimelineSelection(); return; }
   const r = hr.row;
   if (r.kind !== 'layer') {
     api.selection.set({ chan: r.key });
@@ -3518,7 +3518,7 @@ function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
     (k: any) => Math.abs(t2x(r.L.from + k.t) - x), 6,
   );
   const quickModifier = quickOffsetModifiers(e);
-  const additive = !quickModifier && (e.shiftKey || e.metaKey);
+  const additive = !quickModifier && (e.shiftKey || e.metaKey || e.ctrlKey);
   if (!hit) return marquee(e, { additive });
   api.selection.set({ chan: r.key });
   T.focusGraph(r.L, r.key);
@@ -3613,10 +3613,10 @@ function graphDown(e: any, x: any, y: any) {
   if (pointDistance >= GRAPH_POINT_HIT && pointInGraphSelection(g.selectionBounds, x, y)) {
     return dragGraphSelection(e, g, L);
   }
-  if (!pointHit || pointDistance >= GRAPH_POINT_HIT) return marquee(e, { additive: e.shiftKey || e.metaKey, graph: true });
+  if (!pointHit || pointDistance >= GRAPH_POINT_HIT) return marquee(e, { additive: e.shiftKey || e.metaKey || e.ctrlKey, graph: true });
   L = pointHit.axis.L;
   const hit = pointHit.key;
-  const additive = e.shiftKey || e.metaKey;
+  const additive = e.shiftKey || e.metaKey || e.ctrlKey;
   const wasSelected = keySelected(hit);
   if (additive) api.selection.select(L.id, true);
   else if (!api.selection.layers().includes(L.id)) api.selection.select(L.id);

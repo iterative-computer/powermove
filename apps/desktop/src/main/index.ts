@@ -1,3 +1,4 @@
+import { encoderBinary, windowChrome } from './platform';
 import { registerFontsIpc } from './fonts';
 import { registerAgentNotifications } from './agent-notifications';
 import { installUpdates } from './updates';
@@ -469,14 +470,12 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
     height: 900,
     minWidth: 980,
     minHeight: 640,
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 14, y: 15 },
+    ...windowChrome(),
+    ...(process.platform === 'darwin' ? { vibrancy: 'sidebar' as const, visualEffectState: 'followWindow' as const } : {}),
     // The window canvas is a native material: the desktop blurs through
     // behind the panels, and it goes flat when the window loses focus, the
     // way Finder and Xcode do. The renderer paints only a tint over it
     // (see `--bg-window` in css/app.css), so no opaque backgroundColor here.
-    vibrancy: 'sidebar',
-    visualEffectState: 'followWindow',
     webPreferences: {
       ...testOptions.webPreferences,
       preload: path.join(__dirname, '../preload/index.js'),
@@ -861,9 +860,8 @@ if (!hasSingleInstanceLock) {
   });
 
   void app.whenReady().then(async () => {
-    const proxyEncoder = app.isPackaged
-      ? path.join(process.resourcesPath, 'encoder', 'ffmpeg')
-      : path.join(app.getAppPath(), 'node_modules', 'ffmpeg-static', 'ffmpeg');
+    if (process.platform === 'win32') app.setAppUserModelId('com.zellzoi.powermove');
+    const proxyEncoder = encoderBinary(app.getAppPath(), app.isPackaged ? process.resourcesPath : undefined);
     const mediaProxies = new MediaProxyService(app.getPath('temp'), playbackConverter(proxyEncoder), imageSequenceConverter(proxyEncoder), previewConverter(proxyEncoder), stillImageConverter(proxyEncoder));
     registerAppProtocol();
     installPermissionHandlers(session.defaultSession, isAppMainFrame);

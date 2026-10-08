@@ -181,7 +181,7 @@ test.describe('@viewer After Effects tool behavior', () => {
     expect(afterAnchor.matrix).toEqual(beforeAnchor.matrix);
 
     // Command+T activates Type; a click creates editable source text at that point.
-    await page.keyboard.press('Meta+t');
+    await page.keyboard.press('ControlOrMeta+t');
     const typeAt = await compositionPoint(page, 120, 80);
     await page.mouse.click(typeAt.x, typeAt.y);
     const text = await page.evaluate(() => {

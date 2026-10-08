@@ -59,7 +59,7 @@ test('Command+A selects the full agent composer draft', async ({ session }) => {
   await page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
   await composer.fill('Select this entire composer draft');
-  await composer.press('Meta+A');
+  await composer.press('ControlOrMeta+A');
   await expect.poll(() => composer.evaluate(element => {
     const selection = window.getSelection();
     return { text: selection?.toString(), inside: !!selection?.anchorNode && element.contains(selection.anchorNode) };
@@ -96,12 +96,12 @@ test('selected agent text copies and pastes normally without copying layers', as
   });
 
   const selectedLayers = await page.evaluate(() => [...(window as any).PM.sel.layers]);
-  await page.keyboard.press('Meta+C');
+  await page.keyboard.press('ControlOrMeta+C');
   await expect.poll(() => session.app.evaluate(({ clipboard }) => clipboard.readText())).toBe(reply);
   expect(await page.evaluate(() => [...(window as any).PM.sel.layers])).toEqual(selectedLayers);
 
   await composer.click();
-  await page.keyboard.press('Meta+V');
+  await page.keyboard.press('ControlOrMeta+V');
   await expect(composer).toHaveText(reply);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

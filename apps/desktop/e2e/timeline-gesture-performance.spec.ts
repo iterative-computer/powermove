@@ -44,7 +44,7 @@ test('moving a group in a large timeline expands selection once and remains undo
   await page.mouse.up();
   const positions = () => page.evaluate(() => (window as any).PM.proj.layers.map((layer: any) => layer.from));
   expect(await positions()).toEqual([...Array(6).fill(2), ...Array(495).fill(1)]);
-  await page.keyboard.press('Meta+z');
+  await page.keyboard.press('ControlOrMeta+z');
   await expect.poll(positions).toEqual(Array(501).fill(1));
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

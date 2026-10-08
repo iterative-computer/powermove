@@ -54,7 +54,7 @@ test('Command-click and Shift-click select media; referenced bulk deletion confi
   await expect(page.locator('.asset-card[data-asset-id][aria-selected="true"]')).toHaveCount(2);
   await cards.nth(3).locator('.asset-copy').click({ modifiers: ['Shift'] });
   await expect(page.locator('.asset-card[data-asset-id][aria-selected="true"]')).toHaveCount(2);
-  await page.keyboard.press('Meta+a');
+  await page.keyboard.press('ControlOrMeta+a');
   await expect(page.locator('.asset-card[data-asset-id][aria-selected="true"]')).toHaveCount(4);
   await session.app.evaluate(({ dialog }) => {
     dialog.showMessageBox = async (_window, options) => {

@@ -112,7 +112,7 @@ test('inline file tokens preserve their place, bytes, and two-step deletion in t
   });
   expect(draft).toEqual({ text: 'Use this  as a reference', offset: 9, bytes: 'Zml4dHVyZSBieXRlcw==' });
   // Select-all then Right collapses to the end; remove only the suffix text.
-  await input.press('ControlOrMeta+a');
+  await input.press('ControlOrControlOrMeta+a');
   await input.press('ArrowRight');
   for (let i = 0; i < ' as a reference'.length; i++) await input.press('Backspace');
   expect(await page.evaluate(() => (window as any).PM.AgentUI.state.composerDraft)).toBe('Use this ');
@@ -121,7 +121,7 @@ test('inline file tokens preserve their place, bytes, and two-step deletion in t
   await expect(token).toHaveClass(/is-selected/);
   await input.press('Backspace');
   await expect(token).toHaveCount(0);
-  await input.press('ControlOrMeta+z');
+  await input.press('ControlOrControlOrMeta+z');
   await expect(token).toHaveCount(1);
   expect(await page.evaluate(() => (window as any).PM.AgentUI.state.attachments[0].dataBase64)).toBe(draft.bytes);
   expect(session.diagnostics.pageErrors).toEqual([]);

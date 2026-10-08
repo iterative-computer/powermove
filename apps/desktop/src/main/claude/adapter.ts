@@ -40,6 +40,7 @@ const PROJECT_SANDBOX = JSON.stringify({ sandbox: PROJECT_SANDBOX_SETTINGS });
 const PROJECT_NETWORK_INSTRUCTIONS = `SHELL NETWORK\n${AGENT_SHELL_NETWORK_INSTRUCTIONS}`;
 
 interface ClaudeArgvOptions {
+  platform?: NodeJS.Platform;
   schema: Record<string, unknown>;
   prompt: string;
   imagePaths: readonly string[];
@@ -76,6 +77,7 @@ export function claudeUserMessage(prompt: string, imagePaths: readonly string[])
  * the person. Every other prompt is denied by the runner, so no tool gains
  * approval this way. */
 export function buildClaudeArgv(options: ClaudeArgvOptions): string[] {
+  const windows = (options.platform ?? process.platform) === 'win32';
   const external = Object.fromEntries(Object.entries(options.externalMcpServers ?? {}).filter(([name]) => name !== 'powermove'));
   const mcpConfig = JSON.stringify({ mcpServers: {
     ...external,
@@ -114,9 +116,10 @@ export function buildClaudeArgv(options: ClaudeArgvOptions): string[] {
       // it (and anything unlisted) to the permission prompt, which the runner
       // answers: questions go to the person, everything else is denied.
       '--permission-mode', options.access === 'editor' ? 'default' : 'acceptEdits',
-      '--settings', options.access === 'editor' ? EDITOR_SANDBOX : PROJECT_SANDBOX,
+      // Windows Project runs are enclosed by Codex's sandbox in the runner.
+      '--settings', windows ? JSON.stringify({ sandbox: { enabled: false } }) : options.access === 'editor' ? EDITOR_SANDBOX : PROJECT_SANDBOX,
       '--tools', 'default',
-      '--allowedTools', withExternal(options.access === 'editor' ? editorTools : projectTools)
+      '--allowedTools', withExternal(options.access === 'editor' ? editorTools : windows ? `${projectTools},PowerShell` : projectTools)
     );
     if (options.access === 'editor') argv.push('--disallowedTools', EDITOR_DISALLOWED_TOOLS);
   }

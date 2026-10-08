@@ -17,7 +17,7 @@ test('imports ProRes 4444 with transparency and restores playable media', async 
         frame[(y * 64 + x) * 4] = 255;
         frame[(y * 64 + x) * 4 + 3] = 255;
       }
-      execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'), [
+      execFileSync(path.join(repoRoot, `node_modules/ffmpeg-static/ffmpeg${process.platform === 'win32' ? '.exe' : ''}`), [
         '-v', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', '64x64', '-r', '30', '-i', 'pipe:0',
         '-c:v', 'prores_ks', '-profile:v', '4', '-pix_fmt', 'yuva444p10le', fixture
       ], { input: Buffer.concat(Array.from({ length: 60 }, () => frame)) });

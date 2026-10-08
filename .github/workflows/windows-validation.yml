@@ -1,0 +1,75 @@
+name: Validate Windows x64
+on:
+  pull_request:
+    paths:
+      - 'apps/desktop/**'
+      - 'packages/**'
+      - 'bun.lock'
+      - 'package.json'
+      - '.github/workflows/windows-validation.yml'
+  push:
+    branches: ['codex/windows-x64-port']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: windows-validation-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - name: Type check
+        run: bun run --cwd apps/desktop typecheck
+      - name: Windows runtime and editor regression tests
+        working-directory: apps/desktop
+        run: >-
+          bun run test --
+          src/main/windows-native.test.ts
+          src/main/platform.test.ts
+          src/renderer/src/platform.test.ts
+          src/main/updates.test.ts
+          src/main/menu.test.ts
+          src/main/project-save.test.ts
+          src/main/project-files.test.ts
+          src/main/render-encoder.test.ts
+          src/main/media-proxy.test.ts
+          src/main/extensions/esbuild-binary.test.ts
+          src/server/windows-service.test.ts
+          src/server/install.test.ts
+          src/server/fonts.test.ts
+          src/server/updates.test.ts
+          --pool=threads
+      - name: Check extension boundaries
+        run: bun run --cwd apps/desktop lint:boundaries
+      - name: Build Windows installer (no publishing)
+        run: bun run dist:win
+      - name: Run Electron smoke tests
+        working-directory: apps/desktop
+        run: >-
+          bun run test:e2e --
+          e2e/menu-save.spec.ts
+          e2e/layer-paste.spec.ts
+          e2e/export-mp4.spec.ts
+          e2e/import-image-sequence.spec.ts
+      - name: Build command-line host
+        run: bun run build:cli
+      - name: Check command-line startup
+        run: node packages/cli/bin/powermove.mjs --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: powermove-windows-x64-test-installer
+          path: apps/desktop/dist/Powermove-*-win-x64.exe
+          if-no-files-found: error
+          retention-days: 7

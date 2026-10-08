@@ -71,7 +71,7 @@ export function ensureBuilt(force = false): Promise<void> {
           // A direct helper invocation needs a build when out/ is absent.
         }
       }
-      await execFileAsync('npm', ['run', 'build'], {
+      await execFileAsync('bun', ['run', 'build'], {
         cwd: repoRoot,
         env: process.env,
         maxBuffer: 10 * 1024 * 1024
@@ -93,7 +93,7 @@ async function startElectron(
     // Offline UI regressions must not depend on the developer's subscription
     // state (or race a real account check that replaces the composer).
     ...(process.env.POWERMOVE_E2E_LIVE ? {} : {
-      CODEX_BINARY: path.join(repoRoot, 'src/main/codex/__fixtures__/fake-codex-app-server.sh'),
+      ...(process.platform === 'win32' ? {} : { CODEX_BINARY: path.join(repoRoot, 'src/main/codex/__fixtures__/fake-codex-app-server.sh') }),
       POWERMOVE_FAKE_CHATGPT_STATUS: 'connected',
     }),
     ...env,

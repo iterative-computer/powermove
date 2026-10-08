@@ -24,7 +24,7 @@ for (const surface of ['floating', 'panel'] as const) test(`${surface} prompt pa
   });
   try {
     await input.focus();
-    await page.keyboard.press('Meta+V');
+    await page.keyboard.press('ControlOrMeta+V');
     await expect.poll(value).toBe('Pasted text\nSecond line');
     expect(await app.evaluate(({ BrowserWindow }) => (BrowserWindow.getAllWindows()[0].webContents as any).__spatialPasteCount)).toBe(1);
     await input.selectText();
@@ -37,7 +37,7 @@ for (const surface of ['floating', 'panel'] as const) test(`${surface} prompt pa
       await clipboard.write([new ClipboardItem({ 'image/png': new Blob([bytes], { type: 'image/png' }) })]);
     }, imageBytes);
     await input.focus();
-    await page.keyboard.press('Meta+V');
+    await page.keyboard.press('ControlOrMeta+V');
     await expect(composer.locator(surface === 'floating' ? '.agent-attachment img' : '.agent-inline-attachment img')).toHaveCount(1);
     await expect.poll(value).toBe('Pasted text\nSecond line');
     expect(await page.evaluate(() => (window as any).PM.proj.layers.length)).toBe(layers);

@@ -8,6 +8,8 @@
  * strings are equal, so the keybinding registry can key straight off the string.
  */
 
+import { isWindows } from '../platform';
+
 const MOD_ALIASES: Record<string, 'cmd' | 'ctrl' | 'alt' | 'shift'> = {
   cmd: 'cmd',
   command: 'cmd',
@@ -151,7 +153,8 @@ function chordParts(chord: string): ChordParts | null {
 
 /** Match a pressed chord against a binding, optionally using legacy modifier semantics. */
 export function chordMatches(bindingChord: string, pressedChord: string, looseModifiers = false): boolean {
-  const binding = normalizeChord(bindingChord);
+  const primary = (chord: string) => isWindows() ? chord.replace(/^cmd\+/, 'ctrl+') : chord;
+  const binding = primary(normalizeChord(bindingChord));
   const pressed = normalizeChord(pressedChord);
   if (!binding || !pressed) return false;
   if (binding === pressed) return true;

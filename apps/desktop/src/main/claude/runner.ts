@@ -1,3 +1,6 @@
+import { discoverCodexBinary } from '../codex/env';
+import { windowsSandboxArgs } from '../windows-sandbox';
+import { killProcessFamily } from '../process-family';
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -416,11 +419,18 @@ export class ClaudeRunner {
     options: ClaudeRunOptions
   ): Promise<Attempt> {
     const spawnProcess = options.spawnProcess ?? ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
+    const windows = process.platform === 'win32';
+    if (windows && req.access === 'project') {
+      const sandbox = await discoverCodexBinary(null);
+      argv = windowsSandboxArgs(cwd, [binary, ...argv], [configDirectory]);
+      binary = sandbox;
+    }
     let child: ChildProcess;
     try {
       child = spawnProcess(binary, argv, {
         cwd,
-        detached: true,
+        detached: !windows,
+        windowsHide: true,
         env: isolatedClaudeEnvironment(configDirectory),
         stdio: ['pipe', 'pipe', 'pipe']
       });
@@ -487,6 +497,10 @@ export class ClaudeRunner {
   private terminate(state: ActiveRun): void {
     const pid = state.child?.pid;
     if (!pid) return;
+    if (process.platform === 'win32') {
+      void killProcessFamily(pid, { cwd: state.layout?.root ?? process.cwd(), since: Date.now() - 1000 }).catch(() => state.child?.kill());
+      return;
+    }
     try { process.kill(-pid, 'SIGINT'); }
     catch { try { state.child?.kill('SIGINT'); } catch { /* already exited */ } }
     if (state.killTimer) clearTimeout(state.killTimer);

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { shortcutLabel } from '../platform';
   import { onMount } from 'svelte';
   import Icon from '../panels/Icon.svelte';
   import { blink } from '../controls/menu-blink';
@@ -144,7 +145,7 @@
         {/if}
         <span>{item.label}</span>
         {#if item.kb}
-          <span class="kb">{item.kb}</span>
+          <span class="kb">{shortcutLabel(item.kb)}</span>
         {/if}
       </button>
     {/if}

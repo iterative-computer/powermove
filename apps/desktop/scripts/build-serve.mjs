@@ -19,7 +19,7 @@ const skipRenderer = args.includes('--skip-renderer');
 const pkg = JSON.parse(await readFile(path.join(desktop, 'package.json'), 'utf8'));
 
 if (!skipRenderer) {
-  const result = spawnSync('bunx', ['electron-vite', 'build'], { cwd: desktop, stdio: 'inherit' });
+  const result = spawnSync('bun', ['x', 'electron-vite', 'build'], { cwd: desktop, stdio: 'inherit' });
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
@@ -33,7 +33,10 @@ await build({
   target: 'node22',
   format: 'esm',
   outfile: path.join(outDir, 'server.mjs'),
-  packages: 'external',
+  // Bundle the shared TypeScript packages and their JS dependencies. The
+  // standalone npm package must not depend on unpublished workspace modules.
+  // Keep native/process-backed dependencies in node_modules.
+  external: ['@anthropic-ai/claude-agent-sdk', 'esbuild', 'ws', '@powermove/macos-haptics'],
   alias: { electron: path.join(desktop, 'src/server/electron-stub.ts') },
   define: { 'process.env.NODE_ENV': '"production"' },
   sourcemap: true,
@@ -45,7 +48,7 @@ await cp(path.join(desktop, 'out/renderer'), path.join(outDir, 'renderer'), { re
 
 // The document engine: the renderer's core built for Node by Vite (SSR).
 {
-  const result = spawnSync('bunx', ['vite', 'build', '--config', 'engine.vite.config.ts'], { cwd: desktop, stdio: 'inherit', env: { ...process.env, POWERMOVE_ENGINE_OUT: path.join(outDir, 'engine') } });
+  const result = spawnSync('bun', ['x', 'vite', 'build', '--config', 'engine.vite.config.ts'], { cwd: desktop, stdio: 'inherit', env: { ...process.env, POWERMOVE_ENGINE_OUT: path.join(outDir, 'engine') } });
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 

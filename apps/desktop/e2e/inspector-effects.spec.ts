@@ -64,8 +64,8 @@ test('effect rows select, copy, paste, delete, and undo as editable source trans
   await expect(first).toHaveAttribute('aria-selected', 'true');
   await expect(second).toHaveAttribute('aria-selected', 'true');
 
-  await page.keyboard.press('Meta+c');
-  await page.keyboard.press('Meta+v');
+  await page.keyboard.press('ControlOrMeta+c');
+  await page.keyboard.press('ControlOrMeta+v');
   await expect(page.locator('[data-effect-id]')).toHaveCount(4);
   const copiedState = await page.evaluate(({ layer }) => {
     const effects = (window as any).PM.L(layer).fx;
@@ -83,13 +83,13 @@ test('effect rows select, copy, paste, delete, and undo as editable source trans
   expect(identity.effects[0]).toBe(identity.effects[1]);
   expect(identity.keys[0]).toBe(identity.keys[1]);
 
-  await page.keyboard.press('Meta+z');
+  await page.keyboard.press('ControlOrMeta+z');
   await expect(page.locator('[data-effect-id]')).toHaveCount(2);
   await first.click();
   await second.click({ modifiers: ['Meta'] });
   await page.keyboard.press('Delete');
   await expect(page.locator('[data-effect-id]')).toHaveCount(0);
-  await page.keyboard.press('Meta+z');
+  await page.keyboard.press('ControlOrMeta+z');
   await expect(page.locator('[data-effect-id]')).toHaveCount(2);
 
   expect(session.diagnostics.pageErrors).toEqual([]);

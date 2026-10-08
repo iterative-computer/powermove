@@ -10,6 +10,7 @@ import { execFile } from 'node:child_process';
 import { mkdir, readFile, rename, copyFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { windowsFontFamilies } from '../main/windows-system';
 
 const run = promisify(execFile);
 
@@ -69,7 +70,9 @@ export class FontStore {
   async system(): Promise<Set<string>> {
     if (this.systemFamilies) return this.systemFamilies;
     const families = new Set<string>();
-    if (this.fcList) {
+    if (process.platform === 'win32' && this.fcList) {
+      for (const family of await windowsFontFamilies()) families.add(family);
+    } else if (this.fcList) {
       try {
         const { stdout } = await run(this.fcList, ['--format', '%{family}\n'], { maxBuffer: 16 * 1024 * 1024 });
         for (const line of stdout.split('\n')) for (const family of line.split(',')) if (family.trim()) families.add(family.trim());

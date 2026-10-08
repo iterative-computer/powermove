@@ -275,7 +275,12 @@ def build_snapshot(req):
         if settings.get('device') in ('auto','gpu'):
             try:
                 prefs=bpy.context.preferences.addons['cycles'].preferences
-                prefs.compute_device_type='METAL' if sys.platform=='darwin' else 'CUDA';prefs.get_devices();devices=[d for d in prefs.devices if d.type!='CPU']
+                devices=[]
+                for backend in (['METAL'] if sys.platform=='darwin' else ['OPTIX','CUDA','HIP','ONEAPI']):
+                    try:
+                        prefs.compute_device_type=backend;prefs.get_devices();devices=[d for d in prefs.devices if d.type==backend]
+                        if devices:break
+                    except (TypeError, RuntimeError):continue
                 if not devices and settings['device']=='gpu':raise ValueError('No supported Cycles GPU found')
                 for d in prefs.devices:d.use=d.type!='CPU'
                 if devices:scene.cycles.device='GPU'

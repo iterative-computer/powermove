@@ -80,7 +80,7 @@ test('Scale keys move outside the layer, delete together, and never delete their
     const PM = (window as any).PM;
     return [PM.proj.layers.length, PM.L(id).p['scale.x'].kf.length, PM.L(id).p['scale.y'].kf.length];
   }, id)).toEqual([1, 1, 1]);
-  await page.keyboard.press('Meta+z');
+  await page.keyboard.press('ControlOrMeta+z');
   expect(await page.evaluate((id) => (window as any).PM.L(id).p['scale.y'].kf.length, id)).toBe(2);
   await page.evaluate(async () => {
     const PM = (window as any).PM;
@@ -121,7 +121,7 @@ test('the easing grid applies a curve to both Scale dimensions and preserves lin
     const L = (window as any).PM.L(id);
     return [L.p['scale.x'].kf[0].ei, L.p['scale.y'].kf[0].ei];
   }, id)).toEqual([[.58, 1], [.58, 1]]);
-  await page.keyboard.press('Meta+z');
+  await page.keyboard.press('ControlOrMeta+z');
   expect(await page.evaluate((id) => (window as any).PM.L(id).p['scale.y'].kf[0].ei, id)).toEqual([1, 1]);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
@@ -159,7 +159,7 @@ test('Command Shift D selects the new segment to the right of the playhead', asy
     return PM.allProps(layer).map(({ prop }: any) => prop.kf.map((k: any) => ({ t: k.t + layer.from, v: k.v })));
   });
   const before = await animation();
-  await page.keyboard.press('Meta+Shift+d');
+  await page.keyboard.press('ControlOrMeta+Shift+d');
   expect(await animation()).toEqual(before);
 
   expect(await page.evaluate((leftId) => {
@@ -179,7 +179,7 @@ test('Command Shift D selects the new segment to the right of the playhead', asy
     const PM = (window as any).PM;
     return PM.sel.layers.length === 1 && PM.sel.layers[0] !== PM.proj.layers.find((layer: any) => layer.from === 2)?.id;
   })).toBe(true);
-  await page.keyboard.press('Meta+z');
+  await page.keyboard.press('ControlOrMeta+z');
   expect(await animation()).toEqual(before);
   expect(await page.evaluate(() => (window as any).PM.proj.layers.length)).toBe(1);
   expect(session.diagnostics.pageErrors).toEqual([]);
@@ -220,7 +220,7 @@ for (const descending of [false, true]) test(`incoming Bézier handles follow th
   if (descending) expect(result[0][1]).toBeLessThan(2 / 3);
   else expect(result[0][1]).toBeGreaterThan(2 / 3);
   expect(result[1]).toEqual(result[0]);
-  await page.keyboard.press('Meta+z');
+  await page.keyboard.press('ControlOrMeta+z');
   expect(await page.evaluate((id) => (window as any).PM.L(id).p['scale.x'].kf[1].ei, id)).toEqual([1, 1]);
   await page.mouse.move(point.x, point.y);
   await page.mouse.down();
@@ -303,7 +303,7 @@ test('continuous Bézier handles stay joined unless Option-drag splits them', as
     mode: 'continuous',
   });
 
-  await page.keyboard.press('Meta+z');
+  await page.keyboard.press('ControlOrMeta+z');
   await drag(true);
   expect(await page.evaluate((layerId) => {
     const middle = (window as any).PM.L(layerId).p['scale.x'].kf[1];
@@ -411,7 +411,7 @@ test('a Bézier handle adjusts paired Scale axes without changing other selected
     [expect.not.arrayContaining([0, 0]), [0, 0], [0, 0]],
     [expect.not.arrayContaining([0, 0]), [0, 0], [0, 0]],
   ]);
-  await page.keyboard.press('Meta+z');
+  await page.keyboard.press('ControlOrMeta+z');
   expect(await page.evaluate((layerId) => {
     const layer = (window as any).PM.L(layerId);
     return ['scale.x', 'scale.y'].flatMap(path => layer.p[path].kf.map((key: any) => key.eo));

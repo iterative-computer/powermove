@@ -13,7 +13,7 @@ npx powermove-cli@latest serve
 Keep it running on a box:
 
 ```sh
-npx powermove-cli@latest install   # copies the host under ~/.powermove and registers a service (systemd on Linux, launchd on macOS)
+npx powermove-cli@latest install   # copies the host under ~/.powermove and registers a service (Task Scheduler on Windows, systemd on Linux, launchd on macOS)
 powermove status                   # running? and the address to open
 powermove logs                     # the host log
 powermove uninstall
@@ -70,4 +70,9 @@ The host is published to npm with every Powermove release, at the same version a
 
 ## Requirements
 
-Node 22 or newer. Linux and macOS.
+Node 22 or newer. Windows x64, Linux and macOS.
+
+On Windows, `install` starts a hidden host and registers a task that restarts it
+when you sign in. It uses your normal account and needs no administrator rights.
+Use `npx powermove-cli status`, `logs`, or `uninstall` to manage it. Uninstall
+removes the task and keeps your projects and profile.

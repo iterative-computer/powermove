@@ -12,10 +12,12 @@ let probe: Promise<string[]> | null = null;
 let retryAt = 0;
 
 /** Absolute, unique PATH entries in order; relative entries resolve against a caller's cwd. */
-export function absolutePathEntries(value: string | undefined): string[] {
+export function absolutePathEntries(value: string | undefined, platform: NodeJS.Platform = process.platform): string[] {
+  const paths = platform === 'win32' ? path.win32 : path.posix;
   const entries: string[] = [];
-  for (const entry of (value ?? '').split(':')) {
-    if (path.isAbsolute(entry) && !/[\0\r\n]/u.test(entry) && !entries.includes(entry)) entries.push(entry);
+  for (const raw of (value ?? '').split(paths.delimiter)) {
+    const entry = raw.replace(/^"(.*)"$/, '$1');
+    if (paths.isAbsolute(entry) && !/[\0\r\n]/u.test(entry) && !entries.some(value => platform === 'win32' ? value.toLowerCase() === entry.toLowerCase() : value === entry)) entries.push(entry);
   }
   return entries;
 }
@@ -77,6 +79,11 @@ function readLoginShellPath(): Promise<string[] | null> {
  * folders for a minute, so a slow profile does not delay each of them.
  */
 export async function loginShellPath(home = process.env.HOME): Promise<string> {
+  if (process.platform === 'win32') {
+    const user = home ?? os.homedir();
+    const inherited = process.env.PATH ?? process.env.Path;
+    return absolutePathEntries([inherited, path.join(user, '.bun', 'bin'), path.join(user, '.local', 'bin'), process.env.APPDATA ? path.join(process.env.APPDATA, 'npm') : ''].join(';')).join(';');
+  }
   let login: string[] = [];
   if (process.platform === 'darwin' && (probe || Date.now() >= retryAt)) {
     const current = probe ??= readLoginShellPath().then(entries => {

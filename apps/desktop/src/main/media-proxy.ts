@@ -1,10 +1,12 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, open, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { copyFile, link, mkdtemp, open, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import { Worker } from 'node:worker_threads';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 
-import type { IpcMain, IpcMainInvokeEvent } from 'electron';
+import { app, type IpcMain, type IpcMainInvokeEvent } from 'electron';
 
 import {
   IPC,
@@ -116,16 +118,41 @@ export function imageSequenceConverter(binary: string): ConvertSequence {
   };
 }
 
+/** Hard links work without Windows Developer Mode. Copy only when the
+ * source and cache are on different volumes or the filesystem lacks links. */
+async function linkMedia(source: string, target: string): Promise<void> {
+  if (process.platform !== 'win32') { await symlink(source, target); return; }
+  try { await link(source, target); }
+  catch (error) {
+    if (!['EXDEV', 'EPERM', 'ENOTSUP', 'ENOSYS'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+    await copyFile(source, target);
+  }
+}
+
 type ConvertStill = (source: string, extension: string, output: string) => Promise<void>;
 
 /** Chromium decodes neither TIFF nor HEIF, so those stills become PNG on import. */
-export function stillImageConverter(binary: string): ConvertStill {
+export function stillImageConverter(binary: string, platform: NodeJS.Platform = process.platform): ConvertStill {
   return async (source, extension, output) => {
-    if (extension === 'heic' || extension === 'heif') {
+    if ((extension === 'heic' || extension === 'heif') && platform === 'darwin') {
       // FFmpeg 6 cannot open the HEIF variants Apple devices write; sips, which
       // ships with macOS, reads them through the same decoder Preview uses.
       await execFileAsync('/usr/bin/sips', ['-s', 'format', 'png', source, '--out', output],
         { timeout: STILL_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+      return;
+    }
+    if (extension === 'heic' || extension === 'heif') {
+      const decoder = createRequire(path.join(app.getAppPath(), 'package.json')).resolve('heic-convert');
+      await new Promise<void>((resolve, reject) => {
+        const worker = new Worker(`const { workerData, parentPort } = require('node:worker_threads');
+          const fs = require('node:fs/promises');
+          (async () => { const convert = require(workerData.decoder); const png = await convert({ buffer: await fs.readFile(workerData.source), format: 'PNG' }); await fs.writeFile(workerData.output, Buffer.from(png)); parentPort.postMessage('done'); })().catch(error => { throw error; });`,
+        { eval: true, workerData: { source, output, decoder } });
+        const timer = setTimeout(() => { void worker.terminate(); reject(new Error('Image conversion timed out.')); }, STILL_TIMEOUT_MS);
+        worker.once('message', () => { clearTimeout(timer); resolve(); });
+        worker.once('error', error => { clearTimeout(timer); reject(error); });
+        worker.once('exit', code => { clearTimeout(timer); if (code !== 0) reject(new Error('Image conversion failed.')); });
+      });
       return;
     }
     await execFileAsync(binary, [
@@ -175,7 +202,7 @@ export class MediaProxyService {
       try { await handle.read(prefix, 0, 4, 0); } finally { await handle.close(); }
       if (prefix.equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) {
         const named = entry.file + '.webm';
-        await symlink(entry.file, named); entry.file = named;
+        await linkMedia(entry.file, named); entry.file = named;
       }
       const output = path.join(entry.directory, 'preview.webm');
       await this.convertPreview!(entry.file, output);
@@ -229,7 +256,7 @@ export class MediaProxyService {
         const source = await realpath(frames[index]!.source);
         const info = await stat(source);
         if (!info.isFile() || info.size <= 0) throw new Error(`Could not read ${frames[index]!.name}`);
-        await symlink(source, path.join(directory, `frame-${String(index).padStart(8, '0')}${extension}`));
+        await linkMedia(source, path.join(directory, `frame-${String(index).padStart(8, '0')}${extension}`));
       }
       await this.convertSequence(path.join(directory, `frame-%08d${extension}`), fps, frames.length, output, onProgress);
       const converted = await stat(output);
@@ -289,7 +316,7 @@ export class MediaProxyService {
       for (let index = 0; index < animation.repeats.length; index++) {
         const source = path.join(entry.directory, `source-${String(index).padStart(8, '0')}.png`);
         for (let repeat = 0; repeat < animation.repeats[index]!; repeat++) {
-          await symlink(source, path.join(entry.directory, `frame-${String(slot++).padStart(8, '0')}.png`));
+          await linkMedia(source, path.join(entry.directory, `frame-${String(slot++).padStart(8, '0')}.png`));
         }
       }
       const output = path.join(entry.directory, 'animation.webm');

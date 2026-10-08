@@ -4,6 +4,7 @@ import {
   mkdtemp,
   writeFile,
   readFile,
+  readdir,
   rm,
   stat,
 } from "node:fs/promises";
@@ -209,6 +210,8 @@ export function validateBlenderJob(raw: BlenderJob): BlenderJob {
 export async function discoverBlender(
   configured?: string,
 ): Promise<BlenderStatus> {
+  const installedWindowsBlenders = process.platform === 'win32' && !configured
+    ? await readdir(path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Blender Foundation'), { withFileTypes: true }).then(entries => entries.filter(entry => entry.isDirectory() && /^Blender [0-9]/.test(entry.name)).sort((a, b) => b.name.localeCompare(a.name, undefined, { numeric: true })).map(entry => path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Blender Foundation', entry.name, 'blender.exe')), () => []) : [];
   const candidates = configured
     ? [configured]
     : [
@@ -223,8 +226,7 @@ export async function discoverBlender(
             ]
           : process.platform === "win32"
             ? [
-                "C:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe",
-                "C:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe",
+                ...installedWindowsBlenders,
               ]
             : ["/usr/bin/blender", "/usr/local/bin/blender"]),
         ...(process.env["PATH"] || "")
@@ -248,7 +250,7 @@ export async function discoverBlender(
       continue;
     try {
       const version = await new Promise<string>((resolve, reject) => {
-        const p = spawn(executable, ["--version"]);
+        const p = spawn(executable, ["--version"], { windowsHide: true });
         let out = "";
         const timer = setTimeout(() => {
           p.kill("SIGKILL");
@@ -325,6 +327,7 @@ export class BlenderWorker {
         script,
       ],
       {
+        windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
         env: { ...process.env, PYTHONUNBUFFERED: "1" },
       },

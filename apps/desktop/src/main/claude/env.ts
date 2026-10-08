@@ -3,13 +3,14 @@ import { constants } from 'node:fs';
 import { access, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { updatedRuntimeCandidates } from '../runtime-updates';
+import { agentPlatform, executableName } from '../platform';
 
-export const PACKAGED_CLAUDE_RELATIVE_PATH = path.join('claude', 'bin', 'claude');
+export const PACKAGED_CLAUDE_RELATIVE_PATH = path.join('claude', 'bin', executableName('claude'));
 export const DEVELOPMENT_CLAUDE_RELATIVE_PATH = path.join(
   'node_modules',
   '@anthropic-ai',
-  'claude-code-darwin-arm64',
-  'claude'
+  `claude-code-${agentPlatform().suffix}`,
+  executableName('claude')
 );
 
 export const CLAUDE_NOT_FOUND_MESSAGE =
@@ -42,7 +43,9 @@ async function probeLoginShell(): Promise<string | null> {
   if (loginShellProbe === null) {
     loginShellProbe = (async () => {
       try {
-        const stdout = await execFileText('/bin/zsh', ['-ilc', 'command -v claude']);
+        const stdout = process.platform === 'win32'
+          ? await execFileText('where.exe', ['claude.exe'])
+          : await execFileText(process.platform === 'darwin' ? '/bin/zsh' : '/bin/sh', ['-ilc', 'command -v claude']);
         return executable(stdout.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean).at(-1));
       } catch {
         return null;

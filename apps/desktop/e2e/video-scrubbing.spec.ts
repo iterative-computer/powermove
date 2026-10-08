@@ -26,7 +26,7 @@ for (const sequence of [false, true]) test(`${sequence ? '4K image sequence' : '
   } else {
     sources = [path.join(session.userData, 'scrub-source.mp4')];
     // Ordinary compressed footage with a long interval between reference frames.
-    execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'), [
+    execFileSync(path.join(repoRoot, `node_modules/ffmpeg-static/ffmpeg${process.platform === 'win32' ? '.exe' : ''}`), [
       '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=30:duration=4',
       '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '120', '-keyint_min', '120',
       '-sc_threshold', '0', '-pix_fmt', 'yuv420p', sources[0]!,

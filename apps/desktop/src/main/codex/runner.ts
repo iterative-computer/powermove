@@ -1,3 +1,4 @@
+import { killProcessFamily } from '../process-family';
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -584,7 +585,8 @@ export class CodexRunner {
     try {
       child = spawnProcess(binary, argv, {
         cwd,
-        detached: true,
+        detached: process.platform !== 'win32',
+        windowsHide: true,
         env: isolatedCodexEnvironment(codexHome),
         stdio: ['ignore', 'pipe', 'pipe']
       });
@@ -661,6 +663,10 @@ export class CodexRunner {
   private terminate(state: ActiveRun): void {
     const pid = state.child?.pid;
     if (!pid) return;
+    if (process.platform === 'win32') {
+      void killProcessFamily(pid, { cwd: state.layout?.root ?? process.cwd(), since: Date.now() - 1000 }).catch(() => state.child?.kill());
+      return;
+    }
     try {
       process.kill(-pid, 'SIGTERM');
     } catch {

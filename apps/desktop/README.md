@@ -2,9 +2,11 @@
 
 The Electron editor. This is the only supported application; the earlier root-page/WKWebView implementation and its separate test oracle were retired after parity coverage moved to Vitest. For the repository overview and shared packages, see the [root README](../../README.md).
 
+For Windows setup, packaging, and validation, see [Windows support](docs/windows.md).
+
 ## Project files
 
-Use **Command+S** to save an editable `.pmv` project and **Shift+Command+S** for Save As. Subsequent saves update the same file, keep the previous version in a hidden backup store, and keep unsaved changes separate from local recovery. **Command+O** reopens projects with their embedded media. See [saving and recovery](docs/project-files.md) for details and the current file-size limit.
+On Windows, use Ctrl in place of Command. Use **Command+S** to save an editable `.pmv` project and **Shift+Command+S** for Save As. Subsequent saves update the same file, keep the previous version in a hidden backup store, and keep unsaved changes separate from local recovery. **Command+O** reopens projects with their embedded media. See [saving and recovery](docs/project-files.md) for details and the current file-size limit.
 
 ## Kernel and extensions
 
@@ -113,7 +115,7 @@ include files or services beyond the project workspace.
 
 ## Development
 
-Requirements: macOS on Apple Silicon and bun 1.3 or newer (the repo pins `bun@1.3.14`). Xcode command line tools are needed to build the native haptics addon. Agent features additionally require the Codex CLI or Claude Code to be installed and signed in.
+Requirements: macOS on Apple Silicon or Windows x64, and bun 1.3 or newer (the repo pins `bun@1.3.14`). On Mac, Xcode command line tools are needed to build the native haptics addon. Agent features additionally require the Codex CLI or Claude Code to be installed and signed in.
 
 Install once from the repository root, then run scripts either from the root or from this directory:
 
@@ -190,7 +192,7 @@ project. The animation performance baseline now measures actual frame changes
 
 A MOV or MP4 holding a codec Chromium refuses (notably ProRes) also converts,
 after the decode attempt fails. Conversion happens in the main process with the
-bundled FFmpeg; HEIC and HEIF go through macOS `sips`, which reads the HEIF
+bundled FFmpeg; HEIC and HEIF go through macOS `sips` on Mac and a bundled HEIF decoder on Windows, which reads the HEIF
 variants FFmpeg 6 cannot. Powermove stores the converted media in the project,
 so a saved `.pmv` never depends on the original file.
 

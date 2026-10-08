@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { BrowserWindow, dialog, type IpcMain, type IpcMainInvokeEvent } from 'electron';
 import { cloudFileState } from '@powermove/macos-haptics';
 import { IPC, type CloudFileState } from '../shared/ipc';
+import { windowsCloudFileState, powershellPath } from './windows-system';
 
 const DOWNLOAD_TIMEOUT = 5 * 60_000;
 const CHUNK_BYTES = 4 * 1024 * 1024;
@@ -21,7 +22,10 @@ export function cloudPath(value: unknown): string {
  * stdout is discarded, so even large movies do not accumulate in main's heap. */
 export function materializeFile(source: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn('/bin/cat', [source], { stdio: ['ignore', 'ignore', 'pipe'] });
+    const script = "$ErrorActionPreference = 'Stop'; $file = [IO.File]::OpenRead($env:POWERMOVE_MEDIA_SOURCE); try { $buffer = New-Object byte[] 4194304; while ($file.Read($buffer, 0, $buffer.Length) -gt 0) {} } finally { $file.Dispose() }";
+    const child = process.platform === 'win32'
+      ? spawn(powershellPath(), ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { windowsHide: true, env: { ...process.env, POWERMOVE_MEDIA_SOURCE: source }, stdio: ['ignore', 'ignore', 'pipe'] })
+      : spawn('/bin/cat', [source], { stdio: ['ignore', 'ignore', 'pipe'] });
     let detail = '';
     let timedOut = false;
     child.stderr.on('data', chunk => { detail = (detail + String(chunk)).slice(0, 1000); });
@@ -38,7 +42,7 @@ export function materializeFile(source: string): Promise<void> {
 export class CloudMediaService {
   private downloads = new Map<string, Promise<void>>();
   constructor(
-    private inspect: typeof cloudFileState = cloudFileState,
+    private inspect: typeof cloudFileState = process.platform === 'win32' ? windowsCloudFileState : cloudFileState,
     private materialize: (source: string) => Promise<void> = materializeFile,
   ) {}
   async status(source: string): Promise<CloudFileState> { return this.inspect(source); }

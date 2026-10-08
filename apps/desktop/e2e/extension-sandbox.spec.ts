@@ -114,13 +114,13 @@ test('a store extension’s Svelte panel renders in its own view iframe with hos
   await expect.poll(() => page.evaluate(() => (window as any).__sandboxUndoCount)).toBe(1);
   await page.waitForTimeout(300);
   expect(await page.evaluate(() => (window as any).__sandboxUndoCount)).toBe(1); // exactly once: no echo through the page listener
-  await page.keyboard.press('Meta+Shift+9');
+  await page.keyboard.press('ControlOrMeta+Shift+9');
   await page.keyboard.press('Alt+Shift+F10');
   await expect.poll(keyProofCount).toBe(2);
   // Click the Note field (third row of the fixture) and type: the chord is ignored in the field.
   await page.mouse.click(box.x + 40, box.y + 12 + 26 * 2 + 12 + 14);
   await page.keyboard.press('Alt+Shift+F10');
-  await page.keyboard.press('Meta+Shift+9');
+  await page.keyboard.press('ControlOrMeta+Shift+9');
   await page.waitForTimeout(200);
   expect(await keyProofCount()).toBe(2);
   await page.keyboard.press('Escape');

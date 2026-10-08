@@ -13,6 +13,7 @@ import { install, logs, status, uninstall, unitPath, unitText, type ServiceSpec 
 import { detectInstallKind, PACKAGE } from './updates';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { runNpm } from './npm';
 
 const run = promisify(execFile);
 
@@ -37,7 +38,7 @@ async function durableEntry(entry: string, userData: string, log: (line: string)
   // The agent runtimes make this a large download; give slow links time and retries.
   const flags = ['--no-fund', '--no-audit', '--loglevel', 'error', '--fetch-retries', '5', '--fetch-retry-maxtimeout', '120000', '--fetch-timeout', '600000'];
   try {
-    await run('npm', ['install', '--prefix', prefix, ...flags, `${PACKAGE}@latest`], { maxBuffer: 16 * 1024 * 1024, timeout: 30 * 60 * 1000 });
+    await runNpm(['install', '--prefix', prefix, ...flags, `${PACKAGE}@latest`], { maxBuffer: 16 * 1024 * 1024, timeout: 30 * 60 * 1000 });
   } catch (error) {
     const detail = error instanceof Error ? `${error.message}\n${(error as { stderr?: string }).stderr ?? ''}` : String(error);
     if (NETWORK_ERROR.test(detail)) throw new Error(`npm could not download ${PACKAGE} (network timeout). Nothing was changed; check the connection or proxy and run the same command again.\n\n${detail.trim()}`);
@@ -51,6 +52,7 @@ async function durableEntry(entry: string, userData: string, log: (line: string)
 
 /** A `powermove` command on PATH when ~/.local/bin exists; otherwise the npx form works. */
 async function installShim(entry: string, log: (line: string) => void): Promise<void> {
+  if (process.platform === 'win32') { log(`Use npx ${PACKAGE} status|logs|uninstall for the other commands.`); return; }
   const binDir = path.join(homedir(), '.local', 'bin');
   const shim = path.join(binDir, 'powermove');
   if (!existsSync(binDir)) { log(`tip: use \`npx ${PACKAGE} status|logs|uninstall\` for the other commands.`); return; }
@@ -84,7 +86,7 @@ const HELP = `powermove — run the Powermove host on this machine and use it fr
 
 Usage:
   powermove serve [options]      Run the host in this terminal (try it: npx powermove-cli@latest serve)
-  powermove install [options]    Keep it running as a user service (systemd on Linux, launchd on macOS).
+  powermove install [options]    Keep it running after login (Task Scheduler on Windows, systemd on Linux, launchd on macOS).
                                  No sudo: it installs under ~/.powermove. Run it again to update.
   powermove uninstall            Stop and remove the service
   powermove status               Is the service running, and at which address

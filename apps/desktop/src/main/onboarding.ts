@@ -5,6 +5,7 @@ import path from 'node:path';
 import { IPC, type OnboardingLogoTarget } from '../shared/ipc';
 import { onboardingChoice, type CreativeAppId, type OnboardingAgentChoice, type OnboardingChoice, type OnboardingTimelineMode } from '../shared/creative-workspace';
 import { LIGHT_BACKGROUND } from './theme';
+import { windowChrome } from './platform';
 
 export const ONBOARDING_VERSION = 1;
 export const ONBOARDING_ANIMATION_SECONDS = 9.766666666666667;
@@ -90,8 +91,7 @@ export function onboardingWelcomeOptions(
     show: false,
     skipTaskbar: backgroundTest,
     focusable: !backgroundTest,
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 14, y: 15 },
+    ...windowChrome(),
     backgroundColor: LIGHT_BACKGROUND,
     webPreferences: {
       preload: path.join(__dirname, '../preload/onboarding.js'),

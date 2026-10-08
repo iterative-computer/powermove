@@ -37,7 +37,7 @@ test('text color follows the pointer throughout a drag', async ({ session }) => 
   }
   await picker.getByRole('button', { name: 'Close', exact: true }).click();
   await expect(picker).toHaveCount(0);
-  await page.keyboard.press('Meta+z');
+  await page.keyboard.press('ControlOrMeta+z');
   await expect.poll(color).toBe('#F2F2F2');
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

@@ -7,7 +7,7 @@ import { IPC, type AppUpdateState } from '../shared/ipc';
  * bypass the editor's before-quit save barrier with quitAndInstall(): the
  * renderer's Update button quits normally with autoRunAppAfterInstall on. */
 export function installUpdates(menu: Menu): void {
-  if (!app.isPackaged || process.platform !== 'darwin') return;
+  if (!app.isPackaged || !['darwin', 'win32'].includes(process.platform)) return;
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.autoRunAppAfterInstall = false;
@@ -66,7 +66,8 @@ export function installUpdates(menu: Menu): void {
   });
   // The electron-updater event precedes Squirrel staging. Only announce the
   // update after the native updater confirms it can install on exit.
-  nativeUpdater.on('update-downloaded', () => {
+  const stagedUpdater = process.platform === 'darwin' ? nativeUpdater : autoUpdater;
+  stagedUpdater.on('update-downloaded', () => {
     manual = false;
     item.label = 'Update Ready — Quit to Install';
     set({ status: 'ready' });

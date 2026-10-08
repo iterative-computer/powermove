@@ -11,12 +11,12 @@ files:
   - out/**
   - "!**/* [2-9].*"
   - "!**/* [2-9]"
-  - '!node_modules/ffmpeg-static/ffmpeg'
+  - '!node_modules/ffmpeg-static/ffmpeg{,.exe}'
   # The native agent runtimes are copied once below, at the paths used by the
   # packaged binary resolvers. Keep their npm wrappers/metadata, but do not let
   # electron-builder auto-pack a second copy of either platform executable.
-  - '!node_modules/@openai/codex-darwin-arm64/**'
-  - '!node_modules/@anthropic-ai/claude-code-darwin-arm64/**'
+  - '!node_modules/@openai/codex-{darwin,win32,linux}-*/**'
+  - '!node_modules/@anthropic-ai/claude-code-{darwin,win32,linux}-*/**'
   - '!node_modules/@anthropic-ai/claude-code/bin/claude.exe'
   # esbuild/lib/main.js resolves the @esbuild platform package at runtime. The
   # install-time bin copy is the same executable and is not used by Powermove.
@@ -24,18 +24,8 @@ files:
 extraResources:
   - from: resources/sounds
     to: sounds
-  - from: node_modules/ffmpeg-static/ffmpeg
-    to: encoder/ffmpeg
   - from: node_modules/ffmpeg-static/LICENSE
     to: encoder/LICENSE
-  - from: node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin
-    to: codex
-    filter:
-      - "**/*"
-      - "!**/* [2-9]"
-      - "!**/* [2-9].*"
-  - from: node_modules/@anthropic-ai/claude-code-darwin-arm64/claude
-    to: claude/bin/claude
   - from: src/extensions
     to: builtin-extensions
     filter:
@@ -100,16 +90,27 @@ protocols:
     schemes:
       - powermove
 
-fileAssociations:
-  - ext: pmv
-    name: Powermove Project
-    description: Powermove Project
-    role: Editor
-    icon: resources/document.icns
-    mimeType: application/vnd.powermove.project
-    isPackage: false
 
 mac:
+  fileAssociations:
+    - ext: pmv
+      name: Powermove Project
+      description: Powermove Project
+      role: Editor
+      icon: resources/document.icns
+      mimeType: application/vnd.powermove.project
+      isPackage: false
+  extraResources:
+    - from: node_modules/ffmpeg-static/ffmpeg
+      to: encoder/ffmpeg
+    - from: node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin
+      to: codex
+      filter:
+        - "**/*"
+        - "!**/* [2-9]"
+        - "!**/* [2-9].*"
+    - from: node_modules/@anthropic-ai/claude-code-darwin-arm64/claude
+      to: claude/bin/claude
   # Local dist:mac builds stay unsigned. scripts/release-mac.mjs flips
   # identity, hardenedRuntime and notarize on for CI releases.
   identity: null
@@ -137,3 +138,33 @@ mac:
     - target: zip
       arch:
         - arm64
+
+win:
+  icon: resources/icon/exports/Powermove-iOS-Default-1024x1024@1x.png
+  artifactName: ${productName}-${version}-win-${arch}.${ext}
+  target:
+    - target: nsis
+      arch:
+        - x64
+  files:
+    - '!node_modules/@powermove/macos-haptics/build/**'
+  fileAssociations:
+    - ext: pmv
+      name: Powermove Project
+      description: Powermove Project
+  extraResources:
+    - from: node_modules/ffmpeg-static/ffmpeg.exe
+      to: encoder/ffmpeg.exe
+    - from: node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc
+      to: codex
+      filter:
+        - '**/*'
+    - from: node_modules/@anthropic-ai/claude-code-win32-x64/claude.exe
+      to: claude/bin/claude.exe
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false

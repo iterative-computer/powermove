@@ -1,4 +1,4 @@
-import { nativeTheme, type IpcMain, type IpcMainEvent, type NativeTheme } from 'electron';
+import { BrowserWindow, nativeTheme, type IpcMain, type IpcMainEvent, type NativeTheme } from 'electron';
 
 import { isOneOf } from '../shared/guards';
 import { IPC, type ThemeSource } from '../shared/ipc';
@@ -26,6 +26,9 @@ export function registerThemeIpc(ipcMain: Pick<IpcMain, 'on'>, ctx: ThemeIpcCont
     if (!ctx.isTrustedSenderContents(event.sender)) return;
     if (!isOneOf(value, THEME_SOURCES)) return;
     nativeTheme.themeSource = value;
+    if (process.platform === 'win32') for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.setTitleBarOverlay({ color: currentBackgroundColor(value), symbolColor: currentBackgroundColor(value) === DARK_BACKGROUND ? '#f5f5f5' : '#171717', height: 44 });
+    }
   });
 }
 

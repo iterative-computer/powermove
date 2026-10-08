@@ -15,6 +15,9 @@ import { killStrays, ProcessFamily } from './process-family';
 import { agentResultSchema } from './codex/instructions';
 import type { AgentWorkspace } from './codex/workspace';
 import type { PowermoveAgentToolSpec } from './agent-tools/spec';
+import { powershellPath } from './windows-system';
+import { windowsSandboxArgs } from './windows-sandbox';
+import { discoverCodexBinary } from './codex/env';
 
 const object = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', additionalProperties: false, properties, required });
 const COMMAND_TIMEOUT_MS = 600_000;
@@ -283,6 +286,10 @@ async function commandEnvironment(root: string, access: 'project' | 'computer'):
   // Keep account keys and provider configuration out of subprocess environments.
   const env: NodeJS.ProcessEnv = { PATH: bin ? `${bin}:${PATH}` : PATH, HOME: process.env.HOME, LANG: 'en_US.UTF-8',
     TMPDIR: scratch, TMP: scratch, TEMP: scratch, TMPPREFIX: path.join(scratch, 'zsh') };
+  if (process.platform === 'win32') {
+    for (const name of ['SystemRoot', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA']) env[name] = process.env[name];
+    env.PATH = PATH;
+  }
   if (access === 'project') for (const [name, tool] of PROJECT_CACHES) env[name] = path.join(root, '.powermove', 'cache', tool);
   return env;
 }
@@ -318,14 +325,22 @@ export async function startWorkspaceCommand(root: string, access: 'project' | 'c
     + `(deny file-write*)(allow file-write* (subpath ${JSON.stringify(await realpath(root))}) (literal "/dev/null") (literal "/dev/tty")`
     // Inherited stdio only; a broad /dev subpath would expose devices.
     + ' (literal "/dev/stdout") (literal "/dev/stderr") (regex #"^/dev/fd/[0-9]+$"))';
-  if (access === 'project' && process.platform !== 'darwin') throw new Error('Project command sandbox is only available on macOS.');
+  if (access === 'project' && !['darwin', 'win32'].includes(process.platform)) throw new Error('Project command sandbox is available on macOS and Windows.');
   const startedAt = Date.now();
   // The command creates its own scratch folder, so the sandbox, not main,
   // decides where a planted link may lead.
-  const shell = ['/bin/sh', '-c', 'mkdir -p -- "$TMPDIR" 2>/dev/null; exec /bin/zsh -c "$1"', 'zsh', command];
-  const child = spawn(access === 'project' ? '/usr/bin/sandbox-exec' : shell[0]!,
-    access === 'project' ? ['-p', profile, ...shell] : shell.slice(1),
-    { cwd: root, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  const windows = process.platform === 'win32';
+  const script = 'New-Item -ItemType Directory -Force -Path $env:TMPDIR | Out-Null; ' + command;
+  const shell = windows
+    ? [powershellPath(), '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')]
+    : ['/bin/sh', '-c', `mkdir -p -- "$TMPDIR" 2>/dev/null; exec ${process.platform === 'darwin' ? '/bin/zsh' : '/bin/sh'} -c "$1"`, 'shell', command];
+  const sandbox = windows && access === 'project' ? await discoverCodexBinary(null) : null;
+  // A configured runtime home carries the user's Windows sandbox choice.
+  // Forward only the directory, never provider keys or account environment.
+  if (sandbox && process.env.CODEX_HOME) env.CODEX_HOME = process.env.CODEX_HOME;
+  const child = spawn(sandbox ?? (access === 'project' ? '/usr/bin/sandbox-exec' : shell[0]!),
+    sandbox ? windowsSandboxArgs(real, shell) : access === 'project' ? ['-p', profile, ...shell] : shell.slice(1),
+    { cwd: root, env, detached: !windows, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   // Closed at once, so stdin reads end as they did from /dev/null.
   child.stdin.on('error', () => undefined); child.stdin.end(options.input);
   let output = '', truncated = false, running = true, exitCode: number | null = null;

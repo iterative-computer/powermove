@@ -12,7 +12,7 @@ test.describe('@menu-save save command routing', () => {
     });
 
     await page.locator('body').click({ position: { x: 20, y: 100 } });
-    await page.keyboard.press('Meta+S');
+    await page.keyboard.press('ControlOrMeta+S');
     await expect.poll(() => page.evaluate(() => (window as any).__e2eCommandCalls)).toContain('save');
 
     const menuWired = await app.evaluate(({ Menu }) => {

@@ -14,19 +14,19 @@ test('keyboard paste places copied layers at the playhead and undo restores the 
     PM.selectLayers(project.layers.map((layer: any) => layer.id));
     (document.activeElement as HTMLElement)?.blur();
   });
-  await page.keyboard.press('Meta+C');
+  await page.keyboard.press('ControlOrMeta+C');
   await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.setTime(6.5);
     PM.hist.clear();
   });
-  await page.keyboard.press('Meta+V');
+  await page.keyboard.press('ControlOrMeta+V');
   await expect.poll(() => page.evaluate(() => {
     const PM = (window as any).PM;
     return PM.selLayers().map((layer: any) => ({ from: layer.from, dur: layer.dur }));
   })).toEqual([{ from: 8.5, dur: 2 }, { from: 6.5, dur: 4 }]);
   await expect.poll(() => page.evaluate(() => (window as any).PM.proj.layers.length)).toBe(4);
-  await page.keyboard.press('Meta+Z');
+  await page.keyboard.press('ControlOrMeta+Z');
   await expect.poll(() => page.evaluate(() => (window as any).PM.proj.layers.map((layer: any) => layer.from))).toEqual([3, 1]);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

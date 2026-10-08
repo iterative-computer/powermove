@@ -54,7 +54,7 @@ test('colour alpha from the picker renders see-through and survives Undo', async
   const [red] = await sample();
   expect(red).toBeGreaterThan(opaque[0]! * .3);
 
-  await page.keyboard.press('Meta+z');
+  await page.keyboard.press('ControlOrMeta+z');
   await expect.poll(() => page.evaluate(() => (window as any).PM.proj.layers[0].d.color)).toBe('#FF0000');
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

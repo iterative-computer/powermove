@@ -44,3 +44,5 @@ ffmpeg -y -i prores4444-alpha.mov -vf scale=320:180 -c:v hevc_videotoolbox -pix_
 ```
 
 Verified with `-pix_fmt rgba` readback at t=1.5: left `(80,90)` = `[20,255,7,255]`, right `(240,90)` = `[20,255,7,0]`.
+
+`still-red.heic` is a synthetic HEIC copy of `still-red.png`, generated with macOS sips for portable decoder tests. It contains no user photo or screenshot.

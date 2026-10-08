@@ -9,6 +9,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { installWindowsTask, removeWindowsTask, windowsTask, windowsSupervisor, windowsTaskStatus } from './windows-service';
 
 const run = promisify(execFile);
 
@@ -32,7 +33,7 @@ export const LAUNCHD_LABEL = 'com.zellzoi.powermove.serve';
 const quote = (value: string): string => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `"${value.replace(/(["\\$`])/g, '\\$1')}"`);
 const xml = (value: string): string => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-export function logPath(userData: string): string { return path.join(userData, 'serve.log'); }
+export function logPath(userData: string, platform: NodeJS.Platform = process.platform): string { return (platform === 'win32' ? path.win32 : path.posix).join(userData, 'serve.log'); }
 
 export function systemdUnit(spec: ServiceSpec): string {
   const command = [spec.node, spec.entry, 'serve', ...spec.args].map(quote).join(' ');
@@ -47,8 +48,8 @@ ExecStart=${command}
 Environment=POWERMOVE_USER_DATA=${quote(spec.userData)}
 Restart=always
 RestartSec=3
-StandardOutput=append:${logPath(spec.userData)}
-StandardError=append:${logPath(spec.userData)}
+StandardOutput=append:${logPath(spec.userData, 'linux')}
+StandardError=append:${logPath(spec.userData, 'linux')}
 
 [Install]
 WantedBy=default.target
@@ -70,8 +71,8 @@ ${program}
   <dict><key>POWERMOVE_USER_DATA</key><string>${xml(spec.userData)}</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>${xml(logPath(spec.userData))}</string>
-  <key>StandardErrorPath</key><string>${xml(logPath(spec.userData))}</string>
+  <key>StandardOutPath</key><string>${xml(logPath(spec.userData, 'darwin'))}</string>
+  <key>StandardErrorPath</key><string>${xml(logPath(spec.userData, 'darwin'))}</string>
 </dict>
 </plist>
 `;
@@ -79,12 +80,14 @@ ${program}
 
 export function unitPath(spec: ServiceSpec): string {
   const home = spec.home ?? homedir();
+  if ((spec.platform ?? process.platform) === 'win32') return path.win32.join(spec.userData, 'serve-task.xml');
   return (spec.platform ?? process.platform) === 'darwin'
-    ? path.join(home, 'Library', 'LaunchAgents', `${LAUNCHD_LABEL}.plist`)
-    : path.join(home, '.config', 'systemd', 'user', `${SERVICE_NAME}.service`);
+    ? path.posix.join(home, 'Library', 'LaunchAgents', `${LAUNCHD_LABEL}.plist`)
+    : path.posix.join(home, '.config', 'systemd', 'user', `${SERVICE_NAME}.service`);
 }
 
 export function unitText(spec: ServiceSpec): string {
+  if ((spec.platform ?? process.platform) === 'win32') return windowsTask(spec);
   return (spec.platform ?? process.platform) === 'darwin' ? launchdPlist(spec) : systemdUnit(spec);
 }
 
@@ -95,13 +98,17 @@ async function launchctlDomain(): Promise<string> {
 
 export async function install(spec: ServiceSpec, log: (line: string) => void): Promise<void> {
   const platform = spec.platform ?? process.platform;
-  if (platform !== 'darwin' && platform !== 'linux') throw new Error('Install is supported on Linux (systemd) and macOS (launchd).');
+  if (!['darwin', 'linux', 'win32'].includes(platform)) throw new Error('Install is supported on Windows, Linux, and macOS.');
   const file = unitPath(spec);
   await mkdir(path.dirname(file), { recursive: true });
   await mkdir(spec.userData, { recursive: true });
-  await writeFile(file, unitText(spec));
+  await writeFile(file, unitText(spec), platform === 'win32' ? 'utf16le' : 'utf8');
   log(`wrote ${file}`);
-  if (platform === 'darwin') {
+  if (platform === 'win32') {
+    await writeFile(path.join(spec.userData, 'serve-service.cjs'), windowsSupervisor(spec));
+    await installWindowsTask(spec);
+    log('started Powermove Host (Task Scheduler). It restarts with your login.');
+  } else if (platform === 'darwin') {
     const domain = await launchctlDomain();
     await run('launchctl', ['bootout', `${domain}/${LAUNCHD_LABEL}`]).catch(() => undefined);
     await run('launchctl', ['bootstrap', domain, file]);
@@ -118,7 +125,10 @@ export async function install(spec: ServiceSpec, log: (line: string) => void): P
 export async function uninstall(spec: ServiceSpec, log: (line: string) => void): Promise<void> {
   const platform = spec.platform ?? process.platform;
   const file = unitPath(spec);
-  if (platform === 'darwin') {
+  if (platform === 'win32') {
+    await removeWindowsTask();
+    await rm(path.join(spec.userData, 'serve-service.cjs'), { force: true });
+  } else if (platform === 'darwin') {
     const domain = await launchctlDomain();
     await run('launchctl', ['bootout', `${domain}/${LAUNCHD_LABEL}`]).catch(() => undefined);
   } else if (platform === 'linux') {
@@ -132,7 +142,9 @@ export async function uninstall(spec: ServiceSpec, log: (line: string) => void):
 export async function status(spec: ServiceSpec, log: (line: string) => void): Promise<void> {
   const platform = spec.platform ?? process.platform;
   try {
-    if (platform === 'darwin') {
+    if (platform === 'win32') {
+      log(`Powermove Host: ${await windowsTaskStatus()}`);
+    } else if (platform === 'darwin') {
       const { stdout } = await run('launchctl', ['print', `${await launchctlDomain()}/${LAUNCHD_LABEL}`]);
       const state = /state = (\w+)/.exec(stdout)?.[1] ?? 'unknown';
       const pid = /pid = (\d+)/.exec(stdout)?.[1];

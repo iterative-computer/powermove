@@ -71,7 +71,7 @@ describe('application menu', () => {
 
   it('has the requested labels, accelerators, roles, and custom history commands', () => {
     const sent: MenuCommand[] = [];
-    const template = appMenuTemplate((command) => sent.push(command));
+    const template = appMenuTemplate((command) => sent.push(command), undefined, 'darwin');
     expect(template.map((item) => item.label)).toEqual([
       'Powermove',
       'File',

@@ -37,7 +37,7 @@ test('Command+S writes real files, reuses the destination, saves from a field, a
   await rename(session, 'Velocity Study');
   const a = path.join(session.userData, 'First.pmv'), b = path.join(session.userData, 'Copy.pmv');
   await saveTo(session, a);
-  await session.page.keyboard.press('Meta+S');
+  await session.page.keyboard.press('ControlOrMeta+S');
   await expect.poll(() => savedName(a)).toBe('Velocity Study');
   await expect.poll(() => session.page.evaluate(() => (window as any).PM.app.dirty)).toBe(false);
   await rename(session, 'Second version');
@@ -47,19 +47,19 @@ test('Command+S writes real files, reuses the destination, saves from a field, a
   await session.page.evaluate(() => {
     const input = document.createElement('input'); input.id = 'save-from-field'; document.body.appendChild(input); input.focus();
   });
-  await session.page.keyboard.press('Meta+S');
+  await session.page.keyboard.press('ControlOrMeta+S');
   await expect.poll(() => savedName(a)).toBe('Second version');
   expect(await savedName(await newestBackup(session.userData))).toBe('Velocity Study');
   expect(await session.app.evaluate(() => (globalThis as any).__saveDialogs)).toBe(1);
   await saveTo(session, b);
-  await session.page.keyboard.press('Meta+Shift+S');
+  await session.page.keyboard.press('ControlOrMeta+Shift+S');
   await expect.poll(() => savedName(b)).toBe('Second version');
   await expect.poll(() => session.page.evaluate(() => (window as any).PM.app.saving)).toBe(false);
   await session.relaunch();
   await session.openEditor();
   await expect.poll(() => session.page.evaluate(() => (window as any).PM.app.dirty)).toBe(false);
   await rename(session, 'After relaunch');
-  await session.page.keyboard.press('Meta+S');
+  await session.page.keyboard.press('ControlOrMeta+S');
   await expect.poll(() => savedName(b)).toBe('After relaunch');
   expect(await savedName(a)).toBe('Second version');
   expect(await session.app.evaluate(() => (globalThis as any).__saveDialogs || 0)).toBe(0);

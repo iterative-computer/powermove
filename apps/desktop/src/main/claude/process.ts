@@ -6,5 +6,6 @@ import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
  * exec preserves its PID for cancellation. Arguments are passed literally; no
  * user shell profile or command interpolation is involved. */
 export function spawnClaudeProcess(command: string, args: readonly string[], options: SpawnOptions): ChildProcess {
+  if (process.platform === 'win32') return spawn(command, [...args], { ...options, windowsHide: true });
   return spawn('/bin/sh', ['-c', 'exec "$@"', 'powermove-claude', command, ...args], options);
 }

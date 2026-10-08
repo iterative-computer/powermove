@@ -11,7 +11,7 @@ cases.push({ restore: true, fps: 30, format: 'mp4', sourceFormat: 'mp4' });
 for (const { restore, fps, format, sourceFormat } of cases) test(`exports each ${sourceFormat} source frame to ${format} at ${fps} fps ${restore ? 'after restoring media' : 'after import'}`, async ({ session }, info) => {
   await session.openEditor();
   const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-export-frames-'));
-  const ffmpeg = path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg');
+  const ffmpeg = path.join(repoRoot, `node_modules/ffmpeg-static/ffmpeg${process.platform === 'win32' ? '.exe' : ''}`);
   try {
     const source = path.join(root, `steps.${sourceFormat}`);
     const raw = Buffer.concat(Array.from({ length: 20 }, (_, i) => Buffer.alloc(64 * 64 * 3, 20 + i * 10)));

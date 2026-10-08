@@ -1,3 +1,4 @@
+import { encoderBinary } from '../main/platform';
 /*
  * `powermove serve`: the Powermove host without Electron. The same main-process
  * modules that back the desktop app run here in plain Node, and each browser
@@ -347,10 +348,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   registerCaptureIpc(ipcMain, ctx);
   registerShellIpc(ipcMain, { ...ctx, attachmentCacheDirectory: path.join(userData, 'Attachment Cache') });
   registerLogIpc(ipcMain, ctx);
-  const ffmpeg = path.join(options.appPath, 'node_modules', 'ffmpeg-static', 'ffmpeg');
+  const ffmpeg = encoderBinary(options.appPath);
   const mediaProxies = new MediaProxyService(app.getPath('temp'), playbackConverter(ffmpeg), imageSequenceConverter(ffmpeg), previewConverter(ffmpeg), stillImageConverter(ffmpeg));
   registerMediaProxyIpc(ipcMain, mediaProxies, ctx);
-  registerRenderEncoder(ipcMain, ctx);
+  registerRenderEncoder(ipcMain, { ...ctx, binary: ffmpeg });
 
   /* agents */
   const apiPackDir = path.join(options.resourcesDir, 'api-pack');

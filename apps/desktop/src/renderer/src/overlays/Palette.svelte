@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { shortcutLabel } from '../platform';
   import { onMount, tick, untrack } from 'svelte';
 
   import { paletteEntries, type PaletteEntry } from './palette-model';
@@ -161,7 +162,7 @@
           onpointermove={() => select(index)}
         >
           <span>{item.label}</span>
-          {#if item.kb}<span class="kb">{item.kb}</span>{/if}
+          {#if item.kb}<span class="kb">{shortcutLabel(item.kb)}</span>{/if}
         </div>
       {/each}
     {:else}

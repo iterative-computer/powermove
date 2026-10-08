@@ -2,6 +2,7 @@ import { app, BrowserWindow, Notification, type IpcMain, type WebContents } from
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { AGENT_SOUNDS } from '../shared/agent-notifications';
+import { windowsScript } from './windows-system';
 
 export function registerAgentNotifications(ipc: Pick<IpcMain, 'handle'>, ctx: {
   isTrustedSenderContents(sender: WebContents): boolean;
@@ -30,6 +31,11 @@ export function registerAgentNotifications(ipc: Pick<IpcMain, 'handle'>, ctx: {
         ? path.join(app.isPackaged ? process.resourcesPath : app.getAppPath(), app.isPackaged ? 'sounds' : 'resources/sounds', 'little-victory-deep.wav')
         : `/System/Library/Sounds/${options.sound}.aiff`;
       execFile('/usr/bin/afplay', [soundPath], () => {});
+    }
+    if (process.platform === 'win32' && options.sound !== 'None') {
+      const soundPath = options.sound === 'Little Victory (Deep)'
+        ? path.join(app.isPackaged ? process.resourcesPath : app.getAppPath(), app.isPackaged ? 'sounds' : 'resources/sounds', 'little-victory-deep.wav') : null;
+      void windowsScript('if ($data) { $player = New-Object System.Media.SoundPlayer $data; try { $player.PlaySync() } finally { $player.Dispose() } } else { [System.Media.SystemSounds]::Asterisk.Play() }', soundPath).catch(() => undefined);
     }
   });
 }

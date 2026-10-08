@@ -17,7 +17,7 @@ test('clearing composer lines preserves only intentional newlines and keeps the 
   await expect.poll(draft).toBe('First\nAgain');
 
   // Clear a whole draft, then type again at the same caret.
-  await input.press('ControlOrMeta+a');
+  await input.press('ControlOrControlOrMeta+a');
   await input.press('Backspace');
   await expect.poll(draft).toBe('');
   await expect(input.locator('br')).toHaveCount(0);
@@ -26,11 +26,11 @@ test('clearing composer lines preserves only intentional newlines and keeps the 
 
   await input.press('Shift+Enter');
   await input.pressSequentially('Last');
-  await input.press('Meta+Backspace');
+  await input.press('ControlOrMeta+Backspace');
   await expect.poll(draft).toBe('Replacement\n');
-  await input.press('ControlOrMeta+z');
+  await input.press('ControlOrControlOrMeta+z');
   await expect.poll(draft).toBe('Replacement\nLast');
-  await input.press('ControlOrMeta+Shift+z');
+  await input.press('ControlOrControlOrMeta+Shift+z');
   await expect.poll(draft).toBe('Replacement\n');
   // Removing the intentional newline still joins the lines normally.
   await input.press('Backspace');

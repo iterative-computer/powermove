@@ -5,7 +5,7 @@ import { parse, stringify } from 'smol-toml';
 
 const CODEX_RESOURCE_KEYS = [
   'features', 'skills', 'plugins', 'marketplaces', 'apps', 'mcp_servers',
-  'tools', 'web_search', 'hooks', 'agents', 'developer_instructions',
+  'tools', 'web_search', 'hooks', 'agents', 'windows', 'developer_instructions',
   'model_instructions_file', 'project_doc_fallback_filenames', 'project_doc_max_bytes'
 ] as const;
 
@@ -22,6 +22,8 @@ async function linkResource(source: string, target: string): Promise<void> {
     return;
   }
   if (await exists(target)) {
+    if (process.platform === 'win32' && (await lstat(source)).isFile() && (await lstat(target)).isFile()
+      && await readFile(source, 'utf8') === await readFile(target, 'utf8')) return;
     if ((await lstat(target)).isSymbolicLink() && await readlink(target) === source) return;
     // Preserve resources created by an older private runtime before linking the
     // normal user installation. Never move or replace account/session files.
@@ -30,7 +32,9 @@ async function linkResource(source: string, target: string): Promise<void> {
     const backup = await mkdtemp(path.join(backupRoot, `${path.basename(target)}-`));
     await rename(target, path.join(backup, path.basename(target)));
   }
-  await symlink(source, target);
+  const info = await lstat(source);
+  if (process.platform === 'win32' && info.isFile()) await writeConfig(target, await readFile(source, 'utf8'));
+  else await symlink(source, target, process.platform === 'win32' ? 'junction' : undefined);
 }
 
 async function readConfig(file: string, toml: boolean): Promise<Record<string, unknown>> {

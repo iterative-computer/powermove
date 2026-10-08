@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { shortcutLabel } from '../platform';
   import { onMount } from 'svelte';
   import Icon from '../panels/Icon.svelte';
   import { agentState } from '../panels/agent/agent-state.svelte';
@@ -98,7 +99,7 @@
     class:receiving
     type="button"
     data-tone={status.tone}
-    title={status.tone === 'idle' ? 'Ask the agent (⌘⇧K). Drag to dock.' : status.label}
+    title={status.tone === 'idle' ? shortcutLabel('Ask the agent (⌘⇧K). Drag to dock.') : status.label}
     aria-label={ariaLabel}
     aria-haspopup="dialog"
     aria-controls="agent-popover"

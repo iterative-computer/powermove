@@ -75,15 +75,15 @@ test('professional shortcuts split, cut, paste, nudge, and respect focused field
   });
   expect(state).toEqual({ count: 4, selectedFrom: 4, selectedDuration: 4, history: ['Split'] });
 
-  await page.keyboard.press('Meta+Z');
+  await page.keyboard.press('ControlOrMeta+Z');
   expect(await page.evaluate(() => (window as any).PM.proj.layers.length)).toBe(3);
   await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.selectLayers([PM.proj.layers[1].id]);
   });
-  await page.keyboard.press('Meta+X');
+  await page.keyboard.press('ControlOrMeta+X');
   expect(await page.evaluate(() => (window as any).PM.proj.layers.length)).toBe(2);
-  await page.keyboard.press('Meta+V');
+  await page.keyboard.press('ControlOrMeta+V');
   state = await page.evaluate(() => {
     const PM = (window as any).PM;
     return { count: PM.proj.layers.length, selected: PM.sel.layers.length, history: PM.hist.list().slice(-2) };
@@ -294,7 +294,7 @@ test('After Effects timeline keys navigate, retime layers, and move selected key
   await page.evaluate(() => (window as any).PM.setTime(5));
   await page.keyboard.press('[');
   await expect.poll(() => page.evaluate((layerId) => (window as any).PM.L(layerId)?.from, setup.layerId)).toBe(5);
-  await page.keyboard.press('Meta+Z');
+  await page.keyboard.press('ControlOrMeta+Z');
   await expect.poll(() => page.evaluate((layerId) => (window as any).PM.L(layerId)?.from, setup.layerId)).toBe(2);
 
   await page.evaluate(() => (window as any).PM.setTime(0));
@@ -316,9 +316,9 @@ test('After Effects timeline keys navigate, retime layers, and move selected key
     return layer.p.opacity.kf.find((key: any) => key.i === keyId)?.t;
   }, setup)).toBeCloseTo(keyTimeBefore + 1 / 30, 6);
 
-  await page.keyboard.press('Meta+l');
+  await page.keyboard.press('ControlOrMeta+l');
   await expect.poll(() => page.evaluate((layerId) => (window as any).PM.L(layerId)?.lock, setup.layerId)).toBe(true);
-  await page.keyboard.press('Meta+Shift+l');
+  await page.keyboard.press('ControlOrMeta+Shift+l');
   await expect.poll(() => page.evaluate((layerId) => (window as any).PM.L(layerId)?.lock, setup.layerId)).toBe(false);
 
   expect(session.diagnostics.pageErrors).toEqual([]);

@@ -8,7 +8,7 @@ test.describe('@overlays Svelte overlays', () => {
     const { page, diagnostics } = session;
     await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
     const before = await page.evaluate(() => (window as any).PM.proj.layers.length as number);
-    await page.keyboard.press('Meta+K');
+    await page.keyboard.press('ControlOrMeta+K');
     const palette = page.locator('#palette[data-svelte-overlay-palette="true"]');
     await expect(palette).toHaveCount(1);
     await palette.locator('input[role="combobox"]').fill('New solid');

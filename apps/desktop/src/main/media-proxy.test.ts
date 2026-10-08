@@ -1,3 +1,4 @@
+import { encoderBinary } from './platform';
 import { copyFile, mkdtemp, rm, writeFile, readFile, readdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -90,7 +91,7 @@ describe('native image sequence conversion', () => {
     const source = path.resolve('e2e/fixtures/still-red.png');
     const files = [path.join(root, 'frame-001.png'), path.join(root, 'frame-002.png')];
     await Promise.all(files.map(file => copyFile(source, file)));
-    const service = new MediaProxyService(root, async () => {}, imageSequenceConverter(path.resolve('node_modules/ffmpeg-static/ffmpeg')));
+    const service = new MediaProxyService(root, async () => {}, imageSequenceConverter(encoderBinary(process.cwd())));
     const result = await service.createSequence(files, 24);
     expect(result.size).toBeGreaterThan(100);
     await service.release(result.token);

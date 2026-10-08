@@ -19,7 +19,7 @@ export function resolvePackagedEsbuildBinary(
   if (!resourcesPath) return undefined;
 
   const executable = platform === 'win32' ? 'esbuild.exe' : 'esbuild';
-  const candidate = path.join(resourcesPath, 'app.asar.unpacked', 'node_modules', '@esbuild', `${platform}-${arch}`, 'bin', executable);
+  const candidate = path.join(resourcesPath, 'app.asar.unpacked', 'node_modules', '@esbuild', `${platform}-${arch}`, ...(platform === 'win32' ? [] : ['bin']), executable);
   return existsSync(candidate) ? candidate : undefined;
 }
 

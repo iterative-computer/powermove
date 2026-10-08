@@ -20,6 +20,10 @@ export async function syncFile(handle: FileHandle): Promise<void> {
   if (!await (await nativeFiles())?.fullSync(handle.fd)) await handle.sync();
 }
 export async function syncDirectory(directory: string): Promise<void> {
+  // Node cannot open directory handles for fsync on Windows. File handles
+  // are still flushed before publication; do not turn a successful save into
+  // an EISDIR/EPERM failure after replacing the destination.
+  if (process.platform === 'win32') return;
   const handle = await open(directory, 'r');
   try { await syncFile(handle); } finally { await handle.close(); }
 }

@@ -63,7 +63,7 @@ for (const surface of ['agent', 'floating agent', 'text tool'] as const) {
       : surface === 'floating agent' ? page.locator('.spatial-compose textarea')
         : page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
     await editor.fill('Native controls');
-    await editor.press('Meta+A');
+    await editor.press('ControlOrMeta+A');
     const layersBefore = await page.evaluate(() => (window as any).PM.proj.layers.map((l: any) => l.id));
     const value = () => editor.evaluate((el: any) => el.value ?? el.textContent);
     const invoke = async (label: string) => {
