@@ -30,6 +30,8 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile
+      - name: Generate cloud runtime types
+        run: bun run --cwd apps/cloud types
       - name: Type check
         run: bun run --cwd apps/desktop typecheck
       - name: Windows runtime and editor regression tests
