@@ -27,8 +27,9 @@ export function windowsTask(spec: ServiceSpec): string {
 export function windowsSupervisor(spec: ServiceSpec): string {
   // All inputs are JS data, with no shell or command-string interpolation.
   return `const { spawn } = require('node:child_process');
-const { openSync } = require('node:fs');
+const { openSync, writeFileSync } = require('node:fs');
 const fd = openSync(${JSON.stringify(logPath(spec.userData, 'win32'))}, 'a');
+writeFileSync(${JSON.stringify(path.win32.join(spec.userData, 'serve-service.pid'))}, String(process.pid));
 let child, stopping = false;
 function start() {
   child = spawn(${JSON.stringify(spec.node)}, ${JSON.stringify([spec.entry, 'serve', ...spec.args])}, { env: { ...process.env, POWERMOVE_USER_DATA: ${JSON.stringify(spec.userData)} }, windowsHide: true, stdio: ['ignore', fd, fd] });
@@ -41,11 +42,18 @@ start();
 }
 
 export async function installWindowsTask(spec: ServiceSpec): Promise<void> {
+  await removeWindowsTask(spec);
   await windowsScript('Register-ScheduledTask -TaskName $data.name -Xml $data.xml -Force | Out-Null; Start-ScheduledTask -TaskName $data.name', { name: WINDOWS_TASK, xml: windowsTask(spec) });
 }
 
-export async function removeWindowsTask(): Promise<void> {
-  await windowsScript('$task = Get-ScheduledTask -TaskName $data -ErrorAction SilentlyContinue; if ($task) { Stop-ScheduledTask -TaskName $data; Unregister-ScheduledTask -TaskName $data -Confirm:$false }', WINDOWS_TASK);
+export async function removeWindowsTask(spec: ServiceSpec): Promise<void> {
+  // Task Scheduler can stop the PowerShell action while leaving its Node child
+  // alive. Verify the supervisor command before stopping its entire tree.
+  await windowsScript('$task = Get-ScheduledTask -TaskName $data.name -ErrorAction SilentlyContinue; if ($task) { Stop-ScheduledTask -TaskName $data.name }; if (Test-Path -LiteralPath $data.pidFile) { $supervisorPid = [int](Get-Content -LiteralPath $data.pidFile -Raw); $process = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $supervisorPid); if ($process -and $process.ExecutablePath -eq $data.node -and $process.CommandLine.Contains($data.supervisor)) { & taskkill.exe /PID $supervisorPid /T /F | Out-Null; if ($LASTEXITCODE -ne 0 -and (Get-Process -Id $supervisorPid -ErrorAction SilentlyContinue)) { throw "Could not stop the Powermove host" } }; Remove-Item -LiteralPath $data.pidFile -Force }; if ($task) { Unregister-ScheduledTask -TaskName $data.name -Confirm:$false }', {
+    name: WINDOWS_TASK, node: spec.node,
+    supervisor: path.win32.join(spec.userData, 'serve-service.cjs'),
+    pidFile: path.win32.join(spec.userData, 'serve-service.pid')
+  });
 }
 
 export async function windowsTaskStatus(): Promise<string> {

@@ -51,7 +51,7 @@ describe.runIf(process.platform === 'win32')('native Windows login task', () => 
     } finally {
       await uninstall(nativeSpec, () => {}).catch(() => undefined);
       if (pid) { try { process.kill(pid); } catch { /* already stopped */ } }
-      await rm(root, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     }
   }, 120_000);
 });

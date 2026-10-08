@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import path from 'node:path';
 import { agentPlatform, encoderBinary, executableName, windowChrome } from './platform';
 import { absolutePathEntries } from './login-shell-path';
-import { windowsSandboxArgs } from './windows-sandbox';
+import { needsWindowsSandboxDefault, windowsSandboxArgs } from './windows-sandbox';
 
 describe('Windows executable and window layout', () => {
   it('uses the native x64 agents and encoder', () => {
@@ -28,5 +28,11 @@ describe('Windows executable and window layout', () => {
     expect(args).toContain('powermove-project');
     expect(args.find(value => value.startsWith('permissions.powermove-project='))).toContain('"C:\\\\Private Runtime" = "write"');
     expect(args.join(' ')).not.toContain('dangerously');
+  });
+  it('initializes fresh Windows sandboxes while preserving an existing selection', () => {
+    expect(needsWindowsSandboxDefault({})).toBe(true);
+    for (const sandbox of ['elevated', 'unelevated', 'mxc']) expect(needsWindowsSandboxDefault({ windows: { sandbox } })).toBe(false);
+    expect(needsWindowsSandboxDefault({ features: { elevated_windows_sandbox: true } })).toBe(false);
+    expect(needsWindowsSandboxDefault({ features: { experimental_windows_sandbox: true } })).toBe(false);
   });
 });

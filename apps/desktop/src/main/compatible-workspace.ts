@@ -16,7 +16,7 @@ import { agentResultSchema } from './codex/instructions';
 import type { AgentWorkspace } from './codex/workspace';
 import type { PowermoveAgentToolSpec } from './agent-tools/spec';
 import { powershellPath } from './windows-system';
-import { windowsSandboxArgs } from './windows-sandbox';
+import { windowsSandboxArgs, windowsSandboxDefaultArgs } from './windows-sandbox';
 import { discoverCodexBinary } from './codex/env';
 
 const object = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', additionalProperties: false, properties, required });
@@ -339,7 +339,7 @@ export async function startWorkspaceCommand(root: string, access: 'project' | 'c
   // Forward only the directory, never provider keys or account environment.
   if (sandbox && process.env.CODEX_HOME) env.CODEX_HOME = process.env.CODEX_HOME;
   const child = spawn(sandbox ?? (access === 'project' ? '/usr/bin/sandbox-exec' : shell[0]!),
-    sandbox ? windowsSandboxArgs(real, shell) : access === 'project' ? ['-p', profile, ...shell] : shell.slice(1),
+    sandbox ? windowsSandboxArgs(real, shell, [], await windowsSandboxDefaultArgs()) : access === 'project' ? ['-p', profile, ...shell] : shell.slice(1),
     { cwd: root, env, detached: !windows, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   // Closed at once, so stdin reads end as they did from /dev/null.
   child.stdin.on('error', () => undefined); child.stdin.end(options.input);

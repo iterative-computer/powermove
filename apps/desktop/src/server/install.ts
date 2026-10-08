@@ -126,7 +126,7 @@ export async function uninstall(spec: ServiceSpec, log: (line: string) => void):
   const platform = spec.platform ?? process.platform;
   const file = unitPath(spec);
   if (platform === 'win32') {
-    await removeWindowsTask();
+    await removeWindowsTask(spec);
     await rm(path.join(spec.userData, 'serve-service.cjs'), { force: true });
   } else if (platform === 'darwin') {
     const domain = await launchctlDomain();

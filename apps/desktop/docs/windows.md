@@ -31,7 +31,8 @@ by it because Claude does not provide native Windows sandboxing. The private
 Claude runtime directory is writable for its login and session state. Sandbox
 startup failure stops the run; it never retries with Computer access.
 
-Codex supports elevated and unelevated Windows sandboxes. Initial elevated
+Fresh installations use the unelevated Windows sandbox, which needs no
+administrator setup. Codex also supports an elevated Windows sandbox. Initial elevated
 setup can require Windows administrator approval. An explicit user choice in
 the Codex `[windows]` configuration is retained. Computer access still requires
 the existing per-run confirmation. See the [Windows sandbox documentation](https://learn.chatgpt.com/docs/windows/windows-sandbox).

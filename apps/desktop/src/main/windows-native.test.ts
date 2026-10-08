@@ -39,6 +39,7 @@ describe.runIf(process.platform === 'win32')('native Windows x64 integration', (
     await mkdir(path.join(source, 'skills'));
     await writeFile(path.join(source, 'AGENTS.md'), 'first');
     await prepareUserResources(runtime, source, 'chatgpt');
+    expect(await readFile(path.join(runtime, 'config.toml'), 'utf8')).toContain('sandbox = "unelevated"');
     expect((await lstat(path.join(runtime, 'skills'))).isSymbolicLink()).toBe(true);
     await prepareUserResources(runtime, source, 'chatgpt');
     await expect(stat(path.join(runtime, '.powermove-resource-backups'))).rejects.toMatchObject({ code: 'ENOENT' });
@@ -104,7 +105,6 @@ describe.runIf(process.platform === 'win32')('native Windows x64 integration', (
   }, 45_000);
   it('allows Project commands to write inside the workspace and denies writes outside it', async () => {
     const root = await folder(); const runtime = await folder(); const outside = await folder();
-    await writeFile(path.join(runtime, 'config.toml'), '[windows]\nsandbox = "unelevated"\n');
     vi.stubEnv('CODEX_HOME', runtime);
     const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
     const insideFile = path.join(root, 'allowed.txt'); const outsideFile = path.join(outside, 'denied.txt');

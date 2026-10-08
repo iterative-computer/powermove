@@ -1,5 +1,5 @@
 import { discoverCodexBinary } from '../codex/env';
-import { windowsSandboxArgs } from '../windows-sandbox';
+import { windowsSandboxArgs, windowsSandboxDefaultArgs } from '../windows-sandbox';
 import { killProcessFamily } from '../process-family';
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -422,7 +422,7 @@ export class ClaudeRunner {
     const windows = process.platform === 'win32';
     if (windows && req.access === 'project') {
       const sandbox = await discoverCodexBinary(null);
-      argv = windowsSandboxArgs(cwd, [binary, ...argv], [configDirectory]);
+      argv = windowsSandboxArgs(cwd, [binary, ...argv], [configDirectory], await windowsSandboxDefaultArgs());
       binary = sandbox;
     }
     let child: ChildProcess;

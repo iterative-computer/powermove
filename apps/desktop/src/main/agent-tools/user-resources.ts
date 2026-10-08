@@ -2,6 +2,7 @@ import { lstat, mkdir, mkdtemp, readFile, readlink, rename, symlink, unlink, wri
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { parse, stringify } from 'smol-toml';
+import { needsWindowsSandboxDefault } from '../windows-sandbox';
 
 const CODEX_RESOURCE_KEYS = [
   'features', 'skills', 'plugins', 'marketplaces', 'apps', 'mcp_servers',
@@ -92,6 +93,7 @@ async function syncUserResources(
   // The native engine, skills, app connectors and plugins are no longer
   // disabled by Powermove. Explicit user choices retain their native meaning.
   runtime.cli_auth_credentials_store = 'file';
+  if (process.platform === 'win32' && needsWindowsSandboxDefault(runtime)) runtime.windows = { ...(runtime.windows as Record<string, unknown> ?? {}), sandbox: 'unelevated' };
   await writeConfig(configFile, stringify(runtime));
 }
 
