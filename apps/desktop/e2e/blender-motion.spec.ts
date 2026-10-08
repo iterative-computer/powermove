@@ -102,9 +102,7 @@ test("Blender models, editable materials, regeneration and engine renders work i
   await expect(
     page.getByRole("group", { name: "Pattern scale property", exact: true }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("radio", { name: "Solid", exact: true }),
-  ).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "3D preview" })).toBeVisible();
   for (const theme of ["dark", "light"]) {
     await page.evaluate((theme) => {
       const PM = (window as any).PM;
@@ -404,10 +402,10 @@ test("an agent builds and animates a textured Blender model, captures the real c
       light: {
         id: "studio_key",
         type: "sun",
-        p: { x: 3, y: 5, z: 4, intensity: 3 },
+        p: { x: 1560, y: -460, z: -800, intensity: 3 },
       },
     });
-    await call("edit_3d",{operation:"add_light",light:{id:"studio_fill",type:"point",p:{x:-2,y:3,z:2,intensity:20,distance:12}}});
+    await call("edit_3d",{operation:"add_light",light:{id:"studio_fill",type:"point",p:{x:560,y:-60,z:-400,intensity:20,distance:2400}}});
     await call("edit_3d", { operation: "add_camera" });
     await call("edit_3d", {
       operation: "set_rendering",
@@ -470,6 +468,8 @@ test("Blender motion blur exports transparent groups and nested compositions wit
       operation: "add_object",
       object: {
         source: { primitive: "box" },
+        // A 20 px box in the 128 px frame.
+        p: { sx: 0.1, sy: 0.1, sz: 0.1 },
         material: { p: { color: "#FF6622" } },
       },
     });
@@ -488,8 +488,8 @@ test("Blender motion blur exports transparent groups and nested compositions wit
         target: group.id,
         path: "position.x",
         keyframes: [
-          { time: 0, value: -3 },
-          { time: 1, value: 3 },
+          { time: 0, value: -36 },
+          { time: 1, value: 164 },
         ],
       },
     ]);

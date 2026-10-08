@@ -1,99 +1,87 @@
 import {describe,expect,it} from 'vitest';
 import * as THREE from 'three';
-import {ModalTransform,cycleConstraint,typeNumber,parseTyped,toScreen,type ModalHost} from './modal';
+import {ModalTransform,toScreen,SCENE_AXIS,type ModalHost,type ModalMode} from './modal';
 import {resolveTargets} from './targets';
 import {compositionRuntime} from './service';
 import {editScene} from './operations';
 import {LAYER3D_DEFINITIONS} from './layers';
+import {applyDefaultCamera,defaultLens} from './space';
 import {makePM} from '../../legacy/__tests__/make-pm';
 
 function editor(){
   const PM=makePM('core/easing','core/model','core/selection','core/anim','core/history','core/editing');
-  PM.proj=PM.mkProject({name:'Modal',fps:30,dur:5});PM.time=0;
+  PM.proj=PM.mkProject({name:'Drag',fps:30,dur:5,w:1600,h:900});PM.time=0;
   PM.layerDefinition=(id:string)=>Object.values(LAYER3D_DEFINITIONS).includes(id as any)?{id,label:'3D',version:1,params:[],defaults:{},renderer:{kind:'layer3d'}}:null;
   return PM;
 }
+/** The default camera over a composition-sized rectangle: one screen pixel is one composition pixel at z=0. */
 const rect={x:0,y:0,width:1600,height:900};
-function host(PM:any,patch:Partial<ModalHost>={}):ModalHost&{results:string[]} {
-  const camera=new THREE.PerspectiveCamera(50,16/9,.01,1000);camera.position.set(0,0,10);camera.lookAt(0,0,0);camera.updateMatrixWorld(true);
+function host(PM:any):ModalHost&{results:string[]} {
+  const camera=new THREE.PerspectiveCamera(defaultLens(PM.proj).fov,16/9,.01,1000);applyDefaultCamera(camera,PM.proj);camera.updateMatrixWorld(true);
   const results:string[]=[];
-  return {PM,camera:()=>camera,rect:()=>rect,cursor:()=>new THREE.Vector3(),orientation:'global',pivot:'median',snap:false,activeId:null,
-    changed:()=>{},finished:result=>results.push(result),results,...patch};
+  return {PM,camera:()=>camera,rect:()=>rect,changed:()=>{},finished:result=>results.push(result),results};
 }
-const key=(k:string,extra:Partial<KeyboardEvent>={})=>({key:k,shiftKey:false,ctrlKey:false,altKey:false,metaKey:false,...extra});
 const value=(PM:any,id:string,path:string)=>PM.L(id).p[path].v;
-const start=(PM:any,mode:'translate'|'rotate'|'scale'|'trackball',ids:string[],h=host(PM))=>
-  ModalTransform.begin(h,mode,resolveTargets(PM,ids,compositionRuntime(PM)),{x:900,y:450})!;
+const plain={shiftKey:false,ctrlKey:false};
+const start=(PM:any,mode:ModalMode,ids:string[],options:Parameters<typeof ModalTransform.begin>[4]={},h=host(PM),at={x:800,y:450})=>
+  ModalTransform.begin(h,mode,resolveTargets(PM,ids,compositionRuntime(PM)),at,options)!;
+const cube=(PM:any,id='cube',p:any={})=>expect(editScene(PM,{operation:'add_object',object:{id,source:{primitive:'box'},p:{sx:1,sy:1,sz:1,...p}}}).ok).toBe(true);
 
-describe('Blender modal transforms',()=>{
-  it('cycles axis constraints through the header orientation, the alternate one, then none',()=>{
-    let c=cycleConstraint(null,'x',false,'global');expect(c).toEqual({axis:'x',plane:false,orientation:'global'});
-    c=cycleConstraint(c,'x',false,'global');expect(c?.orientation).toBe('local');
-    expect(cycleConstraint(c,'x',false,'global')).toBeNull();
-    expect(cycleConstraint({axis:'x',plane:false,orientation:'global'},'y',false,'global')?.axis).toBe('y');
-    expect(cycleConstraint(null,'z',true,'view')).toEqual({axis:'z',plane:true,orientation:'view'});
+describe('3D drags',()=>{
+  it('adds models at the composition centre in composition pixels',()=>{
+    const PM=editor();cube(PM);
+    expect(value(PM,'cube','position.x')).toBe(800);expect(value(PM,'cube','position.y')).toBe(450);expect(value(PM,'cube','position.z')).toBe(0);
   });
-  it('reads numbers like Blender: minus toggles the sign anywhere',()=>{
-    let input='';for(const k of ['2','.','5'])input=typeNumber(input,k);expect(parseTyped(input)).toBe(2.5);
-    input=typeNumber(input,'-');expect(parseTyped(input)).toBe(-2.5);input=typeNumber(input,'-');expect(parseTyped(input)).toBe(2.5);
-    expect(parseTyped(typeNumber('','-'))).toBeNull();expect(typeNumber('1.5','.')).toBe('1.5');
+  it('moves with the pointer pixel for pixel through the default camera, as one Undo',()=>{
+    const PM=editor();cube(PM);
+    const count=PM.hist.list().length,h=host(PM),modal=start(PM,'translate',['cube'],{},h);
+    modal.move({x:900,y:500},plain);
+    expect(value(PM,'cube','position.x')).toBeCloseTo(900,0);expect(value(PM,'cube','position.y')).toBeCloseTo(500,0);expect(value(PM,'cube','position.z')).toBeCloseTo(0);
+    expect(modal.readout()).toBe('X 100  Y 50  Z 0');
+    modal.confirm();expect(h.results).toEqual(['confirm']);expect(PM.hist.list()).toHaveLength(count+1);
   });
-  it('G X 2 Enter moves along global X as one undo; Escape restores everything',()=>{
-    const PM=editor();expect(editScene(PM,{operation:'add_object',object:{id:'cube',source:{primitive:'box'},p:{x:1,y:2}}}).ok).toBe(true);
-    const count=PM.hist.list().length,h=host(PM),modal=start(PM,'translate',['cube'],h);
-    modal.key(key('x'));modal.key(key('2'));
-    expect(modal.header()).toBe('D: [2|] (2) along global X');
-    expect(value(PM,'cube','position.x')).toBeCloseTo(3);expect(value(PM,'cube','position.y')).toBeCloseTo(2);
-    modal.key(key('Enter'));expect(h.results).toEqual(['confirm']);expect(PM.hist.list()).toHaveLength(count+1);
-    const second=start(PM,'translate',['cube']);second.key(key('y'));second.key(key('5'));expect(value(PM,'cube','position.y')).toBeCloseTo(7);
-    second.key(key('Escape'));expect(value(PM,'cube','position.y')).toBeCloseTo(2);expect(PM.hist.list()).toHaveLength(count+1);
-  });
-  it('follows the pointer in the view plane, snaps with Ctrl and slows with Shift',()=>{
-    const PM=editor();expect(editScene(PM,{operation:'add_object',object:{id:'cube',source:{primitive:'box'}}}).ok).toBe(true);
+  it('snaps to 10 px with Ctrl and locks to the dominant axis with Shift',()=>{
+    const PM=editor();cube(PM);
     const modal=start(PM,'translate',['cube']);
-    const camera=host(PM).camera(),per=toScreen(camera,rect,new THREE.Vector3(1,0,0)).x-toScreen(camera,rect,new THREE.Vector3()).x;
-    modal.move({x:900+per*2.4,y:450},{shiftKey:false,ctrlKey:false});
-    expect(value(PM,'cube','position.x')).toBeCloseTo(2.4,1);expect(value(PM,'cube','position.z')).toBeCloseTo(0);
-    modal.modifiers({shiftKey:false,ctrlKey:true});expect(value(PM,'cube','position.x')).toBeCloseTo(2);
-    modal.modifiers({shiftKey:false,ctrlKey:false});
-    modal.move({x:900+per*3.4,y:450},{shiftKey:true,ctrlKey:false});expect(value(PM,'cube','position.x')).toBeCloseTo(2.5,1);
+    modal.move({x:904,y:453},{shiftKey:false,ctrlKey:true});expect(value(PM,'cube','position.x')).toBeCloseTo(900);expect(value(PM,'cube','position.y')).toBeCloseTo(450);
+    modal.move({x:904,y:470},{shiftKey:true,ctrlKey:false});expect(value(PM,'cube','position.y')).toBeCloseTo(450);expect(value(PM,'cube','position.x')).toBeCloseTo(904,0);
+    modal.cancel();
+  });
+  it('moves along one axis from an axis handle and Escape restores the start',()=>{
+    const PM=editor();cube(PM);
+    const camera=host(PM).camera(),pivot=new THREE.Vector3(),tip=toScreen(camera,rect,pivot.clone().add(SCENE_AXIS.z)),base=toScreen(camera,rect,pivot);
+    const modal=start(PM,'translate',['cube'],{constraint:{axis:'x'}});
+    modal.move({x:950,y:450},plain);
+    expect(value(PM,'cube','position.x')).toBeCloseTo(950,0);expect(value(PM,'cube','position.y')).toBe(450);expect(value(PM,'cube','position.z')).toBe(0);
+    expect(modal.readout()).toBe('X 150');
+    expect(modal.key({key:'Escape'})).toBe(true);expect(value(PM,'cube','position.x')).toBe(800);
+    // Z points away from the viewer, straight into the screen.
+    expect(Math.hypot(tip.x-base.x,tip.y-base.y)).toBeLessThan(1);
+  });
+  it('turns in the view like the 2D rotate handle: clockwise on screen is positive',()=>{
+    const PM=editor();cube(PM);
+    const modal=start(PM,'rotate',['cube'],{},host(PM),{x:900,y:450});
+    modal.move({x:800+100*Math.SQRT1_2,y:450+100*Math.SQRT1_2},plain);modal.move({x:800,y:550},plain);
+    expect(value(PM,'cube','rotation')).toBeCloseTo(90,0);expect(modal.readout()).toBe('90°');
     modal.confirm();
   });
-  it('constrains to an axis the view looks along by closest approach, and to planes',()=>{
-    const PM=editor();expect(editScene(PM,{operation:'add_object',object:{id:'cube',source:{primitive:'box'}}}).ok).toBe(true);
-    const modal=start(PM,'translate',['cube']);
-    modal.key(key('z',{shiftKey:true}));expect(modal.header()).toContain('locking global Z');
-    modal.move({x:1100,y:300},{shiftKey:false,ctrlKey:false});
-    expect(value(PM,'cube','position.z')).toBe(0);expect(value(PM,'cube','position.x')).toBeGreaterThan(0);expect(value(PM,'cube','position.y')).toBeGreaterThan(0);
-    modal.cancel();expect(value(PM,'cube','position.x')).toBe(0);
+  it('scales from the pivot by the pointer distance',()=>{
+    const PM=editor();cube(PM);
+    const modal=start(PM,'scale',['cube'],{},host(PM),{x:900,y:450});
+    modal.move({x:1000,y:450},plain);
+    expect(value(PM,'cube','scale.x')).toBeCloseTo(200);expect(value(PM,'cube','scale.z')).toBeCloseTo(200);expect(modal.readout()).toBe('200%');
+    modal.confirm();
   });
-  it('R Z 90 rotates about the pivot; Individual Origins rotates each in place',()=>{
-    const PM=editor();
-    for(const [id,x] of [['a',-2],['b',2]] as const)expect(editScene(PM,{operation:'add_object',object:{id,source:{primitive:'box'},p:{x}}}).ok).toBe(true);
-    let modal=start(PM,'rotate',['a','b']);modal.key(key('z'));for(const k of '90')modal.key(key(k));
-    expect(value(PM,'a','rotation')).toBeCloseTo(90);expect(value(PM,'a','position.x')).toBeCloseTo(0);expect(value(PM,'a','position.y')).toBeCloseTo(-2);
-    expect(value(PM,'b','position.y')).toBeCloseTo(2);modal.cancel();
-    modal=start(PM,'rotate',['a','b'],host(PM,{pivot:'individual'}));modal.key(key('z'));for(const k of '90')modal.key(key(k));
-    expect(value(PM,'a','position.x')).toBeCloseTo(-2);expect(value(PM,'b','rotation')).toBeCloseTo(90);modal.confirm();
-  });
-  it('S scales from the pointer distance; typed values set exact factors per axis',()=>{
-    const PM=editor();expect(editScene(PM,{operation:'add_object',object:{id:'cube',source:{primitive:'box'}}}).ok).toBe(true);
-    const modal=start(PM,'scale',['cube']);const centre=toScreen(host(PM).camera(),rect,new THREE.Vector3());
-    modal.move({x:centre.x+(900-centre.x)*2,y:centre.y+(450-centre.y)*2},{shiftKey:false,ctrlKey:false});
-    expect(value(PM,'cube','scale.x')).toBeCloseTo(200);expect(value(PM,'cube','scale.z')).toBeCloseTo(200);
-    modal.key(key('y'));modal.key(key('3'));expect(value(PM,'cube','scale.y')).toBeCloseTo(300);expect(value(PM,'cube','scale.x')).toBeCloseTo(100);
-    expect(modal.header()).toBe('Scale: [3|] along global Y');modal.confirm();
-  });
-  it('switches between G, R and S mid-gesture and keys moves with auto keying',()=>{
-    const PM=editor();expect(editScene(PM,{operation:'add_object',object:{id:'cube',source:{primitive:'box'}}}).ok).toBe(true);
-    PM.autokey=true;PM.time=1;
-    const modal=start(PM,'translate',['cube']);modal.key(key('r'));expect(modal.mode).toBe('rotate');modal.key(key('r'));expect(modal.mode).toBe('trackball');
-    modal.key(key('g'));modal.key(key('x'));modal.key(key('1'));modal.confirm();
+  it('keys moves while auto keying is on',()=>{
+    const PM=editor();cube(PM);PM.autokey=true;PM.time=1;
+    const modal=start(PM,'translate',['cube']);modal.move({x:820,y:450},plain);modal.confirm();
     expect(PM.L('cube').p['position.x'].kf).toHaveLength(1);
   });
-  it('moves a light and keeps its aim unless Alt-moved; rotation swings the aim',()=>{
-    const PM=editor();expect(editScene(PM,{operation:'add_light',light:{id:'key',type:'spot',p:{x:0,y:4,z:0,targetX:0,targetY:0,targetZ:0}}}).ok).toBe(true);
-    const id=PM.proj.layers[0].id,modal=start(PM,'translate',[id]);modal.key(key('x'));modal.key(key('2'));modal.confirm();
-    expect(value(PM,id,'position.x')).toBeCloseTo(2);expect(PM.L(id).d.data.light.p.targetX.v).toBeCloseTo(0);
+  it('moves a light and keeps it aimed at the same point',()=>{
+    const PM=editor();
+    expect(editScene(PM,{operation:'add_light',light:{id:'key',type:'spot',p:{x:800,y:0,z:-400,targetX:800,targetY:450,targetZ:0}}}).ok).toBe(true);
+    const id=PM.proj.layers[0].id,modal=start(PM,'translate',[id],{constraint:{axis:'x'}});
+    modal.move({x:900,y:450},plain);modal.confirm();
+    expect(value(PM,id,'position.x')).toBeGreaterThan(800);expect(PM.L(id).d.data.light.p.targetX.v).toBeCloseTo(800);
   });
 });

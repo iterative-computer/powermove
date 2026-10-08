@@ -1,8 +1,3 @@
-import {mount,unmount} from 'svelte';
-import Header3D from './viewport3d/Header3D.svelte';
-import Toolbar3D from './viewport3d/Toolbar3D.svelte';
-import Sidebar3D from './viewport3d/Sidebar3D.svelte';
-import { objectContextMenu, rememberMenuPoint } from './viewport3d/menus';
 import type { EditCommand, InspectorService, PowermoveAPI, Space3DAPI, ToolService, ViewerService } from 'powermove';
 
 type ViewerSpace3D = Pick<Space3DAPI, 'is3DLayer' | 'planeMatrix' | 'planeContains' | 'projectPoint' | 'inversePlane'>;
@@ -778,13 +773,15 @@ const displayViewport = (viewport: PreviewViewport, zoom = viewport.cssWidth / v
 const eventOffs: Array<() => void> = [];
 
 let viewport3d:ReturnType<PowermoveAPI['scene3d']['viewport']['attach']>|null=null;
-let viewportHeader:any=null,viewportHeaderHost:HTMLElement|null=null,viewportPanels:any[]=[];
+let renderModeControl:HTMLSelectElement|null=null;
 const isModel3D=(layer:any)=>['powermove.3d.object','powermove.3d.light','powermove.3d.camera'].includes(layer?.d?.definition) || !!api.scene3d?.isGroup?.(layer?.id);
+/** Layers the 3D view selects and transforms: models, lights, cameras and 2D layers with 3D on. */
+const in3DView=(layer:any)=>!!layer&&!!viewport3d?.covers([layer.id]);
 const disposeRuntime = () => {
   if (disposed) return;
   disposed = true;
   viewport3d?.dispose();viewport3d=null;V.viewport3d=null;V.sceneGizmo=null;
-  if(viewportHeader)void unmount(viewportHeader);viewportHeaderHost?.remove();for(const panel of viewportPanels.splice(0))void unmount(panel);
+  renderModeControl?.remove();renderModeControl=null;
   activeDrag?.cancel(); activeDrag = null;
   unbindStage?.(); unbindStage = null;
   resizeObserver?.disconnect(); resizeObserver = null;
@@ -841,13 +838,13 @@ V.attach = (stage: HTMLElement) => {
       stage.appendChild(recovery);
     }
     if(api.scene3d?.viewport){
-      // Blender's 3D viewport: shown only for compositions with 3D layers.
+      // The 3D view: shown only for compositions with 3D layers.
       viewport3d=api.scene3d.viewport.attach(stage,{
         panComposition:(dx,dy)=>{leaveFitMode();V.pan=[V.pan[0]+dx,V.pan[1]+dy];V.layout(true);},
-        zoomComposition:(factor,clientX,clientY)=>{zoomGestureUntil=window.performance.now()+80;navigationUntil=window.performance.now()+250;zoomAtEvent({clientX,clientY},factor);}
+        zoomComposition:(factor,clientX,clientY)=>{zoomGestureUntil=window.performance.now()+80;navigationUntil=window.performance.now()+250;zoomAtEvent({clientX,clientY},factor);},
+        tool:()=>V.temporaryTool||toolService()?.tool||'select'
       });
       V.viewport3d=viewport3d;V.sceneGizmo=viewport3d;
-      viewportPanels.push(mount(Toolbar3D,{target:stage,props:{api}}),mount(Sidebar3D,{target:stage,props:{api}}));
     }
     V.el = gl; V.ov = ov; V.octx = ov.getContext('2d'); V.inner = inner; V.stage = stage;
     V.recovery = recovery;
@@ -870,11 +867,6 @@ V.attach = (stage: HTMLElement) => {
     zoomHost.append(zoomControl);
     zoomControl.style.cssText = 'position:absolute;right:8px;top:7px;z-index:6;width:110px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui)';
     V.zoomControl = zoomControl;
-    if(api.scene3d?.viewport){
-      viewportHeaderHost=document.createElement('div');viewportHeaderHost.id='composition-3d-controls';viewportHeaderHost.dataset['3dToolbar']='';
-      viewportHeaderHost.style.cssText='position:relative;z-index:6;display:none;align-items:center;padding:26px 4px 6px;flex-shrink:0;min-width:0';
-      stage.parentElement!.insertBefore(viewportHeaderHost,stage);viewportHeader=mount(Header3D,{target:viewportHeaderHost,props:{api}});
-    }
 
     let preview=zoomHost.querySelector<HTMLElement>('#preview-controls');
     if(!preview){preview=document.createElement('div');preview.id='preview-controls';zoomHost.append(preview);}
@@ -883,6 +875,17 @@ V.attach = (stage: HTMLElement) => {
     const quality=document.createElement('select');quality.setAttribute('aria-label','Preview resolution');quality.style.cssText='width:82px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui)';
     for(const [value,label] of [['auto','Auto'],['1','Full'],['0.5','Half'],['0.25','Quarter']]){const option=document.createElement('option');option.value=value!;option.textContent=label!;quality.append(option);}
     quality.value=api.transport.perf.auto?'auto':String(api.transport.quality);quality.onchange=()=>{api.transport.perf.auto=quality.value==='auto';api.transport.quality=quality.value==='auto'?1:Number(quality.value);api.transport.previewResolution=quality.value;V.layout();};preview.append(quality);
+    if(api.scene3d?.previewState){
+      // 3D compositions choose between the fast draft view and the Blender render.
+      const mode=document.createElement('select');mode.setAttribute('aria-label','3D preview');mode.title='3D preview';mode.dataset.renderMode='';
+      // Its own slot left of the resolution control, so `#preview-controls select` stays the resolution.
+      mode.style.cssText=quality.style.cssText+';position:absolute;right:212px;top:7px;z-index:6;width:96px;display:none';
+      for(const [value,label] of [['draft','Draft'],['rendered','Rendered']]){const option=document.createElement('option');option.value=value!;option.textContent=label!;mode.append(option);}
+      const sync=()=>{const state=api.scene3d.previewState();mode.value=state.mode;mode.title=state.error??(state.busy?'Rendering…':'3D preview');};
+      mode.onchange=()=>{api.scene3d.setPreviewMode(mode.value as 'draft'|'rendered');sync();};
+      sync();const off=api.scene3d.onPreviewChange(sync);eventOffs.push(()=>off.dispose());
+      zoomHost.querySelector('select[data-render-mode]')?.remove();zoomHost.append(mode);renderModeControl=mode;
+    }
     V.previewOff?.(); V.previewOff = undefined;
 
     zoomControl.onchange = () => { if (zoomControl.value === 'fit') V.returnToComposition(); else V.setZoom(Number(zoomControl.value)); };
@@ -1108,7 +1111,7 @@ function drawOverlay() {
   const selectionInk = selectionOutlineColor(api.project.get());
   const p = api.project.get(), dpr = V.ov.width / overlayGeometry.width;
   viewport3d?.update({x:overlayGeometry.x,y:overlayGeometry.y,width:p.w*V.shown,height:p.h*V.shown},api.selection.layers());
-  if(viewportHeaderHost)viewportHeaderHost.style.display=api.model.curComp().layers.some((l:any)=>String(l.d?.definition??'').startsWith('powermove.3d.')&&l.d?.definition!=='powermove.3d.scene')?'flex':'none';
+  if(renderModeControl){const shown=!!api.scene3d.viewport.state().hasScene;if((renderModeControl.style.display!=='none')!==shown)renderModeControl.style.display=shown?'':'none';}
 
   c.setTransform(1, 0, 0, 1, 0, 0);
   c.clearRect(0, 0, V.ov.width, V.ov.height);
@@ -1172,7 +1175,7 @@ function drawOverlay() {
     }
   }
 
-  const sels = visualSelection(api).filter((L: any) => !isModel3D(L) && api.anim.active(L, api.transport.time()) && L.id !== V.canvasTextEditing);
+  const sels = visualSelection(api).filter((L: any) => !in3DView(L) && api.anim.active(L, api.transport.time()) && L.id !== V.canvasTextEditing);
   const selection = resolveSelectionGeometry(api, sels, api.transport.time(), space3d);
   /* Multi-selection keeps light per-layer outlines for orientation, but owns
      exactly one common transform box and one set of controls. */
@@ -1508,7 +1511,7 @@ function bindStage(stage: any, inner: any): () => void {
     listeners.push([target, type, handler, options]);
   };
   const guarded = (handler: (event: any) => void) => ((event: any) => {
-    if ((event.target as Element)?.closest?.('#composition-zoom, #preview-controls, #composition-3d-controls, [data-viewport-chrome], [data-viewport-ui], [contenteditable]')) return;
+    if ((event.target as Element)?.closest?.('#composition-zoom, #preview-controls, [data-render-mode], [data-viewport-chrome], [data-viewport-ui], [contenteditable]')) return;
     handler(event);
   }) as EventListener;
   const capture = undefined;
@@ -1516,17 +1519,9 @@ function bindStage(stage: any, inner: any): () => void {
     // Right-clicking edited text gets the native text services menu.
     if ((event.target as Element)?.closest?.('.canvas-text-input')) return;
     event.preventDefault();
-    if (viewport3d?.contextMenu(event)) return;
     const point = pointerComp(event);
     const layer = api.render.gl.pick(point.x, point.y, api.transport.time(), { includeLocked: true });
-    /* Blender: right click opens the Object Context Menu for models, lights and cameras. */
-    const viewport = api.scene3d?.viewport?.state();
-    if (viewport?.hasScene && (layer ? isModel3D(layer) : viewport.selected.length > 0 && viewport.inContext)) {
-      if (layer && !api.selection.layers().includes(layer.id)) api.scene3d.viewport.run('select.click', resolvePickTarget(api, layer, {})?.id ?? layer.id, false);
-      rememberMenuPoint(event);
-      api.ui.menu({ x: event.clientX, y: event.clientY }, objectContextMenu(api, layer));
-    }
-    else if (layer) api.ui.showLayerMenu(layer, event, 'viewer');
+    if (layer) api.ui.showLayerMenu(layer, event, 'viewer');
     else {
       api.ui.menu({ x: event.clientX, y: event.clientY }, api.menus.gather('viewer:context', { layerId: null, time: api.transport.time() }));
     }
@@ -1699,7 +1694,7 @@ function hoverTargetId(): string | null {
   if ((V.temporaryTool || toolService()?.tool || 'select') !== 'select') return null;
   const T = api.transport.time();
   const point = pointerComp(hoverPointer);
-  const selection = resolveSelectionGeometry(api, visualSelection(api).filter((l:any)=>!isModel3D(l)), T, space3d);
+  const selection = resolveSelectionGeometry(api, visualSelection(api).filter((l:any)=>!in3DView(l)), T, space3d);
   if (selection?.transformable && handleAt(selection, point.x, point.y)) return null;
   const target = resolvePickTarget(api, api.render.gl.pick(point.x, point.y, T), { deep: hoverPointer.deep });
   if (!target || visualSelection(api).some((layer: any) => layer.id === target.id)) return null;
@@ -1730,7 +1725,7 @@ function updateStageCursor(e: any) {
   if (tool === 'shape') { setStageCursor('crosshair'); return; }
   if (tool === 'text') { setStageCursor('text'); return; }
   const [x, y] = toComp(e), T = api.transport.time();
-  const selection = resolveSelectionGeometry(api, visualSelection(api).filter((l:any)=>!isModel3D(l)), T, space3d);
+  const selection = resolveSelectionGeometry(api, visualSelection(api).filter((l:any)=>!in3DView(l)), T, space3d);
   if (selection?.transformable) {
     const hit = handleAt(selection, x, y);
     if (hit) { setStageCursor(cursorForHit(selection, hit)); return; }
@@ -1808,25 +1803,22 @@ function onDown(e: any) {
   }
 
   const chosen = V.temporaryTool || toolService()?.tool || 'select';
-  /* The Pen edits 2D paths; with models, lights or cameras selected it selects like the Select tool. */
-  const tool = chosen === 'pen' && visualSelection(api).some(isModel3D) ? 'select' : chosen;
+  /* The Pen edits flat 2D paths; with 3D layers selected it selects like the Select tool. */
+  const tool = chosen === 'pen' && visualSelection(api).some(in3DView) ? 'select' : chosen;
   if (tool === 'hand') return startPan(e);
   if (tool === 'zoom') return startZoom(e);
-  if (tool === 'pen' && visualSelection(api).some((layer: any) => space3d.is3DLayer(layer))) { api.ui.toast('Turn off 3D temporarily to edit path vertices'); return; }
   if (tool === 'pen') return startPathEdit(api,V,e,pointerComp,beginDrag,V.shown);
   if (tool === 'shape') return startShape(e);
   if (tool === 'text') return startText(e);
-  if (tool === 'rotate' && visualSelection(api).some(isModel3D)){api.scene3d.viewport.run('tool','rotate');return;}
-  if (tool === 'rotate') return startRotationTool(e);
-  if (tool === 'anchor' && visualSelection(api).some(isModel3D))return;
+  /* With 3D layers selected, Rotate shows rings on the selection and turns what you drag. */
+  const selected3D = visualSelection(api).some(in3DView);
+  if (tool === 'rotate' && !selected3D) return startRotationTool(e);
+  if (tool === 'anchor' && selected3D) return;
   if (tool === 'anchor') return startAnchorTool(e);
-
-  /* Blender's B: the next drag box-selects wherever it starts. */
-  if (viewport3d?.takeBoxSelect()) return startSelectionMarquee(e);
   const [x, y] = toComp(e);
   const T = api.transport.time();
 
-  const selection = resolveSelectionGeometry(api, visualSelection(api).filter((l:any)=>!isModel3D(l)), T, space3d);
+  const selection = resolveSelectionGeometry(api, visualSelection(api).filter((l:any)=>!in3DView(l)), T, space3d);
   if (selection?.transformable) {
     const hit = handleAt(selection, x, y);
     if (hit) return startTransform(e, selection, hit, T);
@@ -1851,13 +1843,12 @@ function onDown(e: any) {
       },
     });
   }
+  /* As in 2D, a press inside the selection box moves the 3D selection even between its layers. */
+  if (!L && viewport3d?.selectionPress(e)) return;
   if (!L) return startSelectionMarquee(e);
-  /* Models, lights and cameras follow Blender: click selects (Shift extends and
-     sets the active item), Tweak drags grab, other tools box-select on drag. */
-  if (isModel3D(L)) {
-    if (viewport3d?.objectPress(e, L.id)) return;
-    return startSelectionMarquee(e, () => api.scene3d.viewport.run('select.click', L.id, e.shiftKey));
-  }
+  /* 3D layers select like 2D ones; dragging moves them in the view's plane. */
+  if (in3DView(L) && viewport3d?.objectPress(e, L.id)) return;
+  if (tool === 'rotate') return startRotationTool(e);
   if (e.shiftKey && api.selection.layers().includes(L.id)) {
     selectLayers(api.selection.layers().filter((id: any) => id !== L.id));
     return;
@@ -1911,7 +1902,7 @@ function startZoom(e: any): void {
 function startSelectionMarquee(e: any, click?: () => void): void {
   const start = pointerComp(e);
   const before = [...api.selection.layers()];
-  const blender = !!api.scene3d?.viewport?.state().hasScene;
+  const scene = !!api.scene3d?.viewport?.state().hasScene;
   let moved = false;
   beginDrag(e, {
     cursor: 'default',
@@ -1929,14 +1920,14 @@ function startSelectionMarquee(e: any, click?: () => void): void {
         else if (!e.shiftKey) selectLayers([]);
         return;
       }
-      /* Models are box-selected when they touch the box (Blender); 2D layers when enclosed. */
+      /* Models are box-selected when they touch the box; 2D layers when enclosed. Light and camera wires count too. */
       const enclosed = api.project.get().layers.filter((layer: any) => {
         if (!api.anim.active(layer, api.transport.time()) || layerTypeMeta(api, layer)?.pickable === false) return false;
         const bounds = layerWorldBounds(api, layer, api.transport.time(), space3d);
         if (bounds && isModel3D(layer) && layer.type !== 'group') return bounds.x1 >= box.x0 && bounds.x0 <= box.x1 && bounds.y1 >= box.y0 && bounds.y0 <= box.y1;
         return !!bounds && bounds.x0 >= box.x0 && bounds.x1 <= box.x1 && bounds.y0 >= box.y0 && bounds.y1 <= box.y1;
       }).map((layer: any) => layer.id);
-      if (blender) api.scene3d.viewport.run('select.box', { ids: enclosed, rect: box, mode: e.ctrlKey || e.metaKey ? 'sub' : e.shiftKey ? 'add' : 'set' });
+      if (scene) api.scene3d.viewport.run('select.box', { ids: enclosed, rect: box, mode: e.ctrlKey || e.metaKey ? 'sub' : e.shiftKey ? 'add' : 'set' });
       else if (!e.shiftKey) selectLayers(enclosed);
       else {
         const next = new Set(before);

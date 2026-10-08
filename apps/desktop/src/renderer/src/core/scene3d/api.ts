@@ -4,7 +4,8 @@ import {materialPreset,MATERIAL_PRESETS,listMaterials,materialSlots,assignedMate
 import {renderSettings,setRenderSettings,blenderStatus,renderState,setPreviewMode,onRenderState,renderBlenderPreview,cancelBlender} from './rendering';
 import {getViewportMode,setViewportMode,onViewportChange} from './viewport';
 import {onViewportSettings,notifyViewport} from './editor-state';
-import {attachViewport,inViewportContext} from './controller';
+import {attachViewport} from './controller';
+import {listLights,aimLightCommands,applyLightingPreset,LIGHTING_PRESETS} from './lighting';
 import {runViewportOperator,viewportSnapshot,VIEWPORT_OPERATORS} from './commands';
 import {frameComposition,navigationNotice} from './navigation';
 import { createScene,createObject,createLight,parseScene,SCENE3D_DEFINITION } from './schema';
@@ -14,8 +15,8 @@ import { compositionScene,layer3DRole,isModelGroup } from './layers';
 import { editScene } from './operations';
 import type { Scene3DAPI } from '../../kernel/api';
 
-const warn=(PM:any,error:unknown)=>PM.toast?.(error instanceof Error?error.message:String(error),{key:navigationNotice,error:true});
-/** Coalesced viewport state notifications for header, toolbar and sidebar UI. */
+const warn=(PM:any,error:unknown)=>PM.toast?.(error instanceof Error?error.message:String(error),2200,{key:navigationNotice,error:true});
+/** Coalesced 3D view state notifications for viewer and inspector UI. */
 function onViewportState(PM:any,listener:(state:ReturnType<typeof viewportSnapshot>)=>void):()=>void {
   let queued=false,live=true;
   const fire=()=>{if(queued||!live)return;queued=true;queueMicrotask(()=>{queued=false;if(live)listener(viewportSnapshot(PM));});};
@@ -51,9 +52,14 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection',selection:
       attach:(stage,host)=>attachViewport(PM,stage,host),
       state:()=>viewportSnapshot(PM),
       onChange:listener=>({dispose:onViewportState(PM,listener)}),
-      inContext:()=>inViewportContext(PM),
       operators:VIEWPORT_OPERATORS,
       run(operator,...args){try{return runViewportOperator(PM,operator,args);}catch(error){warn(PM,error);return true;}}
+    },
+    lighting:{
+      presets:LIGHTING_PRESETS.map(({id,label})=>({id,label})),
+      list:()=>listLights(PM),
+      aimCommands:(id,direction)=>aimLightCommands(PM,id,direction),
+      applyPreset(id){try{const ids=applyLightingPreset(PM,id);return {ok:true,message:'Lighting applied',data:{ids}};}catch(error){return {ok:false,message:error instanceof Error?error.message:String(error)};}}
     },
     describe(){return compositionScene(PM,PM.time);},
     selection,select};

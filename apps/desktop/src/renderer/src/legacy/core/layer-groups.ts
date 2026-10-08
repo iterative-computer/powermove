@@ -1,7 +1,7 @@
 import { is3DLayer, world3D, local3D, perspectiveAmount, CHANNELS_3D } from './space-3d';
 import type { PMRegistry } from '../registry';
 import { preserveWorldPose, worldPoseValues,worldAim3D,preserveWorldAim,aimProperties3D,aimValues3D } from './parenting';
-import { isModelGroup } from '../../core/scene3d/layers';
+import { isModelGroup, pinCameraLayers, layer3DRole } from '../../core/scene3d/layers';
 import { modelGroupBounds } from '../../core/scene3d/service';
 
 /** Membership supplies a transform space without changing parent links or layer time. */
@@ -84,7 +84,7 @@ export function installLayerGroups(PM: PMRegistry): void {
   PM.expandGroups = (ids: string[]) => PM.proj.layers.filter((layer: any) => ids.includes(layer.id)
     || ancestors(layer, PM.proj.layers).some(group => ids.includes(group.id))).map((layer: any) => layer.id);
   PM.normalizeGroupStack = () => {
-    const layers = PM.proj.layers, ordered: any[] = [], seen = new Set<string>();
+    const layers = pinCameraLayers(PM.proj.layers), ordered: any[] = [], seen = new Set<string>();
     const visit = (parent: string | null) => {
       for (const layer of layers) {
         if ((layer.group || null) !== parent || seen.has(layer.id)) continue;
@@ -109,6 +109,14 @@ export function installLayerGroups(PM: PMRegistry): void {
     layers.forEach(visit);
   };
   const changed = () => { PM.normalizeGroupStack(); PM.ProjectIndex?.invalidate(); PM.bus.emit('layers'); PM.invalidate(); };
+  /** Parent cameras to a group (or release them) without moving them or changing their aim. */
+  const followGroup = (cameras: any[], parent: string | null) => {
+    const poses = new Map<string,number[]>(cameras.map((layer: any) => [layer.id, worldPose(layer,PM.time)]));
+    const aims = new Map<string,number[]|null>(cameras.map((layer: any) => [layer.id, worldAim3D(PM,layer,PM.time)]));
+    cameras.forEach((layer: any) => { layer.parent = parent; });
+    PM.touch(); rebase(cameras, poses);
+    for (const layer of cameras) preserveWorldAim(PM,layer,aims.get(layer.id) || null,PM.time);
+  };
   PM.groupLayers = (ids: string[], name = 'Group') => {
     const layers = PM.proj.layers;
     const selected = layers.filter((layer: any) => ids.includes(layer.id));
@@ -121,9 +129,11 @@ export function installLayerGroups(PM: PMRegistry): void {
     const group = PM.mkLayer('group', { name: String(name || 'Group').trim() || 'Group' });
     group.group = parent; group.collapsed = false;
     group.from = 0; group.dur = PM.proj.dur;
+    /* Cameras stay pinned at the top of the stack; a grouped camera follows the group as its parent. */
+    const cameras = roots.filter((layer: any) => layer3DRole(layer) === 'camera'), members = roots.filter((layer: any) => !cameras.includes(layer));
     // Keep selected layers in stack order and gather them at the first selected row.
-    layers.splice(layers.indexOf(roots[0]), 0, group);
-    roots.forEach((layer: any) => { layer.group = group.id; });
+    layers.splice(layers.indexOf(members[0] ?? roots[0]), 0, group);
+    members.forEach((layer: any) => { layer.group = group.id; });
     if(isModelGroup(PM,group))group.threeD=true;
     PM.touch();
     changed();
@@ -133,6 +143,7 @@ export function installLayerGroups(PM: PMRegistry): void {
       group.p['position.y'].v = group.p['anchor.y'].v = (bounds.y0 + bounds.y1) / 2;
       if(group.threeD && bounds.z0!==undefined)group.p['position.z'].v=group.p['anchor.z'].v=(bounds.z0+bounds.z1)/2;
     }
+    if (cameras.length) { if (!members.length) group.threeD = true; PM.touch(); followGroup(cameras, group.id); }
     PM.touch?.(); PM.selectLayers(group.id); return group;
   };
   PM.ungroupLayers = (ids: string[]) => {
@@ -147,7 +158,8 @@ export function installLayerGroups(PM: PMRegistry): void {
     if (styled) throw new Error(`Remove visual compositing from “${styled.name}” before ungrouping`);
     const children: string[] = [];
     for (const group of groups) {
-      const members = PM.proj.layers.filter((layer: any) => layer.group === group.id);
+      // Cameras follow a group as their parent; ungrouping releases them in place.
+      const members = PM.proj.layers.filter((layer: any) => layer.group === group.id || layer3DRole(layer) === 'camera' && layer.parent === group.id);
       // Ungrouping animation bakes editable channel keys at composition frames.
       // Include the playhead so this operation never jumps between frames either.
       const hasAnimation = (layer: any) => [...Object.values(layer.p),...aimProperties3D(layer).map(x=>x.prop)].some((prop: any) => prop.kf.length || prop.expr);
@@ -161,6 +173,7 @@ export function installLayerGroups(PM: PMRegistry): void {
       const perspectives = new Map(members.map((layer: any) => [layer.id, perspectiveAmount(PM,layer,PM.time)]));
       for (const layer of members) {
         layer.group = group.group || null; children.push(layer.id);
+        if (layer3DRole(layer) === 'camera' && layer.parent === group.id) layer.parent = null;
         if (poses.get(layer.id)?.length === 16) {
           for (const [key,fallback] of Object.entries(CHANNELS_3D)) layer.p[key] ||= PM.P(fallback);
           layer.threeD = true;
@@ -214,7 +227,11 @@ export function installLayerGroups(PM: PMRegistry): void {
     if (!selected.length || new Set(ids).size !== selected.length) throw new Error('Layer not found');
     if (group?.lock || group && ancestors(group, PM.proj.layers).some(parent => parent.lock) || selected.some((layer: any) => layer.lock || ancestors(layer, PM.proj.layers).some(parent => parent.lock))) throw new Error('Unlock layers before moving');
     if (group && (ids.includes(group.id) || ancestors(group, PM.proj.layers).some(item => ids.includes(item.id)))) throw new Error('Grouping would create a cycle');
-    const roots = selected.filter((layer: any) => !ancestors(layer, PM.proj.layers).some(item => ids.includes(item.id)));
+    const all = selected.filter((layer: any) => !ancestors(layer, PM.proj.layers).some(item => ids.includes(item.id)));
+    const cameras = all.filter((layer: any) => layer3DRole(layer) === 'camera'), roots = all.filter((layer: any) => !cameras.includes(layer));
+    // Taking a camera out of groups releases it only from a group parent, never from another parent layer.
+    const following = cameras.filter((layer: any) => group || PM.L(layer.parent)?.type === 'group');
+    if (following.length) followGroup(following, group?.id || null);
     const poses = new Map<string,number[]>(roots.filter((layer: any) => layer.type !== 'audio').map((layer: any) => [layer.id, worldPose(layer,PM.time)]));
     const perspectives = new Map(roots.map((layer: any) => [layer.id, perspectiveAmount(PM,layer,PM.time)]));
     const aims = new Map<string,number[]|null>(roots.map((layer:any)=>[layer.id,worldAim3D(PM,layer,PM.time)]));

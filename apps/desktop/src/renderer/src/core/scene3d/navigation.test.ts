@@ -7,6 +7,7 @@ import {compositionRuntime} from './service';
 import {editScene} from './operations';
 import {makePM} from '../../legacy/__tests__/make-pm';
 import {LAYER3D_DEFINITIONS} from './layers';
+import {toComp} from './space';
 
 const pose=():ViewPose=>({target:new THREE.Vector3(),rotation:new THREE.Quaternion(),distance:6});
 function editor(){
@@ -17,7 +18,7 @@ function editor(){
 }
 const cameraLayer=(PM:any)=>PM.proj.layers.find((l:any)=>l.d?.definition===LAYER3D_DEFINITIONS.camera);
 
-describe('Blender view navigation',()=>{
+describe('3D view navigation',()=>{
   it('orbits around the pivot at a constant distance, through the poles like a turntable',()=>{
     const start=pose(),next=orbitView(start,100,80);
     expect(viewPosition(next).distanceTo(next.target)).toBeCloseTo(6);expect(next.target.toArray()).toEqual([0,0,0]);
@@ -65,9 +66,10 @@ describe('Blender view navigation',()=>{
   });
   it('keeps editor views per composition and independent of animated shot cameras',()=>{
     const PM=editor();PM.proj.compId='first';
-    expect(editScene(PM,{operation:'add_camera',camera:{p:{x:0,y:0,z:6}}}).ok).toBe(true);
+    expect(editScene(PM,{operation:'add_camera',camera:{p:{x:960,y:540,z:-1200}}}).ok).toBe(true);
     const shot=cameraLayer(PM);
-    expect(PM.Edit.apply({type:'replace_keyframes',target:shot.id,path:'position.x',keyframes:[{time:0,value:0},{time:2,value:4}]}).ok).toBe(true);
+    // 800 px right of centre is 4 scene units.
+    expect(PM.Edit.apply({type:'replace_keyframes',target:shot.id,path:'position.x',keyframes:[{time:0,value:960},{time:2,value:1760}]}).ok).toBe(true);
     applyViewportPose(PM,orbitView(viewportPose(PM),70,40));const editor1=viewportPose(PM);
     PM.time=2;const rendered=compositionRuntime(PM);
     expect(rendered.camera.position.x).toBeCloseTo(4);expect(viewportPose(PM).rotation.angleTo(editor1.rotation)).toBeCloseTo(0);
@@ -76,7 +78,7 @@ describe('Blender view navigation',()=>{
   });
   it('frames the selection without editing the project',()=>{
     const PM=editor();
-    for(const [id,x] of [['a',10],['b',12]] as const)expect(editScene(PM,{operation:'add_object',object:{id,source:{primitive:'box'},p:{x}}}).ok).toBe(true);
+    for(const [id,x] of [['a',2960],['b',3360]] as const)expect(editScene(PM,{operation:'add_object',object:{id,source:{primitive:'box'},p:{x}}}).ok).toBe(true);
     const group=PM.groupLayers(['a','b']),before=JSON.stringify(PM.proj.layers),count=PM.hist.list().length;
     PM.selectLayers([group.id]);
     expect(frameComposition(PM,true)).toBe(true);
@@ -86,22 +88,23 @@ describe('Blender view navigation',()=>{
   });
   it('aligns the camera to the view and, with Lock Camera to View, frames by moving the camera (one undo each)',()=>{
     const PM=editor();
-    expect(editScene(PM,{operation:'add_object',object:{id:'cube',source:{primitive:'box'},p:{x:3}}}).ok).toBe(true);
-    expect(editScene(PM,{operation:'add_camera',camera:{p:{x:0,y:0,z:6}}}).ok).toBe(true);
+    expect(editScene(PM,{operation:'add_object',object:{id:'cube',source:{primitive:'box'},p:{x:1560}}}).ok).toBe(true);
+    expect(editScene(PM,{operation:'add_camera',camera:{p:{x:960,y:540,z:-1200}}}).ok).toBe(true);
     setViewAxis(PM,'right');const count=PM.hist.list().length,view=viewportPose(PM);
     alignCameraToView(PM);
     expect(PM.hist.list()).toHaveLength(count+1);expect(getViewportMode(PM)).toBe('camera');
-    const camera=cameraLayer(PM),position=viewPosition(view);
-    expect(camera.p['position.x'].v).toBeCloseTo(position.x);expect(camera.d.data.camera.p.targetX.v).toBeCloseTo(view.target.x);
+    // The view is in scene units; the camera layer stores composition pixels.
+    const camera=cameraLayer(PM),position=toComp(PM.proj,viewPosition(view)),target=toComp(PM.proj,view.target);
+    expect(camera.p['position.x'].v).toBeCloseTo(position.x,1);expect(camera.d.data.camera.p.targetX.v).toBeCloseTo(target.x,1);
     expect(lockedCamera(PM)).toBeNull();setViewportPreferences(PM,{lockCamera:true});expect(lockedCamera(PM)).toBe(camera);
     PM.selectLayers(['cube']);frameComposition(PM,true);
-    expect(PM.hist.list().slice(count)).toEqual(['Align camera to view','Selection','View camera']);expect(camera.d.data.camera.p.targetX.v).toBeCloseTo(3);
+    expect(PM.hist.list().slice(count)).toEqual(['Align camera to view','Selection','View camera']);expect(camera.d.data.camera.p.targetX.v).toBeCloseTo(1560,1);
     expect(getViewportMode(PM)).toBe('camera');
     setViewportPreferences(PM,{lockCamera:false});
   });
   it('makes a selected camera the composition camera by moving it above the others',()=>{
     const PM=editor();
-    for(const z of [6,9])expect(editScene(PM,{operation:'add_camera',camera:{p:{x:0,y:0,z}}}).ok).toBe(true);
+    for(const z of [-1200,-1800])expect(editScene(PM,{operation:'add_camera',camera:{p:{x:960,y:540,z}}}).ok).toBe(true);
     const cameras=PM.proj.layers.filter((l:any)=>l.d?.definition===LAYER3D_DEFINITIONS.camera),second=cameras[1];
     expect(setActiveCamera(PM,second.id)).toBe(true);
     expect(PM.proj.layers.find((l:any)=>l.d?.definition===LAYER3D_DEFINITIONS.camera)).toBe(second);

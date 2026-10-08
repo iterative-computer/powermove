@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import {parent3D} from '../../legacy/core/space-3d';
+import {parent3D,setPlaneProjection} from '../../legacy/core/space-3d';
+import {sceneFromComp} from './space';
 import {compositionRuntime} from './service';
 import {layer3DRole} from './layers';
 
@@ -18,7 +19,7 @@ export type ViewProjection='perspective'|'orthographic';
 export type ViewAxis='front'|'back'|'right'|'left'|'top'|'bottom';
 export type ViewPose={target:THREE.Vector3;rotation:THREE.Quaternion;distance:number};
 type UserView={pose:ViewPose;projection:ViewProjection;axis:ViewAxis|null;autoOrtho:boolean};
-type ViewState=UserView&{mode:ViewMode;fov:number;persp:THREE.PerspectiveCamera;ortho:THREE.OrthographicCamera;initialized:boolean;last:UserView|null;local:{ids:Set<string>;restore:{mode:ViewMode;view:UserView|null}}|null};
+type ViewState=UserView&{mode:ViewMode;fov:number;persp:THREE.PerspectiveCamera;ortho:THREE.OrthographicCamera;initialized:boolean;last:UserView|null};
 
 /** Orthographic frustums are ±3 units tall before zoom (see SceneRuntime.resizeCamera). */
 const ORTHO_HALF=3;
@@ -42,7 +43,7 @@ function state(PM:any):ViewState {
   const comp=composition(PM),key=`${PM.proj.id}:${comp.compId||comp.id}`;let entry=comps.get(key);
   if(!entry){
     entry={mode:'camera',pose:{target:new THREE.Vector3(),rotation:new THREE.Quaternion(),distance:6},projection:'perspective',axis:null,autoOrtho:false,
-      fov:50,persp:new THREE.PerspectiveCamera(50,16/9,.01,1000),ortho:new THREE.OrthographicCamera(-ORTHO_HALF,ORTHO_HALF,ORTHO_HALF,-ORTHO_HALF,.01,1000),initialized:false,last:null,local:null};
+      fov:50,persp:new THREE.PerspectiveCamera(50,16/9,.01,1000),ortho:new THREE.OrthographicCamera(-ORTHO_HALF,ORTHO_HALF,ORTHO_HALF,-ORTHO_HALF,.01,1000),initialized:false,last:null};
     comps.set(key,entry);
   }
   return entry;
@@ -72,7 +73,7 @@ export function cameraPose(PM:any):ViewPose {
   let target:THREE.Vector3;
   if(layer){
     target=new THREE.Vector3(...['X','Y','Z'].map(axis=>Number(PM.evP(layer,layer.d.data.camera.p[`target${axis}`],PM.time,`camera.target${axis}`))) as [number,number,number])
-      .applyMatrix4(new THREE.Matrix4().fromArray(parent3D(PM,layer,PM.time)));
+      .applyMatrix4(new THREE.Matrix4().fromArray(parent3D(PM,layer,PM.time))).applyMatrix4(sceneFromComp(composition(PM)));
   }else target=position.clone().add(new THREE.Vector3(0,0,-1).applyQuaternion(rotation).multiplyScalar(Math.max(1,position.length())));
   return {target,rotation,distance:Math.max(.05,position.distanceTo(target))};
 }
@@ -120,7 +121,7 @@ export function viewportState(PM:any):{mode:ViewMode;projection:ViewProjection;a
 export function viewLabel(PM:any):string {
   const view=viewportState(PM),projection=view.projection==='orthographic'?'Orthographic':'Perspective';
   if(view.mode==='camera')return `Camera ${projection}`;
-  return `${view.axis?view.axis[0]!.toUpperCase()+view.axis.slice(1):'User'} ${projection}${state(PM).local?' (Local)':''}`;
+  return `${view.axis?view.axis[0]!.toUpperCase()+view.axis.slice(1):'User'} ${projection}`;
 }
 /** Camera ⇄ the previous user view (Numpad 0). */
 export function setViewportMode(PM:any,mode:ViewMode):void {
@@ -173,22 +174,19 @@ export function orbitViewStep(PM:any,yawDegrees:number,pitchDegrees:number):void
     :axis&&Math.abs(pitchDegrees)===180&&!yawDegrees?OPPOSITE_VIEW[axis]:null;
   applyViewportPose(PM,named?{...next,rotation:VIEW_AXES[named].clone()}:next,{axis:named});
 }
-/** Numpad 2/4/6/8 with Shift roll the view about its own axis. */
-export function rollView(PM:any,degrees:number):void {
-  const pose=viewportPose(PM),axis=state(PM).mode==='editor'?state(PM).axis:null;
-  applyViewportPose(PM,{...pose,rotation:pose.rotation.clone().multiply(axisRotation(new THREE.Vector3(0,0,1),degrees))},{axis});
-}
-
-/* ── Local View (Numpad /): only the chosen models show in the editor ── */
-export const localViewIds=(PM:any):ReadonlySet<string>|null=>state(PM).local?.ids??null;
-export function enterLocalView(PM:any,ids:Iterable<string>):boolean {
-  const entry=state(PM),set=new Set(ids);if(!set.size)return false;
-  const restore={mode:entry.mode,view:entry.initialized?cloneUser(entry):null};
-  entry.local={ids:set,restore};changed(PM);return true;
-}
-export function exitLocalView(PM:any):boolean {
-  const entry=state(PM),local=entry.local;if(!local)return false;
-  entry.local=null;
-  if(local.restore.view)Object.assign(entry,cloneUser(local.restore.view));
-  entry.mode=local.restore.mode;changed(PM);return true;
-}
+/*
+ * 3D-enabled 2D layers project through the same camera as models: during a
+ * render the camera that render uses, and in the editor the view on screen.
+ * Without a camera layer or free view, the 2D layers' own 50 mm lens applies.
+ */
+setPlaneProjection((PM,comp,T)=>{
+  const hasCamera=comp?.layers?.some((l:any)=>layer3DRole(l)==='camera'&&(PM.active?PM.active(l,T):true));
+  const runtime=compositionRuntime(PM,T,comp);
+  let camera:ViewCamera|null;
+  if(PM._renderOptions3D)camera=PM._renderCamera3D||(hasCamera?runtime.camera:null);
+  else{const view=comp===composition(PM)?viewportCamera(PM,runtime.camera):runtime.camera;camera=view!==runtime.camera?view:hasCamera?runtime.camera:null;}
+  if(!camera)return null;
+  runtime.resizeCamera(comp.w,comp.h,camera);
+  const screen=new THREE.Matrix4().set(comp.w/2,0,0,comp.w/2, 0,-comp.h/2,0,comp.h/2, 0,0,1,0, 0,0,0,1);
+  return screen.multiply(camera.projectionMatrix).multiply(camera.matrixWorldInverse).multiply(sceneFromComp(comp)).elements;
+});

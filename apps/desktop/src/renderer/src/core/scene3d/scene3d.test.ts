@@ -8,6 +8,7 @@ import { convertLegacyScene } from './migration';
 import { editScene } from './operations';
 import { makePM } from '../../legacy/__tests__/make-pm';
 import { world3D,parent3D } from '../../legacy/core/space-3d';
+import { sceneFromComp } from './space';
 
 function editor() {
   const PM=makePM('core/easing','core/model','core/selection','core/anim','core/history','core/editing');
@@ -19,21 +20,36 @@ function editor() {
 describe('individual 3D layers and guarded edits',()=>{
   it('groups models around their world-space center without changing their pose',()=>{
     const PM=editor();
-    expect(editScene(PM,{operation:'add_object',object:{id:'a',source:{primitive:'box'},p:{x:-1,z:2}}}).ok).toBe(true);
-    expect(editScene(PM,{operation:'add_object',object:{id:'b',source:{primitive:'box'},p:{x:1,z:4}}}).ok).toBe(true);
+    expect(editScene(PM,{operation:'add_object',object:{id:'a',source:{primitive:'box'},p:{x:900,z:-100}}}).ok).toBe(true);
+    expect(editScene(PM,{operation:'add_object',object:{id:'b',source:{primitive:'box'},p:{x:1100,z:100}}}).ok).toBe(true);
     PM.GL.bounds=()=>({x0:800,x1:1100,y0:400,y1:700});
     const before=['a','b'].map(id=>world3D(PM,PM.L(id),0));
     const grouped=PM.Edit.apply({type:'group_layers',targets:['a','b']});expect(grouped.ok,grouped.message).toBe(true);
     const group=PM.proj.layers.find((l:any)=>l.type==='group');
     expect(group.threeD).toBe(true);
-    expect(['x','y','z'].map(axis=>group.p[`anchor.${axis}`].v)).toEqual([0,0,3]);
+    ['x','y','z'].forEach((axis,i)=>expect(group.p[`anchor.${axis}`].v).toBeCloseTo([1000,540,0][i]!));
     ['a','b'].forEach((id,i)=>expect(world3D(PM,PM.L(id),0)).toEqual(before[i]));
     expect(PM.Edit.apply({type:'set_property',target:group.id,path:'rotation.y',value:90}).ok).toBe(true);
     const a=world3D(PM,PM.L('a'),0),b=world3D(PM,PM.L('b'),0);
-    expect(a[12]).toBeCloseTo(-1);expect(a[14]).toBeCloseTo(4);
-    expect(b[12]).toBeCloseTo(1);expect(b[14]).toBeCloseTo(2);
+    // A quarter turn about the group's anchor swings each model around it.
+    expect(a[12]).toBeCloseTo(900);expect(a[14]).toBeCloseTo(100);
+    expect(b[12]).toBeCloseTo(1100);expect(b[14]).toBeCloseTo(-100);
     PM.hist.undo();PM.hist.undo();expect(PM.L(group.id)).toBeNull();
     ['a','b'].forEach((id,i)=>expect(world3D(PM,PM.L(id),0)).toEqual(before[i]));
+  });
+  it('pins camera layers to the top of the stack, outside groups',()=>{
+    const PM=editor();
+    editScene(PM,{operation:'add_object',object:{id:'model',source:{primitive:'box'}}});
+    expect(editScene(PM,{operation:'add_camera',id:'camera'}).ok).toBe(true);
+    editScene(PM,{operation:'add_object',object:{id:'top',source:{primitive:'box'}}});
+    expect(PM.proj.layers[0].id).toBe('camera');
+    expect(PM.Edit.apply({type:'reorder_layer',target:'model',index:0}).ok).toBe(true);
+    expect(PM.proj.layers.map((l:any)=>l.id).slice(0,2)).toEqual(['camera','model']);
+    // Grouping a camera parents it to the group instead, so rigs still move it.
+    const grouped=PM.Edit.apply({type:'group_layers',targets:['model','camera']});expect(grouped.ok,grouped.message).toBe(true);
+    const group=PM.proj.layers.find((l:any)=>l.type==='group');
+    expect(PM.proj.layers[0].id).toBe('camera');expect(PM.L('camera').group).toBeNull();expect(PM.L('camera').parent).toBe(group.id);
+    expect(PM.Edit.apply({type:'ungroup_layers',targets:[group.id]}).ok).toBe(true);expect(PM.L('camera').parent).toBeNull();
   });
   it('keeps shared depth across ordinary group headers and preserves 2D barriers',()=>{
     const PM=editor();editScene(PM,{operation:'add_object',object:{id:'a',source:{primitive:'box'}}});editScene(PM,{operation:'add_object',object:{id:'b',source:{primitive:'box'}}});
@@ -45,12 +61,15 @@ describe('individual 3D layers and guarded edits',()=>{
   it('rotates grouped light and camera aim targets together with their positions',()=>{
     const PM=editor();
     editScene(PM,{operation:'add_object',object:{id:'model',source:{primitive:'box'}}});
-    editScene(PM,{operation:'add_light',light:{id:'sun',type:'sun',p:{x:0,y:2,z:3}}});
-    expect(editScene(PM,{operation:'add_camera',id:'camera',camera:{p:{x:0,y:0,z:6}}}).ok).toBe(true);
+    editScene(PM,{operation:'add_light',light:{id:'sun',type:'sun',p:{x:960,y:140,z:-600}}});
+    expect(editScene(PM,{operation:'add_camera',id:'camera',camera:{p:{x:960,y:540,z:-1200}}}).ok).toBe(true);
     const group=PM.groupLayers(['model','sun','camera']);
     PM.Edit.apply({type:'set_property',target:group.id,path:'rotation.y',value:90});
     const world=compositionRuntime(PM,0),parent=new THREE.Matrix4().fromArray(parent3D(PM,PM.L('camera'),0));
-    const expected=new THREE.Vector3().applyMatrix4(parent),sun=world.objects.get('sun') as THREE.DirectionalLight;
+    const aim=(['X','Y','Z'] as const).map(axis=>PM.L('camera').d.data.camera.p[`target${axis}`].v) as [number,number,number];
+    // Both aim at the composition centre, held in the group's space.
+    expect(aim).toEqual((['X','Y','Z'] as const).map(axis=>PM.L('sun').d.data.light.p[`target${axis}`].v));
+    const expected=new THREE.Vector3(...aim).applyMatrix4(parent).applyMatrix4(sceneFromComp(PM.proj)),sun=world.objects.get('sun') as THREE.DirectionalLight;
     expect(sun.target.position.distanceTo(expected)).toBeLessThan(1e-8);
     expect(world.camera.getWorldDirection(new THREE.Vector3()).distanceTo(expected.clone().sub(world.camera.position).normalize())).toBeLessThan(1e-8);
     const direction=world.camera.getWorldDirection(new THREE.Vector3());
@@ -126,15 +145,15 @@ describe('individual 3D layers and guarded edits',()=>{
     const PM=editor();editScene(PM,{operation:'create'});const target=PM.proj.layers[0].id,count=PM.hist.list().length;
     PM.Edit.begin('Move model',{origin:'canvas'});
     for(const x of [1,2,3])expect(PM.Edit.dispatch({type:'set_property',target,path:'position.x',value:x}).ok).toBe(true);
-    PM.Edit.commit();expect(PM.hist.list().length).toBe(count+1);PM.hist.undo();expect(PM.L(target).p['position.x'].v).toBe(0);
-    PM.Edit.begin('Cancelled move');PM.Edit.dispatch({type:'set_property',target,path:'position.x',value:5});PM.Edit.cancel();expect(PM.L(target).p['position.x'].v).toBe(0);
+    PM.Edit.commit();expect(PM.hist.list().length).toBe(count+1);PM.hist.undo();expect(PM.L(target).p['position.x'].v).toBe(960);
+    PM.Edit.begin('Cancelled move');PM.Edit.dispatch({type:'set_property',target,path:'position.x',value:5});PM.Edit.cancel();expect(PM.L(target).p['position.x'].v).toBe(960);
   });
   it('duplicates with independent transforms and keyframe identities',()=>{
     const PM=editor();editScene(PM,{operation:'create'});const target=PM.proj.layers[0].id;
     PM.Edit.apply({type:'replace_keyframes',target,path:'position.x',keyframes:[{time:0,value:0},{time:1,value:2}]});
     const result=editScene(PM,{operation:'duplicate',target});expect(result.ok).toBe(true);if(!result.ok)return;
     const copy=PM.L((result.data.result as any).id);expect(copy.p['position.x'].kf[0].i).not.toBe(PM.L(target).p['position.x'].kf[0].i);
-    copy.p['position.y'].v=12;expect(PM.L(target).p['position.y'].v).toBe(0);PM.hist.undo();expect(PM.proj.layers).toHaveLength(1);
+    copy.p['position.y'].v=12;expect(PM.L(target).p['position.y'].v).toBe(540);PM.hist.undo();expect(PM.proj.layers).toHaveLength(1);
   });
   it('splits a legacy OBJ into layers and restores it exactly with one undo',()=>{
     const PM=editor(),defs=PM.layerDefinition;
@@ -143,7 +162,7 @@ describe('individual 3D layers and guarded edits',()=>{
     const layer=PM.proj.layers[0];layer.d.params={yaw:PM.P(0,{kf:[PM.KF(0,0),PM.KF(2,90)]}),pitch:PM.P(0),distance:PM.P(4),rotationY:PM.P(15),background:PM.P('#112233')};
     PM.evP(layer,layer.d.params.yaw,1,'x.yaw');
     const before=JSON.stringify(layer.d),count=PM.hist.list().length,result=convertLegacyScene(PM,layer.id);expect(result,result.message).toMatchObject({ok:true});
-    expect(PM.L(layer.id).d.definition).toBe(LAYER3D_DEFINITIONS.object);expect(PM.L(layer.id).p['rotation.y'].v).toBe(15);
+    expect(PM.L(layer.id).d.definition).toBe(LAYER3D_DEFINITIONS.object);expect(PM.L(layer.id).p['rotation.y'].v).toBe(-15);
     const camera=PM.proj.layers.find((l:any)=>l.d.definition===LAYER3D_DEFINITIONS.camera);expect(camera.p['position.x'].kf.length).toBeGreaterThan(30);
     expect(camera.d.data.environment.background).toBe('#112233');expect(PM.hist.list().length).toBe(count+1);PM.hist.undo();expect(JSON.stringify(PM.L(layer.id).d)).toBe(before);
   });
@@ -156,26 +175,27 @@ describe('individual 3D layers and guarded edits',()=>{
   it('rejects invalid native camera edits before changing live channels',()=>{
     const PM=editor();editScene(PM,{operation:'add_camera'});const camera=PM.proj.layers[0],before=JSON.stringify(camera.d.data);
     PM.Edit.begin('Camera edit');
-    expect(PM.Edit.apply({type:'set_property',target:camera.id,path:'camera.near',value:2000}).ok).toBe(false);
+    expect(PM.Edit.apply({type:'set_property',target:camera.id,path:'camera.near',value:200000}).ok).toBe(false);
     expect(JSON.stringify(camera.d.data)).toBe(before);PM.Edit.cancel();
     editScene(PM,{operation:'add_object',object:{id:'mirror',source:{primitive:'box'},p:{sx:-1,sy:0}}});
     expect(compositionScene(PM).objects[0]!.p.sx!.v).toBe(-1);expect(compositionScene(PM).objects[0]!.p.sy!.v).toBe(0);
   });
   it('uses native parent matrices and solo/opacity in shared depth groups',()=>{
     const PM=editor();
-    editScene(PM,{operation:'add_object',object:{id:'parent',source:{primitive:'box'},p:{x:2}}});
-    editScene(PM,{operation:'add_object',object:{id:'child',source:{primitive:'box'},p:{x:1}}});
+    editScene(PM,{operation:'add_object',object:{id:'parent',source:{primitive:'box'},p:{x:400}}});
+    editScene(PM,{operation:'add_object',object:{id:'child',source:{primitive:'box'},p:{x:200}}});
     PM.L('child').parent='parent';PM.touch();
     const runtime=compositionRuntime(PM,0);
-    expect(runtime.objects.get('child')!.getWorldPosition(new THREE.Vector3()).x).toBe(3);
+    // 600 px across a 1920 px composition is 1.8 scene units left of centre.
+    expect(runtime.objects.get('child')!.getWorldPosition(new THREE.Vector3()).x).toBeCloseTo(-1.8);
     PM.L('child').solo=true;PM.touch();expect([...compositionDepthIds(PM,PM.L('child'),0)]).toEqual(['child']);
     PM.L('child').solo=false;PM.L('parent').p.opacity.v=0;PM.touch();
     expect([...compositionDepthIds(PM,PM.L('child'),0)]).toEqual(['child']);runtime.dispose();
   });
   it('orders translucent models by camera depth while retaining 2D barriers',()=>{
-    const PM=editor();editScene(PM,{operation:'add_camera',camera:{p:{x:6,y:0,z:0}}});
-    editScene(PM,{operation:'add_object',object:{id:'near',source:{primitive:'box'},p:{x:2}}});
-    editScene(PM,{operation:'add_object',object:{id:'far',source:{primitive:'box'},p:{x:-2}}});
+    const PM=editor();editScene(PM,{operation:'add_camera',camera:{p:{x:2160,y:540,z:0}}});
+    editScene(PM,{operation:'add_object',object:{id:'near',source:{primitive:'box'},p:{x:1360}}});
+    editScene(PM,{operation:'add_object',object:{id:'far',source:{primitive:'box'},p:{x:560}}});
     const near=PM.L('near'),far=PM.L('far');expect(compositionOrderedLayers(PM,[far,near],0)).toEqual([near,far]);
     const divider=PM.mkLayer('shape');expect(compositionOrderedLayers(PM,[far,divider,near],0)).toEqual([far,divider,near]);
     compositionRuntime(PM,0).dispose();

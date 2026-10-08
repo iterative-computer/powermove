@@ -235,21 +235,16 @@ export class SceneRuntime {
     else { camera.left=-3*aspect;camera.right=3*aspect;camera.top=3;camera.bottom=-3; }
     camera.updateProjectionMatrix();camera.updateMatrixWorld();
   }
-  /** `look` is the editor's Wireframe shading and X-ray; output never sets it. */
-  render(w:number,h:number,objectId?:string,depthIds?:Set<string>,background=true,camera=this.camera,look:{wireframe?:boolean;xray?:boolean}={}): HTMLCanvasElement {
-    const saved:[any,{wireframe:boolean;transparent:boolean;opacity:number;depthWrite:boolean}][]=[];
-    if(look.wireframe||look.xray)this.scene.traverse((child:any)=>{
+  /** `look` is the editor's Wireframe shading; output never sets it. */
+  render(w:number,h:number,objectId?:string,depthIds?:Set<string>,background=true,camera=this.camera,look:{wireframe?:boolean}={}): HTMLCanvasElement {
+    const wired:THREE.Material[]=[];
+    if(look.wireframe)this.scene.traverse((child:any)=>{
       if(!child.isMesh)return;
-      for(const material of Array.isArray(child.material)?child.material:[child.material]){
-        if(!material||saved.some(([m])=>m===material))continue;
-        saved.push([material,{wireframe:!!material.wireframe,transparent:material.transparent,opacity:material.opacity,depthWrite:material.depthWrite}]);
-        if(look.wireframe&&'wireframe' in material)material.wireframe=true;
-        // X-ray: models become see-through and stop hiding one another.
-        if(look.xray){material.transparent=true;material.opacity*=.45;material.depthWrite=false;}
-      }
+      for(const material of Array.isArray(child.material)?child.material:[child.material])if(material&&'wireframe' in material&&!material.wireframe){material.wireframe=true;wired.push(material);}
     });
-    try{return this.renderPass(w,h,objectId,depthIds,background,camera,`${!!look.wireframe}:${!!look.xray}`);}
-    finally{for(const [material,old] of saved)Object.assign(material,old);}
+    // The shared depth prepass is keyed by look so an editor-only pass is never reused for output.
+    try{return this.renderPass(w,h,objectId,depthIds,background,camera,`${!!look.wireframe}`);}
+    finally{for(const material of wired)(material as any).wireframe=false;}
   }
   private renderPass(w:number,h:number,objectId:string|undefined,depthIds:Set<string>|undefined,background:boolean,camera:THREE.PerspectiveCamera|THREE.OrthographicCamera,lookKey=''): HTMLCanvasElement {
     if (!this.renderer) {

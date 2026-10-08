@@ -190,6 +190,8 @@ PM.mkProject = (o: any = {}) => ({
      Settings › Project tab both read and write this. */
   exportDefaults: normalizeExportDefaults(o.exportDefaults, o.fps || 30),
   params: {},         // agent/workspace-exposed scene parameters
+  /* 3D layers keep their channels in composition pixels, like 2D layers. */
+  space3d: 'px',
   revision: 0,
   edits: [],          // shared UI/agent transaction provenance
   created: Date.now(),

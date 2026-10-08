@@ -1,9 +1,18 @@
 import * as THREE from 'three';
 import {animatedPart} from './recipe-preview';
-import { world3D,parent3D,depthOrderedLayers } from '../../legacy/core/space-3d';
+import { world3D,parent3D,is3DLayer } from '../../legacy/core/space-3d';
 import { SceneRuntime } from './runtime';
 import { createScene,parseScene,SCENE3D_DEFINITION,type Scene3D } from './schema';
 import { compositionScene, layer3DRole,layer3DAssetIds,isModelGroup } from './layers';
+import { sceneFromComp,GEOMETRY_TO_COMP,lengthToScene,applyDefaultCamera } from './space';
+
+/** Pixel-valued scene fields (light range and size, clip planes) in scene units for the renderer. */
+function inSceneUnits(scene:Scene3D):Scene3D {
+  const scale=(prop:any)=>{if(prop&&typeof prop.v==='number')prop.v=lengthToScene(prop.v);};
+  for(const light of scene.lights)for(const key of ['distance','width','height'])scale((light.p as any)[key]);
+  for(const key of ['near','far'])scale((scene.camera.p as any)[key]);
+  return scene;
+}
 
 const runtimes = new WeakMap<object,Map<string,SceneRuntime>>();
 const legacyScenes = new WeakMap<object,{signature:string;scene:Scene3D}>();
@@ -17,13 +26,23 @@ export function compositionRuntime(PM:any,time=PM.time || 0,composition?:any):Sc
   const assetsChanged=!cached || cached.references.size!==references.size || [...references].some(([id,asset])=>cached.references.get(id)!==asset);
   if(assetsChanged || !cached || cached.comp!==comp || cached.time!==time || cached.revision!==revision || cached.assets!==PM.proj.assets){
     const starts=new Map<string,number>(comp.layers.map((l:any)=>[l.id,l.from]));
-    runtime.sync(compositionScene(PM,time,comp),(id:string)=>PM.assets?.get?.(id),prop=>prop.v,time,true,id=>time-(starts.get(id) || 0));
+    runtime.sync(inSceneUnits(compositionScene(PM,time,comp)),(id:string)=>PM.assets?.get?.(id),prop=>prop.v,time,true,id=>time-(starts.get(id) || 0));
+    // Layers live in composition pixels; the renderer works in scene units.
+    const toScene=sceneFromComp(comp);
     const models=comp.layers.filter((l:any)=>layer3DRole(l)==='object');
     // Use exactly the native layer hierarchy, orientation and anchor matrices.
     // Flattening the evaluated world avoids applying parent transforms twice.
     for(const l of models){const object=runtime.objects.get(l.id);if(!object)continue;
-      runtime.scene.add(object);object.matrixAutoUpdate=false;object.matrix.fromArray(world3D(PM,l,time));
-      const part=animatedPart(PM,l,time);if(part){const delta=new THREE.Vector3(part.base.x!-part.prior.x!,part.base.y!-part.prior.y!,part.base.z!-part.prior.z!);const parent=new THREE.Matrix4().fromArray(parent3D(PM,l,time));const origin=new THREE.Vector3().applyMatrix4(parent);delta.applyMatrix4(parent).sub(origin);object.matrix.elements[12]!+=delta.x;object.matrix.elements[13]!+=delta.y;object.matrix.elements[14]!+=delta.z;}
+      runtime.scene.add(object);object.matrixAutoUpdate=false;
+      const world=new THREE.Matrix4().fromArray(world3D(PM,l,time));
+      // A recipe part's animated offset is in model units relative to its group.
+      const part=animatedPart(PM,l,time);
+      if(part){
+        const delta=new THREE.Vector3(part.base.x!-part.prior.x!,part.base.y!-part.prior.y!,part.base.z!-part.prior.z!).applyMatrix4(GEOMETRY_TO_COMP);
+        const parent=new THREE.Matrix4().fromArray(parent3D(PM,l,time)),origin=new THREE.Vector3().applyMatrix4(parent);
+        delta.applyMatrix4(parent).sub(origin);world.elements[12]!+=delta.x;world.elements[13]!+=delta.y;world.elements[14]!+=delta.z;
+      }
+      object.matrix.copy(toScene).multiply(world).multiply(GEOMETRY_TO_COMP);
 
       object.matrix.decompose(object.position,object.quaternion,object.scale);object.rotation.order='ZYX';
       object.userData.layerOpacity=PM.worldOpacity?PM.worldOpacity(l,time):1;
@@ -32,14 +51,18 @@ export function compositionRuntime(PM:any,time=PM.time || 0,composition?:any):Sc
     for(const l of comp.layers.filter((l:any)=>layer3DRole(l)==='light' || layer3DRole(l)==='camera')){
       const role=layer3DRole(l),node=role==='light'?runtime.objects.get(l.id):comp.layers.find((c:any)=>layer3DRole(c)==='camera' && PM.active(c,time))===l?runtime.camera:null;
       if(!node || !role)continue;
-      node.position.setFromMatrixPosition(new THREE.Matrix4().fromArray(world3D(PM,l,time)));
+      const world=toScene.clone().multiply(new THREE.Matrix4().fromArray(world3D(PM,l,time)));
+      node.position.setFromMatrixPosition(world);
       const p=l.d.data[role].p,ev=(key:string)=>PM.evP(l,p[key],time,`${role}.${key}`);
-      const parent=new THREE.Matrix4().fromArray(parent3D(PM,l,time));
+      const parent=toScene.clone().multiply(new THREE.Matrix4().fromArray(parent3D(PM,l,time)));
       const target=new THREE.Vector3(ev('targetX'),ev('targetY'),ev('targetZ')).applyMatrix4(parent);
-      if(role==='camera'){node.up.set(0,1,0).transformDirection(new THREE.Matrix4().fromArray(world3D(PM,l,time)));node.lookAt(target);node.updateMatrixWorld(true);}
+      // Screen-up in composition pixels is -y.
+      if(role==='camera'){node.up.set(0,-1,0).transformDirection(world);node.lookAt(target);node.updateMatrixWorld(true);}
       else if((node as THREE.DirectionalLight).target)(node as THREE.DirectionalLight).target.position.copy(target);
       else if((node as THREE.RectAreaLight).isRectAreaLight)node.lookAt(target);
     }
+    // Without a camera layer, 3D layers share the default 50 mm composition camera.
+    if(!comp.layers.some((c:any)=>layer3DRole(c)==='camera'&&PM.active(c,time)))applyDefaultCamera(runtime.camera,comp);
     runtime.scene.updateMatrixWorld(true);
     compositionCache.set(runtime,{comp,time,revision,assets:PM.proj.assets,references});
   }
@@ -64,31 +87,60 @@ export function compositionDepthIds(PM:any,layer:any,time:number):Set<string> {
 /** Real geometry bounds in the group's local world-unit space, not projected pixels. */
 export function modelGroupBounds(PM:any,group:any,time:number):any {
   if(!isModelGroup(PM,group))return null;
-  const runtime=compositionRuntime(PM,time),box=new THREE.Box3();
-  const inverse=new THREE.Matrix4().fromArray(world3D(PM,group,time)).invert();
+  const runtime=compositionRuntime(PM,time),box=new THREE.Box3(),comp=PM.curComp?.()||PM.proj;
+  // Model geometry is measured in scene units; bring it back to the group's pixel frame.
+  const inverse=new THREE.Matrix4().fromArray(world3D(PM,group,time)).invert().multiply(sceneFromComp(comp).invert());
   for(const child of (PM.curComp?.() || PM.proj).layers){
     if(!(PM.groupAncestors?.(child) || []).some((g:any)=>g.id===group.id) || !PM.active(child,time))continue;
     const object=layer3DRole(child)==='object'?runtime.objects.get(child.id):null;
     if(object)box.union(new THREE.Box3().setFromObject(object).applyMatrix4(inverse));
-    else if(layer3DRole(child))box.expandByPoint(new THREE.Vector3().setFromMatrixPosition(new THREE.Matrix4().fromArray(world3D(PM,child,time))).applyMatrix4(inverse));
+    else if(layer3DRole(child))box.expandByPoint(new THREE.Vector3().setFromMatrixPosition(new THREE.Matrix4().fromArray(world3D(PM,child,time))).applyMatrix4(new THREE.Matrix4().fromArray(world3D(PM,group,time)).invert()));
   }
   if(box.isEmpty())return null;
   return {x0:box.min.x,y0:box.min.y,z0:box.min.z,x1:box.max.x,y1:box.max.y,z1:box.max.z,
     w:box.max.x-box.min.x,h:box.max.y-box.min.y,ax:0,ay:0};
 }
-/** Transparent models sort in the shared camera's depth, keeping every 2D stack boundary. */
+/**
+ * Models and 3D-enabled 2D layers share one space and one camera, so within
+ * each run of 3D layers they sort together by camera depth (far to near).
+ * Coplanar artwork keeps its timeline order as one surface; 2D layers stay
+ * compositing barriers between runs.
+ */
 export function compositionOrderedLayers(PM:any,layers:any[],time:number,camera?:THREE.Camera):any[] {
-  if(!layers.some(layer3DRole))return depthOrderedLayers(PM,layers,time);
-  const world=compositionRuntime(PM,time),result:any[]=[],position=new THREE.Vector3();
+  const spatial=(l:any)=>!!layer3DRole(l)||is3DLayer(PM,l);
+  if(!layers.some(spatial))return layers;
+  const comp=PM._renderComposition3D||PM.curComp?.()||PM.proj,world=compositionRuntime(PM,time,comp);
+  const view=(camera||world.camera),toScene=sceneFromComp(comp),position=new THREE.Vector3();
+  view.updateMatrixWorld(true);
+  const depthOf=(point:THREE.Vector3)=>point.applyMatrix4(view.matrixWorldInverse).z;
+  const result:any[]=[];
   for(let start=0;start<layers.length;){
-    const modelBlock=!!layer3DRole(layers[start]);let end=start+1;
-    while(end<layers.length && !!layer3DRole(layers[end])===modelBlock)end++;
-    const block=layers.slice(start,end);
-    if(modelBlock){
-      const depth=(l:any)=>{const object=world.objects.get(l.id);return object?object.getWorldPosition(position).applyMatrix4((camera||world.camera).matrixWorldInverse).z:0;};
-      block.sort((a,b)=>depth(b)-depth(a));result.push(...block);
-    }else result.push(...depthOrderedLayers(PM,block,time));
-    start=end;
+    const isSpatial=spatial(layers[start]);let end=start+1;
+    while(end<layers.length&&spatial(layers[end])===isSpatial)end++;
+    const block=layers.slice(start,end);start=end;
+    if(!isSpatial){result.push(...block);continue;}
+    const surfaces:Array<{plane:number[]|null;layers:any[];depth:number}>=[];
+    for(const layer of block){
+      if(layer3DRole(layer)){
+        const object=world.objects.get(layer.id);
+        const point=object?object.getWorldPosition(position).clone():new THREE.Vector3().setFromMatrixPosition(new THREE.Matrix4().fromArray(world3D(PM,layer,time))).applyMatrix4(toScene);
+        surfaces.push({plane:null,layers:[layer],depth:depthOf(point)});continue;
+      }
+      const m=world3D(PM,layer,time),normal=[m[1]!*m[6]!-m[2]!*m[5]!,m[2]!*m[4]!-m[0]!*m[6]!,m[0]!*m[5]!-m[1]!*m[4]!],length=Math.hypot(...normal);
+      let plane:number[]|null=null;
+      if(length>1e-12){
+        // A reflected layer still belongs to the same two-sided plane.
+        const sign=(normal.find(v=>Math.abs(v)>length*1e-8)??1)<0?-1:1,n=normal.map(v=>v/length*sign);
+        plane=[...n,n[0]!*m[12]!+n[1]!*m[13]!+n[2]!*m[14]!];
+      }
+      const existing=plane&&surfaces.find(surface=>surface.plane&&plane!.slice(0,3).every((v,i)=>Math.abs(v-surface.plane![i]!)<1e-7)&&Math.abs(plane![3]!-surface.plane[3]!)<1e-5);
+      if(existing){existing.layers.push(layer);continue;}
+      const ev=(key:string)=>layer.p?.[key]?Number(PM.ev(layer,key,time))||0:0;
+      const anchor=new THREE.Vector3(ev('anchor.x'),ev('anchor.y'),layer.threeD?ev('anchor.z'):0).applyMatrix4(new THREE.Matrix4().fromArray(m)).applyMatrix4(toScene);
+      surfaces.push({plane,layers:[layer],depth:depthOf(anchor)});
+    }
+    // Layer lists run top-down; camera-space z grows toward the camera, so the nearest surface comes first.
+    result.push(...surfaces.sort((a,b)=>b.depth-a.depth).flatMap(surface=>surface.layers));
   }
   return result;
 }

@@ -1,4 +1,4 @@
-import {viewportCamera,viewportRevision,getViewportMode,localViewIds} from '../../core/scene3d/viewport';
+import {viewportCamera,viewportRevision,getViewportMode} from '../../core/scene3d/viewport';
 import { videoClipsAt } from '../core/video-timeline';
 import { sizeAnchorOffset } from '../core/size-anchor';
 import { previewSeekFrame, seekPreviewVideo } from '../core/video-seek';
@@ -14,7 +14,6 @@ import { previewPlan } from './preview-plan';
 import { sourceTime } from '../core/retiming';
 import { layer3DRole } from '../../core/scene3d/layers';
 import {blenderSurface,blenderRevision,renderState,wireframePreview} from '../../core/scene3d/rendering';
-import {viewportPreferences} from '../../core/scene3d/editor-state';
 import { sceneRuntime, pruneSceneRuntimes, compositionRuntime, compositionDepthIds,compositionOrderedLayers } from '../../core/scene3d/service';
 import { evaluatedValue, isProperty, resolveContent } from '../core/content-properties';
 /* Ported from js/gl/compositor.js — behavior-preserving. */
@@ -1495,16 +1494,13 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   if(proj===PM.proj && !opt.groupParent && !opt.mattePass)pruneSceneRuntimes(PM);
   const previous3DOptions=PM._renderOptions3D;PM._renderOptions3D=opt;
   const previous3DComposition=PM._renderComposition3D,previous3DPass=PM._renderComposition3DPass,previous3DCamera=PM._renderCamera3D,previousBlenderPreview=PM._renderBlenderPreview,previousWireframe=PM._renderWireframe3D;PM._renderComposition3D=proj;PM._renderBlenderPreview=!!opt.editorViewport;
-  PM._renderWireframe3D=opt.editorViewport?{wireframe:wireframePreview(PM),xray:viewportPreferences(PM).xray&&renderState(PM).mode==='draft'}:null;
+  PM._renderWireframe3D=opt.editorViewport&&wireframePreview(PM)?{wireframe:true}:null;
   try {
   PM._renderCamera3D=opt.editorViewport&&(proj===PM.proj||opt.matteProject===PM.proj)&&getViewportMode(PM)==='editor'?viewportCamera(PM,compositionRuntime(PM,T,PM.proj).camera):null;
   const gl = GL.gl;
   const orderedLayers = proj.layers;
   const parentGroup = typeof opt.groupParent === 'string' ? opt.groupParent : null;
-  // Local View hides the other models in the editor only; output always renders everything.
-  const local=opt.editorViewport&&proj===PM.proj?localViewIds(PM):null;
-  const passLayers=opt.explicitLayers ? orderedLayers : compositingPass(orderedLayers, parentGroup, T, opt);
-  const layers = compositionOrderedLayers(PM,local?passLayers.filter((l:any)=>layer3DRole(l)!=='object'||local.has(l.id)):passLayers,T,PM._renderCamera3D);
+  const layers = compositionOrderedLayers(PM,opt.explicitLayers ? orderedLayers : compositingPass(orderedLayers, parentGroup, T, opt),T,PM._renderCamera3D);
   PM._renderComposition3DPass=layers;
   const solo = orderedLayers.some((layer: any) => layer.solo);
   // Rebuild per composition/pass so edits and nested mattes cannot leave a
@@ -1883,8 +1879,7 @@ GL.renderToPixels = (T: any, W: any, H: any, opt: any = {}) => {
 GL.pick = (x: any, y: any, T: any, options: { includeLocked?: boolean } = {}) => {
   pruneSceneRuntimes(PM);
   const pickCamera=PM.proj.layers.some(layer3DRole)?viewportCamera(PM,compositionRuntime(PM,T).camera):undefined;
-  const local=localViewIds(PM);
-  const layers = compositionOrderedLayers(PM, local?PM.proj.layers.filter((l:any)=>layer3DRole(l)!=='object'||local.has(l.id)):PM.proj.layers, T,pickCamera);
+  const layers = compositionOrderedLayers(PM, PM.proj.layers, T,pickCamera);
   for (const L of layers) {
     if (!PM.active(L, T) || !options.includeLocked && (L.lock || (PM.groupAncestors?.(L) || []).some((group: any) => group.lock)) || (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].pickable === false)) continue;
     if(layer3DRole(L)){

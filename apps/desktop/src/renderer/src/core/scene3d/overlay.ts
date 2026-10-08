@@ -4,36 +4,33 @@ import type {ViewAxis} from './viewport';
 import {AXIS_COLORS,type Axis,type Rect} from './modal';
 
 /*
- * Blender's viewport overlays drawn over the composition: the floor grid and
- * its axes (user views only), selection outlines, light and camera wires, and
- * transform constraint guides. Overlays never draw into the composition, so
- * exports and captures are unaffected.
+ * Guides drawn over the composition in the editor only: in a free view the
+ * composition frame (the plane 2D layers sit on) and a floor grid under it;
+ * light and camera wires; and the axis line of a constrained move. Guides
+ * never draw into the composition, so exports and captures are unaffected.
  */
 
-export const SELECTED_COLOR='#f15800',ACTIVE_COLOR='#ffaa40',WIRE_COLOR='#c8c8c8';
-export type Glyph={id:string;kind:'point'|'sun'|'spot'|'area'|'camera';position:THREE.Vector3;target:THREE.Vector3|null;up?:THREE.Vector3;fov?:number;aspect?:number;angle?:number;size?:[number,number];state:'none'|'selected'|'active'};
+export const WIRE_COLOR='#c8c8c8';
+export type Glyph={id:string;kind:'point'|'sun'|'spot'|'area'|'camera';position:THREE.Vector3;target:THREE.Vector3|null;up?:THREE.Vector3;fov?:number;aspect?:number;angle?:number;size?:[number,number];state:'none'|'selected'};
 export type Guide={origin:THREE.Vector3;direction:THREE.Vector3;axis:Axis};
 export interface OverlayFrame {
   camera:THREE.PerspectiveCamera|THREE.OrthographicCamera;
   rect:Rect;
   runtime:SceneRuntime|null;
-  /** User view: draw the floor grid against the scene's depth. */
+  /** Free view: draw the composition frame and floor grid. */
   userView:boolean;
   axis:ViewAxis|null;
   /** Pivot distance and field of view, for grid density. */
   distance:number;
   fov:number;
   overlays:boolean;
-  selected:Set<string>;
-  active:Set<string>;
+  /** Selection ink, matching 2D selection boxes. */
+  ink:string;
+  /** The composition frame's corners and the floor height, in scene units. */
+  frame:THREE.Vector3[];
+  floor:number;
   glyphs:Glyph[];
   guides:Guide[];
-  /** Edit Mode: the edited model's points and edges (world space). */
-  edit?:{points:THREE.Vector3[];selected:boolean[];edges:[number,number][]}|null;
-  /** X-ray: the floor and wires show through models. */
-  xray?:boolean;
-  /** Drawn last and unclipped: the transform gizmo. */
-  gizmo:THREE.Object3D|null;
 }
 
 const GRID_VERTEX=`
@@ -60,22 +57,6 @@ void main(){
   if(color.a<0.004)discard;
   gl_FragColor=color;
 }`;
-const OUTLINE_FRAGMENT=`
-varying vec2 vUv;
-uniform sampler2D uMask;uniform vec2 uTexel;uniform vec3 uSelected;uniform vec3 uActive;uniform float uRadius;
-void main(){
-  vec4 here=texture2D(uMask,vUv);
-  if(max(here.r,here.g)>0.5)discard;
-  float nearSelected=0.0,nearActive=0.0;
-  for(int x=-2;x<=2;x++)for(int y=-2;y<=2;y++){
-    vec2 offset=vec2(float(x),float(y));if(length(offset)>uRadius+0.01)continue;
-    vec4 sampled=texture2D(uMask,vUv+offset*uTexel);nearSelected=max(nearSelected,sampled.r);nearActive=max(nearActive,sampled.g);
-  }
-  if(nearActive>0.5)gl_FragColor=vec4(uActive,1.0);
-  else if(nearSelected>0.5)gl_FragColor=vec4(uSelected,1.0);
-  else discard;
-}`;
-
 const PLANES:Record<string,{plane:number;a:Axis;b:Axis;rotate:(mesh:THREE.Mesh)=>void}>={
   floor:{plane:0,a:'x',b:'z',rotate:mesh=>mesh.rotation.set(-Math.PI/2,0,0)},
   front:{plane:1,a:'x',b:'y',rotate:mesh=>mesh.rotation.set(0,0,0)},
@@ -88,13 +69,7 @@ export class ViewportOverlay {
   private gridScene=new THREE.Scene();
   private grid:THREE.Mesh<THREE.PlaneGeometry,THREE.ShaderMaterial>;
   private depthMaterial=new THREE.MeshBasicMaterial({colorWrite:false});
-  private maskMaterial=new THREE.MeshBasicMaterial({color:0xff0000,side:THREE.DoubleSide});
-  private mask:THREE.WebGLRenderTarget|null=null;
-  private quadScene=new THREE.Scene();
-  private quadCamera=new THREE.OrthographicCamera(-1,1,1,-1,0,1);
-  private outline:THREE.ShaderMaterial;
   private lineScene=new THREE.Scene();
-  private gizmoScene=new THREE.Scene();
   private materials=new Map<string,THREE.LineBasicMaterial>();
   private disposed=false;
 
@@ -103,7 +78,7 @@ export class ViewportOverlay {
     this.renderer.setPixelRatio(Math.min(2,window.devicePixelRatio||1));
     this.renderer.autoClear=false;
     this.canvas=this.renderer.domElement;
-    this.canvas.setAttribute('aria-hidden','true');this.canvas.dataset.sceneGizmo='';this.canvas.dataset.sceneOverlay='';
+    this.canvas.setAttribute('aria-hidden','true');this.canvas.dataset.sceneOverlay='';
     this.canvas.style.cssText='position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:4';
     stage.append(this.canvas);
     this.grid=new THREE.Mesh(new THREE.PlaneGeometry(1,1),new THREE.ShaderMaterial({
@@ -112,19 +87,11 @@ export class ViewportOverlay {
         uAxisA:{value:new THREE.Color(AXIS_COLORS.x)},uAxisB:{value:new THREE.Color(AXIS_COLORS.z)}}
     }));
     this.grid.frustumCulled=false;this.gridScene.add(this.grid);
-    this.outline=new THREE.ShaderMaterial({
-      vertexShader:'varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0.0,1.0);}',fragmentShader:OUTLINE_FRAGMENT,
-      transparent:true,depthTest:false,depthWrite:false,
-      uniforms:{uMask:{value:null},uTexel:{value:new THREE.Vector2()},uSelected:{value:new THREE.Color(SELECTED_COLOR)},uActive:{value:new THREE.Color(ACTIVE_COLOR)},uRadius:{value:1.5}}
-    });
-    const quad=new THREE.Mesh(new THREE.PlaneGeometry(2,2),this.outline);quad.frustumCulled=false;this.quadScene.add(quad);
   }
-  /** Shared with the transform gizmo so handles draw in the same pass and camera. */
-  get scene():THREE.Scene {return this.gizmoScene;}
 
-  private line(color:string,depth:boolean):THREE.LineBasicMaterial {
-    const key=`${color}:${depth}`;let material=this.materials.get(key);
-    if(!material){material=new THREE.LineBasicMaterial({color,depthTest:depth,depthWrite:false,transparent:true});this.materials.set(key,material);}
+  private line(color:string,depth:boolean,opacity=1):THREE.LineBasicMaterial {
+    const key=`${color}:${depth}:${opacity}`;let material=this.materials.get(key);
+    if(!material){material=new THREE.LineBasicMaterial({color,depthTest:depth,depthWrite:false,transparent:true,opacity});this.materials.set(key,material);}
     return material;
   }
   private clearLines(){for(const child of [...this.lineScene.children]){(child as THREE.LineSegments).geometry.dispose();child.removeFromParent();}}
@@ -139,35 +106,28 @@ export class ViewportOverlay {
     renderer.setSize(width,height,false);
     renderer.setScissorTest(false);renderer.setClearColor(0,0);renderer.clear(true,true,true);
     const {rect}=frame,camera=frame.camera.clone() as THREE.PerspectiveCamera|THREE.OrthographicCamera;
-    // Extend the frustum over the whole stage so handles stay visible past the composition edge.
     camera.setViewOffset(rect.width,rect.height,-rect.x,-rect.y,width,height);camera.updateProjectionMatrix();camera.updateMatrixWorld(true);
-    const scissor=()=>{renderer.setScissorTest(true);renderer.setScissor(rect.x,height-rect.y-rect.height,rect.width,rect.height);};
+    renderer.setScissorTest(true);renderer.setScissor(rect.x,height-rect.y-rect.height,rect.width,rect.height);
     const runtime=frame.runtime;
+    this.clearLines();
     if(frame.overlays&&runtime){
-      scissor();
-      const scene=runtime.scene,background=scene.background;
-      if(frame.userView&&!frame.xray){
-        // Depth of the models, so the floor and wires pass behind them.
+      if(frame.userView){
+        // Depth of the models, so the floor passes behind them.
+        const scene=runtime.scene,background=scene.background;
         scene.background=null;scene.overrideMaterial=this.depthMaterial;
         try{renderer.render(scene,camera);}finally{scene.overrideMaterial=null;scene.background=background;}
         this.drawGrid(frame,camera);
-      }else if(frame.userView)this.drawGrid(frame,camera);
-      this.drawOutlines(frame,camera,width,height,scissor);
-      this.clearLines();
-      for(const glyph of frame.glyphs)this.drawGlyph(glyph,frame,camera);
-      if(frame.edit)this.drawEdit(frame.edit);
-      scissor();renderer.render(this.lineScene,camera);
-    }
-    if(frame.guides.length){
-      this.clearLines();
-      for(const guide of frame.guides){
-        const reach=Math.max(1e3,frame.distance*100);
-        this.segments([guide.origin.clone().addScaledVector(guide.direction,-reach),guide.origin.clone().addScaledVector(guide.direction,reach)],this.line(AXIS_COLORS[guide.axis],false));
+        const [a,b,c,d]=frame.frame;
+        if(a&&b&&c&&d)this.segments([a,b,b,c,c,d,d,a],this.line(frame.ink,false,.55));
       }
-      scissor();renderer.clearDepth();renderer.render(this.lineScene,camera);
+      for(const glyph of frame.glyphs)this.drawGlyph(glyph,frame,camera);
     }
+    for(const guide of frame.guides){
+      const reach=Math.max(1e3,frame.distance*100);
+      this.segments([guide.origin.clone().addScaledVector(guide.direction,-reach),guide.origin.clone().addScaledVector(guide.direction,reach)],this.line(AXIS_COLORS[guide.axis],false,.8));
+    }
+    if(this.lineScene.children.length)renderer.render(this.lineScene,camera);
     renderer.setScissorTest(false);
-    if(frame.gizmo){renderer.clearDepth();renderer.render(this.gizmoScene,camera);}
   }
 
   private drawGrid(frame:OverlayFrame,camera:THREE.Camera):void {
@@ -177,7 +137,8 @@ export class ViewportOverlay {
     const step=Math.pow(10,Math.floor(Math.log10(Math.max(1e-4,half/2))));
     const forward=new THREE.Vector3(0,0,-1).transformDirection(camera.matrixWorld);
     const target=new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld).addScaledVector(forward,frame.distance);
-    const center=target.clone();center[kind==='floor'?'y':kind==='front'?'z':'x']=0;
+    const center=target.clone();
+    if(kind==='floor')center.y=frame.floor;else center[kind==='front'?'z':'x']=0;
     const fade=named?half*Math.max(4,frame.rect.width/Math.max(1,frame.rect.height)*3):Math.max(frame.distance*6,step*40);
     const uniforms=this.grid.material.uniforms;
     uniforms.uStep!.value=step;uniforms.uCenter!.value.copy(center);uniforms.uFade!.value=fade;uniforms.uPlane!.value=plane.plane;uniforms.uFar!.value=named?1:0;
@@ -186,45 +147,6 @@ export class ViewportOverlay {
     this.renderer.render(this.gridScene,camera);
   }
 
-  private drawOutlines(frame:OverlayFrame,camera:THREE.Camera,width:number,height:number,scissor:()=>void):void {
-    const runtime=frame.runtime!;if(!frame.selected.size)return;
-    const ratio=this.renderer.getPixelRatio(),w=Math.max(2,Math.round(width*ratio)),h=Math.max(2,Math.round(height*ratio));
-    if(!this.mask||this.mask.width!==w||this.mask.height!==h){this.mask?.dispose();this.mask=new THREE.WebGLRenderTarget(w,h,{depthBuffer:false});}
-    const marked:THREE.Object3D[]=[];
-    runtime.scene.traverse((child:any)=>{
-      if(!child.isMesh)return;const id=child.userData.sceneId;
-      if(frame.active.has(id)){child.layers.enable(2);marked.push(child);}
-      else if(frame.selected.has(id)){child.layers.enable(1);marked.push(child);}
-    });
-    if(!marked.length)return;
-    const scene=runtime.scene,background=scene.background,previous=this.renderer.getRenderTarget();
-    try{
-      scene.background=null;scene.overrideMaterial=this.maskMaterial;
-      this.renderer.setRenderTarget(this.mask);this.renderer.setScissorTest(false);this.renderer.setClearColor(0,0);this.renderer.clear(true,false,false);
-      camera.layers.set(1);this.maskMaterial.color.setRGB(1,0,0);this.renderer.render(scene,camera);
-      camera.layers.set(2);this.maskMaterial.color.setRGB(0,1,0);this.renderer.render(scene,camera);
-    }finally{
-      camera.layers.set(0);scene.overrideMaterial=null;scene.background=background;this.renderer.setRenderTarget(previous);
-      for(const child of marked){child.layers.disable(1);child.layers.disable(2);}
-    }
-    this.outline.uniforms.uMask!.value=this.mask.texture;this.outline.uniforms.uTexel!.value.set(1/w,1/h);
-    this.outline.uniforms.uRadius!.value=ratio>=2?2:1.5;
-    scissor();this.renderer.render(this.quadScene,this.quadCamera);
-  }
-
-  /** Edit Mode: edges and points over everything, selected ones in orange like Blender. */
-  private drawEdit(edit:NonNullable<OverlayFrame['edit']>):void {
-    const plain:THREE.Vector3[]=[],chosen:THREE.Vector3[]=[];
-    for(const [a,b] of edit.edges)(edit.selected[a]&&edit.selected[b]?chosen:plain).push(edit.points[a]!,edit.points[b]!);
-    if(plain.length)this.segments(plain,this.line('#d9d9d9',false));
-    if(chosen.length)this.segments(chosen,this.line(SELECTED_COLOR,false));
-    const geometry=new THREE.BufferGeometry().setFromPoints(edit.points),colors:number[]=[],plainColor=new THREE.Color('#111111'),pick=new THREE.Color(SELECTED_COLOR);
-    for(const selected of edit.selected)colors.push(...(selected?pick:plainColor).toArray());
-    geometry.setAttribute('color',new THREE.Float32BufferAttribute(colors,3));
-    this.pointMaterial??=new THREE.PointsMaterial({size:6,sizeAttenuation:false,vertexColors:true,depthTest:false,transparent:true});
-    const points=new THREE.Points(geometry,this.pointMaterial);points.frustumCulled=false;this.lineScene.add(points);
-  }
-  private pointMaterial:THREE.PointsMaterial|null=null;
   /** World units per screen pixel at `point`, so wires keep a constant on-screen size. */
   private perPixel(point:THREE.Vector3,frame:OverlayFrame):number {
     const camera=frame.camera;
@@ -233,7 +155,7 @@ export class ViewportOverlay {
     return 2*depth*Math.tan(THREE.MathUtils.degToRad(camera.fov)/2)/Math.max(1,frame.rect.height);
   }
   private drawGlyph(glyph:Glyph,frame:OverlayFrame,camera:THREE.Camera):void {
-    const color=glyph.state==='active'?ACTIVE_COLOR:glyph.state==='selected'?SELECTED_COLOR:WIRE_COLOR;
+    const color=glyph.state==='none'?WIRE_COLOR:frame.ink;
     const material=this.line(color,frame.userView),p=glyph.position,unit=this.perPixel(p,frame);
     const q=new THREE.Quaternion();frame.camera.matrixWorld.decompose(new THREE.Vector3(),q,new THREE.Vector3());
     const right=new THREE.Vector3(1,0,0).applyQuaternion(q),up=new THREE.Vector3(0,1,0).applyQuaternion(q);
@@ -259,7 +181,7 @@ export class ViewportOverlay {
       this.segments(points,material);return;
     }
     if(glyph.kind==='area'){
-      // Blender draws the lamp's real rectangle and the direction it shines.
+      // An area light shows its real rectangle and the direction it shines.
       const target=glyph.target&&glyph.target.distanceToSquared(p)>1e-12?glyph.target:p.clone().add(new THREE.Vector3(0,-1,0));
       const look=new THREE.Matrix4().lookAt(p,target,Math.abs(target.clone().sub(p).normalize().y)>.99?new THREE.Vector3(0,0,1):new THREE.Vector3(0,1,0));
       const ax=new THREE.Vector3(1,0,0).applyMatrix4(look).normalize(),ay=new THREE.Vector3(0,1,0).applyMatrix4(look).normalize(),forward=new THREE.Vector3(0,0,-1).applyMatrix4(look).normalize();
@@ -288,8 +210,8 @@ export class ViewportOverlay {
 
   dispose():void {
     if(this.disposed)return;this.disposed=true;
-    this.clearLines();this.grid.geometry.dispose();this.grid.material.dispose();this.depthMaterial.dispose();this.maskMaterial.dispose();
-    this.outline.dispose();this.mask?.dispose();this.pointMaterial?.dispose();for(const material of this.materials.values())material.dispose();
+    this.clearLines();this.grid.geometry.dispose();this.grid.material.dispose();this.depthMaterial.dispose();
+    for(const material of this.materials.values())material.dispose();
     this.renderer.dispose();this.renderer.forceContextLoss();this.canvas.remove();
   }
 }

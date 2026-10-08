@@ -1696,6 +1696,8 @@ const CLIP_TYPES: Record<string, { body: string; primary: string; foreground: st
   shader: { body: '#413B60', primary: '#A99AE0', foreground: '#ECE8F8' },
   extension: { body: '#40395D', primary: '#B2A6EF', foreground: '#F0EDFF' },
   null:   { body: '#3E434B', primary: '#A2A9B3', foreground: '#EEF0F3' },
+  /* Camera layers are pinned to the top of the stack and read apart from artwork. */
+  camera: { body: '#4F4C2C', primary: '#D6CC86', foreground: '#F6F2DC' },
 };
 const CLIP_FALLBACK = { body: '#34505A', primary: '#8DB8C6', foreground: '#E6F1F4' };
 function mixHex(color: string, toward: [number, number, number], amount: number) {
@@ -1705,7 +1707,7 @@ function mixHex(color: string, toward: [number, number, number], amount: number)
   return `rgb(${m(r, toward[0])},${m(g, toward[1])},${m(b, toward[2])})`;
 }
 function clipPalette(L: any) {
-  const base = CLIP_TYPES[L?.type] || CLIP_FALLBACK;
+  const base = CLIP_TYPES[L?.d?.definition === 'powermove.3d.camera' ? 'camera' : L?.type] || CLIP_FALLBACK;
   const dark = document.documentElement.dataset.theme === 'dark';
   if (dark) return { ...base, ring: 'rgba(0,0,0,.55)' };
   /* Light theme: the same hues lifted toward paper, ink from the body. */

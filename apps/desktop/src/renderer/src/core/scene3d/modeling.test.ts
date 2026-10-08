@@ -97,12 +97,13 @@ describe("Blender model recipes and native editing", () => {
     );
     expect(shader.p.roughness!.kf[0]!.t).toBe(1);
   });
-  it("creates native parts in one undo and keeps a world-unit group pivot", () => {
+  it("creates native parts in one undo, centred in the composition", () => {
     const PM = editor(),
       count = PM.hist.list().length,
       group = create(PM);
     expect(group.threeD).toBe(true);
-    expect(group.p["position.x"].v).toBe(0);
+    // The model sits at the composition centre; its parts are placed around the group's origin.
+    expect(group.p["position.x"].v).toBe(960);
     expect(group.p["anchor.x"].v).toBe(0);
     expect(group.collapsed).toBe(true);
     expect(PM.proj.layers).toHaveLength(3);
@@ -138,7 +139,8 @@ describe("Blender model recipes and native editing", () => {
     expect(result, result.message).toMatchObject({ ok: true });
     const next = PM.L(nose.id);
     expect(next.d.data.object.material).toEqual(JSON.parse(shader));
-    expect(next.p["position.y"].kf.map((k: any) => k.v)).toEqual([5, 7]);
+    // The part moved 2 units up in Blender: 400 px toward the top of the composition.
+    expect(next.p["position.y"].kf.map((k: any) => k.v)).toEqual([-397, -395]);
     expect(next.p["position.y"].kf[0].eo).toEqual([0.1, 0.2]);
     expect(PM.L(group.id).d.modeling.parts.nose.layerId).toBe(nose.id);
     PM.hist.undo();

@@ -1,5 +1,6 @@
 import { createScene, createObject, createLight, parseScene, sceneProperties, SCENE3D_DEFINITION } from './schema';
 import { LAYER3D_DEFINITIONS, layer3DRole, parseLayer3DData, TRANSFORM_PATHS } from './layers';
+import { compCenter, defaultCameraChannels, defaultLightChannels, modelScale, PX_PER_UNIT } from './space';
 import type { EditCommand, EditMeta, EditResult } from '../types/commands';
 
 export interface Scene3DEdit {
@@ -28,8 +29,14 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
   if (JSON.stringify(args).length > 8_000_000) throw new Error('3D edit exceeds the geometry budget');
   const commands:any[]=[];
   const uid=(role:string)=>String(PM.uid?.(role) || `${role}_${crypto.randomUUID().replaceAll('-','')}`);
-  const add=(role:'object'|'light'|'camera',node:any, suppliedId?:string)=>{
+  const comp=PM.curComp?.() || PM.proj;
+  const add=(role:'object'|'light'|'camera',raw:any, suppliedId?:string)=>{
     const id=suppliedId || uid(role);
+    // Positions are composition pixels; unspecified ones get the composition's defaults.
+    let node=raw;
+    if(role==='object'&&!raw.parent){const k=modelScale(comp);node={...raw,p:{...compCenter(comp),...(k!==1?{sx:k,sy:k,sz:k}:{}),...raw.p}};}
+    if(role==='light')node={...raw,p:{...defaultLightChannels(comp),...(raw.type==='area'?{width:2*PX_PER_UNIT,height:2*PX_PER_UNIT}:{}),...raw.p}};
+    if(role==='camera'){const camera=raw.camera || raw;node={...raw,camera:{...camera,p:{...defaultCameraChannels(comp),...camera.p}}};}
     if(PM.L?.(id))throw new Error(`Layer id already exists: ${id}`);
     let data:any,props:any,visible=true;
     if(role==='object'){
@@ -50,19 +57,22 @@ export function sceneCommands(PM: any, args: Scene3DEdit, meta: EditMeta = {}): 
     commands.push({type:'add_layer',id,layerType:'extension',name:node.name || args.name || (role==='object'?'3D Model':role==='light'?'Light':'Camera'),
       content:{definition:LAYER3D_DEFINITIONS[role],data:parseLayer3DData(role,data)},properties:props,
       visible,
-      ...(role==='object'&&node.parent?{parent:node.parent}:{}),select:true});
+      ...(role==='object'&&node.parent?{parent:node.parent}:{}),
+      // Cameras stay pinned to the top of the timeline.
+      ...(role==='camera'?{index:0}:{}),select:true});
     return id;
   };
   if(args.operation==='create'){
     if(!args.scene)return {commands,id:add('object',args.object || {source:{primitive:'box'}},args.object?.id || args.id)};
-    const scene=parseScene(args.scene),mapping=new Map<string,string>();
+    // Validate the whole template, then add its raw nodes so unspecified positions get pixel defaults.
+    const scene=parseScene(args.scene),raw=args.scene as any,mapping=new Map<string,string>();
     for(const node of scene.objects)mapping.set(node.id,uid('object'));
     let first:string|undefined;
-    const pending=[...scene.objects],added=new Set<string>();
-    while(pending.length){const index=pending.findIndex(n=>!n.parent || added.has(n.parent));const node=pending.splice(index,1)[0]!;
+    const pending=[...(raw.objects||[])],added=new Set<string>();
+    while(pending.length){const index=pending.findIndex((n:any)=>!n.parent || added.has(n.parent));const node=pending.splice(index,1)[0]!;
       const id=add('object',{...node,parent:node.parent?mapping.get(node.parent):null},mapping.get(node.id));added.add(node.id);first ||= id;}
-    for(const node of scene.lights)add('light',node);
-    const cameraId=add('camera',{camera:scene.camera,environment:scene.environment});first ||= cameraId;
+    for(const node of raw.lights||[])add('light',node);
+    const cameraId=add('camera',{camera:raw.camera||{},environment:raw.environment});first ||= cameraId;void scene;
     return {commands,id:first};
   }
   if(args.operation==='add_object')return {commands,id:add('object',args.object || {source:{primitive:'box'}},args.object?.id || args.id)};

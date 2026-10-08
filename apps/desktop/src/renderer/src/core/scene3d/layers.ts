@@ -1,6 +1,7 @@
 import {animatedPart} from './recipe-preview';
 import { generatedModelSchema } from '../../../../shared/blender';
 import { objectSchema, lightSchema, cameraSchema, environmentSchema, parseScene, validateSceneChannel, type Scene3D } from './schema';
+import { compCenter, defaultCameraChannels, defaultLightChannels } from './space';
 
 export const LAYER3D_DEFINITIONS = {
   object: 'powermove.3d.object', light: 'powermove.3d.light', camera: 'powermove.3d.camera'
@@ -8,6 +9,13 @@ export const LAYER3D_DEFINITIONS = {
 export type Layer3DRole = keyof typeof LAYER3D_DEFINITIONS;
 export function layer3DRole(layer: any): Layer3DRole|null {
   return (Object.keys(LAYER3D_DEFINITIONS) as Layer3DRole[]).find(role => layer?.d?.definition === LAYER3D_DEFINITIONS[role]) ?? null;
+}
+/** Camera layers sit at the top of the stack, outside groups, above everything they film. */
+export function pinCameraLayers(layers:any[]):any[] {
+  const cameras=layers.filter(layer=>layer3DRole(layer)==='camera');
+  if(!cameras.length)return layers;
+  for(const camera of cameras)camera.group=null;
+  return [...cameras,...layers.filter(layer=>layer3DRole(layer)!=='camera')];
 }
 /** Model groups use the same world coordinates as their contents. Mixed artwork
  * groups retain the composition's existing 2D interaction. */
@@ -76,12 +84,14 @@ export function validateLayer3DChannel(layer:any,path:string,property:any):void 
     const data=clone(layer.d.data);data.camera.p[path.slice(7)]=clone(property);parseLayer3DData('camera',data);
   }
 }
-export function initializeLayer3D(layer:any, properties:any={}): void {
+/** Fill a new 3D layer's transform; unspecified positions use the composition's pixel defaults. */
+export function initializeLayer3D(layer:any, properties:any={}, comp:any={w:1920,h:1080}): void {
   const role=layer3DRole(layer);if(!role)return;
   layer.d.data=parseLayer3DData(role,layer.d.data);
   layer.threeD=true;
   for(const [path,raw] of Object.entries<any>(properties))if(layer.p[path])layer.p[path]=typeof raw==='object'?clone(raw):{v:raw,kf:[],expr:null};
-  const position=role==='light'?[-3,5,4]:role==='camera'?[3,2,6]:[0,0,0];
+  const camera=defaultCameraChannels(comp),light=defaultLightChannels(comp),center=compCenter(comp);
+  const position=role==='light'?[light.x,light.y,light.z]:role==='camera'?[camera.x,camera.y,camera.z]:[center.x,center.y,center.z];
   for(const [key,path] of Object.entries(TRANSFORM_PATHS)){
     const fallback=key.startsWith('s')?100:key==='x'?position[0]:key==='y'?position[1]:key==='z'?position[2]:0;
     const raw=properties[path] ?? fallback;

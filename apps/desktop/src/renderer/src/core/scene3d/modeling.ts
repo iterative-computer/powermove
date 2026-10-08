@@ -10,6 +10,7 @@ import { createObject, parseScene } from "./schema";
 import { sceneCommands } from "./operations";
 import { importedMaterial } from "./materials";
 import { layer3DRole } from "./layers";
+import { compCenter, modelScale, PX_PER_UNIT } from "./space";
 import type { EditMeta, EditResult } from "../types/commands";
 const clone = (v: any) => JSON.parse(JSON.stringify(v));
 export const MODEL_RECIPES = [
@@ -67,6 +68,13 @@ export const modelFieldsFor = (kind: string) =>
       },
     ]),
   );
+/* Recipe parts are laid out in model units (y up) relative to their group;
+   layers hold composition pixels (y down, z away), so offsets scale and flip. */
+const PART_FACTOR: Record<string, number> = {
+  x: PX_PER_UNIT, y: -PX_PER_UNIT, z: -PX_PER_UNIT, rx: 1, ry: -1, rz: -1, sx: 1, sy: 1, sz: 1,
+};
+const partPixels = (base: Record<string, number>) =>
+  Object.fromEntries(Object.entries(base).map(([key, value]) => [key, value * (PART_FACTOR[key] ?? 1)]));
 const transformPath: Record<string, string> = {
   x: "position.x",
   y: "position.y",
@@ -123,15 +131,15 @@ export function generatedCommands(
         ? MODEL_RECIPES.find((r) => r.id === recipe.kind)?.label || "3D Model"
         : "Blender Model",
       properties: {
-        "position.x": 0,
-        "position.y": 0,
+        "position.x": compCenter(PM.curComp?.() || PM.proj).x,
+        "position.y": compCenter(PM.curComp?.() || PM.proj).y,
         "position.z": 0,
         "rotation.x": 0,
         "rotation.y": 0,
         rotation: 0,
-        "scale.x": 100,
-        "scale.y": 100,
-        "scale.z": 100,
+        "scale.x": 100 * modelScale(PM.curComp?.() || PM.proj),
+        "scale.y": 100 * modelScale(PM.curComp?.() || PM.proj),
+        "scale.z": 100 * modelScale(PM.curComp?.() || PM.proj),
         "anchor.x": 0,
         "anchor.y": 0,
         "anchor.z": 0,
@@ -261,7 +269,7 @@ export function generatedCommands(
       });
       for (const [key, path] of Object.entries(transformPath)) {
         const prop = layer.p[path],
-          factor = key.startsWith("s") ? 100 : 1,
+          factor = key.startsWith("s") ? 100 : (PART_FACTOR[key] ?? 1),
           delta =
             (part.base[key] -
               (prior.base[key] ?? (key.startsWith("s") ? 1 : 0))) *
@@ -284,7 +292,7 @@ export function generatedCommands(
     } else {
       const additions = sceneCommands(PM, {
         operation: "add_object",
-        object: { ...object, parent: groupId, p: part.base },
+        object: { ...object, parent: groupId, p: partPixels(part.base) },
       }).commands;
       for (const command of additions)
         if (command.type === "add_layer")

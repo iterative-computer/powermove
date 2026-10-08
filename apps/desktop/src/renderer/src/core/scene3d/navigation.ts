@@ -1,18 +1,18 @@
 import * as THREE from 'three';
 import {compositionRuntime} from './service';
-import {layer3DRole} from './layers';
 import {parent3D,world3D} from '../../legacy/core/space-3d';
+import {layer3DRole} from './layers';
 import {viewportPose,applyViewportPose,getViewportMode,setViewportMode,viewportState,activeCameraLayer,viewPosition,orbitPose,type ViewPose} from './viewport';
 import {viewportPreferences,selected3D} from './editor-state';
-import {editableLayer,propertyCommand} from './targets';
+import {editableLayer,propertyCommand,roleOf} from './targets';
+import {sceneFromComp,compFromScene} from './space';
 
 /*
- * Blender viewport navigation. MMB orbits, Shift+MMB pans, Ctrl+MMB zooms;
- * Alt+LMB emulates the middle button. In a user view the mouse wheel zooms
- * and a trackpad orbits (Shift pans, Ctrl or pinch zooms). Camera view keeps
- * the composition's own 2D zoom and pan, exactly as Blender pans and zooms the
- * camera frame; orbiting leaves it for a user view. With Lock Camera to View
- * every navigation in camera view moves the real camera layer instead.
+ * 3D navigation. Middle-drag (or Alt+drag) orbits, adding Shift pans and Ctrl
+ * zooms. In a free view the mouse wheel zooms and a trackpad orbits (Shift
+ * pans, Ctrl or pinch zooms). Camera view keeps the composition's own 2D zoom
+ * and pan; orbiting leaves it for a free view. With "Camera follows view" on,
+ * navigating in camera view moves the camera layer itself.
  */
 
 export const navigationNotice='scene3d-navigation';
@@ -39,14 +39,19 @@ export function frameView(start:ViewPose,box:THREE.Box3,fov:number,aspect:number
 }
 
 const comp=(PM:any)=>PM.curComp?.()||PM.proj;
-/** World bounds of the selection (or everything, like Blender's View All); lights and cameras count as points. */
+/** Scene-space bounds of the selection (or everything): models, 3D-enabled 2D layers, and lights and cameras as points. */
 export function viewportBounds(PM:any,selected=true,exclude:string|null=null):THREE.Box3 {
-  const world=compositionRuntime(PM),ids=new Set<string>(selected?selected3D(PM):[]),box=new THREE.Box3();
+  const world=compositionRuntime(PM),ids=new Set<string>(selected?selected3D(PM):[]),box=new THREE.Box3(),toScene=sceneFromComp(comp(PM));
   for(const layer of comp(PM).layers){
-    const role=layer3DRole(layer);if(!role||!PM.active(layer,PM.time)||layer.id===exclude)continue;
+    const role=roleOf(PM,layer);if(!role||role==='group'||!PM.active(layer,PM.time)||layer.id===exclude)continue;
     if(selected&&!ids.has(layer.id)&&!(PM.groupAncestors?.(layer)||[]).some((g:any)=>ids.has(g.id)))continue;
+    const matrix=toScene.clone().multiply(new THREE.Matrix4().fromArray(world3D(PM,layer,PM.time)));
     if(role==='object'){const object=world.objects.get(layer.id);if(object)box.expandByObject(object);}
-    else box.expandByPoint(new THREE.Vector3().setFromMatrixPosition(new THREE.Matrix4().fromArray(world3D(PM,layer,PM.time))));
+    else if(role==='plane'){
+      const b=PM.GL?.bounds?.(layer,PM.time);
+      if(b)for(const [x,y] of [[b.x0,b.y0],[b.x1,b.y0],[b.x1,b.y1],[b.x0,b.y1]])box.expandByPoint(new THREE.Vector3(x,y,0).applyMatrix4(matrix));
+    }
+    else box.expandByPoint(new THREE.Vector3().setFromMatrixPosition(matrix));
   }
   return box;
 }
@@ -55,7 +60,7 @@ const viewFov=(PM:any)=>{
   if(getViewportMode(PM)==='editor')return viewportState(PM).fov;
   const camera=compositionRuntime(PM).camera;return camera instanceof THREE.PerspectiveCamera?camera.fov:50;
 };
-/** Numpad . (View Selected) and Home (View All). Returns false when there is nothing to frame. */
+/** Frame the selection, or everything. Returns false when there is nothing to frame. */
 export function frameComposition(PM:any,selected=true):boolean {
   const box=viewportBounds(PM,selected,lockedCamera(PM)?.id??null);if(box.isEmpty())return false;
   const pose=frameView(viewportPose(PM),box,viewFov(PM),viewAspect(PM));
@@ -64,14 +69,15 @@ export function frameComposition(PM:any,selected=true):boolean {
 }
 
 /* ── the real camera ─────────────────────────────────── */
-/** The camera layer navigation edits when Lock Camera to View is on in camera view. */
+/** The camera layer navigation moves when "Camera follows view" is on in camera view. */
 export function lockedCamera(PM:any):any|null {
   if(getViewportMode(PM)!=='camera'||!viewportPreferences(PM).lockCamera)return null;
   const layer=activeCameraLayer(PM);return layer&&editableLayer(PM,layer)?layer:null;
 }
 /** Edits that place the camera layer at a view pose (position and aim), keyed when animated or auto-keying. */
 export function cameraPoseCommands(PM:any,layer:any,pose:ViewPose):any[] {
-  const inverse=new THREE.Matrix4().fromArray(parent3D(PM,layer,PM.time)).invert();
+  // The pose is in scene units; camera channels are composition pixels in the parent's frame.
+  const inverse=new THREE.Matrix4().fromArray(parent3D(PM,layer,PM.time)).invert().multiply(compFromScene(comp(PM)));
   const position=viewPosition(pose).applyMatrix4(inverse),target=pose.target.clone().applyMatrix4(inverse);
   return [...(['x','y','z'] as const).map(axis=>propertyCommand(PM,layer.id,`position.${axis}`,position[axis])),
     ...(['X','Y','Z'] as const).map(axis=>propertyCommand(PM,layer.id,`camera.target${axis}`,target[axis.toLowerCase() as 'x'|'y'|'z']))];
@@ -83,14 +89,14 @@ export function writeCameraPose(PM:any,pose:ViewPose,label:string,layer=activeCa
   if(!result.ok)throw new Error(result.message);
   return true;
 }
-/** Ctrl+Alt+Numpad 0: move the active camera to the current view, then look through it. */
+/** Move the active camera to the current view, then look through it. */
 export function alignCameraToView(PM:any):boolean {
   const layer=activeCameraLayer(PM);if(!layer)throw new Error('Add a camera first');
   const pose=viewportPose(PM);writeCameraPose(PM,pose,'Align camera to view',layer);
   setViewportMode(PM,'camera');
   return true;
 }
-/** Ctrl+Numpad 0: the selected camera becomes the composition camera (topmost camera layer). */
+/** The selected camera becomes the composition camera (the topmost camera layer). */
 export function setActiveCamera(PM:any,id:string):boolean {
   const layers=comp(PM).layers,layer=PM.L(id);
   if(layer3DRole(layer)!=='camera')throw new Error('Select a camera');
@@ -104,7 +110,7 @@ export function setActiveCamera(PM:any,id:string):boolean {
 export interface NavigationHost {
   /** Composition rectangle height in CSS pixels, for pan speed. */
   height():number;
-  /** Camera view: Blender pans and zooms the camera frame; Powermove pans and zooms the composition. */
+  /** Camera view pans and zooms the composition frame, like 2D. */
   panComposition(dx:number,dy:number):void;
   zoomComposition(factor:number,clientX:number,clientY:number):void;
 }
@@ -127,7 +133,7 @@ export function createSceneNavigation(PM:any,stage:HTMLElement,host:NavigationHo
   let gesture:null|{start:ViewPose;kind:NavigationKind;x:number;y:number;camera:any|null;fov:number;composition:boolean}=null;
   let disposed=false,wheelEdit:{camera:any;timer:ReturnType<typeof setTimeout>|null}|null=null;
   const offs:(()=>void)[]=[],dragOffs:(()=>void)[]=[];
-  const warn=(error:unknown)=>PM.toast?.(error instanceof Error?error.message:String(error),{key:navigationNotice,error:true});
+  const warn=(error:unknown)=>PM.toast?.(error instanceof Error?error.message:String(error),2200,{key:navigationNotice,error:true});
   const endListeners=()=>{for(const off of dragOffs.splice(0))off();};
   function cancel(){
     if(!gesture)return;const {start,camera}=gesture;gesture=null;endListeners();

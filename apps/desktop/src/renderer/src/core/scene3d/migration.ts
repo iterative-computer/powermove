@@ -3,6 +3,7 @@ import { sceneForLayer } from './service';
 import { sceneCommands } from './operations';
 import { layer3DRole,initializeLayer3D } from './layers';
 import type { EditResult } from '../types/commands';
+import { migrateLayers3DSpace } from './space-migration';
 
 /** Explicit, undoable upgrade. Existing documents otherwise keep their original renderer. */
 function legacySceneSource(PM:any,layerId:string):any {
@@ -65,6 +66,8 @@ export function convertLegacyScene(PM:any,layerId:string):EditResult {
       for(const prop of [...Object.values<any>(next.p),...sceneProperties(next).map(p=>p.prop)])for(const key of prop.kf || [])key.i=PM.uid('kf');
       return next;
     });
+    // Legacy scenes are authored in scene units; their new layers live in composition pixels.
+    migrateLayers3DSpace(created,PM.curComp?.()||PM.proj);
     return PM.Edit.mutate('Convert to 3D layers',()=>{
       const index=PM.proj.layers.indexOf(layer);PM.proj.layers.splice(index,1,...created.reverse());
       PM.selectLayers?.([first?layerId:plan.id]);PM.touch();return {id:first?layerId:plan.id,layerId:first?layerId:plan.id};

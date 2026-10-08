@@ -7,6 +7,12 @@ export function showNewLayerMenu(api: PowermoveAPI, anchor: HTMLElement): void {
     { label: 'Shape', kb: '⌘⇧Y', run: () => api.commands.run('newShape') },
     { label: 'Solid', kb: '⌘Y', run: () => api.commands.run('newSolid') },
     { label: 'Null', run: () => api.commands.run('newNull') },
+    ...(api.commands.has('3d.add-camera') ? [
+      '-',
+      { label: 'Camera', run: () => api.commands.run('3d.add-camera') },
+      { label: 'Light', run: () => api.commands.run('3d.add-light', 'sun') },
+      { label: '3D model…', run: () => api.commands.run('3d.add-menu', anchor) },
+    ] as MenuContribution[] : []),
     '-',
     { label: 'Import media…', kb: '⌘I', run: () => api.commands.run('import') }
   ]);

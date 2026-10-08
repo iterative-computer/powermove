@@ -10,17 +10,14 @@ const run=(api:PowermoveAPI,args:any,label:string)=>{
   else{const id=(result.data.result as any)?.id;if(id)api.selection.select([id]);}
   api.transport.invalidate();return result;
 };
-/** Blender adds new objects at the 3D cursor. */
-const atCursor=(api:PowermoveAPI)=>{const [x,y,z]=api.scene3d.viewport?.state().cursor ?? [0,0,0];return {x,y,z};};
 export function addPrimitive(api:PowermoveAPI,primitive:Primitive='box',_layerId?:unknown):string|null {
   const name=PRIMITIVES.find(p=>p.id===primitive)?.label || 'Model';
-  const result=run(api,{operation:'add_object',object:{source:{primitive},name,p:atCursor(api)}},`Add ${name}`);
+  const result=run(api,{operation:'add_object',object:{source:{primitive},name}},`Add ${name}`);
   return result.ok?(result.data.result as any)?.id ?? null:null;
 }
 export function addLight(api:PowermoveAPI,type:LightType='point',_layerId?:unknown):string|null {
   const name=`${LIGHT_TYPES.find(p=>p.id===type)?.label || 'Point'} light`;
-  const {x,y,z}=atCursor(api),offset=x||y||z?{p:{x,y,z}}:{};
-  const result=run(api,{operation:'add_light',light:{type,name,...offset}},`Add ${name}`);
+  const result=run(api,{operation:'add_light',light:{type,name}},`Add ${name}`);
   return result.ok?(result.data.result as any)?.id ?? null:null;
 }
 export function addCamera(api:PowermoveAPI):EditResult{return run(api,{operation:'add_camera'},'Add camera');}

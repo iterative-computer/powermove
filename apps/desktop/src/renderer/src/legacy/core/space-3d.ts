@@ -104,13 +104,27 @@ export function perspectiveAmount(PM: any, layer: any, time: number): number {
     return Math.max(0.001, value(PM, owner, 'perspective', time, 50));
 }
 
+/**
+ * 3D layers and models share one camera. When the composition has a camera
+ * layer, or the editor shows a free view, this supplies a column-major 4x4 that
+ * takes composition-pixel world points to homogeneous screen pixels.
+ */
+type PlaneProjection = (PM: any, comp: any, T: number) => readonly number[] | null;
+let planeProjection: PlaneProjection | null = null;
+export function setPlaneProjection(provider: PlaneProjection | null): void { planeProjection = provider; }
 /** Column-major homography, shared by GPU rendering, outlines and picking. */
 export function planeMatrix(PM: any, L: any, T: number, positioning = false): Mat3 {
     if (!is3DLayer(PM,L)) {
         const m = PM.worldMatrix(L, T);
         return [m[0], m[1], 0, m[2], m[3], 0, m[4], m[5], 1];
     }
-    const m = world3D(PM, L, T, positioning), comp = PM.curComp?.() || PM.proj, cx = comp.w / 2, cy = comp.h / 2, f = Math.max(1, comp.w) * perspectiveAmount(PM, L, T) / 36;
+    const comp = PM.curComp?.() || PM.proj, projection = planeProjection?.(PM, comp, T);
+    if (projection) {
+        // The plane is z=0 in the layer's own frame: keep its x, y and w columns.
+        const s = multiply(projection as Mat4, world3D(PM, L, T, positioning));
+        return [s[0], s[1], s[3], s[4], s[5], s[7], s[12], s[13], s[15]];
+    }
+    const m = world3D(PM, L, T, positioning), cx = comp.w / 2, cy = comp.h / 2, f = Math.max(1, comp.w) * perspectiveAmount(PM, L, T) / 36;
     return [m[0] + cx * m[2] / f, m[1] + cy * m[2] / f, m[2] / f, m[4] + cx * m[6] / f, m[5] + cy * m[6] / f, m[6] / f, m[12] + cx * m[14] / f, m[13] + cy * m[14] / f, 1 + m[14] / f];
 }
 /** A front-facing plane with constant perspective divide is exactly affine.

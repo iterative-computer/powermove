@@ -33,19 +33,21 @@ Sources accept one of:
 - `{"lathe":[[radius,y],...],"segments":48}` for turned shapes.
 - `{"extrude":[[x,y],...],"depth":0.2,"bevel":0.02}` for an extruded closed outline.
 
-Models persist source, material, castShadow, receiveShadow and useSourceMaterials under `layer.d.data.object`. Their IDs, names, parenting, visibility, timing and transforms belong to the native layer. Parent transforms use the normal layer hierarchy. Imported models are centered and normalized to a unit bounding sphere. Model coordinates use world units.
+Models persist source, material, castShadow, receiveShadow and useSourceMaterials under `layer.d.data.object`. Their IDs, names, parenting, visibility, timing and transforms belong to the native layer. Parent transforms use the normal layer hierarchy. Imported models are centered and normalized to a unit bounding sphere (200 px across at 100% scale).
+
+**One space for 2D and 3D.** Model, light and camera positions, aim targets and distances use the same composition pixels as 2D layers with 3D on: origin top-left, +y down, +z away from the viewer. New models appear at the composition centre, scaled to keep the same size relative to the frame (100% at 1080p), and a new camera frames the composition exactly like the 2D 50 mm view, so adding a camera leaves the picture unchanged. 2D layers with 3D on are seen through the composition camera and depth-sorted together with models. Projects saved with the older scene-unit coordinates are converted once when opened.
 
 Position and light/camera aim targets are expressed in the parent/group coordinate space. Group rotation carries their aim along; ungrouping, regrouping and reparenting preserve the current world aim. Ungrouping an animated group bakes editable transform and aim channels at composition frames.
 
 Materials support color, roughness (0.02–1), metalness (0–1), emissive, emissiveIntensity, opacity, doubleSided, and image asset maps: color, normal, roughness, metalness, emissive, ao. Color and emissive maps use sRGB; data maps are linear. Map edits replace the entire map set. GLB/glTF with `useSourceMaterials:true` preserves imported materials and embedded textures; turn it off to use the editable material.
 
-Sun, point, spot and area lights support intensity, color, position, aim target, range/falloff, cone angle/softness and shadows. Area lights are rectangles of `width` × `height` world units facing their target; Blender renders their soft shadows, while Solid shading previews their light without shadows. The active camera holds projection, lens, target, clipping, and environment (ambient, ambientColor, exposure, shadows, optional background). Resource limits bound geometry, textures, objects, lights and shadow maps; simplify large models before import.
+Sun, point, spot and area lights support intensity, color, position, aim target, range/falloff, cone angle/softness and shadows. Area lights are rectangles of `width` × `height` pixels facing their target; Blender renders their soft shadows, while Solid shading previews their light without shadows. The active camera holds projection, lens, target, clipping, and environment (ambient, ambientColor, exposure, shadows, optional background). Resource limits bound geometry, textures, objects, lights and shadow maps; simplify large models before import.
 
 ## Animation
 
 Transform paths on the actual layer:
 
-- `position.x|y|z` in world units.
+- `position.x|y|z` in composition pixels.
 - `rotation.x`, `rotation.y`, `rotation` (Z), and `orientation.x|y|z`, in degrees.
 - `scale.x|y|z` in percent; 100 is original size.
 - `opacity` in percent.
@@ -58,91 +60,62 @@ Content paths: `m.color|roughness|metalness|emissive|emissiveIntensity|opacity`,
 
 For semantic creation and `patch.p`, the convenient aliases are x/y/z, rx/ry/rz in degrees and sx/sy/sz with 1 as original size; they map to native transform channels. Standard `{v,kf,expr}` channels are also accepted.
 
-## The 3D viewport (manual editing)
+## Working in the viewer
 
-When a composition contains 3D layers the composition viewer becomes a Blender
-3D Viewport. Compositions without 3D layers show none of it, and Blender keys
-apply only while the pointer is over the viewer, the composition has 3D layers
-and no 2D layers are selected. Otherwise every key keeps its normal Powermove
-(After Effects) meaning, and so does a Blender key that has nothing to act on.
+A composition with 3D layers (models, lights, cameras or 2D layers with 3D on)
+keeps the same viewer, at the same size. 3D adds only a small cluster in the
+top-right corner: an axis ball (drag to orbit, click an axis to look along it),
+a camera button (look through the composition camera or a free view) and a
+View menu (Front, Top, Side, Frame selection, Frame all, Move camera to this
+view, Camera follows view, Show guides). The preview controls gain a
+Draft/Rendered choice. Compositions without 3D layers show none of it.
 
-- **Header:** Object Mode, View, Select, Add and Object menus; Transform
-  Orientation (Global, Local, View); Pivot Point (Median Point, Individual
-  Origins, 3D Cursor, Active Element, Bounding Box Center); Snap; Lock Camera to
-  View; Overlays; Wireframe, Solid, Material Preview (EEVEE) and Rendered (the
-  composition's engine) shading; Auto Keying.
-- **Toolbar (T):** Tweak, Select Box (default; W cycles them), Cursor, Move,
-  Rotate and Scale. Only the transform tools show a gizmo.
-- **Sidebar (N):** the active item's Location, Rotation and Scale; the view's
-  field of view, Lock Camera to View and the 3D cursor.
-- **Navigation:** MMB orbits, Shift+MMB pans, Ctrl+MMB or the wheel zooms; Alt+LMB
-  emulates the middle button. A trackpad orbits, Shift pans and Ctrl/pinch zooms.
-  The navigation gizmo (axis ball plus zoom, pan, camera and projection buttons)
-  sits in the top-right corner; click an axis to align the view. Number-row or
-  numpad 1/3/7 (Ctrl for the opposite side) give orthographic Front/Right/Top,
-  5 toggles perspective, 2/4/6/8 orbit by 15°, 9 flips, 0 toggles camera view,
-  Numpad . frames the selection and Home frames everything. The top-left text
-  names the view, e.g. "User Perspective" or "Camera Perspective".
-- **Camera view** shows the composition camera. Its wheel/trackpad zoom and pan
-  move the composition frame, as Blender zooms and pans the camera frame;
-  orbiting leaves it for a user view. Ctrl+Alt+0 aligns the active camera to the
-  view, Ctrl+0 makes the selected camera active, and with Lock Camera to View any
-  navigation in camera view moves the real camera (keyed with Auto Keying, one
-  Undo per gesture).
-- **Selection:** click selects, Shift+click extends and sets the active item
-  (shown in light orange; other selected items in orange). Drag box-selects
-  (Shift adds, Ctrl subtracts). Lights and cameras are drawn as wires and are
-  clickable. A, Alt+A, Ctrl+I; Select › All by Type.
-- **Transform:** G, R and S (R R for trackball) follow the pointer until LMB,
-  Enter or Space confirms, or RMB/Escape cancels. X/Y/Z constrain to an axis
-  (again for the other orientation, a third time to clear), Shift+X/Y/Z to a
-  plane, MMB picks an axis, digits type exact values (Tab for the next axis,
-  minus toggles the sign), Ctrl snaps (1 unit, 5°, 0.1) and Shift gives
-  precision. G/R/S switch mode mid-gesture. Alt+G/R/S clear location, rotation
-  and scale. Each gesture is one Undo; animated channels and Auto Keying receive
-  keyframes at the playhead.
-- **Objects:** Shift+A adds at the 3D cursor; Shift+D duplicates and grabs; X or
-  Delete deletes; H, Shift+H and Alt+H hide and reveal (the layer's visibility,
-  as shown in the timeline); I and Alt+I insert and delete transform keyframes;
-  Ctrl+P parents to the active item and Alt+P clears it, keeping world poses;
-  F2 renames; F3 searches commands. Right-click opens the object context menu.
-- **3D cursor:** Shift+right-click (or the Cursor tool) places it on the surface
-  under the pointer; Shift+S opens the snap pie; Shift+C centres it and frames all.
-- **Pies:** Z shading, ` view, . pivot point, comma orientation, Shift+S snap.
-  Tap to open and click, or hold, point and release.
-- **More navigation:** Shift+` starts Walk Navigation (mouse looks, WASD moves,
-  Q/E down/up, Shift faster, wheel changes speed; LMB confirms, RMB/Esc returns;
-  in camera view it moves the camera). Numpad / toggles Local View, showing only
-  the selected models in the editor. Shift+B zooms to a dragged region,
-  Shift+4/6 rolls the view, B box-selects from anywhere, and Alt+Z toggles X-ray
-  so models are see-through in Solid and Wireframe. None of these affect output.
-- **Edit Mode (Tab):** edits the active model's points. Click, Shift+click, drag
-  (box) and A/Alt+A/Ctrl+I select points; G/R/S transform them with the same
-  constraints and typed values; E extrudes the selected region (or edges) and
-  moves it along its normal; M merges at the centre; X deletes. The first edit
-  turns a primitive or profile into an indexed mesh source, which stops following
-  a recipe's regeneration. Each edit is one Undo. Imported models and models with
-  several material slots are edited in their source application.
-- **Properties:** a selected 3D layer shows Blender's Properties tabs — Render,
-  World (the active camera's environment), Object, Modifiers (generated models),
-  Data (light or camera) and Material. The last chosen tab is remembered.
+- **Selecting and moving** works as in 2D: click selects, Shift toggles, drag
+  moves the selection under the pointer and box selection picks up 3D layers,
+  light and camera wires. Ctrl snaps (10 px, 5°, 10%), Shift locks a move to
+  its main axis and Escape cancels. Each drag is one Undo and keys animated
+  channels or Auto Keying at the playhead.
+- **The selection box** is drawn like a 2D selection, in the same ink: corner
+  handles scale, the stem above turns the selection in the view, and three short
+  coloured spokes (x red, y green, z blue) move along one axis. With the Rotate
+  tool, rings replace the spokes to turn about one axis. Lights and cameras show
+  an aim handle at the point they face; drag it to re-aim.
+- **Navigation:** middle-drag or Alt+drag orbits, adding Shift pans and Ctrl
+  zooms; a trackpad orbits, Shift pans and Ctrl/pinch zooms. In camera view the
+  wheel zooms and pans the composition as in 2D, and orbiting switches to a free
+  view. With Camera follows view on, navigating in camera view moves the camera
+  layer itself (one Undo per gesture).
+- **Camera layers** always sit at the top of the timeline. Grouping a camera
+  parents it to the group, so rotating the group orbits the camera.
+- **Lighting:** any 3D layer's inspector has a Lighting section. Its ball shows
+  each light as a dot seen from the camera; drag a dot to swing that light
+  around the subject (past the edge to move it behind), double-click the ball to
+  add a light from that side, pick a preset (Studio, Soft, Dramatic, Top,
+  Sunset) to replace the rig in one Undo, and set each light's color and
+  strength and the ambient light below.
+- **Inspector:** models show Model, Material and Shadows; generated models add
+  their shape and modifiers; lights show type, range and aim point; cameras show
+  lens, View, aim point, clipping, Scene and Rendering. Position, rotation and
+  scale stay in the normal Transform section.
 
-Viewport state (view, tools, overlays, shading, cursor) is editor state. It never
-changes camera layers, keyframes or project data unless an operator says so,
-and exports and agent frame captures always use the actual render camera.
-Grouping models creates a native 3D group pivoting on its geometry; clicking a
-member selects the group and double-click descends into it.
+View state (free view, guides, shading) is editor state. It never changes
+camera layers, keyframes or project data unless an action says so, and exports
+and agent frame captures always use the actual render camera. Grouping models
+creates a native 3D group pivoting on its geometry; clicking a member selects
+the group and double-click descends into it.
 
-Extensions drive the same viewport through `api.scene3d.viewport`: `state()` (including `editMode`),
-`onChange()`, `inContext()`, `operators` and `run(operator, ...args)` (for
-example `run('view.front')`, `run('transform.translate')`, `run('tool','move')`,
-`run('shading','material')`), plus `attach(stage, host)` for a viewer surface.
-Extensions must use the public API instead of importing Three.js or modifying
-editor internals.
+Extensions drive the same view through `api.scene3d.viewport`: `state()`,
+`onChange()`, `operators` and `run(operator, ...args)` (for example
+`run('view.front')`, `run('view.camera')`, `run('shading','material')`,
+`run('lighting.preset','studio')`), plus `attach(stage, host)` for a viewer
+surface. `api.scene3d.lighting` lists lights as directions (`list()`), builds
+aim edits (`aimCommands(id, direction)`) and applies presets
+(`applyPreset(id)`). Extensions must use the public API instead of importing
+Three.js or modifying editor internals.
 
-Right-click the composition or timeline and choose Add 3D layer for primitives, lights, camera or model import. These actions are also searchable in the command palette. Select OBJ together with its MTL and images to pack a durable GLB. GLB and self-contained glTF preserve materials, UVs, textures and animation; external glTF file/URL references must be packed into a self-contained file first.
+The New layer menu adds a Camera, a Light or a 3D model; right-clicking the composition or timeline and choosing Add 3D layer also offers primitives, every light type and model import. These actions are also searchable in the command palette. Select OBJ together with its MTL and images to pack a durable GLB. GLB and self-contained glTF preserve materials, UVs, textures and animation; external glTF file/URL references must be packed into a self-contained file first.
 
-Extensions use `api.scene3d.edit`, `describe()`, `prepareImport(files)`, template factories `createScene/createObject/createLight`, and ordinary `api.selection`. `createGizmo(element)` provides the shared composition overlay. `getMode/setMode`, `getSpace/setSpace` and `onGizmoChange` keep native controls synchronized. Extensions must use the public API instead of importing Three.js or modifying editor internals.
+Extensions use `api.scene3d.edit`, `describe()`, `prepareImport(files)`, template factories `createScene/createObject/createLight`, and ordinary `api.selection`. `getView/setView/onViewChange` follow the camera or free view. Extensions must use the public API instead of importing Three.js or modifying editor internals.
 
 Existing OBJ/scene layers retain their compatibility renderer. Convert to 3D Layers, also available by double-clicking a legacy layer, splits them into ordinary layers in one Undo. Model/material channels are preserved; camera and auto-rotation animation is sampled at project FPS (up to 2,398 frames). Move a keyed legacy background to a separate layer before converting. Preview, native frame export and portable web export use the same renderer.
 
@@ -241,7 +214,7 @@ exposed inputs, slots, and textures rather than a node-canvas editor or UV paint
 
 ## Viewport shading, rendered previews, and output
 
-**Solid** (and Wireframe) shading uses native GPU geometry and approximate surface shading for responsive
+**Draft** (Solid and Wireframe) shading uses native GPU geometry and approximate surface shading for responsive
 playback and manipulation. **Material Preview** (EEVEE) and **Rendered** (the composition's engine) use
 Blender for the current paused frame, including actual shader graphs and evaluated procedural modifiers.
 Paused rendered previews show one sharp frame; motion blur is applied during export.

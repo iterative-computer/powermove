@@ -564,7 +564,7 @@ function addLayer(command: any) {
     }
     if (!command.color && extensionDefinition.color) layer.color = extensionDefinition.color;
   }
-  initializeLayer3D(layer, opts.p);
+  initializeLayer3D(layer, opts.p, PM.curComp?.() || PM.proj);
   if (command.id != null) {
     if (PM.L(command.id)) throw new Error(`Layer id already exists: ${command.id}`);
     layer.id = String(command.id);
@@ -956,6 +956,7 @@ function runOne(sourceCommand: any, meta: any = {}) {
     const created = PM.proj.layers.find((l: any) => l.id === data?.id);
     if (created) validateSceneLayer(created,PM);
   }
+  if (['add_layer', 'reorder_layer', 'group_layers', 'move_to_group'].includes(command.type)) PM.normalizeGroupStack?.();
   if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group'].includes(command.type)
       || command.type === 'set_layer' && Object.keys(command.patch || {}).some((key: any) => ['name', 'from', 'duration', 'visible', 'parent'].includes(key))) {
     PM.ProjectIndex?.invalidate();

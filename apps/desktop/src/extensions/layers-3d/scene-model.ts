@@ -32,7 +32,7 @@ export const MAP_SLOTS: ReadonlyArray<{ id: MapSlot; label: string }> = [
   { id: 'ao', label: 'Occlusion map' }
 ];
 
-/** Channel keys are `x`, `rx`, `sx` for transforms and camel-cased `targetX` for targets. */
+/** Channel keys are `x`, `rx`, `sx` for transforms and camel-cased `targetX` for aim points, in composition pixels. */
 const xyz = (prefix: string, label: string, step: number, unit?: string): FieldSpec[] =>
   (['x', 'y', 'z'] as const).map((axis) => ({
     key: prefix.length > 1 ? `${prefix}${axis.toUpperCase()}` : `${prefix}${axis}`,
@@ -56,17 +56,17 @@ export function lightFields(type: LightType): FieldSpec[] {
   const fields: FieldSpec[] = [
     { key: 'color', label: 'Color', kind: 'color' },
     { key: 'intensity', label: 'Intensity', kind: 'num', step: 0.05, min: 0 },
-    ...xyz('', 'Position', 0.01)
+    ...xyz('', 'Position', 1)
   ];
-  if (type !== 'point') fields.push(...xyz('target', 'Target', 0.01));
+  if (type !== 'point') fields.push(...xyz('target', 'Aim', 1));
   if (type === 'area') {
     fields.push(
-      { key: 'width', label: 'Size X', kind: 'num', step: 0.05, min: 0.001 },
-      { key: 'height', label: 'Size Y', kind: 'num', step: 0.05, min: 0.001 }
+      { key: 'width', label: 'Width', kind: 'num', step: 1, min: 1, unit: 'px' },
+      { key: 'height', label: 'Height', kind: 'num', step: 1, min: 1, unit: 'px' }
     );
   } else if (type !== 'sun') {
     fields.push(
-      { key: 'distance', label: 'Range', kind: 'num', step: 0.1, min: 0 },
+      { key: 'distance', label: 'Range', kind: 'num', step: 10, min: 0, unit: 'px' },
       { key: 'decay', label: 'Falloff', kind: 'num', step: 0.05, min: 0 }
     );
   }
@@ -81,13 +81,13 @@ export function lightFields(type: LightType): FieldSpec[] {
 
 export function cameraFields(projection: 'perspective' | 'orthographic'): FieldSpec[] {
   return [
-    ...xyz('', 'Position', 0.01),
-    ...xyz('target', 'Target', 0.01),
+    ...xyz('', 'Position', 1),
+    ...xyz('target', 'Aim', 1),
     projection === 'perspective'
       ? { key: 'fov', label: 'Field of view', kind: 'num', step: 0.5, min: 1, max: 150, unit: '°' }
       : { key: 'zoom', label: 'Zoom', kind: 'num', step: 0.01, min: 0.01 },
-    { key: 'near', label: 'Clip start', kind: 'num', step: 0.01, min: 0.001 },
-    { key: 'far', label: 'Clip end', kind: 'num', step: 1, min: 0.01 }
+    { key: 'near', label: 'Clip start', kind: 'num', step: 1, min: 0.1, unit: 'px' },
+    { key: 'far', label: 'Clip end', kind: 'num', step: 100, min: 1, unit: 'px' }
   ];
 }
 

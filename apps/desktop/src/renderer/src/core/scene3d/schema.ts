@@ -64,17 +64,18 @@ export const objectSchema = z.object({
   slots:z.array(z.object({id:identifier,name:z.string().min(1).max(160),material:materialSchema}).strict()).max(64).default([]),
   castShadow: z.boolean().default(true), receiveShadow: z.boolean().default(true)
 }).strict();
+/* Light and camera distances are composition pixels (200 px per scene unit), so their ranges are wide. */
 export const lightSchema = z.object({
   id, name: z.string().min(1).max(160).default('Light'), type: z.enum(['sun','point','spot','area']).default('sun'),
   p: p({ x:[num(),-3], y:[num(),5], z:[num(),4], targetX:[num(),0], targetY:[num(),0], targetZ:[num(),0],
-    color:[color,'#FFFFFF'], intensity:[num(0,10000),3], distance:[num(0,100000),0], decay:[num(0,4),2],
-    angle:[num(1,89),45], penumbra:[num(0,1),.4], width:[num(.001,10000),1], height:[num(.001,10000),1], visible:[z.boolean(),true] }).default({} as any),
+    color:[color,'#FFFFFF'], intensity:[num(0,10000),3], distance:[num(0,20_000_000),0], decay:[num(0,4),2],
+    angle:[num(1,89),45], penumbra:[num(0,1),.4], width:[num(.001,2_000_000),1], height:[num(.001,2_000_000),1], visible:[z.boolean(),true] }).default({} as any),
   castShadow: z.boolean().default(true)
 }).strict();
 export const cameraSchema = z.object({
   projection: z.enum(['perspective','orthographic']).default('perspective'),
   p: p({ x:[num(),3], y:[num(),2], z:[num(),6], targetX:[num(),0], targetY:[num(),0], targetZ:[num(),0],
-    fov:[num(1,150),45], zoom:[num(.001,1000),1], near:[num(.0001,10000),.01], far:[num(.01,100000),1000] }).default({} as any)
+    fov:[num(1,150),45], zoom:[num(.001,1000),1], near:[num(.0001,2_000_000),.01], far:[num(.01,20_000_000),1000] }).default({} as any)
 }).strict();
 export const environmentSchema = z.object({
   p: p({ ambient:[num(0,100),.5], ambientColor:[color,'#FFFFFF'], exposure:[num(.01,20),1] }).default({} as any),

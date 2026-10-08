@@ -2,7 +2,6 @@ import type { PowermoveAPI } from 'powermove';
 
 import { createViewerRuntime, viewerPanelOptions } from './viewer';
 import { installSourcePreview } from './source-preview';
-import { installViewportKeys } from './viewport3d/keymap';
 
 const VIEWER_STYLES = `
   .canvas-text-input::selection{background:transparent;color:transparent}
@@ -37,9 +36,6 @@ export default function activate(api: PowermoveAPI): void {
   const disposeRuntime = runtime.dispose as () => void;
   api.onDispose(() => disposeRuntime());
   api.services.register('viewer', runtime);
-  // Blender's 3D viewport keymap; it only applies while the pointer is over a 3D composition.
-  const viewportKeys = api.scene3d?.viewport ? installViewportKeys(api, { pointer: () => (runtime as any).viewport3d?.pointer() ?? null }) : null;
-  api.onDispose(() => viewportKeys?.dispose());
 
   // Enter on a single selected text layer starts editing it (Figma).
   api.commands.register({
@@ -66,8 +62,7 @@ export default function activate(api: PowermoveAPI): void {
         if (styles) styles.textContent = VIEWER_STYLES;
         const overlay = stage.querySelector('#overlay');
         if (overlay && overlay.parentElement !== stage) stage.appendChild(overlay);
-        const toolbar = stage.parentElement?.querySelector('[data-3d-toolbar]');
-        body.replaceChildren(...(toolbar ? [toolbar, stage] : [stage]));
+        body.replaceChildren(stage);
         runtime.layout();
         installSourcePreview(api, runtime, stage);
         return;

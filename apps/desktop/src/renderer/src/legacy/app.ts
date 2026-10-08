@@ -15,6 +15,8 @@ import { stringifyAsync } from './core/serialize-async';
 import { createNewProjectForm } from './ui/project-settings';
 import { inspectorService, shaderHooks, timelineService, viewerService } from './core/services';
 import { bridge as hostBridge } from '../kernel/bridge';
+import { migrateLayers3DSpace, needsSpaceMigration, PX_SPACE } from '../core/scene3d/space-migration';
+import { pinCameraLayers } from '../core/scene3d/layers';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -171,6 +173,7 @@ function loadBootProject() {
 }
 function hydrate(p: any) {
   const base = PM.mkProject({ name: p.name, w: p.w, h: p.h, fps: p.fps, dur: p.dur, bg: p.bg });
+  const legacy3DSpace = needsSpaceMigration(p);
   Object.assign(base, p);
   base.edits = compactEditLog(Array.isArray(p.edits) ? p.edits : []);
   base.backgroundFill = PM.normalizeFill(p.backgroundFill, p.bg || '#000000');
@@ -364,6 +367,10 @@ function hydrate(p: any) {
     sanitizeLayers(c.layers, c);
   });
   sanitizeLayers(base.layers, base);
+  /* Older projects kept 3D models, lights and cameras in scene units; move them into composition pixels once. */
+  if (legacy3DSpace) for (const container of [base, ...Object.values(base.comps)] as any[]) migrateLayers3DSpace(container.layers || [], container);
+  base.space3d = PX_SPACE;
+  for (const container of [base, ...Object.values(base.comps)] as any[]) if (container.layers) container.layers = pinCameraLayers(container.layers);
   /* precomp layers whose referenced comp failed to load degrade to empty layers */
   PM.Comps?.normalize(base);
   /* precomp layers whose referenced comp failed to load degrade to empty layers */
