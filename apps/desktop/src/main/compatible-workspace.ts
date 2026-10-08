@@ -111,12 +111,18 @@ export class CompatibleWorkspace {
     if (name === 'write_file') {
       if (typeof args.text !== 'string' || args.text.length > 1000000) throw new Error('Provide text no larger than 1,000,000 characters.');
       const file = await this.resolve(args.path);
-      if (this.access === 'project' && process.platform === 'darwin') {
+      if (this.access === 'project' && ['darwin', 'win32'].includes(process.platform)) {
         // The sandbox writes it: a link planted after, or dangling past, the
         // check above still cannot lead outside the workspace.
         const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
-        const written = await settleCommand(await this.start(`/bin/mkdir -p -- ${quote(path.dirname(file))} && /bin/cat >| ${quote(file)}`,
-          30000, signal, { input: args.text }), signal);
+        const windows = process.platform === 'win32';
+        const command = windows
+          ? "$ErrorActionPreference='Stop'; $data=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())) | ConvertFrom-Json; [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($data.path)) | Out-Null; [IO.File]::WriteAllText($data.path, $data.text, [Text.UTF8Encoding]::new($false))"
+          : `/bin/mkdir -p -- ${quote(path.dirname(file))} && /bin/cat >| ${quote(file)}`;
+        // ASCII stdin carries arbitrary UTF-8 paths/text without interpreting
+        // them as PowerShell or exceeding Windows' command-line length limit.
+        const input = windows ? Buffer.from(JSON.stringify({ path: file, text: args.text })).toString('base64') : args.text;
+        const written = await settleCommand(await this.start(command, 30000, signal, { input }), signal);
         if (written.exitCode !== 0) throw new Error(`Could not write ${file}: ${written.output.trim()}`);
       } else {
         await mkdir(path.dirname(file), { recursive: true });

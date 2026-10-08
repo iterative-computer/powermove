@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { copyFile, lstat, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -16,7 +16,7 @@ import { MediaProxyService, stillImageConverter, imageSequenceConverter } from '
 import { encoderBinary } from './platform';
 import { fileVersion, publishFile, syncDirectory } from './durable-file';
 import { killProcessFamily } from './process-family';
-import { runWorkspaceCommand } from './compatible-workspace';
+import { CompatibleWorkspace, runWorkspaceCommand } from './compatible-workspace';
 import { prepareUserResources } from './agent-tools/user-resources';
 
 const run = promisify(execFile);
@@ -112,5 +112,20 @@ describe.runIf(process.platform === 'win32')('native Windows x64 integration', (
     await expect(readFile(insideFile, 'utf8'), result.output).resolves.toContain('allowed');
     expect(result.exitCode).not.toBe(0);
     await expect(stat(outsideFile)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 90_000);
+  it('writes custom-provider files through the sandbox with literal UTF-8 names and contents', async () => {
+    const root = await folder(); const runtime = await folder(); const outside = await folder();
+    vi.stubEnv('CODEX_HOME', runtime);
+    const workspace = new CompatibleWorkspace({ root } as any, 'project');
+    const file = "nested/A & B's 雪.txt";
+    const text = 'héllo 雪 $(exit 1)\n' + 'x'.repeat(100_000);
+    const signal = new AbortController().signal;
+    try {
+      await workspace.call('write_file', { path: file, text }, signal);
+      expect(await readFile(path.join(root, file), 'utf8')).toBe(text);
+      await symlink(outside, path.join(root, 'escape'), 'junction');
+      await expect(workspace.call('write_file', { path: 'escape/denied.txt', text: 'no' }, signal)).rejects.toThrow('symbolic link');
+      await expect(stat(path.join(outside, 'denied.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally { await workspace.stopCommands(); }
   }, 90_000);
 });
