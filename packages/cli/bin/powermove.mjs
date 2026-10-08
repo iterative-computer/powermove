@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const distDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../dist');
 const [major] = process.versions.node.split('.').map(Number);
@@ -16,5 +16,5 @@ try { version = JSON.parse(await readFile(path.join(distDir, 'build.json'), 'utf
   process.exit(1);
 }
 
-const { main } = await import(path.join(distDir, 'server.mjs'));
+const { main } = await import(pathToFileURL(path.join(distDir, 'server.mjs')).href);
 await main(process.argv.slice(2), { distDir, entry: fileURLToPath(import.meta.url), version });

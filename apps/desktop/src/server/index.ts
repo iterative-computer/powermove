@@ -663,7 +663,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   let engineRestarts = 0;
   const startEngine = (): void => {
     if (engineStopped || !options.engineScript) return;
-    const child = spawn(process.execPath, [options.engineScript, `${scheme === 'https' ? 'wss' : 'ws'}://127.0.0.1:${port}${WS_PATH}?engine=1`, token], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [options.engineScript, `${scheme === 'https' ? 'wss' : 'ws'}://127.0.0.1:${port}${WS_PATH}?engine=1`, token], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     engine = child;
     child.stdout?.on('data', (chunk: Buffer) => { for (const line of chunk.toString().split('\n')) if (line.trim()) log(line); });
     child.stderr?.on('data', (chunk: Buffer) => { for (const line of chunk.toString().split('\n')) if (line.trim()) log(`[engine] ${line}`); });

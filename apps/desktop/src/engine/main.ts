@@ -14,6 +14,7 @@ import { WebSocket } from 'ws';
 import { IPC, type AgentToolRequestEvent, type AgentToolResponseEvent, type PowermoveBridge } from '../shared/ipc';
 import { Connection } from '../shared/link';
 import { WEB } from '../shared/wire';
+import { provideBridge } from '../renderer/src/kernel/bridge';
 
 export interface EngineOptions {
   /** wss://127.0.0.1:<port>/__powermove/ws */
@@ -67,7 +68,9 @@ export async function startEngine(options: EngineOptions): Promise<{ close(): vo
     onRequest: (cb) => { onRequest = cb; return () => { if (onRequest === cb) onRequest = null; }; },
     respond: (response) => { for (const listener of responses) listener(response); }
   };
-  (window as unknown as { powermove: unknown }).powermove = bridgeStub(agentTools);
+  // The Node DOM window is a separate object from globalThis. Register the
+  // private host bridge before importing the editing and agent modules.
+  provideBridge(bridgeStub(agentTools) as PowermoveBridge);
 
   const PM = ((window as unknown as { PM?: Record<string, any> }).PM = {});
   const [diag, util, kernel, uiState, memory, fonts, easing, model, selection, anim, history, library, projects, editing, capabilities, workspace, harness] = await Promise.all([
