@@ -37,6 +37,11 @@ jobs:
       - name: Check first-launch setup with ordinary windows
         working-directory: apps/desktop
         run: bun run test:e2e -- e2e/onboarding-first-launch.spec.ts
+      - name: Build Windows application (no publishing)
+        working-directory: apps/desktop
+        run: bunx --no-install electron-builder --win --x64 --dir --publish never
+      - name: Check first launch of the packaged Windows executable
+        run: node apps/desktop/scripts/smoke-windows-package.mjs
       - name: Windows runtime and editor regression tests
         working-directory: apps/desktop
         run: >-
@@ -76,9 +81,8 @@ jobs:
       - name: Check browser host startup
         run: node apps/desktop/scripts/smoke-serve.mjs
       - name: Build Windows installer (no publishing)
-        run: bun run dist:win
-      - name: Check first launch of the packaged Windows executable
-        run: node apps/desktop/scripts/smoke-windows-package.mjs
+        working-directory: apps/desktop
+        run: bunx --no-install electron-builder --win --x64 --prepackaged dist/win-unpacked --publish never
       - uses: actions/upload-artifact@v4
         with:
           name: powermove-windows-x64-test-installer

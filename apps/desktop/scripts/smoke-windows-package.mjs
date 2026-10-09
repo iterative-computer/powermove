@@ -38,7 +38,7 @@ for (const action of ['Start fresh', 'Bring my workspace']) {
   const port = await availablePort();
   const env = { ...process.env, POWERMOVE_USER_DATA: userData, POWERMOVE_BACKGROUND_TEST: '0', POWERMOVE_DEVTOOLS: '0' };
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(executable, [`--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1'], {
+  const child = spawn(executable, [`--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1', '--enable-logging=stderr'], {
     env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
   });
   const exited = once(child, 'exit');

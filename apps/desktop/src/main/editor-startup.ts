@@ -28,7 +28,10 @@ export function openOnboardingEditor(create: (ready: () => void) => BrowserWindo
     const failed = (_event: unknown, _code: number, description: string, _url: string, mainFrame: boolean) => {
       if (mainFrame !== false) fail(new Error(description));
     };
-    const crashed = () => fail(new Error('The editor stopped before it finished opening.'));
+    const crashed = (_event: unknown, details: Electron.RenderProcessGoneDetails) => {
+      console.error('[onboarding] editor renderer stopped', details.reason, details.exitCode);
+      fail(new Error('The editor stopped before it finished opening.'));
+    };
     window = create(ready);
     contents = window.webContents;
     window.once('closed', closed);
