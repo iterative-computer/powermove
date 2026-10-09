@@ -43,7 +43,7 @@ for (const action of ['Start fresh', 'Bring my workspace']) {
   });
   const exited = once(child, 'exit');
   let stderr = '', browser;
-  child.stderr.on('data', data => { stderr = (stderr + data).slice(-12_000); });
+  child.stderr.on('data', data => { stderr = (stderr + data).slice(-100_000); });
   child.stdout.resume();
   try {
     await waitFor(async () => {
@@ -81,7 +81,7 @@ for (const action of ['Start fresh', 'Bring my workspace']) {
   } catch (error) {
     // The test profiles hold no user account data. Still redact links from
     // Chromium/agent diagnostics before printing public validation logs.
-    console.error(stderr.replace(/(?:https?|wss?):\/\/\S+/g, '[URL]').slice(-4000));
+    console.error(stderr.replace(/(?:https?|wss?):\/\/\S+/g, '[URL]').slice(-20_000));
     throw error;
   } finally {
     if (child.exitCode === null) {

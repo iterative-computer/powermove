@@ -140,6 +140,11 @@ mac:
         - arm64
 
 win:
+  # Windows ships region-specific .pak files, rather than macOS's en.lproj.
+  # The bare "en" setting removes every Windows locale in electron-builder.
+  electronLanguages:
+    - en-US
+    - en-GB
   icon: resources/icon/exports/Powermove-iOS-Default-1024x1024@1x.png
   artifactName: ${productName}-${version}-win-${arch}.${ext}
   target:

@@ -10,6 +10,9 @@ const execFileAsync = promisify(execFile);
 export default async function afterPack(context) {
   const windows = context.electronPlatformName === 'win32';
   if (windows) {
+    const locale = path.join(context.appOutDir, 'locales', 'en-US.pak');
+    const localeInfo = await stat(locale).catch(() => null);
+    if (!localeInfo?.isFile() || localeInfo.size === 0) throw new Error('Missing Windows language resources: locales/en-US.pak');
     const resources = path.join(context.appOutDir, 'resources');
     for (const file of ['encoder/ffmpeg.exe', 'codex/bin/codex.exe', 'codex/bin/codex-code-mode-host.exe', 'claude/bin/claude.exe']) {
       const binary = path.join(resources, file);
