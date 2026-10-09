@@ -34,6 +34,9 @@ jobs:
         run: bun run --cwd apps/cloud types
       - name: Type check
         run: bun run --cwd apps/desktop typecheck
+      - name: Check first-launch setup with ordinary windows
+        working-directory: apps/desktop
+        run: bun run test:e2e -- e2e/onboarding-first-launch.spec.ts
       - name: Windows runtime and editor regression tests
         working-directory: apps/desktop
         run: >-
