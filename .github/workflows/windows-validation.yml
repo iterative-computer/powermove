@@ -42,6 +42,8 @@ jobs:
         run: >-
           bun run test --
           src/main/windows-native.test.ts
+          src/main/editor-startup.test.ts
+          src/main/onboarding.test.ts
           src/main/platform.test.ts
           src/renderer/src/platform.test.ts
           src/main/updates.test.ts
@@ -75,6 +77,8 @@ jobs:
         run: node apps/desktop/scripts/smoke-serve.mjs
       - name: Build Windows installer (no publishing)
         run: bun run dist:win
+      - name: Check first launch of the packaged Windows executable
+        run: node apps/desktop/scripts/smoke-windows-package.mjs
       - uses: actions/upload-artifact@v4
         with:
           name: powermove-windows-x64-test-installer

@@ -74,6 +74,7 @@ import { EXTENSION_ID } from '../shared/extensions';
 import { createStore, installQuitFlush, registerStoreIpc, type Store } from './storage';
 import { registerThemeIpc } from './theme';
 import { backgroundTesting, backgroundWindowOptions } from './background-testing';
+import { openOnboardingEditor } from './editor-startup';
 import { EditorWindows, restorableSessions, windowUnderTabDrop } from './windows';
 import { isPanelPopoutRequest } from './panel-popout';
 import { OnboardingFlow, onboardingCompleted, onboardingEnabled } from './onboarding';
@@ -171,6 +172,7 @@ function drainPendingOpenFiles(): void {
 }
 async function prepareEditorClose(window: BrowserWindow): Promise<void> {
   if (window.isDestroyed() || window.webContents.isDestroyed()
+    || !editors.has(window) || !openReadyEditors.has(window.webContents)
     || !isAllowedNavigation(window.webContents.getURL(), devRendererUrl)) return;
   // User decisions and large file saves must not be cut off by the recovery-flush timeout.
   const allowed = await window.webContents.executeJavaScript('window.PM?.prepareToClose?.() ?? true');
@@ -519,7 +521,8 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
 
   let closing = false, closePrepared = false;
   window.on('close', event => {
-    if (closePrepared || quitPrepared() || window.webContents.isDestroyed()) return;
+    if (closePrepared || quitPrepared() || window.webContents.isDestroyed()
+      || !openReadyEditors.has(window.webContents)) return;
     event.preventDefault();
     if (closing) return;
     closing = true;
@@ -539,9 +542,14 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
   });
 
   if (entrance) {
+    // Let Chromium paint the real window as soon as it can. A hidden Windows
+    // window must not wait for font loading or its entrance animation to show.
+    window.once('ready-to-show', () => {
+      if (!window.isDestroyed() && !isBackgroundTest) { window.show(); window.focus(); }
+    });
     window.webContents.once('did-finish-load', () => {
       void window.webContents.executeJavaScript(`
-        document.fonts.ready.then(() => {
+        void document.fonts.ready.then(() => {
           if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
           const home = document.querySelector('#projects-screen.on');
           const selector = home
@@ -562,10 +570,9 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
           window.addEventListener('focus', play, { once: true });
           setTimeout(play, 150);
         })
-      `).catch(error => console.error('[onboarding] entrance failed', error)).finally(() => {
-        if (!window.isDestroyed() && !isBackgroundTest) { window.show(); window.focus(); }
-        onEntranceReady?.();
-      });
+      `).catch(error => console.error('[onboarding] entrance failed', error));
+      if (!window.isDestroyed() && !isBackgroundTest) { window.show(); window.focus(); }
+      onEntranceReady?.();
     });
   }
 
@@ -1218,13 +1225,7 @@ if (!hasSingleInstanceLock) {
           }
           return existing;
         }
-        return new Promise<BrowserWindow>((resolve, reject) => {
-          const editor = createWindow({ entrance: true, onEntranceReady: () => resolve(editor) });
-          editor.webContents.once('did-fail-load', (_event, _code, description) => {
-            editor.destroy();
-            reject(new Error(description));
-          });
-        });
+        return openOnboardingEditor(ready => createWindow({ entrance: true, onEntranceReady: ready }));
       },
       importWorkspace: async (window, appId) => {
         const prepared = await window.webContents.executeJavaScript(`window.PM?.AgentUI?.importWorkspace?.(${JSON.stringify(appId)}) ?? false`);

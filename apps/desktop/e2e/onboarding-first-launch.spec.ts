@@ -9,8 +9,53 @@ async function findPage(app: ElectronApplication, predicate: (url: string) => bo
   return app.windows().find(page => predicate(page.url()))!;
 }
 
-for (const action of ['Start fresh', 'Bring my workspace']) {
-  test(`first launch with ordinary window settings: ${action} opens a usable, closable editor`, async () => {
+test('a loading editor can be closed and returns setup to a retryable state', async () => {
+  test.setTimeout(45_000);
+  const userData = await mkdtemp(path.join(os.tmpdir(), 'pm-first-launch-stalled-'));
+  const env = { ...process.env as Record<string, string>, POWERMOVE_USER_DATA: userData,
+    POWERMOVE_DEVTOOLS: '0', POWERMOVE_BACKGROUND_TEST: '0' };
+  delete env.ELECTRON_RUN_AS_NODE;
+  const app = await _electron.launch({ args: ['.'], cwd: repoRoot, env });
+  const appPid = await app.evaluate(() => process.pid);
+  try {
+    const animation = await findPage(app, url => url.endsWith('/onboarding/animation.html'));
+    await animation.waitForLoadState('domcontentloaded');
+    await animation.evaluate(() => (window as any).onboarding.animationComplete());
+    const welcome = await findPage(app, url => url.endsWith('/onboarding/welcome.html'));
+    await welcome.getByRole('button', { name: 'Begin', exact: true }).click();
+    await welcome.locator('#timeline-step').getByRole('button', { name: 'Continue', exact: true }).click();
+    await welcome.locator('#agent-step').getByRole('button', { name: 'Continue', exact: true }).click();
+    // An entry module that never arrives reproduces a blank editor whose
+    // DOM has not finished loading. Keep the existing welcome page intact.
+    await app.evaluate(({ protocol }) => {
+      protocol.unhandle('app');
+      protocol.handle('app', request => request.url === 'app://powermove/'
+        ? new Response('<!doctype html><html><body><script type="module" src="./blocked.js"></script></body></html>', { headers: { 'Content-Type': 'text/html' } })
+        : new Promise<Response>(() => {}));
+    });
+    await welcome.getByRole('button', { name: 'Start fresh', exact: true }).click();
+    const editor = await findPage(app, url => url === 'app://powermove/');
+    const closed = editor.waitForEvent('close', { timeout: 8000 });
+    await app.evaluate(({ BrowserWindow }) => {
+      const editor = BrowserWindow.getAllWindows().find(window => window.webContents.getURL() === 'app://powermove/')!;
+      editor.show(); editor.close();
+    });
+    await closed;
+    await expect(welcome.getByRole('button', { name: 'Start fresh', exact: true })).toBeEnabled();
+    await expect(welcome.getByRole('status')).toContainText('Could not open');
+  } finally {
+    await Promise.race([app.close().catch(() => undefined), new Promise(resolve => setTimeout(resolve, 3000))]);
+    try { process.kill(appPid); } catch { /* Already closed. */ }
+    await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+for (const { action, delayedFonts } of [
+  { action: 'Start fresh', delayedFonts: false },
+  { action: 'Bring my workspace', delayedFonts: false },
+  { action: 'Start fresh', delayedFonts: true }
+]) {
+  test(`first launch with ordinary window settings: ${action}${delayedFonts ? ' while fonts stay loading' : ''} opens a usable, closable editor`, async () => {
     test.setTimeout(90_000);
     const userData = await mkdtemp(path.join(os.tmpdir(), 'pm-first-launch-'));
     const env: Record<string, string> = { ...process.env as Record<string, string>,
@@ -33,10 +78,20 @@ for (const action of ['Start fresh', 'Bring my workspace']) {
       // connection gate; this regression never starts a real agent run.
       await welcome.getByText('API or local model', { exact: true }).click();
       await welcome.locator('#agent-step').getByRole('button', { name: 'Continue', exact: true }).click();
+      if (delayedFonts) await app.evaluate(({ app }) => {
+        app.on('web-contents-created', (_event, contents) => {
+          contents.once('did-finish-load', () => {
+            if (contents.getURL() === 'app://powermove/') void contents.executeJavaScript("Object.defineProperty(document.fonts, 'ready', { value: new Promise(() => {}) })");
+          });
+        });
+      });
       await welcome.getByRole('button', { name: action, exact: true }).click();
       const editor = await findPage(app, url => url === 'app://powermove/');
       await editor.waitForFunction(() => Boolean((window as any).PM?.AgentUI?.state && document.querySelector('#titlebar')), undefined, { timeout: 25_000 });
       await expect.poll(() => welcome.isClosed()).toBe(true);
+      if (delayedFonts) expect(await editor.evaluate(() => Promise.race([
+        document.fonts.ready.then(() => 'loaded'), new Promise(resolve => setTimeout(() => resolve('pending'), 25))
+      ]))).toBe('pending');
       const saved = JSON.parse(await readFile(path.join(userData, 'onboarding-v1.json'), 'utf8'));
       expect(saved.workspaceImport).toBe(action === 'Start fresh' ? null : 'after-effects');
       const native = await app.evaluate(({ BrowserWindow }) => {
