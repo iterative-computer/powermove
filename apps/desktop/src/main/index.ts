@@ -542,6 +542,18 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
   });
 
   if (entrance) {
+    let entranceReady = false;
+    const finishEntrance = () => {
+      if (entranceReady || window.isDestroyed() || !openReadyEditors.has(window.webContents)) return;
+      entranceReady = true;
+      if (!isBackgroundTest) { window.show(); window.focus(); }
+      onEntranceReady?.();
+    };
+    const rendererReady = (event: Electron.IpcMainEvent) => {
+      if (event.sender === window.webContents && event.senderFrame === window.webContents.mainFrame) finishEntrance();
+    };
+    ipcMain.on(IPC.projectOpenReady, rendererReady);
+    window.once('closed', () => ipcMain.off(IPC.projectOpenReady, rendererReady));
     // Let Chromium paint the real window as soon as it can. A hidden Windows
     // window must not wait for font loading or its entrance animation to show.
     window.once('ready-to-show', () => {
@@ -572,7 +584,7 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
         })
       `).catch(error => console.error('[onboarding] entrance failed', error));
       if (!window.isDestroyed() && !isBackgroundTest) { window.show(); window.focus(); }
-      onEntranceReady?.();
+      finishEntrance();
     });
   }
 

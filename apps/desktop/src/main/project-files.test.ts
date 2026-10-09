@@ -48,7 +48,9 @@ describe('real project files', () => {
       expect([...await files.read(result.token, result.size - 4, 4)]).toEqual([7, 8, 9, 10]);
       await expect(files.read(result.token, 0, 1024 * 1024 + 1)).rejects.toThrow('range');
     } finally { await files.close(result.token); }
-  }, 30000);
+  // Growing the >1 GiB fixture can zero-fill real disk blocks on Windows.
+  // The assertions exercise bounded reads, not fixture creation speed.
+  }, process.platform === 'win32' ? 90_000 : 30_000);
 
   it('writes, backs up the previous version, and remembers the destination across restarts', async () => {
     const destination = path.join(directory, 'Demo.pmv');
@@ -138,5 +140,5 @@ describe('real project files', () => {
     expect(backups).toHaveLength(5);
     expect(backups).toEqual([...backups].sort((a, b) => path.basename(b).localeCompare(path.basename(a))));
     expect(await readFile(backups[0]!)).toEqual(bytes('version-6'));
-  });
+  }, process.platform === 'win32' ? 15_000 : 5000);
 });

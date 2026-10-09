@@ -9,7 +9,7 @@ async function findPage(app: ElectronApplication, predicate: (url: string) => bo
   return app.windows().find(page => predicate(page.url()))!;
 }
 
-test('a loading editor can be closed and returns setup to a retryable state', async () => {
+for (const failedBoot of [false, true]) test(`a ${failedBoot ? 'failed boot' : 'loading'} editor can be closed and returns setup to a retryable state`, async () => {
   test.setTimeout(45_000);
   const userData = await mkdtemp(path.join(os.tmpdir(), 'pm-first-launch-stalled-'));
   const env = { ...process.env as Record<string, string>, POWERMOVE_USER_DATA: userData,
@@ -27,12 +27,12 @@ test('a loading editor can be closed and returns setup to a retryable state', as
     await welcome.locator('#agent-step').getByRole('button', { name: 'Continue', exact: true }).click();
     // An entry module that never arrives reproduces a blank editor whose
     // DOM has not finished loading. Keep the existing welcome page intact.
-    await app.evaluate(({ protocol }) => {
+    await app.evaluate(({ protocol }, failedBoot) => {
       protocol.unhandle('app');
       protocol.handle('app', request => request.url === 'app://powermove/'
-        ? new Response('<!doctype html><html><body><script type="module" src="./blocked.js"></script></body></html>', { headers: { 'Content-Type': 'text/html' } })
+        ? new Response(`<!doctype html><html><body>${failedBoot ? '' : '<script type="module" src="./blocked.js"></script>'}</body></html>`, { headers: { 'Content-Type': 'text/html' } })
         : new Promise<Response>(() => {}));
-    });
+    }, failedBoot);
     await welcome.getByRole('button', { name: 'Start fresh', exact: true }).click();
     const editor = await findPage(app, url => url === 'app://powermove/');
     const closed = editor.waitForEvent('close', { timeout: 8000 });
@@ -43,6 +43,7 @@ test('a loading editor can be closed and returns setup to a retryable state', as
     await closed;
     await expect(welcome.getByRole('button', { name: 'Start fresh', exact: true })).toBeEnabled();
     await expect(welcome.getByRole('status')).toContainText('Could not open');
+    await expect(readFile(path.join(userData, 'onboarding-v1.json'))).rejects.toMatchObject({ code: 'ENOENT' });
   } finally {
     await Promise.race([app.close().catch(() => undefined), new Promise(resolve => setTimeout(resolve, 3000))]);
     try { process.kill(appPid); } catch { /* Already closed. */ }
