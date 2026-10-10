@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile, open, stat } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile, open, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -74,6 +74,18 @@ describe('incremental project transactions', () => {
     expect(await files.destination('one')).toBe(target);
     expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('original');
     expect([...decodeProjectContainer(await readFile(target)).media[0]!.data]).toEqual([1, 2, 3]);
+  });
+  it.skipIf(process.platform === 'win32')('can update a readable project in a writable folder when its file permissions are read-only', async () => {
+    await save('original', [clip()], undefined, destination);
+    await chmod(destination, 0o400);
+    expect(await save('updated')).toEqual([]);
+    expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('updated');
+    expect((await stat(destination)).mode & 0o777).toBe(0o400);
+    const backup = (await files.backups('one'))[0]!;
+    expect(decodeProjectContainer(await readFile(backup)).document.proj.name).toBe('original');
+    expect((await stat(backup)).mode & 0o777).toBe(0o400);
+    await save('updated again');
+    expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('updated again');
   });
   it('Save As starts a fresh container even when explicitly replacing an unreadable PMV4 file', async () => {
     const damaged = Buffer.from('PMV4\nincomplete old file');

@@ -1,5 +1,5 @@
 import { createHash, type Hash } from 'node:crypto';
-import { open, unlink, type FileHandle } from 'node:fs/promises';
+import { chmod, open, unlink, type FileHandle } from 'node:fs/promises';
 import { INCREMENTAL_MAGIC, isIncrementalProject, projectFooter, readIncrementalIndex, type IncrementalMedia, type ProjectIndex, type ProjectRecord, type SaveMedia } from '../shared/project-incremental';
 import { checkVersion, copySnapshot, hashHandle, readExactly, syncFile, temporarySibling, type FileVersion } from './durable-file';
 import { FILE_CHUNK_BYTES } from './file-upload';
@@ -27,6 +27,7 @@ export class ProjectSave {
   private offset = 0;
   private digest = createHash('sha256');
   private handle!: FileHandle;
+  private clonedMode?: number;
   private busy?: Promise<unknown>;
   private ended = false;
   private failed = false;
@@ -61,6 +62,10 @@ export class ProjectSave {
       const compact = !index || deadBytes > Math.max(16 * 1024 * 1024, liveBytes / 2);
       if (!compact && previous) {
         await copySnapshot(destination, save.temporary);
+        // A clone inherits read-only permissions. Only the transaction copy
+        // needs write access; restore the user's mode before publishing it.
+        save.clonedMode = previous.info.mode & 0o777;
+        await chmod(save.temporary, save.clonedMode | 0o600);
         save.handle = await open(save.temporary, 'r+');
         save.offset = previous.info.size;
         save.digest = previous.digest.copy();
@@ -125,6 +130,7 @@ export class ProjectSave {
       const bytes = Buffer.from(JSON.stringify(index));
       const footer = projectFooter(this.offset, bytes.length, await nativeHash(bytes));
       await this.append(bytes); await this.append(footer);
+      if (this.clonedMode !== undefined) await this.handle.chmod(this.clonedMode);
       await syncFile(this.handle); await this.handle.close();
       return await this.commit(this.temporary, this.digest.digest('hex'));
     })();
