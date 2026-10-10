@@ -1,4 +1,5 @@
 import { webmTimestampScale } from '../../../../shared/video-timing';
+import { mp4FrameRate } from '../../../../shared/mp4-frame-rate';
 import { createCloudMedia, cloudSourcePaths, readLocalMediaSource } from '../core/cloud-media';
 import { prepareVideoPreview } from '../core/video-preview';
 import { disposeVideoInstances } from '../core/video-instances';
@@ -768,6 +769,7 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
       id, name, kind, url, el, storageKey: meta.storageKey,
       w: w || meta.w || 0, h: hh || meta.h || 0,
       dur: dur || meta.dur || 0, size: sourceBlob.size || meta.size || 0,
+      ...(kind === 'video' ? { fps: imageSequence?.fps || meta.fps || await mp4FrameRate(blob) } : {}),
       playbackProxy: playbackProxyUsed,
       playbackProxyVersion,
       ...(kind === 'video' ? { videoTimestampScale: await webmTimestampScale(sourceBlob) } : {}),
@@ -822,6 +824,7 @@ function assetIdentity(id: any, file: any, kind: any, prepared: any, fingerprint
     id, name: file.name, kind, fingerprint, storageKey,
     ...(sourcePath ? { sourcePath } : {}),
     size: prepared.size, dur: prepared.dur, w: prepared.w, h: prepared.h,
+    ...(prepared.fps ? { fps: prepared.fps } : {}),
     channels: prepared.channels || 0, sampleRate: prepared.sampleRate || 0,
     playbackProxy: prepared.playbackProxy === true,
     playbackProxyVersion: Number(prepared.playbackProxyVersion) || 0,
