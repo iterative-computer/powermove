@@ -60,6 +60,7 @@ import { AgentApprovals, type RequestApproval } from '../agent-approvals';
 import { runWorkspaceCommand } from '../compatible-workspace';
 import type { StoreAgentGateway } from '../cloud/store-agent';
 import { readForkRebaseInfo, stageForkRebase } from '../extensions/rebase';
+import { updateFork } from '../extensions/update-fork';
 
 const FIX_PROMPT_ERROR_CHARS = 4_000;
 const FIX_PROMPT_FILES = 40;
@@ -186,9 +187,9 @@ function requireFixPromptRequest(value: unknown): CodexFixPromptRequest {
   return { id: value.id, error: value.error, files };
 }
 
-function requireRebasePromptRequest(value: unknown): CodexRebasePromptRequest {
+function requireRebasePromptRequest(value: unknown, channel: string = IPC.codexRebasePrompt): CodexRebasePromptRequest {
   if (!isRecord(value) || !isString(value.id) || !EXTENSION_ID.test(value.id)) {
-    throw new IpcValidationError(IPC.codexRebasePrompt, 'invalid request');
+    throw new IpcValidationError(channel, 'invalid request');
   }
   return { id: value.id };
 }
@@ -355,6 +356,7 @@ export function registerCodexIpc(
   const runner = new CodexRunner();
   const claudeRunner = new ClaudeRunner();
   const owners = new Map<string, WebContents>();
+  let forkUpdateQueue: Promise<unknown> = Promise.resolve();
   const rootToolSessions = new Map<string, PowermoveAgentToolSession>();
   const activeChildWorkspaces = new Set<string>();
   const preserveRunEdits = new Set<string>();
@@ -704,6 +706,27 @@ export function registerCodexIpc(
       userExtensionsDir: ctx.extensionsDir,
       builtinExtensionsDir: builtinExtensionsDirectory(ctx)
     }));
+  });
+
+  ipcMain.handle(IPC.codexUpdateFork, async (event, rawRequest: unknown) => {
+    requireTrusted(event, ctx);
+    const request = requireRebasePromptRequest(rawRequest, IPC.codexUpdateFork);
+    const run = forkUpdateQueue.then(async () => {
+      const result = await updateFork({
+        forkId: request.id, userData: ctx.userData,
+        userExtensionsDir: ctx.extensionsDir,
+        builtinExtensionsDir: builtinExtensionsDirectory(ctx)
+      });
+      if (result.kind === 'updated') {
+        // Always return the undo reference after publication, even if registry
+        // refresh fails; the renderer can reload or restore the checked update.
+        try { await ctx.refreshExtensions?.([request.id]); }
+        catch (error) { console.warn('[extensions] Could not refresh the updated fork', error); }
+      }
+      return result;
+    });
+    forkUpdateQueue = run.catch(() => undefined);
+    return run;
   });
 
   ipcMain.handle(IPC.codexRestoreChangeSet, async (event, rawRequest: unknown) => {

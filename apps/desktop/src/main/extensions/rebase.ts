@@ -1,5 +1,7 @@
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
+import { mergeText } from '../cloud/pull';
 
 import {
   EXTENSION_ID,
@@ -12,14 +14,14 @@ const MAX_FILES = 4_000;
 const MAX_BYTES = 32 * 1024 * 1024;
 const FORK_BASE_DIRECTORY = '.forked-from';
 
-export interface StageForkRebaseResult {
-  forkId: string;
+export interface StageForkRebaseResult extends ForkRebaseInfo {
   workingDir: string;
   baseDir: string;
   oursDir: string;
   changedByUser: string[];
   changedUpstream: string[];
   conflicts: string[];
+  mergedFiles: string[];
 }
 
 export interface ForkRebaseInfo {
@@ -104,8 +106,7 @@ export async function stageForkRebase(options: {
 
   const changedByUser = changedFiles(fork.base.files, fork.user.files);
   const changedUpstream = changedFiles(fork.base.files, fork.current.files);
-  const upstream = new Set(changedUpstream);
-  const conflicts = changedByUser.filter((relativePath) => upstream.has(relativePath));
+  const merged = mergeFork(fork);
 
   // All sources have been read and validated before any staged state is removed.
   await fs.mkdir(stagingDirectory, { recursive: true });
@@ -115,7 +116,7 @@ export async function stageForkRebase(options: {
   ]);
 
   await Promise.all([
-    writeTree(workingDir, fork.user),
+    writeTree(workingDir, merged.tree),
     writeTree(baseDir, fork.base),
     writeTree(oursDir, fork.current)
   ]);
@@ -126,7 +127,7 @@ export async function stageForkRebase(options: {
   await fs.writeFile(
     path.join(workingDir, 'manifest.json'),
     `${JSON.stringify({
-      ...fork.manifestRaw,
+      ...merged.manifest,
       forkedFrom: `${fork.forkedFrom}@${fork.currentVersion}`
     }, null, 2)}\n`,
     { mode: 0o600 }
@@ -139,8 +140,81 @@ export async function stageForkRebase(options: {
     oursDir,
     changedByUser,
     changedUpstream,
-    conflicts
+    conflicts: merged.conflicts,
+    mergedFiles: merged.mergedFiles,
+    forkedFrom: fork.forkedFrom,
+    base: fork.baseVersion,
+    current: fork.currentVersion
   };
+}
+
+/** Keep custom identity; merge the remaining manifest fields as JSON values so
+ * formatting and the fork's bookkeeping never create artificial conflicts. */
+function mergeManifest(fork: ValidatedFork): { manifest: Record<string, unknown>; conflict: boolean } {
+  const base = parseManifestObject(fork.base.files.get('manifest.json'), 'fork base');
+  const current = parseManifestObject(fork.current.files.get('manifest.json'), 'shipped built-in');
+  const user = fork.manifestRaw;
+  const manifest = { ...user };
+  const identity = new Set(['id', 'name', 'author', 'version', 'forkedFrom']);
+  for (const input of [base, current]) {
+    input.replaces = [...new Set([...(input.replaces as string[] | undefined ?? []), fork.forkedFrom])];
+  }
+  let conflict = false;
+  for (const key of new Set([...Object.keys(base), ...Object.keys(user), ...Object.keys(current)])) {
+    if (identity.has(key) || isDeepStrictEqual(user[key], current[key]) || isDeepStrictEqual(base[key], current[key])) continue;
+    if (!isDeepStrictEqual(user[key], base[key])) { conflict = true; continue; }
+    if (Object.hasOwn(current, key)) manifest[key] = current[key];
+    else delete manifest[key];
+  }
+  return { manifest, conflict };
+}
+
+function mergeFork(fork: ValidatedFork): {
+  tree: TreeSnapshot; manifest: Record<string, unknown>; conflicts: string[]; mergedFiles: string[];
+} {
+  const files = new Map(fork.user.files);
+  const conflicts: string[] = [];
+  const mergedFiles: string[] = [];
+  const { manifest, conflict } = mergeManifest(fork);
+  if (conflict) conflicts.push('manifest.json');
+  else mergedFiles.push('manifest.json');
+  for (const relative of changedFiles(fork.base.files, fork.current.files)) {
+    if (relative === 'manifest.json') continue;
+    const base = fork.base.files.get(relative);
+    const user = fork.user.files.get(relative);
+    const current = fork.current.files.get(relative);
+    if (isDeepStrictEqual(user, current)) continue;
+    if (isDeepStrictEqual(user, base)) {
+      if (current) files.set(relative, current);
+      else files.delete(relative);
+      mergedFiles.push(relative);
+    } else if (user && current) {
+      const merged = mergeText(base ?? null, user, current);
+      if (merged) { files.set(relative, Buffer.from(merged)); mergedFiles.push(relative); }
+      else conflicts.push(relative);
+    } else conflicts.push(relative);
+  }
+  // A new file can collide with a customized folder (or vice versa). Leave
+  // those structural changes to the agent instead of writing a partial tree.
+  for (const relative of files.keys()) {
+    const parts = relative.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      if (files.has(parts.slice(0, i).join('/'))) {
+        return { tree: fork.user, manifest: fork.manifestRaw,
+          conflicts: changedFiles(fork.base.files, fork.current.files), mergedFiles: [] };
+      }
+    }
+  }
+  const directories = new Set(fork.user.directories.filter(dir => {
+    const parts = dir.split('/');
+    return !parts.some((_, i) => files.has(parts.slice(0, i + 1).join('/')));
+  }));
+  for (const relative of files.keys()) {
+    const parts = relative.split('/');
+    for (let i = 1; i < parts.length; i++) directories.add(parts.slice(0, i).join('/'));
+  }
+  return { tree: { files, directories: [...directories].sort() }, manifest,
+    conflicts: conflicts.sort(), mergedFiles: mergedFiles.sort() };
 }
 
 async function inspectFork(options: ForkRebaseOptions): Promise<ValidatedFork> {

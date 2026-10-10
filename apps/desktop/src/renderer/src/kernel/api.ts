@@ -1188,7 +1188,7 @@ export interface ExtensionsAPI {
   reveal(id: string): Promise<void>;
   /** Ask the agent to repair a failing extension (opens the agent panel with a prefilled prompt). */
   requestFix(id: string): void;
-  /** Ask the agent to rebase a stale user fork onto its newly shipped built-in. */
+  /** Update a customized built-in locally; offer agent help for unresolved changes. */
   rebase(id: string): void;
   /** Open the sheet where the user enters an extension's declared `vars` values. */
   setUp(id: string): void;
