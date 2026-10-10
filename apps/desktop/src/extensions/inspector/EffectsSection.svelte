@@ -8,8 +8,6 @@
   /* App-local clipboard survives layer/inspector remounts without replacing the user's system clipboard. */
   import { copyEffects, effectPasteCommands } from './effect-clipboard';
   import Icon from './Icon.svelte';
-  import SectionHeading from './SectionHeading.svelte';
-  import { showFxMenu } from './actions';
   import { inspectorRefresh } from './refresh.svelte.js';
 
   const { api, doc, transport, mixed, edit: inspectorEdit, inspector } = inspectorContext();
@@ -263,10 +261,6 @@
   role="group"
   aria-label="Effects section"
 >
-  <SectionHeading title="Effects" empty={!effects.length}>
-    <button type="button" class="section-action" aria-label="Add effect" title="Add effect"
-      onpointerdown={(event) => { event.preventDefault(); showFxMenu(api, event.currentTarget, layer); }}><Icon name="plus" /></button>
-  </SectionHeading>
   {#if effects.length > 0}
   <div class="fx-list" role="listbox" aria-label="Effects" aria-multiselectable="true">
     {#each effects as effect, index (effect.id)}

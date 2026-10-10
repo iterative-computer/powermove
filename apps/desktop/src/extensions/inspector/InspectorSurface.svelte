@@ -166,6 +166,11 @@
   }
   .insp :global(.inspector-header .k) { font-size: 12px; }
 
+  .insp :global(.inspector-header[data-effects-header]) {
+    height: 32px;
+    margin-bottom: 0;
+  }
+
   .insp :global(.inspector-header:hover) {
     background: transparent;
   }
