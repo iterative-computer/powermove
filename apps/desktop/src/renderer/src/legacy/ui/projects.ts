@@ -64,8 +64,7 @@ function ensure() {
     paint();
   });
   S.nav = h('div.ps-nav');
-  /* Forked built-ins that fell behind the shipped version. The agent does the
-     merge; this block only says how many and offers the one action. */
+  /* Customized built-ins that fell behind the shipped version. */
   S.updates = h('div.ps-updates', { hidden: true });
   const paintUpdates = (pending: readonly ForkUpdate[]) => {
     S.updates.textContent = '';
@@ -74,8 +73,8 @@ function ensure() {
     const names = pending.map((update) => update.name).join(', ');
     S.updates.append(
       h('b', pending.length === 1 ? '1 extension needs updating' : `${pending.length} extensions need updating`),
-      h('span', `${names} ${pending.length === 1 ? 'was' : 'were'} forked from an older built-in. Your agent can merge the new version while keeping your changes.`),
-      h('button.btn', { onclick: () => { updateAll(); PM.ProjectsScreen.hide(); } }, 'Update with agent'));
+      h('span', `Update ${names} while keeping your customizations.`),
+      h('button.btn', { onclick: () => { updateAll(); PM.ProjectsScreen.hide(); } }, 'Update'));
   };
   S.offUpdates = subscribeForkUpdates(paintUpdates);
   /* A new app version staged by the background updater. Installing is a

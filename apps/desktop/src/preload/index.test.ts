@@ -143,6 +143,13 @@ describe('preload bridge', () => {
     expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(IPC.codexRebasePrompt, { id: 'my-fork' });
   });
 
+  it('requests a local fork update without starting an agent', async () => {
+    const result = { kind: 'updated', version: '2.0.0', projectId: 'fork-updates', changeSetId: 'fork-update-1' };
+    electronMocks.invoke.mockResolvedValue(result);
+    await expect(bridge().codex.updateFork({ id: 'my-fork' })).resolves.toEqual(result);
+    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(IPC.codexUpdateFork, { id: 'my-fork' });
+  });
+
   it('brokers native agent tool requests without exposing Electron event objects', () => {
     const onRequest = vi.fn();
     const stop = bridge().agentTools.onRequest(onRequest);

@@ -185,7 +185,7 @@ describe('buildRebasePrompt', () => {
       current: '1.4.0'
     })).toBe(`Update the user fork \`my-timeline\`. It was forked from \`timeline@1.2.0\`, and Powermove now ships \`timeline@1.4.0\`.
 
-Call \`stage_fork_rebase\` with {"id":"my-timeline"}. Work only inside the returned staging paths. Merge every file in \`changedUpstream\` into \`workingDir\` using a three-way comparison: \`baseDir\` is the old base, the working copy is the user's version (theirs), and \`oursDir\` is the shipped version (ours). Preserve the user's changes, behavior, and intent. Treat every path in \`conflicts\` with care, and explain each conflict resolution in your final response. When finished, return the fork in the result's \`extensions\` array as {"id":"my-timeline","action":"updated","summary":"..."}.`);
+Call \`stage_fork_rebase\` with {"id":"my-timeline"}. Work only inside the returned staging paths. Powermove has already merged straightforward changes in \`mergedFiles\` into \`workingDir\`. Resolve only the remaining \`conflicts\` using a three-way comparison: \`baseDir\` is the old base, the working copy retains the user's customizations, and \`oursDir\` is the shipped version. Preserve the user's changes, behavior, and intent; do not redo completed merges. Compile the result and repair any remaining validation failure. Explain each conflict resolution in your final response. When finished, return the fork in the result's \`extensions\` array as {"id":"my-timeline","action":"updated","summary":"..."}.`);
   });
 
   it('stays below the 1.5 KB prompt budget', () => {

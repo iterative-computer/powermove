@@ -52,6 +52,8 @@ const mocks = vi.hoisted(() => {
     forkId, forkedFrom: 'timeline', base: '1.0.0', current: '2.0.0'
   }));
   const stageForkRebase = vi.fn();
+  const updateFork = vi.fn(async (_options: { forkId: string; userData: string; userExtensionsDir: string; builtinExtensionsDir: string }) =>
+    ({ kind: 'updated', version: '2.0.0', projectId: 'fork-updates', changeSetId: 'fork-update-1' }));
   const forgetWorkspace = vi.fn(async () => undefined);
   const sweepWorkspaces = vi.fn(async () => ['orphan']);
   return {
@@ -86,6 +88,7 @@ const mocks = vi.hoisted(() => {
     toolShutdown,
     readForkRebaseInfo,
     stageForkRebase,
+    updateFork,
     appRunner: {
       run,
       cancel: appCancel,
@@ -121,6 +124,7 @@ vi.mock('../extensions/rebase', () => ({
   readForkRebaseInfo: mocks.readForkRebaseInfo,
   stageForkRebase: mocks.stageForkRebase
 }));
+vi.mock('../extensions/update-fork', () => ({ updateFork: mocks.updateFork }));
 
 vi.mock('./workspace-lifetime', () => ({
   forgetProjectWorkspace: mocks.forgetWorkspace,
@@ -203,6 +207,7 @@ describe('registerCodexIpc', () => {
       IPC.codexCancelTask,
       IPC.codexFixPrompt,
       IPC.codexRebasePrompt,
+      IPC.codexUpdateFork,
       IPC.codexRestoreChangeSet,
       IPC.consentComputer,
       IPC.artifactRead,
@@ -470,6 +475,62 @@ describe('registerCodexIpc', () => {
   it('rejects an invalid rebase-prompt extension id', async () => {
     await expect(handlers.get(IPC.codexRebasePrompt)!({ sender: new Sender() }, { id: '../escape' }))
       .rejects.toThrow(IPC.codexRebasePrompt);
+  });
+
+  it('updates a fork locally without running an agent', async () => {
+    await expect(handlers.get(IPC.codexUpdateFork)!({ sender: new Sender() }, { id: 'my-fork' }))
+      .resolves.toMatchObject({ kind: 'updated', changeSetId: 'fork-update-1' });
+    expect(mocks.updateFork).toHaveBeenCalledExactlyOnceWith({
+      forkId: 'my-fork', userData: '/tmp/powermove-index-test',
+      userExtensionsDir: '/tmp/powermove-user-extensions', builtinExtensionsDir: '/tmp/powermove-builtin-extensions'
+    });
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid direct-update ids before accessing extension files', async () => {
+    await expect(handlers.get(IPC.codexUpdateFork)!({ sender: new Sender() }, { id: '../escape' }))
+      .rejects.toThrow(IPC.codexUpdateFork);
+    expect(mocks.updateFork).not.toHaveBeenCalled();
+  });
+
+  it('serializes local fork updates and continues after a failed update', async () => {
+    let fail!: () => void;
+    mocks.updateFork.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      fail = () => reject(new Error('The extension changed.'));
+    }));
+    const first = handlers.get(IPC.codexUpdateFork)!({ sender: new Sender() }, { id: 'first-fork' });
+    const failed = expect(first).rejects.toThrow('The extension changed.');
+    const second = handlers.get(IPC.codexUpdateFork)!({ sender: new Sender() }, { id: 'second-fork' });
+    await vi.waitFor(() => expect(mocks.updateFork).toHaveBeenCalledTimes(1));
+    fail();
+    await failed;
+    await expect(second).resolves.toMatchObject({ kind: 'updated' });
+    expect(mocks.updateFork.mock.calls.map(([request]) => request.forkId)).toEqual(['first-fork', 'second-fork']);
+  });
+
+  it('returns the undo reference even if refreshing a published update fails', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    registerCodexIpc(ipcMain as never, {
+      getWindow: () => null, userData: '/tmp/powermove-index-test',
+      extensionsDir: '/tmp/powermove-user-extensions', builtinExtensionsDir: '/tmp/powermove-builtin-extensions',
+      apiPackFiles, isTrustedSender: () => true, codexBinaryPref: () => null,
+      refreshExtensions: async () => { throw new Error('Refresh unavailable'); }, openExternal: async () => undefined
+    }, mocks.account, mocks.account, mocks.appRunner as never);
+    try {
+      await expect(handlers.get(IPC.codexUpdateFork)!({ sender: new Sender() }, { id: 'my-fork' }))
+        .resolves.toMatchObject({ kind: 'updated', changeSetId: 'fork-update-1' });
+    } finally { warn.mockRestore(); }
+  });
+
+  it('refuses direct updates from an untrusted sender', async () => {
+    registerCodexIpc(ipcMain as never, {
+      getWindow: () => null, userData: '/tmp/powermove-index-test', extensionsDir: '/tmp/powermove-user-extensions',
+      builtinExtensionsDir: '/tmp/powermove-builtin-extensions', apiPackFiles,
+      isTrustedSender: () => false, codexBinaryPref: () => null, openExternal: async () => undefined
+    }, mocks.account, mocks.account, mocks.appRunner as never);
+    await expect(handlers.get(IPC.codexUpdateFork)!({ sender: new Sender() }, { id: 'my-fork' }))
+      .rejects.toThrow('Unauthorized IPC sender');
+    expect(mocks.updateFork).not.toHaveBeenCalled();
   });
 
   it('refreshes promoted extension records before returning the run result', async () => {

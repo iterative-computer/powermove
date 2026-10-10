@@ -1,4 +1,5 @@
 import { workspaceImportHandoff } from '../../onboarding/workspace-import';
+import { createForkUpdater } from '../../shell/update-fork';
 import { WORKSPACE_IMPORT_PROMPT, expandAgentRequest } from '../../../../shared/creative-workspace';
 import { recordAfterEffectsExtensions } from '../../library/after-effects-imports';
 import { createAgentCheckpoint } from './checkpoint';
@@ -107,6 +108,7 @@ function boundedAgentPrompt(prompt: string, request: string, maxChars = LIMITS.c
 }
 
 export function install(PM: PMRegistry): void {
+const requestExtensionRebase = createForkUpdater(PM, requestAgentRebase);
 const h: any = PM.h;
 let rippleModule: ReturnType<typeof idlePreload> | null = null;
 const loadRippleModule = () => {
@@ -1165,11 +1167,10 @@ async function requestExtensionRepair(target: { id: string; name?: string; diagn
   }
 }
 
-async function requestExtensionRebase(id: any) {
+async function requestAgentRebase(id: string) {
   const native: any = (hostBridge() as any);
   if (typeof native?.codex?.rebasePrompt !== 'function') {
-    window.console.warn(`[agent] Fork rebase is unavailable for extension "${String(id)}"`);
-    return;
+    throw new Error('Restart Powermove to update this extension with your agent.');
   }
   try {
     const prompt: any = await native.codex.rebasePrompt({ id });
@@ -1179,6 +1180,7 @@ async function requestExtensionRebase(id: any) {
     PM.AgentUI?.submit?.(String(prompt));
   } catch (error: any) {
     window.console.warn(`[agent] Could not prepare fork rebase for extension "${String(id)}"`, error);
+    throw error;
   }
 }
 

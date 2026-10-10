@@ -107,6 +107,22 @@ async function fixture(): Promise<{
 }
 
 describe('fork rebase staging', () => {
+  it('merges untouched upstream changes before asking the agent to resolve conflicts', async () => {
+    const setup = await fixture();
+    const result = await stageForkRebase({
+      forkId: 'custom-timeline',
+      stagingDirectory: setup.stagingDirectory,
+      userExtensionsDir: setup.userExtensionsDir,
+      builtinExtensionsDir: setup.builtinExtensionsDir
+    });
+    expect(await readFile(path.join(result.workingDir, 'upstream-added.ts'), 'utf8'))
+      .toContain('upstreamAdded');
+    await expect(access(path.join(result.workingDir, 'removed-upstream.ts')))
+      .rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readFile(path.join(result.workingDir, 'index.ts'), 'utf8')).toContain('user');
+    expect(result.conflicts).toEqual(['shared.ts']);
+  });
+
   it('creates a contained three-way layout, preserves user files, and installs the new hidden base', async () => {
     const setup = await fixture();
     const result = await stageForkRebase({
@@ -118,7 +134,7 @@ describe('fork rebase staging', () => {
 
     expect(Object.keys(result)).toEqual([
       'forkId', 'workingDir', 'baseDir', 'oursDir',
-      'changedByUser', 'changedUpstream', 'conflicts'
+      'changedByUser', 'changedUpstream', 'conflicts', 'mergedFiles', 'forkedFrom', 'base', 'current'
     ]);
     expect(result).toMatchObject({
       forkId: 'custom-timeline',
@@ -145,7 +161,7 @@ describe('fork rebase staging', () => {
     });
   });
 
-  it('reports sorted content additions, deletions, edits, and their intersection as conflicts', async () => {
+  it('reports sorted changes and only unresolved merges as conflicts', async () => {
     const setup = await fixture();
     const result = await stageForkRebase({
       forkId: 'custom-timeline',
@@ -168,7 +184,53 @@ describe('fork rebase staging', () => {
       'shared.ts',
       'upstream-added.ts'
     ]);
+    expect(result.conflicts).toEqual(['shared.ts']);
+    expect(result.mergedFiles).toEqual(['manifest.json', 'removed-upstream.ts', 'upstream-added.ts']);
+  });
+
+  it('merges manifest fields independently while preserving custom identity and detecting competing edits', async () => {
+    const setup = await fixture();
+    const currentPath = path.join(setup.builtinExtensionsDir, 'timeline', 'manifest.json');
+    const userPath = path.join(setup.userExtensionsDir, 'custom-timeline', 'manifest.json');
+    await writeFile(currentPath, JSON.stringify({ ...JSON.parse(builtinManifest('timeline', '2.0.0')),
+      apiVersion: 3, description: 'New description', contributes: ['panels'], permissions: ['network'] }));
+    await writeFile(userPath, forkManifest('custom-timeline', 'timeline', '1.0.0', {
+      name: 'My timeline', contributes: ['commands']
+    }));
+    const result = await stageForkRebase({ ...setup, forkId: 'custom-timeline' });
     expect(result.conflicts).toEqual(['manifest.json', 'shared.ts']);
+    expect(JSON.parse(await readFile(path.join(result.workingDir, 'manifest.json'), 'utf8'))).toMatchObject({
+      id: 'custom-timeline', name: 'My timeline', author: 'user', version: '1.0.0',
+      replaces: ['timeline'], forkedFrom: 'timeline@2.0.0', description: 'New description',
+      apiVersion: 3, contributes: ['commands'], permissions: ['network']
+    });
+  });
+
+  it('leaves competing binary changes and delete-versus-edit changes for the agent', async () => {
+    const setup = await fixture();
+    const user = path.join(setup.userExtensionsDir, 'custom-timeline');
+    const current = path.join(setup.builtinExtensionsDir, 'timeline');
+    await Promise.all([
+      writeFile(path.join(user, '.forked-from', 'image.bin'), Buffer.from([0, 1])),
+      writeFile(path.join(user, 'image.bin'), Buffer.from([0, 2])),
+      writeFile(path.join(current, 'image.bin'), Buffer.from([0, 3])),
+      writeFile(path.join(user, 'removed-upstream.ts'), 'export const customized = true;')
+    ]);
+    const result = await stageForkRebase({ ...setup, forkId: 'custom-timeline' });
+    expect(result.conflicts).toEqual(['image.bin', 'removed-upstream.ts', 'shared.ts']);
+    expect(await readFile(path.join(result.workingDir, 'image.bin'))).toEqual(Buffer.from([0, 2]));
+    expect(await readFile(path.join(result.workingDir, 'removed-upstream.ts'), 'utf8')).toContain('customized');
+  });
+
+  it('keeps the working tree intact when an upstream file collides with a customized folder', async () => {
+    const setup = await fixture();
+    const user = path.join(setup.userExtensionsDir, 'custom-timeline');
+    await writeTree(user, { 'custom/nested.ts': 'export const mine = true;' });
+    await writeFile(path.join(setup.builtinExtensionsDir, 'timeline', 'custom'), 'new upstream file');
+    const result = await stageForkRebase({ ...setup, forkId: 'custom-timeline' });
+    expect(result.conflicts).toContain('custom');
+    expect(result.mergedFiles).toEqual([]);
+    expect(await readFile(path.join(result.workingDir, 'custom/nested.ts'), 'utf8')).toContain('mine');
   });
 
   it('reads validated fork update metadata without staging it', async () => {

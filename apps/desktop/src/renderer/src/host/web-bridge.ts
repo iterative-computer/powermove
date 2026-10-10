@@ -403,6 +403,7 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
       cancelTask: (requestId, taskId) => link.invoke(IPC.codexCancelTask, { requestId, taskId }),
       fixPrompt: (req) => link.invoke(IPC.codexFixPrompt, req),
       rebasePrompt: (req) => link.invoke(IPC.codexRebasePrompt, req),
+      updateFork: (req) => link.invoke(IPC.codexUpdateFork, req),
       restoreChangeSet: (req) => link.invoke(IPC.codexRestoreChangeSet, req),
       requestComputerConsent: (req) => link.invoke(IPC.consentComputer, req)
     },

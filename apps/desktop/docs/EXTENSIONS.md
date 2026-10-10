@@ -640,7 +640,7 @@ The bundled **3D Layers** extension provides this as **Import OBJ Model…**. Po
 
 **Replace a built-in** — call `await api.extensions.fork('timeline')`, then edit the created user extension. Turning your fork off brings the built-in back.
 
-**Updating a fork** — when Powermove ships a newer version of the built-in, call `api.extensions.rebase(id)` (or use the update notice). The agent stages the old pristine base, your fork, and the newly shipped source together, then performs a three-way merge that preserves your behavior and records the new `forkedFrom` version.
+**Updating a fork** — when Powermove ships a newer version of the built-in, call `api.extensions.rebase(id)` (or use the update notice). Powermove compares the old pristine base, your fork, and the newly shipped source locally. It applies untouched upstream changes and merges non-overlapping edits while preserving your custom identity and edits. The result is compiled and validated before installation, and the update offers Undo. Conflicts or validation failures keep the current version and offer **Update with agent**. The agent receives a working copy with straightforward changes already merged and resolves the remaining conflicts. A completed update records the new `forkedFrom` version; a loading or sandbox-check failure restores the previous copy when possible.
 
 **Override just a piece** — don't fork; register the same panel/command/effect `id`. The latest registration wins; disabling yours restores the original.
 
