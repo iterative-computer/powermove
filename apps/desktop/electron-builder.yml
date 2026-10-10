@@ -87,6 +87,8 @@ extraResources:
       - "**/*"
   - from: src/main/agent-tools/mcp-server.mjs
     to: agent-tools/mcp-server.mjs
+  - from: src/main/agent-tools/mcp-stdio.mjs
+    to: agent-tools/mcp-stdio.mjs
 extraMetadata:
   main: out/main/index.js
 

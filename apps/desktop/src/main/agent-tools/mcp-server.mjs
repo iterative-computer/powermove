@@ -1,4 +1,5 @@
 import net from 'node:net';
+import { startMcpStdio } from './mcp-stdio.mjs';
 
 const port = Number.parseInt(process.env.POWERMOVE_AGENT_TOOL_PORT || '', 10);
 const token = process.env.POWERMOVE_AGENT_TOOL_TOKEN || '';
@@ -10,10 +11,6 @@ const LONG_CALLS = new Map([['run_outside_sandbox', 4_200_000]]);
 if (!Number.isInteger(port) || port < 1 || port > 65535 || !token || !runId) {
   process.stderr.write('Powermove MCP bridge environment is incomplete.\n');
   process.exit(1);
-}
-
-function write(message) {
-  process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
 function bridgeCall(tool, args, id) {
@@ -41,82 +38,16 @@ function bridgeCall(tool, args, id) {
   });
 }
 
-function rpcError(id, code, message) {
-  write({ jsonrpc: '2.0', id: id ?? null, error: { code, message } });
-}
-
-async function handle(message) {
-  if (!message || message.jsonrpc !== '2.0' || typeof message.method !== 'string') {
-    rpcError(message?.id, -32600, 'Invalid Request');
-    return;
-  }
-  const id = message.id;
-  if (message.method === 'notifications/initialized' || message.method.startsWith('notifications/')) return;
-  if (id === undefined) return;
-  if (message.method === 'initialize') {
-    write({
-      jsonrpc: '2.0',
-      id,
-      result: {
-        protocolVersion: message.params?.protocolVersion || '2025-06-18',
-        capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'powermove', version: '1.0.0' }
-      }
-    });
-    return;
-  }
-  if (message.method === 'ping') {
-    write({ jsonrpc: '2.0', id, result: {} });
-    return;
-  }
-  if (message.method === 'tools/list') {
-    const response = await bridgeCall('__list_tools', {}, id);
+void startMcpStdio({
+  listTools: async () => {
+    const response = await bridgeCall('__list_tools', {}, null);
     if (!response.ok || !Array.isArray(response.tools)) throw new Error(response.error || 'Powermove tools are unavailable.');
-    write({ jsonrpc: '2.0', id, result: { tools: response.tools } });
-    return;
-  }
-  if (message.method === 'tools/call') {
-    const name = message.params?.name;
-    const args = message.params?.arguments ?? {};
-    if (typeof name !== 'string' || typeof args !== 'object' || args === null || Array.isArray(args)) {
-      rpcError(id, -32602, 'Invalid tool arguments');
-      return;
-    }
+    return response.tools;
+  },
+  callTool: async (name, args, id) => {
     const response = await bridgeCall(name, args, id);
     const content = Array.isArray(response.content) ? response.content : [];
-    if (!response.ok && response.error && !content.some((item) => item?.type === 'text')) {
-      content.push({ type: 'text', text: response.error });
-    }
-    write({
-      jsonrpc: '2.0',
-      id,
-      result: { content, isError: response.ok !== true }
-    });
-    return;
+    if (!response.ok && response.error && !content.some(item => item?.type === 'text')) content.push({ type: 'text', text: response.error });
+    return { content, isError: response.ok !== true };
   }
-  rpcError(id, -32601, 'Method not found');
-}
-
-let input = '';
-let chain = Promise.resolve();
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk) => {
-  input += chunk;
-  for (;;) {
-    const newline = input.indexOf('\n');
-    if (newline < 0) break;
-    const line = input.slice(0, newline).trim();
-    input = input.slice(newline + 1);
-    if (!line) continue;
-    chain = chain.then(async () => {
-      let message;
-      try { message = JSON.parse(line); }
-      catch { rpcError(null, -32700, 'Parse error'); return; }
-      try { await handle(message); }
-      catch (error) { rpcError(message?.id, -32603, error instanceof Error ? error.message : String(error)); }
-    });
-  }
-});
-
-// Electron's headless app entrypoint must exit after the client closes stdin.
-process.stdin.once('end', () => { void chain.finally(() => process.exit(0)); });
+}).then(() => process.exit(0), error => { process.stderr.write(`${String(error)}\n`); process.exit(1); });

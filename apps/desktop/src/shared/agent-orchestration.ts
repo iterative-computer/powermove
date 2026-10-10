@@ -54,7 +54,7 @@ export interface OrchestrationCapabilities {
     appOwnedSubagents: true;
     crossProviderSubagents: true;
     cancellation: true;
-    automaticResultDelivery: true;
+    automaticResultDelivery: boolean;
     liveSteering: true;
     threadManagement: boolean;
     threadWatching: boolean;

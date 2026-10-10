@@ -50,6 +50,7 @@ import { FontStore } from './fonts';
 import { UpdateChecker, type InstallKind } from './updates';
 import { spawn, type ChildProcess } from 'node:child_process';
 import type { BrowserWindow, IpcMain, WebContents } from 'electron';
+import type { CodexIpcContext } from '../main/codex';
 
 /** Electron's own types for main's modules; the remote stand-ins have the members they use. */
 const asWebContents = (client: RemoteClient): WebContents => client as unknown as WebContents;
@@ -82,6 +83,7 @@ export interface ServeOptions {
   /** userData/host: where a managed install writes its update. */
   managedPrefix?: string;
   log?: (line: string) => void;
+  externalMcp?: CodexIpcContext['externalMcp'];
 }
 
 export interface RunningServer {
@@ -375,6 +377,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     agentToolCommand: process.execPath,
     agentMediaFfmpeg: ffmpeg,
     refreshExtensions: refreshRestoredExtensions,
+    externalMcp: options.externalMcp ?? {},
     builtinExtensionsDir: builtinResourcesDir,
     openExternal: async (url) => { for (const client of ipc.all()) client.send(WEB.openExternal, url); log(`[serve] sign in from your browser: ${url}`); }
   });

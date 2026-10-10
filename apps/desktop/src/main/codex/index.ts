@@ -62,6 +62,8 @@ import { runWorkspaceCommand } from '../compatible-workspace';
 import type { StoreAgentGateway } from '../cloud/store-agent';
 import { readForkRebaseInfo, stageForkRebase } from '../extensions/rebase';
 import { updateFork } from '../extensions/update-fork';
+import { ExternalAgentSession, type ExternalSessionOptions } from '../agent-tools/external-session';
+import { startExternalMcp } from '../agent-tools/external-server';
 
 const FIX_PROMPT_ERROR_CHARS = 4_000;
 const FIX_PROMPT_FILES = 40;
@@ -92,6 +94,12 @@ export interface CodexIpcContext {
   builtinExtensionsDir?: string;
   /** The bundled ffmpeg the agent's media tools run (probe, frames, waveform). */
   agentMediaFfmpeg?: string;
+  externalMcp?: {
+    ready?(host: Awaited<ReturnType<typeof startExternalMcp>>): void;
+    importMedia?: ExternalSessionOptions['importMedia'];
+    capturePanel?: import('../agent-tools/bridge').PowermoveAgentToolBridgeOptions['capturePanel'];
+    panelInput?: import('../agent-tools/bridge').PowermoveAgentToolBridgeOptions['panelInput'];
+  };
 }
 
 export interface ChatGPTAccountController {
@@ -389,6 +397,8 @@ export function registerCodexIpc(
         ...(ctx.agentToolCommandArgs ? { commandArgs: ctx.agentToolCommandArgs } : {}),
         storeAgent: ctx.storeAgent?.() ?? null,
         ...(ctx.agentMediaFfmpeg ? { ffmpegPath: ctx.agentMediaFfmpeg } : {}),
+        capturePanel: ctx.externalMcp?.capturePanel,
+        panelInput: ctx.externalMcp?.panelInput,
         orchestrate: (runId, tool, args) => orchestrator.call(runId, tool, args),
         stageForkRebase: ({ forkId, stagingDirectory }) => stageForkRebase({
           forkId,
@@ -450,6 +460,32 @@ export function registerCodexIpc(
       }
     }
   };
+
+  const externalHost = toolBridge && ctx.externalMcp ? startExternalMcp({ userData: ctx.userData,
+    createSession: () => new ExternalAgentSession({ bridge: toolBridge,
+      getOwner: () => ctx.getWindow()?.webContents ?? null, userData: ctx.userData,
+      extensionsDir: ctx.extensionsDir, apiPackFiles: ctx.apiPackFiles,
+      refreshExtensions: ctx.refreshExtensions, importMedia: ctx.externalMcp?.importMedia,
+      attach: async (request, session) => {
+        owners.set(request.id, session.owner); rootToolSessions.set(request.id, session);
+        const workspaceId = `mcp-${session.runId}`;
+        activeChildWorkspaces.add(workspaceId);
+        runningProjects.set(request.projectId, (runningProjects.get(request.projectId) ?? 0) + 1);
+        let detach: (() => Promise<void>) | undefined;
+        const remove = () => {
+          activeChildWorkspaces.delete(workspaceId);
+          owners.delete(request.id); rootToolSessions.delete(request.id);
+          const remaining = (runningProjects.get(request.projectId) ?? 1) - 1;
+          if (remaining) runningProjects.set(request.projectId, remaining); else runningProjects.delete(request.projectId);
+        };
+        try { detach = await orchestrator.attachExternal(request); }
+        catch (error) { remove(); throw error; }
+        return async () => { try { await detach!(); } finally { remove(); } };
+      }
+    })
+  }).then(host => { ctx.externalMcp?.ready?.(host); return host; }) : null;
+  // Do not make native provider runs depend on local MCP discovery succeeding.
+  void externalHost?.catch(error => console.error(`[powermove-mcp] ${error instanceof Error ? error.message : String(error)}`));
 
   const announce = (channel: string, status: unknown): void => {
     if (ctx.broadcast) {
@@ -786,6 +822,7 @@ export function registerCodexIpc(
   // before-quit can be cancelled by the document save prompt or recovery flush.
   // Keep active runs and their tool bridge alive until closing is confirmed.
   app.once('will-quit', () => {
+    void externalHost?.then(host => host.close()).catch(() => {});
     void orchestrator.shutdown();
     compatible.cancelAll();
     void runner.cancelAll();

@@ -33,7 +33,10 @@ await build({
   target: 'node22',
   format: 'esm',
   outfile: path.join(outDir, 'server.mjs'),
-  packages: 'external',
+  // Bundle the shared TypeScript packages and their JS dependencies. The
+  // standalone npm package must not depend on unpublished workspace modules.
+  // Keep native/process-backed dependencies in node_modules.
+  external: ['@anthropic-ai/claude-agent-sdk', 'esbuild', 'ws', 'playwright', '@powermove/macos-haptics', 'transcribe-cpp', 'koffi'],
   alias: { electron: path.join(desktop, 'src/server/electron-stub.ts') },
   define: { 'process.env.NODE_ENV': '"production"' },
   sourcemap: true,
@@ -68,7 +71,8 @@ const copies = [
   ['src/renderer/src/core/types/commands.ts', 'api-pack/commands.ts'],
   ['docs/samples/media-browser', 'api-pack/samples/media-browser'],
   ['docs/samples/gradient-tint', 'api-pack/samples/gradient-tint'],
-  ['src/main/agent-tools/mcp-server.mjs', 'agent-tools/mcp-server.mjs']
+  ['src/main/agent-tools/mcp-server.mjs', 'agent-tools/mcp-server.mjs'],
+  ['src/main/agent-tools/mcp-stdio.mjs', 'agent-tools/mcp-stdio.mjs']
 ];
 for (const [from, to] of copies) {
   const target = path.join(resources, to);

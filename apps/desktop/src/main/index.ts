@@ -1245,6 +1245,7 @@ if (!hasSingleInstanceLock) {
       agentToolCommandArgs: [...(app.isPackaged ? [] : [app.getAppPath()]), '--powermove-agent-tools'],
       agentMediaFfmpeg: proxyEncoder,
       refreshExtensions: refreshRestoredExtensions,
+      externalMcp: {},
       storeAgent: () => storeAgentGateway,
       openExternal: async (url) => { await shell.openExternal(url); }
     });

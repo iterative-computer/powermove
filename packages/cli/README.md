@@ -68,6 +68,12 @@ The host is published to npm with every Powermove release, at the same version a
 - Exports are written on the host and also downloaded by the browser.
 - Nothing is sent anywhere else. There is no telemetry.
 
+## MCP for agents
+
+The CLI also provides a stdio MCP server. Run `powermove mcp-install-browser` once, then configure your agent to launch `powermove mcp`. It starts a hidden editor, so agents can create a project, import media, animate and edit, review frames, and export video without opening the app. Its default profile is `~/.powermove-headless`; exports go to `~/Powermove`.
+
+Use `--user-data` and `--exports` for other folders. `mcp --connect --user-data <profile>` connects to an already running app or host. See [the MCP guide](https://github.com/iterative-computer/powermove/blob/main/apps/desktop/docs/MCP.md) for client configuration, tool workflow and capability limits.
+
 ## Requirements
 
 Node 22 or newer. Linux and macOS.

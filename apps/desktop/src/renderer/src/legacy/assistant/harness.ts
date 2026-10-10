@@ -1,4 +1,5 @@
 import { setPanelLayout } from './workspace-layout';
+import { mcpProjectTool } from './mcp-project-tools';
 import { createAgentCheckpoint } from './checkpoint';
 import { openPanel, readPanel, interactPanel, panelBounds, preparePanelInput } from './panel-tools';
 import { records as extensionRecords } from '../../kernel/extensions.svelte';
@@ -572,6 +573,13 @@ async function rollBackLiveTransaction(transaction: LiveToolTransaction): Promis
 
 async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit<AgentToolResponseEvent, 'runId' | 'callId'>> {
   PM.SpatialAssistant?.assertRunProject?.(request.runId);
+  const pinned = liveToolObservations.get(request.runId) || liveToolTransactions.get(request.runId);
+  if (pinned && request.tool !== '__finish_run') assertTransactionProject(pinned);
+  if (request.tool.startsWith('__mcp_')) {
+    const value = await mcpProjectTool(PM, request.tool, request.arguments);
+    if (request.tool === '__mcp_context') refreshLiveTransaction(request);
+    return { ok: true, content: [toolText(value)], revision: currentRevision() };
+  }
   if (request.tool === '__agent_thread_control') {
     if (!PM.SpatialAssistant?.controlThread) throw new Error('Thread controls are unavailable.');
     return { ok: true, content: [toolText(await PM.SpatialAssistant.controlThread(request.arguments))] };
