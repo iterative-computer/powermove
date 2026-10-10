@@ -11,6 +11,9 @@ import '../../../css/publish.css';
 import '../../../css/transcription.css';
 import './legacy/core/image-sequence.css';
 import { installWebBridge, remoteLink } from './host/web-bridge';
+import { installPointerFocus } from './controls/pointer-focus';
+
+installPointerFocus();
 
 // Served by `powermove serve`, the browser has no preload: the bridge has to be
 // in the kernel's capture before the engines read the store during their
