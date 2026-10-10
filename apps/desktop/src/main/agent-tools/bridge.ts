@@ -27,7 +27,7 @@ import {
 } from './spec';
 import { ORCHESTRATION_TOOL_NAMES } from '../../shared/agent-orchestration';
 import type { StoreAgentGateway, StoreInstallInput, StorePublishInput, StoreSearchInput } from '../cloud/store-agent';
-import { inspectCreativeWorkspace } from '../creative-workspace';
+import { inspectCreativeExtension, inspectCreativeWorkspace } from '../creative-workspace';
 import { userInput, type UserInput } from '../user-input';
 import { AgentMediaTools, CALL_BUDGET_MS, type CompositionInfo, type MediaToolContext } from './media-tools';
 import { AGENT_MEDIA_TOOL_NAMES, COMPOSITION_INFO_TOOL, MEDIA_SOURCE_TOOL, type AgentMediaSource } from '../../shared/media-tools';
@@ -466,9 +466,9 @@ export class PowermoveAgentToolBridge {
       const result = await this.options.orchestrate(session.runId, tool, args);
       return { runId: session.runId, callId: `tool-${randomUUID()}`, ok: true, content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
-    if (tool === 'inspect_creative_workspace') {
+    if (tool === 'inspect_creative_workspace' || tool === 'inspect_creative_extension') {
       return { runId: session.runId, callId: `tool-${randomUUID()}`, ok: true,
-        content: [{ type: 'text', text: JSON.stringify(await inspectCreativeWorkspace(args)) }] };
+        content: [{ type: 'text', text: JSON.stringify(await (tool === 'inspect_creative_workspace' ? inspectCreativeWorkspace(args) : inspectCreativeExtension(args))) }] };
     }
     if (tool === 'fork_builtin_extension') {
       const request: ToolSocketRequest = { token: session.token, runId: session.runId, id: null, tool, arguments: args, workspace };

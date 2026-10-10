@@ -230,6 +230,7 @@ interface WorkspaceManifestBase {
   schemaVersion: 1;
   id: string;
   name: string;
+  sourceApp?: 'after-effects' | null;
   density: WorkspaceDensity;
   theme: WorkspaceTheme;
   chrome: WorkspaceChrome;

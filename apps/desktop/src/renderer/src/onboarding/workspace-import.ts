@@ -15,10 +15,15 @@ export function workspaceImportHandoff(PM: AgentHost, connected: () => Promise<b
   return {
     async start(appId: CreativeAppId): Promise<boolean> {
       if (appId !== 'after-effects' || !PM.AgentUI?.openGlobal) return false;
+      const { provider, model, reasoningEffort } = PM.AgentUI.state ?? {};
+      if (PM.AgentUI.openGlobal() === false) return false;
       // Arrange the imported workspace around a project, not the empty home.
       if (PM.ProjectsScreen?.isOpen || PM.isHomeProject?.()) PM.newBlankProject?.();
-      PM.AgentUI.openGlobal();
       PM.AgentUI.newThread();
+      // App conversations have their own saved choices; keep the agent the
+      // person selected before starting this transfer.
+      if (provider) PM.AgentUI.setProvider?.(provider);
+      if (model && reasoningEffort) PM.AgentUI.setModel?.(model, reasoningEffort);
       PM.AgentUI.setScope('workspace');
       PM.AgentUI.setDraft(WORKSPACE_IMPORT_LABEL, true);
       pendingThread = PM.AgentUI.state.threadId;

@@ -22,6 +22,7 @@ export const STATIC_KEYS = [
   'workspaces',
   'workspace',
   'defaultWorkspace',
+  'afterEffectsExtensions',
   'workspaceTrash',
   'panelVisibility',
   'theme',

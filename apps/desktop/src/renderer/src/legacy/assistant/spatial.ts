@@ -1,5 +1,6 @@
 import { workspaceImportHandoff } from '../../onboarding/workspace-import';
 import { WORKSPACE_IMPORT_PROMPT, expandAgentRequest } from '../../../../shared/creative-workspace';
+import { recordAfterEffectsExtensions } from '../../library/after-effects-imports';
 import { createAgentCheckpoint } from './checkpoint';
 import { bridge } from '../../kernel/bridge';
 import { noticeKind, stated } from '../../errors/presentation';
@@ -928,10 +929,11 @@ registerAgentPanel(PM, {
   importWorkspace: workspaceImport.start,
   resumeWorkspaceImport: workspaceImport.resume,
   openGlobal: () => {
-    if (!switchAgentContext('app')) return;
+    if (!switchAgentContext('app')) return false;
     setAgentAccessMode('project');
     PM.AgentShell?.openGlobal?.();
     PM.AgentUI?.update({ flush: true, focusComposer: true });
+    return true;
   },
   repairExtension: async (target: { id: string; name?: string; diagnostics?: string[] }) => requestExtensionRepair(target),
   flushThreads: persistThreads,
@@ -2081,6 +2083,7 @@ async function runAppRequest({ session, request, token, controller, threadId, or
   }
   await applyExtensionChanges(result.extensions);
   if (token !== session.requestToken || controller.signal.aborted) return;
+  if (originalRequest === WORKSPACE_IMPORT_PROMPT && result.extensions.length) recordAfterEffectsExtensions(PM as any, result.extensions);
   const run = {
     autonomous: true, summary: result.summary, checkpoint: null,
     extensionChangeSetId: typeof raw === 'object' ? raw?.extensionChangeSetId : undefined,

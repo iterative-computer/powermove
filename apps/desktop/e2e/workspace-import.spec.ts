@@ -3,8 +3,9 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { expect, test, launchApp } from './helpers/app';
+import { WORKSPACE_IMPORT_LABEL } from '../src/shared/creative-workspace';
 
-test('onboarding workspace handoff creates, loads and arranges an original extension without editing the project', async () => {
+test('Settings workspace transfer creates, loads and arranges an original extension without editing the project', async ({}, testInfo) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'powermove-workspace-import-e2e-'));
   const seen: any[] = [];
   let run = 0;
@@ -27,7 +28,7 @@ test('onboarding workspace handoff creates, loads and arranges an original exten
         ['complete_task', { ...result, extensions: [{ id: 'workspace-proof', action: 'created', summary: 'Frame counter' }] }]
       ] : [
         ['get_panel_layout', {}],
-        ['set_panel_layout', { name: 'After Effects import', docks: [
+        ['set_panel_layout', { name: 'After Effects import', sourceApp: 'after-effects', docks: [
           { id: 'left', size: 240, panels: [{ id: 'assets', flex: true }] },
           { id: 'center', panels: [{ id: 'viewer', flex: true }, { id: 'timeline', size: 220 }] },
           { id: 'right', size: 300, panels: [{ id: 'workspace-proof.frame', size: 160 }, { id: 'inspector', size: 200 }] }
@@ -48,12 +49,16 @@ test('onboarding workspace handoff creates, loads and arranges an original exten
     session = await launchApp({ userData: home });
     await session.openEditor();
     const before = await session.page.evaluate(() => JSON.stringify((window as any).PM.proj));
-    await session.page.evaluate(async () => {
+    await session.page.evaluate(() => {
       const PM = (window as any).PM;
-      PM.AgentUI.openGlobal();
       PM.AgentUI.setProvider('compatible');
-      await PM.AgentUI.importWorkspace('after-effects');
+      PM.SettingsUI.open('general');
     });
+    const settings = session.page.getByRole('dialog', { name: 'Settings', exact: true });
+    const transfer = settings.getByRole('button', { name: 'Bring my workspace', exact: true });
+    await expect(transfer).toBeVisible({ timeout: 3000 });
+    await transfer.click();
+    await expect(settings).toBeHidden();
     await expect.poll(async () => {
       const state = await session!.page.evaluate(() => {
         const {phase, context, provider, composerDraft, threadId, conversation} = (window as any).PM.AgentUI.state;
@@ -76,18 +81,86 @@ test('onboarding workspace handoff creates, loads and arranges an original exten
     expect(proof.conversation).toContain('Saved the imported workspace.');
     const tools = seen[0].tools.map((tool: any) => tool.function.name);
     expect(tools).toContain('inspect_creative_workspace');
+    expect(tools).toContain('inspect_creative_extension');
     expect(tools).toContain('set_panel_layout');
     expect(tools).not.toContain('apply_commands');
     expect(seen.at(-1).messages.some((message: any) => message.role === 'tool' && message.content.includes('workspace-proof.frame'))).toBe(true);
     await session.page.evaluate(() => { const PM = (window as any).PM; PM.newProject(); });
     await session.page.getByRole('button', { name: 'Create', exact: true }).click();
     expect(await session.page.evaluate(() => (window as any).PM.WS.current.name)).toBe('After Effects import');
+    // Surface persistence failures here, before the application's quit barrier.
+    await session.page.evaluate(async () => { await (window as any).PM.flushProject(); });
     await session.relaunch();
     expect(await session.page.evaluate(() => (window as any).PM.WS.current.name)).toBe('After Effects import');
+    await session.page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.WS.create({ name: 'Unrelated workspace', sourceApp: null });
+      PM.LibraryUI.open('after-effects');
+    });
+    const library = session.page.getByRole('dialog', { name: 'Panel library', exact: true });
+    await expect(library.getByRole('button', { name: 'After Effects imports', exact: true })).toHaveAttribute('aria-current', 'page');
+    await expect(library.getByRole('list', { name: 'After Effects extensions', exact: true }).locator('[data-extension-id="workspace-proof"]')).toBeVisible();
+    await expect(library.getByRole('button', { name: 'Activate After Effects import', exact: true })).toBeVisible();
+    await expect(library.getByRole('button', { name: 'Activate Unrelated workspace', exact: true })).toHaveCount(0);
+    const search = library.getByRole('searchbox', { name: 'Search After Effects imports', exact: true });
+    await search.fill('Frame counter');
+    await expect(library.locator('[data-extension-id="workspace-proof"]')).toBeVisible();
+    await expect(library.getByRole('button', { name: 'Activate After Effects import', exact: true })).toHaveCount(0);
+    await search.fill('After Effects import');
+    await expect(library.locator('[data-extension-id="workspace-proof"]')).toHaveCount(0);
+    await expect(library.getByRole('button', { name: 'Activate After Effects import', exact: true })).toBeVisible();
+    await search.fill('');
+    for (const theme of ['dark', 'light']) {
+      await session.page.evaluate(theme => (window as any).PM.theme.apply(theme), theme);
+      await session.page.screenshot({ path: testInfo.outputPath(`after-effects-library-${theme}.png`) });
+    }
+    await library.getByRole('button', { name: 'Activate After Effects import', exact: true }).click();
+    expect(await session.page.evaluate(() => (window as any).PM.WS.current.sourceApp)).toBe('after-effects');
     expect(session.diagnostics.pageErrors).toEqual([]);
   } finally {
     await session?.close(); server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
     await rm(home, { recursive: true, force: true });
   }
+});
+
+test('Settings transfer from home keeps the request ready while the agent needs sign-in', async () => {
+  const session = await launchApp({ env: { POWERMOVE_FAKE_CHATGPT_STATUS: 'disconnected' } });
+  try {
+    const { page } = session;
+    await page.evaluate(() => (window as any).PM.SettingsUI.open('general'));
+    const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
+    await settings.getByRole('searchbox', { name: 'Search settings' }).fill('After Effects');
+    await settings.getByRole('button', { name: 'Bring my workspace', exact: true }).click();
+    await expect(settings).toBeHidden();
+    await expect(page.locator('#panel-agent').getByRole('button', { name: 'Connect ChatGPT', exact: true })).toBeVisible();
+    await expect.poll(() => page.evaluate(() => {
+      const PM = (window as any).PM;
+      return { home: PM.ProjectsScreen.isOpen, context: PM.AgentUI.state.context,
+        draft: PM.AgentUI.state.composerDraft, messages: PM.AgentUI.state.conversation.length };
+    })).toEqual({ home: false, context: 'app', draft: WORKSPACE_IMPORT_LABEL, messages: 0 });
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  } finally { await session.close(); }
+});
+
+test('Settings transfer stays retryable when the handoff is unavailable or fails', async ({ session }) => {
+  const { page } = session;
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    PM.AgentUI.importWorkspace = async () => false;
+    PM.SettingsUI.open('general');
+  });
+  const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
+  const transfer = settings.getByRole('button', { name: 'Bring my workspace', exact: true });
+  for (const throws of [false, true]) {
+    if (throws) await page.evaluate(() => {
+      (window as any).PM.AgentUI.importWorkspace = async () => { throw new Error('Unavailable'); };
+    });
+    await transfer.click();
+    await expect(settings).toBeVisible();
+    await expect(transfer).toBeEnabled();
+    await expect(page.getByText('Could not start the workspace transfer. Try again.', { exact: true })).toBeVisible();
+    expect(await page.evaluate(() => (window as any).PM.ProjectsScreen.isOpen)).toBe(true);
+  }
+  expect(session.diagnostics.pageErrors).toEqual([]);
 });

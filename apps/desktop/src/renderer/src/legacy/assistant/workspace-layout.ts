@@ -5,6 +5,7 @@ import type { DockSpec } from '../../layout/model';
 export function setPanelLayout(PM: PMRegistry, args: Record<string, unknown>) {
   if (PM.WS?.editing) throw new Error('Finish editing your workspace before arranging panels.');
   if (typeof args.name !== 'string' || !args.name.trim() || args.name.length > 80) throw new Error('Name the new workspace (up to 80 characters).');
+  if (args.sourceApp !== undefined && args.sourceApp !== 'after-effects') throw new Error('Choose a supported workspace source.');
   if (!Array.isArray(args.docks) || args.docks.length < 1 || args.docks.length > 3) throw new Error('Supply one to three docks.');
   const dockIds = new Set<string>();
   const panelIds = new Set<string>();
@@ -37,7 +38,7 @@ export function setPanelLayout(PM: PMRegistry, args: Record<string, unknown>) {
   const before = PM.WS.historySnapshot();
   const previousDefault = PM.store.get('defaultWorkspace', 'design');
   try {
-    const created = PM.WS.create({ name: args.name.trim(), scope: 'global', projectId: null, hiddenPanels: [], layout: { docks } });
+    const created = PM.WS.create({ name: args.name.trim(), scope: 'global', projectId: null, hiddenPanels: [], sourceApp: args.sourceApp ?? null, layout: { docks } });
     PM.store.set('defaultWorkspace', created.id);
     const after = PM.WS.historySnapshot();
     const historyId = PM.hist.external(`Agent · ${created.name}`, () => { PM.store.set('defaultWorkspace', previousDefault); return PM.WS.restoreHistorySnapshot(before); }, () => { PM.store.set('defaultWorkspace', created.id); return PM.WS.restoreHistorySnapshot(after); });

@@ -18,6 +18,18 @@ const arrangement = { name: 'From After Effects', docks: [
 ] };
 
 describe('agent workspace arrangement', () => {
+  it('retains import provenance through Undo and Redo and clears it on unrelated layouts', () => {
+    const { PM, checkpoints } = host();
+    setPanelLayout(PM, { ...arrangement, sourceApp: 'after-effects' });
+    expect(PM.WS.create).toHaveBeenLastCalledWith(expect.objectContaining({ sourceApp: 'after-effects' }));
+    checkpoints[0].undo();
+    expect(PM.WS.restoreHistorySnapshot).toHaveBeenLastCalledWith(expect.not.objectContaining({ sourceApp: 'after-effects' }));
+    checkpoints[0].redo();
+    expect(PM.WS.restoreHistorySnapshot).toHaveBeenLastCalledWith(expect.objectContaining({ sourceApp: 'after-effects' }));
+    setPanelLayout(PM, arrangement);
+    expect(PM.WS.create).toHaveBeenLastCalledWith(expect.objectContaining({ sourceApp: null }));
+    expect(() => setPanelLayout(PM, { ...arrangement, sourceApp: 'unknown' })).toThrow('supported workspace source');
+  });
   it('preserves panel order and sizes in a new global workspace with working Undo/Redo', () => {
     const { PM, checkpoints, getCurrent } = host();
     expect(setPanelLayout(PM, arrangement)).toMatchObject({ workspaceId: 'imported', historyId: 'layout-history' });

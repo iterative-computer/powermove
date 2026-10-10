@@ -12,6 +12,14 @@ import {
 } from './spec';
 
 describe('Powermove agent tool spec', () => {
+  it('offers bounded extension inspection to app import runs without composition tools', () => {
+    const tool = POWERMOVE_APP_AGENT_TOOLS.find(tool => tool.name === 'inspect_creative_extension');
+    expect(tool?.inputSchema).toMatchObject({ additionalProperties: false, required: ['appId', 'toolId'], properties: {
+      toolId: { pattern: '^[a-f0-9]{32}$' }, path: { minLength: 1, maxLength: 1024 }
+    } });
+    expect(POWERMOVE_MCP_TOOL_NAMES).toContain('mcp__powermove__inspect_creative_extension');
+    expect(POWERMOVE_APP_AGENT_TOOLS.some(tool => tool.name === 'apply_commands')).toBe(false);
+  });
   it('publishes the closed fork_builtin_extension schema to MCP clients', () => {
     const tool = POWERMOVE_AGENT_TOOLS.find((candidate) => candidate.name === 'fork_builtin_extension');
 
