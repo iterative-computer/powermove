@@ -272,6 +272,7 @@ export class ClaudeRunner {
             artifactPath: `artifacts/${layout.runId}`,
             access: authority,
             context: req.context,
+            request: prompt,
             extensionsDir: layout.extensionsDir
           }),
           nativeTools: options.nativeTools,

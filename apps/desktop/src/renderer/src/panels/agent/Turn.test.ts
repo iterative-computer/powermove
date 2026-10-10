@@ -40,7 +40,7 @@ describe('assistant word reveal', () => {
     flushSync();
     expect(continueWithProject).not.toHaveBeenCalled();
     const button = target.querySelector<HTMLButtonElement>('button')!;
-    expect(button.textContent).toBe('Continue with Project access');
+    expect(button.textContent).toBe('Continue with project tools');
     button.click();
     expect(continueWithProject).toHaveBeenCalledWith(3);
   });

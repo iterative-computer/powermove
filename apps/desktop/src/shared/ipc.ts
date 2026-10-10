@@ -250,7 +250,7 @@ const PROJECT_SNAPSHOT_BYTES = 32 * 1024 * 1024;
 
 export const LIMITS = {
   fileSaveBytes: 256 * 1024 * 1024, // direct IPC / local recovery bound
-  codexImages: 6,
+  codexImages: 12, // Six references, a selected region, and representative composition frames.
   codexImageBytes: 4 * 1024 * 1024,
   codexAttachments: 6,
   codexAttachmentBytes: 100 * 1024,

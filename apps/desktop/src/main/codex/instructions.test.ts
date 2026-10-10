@@ -15,6 +15,25 @@ function normalizeText(value: string): string {
 }
 
 describe('autonomous agent contract', () => {
+  it('keeps simple animation focused while supplying procedures for extension and footage tasks', () => {
+    const base = { projectName: 'Project', artifactPath: 'artifacts/run', access: 'project' as const, extensionsDir: '/stage' };
+    const animation = agentInstructions({ ...base, request: 'Animate the title' });
+    expect(animation).toContain('CREATIVE JUDGMENT');
+    expect(animation).toContain('Auto and Supervised support project edits and extension creation');
+    expect(animation).not.toContain('EXTENSION COMPLETION');
+    expect(animation).not.toContain('FOOTAGE AND CAPTIONS');
+    expect(animation).not.toContain('Svelte 5');
+    expect(Buffer.byteLength(animation)).toBeLessThan(8000);
+    const effect = agentInstructions({ ...base, request: 'Create a glow effect' });
+    expect(effect).toContain('EXTENSION COMPLETION');
+    expect(effect).toContain('api.effects.register');
+    expect(effect).toContain('Test in Sandbox');
+    const footage = agentInstructions({ ...base, request: 'Trim this video and add captions' });
+    expect(footage).toContain('FOOTAGE AND CAPTIONS');
+    expect(footage).toContain('transcribe_media');
+    expect(agentInstructions({ ...base, request: 'Rename the title\n\nCONVERSATION IN THIS THREAD\nEarlier we made an effect.' })).not.toContain('EXTENSION COMPLETION');
+  });
+
   it('keeps every distinct edit command reachable by the agent', () => {
     expect(EDIT_COMMAND_TYPES).toHaveLength(25);
     expect(new Set(EDIT_COMMAND_TYPES).size).toBe(25);

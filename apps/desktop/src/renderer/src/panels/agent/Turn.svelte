@@ -108,7 +108,7 @@
       {#if message.requiresProject && messageIndex !== undefined}
         <button type="button" class="btn agent-error-retry"
           disabled={agentState.phase === 'running'}
-          onclick={() => PM.AgentUI?.continueWithProject?.(messageIndex)}>Continue with Project access</button>
+          onclick={() => PM.AgentUI?.continueWithProject?.(messageIndex)}>Continue with project tools</button>
       {/if}
     {/if}
     {#if message.attachments?.length}

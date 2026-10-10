@@ -22,6 +22,7 @@ import { AGENT_ORCHESTRATION_INSTRUCTIONS } from '../../shared/agent-orchestrati
 
 import {
   IPC,
+  LIMITS,
   PROJECT_ID,
   REQUEST_ID,
   type ArtifactRef,
@@ -132,7 +133,7 @@ function requireSteerRequest(value: unknown): CodexSteerRequest {
     !isRecord(value) ||
     !isString(value.id) || !REQUEST_ID.test(value.id) ||
     !isString(value.prompt, 200_000) || value.prompt.length === 0 ||
-    !Array.isArray(value.images) || value.images.length > 6 ||
+    !Array.isArray(value.images) || value.images.length > LIMITS.codexImages ||
     value.images.some((image) => !(image instanceof Uint8Array) || image.byteLength > 4 * 1024 * 1024)
   ) throw new IpcValidationError(IPC.codexSteer, 'invalid steering request');
   return { id: value.id, prompt: value.prompt, images: value.images as Uint8Array[] };

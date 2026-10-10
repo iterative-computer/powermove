@@ -1,12 +1,18 @@
-/** Included in every run, including resumes and editor-only requests. */
+/** Shared verification rules, with extension completion only when relevant. */
 export const AGENT_TESTING_INSTRUCTIONS = `BACKGROUND TESTING
-Never open or show a new window for testing. Use window-free unit/type checks, headless browsers, or a hidden Electron renderer with isolated temporary test data. Never launch a headed browser, detached DevTools, or a visible second copy of Powermove for verification.
-Powermove's source checkout, package scripts, and Electron test harness are not available; do not search for them or build a substitute launcher. Verify through the live powermove tools (panel state, interaction, capture, workspace errors, render_frames) and the extension compile report. Never point tests at the user's live profile or change the live document just to test.
-Keep the user's existing Powermove process, window, and editing session open. Apply interface changes through renderer or extension hot reload only; do not quit, relaunch, or reload the whole window. If background testing is unavailable, report what remains unverified instead of falling back to a visible test window. Distinguish automated, hidden-renderer, and visible-app evidence. Native dialogs, focus, and other OS-only behavior require explicit user coordination.
+Never open or show a new window for testing. Use window-free unit/type checks, headless browsers or a hidden Electron renderer with isolated temporary test data. Keep the user's process, window and editing session open; hot reload extensions, never quit/relaunch or reload the whole window. Native OS behavior requires explicit user coordination.
+Powermove's source checkout, package scripts, and Electron test harness are not available. Verify through live panel state/interaction/capture, workspace errors, render_frames and the compile report. Never test against the live profile or change the user's document merely for a test. Report unavailable checks; never substitute a visible test window.
 
 EXTENSION COMPLETION
-Read the shipped API types before implementing effects or panels; never invent host services or validate against mocks that merely repeat those assumptions. Native raster surfaces use cv for their canvas. The raster service can be wrapped through api.services; capture the previous service before registering, and preserve its surface geometry.
-Extension source is staged until you return it in the extensions result. Do not claim live verification of files that have not loaded. After promotion, Powermove automatically continues this same task with a load report so you can inspect actual panel controls, capture_panel images, render_frames output and workspace errors. Repair failures yourself and verify the updated result before declaring completion. Do not defer repair to a user-operated Fix it button. Report a concrete blocker when verification is unavailable.
+Read shipped API types; never invent host services or validate with mocks that repeat assumptions. Native raster surfaces use cv; when wrapping api.services capture the previous service and preserve surface geometry.
+Files are staged until returned in extensions. After promotion Powermove continues with a load report: inspect actual controls, screenshots, rendered frames and errors. Repair and verify failures yourself; do not claim staged files were live-tested or defer repair to a Fix it button. Report concrete blockers.
 
 TOOL RELIABILITY
-A failed tool call remains visible to the user. Before running a command, confirm its working directory and any uncertain paths. Keep speculative discovery separate from edits and required validation so one expected miss cannot mark real work as failed. When absence is an expected result, use an explicit conditional check whose successful not-found branch exits cleanly. If a tool call fails unexpectedly, read its exact result, correct the smallest failing operation, and verify that narrow retry before proceeding. Do not repeat an identical failed call or claim that a failed check passed.`;
+Confirm working directory and uncertain paths before commands. Separate discovery from edits; expected absence must exit cleanly. On failure read the exact result, correct the smallest operation and verify the retry. Inspect state before retrying possibly completed edits. Never repeat an identical failed call or claim a failed check passed.`;
+
+/** Inspection/planning cannot author extensions. */
+export const AGENT_EDITOR_TESTING_INSTRUCTIONS = AGENT_TESTING_INSTRUCTIONS.replace(/\n\nEXTENSION COMPLETION[\s\S]*?(?=\n\nTOOL RELIABILITY)/, '');
+
+export function agentTestingInstructions(extensions: boolean): string {
+  return extensions ? AGENT_TESTING_INSTRUCTIONS : AGENT_EDITOR_TESTING_INSTRUCTIONS;
+}

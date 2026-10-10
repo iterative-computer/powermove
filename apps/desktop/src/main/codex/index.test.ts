@@ -425,7 +425,7 @@ describe('registerCodexIpc', () => {
     const owner = new Sender();
     const stranger = new Sender();
     const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
-    const steering = { id: 'ipc-run-1234', prompt: 'Focus on the blur edge', images: [] };
+    const steering = { id: 'ipc-run-1234', prompt: 'Focus on the blur edge', images: Array.from({ length: 10 }, () => new Uint8Array([1])) };
 
     await expect(handlers.get(IPC.codexSteer)!({ sender: stranger }, steering))
       .resolves.toEqual({ accepted: false });
@@ -433,6 +433,7 @@ describe('registerCodexIpc', () => {
     await expect(handlers.get(IPC.codexSteer)!({ sender: owner }, steering))
       .resolves.toEqual({ accepted: true });
     expect(mocks.appSteer).toHaveBeenCalledExactlyOnceWith(steering);
+    await expect(handlers.get(IPC.codexSteer)!({ sender: owner }, { ...steering, images: Array.from({ length: 13 }, () => new Uint8Array([1])) })).rejects.toThrow('invalid steering request');
 
     await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     mocks.resolve({ ok: true, text: '{}', access: 'editor' });

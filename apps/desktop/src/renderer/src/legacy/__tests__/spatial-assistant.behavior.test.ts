@@ -350,7 +350,7 @@ it('reloads typed extension changes during the autonomous request flow', async (
   PM.hist = { mark: vi.fn(() => 1), squash: vi.fn() };
   PM.AgentHarness = {
     ...PM.AgentHarness,
-    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    observeVisual: vi.fn(async () => ({ state: {}, times: [], images: [] })),
     cleanCommand: vi.fn((command) => command),
   };
   PM.Kernel = { loader: {
@@ -457,7 +457,8 @@ it('keeps the prose the model streamed as the reply instead of replacing it with
   PM.proj = { id: 'project-1', name: 'Test Project', revision: 0, layers: [] };
   PM.hist = { mark: vi.fn(() => 1), squash: vi.fn() };
   PM.AgentHarness = {
-    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    ...PM.AgentHarness,
+    observeVisual: vi.fn(async () => ({ state: {}, times: [], images: [] })),
     cleanCommand: vi.fn((command) => command),
   };
   const spoken = '## What I did\n\nManifest and **TypeScript checks passed**. See [Commons](https://example.com).';
@@ -490,7 +491,8 @@ it('falls back to the structured summary when the run streamed no prose', async 
   PM.proj = { id: 'project-1', name: 'Test Project', revision: 0, layers: [] };
   PM.hist = { mark: vi.fn(() => 1), squash: vi.fn() };
   PM.AgentHarness = {
-    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    ...PM.AgentHarness,
+    observeVisual: vi.fn(async () => ({ state: {}, times: [], images: [] })),
     cleanCommand: vi.fn((command) => command),
   };
   PM.CodexBridge.request = vi.fn(async (_prompt, _s, _i, options) => {
@@ -510,10 +512,12 @@ it('recognizes native live edits without applying final commands a second time',
   PM.hist = { mark: vi.fn(() => ({ index: -1, topId: null })), squash: vi.fn() };
   PM.Edit = { apply: vi.fn(() => ({ ok: true })) };
   PM.AgentHarness = {
-    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    ...PM.AgentHarness,
+    observeVisual: vi.fn(async () => ({ state: {}, times: [], images: [] })),
     cleanCommand: vi.fn(command => command),
   };
   PM.CodexBridge.request = vi.fn(async () => {
+    if (PM.CodexBridge.request.mock.calls.length > 1) return emptyAgentResult;
     PM.proj.revision = 1;
     return {
       text: JSON.stringify({
@@ -529,7 +533,8 @@ it('recognizes native live edits without applying final commands a second time',
   await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
 
   assert.equal(PM.AgentUI.state.run.changed, true);
-  assert.equal(PM.AgentUI.state.run.checkpoint.historyId, 'native-history-1');
+  assert.equal(PM.AgentUI.state.run.undoRuns[0].checkpoint.historyId, 'native-history-1');
+  assert.equal(PM.CodexBridge.request.mock.calls.length, 2, 'automatically reviews native edits');
   assert.equal(PM.AgentUI.state.run.reviewError, '');
   assert.equal(PM.Edit.apply.mock.calls.length, 0);
 });
@@ -539,7 +544,8 @@ it('notifies the active autonomous agent when the user changes the project', asy
   PM.proj = { id: 'project-1', name: 'Test Project', revision: 0, layers: [], edits: [] };
   PM.hist = { mark: vi.fn(() => ({ index: -1, topId: null })), squash: vi.fn() };
   PM.AgentHarness = {
-    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    ...PM.AgentHarness,
+    observeVisual: vi.fn(async () => ({ state: {}, times: [], images: [] })),
     cleanCommand: vi.fn(command => command),
   };
   PM.CodexBridge.steer = vi.fn(async () => true);
@@ -567,7 +573,8 @@ it('does not notify the autonomous agent about its own live project edits', asyn
   PM.proj = { id: 'project-1', name: 'Test Project', revision: 0, layers: [], edits: [] };
   PM.hist = { mark: vi.fn(() => ({ index: -1, topId: null })), squash: vi.fn() };
   PM.AgentHarness = {
-    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    ...PM.AgentHarness,
+    observeVisual: vi.fn(async () => ({ state: {}, times: [], images: [] })),
     cleanCommand: vi.fn(command => command),
   };
   PM.CodexBridge.steer = vi.fn(async () => true);
@@ -589,6 +596,8 @@ it('does not notify the autonomous agent about its own live project edits', asyn
     text: JSON.stringify({ summary: 'Done', commands: [], artifacts: [], externalActions: [], notes: [] }),
     liveEditsApplied: true,
   });
+  await vi.waitFor(() => assert.equal(PM.CodexBridge.request.mock.calls.length, 2));
+  finish(emptyAgentResult);
   await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
 });
 
@@ -600,7 +609,8 @@ it('imports autonomous artifacts even when the project changed during the run', 
     squash: vi.fn(() => 'agent-history'),
   };
   PM.AgentHarness = {
-    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    ...PM.AgentHarness,
+    observeVisual: vi.fn(async () => ({ state: {}, times: [], images: [] })),
     cleanCommand: vi.fn(command => command),
   };
   const media = new File(['clip'], 'clip.mp4', { type: 'video/mp4' });
@@ -704,7 +714,8 @@ it('reconciles stale autonomous commands against the latest project before apply
   };
   PM.Edit = { apply: vi.fn(() => ({ ok: true })) };
   PM.AgentHarness = {
-    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    ...PM.AgentHarness,
+    observeVisual: vi.fn(async () => ({ state: {}, times: [], images: [] })),
     cleanCommand: vi.fn(value => value),
     sanitizeProposal: vi.fn(value => value),
     sceneSchema: vi.fn(() => ({ type: 'object' })),
@@ -724,6 +735,7 @@ it('reconciles stale autonomous commands against the latest project before apply
         extensions: [],
       };
     }
+    if (PM.CodexBridge.request.mock.calls.length > 2) return emptyAgentResult;
     return JSON.stringify({
       kind: 'scene', operation: 'modify', targetPanelId: '', dockId: '', placement: 'replace',
       message: 'Reconciled the edit', steps: ['Reconcile the source'],
@@ -734,12 +746,12 @@ it('reconciles stale autonomous commands against the latest project before apply
   PM.AgentUI.submit('Update the composition');
   await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result', JSON.stringify(PM.AgentUI.state.conversation)));
 
-  assert.equal(PM.CodexBridge.request.mock.calls.length, 2, 'uses a read-only reconciliation pass');
+  assert.equal(PM.CodexBridge.request.mock.calls.length, 3, 'reconciles source, then reviews rendered output');
   assert.equal(PM.CodexBridge.request.mock.calls[1][3].mode, undefined);
   assert.deepEqual(PM.Edit.apply.mock.calls[0][0], [command]);
   assert.equal(PM.Edit.apply.mock.calls[0][1].baseRevision, 1);
   assert.equal(PM.AgentUI.state.run.reviewError, '');
-  assert.equal(PM.AgentUI.state.run.checkpoint.historyId, 'agent-history');
+  assert.equal(PM.AgentUI.state.run.undoRuns[0].checkpoint.historyId, 'agent-history');
 });
 
 function placementHarness() {
@@ -751,7 +763,7 @@ function placementHarness() {
   PM.hist = { mark: vi.fn(() => 1), squash: vi.fn() };
   PM.AgentHarness = {
     ...PM.AgentHarness,
-    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    observeVisual: vi.fn(async () => ({ state: {}, times: [], images: [] })),
     cleanCommand: vi.fn(command => command),
   };
   const jobs = [];
@@ -985,13 +997,15 @@ it('keeps a project-tab run alive and applies its result only after returning', 
   assert.equal(PM.AgentUI.state.conversation.length, 0);
   PM.proj = original;
   PM.bus.emit('project');
+  await vi.waitFor(() => assert.equal(jobs.length, 2));
+  jobs[1].resolve(emptyAgentResult);
   await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
   assert.equal(PM.AgentUI.state.threadId, first);
   assert.equal(PM.AgentUI.state.run.projectId, original.id);
   assert.equal(PM.AgentUI.state.conversation.at(-1).text, 'Done');
   assert.equal(PM.Edit.apply.mock.calls.length, 1);
   assert.equal(original.bg, '#123456');
-  assert.equal(jobs.length, 1, 'returning never restarts the model request');
+  assert.equal(jobs.length, 2, 'returning finishes the original edit and its visual review');
   assert.equal(jobs[0].options.signal.aborted, false);
 });
 
@@ -1467,7 +1481,7 @@ it('sending an agent message does not clone or rewrite the saved Takes archive',
   PM.proj = { id: 'checkpoint-project', name: 'Project', revision: 0, layers: [] };
   PM.hist = { mark: vi.fn(() => 1), squash: vi.fn() };
   PM.takes = { save: vi.fn(() => ({ id: 'old-archive-take' })), all: vi.fn(() => []) };
-  PM.AgentHarness = { observe: vi.fn(async () => ({ state: {}, times: [], images: [] })), cleanCommand: vi.fn(c => c) };
+  PM.AgentHarness = { ...PM.AgentHarness, observeVisual: vi.fn(async () => ({ state: {}, times: [], images: [] })), cleanCommand: vi.fn(c => c) };
   PM.CodexBridge.request = vi.fn(async () => ({ text: JSON.stringify({ summary: 'Done', commands: [], artifacts: [], externalActions: [], notes: [] }), extensions: [] }));
   PM.AgentUI.submit('Continue');
   await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));

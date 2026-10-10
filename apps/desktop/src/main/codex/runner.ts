@@ -445,6 +445,7 @@ export class CodexRunner {
             artifactPath: `artifacts/${layout.runId}`,
             access: authority,
             context: req.context,
+            request: prompt,
             extensionsDir: layout.extensionsDir
           }) + (options.additionalInstructions ? `\n\n${options.additionalInstructions}` : ''),
           prompt,

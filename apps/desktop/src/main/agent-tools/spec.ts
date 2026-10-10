@@ -47,8 +47,8 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   },
   {
     name: 'get_project_state',
-    description: 'Read the live Powermove composition, selection, layers, editable properties, keyframes, effects, markers, and current revision. Call this again after edits or a revision conflict to refresh the edit baseline, then adjust commands to the observed state and retry. Results are paged: use layerOffset/layerLimit, layerId, propertyOffset/propertyLimit and keyframeOffset/keyframeLimit; counts indicate omitted data.',
-    inputSchema: closedObject({ layerOffset: { type: 'integer', minimum: 0 }, layerLimit: { type: 'integer', minimum: 1 }, keyframeOffset: { type: 'integer', minimum: 0 }, layerId: { type: 'string' }, propertyOffset: { type: 'integer', minimum: 0 }, propertyLimit: { type: 'integer', minimum: 1 }, keyframeLimit: { type: 'integer', minimum: 0 }, cueOffset: { type: 'integer', minimum: 0 }, cueLimit: { type: 'integer', minimum: 0 } })
+    description: 'Read live composition, selection, layers, properties, keyframes and revision. For large projects use indexOnly=true for compact layer metadata, follow pagination.nextLayerOffset until null, or use layerSearch (case-insensitive name/ID). Then read layerId, nextPropertyOffset and keyframeOffset/keyframeLimit for full target details. Omitted entries are not unavailable capabilities. Refresh after edits/revision conflicts before retrying commands.',
+    inputSchema: closedObject({ indexOnly: { type: 'boolean' }, layerSearch: { type: 'string', maxLength: 200 }, layerOffset: { type: 'integer', minimum: 0 }, layerLimit: { type: 'integer', minimum: 1 }, keyframeOffset: { type: 'integer', minimum: 0 }, layerId: { type: 'string' }, propertyOffset: { type: 'integer', minimum: 0 }, propertyLimit: { type: 'integer', minimum: 1 }, keyframeLimit: { type: 'integer', minimum: 0 }, cueOffset: { type: 'integer', minimum: 0 }, cueLimit: { type: 'integer', minimum: 0 } })
   },
   {
     name: 'list_media',

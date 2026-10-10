@@ -11,6 +11,30 @@ import { AGENT_SHELL_NETWORK_INSTRUCTIONS, agentResultSchema } from './codex/ins
 const directories: string[] = [];
 afterEach(async () => { for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true }); });
 const event = (delta: any, finish_reason: any = null) => `data: ${JSON.stringify({ choices: [{ delta, finish_reason }] })}\r\n\r\n`;
+it('returns a valid, explicit recovery response rather than cutting off large project JSON', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-api-pages-')); directories.push(directory);
+  let turn = 0;
+  let recovered: any;
+  const fetcher = vi.fn(async (_url: any, options: any) => {
+    if (options.method === 'GET') return new Response(null, { status: 404 });
+    const body = JSON.parse(options.body);
+    if (!body.stream) return Response.json({ choices: [{ message: { content: 'OK' } }] });
+    if (turn++ === 0) return streamed(event({ tool_calls: [{ index: 0, id: 'read', function: { name: 'get_project_state', arguments: '{}' } }] }, 'tool_calls'));
+    recovered = JSON.parse(body.messages.at(-1).content);
+    return streamed(event({ content: JSON.stringify({ operation: 'noop', message: 'Inspected the project.' }) }, 'stop'));
+  }) as typeof fetch;
+  const provider = new CompatibleProvider(directory, fetcher);
+  await provider.configure({ baseUrl: 'http://localhost:11434/v1', model: 'local', vision: false });
+  const result = await provider.run({ id: 'pages', provider: 'compatible', mode: 'editor', access: 'editor', prompt: 'Inspect the project', schema: {}, images: [], attachments: [] } as any, () => {}, async () => ({
+    runId: 'pages', callId: 'read', ok: true, content: [{ type: 'text', text: JSON.stringify({ layers: [{ id: 'title', content: 'x'.repeat(160_000) }], pagination: { nextLayerOffset: 12 } }) }],
+  }));
+  expect(result.ok, JSON.stringify(result)).toBe(true);
+  expect(recovered.ok).toBe(true);
+  expect(recovered.outputTruncated).toBe(true);
+  expect(recovered.content[0].text).toContain('indexOnly');
+  expect(recovered.content[0].text).toContain('layerId');
+});
+
 it('authors and publishes a real effect through API tools, collects artifacts and preserves recovery history', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-api-authoring-')); directories.push(directory);
   const sample = path.resolve('docs/samples/gradient-tint');

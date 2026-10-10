@@ -80,9 +80,9 @@ function defaultTimes() {
   const start = Array.isArray(p.work) ? p.work[0] : 0;
   const end = Array.isArray(p.work) ? p.work[1] : p.dur;
   const selected = PM.selLayers?.() || [];
-  const candidates = selected.length
-    ? [PM.time, ...selected.flatMap((layer: any) => [layer.from, layer.from + layer.dur * .5, layer.from + layer.dur - 1 / p.fps])]
-    : [start, start + (end - start) * .33, start + (end - start) * .67, Math.max(start, end - 1 / p.fps)];
+  const from = selected.length ? Math.min(...selected.map((layer: any) => layer.from)) : start;
+  const to = selected.length ? Math.max(...selected.map((layer: any) => layer.from + layer.dur)) : end;
+  const candidates = [PM.time, from, from + (to - from) * .5, Math.max(from, to - 1 / p.fps)];
   return safeTimes(candidates, [PM.time]);
 }
 
@@ -95,6 +95,7 @@ function propertyDigest(layer: any, options: any = {}) {
     path: item.key,
     value: PM.evP(layer, item.prop, PM.time, item.key),
     keyframeCount: item.prop.kf.length,
+    nextKeyframeOffset: keyOffset + keys < item.prop.kf.length && keys > 0 ? keyOffset + keys : null,
     keyframes: item.prop.kf.slice(keyOffset, keyOffset + keys).map((key: any) => ({
       time: PM.round(key.t, 3), compositionTime: PM.round(layer.from + key.t, 3),
       value: clone(key.v), hold: !!key.hold,
@@ -128,7 +129,13 @@ function projectState(options: any = {}) {
   const p = PM.proj;
   const selectedIds = new Set(PM.sel?.layers || []);
   const layerOffset = Math.max(0, Math.trunc(Number(options.layerOffset) || 0));
-  const layerLimit = Math.max(1, Math.trunc(Number(options.layerLimit) || 12));
+  const layerLimit = Math.min(options.indexOnly ? 200 : 50, Math.max(1, Math.trunc(Number(options.layerLimit) || (options.indexOnly ? 100 : 12))));
+  const search = String(options.layerSearch || '').trim().toLocaleLowerCase();
+  const matching = p.layers.filter((layer: any) => (!options.layerId || layer.id === options.layerId)
+    && (!search || String(layer.name || '').toLocaleLowerCase().includes(search) || layer.id.toLocaleLowerCase().includes(search)));
+  const page = matching.slice(layerOffset, layerOffset + layerLimit);
+  const propertyOffset = Math.max(0, Math.trunc(Number(options.propertyOffset) || 0));
+  const propertyLimit = Math.max(1, Math.trunc(Number(options.propertyLimit) || 100));
   return {
     composition: {
       id: p.id, name: p.name, width: p.w, height: p.h, fps: p.fps,
@@ -136,28 +143,33 @@ function projectState(options: any = {}) {
       playhead: PM.round(PM.time, 3), revision: Number(p.revision) || 0,
     },
     layerCount: p.layers.length,
-    mediaAssets: videoAssets(PM),
+    mediaAssets: options.indexOnly ? [] : videoAssets(PM),
     videoEditingTool: 'edit_video',
     threeDEditingTool:'edit_3d',
-    modelAssets:Object.values<any>(p.assets || {}).filter(a=>a.kind==='model'||a.kind==='image').map(a=>({id:a.id,name:a.name,kind:a.kind,format:a.format})),
+    modelAssets:options.indexOnly ? [] : Object.values<any>(p.assets || {}).filter(a=>a.kind==='model'||a.kind==='image').map(a=>({id:a.id,name:a.name,kind:a.kind,format:a.format})),
     selection: clone(PM.sel),
-    layers: p.layers.filter((layer: any) => !options.layerId || layer.id === options.layerId).slice(layerOffset, layerOffset + layerLimit).map((layer: any) => ({
+    layers: page.map((layer: any) => ({
       index: p.layers.indexOf(layer), id: layer.id, name: layer.name, type: layer.type, from: layer.from,
       duration: layer.dur, visible: layer.on, locked: layer.lock, parent: layer.parent, group: layer.group || null,
       blend: layer.blend, motionBlur: layer.mblur, color: layer.color,
+      ...(options.indexOnly ? {} : {
       content: layer.type === 'captions' ? captionsDigest(layer, options) : clone(layer.d || {}),
       masks: (layer.masks || []).map((m: any) => ({ id: m.id, shape: m.shape, mode: m.mode, hasPath: !!m.path, vertices: m.path?.vertices?.length || 0 })),
       propertyCount: PM.allProps(layer).length,
+      nextPropertyOffset: propertyOffset + propertyLimit < PM.allProps(layer).length ? propertyOffset + propertyLimit : null,
       properties: propertyDigest(layer, options),
       effects: (layer.fx || []).map((effect: any) => ({ id: effect.id, type: effect.type, enabled: effect.on })),
       textLayout: layer.type === 'text' && selectedIds.has(layer.id) && PM.textLayout
         ? PM.textLayout(layer, PM.time) : null,
+      }),
     })),
-    parameters: clone(p.params || {}),
-    markers: clone(p.markers || []),
+    parameters: options.indexOnly ? {} : clone(p.params || {}),
+    markers: options.indexOnly ? [] : clone(p.markers || []),
     availableOperations: [...SCENE_OPERATIONS],
-    availableCapabilities: PM.Capabilities?.catalog?.() || null,
-    pagination: { layerOffset, layerLimit, keyframeOffset: Number(options.keyframeOffset) || 0, propertyOffset: Number(options.propertyOffset) || 0, propertyLimit: Math.max(1, Math.trunc(Number(options.propertyLimit) || 100)), note: 'Properties and keyframes are sampled. Use layerOffset/layerLimit, layerId, propertyOffset/propertyLimit and keyframeOffset/keyframeLimit for focused reads. Full source is in inputs/powermove-project.json (run-start snapshot).' },
+    availableCapabilities: options.indexOnly ? null : PM.Capabilities?.catalog?.() || null,
+    pagination: { layerOffset, layerLimit, matchingLayerCount: matching.length, nextLayerOffset: layerOffset + page.length < matching.length ? layerOffset + page.length : null,
+      indexOnly: !!options.indexOnly, keyframeOffset: Number(options.keyframeOffset) || 0, propertyOffset, propertyLimit,
+      note: 'This page is not the whole composition. Discover all targets with indexOnly=true and follow nextLayerOffset until null, or search with layerSearch. Then read layerId and nextPropertyOffset/keyframeOffset for complete target properties. Omitted layers and channels still exist. inputs/powermove-project.json is only the run-start snapshot.' },
   };
 }
 
@@ -177,6 +189,15 @@ async function observe(times?: any) {
   const chosen = safeTimes(times, []);
   const frames = chosen.length ? await capture(chosen) : { times: [], images: [] };
   return { state: projectState(), ...frames };
+}
+
+/** Capture only on a deliberate agent send/review, never during idle reads. */
+async function observeVisual(times?: any) {
+  const chosen = safeTimes(times, defaultTimes());
+  try { return { state: projectState(), ...await capture(chosen), visualError: '' }; }
+  catch (error: any) {
+    return { state: projectState(), times: [], images: [], visualError: `Composition preview unavailable: ${String(error?.message || error)}` };
+  }
 }
 
 function cleanCommand(raw: any) {
@@ -266,11 +287,14 @@ function reviewSchema() {
 }
 
 function promptContext(observation: any) {
-  return `\nLIVE COMPOSITION SOURCE\n${JSON.stringify(observation?.state || projectState())}\n\nRENDERED FRAME TIMES\n${JSON.stringify(observation?.times || [])}`;
+  let source = JSON.stringify(observation?.state || projectState());
+  if (source.length > 72_000) source = JSON.stringify({ ...projectState({ indexOnly: true, layerLimit: 50 }),
+    note: 'Detailed source exceeded automatic context budget. This is a compact index page; use get_project_state layerId/propertyOffset/keyframeOffset to recover full target details before editing.' });
+  return `\nLIVE COMPOSITION SOURCE\n${source}\n\nRENDERED FRAME TIMES\n${JSON.stringify(observation?.times || [])}\n\nVISUAL CAPTURE STATUS\n${observation?.visualError || (observation?.images?.length ? 'Representative frames attached; inspect them.' : 'No images attached; do not claim visual verification.')}`;
 }
 
 function reviewPrompt(request: any, applied: any, pass: any, observation: any) {
-  return `You are the review stage inside Powermove's bounded motion-editing harness. Judge the result against the user's request and the live semantic source. Frames are only attached when explicitly requested through reviewTimes; when there are no frames, do not claim visual verification. Leave reviewTimes empty unless you need to inspect specific moments.
+  return `You are the review stage inside Powermove's bounded motion-editing harness. Judge the result against the user's request, attached representative frames, and live semantic source. Ask for additional reviewTimes when a defect needs closer inspection. When capture fails, explain the verification limit; never claim a visual pass from source alone.
 
 USER REQUEST
 ${request}
@@ -291,7 +315,9 @@ REVIEW CONTRACT
 ${AGENT_RESPONSE_STYLE}`;
 }
 
-async function execute(request: any, proposal: any, progress: any = () => {}) {
+async function execute(request: any, proposal: any, progress: any = () => {}, reviewOptions: any = {}) {
+  // Copy once: a picker change mid-review must not change later repair rounds.
+  const settings = { ...reviewOptions, mode: 'editor', access: 'editor', context: 'project' };
   const historyMark = PM.hist.mark?.() || null;
   const historyGroup = PM.uid('agent-history');
   const editStart = Array.isArray(PM.proj.edits) ? PM.proj.edits.length : 0;
@@ -313,10 +339,11 @@ async function execute(request: any, proposal: any, progress: any = () => {}) {
   try {
     for (let pass = 0; pass <= MAX_REPAIRS; pass++) {
       progress(pass ? `Reviewing repair ${pass} of ${MAX_REPAIRS}…` : 'Reviewing the source edit…');
-      frames = await observe(proposal.reviewTimes);
+      frames = await observeVisual(proposal.reviewTimes);
+      if (frames.visualError) reviewError = frames.visualError;
       const raw = await PM.CodexBridge.request(
         reviewPrompt(request, applied, pass, frames), reviewSchema(), frames.images,
-        { onProgress: (summary: any) => progress(summary) },
+        { ...settings, onProgress: (summary: any) => progress(summary) },
       );
       review = JSON.parse(raw);
       const repair = sanitizeProposal(review);
@@ -332,8 +359,8 @@ async function execute(request: any, proposal: any, progress: any = () => {}) {
   } catch (error: any) {
     reviewError = String(error.message || error);
   }
-  /* Refresh final source, capturing pixels only at agent-requested times. */
-  try { frames = await observe(proposal.reviewTimes); }
+  /* Refresh final pixels after repairs, using representative times by default. */
+  try { frames = await observeVisual(proposal.reviewTimes); if (frames.visualError) reviewError = frames.visualError; }
   catch (error: any) {
     reviewError = reviewError || String(error.message || error);
     frames = frames || { state: projectState(), times: proposal.reviewTimes, images: [] };
@@ -859,7 +886,7 @@ nativeAgentTools?.onRequest((request) => {
 });
 
 PM.AgentHarness = {
-  MAX_REPAIRS, projectState, defaultTimes, observe, capture, sanitizeProposal,
+  MAX_REPAIRS, projectState, defaultTimes, observe, observeVisual, capture, sanitizeProposal,
   describeCommand, sceneSchema, promptContext, execute, rollback, cleanCommand,
   test: { cleanCommand, safeTimes, reviewSchema, handleLiveAgentTool },
 };

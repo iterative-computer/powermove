@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AgentThreads, normalizeGeneratedThreadTitle, threadTitle, threadMessageText } from './threads';
+import { AgentThreads, conversationForAgent, conversationContextForAgent, normalizeGeneratedThreadTitle, threadTitle, threadMessageText } from './threads';
 
 function setup() {
   const saved = new Map<string, unknown>(); let id = 0;
@@ -9,6 +9,35 @@ function setup() {
 }
 
 describe('agent thread archive', () => {
+  it('protects older decisions and answered questions from verbose recent replies', () => {
+    const { make } = setup(); const threads = make(); threads.load('decisions');
+    threads.active.conversation.push({ role: 'user', text: 'Create the title sequence.' },
+      { role: 'user', text: 'Use our existing serif font throughout.' },
+      { role: 'trace', steps: [{ kind: 'question', id: 'q', status: 'answered', transport: 'reply', blocking: false, questions: [{ id: 'color', question: 'Which palette?', header: 'Color', options: [], allowOther: true, secret: false }], answers: { color: 'Blue and white.' } }] });
+    for (let i = 0; i < 30; i++) threads.active.conversation.push({ role: 'assistant', text: 'Detailed inspection. '.repeat(1000) });
+    threads.active.conversation.push({ role: 'user', text: 'Keep the font, but use green instead of blue.' });
+    threads.save(); const restored = make(); restored.load('decisions');
+    const context = JSON.parse(conversationContextForAgent(restored.active.conversation, restored.activeId));
+    expect(context.messages.find((turn: any) => turn.position === 1).text).toContain('serif font');
+    expect(context.messages.find((turn: any) => turn.position === 2).text).toContain('Blue and white.');
+    expect(context.messages.at(-1).text).toContain('green instead');
+    expect(context.guidance).toContain('newest user direction wins');
+    expect(context.guidance).toContain('offset=position');
+    expect(context.messages.reduce((sum: number, turn: any) => sum + turn.text.length, 0)).toBeLessThanOrEqual(40_000);
+    expect(threadMessageText(restored.active.conversation[3]!)).toHaveLength('Detailed inspection. '.repeat(1000).length);
+  });
+
+  it('retains the original brief and older decisions after long conversations and restart', () => {
+    const { make } = setup(); const threads = make(); threads.load('memory');
+    threads.active.conversation.push({ role: 'user', text: 'Keep the title readable for two seconds and use warm colors.' });
+    for (let i = 0; i < 40; i++) threads.active.conversation.push({ role: 'assistant', text: `Checked layer ${i}.` });
+    threads.active.conversation.push({ role: 'user', text: 'Use cool colors instead; keep the readable hold.' });
+    threads.save(); const restored = make(); restored.load('memory');
+    const context = conversationForAgent(restored.active.conversation);
+    expect(context.find(turn => turn.text.includes('readable for two seconds'))).toBeDefined();
+    expect(context.at(-1)?.text).toContain('cool colors instead');
+  });
+
   it('keeps model-controlled settings and retry metadata across restart', () => {
     const { make } = setup(); const threads = make(); threads.load('project');
     Object.assign(threads.active, { provider: 'claude', model: 'claude-sonnet-5-5', reasoningEffort: 'high', access: 'project', lastRunId: 'controlled-run', lastRunStatus: 'completed', orchestration: { callerThreadId: 'parent', clientRequestId: 'launch', fingerprint: 'a'.repeat(64) }, controls: [{ callerThreadId: 'parent', clientRequestId: 'followup', fingerprint: 'b'.repeat(64), runId: 'controlled-run' }] });
