@@ -18,7 +18,7 @@ import { forkBuiltinExtension } from '../extensions/fork';
 import { POWERMOVE_AGENT_TOOLS, POWERMOVE_APP_AGENT_TOOLS, POWERMOVE_LIVE_INSPECTION_TOOL_NAMES, POWERMOVE_STORE_TOOL_NAMES, type NativeMcpServerConfig } from './spec';
 import { ORCHESTRATION_TOOL_NAMES } from '../../shared/agent-orchestration';
 import type { StoreAgentGateway, StoreInstallInput, StorePublishInput, StoreSearchInput } from '../cloud/store-agent';
-import { inspectCreativeWorkspace } from '../creative-workspace';
+import { inspectCreativeExtension, inspectCreativeWorkspace } from '../creative-workspace';
 import { userInput, type UserInput } from '../user-input';
 
 const STORE_TOOL_NAMES = new Set<string>(POWERMOVE_STORE_TOOL_NAMES);
@@ -426,9 +426,9 @@ export class PowermoveAgentToolBridge {
       const result = await this.options.orchestrate(session.runId, tool, args);
       return { runId: session.runId, callId: `tool-${randomUUID()}`, ok: true, content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
-    if (tool === 'inspect_creative_workspace') {
+    if (tool === 'inspect_creative_workspace' || tool === 'inspect_creative_extension') {
       return { runId: session.runId, callId: `tool-${randomUUID()}`, ok: true,
-        content: [{ type: 'text', text: JSON.stringify(await inspectCreativeWorkspace(args)) }] };
+        content: [{ type: 'text', text: JSON.stringify(await (tool === 'inspect_creative_workspace' ? inspectCreativeWorkspace(args) : inspectCreativeExtension(args))) }] };
     }
     if (tool === 'fork_builtin_extension') {
       const request: ToolSocketRequest = { token: session.token, runId: session.runId, id: null, tool, arguments: args, workspace };

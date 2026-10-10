@@ -31,6 +31,28 @@ describe('onboarding workspace agent handoff', () => {
     await workspaceImportHandoff(inProject, async () => true).start('after-effects');
     expect(inProject.newBlankProject).not.toHaveBeenCalled();
   });
+  it('leaves the project and draft alone when another run prevents switching context', async () => {
+    const PM = { ...host(), ProjectsScreen: { isOpen: true }, newBlankProject: vi.fn() };
+    PM.AgentUI.openGlobal.mockReturnValue(false);
+    const connected = vi.fn(async () => true);
+    expect(await workspaceImportHandoff(PM, connected).start('after-effects')).toBe(false);
+    expect(PM.newBlankProject).not.toHaveBeenCalled();
+    expect(PM.AgentUI.newThread).not.toHaveBeenCalled();
+    expect(PM.AgentUI.setDraft).not.toHaveBeenCalled();
+    expect(connected).not.toHaveBeenCalled();
+  });
+  it('keeps the selected agent and model when the app conversation has different saved choices', async () => {
+    const PM = host();
+    Object.assign(PM.AgentUI.state, { provider: 'claude', model: 'opus', reasoningEffort: 'high' });
+    PM.AgentUI.openGlobal.mockImplementation(() => {
+      Object.assign(PM.AgentUI.state, { provider: 'chatgpt', model: 'gpt-5.6-sol', reasoningEffort: 'low' });
+    });
+    const setProvider = vi.fn(); const setModel = vi.fn();
+    Object.assign(PM.AgentUI, { setProvider, setModel });
+    await workspaceImportHandoff(PM, async () => true).start('after-effects');
+    expect(setProvider).toHaveBeenCalledExactlyOnceWith('claude');
+    expect(setModel).toHaveBeenCalledExactlyOnceWith('opus', 'high');
+  });
   it('never sends a changed draft or a request in a different thread', async () => {
     const PM = host(); const handoff = workspaceImportHandoff(PM, async () => false);
     await handoff.start('after-effects');

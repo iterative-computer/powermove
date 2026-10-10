@@ -11,6 +11,12 @@ it('persists the imported workspace preference', () => {
   expect(storeFileName(parsed!)).toBe('defaultWorkspace.json');
 });
 
+it('persists After Effects extension provenance', () => {
+  const parsed = parseStoreKey('afterEffectsExtensions');
+  expect(parsed).toEqual({ kind: 'static', key: 'afterEffectsExtensions' });
+  expect(storeFileName(parsed!)).toBe('afterEffectsExtensions.json');
+});
+
 it('allows project-local thread archives without allowing filesystem traversal', () => {
   const parsed = parseStoreKey('agentThreads.project-123');
   expect(parsed).toEqual({kind:'dynamic',prefix:'agentThreads',id:'project-123'});
