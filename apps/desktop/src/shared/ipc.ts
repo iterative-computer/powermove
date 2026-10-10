@@ -86,6 +86,7 @@ export const IPC = {
   codexCancelTask: 'codex:cancel-task',
   codexFixPrompt: 'codex:fix-prompt',
   codexRebasePrompt: 'codex:rebase-prompt',
+  codexUpdateFork: 'codex:update-fork',
   codexRestoreChangeSet: 'codex:restore-change-set',
   codexEvent: 'codex:event', // main → renderer
   agentToolRequest: 'agent-tool:request', // main → renderer
@@ -427,6 +428,10 @@ export interface CodexFixPromptRequest {
 export interface CodexRebasePromptRequest {
   id: string;
 }
+
+export type ForkUpdateResult =
+  | { kind: 'updated'; version: string; projectId: string; changeSetId: string }
+  | { kind: 'needs-agent'; reason: 'conflict' | 'validation'; conflicts: string[] };
 
 /* Structured activity, streamed from main as it happens. Every `thought` and
    `answer` event is an APPEND-ONLY fragment: the renderer concatenates
@@ -777,6 +782,7 @@ export interface PowermoveBridge {
     cancelTask?(requestId: string, taskId: string): Promise<void>;
     fixPrompt(req: CodexFixPromptRequest): Promise<string>;
     rebasePrompt(req: CodexRebasePromptRequest): Promise<string>;
+    updateFork(req: CodexRebasePromptRequest): Promise<ForkUpdateResult>;
     restoreChangeSet(req: AgentChangeSetRestoreRequest): Promise<AgentChangeSetRestoreResult>;
     requestComputerConsent(req: ConsentRequest): Promise<ConsentResult>;
   };
