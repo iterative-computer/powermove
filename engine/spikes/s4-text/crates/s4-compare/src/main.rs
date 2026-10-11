@@ -164,8 +164,10 @@ fn by_ptr_len(_ptr: usize, id: FaceId) -> FaceId {
     id
 }
 
-/// Debug: `s4-compare --shape TEXT [--font F] [--weight W] [--size S] [--tracking T]`
-/// prints Blink-port runs with their faces and advances.
+/// Debug: `s4-compare --shape TEXT [--font F] [--weight W] [--size S] [--tracking T]
+/// [--axes wght=700,wdth=80]` prints Blink-port runs with their faces and
+/// advances. `--axes` routes `--font` through its `FontFace` source as the
+/// corpus does.
 pub fn shape_debug(text: &str) {
     use s4_layout::blink::measure;
     use s4_layout::legacy::TextContent;
@@ -179,7 +181,20 @@ pub fn shape_debug(text: &str) {
     };
     let mut registry = CoreTextRegistry::new();
     let mut cache = PreparedCache::default();
-    let fams = s4_layout::canvas::families(&d, None);
+    let custom = arg("--axes").map(|axes| {
+        let family = d.font.clone().expect("--axes needs --font");
+        let path = VARIABLE_SOURCES.iter().find(|(f, _)| *f == family).map(|(_, p)| *p).expect("a corpus variable family");
+        let face = registry.register_custom(FontBytes(Arc::new(std::fs::read(path).unwrap())), 0);
+        let settings = axes
+            .split(',')
+            .map(|kv| {
+                let (k, v) = kv.split_once('=').expect("tag=value");
+                (s4_layout::font::tag(k.as_bytes().try_into().expect("4-byte tag")), v.parse::<f32>().unwrap())
+            })
+            .collect();
+        (face, settings)
+    });
+    let fams = s4_layout::canvas::families(&d, custom);
     let setup = measure::build_setup(&mut registry, &fams, s4_layout::canvas::font_desc(&d), s4_layout::canvas::letter_spacing(&d));
     for g in &setup.group {
         println!("group face {} {}", g.face(), registry.face(g.face()).postscript_name);

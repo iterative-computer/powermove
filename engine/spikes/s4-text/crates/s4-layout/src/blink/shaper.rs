@@ -208,7 +208,11 @@ impl BlinkFuncs<'_> {
             return 0;
         }
         let metrics = self.face.font.glyph_metrics();
-        let units = metrics.h_advance(glyph);
+        let mut units = metrics.h_advance(glyph);
+        if self.face.phantom_advances {
+            // CoreText moves the phantom points by the rounded `gvar` delta.
+            units = units.round();
+        }
         let px = match self.face.em_advance {
             // CoreText's strike-sized color glyph advance, proportional to hmtx.
             Some(em) => (units as f64 * em as f64 / self.face.upem as f64) as f32,

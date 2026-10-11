@@ -124,6 +124,9 @@ pub struct PreparedFace {
     pub has_trak: bool,
     pub has_sbix: bool,
     pub has_color_table: bool,
+    /// Varied advances come from `gvar` phantom points (no `HVAR`), which
+    /// CoreText rounds to whole font units.
+    pub phantom_advances: bool,
     pub space_glyph: Option<u32>,
     pub synthetic_bold: bool,
     pub synthesized_hyphens: [Option<u16>; 2],
@@ -208,6 +211,7 @@ pub fn prepare(info: &FaceInfo, coords: Vec<(u32, f32)>, size: f32, em_advance: 
     let has_trak = has(b"trak");
     let has_sbix = has(b"sbix");
     let has_color_table = has_sbix || has(b"COLR") || has(b"CBDT") || has(b"SVG ");
+    let phantom_advances = !coords.is_empty() && has(b"gvar") && !has(b"HVAR");
     let upem = font.units_per_em();
     let space_glyph = font.charmap().map_unicode(0x20u32).map(|g| g.to_u32());
     Some(PreparedFace {
@@ -218,6 +222,7 @@ pub fn prepare(info: &FaceInfo, coords: Vec<(u32, f32)>, size: f32, em_advance: 
         has_trak,
         has_sbix,
         has_color_table,
+        phantom_advances,
         space_glyph,
         synthetic_bold: info.synthetic_bold,
         synthesized_hyphens: info.synthesized_hyphens,
