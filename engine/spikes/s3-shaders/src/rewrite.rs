@@ -15,7 +15,7 @@ use rspirv::dr::{Instruction, Module, Operand};
 use rspirv::spirv::{Decoration, Op, StorageClass, Word};
 
 /// Sampler variables are bound at `image binding + SAMPLER_BINDING_OFFSET`.
-pub const SAMPLER_BINDING_OFFSET: u32 = 16;
+pub const SAMPLER_BINDING_OFFSET: u32 = 32;
 
 #[derive(Debug, Clone)]
 pub struct RewriteError(pub String);
@@ -100,6 +100,46 @@ pub fn remap_varyings(module: &mut Module, locations: &[(&str, u32)]) {
                     inst.operands[2] = Operand::LiteralBit32(location);
                 }
             }
+        }
+    }
+}
+
+/// Give every resource of a stage a distinct binding in declaration order: the
+/// default uniform block keeps `block_binding`, and each `UniformConstant`
+/// variable (the `sampler2D`s) takes the next free number after it.
+///
+/// glslang's automatic bindings only cover live resources, so a declared but
+/// unused `sampler2D` (legal in GL, where it is simply inactive) kept binding 0
+/// and collided with the default block.
+pub fn assign_bindings(module: &mut Module, block_binding: u32) {
+    let mut next = block_binding + 1;
+    let variables: Vec<(Word, StorageClass)> = module
+        .types_global_values
+        .iter()
+        .filter(|inst| inst.class.opcode == Op::Variable)
+        .filter_map(|inst| match inst.operands.first() {
+            Some(Operand::StorageClass(class @ (StorageClass::Uniform | StorageClass::UniformConstant))) => Some((inst.result_id?, *class)),
+            _ => None,
+        })
+        .collect();
+    for (id, class) in variables {
+        let binding = if class == StorageClass::Uniform {
+            block_binding
+        } else {
+            next += 1;
+            next - 1
+        };
+        let mut found = false;
+        for inst in module.annotations.iter_mut() {
+            if inst.class.opcode == Op::Decorate && id_operand(inst, 0) == Some(id) {
+                if let Some(Operand::Decoration(Decoration::Binding)) = inst.operands.get(1) {
+                    inst.operands[2] = Operand::LiteralBit32(binding);
+                    found = true;
+                }
+            }
+        }
+        if !found {
+            module.annotations.push(Instruction::new(Op::Decorate, None, None, vec![Operand::IdRef(id), Operand::Decoration(Decoration::Binding), Operand::LiteralBit32(binding)]));
         }
     }
 }
@@ -389,6 +429,29 @@ mod tests {
         split_combined_samplers(&mut module).unwrap();
         let words = assemble(&module);
         naga::front::spv::Frontend::new(words.into_iter(), &naga::front::spv::Options::default()).parse().expect("types precede uses");
+    }
+
+    #[test]
+    fn unused_samplers_get_their_own_binding() {
+        let src = "#version 450\nuniform sampler2D u_tex; uniform sampler2D u_orig; uniform float u_time;\nout vec4 o;\nvoid main(){ o = vec4(u_time) + texture(u_orig, vec2(0.5)); }\n";
+        let spv = compile(src, Stage::Fragment).unwrap();
+        let mut module = load(&spv.words).unwrap();
+        assign_bindings(&mut module, 0);
+        let binding_of = |name: &str| {
+            let id = names(&module).into_iter().find(|(_, n)| n == name).map(|(id, _)| id).unwrap();
+            decoration_value(&module, id, Decoration::Binding).unwrap()
+        };
+        let block = module
+            .types_global_values
+            .iter()
+            .find(|inst| inst.class.opcode == Op::Variable && matches!(inst.operands.first(), Some(Operand::StorageClass(StorageClass::Uniform))))
+            .and_then(|inst| inst.result_id)
+            .unwrap();
+        assert_eq!(decoration_value(&module, block, Decoration::Binding), Some(0));
+        // SPIR-V order is glslang's emission order (live resources first).
+        let mut samplers = [binding_of("u_tex"), binding_of("u_orig")];
+        samplers.sort();
+        assert_eq!(samplers, [1, 2], "the unused sampler no longer shares binding 0 with the block");
     }
 
     #[test]

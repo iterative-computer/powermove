@@ -109,6 +109,7 @@ fn stage_spirv(source: &str, stage: Stage, line_offset: u32, timings: &mut HashM
     })?;
     timings.insert(format!("{prefix}glslang"), ms(start));
     let mut module = rewrite::load(&spv.words).map_err(|e| Failure::new("rewrite", e.0))?;
+    rewrite::assign_bindings(&mut module, compile::DEFAULT_BLOCK_BINDING);
     if stage == Stage::Fragment {
         rewrite::remap_varyings(&mut module, VARYINGS);
     }
