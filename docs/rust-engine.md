@@ -823,6 +823,11 @@ writes from imported After Effects scripts), and web exports carry GLSL ES 3.00
 with Powermove's preambles, `u_<param>` uniforms, and `u_p<i>` and `u_c<i>`
 aliases.
 
+**No shader is dropped.** Every known GLSL source (the repository, the Store, the
+docs samples, and agent-written local extensions) must compile and match its
+WebGL output within the parity tolerances before cutover. A failure is fixed in
+the pipeline, never by removing or rewriting the user's shader.
+
 1. **Wrap** with the existing generators.
 2. **Normalize:** `#version 300 es` → `#version 450`; remove precision
    qualifiers; inject `pm_FragCoord` in place of `gl_FragCoord`.
@@ -1354,7 +1359,7 @@ memory-pressure warnings, including a run with a Blender export in progress.
 | `render.gl.bounds`, `pick`, `previewViewport` | `pm-wasm`; for 3D layers, mesh raycasts and projected bounds with the editor camera and Local View |
 | `render.gl.init`, `resize` | Viewer-internal; mapped to the bridge |
 | `render.gl.compileError` | Engine compiler, mirrored |
-| `render.gl.context` | `null` with a deprecation warning |
+| `render.gl.context` | The compositor's WebGL context no longer exists. Phase 0 audits the Store and known local extensions for use; any user gets an equivalent path through extension layers before cutover. Then `null` with a deprecation warning; the two built-in call sites are rewritten |
 | `render.raster()` | Metrics from `pm-wasm`; pixels deprecated |
 | `render.renderFrameTo()`, `render.textLayout` | Async engine render; `pm-wasm` |
 | `scene3d.edit`, `describe`, `selection`, `select`, `isGroup`, `create*`, `convert`, `model`, `setMaterial`, `setRendering` | Unchanged at the document level; `describe` evaluates through `pm-wasm` |
@@ -1703,6 +1708,8 @@ Work:
 - Opt-in crash and session reporting (decision 10).
 - The FFmpeg replacement track (section 24).
 - Frozen lane contracts (section 27).
+- Audit of the Store and known local extensions for `render.gl.context`, the
+  `raster` override, and other deprecated surfaces (section 20).
 - Spikes, each a throwaway branch with a written result:
   - **S1 frame bridge** (section 18), including 3D orbit latency.
   - **S2 precision and encode:** ProRes 4444 XQ round trip; VideoToolbox formats;
@@ -1857,6 +1864,11 @@ Each with its own plan, roughly in this order:
 10. OpenFX hosting out of process.
 11. `pm-doc`: edit pipeline and history in Rust, ticks on disk.
 12. PSD and multi-part EXR layers; FBX; FCPXML and OTIO; 3D Text from `pm-text`.
+13. Shell review: Electron or Tauri. The engine is host-agnostic, so a move reuses
+    it. The review weighs WKWebView differences on macOS (Chromium-only CSS such
+    as `corner-shape`, `queryLocalFonts`), the per-process extension sandbox,
+    the Node main process (agent harness, MCP, save, Store), and agent panel
+    capture, against a smaller app and direct engine hosting.
 
 ## 27. Lanes, contracts, and ownership
 
