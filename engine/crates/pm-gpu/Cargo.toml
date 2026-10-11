@@ -1,0 +1,10 @@
+[package]
+name = "pm-gpu"
+description = "wgpu device, pools, shader compilation, interop, time slicing (section 8)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

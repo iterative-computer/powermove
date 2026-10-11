@@ -1,0 +1,10 @@
+[package]
+name = "pm-geom3d"
+description = "3D geometry: generators, glTF, BVH, depth sets (sections 7 and 8)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

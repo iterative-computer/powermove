@@ -1,0 +1,10 @@
+[package]
+name = "pm-time"
+description = "Ticks, rationals, frame math, timecode (section 5)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

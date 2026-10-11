@@ -1,0 +1,10 @@
+[package]
+name = "pm-model"
+description = "Canonical document model, v1_ingest, id-keyed reconciliation, identity registry (section 6)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

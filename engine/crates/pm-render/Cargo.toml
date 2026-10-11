@@ -1,0 +1,10 @@
+[package]
+name = "pm-render"
+description = "Render graph, 2D layers, 3D scene pass, effects (section 8)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

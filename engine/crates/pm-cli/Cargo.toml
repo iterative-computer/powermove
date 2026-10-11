@@ -1,0 +1,10 @@
+[package]
+name = "pm-cli"
+description = "Headless binary, parity runner, test sinks (section 22)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

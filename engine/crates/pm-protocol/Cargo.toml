@@ -1,0 +1,10 @@
+[package]
+name = "pm-protocol"
+description = "Engine protocol messages and contract types (section 19)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

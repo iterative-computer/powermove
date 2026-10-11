@@ -1,0 +1,10 @@
+[package]
+name = "pm-edit"
+description = "Geometry-dependent edit kernels returning patches (section 6)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

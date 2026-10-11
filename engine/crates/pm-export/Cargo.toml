@@ -1,0 +1,10 @@
+[package]
+name = "pm-export"
+description = "Encoders, muxers, render queue (section 17)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
