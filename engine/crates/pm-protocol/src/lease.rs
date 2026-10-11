@@ -11,7 +11,7 @@ use ts_rs::TS;
 
 use crate::common::{ByteSize, Seq};
 use crate::error::EngineProcess;
-use crate::validate::{ensure, Validate, Violation};
+use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
 
 /// Why a lease changed.
@@ -70,7 +70,9 @@ impl LeaseCategories {
             self.pipelines,
             self.other,
         ];
-        let sum = parts.iter().try_fold(0u64, |acc, part| acc.checked_add(part.get()))?;
+        let sum = parts
+            .iter()
+            .try_fold(0u64, |acc, part| acc.checked_add(part.get()))?;
         ByteSize::new(sum).ok()
     }
 }
@@ -101,15 +103,25 @@ pub struct LeaseRequest {
 
 impl Validate for LeaseUsage {
     fn validate(&self) -> Result<(), Violation> {
-        ensure(self.categories.total() == Some(self.total), ContractId::Lease, || {
-            format!("usage total {} does not equal the category sum {:?}", self.total, self.categories.total())
-        })
+        ensure(
+            self.categories.total() == Some(self.total),
+            ContractId::Lease,
+            || {
+                format!(
+                    "usage total {} does not equal the category sum {:?}",
+                    self.total,
+                    self.categories.total()
+                )
+            },
+        )
     }
 }
 
 impl Validate for Lease {
     fn validate(&self) -> Result<(), Violation> {
-        ensure(self.ack_deadline_ms > 0, ContractId::Lease, || "a lease needs an acknowledgement deadline".into())
+        ensure(self.ack_deadline_ms > 0, ContractId::Lease, || {
+            "a lease needs an acknowledgement deadline".into()
+        })
     }
 }
 
@@ -127,14 +139,21 @@ pub enum LeaseError {
     #[error("usage for epoch {got} but the current epoch is {current}")]
     StaleEpoch { got: Seq, current: Seq },
     #[error("acknowledged epoch {epoch} with {used} bytes over a {granted}-byte lease")]
-    AckOverLease { epoch: Seq, used: ByteSize, granted: ByteSize },
+    AckOverLease {
+        epoch: Seq,
+        used: ByteSize,
+        granted: ByteSize,
+    },
     #[error("lease epochs must increase ({previous} then {next})")]
     EpochNotIncreasing { previous: Seq, next: Seq },
 }
 
 impl LeaseLedger {
     pub fn new(initial: Lease) -> Self {
-        Self { current: initial, acknowledged: None }
+        Self {
+            current: initial,
+            acknowledged: None,
+        }
     }
 
     pub fn current(&self) -> &Lease {
@@ -148,7 +167,10 @@ impl LeaseLedger {
     /// Replaces the lease with a newer epoch.
     pub fn grant(&mut self, next: Lease) -> Result<(), LeaseError> {
         if next.epoch <= self.current.epoch {
-            return Err(LeaseError::EpochNotIncreasing { previous: self.current.epoch, next: next.epoch });
+            return Err(LeaseError::EpochNotIncreasing {
+                previous: self.current.epoch,
+                next: next.epoch,
+            });
         }
         self.current = next;
         Ok(())
@@ -158,11 +180,18 @@ impl LeaseLedger {
     /// acknowledgement must fit the lease.
     pub fn report(&mut self, usage: &LeaseUsage) -> Result<(), LeaseError> {
         if usage.epoch != self.current.epoch {
-            return Err(LeaseError::StaleEpoch { got: usage.epoch, current: self.current.epoch });
+            return Err(LeaseError::StaleEpoch {
+                got: usage.epoch,
+                current: self.current.epoch,
+            });
         }
         if usage.ack {
             if usage.total > self.current.bytes {
-                return Err(LeaseError::AckOverLease { epoch: usage.epoch, used: usage.total, granted: self.current.bytes });
+                return Err(LeaseError::AckOverLease {
+                    epoch: usage.epoch,
+                    used: usage.total,
+                    granted: self.current.bytes,
+                });
             }
             self.acknowledged = Some(usage.epoch);
         }
@@ -189,8 +218,17 @@ mod tests {
     }
 
     fn usage(epoch: u64, frame_cache: u64, ack: bool) -> LeaseUsage {
-        let categories = LeaseCategories { frame_cache: bytes(frame_cache), ..Default::default() };
-        LeaseUsage { process: EngineProcess::Job, epoch: Seq::new(epoch).unwrap(), total: categories.total().unwrap(), categories, ack }
+        let categories = LeaseCategories {
+            frame_cache: bytes(frame_cache),
+            ..Default::default()
+        };
+        LeaseUsage {
+            process: EngineProcess::Job,
+            epoch: Seq::new(epoch).unwrap(),
+            total: categories.total().unwrap(),
+            categories,
+            ack,
+        }
     }
 
     #[test]
@@ -199,7 +237,11 @@ mod tests {
         assert!(report.validate().is_ok());
         report.total = bytes(99);
         assert!(report.validate().is_err());
-        let overflow = LeaseCategories { frame_cache: ByteSize::MAX, render_cache: bytes(1), ..Default::default() };
+        let overflow = LeaseCategories {
+            frame_cache: ByteSize::MAX,
+            render_cache: bytes(1),
+            ..Default::default()
+        };
         assert_eq!(overflow.total(), None);
     }
 
@@ -208,13 +250,27 @@ mod tests {
         let mut ledger = LeaseLedger::new(lease(1, 1000));
         ledger.report(&usage(1, 800, true)).unwrap();
         assert!(ledger.is_acknowledged());
-        ledger.grant(Lease { reason: LeaseReason::PlaybackStarted, ..lease(2, 500) }).unwrap();
+        ledger
+            .grant(Lease {
+                reason: LeaseReason::PlaybackStarted,
+                ..lease(2, 500)
+            })
+            .unwrap();
         assert!(!ledger.is_acknowledged());
-        assert!(matches!(ledger.report(&usage(1, 400, true)), Err(LeaseError::StaleEpoch { .. })));
-        assert!(matches!(ledger.report(&usage(2, 800, true)), Err(LeaseError::AckOverLease { .. })));
+        assert!(matches!(
+            ledger.report(&usage(1, 400, true)),
+            Err(LeaseError::StaleEpoch { .. })
+        ));
+        assert!(matches!(
+            ledger.report(&usage(2, 800, true)),
+            Err(LeaseError::AckOverLease { .. })
+        ));
         ledger.report(&usage(2, 800, false)).unwrap();
         ledger.report(&usage(2, 450, true)).unwrap();
         assert!(ledger.is_acknowledged());
-        assert!(matches!(ledger.grant(lease(2, 900)), Err(LeaseError::EpochNotIncreasing { .. })));
+        assert!(matches!(
+            ledger.grant(lease(2, 900)),
+            Err(LeaseError::EpochNotIncreasing { .. })
+        ));
     }
 }

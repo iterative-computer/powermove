@@ -16,28 +16,38 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
-use crate::blender::{BlenderJobRequest, BlenderModelJob, BlenderProgress, BlenderStatus, BlenderSurface};
+use crate::blender::{
+    BlenderJobRequest, BlenderModelJob, BlenderProgress, BlenderStatus, BlenderSurface,
+};
 use crate::clock::{ClockSample, TransportCommand};
 use crate::color::ProjectColor;
 use crate::common::{CompositionId, DocumentId, RequestId, Revision, SessionId, Ticks};
 use crate::definitions::{DefinitionsApplied, DefinitionsUpdate};
 use crate::document_host::{
-    CloseProject, ExtensionRegistered, OpenProject, Persist, Persisted, ProjectOpened, RegisterExtension, ToolCall, ToolResult,
+    CloseProject, ExtensionRegistered, OpenProject, Persist, Persisted, ProjectOpened,
+    RegisterExtension, ToolCall, ToolResult,
 };
 use crate::error::{CrashReport, EngineError, EngineProcess, FailureReport};
-use crate::frame::{FrameDescriptor, FrameQuality, FrameRelease, FrameRequest, ViewOverride, ViewerState};
+use crate::frame::{
+    FrameDescriptor, FrameQuality, FrameRelease, FrameRequest, ViewOverride, ViewerState,
+};
 use crate::host::{
-    CommitOutput, HandleGrant, HardwareSessionGrant, HardwareSessionRequest, MintHandle, OutputCommitted, OutputDestination,
-    OutputDestinationRequest,
+    CommitOutput, HandleGrant, HardwareSessionGrant, HardwareSessionRequest, MintHandle,
+    OutputCommitted, OutputDestination, OutputDestinationRequest,
 };
 use crate::interop::SurfacePool;
 use crate::lease::{Lease, LeaseRequest, LeaseUsage};
-use crate::patch::{ConsistencyCheck, ConsistencyResult, EngineFact, PatchBatch, PatchesApplied, Resync};
-use crate::priority::{AgentFrameRequest, AgentFrameResult, CancelJobs, ImagePayload, JobAccepted, JobStatus, JobsCancelled, SubmitJob};
+use crate::patch::{
+    ConsistencyCheck, ConsistencyResult, EngineFact, PatchBatch, PatchesApplied, Resync,
+};
+use crate::priority::{
+    AgentFrameRequest, AgentFrameResult, CancelJobs, ImagePayload, JobAccepted, JobStatus,
+    JobsCancelled, SubmitJob,
+};
 use crate::scene::EvaluatedScene;
 use crate::slicing::{DeadlineSignal, SlicingPolicy};
-use crate::validate::{ensure, Validate, Violation};
-use crate::version::{ContractId, Hello, Welcome, WIRE_VERSION};
+use crate::validate::{Validate, Violation, ensure};
+use crate::version::{ContractId, Hello, WIRE_VERSION, Welcome};
 
 /// One protocol message with its routing and revision tags.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -55,7 +65,12 @@ pub struct Envelope {
 
 impl Envelope {
     pub fn new(message: Message) -> Self {
-        Self { wire: WIRE_VERSION, session: None, revision: None, message }
+        Self {
+            wire: WIRE_VERSION,
+            session: None,
+            revision: None,
+            message,
+        }
     }
 
     pub fn with_session(mut self, session: SessionId) -> Self {
@@ -72,17 +87,34 @@ impl Envelope {
 /// The message kinds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum Message {
     Hello(Hello),
     Welcome(Welcome),
-    Request { id: RequestId, body: Request },
-    Response { id: RequestId, body: Response },
-    Error { id: RequestId, error: EngineError },
-    Event { body: Event },
+    Request {
+        id: RequestId,
+        body: Request,
+    },
+    Response {
+        id: RequestId,
+        body: Response,
+    },
+    Error {
+        id: RequestId,
+        error: EngineError,
+    },
+    Event {
+        body: Event,
+    },
     /// Cancel an outstanding request. The receiver answers the request with
     /// an error coded `Cancelled` unless it already answered.
-    Cancel { id: RequestId },
+    Cancel {
+        id: RequestId,
+    },
 }
 
 /// Engine session roles.
@@ -133,7 +165,11 @@ pub struct RenderedImage {
 /// Requests. Each names its direction; a peer answers only requests it serves.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "type")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "type"
+)]
 pub enum Request {
     /// Renderer or host → engine. Answer: `sessionOpened`. Follow with a resync.
     OpenSession(OpenSession),
@@ -188,7 +224,11 @@ pub enum Request {
 /// Responses, one per request kind.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "type")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "type"
+)]
 pub enum Response {
     Ack,
     SessionOpened { session: SessionId },
@@ -217,7 +257,11 @@ pub enum Response {
 /// One-way messages. Each names its direction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "type")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "type"
+)]
 pub enum Event {
     /// pm-wasm → engine (session-bound): canonical patches, in revision order.
     ApplyPatches(PatchBatch),
@@ -286,7 +330,10 @@ impl Request {
     pub const fn expects(&self) -> ResponseKind {
         match self {
             Request::OpenSession(_) => ResponseKind::SessionOpened,
-            Request::CloseSession | Request::BlenderRender(_) | Request::BlenderModel(_) | Request::CloseProject(_) => ResponseKind::Ack,
+            Request::CloseSession
+            | Request::BlenderRender(_)
+            | Request::BlenderModel(_)
+            | Request::CloseProject(_) => ResponseKind::Ack,
             Request::Resync(_) => ResponseKind::PatchesApplied,
             Request::CheckConsistency(_) => ResponseKind::Consistency,
             Request::RenderFrame(_) => ResponseKind::FrameOrImage,
@@ -316,16 +363,23 @@ impl Request {
             Request::Resync(_) | Request::CheckConsistency(_) => ContractId::Patch,
             Request::RenderFrame(_) => ContractId::Frame,
             Request::Evaluate(_) => ContractId::EvaluatedScene,
-            Request::AgentFrames(_) | Request::SubmitJob(_) | Request::CancelJobs(_) => ContractId::Priority,
+            Request::AgentFrames(_) | Request::SubmitJob(_) | Request::CancelJobs(_) => {
+                ContractId::Priority
+            }
             Request::PushDefinitions(_) => ContractId::Definitions,
             Request::GrantLease(_) | Request::RequestLease(_) => ContractId::Lease,
-            Request::MintHandle(_) | Request::OutputDestination(_) | Request::CommitOutput(_) | Request::HardwareSessions(_) => {
-                ContractId::HostServices
+            Request::MintHandle(_)
+            | Request::OutputDestination(_)
+            | Request::CommitOutput(_)
+            | Request::HardwareSessions(_) => ContractId::HostServices,
+            Request::BlenderRender(_) | Request::BlenderStatus | Request::BlenderModel(_) => {
+                ContractId::Blender
             }
-            Request::BlenderRender(_) | Request::BlenderStatus | Request::BlenderModel(_) => ContractId::Blender,
-            Request::OpenProject(_) | Request::CloseProject(_) | Request::Persist(_) | Request::RegisterExtension(_) | Request::ToolCall(_) => {
-                ContractId::DocumentHost
-            }
+            Request::OpenProject(_)
+            | Request::CloseProject(_)
+            | Request::Persist(_)
+            | Request::RegisterExtension(_)
+            | Request::ToolCall(_) => ContractId::DocumentHost,
         }
     }
 
@@ -390,7 +444,12 @@ impl Event {
     pub const fn session_bound(&self) -> bool {
         matches!(
             self,
-            Event::ApplyPatches(_) | Event::PatchesApplied(_) | Event::Frame(_) | Event::ReleaseFrame(_) | Event::Viewer(_) | Event::Transport(_)
+            Event::ApplyPatches(_)
+                | Event::PatchesApplied(_)
+                | Event::Frame(_)
+                | Event::ReleaseFrame(_)
+                | Event::Viewer(_)
+                | Event::Transport(_)
         )
     }
 }
@@ -399,7 +458,10 @@ impl Message {
     /// The contract a message belongs to; it must have been negotiated.
     pub const fn contract(&self) -> ContractId {
         match self {
-            Message::Hello(_) | Message::Welcome(_) | Message::Cancel { .. } | Message::Response { .. } => ContractId::Protocol,
+            Message::Hello(_)
+            | Message::Welcome(_)
+            | Message::Cancel { .. }
+            | Message::Response { .. } => ContractId::Protocol,
             Message::Error { .. } => ContractId::Errors,
             Message::Request { body, .. } => body.contract(),
             Message::Event { body } => body.contract(),
@@ -410,9 +472,17 @@ impl Message {
 impl Validate for Request {
     fn validate(&self) -> Result<(), Violation> {
         match self {
-            Request::OpenSession(open) => ensure(open.document.is_valid(), ContractId::Protocol, || "invalid document id".into()),
+            Request::OpenSession(open) => {
+                ensure(open.document.is_valid(), ContractId::Protocol, || {
+                    "invalid document id".into()
+                })
+            }
             Request::RenderFrame(request) => request.validate(),
-            Request::Evaluate(request) => ensure(request.composition.is_valid(), ContractId::EvaluatedScene, || "invalid composition id".into()),
+            Request::Evaluate(request) => ensure(
+                request.composition.is_valid(),
+                ContractId::EvaluatedScene,
+                || "invalid composition id".into(),
+            ),
             Request::AgentFrames(request) => request.validate(),
             Request::PushDefinitions(update) => update.validate(),
             Request::GrantLease(lease) => lease.validate(),
@@ -471,18 +541,26 @@ impl Validate for Event {
 impl Validate for Envelope {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::Protocol;
-        ensure(self.wire == WIRE_VERSION, C, || format!("wire version {} is not {WIRE_VERSION}", self.wire))?;
+        ensure(self.wire == WIRE_VERSION, C, || {
+            format!("wire version {} is not {WIRE_VERSION}", self.wire)
+        })?;
         match &self.message {
             Message::Hello(_) | Message::Welcome(_) => {
-                ensure(self.session.is_none() && self.revision.is_none(), C, || "hello and welcome carry no session or revision".into())
+                ensure(self.session.is_none() && self.revision.is_none(), C, || {
+                    "hello and welcome carry no session or revision".into()
+                })
             }
             Message::Request { body, .. } => {
-                ensure(!body.session_bound() || self.session.is_some(), C, || "this request needs a session".into())?;
+                ensure(!body.session_bound() || self.session.is_some(), C, || {
+                    "this request needs a session".into()
+                })?;
                 body.validate()
             }
             Message::Response { body, .. } => body.validate(),
             Message::Event { body } => {
-                ensure(!body.session_bound() || self.session.is_some(), C, || "this event needs a session".into())?;
+                ensure(!body.session_bound() || self.session.is_some(), C, || {
+                    "this event needs a session".into()
+                })?;
                 body.validate()
             }
             Message::Error { error, .. } => error.validate(),
@@ -497,7 +575,11 @@ pub enum CorrelationError {
     #[error("no outstanding request {0}")]
     Unknown(RequestId),
     #[error("request {id} expects {expected:?}, got {got:?}")]
-    WrongKind { id: RequestId, expected: ResponseKind, got: ResponseKind },
+    WrongKind {
+        id: RequestId,
+        expected: ResponseKind,
+        got: ResponseKind,
+    },
     #[error("request ids are exhausted on this connection")]
     Exhausted,
 }
@@ -525,13 +607,19 @@ impl Outstanding {
             Message::Response { id, body } => {
                 let expected = *self.pending.get(id).ok_or(CorrelationError::Unknown(*id))?;
                 if expected != body.kind() {
-                    return Err(CorrelationError::WrongKind { id: *id, expected, got: body.kind() });
+                    return Err(CorrelationError::WrongKind {
+                        id: *id,
+                        expected,
+                        got: body.kind(),
+                    });
                 }
                 self.pending.remove(id);
                 Ok(Some(*id))
             }
             Message::Error { id, .. } => {
-                self.pending.remove(id).ok_or(CorrelationError::Unknown(*id))?;
+                self.pending
+                    .remove(id)
+                    .ok_or(CorrelationError::Unknown(*id))?;
                 Ok(Some(*id))
             }
             _ => Ok(None),
@@ -559,20 +647,37 @@ mod tests {
     fn requests_correlate_with_their_response_kind() {
         let mut outstanding = Outstanding::default();
         let id = outstanding.send(&Request::BlenderStatus).unwrap();
-        let wrong = Message::Response { id, body: Response::Ack };
-        assert!(matches!(outstanding.receive(&wrong), Err(CorrelationError::WrongKind { .. })));
+        let wrong = Message::Response {
+            id,
+            body: Response::Ack,
+        };
+        assert!(matches!(
+            outstanding.receive(&wrong),
+            Err(CorrelationError::WrongKind { .. })
+        ));
         assert!(outstanding.is_pending(id));
         let right = Message::Response {
             id,
-            body: Response::BlenderStatus(BlenderStatus { available: false, version: None, error: None }),
+            body: Response::BlenderStatus(BlenderStatus {
+                available: false,
+                version: None,
+                error: None,
+            }),
         };
         assert_eq!(outstanding.receive(&right), Ok(Some(id)));
-        assert_eq!(outstanding.receive(&right), Err(CorrelationError::Unknown(id)));
+        assert_eq!(
+            outstanding.receive(&right),
+            Err(CorrelationError::Unknown(id))
+        );
         let second = outstanding.send(&Request::CloseSession).unwrap();
         assert_ne!(id, second);
         let error = Message::Error {
             id: second,
-            error: EngineError::new(crate::error::ErrorCode::Cancelled, crate::error::ErrorScope::Request { id: second }, "Cancelled."),
+            error: EngineError::new(
+                crate::error::ErrorCode::Cancelled,
+                crate::error::ErrorScope::Request { id: second },
+                "Cancelled.",
+            ),
         };
         assert_eq!(outstanding.receive(&error), Ok(Some(second)));
         assert!(outstanding.is_empty());
@@ -580,7 +685,10 @@ mod tests {
 
     #[test]
     fn session_bound_messages_need_a_session() {
-        let envelope = Envelope::new(Message::Request { id: RequestId::ZERO, body: Request::CloseSession });
+        let envelope = Envelope::new(Message::Request {
+            id: RequestId::ZERO,
+            body: Request::CloseSession,
+        });
         assert!(envelope.validate().is_err());
         assert!(envelope.with_session(SessionId::ZERO).validate().is_ok());
         let hello = Envelope::new(Message::Hello(Hello {

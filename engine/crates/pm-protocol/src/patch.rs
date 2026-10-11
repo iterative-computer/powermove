@@ -18,7 +18,7 @@ use ts_rs::TS;
 use crate::blender::BlenderOutputFile;
 use crate::common::{AssetId, ByteSize, Bytes, ContentHash, DocumentId, JobId, Revision};
 use crate::host::CapabilityHandle;
-use crate::validate::{ensure, Validate, Violation};
+use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
 
 /// The encoding of a patch body, owned by pm-model.
@@ -85,23 +85,44 @@ impl Validate for PatchBatch {
         const C: ContractId = ContractId::Patch;
         ensure(self.document.is_valid(), C, || "invalid document id".into())?;
         ensure(self.revision > self.base_revision, C, || {
-            format!("revision {} must exceed base revision {}", self.revision, self.base_revision)
+            format!(
+                "revision {} must exceed base revision {}",
+                self.revision, self.base_revision
+            )
         })?;
-        ensure(self.patch_count > 0, C, || "a batch carries at least one patch".into())?;
-        ensure(!self.body.0.is_empty() && self.body.0.len() <= MAX_PATCH_BODY_BYTES, C, || {
-            format!("patch body must be 1 to {MAX_PATCH_BODY_BYTES} bytes, got {}", self.body.0.len())
-        })
+        ensure(self.patch_count > 0, C, || {
+            "a batch carries at least one patch".into()
+        })?;
+        ensure(
+            !self.body.0.is_empty() && self.body.0.len() <= MAX_PATCH_BODY_BYTES,
+            C,
+            || {
+                format!(
+                    "patch body must be 1 to {MAX_PATCH_BODY_BYTES} bytes, got {}",
+                    self.body.0.len()
+                )
+            },
+        )
     }
 }
 
 /// Where a resync body is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum ResyncSource {
-    Inline { body: Bytes },
+    Inline {
+        body: Bytes,
+    },
     /// Large documents go through a cache file.
-    CacheFile { handle: CapabilityHandle, length: ByteSize },
+    CacheFile {
+        handle: CapabilityHandle,
+        length: ByteSize,
+    },
 }
 
 /// Replace the receiver's mirror with the canonical document at `revision`.
@@ -190,7 +211,10 @@ impl RevisionTracker {
         } else if batch.base_revision == self.applied {
             Ok(Admission::Apply)
         } else {
-            Err(RevisionGap { applied: self.applied, base: batch.base_revision })
+            Err(RevisionGap {
+                applied: self.applied,
+                base: batch.base_revision,
+            })
         }
     }
 
@@ -239,21 +263,96 @@ pub struct FieldEntry {
 /// The section 6 additive fields, the input to pm-model's ingest and to the
 /// `requiresEngine` stamping rules.
 pub const FIELD_TABLE: [FieldEntry; 15] = [
-    FieldEntry { owner: "composition", field: "fpsRational", legacy: LegacyBehavior::IgnoredSafely, condition: None },
-    FieldEntry { owner: "root", field: "minReaderVersion", legacy: LegacyBehavior::ReadByGuard, condition: None },
-    FieldEntry { owner: "root", field: "requiresEngine", legacy: LegacyBehavior::LegacyRefuses, condition: None },
-    FieldEntry { owner: "layer", field: "compat", legacy: LegacyBehavior::IgnoredSafely, condition: None },
-    FieldEntry { owner: "asset", field: "link", legacy: LegacyBehavior::RequiresNative, condition: None },
-    FieldEntry { owner: "asset", field: "interpret", legacy: LegacyBehavior::RequiresNative, condition: None },
-    FieldEntry { owner: "asset", field: "storage", legacy: LegacyBehavior::RequiresNativeWhen, condition: Some("value is \"linked\"") },
-    FieldEntry { owner: "composition", field: "motionBlurSamples", legacy: LegacyBehavior::IgnoredSafely, condition: None },
-    FieldEntry { owner: "composition", field: "audioSampleRate", legacy: LegacyBehavior::IgnoredSafely, condition: None },
-    FieldEntry { owner: "precomp", field: "keepFrameRate", legacy: LegacyBehavior::RequiresNativeWhen, condition: Some("value is true") },
-    FieldEntry { owner: "clip", field: "pitch", legacy: LegacyBehavior::RequiresNativeWhen, condition: Some("value is not the default") },
-    FieldEntry { owner: "clip", field: "alwaysOriginal", legacy: LegacyBehavior::IgnoredSafely, condition: None },
-    FieldEntry { owner: "precomp", field: "keepRendered", legacy: LegacyBehavior::IgnoredSafely, condition: None },
-    FieldEntry { owner: "project", field: "color", legacy: LegacyBehavior::RequiresNativeWhen, condition: Some("value is not the default") },
-    FieldEntry { owner: "project", field: "media", legacy: LegacyBehavior::IgnoredSafely, condition: None },
+    FieldEntry {
+        owner: "composition",
+        field: "fpsRational",
+        legacy: LegacyBehavior::IgnoredSafely,
+        condition: None,
+    },
+    FieldEntry {
+        owner: "root",
+        field: "minReaderVersion",
+        legacy: LegacyBehavior::ReadByGuard,
+        condition: None,
+    },
+    FieldEntry {
+        owner: "root",
+        field: "requiresEngine",
+        legacy: LegacyBehavior::LegacyRefuses,
+        condition: None,
+    },
+    FieldEntry {
+        owner: "layer",
+        field: "compat",
+        legacy: LegacyBehavior::IgnoredSafely,
+        condition: None,
+    },
+    FieldEntry {
+        owner: "asset",
+        field: "link",
+        legacy: LegacyBehavior::RequiresNative,
+        condition: None,
+    },
+    FieldEntry {
+        owner: "asset",
+        field: "interpret",
+        legacy: LegacyBehavior::RequiresNative,
+        condition: None,
+    },
+    FieldEntry {
+        owner: "asset",
+        field: "storage",
+        legacy: LegacyBehavior::RequiresNativeWhen,
+        condition: Some("value is \"linked\""),
+    },
+    FieldEntry {
+        owner: "composition",
+        field: "motionBlurSamples",
+        legacy: LegacyBehavior::IgnoredSafely,
+        condition: None,
+    },
+    FieldEntry {
+        owner: "composition",
+        field: "audioSampleRate",
+        legacy: LegacyBehavior::IgnoredSafely,
+        condition: None,
+    },
+    FieldEntry {
+        owner: "precomp",
+        field: "keepFrameRate",
+        legacy: LegacyBehavior::RequiresNativeWhen,
+        condition: Some("value is true"),
+    },
+    FieldEntry {
+        owner: "clip",
+        field: "pitch",
+        legacy: LegacyBehavior::RequiresNativeWhen,
+        condition: Some("value is not the default"),
+    },
+    FieldEntry {
+        owner: "clip",
+        field: "alwaysOriginal",
+        legacy: LegacyBehavior::IgnoredSafely,
+        condition: None,
+    },
+    FieldEntry {
+        owner: "precomp",
+        field: "keepRendered",
+        legacy: LegacyBehavior::IgnoredSafely,
+        condition: None,
+    },
+    FieldEntry {
+        owner: "project",
+        field: "color",
+        legacy: LegacyBehavior::RequiresNativeWhen,
+        condition: Some("value is not the default"),
+    },
+    FieldEntry {
+        owner: "project",
+        field: "media",
+        legacy: LegacyBehavior::IgnoredSafely,
+        condition: None,
+    },
 ];
 
 /// Existing fields `v1_ingest` takes as they are (section 6, "Existing
@@ -291,23 +390,43 @@ pub enum FactCommit {
 /// the document itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum EngineFact {
     /// An offline asset was found by content hash, UMID, or content identifier.
-    RelinkedByIdentity { asset: AssetId, hash: ContentHash, revision: Revision },
+    RelinkedByIdentity {
+        asset: AssetId,
+        hash: ContentHash,
+        revision: Revision,
+    },
     /// A Blender generation or import finished (contract 11); the result
     /// applies only if the document is still at `revision`. `manifest` is
     /// the worker's manifest JSON; the renderer mints asset ids on commit.
-    BlenderResult { job: JobId, revision: Revision, files: Vec<BlenderOutputFile>, manifest: String },
+    BlenderResult {
+        job: JobId,
+        revision: Revision,
+        files: Vec<BlenderOutputFile>,
+        manifest: String,
+    },
     /// A name, timecode, or duration match for an offline asset. Only a
     /// proposal: the user confirms it (Relink sheet), and the confirmation is
     /// an undoable edit (section 21).
-    RelinkProposal { asset: AssetId, candidate: CapabilityHandle, reason: RelinkReason },
+    RelinkProposal {
+        asset: AssetId,
+        candidate: CapabilityHandle,
+        reason: RelinkReason,
+    },
     /// Probe results and detected color and alpha for an asset:
     /// informational only. The other uncommitted facts travel elsewhere:
     /// Blender availability as `BlenderStatus`, font substitution and
     /// crash-attributed failures as failure and crash events.
-    MediaFacts { asset: AssetId, hash: Option<ContentHash> },
+    MediaFacts {
+        asset: AssetId,
+        hash: Option<ContentHash>,
+    },
 }
 
 /// Why a relink candidate was proposed (never applied automatically).
@@ -366,13 +485,21 @@ mod tests {
         assert_eq!(tracker.admit(&batch(5, 6)), Ok(Admission::Apply));
         tracker.commit(&batch(5, 6));
         assert_eq!(tracker.admit(&batch(5, 6)), Ok(Admission::Duplicate));
-        assert_eq!(tracker.admit(&batch(7, 8)), Err(RevisionGap { applied: rev(6), base: rev(7) }));
+        assert_eq!(
+            tracker.admit(&batch(7, 8)),
+            Err(RevisionGap {
+                applied: rev(6),
+                base: rev(7)
+            })
+        );
         assert!(tracker.satisfies(rev(6)) && !tracker.satisfies(rev(7)));
         tracker.resynced(&Resync {
             document: "doc".into(),
             revision: rev(8),
             encoding: DocumentEncoding::CanonicalJsonV1,
-            source: ResyncSource::Inline { body: Bytes(b"{}".to_vec()) },
+            source: ResyncSource::Inline {
+                body: Bytes(b"{}".to_vec()),
+            },
             hash: ContentHash([0; 32]),
         });
         assert_eq!(tracker.admit(&batch(8, 9)), Ok(Admission::Apply));
@@ -382,23 +509,56 @@ mod tests {
     fn field_table_covers_section_6() {
         assert_eq!(FIELD_TABLE.len(), 15);
         for entry in FIELD_TABLE {
-            assert_eq!(entry.condition.is_some(), entry.legacy == LegacyBehavior::RequiresNativeWhen, "{}", entry.field);
+            assert_eq!(
+                entry.condition.is_some(),
+                entry.legacy == LegacyBehavior::RequiresNativeWhen,
+                "{}",
+                entry.field
+            );
         }
         let mut names: Vec<_> = FIELD_TABLE.iter().map(|f| (f.owner, f.field)).collect();
         names.sort();
         names.dedup();
         assert_eq!(names.len(), FIELD_TABLE.len());
         for (owner, path) in INGESTED_AS_IS {
-            assert!(!FIELD_TABLE.iter().any(|f| f.owner == owner && f.field == path), "{owner}.{path} is existing, not additive");
+            assert!(
+                !FIELD_TABLE
+                    .iter()
+                    .any(|f| f.owner == owner && f.field == path),
+                "{owner}.{path} is existing, not additive"
+            );
         }
     }
 
     #[test]
     fn facts_commit_per_section_6() {
         let hash = ContentHash([1; 32]);
-        assert_eq!(EngineFact::RelinkedByIdentity { asset: "a".into(), hash, revision: rev(1) }.commit(), FactCommit::MetadataWrite);
-        assert_eq!(EngineFact::MediaFacts { asset: "a".into(), hash: None }.commit(), FactCommit::NotCommitted);
+        assert_eq!(
+            EngineFact::RelinkedByIdentity {
+                asset: "a".into(),
+                hash,
+                revision: rev(1)
+            }
+            .commit(),
+            FactCommit::MetadataWrite
+        );
+        assert_eq!(
+            EngineFact::MediaFacts {
+                asset: "a".into(),
+                hash: None
+            }
+            .commit(),
+            FactCommit::NotCommitted
+        );
         let candidate = CapabilityHandle::from_random_bytes([3; 16]);
-        assert_eq!(EngineFact::RelinkProposal { asset: "a".into(), candidate, reason: RelinkReason::Timecode }.commit(), FactCommit::UndoableEdit);
+        assert_eq!(
+            EngineFact::RelinkProposal {
+                asset: "a".into(),
+                candidate,
+                reason: RelinkReason::Timecode
+            }
+            .commit(),
+            FactCommit::UndoableEdit
+        );
     }
 }

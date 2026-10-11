@@ -8,56 +8,66 @@
 //! sample.
 
 use crate::blender::{
-    BlenderAsset, BlenderEngine, BlenderJobRequest, BlenderModelJob, BlenderModelOperation, BlenderOutputFile, BlenderProgress,
-    BlenderSettings, BlenderStatus, BlenderSurface, RequestedDevice, ResolvedDevice, ShutterSample, SnapshotEncoding, SnapshotRef,
+    BlenderAsset, BlenderEngine, BlenderJobRequest, BlenderModelJob, BlenderModelOperation,
+    BlenderOutputFile, BlenderProgress, BlenderSettings, BlenderStatus, BlenderSurface,
+    RequestedDevice, ResolvedDevice, ShutterSample, SnapshotEncoding, SnapshotRef,
     SurfaceRequest as BlenderSurfaceRequest,
 };
 use crate::clock::{ClockSample, SeekMode, TransportCommand, TransportState};
 use crate::color::{
-    AlphaMode, ChromaSiting, ColorDescription, MatrixCoefficients, OutputColor, Precision, Primaries, ProjectColor, Range, Subsampling,
-    ToneMapping3d, Transfer, ViewerColorSpace,
+    AlphaMode, ChromaSiting, ColorDescription, MatrixCoefficients, OutputColor, Precision,
+    Primaries, ProjectColor, Range, Subsampling, ToneMapping3d, Transfer, ViewerColorSpace,
 };
 use crate::common::{
-    ByteSize, Bytes, ContentHash, Count, FrameRate, HostMicros, PixelRect, PlaybackRate, Rect, RequestId, Revision, Rgba, SessionId, Seq,
-    Size, TickRange, Ticks, MAT3_IDENTITY, MAT4_IDENTITY, MAX_SAFE_INTEGER,
+    ByteSize, Bytes, ContentHash, Count, FrameRate, HostMicros, MAT3_IDENTITY, MAT4_IDENTITY,
+    MAX_SAFE_INTEGER, PixelRect, PlaybackRate, Rect, RequestId, Revision, Rgba, Seq, SessionId,
+    Size, TickRange, Ticks,
 };
 use crate::definitions::{
-    DefinitionFlags, DefinitionKind, DefinitionOrigin, DefinitionRemoval, DefinitionSnapshot, DefinitionsApplied, DefinitionsUpdate,
-    Layer3dRole, LayerRenderer, ParamSpec, WrappedGlsl,
+    DefinitionFlags, DefinitionKind, DefinitionOrigin, DefinitionRemoval, DefinitionSnapshot,
+    DefinitionsApplied, DefinitionsUpdate, Layer3dRole, LayerRenderer, ParamSpec, WrappedGlsl,
 };
 use crate::document_host::{
-    CloseProject, ExtensionRegistered, ExtensionSource, InstanceId, OpenProject, Persist, PersistReason, Persisted, ProjectOpened,
-    RegisterExtension, ToolCall, ToolResult,
+    CloseProject, ExtensionRegistered, ExtensionSource, InstanceId, OpenProject, Persist,
+    PersistReason, Persisted, ProjectOpened, RegisterExtension, ToolCall, ToolResult,
 };
-use crate::envelope::{Envelope, EvaluateRequest, Event, Message, OpenSession, RenderedImage, Request, Response, SessionRole};
-use crate::error::{CrashReport, EngineError, EngineProcess, ErrorCode, ErrorDetail, ErrorScope, FailureReport, Retry, ShaderDiagnostic};
+use crate::envelope::{
+    Envelope, EvaluateRequest, Event, Message, OpenSession, RenderedImage, Request, Response,
+    SessionRole,
+};
+use crate::error::{
+    CrashReport, EngineError, EngineProcess, ErrorCode, ErrorDetail, ErrorScope, FailureReport,
+    Retry, ShaderDiagnostic,
+};
 use crate::frame::{
-    Caret, DepthIdSurface, EditorCamera, FrameDescriptor, FramePurpose, FrameQuality, FrameRelease, FrameRequest, MediaPreference,
-    MotionBlurKind, OverlayGeometry, OverlayLayer, PathCommand, PreviewResolution, Projection, Representation, Shading3d, ViewOverride,
-    ViewerState,
+    Caret, DepthIdSurface, EditorCamera, FrameDescriptor, FramePurpose, FrameQuality, FrameRelease,
+    FrameRequest, MediaPreference, MotionBlurKind, OverlayGeometry, OverlayLayer, PathCommand,
+    PreviewResolution, Projection, Representation, Shading3d, ViewOverride, ViewerState,
 };
 use crate::host::{
-    CacheKind, CapabilityHandle, CapabilityKind, CommitOutput, HandleGrant, HardwareSessionGrant, HardwareSessionKind,
-    HardwareSessionRequest, MintHandle, OutputChoice, OutputCommitted, OutputDestination, OutputDestinationRequest, OutputVerification,
-    OverwritePolicy,
+    CacheKind, CapabilityHandle, CapabilityKind, CommitOutput, HandleGrant, HardwareSessionGrant,
+    HardwareSessionKind, HardwareSessionRequest, MintHandle, OutputChoice, OutputCommitted,
+    OutputDestination, OutputDestinationRequest, OutputVerification, OverwritePolicy,
 };
 use crate::interop::{PlatformSurface, SurfaceDescriptor, SurfaceFormat, SurfacePool};
 use crate::lease::{Lease, LeaseCategories, LeaseReason, LeaseRequest, LeaseUsage};
 use crate::patch::{
-    ConsistencyCheck, ConsistencyResult, DocumentEncoding, EngineFact, PatchBatch, PatchEncoding, PatchOrigin, PatchesApplied, RelinkReason,
-    Resync, ResyncSource,
+    ConsistencyCheck, ConsistencyResult, DocumentEncoding, EngineFact, PatchBatch, PatchEncoding,
+    PatchOrigin, PatchesApplied, RelinkReason, Resync, ResyncSource,
 };
 use crate::priority::{
-    AgentFrame, AgentFrameOutcome, AgentFrameRequest, AgentFrameResult, AlphaOutput, BlenderUse, CancelJobs, ExportFormat, ExportSettings,
-    ImagePayload, JobAccepted, JobSpec, JobState, JobStatus, JobsCancelled, PriorityClass, ProResProfile, QualityTier, SubmitJob,
+    AgentFrame, AgentFrameOutcome, AgentFrameRequest, AgentFrameResult, AlphaOutput, BlenderUse,
+    CancelJobs, ExportFormat, ExportSettings, ImagePayload, JobAccepted, JobSpec, JobState,
+    JobStatus, JobsCancelled, PriorityClass, ProResProfile, QualityTier, SubmitJob,
 };
 use crate::scene::{
-    Background, Camera3d, Compat, DepthSet, EvaluatedEffect, EvaluatedLayer, EvaluatedMask, EvaluatedScene, EvaluatedTransition,
-    GradientStop, LayerKind, LayerSource, LayerTransform, Light3d, LightKind, MaskMode, MatteMode, MatteRef, ModelSource, NamedParam,
-    Object3d, OrderedRun, ParamValue, Shutter, World3d,
+    Background, Camera3d, Compat, DepthSet, EvaluatedEffect, EvaluatedLayer, EvaluatedMask,
+    EvaluatedScene, EvaluatedTransition, GradientStop, LayerKind, LayerSource, LayerTransform,
+    Light3d, LightKind, MaskMode, MatteMode, MatteRef, ModelSource, NamedParam, Object3d,
+    OrderedRun, ParamValue, Shutter, World3d,
 };
 use crate::slicing::{BlenderThrottle, DeadlineSignal, SlicingPolicy};
-use crate::version::{local_ranges, ContractVersion, Hello, PeerRole, Welcome, WIRE_VERSION};
+use crate::version::{ContractVersion, Hello, PeerRole, WIRE_VERSION, Welcome, local_ranges};
 
 fn handle(n: u8) -> CapabilityHandle {
     CapabilityHandle::from_random_bytes([n; 16])
@@ -89,18 +99,33 @@ fn ticks(n: i64) -> Ticks {
 
 fn request(id: u64, body: Request) -> Envelope {
     let bound = body.session_bound();
-    let envelope = Envelope::new(Message::Request { id: RequestId::new(id).expect("sample id"), body });
-    if bound { envelope.with_session(session()) } else { envelope }
+    let envelope = Envelope::new(Message::Request {
+        id: RequestId::new(id).expect("sample id"),
+        body,
+    });
+    if bound {
+        envelope.with_session(session())
+    } else {
+        envelope
+    }
 }
 
 fn response(id: u64, body: Response) -> Envelope {
-    Envelope::new(Message::Response { id: RequestId::new(id).expect("sample id"), body }).with_revision(rev(42))
+    Envelope::new(Message::Response {
+        id: RequestId::new(id).expect("sample id"),
+        body,
+    })
+    .with_revision(rev(42))
 }
 
 fn event(body: Event) -> Envelope {
     let bound = body.session_bound();
     let envelope = Envelope::new(Message::Event { body }).with_revision(rev(42));
-    if bound { envelope.with_session(session()) } else { envelope }
+    if bound {
+        envelope.with_session(session())
+    } else {
+        envelope
+    }
 }
 
 pub fn project_color() -> ProjectColor {
@@ -109,7 +134,14 @@ pub fn project_color() -> ProjectColor {
 
 pub fn view_override() -> ViewOverride {
     ViewOverride {
-        camera: Some(EditorCamera { view: MAT4_IDENTITY, projection: Projection::Orthographic { half_height: 3.0, near: 0.01, far: 200.0 } }),
+        camera: Some(EditorCamera {
+            view: MAT4_IDENTITY,
+            projection: Projection::Orthographic {
+                half_height: 3.0,
+                near: 0.01,
+                far: 200.0,
+            },
+        }),
         shading: Shading3d::Solid,
         xray: true,
         local_view: vec!["cube".into()],
@@ -123,11 +155,18 @@ pub fn viewer_frame_request() -> FrameRequest {
         purpose: FramePurpose::Viewer,
         priority: PriorityClass::Interactive,
         output_size: Size::new(3840, 2160),
-        region: Some(PixelRect { x: 0, y: 0, width: 1920, height: 1080 }),
+        region: Some(PixelRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        }),
         scale: 1.0,
         resolution: PreviewResolution::Automatic,
         media: MediaPreference::Automatic,
-        color: OutputColor::Viewer { space: ViewerColorSpace::DisplayP3 },
+        color: OutputColor::Viewer {
+            space: ViewerColorSpace::DisplayP3,
+        },
         precision: Precision::Float16,
         motion_blur: MotionBlurKind::PreviewPaused,
         view: Some(view_override()),
@@ -147,9 +186,19 @@ pub fn frame_descriptor() -> FrameDescriptor {
         revision: rev(42),
         color_space: ViewerColorSpace::DisplayP3,
         format: SurfaceFormat::Rgba16Float,
-        quality: FrameQuality { resolution: PreviewResolution::Half, representation: Representation::Proxy, draft_3d: false, cached: true },
+        quality: FrameQuality {
+            resolution: PreviewResolution::Half,
+            representation: Representation::Proxy,
+            draft_3d: false,
+            cached: true,
+        },
         overlay: Some(OverlayGeometry {
-            viewport: Rect { x: 12.5, y: 8.0, width: 1600.0, height: 900.0 },
+            viewport: Rect {
+                x: 12.5,
+                y: 8.0,
+                width: 1600.0,
+                height: 900.0,
+            },
             layers: vec![OverlayLayer {
                 layer: "title".into(),
                 world_2d: Some(MAT3_IDENTITY),
@@ -157,14 +206,27 @@ pub fn frame_descriptor() -> FrameDescriptor {
                 bounds: [[0.0, 0.0], [100.0, 0.0], [100.0, 40.0], [0.0, 40.0]],
                 paths: vec![vec![
                     PathCommand::MoveTo { x: 0.0, y: 0.0 },
-                    PathCommand::CubicTo { x1: 10.0, y1: 0.0, x2: 20.0, y2: 10.0, x: 20.0, y: 20.0 },
+                    PathCommand::CubicTo {
+                        x1: 10.0,
+                        y1: 0.0,
+                        x2: 20.0,
+                        y2: 10.0,
+                        x: 20.0,
+                        y: 20.0,
+                    },
                     PathCommand::LineTo { x: 0.0, y: 20.0 },
                     PathCommand::Close,
                 ]],
             }],
-            caret: Some(Caret { top: [40.0, 2.0], bottom: [40.0, 38.0] }),
+            caret: Some(Caret {
+                top: [40.0, 2.0],
+                bottom: [40.0, 38.0],
+            }),
         }),
-        depth_id: Some(DepthIdSurface { pool_index: 9, seq: seq(11) }),
+        depth_id: Some(DepthIdSurface {
+            pool_index: 9,
+            seq: seq(11),
+        }),
     }
 }
 
@@ -176,7 +238,15 @@ pub fn evaluated_scene() -> EvaluatedScene {
         visible: true,
         opacity: 1.0,
         blend: crate::color::BlendMode::Normal,
-        transform: if kind.is_3d() { LayerTransform::World { matrix: MAT4_IDENTITY } } else { LayerTransform::Flat { matrix: MAT3_IDENTITY } },
+        transform: if kind.is_3d() {
+            LayerTransform::World {
+                matrix: MAT4_IDENTITY,
+            }
+        } else {
+            LayerTransform::Flat {
+                matrix: MAT3_IDENTITY,
+            }
+        },
         group: None,
         source,
         effects: vec![],
@@ -185,7 +255,19 @@ pub fn evaluated_scene() -> EvaluatedScene {
         transition: None,
         motion_blur: false,
     };
-    let mut title = layer("title", LayerKind::Text, LayerSource::Vector { content_key: "text:9f2c".into(), bounds: Rect { x: 0.0, y: 0.0, width: 640.0, height: 120.0 } });
+    let mut title = layer(
+        "title",
+        LayerKind::Text,
+        LayerSource::Vector {
+            content_key: "text:9f2c".into(),
+            bounds: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 640.0,
+                height: 120.0,
+            },
+        },
+    );
     title.compat = Compat::Level2;
     title.blend = crate::color::BlendMode::Screen;
     title.opacity = 0.75;
@@ -195,18 +277,49 @@ pub fn evaluated_scene() -> EvaluatedScene {
         enabled: true,
         compat: Compat::Level2,
         params: vec![
-            NamedParam { key: "radius".into(), value: ParamValue::Number(12.5) },
-            NamedParam { key: "tint".into(), value: ParamValue::Color([1.0, 0.5, 0.25]) },
-            NamedParam { key: "invert".into(), value: ParamValue::Toggle(false) },
-            NamedParam { key: "offset".into(), value: ParamValue::Vector(vec![0.0, 0.0]) },
+            NamedParam {
+                key: "radius".into(),
+                value: ParamValue::Number(12.5),
+            },
+            NamedParam {
+                key: "tint".into(),
+                value: ParamValue::Color([1.0, 0.5, 0.25]),
+            },
+            NamedParam {
+                key: "invert".into(),
+                value: ParamValue::Toggle(false),
+            },
+            NamedParam {
+                key: "offset".into(),
+                value: ParamValue::Vector(vec![0.0, 0.0]),
+            },
         ],
     }];
     title.masks = vec![
-        EvaluatedMask::Ellipse { center: [320.0, 60.0], size: [600.0, 100.0], rotation_degrees: 15.0, feather: 4.0, mode: MaskMode::Add, enabled: true },
-        EvaluatedMask::Path { content_key: "mask:01".into(), feather: 0.0, mode: MaskMode::Subtract, enabled: false },
+        EvaluatedMask::Ellipse {
+            center: [320.0, 60.0],
+            size: [600.0, 100.0],
+            rotation_degrees: 15.0,
+            feather: 4.0,
+            mode: MaskMode::Add,
+            enabled: true,
+        },
+        EvaluatedMask::Path {
+            content_key: "mask:01".into(),
+            feather: 0.0,
+            mode: MaskMode::Subtract,
+            enabled: false,
+        },
     ];
-    title.matte = Some(MatteRef { source: "bg".into(), mode: MatteMode::Luma });
-    title.transition = Some(EvaluatedTransition { definition: "powermove.fade".into(), progress: 0.5, params: vec![] });
+    title.matte = Some(MatteRef {
+        source: "bg".into(),
+        mode: MatteMode::Luma,
+    });
+    title.transition = Some(EvaluatedTransition {
+        definition: "powermove.fade".into(),
+        progress: 0.5,
+        params: vec![],
+    });
     EvaluatedScene {
         composition: "main".into(),
         revision: rev(42),
@@ -215,26 +328,71 @@ pub fn evaluated_scene() -> EvaluatedScene {
         size: Size::new(1920, 1080),
         background: Background::Linear {
             stops: vec![
-                GradientStop { position: 0.0, color: Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 } },
-                GradientStop { position: 1.0, color: Rgba { r: 1.2, g: 1.0, b: 0.9, a: 1.0 } },
+                GradientStop {
+                    position: 0.0,
+                    color: Rgba {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: Rgba {
+                        r: 1.2,
+                        g: 1.0,
+                        b: 0.9,
+                        a: 1.0,
+                    },
+                },
             ],
             angle_degrees: 90.0,
         },
         shutter: Shutter::from_frames(0.5),
         view: None,
         layers: vec![
-            layer("bg", LayerKind::Video, LayerSource::Media { asset: "a1".into(), source_time: ticks(-1), always_original: false }),
+            layer(
+                "bg",
+                LayerKind::Video,
+                LayerSource::Media {
+                    asset: "a1".into(),
+                    source_time: ticks(-1),
+                    always_original: false,
+                },
+            ),
             layer("cube", LayerKind::Object3d, LayerSource::World { world: 0 }),
             layer("sun", LayerKind::Light3d, LayerSource::None),
             title,
         ],
         worlds: vec![World3d {
-            camera: Camera3d { layer: None, view: MAT4_IDENTITY, projection: Projection::Perspective { fov_y_degrees: 45.0, near: 0.1, far: 1000.0 } },
+            camera: Camera3d {
+                layer: None,
+                view: MAT4_IDENTITY,
+                projection: Projection::Perspective {
+                    fov_y_degrees: 45.0,
+                    near: 0.1,
+                    far: 1000.0,
+                },
+            },
             lights: vec![
-                Light3d { layer: Some("sun".into()), kind: LightKind::Sun, color: [1.0; 3], intensity: 3.0, world: MAT4_IDENTITY, casts_shadow: true, embedded: false },
+                Light3d {
+                    layer: Some("sun".into()),
+                    kind: LightKind::Sun,
+                    color: [1.0; 3],
+                    intensity: 3.0,
+                    world: MAT4_IDENTITY,
+                    casts_shadow: true,
+                    embedded: false,
+                },
                 Light3d {
                     layer: None,
-                    kind: LightKind::Spot { distance: 0.0, angle_degrees: 30.0, penumbra: 0.2, decay: 2.0 },
+                    kind: LightKind::Spot {
+                        distance: 0.0,
+                        angle_degrees: 30.0,
+                        penumbra: 0.2,
+                        decay: 2.0,
+                    },
                     color: [1.0, 0.9, 0.8],
                     intensity: 10.0,
                     world: MAT4_IDENTITY,
@@ -244,7 +402,10 @@ pub fn evaluated_scene() -> EvaluatedScene {
             ],
             objects: vec![Object3d {
                 layer: "cube".into(),
-                model: ModelSource::Imported { asset: "glb1".into(), animation_time: ticks(0) },
+                model: ModelSource::Imported {
+                    asset: "glb1".into(),
+                    animation_time: ticks(0),
+                },
                 world: MAT4_IDENTITY,
                 opacity: 1.0,
                 writes_depth: true,
@@ -253,11 +414,25 @@ pub fn evaluated_scene() -> EvaluatedScene {
             tone_mapping: ToneMapping3d::AcesFilmicR180 { exposure: 1.0 },
             blender: false,
         }],
-        depth_sets: vec![DepthSet { world: 0, layers: vec!["cube".into()], shadow_casters: vec!["cube".into()], background_layer: "cube".into() }],
-        ordering: vec![OrderedRun { start: 1, order: vec!["sun".into(), "cube".into()] }],
+        depth_sets: vec![DepthSet {
+            world: 0,
+            layers: vec!["cube".into()],
+            shadow_casters: vec!["cube".into()],
+            background_layer: "cube".into(),
+        }],
+        ordering: vec![OrderedRun {
+            start: 1,
+            order: vec!["sun".into(), "cube".into()],
+        }],
         failures: vec![FailureReport {
             revision: rev(42),
-            error: EngineError::new(ErrorCode::DefinitionMissing, ErrorScope::Layer { layer: "title".into() }, "The effect is not installed; its settings are kept."),
+            error: EngineError::new(
+                ErrorCode::DefinitionMissing,
+                ErrorScope::Layer {
+                    layer: "title".into(),
+                },
+                "The effect is not installed; its settings are kept.",
+            ),
         }],
     }
 }
@@ -271,17 +446,38 @@ pub fn effect_snapshot() -> DefinitionSnapshot {
         origin: DefinitionOrigin::Fork,
         renderer: None,
         glsl: Some(WrappedGlsl {
-            source: format!("#version 300 es\nprecision highp float;\nuniform float u_amount;\nvoid main(){{\n{body}\n}}\n"),
+            source: format!(
+                "#version 300 es\nprecision highp float;\nuniform float u_amount;\nvoid main(){{\n{body}\n}}\n"
+            ),
             body_line_offset: 4,
             body_utf16_len: body.encode_utf16().count() as u32,
             body_utf8_len: body.len() as u32,
         }),
         params: vec![
-            ParamSpec::Number { key: "amount".into(), default: 1.0, min: 0.0, max: 2.0, step: Some(0.01) },
-            ParamSpec::Color { key: "tint".into(), default: "#ff8800".into() },
-            ParamSpec::Toggle { key: "invert".into(), default: false },
+            ParamSpec::Number {
+                key: "amount".into(),
+                default: 1.0,
+                min: 0.0,
+                max: 2.0,
+                step: Some(0.01),
+            },
+            ParamSpec::Color {
+                key: "tint".into(),
+                default: "#ff8800".into(),
+            },
+            ParamSpec::Toggle {
+                key: "invert".into(),
+                default: false,
+            },
         ],
-        flags: DefinitionFlags { passes: 2, keep_orig: true, backdrop: true, viewport_safe: true, viewport_padding: vec!["amount".into()], ..DefinitionFlags::default() },
+        flags: DefinitionFlags {
+            passes: 2,
+            keep_orig: true,
+            backdrop: true,
+            viewport_safe: true,
+            viewport_padding: vec!["amount".into()],
+            ..DefinitionFlags::default()
+        },
     }
 }
 
@@ -291,7 +487,9 @@ pub fn layer_snapshot() -> DefinitionSnapshot {
         kind: DefinitionKind::Layer,
         version: 3,
         origin: DefinitionOrigin::BuiltIn,
-        renderer: Some(LayerRenderer::Layer3d { role: Layer3dRole::Light }),
+        renderer: Some(LayerRenderer::Layer3d {
+            role: Layer3dRole::Light,
+        }),
         glsl: None,
         params: vec![],
         flags: DefinitionFlags::default(),
@@ -300,12 +498,17 @@ pub fn layer_snapshot() -> DefinitionSnapshot {
 
 pub fn export_settings() -> ExportSettings {
     ExportSettings {
-        format: ExportFormat::ProRes { profile: ProResProfile::P4444Xq },
+        format: ExportFormat::ProRes {
+            profile: ProResProfile::P4444Xq,
+        },
         alpha: AlphaOutput::Premultiplied,
         quality: QualityTier::Max,
         size: Size::new(3840, 2160),
         frame_rate: FrameRate::new(24000, 1001),
-        range: TickRange { start: ticks(0), end: ticks(7_056_000_000) },
+        range: TickRange {
+            start: ticks(0),
+            end: ticks(7_056_000_000),
+        },
         audio: true,
         motion_blur: true,
         color: OutputColor::Rec709Broadcast,
@@ -319,15 +522,34 @@ pub fn blender_job() -> BlenderJobRequest {
     BlenderJobRequest {
         job: "blender-1".into(),
         priority: PriorityClass::UserJob,
-        snapshot: SnapshotRef { hash: hash(1), encoding: SnapshotEncoding::RenderSnapshotJsonV1, handle: handle(1), bytes: bytes(65_536) },
+        snapshot: SnapshotRef {
+            hash: hash(1),
+            encoding: SnapshotEncoding::RenderSnapshotJsonV1,
+            handle: handle(1),
+            bytes: bytes(65_536),
+        },
         worker_script_hash: hash(2),
-        assets: vec![BlenderAsset { asset: "tex1".into(), hash: hash(3), handle: handle(3) }],
-        settings: BlenderSettings { engine: BlenderEngine::Cycles, samples: 128, preview: false, preview_scale: 0.5, denoise: true, device: RequestedDevice::Auto },
+        assets: vec![BlenderAsset {
+            asset: "tex1".into(),
+            hash: hash(3),
+            handle: handle(3),
+        }],
+        settings: BlenderSettings {
+            engine: BlenderEngine::Cycles,
+            samples: 128,
+            preview: false,
+            preview_scale: 0.5,
+            denoise: true,
+            device: RequestedDevice::Auto,
+        },
         surfaces: vec![BlenderSurfaceRequest {
             layer: "cube".into(),
             composition_path: vec!["main".into(), "inner".into()],
             time: ticks(-705_600),
-            shutter: Some(ShutterSample { index: 3, count: 16 }),
+            shutter: Some(ShutterSample {
+                index: 3,
+                count: 16,
+            }),
             size: Size::new(1920, 1080),
             key: hash(4),
         }],
@@ -340,7 +562,15 @@ pub fn blender_job() -> BlenderJobRequest {
 pub fn requests() -> Vec<Envelope> {
     let id = |n| n;
     vec![
-        request(id(1), Request::OpenSession(OpenSession { document: "doc-1".into(), role: SessionRole::Interactive, process: EngineProcess::Interactive, color: project_color() })),
+        request(
+            id(1),
+            Request::OpenSession(OpenSession {
+                document: "doc-1".into(),
+                role: SessionRole::Interactive,
+                process: EngineProcess::Interactive,
+                color: project_color(),
+            }),
+        ),
         request(id(2), Request::CloseSession),
         request(
             id(3),
@@ -348,18 +578,44 @@ pub fn requests() -> Vec<Envelope> {
                 document: "doc-1".into(),
                 revision: rev(40),
                 encoding: DocumentEncoding::CanonicalJsonV1,
-                source: ResyncSource::CacheFile { handle: handle(6), length: bytes(123_456_789) },
+                source: ResyncSource::CacheFile {
+                    handle: handle(6),
+                    length: bytes(123_456_789),
+                },
                 hash: hash(7),
             }),
         ),
-        request(id(4), Request::CheckConsistency(ConsistencyCheck { document: "doc-1".into(), revision: rev(42), hash: hash(8) })),
+        request(
+            id(4),
+            Request::CheckConsistency(ConsistencyCheck {
+                document: "doc-1".into(),
+                revision: rev(42),
+                hash: hash(8),
+            }),
+        ),
         request(id(5), Request::RenderFrame(viewer_frame_request())).with_revision(rev(42)),
-        request(id(6), Request::Evaluate(EvaluateRequest { composition: "main".into(), time: ticks(0), view: Some(view_override()) })),
+        request(
+            id(6),
+            Request::Evaluate(EvaluateRequest {
+                composition: "main".into(),
+                time: ticks(0),
+                view: Some(view_override()),
+            }),
+        ),
         request(
             id(7),
             Request::AgentFrames(AgentFrameRequest::render_frames_default(
                 "run-1".into(),
-                vec![AgentFrame { composition: "main".into(), time: ticks(0) }, AgentFrame { composition: "main".into(), time: ticks(1_411_200_000) }],
+                vec![
+                    AgentFrame {
+                        composition: "main".into(),
+                        time: ticks(0),
+                    },
+                    AgentFrame {
+                        composition: "main".into(),
+                        time: ticks(1_411_200_000),
+                    },
+                ],
             )),
         )
         .with_revision(rev(42)),
@@ -369,31 +625,70 @@ pub fn requests() -> Vec<Envelope> {
                 job: "job-1".into(),
                 class: PriorityClass::AgentExport,
                 run: Some("run-1".into()),
-                spec: JobSpec::Export { session: session(), composition: "main".into(), settings: export_settings() },
-                output: Some(OutputChoice::AgentAutomatic { suggested_name: "Launch cut".into(), extension: "mov".into() }),
+                spec: JobSpec::Export {
+                    session: session(),
+                    composition: "main".into(),
+                    settings: export_settings(),
+                },
+                output: Some(OutputChoice::AgentAutomatic {
+                    suggested_name: "Launch cut".into(),
+                    extension: "mov".into(),
+                }),
             }),
         ),
-        request(id(9), Request::CancelJobs(CancelJobs::Run { run: "run-1".into() })),
+        request(
+            id(9),
+            Request::CancelJobs(CancelJobs::Run {
+                run: "run-1".into(),
+            }),
+        ),
         request(
             id(10),
             Request::PushDefinitions(DefinitionsUpdate {
                 generation: seq(5),
                 full: false,
                 upserts: vec![effect_snapshot(), layer_snapshot()],
-                removals: vec![DefinitionRemoval { id: "acme.glitch".into(), kind: DefinitionKind::Transition }],
+                removals: vec![DefinitionRemoval {
+                    id: "acme.glitch".into(),
+                    kind: DefinitionKind::Transition,
+                }],
             }),
         ),
         request(
             id(11),
-            Request::GrantLease(Lease { process: EngineProcess::Job, epoch: seq(3), bytes: bytes(2 << 30), reason: LeaseReason::PlaybackStarted, ack_deadline_ms: 500 }),
+            Request::GrantLease(Lease {
+                process: EngineProcess::Job,
+                epoch: seq(3),
+                bytes: bytes(2 << 30),
+                reason: LeaseReason::PlaybackStarted,
+                ack_deadline_ms: 500,
+            }),
         ),
-        request(id(12), Request::RequestLease(LeaseRequest { process: EngineProcess::Interactive, wanted: bytes(6 << 30), reason: LeaseReason::Requested })),
-        request(id(13), Request::MintHandle(MintHandle { kind: CapabilityKind::Cache { cache: CacheKind::BlenderSurfaces }, session: session() })),
+        request(
+            id(12),
+            Request::RequestLease(LeaseRequest {
+                process: EngineProcess::Interactive,
+                wanted: bytes(6 << 30),
+                reason: LeaseReason::Requested,
+            }),
+        ),
+        request(
+            id(13),
+            Request::MintHandle(MintHandle {
+                kind: CapabilityKind::Cache {
+                    cache: CacheKind::BlenderSurfaces,
+                },
+                session: session(),
+            }),
+        ),
         request(
             id(14),
             Request::OutputDestination(OutputDestinationRequest {
                 job: "job-1".into(),
-                choice: OutputChoice::AgentAutomatic { suggested_name: "Launch cut".into(), extension: "mov".into() },
+                choice: OutputChoice::AgentAutomatic {
+                    suggested_name: "Launch cut".into(),
+                    extension: "mov".into(),
+                },
                 overwrite: OverwritePolicy::UniqueName,
             }),
         ),
@@ -403,10 +698,21 @@ pub fn requests() -> Vec<Envelope> {
                 job: "job-1".into(),
                 temporary: handle(9),
                 commit: true,
-                verification: Some(OutputVerification { codec: "ap4x".into(), frames: 240, audio_samples: Count::new(480_480).expect("count"), bytes: bytes(9_876_543_210) }),
+                verification: Some(OutputVerification {
+                    codec: "ap4x".into(),
+                    frames: 240,
+                    audio_samples: Count::new(480_480).expect("count"),
+                    bytes: bytes(9_876_543_210),
+                }),
             }),
         ),
-        request(id(16), Request::HardwareSessions(HardwareSessionRequest { kind: HardwareSessionKind::ProResEncode, delta: -1 })),
+        request(
+            id(16),
+            Request::HardwareSessions(HardwareSessionRequest {
+                kind: HardwareSessionKind::ProResEncode,
+                delta: -1,
+            }),
+        ),
         request(id(17), Request::BlenderRender(blender_job())),
         request(id(18), Request::BlenderStatus),
         request(
@@ -415,13 +721,38 @@ pub fn requests() -> Vec<Envelope> {
                 job: "model-1".into(),
                 document: "doc-1".into(),
                 revision: rev(41),
-                operation: BlenderModelOperation::Import { source: "blend1".into(), object: Some("Rocket".into()) },
-                assets: vec![BlenderAsset { asset: "blend1".into(), hash: hash(10), handle: handle(10) }],
+                operation: BlenderModelOperation::Import {
+                    source: "blend1".into(),
+                    object: Some("Rocket".into()),
+                },
+                assets: vec![BlenderAsset {
+                    asset: "blend1".into(),
+                    hash: hash(10),
+                    handle: handle(10),
+                }],
             }),
         ),
-        request(id(20), Request::OpenProject(OpenProject { project: "p-1".into(), store: handle(11), pinned_by: Some("run-1".into()) })),
-        request(id(21), Request::CloseProject(CloseProject { instance: InstanceId(1) })),
-        request(id(22), Request::Persist(Persist { instance: InstanceId(1), reason: PersistReason::ToolCall })),
+        request(
+            id(20),
+            Request::OpenProject(OpenProject {
+                project: "p-1".into(),
+                store: handle(11),
+                pinned_by: Some("run-1".into()),
+            }),
+        ),
+        request(
+            id(21),
+            Request::CloseProject(CloseProject {
+                instance: InstanceId(1),
+            }),
+        ),
+        request(
+            id(22),
+            Request::Persist(Persist {
+                instance: InstanceId(1),
+                reason: PersistReason::ToolCall,
+            }),
+        ),
         request(
             id(23),
             Request::RegisterExtension(RegisterExtension {
@@ -450,8 +781,21 @@ pub fn responses() -> Vec<Envelope> {
     vec![
         response(1, Response::Ack),
         response(2, Response::SessionOpened { session: session() }),
-        response(3, Response::PatchesApplied(PatchesApplied { document: "doc-1".into(), revision: rev(42) })),
-        response(4, Response::Consistency(ConsistencyResult { revision: rev(42), matches: false, hash: hash(13) })),
+        response(
+            3,
+            Response::PatchesApplied(PatchesApplied {
+                document: "doc-1".into(),
+                revision: rev(42),
+            }),
+        ),
+        response(
+            4,
+            Response::Consistency(ConsistencyResult {
+                revision: rev(42),
+                matches: false,
+                hash: hash(13),
+            }),
+        ),
         response(5, Response::Frame(frame_descriptor())),
         response(
             6,
@@ -459,8 +803,15 @@ pub fn responses() -> Vec<Envelope> {
                 width: 320,
                 height: 180,
                 revision: rev(42),
-                quality: FrameQuality { resolution: PreviewResolution::Full, representation: Representation::Original, draft_3d: true, cached: false },
-                image: ImagePayload::Inline { bytes: Bytes(vec![0x89, b'P', b'N', b'G']) },
+                quality: FrameQuality {
+                    resolution: PreviewResolution::Full,
+                    representation: Representation::Original,
+                    draft_3d: true,
+                    cached: false,
+                },
+                image: ImagePayload::Inline {
+                    bytes: Bytes(vec![0x89, b'P', b'N', b'G']),
+                },
             }),
         ),
         response(7, Response::Scene(Box::new(evaluated_scene()))),
@@ -473,39 +824,136 @@ pub fn responses() -> Vec<Envelope> {
                         revision: rev(42),
                         width: 720,
                         height: 405,
-                        image: ImagePayload::CacheFile { handle: handle(14), length: bytes(48_000) },
+                        image: ImagePayload::CacheFile {
+                            handle: handle(14),
+                            length: bytes(48_000),
+                        },
                         blender: BlenderUse::Pending,
                     },
                     AgentFrameOutcome::Failed {
                         index: 1,
-                        error: EngineError::new(ErrorCode::MediaOffline, ErrorScope::Asset { asset: "a1".into() }, "Media offline · A001_C003.mov.")
-                            .with_retry(Retry::AfterUserAction)
-                            .with_detail(ErrorDetail::Offline { assets: vec!["a1".into()] }),
+                        error: EngineError::new(
+                            ErrorCode::MediaOffline,
+                            ErrorScope::Asset { asset: "a1".into() },
+                            "Media offline · A001_C003.mov.",
+                        )
+                        .with_retry(Retry::AfterUserAction)
+                        .with_detail(ErrorDetail::Offline {
+                            assets: vec!["a1".into()],
+                        }),
                     },
                 ],
                 queued_ms: 180,
             }),
         ),
-        response(9, Response::JobAccepted(JobAccepted { job: "job-1".into(), state: JobState::Queued, position: 2 })),
-        response(10, Response::JobsCancelled(JobsCancelled { jobs: vec!["job-1".into(), "job-2".into()] })),
+        response(
+            9,
+            Response::JobAccepted(JobAccepted {
+                job: "job-1".into(),
+                state: JobState::Queued,
+                position: 2,
+            }),
+        ),
+        response(
+            10,
+            Response::JobsCancelled(JobsCancelled {
+                jobs: vec!["job-1".into(), "job-2".into()],
+            }),
+        ),
         response(
             11,
             Response::DefinitionsApplied(DefinitionsApplied {
                 generation: seq(5),
-                failures: vec![EngineError::new(ErrorCode::ShaderCompile, ErrorScope::Definition { definition: "acme.glow".into() }, "The shader does not compile.")
-                    .with_detail(ErrorDetail::ShaderCompile { diagnostics: vec![ShaderDiagnostic { line: 3, column: Some(14), message: "'u_amout' : undeclared identifier".into() }] })],
+                failures: vec![
+                    EngineError::new(
+                        ErrorCode::ShaderCompile,
+                        ErrorScope::Definition {
+                            definition: "acme.glow".into(),
+                        },
+                        "The shader does not compile.",
+                    )
+                    .with_detail(ErrorDetail::ShaderCompile {
+                        diagnostics: vec![ShaderDiagnostic {
+                            line: 3,
+                            column: Some(14),
+                            message: "'u_amout' : undeclared identifier".into(),
+                        }],
+                    }),
+                ],
             }),
         ),
         response(12, Response::LeaseUsage(lease_usage())),
-        response(13, Response::Lease(Lease { process: EngineProcess::Interactive, epoch: seq(1), bytes: bytes(6 << 30), reason: LeaseReason::Initial, ack_deadline_ms: 1000 })),
-        response(14, Response::Handle(HandleGrant { handle: handle(15), kind: CapabilityKind::MediaRead { asset: "a1".into() }, content_hash: Some(hash(16)) })),
-        response(15, Response::OutputDestination(OutputDestination { job: "job-1".into(), temporary: handle(17) })),
-        response(16, Response::OutputCommitted(OutputCommitted { job: "job-1".into(), path: Some("/Users/someone/Powermove/Launch cut 2.mov".into()) })),
-        response(17, Response::HardwareSessions(HardwareSessionGrant { kind: HardwareSessionKind::Decode, held: 3 })),
-        response(18, Response::BlenderStatus(BlenderStatus { available: true, version: Some("4.5.3".into()), error: None })),
-        response(19, Response::ProjectOpened(ProjectOpened { instance: InstanceId(1), document: "doc-1".into(), revision: rev(1) })),
-        response(20, Response::Persisted(Persisted { instance: InstanceId(1), revision: rev(42), bytes: bytes(1_048_576) })),
-        response(21, Response::ExtensionRegistered(ExtensionRegistered { instance: InstanceId(1), extension: "acme.glow".into(), definitions_generation: seq(6) })),
+        response(
+            13,
+            Response::Lease(Lease {
+                process: EngineProcess::Interactive,
+                epoch: seq(1),
+                bytes: bytes(6 << 30),
+                reason: LeaseReason::Initial,
+                ack_deadline_ms: 1000,
+            }),
+        ),
+        response(
+            14,
+            Response::Handle(HandleGrant {
+                handle: handle(15),
+                kind: CapabilityKind::MediaRead { asset: "a1".into() },
+                content_hash: Some(hash(16)),
+            }),
+        ),
+        response(
+            15,
+            Response::OutputDestination(OutputDestination {
+                job: "job-1".into(),
+                temporary: handle(17),
+            }),
+        ),
+        response(
+            16,
+            Response::OutputCommitted(OutputCommitted {
+                job: "job-1".into(),
+                path: Some("/Users/someone/Powermove/Launch cut 2.mov".into()),
+            }),
+        ),
+        response(
+            17,
+            Response::HardwareSessions(HardwareSessionGrant {
+                kind: HardwareSessionKind::Decode,
+                held: 3,
+            }),
+        ),
+        response(
+            18,
+            Response::BlenderStatus(BlenderStatus {
+                available: true,
+                version: Some("4.5.3".into()),
+                error: None,
+            }),
+        ),
+        response(
+            19,
+            Response::ProjectOpened(ProjectOpened {
+                instance: InstanceId(1),
+                document: "doc-1".into(),
+                revision: rev(1),
+            }),
+        ),
+        response(
+            20,
+            Response::Persisted(Persisted {
+                instance: InstanceId(1),
+                revision: rev(42),
+                bytes: bytes(1_048_576),
+            }),
+        ),
+        response(
+            21,
+            Response::ExtensionRegistered(ExtensionRegistered {
+                instance: InstanceId(1),
+                extension: "acme.glow".into(),
+                definitions_generation: seq(6),
+            }),
+        ),
         response(
             22,
             Response::ToolResult(ToolResult {
@@ -530,7 +978,13 @@ fn lease_usage() -> LeaseUsage {
         pipelines: bytes(32 << 20),
         other: bytes(16 << 20),
     };
-    LeaseUsage { process: EngineProcess::Job, epoch: seq(3), total: categories.total().expect("sum"), categories, ack: true }
+    LeaseUsage {
+        process: EngineProcess::Job,
+        epoch: seq(3),
+        total: categories.total().expect("sum"),
+        categories,
+        ack: true,
+    }
 }
 
 /// Every event kind, in declaration order.
@@ -545,13 +999,26 @@ pub fn events() -> Vec<Envelope> {
             patch_count: 2,
             body: Bytes(vec![0x92, 0x01, 0x02]),
         })),
-        event(Event::PatchesApplied(PatchesApplied { document: "doc-1".into(), revision: rev(42) })),
+        event(Event::PatchesApplied(PatchesApplied {
+            document: "doc-1".into(),
+            revision: rev(42),
+        })),
         event(Event::Frame(frame_descriptor())),
-        event(Event::ReleaseFrame(FrameRelease { pool_index: 3, seq: seq(MAX_SAFE_INTEGER as u64) })),
+        event(Event::ReleaseFrame(FrameRelease {
+            pool_index: 3,
+            seq: seq(MAX_SAFE_INTEGER as u64),
+        })),
         event(Event::SurfacePool(SurfacePool {
             generation: seq(2),
             surfaces: (0..5)
-                .map(|i| SurfaceDescriptor { pool_index: i, size: Size::new(3840, 2160), format: SurfaceFormat::Rgba16Float, platform: PlatformSurface::IoSurface { bridge_index: 100 + i } })
+                .map(|i| SurfaceDescriptor {
+                    pool_index: i,
+                    size: Size::new(3840, 2160),
+                    format: SurfaceFormat::Rgba16Float,
+                    platform: PlatformSurface::IoSurface {
+                        bridge_index: 100 + i,
+                    },
+                })
                 .collect(),
         })),
         event(Event::Viewer(ViewerState {
@@ -566,7 +1033,10 @@ pub fn events() -> Vec<Envelope> {
             view: Some(view_override()),
             play_every_frame: true,
         })),
-        event(Event::Transport(TransportCommand::Seek { time: ticks(-705_600_000), mode: SeekMode::Scrub })),
+        event(Event::Transport(TransportCommand::Seek {
+            time: ticks(-705_600_000),
+            mode: SeekMode::Scrub,
+        })),
         event(Event::Clock(ClockSample {
             seq: seq(99),
             epoch: 4,
@@ -576,15 +1046,29 @@ pub fn events() -> Vec<Envelope> {
             rate: PlaybackRate { num: -2, den: 1 },
             output_latency_us: 11_610,
             sample_rate: 48_000,
-            loop_range: Some(TickRange { start: ticks(0), end: ticks(7_056_000_000) }),
+            loop_range: Some(TickRange {
+                start: ticks(0),
+                end: ticks(7_056_000_000),
+            }),
         })),
-        event(Event::Deadline(DeadlineSignal::DeadlineMiss { at: HostMicros::new(123_456_800_000).expect("micros"), frame_seq: seq(812), overrun_us: 900 })),
-        event(Event::Slicing(SlicingPolicy { blender: BlenderThrottle::Throttle { max_workers: 1 }, ..SlicingPolicy::DEFAULT })),
+        event(Event::Deadline(DeadlineSignal::DeadlineMiss {
+            at: HostMicros::new(123_456_800_000).expect("micros"),
+            frame_seq: seq(812),
+            overrun_us: 900,
+        })),
+        event(Event::Slicing(SlicingPolicy {
+            blender: BlenderThrottle::Throttle { max_workers: 1 },
+            ..SlicingPolicy::DEFAULT
+        })),
         event(Event::Failure(FailureReport {
             revision: rev(42),
             error: EngineError::new(
                 ErrorCode::WatchdogTimeout,
-                ErrorScope::Effect { layer: "title".into(), effect: "fx1".into(), definition: "acme.glow".into() },
+                ErrorScope::Effect {
+                    layer: "title".into(),
+                    effect: "fx1".into(),
+                    definition: "acme.glow".into(),
+                },
                 "Glow took too long on the GPU and was turned off.",
             ),
         })),
@@ -596,24 +1080,54 @@ pub fn events() -> Vec<Envelope> {
             marked_failed: vec![ErrorScope::Asset { asset: "a1".into() }],
             restart_in_ms: 500,
         })),
-        event(Event::LeaseUsage(LeaseUsage { ack: false, ..lease_usage() })),
-        event(Event::JobStatus(JobStatus { job: "job-1".into(), class: PriorityClass::AgentExport, state: JobState::Running, progress: 0.25, path: None, error: None })),
-        event(Event::BlenderProgress(BlenderProgress { job: "blender-1".into(), completed: 3, total: 16 })),
+        event(Event::LeaseUsage(LeaseUsage {
+            ack: false,
+            ..lease_usage()
+        })),
+        event(Event::JobStatus(JobStatus {
+            job: "job-1".into(),
+            class: PriorityClass::AgentExport,
+            state: JobState::Running,
+            progress: 0.25,
+            path: None,
+            error: None,
+        })),
+        event(Event::BlenderProgress(BlenderProgress {
+            job: "blender-1".into(),
+            completed: 3,
+            total: 16,
+        })),
         event(Event::BlenderSurface(BlenderSurface {
             job: "blender-1".into(),
             request_index: 0,
             key: hash(4),
             size: Size::new(1920, 1080),
-            crop: PixelRect { x: 400, y: 200, width: 800, height: 600 },
+            crop: PixelRect {
+                x: 400,
+                y: 200,
+                width: 800,
+                height: 600,
+            },
             handle: handle(18),
             bytes: bytes(3_840_000),
-            device: ResolvedDevice::Metal { name: "Apple M4 Max".into() },
+            device: ResolvedDevice::Metal {
+                name: "Apple M4 Max".into(),
+            },
         })),
-        event(Event::Fact(EngineFact::RelinkProposal { asset: "a1".into(), candidate: handle(19), reason: RelinkReason::Timecode })),
+        event(Event::Fact(EngineFact::RelinkProposal {
+            asset: "a1".into(),
+            candidate: handle(19),
+            reason: RelinkReason::Timecode,
+        })),
         event(Event::Fact(EngineFact::BlenderResult {
             job: "model-1".into(),
             revision: rev(41),
-            files: vec![BlenderOutputFile { name: "Rocket.glb".into(), hash: hash(20), handle: handle(20), bytes: bytes(2_000_000) }],
+            files: vec![BlenderOutputFile {
+                name: "Rocket.glb".into(),
+                hash: hash(20),
+                handle: handle(20),
+                bytes: bytes(2_000_000),
+            }],
             manifest: "{\"objects\":[\"Rocket\"]}".into(),
         })),
     ]
@@ -621,23 +1135,46 @@ pub fn events() -> Vec<Envelope> {
 
 /// The handshake, a cancel, and a connection-level error.
 pub fn control() -> Vec<Envelope> {
-    let hello = Hello { role: PeerRole::Renderer, wire: WIRE_VERSION, build: "0123abcd".into(), contracts: local_ranges(), max_message_bytes: 16 << 20 };
+    let hello = Hello {
+        role: PeerRole::Renderer,
+        wire: WIRE_VERSION,
+        build: "0123abcd".into(),
+        contracts: local_ranges(),
+        max_message_bytes: 16 << 20,
+    };
     let welcome = Welcome {
         role: PeerRole::InteractiveEngine,
         wire: WIRE_VERSION,
         build: "0123abcd".into(),
-        contracts: local_ranges().iter().map(|r| ContractVersion { contract: r.contract, version: r.max }).collect(),
+        contracts: local_ranges()
+            .iter()
+            .map(|r| ContractVersion {
+                contract: r.contract,
+                version: r.max,
+            })
+            .collect(),
         max_message_bytes: 16 << 20,
     };
     vec![
         Envelope::new(Message::Hello(hello)),
         Envelope::new(Message::Welcome(welcome)),
-        Envelope::new(Message::Cancel { id: RequestId::new(7).expect("id") }),
+        Envelope::new(Message::Cancel {
+            id: RequestId::new(7).expect("id"),
+        }),
         Envelope::new(Message::Error {
             id: RequestId::new(5).expect("id"),
-            error: EngineError::new(ErrorCode::StaleRevision, ErrorScope::Request { id: RequestId::new(5).expect("id") }, "The engine has not caught up with this edit yet.")
-                .with_retry(Retry::AfterResync)
-                .with_detail(ErrorDetail::StaleRevision { applied: rev(40), wanted: rev(42) }),
+            error: EngineError::new(
+                ErrorCode::StaleRevision,
+                ErrorScope::Request {
+                    id: RequestId::new(5).expect("id"),
+                },
+                "The engine has not caught up with this edit yet.",
+            )
+            .with_retry(Retry::AfterResync)
+            .with_detail(ErrorDetail::StaleRevision {
+                applied: rev(40),
+                wanted: rev(42),
+            }),
         }),
     ]
 }
@@ -655,7 +1192,11 @@ pub fn all() -> Vec<(String, Envelope)> {
         };
         named.push((name, envelope));
     }
-    for (prefix, list) in [("request", requests()), ("response", responses()), ("event", events())] {
+    for (prefix, list) in [
+        ("request", requests()),
+        ("response", responses()),
+        ("event", events()),
+    ] {
         for envelope in list {
             let tag = match &envelope.message {
                 Message::Request { body, .. } => tag_of(body),
@@ -664,9 +1205,17 @@ pub fn all() -> Vec<(String, Envelope)> {
                 _ => unreachable!("typed samples"),
             };
             let mut name = format!("{prefix}-{tag}");
-            if let Message::Event { body: Event::Fact(fact) } = &envelope.message {
+            if let Message::Event {
+                body: Event::Fact(fact),
+            } = &envelope.message
+            {
                 name.push('-');
-                name.push_str(&serde_json::to_value(fact).ok().and_then(|v| v["kind"].as_str().map(str::to_owned)).unwrap_or_default());
+                name.push_str(
+                    &serde_json::to_value(fact)
+                        .ok()
+                        .and_then(|v| v["kind"].as_str().map(str::to_owned))
+                        .unwrap_or_default(),
+                );
             }
             named.push((name, envelope));
         }
@@ -675,7 +1224,10 @@ pub fn all() -> Vec<(String, Envelope)> {
 }
 
 fn tag_of<T: serde::Serialize>(body: &T) -> String {
-    serde_json::to_value(body).ok().and_then(|v| v["type"].as_str().map(str::to_owned)).expect("tagged body")
+    serde_json::to_value(body)
+        .ok()
+        .and_then(|v| v["type"].as_str().map(str::to_owned))
+        .expect("tagged body")
 }
 
 /// Exhaustive index of request variants; add a sample when this grows.
@@ -785,6 +1337,10 @@ pub fn fixture_dir() -> std::path::PathBuf {
 }
 
 /// Every sample encoded with the production codec, keyed by file name.
-pub fn fixture_files() -> Result<std::collections::BTreeMap<String, Vec<u8>>, crate::codec::CodecError> {
-    all().into_iter().map(|(name, envelope)| Ok((format!("{name}.msgpack"), crate::codec::encode(&envelope)?))).collect()
+pub fn fixture_files()
+-> Result<std::collections::BTreeMap<String, Vec<u8>>, crate::codec::CodecError> {
+    all()
+        .into_iter()
+        .map(|(name, envelope)| Ok((format!("{name}.msgpack"), crate::codec::encode(&envelope)?)))
+        .collect()
 }

@@ -152,14 +152,21 @@ impl ChromaSiting {
     /// Co-sited samples are kept exact by upsampling and by point decimation
     /// in the encoder-input shader.
     pub const fn horizontally_cosited(self) -> bool {
-        matches!(self, ChromaSiting::Left | ChromaSiting::TopLeft | ChromaSiting::BottomLeft)
+        matches!(
+            self,
+            ChromaSiting::Left | ChromaSiting::TopLeft | ChromaSiting::BottomLeft
+        )
     }
 }
 
 /// How a source's alpha relates to its color.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum AlphaMode {
     /// No alpha, or alpha ignored.
     Opaque,
@@ -275,7 +282,11 @@ impl ProjectColor {
     };
 
     pub const fn working(&self) -> WorkingEncoding {
-        if self.linear_blending { WorkingEncoding::LinearLight } else { WorkingEncoding::Standard }
+        if self.linear_blending {
+            WorkingEncoding::LinearLight
+        } else {
+            WorkingEncoding::Standard
+        }
     }
 
     /// Non-default color settings require the native engine (section 6 table).
@@ -304,14 +315,21 @@ impl BlendMode {
     /// Modes that use HDR-safe formulas, or E with the per-project option,
     /// when linear blending is on. The rest always run in the active encoding.
     pub const fn uses_blend_domain(self) -> bool {
-        matches!(self, BlendMode::Screen | BlendMode::Overlay | BlendMode::SoftLight)
+        matches!(
+            self,
+            BlendMode::Screen | BlendMode::Overlay | BlendMode::SoftLight
+        )
     }
 }
 
 /// 3D tone mapping (decision 17): curves differ by design at cutover.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum ToneMapping3d {
     /// Native 3D: three.js r180 `ACESFilmicToneMapping` with its
     /// `exposure / 0.6` pre-scale, then three's sRGB OETF, per fragment.
@@ -323,7 +341,11 @@ pub enum ToneMapping3d {
 /// An output's color tag choice (section 9, output tags).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum OutputColor {
     /// sRGB images: CICP 1-13-0, full range (PNG `cICP` or ICC).
     SrgbImage,
@@ -377,11 +399,20 @@ impl OutputColor {
             OutputColor::SrgbImage => (1, 13, 0, true),
             OutputColor::Rec709Broadcast => (1, 1, 1, false),
             OutputColor::Rec709Image => (1, 1, 0, true),
-            OutputColor::Rec709QuickTime { candidate: QuickTimeTag::Cicp1_13_1 } => (1, 13, 1, false),
-            OutputColor::Rec709QuickTime { candidate: QuickTimeTag::Cicp1_2_1Gamma22 } => (1, 2, 1, false),
+            OutputColor::Rec709QuickTime {
+                candidate: QuickTimeTag::Cicp1_13_1,
+            } => (1, 13, 1, false),
+            OutputColor::Rec709QuickTime {
+                candidate: QuickTimeTag::Cicp1_2_1Gamma22,
+            } => (1, 2, 1, false),
             OutputColor::Viewer { .. } => return None,
         };
-        Some(Cicp { primaries, transfer, matrix, full_range })
+        Some(Cicp {
+            primaries,
+            transfer,
+            matrix,
+            full_range,
+        })
     }
 }
 
@@ -493,7 +524,11 @@ pub fn aces_filmic_r180(rgb: [f64; 3], exposure: f64) -> [f64; 3] {
         *c = a / b;
     }
     let color = mul(&OUTPUT, color);
-    [color[0].clamp(0.0, 1.0), color[1].clamp(0.0, 1.0), color[2].clamp(0.0, 1.0)]
+    [
+        color[0].clamp(0.0, 1.0),
+        color[1].clamp(0.0, 1.0),
+        color[2].clamp(0.0, 1.0),
+    ]
 }
 
 /// BT.709 luma of E-encoded values, used by luma mattes (section 9).
@@ -598,7 +633,14 @@ mod tests {
     fn e_round_trips_over_all_reals() {
         let mut x = -4.0;
         while x <= 4.0 {
-            assert!(close(display_decode(display_encode(x)), x, 1e-12 * x.abs().max(1.0)), "{x}");
+            assert!(
+                close(
+                    display_decode(display_encode(x)),
+                    x,
+                    1e-12 * x.abs().max(1.0)
+                ),
+                "{x}"
+            );
             x += 0.000_731;
         }
     }
@@ -612,7 +654,10 @@ mod tests {
         let below = display_encode(E_LINEAR_BREAK);
         let above = 1.055 * libm::pow(E_LINEAR_BREAK, 1.0 / 2.4) - 0.055;
         assert!(close(below, above, 1e-6));
-        assert!(display_encode(2.0) > 1.0, "the power segment continues above 1");
+        assert!(
+            display_encode(2.0) > 1.0,
+            "the power segment continues above 1"
+        );
     }
 
     #[test]
@@ -632,7 +677,13 @@ mod tests {
         assert_eq!(tag(OutputColor::SrgbImage), (1, 13, 0, true));
         assert_eq!(tag(OutputColor::Rec709Broadcast), (1, 1, 1, false));
         assert_eq!(tag(OutputColor::Rec709Image), (1, 1, 0, true));
-        assert!(OutputColor::Viewer { space: ViewerColorSpace::Srgb }.cicp().is_none());
+        assert!(
+            OutputColor::Viewer {
+                space: ViewerColorSpace::Srgb
+            }
+            .cicp()
+            .is_none()
+        );
     }
 
     #[test]
@@ -703,7 +754,10 @@ mod tests {
         let srgb = ColorDescription::SRGB_RGBA8;
         assert!(srgb.input_is_identity(WorkingEncoding::Standard));
         assert!(!srgb.input_is_identity(WorkingEncoding::LinearLight));
-        let bt1886 = ColorDescription { transfer: Transfer::Bt1886, ..srgb };
+        let bt1886 = ColorDescription {
+            transfer: Transfer::Bt1886,
+            ..srgb
+        };
         assert!(!bt1886.input_is_identity(WorkingEncoding::Standard));
         assert!(may_unpremultiply(1.0 / 4096.0));
         assert!(!may_unpremultiply(0.0));
@@ -713,7 +767,10 @@ mod tests {
     fn project_color_default_is_decision_1() {
         assert_eq!(ProjectColor::DEFAULT.working(), WorkingEncoding::Standard);
         assert!(!ProjectColor::DEFAULT.requires_native());
-        let linear = ProjectColor { linear_blending: true, ..ProjectColor::DEFAULT };
+        let linear = ProjectColor {
+            linear_blending: true,
+            ..ProjectColor::DEFAULT
+        };
         assert!(linear.requires_native());
     }
 
@@ -727,7 +784,10 @@ mod tests {
             dither: true,
         };
         assert_eq!(key.key_bytes(), key.key_bytes());
-        let other = ColorKey { dither: false, ..key };
+        let other = ColorKey {
+            dither: false,
+            ..key
+        };
         assert_ne!(key.key_bytes(), other.key_bytes());
     }
 }

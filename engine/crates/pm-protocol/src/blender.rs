@@ -12,10 +12,12 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
-use crate::common::{AssetId, ByteSize, CompositionId, ContentHash, JobId, LayerId, PixelRect, Size, Ticks};
+use crate::common::{
+    AssetId, ByteSize, CompositionId, ContentHash, JobId, LayerId, PixelRect, Size, Ticks,
+};
 use crate::host::CapabilityHandle;
 use crate::priority::PriorityClass;
-use crate::validate::{ensure, Validate, Violation};
+use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
 
 /// Oldest supported Blender.
@@ -56,7 +58,11 @@ pub enum RequestedDevice {
 /// The device Blender actually used; `auto` is resolved and recorded per job.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum ResolvedDevice {
     Cpu,
     Metal { name: String },
@@ -119,7 +125,12 @@ pub const PINNED_OUTPUT: PinnedOutput = PinnedOutput {
 /// `--background --factory-startup --disable-autoexec --python-exit-code 1
 /// --python <script>`; the engine adds `--offline-mode`. The environment is
 /// scrubbed and `BLENDER_USER_*` point at scratch directories.
-pub const WORKER_FLAGS: [&str; 4] = ["--background", "--factory-startup", "--disable-autoexec", "--offline-mode"];
+pub const WORKER_FLAGS: [&str; 4] = [
+    "--background",
+    "--factory-startup",
+    "--disable-autoexec",
+    "--offline-mode",
+];
 
 /// The snapshot encoding: today's `renderSnapshot` JSON, version 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -198,21 +209,55 @@ impl Validate for BlenderJobRequest {
         use limits::*;
         const C: ContractId = ContractId::Blender;
         ensure(self.job.is_valid(), C, || "invalid job id".into())?;
-        ensure(!self.surfaces.is_empty() && self.surfaces.len() <= MAX_NESTED_FRAMES, C, || {
-            format!("a job renders 1 to {MAX_NESTED_FRAMES} surfaces, got {}", self.surfaces.len())
+        ensure(
+            !self.surfaces.is_empty() && self.surfaces.len() <= MAX_NESTED_FRAMES,
+            C,
+            || {
+                format!(
+                    "a job renders 1 to {MAX_NESTED_FRAMES} surfaces, got {}",
+                    self.surfaces.len()
+                )
+            },
+        )?;
+        ensure(self.assets.len() <= MAX_ASSETS, C, || {
+            format!("at most {MAX_ASSETS} assets")
         })?;
-        ensure(self.assets.len() <= MAX_ASSETS, C, || format!("at most {MAX_ASSETS} assets"))?;
-        ensure(self.snapshot.bytes.get() <= MAX_SNAPSHOT_BYTES, C, || "snapshot exceeds 64 MB".into())?;
+        ensure(self.snapshot.bytes.get() <= MAX_SNAPSHOT_BYTES, C, || {
+            "snapshot exceeds 64 MB".into()
+        })?;
         let max_samples = if self.settings.preview { 512 } else { 4096 };
-        ensure((1..=max_samples).contains(&self.settings.samples), C, || format!("samples must be 1 to {max_samples}"))?;
-        ensure(!self.settings.preview || (0.1..=1.0).contains(&self.settings.preview_scale), C, || "preview scale must be 0.1 to 1".into())?;
+        ensure(
+            (1..=max_samples).contains(&self.settings.samples),
+            C,
+            || format!("samples must be 1 to {max_samples}"),
+        )?;
+        ensure(
+            !self.settings.preview || (0.1..=1.0).contains(&self.settings.preview_scale),
+            C,
+            || "preview scale must be 0.1 to 1".into(),
+        )?;
         for surface in &self.surfaces {
-            ensure(!surface.size.is_empty() && surface.size.width <= MAX_OUTPUT_DIMENSION && surface.size.height <= MAX_OUTPUT_DIMENSION, C, || {
-                format!("surface size {:?} outside 1..{MAX_OUTPUT_DIMENSION}", surface.size)
+            ensure(
+                !surface.size.is_empty()
+                    && surface.size.width <= MAX_OUTPUT_DIMENSION
+                    && surface.size.height <= MAX_OUTPUT_DIMENSION,
+                C,
+                || {
+                    format!(
+                        "surface size {:?} outside 1..{MAX_OUTPUT_DIMENSION}",
+                        surface.size
+                    )
+                },
+            )?;
+            ensure((1..=8).contains(&surface.composition_path.len()), C, || {
+                "nesting depth is 1 to 8".into()
             })?;
-            ensure((1..=8).contains(&surface.composition_path.len()), C, || "nesting depth is 1 to 8".into())?;
             if let Some(shutter) = surface.shutter {
-                ensure(shutter.count > 0 && shutter.index < shutter.count, C, || "shutter index must be below its count".into())?;
+                ensure(
+                    shutter.count > 0 && shutter.index < shutter.count,
+                    C,
+                    || "shutter index must be below its count".into(),
+                )?;
             }
         }
         Ok(())
@@ -225,14 +270,21 @@ impl Validate for BlenderJobRequest {
 /// undoable edit, dropped if the document moved past `revision` meanwhile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum BlenderModelOperation {
     /// Generate a model from a recipe: the document's `ModelRecipe` JSON as
     /// UTF-8 text, validated by the kernel's schema (`shared/blender.ts`).
     Generate { recipe: String },
     /// Import an object from a `.blend` source asset (external textures packed
     /// or reported at import).
-    Import { source: AssetId, object: Option<String> },
+    Import {
+        source: AssetId,
+        object: Option<String>,
+    },
 }
 
 /// Renderer → host: run a model operation.
@@ -254,16 +306,30 @@ pub const MAX_RECIPE_BYTES: usize = 8 * 1024 * 1024;
 impl Validate for BlenderModelJob {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::Blender;
-        ensure(self.job.is_valid() && self.document.is_valid(), C, || "invalid job or document id".into())?;
-        ensure(self.assets.len() <= limits::MAX_ASSETS, C, || format!("at most {} assets", limits::MAX_ASSETS))?;
+        ensure(self.job.is_valid() && self.document.is_valid(), C, || {
+            "invalid job or document id".into()
+        })?;
+        ensure(self.assets.len() <= limits::MAX_ASSETS, C, || {
+            format!("at most {} assets", limits::MAX_ASSETS)
+        })?;
         match &self.operation {
-            BlenderModelOperation::Generate { recipe } => {
-                ensure(!recipe.is_empty() && recipe.len() <= MAX_RECIPE_BYTES, C, || "recipe must be 1 byte to 8 MiB of JSON".into())
-            }
+            BlenderModelOperation::Generate { recipe } => ensure(
+                !recipe.is_empty() && recipe.len() <= MAX_RECIPE_BYTES,
+                C,
+                || "recipe must be 1 byte to 8 MiB of JSON".into(),
+            ),
             BlenderModelOperation::Import { source, object } => {
                 ensure(source.is_valid(), C, || "invalid source asset".into())?;
-                ensure(object.as_ref().is_none_or(|o| !o.is_empty() && o.chars().count() <= 160), C, || "object names are 1 to 160 characters".into())?;
-                ensure(self.assets.iter().any(|a| &a.asset == source), C, || "the source .blend must be among the job's assets".into())
+                ensure(
+                    object
+                        .as_ref()
+                        .is_none_or(|o| !o.is_empty() && o.chars().count() <= 160),
+                    C,
+                    || "object names are 1 to 160 characters".into(),
+                )?;
+                ensure(self.assets.iter().any(|a| &a.asset == source), C, || {
+                    "the source .blend must be among the job's assets".into()
+                })
             }
         }
     }
@@ -302,8 +368,14 @@ pub struct BlenderSurface {
 impl Validate for BlenderSurface {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::Blender;
-        ensure(self.size.contains(&self.crop), C, || "crop must lie inside the surface".into())?;
-        ensure(self.bytes.get() <= limits::MAX_OUTPUT_BYTES_PER_SURFACE, C, || "surface exceeds the per-surface output cap".into())
+        ensure(self.size.contains(&self.crop), C, || {
+            "crop must lie inside the surface".into()
+        })?;
+        ensure(
+            self.bytes.get() <= limits::MAX_OUTPUT_BYTES_PER_SURFACE,
+            C,
+            || "surface exceeds the per-surface output cap".into(),
+        )
     }
 }
 
@@ -331,10 +403,14 @@ pub struct BlenderStatus {
 impl BlenderStatus {
     /// Whether the version meets [`MIN_BLENDER_VERSION`].
     pub fn supported(&self) -> bool {
-        let Some(version) = &self.version else { return false };
+        let Some(version) = &self.version else {
+            return false;
+        };
         let mut parts = version.split('.').map(|p| p.parse::<u16>());
         match (parts.next(), parts.next()) {
-            (Some(Ok(major)), Some(Ok(minor))) => self.available && (major, minor) >= MIN_BLENDER_VERSION,
+            (Some(Ok(major)), Some(Ok(minor))) => {
+                self.available && (major, minor) >= MIN_BLENDER_VERSION
+            }
             _ => false,
         }
     }
@@ -384,15 +460,30 @@ pub(crate) mod tests {
         BlenderJobRequest {
             job: "blender-1".into(),
             priority: PriorityClass::UserJob,
-            snapshot: SnapshotRef { hash: ContentHash([1; 32]), encoding: SnapshotEncoding::RenderSnapshotJsonV1, handle: handle(1), bytes: ByteSize::new(4096).unwrap() },
+            snapshot: SnapshotRef {
+                hash: ContentHash([1; 32]),
+                encoding: SnapshotEncoding::RenderSnapshotJsonV1,
+                handle: handle(1),
+                bytes: ByteSize::new(4096).unwrap(),
+            },
             worker_script_hash: ContentHash([2; 32]),
             assets: vec![],
-            settings: BlenderSettings { engine: BlenderEngine::Eevee, samples: 64, preview: false, preview_scale: 0.5, denoise: true, device: RequestedDevice::Auto },
+            settings: BlenderSettings {
+                engine: BlenderEngine::Eevee,
+                samples: 64,
+                preview: false,
+                preview_scale: 0.5,
+                denoise: true,
+                device: RequestedDevice::Auto,
+            },
             surfaces: vec![SurfaceRequest {
                 layer: "cube".into(),
                 composition_path: vec!["main".into()],
                 time: Ticks::ZERO,
-                shutter: Some(ShutterSample { index: 0, count: 16 }),
+                shutter: Some(ShutterSample {
+                    index: 0,
+                    count: 16,
+                }),
                 size: Size::new(1920, 1080),
                 key: ContentHash([3; 32]),
             }],
@@ -408,7 +499,10 @@ pub(crate) mod tests {
         big.surfaces[0].size = Size::new(8193, 10);
         assert!(big.validate().is_err());
         let mut bad = job();
-        bad.surfaces[0].shutter = Some(ShutterSample { index: 16, count: 16 });
+        bad.surfaces[0].shutter = Some(ShutterSample {
+            index: 16,
+            count: 16,
+        });
         assert!(bad.validate().is_err());
         let mut preview = job();
         preview.settings.preview = true;
@@ -418,7 +512,11 @@ pub(crate) mod tests {
 
     #[test]
     fn version_gate() {
-        let status = |v: &str| BlenderStatus { available: true, version: Some(v.into()), error: None };
+        let status = |v: &str| BlenderStatus {
+            available: true,
+            version: Some(v.into()),
+            error: None,
+        };
         assert!(status("4.5.0").supported());
         assert!(status("5.0.1").supported());
         assert!(!status("4.4.3").supported());
@@ -433,7 +531,9 @@ pub(crate) mod tests {
             asset_hashes: vec![ContentHash([5; 32]), ContentHash([4; 32])],
             blender_version: "4.5.0".into(),
             settings: job().settings,
-            device: ResolvedDevice::Metal { name: "Apple M4 Max".into() },
+            device: ResolvedDevice::Metal {
+                name: "Apple M4 Max".into(),
+            },
             preview: false,
             camera: ContentHash([9; 32]),
             size: Size::new(1920, 1080),
@@ -443,7 +543,10 @@ pub(crate) mod tests {
         let mut reordered = key.clone();
         reordered.asset_hashes.reverse();
         assert_eq!(key.key_bytes(), reordered.key_bytes());
-        let other = SurfaceKey { preview: true, ..key.clone() };
+        let other = SurfaceKey {
+            preview: true,
+            ..key.clone()
+        };
         assert_ne!(key.key_bytes(), other.key_bytes());
     }
 

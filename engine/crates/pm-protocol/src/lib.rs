@@ -50,8 +50,7 @@ pub mod samples;
 #[cfg(feature = "ts")]
 pub mod ts;
 
-
-pub use codec::{decode, encode, CodecError};
+pub use codec::{CodecError, decode, encode};
 pub use envelope::{Envelope, Event, Message, Request, Response};
 pub use validate::{Validate, Violation};
 pub use version::{ContractId, WIRE_VERSION};

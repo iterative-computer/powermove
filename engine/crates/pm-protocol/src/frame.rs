@@ -11,10 +11,12 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::color::{OutputColor, Precision, ViewerColorSpace};
-use crate::common::{CompositionId, LayerId, Mat3, Mat4, PixelRect, Rect, Revision, Seq, Size, Ticks};
+use crate::common::{
+    CompositionId, LayerId, Mat3, Mat4, PixelRect, Rect, Revision, Seq, Size, Ticks,
+};
 use crate::interop::SurfaceFormat;
 use crate::priority::PriorityClass;
-use crate::validate::{ensure, Validate, Violation};
+use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
 
 /// The viewer's Resolution control (appendix D).
@@ -92,12 +94,24 @@ pub enum Shading3d {
 /// Camera projection.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum Projection {
     /// Vertical field of view in degrees.
-    Perspective { fov_y_degrees: f64, near: f64, far: f64 },
+    Perspective {
+        fov_y_degrees: f64,
+        near: f64,
+        far: f64,
+    },
     /// Orthographic with a fixed half-height (3 divided by zoom, section 8).
-    Orthographic { half_height: f64, near: f64, far: f64 },
+    Orthographic {
+        half_height: f64,
+        near: f64,
+        far: f64,
+    },
 }
 
 /// A camera that is not in the document (the editor camera).
@@ -172,55 +186,114 @@ pub const MAX_OUTPUT_DIMENSION: u32 = 16384;
 impl Validate for FrameRequest {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::Frame;
-        ensure(self.composition.is_valid(), C, || "invalid composition id".into())?;
+        ensure(self.composition.is_valid(), C, || {
+            "invalid composition id".into()
+        })?;
         ensure(
             !self.output_size.is_empty()
                 && self.output_size.width <= MAX_OUTPUT_DIMENSION
                 && self.output_size.height <= MAX_OUTPUT_DIMENSION,
             C,
-            || format!("output size {:?} outside 1..{MAX_OUTPUT_DIMENSION}", self.output_size),
+            || {
+                format!(
+                    "output size {:?} outside 1..{MAX_OUTPUT_DIMENSION}",
+                    self.output_size
+                )
+            },
         )?;
         if let Some(region) = &self.region {
-            ensure(!region.is_empty() && self.output_size.contains(region), C, || {
-                format!("region {region:?} is empty or outside {:?}", self.output_size)
-            })?;
+            ensure(
+                !region.is_empty() && self.output_size.contains(region),
+                C,
+                || {
+                    format!(
+                        "region {region:?} is empty or outside {:?}",
+                        self.output_size
+                    )
+                },
+            )?;
         }
-        ensure(self.scale.is_finite() && (MIN_SCALE..=MAX_SCALE).contains(&self.scale), C, || {
-            format!("scale {} outside {MIN_SCALE}..{MAX_SCALE}", self.scale)
-        })?;
+        ensure(
+            self.scale.is_finite() && (MIN_SCALE..=MAX_SCALE).contains(&self.scale),
+            C,
+            || format!("scale {} outside {MIN_SCALE}..{MAX_SCALE}", self.scale),
+        )?;
         if self.purpose.is_final() {
-            ensure(self.view.is_none(), C, || "exports and agent captures ignore view overrides; send none".into())?;
-            ensure(self.resolution == PreviewResolution::Full, C, || "exports and agent captures render at full resolution".into())?;
-            ensure(!matches!(self.motion_blur, MotionBlurKind::PreviewPlaying | MotionBlurKind::PreviewPaused), C, || {
-                "exports and agent captures never use preview motion-blur counts".into()
+            ensure(self.view.is_none(), C, || {
+                "exports and agent captures ignore view overrides; send none".into()
             })?;
-            ensure(!self.overlay && !self.depth_id, C, || "overlay geometry and depth surfaces are viewer outputs".into())?;
+            ensure(self.resolution == PreviewResolution::Full, C, || {
+                "exports and agent captures render at full resolution".into()
+            })?;
+            ensure(
+                !matches!(
+                    self.motion_blur,
+                    MotionBlurKind::PreviewPlaying | MotionBlurKind::PreviewPaused
+                ),
+                C,
+                || "exports and agent captures never use preview motion-blur counts".into(),
+            )?;
+            ensure(!self.overlay && !self.depth_id, C, || {
+                "overlay geometry and depth surfaces are viewer outputs".into()
+            })?;
         }
-        ensure(!self.draft_render || self.purpose == FramePurpose::Export, C, || "only exports take an explicit draft render".into())?;
-        ensure(self.media != MediaPreference::Proxies || !self.purpose.is_final() || self.draft_render, C, || {
-            "proxy pixels reach an export only through an explicit draft render, and never an agent capture".into()
-        })?;
-        ensure(!self.draft_render || self.media == MediaPreference::Proxies, C, || "a draft render reads proxies".into())?;
+        ensure(
+            !self.draft_render || self.purpose == FramePurpose::Export,
+            C,
+            || "only exports take an explicit draft render".into(),
+        )?;
+        ensure(
+            self.media != MediaPreference::Proxies || !self.purpose.is_final() || self.draft_render,
+            C,
+            || {
+                "proxy pixels reach an export only through an explicit draft render, and never an agent capture".into()
+            },
+        )?;
+        ensure(
+            !self.draft_render || self.media == MediaPreference::Proxies,
+            C,
+            || "a draft render reads proxies".into(),
+        )?;
         if self.purpose == FramePurpose::Export {
-            ensure(!self.draft_3d, C, || "exports never use draft 3D; a missing Blender surface fails the export".into())?;
-            ensure(!matches!(self.priority, PriorityClass::Interactive | PriorityClass::AgentSnapshot), C, || {
-                "exports run in a job class".into()
+            ensure(!self.draft_3d, C, || {
+                "exports never use draft 3D; a missing Blender surface fails the export".into()
             })?;
-            ensure(matches!(self.motion_blur, MotionBlurKind::Export | MotionBlurKind::AlphaExport | MotionBlurKind::Off), C, || {
-                "exports use export motion-blur counts".into()
-            })?;
+            ensure(
+                !matches!(
+                    self.priority,
+                    PriorityClass::Interactive | PriorityClass::AgentSnapshot
+                ),
+                C,
+                || "exports run in a job class".into(),
+            )?;
+            ensure(
+                matches!(
+                    self.motion_blur,
+                    MotionBlurKind::Export | MotionBlurKind::AlphaExport | MotionBlurKind::Off
+                ),
+                C,
+                || "exports use export motion-blur counts".into(),
+            )?;
         }
         if self.purpose == FramePurpose::AgentCapture {
-            ensure(self.priority == PriorityClass::AgentSnapshot, C, || "agent captures run in the agent snapshot class".into())?;
+            ensure(self.priority == PriorityClass::AgentSnapshot, C, || {
+                "agent captures run in the agent snapshot class".into()
+            })?;
         }
         if matches!(self.purpose, FramePurpose::Viewer | FramePurpose::Scrub) {
-            ensure(self.priority == PriorityClass::Interactive, C, || "viewer frames are interactive".into())?;
-            ensure(matches!(self.color, OutputColor::Viewer { .. }), C, || "viewer frames use the viewer output color".into())?;
+            ensure(self.priority == PriorityClass::Interactive, C, || {
+                "viewer frames are interactive".into()
+            })?;
+            ensure(matches!(self.color, OutputColor::Viewer { .. }), C, || {
+                "viewer frames use the viewer output color".into()
+            })?;
         }
         if let Some(view) = &self.view {
-            ensure(!view.xray || matches!(view.shading, Shading3d::Wireframe | Shading3d::Solid), C, || {
-                "X-ray applies in draft shading modes only".into()
-            })?;
+            ensure(
+                !view.xray || matches!(view.shading, Shading3d::Wireframe | Shading3d::Solid),
+                C,
+                || "X-ray applies in draft shading modes only".into(),
+            )?;
         }
         Ok(())
     }
@@ -261,9 +334,22 @@ pub type Quad = [[f64; 2]; 4];
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "op")]
 pub enum PathCommand {
-    MoveTo { x: f64, y: f64 },
-    LineTo { x: f64, y: f64 },
-    CubicTo { x1: f64, y1: f64, x2: f64, y2: f64, x: f64, y: f64 },
+    MoveTo {
+        x: f64,
+        y: f64,
+    },
+    LineTo {
+        x: f64,
+        y: f64,
+    },
+    CubicTo {
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        x: f64,
+        y: f64,
+    },
     Close,
 }
 
@@ -364,13 +450,32 @@ pub struct ViewerState {
 impl Validate for ViewerState {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::Frame;
-        ensure(self.composition.is_valid(), C, || "invalid composition id".into())?;
-        ensure(!self.size.is_empty() && self.size.width <= MAX_OUTPUT_DIMENSION && self.size.height <= MAX_OUTPUT_DIMENSION, C, || {
-            format!("viewer size {:?} outside 1..{MAX_OUTPUT_DIMENSION}", self.size)
+        ensure(self.composition.is_valid(), C, || {
+            "invalid composition id".into()
         })?;
-        ensure(self.device_pixel_ratio.is_finite() && self.device_pixel_ratio > 0.0, C, || "device pixel ratio must be positive".into())?;
-        ensure(self.zoom.is_finite() && self.zoom > 0.0, C, || "zoom must be positive".into())?;
-        ensure(self.pan.iter().all(|v| v.is_finite()), C, || "pan must be finite".into())
+        ensure(
+            !self.size.is_empty()
+                && self.size.width <= MAX_OUTPUT_DIMENSION
+                && self.size.height <= MAX_OUTPUT_DIMENSION,
+            C,
+            || {
+                format!(
+                    "viewer size {:?} outside 1..{MAX_OUTPUT_DIMENSION}",
+                    self.size
+                )
+            },
+        )?;
+        ensure(
+            self.device_pixel_ratio.is_finite() && self.device_pixel_ratio > 0.0,
+            C,
+            || "device pixel ratio must be positive".into(),
+        )?;
+        ensure(self.zoom.is_finite() && self.zoom > 0.0, C, || {
+            "zoom must be positive".into()
+        })?;
+        ensure(self.pan.iter().all(|v| v.is_finite()), C, || {
+            "pan must be finite".into()
+        })
     }
 }
 
@@ -389,12 +494,18 @@ pub enum ReleaseError {
     #[error("pool index {index} is not held")]
     NotHeld { index: u32 },
     #[error("pool index {index} holds seq {held}, release named {released}")]
-    WrongSeq { index: u32, held: Seq, released: Seq },
+    WrongSeq {
+        index: u32,
+        held: Seq,
+        released: Seq,
+    },
 }
 
 impl PoolLedger {
     pub fn new(surfaces: usize) -> Self {
-        Self { held: vec![None; surfaces] }
+        Self {
+            held: vec![None; surfaces],
+        }
     }
 
     /// A free surface to render into, if any.
@@ -415,10 +526,19 @@ impl PoolLedger {
     }
 
     pub fn release(&mut self, release: FrameRelease) -> Result<(), ReleaseError> {
-        let slot = self.held.get_mut(release.pool_index as usize).ok_or(ReleaseError::OutOfRange(release.pool_index))?;
+        let slot = self
+            .held
+            .get_mut(release.pool_index as usize)
+            .ok_or(ReleaseError::OutOfRange(release.pool_index))?;
         match *slot {
-            None => Err(ReleaseError::NotHeld { index: release.pool_index }),
-            Some(held) if held != release.seq => Err(ReleaseError::WrongSeq { index: release.pool_index, held, released: release.seq }),
+            None => Err(ReleaseError::NotHeld {
+                index: release.pool_index,
+            }),
+            Some(held) if held != release.seq => Err(ReleaseError::WrongSeq {
+                index: release.pool_index,
+                held,
+                released: release.seq,
+            }),
             Some(_) => {
                 *slot = None;
                 Ok(())
@@ -446,7 +566,9 @@ mod tests {
             scale: 1.0,
             resolution: PreviewResolution::Automatic,
             media: MediaPreference::Automatic,
-            color: OutputColor::Viewer { space: ViewerColorSpace::DisplayP3 },
+            color: OutputColor::Viewer {
+                space: ViewerColorSpace::DisplayP3,
+            },
             precision: Precision::Float16,
             motion_blur: MotionBlurKind::PreviewPlaying,
             view: None,
@@ -461,7 +583,12 @@ mod tests {
     fn viewer_requests_validate() {
         assert!(viewer_request().validate().is_ok());
         let mut bad = viewer_request();
-        bad.region = Some(PixelRect { x: 3800, y: 0, width: 100, height: 10 });
+        bad.region = Some(PixelRect {
+            x: 3800,
+            y: 0,
+            width: 100,
+            height: 10,
+        });
         assert!(bad.validate().is_err());
         let mut bad = viewer_request();
         bad.scale = 0.0;
@@ -487,17 +614,74 @@ mod tests {
         };
         assert!(export.validate().is_ok());
         let with_view = FrameRequest {
-            view: Some(ViewOverride { camera: None, shading: Shading3d::Solid, xray: false, local_view: vec![] }),
+            view: Some(ViewOverride {
+                camera: None,
+                shading: Shading3d::Solid,
+                xray: false,
+                local_view: vec![],
+            }),
             ..export.clone()
         };
         assert!(with_view.validate().is_err());
-        assert!(FrameRequest { media: MediaPreference::Proxies, ..export.clone() }.validate().is_err());
-        assert!(FrameRequest { media: MediaPreference::Proxies, draft_render: true, ..export.clone() }.validate().is_ok(), "explicit draft render");
-        assert!(FrameRequest { draft_render: true, ..export.clone() }.validate().is_err(), "a draft render reads proxies");
-        assert!(FrameRequest { draft_3d: true, ..export.clone() }.validate().is_err());
-        assert!(FrameRequest { resolution: PreviewResolution::Half, ..export.clone() }.validate().is_err());
-        assert!(FrameRequest { overlay: true, ..export.clone() }.validate().is_err());
-        assert!(FrameRequest { motion_blur: MotionBlurKind::PreviewPaused, ..export.clone() }.validate().is_err());
+        assert!(
+            FrameRequest {
+                media: MediaPreference::Proxies,
+                ..export.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            FrameRequest {
+                media: MediaPreference::Proxies,
+                draft_render: true,
+                ..export.clone()
+            }
+            .validate()
+            .is_ok(),
+            "explicit draft render"
+        );
+        assert!(
+            FrameRequest {
+                draft_render: true,
+                ..export.clone()
+            }
+            .validate()
+            .is_err(),
+            "a draft render reads proxies"
+        );
+        assert!(
+            FrameRequest {
+                draft_3d: true,
+                ..export.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            FrameRequest {
+                resolution: PreviewResolution::Half,
+                ..export.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            FrameRequest {
+                overlay: true,
+                ..export.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            FrameRequest {
+                motion_blur: MotionBlurKind::PreviewPaused,
+                ..export.clone()
+            }
+            .validate()
+            .is_err()
+        );
         let agent = FrameRequest {
             purpose: FramePurpose::AgentCapture,
             priority: PriorityClass::AgentSnapshot,
@@ -506,18 +690,53 @@ mod tests {
             draft_3d: true,
             ..export
         };
-        assert!(agent.validate().is_ok(), "agent captures may stand in native shading (blender: pending)");
-        assert!(FrameRequest { media: MediaPreference::Proxies, ..agent.clone() }.validate().is_err());
-        assert!(FrameRequest { media: MediaPreference::Proxies, draft_render: true, ..agent.clone() }.validate().is_err());
-        assert!(FrameRequest { priority: PriorityClass::UserJob, ..agent }.validate().is_err());
+        assert!(
+            agent.validate().is_ok(),
+            "agent captures may stand in native shading (blender: pending)"
+        );
+        assert!(
+            FrameRequest {
+                media: MediaPreference::Proxies,
+                ..agent.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            FrameRequest {
+                media: MediaPreference::Proxies,
+                draft_render: true,
+                ..agent.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            FrameRequest {
+                priority: PriorityClass::UserJob,
+                ..agent
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
     fn xray_only_in_draft_shading() {
         let mut request = viewer_request();
-        request.view = Some(ViewOverride { camera: None, shading: Shading3d::Rendered, xray: true, local_view: vec![] });
+        request.view = Some(ViewOverride {
+            camera: None,
+            shading: Shading3d::Rendered,
+            xray: true,
+            local_view: vec![],
+        });
         assert!(request.validate().is_err());
-        request.view = Some(ViewOverride { camera: None, shading: Shading3d::Solid, xray: true, local_view: vec![] });
+        request.view = Some(ViewOverride {
+            camera: None,
+            shading: Shading3d::Solid,
+            xray: true,
+            local_view: vec![],
+        });
         assert!(request.validate().is_ok());
     }
 
@@ -530,10 +749,36 @@ mod tests {
         assert_eq!(pool.free(), Some(1));
         assert!(pool.present(1, seq(2)));
         assert_eq!(pool.free(), None);
-        assert_eq!(pool.release(FrameRelease { pool_index: 0, seq: seq(9) }), Err(ReleaseError::WrongSeq { index: 0, held: seq(1), released: seq(9) }));
-        assert_eq!(pool.release(FrameRelease { pool_index: 5, seq: seq(1) }), Err(ReleaseError::OutOfRange(5)));
-        pool.release(FrameRelease { pool_index: 0, seq: seq(1) }).unwrap();
-        assert_eq!(pool.release(FrameRelease { pool_index: 0, seq: seq(1) }), Err(ReleaseError::NotHeld { index: 0 }));
+        assert_eq!(
+            pool.release(FrameRelease {
+                pool_index: 0,
+                seq: seq(9)
+            }),
+            Err(ReleaseError::WrongSeq {
+                index: 0,
+                held: seq(1),
+                released: seq(9)
+            })
+        );
+        assert_eq!(
+            pool.release(FrameRelease {
+                pool_index: 5,
+                seq: seq(1)
+            }),
+            Err(ReleaseError::OutOfRange(5))
+        );
+        pool.release(FrameRelease {
+            pool_index: 0,
+            seq: seq(1),
+        })
+        .unwrap();
+        assert_eq!(
+            pool.release(FrameRelease {
+                pool_index: 0,
+                seq: seq(1)
+            }),
+            Err(ReleaseError::NotHeld { index: 0 })
+        );
         assert_eq!(pool.held_count(), 1);
     }
 }

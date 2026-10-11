@@ -45,7 +45,12 @@ fn main() -> ExitCode {
 type TsFiles = std::collections::BTreeMap<std::path::PathBuf, String>;
 type Fixtures = std::collections::BTreeMap<String, Vec<u8>>;
 
-fn check_outputs(ts_files: &TsFiles, ts_dir: &std::path::Path, fixtures: &Fixtures, fixture_dir: &std::path::Path) -> std::io::Result<bool> {
+fn check_outputs(
+    ts_files: &TsFiles,
+    ts_dir: &std::path::Path,
+    fixtures: &Fixtures,
+    fixture_dir: &std::path::Path,
+) -> std::io::Result<bool> {
     let ts = pm_protocol::ts::drift(ts_files, ts_dir)?;
     let wire = fixture_drift(fixtures, fixture_dir)?;
     if ts.is_empty() && wire.is_empty() {
@@ -53,11 +58,18 @@ fn check_outputs(ts_files: &TsFiles, ts_dir: &std::path::Path, fixtures: &Fixtur
         return Ok(true);
     }
     eprintln!("Out of date. TypeScript: {ts:?}. Fixtures: {wire:?}");
-    eprintln!("Run: source engine/env.sh && cd engine && cargo run -p pm-protocol --bin pm-protocol-gen");
+    eprintln!(
+        "Run: source engine/env.sh && cd engine && cargo run -p pm-protocol --bin pm-protocol-gen"
+    );
     Ok(false)
 }
 
-fn write_outputs(ts_files: &TsFiles, ts_dir: &std::path::Path, fixtures: &Fixtures, fixture_dir: &std::path::Path) -> std::io::Result<bool> {
+fn write_outputs(
+    ts_files: &TsFiles,
+    ts_dir: &std::path::Path,
+    fixtures: &Fixtures,
+    fixture_dir: &std::path::Path,
+) -> std::io::Result<bool> {
     let before = pm_protocol::ts::write(ts_files, ts_dir)?;
     println!(
         "TypeScript: {} files in {} ({} new, {} changed, {} removed)",
@@ -78,7 +90,11 @@ fn write_outputs(ts_files: &TsFiles, ts_dir: &std::path::Path, fixtures: &Fixtur
             std::fs::write(&path, bytes)?;
         }
     }
-    println!("Fixtures: {} files in {}", fixtures.len(), fixture_dir.display());
+    println!(
+        "Fixtures: {} files in {}",
+        fixtures.len(),
+        fixture_dir.display()
+    );
     Ok(true)
 }
 

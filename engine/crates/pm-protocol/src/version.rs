@@ -199,7 +199,9 @@ pub struct Welcome {
 pub enum NegotiationError {
     #[error("wire version mismatch: local {local}, remote {remote}")]
     WireMismatch { local: u16, remote: u16 },
-    #[error("contract {contract:?} has no common version (local {local_min}..={local_max}, remote {remote_min}..={remote_max})")]
+    #[error(
+        "contract {contract:?} has no common version (local {local_min}..={local_max}, remote {remote_min}..={remote_max})"
+    )]
     NoCommonVersion {
         contract: ContractId,
         local_min: u16,
@@ -210,7 +212,11 @@ pub enum NegotiationError {
     #[error("contract {contract:?} is required but the peer does not speak it")]
     MissingRequired { contract: ContractId },
     #[error("draft contract {contract:?} needs equal builds (local {local}, remote {remote})")]
-    DraftBuildMismatch { contract: ContractId, local: String, remote: String },
+    DraftBuildMismatch {
+        contract: ContractId,
+        local: String,
+        remote: String,
+    },
     #[error("contract {contract:?} is listed twice or has min > max")]
     MalformedRange { contract: ContractId },
     #[error("the peer accepts messages of at most {0} bytes; the floor is 64 KiB")]
@@ -235,7 +241,9 @@ fn check_ranges(ranges: &[ContractRange]) -> Result<(), NegotiationError> {
     let mut seen = std::collections::BTreeSet::new();
     for range in ranges {
         if range.min > range.max || !seen.insert(range.contract) {
-            return Err(NegotiationError::MalformedRange { contract: range.contract });
+            return Err(NegotiationError::MalformedRange {
+                contract: range.contract,
+            });
         }
     }
     Ok(())
@@ -251,7 +259,10 @@ pub fn negotiate(
     remote: &Hello,
 ) -> Result<Vec<ContractVersion>, NegotiationError> {
     if remote.wire != WIRE_VERSION {
-        return Err(NegotiationError::WireMismatch { local: WIRE_VERSION, remote: remote.wire });
+        return Err(NegotiationError::WireMismatch {
+            local: WIRE_VERSION,
+            remote: remote.wire,
+        });
     }
     if remote.max_message_bytes < MIN_MESSAGE_LIMIT {
         return Err(NegotiationError::TinyLimit(remote.max_message_bytes));
@@ -260,10 +271,15 @@ pub fn negotiate(
     check_ranges(&remote.contracts)?;
     let mut agreed = Vec::new();
     for mine in local {
-        let theirs = remote.contracts.iter().find(|r| r.contract == mine.contract);
+        let theirs = remote
+            .contracts
+            .iter()
+            .find(|r| r.contract == mine.contract);
         let Some(theirs) = theirs else {
             if mine.required {
-                return Err(NegotiationError::MissingRequired { contract: mine.contract });
+                return Err(NegotiationError::MissingRequired {
+                    contract: mine.contract,
+                });
             }
             continue;
         };
@@ -285,11 +301,16 @@ pub fn negotiate(
                 remote: remote.build.clone(),
             });
         }
-        agreed.push(ContractVersion { contract: mine.contract, version: high });
+        agreed.push(ContractVersion {
+            contract: mine.contract,
+            version: high,
+        });
     }
     for theirs in &remote.contracts {
         if theirs.required && !local.iter().any(|r| r.contract == theirs.contract) {
-            return Err(NegotiationError::MissingRequired { contract: theirs.contract });
+            return Err(NegotiationError::MissingRequired {
+                contract: theirs.contract,
+            });
         }
     }
     agreed.sort_by_key(|v| v.contract);
@@ -318,7 +339,8 @@ impl Negotiated {
     /// negotiated (hello and welcome are always allowed).
     pub fn permits(&self, message: &crate::envelope::Message) -> bool {
         use crate::envelope::Message;
-        matches!(message, Message::Hello(_) | Message::Welcome(_)) || self.versions.contains_key(&message.contract())
+        matches!(message, Message::Hello(_) | Message::Welcome(_))
+            || self.versions.contains_key(&message.contract())
     }
 }
 
@@ -331,8 +353,17 @@ pub fn accept(
     hello: &Hello,
 ) -> Result<(Welcome, Negotiated), NegotiationError> {
     let contracts = negotiate(build, local, hello)?;
-    let negotiated = Negotiated { versions: contracts.iter().map(|v| (v.contract, v.version)).collect(), max_message_bytes: clamp_limit(hello.max_message_bytes) };
-    let welcome = Welcome { role, wire: WIRE_VERSION, build: build.to_owned(), contracts, max_message_bytes };
+    let negotiated = Negotiated {
+        versions: contracts.iter().map(|v| (v.contract, v.version)).collect(),
+        max_message_bytes: clamp_limit(hello.max_message_bytes),
+    };
+    let welcome = Welcome {
+        role,
+        wire: WIRE_VERSION,
+        build: build.to_owned(),
+        contracts,
+        max_message_bytes,
+    };
     Ok((welcome, negotiated))
 }
 
@@ -352,50 +383,101 @@ pub enum WelcomeError {
 }
 
 /// The opening side: checks the peer's `Welcome` against what it offered.
-pub fn complete(build: &str, offered: &[ContractRange], welcome: &Welcome) -> Result<Negotiated, WelcomeError> {
+pub fn complete(
+    build: &str,
+    offered: &[ContractRange],
+    welcome: &Welcome,
+) -> Result<Negotiated, WelcomeError> {
     if welcome.wire != WIRE_VERSION {
-        return Err(NegotiationError::WireMismatch { local: WIRE_VERSION, remote: welcome.wire }.into());
+        return Err(NegotiationError::WireMismatch {
+            local: WIRE_VERSION,
+            remote: welcome.wire,
+        }
+        .into());
     }
     if welcome.max_message_bytes < MIN_MESSAGE_LIMIT {
         return Err(NegotiationError::TinyLimit(welcome.max_message_bytes).into());
     }
     let mut versions = std::collections::BTreeMap::new();
     for agreed in &welcome.contracts {
-        let range = offered.iter().find(|r| r.contract == agreed.contract).ok_or(WelcomeError::NotOffered(agreed.contract))?;
+        let range = offered
+            .iter()
+            .find(|r| r.contract == agreed.contract)
+            .ok_or(WelcomeError::NotOffered(agreed.contract))?;
         if agreed.version < range.min || agreed.version > range.max {
-            return Err(WelcomeError::OutsideRange { contract: agreed.contract, version: agreed.version });
+            return Err(WelcomeError::OutsideRange {
+                contract: agreed.contract,
+                version: agreed.version,
+            });
         }
         if agreed.version == 0 && welcome.build != build {
-            return Err(NegotiationError::DraftBuildMismatch { contract: agreed.contract, local: build.to_owned(), remote: welcome.build.clone() }.into());
+            return Err(NegotiationError::DraftBuildMismatch {
+                contract: agreed.contract,
+                local: build.to_owned(),
+                remote: welcome.build.clone(),
+            }
+            .into());
         }
         if versions.insert(agreed.contract, agreed.version).is_some() {
-            return Err(NegotiationError::MalformedRange { contract: agreed.contract }.into());
+            return Err(NegotiationError::MalformedRange {
+                contract: agreed.contract,
+            }
+            .into());
         }
     }
     for range in offered.iter().filter(|r| r.required) {
         if !versions.contains_key(&range.contract) {
-            return Err(NegotiationError::MissingRequired { contract: range.contract }.into());
+            return Err(NegotiationError::MissingRequired {
+                contract: range.contract,
+            }
+            .into());
         }
     }
-    Ok(Negotiated { versions, max_message_bytes: clamp_limit(welcome.max_message_bytes) })
+    Ok(Negotiated {
+        versions,
+        max_message_bytes: clamp_limit(welcome.max_message_bytes),
+    })
 }
 
 impl From<NegotiationError> for crate::error::EngineError {
     fn from(error: NegotiationError) -> Self {
         use crate::error::{EngineError, ErrorCode, ErrorDetail, ErrorScope};
         let detail = match &error {
-            NegotiationError::NoCommonVersion { contract, local_min, local_max, remote_min, remote_max } => ErrorDetail::UnsupportedVersion {
+            NegotiationError::NoCommonVersion {
+                contract,
+                local_min,
+                local_max,
+                remote_min,
+                remote_max,
+            } => ErrorDetail::UnsupportedVersion {
                 contract: Some(*contract),
                 local: (*local_min..=*local_max).collect(),
                 remote: (*remote_min..=*remote_max).collect(),
             },
-            NegotiationError::WireMismatch { local, remote } => ErrorDetail::UnsupportedVersion { contract: None, local: vec![*local], remote: vec![*remote] },
-            NegotiationError::TinyLimit(_) => ErrorDetail::UnsupportedVersion { contract: None, local: vec![], remote: vec![] },
-            NegotiationError::MissingRequired { contract } | NegotiationError::DraftBuildMismatch { contract, .. } | NegotiationError::MalformedRange { contract } => {
-                ErrorDetail::UnsupportedVersion { contract: Some(*contract), local: vec![], remote: vec![] }
-            }
+            NegotiationError::WireMismatch { local, remote } => ErrorDetail::UnsupportedVersion {
+                contract: None,
+                local: vec![*local],
+                remote: vec![*remote],
+            },
+            NegotiationError::TinyLimit(_) => ErrorDetail::UnsupportedVersion {
+                contract: None,
+                local: vec![],
+                remote: vec![],
+            },
+            NegotiationError::MissingRequired { contract }
+            | NegotiationError::DraftBuildMismatch { contract, .. }
+            | NegotiationError::MalformedRange { contract } => ErrorDetail::UnsupportedVersion {
+                contract: Some(*contract),
+                local: vec![],
+                remote: vec![],
+            },
         };
-        EngineError::new(ErrorCode::UnsupportedVersion, ErrorScope::Connection, error.to_string()).with_detail(detail)
+        EngineError::new(
+            ErrorCode::UnsupportedVersion,
+            ErrorScope::Connection,
+            error.to_string(),
+        )
+        .with_detail(detail)
     }
 }
 
@@ -405,43 +487,114 @@ mod tests {
 
     #[test]
     fn handshake_round_trip() {
-        let hello = Hello { role: PeerRole::Renderer, wire: WIRE_VERSION, build: "abc".into(), contracts: local_ranges(), max_message_bytes: 1 << 20 };
-        let (welcome, accepted) = accept(PeerRole::InteractiveEngine, "abc", &local_ranges(), 16 * 1024 * 1024, &hello).unwrap();
+        let hello = Hello {
+            role: PeerRole::Renderer,
+            wire: WIRE_VERSION,
+            build: "abc".into(),
+            contracts: local_ranges(),
+            max_message_bytes: 1 << 20,
+        };
+        let (welcome, accepted) = accept(
+            PeerRole::InteractiveEngine,
+            "abc",
+            &local_ranges(),
+            16 * 1024 * 1024,
+            &hello,
+        )
+        .unwrap();
         let opened = complete("abc", &hello.contracts, &welcome).unwrap();
         assert_eq!(accepted.version(ContractId::Frame), Some(0));
-        assert_eq!(accepted.max_message_bytes(), 1 << 20, "the acceptor sends at most what the opener accepts");
+        assert_eq!(
+            accepted.max_message_bytes(),
+            1 << 20,
+            "the acceptor sends at most what the opener accepts"
+        );
         assert_eq!(opened.max_message_bytes(), 16 * 1024 * 1024);
-        assert_eq!(opened.version(ContractId::Frame), accepted.version(ContractId::Frame));
-        let close = crate::envelope::Message::Request { id: crate::common::RequestId::ZERO, body: crate::envelope::Request::CloseSession };
+        assert_eq!(
+            opened.version(ContractId::Frame),
+            accepted.version(ContractId::Frame)
+        );
+        let close = crate::envelope::Message::Request {
+            id: crate::common::RequestId::ZERO,
+            body: crate::envelope::Request::CloseSession,
+        };
         assert!(opened.permits(&close));
-        assert!(!Negotiated::default().permits(&close), "nothing but the handshake before negotiation");
+        assert!(
+            !Negotiated::default().permits(&close),
+            "nothing but the handshake before negotiation"
+        );
         let mut forged = welcome.clone();
         forged.contracts[0].version = 7;
-        assert!(matches!(complete("abc", &hello.contracts, &forged), Err(WelcomeError::OutsideRange { .. })));
+        assert!(matches!(
+            complete("abc", &hello.contracts, &forged),
+            Err(WelcomeError::OutsideRange { .. })
+        ));
         let mut missing = welcome.clone();
         missing.contracts.pop();
-        assert!(matches!(complete("abc", &hello.contracts, &missing), Err(WelcomeError::Negotiation(NegotiationError::MissingRequired { .. }))));
-        let tiny = Welcome { max_message_bytes: 10, ..welcome };
-        assert!(matches!(complete("abc", &hello.contracts, &tiny), Err(WelcomeError::Negotiation(NegotiationError::TinyLimit(10)))));
-        let tiny_hello = Hello { max_message_bytes: 1, ..hello };
-        assert!(matches!(accept(PeerRole::JobEngine, "abc", &local_ranges(), 1 << 20, &tiny_hello), Err(NegotiationError::TinyLimit(1))));
-        let error: crate::error::EngineError = NegotiationError::WireMismatch { local: 1, remote: 2 }.into();
+        assert!(matches!(
+            complete("abc", &hello.contracts, &missing),
+            Err(WelcomeError::Negotiation(
+                NegotiationError::MissingRequired { .. }
+            ))
+        ));
+        let tiny = Welcome {
+            max_message_bytes: 10,
+            ..welcome
+        };
+        assert!(matches!(
+            complete("abc", &hello.contracts, &tiny),
+            Err(WelcomeError::Negotiation(NegotiationError::TinyLimit(10)))
+        ));
+        let tiny_hello = Hello {
+            max_message_bytes: 1,
+            ..hello
+        };
+        assert!(matches!(
+            accept(
+                PeerRole::JobEngine,
+                "abc",
+                &local_ranges(),
+                1 << 20,
+                &tiny_hello
+            ),
+            Err(NegotiationError::TinyLimit(1))
+        ));
+        let error: crate::error::EngineError = NegotiationError::WireMismatch {
+            local: 1,
+            remote: 2,
+        }
+        .into();
         assert_eq!(error.code, crate::error::ErrorCode::UnsupportedVersion);
     }
 
     fn range(contract: ContractId, min: u16, max: u16, required: bool) -> ContractRange {
-        ContractRange { contract, min, max, required }
+        ContractRange {
+            contract,
+            min,
+            max,
+            required,
+        }
     }
 
     fn hello(build: &str, contracts: Vec<ContractRange>) -> Hello {
-        Hello { role: PeerRole::Renderer, wire: WIRE_VERSION, build: build.into(), contracts, max_message_bytes: MIN_MESSAGE_LIMIT }
+        Hello {
+            role: PeerRole::Renderer,
+            wire: WIRE_VERSION,
+            build: build.into(),
+            contracts,
+            max_message_bytes: MIN_MESSAGE_LIMIT,
+        }
     }
 
     #[test]
     fn contract_numbers_are_one_to_fifteen_in_order() {
         for (index, contract) in ContractId::ALL.iter().enumerate() {
             assert_eq!(contract.number() as usize, index + 1);
-            assert!(contract.rfc().starts_with(&format!("docs/engine/rfcs/{:02}-", index + 1)));
+            assert!(
+                contract
+                    .rfc()
+                    .starts_with(&format!("docs/engine/rfcs/{:02}-", index + 1))
+            );
         }
     }
 
@@ -450,7 +603,13 @@ mod tests {
         let local = [range(ContractId::Frame, 1, 3, true)];
         let remote = hello("b", vec![range(ContractId::Frame, 2, 5, true)]);
         let agreed = negotiate("a", &local, &remote).unwrap();
-        assert_eq!(agreed, vec![ContractVersion { contract: ContractId::Frame, version: 3 }]);
+        assert_eq!(
+            agreed,
+            vec![ContractVersion {
+                contract: ContractId::Frame,
+                version: 3
+            }]
+        );
     }
 
     #[test]
@@ -459,7 +618,10 @@ mod tests {
         let remote = hello("b", vec![range(ContractId::Frame, 2, 2, true)]);
         assert!(matches!(
             negotiate("a", &local, &remote),
-            Err(NegotiationError::NoCommonVersion { contract: ContractId::Frame, .. })
+            Err(NegotiationError::NoCommonVersion {
+                contract: ContractId::Frame,
+                ..
+            })
         ));
     }
 
@@ -477,19 +639,32 @@ mod tests {
 
     #[test]
     fn optional_contracts_may_be_missing_and_required_ones_may_not() {
-        let local = [range(ContractId::Frame, 1, 1, true), range(ContractId::Blender, 1, 1, false)];
+        let local = [
+            range(ContractId::Frame, 1, 1, true),
+            range(ContractId::Blender, 1, 1, false),
+        ];
         let remote = hello("b", vec![range(ContractId::Frame, 1, 1, true)]);
         assert_eq!(negotiate("a", &local, &remote).unwrap().len(), 1);
         let remote = hello("b", vec![range(ContractId::Blender, 1, 1, false)]);
         assert_eq!(
             negotiate("a", &local, &remote),
-            Err(NegotiationError::MissingRequired { contract: ContractId::Frame })
+            Err(NegotiationError::MissingRequired {
+                contract: ContractId::Frame
+            })
         );
         let local = [range(ContractId::Frame, 1, 1, true)];
-        let remote = hello("b", vec![range(ContractId::Frame, 1, 1, true), range(ContractId::Clock, 1, 1, true)]);
+        let remote = hello(
+            "b",
+            vec![
+                range(ContractId::Frame, 1, 1, true),
+                range(ContractId::Clock, 1, 1, true),
+            ],
+        );
         assert_eq!(
             negotiate("a", &local, &remote),
-            Err(NegotiationError::MissingRequired { contract: ContractId::Clock })
+            Err(NegotiationError::MissingRequired {
+                contract: ContractId::Clock
+            })
         );
     }
 
@@ -497,10 +672,25 @@ mod tests {
     fn wire_and_malformed_ranges_are_rejected() {
         let mut remote = hello("b", vec![]);
         remote.wire = WIRE_VERSION + 1;
-        assert!(matches!(negotiate("a", &[], &remote), Err(NegotiationError::WireMismatch { .. })));
+        assert!(matches!(
+            negotiate("a", &[], &remote),
+            Err(NegotiationError::WireMismatch { .. })
+        ));
         let remote = hello("b", vec![range(ContractId::Frame, 2, 1, false)]);
-        assert!(matches!(negotiate("a", &[], &remote), Err(NegotiationError::MalformedRange { .. })));
-        let remote = hello("b", vec![range(ContractId::Frame, 1, 1, false), range(ContractId::Frame, 1, 1, false)]);
-        assert!(matches!(negotiate("a", &[], &remote), Err(NegotiationError::MalformedRange { .. })));
+        assert!(matches!(
+            negotiate("a", &[], &remote),
+            Err(NegotiationError::MalformedRange { .. })
+        ));
+        let remote = hello(
+            "b",
+            vec![
+                range(ContractId::Frame, 1, 1, false),
+                range(ContractId::Frame, 1, 1, false),
+            ],
+        );
+        assert!(matches!(
+            negotiate("a", &[], &remote),
+            Err(NegotiationError::MalformedRange { .. })
+        ));
     }
 }

@@ -16,7 +16,7 @@ use crate::common::{AssetId, ContentHash, JobId, SessionId};
 use crate::definitions::DefinitionSetSnapshot;
 use crate::error::EngineError;
 use crate::lease::{Lease, LeaseRequest};
-use crate::validate::{ensure, Validate, Violation};
+use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
 
 /// An unguessable 128-bit capability, written as 32 lowercase hex digits.
@@ -45,7 +45,11 @@ impl CapabilityHandle {
     }
 
     pub fn parse(text: &str) -> Result<Self, MalformedHandle> {
-        if text.len() == 32 && text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        if text.len() == 32
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
             Ok(Self(text.to_owned()))
         } else {
             Err(MalformedHandle)
@@ -95,7 +99,11 @@ pub enum CacheKind {
 /// What a handle grants.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum CapabilityKind {
     /// Read an asset's bytes (original, linked file, or media-store copy).
     MediaRead { asset: AssetId },
@@ -145,12 +153,19 @@ pub enum OverwritePolicy {
 /// Who chooses where an output goes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum OutputChoice {
     /// MCP and agent tools: the host's automatic destination, unique name,
     /// no dialog, owner-only file created exclusively (`open(wx, 0600)`).
     /// Agents never choose output paths.
-    AgentAutomatic { suggested_name: String, extension: String },
+    AgentAutomatic {
+        suggested_name: String,
+        extension: String,
+    },
     /// The export sheet or the CLI: a destination the user chose, already
     /// turned into a handle by the host.
     UserChosen { destination: CapabilityHandle },
@@ -247,14 +262,29 @@ pub struct HardwareSessionGrant {
 pub trait HostServices {
     type Error: std::error::Error;
 
-    fn mint_handle(&mut self, request: &MintHandle, port: PortId) -> Result<HandleGrant, Self::Error>;
+    fn mint_handle(
+        &mut self,
+        request: &MintHandle,
+        port: PortId,
+    ) -> Result<HandleGrant, Self::Error>;
     /// Checks a handle presented on `port` by `session`; never trusts the engine's word.
-    fn check_handle(&self, handle: &CapabilityHandle, session: SessionId, port: PortId) -> Result<CapabilityKind, Self::Error>;
+    fn check_handle(
+        &self,
+        handle: &CapabilityHandle,
+        session: SessionId,
+        port: PortId,
+    ) -> Result<CapabilityKind, Self::Error>;
     fn revoke_session(&mut self, session: SessionId);
-    fn output_destination(&mut self, request: &OutputDestinationRequest) -> Result<OutputDestination, Self::Error>;
+    fn output_destination(
+        &mut self,
+        request: &OutputDestinationRequest,
+    ) -> Result<OutputDestination, Self::Error>;
     fn commit_output(&mut self, request: &CommitOutput) -> Result<OutputCommitted, Self::Error>;
     fn request_lease(&mut self, request: &LeaseRequest) -> Result<Lease, Self::Error>;
-    fn hardware_sessions(&mut self, request: &HardwareSessionRequest) -> Result<HardwareSessionGrant, Self::Error>;
+    fn hardware_sessions(
+        &mut self,
+        request: &HardwareSessionRequest,
+    ) -> Result<HardwareSessionGrant, Self::Error>;
     fn blender_status(&self) -> BlenderStatus;
     fn submit_blender_job(&mut self, request: &BlenderJobRequest) -> Result<(), Self::Error>;
     /// The current winning definitions, for jobs and the CLI.
@@ -274,7 +304,11 @@ pub enum HandleRejection {
 
 impl From<HandleRejection> for EngineError {
     fn from(rejection: HandleRejection) -> Self {
-        EngineError::new(crate::error::ErrorCode::CapabilityRejected, crate::error::ErrorScope::Connection, rejection.to_string())
+        EngineError::new(
+            crate::error::ErrorCode::CapabilityRejected,
+            crate::error::ErrorScope::Connection,
+            rejection.to_string(),
+        )
     }
 }
 
@@ -287,7 +321,13 @@ pub struct HandleTable {
 impl HandleTable {
     /// Binds a freshly minted handle. Returns false if it already exists
     /// (a duplicate means the RNG is broken; the caller must not use it).
-    pub fn bind(&mut self, handle: CapabilityHandle, kind: CapabilityKind, session: SessionId, port: PortId) -> bool {
+    pub fn bind(
+        &mut self,
+        handle: CapabilityHandle,
+        kind: CapabilityKind,
+        session: SessionId,
+        port: PortId,
+    ) -> bool {
         if self.entries.contains_key(&handle) {
             return false;
         }
@@ -295,8 +335,14 @@ impl HandleTable {
         true
     }
 
-    pub fn check(&self, handle: &CapabilityHandle, session: SessionId, port: PortId) -> Result<&CapabilityKind, HandleRejection> {
-        let (kind, bound_session, bound_port) = self.entries.get(handle).ok_or(HandleRejection::Unknown)?;
+    pub fn check(
+        &self,
+        handle: &CapabilityHandle,
+        session: SessionId,
+        port: PortId,
+    ) -> Result<&CapabilityKind, HandleRejection> {
+        let (kind, bound_session, bound_port) =
+            self.entries.get(handle).ok_or(HandleRejection::Unknown)?;
         if *bound_session != session {
             return Err(HandleRejection::WrongSession);
         }
@@ -326,15 +372,29 @@ impl Validate for OutputDestinationRequest {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::HostServices;
         ensure(self.job.is_valid(), C, || "invalid job id".into())?;
-        if let OutputChoice::AgentAutomatic { suggested_name, extension } = &self.choice {
+        if let OutputChoice::AgentAutomatic {
+            suggested_name,
+            extension,
+        } = &self.choice
+        {
             ensure(self.overwrite == OverwritePolicy::UniqueName, C, || {
                 "agent outputs always get unique names".into()
             })?;
-            let clean = |s: &str| !s.is_empty() && s.len() <= 255 && !s.contains(['/', '\\', '\0']) && s != "." && s != "..";
-            ensure(clean(suggested_name), C, || "suggested name must be a bare file name".into())?;
-            ensure(clean(extension) && extension.bytes().all(|b| b.is_ascii_alphanumeric()), C, || {
-                "extension must be alphanumeric".into()
+            let clean = |s: &str| {
+                !s.is_empty()
+                    && s.len() <= 255
+                    && !s.contains(['/', '\\', '\0'])
+                    && s != "."
+                    && s != ".."
+            };
+            ensure(clean(suggested_name), C, || {
+                "suggested name must be a bare file name".into()
             })?;
+            ensure(
+                clean(extension) && extension.bytes().all(|b| b.is_ascii_alphanumeric()),
+                C,
+                || "extension must be alphanumeric".into(),
+            )?;
         }
         Ok(())
     }
@@ -342,7 +402,9 @@ impl Validate for OutputDestinationRequest {
 
 impl Validate for HardwareSessionRequest {
     fn validate(&self) -> Result<(), Violation> {
-        ensure(self.delta != 0, ContractId::HostServices, || "a session request changes the count".into())
+        ensure(self.delta != 0, ContractId::HostServices, || {
+            "a session request changes the count".into()
+        })
     }
 }
 
@@ -371,29 +433,50 @@ mod tests {
         assert!(table.bind(handle.clone(), kind.clone(), session, PortId(3)));
         assert!(!table.bind(handle.clone(), kind.clone(), session, PortId(3)));
         assert_eq!(table.check(&handle, session, PortId(3)), Ok(&kind));
-        assert_eq!(table.check(&handle, SessionId::new(2).unwrap(), PortId(3)), Err(HandleRejection::WrongSession));
-        assert_eq!(table.check(&handle, session, PortId(4)), Err(HandleRejection::WrongPort));
+        assert_eq!(
+            table.check(&handle, SessionId::new(2).unwrap(), PortId(3)),
+            Err(HandleRejection::WrongSession)
+        );
+        assert_eq!(
+            table.check(&handle, session, PortId(4)),
+            Err(HandleRejection::WrongPort)
+        );
         let other = CapabilityHandle::from_random_bytes([8; 16]);
-        assert_eq!(table.check(&other, session, PortId(3)), Err(HandleRejection::Unknown));
+        assert_eq!(
+            table.check(&other, session, PortId(3)),
+            Err(HandleRejection::Unknown)
+        );
         assert_eq!(table.revoke_session(session), 1);
-        assert_eq!(table.check(&handle, session, PortId(3)), Err(HandleRejection::Unknown));
+        assert_eq!(
+            table.check(&handle, session, PortId(3)),
+            Err(HandleRejection::Unknown)
+        );
     }
 
     #[test]
     fn agent_outputs_never_choose_paths() {
         let request = OutputDestinationRequest {
             job: "j".into(),
-            choice: OutputChoice::AgentAutomatic { suggested_name: "../../etc/passwd".into(), extension: "mp4".into() },
+            choice: OutputChoice::AgentAutomatic {
+                suggested_name: "../../etc/passwd".into(),
+                extension: "mp4".into(),
+            },
             overwrite: OverwritePolicy::UniqueName,
         };
         assert!(request.validate().is_err());
         let request = OutputDestinationRequest {
-            choice: OutputChoice::AgentAutomatic { suggested_name: "Launch cut".into(), extension: "mp4".into() },
+            choice: OutputChoice::AgentAutomatic {
+                suggested_name: "Launch cut".into(),
+                extension: "mp4".into(),
+            },
             overwrite: OverwritePolicy::Replace,
             ..request
         };
         assert!(request.validate().is_err(), "agents cannot overwrite");
-        let request = OutputDestinationRequest { overwrite: OverwritePolicy::UniqueName, ..request };
+        let request = OutputDestinationRequest {
+            overwrite: OverwritePolicy::UniqueName,
+            ..request
+        };
         assert!(request.validate().is_ok());
     }
 }

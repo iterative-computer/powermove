@@ -16,7 +16,10 @@ pub struct Violation {
 
 impl Violation {
     pub fn new(contract: ContractId, message: impl Into<String>) -> Self {
-        Self { contract, message: message.into() }
+        Self {
+            contract,
+            message: message.into(),
+        }
     }
 }
 
@@ -38,8 +41,16 @@ impl<T: Validate> Validate for Option<T> {
 }
 
 /// Returns a violation unless `condition` holds.
-pub(crate) fn ensure(condition: bool, contract: ContractId, message: impl FnOnce() -> String) -> Result<(), Violation> {
-    if condition { Ok(()) } else { Err(Violation::new(contract, message())) }
+pub(crate) fn ensure(
+    condition: bool,
+    contract: ContractId,
+    message: impl FnOnce() -> String,
+) -> Result<(), Violation> {
+    if condition {
+        Ok(())
+    } else {
+        Err(Violation::new(contract, message()))
+    }
 }
 
 /// Fails when ids repeat.
@@ -52,7 +63,10 @@ pub(crate) fn ensure_unique<T: Ord + core::fmt::Debug>(
     for item in items {
         let description = format!("{item:?}");
         if !seen.insert(item) {
-            return Err(Violation::new(contract, format!("duplicate {what} {description}")));
+            return Err(Violation::new(
+                contract,
+                format!("duplicate {what} {description}"),
+            ));
         }
     }
     Ok(())

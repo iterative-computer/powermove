@@ -4,10 +4,10 @@
 
 use std::collections::BTreeSet;
 
+use pm_protocol::Envelope;
 use pm_protocol::codec::{decode, decode_unvalidated, encode};
 use pm_protocol::envelope::Message;
 use pm_protocol::samples;
-use pm_protocol::Envelope;
 use proptest::prelude::*;
 
 #[test]
@@ -17,7 +17,8 @@ fn every_sample_round_trips_through_messagepack_and_json() {
         let back = decode(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(back, envelope, "{name} changed through MessagePack");
         let json = serde_json::to_string(&envelope).unwrap();
-        let back: Envelope = serde_json::from_str(&json).unwrap_or_else(|e| panic!("{name} JSON: {e}"));
+        let back: Envelope =
+            serde_json::from_str(&json).unwrap_or_else(|e| panic!("{name} JSON: {e}"));
         assert_eq!(back, envelope, "{name} changed through JSON");
     }
 }
@@ -53,12 +54,28 @@ fn samples_cover_every_message_kind() {
             }
         }
     }
-    assert_eq!(requests.len(), samples::REQUEST_VARIANTS, "a request kind has no sample");
-    assert_eq!(responses.len(), samples::RESPONSE_VARIANTS, "a response kind has no sample");
-    assert_eq!(events.len(), samples::EVENT_VARIANTS, "an event kind has no sample");
+    assert_eq!(
+        requests.len(),
+        samples::REQUEST_VARIANTS,
+        "a request kind has no sample"
+    );
+    assert_eq!(
+        responses.len(),
+        samples::RESPONSE_VARIANTS,
+        "a response kind has no sample"
+    );
+    assert_eq!(
+        events.len(),
+        samples::EVENT_VARIANTS,
+        "an event kind has no sample"
+    );
     assert_eq!(control.len(), 4);
     let names: BTreeSet<String> = samples::all().into_iter().map(|(name, _)| name).collect();
-    assert_eq!(names.len(), samples::all().len(), "fixture names are unique");
+    assert_eq!(
+        names.len(),
+        samples::all().len(),
+        "fixture names are unique"
+    );
 }
 
 #[test]
@@ -73,7 +90,11 @@ fn every_request_kind_has_a_matching_response_sample() {
         .collect();
     for envelope in samples::requests() {
         if let Message::Request { body, .. } = &envelope.message {
-            assert!(responses.contains(&body.expects()), "{:?} has no response sample", body.expects());
+            assert!(
+                responses.contains(&body.expects()),
+                "{:?} has no response sample",
+                body.expects()
+            );
             if !matches!(body, Request::OpenSession(_)) && body.session_bound() {
                 assert!(envelope.session.is_some());
             }
@@ -86,8 +107,12 @@ fn golden_fixtures_are_current() {
     let fixtures = samples::fixture_files().unwrap();
     let dir = samples::fixture_dir();
     for (name, bytes) in &fixtures {
-        let on_disk = std::fs::read(dir.join(name)).unwrap_or_else(|_| panic!("missing fixture {name}; run pm-protocol-gen"));
-        assert!(on_disk == *bytes, "fixture {name} is out of date; run pm-protocol-gen and review the wire change");
+        let on_disk = std::fs::read(dir.join(name))
+            .unwrap_or_else(|_| panic!("missing fixture {name}; run pm-protocol-gen"));
+        assert!(
+            on_disk == *bytes,
+            "fixture {name} is out of date; run pm-protocol-gen and review the wire change"
+        );
         decode(&on_disk).unwrap_or_else(|e| panic!("{name}: {e}"));
     }
     let on_disk: BTreeSet<String> = std::fs::read_dir(&dir)
@@ -96,7 +121,10 @@ fn golden_fixtures_are_current() {
         .filter(|n| n.ends_with(".msgpack"))
         .collect();
     let expected: BTreeSet<String> = fixtures.keys().cloned().collect();
-    assert_eq!(on_disk, expected, "stale or missing fixtures; run pm-protocol-gen");
+    assert_eq!(
+        on_disk, expected,
+        "stale or missing fixtures; run pm-protocol-gen"
+    );
 }
 
 #[cfg(feature = "ts")]
@@ -115,17 +143,44 @@ fn typescript_regeneration_is_a_no_op() {
 fn typescript_has_no_bigint_and_covers_the_envelope() {
     let files = pm_protocol::ts::generate().unwrap();
     for (path, text) in &files {
-        assert!(!text.contains("bigint"), "{} exposes a 64-bit integer; use a safe newtype", path.display());
-        for line in text.lines().filter(|l| !l.trim_start().starts_with(['*', '/'])) {
-            for token in line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':')) {
+        assert!(
+            !text.contains("bigint"),
+            "{} exposes a 64-bit integer; use a safe newtype",
+            path.display()
+        );
+        for line in text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with(['*', '/']))
+        {
+            for token in line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+            {
                 let field = token.strip_suffix(':').unwrap_or("");
-                assert!(!field.contains('_'), "{} has a snake_case field {field:?}; the wire is camelCase", path.display());
+                assert!(
+                    !field.contains('_'),
+                    "{} has a snake_case field {field:?}; the wire is camelCase",
+                    path.display()
+                );
             }
         }
     }
     let index = &files[std::path::Path::new("index.ts")];
-    for name in ["Envelope", "Message", "Request", "Response", "Event", "Hello", "Welcome", "EngineError", "EvaluatedScene", "FrameRequest", "FrameDescriptor"] {
-        assert!(index.contains(&format!("export type {{ {name} }}")), "index.ts lacks {name}");
+    for name in [
+        "Envelope",
+        "Message",
+        "Request",
+        "Response",
+        "Event",
+        "Hello",
+        "Welcome",
+        "EngineError",
+        "EvaluatedScene",
+        "FrameRequest",
+        "FrameDescriptor",
+    ] {
+        assert!(
+            index.contains(&format!("export type {{ {name} }}")),
+            "index.ts lacks {name}"
+        );
     }
 }
 
@@ -133,7 +188,10 @@ fn typescript_has_no_bigint_and_covers_the_envelope() {
 fn truncated_fixtures_fail_cleanly() {
     for (name, bytes) in samples::fixture_files().unwrap() {
         for cut in [0, 1, bytes.len() / 2, bytes.len() - 1] {
-            assert!(decode(&bytes[..cut]).is_err(), "{name} truncated at {cut} decoded");
+            assert!(
+                decode(&bytes[..cut]).is_err(),
+                "{name} truncated at {cut} decoded"
+            );
         }
     }
 }
@@ -166,14 +224,24 @@ proptest! {
 #[ignore = "measurement, run explicitly in release"]
 fn measure_frame_descriptor_codec_cost() {
     use pm_protocol::envelope::Event;
-    let full = pm_protocol::Envelope::new(Message::Event { body: Event::Frame(samples::frame_descriptor()) })
-        .with_session(pm_protocol::common::SessionId::ZERO)
-        .with_revision(pm_protocol::common::Revision::ZERO);
+    let full = pm_protocol::Envelope::new(Message::Event {
+        body: Event::Frame(samples::frame_descriptor()),
+    })
+    .with_session(pm_protocol::common::SessionId::ZERO)
+    .with_revision(pm_protocol::common::Revision::ZERO);
     let mut bare_descriptor = samples::frame_descriptor();
     bare_descriptor.overlay = None;
     bare_descriptor.depth_id = None;
-    let bare = pm_protocol::Envelope { message: Message::Event { body: Event::Frame(bare_descriptor) }, ..full.clone() };
-    for (label, envelope) in [("descriptor with overlay", &full), ("descriptor without overlay", &bare)] {
+    let bare = pm_protocol::Envelope {
+        message: Message::Event {
+            body: Event::Frame(bare_descriptor),
+        },
+        ..full.clone()
+    };
+    for (label, envelope) in [
+        ("descriptor with overlay", &full),
+        ("descriptor without overlay", &bare),
+    ] {
         let bytes = encode(envelope).unwrap();
         let iterations = 200_000u32;
         let start = std::time::Instant::now();
@@ -186,6 +254,9 @@ fn measure_frame_descriptor_codec_cost() {
             std::hint::black_box(decode(std::hint::black_box(&bytes)).unwrap());
         }
         let decode_ns = start.elapsed().as_nanos() / iterations as u128;
-        println!("{label}: {} bytes, encode {encode_ns} ns, decode {decode_ns} ns (validated)", bytes.len());
+        println!(
+            "{label}: {} bytes, encode {encode_ns} ns, decode {decode_ns} ns (validated)",
+            bytes.len()
+        );
     }
 }

@@ -14,10 +14,13 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::color::{BlendMode, ToneMapping3d};
-use crate::common::{AssetId, CompositionId, DefinitionId, EffectInstanceId, FrameRate, LayerId, Mat3, Mat4, Revision, Rgba, Size, Ticks};
+use crate::common::{
+    AssetId, CompositionId, DefinitionId, EffectInstanceId, FrameRate, LayerId, Mat3, Mat4,
+    Revision, Rgba, Size, Ticks,
+};
 use crate::error::FailureReport;
 use crate::frame::{Projection, ViewOverride};
-use crate::validate::{ensure, ensure_unique, Validate, Violation};
+use crate::validate::{Validate, Violation, ensure, ensure_unique};
 use crate::version::ContractId;
 
 /// `compat` level (section 6): 1 keeps today's behavior, 2 gets fixes.
@@ -53,7 +56,12 @@ impl From<Compat> for u8 {
 /// An evaluated parameter value (effects, transitions, extension layers, shaders).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind", content = "value")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind",
+    content = "value"
+)]
 pub enum ParamValue {
     Number(f64),
     /// Toggles bind as `float` for effects and `bool` for extension layers (section 11).
@@ -68,13 +76,25 @@ pub enum ParamValue {
 /// Composition background (appendix B).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum Background {
     None,
-    Solid { color: Rgba },
+    Solid {
+        color: Rgba,
+    },
     /// Up to 8 stops; `angle_degrees` for linear, radial uses angle only.
-    Linear { stops: Vec<GradientStop>, angle_degrees: f64 },
-    Radial { stops: Vec<GradientStop>, angle_degrees: f64 },
+    Linear {
+        stops: Vec<GradientStop>,
+        angle_degrees: f64,
+    },
+    Radial {
+        stops: Vec<GradientStop>,
+        angle_degrees: f64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -102,12 +122,19 @@ impl Shutter {
     /// 180° at −90°.
     pub fn from_frames(frames: f64) -> Self {
         let angle_degrees = frames * 360.0;
-        Self { angle_degrees, phase_degrees: -angle_degrees / 2.0 }
+        Self {
+            angle_degrees,
+            phase_degrees: -angle_degrees / 2.0,
+        }
     }
 
     /// Sample offsets in frames for `n` samples.
     pub fn sample_offsets(&self, n: u32) -> Vec<f64> {
-        (0..n).map(|i| (self.phase_degrees + (i as f64 + 0.5) / n as f64 * self.angle_degrees) / 360.0).collect()
+        (0..n)
+            .map(|i| {
+                (self.phase_degrees + (i as f64 + 0.5) / n as f64 * self.angle_degrees) / 360.0
+            })
+            .collect()
     }
 }
 
@@ -148,20 +175,30 @@ impl LayerKind {
 
     /// Layers that take part in 3D worlds (depth sets and the scene pass).
     pub const fn is_3d(self) -> bool {
-        matches!(self, LayerKind::Object3d | LayerKind::Light3d | LayerKind::Camera3d)
+        matches!(
+            self,
+            LayerKind::Object3d | LayerKind::Light3d | LayerKind::Camera3d
+        )
     }
 }
 
 /// The layer's transform space.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum LayerTransform {
     /// Layer-to-composition, including parenting and group transforms.
     Flat { matrix: Mat3 },
     /// 2.5D: layer-to-composition through the 3D group's perspective
     /// (homography planes, section 8 "2.5D").
-    Perspective { matrix: Mat4, group: Option<LayerId> },
+    Perspective {
+        matrix: Mat4,
+        group: Option<LayerId>,
+    },
     /// A 3D world member; the matrix is layer-to-world.
     World { matrix: Mat4 },
 }
@@ -171,20 +208,45 @@ pub enum LayerTransform {
 /// the engine; the scene carries what the graph keys on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum LayerSource {
-    Solid { color: Rgba, size: Size, radius: f64 },
+    Solid {
+        color: Rgba,
+        size: Size,
+        radius: f64,
+    },
     /// Shapes, text, and captions: vector content evaluated by pm-eval and
     /// drawn by pm-vector or pm-text; `content_key` hashes the evaluated geometry.
-    Vector { content_key: String, bounds: crate::common::Rect },
+    Vector {
+        content_key: String,
+        bounds: crate::common::Rect,
+    },
     /// A media frame from an asset at a source time (after retiming).
-    Media { asset: AssetId, source_time: Ticks, always_original: bool },
+    Media {
+        asset: AssetId,
+        source_time: Ticks,
+        always_original: bool,
+    },
     /// A user shader or extension fragment layer.
-    Fragment { definition: Option<DefinitionId>, params: Vec<NamedParam>, size: Size },
+    Fragment {
+        definition: Option<DefinitionId>,
+        params: Vec<NamedParam>,
+        size: Size,
+    },
     /// A legacy OBJ or third-party mesh definition.
-    Mesh { definition: DefinitionId, asset: Option<AssetId> },
+    Mesh {
+        definition: DefinitionId,
+        asset: Option<AssetId>,
+    },
     /// A precomp sampled at a child time (keep frame rate quantizes it).
-    Precomp { composition: CompositionId, time: Ticks },
+    Precomp {
+        composition: CompositionId,
+        time: Ticks,
+    },
     /// The output of a 3D world for this layer (scene pass or Blender surface).
     World { world: u32 },
     /// Effects run on the accumulator below.
@@ -229,12 +291,35 @@ pub enum MaskMode {
 /// An evaluated mask.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum EvaluatedMask {
-    Rect { center: [f64; 2], size: [f64; 2], rotation_degrees: f64, feather: f64, mode: MaskMode, enabled: bool },
-    Ellipse { center: [f64; 2], size: [f64; 2], rotation_degrees: f64, feather: f64, mode: MaskMode, enabled: bool },
+    Rect {
+        center: [f64; 2],
+        size: [f64; 2],
+        rotation_degrees: f64,
+        feather: f64,
+        mode: MaskMode,
+        enabled: bool,
+    },
+    Ellipse {
+        center: [f64; 2],
+        size: [f64; 2],
+        rotation_degrees: f64,
+        feather: f64,
+        mode: MaskMode,
+        enabled: bool,
+    },
     /// Bezier path masks; geometry keyed like vector content.
-    Path { content_key: String, feather: f64, mode: MaskMode, enabled: bool },
+    Path {
+        content_key: String,
+        feather: f64,
+        mode: MaskMode,
+        enabled: bool,
+    },
 }
 
 /// Track matte modes.
@@ -297,15 +382,30 @@ pub const MAX_PARAMETRIC_MASKS: usize = 8;
 /// A light in a 3D world.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum LightKind {
     /// Hemisphere ambient; ground color is 0.35× the sky color.
     Ambient,
     Sun,
-    Point { distance: f64, decay: f64 },
-    Spot { distance: f64, angle_degrees: f64, penumbra: f64, decay: f64 },
+    Point {
+        distance: f64,
+        decay: f64,
+    },
+    Spot {
+        distance: f64,
+        angle_degrees: f64,
+        penumbra: f64,
+        decay: f64,
+    },
     /// Rectangular area light (LTC tables, no native shadows).
-    Area { width: f64, height: f64 },
+    Area {
+        width: f64,
+        height: f64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -339,14 +439,21 @@ pub struct Camera3d {
 /// What a 3D object draws.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum ModelSource {
     /// A primitive, lathe, extrude, or recipe mesh from pm-geom3d; the key
     /// hashes the generator inputs.
     Generated { geometry_key: String },
     /// An imported glTF or GLB asset, with its animation time
     /// `max(0, t − layer.from)` (section 5 rule 10).
-    Imported { asset: AssetId, animation_time: Ticks },
+    Imported {
+        asset: AssetId,
+        animation_time: Ticks,
+    },
     /// A missing model: an orange wireframe box in output, as today.
     Missing,
 }
@@ -437,76 +544,166 @@ pub struct EvaluatedScene {
 impl Validate for EvaluatedScene {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::EvaluatedScene;
-        ensure(self.composition.is_valid(), C, || "invalid composition id".into())?;
-        ensure(self.frame_rate.is_valid(), C, || "frame rate must be positive".into())?;
-        ensure(!self.size.is_empty(), C, || "composition size must be positive".into())?;
-        ensure((0.0..=720.0).contains(&self.shutter.angle_degrees) && self.shutter.phase_degrees.is_finite(), C, || {
-            "shutter angle is 0 to 720 degrees (0 to 2 frames)".into()
+        ensure(self.composition.is_valid(), C, || {
+            "invalid composition id".into()
         })?;
-        if let Background::Linear { stops, .. } | Background::Radial { stops, .. } = &self.background {
+        ensure(self.frame_rate.is_valid(), C, || {
+            "frame rate must be positive".into()
+        })?;
+        ensure(!self.size.is_empty(), C, || {
+            "composition size must be positive".into()
+        })?;
+        ensure(
+            (0.0..=720.0).contains(&self.shutter.angle_degrees)
+                && self.shutter.phase_degrees.is_finite(),
+            C,
+            || "shutter angle is 0 to 720 degrees (0 to 2 frames)".into(),
+        )?;
+        if let Background::Linear { stops, .. } | Background::Radial { stops, .. } =
+            &self.background
+        {
             ensure((2..=MAX_GRADIENT_STOPS).contains(&stops.len()), C, || {
-                format!("gradients have 2 to {MAX_GRADIENT_STOPS} stops, got {}", stops.len())
+                format!(
+                    "gradients have 2 to {MAX_GRADIENT_STOPS} stops, got {}",
+                    stops.len()
+                )
             })?;
-            ensure(stops.iter().all(|s| (0.0..=1.0).contains(&s.position)) && stops.windows(2).all(|w| w[0].position <= w[1].position), C, || {
-                "gradient stop positions are in 0..1 and ascending".into()
-            })?;
+            ensure(
+                stops.iter().all(|s| (0.0..=1.0).contains(&s.position))
+                    && stops.windows(2).all(|w| w[0].position <= w[1].position),
+                C,
+                || "gradient stop positions are in 0..1 and ascending".into(),
+            )?;
         }
         ensure_unique(self.layers.iter().map(|l| &l.id), C, "layer id")?;
         let index_of = |id: &LayerId| self.layers.iter().position(|l| &l.id == id);
         for layer in &self.layers {
-            ensure((0.0..=1.0).contains(&layer.opacity), C, || format!("layer {:?} opacity {} outside 0..1", layer.id, layer.opacity))?;
-            ensure(layer.masks.iter().filter(|m| !matches!(m, EvaluatedMask::Path { .. })).count() <= MAX_PARAMETRIC_MASKS || layer.compat == Compat::Level2, C, || {
-                format!("layer {:?} has more than {MAX_PARAMETRIC_MASKS} parametric masks at compat level 1", layer.id)
+            ensure((0.0..=1.0).contains(&layer.opacity), C, || {
+                format!(
+                    "layer {:?} opacity {} outside 0..1",
+                    layer.id, layer.opacity
+                )
             })?;
+            ensure(
+                layer
+                    .masks
+                    .iter()
+                    .filter(|m| !matches!(m, EvaluatedMask::Path { .. }))
+                    .count()
+                    <= MAX_PARAMETRIC_MASKS
+                    || layer.compat == Compat::Level2,
+                C,
+                || {
+                    format!(
+                        "layer {:?} has more than {MAX_PARAMETRIC_MASKS} parametric masks at compat level 1",
+                        layer.id
+                    )
+                },
+            )?;
             if let Some(matte) = &layer.matte {
-                ensure(matte.source != layer.id && index_of(&matte.source).is_some(), C, || {
-                    format!("layer {:?} matte source {:?} is itself or missing", layer.id, matte.source)
-                })?;
+                ensure(
+                    matte.source != layer.id && index_of(&matte.source).is_some(),
+                    C,
+                    || {
+                        format!(
+                            "layer {:?} matte source {:?} is itself or missing",
+                            layer.id, matte.source
+                        )
+                    },
+                )?;
             }
             if let Some(transition) = &layer.transition {
-                ensure((0.0..=1.0).contains(&transition.progress), C, || "transition progress outside 0..1".into())?;
+                ensure((0.0..=1.0).contains(&transition.progress), C, || {
+                    "transition progress outside 0..1".into()
+                })?;
             }
             if let LayerSource::World { world } = layer.source {
-                ensure((world as usize) < self.worlds.len(), C, || format!("layer {:?} names world {world}", layer.id))?;
+                ensure((world as usize) < self.worlds.len(), C, || {
+                    format!("layer {:?} names world {world}", layer.id)
+                })?;
             }
-            ensure(layer.kind.is_3d() == matches!(layer.transform, LayerTransform::World { .. }), C, || {
-                format!("layer {:?}: 3D kinds and only 3D kinds use world transforms", layer.id)
-            })?;
+            ensure(
+                layer.kind.is_3d() == matches!(layer.transform, LayerTransform::World { .. }),
+                C,
+                || {
+                    format!(
+                        "layer {:?}: 3D kinds and only 3D kinds use world transforms",
+                        layer.id
+                    )
+                },
+            )?;
         }
         for world in &self.worlds {
             let lights = world.lights.iter().filter(|l| !l.embedded).count();
-            ensure(world.objects.len() <= MAX_ACTIVE_MODELS, C, || format!("{} models exceed {MAX_ACTIVE_MODELS}", world.objects.len()))?;
-            ensure(lights <= MAX_ACTIVE_LIGHTS, C, || format!("{lights} lights exceed {MAX_ACTIVE_LIGHTS}"))?;
-            let shadows = world.lights.iter().filter(|l| l.casts_shadow && !l.embedded).count();
-            ensure(shadows <= MAX_SHADOW_LIGHTS, C, || format!("{shadows} shadow-casting lights exceed {MAX_SHADOW_LIGHTS}"))?;
+            ensure(world.objects.len() <= MAX_ACTIVE_MODELS, C, || {
+                format!("{} models exceed {MAX_ACTIVE_MODELS}", world.objects.len())
+            })?;
+            ensure(lights <= MAX_ACTIVE_LIGHTS, C, || {
+                format!("{lights} lights exceed {MAX_ACTIVE_LIGHTS}")
+            })?;
+            let shadows = world
+                .lights
+                .iter()
+                .filter(|l| l.casts_shadow && !l.embedded)
+                .count();
+            ensure(shadows <= MAX_SHADOW_LIGHTS, C, || {
+                format!("{shadows} shadow-casting lights exceed {MAX_SHADOW_LIGHTS}")
+            })?;
         }
         // Depth sets: object layers only, each object layer in exactly one set.
         let mut in_sets = std::collections::BTreeSet::new();
         for set in &self.depth_sets {
-            ensure((set.world as usize) < self.worlds.len(), C, || format!("depth set names world {}", set.world))?;
+            ensure((set.world as usize) < self.worlds.len(), C, || {
+                format!("depth set names world {}", set.world)
+            })?;
             ensure(!set.layers.is_empty(), C, || "empty depth set".into())?;
             for id in &set.layers {
                 let layer = index_of(id).map(|i| &self.layers[i]);
-                ensure(layer.is_some_and(|l| l.kind == LayerKind::Object3d), C, || format!("depth set member {id:?} is not a 3D object layer"))?;
-                ensure(in_sets.insert(id), C, || format!("layer {id:?} is in two depth sets"))?;
+                ensure(
+                    layer.is_some_and(|l| l.kind == LayerKind::Object3d),
+                    C,
+                    || format!("depth set member {id:?} is not a 3D object layer"),
+                )?;
+                ensure(in_sets.insert(id), C, || {
+                    format!("layer {id:?} is in two depth sets")
+                })?;
             }
-            ensure(set.shadow_casters.iter().all(|c| set.layers.contains(c)), C, || "shadow casters must be members of their set".into())?;
-            ensure(set.layers.contains(&set.background_layer), C, || "the background layer must be a member of its set".into())?;
+            ensure(
+                set.shadow_casters.iter().all(|c| set.layers.contains(c)),
+                C,
+                || "shadow casters must be members of their set".into(),
+            )?;
+            ensure(set.layers.contains(&set.background_layer), C, || {
+                "the background layer must be a member of its set".into()
+            })?;
             let bottom = set.layers.iter().filter_map(index_of).min();
-            ensure(bottom == index_of(&set.background_layer), C, || "the background layer is the bottom layer of the set".into())?;
+            ensure(bottom == index_of(&set.background_layer), C, || {
+                "the background layer is the bottom layer of the set".into()
+            })?;
         }
         // Ordering: each run is a permutation of a contiguous block of 3D layers.
         let mut covered = std::collections::BTreeSet::new();
         for run in &self.ordering {
             let start = run.start as usize;
             let end = start + run.order.len();
-            ensure(!run.order.is_empty() && end <= self.layers.len(), C, || format!("run at {start} is empty or past the end"))?;
-            let block: std::collections::BTreeSet<&LayerId> = self.layers[start..end].iter().map(|l| &l.id).collect();
+            ensure(!run.order.is_empty() && end <= self.layers.len(), C, || {
+                format!("run at {start} is empty or past the end")
+            })?;
+            let block: std::collections::BTreeSet<&LayerId> =
+                self.layers[start..end].iter().map(|l| &l.id).collect();
             let order: std::collections::BTreeSet<&LayerId> = run.order.iter().collect();
-            ensure(block == order && order.len() == run.order.len(), C, || format!("run at {start} is not a permutation of its block"))?;
-            ensure(self.layers[start..end].iter().all(|l| l.kind.is_3d()), C, || format!("run at {start} contains a non-3D layer"))?;
+            ensure(block == order && order.len() == run.order.len(), C, || {
+                format!("run at {start} is not a permutation of its block")
+            })?;
+            ensure(
+                self.layers[start..end].iter().all(|l| l.kind.is_3d()),
+                C,
+                || format!("run at {start} contains a non-3D layer"),
+            )?;
             for index in start..end {
-                ensure(covered.insert(index), C, || format!("layer index {index} is in two runs"))?;
+                ensure(covered.insert(index), C, || {
+                    format!("layer index {index} is in two runs")
+                })?;
             }
         }
         Ok(())
@@ -526,9 +723,21 @@ pub(crate) mod tests {
             visible: true,
             opacity: 1.0,
             blend: BlendMode::Normal,
-            transform: if kind.is_3d() { LayerTransform::World { matrix: MAT4_IDENTITY } } else { LayerTransform::Flat { matrix: MAT3_IDENTITY } },
+            transform: if kind.is_3d() {
+                LayerTransform::World {
+                    matrix: MAT4_IDENTITY,
+                }
+            } else {
+                LayerTransform::Flat {
+                    matrix: MAT3_IDENTITY,
+                }
+            },
             group: None,
-            source: if kind == LayerKind::Object3d { LayerSource::World { world: 0 } } else { LayerSource::None },
+            source: if kind == LayerKind::Object3d {
+                LayerSource::World { world: 0 }
+            } else {
+                LayerSource::None
+            },
             effects: vec![],
             masks: vec![],
             matte: None,
@@ -540,7 +749,9 @@ pub(crate) mod tests {
     pub(crate) fn sample_scene() -> EvaluatedScene {
         let object = |id: &str, depth: f64| Object3d {
             layer: id.into(),
-            model: ModelSource::Generated { geometry_key: format!("cube:{id}") },
+            model: ModelSource::Generated {
+                geometry_key: format!("cube:{id}"),
+            },
             world: MAT4_IDENTITY,
             opacity: 1.0,
             writes_depth: true,
@@ -552,7 +763,14 @@ pub(crate) mod tests {
             time: Ticks::from_whole_seconds(1),
             frame_rate: FrameRate::new(30000, 1001),
             size: Size::new(1920, 1080),
-            background: Background::Solid { color: Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 } },
+            background: Background::Solid {
+                color: Rgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            },
             shutter: Shutter::from_frames(0.5),
             view: None,
             layers: vec![
@@ -566,7 +784,11 @@ pub(crate) mod tests {
                 camera: Camera3d {
                     layer: None,
                     view: MAT4_IDENTITY,
-                    projection: Projection::Perspective { fov_y_degrees: 45.0, near: 0.1, far: 1000.0 },
+                    projection: Projection::Perspective {
+                        fov_y_degrees: 45.0,
+                        near: 0.1,
+                        far: 1000.0,
+                    },
                 },
                 lights: vec![Light3d {
                     layer: Some("sun".into()),
@@ -587,7 +809,10 @@ pub(crate) mod tests {
                 shadow_casters: vec!["cube".into(), "ball".into()],
                 background_layer: "cube".into(),
             }],
-            ordering: vec![OrderedRun { start: 1, order: vec!["cube".into(), "sun".into(), "ball".into()] }],
+            ordering: vec![OrderedRun {
+                start: 1,
+                order: vec!["cube".into(), "sun".into(), "ball".into()],
+            }],
             failures: vec![],
         }
     }
@@ -601,22 +826,39 @@ pub(crate) mod tests {
     fn depth_sets_and_ordering_are_checked_separately() {
         let mut scene = sample_scene();
         scene.depth_sets[0].layers.push("sun".into());
-        assert!(scene.validate().is_err(), "lights are not depth set members");
+        assert!(
+            scene.validate().is_err(),
+            "lights are not depth set members"
+        );
 
         let mut scene = sample_scene();
-        scene.depth_sets.push(DepthSet { world: 0, layers: vec!["ball".into()], shadow_casters: vec![], background_layer: "ball".into() });
+        scene.depth_sets.push(DepthSet {
+            world: 0,
+            layers: vec!["ball".into()],
+            shadow_casters: vec![],
+            background_layer: "ball".into(),
+        });
         assert!(scene.validate().is_err(), "a layer in two sets");
 
         let mut scene = sample_scene();
         scene.depth_sets[0].background_layer = "ball".into();
-        assert!(scene.validate().is_err(), "background must be the bottom layer");
+        assert!(
+            scene.validate().is_err(),
+            "background must be the bottom layer"
+        );
 
         let mut scene = sample_scene();
         scene.ordering[0].order = vec!["cube".into(), "ball".into(), "title".into()];
-        assert!(scene.validate().is_err(), "a run must permute its own block");
+        assert!(
+            scene.validate().is_err(),
+            "a run must permute its own block"
+        );
 
         let mut scene = sample_scene();
-        scene.ordering[0] = OrderedRun { start: 0, order: vec!["bg".into(), "cube".into()] };
+        scene.ordering[0] = OrderedRun {
+            start: 0,
+            order: vec!["bg".into(), "cube".into()],
+        };
         assert!(scene.validate().is_err(), "runs contain only 3D layers");
     }
 
@@ -624,14 +866,31 @@ pub(crate) mod tests {
     fn limits_and_references() {
         let mut scene = sample_scene();
         scene.worlds[0].lights = (0..5)
-            .map(|_| Light3d { layer: None, kind: LightKind::Sun, color: [1.0; 3], intensity: 1.0, world: MAT4_IDENTITY, casts_shadow: true, embedded: false })
+            .map(|_| Light3d {
+                layer: None,
+                kind: LightKind::Sun,
+                color: [1.0; 3],
+                intensity: 1.0,
+                world: MAT4_IDENTITY,
+                casts_shadow: true,
+                embedded: false,
+            })
             .collect();
         assert!(scene.validate().is_err(), "more than 4 shadow lights");
-        scene.worlds[0].lights.iter_mut().for_each(|l| l.embedded = true);
-        assert!(scene.validate().is_ok(), "embedded lights count toward neither limit");
+        scene.worlds[0]
+            .lights
+            .iter_mut()
+            .for_each(|l| l.embedded = true);
+        assert!(
+            scene.validate().is_ok(),
+            "embedded lights count toward neither limit"
+        );
 
         let mut scene = sample_scene();
-        scene.layers[4].matte = Some(MatteRef { source: "nope".into(), mode: MatteMode::Luma });
+        scene.layers[4].matte = Some(MatteRef {
+            source: "nope".into(),
+            mode: MatteMode::Luma,
+        });
         assert!(scene.validate().is_err());
 
         let mut scene = sample_scene();
@@ -643,7 +902,10 @@ pub(crate) mod tests {
     fn shutter_matches_todays_centered_samples() {
         // compositor.ts: dt = ((s + .5) / n − .5) × shutter, shutter in frames.
         let shutter = Shutter::from_frames(0.5);
-        assert_eq!((shutter.angle_degrees, shutter.phase_degrees), (180.0, -90.0));
+        assert_eq!(
+            (shutter.angle_degrees, shutter.phase_degrees),
+            (180.0, -90.0)
+        );
         for n in [1u32, 6, 10, 16, 20] {
             for (s, offset) in shutter.sample_offsets(n).iter().enumerate() {
                 let today = ((s as f64 + 0.5) / n as f64 - 0.5) * 0.5;

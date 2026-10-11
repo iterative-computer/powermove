@@ -13,7 +13,7 @@ use ts_rs::TS;
 
 use crate::color::{ColorDescription, Subsampling};
 use crate::common::{ContentHash, PixelRect, Seq, Size};
-use crate::validate::{ensure, Validate, Violation};
+use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
 
 /// GPU texture formats that cross the interop boundary.
@@ -54,7 +54,11 @@ impl SurfaceFormat {
 /// Decoded frame layouts the engine imports without copies (section 13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum DecodedLayout {
     /// VideoToolbox 8-bit biplanar 4:2:0 (`420v` limited, `420f` full).
     Biplanar420_8 { full_range: bool },
@@ -67,7 +71,11 @@ pub enum DecodedLayout {
     /// VideoToolbox 16-bit AYCbCr 4:4:4:4 (`y416`), ProRes 4444 and XQ.
     Ayuv4444_16,
     /// FFmpeg planar n-bit, LSB-aligned (DNxHR HQX and 444, H.264 4:2:2 10-bit, VP9 profile 2, DPX).
-    PlanarLsb { bits: u8, subsampling: Subsampling, alpha: bool },
+    PlanarLsb {
+        bits: u8,
+        subsampling: Subsampling,
+        alpha: bool,
+    },
     /// Packed RGBA from image readers.
     Rgba { format: SurfaceFormat },
 }
@@ -83,15 +91,21 @@ impl DecodedLayout {
             | DecodedLayout::Biplanar422_8 { full_range }
             | DecodedLayout::Biplanar420_10 { full_range }
             | DecodedLayout::Biplanar422_10 { full_range } => Some(full_range),
-            DecodedLayout::Ayuv4444_16 | DecodedLayout::PlanarLsb { .. } | DecodedLayout::Rgba { .. } => None,
+            DecodedLayout::Ayuv4444_16
+            | DecodedLayout::PlanarLsb { .. }
+            | DecodedLayout::Rgba { .. } => None,
         }
     }
 
     /// The chroma subsampling of the layout.
     pub const fn subsampling(&self) -> Subsampling {
         match *self {
-            DecodedLayout::Biplanar420_8 { .. } | DecodedLayout::Biplanar420_10 { .. } => Subsampling::S420,
-            DecodedLayout::Biplanar422_8 { .. } | DecodedLayout::Biplanar422_10 { .. } => Subsampling::S422,
+            DecodedLayout::Biplanar420_8 { .. } | DecodedLayout::Biplanar420_10 { .. } => {
+                Subsampling::S420
+            }
+            DecodedLayout::Biplanar422_8 { .. } | DecodedLayout::Biplanar422_10 { .. } => {
+                Subsampling::S422
+            }
             DecodedLayout::Ayuv4444_16 | DecodedLayout::Rgba { .. } => Subsampling::S444,
             DecodedLayout::PlanarLsb { subsampling, .. } => subsampling,
         }
@@ -106,7 +120,10 @@ impl DecodedLayout {
             DecodedLayout::PlanarLsb { bits, .. } => bits,
             DecodedLayout::Rgba { format } => match format {
                 SurfaceFormat::Bgra8Unorm | SurfaceFormat::R8Unorm | SurfaceFormat::Rg8Unorm => 8,
-                SurfaceFormat::Rgba16Float | SurfaceFormat::Rgba16Unorm | SurfaceFormat::R16Unorm | SurfaceFormat::Rg16Unorm => 16,
+                SurfaceFormat::Rgba16Float
+                | SurfaceFormat::Rgba16Unorm
+                | SurfaceFormat::R16Unorm
+                | SurfaceFormat::Rg16Unorm => 16,
                 SurfaceFormat::Rgba32Float => 32,
             },
         }
@@ -128,21 +145,49 @@ impl DecodedLayout {
     /// The planes the importer creates, in order. Planar layouts import each
     /// plane as one single-channel texture.
     pub fn planes(&self) -> Vec<PlaneSpec> {
-        let plane = |format, width_divisor, height_divisor| PlaneSpec { format, width_divisor, height_divisor };
+        let plane = |format, width_divisor, height_divisor| PlaneSpec {
+            format,
+            width_divisor,
+            height_divisor,
+        };
         match *self {
-            DecodedLayout::Biplanar420_8 { .. } => vec![plane(SurfaceFormat::R8Unorm, 1, 1), plane(SurfaceFormat::Rg8Unorm, 2, 2)],
-            DecodedLayout::Biplanar422_8 { .. } => vec![plane(SurfaceFormat::R8Unorm, 1, 1), plane(SurfaceFormat::Rg8Unorm, 2, 1)],
-            DecodedLayout::Biplanar420_10 { .. } => vec![plane(SurfaceFormat::R16Unorm, 1, 1), plane(SurfaceFormat::Rg16Unorm, 2, 2)],
-            DecodedLayout::Biplanar422_10 { .. } => vec![plane(SurfaceFormat::R16Unorm, 1, 1), plane(SurfaceFormat::Rg16Unorm, 2, 1)],
+            DecodedLayout::Biplanar420_8 { .. } => vec![
+                plane(SurfaceFormat::R8Unorm, 1, 1),
+                plane(SurfaceFormat::Rg8Unorm, 2, 2),
+            ],
+            DecodedLayout::Biplanar422_8 { .. } => vec![
+                plane(SurfaceFormat::R8Unorm, 1, 1),
+                plane(SurfaceFormat::Rg8Unorm, 2, 1),
+            ],
+            DecodedLayout::Biplanar420_10 { .. } => vec![
+                plane(SurfaceFormat::R16Unorm, 1, 1),
+                plane(SurfaceFormat::Rg16Unorm, 2, 2),
+            ],
+            DecodedLayout::Biplanar422_10 { .. } => vec![
+                plane(SurfaceFormat::R16Unorm, 1, 1),
+                plane(SurfaceFormat::Rg16Unorm, 2, 1),
+            ],
             DecodedLayout::Ayuv4444_16 => vec![plane(SurfaceFormat::Rgba16Unorm, 1, 1)],
-            DecodedLayout::PlanarLsb { bits, subsampling, alpha } => {
-                let format = if bits <= 8 { SurfaceFormat::R8Unorm } else { SurfaceFormat::R16Unorm };
+            DecodedLayout::PlanarLsb {
+                bits,
+                subsampling,
+                alpha,
+            } => {
+                let format = if bits <= 8 {
+                    SurfaceFormat::R8Unorm
+                } else {
+                    SurfaceFormat::R16Unorm
+                };
                 let (w, h) = match subsampling {
                     Subsampling::S444 => (1, 1),
                     Subsampling::S422 => (2, 1),
                     Subsampling::S420 => (2, 2),
                 };
-                let mut planes = vec![plane(format, 1, 1), plane(format, w, h), plane(format, w, h)];
+                let mut planes = vec![
+                    plane(format, 1, 1),
+                    plane(format, w, h),
+                    plane(format, w, h),
+                ];
                 if alpha {
                     planes.push(plane(format, 1, 1));
                 }
@@ -168,26 +213,54 @@ pub struct DecodedFrameDesc {
 impl Validate for DecodedFrameDesc {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::GpuInterop;
-        ensure(!self.size.is_empty(), C, || "decoded frames have a size".into())?;
+        ensure(!self.size.is_empty(), C, || {
+            "decoded frames have a size".into()
+        })?;
         if let DecodedLayout::PlanarLsb { bits, .. } = self.layout {
-            ensure((8..=16).contains(&bits), C, || format!("planar samples are 8 to 16 bits, got {bits}"))?;
+            ensure((8..=16).contains(&bits), C, || {
+                format!("planar samples are 8 to 16 bits, got {bits}")
+            })?;
         }
         if let DecodedLayout::Rgba { format } = self.layout {
-            ensure(matches!(format, SurfaceFormat::Bgra8Unorm | SurfaceFormat::Rgba16Unorm | SurfaceFormat::Rgba16Float | SurfaceFormat::Rgba32Float), C, || {
-                format!("{format:?} is not a packed RGBA format")
-            })?;
+            ensure(
+                matches!(
+                    format,
+                    SurfaceFormat::Bgra8Unorm
+                        | SurfaceFormat::Rgba16Unorm
+                        | SurfaceFormat::Rgba16Float
+                        | SurfaceFormat::Rgba32Float
+                ),
+                C,
+                || format!("{format:?} is not a packed RGBA format"),
+            )?;
         }
         if let Some(full) = self.layout.full_range() {
-            ensure(full == (self.color.range == crate::color::Range::Full), C, || {
-                "the pixel format's range must match the color description (420v vs 420f)".into()
-            })?;
+            ensure(
+                full == (self.color.range == crate::color::Range::Full),
+                C,
+                || {
+                    "the pixel format's range must match the color description (420v vs 420f)"
+                        .into()
+                },
+            )?;
         }
-        ensure(self.layout.subsampling() == self.color.subsampling, C, || "layout and color description disagree on subsampling".into())?;
-        ensure(self.layout.bits() == self.color.bit_depth || matches!(self.layout, DecodedLayout::Rgba { .. }), C, || {
-            "layout and color description disagree on bit depth".into()
-        })?;
+        ensure(
+            self.layout.subsampling() == self.color.subsampling,
+            C,
+            || "layout and color description disagree on subsampling".into(),
+        )?;
+        ensure(
+            self.layout.bits() == self.color.bit_depth
+                || matches!(self.layout, DecodedLayout::Rgba { .. }),
+            C,
+            || "layout and color description disagree on bit depth".into(),
+        )?;
         if let Some(aperture) = &self.clean_aperture {
-            ensure(!aperture.is_empty() && self.size.contains(aperture), C, || "clean aperture must lie inside the frame".into())?;
+            ensure(
+                !aperture.is_empty() && self.size.contains(aperture),
+                C,
+                || "clean aperture must lie inside the frame".into(),
+            )?;
         }
         Ok(())
     }
@@ -197,7 +270,11 @@ impl Validate for DecodedFrameDesc {
 /// adapter (Metal `registryID`, Windows LUID).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum AdapterIdentity {
     /// Metal `MTLDevice.registryID`, as decimal text (it is a u64).
     Metal { registry_id: String, name: String },
@@ -212,7 +289,11 @@ pub enum AdapterIdentity {
 /// The platform object behind an exported surface, as it crosses processes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum PlatformSurface {
     /// An IOSurface sent once as a Mach port right through `pm-bridge`; the
     /// message carries the index the bridge assigned, never a raw port.
@@ -220,7 +301,10 @@ pub enum PlatformSurface {
     /// An NT handle duplicated into main with `DuplicateHandle` (Windows).
     NtHandle { bridge_index: u32 },
     /// Shared-memory CPU frames (fallback B, and the hidden host's Chromium viewer).
-    SharedMemory { handle: crate::host::CapabilityHandle, stride: u32 },
+    SharedMemory {
+        handle: crate::host::CapabilityHandle,
+        stride: u32,
+    },
 }
 
 /// A surface in the viewer pool, sent once and imported once.
@@ -255,22 +339,49 @@ pub const MAX_POOL_SURFACES: usize = 32;
 impl Validate for SurfacePool {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::GpuInterop;
-        ensure((MIN_POOL_SURFACES..=MAX_POOL_SURFACES).contains(&self.surfaces.len()), C, || {
-            format!("a pool has {MIN_POOL_SURFACES} to {MAX_POOL_SURFACES} surfaces, got {}", self.surfaces.len())
-        })?;
+        ensure(
+            (MIN_POOL_SURFACES..=MAX_POOL_SURFACES).contains(&self.surfaces.len()),
+            C,
+            || {
+                format!(
+                    "a pool has {MIN_POOL_SURFACES} to {MAX_POOL_SURFACES} surfaces, got {}",
+                    self.surfaces.len()
+                )
+            },
+        )?;
         for (index, surface) in self.surfaces.iter().enumerate() {
-            ensure(surface.pool_index as usize == index, C, || format!("surface {index} has pool index {}", surface.pool_index))?;
-            ensure(!surface.size.is_empty() && surface.size.width <= 16384 && surface.size.height <= 16384, C, || {
-                format!("surface {index} size {:?} outside 1..16384", surface.size)
+            ensure(surface.pool_index as usize == index, C, || {
+                format!("surface {index} has pool index {}", surface.pool_index)
             })?;
-            ensure(matches!(surface.format, SurfaceFormat::Bgra8Unorm | SurfaceFormat::Rgba16Float), C, || {
-                format!("viewer surfaces are bgra8 or rgba16float, got {:?}", surface.format)
-            })?;
+            ensure(
+                !surface.size.is_empty()
+                    && surface.size.width <= 16384
+                    && surface.size.height <= 16384,
+                C,
+                || format!("surface {index} size {:?} outside 1..16384", surface.size),
+            )?;
+            ensure(
+                matches!(
+                    surface.format,
+                    SurfaceFormat::Bgra8Unorm | SurfaceFormat::Rgba16Float
+                ),
+                C,
+                || {
+                    format!(
+                        "viewer surfaces are bgra8 or rgba16float, got {:?}",
+                        surface.format
+                    )
+                },
+            )?;
         }
         let first = &self.surfaces[0];
-        ensure(self.surfaces.iter().all(|s| s.size == first.size && s.format == first.format), C, || {
-            "every surface in a pool has the same size and format".into()
-        })
+        ensure(
+            self.surfaces
+                .iter()
+                .all(|s| s.size == first.size && s.format == first.format),
+            C,
+            || "every surface in a pool has the same size and format".into(),
+        )
     }
 }
 
@@ -346,10 +457,24 @@ pub trait GpuInterop {
     type Error: std::error::Error;
 
     fn capabilities(&self) -> InteropCapabilities;
-    fn import_decoded(&mut self, desc: &DecodedFrameDesc, frame: &Self::NativeFrame) -> Result<Vec<Self::Texture>, Self::Error>;
-    fn export_surface(&mut self, request: &SurfaceRequest) -> Result<(Self::Texture, Self::NativeSurface), Self::Error>;
-    fn encoder_input(&mut self, desc: &EncoderInputDesc) -> Result<EncoderInput<Self::Texture, Self::NativeFrame>, Self::Error>;
-    fn import_blender_surface(&mut self, desc: &BlenderSurfaceDesc, rgba16_straight: &[u16]) -> Result<Self::Texture, Self::Error>;
+    fn import_decoded(
+        &mut self,
+        desc: &DecodedFrameDesc,
+        frame: &Self::NativeFrame,
+    ) -> Result<Vec<Self::Texture>, Self::Error>;
+    fn export_surface(
+        &mut self,
+        request: &SurfaceRequest,
+    ) -> Result<(Self::Texture, Self::NativeSurface), Self::Error>;
+    fn encoder_input(
+        &mut self,
+        desc: &EncoderInputDesc,
+    ) -> Result<EncoderInput<Self::Texture, Self::NativeFrame>, Self::Error>;
+    fn import_blender_surface(
+        &mut self,
+        desc: &BlenderSurfaceDesc,
+        rgba16_straight: &[u16],
+    ) -> Result<Self::Texture, Self::Error>;
 }
 
 #[cfg(test)]
@@ -391,10 +516,18 @@ mod tests {
             }
         }
 
-        fn import_decoded(&mut self, desc: &DecodedFrameDesc, frame: &Self::NativeFrame) -> Result<Vec<CpuTexture>, CpuError> {
+        fn import_decoded(
+            &mut self,
+            desc: &DecodedFrameDesc,
+            frame: &Self::NativeFrame,
+        ) -> Result<Vec<CpuTexture>, CpuError> {
             let planes = desc.layout.planes();
             if planes.len() != frame.len() {
-                return Err(CpuError(format!("{} planes expected, got {}", planes.len(), frame.len())));
+                return Err(CpuError(format!(
+                    "{} planes expected, got {}",
+                    planes.len(),
+                    frame.len()
+                )));
             }
             planes
                 .iter()
@@ -404,19 +537,42 @@ mod tests {
                     let height = desc.size.height.div_ceil(plane.height_divisor as u32);
                     let expected = (width * height * plane.format.bytes_per_pixel()) as usize;
                     if bytes.len() != expected {
-                        return Err(CpuError(format!("plane needs {expected} bytes, got {}", bytes.len())));
+                        return Err(CpuError(format!(
+                            "plane needs {expected} bytes, got {}",
+                            bytes.len()
+                        )));
                     }
-                    Ok(CpuTexture { width, height, format: plane.format, data: bytes.clone() })
+                    Ok(CpuTexture {
+                        width,
+                        height,
+                        format: plane.format,
+                        data: bytes.clone(),
+                    })
                 })
                 .collect()
         }
 
-        fn export_surface(&mut self, request: &SurfaceRequest) -> Result<(CpuTexture, usize), CpuError> {
-            let len = (request.size.width * request.size.height * request.format.bytes_per_pixel()) as usize;
-            Ok((CpuTexture { width: request.size.width, height: request.size.height, format: request.format, data: vec![0; len] }, 0))
+        fn export_surface(
+            &mut self,
+            request: &SurfaceRequest,
+        ) -> Result<(CpuTexture, usize), CpuError> {
+            let len = (request.size.width * request.size.height * request.format.bytes_per_pixel())
+                as usize;
+            Ok((
+                CpuTexture {
+                    width: request.size.width,
+                    height: request.size.height,
+                    format: request.format,
+                    data: vec![0; len],
+                },
+                0,
+            ))
         }
 
-        fn encoder_input(&mut self, desc: &EncoderInputDesc) -> Result<EncoderInput<CpuTexture, Self::NativeFrame>, CpuError> {
+        fn encoder_input(
+            &mut self,
+            desc: &EncoderInputDesc,
+        ) -> Result<EncoderInput<CpuTexture, Self::NativeFrame>, CpuError> {
             let textures: Vec<CpuTexture> = desc
                 .layout
                 .planes()
@@ -424,14 +580,26 @@ mod tests {
                 .map(|p| {
                     let width = desc.size.width.div_ceil(p.width_divisor as u32);
                     let height = desc.size.height.div_ceil(p.height_divisor as u32);
-                    CpuTexture { width, height, format: p.format, data: vec![0; (width * height * p.format.bytes_per_pixel()) as usize] }
+                    CpuTexture {
+                        width,
+                        height,
+                        format: p.format,
+                        data: vec![0; (width * height * p.format.bytes_per_pixel()) as usize],
+                    }
                 })
                 .collect();
             let frame = textures.iter().map(|t| t.data.clone()).collect();
-            Ok(EncoderInput { planes: textures, frame })
+            Ok(EncoderInput {
+                planes: textures,
+                frame,
+            })
         }
 
-        fn import_blender_surface(&mut self, desc: &BlenderSurfaceDesc, rgba: &[u16]) -> Result<CpuTexture, CpuError> {
+        fn import_blender_surface(
+            &mut self,
+            desc: &BlenderSurfaceDesc,
+            rgba: &[u16],
+        ) -> Result<CpuTexture, CpuError> {
             if rgba.len() != (desc.size.width * desc.size.height * 4) as usize {
                 return Err(CpuError("surface size mismatch".into()));
             }
@@ -445,7 +613,12 @@ mod tests {
                 }
                 data.extend_from_slice(&px[3].to_le_bytes());
             }
-            Ok(CpuTexture { width: desc.size.width, height: desc.size.height, format: SurfaceFormat::Rgba16Unorm, data })
+            Ok(CpuTexture {
+                width: desc.size.width,
+                height: desc.size.height,
+                format: SurfaceFormat::Rgba16Unorm,
+                data,
+            })
         }
     }
 
@@ -453,12 +626,30 @@ mod tests {
     fn plane_rules() {
         let x420 = DecodedLayout::Biplanar420_10 { full_range: false };
         assert_eq!(x420.planes().len(), 2);
-        assert_eq!(x420.planes()[1], PlaneSpec { format: SurfaceFormat::Rg16Unorm, width_divisor: 2, height_divisor: 2 });
+        assert_eq!(
+            x420.planes()[1],
+            PlaneSpec {
+                format: SurfaceFormat::Rg16Unorm,
+                width_divisor: 2,
+                height_divisor: 2
+            }
+        );
         let x422 = DecodedLayout::Biplanar422_10 { full_range: false };
         assert_eq!(x422.planes()[1].height_divisor, 1);
-        let dnx = DecodedLayout::PlanarLsb { bits: 10, subsampling: Subsampling::S422, alpha: true };
+        let dnx = DecodedLayout::PlanarLsb {
+            bits: 10,
+            subsampling: Subsampling::S422,
+            alpha: true,
+        };
         assert_eq!(dnx.planes().len(), 4);
-        assert_eq!(DecodedLayout::Ayuv4444_16.planes(), vec![PlaneSpec { format: SurfaceFormat::Rgba16Unorm, width_divisor: 1, height_divisor: 1 }]);
+        assert_eq!(
+            DecodedLayout::Ayuv4444_16.planes(),
+            vec![PlaneSpec {
+                format: SurfaceFormat::Rgba16Unorm,
+                width_divisor: 1,
+                height_divisor: 1
+            }]
+        );
     }
 
     #[test]
@@ -477,16 +668,39 @@ mod tests {
 
     #[test]
     fn cpu_interop_premultiplies_blender_surfaces() {
-        let desc = BlenderSurfaceDesc { size: Size::new(1, 1), crop: PixelRect { x: 0, y: 0, width: 1, height: 1 }, key: ContentHash([0; 32]) };
-        let texture = Cpu.import_blender_surface(&desc, &[65535, 0, 65535, 32768]).unwrap();
+        let desc = BlenderSurfaceDesc {
+            size: Size::new(1, 1),
+            crop: PixelRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            key: ContentHash([0; 32]),
+        };
+        let texture = Cpu
+            .import_blender_surface(&desc, &[65535, 0, 65535, 32768])
+            .unwrap();
         let red = u16::from_le_bytes([texture.data[0], texture.data[1]]);
         assert_eq!(red, 32768);
         let caps = Cpu.capabilities();
         assert_eq!(caps.adapter, AdapterIdentity::Software);
-        let (surface, _) = Cpu.export_surface(&SurfaceRequest { size: Size::new(2, 2), format: SurfaceFormat::Rgba16Float }).unwrap();
+        let (surface, _) = Cpu
+            .export_surface(&SurfaceRequest {
+                size: Size::new(2, 2),
+                format: SurfaceFormat::Rgba16Float,
+            })
+            .unwrap();
         assert_eq!(surface.data.len(), 32);
-        let EncoderInput { planes, frame: native } = Cpu
-            .encoder_input(&EncoderInputDesc { size: Size::new(4, 4), layout: DecodedLayout::Biplanar420_10 { full_range: false }, color: ColorDescription::SRGB_RGBA8 })
+        let EncoderInput {
+            planes,
+            frame: native,
+        } = Cpu
+            .encoder_input(&EncoderInputDesc {
+                size: Size::new(4, 4),
+                layout: DecodedLayout::Biplanar420_10 { full_range: false },
+                color: ColorDescription::SRGB_RGBA8,
+            })
             .unwrap();
         assert_eq!(planes.len(), native.len());
     }
@@ -499,7 +713,10 @@ mod tests {
             format: SurfaceFormat::Rgba16Float,
             platform: PlatformSurface::IoSurface { bridge_index: i },
         };
-        let pool = SurfacePool { generation: Seq::ZERO, surfaces: (0..6).map(surface).collect() };
+        let pool = SurfacePool {
+            generation: Seq::ZERO,
+            surfaces: (0..6).map(surface).collect(),
+        };
         assert!(pool.validate().is_ok());
         let mut bad = pool.clone();
         bad.surfaces.swap(0, 1);
@@ -507,7 +724,10 @@ mod tests {
         let mut mixed = pool.clone();
         mixed.surfaces[2].format = SurfaceFormat::Bgra8Unorm;
         assert!(mixed.validate().is_err());
-        let small = SurfacePool { generation: Seq::ZERO, surfaces: (0..2).map(surface).collect() };
+        let small = SurfacePool {
+            generation: Seq::ZERO,
+            surfaces: (0..2).map(surface).collect(),
+        };
         assert!(small.validate().is_err());
     }
 }

@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
-use crate::common::{HostMicros, PlaybackRate, Seq, TickRange, Ticks, TICKS_PER_SECOND};
-use crate::validate::{ensure, Validate, Violation};
+use crate::common::{HostMicros, PlaybackRate, Seq, TICKS_PER_SECOND, TickRange, Ticks};
+use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
 
 /// Transport state.
@@ -75,11 +75,21 @@ impl ClockSample {
 impl Validate for ClockSample {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::Clock;
-        ensure(self.rate.is_valid(), C, || "rate denominator must be positive".into())?;
-        ensure((8_000..=192_000).contains(&self.sample_rate), C, || format!("sample rate {} outside 8 to 192 kHz", self.sample_rate))?;
-        ensure((self.state == TransportState::Stopped) == (self.rate.num == 0), C, || "a stopped clock has rate 0 and a running clock does not".into())?;
+        ensure(self.rate.is_valid(), C, || {
+            "rate denominator must be positive".into()
+        })?;
+        ensure((8_000..=192_000).contains(&self.sample_rate), C, || {
+            format!("sample rate {} outside 8 to 192 kHz", self.sample_rate)
+        })?;
+        ensure(
+            (self.state == TransportState::Stopped) == (self.rate.num == 0),
+            C,
+            || "a stopped clock has rate 0 and a running clock does not".into(),
+        )?;
         if let Some(range) = self.loop_range {
-            ensure(range.is_valid(), C, || "loop range must be non-empty".into())?;
+            ensure(range.is_valid(), C, || {
+                "loop range must be non-empty".into()
+            })?;
         }
         Ok(())
     }
@@ -99,17 +109,35 @@ pub enum SeekMode {
 /// Transport commands from the renderer (notifications; the clock samples are the answer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "command")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "command"
+)]
 pub enum TransportCommand {
-    Play { rate: PlaybackRate },
+    Play {
+        rate: PlaybackRate,
+    },
     Pause,
-    Seek { time: Ticks, mode: SeekMode },
+    Seek {
+        time: Ticks,
+        mode: SeekMode,
+    },
     /// Frame stepping by whole frames (negative steps back).
-    Step { frames: i32 },
-    SetLoop { range: Option<TickRange> },
+    Step {
+        frames: i32,
+    },
+    SetLoop {
+        range: Option<TickRange>,
+    },
     /// Play around the current frame (pre-roll, post-roll in ticks).
-    PlayAround { pre_roll: Ticks, post_roll: Ticks },
-    AudioScrub { enabled: bool },
+    PlayAround {
+        pre_roll: Ticks,
+        post_roll: Ticks,
+    },
+    AudioScrub {
+        enabled: bool,
+    },
 }
 
 /// J/K/L rates: 1× and 2× forward and reverse (section 15).
@@ -124,12 +152,21 @@ impl Validate for TransportCommand {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::Clock;
         match self {
-            TransportCommand::Play { rate } => ensure(rate.is_valid() && rate.num != 0, C, || "play needs a non-zero rate".into()),
-            TransportCommand::SetLoop { range: Some(range) } => ensure(range.is_valid(), C, || "loop range must be non-empty".into()),
-            TransportCommand::Step { frames } => ensure(*frames != 0, C, || "a step moves at least one frame".into()),
-            TransportCommand::PlayAround { pre_roll, post_roll } => {
-                ensure(pre_roll.get() >= 0 && post_roll.get() >= 0, C, || "rolls are non-negative".into())
+            TransportCommand::Play { rate } => ensure(rate.is_valid() && rate.num != 0, C, || {
+                "play needs a non-zero rate".into()
+            }),
+            TransportCommand::SetLoop { range: Some(range) } => ensure(range.is_valid(), C, || {
+                "loop range must be non-empty".into()
+            }),
+            TransportCommand::Step { frames } => {
+                ensure(*frames != 0, C, || "a step moves at least one frame".into())
             }
+            TransportCommand::PlayAround {
+                pre_roll,
+                post_roll,
+            } => ensure(pre_roll.get() >= 0 && post_roll.get() >= 0, C, || {
+                "rolls are non-negative".into()
+            }),
             _ => Ok(()),
         }
     }
@@ -143,7 +180,11 @@ mod tests {
         ClockSample {
             seq: Seq::ZERO,
             epoch: 1,
-            state: if rate.num == 0 { TransportState::Stopped } else { TransportState::Playing },
+            state: if rate.num == 0 {
+                TransportState::Stopped
+            } else {
+                TransportState::Playing
+            },
             host_time: HostMicros::new(1_000_000).unwrap(),
             media_time: Ticks::from_whole_seconds(10),
             rate,
@@ -156,19 +197,37 @@ mod tests {
     #[test]
     fn media_time_follows_the_line() {
         let clock = sample(PlaybackRate::NORMAL);
-        assert_eq!(clock.media_time_at(HostMicros::new(1_500_000).unwrap()), Ticks::new(10 * TICKS_PER_SECOND + TICKS_PER_SECOND / 2).unwrap());
+        assert_eq!(
+            clock.media_time_at(HostMicros::new(1_500_000).unwrap()),
+            Ticks::new(10 * TICKS_PER_SECOND + TICKS_PER_SECOND / 2).unwrap()
+        );
         // Before the anchor: earlier media time, floored.
-        assert_eq!(clock.media_time_at(HostMicros::new(999_999).unwrap()).get(), 10 * TICKS_PER_SECOND - 706);
+        assert_eq!(
+            clock.media_time_at(HostMicros::new(999_999).unwrap()).get(),
+            10 * TICKS_PER_SECOND - 706
+        );
         let reverse = sample(PlaybackRate { num: -2, den: 1 });
-        assert_eq!(reverse.media_time_at(HostMicros::new(2_000_000).unwrap()), Ticks::from_whole_seconds(8));
+        assert_eq!(
+            reverse.media_time_at(HostMicros::new(2_000_000).unwrap()),
+            Ticks::from_whole_seconds(8)
+        );
         let stopped = sample(PlaybackRate::STOPPED);
-        assert_eq!(stopped.media_time_at(HostMicros::new(9_000_000).unwrap()), Ticks::from_whole_seconds(10));
+        assert_eq!(
+            stopped.media_time_at(HostMicros::new(9_000_000).unwrap()),
+            Ticks::from_whole_seconds(10)
+        );
     }
 
     #[test]
     fn ntsc_rates_stay_exact() {
         // 1001/1000 slow-down over 1001 s of host time is exactly 1000 s of media.
-        let clock = ClockSample { media_time: Ticks::ZERO, ..sample(PlaybackRate { num: 1000, den: 1001 }) };
+        let clock = ClockSample {
+            media_time: Ticks::ZERO,
+            ..sample(PlaybackRate {
+                num: 1000,
+                den: 1001,
+            })
+        };
         let at = HostMicros::new(1_000_000 + 1_001_000_000).unwrap();
         assert_eq!(clock.media_time_at(at), Ticks::from_whole_seconds(1000));
     }
@@ -176,8 +235,14 @@ mod tests {
     #[test]
     fn loops_wrap() {
         let mut clock = sample(PlaybackRate::NORMAL);
-        clock.loop_range = Some(TickRange { start: Ticks::from_whole_seconds(10), end: Ticks::from_whole_seconds(12) });
-        assert_eq!(clock.media_time_at(HostMicros::new(4_000_000).unwrap()), Ticks::from_whole_seconds(11));
+        clock.loop_range = Some(TickRange {
+            start: Ticks::from_whole_seconds(10),
+            end: Ticks::from_whole_seconds(12),
+        });
+        assert_eq!(
+            clock.media_time_at(HostMicros::new(4_000_000).unwrap()),
+            Ticks::from_whole_seconds(11)
+        );
         assert!(clock.validate().is_ok());
     }
 
@@ -186,8 +251,18 @@ mod tests {
         let mut clock = sample(PlaybackRate::NORMAL);
         clock.state = TransportState::Stopped;
         assert!(clock.validate().is_err());
-        assert!(TransportCommand::Play { rate: PlaybackRate::STOPPED }.validate().is_err());
+        assert!(
+            TransportCommand::Play {
+                rate: PlaybackRate::STOPPED
+            }
+            .validate()
+            .is_err()
+        );
         assert!(TransportCommand::Step { frames: -1 }.validate().is_ok());
-        assert!(JKL_RATES.iter().all(|r| TransportCommand::Play { rate: *r }.validate().is_ok()));
+        assert!(
+            JKL_RATES
+                .iter()
+                .all(|r| TransportCommand::Play { rate: *r }.validate().is_ok())
+        );
     }
 }

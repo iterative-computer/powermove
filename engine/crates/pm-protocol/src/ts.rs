@@ -10,7 +10,7 @@ use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use ts_rs::{Config, TypeVisitor, TS};
+use ts_rs::{Config, TS, TypeVisitor};
 
 use crate::envelope::Envelope;
 
@@ -66,7 +66,10 @@ impl Collector<'_> {
             return;
         }
         let Some(path) = T::output_path() else { return };
-        let key = TypeIdOrd(std::any::type_name::<T>().to_owned(), TypeIdKey(TypeId::of::<T>()));
+        let key = TypeIdOrd(
+            std::any::type_name::<T>().to_owned(),
+            TypeIdKey(TypeId::of::<T>()),
+        );
         if !self.seen.insert(key) {
             return;
         }
@@ -77,11 +80,17 @@ impl Collector<'_> {
                     // one file with one declaration; identical text is one type.
                     Some((_, existing)) if *existing == text => {}
                     Some((other, _)) => {
-                        self.error = Some(format!("{} and {} both export to {}", other, std::any::type_name::<T>(), path.display()));
+                        self.error = Some(format!(
+                            "{} and {} both export to {}",
+                            other,
+                            std::any::type_name::<T>(),
+                            path.display()
+                        ));
                         return;
                     }
                     None => {
-                        self.files.insert(path, (std::any::type_name::<T>().to_owned(), text));
+                        self.files
+                            .insert(path, (std::any::type_name::<T>().to_owned(), text));
                     }
                 }
             }
@@ -103,17 +112,29 @@ impl TypeVisitor for Collector<'_> {
 /// Generates every file, keyed by path relative to the output directory.
 pub fn generate() -> Result<BTreeMap<PathBuf, String>, String> {
     let cfg = config();
-    let mut collector = Collector { cfg: &cfg, seen: BTreeSet::new(), files: BTreeMap::new(), error: None };
+    let mut collector = Collector {
+        cfg: &cfg,
+        seen: BTreeSet::new(),
+        files: BTreeMap::new(),
+        error: None,
+    };
     collector.add::<Envelope>();
     if let Some(error) = collector.error {
         return Err(error);
     }
-    let mut files: BTreeMap<PathBuf, String> = collector.files.into_iter().map(|(path, (_, text))| (path, text)).collect();
+    let mut files: BTreeMap<PathBuf, String> = collector
+        .files
+        .into_iter()
+        .map(|(path, (_, text))| (path, text))
+        .collect();
     let mut index = String::from(INDEX_HEADER);
     index.push('\n');
     for path in files.keys() {
         let module = path.with_extension("");
-        let name = module.file_name().and_then(|n| n.to_str()).ok_or("bad file name")?;
+        let name = module
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or("bad file name")?;
         let module = module.to_str().ok_or("non-UTF-8 path")?.replace('\\', "/");
         index.push_str(&format!("export type {{ {name} }} from \"./{module}\";\n"));
     }
@@ -143,8 +164,14 @@ fn list_ts(dir: &Path, base: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<(
         let path = entry?.path();
         if path.is_dir() {
             list_ts(&path, base, out)?;
-        } else if path.extension().is_some_and(|e| e == "ts") && !path.to_string_lossy().ends_with(".test.ts") {
-            out.push(path.strip_prefix(base).expect("listed under base").to_path_buf());
+        } else if path.extension().is_some_and(|e| e == "ts")
+            && !path.to_string_lossy().ends_with(".test.ts")
+        {
+            out.push(
+                path.strip_prefix(base)
+                    .expect("listed under base")
+                    .to_path_buf(),
+            );
         }
     }
     Ok(())
@@ -164,7 +191,10 @@ pub fn drift(files: &BTreeMap<PathBuf, String>, dir: &Path) -> std::io::Result<D
     }
     let mut on_disk = Vec::new();
     list_ts(dir, dir, &mut on_disk)?;
-    drift.stale = on_disk.into_iter().filter(|p| !files.contains_key(p)).collect();
+    drift.stale = on_disk
+        .into_iter()
+        .filter(|p| !files.contains_key(p))
+        .collect();
     drift.stale.sort();
     Ok(drift)
 }

@@ -112,7 +112,9 @@ safe_uint!(
 /// A time in ticks (1/705,600,000 s) inside the protocol's safe range,
 /// about ±147 days. Document key times are not limited by this: they travel
 /// inside patch bodies as the document's float seconds (contract 5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 #[cfg_attr(feature = "ts", derive(TS), ts(type = "number"))]
 #[serde(try_from = "i64", into = "i64")]
 pub struct Ticks(i64);
@@ -124,7 +126,9 @@ impl Ticks {
 
     pub const fn new(value: i64) -> Result<Self, UnsafeInteger> {
         if value < -MAX_SAFE_INTEGER || value > MAX_SAFE_INTEGER {
-            Err(UnsafeInteger { value: value as i128 })
+            Err(UnsafeInteger {
+                value: value as i128,
+            })
         } else {
             Ok(Self(value))
         }
@@ -195,7 +199,8 @@ impl FrameRate {
     /// the flick (section 5, rule 1); unusual rates already in projects keep
     /// working through pm-time's ceil and Euclidean math.
     pub fn divides_flick(&self) -> bool {
-        self.is_valid() && (TICKS_PER_SECOND as u128 * self.den as u128).is_multiple_of(self.num as u128)
+        self.is_valid()
+            && (TICKS_PER_SECOND as u128 * self.den as u128).is_multiple_of(self.num as u128)
     }
 }
 
@@ -413,15 +418,30 @@ mod tests {
     fn every_supported_rate_divides_the_flick() {
         // Section 5: the supported frame rates all divide 705,600,000.
         let rates = [
-            (24000, 1001), (24, 1), (25, 1), (30000, 1001), (30, 1), (48000, 1001), (48, 1),
-            (50, 1), (60000, 1001), (60, 1), (90, 1), (100, 1), (120000, 1001), (120, 1),
-            (240000, 1001), (240, 1),
+            (24000, 1001),
+            (24, 1),
+            (25, 1),
+            (30000, 1001),
+            (30, 1),
+            (48000, 1001),
+            (48, 1),
+            (50, 1),
+            (60000, 1001),
+            (60, 1),
+            (90, 1),
+            (100, 1),
+            (120000, 1001),
+            (120, 1),
+            (240000, 1001),
+            (240, 1),
         ];
         for (num, den) in rates {
             assert!(FrameRate::new(num, den).divides_flick(), "{num}/{den}");
         }
         // Sample rates 8 kHz to 192 kHz as "frame rates" of one sample.
-        for sr in [8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000, 176400, 192000] {
+        for sr in [
+            8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000, 176400, 192000,
+        ] {
             assert!(FrameRate::new(sr, 1).divides_flick(), "{sr}");
         }
         assert!(FrameRate::new(7, 1).divides_flick());

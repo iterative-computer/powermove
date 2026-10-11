@@ -13,7 +13,7 @@ use ts_rs::TS;
 
 use crate::common::{AgentRunId, DocumentId, ExtensionId, ProjectId, Revision, Seq};
 use crate::host::CapabilityHandle;
-use crate::validate::{ensure, Validate, Violation};
+use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
 
 /// One document host worker for one project.
@@ -241,12 +241,25 @@ pub struct ToolResult {
 impl Validate for ToolCall {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::DocumentHost;
-        ensure(!self.tool.is_empty() && self.tool.len() <= 64 && self.tool.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'), C, || {
-            format!("tool name {:?} must be snake_case", self.tool)
-        })?;
-        ensure(!self.call_id.is_empty() && self.call_id.len() <= 128, C, || "call id must be 1 to 128 bytes".into())?;
+        ensure(
+            !self.tool.is_empty()
+                && self.tool.len() <= 64
+                && self
+                    .tool
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
+            C,
+            || format!("tool name {:?} must be snake_case", self.tool),
+        )?;
+        ensure(
+            !self.call_id.is_empty() && self.call_id.len() <= 128,
+            C,
+            || "call id must be 1 to 128 bytes".into(),
+        )?;
         let route = route_tool(&self.tool);
-        ensure(route == ToolRoute::DocumentHost, C, || format!("{} routes to {route:?}, not a document host", self.tool))
+        ensure(route == ToolRoute::DocumentHost, C, || {
+            format!("{} routes to {route:?}, not a document host", self.tool)
+        })
     }
 }
 
@@ -263,7 +276,10 @@ mod tests {
         assert_eq!(route_tool("apply_commands"), ToolRoute::DocumentHost);
         assert_eq!(route_tool("edit_3d"), ToolRoute::DocumentHost);
         assert_eq!(route_tool("render_frames"), ToolRoute::DocumentHost);
-        assert_eq!(route_tool("import_media_to_timeline"), ToolRoute::DocumentHost);
+        assert_eq!(
+            route_tool("import_media_to_timeline"),
+            ToolRoute::DocumentHost
+        );
         assert_eq!(route_tool("import_media"), ToolRoute::DocumentHost);
         assert_eq!(route_tool("check_project"), ToolRoute::DocumentHost);
         assert_eq!(route_tool("probe_media"), ToolRoute::HostServices);
@@ -282,8 +298,30 @@ mod tests {
             arguments: serde_json::json!({ "commands": [] }),
         };
         assert!(call.validate().is_ok());
-        assert!(ToolCall { tool: "open_panel".into(), ..call.clone() }.validate().is_err());
-        assert!(ToolCall { tool: "export_video".into(), ..call.clone() }.validate().is_err(), "exports go to the job engine");
-        assert!(ToolCall { tool: "Bad-Name".into(), ..call }.validate().is_err());
+        assert!(
+            ToolCall {
+                tool: "open_panel".into(),
+                ..call.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            ToolCall {
+                tool: "export_video".into(),
+                ..call.clone()
+            }
+            .validate()
+            .is_err(),
+            "exports go to the job engine"
+        );
+        assert!(
+            ToolCall {
+                tool: "Bad-Name".into(),
+                ..call
+            }
+            .validate()
+            .is_err()
+        );
     }
 }

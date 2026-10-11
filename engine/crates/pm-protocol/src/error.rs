@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
-use crate::common::{AssetId, DefinitionId, EffectInstanceId, JobId, LayerId, RequestId, Revision, SessionId};
+use crate::common::{
+    AssetId, DefinitionId, EffectInstanceId, JobId, LayerId, RequestId, Revision, SessionId,
+};
 use crate::version::ContractId;
 
 /// What failed.
@@ -69,14 +71,22 @@ pub enum ErrorCode {
 /// The thing an error is about; decides the isolation rule.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum ErrorScope {
     /// One request failed; nothing else is affected.
     Request { id: RequestId },
     /// A layer failed: it outputs transparency (section 8, isolation).
     Layer { layer: LayerId },
     /// An effect instance failed: it is skipped with its data kept.
-    Effect { layer: LayerId, effect: EffectInstanceId, definition: DefinitionId },
+    Effect {
+        layer: LayerId,
+        effect: EffectInstanceId,
+        definition: DefinitionId,
+    },
     /// A definition failed everywhere it is used (compile failures stay per definition).
     Definition { definition: DefinitionId },
     /// An asset failed to decode or is offline.
@@ -122,11 +132,17 @@ impl ErrorScope {
 /// Whether the same request can succeed later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum Retry {
     Never,
     /// Retry after this many milliseconds.
-    After { ms: u32 },
+    After {
+        ms: u32,
+    },
     /// Retry after a canonical resync of the document.
     AfterResync,
     /// Retry after the user acts (install Blender, locate media).
@@ -147,13 +163,30 @@ pub struct ShaderDiagnostic {
 /// Structured details for codes that need them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum ErrorDetail {
-    ShaderCompile { diagnostics: Vec<ShaderDiagnostic> },
-    StaleRevision { applied: Revision, wanted: Revision },
-    UnsupportedVersion { contract: Option<ContractId>, local: Vec<u16>, remote: Vec<u16> },
-    MissingSurfaces { count: u32 },
-    Offline { assets: Vec<AssetId> },
+    ShaderCompile {
+        diagnostics: Vec<ShaderDiagnostic>,
+    },
+    StaleRevision {
+        applied: Revision,
+        wanted: Revision,
+    },
+    UnsupportedVersion {
+        contract: Option<ContractId>,
+        local: Vec<u16>,
+        remote: Vec<u16>,
+    },
+    MissingSurfaces {
+        count: u32,
+    },
+    Offline {
+        assets: Vec<AssetId>,
+    },
 }
 
 /// An error as it crosses the protocol.
@@ -172,7 +205,13 @@ pub struct EngineError {
 
 impl EngineError {
     pub fn new(code: ErrorCode, scope: ErrorScope, message: impl Into<String>) -> Self {
-        Self { code, scope, message: message.into(), retry: Retry::Never, detail: None }
+        Self {
+            code,
+            scope,
+            message: message.into(),
+            retry: Retry::Never,
+            detail: None,
+        }
     }
 
     pub fn with_retry(mut self, retry: Retry) -> Self {
@@ -191,9 +230,11 @@ pub const MAX_ERROR_MESSAGE_BYTES: usize = 4096;
 
 impl crate::validate::Validate for EngineError {
     fn validate(&self) -> Result<(), crate::validate::Violation> {
-        crate::validate::ensure(!self.message.is_empty() && self.message.len() <= MAX_ERROR_MESSAGE_BYTES, ContractId::Errors, || {
-            format!("error messages are 1 to {MAX_ERROR_MESSAGE_BYTES} bytes")
-        })
+        crate::validate::ensure(
+            !self.message.is_empty() && self.message.len() <= MAX_ERROR_MESSAGE_BYTES,
+            ContractId::Errors,
+            || format!("error messages are 1 to {MAX_ERROR_MESSAGE_BYTES} bytes"),
+        )
     }
 }
 
@@ -295,7 +336,9 @@ impl CrashLedger {
     }
 
     pub fn is_failed(&self, scope: &ErrorScope) -> bool {
-        self.counts.iter().any(|(s, count)| s == scope && *count >= CRASHES_BEFORE_MARKED_FAILED)
+        self.counts
+            .iter()
+            .any(|(s, count)| s == scope && *count >= CRASHES_BEFORE_MARKED_FAILED)
     }
 }
 
@@ -305,20 +348,35 @@ mod tests {
 
     #[test]
     fn scopes_map_to_isolation_rules() {
-        assert_eq!(ErrorScope::Layer { layer: "l".into() }.isolation(), Isolation::TransparentLayer);
-        let effect = ErrorScope::Effect { layer: "l".into(), effect: "e".into(), definition: "d".into() };
+        assert_eq!(
+            ErrorScope::Layer { layer: "l".into() }.isolation(),
+            Isolation::TransparentLayer
+        );
+        let effect = ErrorScope::Effect {
+            layer: "l".into(),
+            effect: "e".into(),
+            definition: "d".into(),
+        };
         assert_eq!(effect.isolation(), Isolation::SkipEffect);
-        assert_eq!(ErrorScope::Connection.isolation(), Isolation::CloseConnection);
+        assert_eq!(
+            ErrorScope::Connection.isolation(),
+            Isolation::CloseConnection
+        );
     }
 
     #[test]
     fn two_attributed_crashes_mark_an_item_failed() {
         let asset = ErrorScope::Asset { asset: "a1".into() };
-        let session = ErrorScope::Session { session: crate::common::SessionId::ZERO };
+        let session = ErrorScope::Session {
+            session: crate::common::SessionId::ZERO,
+        };
         let mut ledger = CrashLedger::default();
         assert!(ledger.record(&[asset.clone(), session.clone()]).is_empty());
         assert!(!ledger.is_failed(&asset));
-        assert_eq!(ledger.record(std::slice::from_ref(&asset)), vec![asset.clone()]);
+        assert_eq!(
+            ledger.record(std::slice::from_ref(&asset)),
+            vec![asset.clone()]
+        );
         assert!(ledger.is_failed(&asset));
         // Reported once, not on every later crash.
         assert!(ledger.record(std::slice::from_ref(&asset)).is_empty());

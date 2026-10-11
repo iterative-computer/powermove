@@ -33,7 +33,11 @@ pub enum CodecError {
 
 impl From<CodecError> for crate::error::EngineError {
     fn from(error: CodecError) -> Self {
-        crate::error::EngineError::new(crate::error::ErrorCode::InvalidMessage, crate::error::ErrorScope::Connection, error.to_string())
+        crate::error::EngineError::new(
+            crate::error::ErrorCode::InvalidMessage,
+            crate::error::ErrorScope::Connection,
+            error.to_string(),
+        )
     }
 }
 
@@ -83,12 +87,19 @@ mod tests {
 
     #[test]
     fn rejects_trailing_bytes_and_oversized_input() {
-        let envelope = Envelope::new(Message::Request { id: RequestId::ZERO, body: Request::CloseSession }).with_session(SessionId::ZERO);
+        let envelope = Envelope::new(Message::Request {
+            id: RequestId::ZERO,
+            body: Request::CloseSession,
+        })
+        .with_session(SessionId::ZERO);
         let mut bytes = encode(&envelope).unwrap();
         assert_eq!(decode(&bytes).unwrap(), envelope);
         bytes.push(0xc0);
         assert!(matches!(decode(&bytes), Err(CodecError::TrailingBytes(1))));
-        assert!(matches!(decode(&vec![0; MAX_MESSAGE_BYTES + 1]), Err(CodecError::TooLarge(_))));
+        assert!(matches!(
+            decode(&vec![0; MAX_MESSAGE_BYTES + 1]),
+            Err(CodecError::TooLarge(_))
+        ));
     }
 
     #[test]
@@ -101,7 +112,10 @@ mod tests {
 
     #[test]
     fn invalid_messages_fail_at_the_sender() {
-        let envelope = Envelope::new(Message::Request { id: RequestId::ZERO, body: Request::CloseSession });
+        let envelope = Envelope::new(Message::Request {
+            id: RequestId::ZERO,
+            body: Request::CloseSession,
+        });
         assert!(matches!(encode(&envelope), Err(CodecError::Invalid(_))));
         let bytes = encode_unvalidated(&envelope).unwrap();
         assert!(matches!(decode(&bytes), Err(CodecError::Invalid(_))));
