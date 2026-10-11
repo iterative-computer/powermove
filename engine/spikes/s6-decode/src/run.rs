@@ -7,6 +7,10 @@ use crate::frame::{Decoded, FrameDesc, Pixels};
 use crate::gpu::{Compare, Gpu};
 use crate::index::{FrameIndex, IndexSource, IndexStats};
 use crate::time::{self, NominalRate, Rational, SelectionCheck};
+use crate::pool::MetalPool;
+use crate::sw::SwDecoder;
+use crate::sw::dav1d::Dav1dDecoder;
+use crate::sw::vpx::VpxDecoder;
 use crate::vt::{self, BufferFacts, VtDecoder, VtPlan};
 use anyhow::{Context, Result, bail};
 use md5::{Digest, Md5};
@@ -52,7 +56,7 @@ pub struct FileReport {
     pub backends: Vec<BackendReport>,
     /// Section 13 normalized values (Y′, A, Cb, Cr as f32) of VideoToolbox versus
     /// FFmpeg, frame by frame: both backends must produce the same picture.
-    pub cross_backend: Option<RefCompare>,
+    pub cross_backend: Vec<RefCompare>,
     pub errors: Vec<String>,
 }
 
@@ -139,8 +143,14 @@ pub struct BackendReport {
     pub frames: usize,
     pub unique_hashes: usize,
     pub decoded_not_presented: usize,
-    pub sequential_decode_ms: f64,
-    pub sequential_fps: f64,
+    /// Wall time of the verifying sequential pass (decode, framemd5, zero-copy
+    /// import, normalization, readback, CPU reference): not a decode speed.
+    pub sequential_pass_ms: f64,
+    /// Decode-only throughput: VideoToolbox with asynchronous decompression
+    /// and one wait at the end; software decoders with their own threading,
+    /// frames dropped as soon as they are output. No hashing, import, or
+    /// readback.
+    pub throughput_fps: f64,
     pub reference: Option<RefCompare>,
     /// VideoToolbox versus FFmpeg's software decoder repacked to the same layout.
     pub software_crosscheck: Option<RefCompare>,
@@ -165,11 +175,12 @@ enum Event {
 /// One decoder behind a common interface.
 enum Dec {
     Vt { plan: VtPlan, ts: i64, dec: Option<VtDecoder>, hw: bool },
-    Ff { inp: Input, name: Option<String>, dec: Option<FfDecoder>, threads: i32, copies: usize },
+    /// FFmpeg, dav1d, or libvpx; `make` opens a fresh decoder.
+    Sw { make: Box<dyn Fn() -> Result<Box<dyn SwDecoder>>>, dec: Option<Box<dyn SwDecoder>>, copies: usize },
 }
 
 impl Dec {
-    fn reset(&mut self, gpu: &Gpu) -> Result<()> {
+    fn reset(&mut self) -> Result<()> {
         match self {
             Dec::Vt { plan, ts, dec, hw } => {
                 *dec = None;
@@ -177,11 +188,11 @@ impl Dec {
                 *hw = d.hardware;
                 *dec = Some(d);
             }
-            Dec::Ff { inp, name, dec, threads, copies } => {
+            Dec::Sw { make, dec, copies } => {
                 if let Some(d) = dec.take() {
-                    *copies += d.copies;
+                    *copies += d.copies();
                 }
-                *dec = Some(FfDecoder::new(inp, name.as_deref(), gpu.pool.clone(), *threads)?);
+                *dec = Some(make()?);
             }
         }
         Ok(())
@@ -211,7 +222,7 @@ impl Dec {
                     }
                 }
             }
-            Dec::Ff { dec, .. } => {
+            Dec::Sw { dec, .. } => {
                 let d = dec.as_mut().context("no decoder")?;
                 let mut out = Vec::new();
                 for p in pkts.iter().map(Some).chain([None]) {
@@ -219,7 +230,7 @@ impl Dec {
                     d.send(p, &mut out)?;
                     *busy += t.elapsed().as_secs_f64();
                     for (pts, f) in out.drain(..) {
-                        on(Event::Frame(Decoded { pts, px: Pixels::Ff(f) }))?;
+                        on(Event::Frame(Decoded { pts, px: Pixels::Pool(f) }))?;
                     }
                 }
             }
@@ -229,7 +240,7 @@ impl Dec {
 
     fn copies(&self) -> usize {
         match self {
-            Dec::Ff { dec, copies, .. } => *copies + dec.as_ref().map(|d| d.copies).unwrap_or(0),
+            Dec::Sw { dec, copies, .. } => *copies + dec.as_ref().map(|d| d.copies()).unwrap_or(0),
             _ => 0,
         }
     }
@@ -454,7 +465,7 @@ pub fn run_file(path: &Path, gpu: &Gpu, opt: &Options) -> FileReport {
         nominal_rate: None,
         selection: None,
         backends: vec![],
-        cross_backend: None,
+        cross_backend: vec![],
         errors: vec![],
     };
     if let Err(e) = run_file_inner(path, gpu, opt, &mut rep) {
@@ -520,10 +531,25 @@ fn run_file_inner(path: &Path, gpu: &Gpu, opt: &Options, rep: &mut FileReport) -
     if info.codec == "prores" {
         backends.push(("FFmpeg".into(), Err("ProRes decodes only through VideoToolbox (decision 12)".into())));
     } else {
-        backends.push((
-            "FFmpeg".into(),
-            Ok(Dec::Ff { inp: Input::open(path)?, name: ff_name.clone(), dec: None, threads: opt.threads, copies: 0 }),
-        ));
+        let ff_inp = Input::open(path)?;
+        let (name, pool, threads) = (ff_name.clone(), gpu.pool.clone(), opt.threads);
+        let make = move || -> Result<Box<dyn SwDecoder>> {
+            Ok(Box::new(FfDecoder::new(&ff_inp, name.as_deref(), pool.clone(), threads)?))
+        };
+        backends.push(("FFmpeg".into(), Ok(Dec::Sw { make: Box::new(make), dec: None, copies: 0 })));
+    }
+    // FFmpeg's libdav1d and libvpx wrappers ignore get_buffer2; the direct
+    // sessions decode into the pool without a copy.
+    if info.codec == "av1" {
+        let (pool, threads) = (gpu.pool.clone(), opt.threads);
+        let make = move || -> Result<Box<dyn SwDecoder>> { Ok(Box::new(Dav1dDecoder::new(pool.clone(), threads)?)) };
+        backends.push(("dav1d".into(), Ok(Dec::Sw { make: Box::new(make), dec: None, copies: 0 })));
+    }
+    if info.codec == "vp9" && info.alpha_mode {
+        let pool = MetalPool::new_zeroed(gpu.pool.device());
+        let threads = opt.threads.max(0) as u32;
+        let make = move || -> Result<Box<dyn SwDecoder>> { Ok(Box::new(VpxDecoder::new(pool.clone(), true, threads)?)) };
+        backends.push(("libvpx".into(), Ok(Dec::Sw { make: Box::new(make), dec: None, copies: 0 })));
     }
 
     for (name, dec) in backends {
@@ -547,16 +573,18 @@ fn run_file_inner(path: &Path, gpu: &Gpu, opt: &Options, rep: &mut FileReport) -
 
     let hashed: Vec<&BackendReport> =
         rep.backends.iter().filter(|b| !b.norm_hashes.is_empty() && b.norm_hashes.len() == idx.order.len()).collect();
-    if let [a, b] = hashed[..] {
-        let matched = a.norm_hashes.iter().zip(&b.norm_hashes).filter(|(x, y)| x == y).count();
-        let first = a.norm_hashes.iter().zip(&b.norm_hashes).position(|(x, y)| x != y);
-        rep.cross_backend = Some(RefCompare {
-            reference: format!("{} vs {} normalized Y'CbCrA (f32 bits)", a.backend, b.backend),
-            frames: idx.order.len(),
-            matched,
-            first_mismatch: first,
-            ..Default::default()
-        });
+    if let [a, rest @ ..] = &hashed[..] {
+        for b in rest {
+            let matched = a.norm_hashes.iter().zip(&b.norm_hashes).filter(|(x, y)| x == y).count();
+            let first = a.norm_hashes.iter().zip(&b.norm_hashes).position(|(x, y)| x != y);
+            rep.cross_backend.push(RefCompare {
+                reference: format!("{} vs {} normalized Y'CbCrA (f32 bits)", a.backend, b.backend),
+                frames: idx.order.len(),
+                matched,
+                first_mismatch: first,
+                ..Default::default()
+            });
+        }
     }
     Ok(())
 }
@@ -580,7 +608,7 @@ fn run_backend(
 
     // Sequential pass: every sample in decode order, hashing and importing each
     // presented frame.
-    dec.reset(gpu)?;
+    dec.reset()?;
     let mut hashes: Vec<Option<String>> = vec![None; n];
     let mut norms: Vec<Option<String>> = vec![None; n];
     let mut not_presented = 0;
@@ -637,7 +665,9 @@ fn run_backend(
             }
             Ok(())
         };
+        let t0 = Instant::now();
         dec.feed(&all, &mut on, &mut busy)?;
+        br.sequential_pass_ms = t0.elapsed().as_secs_f64() * 1e3;
     }
     drop(all);
     let missing: Vec<usize> = (0..n).filter(|&i| hashes[i].is_none()).collect();
@@ -651,8 +681,6 @@ fn run_backend(
     br.frames = n;
     br.unique_hashes = seq.iter().collect::<std::collections::HashSet<_>>().len();
     br.decoded_not_presented = not_presented;
-    br.sequential_decode_ms = busy * 1e3;
-    br.sequential_fps = n as f64 / busy;
     if let (Some(b), Dec::Vt { plan, .. }) = (&mut buffer, &*dec) {
         b.matches_request = b.pixel_format == plan.pixel_format;
     }
@@ -671,10 +699,36 @@ fn run_backend(
                 plan.format_extensions
             );
         }
-        Dec::Ff { dec: Some(d), .. } => {
-            br.detail = format!("{} ({}direct rendering)", d.name, if d.dr1 { "" } else { "no " });
+        Dec::Sw { dec: Some(d), .. } => {
+            br.detail = format!("{} ({})", d.name(), if d.direct() { "renders into the pool" } else { "own buffers, copied" });
         }
         _ => {}
+    }
+
+    // Decode-only throughput.
+    {
+        let pkts = reader.read(idx, &all_idx)?;
+        dec.reset()?;
+        let (frames, secs) = match dec {
+            Dec::Vt { dec: Some(d), .. } => {
+                let (n, failed, secs) = d.throughput(&pkts)?;
+                if failed > 0 {
+                    bail!("{failed} frames failed in the throughput pass");
+                }
+                (n, secs)
+            }
+            _ => {
+                let mut n = 0;
+                let mut busy = 0.0;
+                let t0 = Instant::now();
+                dec.feed(&pkts, &mut |_| { n += 1; Ok(()) }, &mut busy)?;
+                (n, t0.elapsed().as_secs_f64())
+            }
+        };
+        if frames < n {
+            bail!("throughput pass output {frames} of {n} frames");
+        }
+        br.throughput_fps = frames as f64 / secs;
     }
 
     // References.
@@ -719,7 +773,7 @@ fn run_backend(
                     br.avfoundation = Some(compare_avf(tool, path, &plan.pixel_format, idx, &seq));
                 }
             }
-            Dec::Ff { .. } => {
+            Dec::Sw { .. } => {
                 let mut args: Vec<&str> = vec![];
                 if let Some(n) = ff_name {
                     args.extend(["-c:v", n]);
@@ -756,7 +810,7 @@ fn run_backend(
         let want = idx.samples[idx.order[target]].pts;
         let t0 = Instant::now();
         let pkts = reader.read(idx, &plan)?;
-        dec.reset(gpu)?;
+        dec.reset()?;
         let mut got: Option<String> = None;
         let mut target_failed = None;
         let mut leading = 0;

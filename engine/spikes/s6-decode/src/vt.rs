@@ -102,6 +102,7 @@ pub fn plan(info: &StreamInfo, idx: &FrameIndex, extradata: &[u8]) -> Result<VtP
         .map(|k| format!("{k}={}", ext(k)))
         .collect::<Vec<_>>()
         .join(" ");
+    let format_extensions = if format_extensions.is_empty() { "none derived".to_string() } else { format_extensions };
     Ok(VtPlan {
         format_source,
         format_extensions,
@@ -289,6 +290,10 @@ pub struct VtFrame {
 
 struct Collector {
     frames: Mutex<Vec<(OSStatus, u32, Option<Cf>, CMTime)>>,
+    /// Throughput mode: count successful frames and drop the buffers at once.
+    count_only: std::sync::atomic::AtomicBool,
+    counted: std::sync::atomic::AtomicUsize,
+    failed: std::sync::atomic::AtomicUsize,
 }
 
 unsafe extern "C" fn on_output(
@@ -300,7 +305,16 @@ unsafe extern "C" fn on_output(
     pts: CMTime,
     _dur: CMTime,
 ) {
+    use std::sync::atomic::Ordering::Relaxed;
     let c = unsafe { &*(refcon as *const Collector) };
+    if c.count_only.load(Relaxed) {
+        if status == 0 && !image.is_null() {
+            c.counted.fetch_add(1, Relaxed);
+        } else if flags & kVTDecodeInfo_FrameDropped == 0 {
+            c.failed.fetch_add(1, Relaxed);
+        }
+        return;
+    }
     let buf = unsafe { Cf::retain(image as CFTypeRef) };
     c.frames.lock().unwrap().push((status, flags, buf, pts));
 }
@@ -339,7 +353,12 @@ impl VtDecoder {
                 (kCVPixelBufferMetalCompatibilityKey, cf_bool(true)),
                 (kCVPixelBufferIOSurfacePropertiesKey, iosurface.as_ptr()),
             ]);
-            let collector = Box::new(Collector { frames: Mutex::new(Vec::new()) });
+            let collector = Box::new(Collector {
+                frames: Mutex::new(Vec::new()),
+                count_only: Default::default(),
+                counted: Default::default(),
+                failed: Default::default(),
+            });
             let rec = VTDecompressionOutputCallbackRecord {
                 callback: on_output,
                 refcon: &*collector as *const Collector as *mut c_void,
@@ -380,10 +399,34 @@ impl VtDecoder {
         }
     }
 
+    /// Decode throughput: submits every packet with asynchronous decompression
+    /// and waits once at the end; output buffers are counted and released in
+    /// the callback. Returns (frames output, frames failed, seconds).
+    pub fn throughput(&mut self, pkts: &[Packet]) -> Result<(usize, usize, f64)> {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.collector.count_only.store(true, Relaxed);
+        let t0 = std::time::Instant::now();
+        for p in pkts {
+            let st = self.submit(p, 1 /* kVTDecodeFrame_EnableAsynchronousDecompression */)?;
+            ensure!(st == 0, "VTDecompressionSessionDecodeFrame: OSStatus {st}");
+        }
+        unsafe {
+            VTDecompressionSessionFinishDelayedFrames(self.session);
+            VTDecompressionSessionWaitForAsynchronousFrames(self.session);
+        }
+        let secs = t0.elapsed().as_secs_f64();
+        self.collector.count_only.store(false, Relaxed);
+        Ok((self.collector.counted.swap(0, Relaxed), self.collector.failed.swap(0, Relaxed), secs))
+    }
+
     /// Submits one sample. Returns the synchronous decode status (non-zero
     /// statuses are also reported through the output callback when the session
     /// produced a callback for the frame).
     pub fn decode(&mut self, pkt: &Packet) -> Result<OSStatus> {
+        self.submit(pkt, 0)
+    }
+
+    fn submit(&mut self, pkt: &Packet, flags: u32) -> Result<OSStatus> {
         let converted;
         let data: &[u8] = if self.annexb {
             converted = annexb_to_length_prefixed(&pkt.data);
@@ -428,7 +471,7 @@ impl VtDecoder {
             ensure!(st == 0, "CMSampleBufferCreateReady: {st}");
             let sb = Cf::from_create(sb as CFTypeRef).unwrap();
             let mut info = 0u32;
-            let st = VTDecompressionSessionDecodeFrame(self.session, sb.as_mut_ptr(), 0, std::ptr::null_mut(), &mut info);
+            let st = VTDecompressionSessionDecodeFrame(self.session, sb.as_mut_ptr(), flags, std::ptr::null_mut(), &mut info);
             Ok(st)
         }
     }

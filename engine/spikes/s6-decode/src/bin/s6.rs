@@ -206,11 +206,11 @@ fn print_summary(r: &run::FileReport) {
         }
         let rnd = &b.random;
         println!(
-            "      frames {} unique {} | seq {:.1} ms ({:.0} fps) | random {}/{} (mismatch {:?}, missing {:?}, selection {:?}; leading failures {}, RASL skipped {}) mean {:.2} p95 {:.2} max {:.2} ms, {:.1} pkts avg",
+            "      frames {} unique {} | decode-only {:.0} fps (verifying pass {:.0} ms) | random {}/{} (mismatch {:?}, missing {:?}, selection {:?}; leading failures {}, RASL skipped {}) mean {:.2} p95 {:.2} max {:.2} ms, {:.1} pkts avg",
             b.frames,
             b.unique_hashes,
-            b.sequential_decode_ms,
-            b.sequential_fps,
+            b.throughput_fps,
+            b.sequential_pass_ms,
             rnd.matched,
             rnd.probes,
             rnd.mismatched,
@@ -250,7 +250,7 @@ fn print_summary(r: &run::FileReport) {
             println!("      check: {c}");
         }
     }
-    if let Some(c) = &r.cross_backend {
+    for c in &r.cross_backend {
         print_ref("cross-backend", c, c.frames);
     }
 }
