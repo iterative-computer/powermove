@@ -609,6 +609,20 @@ void main() {
 }`,
     }),
 
+  // An agent's first draft with a type error on the body's third line: WebGL
+  // and the engine must both reject it, and the engine must report line 3.
+  fx('type-error-first-draft', ['compileError'],
+    'Tint the layer toward a color by an amount.', {
+      params: [
+        { k: 'color', label: 'Color', type: 'color', def: '#FF0080' },
+        { k: 'amount', label: 'Amount', def: 0.5, min: 0, max: 1 },
+      ],
+      frag: `
+    vec4 c = texture(u_tex, v_st);
+    vec3 t = texture(u_tex, v_st) * u_color;
+    o = vec4(mix(c.rgb, t, u_amount), c.a);`,
+    }),
+
   fx('ub-pow-normalize-edge', ['ub-probe'],
     'Spotlight from the layer center (uses pow and normalize on values that can be zero or negative).', {
       params: [{ k: 'falloff', label: 'Falloff', def: 2.2, min: 0.5, max: 6 }],
