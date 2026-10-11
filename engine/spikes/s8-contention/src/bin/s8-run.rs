@@ -5,10 +5,15 @@
 //! for the measured window, then stop B and collect both JSON summaries. A and B talk
 //! over a FIFO (A writes deadline signals, B reads them), standing in for main's relay.
 //!
+//! Each scenario JSON also records whether the main display was asleep or the screen
+//! locked: in either state WindowServer composites nothing, so the GPU has less
+//! competing work than on an active desktop, and `present-*` scenarios are skipped.
+//!
 //! Usage: `s8-run [--seconds 60] [--only a,b,c] [--out results/<dir>] [--list]`
 
-use s8_contention::{Args, signal, stats};
+use s8_contention::{Args, display, signal, stats};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,340 +27,324 @@ struct Scenario {
     b: Option<Vec<&'static str>>,
 }
 
-fn sc(name: &'static str, what: &'static str, a: &[&'static str], b: Option<&[&'static str]>) -> Scenario {
-    Scenario {
-        name,
-        what,
-        a: a.to_vec(),
-        b: b.map(|b| b.to_vec()),
-    }
+/// Job-process flags shared by the sliced scenarios.
+const SLICED: &[&str] = &["--mode", "sliced", "--in-flight", "1", "--qos", "utility"];
+/// Frame-aligned slicing: submit only after A's current frame is done and only if the
+/// slice is predicted to end 1 ms before A's next tick.
+const ALIGN: &[&str] = &["--align", "--align-guard-ms", "1"];
+const PRESENT: &[&str] = &["--present", "corner", "--window-width", "48", "--window-height", "27"];
+
+fn b(parts: &[&[&'static str]]) -> Option<Vec<&'static str>> {
+    Some(parts.iter().flat_map(|p| p.iter().copied()).collect())
 }
 
 fn scenarios() -> Vec<Scenario> {
+    let s = |name, what, a: &[&'static str], b: Option<Vec<&'static str>>| Scenario {
+        name,
+        what,
+        a: a.to_vec(),
+        b,
+    };
     vec![
-        sc("baseline", "A alone", &[], None),
-        sc(
+        s("baseline", "A alone", &[], None),
+        // No slicing.
+        s(
             "full",
             "B unsliced: one 4K blur export frame per command buffer, 2 in flight, default QoS",
             &[],
-            Some(&["--mode", "full"]),
+            b(&[&["--mode", "full"]]),
         ),
-        sc(
+        s(
             "heavy",
             "B one long kernel per command buffer (foreign renderer stand-in), 2 in flight",
             &[],
-            Some(&["--mode", "heavy"]),
+            b(&[&["--mode", "heavy"]]),
         ),
-        sc(
+        s(
+            "full-bg",
+            "B unsliced, background QoS + Darwin background process",
+            &[],
+            b(&[&["--mode", "full", "--qos", "background", "--darwin-bg"]]),
+        ),
+        // Time slicing with reactive yields.
+        s(
             "sliced-2ms",
             "B sliced 2 ms, 1 in flight, utility QoS, yield 100 ms on miss",
             &[],
-            Some(&[
-                "--mode",
-                "sliced",
-                "--slice-ms",
-                "2",
-                "--in-flight",
-                "1",
-                "--qos",
-                "utility",
-                "--yield-on",
-                "miss",
-                "--yield-ms",
-                "100",
-            ]),
+            b(&[SLICED, &["--slice-ms", "2", "--yield-on", "miss", "--yield-ms", "100"]]),
         ),
-        sc(
+        s(
             "sliced-2ms-noyield",
             "B sliced 2 ms, 1 in flight, utility QoS, no yield",
             &[],
-            Some(&[
-                "--mode",
-                "sliced",
-                "--slice-ms",
-                "2",
-                "--in-flight",
-                "1",
-                "--qos",
-                "utility",
-                "--yield-on",
-                "none",
-            ]),
+            b(&[SLICED, &["--slice-ms", "2", "--yield-on", "none"]]),
         ),
-        sc(
+        s(
             "sliced-2ms-risk",
-            "B sliced 2 ms, 1 in flight, utility QoS, yield 100 ms on at-risk or miss",
+            "B sliced 2 ms, utility QoS, yield 100 ms on at-risk or miss",
             &[],
-            Some(&[
-                "--mode",
-                "sliced",
-                "--slice-ms",
-                "2",
-                "--in-flight",
-                "1",
-                "--qos",
-                "utility",
-                "--yield-on",
-                "risk",
-                "--yield-ms",
-                "100",
-            ]),
+            b(&[SLICED, &["--slice-ms", "2", "--yield-on", "risk", "--yield-ms", "100"]]),
         ),
-        sc(
+        s(
             "sliced-2ms-bg",
-            "B sliced 2 ms, 1 in flight, background QoS + Darwin background process, yield on miss",
+            "B sliced 2 ms, background QoS + Darwin background process, yield on miss",
             &[],
-            Some(&[
+            b(&[&[
                 "--mode",
                 "sliced",
-                "--slice-ms",
-                "2",
                 "--in-flight",
                 "1",
                 "--qos",
                 "background",
                 "--darwin-bg",
+                "--slice-ms",
+                "2",
                 "--yield-on",
                 "miss",
-            ]),
+            ]]),
         ),
-        sc(
+        s(
             "sliced-2ms-if2",
             "B sliced 2 ms, 2 in flight, utility QoS, yield on miss",
             &[],
-            Some(&[
+            b(&[&[
                 "--mode",
                 "sliced",
-                "--slice-ms",
-                "2",
                 "--in-flight",
                 "2",
                 "--qos",
                 "utility",
+                "--slice-ms",
+                "2",
                 "--yield-on",
                 "miss",
-            ]),
+            ]]),
         ),
-        sc(
+        s(
             "sliced-1ms",
-            "B sliced 1 ms, 1 in flight, utility QoS, yield on miss",
+            "B sliced 1 ms, utility QoS, yield on miss",
             &[],
-            Some(&[
-                "--mode",
-                "sliced",
-                "--slice-ms",
-                "1",
-                "--in-flight",
-                "1",
-                "--qos",
-                "utility",
-                "--yield-on",
-                "miss",
-            ]),
+            b(&[SLICED, &["--slice-ms", "1", "--yield-on", "miss"]]),
         ),
-        sc(
+        s(
             "sliced-4ms",
-            "B sliced 4 ms, 1 in flight, utility QoS, yield on miss",
+            "B sliced 4 ms, utility QoS, yield on miss",
             &[],
-            Some(&[
-                "--mode",
-                "sliced",
-                "--slice-ms",
-                "4",
-                "--in-flight",
-                "1",
-                "--qos",
-                "utility",
-                "--yield-on",
-                "miss",
-            ]),
+            b(&[SLICED, &["--slice-ms", "4", "--yield-on", "miss"]]),
         ),
-        sc(
+        s(
             "sliced-8ms",
-            "B sliced 8 ms, 1 in flight, utility QoS, yield on miss",
+            "B sliced 8 ms, utility QoS, yield on miss",
             &[],
-            Some(&[
-                "--mode",
-                "sliced",
-                "--slice-ms",
-                "8",
-                "--in-flight",
-                "1",
-                "--qos",
-                "utility",
-                "--yield-on",
-                "miss",
-            ]),
+            b(&[SLICED, &["--slice-ms", "8", "--yield-on", "miss"]]),
         ),
-        sc(
+        // Frame-aligned slicing.
+        s(
             "sliced-2ms-align",
-            "B sliced 2 ms, frame-aligned (submit only between A's frame completion and next tick minus 1 ms), utility QoS, yield on miss",
+            "B sliced 2 ms, frame-aligned, guard 1 ms, utility QoS, yield on miss",
             &[],
-            Some(&[
-                "--mode",
-                "sliced",
-                "--slice-ms",
-                "2",
-                "--in-flight",
-                "1",
-                "--qos",
-                "utility",
-                "--yield-on",
-                "miss",
-                "--align",
-                "--align-guard-ms",
-                "1",
-            ]),
+            b(&[SLICED, ALIGN, &["--slice-ms", "2", "--yield-on", "miss"]]),
         ),
-        sc(
+        s(
             "sliced-1ms-align",
-            "B sliced 1 ms, frame-aligned, guard 1 ms, utility QoS, yield on miss",
+            "B sliced 1 ms, frame-aligned, guard 1 ms",
             &[],
-            Some(&[
-                "--mode",
-                "sliced",
-                "--slice-ms",
-                "1",
-                "--in-flight",
-                "1",
-                "--qos",
-                "utility",
-                "--yield-on",
-                "miss",
-                "--align",
-                "--align-guard-ms",
-                "1",
+            b(&[SLICED, ALIGN, &["--slice-ms", "1", "--yield-on", "miss"]]),
+        ),
+        s(
+            "sliced-4ms-align",
+            "B sliced 4 ms, frame-aligned, guard 1 ms",
+            &[],
+            b(&[SLICED, ALIGN, &["--slice-ms", "4", "--yield-on", "miss"]]),
+        ),
+        s(
+            "sliced-2ms-align-relay1",
+            "As sliced-2ms-align, signals take effect 1 ms after A sends them (main relay stand-in)",
+            &[],
+            b(&[
+                SLICED,
+                ALIGN,
+                &["--slice-ms", "2", "--yield-on", "miss", "--relay-delay-ms", "1"],
             ]),
         ),
-        sc(
+        s(
+            "sliced-2ms-align-relay4",
+            "As sliced-2ms-align, signals take effect 4 ms after A sends them",
+            &[],
+            b(&[
+                SLICED,
+                ALIGN,
+                &["--slice-ms", "2", "--yield-on", "miss", "--relay-delay-ms", "4"],
+            ]),
+        ),
+        s(
+            "sliced-2ms-120",
+            "A at 120 fps; B sliced 2 ms, utility QoS, yield on miss",
+            &["--fps", "120"],
+            b(&[SLICED, &["--slice-ms", "2", "--yield-on", "miss"]]),
+        ),
+        s(
             "sliced-2ms-align-120",
             "A at 120 fps; B sliced 2 ms, frame-aligned, guard 1 ms",
             &["--fps", "120"],
-            Some(&[
-                "--mode",
-                "sliced",
-                "--slice-ms",
-                "2",
-                "--in-flight",
-                "1",
-                "--qos",
-                "utility",
-                "--yield-on",
-                "miss",
-                "--align",
-                "--align-guard-ms",
-                "1",
-            ]),
+            b(&[SLICED, ALIGN, &["--slice-ms", "2", "--yield-on", "miss"]]),
         ),
-        sc(
-            "sliced-2ms-120",
-            "A at 120 fps; B sliced 2 ms, 1 in flight, utility QoS, yield on miss",
-            &["--fps", "120"],
-            Some(&[
-                "--mode",
-                "sliced",
-                "--slice-ms",
-                "2",
-                "--in-flight",
-                "1",
-                "--qos",
-                "utility",
-                "--yield-on",
-                "miss",
-            ]),
+        // Foreign renderer pause (Blender stand-in).
+        s(
+            "baseline-cold",
+            "A alone, no warm-up window (reference for heavy-pause)",
+            &["--warmup", "0"],
+            None,
         ),
-        sc(
-            "full-bg",
-            "B unsliced, background QoS + Darwin background process",
-            &[],
-            Some(&["--mode", "full", "--qos", "background", "--darwin-bg"]),
+        s(
+            "heavy-pause",
+            "B long kernels, paused on PlaybackStart (Blender pause stand-in); A measured from its first frame",
+            &["--warmup", "0"],
+            b(&[&["--mode", "heavy", "--pause-on-playback"]]),
         ),
-        sc(
+        // Private Metal queue priority (experiment only).
+        s(
             "full-prio2",
             "B unsliced, private Metal queue priority 2 (experiment)",
             &[],
-            Some(&["--mode", "full", "--gpu-priority", "2"]),
+            b(&[&["--mode", "full", "--gpu-priority", "2"]]),
         ),
-        sc(
+        s(
             "heavy-prio2",
             "B long kernels, private Metal queue priority 2 (experiment)",
             &[],
-            Some(&["--mode", "heavy", "--gpu-priority", "2"]),
+            b(&[&["--mode", "heavy", "--gpu-priority", "2"]]),
         ),
-        sc(
+        s(
             "full-a-prio0",
             "B unsliced; A private Metal queue priority 0 (experiment)",
             &["--gpu-priority", "0"],
-            Some(&["--mode", "full"]),
+            b(&[&["--mode", "full"]]),
         ),
-        sc(
+        // VideoToolbox encode sessions.
+        s(
             "vt-hevc10-x1",
             "1 VideoToolbox HEVC Main10 4K session, no B GPU work",
             &[],
-            Some(&["--mode", "none", "--vt-sessions", "1", "--vt-codec", "hevc10"]),
+            b(&[&["--mode", "none", "--vt-sessions", "1", "--vt-codec", "hevc10"]]),
         ),
-        sc(
+        s(
             "vt-hevc10-x2",
             "2 concurrent HEVC Main10 4K sessions",
             &[],
-            Some(&["--mode", "none", "--vt-sessions", "2", "--vt-codec", "hevc10"]),
+            b(&[&["--mode", "none", "--vt-sessions", "2", "--vt-codec", "hevc10"]]),
         ),
-        sc(
+        s(
             "vt-hevc10-x4",
             "4 concurrent HEVC Main10 4K sessions",
             &[],
-            Some(&["--mode", "none", "--vt-sessions", "4", "--vt-codec", "hevc10"]),
+            b(&[&["--mode", "none", "--vt-sessions", "4", "--vt-codec", "hevc10"]]),
         ),
-        sc(
+        s(
             "vt-h264-x2",
             "2 concurrent H.264 High 4K sessions",
             &[],
-            Some(&["--mode", "none", "--vt-sessions", "2", "--vt-codec", "h264"]),
+            b(&[&["--mode", "none", "--vt-sessions", "2", "--vt-codec", "h264"]]),
         ),
-        sc(
+        s(
             "vt-prores-x1",
             "1 ProRes 422 HQ 4K session",
             &[],
-            Some(&["--mode", "none", "--vt-sessions", "1", "--vt-codec", "prores422hq"]),
+            b(&[&["--mode", "none", "--vt-sessions", "1", "--vt-codec", "prores422hq"]]),
         ),
-        sc(
+        s(
             "vt-prores-x2",
             "2 concurrent ProRes 422 HQ 4K sessions",
             &[],
-            Some(&["--mode", "none", "--vt-sessions", "2", "--vt-codec", "prores422hq"]),
+            b(&[&["--mode", "none", "--vt-sessions", "2", "--vt-codec", "prores422hq"]]),
         ),
-        sc(
+        s(
             "vt-prores-x4",
             "4 concurrent ProRes 422 HQ 4K sessions",
             &[],
-            Some(&["--mode", "none", "--vt-sessions", "4", "--vt-codec", "prores422hq"]),
+            b(&[&["--mode", "none", "--vt-sessions", "4", "--vt-codec", "prores422hq"]]),
         ),
-        sc(
-            "export-sliced+hevc10",
-            "Full export stand-in: B sliced 2 ms (utility, yield on miss) plus 1 HEVC Main10 session",
-            &[],
-            Some(&[
-                "--mode",
-                "sliced",
-                "--slice-ms",
-                "2",
-                "--in-flight",
-                "1",
-                "--qos",
-                "utility",
-                "--yield-on",
-                "miss",
-                "--vt-sessions",
-                "1",
-                "--vt-codec",
-                "hevc10",
-            ]),
-        ),
-        sc(
+        // Export stand-ins: GPU work plus an encoder.
+        s(
             "export-full+hevc10",
             "Unsliced export stand-in: B full plus 1 HEVC Main10 session",
             &[],
-            Some(&["--mode", "full", "--vt-sessions", "1", "--vt-codec", "hevc10"]),
+            b(&[&["--mode", "full", "--vt-sessions", "1", "--vt-codec", "hevc10"]]),
+        ),
+        s(
+            "export-sliced+hevc10",
+            "B sliced 2 ms (utility, yield on miss) plus 1 HEVC Main10 session",
+            &[],
+            b(&[
+                SLICED,
+                &[
+                    "--slice-ms",
+                    "2",
+                    "--yield-on",
+                    "miss",
+                    "--vt-sessions",
+                    "1",
+                    "--vt-codec",
+                    "hevc10",
+                ],
+            ]),
+        ),
+        s(
+            "export-align+hevc10",
+            "B sliced 2 ms frame-aligned plus 1 HEVC Main10 session",
+            &[],
+            b(&[
+                SLICED,
+                ALIGN,
+                &[
+                    "--slice-ms",
+                    "2",
+                    "--yield-on",
+                    "miss",
+                    "--vt-sessions",
+                    "1",
+                    "--vt-codec",
+                    "hevc10",
+                ],
+            ]),
+        ),
+        s(
+            "export-align+prores",
+            "B sliced 2 ms frame-aligned plus 1 ProRes 422 HQ session",
+            &[],
+            b(&[
+                SLICED,
+                ALIGN,
+                &[
+                    "--slice-ms",
+                    "2",
+                    "--yield-on",
+                    "miss",
+                    "--vt-sessions",
+                    "1",
+                    "--vt-codec",
+                    "prores422hq",
+                ],
+            ]),
+        ),
+        // On-screen presentation (needs an awake, unlocked display).
+        s(
+            "present-baseline",
+            "A alone, presenting through a small on-screen CAMetalLayer window",
+            PRESENT,
+            None,
+        ),
+        s(
+            "present-full",
+            "As present-baseline with B unsliced",
+            PRESENT,
+            b(&[&["--mode", "full"]]),
+        ),
+        s(
+            "present-align",
+            "As present-baseline with B sliced 2 ms frame-aligned",
+            PRESENT,
+            b(&[SLICED, ALIGN, &["--slice-ms", "2", "--yield-on", "miss"]]),
         ),
     ]
 }
@@ -371,6 +360,69 @@ fn gpu_util() -> Option<f64> {
     let i = s.find(key)? + key.len();
     let digits: String = s[i..].chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().ok()
+}
+
+/// Accumulated GPU time (ns) per process from the AGX user clients in the IORegistry
+/// (`AppUsage` / `accumulatedGPUTime`, summed over a process's clients).
+fn gpu_time_by_pid() -> HashMap<u32, (String, u64)> {
+    let mut map: HashMap<u32, (String, u64)> = HashMap::new();
+    let Ok(out) = Command::new("/usr/sbin/ioreg")
+        .args(["-r", "-c", "AGXDeviceUserClient", "-d", "1", "-l"])
+        .output()
+    else {
+        return map;
+    };
+    parse_gpu_time(&String::from_utf8_lossy(&out.stdout), &mut map);
+    map
+}
+
+fn parse_gpu_time(text: &str, map: &mut HashMap<u32, (String, u64)>) {
+    let mut current: Option<u32> = None;
+    for line in text.lines() {
+        if let Some(i) = line.find("\"IOUserClientCreator\" = \"pid ") {
+            let rest = &line[i + "\"IOUserClientCreator\" = \"pid ".len()..];
+            let (pid, name) = rest.split_once(", ").unwrap_or((rest, ""));
+            current = pid.trim().parse().ok();
+            if let Some(pid) = current {
+                map.entry(pid)
+                    .or_insert_with(|| (name.trim_end_matches('"').to_string(), 0));
+            }
+        } else if line.contains("\"AppUsage\"") {
+            let Some(pid) = current else { continue };
+            let key = "\"accumulatedGPUTime\"=";
+            let mut sum = 0u64;
+            for (i, _) in line.match_indices(key) {
+                let digits: String = line[i + key.len()..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                sum += digits.parse::<u64>().unwrap_or(0);
+            }
+            if let Some(e) = map.get_mut(&pid) {
+                e.1 += sum;
+            }
+        }
+    }
+}
+
+/// GPU time other processes used between two snapshots (ms), excluding `ours`.
+fn external_gpu(before: &HashMap<u32, (String, u64)>, after: &HashMap<u32, (String, u64)>, ours: &[u32]) -> Value {
+    let mut rows: Vec<(String, f64)> = after
+        .iter()
+        .filter(|(pid, _)| !ours.contains(pid))
+        .filter_map(|(pid, (name, t))| {
+            let t0 = before.get(pid).map(|b| b.1)?;
+            let d = t.saturating_sub(t0) as f64 / 1e6;
+            (d > 0.0).then(|| (format!("{name} ({pid})"), d))
+        })
+        .collect();
+    rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    let total: f64 = rows.iter().map(|r| r.1).sum();
+    rows.truncate(6);
+    json!({
+        "total_ms": stats::r(total, 1),
+        "top": rows.iter().map(|(n, d)| json!({"process": n, "ms": stats::r(*d, 1)})).collect::<Vec<_>>(),
+    })
 }
 
 fn sample_util(stop: Arc<AtomicBool>) -> std::thread::JoinHandle<Vec<f64>> {
@@ -401,6 +453,8 @@ fn run(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::Path)
             gpu_util()
         })
         .collect();
+    let display_asleep = display::main_display_asleep();
+    let screen_locked = display::screen_locked();
     let fifo = std::env::temp_dir().join(format!("s8-{}-{}.fifo", std::process::id(), s.name));
     let fifo = fifo.to_str().unwrap().to_string();
     signal::make_fifo(&fifo).expect("mkfifo");
@@ -440,6 +494,8 @@ fn run(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::Path)
         b_child = Some(child);
     }
 
+    let b_pid = b_child.as_ref().map(|c| c.id());
+    let gpu_before = gpu_time_by_pid();
     let stop = Arc::new(AtomicBool::new(false));
     let sampler = sample_util(stop.clone());
     let raw = out.join("raw").join(format!("{}-a.jsonl", s.name));
@@ -462,6 +518,9 @@ fn run(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::Path)
     let a_secs = t.elapsed().as_secs_f64();
     stop.store(true, Ordering::Relaxed);
     let during = sampler.join().unwrap();
+    let gpu_after = gpu_time_by_pid();
+    let ours: Vec<u32> = b_pid.into_iter().chain([std::process::id()]).collect();
+    let external = external_gpu(&gpu_before, &gpu_after, &ours);
 
     let b = if let Some(mut child) = b_child {
         // SAFETY: plain signal to our own child.
@@ -480,8 +539,11 @@ fn run(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::Path)
         "a_args": s.a,
         "b_args": s.b,
         "a_wall_seconds": stats::r(a_secs, 2),
+        "display_asleep": display_asleep,
+        "screen_locked": screen_locked,
         "gpu_util_idle_before": stats::dist(&idle),
         "gpu_util_during": stats::dist(&during),
+        "external_gpu_during_a": external,
         "a": a,
         "b": b,
     })
@@ -541,6 +603,11 @@ fn main() {
         .filter(|s| only.as_ref().is_none_or(|o| o.iter().any(|n| n == s.name)))
     {
         eprintln!("== {} ({})", s.name, s.what);
+        if s.a.contains(&"--present") && (display::main_display_asleep() || display::screen_locked() != Some(false)) {
+            // Nothing reaches the glass while the display sleeps or the lock screen is up.
+            eprintln!("   skipped: display asleep or screen locked");
+            continue;
+        }
         let v = run(s, &bin, seconds, &out);
         std::fs::write(
             out.join(format!("{}.json", s.name)),
@@ -560,4 +627,32 @@ fn main() {
         merged.push(r);
     }
     std::fs::write(&path, serde_json::to_string_pretty(&merged).unwrap()).unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_agx_user_clients() {
+        let text = r#"
+    | {
+      "IOUserClientCreator" = "pid 463, WindowServer"
+      "AppUsage" = ({"API"="Metal","lastSubmittedTime"=1,"accumulatedGPUTime"=1000},{"API"="Metal","accumulatedGPUTime"=24})
+    | {
+      "IOUserClientCreator" = "pid 463, WindowServer"
+      "AppUsage" = ({"API"="Metal","accumulatedGPUTime"=6})
+    | {
+      "IOUserClientCreator" = "pid 916, MenuBarAgent"
+"#;
+        let mut map = HashMap::new();
+        parse_gpu_time(text, &mut map);
+        assert_eq!(map[&463], ("WindowServer".to_string(), 1030));
+        assert_eq!(map[&916], ("MenuBarAgent".to_string(), 0));
+        let mut after = map.clone();
+        after.get_mut(&463).unwrap().1 += 2_000_000;
+        after.insert(1, ("new".into(), 5_000_000));
+        let v = external_gpu(&map, &after, &[916]);
+        assert_eq!(v["total_ms"], 2.0);
+    }
 }
