@@ -4,6 +4,7 @@
  *   bun engine/corpus/src/capture.ts [--id <capture-id>] [--root <dir>]
  *        [--only <prefix,...>] [--skip-synthetic] [--skip-scenarios] [--skip-real]
  *        [--real <file.pmv>] [--real-step <seconds>] [--no-eval] [--restart-every <n>]
+ *        [--label <text>]
  *
  * Writes to <root>/<capture-id>/ (default root: ~/Library/Application Support/
  * Powermove Engine Corpus). Never writes inside the repository. See
@@ -22,13 +23,14 @@ import { textAnimationScript } from './inject';
 import { installCorpusPage, renderingPerformanceScenarios } from './page';
 import { allProjects, type CorpusProject } from './projects';
 import { compareSubset, type Issue } from './validate';
+import { verifyCapture } from './verify';
 
 export const DEFAULT_ROOT = path.join(os.homedir(), 'Library/Application Support/Powermove Engine Corpus');
 export const DEFAULT_REAL = path.join(os.homedir(), 'Documents/Powermove ad.pmv');
 
 interface Options {
   id?: string; root: string; only: string[]; synthetic: boolean; scenarios: boolean; real: boolean;
-  realPath: string; realStep: number; evaluate: boolean; restartEvery: number;
+  realPath: string; realStep: number; evaluate: boolean; restartEvery: number; label: string;
 }
 
 interface SampleRecord {
@@ -45,7 +47,7 @@ interface ProjectRecord {
 }
 
 function parseArgs(argv: string[]): Options {
-  const options: Options = { root: DEFAULT_ROOT, only: [], synthetic: true, scenarios: true, real: true, realPath: DEFAULT_REAL, realStep: 2, evaluate: true, restartEvery: 30 };
+  const options: Options = { root: DEFAULT_ROOT, only: [], synthetic: true, scenarios: true, real: true, realPath: DEFAULT_REAL, realStep: 2, evaluate: true, restartEvery: 30, label: 'v0' };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!, next = () => { const value = argv[++i]; if (value === undefined) throw new Error(`${arg} needs a value`); return value; };
     if (arg === '--id') options.id = next();
@@ -57,6 +59,7 @@ function parseArgs(argv: string[]): Options {
     else if (arg === '--real') options.realPath = path.resolve(next());
     else if (arg === '--real-step') options.realStep = Number(next());
     else if (arg === '--no-eval') options.evaluate = false;
+    else if (arg === '--label') options.label = next();
     else if (arg === '--restart-every') options.restartEvery = Math.max(1, Number(next()));
     else throw new Error(`Unknown argument ${arg}`);
   }
@@ -352,7 +355,7 @@ export async function capture(options: Options): Promise<string> {
     const all = [...records, ...(real ? [real] : [])];
     const files = all.flatMap(record => record.samples.flatMap(sample => [sample.png, sample.alphaPng, sample.float?.data, sample.float?.header, sample.eval].filter(Boolean) as FileRecord[]));
     const manifest = {
-      format: 'powermove-engine-corpus', version: 1, id, label: 'v0 (before the appendix A Phase 0 legacy fixes; to be recaptured)',
+      format: 'powermove-engine-corpus', version: 1, id, label: options.label,
       createdAt: startedAt, finishedAt: new Date().toISOString(), durationMs: Math.round(performance.now() - started),
       engine: { commit: head, dirty, branch: git('rev-parse', '--abbrev-ref', 'HEAD'), build },
       app: appVersions, gpu: environment, machine: machine(),
@@ -388,6 +391,10 @@ export async function capture(options: Options): Promise<string> {
       scenarios,
     };
     writeFile(out, 'manifest.json', JSON.stringify(manifest, null, 1) + '\n');
+    const verified = verifyCapture(out);
+    for (const problem of verified.problems) log(`verify: ${problem}`);
+    for (const file of verified.unlisted) log(`verify: unlisted ${file}`);
+    log(`Verified ${verified.checked} files: ${verified.problems.length} problems, ${verified.unlisted.length} unlisted`);
     log(`Done: ${manifest.totals.frames} frames, ${manifest.totals.floatFrames} float frames, ${manifest.totals.evalDumps} evaluation dumps, ${(manifest.totals.bytes / 1e6).toFixed(1)} MB, ${manifest.totals.failedSamples} failed samples`);
   } finally {
     await session.legacy.close();

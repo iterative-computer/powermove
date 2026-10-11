@@ -8,10 +8,11 @@ import { generateCorpus, validateAll } from '../src/generate';
 import { corpusGlb } from '../src/glb';
 import { TEXT_ANIMATION_GLOBAL, TEXT_ANIMATION_MODULE, textAnimationScript } from '../src/inject';
 import { FIXTURE_FILES, GENERATED_MEDIA, mediaRefs, MISSING_MEDIA, resolveMedia } from '../src/media';
-import { readFloat, straightTopDown, writeFloat } from '../src/output';
+import { readFloat, straightTopDown, writeFile, writeFloat, writePng } from '../src/output';
 import { decodePng, encodePng } from '../src/png';
 import { allProjects } from '../src/projects';
 import { validateDocument } from '../src/validate';
+import { verifyCapture } from '../src/verify';
 
 const projects = allProjects();
 const temp = (label: string) => mkdtempSync(path.join(os.tmpdir(), `pm-corpus-${label}-`));
@@ -259,5 +260,32 @@ describe('renderer injection', () => {
         expect(expected).toHaveLength(chars.length);
       }
     }
+  });
+});
+
+describe('capture verification', () => {
+  test('accepts a consistent capture and reports corruption, missing, and unlisted files', () => {
+    const dir = temp('verify');
+    try {
+      const png = writePng(dir, 'projects/a/frames/t0.png', 2, 1, new Uint8Array([1, 2, 3, 255, 4, 5, 6, 255]), {});
+      const float = writeFloat(dir, 'projects/a/frames/t0.rgba32f', { width: 2, height: 1, rowOrder: 'top-down', alpha: 'premultiplied', time: 0, sourcePrecision: 'binary16', encoding: '', source: '' }, new Uint8Array(32));
+      const evalRecord = writeFile(dir, 'projects/a/eval/t0.json', JSON.stringify({ format: 'powermove-corpus-eval', version: 1, time: 0 }));
+      writeFile(dir, 'projects/a/project.json', '{}');
+      const sample = { time: 0, width: 2, height: 1, png, float, eval: evalRecord };
+      const bytes = png.bytes + float.data.bytes + float.header.bytes + evalRecord.bytes;
+      writeFile(dir, 'manifest.json', JSON.stringify({
+        format: 'powermove-engine-corpus', version: 1, projects: [{ id: 'a', dir: 'projects/a', samples: [sample] }],
+        totals: { projects: 1, frames: 1, floatFrames: 1, evalDumps: 1, failedSamples: 0, bytes },
+      }));
+      expect(verifyCapture(dir)).toEqual({ problems: [], checked: 4, unlisted: [] });
+      writeFileSync(path.join(dir, 'projects/a/frames/t0.png'), new Uint8Array(png.bytes));
+      writeFileSync(path.join(dir, 'stray.bin'), 'x');
+      rmSync(path.join(dir, 'projects/a/eval/t0.json'));
+      const result = verifyCapture(dir);
+      expect(result.problems.some(problem => /t0\.png does not match its SHA-256/.test(problem))).toBe(true);
+      expect(result.problems.some(problem => /t0\.png does not decode/.test(problem))).toBe(true);
+      expect(result.problems.some(problem => /t0\.json is missing/.test(problem))).toBe(true);
+      expect(result.unlisted).toEqual(['stray.bin']);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

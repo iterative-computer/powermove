@@ -8,6 +8,7 @@
     "generate": "bun src/generate.ts",
     "check": "bun src/generate.ts --check",
     "capture": "bun src/capture.ts",
+    "verify": "bun src/verify.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit -p ."
   },
