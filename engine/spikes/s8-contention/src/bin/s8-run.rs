@@ -406,6 +406,10 @@ fn parse_gpu_time(text: &str, map: &mut HashMap<u32, (String, u64)>) {
 }
 
 /// GPU time other processes used between two snapshots (ms), excluding `ours`.
+///
+/// Only the total, WindowServer's share, and the number of processes are recorded:
+/// result files are committed to a public repository and the names of the apps running
+/// on the machine are not. The top consumers are printed to stderr for the operator.
 fn external_gpu(before: &HashMap<u32, (String, u64)>, after: &HashMap<u32, (String, u64)>, ours: &[u32]) -> Value {
     let mut rows: Vec<(String, f64)> = after
         .iter()
@@ -413,15 +417,19 @@ fn external_gpu(before: &HashMap<u32, (String, u64)>, after: &HashMap<u32, (Stri
         .filter_map(|(pid, (name, t))| {
             let t0 = before.get(pid).map(|b| b.1)?;
             let d = t.saturating_sub(t0) as f64 / 1e6;
-            (d > 0.0).then(|| (format!("{name} ({pid})"), d))
+            (d > 0.0).then(|| (name.clone(), d))
         })
         .collect();
     rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
     let total: f64 = rows.iter().map(|r| r.1).sum();
-    rows.truncate(6);
+    let window_server: f64 = rows.iter().filter(|r| r.0 == "WindowServer").map(|r| r.1).sum();
+    for (name, ms) in rows.iter().take(4) {
+        eprintln!("   external GPU: {name} {ms:.1} ms");
+    }
     json!({
         "total_ms": stats::r(total, 1),
-        "top": rows.iter().map(|(n, d)| json!({"process": n, "ms": stats::r(*d, 1)})).collect::<Vec<_>>(),
+        "window_server_ms": stats::r(window_server, 1),
+        "processes": rows.len(),
     })
 }
 
