@@ -616,7 +616,7 @@ fn run(args: &Args, g: gpu::Gpu, presenter: Option<(Presenter, String, bool)>) {
     let risk_ns = (risk_frac * period_ns as f64) as u64;
     let warm_frames = (warmup * fps).round() as u64;
 
-    // Slot n % RING is free once frame n - RING has been fully processed.
+    // Slot n % RING is free once the last frame submitted into it has been processed.
     let processed: Arc<Vec<AtomicU64>> = Arc::new((0..RING).map(|_| AtomicU64::new(u64::MAX)).collect());
     let (tx, rx) = mpsc::channel::<Submitted>();
     let mut sender = fifo.as_deref().map(|f| signal::Sender::open(f).expect("open fifo"));
@@ -684,6 +684,10 @@ fn run(args: &Args, g: gpu::Gpu, presenter: Option<(Presenter, String, bool)>) {
     let _ = sys::set_thread_qos(sys::Qos::UserInteractive);
     let rt_ok = realtime && sys::set_thread_realtime(period_ns, 3_000_000, period_ns).is_ok();
     let mut skipped = Vec::new();
+    // Last frame submitted into each ring slot. A slot is free once that frame has been
+    // processed; comparing against `n - RING` instead would wedge a slot forever after
+    // one skipped frame.
+    let mut last_in_slot: [Option<u64>; RING as usize] = [None; RING as usize];
     let mut drawable_wait = Vec::new();
     // Display clock: vsync index counted from the first vsync, advanced by the number of
     // refreshes between successive callbacks (robust to a missed callback).
@@ -723,7 +727,7 @@ fn run(args: &Args, g: gpu::Gpu, presenter: Option<(Presenter, String, bool)>) {
         let wake = clock::now_ns();
         let slot = (n % RING as u64) as u32;
         let prev = processed[slot as usize].load(Ordering::Acquire);
-        let free = n < RING as u64 || prev == n - RING as u64;
+        let free = last_in_slot[slot as usize].is_none_or(|m| prev == m);
         if !free {
             skipped.push((n, tick, wake, false));
             continue;
@@ -738,6 +742,7 @@ fn run(args: &Args, g: gpu::Gpu, presenter: Option<(Presenter, String, bool)>) {
         let cb = encode_frame(n, slot, (n + WARM_PIPE) as usize, view.as_ref());
         let submit = clock::now_ns();
         let index = queue.submit([cb]);
+        last_in_slot[slot as usize] = Some(n);
         if let (Some((pr, ..)), Some(f)) = (presenter.as_ref(), frame) {
             drop(view);
             pr.present(queue, f, n);
