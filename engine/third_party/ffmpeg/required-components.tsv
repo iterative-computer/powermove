@@ -1,0 +1,193 @@
+# FFmpeg components Powermove uses today, checked by verify.sh against the
+# built ffmpeg's -protocols, -demuxers, -muxers, -decoders, -encoders,
+# -filters, -devices, and -hwaccels lists.
+#
+# Columns (tab separated): kind  name  expect  call sites
+#   expect = present  the component must exist in the build
+#   expect = absent   the component must NOT exist (GPL, nonfree, or decision 12);
+#                     the call sites listed are the ones that break with this build
+#
+# Call sites were collected from apps/desktop/src/main/render-encoder.ts,
+# media-proxy.ts, agent-tools/media-ffmpeg.ts and media-tools.ts,
+# transcription/audio.ts, src/shared/media-formats.ts (import containers),
+# scripts/test-mcp.mjs, the e2e specs, the unit tests that spawn the bundled
+# binary, docs/rust-engine.md section 24 item 1, and e2e/fixtures/gen.sh.
+# "Plan 24.1" marks components the plan names for the executable.
+
+# ── Protocols ────────────────────────────────────────────────────────────────
+protocol	file	present	every call site
+protocol	pipe	present	render-encoder.ts (pipe:0), transcription/audio.ts (pipe:1), media-ffmpeg.ts triageScanArgs (pipe:1), media-proxy.ts -progress pipe:1, e2e rawvideo inputs
+
+# ── Input devices ────────────────────────────────────────────────────────────
+device	lavfi	present	e2e agent-media-tools, media-intelligence, video-scrubbing; media-tools.test.ts; bridge.test.ts; gen.sh
+
+# ── Demuxers ─────────────────────────────────────────────────────────────────
+demuxer	rawvideo	present	render-encoder.ts; e2e composited-video-sync, export-video-frames, import-prores-alpha, video-frame-integrity
+demuxer	mov	present	MOV/MP4/M4V/3GP/3G2/M4A import, probe, frames, proxies, transcription; render-encoder.ts audio mux
+demuxer	matroska	present	WebM and MKV import, media-proxy.ts previewConverter (WebM), WebA audio
+demuxer	image2	present	media-ffmpeg.ts tileArgs (cell-%03d.jpg); media-proxy.ts imageSequenceConverter
+demuxer	png_pipe	present	media-ffmpeg.ts frameArgs on rendered composition stills
+demuxer	jpeg_pipe	present	image inputs to agent media tools
+demuxer	tiff_pipe	present	media-proxy.ts stillImageConverter (TIFF to PNG)
+demuxer	webp_pipe	present	image inputs to agent media tools
+demuxer	wav	present	render-encoder.ts audio mux (audio.wav); WAV import; transcription
+demuxer	aiff	present	AIFF import; e2e media-intelligence (say output)
+demuxer	mp3	present	MP3 import; transcription
+demuxer	aac	present	AAC import
+demuxer	ogg	present	OGG/OGA/Opus/OGV import
+demuxer	flac	present	FLAC import
+demuxer	avi	present	AVI import (media-formats.ts)
+demuxer	asf	present	WMV/ASF import (media-formats.ts)
+demuxer	flv	present	FLV import (media-formats.ts)
+demuxer	mpeg	present	MPG/MPEG/VOB import (media-formats.ts)
+demuxer	mpegvideo	present	M2V import (media-formats.ts)
+demuxer	mpegts	present	TS/MTS/M2TS import (media-formats.ts)
+demuxer	mxf	present	MXF import (media-formats.ts)
+demuxer	dv	present	DV import (media-formats.ts)
+
+# ── Muxers ───────────────────────────────────────────────────────────────────
+muxer	mov	present	render-encoder.ts (ProRes .mov and its audio mux)
+muxer	mp4	present	render-encoder.ts (.mp4); e2e agent-media-tools, media-intelligence, export-video-frames
+muxer	webm	present	media-proxy.ts playback, preview, and image sequence proxies; e2e VP9 fixtures
+muxer	matroska	present	gen.sh converted.mkv
+muxer	image2	present	media-ffmpeg.ts frameArgs, tileArgs, waveformArgs; media-proxy.ts stillImageConverter
+muxer	rawvideo	present	media-ffmpeg.ts triageScanArgs; scripts/test-mcp.mjs; e2e export-video-frames; media-tools.test.ts
+muxer	f32le	present	transcription/audio.ts
+muxer	s16le	present	scripts/test-mcp.mjs
+muxer	null	present	media-ffmpeg.ts analysisArgs (-f null); scripts/test-mcp.mjs
+muxer	framemd5	present	e2e project-export-fixture
+muxer	wav	present	e2e media-intelligence; bridge.test.ts; media-tools.test.ts; gen.sh
+muxer	ipod	present	gen.sh tone.m4a
+muxer	ogg	present	gen.sh tone.opus
+muxer	flac	present	gen.sh tone.flac
+muxer	gif	present	gen.sh animated.gif
+muxer	apng	present	gen.sh animated-apng.png
+muxer	avif	present	gen.sh still.avif
+
+# ── Decoders: video and images ───────────────────────────────────────────────
+decoder	rawvideo	present	render-encoder.ts input; e2e rawvideo inputs
+decoder	h264	present	H.264 import, probe, frames; scripts/test-mcp.mjs export verification
+decoder	hevc	present	HEVC and HEVC-with-alpha import
+decoder	prores	present	ProRes import, proxies, agent frames; hosts the VideoToolbox ProRes hwaccel (see README, ProRes)
+decoder	dnxhd	present	DNxHD/DNxHR import (plan section 13)
+decoder	cfhd	present	CineForm import (plan section 13)
+decoder	mjpeg	present	MJPEG import; media-ffmpeg.ts tileArgs reads JPEG cells
+decoder	dvvideo	present	DV import
+decoder	mpeg1video	present	MPG import
+decoder	mpeg2video	present	MPG/VOB/M2V/TS/MXF import
+decoder	mpeg4	present	AVI/3GP import
+decoder	h263	present	3GP import
+decoder	msmpeg4	present	AVI import
+decoder	wmv1	present	WMV import
+decoder	wmv2	present	WMV import
+decoder	wmv3	present	WMV import
+decoder	vc1	present	WMV/TS import
+decoder	flv	present	FLV import
+decoder	vp6f	present	FLV import
+decoder	theora	present	OGV import
+decoder	vp8	present	VP8 WebM import
+decoder	vp9	present	VP9 WebM import
+decoder	libvpx	present	VP8 with alpha (plan section 13)
+decoder	libvpx-vp9	present	media-proxy.ts previewConverter (-c:v libvpx-vp9 keeps WebM alpha)
+decoder	libdav1d	present	AV1 import (plan section 13)
+decoder	png	present	PNG stills and sequences; media-ffmpeg.ts frameArgs on rendered stills
+decoder	apng	present	APNG import
+decoder	gif	present	GIF import
+decoder	webp	present	WebP inputs
+decoder	tiff	present	media-proxy.ts stillImageConverter
+decoder	bmp	present	BMP inputs
+decoder	qtrle	present	QuickTime Animation MOV import
+
+# ── Decoders: audio ──────────────────────────────────────────────────────────
+decoder	aac	present	AAC/M4A import, MP4 audio; transcription
+decoder	mp3float	present	MP3 import; transcription
+decoder	mp2	present	MPEG-PS/TS audio
+decoder	ac3	present	TS/VOB audio
+decoder	eac3	present	TS/MP4 audio
+decoder	opus	present	Opus import
+decoder	libopus	present	Opus import (plan 24.1)
+decoder	vorbis	present	OGG/WebM audio
+decoder	flac	present	FLAC import
+decoder	alac	present	ALAC M4A import
+decoder	wmav2	present	WMV/ASF audio
+decoder	wmapro	present	WMV/ASF audio
+decoder	pcm_s16le	present	WAV import; render-encoder.ts audio.wav
+decoder	pcm_s24le	present	WAV and MOV audio
+decoder	pcm_f32le	present	WAV import; render-encoder.ts audio.wav
+decoder	pcm_s16be	present	AIFF import; e2e media-intelligence
+decoder	pcm_s24be	present	AIFF and MOV audio
+decoder	pcm_dvd	present	VOB audio
+
+# ── Encoders ─────────────────────────────────────────────────────────────────
+encoder	rawvideo	present	media-ffmpeg.ts triageScanArgs; scripts/test-mcp.mjs; e2e framemd5 and frame reads
+encoder	wrapped_avframe	present	-f null video in scripts/test-mcp.mjs
+encoder	png	present	media-ffmpeg.ts frameArgs, waveformArgs; media-proxy.ts stillImageConverter (plan 24.1)
+encoder	mjpeg	present	media-ffmpeg.ts frameArgs, tileArgs (plan 24.1)
+encoder	libvpx-vp9	present	media-proxy.ts all three converters; e2e VP9 fixtures (plan 24.1)
+encoder	libvpx	present	gen.sh vp8-opus.webm; plan section 17 WebM VP8 (plan 24.1)
+encoder	libopus	present	media-proxy.ts playbackConverter (plan 24.1)
+encoder	aac	present	render-encoder.ts MP4 audio mux; e2e agent-media-tools, media-intelligence
+encoder	aac_at	present	AudioToolbox AAC (plan section 16)
+encoder	pcm_s16le	present	scripts/test-mcp.mjs; -f null audio; e2e media-intelligence; media-tools.test.ts; bridge.test.ts
+encoder	pcm_s24le	present	render-encoder.ts ProRes audio mux
+encoder	pcm_f32le	present	transcription/audio.ts
+encoder	flac	present	gen.sh tone.flac
+encoder	tiff	present	gen.sh still.tiff
+encoder	gif	present	gen.sh animated.gif
+encoder	apng	present	gen.sh animated-apng.png
+encoder	libsvtav1	present	gen.sh av1.mp4 and still.avif
+encoder	h264_videotoolbox	present	replacement for libx264 (plan section 17)
+encoder	hevc_videotoolbox	present	gen.sh hevc.mov, hevc.mp4, hevc-alpha.mov (plan section 17)
+encoder	prores_videotoolbox	present	replacement for prores_ks (plan section 17, decision 12)
+
+# ── Filters ──────────────────────────────────────────────────────────────────
+filter	scale	present	render-encoder.ts; media-ffmpeg.ts frameArgs, triageScanArgs; media-proxy.ts previewConverter; e2e frame reads
+filter	pad	present	media-ffmpeg.ts frameArgs, waveformArgs
+filter	drawtext	present	media-ffmpeg.ts frameArgs labels, waveformArgs ruler (plan 24.1)
+filter	drawbox	present	media-ffmpeg.ts waveformArgs
+filter	tile	present	media-ffmpeg.ts tileArgs
+filter	fps	present	media-ffmpeg.ts triageScanArgs
+filter	format	present	media-ffmpeg.ts triageScanArgs; gen.sh
+filter	overlay	present	media-ffmpeg.ts waveformArgs
+filter	color	present	media-ffmpeg.ts waveformArgs; e2e agent-media-tools; tests
+filter	showwavespic	present	media-ffmpeg.ts waveformArgs
+filter	aformat	present	media-ffmpeg.ts waveformArgs; e2e media-intelligence
+filter	silencedetect	present	media-ffmpeg.ts analysisArgs (plan 24.1)
+filter	ebur128	present	media-ffmpeg.ts analysisArgs (plan 24.1)
+filter	astats	present	media-ffmpeg.ts analysisArgs (plan 24.1)
+filter	select	present	scene detection, select='gt(scene,N)' (plan 24.1)
+filter	scdet	present	scene detection (plan 24.1)
+filter	aresample	present	transcription/audio.ts (-ar 16000, auto-inserted); e2e media-intelligence
+filter	crop	present	scripts/test-mcp.mjs
+filter	concat	present	e2e agent-media-tools, media-intelligence; media-tools.test.ts; gen.sh
+filter	volume	present	e2e agent-media-tools; media-tools.test.ts; gen.sh
+filter	anullsrc	present	e2e media-intelligence
+filter	atrim	present	e2e media-intelligence
+filter	sine	present	e2e agent-media-tools; media-tools.test.ts; bridge.test.ts; gen.sh
+filter	smptebars	present	e2e agent-media-tools; media-tools.test.ts
+filter	testsrc2	present	e2e media-intelligence, video-scrubbing
+filter	geq	present	gen.sh alpha fixtures
+filter	alphamerge	present	gen.sh alpha fixtures
+filter	split	present	gen.sh animated.gif
+filter	palettegen	present	gen.sh animated.gif
+filter	paletteuse	present	gen.sh animated.gif
+filter	pan	present	gen.sh audio fixtures
+filter	zscale	present	SDR color reference, FFmpeg plus zimg (plan sections 2 and 25)
+filter	bwdif	present	software deinterlace reference (plan section 13)
+
+# ── Hardware acceleration ────────────────────────────────────────────────────
+hwaccel	videotoolbox	present	ProRes, H.264, HEVC decode through VideoToolbox (decision 12)
+
+# ── Must be absent (GPL, nonfree, or ProRes outside VideoToolbox) ────────────
+encoder	libx264	absent	render-encoder.ts encoderArgs (MP4 export, export_video mp4); e2e agent-media-tools, export-video-frames (mp4 sources, -crf 0), media-intelligence, video-scrubbing, export-mp4 (through render-encoder); media-tools.test.ts fixture; render-encoder.test.ts:41 (MP4 with real frames); gen.sh h264-aac.mp4, h264-aac.mov, converted.mkv (skipped, gen.sh checks)
+encoder	prores_ks	absent	render-encoder.ts encoderArgs (ProRes export, export_video prores); e2e import-prores-alpha fixture; render-encoder.test.ts ProRes 4444 alpha case; gen.sh prores422.mov, prores4444-alpha.mov, and hevc-alpha.mov which is made from it (skipped, gen.sh checks)
+encoder	prores	absent	none today (decision 12)
+encoder	prores_aw	absent	none today (decision 12)
+decoder	prores_raw	absent	none today (camera RAW needs counsel, decision 12)
+encoder	libx265	absent	gen.sh HEVC fallback only (hevc_videotoolbox is tried first)
+encoder	libmp3lame	absent	gen.sh tone.mp3 (skipped, gen.sh checks)
+encoder	libaom-av1	absent	gen.sh AV1 fallback order only (libsvtav1 is used)
+encoder	libfdk_aac	absent	none (nonfree)
+encoder	libxvid	absent	none (GPL)
+filter	frei0r	absent	none (GPL)
+filter	vidstabdetect	absent	none (GPL)
