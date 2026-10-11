@@ -201,14 +201,15 @@ export async function runAll({ bindings, memory, now, platform, sha256, gc = () 
   const kinds = ['reorder', 'insert', 'delete'];
   const withChannels = () => { for (;;) { const l = project.layers[Math.floor(rand() * project.layers.length)]; if (Object.keys(l.p).length === 18) return l; } };
   const structural = {};
-  for (const kind of kinds) structural[kind] = { stringify: [], encode: [], apply: [], total: [], parsed: [], invalidated: [], kept: [], orderTotal: [], orderParsed: [], orderInvalidated: [] };
+  for (const kind of kinds) structural[kind] = { stringify: [], encode: [], apply: [], total: [], parsed: [], invalidated: [], kept: [], bytesTotal: [], bytesParsed: [], bytesInvalidated: [], orderTotal: [], orderParsed: [], orderInvalidated: [] };
+  const utf8 = new TextEncoder();
   const evaluateAll = () => mirror.evBatch(ids, T); // all handles cached before each edit
   const cacheLayer = (layer) => { for (const key of Object.keys(layer.p)) mirror.ev(mirror.intern(layer.id, key), T); };
   const orderPatch = (layers, changed) => [{ path: ['layers'], order: layers.map((l) => l.id), layers: changed }];
   const ROUNDS_S = 60;
   for (let r = 0; r < ROUNDS_S; r++) {
     for (const kind of kinds) {
-      for (const encoding of ['array', 'order']) {
+      for (const encoding of ['array', 'bytes', 'order']) {
         const layers = project.layers;
         let changed = [];
         let inserted = null;
@@ -242,6 +243,17 @@ export async function runAll({ bindings, memory, now, platform, sha256, gc = () 
           s.stringify.push(b - a); s.encode.push(c - b); s.apply.push(d - c); s.total.push(d - a);
           const st = mirror.stats();
           s.parsed.push(st.parsed); s.invalidated.push(st.invalidated); s.kept.push(st.kept);
+        } else if (encoding === 'bytes') {
+          // The whole array as UTF-8 bytes the history already holds:
+          // scopedPatches (legacy/core/history.ts) stringifies each scope and
+          // encodes it to count bytes. Untimed here; timed: copy and apply.
+          const bytes = utf8.encode(JSON.stringify(layers));
+          const a = now();
+          mirror.apply([{ path: ['layers'], exists: true, bytes }]);
+          const d = now();
+          s.bytesTotal.push(d - a);
+          const st = mirror.stats();
+          s.bytesParsed.push(st.parsed); s.bytesInvalidated.push(st.invalidated);
         } else {
           const a = now();
           mirror.apply(orderPatch(layers, changed));
@@ -291,6 +303,7 @@ export async function runAll({ bindings, memory, now, platform, sha256, gc = () 
         encodeAndApply: summarize(s.encode.map((x, i) => x + s.apply[i])), total: summarize(s.total),
         parsed: summarize(s.parsed), invalidated: summarize(s.invalidated), kept: summarize(s.kept),
       },
+      bytesPatch: { total: summarize(s.bytesTotal), parsed: summarize(s.bytesParsed), invalidated: summarize(s.bytesInvalidated) },
       orderPatch: { total: summarize(s.orderTotal), parsed: summarize(s.orderParsed), invalidated: summarize(s.orderInvalidated) },
     };
   }
@@ -300,14 +313,16 @@ export async function runAll({ bindings, memory, now, platform, sha256, gc = () 
     arrayEncodeAndApplyP95: kinds.every((k) => st[k].arrayPatch.encodeAndApply.p95 < TARGETS.structuralPatchMs),
     // Including JSON.stringify of the whole 884-layer array in JS.
     arrayTotalP95: kinds.every((k) => st[k].arrayPatch.total.p95 < TARGETS.structuralPatchMs),
+    // The history's UTF-8 bytes copied into wasm memory and applied.
+    bytesTotalP95: kinds.every((k) => st[k].bytesPatch.total.p95 < TARGETS.structuralPatchMs),
     // Id-keyed order patch, end to end in JS.
     orderTotalP95: kinds.every((k) => st[k].orderPatch.total.p95 < TARGETS.structuralPatchMs),
     // Reorder: nothing parsed, nothing invalidated. Insert: one layer parsed,
     // only the 18 handles waiting for its id invalidated. Delete: only the
     // deleted layer's 18 handles invalidated.
-    onlyChangedIdsInvalidated: [st.reorder.arrayPatch, st.reorder.orderPatch].every((x) => x.invalidated.max === 0 && x.parsed.max === 0)
-      && [st.insert.arrayPatch, st.insert.orderPatch].every((x) => x.invalidated.min === 18 && x.invalidated.max === 18 && x.parsed.min === 1 && x.parsed.max === 1)
-      && [st.delete.arrayPatch, st.delete.orderPatch].every((x) => x.invalidated.min === 18 && x.invalidated.max === 18 && x.parsed.max === 0),
+    onlyChangedIdsInvalidated: [st.reorder.arrayPatch, st.reorder.bytesPatch, st.reorder.orderPatch].every((x) => x.invalidated.max === 0 && x.parsed.max === 0)
+      && [st.insert.arrayPatch, st.insert.bytesPatch, st.insert.orderPatch].every((x) => x.invalidated.min === 18 && x.invalidated.max === 18 && x.parsed.min === 1 && x.parsed.max === 1)
+      && [st.delete.arrayPatch, st.delete.bytesPatch, st.delete.orderPatch].every((x) => x.invalidated.min === 18 && x.invalidated.max === 18 && x.parsed.max === 0),
   };
 
   // Edit-log append: the top-level `edits` array replaced with one more entry.

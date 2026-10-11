@@ -121,10 +121,19 @@ export class WasmMirror {
     return offset + 4 + n;
   }
 
+  /** A chunk from UTF-8 bytes already encoded elsewhere (a plain copy). */
+  writeBytesChunk(offset, bytes) {
+    const view = this.reserveInput(offset + 4 + bytes.length);
+    this.writeU32(offset, bytes.length);
+    view.set(bytes, offset + 4);
+    return offset + 4 + bytes.length;
+  }
+
   /**
    * Encode patches into the input buffer. Each patch is either a leaf patch
-   * `{path, exists, value}` (shared/patch.ts), optionally with a pre-serialized
-   * `json` for its value, or an id-keyed structural patch
+   * `{path, exists, value}` (shared/patch.ts), optionally with its value
+   * pre-serialized as a `json` string or as UTF-8 `bytes` (the history's
+   * scoped commit already produces both), or an id-keyed structural patch
    * `{path: ['layers'], order: [ids], layers: [changed layer objects or JSON]}`.
    */
   encode(patches) {
@@ -136,7 +145,7 @@ export class WasmMirror {
       this.reserveInput(at + 1);
       this.u8[at++] = kind;
       at = this.writeChunk(at, JSON.stringify(patch.path));
-      if (kind === 1) at = this.writeChunk(at, patch.json ?? JSON.stringify(patch.value));
+      if (kind === 1) at = patch.bytes ? this.writeBytesChunk(at, patch.bytes) : this.writeChunk(at, patch.json ?? JSON.stringify(patch.value));
       else if (kind === 2) {
         at = this.writeChunk(at, JSON.stringify(patch.order));
         this.writeU32(at, patch.layers.length); at += 4;
