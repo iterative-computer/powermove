@@ -34,7 +34,12 @@ struct CMTime {
 }
 
 const CMTIME_VALID: u32 = 1;
-const INVALID_TIME: CMTime = CMTime { value: 0, timescale: 0, flags: 0, epoch: 0 };
+const INVALID_TIME: CMTime = CMTime {
+    value: 0,
+    timescale: 0,
+    flags: 0,
+    epoch: 0,
+};
 
 type OutputCallback = extern "C" fn(*mut c_void, *mut c_void, OSStatus, u32, CMSampleBufferRef);
 
@@ -53,7 +58,12 @@ unsafe extern "C" {
         session_out: *mut VTSession,
     ) -> OSStatus;
     fn VTSessionSetProperty(session: VTSession, key: CFStringRef, value: CFTypeRef) -> OSStatus;
-    fn VTSessionCopyProperty(session: VTSession, key: CFStringRef, allocator: CFAllocatorRef, value_out: *mut c_void) -> OSStatus;
+    fn VTSessionCopyProperty(
+        session: VTSession,
+        key: CFStringRef,
+        allocator: CFAllocatorRef,
+        value_out: *mut c_void,
+    ) -> OSStatus;
     fn VTCompressionSessionPrepareToEncodeFrames(session: VTSession) -> OSStatus;
     fn VTCompressionSessionEncodeFrame(
         session: VTSession,
@@ -79,7 +89,11 @@ unsafe extern "C" {
 
 #[link(name = "CoreVideo", kind = "framework")]
 unsafe extern "C" {
-    fn CVPixelBufferPoolCreatePixelBuffer(allocator: CFAllocatorRef, pool: CVPixelBufferPoolRef, out: *mut CVPixelBufferRef) -> i32;
+    fn CVPixelBufferPoolCreatePixelBuffer(
+        allocator: CFAllocatorRef,
+        pool: CVPixelBufferPoolRef,
+        out: *mut CVPixelBufferRef,
+    ) -> i32;
     fn CVPixelBufferLockBaseAddress(pb: CVPixelBufferRef, flags: u64) -> i32;
     fn CVPixelBufferUnlockBaseAddress(pb: CVPixelBufferRef, flags: u64) -> i32;
     fn CVPixelBufferGetPlaneCount(pb: CVPixelBufferRef) -> usize;
@@ -193,7 +207,13 @@ struct CallbackState {
     latency_ms: Mutex<Vec<f64>>,
 }
 
-extern "C" fn on_output(refcon: *mut c_void, source: *mut c_void, status: OSStatus, _flags: u32, sb: CMSampleBufferRef) {
+extern "C" fn on_output(
+    refcon: *mut c_void,
+    source: *mut c_void,
+    status: OSStatus,
+    _flags: u32,
+    sb: CMSampleBufferRef,
+) {
     // SAFETY: refcon is the Arc<CallbackState> pointer kept alive by the session thread
     // until after CompleteFrames and Invalidate.
     let st = unsafe { &*(refcon as *const CallbackState) };
@@ -288,10 +308,22 @@ fn run_session(cfg: &Config, index: usize, stop: &AtomicBool) -> SessionStats {
         )]);
         let empty: CFDictionary<CFType, CFType> = CFDictionary::from_CFType_pairs(&[]);
         let attrs = CFDictionary::from_CFType_pairs(&[
-            (cfstr(kCVPixelBufferPixelFormatTypeKey).as_CFType(), CFNumber::from(cfg.codec.pixel_format() as i32).as_CFType()),
-            (cfstr(kCVPixelBufferWidthKey).as_CFType(), CFNumber::from(cfg.width).as_CFType()),
-            (cfstr(kCVPixelBufferHeightKey).as_CFType(), CFNumber::from(cfg.height).as_CFType()),
-            (cfstr(kCVPixelBufferIOSurfacePropertiesKey).as_CFType(), empty.as_CFType()),
+            (
+                cfstr(kCVPixelBufferPixelFormatTypeKey).as_CFType(),
+                CFNumber::from(cfg.codec.pixel_format() as i32).as_CFType(),
+            ),
+            (
+                cfstr(kCVPixelBufferWidthKey).as_CFType(),
+                CFNumber::from(cfg.width).as_CFType(),
+            ),
+            (
+                cfstr(kCVPixelBufferHeightKey).as_CFType(),
+                CFNumber::from(cfg.height).as_CFType(),
+            ),
+            (
+                cfstr(kCVPixelBufferIOSurfacePropertiesKey).as_CFType(),
+                empty.as_CFType(),
+            ),
         ]);
         let mut session: VTSession = std::ptr::null_mut();
         let rc = VTCompressionSessionCreate(
@@ -311,15 +343,35 @@ fn run_session(cfg: &Config, index: usize, stop: &AtomicBool) -> SessionStats {
             return stats;
         }
         stats.created = true;
-        VTSessionSetProperty(session, kVTCompressionPropertyKey_RealTime, CFBoolean::false_value().as_CFTypeRef());
+        VTSessionSetProperty(
+            session,
+            kVTCompressionPropertyKey_RealTime,
+            CFBoolean::false_value().as_CFTypeRef(),
+        );
         match cfg.codec {
             Codec::Hevc10 => {
-                VTSessionSetProperty(session, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main10_AutoLevel as CFTypeRef);
-                VTSessionSetProperty(session, kVTCompressionPropertyKey_AverageBitRate, CFNumber::from(100_000_000i32).as_CFTypeRef());
+                VTSessionSetProperty(
+                    session,
+                    kVTCompressionPropertyKey_ProfileLevel,
+                    kVTProfileLevel_HEVC_Main10_AutoLevel as CFTypeRef,
+                );
+                VTSessionSetProperty(
+                    session,
+                    kVTCompressionPropertyKey_AverageBitRate,
+                    CFNumber::from(100_000_000i32).as_CFTypeRef(),
+                );
             }
             Codec::H264 => {
-                VTSessionSetProperty(session, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel as CFTypeRef);
-                VTSessionSetProperty(session, kVTCompressionPropertyKey_AverageBitRate, CFNumber::from(60_000_000i32).as_CFTypeRef());
+                VTSessionSetProperty(
+                    session,
+                    kVTCompressionPropertyKey_ProfileLevel,
+                    kVTProfileLevel_H264_High_AutoLevel as CFTypeRef,
+                );
+                VTSessionSetProperty(
+                    session,
+                    kVTCompressionPropertyKey_AverageBitRate,
+                    CFNumber::from(60_000_000i32).as_CFTypeRef(),
+                );
             }
             Codec::ProRes422Hq => {}
         }
@@ -368,8 +420,18 @@ fn run_session(cfg: &Config, index: usize, stop: &AtomicBool) -> SessionStats {
             }
             let pb = buffers[n as usize % buffers.len()];
             state.pending.fetch_add(1, Ordering::AcqRel);
-            let pts = CMTime { value: n * 1001, timescale: 60000, flags: CMTIME_VALID, epoch: 0 };
-            let dur = CMTime { value: 1001, timescale: 60000, flags: CMTIME_VALID, epoch: 0 };
+            let pts = CMTime {
+                value: n * 1001,
+                timescale: 60000,
+                flags: CMTIME_VALID,
+                epoch: 0,
+            };
+            let dur = CMTime {
+                value: 1001,
+                timescale: 60000,
+                flags: CMTIME_VALID,
+                epoch: 0,
+            };
             let rc = VTCompressionSessionEncodeFrame(
                 session,
                 pb,
@@ -434,7 +496,15 @@ mod tests {
     fn h264_session_encodes_frames() {
         let stop = Arc::new(AtomicBool::new(false));
         let h = spawn(
-            Config { codec: Codec::H264, width: 640, height: 360, sessions: 1, max_pending: 16, fps_cap: None, qos: None },
+            Config {
+                codec: Codec::H264,
+                width: 640,
+                height: 360,
+                sessions: 1,
+                max_pending: 16,
+                fps_cap: None,
+                qos: None,
+            },
             stop.clone(),
         );
         std::thread::sleep(std::time::Duration::from_millis(500));

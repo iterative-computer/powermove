@@ -108,7 +108,10 @@ pub fn set_process_darwin_bg() -> Result<(), String> {
     if rc == 0 {
         Ok(())
     } else {
-        Err(format!("setpriority(PRIO_DARWIN_BG) = {rc} errno {}", std::io::Error::last_os_error()))
+        Err(format!(
+            "setpriority(PRIO_DARWIN_BG) = {rc} errno {}",
+            std::io::Error::last_os_error()
+        ))
     }
 }
 

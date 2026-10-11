@@ -1,9 +1,10 @@
 //! Deadline signals from the interactive process to the job process (contract 13).
 //!
 //! In the product, main relays these between the two utility processes. The spike
-//! uses a FIFO created by the orchestrator: A writes fixed 16-byte records (atomic,
+//! uses a FIFO created by the orchestrator: A writes fixed 24-byte records (atomic,
 //! below `PIPE_BUF`), B drains them without blocking between command buffers.
-//! Each record carries the sender's host time so B can measure relay latency.
+//! Each record carries the sender's host time (so B can measure relay latency) and the
+//! vsync tick of the frame it concerns (so B can align its work to A's frame phase).
 
 use std::ffi::CString;
 use std::io;
@@ -16,8 +17,10 @@ pub enum Kind {
     PlaybackStart = b'P',
     /// Playback stopped: job engine may return to full speed.
     PlaybackStop = b'S',
-    /// A frame completed within its deadline (sent every frame; lets B align to A).
+    /// A frame completed within its deadline and below the risk threshold.
     FrameOk = b'F',
+    /// A frame completed after an at-risk or miss signal for it was already sent.
+    LateDone = b'L',
     /// A frame completed late enough to be at risk (latency over the risk threshold)
     /// but still before its deadline.
     AtRisk = b'R',
@@ -31,6 +34,7 @@ impl Kind {
             b'P' => Self::PlaybackStart,
             b'S' => Self::PlaybackStop,
             b'F' => Self::FrameOk,
+            b'L' => Self::LateDone,
             b'R' => Self::AtRisk,
             b'M' => Self::Miss,
             _ => return None,
@@ -38,13 +42,15 @@ impl Kind {
     }
 }
 
-pub const RECORD: usize = 16;
+pub const RECORD: usize = 24;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Message {
     pub kind: Kind,
     /// Sender host time (ns, mach timebase).
     pub sent_ns: u64,
+    /// Vsync tick (host ns) of the frame this message concerns; 0 if none.
+    pub tick_ns: u64,
 }
 
 impl Message {
@@ -52,6 +58,7 @@ impl Message {
         let mut b = [0u8; RECORD];
         b[0] = self.kind as u8;
         b[8..16].copy_from_slice(&self.sent_ns.to_le_bytes());
+        b[16..24].copy_from_slice(&self.tick_ns.to_le_bytes());
         b
     }
 
@@ -62,6 +69,7 @@ impl Message {
         Some(Self {
             kind: Kind::from_u8(b[0])?,
             sent_ns: u64::from_le_bytes(b[8..16].try_into().unwrap()),
+            tick_ns: u64::from_le_bytes(b[16..24].try_into().unwrap()),
         })
     }
 }
@@ -71,14 +79,22 @@ pub fn make_fifo(path: &str) -> io::Result<()> {
     let _ = std::fs::remove_file(path);
     // SAFETY: valid C string.
     let rc = unsafe { libc::mkfifo(c.as_ptr(), 0o600) };
-    if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 fn open(path: &str, flags: i32) -> io::Result<RawFd> {
     let c = CString::new(path).unwrap();
     // SAFETY: valid C string.
     let fd = unsafe { libc::open(c.as_ptr(), flags) };
-    if fd < 0 { Err(io::Error::last_os_error()) } else { Ok(fd) }
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(fd)
+    }
 }
 
 pub struct Sender {
@@ -90,11 +106,24 @@ pub struct Sender {
 impl Sender {
     /// Open the FIFO for writing without blocking (O_RDWR never waits for a reader).
     pub fn open(path: &str) -> io::Result<Self> {
-        Ok(Self { fd: open(path, libc::O_RDWR | libc::O_NONBLOCK)?, sent: 0, dropped: 0 })
+        Ok(Self {
+            fd: open(path, libc::O_RDWR | libc::O_NONBLOCK)?,
+            sent: 0,
+            dropped: 0,
+        })
     }
 
     pub fn send(&mut self, kind: Kind) {
-        let rec = Message { kind, sent_ns: crate::clock::now_ns() }.encode();
+        self.send_tick(kind, 0);
+    }
+
+    pub fn send_tick(&mut self, kind: Kind, tick_ns: u64) {
+        let rec = Message {
+            kind,
+            sent_ns: crate::clock::now_ns(),
+            tick_ns,
+        }
+        .encode();
         // SAFETY: fd is open; RECORD < PIPE_BUF so the write is atomic or fails whole.
         let n = unsafe { libc::write(self.fd, rec.as_ptr() as *const _, RECORD) };
         if n == RECORD as isize {
@@ -119,7 +148,10 @@ pub struct Receiver {
 
 impl Receiver {
     pub fn open(path: &str) -> io::Result<Self> {
-        Ok(Self { fd: open(path, libc::O_RDONLY | libc::O_NONBLOCK)?, carry: Vec::new() })
+        Ok(Self {
+            fd: open(path, libc::O_RDONLY | libc::O_NONBLOCK)?,
+            carry: Vec::new(),
+        })
     }
 
     /// Drain every complete record currently in the pipe.
@@ -153,8 +185,19 @@ mod tests {
 
     #[test]
     fn record_round_trip() {
-        for kind in [Kind::PlaybackStart, Kind::PlaybackStop, Kind::FrameOk, Kind::AtRisk, Kind::Miss] {
-            let m = Message { kind, sent_ns: 0x0123_4567_89ab_cdef };
+        for kind in [
+            Kind::PlaybackStart,
+            Kind::PlaybackStop,
+            Kind::FrameOk,
+            Kind::LateDone,
+            Kind::AtRisk,
+            Kind::Miss,
+        ] {
+            let m = Message {
+                kind,
+                sent_ns: 0x0123_4567_89ab_cdef,
+                tick_ns: 42,
+            };
             assert_eq!(Message::decode(&m.encode()), Some(m));
         }
         assert_eq!(Message::decode(&[b'?'; RECORD]), None);
@@ -170,9 +213,11 @@ mod tests {
         assert!(rx.drain().is_empty());
         tx.send(Kind::PlaybackStart);
         tx.send(Kind::Miss);
-        tx.send(Kind::FrameOk);
-        let got: Vec<Kind> = rx.drain().iter().map(|m| m.kind).collect();
+        tx.send_tick(Kind::FrameOk, 7);
+        let msgs = rx.drain();
+        let got: Vec<Kind> = msgs.iter().map(|m| m.kind).collect();
         assert_eq!(got, vec![Kind::PlaybackStart, Kind::Miss, Kind::FrameOk]);
+        assert_eq!(msgs[2].tick_ns, 7);
         assert_eq!(tx.sent, 3);
         std::fs::remove_file(&path).unwrap();
     }

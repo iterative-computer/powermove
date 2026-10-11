@@ -63,9 +63,7 @@ impl Args {
 
     pub fn num<T: std::str::FromStr>(&self, key: &str, default: T) -> T {
         match self.str(key) {
-            Some(v) => v
-                .parse()
-                .unwrap_or_else(|_| panic!("--{key}: cannot parse {v:?}")),
+            Some(v) => v.parse().unwrap_or_else(|_| panic!("--{key}: cannot parse {v:?}")),
             None => default,
         }
     }
