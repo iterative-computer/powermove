@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn wraps_at_spaces_and_trims() {
-        let l = text_source_lines(&d("aaa bbb ccc", 75.0), &mut Mono, 10.0);
+        let l = text_source_lines(&d("aaa bbb ccc", 65.0), &mut Mono, 10.0);
         assert_eq!(texts(&l), ["aaa", "bbb", "ccc"]);
         assert_eq!(l.iter().map(|l| l.start).collect::<Vec<_>>(), [0, 4, 8]);
     }

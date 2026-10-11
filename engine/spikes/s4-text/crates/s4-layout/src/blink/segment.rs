@@ -104,7 +104,9 @@ fn scan(c: &[EmojiCat], p: usize) -> (usize, bool, bool) {
     let mut l3 = 0;
     if matches!(
         at(p),
-        Some(EmojiCat::EmojiEmojiPresentation | EmojiCat::TagBase | EmojiCat::EmojiModifierBase | EmojiCat::EmojiModifier | EmojiCat::RegionalIndicator)
+        // emoji_presentation's single code points; a lone modifier or
+        // regional indicator is a text_run.
+        Some(EmojiCat::EmojiEmojiPresentation | EmojiCat::TagBase | EmojiCat::EmojiModifierBase)
     ) {
         l3 = 1;
     }
@@ -185,7 +187,9 @@ pub fn symbol_runs(s: &[u16]) -> Vec<(usize, FallbackPriority)> {
             if cursor >= n {
                 break;
             }
-            let peek = if it < n { next_cp(s, off[it]).0 } else { 0xFFFD };
+            // UTF16RagelIterator::PeekCodepoint: the code point after the
+            // iterator's position, U+FFFD past the end.
+            let peek = if it + 1 < n { next_cp(s, off[it + 1]).0 } else { 0xFFFD };
             if !cur_emoji && !chars::maybe_emoji_presentation(peek) {
                 it += 1;
                 next_end = it;
