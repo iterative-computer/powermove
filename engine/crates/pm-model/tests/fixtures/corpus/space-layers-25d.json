@@ -1,0 +1,879 @@
+{
+ "id": "Pspace-layers-25d",
+ "name": "2.5D layers",
+ "w": 640,
+ "h": 360,
+ "fps": 30,
+ "dur": 3,
+ "bg": "#0C0D12",
+ "backgroundFill": {
+  "type": "linear",
+  "angle": 35,
+  "stops": [
+   {
+    "id": "stop-1",
+    "color": "#0C0D12",
+    "position": 0
+   },
+   {
+    "id": "stop-2",
+    "color": "#1B2A4A",
+    "position": 55
+   },
+   {
+    "id": "stop-3",
+    "color": "#3A2A5A",
+    "position": 100
+   }
+  ]
+ },
+ "compId": "Pspace-layers-25d-root",
+ "compName": "2.5D layers",
+ "layers": [
+  {
+   "id": "L00a",
+   "type": "shape",
+   "name": "2D overlay",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": false,
+   "solo": false,
+   "color": "#6C7BE8",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 320,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 20,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "shape": "rect",
+    "color": "#F2C14E",
+    "w": 600,
+    "h": 6,
+    "radius": 24,
+    "stroke": 0,
+    "strokeColor": "#ffffff",
+    "points": 5
+   },
+   "locked_intent": {}
+  },
+  {
+   "id": "L009",
+   "type": "shape",
+   "name": "Coplanar B",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": true,
+   "solo": false,
+   "color": "#6C7BE8",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 530,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 110,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "shape": "ellipse",
+    "color": "#3FCF8E",
+    "w": 100,
+    "h": 100,
+    "radius": 24,
+    "stroke": 0,
+    "strokeColor": "#ffffff",
+    "points": 5
+   },
+   "locked_intent": {}
+  },
+  {
+   "id": "L008",
+   "type": "shape",
+   "name": "Coplanar A",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": true,
+   "solo": false,
+   "color": "#6C7BE8",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 500,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 90,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "shape": "rect",
+    "color": "#4C8DFF",
+    "w": 100,
+    "h": 100,
+    "radius": 24,
+    "stroke": 0,
+    "strokeColor": "#ffffff",
+    "points": 5
+   },
+   "locked_intent": {}
+  },
+  {
+   "id": "L007",
+   "type": "text",
+   "name": "Text in depth",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": true,
+   "solo": false,
+   "color": "#E8E2CF",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": -200,
+     "kf": [
+      {
+       "t": 0,
+       "v": -200,
+       "i": "k005",
+       "inInterp": "linear",
+       "outInterp": "linear",
+       "inEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "outEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "autoBezier": false,
+       "continuous": false
+      },
+      {
+       "t": 2.5,
+       "v": 200,
+       "i": "k006",
+       "inInterp": "linear",
+       "outInterp": "linear",
+       "inEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "outEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "autoBezier": false,
+       "continuous": false
+      }
+     ],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 25,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 440,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 180,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "text": "DEPTH",
+    "boxWidth": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "boxHeight": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "font": "SF Pro Display",
+    "weight": 800,
+    "size": 64,
+    "tracking": -2,
+    "leading": 1.1,
+    "color": "#E8E2CF",
+    "align": "center",
+    "italic": false
+   },
+   "locked_intent": {}
+  },
+  {
+   "id": "L004",
+   "type": "shape",
+   "name": "Card swinging",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": true,
+   "solo": false,
+   "color": "#6C7BE8",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 35,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": -60,
+     "kf": [
+      {
+       "t": 0,
+       "v": -60,
+       "i": "k002",
+       "inInterp": "linear",
+       "outInterp": "linear",
+       "inEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "outEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "autoBezier": false,
+       "continuous": false
+      },
+      {
+       "t": 2.5,
+       "v": 60,
+       "i": "k003",
+       "inInterp": "linear",
+       "outInterp": "linear",
+       "inEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "outEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "autoBezier": false,
+       "continuous": false
+      }
+     ],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 220,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 180,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "shape": "rect",
+    "color": "#FF6B1A",
+    "w": 160,
+    "h": 110,
+    "radius": 12,
+    "stroke": 0,
+    "strokeColor": "#ffffff",
+    "points": 5
+   },
+   "locked_intent": {}
+  },
+  {
+   "id": "L001",
+   "type": "image",
+   "name": "Floor art",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": true,
+   "solo": false,
+   "color": "#A9A9AE",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 70,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 320,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 260,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "asset": "media:corpus-art.svg",
+    "fit": "cover",
+    "w": 420,
+    "h": 236
+   },
+   "locked_intent": {}
+  }
+ ],
+ "comps": {},
+ "assets": {},
+ "markers": [],
+ "work": [
+  0,
+  3
+ ],
+ "params": {},
+ "revision": 0,
+ "edits": [],
+ "created": 1791676800000,
+ "shutter": 0.5
+}

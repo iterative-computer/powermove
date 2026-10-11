@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::collections::btree_map;
 
 pub(crate) use jsnum::array_index;
-pub use jsnum::{number_to_js_string, string_to_number};
+pub use jsnum::{js_trim, number_to_js_string, string_to_number};
 pub use parse::{ParseError, parse, parse_bytes, parse_file_text};
 pub use string::JsString;
 pub use write::{to_canonical_string, write_canonical};
@@ -218,6 +218,39 @@ impl Value {
         match self {
             Value::String(s) => Some(s),
             _ => None,
+        }
+    }
+
+    /// JavaScript truthiness (`if (value)`).
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            Value::Null => false,
+            Value::Bool(b) => *b,
+            Value::Number(n) => *n != 0.0 && !n.is_nan(),
+            Value::String(s) => !s.as_bytes().is_empty(),
+            Value::Array(_) | Value::Object(_) => true,
+        }
+    }
+
+    /// `String(value)` for JSON values.
+    pub fn to_js_string(&self) -> JsString {
+        match self {
+            Value::Null => JsString::from("null"),
+            Value::Bool(b) => JsString::from(if *b { "true" } else { "false" }),
+            Value::Number(n) => JsString::from(number_to_js_string(*n)),
+            Value::String(s) => s.clone(),
+            Value::Array(items) => {
+                // Array.prototype.join: null elements are empty.
+                let parts: Vec<String> = items
+                    .iter()
+                    .map(|item| match item {
+                        Value::Null => String::new(),
+                        other => other.to_js_string().to_string_lossy(),
+                    })
+                    .collect();
+                JsString::from(parts.join(","))
+            }
+            Value::Object(_) => JsString::from("[object Object]"),
         }
     }
 

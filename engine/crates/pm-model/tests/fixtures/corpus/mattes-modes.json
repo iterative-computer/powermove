@@ -1,0 +1,1242 @@
+{
+ "id": "Pmattes-modes",
+ "name": "Track matte modes",
+ "w": 640,
+ "h": 360,
+ "fps": 30,
+ "dur": 3,
+ "bg": "#0C0D12",
+ "backgroundFill": {
+  "type": "linear",
+  "angle": 35,
+  "stops": [
+   {
+    "id": "stop-1",
+    "color": "#0C0D12",
+    "position": 0
+   },
+   {
+    "id": "stop-2",
+    "color": "#1B2A4A",
+    "position": 55
+   },
+   {
+    "id": "stop-3",
+    "color": "#3A2A5A",
+    "position": 100
+   }
+  ]
+ },
+ "compId": "Pmattes-modes-root",
+ "compName": "Track matte modes",
+ "layers": [
+  {
+   "id": "L00g",
+   "type": "text",
+   "name": "Matte luma-inverted",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": false,
+   "solo": false,
+   "color": "#E8E2CF",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 480,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 270,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": -10,
+     "kf": [
+      {
+       "t": 0,
+       "v": -10,
+       "i": "k00e",
+       "inInterp": "linear",
+       "outInterp": "linear",
+       "inEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "outEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "autoBezier": false,
+       "continuous": false
+      },
+      {
+       "t": 2.5,
+       "v": 10,
+       "i": "k00f",
+       "inInterp": "linear",
+       "outInterp": "linear",
+       "inEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "outEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "autoBezier": false,
+       "continuous": false
+      }
+     ],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "text": "MATTE",
+    "boxWidth": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "boxHeight": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "font": "SF Pro Display",
+    "weight": 900,
+    "size": 64,
+    "tracking": -2,
+    "leading": 1.1,
+    "color": "#808080",
+    "align": "center",
+    "italic": false
+   },
+   "locked_intent": {}
+  },
+  {
+   "id": "L00d",
+   "type": "image",
+   "name": "Target luma-inverted",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": false,
+   "solo": false,
+   "color": "#A9A9AE",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": "L00g",
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 480,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 270,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "asset": "media:corpus-art.svg",
+    "fit": "cover",
+    "w": 300,
+    "h": 168
+   },
+   "locked_intent": {},
+   "matteMode": {
+    "v": "luma-inverted",
+    "kf": [],
+    "expr": null
+   }
+  },
+  {
+   "id": "L00c",
+   "type": "text",
+   "name": "Matte luma",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": false,
+   "solo": false,
+   "color": "#E8E2CF",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 160,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 270,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": -10,
+     "kf": [
+      {
+       "t": 0,
+       "v": -10,
+       "i": "k00a",
+       "inInterp": "linear",
+       "outInterp": "linear",
+       "inEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "outEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "autoBezier": false,
+       "continuous": false
+      },
+      {
+       "t": 2.5,
+       "v": 10,
+       "i": "k00b",
+       "inInterp": "linear",
+       "outInterp": "linear",
+       "inEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "outEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "autoBezier": false,
+       "continuous": false
+      }
+     ],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "text": "MATTE",
+    "boxWidth": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "boxHeight": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "font": "SF Pro Display",
+    "weight": 900,
+    "size": 64,
+    "tracking": -2,
+    "leading": 1.1,
+    "color": "#FFFFFF",
+    "align": "center",
+    "italic": false
+   },
+   "locked_intent": {}
+  },
+  {
+   "id": "L009",
+   "type": "image",
+   "name": "Target luma",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": false,
+   "solo": false,
+   "color": "#A9A9AE",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": "L00c",
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 160,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 270,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "asset": "media:corpus-art.svg",
+    "fit": "cover",
+    "w": 300,
+    "h": 168
+   },
+   "locked_intent": {},
+   "matteMode": {
+    "v": "luma",
+    "kf": [],
+    "expr": null
+   }
+  },
+  {
+   "id": "L008",
+   "type": "text",
+   "name": "Matte alpha-inverted",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": false,
+   "solo": false,
+   "color": "#E8E2CF",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 480,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 90,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": -10,
+     "kf": [
+      {
+       "t": 0,
+       "v": -10,
+       "i": "k006",
+       "inInterp": "linear",
+       "outInterp": "linear",
+       "inEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "outEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "autoBezier": false,
+       "continuous": false
+      },
+      {
+       "t": 2.5,
+       "v": 10,
+       "i": "k007",
+       "inInterp": "linear",
+       "outInterp": "linear",
+       "inEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "outEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "autoBezier": false,
+       "continuous": false
+      }
+     ],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "text": "MATTE",
+    "boxWidth": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "boxHeight": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "font": "SF Pro Display",
+    "weight": 900,
+    "size": 64,
+    "tracking": -2,
+    "leading": 1.1,
+    "color": "#808080",
+    "align": "center",
+    "italic": false
+   },
+   "locked_intent": {}
+  },
+  {
+   "id": "L005",
+   "type": "image",
+   "name": "Target alpha-inverted",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": false,
+   "solo": false,
+   "color": "#A9A9AE",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": "L008",
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 480,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 90,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "asset": "media:corpus-art.svg",
+    "fit": "cover",
+    "w": 300,
+    "h": 168
+   },
+   "locked_intent": {},
+   "matteMode": {
+    "v": "alpha-inverted",
+    "kf": [],
+    "expr": null
+   }
+  },
+  {
+   "id": "L004",
+   "type": "text",
+   "name": "Matte alpha",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": false,
+   "solo": false,
+   "color": "#E8E2CF",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 160,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 90,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": -10,
+     "kf": [
+      {
+       "t": 0,
+       "v": -10,
+       "i": "k002",
+       "inInterp": "linear",
+       "outInterp": "linear",
+       "inEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "outEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "autoBezier": false,
+       "continuous": false
+      },
+      {
+       "t": 2.5,
+       "v": 10,
+       "i": "k003",
+       "inInterp": "linear",
+       "outInterp": "linear",
+       "inEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "outEase": {
+        "speed": 0,
+        "influence": 33.333333333333336
+       },
+       "autoBezier": false,
+       "continuous": false
+      }
+     ],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "text": "MATTE",
+    "boxWidth": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "boxHeight": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "font": "SF Pro Display",
+    "weight": 900,
+    "size": 64,
+    "tracking": -2,
+    "leading": 1.1,
+    "color": "#FFFFFF",
+    "align": "center",
+    "italic": false
+   },
+   "locked_intent": {}
+  },
+  {
+   "id": "L001",
+   "type": "image",
+   "name": "Target alpha",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": false,
+   "solo": false,
+   "color": "#A9A9AE",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": "L004",
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 160,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 90,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "asset": "media:corpus-art.svg",
+    "fit": "cover",
+    "w": 300,
+    "h": 168
+   },
+   "locked_intent": {},
+   "matteMode": {
+    "v": "alpha",
+    "kf": [],
+    "expr": null
+   }
+  }
+ ],
+ "comps": {},
+ "assets": {},
+ "markers": [],
+ "work": [
+  0,
+  3
+ ],
+ "params": {},
+ "revision": 0,
+ "edits": [],
+ "created": 1791676800000,
+ "shutter": 0.5
+}

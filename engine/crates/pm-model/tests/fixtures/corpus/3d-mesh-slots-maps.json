@@ -1,0 +1,899 @@
+{
+ "id": "P3d-mesh-slots-maps",
+ "name": "Indexed mesh, slots, and maps",
+ "w": 640,
+ "h": 360,
+ "fps": 30,
+ "dur": 3,
+ "bg": "#0C0D12",
+ "backgroundFill": {
+  "type": "solid",
+  "angle": 0,
+  "stops": [
+   {
+    "id": "stop-1",
+    "color": "#0C0D12",
+    "position": 0
+   }
+  ]
+ },
+ "compId": "P3d-mesh-slots-maps-root",
+ "compName": "Indexed mesh, slots, and maps",
+ "layers": [
+  {
+   "id": "L004",
+   "type": "extension",
+   "name": "Camera",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": true,
+   "solo": false,
+   "color": "#9B8CFF",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 5,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 0.8,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "definition": "powermove.3d.camera",
+    "version": 1,
+    "w": 640,
+    "h": 360,
+    "data": {
+     "camera": {
+      "projection": "perspective",
+      "p": {
+       "targetX": {
+        "v": 0,
+        "kf": [],
+        "expr": null
+       },
+       "targetY": {
+        "v": 0,
+        "kf": [],
+        "expr": null
+       },
+       "targetZ": {
+        "v": 0,
+        "kf": [],
+        "expr": null
+       },
+       "fov": {
+        "v": 45,
+        "kf": [],
+        "expr": null
+       },
+       "zoom": {
+        "v": 1,
+        "kf": [],
+        "expr": null
+       },
+       "near": {
+        "v": 0.01,
+        "kf": [],
+        "expr": null
+       },
+       "far": {
+        "v": 1000,
+        "kf": [],
+        "expr": null
+       }
+      }
+     },
+     "environment": {
+      "p": {
+       "ambient": {
+        "v": 0.5,
+        "kf": [],
+        "expr": null
+       },
+       "ambientColor": {
+        "v": "#FFFFFF",
+        "kf": [],
+        "expr": null
+       },
+       "exposure": {
+        "v": 1,
+        "kf": [],
+        "expr": null
+       }
+      },
+      "background": null,
+      "shadows": true
+     }
+    },
+    "params": {}
+   },
+   "locked_intent": {}
+  },
+  {
+   "id": "L003",
+   "type": "extension",
+   "name": "Light",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": true,
+   "solo": false,
+   "color": "#9B8CFF",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 4,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": -3,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 5,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "definition": "powermove.3d.light",
+    "version": 1,
+    "w": 640,
+    "h": 360,
+    "data": {
+     "light": {
+      "type": "sun",
+      "p": {
+       "targetX": {
+        "v": 0,
+        "kf": [],
+        "expr": null
+       },
+       "targetY": {
+        "v": 0,
+        "kf": [],
+        "expr": null
+       },
+       "targetZ": {
+        "v": 0,
+        "kf": [],
+        "expr": null
+       },
+       "color": {
+        "v": "#FFFFFF",
+        "kf": [],
+        "expr": null
+       },
+       "intensity": {
+        "v": 3,
+        "kf": [],
+        "expr": null
+       },
+       "distance": {
+        "v": 0,
+        "kf": [],
+        "expr": null
+       },
+       "decay": {
+        "v": 2,
+        "kf": [],
+        "expr": null
+       },
+       "angle": {
+        "v": 45,
+        "kf": [],
+        "expr": null
+       },
+       "penumbra": {
+        "v": 0.4,
+        "kf": [],
+        "expr": null
+       },
+       "width": {
+        "v": 1,
+        "kf": [],
+        "expr": null
+       },
+       "height": {
+        "v": 1,
+        "kf": [],
+        "expr": null
+       }
+      },
+      "castShadow": true
+     }
+    },
+    "params": {}
+   },
+   "locked_intent": {}
+  },
+  {
+   "id": "L002",
+   "type": "extension",
+   "name": "Color map with placement",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": true,
+   "solo": false,
+   "color": "#9B8CFF",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 30,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 1.4,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "definition": "powermove.3d.object",
+    "version": 1,
+    "w": 640,
+    "h": 360,
+    "data": {
+     "object": {
+      "source": {
+       "primitive": "box"
+      },
+      "material": {
+       "placement": {
+        "scaleX": 2,
+        "scaleY": 2,
+        "offsetX": 0,
+        "offsetY": 0,
+        "rotation": 15
+       },
+       "p": {
+        "color": {
+         "v": "#FFFFFF",
+         "kf": [],
+         "expr": null
+        },
+        "roughness": {
+         "v": 0.5,
+         "kf": [],
+         "expr": null
+        },
+        "metalness": {
+         "v": 0.1,
+         "kf": [],
+         "expr": null
+        },
+        "emissive": {
+         "v": "#000000",
+         "kf": [],
+         "expr": null
+        },
+        "emissiveIntensity": {
+         "v": 1,
+         "kf": [],
+         "expr": null
+        },
+        "opacity": {
+         "v": 1,
+         "kf": [],
+         "expr": null
+        }
+       },
+       "maps": {
+        "color": "media:still.webp"
+       },
+       "doubleSided": true
+      },
+      "useSourceMaterials": false,
+      "slots": [],
+      "castShadow": true,
+      "receiveShadow": true
+     }
+    },
+    "params": {}
+   },
+   "locked_intent": {}
+  },
+  {
+   "id": "L001",
+   "type": "extension",
+   "name": "Indexed mesh with two slots",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": true,
+   "solo": false,
+   "color": "#9B8CFF",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 20,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 25,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": -1.3,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "definition": "powermove.3d.object",
+    "version": 1,
+    "w": 640,
+    "h": 360,
+    "data": {
+     "object": {
+      "source": {
+       "mesh": {
+        "positions": [
+         -1,
+         -1,
+         0,
+         1,
+         -1,
+         0,
+         1,
+         1,
+         0,
+         -1,
+         1,
+         0,
+         -1,
+         -1,
+         -1,
+         1,
+         -1,
+         -1
+        ],
+        "indices": [
+         0,
+         1,
+         2,
+         0,
+         2,
+         3,
+         0,
+         4,
+         5,
+         0,
+         5,
+         1
+        ],
+        "groups": [
+         {
+          "start": 0,
+          "count": 6,
+          "materialIndex": 0
+         },
+         {
+          "start": 6,
+          "count": 6,
+          "materialIndex": 1
+         }
+        ],
+        "uvs": [
+         0,
+         0,
+         1,
+         0,
+         1,
+         1,
+         0,
+         1,
+         0,
+         1,
+         1,
+         1
+        ]
+       }
+      },
+      "material": {
+       "p": {
+        "color": {
+         "v": "#C7C4FF",
+         "kf": [],
+         "expr": null
+        },
+        "roughness": {
+         "v": 0.4,
+         "kf": [],
+         "expr": null
+        },
+        "metalness": {
+         "v": 0.1,
+         "kf": [],
+         "expr": null
+        },
+        "emissive": {
+         "v": "#000000",
+         "kf": [],
+         "expr": null
+        },
+        "emissiveIntensity": {
+         "v": 1,
+         "kf": [],
+         "expr": null
+        },
+        "opacity": {
+         "v": 1,
+         "kf": [],
+         "expr": null
+        }
+       },
+       "maps": {},
+       "doubleSided": true
+      },
+      "useSourceMaterials": false,
+      "slots": [
+       {
+        "id": "front",
+        "name": "Front",
+        "material": {
+         "p": {
+          "color": {
+           "v": "#FF6B1A",
+           "kf": [],
+           "expr": null
+          },
+          "roughness": {
+           "v": 0.4,
+           "kf": [],
+           "expr": null
+          },
+          "metalness": {
+           "v": 0,
+           "kf": [],
+           "expr": null
+          },
+          "emissive": {
+           "v": "#000000",
+           "kf": [],
+           "expr": null
+          },
+          "emissiveIntensity": {
+           "v": 1,
+           "kf": [],
+           "expr": null
+          },
+          "opacity": {
+           "v": 1,
+           "kf": [],
+           "expr": null
+          }
+         },
+         "maps": {},
+         "doubleSided": true
+        }
+       },
+       {
+        "id": "floor",
+        "name": "Floor",
+        "material": {
+         "p": {
+          "color": {
+           "v": "#4C8DFF",
+           "kf": [],
+           "expr": null
+          },
+          "roughness": {
+           "v": 0.6,
+           "kf": [],
+           "expr": null
+          },
+          "metalness": {
+           "v": 0.3,
+           "kf": [],
+           "expr": null
+          },
+          "emissive": {
+           "v": "#000000",
+           "kf": [],
+           "expr": null
+          },
+          "emissiveIntensity": {
+           "v": 1,
+           "kf": [],
+           "expr": null
+          },
+          "opacity": {
+           "v": 1,
+           "kf": [],
+           "expr": null
+          }
+         },
+         "maps": {},
+         "doubleSided": true
+        }
+       }
+      ],
+      "castShadow": true,
+      "receiveShadow": true
+     }
+    },
+    "params": {}
+   },
+   "locked_intent": {}
+  }
+ ],
+ "comps": {},
+ "assets": {},
+ "markers": [],
+ "work": [
+  0,
+  3
+ ],
+ "params": {},
+ "revision": 0,
+ "edits": [],
+ "created": 1791676800000,
+ "shutter": 0.5
+}

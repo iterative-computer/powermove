@@ -135,6 +135,11 @@ fn u128_to_f64(v: u128) -> f64 {
     v as f64
 }
 
+/// `String.prototype.trim()`.
+pub fn js_trim(s: &str) -> &str {
+    s.trim_matches(is_js_whitespace)
+}
+
 /// WhiteSpace and LineTerminator code points (ECMA-262 §12.2, §12.3).
 fn is_js_whitespace(c: char) -> bool {
     matches!(

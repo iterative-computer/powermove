@@ -5,8 +5,11 @@
 //! * [`hash`]: the canonical document hash.
 //! * [`patch`]: leaf patches with the exact semantics of `src/shared/patch.ts`.
 //! * [`doc`]: the revisioned document tree with id-keyed reconciliation.
+//! * [`canonical`]: the canonical project form (every composition stored
+//!   uniformly) and the legacy composition helpers.
 #![forbid(unsafe_code)]
 
+pub mod canonical;
 pub mod doc;
 pub mod hash;
 pub mod json;
