@@ -12,7 +12,9 @@
 //!   collects the JSON summaries.
 
 pub mod clock;
+pub mod display;
 pub mod gpu;
+pub mod present;
 pub mod signal;
 pub mod stats;
 pub mod sys;

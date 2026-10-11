@@ -18,6 +18,11 @@ libc = "0.2"
 core-foundation = "0.10"
 objc2 = "0.6"
 objc2-metal = "0.3"
+objc2-quartz-core = "0.3"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+objc2-core-foundation = "0.3"
+block2 = "0.6"
 
 [profile.release]
 debug = "line-tables-only"
