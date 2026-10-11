@@ -523,7 +523,8 @@ WS.restoreHistorySnapshot = (snapshot: any) => {
 };
 WS.restoreSnapshot = (snapshot: any) => {
   if (!snapshot || typeof snapshot !== 'object') return WS.activate('design', true);
-  const restored: any = normalizeWorkspace(snapshot);
+  // A project keeps its own saved workspace, which needs the same one-time migrations.
+  const restored: any = normalizeWorkspace(migrateDockedAgent(snapshot));
   const index: any = WS.all.findIndex((item: any) => item.id === restored.id);
   if (index >= 0) WS.all[index] = restored; else WS.all.push(restored);
   WS.current = restored;
