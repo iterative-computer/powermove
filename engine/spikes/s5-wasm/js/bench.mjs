@@ -346,9 +346,11 @@ export async function runAll({ bindings, memory, now, platform, sha256, gc = () 
 
   gc();
   memStage('afterBench');
-  // Interned handles are never released: those of inserted-then-deleted
-  // layers stay, which is most of the heap growth over the benchmark.
+  // What the heap holds beyond the steady state: interned handles are never
+  // released (those of inserted-then-deleted layers stay, about 160 bytes
+  // each), and the input buffer keeps the capacity of the largest patch.
   results.stages.afterBench.handles = mirror.handleCount();
+  results.stages.afterBench.inputCapacityBytes = mirror.inputCap;
   results.stages.afterBench.layers = mirror.layerCount();
   results.viewRefreshes = mirror.viewRefreshes;
   await onStage('afterBench');

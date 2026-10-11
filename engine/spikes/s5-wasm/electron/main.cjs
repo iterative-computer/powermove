@@ -129,6 +129,8 @@ async function runMode(name) {
   return result;
 }
 
+const writeLine = (line) => new Promise((resolve) => process.stdout.write(`${line}\n`, resolve));
+
 app.whenReady().then(async () => {
   protocol.handle('s5', async (request) => {
     const url = new URL(request.url);
@@ -160,7 +162,8 @@ app.whenReady().then(async () => {
     }
     if (all[name].results?.error) failed = true;
     await writeFile(path.join(root, `results/electron-${name}.local.json`), JSON.stringify(all[name], null, 2));
-    console.log(`mode ${name}: ${all[name].error ? `error (${all[name].error.split('\n')[0]})` : `wasm ${all[name].env?.wasm}${all[name].env?.wasmError ? ` (${all[name].env.wasmError})` : ''}`}`);
+    // Written with a callback: app.exit() does not wait for stdout to drain.
+    await writeLine(`mode ${name}: ${all[name].error ? `error (${all[name].error.split('\n')[0]})` : `wasm ${all[name].env?.wasm}${all[name].env?.wasmError ? ` (${all[name].env.wasmError})` : ''}`}`);
   }
   app.exit(failed ? 1 : 0);
 });
