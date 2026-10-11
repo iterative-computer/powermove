@@ -50,7 +50,7 @@ not when its code lands.
 **After cutover** (each its own plan): ACES, wide-gamut and HDR projects, scopes,
 LUTs and color effects, more delivery formats, Windows, cameras and lights for
 2.5D layers, camera RAW, OpenFX, the second half of proxy and media management
-(phase 4b), the WASM web player (unless decision 8 moves it earlier).
+(Phase 4b), the WASM web player (unless decision 8 moves it earlier).
 
 **Phases**
 
@@ -67,7 +67,7 @@ LUTs and color effects, more delivery formats, Windows, cameras and lights for
 
 3a, 3b, and 3c start together at the Phase 2 gate; the 3c gate requires 3a and 3b.
 
-**Before any engine work:** the bundled FFmpeg is replaced as a standalone
+**Before any Phase 0 release:** the bundled FFmpeg is replaced as a standalone
 compliance fix (section 24, item 1).
 
 **Decisions needed** are in section 29; decisions 10, 11, 12, 13, and 18 block
@@ -223,7 +223,7 @@ Non-test lines at `d5d5b731`, excluding tracked `* 2.ts` duplicates.
 | Playback loop | `legacy/core/engine.ts` | ~500 |
 | Audio and mixer engine | `legacy/core/audio.ts`, non-UI mixer | ~1,830 |
 | Export | `legacy/core/{exporter,frame-capture,frame-preparation,render-queue}.ts`, `main/render-encoder.ts` | ~1,040 |
-| Built-in effect and transition shaders, legacy mesh rendering | `extensions/{effects-basic,transitions-basic}` shader bodies, `kernel/obj.ts` rendering use, `captions/render.ts`, `legacy/core/fonts.ts` | ~950 |
+| Built-in effect and transition rendering glue (the GLSL bodies stay, section 11), legacy mesh rendering | `extensions/{effects-basic,transitions-basic}` binding code, `kernel/obj.ts` rendering use, `captions/render.ts`, `legacy/core/fonts.ts` | ~950 |
 
 About 15,700 lines, plus the parts of three.js r180 (MIT) whose output rendering the
 engine reproduces. The Rust replacement will be larger, because it takes over
@@ -1057,7 +1057,7 @@ by accident. Controls and copy are in appendix D.
 
 | Phase 4a (before cutover) | Phase 4b (first release after cutover) |
 |---|---|
-| Automatic proxies for sources that cannot play in real time on this Mac; whole-clip generation; the representation ladder with reduced-resolution decode; all project and per-clip controls in appendix D; the viewer Media menu; Always Play Original; export safety; offline handling; disk guard; cached preview through an engine memory cache | Content-addressed segments shared across projects; used-range generation; optimized media; the disk render cache with its timeline track; Keep Rendered; background rendering; Storage settings; Collect Project; the Relink sheet; `manage_proxies` |
+| Automatic proxies for sources that cannot play in real time on this Mac; whole-clip generation; the representation ladder with reduced-resolution decode; the appendix D controls marked 4a; the viewer Media menu; Always Play Original; export safety; offline handling; disk guard; cached preview through an engine memory cache | Content-addressed segments shared across projects; used-range generation; optimized media; the disk render cache with its timeline track; Keep Rendered; background rendering; Storage settings; Collect Project; the Relink sheet; `manage_proxies` |
 
 ### 14.3 The representation ladder
 
@@ -1178,7 +1178,8 @@ evaluate → [Blender stage] → render (float) → output transform
   per frame, shutter sample, and nested composition, ahead of compositing. A frame's
   layer renders may be batched in one worker invocation only when S7 shows equal
   surfaces; several workers only within the memory lease. Worker settings are pinned:
-  16-bit RGBA PNG, `dither_intensity = 0`, `look = 'None'`, sRGB display device,
+  16-bit RGBA PNG, `view_transform = 'AgX'`, `dither_intensity = 0`, `look = 'None'`,
+  sRGB display device,
   gamma 1, scene-following image color management, fast compression; the engine
   ignores PNG `gAMA`, `sRGB`, and `iCCP` chunks. The 512 MB output cap is raised or
   surfaces stream per layer, because one 8192² 16-bit layer is 512 MiB. Cancel stops
@@ -1450,7 +1451,8 @@ gains a real compile through the engine's pipeline. WGSL is optional at apiVersi
 
 ### Agents and MCP
 
-All tools keep their schemas.
+All tools keep their schemas; changes are additive and optional (`export_video` `mode`,
+the queued result).
 
 - **Frames.** `render_frames`, composition contact sheets, and `observeVisual` become
   batched engine requests at agent priority, carrying the agent's revision
@@ -1476,7 +1478,7 @@ All tools keep their schemas.
   project; on the hidden host each pinned project has its own document host.
 - **External MCP limits** stay: 10 s auth, 2 MiB lines, 32 queued requests, one call at a
   time per connection and per stdio relay, 64 MiB responses.
-- **New in Phase 4b:** `manage_proxies`.
+- **New:** `get_render_status` (Phase 3b); `manage_proxies` (Phase 4b).
 
 ## 21. Media management and project files
 
@@ -1596,7 +1598,8 @@ Playwright Chromium on SwiftShader, with no headless document host
 it switches to `pm-wasm`. Its fixes: captions tools routed there without
 `captions/install`; `editing.ts:927` calling `PM.raster` unguarded; history cleared on
 every project switch (`engine/main.ts:106-115`); agent export and save routed to it with
-no exporter (`server/runs.ts:20-23,194`), which go to the job engine in Phase 3c.
+no exporter (`server/runs.ts:20-23,194`); in Phase 3c export goes to the job engine and
+save to the host-services packer.
 
 ### The CLI
 
@@ -1622,7 +1625,7 @@ Settled with counsel before the dependent work ships.
 1. **FFmpeg (standalone, urgent).** The shipped `ffmpeg-static` binary is a third-party
    build whose configuration includes components that must not be redistributed.
    Replacing it is a compliance fix that ships before any Phase 0 release and does not
-   wait for the rewrite. Our build: pinned version, LGPL or GPLv3-compatible components
+   wait for the rewrite; its release needs Jude's authorization. Our build: pinned version, LGPL or GPLv3-compatible components
    only, never `--enable-nonfree`; dylibs for the engine plus an `ffmpeg` executable from
    the same configuration (including libfreetype `drawtext`, `silencedetect`, `ebur128`,
    `astats`, scene detection, MJPEG and PNG encoders, libvpx, libopus) for transcription,
@@ -1782,9 +1785,9 @@ Work:
 Gates, per consumer:
 
 - S5, S4's layout half, and contracts 1, 5, 9 gate Phase 1.
-- S1, S2, S6, S8, the FFmpeg replacement, the runners, and the remaining contracts gate
-  Phase 2.
-- S3, S4's rendering half, and S7 gate Phase 3a.
+- S1, S2, S6, S8, the runners, and the remaining contracts gate Phase 2 (the FFmpeg
+  replacement has already shipped by then, section 24).
+- S3, S4's rendering half, and S7 gate Phase 3a; S7 also gates Phase 3b.
 
 ### Phase 1: Evaluation and the write path
 
@@ -1837,8 +1840,10 @@ blur, 2.5D, the full 3D scene pass (section 8), Blender surface compositing and 
 parity, adjustment layers, retiming, continuous precomp rasterization on level 2, linear
 blending, the internal scope tool.
 
-Gate: render parity including the 3D and Blender classes; linear-blending invariants,
-antialiasing, 3D, and determinism bars; text review; Phase 3a performance rows.
+Gate: render parity including the 3D and Blender classes; the section 11 shader gate
+(repository, Store, docs samples, generated agent corpus); linear-blending invariants and
+linear blending, antialiasing, 3D, and determinism bars; text review; Phase 3a
+performance rows.
 
 ### Phase 3b: Media and delivery
 
@@ -1870,7 +1875,7 @@ Section 14.2's Phase 4a column.
 
 Gate: Phase 4a performance rows on the three machines without user action; the export
 safety byte-identity test; no proxy pixels in exports without a draft choice; proxies
-survive moves, relinks, and relaunch; disk guard enforced.
+survive moves, relinks, and relaunch; disk guard enforced; the section 2 Proxies bar.
 
 ### Phase 5: Cutover
 
@@ -1941,8 +1946,8 @@ Drafted in Phase 0 as Rust types and RFCs; frozen when their consumer phase star
 | Lane | Owns | Phases |
 |---|---|---|
 | Model and evaluation | `pm-time`, `pm-model`, `pm-eval`, `pm-edit`, `pm-wasm`, editor-helper shims | 0, 1 |
-| Renderer write path | Write barrier, flush, identity registry, auditor, dual-answer mode, consistency check, writer-inventory script, frame-rate validator, `minReaderVersion` and `requiresEngine`, headless document host | 0, 1, 2 |
-| Text and vectors | `pm-text`, font registry, `pm-vector` | 0, 1, 3a |
+| Renderer write path | Write barrier, flush, identity registry, auditor, dual-answer mode, consistency check, writer-inventory script, frame-rate validator, `minReaderVersion` and `requiresEngine`, headless document host and its per-project instances | 0, 1, 2, 3c |
+| Text and vectors | `pm-text`, font registry, `pm-vector` | 0, 1, 2, 3a |
 | 3D | `pm-geom3d`, 3D scene pass, depth and ID surface, `pm-blender`, 3D viewport integration | 0, 1, 2, 3a, 3b, 3c |
 | Media | `pm-media`, decoders, readers, index, chroma, content hashing | 0, 2, 3b |
 | GPU and render | `pm-gpu`, `pm-render` 2D, GLSL pipeline, definition snapshots, fallback runner | 0, 2, 3a |
