@@ -483,6 +483,94 @@ pub fn add_missing_varyings(vs: &str, fs: &str) -> String {
     format!("{vs}{extra}")
 }
 
+/// Step 2i: std140 gives `uniform float a[N]` (and `vec2`, `int`, `ivec2`, `uint`,
+/// `bool` arrays) a 16-byte stride; naga's MSL back end lays such arrays out at the
+/// element size, so later block members move. The array is declared as the matching
+/// 4-component vector (same stride, same offsets) and every access takes the original
+/// components. Returns the widened names with their original component counts.
+pub fn widen_uniform_arrays(source: &str) -> Result<(String, Vec<(String, u32)>)> {
+    let mut widened: Vec<(String, u32)> = Vec::new();
+    let mut out = String::with_capacity(source.len());
+    for line in source.lines() {
+        let t = line.trim();
+        let tokens: Vec<&str> = t.trim_end_matches(';').split_whitespace().collect();
+        if tokens.first() == Some(&"uniform") && t.ends_with(';') && t.contains('[') && !t.contains('(') {
+            let ty_index = if ["highp", "mediump", "lowp"].contains(&tokens.get(1).copied().unwrap_or("")) { 2 } else { 1 };
+            let ty = tokens.get(ty_index).copied().unwrap_or("");
+            let wide = match ty {
+                "float" => Some(("vec4", 1)),
+                "vec2" => Some(("vec4", 2)),
+                "int" => Some(("ivec4", 1)),
+                "ivec2" => Some(("ivec4", 2)),
+                "uint" => Some(("uvec4", 1)),
+                "uvec2" => Some(("uvec4", 2)),
+                "bool" => Some(("bvec4", 1)),
+                "bvec2" => Some(("bvec4", 2)),
+                _ => None,
+            };
+            if let Some((wide_ty, comps)) = wide {
+                let rest = tokens[ty_index + 1..].join(" ");
+                let name = rest.split('[').next().unwrap_or("").trim().to_string();
+                out.push_str(&format!("uniform {wide_ty} {rest};\n"));
+                widened.push((name, comps));
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    for (name, comps) in &widened {
+        let swizzle = if *comps == 1 { ".x" } else { ".xy" };
+        out = suffix_indexed(&out, name, swizzle)?;
+    }
+    Ok((out, widened))
+}
+
+/// Appends `suffix` after every `name[ ... ]` (balanced brackets) outside declarations.
+fn suffix_indexed(source: &str, name: &str, suffix: &str) -> Result<String> {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len() + 64);
+    let mut i = 0;
+    while i < bytes.len() {
+        let at_name = source[i..].starts_with(name)
+            && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
+            && !source[i + name.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_');
+        if at_name {
+            let line_start = source[..i].rfind('\n').map(|p| p + 1).unwrap_or(0);
+            let is_decl = source[line_start..i].trim_start().starts_with("uniform");
+            let rest = &source[i + name.len()..];
+            let trimmed = rest.trim_start();
+            if !is_decl && trimmed.starts_with('[') {
+                let open = i + name.len() + (rest.len() - trimmed.len());
+                let mut depth = 0;
+                let mut close = None;
+                for (k, ch) in source[open..].char_indices() {
+                    match ch {
+                        '[' => depth += 1,
+                        ']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                close = Some(open + k);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let close = close.ok_or_else(|| anyhow!("unbalanced index into {name}"))?;
+                out.push_str(&source[i..=close]);
+                out.push_str(suffix);
+                i = close + 1;
+                continue;
+            }
+        }
+        let ch = source[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    Ok(out)
+}
+
 /// Step 2c: vertex inputs of matrix type (`in mat4 instanceMatrix;`) become one vec
 /// input per column, `name_pmcK`, and uses are rebuilt with a matrix constructor.
 /// naga does not accept matrix-typed entry point inputs.
@@ -807,6 +895,8 @@ pub fn compile(vertex_src: &str, fragment_src: &str) -> Result<Program> {
     let vs = split_matrix_attributes(&vs)?;
     let vs = rename_vulkan_keywords(&rewrite_modf(&expand_io_arrays(&vs)?));
     let fs = rename_vulkan_keywords(&rewrite_modf(&expand_io_arrays(&fs)?));
+    let (vs, vs_wide) = widen_uniform_arrays(&vs)?;
+    let (fs, fs_wide) = widen_uniform_arrays(&fs)?;
     let [vs, fs] = assign_sampler_bindings([&vs, &fs]);
     let vs = add_missing_varyings(&vs, &fs);
     let vs = wrap_vertex_main(&vs)?;
@@ -839,6 +929,14 @@ pub fn compile(vertex_src: &str, fragment_src: &str) -> Result<Program> {
         .collect();
     reflect(&mut program, Stage::Vertex, &array_names)?;
     reflect(&mut program, Stage::Fragment, &array_names)?;
+    // Widened arrays keep their GL element size for uniform writes.
+    for (name, comps) in vs_wide.iter().chain(fs_wide.iter()) {
+        for (key, slot) in program.uniforms.iter_mut() {
+            if key == name || (key.starts_with(name.as_str()) && key[name.len()..].starts_with('[')) {
+                slot.rows = *comps;
+            }
+        }
+    }
     Ok(program)
 }
 
@@ -1015,6 +1113,17 @@ mod tests {
         let fs = "#version 300 es\nprecision highp float;\nin vec4 vCoord[ 2 ];\nlayout(location = 0) out vec4 o;\nvoid main() { float i; float f = modf(vCoord[ 1 ].x * 3.5, i); o = vCoord[ 0 ] + vec4(f, i, 0.0, 0.0); }\n";
         let p = compile(vs, fs).expect("compile");
         assert!(p.preprocessed[0].contains("vCoord_pm1") && p.preprocessed[1].contains("pm_modf"));
+    }
+
+    #[test]
+    fn widens_scalar_uniform_arrays() {
+        let vs = "#version 300 es\nin vec3 position;\nuniform float w[ 3 ];\nuniform float after;\nvoid main() { float s = 0.0; for (int i = 0; i < 3; i++) s += w[ i ]; gl_Position = vec4(position * s * after, 1.0); }\n";
+        let fs = "#version 300 es\nprecision highp float;\nlayout(location = 0) out vec4 o;\nvoid main() { o = vec4(1.0); }\n";
+        let p = compile(vs, fs).expect("compile");
+        assert_eq!(p.uniforms["w[1]"].offset, 16);
+        assert_eq!(p.uniforms["w[1]"].rows, 1);
+        assert_eq!(p.uniforms["w"].count, 3);
+        assert_eq!(p.uniforms["after"].offset, 48);
     }
 
     #[test]
