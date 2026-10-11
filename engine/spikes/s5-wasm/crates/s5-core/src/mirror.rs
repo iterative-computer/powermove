@@ -628,7 +628,10 @@ impl Mirror {
                 {
                     let slot = self.slots[s as usize].as_ref().expect("live slot");
                     let end = start + slot.raw.len();
-                    if slot.claimed != pass && end <= arr.len() && arr[start..end] == slot.raw[..] {
+                    if slot.claimed != pass
+                        && end <= arr.len()
+                        && bytes_eq(&arr[start..end], &slot.raw)
+                    {
                         self.stats.bytes_compared += slot.raw.len() as u64;
                         kept = Some((s, end));
                     }
@@ -742,7 +745,7 @@ impl Mirror {
                 (Some(&(bytes, value)), Some(s)) => {
                     let same = self.slots[s as usize]
                         .as_ref()
-                        .is_some_and(|x| x.raw[..] == bytes[..]);
+                        .is_some_and(|x| bytes_eq(&x.raw, bytes));
                     if same {
                         self.stats.layers_kept += 1;
                         s
@@ -945,7 +948,7 @@ impl Mirror {
         }
         let s = self.order[index];
         let old_id = self.slot(s).data.id.clone();
-        if self.slot(s).raw[..] == json[..] {
+        if bytes_eq(&self.slot(s).raw, json) {
             self.stats.layers_kept += 1;
             return Ok(());
         }
@@ -1031,6 +1034,22 @@ fn quick_id(arr: &[u8], start: usize) -> Option<&str> {
     std::str::from_utf8(&body[..end]).ok()
 }
 
+/// Byte equality eight bytes at a time. Slice `==` lowers to `memcmp`, which
+/// on wasm32 is compiler-builtins' byte-at-a-time loop (there is no wasm
+/// instruction for it); keeping unchanged layers compares about 1 MB per
+/// structural patch on the 884-layer project.
+#[inline]
+pub fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let (a8, a_tail) = a.split_at(a.len() & !7);
+    let (b8, b_tail) = b.split_at(b.len() & !7);
+    a8.chunks_exact(8).zip(b8.chunks_exact(8)).all(|(x, y)| {
+        u64::from_ne_bytes(x.try_into().unwrap()) == u64::from_ne_bytes(y.try_into().unwrap())
+    }) && a_tail == b_tail
+}
+
 /// Bit-level equality, so a NaN-valued property compares equal to itself.
 fn props_identical(a: &PropEval, b: &PropEval) -> bool {
     match (a, b) {
@@ -1049,4 +1068,27 @@ pub fn mul(m: &[f64; 6], n: &[f64; 6]) -> [f64; 6] {
         m[0] * n[4] + m[2] * n[5] + m[4],
         m[1] * n[4] + m[3] * n[5] + m[5],
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bytes_eq;
+
+    #[test]
+    fn bytes_eq_matches_slice_equality() {
+        let base: Vec<u8> = (0..70u8).collect();
+        for len in 0..base.len() {
+            let a = &base[..len];
+            assert!(bytes_eq(a, a));
+            for flip in 0..len {
+                let mut b = a.to_vec();
+                b[flip] ^= 0x20;
+                assert_eq!(bytes_eq(a, &b), a == &b[..], "len {len} flip {flip}");
+                assert!(!bytes_eq(a, &b));
+            }
+            if len > 0 {
+                assert!(!bytes_eq(a, &base[..len - 1]));
+            }
+        }
+    }
 }
