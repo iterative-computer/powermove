@@ -7,6 +7,7 @@ import { FILE_CHUNK_BYTES } from './file-upload';
 import { checkVersion, changedFile, copySnapshot, fileVersion, hashHandle, publishFile, syncDirectory, syncFile, temporarySibling, type FileVersion } from './durable-file';
 import { isIncrementalProject, readIncrementalIndex, type SaveMedia } from '../shared/project-incremental';
 import { nativeHash, ProjectSave, validateSaveMedia } from './project-save';
+import { NEWER_PROJECT_MESSAGE, needsNewerReader } from '../shared/reader-version';
 
 /** Replace only after every byte has reached disk; a failed write preserves the original. */
 export async function atomicWrite(filePath: string, data: Uint8Array | Iterable<Uint8Array> | AsyncIterable<Uint8Array>): Promise<void> {
@@ -230,14 +231,23 @@ export class ProjectFiles {
           document = JSON.parse((await readExactly(0, info.size)).toString('utf8'));
         }
         const project = document?.proj || document;
-        if (!project || !Array.isArray(project.layers) || !Number.isFinite(project.w) || !Number.isFinite(project.h)) throw new Error('This is not a Powermove project.');
+        // A newer build may change the document's shape; say why it cannot open.
+        const newer = needsNewerReader(document);
+        if (!project || !Array.isArray(project.layers) || !Number.isFinite(project.w) || !Number.isFinite(project.h)) {
+          throw new Error(newer ? `${NEWER_PROJECT_MESSAGE}.` : 'This is not a Powermove project.');
+        }
         const digest = createHash('sha256');
         for await (const chunk of handle.createReadStream({ start: 0, autoClose: false, highWaterMark: FILE_CHUNK_BYTES })) digest.update(chunk);
         const after = await handle.stat();
         if (after.size !== info.size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs) throw new Error('The project changed while opening. Try opening it again.');
         const projectId = randomUUID(), token = randomUUID();
-        this.associations.set(projectId, { path: filePath, hash: digest.digest('hex') });
-        await this.persist();
+        // A project written for a newer reader opens read-only: without an
+        // association, no save can target this file except one the person
+        // chooses again in a Save dialog.
+        if (!newer) {
+          this.associations.set(projectId, { path: filePath, hash: digest.digest('hex') });
+          await this.persist();
+        }
         this.readers.set(token, { handle, size: info.size, mtime: info.mtimeMs, ctime: info.ctimeMs, busy: false });
         return { path: filePath, projectId, token, size: info.size, document, media };
       } catch (error) { await handle.close(); throw error; }

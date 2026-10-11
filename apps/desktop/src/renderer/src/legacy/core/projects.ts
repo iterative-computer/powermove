@@ -1,6 +1,7 @@
 /* Ported from js/core/projects.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { bridge as hostBridge } from '../../kernel/bridge';
+import { needsNewerReader } from '../../../../shared/reader-version';
 
 export function install(PM: PMRegistry): void {
 const R: any = {
@@ -63,8 +64,13 @@ R.put = (proj: any, thumb: any) => {
   if (!proj || !proj.id) return;
   const meta: any = { id: proj.id, name: proj.name || 'Untitled', at: Date.now(), w: proj.w, h: proj.h };
   if (thumb) meta.thumb = thumb;
+  /* A project written for a newer reader is stored once, as opened, so its
+     tab and restart still work. Later writes keep only the library metadata:
+     this build never autosaves a document it may not fully understand. */
+  const frozen = needsNewerReader(proj) && PM.store.get(R.SLOT + proj.id, null) != null;
   R.upsertMeta(meta);
   PM.store.set(R.trashKey, R.trashList().filter((x: any) => x.id !== proj.id));
+  if (frozen) return meta;
   /* Serialize the project passed to us, not whichever project happens to be
      active. This matters for rename/duplicate and keeps every slot canonical. */
   if (PM.store.set(R.SLOT + proj.id, { v: PM.version || '1.0.0', proj }) === false) throw new Error('Project storage is unavailable or full');
@@ -256,6 +262,8 @@ R.openProjects = () => {
 PM.Projects = R;
 PM.bus?.on?.('history:project-patch', (entry: any) => {
   if (!entry?.projectId || !Array.isArray(entry.patches) || !entry.patches.length) return;
+  // Read-only (newer) projects keep no recovery journal; see R.put.
+  if (PM.proj?.id === entry.projectId && needsNewerReader(PM.proj)) return;
   const entries = journal(entry.projectId);
   entries.push({ revision: Number(entry.revision) || 0, patches: entry.patches });
   /* Keep the journal bounded even before the next debounced checkpoint. */

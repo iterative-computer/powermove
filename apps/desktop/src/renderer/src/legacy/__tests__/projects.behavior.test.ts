@@ -108,3 +108,31 @@ it('replays compact recovery patches over the last full checkpoint', () => {
   assert.equal(mem.has('projectJournal.P1'), true);
 });
 
+
+it('stores a project written for a newer reader once and never autosaves it afterwards', () => {
+  const { PM, mem } = projectsModel();
+  PM.proj = { id: 'N1', name: 'Newer', layers: [{ id: 'L1' }], minReaderVersion: 2 };
+  PM.Projects.put(PM.proj);
+  assert.deepEqual(PM.Projects.get('N1').layers, [{ id: 'L1' }], 'the opened document is stored once');
+  // This test store keeps references; the real one stores copies.
+  PM.proj = { ...PM.proj, layers: [...PM.proj.layers, { id: 'L2' }] };
+  PM.Projects.put(PM.proj);
+  PM.Projects.recover({ ...PM.proj, revision: 50 });
+  PM.bus.emit('history:project-patch', { projectId: 'N1', revision: 1, patches: [{ path: ['layers', 1], exists: true, value: { id: 'L2' } }] });
+  assert.equal(mem.has('projectJournal.N1'), false, 'no recovery journal');
+  assert.deepEqual(PM.Projects.get('N1').layers, [{ id: 'L1' }], 'edits never reach storage');
+  assert.equal(PM.Projects.rename('N1', 'Renamed'), 'Renamed');
+  assert.equal(PM.Projects.list().find(m => m.id === 'N1').name, 'Renamed', 'library metadata still updates');
+  assert.deepEqual(PM.Projects.get('N1').layers, [{ id: 'L1' }]);
+});
+
+it('keeps autosaving projects stamped for this reader', () => {
+  const { PM } = projectsModel();
+  PM.proj = { id: 'C1', name: 'Current', layers: [], minReaderVersion: 1 };
+  PM.Projects.put(PM.proj);
+  PM.proj = { ...PM.proj, layers: [{ id: 'L1' }] };
+  PM.Projects.put(PM.proj);
+  assert.deepEqual(PM.Projects.get('C1').layers, [{ id: 'L1' }]);
+  PM.bus.emit('history:project-patch', { projectId: 'C1', revision: 1, patches: [{ path: ['name'], exists: true, value: 'Journaled' }] });
+  assert.equal(PM.Projects.get('C1').name, 'Journaled');
+});
