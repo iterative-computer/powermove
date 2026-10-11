@@ -209,8 +209,30 @@ impl BlinkFuncs<'_> {
         }
         let metrics = self.face.font.glyph_metrics();
         let units = metrics.h_advance(glyph);
-        let px = (units as f64 * self.face.size as f64 / self.face.upem as f64) as f32;
+        let px = match self.face.em_advance {
+            // CoreText's strike-sized color glyph advance, proportional to hmtx.
+            Some(em) => (units as f64 * em as f64 / self.face.upem as f64) as f32,
+            None => (units as f64 * self.face.size as f64 / self.face.upem as f64) as f32,
+        };
         (px * 65536.0f32) as i32
+    }
+}
+
+impl BlinkFuncs<'_> {
+    /// HarfBuzz's `hb_ot` advance (Chromium's pinned HarfBuzz): the unvaried
+    /// `hmtx` advance plus the variation delta rounded to a whole unit
+    /// (`hmtx_accelerator_t::get_advance_with_var_unscaled`), then scaled
+    /// with `em_mult`. HarfRust keeps the fractional delta instead.
+    fn harfbuzz_advance(&self, font: &ShaperFont, glyph: GlyphId) -> i32 {
+        let Some(default) = &self.face.default_font else {
+            return font.default_glyph_h_advance(glyph);
+        };
+        let base = default.glyph_metrics().h_advance(glyph) as f64;
+        let varied = self.face.font.glyph_metrics().h_advance_exact(glyph).to_f64();
+        let delta = (varied - base) as f32;
+        let units = (base as f32 + delta.round()).max(0.0) as i32;
+        let scale = (self.face.size * 65536.0f32) as i32;
+        harfrust::Scale::new(Some((scale, scale)), self.face.upem as i32).scale_x(units)
     }
 }
 
@@ -227,7 +249,7 @@ impl FontFuncs for BlinkFuncs<'_> {
         } else if glyph.to_u32() == UNMATCHED_VS_GLYPH {
             0
         } else {
-            font.default_glyph_h_advance(glyph)
+            self.harfbuzz_advance(font, glyph)
         }
     }
 }
@@ -261,7 +283,9 @@ impl<'r> Shaper<'r> {
             GroupFont::Installed(_) => crate::font::platform_coords(&info, size),
             GroupFont::Custom { settings, .. } => crate::font::custom_coords(&info.data, info.index, &self.setup.desc, settings),
         };
-        self.cache.get(font.face(), &info, coords, size)
+        let face = font.face();
+        let resolver = &mut *self.resolver;
+        self.cache.get(face, &info, coords, size, || resolver.em_advance(face, size))
     }
 
     fn push_font(&mut self, f: GroupFont) -> usize {
@@ -388,6 +412,8 @@ impl<'r> Shaper<'r> {
             let mut i = 0;
             while i < s.len() {
                 let (c, n) = segment::next_cp(s, i);
+                // UTF16TextIterator yields U+FFFD for an unpaired surrogate.
+                let c = if (0xD800..0xE000).contains(&c) { 0xFFFD } else { c };
                 hint.push(c);
                 if !needs_list && !chars::is_common_or_inherited_script(c) {
                     return Some(hint);
@@ -567,7 +593,7 @@ impl<'r> Shaper<'r> {
             s
         };
 
-        let mut queue_chars = |queue: &mut VecDeque<QItem>, slice: &Slice, stage: Stage, queued: &mut bool| {
+        let queue_chars = |queue: &mut VecDeque<QItem>, slice: &Slice, stage: Stage, queued: &mut bool| {
             if !*queued {
                 queue.push_back(QItem { action: if needs_reset(stage) { QAction::Reset } else { QAction::NextFont }, start: 0, num: 0 });
                 *queued = true;

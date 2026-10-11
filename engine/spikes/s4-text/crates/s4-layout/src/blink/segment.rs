@@ -258,7 +258,7 @@ fn get_scripts(ch: u32, dst: &mut Vec<Script>) {
             return;
         }
         for i in 1..dst.len() {
-            if dst[0] == Script::Latin || dst[i].to_icu4c_value() < dst[0].to_icu4c_value() {
+            if dst[0] == Script::Latin || code(dst[i]) < code(dst[0]) {
                 dst.swap(0, i);
             }
         }
@@ -268,12 +268,13 @@ fn get_scripts(ch: u32, dst: &mut Vec<Script>) {
     dst.push(first);
     dst[0] = primary;
     for i in 2..dst.len() {
-        if dst[1] == Script::Latin || dst[i].to_icu4c_value() < dst[1].to_icu4c_value() {
+        if dst[1] == Script::Latin || code(dst[i]) < code(dst[1]) {
             dst.swap(1, i);
         }
     }
 }
 
+#[allow(deprecated)]
 fn code(s: Script) -> u16 {
     s.to_icu4c_value()
 }

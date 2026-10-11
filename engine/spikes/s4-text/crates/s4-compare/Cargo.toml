@@ -1,0 +1,12 @@
+[package]
+name = "s4-compare"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+s4-layout = { path = "../s4-layout" }
+s4-registry = { path = "../s4-registry" }
+serde.workspace = true
+serde_json.workspace = true
