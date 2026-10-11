@@ -54,11 +54,36 @@ impl SlicingPolicy {
     pub const DEFAULT: Self = Self { max_command_buffer_us: 2_000, yield_after_miss_us: 100_000, blender: BlenderThrottle::Pause };
 }
 
+/// Longest yield after a deadline miss. Longer would starve jobs whenever
+/// playback stutters; S8 tunes the default below it.
+pub const MAX_YIELD_AFTER_MISS_US: u32 = 1_000_000;
+
 impl Validate for SlicingPolicy {
     fn validate(&self) -> Result<(), Violation> {
-        ensure(self.max_command_buffer_us > 0 && self.max_command_buffer_us <= 2_000, ContractId::Slicing, || {
+        const C: ContractId = ContractId::Slicing;
+        ensure(self.max_command_buffer_us > 0 && self.max_command_buffer_us <= 2_000, C, || {
             "command buffers during playback are at most 2 ms".into()
+        })?;
+        ensure(self.yield_after_miss_us <= MAX_YIELD_AFTER_MISS_US, C, || {
+            format!("the yield after a miss is at most {MAX_YIELD_AFTER_MISS_US} µs")
+        })?;
+        ensure(!matches!(self.blender, BlenderThrottle::Throttle { max_workers: 0 }), C, || {
+            "a Blender throttle allows at least one worker; use pause for none".into()
         })
+    }
+}
+
+impl Validate for DeadlineSignal {
+    fn validate(&self) -> Result<(), Violation> {
+        const C: ContractId = ContractId::Slicing;
+        match *self {
+            DeadlineSignal::PlaybackStarted { rate, frame_budget_us, .. } => {
+                ensure(rate.is_valid() && rate.num != 0, C, || "playback starts at a non-zero rate".into())?;
+                ensure(frame_budget_us > 0, C, || "the frame budget is positive".into())
+            }
+            DeadlineSignal::DeadlineMiss { overrun_us, .. } => ensure(overrun_us > 0, C, || "a miss overruns by at least 1 µs".into()),
+            DeadlineSignal::PlaybackStopped { .. } | DeadlineSignal::QualityStepDown { .. } => Ok(()),
+        }
     }
 }
 
@@ -142,5 +167,19 @@ mod tests {
     fn policy_caps_command_buffers_at_2ms() {
         assert!(SlicingPolicy::DEFAULT.validate().is_ok());
         assert!(SlicingPolicy { max_command_buffer_us: 2_001, ..SlicingPolicy::DEFAULT }.validate().is_err());
+        assert!(SlicingPolicy { max_command_buffer_us: 0, ..SlicingPolicy::DEFAULT }.validate().is_err());
+        assert!(SlicingPolicy { yield_after_miss_us: 1_000_001, ..SlicingPolicy::DEFAULT }.validate().is_err());
+        assert!(SlicingPolicy { blender: BlenderThrottle::Throttle { max_workers: 0 }, ..SlicingPolicy::DEFAULT }.validate().is_err());
+        assert!(SlicingPolicy { blender: BlenderThrottle::Throttle { max_workers: 1 }, ..SlicingPolicy::DEFAULT }.validate().is_ok());
+    }
+
+    #[test]
+    fn deadline_signals_validate() {
+        let started = |num, frame_budget_us| DeadlineSignal::PlaybackStarted { at: at(1), rate: PlaybackRate { num, den: 1 }, frame_budget_us };
+        assert!(started(1, 16_666).validate().is_ok());
+        assert!(started(-2, 16_666).validate().is_ok(), "reverse playback");
+        assert!(started(0, 16_666).validate().is_err());
+        assert!(started(1, 0).validate().is_err());
+        assert!(DeadlineSignal::DeadlineMiss { at: at(1), frame_seq: Seq::ZERO, overrun_us: 0 }.validate().is_err());
     }
 }

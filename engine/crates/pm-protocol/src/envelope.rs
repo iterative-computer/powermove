@@ -457,6 +457,7 @@ impl Validate for Event {
             Event::Transport(command) => command.validate(),
             Event::Clock(sample) => sample.validate(),
             Event::Slicing(policy) => policy.validate(),
+            Event::Deadline(signal) => signal.validate(),
             Event::LeaseUsage(usage) => usage.validate(),
             Event::JobStatus(status) => status.validate(),
             Event::BlenderSurface(surface) => surface.validate(),
