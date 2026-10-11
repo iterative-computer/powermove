@@ -225,6 +225,20 @@ fn inject(body: &str, text: &str) -> String {
     out
 }
 
+/// Rename identifiers that are legal in WebGL's GLSL ES 3.00 but keywords in
+/// glslang's grammar (`shared`, `buffer`, `precise`, ...), leaving the version
+/// directive alone. Used before the ES validation step so glslang does not
+/// reject what ANGLE accepts.
+pub fn rename_reserved(source: &str) -> String {
+    let mut body = source.to_string();
+    for name in KEYWORDS_450_ONLY {
+        if find_token(&body, name).is_some() {
+            body = rename_token(&body, name, &format!("pm_{name}")).0;
+        }
+    }
+    body
+}
+
 pub fn normalize(source: &str, target: Target) -> Result<Normalized, NormalizeError> {
     // The version directive must be the first non-whitespace token (GLSL ES 3.00 §3.3).
     let trimmed = source.trim_start();

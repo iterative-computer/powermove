@@ -84,27 +84,7 @@ pub fn compile(source: &str, stage: Stage) -> Result<Spirv, CompileError> {
     let messages = sys::glslang_messages_t::DEFAULT
         | sys::glslang_messages_t::SPV_RULES
         | sys::glslang_messages_t::VULKAN_RULES;
-    let input = sys::glslang_input_t {
-        language: sys::glslang_source_t::GLSL,
-        stage: match stage {
-            Stage::Vertex => sys::glslang_stage_t::Vertex,
-            Stage::Fragment => sys::glslang_stage_t::Fragment,
-        },
-        client: sys::glslang_client_t::Vulkan,
-        client_version: sys::glslang_target_client_version_t::Vulkan1_0,
-        target_language: sys::glslang_target_language_t::SPIRV,
-        target_language_version: sys::glslang_target_language_version_t::SPIRV1_0,
-        code: code.as_ptr(),
-        default_version: 450,
-        default_profile: sys::glslang_profile_t::None,
-        force_default_version_and_profile: 0,
-        forward_compatible: 0,
-        messages,
-        resource: resource(),
-        callbacks: sys::glsl_include_callbacks_t { include_system: None, include_local: None, free_include_result: None },
-        callbacks_ctx: std::ptr::null_mut(),
-    };
-    let shader = ShaderHandle(NonNull::new(unsafe { sys::glslang_shader_create(&input) }).expect("glslang_shader_create"));
+    let (input, shader) = create_shader(&code, stage, false, messages);
     let set = match stage {
         Stage::Vertex => VERTEX_SET,
         Stage::Fragment => FRAGMENT_SET,
@@ -148,6 +128,60 @@ pub fn compile(source: &str, stage: Stage) -> Result<Spirv, CompileError> {
     Ok(Spirv { words, preprocessed, warnings: format!("{warnings}{spv_messages}") })
 }
 
+fn create_shader(code: &CString, stage: Stage, es: bool, messages: sys::glslang_messages_t) -> (sys::glslang_input_t, ShaderHandle) {
+    let input = sys::glslang_input_t {
+        language: sys::glslang_source_t::GLSL,
+        stage: match stage {
+            Stage::Vertex => sys::glslang_stage_t::Vertex,
+            Stage::Fragment => sys::glslang_stage_t::Fragment,
+        },
+        client: if es { sys::glslang_client_t::None } else { sys::glslang_client_t::Vulkan },
+        client_version: if es { sys::glslang_target_client_version_t::OpenGL450 } else { sys::glslang_target_client_version_t::Vulkan1_0 },
+        target_language: if es { sys::glslang_target_language_t::None } else { sys::glslang_target_language_t::SPIRV },
+        target_language_version: sys::glslang_target_language_version_t::SPIRV1_0,
+        code: code.as_ptr(),
+        default_version: if es { 100 } else { 450 },
+        default_profile: if es { sys::glslang_profile_t::ES } else { sys::glslang_profile_t::None },
+        force_default_version_and_profile: 0,
+        forward_compatible: 0,
+        messages,
+        resource: resource(),
+        callbacks: sys::glsl_include_callbacks_t { include_system: None, include_local: None, free_include_result: None },
+        callbacks_ctx: std::ptr::null_mut(),
+    };
+    let shader = ShaderHandle(NonNull::new(unsafe { sys::glslang_shader_create(&input) }).expect("glslang_shader_create"));
+    (input, shader)
+}
+
+/// WebGL's compile and link step, reproduced with glslang's GLSL ES 3.00
+/// front end on the author's unmodified program (the compositor's `PM.VERT`
+/// plus the generated fragment shader): ES-only rules such as the mandatory
+/// fragment float precision, and link rules such as matching uniform
+/// precision and type across stages and fragment inputs the vertex stage
+/// does not write. A program WebGL cannot link renders nothing today, so the
+/// engine rejects it the same way instead of rendering it.
+pub fn validate_es(vertex: &str, fragment: &str) -> Result<(), CompileError> {
+    ensure_process();
+    let messages = sys::glslang_messages_t::DEFAULT | sys::glslang_messages_t::VALIDATE_CROSS_STAGE_IO;
+    let program = ProgramHandle(NonNull::new(unsafe { sys::glslang_program_create() }).expect("glslang_program_create"));
+    let mut keep = Vec::new();
+    for (source, stage) in [(vertex, Stage::Vertex), (fragment, Stage::Fragment)] {
+        let code = CString::new(source).map_err(|_| CompileError { phase: "parse", log: "source contains a NUL byte".into() })?;
+        let (input, shader) = create_shader(&code, stage, true, messages);
+        if unsafe { sys::glslang_shader_preprocess(shader.0.as_ptr(), &input) } == 0 || unsafe { sys::glslang_shader_parse(shader.0.as_ptr(), &input) } == 0 {
+            return Err(CompileError { phase: "parse", log: cstr(unsafe { sys::glslang_shader_get_info_log(shader.0.as_ptr()) }) });
+        }
+        unsafe { sys::glslang_program_add_shader(program.0.as_ptr(), shader.0.as_ptr()) };
+        keep.push((code, shader));
+    }
+    if unsafe { sys::glslang_program_link(program.0.as_ptr(), messages.0) } == 0 {
+        return Err(CompileError { phase: "link", log: cstr(unsafe { sys::glslang_program_get_info_log(program.0.as_ptr()) }) });
+    }
+    drop(program);
+    drop(keep);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +199,28 @@ mod tests {
     #[test]
     fn locations_are_assigned_automatically() {
         compile("#version 450\nin vec2 v_st; out vec4 o; void main(){ o = vec4(v_st, 0.0, 1.0); }\n", Stage::Fragment).expect("auto locations");
+    }
+
+    const VERT: &str = "#version 300 es\nprecision highp float;\nin vec2 a_pos;\nuniform vec2 u_res;\nout vec2 v_st;\nvoid main(){ v_st = a_pos; gl_Position = vec4(a_pos / u_res, 0.0, 1.0); }\n";
+
+    #[test]
+    fn es_validation_accepts_a_webgl_program() {
+        validate_es(VERT, "#version 300 es\nprecision highp float;\nin vec2 v_st;\nuniform vec2 u_res;\nout vec4 o;\nvoid main(){ o = vec4(v_st * u_res, 0.0, 1.0); }\n").expect("links");
+        // GL only rejects unwritten fragment inputs that are statically used.
+        validate_es(VERT, "#version 300 es\nprecision highp float;\nin vec2 v_coord;\nout vec4 o;\nvoid main(){ o = vec4(1.0); }\n").expect("unused input links");
+    }
+
+    #[test]
+    fn es_validation_rejects_what_webgl_rejects() {
+        // Uniform precision differs between stages (WebGL: "Precisions of uniform 'u_res' differ").
+        let e = validate_es(VERT, "#version 300 es\nprecision mediump float;\nin vec2 v_st;\nuniform vec2 u_res;\nout vec4 o;\nvoid main(){ o = vec4(v_st * u_res, 0.0, 1.0); }\n").err().expect("precision mismatch");
+        assert_eq!(e.phase, "link", "{}", e.log);
+        // No default float precision in a fragment shader.
+        let e = validate_es(VERT, "#version 300 es\nin vec2 v_st;\nout vec4 o;\nvoid main(){ o = vec4(v_st, 0.0, 1.0); }\n").err().expect("no precision");
+        assert_eq!(e.phase, "parse", "{}", e.log);
+        // A statically used fragment input the vertex stage does not write.
+        let e = validate_es(VERT, "#version 300 es\nprecision highp float;\nin vec2 v_coord;\nout vec4 o;\nvoid main(){ o = vec4(v_coord, 0.0, 1.0); }\n").err().expect("unwritten varying");
+        assert_eq!(e.phase, "link", "{}", e.log);
     }
 
     #[test]

@@ -1,5 +1,8 @@
 //! The section 11 translation pipeline, both back ends:
 //!
+//! Both paths first validate the unmodified GLSL ES 3.00 program with the
+//! compositor's vertex shader, as WebGL's compile and link would.
+//!
 //! * `Path::Naga`: normalize, glslang (relaxed Vulkan rules), varying remap,
 //!   combined-sampler split, naga SPIR-V front end, naga validation with the
 //!   derivative-uniformity diagnostic off, then wgpu (`ShaderSource::Naga`,
@@ -38,7 +41,7 @@ pub const VARYINGS: &[(&str, u32)] = &[("v_uv", 0), ("v_st", 1), ("v_px", 2)];
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Failure {
-    /// normalize, glslang, rewrite, naga-parse, naga-validate, spvc, metal, render
+    /// es-validate, normalize, glslang, rewrite, naga-parse, naga-validate, spvc, metal, render
     pub stage: String,
     pub message: String,
     pub diagnostics: Vec<Diagnostic>,
@@ -195,6 +198,13 @@ fn spvc_stage(module: rspirv::dr::Module, spv: &compile::Spirv, stage: Stage, ti
 
 pub fn translate(gl_vertex: &str, fragment: &str, line_offset: u32, path: Path) -> Result<Translated, Failure> {
     let mut timings = HashMap::new();
+    let start = Instant::now();
+    compile::validate_es(gl_vertex, &normalize::rename_reserved(fragment)).map_err(|e| Failure {
+        stage: "es-validate".into(),
+        message: e.to_string(),
+        diagnostics: errors::map(&e.log, line_offset),
+    })?;
+    timings.insert("es-validate".into(), ms(start));
     let start = Instant::now();
     let target = match path {
         Path::Naga => normalize::Target::Naga,
