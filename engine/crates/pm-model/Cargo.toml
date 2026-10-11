@@ -8,3 +8,9 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+pm-time = { path = "../pm-time" }
+sha2.workspace = true
+ryu-js.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
