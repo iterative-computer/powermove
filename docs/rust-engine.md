@@ -67,8 +67,8 @@ LUTs and color effects, more delivery formats, Windows, cameras and lights for
 
 3a, 3b, and 3c start together at the Phase 2 gate; the 3c gate requires 3a and 3b.
 
-**Before any Phase 0 release:** the bundled FFmpeg is replaced as a standalone
-compliance fix (section 24, item 1).
+**FFmpeg:** the bundled `ffmpeg-static` binary is replaced by our own build as part of
+the rewrite (section 24, item 1; Jude's decision, 2026-10-11).
 
 **Decisions** are in section 29; none remain open.
 
@@ -1622,10 +1622,10 @@ output path.
 
 Settled with counsel before the dependent work ships.
 
-1. **FFmpeg (standalone, urgent).** The shipped `ffmpeg-static` binary is a third-party
-   build whose configuration includes components that must not be redistributed.
-   Replacing it is a compliance fix that ships before any Phase 0 release and does not
-   wait for the rewrite; its release needs Jude's authorization. Our build: pinned version, LGPL or GPLv3-compatible components
+1. **FFmpeg.** The shipped `ffmpeg-static` binary is a third-party build whose
+   configuration includes components that must not be redistributed. Jude chose to
+   replace it as part of the rewrite rather than as a separate release; it is built in
+   Phase 0 and wired in by Phase 2. Our build: pinned version, LGPL or GPLv3-compatible components
    only, never `--enable-nonfree`; dylibs for the engine plus an `ffmpeg` executable from
    the same configuration (including libfreetype `drawtext`, `silencedetect`, `ebur128`,
    `astats`, scene detection, MJPEG and PNG encoders, libvpx, libopus) for transcription,
@@ -1790,8 +1790,8 @@ Work:
 Gates, per consumer:
 
 - S5, S4's layout half, and contracts 1, 5, 9 gate Phase 1.
-- S1, S2, S6, S8, the reference machine setup, and the remaining contracts gate Phase 2 (the FFmpeg
-  replacement has already shipped by then, section 24).
+- S1, S2, S6, S8, the FFmpeg build, the reference machine setup, and the remaining
+  contracts gate Phase 2.
 - S3, S4's rendering half, and S7 gate Phase 3a; S7 also gates Phase 3b.
 
 ### Phase 1: Evaluation and the write path
@@ -2000,7 +2000,7 @@ and reports failures as they are.
 | Long freeze before cutover | Product stalls | Phase 4 split; sizes; freeze ends at 5b |
 | Engine-side features landing in legacy | Moving target | Decision 18 |
 | Toolchain churn | Upgrade cost | Pinned versions; upgrades as lanes |
-| Licensing | Blocked features | Section 24; FFmpeg fixed first |
+| Licensing | Blocked features; current builds keep the bundled FFmpeg until the engine ships | Section 24; our FFmpeg build in Phase 0 |
 | Memory on 8 GB machines | Crashes | Arbiter, leases, base-machine gates with Blender running |
 | Engine crashes | Lost work | Two engines, attribution, backoff, persisted jobs, atomic output |
 | Old builds overwriting new projects | Data loss | `minReaderVersion` guard in Phase 0 |
