@@ -66,7 +66,7 @@ export class Builder {
   }
 
   ch(v: Value, keys?: KeySpec[], expr: string | null = null): Channel {
-    return { v, kf: (keys ?? []).map(spec => this.key(...spec)), expr };
+    return { v, kf: (keys ?? []).map(spec => this.key(spec[0], spec[1], spec[2])), expr };
   }
 
   key(t: number, v: Value, options: KeyOptions = {}): Key {

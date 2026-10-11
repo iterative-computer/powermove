@@ -23,7 +23,7 @@ const LEGACY_KEY_FIELDS = new Set(['eo', 'ei', 'hold']);
 const KEYFRAME_PATH = /\.kf\[\d+\]$/;
 
 /** Every leaf of `expected` must appear unchanged in `actual`. */
-function compareSubset(expected: unknown, actual: unknown, path: string, issues: Issue[]): void {
+export function compareSubset(expected: unknown, actual: unknown, path: string, issues: Issue[]): void {
   if (Array.isArray(expected)) {
     if (!Array.isArray(actual)) { issues.push({ path, message: `array became ${JSON.stringify(actual)?.slice(0, 80)}` }); return; }
     if (actual.length !== expected.length) issues.push({ path, message: `array length ${expected.length} became ${actual.length}` });

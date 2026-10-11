@@ -19,7 +19,7 @@ export const ref = (file: string): string => MEDIA_PREFIX + file;
 
 export interface FixtureInfo {
   file: string; kind: string; hasAlpha?: boolean; skipped?: string | null;
-  expectedColorAt?: { t: number; rgb: number[] };
+  expectedColorAt?: { t: number; rgb: number[] }; expectedColorAt2?: { t: number; rgb: number[] };
 }
 
 export function fixtureManifest(): FixtureInfo[] {
@@ -43,14 +43,14 @@ export const GENERATED_MEDIA: Record<string, () => Uint8Array> = {
 
 export interface MediaSource { name: string; origin: 'fixture' | 'generated'; path: string; bytes: number; sha256: string }
 
-/** Resolve a `media:` name to a file: fixtures from the repository, generated files from `generatedDir`. */
-export function resolveMedia(name: string, generatedDir: string): MediaSource {
+/** Resolve a `media:` name to a file: fixtures from the repository, generated files from `<corpusDir>/media` (generate.ts output). */
+export function resolveMedia(name: string, corpusDir: string): MediaSource {
   const fixture = path.join(fixturesDir, name);
   if ((FIXTURE_FILES as readonly string[]).includes(name)) {
     if (!existsSync(fixture)) throw new Error(`Fixture ${name} is missing from ${fixturesDir}`);
     return describe(name, 'fixture', fixture);
   }
-  if (GENERATED_MEDIA[name]) return describe(name, 'generated', path.join(generatedDir, name));
+  if (GENERATED_MEDIA[name]) return describe(name, 'generated', path.join(corpusDir, 'media', name));
   throw new Error(`Unknown corpus media ${name}`);
 }
 

@@ -13,15 +13,16 @@ function textProperties(): CorpusProject {
   rows.forEach(([name, d], index) => b.add(b.layer('text', { name, d, p: { 'position.x': 320, 'position.y': 50 + index * 62 } })));
   b.add(b.layer('text', {
     name: 'Wrapped paragraph in a box',
-    d: { text: 'Paragraph text wraps inside its box and keeps its leading and alignment across lines.', size: 22, weight: 500, leading: 1.4, align: 'left', boxWidth: b.ch(260, [[0, 260], [2.5, 420]]), boxHeight: b.ch(0) },
-    p: { 'position.x': 330, 'position.y': 320 },
+    d: { text: 'Paragraph text wraps inside its box and keeps its leading and alignment across lines.', size: 18, weight: 500, leading: 1.4, align: 'left', boxWidth: b.ch(260, [[0, 260], [2.5, 420]]), boxHeight: b.ch(0) },
+    // Box text hangs right and down from its position.
+    p: { 'position.x': 40, 'position.y': 272 },
   }));
   b.add(b.layer('text', {
     name: 'Animated content', d: {
       text: b.ch('One', [[0, 'One'], [1, 'Two'], [2, 'Three']]),
       size: b.ch(30, [[0, 30], [2.5, 60]]), color: b.ch('#FF6B1A', [[0, '#FF6B1A'], [2.5, '#4C8DFF']]),
     },
-    p: { 'position.x': 120, 'position.y': 300 },
+    p: { 'position.x': 540, 'position.y': 300 },
   }));
   return project(b, {
     group: 'Text', title: 'Text properties', covers: ['fonts', 'weight', 'italic', 'size', 'tracking', 'leading', 'alignment', 'box wrapping', 'animated text string (steps)', 'animated size', 'color interpolation'],
