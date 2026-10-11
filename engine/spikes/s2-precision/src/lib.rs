@@ -15,3 +15,4 @@ pub mod exp_math;
 pub mod exp_caps;
 pub mod exp_generation;
 pub mod exp_tags;
+pub mod exp_quicktime;

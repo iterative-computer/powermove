@@ -53,6 +53,9 @@ fn run(exp: &str, work: &std::path::Path) -> cf::Result<()> {
     if all || exp == "tags" {
         emit(work, "tags", &exp_tags::run(gpu.as_ref().unwrap(), &work.join("tags"))?)?;
     }
+    if all || exp == "quicktime" {
+        emit(work, "quicktime", &exp_quicktime::run(gpu.as_ref().unwrap(), &work.join("quicktime"))?)?;
+    }
     if all || exp == "math" {
         emit(work, "math", &exp_math::run(gpu.as_ref().unwrap())?)?;
     }
