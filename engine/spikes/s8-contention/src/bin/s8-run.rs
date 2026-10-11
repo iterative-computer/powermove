@@ -9,7 +9,14 @@
 //! locked: in either state WindowServer composites nothing, so the GPU has less
 //! competing work than on an active desktop, and `present-*` scenarios are skipped.
 //!
-//! Usage: `s8-run [--seconds 60] [--only a,b,c] [--out results/<dir>] [--list]`
+//! Other processes on the machine also use the GPU. Before each scenario the
+//! orchestrator waits until external GPU time (per-process `accumulatedGPUTime` from the
+//! IORegistry) is below `--max-external-pct` of wall time, and it reruns a scenario (up to
+//! `--retries`) when external use during A's run exceeded that; the least contaminated
+//! attempt is kept and every attempt is recorded.
+//!
+//! Usage: `s8-run [--seconds 60] [--only a,b,c] [--out results/<dir>] [--list]
+//!         [--max-external-pct 10] [--quiet-wait-s 900] [--retries 2]`
 
 use s8_contention::{Args, display, signal, stats};
 use serde_json::{Value, json};
@@ -453,7 +460,70 @@ fn parse_result(text: &str) -> Option<Value> {
         .and_then(|j| serde_json::from_str(j).ok())
 }
 
-fn run(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::Path) -> Value {
+/// External GPU time over `window` as a fraction of wall time.
+fn external_fraction(window: Duration) -> f64 {
+    let before = gpu_time_by_pid();
+    std::thread::sleep(window);
+    let after = gpu_time_by_pid();
+    let ext = external_gpu_quiet(&before, &after);
+    ext / (window.as_secs_f64() * 1e3)
+}
+
+fn external_gpu_quiet(before: &HashMap<u32, (String, u64)>, after: &HashMap<u32, (String, u64)>) -> f64 {
+    after
+        .iter()
+        .filter_map(|(pid, (_, t))| before.get(pid).map(|b| t.saturating_sub(b.1) as f64 / 1e6))
+        .sum()
+}
+
+/// Gate on a quiet GPU, run, and retry when other processes used more than
+/// `max_ext` of the GPU during A's run. Keeps the least contaminated attempt and records
+/// every attempt.
+fn run(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::Path, gate: &Gate) -> Value {
+    let mut attempts = Vec::new();
+    let mut best: Option<(f64, Value)> = None;
+    for attempt in 0..=gate.retries {
+        let t = Instant::now();
+        let mut quiet = external_fraction(Duration::from_secs(3));
+        while quiet > gate.max_ext && t.elapsed().as_secs_f64() < gate.wait_s {
+            eprintln!("   waiting for a quiet GPU (external {:.1}%)", quiet * 100.0);
+            std::thread::sleep(Duration::from_secs(5));
+            quiet = external_fraction(Duration::from_secs(3));
+        }
+        let mut v = run_once(s, bin, seconds, out);
+        let a_ms = v["a_wall_seconds"].as_f64().unwrap_or(seconds) * 1e3;
+        let ext = v["external_gpu_during_a"]["total_ms"].as_f64().unwrap_or(f64::NAN) / a_ms;
+        v["external_gpu_fraction"] = json!(stats::r(ext, 4));
+        v["quiet_before"] = json!(stats::r(quiet, 4));
+        v["quiet_wait_s"] = json!(stats::r(t.elapsed().as_secs_f64(), 1));
+        attempts.push(json!({
+            "attempt": attempt,
+            "external_gpu_fraction": stats::r(ext, 4),
+            "drops_1f": v["a"]["drops"]["deadline_1_frame"],
+            "drops_2f": v["a"]["drops"]["deadline_2_frames"],
+        }));
+        eprintln!("   attempt {attempt}: external GPU {:.1}% of A's run", ext * 100.0);
+        let clean = ext <= gate.max_ext;
+        if best.as_ref().is_none_or(|(b, _)| ext < *b) {
+            best = Some((ext, v));
+        }
+        if clean {
+            break;
+        }
+    }
+    let (ext, mut v) = best.unwrap();
+    v["attempts"] = json!(attempts);
+    v["contaminated"] = json!(ext > gate.max_ext);
+    v
+}
+
+struct Gate {
+    max_ext: f64,
+    wait_s: f64,
+    retries: usize,
+}
+
+fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::Path) -> Value {
     // Idle baseline: what else is using the GPU right now.
     let idle: Vec<f64> = (0..6)
         .filter_map(|_| {
@@ -599,6 +669,11 @@ fn main() {
         return;
     }
     let seconds: f64 = args.num("seconds", 60.0);
+    let gate = Gate {
+        max_ext: args.num::<f64>("max-external-pct", 10.0) / 100.0,
+        wait_s: args.num("quiet-wait-s", 900.0),
+        retries: args.num("retries", 2),
+    };
     let only: Option<Vec<String>> = args.str("only").map(|o| o.split(',').map(str::to_string).collect());
     let bin = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
     let out = std::path::PathBuf::from(args.string_or("out", "results/latest"));
@@ -616,7 +691,7 @@ fn main() {
             eprintln!("   skipped: display asleep or screen locked");
             continue;
         }
-        let v = run(s, &bin, seconds, &out);
+        let v = run(s, &bin, seconds, &out, &gate);
         std::fs::write(
             out.join(format!("{}.json", s.name)),
             serde_json::to_string_pretty(&v).unwrap(),
