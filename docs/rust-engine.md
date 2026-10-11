@@ -70,7 +70,7 @@ LUTs and color effects, more delivery formats, Windows, cameras and lights for
 **Before any Phase 0 release:** the bundled FFmpeg is replaced as a standalone
 compliance fix (section 24, item 1).
 
-**Decisions** are in section 29; three remain open (8, 11, 13).
+**Decisions** are in section 29; none remain open.
 
 Contents
 
@@ -1743,7 +1743,12 @@ M-series Air with a ProRes engine ("base"), an M-series Pro ("Pro"). Calibrated 
 ## 26. Phases
 
 Ordered by dependency; lanes run in parallel (section 27). The legacy engine stays the
-default until Phase 5b. Each gate has objective criteria; Jude signs off at each gate in
+default until Phase 5b.
+
+**Implementation run.** Jude asked for the implementation in one run, up to a
+beta-ready build (everything through Phase 4a plus the Phase 5a build and the WASM web
+player under decision 8). The run stops there for Jude. Nothing is merged and nothing is
+released: work stays on branches and stacked PRs are not merged. Each gate has objective criteria; Jude signs off at each gate in
 addition.
 
 **Engine-side features during the rewrite** follow decision 18: from Phase 0, a feature
@@ -1753,7 +1758,7 @@ hard freeze starts at Phase 3a and ends at Phase 5b.
 
 ### Phase 0: Foundations, contracts, spikes
 
-Base-machine gates need decision 11. Release-dependent items (the `minReaderVersion`
+Base-machine gates are deferred (decision 11). Release-dependent items (the `minReaderVersion`
 guard, notarizing the placeholder addon) need Jude's release authorization.
 
 Work:
@@ -2013,12 +2018,12 @@ Jude delegated these decisions on 2026-10-11, except the ones marked **Open**.
 | 5 | Disk guard and storage limit | Pause below the larger of 20 GB or 10% free; limit 25% of the cache volume |
 | 6 | Order after cutover | As written in section 26 |
 | 7 | Intel Macs | No, apart from the CLI's existing darwin-x64 support |
-| 8 | Web player and "no trace" | **Open** (Jude): (A) frozen web player v1 for code export, www, and serve after cutover, replaced by the WASM player later; or (B) the WASM player before Phase 5c, so no TypeScript renderer remains anywhere |
-| 9 | Serve interim | Follows decision 8 (web player v1 under A, the WASM player under B) |
+| 8 | Web player and "no trace" | (B): the WASM web player is built before Phase 5c, so no TypeScript renderer remains anywhere. If it proves too complex, code export and the web player are removed instead (Jude accepts this); the www hero and onboarding then play engine-rendered video |
+| 9 | Serve interim | The WASM player; if decision 8 falls back to removal, serve previews use CPU frames from a host-side engine or stay paused |
 | 10 | Crash and session reporting | Beta cohort submitting local crash and session logs; no new backend. Cutover gates use the cohort: crash-free sessions ≥ 99.5% over at least 500 sessions from at least 20 users. Jude recruits the cohort at 5a |
-| 11 | Reference machines | **Open** (Jude): this M4 Max MacBook Pro (128 GB, XDR) is the Pro reference. The base M1 Air (no ProRes engine) and a base M-series Air with a ProRes engine are needed for base-machine gates, physically or by remote access |
+| 11 | Reference machines | Jude's M4 Max MacBook Pro (128 GB, XDR) is the only reference machine for now. Base-machine gates (M1 Air, base Air) are deferred and marked unverified in gate reports |
 | 12 | Licensing | No counsel needed for the pre-cutover macOS scope: an LGPL-only FFmpeg build (no x264, x265, or nonfree components), ProRes only through VideoToolbox, Blender as today. Counsel before Linux or Windows ProRes, software H.264 encode, or camera RAW |
-| 13 | Real-world corpus projects | **Open** (Jude): a handful of real projects kept outside the repository; until then the corpus is synthetic plus e2e fixtures |
+| 13 | Real-world corpus projects | Synthetic projects, e2e fixtures, and Jude's "Powermove ad" project (kept outside the repository) |
 | 14 | 3D rendering | Native port of the three.js r180 subset |
 | 15 | Blender surfaces at cutover | 16-bit PNG through AgX |
 | 16 | Linux | Today's Chromium hidden host stays on Linux until after cutover; Linux and Windows ProRes and H.264 encode decided with counsel then |
