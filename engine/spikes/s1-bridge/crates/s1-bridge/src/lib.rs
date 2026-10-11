@@ -349,9 +349,9 @@ pub fn edr_headroom() -> Result<Vec<EdrHeadroom>> {
     for s in screens.iter() {
         out.push(EdrHeadroom {
             screen: s.localizedName().to_string(),
-            current: s.maximumExtendedDynamicRangeColorComponentValue() as f64,
-            potential: s.maximumPotentialExtendedDynamicRangeColorComponentValue() as f64,
-            reference: s.maximumReferenceExtendedDynamicRangeColorComponentValue() as f64,
+            current: s.maximumExtendedDynamicRangeColorComponentValue(),
+            potential: s.maximumPotentialExtendedDynamicRangeColorComponentValue(),
+            reference: s.maximumReferenceExtendedDynamicRangeColorComponentValue(),
         });
     }
     Ok(out)

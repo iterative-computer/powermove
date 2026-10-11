@@ -53,11 +53,51 @@ struct Input {
     walk: f32,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Grid {
-    origin_us: f64,
-    dur_us: f64,
-    next_k: i64,
+/// The playback PTS grid. Content frame `k` is displayed from `pts(k)` for `dur_us`.
+/// PTS boundaries sit half a refresh interval before vsyncs, so the viewer's choice
+/// of frame at a vsync is insensitive to small timing errors. Frame indices stay
+/// continuous across display-timing updates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Grid {
+    /// PTS of frame `base_k`.
+    pub origin_us: f64,
+    pub base_k: i64,
+    pub dur_us: f64,
+    pub period_us: f64,
+    /// Next frame to render; `None` until playback seeds it from the clock.
+    pub next_k: Option<i64>,
+}
+
+impl Grid {
+    /// `anchor_us` is a vsync time, `period_us` the refresh interval. Content frames
+    /// last a whole number of refresh intervals (60 fps content on a 120 Hz display
+    /// lasts two).
+    pub fn new(anchor_us: f64, period_us: f64) -> Self {
+        let mult = (16_666.667 / period_us).round().max(1.0);
+        Self { origin_us: anchor_us - period_us / 2.0, base_k: 0, dur_us: period_us * mult, period_us, next_k: None }
+    }
+
+    pub fn pts(&self, k: i64) -> f64 {
+        self.origin_us + (k - self.base_k) as f64 * self.dur_us
+    }
+
+    /// First frame whose pts is at or after `t_us`.
+    pub fn first_at_or_after(&self, t_us: f64) -> i64 {
+        self.base_k + ((t_us - self.origin_us) / self.dur_us - 1e-9).ceil() as i64
+    }
+
+    /// Re-anchors to new display timing, keeping the next frame's index. The next
+    /// frame's pts moves to the nearest boundary of the new timing (any vsync is a
+    /// valid boundary); returns how far it moved, in microseconds.
+    pub fn retime(&mut self, anchor_us: f64, period_us: f64) -> f64 {
+        let fresh = Grid::new(anchor_us, period_us);
+        let k = self.next_k.unwrap_or(self.base_k);
+        let old = self.pts(k);
+        let n = ((old - fresh.origin_us) / period_us).round();
+        let new = fresh.origin_us + n * period_us;
+        *self = Grid { origin_us: new, base_k: k, dur_us: fresh.dur_us, period_us, next_k: self.next_k };
+        new - old
+    }
 }
 
 #[derive(Default, Serialize, Clone)]
@@ -71,6 +111,7 @@ pub struct Stats {
     pub releases: u64,
     pub release_mismatches: u64,
     pub regrids: u64,
+    pub max_retime_us: i64,
     pub max_busy_slots: u32,
     pub gpu_us_max: i64,
     pub gpu_us_sum: i64,
@@ -203,7 +244,7 @@ impl Engine {
             if mode == Mode::Playback
                 && let Some(g) = st.grid.as_mut()
             {
-                g.next_k = i64::MIN; // re-seed from "now" on the next iteration
+                g.next_k = None; // re-seed from "now" on the next iteration
             }
         });
     }
@@ -212,29 +253,18 @@ impl Engine {
         self.with(|st| st.lead_frames = lead);
     }
 
-    /// `anchor_us` is a predicted display time (a vsync), `period_us` the refresh
-    /// interval. Content frames last a whole number of refresh intervals (60 fps
-    /// content on a 120 Hz display lasts two), and PTS boundaries sit half an
-    /// interval before display times so selection is insensitive to small errors.
+    /// Display timing from the viewer: a recent vsync (`anchor_us`) and the refresh
+    /// interval. Phase corrections below a quarter interval do not change which vsync
+    /// any frame lands on; larger ones are counted as re-grids.
     pub fn set_display_timing(&self, anchor_us: f64, period_us: f64) {
-        self.with(|st| {
-            let mult = (16_666.667 / period_us).round().max(1.0);
-            let dur = period_us * mult;
-            let origin = anchor_us - period_us / 2.0;
-            match st.grid.as_mut() {
-                None => st.grid = Some(Grid { origin_us: origin, dur_us: dur, next_k: i64::MIN }),
-                Some(g) => {
-                    let err = (origin - g.origin_us).rem_euclid(g.dur_us);
-                    let err = if err > g.dur_us / 2.0 { err - g.dur_us } else { err };
-                    let rate_changed = (dur - g.dur_us).abs() > g.dur_us * 0.002;
-                    if rate_changed || err.abs() > period_us / 4.0 {
-                        // Keep the next frame's index continuous across the re-grid.
-                        let next_pts = g.origin_us + g.next_k.max(0) as f64 * g.dur_us;
-                        let k = ((next_pts - origin) / dur).ceil() as i64;
-                        *g = Grid { origin_us: origin, dur_us: dur, next_k: if g.next_k == i64::MIN { i64::MIN } else { k } };
-                        st.stats.regrids += 1;
-                    }
+        self.with(|st| match st.grid.as_mut() {
+            None => st.grid = Some(Grid::new(anchor_us, period_us)),
+            Some(g) => {
+                let moved = g.retime(anchor_us, period_us);
+                if moved.abs() > period_us / 4.0 {
+                    st.stats.regrids += 1;
                 }
+                st.stats.max_retime_us = st.stats.max_retime_us.max(moved.abs() as i64);
             }
         });
     }
@@ -420,27 +450,34 @@ fn next_job(st: &mut State, seq: &mut u64, last_rev: &mut u64, start: i64, w: u3
             let lead = st.lead_frames;
             let Some(g) = st.grid.as_mut() else { return Job::Wait(Duration::from_millis(5)) };
             let lead_us = f64::from(lead) * g.dur_us;
-            if g.next_k == i64::MIN {
-                g.next_k = ((now as f64 + lead_us - g.origin_us) / g.dur_us).ceil() as i64;
-            }
-            let pts = g.origin_us + g.next_k as f64 * g.dur_us;
+            let k = match g.next_k {
+                Some(k) => k,
+                None => {
+                    let k = g.first_at_or_after(now as f64 + lead_us);
+                    g.next_k = Some(k);
+                    k
+                }
+            };
+            let pts = g.pts(k);
+            let dur = g.dur_us;
             let render_at = pts - lead_us;
             if (now as f64) < render_at {
                 let wait = ((render_at - now as f64) as u64).clamp(100, 2000);
                 return Job::Wait(Duration::from_micros(wait));
             }
-            if pts + g.dur_us < now as f64 {
+            if pts + dur < now as f64 {
                 // Already past its display interval: skipping is an engine-side drop.
-                g.next_k += 1;
+                g.next_k = Some(k + 1);
                 st.stats.late_skipped += 1;
                 return Job::Wait(Duration::ZERO);
             }
-            let (k, dur) = (g.next_k, g.dur_us);
             let Some(slot) = take_slot(st, *seq) else {
                 st.stats.pool_exhausted_waits += 1;
                 return Job::Wait(Duration::from_micros(500));
             };
-            st.grid.as_mut().unwrap().next_k += 1;
+            if let Some(g) = st.grid.as_mut() {
+                g.next_k = Some(k + 1);
+            }
             let s = *seq;
             *seq += 1;
             Job::Frame {
@@ -498,5 +535,45 @@ fn next_job(st: &mut State, seq: &mut u64, last_rev: &mut u64, start: i64, w: u3
                 three_d: st.mode != Mode::Gesture,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Grid;
+
+    const P120: f64 = 8333.333;
+
+    #[test]
+    fn sixty_fps_on_120hz_lasts_two_vsyncs_with_boundaries_between_vsyncs() {
+        let g = Grid::new(1_000_000.0, P120);
+        assert!((g.dur_us - 2.0 * P120).abs() < 1e-6);
+        assert!((g.pts(0) - (1_000_000.0 - P120 / 2.0)).abs() < 1e-6);
+        assert_eq!(g.first_at_or_after(g.pts(5) - 1.0), 5);
+        assert_eq!(g.first_at_or_after(g.pts(5)), 5);
+    }
+
+    #[test]
+    fn retime_keeps_index_and_moves_less_than_jitter() {
+        let mut g = Grid::new(1_000_000.0, P120);
+        g.next_k = Some(600);
+        let before = g.pts(600);
+        // The next update reports a vsync 1000 periods later with 0.2 ms of jitter and
+        // a slightly better period estimate.
+        let moved = g.retime(1_000_000.0 + 1000.0 * 8333.2 + 200.0, 8333.2);
+        assert_eq!(g.next_k, Some(600));
+        assert!(moved.abs() < 400.0, "moved {moved}");
+        assert!((g.pts(600) - before - moved).abs() < 1e-6);
+        assert!((g.pts(601) - g.pts(600) - 2.0 * 8333.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn retime_with_anchor_on_the_other_vsync_parity_is_not_a_jump() {
+        // 60 fps content at 120 Hz: an anchor on the odd vsync must not shift frames
+        // by a whole refresh interval.
+        let mut g = Grid::new(1_000_000.0, P120);
+        g.next_k = Some(10);
+        let moved = g.retime(1_000_000.0 + 7.0 * P120, P120);
+        assert!(moved.abs() < 1.0, "moved {moved}");
     }
 }
