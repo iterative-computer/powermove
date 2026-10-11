@@ -179,9 +179,10 @@ function isLegacyBrokenTextSplitter(panel: any) {
       Effects; an agent docked from the launcher since then stays put.
    2. Layer Effects joins its default place below Media, unless the workspace
       already has it, docked or hidden.
-   3. A sized Timeline at the foot of the center column moves into a bottom
-      dock that also spans the left column. */
-const AGENT_DOCK_MIGRATION = 3;
+   4. A sized Timeline at the foot of the center column moves into a bottom
+      dock that also spans the left column. (Version 3 briefly stamped
+      project workspaces without moving it, so this step runs below 4.) */
+const AGENT_DOCK_MIGRATION = 4;
 const panelId = (spec: any) => typeof spec === 'string' ? spec : spec?.id;
 function migrateDockedAgent(workspace: any) {
   if (!workspace || typeof workspace !== 'object') return workspace;
@@ -205,7 +206,7 @@ function migrateDockedAgent(workspace: any) {
       media.panels.splice(index + 1, 0, { id: 'layer-effects', size: 350 });
     }
   }
-  if (version < 3 && docks && !docks.some((dock: any) => dock?.id === 'bottom')) {
+  if (version < 4 && docks && !docks.some((dock: any) => dock?.id === 'bottom')) {
     const center = docks.find((dock: any) => dock?.id === 'center');
     const last = center?.panels?.at(-1);
     if (center && center.panels.length > 1 && panelId(last) === 'timeline' && !last?.flex

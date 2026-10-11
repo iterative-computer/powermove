@@ -101,8 +101,8 @@ describe('legacy workspace install', () => {
       workspace: 'saved',
       workspaces: [
         { id: 'saved', name: 'Saved', agentDockMigration: 2, layout: { docks: [left, center, right] } },
-        { id: 'tall', name: 'Tall', agentDockMigration: 2, layout: { docks: [left, animate, right] } },
-        { id: 'current', name: 'Current', agentDockMigration: 3, layout: { docks: [left, center, right] } },
+        { id: 'tall', name: 'Tall', agentDockMigration: 3, layout: { docks: [left, animate, right] } },
+        { id: 'current', name: 'Current', agentDockMigration: 4, layout: { docks: [left, center, right] } },
       ],
     });
     PM.WS.init();
@@ -119,7 +119,7 @@ describe('legacy workspace install', () => {
   it('migrates a project-saved workspace when it is restored', () => {
     const PM = workspaceModel();
     PM.WS.init();
-    const restored = PM.WS.restoreSnapshot({ id: 'project-ws', name: 'Project', agentDockMigration: 2, layout: { docks: [
+    const restored = PM.WS.restoreSnapshot({ id: 'project-ws', name: 'Project', agentDockMigration: 3, layout: { docks: [
       { id: 'left', panels: [{ id: 'assets', flex: true }] },
       { id: 'center', flex: true, panels: [{ id: 'viewer', flex: true }, { id: 'timeline', size: 280 }] },
     ] } });
