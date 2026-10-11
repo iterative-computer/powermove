@@ -224,8 +224,11 @@ build_harfbuzz() {
 build_zimg() {
   log "build zimg"
   cd "$(src_of zimg)"
+  # zimg ships no release tarball with a generated configure, so autogen.sh runs the
+  # host's autoconf, automake and libtool (versions recorded in the manifest).
+  # MKDIR_P keeps configure from picking up GNU mkdir (gmkdir) when coreutils is installed.
   LIBTOOLIZE=glibtoolize ./autogen.sh >/dev/null
-  with_flags ./configure --prefix="$PREFIX" --libdir="$PREFIX/lib" --enable-static --disable-shared --with-pic \
+  MKDIR_P="mkdir -p" with_flags ./configure --prefix="$PREFIX" --libdir="$PREFIX/lib" --enable-static --disable-shared --with-pic \
     --disable-testapp --disable-example --disable-unit-test
   make -j"$JOBS"
   make install
