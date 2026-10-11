@@ -238,7 +238,7 @@ pub struct FieldEntry {
 
 /// The section 6 additive fields, the input to pm-model's ingest and to the
 /// `requiresEngine` stamping rules.
-pub const FIELD_TABLE: [FieldEntry; 16] = [
+pub const FIELD_TABLE: [FieldEntry; 15] = [
     FieldEntry { owner: "composition", field: "fpsRational", legacy: LegacyBehavior::IgnoredSafely, condition: None },
     FieldEntry { owner: "root", field: "minReaderVersion", legacy: LegacyBehavior::ReadByGuard, condition: None },
     FieldEntry { owner: "root", field: "requiresEngine", legacy: LegacyBehavior::LegacyRefuses, condition: None },
@@ -254,8 +254,21 @@ pub const FIELD_TABLE: [FieldEntry; 16] = [
     FieldEntry { owner: "precomp", field: "keepRendered", legacy: LegacyBehavior::IgnoredSafely, condition: None },
     FieldEntry { owner: "project", field: "color", legacy: LegacyBehavior::RequiresNativeWhen, condition: Some("value is not the default") },
     FieldEntry { owner: "project", field: "media", legacy: LegacyBehavior::IgnoredSafely, condition: None },
-    // Existing field ingested as it is; listed so the stamping rules see every engine-relevant root field.
-    FieldEntry { owner: "composition", field: "render3d", legacy: LegacyBehavior::IgnoredSafely, condition: None },
+];
+
+/// Existing fields `v1_ingest` takes as they are (section 6, "Existing
+/// fields ingested as they are"). Both engines read them, so they never
+/// stamp `requiresEngine`; they are listed so ingest and the stamping rules
+/// agree on what is already engine-relevant. `(owner, path)`.
+pub const INGESTED_AS_IS: [(&str, &str); 8] = [
+    ("composition", "render3d"),
+    ("layer", "d.data.object"),
+    ("layer", "d.data.light"),
+    ("layer", "d.data.camera"),
+    ("layer", "d.data.environment"),
+    ("group", "d.modeling"),
+    ("asset", "fps"),
+    ("asset", "format"),
 ];
 
 /// How an engine-originated fact reaches the document (section 6).
@@ -290,8 +303,10 @@ pub enum EngineFact {
     /// proposal: the user confirms it (Relink sheet), and the confirmation is
     /// an undoable edit (section 21).
     RelinkProposal { asset: AssetId, candidate: CapabilityHandle, reason: RelinkReason },
-    /// Probe results, detected color and alpha, Blender availability, font
-    /// substitution, crash-attributed failures: informational only.
+    /// Probe results and detected color and alpha for an asset:
+    /// informational only. The other uncommitted facts travel elsewhere:
+    /// Blender availability as `BlenderStatus`, font substitution and
+    /// crash-attributed failures as failure and crash events.
     MediaFacts { asset: AssetId, hash: Option<ContentHash> },
 }
 
@@ -365,7 +380,7 @@ mod tests {
 
     #[test]
     fn field_table_covers_section_6() {
-        assert_eq!(FIELD_TABLE.iter().filter(|f| f.field != "render3d").count(), 15);
+        assert_eq!(FIELD_TABLE.len(), 15);
         for entry in FIELD_TABLE {
             assert_eq!(entry.condition.is_some(), entry.legacy == LegacyBehavior::RequiresNativeWhen, "{}", entry.field);
         }
@@ -373,6 +388,9 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), FIELD_TABLE.len());
+        for (owner, path) in INGESTED_AS_IS {
+            assert!(!FIELD_TABLE.iter().any(|f| f.owner == owner && f.field == path), "{owner}.{path} is existing, not additive");
+        }
     }
 
     #[test]
