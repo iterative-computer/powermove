@@ -85,6 +85,32 @@ pub struct GradientStop {
     pub color: Rgba,
 }
 
+/// The composition shutter (section 5 rule 8): motion-blur sample `i` of
+/// `n` is evaluated at t + (phase + (i + ½)/n × angle) / 360 frames. The
+/// render graph evaluates one scene per sample; this scene is the center
+/// time.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct Shutter {
+    pub angle_degrees: f64,
+    pub phase_degrees: f64,
+}
+
+impl Shutter {
+    /// Today's `composition.shutter` (0 to 2 frames, centered): 0.5 frame is
+    /// 180° at −90°.
+    pub fn from_frames(frames: f64) -> Self {
+        let angle_degrees = frames * 360.0;
+        Self { angle_degrees, phase_degrees: -angle_degrees / 2.0 }
+    }
+
+    /// Sample offsets in frames for `n` samples.
+    pub fn sample_offsets(&self, n: u32) -> Vec<f64> {
+        (0..n).map(|i| (self.phase_degrees + (i as f64 + 0.5) / n as f64 * self.angle_degrees) / 360.0).collect()
+    }
+}
+
 /// Most background gradient stops.
 pub const MAX_GRADIENT_STOPS: usize = 8;
 
@@ -396,6 +422,7 @@ pub struct EvaluatedScene {
     pub frame_rate: FrameRate,
     pub size: Size,
     pub background: Background,
+    pub shutter: Shutter,
     /// The view override the scene was evaluated with (editor camera and Local View change worlds).
     pub view: Option<ViewOverride>,
     /// Layers bottom to top in stack order.
@@ -413,9 +440,15 @@ impl Validate for EvaluatedScene {
         ensure(self.composition.is_valid(), C, || "invalid composition id".into())?;
         ensure(self.frame_rate.is_valid(), C, || "frame rate must be positive".into())?;
         ensure(!self.size.is_empty(), C, || "composition size must be positive".into())?;
+        ensure((0.0..=720.0).contains(&self.shutter.angle_degrees) && self.shutter.phase_degrees.is_finite(), C, || {
+            "shutter angle is 0 to 720 degrees (0 to 2 frames)".into()
+        })?;
         if let Background::Linear { stops, .. } | Background::Radial { stops, .. } = &self.background {
             ensure((2..=MAX_GRADIENT_STOPS).contains(&stops.len()), C, || {
                 format!("gradients have 2 to {MAX_GRADIENT_STOPS} stops, got {}", stops.len())
+            })?;
+            ensure(stops.iter().all(|s| (0.0..=1.0).contains(&s.position)) && stops.windows(2).all(|w| w[0].position <= w[1].position), C, || {
+                "gradient stop positions are in 0..1 and ascending".into()
             })?;
         }
         ensure_unique(self.layers.iter().map(|l| &l.id), C, "layer id")?;
@@ -520,6 +553,7 @@ pub(crate) mod tests {
             frame_rate: FrameRate::new(30000, 1001),
             size: Size::new(1920, 1080),
             background: Background::Solid { color: Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 } },
+            shutter: Shutter::from_frames(0.5),
             view: None,
             layers: vec![
                 layer("bg", LayerKind::Solid),
@@ -603,6 +637,19 @@ pub(crate) mod tests {
         let mut scene = sample_scene();
         scene.layers.push(layer("bg", LayerKind::Null));
         assert!(scene.validate().is_err(), "duplicate ids");
+    }
+
+    #[test]
+    fn shutter_matches_todays_centered_samples() {
+        // compositor.ts: dt = ((s + .5) / n − .5) × shutter, shutter in frames.
+        let shutter = Shutter::from_frames(0.5);
+        assert_eq!((shutter.angle_degrees, shutter.phase_degrees), (180.0, -90.0));
+        for n in [1u32, 6, 10, 16, 20] {
+            for (s, offset) in shutter.sample_offsets(n).iter().enumerate() {
+                let today = ((s as f64 + 0.5) / n as f64 - 0.5) * 0.5;
+                assert!((offset - today).abs() < 1e-15, "n={n} s={s}");
+            }
+        }
     }
 
     #[test]

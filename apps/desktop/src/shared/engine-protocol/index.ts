@@ -188,6 +188,7 @@ export type { SessionId } from "./SessionId";
 export type { SessionRole } from "./SessionRole";
 export type { ShaderDiagnostic } from "./ShaderDiagnostic";
 export type { Shading3d } from "./Shading3d";
+export type { Shutter } from "./Shutter";
 export type { ShutterSample } from "./ShutterSample";
 export type { Size } from "./Size";
 export type { SlicingPolicy } from "./SlicingPolicy";

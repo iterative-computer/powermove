@@ -7,6 +7,7 @@ import type { FailureReport } from "./FailureReport";
 import type { FrameRate } from "./FrameRate";
 import type { OrderedRun } from "./OrderedRun";
 import type { Revision } from "./Revision";
+import type { Shutter } from "./Shutter";
 import type { Size } from "./Size";
 import type { Ticks } from "./Ticks";
 import type { ViewOverride } from "./ViewOverride";
@@ -15,7 +16,7 @@ import type { World3d } from "./World3d";
 /**
  * Everything the render graph needs for one frame.
  */
-export type EvaluatedScene = { composition: CompositionId, revision: Revision, time: Ticks, frameRate: FrameRate, size: Size, background: Background, 
+export type EvaluatedScene = { composition: CompositionId, revision: Revision, time: Ticks, frameRate: FrameRate, size: Size, background: Background, shutter: Shutter, 
 /**
  * The view override the scene was evaluated with (editor camera and Local View change worlds).
  */

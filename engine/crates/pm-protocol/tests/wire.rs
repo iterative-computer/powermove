@@ -158,3 +158,34 @@ proptest! {
         }
     }
 }
+
+/// Codec cost of the per-frame message (section 18: one small message per
+/// frame). Not a gate; run with
+/// `cargo test --release -p pm-protocol --test wire -- --ignored --nocapture`.
+#[test]
+#[ignore = "measurement, run explicitly in release"]
+fn measure_frame_descriptor_codec_cost() {
+    use pm_protocol::envelope::Event;
+    let full = pm_protocol::Envelope::new(Message::Event { body: Event::Frame(samples::frame_descriptor()) })
+        .with_session(pm_protocol::common::SessionId::ZERO)
+        .with_revision(pm_protocol::common::Revision::ZERO);
+    let mut bare_descriptor = samples::frame_descriptor();
+    bare_descriptor.overlay = None;
+    bare_descriptor.depth_id = None;
+    let bare = pm_protocol::Envelope { message: Message::Event { body: Event::Frame(bare_descriptor) }, ..full.clone() };
+    for (label, envelope) in [("descriptor with overlay", &full), ("descriptor without overlay", &bare)] {
+        let bytes = encode(envelope).unwrap();
+        let iterations = 200_000u32;
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            std::hint::black_box(encode(std::hint::black_box(envelope)).unwrap());
+        }
+        let encode_ns = start.elapsed().as_nanos() / iterations as u128;
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            std::hint::black_box(decode(std::hint::black_box(&bytes)).unwrap());
+        }
+        let decode_ns = start.elapsed().as_nanos() / iterations as u128;
+        println!("{label}: {} bytes, encode {encode_ns} ns, decode {decode_ns} ns (validated)", bytes.len());
+    }
+}

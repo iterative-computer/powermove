@@ -54,7 +54,7 @@ use crate::priority::{
 use crate::scene::{
     Background, Camera3d, Compat, DepthSet, EvaluatedEffect, EvaluatedLayer, EvaluatedMask, EvaluatedScene, EvaluatedTransition,
     GradientStop, LayerKind, LayerSource, LayerTransform, Light3d, LightKind, MaskMode, MatteMode, MatteRef, ModelSource, NamedParam,
-    Object3d, OrderedRun, ParamValue, World3d,
+    Object3d, OrderedRun, ParamValue, Shutter, World3d,
 };
 use crate::slicing::{BlenderThrottle, DeadlineSignal, SlicingPolicy};
 use crate::version::{local_ranges, ContractVersion, Hello, PeerRole, Welcome, WIRE_VERSION};
@@ -220,6 +220,7 @@ pub fn evaluated_scene() -> EvaluatedScene {
             ],
             angle_degrees: 90.0,
         },
+        shutter: Shutter::from_frames(0.5),
         view: None,
         layers: vec![
             layer("bg", LayerKind::Video, LayerSource::Media { asset: "a1".into(), source_time: ticks(-1), always_original: false }),
