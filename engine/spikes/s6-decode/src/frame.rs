@@ -4,7 +4,7 @@
 //! the CPU).
 
 use crate::apple::*;
-use crate::ff::FfFrame;
+use crate::pool::PoolFrame;
 use crate::vt;
 use anyhow::{Result, bail};
 use md5::{Digest, Md5};
@@ -12,8 +12,8 @@ use md5::{Digest, Md5};
 pub enum Pixels {
     /// IOSurface-backed CVPixelBuffer from VideoToolbox.
     Vt(Cf),
-    /// FFmpeg frame in Metal-shared pool memory.
-    Ff(FfFrame),
+    /// Software-decoded frame (FFmpeg, dav1d, libvpx) in Metal-shared pool memory.
+    Pool(PoolFrame),
 }
 
 pub struct Decoded {
@@ -151,7 +151,7 @@ impl Decoded {
     pub fn desc(&self) -> Result<FrameDesc> {
         match &self.px {
             Pixels::Vt(pb) => vt_desc(pb),
-            Pixels::Ff(f) => ff_desc(f),
+            Pixels::Pool(f) => pool_desc(f),
         }
     }
 
@@ -180,16 +180,12 @@ impl Decoded {
                 CVPixelBufferUnlockBaseAddress(p, kCVPixelBufferLock_ReadOnly);
                 Ok(r)
             },
-            Pixels::Ff(fr) => {
+            Pixels::Pool(fr) => {
                 let views: Vec<PlaneView> = d
                     .planes
                     .iter()
-                    .zip(&fr.layout.planes)
-                    .map(|(pd, pl)| PlaneView {
-                        ptr: unsafe { fr.slot.ptr().add(pl.offset) },
-                        stride: pl.stride,
-                        desc: pd.clone(),
-                    })
+                    .zip(&fr.planes)
+                    .map(|(pd, pl)| PlaneView { ptr: pl.ptr(), stride: pl.stride, desc: pd.clone() })
                     .collect();
                 Ok(f(&views))
             }
@@ -323,36 +319,26 @@ fn vt_desc(pb: &Cf) -> Result<FrameDesc> {
     }
 }
 
-fn ff_desc(fr: &FfFrame) -> Result<FrameDesc> {
-    use ffmpeg_sys_the_third as ff;
-    let l = &fr.layout;
-    let n = l.depth as u32;
+fn pool_desc(fr: &PoolFrame) -> Result<FrameDesc> {
+    let n = fr.depth as u32;
     let fmt = if n > 8 { PlaneFormat::R16 } else { PlaneFormat::R8 };
     let code_max = if n > 8 { 65535.0 } else { 255.0 };
-    let full = unsafe { (*fr.frame).color_range == ff::AVColorRange::JPEG };
     let planes: Vec<PlaneDesc> =
-        l.planes.iter().map(|p| PlaneDesc { format: fmt, width: p.width, height: p.height }).collect();
-    let name = unsafe {
-        std::ffi::CStr::from_ptr(ff::av_get_pix_fmt_name(ff::AVPixelFormat(l.format))).to_string_lossy().into_owned()
+        fr.planes.iter().map(|p| PlaneDesc { format: fmt, width: p.width, height: p.height }).collect();
+    let alpha = match planes.len() {
+        3 => AlphaSrc::None,
+        4 => AlphaSrc::Plane(3),
+        k => bail!("{k}-plane layout {} not handled by the spike's shader", fr.label),
     };
-    let (kind, alpha) = match planes.len() {
-        1 => (Kind::Planar, AlphaSrc::None),
-        3 => (Kind::Planar, AlphaSrc::None),
-        4 => (Kind::Planar, AlphaSrc::Plane(3)),
-        k => bail!("{k}-plane layout {name} not handled"),
-    };
-    if planes.len() == 1 {
-        bail!("grey frames ({name}) not handled by the spike's shader");
-    }
     Ok(FrameDesc {
-        kind,
+        kind: Kind::Planar,
         alpha,
         width: planes[0].width,
         height: planes[0].height,
-        log2_cw: l.planes[1].log2_w as u32,
-        log2_ch: l.planes[1].log2_h as u32,
+        log2_cw: fr.log2_chroma_w as u32,
+        log2_ch: fr.log2_chroma_h as u32,
         planes,
-        norm: Norm::new(n, full, code_max, 1.0, n, code_max),
-        label: name,
+        norm: Norm::new(n, fr.full_range, code_max, 1.0, n, code_max),
+        label: fr.label.clone(),
     })
 }

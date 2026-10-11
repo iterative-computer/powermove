@@ -27,6 +27,9 @@ serde_json = "1"
 anyhow = "1"
 libc = "0.2"
 
+[build-dependencies]
+bindgen = "0.72"
+
 [profile.release]
 debug = "line-tables-only"
 

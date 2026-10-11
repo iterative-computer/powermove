@@ -270,8 +270,8 @@ impl Gpu {
                     textures.push(self.wrap(raw, p.format.wgpu(), p.width as u32, p.height as u32, keep));
                 }
             }
-            Pixels::Ff(fr) => {
-                for (p, pl) in desc.planes.iter().zip(&fr.layout.planes) {
+            Pixels::Pool(fr) => {
+                for (p, pl) in desc.planes.iter().zip(&fr.planes) {
                     let raw = unsafe {
                         let td = MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
                             p.format.metal(),
@@ -281,7 +281,7 @@ impl Gpu {
                         );
                         td.setStorageMode(MTLStorageMode::Shared);
                         td.setUsage(MTLTextureUsage::ShaderRead);
-                        let buf: &ProtocolObject<dyn MTLBuffer> = fr.slot.buffer();
+                        let buf: &ProtocolObject<dyn MTLBuffer> = pl.slot.buffer();
                         let align = self.mtl.minimumLinearTextureAlignmentForPixelFormat(p.format.metal());
                         if pl.offset % align != 0 || pl.stride % align != 0 {
                             bail!("plane offset {} / stride {} not {}-aligned", pl.offset, pl.stride, align);
@@ -289,14 +289,13 @@ impl Gpu {
                         buf.newTextureWithDescriptor_offset_bytesPerRow(&td, pl.offset, pl.stride)
                             .context("newTextureWithDescriptor:offset:bytesPerRow:")?
                     };
-                    let plane_ptr = unsafe { (*fr.frame).data[textures.len()] } as usize;
                     let tex_ptr = raw
                         .buffer()
                         .map(|b| b.contents().as_ptr() as usize + raw.bufferOffset())
                         .unwrap_or(0);
-                    // For a copied frame the texture aliases the pool copy, not FFmpeg's buffer.
-                    aliased &= !fr.copied && tex_ptr == plane_ptr;
-                    let lease = fr.slot.clone();
+                    // For a copied frame the texture aliases the pool copy, not the decoder's buffer.
+                    aliased &= !fr.copied && tex_ptr == pl.decoder_ptr;
+                    let lease = pl.slot.clone();
                     let keep = Box::new(move || drop(lease));
                     textures.push(self.wrap(raw, p.format.wgpu(), p.width as u32, p.height as u32, keep));
                 }

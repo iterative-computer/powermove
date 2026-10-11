@@ -81,6 +81,9 @@ struct State {
 struct PoolInner {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     state: Mutex<State>,
+    /// Zero slots when first allocated (libvpx requires zeroed frame buffers;
+    /// like FFmpeg's wrapper, reused slots are not cleared again).
+    zero_new: bool,
 }
 
 unsafe impl Send for PoolInner {}
@@ -90,7 +93,16 @@ pub struct MetalPool(Arc<PoolInner>);
 
 impl MetalPool {
     pub fn new(device: Retained<ProtocolObject<dyn MTLDevice>>) -> Arc<Self> {
-        Arc::new(MetalPool(Arc::new(PoolInner { device, state: Mutex::new(State::default()) })))
+        Arc::new(MetalPool(Arc::new(PoolInner { device, state: Mutex::new(State::default()), zero_new: false })))
+    }
+
+    /// A pool whose fresh slots are zero-filled.
+    pub fn new_zeroed(device: Retained<ProtocolObject<dyn MTLDevice>>) -> Arc<Self> {
+        Arc::new(MetalPool(Arc::new(PoolInner { device, state: Mutex::new(State::default()), zero_new: true })))
+    }
+
+    pub fn device(&self) -> Retained<ProtocolObject<dyn MTLDevice>> {
+        self.0.device.clone()
     }
 
     pub fn acquire(&self, len: usize) -> Option<SlotRef> {
@@ -102,6 +114,9 @@ impl MetalPool {
                 let mut p: *mut libc::c_void = std::ptr::null_mut();
                 if unsafe { libc::posix_memalign(&mut p, PAGE, len) } != 0 {
                     return None;
+                }
+                if self.0.zero_new {
+                    unsafe { std::ptr::write_bytes(p as *mut u8, 0, len) };
                 }
                 let buffer = unsafe {
                     self.0.device.newBufferWithBytesNoCopy_length_options_deallocator(
@@ -136,6 +151,46 @@ impl MetalPool {
         let g = self.0.state.lock().unwrap();
         (g.allocated, g.bytes)
     }
+}
+
+/// One decoded plane in pool memory.
+#[derive(Clone)]
+pub struct PoolPlane {
+    pub slot: SlotRef,
+    pub offset: usize,
+    pub stride: usize,
+    /// Visible size in samples.
+    pub width: usize,
+    pub height: usize,
+    pub bytes_per_px: usize,
+    /// The address the decoder reported for this plane (AVFrame.data,
+    /// Dav1dPicture.data, vpx_image_t.planes), used to verify the GPU texture
+    /// aliases what the decoder wrote.
+    pub decoder_ptr: usize,
+}
+
+impl PoolPlane {
+    pub fn ptr(&self) -> *const u8 {
+        unsafe { self.slot.ptr().add(self.offset) }
+    }
+}
+
+/// A decoded planar Y′CbCr(A) frame whose planes live in pool slots (one slot
+/// per decoder buffer: libvpx's alpha comes from a second decoder).
+pub struct PoolFrame {
+    /// Y′, Cb, Cr, then A when present.
+    pub planes: Vec<PoolPlane>,
+    pub depth: u8,
+    pub log2_chroma_w: u8,
+    pub log2_chroma_h: u8,
+    pub full_range: bool,
+    /// Pixel format name for reports (FFmpeg naming).
+    pub label: String,
+    /// The pixels were copied into the pool by the spike (decoder without
+    /// direct rendering): not zero-copy.
+    pub copied: bool,
+    /// Keeps the decoder's own frame reference alive (AVFrame, Dav1dPicture).
+    pub owner: Option<Box<dyn Send>>,
 }
 
 #[derive(Clone, Debug)]

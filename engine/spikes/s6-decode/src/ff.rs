@@ -3,7 +3,7 @@
 //! Metal-shared memory through a custom `get_buffer2`.
 
 use crate::index::{FrameIndex, IndexSource, IndexStats, Loc, Sample};
-use crate::pool::{FrameLayout, MetalPool, SlotRef};
+use crate::pool::{FrameLayout, MetalPool, PoolFrame, PoolPlane, SlotRef};
 use crate::time::Rational;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use ffmpeg_sys_the_third as ff;
@@ -361,14 +361,9 @@ impl PacketReader {
     }
 }
 
-/// A decoded FFmpeg frame whose planes live in Metal-shared memory.
+/// Owns one decoded AVFrame (kept alive while its pool planes are in use).
 pub struct FfFrame {
     pub frame: *mut ff::AVFrame,
-    /// The pool slot holding the pixels, and whether the decoder wrote there
-    /// itself (direct rendering) or the spike copied into it.
-    pub slot: SlotRef,
-    pub copied: bool,
-    pub layout: FrameLayout,
 }
 
 unsafe impl Send for FfFrame {}
@@ -493,7 +488,7 @@ impl FfDecoder {
         }
     }
 
-    pub fn send(&mut self, p: Option<&Packet>, out: &mut Vec<(i64, FfFrame)>) -> Result<()> {
+    pub fn send(&mut self, p: Option<&Packet>, out: &mut Vec<(i64, PoolFrame)>) -> Result<()> {
         unsafe {
             if let Some(p) = p {
                 ff::av_packet_unref(self.pkt);
@@ -543,38 +538,66 @@ impl FfDecoder {
 
     /// Wraps a frame; copies it into a pool slot only if the decoder did not
     /// render into one (decoders without DR1: libdav1d, libvpx).
-    fn adopt(&mut self, f: *mut ff::AVFrame) -> Result<FfFrame> {
+    fn adopt(&mut self, f: *mut ff::AVFrame) -> Result<PoolFrame> {
         unsafe {
             self.frames += 1;
             let fmt = ff::AVPixelFormat((*f).format);
             let mut layout = FrameLayout::for_format(fmt, (*f).width, (*f).height)
                 .with_context(|| format!("unsupported decoded pixel format {}", fmt.0))?;
+            let d = ff::av_pix_fmt_desc_get(fmt);
+            let label = CStr::from_ptr(ff::av_get_pix_fmt_name(fmt)).to_string_lossy().into_owned();
+            let full_range = (*f).color_range == ff::AVColorRange::JPEG || label.starts_with("yuvj");
+            let decoder_ptrs: Vec<usize> = (0..layout.planes.len()).map(|p| (*f).data[p] as usize).collect();
             let buf0 = (*f).buf[0];
-            if let Some(slot) = (!buf0.is_null()).then(|| self.pool.find((*buf0).data)).flatten() {
+            let (slot, copied) = if let Some(slot) = (!buf0.is_null()).then(|| self.pool.find((*buf0).data)).flatten() {
                 // The decoder rendered into our slot (direct rendering).
                 for p in 0..layout.planes.len() {
                     layout.planes[p].offset = (*f).data[p].offset_from(slot.ptr()) as usize;
                     layout.planes[p].stride = (*f).linesize[p] as usize;
                 }
-                layout.total = slot.len();
-                return Ok(FfFrame { frame: f, slot, copied: false, layout });
-            }
-            // Not ours: one CPU copy into Metal-shared memory.
-            let align = [0 as c_int; 8];
-            layout.pad_to((*f).width as usize, (*f).height as usize, &align);
-            let slot = self.pool.acquire(layout.total).context("pool")?;
-            for (p, pl) in layout.planes.iter().enumerate() {
-                let row = pl.width * pl.bytes_per_px;
-                for y in 0..pl.height {
-                    ptr::copy_nonoverlapping(
-                        (*f).data[p].add(y * (*f).linesize[p] as usize),
-                        slot.ptr().add(pl.offset + y * pl.stride),
-                        row,
-                    );
+                (slot, false)
+            } else {
+                // Not ours: one CPU copy into Metal-shared memory.
+                let align = [0 as c_int; 8];
+                layout.pad_to((*f).width as usize, (*f).height as usize, &align);
+                let slot = self.pool.acquire(layout.total).context("pool")?;
+                for (p, pl) in layout.planes.iter().enumerate() {
+                    let row = pl.width * pl.bytes_per_px;
+                    for y in 0..pl.height {
+                        ptr::copy_nonoverlapping(
+                            (*f).data[p].add(y * (*f).linesize[p] as usize),
+                            slot.ptr().add(pl.offset + y * pl.stride),
+                            row,
+                        );
+                    }
                 }
-            }
-            self.copies += 1;
-            Ok(FfFrame { frame: f, slot, copied: true, layout })
+                self.copies += 1;
+                (slot, true)
+            };
+            let planes = layout
+                .planes
+                .iter()
+                .zip(decoder_ptrs)
+                .map(|(pl, dp)| PoolPlane {
+                    slot: slot.clone(),
+                    offset: pl.offset,
+                    stride: pl.stride,
+                    width: pl.width,
+                    height: pl.height,
+                    bytes_per_px: pl.bytes_per_px,
+                    decoder_ptr: dp,
+                })
+                .collect();
+            Ok(PoolFrame {
+                planes,
+                depth: layout.depth,
+                log2_chroma_w: (*d).log2_chroma_w,
+                log2_chroma_h: (*d).log2_chroma_h,
+                full_range,
+                label,
+                copied,
+                owner: Some(Box::new(FfFrame { frame: f })),
+            })
         }
     }
 
