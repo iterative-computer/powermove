@@ -24,20 +24,20 @@
 
 <svelte:head>
   <title>Powermove</title>
-  <meta name="description" content="A motion editor with AI in the loop and you in the driver’s seat. Real layers, editable keyframes, and an editor you can rewrite." />
+  <meta name="description" content="Powermove is a video editing app that lets you shape the featureset. Simply connect an agent and ask." />
   <link rel="canonical" href="https://trypowermove.com/" />
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Powermove" />
   <meta property="og:url" content="https://trypowermove.com/" />
   <meta property="og:title" content="Powermove" />
-  <meta property="og:description" content="A motion editor with AI in the loop and you in the driver’s seat. Real layers, editable keyframes, and an editor you can rewrite." />
+  <meta property="og:description" content="Powermove is a video editing app that lets you shape the featureset. Simply connect an agent and ask." />
   <meta property="og:image" content="https://trypowermove.com/og.png?v=2" />
   <meta property="og:image:width" content="2400" />
   <meta property="og:image:height" content="1260" />
   <meta property="og:image:alt" content="Shape your video editor. The Powermove editor on a warm gradient, with its media, agent conversation, canvas, and keyframe timeline." />
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="Powermove" />
-  <meta name="twitter:description" content="A motion editor with AI in the loop and you in the driver’s seat. Real layers, editable keyframes, and an editor you can rewrite." />
+  <meta name="twitter:description" content="Powermove is a video editing app that lets you shape the featureset. Simply connect an agent and ask." />
   <meta name="twitter:image" content="https://trypowermove.com/og.png?v=2" />
 </svelte:head>
 
