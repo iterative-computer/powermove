@@ -146,10 +146,12 @@ macOS packaging is currently ad-hoc signed for development distribution; see the
 
 ## Delivery status
 
-- Unsupported MOV/ProRes video is converted automatically to a durable H.264
-  editing proxy while the original media stays embedded in the editable project.
+- Unsupported MOV/ProRes video is converted automatically to a full-size,
+  alpha-preserving VP9/Opus WebM. The converted copy replaces the original in
+  the project: the original bytes are not embedded, so a saved `.pmv` holds
+  only the converted video.
 - Containers Chromium cannot open — MKV, AVI, WMV, FLV, MPEG-PS/TS, MXF and the
-  rest — convert on import through the same proxy path.
+  rest — convert on import through the same path.
 - Export includes playable H.264/AAC MP4, frame-exact WebM/VP9/Opus,
   realtime WebM, still PNG, and PNG-sequence delivery.
 - Local builds remain ad-hoc signed. `bun run dist:release` is the guarded
