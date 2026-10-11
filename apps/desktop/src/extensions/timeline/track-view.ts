@@ -38,6 +38,8 @@ export const PROPERTY_LANE = 24;
 export const TRACK_GUTTER = 272;
 /** Pointer reach of a clip's disclosure arrow, from its visible left edge. */
 const DISCLOSURE = 18;
+/** Pickwhip reach around its spiral centre: the spiral, then the parent menu chevron. */
+const WHIP_LEFT = 8, WHIP_SPLIT = 10, WHIP_RIGHT = 25;
 
 export interface TrackViewHost {
   api: PowermoveAPI;
@@ -58,6 +60,10 @@ export interface TrackViewHost {
   icoEye(c: CanvasRenderingContext2D, x: number, y: number, on: boolean): void;
   icoLock(c: CanvasRenderingContext2D, x: number, y: number, on: boolean): void;
   icoSpeaker(c: CanvasRenderingContext2D, x: number, y: number, on: boolean): void;
+  /** The parent pickwhip glyph; x is the spiral's centre, the chevron ends 21px right. */
+  drawParentWhip(c: CanvasRenderingContext2D, x: number, y: number, color: string): void;
+  /** Whether a clip can be parented and shows its name. */
+  supportsParent(layer: any): boolean;
   icoAnimationDiamond(c: CanvasRenderingContext2D, x: number, y: number, animated: boolean, current: boolean): void;
   fitValue(c: CanvasRenderingContext2D, value: any, unit: string, width: number): string;
   visible(layer: any): boolean;
@@ -337,6 +343,7 @@ export function createTrackView(host: TrackViewHost) {
 
     drawDrawers(c, W, H, drag);
 
+    whips = new Map();
     for (const item of current.items) {
       const layer = layerOf(item.id);
       if (!layer) continue;
@@ -352,12 +359,16 @@ export function createTrackView(host: TrackViewHost) {
       }
       if (item.kind === 'group') {
         const collapsed = api.uiState.getGroupCollapsed(layer);
-        host.drawClip(c, { ...layer, from: item.from, dur: item.dur, name: `${collapsed ? '▸' : '▾'}  ${layer.name}` }, y, h);
+        const name = `${collapsed ? '▸' : '▾'}  ${layer.name}`;
+        host.drawClip(c, { ...layer, from: item.from, dur: item.dur, name }, y, h);
+        placeWhip(c, layer, item.from, item.dur, name, y, h);
       } else {
         if (drag?.moving.has(item.id)) c.globalAlpha = .85;
         const open = isOpen(layer);
         // Animated clips carry the same disclosure arrow as group bars.
-        host.drawClip(c, openable(layer) ? { ...layer, from, name: `${open ? '▾' : '▸'}  ${layer.name}` } : { ...layer, from }, y, h);
+        const name = openable(layer) ? `${open ? '▾' : '▸'}  ${layer.name}` : layer.name;
+        host.drawClip(c, { ...layer, from, name }, y, h);
+        if (!drag?.moving.has(item.id)) placeWhip(c, layer, from, layer.dur, name, y, h);
         if (!open || !drawerOf(item)) drawClipKeys(c, layer, from, y, h);
         c.globalAlpha = 1;
       }
@@ -634,6 +645,38 @@ export function createTrackView(host: TrackViewHost) {
     for (const layer of layers) api.uiState.setLayerCollapsed(layer, !open);
     host.invalidate('timeline');
   }
+  /* Each clip's parent pickwhip follows its name, as the layer timeline's
+     ends the name column. Positions come from the last draw, for hit tests. */
+  let whips = new Map<string, { x: number; cy: number }>();
+  function placeWhip(c: CanvasRenderingContext2D, layer: any, from: number, dur: number, name: string, y: number, h: number) {
+    if (!host.supportsParent(layer)) return;
+    const lx = Math.max(host.t2x(from), T.gut) + 6, maxX = host.t2x(from + dur) - 6;
+    c.font = '400 11px ' + host.fui();
+    const textEnd = lx + c.measureText(name).width;
+    const x = Math.min(textEnd + 14, maxX - 21);
+    if (x - WHIP_LEFT < lx + 12) return;
+    // Same baseline as drawClip's label.
+    const cy = h >= 32 ? y + 11 : y + h / 2 + .5;
+    whips.set(layer.id, { x, cy });
+    const shown = !!layer.parent || T.trackHover?.clip === layer.id || api.selection.layers().includes(layer.id);
+    if (!shown) return;
+    const pal = host.clipPalette(layer);
+    if (x - WHIP_LEFT < textEnd) {
+      // A long name runs under the whip; cover its tail.
+      c.fillStyle = pal.body; host.roundRect(c, x - WHIP_LEFT, cy - 7, WHIP_LEFT + 23, 14, 3); c.fill();
+    }
+    c.save();
+    if (!layer.parent) c.globalAlpha *= .65;
+    host.drawParentWhip(c, x, cy, layer.parent ? host.theme().accent : pal.foreground);
+    c.restore();
+  }
+  function whipAt(x: number, y: number): { layer: any; menu: boolean } | null {
+    const hit = hitItem(x, y);
+    const whip = hit && !hit.edge ? whips.get(hit.item.id) : null;
+    if (!whip || Math.abs(y - whip.cy) > 8 || x < whip.x - WHIP_LEFT || x >= whip.x + WHIP_RIGHT) return null;
+    const layer = layerOf(hit!.item.id);
+    return layer ? { layer, menu: x >= whip.x + WHIP_SPLIT } : null;
+  }
   const onDisclosure = (item: TrackItem, x: number) => x - Math.max(host.t2x(item.from), T.gut) < DISCLOSURE;
 
   /* ── gestures ───────────────────────────────────────────── */
@@ -643,6 +686,14 @@ export function createTrackView(host: TrackViewHost) {
     if (drawerHit) {
       if (drawerHit.row) return host.keyDown(event, drawerHit.row, x, y);
       return host.keyMarquee(event);
+    }
+    const whip = whipAt(x, y);
+    if (whip) {
+      const selected = api.selection.layers();
+      const ids = selected.includes(whip.layer.id) ? selected : [whip.layer.id];
+      if (whip.menu) api.ui.showParentMenu(ids, event);
+      else api.ui.beginParentPick(event, ids);
+      return;
     }
     const hit = hitItem(x, y);
     if (!hit) return marquee(event);
@@ -826,8 +877,9 @@ export function createTrackView(host: TrackViewHost) {
 
   function hover(x: number, y: number): { cursor: string; title: string } {
     const lane = laneAt(y);
-    const next = lane ? { area: lane.area, lane: lane.lane } : null;
-    if (!T.trackDrag && (next?.area !== T.trackHover?.area || next?.lane !== T.trackHover?.lane)) {
+    const clip = lane && x >= T.gut ? hitItem(x, y)?.item.id ?? null : null;
+    const next = lane ? { area: lane.area, lane: lane.lane, clip } : null;
+    if (!T.trackDrag && (next?.area !== T.trackHover?.area || next?.lane !== T.trackHover?.lane || next?.clip !== T.trackHover?.clip)) {
       T.trackHover = next; host.invalidate('timeline');
     }
     if (!lane) return { cursor: 'default', title: '' };
@@ -847,6 +899,12 @@ export function createTrackView(host: TrackViewHost) {
       if (x < 42 && state.animated.length) return { cursor: 'pointer', title: state.open ? 'Fold keyframes' : 'Unfold keyframes' };
       if (x >= T.gut - 30) return { cursor: 'pointer', title: lane.area === 'audio' ? 'Mute track' : lane.area === 'captions' ? 'Show or hide captions' : 'Toggle track output' };
       return { cursor: 'pointer', title: 'Select all clips on this track' };
+    }
+    const whip = whipAt(x, y);
+    if (whip) {
+      const parent = whip.layer.parent ? layerOf(whip.layer.parent)?.name || 'Missing layer' : 'None';
+      return whip.menu ? { cursor: 'pointer', title: `Parent: ${parent} · Choose parent` }
+        : { cursor: 'crosshair', title: `Parent: ${parent} · Drag to a layer` };
     }
     const hit = hitItem(x, y);
     if (!hit) return { cursor: 'default', title: '' };

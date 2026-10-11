@@ -1220,7 +1220,8 @@ const trackView = createTrackView({
   roundRect, clipText, rgba,
   captions: captionTrack,
   fui: () => fui(), fmono: () => fmono(), niceStep,
-  icoEye, icoLock, icoSpeaker,
+  icoEye, icoLock, icoSpeaker, drawParentWhip,
+  supportsParent: (L) => layerSupportsTransform(L.type) && shouldDrawClipLabel(L.type),
   visible: (L) => !!evaluatedValue(L, L.on, api.transport.time(), 'l.on'),
   beginDrag, invalidate, edgeSnapping,
   layerEdgeSnapper: (ids) => layerEdgeSnapper(ids),
@@ -1254,7 +1255,7 @@ function timelineBackdropKey(): unknown[] | null {
     T.rows, T.gut, T.row, T.ruler, T.pps, T.scrollT, T.scrollY, T.hoverRow, T.dropRow,
     T.style.clipRadius, T.style.keyframeSize, T.style.showLayerNumbers, T.style.showTypeBadges,
     theme, p, p.dur, p.fps, p.work?.[0], p.work?.[1], api.project.revision(),
-    api.anim.version(), api.uiState.timelineVersion(), T.mode, T.trackHover?.area, T.trackHover?.lane, T.trackScrollY,
+    api.anim.version(), api.uiState.timelineVersion(), T.mode, T.trackHover?.area, T.trackHover?.lane, T.trackHover?.clip, T.trackScrollY,
     captionTrack.version()];
   const [first, end] = visibleRowRange();
   for (let i = first; i < end; i++) {
@@ -1845,6 +1846,20 @@ function drawClip(c: any, L: any, y: any, rowHeight = T.row) {
   c.restore();
 }
 
+/* Parent pickwhip: a spiral to drag onto a layer, then a chevron for the
+   parent menu. x is the spiral's centre; the chevron ends 21px right of it. */
+function drawParentWhip(c: any, x: number, cy: number, color: string) {
+  c.strokeStyle = color; c.lineWidth = 1.2;
+  c.beginPath();
+  for (let step = 0; step <= 32; step++) {
+    const angle = step / 32 * Math.PI * 3, radius = 1 + step / 32 * 4;
+    const px = x + Math.cos(angle) * radius, py = cy + Math.sin(angle) * radius;
+    if (!step) c.moveTo(px, py); else c.lineTo(px, py);
+  }
+  c.stroke();
+  c.beginPath(); c.moveTo(x + 15, cy - 1.5); c.lineTo(x + 18, cy + 1.5); c.lineTo(x + 21, cy - 1.5); c.stroke();
+}
+
 function drawPropKeys(c: any, r: any, y: any) {
   const L = r.L, cy = y + T.row / 2;
   c.strokeStyle = INK.grid;
@@ -1965,17 +1980,7 @@ function drawGutter(c: any, W: any, H: any, dynamicOnly = false): boolean {
       const audioX = embeddedAudioToggleX(L);
       const nameRight = T.gut - (hasParentControl ? 50 : 12) - statusWidth - (audioX == null ? 0 : AUDIO_TOGGLE_WIDTH);
       clipText(c, L.name, 96 + indent, iy, Math.max(0, nameRight - 96 - indent));
-      if (showParentControl) {
-        c.strokeStyle = L.parent ? theme.accent : theme.tx3; c.lineWidth = 1.2;
-        c.beginPath();
-        for (let step = 0; step <= 32; step++) {
-          const angle = step / 32 * Math.PI * 3, radius = 1 + step / 32 * 4;
-          const x = T.gut - 30 + Math.cos(angle) * radius, py = iy + Math.sin(angle) * radius;
-          if (!step) c.moveTo(x, py); else c.lineTo(x, py);
-        }
-        c.stroke();
-        c.beginPath(); c.moveTo(T.gut - 15, iy - 1.5); c.lineTo(T.gut - 12, iy + 1.5); c.lineTo(T.gut - 9, iy - 1.5); c.stroke();
-      }
+      if (showParentControl) drawParentWhip(c, T.gut - 30, iy, L.parent ? theme.accent : theme.tx3);
       let statusX = nameRight + 8;
       if (L.solo) { c.fillStyle = theme.accent; c.fillText('●', statusX, iy); statusX += 12; }
       if (evaluatedValue(L, L.mblur, api.transport.time(), 'l.mblur')) {
