@@ -50,7 +50,6 @@ pub struct Sampler {
     pub name: String,
     pub set: u32,
     pub binding: u32,
-    pub active: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -185,9 +184,8 @@ pub fn reflect(module: &Module, bool_names: &HashSet<String>) -> Reflection {
     let names = names(module);
     let mut reflection = Reflection::default();
 
-    // Ids statically used by access chains or loads inside functions.
+    // Block members statically used by access chains inside functions.
     let mut used_members: HashMap<Word, HashSet<u32>> = HashMap::new();
-    let mut used_ids: HashSet<Word> = HashSet::new();
     for function in &module.functions {
         for block in &function.blocks {
             for inst in &block.instructions {
@@ -196,11 +194,6 @@ pub fn reflect(module: &Module, bool_names: &HashSet<String>) -> Reflection {
                         if let Some(&member) = types.constants.get(index) {
                             used_members.entry(*base).or_default().insert(member);
                         }
-                    }
-                }
-                for op in &inst.operands {
-                    if let Operand::IdRef(id) = op {
-                        used_ids.insert(*id);
                     }
                 }
             }
@@ -254,7 +247,6 @@ pub fn reflect(module: &Module, bool_names: &HashSet<String>) -> Reflection {
                         name: names.get(&id).cloned().unwrap_or_default(),
                         set,
                         binding,
-                        active: used_ids.contains(&id),
                     });
                 }
             }

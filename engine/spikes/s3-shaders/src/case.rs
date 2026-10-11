@@ -26,8 +26,6 @@ pub struct Case {
     pub id: String,
     pub group: String,
     pub kind: String,
-    pub label: String,
-    pub source: String,
     pub frag: String,
     /// Program lines before the author's first line (for diagnostics).
     #[serde(rename = "lineOffset")]

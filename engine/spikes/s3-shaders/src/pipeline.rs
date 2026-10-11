@@ -66,6 +66,8 @@ pub struct Translated {
     pub fragment: StageOutput,
     pub renamed: Vec<String>,
     pub polyfilled: Vec<String>,
+    /// glslang warnings for the fragment stage.
+    pub warnings: String,
     pub timings_ms: HashMap<String, f64>,
 }
 
@@ -232,5 +234,5 @@ pub fn translate(gl_vertex: &str, fragment: &str, line_offset: u32, path: Path) 
             spvc_stage(fmod, &fspv, Stage::Fragment, &mut timings, "")?,
         ),
     };
-    Ok(Translated { vertex: vertex_out, fragment: fragment_out, renamed: normalized.renamed, polyfilled: normalized.polyfilled, timings_ms: timings })
+    Ok(Translated { vertex: vertex_out, fragment: fragment_out, renamed: normalized.renamed, polyfilled: normalized.polyfilled, warnings: fspv.warnings.trim().to_string(), timings_ms: timings })
 }

@@ -28,8 +28,6 @@ pub struct Gpu {
 }
 
 pub struct Image {
-    pub width: u32,
-    pub height: u32,
     pub view: wgpu::TextureView,
 }
 
@@ -84,7 +82,7 @@ impl Gpu {
         let bytes = std::fs::read(base.join(&spec.file))?;
         anyhow::ensure!(bytes.len() == (spec.width * spec.height * 8) as usize, "image {} has {} bytes", spec.name, bytes.len());
         let halfs: Vec<f16> = bytes.chunks_exact(2).map(|c| f16::from_le_bytes([c[0], c[1]])).collect();
-        Ok(Image { width: spec.width, height: spec.height, view: upload(&self.device, &self.queue, spec.width, spec.height, &halfs, &spec.name) })
+        Ok(Image { view: upload(&self.device, &self.queue, spec.width, spec.height, &halfs, &spec.name) })
     }
 }
 
@@ -210,6 +208,19 @@ impl Gpu {
         let vertex_block = translated.vertex.reflection.block.clone();
         let mut samplers: Vec<(String, u32)> = translated.fragment.reflection.samplers.iter().map(|s| (s.name.clone(), s.binding)).collect();
         samplers.sort_by_key(|s| s.1);
+        // The naga path's split must have produced exactly the layout below:
+        // one image and one sampler per `sampler2D`, in the fragment set.
+        if path == Path::Naga {
+            for split in &translated.fragment.splits {
+                let known = samplers.iter().any(|(name, binding)| *name == split.name && *binding == split.image_binding);
+                if !known || split.set != crate::compile::FRAGMENT_SET || split.sampler_binding != split.image_binding + SAMPLER_BINDING_OFFSET {
+                    return Err(Failure::new("rewrite", format!("sampler split {split:?} does not match the bind group layout")));
+                }
+            }
+            if translated.fragment.splits.len() != samplers.len() {
+                return Err(Failure::new("rewrite", format!("{} sampler2D uniforms but {} splits", samplers.len(), translated.fragment.splits.len())));
+            }
+        }
         let guard = push_scopes(device);
         let (vertex_module, fragment_module) = match path {
             Path::Naga => {

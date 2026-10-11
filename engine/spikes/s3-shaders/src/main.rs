@@ -53,6 +53,8 @@ struct CaseResult {
     failure: Option<Failure>,
     renamed: Vec<String>,
     polyfilled: Vec<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    warnings: String,
     timings_ms: BTreeMap<String, f64>,
     variants: Vec<VariantResult>,
 }
@@ -102,6 +104,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 failure: None,
                 renamed: Vec::new(),
                 polyfilled: Vec::new(),
+                warnings: String::new(),
                 timings_ms: BTreeMap::new(),
                 variants: Vec::new(),
             };
@@ -111,6 +114,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 Ok(translated) => {
                     result.renamed = translated.renamed.clone();
                     result.polyfilled = translated.polyfilled.clone();
+                    result.warnings = translated.warnings.clone();
                     result.timings_ms = translated.timings_ms.clone().into_iter().collect();
                     let start = Instant::now();
                     match gpu.build(translated, *path, &case.id) {
@@ -169,7 +173,9 @@ fn msl(args: &[String]) -> anyhow::Result<()> {
             Path::Naga => {
                 let module = stage.naga.as_ref().unwrap();
                 let info = pipeline::naga_validate(module).map_err(|e| anyhow::anyhow!(e))?;
-                let (source, _) = naga::back::msl::write_string(module, &info, &Default::default(), &Default::default()).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+                // Same language version wgpu-hal picks on this machine (MSL 3.x on macOS 14+).
+                let options = naga::back::msl::Options { lang_version: (3, 0), ..Default::default() };
+                let (source, _) = naga::back::msl::write_string(module, &info, &options, &Default::default()).map_err(|e| anyhow::anyhow!("{e:?}"))?;
                 println!("{source}");
             }
         }
