@@ -130,16 +130,23 @@ fn find_or_add_type(module: &mut Module, opcode: Op, operands: Vec<Operand>) -> 
         return existing;
     }
     let id = fresh(module);
-    let inst = Instruction::new(opcode, None, Some(id), operands);
-    // Types must precede their uses; the sampler and pointer types only depend
-    // on types that already exist, so inserting before the first variable is safe.
-    let position = module
-        .types_global_values
-        .iter()
-        .position(|inst| inst.class.opcode == Op::Variable)
-        .unwrap_or(module.types_global_values.len());
-    module.types_global_values.insert(position, inst);
+    let position = after_dependencies(module, &operands);
+    module.types_global_values.insert(position, Instruction::new(opcode, None, Some(id), operands));
     id
+}
+
+/// Index just after the last global instruction that defines an id referenced
+/// by `operands`. glslang interleaves types with variables, so a new type must
+/// go after its own operands, not merely before the first variable.
+fn after_dependencies(module: &Module, operands: &[Operand]) -> usize {
+    operands
+        .iter()
+        .filter_map(|op| match op {
+            Operand::IdRef(id) => module.types_global_values.iter().position(|inst| inst.result_id == Some(*id)),
+            _ => None,
+        })
+        .max()
+        .map_or(0, |p| p + 1)
 }
 
 pub fn split_combined_samplers(module: &mut Module) -> Result<Vec<SplitBinding>, RewriteError> {
@@ -258,7 +265,7 @@ pub fn split_combined_samplers(module: &mut Module) -> Result<Vec<SplitBinding>,
                 Some(id) => id,
                 None => {
                     let id = fresh(module);
-                    let position = module.types_global_values.iter().position(|inst| inst.class.opcode == Op::Variable).unwrap_or(module.types_global_values.len());
+                    let position = after_dependencies(module, &type_operands);
                     module.types_global_values.insert(position, Instruction::new(Op::TypeFunction, None, Some(id), type_operands.clone()));
                     id
                 }
@@ -369,6 +376,19 @@ mod tests {
         let samplers = parsed.global_variables.iter().filter(|(_, v)| matches!(parsed.types[v.ty].inner, naga::TypeInner::Sampler { .. })).count();
         assert_eq!(samplers, 2);
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&parsed).expect("valid");
+    }
+
+    #[test]
+    fn new_types_follow_their_operands() {
+        // The built-in crossfade: glslang emits the `o` output variable before
+        // the image type, so a pointer-to-image inserted "before the first
+        // variable" referenced an undefined id (naga: InvalidId(10)).
+        let src = "#version 450\nin vec2 v_uv; in vec2 v_st;\nuniform sampler2D u_from, u_to;\nuniform float u_prog;\nout vec4 o;\nvoid main(){ o = mix(texture(u_from, v_st), texture(u_to, v_st), clamp(u_prog, 0.0, 1.0)); }\n";
+        let spv = compile(src, Stage::Fragment).unwrap();
+        let mut module = load(&spv.words).unwrap();
+        split_combined_samplers(&mut module).unwrap();
+        let words = assemble(&module);
+        naga::front::spv::Frontend::new(words.into_iter(), &naga::front::spv::Options::default()).parse().expect("types precede uses");
     }
 
     #[test]
