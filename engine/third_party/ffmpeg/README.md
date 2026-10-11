@@ -138,7 +138,7 @@ built in-tree with relative source paths.
 encoder, filter, and hwaccel Powermove uses today, with its call sites, collected from
 `render-encoder.ts`, `media-proxy.ts`, `agent-tools/media-ffmpeg.ts` and
 `media-tools.ts`, `transcription/audio.ts`, `shared/media-formats.ts`,
-`scripts/test-mcp.mjs`, the e2e specs, the unit tests that spawn the bundled binary,
+`apps/desktop/scripts/test-mcp.mjs`, the e2e specs, the unit tests that spawn the bundled binary,
 and `e2e/fixtures/gen.sh`, plus the components plan section 24 item 1 names.
 
 `smoke.ts` imports today's argument builders from the desktop app (not copies) and runs
@@ -155,12 +155,26 @@ swapped.
 
 These call sites use encoders the build excludes. None are wired to this build yet.
 
+Every real MP4 or ProRes export runs through `encoderArgs` in `render-encoder.ts`, so
+each test that completes one fails with this build until that function moves to
+VideoToolbox. Tests that replace the `render:*` IPC handlers with mocks never spawn
+ffmpeg and are not affected: `native-export-performance.spec.ts:6` (pixel parity, both
+cases) and `:111` (GPU loss recovery, both cases), `render-queue.test.ts`, and
+`export-destination.spec.ts`, which cancels at the save dialog before the encoder starts.
+WebM, still, PNG-sequence, code and project exports do not use the encoder.
+
 | Call site | Uses | Phase 2 replacement |
 |---|---|---|
 | `apps/desktop/src/main/render-encoder.ts:15` (`encoderArgs`, MP4 export, agent `export_video` mp4) | `libx264` | `h264_videotoolbox`; frames need `setparams` color tags, because VideoToolbox takes primaries and transfer from frame attachments (shown in `smoke.ts`). Section 17: the engine encodes through VideoToolbox |
 | `apps/desktop/src/main/render-encoder.ts:15` (ProRes export, agent `export_video` prores) | `prores_ks` with `-alpha_bits 16` | `prores_videotoolbox -profile:v 4444 -pix_fmt ayuv64le` after today's scale filter, frames tagged with `setparams` (alpha and exact color kept, shown in `smoke.ts`). Do not hand it BGRA: VideoToolbox then converts with the Rec.709 matrix but the stream is tagged smpte170m regardless of `-colorspace`, so 255,0,0 decodes as 234,0,3 |
 | `apps/desktop/src/main/render-encoder.test.ts:15` and `:41` | ProRes 4444 alpha, and MP4 with real frames, through `RenderEncoder` | follows `render-encoder.ts` |
-| `apps/desktop/e2e/export-mp4.spec.ts` | MP4 export through `render-encoder.ts` | follows `render-encoder.ts` |
+| `apps/desktop/e2e/export-mp4.spec.ts:7` | MP4 export with AAC audio through `render-encoder.ts`, asserts `avc1` | follows `render-encoder.ts` |
+| `apps/desktop/e2e/export-mp4.spec.ts:61` | cancels an MP4 export mid-run; ffmpeg exits with "Unknown encoder 'libx264'" about 25 ms after start, so the run ends in an error instead of `{ cancelled: true }` | follows `render-encoder.ts` |
+| `apps/desktop/e2e/export-video-frames.spec.ts:11` (all 5 `mp4` export cases: WebM source at 10 and 30 fps, after import and after restore, plus the MP4-source case) | MP4 export through `render-encoder.ts`, then a per-frame level check within 5 code values | follows `render-encoder.ts`; the per-frame tolerance needs rechecking with VideoToolbox rate control |
+| `apps/desktop/e2e/native-export-performance.spec.ts:55` (export at `:90`) | HD and 4K MP4 export profile through `render-encoder.ts` | follows `render-encoder.ts` |
+| `apps/desktop/e2e/media-intelligence.spec.ts:464` (export at `:540`) | MP4 export with an SRT caption sidecar through `render-encoder.ts` | follows `render-encoder.ts` |
+| `apps/desktop/e2e/ae-audit-implementation.spec.ts:95` (export at `:98`) | queued ProRes 4444 alpha delivery through `render-encoder.ts`, asserts `ap4h` | follows `render-encoder.ts`; `prores_videotoolbox -profile:v 4444` also writes `ap4h` (checked in `smoke.ts`) |
+| `apps/desktop/scripts/test-mcp.mjs:77` (inspected at `:79`-`:83`) | agent `export_video` MP4 with audio through `render-encoder.ts`, then decode, audio and pixel checks | follows `render-encoder.ts` |
 | `apps/desktop/src/main/agent-tools/media-tools.test.ts:36` | `libx264` fixture | `h264_videotoolbox` |
 | `apps/desktop/e2e/agent-media-tools.spec.ts:30` | `libx264` fixture | `h264_videotoolbox` |
 | `apps/desktop/e2e/media-intelligence.spec.ts:59` | `libx264` fixture | `h264_videotoolbox` |
@@ -186,6 +200,25 @@ that are GPL or need components not enabled here (`eq`, `hqdn3d`, `boxblur`, `cr
 `coreimage`, and others). No call site uses any of them. `libvmaf` (BSD-2-Clause-Patent)
 is LGPL-compatible and could be added if section 17's VMAF comparison runs through
 FFmpeg.
+
+## Known limits
+
+- macOS arm64 only. The plan's `packages/cli` darwin-x64 prebuilds and the later Linux
+  and Windows targets need their own builds.
+- `libbz2` and `libiconv` link from the OS (`/usr/lib`), not from pinned sources. They
+  are system libraries, so the output stays self-contained.
+- Reproducibility is shown on one machine and toolchain. zimg has no release tarball
+  with a generated `configure`, so `autogen.sh` runs the host's autoconf, automake and
+  libtool; those, cmake, ninja and pkg-config come from the host and are recorded in
+  `manifest.json`, not pinned. Meson is pinned.
+- `--extra-libs="-lc++ -liconv"` applies to every library, so all seven dylibs link
+  `libc++` and `libiconv`, though only `libavfilter` needs `libc++` (HarfBuzz and zimg)
+  and only `libavcodec` needs `libiconv`.
+  Both are system libraries; this costs nothing at run time beyond the load command.
+- The software `prores` decoder stays (see "What is built"); whether to drop it under
+  decision 12 is an open decision.
+- Binaries are ad-hoc signed by the linker. Team ID signing and the hardened runtime
+  belong to release packaging.
 
 ## Licensing obligations when shipping
 

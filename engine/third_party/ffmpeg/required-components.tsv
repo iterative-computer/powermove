@@ -10,7 +10,7 @@
 # Call sites were collected from apps/desktop/src/main/render-encoder.ts,
 # media-proxy.ts, agent-tools/media-ffmpeg.ts and media-tools.ts,
 # transcription/audio.ts, src/shared/media-formats.ts (import containers),
-# scripts/test-mcp.mjs, the e2e specs, the unit tests that spawn the bundled
+# apps/desktop/scripts/test-mcp.mjs, the e2e specs, the unit tests that spawn the bundled
 # binary, docs/rust-engine.md section 24 item 1, and e2e/fixtures/gen.sh.
 # "Plan 24.1" marks components the plan names for the executable.
 
@@ -51,10 +51,10 @@ muxer	mp4	present	render-encoder.ts (.mp4); e2e agent-media-tools, media-intelli
 muxer	webm	present	media-proxy.ts playback, preview, and image sequence proxies; e2e VP9 fixtures
 muxer	matroska	present	gen.sh converted.mkv
 muxer	image2	present	media-ffmpeg.ts frameArgs, tileArgs, waveformArgs; media-proxy.ts stillImageConverter
-muxer	rawvideo	present	media-ffmpeg.ts triageScanArgs; scripts/test-mcp.mjs; e2e export-video-frames; media-tools.test.ts
+muxer	rawvideo	present	media-ffmpeg.ts triageScanArgs; apps/desktop/scripts/test-mcp.mjs; e2e export-video-frames; media-tools.test.ts
 muxer	f32le	present	transcription/audio.ts
-muxer	s16le	present	scripts/test-mcp.mjs
-muxer	null	present	media-ffmpeg.ts analysisArgs (-f null); scripts/test-mcp.mjs
+muxer	s16le	present	apps/desktop/scripts/test-mcp.mjs
+muxer	null	present	media-ffmpeg.ts analysisArgs (-f null); apps/desktop/scripts/test-mcp.mjs
 muxer	framemd5	present	e2e project-export-fixture
 muxer	wav	present	e2e media-intelligence; bridge.test.ts; media-tools.test.ts; gen.sh
 muxer	ipod	present	gen.sh tone.m4a
@@ -66,7 +66,7 @@ muxer	avif	present	gen.sh still.avif
 
 # ── Decoders: video and images ───────────────────────────────────────────────
 decoder	rawvideo	present	render-encoder.ts input; e2e rawvideo inputs
-decoder	h264	present	H.264 import, probe, frames; scripts/test-mcp.mjs export verification
+decoder	h264	present	H.264 import, probe, frames; apps/desktop/scripts/test-mcp.mjs export verification
 decoder	hevc	present	HEVC and HEVC-with-alpha import
 decoder	prores	present	ProRes import, proxies, agent frames; hosts the VideoToolbox ProRes hwaccel (see README, ProRes)
 decoder	dnxhd	present	DNxHD/DNxHR import (plan section 13)
@@ -119,8 +119,8 @@ decoder	pcm_s24be	present	AIFF and MOV audio
 decoder	pcm_dvd	present	VOB audio
 
 # ── Encoders ─────────────────────────────────────────────────────────────────
-encoder	rawvideo	present	media-ffmpeg.ts triageScanArgs; scripts/test-mcp.mjs; e2e framemd5 and frame reads
-encoder	wrapped_avframe	present	-f null video in scripts/test-mcp.mjs
+encoder	rawvideo	present	media-ffmpeg.ts triageScanArgs; apps/desktop/scripts/test-mcp.mjs; e2e framemd5 and frame reads
+encoder	wrapped_avframe	present	-f null video in apps/desktop/scripts/test-mcp.mjs
 encoder	png	present	media-ffmpeg.ts frameArgs, waveformArgs; media-proxy.ts stillImageConverter (plan 24.1)
 encoder	mjpeg	present	media-ffmpeg.ts frameArgs, tileArgs (plan 24.1)
 encoder	libvpx-vp9	present	media-proxy.ts all three converters; e2e VP9 fixtures (plan 24.1)
@@ -128,7 +128,7 @@ encoder	libvpx	present	gen.sh vp8-opus.webm; plan section 17 WebM VP8 (plan 24.1
 encoder	libopus	present	media-proxy.ts playbackConverter (plan 24.1)
 encoder	aac	present	render-encoder.ts MP4 audio mux; e2e agent-media-tools, media-intelligence
 encoder	aac_at	present	AudioToolbox AAC (plan section 16)
-encoder	pcm_s16le	present	scripts/test-mcp.mjs; -f null audio; e2e media-intelligence; media-tools.test.ts; bridge.test.ts
+encoder	pcm_s16le	present	apps/desktop/scripts/test-mcp.mjs; -f null audio; e2e media-intelligence; media-tools.test.ts; bridge.test.ts
 encoder	pcm_s24le	present	render-encoder.ts ProRes audio mux
 encoder	pcm_f32le	present	transcription/audio.ts
 encoder	flac	present	gen.sh tone.flac
@@ -158,7 +158,7 @@ filter	astats	present	media-ffmpeg.ts analysisArgs (plan 24.1)
 filter	select	present	scene detection, select='gt(scene,N)' (plan 24.1)
 filter	scdet	present	scene detection (plan 24.1)
 filter	aresample	present	transcription/audio.ts (-ar 16000, auto-inserted); e2e media-intelligence
-filter	crop	present	scripts/test-mcp.mjs
+filter	crop	present	apps/desktop/scripts/test-mcp.mjs
 filter	concat	present	e2e agent-media-tools, media-intelligence; media-tools.test.ts; gen.sh
 filter	volume	present	e2e agent-media-tools; media-tools.test.ts; gen.sh
 filter	anullsrc	present	e2e media-intelligence
@@ -179,8 +179,8 @@ filter	bwdif	present	software deinterlace reference (plan section 13)
 hwaccel	videotoolbox	present	ProRes, H.264, HEVC decode through VideoToolbox (decision 12)
 
 # ── Must be absent (GPL, nonfree, or ProRes outside VideoToolbox) ────────────
-encoder	libx264	absent	render-encoder.ts encoderArgs (MP4 export, export_video mp4); e2e agent-media-tools, export-video-frames (mp4 sources, -crf 0), media-intelligence, video-scrubbing, export-mp4 (through render-encoder); media-tools.test.ts fixture; render-encoder.test.ts:41 (MP4 with real frames); gen.sh h264-aac.mp4, h264-aac.mov, converted.mkv (skipped, gen.sh checks)
-encoder	prores_ks	absent	render-encoder.ts encoderArgs (ProRes export, export_video prores); e2e import-prores-alpha fixture; render-encoder.test.ts ProRes 4444 alpha case; gen.sh prores422.mov, prores4444-alpha.mov, and hevc-alpha.mov which is made from it (skipped, gen.sh checks)
+encoder	libx264	absent	render-encoder.ts:15 encoderArgs (MP4 export, export_video mp4). Real MP4 exports through it: render-encoder.test.ts:41; e2e export-mp4 :7 and :61 (cancel), export-video-frames (5 mp4 export cases), native-export-performance:55 (profile, export at :90), media-intelligence:464 (SRT sidecar, export at :540); apps/desktop/scripts/test-mcp.mjs:77 (export_video mp4, inspected at :79-83). libx264 fixtures: e2e agent-media-tools:30, export-video-frames:19 (mp4 source, -crf 0), media-intelligence:59, video-scrubbing:31; media-tools.test.ts:36; gen.sh h264-aac.mp4, h264-aac.mov, converted.mkv (skipped, gen.sh checks)
+encoder	prores_ks	absent	render-encoder.ts:15 encoderArgs (ProRes export, export_video prores). Real ProRes exports through it: render-encoder.test.ts:15 (4444 alpha); e2e ae-audit-implementation:95 (queued alpha delivery, export at :98, asserts ap4h). prores_ks fixtures: e2e import-prores-alpha:22; gen.sh prores422.mov, prores4444-alpha.mov, and hevc-alpha.mov which is made from it (skipped, gen.sh checks)
 encoder	prores	absent	none today (decision 12)
 encoder	prores_aw	absent	none today (decision 12)
 decoder	prores_raw	absent	none today (camera RAW needs counsel, decision 12)
