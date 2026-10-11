@@ -159,7 +159,7 @@ impl ChromaSiting {
 /// How a source's alpha relates to its color.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum AlphaMode {
     /// No alpha, or alpha ignored.
     Opaque,
@@ -311,7 +311,7 @@ impl BlendMode {
 /// 3D tone mapping (decision 17): curves differ by design at cutover.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum ToneMapping3d {
     /// Native 3D: three.js r180 `ACESFilmicToneMapping` with its
     /// `exposure / 0.6` pre-scale, then three's sRGB OETF, per fragment.
@@ -323,7 +323,7 @@ pub enum ToneMapping3d {
 /// An output's color tag choice (section 9, output tags).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum OutputColor {
     /// sRGB images: CICP 1-13-0, full range (PNG `cICP` or ICC).
     SrgbImage,

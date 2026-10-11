@@ -69,7 +69,7 @@ pub enum ErrorCode {
 /// The thing an error is about; decides the isolation rule.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum ErrorScope {
     /// One request failed; nothing else is affected.
     Request { id: RequestId },
@@ -122,7 +122,7 @@ impl ErrorScope {
 /// Whether the same request can succeed later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum Retry {
     Never,
     /// Retry after this many milliseconds.
@@ -147,7 +147,7 @@ pub struct ShaderDiagnostic {
 /// Structured details for codes that need them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum ErrorDetail {
     ShaderCompile { diagnostics: Vec<ShaderDiagnostic> },
     StaleRevision { applied: Revision, wanted: Revision },
@@ -183,6 +183,17 @@ impl EngineError {
     pub fn with_detail(mut self, detail: ErrorDetail) -> Self {
         self.detail = Some(detail);
         self
+    }
+}
+
+/// Longest error message, in UTF-8 bytes.
+pub const MAX_ERROR_MESSAGE_BYTES: usize = 4096;
+
+impl crate::validate::Validate for EngineError {
+    fn validate(&self) -> Result<(), crate::validate::Violation> {
+        crate::validate::ensure(!self.message.is_empty() && self.message.len() <= MAX_ERROR_MESSAGE_BYTES, ContractId::Errors, || {
+            format!("error messages are 1 to {MAX_ERROR_MESSAGE_BYTES} bytes")
+        })
     }
 }
 

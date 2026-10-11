@@ -219,6 +219,67 @@ impl Validate for BlenderJobRequest {
     }
 }
 
+/// A model operation run by Blender through host services (`api.scene3d`
+/// model tools, `edit_3d` model jobs). The result returns as
+/// [`crate::patch::EngineFact::BlenderResult`] and is committed as one
+/// undoable edit, dropped if the document moved past `revision` meanwhile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+pub enum BlenderModelOperation {
+    /// Generate a model from a recipe: the document's `ModelRecipe` JSON as
+    /// UTF-8 text, validated by the kernel's schema (`shared/blender.ts`).
+    Generate { recipe: String },
+    /// Import an object from a `.blend` source asset (external textures packed
+    /// or reported at import).
+    Import { source: AssetId, object: Option<String> },
+}
+
+/// Renderer → host: run a model operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct BlenderModelJob {
+    pub job: JobId,
+    pub document: crate::common::DocumentId,
+    /// The revision the operation was requested at.
+    pub revision: crate::common::Revision,
+    pub operation: BlenderModelOperation,
+    pub assets: Vec<BlenderAsset>,
+}
+
+/// Longest recipe text (mesh recipes carry up to 300k numbers).
+pub const MAX_RECIPE_BYTES: usize = 8 * 1024 * 1024;
+
+impl Validate for BlenderModelJob {
+    fn validate(&self) -> Result<(), Violation> {
+        const C: ContractId = ContractId::Blender;
+        ensure(self.job.is_valid() && self.document.is_valid(), C, || "invalid job or document id".into())?;
+        ensure(self.assets.len() <= limits::MAX_ASSETS, C, || format!("at most {} assets", limits::MAX_ASSETS))?;
+        match &self.operation {
+            BlenderModelOperation::Generate { recipe } => {
+                ensure(!recipe.is_empty() && recipe.len() <= MAX_RECIPE_BYTES, C, || "recipe must be 1 byte to 8 MiB of JSON".into())
+            }
+            BlenderModelOperation::Import { source, object } => {
+                ensure(source.is_valid(), C, || "invalid source asset".into())?;
+                ensure(object.as_ref().is_none_or(|o| !o.is_empty() && o.chars().count() <= 160), C, || "object names are 1 to 160 characters".into())?;
+                ensure(self.assets.iter().any(|a| &a.asset == source), C, || "the source .blend must be among the job's assets".into())
+            }
+        }
+    }
+}
+
+/// One file a model operation produced (GLB, textures), in the host's scratch cache.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct BlenderOutputFile {
+    pub name: String,
+    pub hash: ContentHash,
+    pub handle: CapabilityHandle,
+    pub bytes: ByteSize,
+}
+
 /// A finished surface (host → job engine, one event per surface).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]

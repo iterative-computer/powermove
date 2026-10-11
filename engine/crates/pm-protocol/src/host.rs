@@ -95,7 +95,7 @@ pub enum CacheKind {
 /// What a handle grants.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum CapabilityKind {
     /// Read an asset's bytes (original, linked file, or media-store copy).
     MediaRead { asset: AssetId },
@@ -145,7 +145,7 @@ pub enum OverwritePolicy {
 /// Who chooses where an output goes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum OutputChoice {
     /// MCP and agent tools: the host's automatic destination, unique name,
     /// no dialog, owner-only file created exclusively (`open(wx, 0600)`).
@@ -183,7 +183,9 @@ pub struct OutputDestination {
 pub struct OutputVerification {
     pub codec: String,
     pub frames: u32,
-    pub audio_samples: u32,
+    /// Total audio samples per channel after edit-list trimming; equals
+    /// round(duration × sample rate) (section 2, audio bar).
+    pub audio_samples: crate::common::Count,
     pub bytes: crate::common::ByteSize,
 }
 

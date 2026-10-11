@@ -54,10 +54,12 @@ impl SurfaceFormat {
 /// Decoded frame layouts the engine imports without copies (section 13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum DecodedLayout {
     /// VideoToolbox 8-bit biplanar 4:2:0 (`420v` limited, `420f` full).
     Biplanar420_8 { full_range: bool },
+    /// VideoToolbox 8-bit biplanar 4:2:2 (`422v` limited, `422f` full).
+    Biplanar422_8 { full_range: bool },
     /// VideoToolbox 10-bit biplanar 4:2:0, MSB-aligned (`x420` limited, `xf20` full).
     Biplanar420_10 { full_range: bool },
     /// VideoToolbox 10-bit biplanar 4:2:2, MSB-aligned (`x422`).
@@ -68,6 +70,47 @@ pub enum DecodedLayout {
     PlanarLsb { bits: u8, subsampling: Subsampling, alpha: bool },
     /// Packed RGBA from image readers.
     Rgba { format: SurfaceFormat },
+}
+
+impl DecodedLayout {
+    /// The quantization range the layout's pixel format implies, for
+    /// Y′CbCr layouts. VideoToolbox picks `420v`/`420f` (and `x420`/`xf20`)
+    /// to match the bitstream; the importer verifies it against buffer
+    /// attachments (section 13).
+    pub const fn full_range(&self) -> Option<bool> {
+        match *self {
+            DecodedLayout::Biplanar420_8 { full_range }
+            | DecodedLayout::Biplanar422_8 { full_range }
+            | DecodedLayout::Biplanar420_10 { full_range }
+            | DecodedLayout::Biplanar422_10 { full_range } => Some(full_range),
+            DecodedLayout::Ayuv4444_16 | DecodedLayout::PlanarLsb { .. } | DecodedLayout::Rgba { .. } => None,
+        }
+    }
+
+    /// The chroma subsampling of the layout.
+    pub const fn subsampling(&self) -> Subsampling {
+        match *self {
+            DecodedLayout::Biplanar420_8 { .. } | DecodedLayout::Biplanar420_10 { .. } => Subsampling::S420,
+            DecodedLayout::Biplanar422_8 { .. } | DecodedLayout::Biplanar422_10 { .. } => Subsampling::S422,
+            DecodedLayout::Ayuv4444_16 | DecodedLayout::Rgba { .. } => Subsampling::S444,
+            DecodedLayout::PlanarLsb { subsampling, .. } => subsampling,
+        }
+    }
+
+    /// Bits per sample.
+    pub const fn bits(&self) -> u8 {
+        match *self {
+            DecodedLayout::Biplanar420_8 { .. } | DecodedLayout::Biplanar422_8 { .. } => 8,
+            DecodedLayout::Biplanar420_10 { .. } | DecodedLayout::Biplanar422_10 { .. } => 10,
+            DecodedLayout::Ayuv4444_16 => 16,
+            DecodedLayout::PlanarLsb { bits, .. } => bits,
+            DecodedLayout::Rgba { format } => match format {
+                SurfaceFormat::Bgra8Unorm | SurfaceFormat::R8Unorm | SurfaceFormat::Rg8Unorm => 8,
+                SurfaceFormat::Rgba16Float | SurfaceFormat::Rgba16Unorm | SurfaceFormat::R16Unorm | SurfaceFormat::Rg16Unorm => 16,
+                SurfaceFormat::Rgba32Float => 32,
+            },
+        }
+    }
 }
 
 /// One plane of a decoded layout.
@@ -88,6 +131,7 @@ impl DecodedLayout {
         let plane = |format, width_divisor, height_divisor| PlaneSpec { format, width_divisor, height_divisor };
         match *self {
             DecodedLayout::Biplanar420_8 { .. } => vec![plane(SurfaceFormat::R8Unorm, 1, 1), plane(SurfaceFormat::Rg8Unorm, 2, 2)],
+            DecodedLayout::Biplanar422_8 { .. } => vec![plane(SurfaceFormat::R8Unorm, 1, 1), plane(SurfaceFormat::Rg8Unorm, 2, 1)],
             DecodedLayout::Biplanar420_10 { .. } => vec![plane(SurfaceFormat::R16Unorm, 1, 1), plane(SurfaceFormat::Rg16Unorm, 2, 2)],
             DecodedLayout::Biplanar422_10 { .. } => vec![plane(SurfaceFormat::R16Unorm, 1, 1), plane(SurfaceFormat::Rg16Unorm, 2, 1)],
             DecodedLayout::Ayuv4444_16 => vec![plane(SurfaceFormat::Rgba16Unorm, 1, 1)],
@@ -121,11 +165,39 @@ pub struct DecodedFrameDesc {
     pub clean_aperture: Option<PixelRect>,
 }
 
+impl Validate for DecodedFrameDesc {
+    fn validate(&self) -> Result<(), Violation> {
+        const C: ContractId = ContractId::GpuInterop;
+        ensure(!self.size.is_empty(), C, || "decoded frames have a size".into())?;
+        if let DecodedLayout::PlanarLsb { bits, .. } = self.layout {
+            ensure((8..=16).contains(&bits), C, || format!("planar samples are 8 to 16 bits, got {bits}"))?;
+        }
+        if let DecodedLayout::Rgba { format } = self.layout {
+            ensure(matches!(format, SurfaceFormat::Bgra8Unorm | SurfaceFormat::Rgba16Unorm | SurfaceFormat::Rgba16Float | SurfaceFormat::Rgba32Float), C, || {
+                format!("{format:?} is not a packed RGBA format")
+            })?;
+        }
+        if let Some(full) = self.layout.full_range() {
+            ensure(full == (self.color.range == crate::color::Range::Full), C, || {
+                "the pixel format's range must match the color description (420v vs 420f)".into()
+            })?;
+        }
+        ensure(self.layout.subsampling() == self.color.subsampling, C, || "layout and color description disagree on subsampling".into())?;
+        ensure(self.layout.bits() == self.color.bit_depth || matches!(self.layout, DecodedLayout::Rgba { .. }), C, || {
+            "layout and color description disagree on bit depth".into()
+        })?;
+        if let Some(aperture) = &self.clean_aperture {
+            ensure(!aperture.is_empty() && self.size.contains(aperture), C, || "clean aperture must lie inside the frame".into())?;
+        }
+        Ok(())
+    }
+}
+
 /// Identifies the GPU so the engine and Chromium's GPU process use the same
 /// adapter (Metal `registryID`, Windows LUID).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum AdapterIdentity {
     /// Metal `MTLDevice.registryID`, as decimal text (it is a u64).
     Metal { registry_id: String, name: String },
@@ -140,7 +212,7 @@ pub enum AdapterIdentity {
 /// The platform object behind an exported surface, as it crosses processes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum PlatformSurface {
     /// An IOSurface sent once as a Mach port right through `pm-bridge`; the
     /// message carries the index the bridge assigned, never a raw port.

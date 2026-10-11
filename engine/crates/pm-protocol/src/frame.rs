@@ -92,7 +92,7 @@ pub enum Shading3d {
 /// Camera projection.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum Projection {
     /// Vertical field of view in degrees.
     Perspective { fov_y_degrees: f64, near: f64, far: f64 },
@@ -150,8 +150,13 @@ pub struct FrameRequest {
     pub precision: Precision,
     pub motion_blur: MotionBlurKind,
     pub view: Option<ViewOverride>,
-    /// Native shading for Blender-rendered compositions (preview only).
+    /// Native shading stands in for Blender-rendered compositions: preview,
+    /// thumbnails, and agent captures reported as `blender: "pending"`.
+    /// Never for exports (a missing Blender surface fails an export).
     pub draft_3d: bool,
+    /// The user chose "Render using: Proxies (draft)" for this export
+    /// (section 14.6). The only way proxy pixels reach an export.
+    pub draft_render: bool,
     /// Also render the depth and object-id surface (frames with 3D layers).
     pub depth_id: bool,
     /// Also return overlay geometry at the frame's revision.
@@ -185,19 +190,28 @@ impl Validate for FrameRequest {
         })?;
         if self.purpose.is_final() {
             ensure(self.view.is_none(), C, || "exports and agent captures ignore view overrides; send none".into())?;
-            ensure(!self.draft_3d, C, || "exports and agent captures never use draft 3D".into())?;
             ensure(self.resolution == PreviewResolution::Full, C, || "exports and agent captures render at full resolution".into())?;
-            ensure(self.media != MediaPreference::Proxies, C, || {
-                "proxy pixels reach exports only through an explicit draft render job".into()
-            })?;
             ensure(!matches!(self.motion_blur, MotionBlurKind::PreviewPlaying | MotionBlurKind::PreviewPaused), C, || {
+                "exports and agent captures never use preview motion-blur counts".into()
+            })?;
+            ensure(!self.overlay && !self.depth_id, C, || "overlay geometry and depth surfaces are viewer outputs".into())?;
+        }
+        ensure(!self.draft_render || self.purpose == FramePurpose::Export, C, || "only exports take an explicit draft render".into())?;
+        ensure(self.media != MediaPreference::Proxies || !self.purpose.is_final() || self.draft_render, C, || {
+            "proxy pixels reach an export only through an explicit draft render, and never an agent capture".into()
+        })?;
+        ensure(!self.draft_render || self.media == MediaPreference::Proxies, C, || "a draft render reads proxies".into())?;
+        if self.purpose == FramePurpose::Export {
+            ensure(!self.draft_3d, C, || "exports never use draft 3D; a missing Blender surface fails the export".into())?;
+            ensure(!matches!(self.priority, PriorityClass::Interactive | PriorityClass::AgentSnapshot), C, || {
+                "exports run in a job class".into()
+            })?;
+            ensure(matches!(self.motion_blur, MotionBlurKind::Export | MotionBlurKind::AlphaExport | MotionBlurKind::Off), C, || {
                 "exports use export motion-blur counts".into()
             })?;
         }
-        if self.purpose == FramePurpose::Export {
-            ensure(self.priority != PriorityClass::Interactive && self.priority != PriorityClass::AgentSnapshot, C, || {
-                "exports run in a job class".into()
-            })?;
+        if self.purpose == FramePurpose::AgentCapture {
+            ensure(self.priority == PriorityClass::AgentSnapshot, C, || "agent captures run in the agent snapshot class".into())?;
         }
         if matches!(self.purpose, FramePurpose::Viewer | FramePurpose::Scrub) {
             ensure(self.priority == PriorityClass::Interactive, C, || "viewer frames are interactive".into())?;
@@ -245,7 +259,7 @@ pub type Quad = [[f64; 2]; 4];
 /// One path command in view pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "op")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "op")]
 pub enum PathCommand {
     MoveTo { x: f64, y: f64 },
     LineTo { x: f64, y: f64 },
@@ -347,6 +361,19 @@ pub struct ViewerState {
     pub play_every_frame: bool,
 }
 
+impl Validate for ViewerState {
+    fn validate(&self) -> Result<(), Violation> {
+        const C: ContractId = ContractId::Frame;
+        ensure(self.composition.is_valid(), C, || "invalid composition id".into())?;
+        ensure(!self.size.is_empty() && self.size.width <= MAX_OUTPUT_DIMENSION && self.size.height <= MAX_OUTPUT_DIMENSION, C, || {
+            format!("viewer size {:?} outside 1..{MAX_OUTPUT_DIMENSION}", self.size)
+        })?;
+        ensure(self.device_pixel_ratio.is_finite() && self.device_pixel_ratio > 0.0, C, || "device pixel ratio must be positive".into())?;
+        ensure(self.zoom.is_finite() && self.zoom > 0.0, C, || "zoom must be positive".into())?;
+        ensure(self.pan.iter().all(|v| v.is_finite()), C, || "pan must be finite".into())
+    }
+}
+
 /// Engine-side bookkeeping of frames the viewer holds. A surface is never
 /// written while held; a release must name the frame's exact `seq`.
 #[derive(Debug, Clone)]
@@ -424,6 +451,7 @@ mod tests {
             motion_blur: MotionBlurKind::PreviewPlaying,
             view: None,
             draft_3d: true,
+            draft_render: false,
             depth_id: true,
             overlay: true,
         }
@@ -464,9 +492,24 @@ mod tests {
         };
         assert!(with_view.validate().is_err());
         assert!(FrameRequest { media: MediaPreference::Proxies, ..export.clone() }.validate().is_err());
+        assert!(FrameRequest { media: MediaPreference::Proxies, draft_render: true, ..export.clone() }.validate().is_ok(), "explicit draft render");
+        assert!(FrameRequest { draft_render: true, ..export.clone() }.validate().is_err(), "a draft render reads proxies");
         assert!(FrameRequest { draft_3d: true, ..export.clone() }.validate().is_err());
         assert!(FrameRequest { resolution: PreviewResolution::Half, ..export.clone() }.validate().is_err());
-        assert!(FrameRequest { motion_blur: MotionBlurKind::PreviewPaused, ..export }.validate().is_err());
+        assert!(FrameRequest { overlay: true, ..export.clone() }.validate().is_err());
+        assert!(FrameRequest { motion_blur: MotionBlurKind::PreviewPaused, ..export.clone() }.validate().is_err());
+        let agent = FrameRequest {
+            purpose: FramePurpose::AgentCapture,
+            priority: PriorityClass::AgentSnapshot,
+            color: OutputColor::SrgbImage,
+            motion_blur: MotionBlurKind::Off,
+            draft_3d: true,
+            ..export
+        };
+        assert!(agent.validate().is_ok(), "agent captures may stand in native shading (blender: pending)");
+        assert!(FrameRequest { media: MediaPreference::Proxies, ..agent.clone() }.validate().is_err());
+        assert!(FrameRequest { media: MediaPreference::Proxies, draft_render: true, ..agent.clone() }.validate().is_err());
+        assert!(FrameRequest { priority: PriorityClass::UserJob, ..agent }.validate().is_err());
     }
 
     #[test]

@@ -53,7 +53,7 @@ impl From<Compat> for u8 {
 /// An evaluated parameter value (effects, transitions, extension layers, shaders).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind", content = "value")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind", content = "value")]
 pub enum ParamValue {
     Number(f64),
     /// Toggles bind as `float` for effects and `bool` for extension layers (section 11).
@@ -68,7 +68,7 @@ pub enum ParamValue {
 /// Composition background (appendix B).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum Background {
     None,
     Solid { color: Rgba },
@@ -129,7 +129,7 @@ impl LayerKind {
 /// The layer's transform space.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum LayerTransform {
     /// Layer-to-composition, including parenting and group transforms.
     Flat { matrix: Mat3 },
@@ -145,7 +145,7 @@ pub enum LayerTransform {
 /// the engine; the scene carries what the graph keys on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum LayerSource {
     Solid { color: Rgba, size: Size, radius: f64 },
     /// Shapes, text, and captions: vector content evaluated by pm-eval and
@@ -203,7 +203,7 @@ pub enum MaskMode {
 /// An evaluated mask.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum EvaluatedMask {
     Rect { center: [f64; 2], size: [f64; 2], rotation_degrees: f64, feather: f64, mode: MaskMode, enabled: bool },
     Ellipse { center: [f64; 2], size: [f64; 2], rotation_degrees: f64, feather: f64, mode: MaskMode, enabled: bool },
@@ -271,7 +271,7 @@ pub const MAX_PARAMETRIC_MASKS: usize = 8;
 /// A light in a 3D world.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum LightKind {
     /// Hemisphere ambient; ground color is 0.35× the sky color.
     Ambient,
@@ -313,7 +313,7 @@ pub struct Camera3d {
 /// What a 3D object draws.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum ModelSource {
     /// A primitive, lathe, extrude, or recipe mesh from pm-geom3d; the key
     /// hashes the generator inputs.

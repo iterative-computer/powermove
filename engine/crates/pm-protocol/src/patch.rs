@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
-use crate::common::{AssetId, Bytes, ContentHash, DocumentId, Revision};
+use crate::blender::BlenderOutputFile;
+use crate::common::{AssetId, ByteSize, Bytes, ContentHash, DocumentId, JobId, Revision};
 use crate::host::CapabilityHandle;
 use crate::validate::{ensure, Validate, Violation};
 use crate::version::ContractId;
@@ -96,11 +97,11 @@ impl Validate for PatchBatch {
 /// Where a resync body is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum ResyncSource {
     Inline { body: Bytes },
     /// Large documents go through a cache file.
-    CacheFile { handle: CapabilityHandle, length: u32 },
+    CacheFile { handle: CapabilityHandle, length: ByteSize },
 }
 
 /// Replace the receiver's mirror with the canonical document at `revision`.
@@ -277,16 +278,31 @@ pub enum FactCommit {
 /// the document itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum EngineFact {
     /// An offline asset was found by content hash, UMID, or content identifier.
     RelinkedByIdentity { asset: AssetId, hash: ContentHash, revision: Revision },
-    /// A Blender generation or import finished; the result applies only if
-    /// the document is still at `revision`.
-    BlenderResult { asset: AssetId, revision: Revision, result: CapabilityHandle },
+    /// A Blender generation or import finished (contract 11); the result
+    /// applies only if the document is still at `revision`. `manifest` is
+    /// the worker's manifest JSON; the renderer mints asset ids on commit.
+    BlenderResult { job: JobId, revision: Revision, files: Vec<BlenderOutputFile>, manifest: String },
+    /// A name, timecode, or duration match for an offline asset. Only a
+    /// proposal: the user confirms it (Relink sheet), and the confirmation is
+    /// an undoable edit (section 21).
+    RelinkProposal { asset: AssetId, candidate: CapabilityHandle, reason: RelinkReason },
     /// Probe results, detected color and alpha, Blender availability, font
     /// substitution, crash-attributed failures: informational only.
     MediaFacts { asset: AssetId, hash: Option<ContentHash> },
+}
+
+/// Why a relink candidate was proposed (never applied automatically).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub enum RelinkReason {
+    Name,
+    Timecode,
+    Duration,
 }
 
 impl EngineFact {
@@ -294,6 +310,7 @@ impl EngineFact {
         match self {
             EngineFact::RelinkedByIdentity { .. } => FactCommit::MetadataWrite,
             EngineFact::BlenderResult { .. } => FactCommit::UndoableIfUnchanged,
+            EngineFact::RelinkProposal { .. } => FactCommit::UndoableEdit,
             EngineFact::MediaFacts { .. } => FactCommit::NotCommitted,
         }
     }
@@ -363,5 +380,7 @@ mod tests {
         let hash = ContentHash([1; 32]);
         assert_eq!(EngineFact::RelinkedByIdentity { asset: "a".into(), hash, revision: rev(1) }.commit(), FactCommit::MetadataWrite);
         assert_eq!(EngineFact::MediaFacts { asset: "a".into(), hash: None }.commit(), FactCommit::NotCommitted);
+        let candidate = CapabilityHandle::from_random_bytes([3; 16]);
+        assert_eq!(EngineFact::RelinkProposal { asset: "a".into(), candidate, reason: RelinkReason::Timecode }.commit(), FactCommit::UndoableEdit);
     }
 }

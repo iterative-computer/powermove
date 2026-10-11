@@ -99,6 +99,10 @@ safe_uint!(
     ByteSize
 );
 safe_uint!(
+    /// A count that can exceed 32 bits (audio samples of a long export).
+    Count
+);
+safe_uint!(
     /// A monotonic host clock instant in microseconds (`mach_absolute_time`
     /// converted to µs on macOS, `QueryPerformanceCounter` on Windows,
     /// `CLOCK_MONOTONIC` on Linux). All processes on one machine share it.

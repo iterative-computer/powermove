@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
-use crate::blender::{BlenderJobRequest, BlenderProgress, BlenderStatus, BlenderSurface};
+use crate::blender::{BlenderJobRequest, BlenderModelJob, BlenderProgress, BlenderStatus, BlenderSurface};
 use crate::clock::{ClockSample, TransportCommand};
 use crate::color::ProjectColor;
 use crate::common::{CompositionId, DocumentId, RequestId, Revision, SessionId, Ticks};
@@ -33,7 +33,7 @@ use crate::host::{
 use crate::interop::SurfacePool;
 use crate::lease::{Lease, LeaseRequest, LeaseUsage};
 use crate::patch::{ConsistencyCheck, ConsistencyResult, EngineFact, PatchBatch, PatchesApplied, Resync};
-use crate::priority::{AgentFrameRequest, AgentFrameResult, ImagePayload, JobStatus};
+use crate::priority::{AgentFrameRequest, AgentFrameResult, CancelJobs, ImagePayload, JobAccepted, JobStatus, JobsCancelled, SubmitJob};
 use crate::scene::EvaluatedScene;
 use crate::slicing::{DeadlineSignal, SlicingPolicy};
 use crate::validate::{ensure, Validate, Violation};
@@ -72,7 +72,7 @@ impl Envelope {
 /// The message kinds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum Message {
     Hello(Hello),
     Welcome(Welcome),
@@ -149,6 +149,10 @@ pub enum Request {
     Evaluate(EvaluateRequest),
     /// Host → job engine (session-bound). Answer: `agentFrames`.
     AgentFrames(AgentFrameRequest),
+    /// Host → job engine. Answer: `jobAccepted`; progress follows as `jobStatus` events.
+    SubmitJob(SubmitJob),
+    /// Host → job engine. Answer: `jobsCancelled`.
+    CancelJobs(CancelJobs),
     /// Renderer or host → engine (session-bound). Answer: `definitionsApplied`.
     PushDefinitions(DefinitionsUpdate),
     /// Host → engine. Answer: `leaseUsage` with `ack` once usage fits.
@@ -167,6 +171,8 @@ pub enum Request {
     BlenderRender(BlenderJobRequest),
     /// Any → host. Answer: `blenderStatus`.
     BlenderStatus,
+    /// Renderer or document host → host. Answer: `ack`; the result follows as a `fact` event.
+    BlenderModel(BlenderModelJob),
     /// Host → document host pool. Answer: `projectOpened`.
     OpenProject(OpenProject),
     /// Host → document host. Answer: `ack`.
@@ -192,6 +198,8 @@ pub enum Response {
     Image(RenderedImage),
     Scene(Box<EvaluatedScene>),
     AgentFrames(AgentFrameResult),
+    JobAccepted(JobAccepted),
+    JobsCancelled(JobsCancelled),
     DefinitionsApplied(DefinitionsApplied),
     LeaseUsage(LeaseUsage),
     Lease(Lease),
@@ -257,6 +265,8 @@ pub enum ResponseKind {
     FrameOrImage,
     Scene,
     AgentFrames,
+    JobAccepted,
+    JobsCancelled,
     DefinitionsApplied,
     LeaseUsage,
     Lease,
@@ -276,12 +286,14 @@ impl Request {
     pub const fn expects(&self) -> ResponseKind {
         match self {
             Request::OpenSession(_) => ResponseKind::SessionOpened,
-            Request::CloseSession | Request::BlenderRender(_) | Request::CloseProject(_) => ResponseKind::Ack,
+            Request::CloseSession | Request::BlenderRender(_) | Request::BlenderModel(_) | Request::CloseProject(_) => ResponseKind::Ack,
             Request::Resync(_) => ResponseKind::PatchesApplied,
             Request::CheckConsistency(_) => ResponseKind::Consistency,
             Request::RenderFrame(_) => ResponseKind::FrameOrImage,
             Request::Evaluate(_) => ResponseKind::Scene,
             Request::AgentFrames(_) => ResponseKind::AgentFrames,
+            Request::SubmitJob(_) => ResponseKind::JobAccepted,
+            Request::CancelJobs(_) => ResponseKind::JobsCancelled,
             Request::PushDefinitions(_) => ResponseKind::DefinitionsApplied,
             Request::GrantLease(_) => ResponseKind::LeaseUsage,
             Request::RequestLease(_) => ResponseKind::Lease,
@@ -304,13 +316,13 @@ impl Request {
             Request::Resync(_) | Request::CheckConsistency(_) => ContractId::Patch,
             Request::RenderFrame(_) => ContractId::Frame,
             Request::Evaluate(_) => ContractId::EvaluatedScene,
-            Request::AgentFrames(_) => ContractId::Priority,
+            Request::AgentFrames(_) | Request::SubmitJob(_) | Request::CancelJobs(_) => ContractId::Priority,
             Request::PushDefinitions(_) => ContractId::Definitions,
             Request::GrantLease(_) | Request::RequestLease(_) => ContractId::Lease,
             Request::MintHandle(_) | Request::OutputDestination(_) | Request::CommitOutput(_) | Request::HardwareSessions(_) => {
                 ContractId::HostServices
             }
-            Request::BlenderRender(_) | Request::BlenderStatus => ContractId::Blender,
+            Request::BlenderRender(_) | Request::BlenderStatus | Request::BlenderModel(_) => ContractId::Blender,
             Request::OpenProject(_) | Request::CloseProject(_) | Request::Persist(_) | Request::RegisterExtension(_) | Request::ToolCall(_) => {
                 ContractId::DocumentHost
             }
@@ -342,6 +354,8 @@ impl Response {
             Response::Frame(_) | Response::Image(_) => ResponseKind::FrameOrImage,
             Response::Scene(_) => ResponseKind::Scene,
             Response::AgentFrames(_) => ResponseKind::AgentFrames,
+            Response::JobAccepted(_) => ResponseKind::JobAccepted,
+            Response::JobsCancelled(_) => ResponseKind::JobsCancelled,
             Response::DefinitionsApplied(_) => ResponseKind::DefinitionsApplied,
             Response::LeaseUsage(_) => ResponseKind::LeaseUsage,
             Response::Lease(_) => ResponseKind::Lease,
@@ -405,6 +419,8 @@ impl Validate for Request {
             Request::OutputDestination(request) => request.validate(),
             Request::HardwareSessions(request) => request.validate(),
             Request::BlenderRender(job) => job.validate(),
+            Request::BlenderModel(job) => job.validate(),
+            Request::SubmitJob(job) => job.validate(),
             Request::ToolCall(call) => call.validate(),
             Request::CloseSession
             | Request::Resync(_)
@@ -413,6 +429,7 @@ impl Validate for Request {
             | Request::MintHandle(_)
             | Request::CommitOutput(_)
             | Request::BlenderStatus
+            | Request::CancelJobs(_)
             | Request::OpenProject(_)
             | Request::CloseProject(_)
             | Request::Persist(_)
@@ -443,6 +460,8 @@ impl Validate for Event {
             Event::LeaseUsage(usage) => usage.validate(),
             Event::JobStatus(status) => status.validate(),
             Event::BlenderSurface(surface) => surface.validate(),
+            Event::Viewer(state) => state.validate(),
+            Event::Failure(report) => report.error.validate(),
             _ => Ok(()),
         }
     }
@@ -465,7 +484,8 @@ impl Validate for Envelope {
                 ensure(!body.session_bound() || self.session.is_some(), C, || "this event needs a session".into())?;
                 body.validate()
             }
-            Message::Error { .. } | Message::Cancel { .. } => Ok(()),
+            Message::Error { error, .. } => error.validate(),
+            Message::Cancel { .. } => Ok(()),
         }
     }
 }
@@ -567,6 +587,7 @@ mod tests {
             wire: WIRE_VERSION,
             build: "dev".into(),
             contracts: crate::version::local_ranges(),
+            max_message_bytes: crate::codec::MAX_MESSAGE_BYTES as u32,
         }));
         assert!(hello.validate().is_ok());
         assert!(hello.with_session(SessionId::ZERO).validate().is_err());

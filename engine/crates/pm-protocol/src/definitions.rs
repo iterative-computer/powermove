@@ -52,7 +52,7 @@ impl DefinitionOrigin {
 /// (`kernel/sandbox-schemas.ts` `layers.renderer`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
 pub enum LayerRenderer {
     /// A GLSL `void main()` body (the user's text; the wrapped source is in `glsl`).
     Fragment { fragment: String },
@@ -81,7 +81,7 @@ pub enum Layer3dRole {
 /// One parameter (UI fields stripped).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
-#[serde(rename_all = "camelCase", tag = "type")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "type")]
 pub enum ParamSpec {
     Number { key: String, default: f64, min: f64, max: f64, step: Option<f64> },
     /// `#rrggbb`.

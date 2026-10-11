@@ -127,15 +127,18 @@ pub enum ToolRoute {
     DocumentHost,
     /// Needs a real DOM: a Chromium tab started on demand on the pinned project.
     Chromium,
-    /// Host services: media store, media tools over the `ffmpeg` executable, Blender, the packer.
+    /// Host services in the CLI process: the project packer, media tools over
+    /// the `ffmpeg` executable, the Store client, extension forking and
+    /// inspection, and orchestration (the same split as the desktop's
+    /// `main/agent-tools/bridge.ts`).
     HostServices,
     /// The job engine (exports and render status).
     JobEngine,
 }
 
-/// DOM tools: they need a real DOM, so the hidden host starts Chromium on
-/// demand for them and fails with a named error when Chromium is missing.
-pub const DOM_TOOLS: [&str; 7] = [
+/// DOM tools (section 22): the hidden host starts Chromium on demand for
+/// them and fails with a named error when Chromium is missing.
+pub const DOM_TOOLS: &[&str] = &[
     "capture_panel",
     "computer_use_panel",
     "interact_panel",
@@ -145,27 +148,51 @@ pub const DOM_TOOLS: [&str; 7] = [
     "set_panel_layout",
 ];
 
-/// Tools served by host services.
-pub const HOST_TOOLS: [&str; 10] = [
+/// Tools served by host services. Mirrors what the desktop bridge runs in
+/// main today: `save_project` (the packer), `AGENT_MEDIA_TOOL_NAMES`,
+/// `POWERMOVE_STORE_TOOL_NAMES`, creative-workspace inspection, extension
+/// forking, and `ORCHESTRATION_TOOL_NAMES`.
+pub const HOST_TOOLS: &[&str] = &[
     "save_project",
-    "import_media",
-    "replace_media",
     "probe_media",
+    "sample_media_frames",
     "media_contact_sheet",
     "media_waveform",
-    "sample_media_frames",
     "transcribe_media",
-    "separate_audio",
-    "import_blend",
+    "store_search",
+    "store_extension",
+    "store_source",
+    "store_library",
+    "store_install",
+    "store_update",
+    "store_uninstall",
+    "store_publish_prepare",
+    "store_publish",
+    "inspect_creative_workspace",
+    "inspect_creative_extension",
+    "fork_builtin_extension",
+    "stage_fork_rebase",
+    "orchestrator_capabilities",
+    "delegate_task",
+    "task_status",
+    "task_cancel",
+    "task_send",
+    "thread_launch",
+    "thread_list",
+    "thread_read",
+    "thread_send",
+    "thread_watch",
+    "thread_unwatch",
+    "thread_cancel",
 ];
 
-/// Tools served by the job engine.
-pub const JOB_TOOLS: [&str; 2] = ["export_video", "get_render_status"];
+/// Tools served by the job engine through host services.
+pub const JOB_TOOLS: &[&str] = &["export_video", "get_render_status"];
 
-/// Routes an agent tool by name. Every other tool (document, 3D, extension,
-/// store, and orchestration tools) runs in the document host. A host tool
-/// that also edits the document (`import_media_to_timeline`) goes to the
-/// document host, which calls host services for the bytes.
+/// Routes an agent tool by name. Every other tool (document, 3D, media
+/// import and replace, captions, `render_frames`, `check_project`) runs in
+/// the document host, which calls host services for bytes and the job
+/// engine for frames.
 pub fn route_tool(name: &str) -> ToolRoute {
     if DOM_TOOLS.contains(&name) {
         ToolRoute::Chromium
@@ -218,9 +245,8 @@ impl Validate for ToolCall {
             format!("tool name {:?} must be snake_case", self.tool)
         })?;
         ensure(!self.call_id.is_empty() && self.call_id.len() <= 128, C, || "call id must be 1 to 128 bytes".into())?;
-        ensure(route_tool(&self.tool) != ToolRoute::Chromium, C, || {
-            format!("{} needs a DOM and routes to Chromium, not a document host", self.tool)
-        })
+        let route = route_tool(&self.tool);
+        ensure(route == ToolRoute::DocumentHost, C, || format!("{} routes to {route:?}, not a document host", self.tool))
     }
 }
 
@@ -238,6 +264,12 @@ mod tests {
         assert_eq!(route_tool("edit_3d"), ToolRoute::DocumentHost);
         assert_eq!(route_tool("render_frames"), ToolRoute::DocumentHost);
         assert_eq!(route_tool("import_media_to_timeline"), ToolRoute::DocumentHost);
+        assert_eq!(route_tool("import_media"), ToolRoute::DocumentHost);
+        assert_eq!(route_tool("check_project"), ToolRoute::DocumentHost);
+        assert_eq!(route_tool("probe_media"), ToolRoute::HostServices);
+        assert_eq!(route_tool("store_install"), ToolRoute::HostServices);
+        assert_eq!(route_tool("delegate_task"), ToolRoute::HostServices);
+        assert_eq!(route_tool("thread_cancel"), ToolRoute::HostServices);
     }
 
     #[test]
@@ -251,6 +283,7 @@ mod tests {
         };
         assert!(call.validate().is_ok());
         assert!(ToolCall { tool: "open_panel".into(), ..call.clone() }.validate().is_err());
+        assert!(ToolCall { tool: "export_video".into(), ..call.clone() }.validate().is_err(), "exports go to the job engine");
         assert!(ToolCall { tool: "Bad-Name".into(), ..call }.validate().is_err());
     }
 }
