@@ -4,3 +4,8 @@ pub mod cf;
 pub mod color;
 pub mod pixbuf;
 pub mod gpu;
+pub mod avio;
+pub mod vt;
+pub mod material;
+pub mod exp_formats;
+pub mod exp_transparency;
