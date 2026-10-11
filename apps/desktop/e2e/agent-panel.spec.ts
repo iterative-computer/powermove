@@ -8,6 +8,8 @@ test.describe('@agent-panel Svelte agent panel drives a real editor-mode run', (
     await page.evaluate(() => {
       const PM = (window as any).PM;
       PM.WS.mutate((workspace: any) => {
+        // Measure against a full-height left column, not one above the timeline.
+        PM.Layout.movePanel(workspace, 'timeline', 'center');
         for (const spec of [...PM.Layout.ensureDock(workspace, 'left').panels]) {
           PM.Layout.hidePanel(workspace, spec.id);
         }

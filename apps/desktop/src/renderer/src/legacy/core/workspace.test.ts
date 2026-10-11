@@ -92,6 +92,30 @@ describe('legacy workspace install', () => {
     expect(PM.WS.normalize({ ...PM.WS.get('design'), layout: { docks: [left, center] } }).layout.docks[0].panels.map((panel: any) => panel.id)).toEqual(['assets', 'takes']);
   });
 
+  it('moves a sized center Timeline into a bottom dock under the left column once', () => {
+    const left = { id: 'left', panels: [{ id: 'assets', flex: true }, { id: 'layer-effects', size: 350 }] };
+    const center = { id: 'center', flex: true, panels: [{ id: 'viewer', flex: true }, { id: 'timeline', size: 320 }] };
+    const right = { id: 'right', panels: [{ id: 'inspector', flex: true }] };
+    const animate = { id: 'center', flex: true, panels: [{ id: 'viewer', size: 300 }, { id: 'timeline', flex: true }] };
+    const PM = workspaceModel({
+      workspace: 'saved',
+      workspaces: [
+        { id: 'saved', name: 'Saved', agentDockMigration: 2, layout: { docks: [left, center, right] } },
+        { id: 'tall', name: 'Tall', agentDockMigration: 2, layout: { docks: [left, animate, right] } },
+        { id: 'current', name: 'Current', agentDockMigration: 3, layout: { docks: [left, center, right] } },
+      ],
+    });
+    PM.WS.init();
+    const docks = (id: string) => PM.WS.get(id).layout.docks.map((dock: any) => [dock.id, dock.panels.map((panel: any) => panel.id)]);
+
+    expect(docks('saved')).toEqual([
+      ['left', ['assets', 'layer-effects']], ['center', ['viewer']], ['bottom', ['timeline']], ['right', ['inspector']],
+    ]);
+    expect(PM.WS.get('saved').layout.docks[2]).toMatchObject({ id: 'bottom', size: 320 });
+    expect(docks('tall')[1]).toEqual(['center', ['viewer', 'timeline']]);
+    expect(docks('current')[1]).toEqual(['center', ['viewer', 'timeline']]);
+  });
+
   it('keeps a shared agent panel at its set height', () => {
     const PM = workspaceModel();
     const workspace = PM.WS.normalize({

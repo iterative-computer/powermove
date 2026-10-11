@@ -114,7 +114,7 @@ export interface PanelsAPI {
   refresh(id: string): void;
 }
 
-export type PanelDock = 'left' | 'center' | 'right';
+export type PanelDock = 'left' | 'center' | 'right' | 'bottom';
 export interface PanelOpenOptions { dock?: PanelDock; index?: number }
 
 /* ── commands & keybindings ──────────────────────────────── */

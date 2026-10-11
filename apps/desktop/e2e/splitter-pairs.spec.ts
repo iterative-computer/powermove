@@ -7,7 +7,7 @@ test('timeline/shader splitter transfers height and revives a collapsed shader',
   await page.setViewportSize({ width: 1600, height: 1000 });
   await page.evaluate(() => {
     const PM = (window as any).PM;
-    PM.WS.mutate((w: any) => { const c = w.layout.docks.find((d: any) => d.id === 'center'); if (!c.panels.some((p: any) => p.id === 'shader')) c.panels.push({ id: 'shader', size: 320 }); });
+    PM.WS.mutate((w: any) => { PM.Layout.movePanel(w, 'timeline', 'center'); const c = w.layout.docks.find((d: any) => d.id === 'center'); if (!c.panels.some((p: any) => p.id === 'shader')) c.panels.push({ id: 'shader', size: 320 }); });
   });
   await page.waitForSelector('#panel-shader'); await page.waitForTimeout(400);
   const h = (id: string) => page.evaluate((id) => document.getElementById(`panel-${id}`)!.getBoundingClientRect().height, id);

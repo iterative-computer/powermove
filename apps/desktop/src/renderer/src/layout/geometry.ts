@@ -60,7 +60,8 @@ export function hitTestDockPlacement(
 export function buildDockDropTargets<T extends DockTarget>(
   docks: T[] | null | undefined,
   bodyRect: Rect | null | undefined,
-  edgeWidth = 96
+  edgeWidth = 96,
+  edgeHeight = 56
 ): Array<T | DockTarget> {
   const targets = [...(docks || [])];
   if (!bodyRect) return targets;
@@ -83,6 +84,18 @@ export function buildDockDropTargets<T extends DockTarget>(
   }
   if (!targets.some((dock) => dock.id === 'right')) {
     virtual.push(make('right', Math.max(bodyRect.left, bodyRect.right - edgeWidth), bodyRect.right));
+  }
+  /* The bottom dock spans everything left of the right dock, so its drop strip
+     runs along the bottom edge of that same span. */
+  if (!targets.some((dock) => dock.id === 'bottom')) {
+    const right = targets.find((dock) => dock.id === 'right')?.rect.left ?? bodyRect.right;
+    const top = Math.max(bodyRect.top, bodyRect.bottom - edgeHeight);
+    virtual.push({
+      id: 'bottom',
+      virtual: true,
+      panels: [],
+      rect: { left: bodyRect.left, right, top, bottom: bodyRect.bottom, width: right - bodyRect.left, height: bodyRect.bottom - top }
+    });
   }
   return [...virtual, ...targets];
 }

@@ -105,7 +105,7 @@ test.describe('@dock-layout Svelte DockLayout', () => {
       });
     }, ids);
     await expect(page.locator('#dock-left #panel-overflow-fixed-c')).toHaveCount(1);
-    await page.locator('#body > .splitter').first().hover();
+    await page.locator('#dock-left + .splitter').hover();
     await page.mouse.wheel(0, 240);
     await expect.poll(() => page.locator('#dock-left').evaluate((dock) => dock.scrollTop)).toBeGreaterThan(0);
     await page.mouse.wheel(0, -10000);
@@ -122,7 +122,7 @@ test.describe('@dock-layout Svelte DockLayout', () => {
     await session.openEditor();
     const { page, diagnostics } = session;
     await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
-    await expect(page.locator('#body > .dock .panel[data-panel]')).not.toHaveCount(0);
+    await expect(page.locator('#body .dock .panel[data-panel]')).not.toHaveCount(0);
     await expect(page.locator('#pm-panel-pool')).toHaveCount(1);
 
     const movedPanel = await page.evaluate(() => {
@@ -151,7 +151,7 @@ test.describe('@dock-layout Svelte DockLayout', () => {
         identity: (document.getElementById('panel-perf') as any)?.__dockLayoutIdentity,
         sameNode: document.getElementById('panel-perf') === moved,
         hiddenInPool,
-        restored: Boolean(document.querySelector('#body > .dock #panel-perf'))
+        restored: Boolean(document.querySelector('#body .dock #panel-perf'))
       };
     });
     expect(panelState).toEqual({ identity: 'perf-live', sameNode: true, hiddenInPool: true, restored: true });

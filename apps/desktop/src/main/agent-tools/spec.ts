@@ -84,9 +84,9 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   },
   {
     name: 'set_panel_layout',
-    description: 'Save and activate a NEW named Powermove workspace with ordered panels in left, center and right docks. Uses registered panel IDs from get_panel_layout; load staged extensions before placing their panels. Retain viewer in center and timeline. Preserves previous workspaces and records normal Undo. Does not modify composition content. After Effects tab groups and floating windows must be adapted to dock columns. Re-read get_panel_layout to verify.',
-    inputSchema: closedObject({ name: { type: 'string', minLength: 1, maxLength: 80 }, sourceApp: { type: 'string', enum: ['after-effects'] }, docks: { type: 'array', minItems: 1, maxItems: 3, items: closedObject({
-      id: { type: 'string', enum: ['left', 'center', 'right'] }, size: { type: 'number', minimum: 160, maximum: 720 },
+    description: 'Save and activate a NEW named Powermove workspace with ordered panels in left, center, right and bottom docks. The bottom dock spans under the left and center columns (its size is a height; put a sized timeline there for a full-width timeline). Uses registered panel IDs from get_panel_layout; load staged extensions before placing their panels. Retain viewer in center and timeline. Preserves previous workspaces and records normal Undo. Does not modify composition content. After Effects tab groups and floating windows must be adapted to the docks. Re-read get_panel_layout to verify.',
+    inputSchema: closedObject({ name: { type: 'string', minLength: 1, maxLength: 80 }, sourceApp: { type: 'string', enum: ['after-effects'] }, docks: { type: 'array', minItems: 1, maxItems: 4, items: closedObject({
+      id: { type: 'string', enum: ['left', 'center', 'bottom', 'right'] }, size: { type: 'number', minimum: 160, maximum: 720 },
       panels: { type: 'array', maxItems: 32, items: closedObject({ id: { type: 'string' }, size: { type: 'number', minimum: 72, maximum: 1200 }, flex: { type: 'boolean' } }, ['id']) }
     }, ['id', 'panels']) } }, ['name', 'docks'])
   },

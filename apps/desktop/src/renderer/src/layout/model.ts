@@ -24,7 +24,10 @@ export type Workspace = {
   layout: { docks: DockSpec[] };
 };
 
-const DOCK_ORDER: Record<string, number> = { left: 0, center: 1, right: 2 };
+/* `bottom` is the one row dock: it spans under every column except `right`,
+   so its `size` is a height rather than a width. */
+const DOCK_ORDER: Record<string, number> = { left: 0, center: 1, bottom: 1.5, right: 2 };
+export const defaultDockSize = (id: string): number => id === 'right' || id === 'bottom' ? 300 : 250;
 const SET_HEIGHT_PANEL_DEFAULTS: Readonly<Record<string, number>> = Object.freeze({ agent: 350 });
 
 /** Prefer a saved pixel height when another panel can fill the dock.
@@ -67,7 +70,7 @@ export function ensureDock(ws: Workspace, id: string): DockSpec {
   if (dock) return dock;
   dock = { id, panels: [] };
   if (id === 'center') dock.flex = true;
-  else dock.size = id === 'right' ? 300 : 250;
+  else dock.size = defaultDockSize(id);
   const order = DOCK_ORDER[id] ?? 3;
   const index = ws.layout.docks.findIndex((item) => (DOCK_ORDER[item.id] ?? 3) > order);
   ws.layout.docks.splice(index < 0 ? ws.layout.docks.length : index, 0, dock);
@@ -206,6 +209,6 @@ export function setPanelCollapsed(PM: PMRegistry, id: string, collapsed: boolean
 }
 
 export function dockLabel(id: string): string {
-  const labels: Record<string, string> = { left: 'Left dock', center: 'Center dock', right: 'Right dock' };
+  const labels: Record<string, string> = { left: 'Left dock', center: 'Center dock', right: 'Right dock', bottom: 'Bottom dock' };
   return labels[id] || id.replace(/^\w/, (character) => character.toUpperCase()) + ' dock';
 }
