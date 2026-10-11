@@ -1,6 +1,7 @@
 /* Ported from js/core/util.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { bridge as hostBridge } from '../../kernel/bridge';
+import { dropFrameTimecode, formatTimecode, parseTimecode } from './timecode';
 
 export function install(PM: PMRegistry): void {
 /* Powermove — util: dom, bus, math, time, persistence. */
@@ -194,25 +195,12 @@ PM.hexAlpha = (hex: any) => {
 PM.rgb2hex = (r: any, g: any, b: any) => '#' + [r, g, b].map(v => clamp(Math.round(v * 255), 0, 255).toString(16).padStart(2, '0')).join('');
 
 /* ── time ──────────────────────────────────────────────── */
-PM.tc = (sec: any, fps = 30, showFrames = true) => {
-  const neg = sec < 0; sec = Math.abs(sec);
-  let f = Math.round(sec * fps);
-  const ff = f % fps; f = Math.floor(f / fps);
-  const ss = f % 60; const mm = Math.floor(f / 60) % 60; const hh = Math.floor(f / 3600);
-  const p = (n: any, w = 2) => String(n).padStart(w, '0');
-  const base = (hh ? p(hh) + ':' : '') + p(mm) + ':' + p(ss);
-  return (neg ? '-' : '') + base + (showFrames ? ':' + p(ff) : '');
-};
-PM.parseTc = (str: any, fps = 30) => {
-  const parts: any = String(str).trim().split(':').map(Number);
-  if (parts.some(isNaN)) return null;
-  let s = 0;
-  if (parts.length === 4) s = parts[0] * 3600 + parts[1] * 60 + parts[2] + parts[3] / fps;
-  else if (parts.length === 3) s = parts[0] * 60 + parts[1] + parts[2] / fps;
-  else if (parts.length === 2) s = parts[0] + parts[1] / fps;
-  else s = parts[0];
-  return s;
-};
+/* Non-drop timecode; fractional rates label frames with the nearest integer
+   base (24 for 23.976, 30 for 29.97). PM.tcDrop is SMPTE drop-frame for 29.97
+   and 59.94 and is not shown anywhere in the UI yet. */
+PM.tc = (sec: any, fps = 30, showFrames = true) => formatTimecode(sec, fps, showFrames);
+PM.parseTc = (str: any, fps = 30) => parseTimecode(str, fps);
+PM.tcDrop = (sec: any, fps: any) => dropFrameTimecode(sec, fps);
 PM.snapF = (t: any, fps: any) => Math.round(t * fps) / fps;
 
 /* ── event bus ─────────────────────────────────────────── */

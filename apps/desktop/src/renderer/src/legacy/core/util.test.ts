@@ -45,6 +45,17 @@ afterEach(() => {
 });
 
 describe('legacy util install', () => {
+  it('exposes timecode helpers that count fractional rates in whole frames', () => {
+    const { PM } = utilRegistry();
+    expect(PM.tc(3723 + 12 / 25, 25)).toBe('01:02:03:12');
+    expect(PM.tc(1.5)).toBe('00:01:15');
+    expect(PM.tc(1800 / 29.97, 29.97)).toBe('01:00:00');
+    expect(PM.parseTc('01:00:00', 29.97)).toBeCloseTo(1800 / 29.97, 12);
+    expect(PM.parseTc('00:01:15')).toBe(1.5);
+    expect(PM.tcDrop(1800 / 29.97, 29.97)).toBe('00:01:00;02');
+    expect(() => PM.tcDrop(1, 25)).toThrow(RangeError);
+  });
+
   it('signals rendering immediately while leaving UI work coalesced', () => {
     const { PM } = utilRegistry();
     const draw = vi.fn();
