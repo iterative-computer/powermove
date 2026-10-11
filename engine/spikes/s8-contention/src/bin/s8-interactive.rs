@@ -13,9 +13,11 @@
 //! at-risk (not complete at `risk-frac` of the period), and miss (not complete at the
 //! deadline), sent the moment they are known rather than after completion.
 
+use s8_contention::display::{self, DisplayLink};
+use s8_contention::present::{self, Presenter};
 use s8_contention::{Args, clock, gpu, signal, stats, sys};
 use serde::Serialize;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 
 const RING: u32 = 8;
@@ -169,6 +171,31 @@ struct Drops {
     deadline_3_frames: usize,
     /// Frames never submitted because the output ring was still busy.
     skipped_ring_full: usize,
+    /// Frames never submitted because the pacing thread woke after the frame's vsync
+    /// had already passed (display-link clock only).
+    skipped_pacing: usize,
+}
+
+/// Presentation through the on-screen layer (`--present`).
+#[derive(Serialize)]
+struct Presentation {
+    placement: String,
+    /// AppKit's occlusion state for the window just before the run.
+    window_visible: bool,
+    /// Presented-handler invocations for measured frames (including skipped frames).
+    handler_calls: usize,
+    /// Frames whose drawable reported a presented host time.
+    presented: usize,
+    /// Frames the compositor never showed (presentedTime 0 or no handler call).
+    not_presented: usize,
+    /// Consecutive presented frames whose spacing differs from the frame period by more
+    /// than half a display refresh: a repeat or a skip on the glass.
+    irregular_intervals: usize,
+    /// Presented time minus the frame's vsync tick.
+    present_latency_ms: stats::Dist,
+    /// Spacing between consecutive presented frames.
+    present_interval_ms: stats::Dist,
+    drawable_wait_ms: stats::Dist,
 }
 
 #[derive(Serialize)]
@@ -184,6 +211,10 @@ struct Summary {
     layers: u32,
     blur_radius: i32,
     realtime_thread: bool,
+    /// `display` (CVDisplayLink vsyncs) or `timer` (free-running absolute timer).
+    clock: &'static str,
+    display_refresh_ms: Option<f64>,
+    refreshes_per_frame: Option<u64>,
     gpu_priority: Option<usize>,
     frames_measured: usize,
     drops: Drops,
@@ -198,19 +229,58 @@ struct Summary {
     miss_times_s: Vec<f64>,
     signals_sent: u64,
     signals_dropped: u64,
+    presentation: Option<Presentation>,
 }
 
 struct Pipelines {
     comp: wgpu::RenderPipeline,
     blur: wgpu::RenderPipeline,
     out: wgpu::RenderPipeline,
+    out_bgra: wgpu::RenderPipeline,
 }
 
 fn main() {
     let args = Args::from_env();
     let width: u32 = args.num("width", 3840);
     let height: u32 = args.num("height", 2160);
-    let fps: f64 = args.num("fps", 60.0);
+    let g = gpu::create("s8-interactive");
+    let Some(placement) = args.str("present") else {
+        run(&args, g, None);
+        return;
+    };
+    let placement = present::Placement::parse(placement).expect("--present corner|offscreen");
+    let mtm = present::main_thread().expect("main thread");
+    let raw_device = {
+        // SAFETY: the device outlives the layer that references the raw MTLDevice.
+        let hal = unsafe { g.device.as_hal::<wgpu::hal::api::Metal>() }.expect("Metal device");
+        hal.raw_device().clone()
+    };
+    let points: (f64, f64) = (args.num("window-width", 192.0), args.num("window-height", 108.0));
+    let window = present::create_window(mtm, &raw_device, width, height, placement, points);
+    let visible = window.visible();
+    let presenter = Presenter::new(window.layer.clone(), width, height);
+    let done = Arc::new(AtomicBool::new(false));
+    let worker = {
+        let done = done.clone();
+        let args = Args::parse(std::env::args().skip(1));
+        std::thread::spawn(move || {
+            run(
+                &args,
+                g,
+                Some((presenter, format!("{placement:?}").to_lowercase(), visible)),
+            );
+            done.store(true, Ordering::Release);
+        })
+    };
+    present::pump_until(mtm, &done);
+    worker.join().unwrap();
+    drop(window);
+}
+
+fn run(args: &Args, g: gpu::Gpu, presenter: Option<(Presenter, String, bool)>) {
+    let width: u32 = args.num("width", 3840);
+    let height: u32 = args.num("height", 2160);
+    let mut fps: f64 = args.num("fps", 60.0);
     let seconds: f64 = args.num("seconds", 60.0);
     let warmup: f64 = args.num("warmup", 2.0);
     let layers: u32 = args.num("layers", 3);
@@ -220,9 +290,26 @@ fn main() {
     let realtime = !args.flag("no-rt");
     let raw_path = args.str("raw").map(str::to_string);
     let fifo = args.str("signal-fifo").map(str::to_string);
+    let clock_kind = args.string_or("clock", "display");
     assert!((1..=8).contains(&layers));
 
-    let g = gpu::create("s8-interactive");
+    // Display-link clock: frames start on every k-th vsync of the main display.
+    let dl = match clock_kind.as_str() {
+        "display" => Some(DisplayLink::start().expect("display link")),
+        "timer" => None,
+        c => panic!("--clock display|timer, not {c}"),
+    };
+    let refresh_ns = dl.as_ref().map(|d| d.measure_refresh(120));
+    let k = dl.as_ref().zip(refresh_ns).map(|(d, r)| {
+        // Pick k from the nominal period when CoreVideo reports one.
+        let basis = if d.refresh_ns.is_finite() { d.refresh_ns } else { r };
+        display::refreshes_per_frame(basis, fps)
+            .unwrap_or_else(|| panic!("{fps} fps is not a whole number of {:.3} ms refreshes", basis / 1e6))
+    });
+    if let (Some(r), Some(k)) = (refresh_ns, k) {
+        // Deadlines follow the panel's measured rate, not the nominal content rate.
+        fps = 1e9 / (r * k as f64);
+    }
     let gpu_priority = match args.str("gpu-priority") {
         Some(p) => Some(gpu::set_private_gpu_priority(&g.queue, p.parse().unwrap()).expect("gpu priority")),
         None => gpu::get_private_gpu_priority(&g.queue),
@@ -309,6 +396,7 @@ fn main() {
         comp: pipeline("fs_comp", FS_COMP, wgpu::TextureFormat::Rgba16Float),
         blur: pipeline("fs_blur", FS_BLUR, wgpu::TextureFormat::Rgba16Float),
         out: pipeline("fs_out", FS_OUT, wgpu::TextureFormat::Rgba8Unorm),
+        out_bgra: pipeline("fs_out", FS_OUT, wgpu::TextureFormat::Bgra8Unorm),
     };
     let gen_pipe = pipeline("fs_gen", FS_GEN, wgpu::TextureFormat::Rgba16Float);
 
@@ -430,14 +518,18 @@ fn main() {
     };
     let blur_h_bg = blur_bg(&blur_h, &comp_view);
     let blur_v_bg = blur_bg(&blur_v, &tmp_view);
-    let out_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &p.out.get_bind_group_layout(0),
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: wgpu::BindingResource::TextureView(&comp_view),
-        }],
-    });
+    let out_bg_for = |pipe: &wgpu::RenderPipeline| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipe.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&comp_view),
+            }],
+        })
+    };
+    let out_bg = out_bg_for(&p.out);
+    let out_bgra_bg = out_bg_for(&p.out_bgra);
     let total_frames = ((seconds + warmup) * fps).round() as u64;
     const WARM_PIPE: u64 = 10;
     let mut ts = gpu::TsLog::new(&g, (total_frames + WARM_PIPE) as usize);
@@ -468,7 +560,8 @@ fn main() {
         rp.draw(0..3, 0..1);
     };
 
-    let encode_frame = |n: u64, slot: u32, entry: usize| -> wgpu::CommandBuffer {
+    // `target`: the presented drawable's view; otherwise the output ring slot.
+    let encode_frame = |n: u64, slot: u32, entry: usize, target: Option<&wgpu::TextureView>| -> wgpu::CommandBuffer {
         let t = n as f32 / fps as f32;
         let mut u = CompU {
             dims: [width as f32, height as f32],
@@ -499,11 +592,15 @@ fn main() {
         );
         pass(&mut enc, &tmp_view, &p.blur, &blur_h_bg, None);
         pass(&mut enc, &comp_view, &p.blur, &blur_v_bg, None);
+        let (view, pipe, bg) = match target {
+            Some(v) => (v, &p.out_bgra, &out_bgra_bg),
+            None => (&out_views[slot as usize], &p.out, &out_bg),
+        };
         pass(
             &mut enc,
-            &out_views[slot as usize],
-            &p.out,
-            &out_bg,
+            view,
+            pipe,
+            bg,
             tsr.map(|t| t.render_writes(entry, false, true)),
         );
         enc.finish()
@@ -511,7 +608,7 @@ fn main() {
 
     // Warm the pipelines.
     for i in 0..WARM_PIPE {
-        queue.submit([encode_frame(i, (i % RING as u64) as u32, i as usize)]);
+        queue.submit([encode_frame(i, (i % RING as u64) as u32, i as usize, None)]);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     }
 
@@ -586,22 +683,65 @@ fn main() {
     // Pacing thread (this one): real-time, absolute vsync ticks.
     let _ = sys::set_thread_qos(sys::Qos::UserInteractive);
     let rt_ok = realtime && sys::set_thread_realtime(period_ns, 3_000_000, period_ns).is_ok();
-    let t0 = clock::now_ns() + 200_000_000;
     let mut skipped = Vec::new();
+    let mut drawable_wait = Vec::new();
+    // Display clock: vsync index counted from the first vsync, advanced by the number of
+    // refreshes between successive callbacks (robust to a missed callback).
+    let mut vs_idx: u64 = 0;
+    let mut vs_prev: u64 = 0;
+    let t0 = match &dl {
+        Some(d) => {
+            while d.rx.try_recv().is_ok() {}
+            let v = d.rx.recv().expect("vsync");
+            vs_prev = v.now_ns;
+            v.now_ns
+        }
+        None => clock::now_ns() + 200_000_000,
+    };
     for n in 0..total_frames {
-        let tick = t0 + n * period_ns;
-        clock::sleep_until_ns(tick);
+        let tick = match (&dl, refresh_ns, k) {
+            (Some(d), Some(r), Some(k)) => {
+                let target = n * k;
+                while vs_idx < target {
+                    let v = d.rx.recv().expect("vsync");
+                    vs_idx += ((v.now_ns - vs_prev) as f64 / r).round().max(1.0) as u64;
+                    vs_prev = v.now_ns;
+                }
+                if vs_idx > target {
+                    // This frame's vsync passed before we saw it.
+                    skipped.push((n, t0 + (target as f64 * r) as u64, clock::now_ns(), true));
+                    continue;
+                }
+                vs_prev
+            }
+            _ => {
+                let tick = t0 + n * period_ns;
+                clock::sleep_until_ns(tick);
+                tick
+            }
+        };
         let wake = clock::now_ns();
         let slot = (n % RING as u64) as u32;
         let prev = processed[slot as usize].load(Ordering::Acquire);
         let free = n < RING as u64 || prev == n - RING as u64;
         if !free {
-            skipped.push((n, tick, wake));
+            skipped.push((n, tick, wake, false));
             continue;
         }
-        let cb = encode_frame(n, slot, (n + WARM_PIPE) as usize);
+        let frame = presenter.as_ref().map(|(pr, ..)| {
+            let t = clock::now_ns();
+            let f = pr.acquire(device).expect("nextDrawable timed out");
+            drawable_wait.push((clock::now_ns() - t) as f64 / 1e6);
+            f
+        });
+        let view = frame.as_ref().map(|f| f.texture.create_view(&Default::default()));
+        let cb = encode_frame(n, slot, (n + WARM_PIPE) as usize, view.as_ref());
         let submit = clock::now_ns();
         let index = queue.submit([cb]);
+        if let (Some((pr, ..)), Some(f)) = (presenter.as_ref(), frame) {
+            drop(view);
+            pr.present(queue, f, n);
+        }
         tx.send(Submitted {
             n,
             slot,
@@ -665,8 +805,9 @@ fn main() {
             skipped: false,
         });
     }
-    let skipped_measured: Vec<_> = skipped.iter().filter(|(n, _, _)| *n >= warm_frames).collect();
-    for (n, tick, wake) in &skipped_measured {
+    let skipped_measured: Vec<_> = skipped.iter().filter(|(n, ..)| *n >= warm_frames).collect();
+    let skipped_pacing_measured = skipped_measured.iter().filter(|s| s.3).count();
+    for (n, tick, wake, _) in &skipped_measured {
         frames.push(FrameRec {
             n: *n,
             t_s: stats::r((tick - t0) as f64 / 1e9 - warmup, 4),
@@ -711,6 +852,42 @@ fn main() {
     }
 
     let sk = skipped_measured.len();
+    let presentation = presenter.map(|(pr, placement, window_visible)| {
+        // Presented handlers fire after the glass shows the frame; give the last ones time.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mut log: Vec<(u64, u64)> = pr.presented.lock().unwrap().clone();
+        log.retain(|(n, _)| *n >= warm_frames);
+        log.sort();
+        let ticks: std::collections::HashMap<u64, u64> = recs.iter().map(|(s, _)| (s.n, s.tick)).collect();
+        let shown: Vec<(u64, u64)> = log.iter().copied().filter(|(_, t)| *t > 0).collect();
+        let submitted_measured = recs.iter().filter(|(s, _)| s.n >= warm_frames).count();
+        let half_refresh = refresh_ns.unwrap_or(period_ns as f64) / 2.0;
+        let intervals: Vec<f64> = shown.windows(2).map(|w| w[1].1 as f64 - w[0].1 as f64).collect();
+        let expected: Vec<f64> = shown
+            .windows(2)
+            .map(|w| (w[1].0 - w[0].0) as f64 * period_ns as f64)
+            .collect();
+        let irregular = intervals
+            .iter()
+            .zip(&expected)
+            .filter(|(i, e)| (*i - *e).abs() > half_refresh)
+            .count();
+        let latency: Vec<f64> = shown
+            .iter()
+            .filter_map(|(n, t)| ticks.get(n).map(|tick| (*t as f64 - *tick as f64) / 1e6))
+            .collect();
+        Presentation {
+            placement,
+            window_visible,
+            handler_calls: log.len(),
+            presented: shown.len(),
+            not_presented: submitted_measured.saturating_sub(shown.len()),
+            irregular_intervals: irregular,
+            present_latency_ms: stats::dist(&latency).rounded(3),
+            present_interval_ms: stats::dist(&intervals.iter().map(|i| i / 1e6).collect::<Vec<_>>()).rounded(3),
+            drawable_wait_ms: stats::dist(&drawable_wait).rounded(3),
+        }
+    });
     let summary = Summary {
         process: "interactive",
         label,
@@ -723,13 +900,17 @@ fn main() {
         layers,
         blur_radius: radius,
         realtime_thread: rt_ok,
+        clock: if dl.is_some() { "display" } else { "timer" },
+        display_refresh_ms: refresh_ns.map(|r| stats::r(r / 1e6, 4)),
+        refreshes_per_frame: k,
         gpu_priority,
         frames_measured: completed.len() + sk,
         drops: Drops {
             deadline_1_frame: d1 + sk,
             deadline_2_frames: d2 + sk,
             deadline_3_frames: d3 + sk,
-            skipped_ring_full: sk,
+            skipped_ring_full: sk - skipped_pacing_measured,
+            skipped_pacing: skipped_pacing_measured,
         },
         at_risk,
         latency_ms: stats::dist(&pick(|r| r.latency_ms)).rounded(3),
@@ -742,6 +923,7 @@ fn main() {
         miss_times_s: miss_times,
         signals_sent,
         signals_dropped,
+        presentation,
     };
     println!("S8RESULT {}", serde_json::to_string(&summary).unwrap());
 }
