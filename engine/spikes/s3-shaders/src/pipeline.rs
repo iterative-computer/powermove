@@ -139,7 +139,14 @@ fn naga_stage(mut module: rspirv::dr::Module, spv: &compile::Spirv, timings: &mu
     let start = Instant::now();
     naga_validate(&naga_module).map_err(|e| Failure::new("naga-validate", e))?;
     timings.insert(format!("{prefix}naga-validate"), ms(start));
-    Ok(StageOutput { reflection, splits, naga: Some(naga_module), msl: None, entry_point: "main".into() })
+    // `S3_NONCE` makes the generated MSL unique so the Metal compiler cache
+    // misses (cold pipeline timings); it renames the entry point only.
+    let mut entry_point = "main".to_string();
+    if let Ok(nonce) = std::env::var("S3_NONCE") {
+        entry_point = format!("main_{nonce}");
+        naga_module.entry_points[0].name = entry_point.clone();
+    }
+    Ok(StageOutput { reflection, splits, naga: Some(naga_module), msl: None, entry_point })
 }
 
 /// Metal resource indices as wgpu-hal assigns them for our layouts (see
@@ -192,6 +199,9 @@ fn spvc_stage(module: rspirv::dr::Module, spv: &compile::Spirv, stage: Stage, ti
     let mut msl = artifact.to_string();
     if let Ok(pragma) = std::env::var("S3_MSL_PRAGMA") {
         msl = format!("{}\n{msl}", pragma.replace(';', "\n"));
+    }
+    if let Ok(nonce) = std::env::var("S3_NONCE") {
+        msl = format!("// {nonce}\n{msl}");
     }
     Ok(StageOutput { reflection, splits: Vec::new(), naga: None, msl: Some(msl), entry_point: entry })
 }

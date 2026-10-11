@@ -202,14 +202,40 @@ fn diff(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Compare two reference sets (for example WebGL on ANGLE Metal against WebGL
+/// on SwiftShader) with the same tolerance, to show how implementation
+/// sensitive each shader is. Writes one JSON line per case variant.
+fn refcmp(args: &[String]) -> anyhow::Result<()> {
+    let corpus_path = PathBuf::from(arg(args, "--corpus").unwrap_or_else(|| "work/corpus.json".into()));
+    let a = PathBuf::from(arg(args, "--a").unwrap_or_else(|| "work/webgl/metal".into()));
+    let b = PathBuf::from(arg(args, "--b").unwrap_or_else(|| "work/webgl/swiftshader".into()));
+    let out = PathBuf::from(arg(args, "--out").unwrap_or_else(|| "work/results/webgl-metal-vs-swiftshader.jsonl".into()));
+    let corpus: case::Corpus = serde_json::from_slice(&std::fs::read(&corpus_path)?)?;
+    std::fs::create_dir_all(out.parent().unwrap())?;
+    let mut file = std::fs::File::create(&out)?;
+    for case in &corpus.cases {
+        for variant in &case.variants {
+            let name = format!("{}.f16", variant.name);
+            let (x, y) = (read_f16(&a.join(sanitize(&case.id)).join(&name)), read_f16(&b.join(sanitize(&case.id)).join(&name)));
+            let metrics = match (x, y) {
+                (Some(x), Some(y)) if x.len() == y.len() => Some(compare::compare(&x, &y)),
+                _ => None,
+            };
+            writeln!(file, "{}", serde_json::json!({ "id": case.id, "group": case.group, "variant": variant.name, "metrics": metrics }))?;
+        }
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("run") => run(&args),
         Some("msl") => msl(&args),
         Some("diff") => diff(&args),
+        Some("refcmp") => refcmp(&args),
         _ => {
-            eprintln!("usage: s3-shaders run|msl|diff [options]");
+            eprintln!("usage: s3-shaders run|msl|diff|refcmp [options]");
             std::process::exit(2);
         }
     }
