@@ -161,13 +161,25 @@ struct Ctl {
     /// successive ticks.
     last_done_tick: u64,
     period: u64,
+    /// Emulated relay latency (main's hop between the engines): a message takes effect
+    /// only `relay_delay_ns` after it was sent.
+    relay_delay_ns: u64,
+    held: VecDeque<signal::Message>,
 }
 
 impl Ctl {
     fn drain(&mut self, rx: &mut Option<signal::Receiver>, yield_on: YieldOn, sliced: bool, yield_ns: u64) {
         let Some(r) = rx.as_mut() else { return };
         let now = clock::now_ns();
-        for m in r.drain() {
+        self.held.extend(r.drain());
+        let mut due = Vec::new();
+        while let Some(m) = self.held.front() {
+            if m.sent_ns + self.relay_delay_ns > now {
+                break;
+            }
+            due.push(self.held.pop_front().unwrap());
+        }
+        for m in due {
             self.reaction.push((now.saturating_sub(m.sent_ns)) as f64 / 1e6);
             let trigger = match m.kind {
                 signal::Kind::PlaybackStart => {
@@ -246,6 +258,8 @@ struct Summary {
     in_flight: usize,
     yield_on: &'static str,
     yield_ms: f64,
+    pause_on_playback: bool,
+    relay_delay_ms: f64,
     radius: i32,
     iters: u32,
     heavy_radius: i32,
@@ -295,6 +309,7 @@ fn main() {
     };
     let yield_ms: f64 = args.num("yield-ms", 100.0);
     let pause_on_playback = args.flag("pause-on-playback");
+    let relay_delay_ms: f64 = args.num("relay-delay-ms", 0.0);
     let align = args.flag("align");
     let align_guard_ms: f64 = args.num("align-guard-ms", 1.0);
     let radius: i32 = args.num("radius", 48);
@@ -594,7 +609,10 @@ fn main() {
     let mut yield_total = 0u64;
     let mut paused_total = 0u64;
     let mut align_wait_total = 0u64;
-    let mut ctl = Ctl::default();
+    let mut ctl = Ctl {
+        relay_delay_ns: (relay_delay_ms * 1e6) as u64,
+        ..Default::default()
+    };
     let mut retired_since_flush = 0usize;
     let mut planned: Option<(wgpu::CommandBuffer, InFlight)> = None;
     let yield_ns = (yield_ms * 1e6) as u64;
@@ -606,7 +624,7 @@ fn main() {
                 break;
             }
             ctl.drain(&mut rx, yield_on, mode == Mode::Sliced, yield_ns);
-            if mode == Mode::Sliced && pause_on_playback && ctl.playback {
+            if pause_on_playback && ctl.playback {
                 let t = clock::now_ns();
                 clock::sleep_ns(1_000_000);
                 paused_total += clock::now_ns() - t;
@@ -699,7 +717,7 @@ fn main() {
             }
             // A signal may have arrived while waiting: honour it before submitting.
             ctl.drain(&mut rx, yield_on, mode == Mode::Sliced, yield_ns);
-            if mode == Mode::Sliced && (clock::now_ns() < ctl.yield_until || (pause_on_playback && ctl.playback)) {
+            if (mode == Mode::Sliced && clock::now_ns() < ctl.yield_until) || (pause_on_playback && ctl.playback) {
                 continue;
             }
             // Frame-aligned slicing: submit only after A's current frame is done and only
@@ -815,6 +833,8 @@ fn main() {
             YieldOn::Risk => "risk",
         },
         yield_ms,
+        pause_on_playback,
+        relay_delay_ms,
         radius,
         iters,
         heavy_radius,
