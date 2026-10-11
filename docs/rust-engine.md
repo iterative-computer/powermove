@@ -70,8 +70,7 @@ LUTs and color effects, more delivery formats, Windows, cameras and lights for
 **Before any Phase 0 release:** the bundled FFmpeg is replaced as a standalone
 compliance fix (section 24, item 1).
 
-**Decisions needed** are in section 29; decisions 10, 11, 12, 13, and 18 block
-Phase 0.
+**Decisions** are in section 29; three remain open (8, 11, 13).
 
 Contents
 
@@ -103,7 +102,7 @@ Contents
 26. Phases
 27. Lanes, contracts, and ownership
 28. Risks
-29. Decisions needed from Jude
+29. Decisions
 30. Appendix A: defects found during the survey
 31. Appendix B: feature parity inventory
 32. Appendix C: integration checklist
@@ -1377,11 +1376,12 @@ bulk data through shared surfaces or cache files.
 ### Packaging and CI
 
 - Pinned Rust toolchain; `aarch64-apple-darwin` first.
-- **Reference runners:** self-hosted Apple Silicon machines that run only on trusted
-  events (pushes to protected branches, `workflow_dispatch` by maintainers), never on
-  pull requests from forks; ephemeral VMs (for example Tart); the private corpus is
-  mounted read-only only for trusted-branch jobs. Alternatively, parity and performance
-  jobs run from a private mirror repository. A pinned Blender LTS is installed.
+- **Reference machines (decision 20):** no self-hosted runners on the public
+  repository. Hosted runners run unit, lint, and build jobs. Parity and performance
+  gates run locally on the reference machines with a pinned Blender LTS; the private
+  corpus never leaves them; each PR carries the gate report. If self-hosted runners are
+  added later, they run only on trusted events, as ephemeral VMs, or from a private
+  mirror.
 - `pm-node` and `pm-bridge` are napi-rs addons in `asarUnpack`, signed with the Team
   ID and hardened runtime; `apps/desktop/scripts/release-mac.mjs` verification is
   generalized.
@@ -1753,14 +1753,14 @@ hard freeze starts at Phase 3a and ends at Phase 5b.
 
 ### Phase 0: Foundations, contracts, spikes
 
-Blocked on decisions 10, 11, 12, 13, 18. Release-dependent items (the `minReaderVersion`
+Base-machine gates need decision 11. Release-dependent items (the `minReaderVersion`
 guard, notarizing the placeholder addon) need Jude's release authorization.
 
 Work:
 
 - Cargo workspace, toolchain, `cargo-deny`, napi-rs and wasm-bindgen builds; a placeholder
   addon signed and notarized through the real release script.
-- Secure reference runners (section 19) with a pinned Blender.
+- Reference machines set up with a pinned Blender and the local gate tooling (section 19).
 - Appendix A (Phase 0) fixes, then the e2e ledger and the parity corpus capture.
 - `minReaderVersion` guard in a normal release.
 - Opt-in crash and session reporting.
@@ -1785,7 +1785,7 @@ Work:
 Gates, per consumer:
 
 - S5, S4's layout half, and contracts 1, 5, 9 gate Phase 1.
-- S1, S2, S6, S8, the runners, and the remaining contracts gate Phase 2 (the FFmpeg
+- S1, S2, S6, S8, the reference machine setup, and the remaining contracts gate Phase 2 (the FFmpeg
   replacement has already shipped by then, section 24).
 - S3, S4's rendering half, and S7 gate Phase 3a; S7 also gates Phase 3b.
 
@@ -1953,7 +1953,7 @@ Drafted in Phase 0 as Rust types and RFCs; frozen when their consumer phase star
 | GPU and render | `pm-gpu`, `pm-render` 2D, GLSL pipeline, definition snapshots, fallback runner | 0, 2, 3a |
 | Color | `pm-color`, invariants, interpretation, tone mapping | 0, 2, 3a, 3b |
 | Engine and platform | `pm-engine`, `pm-node`, `pm-bridge`, `pm-protocol`, leases, priority and slicing, host services in main | 0, 2 |
-| Platform, CI, and compliance | Toolchain, runners and their security, packaging, signing, FFmpeg build, crash reporting | 0 onward |
+| Platform, CI, and compliance | Toolchain, hosted CI, local gate tooling, packaging, signing, FFmpeg build, crash reporting | 0 onward |
 | Audio | `pm-audio`, mixer, clock contract | 0, 2, 3b |
 | Export and agents | `pm-export`, `pm-cli`, render queue, agent export, save, and snapshots, `pm-host` CLI implementation, the hidden MCP host, CLI prebuilds | 2, 3b, 3c |
 | Proxies and storage | `pm-proxy`, `pm-cache`, media store, media management | 2, 4a, 4b |
@@ -1990,7 +1990,7 @@ and reports failures as they are.
 | Agent media lost after linking | Broken agent projects | Agent imports always copied; `save_project` embeds |
 | Switching engines loses data | Broken projects | Field table, stamping, copied media, round-trip gate from Phase 2 |
 | Weak media identity | Wrong footage | Full content hash; re-verification |
-| Private corpus exposure | Leak of user projects | Trusted-event-only ephemeral runners or a private mirror |
+| Private corpus exposure | Leak of user projects | No self-hosted runners; the corpus stays on the reference machines |
 | `pm-bridge` crash in main | App crash | Small, fuzzed addon; S1 hardening |
 | Long freeze before cutover | Product stalls | Phase 4 split; sizes; freeze ends at 5b |
 | Engine-side features landing in legacy | Moving target | Decision 18 |
@@ -2000,46 +2000,33 @@ and reports failures as they are.
 | Engine crashes | Lost work | Two engines, attribution, backoff, persisted jobs, atomic output |
 | Old builds overwriting new projects | Data loss | `minReaderVersion` guard in Phase 0 |
 
-## 29. Decisions needed from Jude
+## 29. Decisions
 
-Decisions 10, 11, 12, 13, and 18 block Phase 0.
+Jude delegated these decisions on 2026-10-11, except the ones marked **Open**.
 
-1. **Default for new projects:** Standard color, "Blend in linear light" off
-   (recommended), or on.
-2. **When importing:** Copy into project (recommended, keeps `.pmv` files
-   self-contained) or Link to files. Revisit after Collect Project ships in 4b.
-3. **Generated media location:** the Powermove cache (recommended), next to the project,
-   or a chosen folder.
-4. **Optimized media** (4b): Only when I ask (recommended).
-5. **Disk guard and storage limit:** below the larger of 20 GB or 10% free; limit 25% of
-   the cache volume (recommended).
-6. **Order after cutover:** as written, or Windows earlier.
-7. **Intel Macs:** no (recommended), apart from the CLI's existing darwin-x64 support.
-8. **Web player and "no trace":** (A) frozen web player v1 in `packages/player` after
-   cutover, replaced by the WASM player afterwards (recommended); or (B) build the WASM
-   player before Phase 5c so no TypeScript renderer remains anywhere (adds a large phase).
-9. **Serve interim:** serve tabs use web player v1 (recommended).
-10. **Crash and session reporting:** opt-in reporting with a privacy note (recommended),
-    or a beta cohort submitting local crash logs, with the same thresholds. If the user
-    base cannot reach the session counts, the cohort is the default.
-11. **Reference machines:** a base M1 MacBook Air, a base M-series Air with a ProRes
-    engine, an M-series Pro.
-12. **Licensing counsel,** starting with the FFmpeg item.
-13. **Real-world corpus projects** (kept outside the repository).
-14. **3D rendering:** native port of the three.js r180 subset (recommended), or keep
-    three.js as a pixel source (not headless).
-15. **Blender surfaces at cutover:** 16-bit PNG through AgX (recommended), or half-float
-    EXR with the engine applying Blender's AgX configuration.
-16. **Linux:** keep today's Chromium hidden host on Linux until after cutover
-    (recommended). For Linux and Windows: license ProRes decode and encode or drop them,
-    and decide on libx264 for H.264 encode.
-17. **3D tone curves:** keep ACES Filmic for Native and AgX for Blender at cutover
-    (recommended), unify after.
-18. **Engine-side feature policy:** corpus cases and port notes from Phase 0 and a hard
-    freeze from Phase 3a to Phase 5b (recommended), or a hard freeze from Phase 0.
-19. **Shader fallback runner:** keep a minimal in-renderer GLSL runner for shaders that
-    fail translation on a user's machine (recommended, preserves every shader), or block
-    those shaders with an error.
+| # | Decision | Choice |
+|---|---|---|
+| 1 | Default for new projects | Standard color, "Blend in linear light" off |
+| 2 | When importing | Copy into project; revisit after Collect Project ships in 4b |
+| 3 | Generated media location | The Powermove cache |
+| 4 | Optimized media | Only when I ask (4b) |
+| 5 | Disk guard and storage limit | Pause below the larger of 20 GB or 10% free; limit 25% of the cache volume |
+| 6 | Order after cutover | As written in section 26 |
+| 7 | Intel Macs | No, apart from the CLI's existing darwin-x64 support |
+| 8 | Web player and "no trace" | **Open** (Jude): (A) frozen web player v1 for code export, www, and serve after cutover, replaced by the WASM player later; or (B) the WASM player before Phase 5c, so no TypeScript renderer remains anywhere |
+| 9 | Serve interim | Follows decision 8 (web player v1 under A, the WASM player under B) |
+| 10 | Crash and session reporting | Beta cohort submitting local crash and session logs; no new backend. Cutover gates use the cohort: crash-free sessions ≥ 99.5% over at least 500 sessions from at least 20 users. Jude recruits the cohort at 5a |
+| 11 | Reference machines | **Open** (Jude): this M4 Max MacBook Pro (128 GB, XDR) is the Pro reference. The base M1 Air (no ProRes engine) and a base M-series Air with a ProRes engine are needed for base-machine gates, physically or by remote access |
+| 12 | Licensing | No counsel needed for the pre-cutover macOS scope: an LGPL-only FFmpeg build (no x264, x265, or nonfree components), ProRes only through VideoToolbox, Blender as today. Counsel before Linux or Windows ProRes, software H.264 encode, or camera RAW |
+| 13 | Real-world corpus projects | **Open** (Jude): a handful of real projects kept outside the repository; until then the corpus is synthetic plus e2e fixtures |
+| 14 | 3D rendering | Native port of the three.js r180 subset |
+| 15 | Blender surfaces at cutover | 16-bit PNG through AgX |
+| 16 | Linux | Today's Chromium hidden host stays on Linux until after cutover; Linux and Windows ProRes and H.264 encode decided with counsel then |
+| 17 | 3D tone curves | ACES Filmic for Native and AgX for Blender at cutover; unified after |
+| 18 | Engine-side feature policy | From Phase 0, features touching the engine land with corpus cases and port notes; hard freeze from Phase 3a to 5b. This binds work by Jude and other agents on main |
+| 19 | Shader fallback runner | Keep a minimal in-renderer GLSL runner for shaders that fail translation |
+| 20 | CI hardware | No self-hosted runners on the public repository. Hosted runners run unit, lint, and build jobs; parity and performance gates run locally on the reference machines and their reports are attached to each PR |
+| 21 | Worker models | Opus 5.5 for implementation and reviews |
 
 ## 30. Appendix A: defects found during the survey
 
