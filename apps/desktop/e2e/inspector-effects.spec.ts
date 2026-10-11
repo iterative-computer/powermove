@@ -108,9 +108,12 @@ test('timeline controls occupy the ruler gutter without legacy navigation button
   expect(await graph.evaluate((button) => ({
     graphSlot: !!button.closest('.tl-graph-slot'),
     transport: !!button.closest('.tl-transport'),
-    last: button.parentElement?.lastElementChild === button,
+    // Track-mode snapping remains in the DOM while hidden in layer mode.
+    lastVisible: [...button.parentElement!.children]
+      .filter(element => element.getClientRects().length > 0).at(-1) === button,
     previousGroup: button.parentElement?.previousElementSibling?.classList.contains('tl-transport')
-  }))).toEqual({ graphSlot: true, transport: false, last: true, previousGroup: true });
+  }))).toEqual({ graphSlot: true, transport: false, lastVisible: true, previousGroup: true });
+  await expect(page.locator('#tl-head .tl-snap')).toBeHidden();
   for (const name of ['Previous edge', 'Next edge', 'Frame entire composition (⇧F)', 'Loop']) {
     await expect(page.getByRole('button', { name, exact: true })).toHaveCount(0);
   }

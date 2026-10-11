@@ -84,6 +84,12 @@ describe('preload bridge', () => {
     expect(Object.keys(bridge()).filter(key => /clipboard/i.test(key))).toEqual(['clipboardWriteText']);
   });
 
+  it('requests native media paste without passing paths or receiving clipboard contents', async () => {
+    electronMocks.invoke.mockResolvedValue(true);
+    expect(await bridge().pasteMedia!()).toBe(true);
+    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(IPC.mediaPaste);
+  });
+
   it('isolates progress and trace by request and removes its one listener after resolve', async () => {
     const result = { ok: true as const, text: 'done', access: 'editor' as const };
     electronMocks.invoke.mockResolvedValue(result);

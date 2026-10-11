@@ -4,6 +4,8 @@ import { chooseSequence, convertImageSequence } from './core/image-sequence';
 import { createImportProgress } from './core/import-progress';
 import { createFolder, validFolder } from './core/asset-folders';
 import { droppedFolders, pickedFolders, readDroppedFolder, type ImportFolderNode } from './core/folder-import';
+import { pasteMedia } from './core/media-paste';
+import { isFieldTarget, selectableTextRoot } from '../kernel/keychord';
 import { canAnimateContent, isProperty } from './core/content-properties';
 /* Ported from js/app.js — behavior-preserving. */
 import { normalizeExportDefaults, type ExportDefaults } from '../core/export-defaults';
@@ -1462,6 +1464,12 @@ PM.pickFolder = ({ folder }: { folder?: string | null } = {}) => {
   inp.click();
 };
 window.addEventListener('dragover', (e: any) => { if ([...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
+window.addEventListener('paste', (event: ClipboardEvent) => {
+  if (pasteMedia(PM, event)) return;
+  // Browser shortcuts deliver the native paste event directly.
+  if (!event.defaultPrevented && !event.composedPath().some(target => isFieldTarget(target)
+    || selectableTextRoot(target as EventTarget))) PM.cmd('pasteLayers');
+});
 window.addEventListener('drop', (e: any) => {
   if (![...e.dataTransfer.types].includes('Files')) return;
   e.preventDefault(); PM.importFiles(e.dataTransfer, { asFolder: e.altKey });

@@ -44,6 +44,7 @@ export const IPC = {
   projectConfirmClose: 'project:confirm-close',
   dialogConfirm: 'dialog:confirm',
   clipboardWriteText: 'clipboard:write-text',
+  mediaPaste: 'media:paste',
 
   blenderStatus: 'blender:status',
   blenderChoose: 'blender:choose',
@@ -751,6 +752,8 @@ export interface PowermoveBridge {
   confirm(request: ConfirmRequest): Promise<boolean>;
   /** Writes plain text to the system clipboard while the window has focus; nothing is ever read back. */
   clipboardWriteText?(text: string): Promise<void>;
+  /** Native user-initiated media paste. Returns false when there is no media; exposes no clipboard data. */
+  pasteMedia?(): Promise<boolean>;
 
   blender?: {
     status(): Promise<import('./blender').BlenderStatus>;

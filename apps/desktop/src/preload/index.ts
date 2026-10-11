@@ -129,6 +129,7 @@ const bridge: PowermoveBridge = {
   confirmProjectClose: (name) => ipcRenderer.invoke(IPC.projectConfirmClose, name),
   confirm: (request) => ipcRenderer.invoke(IPC.dialogConfirm, request) as Promise<boolean>,
   clipboardWriteText: (text) => ipcRenderer.invoke(IPC.clipboardWriteText, text) as Promise<void>,
+  pasteMedia: () => ipcRenderer.invoke(IPC.mediaPaste) as Promise<boolean>,
 
   blender: {
     status: () => ipcRenderer.invoke(IPC.blenderStatus),

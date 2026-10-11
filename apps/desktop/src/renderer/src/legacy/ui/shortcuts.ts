@@ -270,6 +270,11 @@ let layerClip: any = null;
 /* Selected keyframes take precedence over their layers, as Delete does.
    Only the most recent copy (effects, keyframes, or layers) stays pasteable. */
 let keyClip: KeyframeClipboard | null = null;
+let localClipboardWrite: Promise<void> = Promise.resolve();
+// A subsequent app copy replaces any older system media, just as text copy does.
+const markLocalClipboard = (text: string): void => {
+  localClipboardWrite = hostBridge()?.clipboardWriteText?.(text).catch(() => {}) ?? Promise.resolve();
+};
 const copySelectedKeyframes = (): boolean => {
   const copied = copyKeyframes(PM);
   if (!copied) return false;
@@ -277,12 +282,13 @@ const copySelectedKeyframes = (): boolean => {
   layerClip = null;
   inspectorService(PM)?.clearEffectClipboard();
   const count = copied.tracks.reduce((sum, track) => sum + track.keys.length, 0);
+  markLocalClipboard('Powermove keyframes');
   PM.toast?.(`Copied ${count} ${count === 1 ? 'keyframe' : 'keyframes'}`);
   return true;
 };
 def('copyLayers', 'Copy layers', '⌘C', () => {
   const inspector = inspectorService(PM);
-  if (inspector?.copySelectedEffects()) { keyClip = null; return; }
+  if (inspector?.copySelectedEffects()) { keyClip = null; markLocalClipboard('Powermove effects'); return; }
   if (copySelectedKeyframes()) return;
   const sels: any = selectedStackLayers(PM); if (!sels.length) return;
   /* An explicit layer copy becomes the active app-local clipboard payload.
@@ -291,11 +297,15 @@ def('copyLayers', 'Copy layers', '⌘C', () => {
   inspector?.clearEffectClipboard();
   keyClip = null;
   layerClip = sels.map((L: any) => JSON.parse(JSON.stringify(L)));
+  markLocalClipboard(sels.map((layer: any) => layer.name).join('\n'));
   PM.toast(`Copied ${layerClip.length} ${layerClip.length === 1 ? 'layer' : 'layers'}`);
 }, 'Edit');
 def('cutLayers', 'Cut layers', '⌘X', () => {
   if (copySelectedKeyframes()) return deleteSelection(PM);
-  return cutLayers(PM, (value: any[]) => { layerClip = value; keyClip = null; });
+  return cutLayers(PM, (value: any[]) => {
+    layerClip = value; keyClip = null;
+    markLocalClipboard(value.map(layer => layer.name).join('\n'));
+  });
 }, 'Edit');
 def('pasteLayers', 'Paste layers', '⌘V', () => {
   /* Effect paste deliberately routes through the ordinary global shortcut:
@@ -313,7 +323,22 @@ def('contextUndo', 'Undo', null, () => activeTextField() ? nativeEdit('undo') : 
 def('contextRedo', 'Redo', null, () => activeTextField() ? nativeEdit('redo') : readingText() ? false : PM.cmd('redo'), 'Edit', hidden);
 def('contextCut', 'Cut', null, () => activeTextField() ? nativeEdit('cut') : readingText() ? false : PM.cmd('cutLayers'), 'Edit', hidden);
 def('contextCopy', 'Copy', null, () => activeTextField() || readingText() || hasTextSelection() ? nativeEdit('copy') : PM.cmd('copyLayers'), 'Edit', hidden);
-def('contextPaste', 'Paste', null, () => activeTextField() ? nativeEdit('paste') : readingText() ? false : PM.cmd('pasteLayers'), 'Edit', hidden);
+def('contextPaste', 'Paste', null, () => {
+  if (activeTextField()) return nativeEdit('paste');
+  if (readingText()) return false;
+  const paste = hostBridge()?.pasteMedia;
+  if (paste) {
+    const project = PM.proj;
+    return localClipboardWrite.then(paste).then(handled => {
+      if (!handled && PM.proj === project && !activeTextField() && !readingText()) PM.cmd('pasteLayers');
+    }).catch(() => {
+      if (PM.proj === project && !activeTextField() && !readingText()) PM.cmd('pasteLayers');
+    });
+  }
+  // In browsers, let the user's shortcut produce the clipboard event.
+  if (typeof document !== 'undefined' && typeof ClipboardEvent !== 'undefined') return false;
+  return PM.cmd('pasteLayers');
+}, 'Edit', { ...hidden, preserveFalse: true });
 def('contextSelectAll', 'Select all', null, () => { const root = readingText(); return activeTextField() ? nativeEdit('selectAll') : root ? selectTextContents(root) : PM.cmd('selectAll'); }, 'Edit', hidden);
 def('toggleVisibility', 'Hide/show selected layers', null, () => toggleVisibility(PM), 'Edit');
 def('toggleLayerControls', 'Show/hide layer controls', '⌘⇧H', () => toggleLayerControls(PM), 'View', preserveFalse);

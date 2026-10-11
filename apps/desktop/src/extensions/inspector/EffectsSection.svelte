@@ -5,8 +5,8 @@
   import { evaluatedValue } from './multi-edit';
   import AnimatedRow from './AnimatedRow.svelte';
   import ParameterList from './ParameterList.svelte';
-  /* App-local clipboard survives layer/inspector remounts without replacing the user's system clipboard. */
-  import { copyEffects, effectPasteCommands } from './effect-clipboard';
+  /* App-local effect snapshots survive layer/inspector remounts. */
+  import { effectPasteCommands } from './effect-clipboard';
   import Icon from './Icon.svelte';
   import { inspectorRefresh } from './refresh.svelte.js';
 
@@ -125,8 +125,7 @@
     selectedIds = copied.map((effect: any) => effect.id);
     selectionAnchor = fallback.id;
     inspector()?.setEffectSelection(layer.id, selectedIds);
-    const count = copyEffects(copied);
-    api.ui.toast?.(`Copied ${count} ${count === 1 ? 'effect' : 'effects'}`);
+    api.commands.run('copyLayers');
   }
 
   function pasteEffects(): void {

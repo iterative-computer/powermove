@@ -971,7 +971,10 @@ describe('InspectorPanel', () => {
       { id: 'fx-1', type: 'blur', on: false, open: false, p: { amount: channel(12, 'key-1') } },
       { id: 'fx-2', type: 'blur', on: true, open: true, p: { amount: channel(24, 'key-2') } }
     );
-    const { apply } = setup([candidate], ['A'], { effects: true });
+    const { apply, api } = setup([candidate], ['A'], { effects: true });
+    const copy = vi.spyOn(api.commands, 'run').mockImplementation(command => {
+      if (command === 'copyLayers') return api.services.get<InspectorService>('inspector')?.copySelectedEffects();
+    });
     const first = target.querySelector<HTMLElement>('[data-effect-id="fx-1"]')!;
     const second = target.querySelector<HTMLElement>('[data-effect-id="fx-2"]')!;
 
@@ -984,6 +987,7 @@ describe('InspectorPanel', () => {
     second.dispatchEvent(new KeyboardEvent('keydown', {
       key: 'c', metaKey: true, bubbles: true, cancelable: true
     }));
+    expect(copy).toHaveBeenCalledExactlyOnceWith('copyLayers');
     apply.mockClear();
     const paste = new KeyboardEvent('keydown', {
       key: 'v', metaKey: true, bubbles: true, cancelable: true

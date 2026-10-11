@@ -69,6 +69,7 @@ import { registerClipboardIpc } from './clipboard';
 import { userInput } from './user-input';
 import { MediaProxyService, playbackConverter, previewConverter, imageSequenceConverter, stillImageConverter, registerMediaProxyIpc } from './media-proxy';
 import { registerNativeEditIpc } from './native-edit';
+import { registerMediaPasteIpc } from './media-paste';
 import { installMenu, installRendererMenuShortcutRouting } from './menu';
 import { openProjectForWindow, registerProjectOpenPathIpc, registerSaveIpc } from './save';
 import { ProjectFiles } from './project-files';
@@ -1030,6 +1031,7 @@ if (!hasSingleInstanceLock) {
     if (isBackgroundTest) (globalThis as { __powermoveRemoteMedia?: unknown }).__powermoveRemoteMedia = remoteMedia;
     registerAgentNotifications(ipcMain, ctx);
     registerNativeEditIpc(ipcMain, ctx);
+    registerMediaPasteIpc(ipcMain, ctx);
     registerLogIpc(ipcMain, ctx);
     registerMediaProxyIpc(ipcMain, mediaProxies, ctx);
     /* agent media tools: an asset's bytes as a file path (media-tools lane) */
