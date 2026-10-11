@@ -6,7 +6,7 @@ const token = process.env.POWERMOVE_AGENT_TOOL_TOKEN || '';
 const runId = process.env.POWERMOVE_AGENT_RUN_ID || '';
 const timeoutMs = Number.parseInt(process.env.POWERMOVE_AGENT_TOOL_TIMEOUT_MS || '120000', 10);
 // run_outside_sandbox waits for the person's approval (spec.ts OUTSIDE_SANDBOX_CALL_MS).
-const LONG_CALLS = new Map([['run_outside_sandbox', 4_200_000]]);
+const LONG_CALLS = new Map([['run_outside_sandbox', 4_200_000], ['save_project', 3_605_000], ['export_video', 3_605_000]]);
 
 if (!Number.isInteger(port) || port < 1 || port > 65535 || !token || !runId) {
   process.stderr.write('Powermove MCP bridge environment is incomplete.\n');

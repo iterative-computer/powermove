@@ -12,6 +12,14 @@ import {
 } from './spec';
 
 describe('Powermove agent tool spec', () => {
+  it('offers delivery by default to project agents but excludes planning and app-only runs', () => {
+    for (const name of ['save_project', 'export_video']) {
+      expect(POWERMOVE_AGENT_TOOLS.some(tool => tool.name === name)).toBe(true);
+      expect(POWERMOVE_MCP_TOOL_NAMES).toContain(`mcp__powermove__${name}`);
+      expect(POWERMOVE_APP_AGENT_TOOLS.some(tool => tool.name === name)).toBe(false);
+      expect((POWERMOVE_LIVE_INSPECTION_TOOL_NAMES as readonly string[]).includes(name)).toBe(false);
+    }
+  });
   it('offers bounded extension inspection to app import runs without composition tools', () => {
     const tool = POWERMOVE_APP_AGENT_TOOLS.find(tool => tool.name === 'inspect_creative_extension');
     expect(tool?.inputSchema).toMatchObject({ additionalProperties: false, required: ['appId', 'toolId'], properties: {

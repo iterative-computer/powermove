@@ -23,6 +23,7 @@ it('applies the selected MP4 bitrate and rejects invalid bitrates', () => {
 });
 
 import { IPC } from '../shared/ipc';
+import { withAgentExport } from './agent-export';
 it.each(['mp4', 'prores'])('selects the %s destination before starting the encoder and handles cancellation', async format => {
   const handlers = new Map<string, any>();
   registerRenderEncoder({ handle: (channel: string, handler: any) => handlers.set(channel, handler) } as any, { isTrustedSender: () => true });
@@ -31,12 +32,13 @@ it.each(['mp4', 'prores'])('selects the %s destination before starting the encod
   native.showSaveDialog.mockImplementationOnce(() => new Promise(resolve => { choose = resolve; }));
   const pending = handlers.get(IPC.renderStart)({ sender: { id: 1 } }, { width: 16, height: 16, fps: 30, format, alpha: false, name: 'Export' });
   expect(start).not.toHaveBeenCalled();
+  await vi.waitFor(() => expect(typeof choose).toBe('function'));
   choose({ canceled: true });
   expect(await pending).toBeNull();
   expect(start).not.toHaveBeenCalled();
 });
 
-it('finishes video at its original destination without another save dialog', async () => {
+it.each([false, true])('finishes real video with automatic agent delivery=%s', async automatic => {
   const folder = await mkdtemp(path.join(os.tmpdir(), 'powermove-render-ipc-'));
   const output = path.join(folder, 'chosen.mp4');
   const handlers = new Map<string, any>();
@@ -50,10 +52,13 @@ it('finishes video at its original destination without another save dialog', asy
   });
   const event = { sender: { id: 1, isDestroyed: () => false } };
   try {
-    const token = await handlers.get(IPC.renderStart)(event, { width: 16, height: 16, fps: 30, format: 'mp4', alpha: false, name: 'Export' });
-    await handlers.get(IPC.renderWrite)(event, { token, data: new Uint8Array(16 * 16 * 4) });
-    expect(await handlers.get(IPC.renderFinish)(event, { token })).toEqual({ path: output });
-    expect((await readFile(output)).length).toBeGreaterThan(0);
-    expect(native.showSaveDialog).toHaveBeenCalledOnce();
+    await withAgentExport(event.sender, automatic ? folder : undefined, async () => {
+      const token = await handlers.get(IPC.renderStart)(event, { width: 16, height: 16, fps: 30, format: 'mp4', alpha: false, name: 'Export' });
+      await handlers.get(IPC.renderWrite)(event, { token, data: new Uint8Array(16 * 16 * 4) });
+      const destination = automatic ? path.join(folder, 'Export.mp4') : output;
+      expect(await handlers.get(IPC.renderFinish)(event, { token })).toEqual({ path: destination });
+      expect((await readFile(destination)).length).toBeGreaterThan(0);
+      expect(native.showSaveDialog).toHaveBeenCalledTimes(automatic ? 0 : 1);
+    });
   } finally { await rm(folder, { recursive: true, force: true }); }
 });

@@ -1,3 +1,4 @@
+import { withAgentExport } from '../agent-export';
 import { randomBytes, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import net, { type Server, type Socket } from 'node:net';
@@ -146,6 +147,8 @@ export interface PowermoveAgentToolBridgeOptions {
   /** Fixed Electron app entrypoint; omitted for standalone Node embeddings. */
   commandArgs?: string[];
   timeoutMs?: number;
+  /** Desktop agent deliveries avoid dialogs and use unique filenames here. */
+  exportDirectory?: string;
   stageForkRebase?(options: { forkId: string; stagingDirectory: string }): Promise<unknown>;
   /** The Store as the agent uses it; absent when cloud is unconfigured. */
   storeAgent?: StoreAgentGateway | null;
@@ -208,7 +211,7 @@ export class PowermoveAgentToolBridge {
         POWERMOVE_AGENT_RUN_ID: options.runId,
         POWERMOVE_AGENT_TOOL_TIMEOUT_MS: String(this.timeoutMs)
       },
-      ...(options.outsideSandbox ? { toolTimeoutSec: Math.ceil(OUTSIDE_SANDBOX_CALL_MS / 1000) } : {})
+      toolTimeoutSec: Math.ceil(Math.max(3_600_000, options.outsideSandbox ? OUTSIDE_SANDBOX_CALL_MS : 0) / 1000)
     };
     const session = new PowermoveAgentToolSession(
       options.runId,
@@ -276,7 +279,7 @@ export class PowermoveAgentToolBridge {
       };
       const fail = (error: Error) => { cleanup(); reject(error); };
       const unavailable = () => fail(new Error(`Powermove renderer closed or crashed while running ${tool}. The action outcome is unknown; inspect the project before repeating edits.`));
-      const timer = setTimeout(() => fail(new Error(`Powermove timed out while running ${tool}. Inspect get_workspace_state or capture_panel before retrying; an edit may already have completed.`)), this.timeoutMs);
+      const timer = setTimeout(() => fail(new Error(`Powermove timed out while running ${tool}. Inspect get_workspace_state or capture_panel before retrying; an edit may already have completed.`)), tool === '__mcp_export_video' || tool === '__mcp_save_project' ? 3_600_000 : this.timeoutMs);
       timer.unref();
       session.owner.once('destroyed', unavailable);
       session.owner.once('render-process-gone', unavailable);
@@ -448,6 +451,8 @@ export class PowermoveAgentToolBridge {
     if (request.tool === OUTSIDE_SANDBOX_TOOL_NAME) {
       // It waits on the person, far longer than any other tool call.
       socket?.setTimeout(OUTSIDE_SANDBOX_CALL_MS + 5_000);
+    } else if (request.tool === 'export_video' || request.tool === 'save_project') {
+      socket?.setTimeout(3_605_000);
     } else if (!POWERMOVE_AGENT_TOOLS.some((tool) => tool.name === request.tool)) {
       throw new Error(`Unknown Powermove tool: ${request.tool}`);
     }
@@ -471,6 +476,12 @@ export class PowermoveAgentToolBridge {
     if (session.inspectionOnly && !(POWERMOVE_LIVE_INSPECTION_TOOL_NAMES as readonly string[]).includes(tool)) throw new Error('This planning run can only inspect the project.');
     if (session.context === 'app' && !POWERMOVE_APP_AGENT_TOOLS.some(spec => spec.name === tool)) {
       throw new Error('This agent has no project attached. Open a project to use composition tools.');
+    }
+    if (tool === 'save_project' || tool === 'export_video') {
+      // The normal provider connection owns this session; no separate MCP setup.
+      await this.callRenderer(session, 'get_project_state', { propertyLimit: 1, keyframeLimit: 0 });
+      return withAgentExport(session.owner, this.options.exportDirectory, () =>
+        this.callRenderer(session, `__mcp_${tool}`, args));
     }
     if ((ORCHESTRATION_TOOL_NAMES as readonly string[]).includes(tool)) {
       if (!this.options.orchestrate) throw new Error('Subagent orchestration is unavailable in this connection.');

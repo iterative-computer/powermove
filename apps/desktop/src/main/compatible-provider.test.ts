@@ -11,6 +11,30 @@ import { AGENT_SHELL_NETWORK_INSTRUCTIONS, agentResultSchema } from './codex/ins
 const directories: string[] = [];
 afterEach(async () => { for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true }); });
 const event = (delta: any, finish_reason: any = null) => `data: ${JSON.stringify({ choices: [{ delta, finish_reason }] })}\r\n\r\n`;
+it('automatically offers and invokes complete video delivery after connecting an API provider', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-api-delivery-')); directories.push(directory);
+  const requests: any[] = [], calls = ['export_video', 'save_project', 'complete_task'];
+  let turn = 0;
+  const fetcher = vi.fn(async (_url: any, options: any) => {
+    if (options.method === 'GET') return new Response(null, { status: 404 });
+    const body = JSON.parse(options.body);
+    if (!body.stream) return Response.json({ choices: [{ message: { content: 'OK' } }] });
+    requests.push(body);
+    const name = calls[turn++]!;
+    const args = name === 'complete_task' ? { summary: 'Video delivered.', commands: [], artifacts: [], extensions: [], notes: [], externalActions: [] } : {};
+    return streamed(event({ tool_calls: [{ index: 0, id: `delivery-${turn}`, function: { name, arguments: JSON.stringify(args) } }] }, 'tool_calls'));
+  }) as typeof fetch;
+  const provider = new CompatibleProvider(directory, fetcher);
+  await provider.configure({ baseUrl: 'http://localhost:11434/v1', model: 'local', vision: false });
+  const call = vi.fn(async (name: string) => ({ runId: 'delivery', callId: name, ok: true, content: [{ type: 'text' as const, text: JSON.stringify({ path: `/tmp/${name}` }) }] }));
+  const result = await provider.run({ id: 'delivery', provider: 'compatible', mode: 'autonomous', access: 'project', projectId: 'proof', projectName: 'Proof', projectJSON: '{}', prompt: 'Finish the video', images: [], attachments: [] } as any, () => {}, call, {
+    extensionsDir: path.join(directory, 'extensions'), apiPackFiles: async () => [{ name: 'api.ts', text: 'export interface PowermoveAPI {}' }]
+  });
+  expect(result.ok, JSON.stringify(result)).toBe(true);
+  const names = requests[0].tools.map((tool: any) => tool.function.name);
+  expect(names).toEqual(expect.arrayContaining(['import_media', 'edit_video', 'render_frames', 'save_project', 'export_video']));
+  expect(call.mock.calls.map(([name]) => name)).toEqual(['export_video', 'save_project']);
+});
 it('returns a valid, explicit recovery response rather than cutting off large project JSON', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-api-pages-')); directories.push(directory);
   let turn = 0;

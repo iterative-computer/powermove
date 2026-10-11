@@ -1,3 +1,4 @@
+import { agentExportDestination } from './agent-export';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdtemp, rm, stat, copyFile, appendFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -46,7 +47,8 @@ export function registerRenderEncoder(ipc:IpcMain,ctx:{isTrustedSender:(event:an
     const window=BrowserWindow.fromWebContents(e.sender);
     if(!window||window.isDestroyed())throw new Error('Export window is unavailable');
     const extension=options.format==='prores'?'mov':'mp4';
-    const result=await dialog.showSaveDialog(window,{defaultPath:options.name.replace(/[\\/:]/g,'_')+'.'+extension,filters:[{name:'Video',extensions:[extension]}]});
+    const automatic=await agentExportDestination(e.sender,options.name+'.'+extension);
+    const result=automatic?{canceled:false,filePath:automatic}:await dialog.showSaveDialog(window,{defaultPath:options.name.replace(/[\\/:]/g,'_')+'.'+extension,filters:[{name:'Video',extensions:[extension]}]});
     if(result.canceled||!result.filePath||window.isDestroyed())return null;
     const token=await encoder.start(options,owner);
     if(e.sender.isDestroyed()){await encoder.release(token,owner);return null;}

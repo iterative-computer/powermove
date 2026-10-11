@@ -94,7 +94,10 @@ export interface CodexIpcContext {
   builtinExtensionsDir?: string;
   /** The bundled ffmpeg the agent's media tools run (probe, frames, waveform). */
   agentMediaFfmpeg?: string;
+  agentExportDirectory?: string;
   externalMcp?: {
+    /** Desktop boot barrier: only return an editor after its tool listener is ready. */
+    getOwner?(): BrowserWindow['webContents'] | null;
     ready?(host: Awaited<ReturnType<typeof startExternalMcp>>): void;
     importMedia?: ExternalSessionOptions['importMedia'];
     capturePanel?: import('../agent-tools/bridge').PowermoveAgentToolBridgeOptions['capturePanel'];
@@ -397,6 +400,7 @@ export function registerCodexIpc(
         ...(ctx.agentToolCommandArgs ? { commandArgs: ctx.agentToolCommandArgs } : {}),
         storeAgent: ctx.storeAgent?.() ?? null,
         ...(ctx.agentMediaFfmpeg ? { ffmpegPath: ctx.agentMediaFfmpeg } : {}),
+        exportDirectory: ctx.agentExportDirectory,
         capturePanel: ctx.externalMcp?.capturePanel,
         panelInput: ctx.externalMcp?.panelInput,
         orchestrate: (runId, tool, args) => orchestrator.call(runId, tool, args),
@@ -463,7 +467,7 @@ export function registerCodexIpc(
 
   const externalHost = toolBridge && ctx.externalMcp ? startExternalMcp({ userData: ctx.userData,
     createSession: () => new ExternalAgentSession({ bridge: toolBridge,
-      getOwner: () => ctx.getWindow()?.webContents ?? null, userData: ctx.userData,
+      getOwner: () => ctx.externalMcp?.getOwner ? ctx.externalMcp.getOwner() : ctx.getWindow()?.webContents ?? null, userData: ctx.userData,
       extensionsDir: ctx.extensionsDir, apiPackFiles: ctx.apiPackFiles,
       refreshExtensions: ctx.refreshExtensions, importMedia: ctx.externalMcp?.importMedia,
       attach: async (request, session) => {

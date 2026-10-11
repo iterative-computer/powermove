@@ -1,3 +1,4 @@
+import { agentExportDestination } from './agent-export';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -256,8 +257,11 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
         if (!result.canceled) selectedPath = result.filePaths[0];
       } else {
         const options = { defaultPath: name, filters: saveFiltersForName(name) };
-        const result = ctx.dialogs?.showSave ? await ctx.dialogs.showSave(window, options) : await dialog.showSaveDialog(window, options);
-        if (!result.canceled) selectedPath = result.filePath;
+        selectedPath = await agentExportDestination(event.sender, name);
+        if (!selectedPath) {
+          const result = ctx.dialogs?.showSave ? await ctx.dialogs.showSave(window, options) : await dialog.showSaveDialog(window, options);
+          if (!result.canceled) selectedPath = result.filePath;
+        }
       }
       if (!selectedPath || window.isDestroyed()) return null;
       const token = randomUUID();

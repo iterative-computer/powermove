@@ -1244,8 +1244,12 @@ if (!hasSingleInstanceLock) {
       agentToolCommand: process.execPath,
       agentToolCommandArgs: [...(app.isPackaged ? [] : [app.getAppPath()]), '--powermove-agent-tools'],
       agentMediaFfmpeg: proxyEncoder,
+      agentExportDirectory: path.join(app.getPath('home'), 'Powermove'),
       refreshExtensions: refreshRestoredExtensions,
-      externalMcp: {},
+      externalMcp: { getOwner: () => {
+        const editor = currentEditor();
+        return editor && openReadyEditors.has(editor.webContents) ? editor.webContents : null;
+      } },
       storeAgent: () => storeAgentGateway,
       openExternal: async (url) => { await shell.openExternal(url); }
     });

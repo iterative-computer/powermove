@@ -57,6 +57,20 @@ async function rpc(child: ChildProcessWithoutNullStreams, message: Record<string
 }
 
 describe('native Powermove agent tool bridge', () => {
+  it('routes default delivery tools through the production exporter and keeps planning read-only', async () => {
+    const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '' });
+    try {
+      const session = await bridge.openSession({ runId: 'delivery', owner: owner as never, baseRevision: 0 });
+      await bridge.callTool(session, 'save_project', {});
+      await bridge.callTool(session, 'export_video', { audio: true });
+      expect(owner.requests.map(request => request.tool)).toEqual(['get_project_state', '__mcp_save_project', 'get_project_state', '__mcp_export_video']);
+      expect(owner.requests.at(-1)?.arguments).toEqual({ audio: true });
+      expect(session.mcpConfig.toolTimeoutSec).toBeGreaterThanOrEqual(3600);
+      const planning = await bridge.openSession({ runId: 'delivery-plan', owner: owner as never, baseRevision: 0, inspectionOnly: true });
+      await expect(bridge.callTool(planning, 'export_video', {})).rejects.toThrow('only inspect');
+    } finally { await bridge.shutdown(); }
+  });
   const bridges: PowermoveAgentToolBridge[] = [];
   const children: ChildProcessWithoutNullStreams[] = [];
   const temporaryDirectories: string[] = [];
@@ -106,7 +120,7 @@ describe('native Powermove agent tool bridge', () => {
     const listed = await rpc(child, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     expect(listed.result.tools.map((tool: any) => tool.name)).toEqual([
       ...ORCHESTRATION_TOOL_NAMES,
-      'get_3d_scene', 'edit_3d', 'fork_builtin_extension', 'get_project_state', 'list_media', 'replace_media', 'import_media', 'manage_media', 'select_layers', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'inspect_creative_extension', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes', 'validate_effect', 'stage_fork_rebase',
+      'save_project', 'export_video', 'get_3d_scene', 'edit_3d', 'fork_builtin_extension', 'get_project_state', 'list_media', 'replace_media', 'import_media', 'manage_media', 'select_layers', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'inspect_creative_extension', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes', 'validate_effect', 'stage_fork_rebase',
       'probe_media', 'sample_media_frames', 'media_contact_sheet', 'media_waveform', 'transcribe_media', 'check_project',
       'store_search', 'store_extension', 'store_source', 'store_library', 'store_install', 'store_update', 'store_uninstall', 'store_publish_prepare', 'store_publish',
       'generate_captions', 'export_captions'
@@ -576,7 +590,7 @@ describe('native Powermove agent tool bridge', () => {
     });
     bridges.push(bridge);
     const plain = await bridge.openSession({ runId: 'plain-run-1', owner: owner as never, baseRevision: 0 });
-    expect(plain.mcpConfig.toolTimeoutSec).toBeUndefined();
+    expect(plain.mcpConfig.toolTimeoutSec).toBe(3600);
     await expect(bridge.callTool(plain, 'run_outside_sandbox', { command: 'true', reason: 'x' })).rejects.toThrow(/not available/);
 
     const outsideSandbox = vi.fn(async ({ command }: { command: string }) => `Exit code: 0\nran ${command}`);

@@ -65,6 +65,9 @@ Read get_project_state; discover all layers with indexOnly/nextLayerOffset or la
 
 ${profile.footage ? AGENT_WATCH_AND_LISTEN_INSTRUCTIONS : ''}
 
+DELIVERY
+Project runs already have Powermove tools attached for every connected provider; do not ask the user to configure MCP. When the user asks for a finished video, verify frames and audio, then call export_video. Call save_project for an editable .pmv. Both return actual file paths after saving, without a file picker, in the host export folder (desktop: ~/Powermove). Include those paths in your result. A new video can be built in the current blank project with the normal edit tools. Never switch projects during a run.
+
 VERIFICATION
 Check the API pack and get_workspace_state before declaring a capability unavailable. Panel targets: select_layers. Reproduce failures and inspect output; builds and clicks are not proof. For tracking/rotoscoping inspect source-colored cutouts with subject motion at beginning, middle and end; white mattes fail. Never substitute outline tracking for segmentation. After tool failure, inspect errors and capture_panel; never repeat a possibly completed mutation.
 

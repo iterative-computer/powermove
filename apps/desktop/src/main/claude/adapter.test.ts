@@ -210,6 +210,8 @@ describe('Claude CLI adapter', () => {
     const allowed = argv[argv.indexOf('--allowedTools') + 1]!;
     expect(allowed).toContain('mcp__powermove__get_project_state');
     expect(allowed).toContain('mcp__powermove__apply_commands');
+    expect(allowed).toContain('mcp__powermove__save_project');
+    expect(allowed).toContain('mcp__powermove__export_video');
   });
 
   it('limits editor runs to live Powermove inspection and capture tools', () => {

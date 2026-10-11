@@ -2,6 +2,12 @@
 
 Agents can use Powermove through MCP, including creating and exporting a video without opening the desktop app. The server uses the same editor, tool definitions, media pipeline, extension validation and Undo history as Powermove's built-in agents.
 
+## Built-in agents
+
+Connecting ChatGPT, Claude or an API-compatible provider in Powermove automatically gives its agent the Powermove tools. No MCP settings or separate installation are needed. Project editing runs can import media, build and review a video, save an editable `.pmv` and export MP4 or ProRes with audio. Desktop agent deliveries use unique filenames in `~/Powermove` without a file picker. Planning runs remain read-only. API models must support function calling.
+
+The configuration below is only for agents running outside Powermove.
+
 ## Create videos without opening the app
 
 Build the CLI from this checkout (`bun install`, then `bun run build:cli`). Install its hidden renderer once:
@@ -51,7 +57,7 @@ This connects to the running app without opening a second editor. A CLI can also
 5. `save_project` writes an editable `.pmv` including its media. `export_video` writes MP4 or ProRes with audio and returns the actual saved path after encoding completes.
 6. `finish_session` with `commit: true` keeps edits; `false` attempts a safe rollback. Already saved files and locally published extensions remain. Disconnecting cancels child tasks and attempts to roll back unfinished composition edits. Panel actions and interleaved edits retain normal editor Undo and may produce a rollback warning.
 
-`import_media` uses the hidden host's local file importer. For a desktop connection, import files into the project through the app before starting a session.
+`import_media` imports durable media in both desktop and hidden hosts; use `apply_commands` or `edit_video` to place its returned asset ID. Hidden hosts also offer `import_media_to_timeline` for direct import and placement.
 
 All filesystem paths refer to the host machine. A remote MCP client must use its own host-file tooling to put inputs there and retrieve outputs. Shell and web tools belong to the calling agent, and are not replaced by this MCP.
 

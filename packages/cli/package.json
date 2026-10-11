@@ -1,6 +1,6 @@
 {
   "name": "powermove-cli",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "license": "AGPL-3.0-or-later",
   "description": "Run the Powermove motion editor host on any machine and use it from a browser: `npx powermove serve`.",
   "type": "module",

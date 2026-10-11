@@ -76,18 +76,15 @@ export class ExternalAgentSession {
       session.stagingDirectory = this.workspace.stagingDirectory;
       return { changeSetId: changeSet?.id ?? null, extensions: input.extensions, stagingDirectory: this.workspace.stagingDirectory };
     }
-    if (name === 'import_media' || name === 'save_project' || name === 'export_video') {
+    if (name === 'import_media_to_timeline' || (name === 'import_media' && this.options.importMedia)) {
       if (session.inspectionOnly || session.context === 'app') throw new Error('This tool requires project access and an attached project.');
-      // Assert the pinned document before imports, saves or exports.
+      // Assert the pinned document before host-local import.
       await this.renderer(session, 'get_project_state', { propertyLimit: 1, keyframeLimit: 0 });
-      if (name === 'import_media') {
-        const input = z.object({ path: z.string().min(1), at: z.number().finite().min(0).optional() }).strict().parse(args);
-        if (!this.options.importMedia) throw new Error('Host-local import requires powermove mcp. In the desktop app, import media into the project first.');
-        const result = await this.options.importMedia(session.owner, input);
-        // Native import has its own Undo entry, like panel actions.
-        return result;
-      }
-      return this.renderer(session, `__mcp_${name}`, args);
+      const input = name === 'import_media'
+        ? { ...z.object({ path: z.string().min(1).max(4096).refine(value => /^(\/|[A-Za-z]:[\\/])/.test(value) && !value.includes('\0')), folderId: z.string().nullable().optional(), expectedFingerprint: z.string().max(200).optional() }).strict().parse(args), assetOnly: true }
+        : z.object({ path: z.string().min(1), at: z.number().finite().min(0).optional() }).strict().parse(args);
+      if (!this.options.importMedia) throw new Error('Direct timeline import requires a hidden host. Use import_media and edit_video in the desktop connection.');
+      return this.options.importMedia(session.owner, { ...input, projectId: this.request?.projectId });
     }
     const response = await this.options.bridge.callTool(session, name, args, this.workspace?.root);
     return response;

@@ -43,6 +43,7 @@ import {
 import { IPC, LIMITS, type FileSaveResult } from '../shared/ipc';
 import { ProjectFiles } from './project-files';
 import { decodeProjectContainer } from '../shared/project-container';
+import { withAgentExport } from './agent-export';
 
 type InvokeHandler = (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown;
 type OnHandler = (event: IpcMainEvent, ...args: unknown[]) => void;
@@ -76,6 +77,23 @@ afterEach(() => {
 });
 
 describe('save IPC', () => {
+  it('delivers an agent project through the existing save pipeline without a dialog', async () => {
+    const folder = await mkdtemp(path.join(tmpdir(), 'pm-agent-save-'));
+    const { ipcMain, invokes } = fakeIpcMain();
+    const sender = { once: vi.fn() }, event = invokeEvent(sender);
+    const showSave = vi.fn();
+    electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
+    registerSaveIpc(ipcMain, { isTrustedSender: () => true, dialogs: { showSave } });
+    try {
+      await withAgentExport(sender, folder, async () => {
+        const token = await invokes.get(IPC.exportChoose)!(event, { name: 'Project.pmv' });
+        expect(await invokes.get(IPC.fileSave)!(event, { name: 'Project.pmv', data: new Uint8Array([7]), destinationToken: token })).toEqual({ ok: true, path: path.join(folder, 'Project.pmv') });
+        await invokes.get(IPC.exportRelease)!(event, token);
+      });
+      expect(showSave).not.toHaveBeenCalled();
+      expect([...await readFile(path.join(folder, 'Project.pmv'))]).toEqual([7]);
+    } finally { await rm(folder, { recursive: true, force: true }); }
+  });
   it('owns incremental transactions per sender and never publishes an incomplete upload', async () => {
     const folder = await mkdtemp(path.join(tmpdir(), 'pm-save-ipc-'));
     const output = path.join(folder, 'Project.pmv');
