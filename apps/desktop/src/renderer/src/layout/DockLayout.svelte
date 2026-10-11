@@ -18,7 +18,8 @@
     const onWheel = (event: WheelEvent): void => {
       // Only the empty outer gutter belongs to this handler. Panel contents,
       // dividers and overlays retain their own scrolling behavior.
-      if (event.target !== body || event.ctrlKey || event.metaKey || event.shiftKey || !event.deltaY) return;
+      const gutter = event.target === body || (event.target as Element | null)?.matches?.('.dock-stack, .dock-row');
+      if (!gutter || event.ctrlKey || event.metaKey || event.shiftKey || !event.deltaY) return;
       for (const side of ['left', 'right']) {
         const dock = document.getElementById(`dock-${side}`);
         if (!dock || !dock.clientHeight) continue;
@@ -56,16 +57,20 @@
       (id: string) => !!PM.PANELS?.[id]
     ) as Array<{ dock: DockSpec; specs: PanelSpec[] }>;
   });
+  /* A bottom dock spans every column except the right one: those columns sit
+     in a row above it, and the right column keeps the full height. */
+  const bottom = $derived(plan.find((entry) => entry.dock.id === 'bottom'));
+  const upper = $derived(plan.filter((entry) => entry.dock.id !== 'bottom' && entry.dock.id !== 'right'));
+  const trailing = $derived(plan.filter((entry) => entry.dock.id === 'right'));
 </script>
 
-{#if manifest}
-  <PanelPool {PM} workspace={manifest} {tick} />
-  {#each plan as entry, index (entry.dock.id)}
-    {#if index > 0}
+{#snippet columns(entries: Array<{ dock: DockSpec; specs: PanelSpec[] }>, leading: DockSpec | undefined)}
+  {#each entries as entry, index (entry.dock.id)}
+    {#if index > 0 || leading}
       <Splitter
         {PM}
         mode="vertical"
-        beforeDock={plan[index - 1]?.dock}
+        beforeDock={index > 0 ? entries[index - 1]?.dock : leading}
         afterDock={entry.dock}
         {tick}
         oncommit={commit}
@@ -73,6 +78,22 @@
     {/if}
     <Dock {PM} dock={entry.dock} specs={entry.specs} {tick} oncommit={commit} />
   {/each}
+{/snippet}
+
+{#if manifest}
+  <PanelPool {PM} workspace={manifest} {tick} />
+  {#if bottom}
+    <div class="dock-stack">
+      <div class="dock-row">
+        {@render columns(upper, undefined)}
+      </div>
+      <Splitter {PM} mode="horizontal" afterDock={bottom.dock} {tick} oncommit={commit} />
+      <Dock {PM} dock={bottom.dock} specs={bottom.specs} {tick} oncommit={commit} />
+    </div>
+    {@render columns(trailing, upper.at(-1)?.dock)}
+  {:else}
+    {@render columns(plan, undefined)}
+  {/if}
 {/if}
 
 <UIPlacementGhost />

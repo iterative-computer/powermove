@@ -293,6 +293,10 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .dock#dock-center{flex:1 1 auto;min-width:200px}
 .dock#dock-left{flex:0 0 250px;min-width:200px}
 .dock#dock-right{flex:0 0 300px;min-width:220px}
+.dock#dock-bottom{flex:0 0 300px;min-height:120px}
+/* With a bottom dock, the columns left of the right dock stack above it. */
+.dock-stack{flex:1 1 auto;display:flex;flex-direction:column;gap:var(--gap);min-width:0;min-height:0}
+.dock-row{flex:1 1 auto;display:flex;gap:var(--gap);min-width:0;min-height:0}
 /* Match panel radius and smoothing at the scroll boundary. Keep the panel's
    own material without adding another outline around the clipped contents. */
 .dock:is(#dock-left,#dock-right){overflow-y:auto;overscroll-behavior-y:contain;scrollbar-width:none;border-radius:var(--r-lg);corner-shape:var(--ui-corner-smoothing)}

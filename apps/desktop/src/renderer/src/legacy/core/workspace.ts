@@ -178,8 +178,10 @@ function isLegacyBrokenTextSplitter(panel: any) {
    1. A docked agent from before the titlebar launcher hands its slot to Layer
       Effects; an agent docked from the launcher since then stays put.
    2. Layer Effects joins its default place below Media, unless the workspace
-      already has it, docked or hidden. */
-const AGENT_DOCK_MIGRATION = 2;
+      already has it, docked or hidden.
+   3. A sized Timeline at the foot of the center column moves into a bottom
+      dock that also spans the left column. */
+const AGENT_DOCK_MIGRATION = 3;
 const panelId = (spec: any) => typeof spec === 'string' ? spec : spec?.id;
 function migrateDockedAgent(workspace: any) {
   if (!workspace || typeof workspace !== 'object') return workspace;
@@ -201,6 +203,18 @@ function migrateDockedAgent(workspace: any) {
     if (!present && media) {
       const index = media.panels.findIndex((spec: any) => panelId(spec) === 'assets');
       media.panels.splice(index + 1, 0, { id: 'layer-effects', size: 350 });
+    }
+  }
+  if (version < 3 && docks && !docks.some((dock: any) => dock?.id === 'bottom')) {
+    const center = docks.find((dock: any) => dock?.id === 'center');
+    const last = center?.panels?.at(-1);
+    if (center && center.panels.length > 1 && panelId(last) === 'timeline' && !last?.flex
+      && docks.some((dock: any) => dock?.id === 'left')) {
+      center.panels.pop();
+      ensureDockFill(center);
+      const index = docks.findIndex((dock: any) => dock?.id === 'right');
+      const bottom = { id: 'bottom', size: (typeof last === 'object' && last?.size) || 300, panels: [{ id: 'timeline', flex: true }] };
+      docks.splice(index < 0 ? docks.length : index, 0, bottom);
     }
   }
   return {
@@ -351,7 +365,8 @@ const PRESETS: any = () => ([
            properties over the effects browser on the right. The agent opens
            from the titlebar and can be dragged into any dock. */
         dock('left', [p('assets', { flex: true }), p('layer-effects', { size: 350 })], 300),
-        dock('center', [p('viewer', { flex: true }), p('timeline', { size: 340 })]),
+        dock('center', [p('viewer', { flex: true })]),
+        dock('bottom', [p('timeline', { flex: true })], 340),
         dock('right', [p('inspector', { flex: true }), p('fxbrowser', { size: 380 })], 320),
       ],
     },
@@ -363,7 +378,8 @@ const PRESETS: any = () => ([
     layout: {
       docks: [
         dock('left', [p('gradient-controls', { flex: true }), p('assets', { size: 190 })], 300),
-        dock('center', [p('viewer', { flex: true }), p('timeline', { size: 300 })]),
+        dock('center', [p('viewer', { flex: true })]),
+        dock('bottom', [p('timeline', { flex: true })], 300),
         dock('right', [p('inspector', { flex: true })], 340),
       ],
     },
@@ -397,7 +413,8 @@ const PRESETS: any = () => ([
     layout: {
       docks: [
         dock('left', [p('shader', { flex: true })], 460),
-        dock('center', [p('viewer', { flex: true }), p('timeline', { size: 200 })]),
+        dock('center', [p('viewer', { flex: true })]),
+        dock('bottom', [p('timeline', { flex: true })], 200),
         dock('right', [p('inspector', { flex: true }), p('perf', { size: 190 })], 290),
       ],
     },
@@ -409,7 +426,8 @@ const PRESETS: any = () => ([
     layout: {
       docks: [
         dock('left', [p('assets', { flex: true }), p('fxbrowser', { size: 240 })], 250),
-        dock('center', [p('viewer', { flex: true }), p('timeline', { size: 360 })]),
+        dock('center', [p('viewer', { flex: true })]),
+        dock('bottom', [p('timeline', { flex: true })], 360),
         dock('right', [p('inspector', { flex: true })], 280),
       ],
     },

@@ -4,7 +4,7 @@ import { dockLabel, insertPanel, removePanel, type DockSpec, type PanelSpec, typ
 type RectTarget = { id: string; el?: HTMLElement; virtual?: boolean; rect: DOMRect; panels: Array<{ el: HTMLElement; rect: DOMRect }> };
 type PreviewTarget = { key: string };
 
-const PANEL_SELECTOR = '#body > .dock .panel[data-panel]';
+const PANEL_SELECTOR = '#body .dock .panel[data-panel]';
 
 export function panelRects(): Map<string, DOMRect> {
   const rects = new Map<string, DOMRect>();
@@ -46,7 +46,7 @@ export function retargetPreview(preview: HTMLElement, target: PreviewTarget, key
 }
 
 function liveTargets(PM: PMRegistry): RectTarget[] {
-  const docks: RectTarget[] = [...document.querySelectorAll<HTMLElement>('#body > .dock')].map((element) => ({
+  const docks: RectTarget[] = [...document.querySelectorAll<HTMLElement>('#body .dock')].map((element) => ({
     id: element.id.replace('dock-', ''),
     el: element,
     rect: element.getBoundingClientRect(),
@@ -69,7 +69,15 @@ function placePreview(
   const dock = docks.find((item) => item.id === target.dockId);
   if (!dock) return;
   const rect = dock.rect;
-  if (dock.virtual) {
+  if (dock.virtual && dock.id === 'bottom') {
+    const height = Math.min(300, Math.max(120, Math.round(rect.height * 2.5)));
+    preview.classList.add('dock-edge');
+    preview.style.left = `${Math.round(rect.left)}px`;
+    preview.style.top = `${Math.round(rect.bottom - height)}px`;
+    preview.style.width = `${Math.round(rect.width)}px`;
+    preview.style.height = `${height}px`;
+    retargetPreview(preview, previewTarget, 'virtual:bottom');
+  } else if (dock.virtual) {
     const width = Math.min(dock.id === 'right' ? 300 : 250, Math.max(120, Math.round(rect.width * 2.5)));
     preview.classList.add('dock-edge');
     preview.style.left = `${Math.round(dock.id === 'right' ? rect.right - width : rect.left)}px`;

@@ -9,7 +9,7 @@ const CORNERS: AreaCorner[] = ['top-left', 'top-right', 'bottom-left', 'bottom-r
 const plainRect = ({ left, right, top, bottom }: DOMRect): AreaRect => ({ left, right, top, bottom });
 
 function liveAreas(): Area[] {
-  return [...document.querySelectorAll<HTMLElement>('#body > .dock')].flatMap((dock) =>
+  return [...document.querySelectorAll<HTMLElement>('#body .dock')].flatMap((dock) =>
     [...dock.querySelectorAll<HTMLElement>('.panel[data-panel]')].map((panel, index) => ({
       id: panel.dataset.panel!,
       dockId: dock.dataset.dock || dock.id.replace('dock-', ''),
