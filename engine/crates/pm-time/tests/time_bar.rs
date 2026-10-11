@@ -107,6 +107,13 @@ fn invalid_drop_frame_strings_are_rejected() {
         );
     }
     assert!(f.parse("00:01:00;04").is_ok());
+    // `.` and `,` mark drop-frame too (parseDropFrameTimecode); dropped labels
+    // stay invalid whatever the separator.
+    let f = df29();
+    assert_eq!(f.parse("00:01:00.02").unwrap(), 1800);
+    assert_eq!(f.parse("00:01:00,02").unwrap(), 1800);
+    assert!(f.parse("00:01:00.00").is_err());
+    assert!(f.parse("00:01:00,01").is_err());
     // Malformed strings.
     let f = df29();
     for text in [

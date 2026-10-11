@@ -5,13 +5,16 @@
 //!   start of every minute except minutes divisible by ten, and is written with a
 //!   `;` before the frame field: `00:01:00;02`.
 //! * Every other rate counts non-drop (NDF) with `:` separators, using the nominal
-//!   base `ceil(rate)`: 23.976 counts 24 labels per second, 119.88 counts 120. The
-//!   NTSC rates 29.97 and 59.94 can also count NDF when asked.
+//!   base of `legacy/core/timecode.ts` (the rate rounded to the nearest integer,
+//!   halves up, at least 1): 23.976 counts 24 labels per second, 119.88 counts
+//!   120. The NTSC rates 29.97 and 59.94 can also count NDF when asked.
 //! * Timecode wraps at 24 hours: 2,589,408 frames at 29.97 DF, `base × 86400`
 //!   for NDF. Negative frames wrap from the end of the day.
 //! * Parsing is strict: two digits for hours, minutes, and seconds, the format's
-//!   frame-field width, the format's separator before the frame field, fields in
-//!   range, and no dropped labels (`00:01:00;00` is rejected at 29.97 DF).
+//!   frame-field width, the format's separator before the frame field (`;` for
+//!   DF, also `.` and `,` as `parseDropFrameTimecode` accepts; `:` for NDF),
+//!   fields in range, and no dropped labels (`00:01:00;00` is rejected at
+//!   29.97 DF).
 
 use core::fmt;
 
@@ -188,7 +191,7 @@ impl TimecodeFormat {
         }
         let separator = bytes[8];
         match (self.drop_frame, separator) {
-            (true, b';') | (false, b':') => {}
+            (true, b';' | b'.' | b',') | (false, b':') => {}
             (true, b':') => {
                 return Err(TimeError::InvalidTimecode(
                     "drop-frame timecode uses ';' before frames",
@@ -233,11 +236,15 @@ impl fmt::Display for Timecode {
     }
 }
 
-/// `ceil(rate)` as the label base.
+/// The label base: the rate itself for integer rates, otherwise the nearest
+/// integer with halves rounding up, at least 1. This is `timecodeBase` in
+/// `legacy/core/timecode.ts` (`Math.max(1, Math.round(rate))`), so 23.976
+/// counts 24 labels per second and 12.5 counts 13.
 fn nominal_base(rate: Rate) -> u32 {
     let num = rate.num() as i128;
     let den = rate.den() as i128;
-    let base = (num + den - 1) / den;
+    // floor(num/den + 1/2), exact.
+    let base = (2 * num + den).div_euclid(2 * den);
     base.clamp(1, u32::MAX as i128) as u32
 }
 
@@ -255,6 +262,10 @@ mod tests {
             TimecodeFormat::for_rate(Rate::new(25, 2).unwrap()).base(),
             13
         );
+        // Math.round semantics: 7/3 fps counts 2 labels, 0.4 fps at least 1.
+        assert_eq!(TimecodeFormat::for_rate(Rate::new(7, 3).unwrap()).base(), 2);
+        assert_eq!(TimecodeFormat::for_rate(Rate::new(2, 5).unwrap()).base(), 1);
+        assert_eq!(TimecodeFormat::for_rate(Rate::new(5, 2).unwrap()).base(), 3);
         assert!(TimecodeFormat::for_rate(Rate::FPS_29_97).is_drop_frame());
         assert!(TimecodeFormat::for_rate(Rate::FPS_59_94).is_drop_frame());
         assert!(!TimecodeFormat::for_rate(Rate::FPS_23_976).is_drop_frame());
