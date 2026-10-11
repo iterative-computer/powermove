@@ -116,6 +116,17 @@ describe('legacy workspace install', () => {
     expect(docks('current')[1]).toEqual(['center', ['viewer', 'timeline']]);
   });
 
+  it('migrates a project-saved workspace when it is restored', () => {
+    const PM = workspaceModel();
+    PM.WS.init();
+    const restored = PM.WS.restoreSnapshot({ id: 'project-ws', name: 'Project', agentDockMigration: 2, layout: { docks: [
+      { id: 'left', panels: [{ id: 'assets', flex: true }] },
+      { id: 'center', flex: true, panels: [{ id: 'viewer', flex: true }, { id: 'timeline', size: 280 }] },
+    ] } });
+    expect(restored.layout.docks.map((dock: any) => dock.id)).toEqual(['left', 'center', 'bottom']);
+    expect(restored.layout.docks[2]).toMatchObject({ size: 280, panels: [{ id: 'timeline', flex: true }] });
+  });
+
   it('keeps a shared agent panel at its set height', () => {
     const PM = workspaceModel();
     const workspace = PM.WS.normalize({
