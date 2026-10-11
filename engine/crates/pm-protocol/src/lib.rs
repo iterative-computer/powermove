@@ -44,6 +44,9 @@ pub mod slicing;
 pub mod validate;
 pub mod version;
 
+#[doc(hidden)]
+pub mod samples;
+
 #[cfg(feature = "ts")]
 pub mod ts;
 

@@ -24,3 +24,7 @@ ts-rs = { version = "12", optional = true, features = ["serde-json-impl", "no-se
 
 [dev-dependencies]
 proptest = "1.12"
+
+[[bin]]
+name = "pm-protocol-gen"
+required-features = ["ts"]
