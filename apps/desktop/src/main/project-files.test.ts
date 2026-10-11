@@ -90,6 +90,38 @@ describe('real project files', () => {
     await files.save(a.projectId, bytes('second'));
     await expect(files.save(b.projectId, bytes('stale'))).rejects.toThrow('outside Powermove');
   });
+  it('opens a project stamped for a newer reader without granting a save over it', async () => {
+    const destination = path.join(directory, 'newer.pmv');
+    const newer = Buffer.from(JSON.stringify({ v: '9.0.0', proj: { id: 'embedded', name: 'newer', w: 100, h: 100, layers: [], minReaderVersion: 2 } }));
+    await writeFile(destination, newer);
+    const opened = await files.open(destination);
+    await files.close(opened.token);
+    expect(opened.document.proj.minReaderVersion).toBe(2);
+    expect(await files.destination(opened.projectId)).toBeUndefined();
+    await expect(files.save(opened.projectId, bytes('older build'))).rejects.toThrow('Save As');
+    await expect(files.beginIncremental(opened.projectId, [], 64)).rejects.toThrow('Save As');
+    expect(await readFile(destination)).toEqual(newer);
+    // The grant must not come back from the registry after a restart either.
+    files = new ProjectFiles(registry, backupDirectory);
+    expect(await files.destination(opened.projectId)).toBeUndefined();
+  });
+  it('honors a stamp on the envelope root and still grants saves to current projects', async () => {
+    const envelope = path.join(directory, 'envelope.pmv');
+    await writeFile(envelope, JSON.stringify({ minReaderVersion: 7, proj: { w: 100, h: 100, layers: [] } }));
+    const stamped = await files.open(envelope);
+    await files.close(stamped.token);
+    expect(await files.destination(stamped.projectId)).toBeUndefined();
+    const current = path.join(directory, 'current.pmv');
+    await writeFile(current, JSON.stringify({ proj: { w: 100, h: 100, layers: [], minReaderVersion: 1 } }));
+    const opened = await files.open(current);
+    await files.close(opened.token);
+    expect(await files.destination(opened.projectId)).toBe(current);
+  });
+  it('explains that a newer project it cannot parse needs a newer version', async () => {
+    const destination = path.join(directory, 'reshaped.pmv');
+    await writeFile(destination, JSON.stringify({ proj: { minReaderVersion: 3, timelines: [] } }));
+    await expect(files.open(destination)).rejects.toThrow('This project needs a newer version of Powermove.');
+  });
   it('serializes concurrent writes and leaves a complete previous version', async () => {
     const destination = path.join(directory, 'a.pmv');
     await files.save('one', bytes('first'), destination);

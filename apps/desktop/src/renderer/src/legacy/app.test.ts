@@ -766,3 +766,113 @@ it('does not recapture a trashed active project while switching, but still captu
     expect(put.mock.calls.map(([project]) => (project as { id: string }).id)).toEqual(trashed ? ['P2'] : ['P1', 'P2']);
   }
 });
+
+describe('minReaderVersion guard', () => {
+  const NEWER = 'This project needs a newer version of Powermove';
+  function editorWith(bridge: any, bootProject?: any) {
+    const registry = appRegistry(true, bootProject, undefined, bridge);
+    const { PM } = registry;
+    PM.pause = vi.fn();
+    PM.rasterClear = vi.fn();
+    PM.WS.activate = vi.fn();
+    PM.touch = vi.fn();
+    PM.dismissToast = vi.fn();
+    PM.hist.export = () => ({ version: 1, index: 0, entries: [{ label: 'edit' }] });
+    return registry;
+  }
+  const fileBytes = (document: any) => new TextEncoder().encode(JSON.stringify(document));
+  const newerDocument = () => ({
+    v: '9.0.0',
+    proj: { id: 'written-by-newer', name: 'Newer', w: 1920, h: 1080, fps: 30, dur: 10, layers: [], assets: {}, markers: [], comps: {}, minReaderVersion: 2 },
+  });
+
+  it('opens a newer project read-only: notice, no autosave, no Save or Save As', async () => {
+    const saveFile = vi.fn(async () => ({ ok: true, path: '/tmp/Newer.pmv' }));
+    const projectSave = { begin: vi.fn(), chunk: vi.fn(), finish: vi.fn(), abort: vi.fn() };
+    const confirmProjectClose = vi.fn(async () => 'save');
+    const bridge: any = { saveFile, projectSave, confirmProjectClose };
+    const { PM, toasts, timers } = editorWith(bridge);
+    bridge.openProjectFile = async () => ({ ok: true, path: '/tmp/Newer.pmv', projectId: 'opened-newer', data: fileBytes(newerDocument()) });
+    await PM.openProject();
+
+    expect(PM.proj.id).toBe('opened-newer');
+    expect(PM.proj.minReaderVersion).toBe(2);
+    expect(PM.isReadOnlyProject()).toBe(true);
+    expect(toasts).toContain(`${NEWER}. It is open read-only, so changes are not saved.`);
+    expect(toasts).toContain('Opened Newer.pmv');
+    expect(PM.Projects.getState('opened-newer').history).toBeUndefined();
+
+    const put = vi.spyOn(PM.Projects, 'put');
+    const putState = vi.spyOn(PM.Projects, 'putState');
+    PM.proj.name = 'Edited in an older build';
+    PM.autosave();
+    await timers.get(PM.app.saveTimer)();
+    expect(put).not.toHaveBeenCalled();
+    expect(putState).not.toHaveBeenCalled();
+    expect(PM.app.dirty).toBe(true);
+
+    expect(await PM.saveProject()).toBe(false);
+    expect(await PM.saveProject({ saveAs: true })).toBe(false);
+    expect(await PM.saveProject({ projectId: 'opened-newer' })).toBe(false);
+    expect(toasts.filter(text => text === `${NEWER}. It is open read-only, so it can't be saved.`)).toHaveLength(3);
+    expect(saveFile).not.toHaveBeenCalled();
+    expect(projectSave.begin).not.toHaveBeenCalled();
+
+    // Choosing Save when closing cannot write either; Don't Save closes.
+    expect(await PM.confirmCloseProject('opened-newer')).toBe(false);
+    expect(saveFile).not.toHaveBeenCalled();
+    confirmProjectClose.mockResolvedValueOnce('discard');
+    expect(await PM.confirmCloseProject('opened-newer')).toBe(true);
+
+    // Session capture keeps the layout but records no undo history.
+    PM.flushProject = PM.flushProject || (() => undefined);
+    await PM.flushProject();
+    expect(putState.mock.calls.every(([, state]: any) => !('history' in state))).toBe(true);
+  });
+
+  it('carries a stamp on the file envelope onto the project', async () => {
+    const bridge: any = {};
+    const { PM } = editorWith(bridge);
+    const document: any = newerDocument();
+    delete document.proj.minReaderVersion;
+    document.minReaderVersion = 5;
+    bridge.openProjectFile = async () => ({ ok: true, path: '/tmp/Envelope.pmv', projectId: 'envelope', data: fileBytes(document) });
+    await PM.openProject();
+    expect(PM.proj.id).toBe('envelope');
+    expect(PM.proj.minReaderVersion).toBe(5);
+    expect(PM.isReadOnlyProject('envelope')).toBe(true);
+  });
+
+  it('explains why a newer project it cannot parse does not open', async () => {
+    const bridge: any = {};
+    const { PM, toasts } = editorWith(bridge);
+    bridge.openProjectFile = async () => ({ ok: true, path: '/tmp/Reshaped.pmv', projectId: 'reshaped', data: fileBytes({ proj: { minReaderVersion: 3, timelines: [] } }) });
+    await PM.openProject();
+    expect(PM.proj.id).toBe('P1');
+    expect(toasts).toContain(`Could not open project: ${NEWER}.`);
+  });
+
+  it('shows the notice and skips autosave for a newer project restored at launch', async () => {
+    const { PM, toasts, timers } = editorWith({}, { ...newerDocument().proj, id: 'P1' });
+    expect(PM.proj.minReaderVersion).toBe(2);
+    expect(toasts).toContain(`${NEWER}. It is open read-only, so changes are not saved.`);
+    const put = vi.spyOn(PM.Projects, 'put');
+    PM.autosave();
+    await timers.get(PM.app.saveTimer)();
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it('keeps saving projects stamped for this reader', async () => {
+    const saveFile = vi.fn(async (_request: any) => ({ ok: true, path: '/tmp/Current.pmv' }));
+    const bridge: any = { saveFile };
+    const { PM, toasts } = editorWith(bridge);
+    const document: any = newerDocument();
+    document.proj.minReaderVersion = 1;
+    bridge.openProjectFile = async () => ({ ok: true, path: '/tmp/Current.pmv', projectId: 'current', data: fileBytes(document) });
+    await PM.openProject();
+    expect(PM.isReadOnlyProject()).toBe(false);
+    expect(toasts.some(text => text.startsWith(NEWER))).toBe(false);
+    expect(await PM.saveProject()).toBe(true);
+    expect(unpackProjectFile(saveFile.mock.calls[0]![0].data).proj.minReaderVersion).toBe(1);
+  });
+});

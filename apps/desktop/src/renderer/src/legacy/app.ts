@@ -18,6 +18,7 @@ import { stringifyAsync } from './core/serialize-async';
 import { createNewProjectForm } from './ui/project-settings';
 import { inspectorService, shaderHooks, timelineService, viewerService } from './core/services';
 import { bridge as hostBridge } from '../kernel/bridge';
+import { CURRENT_READER_VERSION, NEWER_PROJECT_MESSAGE, needsNewerReader, requiredReaderVersion } from '../../../shared/reader-version';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -100,6 +101,21 @@ PM.projectFileState = (id: string, { initialize = true }: { initialize?: boolean
 };
 let saveGeneration = 0;
 PM.app = APP;
+
+/* A project stamped with a minReaderVersion above this build's reader opens
+   read-only: it is never autosaved (Projects.put keeps the copy stored when it
+   opened) and never saved, so nothing this build does can overwrite it. */
+const isReadOnlyProject = (project: any) => needsNewerReader(project);
+PM.isReadOnlyProject = (id: string = PM.proj?.id) => {
+  if (!id) return false;
+  if (id === PM.proj?.id) return isReadOnlyProject(PM.proj);
+  return isReadOnlyProject(parkedTabs.get(id)?.project ?? PM.Projects.get(id));
+};
+const READ_ONLY_TOAST = 'project-reader-version';
+function showReadOnlyNotice() {
+  PM.toast?.(`${NEWER_PROJECT_MESSAGE}. It is open read-only, so changes are not saved.`, 8000,
+    { key: READ_ONLY_TOAST, error: true, sticky: true });
+}
 
 /* ── appearance (system default; light/dark are explicit overrides) ── */
 PM.theme = (() => {
@@ -440,6 +456,7 @@ async function restoreProjectAssets(project: any, warn: any = true) {
 }
 
 PM.proj = loadBootProject();
+if (isReadOnlyProject(PM.proj)) showReadOnlyNotice();
 // The Svelte runtime bridge is installed before the legacy app hydrates its
 // boot project. Publish the initial reference now so panels render the restored
 // layers immediately instead of waiting for the asynchronous media pass to
@@ -610,7 +627,8 @@ function captureProjectSession() {
   PM.Projects.putState(PM.proj.id, {
     ...PM.Projects.getState(PM.proj.id, { history: false }),
     lastActiveAt: Date.now(),
-    history: PM.hist.export?.({ copy: false }),
+    // Undo history records edits; a read-only project keeps none of them.
+    ...(isReadOnlyProject(PM.proj) ? {} : { history: PM.hist.export?.({ copy: false }) }),
     workspace: PM.WS.snapshot(), time: PM.time,
     selection: { layers: [...PM.sel.layers], keys: PM.sel.keys.filter((key: any) => typeof key === 'string'), chan: PM.sel.chan },
     timeline: timeline
@@ -647,13 +665,17 @@ PM.autosave = () => {
   APP.saveTimer = window.setTimeout(async () => {
     if (discardedProjects.has(projectId)) return;
     try {
-      if (!persistCurrent(true)) throw new Error('Project storage is unavailable or full');
-      PM.Projects.putState(PM.proj.id, { ...PM.Projects.getState(PM.proj.id, { history: false }), history: PM.hist.export?.({ copy: false }) });
-      await PM.store.flush?.();
+      // A read-only project only tracks whether it differs from its file.
+      const readOnly = isReadOnlyProject(PM.proj);
+      if (!readOnly) {
+        if (!persistCurrent(true)) throw new Error('Project storage is unavailable or full');
+        PM.Projects.putState(PM.proj.id, { ...PM.Projects.getState(PM.proj.id, { history: false }), history: PM.hist.export?.({ copy: false }) });
+        await PM.store.flush?.();
+      }
       if (generation !== saveGeneration || projectId !== PM.proj.id) return;
       // Local recovery is not the user's .pmv file and must never mark it saved.
       await refreshFileDirty();
-      PM.bus.emit('project:recovered');
+      if (!readOnly) PM.bus.emit('project:recovered');
     } catch (error) {
       APP.dirty = true;
       PM.toast('Could not save this project. Your edits are still open; try Save again.', 6000);
@@ -773,6 +795,13 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
 PM.saveProject = (options: any = {}) => {
   if (PM.proj.id === homeProjectId) return Promise.resolve(false);
   if (activeSave) return Promise.resolve(false);
+  // Neither Save nor Save As: a copy written by this build could drop what
+  // the newer version stored while still claiming to need that version.
+  if (PM.isReadOnlyProject(options.projectId ?? PM.proj.id)) {
+    PM.toast(`${NEWER_PROJECT_MESSAGE}. It is open read-only, so it can't be saved.`, 6000,
+      { key: 'project-save', error: true });
+    return Promise.resolve(false);
+  }
   const save = saveProject(options);
   activeSave = save;
   void save.finally(() => {
@@ -818,7 +847,13 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     else if (file instanceof Blob) o = await unpackProjectFileBlob(file);
     else o = unpackProjectFile(file.arrayBuffer ? await file.arrayBuffer() : await file.text());
     const source = o.proj || o;
-    if (!source || !Array.isArray(source.layers) || !Number.isFinite(source.w) || !Number.isFinite(source.h)) throw new Error('This is not a Powermove project.');
+    const requiredReader = requiredReaderVersion(o);
+    if (!source || !Array.isArray(source.layers) || !Number.isFinite(source.w) || !Number.isFinite(source.h)) {
+      throw new Error(requiredReader > CURRENT_READER_VERSION ? `${NEWER_PROJECT_MESSAGE}.` : 'This is not a Powermove project.');
+    }
+    // Carry a stamp from the file envelope onto the project, so local storage
+    // and every later load keep the project read-only.
+    if (requiredReader > CURRENT_READER_VERSION) source.minReaderVersion = requiredReader;
     source.id = association?.projectId || PM.uid('project');
     const project = hydrate(source);
     if (!mediaRestored) await restoreProjectFileMedia(o, PM.MediaStore);
@@ -1061,6 +1096,8 @@ function switchProject(p: any, history?: any, live?: ParkedTab) {
   // already was when it was set aside.
   if (live) fileUI();
   else PM.autosave();
+  if (isReadOnlyProject(PM.proj)) showReadOnlyNotice();
+  else PM.dismissToast?.(READ_ONLY_TOAST);
   // A tab left before its autosave settled still needs its unsaved dot checked.
   if (previous?.id && previous.id !== PM.proj.id && previous.id !== homeProjectId && tabIds.includes(previous.id)) {
     void refreshFileDirty(previous).catch(() => undefined);
