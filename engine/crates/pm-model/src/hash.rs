@@ -33,6 +33,11 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     to_hex(&Sha256::digest(bytes).into())
 }
 
+/// 32 bytes as 64 lowercase hex digits.
+pub fn hex(digest: &[u8; 32]) -> String {
+    to_hex(digest)
+}
+
 fn to_hex(digest: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(64);
