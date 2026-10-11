@@ -175,8 +175,14 @@ fn spvc_stage(module: rspirv::dr::Module, spv: &compile::Spirv, stage: Stage, ti
     // The GL vertex shader writes GL clip space; glslang reads it with Vulkan's
     // y-down convention, so flip like naga's `adjust_coordinate_space` does.
     options.common.flip_vertex_y = true;
-    let entry = compiler.cleansed_entry_point_name("main", model).map_err(fail)?.map(|s| s.to_string()).unwrap_or_else(|| "main0".into());
     let artifact = compiler.compile(&options).map_err(fail)?;
+    // SPIRV-Cross renames `main` (reserved in MSL) while compiling, so the
+    // cleansed name is only final on the compiled artifact.
+    let entry = artifact
+        .cleansed_entry_point_name("main", model)
+        .map_err(fail)?
+        .map(|s| s.to_string())
+        .ok_or_else(|| Failure::new("spvc", "SPIRV-Cross reported no entry point"))?;
     timings.insert(format!("{prefix}spvc"), ms(start));
     Ok(StageOutput { reflection, splits: Vec::new(), naga: None, msl: Some(artifact.to_string()), entry_point: entry })
 }
