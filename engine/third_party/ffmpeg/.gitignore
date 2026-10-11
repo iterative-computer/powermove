@@ -1,0 +1,4 @@
+# Build output, scratch space, and the verified source cache (build.sh).
+/out/
+/work/
+/downloads/
