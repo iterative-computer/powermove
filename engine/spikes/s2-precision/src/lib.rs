@@ -9,3 +9,4 @@ pub mod vt;
 pub mod material;
 pub mod exp_formats;
 pub mod exp_transparency;
+pub mod exp_precision;

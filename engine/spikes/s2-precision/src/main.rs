@@ -44,5 +44,8 @@ fn run(exp: &str, work: &std::path::Path) -> cf::Result<()> {
     if all || exp == "transparency" {
         emit(work, "transparency", &exp_transparency::run(gpu.as_ref().unwrap(), &m)?)?;
     }
+    if all || exp == "precision" {
+        emit(work, "precision", &exp_precision::run(gpu.as_ref().unwrap())?)?;
+    }
     Ok(())
 }
