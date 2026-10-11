@@ -94,6 +94,13 @@ summary.memory.electronRenderer = runs.map((run) => {
   };
 });
 
+// Renderer configuration per run: wasm must load under the plan's CSP, fail
+// under today's (the negative control), and string eval must stay blocked.
+summary.rendererConfig = runs.map((run) => Object.fromEntries(['plain', 'isolated', 'nowasm'].map((mode) => {
+  const e = load(run, `electron-${mode}.local.json`);
+  return [mode, e ? { wasm: e.env?.wasm ?? null, stringEval: e.env?.stringEval ?? null, error: e.error ?? null, webPreferences: e.webPreferences ?? null, crossOriginIsolated: e.env?.crossOriginIsolated ?? null } : null];
+})));
+
 // Bit identity: native vector files, the Node wasm vector files, and every
 // hash Electron reported.
 const sha = (file) => (existsSync(file) ? createHash('sha256').update(readFileSync(file)).digest('hex') : null);
@@ -120,5 +127,6 @@ writeFileSync(path.join(dir, 'summary.local.json'), JSON.stringify(summary, null
 console.log(lines.join('\n'));
 console.log('\nBit identity:', JSON.stringify(Object.fromEntries(Object.entries(summary.bitIdentity).map(([k, v]) => [k, { identical: v.identical, controlDiffers: v.controlDiffers, sha256: v.hashes.native }]))));
 console.log('Correctness:', JSON.stringify(summary.correctness));
+console.log('Renderer configuration:', JSON.stringify(summary.rendererConfig));
 console.log('Electron renderer memory:', JSON.stringify(summary.memory.electronRenderer));
 if (summary.legacyParity) console.log('Legacy parity:', JSON.stringify(Object.fromEntries(Object.entries(summary.legacyParity.projects).map(([k, v]) => [k, { values: v.values, differing: v.differing, channelDiffs: v.channelDiffs, matrixDiffs: v.matrixDiffs, maxUlps: v.maxUlps }]))));

@@ -15,12 +15,17 @@ electron="$here/../../../apps/desktop/node_modules/electron/dist/Electron.app/Co
 [[ -x "$electron" ]] || { echo "Electron 44 not found at $electron (run bun install in the repository root)" >&2; exit 1; }
 
 ./scripts/build.sh
-rm -rf results/runs
+mkdir -p results && rm -rf results/runs
+: > results/electron-stderr.local.log
 for i in $(seq 1 "$rounds"); do
   echo "round $i/$rounds: node"
   node --expose-gc js/node-run.mjs > /dev/null
-  echo "round $i/$rounds: electron"
-  env -u ELECTRON_RUN_AS_NODE "$electron" electron/main.cjs all 2> results/electron-stderr.local.log
+  rm -f results/electron-*.local.json
+  for mode in nowasm plain isolated; do
+    echo "round $i/$rounds: electron $mode"
+    env -u ELECTRON_RUN_AS_NODE "$electron" electron/main.cjs "$mode" 2>> "results/electron-stderr.local.log" \
+      || { echo "electron $mode failed (see results/electron-stderr.local.log)" >&2; exit 1; }
+  done
   mkdir -p "results/runs/$i"
   cp results/node.local.json results/electron-*.local.json "results/runs/$i/"
 done

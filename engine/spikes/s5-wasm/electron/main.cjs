@@ -6,6 +6,9 @@
 //     ../../../apps/desktop/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron \
 //     electron/main.cjs [isolated|plain|nowasm|all]
 //
+// scripts/run-all.sh runs one mode per Electron process: each mode gets a
+// fresh renderer process and fresh process-memory numbers.
+//
 // Modes: `plain` is the editor's headers with the plan's CSP change, the
 // configuration S5 is judged in; `isolated` adds COOP/COEP only for 5 us
 // timers; `nowasm` is today's CSP, the negative control. Results go to
@@ -146,10 +149,18 @@ app.whenReady().then(async () => {
   const modes = MODES[which] ? [which] : ['nowasm', 'plain', 'isolated'];
   await mkdir(path.join(root, 'results'), { recursive: true });
   const all = {};
+  let failed = false;
   for (const name of modes) {
-    all[name] = await runMode(name);
+    try {
+      all[name] = await runMode(name);
+    } catch (error) {
+      // A mode that cannot run is reported, never left out silently.
+      all[name] = { mode: name, error: String(error?.stack ?? error) };
+      failed = true;
+    }
+    if (all[name].results?.error) failed = true;
     await writeFile(path.join(root, `results/electron-${name}.local.json`), JSON.stringify(all[name], null, 2));
-    console.log(`mode ${name}: wasm ${all[name].env?.wasm}${all[name].env?.wasmError ? ` (${all[name].env.wasmError})` : ''}`);
+    console.log(`mode ${name}: ${all[name].error ? `error (${all[name].error.split('\n')[0]})` : `wasm ${all[name].env?.wasm}${all[name].env?.wasmError ? ` (${all[name].env.wasmError})` : ''}`}`);
   }
-  app.quit();
+  app.exit(failed ? 1 : 0);
 });
