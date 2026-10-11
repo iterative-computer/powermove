@@ -1,0 +1,75 @@
+import { effects, transitions } from '../catalog';
+import { newProject, type Builder, type Channel, type Value } from '../doc';
+import { GRADIENT, project, testCard, type CorpusProject } from './common';
+
+/** Non-default values per built-in effect; one parameter animates across the clip. */
+function effectValues(b: Builder, id: string): Record<string, Value | Channel> {
+  const k = (from: Value, to: Value) => b.ch(from, [[0, from], [2.5, to]]);
+  switch (id) {
+    case 'blur': return { amount: k(0, 40) };
+    case 'motionblurDir': return { amount: 40, angle: k(0, 90) };
+    case 'sharpen': return { amount: k(40, 220) };
+    case 'glow': return { threshold: 40, radius: k(30, 90), intensity: 150 };
+    case 'color': return { exposure: .4, contrast: 20, saturation: 50, hue: k(0, 90), temperature: 30 };
+    case 'levels': return { inBlack: 10, inWhite: k(100, 70), gamma: 1.4 };
+    case 'duotone': return { shadow: k('#1B2A4A', '#5A0A2A'), highlight: '#FFD66B', amount: 80 };
+    case 'grain': return { amount: k(10, 40), size: 2 };
+    case 'vignette': return { amount: k(30, 90), feather: 40 };
+    case 'chroma': return { amount: k(0, 20) };
+    case 'pixelate': return { size: k(4, 24) };
+    case 'posterize': return { levels: k(16, 3) };
+    case 'displace': return { amount: k(10, 40), scale: 3, speed: 1 };
+    case 'shadow': return { distance: k(5, 40), angle: 135, softness: 20, opacity: 80, color: '#000000' };
+    case 'invert': return { amount: k(0, 100) };
+    case 'gradient': return { startColor: '#FF6B1A', endColor: '#1B2A4A', angle: k(0, 180), midpoint: 40, radial: false, amount: 60 };
+    default: throw new Error(`No corpus values for effect ${id}`);
+  }
+}
+
+function effectProject(id: string): CorpusProject {
+  const b = newProject(`effects/${id}`, { name: `Effect ${id}`, backgroundFill: GRADIENT });
+  const [art, , , , , , title] = testCard(b);
+  art!.fx.push(b.effect(id, effectValues(b, id)));
+  // A second instance on text exercises padding and bounds growth on a smaller layer.
+  title!.fx.push(b.effect(id, effectValues(b, id)));
+  const covers = [`effect ${id}`, 'keyframed effect parameter'];
+  if (id === 'blur') {
+    art!.fx.push(b.effect('color', { saturation: -100 }, b.ch(true, [[0, true], [1.5, false]])));
+    covers.push('animatable effect enable', 'effect stacking');
+  }
+  if (id === 'gradient') {
+    title!.fx[0] = b.effect('gradient', { radial: true, shade: true, centerX: 20, centerY: -10, spread: 150, dither: 4 });
+    covers.push('toggle parameters as float');
+  }
+  return project(b, { group: 'Effects and transitions', title: `Effect ${id}`, covers, samples: [0, 1.25, 2.5], alpha: id === 'shadow' || id === 'glow' });
+}
+
+function transitionProject(id: string): CorpusProject {
+  const b = newProject(`transitions/${id}`, { name: `Transition ${id}`, backgroundFill: GRADIENT });
+  const definition = transitions.find(t => t.id === id)!;
+  const values = Object.fromEntries(definition.params.map(param => {
+    if (param.k === 'angle') return [param.k, 30];
+    if (param.k === 'softness') return [param.k, 20];
+    if (param.k === 'direction') return [param.k, 90];
+    if (param.k === 'amount') return [param.k, 60];
+    return [param.k, param.def as Value];
+  }));
+  const card = testCard(b);
+  const art = card[0]!;
+  art.from = .2; art.dur = 2.6;
+  art.transitionIn = b.transition(id, .8, values);
+  art.transitionOut = b.transition(id, .6, values);
+  const title = card[6]!;
+  title.transitionIn = b.transition(id, 1.2);
+  return project(b, {
+    group: 'Effects and transitions', title: `Transition ${id}`,
+    covers: [`transition ${id}`, 'transition in', 'transition out', 'transition parameters'],
+    samples: [.3, .6, .9, 1.5, 2.4, 2.7], alpha: true,
+  });
+}
+
+export function effectProjects(): CorpusProject[] {
+  if (effects.length !== 16) throw new Error(`Expected 16 built-in effects, found ${effects.length}`);
+  if (transitions.length !== 4) throw new Error(`Expected 4 built-in transitions, found ${transitions.length}`);
+  return [...effects.map(effect => effectProject(effect.id)), ...transitions.map(transition => transitionProject(transition.id))];
+}
