@@ -184,7 +184,7 @@ pub fn writer_settings(codec: &NSString, extra: Option<Retained<NSDictionary<NSS
 }
 
 pub fn write_frames(path: &Path, file_type: &AVFileType, settings: &NSDictionary<NSString, AnyObject>, frames: &[PixelBuffer]) -> Result<()> {
-    let mut w = VideoWriter::encoding(path, file_type, settings)?;
+    let mut w = VideoWriter::encoding(path, file_type, settings, TIMESCALE)?;
     for (i, f) in frames.iter().enumerate() {
         w.append_pixel_buffer(f, avio::time(i as i64 * FRAME_DUR, TIMESCALE))?;
     }

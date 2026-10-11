@@ -126,6 +126,28 @@ pub fn encode_to_file(
     spec: &EncodeSpec,
     frames: &[&PixelBuffer],
 ) -> Result<CFRetained<CMFormatDescription>> {
+    let samples = encode_samples(spec, frames)?;
+    mux(path, file_type, &samples)
+}
+
+/// Mux compressed samples with AVAssetWriter pass-through; returns the first format description.
+pub fn mux(
+    path: &Path,
+    file_type: &objc2_av_foundation::AVFileType,
+    samples: &[CFRetained<CMSampleBuffer>],
+) -> Result<CFRetained<CMFormatDescription>> {
+    let fd = unsafe { samples[0].format_description() }.ok_or_else(|| cf::Error("no format description".into()))?;
+    let timescale = unsafe { samples[0].presentation_time_stamp() }.timescale;
+    let mut w = avio::VideoWriter::passthrough(path, file_type, &fd, timescale)?;
+    for sb in samples {
+        w.append_sample(sb)?;
+    }
+    w.finish()?;
+    Ok(fd)
+}
+
+/// Encode buffers with VTCompressionSession; compressed samples in decode order.
+pub fn encode_samples(spec: &EncodeSpec, frames: &[&PixelBuffer]) -> Result<Vec<CFRetained<CMSampleBuffer>>> {
     let enc_spec = spec.encoder_id.map(|id| {
         cf::Dict::new()
             .cfkey(unsafe { kVTVideoEncoderSpecification_EncoderID }, &NSString::from_str(id))
@@ -190,13 +212,10 @@ pub fn encode_to_file(
         return err(format!("encode errors: {errs:?}"));
     }
     let samples = std::mem::take(&mut *out.lock().unwrap());
-    let fd = unsafe { samples[0].format_description() }.ok_or_else(|| cf::Error("no format description".into()))?;
-    let mut w = avio::VideoWriter::passthrough(path, file_type, &fd)?;
-    for sb in &samples {
-        w.append_sample(sb)?;
+    if samples.is_empty() {
+        return err("encoder produced no samples");
     }
-    w.finish()?;
-    Ok(fd)
+    Ok(samples)
 }
 
 /// One entry of VTCopyVideoEncoderList.

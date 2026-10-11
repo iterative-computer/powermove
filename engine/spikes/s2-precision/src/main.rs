@@ -50,6 +50,9 @@ fn run(exp: &str, work: &std::path::Path) -> cf::Result<()> {
     if all || exp == "generation" {
         emit(work, "generation", &exp_generation::run(gpu.as_ref().unwrap(), &m)?)?;
     }
+    if all || exp == "tags" {
+        emit(work, "tags", &exp_tags::run(gpu.as_ref().unwrap(), &work.join("tags"))?)?;
+    }
     if all || exp == "math" {
         emit(work, "math", &exp_math::run(gpu.as_ref().unwrap())?)?;
     }

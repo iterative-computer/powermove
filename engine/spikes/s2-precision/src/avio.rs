@@ -55,6 +55,7 @@ impl VideoWriter {
         settings: Option<&NSDictionary<NSString, AnyObject>>,
         hint: Option<&CMFormatDescription>,
         adaptor: bool,
+        timescale: i32,
     ) -> Result<Self> {
         remove(path);
         let url = file_url(path);
@@ -64,6 +65,15 @@ impl VideoWriter {
             AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings_sourceFormatHint(video(), settings, hint)
         };
         unsafe { input.setExpectsMediaDataInRealTime(false) };
+        // Section 17: the media and movie timescales follow the rate (24000 for 23.976);
+        // AVAssetWriter otherwise defaults to 600, which cannot represent 1001/24000.
+        // A timescale ≤ 0 keeps AVAssetWriter's defaults (measured in exp_tags).
+        if timescale > 0 {
+            unsafe {
+                input.setMediaTimeScale(timescale);
+                writer.setMovieTimeScale(timescale);
+            }
+        }
         if !unsafe { writer.canAddInput(&input) } {
             return err("AVAssetWriter cannot add input");
         }
@@ -79,13 +89,13 @@ impl VideoWriter {
     }
 
     /// Encoding writer: AVAssetWriter compresses appended pixel buffers with `settings`.
-    pub fn encoding(path: &Path, file_type: &AVFileType, settings: &NSDictionary<NSString, AnyObject>) -> Result<Self> {
-        Self::new_inner(path, file_type, Some(settings), None, true)
+    pub fn encoding(path: &Path, file_type: &AVFileType, settings: &NSDictionary<NSString, AnyObject>, timescale: i32) -> Result<Self> {
+        Self::new_inner(path, file_type, Some(settings), None, true, timescale)
     }
 
     /// Pass-through writer for samples compressed by our own VTCompressionSession.
-    pub fn passthrough(path: &Path, file_type: &AVFileType, hint: &CMFormatDescription) -> Result<Self> {
-        Self::new_inner(path, file_type, None, Some(hint), false)
+    pub fn passthrough(path: &Path, file_type: &AVFileType, hint: &CMFormatDescription, timescale: i32) -> Result<Self> {
+        Self::new_inner(path, file_type, None, Some(hint), false, timescale)
     }
 
     fn start(&mut self, t: CMTime) -> Result<()> {
