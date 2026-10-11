@@ -16,7 +16,7 @@
 
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -82,7 +82,7 @@ function expect(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-interface StreamInfo { codec_name?: string; codec_type?: string; width?: number; height?: number; pix_fmt?: string; color_transfer?: string; color_primaries?: string; color_space?: string; color_range?: string; nb_read_frames?: string; sample_rate?: string; tags?: Record<string, string> }
+interface StreamInfo { codec_name?: string; codec_tag_string?: string; codec_type?: string; width?: number; height?: number; pix_fmt?: string; color_transfer?: string; color_primaries?: string; color_space?: string; color_range?: string; nb_read_frames?: string; sample_rate?: string; tags?: Record<string, string> }
 async function probe(file: string, countFrames = false): Promise<StreamInfo[]> {
   const result = await run(ffprobe, ['-v', 'error', ...(countFrames ? ['-count_frames'] : []), '-show_streams', '-of', 'json', file]);
   if (result.code !== 0) throw new Error(`ffprobe ${file}: ${result.stderr}`);
@@ -330,9 +330,11 @@ try {
     const [video] = await probe(output, true);
     expect(video?.codec_name === 'h264' && video.nb_read_frames === '30', JSON.stringify(video));
     expect(video.color_primaries === 'bt709' && video.color_space === 'bt709' && video.color_range === 'tv' && video.color_transfer === 'iec61966-2-1', `tags ${video.color_primaries}/${video.color_transfer}/${video.color_space}/${video.color_range}`);
+    // e2e/export-mp4.spec.ts asserts the file carries the avc1 sample entry.
+    expect((await readFile(output)).toString('latin1').includes('avc1'), 'no avc1 sample entry in the MP4');
     const red = pixel(await rgba(output), 64, 8, 32);
     expect(near(red, [255, 0, 0], 2), `colour ${red}, want 255,0,0 within 2 CV`);
-    return `30 frames, ${video.color_primaries}/${video.color_transfer}/${video.color_space}/${video.color_range}, pixel ${red.slice(0, 3)}`;
+    return `30 frames, avc1, ${video.color_primaries}/${video.color_transfer}/${video.color_space}/${video.color_range}, pixel ${red.slice(0, 3)}`;
   });
 
   await check('Phase 2 candidate: encoderArgs prores with prores_videotoolbox 4444 in place of prores_ks (alpha kept)', async () => {
@@ -351,10 +353,12 @@ try {
     const [video] = await probe(output, true);
     expect(video?.codec_name === 'prores' && /^yuva444p/.test(video.pix_fmt ?? '') && video.nb_read_frames === '3', JSON.stringify(video));
     expect(video.color_primaries === 'bt709' && video.color_space === 'bt709' && video.color_range === 'tv' && video.color_transfer === 'iec61966-2-1', `tags ${video.color_primaries}/${video.color_transfer}/${video.color_space}/${video.color_range}`);
+    // e2e/ae-audit-implementation.spec.ts:98 asserts the ProRes 4444 sample entry, ap4h.
+    expect(video.codec_tag_string === 'ap4h' && (await readFile(output)).toString('latin1').includes('ap4h'), `codec tag ${video.codec_tag_string}, want ap4h`);
     const pixels = await rgba(output);
     const left = pixel(pixels, 64, 8, 32), right = pixel(pixels, 64, 56, 32);
     expect(near(left, [255, 0, 0, 255], 2) && right[3] === 0, `left ${left} (want 255,0,0,255 within 2 CV), right alpha ${right[3]} (want 0)`);
-    return `${video.pix_fmt}, ${video.color_primaries}/${video.color_transfer}/${video.color_space}/${video.color_range}, left ${left}, right alpha ${right[3]}`;
+    return `${video.pix_fmt} ap4h, ${video.color_primaries}/${video.color_transfer}/${video.color_space}/${video.color_range}, left ${left}, right alpha ${right[3]}`;
   });
 
   await check('render-encoder audio mux step: PCM 24-bit into MOV and AAC into MP4 (-c:v copy)', async () => {
@@ -371,7 +375,7 @@ try {
 
   /* ── test-mcp.mjs and e2e verification shapes ─────────── */
 
-  await check('scripts/test-mcp.mjs shapes: -f null inspect, s16le audio, crop=2:2 rgb24 pixel', async () => {
+  await check('apps/desktop/scripts/test-mcp.mjs shapes: -f null inspect, s16le audio, crop=2:2 rgb24 pixel', async () => {
     const exported = path.join(dir, 'final.mp4');
     await ok(['-hide_banner', '-i', exported, '-f', 'null', '-']);
     const audio = await ok(['-v', 'error', '-i', exported, '-map', '0:a:0', '-f', 's16le', '-']);

@@ -52,6 +52,8 @@ for tool in "$FFMPEG" "$FFPROBE"; do
   fi
   if grep -qE 'version3' <<<"$buildconf"; then
     fail "$name -buildconf enables version3 (LGPLv3); the build is meant to stay LGPL 2.1+"
+  else
+    pass "$name -buildconf has no version3"
   fi
 done
 
