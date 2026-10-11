@@ -1,0 +1,21 @@
+[workspace]
+
+[package]
+name = "s3-shaders"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+wgpu = { version = "30.0.1", features = ["naga-ir"] }
+naga = { version = "30.0.1", features = ["spv-in", "msl-out", "wgsl-out"] }
+glslang = "0.8.1"
+spirv-cross2 = { version = "0.7.1", features = ["msl"] }
+rspirv = "0.13.0"
+pollster = "1.0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+half = "2"
+glslang-sys = "0.8.1"
