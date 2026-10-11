@@ -20,6 +20,7 @@ pub const BGRA: u32 = kCVPixelFormatType_32BGRA;
 pub const RGBA_HALF: u32 = kCVPixelFormatType_64RGBAHalf; // 'RGhA'
 pub const RGBA64: u32 = kCVPixelFormatType_64RGBALE; // 'l64r'
 pub const B64A: u32 = kCVPixelFormatType_64ARGB; // 'b64a' (big-endian)
+pub const V216: u32 = kCVPixelFormatType_422YpCbCr16; // 'v216' (packed Cb Y0 Cr Y1)
 
 /// A retained CVPixelBuffer.
 pub struct PixelBuffer(pub CFRetained<CVPixelBuffer>);
@@ -219,6 +220,7 @@ fn row_samples(pb: &CVPixelBuffer, plane: Option<usize>, w: usize) -> usize {
     let f = CVPixelBufferGetPixelFormatType(pb);
     match (f, plane) {
         (Y416, _) | (RGBA_HALF, _) | (RGBA64, _) | (B64A, _) | (BGRA, _) => w * 4,
+        (V216, _) => w * 2,
         (X422 | X420 | XF20 | V420 | F420, Some(0)) => w,
         (X422 | X420 | XF20 | V420 | F420, Some(1)) => w * 2,
         _ => w * 4,

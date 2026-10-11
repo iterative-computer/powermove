@@ -191,6 +191,107 @@ pub fn write_frames(path: &Path, file_type: &AVFileType, settings: &NSDictionary
     w.finish()
 }
 
+/// Frames of the natural-content clips used for codec generation.
+pub const NATURAL_FRAMES: usize = 48;
+
+/// Box-Muller standard normal from the xorshift generator.
+fn gauss(rng: &mut Rng) -> f64 {
+    let u1 = ((rng.next() >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
+    let u2 = ((rng.next() >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
+    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+}
+
+/// Natural-looking content inside the codable range: a moving hue gradient, a zone
+/// plate, moving soft-edged discs, 75% bars, a grey ramp, and film grain of σ = 1.5
+/// 10-bit luma codes. Returns E-encoded RGB and straight alpha (soft discs and a
+/// vignette, with fully transparent corners) for pixel (x, y) of frame f.
+fn natural(f: usize, x: usize, y: usize) -> ([f64; 3], f64) {
+    use std::f64::consts::PI;
+    let t = f as f64 / NATURAL_FRAMES as f64;
+    let (xf, yf) = (x as f64 / W as f64, y as f64 / H as f64);
+    let mut rgb = if yf > 0.85 {
+        if xf < 0.5 { BARS[(xf * 16.0) as usize % 8] } else { let g = (xf - 0.5) * 2.0; [g, g, g] }
+    } else {
+        let h = 2.0 * PI * (xf * 0.7 + yf * 0.3 + t);
+        [0.5 + 0.3 * h.sin(), 0.5 + 0.3 * (h + 2.1).sin(), 0.5 + 0.3 * (h + 4.2).sin()]
+    };
+    // Zone plate, 360 px square, upper left.
+    let (zx, zy) = (x as f64 - 300.0, y as f64 - 300.0);
+    if zx.abs() < 180.0 && zy.abs() < 180.0 {
+        let v = 0.5 + 0.4 * (PI * (zx * zx + zy * zy) / 720.0 + t * 4.0).cos();
+        rgb = [v, v, v];
+    }
+    // Three moving discs with soft (8 px) edges.
+    let discs = [
+        (0.55 + 0.3 * (2.0 * PI * t).cos(), 0.4, 0.12, [0.85, 0.2, 0.15]),
+        (0.75, 0.45 + 0.25 * (2.0 * PI * t).sin(), 0.09, [0.1, 0.7, 0.3]),
+        (0.35 + 0.2 * t, 0.6, 0.15, [0.2, 0.3, 0.9]),
+    ];
+    for (cx, cy, r, c) in discs {
+        let d = ((x as f64 - cx * W as f64).powi(2) + (y as f64 - cy * H as f64).powi(2)).sqrt() - r * H as f64;
+        let cov = (0.5 - d / 8.0).clamp(0.0, 1.0);
+        for k in 0..3 {
+            rgb[k] = rgb[k] * (1.0 - cov) + c[k] * cov;
+        }
+    }
+    let r = ((xf - 0.5).powi(2) + (yf - 0.5).powi(2)).sqrt();
+    let alpha = (1.0 - (r - 0.35) / 0.3).clamp(0.0, 1.0);
+    (rgb, alpha)
+}
+
+/// A natural-content frame in `format` ('y416' with 12-bit codes, or 'x422').
+pub fn natural_frame(f: usize, format: u32, with_alpha: bool) -> Result<PixelBuffer> {
+    let pb = PixelBuffer::new(W, H, format)?;
+    let mut rng = Rng::new(1000 + f as u64);
+    let grain = 1.5 / 876.0;
+    let mut ycc = vec![[0f64; 3]; W * H];
+    let mut alpha = vec![0f64; W * H];
+    for y in 0..H {
+        for x in 0..W {
+            let (rgb, a) = natural(f, x, y);
+            let mut v = color::rgb_to_ycbcr(rgb);
+            v[0] += grain * gauss(&mut rng);
+            ycc[y * W + x] = v;
+            alpha[y * W + x] = if with_alpha { a } else { 1.0 };
+        }
+    }
+    if format == pixbuf::Y416 {
+        let mut d = vec![0u16; W * H * 4];
+        for i in 0..W * H {
+            let [yv, cb, cr] = ycc[i];
+            // 12-bit codes, MSB-aligned (× 16), inside 16..4079.
+            let q = |v: f64, off: f64, scale: f64| ((v * scale + off).round().clamp(16.0, 4079.0) as u16) << 4;
+            d[i * 4] = (alpha[i] * 65535.0).round() as u16;
+            d[i * 4 + 1] = q(yv, 256.0, 3504.0);
+            d[i * 4 + 2] = q(cb, 2048.0, 3584.0);
+            d[i * 4 + 3] = q(cr, 2048.0, 3584.0);
+        }
+        pb.write_u16(None, &d)?;
+    } else {
+        let mut yp = vec![0u16; W * H];
+        let mut cp = vec![0u16; W * H];
+        let q = |v: f64, off: f64, scale: f64| ((v * scale + off).round().clamp(4.0, 1019.0) as u16) << 6;
+        for y in 0..H {
+            for x in 0..W {
+                let i = y * W + x;
+                yp[i] = q(ycc[i][0], 64.0, 876.0);
+                if x % 2 == 0 {
+                    // Co-sited 4:2:2: average with the right neighbor's half weight (1-2-1 filter).
+                    let l = ycc[y * W + x.saturating_sub(1)];
+                    let r = ycc[y * W + (x + 1).min(W - 1)];
+                    let c = ycc[i];
+                    cp[i] = q((l[1] + 2.0 * c[1] + r[1]) / 4.0, 512.0, 896.0);
+                    cp[i + 1] = q((l[2] + 2.0 * c[2] + r[2]) / 4.0, 512.0, 896.0);
+                }
+            }
+        }
+        pb.write_u16(Some(0), &yp)?;
+        pb.write_u16(Some(1), &cp)?;
+    }
+    pb.tag_709();
+    Ok(pb)
+}
+
 pub struct Material {
     pub dir: PathBuf,
     pub prores4444xq: PathBuf,
@@ -198,6 +299,10 @@ pub struct Material {
     pub prores422hq: PathBuf,
     pub hevc10: PathBuf,
     pub h264: PathBuf,
+    /// Natural content, 48 frames, for codec generation.
+    pub natural_422hq: PathBuf,
+    pub natural_4444xq: PathBuf,
+    pub natural_4444xq_alpha: PathBuf,
 }
 
 /// Create (or reuse) the test material in `dir`.
@@ -210,6 +315,9 @@ pub fn ensure(dir: &Path) -> Result<Material> {
         prores422hq: dir.join("src_422hq.mov"),
         hevc10: dir.join("src_hevc10.mov"),
         h264: dir.join("src_h264.mov"),
+        natural_422hq: dir.join("natural_422hq.mov"),
+        natural_4444xq: dir.join("natural_4444xq.mov"),
+        natural_4444xq_alpha: dir.join("natural_4444xq_alpha.mov"),
     };
     unsafe {
         if !m.prores4444xq.exists() {
@@ -236,6 +344,16 @@ pub fn ensure(dir: &Path) -> Result<Material> {
             let frames: Vec<_> = (0..FRAMES).map(|f| yuv420_frame(f, false)).collect::<Result<_>>()?;
             let comp = Dict::new().i64(AVVideoAverageBitRateKey.unwrap(), 40_000_000).build();
             write_frames(&m.h264, avio::mov(), &writer_settings(AVVideoCodecTypeH264.unwrap(), Some(comp)), &frames)?;
+        }
+        for (path, codec, format, alpha) in [
+            (&m.natural_422hq, AVVideoCodecTypeAppleProRes422HQ.unwrap(), pixbuf::X422, false),
+            (&m.natural_4444xq, AVVideoCodecTypeAppleProRes4444XQ.unwrap(), pixbuf::Y416, false),
+            (&m.natural_4444xq_alpha, AVVideoCodecTypeAppleProRes4444XQ.unwrap(), pixbuf::Y416, true),
+        ] {
+            if !path.exists() {
+                let frames: Vec<_> = (0..NATURAL_FRAMES).map(|f| natural_frame(f, format, alpha)).collect::<Result<_>>()?;
+                write_frames(path, avio::mov(), &writer_settings(codec, None), &frames)?;
+            }
         }
     }
     Ok(m)

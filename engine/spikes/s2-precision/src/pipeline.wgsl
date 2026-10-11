@@ -152,6 +152,26 @@ fn fs_from_x422(in: VsOut) -> @location(0) vec4<f32> {
     return to_working(ycbcr_to_rgb(y, cb, cr), 1.0);
 }
 
+// 'v216': packed 4:2:2 16-bit, texel = (Cb, Y′0, Cr, Y′1), co-sited chroma; same
+// normalization as y416.
+@fragment
+fn fs_from_v216(in: VsOut) -> @location(0) vec4<f32> {
+    let p = vec2<i32>(in.pos.xy);
+    let tw = i32(textureDimensions(src0).x);
+    let t = unorm16(textureLoad(src0, vec2(p.x / 2, p.y), 0));
+    var yv = t.y;
+    var c = vec2(t.x, t.z);
+    if ((p.x & 1) == 1) {
+        yv = t.w;
+        let t2 = unorm16(textureLoad(src0, vec2(min(p.x / 2 + 1, tw - 1), p.y), 0));
+        c = (c + vec2(t2.x, t2.z)) * 0.5;
+    }
+    let y = (yv - 4096.0) / 56064.0;
+    let cb = (c.x - 32768.0) / 57344.0;
+    let cr = (c.y - 32768.0) / 57344.0;
+    return to_working(ycbcr_to_rgb(y, cb, cr), 1.0);
+}
+
 // 16-bit straight RGBA (for example a 16-bit PNG or a Blender surface), E-encoded.
 @fragment
 fn fs_from_rgba16(in: VsOut) -> @location(0) vec4<f32> {
@@ -264,6 +284,23 @@ fn fs_to_420v_chroma(in: VsOut) -> @location(0) vec4<f32> {
     let cb = code_d(c.x * 224.0 + 128.0, 1.0, 254.0, p, 1u);
     let cr = code_d(c.y * 224.0 + 128.0, 1.0, 254.0, p, 2u);
     return vec4(cb / 255.0, cr / 255.0, 0.0, 1.0);
+}
+
+// 'v216' output for a 10-bit codec: codes clip to the 10-bit codable range 4..1019
+// expressed in 16-bit units (256..65216); chroma by point decimation (co-sited).
+@fragment
+fn fs_to_v216(in: VsOut) -> @location(0) vec4<f32> {
+    let t = vec2<i32>(in.pos.xy);
+    let p0 = vec2(t.x * 2, t.y);
+    let p1 = vec2(t.x * 2 + 1, t.y);
+    let a = rgb_to_ycbcr(from_working(textureLoad(src0, p0, 0)).rgb);
+    let b = rgb_to_ycbcr(from_working(textureLoad(src0, p1, 0)).rgb);
+    // Dither (when on) at 10-bit LSB = 64 units.
+    let y0 = code(a.x * 56064.0 + 4096.0 + 64.0 * dither_offset(p0, 0u), 256.0, 65216.0);
+    let y1 = code(b.x * 56064.0 + 4096.0 + 64.0 * dither_offset(p1, 0u), 256.0, 65216.0);
+    let cb = code(a.y * 57344.0 + 32768.0 + 64.0 * dither_offset(t, 1u), 256.0, 65216.0);
+    let cr = code(a.z * 57344.0 + 32768.0 + 64.0 * dither_offset(t, 2u), 256.0, 65216.0);
+    return vec4(cb, y0, cr, y1) / 65535.0;
 }
 
 @fragment

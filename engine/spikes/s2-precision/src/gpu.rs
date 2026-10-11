@@ -189,6 +189,9 @@ impl Gpu {
                 objc2_core_video::CVPixelBufferGetWidthOfPlane(pb.as_cf(), plane),
                 objc2_core_video::CVPixelBufferGetHeightOfPlane(pb.as_cf(), plane),
             )
+        } else if pb.format() == pixbuf::V216 {
+            // Packed 4:2:2: one RGBA16 texel (Cb, Y′0, Cr, Y′1) per two pixels.
+            (pb.width() / 2, pb.height())
         } else {
             (pb.width(), pb.height())
         };
@@ -390,6 +393,10 @@ impl Gpu {
                 let s = self.import_plane(src, 0, MTLPixelFormat::RGBA16Unorm, wgpu::TextureFormat::Rgba16Unorm)?;
                 self.pass("fs_from_rgba16", &s.create_view(&Default::default()), None, p, &work);
             }
+            pixbuf::V216 => {
+                let s = self.import_plane(src, 0, MTLPixelFormat::RGBA16Unorm, wgpu::TextureFormat::Rgba16Unorm)?;
+                self.pass("fs_from_v216", &s.create_view(&Default::default()), None, p, &work);
+            }
             f => return err(format!("source_pass: unsupported format '{}'", cf::fourcc_str(f))),
         }
         Ok(work)
@@ -425,6 +432,10 @@ impl Gpu {
             pixbuf::RGBA64 => {
                 let t = self.import_plane(sink, 0, MTLPixelFormat::RGBA16Unorm, wgpu::TextureFormat::Rgba16Unorm)?;
                 self.pass("fs_to_rgba16", &wv, n, p, &t);
+            }
+            pixbuf::V216 => {
+                let t = self.import_plane(sink, 0, MTLPixelFormat::RGBA16Unorm, wgpu::TextureFormat::Rgba16Unorm)?;
+                self.pass("fs_to_v216", &wv, n, p, &t);
             }
             f => return err(format!("output_pass: unsupported format '{}'", cf::fourcc_str(f))),
         }

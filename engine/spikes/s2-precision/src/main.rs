@@ -47,6 +47,9 @@ fn run(exp: &str, work: &std::path::Path) -> cf::Result<()> {
     if all || exp == "precision" {
         emit(work, "precision", &exp_precision::run(gpu.as_ref().unwrap())?)?;
     }
+    if all || exp == "generation" {
+        emit(work, "generation", &exp_generation::run(gpu.as_ref().unwrap(), &m)?)?;
+    }
     if all || exp == "math" {
         emit(work, "math", &exp_math::run(gpu.as_ref().unwrap())?)?;
     }

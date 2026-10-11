@@ -213,3 +213,32 @@ pub fn export_session(src: &Path, dst: &Path, preset: &NSString, file_type: &AVF
     }
     Ok(())
 }
+
+/// Facts about the first video track of a file.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TrackInfo {
+    pub codec: String,
+    pub estimated_data_rate_bps: f64,
+    pub width: f64,
+    pub height: f64,
+    /// Format description extensions (color tags, depth, field info, and so on).
+    pub extensions: Vec<(String, String)>,
+}
+
+#[allow(deprecated)]
+pub fn track_info(path: &Path) -> Result<TrackInfo> {
+    let (_asset, track) = video_track(path)?;
+    let fds = unsafe { track.formatDescriptions() };
+    let first = fds.firstObject().ok_or_else(|| cf::Error("no format description".into()))?;
+    let fd: &CMFormatDescription = unsafe { &*(Retained::as_ptr(&first) as *const CMFormatDescription) };
+    let codec = cf::fourcc_str(unsafe { fd.media_sub_type() });
+    let extensions = unsafe { fd.extensions() }.map(|d| crate::pixbuf::dict_pairs(&d)).unwrap_or_default();
+    let size = unsafe { track.naturalSize() };
+    Ok(TrackInfo {
+        codec,
+        estimated_data_rate_bps: unsafe { track.estimatedDataRate() } as f64,
+        width: size.width,
+        height: size.height,
+        extensions,
+    })
+}

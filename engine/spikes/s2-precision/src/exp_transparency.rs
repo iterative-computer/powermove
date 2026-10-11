@@ -101,6 +101,29 @@ pub fn compare_x422(reference: &PixelBuffer, out: &PixelBuffer, acc: &mut [Chann
     Ok(())
 }
 
+/// 'v216' (Cb, Y′0, Cr, Y′1): differences in 16-bit units and at 10-bit (codec depth).
+pub fn compare_v216(reference: &PixelBuffer, out: &PixelBuffer, acc: &mut [ChannelStats; 4], outside: &mut u64, vs_clipped: &mut u64) -> Result<()> {
+    let (a, _, _) = reference.read_u16(None)?;
+    let (b, _, _) = out.read_u16(None)?;
+    for (i, (&x, &y)) in a.iter().zip(&b).enumerate() {
+        let ch = match i % 4 {
+            1 | 3 => 0,
+            0 => 1,
+            _ => 2,
+        };
+        let (x, y) = (x as i64, y as i64);
+        if !(256..=65216).contains(&x) {
+            *outside += 1;
+        }
+        if x.clamp(256, 65216) != y {
+            *vs_clipped += 1;
+        }
+        acc[ch].at16.add(x, y);
+        acc[ch].at_codec_depth.add(((x + 32) >> 6).min(1023), ((y + 32) >> 6).min(1023));
+    }
+    Ok(())
+}
+
 fn new_acc() -> [ChannelStats; 4] {
     ["Y", "Cb", "Cr", "A"].map(|c| ChannelStats { channel: c.into(), at16: DiffStats::default(), at_codec_depth: DiffStats::default() })
 }
@@ -125,6 +148,7 @@ pub fn run(gpu: &Gpu, m: &Material) -> Result<Vec<Case>> {
         ("ProRes 4444 XQ (opaque) → y416", &m.prores4444xq, pixbuf::Y416),
         ("ProRes 4444 XQ (alpha ramp) → y416", &m.prores4444xq_alpha, pixbuf::Y416),
         ("ProRes 422 HQ → x422", &m.prores422hq, pixbuf::X422),
+        ("ProRes 422 HQ → v216", &m.prores422hq, pixbuf::V216),
     ] {
         let dec = vt::decode_file(path, fmt)?;
         for (cname, p) in configs() {
@@ -136,11 +160,19 @@ pub fn run(gpu: &Gpu, m: &Material) -> Result<Vec<Case>> {
             for (i, f) in dec.frames.iter().enumerate() {
                 let out = gpu.engine_copy(&f.buffer, &p)?;
                 if i == 0 && cname == "f32 standard, clip" {
-                    let stem = if fmt == pixbuf::Y416 && name.contains("alpha") { "sink_4444xq_alpha" } else if fmt == pixbuf::Y416 { "sink_4444xq" } else { "sink_422hq" };
+                    let stem = if fmt == pixbuf::Y416 && name.contains("alpha") {
+                        "sink_4444xq_alpha"
+                    } else if fmt == pixbuf::Y416 {
+                        "sink_4444xq"
+                    } else {
+                        "sink_422hq"
+                    };
                     raw = Some(raw_sink(&out, &m.dir.join("../sinks"), stem)?);
                 }
                 if fmt == pixbuf::Y416 {
                     compare_y416(&f.buffer, &out, &mut acc, &mut az, &mut outside, &mut vs_clipped)?;
+                } else if fmt == pixbuf::V216 {
+                    compare_v216(&f.buffer, &out, &mut acc, &mut outside, &mut vs_clipped)?;
                 } else {
                     compare_x422(&f.buffer, &out, &mut acc, &mut outside, &mut vs_clipped)?;
                 }
