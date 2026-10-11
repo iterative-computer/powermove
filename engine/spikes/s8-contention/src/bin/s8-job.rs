@@ -17,8 +17,12 @@
 //!
 //! Optional VideoToolbox sessions (`vt-sessions`, `vt-codec`) run concurrently in this
 //! process, standing in for the export encoder.
+//!
+//! Optional Blender EEVEE worker (`--blender PATH`): this process also stands in for
+//! main's Blender supervision and applies `--blender-policy` from the same deadline
+//! signals (see `s8_contention::blender`).
 
-use s8_contention::{Args, clock, gpu, signal, stats, sys, vt};
+use s8_contention::{Args, blender, clock, gpu, signal, stats, sys, vt};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -155,6 +159,8 @@ struct Ctl {
     sig: Signals,
     reaction: Vec<f64>,
     playback: bool,
+    /// Host time playback last started.
+    playback_since: u64,
     yield_until: u64,
     yields: u64,
     /// Tick of the most recent frame A reported done, and the frame period inferred from
@@ -168,7 +174,9 @@ struct Ctl {
 }
 
 impl Ctl {
-    fn drain(&mut self, rx: &mut Option<signal::Receiver>, yield_on: YieldOn, sliced: bool, yield_ns: u64) {
+    /// Drain signals that are due. `react`: whether misses open a yield window (sliced
+    /// GPU work, or a Blender `yield` policy).
+    fn drain(&mut self, rx: &mut Option<signal::Receiver>, yield_on: YieldOn, react: bool, yield_ns: u64) {
         let Some(r) = rx.as_mut() else { return };
         let now = clock::now_ns();
         self.held.extend(r.drain());
@@ -185,6 +193,7 @@ impl Ctl {
                 signal::Kind::PlaybackStart => {
                     self.sig.playback_start += 1;
                     self.playback = true;
+                    self.playback_since = m.sent_ns;
                     false
                 }
                 signal::Kind::PlaybackStop => {
@@ -219,7 +228,7 @@ impl Ctl {
                     matches!(yield_on, YieldOn::Miss | YieldOn::Risk)
                 }
             };
-            if trigger && sliced {
+            if trigger && react {
                 if self.yield_until <= now {
                     self.yields += 1;
                 }
@@ -280,6 +289,7 @@ struct Summary {
     calibration_ms_per_full_pass: Vec<(String, f64)>,
     signals: Signals,
     vt: Vec<vt::SessionStats>,
+    blender: Option<blender::Stats>,
 }
 
 fn main() {
@@ -319,6 +329,27 @@ fn main() {
     let vt_sessions: usize = args.num("vt-sessions", 0);
     let vt_codec = vt::Codec::parse(&args.string_or("vt-codec", "hevc10")).expect("vt-codec");
     let vt_fps: f64 = args.num("vt-fps", 0.0);
+    let blender_cfg = args.str("blender").map(|exe| blender::Config {
+        executable: exe.to_string(),
+        script: args.string_or(
+            "blender-script",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/blender/eevee_load.py"),
+        ),
+        out_dir: args.string_or(
+            "blender-out",
+            std::env::temp_dir()
+                .join(format!("s8-blender-{}", std::process::id()))
+                .to_str()
+                .unwrap(),
+        ),
+        width: args.num("blender-width", W),
+        height: args.num("blender-height", H),
+        samples: args.num("blender-samples", 16),
+        policy: blender::Policy::parse(&args.string_or("blender-policy", "run")).expect("blender-policy"),
+        run_ms: args.num("blender-run-ms", 10.0),
+        stop_ms: args.num("blender-stop-ms", 40.0),
+    });
+    let react = mode == Mode::Sliced || blender_cfg.as_ref().is_some_and(|c| c.policy == blender::Policy::Yield);
 
     if darwin_bg {
         sys::set_process_darwin_bg().expect("darwin bg");
@@ -597,6 +628,11 @@ fn main() {
     }
     let first_run_entry = entry;
 
+    // Blender starts after calibration so it does not perturb the cost model; READY is
+    // sent once it has finished two frames (shader compilation done).
+    let out_dir = blender_cfg.as_ref().map(|c| c.out_dir.clone());
+    let mut blender = blender_cfg.map(|c| blender::Blender::launch(c, 2, 120.0).expect("launch Blender"));
+
     eprintln!("S8READY");
     let start = clock::now_ns();
     let deadline_end = start + (seconds_limit * 1e9) as u64;
@@ -623,7 +659,8 @@ fn main() {
             if sys::stop_requested() || clock::now_ns() >= deadline_end {
                 break;
             }
-            ctl.drain(&mut rx, yield_on, mode == Mode::Sliced, yield_ns);
+            ctl.drain(&mut rx, yield_on, react, yield_ns);
+            supervise(&mut blender, &ctl);
             if pause_on_playback && ctl.playback {
                 let t = clock::now_ns();
                 clock::sleep_ns(1_000_000);
@@ -716,7 +753,8 @@ fn main() {
                 retired_since_flush += 1;
             }
             // A signal may have arrived while waiting: honour it before submitting.
-            ctl.drain(&mut rx, yield_on, mode == Mode::Sliced, yield_ns);
+            ctl.drain(&mut rx, yield_on, react, yield_ns);
+            supervise(&mut blender, &ctl);
             if (mode == Mode::Sliced && clock::now_ns() < ctl.yield_until) || (pause_on_playback && ctl.playback) {
                 continue;
             }
@@ -729,6 +767,7 @@ fn main() {
                 while !ctl.align_ok(clock::now_ns(), est, guard_ns) {
                     clock::sleep_ns(100_000);
                     ctl.drain(&mut rx, yield_on, true, yield_ns);
+                    supervise(&mut blender, &ctl);
                     if clock::now_ns() < ctl.yield_until || sys::stop_requested() {
                         yielded = true;
                         break;
@@ -777,7 +816,9 @@ fn main() {
         }
     } else {
         while !sys::stop_requested() && clock::now_ns() < deadline_end {
-            clock::sleep_ns(10_000_000);
+            ctl.drain(&mut rx, yield_on, react, yield_ns);
+            supervise(&mut blender, &ctl);
+            clock::sleep_ns(1_000_000);
         }
     }
     let end_ns = clock::now_ns();
@@ -810,6 +851,10 @@ fn main() {
     let secs = (clock::now_ns() - start) as f64 / 1e9;
     vt_stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let vt_stats = vt_handle.map(|h| h.join().unwrap()).unwrap_or_default();
+    let blender_stats = blender.take().map(|b| b.finish());
+    if let Some(d) = out_dir {
+        let _ = std::fs::remove_dir_all(d);
+    }
     ctl.sig.reaction_ms = stats::dist(&ctl.reaction).rounded(3);
 
     let summary = Summary {
@@ -854,6 +899,19 @@ fn main() {
         align_guard_ms,
         align_wait_total_ms: stats::r(align_wait_total as f64 / 1e6, 1),
         vt: vt_stats,
+        blender: blender_stats,
     };
     println!("S8RESULT {}", serde_json::to_string(&summary).unwrap());
+}
+
+/// Apply the Blender policy for the current signal state.
+fn supervise(blender: &mut Option<blender::Blender>, ctl: &Ctl) {
+    if let Some(b) = blender.as_mut() {
+        let now = clock::now_ns();
+        b.apply(
+            ctl.playback,
+            now < ctl.yield_until,
+            now.saturating_sub(ctl.playback_since),
+        );
+    }
 }

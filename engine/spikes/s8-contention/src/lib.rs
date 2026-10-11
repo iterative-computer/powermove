@@ -11,6 +11,7 @@
 //!   deadline signals straight into a FIFO that B reads, standing in for main's relay),
 //!   collects the JSON summaries.
 
+pub mod blender;
 pub mod clock;
 pub mod display;
 pub mod gpu;
