@@ -1,0 +1,37 @@
+# Spike S6 (plan section 26): decode into wgpu without copies, exact random access.
+# Its own workspace so the spike never touches the engine workspace's lockfile.
+[workspace]
+
+[package]
+name = "s6-decode"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+ffmpeg-sys-the-third = { version = "=5.0.0", default-features = false, features = ["avcodec", "avformat"] }
+wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
+wgpu-hal = { version = "30", features = ["metal"] }
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-metal = { version = "0.3", features = ["objc2-io-surface"] }
+objc2-core-foundation = "0.3"
+objc2-core-video = "0.3"
+objc2-core-media = "0.3"
+objc2-video-toolbox = "0.3"
+md-5 = "0.10"
+pollster = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+libc = "0.2"
+
+[profile.release]
+debug = "line-tables-only"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
