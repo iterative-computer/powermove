@@ -12,3 +12,7 @@ serde_json.workspace = true
 libm.workspace = true
 memchr.workspace = true
 rustc-hash.workspace = true
+
+[features]
+# Negative control for the bit-identity check: platform math instead of libm.
+system-math = []

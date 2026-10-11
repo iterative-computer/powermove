@@ -37,7 +37,16 @@ struct Handle {
 
 enum Field {
     Layers,
+    /// Validated JSON kept as bytes until a patch reaches below it. Fields
+    /// the evaluator never reads (the edit log, assets) stay opaque.
+    Raw(Vec<u8>),
     Value(Value),
+}
+
+/// Validate JSON without building it.
+fn validated(json: &[u8]) -> Result<Vec<u8>> {
+    serde_json::from_slice::<serde::de::IgnoredAny>(json).map_err(json_err)?;
+    Ok(json.to_vec())
 }
 
 /// Counters for the last `apply`/`load` call.
@@ -171,8 +180,7 @@ impl Mirror {
                 layers = Some(raw.get().as_bytes());
                 fields.push((k, Field::Layers));
             } else {
-                let value: Value = serde_json::from_str(raw.get()).map_err(json_err)?;
-                fields.push((k, Field::Value(value)));
+                fields.push((k, Field::Raw(raw.get().as_bytes().to_vec())));
             }
         }
         self.fields = fields;
@@ -356,9 +364,9 @@ impl Mirror {
         let sx = d.ev("scale.x", t) / 100.0;
         let sy = d.ev("scale.y", t) / 100.0;
         let r = d.ev("rotation", t) * std::f64::consts::PI / 180.0;
-        let sk = libm::tan(d.ev("skew", t) * std::f64::consts::PI / 180.0);
-        let c = libm::cos(r);
-        let s = libm::sin(r);
+        let sk = crate::math::tan(d.ev("skew", t) * std::f64::consts::PI / 180.0);
+        let c = crate::math::cos(r);
+        let s = crate::math::sin(r);
         let a = c * sx;
         let b = s * sx;
         let cc = (c * sk - s) * sy;
@@ -821,14 +829,10 @@ impl Mirror {
         if rest.is_empty() {
             match (value, position) {
                 (Some(json), Some(p)) => {
-                    self.fields[p].1 =
-                        Field::Value(serde_json::from_slice(json).map_err(json_err)?);
+                    self.fields[p].1 = Field::Raw(validated(json)?);
                 }
                 (Some(json), None) => {
-                    self.fields.push((
-                        key.into(),
-                        Field::Value(serde_json::from_slice(json).map_err(json_err)?),
-                    ));
+                    self.fields.push((key.into(), Field::Raw(validated(json)?)));
                 }
                 (None, Some(p)) => {
                     self.fields.remove(p);
@@ -838,8 +842,12 @@ impl Mirror {
             return Ok(());
         }
         let Some(p) = position else { return Ok(()) };
+        if let Field::Raw(bytes) = &self.fields[p].1 {
+            let value: Value = serde_json::from_slice(bytes).map_err(json_err)?;
+            self.fields[p].1 = Field::Value(value);
+        }
         let Field::Value(root) = &mut self.fields[p].1 else {
-            unreachable!("layers handled above")
+            unreachable!("layers handled above, raw converted")
         };
         match value {
             Some(json) => {
@@ -998,6 +1006,7 @@ impl Mirror {
                     }
                     out.push(b']');
                 }
+                Field::Raw(bytes) => out.extend_from_slice(bytes),
                 Field::Value(v) => serde_json::to_writer(&mut out, v).expect("value serializes"),
             }
         }

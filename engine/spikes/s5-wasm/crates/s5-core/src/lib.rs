@@ -9,6 +9,7 @@
 
 pub mod ease;
 pub mod json_scan;
+pub mod math;
 pub mod mirror;
 pub mod model;
 pub mod patch;

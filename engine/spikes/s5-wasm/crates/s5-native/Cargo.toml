@@ -9,3 +9,6 @@ publish.workspace = true
 [dependencies]
 s5-core.workspace = true
 serde_json.workspace = true
+
+[features]
+system-math = ["s5-core/system-math"]
