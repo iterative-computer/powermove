@@ -68,8 +68,38 @@ function transitionProject(id: string): CorpusProject {
   });
 }
 
+function extensionEffectProjects(): CorpusProject[] {
+  const typewriter = newProject('effects/extension-typewriter', { name: 'Extension effect: Typewriter', backgroundFill: GRADIENT });
+  const card = testCard(typewriter);
+  const title = card[6]!;
+  title.fx.push(typewriter.foreignEffect('typewriter', {
+    progress: typewriter.ch(0, [[0, 0], [2.5, 100]]), cursor: true, blinkRate: 0, gradAngle: typewriter.ch(90, [[0, 90], [2.5, 270]]),
+  }));
+  const second = typewriter.add(typewriter.layer('text', {
+    name: 'Second typed line', d: { text: 'typed by an extension', size: 30, weight: 500, color: '#E8E2CF', align: 'left' },
+    p: { 'position.x': 30, 'position.y': 24 },
+  }));
+  second.fx.push(typewriter.foreignEffect('typewriter', { progress: 60, cursor: false }), typewriter.effect('glow', { radius: 40, intensity: 120 }));
+  const missing = newProject('effects/missing-definition', { name: 'Missing effect definition', backgroundFill: GRADIENT });
+  const [art, , , , , , label] = testCard(missing);
+  art!.fx.push(missing.foreignEffect('com.example.missing-word-swap', { progress: missing.ch(0, [[0, 0], [2, 100]]), tint: '#FF6B1A' }));
+  label!.fx.push(missing.effect('blur', { amount: 6 }), missing.foreignEffect('com.example.missing-wobble', { amount: 4 }, missing.ch(true, [[0, true], [1, false]])));
+  return [
+    project(typewriter, {
+      group: 'Effects and transitions', title: 'Extension effect (Typewriter fixture extension)',
+      covers: ['extension effects', 'extension raster hooks', 'extension effect stacked with a built-in'], samples: [0, .8, 1.6, 2.5],
+      extensions: ['typewriter-effect'], alpha: true,
+    }),
+    project(missing, {
+      group: 'Effects and transitions', title: 'Missing effect definitions',
+      covers: ['missing definition behavior', 'animated parameters kept on a missing effect', 'animatable enable on a missing effect'], samples: [0, 1.5],
+      notes: 'core/validate sanitizeProject drops non-built-in effects; the app loader keeps them as missing (pass-through).',
+    }),
+  ];
+}
+
 export function effectProjects(): CorpusProject[] {
   if (effects.length !== 16) throw new Error(`Expected 16 built-in effects, found ${effects.length}`);
   if (transitions.length !== 4) throw new Error(`Expected 4 built-in transitions, found ${transitions.length}`);
-  return [...effects.map(effect => effectProject(effect.id)), ...transitions.map(transition => transitionProject(transition.id))];
+  return [...effects.map(effect => effectProject(effect.id)), ...transitions.map(transition => transitionProject(transition.id)), ...extensionEffectProjects()];
 }

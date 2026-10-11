@@ -71,7 +71,7 @@ export const scene3d = {
 export const captionModel = {
   presetStyle: captions.presetStyle as (preset: string, height: number) => Record<string, unknown>,
   normalizeCaptionsContent: captions.normalizeCaptionsContent as (raw: unknown) => any,
-  presets: Object.keys(captions.CAPTION_PRESETS) as string[],
+  presets: (captions.CAPTION_PRESETS as Array<{ id: string }>).map(preset => preset.id),
 };
 
 export const sanitizeProject: (raw: unknown) => any = validator.sanitizeProject;
@@ -123,6 +123,24 @@ export function shaderPresets(): Record<string, string> {
   if (Object.keys(out).length !== 5) throw new Error(`Expected 5 shader presets, found ${Object.keys(out).length}`);
   return out;
 }
+
+/**
+ * Extension effects from e2e fixture extensions (apps/desktop/e2e/fixtures/<extension>).
+ * The capture installs the extension into the isolated profile before launch and
+ * checks these parameter keys against the definition the running app registered.
+ */
+export const EXTENSION_EFFECTS: Record<string, { extension: string; params: string[] }> = {
+  typewriter: {
+    extension: 'typewriter-effect',
+    params: ['progress', 'cursor', 'cursorWidth', 'cursorHeight', 'cursorOffsetX', 'cursorOffsetY', 'cursorRound', 'blinkRate',
+      'gradStart', 'gradMid', 'gradEnd', 'gradMidPos', 'gradAngle', 'gradOffset', 'gradCycle'],
+  },
+};
+
+/** Effect types no extension defines, for the missing-definition behavior. */
+export const MISSING_EFFECT_PREFIX = 'com.example.missing-';
+
+export const isForeignEffect = (type: string): boolean => type in EXTENSION_EFFECTS || type.startsWith(MISSING_EFFECT_PREFIX);
 
 export function effectDef(id: string): EffectDef {
   const definition = effects.find(effect => effect.id === id);

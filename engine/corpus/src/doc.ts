@@ -4,7 +4,7 @@
  * `PM.mkLayer` produces (`legacy/core/model.ts`), so generated documents look
  * like ones the app writes and are byte-stable across runs.
  */
-import { animatorPresets, captionModel, effectDef, makeAnimator, scene3d, transitionDef, typeMeta } from './catalog';
+import { animatorPresets, captionModel, effectDef, EXTENSION_EFFECTS, isForeignEffect, makeAnimator, scene3d, transitionDef, typeMeta } from './catalog';
 
 export type Value = number | string | boolean;
 export interface Key { t: number; v: Value; i: string; [field: string]: unknown }
@@ -145,6 +145,18 @@ export class Builder {
     for (const param of definition.params) p[param.k] = this.ch(param.def as Value);
     for (const [key, value] of Object.entries(values)) {
       if (!p[key]) throw new Error(`Effect ${type} has no parameter ${key}`);
+      p[key] = typeof value === 'object' ? value : this.ch(value);
+    }
+    return { id: this.id('f'), type, on, p };
+  }
+
+  /** An effect the built-in catalog does not define: an extension effect or a deliberately missing one. */
+  foreignEffect(type: string, values: Record<string, Value | Channel>, on: boolean | Channel = true): Doc {
+    if (!isForeignEffect(type)) throw new Error(`${type} is not a declared extension or missing effect`);
+    const allowed = EXTENSION_EFFECTS[type]?.params;
+    const p: Record<string, Channel> = {};
+    for (const [key, value] of Object.entries(values)) {
+      if (allowed && !allowed.includes(key)) throw new Error(`Extension effect ${type} has no parameter ${key}`);
       p[key] = typeof value === 'object' ? value : this.ch(value);
     }
     return { id: this.id('f'), type, on, p };

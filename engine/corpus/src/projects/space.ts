@@ -54,7 +54,7 @@ function primitives(): CorpusProject {
 function latheExtrude(): CorpusProject {
   const b = newProject('3d/lathe-extrude', { name: 'Lathe and extrude', backgroundFill: BLACK });
   b.add(b.object3d({ source: { lathe: [[0, -1], [.5, -1], [.65, -.6], [.35, .1], [.42, .7], [.25, 1]], segments: 40 }, material: material('#7DD3FC', { metalness: .6, roughness: .25 }) }, { name: 'Lathe vase', position: [-1.4, 0, 0] }));
-  const star = Array.from({ length: 10 }, (_, i) => { const r = i % 2 ? .35 : .8, a = i * Math.PI / 5 + Math.PI / 2; return [Math.round(Math.cos(a) * r * 1e4) / 1e4, Math.round(Math.sin(a) * r * 1e4) / 1e4]; });
+  const star = Array.from({ length: 10 }, (_, i) => { const r = i % 2 ? .35 : .8, a = i * Math.PI / 5 + Math.PI / 2; return [Math.round(Math.cos(a) * r * 1e4) / 1e4 || 0, Math.round(Math.sin(a) * r * 1e4) / 1e4 || 0]; });
   b.add(b.object3d({ source: { extrude: star, depth: .4, bevel: .06 }, material: material('#F2C14E', { metalness: .9, roughness: .3 }) }, { name: 'Extruded star (bevel)', position: [1.4, 0, 0], p: { 'rotation.y': b.ch(-30, [[0, -30], [3, 60]]) } }));
   b.add(b.object3d({ source: { extrude: [[-.5, -.3], [.5, -.3], [.5, .3], [-.5, .3]], depth: .2 }, material: material('#FB7185') }, { name: 'Extruded slab', position: [0, -1.3, 0] }));
   b.add(b.light3d({ type: 'point', p: { intensity: 30, color: '#FFFFFF', distance: 0, decay: 2 } }, { position: [0, 2.5, 3] }));

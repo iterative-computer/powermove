@@ -17,6 +17,8 @@ export interface CorpusProject {
   /** Capture size when it should differ from the composition size. */
   size?: [number, number];
   notes?: string;
+  /** e2e fixture extensions (apps/desktop/e2e/fixtures/<name>) installed in the capture profile. */
+  extensions?: string[];
 }
 
 export function project(b: Builder, fields: Omit<CorpusProject, 'id' | 'doc'>): CorpusProject {

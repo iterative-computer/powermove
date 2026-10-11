@@ -9,11 +9,11 @@
  * self-contained: they are sent as source text and run in the renderer.
  */
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { cp, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { Subprocess } from 'bun';
-import { desktopRoot } from './catalog';
+import { desktopRoot, fixturesDir } from './catalog';
 
 export const mainEntry = path.join(desktopRoot, 'out/main/index.js');
 const bridgeEntry = path.join(import.meta.dir, 'electron-bridge.mts');
@@ -77,9 +77,20 @@ class Bridge {
   }
 }
 
-export async function launchLegacyApp(): Promise<LegacyApp> {
+export interface LaunchOptions {
+  /** e2e fixture extensions to install into the profile before launch (as typewriter-raster.spec.ts does). */
+  extensions?: string[];
+}
+
+export async function launchLegacyApp(options: LaunchOptions = {}): Promise<LegacyApp> {
   if (!existsSync(mainEntry)) throw new Error(`The legacy app is not built (${mainEntry} is missing). Run: bun run --cwd apps/desktop build`);
   const userData = await mkdtemp(path.join(os.tmpdir(), 'powermove-corpus-'));
+  const extensions = options.extensions ?? [];
+  for (const name of extensions) {
+    const source = path.join(fixturesDir, name);
+    if (!existsSync(path.join(source, 'manifest.json'))) throw new Error(`No fixture extension ${name} in ${fixturesDir}`);
+    await cp(source, path.join(userData, 'extensions', name), { recursive: true });
+  }
   const pageErrors: string[] = [], consoleErrors: string[] = [];
   const bridge = new Bridge((event, text) => (event === 'pageerror' ? pageErrors : consoleErrors).push(text));
   const env: Record<string, string> = {
@@ -120,6 +131,7 @@ export async function launchLegacyApp(): Promise<LegacyApp> {
     });
     await legacy.waitFor(() => !(window as any).PM.ProjectsScreen.isOpen);
     await legacy.waitFor(() => Boolean((window as any).PM.GL?.gl && (window as any).PM.Kernel.services.get('viewer')?.stage?.isConnected), undefined, 60_000);
+    if (extensions.length) await legacy.waitFor((ids: string[]) => ids.every(id => (window as any).PM.Kernel.loader.activeIds().includes(id)), extensions, 60_000);
   } catch (error) {
     await legacy.close();
     throw error;

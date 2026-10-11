@@ -5,8 +5,14 @@
  * survives unchanged. Additions (defaults the sanitizer fills in) are allowed;
  * drops and rewrites are errors. 3D layer content must also be a fixed point of
  * the scene schema the app parses it with.
+ *
+ * One deliberate exception: `sanitizeProject` keeps only the 16 built-in effect
+ * types, while the app's loader (legacy/app.ts) keeps extension effects and marks
+ * unregistered ones `missing`. Declared extension and missing effects
+ * (catalog.ts) are taken out before the sanitizer comparison and checked on
+ * their own; the capture records how the running app loaded them.
  */
-import { effects, sanitizeProject, scene3d, transitions } from './catalog';
+import { effects, EXTENSION_EFFECTS, isForeignEffect, sanitizeProject, scene3d, transitions } from './catalog';
 import type { Doc } from './doc';
 
 export interface Issue { path: string; message: string }
@@ -65,10 +71,21 @@ export function validateDocument(doc: Doc): Issue[] {
   const issues: Issue[] = [];
   const serialized = JSON.stringify(doc);
   if (!deepEqual(JSON.parse(serialized), doc)) issues.push({ path: '', message: 'document does not survive a JSON round trip (NaN, Infinity, or undefined values)' });
+  // -0 serializes as 0, so the in-memory document and the file would disagree.
+  const negativeZero = (value: unknown, path: string): void => {
+    if (Object.is(value, -0)) issues.push({ path, message: '-0 does not survive serialization' });
+    else if (Array.isArray(value)) value.forEach((item, index) => negativeZero(item, `${path}[${index}]`));
+    else if (isRecord(value)) for (const [key, item] of Object.entries(value)) negativeZero(item, `${path}.${key}`);
+  };
+  negativeZero(doc, 'doc');
+  const comparable = JSON.parse(serialized);
+  for (const [, comp] of compositions(comparable)) for (const layer of comp.layers as Doc[]) {
+    if (Array.isArray(layer.fx)) layer.fx = layer.fx.filter((fx: Doc) => !isForeignEffect(fx.type));
+  }
   let sanitized: Doc;
-  try { sanitized = sanitizeProject(JSON.parse(serialized)); }
+  try { sanitized = sanitizeProject(structuredClone(comparable)); }
   catch (error) { return [...issues, { path: '', message: `sanitizeProject threw: ${(error as Error).message}` }]; }
-  compareSubset(JSON.parse(serialized), sanitized, 'doc', issues);
+  compareSubset(comparable, sanitized, 'doc', issues);
 
   const effectIds = new Map(effects.map(effect => [effect.id, new Set(effect.params.map(param => param.k))]));
   const transitionIds = new Map(transitions.map(transition => [transition.id, new Set(transition.params.map(param => param.k))]));
@@ -94,6 +111,15 @@ export function validateDocument(doc: Doc): Issue[] {
       if (ids.has(layer.id)) issues.push({ path: at, message: `duplicate layer id ${layer.id}` });
       ids.add(layer.id);
       for (const fx of layer.fx ?? []) {
+        if (isForeignEffect(fx.type)) {
+          const allowed = EXTENSION_EFFECTS[fx.type]?.params;
+          if (typeof fx.id !== 'string' || !fx.id) issues.push({ path: at, message: `effect ${fx.type} has no id` });
+          for (const [key, value] of Object.entries<any>(fx.p ?? {})) {
+            if (allowed && !allowed.includes(key)) issues.push({ path: at, message: `extension effect ${fx.type} has no parameter ${key}` });
+            if (!value || typeof value !== 'object' || !Array.isArray(value.kf) || !('v' in value)) issues.push({ path: at, message: `effect ${fx.type} parameter ${key} is not a channel` });
+          }
+          continue;
+        }
         const params = effectIds.get(fx.type);
         if (!params) { issues.push({ path: at, message: `unknown effect ${fx.type}` }); continue; }
         for (const key of Object.keys(fx.p)) if (!params.has(key)) issues.push({ path: at, message: `effect ${fx.type} has no parameter ${key}` });

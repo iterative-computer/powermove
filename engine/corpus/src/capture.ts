@@ -14,7 +14,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSyn
 import os from 'node:os';
 import path from 'node:path';
 import { launchLegacyApp, type LegacyApp } from './app';
-import { desktopRoot, repoRoot, shaderPresets } from './catalog';
+import { desktopRoot, EXTENSION_EFFECTS, repoRoot, shaderPresets } from './catalog';
 import { generateCorpus, stableJson, type GeneratedProject } from './generate';
 import { MISSING_MEDIA, resolveMedia, type MediaSource } from './media';
 import { sha256, timeLabel, writeFile, writeFloat, writePng, straightTopDown, type FileRecord } from './output';
@@ -33,13 +33,13 @@ interface Options {
 interface SampleRecord {
   time: number; width: number; height: number;
   png?: FileRecord; alphaPng?: FileRecord; float?: { data: FileRecord; header: FileRecord }; eval?: FileRecord;
-  glErrors: string[]; warnings: string[]; error?: string; ms: number;
+  glErrors: string[]; warnings: string[]; prepareError?: string; error?: string; ms: number;
 }
 
 interface ProjectRecord {
   id: string; group?: string; title?: string; covers?: string[]; source: 'synthetic' | 'real';
   document?: FileRecord; loaded?: FileRecord; media: Record<string, { assetId: string; kind: string; source?: MediaSource; error?: string }>;
-  hydrateIssues: Issue[]; keyIdRewrites: string[]; missingDefinitions: string[]; mediaPending: string[]; settle?: { stable: boolean; renders: number };
+  hydrateIssues: Issue[]; keyIdRewrites: string[]; extensionChecks: Array<{ extension: string; effect: string; registered: boolean; paramsMatch: boolean }>; extensions?: string[]; missingDefinitions: string[]; mediaPending: string[]; settle?: { stable: boolean; renders: number; prepareError?: string };
   samples: SampleRecord[]; pageErrors: string[]; error?: string; ms: number;
 }
 
@@ -94,20 +94,26 @@ const decode = (base64: string) => new Uint8Array(Buffer.from(base64, 'base64'))
 class Session {
   legacy!: LegacyApp;
   opened = 0;
+  extensions: string[] = [];
   constructor(readonly options: Options) {}
 
-  async start(): Promise<void> {
-    this.legacy = await launchLegacyApp();
+  async start(extensions: string[] = []): Promise<void> {
+    this.extensions = [...extensions].sort();
+    this.legacy = await launchLegacyApp({ extensions: this.extensions });
     await this.legacy.evaluate(installCorpusPage);
     this.opened = 0;
   }
 
-  async restartIfDue(): Promise<void> {
-    if (this.opened < this.options.restartEvery) return;
+  async restart(extensions = this.extensions): Promise<void> {
     await this.legacy.close();
-    await this.start();
+    await this.start(extensions);
   }
 
+  /** Restart every `restartEvery` projects, and whenever a project needs a different set of fixture extensions. */
+  async prepareFor(extensions: string[] = []): Promise<void> {
+    const wanted = [...extensions].sort();
+    if (wanted.join('\n') !== this.extensions.join('\n') || this.opened >= this.options.restartEvery) await this.restart(wanted);
+  }
 }
 
 async function captureSamples(session: Session, out: string, dir: string, samples: number[], size: [number, number], alpha: boolean, evaluate: boolean, record: ProjectRecord, label: string): Promise<void> {
@@ -129,6 +135,7 @@ async function captureSamples(session: Session, out: string, dir: string, sample
       }
       if (result.evaluated) sample.eval = writeFile(out, `${dir}/eval/${name}.json`, JSON.stringify(result.evaluated) + '\n');
       sample.glErrors = result.glErrors; sample.warnings = result.warnings;
+      if (result.prepareError) sample.prepareError = result.prepareError;
     } catch (error) {
       sample.error = (error as Error).message.split('\n')[0]!;
     }
@@ -153,7 +160,7 @@ async function captureSynthetic(session: Session, out: string, project: CorpusPr
   const dir = `projects/${project.id}`;
   const record: ProjectRecord = {
     id: project.id, group: project.group, title: project.title, covers: project.covers, source: 'synthetic',
-    media: {}, hydrateIssues: [], keyIdRewrites: [], missingDefinitions: [], mediaPending: [], samples: [], pageErrors: [], ms: 0,
+    media: {}, hydrateIssues: [], keyIdRewrites: [], extensionChecks: [], extensions: project.extensions ?? [], missingDefinitions: [], mediaPending: [], samples: [], pageErrors: [], ms: 0,
   };
   const errorsBefore = session.legacy.pageErrors.length;
   try {
@@ -161,7 +168,7 @@ async function captureSynthetic(session: Session, out: string, project: CorpusPr
     const opened = await session.legacy.evaluate(doc => (window as any).__corpus.open(doc), project.doc);
     session.opened++;
     const issues: Issue[] = [];
-    compareSubset(project.doc, opened.hydrated, 'doc', issues);
+    compareSubset(JSON.parse(stableJson(project.doc)), opened.hydrated, 'doc', issues);
     // The app's loader reassigns some keyframe ids on every open (effect parameters pass
     // through two id-deduplicating sanitizers in legacy/app.ts); those are recorded apart
     // from value rewrites. loaded.json holds the ids the app settled on.
@@ -169,6 +176,14 @@ async function captureSynthetic(session: Session, out: string, project: CorpusPr
     record.keyIdRewrites = issues.filter(issue => keyId.test(issue.path)).map(issue => issue.path);
     record.hydrateIssues = issues.filter(issue => !keyId.test(issue.path));
     record.missingDefinitions = missingDefinitions(project.doc, opened.hydrated);
+    for (const extension of project.extensions ?? []) {
+      for (const [type, definition] of Object.entries(EXTENSION_EFFECTS).filter(([, item]) => item.extension === extension)) {
+        const live: string[] | null = await session.legacy.evaluate((id: string) => (window as any).PM.Kernel.effects.get(id)?.params?.map((param: any) => param.k) ?? null, type);
+        const matches = !!live && live.length === definition.params.length && live.every((key, index) => key === definition.params[index]);
+        record.extensionChecks.push({ extension, effect: type, registered: !!live, paramsMatch: matches });
+        if (!matches) record.hydrateIssues.push({ path: `extension ${extension}`, message: `effect ${type} ${live ? `parameters ${live.join(',')} differ from the corpus list` : 'is not registered'}` });
+      }
+    }
     const names = described.media.filter(name => !`media:${name}`.startsWith(MISSING_MEDIA));
     if (names.length) {
       const sources = names.map(name => resolveMedia(name, generatedDir));
@@ -234,7 +249,7 @@ async function captureReal(session: Session, out: string, file: string, step: nu
   const started = performance.now();
   const slug = path.basename(file, path.extname(file)).toLowerCase().replace(/[^a-z0-9]+/g, '-');
   const dir = `real/${slug}`;
-  const record: ProjectRecord = { id: `real/${slug}`, source: 'real', media: {}, hydrateIssues: [], keyIdRewrites: [], missingDefinitions: [], mediaPending: [], samples: [], pageErrors: [], ms: 0 };
+  const record: ProjectRecord = { id: `real/${slug}`, source: 'real', media: {}, hydrateIssues: [], keyIdRewrites: [], extensionChecks: [], missingDefinitions: [], mediaPending: [], samples: [], pageErrors: [], ms: 0 };
   const errorsBefore = session.legacy.pageErrors.length;
   const originalHash = sha256(readFileSync(file));
   try {
@@ -288,7 +303,14 @@ export async function capture(options: Options): Promise<string> {
   const generatedDir = path.join(out, 'generated');
   const corpus = generateCorpus(generatedDir);
   const described = new Map(corpus.projects.map(item => [item.id, item]));
-  const projects = allProjects().filter(item => !options.only.length || options.only.some(prefix => item.id.startsWith(prefix)));
+  // Projects that install fixture extensions run last, in their own sessions, so extension
+  // hooks (for example a text raster wrapper) never touch the plain projects' frames.
+  const extensionKey = (item: CorpusProject) => [...(item.extensions ?? [])].sort().join(',');
+  const projects = allProjects()
+    .filter(item => !options.only.length || options.only.some(prefix => item.id.startsWith(prefix)))
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => extensionKey(a.item).localeCompare(extensionKey(b.item)) || a.index - b.index)
+    .map(({ item }) => item);
   const build = buildFingerprint();
   const session = new Session(options);
   await session.start();
@@ -303,7 +325,7 @@ export async function capture(options: Options): Promise<string> {
   try {
     if (options.synthetic) {
       for (const [index, project] of projects.entries()) {
-        await session.restartIfDue();
+        await session.prepareFor(project.extensions);
         const record = await captureSynthetic(session, out, project, described.get(project.id)!, generatedDir, options.evaluate);
         records.push(record);
         const failed = record.samples.filter(sample => sample.error).length;
@@ -312,15 +334,15 @@ export async function capture(options: Options): Promise<string> {
     }
     let scenarios: Record<string, unknown> | null = null;
     if (options.scenarios) {
-      try { scenarios = await captureScenarios(session, out); log(`Scenarios: ${Object.keys((scenarios as any).hashes).length} images, flatMatches ${(scenarios as any).flatMatches}`); }
+      // A fresh app, as the spec gets from its fixture before openEditor().
+      try { await session.restart([]); scenarios = await captureScenarios(session, out); log(`Scenarios: ${Object.keys((scenarios as any).hashes).length} images, flatMatches ${(scenarios as any).flatMatches}`); }
       catch (error) { scenarios = { error: (error as Error).message.split('\n')[0] }; log(`Scenarios failed: ${(scenarios as any).error}`); }
     }
     let real: ProjectRecord | null = null;
     if (options.real) {
       if (!existsSync(options.realPath)) log(`Real project ${options.realPath} not found; skipped`);
       else {
-        await session.legacy.close();
-        await session.start();
+        await session.restart([]);
         real = await captureReal(session, out, options.realPath, options.realStep, options.evaluate);
         log(`Real project ${real.title ?? real.id}: ${real.samples.filter(s => !s.error).length}/${real.samples.length} samples${real.error ? `, ERROR ${real.error}` : ''} (${real.ms} ms)`);
       }
@@ -357,8 +379,8 @@ export async function capture(options: Options): Promise<string> {
         id: record.id, source: record.source, group: record.group, title: record.title, covers: record.covers,
         dir: record.source === 'real' ? `real/${record.id.slice(5)}` : `projects/${record.id}`,
         document: record.document, loaded: record.loaded, media: record.media, error: record.error,
-        hydrateIssues: record.hydrateIssues, keyIdRewrites: record.keyIdRewrites.length, missingDefinitions: record.missingDefinitions, mediaPending: record.mediaPending, settle: record.settle,
-        samples: record.samples.map(sample => ({ time: sample.time, width: sample.width, height: sample.height, png: sample.png, alphaPng: sample.alphaPng, float: sample.float, eval: sample.eval, glErrors: sample.glErrors, warnings: sample.warnings, error: sample.error, ms: sample.ms })),
+        extensions: record.extensions, extensionChecks: record.extensionChecks, hydrateIssues: record.hydrateIssues, keyIdRewrites: record.keyIdRewrites.length, missingDefinitions: record.missingDefinitions, mediaPending: record.mediaPending, settle: record.settle,
+        samples: record.samples.map(sample => ({ time: sample.time, width: sample.width, height: sample.height, png: sample.png, alphaPng: sample.alphaPng, float: sample.float, eval: sample.eval, glErrors: sample.glErrors, warnings: sample.warnings, prepareError: sample.prepareError, error: sample.error, ms: sample.ms })),
         pageErrors: record.pageErrors.length,
       })),
       scenarios,

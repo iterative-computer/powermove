@@ -202,25 +202,37 @@ export function installCorpusPage(): void {
       return last;
     },
 
-    /** Render a small frame until three consecutive renders agree (async shader compiles, model loads, fonts). */
-    async settle(time: number, timeoutMs = 15000): Promise<{ stable: boolean; renders: number }> {
+    /**
+     * Render a small frame until three consecutive renders agree (async shader compiles,
+     * model loads, fonts). Export.busy is held as the exporter holds it, so the viewer's
+     * paused-preview video sync cannot seek shared media elements under prepareFrame.
+     */
+    async settle(time: number, timeoutMs = 15000): Promise<{ stable: boolean; renders: number; prepareError?: string }> {
       const deadline = performance.now() + timeoutMs;
       const w = Math.max(2, Math.round(PM.proj.w / 4)), h = Math.max(2, Math.round(PM.proj.h / 4));
-      let previous = '', streak = 0, renders = 0;
-      while (performance.now() < deadline) {
-        await PM.prepareFrame(time);
-        const pixels = PM.GL.renderToPixels(time, w, h, { opaque: true, mblur: false });
+      let previous = '', streak = 0, renders = 0, prepareError: string | undefined;
+      PM.pause();
+      PM.Export.busy = true;
+      try {
+        while (performance.now() < deadline) {
+          try { await PM.prepareFrame(time); prepareError = undefined; }
+          catch (error: any) { prepareError = String(error?.message || error); }
+          const pixels = PM.GL.renderToPixels(time, w, h, { opaque: true, mblur: false });
+          PM.preparedVideoFrames = null;
+          renders++;
+          let hash = 2166136261;
+          for (let i = 0; i < pixels.length; i++) hash = Math.imul(hash ^ pixels[i], 16777619);
+          const key = String(hash >>> 0);
+          streak = key === previous ? streak + 1 : 0;
+          previous = key;
+          if (streak >= 2) return { stable: true, renders, ...(prepareError ? { prepareError } : {}) };
+          await sleep(120);
+        }
+        return { stable: false, renders, ...(prepareError ? { prepareError } : {}) };
+      } finally {
         PM.preparedVideoFrames = null;
-        renders++;
-        let hash = 2166136261;
-        for (let i = 0; i < pixels.length; i++) hash = Math.imul(hash ^ pixels[i], 16777619);
-        const key = String(hash >>> 0);
-        streak = key === previous ? streak + 1 : 0;
-        previous = key;
-        if (streak >= 2) return { stable: true, renders };
-        await sleep(120);
+        PM.Export.busy = false;
       }
-      return { stable: false, renders };
     },
 
     /** One sample: opaque RGBA8 (export path), optional transparent float RGBA and straight-alpha RGBA8, evaluated state. */
@@ -234,7 +246,10 @@ export function installCorpusPage(): void {
       PM.Export.busy = true;
       try {
         PM.quality = 1;
-        await PM.prepareFrame(time);
+        // The exporter stops when prepareFrame throws (for example on a composition cycle);
+        // the corpus records the error and still captures what the compositor draws.
+        try { await PM.prepareFrame(time); }
+        catch (error: any) { out.prepareError = String(error?.message || error); }
         const opaqueOptions = { mblur: true, mbSamples: 16, shutter, opaque: true, topDownOpaque: true };
         const opaque = PM.GL.renderToPixels(time, width, height, opaqueOptions);
         if (!opaque || opaque.length !== width * height * 4) throw new Error('Opaque capture returned no pixels');
