@@ -61,6 +61,50 @@ export function installCorpusPage(): void {
     return cached.sums[full]! + value(layer.from + full * step + remainder / 2) * remainder + Number(d.trim || 0);
   };
 
+  /** `legacy/gl/raster.ts` resolvedTextContent, which the renderer does not expose on PM. */
+  const resolvedTextContent = (layer: any, time: number) => {
+    const d = PM.resolveContent(layer, time);
+    const value = (key: string) => {
+      const source = d?.[key];
+      if (!source || typeof source !== 'object' || Array.isArray(source)) return Number(source) || 0;
+      return Number(PM.evP(layer, source, time, 'c.' + key)) || 0;
+    };
+    const boxWidth = Math.max(0, value('boxWidth')), boxHeight = Math.max(0, value('boxHeight'));
+    const resolved: any = { ...d, boxWidth, boxHeight, paragraph: boxWidth > 0 };
+    for (const key of Object.keys(d ?? {})) {
+      if (!key.startsWith('fontAxis.')) continue;
+      const source = d[key];
+      if (!source || typeof source !== 'object' || !Array.isArray(source.kf)) continue;
+      resolved[key] = Number(PM.evP(layer, source, time, 'c.' + key));
+    }
+    return resolved;
+  };
+
+  /**
+   * Animator and range-style state and the posed glyphs, through the bundled
+   * `legacy/core/text-animation.ts` (inject.ts), called exactly as raster.ts
+   * calls it. Glyph matrices are relative to each glyph's baseline origin.
+   * raster.ts later shifts glyphs by range-font advance differences measured
+   * with Canvas2D; those shifts are rasterization and are not included.
+   */
+  const textAnimation = (layer: any, time: number) => {
+    const T = w.__corpusTextAnimation;
+    if (!T) throw new Error('text-animation bundle not installed');
+    const d = resolvedTextContent(layer, time), layout = PM.textLayout(layer, time);
+    const animation = T.textAnimationState(PM, layer, time, layout);
+    const glyphs = T.animatedGlyphs(PM, layer, time, d, layout, animation);
+    // The resolved style per glyph: base typography plus every key a range style sets.
+    const styleKeys = new Set(['font', 'weight', 'size', 'color', 'italic', 'tracking', ...animation.styles.flatMap((range: any) => Object.keys(range.p || {}))]);
+    return {
+      animators: animation.animators, styles: animation.styles,
+      glyphs: glyphs.map((g: any) => ({
+        index: g.index, text: g.text, line: g.line, word: g.word, x: g.x, y: g.y, w: g.w,
+        matrix: g.matrix, opacity: g.opacity, blur: g.blur, color: g.color, tracking: g.tracking, trackingShift: g.trackingShift ?? 0,
+        style: Object.fromEntries([...styleKeys].map(key => [key, g.style?.[key] ?? null])),
+      })),
+    };
+  };
+
   const layerState = (layer: any, time: number, comp: any) => {
     const channels: Record<string, any> = {};
     const errors: Record<string, string> = {};
@@ -98,6 +142,7 @@ export function installCorpusPage(): void {
     if (layer.type === 'text') {
       state.textLayout = safe('textLayout', () => PM.textLayout(layer, time));
       state.textRaster = safe('textRaster', () => { const g = PM.textRasterGeometry(layer, 1, time); return { w: g?.w, h: g?.h, anchorX: g?.anchorX, anchorY: g?.anchorY, density: g?.density, selection: g?.selection }; });
+      if (layer.d?.animators?.length || layer.d?.styles?.length) state.textAnimation = safe('textAnimation', () => textAnimation(layer, time));
     }
     if (layer.type === 'captions') state.captionBounds = safe('captionBounds', () => PM.captionBounds(layer, time));
     if (layer.type === 'shape' && layer.d?.paths?.length) {

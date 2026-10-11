@@ -1,10 +1,12 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
+import vm from 'node:vm';
 import path from 'node:path';
-import { blendModes, captionModel, effects, layerTypes, matteModes, scene3d, transitions } from '../src/catalog';
+import { animatorPresets, blendModes, captionModel, effects, layerTypes, makeAnimator, matteModes, scene3d, transitions } from '../src/catalog';
 import { generateCorpus, validateAll } from '../src/generate';
 import { corpusGlb } from '../src/glb';
+import { TEXT_ANIMATION_GLOBAL, TEXT_ANIMATION_MODULE, textAnimationScript } from '../src/inject';
 import { FIXTURE_FILES, GENERATED_MEDIA, mediaRefs, MISSING_MEDIA, resolveMedia } from '../src/media';
 import { readFloat, straightTopDown, writeFloat } from '../src/output';
 import { decodePng, encodePng } from '../src/png';
@@ -205,14 +207,14 @@ describe('capture formats', () => {
     const dir = temp('float');
     try {
       const pixels = new Float32Array([0, .25, .5, 1, 1.5, -0.125, 1e-7, .75]);
-      const record = writeFloat(dir, 'f/frame.rgba32f', { width: 2, height: 1, rowOrder: 'top-down', alpha: 'premultiplied', time: 1, encoding: 'test', source: 'test' }, new Uint8Array(pixels.buffer));
+      const record = writeFloat(dir, 'f/frame.rgba32f', { width: 2, height: 1, rowOrder: 'top-down', alpha: 'premultiplied', time: 1, sourcePrecision: 'binary32', encoding: 'test', source: 'test' }, new Uint8Array(pixels.buffer));
       expect(record.data.bytes).toBe(32);
       const read = readFloat(path.join(dir, 'f/frame.rgba32f.json'));
       expect(Array.from(read.pixels)).toEqual(Array.from(pixels));
       expect(read.header).toMatchObject({ format: 'powermove-corpus-rgba32f', version: 1, width: 2, height: 1, channels: 4, sampleType: 'f32', endianness: 'little' });
-      Bun.write(path.join(dir, 'f/frame.rgba32f'), new Uint8Array(32));
+      writeFileSync(path.join(dir, 'f/frame.rgba32f'), new Uint8Array(32));
       expect(() => readFloat(path.join(dir, 'f/frame.rgba32f.json'))).toThrow(/does not match/);
-      expect(() => writeFloat(dir, 'g.rgba32f', { width: 3, height: 1, rowOrder: 'top-down', alpha: 'premultiplied', time: 0, encoding: '', source: '' }, new Uint8Array(32))).toThrow();
+      expect(() => writeFloat(dir, 'g.rgba32f', { width: 3, height: 1, rowOrder: 'top-down', alpha: 'premultiplied', time: 0, sourcePrecision: 'binary32', encoding: '', source: '' }, new Uint8Array(32))).toThrow();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
@@ -227,5 +229,35 @@ describe('capture formats', () => {
       127, 63, 31, 128, 255, 255, 255, 255,
       10, 20, 30, 255, 0, 0, 0, 0,
     ]);
+  });
+});
+
+describe('renderer injection', () => {
+  test('the bundled text-animation module poses glyphs exactly as the source module does', async () => {
+    const script = await textAnimationScript();
+    const context: Record<string, any> = {};
+    context.globalThis = context;
+    expect(vm.runInNewContext(script, context)).toBe(true);
+    const bundled = context[TEXT_ANIMATION_GLOBAL];
+    const source = await import(TEXT_ANIMATION_MODULE);
+    // A stub PM: channels evaluate to their static value, as the evaluator does for a channel without keys.
+    const PM = { evP: (_layer: unknown, p: any) => (p && typeof p === 'object' && 'v' in p ? p.v : p) };
+    let n = 0;
+    const P = (v: unknown) => ({ v, kf: [], expr: null, id: `p${n++}` });
+    const chars = 'Ab cd'.split('');
+    const layout = {
+      characters: chars.map((text, index) => ({ text, x: index * 20, y: 0, w: 18, line: 0, lineUnit: 0, word: index < 2 ? 0 : 1, sourceStart: index, index })),
+      words: [{ x: 0, w: 38 }, { x: 60, w: 38 }], lines: [{ x: 0, w: 98 }],
+    };
+    for (const preset of ['custom-range', 'wave', 'pop']) {
+      const animator = makeAnimator(P, 'ta1', preset, animatorPresets.find(item => item.id === preset), 40);
+      const layer = { type: 'text', from: 0, d: { size: 40, color: '#ffffff', align: 'left', animators: [animator], styles: [{ id: 's1', start: 1, end: 3, p: { color: P('#ff0000'), size: P(48) } }] } };
+      for (const time of [0, .3, 1.1]) {
+        const expected = source.animatedGlyphs(PM, layer, time, layer.d, layout);
+        const actual = bundled.animatedGlyphs(PM, layer, time, layer.d, layout);
+        expect(JSON.parse(JSON.stringify(actual))).toEqual(JSON.parse(JSON.stringify(expected)));
+        expect(expected).toHaveLength(chars.length);
+      }
+    }
   });
 });

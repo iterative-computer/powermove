@@ -18,6 +18,7 @@ import { desktopRoot, EXTENSION_EFFECTS, repoRoot, shaderPresets } from './catal
 import { generateCorpus, stableJson, type GeneratedProject } from './generate';
 import { MISSING_MEDIA, resolveMedia, type MediaSource } from './media';
 import { sha256, timeLabel, writeFile, writeFloat, writePng, straightTopDown, type FileRecord } from './output';
+import { textAnimationScript } from './inject';
 import { installCorpusPage, renderingPerformanceScenarios } from './page';
 import { allProjects, type CorpusProject } from './projects';
 import { compareSubset, type Issue } from './validate';
@@ -95,12 +96,13 @@ class Session {
   legacy!: LegacyApp;
   opened = 0;
   extensions: string[] = [];
-  constructor(readonly options: Options) {}
+  constructor(readonly options: Options, readonly textAnimation: string) {}
 
   async start(extensions: string[] = []): Promise<void> {
     this.extensions = [...extensions].sort();
     this.legacy = await launchLegacyApp({ extensions: this.extensions });
     await this.legacy.evaluate(installCorpusPage);
+    if (await this.legacy.evaluateScript<boolean>(this.textAnimation) !== true) throw new Error('The text-animation bundle did not install in the renderer');
     this.opened = 0;
   }
 
@@ -128,8 +130,8 @@ async function captureSamples(session: Session, out: string, dir: string, sample
       if (result.alpha) {
         sample.alphaPng = writePng(out, `${dir}/frames/${name}.alpha.png`, size[0], size[1], decode(result.alpha.straightBase64), { ...text, Alpha: 'straight alpha, exporter alphaFrame conversion of the transparent render' });
         sample.float = writeFloat(out, `${dir}/frames/${name}.rgba32f`, {
-          width: size[0], height: size[1], rowOrder: 'top-down', alpha: 'premultiplied', time,
-          encoding: 'Legacy compositor working values: display encoding E, Rec.709 primaries, premultiplied, unclamped f32 as read from the accumulator',
+          width: size[0], height: size[1], rowOrder: 'top-down', alpha: 'premultiplied', time, sourcePrecision: 'binary16',
+          encoding: 'Legacy compositor working values: display encoding E, Rec.709 primaries, premultiplied, unclamped; the accumulator is an RGBA16F texture, so every value is exactly representable in binary16',
           source: `PM.GL.renderToPixels(t, w, h, ${JSON.stringify(result.alpha.options)}) via gl.readPixels(RGBA, FLOAT)`,
         }, decode(result.alpha.floatBase64));
       }
@@ -312,7 +314,7 @@ export async function capture(options: Options): Promise<string> {
     .sort((a, b) => extensionKey(a.item).localeCompare(extensionKey(b.item)) || a.index - b.index)
     .map(({ item }) => item);
   const build = buildFingerprint();
-  const session = new Session(options);
+  const session = new Session(options, await textAnimationScript());
   await session.start();
   const environment = await session.legacy.evaluate(() => (window as any).__corpus.environment());
   const appVersions = await session.legacy.evaluateMain(({ app }) => ({ app: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node }));

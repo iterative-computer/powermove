@@ -26,6 +26,8 @@ export interface LegacyApp {
   consoleErrors: string[];
   /** Run a self-contained function in the renderer (`page.evaluate`). */
   evaluate<R, A = undefined>(fn: PageFunction<A, R>, arg?: A): Promise<R>;
+  /** Evaluate a script's source text in the renderer as one expression (Runtime.evaluate, so the renderer's CSP does not apply). */
+  evaluateScript<R = unknown>(source: string): Promise<R>;
   /** `page.waitForFunction` with a self-contained predicate. */
   waitFor<A = undefined>(fn: PageFunction<A, unknown>, arg?: A, timeout?: number): Promise<void>;
   /** Run a function in Electron's main process (`electronApp.evaluate`); it receives the electron module. */
@@ -106,6 +108,7 @@ export async function launchLegacyApp(options: LaunchOptions = {}): Promise<Lega
   const legacy: LegacyApp = {
     userData, pageErrors, consoleErrors,
     evaluate: (fn, arg) => bridge.request('evaluate', { source: fn.toString(), arg }),
+    evaluateScript: source => bridge.request('script', { source }),
     waitFor: async (fn, arg, timeout = 60_000) => { await bridge.request('waitForFunction', { source: fn.toString(), arg, timeout }); },
     evaluateMain: (fn, arg) => bridge.request('appEvaluate', { source: fn.toString(), arg }),
     setInputFiles: async (selector, files) => { await bridge.request('setInputFiles', { selector, files }); },

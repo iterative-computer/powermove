@@ -73,6 +73,7 @@ async function handle(request: Request): Promise<unknown> {
   switch (op) {
     case 'launch': return launch(args);
     case 'evaluate': return requirePage().evaluate(call(String(args.source), args.arg));
+    case 'script': return requirePage().evaluate(String(args.source));
     case 'waitForFunction': {
       // page.waitForFunction with a string predicate evaluates it with eval() inside the
       // page, which the renderer's CSP forbids; poll through Runtime.evaluate instead.

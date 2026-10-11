@@ -18,6 +18,8 @@ export interface FloatHeader {
   endianness: 'little';
   rowOrder: 'top-down';
   alpha: 'premultiplied';
+  /** Precision of the render target the values were read from ('binary16' for the legacy RGBA16F accumulator). */
+  sourcePrecision: 'binary16' | 'binary32';
   encoding: string;
   source: string;
   time: number;
