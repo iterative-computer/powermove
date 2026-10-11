@@ -52,6 +52,7 @@ struct CaseResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     failure: Option<Failure>,
     renamed: Vec<String>,
+    polyfilled: Vec<String>,
     timings_ms: BTreeMap<String, f64>,
     variants: Vec<VariantResult>,
 }
@@ -100,6 +101,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 compiled: false,
                 failure: None,
                 renamed: Vec::new(),
+                polyfilled: Vec::new(),
                 timings_ms: BTreeMap::new(),
                 variants: Vec::new(),
             };
@@ -108,6 +110,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 Err(failure) => result.failure = Some(failure),
                 Ok(translated) => {
                     result.renamed = translated.renamed.clone();
+                    result.polyfilled = translated.polyfilled.clone();
                     result.timings_ms = translated.timings_ms.clone().into_iter().collect();
                     let start = Instant::now();
                     match gpu.build(translated, *path, &case.id) {
@@ -174,13 +177,39 @@ fn msl(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// List the pixels of a rendered variant that differ from the WebGL reference
+/// by more than 1 (8-bit), with coordinates in GL row order.
+fn diff(args: &[String]) -> anyhow::Result<()> {
+    let a = PathBuf::from(arg(args, "--a").expect("--a reference.f16"));
+    let b = PathBuf::from(arg(args, "--b").expect("--b rendered.f16"));
+    let width: usize = arg(args, "--width").map_or(256, |w| w.parse().unwrap());
+    let limit: usize = arg(args, "--limit").map_or(40, |w| w.parse().unwrap());
+    let (a, b) = (read_f16(&a).expect("read a"), read_f16(&b).expect("read b"));
+    anyhow::ensure!(a.len() == b.len(), "size mismatch");
+    let q = |v: f16| (v.to_f32().clamp(0.0, 1.0) * 255.0).round() as i32;
+    let mut shown = 0;
+    for p in 0..a.len() / 4 {
+        let worst = (0..4).map(|c| (q(a[p * 4 + c]) - q(b[p * 4 + c])).abs()).max().unwrap();
+        if worst > 1 {
+            if shown < limit {
+                let fmt = |x: &[f16]| x.iter().map(|v| format!("{:.4}", v.to_f32())).collect::<Vec<_>>().join(",");
+                println!("x={} y={} diff={} a=[{}] b=[{}]", p % width, p / width, worst, fmt(&a[p * 4..p * 4 + 4]), fmt(&b[p * 4..p * 4 + 4]));
+            }
+            shown += 1;
+        }
+    }
+    println!("{shown} pixels differ by more than 1");
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("run") => run(&args),
         Some("msl") => msl(&args),
+        Some("diff") => diff(&args),
         _ => {
-            eprintln!("usage: s3-shaders run|msl [options]");
+            eprintln!("usage: s3-shaders run|msl|diff [options]");
             std::process::exit(2);
         }
     }

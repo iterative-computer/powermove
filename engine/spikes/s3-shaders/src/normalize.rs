@@ -40,6 +40,67 @@ const BUILTINS_450_ONLY: &[&str] = &[
     "shadow1DProjLod", "shadow2DProjLod", "textureCubeLod", "anyInvocation", "allInvocations", "allInvocationsEqual", "subpassLoad",
 ];
 
+/// GLSL built-ins naga's MSL back end cannot emit (`naga::back::msl`:
+/// `UnsupportedCall("Inverse")`, `UnsupportedCall("Outer")`). On the naga path
+/// they are renamed to `pm_` overloads injected after the version directive.
+/// SPIRV-Cross emits both natively, so its path keeps the built-ins.
+const POLYFILLS: &[(&str, &str)] = &[
+    (
+        // Same expressions and evaluation order as ANGLE's Metal translator
+        // (`ANGLE_inverse`, the reference renderer), including the reciprocal
+        // of the determinant, so rounding follows WebGL.
+        "inverse",
+        "mat2 pm_inverse(mat2 m){ mat2 adj = mat2(m[1][1], -m[0][1], -m[1][0], m[0][0]); \
+float det = (adj[0][0] * m[0][0]) + (adj[0][1] * m[1][0]); return adj * (1.0 / det); } \
+mat3 pm_inverse(mat3 m){ \
+float a = m[1][1] * m[2][2] - m[2][1] * m[1][2]; float b = m[1][0] * m[2][2]; float c = m[1][2] * m[2][0]; float d = m[1][0] * m[2][1]; \
+float det = m[0][0] * (a) - m[0][1] * (b - c) + m[0][2] * (d - m[1][1] * m[2][0]); det = 1.0 / det; mat3 minv; \
+minv[0][0] = (a) * det; minv[0][1] = (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * det; minv[0][2] = (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * det; \
+minv[1][0] = (c - b) * det; minv[1][1] = (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * det; minv[1][2] = (m[1][0] * m[0][2] - m[0][0] * m[1][2]) * det; \
+minv[2][0] = (d - m[2][0] * m[1][1]) * det; minv[2][1] = (m[2][0] * m[0][1] - m[0][0] * m[2][1]) * det; minv[2][2] = (m[0][0] * m[1][1] - m[1][0] * m[0][1]) * det; \
+return minv; } \
+mat4 pm_inverse(mat4 m){ \
+float A2323 = m[2][2] * m[3][3] - m[2][3] * m[3][2]; float A1323 = m[2][1] * m[3][3] - m[2][3] * m[3][1]; float A1223 = m[2][1] * m[3][2] - m[2][2] * m[3][1]; \
+float A0323 = m[2][0] * m[3][3] - m[2][3] * m[3][0]; float A0223 = m[2][0] * m[3][2] - m[2][2] * m[3][0]; float A0123 = m[2][0] * m[3][1] - m[2][1] * m[3][0]; \
+float A2313 = m[1][2] * m[3][3] - m[1][3] * m[3][2]; float A1313 = m[1][1] * m[3][3] - m[1][3] * m[3][1]; float A1213 = m[1][1] * m[3][2] - m[1][2] * m[3][1]; \
+float A2312 = m[1][2] * m[2][3] - m[1][3] * m[2][2]; float A1312 = m[1][1] * m[2][3] - m[1][3] * m[2][1]; float A1212 = m[1][1] * m[2][2] - m[1][2] * m[2][1]; \
+float A0313 = m[1][0] * m[3][3] - m[1][3] * m[3][0]; float A0213 = m[1][0] * m[3][2] - m[1][2] * m[3][0]; float A0312 = m[1][0] * m[2][3] - m[1][3] * m[2][0]; \
+float A0212 = m[1][0] * m[2][2] - m[1][2] * m[2][0]; float A0113 = m[1][0] * m[3][1] - m[1][1] * m[3][0]; float A0112 = m[1][0] * m[2][1] - m[1][1] * m[2][0]; \
+float a = m[1][1] * A2323 - m[1][2] * A1323 + m[1][3] * A1223; float b = m[1][0] * A2323 - m[1][2] * A0323 + m[1][3] * A0223; \
+float c = m[1][0] * A1323 - m[1][1] * A0323 + m[1][3] * A0123; float d = m[1][0] * A1223 - m[1][1] * A0223 + m[1][2] * A0123; \
+float det = m[0][0] * (a) - m[0][1] * (b) + m[0][2] * (c) - m[0][3] * (d); det = 1.0 / det; mat4 im; \
+im[0][0] = det * (a); im[0][1] = det * -(m[0][1] * A2323 - m[0][2] * A1323 + m[0][3] * A1223); \
+im[0][2] = det * (m[0][1] * A2313 - m[0][2] * A1313 + m[0][3] * A1213); im[0][3] = det * -(m[0][1] * A2312 - m[0][2] * A1312 + m[0][3] * A1212); \
+im[1][0] = det * -(b); im[1][1] = det * (m[0][0] * A2323 - m[0][2] * A0323 + m[0][3] * A0223); \
+im[1][2] = det * -(m[0][0] * A2313 - m[0][2] * A0313 + m[0][3] * A0213); im[1][3] = det * (m[0][0] * A2312 - m[0][2] * A0312 + m[0][3] * A0212); \
+im[2][0] = det * (c); im[2][1] = det * -(m[0][0] * A1323 - m[0][1] * A0323 + m[0][3] * A0123); \
+im[2][2] = det * (m[0][0] * A1313 - m[0][1] * A0313 + m[0][3] * A0113); im[2][3] = det * -(m[0][0] * A1312 - m[0][1] * A0312 + m[0][3] * A0112); \
+im[3][0] = det * -(d); im[3][1] = det * (m[0][0] * A1223 - m[0][1] * A0223 + m[0][2] * A0123); \
+im[3][2] = det * -(m[0][0] * A1213 - m[0][1] * A0213 + m[0][2] * A0113); im[3][3] = det * (m[0][0] * A1212 - m[0][1] * A0212 + m[0][2] * A0112); \
+return im; }",
+    ),
+    (
+        "outerProduct",
+        "mat2 pm_outerProduct(vec2 c, vec2 r){ return mat2(c * r.x, c * r.y); } \
+mat3 pm_outerProduct(vec3 c, vec3 r){ return mat3(c * r.x, c * r.y, c * r.z); } \
+mat4 pm_outerProduct(vec4 c, vec4 r){ return mat4(c * r.x, c * r.y, c * r.z, c * r.w); } \
+mat2x3 pm_outerProduct(vec3 c, vec2 r){ return mat2x3(c * r.x, c * r.y); } \
+mat3x2 pm_outerProduct(vec2 c, vec3 r){ return mat3x2(c * r.x, c * r.y, c * r.z); } \
+mat2x4 pm_outerProduct(vec4 c, vec2 r){ return mat2x4(c * r.x, c * r.y); } \
+mat4x2 pm_outerProduct(vec2 c, vec4 r){ return mat4x2(c * r.x, c * r.y, c * r.z, c * r.w); } \
+mat3x4 pm_outerProduct(vec4 c, vec3 r){ return mat3x4(c * r.x, c * r.y, c * r.z); } \
+mat4x3 pm_outerProduct(vec3 c, vec4 r){ return mat4x3(c * r.x, c * r.y, c * r.z, c * r.w); }",
+    ),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// naga's MSL back end: inject polyfills for built-ins it cannot emit.
+    Naga,
+    /// SPIRV-Cross: every GLSL ES 3.00 built-in is supported.
+    SpirvCross,
+}
+
 #[derive(Debug, Clone)]
 pub struct NormalizeError(pub String);
 
@@ -48,6 +109,8 @@ pub struct Normalized {
     pub source: String,
     /// Identifiers renamed to avoid GLSL 4.50 keywords or built-ins.
     pub renamed: Vec<String>,
+    /// Built-ins replaced with injected `pm_` polyfills.
+    pub polyfilled: Vec<String>,
 }
 
 fn is_ident_char(c: u8) -> bool {
@@ -134,7 +197,35 @@ fn find_token(haystack: &str, token: &str) -> Option<usize> {
     None
 }
 
-pub fn normalize(source: &str) -> Result<Normalized, NormalizeError> {
+/// Insert `text` (one physical line) after the
+/// version directive and any leading `#extension` lines, followed by a `#line`
+/// directive so every later line keeps its original number.
+fn inject(body: &str, text: &str) -> String {
+    let mut out = String::with_capacity(body.len() + text.len() + 16);
+    let mut line_number = 0u32;
+    let mut injected = false;
+    for line in body.split_inclusive('\n') {
+        line_number += 1;
+        let trimmed = line.trim();
+        let skip = line_number == 1 || trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("#extension");
+        if !injected && !skip {
+            out.push_str(text);
+            out.push('\n');
+            // GLSL 3.30+ and ES 3.00: `#line N` numbers the following line N.
+            out.push_str(&format!("#line {line_number}\n"));
+            injected = true;
+        }
+        out.push_str(line);
+    }
+    if !injected {
+        out.push_str("\n");
+        out.push_str(text);
+        out.push('\n');
+    }
+    out
+}
+
+pub fn normalize(source: &str, target: Target) -> Result<Normalized, NormalizeError> {
     // The version directive must be the first non-whitespace token (GLSL ES 3.00 §3.3).
     let trimmed = source.trim_start();
     let leading = &source[..source.len() - trimmed.len()];
@@ -159,7 +250,25 @@ pub fn normalize(source: &str) -> Result<Normalized, NormalizeError> {
             }
         }
     }
-    Ok(Normalized { source: body, renamed })
+    let mut polyfilled = Vec::new();
+    if target == Target::Naga {
+        let mut text = String::new();
+        for (name, code) in POLYFILLS {
+            if find_token(&body, name).is_some() {
+                let (next, changed) = rename_token(&body, name, &format!("pm_{name}"));
+                if changed {
+                    body = next;
+                    polyfilled.push((*name).to_string());
+                    text.push_str(code);
+                    text.push(' ');
+                }
+            }
+        }
+        if !text.is_empty() {
+            body = inject(&body, text.trim_end());
+        }
+    }
+    Ok(Normalized { source: body, renamed, polyfilled })
 }
 
 #[cfg(test)]
@@ -169,7 +278,7 @@ mod tests {
     #[test]
     fn rewrites_version_and_precision_keeping_lines() {
         let src = "#version 300 es\nprecision highp float;\nuniform mediump float x; // highp note\nvoid main(){}\n";
-        let out = normalize(src).unwrap();
+        let out = normalize(src, Target::Naga).unwrap();
         assert!(out.source.starts_with("#version 450\n"));
         assert_eq!(out.source.lines().count(), src.lines().count());
         assert!(!out.source.contains("precision highp"));
@@ -180,7 +289,7 @@ mod tests {
     #[test]
     fn renames_450_only_identifiers_outside_comments() {
         let src = "#version 300 es\nfloat precise(float shared){ return shared; } // precise\nfloat noise1(float v){ return precise(v); }\n";
-        let out = normalize(src).unwrap();
+        let out = normalize(src, Target::Naga).unwrap();
         assert!(out.source.contains("float pm_precise(float pm_shared)"));
         assert!(out.source.contains("// precise"));
         assert!(out.source.contains("pm_noise1"));
@@ -188,8 +297,33 @@ mod tests {
     }
 
     #[test]
+    fn polyfills_inverse_and_outer_product_for_naga_keeping_line_numbers() {
+        let src = "#version 300 es\nprecision highp float;\nuniform mat3 m;\nout vec4 o;\nvoid main(){\n  mat3 i = inverse(m);\n  o = vec4(i[0] + outerProduct(vec3(1.0), vec2(2.0))[1], 1.0) + vec4(undefinedName);\n}\n";
+        let naga = normalize(src, Target::Naga).unwrap();
+        assert_eq!(naga.polyfilled, vec!["inverse".to_string(), "outerProduct".to_string()]);
+        assert!(naga.source.contains("pm_inverse(m)"));
+        assert!(naga.source.starts_with("#version 450\n"));
+        // glslang reports the error on the author's line 7 despite the injection.
+        let error = crate::compile::compile(&naga.source, crate::compile::Stage::Fragment).err().expect("undefined name");
+        assert!(error.log.contains("0:7:"), "{}", error.log);
+        let spvc = normalize(src, Target::SpirvCross).unwrap();
+        assert!(spvc.polyfilled.is_empty());
+        assert!(spvc.source.contains(" inverse(m)"));
+    }
+
+    #[test]
+    fn polyfill_goes_after_extension_directives() {
+        let src = "#version 300 es\n#extension GL_OES_standard_derivatives : enable\nuniform mat2 m;\nout vec4 o;\nvoid main(){ o = vec4(inverse(m)[0], 0.0, 1.0); }\n";
+        let out = normalize(src, Target::Naga).unwrap();
+        let lines: Vec<&str> = out.source.lines().collect();
+        assert!(lines[1].starts_with("#extension"));
+        assert!(lines[2].starts_with("mat2 pm_inverse"));
+        assert_eq!(lines[3], "#line 3");
+    }
+
+    #[test]
     fn rejects_programs_without_version_300_es() {
-        assert!(normalize("void main(){ gl_FragColor = vec4(1.); }").is_err());
-        assert!(normalize("#version 100\nvoid main(){}").is_err());
+        assert!(normalize("void main(){ gl_FragColor = vec4(1.); }", Target::Naga).is_err());
+        assert!(normalize("#version 100\nvoid main(){}", Target::Naga).is_err());
     }
 }

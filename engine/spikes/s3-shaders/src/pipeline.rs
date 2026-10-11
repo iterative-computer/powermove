@@ -62,6 +62,7 @@ pub struct Translated {
     pub vertex: StageOutput,
     pub fragment: StageOutput,
     pub renamed: Vec<String>,
+    pub polyfilled: Vec<String>,
     pub timings_ms: HashMap<String, f64>,
 }
 
@@ -185,14 +186,22 @@ fn spvc_stage(module: rspirv::dr::Module, spv: &compile::Spirv, stage: Stage, ti
         .map(|s| s.to_string())
         .ok_or_else(|| Failure::new("spvc", "SPIRV-Cross reported no entry point"))?;
     timings.insert(format!("{prefix}spvc"), ms(start));
-    Ok(StageOutput { reflection, splits: Vec::new(), naga: None, msl: Some(artifact.to_string()), entry_point: entry })
+    let mut msl = artifact.to_string();
+    if let Ok(pragma) = std::env::var("S3_MSL_PRAGMA") {
+        msl = format!("{}\n{msl}", pragma.replace(';', "\n"));
+    }
+    Ok(StageOutput { reflection, splits: Vec::new(), naga: None, msl: Some(msl), entry_point: entry })
 }
 
 pub fn translate(gl_vertex: &str, fragment: &str, line_offset: u32, path: Path) -> Result<Translated, Failure> {
     let mut timings = HashMap::new();
     let start = Instant::now();
-    let normalized = normalize::normalize(fragment).map_err(|e| Failure::new("normalize", e.0))?;
-    let vertex = normalize::normalize(&wgpu_vertex_source(gl_vertex)).map_err(|e| Failure::new("normalize", format!("vertex: {}", e.0)))?;
+    let target = match path {
+        Path::Naga => normalize::Target::Naga,
+        Path::SpirvCross => normalize::Target::SpirvCross,
+    };
+    let normalized = normalize::normalize(fragment, target).map_err(|e| Failure::new("normalize", e.0))?;
+    let vertex = normalize::normalize(&wgpu_vertex_source(gl_vertex), target).map_err(|e| Failure::new("normalize", format!("vertex: {}", e.0)))?;
     timings.insert("normalize".into(), ms(start));
     let (vmod, vspv) = stage_spirv(&vertex.source, Stage::Vertex, 0, &mut timings, "vertex-")?;
     let (fmod, fspv) = stage_spirv(&normalized.source, Stage::Fragment, line_offset, &mut timings, "")?;
@@ -203,5 +212,5 @@ pub fn translate(gl_vertex: &str, fragment: &str, line_offset: u32, path: Path) 
             spvc_stage(fmod, &fspv, Stage::Fragment, &mut timings, "")?,
         ),
     };
-    Ok(Translated { vertex: vertex_out, fragment: fragment_out, renamed: normalized.renamed, timings_ms: timings })
+    Ok(Translated { vertex: vertex_out, fragment: fragment_out, renamed: normalized.renamed, polyfilled: normalized.polyfilled, timings_ms: timings })
 }
