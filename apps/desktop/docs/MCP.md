@@ -33,7 +33,9 @@ The MCP client starts and stops the host. Chromium runs invisibly; no Powermove 
 
 ## Connect to the desktop app
 
-Open Powermove and add:
+On macOS, launching the installed Powermove app automatically adds its connection to Claude Desktop when Claude is installed on this Mac. Existing Claude connections and settings are preserved. If Claude was already running, restart Claude once to load the new connection. Removing or customizing the connection in Claude is respected on later Powermove launches. Development and isolated test launches do not change Claude settings.
+
+For other MCP clients, open Powermove and add:
 
 ```json
 {
