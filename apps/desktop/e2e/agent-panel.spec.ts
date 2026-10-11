@@ -1,6 +1,58 @@
 import { expect, test } from './helpers/app';
 
 test.describe('@agent-panel Svelte agent panel drives a real editor-mode run', () => {
+  test('fills its column when docked alone and keeps its resized height beside another panel', async ({ session }, testInfo) => {
+    await session.openEditor();
+    const { page } = session;
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.WS.mutate((workspace: any) => {
+        for (const spec of [...PM.Layout.ensureDock(workspace, 'left').panels]) {
+          PM.Layout.hidePanel(workspace, spec.id);
+        }
+        PM.Layout.addPanel(workspace, 'agent', 'left');
+      });
+    });
+    const panel = page.locator('#dock-left #panel-agent');
+    await expect(panel).toBeVisible();
+    const bottomGap = () => panel.evaluate(el =>
+      el.closest('.dock')!.getBoundingClientRect().bottom - el.getBoundingClientRect().bottom);
+    await page.screenshot({ path: testInfo.outputPath('agent-alone.png') });
+    await expect.poll(bottomGap).toBeLessThanOrEqual(1);
+    for (const theme of ['dark', 'light']) {
+      await page.evaluate(theme => (window as any).PM.theme.apply(theme), theme);
+      await page.setViewportSize({ width: 1440, height: theme === 'dark' ? 1000 : 800 });
+      await expect.poll(bottomGap).toBeLessThanOrEqual(1);
+      await expect(panel.getByRole('textbox', { name: 'Message Powermove agent', exact: true })).toBeInViewport();
+      expect(await panel.evaluate(el => {
+        const footer = el.querySelector('.agent-footer')!.getBoundingClientRect();
+        return Math.abs(el.getBoundingClientRect().bottom - footer.bottom);
+      })).toBeLessThanOrEqual(1);
+      await page.screenshot({ path: testInfo.outputPath(`agent-alone-${theme}.png`) });
+    }
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.WS.mutate((workspace: any) => PM.Layout.restorePanel(workspace, 'assets'));
+    });
+    await expect(page.locator('#dock-left #panel-assets')).toBeVisible();
+    const height = () => panel.evaluate(el => el.getBoundingClientRect().height);
+    await expect.poll(height).toBe(350);
+    await page.locator('#dock-left .splitter.h').press('ArrowUp');
+    await expect.poll(height).toBe(360);
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.WS.mutate((workspace: any) => PM.Layout.hidePanel(workspace, 'assets'));
+    });
+    await expect.poll(bottomGap).toBeLessThanOrEqual(1);
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.WS.mutate((workspace: any) => PM.Layout.restorePanel(workspace, 'assets'));
+    });
+    await expect.poll(height).toBe(360);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
   test('opens under the titlebar launcher, never in a dock, and follows the window', async ({ session }) => {
     await session.openEditor(); await session.openAgent();
     const { page } = session;

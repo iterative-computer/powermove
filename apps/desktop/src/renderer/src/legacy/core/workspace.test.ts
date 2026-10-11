@@ -92,7 +92,7 @@ describe('legacy workspace install', () => {
     expect(PM.WS.normalize({ ...PM.WS.get('design'), layout: { docks: [left, center] } }).layout.docks[0].panels.map((panel: any) => panel.id)).toEqual(['assets', 'takes']);
   });
 
-  it('keeps an agent docked from the titlebar launcher at its set height', () => {
+  it('keeps a shared agent panel at its set height', () => {
     const PM = workspaceModel();
     const workspace = PM.WS.normalize({
       id: 'agent-height', name: 'Agent height',
@@ -107,6 +107,20 @@ describe('legacy workspace install', () => {
     expect(agent).toMatchObject({ id: 'agent', size: 350 });
     expect(agent.flex).toBeUndefined();
     expect(again.layout.docks[0].panels.find((panel: any) => panel.id === 'assets').flex).toBe(true);
+  });
+
+  it('fills an agent-only dock across normalization without losing its saved height', () => {
+    const PM = workspaceModel();
+    const workspace = PM.WS.normalize({
+      id: 'agent-alone', name: 'Agent alone',
+      layout: { docks: [
+        { id: 'left', panels: [{ id: 'agent', size: 431 }] },
+        { id: 'center', flex: true, panels: [{ id: 'viewer', flex: true }] },
+      ] },
+    });
+    expect(PM.WS.normalize(workspace).layout.docks[0].panels).toEqual([
+      { id: 'agent', size: 431, flex: true },
+    ]);
   });
 
   it('restores saved built-in panel geometry instead of replacing it at boot', () => {

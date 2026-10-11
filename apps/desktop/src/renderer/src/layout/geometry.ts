@@ -1,4 +1,4 @@
-import { ensureDockFill, keepPanelAtSetHeight, type Workspace } from './model';
+import { ensureDockFill, type Workspace } from './model';
 
 type Rect = {
   left: number;
@@ -155,10 +155,7 @@ export function visibleDockPlan(
          an empty slot has no element for the neighbouring splitters to
          measure, and if it was the column's fluid panel nothing fills. */
       const specs = (dock.panels || []).filter((spec) => !isDetached(spec.id) && isAvailable(spec.id));
-      if (specs.length && !specs.some((spec) => spec.flex)) {
-        const fill = [...specs].reverse().find((spec) => !keepPanelAtSetHeight(spec)) ?? null;
-        if (fill) fill.flex = true;
-      }
+      ensureDockFill({ ...dock, panels: specs });
       return { dock, specs };
     })
     .filter((item) => !item.dock.hidden && item.specs.length > 0);

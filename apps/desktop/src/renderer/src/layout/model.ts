@@ -27,8 +27,8 @@ export type Workspace = {
 const DOCK_ORDER: Record<string, number> = { left: 0, center: 1, right: 2 };
 const SET_HEIGHT_PANEL_DEFAULTS: Readonly<Record<string, number>> = Object.freeze({ agent: 350 });
 
-/** Panels in this list keep a saved pixel height instead of absorbing the
- * dock's unused vertical space. They can still be resized explicitly. */
+/** Prefer a saved pixel height when another panel can fill the dock.
+ * Keep that height even while the panel temporarily fills a column alone. */
 export function keepPanelAtSetHeight(spec: PanelSpec): boolean {
   const fallback = SET_HEIGHT_PANEL_DEFAULTS[spec.id];
   if (!fallback) return false;
@@ -48,12 +48,9 @@ export function ensureDockFill(dock: DockSpec | undefined): DockSpec | undefined
   if (!dock?.panels.length) return dock;
   for (const panel of dock.panels) keepPanelAtSetHeight(panel);
   if (!dock.panels.some((panel) => panel.flex)) {
-    for (let index = dock.panels.length - 1; index >= 0; index -= 1) {
-      const panel = dock.panels[index]!;
-      if (SET_HEIGHT_PANEL_DEFAULTS[panel.id]) continue;
-      panel.flex = true;
-      break;
-    }
+    const fill = [...dock.panels].reverse().find((panel) => !SET_HEIGHT_PANEL_DEFAULTS[panel.id])
+      ?? dock.panels.at(-1)!;
+    fill.flex = true;
   }
   return dock;
 }
@@ -181,11 +178,6 @@ export function panelMinHeight(spec: PanelSpec, def: Record<string, any> = {}): 
 }
 
 export function applyPanelSize(el: HTMLElement, spec: PanelSpec, def: Record<string, any>): void {
-  if (keepPanelAtSetHeight(spec)) {
-    el.style.setProperty('--set-panel-height', `${spec.size}px`);
-  } else {
-    el.style.removeProperty('--set-panel-height');
-  }
   el.style.flex = spec.flex || (!spec.size && !def.size)
     ? '1 1 auto'
     : `0 0 ${spec.size || def.size}px`;

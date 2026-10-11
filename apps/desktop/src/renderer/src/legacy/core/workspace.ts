@@ -308,8 +308,8 @@ function normalizeWorkspace(workspace: any, fallback?: any) {
       return clean;
     }).filter(Boolean);
     const out: any = { id: text(d.id, `dock-${index + 1}`), panels };
-    /* Let an eligible panel consume the dock's spare height. The agent is
-       intentionally excluded so its conversation stays at its saved height. */
+    /* Fill the dock, preferring a neighbour over the agent so a shared
+       conversation panel keeps its saved height. */
     ensureDockFill(out);
     if (finite(d.size)) out.size = PM.clamp(d.size, 200, 760);
     if (d.hidden) out.hidden = true;

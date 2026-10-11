@@ -18,7 +18,7 @@ describe('set-height panels', () => {
     ]);
   });
 
-  it('keeps the agent pinned when it is opened or moved into an empty dock', () => {
+  it('fills an empty dock with the agent and restores its saved height when moved beside a neighbour', () => {
     const workspace: Workspace = {
       layout: { docks: [
         { id: 'center', flex: true, panels: [{ id: 'viewer', flex: true }] },
@@ -27,20 +27,23 @@ describe('set-height panels', () => {
     };
 
     addPanel(workspace, 'agent', 'right');
-    expect(workspace.layout.docks[1]!.panels).toEqual([{ id: 'agent', size: 350 }]);
+    expect(workspace.layout.docks[1]!.panels).toEqual([{ id: 'agent', size: 350, flex: true }]);
 
     expect(movePanel(workspace, 'agent', 'center')).toBe(true);
     expect(workspace.layout.docks[0]!.panels.at(-1)).toEqual({ id: 'agent', size: 350 });
   });
 
-  it('writes the set height used by the agent panel shell', () => {
+  it('renders the agent without clearing the dock fill decision or its saved height', () => {
     const element = document.createElement('div');
-    const spec = { id: 'agent', flex: true };
+    const spec = { id: 'agent', size: 420, flex: true };
 
     applyPanelSize(element, spec, { size: 350 });
 
-    expect(spec).toEqual({ id: 'agent', size: 350 });
-    expect(element.style.flex).toBe('0 0 350px');
-    expect(element.style.getPropertyValue('--set-panel-height')).toBe('350px');
+    expect(spec).toEqual({ id: 'agent', size: 420, flex: true });
+    expect(element.style.flex).toBe('1 1 auto');
+
+    ensureDockFill({ id: 'left', panels: [{ id: 'assets' }, spec] });
+    applyPanelSize(element, spec, { size: 350 });
+    expect(element.style.flex).toBe('0 0 420px');
   });
 });
