@@ -53,7 +53,10 @@ function cloneLayer(layer, uid, rand) {
 
 export async function runAll({ bindings, memory, now, platform, sha256, gc = () => {}, onStage = async () => {} }) {
   const results = { platform, targets: TARGETS, stages: {} };
-  const memStage = (name) => { results.stages[name] = { wasmMemoryBytes: memory.buffer.byteLength }; };
+  // Linear memory only grows; the counting allocator in s5-wasm reports what
+  // is live on the Rust heap and the peak since the last reset.
+  const heap = () => ({ wasmMemoryBytes: memory.buffer.byteLength, heapLiveBytes: bindings.heap_live_bytes(), heapPeakBytes: bindings.heap_peak_bytes() });
+  const memStage = (name) => { results.stages[name] = heap(); };
   results.timerResolutionMs = timerResolution(now);
 
   // ── load ───────────────────────────────────────────────────────────────
@@ -63,16 +66,24 @@ export async function runAll({ bindings, memory, now, platform, sha256, gc = () 
   gc();
   memStage('beforeLoad');
   await onStage('beforeLoad');
+  bindings.heap_reset_peak();
   const mirror = new WasmMirror(bindings, memory);
   let t0 = now();
   mirror.load(projectJson);
   results.loadMs = now() - t0;
+  memStage('loadPeak');
+  mirror.releaseInput();
   results.unsupported = mirror.unsupported();
   const { ids, refs } = internAll(mirror, project);
   results.handles = ids.length;
+  // Steady state for one window: every handle interned and cached at one
+  // time, world matrices computed once, the load buffer released.
+  mirror.evBatch(ids, 10);
+  mirror.worldAll(10);
   gc();
   memStage('afterLoad');
   results.stages.afterLoad.rawBytes = mirror.rawBytes();
+  results.stages.afterLoad.documentJsonBytes = projectJson.length;
   await onStage('afterLoad');
 
   // ── evP ────────────────────────────────────────────────────────────────
@@ -269,6 +280,7 @@ export async function runAll({ bindings, memory, now, platform, sha256, gc = () 
       for (let i = 0; i < wx.length; i++) { compared++; if (!Object.is(wx[i], wy[i])) differing++; }
     }
     results.incrementalEqualsFresh = { compared, differing };
+    fresh.free();
   }
   results.structural = {};
   for (const kind of kinds) {
@@ -349,6 +361,7 @@ export async function runAll({ bindings, memory, now, platform, sha256, gc = () 
     const bytes = new Uint8Array(out.buffer);
     results.vectors[name] = { values: out.length, sha256: await sha256(bytes), unsupported: m.unsupported().length };
     vectorBytes[name] = bytes;
+    m.free();
   }
   return { results, vectorBytes };
 }

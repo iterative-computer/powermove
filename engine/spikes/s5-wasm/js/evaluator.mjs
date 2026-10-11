@@ -85,6 +85,18 @@ export class WasmMirror {
     this.registry = new WeakMap();
   }
 
+  /** Free the input buffer after a load; patches re-reserve what they need. */
+  releaseInput() {
+    this.e.input_release();
+    this.u8 = null; this.inputPtr = 0; this.inputCap = 0;
+  }
+
+  /** Free the wasm-side evaluator. The mirror is unusable afterwards. */
+  free() {
+    this.e.free();
+    this.e = null;
+  }
+
   /** Write a UTF-8 string at `offset` in the input buffer; returns its byte length. */
   writeString(offset, str) {
     let view = this.reserveInput(offset + str.length + 16);

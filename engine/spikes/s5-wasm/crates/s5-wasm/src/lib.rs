@@ -10,7 +10,73 @@
 //!   side re-acquires its views whenever linear memory grows or a buffer moves.
 
 use s5_core::Mirror;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use wasm_bindgen::prelude::*;
+
+/// The default allocator with live and peak byte counters, so the per-window
+/// memory budget reports what the mirror holds, not only the size linear
+/// memory has grown to (which never shrinks).
+struct Counting;
+
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+static PEAK: AtomicUsize = AtomicUsize::new(0);
+
+fn grew(bytes: usize) {
+    let live = LIVE.fetch_add(bytes, Ordering::Relaxed) + bytes;
+    PEAK.fetch_max(live, Ordering::Relaxed);
+}
+
+// SAFETY: every call forwards to `System` with the caller's layout unchanged;
+// the counters do not affect allocation.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let p = unsafe { System.alloc(layout) };
+        if !p.is_null() {
+            grew(layout.size());
+        }
+        p
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let p = unsafe { System.alloc_zeroed(layout) };
+        if !p.is_null() {
+            grew(layout.size());
+        }
+        p
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) };
+        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let p = unsafe { System.realloc(ptr, layout, new_size) };
+        if !p.is_null() {
+            LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+            grew(new_size);
+        }
+        p
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+
+/// Bytes currently allocated on the Rust heap in linear memory.
+#[wasm_bindgen]
+pub fn heap_live_bytes() -> f64 {
+    LIVE.load(Ordering::Relaxed) as f64
+}
+
+/// Highest `heap_live_bytes` since the last `heap_reset_peak`.
+#[wasm_bindgen]
+pub fn heap_peak_bytes() -> f64 {
+    PEAK.load(Ordering::Relaxed) as f64
+}
+
+#[wasm_bindgen]
+pub fn heap_reset_peak() {
+    PEAK.store(LIVE.load(Ordering::Relaxed), Ordering::Relaxed);
+}
 
 #[wasm_bindgen]
 pub struct Evaluator {
@@ -49,6 +115,12 @@ impl Evaluator {
 
     pub fn input_capacity(&self) -> usize {
         self.input.len()
+    }
+
+    /// Free the input buffer (after a load, which needs the whole document;
+    /// patches need far less). The JS side drops its view.
+    pub fn input_release(&mut self) {
+        self.input = Vec::new();
     }
 
     /// Address of the id buffer (at least `len` u32s).
