@@ -2,7 +2,7 @@
 
 A reproducible, LGPL-only FFmpeg for macOS arm64, built from pinned and checksummed
 sources. It replaces the bundled `ffmpeg-static` binary, a third-party build whose
-configuration includes GPL components (plan section 24 item 1, decision 12). The engine
+configuration includes GPL and nonfree components (plan section 24 item 1, decision 12). The engine
 links its dylibs; the `ffmpeg` and `ffprobe` executables come from the same configuration
 for transcription, agent media tools, the CLI, and test verification.
 
@@ -17,9 +17,15 @@ bun engine/third_party/ffmpeg/smoke.ts    # functional checks against today's ca
 ```
 
 A clean build takes 2 min 42 s on an M4 Max (14 jobs, downloads cached). Every run
-starts from an empty
-`work/`; downloads are cached in `downloads/` and re-verified against their checksums
-before every extraction. `out/`, `work/`, and `downloads/` are gitignored.
+starts from an empty `work/`; downloads are cached in `downloads/` and re-verified
+against their checksums before every extraction. `out/`, `work/`, and `downloads/` are
+gitignored.
+
+Builds are bit-for-bit reproducible with the same toolchain: three clean builds
+(two in this directory, one with different `PM_FFMPEG_WORK`, `PM_FFMPEG_OUT`, and
+`PM_FFMPEG_DOWNLOADS` and fresh downloads) produced identical binaries and identical
+`manifest.json` files. A different Xcode or SDK changes the binaries; the manifest
+records which was used.
 
 Environment overrides: `PM_FFMPEG_OUT`, `PM_FFMPEG_WORK`, `PM_FFMPEG_DOWNLOADS`,
 `PM_FFMPEG_JOBS`, `PM_FFMPEG_PYTHON` (python 3.10 or newer, for meson), and
