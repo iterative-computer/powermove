@@ -42,6 +42,7 @@ export const IPC = {
   projectConfirmClose: 'project:confirm-close',
   dialogConfirm: 'dialog:confirm',
   clipboardWriteText: 'clipboard:write-text',
+  mediaPaste: 'media:paste',
 
   renderStart: 'render:start',
   renderWrite: 'render:write',
@@ -719,6 +720,8 @@ export interface PowermoveBridge {
   confirm(request: ConfirmRequest): Promise<boolean>;
   /** Writes plain text to the system clipboard while the window has focus; nothing is ever read back. */
   clipboardWriteText?(text: string): Promise<void>;
+  /** Native user-initiated media paste. Returns false when there is no media; exposes no clipboard data. */
+  pasteMedia?(): Promise<boolean>;
 
   render: {
     start(options:{width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number}):Promise<string | null>;
