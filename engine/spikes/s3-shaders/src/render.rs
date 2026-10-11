@@ -179,9 +179,28 @@ fn layout_entries(block: Option<&Block>, samplers: &[(String, u32)], visibility:
     entries
 }
 
-fn pop_error(device: &wgpu::Device, guard: wgpu::ErrorScopeGuard) -> Option<String> {
+/// Validation, internal (shader translation and Metal compilation), and
+/// out-of-memory scopes, so one bad shader fails its case instead of the run.
+struct Scopes([wgpu::ErrorScopeGuard; 3]);
+
+fn push_scopes(device: &wgpu::Device) -> Scopes {
+    Scopes([
+        device.push_error_scope(wgpu::ErrorFilter::OutOfMemory),
+        device.push_error_scope(wgpu::ErrorFilter::Internal),
+        device.push_error_scope(wgpu::ErrorFilter::Validation),
+    ])
+}
+
+fn pop_error(device: &wgpu::Device, scopes: Scopes) -> Option<String> {
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
-    pollster::block_on(guard.pop()).map(|e| e.to_string())
+    let [oom, internal, validation] = scopes.0;
+    let mut errors = Vec::new();
+    for guard in [validation, internal, oom] {
+        if let Some(error) = pollster::block_on(guard.pop()) {
+            errors.push(error.to_string());
+        }
+    }
+    (!errors.is_empty()).then(|| errors.join("; "))
 }
 
 impl Gpu {
@@ -191,7 +210,7 @@ impl Gpu {
         let vertex_block = translated.vertex.reflection.block.clone();
         let mut samplers: Vec<(String, u32)> = translated.fragment.reflection.samplers.iter().map(|s| (s.name.clone(), s.binding)).collect();
         samplers.sort_by_key(|s| s.1);
-        let guard = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let guard = push_scopes(device);
         let (vertex_module, fragment_module) = match path {
             Path::Naga => {
                 let v = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("vertex"), source: wgpu::ShaderSource::Naga(Cow::Owned(translated.vertex.naga.unwrap())) });
@@ -223,7 +242,7 @@ impl Gpu {
         if let Some(error) = pop_error(device, guard) {
             return Err(Failure::new("metal", error));
         }
-        let guard = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let guard = push_scopes(device);
         let fragment_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fragment"),
             entries: &layout_entries(fragment_block.as_ref(), &samplers, wgpu::ShaderStages::FRAGMENT),
@@ -260,7 +279,7 @@ impl Gpu {
     /// GL row order.
     pub fn render(&self, program: &Program, variant: &Variant, images: &HashMap<String, Image>) -> Result<Vec<f16>, Failure> {
         let device = &self.device;
-        let guard = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let guard = push_scopes(device);
         let mut outputs: Vec<wgpu::Texture> = Vec::new();
         for (index, pass) in variant.passes.iter().enumerate() {
             let target = device.create_texture(&wgpu::TextureDescriptor {
