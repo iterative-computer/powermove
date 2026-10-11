@@ -20,6 +20,7 @@ pub mod write;
 use std::collections::BTreeMap;
 use std::collections::btree_map;
 
+pub(crate) use jsnum::array_index;
 pub use jsnum::{number_to_js_string, string_to_number};
 pub use parse::{ParseError, parse, parse_bytes, parse_file_text};
 pub use string::JsString;
@@ -107,6 +108,10 @@ impl Map {
 
     pub fn as_btree(&self) -> &BTreeMap<JsString, Value> {
         &self.0
+    }
+
+    pub fn as_btree_mut(&mut self) -> &mut BTreeMap<JsString, Value> {
+        &mut self.0
     }
 
     pub fn into_btree(self) -> BTreeMap<JsString, Value> {
