@@ -2,6 +2,7 @@
 //! the S3-style GLSL pipeline (`s7-glsl`); GL state, objects, and draw semantics are
 //! emulated for the subset three.js r180 uses (asserted, never silently ignored).
 
+pub mod compare;
 pub mod consts;
 pub mod gl;
 pub mod hand;

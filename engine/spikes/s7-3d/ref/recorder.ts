@@ -5,7 +5,7 @@
 // Image uploads are snapshotted through a second context with the same unpack state,
 // so the trace holds the exact texels WebGL received (flip and premultiply applied).
 
-type Arg = number | boolean | string | null | { o: number } | { b: number; n: number; t: string } | { img: number; w: number; h: number } | Arg[];
+type Arg = number | boolean | string | null | { f: string } | { o: number } | { b: number; n: number; t: string } | { img: number; w: number; h: number } | Arg[];
 
 const SKIP = new Set([
   'getParameter', 'getExtension', 'getSupportedExtensions', 'getContextAttributes', 'isContextLost', 'getError',
@@ -97,6 +97,8 @@ export class GlRecorder {
 
   private encode(value: any): Arg {
     if (value === null || value === undefined) return null;
+    // JSON has no Infinity or NaN (three.js passes attenuationDistance = Infinity).
+    if (typeof value === 'number' && !Number.isFinite(value)) return { f: String(value) } as any;
     if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'string') return value;
     if (ArrayBuffer.isView(value)) return this.typed(value);
     if (Array.isArray(value)) return value.map(v => this.encode(v));

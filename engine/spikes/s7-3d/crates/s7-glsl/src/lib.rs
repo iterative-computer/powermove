@@ -412,6 +412,77 @@ pub fn rewrite_modf(source: &str) -> String {
     out
 }
 
+/// Step 2f: explicit, program-wide sampler bindings. glslang's automatic mapping numbers
+/// each stage from 1, so a vertex-stage texture (the bone texture) and a fragment-stage
+/// texture would collide in one bind group. A name used in both stages gets one binding.
+pub fn assign_sampler_bindings(stages: [&str; 2]) -> [String; 2] {
+    let mut bindings: Vec<String> = Vec::new();
+    let mut out: [String; 2] = [String::new(), String::new()];
+    for (k, source) in stages.iter().enumerate() {
+        for line in source.lines() {
+            let t = line.trim();
+            let tokens: Vec<&str> = t.trim_end_matches(';').split_whitespace().collect();
+            let is_sampler = tokens.first() == Some(&"uniform") && t.ends_with(';') && tokens.len() >= 3 && tokens[tokens.len() - 2].contains("sampler") && !t.contains('[');
+            if is_sampler {
+                let name = tokens[tokens.len() - 1].to_string();
+                let index = match bindings.iter().position(|b| *b == name) {
+                    Some(i) => i,
+                    None => {
+                        bindings.push(name);
+                        bindings.len() - 1
+                    }
+                };
+                out[k].push_str(&format!("layout(binding = {}) {t}\n", index as u32 + 1));
+                continue;
+            }
+            out[k].push_str(line);
+            out[k].push('\n');
+        }
+    }
+    out
+}
+
+/// Step 2g: identifiers that are keywords in Vulkan GLSL (`sampler` names a parameter in
+/// three.js's transmission code) are renamed.
+pub fn rename_vulkan_keywords(source: &str) -> String {
+    let mut s = source.to_string();
+    for word in ["sampler", "samplerShadow"] {
+        if s.contains(word) {
+            s = replace_identifier(&s, word, &format!("pm_{word}"));
+        }
+    }
+    s
+}
+
+/// Step 2h: fragment inputs the vertex stage never declares. GLSL ES links them when the
+/// fragment shader does not statically use them (three.js declares `vNormal` in
+/// MeshBasicMaterial unconditionally), but wgpu requires every fragment input to be a
+/// vertex output, so the vertex stage gets a matching (never written) output.
+pub fn add_missing_varyings(vs: &str, fs: &str) -> String {
+    let decls = |src: &str, kw: &str| -> Vec<(String, String)> {
+        src.lines()
+            .filter_map(|l| {
+                let t = l.trim();
+                let tokens: Vec<&str> = t.trim_end_matches(';').split_whitespace().collect();
+                if !t.ends_with(';') || t.contains('(') || t.starts_with("layout") || !tokens.contains(&kw) || tokens.len() < 3 {
+                    return None;
+                }
+                Some((tokens[tokens.len() - 1].to_string(), t.to_string()))
+            })
+            .collect()
+    };
+    let outs: Vec<String> = decls(vs, "out").into_iter().map(|(n, _)| n).collect();
+    let mut extra = String::new();
+    for (name, decl) in decls(fs, "in") {
+        if !outs.contains(&name) {
+            let tokens: Vec<String> = decl.split_whitespace().map(|w| if w == "in" { "out".to_string() } else { w.to_string() }).collect();
+            extra.push_str(&tokens.join(" "));
+            extra.push('\n');
+        }
+    }
+    format!("{vs}{extra}")
+}
+
 /// Step 2c: vertex inputs of matrix type (`in mat4 instanceMatrix;`) become one vec
 /// input per column, `name_pmcK`, and uses are rebuilt with a matrix constructor.
 /// naga does not accept matrix-typed entry point inputs.
@@ -734,8 +805,10 @@ pub fn compile(vertex_src: &str, fragment_src: &str) -> Result<Program> {
     let (vs, vs_arrays) = expand_sampler_arrays(&vs)?;
     let (fs, fs_arrays) = expand_sampler_arrays(&fs)?;
     let vs = split_matrix_attributes(&vs)?;
-    let vs = rewrite_modf(&expand_io_arrays(&vs)?);
-    let fs = rewrite_modf(&expand_io_arrays(&fs)?);
+    let vs = rename_vulkan_keywords(&rewrite_modf(&expand_io_arrays(&vs)?));
+    let fs = rename_vulkan_keywords(&rewrite_modf(&expand_io_arrays(&fs)?));
+    let [vs, fs] = assign_sampler_bindings([&vs, &fs]);
+    let vs = add_missing_varyings(&vs, &fs);
     let vs = wrap_vertex_main(&vs)?;
     let (vs_spv, fs_spv) = glslang.compile(&vs, &fs)?;
     let vs_spv = split_combined_samplers(&inline_opaque(&vs_spv).context("vertex inline")?).context("vertex split")?;

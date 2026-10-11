@@ -18,6 +18,21 @@ impl Trace {
     }
 }
 
+/// A JSON number, boolean, or encoded non-finite number (`{"f": "Infinity"}`).
+pub fn number(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        Value::Bool(b) => Some(*b as u8 as f64),
+        Value::Object(m) => match m.get("f")?.as_str()? {
+            "Infinity" => Some(f64::INFINITY),
+            "-Infinity" => Some(f64::NEG_INFINITY),
+            "NaN" => Some(f64::NAN),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Accessors over one call's arguments (`[name, arg0, arg1, ..., {ret}?]`).
 pub struct Call<'a> {
     pub name: &'a str,
@@ -51,6 +66,12 @@ impl<'a> Call<'a> {
         match self.args.get(i) {
             Some(Value::Number(n)) => n.as_f64().ok_or_else(|| anyhow!("bad number")),
             Some(Value::Bool(b)) => Ok(*b as u8 as f64),
+            Some(Value::Object(m)) if m.contains_key("f") => match m["f"].as_str() {
+                Some("Infinity") => Ok(f64::INFINITY),
+                Some("-Infinity") => Ok(f64::NEG_INFINITY),
+                Some("NaN") => Ok(f64::NAN),
+                other => bail!("{}: arg {i} bad non-finite number {other:?}", self.name),
+            },
             other => bail!("{}: arg {i} is not a number: {other:?}", self.name),
         }
     }

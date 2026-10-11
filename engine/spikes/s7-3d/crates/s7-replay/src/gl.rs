@@ -1474,7 +1474,10 @@ impl Replayer {
         let n = c.name;
         // Values as f64 plus element arity.
         let values: Vec<f64> = if n.starts_with("uniformMatrix") && c.args.get(2).is_some_and(|v| v.is_array()) {
-            c.args[2].as_array().unwrap().iter().map(|v| v.as_f64().ok_or_else(|| anyhow!("matrix element"))).collect::<Result<Vec<_>>>()?
+            if c.b(1)? {
+                bail!("transposed matrix uniform");
+            }
+            c.args[2].as_array().unwrap().iter().map(|v| crate::trace::number(v).ok_or_else(|| anyhow!("matrix element"))).collect::<Result<Vec<_>>>()?
         } else if n.starts_with("uniformMatrix") {
             if c.b(1)? {
                 bail!("transposed matrix uniform");
@@ -1485,7 +1488,7 @@ impl Replayer {
             }
             bytemuck::cast_slice::<u8, f32>(bytes).iter().map(|v| *v as f64).collect()
         } else if n.ends_with('v') && c.args.get(1).is_some_and(|v| v.is_array()) {
-            c.args[1].as_array().unwrap().iter().map(|v| v.as_f64().or_else(|| v.as_bool().map(|b| b as u8 as f64)).ok_or_else(|| anyhow!("uniform array element"))).collect::<Result<Vec<_>>>()?
+            c.args[1].as_array().unwrap().iter().map(|v| crate::trace::number(v).ok_or_else(|| anyhow!("uniform array element"))).collect::<Result<Vec<_>>>()?
         } else if n.ends_with('v') {
             let (bytes, t) = c.bytes(1)?;
             let v: Vec<f64> = match t {
