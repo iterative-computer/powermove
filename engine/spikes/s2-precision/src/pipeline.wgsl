@@ -13,6 +13,12 @@ struct Params {
     clip: u32,
     // α below this is treated as zero when unpremultiplying
     alpha_guard: f32,
+    // 1 = blue-noise RPDF dither of ±0.5 LSB in the output domain (section 17)
+    dither: u32,
+    // frame index seeding the dither offset
+    frame: u32,
+    _pad0: u32,
+    _pad1: u32,
 };
 
 @group(0) @binding(0) var src0: texture_2d<f32>;
@@ -155,6 +161,30 @@ fn fs_from_rgba16(in: VsOut) -> @location(0) vec4<f32> {
 }
 
 // ---- Encoder input (render into the sink buffer's planes) ----
+// In output passes, src1 is the 64×64 blue-noise rank texture (values in (0, 1)).
+
+fn hash_u32(x: u32) -> u32 {
+    // PCG output permutation (O'Neill), deterministic on every device.
+    let state = x * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// RPDF offset in (−0.5, 0.5) for pixel p and channel ch, seeded by frame; zero when off.
+// Values already on the output grid are unchanged because |offset| < 0.5.
+fn dither_offset(p: vec2<i32>, ch: u32) -> f32 {
+    if (params.dither == 0u) {
+        return 0.0;
+    }
+    let h = hash_u32(params.frame * 4u + ch);
+    let o = vec2<i32>(i32(h & 63u), i32((h >> 6u) & 63u));
+    let q = (p + o) & vec2<i32>(63, 63);
+    return textureLoad(src1, q, 0).x - 0.5;
+}
+
+fn code_d(v: f32, lo: f32, hi: f32, p: vec2<i32>, ch: u32) -> f32 {
+    return code(v + dither_offset(p, ch), lo, hi);
+}
 
 fn code(v: f32, lo: f32, hi: f32) -> f32 {
     let c = round(v);
@@ -170,9 +200,10 @@ fn fs_to_y416(in: VsOut) -> @location(0) vec4<f32> {
     let w = from_working(textureLoad(src0, p, 0));
     let ycc = rgb_to_ycbcr(w.rgb);
     // 12-bit codable range 16..4079, expressed in y416 16-bit units (× 16).
-    let y = code(ycc.x * 56064.0 + 4096.0, 256.0, 65264.0);
-    let cb = code(ycc.y * 57344.0 + 32768.0, 256.0, 65264.0);
-    let cr = code(ycc.z * 57344.0 + 32768.0, 256.0, 65264.0);
+    // Dither (when on) at 12-bit LSB = 16 units of y416.
+    let y = code(ycc.x * 56064.0 + 4096.0 + 16.0 * dither_offset(p, 0u), 256.0, 65264.0);
+    let cb = code(ycc.y * 57344.0 + 32768.0 + 16.0 * dither_offset(p, 1u), 256.0, 65264.0);
+    let cr = code(ycc.z * 57344.0 + 32768.0 + 16.0 * dither_offset(p, 2u), 256.0, 65264.0);
     let a = clamp(round(w.a * 65535.0), 0.0, 65535.0);
     return vec4(a, y, cb, cr) / 65535.0;
 }
@@ -182,7 +213,7 @@ fn fs_to_x422_luma(in: VsOut) -> @location(0) vec4<f32> {
     let p = vec2<i32>(in.pos.xy);
     let w = from_working(textureLoad(src0, p, 0));
     let ycc = rgb_to_ycbcr(w.rgb);
-    let y = code(ycc.x * 876.0 + 64.0, 4.0, 1019.0);
+    let y = code_d(ycc.x * 876.0 + 64.0, 4.0, 1019.0, p, 0u);
     return vec4(y * 64.0 / 65535.0, 0.0, 0.0, 1.0);
 }
 
@@ -192,15 +223,54 @@ fn fs_to_x422_chroma(in: VsOut) -> @location(0) vec4<f32> {
     // Point decimation at the co-sited (even) luma position.
     let w = from_working(textureLoad(src0, vec2(p.x * 2, p.y), 0));
     let ycc = rgb_to_ycbcr(w.rgb);
-    let cb = code(ycc.y * 896.0 + 512.0, 4.0, 1019.0);
-    let cr = code(ycc.z * 896.0 + 512.0, 4.0, 1019.0);
+    let cb = code_d(ycc.y * 896.0 + 512.0, 4.0, 1019.0, p, 1u);
+    let cr = code_d(ycc.z * 896.0 + 512.0, 4.0, 1019.0, p, 2u);
     return vec4(cb * 64.0 / 65535.0, cr * 64.0 / 65535.0, 0.0, 1.0);
+}
+
+// 4:2:0, chroma siting type 0 (left): horizontally co-sited with even luma columns,
+// vertically between rows 2y and 2y + 1. Declared filter: point decimation
+// horizontally, two-tap average vertically, computed on Y′CbCr.
+fn chroma420(p: vec2<i32>) -> vec2<f32> {
+    let h = i32(textureDimensions(src0).y);
+    let a = rgb_to_ycbcr(from_working(textureLoad(src0, vec2(p.x * 2, p.y * 2), 0)).rgb);
+    let b = rgb_to_ycbcr(from_working(textureLoad(src0, vec2(p.x * 2, min(p.y * 2 + 1, h - 1)), 0)).rgb);
+    return (a.yz + b.yz) * 0.5;
+}
+
+@fragment
+fn fs_to_x420_chroma(in: VsOut) -> @location(0) vec4<f32> {
+    let p = vec2<i32>(in.pos.xy);
+    let c = chroma420(p);
+    let cb = code_d(c.x * 896.0 + 512.0, 4.0, 1019.0, p, 1u);
+    let cr = code_d(c.y * 896.0 + 512.0, 4.0, 1019.0, p, 2u);
+    return vec4(cb * 64.0 / 65535.0, cr * 64.0 / 65535.0, 0.0, 1.0);
+}
+
+// 8-bit limited range ('420v'): codable range 1..254.
+@fragment
+fn fs_to_420v_luma(in: VsOut) -> @location(0) vec4<f32> {
+    let p = vec2<i32>(in.pos.xy);
+    let w = from_working(textureLoad(src0, p, 0));
+    let ycc = rgb_to_ycbcr(w.rgb);
+    let y = code_d(ycc.x * 219.0 + 16.0, 1.0, 254.0, p, 0u);
+    return vec4(y / 255.0, 0.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs_to_420v_chroma(in: VsOut) -> @location(0) vec4<f32> {
+    let p = vec2<i32>(in.pos.xy);
+    let c = chroma420(p);
+    let cb = code_d(c.x * 224.0 + 128.0, 1.0, 254.0, p, 1u);
+    let cr = code_d(c.y * 224.0 + 128.0, 1.0, 254.0, p, 2u);
+    return vec4(cb / 255.0, cr / 255.0, 0.0, 1.0);
 }
 
 @fragment
 fn fs_to_rgba16(in: VsOut) -> @location(0) vec4<f32> {
     let p = vec2<i32>(in.pos.xy);
     let w = from_working(textureLoad(src0, p, 0));
-    let c = clamp(round(vec4(w.rgb, w.a) * 65535.0), vec4(0.0), vec4(65535.0));
+    let d = vec4(dither_offset(p, 0u), dither_offset(p, 1u), dither_offset(p, 2u), 0.0);
+    let c = clamp(round(vec4(w.rgb, w.a) * 65535.0 + d), vec4(0.0), vec4(65535.0));
     return c / 65535.0;
 }

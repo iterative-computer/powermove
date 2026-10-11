@@ -229,3 +229,43 @@ fn row_samples(pb: &CVPixelBuffer, plane: Option<usize>, w: usize) -> usize {
 pub fn key_name(k: &CFString) -> String {
     ns(k).to_string()
 }
+
+/// Test-only uncompressed sink: write every plane tightly packed, little-endian, in
+/// plane order (`y416`: AYCbCr u16; `x422`/`x420`: Y′ u16 then CbCr u16; `420v`: u8).
+pub fn write_raw_sink(pb: &PixelBuffer, path: &std::path::Path) -> Result<u64> {
+    let mut bytes: Vec<u8> = vec![];
+    let planes: Vec<Option<usize>> = if pb.plane_count() == 0 { vec![None] } else { (0..pb.plane_count()).map(Some).collect() };
+    for plane in planes {
+        if pb.format() == V420 || pb.format() == F420 {
+            bytes.extend(pb.read_u8(plane)?.0);
+        } else {
+            bytes.extend(pb.read_u16(plane)?.0.iter().flat_map(|v| v.to_le_bytes()));
+        }
+    }
+    std::fs::write(path, &bytes).map_err(|e| cf::Error(format!("{}: {e}", path.display())))?;
+    Ok(bytes.len() as u64)
+}
+
+/// Read a raw sink written by `write_raw_sink` back into a buffer of the same geometry.
+pub fn read_raw_sink(path: &std::path::Path, width: usize, height: usize, format: u32) -> Result<PixelBuffer> {
+    let bytes = std::fs::read(path).map_err(|e| cf::Error(format!("{}: {e}", path.display())))?;
+    let pb = PixelBuffer::new(width, height, format)?;
+    let planes: Vec<Option<usize>> = if pb.plane_count() == 0 { vec![None] } else { (0..pb.plane_count()).map(Some).collect() };
+    let mut off = 0usize;
+    for plane in planes {
+        if format == V420 || format == F420 {
+            let n = pb.read_u8(plane)?.0.len();
+            pb.write_u8(plane, &bytes[off..off + n])?;
+            off += n;
+        } else {
+            let n = pb.read_u16(plane)?.0.len();
+            let v: Vec<u16> = bytes[off..off + 2 * n].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            pb.write_u16(plane, &v)?;
+            off += 2 * n;
+        }
+    }
+    if off != bytes.len() {
+        return err(format!("{}: {} trailing bytes", path.display(), bytes.len() - off));
+    }
+    Ok(pb)
+}

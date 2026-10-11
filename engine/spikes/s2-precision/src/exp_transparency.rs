@@ -34,15 +34,24 @@ pub struct Case {
     pub reference_outside_codable_range: u64,
     /// Mismatches against the reference clipped to the codable range (section 9 clip rule).
     pub mismatches_vs_clipped_reference: u64,
+    /// The first frame's sink written as a raw test sink file and read back.
+    pub raw_sink: Option<RawSink>,
+}
+
+#[derive(Serialize)]
+pub struct RawSink {
+    pub file: String,
+    pub bytes: u64,
+    pub read_back_identical: bool,
 }
 
 fn configs() -> Vec<(&'static str, PipeParams)> {
     vec![
-        ("f32 standard, clip", PipeParams { precision: Precision::F32, linear: false, premultiply: true, clip: true }),
-        ("f32 standard, no clip", PipeParams { precision: Precision::F32, linear: false, premultiply: true, clip: false }),
-        ("f16 standard, no clip", PipeParams { precision: Precision::F16, linear: false, premultiply: true, clip: false }),
-        ("f32 linear, no clip", PipeParams { precision: Precision::F32, linear: true, premultiply: true, clip: false }),
-        ("f16 linear, no clip", PipeParams { precision: Precision::F16, linear: true, premultiply: true, clip: false }),
+        ("f32 standard, clip", PipeParams::new(Precision::F32, false, true)),
+        ("f32 standard, no clip", PipeParams::new(Precision::F32, false, false)),
+        ("f16 standard, no clip", PipeParams::new(Precision::F16, false, false)),
+        ("f32 linear, no clip", PipeParams::new(Precision::F32, true, false)),
+        ("f16 linear, no clip", PipeParams::new(Precision::F16, true, false)),
     ]
 }
 
@@ -96,6 +105,20 @@ fn new_acc() -> [ChannelStats; 4] {
     ["Y", "Cb", "Cr", "A"].map(|c| ChannelStats { channel: c.into(), at16: DiffStats::default(), at_codec_depth: DiffStats::default() })
 }
 
+fn raw_sink(sink: &PixelBuffer, dir: &std::path::Path, stem: &str) -> Result<RawSink> {
+    std::fs::create_dir_all(dir).map_err(|e| crate::cf::Error(e.to_string()))?;
+    let ext = crate::cf::fourcc_str(sink.format());
+    let path = dir.join(format!("{stem}.{ext}"));
+    let bytes = pixbuf::write_raw_sink(sink, &path)?;
+    let back = pixbuf::read_raw_sink(&path, sink.width(), sink.height(), sink.format())?;
+    let planes: Vec<Option<usize>> = if sink.plane_count() == 0 { vec![None] } else { (0..sink.plane_count()).map(Some).collect() };
+    let mut same = true;
+    for p in planes {
+        same &= sink.read_u16(p)?.0 == back.read_u16(p)?.0;
+    }
+    Ok(RawSink { file: path.file_name().unwrap().to_string_lossy().into(), bytes, read_back_identical: same })
+}
+
 pub fn run(gpu: &Gpu, m: &Material) -> Result<Vec<Case>> {
     let mut cases = vec![];
     for (name, path, fmt) in [
@@ -109,8 +132,13 @@ pub fn run(gpu: &Gpu, m: &Material) -> Result<Vec<Case>> {
             let mut az = 0;
             let mut outside = 0;
             let mut vs_clipped = 0;
-            for f in &dec.frames {
+            let mut raw = None;
+            for (i, f) in dec.frames.iter().enumerate() {
                 let out = gpu.engine_copy(&f.buffer, &p)?;
+                if i == 0 && cname == "f32 standard, clip" {
+                    let stem = if fmt == pixbuf::Y416 && name.contains("alpha") { "sink_4444xq_alpha" } else if fmt == pixbuf::Y416 { "sink_4444xq" } else { "sink_422hq" };
+                    raw = Some(raw_sink(&out, &m.dir.join("../sinks"), stem)?);
+                }
                 if fmt == pixbuf::Y416 {
                     compare_y416(&f.buffer, &out, &mut acc, &mut az, &mut outside, &mut vs_clipped)?;
                 } else {
@@ -131,6 +159,7 @@ pub fn run(gpu: &Gpu, m: &Material) -> Result<Vec<Case>> {
                 exact_at_codec_depth: exactd,
                 reference_outside_codable_range: outside,
                 mismatches_vs_clipped_reference: vs_clipped,
+                raw_sink: raw,
             });
         }
     }

@@ -24,7 +24,7 @@ pub struct Row {
 }
 
 fn params(p: Precision, linear: bool) -> PipeParams {
-    PipeParams { precision: p, linear, premultiply: true, clip: false }
+    PipeParams::new(p, linear, false)
 }
 
 const MODES: [(Precision, bool); 4] =

@@ -22,6 +22,8 @@ pub struct Gpu {
     bgl: wgpu::BindGroupLayout,
     layout: wgpu::PipelineLayout,
     dummy: wgpu::TextureView,
+    /// 64×64 blue-noise ranks (R32Float, values in (0, 1)) for output dither.
+    noise: wgpu::TextureView,
 }
 
 struct SendCv(#[allow(dead_code)] CFRetained<CVMetalTexture>);
@@ -50,11 +52,19 @@ pub struct PipeParams {
     pub linear: bool,
     pub premultiply: bool,
     pub clip: bool,
+    /// Blue-noise RPDF dither of ±0.5 LSB in the output domain (section 17).
+    pub dither: bool,
+    /// Frame index seeding the dither offset.
+    pub frame: u32,
 }
 
 impl PipeParams {
     pub fn standard(precision: Precision) -> Self {
-        Self { precision, linear: false, premultiply: true, clip: true }
+        Self { precision, linear: false, premultiply: true, clip: true, dither: false, frame: 0 }
+    }
+
+    pub fn new(precision: Precision, linear: bool, clip: bool) -> Self {
+        Self { precision, linear, premultiply: true, clip, dither: false, frame: 0 }
     }
 }
 
@@ -65,6 +75,9 @@ struct ParamsUniform {
     premultiply: u32,
     clip: u32,
     alpha_guard: f32,
+    dither: u32,
+    frame: u32,
+    _pad: [u32; 2],
 }
 
 pub const WANTED_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
@@ -154,7 +167,8 @@ impl Gpu {
                 view_formats: &[],
             })
             .create_view(&Default::default());
-        Ok(Self { adapter, device, queue, cache, pipeline_module, bgl, layout, dummy })
+        let noise = upload_noise(&device, &queue);
+        Ok(Self { adapter, device, queue, cache, pipeline_module, bgl, layout, dummy, noise })
     }
 
     pub fn mtl_device(&self) -> Retained<ProtocolObject<dyn MTLDevice>> {
@@ -264,11 +278,14 @@ impl Gpu {
                 Precision::F16 => 1.0 / 4096.0,
                 Precision::F32 => f32::MIN_POSITIVE,
             },
+            dither: p.dither as u32,
+            frame: p.frame,
+            _pad: [0; 2],
         };
-        let bytes: [u8; 16] = unsafe { std::mem::transmute(u) };
+        let bytes: [u8; 32] = unsafe { std::mem::transmute(u) };
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("params"),
-            size: 16,
+            size: 32,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -350,58 +367,105 @@ impl Gpu {
         self.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
     }
 
-    /// Engine path for a y416 source: decode buffer → working texture → y416 sink buffer.
-    pub fn run_y416(&self, src: &PixelBuffer, sink: &PixelBuffer, p: &PipeParams) -> Result<()> {
-        let s = self.import_plane(src, 0, MTLPixelFormat::RGBA16Unorm, wgpu::TextureFormat::Rgba16Unorm)?;
-        let t = self.import_plane(sink, 0, MTLPixelFormat::RGBA16Unorm, wgpu::TextureFormat::Rgba16Unorm)?;
+    /// Source conversion: decoded buffer → working texture (premultiplied, E or linear).
+    pub fn source_pass(&self, src: &PixelBuffer, p: &PipeParams) -> Result<wgpu::Texture> {
         let work = self.working_texture(src.width() as u32, src.height() as u32, p.precision);
-        self.pass("fs_from_y416", &s.create_view(&Default::default()), None, p, &work);
-        self.pass("fs_to_y416", &work.create_view(&Default::default()), None, p, &t);
-        self.wait();
-        Ok(())
-    }
-
-    /// Engine path for an x422 source: decode buffer → working texture → x422 sink buffer.
-    pub fn run_x422(&self, src: &PixelBuffer, sink: &PixelBuffer, p: &PipeParams) -> Result<()> {
-        let sy = self.import_plane(src, 0, MTLPixelFormat::R16Unorm, wgpu::TextureFormat::R16Unorm)?;
-        let sc = self.import_plane(src, 1, MTLPixelFormat::RG16Unorm, wgpu::TextureFormat::Rg16Unorm)?;
-        let ty = self.import_plane(sink, 0, MTLPixelFormat::R16Unorm, wgpu::TextureFormat::R16Unorm)?;
-        let tc = self.import_plane(sink, 1, MTLPixelFormat::RG16Unorm, wgpu::TextureFormat::Rg16Unorm)?;
-        let work = self.working_texture(src.width() as u32, src.height() as u32, p.precision);
-        self.pass(
-            "fs_from_x422",
-            &sy.create_view(&Default::default()),
-            Some(&sc.create_view(&Default::default())),
-            p,
-            &work,
-        );
-        let wv = work.create_view(&Default::default());
-        self.pass("fs_to_x422_luma", &wv, None, p, &ty);
-        self.pass("fs_to_x422_chroma", &wv, None, p, &tc);
-        self.wait();
-        Ok(())
-    }
-
-    /// Engine path for 16-bit straight RGBA: 'l64r' buffer → working texture → 'l64r' sink.
-    pub fn run_rgba16(&self, src: &PixelBuffer, sink: &PixelBuffer, p: &PipeParams) -> Result<()> {
-        let s = self.import_plane(src, 0, MTLPixelFormat::RGBA16Unorm, wgpu::TextureFormat::Rgba16Unorm)?;
-        let t = self.import_plane(sink, 0, MTLPixelFormat::RGBA16Unorm, wgpu::TextureFormat::Rgba16Unorm)?;
-        let work = self.working_texture(src.width() as u32, src.height() as u32, p.precision);
-        self.pass("fs_from_rgba16", &s.create_view(&Default::default()), None, p, &work);
-        self.pass("fs_to_rgba16", &work.create_view(&Default::default()), None, p, &t);
-        self.wait();
-        Ok(())
-    }
-
-    /// Run the engine path for a decoded buffer into a freshly allocated sink of the same format.
-    pub fn engine_copy(&self, src: &PixelBuffer, p: &PipeParams) -> Result<PixelBuffer> {
-        let sink = PixelBuffer::new(src.width(), src.height(), src.format())?;
         match src.format() {
-            pixbuf::Y416 => self.run_y416(src, &sink, p)?,
-            pixbuf::X422 => self.run_x422(src, &sink, p)?,
-            pixbuf::RGBA64 => self.run_rgba16(src, &sink, p)?,
-            f => return err(format!("engine_copy: unsupported format '{}'", cf::fourcc_str(f))),
+            pixbuf::Y416 => {
+                let s = self.import_plane(src, 0, MTLPixelFormat::RGBA16Unorm, wgpu::TextureFormat::Rgba16Unorm)?;
+                self.pass("fs_from_y416", &s.create_view(&Default::default()), None, p, &work);
+            }
+            pixbuf::X422 => {
+                let sy = self.import_plane(src, 0, MTLPixelFormat::R16Unorm, wgpu::TextureFormat::R16Unorm)?;
+                let sc = self.import_plane(src, 1, MTLPixelFormat::RG16Unorm, wgpu::TextureFormat::Rg16Unorm)?;
+                self.pass(
+                    "fs_from_x422",
+                    &sy.create_view(&Default::default()),
+                    Some(&sc.create_view(&Default::default())),
+                    p,
+                    &work,
+                );
+            }
+            pixbuf::RGBA64 => {
+                let s = self.import_plane(src, 0, MTLPixelFormat::RGBA16Unorm, wgpu::TextureFormat::Rgba16Unorm)?;
+                self.pass("fs_from_rgba16", &s.create_view(&Default::default()), None, p, &work);
+            }
+            f => return err(format!("source_pass: unsupported format '{}'", cf::fourcc_str(f))),
         }
+        Ok(work)
+    }
+
+    /// Encoder input: working texture → sink buffer planes (matrix, siting, codes, dither).
+    pub fn output_pass(&self, work: &wgpu::Texture, sink: &PixelBuffer, p: &PipeParams) -> Result<()> {
+        let wv = work.create_view(&Default::default());
+        let n = Some(&self.noise);
+        match sink.format() {
+            pixbuf::Y416 => {
+                let t = self.import_plane(sink, 0, MTLPixelFormat::RGBA16Unorm, wgpu::TextureFormat::Rgba16Unorm)?;
+                self.pass("fs_to_y416", &wv, n, p, &t);
+            }
+            pixbuf::X422 => {
+                let ty = self.import_plane(sink, 0, MTLPixelFormat::R16Unorm, wgpu::TextureFormat::R16Unorm)?;
+                let tc = self.import_plane(sink, 1, MTLPixelFormat::RG16Unorm, wgpu::TextureFormat::Rg16Unorm)?;
+                self.pass("fs_to_x422_luma", &wv, n, p, &ty);
+                self.pass("fs_to_x422_chroma", &wv, n, p, &tc);
+            }
+            pixbuf::X420 => {
+                let ty = self.import_plane(sink, 0, MTLPixelFormat::R16Unorm, wgpu::TextureFormat::R16Unorm)?;
+                let tc = self.import_plane(sink, 1, MTLPixelFormat::RG16Unorm, wgpu::TextureFormat::Rg16Unorm)?;
+                self.pass("fs_to_x422_luma", &wv, n, p, &ty);
+                self.pass("fs_to_x420_chroma", &wv, n, p, &tc);
+            }
+            pixbuf::V420 => {
+                let ty = self.import_plane(sink, 0, MTLPixelFormat::R8Unorm, wgpu::TextureFormat::R8Unorm)?;
+                let tc = self.import_plane(sink, 1, MTLPixelFormat::RG8Unorm, wgpu::TextureFormat::Rg8Unorm)?;
+                self.pass("fs_to_420v_luma", &wv, n, p, &ty);
+                self.pass("fs_to_420v_chroma", &wv, n, p, &tc);
+            }
+            pixbuf::RGBA64 => {
+                let t = self.import_plane(sink, 0, MTLPixelFormat::RGBA16Unorm, wgpu::TextureFormat::Rgba16Unorm)?;
+                self.pass("fs_to_rgba16", &wv, n, p, &t);
+            }
+            f => return err(format!("output_pass: unsupported format '{}'", cf::fourcc_str(f))),
+        }
+        Ok(())
+    }
+
+    /// Decoded buffer → engine (no effects) → a freshly allocated sink of `format`, tagged Rec.709.
+    pub fn engine_convert(&self, src: &PixelBuffer, format: u32, p: &PipeParams) -> Result<PixelBuffer> {
+        let sink = PixelBuffer::new(src.width(), src.height(), format)?;
+        let work = self.source_pass(src, p)?;
+        self.output_pass(&work, &sink, p)?;
+        self.wait();
+        sink.tag_709();
         Ok(sink)
     }
+
+    /// Run the engine path for a decoded buffer into a sink of the same format.
+    pub fn engine_copy(&self, src: &PixelBuffer, p: &PipeParams) -> Result<PixelBuffer> {
+        self.engine_convert(src, src.format(), p)
+    }
+}
+
+fn upload_noise(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
+    let n = crate::bluenoise::SIZE;
+    let ranks = crate::bluenoise::tile();
+    let vals: Vec<f32> = ranks.iter().map(|&r| (r as f32 + 0.5) / (n * n) as f32).collect();
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("blue noise"),
+        size: wgpu::Extent3d { width: n as u32, height: n as u32, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        tex.as_image_copy(),
+        &vals.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>(),
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(n as u32 * 4), rows_per_image: None },
+        wgpu::Extent3d { width: n as u32, height: n as u32, depth_or_array_layers: 1 },
+    );
+    tex.create_view(&Default::default())
 }
