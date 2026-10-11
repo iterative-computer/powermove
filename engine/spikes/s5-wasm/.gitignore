@@ -1,4 +1,4 @@
 target/
 .tools/
 pkg/
-results/*.local.*
+results/

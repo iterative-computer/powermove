@@ -20,6 +20,8 @@ fi
 cargo build --release --target wasm32-unknown-unknown -p s5-wasm
 rm -rf pkg
 "$bindgen" --target web --out-dir pkg target/wasm32-unknown-unknown/release/s5_wasm.wasm
+# The bindings are an ES module; say so for Node.
+printf '{ "type": "module" }\n' > pkg/package.json
 
 cargo build --release -p s5-native
 cargo build --release -p s5-native --features system-math --target-dir target/system-math
