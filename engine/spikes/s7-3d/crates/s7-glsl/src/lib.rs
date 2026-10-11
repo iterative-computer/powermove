@@ -355,6 +355,63 @@ fn replace_indexed(source: &str, name: &str, n: u32) -> Result<String> {
     Ok(out)
 }
 
+/// Step 2d: arrays of varyings (`out vec4 vDirectionalShadowCoord[ 1 ];`) become one
+/// varying per element, `name_pmK`; naga only accepts scalars and vectors as entry point
+/// inputs and outputs. three.js unrolls its light loops, so every index is a literal.
+pub fn expand_io_arrays(source: &str) -> Result<String> {
+    let mut arrays: Vec<(String, u32)> = Vec::new();
+    let mut out = String::with_capacity(source.len());
+    for line in source.lines() {
+        let t = line.trim();
+        let tokens: Vec<&str> = t.split_whitespace().collect();
+        let io = tokens.iter().any(|w| *w == "in" || *w == "out") && !t.contains('(') && t.ends_with(';');
+        if io {
+            let decl = t.trim_end_matches(';');
+            if let (Some(open), Some(close)) = (decl.rfind('['), decl.rfind(']')) {
+                let n: u32 = decl[open + 1..close].trim().parse().map_err(|_| anyhow!("non-literal varying array size in `{t}`"))?;
+                let head = decl[..open].trim_end();
+                let name_start = head.rfind(char::is_whitespace).map(|i| i + 1).unwrap_or(0);
+                let name = &head[name_start..];
+                let qualifiers = &head[..name_start];
+                for k in 0..n {
+                    out.push_str(&format!("{qualifiers}{name}_pm{k};\n"));
+                }
+                arrays.push((name.to_string(), n));
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    for (name, n) in &arrays {
+        out = replace_indexed(&out, name, *n)?;
+    }
+    Ok(out)
+}
+
+/// Step 2e: `modf` through a helper. naga's SPIR-V front end produces an unregistered
+/// result type for `Modf`; `x - trunc(x)` is exact, so the helper is bit-identical.
+pub fn rewrite_modf(source: &str) -> String {
+    if !source.contains("modf") {
+        return source.to_string();
+    }
+    let renamed = replace_identifier(source, "modf", "pm_modf");
+    let helpers = "float pm_modf(float x, out float i) { i = trunc(x); return x - i; }\nvec2 pm_modf(vec2 x, out vec2 i) { i = trunc(x); return x - i; }\nvec3 pm_modf(vec3 x, out vec3 i) { i = trunc(x); return x - i; }\nvec4 pm_modf(vec4 x, out vec4 i) { i = trunc(x); return x - i; }\n";
+    // After `#version` and any `#extension` lines.
+    let mut insert_at = 0;
+    for line in renamed.split_inclusive('\n') {
+        let t = line.trim_start();
+        if t.starts_with("#version") || t.starts_with("#extension") || t.is_empty() {
+            insert_at += line.len();
+        } else {
+            break;
+        }
+    }
+    let mut out = renamed;
+    out.insert_str(insert_at, helpers);
+    out
+}
+
 /// Step 2c: vertex inputs of matrix type (`in mat4 instanceMatrix;`) become one vec
 /// input per column, `name_pmcK`, and uses are rebuilt with a matrix constructor.
 /// naga does not accept matrix-typed entry point inputs.
@@ -632,12 +689,41 @@ fn inline_opaque(words: &[u32]) -> Result<Vec<u32>> {
 
 fn to_naga(words: &[u32]) -> Result<(naga::Module, naga::valid::ModuleInfo)> {
     let options = naga::front::spv::Options { adjust_coordinate_space: false, strict_capabilities: false, block_ctx_dump_prefix: None };
-    let module = naga::front::spv::Frontend::new(words.iter().cloned(), &options).parse().map_err(|e| anyhow!("naga spv-in: {e:?}"))?;
+    let mut module = naga::front::spv::Frontend::new(words.iter().cloned(), &options).parse().map_err(|e| anyhow!("naga spv-in: {e:?}"))?;
+    pad_struct_spans(&mut module)?;
     let flags = naga::valid::ValidationFlags::all() ^ naga::valid::ValidationFlags::CONTROL_FLOW_UNIFORMITY;
     let info = naga::valid::Validator::new(flags, naga::valid::Capabilities::all())
         .validate(&module)
         .map_err(|e| anyhow!("naga validation: {}", e.emit_to_string("")))?;
     Ok((module, info))
+}
+
+/// SPIR-V does not record struct sizes, so naga gives a std140 struct its natural span
+/// (`{float x4, vec2}` = 24) while the array holding it has stride 32. The MSL back end
+/// then lays the array out at the struct's size and every later block member moves.
+/// Widen such structs to their array stride.
+pub fn pad_struct_spans(module: &mut naga::Module) -> Result<()> {
+    let mut needed: BTreeMap<naga::Handle<naga::Type>, u32> = BTreeMap::new();
+    for (_, ty) in module.types.iter() {
+        if let naga::TypeInner::Array { base, stride, .. } = ty.inner {
+            if let naga::TypeInner::Struct { span, .. } = module.types[base].inner {
+                if span < stride {
+                    let e = needed.entry(base).or_insert(stride);
+                    *e = (*e).max(stride);
+                }
+            }
+        }
+    }
+    for (handle, stride) in needed {
+        let old = module.types[handle].clone();
+        let naga::TypeInner::Struct { members, .. } = old.inner else { unreachable!() };
+        let new = naga::Type { name: old.name.clone(), inner: naga::TypeInner::Struct { members, span: stride } };
+        if module.types.get(&new).is_some() {
+            bail!("padded struct {:?} already exists", old.name);
+        }
+        module.types.replace(handle, new);
+    }
+    Ok(())
 }
 
 /// Compiles a three.js program (vertex and fragment sources exactly as WebGL received them).
@@ -648,6 +734,8 @@ pub fn compile(vertex_src: &str, fragment_src: &str) -> Result<Program> {
     let (vs, vs_arrays) = expand_sampler_arrays(&vs)?;
     let (fs, fs_arrays) = expand_sampler_arrays(&fs)?;
     let vs = split_matrix_attributes(&vs)?;
+    let vs = rewrite_modf(&expand_io_arrays(&vs)?);
+    let fs = rewrite_modf(&expand_io_arrays(&fs)?);
     let vs = wrap_vertex_main(&vs)?;
     let (vs_spv, fs_spv) = glslang.compile(&vs, &fs)?;
     let vs_spv = split_combined_samplers(&inline_opaque(&vs_spv).context("vertex inline")?).context("vertex split")?;
@@ -846,6 +934,14 @@ mod tests {
         let p = compile(vs, fs).expect("compile");
         let cols: Vec<_> = p.attributes.values().filter(|a| a.gl_name == "instanceMatrix").map(|a| a.column).collect();
         assert_eq!(cols.len(), 4);
+    }
+
+    #[test]
+    fn expands_varying_arrays_and_modf() {
+        let vs = "#version 300 es\nin vec3 position;\nout vec4 vCoord[ 2 ];\nvoid main() { vCoord[ 0 ] = vec4(position, 1.0); vCoord[ 1 ] = vec4(1.0); gl_Position = vCoord[ 0 ]; }\n";
+        let fs = "#version 300 es\nprecision highp float;\nin vec4 vCoord[ 2 ];\nlayout(location = 0) out vec4 o;\nvoid main() { float i; float f = modf(vCoord[ 1 ].x * 3.5, i); o = vCoord[ 0 ] + vec4(f, i, 0.0, 0.0); }\n";
+        let p = compile(vs, fs).expect("compile");
+        assert!(p.preprocessed[0].contains("vCoord_pm1") && p.preprocessed[1].contains("pm_modf"));
     }
 
     #[test]

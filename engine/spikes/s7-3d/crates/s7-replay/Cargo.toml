@@ -1,0 +1,19 @@
+[package]
+name = "s7-replay"
+description = "Replays recorded three.js WebGL2 command streams through the S3-style pipeline on wgpu (spike S7)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+naga.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+bytemuck.workspace = true
+png.workspace = true
+half = "2"
+s7-glsl = { path = "../s7-glsl" }
