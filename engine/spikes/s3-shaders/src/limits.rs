@@ -481,6 +481,12 @@ fn preprocess(source: &str) -> Result<Vec<Tok<'_>>, LimitError> {
             "endif" => {
                 stack.pop();
             }
+            // GLSL ES 3.00 (and ANGLE): `#extension` must precede every
+            // non-preprocessor token. glslang's ES front end does not check
+            // this; the fuzz found it.
+            "extension" if active(&stack) && !out.is_empty() => {
+                return Err(LimitError::new("es-rule", "extension directive must occur before any non-preprocessor tokens in ES", t.first().map(|t| t.line)));
+            }
             _ => {}
         }
     }
@@ -792,6 +798,14 @@ mod tests {
         let many = |n: usize| format!("{H}void main(){{ float f = 0.0;\n{} o = vec4(f); }}\n", "f += 1.0;\n".repeat(n));
         check_source(&many(MAX_STATEMENTS - 4)).expect("4 statements around the loop body");
         assert_eq!(check_source(&many(MAX_STATEMENTS - 3)).unwrap_err().rule, "statements");
+    }
+
+    #[test]
+    fn extension_directives_must_come_first() {
+        check_source("#version 300 es\n#extension GL_EXT_shader_texture_lod : enable\nprecision highp float;\nout vec4 o;\nvoid main(){ o = vec4(1.0); }\n").expect("before code");
+        let late = format!("{H}#extension GL_EXT_shader_texture_lod : enable\nvoid main(){{ o = vec4(1.0); }}\n");
+        let e = check_source(&late).unwrap_err();
+        assert_eq!((e.rule, e.line), ("es-rule", Some(4)));
     }
 
     #[test]
