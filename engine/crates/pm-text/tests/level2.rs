@@ -30,6 +30,7 @@ fn manifest() -> FallbackManifest {
         ],
         emoji: Some("Apple Color Emoji".into()),
         last_resort: None,
+        faces: Vec::new(),
     }
 }
 

@@ -18,7 +18,7 @@
 
 use crate::compat::{Align, Boundary, GlyphLayout, PlacedGlyph, TextContent, Unit};
 use crate::font::{FontBytes, OPSZ, tag};
-use crate::registry::FallbackManifest;
+use crate::registry::{COMMON_SCRIPT, FallbackManifest};
 use parlance::{FontVariation, Tag};
 use parley::fontique::{Blob, Collection, CollectionOptions, FallbackKey, FontInfoOverride, GenericFamily, Script};
 use parley::{
@@ -80,8 +80,8 @@ pub struct Level2Layout {
     pub units: GlyphLayout,
     pub width: f64,
     pub height: f64,
-    /// Characters no added face covers (drawn as `.notdef`): the host adds
-    /// fonts and lays the text out again.
+    /// Visible clusters no added face covers (drawn as `.notdef`): the host
+    /// adds fonts and lays the text out again.
     pub missing_glyphs: usize,
 }
 
@@ -134,11 +134,38 @@ impl Level2 {
         if let Some(emoji) = manifest.emoji.as_deref().and_then(|e| id(collection, e)) {
             collection.set_generic_families(GenericFamily::Emoji, std::iter::once(emoji));
         }
+        // Families for common-script characters come after every script's own.
+        let mut common: Vec<String> = Vec::new();
+        for s in manifest.scripts.iter().filter(|s| s.script == COMMON_SCRIPT) {
+            for f in &s.families {
+                if !common.contains(f) {
+                    common.push(f.clone());
+                }
+            }
+        }
         let mut per_key: BTreeMap<(String, Option<String>), Vec<String>> = BTreeMap::new();
-        for s in &manifest.scripts {
+        for s in manifest.scripts.iter().filter(|s| s.script != COMMON_SCRIPT) {
             per_key.entry((s.script.clone(), s.language.clone())).or_default().extend(s.families.iter().cloned());
         }
-        for ((script, language), families) in per_key {
+        // Text without a locale uses the script's default list: the first
+        // language's families, then the families listed without a language.
+        let scripts: Vec<String> = per_key.keys().map(|k| k.0.clone()).collect();
+        for script in scripts {
+            let first = per_key.iter().find(|(k, _)| k.0 == script && k.1.is_some()).map(|(_, v)| v.clone()).unwrap_or_default();
+            let default = per_key.entry((script, None)).or_default();
+            for (i, f) in first.into_iter().enumerate() {
+                if !default.contains(&f) {
+                    default.insert(i, f);
+                }
+            }
+        }
+        per_key.entry((COMMON_SCRIPT.to_string(), None)).or_default();
+        for ((script, language), mut families) in per_key {
+            for f in &common {
+                if !families.contains(f) {
+                    families.push(f.clone());
+                }
+            }
             let bytes: [u8; 4] = match script.as_bytes().try_into() {
                 Ok(b) => b,
                 Err(_) => continue,
@@ -240,10 +267,16 @@ impl Level2 {
                 let synthesis = run.synthesis();
                 let mut glyphs = Vec::new();
                 for g in gr.positioned_glyphs() {
-                    if g.id == 0 {
+                    glyphs.push(PlacedGlyph { id: g.id, x: g.x as f64 + shift, y: g.y as f64 });
+                }
+                // `.notdef` for a visible character (controls, spaces, and
+                // default-ignorables draw nothing by design).
+                for cluster in run.clusters() {
+                    let t = &text[cluster.text_range()];
+                    let visible = t.chars().any(|c| !c.is_whitespace() && !c.is_control() && !crate::blink::chars::is_default_ignorable(c as u32));
+                    if visible && cluster.glyphs().any(|g| g.id == 0) {
                         out.missing_glyphs += 1;
                     }
-                    glyphs.push(PlacedGlyph { id: g.id, x: g.x as f64 + shift, y: g.y as f64 });
                 }
                 out.runs.push(Run {
                     line: row,

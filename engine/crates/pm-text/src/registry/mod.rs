@@ -248,6 +248,16 @@ pub struct StyleInfo {
     pub italic: bool,
 }
 
+/// A face of a family as a font source (`blob`, `index`) the registry
+/// serves full or as a subset.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceSource {
+    pub blob: String,
+    pub index: u32,
+    pub postscript_name: String,
+}
+
 /// The fallback order level 2 layout gives Parley: per script (ISO 15924)
 /// and language, the families CoreText falls back to for a sample
 /// character, plus the emoji family and the last resort. Built natively
@@ -260,6 +270,17 @@ pub struct FallbackManifest {
     pub scripts: Vec<ScriptFallback>,
     pub emoji: Option<String>,
     pub last_resort: Option<String>,
+    /// Every face the manifest's families need, with the family name to add
+    /// it under (hidden system families have no other way to be found).
+    #[serde(default)]
+    pub faces: Vec<ManifestFace>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestFace {
+    pub family: String,
+    pub source: FaceSource,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -290,6 +311,8 @@ pub const MANIFEST_SAMPLES: &[(&str, Option<&str>, &str)] = &[
     ("Hani", Some("zh-Hans"), "编"),
     ("Hani", Some("zh-Hant"), "編"),
     ("Hani", Some("ja"), "編"),
+    // CJK Extension B (astral ideographs).
+    ("Hani", None, "𠀀"),
     ("Syrc", None, "ܐ"),
     ("Ethi", None, "አ"),
     ("Armn", None, "Ա"),
@@ -300,7 +323,18 @@ pub const MANIFEST_SAMPLES: &[(&str, Option<&str>, &str)] = &[
     ("Tibt", None, "ཀ"),
     ("Zsym", None, "→"),
     ("Zmth", None, "∑"),
+    // Common-script characters the base font may lack: level 2 appends
+    // these families to every script's fallback list.
+    ("Zyyy", None, "𝐁"),
+    ("Zyyy", None, "✂"),
+    ("Zyyy", None, "\u{0335}"),
+    ("Zyyy", None, "\u{0354}"),
+    ("Zyyy", None, "⌘"),
+    ("Zyyy", None, "\u{2B1F}"),
 ];
+
+/// The script code of the common-script entries in a manifest.
+pub const COMMON_SCRIPT: &str = "Zyyy";
 
 #[cfg(test)]
 mod tests {

@@ -15,7 +15,7 @@ use objc2_core_text::{
 };
 use objc2_foundation::{NSArray, NSNumber, NSString};
 use super::{
-    FallbackManifest, FamilyInfo, MANIFEST_SAMPLES, ProjectDescriptors, ProjectStyle, ScriptFallback, StyleInfo,
+    FaceSource, FallbackManifest, FamilyInfo, ManifestFace, MANIFEST_SAMPLES, ProjectDescriptors, ProjectStyle, ScriptFallback, StyleInfo,
     content_key, select_face, source_key, web_synthesis,
 };
 use crate::font::{FaceFacts, FaceId, FaceInfo, FontBytes, FontDesc, FontResolver, WebDescriptors};
@@ -357,36 +357,111 @@ impl CoreTextRegistry {
         Some(FamilyInfo { name: family.to_string(), styles, variable, project: false })
     }
 
+    /// The faces of `family` as font sources, for level 2 layout: a project
+    /// family's faces, or the installed family's members. A hidden family
+    /// CoreText does not list (the system UI font) contributes the faces
+    /// Blink's matching picks for it, upright and italic.
+    pub fn family_faces(&mut self, family: &str) -> Vec<FaceSource> {
+        let project: Vec<FaceSource> = self
+            .project
+            .iter()
+            .filter(|p| p.family.eq_ignore_ascii_case(family))
+            .map(|p| FaceSource { blob: p.blob.clone(), index: 0, postscript_name: unsafe { p.ct.post_script_name() }.to_string() })
+            .collect();
+        if !project.is_empty() {
+            return project;
+        }
+        let mut fonts: Vec<CFRetained<CTFont>> = Vec::new();
+        let all = unsafe { CTFontCollection::from_available_fonts(None) };
+        if let Some(list) = unsafe { all.matching_font_descriptors_for_family(&cfstr(family), None) } {
+            // SAFETY: the array holds CTFontDescriptors.
+            let list: CFRetained<CFArray<CTFontDescriptor>> = unsafe { CFRetained::cast_unchecked(list) };
+            fonts.extend(list.iter().map(|d| unsafe { CTFont::with_font_descriptor(&d, 16.0, std::ptr::null()) }));
+        }
+        if fonts.is_empty() {
+            for italic in [false, true] {
+                let desc = FontDesc { weight: 400.0, italic, size: 16.0 };
+                let found = if family == "system-ui" { self.match_system_ui(&desc) } else { self.match_font_family(family, &desc) };
+                fonts.extend(found);
+            }
+        }
+        let mut out: Vec<FaceSource> = Vec::new();
+        for ct in fonts {
+            let (_, index, blob) = self.font_bytes(&ct);
+            let source = FaceSource { blob, index, postscript_name: unsafe { ct.post_script_name() }.to_string() };
+            if !out.iter().any(|f| f.blob == source.blob && f.index == source.index) {
+                out.push(source);
+            }
+        }
+        out
+    }
+
     /// The fallback order level 2 layout gives Parley, built from CoreText's
     /// substitutes for `MANIFEST_SAMPLES` with `base_family` as the font
-    /// being substituted.
+    /// being substituted (`system-ui` for the system UI font).
     pub fn fallback_manifest(&mut self, base_family: &str) -> FallbackManifest {
-        let desc = FontDesc { weight: 400.0, italic: false, size: 16.0 };
-        let base = match self.match_font_family(base_family, &desc) {
-            Some(f) => f,
-            None => match self.match_system_ui(&desc) {
-                Some(f) => f,
-                None => return FallbackManifest { base_family: base_family.to_string(), ..Default::default() },
-            },
+        let mut manifest = FallbackManifest { base_family: base_family.to_string(), ..Default::default() };
+        // Regular and bold bases, so the manifest carries both weights of
+        // each substitute.
+        let mut bases = Vec::new();
+        for weight in [400.0, 700.0] {
+            let desc = FontDesc { weight, italic: false, size: 16.0 };
+            let base = if base_family == "system-ui" { self.match_system_ui(&desc) } else { self.match_font_family(base_family, &desc) };
+            bases.extend(base);
+        }
+        let Some(first) = bases.first().cloned() else { return manifest };
+        let base_name = unsafe { first.family_name() }.to_string();
+        let mut faces: Vec<ManifestFace> = Vec::new();
+        let mut add_face = |reg: &mut Self, family: &str, ct: &CTFont| {
+            let (_, index, blob) = reg.font_bytes(ct);
+            let source = FaceSource { blob, index, postscript_name: unsafe { ct.post_script_name() }.to_string() };
+            let face = ManifestFace { family: family.to_string(), source };
+            if !faces.contains(&face) {
+                faces.push(face);
+            }
         };
-        let mut scripts: Vec<ScriptFallback> = Vec::new();
+        for base in &bases {
+            add_face(self, base_family, base);
+        }
         for (script, language, sample) in MANIFEST_SAMPLES {
             let string = cfstr(sample);
             let range = CFRange { location: 0, length: string.length() };
             let lang = language.map(cfstr);
-            let font = unsafe { base.for_string_with_language(&string, range, lang.as_deref()) };
-            let family = unsafe { font.family_name() }.to_string();
-            if family.is_empty() || unsafe { font.post_script_name() }.to_string() == "LastResort" {
-                continue;
+            let mut entry: Option<ScriptFallback> = None;
+            for base in &bases {
+                let font = unsafe { base.for_string_with_language(&string, range, lang.as_deref()) };
+                let mut family = unsafe { font.family_name() }.to_string();
+                if family.is_empty() || unsafe { font.post_script_name() }.to_string() == "LastResort" {
+                    continue;
+                }
+                // The base covers the script itself: name it as the caller
+                // does (a hidden system family has no public name).
+                if family == base_name {
+                    family = base_family.to_string();
+                } else {
+                    add_face(self, &family, &font);
+                }
+                entry.get_or_insert_with(|| ScriptFallback { script: script.to_string(), language: language.map(str::to_string), families: Vec::new() });
+                let e = entry.as_mut().expect("entry");
+                if !e.families.contains(&family) {
+                    e.families.push(family);
+                }
             }
-            let entry = ScriptFallback { script: script.to_string(), language: language.map(str::to_string), families: vec![family] };
-            if !scripts.contains(&entry) {
-                scripts.push(entry);
+            if let Some(e) = entry.filter(|e| !manifest.scripts.contains(e)) {
+                manifest.scripts.push(e);
             }
         }
-        let emoji = self.match_font_family("Apple Color Emoji", &desc).map(|f| unsafe { f.family_name() }.to_string());
-        let last_resort = self.match_font_family("Times", &desc).map(|f| unsafe { f.family_name() }.to_string());
-        FallbackManifest { base_family: base_family.to_string(), scripts, emoji, last_resort }
+        for weight in [400.0, 700.0] {
+            let desc = FontDesc { weight, italic: false, size: 16.0 };
+            if let Some(f) = self.match_font_family("Apple Color Emoji", &desc) {
+                let family = unsafe { f.family_name() }.to_string();
+                add_face(self, &family, &f);
+                manifest.emoji = Some(family);
+            }
+        }
+        manifest.last_resort = self.match_font_family("Times", &FontDesc { weight: 400.0, italic: false, size: 16.0 }).map(|f| unsafe { f.family_name() }.to_string());
+        manifest.faces = faces;
+        manifest
     }
 
     // ------------------------------------------------------------ bytes and subsets
