@@ -9,14 +9,23 @@
 //! locked: in either state WindowServer composites nothing, so the GPU has less
 //! competing work than on an active desktop, and `present-*` scenarios are skipped.
 //!
-//! Other processes on the machine also use the GPU. Before each scenario the
-//! orchestrator waits until external GPU time (per-process `accumulatedGPUTime` from the
-//! IORegistry) is below `--max-external-pct` of wall time, and it reruns a scenario (up to
-//! `--retries`) when external use during A's run exceeded that; the least contaminated
-//! attempt is kept and every attempt is recorded.
+//! Other processes on the machine also use the GPU. The orchestrator measures them with
+//! the per-process `accumulatedGPUTime` counters of the AGX user clients in the
+//! IORegistry, but only while none of its own processes run: on this machine those
+//! counters misattribute GPU time while A or B is running (A's own GPU work was charged
+//! to an unrelated long-lived process, and A itself was charged about 0.5% of its
+//! timestamp-measured GPU time), so a during-run reading is not evidence of external
+//! load. Instead each attempt is bracketed: before it, the orchestrator waits until
+//! external GPU time over a 3 s window is below `--max-external-pct` of wall time; after
+//! it, it samples another 3 s window. An attempt whose after-window exceeds the limit is
+//! rerun (up to `--retries`); the attempt with the quietest bracket is kept and every
+//! attempt is recorded.
+//!
+//! Blender scenarios need `--blender PATH` (the Blender executable); without it they are
+//! skipped and listed as skipped.
 //!
 //! Usage: `s8-run [--seconds 60] [--only a,b,c] [--out results/<dir>] [--list]
-//!         [--max-external-pct 10] [--quiet-wait-s 900] [--retries 2]`
+//!         [--max-external-pct 10] [--quiet-wait-s 900] [--retries 2] [--blender PATH]`
 
 use s8_contention::{Args, display, signal, stats};
 use serde_json::{Value, json};
@@ -39,7 +48,12 @@ const SLICED: &[&str] = &["--mode", "sliced", "--in-flight", "1", "--qos", "util
 /// Frame-aligned slicing: submit only after A's current frame is done and only if the
 /// slice is predicted to end 1 ms before A's next tick.
 const ALIGN: &[&str] = &["--align", "--align-guard-ms", "1"];
-const PRESENT: &[&str] = &["--present", "corner", "--window-width", "48", "--window-height", "27"];
+/// A 16 x 9 pt click-through window in the bottom-left corner: the smallest window the
+/// compositor still presents (an offscreen window gets no presented times).
+const PRESENT: &[&str] = &["--present", "corner", "--window-width", "16", "--window-height", "9"];
+/// Blender EEVEE worker, 4K, 16 samples, 16-bit PNG output; `{blender}` is replaced by
+/// the `--blender` path.
+const BLENDER: &[&str] = &["--blender", "{blender}"];
 
 fn b(parts: &[&[&'static str]]) -> Option<Vec<&'static str>> {
     Some(parts.iter().flat_map(|p| p.iter().copied()).collect())
@@ -334,6 +348,123 @@ fn scenarios() -> Vec<Scenario> {
                 ],
             ]),
         ),
+        // Blender EEVEE worker (foreign renderer: process-level policies only).
+        s(
+            "blender",
+            "Blender EEVEE 4K 16 samples rendering continuously, no policy",
+            &[],
+            b(&[&["--mode", "none"], BLENDER]),
+        ),
+        s(
+            "blender-bg",
+            "Blender in the Darwin background state for the whole run",
+            &[],
+            b(&[&["--mode", "none"], BLENDER, &["--blender-policy", "bg"]]),
+        ),
+        s(
+            "blender-yield",
+            "Blender SIGSTOP for 100 ms after each deadline miss",
+            &[],
+            b(&[
+                &["--mode", "none"],
+                BLENDER,
+                &["--blender-policy", "yield", "--yield-on", "miss", "--yield-ms", "100"],
+            ]),
+        ),
+        s(
+            "blender-throttle",
+            "Blender duty-cycled during playback: 10 ms running, 40 ms stopped",
+            &[],
+            b(&[
+                &["--mode", "none"],
+                BLENDER,
+                &[
+                    "--blender-policy",
+                    "throttle",
+                    "--blender-run-ms",
+                    "10",
+                    "--blender-stop-ms",
+                    "40",
+                ],
+            ]),
+        ),
+        s(
+            "blender-pause",
+            "Blender SIGSTOP on PlaybackStart; A measured from its first frame",
+            &["--warmup", "0"],
+            b(&[&["--mode", "none"], BLENDER, &["--blender-policy", "pause"]]),
+        ),
+        // The S8 row: 4K playback while the job engine exports 4K blur (plus its encoder)
+        // and Blender EEVEE renders, with contract 13 in force.
+        s(
+            "gate-pause",
+            "S8 row: B sliced 2 ms frame-aligned + HEVC Main10 session + Blender paused on playback; A from its first frame",
+            &["--warmup", "0"],
+            b(&[
+                SLICED,
+                ALIGN,
+                &[
+                    "--slice-ms",
+                    "2",
+                    "--yield-on",
+                    "miss",
+                    "--vt-sessions",
+                    "1",
+                    "--vt-codec",
+                    "hevc10",
+                ],
+                BLENDER,
+                &["--blender-policy", "pause"],
+            ]),
+        ),
+        s(
+            "gate-throttle",
+            "S8 row: as gate-pause but Blender duty-cycled 10/40 ms during playback",
+            &[],
+            b(&[
+                SLICED,
+                ALIGN,
+                &[
+                    "--slice-ms",
+                    "2",
+                    "--yield-on",
+                    "miss",
+                    "--vt-sessions",
+                    "1",
+                    "--vt-codec",
+                    "hevc10",
+                ],
+                BLENDER,
+                &[
+                    "--blender-policy",
+                    "throttle",
+                    "--blender-run-ms",
+                    "10",
+                    "--blender-stop-ms",
+                    "40",
+                ],
+            ]),
+        ),
+        s(
+            "gate-run",
+            "S8 row without a Blender policy: B sliced 2 ms frame-aligned + HEVC session + Blender running",
+            &[],
+            b(&[
+                SLICED,
+                ALIGN,
+                &[
+                    "--slice-ms",
+                    "2",
+                    "--yield-on",
+                    "miss",
+                    "--vt-sessions",
+                    "1",
+                    "--vt-codec",
+                    "hevc10",
+                ],
+                BLENDER,
+            ]),
+        ),
         // On-screen presentation (needs an awake, unlocked display).
         s(
             "present-baseline",
@@ -353,6 +484,38 @@ fn scenarios() -> Vec<Scenario> {
             PRESENT,
             b(&[SLICED, ALIGN, &["--slice-ms", "2", "--yield-on", "miss"]]),
         ),
+        s(
+            "present-gate-pause",
+            "As gate-pause, presenting on screen",
+            &[
+                "--present",
+                "corner",
+                "--window-width",
+                "16",
+                "--window-height",
+                "9",
+                "--warmup",
+                "0",
+            ],
+            b(&[
+                SLICED,
+                ALIGN,
+                &[
+                    "--slice-ms",
+                    "2",
+                    "--yield-on",
+                    "miss",
+                    "--vt-sessions",
+                    "1",
+                    "--vt-codec",
+                    "hevc10",
+                ],
+                BLENDER,
+                &["--blender-policy", "pause"],
+            ]),
+        ),
+        // Drift check: A alone again at the end of the run.
+        s("baseline-end", "A alone, after every other scenario", &[], None),
     ]
 }
 
@@ -412,34 +575,6 @@ fn parse_gpu_time(text: &str, map: &mut HashMap<u32, (String, u64)>) {
     }
 }
 
-/// GPU time other processes used between two snapshots (ms), excluding `ours`.
-///
-/// Only the total, WindowServer's share, and the number of processes are recorded:
-/// result files are committed to a public repository and the names of the apps running
-/// on the machine are not. The top consumers are printed to stderr for the operator.
-fn external_gpu(before: &HashMap<u32, (String, u64)>, after: &HashMap<u32, (String, u64)>, ours: &[u32]) -> Value {
-    let mut rows: Vec<(String, f64)> = after
-        .iter()
-        .filter(|(pid, _)| !ours.contains(pid))
-        .filter_map(|(pid, (name, t))| {
-            let t0 = before.get(pid).map(|b| b.1)?;
-            let d = t.saturating_sub(t0) as f64 / 1e6;
-            (d > 0.0).then(|| (name.clone(), d))
-        })
-        .collect();
-    rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-    let total: f64 = rows.iter().map(|r| r.1).sum();
-    let window_server: f64 = rows.iter().filter(|r| r.0 == "WindowServer").map(|r| r.1).sum();
-    for (name, ms) in rows.iter().take(4) {
-        eprintln!("   external GPU: {name} {ms:.1} ms");
-    }
-    json!({
-        "total_ms": stats::r(total, 1),
-        "window_server_ms": stats::r(window_server, 1),
-        "processes": rows.len(),
-    })
-}
-
 fn sample_util(stop: Arc<AtomicBool>) -> std::thread::JoinHandle<Vec<f64>> {
     std::thread::spawn(move || {
         let mut v = Vec::new();
@@ -460,60 +595,61 @@ fn parse_result(text: &str) -> Option<Value> {
         .and_then(|j| serde_json::from_str(j).ok())
 }
 
-/// External GPU time over `window` as a fraction of wall time.
+/// GPU time used by every process over `window`, as a fraction of wall time. Only
+/// meaningful while none of the spike's processes run (see the module comment).
 fn external_fraction(window: Duration) -> f64 {
     let before = gpu_time_by_pid();
     std::thread::sleep(window);
     let after = gpu_time_by_pid();
-    let ext = external_gpu_quiet(&before, &after);
+    let ext: f64 = after
+        .iter()
+        .filter_map(|(pid, (_, t))| before.get(pid).map(|b| t.saturating_sub(b.1) as f64 / 1e6))
+        .sum();
     ext / (window.as_secs_f64() * 1e3)
 }
 
-fn external_gpu_quiet(before: &HashMap<u32, (String, u64)>, after: &HashMap<u32, (String, u64)>) -> f64 {
-    after
-        .iter()
-        .filter_map(|(pid, (_, t))| before.get(pid).map(|b| t.saturating_sub(b.1) as f64 / 1e6))
-        .sum()
-}
-
-/// Gate on a quiet GPU, run, and retry when other processes used more than
-/// `max_ext` of the GPU during A's run. Keeps the least contaminated attempt and records
-/// every attempt.
+/// Gate on a quiet GPU, run, sample the GPU again afterwards, and retry when the
+/// after-window was busy. Keeps the attempt with the quietest bracket and records every
+/// attempt.
 fn run(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::Path, gate: &Gate) -> Value {
     let mut attempts = Vec::new();
     let mut best: Option<(f64, Value)> = None;
     for attempt in 0..=gate.retries {
         let t = Instant::now();
-        let mut quiet = external_fraction(Duration::from_secs(3));
-        while quiet > gate.max_ext && t.elapsed().as_secs_f64() < gate.wait_s {
-            eprintln!("   waiting for a quiet GPU (external {:.1}%)", quiet * 100.0);
+        let mut before = external_fraction(Duration::from_secs(3));
+        while before > gate.max_ext && t.elapsed().as_secs_f64() < gate.wait_s {
+            eprintln!("   waiting for a quiet GPU (external {:.1}%)", before * 100.0);
             std::thread::sleep(Duration::from_secs(5));
-            quiet = external_fraction(Duration::from_secs(3));
+            before = external_fraction(Duration::from_secs(3));
         }
-        let mut v = run_once(s, bin, seconds, out);
-        let a_ms = v["a_wall_seconds"].as_f64().unwrap_or(seconds) * 1e3;
-        let ext = v["external_gpu_during_a"]["total_ms"].as_f64().unwrap_or(f64::NAN) / a_ms;
-        v["external_gpu_fraction"] = json!(stats::r(ext, 4));
-        v["quiet_before"] = json!(stats::r(quiet, 4));
-        v["quiet_wait_s"] = json!(stats::r(t.elapsed().as_secs_f64(), 1));
+        let mut v = run_once(s, bin, seconds, out, gate);
+        let after = external_fraction(Duration::from_secs(3));
+        let worst = before.max(after);
+        v["external_gpu_before"] = json!(stats::r(before, 4));
+        v["external_gpu_after"] = json!(stats::r(after, 4));
+        v["quiet_wait_s"] = json!(stats::r(t.elapsed().as_secs_f64() - seconds, 1));
         attempts.push(json!({
             "attempt": attempt,
-            "external_gpu_fraction": stats::r(ext, 4),
+            "external_gpu_before": stats::r(before, 4),
+            "external_gpu_after": stats::r(after, 4),
             "drops_1f": v["a"]["drops"]["deadline_1_frame"],
             "drops_2f": v["a"]["drops"]["deadline_2_frames"],
         }));
-        eprintln!("   attempt {attempt}: external GPU {:.1}% of A's run", ext * 100.0);
-        let clean = ext <= gate.max_ext;
-        if best.as_ref().is_none_or(|(b, _)| ext < *b) {
-            best = Some((ext, v));
+        eprintln!(
+            "   attempt {attempt}: external GPU {:.1}% before, {:.1}% after",
+            before * 100.0,
+            after * 100.0
+        );
+        if best.as_ref().is_none_or(|(b, _)| worst < *b) {
+            best = Some((worst, v));
         }
-        if clean {
+        if worst <= gate.max_ext {
             break;
         }
     }
-    let (ext, mut v) = best.unwrap();
+    let (worst, mut v) = best.unwrap();
     v["attempts"] = json!(attempts);
-    v["contaminated"] = json!(ext > gate.max_ext);
+    v["contaminated"] = json!(worst > gate.max_ext);
     v
 }
 
@@ -521,9 +657,10 @@ struct Gate {
     max_ext: f64,
     wait_s: f64,
     retries: usize,
+    blender: Option<String>,
 }
 
-fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::Path) -> Value {
+fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::Path, gate: &Gate) -> Value {
     // Idle baseline: what else is using the GPU right now.
     let idle: Vec<f64> = (0..6)
         .filter_map(|_| {
@@ -541,8 +678,18 @@ fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::
     let b_out = Arc::new(Mutex::new(String::new()));
     let mut b_reader = None;
     if let Some(b_args) = &s.b {
+        let b_args: Vec<&str> = b_args
+            .iter()
+            .map(|a| {
+                if *a == "{blender}" {
+                    gate.blender.as_deref().unwrap()
+                } else {
+                    a
+                }
+            })
+            .collect();
         let mut child = Command::new(bin.join("s8-job"))
-            .args(b_args)
+            .args(&b_args)
             .args(["--signal-fifo", &fifo, "--label", s.name])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -566,14 +713,12 @@ fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::
             let _ = stdout.read_to_string(&mut t);
             *sink.lock().unwrap() = t;
         }));
-        rx.recv_timeout(Duration::from_secs(60))
+        rx.recv_timeout(Duration::from_secs(180))
             .expect("s8-job never became ready");
         std::thread::sleep(Duration::from_secs(2));
         b_child = Some(child);
     }
 
-    let b_pid = b_child.as_ref().map(|c| c.id());
-    let gpu_before = gpu_time_by_pid();
     let stop = Arc::new(AtomicBool::new(false));
     let sampler = sample_util(stop.clone());
     let raw = out.join("raw").join(format!("{}-a.jsonl", s.name));
@@ -596,9 +741,6 @@ fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::
     let a_secs = t.elapsed().as_secs_f64();
     stop.store(true, Ordering::Relaxed);
     let during = sampler.join().unwrap();
-    let gpu_after = gpu_time_by_pid();
-    let ours: Vec<u32> = b_pid.into_iter().chain([std::process::id()]).collect();
-    let external = external_gpu(&gpu_before, &gpu_after, &ours);
 
     let b = if let Some(mut child) = b_child {
         // SAFETY: plain signal to our own child.
@@ -621,7 +763,6 @@ fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::
         "screen_locked": screen_locked,
         "gpu_util_idle_before": stats::dist(&idle),
         "gpu_util_during": stats::dist(&during),
-        "external_gpu_during_a": external,
         "a": a,
         "b": b,
     })
@@ -673,7 +814,11 @@ fn main() {
         max_ext: args.num::<f64>("max-external-pct", 10.0) / 100.0,
         wait_s: args.num("quiet-wait-s", 900.0),
         retries: args.num("retries", 2),
+        blender: args.str("blender").map(str::to_string),
     };
+    if let Some(p) = &gate.blender {
+        assert!(std::path::Path::new(p).is_file(), "--blender {p}: no such file");
+    }
     let only: Option<Vec<String>> = args.str("only").map(|o| o.split(',').map(str::to_string).collect());
     let bin = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
     let out = std::path::PathBuf::from(args.string_or("out", "results/latest"));
@@ -686,6 +831,11 @@ fn main() {
         .filter(|s| only.as_ref().is_none_or(|o| o.iter().any(|n| n == s.name)))
     {
         eprintln!("== {} ({})", s.name, s.what);
+        let needs_blender = s.b.as_ref().is_some_and(|b| b.contains(&"{blender}"));
+        if needs_blender && gate.blender.is_none() {
+            eprintln!("   skipped: needs --blender");
+            continue;
+        }
         if s.a.contains(&"--present") && (display::main_display_asleep() || display::screen_locked() != Some(false)) {
             // Nothing reaches the glass while the display sleeps or the lock screen is up.
             eprintln!("   skipped: display asleep or screen locked");
@@ -732,10 +882,5 @@ mod tests {
         parse_gpu_time(text, &mut map);
         assert_eq!(map[&463], ("WindowServer".to_string(), 1030));
         assert_eq!(map[&916], ("MenuBarAgent".to_string(), 0));
-        let mut after = map.clone();
-        after.get_mut(&463).unwrap().1 += 2_000_000;
-        after.insert(1, ("new".into(), 5_000_000));
-        let v = external_gpu(&map, &after, &[916]);
-        assert_eq!(v["total_ms"], 2.0);
     }
 }
