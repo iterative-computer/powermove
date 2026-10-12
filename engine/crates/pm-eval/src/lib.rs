@@ -36,8 +36,11 @@
 //! freshly loaded project does, as each module documents.
 #![forbid(unsafe_code)]
 
+pub mod easing;
 pub mod js_sem;
+pub mod keyframes;
 pub mod math;
 pub mod node;
+pub mod temporal;
 
 pub use js_sem::{JsResult, JsThrow, JsValue};
