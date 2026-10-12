@@ -8,7 +8,10 @@ use crate::host::{Host, Shape};
 use crate::jsmath;
 use crate::parser::{BinaryOp, Literal, Node, OBJECT_PROTOTYPE, UnaryOp};
 use crate::string::JsStr;
-use crate::value::{Callable, Helper, MATH_CONSTANTS, MathFunction, Object, Value, number_to_string, string_to_number};
+use crate::value::{
+    Callable, Helper, MATH_CONSTANTS, MathFunction, Object, Value, number_to_string,
+    string_to_number,
+};
 use crate::{Context, Dialect};
 
 /// A JavaScript exception thrown while evaluating, with V8's message.
@@ -34,9 +37,13 @@ impl EvalError {
         match self {
             EvalError::ToPrimitive => "Cannot convert object to primitive value".into(),
             EvalError::NullishToObject => "Cannot convert undefined or null to object".into(),
-            EvalError::ToLocaleString => "Object.prototype.toLocaleString called on null or undefined".into(),
+            EvalError::ToLocaleString => {
+                "Object.prototype.toLocaleString called on null or undefined".into()
+            }
             EvalError::NotAFunction => "math is not a function".into(),
-            EvalError::ReadOfNullish { base, key } => format!("Cannot read properties of {base} (reading '{key}')"),
+            EvalError::ReadOfNullish { base, key } => {
+                format!("Cannot read properties of {base} (reading '{key}')")
+            }
         }
     }
 }
@@ -87,24 +94,122 @@ enum Got<O> {
 const FORBIDDEN_MEMBERS: [&str; 3] = ["__proto__", "prototype", "constructor"];
 
 const ARRAY_PROTOTYPE: [&str; 40] = [
-    "length", "constructor", "at", "concat", "copyWithin", "fill", "find", "findIndex", "findLast", "findLastIndex",
-    "lastIndexOf", "pop", "push", "reverse", "shift", "unshift", "slice", "sort", "splice", "includes", "indexOf",
-    "join", "keys", "entries", "values", "forEach", "filter", "flat", "flatMap", "map", "every", "some", "reduce",
-    "reduceRight", "toReversed", "toSorted", "toSpliced", "with", "toLocaleString", "toString",
+    "length",
+    "constructor",
+    "at",
+    "concat",
+    "copyWithin",
+    "fill",
+    "find",
+    "findIndex",
+    "findLast",
+    "findLastIndex",
+    "lastIndexOf",
+    "pop",
+    "push",
+    "reverse",
+    "shift",
+    "unshift",
+    "slice",
+    "sort",
+    "splice",
+    "includes",
+    "indexOf",
+    "join",
+    "keys",
+    "entries",
+    "values",
+    "forEach",
+    "filter",
+    "flat",
+    "flatMap",
+    "map",
+    "every",
+    "some",
+    "reduce",
+    "reduceRight",
+    "toReversed",
+    "toSorted",
+    "toSpliced",
+    "with",
+    "toLocaleString",
+    "toString",
 ];
 const STRING_PROTOTYPE: [&str; 52] = [
-    "length", "constructor", "anchor", "at", "big", "blink", "bold", "charAt", "charCodeAt", "codePointAt", "concat",
-    "endsWith", "fontcolor", "fontsize", "fixed", "includes", "indexOf", "isWellFormed", "italics", "lastIndexOf",
-    "link", "localeCompare", "match", "matchAll", "normalize", "padEnd", "padStart", "repeat", "replace",
-    "replaceAll", "search", "slice", "small", "split", "strike", "sub", "substr", "substring", "sup", "startsWith",
-    "toString", "toWellFormed", "trim", "trimStart", "trimLeft", "trimEnd", "trimRight", "toLocaleLowerCase",
-    "toLocaleUpperCase", "toLowerCase", "toUpperCase", "valueOf",
+    "length",
+    "constructor",
+    "anchor",
+    "at",
+    "big",
+    "blink",
+    "bold",
+    "charAt",
+    "charCodeAt",
+    "codePointAt",
+    "concat",
+    "endsWith",
+    "fontcolor",
+    "fontsize",
+    "fixed",
+    "includes",
+    "indexOf",
+    "isWellFormed",
+    "italics",
+    "lastIndexOf",
+    "link",
+    "localeCompare",
+    "match",
+    "matchAll",
+    "normalize",
+    "padEnd",
+    "padStart",
+    "repeat",
+    "replace",
+    "replaceAll",
+    "search",
+    "slice",
+    "small",
+    "split",
+    "strike",
+    "sub",
+    "substr",
+    "substring",
+    "sup",
+    "startsWith",
+    "toString",
+    "toWellFormed",
+    "trim",
+    "trimStart",
+    "trimLeft",
+    "trimEnd",
+    "trimRight",
+    "toLocaleLowerCase",
+    "toLocaleUpperCase",
+    "toLowerCase",
+    "toUpperCase",
+    "valueOf",
 ];
-const NUMBER_PROTOTYPE: [&str; 7] =
-    ["constructor", "toExponential", "toFixed", "toPrecision", "toString", "valueOf", "toLocaleString"];
+const NUMBER_PROTOTYPE: [&str; 7] = [
+    "constructor",
+    "toExponential",
+    "toFixed",
+    "toPrecision",
+    "toString",
+    "valueOf",
+    "toLocaleString",
+];
 const BOOLEAN_PROTOTYPE: [&str; 3] = ["constructor", "toString", "valueOf"];
-const FUNCTION_PROTOTYPE: [&str; 9] =
-    ["length", "name", "constructor", "apply", "bind", "call", "toString", "arguments", "caller"];
+const FUNCTION_PROTOTYPE: [&str; 9] = [
+    "length",
+    "name",
+    "constructor",
+    "apply",
+    "bind",
+    "call",
+    "toString",
+    "arguments",
+    "caller",
+];
 
 fn in_object_prototype(key: &JsStr) -> bool {
     OBJECT_PROTOTYPE.iter().any(|(name, _)| key.eq_str(name))
@@ -174,7 +279,12 @@ pub(crate) struct Evaluator<'a, H: Host> {
 
 impl<'a, H: Host> Evaluator<'a, H> {
     pub fn new(host: &'a H, ctx: &'a Context<H::Obj>, dialect: Dialect) -> Self {
-        Evaluator { host, ctx, dialect, deps: Dependencies::default() }
+        Evaluator {
+            host,
+            ctx,
+            dialect,
+            deps: Dependencies::default(),
+        }
     }
 
     // ── document reads ──────────────────────────────────────────────────
@@ -185,16 +295,28 @@ impl<'a, H: Host> Evaluator<'a, H> {
             Root::Comp => &self.ctx.comp,
             Root::Value => &self.ctx.value,
         };
-        self.deps.fields.push(FieldRead { root, path: Vec::new() });
-        let path = Rc::new(Path { root, steps: Vec::new() });
+        self.deps.fields.push(FieldRead {
+            root,
+            path: Vec::new(),
+        });
+        let path = Rc::new(Path {
+            root,
+            steps: Vec::new(),
+        });
         value.clone().map_doc(|obj| Tracked { obj, path })
     }
 
     fn record(&mut self, parent: &Tracked<H::Obj>, step: Step) -> Rc<Path> {
         let mut steps = parent.path.steps.clone();
         steps.push(step);
-        self.deps.fields.push(FieldRead { root: parent.path.root, path: steps.clone() });
-        Rc::new(Path { root: parent.path.root, steps })
+        self.deps.fields.push(FieldRead {
+            root: parent.path.root,
+            path: steps.clone(),
+        });
+        Rc::new(Path {
+            root: parent.path.root,
+            steps,
+        })
     }
 
     fn length(&mut self, array: &Tracked<H::Obj>) -> usize {
@@ -214,12 +336,16 @@ impl<'a, H: Host> Evaluator<'a, H> {
         if index >= len as u64 {
             return Value::Undefined;
         }
-        self.host.element(&array.obj, index as usize).map_doc(|obj| Tracked { obj, path })
+        self.host
+            .element(&array.obj, index as usize)
+            .map_doc(|obj| Tracked { obj, path })
     }
 
     fn property(&mut self, object: &Tracked<H::Obj>, key: &JsStr) -> Option<V<H::Obj>> {
         let path = self.record(object, Step::Key(key.clone()));
-        self.host.property(&object.obj, key).map(|v| v.map_doc(|obj| Tracked { obj, path }))
+        self.host
+            .property(&object.obj, key)
+            .map(|v| v.map_doc(|obj| Tracked { obj, path }))
     }
 
     fn is_array(&self, t: &Tracked<H::Obj>) -> Option<usize> {
@@ -231,9 +357,21 @@ impl<'a, H: Host> Evaluator<'a, H> {
 
     // ── conversions ─────────────────────────────────────────────────────
 
+    /// `String(value)` for a value from outside an evaluation.
+    pub fn string_of(&mut self, value: &Value<H::Obj>) -> R<JsStr> {
+        let path = Rc::new(Path {
+            root: Root::Value,
+            steps: Vec::new(),
+        });
+        let value = value.clone().map_doc(|obj| Tracked { obj, path });
+        self.js_string(&value)
+    }
+
     /// `OrdinaryToPrimitive` for the objects expressions can hold.
-    fn to_primitive(&mut self, value: &V<H::Obj>, hint: Hint) -> R<V<H::Obj>> {
-        let Value::Object(object) = value else { return Ok(value.clone()) };
+    fn js_primitive(&mut self, value: &V<H::Obj>, hint: Hint) -> R<V<H::Obj>> {
+        let Value::Object(object) = value else {
+            return Ok(value.clone());
+        };
         Ok(match object {
             Object::Doc(t) => {
                 if self.is_array(t).is_some() {
@@ -248,8 +386,13 @@ impl<'a, H: Host> Evaluator<'a, H> {
                     Value::String(JsStr::from("[object Object]"))
                 }
             }
-            Object::Math | Object::Callable(_) | Object::PlainObject => Value::String(JsStr::from("[object Object]")),
-            Object::MathFunction(f) => Value::String(JsStr::from(format!("function {}() {{ [native code] }}", f.name()))),
+            Object::Math | Object::Callable(_) | Object::PlainObject => {
+                Value::String(JsStr::from("[object Object]"))
+            }
+            Object::MathFunction(f) => Value::String(JsStr::from(format!(
+                "function {}() {{ [native code] }}",
+                f.name()
+            ))),
             Object::NumberObject(n) => match hint {
                 Hint::String => Value::String(number_to_string(*n)),
                 Hint::Number | Hint::Default => Value::Number(*n),
@@ -269,13 +412,13 @@ impl<'a, H: Host> Evaluator<'a, H> {
             if matches!(element, Value::Undefined | Value::Null) {
                 continue;
             }
-            units.extend_from_slice(self.to_string(&element)?.units());
+            units.extend_from_slice(self.js_string(&element)?.units());
         }
         Ok(JsStr::from_units(units))
     }
 
     /// `Number(value)`.
-    fn to_number(&mut self, value: &V<H::Obj>) -> R<f64> {
+    fn js_number(&mut self, value: &V<H::Obj>) -> R<f64> {
         Ok(match value {
             Value::Undefined => f64::NAN,
             Value::Null => 0.0,
@@ -283,14 +426,14 @@ impl<'a, H: Host> Evaluator<'a, H> {
             Value::Number(n) => *n,
             Value::String(s) => string_to_number(s),
             Value::Object(_) => {
-                let primitive = self.to_primitive(value, Hint::Number)?;
-                self.to_number(&primitive)?
+                let primitive = self.js_primitive(value, Hint::Number)?;
+                self.js_number(&primitive)?
             }
         })
     }
 
     /// `String(value)`.
-    fn to_string(&mut self, value: &V<H::Obj>) -> R<JsStr> {
+    fn js_string(&mut self, value: &V<H::Obj>) -> R<JsStr> {
         Ok(match value {
             Value::Undefined => JsStr::from("undefined"),
             Value::Null => JsStr::from("null"),
@@ -298,8 +441,8 @@ impl<'a, H: Host> Evaluator<'a, H> {
             Value::Number(n) => number_to_string(*n),
             Value::String(s) => s.clone(),
             Value::Object(_) => {
-                let primitive = self.to_primitive(value, Hint::String)?;
-                self.to_string(&primitive)?
+                let primitive = self.js_primitive(value, Hint::String)?;
+                self.js_string(&primitive)?
             }
         })
     }
@@ -336,11 +479,11 @@ impl<'a, H: Host> Evaluator<'a, H> {
             (J::Bool(x), _) => return self.loose_equal(&J::Number(f64::from(u8::from(*x))), b),
             (_, J::Bool(y)) => return self.loose_equal(a, &J::Number(f64::from(u8::from(*y)))),
             (J::Number(_) | J::String(_), J::Object(_)) => {
-                let primitive = self.to_primitive(b, Hint::Default)?;
+                let primitive = self.js_primitive(b, Hint::Default)?;
                 return self.loose_equal(a, &primitive);
             }
             (J::Object(_), J::Number(_) | J::String(_)) => {
-                let primitive = self.to_primitive(a, Hint::Default)?;
+                let primitive = self.js_primitive(a, Hint::Default)?;
                 return self.loose_equal(&primitive, b);
             }
             _ => false,
@@ -362,15 +505,27 @@ impl<'a, H: Host> Evaluator<'a, H> {
                 let value = self.evaluate(inner)?;
                 Ok(match op {
                     UnaryOp::Not => Value::Bool(!value.truthy()),
-                    UnaryOp::Minus => Value::Number(-self.to_number(&value)?),
-                    UnaryOp::Plus => Value::Number(self.to_number(&value)?),
+                    UnaryOp::Minus => Value::Number(-self.js_number(&value)?),
+                    UnaryOp::Plus => Value::Number(self.js_number(&value)?),
                 })
             }
             Node::Binary(op, left, right) => {
                 let left = self.evaluate(left)?;
                 match op {
-                    BinaryOp::And => return if left.truthy() { self.evaluate(right) } else { Ok(left) },
-                    BinaryOp::Or => return if left.truthy() { Ok(left) } else { self.evaluate(right) },
+                    BinaryOp::And => {
+                        return if left.truthy() {
+                            self.evaluate(right)
+                        } else {
+                            Ok(left)
+                        };
+                    }
+                    BinaryOp::Or => {
+                        return if left.truthy() {
+                            Ok(left)
+                        } else {
+                            self.evaluate(right)
+                        };
+                    }
                     _ => {}
                 }
                 let right = self.evaluate(right)?;
@@ -470,18 +625,18 @@ impl<'a, H: Host> Evaluator<'a, H> {
         Ok(match op {
             B::Add => {
                 if matches!(left, Value::String(_)) || matches!(right, Value::String(_)) {
-                    let l = self.to_string(left)?;
-                    let r = self.to_string(right)?;
+                    let l = self.js_string(left)?;
+                    let r = self.js_string(right)?;
                     Value::String(l.concat(&r))
                 } else {
-                    let l = self.to_number(left)?;
-                    let r = self.to_number(right)?;
+                    let l = self.js_number(left)?;
+                    let r = self.js_number(right)?;
                     Value::Number(l + r)
                 }
             }
             B::Sub | B::Mul | B::Div | B::Rem | B::Pow | B::Lt | B::Le | B::Gt | B::Ge => {
-                let l = self.to_number(left)?;
-                let r = self.to_number(right)?;
+                let l = self.js_number(left)?;
+                let r = self.js_number(right)?;
                 match op {
                     B::Sub => Value::Number(l - r),
                     B::Mul => Value::Number(l * r),
@@ -510,7 +665,7 @@ impl<'a, H: Host> Evaluator<'a, H> {
         }
         let key = match property {
             Value::Number(n) => Key::Number(*n),
-            other => Key::String(self.to_string(other)?),
+            other => Key::String(self.js_string(other)?),
         };
         if let Key::String(s) = &key {
             if FORBIDDEN_MEMBERS.iter().any(|f| s.eq_str(f)) {
@@ -543,7 +698,9 @@ impl<'a, H: Host> Evaluator<'a, H> {
         {
             return Ok(Value::Number(s.len() as f64));
         }
-        let Value::Object(object) = object else { return Ok(Value::Undefined) };
+        let Value::Object(object) = object else {
+            return Ok(Value::Undefined);
+        };
         let key = match key {
             Key::Number(n) => number_to_string(n),
             Key::String(s) => s,
@@ -565,7 +722,7 @@ impl<'a, H: Host> Evaluator<'a, H> {
         }
         let mut numbers = Vec::with_capacity(args.len());
         for arg in args {
-            numbers.push(self.to_number(arg)?);
+            numbers.push(self.js_number(arg)?);
         }
         match lookup {
             MathLookup::Missing => Ok(Value::Undefined),
@@ -586,10 +743,12 @@ impl<'a, H: Host> Evaluator<'a, H> {
         }
     }
 
+    // `6.2831` is the literal `expression.ts` uses, not τ.
+    #[allow(clippy::approx_constant)]
     fn helper(&mut self, helper: Helper, args: &[V<H::Obj>]) -> R<V<H::Obj>> {
         let mut numbers: Vec<f64> = Vec::with_capacity(args.len());
         for arg in args {
-            numbers.push(self.to_number(arg)?);
+            numbers.push(self.js_number(arg)?);
         }
         let n = |i: usize| numbers.get(i).copied();
         // An absent argument is `undefined`: NaN in arithmetic and comparisons,
@@ -610,7 +769,11 @@ impl<'a, H: Host> Evaluator<'a, H> {
             }
             Helper::Ease => {
                 let (x, x0, x1, y0, y1) = (nan(n(0)), n(1), n(2), nan(n(3)), nan(n(4)));
-                let ratio = if strict_equal_opt(x1, x0) { 0.0 } else { (x - nan(x0)) / (nan(x1) - nan(x0)) };
+                let ratio = if strict_equal_opt(x1, x0) {
+                    0.0
+                } else {
+                    (x - nan(x0)) / (nan(x1) - nan(x0))
+                };
                 let amount = clamp(ratio, 0.0, 1.0);
                 Value::Number(y0 + (y1 - y0) * amount * amount * (3.0 - 2.0 * amount))
             }
@@ -666,13 +829,17 @@ impl<'a, H: Host> Evaluator<'a, H> {
                     opt(n(1))
                 } else {
                     let position = nan(n(1)) % (duration * 2.0);
-                    Value::Number(if position < duration { position } else { duration * 2.0 - position })
+                    Value::Number(if position < duration {
+                        position
+                    } else {
+                        duration * 2.0 - position
+                    })
                 }
             }
             Helper::Param => {
                 let name = match args.first() {
                     None | Some(Value::Undefined | Value::Null) => JsStr::default(),
-                    Some(v) => self.to_string(v)?,
+                    Some(v) => self.js_string(v)?,
                 };
                 self.param(&name)?
             }
@@ -700,7 +867,13 @@ impl<'a, H: Host> Evaluator<'a, H> {
 
     /// `base[key]` (`[[Get]]`) for the values `param` walks through.
     fn get(&mut self, base: Got<H::Obj>, key: &JsStr) -> R<Got<H::Obj>> {
-        let inherited = |hit: bool| if hit { Got::Inherited } else { Got::Value(Value::Undefined) };
+        let inherited = |hit: bool| {
+            if hit {
+                Got::Inherited
+            } else {
+                Got::Value(Value::Undefined)
+            }
+        };
         let Got::Value(base) = base else {
             // Inherited members are functions or Object.prototype; `param`
             // only asks them for `value`, which none has.
@@ -708,14 +881,26 @@ impl<'a, H: Host> Evaluator<'a, H> {
         };
         Ok(match &base {
             Value::Undefined => {
-                return Err(EvalError::ReadOfNullish { base: "undefined", key: key.to_string_lossy() });
+                return Err(EvalError::ReadOfNullish {
+                    base: "undefined",
+                    key: key.to_string_lossy(),
+                });
             }
-            Value::Null => return Err(EvalError::ReadOfNullish { base: "null", key: key.to_string_lossy() }),
+            Value::Null => {
+                return Err(EvalError::ReadOfNullish {
+                    base: "null",
+                    key: key.to_string_lossy(),
+                });
+            }
             Value::Bool(_) => inherited(in_list(key, &BOOLEAN_PROTOTYPE)),
-            Value::Number(_) | Value::Object(Object::NumberObject(_)) => inherited(in_list(key, &NUMBER_PROTOTYPE)),
+            Value::Number(_) | Value::Object(Object::NumberObject(_)) => {
+                inherited(in_list(key, &NUMBER_PROTOTYPE))
+            }
             Value::String(s) => {
                 if let Some(i) = array_index(key).filter(|&i| i < s.len() as u64) {
-                    Got::Value(Value::String(JsStr::from_units(vec![s.units()[i as usize]])))
+                    Got::Value(Value::String(JsStr::from_units(vec![
+                        s.units()[i as usize],
+                    ])))
                 } else if key.eq_str("length") {
                     Got::Value(Value::Number(s.len() as f64))
                 } else {
@@ -743,7 +928,11 @@ impl<'a, H: Host> Evaluator<'a, H> {
             }
             Value::Object(Object::Math) => {
                 let own = math_member(key);
-                if matches!(own, Value::Undefined) { inherited(in_object_prototype(key)) } else { Got::Value(own) }
+                if matches!(own, Value::Undefined) {
+                    inherited(in_object_prototype(key))
+                } else {
+                    Got::Value(own)
+                }
             }
             Value::Object(Object::MathFunction(_)) => inherited(in_list(key, &FUNCTION_PROTOTYPE)),
             Value::Object(Object::Callable(c)) => {
@@ -760,7 +949,9 @@ impl<'a, H: Host> Evaluator<'a, H> {
 
 /// `Object.hasOwn(MATH_VALUE, key) ? MATH_VALUE[key] : undefined`.
 fn math_member<O>(key: &JsStr) -> Value<O> {
-    let Some(text) = key.to_rust_string() else { return Value::Undefined };
+    let Some(text) = key.to_rust_string() else {
+        return Value::Undefined;
+    };
     if let Some((_, v)) = MATH_CONSTANTS.iter().find(|(name, _)| *name == text) {
         return Value::Number(*v);
     }
@@ -783,10 +974,7 @@ fn clamp(value: f64, minimum: f64, maximum: f64) -> f64 {
 
 /// The same with a possibly absent value, which comes back unchanged.
 fn clamp_opt(value: Option<f64>, minimum: f64, maximum: f64) -> Option<f64> {
-    match value {
-        None => None,
-        Some(v) => Some(clamp(v, minimum, maximum)),
-    }
+    value.map(|v| clamp(v, minimum, maximum))
 }
 
 /// `a === b` where either may be `undefined`.

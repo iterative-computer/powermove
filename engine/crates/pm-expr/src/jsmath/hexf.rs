@@ -13,7 +13,10 @@ pub(crate) const fn hexf(text: &str) -> f64 {
         i = 1;
     }
     // A decimal integer such as `0`, `0.0`, or `1.0`.
-    if i < s.len() && s[i].is_ascii_digit() && !(i + 1 < s.len() && (s[i + 1] == b'x' || s[i + 1] == b'X')) {
+    if i < s.len()
+        && s[i].is_ascii_digit()
+        && !(i + 1 < s.len() && (s[i + 1] == b'x' || s[i + 1] == b'X'))
+    {
         let mut n: u64 = 0;
         while i < s.len() && s[i].is_ascii_digit() {
             n = n * 10 + (s[i] - b'0') as u64;
@@ -21,17 +24,26 @@ pub(crate) const fn hexf(text: &str) -> f64 {
             i += 1;
         }
         if i < s.len() {
-            assert!(s[i] == b'.', "hexf: only integers may be written in decimal");
+            assert!(
+                s[i] == b'.',
+                "hexf: only integers may be written in decimal"
+            );
             i += 1;
             while i < s.len() {
-                assert!(s[i] == b'0', "hexf: only integers may be written in decimal");
+                assert!(
+                    s[i] == b'0',
+                    "hexf: only integers may be written in decimal"
+                );
                 i += 1;
             }
         }
         let v = n as f64;
         return if negative { -v } else { v };
     }
-    assert!(i + 1 < s.len() && s[i] == b'0' && (s[i + 1] == b'x' || s[i + 1] == b'X'), "hexf: expected 0x");
+    assert!(
+        i + 1 < s.len() && s[i] == b'0' && (s[i + 1] == b'x' || s[i + 1] == b'X'),
+        "hexf: expected 0x"
+    );
     i += 2;
     let mut mantissa: u64 = 0;
     let mut bits_after_point: i32 = 0;
@@ -83,16 +95,24 @@ pub(crate) const fn hexf(text: &str) -> f64 {
     let lz = mantissa.leading_zeros() as i32;
     let top = 63 - lz; // index of the leading one
     let unbiased = top + exponent - bits_after_point;
-    assert!(unbiased >= -1022 && unbiased <= 1023, "hexf: not a normal f64");
+    assert!(
+        unbiased >= -1022 && unbiased <= 1023,
+        "hexf: not a normal f64"
+    );
     // Align the leading one to bit 52.
     let fraction = if top > 52 {
         let shift = top - 52;
-        assert!(mantissa & ((1u64 << shift) - 1) == 0, "hexf: more than 53 significant bits");
+        assert!(
+            mantissa & ((1u64 << shift) - 1) == 0,
+            "hexf: more than 53 significant bits"
+        );
         mantissa >> shift
     } else {
         mantissa << (52 - top)
     };
-    let bits = ((negative as u64) << 63) | (((unbiased + 1023) as u64) << 52) | (fraction & ((1u64 << 52) - 1));
+    let bits = ((negative as u64) << 63)
+        | (((unbiased + 1023) as u64) << 52)
+        | (fraction & ((1u64 << 52) - 1));
     f64::from_bits(bits)
 }
 

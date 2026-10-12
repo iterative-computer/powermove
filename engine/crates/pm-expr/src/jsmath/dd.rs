@@ -1,4 +1,4 @@
-//! The subset of LLVM libc's `FPUtil/double_double.h` that `atan` and `pow`
+//! The subset of LLVM libc's `FPUtil/double_double.h` that `atan` and `exp`
 //! use, in the configuration Chromium builds for arm64 (`LIBC_TARGET_CPU_HAS_FMA`):
 //! `multiply_add` is a fused multiply-add. `f64::mul_add` is fused on every
 //! Rust target (software on wasm32), so the results are the same everywhere.
@@ -31,7 +31,10 @@ pub(crate) fn exact_add(a: f64, b: f64) -> DoubleDouble {
 #[inline]
 pub(crate) fn exact_mult(a: f64, b: f64) -> DoubleDouble {
     let hi = a * b;
-    DoubleDouble { hi, lo: fma(a, b, -hi) }
+    DoubleDouble {
+        hi,
+        lo: fma(a, b, -hi),
+    }
 }
 
 /// `fputil::div` on an FMA target.
@@ -41,13 +44,10 @@ pub(crate) fn div(a: DoubleDouble, b: DoubleDouble) -> DoubleDouble {
     let hi = a.hi * q;
     let e_hi = fma(b.hi, -hi, a.hi);
     let e_lo = fma(b.lo, -hi, a.lo);
-    DoubleDouble { hi, lo: q * (e_hi + e_lo) }
-}
-
-/// `fputil::polyeval(x, a0, a1, a2)`: Horner's scheme with fused steps.
-#[inline]
-pub(crate) fn polyeval3(x: f64, a0: f64, a1: f64, a2: f64) -> f64 {
-    fma(x, fma(x, a2, a1), a0)
+    DoubleDouble {
+        hi,
+        lo: q * (e_hi + e_lo),
+    }
 }
 
 /// `fputil::nearest_integer`: `rint` in the default rounding mode.

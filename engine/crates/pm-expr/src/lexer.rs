@@ -71,7 +71,9 @@ fn is_ident_part(u: u16) -> bool {
 }
 
 const MULTI_OPERATORS: [&str; 9] = ["===", "!==", "**", "&&", "||", "==", "!=", "<=", ">="];
-const SINGLE_OPERATORS: [&str; 16] = ["+", "-", "*", "/", "%", "<", ">", "(", ")", "[", "]", "!", ",", ".", "?", ":"];
+const SINGLE_OPERATORS: [&str; 16] = [
+    "+", "-", "*", "/", "%", "<", ">", "(", ")", "[", "]", "!", ",", ".", "?", ":",
+];
 
 pub(crate) struct Lexer<'s> {
     source: &'s [u16],
@@ -110,27 +112,41 @@ impl<'s> Lexer<'s> {
                 end += 1;
             }
             self.at = end;
-            let name: String = self.source[at..end].iter().map(|&u| u as u8 as char).collect();
-            return Ok(Token { tok: Tok::Ident(name), at });
+            let name: String = self.source[at..end]
+                .iter()
+                .map(|&u| u as u8 as char)
+                .collect();
+            return Ok(Token {
+                tok: Tok::Ident(name),
+                at,
+            });
         }
 
         for op in MULTI_OPERATORS {
             if self.starts_with(at, op) {
                 self.at += op.len();
-                return Ok(Token { tok: Tok::Op(op), at });
+                return Ok(Token {
+                    tok: Tok::Op(op),
+                    at,
+                });
             }
         }
         for op in SINGLE_OPERATORS {
             if u16::from(op.as_bytes()[0]) == first {
                 self.at += 1;
-                return Ok(Token { tok: Tok::Op(op), at });
+                return Ok(Token {
+                    tok: Tok::Op(op),
+                    at,
+                });
             }
         }
         Err(SyntaxError(format!("Unsupported token at {at}")))
     }
 
     fn starts_with(&self, at: usize, op: &str) -> bool {
-        op.bytes().enumerate().all(|(i, b)| self.unit(at + i) == Some(u16::from(b)))
+        op.bytes()
+            .enumerate()
+            .all(|(i, b)| self.unit(at + i) == Some(u16::from(b)))
     }
 
     /// `/^(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/` then `Number(match)`.
@@ -165,13 +181,19 @@ impl<'s> Lexer<'s> {
                 end = e;
             }
         }
-        let text: String = self.source[at..end].iter().map(|&u| u as u8 as char).collect();
+        let text: String = self.source[at..end]
+            .iter()
+            .map(|&u| u as u8 as char)
+            .collect();
         self.at = end;
         let value = parse_decimal_literal(&text);
         if !value.is_finite() {
             return Err(SyntaxError(format!("Invalid number at {at}")));
         }
-        Ok(Token { tok: Tok::Number(value), at })
+        Ok(Token {
+            tok: Tok::Number(value),
+            at,
+        })
     }
 
     fn string(&mut self, at: usize, quote: u16) -> Result<Token, SyntaxError> {
@@ -181,7 +203,10 @@ impl<'s> Lexer<'s> {
             let c = self.source[self.at];
             self.at += 1;
             if c == quote {
-                return Ok(Token { tok: Tok::Str(JsStr::from_units(value)), at });
+                return Ok(Token {
+                    tok: Tok::Str(JsStr::from_units(value)),
+                    at,
+                });
             }
             if c == u16::from(b'\n') || c == u16::from(b'\r') {
                 return Err(SyntaxError(format!("Unterminated string at {at}")));
@@ -195,12 +220,12 @@ impl<'s> Lexer<'s> {
             };
             self.at += 1;
             let replaced = match escaped {
-                0x6e => 0x0a, // n
-                0x72 => 0x0d, // r
-                0x74 => 0x09, // t
-                0x62 => 0x08, // b
-                0x66 => 0x0c, // f
-                0x76 => 0x0b, // v
+                0x6e => 0x0a,   // n
+                0x72 => 0x0d,   // r
+                0x74 => 0x09,   // t
+                0x62 => 0x08,   // b
+                0x66 => 0x0c,   // f
+                0x76 => 0x0b,   // v
                 other => other, // \\ " ' and every unknown escape keep the character
             };
             value.push(replaced);
@@ -239,7 +264,9 @@ mod tests {
         assert!(matches!(lex(".5")[..], [Tok::Number(v)] if v == 0.5));
         assert!(matches!(lex("1.e2")[..], [Tok::Number(v)] if v == 100.0));
         assert!(matches!(lex("1e")[..], [Tok::Number(v), Tok::Ident(_)] if v == 1.0));
-        assert!(matches!(lex("1.5.5")[..], [Tok::Number(a), Tok::Number(b)] if a == 1.5 && b == 0.5));
+        assert!(
+            matches!(lex("1.5.5")[..], [Tok::Number(a), Tok::Number(b)] if a == 1.5 && b == 0.5)
+        );
         assert!(matches!(lex("0.1")[..], [Tok::Number(v)] if v == 0.1));
     }
 
@@ -250,6 +277,9 @@ mod tests {
         lexer.next_token().unwrap();
         assert_eq!(lexer.next_token().unwrap_err().0, "Unsupported token at 5");
         let units: Vec<u16> = "1e999".encode_utf16().collect();
-        assert_eq!(Lexer::new(&units).next_token().unwrap_err().0, "Invalid number at 0");
+        assert_eq!(
+            Lexer::new(&units).next_token().unwrap_err().0,
+            "Invalid number at 0"
+        );
     }
 }

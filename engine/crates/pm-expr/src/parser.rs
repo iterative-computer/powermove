@@ -189,13 +189,20 @@ impl<'s> Parser<'s> {
     pub fn new(source: &'s [u16]) -> Result<Parser<'s>, SyntaxError> {
         let mut lexer = Lexer::new(source);
         let token = lexer.next_token()?;
-        Ok(Parser { lexer, token, nodes: 0 })
+        Ok(Parser {
+            lexer,
+            token,
+            nodes: 0,
+        })
     }
 
     pub fn parse(mut self) -> Result<Node, SyntaxError> {
         let value = self.expression(Minimum::Number(0), 0)?;
         if !matches!(self.token.tok, Tok::Eof) {
-            return Err(SyntaxError(format!("Unexpected token at {}", self.token.at)));
+            return Err(SyntaxError(format!(
+                "Unexpected token at {}",
+                self.token.at
+            )));
         }
         Ok(value)
     }
@@ -223,7 +230,10 @@ impl<'s> Parser<'s> {
 
     fn require(&mut self, value: &str) -> Result<(), SyntaxError> {
         if !self.take(value)? {
-            return Err(SyntaxError(format!("Expected {value} at {}", self.token.at)));
+            return Err(SyntaxError(format!(
+                "Expected {value} at {}",
+                self.token.at
+            )));
         }
         Ok(())
     }
@@ -231,7 +241,9 @@ impl<'s> Parser<'s> {
     fn expression(&mut self, minimum: Minimum, depth: usize) -> Result<Node, SyntaxError> {
         let mut left = self.prefix(depth + 1)?;
         while self.token.has_string_value() {
-            let Some(precedence) = precedence(&self.token) else { break };
+            let Some(precedence) = precedence(&self.token) else {
+                break;
+            };
             if less_than(precedence, &minimum) {
                 break;
             }
@@ -248,7 +260,10 @@ impl<'s> Parser<'s> {
             let yes = self.expression(Minimum::Number(0), depth + 1)?;
             self.require(":")?;
             let no = self.expression(Minimum::Number(0), depth + 1)?;
-            left = self.node(Node::Conditional(Box::new(left), Box::new(yes), Box::new(no)), depth)?;
+            left = self.node(
+                Node::Conditional(Box::new(left), Box::new(yes), Box::new(no)),
+                depth,
+            )?;
         }
         Ok(left)
     }
@@ -279,7 +294,9 @@ impl<'s> Parser<'s> {
                 self.node(Node::Literal(literal), depth)?
             }
             Tok::Ident(_) => {
-                let Tok::Ident(name) = self.advance()?.tok else { unreachable!() };
+                let Tok::Ident(name) = self.advance()?.tok else {
+                    unreachable!()
+                };
                 let node = match name.as_str() {
                     "true" => Node::Literal(Literal::Bool(true)),
                     "false" => Node::Literal(Literal::Bool(false)),
@@ -294,7 +311,10 @@ impl<'s> Parser<'s> {
                     self.require(")")?;
                     inner
                 } else {
-                    return Err(SyntaxError(format!("Expected a value at {}", self.token.at)));
+                    return Err(SyntaxError(format!(
+                        "Expected a value at {}",
+                        self.token.at
+                    )));
                 }
             }
         };
@@ -302,10 +322,18 @@ impl<'s> Parser<'s> {
         loop {
             if self.take(".")? {
                 let Tok::Ident(_) = &self.token.tok else {
-                    return Err(SyntaxError(format!("Expected a property at {}", self.token.at)));
+                    return Err(SyntaxError(format!(
+                        "Expected a property at {}",
+                        self.token.at
+                    )));
                 };
-                let Tok::Ident(name) = self.advance()?.tok else { unreachable!() };
-                let property = self.node(Node::Literal(Literal::String(JsStr::from(name.as_str()))), depth + 1)?;
+                let Tok::Ident(name) = self.advance()?.tok else {
+                    unreachable!()
+                };
+                let property = self.node(
+                    Node::Literal(Literal::String(JsStr::from(name.as_str()))),
+                    depth + 1,
+                )?;
                 value = self.node(Node::Member(Box::new(value), Box::new(property)), depth)?;
             } else if self.take("[")? {
                 let property = self.expression(Minimum::Number(0), depth + 1)?;
@@ -316,7 +344,9 @@ impl<'s> Parser<'s> {
                 if !self.take(")")? {
                     loop {
                         if args.len() >= MAX_CALL_ARGS {
-                            return Err(SyntaxError("Expression call has too many arguments".into()));
+                            return Err(SyntaxError(
+                                "Expression call has too many arguments".into(),
+                            ));
                         }
                         args.push(self.expression(Minimum::Number(0), depth + 1)?);
                         if !self.take(",")? {

@@ -53,13 +53,18 @@ mod string;
 mod value;
 
 pub use deps::{ContextReads, Dependencies, FieldRead, Root, Step};
-pub use diagnostic::{LENGTH_MESSAGE, expression_diagnostic, expression_names};
+pub use diagnostic::{
+    LENGTH_MESSAGE, expression_diagnostic, expression_diagnostic_utf16, expression_names,
+};
 pub use eval::EvalError;
 pub use host::{Host, JsonHost, JsonRef, Shape};
 pub use lexer::SyntaxError;
 pub use parser::{MAX_CALL_ARGS, MAX_DEPTH, MAX_NODES, MAX_SOURCE_CHARS};
 pub use string::JsStr;
-pub use value::{Callable, Helper, MATH_CONSTANTS, MathFunction, Object, Value, number_to_string, string_to_number};
+pub use value::{
+    Callable, Helper, MATH_CONSTANTS, MathFunction, Object, Value, number_to_string,
+    string_to_number,
+};
 
 use eval::Evaluator;
 use parser::Node;
@@ -166,7 +171,9 @@ fn needs_idx(source: &[u16]) -> bool {
     let word = |u: u16| matches!(u, 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a | 0x5f);
     let pattern = [u16::from(b'i'), u16::from(b'd'), u16::from(b'x')];
     source.windows(3).enumerate().any(|(i, w)| {
-        w == pattern && (i == 0 || !word(source[i - 1])) && source.get(i + 3).is_none_or(|&u| !word(u))
+        w == pattern
+            && (i == 0 || !word(source[i - 1]))
+            && source.get(i + 3).is_none_or(|&u| !word(u))
     })
 }
 
@@ -180,11 +187,26 @@ impl Expression {
     /// Like [`compile`](Expression::compile), with the reason for a failure.
     pub fn parse(source: &str, dialect: Dialect) -> Result<Expression, CompileError> {
         let units: Vec<u16> = source.encode_utf16().collect();
+        Expression::parse_utf16(&units, dialect)
+    }
+
+    /// [`parse`](Expression::parse) for a JavaScript string given as UTF-16
+    /// code units (project JSON may hold lone surrogates).
+    pub fn parse_utf16(units: &[u16], dialect: Dialect) -> Result<Expression, CompileError> {
         if units.is_empty() || units.len() > MAX_SOURCE_CHARS {
             return Err(CompileError::Length);
         }
-        let tree = parser::parse(&units).map_err(CompileError::Syntax)?;
-        Ok(Expression { tree, needs_idx: needs_idx(&units), dialect })
+        let tree = parser::parse(units).map_err(CompileError::Syntax)?;
+        Ok(Expression {
+            tree,
+            needs_idx: needs_idx(units),
+            dialect,
+        })
+    }
+
+    /// [`compile`](Expression::compile) for UTF-16 code units.
+    pub fn compile_utf16(units: &[u16], dialect: Dialect) -> Option<Expression> {
+        Expression::parse_utf16(units, dialect).ok()
     }
 
     /// Whether the source mentions `idx` as a word (the caller computes the
@@ -200,11 +222,30 @@ impl Expression {
     /// Evaluates against raw project values supplied by `host`.
     pub fn evaluate<H: Host>(&self, host: &H, ctx: &Context<H::Obj>) -> Evaluation<H::Obj> {
         let mut evaluator = Evaluator::new(host, ctx, self.dialect);
-        let result = evaluator.evaluate(&self.tree).map(|v| v.map_doc(|t| t.into_obj()));
+        let result = evaluator
+            .evaluate(&self.tree)
+            .map(|v| v.map_doc(|t| t.into_obj()));
         let mut deps = evaluator.deps;
         deps.finish();
         Evaluation { result, deps }
     }
+}
+
+/// `String(value)` as V8 computes it, reading document objects through
+/// `host` (for showing a result, or comparing one with JavaScript's).
+pub fn to_js_string<H: Host>(host: &H, value: &Value<H::Obj>) -> Result<JsStr, EvalError> {
+    let ctx = Context {
+        t: 0.0,
+        time: 0.0,
+        fps: 0.0,
+        frame: 0.0,
+        value: Value::Undefined,
+        layer: Value::Undefined,
+        comp: Value::Undefined,
+        channel: JsStr::default(),
+        idx: 0.0,
+    };
+    Evaluator::new(host, &ctx, Dialect::Native).string_of(value)
 }
 
 /// `evalProp`'s handling of an expression: `compiled` is `None` when the

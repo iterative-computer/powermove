@@ -105,6 +105,9 @@ mod tests {
         assert!(!JsStr::from("abc").eq_str("ab"));
         assert!(JsStr::from("a") < JsStr::from("b"));
         assert!(JsStr::from("Z") < JsStr::from("a"));
-        assert_eq!(JsStr::from("ab").concat(&JsStr::from("c")), JsStr::from("abc"));
+        assert_eq!(
+            JsStr::from("ab").concat(&JsStr::from("c")),
+            JsStr::from("abc")
+        );
     }
 }

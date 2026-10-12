@@ -95,7 +95,8 @@ impl Dependencies {
     /// Whether the result can change with time alone (`t`, `time`, `T`,
     /// `frame`, or `wiggle`). `fps` and the keyframed value are separate.
     pub fn depends_on_time(&self) -> bool {
-        self.context.intersects(ContextReads::LOCAL_TIME | ContextReads::TIME | ContextReads::FRAME)
+        self.context
+            .intersects(ContextReads::LOCAL_TIME | ContextReads::TIME | ContextReads::FRAME)
     }
 
     /// Whether a change at `root.path` (the node there was replaced or
@@ -108,7 +109,9 @@ impl Dependencies {
         if root == Root::Value && self.context.contains(ContextReads::VALUE) && path.is_empty() {
             return true;
         }
-        self.fields.iter().any(|f| f.root == root && f.path.starts_with(path))
+        self.fields
+            .iter()
+            .any(|f| f.root == root && f.path.starts_with(path))
     }
 
     pub(crate) fn finish(&mut self) {

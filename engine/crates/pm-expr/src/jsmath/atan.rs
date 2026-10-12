@@ -15,13 +15,24 @@ use super::tables::ATAN_I;
 /// `atan_eval`: degree-9 Taylor polynomial in double-double for |x| <= 2^-7.
 fn atan_eval(x: DoubleDouble) -> DoubleDouble {
     let x_hi_sq = x.hi * x.hi;
-    let c0 = fma(x_hi_sq, hexf("0x1.999999999999ap-3"), hexf("-0x1.5555555555555p-2"));
-    let c1 = fma(x_hi_sq, hexf("0x1.c71c71c71c71cp-4"), hexf("-0x1.2492492492492p-3"));
+    let c0 = fma(
+        x_hi_sq,
+        hexf("0x1.999999999999ap-3"),
+        hexf("-0x1.5555555555555p-2"),
+    );
+    let c1 = fma(
+        x_hi_sq,
+        hexf("0x1.c71c71c71c71cp-4"),
+        hexf("-0x1.2492492492492p-3"),
+    );
     let x_hi_3 = x_hi_sq * x.hi;
     let x_hi_4 = x_hi_sq * x_hi_sq;
     let d0 = fma(x_hi_4, c1, c0);
     let d1 = fma(x_hi_4 - x_hi_sq, x.lo, x.lo);
-    DoubleDouble { hi: x.hi, lo: fma(x_hi_3, d0, d1) }
+    DoubleDouble {
+        hi: x.hi,
+        lo: fma(x_hi_3, d0, d1),
+    }
 }
 
 const IS_NEG: [f64; 2] = [1.0, -1.0];
@@ -57,11 +68,17 @@ pub(crate) fn atan(x: f64) -> f64 {
         k *= hexf("0x1.0p-6");
 
         // numerator = |x| - k
-        let num = DoubleDouble { lo: 0.0, hi: x_d - k };
+        let num = DoubleDouble {
+            lo: 0.0,
+            hi: x_d - k,
+        };
         // denominator = 1 - k * |x|
         let den_hi = fma(x_d, k, 1.0);
         let prod = exact_mult(x_d, k);
-        let den = DoubleDouble { hi: den_hi, lo: ((1.0 - den_hi) + prod.hi) + prod.lo };
+        let den = DoubleDouble {
+            hi: den_hi,
+            lo: ((1.0 - den_hi) + prod.hi) + prod.lo,
+        };
 
         let x_r = div(num, den);
         let p = atan_eval(x_r);
@@ -93,7 +110,10 @@ pub(crate) fn atan(x: f64) -> f64 {
     // numerator = 1 - k * |x|
     let num_hi = fma(-x_d, k, 1.0);
     let prod = exact_mult(x_d, k);
-    let num = DoubleDouble { hi: num_hi, lo: ((1.0 - num_hi) - prod.hi) - prod.lo };
+    let num = DoubleDouble {
+        hi: num_hi,
+        lo: ((1.0 - num_hi) - prod.hi) - prod.lo,
+    };
 
     let x_r = div(num, den);
     let p = atan_eval(x_r);

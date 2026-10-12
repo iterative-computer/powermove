@@ -59,8 +59,12 @@ impl<'a> JsonHost<'a> {
             pm_model::Value::Null => Value::Null,
             pm_model::Value::Bool(b) => Value::Bool(*b),
             pm_model::Value::Number(n) => Value::Number(*n),
-            pm_model::Value::String(s) => Value::String(JsStr::from_units(s.utf16_units().collect::<Vec<u16>>())),
-            pm_model::Value::Array(_) | pm_model::Value::Object(_) => Value::Object(Object::Doc(JsonRef(node))),
+            pm_model::Value::String(s) => {
+                Value::String(JsStr::from_units(s.utf16_units().collect::<Vec<u16>>()))
+            }
+            pm_model::Value::Array(_) | pm_model::Value::Object(_) => {
+                Value::Object(Object::Doc(JsonRef(node)))
+            }
         }
     }
 }
@@ -77,7 +81,9 @@ impl<'a> Host for JsonHost<'a> {
 
     fn element(&self, array: &JsonRef<'a>, index: usize) -> Value<JsonRef<'a>> {
         match array.0 {
-            pm_model::Value::Array(items) => items.get(index).map_or(Value::Undefined, JsonHost::value),
+            pm_model::Value::Array(items) => {
+                items.get(index).map_or(Value::Undefined, JsonHost::value)
+            }
             _ => Value::Undefined,
         }
     }

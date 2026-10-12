@@ -7,7 +7,9 @@ use crate::value::{Helper, MathFunction};
 /// The diagnostic for a source that is not a string or is too long.
 pub const LENGTH_MESSAGE: &str = "Use an expression of at most 2000 characters.";
 
-const CONTEXT_NAMES: [&str; 11] = ["time", "t", "T", "fps", "value", "layer", "comp", "ch", "idx", "PI", "Math"];
+const CONTEXT_NAMES: [&str; 11] = [
+    "time", "t", "T", "fps", "value", "layer", "comp", "ch", "idx", "PI", "Math",
+];
 
 /// `EXPRESSION_NAMES`: context names, helpers, then `Math` functions. The
 /// native dialect adds `frame` after `fps`.
@@ -37,10 +39,16 @@ fn is_known(name: &str, dialect: Dialect) -> bool {
 /// `expression.ts` visits nodes, so the first problem reported is the same.
 pub fn expression_diagnostic(source: &str, dialect: Dialect) -> Option<String> {
     let units: Vec<u16> = source.encode_utf16().collect();
+    expression_diagnostic_utf16(&units, dialect)
+}
+
+/// [`expression_diagnostic`] for a JavaScript string given as UTF-16 code
+/// units (lone surrogates allowed).
+pub fn expression_diagnostic_utf16(units: &[u16], dialect: Dialect) -> Option<String> {
     if units.len() > MAX_SOURCE_CHARS {
         return Some(LENGTH_MESSAGE.into());
     }
-    match parse(&units) {
+    match parse(units) {
         Err(error) => Some(error.0),
         Ok(tree) => visit(&tree, dialect).err(),
     }
@@ -50,7 +58,9 @@ fn visit(node: &Node, dialect: Dialect) -> Result<(), String> {
     if let Node::Identifier(name) = node
         && !is_known(name, dialect)
     {
-        return Err(format!("Unknown name “{name}”. Use time, value, or a supported function."));
+        return Err(format!(
+            "Unknown name “{name}”. Use time, value, or a supported function."
+        ));
     }
     if let Node::Call(callee, _) = node {
         if let Node::Identifier(name) = &**callee

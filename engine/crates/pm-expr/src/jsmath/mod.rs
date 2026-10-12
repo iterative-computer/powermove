@@ -1,22 +1,25 @@
 //! `Math` functions bit-identical to the V8 that ships in Powermove's Electron
-//! (V8 15.2, Electron 44) on every Rust target, wasm32 included.
+//! (V8 15.2, Electron 44, Apple silicon), the same on every Rust target unless
+//! noted.
 //!
 //! V8 15.2 implements `Math.sin`, `cos`, `tan`, `asin`, `acos`, `atan`,
-//! `atan2`, `exp`, `log`, and `pow` with LLVM libc (`src/base/ieee754.cc`
-//! includes `third_party/llvm-libc/src/shared/math.h`), not fdlibm. Measured
-//! against 300-digit references, its `sin`, `cos`, `tan`, `asin`, `acos`,
-//! `atan2`, `exp`, and `log` are correctly rounded, so any correctly rounded
-//! implementation reproduces them; these come from `pxfm` (a Rust port of the
-//! CORE-MATH and LLVM libc algorithms). `atan` and `pow` are not correctly
-//! rounded, so they are ported line for line from the LLVM libc revision
-//! Chromium 152 pins ([`atan`](mod@atan), [`pow`](mod@pow)). The fdlibm ports in
-//! the `libm` crate differ from V8 15.2 in about 1 in 30 `sin` results, which
-//! is why they are not used. See `docs/engine/expressions.md`.
+//! `atan2`, `exp`, and `log` with LLVM libc (`src/base/ieee754.cc` includes
+//! `third_party/llvm-libc/src/shared/math.h`), not fdlibm. Measured against
+//! 300-bit references, all of them except `atan` are correctly rounded, so any
+//! correctly rounded implementation reproduces them: `sin`, `cos`, `tan`,
+//! `asin`, `acos`, `atan2`, and `log` come from `pxfm` (Rust ports of the
+//! CORE-MATH and LLVM libc algorithms) and `exp` is a fixed copy of pxfm's
+//! CORE-MATH port ([`exp`](mod@exp)). `atan` is ported line for line from the
+//! LLVM libc revision Chromium 152 pins ([`atan`](mod@atan)). `pow` follows V8
+//! to the platform's C library ([`pow`](mod@pow)). The fdlibm ports in the
+//! `libm` crate differ from V8 15.2 in about 1 in 30 `sin` results, which is
+//! why they are not used. See `docs/engine/expressions.md`.
 //!
 //! The remaining functions are exact operations with ECMAScript edge cases.
 
 mod atan;
 mod dd;
+mod exp;
 mod hexf;
 mod pow;
 mod tables;
@@ -51,14 +54,15 @@ pub fn atan2(y: f64, x: f64) -> f64 {
 }
 
 pub fn exp(x: f64) -> f64 {
-    pxfm::f_exp(x)
+    exp::exp(x)
 }
 
 pub fn log(x: f64) -> f64 {
     pxfm::f_log(x)
 }
 
-/// `Math.pow(x, y)` and `x ** y`.
+/// `Math.pow(x, y)` and `x ** y` (platform `pow` on native targets, as V8;
+/// correctly rounded on wasm32).
 pub fn pow(x: f64, y: f64) -> f64 {
     pow::js_pow(x, y)
 }
@@ -163,7 +167,7 @@ mod tests {
         assert_eq!(pow(f64::NAN, 0.0), 1.0);
         assert_eq!(pow(-0.0, 0.5).to_bits(), 0);
         assert_eq!(pow(f64::NEG_INFINITY, 0.5), f64::INFINITY);
-        assert_eq!(pow(-8.0, 1.0 / 3.0).is_nan(), true);
+        assert!(pow(-8.0, 1.0 / 3.0).is_nan());
         assert_eq!(pow(2.0, 10.0), 1024.0);
         assert_eq!(pow(-2.0, 3.0), -8.0);
         assert_eq!(pow(0.0, -1.0), f64::INFINITY);
