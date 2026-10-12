@@ -9,11 +9,12 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use pm_expr::{
-    Context, Dialect, Expression, JsStr, JsonHost, JsonRef, Root, Step, Value, evaluate_channel,
-    expression_diagnostic_utf16, jsmath, to_js_string,
-};
-use pm_model::json::{Map, Value as Json, parse};
+mod support;
+
+use support::*;
+
+use pm_expr::{Dialect, Expression, JsStr, JsonHost, Root, Step, Value};
+use pm_model::json::{Value as Json, parse};
 
 struct Suite {
     contexts: Vec<Json>,
@@ -66,139 +67,6 @@ fn load(cases: &Path, expected: &Path) -> Suite {
         cases,
         expected,
     }
-}
-
-trait JsonExt {
-    fn field(&self, key: &str) -> Option<&Json>;
-}
-
-impl JsonExt for Json {
-    fn field(&self, key: &str) -> Option<&Json> {
-        self.as_object().and_then(|m| m.get(key))
-    }
-}
-
-fn context(spec: &Json, frame: f64) -> Context<JsonRef<'_>> {
-    let num = |k: &str| spec.field(k).and_then(Json::as_f64).unwrap_or(f64::NAN);
-    let comp = spec.field("comp").expect("comp");
-    let layer = match spec.field("layerIndex").and_then(Json::as_f64) {
-        Some(i) => match comp.field("layers") {
-            Some(Json::Array(items)) => JsonHost::value(&items[i as usize]),
-            _ => panic!("layerIndex without layers"),
-        },
-        None => spec
-            .field("layer")
-            .map_or(Value::Undefined, JsonHost::value),
-    };
-    Context {
-        t: num("t"),
-        time: num("T"),
-        fps: num("fps"),
-        frame,
-        value: spec
-            .field("value")
-            .map_or(Value::Undefined, JsonHost::value),
-        layer,
-        comp: JsonHost::value(comp),
-        channel: JsStr::from(spec.field("ch").and_then(Json::as_str).unwrap_or("")),
-        idx: num("idx"),
-    }
-}
-
-fn js(s: &str) -> Json {
-    Json::String(s.into())
-}
-
-fn jstr(s: &JsStr) -> Json {
-    Json::String(pm_model::JsString::from_utf16_units(s.units()))
-}
-
-fn obj(entries: Vec<(&str, Json)>) -> Json {
-    let mut m = Map::new();
-    for (k, v) in entries {
-        m.insert(k, v);
-    }
-    Json::Object(m)
-}
-
-fn encode<'a>(value: &Value<JsonRef<'a>>) -> Json {
-    match value {
-        Value::Undefined => obj(vec![("type", js("undefined"))]),
-        Value::Null => obj(vec![("type", js("null"))]),
-        Value::Bool(b) => obj(vec![("type", js("boolean")), ("value", Json::Bool(*b))]),
-        Value::Number(n) => {
-            let bits = if n.is_nan() {
-                "nan".to_string()
-            } else {
-                format!("{:016x}", n.to_bits())
-            };
-            obj(vec![
-                ("type", js("number")),
-                ("bits", Json::String(bits.into())),
-            ])
-        }
-        Value::String(s) => obj(vec![("type", js("string")), ("value", jstr(s))]),
-        Value::Object(_) => {
-            let (string, error) = match to_js_string(&JsonHost::new(), value) {
-                Ok(s) => (jstr(&s), Json::Null),
-                Err(e) => (Json::Null, js(&e.message())),
-            };
-            obj(vec![
-                ("type", js(value.type_of())),
-                ("string", string),
-                ("error", error),
-            ])
-        }
-    }
-}
-
-/// The record `reference.mjs` writes for one case.
-fn evaluate_case(source: &[u16], spec: &Json, dialect: Dialect) -> Json {
-    let mut fields = vec![(
-        "diagnostic",
-        expression_diagnostic_utf16(source, dialect).map_or(Json::Null, |d| js(&d)),
-    )];
-    let compiled = Expression::compile_utf16(source, dialect);
-    fields.push(("compiled", Json::Bool(compiled.is_some())));
-    let mut ctx = context(spec, 0.0);
-    if let Some(expr) = &compiled {
-        fields.push(("needsIdx", Json::Bool(expr.needs_idx())));
-        if !expr.needs_idx() {
-            ctx.idx = 0.0;
-        }
-        let out = expr.evaluate(&JsonHost::new(), &ctx);
-        fields.push((
-            "result",
-            match &out.result {
-                Ok(v) => encode(v),
-                Err(e) => obj(vec![("type", js("throw")), ("message", js(&e.message()))]),
-            },
-        ));
-    }
-    let channel = evaluate_channel(compiled.as_ref(), &JsonHost::new(), &ctx);
-    let value = match &channel.value {
-        None => Json::Null,
-        Some(pm_expr::ChannelValue::Number(n)) => encode(&Value::Number(*n)),
-        Some(pm_expr::ChannelValue::String(s)) => encode(&Value::String(s.clone())),
-        Some(pm_expr::ChannelValue::Bool(b)) => encode(&Value::Bool(*b)),
-    };
-    fields.push((
-        "channel",
-        obj(vec![
-            ("value", value),
-            ("error", channel.error.as_deref().map_or(Json::Null, js)),
-        ]),
-    ));
-    obj(fields)
-}
-
-fn mentions_frame(source: &[u16]) -> bool {
-    let source = String::from_utf16_lossy(source);
-    let b = source.as_bytes();
-    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
-    source
-        .match_indices("frame")
-        .any(|(i, _)| (i == 0 || !word(b[i - 1])) && b.get(i + 5).is_none_or(|&c| !word(c)))
 }
 
 fn check_suite(suite: &Suite, label: &str) {
@@ -265,76 +133,6 @@ fn external_run_matches_v8() {
 
 // ── Math sweep ──────────────────────────────────────────────────────────────
 
-struct Mulberry32(u32);
-
-impl Mulberry32 {
-    fn next(&mut self) -> u32 {
-        self.0 = self.0.wrapping_add(0x6d2b_79f5);
-        let mut t = self.0;
-        t = (t ^ (t >> 15)).wrapping_mul(t | 1);
-        t ^= t.wrapping_add((t ^ (t >> 7)).wrapping_mul(t | 61));
-        t ^ (t >> 14)
-    }
-}
-
-fn from_bits(hi: u32, lo: u32) -> f64 {
-    f64::from_bits((u64::from(hi) << 32) | u64::from(lo))
-}
-
-/// Mirrors `sample` in parity/reference.mjs (`6.2831` is wiggle's literal).
-#[allow(clippy::approx_constant)]
-fn sample(fun: &str, i: usize, rng: &mut Mulberry32) -> (f64, f64) {
-    let d: [u32; 6] = std::array::from_fn(|_| rng.next());
-    let unit = |k: usize| f64::from(d[k]) / 4294967296.0;
-    let range_a = match fun {
-        "asin" | "acos" => 1.0,
-        "exp" => 745.0,
-        "pow" => 20.0,
-        _ => 1e3,
-    };
-    let range_b = match fun {
-        "atan2" => 1e3,
-        "pow" => 40.0,
-        _ => 1.0,
-    };
-    let mode = i % 5;
-    let mut a = match mode {
-        0 => from_bits(d[0], d[1]),
-        1 => (unit(0) * 2.0 - 1.0) * range_a,
-        2 => ((unit(0) * 2001.0).floor() - 1000.0 + (unit(1) * 100.0).floor() / 100.0) * 127.1,
-        3 => {
-            unit(0) * 60.0 * (unit(1) * 8.0) * 6.2831
-                + unit(2) * 17.3
-                + (unit(3) * 3.0).floor() * 2.4
-        }
-        _ => {
-            let e = (unit(1) * 80.0).floor() as i64 - 60 + 1023;
-            (unit(0) * 2.0 - 1.0) * f64::from_bits((e as u64) << 52)
-        }
-    };
-    let mut b = if mode == 0 {
-        from_bits(d[2], d[3])
-    } else if mode == 2 && fun == "pow" {
-        ((unit(4) * 2.0 - 1.0) * 40.0).floor()
-    } else {
-        (unit(4) * 2.0 - 1.0) * range_b
-    };
-    if fun == "log" {
-        a = a.abs();
-    }
-    if (fun == "asin" || fun == "acos") && mode != 0 {
-        a = unit(0) * 2.0 - 1.0;
-    }
-    if fun == "pow" && mode == 1 {
-        a = unit(0) * 20.0;
-    }
-    if fun == "wiggle" {
-        a = unit(0) * 60.0;
-        b = unit(1) * 8.0;
-    }
-    (a, b)
-}
-
 #[test]
 fn external_math_sweep_matches_v8() {
     let Ok(dir) = std::env::var("PM_EXPR_PARITY_DIR") else {
@@ -350,9 +148,6 @@ fn external_math_sweep_matches_v8() {
     let Some(Json::Array(functions)) = meta.field("functions") else {
         panic!("functions")
     };
-    let random = Expression::compile("random(value)", Dialect::Legacy).unwrap();
-    let wiggle = Expression::compile("wiggle(value, 20, 7)", Dialect::Legacy).unwrap();
-    let empty = Json::Object(Map::new());
     let mut total_bad = 0;
     for (index, fun) in functions.iter().enumerate() {
         let fun = fun.as_str().unwrap();
@@ -363,43 +158,7 @@ fn external_math_sweep_matches_v8() {
         for i in 0..count {
             let (a, b) = sample(fun, i, &mut rng);
             let expected = f64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap());
-            let got = match fun {
-                "sin" => jsmath::sin(a),
-                "cos" => jsmath::cos(a),
-                "tan" => jsmath::tan(a),
-                "asin" => jsmath::asin(a),
-                "acos" => jsmath::acos(a),
-                "atan" => jsmath::atan(a),
-                "atan2" => jsmath::atan2(a, b),
-                "exp" => jsmath::exp(a),
-                "log" => jsmath::log(a),
-                "pow" => jsmath::pow(a, b),
-                "sqrt" => jsmath::sqrt(a),
-                "random" | "wiggle" => {
-                    let (expr, t, value) = if fun == "random" {
-                        (&random, 0.0, a)
-                    } else {
-                        (&wiggle, a, b)
-                    };
-                    let ctx = Context {
-                        t,
-                        time: 0.0,
-                        fps: 30.0,
-                        frame: 0.0,
-                        value: Value::Number(value),
-                        layer: JsonHost::value(&empty),
-                        comp: JsonHost::value(&empty),
-                        channel: JsStr::from("x"),
-                        idx: 0.0,
-                    };
-                    expr.evaluate(&JsonHost::new(), &ctx)
-                        .result
-                        .unwrap()
-                        .as_number()
-                        .unwrap()
-                }
-                other => panic!("unknown function {other}"),
-            };
+            let got = math_apply(fun, a, b);
             let same = got.to_bits() == expected.to_bits() || (got.is_nan() && expected.is_nan());
             if !same {
                 bad.push((a, b, expected, got, i % 5));

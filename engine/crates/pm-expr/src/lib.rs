@@ -40,7 +40,9 @@
 //! ([`Dependencies`]). Reads are recorded as they happen, so they describe the
 //! branch taken: if none of them changes, the result cannot change.
 
-#![forbid(unsafe_code)]
+// The only unsafe code is the optional wasm import of `Math.pow` (feature
+// `js-pow`), a declaration of a pure function.
+#![deny(unsafe_code)]
 
 mod deps;
 mod diagnostic;

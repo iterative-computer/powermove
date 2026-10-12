@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
 // pm-expr parity run: bundles legacy/core/expression.ts, generates cases,
 // evaluates them in V8 (Electron as Node, the runtime Powermove ships) and in
-// JavaScriptCore (bun, informational), sweeps the Math functions, and runs
-// `cargo test --test parity` against the results.
+// JavaScriptCore (bun, informational), sweeps the Math functions, and checks
+// the native build (`cargo test --test parity`) and the wasm32 build
+// (wasm.mjs) against the results. Source engine/env.sh first.
 //
 //   bun engine/crates/pm-expr/parity/run.ts [--fuzz N] [--seed S] [--math N]
 //       [--corpus DIR] [--no-corpus] [--keep] [--write-fixture]
@@ -127,6 +128,17 @@ if (writeFixture) {
 // 4. The Rust side.
 sh('nice', ['-n', '15', 'cargo', 'test', '-p', 'pm-expr', '--release', '--test', 'parity', '--', '--nocapture', '--test-threads=4'],
   { PM_EXPR_PARITY_DIR: out }, engineDir);
+
+// 5. The same cases and sweep through the wasm32 build: with `js-pow` under V8
+// (every result must match), and the default build under bun (pow may differ).
+const wasmBuild = (features: string[]) =>
+  sh('nice', ['-n', '15', 'cargo', 'build', '-q', '-p', 'pm-expr', '--release', '--example', 'wasm_parity',
+    '--target', 'wasm32-unknown-unknown', ...features], {}, engineDir);
+const wasmFile = join(engineDir, 'target/wasm32-unknown-unknown/release/examples/wasm_parity.wasm');
+wasmBuild(['--features', 'js-pow']);
+sh(electron, [join(here, 'wasm.mjs'), wasmFile, out, '--js-pow'], v8);
+wasmBuild([]);
+sh(process.execPath, [join(here, 'wasm.mjs'), wasmFile, out]);
 
 if (!flag('--keep')) rmSync(out, { recursive: true, force: true });
 else console.log(`parity: kept ${out}`);

@@ -269,6 +269,9 @@ impl<'s> Parser<'s> {
     }
 
     fn prefix(&mut self, depth: usize) -> Result<Node, SyntaxError> {
+        if depth > MAX_DEPTH {
+            return Err(self.too_deep());
+        }
         let unary = if self.token.is("+") {
             Some(UnaryOp::Plus)
         } else if self.token.is("-") {
@@ -364,8 +367,128 @@ impl<'s> Parser<'s> {
     }
 }
 
+impl Parser<'_> {
+    /// The outcome of `prefix` below the depth limit, found without recursing.
+    ///
+    /// Every node created deeper than `MAX_DEPTH` fails, and no node is
+    /// created before the innermost operand, so from here `expression.ts` can
+    /// only end in an error: the first lexer error while it consumes unary
+    /// operators and opening parentheses, then either a lexer error on the
+    /// token after the innermost operand, "Expression is too complex" when that
+    /// operand's node is created, or "Expected a value" when there is none.
+    /// JavaScript recurses once per prefix token (up to 2,000 deep); this loop
+    /// keeps the native and wasm stacks bounded (V8's wasm stack overflowed on
+    /// 2,000 nested parentheses before it existed).
+    fn too_deep(&mut self) -> SyntaxError {
+        loop {
+            if self.token.is("+") || self.token.is("-") || self.token.is("!") {
+                if let Err(error) = self.advance() {
+                    return error;
+                }
+                continue;
+            }
+            if matches!(self.token.tok, Tok::Number(_) | Tok::Str(_) | Tok::Ident(_)) {
+                return match self.advance() {
+                    Err(error) => error,
+                    Ok(_) => SyntaxError("Expression is too complex".into()),
+                };
+            }
+            match self.take("(") {
+                Err(error) => return error,
+                Ok(true) => continue,
+                Ok(false) => return SyntaxError(format!("Expected a value at {}", self.token.at)),
+            }
+        }
+    }
+}
+
 /// Parses UTF-16 source with the limits of `expression.ts` (the length limit
 /// is checked by the callers, which differ in how they report it).
 pub(crate) fn parse(source: &[u16]) -> Result<Node, SyntaxError> {
     Parser::new(source)?.parse()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_str(s: &str) -> Result<Node, SyntaxError> {
+        parse(&s.encode_utf16().collect::<Vec<u16>>())
+    }
+
+    /// Deep inputs parse in a small, fixed stack.
+    #[test]
+    fn recursion_is_bounded() {
+        let inputs = [
+            "(".repeat(2000),
+            "-".repeat(2000),
+            "(".repeat(999) + "1",
+            "!(".repeat(666) + "x",
+            "2**".repeat(666) + "2",
+            "a[".repeat(1000),
+            "f(".repeat(1000),
+            "1?".repeat(1000),
+        ];
+        let handle = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                inputs
+                    .iter()
+                    .map(|s| parse_str(s).unwrap_err().0)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap();
+        let errors = handle.join().expect("no stack overflow");
+        assert_eq!(errors[0], "Expected a value at 2000");
+        assert_eq!(errors[1], "Expected a value at 2000");
+        assert_eq!(errors[2], "Expression is too complex");
+        assert_eq!(errors[3], "Expression is too complex");
+        assert_eq!(errors[4], "Expression is too complex");
+    }
+
+    #[test]
+    fn deep_scan_reports_lexer_errors_first() {
+        let deep = "(".repeat(30);
+        assert_eq!(
+            parse_str(&format!("{deep}@")).unwrap_err().0,
+            "Unsupported token at 30"
+        );
+        assert_eq!(
+            parse_str(&format!("{deep}1@")).unwrap_err().0,
+            "Unsupported token at 31"
+        );
+        assert_eq!(
+            parse_str(&format!("{deep}1)")).unwrap_err().0,
+            "Expression is too complex"
+        );
+        assert_eq!(
+            parse_str(&format!("{deep}\"abc")).unwrap_err().0,
+            "Unterminated string at 30"
+        );
+        assert_eq!(
+            parse_str(&format!("{deep})")).unwrap_err().0,
+            "Expected a value at 30"
+        );
+    }
+
+    #[test]
+    fn limits() {
+        let nested = |n: usize| format!("{}1{}", "(".repeat(n), ")".repeat(n));
+        // The root expression is depth 0 and its operand depth 1; each
+        // parenthesis adds two levels and each unary operator one.
+        let too_complex = |s: &str| parse_str(s).unwrap_err().0 == "Expression is too complex";
+        assert!(parse_str(&nested(11)).is_ok());
+        assert!(too_complex(&nested(12)));
+        assert!(parse_str(&format!("{}1", "-".repeat(23))).is_ok());
+        assert!(too_complex(&format!("{}1", "-".repeat(24))));
+        let chain = |n: usize| vec!["1"; n].join("+");
+        assert!(parse_str(&chain(80)).is_ok()); // 80 literals + 79 binary nodes = 159
+        assert!(parse_str(&chain(81)).is_err()); // 161 nodes
+        let args = |n: usize| format!("max({})", vec!["1"; n].join(","));
+        assert!(parse_str(&args(12)).is_ok());
+        assert_eq!(
+            parse_str(&args(13)).unwrap_err().0,
+            "Expression call has too many arguments"
+        );
+    }
 }
