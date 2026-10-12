@@ -58,7 +58,9 @@ const cfg = Object.assign(
 for (const s of ['disable-renderer-backgrounding', 'disable-background-timer-throttling', 'disable-backgrounding-occluded-windows']) {
   app.commandLine.appendSwitch(s);
 }
-app.commandLine.appendSwitch('disable-features', 'MacWebContentsOcclusion');
+app.commandLine.appendSwitch('disable-features', ['MacWebContentsOcclusion', ...(cfg.disableFeatures ?? [])].join(','));
+// Compositor experiments (Chromium base::Feature names), off unless a run asks.
+if (cfg.enableFeatures?.length) app.commandLine.appendSwitch('enable-features', cfg.enableFeatures.join(','));
 
 const log = msg => process.stdout.write(`[s1 main ${(performance.now() / 1000).toFixed(3)}] ${msg}\n`);
 const nowUs = () => bridgeAddon.nowUsMain();
@@ -525,7 +527,7 @@ async function main() {
   result.display = { bounds: d.bounds, scaleFactor: d.scaleFactor, hz: d.displayFrequency, colorDepth: d.colorDepth, colorSpace: d.colorSpace };
   await createWindow();
   await startEngine();
-  const ready = await viewer('init', { format: cfg.format, width: cfg.width, height: cfg.height, drawPath: cfg.drawPath, hdrCanvas: cfg.hdrCanvas, poolSize: cfg.poolSize, leadFrames: cfg.leadFrames, releaseMode: cfg.releaseMode, redraw: cfg.redraw });
+  const ready = await viewer('init', { displayHz: d.displayFrequency, format: cfg.format, width: cfg.width, height: cfg.height, drawPath: cfg.drawPath, hdrCanvas: cfg.hdrCanvas, poolSize: cfg.poolSize, leadFrames: cfg.leadFrames, releaseMode: cfg.releaseMode, redraw: cfg.redraw });
   result.viewerInit = ready;
   log(`viewer ready: ${JSON.stringify(ready).slice(0, 300)}`);
 

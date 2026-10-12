@@ -135,10 +135,25 @@ function analyzePlayback(raw, events) {
   const jitterMs = presented.map(p => (p.presentUs - p.ptsTraceUs - med) / 1000);
   for (const p of presented) if (Math.abs(p.presentUs - p.ptsTraceUs - med) > periodUs / 2) counts.offSlot += 1;
   const intervalsMs = [];
+  // Cadence: each presentation interval between consecutive content frames minus the
+  // content frame duration. A frame shown one vsync early or late makes two of these
+  // ±1 vsync; a stretch of frames that all present one vsync earlier (a shorter
+  // compositor pipeline) makes one at each end and none inside.
+  const intervalErrMs = [];
   for (let i = 1; i < perFrame.length; i++) {
     const a = perFrame[i - 1];
     const b = perFrame[i];
-    if (a.presentUs != null && b.presentUs != null) intervalsMs.push((b.presentUs - a.presentUs) / 1000);
+    if (a.presentUs != null && b.presentUs != null) {
+      intervalsMs.push((b.presentUs - a.presentUs) / 1000);
+      intervalErrMs.push((b.presentUs - a.presentUs - durUs) / 1000);
+    }
+  }
+  const irregularIntervals = intervalErrMs.filter(e => Math.abs(e) > periodUs / 2000).length;
+  // Pipeline depth: rAF -> presentation in whole display periods, per presented frame.
+  const depth = {};
+  for (const p of presented) {
+    const d = Math.round(p.latencyUs / periodUs);
+    depth[d] = (depth[d] ?? 0) + 1;
   }
   // Attribute every irregular frame (off its vsync slot, late, or missing) to main-load
   // events whose main-thread span started up to 300 ms before the frame's pts and
@@ -181,6 +196,9 @@ function analyzePlayback(raw, events) {
     jitterAbsMs: dist(jitterMs.map(Math.abs), 3),
     jitterMs: dist(jitterMs, 3),
     presentIntervalMs: dist(intervalsMs, 3),
+    intervalJitterAbsMs: dist(intervalErrMs.map(Math.abs), 3),
+    irregularIntervals,
+    pipelineDepthVsyncs: depth,
     rafIntervalMs: dist(rafIntervals, 3),
     rafToPresentMs: dist(presented.map(p => p.latencyUs / 1000), 2),
     gpuDoneToPresentMs: dist(presented.map(p => p.gpuDoneToPresentUs / 1000), 2),

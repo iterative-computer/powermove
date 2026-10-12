@@ -346,39 +346,70 @@ function intake(frame, desc, recvMs, done) {
 
 // --- The frame loop -----------------------------------------------------------------------------
 
+/**
+ * Display timing from rAF timestamps. rAF timestamps are BeginFrame times coarsened
+ * to 0.1 ms and jittered by up to about 1 ms, and a busy renderer skips some, so a
+ * least-squares line through them is pulled off by outliers: a period error of 0.01
+ * ms walks the engine's PTS grid by more than a millisecond per second.
+ *
+ * The period is the display's nominal refresh interval (Electron's
+ * displayFrequency, passed in at init) unless none was given, in which case it is the
+ * median interval. The phase is the median of every sample's offset from the newest
+ * one, folded into one period: robust to skipped vsyncs, coarsening, and outliers.
+ */
 function fitVsync(r) {
-  const d = [];
-  for (let i = Math.max(1, r.length - 120); i < r.length; i++) d.push(r[i] - r[i - 1]);
-  d.sort((a, b) => a - b);
-  const median = d[d.length >> 1];
-  const idx = [0];
-  for (let i = 1; i < r.length; i++) idx.push(idx[i - 1] + Math.max(1, Math.round((r[i] - r[i - 1]) / median)));
-  const n = r.length;
-  let sx = 0;
-  let sy = 0;
-  for (let i = 0; i < n; i++) {
-    sx += idx[i];
-    sy += r[i] - r[0];
+  const recent = r.slice(-240);
+  let periodMs = S.cfg && S.cfg.displayHz ? 1000 / S.cfg.displayHz : null;
+  if (!periodMs) {
+    const d = [];
+    for (let i = 1; i < recent.length; i++) d.push(recent[i] - recent[i - 1]);
+    d.sort((a, b) => a - b);
+    periodMs = d[d.length >> 1];
   }
-  const mx = sx / n;
-  const my = sy / n;
-  let sxy = 0;
-  let sxx = 0;
-  let res = 0;
-  for (let i = 0; i < n; i++) {
-    sxy += (idx[i] - mx) * (r[i] - r[0] - my);
-    sxx += (idx[i] - mx) ** 2;
+  const ref = recent[recent.length - 1];
+  const fold = t => {
+    let x = (((t - ref) % periodMs) + periodMs) % periodMs;
+    if (x > periodMs / 2) x -= periodMs;
+    return x;
+  };
+  const median = xs => [...xs].sort((a, b) => a - b)[xs.length >> 1];
+  const dev = recent.map(fold);
+  let phase = median(dev);
+  // The display link's phase can jump (by about half a period on this machine, after
+  // a resize or an idle gap). The newest 12 samples win when they disagree with the
+  // long median by more than a quarter period.
+  const shortPhase = median(dev.slice(-12));
+  let jumped = false;
+  let d = shortPhase - phase;
+  if (d > periodMs / 2) d -= periodMs;
+  if (d < -periodMs / 2) d += periodMs;
+  if (Math.abs(d) > periodMs / 4) {
+    phase = shortPhase;
+    jumped = true;
   }
-  const periodMs = sxy / sxx;
-  const intercept = r[0] + my - periodMs * mx;
-  for (let i = 0; i < n; i++) res = Math.max(res, Math.abs(r[i] - (intercept + periodMs * idx[i])));
-  return { periodMs, lastMs: intercept + periodMs * idx[n - 1], maxResidualMs: res, samples: n };
+  const resid = dev.slice(jumped ? -12 : 0).map(x => Math.abs(x - phase)).sort((a, b) => a - b);
+  return {
+    periodMs,
+    lastMs: ref + phase,
+    jumped,
+    medianResidualMs: resid[resid.length >> 1],
+    p95ResidualMs: resid[Math.floor(resid.length * 0.95)],
+    maxResidualMs: resid[resid.length - 1],
+    samples: recent.length
+  };
 }
 
-function snapToVsync(ms) {
+/** True when the newest rAF samples sit more than a quarter period off the fit. */
+function phaseJumped(r) {
   const f = S.vsyncFit;
-  if (!f) return ms;
-  return f.lastMs + Math.round((ms - f.lastMs) / f.periodMs) * f.periodMs;
+  if (!f || r.length < 12) return false;
+  const xs = r.slice(-12).map(t => {
+    let x = (((t - f.lastMs) % f.periodMs) + f.periodMs) % f.periodMs;
+    if (x > f.periodMs / 2) x -= f.periodMs;
+    return x;
+  });
+  xs.sort((a, b) => a - b);
+  return Math.abs(xs[6]) > f.periodMs / 4;
 }
 
 let lastTimingPost = 0;
@@ -387,18 +418,15 @@ function frameLoop(rafMs) {
   const rt = S.rafTimes;
   if (S.recording) rt.push(rafMs);
   S.lastRaf = rafMs;
-  // Display timing for the engine's PTS grid: a recent vsync and the refresh period.
-  // rAF timestamps are BeginFrame times coarsened to 0.1 ms and, depending on the
-  // display link, jittered by up to about 1 ms, so a single interval (or the median)
-  // is not precise enough: an error of 0.03 ms drifts the grid by 4 ms per second.
-  // Each sample gets a vsync index (skipped vsyncs advance it by more than one) and a
-  // least-squares line through (index, time) gives the period and a de-jittered
-  // phase for the latest vsync.
+  // Display timing for the engine's PTS grid: a recent vsync and the refresh period
+  // (see fitVsync), re-sent every 500 ms.
   S.recentRaf = S.recentRaf || [];
   S.recentRaf.push(rafMs);
   if (S.recentRaf.length > 1200) S.recentRaf.shift();
-  if (S.port && rafMs - lastTimingPost > 500 && S.recentRaf.length > 60) {
+  const due = rafMs - lastTimingPost > 500 || (rafMs - lastTimingPost > 100 && phaseJumped(S.recentRaf));
+  if (S.port && due && S.recentRaf.length > 60) {
     const fit = fitVsync(S.recentRaf);
+    if (S.recording) (S.vsyncFits ??= []).push(fit);
     S.periodUs = fit.periodMs * 1000;
     S.vsyncFit = fit;
     post({ t: 'timing', anchor: uptimeUs(fit.lastMs), period: fit.periodMs * 1000 });
@@ -407,9 +435,12 @@ function frameLoop(rafMs) {
   if (S.hold || !S.device) return;
 
   if (S.mode === 'playback') {
-    // Decide on the fitted vsync grid, not the raw rAF timestamp, which can be
-    // jittered by milliseconds when the display link is a software timer.
-    const t = uptimeUs(snapToVsync(rafMs));
+    // PTS boundaries sit half a period before vsyncs. Deciding at the rAF time plus a
+    // quarter period keeps at least a quarter period of margin both for the nominal
+    // grid and while a display-link phase jump of half a period has not yet reached
+    // the engine's grid, where deciding at the rAF time itself would be a coin toss.
+    // rAF timestamps jitter by under 1 ms here (the residuals are in each run's log).
+    const t = uptimeUs(rafMs) + S.periodUs / 4;
     let pick = -1;
     for (let i = 0; i < S.queue.length; i++) if (S.queue[i].desc.ptsUs <= t) pick = i;
     if (pick < 0) {
@@ -493,6 +524,7 @@ function resetLogs() {
   S.releasePending = new Map();
   S.redraws = 0;
   S.keySeq = 0;
+  S.vsyncFits = [];
 }
 
 function setMode(mode) {
@@ -604,7 +636,8 @@ function collect(extra) {
     redraws: S.redraws ?? 0,
     releaseTiming: S.releaseTiming,
     periodUs: S.periodUs,
-    vsyncFit: S.vsyncFit ?? null
+    vsyncFit: S.vsyncFit ?? null,
+    vsyncFits: S.vsyncFits ?? []
   };
 }
 

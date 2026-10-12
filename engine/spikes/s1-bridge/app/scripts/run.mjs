@@ -57,6 +57,15 @@ const runs = [
   { name: 'playback-bgra-load-control', ...pb, format: 'bgra', load: LOAD, transport: 'persistent', drawPath: 'control' },
   { name: 'playback-bgra-idle-control', ...pb, format: 'bgra', load: false, transport: 'persistent', drawPath: 'control' },
   { name: 'playback-bgra-idle', ...pb, format: 'bgra', load: false },
+  // Compositor experiment: Chromium's HarmonicFrameRate feature (BeginFrames at a
+  // divisor of the display rate when content updates slower).
+  { name: 'playback-bgra-idle-control-light-harmonic', ...pb, format: 'bgra', load: false, transport: 'persistent', drawPath: 'control', extraPasses: 0, enableFeatures: ['HarmonicFrameRate'] },
+  { name: 'playback-bgra-idle-control-light', ...pb, format: 'bgra', load: false, transport: 'persistent', drawPath: 'control', extraPasses: 0 },
+  // GPU contention: the same runs with the engine's synthetic GPU load off (a 4K
+  // pattern only, about 1 ms of GPU per frame instead of about 7 ms).
+  { name: 'playback-bgra-load-persistent-light', ...pb, format: 'bgra', load: LOAD, transport: 'persistent', extraPasses: 0 },
+  { name: 'playback-bgra-load-light', ...pb, format: 'bgra', load: LOAD, extraPasses: 0 },
+  { name: 'playback-bgra-load-control-light', ...pb, format: 'bgra', load: LOAD, transport: 'persistent', drawPath: 'control', extraPasses: 0 },
   // Validity check: a small on-screen window instead of off every screen (15 s).
   { name: 'playback-bgra-load-onscreen', ...pb, durationMs: 15_000, format: 'bgra', load: LOAD, onscreen: true, transport: 'persistent' },
   { name: 'playback-bgra-load-onscreen-control', ...pb, durationMs: 15_000, format: 'bgra', load: LOAD, onscreen: true, transport: 'persistent', drawPath: 'control' },
