@@ -18,7 +18,8 @@ libm.workspace = true
 ryu-js.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
+# Exact float parsing for the bit-for-bit vector comparisons.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 
 [[example]]
 name = "digest"
