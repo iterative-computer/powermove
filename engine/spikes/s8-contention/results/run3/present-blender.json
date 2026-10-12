@@ -891,6 +891,7 @@
     ],
     "late_b_concurrent": 0,
     "late_b_held_start": 0,
+    "late_backlog_after_b": 0,
     "late_behind_own_backlog": 17,
     "late_frames": 57,
     "late_other": 40,

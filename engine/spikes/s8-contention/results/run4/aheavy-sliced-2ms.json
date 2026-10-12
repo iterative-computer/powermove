@@ -1025,6 +1025,7 @@
     ],
     "late_b_concurrent": 433,
     "late_b_held_start": 0,
+    "late_backlog_after_b": 96,
     "late_behind_own_backlog": 96,
     "late_frames": 529,
     "late_other": 0,

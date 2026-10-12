@@ -226,6 +226,7 @@
     "late": [],
     "late_b_concurrent": 0,
     "late_b_held_start": 0,
+    "late_backlog_after_b": 0,
     "late_behind_own_backlog": 0,
     "late_frames": 0,
     "late_other": 0,
