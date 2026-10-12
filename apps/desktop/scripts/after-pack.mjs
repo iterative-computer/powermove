@@ -1,3 +1,4 @@
+import { access, constants } from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -13,6 +14,14 @@ export default async function afterPack(context) {
     context.appOutDir,
     `${context.packager.appInfo.productFilename}.app`
   );
+
+  // Powermove's FFmpeg (export, proxies, transcription, agent media tools).
+  // A bundle without it would install and then fail on first export.
+  const ffmpeg = path.join(appPath, 'Contents/Resources/ffmpeg');
+  for (const file of ['bin/ffmpeg', 'bin/ffprobe', 'lib/libavcodec.63.dylib', 'NOTICE.txt', 'share/licenses/ffmpeg']) {
+    try { await access(path.join(ffmpeg, file), file.startsWith('bin/') ? constants.X_OK : constants.R_OK); }
+    catch { throw new Error(`The packaged app is missing Resources/ffmpeg/${file}. Run engine/third_party/ffmpeg/package.sh (bun run stage:ffmpeg) before electron-builder.`); }
+  }
 
   // File Provider provenance copied from dependencies makes macOS reject even
   // an ad-hoc signature. The packaged bundle is generated output, so remove

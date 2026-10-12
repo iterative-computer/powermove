@@ -87,6 +87,31 @@ async function verifyRuntimeContract(app) {
   process.stdout.write(`Transcription runtime ${contract.version} matches its binding (header ${headerHash}).\n`);
 }
 
+/* Powermove's FFmpeg executables load their libav* dylibs from
+   Resources/ffmpeg/lib. Under the hardened runtime every one must carry the
+   app's Team ID, or export, proxies, transcription and the agent media tools
+   fail on users' machines. Run the signed ffmpeg once to prove it loads. */
+async function verifyFfmpeg(app) {
+  const appInfo = await signingInfo(app);
+  const root = path.join(app, 'Contents/Resources/ffmpeg');
+  const files = [
+    ...(await readdir(path.join(root, 'bin'))).map((name) => path.join(root, 'bin', name)),
+    ...(await readdir(path.join(root, 'lib'))).filter((name) => name.endsWith('.dylib')).map((name) => path.join(root, 'lib', name))
+  ];
+  for (const name of ['bin/ffmpeg', 'bin/ffprobe']) {
+    if (!files.includes(path.join(root, name))) throw new Error(`FFmpeg ${name} is missing from ${root}.`);
+  }
+  for (const file of files) {
+    const info = await signingInfo(file);
+    if (info.team !== appInfo.team || !info.runtime) {
+      throw new Error(`${path.relative(root, file)} is not signed for the hardened runtime (team ${info.team}, app team ${appInfo.team}, runtime ${info.runtime}).`);
+    }
+  }
+  const license = await execFileAsync(path.join(root, 'bin/ffmpeg'), ['-hide_banner', '-L']);
+  if (!/GNU Lesser General Public/.test(license.stdout + license.stderr)) throw new Error('The packaged ffmpeg does not report the LGPL.');
+  process.stdout.write(`FFmpeg signed with team ${appInfo.team}: ${files.map((file) => path.relative(root, file)).join(', ')}\n`);
+}
+
 async function verifyNativeAddons(app) {
   await verifyRuntimeContract(app);
   const appInfo = await signingInfo(app);
@@ -124,6 +149,7 @@ async function main() {
   const channel = /^\d+\.\d+\.\d+-([a-z]+)\./i.exec(version)?.[1]?.toLowerCase() ?? 'latest';
 
   await run('bun', ['run', 'build']);
+  await run('bun', ['run', 'stage:ffmpeg']);
   await run(path.join(repository, 'node_modules/.bin/electron-builder'), [
     '--mac', '--arm64', '--publish', 'never',
     '--config', 'electron-builder.yml',
@@ -138,6 +164,7 @@ async function main() {
   const app = await findPackagedApp();
   await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', app]);
   await verifyNativeAddons(app);
+  await verifyFfmpeg(app);
   await run('/usr/sbin/spctl', ['--assess', '--type', 'execute', '--verbose=4', app]);
   await run('/usr/bin/xcrun', ['stapler', 'validate', app]);
 
