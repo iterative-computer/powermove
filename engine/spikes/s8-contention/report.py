@@ -2,6 +2,11 @@
 
 Usage: python3 -I report.py results/<dir> [scenario ...]
        python3 -I report.py results run3/full run5/full ...
+       python3 -I report.py --cb results run3/sliced-2ms-align run6/sliced-2ms-align ...
+
+`--cb` reads the raw logs (`results/<run>/raw/<scenario>-{a,b}.jsonl`, not committed)
+and prints the distribution of B's command-buffer GPU spans while A was playing (from
+A's first tick to its last completion), against the scenario's slice length.
 
 With scenario names, only those rows are printed, in that order. A name of the form
 `<run>/<scenario>` reads `results/<run>/<scenario>.json` and labels the row with the
@@ -82,7 +87,51 @@ HEAD = [
 ]
 
 
+def quantile(xs, p):
+    return xs[min(len(xs) - 1, int(round(p * (len(xs) - 1))))]
+
+
+def cb_row(d, name):
+    run, scen = name.split("/", 1)
+    raw = os.path.join(d, run, "raw")
+    a = [json.loads(l) for l in open(os.path.join(raw, scen + "-a.jsonl"))]
+    t0 = min(v["tick_ns"] for v in a if "tick_ns" in v)
+    t1 = max(v["done_ns"] for v in a if v.get("done_ns"))
+    spans = []
+    for line in open(os.path.join(raw, scen + "-b.jsonl")):
+        v = json.loads(line)
+        if v["kind"] == "cb" and v["gpu_begin_ns"] >= t0 and v["gpu_end_ns"] <= t1:
+            spans.append((v["gpu_end_ns"] - v["gpu_begin_ns"]) / 1e6)
+    spans.sort()
+    meta = json.load(open(os.path.join(d, run, scen + ".json")))
+    sl = (meta.get("b") or {}).get("slice_ms")
+    n = len(spans)
+    if n == 0:
+        return [run, scen, f(sl), "0"] + ["-"] * 6
+    over = lambda x: f"{100 * sum(s > x for s in spans) / n:.1f}"
+    return [
+        run,
+        scen,
+        f(sl),
+        str(n),
+        f(quantile(spans, 0.5), 2),
+        f(quantile(spans, 0.9), 2),
+        f(quantile(spans, 0.99), 2),
+        f(spans[-1], 2),
+        over(2.0),
+        over(2.5),
+    ]
+
+
 def main():
+    if sys.argv[1] == "--cb":
+        d = sys.argv[2]
+        head = ["run", "scenario", "slice ms", "cbs", "p50", "p90", "p99", "max", "% > 2 ms", "% > 2.5 ms"]
+        print("| " + " | ".join(head) + " |")
+        print("|" + "---|" * len(head))
+        for n in sys.argv[3:]:
+            print("| " + " | ".join(cb_row(d, n)) + " |")
+        return
     d = sys.argv[1]
     names = sys.argv[2:]
     mixed = any("/" in n for n in names)
