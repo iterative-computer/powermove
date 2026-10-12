@@ -1,0 +1,27 @@
+# Spike S5 (docs/rust-engine.md, Phase 0): the WASM evaluator.
+# A standalone workspace so the spike never touches engine/Cargo.toml.
+[workspace]
+resolver = "3"
+members = ["crates/s5-core", "crates/s5-wasm", "crates/s5-native"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[workspace.dependencies]
+s5-core = { path = "crates/s5-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value", "preserve_order", "float_roundtrip"] }
+libm = "0.2.16"
+memchr = { version = "2.8", default-features = false }
+wasm-bindgen = "=0.2.129"
+rustc-hash = "2"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+panic = "abort"
+debug = false
