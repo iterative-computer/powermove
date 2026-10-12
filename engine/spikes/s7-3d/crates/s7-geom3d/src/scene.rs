@@ -271,6 +271,39 @@ impl Layer {
         &self.prepared.model
     }
 
+    /// World-space triangle-list positions per triangle drawable at the current pose,
+    /// in scene traversal order (the geometry a Blender snapshot carries). Forces the
+    /// full skinning path.
+    pub fn posed_triangles(&mut self, clock: Clock) -> Vec<(String, Vec<[f64; 3]>)> {
+        let lazy = self.lazy;
+        self.lazy = false;
+        self.dirty = !self.deformed.is_empty();
+        self.update(clock);
+        self.lazy = lazy;
+        self.dirty = !self.deformed.is_empty();
+        let model = &self.prepared.model;
+        let mut out = Vec::new();
+        for d in &self.drawables {
+            let p = &model.meshes[d.mesh].primitives[d.prim];
+            if p.topology != Topology::Triangles {
+                continue;
+            }
+            let skinned = d.deformed.is_some() && model.nodes[d.node].skin.is_some();
+            let to_world = if skinned { self.gltf_to_world } else { self.gltf_to_world * d.local };
+            let positions: &[[f32; 3]] = match d.deformed {
+                Some(di) => &self.deformed[di].positions,
+                None => &p.positions,
+            };
+            let tris = &self.prepared.tris[d.mesh][d.prim].as_ref().unwrap().0;
+            let list = tris.iter().flatten().map(|&v| {
+                let q = positions[v as usize];
+                apply4(&to_world, DVec3::new(q[0] as f64, q[1] as f64, q[2] as f64)).to_array()
+            });
+            out.push((model.nodes[d.node].name.clone(), list.collect()));
+        }
+        out
+    }
+
     pub fn vertex_count(&self) -> usize {
         self.drawables.iter().map(|d| self.prepared.model.meshes[d.mesh].primitives[d.prim].positions.len()).sum()
     }

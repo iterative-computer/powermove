@@ -271,7 +271,7 @@ async function pickScene(id: string, options: { times: number[]; cols: number; r
  *  (core/scene3d/rendering.ts) over the production SceneRuntime, so the spike drives the
  *  shipped Blender worker with the geometry, UVs, materials, lights, camera, depth sets,
  *  and textures the app sends today. Texture and asset bytes come back base64-encoded. */
-async function blenderSnapshot(id: string, settings: Record<string, unknown> = {}) {
+async function blenderSnapshot(id: string, settings: Record<string, unknown> = {}, tolerant = false) {
   const def: SceneDef = await (await fetch(`/corpus/scenes/${id}.json`)).json();
   const loaded = await loadAssets(def);
   const runtime = new SceneRuntime();
@@ -280,7 +280,9 @@ async function blenderSnapshot(id: string, settings: Record<string, unknown> = {
   runtime.resizeCamera(def.width, def.height);
   runtime.scene.updateMatrixWorld(true);
   const toBase64 = async (blob: Blob) => { const b = new Uint8Array(await blob.arrayBuffer()); let s = ''; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode(...b.subarray(i, i + 0x8000)); return btoa(s); };
-  const colorHex = (c: any) => '#' + c.getHexString(THREE.SRGBColorSpace);
+  // Faithful to production: a material without `color` or `emissive` (MeshBasicMaterial
+  // from KHR_materials_unlit) throws here. `tolerant` substitutes black to continue.
+  const colorHex = (c: any) => (tolerant && !c ? '#000000' : '#' + c.getHexString(THREE.SRGBColorSpace));
   const assets: { id: string; name: string; data: string }[] = [];
   const textureIds = new Map<any, string>();
   const textureAsset = async (texture: any): Promise<string | undefined> => {
@@ -341,7 +343,8 @@ async function blenderSnapshot(id: string, settings: Record<string, unknown> = {
               const tid = await textureAsset(source[prop] || undefined);
               if (tid) maps[key] = tid;
             }
-            material = { p: { color: { v: colorHex(source.color) }, roughness: { v: source.roughness }, metalness: { v: source.metalness }, emissive: { v: colorHex(source.emissive) }, emissiveIntensity: { v: source.emissiveIntensity }, opacity: { v: source.opacity } }, maps };
+            const num = (v: any, d: number) => (tolerant && v === undefined ? d : v);
+            material = { p: { color: { v: colorHex(source.color) }, roughness: { v: num(source.roughness, 1) }, metalness: { v: num(source.metalness, 0) }, emissive: { v: colorHex(source.emissive) }, emissiveIntensity: { v: num(source.emissiveIntensity, 1) }, opacity: { v: source.opacity } }, maps };
           }
           meshes.push({ positions, normals, uvs, materialIndex: group.materialIndex || 0, matrix, material, smooth: true });
         })());

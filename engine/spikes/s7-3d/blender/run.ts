@@ -60,7 +60,18 @@ const page = await browser.newPage();
 await page.goto(`http://localhost:${server.port}/`);
 await page.waitForFunction(() => (globalThis as any).S7);
 const snapshots: Record<string, any> = {};
-for (const id of scenes) snapshots[id] = await page.evaluate(([id, s]: [string, any]) => (globalThis as any).S7.blenderSnapshot(id, s), [id, { engine, samples, denoise: false, device }]);
+const snapshotErrors: Record<string, string> = {};
+for (const id of scenes) {
+  const settings = { engine, samples, denoise: false, device };
+  try {
+    snapshots[id] = await page.evaluate(([id, s]: [string, any]) => (globalThis as any).S7.blenderSnapshot(id, s), [id, settings]);
+  } catch (error) {
+    // The production collection fails on this scene; record it and continue tolerantly.
+    snapshotErrors[id] = String((error as Error).message).split('\n')[0]!;
+    console.log(`${id}: renderSnapshot port fails as production would: ${snapshotErrors[id]}`);
+    snapshots[id] = await page.evaluate(([id, s]: [string, any]) => (globalThis as any).S7.blenderSnapshot(id, s, true), [id, settings]);
+  }
+}
 await browser.close();
 server.stop(true);
 
@@ -122,7 +133,10 @@ for (const id of scenes) {
       w.close();
     }
   }
-  results.push({ scene: id, tag, batched_ms: batched.ms, manifest: batched.manifest, singles: singles.map(s => ({ layer: s.layer, ms: s.ms })) });
+  results.push({ scene: id, tag, snapshot_error: snapshotErrors[id] ?? null, batched_ms: batched.ms, manifest: batched.manifest, singles: singles.map(s => ({ layer: s.layer, ms: s.ms })) });
   console.log(`${id} [${tag}]: batched ${batched.ms.toFixed(0)} ms (${batched.manifest.files.length} layers, ${batched.manifest.renderEngine})${single ? `, singles ${singles.map(s => s.ms.toFixed(0)).join('/')} ms` : ''}`);
 }
-writeFileSync(join(root, 'out/blender', `run-${tag}.json`), JSON.stringify(results, null, 1));
+// Merge into earlier runs of the same tag (one entry per scene).
+const summary = join(root, 'out/blender', `run-${tag}.json`);
+const previous: any[] = existsSync(summary) ? JSON.parse(readFileSync(summary, 'utf8')) : [];
+writeFileSync(summary, JSON.stringify([...previous.filter(p => !scenes.includes(p.scene)), ...results], null, 1));
