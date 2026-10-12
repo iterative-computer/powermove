@@ -170,3 +170,30 @@ fn seek_corpus() {
     assert!(dir.is_dir(), "run scripts/gen-corpus.sh first");
     run_dir(&dir);
 }
+
+/// Regression: FFmpeg 8.1's HEVC alpha path releases the alpha-layer
+/// picture's luma buffer reference mid-decode (`replace_alpha_plane`). With a
+/// single buffer reference per frame that freed the slot under a live decode
+/// and corrupted random-access frames in about 40% of runs at 4 threads;
+/// `get_buffer2` now gives every plane its own reference. Ten runs with frame
+/// threading must all be exact.
+#[test]
+fn hevc_alpha_ffmpeg_random_access_is_stable() {
+    let gpu = Gpu::new().expect("Metal GPU");
+    let opt = Options { gpu: false, references: false, threads: 4, ..Default::default() };
+    let f = root().join("../../../apps/desktop/e2e/fixtures/hevc-alpha.mov");
+    for run in 0..10 {
+        let r = run::run_file(&f, &gpu, &opt);
+        let b = r.backends.iter().find(|b| b.backend == "FFmpeg").expect("FFmpeg backend");
+        assert!(
+            b.ok && b.random.matched == b.random.probes && b.random_warm.matched == b.random_warm.probes,
+            "run {run}: random {}/{} {:?}, same session {}/{} {:?}",
+            b.random.matched,
+            b.random.probes,
+            b.random.mismatched,
+            b.random_warm.matched,
+            b.random_warm.probes,
+            b.random_warm.mismatched
+        );
+    }
+}

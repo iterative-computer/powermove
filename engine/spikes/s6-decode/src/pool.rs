@@ -141,10 +141,17 @@ impl MetalPool {
         Some(SlotRef(lease))
     }
 
-    /// The live lease whose slot starts at `base`, if any.
-    pub fn find(&self, base: *const u8) -> Option<SlotRef> {
+    /// The live lease whose slot contains `addr`, if any. Decoders hand
+    /// back plane pointers, and a plane's buffer reference may start inside a
+    /// slot (`get_buffer2` gives every plane its own reference).
+    pub fn find_containing(&self, addr: *const u8) -> Option<SlotRef> {
+        let a = addr as usize;
         let g = self.0.state.lock().unwrap();
-        g.live.get(&(base as usize)).and_then(|w| w.upgrade()).map(SlotRef)
+        g.live
+            .iter()
+            .find(|(base, w)| a >= **base && w.upgrade().is_some_and(|l| a < **base + l.slot.as_ref().unwrap().len))
+            .and_then(|(_, w)| w.upgrade())
+            .map(SlotRef)
     }
 
     pub fn stats(&self) -> (usize, usize) {

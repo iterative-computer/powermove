@@ -957,7 +957,16 @@ fn random_pass(
         fed.push(pkts.len());
         match got {
             Some(h) if h == seq[target] => r.matched += 1,
-            Some(_) => r.mismatched.push(cn),
+            Some(h) => {
+                if trace {
+                    eprintln!(
+                        "mismatch{}: comp {cn} frame {target} pts {want} plan {plan:?}; hash equals sequential frame {:?}",
+                        if warm { " (warm)" } else { "" },
+                        seq.iter().position(|s| *s == h)
+                    );
+                }
+                r.mismatched.push(cn)
+            }
             None => r.missing.push(cn),
         }
     }

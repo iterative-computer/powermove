@@ -419,15 +419,30 @@ unsafe extern "C" fn get_buffer2(ctx: *mut ff::AVCodecContext, frame: *mut ff::A
         layout.pad_to(w as usize, h as usize + 2, &align);
         let Some(slot) = op.pool.acquire(layout.total) else { return ff::AVERROR(libc::ENOMEM) };
         let base = slot.ptr();
-        let token = Box::into_raw(Box::new(slot));
-        let buf = ff::av_buffer_create(base, layout.total, Some(release), token as *mut c_void, 0);
-        if buf.is_null() {
-            drop(Box::from_raw(token));
-            return ff::AVERROR(libc::ENOMEM);
-        }
-        (*frame).buf[0] = buf;
-        for p in 0..layout.planes.len() {
-            (*frame).data[p] = base.add(layout.planes[p].offset);
+        // One buffer reference per plane, each holding the slot. A single
+        // reference for every plane is allowed by the API, but FFmpeg 8.1's
+        // HEVC alpha path (`replace_alpha_plane` in hevc/refs.c) swaps the
+        // alpha-layer picture's luma buffer for the base picture's alpha
+        // plane and keeps writing the other planes: with one reference that
+        // frees the whole slot under a live decode, and the stray writes land
+        // in whichever frame reuses it (measured: 128-valued chroma blocks in
+        // random-access frames of hevc-alpha.mov, about 40% of runs at 4
+        // threads).
+        let n = layout.planes.len();
+        for p in 0..n {
+            let start = layout.planes[p].offset;
+            let end = if p + 1 < n { layout.planes[p + 1].offset } else { layout.total };
+            let token = Box::into_raw(Box::new(slot.clone()));
+            let buf = ff::av_buffer_create(base.add(start), end - start, Some(release), token as *mut c_void, 0);
+            if buf.is_null() {
+                drop(Box::from_raw(token));
+                for q in 0..p {
+                    ff::av_buffer_unref(&mut (*frame).buf[q]);
+                }
+                return ff::AVERROR(libc::ENOMEM);
+            }
+            (*frame).buf[p] = buf;
+            (*frame).data[p] = base.add(start);
             (*frame).linesize[p] = layout.planes[p].stride as c_int;
         }
         (*frame).extended_data = (*frame).data.as_mut_ptr();
@@ -566,18 +581,20 @@ impl FfDecoder {
             let label = CStr::from_ptr(ff::av_get_pix_fmt_name(fmt)).to_string_lossy().into_owned();
             let full_range = (*f).color_range == ff::AVColorRange::JPEG || label.starts_with("yuvj");
             let decoder_ptrs: Vec<usize> = (0..layout.planes.len()).map(|p| (*f).data[p] as usize).collect();
-            let buf0 = (*f).buf[0];
-            let (slot, copied) = if let Some(slot) = (!buf0.is_null()).then(|| self.pool.find((*buf0).data)).flatten() {
-                // The frame is in our slot: rendered there by the decoder, or
+            // Each plane in a live pool slot (normally one slot per frame).
+            let found: Option<Vec<SlotRef>> =
+                (0..layout.planes.len()).map(|p| self.pool.find_containing((*f).data[p])).collect();
+            let (slots, copied) = if let Some(slots) = found {
+                // The frame is in our slots: rendered there by the decoder, or
                 // copied there by the wrapper (`internal_copy`).
                 for p in 0..layout.planes.len() {
-                    layout.planes[p].offset = (*f).data[p].offset_from(slot.ptr()) as usize;
+                    layout.planes[p].offset = (*f).data[p].offset_from(slots[p].ptr()) as usize;
                     layout.planes[p].stride = (*f).linesize[p] as usize;
                 }
                 if self.internal_copy {
                     self.copies += 1;
                 }
-                (slot, self.internal_copy)
+                (slots, self.internal_copy)
             } else {
                 // Not ours: one CPU copy into Metal-shared memory.
                 let align = [0 as c_int; 8];
@@ -594,14 +611,15 @@ impl FfDecoder {
                     }
                 }
                 self.copies += 1;
-                (slot, true)
+                (vec![slot; layout.planes.len()], true)
             };
             let planes = layout
                 .planes
                 .iter()
                 .zip(decoder_ptrs)
-                .map(|(pl, dp)| PoolPlane {
-                    slot: slot.clone(),
+                .zip(slots)
+                .map(|((pl, dp), slot)| PoolPlane {
+                    slot,
                     offset: pl.offset,
                     stride: pl.stride,
                     width: pl.width,
