@@ -198,3 +198,71 @@ async function renderScene(id: string, options: { trace?: boolean; tag?: string;
 }
 
 (globalThis as any).S7 = { renderScene, THREE };
+
+/** Pick reference for `pm-geom3d` (S7 deliverable 3). For each time: the production
+ *  `runtime.pick` over an NDC grid (with its bounding-volume caches carried across time
+ *  changes, as in the editor), and three.js raycasts with the skinned bounding volumes
+ *  recomputed for the current pose (the engine's per-frame semantics). Also exports the
+ *  camera, each model's glTF-scene-to-world matrix, and skinned bone world matrices. */
+async function pickScene(id: string, options: { times: number[]; cols: number; rows: number; ids?: string[] }) {
+  const def: SceneDef = await (await fetch(`/corpus/scenes/${id}.json`)).json();
+  const assets = await loadAssets(def);
+  const runtime = new SceneRuntime();
+  const scene = parseScene(def.scene);
+  const ids = new Set(options.ids || Object.values(def.scene.objects).filter((o: any) => o.source?.assetId).map((o: any) => o.id));
+  const rays: [number, number][] = [];
+  for (let j = 0; j < options.rows; j++) for (let i = 0; i < options.cols; i++) rays.push([((i + 0.5) / options.cols) * 2 - 1, 1 - ((j + 0.5) / options.rows) * 2]);
+  const frames: any[] = [];
+  const now = () => performance.now();
+  for (const time of options.times) {
+    runtime.sync(scene, (assetId: string) => assets.get(assetId), (prop: any) => prop.v, time);
+    runtime.resizeCamera(def.width, def.height);
+    runtime.scene.updateMatrixWorld(true);
+    const camera = runtime.camera;
+    // Production pick: the first call after the time change, then the median of the rest.
+    const prod: (string | null)[] = [];
+    const t0 = now();
+    prod.push(runtime.pick(rays[0]![0], rays[0]![1], ids));
+    const first = now() - t0;
+    const times: number[] = [], hitTimes: number[] = [];
+    for (const [x, y] of rays.slice(1)) { const s = now(); const r = runtime.pick(x, y, ids); const d = now() - s; prod.push(r); times.push(d); if (r) hitTimes.push(d); }
+    times.sort((a, b) => a - b);
+    hitTimes.sort((a, b) => a - b);
+    // Fresh bounding volumes for the current pose.
+    const layers: any[] = [];
+    for (const layerId of ids) {
+      const object = runtime.objects.get(layerId);
+      if (!object) continue;
+      const gltfScene = object.children[0]?.children[0];
+      const skins: any[] = [];
+      object.traverse((o: any) => {
+        if (o.isSkinnedMesh) { o.boundingSphere = null; o.boundingBox = null; skins.push({ name: o.name, bones: o.skeleton.bones.map((b: any) => [b.name, Array.from(b.matrixWorld.elements)]), bindMatrix: Array.from(o.bindMatrix.elements) }); }
+        if (o.isMesh && o.morphTargetInfluences) skins.push({ name: o.name, morph: Array.from(o.morphTargetInfluences) });
+      });
+      layers.push({ id: layerId, gltfToWorld: gltfScene ? Array.from(gltfScene.matrixWorld.elements) : null, skins });
+    }
+    const ray = new THREE.Raycaster();
+    const hits = rays.map(([x, y]) => {
+      ray.setFromCamera(new THREE.Vector2(x, y), camera);
+      for (const hit of ray.intersectObjects([...runtime.objects.values()], true)) {
+        const o: any = hit.object;
+        if (!o.visible || !o.userData.sceneId || !ids.has(o.userData.sceneId)) continue;
+        const materials = Array.isArray(o.material) ? o.material : [o.material];
+        if (materials.every((m: any) => m.opacity <= 0)) continue;
+        let visible = true; for (let p = o; p; p = p.parent) if (!p.visible) visible = false;
+        if (!visible) continue;
+        return { layer: o.userData.sceneId, object: o.name, kind: o.isPoints ? 'points' : o.isLine ? 'line' : 'mesh', distance: hit.distance, face: hit.faceIndex ?? null, index: hit.index ?? null, instance: hit.instanceId ?? null, point: hit.point.toArray() };
+      }
+      return null;
+    });
+    frames.push({
+      time, rays, hits, prod, prodFirstMs: first, prodMedianMs: times[times.length >> 1] ?? 0, prodMaxMs: times.at(-1) ?? 0, prodHitMedianMs: hitTimes[hitTimes.length >> 1] ?? 0,
+      camera: { projection: Array.from(camera.projectionMatrix.elements), world: Array.from(camera.matrixWorld.elements), near: camera.near, far: camera.far, isOrthographic: (camera as any).isOrthographicCamera === true },
+      layers,
+    });
+  }
+  runtime.dispose();
+  return { id, width: def.width, height: def.height, ids: [...ids], frames };
+}
+
+(globalThis as any).S7.pickScene = pickScene;

@@ -201,6 +201,24 @@ const scenes: Scene[] = [
   },
 ];
 
+// Pick scenes (deliverable 3): picked, never rendered. pick-big needs `--big`.
+const pickScenes: Scene[] = [
+  {
+    id: 'pick-big', width: W, height: H, time: 0, notes: '1M-vertex skinned model (4 joints, one looping clip) for pick performance and parity.',
+    assets: { model_big: { kind: 'model', file: 'assets/big-skinned.glb' } },
+    scene: { objects: [model('big', 'model_big', { sx: 1.5, sy: 1.5, sz: 1.5, ry: 20 })], lights: [sun()], camera: { p: { x: 0.4, y: 0.2, z: 3.6, fov: 45 } }, environment: {} },
+    sets: [['big']],
+  },
+];
+const pickPlan: Record<string, { times: number[]; cols: number; rows: number }> = {
+  'gltf-skinned': { times: [0, 0.35, 0.7, 1.6, 2.9], cols: 48, rows: 27 },
+  'gltf-pbr-ext': { times: [0], cols: 64, rows: 36 },
+  'gltf-transmission': { times: [0], cols: 48, rows: 27 },
+  ...(existsSync(join(out, 'assets/big-skinned.glb')) ? { 'pick-big': { times: [0, 0.5, 1.3], cols: 24, rows: 14 } } : {}),
+};
+for (const s of pickScenes) writeFileSync(join(out, 'scenes', `${s.id}.json`), JSON.stringify(s, null, 1));
+writeFileSync(join(out, 'picks.json'), JSON.stringify(pickPlan, null, 1));
+
 for (const s of scenes) writeFileSync(join(out, 'scenes', `${s.id}.json`), JSON.stringify(s, null, 1));
 writeFileSync(join(out, 'index.json'), JSON.stringify(scenes.map(s => s.id)));
 console.log(`corpus: ${scenes.length} scenes in ${out}`);
