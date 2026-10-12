@@ -829,6 +829,7 @@ dependencies = [
  "glslang",
  "glslang-sys",
  "half",
+ "libc",
  "naga",
  "pollster",
  "rspirv",

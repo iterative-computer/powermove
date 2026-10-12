@@ -1,0 +1,86 @@
+/*
+ * Compile-and-link oracle: asks WebGL2 in headless Chromium whether each
+ * `<index>.frag` in a directory links with the compositor's vertex shader
+ * (PM.VERT from work/corpus.json). Used on fuzz mutants and resource bombs
+ * written by `s3-shaders fuzz-dump`, to compare the engine's accept/reject
+ * decision with WebGL's.
+ *
+ * Each program gets a deadline; a hang closes the browser and the run
+ * continues in a fresh one. Nothing is drawn.
+ *
+ * Usage: bun scripts/webgl-compile.ts --dir work/fuzz/mutants-seed1 [--angle metal|swiftshader] [--deadline 20]
+ * Output: <dir>/webgl-<angle>.json
+ */
+import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+
+const SPIKE = join(import.meta.dir, '..');
+const { chromium } = await import(join(SPIKE, '..', '..', '..', 'apps', 'desktop', 'node_modules', 'playwright', 'index.mjs'));
+
+const args = process.argv.slice(2);
+const opt = (name: string, fallback: string) => (args.includes(name) ? args[args.indexOf(name) + 1]! : fallback);
+const dir = join(SPIKE, opt('--dir', 'work/fuzz/mutants-seed1'));
+const angle = opt('--angle', 'metal');
+const deadline = Number(opt('--deadline', '20')) * 1000;
+const vertex: string = JSON.parse(await readFile(join(SPIKE, 'work', 'corpus.json'), 'utf8')).vertex;
+const files = (await readdir(dir)).filter((f) => f.endsWith('.frag')).sort((a, b) => parseInt(a) - parseInt(b));
+const launchArgs = angle === 'swiftshader' ? ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] : ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'];
+
+let browser: any = null, page: any = null, renderer = '';
+async function open() {
+  browser = await chromium.launch({ headless: true, args: launchArgs });
+  page = await browser.newPage();
+  await page.goto('about:blank');
+  renderer = await page.evaluate(() => {
+    const gl = document.createElement('canvas').getContext('webgl2')!;
+    (window as any).gl = gl;
+    const info = gl.getExtension('WEBGL_debug_renderer_info');
+    return info ? String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER));
+  });
+}
+
+const results: Record<string, { linked: boolean | null; log?: string; lost?: boolean; ms: number; outcome?: string }> = {};
+await open();
+async function attempt(source: string) {
+  const started = performance.now();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), deadline); });
+  const work = page.evaluate(({ vertex, source }: { vertex: string; source: string }) => {
+    const gl: WebGL2RenderingContext = (window as any).gl;
+    if (gl.isContextLost()) return { linked: null, log: 'context lost before compiling' };
+    const make = (type: number, text: string) => { const s = gl.createShader(type)!; gl.shaderSource(s, text); gl.compileShader(s); return s; };
+    const v = make(gl.VERTEX_SHADER, vertex), f = make(gl.FRAGMENT_SHADER, source);
+    const p = gl.createProgram()!;
+    gl.attachShader(p, v); gl.attachShader(p, f); gl.linkProgram(p);
+    const linked = !!gl.getProgramParameter(p, gl.LINK_STATUS);
+    const log = linked ? '' : ((gl.getShaderInfoLog(f) || '') + (gl.getProgramInfoLog(p) || '')).slice(0, 400);
+    gl.deleteProgram(p); gl.deleteShader(v); gl.deleteShader(f);
+    return { linked, log, lost: gl.isContextLost() };
+  }, { vertex, source }).catch((error: unknown) => ({ linked: null, log: `page error: ${String(error).slice(0, 200)}` }));
+  const result = await Promise.race([work, timeout]);
+  clearTimeout(timer);
+  return { result, ms: performance.now() - started };
+}
+
+for (const file of files) {
+  const index = parseInt(file);
+  const source = await readFile(join(dir, file), 'utf8');
+  let { result, ms } = await attempt(source);
+  // A previous program can take the GPU process down; the context comes back
+  // lost. Retry once in a fresh browser so the answer belongs to this program.
+  if (result !== 'timeout' && result.linked === null) {
+    await browser.close().catch(() => {});
+    await open();
+    ({ result, ms } = await attempt(source));
+  }
+  if (result === 'timeout') {
+    results[index] = { linked: null, ms, outcome: 'timeout' };
+  } else {
+    results[index] = { ...result, ms, ...(result.lost ? { outcome: 'context lost after link' } : {}) };
+  }
+  if (result === 'timeout' || result.linked === null || result.lost) { await browser.close().catch(() => {}); await open(); }
+}
+await browser.close();
+await writeFile(join(dir, `webgl-${angle}.json`), JSON.stringify({ renderer, angle, results }, null, 1));
+const linked = Object.values(results).filter((r) => r.linked === true).length;
+console.log(`${files.length} programs: ${linked} linked, ${Object.values(results).filter((r) => r.linked === false).length} rejected, ${Object.values(results).filter((r) => r.linked === null).length} no answer (${renderer})`);
