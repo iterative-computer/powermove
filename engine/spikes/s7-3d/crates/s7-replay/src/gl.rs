@@ -325,6 +325,9 @@ struct C { color: vec4f, depth: vec4f }
 @fragment fn fs_depth() {}
 "#;
 
+/// Bytes appended to every GPU copy of a GL buffer (see `gpu_buffer`).
+const VERTEX_PULL_PAD: usize = 256;
+
 fn align(v: usize, a: usize) -> usize {
     v.div_ceil(a) * a
 }
@@ -459,7 +462,10 @@ impl Replayer {
                 if attrs.get("premultipliedAlpha").and_then(|v| v.as_bool()) == Some(false) {
                     bail!("premultipliedAlpha: false not supported");
                 }
-                self.make_default_fb(w, h, if antialias { 4 } else { 1 }, depth);
+                let samples = if antialias { 4 } else { 1 };
+                // S7_DEFAULT_SAMPLES overrides the canvas sample count (diagnostics only).
+                let samples = std::env::var("S7_DEFAULT_SAMPLES").ok().and_then(|v| v.parse().ok()).unwrap_or(samples);
+                self.make_default_fb(w, h, samples, depth);
                 self.state.viewport = [0, 0, w as i32, h as i32];
                 self.state.scissor = [0, 0, w as i32, h as i32];
             }
@@ -1555,7 +1561,13 @@ impl Replayer {
         let b = self.buffers.get_mut(&id).ok_or_else(|| anyhow!("no buffer {id}"))?;
         if b.gpu.as_ref().map(|(v, _)| *v) != Some(b.version) {
             let mut data = b.data.clone();
-            data.resize(align(data.len().max(4), 4), 0);
+            // naga's MSL vertex pulling (always on in wgpu-hal Metal) admits element i only
+            // when i < (bound size / stride). For an attribute at offset o > 0 into an
+            // interleaved buffer (instanceMatrix columns at 16, 32, 48 with stride 64), the
+            // bound slice holds n·stride − o bytes, so the last element reads as zero. GL
+            // only needs o + size bytes for it. Padding every buffer by the WebGL maximum
+            // stride (255) restores GL's rule without changing any element that GL reads.
+            data.resize(align(data.len().max(4), 4) + VERTEX_PULL_PAD, 0);
             let buffer = wgpu::util::DeviceExt::create_buffer_init(&self.device, &wgpu::util::BufferInitDescriptor { label: Some("gl buffer"), contents: &data, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::INDEX });
             b.gpu = Some((b.version, buffer));
         }
