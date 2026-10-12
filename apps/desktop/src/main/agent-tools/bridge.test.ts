@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { IPC, type AgentToolRequestEvent } from '../../shared/ipc';
 import { PowermoveAgentToolBridge } from './bridge';
+import { resolveFfmpeg } from '../ffmpeg-binary';
 
 class FakeIpcMain extends EventEmitter {}
 
@@ -184,7 +185,7 @@ describe('native Powermove agent tool bridge', () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'powermove-agent-media-'));
     temporaryDirectories.push(root);
     const tone = path.join(root, 'tone.wav');
-    const ffmpegPath = path.resolve(__dirname, '../../../node_modules/ffmpeg-static/ffmpeg');
+    const ffmpegPath = resolveFfmpeg({ packaged: false, resourcesPath: '', appPath: path.resolve(__dirname, '../../..') }).ffmpeg;
     await new Promise<void>((resolve, reject) => spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'sine=f=220:d=1', tone])
       .once('close', (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg ${code}`))));
     const ipc = new FakeIpcMain();
@@ -215,7 +216,7 @@ describe('native Powermove agent tool bridge', () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'powermove-agent-media-'));
     temporaryDirectories.push(root);
     const still = path.join(root, 'frame.png');
-    const ffmpegPath = path.resolve(__dirname, '../../../node_modules/ffmpeg-static/ffmpeg');
+    const ffmpegPath = resolveFfmpeg({ packaged: false, resourcesPath: '', appPath: path.resolve(__dirname, '../../..') }).ffmpeg;
     await new Promise<void>((resolve, reject) => spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=blue:s=320x180', '-frames:v', '1', still])
       .once('close', (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg ${code}`))));
     const png = new Uint8Array(await fs.readFile(still));
@@ -247,7 +248,7 @@ describe('native Powermove agent tool bridge', () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'powermove-agent-media-'));
     temporaryDirectories.push(root);
     const still = path.join(root, 'frame.png');
-    const ffmpegPath = path.resolve(__dirname, '../../../node_modules/ffmpeg-static/ffmpeg');
+    const ffmpegPath = resolveFfmpeg({ packaged: false, resourcesPath: '', appPath: path.resolve(__dirname, '../../..') }).ffmpeg;
     await new Promise<void>((resolve, reject) => spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=blue:s=320x180', '-frames:v', '1', still])
       .once('close', (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg ${code}`))));
     const png = new Uint8Array(await fs.readFile(still));

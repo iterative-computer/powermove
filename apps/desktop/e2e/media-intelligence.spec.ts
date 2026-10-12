@@ -9,7 +9,8 @@ import { promisify } from 'node:util';
 import type { Page } from 'playwright';
 
 import { CATALOG, DEFAULT_MODEL_ID } from '../src/main/transcription/catalog';
-import { expect, launchApp, repoRoot, test, type LaunchedApp } from './helpers/app';
+import { expect, launchApp, test, type LaunchedApp } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 
 /*
  * The media-intelligence lanes working together on real pieces: spoken media
@@ -24,7 +25,7 @@ import { expect, launchApp, repoRoot, test, type LaunchedApp } from './helpers/a
  */
 
 const run = promisify(execFile);
-const ffmpeg = path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg');
+const ffmpeg = ffmpegBinary;
 const parakeetDir = process.env.POWERMOVE_E2E_PARAKEET_DIR;
 const pinned = CATALOG.find((model) => model.id === DEFAULT_MODEL_ID)!;
 const hasModel = !!parakeetDir && existsSync(path.join(parakeetDir, pinned.files[0]!.name));
@@ -56,7 +57,7 @@ async function speech(directory: string): Promise<Speech> {
     '-map', '[out]', audio]);
   const file = path.join(directory, 'speech.mp4');
   await run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30', '-i', audio,
-    '-shortest', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-g', '30', '-c:a', 'aac', '-b:a', '128k', file]);
+    '-shortest', '-c:v', 'h264_videotoolbox', '-allow_sw', '1', '-b:v', '4M', '-pix_fmt', 'yuv420p', '-g', '30', '-c:a', 'aac', '-b:a', '128k', file]);
   const first = await seconds(a);
   return { file, audio, gapStart: first, gapEnd: first + GAP, duration: await seconds(file) };
 }

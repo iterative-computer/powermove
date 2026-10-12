@@ -8,6 +8,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
+import { ffmpegBuild, SHARED_FFMPEG_DIR } from '../main/ffmpeg-binary';
 import { serve, type ServeOptions } from './index';
 import { install, logs, status, uninstall, unitPath, unitText, type ServiceSpec } from './install';
 import { detectInstallKind, PACKAGE } from './updates';
@@ -174,10 +175,29 @@ export function bundledClaudeBinary(): string | null {
   return existsSync(binary) ? binary : null;
 }
 
-/** ffmpeg-static's package root, so render-encoder's `<appPath>/node_modules/ffmpeg-static/ffmpeg` resolves. */
-function ffmpegAppPath(): string {
-  const binary = require('ffmpeg-static') as string;
-  return path.resolve(path.dirname(binary), '..', '..');
+/**
+ * The FFmpeg the host runs, in order: `$POWERMOVE_FFMPEG` (an executable),
+ * `$PM_FFMPEG_DIR/bin/ffmpeg` and the shared developer build (a checkout with
+ * engine/third_party/ffmpeg built), and otherwise `ffmpeg` from PATH. The
+ * package no longer bundles ffmpeg-static: that build includes GPL and nonfree
+ * components that must not be redistributed (plan section 24). Export encodes
+ * through VideoToolbox (`h264_videotoolbox`, `prores_videotoolbox`), so on Linux
+ * the agent media tools work with a distribution FFmpeg but video export does not.
+ */
+export function hostFfmpeg(env: NodeJS.ProcessEnv = process.env, exists: (file: string) => boolean = existsSync): string {
+  const explicit = env['POWERMOVE_FFMPEG'];
+  if (explicit) return path.resolve(explicit);
+  for (const dir of [env['PM_FFMPEG_DIR'], SHARED_FFMPEG_DIR]) {
+    if (!dir) continue;
+    const { ffmpeg } = ffmpegBuild(path.resolve(dir));
+    if (exists(ffmpeg)) return ffmpeg;
+  }
+  return 'ffmpeg';
+}
+
+/** The package root (the directory holding dist/), answered by `app.getAppPath()` inside the host. */
+function hostAppPath(layout: CliLayout): string {
+  return path.dirname(layout.distDir);
 }
 
 export async function main(argv: string[], layout: CliLayout): Promise<void> {
@@ -199,7 +219,7 @@ export async function main(argv: string[], layout: CliLayout): Promise<void> {
     else await runHeadlessMcp({ host: '127.0.0.1', port: 0, insecure: true, userData: profile,
       exportsDir: path.resolve(parsed.exportsDir ?? path.join(homedir(), 'Powermove')),
       rendererDir: path.join(layout.distDir, 'renderer'), resourcesDir: path.join(layout.distDir, 'resources'),
-      appPath: ffmpegAppPath(), version: layout.version, codexBinary: bundledCodexBinary(), claudeBinary: bundledClaudeBinary()
+      appPath: hostAppPath(layout), ffmpeg: hostFfmpeg(), version: layout.version, codexBinary: bundledCodexBinary(), claudeBinary: bundledClaudeBinary()
     });
     return;
   }
@@ -237,7 +257,8 @@ export async function main(argv: string[], layout: CliLayout): Promise<void> {
     exportsDir: parsed.exportsDir ?? path.join(homedir(), 'Powermove'),
     rendererDir: path.join(layout.distDir, 'renderer'),
     resourcesDir: path.join(layout.distDir, 'resources'),
-    appPath: ffmpegAppPath(),
+    appPath: hostAppPath(layout),
+    ffmpeg: hostFfmpeg(),
     version: layout.version,
     codexBinary: bundledCodexBinary(),
     claudeBinary: bundledClaudeBinary(),

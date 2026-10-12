@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { expect, repoRoot, test } from './helpers/app';
+import { expect, test } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 
 for (const sequence of [false, true]) test(`${sequence ? '4K image sequence' : 'HD video'} scrubbing presents frames throughout a drag and settles at the release position`, async ({ session }) => {
   test.setTimeout(120_000);
@@ -26,10 +27,10 @@ for (const sequence of [false, true]) test(`${sequence ? '4K image sequence' : '
   } else {
     sources = [path.join(session.userData, 'scrub-source.mp4')];
     // Ordinary compressed footage with a long interval between reference frames.
-    execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'), [
+    execFileSync(ffmpegBinary, [
       '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=30:duration=4',
-      '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '120', '-keyint_min', '120',
-      '-sc_threshold', '0', '-pix_fmt', 'yuv420p', sources[0]!,
+      // VideoToolbox places no scene-cut keyframes: -g 120 gives keyframes at 0 and 120 only.
+      '-c:v', 'h264_videotoolbox', '-allow_sw', '1', '-b:v', '8M', '-g', '120', '-pix_fmt', 'yuv420p', sources[0]!,
     ]);
   }
   const chooser = page.waitForEvent('filechooser');

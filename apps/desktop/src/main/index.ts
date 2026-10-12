@@ -6,6 +6,7 @@ import { installWhatsNew, whatsNewOptions } from './whats-new';
 import { installTextContextMenu } from './text-context-menu';
 import { installPermissionHandlers } from './permissions';
 import { registerRenderEncoder } from './render-encoder';
+import { ffmpegMissingMessage, resolveFfmpeg } from './ffmpeg-binary';
 import { registerExportSidecar } from './export-sidecar';
 import { registerBlenderIpc } from './blender-ipc';
 import {
@@ -881,9 +882,9 @@ if (!hasSingleInstanceLock) {
         console.info(`[Powermove MCP] Claude desktop connection: ${registration}`);
       }
     }
-    const proxyEncoder = app.isPackaged
-      ? path.join(process.resourcesPath, 'encoder', 'ffmpeg')
-      : path.join(app.getAppPath(), 'node_modules', 'ffmpeg-static', 'ffmpeg');
+    const ffmpegTools = resolveFfmpeg({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() });
+    if (!app.isPackaged && !existsSync(ffmpegTools.ffmpeg)) console.warn(`[ffmpeg] ${ffmpegMissingMessage(ffmpegTools)}`);
+    const proxyEncoder = ffmpegTools.ffmpeg;
     const mediaProxies = new MediaProxyService(app.getPath('temp'), playbackConverter(proxyEncoder), imageSequenceConverter(proxyEncoder), previewConverter(proxyEncoder), stillImageConverter(proxyEncoder));
     registerAppProtocol();
     installPermissionHandlers(session.defaultSession, isAppMainFrame);
@@ -1040,7 +1041,7 @@ if (!hasSingleInstanceLock) {
     });
     registerMediaPathIpc(ipcMain, mediaPaths, ctx);
     app.once('will-quit', () => { void mediaPaths.dispose(); });
-    registerRenderEncoder(ipcMain,ctx);
+    registerRenderEncoder(ipcMain,{...ctx,ffmpeg:proxyEncoder});
     /* ── transcription: models download on request into userData; inference
        runs in a utility process so neither main nor a window ever blocks. ── */
     const transcription = installTranscription({
