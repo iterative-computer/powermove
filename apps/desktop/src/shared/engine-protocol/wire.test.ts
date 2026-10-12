@@ -24,6 +24,11 @@ function decodeMessagePack(bytes: Uint8Array): unknown {
     if (value > BigInt(Number.MAX_SAFE_INTEGER) || value < BigInt(-Number.MAX_SAFE_INTEGER)) throw new Error(`unsafe integer ${value}`);
     return Number(value);
   };
+  // Contract 9: every float on the wire is finite.
+  const finite = (value: number): number => {
+    if (!Number.isFinite(value)) throw new Error(`non-finite float ${value}`);
+    return value;
+  };
   const str = (n: number) => text.decode(bytes.subarray(take(n), at));
   const bin = (n: number) => bytes.slice(take(n), at);
   const array = (n: number): unknown[] => Array.from({ length: n }, () => value());
@@ -51,8 +56,8 @@ function decodeMessagePack(bytes: Uint8Array): unknown {
       case 0xc4: return bin(view.getUint8(take(1)));
       case 0xc5: return bin(view.getUint16(take(2)));
       case 0xc6: return bin(view.getUint32(take(4)));
-      case 0xca: return view.getFloat32(take(4));
-      case 0xcb: return view.getFloat64(take(8));
+      case 0xca: return finite(view.getFloat32(take(4)));
+      case 0xcb: return finite(view.getFloat64(take(8)));
       case 0xcc: return view.getUint8(take(1));
       case 0xcd: return view.getUint16(take(2));
       case 0xce: return view.getUint32(take(4));
@@ -169,5 +174,7 @@ describe('engine protocol wire fixtures', () => {
     expect(() => decodeMessagePack(bytes.subarray(0, bytes.length - 1))).toThrow();
     expect(() => decodeMessagePack(new Uint8Array([...bytes, 0xc0]))).toThrow(/trailing/);
     expect(() => decodeMessagePack(new Uint8Array([0xcf, 0x00, 0x20, 0, 0, 0, 0, 0, 0]))).toThrow(/unsafe/);
+    expect(() => decodeMessagePack(new Uint8Array([0xcb, 0x7f, 0xf8, 0, 0, 0, 0, 0, 0]))).toThrow(/non-finite/);
+    expect(() => decodeMessagePack(new Uint8Array([0xca, 0xff, 0x80, 0, 0]))).toThrow(/non-finite/);
   });
 });

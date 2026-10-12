@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 
 use pm_protocol::Envelope;
-use pm_protocol::codec::{decode, decode_unvalidated, encode};
+use pm_protocol::codec::{CodecError, decode, decode_unvalidated, encode, encode_unvalidated};
 use pm_protocol::envelope::Message;
 use pm_protocol::samples;
 use proptest::prelude::*;
@@ -20,6 +20,26 @@ fn every_sample_round_trips_through_messagepack_and_json() {
         let back: Envelope =
             serde_json::from_str(&json).unwrap_or_else(|e| panic!("{name} JSON: {e}"));
         assert_eq!(back, envelope, "{name} changed through JSON");
+    }
+}
+
+#[test]
+fn non_finite_floats_never_cross_the_wire() {
+    // A NaN light intensity is not covered by any per-field check; the
+    // codec's finite-float rule still rejects it at both ends.
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut scene = samples::evaluated_scene();
+        scene.worlds[0].lights[0].intensity = bad;
+        let envelope = Envelope::new(Message::Response {
+            id: pm_protocol::common::RequestId::ZERO,
+            body: pm_protocol::Response::Scene(Box::new(scene)),
+        });
+        assert!(matches!(
+            encode(&envelope),
+            Err(CodecError::NonFinite { .. })
+        ));
+        let bytes = encode_unvalidated(&envelope).unwrap();
+        assert!(matches!(decode(&bytes), Err(CodecError::NonFinite { .. })));
     }
 }
 

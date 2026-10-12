@@ -60,6 +60,14 @@ fixtures.
   range cover about ±147 days; document key times are not limited by this
   because they travel inside patch bodies as the document's float seconds
   (contract 5).
+- **Every float is finite.** NaN and infinities have no JSON form (agent
+  tools serialize these messages as JSON), `serde_json::Value` silently turns
+  them into `null`, and range checks would each have to special-case them.
+  `codec::check_finite` scans the encoded bytes for MessagePack float32 and
+  float64 values, so the rule covers every float field without a per-field
+  check: `encode` fails at the sender and `decode` rejects with
+  `CodecError::NonFinite`. A producer whose computation can yield NaN
+  (expression evaluation, RFC 01) maps it before encoding.
 - **Revision tagging.** On a request, `revision` is the minimum document
   revision the receiver must have applied before answering
   (read-your-writes); the receiver waits for patches, then fails with
@@ -101,7 +109,7 @@ scope, and the versions in `ErrorDetail::UnsupportedVersion`.
 ## Invariants
 
 1. **A message that decodes obeys its contract.** `decode` checks size,
-   nesting depth (64), and trailing bytes, then runs `Validate` on the whole
+   nesting depth (64), trailing bytes, and finite floats, then runs `Validate` on the whole
    envelope; `encode` validates first, so invalid messages fail at the
    sender. Hello and welcome carry no session or revision; session-bound
    requests and events must carry a session.
@@ -122,8 +130,9 @@ scope, and the versions in `ErrorDetail::UnsupportedVersion`.
    `bigint`, or when a generated field is snake_case.
 5. **TypeScript reads the same bytes.** `wire.test.ts` (vitest, hand-written
    alongside the generated files) decodes every fixture with a strict
-   MessagePack reader and reads them through the generated types, checking
-   field names, nulls, numbers, and `Uint8Array`s.
+   MessagePack reader (safe integers and finite floats only) and reads them
+   through the generated types, checking field names, nulls, numbers, and
+   `Uint8Array`s.
 6. **`pm-protocol` builds for `wasm32-unknown-unknown`** (for `pm-wasm`),
    with or without the `ts` feature.
 

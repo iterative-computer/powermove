@@ -70,6 +70,9 @@ Checked by `EvaluatedScene::validate`:
    lights, cameras) and no layer is in two runs. Neither structure is derived
    from the other: a light in a run is never in a depth set, and a 2D layer or
    styled group ends a depth set without necessarily ending a run.
+9. **Every number is finite** when the scene crosses a process (the codec
+   rule of RFC 09). Inside an engine the scene is passed by reference and
+   this rule does not apply.
 
 Not checkable from the scene alone, and owned by `pm-eval`'s tests and the
 parity corpus: depth-set membership rules (inactive, hidden, lights,
@@ -123,3 +126,11 @@ bump after the freeze. `pm-cli parity` pins the scene version it compares.
 4. Scene diffs: whether the interactive engine wants a per-layer change set
    between consecutive scenes instead of whole scenes. Not needed for the
    contract; an implementation detail of `pm-render` caching.
+5. Non-finite evaluated values. Expressions and some legacy math can yield
+   NaN or infinity today, and the compositor's uniform upload
+   (`legacy/gl/compositor.ts:391`) has no finiteness check. The wire rejects
+   them (invariant 9), so a scene sent to `pm-cli`, parity runs, or
+   `get_3d_scene` must map them first. Whether `pm-eval` maps them where
+   they arise, matching legacy's observable result per field (measured, not
+   assumed), or reports them as per-layer failures, is decided with the
+   dual-answer harness in Phase 1.

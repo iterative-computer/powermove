@@ -73,13 +73,15 @@ Descriptor rules, enforced by the engine and the bridge:
 Version 0 until Phase 2 starts. The descriptor is on the hot path; adding a
 field after the freeze costs bytes on every frame and is a version bump.
 
-Measured (M4 Max, release build, Rust codec with validation, 200,000
-iterations; `cargo test --release -p pm-protocol --test wire -- --ignored`):
+Measured (M4 Max, release build, Rust codec with validation and the
+finite-float scan, 200,000 iterations, median of three runs while other
+builds loaded the machine (load average 8 to 12);
+`cargo test --release -p pm-protocol --test wire -- --ignored`):
 
 | Message | Bytes | Encode | Decode |
 |---|---|---|---|
-| Frame event without overlay or depth surface | 243 | 309 ns | 1,206 ns |
-| Frame event with overlay (one layer, one path, caret) and depth surface | 748 | 774 ns | 3,776 ns |
+| Frame event without overlay or depth surface | 243 | 369 ns | 1,228 ns |
+| Frame event with overlay (one layer, one path, caret) and depth surface | 748 | 957 ns | 3,785 ns |
 
 These are Rust-side numbers. Main decodes descriptors in JavaScript; S1
 measures that cost under main-process load.
