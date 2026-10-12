@@ -62,6 +62,8 @@ pub struct StageOutput {
     pub entry_point: String,
     /// Non-finite constants rebuilt at run time for naga (see `rewrite`).
     pub materialized: usize,
+    /// naga-only SPIR-V rewrites that changed this stage (`rewrite::naga_compat`).
+    pub notes: Vec<String>,
 }
 
 pub struct Translated {
@@ -116,7 +118,9 @@ pub fn naga_validate(module: &naga::Module) -> Result<naga::valid::ModuleInfo, S
         .map_err(|e| format!("{:?}", e.into_inner()))
 }
 
-fn stage_spirv(source: &str, stage: Stage, line_offset: u32, timings: &mut HashMap<String, f64>, prefix: &str) -> Result<(rspirv::dr::Module, compile::Spirv), Failure> {
+/// glslang, then the rewrites both paths share. Returns notes on rewrites
+/// that changed the program (for the report).
+fn stage_spirv(source: &str, stage: Stage, line_offset: u32, timings: &mut HashMap<String, f64>, prefix: &str) -> Result<(rspirv::dr::Module, compile::Spirv, Vec<String>), Failure> {
     trace(&format!("{prefix}glslang"));
     let start = Instant::now();
     let spv = compile::compile(source, stage).map_err(|e| Failure {
@@ -126,14 +130,28 @@ fn stage_spirv(source: &str, stage: Stage, line_offset: u32, timings: &mut HashM
     })?;
     timings.insert(format!("{prefix}glslang"), ms(start));
     let mut module = rewrite::load(&spv.words).map_err(|e| Failure::new("rewrite", e.0))?;
+    let mut notes = Vec::new();
+    if stage == Stage::Fragment {
+        let arrays = rewrite::scalarize_sampler_arrays(&mut module).map_err(|e| Failure::new("rewrite", e.0))?;
+        if arrays > 0 {
+            notes.push(format!("sampler2D arrays ({arrays})"));
+        }
+    }
     rewrite::assign_bindings(&mut module, compile::DEFAULT_BLOCK_BINDING);
     if stage == Stage::Fragment {
         rewrite::remap_varyings(&mut module, VARYINGS);
+        let names: Vec<&str> = VARYINGS.iter().map(|(n, _)| *n).collect();
+        notes.extend(rewrite::fragment_interface(&mut module, &names));
     }
-    Ok((module, spv))
+    let remainders = rewrite::signed_remainder(&mut module);
+    if remainders > 0 {
+        notes.push(format!("signed % as remainder ({remainders})"));
+    }
+    Ok((module, spv, notes))
 }
 
 fn naga_stage(mut module: rspirv::dr::Module, spv: &compile::Spirv, timings: &mut HashMap<String, f64>, prefix: &str) -> Result<StageOutput, Failure> {
+    let compat = rewrite::naga_compat(&mut module);
     let reflection = reflect::reflect(&module, &reflect::bool_uniforms(&spv.preprocessed));
     let materialized = rewrite::materialize_non_finite_constants(&mut module);
     let start = Instant::now();
@@ -165,7 +183,7 @@ fn naga_stage(mut module: rspirv::dr::Module, spv: &compile::Spirv, timings: &mu
         entry_point = format!("main_{nonce}");
         naga_module.entry_points[0].name = entry_point.clone();
     }
-    Ok(StageOutput { reflection, splits, naga: Some(naga_module), msl: None, entry_point, materialized })
+    Ok(StageOutput { reflection, splits, naga: Some(naga_module), msl: None, entry_point, materialized, notes: compat })
 }
 
 /// Metal resource indices as wgpu-hal assigns them for our layouts (see
@@ -203,6 +221,11 @@ fn spvc_stage(module: rspirv::dr::Module, spv: &compile::Spirv, stage: Stage, ti
     }
     let mut options = CompilerOptions::default();
     options.version = MslVersion::new(3, 0, 0);
+    // WebGL zero-initializes every variable (ANGLE's initialization of
+    // uninitialized locals and globals); naga's MSL does too. Without this,
+    // SPIRV-Cross reads garbage from unwritten private array elements
+    // (coverage sweep, `types/global-arrays-private`).
+    options.common.force_zero_initialized_variables = true;
     // The GL vertex shader writes GL clip space; glslang reads it with Vulkan's
     // y-down convention, so flip like naga's `adjust_coordinate_space` does.
     options.common.flip_vertex_y = true;
@@ -222,7 +245,7 @@ fn spvc_stage(module: rspirv::dr::Module, spv: &compile::Spirv, stage: Stage, ti
     if let Ok(nonce) = std::env::var("S3_NONCE") {
         msl = format!("// {nonce}\n{msl}");
     }
-    Ok(StageOutput { reflection, splits: Vec::new(), naga: None, msl: Some(msl), entry_point: entry, materialized: 0 })
+    Ok(StageOutput { reflection, splits: Vec::new(), naga: None, msl: Some(msl), entry_point: entry, materialized: 0, notes: Vec::new() })
 }
 
 fn limit_failure(error: &limits::LimitError, line_offset: u32) -> Failure {
@@ -254,8 +277,15 @@ pub fn translate(gl_vertex: &str, fragment: &str, line_offset: u32, path: Path) 
     let normalized = normalize::normalize(fragment, target).map_err(|e| Failure::new("normalize", e.0))?;
     let vertex = normalize::normalize(&wgpu_vertex_source(gl_vertex), target).map_err(|e| Failure::new("normalize", format!("vertex: {}", e.0)))?;
     timings.insert("normalize".into(), ms(start));
-    let (vmod, vspv) = stage_spirv(&vertex.source, Stage::Vertex, 0, &mut timings, "vertex-")?;
-    let (fmod, fspv) = stage_spirv(&normalized.source, Stage::Fragment, line_offset, &mut timings, "")?;
+    let (vmod, vspv, _) = stage_spirv(&vertex.source, Stage::Vertex, 0, &mut timings, "vertex-")?;
+    let (fmod, fspv, notes) = stage_spirv(&normalized.source, Stage::Fragment, line_offset, &mut timings, "")?;
+    let unbound = reflect::unbound_resources(&fmod);
+    if !unbound.is_empty() {
+        return Err(Failure::new(
+            "bind",
+            format!("the compositor binds only float sampler2D textures and the default uniform block; WebGL cannot draw this program as Powermove binds it: {}", unbound.join(", ")),
+        ));
+    }
     let start = Instant::now();
     let active: std::collections::HashSet<u32> = reflect::reflect(&fmod, &reflect::bool_uniforms(&fspv.preprocessed))
         .block
@@ -271,8 +301,114 @@ pub fn translate(gl_vertex: &str, fragment: &str, line_offset: u32, path: Path) 
         ),
     };
     let mut polyfilled = normalized.polyfilled;
+    polyfilled.extend(notes);
+    polyfilled.extend(fragment_out.notes.iter().cloned());
     if fragment_out.materialized > 0 {
         polyfilled.push(format!("non-finite constants ({})", fragment_out.materialized));
     }
     Ok(Translated { vertex: vertex_out, fragment: fragment_out, renamed: normalized.renamed, polyfilled, warnings: fspv.warnings.trim().to_string(), timings_ms: timings })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The compositor's vertex shader (`PM.VERT`).
+    const VERT: &str = "#version 300 es\nprecision highp float;\nin vec2 a_pos;\nuniform mat3 u_m;\nuniform vec2 u_res;\nuniform vec2 u_pxOrigin;\nuniform vec4 u_uv;\nout vec2 v_uv;\nout vec2 v_st;\nout vec2 v_px;\nvoid main(){\n  v_uv = u_uv.xy + a_pos * u_uv.zw;\n  v_st = vec2(a_pos.x, 1.0 - a_pos.y);\n  vec3 p = u_m * vec3(a_pos, 1.0);\n  v_px = p.xy / p.z + u_pxOrigin;\n  gl_Position = vec4((p.x / u_res.x) * 2.0 - p.z, p.z - (p.y / u_res.y) * 2.0, 0.0, p.z);\n}\n";
+    const H: &str = "#version 300 es\nprecision highp float;\nin vec2 v_uv;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nout vec4 o;\n";
+
+    /// Translate on both paths and, for naga, emit MSL as wgpu would.
+    fn both(body: &str) -> Vec<Translated> {
+        let source = format!("{H}{body}");
+        [Path::Naga, Path::SpirvCross]
+            .into_iter()
+            .map(|path| {
+                let t = translate(VERT, &source, 6, path).unwrap_or_else(|f| panic!("{path:?}: {}: {}\n{source}", f.stage, f.message));
+                if path == Path::Naga {
+                    let module = t.fragment.naga.as_ref().unwrap();
+                    let info = naga_validate(module).unwrap();
+                    naga::back::msl::write_string(module, &info, &naga::back::msl::Options { lang_version: (3, 0), ..Default::default() }, &Default::default()).expect("msl");
+                }
+                t
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gentype_builtins_naga_lacks_are_polyfilled() {
+        let t = both("void main(){ float w; vec3 w3; float f = modf(v_uv.x * 3.0, w); vec3 f3 = modf(vec3(v_uv, 1.5), w3);\n  float n = normalize(v_uv.x - 0.5) + faceforward(1.0, v_uv.y, -1.0) + reflect(v_uv.x, 0.6) + refract(0.5, -0.8, 0.66);\n  o = vec4(f + w, f3.x + w3.y, n, normalize(v_uv).x); }\n");
+        for name in ["modf", "normalize", "faceforward", "reflect", "refract"] {
+            assert!(t[0].polyfilled.iter().any(|p| p == name), "{name}: {:?}", t[0].polyfilled);
+        }
+        assert!(t[1].polyfilled.is_empty(), "SPIRV-Cross keeps the built-ins: {:?}", t[1].polyfilled);
+    }
+
+    #[test]
+    fn integer_remainder_and_unsigned_negation() {
+        let t = both("void main(){ int i = int(v_uv.x * 100.0) - 50; uint u = uint(i + 60); int r = i % 7; r %= 5; uint n = -u; o = vec4(float(r), float(n & 255u), float(i % 3), 1.0); }\n");
+        assert!(t[0].polyfilled.iter().any(|p| p.starts_with("signed % as remainder")), "{:?}", t[0].polyfilled);
+        assert!(t[0].polyfilled.iter().any(|p| p.starts_with("uint negation")), "{:?}", t[0].polyfilled);
+    }
+
+    #[test]
+    fn sampler_arrays_become_one_sampler_per_element() {
+        let t = both("uniform sampler2D u_extra[3];\nvec4 tap(sampler2D s, vec2 uv){ return texture(s, uv); }\nvoid main(){ const int K = 2; o = texture(u_extra[0], v_uv) + tap(u_extra[K], v_uv) + texture(u_tex, v_uv); }\n");
+        for translated in &t {
+            let mut names: Vec<&str> = translated.fragment.reflection.samplers.iter().map(|s| s.name.as_str()).collect();
+            names.sort();
+            assert_eq!(names, ["u_extra[0]", "u_extra[1]", "u_extra[2]", "u_tex"]);
+            let mut bindings: Vec<u32> = translated.fragment.reflection.samplers.iter().map(|s| s.binding).collect();
+            bindings.sort();
+            bindings.dedup();
+            assert_eq!(bindings.len(), 4, "distinct bindings");
+        }
+        assert_eq!(t[0].fragment.splits.len(), 4);
+    }
+
+    #[test]
+    fn fragment_interface_follows_webgl() {
+        // Narrow and array outputs, gl_FragDepth, and an unused input the
+        // vertex shader does not write.
+        for body in [
+            "void main(){ o3 = texture(u_tex, v_uv).rgb; }\n",
+            "void main(){ of = v_uv.x; }\n",
+            "void main(){ oa[0] = vec4(v_uv, 0.0, 1.0); }\n",
+        ] {
+            let decl = if body.contains("o3") { "out vec3 o3;" } else if body.contains("of") { "out float of;" } else { "out vec4 oa[1];" };
+            let source = format!("#version 300 es\nprecision highp float;\nin vec2 v_uv;\nuniform sampler2D u_tex;\n{decl}\n{body}");
+            for path in [Path::Naga, Path::SpirvCross] {
+                let t = translate(VERT, &source, 5, path).unwrap_or_else(|f| panic!("{path:?}: {}: {}", f.stage, f.message));
+                assert!(t.polyfilled.iter().any(|p| p.contains("widened to vec4")), "{:?}", t.polyfilled);
+            }
+        }
+        let t = both("centroid in vec2 nope;\nvoid main(){ gl_FragDepth = 0.25; o = texture(u_tex, v_uv); }\n");
+        assert!(t[0].polyfilled.iter().any(|p| p.contains("gl_FragDepth")), "{:?}", t[0].polyfilled);
+        assert!(t[0].polyfilled.iter().any(|p| p.contains("unused input `nope`")), "{:?}", t[0].polyfilled);
+    }
+
+    #[test]
+    fn two_row_matrix_uniforms_and_struct_uniforms_reach_naga() {
+        let t = both("struct P { float k; vec4 c; mat2 r; };\nuniform P st;\nuniform mat2 um2; uniform mat3x2 um32; uniform mat2 ums[2];\nvoid main(){ o = vec4(um2 * v_uv + um32 * vec3(v_uv, 1.0) + ums[1] * v_uv, st.k, 1.0) + st.c + vec4(st.r[0], 0.0, 0.0); }\n");
+        let block = t[0].fragment.reflection.block.as_ref().unwrap();
+        let st = block.members.iter().find(|m| m.name == "st").unwrap();
+        assert_eq!(crate::reflect::size_of(&st.ty), 48, "std140 struct size from its members");
+    }
+
+    #[test]
+    fn unbound_resources_are_refused_with_a_reason() {
+        for decl in ["uniform highp sampler3D u_s;\nvoid main(){ o = texture(u_s, vec3(v_uv, 0.5)); }\n", "uniform highp isampler2D u_s;\nvoid main(){ o = vec4(texelFetch(u_s, ivec2(0), 0)); }\n", "uniform Params { vec4 c; };\nvoid main(){ o = c; }\n"] {
+            for path in [Path::Naga, Path::SpirvCross] {
+                let f = translate(VERT, &format!("{H}{decl}"), 6, path).err().expect("refused");
+                assert_eq!(f.stage, "bind", "{}", f.message);
+            }
+        }
+        // Declared but unused: inactive in GL, accepted.
+        both("uniform highp sampler3D u_s;\nuniform Params { vec4 c; };\nvoid main(){ o = texture(u_tex, v_uv); }\n");
+    }
+
+    #[test]
+    fn texel_fetch_offset_and_vulkan_keywords() {
+        let t = both("#define texture2D texture\nfloat sampler(float x){ return x; }\nvoid main(){ vec4 textureCube = texelFetchOffset(u_tex, ivec2(gl_FragCoord.xy), 0, ivec2(2, -3)); o = textureCube + texture2D(u_tex, v_uv) * sampler(0.5); }\n");
+        assert!(t[0].polyfilled.iter().any(|p| p.starts_with("texelFetchOffset")), "{:?}", t[0].polyfilled);
+    }
 }

@@ -25,7 +25,9 @@ pub enum UniformType {
     /// Column-major `columns` x `rows` float matrix.
     Matrix { columns: u32, rows: u32, stride: u32 },
     Array { element: Box<UniformType>, length: u32, stride: u32 },
-    Struct,
+    /// A struct member (std140 size from its members' offsets); the
+    /// compositor never sets struct uniforms, so only the size matters.
+    Struct { size: u32 },
 }
 
 #[derive(Debug, Clone)]
@@ -138,7 +140,7 @@ impl<'a> Types<'a> {
     }
 
     fn ty(&self, id: Word, matrix_stride: Option<u32>) -> UniformType {
-        let Some(inst) = self.by_id.get(&id) else { return UniformType::Struct };
+        let Some(inst) = self.by_id.get(&id) else { return UniformType::Struct { size: 16 } };
         let id_at = |k: usize| match inst.operands.get(k) {
             Some(Operand::IdRef(i)) => *i,
             _ => 0,
@@ -163,7 +165,17 @@ impl<'a> Types<'a> {
                 let stride = decorations(self.module, id).get(&Decoration::ArrayStride).copied().flatten().unwrap_or(16);
                 UniformType::Array { element: Box::new(self.ty(id_at(0), matrix_stride)), length, stride }
             }
-            _ => UniformType::Struct,
+            Op::TypeStruct => {
+                let mut size = 0;
+                for (index, op) in inst.operands.iter().enumerate() {
+                    let Operand::IdRef(member) = op else { continue };
+                    let offset = member_decoration(self.module, id, index as u32, Decoration::Offset).unwrap_or(0);
+                    let stride = member_decoration(self.module, id, index as u32, Decoration::MatrixStride);
+                    size = size.max(offset + size_of(&self.ty(*member, stride)));
+                }
+                UniformType::Struct { size: size.div_ceil(16) * 16 }
+            }
+            _ => UniformType::Struct { size: 16 },
         }
     }
 }
@@ -174,7 +186,7 @@ pub fn size_of(ty: &UniformType) -> u32 {
         UniformType::Vector(_, n) => 4 * n,
         UniformType::Matrix { columns, stride, .. } => columns * stride,
         UniformType::Array { length, stride, .. } => length * stride,
-        UniformType::Struct => 16,
+        UniformType::Struct { size } => *size,
     }
 }
 
@@ -218,7 +230,9 @@ pub fn reflect(module: &Module, bool_names: &HashSet<String>) -> Reflection {
             Some(Operand::StorageClass(StorageClass::Uniform)) => {
                 let Some(struct_id) = pointee else { continue };
                 let Some(struct_inst) = types.by_id.get(&struct_id) else { continue };
-                if struct_inst.class.opcode != Op::TypeStruct {
+                // Named uniform blocks are refused before rendering when active
+                // (`unbound_resources`); only the default block is filled.
+                if struct_inst.class.opcode != Op::TypeStruct || names.get(&struct_id).map(String::as_str) != Some("gl_DefaultUniformBlock") {
                     continue;
                 }
                 let member_names = member_names(module, struct_id);
@@ -254,6 +268,72 @@ pub fn reflect(module: &Module, bool_names: &HashSet<String>) -> Reflection {
         }
     }
     reflection
+}
+
+/// Active resources the compositor never binds, which WebGL cannot draw with
+/// (coverage sweep, `samplers/*`, `variables/uniform-block*`): named uniform
+/// blocks (no buffer is bound: the draw fails with `INVALID_OPERATION`), and
+/// samplers other than a float `sampler2D` (the compositor binds 2D float
+/// textures only; WebGL fails the draw when two sampler types share a unit, an
+/// integer sampler meets a float texture, or a shadow sampler meets a
+/// non-depth texture, and otherwise samples an empty target as (0, 0, 0, 1)).
+/// The engine refuses these programs with this list; it does not reproduce
+/// the constant-sample case (see S3.md, open naga-path work).
+pub fn unbound_resources(module: &Module) -> Vec<String> {
+    let types = Types::new(module);
+    let names = names(module);
+    let used: HashSet<Word> = module
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter().flat_map(|b| &b.instructions))
+        .flat_map(|i| i.operands.iter())
+        .filter_map(|o| if let Operand::IdRef(id) = o { Some(*id) } else { None })
+        .collect();
+    let mut out = Vec::new();
+    for inst in &module.types_global_values {
+        let Some(id) = inst.result_id.filter(|id| inst.class.opcode == Op::Variable && used.contains(id)) else { continue };
+        let Some(pointee) = inst.result_type.and_then(|t| types.by_id.get(&t)).and_then(|p| match p.operands.get(1) {
+            Some(Operand::IdRef(t)) => Some(*t),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let name = names.get(&id).cloned().unwrap_or_default();
+        match inst.operands.first() {
+            Some(Operand::StorageClass(StorageClass::Uniform)) => {
+                let block = names.get(&pointee).cloned().unwrap_or_default();
+                if block != "gl_DefaultUniformBlock" {
+                    out.push(format!("uniform block `{block}`"));
+                }
+            }
+            Some(Operand::StorageClass(StorageClass::UniformConstant)) => {
+                let Some(sampled) = types.by_id.get(&pointee).filter(|t| t.class.opcode == Op::TypeSampledImage) else { continue };
+                let Some(Operand::IdRef(image)) = sampled.operands.first() else { continue };
+                let Some(image) = types.by_id.get(image) else { continue };
+                let lit = |k: usize| match image.operands.get(k) {
+                    Some(Operand::LiteralBit32(v)) => *v,
+                    _ => 0,
+                };
+                let scalar = match image.operands.first() {
+                    Some(Operand::IdRef(t)) => types.scalar(*t),
+                    _ => None,
+                };
+                let dim = image.operands.get(1).cloned();
+                let plain_2d = dim == Some(Operand::Dim(rspirv::spirv::Dim::Dim2D)) && lit(2) == 0 && lit(3) == 0 && lit(4) == 0 && scalar == Some(Scalar::Float);
+                if !plain_2d {
+                    let kind = match scalar {
+                        Some(Scalar::Int) => "integer ",
+                        Some(Scalar::Uint) => "unsigned ",
+                        _ => "",
+                    };
+                    let shape = format!("{}{}{}", dim.map(|d| format!("{d}")).unwrap_or_default(), if lit(3) == 1 { " array" } else { "" }, if lit(2) == 1 { " shadow" } else { "" });
+                    out.push(format!("{kind}sampler `{name}` ({shape})"));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Names declared `uniform bool` in preprocessed GLSL (`uniform bool a, b;`).

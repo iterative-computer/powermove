@@ -210,7 +210,10 @@ pub fn split_combined_samplers(module: &mut Module) -> Result<Vec<SplitBinding>,
                     combined_pointers.insert(inst.result_id.unwrap(), *pointee);
                 }
             }
-            if let (Some(_), Some(Operand::IdRef(pointee))) = (inst.operands.first(), inst.operands.get(1)) {
+            // Arrays are scalarized before this (`scalarize_sampler_arrays`);
+            // one left on a variable means that rewrite was skipped.
+            let pointer_used = module.types_global_values.iter().any(|v| v.class.opcode == Op::Variable && v.result_type == inst.result_id);
+            if let (true, Some(_), Some(Operand::IdRef(pointee))) = (pointer_used, inst.operands.first(), inst.operands.get(1)) {
                 let is_array_of_sampled = module.types_global_values.iter().any(|t| {
                     t.result_id == Some(*pointee)
                         && matches!(t.class.opcode, Op::TypeArray | Op::TypeRuntimeArray)
@@ -556,6 +559,445 @@ pub fn materialize_non_finite_constants(module: &mut Module) -> usize {
     module.debug_names.retain(|i| !id_operand(i, 0).is_some_and(|id| tainted_set.contains(&id)));
     module.annotations.retain(|i| !id_operand(i, 0).is_some_and(|id| tainted_set.contains(&id)));
     tainted.len()
+}
+
+/* ── GL semantics the back ends lack (coverage sweep findings) ────────── */
+
+/// Result type of every id that has one (globals, parameters, instructions).
+fn result_types(module: &Module) -> HashMap<Word, Word> {
+    let mut out = HashMap::new();
+    let mut put = |inst: &Instruction| {
+        if let (Some(id), Some(ty)) = (inst.result_id, inst.result_type) {
+            out.insert(id, ty);
+        }
+    };
+    module.types_global_values.iter().for_each(&mut put);
+    for function in &module.functions {
+        function.parameters.iter().for_each(&mut put);
+        function.blocks.iter().flat_map(|b| &b.instructions).for_each(&mut put);
+    }
+    out
+}
+
+fn definition(module: &Module, id: Word) -> Option<&Instruction> {
+    module.types_global_values.iter().find(|i| i.result_id == Some(id))
+}
+
+fn constant_u32(module: &Module, id: Word) -> Option<u32> {
+    let inst = definition(module, id)?;
+    match (inst.class.opcode, inst.operands.first()) {
+        (Op::Constant, Some(Operand::LiteralBit32(v))) => Some(*v),
+        _ => None,
+    }
+}
+
+/// An `OpConstant`/`OpConstantNull`/`OpConstantComposite` of `ty`, reused or
+/// appended after its operands.
+fn find_or_add_constant(module: &mut Module, opcode: Op, ty: Word, operands: Vec<Operand>) -> Word {
+    if let Some(id) = module.types_global_values.iter().find(|i| i.class.opcode == opcode && i.result_type == Some(ty) && i.operands == operands).and_then(|i| i.result_id) {
+        return id;
+    }
+    let id = fresh(module);
+    let mut deps = operands.clone();
+    deps.push(Operand::IdRef(ty));
+    let position = after_dependencies(module, &deps);
+    module.types_global_values.insert(position, Instruction::new(opcode, Some(ty), Some(id), operands));
+    id
+}
+
+fn float_type(module: &mut Module) -> Word {
+    find_or_add_type(module, Op::TypeFloat, vec![Operand::LiteralBit32(32)])
+}
+
+fn is_referenced_in_functions(module: &Module, id: Word) -> bool {
+    module.functions.iter().flat_map(|f| f.blocks.iter().flat_map(|b| &b.instructions)).any(|inst| inst.operands.contains(&Operand::IdRef(id)))
+}
+
+fn entry_function(module: &Module) -> Option<Word> {
+    module.entry_points.first().and_then(|e| id_operand(e, 1))
+}
+
+/// Arrays of `sampler2D` become one combined-sampler variable per element,
+/// named `name[k]` as GL names them. GLSL ES 3.00 indexes sampler arrays with
+/// constant expressions only, which glslang folds to `OpConstant`, so every
+/// `OpAccessChain` on the array picks one element and is replaced by that
+/// element's variable. The result is plain `sampler2D` globals, which the
+/// sampler split, the reflection, and both back ends already handle (naga's
+/// split refused arrays, SPIRV-Cross needed array bindings the layout does
+/// not have). Runs before `assign_bindings`, so each element gets its own
+/// binding. Returns the number of arrays scalarized.
+pub fn scalarize_sampler_arrays(module: &mut Module) -> Result<usize, RewriteError> {
+    let names = names(module);
+    let mut arrays: Vec<(Word, Word, u32)> = Vec::new(); // (variable, element type, length)
+    for inst in &module.types_global_values {
+        if inst.class.opcode != Op::Variable || inst.operands.first() != Some(&Operand::StorageClass(StorageClass::UniformConstant)) {
+            continue;
+        }
+        let Some(pointee) = inst.result_type.and_then(|t| definition(module, t)).and_then(|p| id_operand(p, 1)) else { continue };
+        let Some(array) = definition(module, pointee).filter(|a| a.class.opcode == Op::TypeArray) else { continue };
+        let element = id_operand(array, 0).unwrap();
+        if definition(module, element).is_some_and(|e| e.class.opcode == Op::TypeSampledImage) {
+            let length = id_operand(array, 1).and_then(|l| constant_u32(module, l)).ok_or_else(|| RewriteError("sampler array without a constant length".into()))?;
+            arrays.push((inst.result_id.unwrap(), element, length));
+        }
+    }
+    for &(var, element, length) in &arrays {
+        let pointer = find_or_add_type(module, Op::TypePointer, vec![Operand::StorageClass(StorageClass::UniformConstant), Operand::IdRef(element)]);
+        let set = decoration_value(module, var, Decoration::DescriptorSet);
+        let base_name = names.get(&var).cloned().unwrap_or_else(|| format!("samplers{var}"));
+        let elements: Vec<Word> = (0..length).map(|_| fresh(module)).collect();
+        let position = module.types_global_values.iter().position(|i| i.result_id == Some(var)).unwrap();
+        for (k, &id) in elements.iter().enumerate() {
+            module.types_global_values.insert(position + 1 + k, Instruction::new(Op::Variable, Some(pointer), Some(id), vec![Operand::StorageClass(StorageClass::UniformConstant)]));
+            module.debug_names.push(Instruction::new(Op::Name, None, None, vec![Operand::IdRef(id), Operand::LiteralString(format!("{base_name}[{k}]"))]));
+            if let Some(set) = set {
+                module.annotations.push(Instruction::new(Op::Decorate, None, None, vec![Operand::IdRef(id), Operand::Decoration(Decoration::DescriptorSet), Operand::LiteralBit32(set)]));
+            }
+        }
+        // Element access chains → element variables.
+        let mut replace: HashMap<Word, Word> = HashMap::new();
+        for function in &module.functions {
+            for inst in function.blocks.iter().flat_map(|b| &b.instructions) {
+                if !inst.operands.contains(&Operand::IdRef(var)) {
+                    continue;
+                }
+                let chain = matches!(inst.class.opcode, Op::AccessChain | Op::InBoundsAccessChain) && id_operand(inst, 0) == Some(var) && inst.operands.len() == 2;
+                let index = if chain { id_operand(inst, 1).and_then(|i| constant_u32(module, i)) } else { None };
+                match index {
+                    Some(k) if k < length => {
+                        replace.insert(inst.result_id.unwrap(), elements[k as usize]);
+                    }
+                    _ => return Err(RewriteError(format!("sampler array `{base_name}` is used as a whole or with a non-constant index ({:?})", inst.class.opcode))),
+                }
+            }
+        }
+        for function in module.functions.iter_mut() {
+            for block in function.blocks.iter_mut() {
+                block.instructions.retain(|i| !i.result_id.is_some_and(|id| replace.contains_key(&id)));
+                for inst in block.instructions.iter_mut() {
+                    for op in inst.operands.iter_mut() {
+                        if let Operand::IdRef(r) = op {
+                            if let Some(new) = replace.get(r) {
+                                *r = *new;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let in_interface = module.entry_points.iter().any(|e| e.operands.contains(&Operand::IdRef(var)));
+        for entry in module.entry_points.iter_mut() {
+            entry.operands.retain(|op| *op != Operand::IdRef(var));
+            if in_interface {
+                entry.operands.extend(elements.iter().map(|&e| Operand::IdRef(e)));
+            }
+        }
+        module.types_global_values.retain(|i| i.result_id != Some(var));
+        module.debug_names.retain(|i| id_operand(i, 0) != Some(var));
+        module.annotations.retain(|i| id_operand(i, 0) != Some(var));
+    }
+    Ok(arrays.len())
+}
+
+/// Turn an interface variable (`Input` or `Output`) into a `Private` one,
+/// including the pointer types of access chains derived from it.
+fn make_private(module: &mut Module, var: Word) {
+    let types = result_types(module);
+    let pointee = |module: &Module, pointer: Word| definition(module, pointer).and_then(|p| id_operand(p, 1));
+    // Derived pointers, in instruction order (a chain's base precedes it).
+    let mut derived: HashSet<Word> = HashSet::from([var]);
+    let mut chains: Vec<Word> = Vec::new();
+    for inst in module.functions.iter().flat_map(|f| f.blocks.iter().flat_map(|b| &b.instructions)) {
+        if matches!(inst.class.opcode, Op::AccessChain | Op::InBoundsAccessChain) && id_operand(inst, 0).is_some_and(|b| derived.contains(&b)) {
+            derived.insert(inst.result_id.unwrap());
+            chains.push(inst.result_id.unwrap());
+        }
+    }
+    let mut new_type: HashMap<Word, Word> = HashMap::new();
+    for id in std::iter::once(var).chain(chains.iter().copied()) {
+        let old = types[&id];
+        let target = pointee(module, old).unwrap();
+        let private = find_or_add_type(module, Op::TypePointer, vec![Operand::StorageClass(StorageClass::Private), Operand::IdRef(target)]);
+        new_type.insert(id, private);
+    }
+    for inst in module.types_global_values.iter_mut() {
+        if inst.result_id == Some(var) {
+            inst.result_type = Some(new_type[&var]);
+            inst.operands[0] = Operand::StorageClass(StorageClass::Private);
+        }
+    }
+    for function in module.functions.iter_mut() {
+        for inst in function.blocks.iter_mut().flat_map(|b| b.instructions.iter_mut()) {
+            if let Some(t) = inst.result_id.and_then(|id| new_type.get(&id)) {
+                inst.result_type = Some(*t);
+            }
+        }
+    }
+    module.annotations.retain(|i| id_operand(i, 0) != Some(var));
+    for entry in module.entry_points.iter_mut() {
+        entry.operands.retain(|op| *op != Operand::IdRef(var));
+    }
+}
+
+/// What WebGL does with a fragment interface the engine's pipeline would
+/// otherwise reject (coverage sweep, `variables/*`, `qualifiers/*`):
+///
+/// * An input the vertex shader does not write and the program does not use
+///   (GL links it; glslang keeps it in the interface and Metal then refuses
+///   the pipeline) becomes a private variable.
+/// * `gl_FragDepth`: the compositor's targets have no depth attachment, so
+///   WebGL discards the write; it becomes a private variable (wgpu refuses a
+///   depth output without a depth target).
+/// * A `float`, `vec2`, or `vec3` output, or an array of float outputs: GL
+///   writes the missing channels as undefined, ANGLE on Metal writes 0
+///   (measured: `out vec3` gives alpha 0). wgpu needs a `vec4` output for an
+///   RGBA target, and naga cannot output arrays. The author's variable becomes
+///   private and every `return` from `main` copies it to `vec4` outputs at the
+///   same locations, padded with 0.
+///
+/// Integer outputs are left alone: WebGL refuses the draw into a float target,
+/// and wgpu refuses the pipeline. Returns notes for the report.
+pub fn fragment_interface(module: &mut Module, vertex_outputs: &[&str]) -> Vec<String> {
+    let names = names(module);
+    let mut notes = Vec::new();
+    let globals: Vec<(Word, StorageClass, Word)> = module
+        .types_global_values
+        .iter()
+        .filter(|i| i.class.opcode == Op::Variable)
+        .filter_map(|i| match i.operands.first() {
+            Some(Operand::StorageClass(c @ (StorageClass::Input | StorageClass::Output))) => Some((i.result_id?, *c, i.result_type?)),
+            _ => None,
+        })
+        .collect();
+    let builtin = |module: &Module, id: Word| decoration_value_any(module, id, Decoration::BuiltIn);
+    for &(var, class, pointer) in &globals {
+        let name = names.get(&var).cloned().unwrap_or_default();
+        if class == StorageClass::Input {
+            if builtin(module, var).is_none() && !vertex_outputs.contains(&name.as_str()) && !is_referenced_in_functions(module, var) {
+                make_private(module, var);
+                notes.push(format!("unused input `{name}` the vertex shader does not write"));
+            }
+            continue;
+        }
+        if builtin(module, var) == Some(rspirv::spirv::BuiltIn::FragDepth as u32) {
+            make_private(module, var);
+            module.execution_modes.retain(|m| !matches!(m.operands.get(1), Some(Operand::ExecutionMode(rspirv::spirv::ExecutionMode::DepthReplacing | rspirv::spirv::ExecutionMode::DepthGreater | rspirv::spirv::ExecutionMode::DepthLess | rspirv::spirv::ExecutionMode::DepthUnchanged))));
+            notes.push("gl_FragDepth (no depth target)".into());
+            continue;
+        }
+        let Some(location) = decoration_value(module, var, Decoration::Location) else { continue };
+        let Some(pointee) = definition(module, pointer).and_then(|p| id_operand(p, 1)) else { continue };
+        // Element type and count: a float scalar or vector, or an array of them.
+        let (element, count) = match definition(module, pointee).map(|d| (d.class.opcode, d.clone())) {
+            Some((Op::TypeArray, d)) => (id_operand(&d, 0).unwrap(), id_operand(&d, 1).and_then(|l| constant_u32(module, l)).unwrap_or(0)),
+            _ => (pointee, 0),
+        };
+        let float = float_type(module);
+        let width = match definition(module, element).map(|d| (d.class.opcode, d.clone())) {
+            Some((Op::TypeFloat, _)) => 1,
+            Some((Op::TypeVector, d)) if id_operand(&d, 0) == Some(float) => match d.operands.get(1) {
+                Some(Operand::LiteralBit32(n)) => *n,
+                _ => continue,
+            },
+            _ => continue,
+        };
+        if width == 4 && count == 0 {
+            continue;
+        }
+        let vec4 = find_or_add_type(module, Op::TypeVector, vec![Operand::IdRef(float), Operand::LiteralBit32(4)]);
+        let out_pointer = find_or_add_type(module, Op::TypePointer, vec![Operand::StorageClass(StorageClass::Output), Operand::IdRef(vec4)]);
+        let element_pointer = find_or_add_type(module, Op::TypePointer, vec![Operand::StorageClass(StorageClass::Private), Operand::IdRef(element)]);
+        let zero = find_or_add_constant(module, Op::Constant, float, vec![Operand::LiteralBit32(0)]);
+        let int = find_or_add_type(module, Op::TypeInt, vec![Operand::LiteralBit32(32), Operand::LiteralBit32(1)]);
+        make_private(module, var);
+        let slots: Vec<Option<u32>> = if count == 0 { vec![None] } else { (0..count).map(Some).collect() };
+        let mut outputs = Vec::new();
+        for (k, slot) in slots.iter().enumerate() {
+            let id = fresh(module);
+            let position = after_dependencies(module, &[Operand::IdRef(out_pointer)]).max(module.types_global_values.iter().position(|i| i.result_id == Some(var)).unwrap() + 1);
+            module.types_global_values.insert(position, Instruction::new(Op::Variable, Some(out_pointer), Some(id), vec![Operand::StorageClass(StorageClass::Output)]));
+            module.annotations.push(Instruction::new(Op::Decorate, None, None, vec![Operand::IdRef(id), Operand::Decoration(Decoration::Location), Operand::LiteralBit32(location + k as u32)]));
+            module.debug_names.push(Instruction::new(Op::Name, None, None, vec![Operand::IdRef(id), Operand::LiteralString(format!("{name}_out{k}"))]));
+            for entry in module.entry_points.iter_mut() {
+                entry.operands.push(Operand::IdRef(id));
+            }
+            let index = slot.map(|k| find_or_add_constant(module, Op::Constant, int, vec![Operand::LiteralBit32(k)]));
+            outputs.push((id, index));
+        }
+        let entry = entry_function(module);
+        let Some(fi) = module.functions.iter().position(|f| f.def.as_ref().and_then(|d| d.result_id) == entry) else { continue };
+        let returns: Vec<usize> = module.functions[fi].blocks.iter().enumerate().filter(|(_, b)| b.instructions.last().is_some_and(|i| i.class.opcode == Op::Return)).map(|(k, _)| k).collect();
+        for bi in returns {
+            let mut copy = Vec::new();
+            for &(output, index) in &outputs {
+                let source = match index {
+                    Some(index) => {
+                        let id = fresh(module);
+                        copy.push(Instruction::new(Op::AccessChain, Some(element_pointer), Some(id), vec![Operand::IdRef(var), Operand::IdRef(index)]));
+                        id
+                    }
+                    None => var,
+                };
+                let value = fresh(module);
+                copy.push(Instruction::new(Op::Load, Some(element), Some(value), vec![Operand::IdRef(source)]));
+                let widened = if width == 4 {
+                    value
+                } else {
+                    let id = fresh(module);
+                    let mut parts = vec![Operand::IdRef(value)];
+                    parts.extend(std::iter::repeat_n(Operand::IdRef(zero), (4 - width) as usize));
+                    copy.push(Instruction::new(Op::CompositeConstruct, Some(vec4), Some(id), parts));
+                    id
+                };
+                copy.push(Instruction::new(Op::Store, None, None, vec![Operand::IdRef(output), Operand::IdRef(widened)]));
+            }
+            let block = &mut module.functions[fi].blocks[bi];
+            let at = block.instructions.len() - 1;
+            block.instructions.splice(at..at, copy);
+        }
+        notes.push(format!("output `{name}` widened to vec4"));
+    }
+    notes
+}
+
+/// `decoration_value` for decorations whose value is an enum (`BuiltIn`).
+fn decoration_value_any(module: &Module, target: Word, decoration: Decoration) -> Option<u32> {
+    module.annotations.iter().find_map(|inst| {
+        if inst.class.opcode != Op::Decorate || id_operand(inst, 0) != Some(target) || inst.operands.get(1) != Some(&Operand::Decoration(decoration)) {
+            return None;
+        }
+        match inst.operands.get(2) {
+            Some(Operand::BuiltIn(b)) => Some(*b as u32),
+            Some(Operand::LiteralBit32(v)) => Some(*v),
+            _ => None,
+        }
+    })
+}
+
+/// GLSL's `%` on signed integers: glslang emits `OpSMod` (result takes the
+/// divisor's sign). GLSL ES leaves negative operands undefined; ANGLE emits
+/// MSL's `%`, which is `OpSRem` (the dividend's sign). Rewriting to `OpSRem`
+/// matches WebGL on both paths, and naga's front end lowers `OpSMod` through
+/// `floor`, which its validator then refuses on integers
+/// (`BuiltinArgumentsInvalid("Floor")`; coverage sweep, `operators/*`).
+pub fn signed_remainder(module: &mut Module) -> usize {
+    let mut n = 0;
+    for inst in module.functions.iter_mut().flat_map(|f| f.blocks.iter_mut().flat_map(|b| b.instructions.iter_mut())) {
+        if inst.class.opcode == Op::SMod {
+            *inst = Instruction::new(Op::SRem, inst.result_type, inst.result_id, inst.operands.clone());
+            n += 1;
+        }
+    }
+    n
+}
+
+/// SPIR-V that is valid but outside what naga's front end or validator take
+/// (naga path only; coverage sweep):
+///
+/// * `OpSNegate` on `uint` (GLSL `-u`): naga refuses `Negate` on unsigned
+///   types; `0 - u` has the same wrapping result.
+/// * `OpImageFetch` with `ConstOffset` (`texelFetchOffset`): naga's front end
+///   drops the offset; it is added to the coordinate instead (the same texel,
+///   since the fetch has no wrapping).
+/// * `MatrixStride` 16 on matrices with 2-component columns (`mat2`,
+///   `mat3x2`, `mat4x2` uniforms, std140): naga only takes the stride of its
+///   own layout (8) and refuses the module (`UnsupportedMatrixStride`). The
+///   stride becomes 8 and the member keeps its offset, so later members do not
+///   move; the reflection reads the new stride when filling the block.
+pub fn naga_compat(module: &mut Module) -> Vec<String> {
+    let mut notes = Vec::new();
+    let types = result_types(module);
+    let unsigned = |module: &Module, ty: Word| {
+        let scalar = match definition(module, ty) {
+            Some(d) if d.class.opcode == Op::TypeVector => id_operand(d, 0).and_then(|s| definition(module, s)),
+            other => other,
+        };
+        scalar.is_some_and(|s| s.class.opcode == Op::TypeInt && s.operands.get(1) == Some(&Operand::LiteralBit32(0)))
+    };
+    // OpSNegate on unsigned.
+    let negates: Vec<Word> = module.functions.iter().flat_map(|f| f.blocks.iter().flat_map(|b| &b.instructions)).filter(|i| i.class.opcode == Op::SNegate && i.result_type.is_some_and(|t| unsigned(module, t))).map(|i| i.result_type.unwrap()).collect();
+    let nulls: HashMap<Word, Word> = negates.iter().map(|&t| (t, find_or_add_constant(module, Op::ConstantNull, t, vec![]))).collect();
+    let mut negated = 0;
+    for inst in module.functions.iter_mut().flat_map(|f| f.blocks.iter_mut().flat_map(|b| b.instructions.iter_mut())) {
+        if inst.class.opcode == Op::SNegate {
+            if let Some(&null) = inst.result_type.and_then(|t| nulls.get(&t)) {
+                let x = inst.operands[0].clone();
+                *inst = Instruction::new(Op::ISub, inst.result_type, inst.result_id, vec![Operand::IdRef(null), x]);
+                negated += 1;
+            }
+        }
+    }
+    if negated > 0 {
+        notes.push(format!("uint negation ({negated})"));
+    }
+    // OpImageFetch with ConstOffset.
+    let mut fetches = 0;
+    for fi in 0..module.functions.len() {
+        for bi in 0..module.functions[fi].blocks.len() {
+            let mut k = 0;
+            while k < module.functions[fi].blocks[bi].instructions.len() {
+                let inst = &module.functions[fi].blocks[bi].instructions[k];
+                let Some(Operand::ImageOperands(mask)) = inst.operands.get(2).cloned() else {
+                    k += 1;
+                    continue;
+                };
+                use rspirv::spirv::ImageOperands as M;
+                if inst.class.opcode != Op::ImageFetch || !mask.contains(M::CONST_OFFSET) {
+                    k += 1;
+                    continue;
+                }
+                // Ids after the mask come in bit order; Grad takes two.
+                let mut at = 3;
+                for (bit, ids) in [(M::BIAS, 1), (M::LOD, 1), (M::GRAD, 2)] {
+                    if mask.contains(bit) {
+                        at += ids;
+                    }
+                }
+                let coordinate = id_operand(inst, 1).unwrap();
+                let offset = id_operand(inst, at).unwrap();
+                let coordinate_type = types[&coordinate];
+                let mut fetch = inst.clone();
+                fetch.operands.remove(at);
+                fetch.operands[2] = Operand::ImageOperands(mask.difference(M::CONST_OFFSET));
+                let sum = fresh(module);
+                fetch.operands[1] = Operand::IdRef(sum);
+                let add = Instruction::new(Op::IAdd, Some(coordinate_type), Some(sum), vec![Operand::IdRef(coordinate), Operand::IdRef(offset)]);
+                let block = &mut module.functions[fi].blocks[bi];
+                block.instructions.splice(k..=k, [add, fetch]);
+                fetches += 1;
+                k += 2;
+            }
+        }
+    }
+    if fetches > 0 {
+        notes.push(format!("texelFetchOffset ({fetches})"));
+    }
+    // MatrixStride of 2-row matrices.
+    let two_row_matrix = |module: &Module, mut ty: Word| {
+        while let Some(d) = definition(module, ty).filter(|d| d.class.opcode == Op::TypeArray) {
+            ty = id_operand(d, 0).unwrap();
+        }
+        definition(module, ty).filter(|d| d.class.opcode == Op::TypeMatrix).and_then(|d| id_operand(d, 0)).and_then(|c| definition(module, c)).is_some_and(|c| c.operands.get(1) == Some(&Operand::LiteralBit32(2)))
+    };
+    let member_type = |module: &Module, structure: Word, member: u32| definition(module, structure).and_then(|d| id_operand(d, member as usize));
+    let targets: Vec<usize> = module
+        .annotations
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| i.class.opcode == Op::MemberDecorate && i.operands.get(2) == Some(&Operand::Decoration(Decoration::MatrixStride)) && i.operands.get(3) == Some(&Operand::LiteralBit32(16)))
+        .filter(|(_, i)| match (id_operand(i, 0), i.operands.get(1)) {
+            (Some(s), Some(Operand::LiteralBit32(m))) => member_type(module, s, *m).is_some_and(|t| two_row_matrix(module, t)),
+            _ => false,
+        })
+        .map(|(k, _)| k)
+        .collect();
+    for &k in &targets {
+        module.annotations[k].operands[3] = Operand::LiteralBit32(8);
+    }
+    if !targets.is_empty() {
+        notes.push(format!("2-row matrix stride ({})", targets.len()));
+    }
+    notes
 }
 
 #[cfg(test)]

@@ -268,7 +268,11 @@ impl Gpu {
             label: Some(label),
             layout: Some(&layout),
             vertex: wgpu::VertexState { module: &vertex_module, entry_point: Some(&translated.vertex.entry_point), compilation_options: Default::default(), buffers: &[] },
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, cull_mode: None, ..Default::default() },
+            // The vertex output is flipped to keep GL row order (S3.md,
+            // "Origin"), which reverses the winding: clockwise is GL's
+            // counter-clockwise, so `gl_FrontFacing` matches WebGL (false for
+            // the compositor's quad; coverage sweep, `variables/gl_FrontFacing`).
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, front_face: wgpu::FrontFace::Cw, cull_mode: None, ..Default::default() },
             depth_stencil: None,
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
@@ -362,7 +366,11 @@ impl Gpu {
             unit_views.insert(unit.unit, view);
         }
         // Sampler uniforms default to unit 0; `setI(name, unit)` moves them.
-        let unit_of = |name: &str| -> u32 { pass.calls.iter().rev().find(|c| c.name == name && c.func == "1i").map_or(0, |c| c.v[0] as u32) };
+        // GL also sets element 0 of a sampler array through the array's name.
+        let unit_of = |name: &str| -> u32 {
+            let base = name.strip_suffix("[0]");
+            pass.calls.iter().rev().find(|c| (c.name == name || Some(c.name.as_str()) == base) && c.func == "1i").map_or(0, |c| c.v[0] as u32)
+        };
         let mut entries: Vec<wgpu::BindGroupEntry> = Vec::new();
         let views: Vec<wgpu::TextureView> = program.samplers.iter().map(|(name, _)| unit_views.get(&unit_of(name)).cloned().unwrap_or_else(|| self.dummy.clone())).collect();
         if let (Some(block), Some(buffer)) = (&program.fragment_block, &fragment_buffer) {
