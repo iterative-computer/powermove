@@ -4,6 +4,7 @@
 //!   s7-blender-check batch <scene-tag-dir>        batched vs per-layer invocation equality
 //!   s7-blender-check orient <blender.png> <three.png>   appendix A item 39 (texture orientation)
 //!   s7-blender-check ortho <blender-dir> <three-ref-dir> <layer ...>   item 38 (ortho framing)
+//!   s7-blender-check diff <a.png> <b.png>         pixel difference of two surfaces
 use anyhow::{Context, Result, bail};
 use s7_blender::{Surface16, read};
 use serde_json::{Value, json};
@@ -16,6 +17,11 @@ fn main() -> Result<()> {
         Some("batch") => batch(Path::new(&a[1]))?,
         Some("orient") => orient(&read(Path::new(&a[1]))?, &read(Path::new(&a[2]))?)?,
         Some("ortho") => ortho(Path::new(&a[1]), Path::new(&a[2]), &a[3..])?,
+        Some("diff") => {
+            let (x, y) = (read(Path::new(&a[1]))?, read(Path::new(&a[2]))?);
+            let (differ, max) = compare(&x, &y);
+            json!({ "channel_values_differ": differ, "max_code_diff": max })
+        }
         _ => bail!("usage: s7-blender-check agx|batch|orient|ortho ..."),
     };
     println!("{}", serde_json::to_string_pretty(&out)?);

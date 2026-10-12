@@ -9,7 +9,7 @@
 //
 //   bun blender/run.ts [--blender /Applications/Blender.app/Contents/MacOS/Blender]
 //                      [--variant pinned|today] [--engine eevee|cycles] [--samples N]
-//                      [--no-single] scene ...
+//                      [--device cpu|auto|gpu] [--no-single] scene ...
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join, dirname, extname } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -22,6 +22,7 @@ const blender = flag('--blender', '/Applications/Blender.app/Contents/MacOS/Blen
 const variant = flag('--variant', 'pinned');
 const engine = flag('--engine', 'eevee');
 const samples = Number(flag('--samples', '16'));
+const device = flag('--device', 'cpu');
 const single = !args.includes('--no-single');
 const scenes = args.filter(a => !a.startsWith('--'));
 
@@ -59,7 +60,7 @@ const page = await browser.newPage();
 await page.goto(`http://localhost:${server.port}/`);
 await page.waitForFunction(() => (globalThis as any).S7);
 const snapshots: Record<string, any> = {};
-for (const id of scenes) snapshots[id] = await page.evaluate(([id, s]: [string, any]) => (globalThis as any).S7.blenderSnapshot(id, s), [id, { engine, samples, denoise: false, device: 'cpu' }]);
+for (const id of scenes) snapshots[id] = await page.evaluate(([id, s]: [string, any]) => (globalThis as any).S7.blenderSnapshot(id, s), [id, { engine, samples, denoise: false, device }]);
 await browser.close();
 server.stop(true);
 
@@ -88,7 +89,7 @@ class Worker {
   close() { this.proc.stdin.end(); }
 }
 
-const tag = `${variant}-${engine}${engine === 'cycles' ? samples : ''}`;
+const tag = `${variant}-${engine}${engine === 'cycles' ? samples + (device === 'cpu' ? '' : '-' + device) : ''}`;
 const results: any[] = [];
 for (const id of scenes) {
   const { snapshot, assets } = snapshots[id];
