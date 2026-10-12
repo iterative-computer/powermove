@@ -104,7 +104,7 @@ export async function launchLegacyApp(options: LaunchOptions = {}): Promise<Lega
     POWERMOVE_BACKGROUND_TEST: '1',
   };
   delete env.ELECTRON_RUN_AS_NODE;
-  let closed = false;
+  let closed = false, electronPid: number | undefined;
   const legacy: LegacyApp = {
     userData, pageErrors, consoleErrors,
     evaluate: (fn, arg) => bridge.request('evaluate', { source: fn.toString(), arg }),
@@ -115,14 +115,21 @@ export async function launchLegacyApp(options: LaunchOptions = {}): Promise<Lega
     async close() {
       if (closed) return;
       closed = true;
-      if (!bridge.exited) await bridge.request('close', { exit: true }).catch(() => undefined);
-      await Promise.race([bridge.process.exited, Bun.sleep(15_000)]);
-      if (!bridge.exited) bridge.process.kill();
+      // The bridge force-kills Electron after 20 s; this outer limit covers a wedged bridge.
+      let confirmed = false;
+      if (!bridge.exited) {
+        const result = await Promise.race([bridge.request<{ forced: boolean } | null>('close', { exit: true, timeout: 20_000 }).catch(() => undefined), Bun.sleep(40_000)]);
+        confirmed = !!result || result === null;
+      }
+      await Promise.race([bridge.process.exited, Bun.sleep(5_000)]);
+      if (!bridge.exited) bridge.process.kill('SIGKILL');
+      // Without the bridge's confirmation Electron may still be running (a wedged or crashed bridge).
+      if (!confirmed && electronPid) { try { process.kill(electronPid, 'SIGKILL'); } catch { /* already gone */ } }
       await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     },
   };
   try {
-    await bridge.request('launch', { env, timeout: 120_000 });
+    ({ pid: electronPid } = await bridge.request<{ pid?: number }>('launch', { env, timeout: 120_000 }));
     await legacy.waitFor(() => Boolean((window as any).PM?.ProjectsScreen && (window as any).PM?.mkProject), undefined, 60_000);
     await legacy.evaluate(async () => { await (window as any).PM.Kernel.loader.builtinsReady; });
     // Leave the Projects home for an editor composition, as the e2e helper's openEditor does.

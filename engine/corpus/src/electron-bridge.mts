@@ -65,7 +65,7 @@ async function launch(args: Record<string, unknown>): Promise<unknown> {
   instrument(page);
   await page.waitForURL((url: URL) => url.protocol === 'app:' || url.hostname === 'localhost');
   await page.waitForLoadState('domcontentloaded');
-  return { url: page.url() };
+  return { url: page.url(), pid: app.process().pid };
 }
 
 async function handle(request: Request): Promise<unknown> {
@@ -96,13 +96,28 @@ async function handle(request: Request): Promise<unknown> {
       return null;
     }
     case 'close': {
-      const current = app;
+      const current = app, currentPage = page;
       app = null; page = null;
-      if (current) {
-        await current.evaluate(({ dialog }: any) => { dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false }); }).catch(() => undefined);
-        await current.close().catch(() => undefined);
+      if (!current) return null;
+      // The profile is disposable: skip the editor's close decision (an unsaved opened
+      // file asks through an in-window sheet nobody can answer) and its save.
+      await currentPage?.evaluate('window.PM && (window.PM.prepareToClose = () => true)').catch(() => undefined);
+      await current.evaluate(({ dialog }: any) => { dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false }); }).catch(() => undefined);
+      const child = current.process();
+      const exited = new Promise<boolean>(resolve => {
+        if (child.exitCode !== null || child.signalCode !== null) resolve(true);
+        else child.once('exit', () => resolve(true));
+      });
+      const closed = await Promise.race([
+        current.close().then(() => true, () => false),
+        new Promise<boolean>(resolve => setTimeout(() => resolve(false), Number(args.timeout) || 20_000)),
+      ]);
+      if (!closed) {
+        void send({ event: 'console-error', text: 'The app did not close in time; killing Electron' });
+        child.kill('SIGKILL');
+        await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5000))]);
       }
-      return null;
+      return { forced: !closed };
     }
     default: throw new Error(`Unknown bridge operation ${op}`);
   }
@@ -117,7 +132,8 @@ process.on('message', (request: Request) => {
 process.on('disconnect', () => {
   const current = app;
   app = null;
-  if (current) current.close().catch(() => undefined).finally(() => process.exit(0));
-  else process.exit(0);
+  if (!current) process.exit(0);
+  const timer = setTimeout(() => { current.process().kill('SIGKILL'); process.exit(0); }, 10_000);
+  current.close().catch(() => undefined).finally(() => { clearTimeout(timer); process.exit(0); });
 });
 void send({ event: 'ready' });
