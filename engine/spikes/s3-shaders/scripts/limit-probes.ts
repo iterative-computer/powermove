@@ -65,7 +65,9 @@ for (const n of [4, 5]) {
 
 // Expression complexity (AST depth 256), nesting, chains.
 for (const d of [120, 126]) add(`expression-chain-${d}`, `void main(){ float f = u_res.x${' + u_res.y * (u_res.x'.repeat(d)}${')'.repeat(d)}; o = vec4(f); }\n`);
-for (const n of [200, 254, 1000, 100000]) add(`add-chain-${n}`, `void main(){ float f = u_res.x${' + u_res.y'.repeat(n)}; o = vec4(f); }\n`);
+for (const n of [200, 230, 240, 245, 250, 252, 254, 1000, 100000]) add(`add-chain-${n}`, `void main(){ float f = u_res.x${' + u_res.y'.repeat(n)}; o = vec4(f); }\n`);
+for (const n of [120, 200, 250]) add(`nested-mix-${n}`, `void main(){ float f = ${'mix(u_res.y, '.repeat(n)}u_res.x${', 0.5)'.repeat(n)}; o = vec4(f); }\n`);
+for (const n of [120, 200, 250]) add(`nested-ternary-${n}`, `void main(){ float f = ${'u_res.x > 0.5 ? u_res.y : ('.repeat(n)}u_res.x${')'.repeat(n)}; o = vec4(f); }\n`);
 for (const n of [1000, 100000]) add(`swizzle-chain-${n}`, `void main(){ vec4 v = vec4(u_res, 1.0, 1.0); o = v${'.wzyx'.repeat(n)}; }\n`);
 for (const d of [1000, 20000]) add(`nested-parens-${d}`, `void main(){ float f = ${'('.repeat(d)}u_res.x${')'.repeat(d)}; o = vec4(f); }\n`);
 add('nested-blocks-10000', `void main(){ ${'{'.repeat(10000)} o = vec4(1.0); ${'}'.repeat(10000)} }\n`);

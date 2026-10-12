@@ -9,7 +9,7 @@
  *   engine-abnormal                      crash or timeout in the engine
  *   webgl-no-answer                      WebGL hung or lost its context
  *
- * Usage: bun scripts/compile-parity.ts --dir work/fuzz/probes [--engine <jsonl>] [--angle metal] [--list]
+ * Usage: bun scripts/compile-parity.ts --dir work/fuzz/probes [--engine <jsonl>] [--oracle webgl-metal|webgl-metal-draw] [--list]
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -19,7 +19,7 @@ const args = process.argv.slice(2);
 const opt = (name: string, fallback: string) => (args.includes(name) ? args[args.indexOf(name) + 1]! : fallback);
 const dir = join(SPIKE, opt('--dir', 'work/fuzz/probes'));
 const enginePath = args.includes('--engine') ? join(SPIKE, opt('--engine', '')) : join(dir, 'engine.jsonl');
-const webgl = JSON.parse(readFileSync(join(dir, `webgl-${opt('--angle', 'metal')}.json`), 'utf8')).results as Record<string, { linked: boolean | null; log?: string; ms: number; outcome?: string }>;
+const webgl = JSON.parse(readFileSync(join(dir, `${opt('--oracle', 'webgl-metal')}.json`), 'utf8')).results as Record<string, { linked: boolean | null; log?: string; ms: number; outcome?: string }>;
 const engine = readFileSync(enginePath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
 const name = (i: number) => (existsSync(join(dir, `${i}.name`)) ? readFileSync(join(dir, `${i}.name`), 'utf8') : '');

@@ -228,7 +228,7 @@ fn max_rss_mb() -> f64 {
 
 fn outcome_of(vertex: &str, source: &str, line_offset: u32, path: Path, gpu: Option<&crate::render::Gpu>) -> (String, String) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match pipeline::translate(vertex, source, line_offset, path) {
-        Err(f) => (format!("reject:{}", f.stage), f.message.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().chars().take(200).collect()),
+        Err(f) => (format!("reject:{}", f.stage), f.message.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().chars().take(400).collect()),
         Ok(translated) => {
             if path == Path::Naga {
                 // wgpu runs naga's MSL writer at pipeline creation.
@@ -248,7 +248,7 @@ fn outcome_of(vertex: &str, source: &str, line_offset: u32, path: Path, gpu: Opt
             // runs out of process in MTLCompilerService).
             if let Some(gpu) = gpu {
                 if let Err(f) = gpu.build(translated, path, "fuzz") {
-                    return (format!("reject:{}", f.stage), f.message.chars().take(200).collect());
+                    return (format!("reject:{}", f.stage), f.message.replace('\n', " ").chars().take(600).collect());
                 }
             }
             ("ok".into(), String::new())

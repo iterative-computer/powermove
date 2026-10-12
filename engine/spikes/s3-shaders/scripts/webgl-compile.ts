@@ -8,9 +8,14 @@
  * Each program gets a deadline; a hang closes the browser and the run
  * continues in a fresh one. Nothing is drawn.
  *
- * Usage: bun scripts/webgl-compile.ts --dir work/fuzz/mutants-seed1 [--angle metal|swiftshader] [--deadline 20]
+ * Usage: bun scripts/webgl-compile.ts --dir work/fuzz/mutants-seed1 [--angle metal|swiftshader] [--deadline 20] [--draw]
+ *
+ * --draw also draws one 1x1 point after linking, which makes ANGLE build the
+ * Metal pipeline (link alone may not). Programs whose name starts with
+ * `loop-` are never drawn: they are meant to run for seconds on the GPU.
  * Output: <dir>/webgl-<angle>.json
  */
+import { existsSync, readFileSync } from 'node:fs';
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -22,6 +27,7 @@ const opt = (name: string, fallback: string) => (args.includes(name) ? args[args
 const dir = join(SPIKE, opt('--dir', 'work/fuzz/mutants-seed1'));
 const angle = opt('--angle', 'metal');
 const deadline = Number(opt('--deadline', '20')) * 1000;
+const draw = args.includes('--draw');
 const vertex: string = JSON.parse(await readFile(join(SPIKE, 'work', 'corpus.json'), 'utf8')).vertex;
 const files = (await readdir(dir)).filter((f) => f.endsWith('.frag')).sort((a, b) => parseInt(a) - parseInt(b));
 const launchArgs = angle === 'swiftshader' ? ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] : ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'];
@@ -41,11 +47,11 @@ async function open() {
 
 const results: Record<string, { linked: boolean | null; log?: string; lost?: boolean; ms: number; outcome?: string }> = {};
 await open();
-async function attempt(source: string) {
+async function attempt(source: string, drawIt: boolean) {
   const started = performance.now();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), deadline); });
-  const work = page.evaluate(({ vertex, source }: { vertex: string; source: string }) => {
+  const work = page.evaluate(({ vertex, source, drawIt }: { vertex: string; source: string; drawIt: boolean }) => {
     const gl: WebGL2RenderingContext = (window as any).gl;
     if (gl.isContextLost()) return { linked: null, log: 'context lost before compiling' };
     const make = (type: number, text: string) => { const s = gl.createShader(type)!; gl.shaderSource(s, text); gl.compileShader(s); return s; };
@@ -54,9 +60,22 @@ async function attempt(source: string) {
     gl.attachShader(p, v); gl.attachShader(p, f); gl.linkProgram(p);
     const linked = !!gl.getProgramParameter(p, gl.LINK_STATUS);
     const log = linked ? '' : ((gl.getShaderInfoLog(f) || '') + (gl.getProgramInfoLog(p) || '')).slice(0, 400);
+    let drawError = 0;
+    if (linked && drawIt) {
+      // One pixel through a framebuffer: forces pipeline creation.
+      const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      const fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      gl.viewport(0, 0, 1, 1); gl.useProgram(p);
+      gl.drawArrays(gl.POINTS, 0, 1);
+      const px = new Uint8Array(4); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      drawError = gl.getError();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.deleteFramebuffer(fb); gl.deleteTexture(tex);
+    }
     gl.deleteProgram(p); gl.deleteShader(v); gl.deleteShader(f);
-    return { linked, log, lost: gl.isContextLost() };
-  }, { vertex, source }).catch((error: unknown) => ({ linked: null, log: `page error: ${String(error).slice(0, 200)}` }));
+    return { linked, log, lost: gl.isContextLost(), ...(drawIt ? { drawError } : {}) };
+  }, { vertex, source, drawIt }).catch((error: unknown) => ({ linked: null, log: `page error: ${String(error).slice(0, 200)}` }));
   const result = await Promise.race([work, timeout]);
   clearTimeout(timer);
   return { result, ms: performance.now() - started };
@@ -65,13 +84,14 @@ async function attempt(source: string) {
 for (const file of files) {
   const index = parseInt(file);
   const source = await readFile(join(dir, file), 'utf8');
-  let { result, ms } = await attempt(source);
+  const drawIt = draw && !(existsSync(join(dir, `${index}.name`)) && readFileSync(join(dir, `${index}.name`), 'utf8').startsWith('loop-'));
+  let { result, ms } = await attempt(source, drawIt);
   // A previous program can take the GPU process down; the context comes back
   // lost. Retry once in a fresh browser so the answer belongs to this program.
   if (result !== 'timeout' && result.linked === null) {
     await browser.close().catch(() => {});
     await open();
-    ({ result, ms } = await attempt(source));
+    ({ result, ms } = await attempt(source, drawIt));
   }
   if (result === 'timeout') {
     results[index] = { linked: null, ms, outcome: 'timeout' };
@@ -81,6 +101,6 @@ for (const file of files) {
   if (result === 'timeout' || result.linked === null || result.lost) { await browser.close().catch(() => {}); await open(); }
 }
 await browser.close();
-await writeFile(join(dir, `webgl-${angle}.json`), JSON.stringify({ renderer, angle, results }, null, 1));
+await writeFile(join(dir, `webgl-${angle}${draw ? '-draw' : ''}.json`), JSON.stringify({ renderer, angle, results }, null, 1));
 const linked = Object.values(results).filter((r) => r.linked === true).length;
 console.log(`${files.length} programs: ${linked} linked, ${Object.values(results).filter((r) => r.linked === false).length} rejected, ${Object.values(results).filter((r) => r.linked === null).length} no answer (${renderer})`);
