@@ -157,7 +157,6 @@ struct ProgramGpu {
     program: s7_glsl::Program,
     vertex: wgpu::ShaderModule,
     fragment: wgpu::ShaderModule,
-    overridden: bool,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1459,7 +1458,7 @@ impl Replayer {
                 let vertex = module(&program.vertex, "three vs");
                 let fragment = module(&program.fragment, "three fs");
                 p.block = vec![0u8; program.block_size as usize];
-                p.compiled = Some(std::rc::Rc::new(ProgramGpu { program, vertex, fragment, overridden }));
+                p.compiled = Some(std::rc::Rc::new(ProgramGpu { program, vertex, fragment }));
             }
             Err(e) => {
                 let name = fs.lines().find(|l| l.starts_with("#define SHADER_TYPE") || l.starts_with("#define SHADER_NAME")).unwrap_or("").to_string();

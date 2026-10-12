@@ -332,8 +332,9 @@ fn mat4_from_cols(m: &[f64]) -> DMat4 {
 
 /// Decodes a GLB (or a self-contained glTF JSON with data URIs) into a [`Model`].
 pub fn load(bytes: &[u8], options: LoadOptions) -> Result<Model> {
+    // The gltf crate parses the GLB container and the document schema (without its
+    // extension validation, which rejects extensions three.js r180 supports).
     let gltf::Gltf { document, blob } = gltf::Gltf::from_slice_without_validation(bytes).map_err(|e| Error(format!("glTF: {e}")))?;
-    let json: Value = serde_json::to_value(document.as_json()).map_err(|e| Error(format!("glTF JSON: {e}")))?;
     // Raw JSON for extensions (the `gltf` crate keeps unknown ones only as `others`).
     let raw: Value = if bytes.starts_with(b"glTF") {
         let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
@@ -341,7 +342,9 @@ pub fn load(bytes: &[u8], options: LoadOptions) -> Result<Model> {
     } else {
         serde_json::from_slice(bytes).map_err(|e| Error(format!("glTF JSON: {e}")))?
     };
-    let _ = json;
+    if document.nodes().len() != raw["nodes"].as_array().map_or(0, |a| a.len()) {
+        return err("glTF node count mismatch");
+    }
     let used: Vec<String> = raw["extensionsUsed"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
     for required in raw["extensionsRequired"].as_array().into_iter().flatten() {
         let name = required.as_str().unwrap_or("");
