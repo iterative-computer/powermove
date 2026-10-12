@@ -30,7 +30,8 @@
 //!
 //! Usage: `s8-run [--seconds 60] [--only a,b,c] [--out results/<dir>] [--list]
 //!         [--max-external-pct 10] [--quiet-wait-s 900] [--retries 2] [--blender PATH]
-//!         [--control-s 20]`
+//!         [--control-s 20]`; `s8-run --reattribute results/<dir>` recomputes the
+//!         late-frame attribution of finished scenarios from their raw logs.
 
 use s8_contention::{Args, display, signal, stats};
 use serde_json::{Value, json};
@@ -970,9 +971,12 @@ fn overlap(spans: &[(f64, f64)], a: f64, b: f64) -> f64 {
 
 /// Attribute A's late frames: for each frame that missed the one-frame deadline, how
 /// much of its GPU start delay (submit to first GPU work) and of its GPU execution B's
-/// command buffers covered, and whether B was inside a yield window at submit. A late
-/// frame whose delay B did not cover was held up by something else (the encoder,
-/// WindowServer, other apps, or A's own backlog, which `prev_late` marks).
+/// command buffers covered, and whether B was inside a yield window at submit. Classes:
+/// `backlog` (A's previous frame was still on the GPU at submit), `b-start` (the start
+/// delay exceeded 1 ms and B's command buffers covered at least half of it),
+/// `b-concurrent` (A started promptly but ran alongside B for at least half of its
+/// execution and was slowed), and `other` (B was mostly idle: the encoder, WindowServer,
+/// other apps, or A's CPU side).
 fn attribute(a_raw: &std::path::Path, b_raw: &std::path::Path, period_ns: f64) -> Value {
     let read = |p: &std::path::Path| -> Vec<Value> {
         std::fs::read_to_string(p)
@@ -997,7 +1001,8 @@ fn attribute(a_raw: &std::path::Path, b_raw: &std::path::Path, period_ns: f64) -
     let f = |v: &Value, k: &str| v[k].as_f64();
     let mut rows = Vec::new();
     let mut prev_end = 0.0f64;
-    let (mut late, mut b_delay, mut backlog, mut other, mut skipped) = (0, 0, 0, 0, 0);
+    let (mut late, mut b_delay, mut b_conc, mut backlog, mut other, mut skipped) = (0, 0, 0, 0, 0, 0);
+    let mut in_yield_n = 0;
     let mut b_share_all = Vec::new();
     for v in &a {
         let Some(tick) = f(v, "tick_ns") else { continue };
@@ -1025,12 +1030,19 @@ fn attribute(a_raw: &std::path::Path, b_raw: &std::path::Path, period_ns: f64) -
         }
         late += 1;
         let in_yield = yields.iter().any(|&(y0, y1)| submit >= y0 && submit < y1);
+        if in_yield {
+            in_yield_n += 1;
+        }
+        let b_in_exec = overlap(&cbs, begin, end);
         let class = if behind_self {
             backlog += 1;
             "backlog"
         } else if delay > 1e6 && b_in_delay >= 0.5 * delay {
             b_delay += 1;
-            "b"
+            "b-start"
+        } else if b_in_exec >= 0.5 * (end - begin) {
+            b_conc += 1;
+            "b-concurrent"
         } else {
             other += 1;
             "other"
@@ -1043,7 +1055,7 @@ fn attribute(a_raw: &std::path::Path, b_raw: &std::path::Path, period_ns: f64) -
                 "start_delay_ms": stats::r(delay / 1e6, 2),
                 "b_in_delay_ms": stats::r(b_in_delay / 1e6, 2),
                 "exec_ms": stats::r((end - begin) / 1e6, 2),
-                "b_in_exec_ms": stats::r(overlap(&cbs, begin, end) / 1e6, 2),
+                "b_in_exec_ms": stats::r(b_in_exec / 1e6, 2),
                 "b_in_yield": in_yield,
             }));
         }
@@ -1052,8 +1064,10 @@ fn attribute(a_raw: &std::path::Path, b_raw: &std::path::Path, period_ns: f64) -
         "late_frames": late,
         "skipped_frames": skipped,
         "late_b_held_start": b_delay,
+        "late_b_concurrent": b_conc,
         "late_behind_own_backlog": backlog,
         "late_other": other,
+        "late_submitted_in_b_yield": in_yield_n,
         "b_share_of_start_delay_all_frames": stats::dist(&b_share_all).rounded(3),
         "late": rows,
     })
@@ -1129,6 +1143,32 @@ fn main() {
     if args.flag("list") {
         for s in &all {
             println!("{:24} {}", s.name, s.what);
+        }
+        return;
+    }
+    if let Some(dir) = args.str("reattribute") {
+        // Recompute the attribution of every scenario JSON in `dir` from its raw logs.
+        let dir = std::path::Path::new(dir);
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|n| n.ends_with(".json") && n != "summary.json")
+            .collect();
+        names.sort();
+        for n in names {
+            let path = dir.join(&n);
+            let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let name = v["scenario"].as_str().unwrap_or_default().to_string();
+            let (Some(fps), false) = (v["a"]["fps"].as_f64(), v["b"].is_null()) else {
+                continue;
+            };
+            v["attribution"] = attribute(
+                &dir.join("raw").join(format!("{name}-a.jsonl")),
+                &dir.join("raw").join(format!("{name}-b.jsonl")),
+                1e9 / fps,
+            );
+            std::fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+            eprintln!("{name}: {}", v["attribution"]["late_frames"]);
         }
         return;
     }
