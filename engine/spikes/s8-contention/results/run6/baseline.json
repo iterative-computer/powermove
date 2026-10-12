@@ -1,0 +1,241 @@
+{
+  "a": {
+    "adapter": "Apple M4 Max (Metal, )",
+    "at_risk": 104,
+    "blur_radius": 8,
+    "clock": "grid",
+    "completion_jitter_ms": {
+      "max": 10.817,
+      "mean": 1.942,
+      "min": 0.0,
+      "n": 3599,
+      "p50": 1.353,
+      "p95": 6.096,
+      "p99": 8.087,
+      "p999": 9.643
+    },
+    "display_refresh_ms": 8.3305,
+    "drops": {
+      "deadline_1_frame": 0,
+      "deadline_2_frames": 0,
+      "deadline_3_frames": 0,
+      "skipped_pacing": 0,
+      "skipped_ring_full": 0
+    },
+    "encode_ms": {
+      "max": 1.061,
+      "mean": 0.6,
+      "min": 0.079,
+      "n": 3600,
+      "p50": 0.735,
+      "p95": 0.838,
+      "p99": 0.872,
+      "p999": 0.964
+    },
+    "fps": 60.00030000150001,
+    "frames_measured": 3600,
+    "gpu_exec_ms": {
+      "max": 13.806,
+      "mean": 4.299,
+      "min": 1.593,
+      "n": 3600,
+      "p50": 3.484,
+      "p95": 9.663,
+      "p99": 12.12,
+      "p999": 13.348
+    },
+    "gpu_priority": 1,
+    "gpu_start_delay_ms": {
+      "max": 4.214,
+      "mean": 0.784,
+      "min": 0.116,
+      "n": 3600,
+      "p50": 0.805,
+      "p95": 0.937,
+      "p99": 1.398,
+      "p999": 2.845
+    },
+    "height": 2160,
+    "label": "baseline",
+    "latency_ms": {
+      "max": 15.849,
+      "mean": 5.864,
+      "min": 2.425,
+      "n": 3600,
+      "p50": 5.098,
+      "p95": 11.483,
+      "p99": 13.979,
+      "p999": 15.282
+    },
+    "layers": 3,
+    "miss_times_s": [],
+    "nominal_refresh_ms": 8.3333,
+    "presentation": null,
+    "process": "interactive",
+    "realtime_thread": true,
+    "refreshes_per_frame": 2,
+    "seconds": 60.0,
+    "signals_dropped": 3390,
+    "signals_sent": 341,
+    "wake_late_ms": {
+      "max": 0.072,
+      "mean": 0.021,
+      "min": 0.003,
+      "n": 3600,
+      "p50": 0.019,
+      "p95": 0.036,
+      "p99": 0.045,
+      "p999": 0.057
+    },
+    "warmup_seconds": 2.0,
+    "width": 3840,
+    "worst": [
+      {
+        "encode_ms": 0.892,
+        "gpu_ms": 13.806,
+        "gpu_start_ms": 0.896,
+        "latency_ms": 15.849,
+        "n": 2913,
+        "skipped": false,
+        "t_s": 46.5498,
+        "wake_late_ms": 0.031
+      },
+      {
+        "encode_ms": 0.809,
+        "gpu_ms": 13.619,
+        "gpu_start_ms": 0.83,
+        "latency_ms": 15.397,
+        "n": 2986,
+        "skipped": false,
+        "t_s": 47.7664,
+        "wake_late_ms": 0.024
+      },
+      {
+        "encode_ms": 0.771,
+        "gpu_ms": 13.24,
+        "gpu_start_ms": 0.89,
+        "latency_ms": 15.392,
+        "n": 2398,
+        "skipped": false,
+        "t_s": 37.9665,
+        "wake_late_ms": 0.014
+      },
+      {
+        "encode_ms": 0.809,
+        "gpu_ms": 13.326,
+        "gpu_start_ms": 0.803,
+        "latency_ms": 15.282,
+        "n": 1828,
+        "skipped": false,
+        "t_s": 28.4665,
+        "wake_late_ms": 0.021
+      },
+      {
+        "encode_ms": 0.784,
+        "gpu_ms": 13.373,
+        "gpu_start_ms": 0.808,
+        "latency_ms": 15.24,
+        "n": 3142,
+        "skipped": false,
+        "t_s": 50.3664,
+        "wake_late_ms": 0.015
+      },
+      {
+        "encode_ms": 0.771,
+        "gpu_ms": 13.348,
+        "gpu_start_ms": 0.797,
+        "latency_ms": 15.068,
+        "n": 1663,
+        "skipped": false,
+        "t_s": 25.7165,
+        "wake_late_ms": 0.019
+      },
+      {
+        "encode_ms": 0.706,
+        "gpu_ms": 13.313,
+        "gpu_start_ms": 0.78,
+        "latency_ms": 15.061,
+        "n": 2495,
+        "skipped": false,
+        "t_s": 39.5831,
+        "wake_late_ms": 0.023
+      },
+      {
+        "encode_ms": 0.771,
+        "gpu_ms": 13.284,
+        "gpu_start_ms": 0.767,
+        "latency_ms": 15.059,
+        "n": 3362,
+        "skipped": false,
+        "t_s": 54.0331,
+        "wake_late_ms": 0.021
+      },
+      {
+        "encode_ms": 0.682,
+        "gpu_ms": 13.124,
+        "gpu_start_ms": 0.893,
+        "latency_ms": 14.992,
+        "n": 3561,
+        "skipped": false,
+        "t_s": 57.3497,
+        "wake_late_ms": 0.021
+      },
+      {
+        "encode_ms": 0.812,
+        "gpu_ms": 12.936,
+        "gpu_start_ms": 0.953,
+        "latency_ms": 14.973,
+        "n": 2719,
+        "skipped": false,
+        "t_s": 43.3164,
+        "wake_late_ms": 0.029
+      }
+    ]
+  },
+  "a_args": [],
+  "a_wall_seconds": 63.15,
+  "attempts": [
+    {
+      "attempt": 0,
+      "control_drops_1f": null,
+      "drops_1f": 0,
+      "drops_2f": 0,
+      "external_gpu_after": 0.0,
+      "external_gpu_before": 0.0
+    }
+  ],
+  "attribution": null,
+  "b": null,
+  "b_args": null,
+  "contaminated": false,
+  "control": null,
+  "desk_load": "--fps 60 --layers 2 --blur-radius 8",
+  "desk_processes": 3,
+  "display_asleep": false,
+  "external_gpu_after": 0.0,
+  "external_gpu_before": 0.0,
+  "gpu_util_during": {
+    "max": 75.0,
+    "mean": 63.46610169491525,
+    "min": 50.0,
+    "n": 118,
+    "p50": 64.0,
+    "p95": 73.0,
+    "p99": 74.0,
+    "p999": 75.0
+  },
+  "gpu_util_idle_before": {
+    "max": 100.0,
+    "mean": 16.666666666666668,
+    "min": 0.0,
+    "n": 6,
+    "p50": 0.0,
+    "p95": 100.0,
+    "p99": 100.0,
+    "p999": 100.0
+  },
+  "quiet_wait_s": 15.6,
+  "scenario": "baseline",
+  "screen_locked": true,
+  "what": "A alone"
+}

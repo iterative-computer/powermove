@@ -1,0 +1,385 @@
+{
+  "a": {
+    "adapter": "Apple M4 Max (Metal, )",
+    "at_risk": 0,
+    "blur_radius": 8,
+    "clock": "grid",
+    "completion_jitter_ms": {
+      "max": 5.231,
+      "mean": 0.508,
+      "min": 0.0,
+      "n": 3599,
+      "p50": 0.355,
+      "p95": 1.461,
+      "p99": 2.344,
+      "p999": 4.601
+    },
+    "display_refresh_ms": 8.3378,
+    "drops": {
+      "deadline_1_frame": 0,
+      "deadline_2_frames": 0,
+      "deadline_3_frames": 0,
+      "skipped_pacing": 0,
+      "skipped_ring_full": 0
+    },
+    "encode_ms": {
+      "max": 0.302,
+      "mean": 0.155,
+      "min": 0.055,
+      "n": 3600,
+      "p50": 0.152,
+      "p95": 0.206,
+      "p99": 0.226,
+      "p999": 0.281
+    },
+    "fps": 60.00030000150001,
+    "frames_measured": 3600,
+    "gpu_exec_ms": {
+      "max": 8.832,
+      "mean": 6.076,
+      "min": 2.55,
+      "n": 3600,
+      "p50": 6.185,
+      "p95": 7.201,
+      "p99": 7.722,
+      "p999": 8.333
+    },
+    "gpu_priority": 1,
+    "gpu_start_delay_ms": {
+      "max": 4.356,
+      "mean": 0.366,
+      "min": 0.1,
+      "n": 3600,
+      "p50": 0.379,
+      "p95": 0.426,
+      "p99": 0.493,
+      "p999": 1.222
+    },
+    "height": 2160,
+    "label": "vt-hevc10-x1",
+    "latency_ms": {
+      "max": 9.608,
+      "mean": 6.715,
+      "min": 2.955,
+      "n": 3600,
+      "p50": 6.828,
+      "p95": 7.867,
+      "p99": 8.414,
+      "p999": 9.026
+    },
+    "layers": 3,
+    "miss_times_s": [],
+    "nominal_refresh_ms": 8.3333,
+    "presentation": null,
+    "process": "interactive",
+    "realtime_thread": true,
+    "refreshes_per_frame": 2,
+    "seconds": 60.0,
+    "signals_dropped": 0,
+    "signals_sent": 3722,
+    "wake_late_ms": {
+      "max": 0.024,
+      "mean": 0.006,
+      "min": 0.002,
+      "n": 3600,
+      "p50": 0.006,
+      "p95": 0.009,
+      "p99": 0.012,
+      "p999": 0.015
+    },
+    "warmup_seconds": 2.0,
+    "width": 3840,
+    "worst": [
+      {
+        "encode_ms": 0.218,
+        "gpu_ms": 8.022,
+        "gpu_start_ms": 1.222,
+        "latency_ms": 9.608,
+        "n": 3452,
+        "skipped": false,
+        "t_s": 55.533,
+        "wake_late_ms": 0.008
+      },
+      {
+        "encode_ms": 0.155,
+        "gpu_ms": 8.832,
+        "gpu_start_ms": 0.384,
+        "latency_ms": 9.48,
+        "n": 969,
+        "skipped": false,
+        "t_s": 14.1499,
+        "wake_late_ms": 0.005
+      },
+      {
+        "encode_ms": 0.202,
+        "gpu_ms": 4.091,
+        "gpu_start_ms": 4.356,
+        "latency_ms": 9.043,
+        "n": 3578,
+        "skipped": false,
+        "t_s": 57.633,
+        "wake_late_ms": 0.006
+      },
+      {
+        "encode_ms": 0.172,
+        "gpu_ms": 8.339,
+        "gpu_start_ms": 0.393,
+        "latency_ms": 9.026,
+        "n": 3404,
+        "skipped": false,
+        "t_s": 54.733,
+        "wake_late_ms": 0.007
+      },
+      {
+        "encode_ms": 0.164,
+        "gpu_ms": 8.288,
+        "gpu_start_ms": 0.418,
+        "latency_ms": 8.982,
+        "n": 606,
+        "skipped": false,
+        "t_s": 8.0999,
+        "wake_late_ms": 0.004
+      },
+      {
+        "encode_ms": 0.112,
+        "gpu_ms": 8.333,
+        "gpu_start_ms": 0.382,
+        "latency_ms": 8.947,
+        "n": 1311,
+        "skipped": false,
+        "t_s": 19.8499,
+        "wake_late_ms": 0.007
+      },
+      {
+        "encode_ms": 0.129,
+        "gpu_ms": 8.335,
+        "gpu_start_ms": 0.356,
+        "latency_ms": 8.935,
+        "n": 1799,
+        "skipped": false,
+        "t_s": 27.9832,
+        "wake_late_ms": 0.004
+      },
+      {
+        "encode_ms": 0.113,
+        "gpu_ms": 8.22,
+        "gpu_start_ms": 0.372,
+        "latency_ms": 8.808,
+        "n": 1152,
+        "skipped": false,
+        "t_s": 17.1999,
+        "wake_late_ms": 0.004
+      },
+      {
+        "encode_ms": 0.205,
+        "gpu_ms": 8.065,
+        "gpu_start_ms": 0.362,
+        "latency_ms": 8.79,
+        "n": 3134,
+        "skipped": false,
+        "t_s": 50.2331,
+        "wake_late_ms": 0.006
+      },
+      {
+        "encode_ms": 0.163,
+        "gpu_ms": 8.128,
+        "gpu_start_ms": 0.365,
+        "latency_ms": 8.775,
+        "n": 2843,
+        "skipped": false,
+        "t_s": 45.3831,
+        "wake_late_ms": 0.005
+      }
+    ]
+  },
+  "a_args": [],
+  "a_wall_seconds": 63.12,
+  "attempts": [
+    {
+      "attempt": 0,
+      "control_drops_1f": 0,
+      "drops_1f": 0,
+      "drops_2f": 0,
+      "external_gpu_after": 0.2625,
+      "external_gpu_before": 0.2029
+    }
+  ],
+  "attribution": {
+    "b_share_of_start_delay_all_frames": {
+      "max": 0.0,
+      "mean": 0.0,
+      "min": 0.0,
+      "n": 3600,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "p999": 0.0
+    },
+    "late": [],
+    "late_b_concurrent": 0,
+    "late_b_held_start": 0,
+    "late_backlog_after_b": 0,
+    "late_behind_own_backlog": 0,
+    "late_frames": 0,
+    "late_other": 0,
+    "late_submitted_in_b_yield": 0,
+    "skipped_frames": 0
+  },
+  "b": {
+    "adapter": "Apple M4 Max (Metal, )",
+    "align": false,
+    "align_guard_ms": 1.0,
+    "align_wait_total_ms": 0.0,
+    "blender": null,
+    "calibration_ms_per_full_pass": [],
+    "cb_gpu_ms": {
+      "max": 0.0,
+      "mean": 0.0,
+      "min": 0.0,
+      "n": 0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "p999": 0.0
+    },
+    "cb_wall_ms": {
+      "max": 0.0,
+      "mean": 0.0,
+      "min": 0.0,
+      "n": 0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "p999": 0.0
+    },
+    "command_buffers": 0,
+    "darwin_bg": false,
+    "export_fps": 0.0,
+    "export_frames": 0,
+    "gpu_busy_fraction": 0.0,
+    "gpu_priority": 1,
+    "heavy_radius": 384,
+    "in_flight": 2,
+    "iters": 6,
+    "label": "vt-hevc10-x1",
+    "mode": "none",
+    "pause_on_playback": false,
+    "paused_for_playback_ms": 0.0,
+    "process": "job",
+    "qos": "inherited",
+    "radius": 48,
+    "relay_delay_ms": 0.0,
+    "seconds": 65.374,
+    "signals": {
+      "at_risk": 0,
+      "frame_ok": 3720,
+      "late_done": 0,
+      "miss": 0,
+      "playback_start": 1,
+      "playback_stop": 1,
+      "reaction_ms": {
+        "max": 7.267,
+        "mean": 0.651,
+        "min": 0.007,
+        "n": 3722,
+        "p50": 0.645,
+        "p95": 1.202,
+        "p99": 1.255,
+        "p999": 1.414
+      }
+    },
+    "slice_ms": 2.0,
+    "vt": [
+      {
+        "bytes": 1578176716,
+        "codec": "hevc10",
+        "created": true,
+        "dropped": 0,
+        "encode_latency_ms": {
+          "max": 113.85,
+          "mean": 94.34,
+          "min": 24.24,
+          "n": 7584,
+          "p50": 101.15,
+          "p95": 110.94,
+          "p99": 112.9,
+          "p999": 113.73
+        },
+        "error": null,
+        "errors": 0,
+        "fps": 116.25,
+        "frames": 7584,
+        "hardware": true,
+        "index": 0,
+        "seconds": 65.241
+      }
+    ],
+    "yield_ms": 100.0,
+    "yield_on": "none",
+    "yield_total_ms": 0.0,
+    "yields": 0
+  },
+  "b_args": [
+    "--mode",
+    "none",
+    "--vt-sessions",
+    "1",
+    "--vt-codec",
+    "hevc10"
+  ],
+  "contaminated": false,
+  "control": {
+    "drops_1f": 0,
+    "drops_2f": 0,
+    "drops_3f": 0,
+    "frames": 1200,
+    "gpu_exec_ms": {
+      "max": 8.677,
+      "mean": 5.99,
+      "min": 2.547,
+      "n": 1200,
+      "p50": 6.087,
+      "p95": 7.378,
+      "p99": 7.879,
+      "p999": 8.357
+    },
+    "latency_ms": {
+      "max": 9.272,
+      "mean": 6.624,
+      "min": 3.253,
+      "n": 1200,
+      "p50": 6.718,
+      "p95": 8.023,
+      "p99": 8.505,
+      "p999": 9.038
+    },
+    "presentation": null
+  },
+  "display_asleep": false,
+  "external_gpu_after": 0.2625,
+  "external_gpu_before": 0.2029,
+  "gpu_util_during": {
+    "max": 62.0,
+    "mean": 49.81967213114754,
+    "min": 18.0,
+    "n": 122,
+    "p50": 50.0,
+    "p95": 57.0,
+    "p99": 60.0,
+    "p999": 62.0
+  },
+  "gpu_util_idle_before": {
+    "max": 44.0,
+    "mean": 24.833333333333332,
+    "min": 17.0,
+    "n": 6,
+    "p50": 23.0,
+    "p95": 44.0,
+    "p99": 44.0,
+    "p999": 44.0
+  },
+  "quiet_wait_s": 37.8,
+  "scenario": "vt-hevc10-x1",
+  "screen_locked": false,
+  "what": "1 VideoToolbox HEVC Main10 4K session, no B GPU work"
+}
