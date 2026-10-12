@@ -7,4 +7,22 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# The addon is a cdylib loaded by the engine utility processes. The napi
+# glue is behind the `node` feature so the workspace builds and tests
+# without Node's symbols (they resolve when Node loads the addon).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
+pm-engine = { path = "../pm-engine" }
+pm-protocol = { path = "../pm-protocol", default-features = false }
+serde_json.workspace = true
+libc = "0.2"
+napi = { version = "3.14", default-features = false, features = ["napi9"], optional = true }
+napi-derive = { version = "3.6", optional = true }
+
+[features]
+node = ["dep:napi", "dep:napi-derive"]
+
+[build-dependencies]
+napi-build = "2.6"
