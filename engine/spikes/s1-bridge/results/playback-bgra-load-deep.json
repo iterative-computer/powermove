@@ -1,0 +1,1422 @@
+{
+  "run": "playback-bgra-load-deep",
+  "scenario": "playback",
+  "config": {
+    "scenario": "playback",
+    "format": "bgra",
+    "width": 3840,
+    "height": 2160,
+    "poolSize": 22,
+    "leadFrames": 18,
+    "extraPasses": 2,
+    "durationMs": 60000,
+    "load": {
+      "longTask": true,
+      "autosave": true,
+      "agent": true,
+      "resize": true
+    },
+    "drawPath": "copy",
+    "hdrCanvas": false,
+    "latencyModes": [
+      "baseline",
+      "gesture",
+      "orbit",
+      "walk"
+    ],
+    "inputHz": 120,
+    "releaseMode": "gpu-done",
+    "transport": "per-frame",
+    "redraw": "none",
+    "onscreen": false,
+    "edrOnscreen": false,
+    "trace": true
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54",
+    "node": "24.18.1"
+  },
+  "display": {
+    "bounds": {
+      "x": 0,
+      "y": 0,
+      "width": 1512,
+      "height": 982
+    },
+    "scaleFactor": 2,
+    "hz": 120.0006103515625,
+    "colorDepth": 30,
+    "colorSpace": "{primaries:P3, transfer:{0.0777*x + 0.0000 if abs(x) < 0.0450 else sign(x)*((0.9495*abs(x) + 0.0495)**2.3955 + 0.0003)}, matrix:RGB, range:FULL}"
+  },
+  "machineLoad": {
+    "before": {
+      "loadavg": [
+        7.86,
+        6.88,
+        10.19
+      ],
+      "busyProcesses": [
+        {
+          "cpu": 96.1,
+          "name": "other"
+        },
+        {
+          "cpu": 98.7,
+          "name": "s2-precision"
+        },
+        {
+          "cpu": 39.8,
+          "name": "other"
+        },
+        {
+          "cpu": 54.9,
+          "name": "rustc"
+        }
+      ]
+    },
+    "after": {
+      "loadavg": [
+        8.94,
+        7.36,
+        10.14
+      ],
+      "busyProcesses": [
+        {
+          "cpu": 95.9,
+          "name": "other"
+        },
+        {
+          "cpu": 20.2,
+          "name": "Electron"
+        },
+        {
+          "cpu": 100.4,
+          "name": "Electron Helper"
+        },
+        {
+          "cpu": 98.8,
+          "name": "s4-render"
+        }
+      ]
+    }
+  },
+  "errors": [],
+  "bridge": {
+    "policy": "unsigned-dev-bypass",
+    "serviceNameLength": 56,
+    "expected": {
+      "pid": 54629,
+      "pidversion": 87969,
+      "spawnUs": 1838
+    },
+    "accepted": {
+      "pid": 54629,
+      "pidversion": 87969,
+      "atUs": 1910020945
+    },
+    "gone": 1974876892
+  },
+  "engine": {
+    "adapter": "Apple M4 Max",
+    "backend": "Metal",
+    "width": 3840,
+    "height": 2160,
+    "format": "bgra",
+    "pool_size": 22,
+    "pool_bytes": 729907200,
+    "lead_frames": 18,
+    "extra_passes": 2,
+    "bridge_pid": 54609,
+    "checkin_us": 188
+  },
+  "engineStats": {
+    "busy": [],
+    "stats": {
+      "frames": 3693,
+      "gesture_frames": 0,
+      "gpu_us_max": 16357,
+      "gpu_us_sum": 22521368,
+      "late_skipped": 0,
+      "max_busy_slots": 20,
+      "max_retime_us": 4158,
+      "playback_frames": 3693,
+      "pool_exhausted_waits": 0,
+      "regrids": 1,
+      "release_mismatches": 0,
+      "releases": 3693,
+      "send_failures": 0
+    }
+  },
+  "imports": {
+    "surfaces": [
+      {
+        "pool": 0,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.2320839999999862
+      },
+      {
+        "pool": 1,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.026416999999980817
+      },
+      {
+        "pool": 2,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.015290999999990618
+      },
+      {
+        "pool": 3,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.012833000000000538
+      },
+      {
+        "pool": 4,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.013582999999982803
+      },
+      {
+        "pool": 5,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.012375000000020009
+      },
+      {
+        "pool": 6,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.011833000000024185
+      },
+      {
+        "pool": 7,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.015416999999956715
+      },
+      {
+        "pool": 8,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.021416999999985364
+      },
+      {
+        "pool": 9,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.022499999999979536
+      },
+      {
+        "pool": 10,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.01512499999995498
+      },
+      {
+        "pool": 11,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.009458999999992557
+      },
+      {
+        "pool": 12,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.01737500000001546
+      },
+      {
+        "pool": 13,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.017291999999997643
+      },
+      {
+        "pool": 14,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.023416999999994914
+      },
+      {
+        "pool": 15,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.012249999999994543
+      },
+      {
+        "pool": 16,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.014917000000025382
+      },
+      {
+        "pool": 17,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.018208000000015545
+      },
+      {
+        "pool": 18,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.010625000000004547
+      },
+      {
+        "pool": 19,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.010167000000024018
+      },
+      {
+        "pool": 20,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.01037500000001046
+      },
+      {
+        "pool": 21,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.013874999999984539
+      }
+    ],
+    "allReleased": 22,
+    "releasedAfterTeardown": 22,
+    "heldAfterTeardown": 0
+  },
+  "sendsPerImport": {
+    "0": 195,
+    "1": 195,
+    "2": 195,
+    "3": 195,
+    "4": 195,
+    "5": 195,
+    "6": 194,
+    "7": 194,
+    "8": 194,
+    "9": 194,
+    "10": 194,
+    "11": 194,
+    "12": 194,
+    "13": 194,
+    "14": 194,
+    "15": 194,
+    "16": 194,
+    "17": 194,
+    "18": 194,
+    "19": 1,
+    "20": 0,
+    "21": 0
+  },
+  "receiver": {
+    "received": 3693,
+    "receiveErrors": 0,
+    "errors": [],
+    "releaseMode": "gpu-done",
+    "releasesSent": 3693,
+    "persistentSlots": 0,
+    "persistentErrors": 0
+  },
+  "load": {
+    "documentBytes": 7061889,
+    "longTasks": {
+      "n": 59,
+      "ms": {
+        "n": 59,
+        "p50": 50.00041699999565,
+        "max": 50.03470900000002
+      }
+    },
+    "autosaves": {
+      "n": 29,
+      "mainThreadMs": {
+        "n": 29,
+        "p50": 138.95724999999948,
+        "max": 206.92299999999886
+      },
+      "totalMs": {
+        "n": 29,
+        "p50": 166.56745899999805,
+        "max": 266.1432079999977
+      }
+    },
+    "agent": {
+      "requests": 1085,
+      "replies": 1085,
+      "replyBytes": 85380770,
+      "mainUs": {
+        "n": 1085,
+        "p50": 87.25000000413274,
+        "max": 218.49999999903957
+      }
+    },
+    "resizes": {
+      "n": 11,
+      "steps": 671
+    },
+    "events": [
+      [
+        "longTask",
+        1913423313,
+        50.04
+      ],
+      [
+        "autosave",
+        1914423936,
+        113.63
+      ],
+      [
+        "longTask",
+        1914538371,
+        50.03
+      ],
+      [
+        "longTask",
+        1915539736,
+        50
+      ],
+      [
+        "autosave",
+        1916424615,
+        104.22
+      ],
+      [
+        "longTask",
+        1916540675,
+        50
+      ],
+      [
+        "longTask",
+        1917541165,
+        50
+      ],
+      [
+        "autosave",
+        1918425424,
+        104.78
+      ],
+      [
+        "longTask",
+        1918541575,
+        50
+      ],
+      [
+        "resize",
+        1917424135,
+        1216.92
+      ],
+      [
+        "longTask",
+        1919541582,
+        50
+      ],
+      [
+        "autosave",
+        1920426161,
+        108.52
+      ],
+      [
+        "longTask",
+        1920542171,
+        50
+      ],
+      [
+        "longTask",
+        1921542135,
+        50
+      ],
+      [
+        "autosave",
+        1922426685,
+        111.72
+      ],
+      [
+        "longTask",
+        1922542465,
+        50
+      ],
+      [
+        "longTask",
+        1923543393,
+        50
+      ],
+      [
+        "resize",
+        1922425419,
+        1186.64
+      ],
+      [
+        "autosave",
+        1924426019,
+        120.62
+      ],
+      [
+        "longTask",
+        1924547873,
+        50.01
+      ],
+      [
+        "longTask",
+        1925547358,
+        50
+      ],
+      [
+        "autosave",
+        1926426867,
+        115.87
+      ],
+      [
+        "longTask",
+        1926547023,
+        50.01
+      ],
+      [
+        "longTask",
+        1927548263,
+        50
+      ],
+      [
+        "autosave",
+        1928431227,
+        111.51
+      ],
+      [
+        "longTask",
+        1928549451,
+        50.01
+      ],
+      [
+        "resize",
+        1927425546,
+        1195.12
+      ],
+      [
+        "longTask",
+        1929550471,
+        50
+      ],
+      [
+        "autosave",
+        1930432578,
+        138.96
+      ],
+      [
+        "longTask",
+        1930573292,
+        50.01
+      ],
+      [
+        "longTask",
+        1931574218,
+        50
+      ],
+      [
+        "autosave",
+        1932433493,
+        156.35
+      ],
+      [
+        "longTask",
+        1932591626,
+        50
+      ],
+      [
+        "longTask",
+        1933592097,
+        50
+      ],
+      [
+        "resize",
+        1932425483,
+        1254.62
+      ],
+      [
+        "autosave",
+        1934434165,
+        201.79
+      ],
+      [
+        "longTask",
+        1934638448,
+        50.01
+      ],
+      [
+        "longTask",
+        1935638909,
+        50
+      ],
+      [
+        "autosave",
+        1936435866,
+        206.92
+      ],
+      [
+        "longTask",
+        1936645354,
+        50.01
+      ],
+      [
+        "longTask",
+        1937648683,
+        50
+      ],
+      [
+        "autosave",
+        1938436161,
+        189.36
+      ],
+      [
+        "longTask",
+        1938650594,
+        50
+      ],
+      [
+        "resize",
+        1937425601,
+        1279.14
+      ],
+      [
+        "longTask",
+        1939651355,
+        50
+      ],
+      [
+        "autosave",
+        1940437596,
+        195.97
+      ],
+      [
+        "longTask",
+        1940652434,
+        50
+      ],
+      [
+        "longTask",
+        1941653119,
+        50
+      ],
+      [
+        "autosave",
+        1942437479,
+        189.78
+      ],
+      [
+        "longTask",
+        1942654844,
+        50.01
+      ],
+      [
+        "longTask",
+        1943655245,
+        50
+      ],
+      [
+        "resize",
+        1942425750,
+        1297.25
+      ],
+      [
+        "autosave",
+        1944438205,
+        155.32
+      ],
+      [
+        "longTask",
+        1944657111,
+        50
+      ],
+      [
+        "longTask",
+        1945658179,
+        50
+      ],
+      [
+        "autosave",
+        1946438883,
+        119.36
+      ],
+      [
+        "longTask",
+        1946659080,
+        50
+      ],
+      [
+        "longTask",
+        1947659914,
+        50
+      ],
+      [
+        "autosave",
+        1948438962,
+        117.91
+      ],
+      [
+        "resize",
+        1947425338,
+        1167.05
+      ],
+      [
+        "longTask",
+        1948660150,
+        50
+      ],
+      [
+        "longTask",
+        1949661583,
+        50
+      ],
+      [
+        "autosave",
+        1950439818,
+        160.24
+      ],
+      [
+        "longTask",
+        1950662397,
+        50.01
+      ],
+      [
+        "longTask",
+        1951663587,
+        50
+      ],
+      [
+        "autosave",
+        1952440920,
+        160.73
+      ],
+      [
+        "longTask",
+        1952664552,
+        50
+      ],
+      [
+        "resize",
+        1952425839,
+        1236.03
+      ],
+      [
+        "longTask",
+        1953664407,
+        50
+      ],
+      [
+        "autosave",
+        1954441271,
+        128.85
+      ],
+      [
+        "longTask",
+        1954665399,
+        50
+      ],
+      [
+        "longTask",
+        1955666584,
+        50
+      ],
+      [
+        "autosave",
+        1956441109,
+        131.83
+      ],
+      [
+        "longTask",
+        1956667014,
+        50
+      ],
+      [
+        "longTask",
+        1957667857,
+        50
+      ],
+      [
+        "autosave",
+        1958442461,
+        152.22
+      ],
+      [
+        "resize",
+        1957426140,
+        1204.97
+      ],
+      [
+        "longTask",
+        1958668262,
+        50
+      ],
+      [
+        "longTask",
+        1959669784,
+        50
+      ],
+      [
+        "autosave",
+        1960442723,
+        137.65
+      ],
+      [
+        "longTask",
+        1960670708,
+        50
+      ],
+      [
+        "longTask",
+        1961671116,
+        50
+      ],
+      [
+        "autosave",
+        1962443038,
+        151.25
+      ],
+      [
+        "longTask",
+        1962673219,
+        50
+      ],
+      [
+        "resize",
+        1962426294,
+        1221.26
+      ],
+      [
+        "longTask",
+        1963674178,
+        50
+      ],
+      [
+        "autosave",
+        1964443276,
+        144.54
+      ],
+      [
+        "longTask",
+        1964675492,
+        50
+      ],
+      [
+        "longTask",
+        1965675382,
+        50
+      ],
+      [
+        "autosave",
+        1966445571,
+        165.44
+      ],
+      [
+        "longTask",
+        1966675096,
+        50
+      ],
+      [
+        "longTask",
+        1967675936,
+        50
+      ],
+      [
+        "autosave",
+        1968445646,
+        168.58
+      ],
+      [
+        "resize",
+        1967427175,
+        1207.87
+      ],
+      [
+        "longTask",
+        1968675045,
+        50
+      ],
+      [
+        "longTask",
+        1969675710,
+        50
+      ],
+      [
+        "autosave",
+        1970445653,
+        107.6
+      ],
+      [
+        "longTask",
+        1970675355,
+        50
+      ],
+      [
+        "longTask",
+        1971676099,
+        50
+      ]
+    ]
+  },
+  "frameForwarding": {
+    "transport": "per-frame",
+    "frames": 3693,
+    "status": {
+      "ok": 3693,
+      "pending": 0,
+      "noTarget": 0,
+      "failed": 0,
+      "engineToViewerDirect": 0
+    },
+    "transferMs": {
+      "n": 3693,
+      "p50": 0.3,
+      "p95": 5.91,
+      "p99": 50.66,
+      "max": 191.01,
+      "min": 0.12
+    }
+  },
+  "playback": {
+    "window": {
+      "seconds": 60,
+      "contentFrameUs": 16667,
+      "displayPeriodUs": 8333.3
+    },
+    "clock": {
+      "pingOffsetVsTraceUs": 81,
+      "pingRttUs": 0
+    },
+    "frames": {
+      "expected": 3587,
+      "engineSkipped": 0,
+      "notDrawn": 0,
+      "drawnLate": 0,
+      "notPresented": 4,
+      "offSlot": 1011,
+      "drops": 4,
+      "presented": 3583
+    },
+    "jitterAbsMs": {
+      "n": 3583,
+      "p50": 0.013,
+      "p95": 8.338,
+      "p99": 8.345,
+      "max": 12.948,
+      "min": 0
+    },
+    "jitterMs": {
+      "n": 3583,
+      "p50": 0,
+      "p95": 0.028,
+      "p99": 0.572,
+      "max": 0.645,
+      "min": -12.948
+    },
+    "presentIntervalMs": {
+      "n": 3580,
+      "p50": 16.666,
+      "p95": 24.999,
+      "p99": 25,
+      "max": 25.1,
+      "min": 8.33
+    },
+    "intervalJitterAbsMs": {
+      "n": 3580,
+      "p50": 0.001,
+      "p95": 8.334,
+      "p99": 8.334,
+      "max": 8.433,
+      "min": 0
+    },
+    "irregularIntervals": 734,
+    "pipelineDepthVsyncs": {
+      "1": 917,
+      "2": 2327,
+      "3": 339
+    },
+    "rafIntervalMs": {
+      "n": 7199,
+      "p50": 8.3,
+      "p95": 9.3,
+      "p99": 9.4,
+      "max": 10.6,
+      "min": 7.2
+    },
+    "rafToPresentMs": {
+      "n": 3583,
+      "p50": 20,
+      "p95": 20.92,
+      "p99": 20.98,
+      "max": 21.02,
+      "min": 11.55
+    },
+    "gpuDoneToPresentMs": {
+      "n": 3583,
+      "p50": 316.7,
+      "p95": 320.9,
+      "p99": 321.18,
+      "max": 321.92,
+      "min": 302.79
+    },
+    "arrivalLeadMs": {
+      "n": 3601,
+      "p50": 292.48,
+      "p95": 296.45,
+      "p99": 296.75,
+      "max": 297.45,
+      "min": 89.42
+    },
+    "forwarderJsDelayMs": {
+      "n": 3601,
+      "p50": 0.07,
+      "p95": 49.18,
+      "p99": 133.06,
+      "max": 206.96,
+      "min": 0.02
+    },
+    "bridgeRecvToViewerMs": {
+      "n": 3601,
+      "p50": 0.36,
+      "p95": 49.4,
+      "p99": 133.32,
+      "max": 207.31,
+      "min": 0.12
+    },
+    "isolatedToMainWorldMs": {
+      "n": 3601,
+      "p50": 0,
+      "p95": 0.1,
+      "p99": 0.1,
+      "max": 0.2,
+      "min": 0
+    },
+    "integrity": {
+      "checked": 3601,
+      "ok": 3601,
+      "bad": [],
+      "skipped": 0
+    },
+    "release": {
+      "mode": "gpu-done",
+      "frames": 3601,
+      "submitToGpuDoneMs": {
+        "n": 3601,
+        "p50": 3.1,
+        "p95": 4.7,
+        "p99": 5.3,
+        "max": 9,
+        "min": 0.8
+      },
+      "submitToCallbackMs": {
+        "n": 0
+      },
+      "callbackMinusGpuDoneMs": {
+        "n": 0
+      },
+      "callbackBeforeGpuDone": 0,
+      "callbackMissing": 3601
+    },
+    "redraws": 0,
+    "viewerDropReasons": {},
+    "irregularByLoadEvent": {
+      "none": 803,
+      "longTask": 79,
+      "autosave": 59,
+      "autosave+longTask": 9,
+      "resize": 32,
+      "longTask+resize": 10,
+      "autosave+resize": 22,
+      "autosave+longTask+resize": 1
+    },
+    "missing": [
+      {
+        "k": 2229,
+        "status": "not-presented",
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 2230,
+        "status": "not-presented",
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 3430,
+        "status": "not-presented",
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 3431,
+        "status": "not-presented",
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      }
+    ],
+    "irregular": [
+      {
+        "k": 121,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 4.17,
+        "rafToPresentMs": 11.66,
+        "near": "none"
+      },
+      {
+        "k": 123,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 4.13,
+        "rafToPresentMs": 11.7,
+        "near": "none"
+      },
+      {
+        "k": 131,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 4.2,
+        "rafToPresentMs": 11.63,
+        "near": "none"
+      },
+      {
+        "k": 132,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 3.43,
+        "rafToPresentMs": 12.4,
+        "near": "none"
+      },
+      {
+        "k": 133,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 3.77,
+        "rafToPresentMs": 12.06,
+        "near": "none"
+      },
+      {
+        "k": 134,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 4.1,
+        "rafToPresentMs": 11.73,
+        "near": "none"
+      },
+      {
+        "k": 135,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 3.33,
+        "rafToPresentMs": 12.5,
+        "near": "none"
+      },
+      {
+        "k": 137,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 4.2,
+        "rafToPresentMs": 11.63,
+        "near": "none"
+      },
+      {
+        "k": 145,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 4.08,
+        "rafToPresentMs": 11.76,
+        "near": "none"
+      },
+      {
+        "k": 146,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 4.22,
+        "rafToPresentMs": 11.63,
+        "near": "none"
+      },
+      {
+        "k": 147,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 4.15,
+        "rafToPresentMs": 11.69,
+        "near": "none"
+      },
+      {
+        "k": 161,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 4.22,
+        "rafToPresentMs": 11.63,
+        "near": "none"
+      },
+      {
+        "k": 162,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 4.15,
+        "rafToPresentMs": 11.69,
+        "near": "none"
+      },
+      {
+        "k": 178,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 4.18,
+        "rafToPresentMs": 11.65,
+        "near": "longTask"
+      },
+      {
+        "k": 179,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 4.12,
+        "rafToPresentMs": 11.72,
+        "near": "longTask"
+      },
+      {
+        "k": 181,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 3.29,
+        "rafToPresentMs": 12.55,
+        "near": "none"
+      },
+      {
+        "k": 182,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 4.12,
+        "rafToPresentMs": 11.72,
+        "near": "none"
+      },
+      {
+        "k": 183,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 4.15,
+        "rafToPresentMs": 11.69,
+        "near": "none"
+      },
+      {
+        "k": 187,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 4.18,
+        "rafToPresentMs": 11.65,
+        "near": "none"
+      },
+      {
+        "k": 188,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 3.42,
+        "rafToPresentMs": 12.42,
+        "near": "none"
+      },
+      {
+        "k": 189,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 4.15,
+        "rafToPresentMs": 11.69,
+        "near": "none"
+      },
+      {
+        "k": 190,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 4.18,
+        "rafToPresentMs": 11.65,
+        "near": "none"
+      },
+      {
+        "k": 192,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 4.15,
+        "rafToPresentMs": 11.69,
+        "near": "none"
+      },
+      {
+        "k": 193,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 4.19,
+        "rafToPresentMs": 11.65,
+        "near": "none"
+      },
+      {
+        "k": 194,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 4.22,
+        "rafToPresentMs": 11.62,
+        "near": "none"
+      },
+      {
+        "k": 223,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 4.19,
+        "rafToPresentMs": 11.65,
+        "near": "none"
+      },
+      {
+        "k": 227,
+        "status": "off-slot",
+        "offsetMs": -8.32,
+        "rafMinusPtsMs": 4.22,
+        "rafToPresentMs": 11.61,
+        "near": "none"
+      },
+      {
+        "k": 239,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 4.12,
+        "rafToPresentMs": 11.71,
+        "near": "autosave"
+      },
+      {
+        "k": 240,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 4.25,
+        "rafToPresentMs": 11.58,
+        "near": "autosave"
+      },
+      {
+        "k": 241,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 4.19,
+        "rafToPresentMs": 11.64,
+        "near": "autosave+longTask"
+      },
+      {
+        "k": 242,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 4.22,
+        "rafToPresentMs": 11.61,
+        "near": "autosave+longTask"
+      },
+      {
+        "k": 243,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 4.15,
+        "rafToPresentMs": 11.68,
+        "near": "autosave+longTask"
+      },
+      {
+        "k": 244,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 4.19,
+        "rafToPresentMs": 11.64,
+        "near": "longTask"
+      },
+      {
+        "k": 245,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 4.22,
+        "rafToPresentMs": 11.61,
+        "near": "longTask"
+      },
+      {
+        "k": 246,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 4.15,
+        "rafToPresentMs": 11.68,
+        "near": "longTask"
+      },
+      {
+        "k": 247,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 4.19,
+        "rafToPresentMs": 11.64,
+        "near": "none"
+      },
+      {
+        "k": 277,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 4.19,
+        "rafToPresentMs": 11.64,
+        "near": "none"
+      },
+      {
+        "k": 278,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 4.12,
+        "rafToPresentMs": 11.7,
+        "near": "none"
+      },
+      {
+        "k": 279,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 4.16,
+        "rafToPresentMs": 11.67,
+        "near": "none"
+      },
+      {
+        "k": 283,
+        "status": "off-slot",
+        "offsetMs": -8.33,
+        "rafMinusPtsMs": 4.09,
+        "rafToPresentMs": 11.74,
+        "near": "none"
+      }
+    ]
+  }
+}

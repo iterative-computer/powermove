@@ -1,0 +1,1016 @@
+{
+  "run": "playback-bgra-load-onscreen-control",
+  "scenario": "playback",
+  "config": {
+    "scenario": "playback",
+    "format": "bgra",
+    "width": 3840,
+    "height": 2160,
+    "poolSize": 14,
+    "leadFrames": 10,
+    "extraPasses": 2,
+    "durationMs": 15000,
+    "load": {
+      "longTask": true,
+      "autosave": true,
+      "agent": true,
+      "resize": true
+    },
+    "drawPath": "control",
+    "hdrCanvas": false,
+    "latencyModes": [
+      "baseline",
+      "gesture",
+      "orbit",
+      "walk"
+    ],
+    "inputHz": 120,
+    "releaseMode": "gpu-done",
+    "transport": "persistent",
+    "redraw": "none",
+    "onscreen": true,
+    "edrOnscreen": false,
+    "trace": true
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54",
+    "node": "24.18.1"
+  },
+  "display": {
+    "bounds": {
+      "x": 0,
+      "y": 0,
+      "width": 1512,
+      "height": 982
+    },
+    "scaleFactor": 2,
+    "hz": 120.0006103515625,
+    "colorDepth": 30,
+    "colorSpace": "{primaries:P3, transfer:{0.0777*x + 0.0000 if abs(x) < 0.0450 else sign(x)*((0.9495*abs(x) + 0.0495)**2.3955 + 0.0003)}, matrix:RGB, range:FULL}"
+  },
+  "machineLoad": {
+    "before": {
+      "loadavg": [
+        5.99,
+        5.39,
+        6.75
+      ],
+      "busyProcesses": [
+        {
+          "cpu": 37.5,
+          "name": "other"
+        },
+        {
+          "cpu": 64.5,
+          "name": "other"
+        },
+        {
+          "cpu": 99.9,
+          "name": "other"
+        },
+        {
+          "cpu": 99.8,
+          "name": "s4-render"
+        }
+      ]
+    },
+    "after": {
+      "loadavg": [
+        6.31,
+        5.49,
+        6.76
+      ],
+      "busyProcesses": [
+        {
+          "cpu": 42.1,
+          "name": "other"
+        },
+        {
+          "cpu": 49.5,
+          "name": "other"
+        },
+        {
+          "cpu": 100,
+          "name": "other"
+        },
+        {
+          "cpu": 99.5,
+          "name": "s4-render"
+        },
+        {
+          "cpu": 71.2,
+          "name": "Electron Helper"
+        }
+      ]
+    }
+  },
+  "errors": [],
+  "bridge": {
+    "policy": "unsigned-dev-bypass",
+    "serviceNameLength": 56,
+    "expected": {
+      "pid": 65570,
+      "pidversion": 105232,
+      "spawnUs": 11605
+    },
+    "accepted": {
+      "pid": 65570,
+      "pidversion": 105232,
+      "atUs": 2920463095
+    },
+    "gone": 2939913621
+  },
+  "engine": {
+    "adapter": "Apple M4 Max",
+    "backend": "Metal",
+    "width": 3840,
+    "height": 2160,
+    "format": "bgra",
+    "pool_size": 14,
+    "pool_bytes": 464486400,
+    "lead_frames": 10,
+    "extra_passes": 2,
+    "bridge_pid": 65550,
+    "checkin_us": 269
+  },
+  "engineStats": {
+    "busy": [],
+    "stats": {
+      "frames": 994,
+      "gesture_frames": 0,
+      "gpu_us_max": 17930,
+      "gpu_us_sum": 3217757,
+      "late_skipped": 0,
+      "max_busy_slots": 12,
+      "max_retime_us": 99,
+      "playback_frames": 994,
+      "pool_exhausted_waits": 0,
+      "regrids": 0,
+      "release_mismatches": 0,
+      "releases": 994,
+      "send_failures": 0
+    }
+  },
+  "imports": {
+    "surfaces": [
+      {
+        "pool": 0,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.6719590000000153
+      },
+      {
+        "pool": 1,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.19079099999999016
+      },
+      {
+        "pool": 2,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.16458299999999326
+      },
+      {
+        "pool": 3,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.15499999999997272
+      },
+      {
+        "pool": 4,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.17695799999989958
+      },
+      {
+        "pool": 5,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.14212499999996453
+      },
+      {
+        "pool": 6,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.15841699999998582
+      },
+      {
+        "pool": 7,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.1574999999999136
+      },
+      {
+        "pool": 8,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.21704199999999219
+      },
+      {
+        "pool": 9,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.19858299999998508
+      },
+      {
+        "pool": 10,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.1295830000000251
+      },
+      {
+        "pool": 11,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.11475000000007185
+      },
+      {
+        "pool": 12,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.11045899999999165
+      },
+      {
+        "pool": 13,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.10466599999995196
+      }
+    ],
+    "persistentSends": [
+      {
+        "pool": 0,
+        "ms": 2.819
+      },
+      {
+        "pool": 1,
+        "ms": 2.515
+      },
+      {
+        "pool": 2,
+        "ms": 2.345
+      },
+      {
+        "pool": 3,
+        "ms": 2.201
+      },
+      {
+        "pool": 4,
+        "ms": 2.052
+      },
+      {
+        "pool": 5,
+        "ms": 1.88
+      },
+      {
+        "pool": 6,
+        "ms": 1.751
+      },
+      {
+        "pool": 7,
+        "ms": 1.574
+      },
+      {
+        "pool": 8,
+        "ms": 1.43
+      },
+      {
+        "pool": 9,
+        "ms": 1.221
+      },
+      {
+        "pool": 10,
+        "ms": 1.06
+      },
+      {
+        "pool": 11,
+        "ms": 0.947
+      },
+      {
+        "pool": 12,
+        "ms": 0.864
+      },
+      {
+        "pool": 13,
+        "ms": 0.765
+      }
+    ],
+    "allReleased": 14,
+    "releasedAfterTeardown": 14,
+    "heldAfterTeardown": 0
+  },
+  "sendsPerImport": {
+    "0": 1,
+    "1": 1,
+    "2": 1,
+    "3": 1,
+    "4": 1,
+    "5": 1,
+    "6": 1,
+    "7": 1,
+    "8": 1,
+    "9": 1,
+    "10": 1,
+    "11": 1,
+    "12": 1,
+    "13": 1
+  },
+  "receiver": {
+    "received": 0,
+    "receiveErrors": 0,
+    "errors": [],
+    "releaseMode": "gpu-done",
+    "releasesSent": 994,
+    "persistentSlots": 14,
+    "persistentErrors": 0,
+    "persistentReleased": 14
+  },
+  "load": {
+    "documentBytes": 7061889,
+    "longTasks": {
+      "n": 14,
+      "ms": {
+        "n": 14,
+        "p50": 50.00054199999977,
+        "max": 50.03991700000006
+      }
+    },
+    "autosaves": {
+      "n": 7,
+      "mainThreadMs": {
+        "n": 7,
+        "p50": 175.68033399999968,
+        "max": 193.66841600000043
+      },
+      "totalMs": {
+        "n": 7,
+        "p50": 232.4627499999997,
+        "max": 250.63741599999776
+      }
+    },
+    "agent": {
+      "requests": 268,
+      "replies": 268,
+      "replyBytes": 21089236,
+      "mainUs": {
+        "n": 268,
+        "p50": 105.915999998615,
+        "max": 155.83299999707378
+      }
+    },
+    "resizes": {
+      "n": 2,
+      "steps": 122
+    },
+    "events": [
+      [
+        "longTask",
+        2923928412,
+        50.05
+      ],
+      [
+        "autosave",
+        2924929348,
+        175.68
+      ],
+      [
+        "longTask",
+        2925106268,
+        50.03
+      ],
+      [
+        "longTask",
+        2926107926,
+        50
+      ],
+      [
+        "autosave",
+        2926929959,
+        168.84
+      ],
+      [
+        "longTask",
+        2927108010,
+        50
+      ],
+      [
+        "longTask",
+        2928107970,
+        50
+      ],
+      [
+        "autosave",
+        2928931335,
+        176.69
+      ],
+      [
+        "longTask",
+        2929112375,
+        50
+      ],
+      [
+        "resize",
+        2927928680,
+        1273.98
+      ],
+      [
+        "longTask",
+        2930112768,
+        50
+      ],
+      [
+        "autosave",
+        2930932956,
+        174.67
+      ],
+      [
+        "longTask",
+        2931112299,
+        50
+      ],
+      [
+        "longTask",
+        2932112626,
+        50
+      ],
+      [
+        "autosave",
+        2932933068,
+        175.9
+      ],
+      [
+        "longTask",
+        2933113894,
+        50
+      ],
+      [
+        "longTask",
+        2934114244,
+        50
+      ],
+      [
+        "resize",
+        2932929530,
+        1270.12
+      ],
+      [
+        "autosave",
+        2934934283,
+        170.8
+      ],
+      [
+        "longTask",
+        2935115092,
+        50.01
+      ],
+      [
+        "longTask",
+        2936115763,
+        50
+      ],
+      [
+        "autosave",
+        2936935838,
+        193.67
+      ],
+      [
+        "longTask",
+        2937131325,
+        50.01
+      ]
+    ]
+  },
+  "frameForwarding": {
+    "transport": "persistent",
+    "frames": 994,
+    "status": {
+      "ok": 0,
+      "pending": 0,
+      "noTarget": 0,
+      "failed": 0,
+      "engineToViewerDirect": 994
+    },
+    "transferMs": {
+      "n": 0
+    }
+  },
+  "playback": {
+    "window": {
+      "seconds": 15,
+      "contentFrameUs": 16667,
+      "displayPeriodUs": 8333.3
+    },
+    "clock": {
+      "pingOffsetVsTraceUs": 1,
+      "pingRttUs": 0
+    },
+    "frames": {
+      "expected": 887,
+      "engineSkipped": 0,
+      "notDrawn": 0,
+      "drawnLate": 0,
+      "notPresented": 2,
+      "offSlot": 173,
+      "drops": 2,
+      "presented": 885
+    },
+    "jitterAbsMs": {
+      "n": 885,
+      "p50": 0.015,
+      "p95": 8.336,
+      "p99": 8.35,
+      "max": 8.356,
+      "min": 0
+    },
+    "jitterMs": {
+      "n": 885,
+      "p50": 0,
+      "p95": 8.336,
+      "p99": 8.35,
+      "max": 8.356,
+      "min": -0.116
+    },
+    "presentIntervalMs": {
+      "n": 883,
+      "p50": 16.667,
+      "p95": 25,
+      "p99": 25,
+      "max": 25,
+      "min": 8.333
+    },
+    "intervalJitterAbsMs": {
+      "n": 883,
+      "p50": 0.001,
+      "p95": 8.334,
+      "p99": 8.334,
+      "max": 8.334,
+      "min": 0
+    },
+    "irregularIntervals": 270,
+    "pipelineDepthVsyncs": {
+      "1": 712,
+      "2": 171,
+      "3": 2
+    },
+    "rafIntervalMs": {
+      "n": 1799,
+      "p50": 8.3,
+      "p95": 9,
+      "p99": 9.2,
+      "max": 9.3,
+      "min": 7.3
+    },
+    "rafToPresentMs": {
+      "n": 885,
+      "p50": 11.58,
+      "p95": 20.55,
+      "p99": 20.79,
+      "max": 20.87,
+      "min": 11.32
+    },
+    "gpuDoneToPresentMs": {
+      "n": 885,
+      "p50": 179.42,
+      "p95": 187.85,
+      "p99": 188.02,
+      "max": 188.16,
+      "min": 177.13
+    },
+    "arrivalLeadMs": {
+      "n": 900,
+      "p50": 163.22,
+      "p95": 163.72,
+      "p99": 163.82,
+      "max": 164.02,
+      "min": 161.28
+    },
+    "forwarderJsDelayMs": {
+      "n": 900,
+      "p50": 0.06,
+      "p95": 0.08,
+      "p99": 0.11,
+      "max": 0.24,
+      "min": 0.04
+    },
+    "bridgeRecvToViewerMs": {
+      "n": 900,
+      "p50": 0.22,
+      "p95": 0.32,
+      "p99": 0.47,
+      "max": 0.77,
+      "min": 0.09
+    },
+    "isolatedToMainWorldMs": {
+      "n": 900,
+      "p50": 0,
+      "p95": 0.1,
+      "p99": 0.1,
+      "max": 0.2,
+      "min": 0
+    },
+    "integrity": {
+      "checked": 0,
+      "ok": 0,
+      "bad": [],
+      "skipped": 900
+    },
+    "release": {
+      "mode": "gpu-done",
+      "frames": 900,
+      "submitToGpuDoneMs": {
+        "n": 900,
+        "p50": 1.4,
+        "p95": 1.9,
+        "p99": 2.1,
+        "max": 2.7,
+        "min": 0.8
+      },
+      "submitToCallbackMs": {
+        "n": 0
+      },
+      "callbackMinusGpuDoneMs": {
+        "n": 0
+      },
+      "callbackBeforeGpuDone": 0,
+      "callbackMissing": 900
+    },
+    "redraws": 0,
+    "viewerDropReasons": {},
+    "irregularByLoadEvent": {
+      "none": 127,
+      "longTask": 14,
+      "autosave": 17,
+      "autosave+longTask": 5,
+      "resize": 6,
+      "longTask+resize": 2,
+      "autosave+resize": 3,
+      "autosave+longTask+resize": 1
+    },
+    "missing": [
+      {
+        "k": 489,
+        "status": "not-presented",
+        "state": "STATE_DROPPED",
+        "near": "autosave+longTask"
+      },
+      {
+        "k": 490,
+        "status": "not-presented",
+        "state": "STATE_DROPPED",
+        "near": "autosave+longTask"
+      }
+    ],
+    "irregular": [
+      {
+        "k": 134,
+        "status": "off-slot",
+        "offsetMs": 8.26,
+        "rafMinusPtsMs": 4.18,
+        "rafToPresentMs": 19.85,
+        "near": "none"
+      },
+      {
+        "k": 135,
+        "status": "off-slot",
+        "offsetMs": 8.26,
+        "rafMinusPtsMs": 4.11,
+        "rafToPresentMs": 19.92,
+        "near": "none"
+      },
+      {
+        "k": 144,
+        "status": "off-slot",
+        "offsetMs": 8.26,
+        "rafMinusPtsMs": 4.21,
+        "rafToPresentMs": 19.82,
+        "near": "none"
+      },
+      {
+        "k": 155,
+        "status": "off-slot",
+        "offsetMs": 8.26,
+        "rafMinusPtsMs": 4.08,
+        "rafToPresentMs": 19.95,
+        "near": "none"
+      },
+      {
+        "k": 156,
+        "status": "off-slot",
+        "offsetMs": 8.26,
+        "rafMinusPtsMs": 3.71,
+        "rafToPresentMs": 20.32,
+        "near": "none"
+      },
+      {
+        "k": 160,
+        "status": "off-slot",
+        "offsetMs": 8.26,
+        "rafMinusPtsMs": 4.14,
+        "rafToPresentMs": 19.88,
+        "near": "none"
+      },
+      {
+        "k": 166,
+        "status": "off-slot",
+        "offsetMs": 8.26,
+        "rafMinusPtsMs": 3.45,
+        "rafToPresentMs": 20.58,
+        "near": "none"
+      },
+      {
+        "k": 167,
+        "status": "off-slot",
+        "offsetMs": 8.26,
+        "rafMinusPtsMs": 4.18,
+        "rafToPresentMs": 19.85,
+        "near": "none"
+      },
+      {
+        "k": 175,
+        "status": "off-slot",
+        "offsetMs": 8.26,
+        "rafMinusPtsMs": 3.85,
+        "rafToPresentMs": 20.18,
+        "near": "none"
+      },
+      {
+        "k": 178,
+        "status": "off-slot",
+        "offsetMs": 8.26,
+        "rafMinusPtsMs": 3.95,
+        "rafToPresentMs": 20.08,
+        "near": "longTask"
+      },
+      {
+        "k": 181,
+        "status": "off-slot",
+        "offsetMs": 8.26,
+        "rafMinusPtsMs": 3.75,
+        "rafToPresentMs": 20.28,
+        "near": "longTask"
+      },
+      {
+        "k": 183,
+        "status": "off-slot",
+        "offsetMs": 8.26,
+        "rafMinusPtsMs": 3.52,
+        "rafToPresentMs": 20.51,
+        "near": "longTask"
+      },
+      {
+        "k": 184,
+        "status": "off-slot",
+        "offsetMs": 8.26,
+        "rafMinusPtsMs": 3.45,
+        "rafToPresentMs": 20.58,
+        "near": "none"
+      },
+      {
+        "k": 188,
+        "status": "off-slot",
+        "offsetMs": 8.26,
+        "rafMinusPtsMs": 3.59,
+        "rafToPresentMs": 20.45,
+        "near": "none"
+      },
+      {
+        "k": 191,
+        "status": "off-slot",
+        "offsetMs": 8.26,
+        "rafMinusPtsMs": 3.49,
+        "rafToPresentMs": 20.55,
+        "near": "none"
+      },
+      {
+        "k": 198,
+        "status": "off-slot",
+        "offsetMs": 8.29,
+        "rafMinusPtsMs": 4.14,
+        "rafToPresentMs": 19.91,
+        "near": "none"
+      },
+      {
+        "k": 206,
+        "status": "off-slot",
+        "offsetMs": 8.29,
+        "rafMinusPtsMs": 4.21,
+        "rafToPresentMs": 19.84,
+        "near": "none"
+      },
+      {
+        "k": 212,
+        "status": "off-slot",
+        "offsetMs": 8.29,
+        "rafMinusPtsMs": 4.21,
+        "rafToPresentMs": 19.84,
+        "near": "none"
+      },
+      {
+        "k": 227,
+        "status": "off-slot",
+        "offsetMs": 8.29,
+        "rafMinusPtsMs": 4.02,
+        "rafToPresentMs": 20.04,
+        "near": "none"
+      },
+      {
+        "k": 228,
+        "status": "off-slot",
+        "offsetMs": 8.29,
+        "rafMinusPtsMs": 3.75,
+        "rafToPresentMs": 20.31,
+        "near": "none"
+      },
+      {
+        "k": 230,
+        "status": "off-slot",
+        "offsetMs": 8.29,
+        "rafMinusPtsMs": 3.52,
+        "rafToPresentMs": 20.54,
+        "near": "none"
+      },
+      {
+        "k": 231,
+        "status": "off-slot",
+        "offsetMs": 8.29,
+        "rafMinusPtsMs": 4.15,
+        "rafToPresentMs": 19.91,
+        "near": "none"
+      },
+      {
+        "k": 232,
+        "status": "off-slot",
+        "offsetMs": 8.29,
+        "rafMinusPtsMs": 4.18,
+        "rafToPresentMs": 19.87,
+        "near": "none"
+      },
+      {
+        "k": 234,
+        "status": "off-slot",
+        "offsetMs": 8.29,
+        "rafMinusPtsMs": 3.45,
+        "rafToPresentMs": 20.61,
+        "near": "none"
+      },
+      {
+        "k": 235,
+        "status": "off-slot",
+        "offsetMs": 8.29,
+        "rafMinusPtsMs": 4.18,
+        "rafToPresentMs": 19.87,
+        "near": "none"
+      },
+      {
+        "k": 242,
+        "status": "off-slot",
+        "offsetMs": 8.29,
+        "rafMinusPtsMs": 4.02,
+        "rafToPresentMs": 20.04,
+        "near": "autosave"
+      },
+      {
+        "k": 243,
+        "status": "off-slot",
+        "offsetMs": 8.28,
+        "rafMinusPtsMs": 3.35,
+        "rafToPresentMs": 20.7,
+        "near": "autosave"
+      },
+      {
+        "k": 249,
+        "status": "off-slot",
+        "offsetMs": 8.29,
+        "rafMinusPtsMs": 3.95,
+        "rafToPresentMs": 20.1,
+        "near": "autosave+longTask"
+      },
+      {
+        "k": 265,
+        "status": "off-slot",
+        "offsetMs": 8.31,
+        "rafMinusPtsMs": 4.11,
+        "rafToPresentMs": 19.97,
+        "near": "none"
+      },
+      {
+        "k": 271,
+        "status": "off-slot",
+        "offsetMs": 8.31,
+        "rafMinusPtsMs": 4.01,
+        "rafToPresentMs": 20.07,
+        "near": "none"
+      },
+      {
+        "k": 274,
+        "status": "off-slot",
+        "offsetMs": 8.31,
+        "rafMinusPtsMs": 3.71,
+        "rafToPresentMs": 20.36,
+        "near": "none"
+      },
+      {
+        "k": 278,
+        "status": "off-slot",
+        "offsetMs": 8.31,
+        "rafMinusPtsMs": 4.04,
+        "rafToPresentMs": 20.03,
+        "near": "none"
+      },
+      {
+        "k": 279,
+        "status": "off-slot",
+        "offsetMs": 8.31,
+        "rafMinusPtsMs": 3.78,
+        "rafToPresentMs": 20.3,
+        "near": "none"
+      },
+      {
+        "k": 281,
+        "status": "off-slot",
+        "offsetMs": 8.31,
+        "rafMinusPtsMs": 3.74,
+        "rafToPresentMs": 20.33,
+        "near": "none"
+      },
+      {
+        "k": 292,
+        "status": "off-slot",
+        "offsetMs": 8.31,
+        "rafMinusPtsMs": 3.31,
+        "rafToPresentMs": 20.76,
+        "near": "none"
+      },
+      {
+        "k": 294,
+        "status": "off-slot",
+        "offsetMs": 8.31,
+        "rafMinusPtsMs": 3.58,
+        "rafToPresentMs": 20.5,
+        "near": "none"
+      },
+      {
+        "k": 301,
+        "status": "off-slot",
+        "offsetMs": 8.31,
+        "rafMinusPtsMs": 3.81,
+        "rafToPresentMs": 20.26,
+        "near": "none"
+      },
+      {
+        "k": 311,
+        "status": "off-slot",
+        "offsetMs": 8.31,
+        "rafMinusPtsMs": 4.05,
+        "rafToPresentMs": 20.03,
+        "near": "longTask"
+      },
+      {
+        "k": 315,
+        "status": "off-slot",
+        "offsetMs": 8.31,
+        "rafMinusPtsMs": 3.48,
+        "rafToPresentMs": 20.59,
+        "near": "none"
+      },
+      {
+        "k": 317,
+        "status": "off-slot",
+        "offsetMs": 8.31,
+        "rafMinusPtsMs": 4.05,
+        "rafToPresentMs": 20.03,
+        "near": "none"
+      }
+    ]
+  }
+}

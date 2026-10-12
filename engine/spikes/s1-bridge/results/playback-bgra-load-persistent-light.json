@@ -1,0 +1,1498 @@
+{
+  "run": "playback-bgra-load-persistent-light",
+  "scenario": "playback",
+  "config": {
+    "scenario": "playback",
+    "format": "bgra",
+    "width": 3840,
+    "height": 2160,
+    "poolSize": 14,
+    "leadFrames": 10,
+    "extraPasses": 0,
+    "durationMs": 60000,
+    "load": {
+      "longTask": true,
+      "autosave": true,
+      "agent": true,
+      "resize": true
+    },
+    "drawPath": "copy",
+    "hdrCanvas": false,
+    "latencyModes": [
+      "baseline",
+      "gesture",
+      "orbit",
+      "walk"
+    ],
+    "inputHz": 120,
+    "releaseMode": "gpu-done",
+    "transport": "persistent",
+    "redraw": "none",
+    "onscreen": false,
+    "edrOnscreen": false,
+    "trace": true
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54",
+    "node": "24.18.1"
+  },
+  "display": {
+    "bounds": {
+      "x": 0,
+      "y": 0,
+      "width": 1512,
+      "height": 982
+    },
+    "scaleFactor": 2,
+    "hz": 120.0006103515625,
+    "colorDepth": 30,
+    "colorSpace": "{primaries:P3, transfer:{0.0777*x + 0.0000 if abs(x) < 0.0450 else sign(x)*((0.9495*abs(x) + 0.0495)**2.3955 + 0.0003)}, matrix:RGB, range:FULL}"
+  },
+  "machineLoad": {
+    "before": {
+      "loadavg": [
+        4.3,
+        4.91,
+        7.04
+      ],
+      "busyProcesses": [
+        {
+          "cpu": 80.8,
+          "name": "other"
+        },
+        {
+          "cpu": 77.2,
+          "name": "other"
+        },
+        {
+          "cpu": 65.4,
+          "name": "other"
+        },
+        {
+          "cpu": 35.2,
+          "name": "other"
+        },
+        {
+          "cpu": 107.4,
+          "name": "other"
+        },
+        {
+          "cpu": 90.3,
+          "name": "s4-render"
+        },
+        {
+          "cpu": 21.4,
+          "name": "Electron"
+        }
+      ]
+    },
+    "after": {
+      "loadavg": [
+        4.1,
+        4.76,
+        6.84
+      ],
+      "busyProcesses": [
+        {
+          "cpu": 98.6,
+          "name": "s4-render"
+        },
+        {
+          "cpu": 21.1,
+          "name": "Electron"
+        },
+        {
+          "cpu": 97.6,
+          "name": "Electron Helper"
+        },
+        {
+          "cpu": 34.4,
+          "name": "other"
+        }
+      ]
+    }
+  },
+  "errors": [],
+  "bridge": {
+    "policy": "unsigned-dev-bypass",
+    "serviceNameLength": 56,
+    "expected": {
+      "pid": 63705,
+      "pidversion": 102170,
+      "spawnUs": 5288
+    },
+    "accepted": {
+      "pid": 63705,
+      "pidversion": 102170,
+      "atUs": 2701627330
+    },
+    "gone": 2766518889
+  },
+  "engine": {
+    "adapter": "Apple M4 Max",
+    "backend": "Metal",
+    "width": 3840,
+    "height": 2160,
+    "format": "bgra",
+    "pool_size": 14,
+    "pool_bytes": 464486400,
+    "lead_frames": 10,
+    "extra_passes": 0,
+    "bridge_pid": 63684,
+    "checkin_us": 255
+  },
+  "engineStats": {
+    "busy": [],
+    "stats": {
+      "frames": 3697,
+      "gesture_frames": 0,
+      "gpu_us_max": 23917,
+      "gpu_us_sum": 14181474,
+      "late_skipped": 0,
+      "max_busy_slots": 14,
+      "max_retime_us": 4165,
+      "playback_frames": 3697,
+      "pool_exhausted_waits": 78,
+      "regrids": 108,
+      "release_mismatches": 0,
+      "releases": 3697,
+      "send_failures": 0
+    }
+  },
+  "imports": {
+    "surfaces": [
+      {
+        "pool": 0,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.8141669999999976
+      },
+      {
+        "pool": 1,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.23416599999995924
+      },
+      {
+        "pool": 2,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.19070899999996982
+      },
+      {
+        "pool": 3,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.20895800000005238
+      },
+      {
+        "pool": 4,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.19662499999992633
+      },
+      {
+        "pool": 5,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.20237500000007458
+      },
+      {
+        "pool": 6,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.16712500000005548
+      },
+      {
+        "pool": 7,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.189707999999996
+      },
+      {
+        "pool": 8,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.1633750000000873
+      },
+      {
+        "pool": 9,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.17670800000007603
+      },
+      {
+        "pool": 10,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.18054099999994833
+      },
+      {
+        "pool": 11,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.16804099999990285
+      },
+      {
+        "pool": 12,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.14429099999995287
+      },
+      {
+        "pool": 13,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.13158400000008896
+      }
+    ],
+    "persistentSends": [
+      {
+        "pool": 0,
+        "ms": 3.35
+      },
+      {
+        "pool": 1,
+        "ms": 2.933
+      },
+      {
+        "pool": 2,
+        "ms": 2.753
+      },
+      {
+        "pool": 3,
+        "ms": 2.59
+      },
+      {
+        "pool": 4,
+        "ms": 2.361
+      },
+      {
+        "pool": 5,
+        "ms": 2.17
+      },
+      {
+        "pool": 6,
+        "ms": 1.97
+      },
+      {
+        "pool": 7,
+        "ms": 1.823
+      },
+      {
+        "pool": 8,
+        "ms": 1.613
+      },
+      {
+        "pool": 9,
+        "ms": 1.489
+      },
+      {
+        "pool": 10,
+        "ms": 1.339
+      },
+      {
+        "pool": 11,
+        "ms": 1.163
+      },
+      {
+        "pool": 12,
+        "ms": 1.024
+      },
+      {
+        "pool": 13,
+        "ms": 0.91
+      }
+    ],
+    "allReleased": 14,
+    "releasedAfterTeardown": 14,
+    "heldAfterTeardown": 0
+  },
+  "sendsPerImport": {
+    "0": 1,
+    "1": 1,
+    "2": 1,
+    "3": 1,
+    "4": 1,
+    "5": 1,
+    "6": 1,
+    "7": 1,
+    "8": 1,
+    "9": 1,
+    "10": 1,
+    "11": 1,
+    "12": 1,
+    "13": 1
+  },
+  "receiver": {
+    "received": 0,
+    "receiveErrors": 0,
+    "errors": [],
+    "releaseMode": "gpu-done",
+    "releasesSent": 3697,
+    "persistentSlots": 14,
+    "persistentErrors": 0,
+    "persistentReleased": 14
+  },
+  "load": {
+    "documentBytes": 7061889,
+    "longTasks": {
+      "n": 59,
+      "ms": {
+        "n": 59,
+        "p50": 50.00029100000393,
+        "max": 50.047083000000384
+      }
+    },
+    "autosaves": {
+      "n": 29,
+      "mainThreadMs": {
+        "n": 29,
+        "p50": 118.35966700000426,
+        "max": 172.11358400000245
+      },
+      "totalMs": {
+        "n": 29,
+        "p50": 123.1492500000004,
+        "max": 388.3197500000024
+      }
+    },
+    "agent": {
+      "requests": 1093,
+      "replies": 1093,
+      "replyBytes": 86010322,
+      "mainUs": {
+        "n": 1093,
+        "p50": 75.16600000235485,
+        "max": 149.5409999988624
+      }
+    },
+    "resizes": {
+      "n": 11,
+      "steps": 671
+    },
+    "events": [
+      [
+        "longTask",
+        2705073238,
+        50.03
+      ],
+      [
+        "autosave",
+        2706072678,
+        119.74
+      ],
+      [
+        "longTask",
+        2706193671,
+        50.05
+      ],
+      [
+        "longTask",
+        2707193954,
+        50.01
+      ],
+      [
+        "autosave",
+        2708072851,
+        117.55
+      ],
+      [
+        "longTask",
+        2708194097,
+        50
+      ],
+      [
+        "longTask",
+        2709195617,
+        50.01
+      ],
+      [
+        "autosave",
+        2710075019,
+        128.18
+      ],
+      [
+        "longTask",
+        2710205521,
+        50
+      ],
+      [
+        "resize",
+        2709073588,
+        1237.22
+      ],
+      [
+        "longTask",
+        2711206629,
+        50
+      ],
+      [
+        "autosave",
+        2712076246,
+        124.97
+      ],
+      [
+        "longTask",
+        2712206399,
+        50
+      ],
+      [
+        "longTask",
+        2713207111,
+        50
+      ],
+      [
+        "autosave",
+        2714076414,
+        118.87
+      ],
+      [
+        "longTask",
+        2714207866,
+        50
+      ],
+      [
+        "longTask",
+        2715210216,
+        50
+      ],
+      [
+        "resize",
+        2714074044,
+        1250.66
+      ],
+      [
+        "autosave",
+        2716077850,
+        123.81
+      ],
+      [
+        "longTask",
+        2716211332,
+        50
+      ],
+      [
+        "longTask",
+        2717211680,
+        50
+      ],
+      [
+        "autosave",
+        2718078369,
+        145.31
+      ],
+      [
+        "longTask",
+        2718225075,
+        50.01
+      ],
+      [
+        "longTask",
+        2719228754,
+        50
+      ],
+      [
+        "autosave",
+        2720094283,
+        172.11
+      ],
+      [
+        "longTask",
+        2720310488,
+        50
+      ],
+      [
+        "resize",
+        2719075253,
+        1851.87
+      ],
+      [
+        "longTask",
+        2721312057,
+        50
+      ],
+      [
+        "autosave",
+        2722094258,
+        131.64
+      ],
+      [
+        "longTask",
+        2722312837,
+        50.01
+      ],
+      [
+        "longTask",
+        2723313225,
+        50
+      ],
+      [
+        "autosave",
+        2724094998,
+        120.61
+      ],
+      [
+        "longTask",
+        2724313719,
+        50
+      ],
+      [
+        "resize",
+        2724075377,
+        1177.19
+      ],
+      [
+        "longTask",
+        2725313749,
+        50
+      ],
+      [
+        "autosave",
+        2726095646,
+        131.1
+      ],
+      [
+        "longTask",
+        2726314272,
+        50.01
+      ],
+      [
+        "longTask",
+        2727315260,
+        50
+      ],
+      [
+        "autosave",
+        2728096250,
+        143.32
+      ],
+      [
+        "longTask",
+        2728316497,
+        50
+      ],
+      [
+        "longTask",
+        2729317192,
+        50
+      ],
+      [
+        "autosave",
+        2730096015,
+        129.43
+      ],
+      [
+        "resize",
+        2729075365,
+        1184.65
+      ],
+      [
+        "longTask",
+        2730318541,
+        50
+      ],
+      [
+        "longTask",
+        2731319414,
+        50
+      ],
+      [
+        "autosave",
+        2732097562,
+        111.65
+      ],
+      [
+        "longTask",
+        2732320995,
+        50
+      ],
+      [
+        "longTask",
+        2733321661,
+        50
+      ],
+      [
+        "autosave",
+        2734097133,
+        129.3
+      ],
+      [
+        "longTask",
+        2734323129,
+        50.01
+      ],
+      [
+        "resize",
+        2734076883,
+        1175.34
+      ],
+      [
+        "longTask",
+        2735324092,
+        50
+      ],
+      [
+        "autosave",
+        2736098175,
+        122.86
+      ],
+      [
+        "longTask",
+        2736324950,
+        50.01
+      ],
+      [
+        "longTask",
+        2737325695,
+        50
+      ],
+      [
+        "autosave",
+        2738098786,
+        117.43
+      ],
+      [
+        "longTask",
+        2738326073,
+        50
+      ],
+      [
+        "longTask",
+        2739327985,
+        50
+      ],
+      [
+        "autosave",
+        2740101956,
+        118.36
+      ],
+      [
+        "resize",
+        2739076804,
+        1165.75
+      ],
+      [
+        "longTask",
+        2740327266,
+        50
+      ],
+      [
+        "longTask",
+        2741327522,
+        50
+      ],
+      [
+        "autosave",
+        2742102674,
+        109.38
+      ],
+      [
+        "longTask",
+        2742327976,
+        50.01
+      ],
+      [
+        "longTask",
+        2743327722,
+        50
+      ],
+      [
+        "autosave",
+        2744103158,
+        116.51
+      ],
+      [
+        "longTask",
+        2744327658,
+        50
+      ],
+      [
+        "resize",
+        2744077310,
+        1165.27
+      ],
+      [
+        "longTask",
+        2745327725,
+        50
+      ],
+      [
+        "autosave",
+        2746104731,
+        112.89
+      ],
+      [
+        "longTask",
+        2746328415,
+        50
+      ],
+      [
+        "longTask",
+        2747329490,
+        50
+      ],
+      [
+        "autosave",
+        2748105399,
+        117.2
+      ],
+      [
+        "longTask",
+        2748329626,
+        50
+      ],
+      [
+        "longTask",
+        2749332143,
+        50
+      ],
+      [
+        "autosave",
+        2750109191,
+        107.83
+      ],
+      [
+        "resize",
+        2749078241,
+        1162.25
+      ],
+      [
+        "longTask",
+        2750333375,
+        50
+      ],
+      [
+        "longTask",
+        2751334554,
+        50
+      ],
+      [
+        "autosave",
+        2752110049,
+        106.35
+      ],
+      [
+        "longTask",
+        2752335630,
+        50.01
+      ],
+      [
+        "longTask",
+        2753336869,
+        50
+      ],
+      [
+        "autosave",
+        2754110817,
+        105.81
+      ],
+      [
+        "longTask",
+        2754336744,
+        50
+      ],
+      [
+        "resize",
+        2754079617,
+        1159.43
+      ],
+      [
+        "longTask",
+        2755337232,
+        50
+      ],
+      [
+        "autosave",
+        2756110838,
+        104.63
+      ],
+      [
+        "longTask",
+        2756337377,
+        50
+      ],
+      [
+        "longTask",
+        2757337283,
+        50
+      ],
+      [
+        "autosave",
+        2758111906,
+        105.24
+      ],
+      [
+        "longTask",
+        2758338001,
+        50
+      ],
+      [
+        "longTask",
+        2759337848,
+        50
+      ],
+      [
+        "autosave",
+        2760112918,
+        103.51
+      ],
+      [
+        "resize",
+        2759080525,
+        1154.29
+      ],
+      [
+        "longTask",
+        2760337667,
+        50
+      ],
+      [
+        "longTask",
+        2761337166,
+        50
+      ],
+      [
+        "autosave",
+        2762113622,
+        105.33
+      ],
+      [
+        "longTask",
+        2762338068,
+        50
+      ],
+      [
+        "longTask",
+        2763338774,
+        50
+      ]
+    ]
+  },
+  "frameForwarding": {
+    "transport": "persistent",
+    "frames": 3697,
+    "status": {
+      "ok": 0,
+      "pending": 0,
+      "noTarget": 0,
+      "failed": 0,
+      "engineToViewerDirect": 3697
+    },
+    "transferMs": {
+      "n": 0
+    }
+  },
+  "playback": {
+    "window": {
+      "seconds": 60,
+      "contentFrameUs": 16667,
+      "displayPeriodUs": 8333.3
+    },
+    "clock": {
+      "pingOffsetVsTraceUs": -36,
+      "pingRttUs": 0
+    },
+    "frames": {
+      "expected": 3591,
+      "engineSkipped": 0,
+      "notDrawn": 7,
+      "drawnLate": 0,
+      "notPresented": 9,
+      "offSlot": 1544,
+      "drops": 16,
+      "presented": 3575
+    },
+    "jitterAbsMs": {
+      "n": 3575,
+      "p50": 3.388,
+      "p95": 9.703,
+      "p99": 24.538,
+      "max": 82.903,
+      "min": 0
+    },
+    "jitterMs": {
+      "n": 3575,
+      "p50": 0,
+      "p95": 8.677,
+      "p99": 24.538,
+      "max": 82.903,
+      "min": -10.723
+    },
+    "presentIntervalMs": {
+      "n": 3564,
+      "p50": 16.666,
+      "p95": 25.006,
+      "p99": 29.116,
+      "max": 83.843,
+      "min": -1.827
+    },
+    "intervalJitterAbsMs": {
+      "n": 3564,
+      "p50": 0.495,
+      "p95": 8.753,
+      "p99": 16.356,
+      "max": 67.176,
+      "min": 0
+    },
+    "irregularIntervals": 1342,
+    "pipelineDepthVsyncs": {
+      "1": 1030,
+      "2": 2030,
+      "3": 384,
+      "4": 77,
+      "5": 24,
+      "6": 15,
+      "7": 7,
+      "8": 5,
+      "9": 1,
+      "11": 1,
+      "12": 1
+    },
+    "rafIntervalMs": {
+      "n": 7092,
+      "p50": 8.3,
+      "p95": 9.9,
+      "p99": 13.1,
+      "max": 53.2,
+      "min": 2
+    },
+    "rafToPresentMs": {
+      "n": 3575,
+      "p50": 19.8,
+      "p95": 28.25,
+      "p99": 44.65,
+      "max": 103.87,
+      "min": 9.41
+    },
+    "gpuDoneToPresentMs": {
+      "n": 3575,
+      "p50": 182.88,
+      "p95": 191.03,
+      "p99": 207.14,
+      "max": 255.24,
+      "min": 159.3
+    },
+    "arrivalLeadMs": {
+      "n": 3604,
+      "p50": 163.76,
+      "p95": 165.45,
+      "p99": 165.83,
+      "max": 166.09,
+      "min": 121.26
+    },
+    "forwarderJsDelayMs": {
+      "n": 3604,
+      "p50": 0.04,
+      "p95": 0.06,
+      "p99": 0.09,
+      "max": 0.34,
+      "min": 0.02
+    },
+    "bridgeRecvToViewerMs": {
+      "n": 3604,
+      "p50": 0.11,
+      "p95": 0.21,
+      "p99": 0.33,
+      "max": 0.95,
+      "min": -0.05
+    },
+    "isolatedToMainWorldMs": {
+      "n": 3604,
+      "p50": 0,
+      "p95": 0.1,
+      "p99": 0.1,
+      "max": 0.2,
+      "min": 0
+    },
+    "integrity": {
+      "checked": 3597,
+      "ok": 3597,
+      "bad": [],
+      "skipped": 0
+    },
+    "release": {
+      "mode": "gpu-done",
+      "frames": 3597,
+      "submitToGpuDoneMs": {
+        "n": 3597,
+        "p50": 5.8,
+        "p95": 25.9,
+        "p99": 46.6,
+        "max": 115,
+        "min": 0.9
+      },
+      "submitToCallbackMs": {
+        "n": 0
+      },
+      "callbackMinusGpuDoneMs": {
+        "n": 0
+      },
+      "callbackBeforeGpuDone": 0,
+      "callbackMissing": 3597
+    },
+    "redraws": 0,
+    "viewerDropReasons": {
+      "late": 7
+    },
+    "irregularByLoadEvent": {
+      "none": 1216,
+      "longTask": 144,
+      "autosave": 91,
+      "autosave+longTask": 13,
+      "resize": 64,
+      "autosave+longTask+resize": 1,
+      "longTask+resize": 13,
+      "autosave+resize": 18
+    },
+    "missing": [
+      {
+        "k": 486,
+        "status": "not-presented",
+        "state": "STATE_DROPPED",
+        "near": "autosave+longTask"
+      },
+      {
+        "k": 487,
+        "status": "not-presented",
+        "state": "STATE_DROPPED",
+        "near": "autosave+longTask"
+      },
+      {
+        "k": 787,
+        "status": "not-presented",
+        "state": "STATE_DROPPED",
+        "near": "longTask"
+      },
+      {
+        "k": 788,
+        "status": "not-presented",
+        "state": "STATE_DROPPED",
+        "near": "longTask"
+      },
+      {
+        "k": 1008,
+        "status": "not-drawn",
+        "state": null,
+        "near": "none"
+      },
+      {
+        "k": 1009,
+        "status": "not-drawn",
+        "state": null,
+        "near": "none"
+      },
+      {
+        "k": 1010,
+        "status": "not-drawn",
+        "state": null,
+        "near": "none"
+      },
+      {
+        "k": 1016,
+        "status": "not-drawn",
+        "state": null,
+        "near": "none"
+      },
+      {
+        "k": 1019,
+        "status": "not-drawn",
+        "state": null,
+        "near": "none"
+      },
+      {
+        "k": 1029,
+        "status": "not-presented",
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1030,
+        "status": "not-presented",
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1033,
+        "status": "not-drawn",
+        "state": null,
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1061,
+        "status": "not-presented",
+        "state": "STATE_DROPPED",
+        "near": "none"
+      },
+      {
+        "k": 1092,
+        "status": "not-drawn",
+        "state": null,
+        "near": "autosave"
+      },
+      {
+        "k": 3135,
+        "status": "not-presented",
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 3136,
+        "status": "not-presented",
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      }
+    ],
+    "irregular": [
+      {
+        "k": 123,
+        "status": "off-slot",
+        "offsetMs": 7.41,
+        "rafMinusPtsMs": -1.6,
+        "rafToPresentMs": 29.76,
+        "near": "none"
+      },
+      {
+        "k": 125,
+        "status": "off-slot",
+        "offsetMs": -9.37,
+        "rafMinusPtsMs": -1.44,
+        "rafToPresentMs": 12.81,
+        "near": "none"
+      },
+      {
+        "k": 126,
+        "status": "off-slot",
+        "offsetMs": 23.49,
+        "rafMinusPtsMs": -1.9,
+        "rafToPresentMs": 46.14,
+        "near": "none"
+      },
+      {
+        "k": 127,
+        "status": "off-slot",
+        "offsetMs": 6.69,
+        "rafMinusPtsMs": -1.97,
+        "rafToPresentMs": 29.41,
+        "near": "none"
+      },
+      {
+        "k": 128,
+        "status": "off-slot",
+        "offsetMs": 14.99,
+        "rafMinusPtsMs": 6.56,
+        "rafToPresentMs": 29.18,
+        "near": "none"
+      },
+      {
+        "k": 129,
+        "status": "off-slot",
+        "offsetMs": 22.64,
+        "rafMinusPtsMs": 5.21,
+        "rafToPresentMs": 38.18,
+        "near": "none"
+      },
+      {
+        "k": 130,
+        "status": "off-slot",
+        "offsetMs": 22.32,
+        "rafMinusPtsMs": 5.54,
+        "rafToPresentMs": 37.52,
+        "near": "none"
+      },
+      {
+        "k": 131,
+        "status": "off-slot",
+        "offsetMs": 22.22,
+        "rafMinusPtsMs": 5.28,
+        "rafToPresentMs": 37.69,
+        "near": "none"
+      },
+      {
+        "k": 132,
+        "status": "off-slot",
+        "offsetMs": 22.19,
+        "rafMinusPtsMs": 5.41,
+        "rafToPresentMs": 37.52,
+        "near": "none"
+      },
+      {
+        "k": 133,
+        "status": "off-slot",
+        "offsetMs": 8.68,
+        "rafMinusPtsMs": 7.44,
+        "rafToPresentMs": 21.98,
+        "near": "none"
+      },
+      {
+        "k": 134,
+        "status": "off-slot",
+        "offsetMs": 9.2,
+        "rafMinusPtsMs": 0.28,
+        "rafToPresentMs": 29.67,
+        "near": "none"
+      },
+      {
+        "k": 135,
+        "status": "off-slot",
+        "offsetMs": 9.59,
+        "rafMinusPtsMs": 1.11,
+        "rafToPresentMs": 29.22,
+        "near": "none"
+      },
+      {
+        "k": 138,
+        "status": "off-slot",
+        "offsetMs": 9.7,
+        "rafMinusPtsMs": 1.21,
+        "rafToPresentMs": 29.24,
+        "near": "none"
+      },
+      {
+        "k": 143,
+        "status": "off-slot",
+        "offsetMs": -6.56,
+        "rafMinusPtsMs": 1.58,
+        "rafToPresentMs": 12.61,
+        "near": "none"
+      },
+      {
+        "k": 145,
+        "status": "off-slot",
+        "offsetMs": -7.05,
+        "rafMinusPtsMs": 1.14,
+        "rafToPresentMs": 12.55,
+        "near": "none"
+      },
+      {
+        "k": 147,
+        "status": "off-slot",
+        "offsetMs": 11.87,
+        "rafMinusPtsMs": 2.71,
+        "rafToPresentMs": 29.9,
+        "near": "none"
+      },
+      {
+        "k": 151,
+        "status": "off-slot",
+        "offsetMs": -8.12,
+        "rafMinusPtsMs": 0.04,
+        "rafToPresentMs": 12.59,
+        "near": "none"
+      },
+      {
+        "k": 154,
+        "status": "off-slot",
+        "offsetMs": 8.15,
+        "rafMinusPtsMs": -0.06,
+        "rafToPresentMs": 28.96,
+        "near": "none"
+      },
+      {
+        "k": 161,
+        "status": "off-slot",
+        "offsetMs": 4.39,
+        "rafMinusPtsMs": 4.53,
+        "rafToPresentMs": 20.61,
+        "near": "none"
+      },
+      {
+        "k": 162,
+        "status": "off-slot",
+        "offsetMs": 4.32,
+        "rafMinusPtsMs": 4.47,
+        "rafToPresentMs": 20.59,
+        "near": "none"
+      },
+      {
+        "k": 163,
+        "status": "off-slot",
+        "offsetMs": 4.29,
+        "rafMinusPtsMs": 4.5,
+        "rafToPresentMs": 20.53,
+        "near": "none"
+      },
+      {
+        "k": 165,
+        "status": "off-slot",
+        "offsetMs": 4.25,
+        "rafMinusPtsMs": 4.37,
+        "rafToPresentMs": 20.63,
+        "near": "none"
+      },
+      {
+        "k": 166,
+        "status": "off-slot",
+        "offsetMs": 4.24,
+        "rafMinusPtsMs": 4.3,
+        "rafToPresentMs": 20.69,
+        "near": "none"
+      },
+      {
+        "k": 167,
+        "status": "off-slot",
+        "offsetMs": 4.23,
+        "rafMinusPtsMs": 4.34,
+        "rafToPresentMs": 20.64,
+        "near": "none"
+      },
+      {
+        "k": 168,
+        "status": "off-slot",
+        "offsetMs": 4.22,
+        "rafMinusPtsMs": 4.47,
+        "rafToPresentMs": 20.5,
+        "near": "none"
+      },
+      {
+        "k": 169,
+        "status": "off-slot",
+        "offsetMs": 4.21,
+        "rafMinusPtsMs": 4.3,
+        "rafToPresentMs": 20.66,
+        "near": "none"
+      },
+      {
+        "k": 170,
+        "status": "off-slot",
+        "offsetMs": 4.19,
+        "rafMinusPtsMs": 4.43,
+        "rafToPresentMs": 20.5,
+        "near": "none"
+      },
+      {
+        "k": 171,
+        "status": "off-slot",
+        "offsetMs": 4.18,
+        "rafMinusPtsMs": 4.17,
+        "rafToPresentMs": 20.76,
+        "near": "none"
+      },
+      {
+        "k": 173,
+        "status": "off-slot",
+        "offsetMs": -4.18,
+        "rafMinusPtsMs": 4.34,
+        "rafToPresentMs": 12.23,
+        "near": "none"
+      },
+      {
+        "k": 179,
+        "status": "off-slot",
+        "offsetMs": -5.08,
+        "rafMinusPtsMs": 2.24,
+        "rafToPresentMs": 13.44,
+        "near": "longTask"
+      },
+      {
+        "k": 185,
+        "status": "off-slot",
+        "offsetMs": -9.54,
+        "rafMinusPtsMs": -0.26,
+        "rafToPresentMs": 11.47,
+        "near": "none"
+      },
+      {
+        "k": 187,
+        "status": "off-slot",
+        "offsetMs": 7.54,
+        "rafMinusPtsMs": 5.9,
+        "rafToPresentMs": 22.39,
+        "near": "none"
+      },
+      {
+        "k": 188,
+        "status": "off-slot",
+        "offsetMs": 12.08,
+        "rafMinusPtsMs": -0.66,
+        "rafToPresentMs": 33.49,
+        "near": "none"
+      },
+      {
+        "k": 189,
+        "status": "off-slot",
+        "offsetMs": 36.54,
+        "rafMinusPtsMs": 4.07,
+        "rafToPresentMs": 53.21,
+        "near": "none"
+      },
+      {
+        "k": 190,
+        "status": "off-slot",
+        "offsetMs": 24.82,
+        "rafMinusPtsMs": 1.7,
+        "rafToPresentMs": 43.87,
+        "near": "none"
+      },
+      {
+        "k": 191,
+        "status": "off-slot",
+        "offsetMs": 21.63,
+        "rafMinusPtsMs": 12.17,
+        "rafToPresentMs": 30.21,
+        "near": "none"
+      },
+      {
+        "k": 192,
+        "status": "off-slot",
+        "offsetMs": 12.64,
+        "rafMinusPtsMs": 3.31,
+        "rafToPresentMs": 30.08,
+        "near": "none"
+      },
+      {
+        "k": 195,
+        "status": "off-slot",
+        "offsetMs": 11,
+        "rafMinusPtsMs": 3.31,
+        "rafToPresentMs": 28.44,
+        "near": "none"
+      },
+      {
+        "k": 204,
+        "status": "off-slot",
+        "offsetMs": 7.18,
+        "rafMinusPtsMs": -1.49,
+        "rafToPresentMs": 29.42,
+        "near": "none"
+      },
+      {
+        "k": 213,
+        "status": "off-slot",
+        "offsetMs": 6.29,
+        "rafMinusPtsMs": 5.61,
+        "rafToPresentMs": 21.43,
+        "near": "none"
+      }
+    ]
+  }
+}

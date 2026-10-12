@@ -1,0 +1,1449 @@
+{
+  "run": "latency-bgra-load-persistent",
+  "scenario": "latency",
+  "config": {
+    "scenario": "latency",
+    "format": "bgra",
+    "width": 3840,
+    "height": 2160,
+    "poolSize": 8,
+    "leadFrames": 4,
+    "extraPasses": 0,
+    "durationMs": 20000,
+    "load": {
+      "longTask": true,
+      "autosave": true,
+      "agent": true,
+      "resize": true
+    },
+    "drawPath": "copy",
+    "hdrCanvas": false,
+    "latencyModes": [
+      "baseline",
+      "gesture",
+      "orbit",
+      "walk"
+    ],
+    "inputHz": 120,
+    "releaseMode": "gpu-done",
+    "transport": "persistent",
+    "redraw": "none",
+    "onscreen": false,
+    "edrOnscreen": false,
+    "trace": true
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54",
+    "node": "24.18.1"
+  },
+  "display": {
+    "bounds": {
+      "x": 0,
+      "y": 0,
+      "width": 1512,
+      "height": 982
+    },
+    "scaleFactor": 2,
+    "hz": 120.0006103515625,
+    "colorDepth": 30,
+    "colorSpace": "{primaries:P3, transfer:{0.0777*x + 0.0000 if abs(x) < 0.0450 else sign(x)*((0.9495*abs(x) + 0.0495)**2.3955 + 0.0003)}, matrix:RGB, range:FULL}"
+  },
+  "machineLoad": {
+    "before": {
+      "loadavg": [
+        6.52,
+        5.97,
+        6.82
+      ],
+      "busyProcesses": [
+        {
+          "cpu": 24.7,
+          "name": "other"
+        },
+        {
+          "cpu": 35.2,
+          "name": "other"
+        },
+        {
+          "cpu": 100,
+          "name": "s4-render"
+        },
+        {
+          "cpu": 100,
+          "name": "s3-shaders"
+        },
+        {
+          "cpu": 99.1,
+          "name": "other"
+        }
+      ]
+    },
+    "after": {
+      "loadavg": [
+        10.03,
+        6.96,
+        7.09
+      ],
+      "busyProcesses": [
+        {
+          "cpu": 60,
+          "name": "other"
+        },
+        {
+          "cpu": 96,
+          "name": "other"
+        },
+        {
+          "cpu": 51.7,
+          "name": "other"
+        },
+        {
+          "cpu": 69.8,
+          "name": "other"
+        },
+        {
+          "cpu": 104.3,
+          "name": "Electron Helper"
+        },
+        {
+          "cpu": 34.7,
+          "name": "other"
+        },
+        {
+          "cpu": 97.3,
+          "name": "s4-render"
+        },
+        {
+          "cpu": 97.2,
+          "name": "s3-shaders"
+        },
+        {
+          "cpu": 167.7,
+          "name": "rustc"
+        },
+        {
+          "cpu": 30.7,
+          "name": "rustc"
+        }
+      ]
+    }
+  },
+  "errors": [],
+  "bridge": {
+    "policy": "unsigned-dev-bypass",
+    "serviceNameLength": 56,
+    "expected": {
+      "pid": 67727,
+      "pidversion": 108072,
+      "spawnUs": 1131
+    },
+    "accepted": {
+      "pid": 67727,
+      "pidversion": 108072,
+      "atUs": 3031548490
+    },
+    "gone": 3122391765
+  },
+  "engine": {
+    "adapter": "Apple M4 Max",
+    "backend": "Metal",
+    "width": 3840,
+    "height": 2160,
+    "format": "bgra",
+    "pool_size": 8,
+    "pool_bytes": 265420800,
+    "lead_frames": 4,
+    "extra_passes": 0,
+    "bridge_pid": 67700,
+    "checkin_us": 173
+  },
+  "engineStats": {
+    "busy": [],
+    "stats": {
+      "frames": 6306,
+      "gesture_frames": 6213,
+      "gpu_us_max": 9636,
+      "gpu_us_sum": 10358999,
+      "late_skipped": 0,
+      "max_busy_slots": 6,
+      "max_retime_us": 4140,
+      "playback_frames": 93,
+      "pool_exhausted_waits": 0,
+      "regrids": 20,
+      "release_mismatches": 0,
+      "releases": 6306,
+      "send_failures": 0
+    }
+  },
+  "imports": {
+    "surfaces": [
+      {
+        "pool": 0,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.43487500000003365
+      },
+      {
+        "pool": 1,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.1032910000000129
+      },
+      {
+        "pool": 2,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.10341599999998152
+      },
+      {
+        "pool": 3,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.0957920000000172
+      },
+      {
+        "pool": 4,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.08312499999999545
+      },
+      {
+        "pool": 5,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.09224999999997863
+      },
+      {
+        "pool": 6,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.09520799999995688
+      },
+      {
+        "pool": 7,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.12266699999997854
+      }
+    ],
+    "persistentSends": [
+      {
+        "pool": 0,
+        "ms": 1.21
+      },
+      {
+        "pool": 1,
+        "ms": 1.027
+      },
+      {
+        "pool": 2,
+        "ms": 0.951
+      },
+      {
+        "pool": 3,
+        "ms": 0.845
+      },
+      {
+        "pool": 4,
+        "ms": 0.774
+      },
+      {
+        "pool": 5,
+        "ms": 0.696
+      },
+      {
+        "pool": 6,
+        "ms": 0.61
+      },
+      {
+        "pool": 7,
+        "ms": 0.513
+      }
+    ],
+    "allReleased": 8,
+    "releasedAfterTeardown": 8,
+    "heldAfterTeardown": 0
+  },
+  "sendsPerImport": {
+    "0": 1,
+    "1": 1,
+    "2": 1,
+    "3": 1,
+    "4": 1,
+    "5": 1,
+    "6": 1,
+    "7": 1
+  },
+  "receiver": {
+    "received": 0,
+    "receiveErrors": 0,
+    "errors": [],
+    "releaseMode": "gpu-done",
+    "releasesSent": 6306,
+    "persistentSlots": 8,
+    "persistentErrors": 0,
+    "persistentReleased": 8
+  },
+  "load": {
+    "documentBytes": 7061889,
+    "longTasks": {
+      "n": 83,
+      "ms": {
+        "n": 83,
+        "p50": 50.00037500000326,
+        "max": 50.030791000000136
+      }
+    },
+    "autosaves": {
+      "n": 41,
+      "mainThreadMs": {
+        "n": 41,
+        "p50": 109.49300000000221,
+        "max": 260.179541000005
+      },
+      "totalMs": {
+        "n": 41,
+        "p50": 113.97741700000188,
+        "max": 362.38787500000035
+      }
+    },
+    "agent": {
+      "requests": 1500,
+      "replies": 1500,
+      "replyBytes": 118038780,
+      "mainUs": {
+        "n": 1500,
+        "p50": 69.79100000171456,
+        "max": 327.95800000894815
+      }
+    },
+    "resizes": {
+      "n": 16,
+      "steps": 976
+    },
+    "events": [
+      [
+        "longTask",
+        3034955834,
+        50.04
+      ],
+      [
+        "autosave",
+        3035956315,
+        113.86
+      ],
+      [
+        "longTask",
+        3036070981,
+        50.03
+      ],
+      [
+        "longTask",
+        3037070584,
+        50
+      ],
+      [
+        "autosave",
+        3037956847,
+        120.19
+      ],
+      [
+        "longTask",
+        3038078018,
+        50
+      ],
+      [
+        "longTask",
+        3039080036,
+        50
+      ],
+      [
+        "autosave",
+        3039959570,
+        111.52
+      ],
+      [
+        "longTask",
+        3040081161,
+        50.01
+      ],
+      [
+        "resize",
+        3038957453,
+        1208.78
+      ],
+      [
+        "longTask",
+        3041082060,
+        50
+      ],
+      [
+        "autosave",
+        3041959361,
+        112.65
+      ],
+      [
+        "longTask",
+        3042082909,
+        50
+      ],
+      [
+        "longTask",
+        3043083555,
+        50
+      ],
+      [
+        "autosave",
+        3043959777,
+        108.33
+      ],
+      [
+        "longTask",
+        3044083453,
+        50
+      ],
+      [
+        "longTask",
+        3045086256,
+        50
+      ],
+      [
+        "resize",
+        3043958551,
+        1195.74
+      ],
+      [
+        "autosave",
+        3045959396,
+        108.91
+      ],
+      [
+        "longTask",
+        3046086849,
+        50
+      ],
+      [
+        "longTask",
+        3047087296,
+        50
+      ],
+      [
+        "autosave",
+        3047959551,
+        107.34
+      ],
+      [
+        "longTask",
+        3048087761,
+        50
+      ],
+      [
+        "longTask",
+        3049087865,
+        50
+      ],
+      [
+        "autosave",
+        3049959460,
+        107.16
+      ],
+      [
+        "longTask",
+        3050092968,
+        50
+      ],
+      [
+        "resize",
+        3048958377,
+        1201.79
+      ],
+      [
+        "longTask",
+        3051092664,
+        50
+      ],
+      [
+        "autosave",
+        3051959334,
+        104.7
+      ],
+      [
+        "longTask",
+        3052092650,
+        50
+      ],
+      [
+        "longTask",
+        3053092679,
+        50
+      ],
+      [
+        "autosave",
+        3053959505,
+        106.03
+      ],
+      [
+        "longTask",
+        3054092700,
+        50
+      ],
+      [
+        "longTask",
+        3055094708,
+        50
+      ],
+      [
+        "resize",
+        3053958154,
+        1226.84
+      ],
+      [
+        "autosave",
+        3055959436,
+        108.52
+      ],
+      [
+        "longTask",
+        3056094763,
+        50.01
+      ],
+      [
+        "longTask",
+        3057094985,
+        50
+      ],
+      [
+        "autosave",
+        3057959456,
+        109.49
+      ],
+      [
+        "longTask",
+        3058094131,
+        50
+      ],
+      [
+        "longTask",
+        3059094363,
+        50
+      ],
+      [
+        "autosave",
+        3059959342,
+        106.26
+      ],
+      [
+        "longTask",
+        3060094347,
+        50.01
+      ],
+      [
+        "resize",
+        3058959011,
+        1186.62
+      ],
+      [
+        "longTask",
+        3061095485,
+        50
+      ],
+      [
+        "autosave",
+        3061959122,
+        106.96
+      ],
+      [
+        "longTask",
+        3062096217,
+        50
+      ],
+      [
+        "longTask",
+        3063097243,
+        50
+      ],
+      [
+        "autosave",
+        3063959209,
+        106.04
+      ],
+      [
+        "longTask",
+        3064097724,
+        50.01
+      ],
+      [
+        "resize",
+        3063958813,
+        1138.95
+      ],
+      [
+        "longTask",
+        3065098999,
+        50
+      ],
+      [
+        "autosave",
+        3065959248,
+        107.79
+      ],
+      [
+        "longTask",
+        3066099175,
+        50
+      ],
+      [
+        "longTask",
+        3067099688,
+        50
+      ],
+      [
+        "autosave",
+        3067959354,
+        103.83
+      ],
+      [
+        "longTask",
+        3068100247,
+        50
+      ],
+      [
+        "longTask",
+        3069100475,
+        50
+      ],
+      [
+        "autosave",
+        3069959924,
+        108.06
+      ],
+      [
+        "longTask",
+        3070101237,
+        50.01
+      ],
+      [
+        "resize",
+        3068958536,
+        1193.75
+      ],
+      [
+        "longTask",
+        3071101523,
+        50
+      ],
+      [
+        "autosave",
+        3071959568,
+        109.63
+      ],
+      [
+        "longTask",
+        3072102332,
+        50.01
+      ],
+      [
+        "longTask",
+        3073103383,
+        50
+      ],
+      [
+        "autosave",
+        3073959460,
+        107.38
+      ],
+      [
+        "longTask",
+        3074105286,
+        50
+      ],
+      [
+        "resize",
+        3073959432,
+        1136.61
+      ],
+      [
+        "longTask",
+        3075105186,
+        50
+      ],
+      [
+        "autosave",
+        3075961048,
+        106.75
+      ],
+      [
+        "longTask",
+        3076106847,
+        50
+      ],
+      [
+        "longTask",
+        3077106798,
+        50
+      ],
+      [
+        "autosave",
+        3077961309,
+        111.94
+      ],
+      [
+        "longTask",
+        3078106110,
+        50.01
+      ],
+      [
+        "longTask",
+        3079106674,
+        50
+      ],
+      [
+        "autosave",
+        3079962143,
+        108.86
+      ],
+      [
+        "resize",
+        3078960049,
+        1146.74
+      ],
+      [
+        "longTask",
+        3080108163,
+        50
+      ],
+      [
+        "longTask",
+        3081109463,
+        50
+      ],
+      [
+        "autosave",
+        3081963204,
+        108.2
+      ],
+      [
+        "longTask",
+        3082110003,
+        50.01
+      ],
+      [
+        "longTask",
+        3083111508,
+        50
+      ],
+      [
+        "autosave",
+        3083964060,
+        104.13
+      ],
+      [
+        "longTask",
+        3084112043,
+        50.01
+      ],
+      [
+        "resize",
+        3083960640,
+        1139.86
+      ],
+      [
+        "longTask",
+        3085113663,
+        50
+      ],
+      [
+        "autosave",
+        3085964631,
+        104.39
+      ],
+      [
+        "longTask",
+        3086114229,
+        50.01
+      ],
+      [
+        "longTask",
+        3087114673,
+        50
+      ],
+      [
+        "autosave",
+        3087964702,
+        104.53
+      ],
+      [
+        "longTask",
+        3088114715,
+        50
+      ],
+      [
+        "longTask",
+        3089114546,
+        50
+      ],
+      [
+        "autosave",
+        3089964086,
+        121.73
+      ],
+      [
+        "longTask",
+        3090114155,
+        50
+      ],
+      [
+        "resize",
+        3088961388,
+        1204.02
+      ],
+      [
+        "longTask",
+        3091114538,
+        50
+      ],
+      [
+        "autosave",
+        3091964383,
+        201.48
+      ],
+      [
+        "longTask",
+        3092168160,
+        50.01
+      ],
+      [
+        "longTask",
+        3093169059,
+        50.01
+      ],
+      [
+        "autosave",
+        3093964520,
+        231.43
+      ],
+      [
+        "longTask",
+        3094198769,
+        50.03
+      ],
+      [
+        "longTask",
+        3095198201,
+        50.01
+      ],
+      [
+        "resize",
+        3093961790,
+        1310.4
+      ],
+      [
+        "autosave",
+        3095964326,
+        229.63
+      ],
+      [
+        "longTask",
+        3096198222,
+        50
+      ],
+      [
+        "longTask",
+        3097198016,
+        50
+      ],
+      [
+        "autosave",
+        3097964318,
+        225.86
+      ],
+      [
+        "longTask",
+        3098200790,
+        50.01
+      ],
+      [
+        "longTask",
+        3099205881,
+        50.01
+      ],
+      [
+        "autosave",
+        3099964530,
+        226.33
+      ],
+      [
+        "longTask",
+        3100206259,
+        50.01
+      ],
+      [
+        "resize",
+        3098962132,
+        1329.89
+      ],
+      [
+        "longTask",
+        3101206376,
+        50
+      ],
+      [
+        "autosave",
+        3101964436,
+        260.18
+      ],
+      [
+        "longTask",
+        3102229607,
+        50.01
+      ],
+      [
+        "longTask",
+        3103229453,
+        50.01
+      ],
+      [
+        "autosave",
+        3103964859,
+        246.02
+      ],
+      [
+        "longTask",
+        3104229991,
+        50.01
+      ],
+      [
+        "longTask",
+        3105229598,
+        50
+      ],
+      [
+        "resize",
+        3103962976,
+        1335.22
+      ],
+      [
+        "autosave",
+        3105964192,
+        238.77
+      ],
+      [
+        "longTask",
+        3106229612,
+        50.01
+      ],
+      [
+        "longTask",
+        3107229545,
+        50
+      ],
+      [
+        "autosave",
+        3107964284,
+        243.79
+      ],
+      [
+        "longTask",
+        3108229567,
+        50
+      ],
+      [
+        "longTask",
+        3109230962,
+        50
+      ],
+      [
+        "autosave",
+        3109967602,
+        234.3
+      ],
+      [
+        "longTask",
+        3110235316,
+        50.01
+      ],
+      [
+        "resize",
+        3108962819,
+        1325.19
+      ],
+      [
+        "longTask",
+        3111236444,
+        50
+      ],
+      [
+        "autosave",
+        3111968615,
+        234.38
+      ],
+      [
+        "longTask",
+        3112237498,
+        50.01
+      ],
+      [
+        "longTask",
+        3113237660,
+        50
+      ],
+      [
+        "autosave",
+        3113969502,
+        239.52
+      ],
+      [
+        "longTask",
+        3114238017,
+        50.01
+      ],
+      [
+        "longTask",
+        3115243726,
+        50
+      ],
+      [
+        "resize",
+        3113962658,
+        1337.99
+      ],
+      [
+        "autosave",
+        3115970324,
+        242.48
+      ],
+      [
+        "longTask",
+        3116244150,
+        50.01
+      ],
+      [
+        "longTask",
+        3117245325,
+        50
+      ]
+    ]
+  },
+  "frameForwarding": {
+    "transport": "persistent",
+    "frames": 6306,
+    "status": {
+      "ok": 0,
+      "pending": 0,
+      "noTarget": 0,
+      "failed": 0,
+      "engineToViewerDirect": 6306
+    },
+    "transferMs": {
+      "n": 0
+    }
+  },
+  "latency": {
+    "baseline": {
+      "stagesMs": {
+        "handlerToRenderStart": {
+          "n": 0
+        },
+        "render": {
+          "n": 0
+        },
+        "gpuDoneToNativeRecv": {
+          "n": 0
+        },
+        "nativeRecvToForwarderJs": {
+          "n": 0
+        },
+        "forwarderJsToReceiver": {
+          "n": 0
+        },
+        "receiverToMainWorld": {
+          "n": 0
+        },
+        "mainWorldToRaf": {
+          "n": 0
+        },
+        "rafToPresent": {
+          "n": 1865,
+          "p50": 11.59,
+          "p95": 12.48,
+          "p99": 19.92,
+          "max": 20.8,
+          "min": 9.4
+        }
+      },
+      "events": 2401,
+      "dispatches": 1865,
+      "draws": 1865,
+      "unmatched": 0,
+      "unpresented": 0,
+      "pointerToPixelMs": {
+        "n": 2401,
+        "p50": 19.81,
+        "p95": 53.24,
+        "p99": 111.25,
+        "max": 177.79,
+        "min": 11.15
+      },
+      "generatedToEventTimestampMs": {
+        "n": 1865,
+        "p50": 0.08,
+        "p95": 0.67,
+        "p99": 1.74,
+        "max": 7.17,
+        "min": -0.04
+      },
+      "eventToHandlerMs": {
+        "n": 1865,
+        "p50": 7.7,
+        "p95": 8.5,
+        "p99": 8.7,
+        "max": 10.6,
+        "min": 0
+      },
+      "integrity": {
+        "checked": 0,
+        "ok": 0,
+        "bad": [],
+        "skipped": 0
+      },
+      "clock": {
+        "pingOffsetVsTraceUs": -9
+      }
+    },
+    "gesture": {
+      "stagesMs": {
+        "handlerToRenderStart": {
+          "n": 2079,
+          "p50": 0.02,
+          "p95": 0.1,
+          "p99": 0.12,
+          "max": 1.38,
+          "min": -0.09
+        },
+        "render": {
+          "n": 2079,
+          "p50": 1.11,
+          "p95": 2.2,
+          "p99": 3.54,
+          "max": 8.72,
+          "min": 0.57
+        },
+        "gpuDoneToNativeRecv": {
+          "n": 2079,
+          "p50": 0.01,
+          "p95": 0.01,
+          "p99": 0.01,
+          "max": 0.02,
+          "min": 0
+        },
+        "nativeRecvToForwarderJs": {
+          "n": 2079,
+          "p50": 0.05,
+          "p95": 0.07,
+          "p99": 0.09,
+          "max": 0.31,
+          "min": 0.02
+        },
+        "forwarderJsToReceiver": {
+          "n": 2079,
+          "p50": 0.11,
+          "p95": 0.19,
+          "p99": 0.21,
+          "max": 0.39,
+          "min": -0.01
+        },
+        "receiverToMainWorld": {
+          "n": 2079,
+          "p50": 0,
+          "p95": 0.1,
+          "p99": 0.1,
+          "max": 0.2,
+          "min": 0
+        },
+        "mainWorldToRaf": {
+          "n": 2079,
+          "p50": 6.8,
+          "p95": 7.4,
+          "p99": 7.8,
+          "max": 8.2,
+          "min": -0.2
+        },
+        "rafToPresent": {
+          "n": 2079,
+          "p50": 11.6,
+          "p95": 19.94,
+          "p99": 20.01,
+          "max": 20.78,
+          "min": 9.43
+        }
+      },
+      "events": 2401,
+      "dispatches": 2084,
+      "draws": 2079,
+      "unmatched": 0,
+      "unpresented": 0,
+      "pointerToPixelMs": {
+        "n": 2401,
+        "p50": 22.08,
+        "p95": 63.24,
+        "p99": 117.72,
+        "max": 138.58,
+        "min": 18.63
+      },
+      "generatedToEventTimestampMs": {
+        "n": 2084,
+        "p50": 0.09,
+        "p95": 0.17,
+        "p99": 0.84,
+        "max": 10.95,
+        "min": -0.04
+      },
+      "eventToHandlerMs": {
+        "n": 2084,
+        "p50": 1.9,
+        "p95": 6.4,
+        "p99": 6.8,
+        "max": 8.8,
+        "min": 0.2
+      },
+      "integrity": {
+        "checked": 2079,
+        "ok": 2079,
+        "bad": [],
+        "skipped": 0
+      },
+      "clock": {
+        "pingOffsetVsTraceUs": 7
+      }
+    },
+    "orbit": {
+      "stagesMs": {
+        "handlerToRenderStart": {
+          "n": 2080,
+          "p50": 0.09,
+          "p95": 0.17,
+          "p99": 0.22,
+          "max": 1.6,
+          "min": -0.04
+        },
+        "render": {
+          "n": 2080,
+          "p50": 1.78,
+          "p95": 4.57,
+          "p99": 5.9,
+          "max": 7.87,
+          "min": 0.7
+        },
+        "gpuDoneToNativeRecv": {
+          "n": 2080,
+          "p50": 0.01,
+          "p95": 0.01,
+          "p99": 0.01,
+          "max": 0.02,
+          "min": 0
+        },
+        "nativeRecvToForwarderJs": {
+          "n": 2080,
+          "p50": 0.05,
+          "p95": 0.09,
+          "p99": 0.47,
+          "max": 6.75,
+          "min": 0.02
+        },
+        "forwarderJsToReceiver": {
+          "n": 2080,
+          "p50": 0.08,
+          "p95": 0.16,
+          "p99": 0.21,
+          "max": 0.83,
+          "min": -0.05
+        },
+        "receiverToMainWorld": {
+          "n": 2080,
+          "p50": 0,
+          "p95": 0.1,
+          "p99": 0.1,
+          "max": 0.2,
+          "min": 0
+        },
+        "mainWorldToRaf": {
+          "n": 2080,
+          "p50": 6.1,
+          "p95": 7.1,
+          "p99": 7.7,
+          "max": 8.8,
+          "min": 0
+        },
+        "rafToPresent": {
+          "n": 2079,
+          "p50": 12.25,
+          "p95": 19.99,
+          "p99": 20.54,
+          "max": 53.18,
+          "min": 11.38
+        }
+      },
+      "events": 2401,
+      "dispatches": 2082,
+      "draws": 2080,
+      "unmatched": 0,
+      "unpresented": 1,
+      "pointerToPixelMs": {
+        "n": 2400,
+        "p50": 26.78,
+        "p95": 75.79,
+        "p99": 184.15,
+        "max": 267.44,
+        "min": 20.9
+      },
+      "generatedToEventTimestampMs": {
+        "n": 2082,
+        "p50": 0.04,
+        "p95": 0.56,
+        "p99": 2.32,
+        "max": 97.81,
+        "min": -0.08
+      },
+      "eventToHandlerMs": {
+        "n": 2082,
+        "p50": 5.7,
+        "p95": 6.5,
+        "p99": 6.8,
+        "max": 8.4,
+        "min": 0.2
+      },
+      "integrity": {
+        "checked": 2080,
+        "ok": 2080,
+        "bad": [],
+        "skipped": 0
+      },
+      "clock": {
+        "pingOffsetVsTraceUs": -45
+      }
+    },
+    "walk": {
+      "stagesMs": {
+        "handlerToRenderStart": {
+          "n": 1921,
+          "p50": 0.13,
+          "p95": 0.24,
+          "p99": 1.11,
+          "max": 3.88,
+          "min": -0.01
+        },
+        "render": {
+          "n": 1921,
+          "p50": 1.13,
+          "p95": 3.96,
+          "p99": 5.44,
+          "max": 6.86,
+          "min": 0.65
+        },
+        "gpuDoneToNativeRecv": {
+          "n": 1921,
+          "p50": 0.01,
+          "p95": 0.01,
+          "p99": 0.01,
+          "max": 0.02,
+          "min": 0
+        },
+        "nativeRecvToForwarderJs": {
+          "n": 1921,
+          "p50": 0.07,
+          "p95": 0.67,
+          "p99": 2.38,
+          "max": 7.38,
+          "min": 0.03
+        },
+        "forwarderJsToReceiver": {
+          "n": 1921,
+          "p50": 2.44,
+          "p95": 6.32,
+          "p99": 6.73,
+          "max": 7.63,
+          "min": 0.01
+        },
+        "receiverToMainWorld": {
+          "n": 1921,
+          "p50": 0,
+          "p95": 0.1,
+          "p99": 0.1,
+          "max": 0.2,
+          "min": 0
+        },
+        "mainWorldToRaf": {
+          "n": 1921,
+          "p50": 7.4,
+          "p95": 8.4,
+          "p99": 8.6,
+          "max": 10,
+          "min": 0.3
+        },
+        "rafToPresent": {
+          "n": 1920,
+          "p50": 19.91,
+          "p95": 20.63,
+          "p99": 20.95,
+          "max": 53.22,
+          "min": 8.87
+        }
+      },
+      "events": 2401,
+      "dispatches": 2401,
+      "draws": 1921,
+      "unmatched": 0,
+      "unpresented": 1,
+      "pointerToPixelMs": {
+        "n": 2400,
+        "p50": 31.65,
+        "p95": 173.25,
+        "p99": 256.34,
+        "max": 291.52,
+        "min": 17.14
+      },
+      "generatedToEventTimestampMs": {
+        "n": 2401,
+        "p50": 0.13,
+        "p95": 141.01,
+        "p99": 222.03,
+        "max": 256.86,
+        "min": -0.04
+      },
+      "eventToHandlerMs": {
+        "n": 2401,
+        "p50": 0.2,
+        "p95": 0.4,
+        "p99": 0.5,
+        "max": 1.9,
+        "min": 0
+      },
+      "integrity": {
+        "checked": 1921,
+        "ok": 1921,
+        "bad": [],
+        "skipped": 0
+      },
+      "clock": {
+        "pingOffsetVsTraceUs": -53
+      }
+    }
+  }
+}
