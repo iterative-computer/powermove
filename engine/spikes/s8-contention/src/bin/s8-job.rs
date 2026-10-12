@@ -246,8 +246,15 @@ impl Ctl {
     /// Frame alignment: true if A's frame for the current period is done and a slice
     /// of `est_ns` started now ends `guard_ns` before A's next tick.
     fn align_ok(&self, now: u64, est_ns: u64, guard_ns: u64) -> bool {
-        if !self.playback || self.last_done_tick == 0 || self.period == 0 {
+        if !self.playback {
             return true;
+        }
+        if self.last_done_tick == 0 || self.period == 0 {
+            // Playback started but A's frame phase is not known yet (no two finished
+            // frames): hold rather than guess. Without this the first playback frames ran
+            // alongside a slice (run3: gate-pause-vt30 frame 0 at 18.4 ms, 13.6 ms of it
+            // overlapped by B).
+            return false;
         }
         if now < self.last_done_tick {
             return false;
@@ -947,5 +954,71 @@ fn supervise(blender: &mut Option<blender::Blender>, ctl: &Ctl) {
             now < ctl.yield_until,
             now.saturating_sub(ctl.playback_since),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MS: u64 = 1_000_000;
+
+    #[test]
+    fn align_holds_until_the_frame_phase_is_known() {
+        let mut c = Ctl::default();
+        // Not playing: always free to submit.
+        assert!(c.align_ok(5 * MS, 2 * MS, MS));
+        c.playback = true;
+        // Playing, no finished frame yet: hold.
+        assert!(!c.align_ok(5 * MS, 2 * MS, MS));
+        c.last_done_tick = 100 * MS;
+        assert!(!c.align_ok(105 * MS, 2 * MS, MS), "period still unknown");
+        c.period = 16 * MS;
+        // A's frame for the period starting at 100 ms is done; a 2 ms slice at 105 ms
+        // ends at 107 ms, well before 116 ms minus the 1 ms guard.
+        assert!(c.align_ok(105 * MS, 2 * MS, MS));
+        // Too close to the next tick.
+        assert!(!c.align_ok(113 * MS + 1, 2 * MS, MS));
+        // Before the tick of the last finished frame (clock skew): hold.
+        assert!(!c.align_ok(99 * MS, 2 * MS, MS));
+        // A full period after the last finished frame: A's next frame is not done yet.
+        assert!(!c.align_ok(117 * MS, 2 * MS, MS));
+    }
+
+    #[test]
+    fn misses_open_and_extend_yield_windows() {
+        let path = std::env::temp_dir().join(format!("s8-job-test-{}.fifo", std::process::id()));
+        let path = path.to_str().unwrap().to_string();
+        signal::make_fifo(&path).unwrap();
+        let mut rx = Some(signal::Receiver::open(&path).unwrap());
+        let mut tx = signal::Sender::open(&path).unwrap();
+        let mut c = Ctl::default();
+        tx.send(signal::Kind::PlaybackStart);
+        tx.send_tick(signal::Kind::FrameOk, 1_000);
+        tx.send_tick(signal::Kind::FrameOk, 1_000 + 16 * MS);
+        c.drain(&mut rx, YieldOn::Miss, true, 100 * MS);
+        assert!(c.playback);
+        assert_eq!(c.period, 16 * MS);
+        assert_eq!(c.yields, 0);
+        // At-risk does not yield under yield-on miss; a miss does.
+        tx.send_tick(signal::Kind::AtRisk, 1_000 + 32 * MS);
+        c.drain(&mut rx, YieldOn::Miss, true, 100 * MS);
+        assert_eq!(c.yields, 0);
+        tx.send_tick(signal::Kind::Miss, 1_000 + 32 * MS);
+        c.drain(&mut rx, YieldOn::Miss, true, 100 * MS);
+        assert_eq!(c.yields, 1);
+        let first = c.yield_until;
+        assert!(first > clock::now_ns());
+        // A second miss inside the window extends it without counting a new yield.
+        tx.send_tick(signal::Kind::Miss, 1_000 + 48 * MS);
+        c.drain(&mut rx, YieldOn::Miss, true, 100 * MS);
+        assert_eq!(c.yields, 1);
+        assert!(c.yield_until >= first);
+        assert_eq!(c.yield_windows.len(), 1);
+        assert_eq!(c.yield_windows[0].1, c.yield_until);
+        tx.send(signal::Kind::PlaybackStop);
+        c.drain(&mut rx, YieldOn::Miss, true, 100 * MS);
+        assert!(!c.playback);
+        std::fs::remove_file(&path).unwrap();
     }
 }
