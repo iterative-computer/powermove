@@ -56,6 +56,8 @@ const ALIGN: &[&str] = &["--align", "--align-guard-ms", "1"];
 /// A 16 x 9 pt click-through window in the bottom-left corner: the smallest window the
 /// compositor still presents (an offscreen window gets no presented times).
 const PRESENT: &[&str] = &["--present", "corner", "--window-width", "16", "--window-height", "9"];
+/// A heavier interactive frame: 8 layers and a radius-40 separable blur.
+const AHEAVY: &[&str] = &["--layers", "8", "--blur-radius", "40"];
 /// Blender EEVEE worker, 4K, 16 samples, 16-bit PNG output; `{blender}` is replaced by
 /// the `--blender` path.
 const BLENDER: &[&str] = &["--blender", "{blender}"];
@@ -91,6 +93,51 @@ fn scenarios() -> Vec<Scenario> {
             "B unsliced, background QoS + Darwin background process",
             &[],
             b(&[&["--mode", "full", "--qos", "background", "--darwin-bg"]]),
+        ),
+        // Kernel-length sweep: B submits one compute dispatch per command buffer, 2 in
+        // flight, no slicing; the blur radius sets how long one dispatch runs.
+        s(
+            "kernel-2ms",
+            "B one dispatch of about 2 ms per command buffer, 2 in flight, unsliced",
+            &[],
+            b(&[&["--mode", "heavy", "--heavy-radius", "22"]]),
+        ),
+        s(
+            "kernel-4ms",
+            "B one dispatch of about 4 ms per command buffer, 2 in flight, unsliced",
+            &[],
+            b(&[&["--mode", "heavy", "--heavy-radius", "44"]]),
+        ),
+        s(
+            "kernel-8ms",
+            "B one dispatch of about 8 ms per command buffer, 2 in flight, unsliced",
+            &[],
+            b(&[&["--mode", "heavy", "--heavy-radius", "88"]]),
+        ),
+        s(
+            "kernel-16ms",
+            "B one dispatch of about 16 ms per command buffer, 2 in flight, unsliced",
+            &[],
+            b(&[&["--mode", "heavy", "--heavy-radius", "176"]]),
+        ),
+        s(
+            "heavy-sliced",
+            "B the heavy (radius 384) kernel cut into 2 ms bands, frame-aligned, utility QoS",
+            &[],
+            b(&[
+                SLICED,
+                ALIGN,
+                &[
+                    "--slice-ms",
+                    "2",
+                    "--yield-on",
+                    "miss",
+                    "--radius",
+                    "384",
+                    "--iters",
+                    "1",
+                ],
+            ]),
         ),
         // Time slicing with reactive yields.
         s(
@@ -508,6 +555,54 @@ fn scenarios() -> Vec<Scenario> {
                 "--warmup",
                 "0",
             ],
+            b(&[
+                SLICED,
+                ALIGN,
+                &[
+                    "--slice-ms",
+                    "2",
+                    "--yield-on",
+                    "miss",
+                    "--vt-sessions",
+                    "1",
+                    "--vt-codec",
+                    "hevc10",
+                ],
+                BLENDER,
+                &["--blender-policy", "pause"],
+            ]),
+        ),
+        // A with less headroom: 8 layers and a radius-40 blur, so its frame costs
+        // several times the default (closer to a base machine's share of the frame).
+        s(
+            "aheavy-baseline",
+            "A heavy (8 layers, blur radius 40) alone",
+            AHEAVY,
+            None,
+        ),
+        s("aheavy-full", "A heavy; B unsliced", AHEAVY, b(&[&["--mode", "full"]])),
+        s(
+            "aheavy-kernel-4ms",
+            "A heavy; B one 4 ms dispatch per command buffer, unsliced",
+            AHEAVY,
+            b(&[&["--mode", "heavy", "--heavy-radius", "44"]]),
+        ),
+        s(
+            "aheavy-sliced-2ms",
+            "A heavy; B sliced 2 ms, utility QoS, yield on miss",
+            AHEAVY,
+            b(&[SLICED, &["--slice-ms", "2", "--yield-on", "miss"]]),
+        ),
+        s(
+            "aheavy-sliced-2ms-align",
+            "A heavy; B sliced 2 ms frame-aligned",
+            AHEAVY,
+            b(&[SLICED, ALIGN, &["--slice-ms", "2", "--yield-on", "miss"]]),
+        ),
+        s(
+            "aheavy-gate-pause",
+            "A heavy; S8 row policy (sliced 2 ms aligned + HEVC + Blender paused)",
+            &["--layers", "8", "--blur-radius", "40", "--warmup", "0"],
             b(&[
                 SLICED,
                 ALIGN,
