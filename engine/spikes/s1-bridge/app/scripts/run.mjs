@@ -31,26 +31,41 @@ const only = arg('only', '')
   .filter(Boolean);
 
 const LOAD = { longTask: true, autosave: true, agent: true, resize: true };
+// Stress, not the gate: an autosave of a 56 MB document (about the size of the largest
+// undo history on the reference machine), about 1.2 s of main-thread work every 2 s.
+const HEAVY = { ...LOAD, historyEntries: 4000 };
+const pb = { scenario: 'playback', durationMs: seconds * 1000 };
+const lat = { scenario: 'latency', durationMs: 20_000, extraPasses: 0, poolSize: 8, leadFrames: 4 };
 const runs = [
-  // The S1 gate: 4K 60 fps for 60 s with main under load.
-  { name: 'playback-bgra-load', scenario: 'playback', format: 'bgra', load: LOAD, durationMs: seconds * 1000 },
-  { name: 'playback-rgbaf16-load', scenario: 'playback', format: 'rgbaf16', load: LOAD, durationMs: seconds * 1000, hdrCanvas: true },
-  { name: 'playback-bgra-load-external', scenario: 'playback', format: 'bgra', load: LOAD, durationMs: seconds * 1000, drawPath: 'external', transport: 'persistent' },
+  // The S1 gate as the plan writes it: 4K 60 fps for 60 s with main under load, every
+  // frame forwarded by main with sendSharedTexture (section 18 step 3).
+  { name: 'playback-bgra-load', ...pb, format: 'bgra', load: LOAD },
+  { name: 'playback-rgbaf16-load', ...pb, format: 'rgbaf16', load: LOAD, hdrCanvas: true },
+  // Tuning the per-frame path: a jitter buffer deep enough to ride out main's stalls.
+  { name: 'playback-bgra-load-deep', ...pb, format: 'bgra', load: LOAD, leadFrames: 18, poolSize: 22 },
+  // Release through the per-use release callback instead of onSubmittedWorkDone.
+  { name: 'playback-bgra-load-callback', ...pb, format: 'bgra', load: LOAD, releaseMode: 'callback' },
   // Tuned transport: one persistent import per slot in the viewer, descriptors engine
   // -> viewer directly (main's JavaScript off the per-frame path).
-  { name: 'playback-bgra-load-persistent', scenario: 'playback', format: 'bgra', load: LOAD, durationMs: seconds * 1000, transport: 'persistent' },
-  { name: 'playback-rgbaf16-load-persistent', scenario: 'playback', format: 'rgbaf16', load: LOAD, durationMs: seconds * 1000, hdrCanvas: true, transport: 'persistent' },
-  { name: 'playback-bgra-load-persistent-redraw', scenario: 'playback', format: 'bgra', load: LOAD, durationMs: seconds * 1000, transport: 'persistent', redraw: 'every-vsync' },
-  // Release through the per-use release callback instead of onSubmittedWorkDone.
-  { name: 'playback-bgra-load-callback', scenario: 'playback', format: 'bgra', load: LOAD, durationMs: seconds * 1000, releaseMode: 'callback' },
+  { name: 'playback-bgra-load-persistent', ...pb, format: 'bgra', load: LOAD, transport: 'persistent' },
+  { name: 'playback-rgbaf16-load-persistent', ...pb, format: 'rgbaf16', load: LOAD, hdrCanvas: true, transport: 'persistent' },
+  { name: 'playback-bgra-load-external', ...pb, format: 'bgra', load: LOAD, drawPath: 'external', transport: 'persistent' },
+  { name: 'playback-bgra-load-persistent-redraw', ...pb, format: 'bgra', load: LOAD, transport: 'persistent', redraw: 'every-vsync' },
+  { name: 'playback-bgra-heavy-persistent', ...pb, format: 'bgra', load: HEAVY, transport: 'persistent' },
+  // Controls: the viewer draws its own content on the same schedule (no surface read),
+  // so whatever remains is Chromium's compositor; and the plan path without load.
+  { name: 'playback-bgra-load-control', ...pb, format: 'bgra', load: LOAD, transport: 'persistent', drawPath: 'control' },
+  { name: 'playback-bgra-idle-control', ...pb, format: 'bgra', load: false, transport: 'persistent', drawPath: 'control' },
+  { name: 'playback-bgra-idle', ...pb, format: 'bgra', load: false },
   // Validity check: a small on-screen window instead of off every screen (15 s).
-  { name: 'playback-bgra-load-onscreen', scenario: 'playback', format: 'bgra', load: LOAD, durationMs: 15_000, onscreen: true, transport: 'persistent' },
-  // Control: the same without main load.
-  { name: 'playback-bgra-idle', scenario: 'playback', format: 'bgra', load: false, durationMs: seconds * 1000 },
-  // Pointer-to-pixel: today's in-renderer path vs the engine path, main under load.
-  { name: 'latency-bgra-load', scenario: 'latency', format: 'bgra', load: LOAD, durationMs: 20_000, extraPasses: 0, poolSize: 8, leadFrames: 4 },
-  { name: 'latency-bgra-load-persistent', scenario: 'latency', format: 'bgra', load: LOAD, durationMs: 20_000, extraPasses: 0, poolSize: 8, leadFrames: 4, transport: 'persistent' },
-  { name: 'latency-bgra-idle', scenario: 'latency', format: 'bgra', load: false, durationMs: 20_000, extraPasses: 0, poolSize: 8, leadFrames: 4 },
+  { name: 'playback-bgra-load-onscreen', ...pb, durationMs: 15_000, format: 'bgra', load: LOAD, onscreen: true, transport: 'persistent' },
+  { name: 'playback-bgra-load-onscreen-control', ...pb, durationMs: 15_000, format: 'bgra', load: LOAD, onscreen: true, transport: 'persistent', drawPath: 'control' },
+  // Pointer-to-pixel: today's in-renderer path ('baseline') vs the engine path for
+  // layer drag, 3D orbit, and walk, main under load and idle.
+  { name: 'latency-bgra-load', ...lat, format: 'bgra', load: LOAD },
+  { name: 'latency-bgra-load-persistent', ...lat, format: 'bgra', load: LOAD, transport: 'persistent' },
+  { name: 'latency-bgra-idle', ...lat, format: 'bgra', load: false },
+  { name: 'latency-bgra-idle-persistent', ...lat, format: 'bgra', load: false, transport: 'persistent' },
   // Image quality: capturePage, banding, values above 1.0.
   { name: 'quality-bgra', scenario: 'quality', format: 'bgra', load: false },
   { name: 'quality-rgbaf16', scenario: 'quality', format: 'rgbaf16', load: false, hdrCanvas: true, edrOnscreen: true }

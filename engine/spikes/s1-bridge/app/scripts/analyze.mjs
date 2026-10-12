@@ -127,7 +127,7 @@ function analyzePlayback(raw, events) {
       perFrame.push({ k, seq: f.seq, status: 'not-presented', state: pf?.state ?? 'no-reporter' });
       continue;
     }
-    perFrame.push({ k, seq: f.seq, status: late ? 'late' : 'ok', presentUs: pf.end, ptsTraceUs: ctx.uptimeToTrace(f.pts), latencyUs: pf.end - ctx.toTrace(rafMs), gpuDoneToPresentUs: pf.end - ctx.uptimeToTrace(f.gpu_done) });
+    perFrame.push({ k, seq: f.seq, status: late ? 'late' : 'ok', presentUs: pf.end, ptsTraceUs: ctx.uptimeToTrace(f.pts), latencyUs: pf.end - ctx.toTrace(rafMs), gpuDoneToPresentUs: pf.end - ctx.uptimeToTrace(f.gpu_done), rafMinusPtsMs: rafMs - ptsMs, frameSeq: pf.seq });
   }
   const presented = perFrame.filter(p => p.presentUs != null);
   const offsets = presented.map(p => p.presentUs - p.ptsTraceUs);
@@ -154,7 +154,17 @@ function analyzePlayback(raw, events) {
     const near = pts == null ? [] : loadEvents.filter(([, u, d]) => u <= pts && u >= pts - 300_000 && u + d * 1000 >= pts - 50_000).map(e => e[0]);
     const key = near.length ? [...new Set(near)].sort().join('+') : 'none';
     attribution[key] = (attribution[key] ?? 0) + 1;
-    if (irregular.length < 40) irregular.push({ k: p.k, status: off && p.status === 'ok' ? 'off-slot' : p.status, offsetMs: p.presentUs != null ? +((p.presentUs - p.ptsTraceUs - med) / 1000).toFixed(2) : null, near: key });
+    if (irregular.length < 40)
+      irregular.push({
+        k: p.k,
+        status: off && p.status === 'ok' ? 'off-slot' : p.status,
+        offsetMs: p.presentUs != null ? +((p.presentUs - p.ptsTraceUs - med) / 1000).toFixed(2) : null,
+        // When it was drawn relative to its pts, and its rAF -> presentation latency:
+        // tells a wrong pick (drawn a vsync early) from a shorter compositor pipeline.
+        rafMinusPtsMs: p.rafMinusPtsMs != null ? +p.rafMinusPtsMs.toFixed(2) : null,
+        rafToPresentMs: p.latencyUs != null ? +(p.latencyUs / 1000).toFixed(2) : null,
+        near: key
+      });
   }
   const drops = counts.engineSkipped + counts.notDrawn + counts.notPresented + perFrame.filter(p => p.status === 'late').length;
   // Where frames were when they arrived: lead time from viewer arrival to pts.

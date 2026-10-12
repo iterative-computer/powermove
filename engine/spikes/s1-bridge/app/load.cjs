@@ -91,9 +91,9 @@ class MainLoad {
     this.tmp = path.join(os.tmpdir(), `s1-autosave-${process.pid}.json`);
   }
 
-  start({ longTask = true, autosave = true, agent = true, resize = true } = {}) {
+  start({ longTask = true, autosave = true, agent = true, resize = true, historyEntries = 120 } = {}) {
     if (autosave) {
-      const doc = buildProject();
+      const doc = buildProject({ historyEntries });
       // The renderer hands main a serialized project; main parses, clones (the store
       // keeps a structured clone), re-serializes, and writes (main/storage.ts).
       this.serialized = JSON.stringify(doc);

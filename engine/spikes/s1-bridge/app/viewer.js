@@ -243,8 +243,15 @@ function drawFrame(item) {
   const { device } = S;
   const enc = device.createCommandEncoder();
   const target = S.context.getCurrentTexture().createView();
-  let check = G.readFree.pop() ?? null;
-  if (S.cfg.drawPath === 'copy') {
+  let check = S.cfg.drawPath === 'control' ? null : (G.readFree.pop() ?? null);
+  if (S.cfg.drawPath === 'control') {
+    // Control: the same frames on the same schedule, but the viewer draws its own
+    // content (a marker that moves with seq) and never reads the engine's surface.
+    // Anything irregular here comes from Chromium's compositor, not the bridge.
+    device.queue.writeBuffer(G.baseUbo, 0, new Float32Array([(item.desc.seq * 24) % (S.W - 96), 600, 96, 96]));
+    const bg = device.createBindGroup({ layout: G.pipe('base', S.canvasFormat).getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: G.baseUbo } }] });
+    pass(enc, target, G.pipe('base', S.canvasFormat), bg);
+  } else if (S.cfg.drawPath === 'copy') {
     device.queue.copyExternalImageToTexture({ source: item.frame }, { texture: G.frameTex }, [S.W, S.H]);
     const bg = device.createBindGroup({ layout: G.pipe('2d', S.canvasFormat).getBindGroupLayout(0), entries: [{ binding: 0, resource: G.frameView }] });
     pass(enc, target, G.pipe('2d', S.canvasFormat), bg);
