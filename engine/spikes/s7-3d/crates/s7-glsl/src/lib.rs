@@ -668,6 +668,10 @@ fn replace_identifier(source: &str, name: &str, with: &str) -> String {
 
 /// Step 3: rename the vertex `main` and append [`VERTEX_EPILOGUE`].
 pub fn wrap_vertex_main(source: &str) -> Result<String> {
+    Ok(format!("{}{VERTEX_EPILOGUE}", rename_main(source).context("vertex shader")?))
+}
+
+fn rename_main(source: &str) -> Result<String> {
     let mut found = false;
     let mut out = String::with_capacity(source.len() + 128);
     let mut rest = source;
@@ -685,9 +689,8 @@ pub fn wrap_vertex_main(source: &str) -> Result<String> {
     }
     out.push_str(rest);
     if !found {
-        bail!("vertex shader has no main()");
+        bail!("no main()");
     }
-    out.push_str(VERTEX_EPILOGUE);
     Ok(out)
 }
 
@@ -890,11 +893,93 @@ fn to_naga(words: &[u32]) -> Result<(naga::Module, naga::valid::ModuleInfo)> {
     let options = naga::front::spv::Options { adjust_coordinate_space: false, strict_capabilities: false, block_ctx_dump_prefix: None };
     let mut module = naga::front::spv::Frontend::new(words.iter().cloned(), &options).parse().map_err(|e| anyhow!("naga spv-in: {e:?}"))?;
     pad_struct_spans(&mut module)?;
-    let flags = naga::valid::ValidationFlags::all() ^ naga::valid::ValidationFlags::CONTROL_FLOW_UNIFORMITY;
-    let info = naga::valid::Validator::new(flags, naga::valid::Capabilities::all())
-        .validate(&module)
-        .map_err(|e| anyhow!("naga validation: {}", e.emit_to_string("")))?;
+    let info = validate(&module)?;
     Ok((module, info))
+}
+
+fn validate(module: &naga::Module) -> Result<naga::valid::ModuleInfo> {
+    let flags = naga::valid::ValidationFlags::all() ^ naga::valid::ValidationFlags::CONTROL_FLOW_UNIFORMITY;
+    naga::valid::Validator::new(flags, naga::valid::Capabilities::all()).validate(module).map_err(|e| anyhow!("naga validation: {}", e.emit_to_string("")))
+}
+
+/// Step 6b: every fragment entry point also returns an all-ones `sample_mask`, as ANGLE's
+/// Metal back end does for every WebGL fragment shader on Apple GPUs (its
+/// `writeHelperSampleMask` workaround, and the coverage mask when multisampled). Without
+/// a sample-mask write, Apple GPUs shade 2×2 quads that span two triangles of one draw,
+/// so `dFdx`/`dFdy` at triangle edges mix both primitives: flat-shading normals and
+/// `geometryRoughness` go wrong along every edge. The mask is ANDed with raster
+/// coverage, so nothing else changes. (GLSL `gl_SampleMask` is an `int[]` that naga's
+/// SPIR-V front end rejects, so this is done on the IR.)
+pub fn add_sample_mask_output(module: &mut naga::Module) -> Result<()> {
+    use naga::{Binding, BuiltIn, Expression, Literal, Scalar, Span, Statement, StructMember, Type, TypeInner};
+    let u32_ty = module.types.insert(Type { name: None, inner: TypeInner::Scalar(Scalar::U32) }, Span::UNDEFINED);
+    for ep_index in 0..module.entry_points.len() {
+        if module.entry_points[ep_index].stage != naga::ShaderStage::Fragment {
+            continue;
+        }
+        let Some(result) = module.entry_points[ep_index].function.result.clone() else {
+            bail!("fragment entry point without outputs");
+        };
+        // The new result struct: the old members (or the single bound output) plus the mask.
+        let (mut members, single) = match &module.types[result.ty].inner {
+            TypeInner::Struct { members, .. } => (members.clone(), false),
+            _ => (vec![StructMember { name: Some("pm_color".into()), ty: result.ty, binding: result.binding.clone(), offset: 0 }], true),
+        };
+        if members.iter().any(|m| matches!(m.binding, Some(Binding::BuiltIn(BuiltIn::SampleMask)))) {
+            continue;
+        }
+        let mut offset = 0u32;
+        for m in members.iter_mut() {
+            let inner = &module.types[m.ty].inner;
+            let align = inner.size(module.to_ctx()).min(16).next_power_of_two().max(4);
+            offset = offset.div_ceil(align) * align;
+            m.offset = offset;
+            offset += inner.size(module.to_ctx());
+        }
+        members.push(StructMember { name: Some("pm_sample_mask".into()), ty: u32_ty, binding: Some(Binding::BuiltIn(BuiltIn::SampleMask)), offset });
+        let span = (offset + 4).div_ceil(16) * 16;
+        let count = members.len();
+        let new_ty = module.types.insert(Type { name: Some("PmFragmentOutput".into()), inner: TypeInner::Struct { members, span } }, Span::UNDEFINED);
+        let ep = &mut module.entry_points[ep_index];
+        ep.function.result = Some(naga::FunctionResult { ty: new_ty, binding: None });
+        // Rewrite every `return value;` in the entry point's top-level body.
+        let body = std::mem::take(&mut ep.function.body);
+        let mut rewritten = naga::Block::with_capacity(body.len() + 2);
+        let mut returns = 0;
+        for (statement, span) in body.span_into_iter() {
+            match statement {
+                Statement::Return { value: Some(value) } => {
+                    returns += 1;
+                    let exprs = &mut ep.function.expressions;
+                    let mask = exprs.append(Expression::Literal(Literal::U32(u32::MAX)), span);
+                    let mut components = Vec::with_capacity(count);
+                    let first = if single {
+                        components.push(value);
+                        None
+                    } else {
+                        let mut first = None;
+                        for index in 0..count as u32 - 1 {
+                            let h = exprs.append(Expression::AccessIndex { base: value, index }, span);
+                            first.get_or_insert(h);
+                            components.push(h);
+                        }
+                        first
+                    };
+                    components.push(mask);
+                    let compose = exprs.append(Expression::Compose { ty: new_ty, components }, span);
+                    rewritten.push(Statement::Emit(naga::Range::new_from_bounds(first.unwrap_or(compose), compose)), span);
+                    rewritten.push(Statement::Return { value: Some(compose) }, span);
+                }
+                Statement::Return { value: None } => bail!("fragment entry point returns no value"),
+                other => rewritten.push(other, span),
+            }
+        }
+        if returns == 0 {
+            bail!("fragment entry point has no top-level return");
+        }
+        ep.function.body = rewritten;
+    }
+    Ok(())
 }
 
 /// SPIR-V does not record struct sizes, so naga gives a std140 struct its natural span
@@ -945,7 +1030,9 @@ pub fn compile(vertex_src: &str, fragment_src: &str) -> Result<Program> {
     let vs_spv = split_combined_samplers(&inline_opaque(&vs_spv).context("vertex inline")?).context("vertex split")?;
     let fs_spv = split_combined_samplers(&inline_opaque(&fs_spv).context("fragment inline")?).context("fragment split")?;
     let (vertex, vertex_info) = to_naga(&vs_spv).context("vertex")?;
-    let (fragment, fragment_info) = to_naga(&fs_spv).context("fragment")?;
+    let (mut fragment, _) = to_naga(&fs_spv).context("fragment")?;
+    add_sample_mask_output(&mut fragment)?;
+    let fragment_info = validate(&fragment).context("fragment with sample mask")?;
     let mut program = Program {
         vertex,
         fragment,

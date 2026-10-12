@@ -150,6 +150,16 @@ export class GlRecorder {
 
 export const recorder = new GlRecorder();
 
+/** Debug probe (render.ts --fs-tail/--fs-match): appends statements to the end of every
+ *  fragment `main` whose source contains the match string. The trace records the probed
+ *  source, so a replay of the same trace runs the same probe. */
+export const shaderDebug: { tail: string; match: string } = { tail: '', match: 'SHADER_TYPE MeshStandardMaterial' };
+function debugShader(source: string): string {
+  if (!shaderDebug.tail || !source.includes('pc_fragColor') || !source.includes(shaderDebug.match)) return source;
+  const end = source.lastIndexOf('}');
+  return `${source.slice(0, end)}${shaderDebug.tail}\n}\n`;
+}
+
 /** Installs the hooks once; recording only affects the context created while armed. */
 export function installRecorder() {
   const proto = WebGL2RenderingContext.prototype as any;
@@ -158,6 +168,7 @@ export function installRecorder() {
     if (!descriptor || typeof descriptor.value !== 'function' || name === 'constructor' || SKIP.has(name)) continue;
     const original = descriptor.value;
     proto[name] = function (this: WebGL2RenderingContext, ...args: any[]) {
+      if (name === 'shaderSource') args[1] = debugShader(args[1]);
       const result = original.apply(this, args);
       if (recorder.on && this === recorder.gl) recorder.record(this, name, args, result);
       return result;

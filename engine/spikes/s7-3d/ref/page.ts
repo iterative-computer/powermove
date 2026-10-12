@@ -6,7 +6,7 @@ import * as THREE from '../../../../apps/desktop/node_modules/three/build/three.
 import { SceneRuntime } from '../../../../apps/desktop/src/renderer/src/core/scene3d/runtime';
 import { loadGltf } from '../../../../apps/desktop/src/renderer/src/core/scene3d/import-model';
 import { parseScene } from '../../../../apps/desktop/src/renderer/src/core/scene3d/schema';
-import { recorder } from './recorder';
+import { recorder, shaderDebug } from './recorder';
 
 type SceneDef = { id: string; width: number; height: number; time: number; scene: any; assets: Record<string, { kind: string; file: string }>; sets: string[][]; opacity?: Record<string, number> };
 
@@ -106,7 +106,9 @@ function masks(runtime: SceneRuntime, def: SceneDef, exposure: number, shadows: 
   return { noAA, shadow, ids, list: list.map((d, i) => ({ id: i + 1, owner: d.owner, name: d.name, kind: d.kind })) };
 }
 
-async function renderScene(id: string, options: { trace?: boolean; tag?: string } = {}) {
+async function renderScene(id: string, options: { trace?: boolean; tag?: string; fsTail?: string; fsMatch?: string } = {}) {
+  shaderDebug.tail = options.fsTail || '';
+  if (options.fsMatch) shaderDebug.match = options.fsMatch;
   const def: SceneDef = await (await fetch(`/corpus/scenes/${id}.json`)).json();
   const tag = options.tag || 'ref';
   const assets = await loadAssets(def);

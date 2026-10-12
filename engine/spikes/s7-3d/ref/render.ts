@@ -2,7 +2,7 @@
 // each scene in headless Chromium on the real GPU (ANGLE Metal), and stores outputs in
 // out/<tag>/<scene>/ as PNG plus the recorded WebGL2 trace.
 //
-//   bun ref/render.ts [scene ...] [--tag ref] [--no-trace]
+//   bun ref/render.ts [scene ...] [--tag ref] [--no-trace] [--fs-tail '<glsl>' [--fs-match <text>]]
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join, dirname, extname } from 'node:path';
 import { encodePng } from './png';
@@ -15,6 +15,8 @@ const args = process.argv.slice(2);
 const flag = (name: string) => { const i = args.indexOf(name); if (i < 0) return undefined; const v = args[i + 1]; args.splice(i, 2); return v; };
 const tag = flag('--tag') || 'ref';
 const noTrace = args.includes('--no-trace');
+const fsTail = flag('--fs-tail');
+const fsMatch = flag('--fs-match');
 const ids: string[] = args.filter(a => !a.startsWith('--'));
 const corpus = join(root, 'out/corpus');
 const sceneIds: string[] = ids.length ? ids : JSON.parse(readFileSync(join(corpus, 'index.json'), 'utf8'));
@@ -65,7 +67,7 @@ const summary: any[] = [];
 for (const id of sceneIds) {
   const t0 = performance.now();
   try {
-    const info = await page.evaluate(([id, tag, trace]: [string, string, boolean]) => (globalThis as any).S7.renderScene(id, { tag, trace }), [id, tag, !noTrace]);
+    const info = await page.evaluate(([id, tag, trace, fsTail, fsMatch]: [string, string, boolean, string | undefined, string | undefined]) => (globalThis as any).S7.renderScene(id, { tag, trace, fsTail, fsMatch }), [id, tag, !noTrace, fsTail, fsMatch]);
     console.log(`${id}: ${info.outputs.length} outputs, ${info.drawables.length} drawables, ${(performance.now() - t0).toFixed(0)} ms${info.warnings.length ? `, warnings: ${info.warnings.join('; ')}` : ''}`);
     summary.push({ id, renderer: info.renderer, samples: info.samples, three: info.three });
   } catch (error) {
