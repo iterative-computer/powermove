@@ -62,7 +62,8 @@ impl<'d> Comp<'d> {
     /// Resolves `comp_id` in a document in canonical form
     /// (`pm_model::canonical`): `comps[comp_id]`. A document still in the
     /// stored form keeps its open composition at the top level; that one is
-    /// found by its `compId` (or its `id` when it has no `compId`).
+    /// found by its `compId` (or its `id` when it has no `compId`) and wins
+    /// over a stale copy in `comps`.
     pub fn resolve(doc: &'d Document, comp_id: &str) -> Result<Comp<'d>, CompError> {
         let root = doc.root().ok_or(CompError::NoDocument)?;
         Comp::in_root(root, comp_id, doc.revision())
@@ -70,21 +71,18 @@ impl<'d> Comp<'d> {
 
     /// [`Comp::resolve`] on a bare root node at a given revision.
     pub fn in_root(root: &'d Node, comp_id: &str, revision: u64) -> Result<Comp<'d>, CompError> {
-        let in_comps = node::member(node::member(Some(root), "comps"), comp_id)
-            .filter(|c| matches!(c.kind(), NodeKind::Object(_)));
-        let node = match in_comps {
-            Some(c) => c,
-            None => {
-                let open = node::string(node::member(Some(root), "compId"))
-                    .or_else(|| node::string(node::member(Some(root), "id")));
-                if open.is_some_and(|s| s.as_bytes() == comp_id.as_bytes())
-                    && node::member(Some(root), "layers").is_some()
-                {
-                    root
-                } else {
-                    return Err(CompError::NotFound(comp_id.to_owned()));
-                }
-            }
+        // The stored form keeps the open composition at the top level (and may
+        // keep a stale copy in `comps`, which the legacy code never reads).
+        let open = node::string(node::member(Some(root), "compId"))
+            .or_else(|| node::string(node::member(Some(root), "id")));
+        let stored_open = open.is_some_and(|s| s.as_bytes() == comp_id.as_bytes())
+            && node::member(Some(root), "layers").is_some();
+        let node = if stored_open {
+            root
+        } else {
+            node::member(node::member(Some(root), "comps"), comp_id)
+                .filter(|c| matches!(c.kind(), NodeKind::Object(_)))
+                .ok_or_else(|| CompError::NotFound(comp_id.to_owned()))?
         };
         let open_canonical = !std::ptr::eq(node, root)
             && node::string(node::member(Some(root), "compId"))
@@ -365,4 +363,76 @@ pub fn group_ancestors<'d>(
         id = node::get(group, b"group");
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_model::json::parse;
+
+    fn root(text: &str) -> Node {
+        Node::from_value(parse(text).unwrap(), 1)
+    }
+
+    #[test]
+    fn resolves_both_forms() {
+        let stored = root(
+            r#"{"id":"P","compId":"C","fps":30,"dur":5,"layers":[],"params":{"a":1},
+                "comps":{"C":{"id":"C","fps":24,"layers":[1]},"N":{"id":"N","fps":25,"layers":[]}}}"#,
+        );
+        let open = Comp::in_root(&stored, "C", 1).unwrap();
+        assert!(
+            std::ptr::eq(open.node(), &stored),
+            "the top level wins over a stale copy"
+        );
+        assert_eq!(open.expression_fps(), JsValue::Number(30.0));
+        assert!(!open.is_open_canonical());
+        let nested = Comp::in_root(&stored, "N", 1).unwrap();
+        assert_eq!(nested.expression_fps(), JsValue::Number(25.0));
+        assert_eq!(
+            Comp::in_root(&stored, "X", 1).unwrap_err(),
+            CompError::NotFound("X".into())
+        );
+
+        let canonical = root(
+            r#"{"id":"P","name":"Project","compId":"C","params":{"a":1},
+                "comps":{"C":{"id":"C","name":"Main","fps":30,"dur":5,"layers":[]}}}"#,
+        );
+        let open = Comp::in_root(&canonical, "C", 1).unwrap();
+        assert!(open.is_open_canonical());
+        assert_eq!(
+            node::js_value_opt(open.member("params")),
+            JsValue::from(parse(r#"{"a":1}"#).unwrap())
+        );
+        assert_eq!(
+            node::js_value_opt(open.member("name")),
+            JsValue::from("Project")
+        );
+        assert_eq!(
+            node::js_value_opt(open.member("compName")),
+            JsValue::from("Main")
+        );
+        assert_eq!(open.duration(), 5.0);
+        assert_eq!(open.project_fps(), JsValue::Number(30.0));
+    }
+
+    #[test]
+    fn group_ancestry() {
+        let layers = root(
+            r#"[{"id":"g1","type":"group","group":"g2"},{"id":"g2","type":"group","group":"g1"},
+                {"id":"x","group":"g1"},{"id":"g1","type":"solid"}]"#,
+        );
+        let NodeKind::Array(items) = layers.kind() else {
+            unreachable!()
+        };
+        let index = LayerIndex::build(items);
+        // The last layer with id g1 is not a group: the chain stops at once.
+        assert!(
+            group_ancestors(&items[2], items, &index)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(index.duplicated.contains(&IdKey::String("g1".into())));
+        assert_eq!(index.strings.get(&JsString::from("g1")), Some(&(0, true)));
+    }
 }
