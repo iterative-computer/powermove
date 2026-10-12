@@ -283,8 +283,10 @@ name = "pm-engine"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "pm-model",
  "pm-protocol",
  "proptest",
+ "serde",
  "thiserror",
 ]
 

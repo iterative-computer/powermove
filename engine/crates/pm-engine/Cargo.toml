@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 pm-protocol = { path = "../pm-protocol", default-features = false }
+pm-model = { path = "../pm-model" }
+serde.workspace = true
 thiserror.workspace = true
 libc = "0.2"
 

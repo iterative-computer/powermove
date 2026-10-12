@@ -361,7 +361,9 @@ mod tests {
     #[test]
     fn charges_within_the_lease_and_fails_beyond_it() {
         let mut budget = LeaseBudget::new(EngineProcess::Job);
-        let usage = budget.grant(lease(1, 1000), at(0), &mut NoEviction).unwrap();
+        let usage = budget
+            .grant(lease(1, 1000), at(0), &mut NoEviction)
+            .unwrap();
         assert!(usage.ack);
         budget.try_charge(Category::FrameCache, 600).unwrap();
         budget.try_charge(Category::Decoders, 400).unwrap();
@@ -378,7 +380,9 @@ mod tests {
     #[test]
     fn charging_evicts_other_categories_in_order() {
         let mut budget = LeaseBudget::new(EngineProcess::Job);
-        budget.grant(lease(1, 1000), at(0), &mut NoEviction).unwrap();
+        budget
+            .grant(lease(1, 1000), at(0), &mut NoEviction)
+            .unwrap();
         budget.try_charge(Category::RenderCache, 300).unwrap();
         budget.try_charge(Category::FrameCache, 500).unwrap();
         let mut caches = Caches {
@@ -393,14 +397,20 @@ mod tests {
             frees: vec![],
             limit: 0,
         };
-        assert!(budget.charge(Category::FrameCache, 10, &mut stingy).is_err());
+        assert!(
+            budget
+                .charge(Category::FrameCache, 10, &mut stingy)
+                .is_err()
+        );
         assert!(!stingy.frees.iter().any(|(c, _)| *c == Category::FrameCache));
     }
 
     #[test]
     fn a_shrink_is_acknowledged_once_usage_fits() {
         let mut budget = LeaseBudget::new(EngineProcess::Job);
-        budget.grant(lease(1, 1000), at(0), &mut NoEviction).unwrap();
+        budget
+            .grant(lease(1, 1000), at(0), &mut NoEviction)
+            .unwrap();
         budget.try_charge(Category::SurfacePool, 800).unwrap();
         // Shrink to 500: nothing evictable outside the pool.
         let usage = budget
@@ -441,7 +451,9 @@ mod tests {
     #[test]
     fn a_shrink_evicts_caches_before_answering() {
         let mut budget = LeaseBudget::new(EngineProcess::Job);
-        budget.grant(lease(1, 1000), at(0), &mut NoEviction).unwrap();
+        budget
+            .grant(lease(1, 1000), at(0), &mut NoEviction)
+            .unwrap();
         budget.try_charge(Category::FrameCache, 300).unwrap();
         budget.try_charge(Category::SurfacePool, 400).unwrap();
         let mut caches = Caches {
@@ -457,7 +469,9 @@ mod tests {
     #[test]
     fn periodic_reports_every_five_seconds_while_active() {
         let mut budget = LeaseBudget::new(EngineProcess::Job);
-        budget.grant(lease(1, 1000), at(0), &mut NoEviction).unwrap();
+        budget
+            .grant(lease(1, 1000), at(0), &mut NoEviction)
+            .unwrap();
         assert!(budget.poll_report(at(1_000_000), true).is_none());
         assert!(budget.poll_report(at(5_000_000), false).is_none(), "idle");
         let report = budget.poll_report(at(5_000_000), true).unwrap();
@@ -469,7 +483,9 @@ mod tests {
     #[test]
     fn request_more_asks_for_usage_plus_extra() {
         let mut budget = LeaseBudget::new(EngineProcess::Job);
-        budget.grant(lease(1, 1000), at(0), &mut NoEviction).unwrap();
+        budget
+            .grant(lease(1, 1000), at(0), &mut NoEviction)
+            .unwrap();
         budget.try_charge(Category::Other, 700).unwrap();
         let request = budget.request_more(500);
         assert_eq!(request.wanted.get(), 1200);

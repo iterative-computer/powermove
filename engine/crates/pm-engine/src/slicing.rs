@@ -147,7 +147,9 @@ pub enum PlanError {
     #[error("pass {0:?} has no calibrated cost; calibrate it before playback")]
     Uncalibrated(PassKey),
     /// A single unit is predicted above the hard bound: band the pass finer.
-    #[error("one unit of pass {pass:?} is predicted at {unit_us:.0} µs, above the {max_us} µs bound")]
+    #[error(
+        "one unit of pass {pass:?} is predicted at {unit_us:.0} µs, above the {max_us} µs bound"
+    )]
     UnitTooLarge {
         pass: PassKey,
         unit_us: f64,
