@@ -85,9 +85,9 @@ const titles = entries.flatMap(entry =>
 
 export default defineConfig({
   ...base,
-  // The ledger run is the whole suite. With one worker it took 38 minutes on
+  // The ledger run is the whole suite. With one worker it took 16 minutes on
   // the reference machine (docs/engine/e2e-ledger.md), so the base config's
-  // 10-minute global timeout would stop it a quarter of the way through.
+  // 10-minute global timeout would stop it partway through.
   globalTimeout: 2 * 60 * 60_000,
   testIgnore: wholeFiles.map(spec => new RegExp(`[/\\\\]${escapeRegExp(spec)}$`)),
   ...(titles.length ? { grepInvert: titles } : {})

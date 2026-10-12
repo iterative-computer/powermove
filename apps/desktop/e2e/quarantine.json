@@ -53,7 +53,7 @@
       ],
       "status": "fail",
       "owner": "Viewer and settings UI",
-      "reason": "Escape does not close the Export dialog, so Export Captions opens on top of it and locator('.export-modal') matches two dialogs (strict mode). Suspected: Pointer-clicked buttons are blurred since 352f1d1e (2026-10-09, \"Fix pointer-clicked buttons retaining keyboard focus\"), after which the dialog no longer holds focus for Escape."
+      "reason": "Escape does not close the Export dialog, so Export Captions opens on top of it and locator('.export-modal') matches two dialogs (strict mode). Suspected cause: pointer-clicked buttons are blurred since 352f1d1e (2026-10-09, \"Fix pointer-clicked buttons retaining keyboard focus\"), after which the dialog no longer holds focus for Escape."
     },
     {
       "spec": "captions-ui.spec.ts",
