@@ -2,7 +2,7 @@
 //!
 //! Usage: s2 <experiment> [work-dir]
 //! Experiments: material, formats, transparency, precision, generation, tags,
-//! quicktime, encoders (alias hevc-alpha), math, caps, all.
+//! quicktime, encoders (alias hevc-alpha), dither, math, caps, all.
 
 use std::path::PathBuf;
 
@@ -39,7 +39,7 @@ fn run(exp: &str, work: &std::path::Path) -> cf::Result<()> {
     if all || exp == "formats" {
         emit(work, "formats", &exp_formats::run(&m)?)?;
     }
-    let needs_gpu = all || matches!(exp, "transparency" | "precision" | "generation" | "math" | "caps" | "tags" | "quicktime" | "hevc-alpha" | "encoders");
+    let needs_gpu = all || matches!(exp, "transparency" | "precision" | "generation" | "math" | "caps" | "tags" | "quicktime" | "hevc-alpha" | "encoders" | "dither");
     let gpu = if needs_gpu { Some(gpu::Gpu::new()?) } else { None };
     if all || exp == "transparency" {
         emit(work, "transparency", &exp_transparency::run(gpu.as_ref().unwrap(), &m)?)?;
@@ -58,6 +58,9 @@ fn run(exp: &str, work: &std::path::Path) -> cf::Result<()> {
     }
     if all || exp == "encoders" || exp == "hevc-alpha" {
         emit(work, "encoders", &exp_encoders::run(gpu.as_ref().unwrap(), &m)?)?;
+    }
+    if all || exp == "dither" {
+        emit(work, "dither", &exp_dither::run(gpu.as_ref().unwrap())?)?;
     }
     if all || exp == "math" {
         emit(work, "math", &exp_math::run(gpu.as_ref().unwrap())?)?;

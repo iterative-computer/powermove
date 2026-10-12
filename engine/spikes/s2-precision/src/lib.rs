@@ -17,3 +17,4 @@ pub mod exp_generation;
 pub mod exp_tags;
 pub mod exp_quicktime;
 pub mod exp_encoders;
+pub mod exp_dither;
