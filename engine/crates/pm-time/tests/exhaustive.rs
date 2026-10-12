@@ -30,25 +30,48 @@ fn check_rate(rate: Rate, from: i64, to: i64) -> u64 {
     checked
 }
 
+/// Worker threads for the exhaustive run: `PM_EXHAUSTIVE_THREADS`, default 4
+/// (the shared machine's limit).
+fn workers() -> usize {
+    std::env::var("PM_EXHAUSTIVE_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n: &usize| n > 0)
+        .unwrap_or(4)
+}
+
 #[test]
 #[ignore = "3.2e9 checks; run with --release -- --ignored"]
 fn frame_math_exhaustive_to_1e8_every_supported_rate() {
     let started = std::time::Instant::now();
+    let jobs: Vec<(Rate, i64, i64)> = SUPPORTED_RATES
+        .iter()
+        .flat_map(|&rate| [(rate, -LIMIT, -1), (rate, 0, LIMIT)])
+        .collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
     let total: u64 = std::thread::scope(|scope| {
-        let handles: Vec<_> = SUPPORTED_RATES
-            .iter()
-            .flat_map(|&rate| {
-                [(-LIMIT, -1), (0, LIMIT)]
-                    .map(|(from, to)| scope.spawn(move || check_rate(rate, from, to)))
+        let handles: Vec<_> = (0..workers())
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut checked = 0;
+                    loop {
+                        let job = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&(rate, from, to)) = jobs.get(job) else {
+                            return checked;
+                        };
+                        checked += check_rate(rate, from, to);
+                    }
+                })
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).sum()
     });
     assert_eq!(total, SUPPORTED_RATES.len() as u64 * (2 * LIMIT as u64 + 1));
     println!(
-        "checked {total} frames across {} rates in {:.1?}",
+        "checked {total} frames across {} rates in {:.1?} on {} threads",
         SUPPORTED_RATES.len(),
-        started.elapsed()
+        started.elapsed(),
+        workers()
     );
 }
 
