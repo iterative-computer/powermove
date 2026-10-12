@@ -4,8 +4,8 @@
 use pm_eval::JsValue;
 use pm_eval::js_sem::{self, math_round, number_to_string_radix, pad_start, parse_int, rem};
 use pm_model::JsString;
-use pm_model::json::parse;
 use pm_model::Value;
+use pm_model::json::parse;
 
 fn vectors() -> Value {
     parse(include_str!("vectors/js-sem-vectors.json")).expect("parse")
@@ -34,7 +34,9 @@ fn decode(v: &Value) -> JsValue {
 
 fn same(a: &JsValue, b: &JsValue) -> bool {
     match (a, b) {
-        (JsValue::Number(x), JsValue::Number(y)) => x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()),
+        (JsValue::Number(x), JsValue::Number(y)) => {
+            x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan())
+        }
         _ => a == b,
     }
 }
@@ -79,7 +81,10 @@ fn operators_match_v8() {
     for case in v.get("unary").unwrap().as_array().unwrap() {
         let x = decode(case.get("v").unwrap());
         checked += 4;
-        if !same(&JsValue::Number(x.to_number()), &decode(case.get("number").unwrap())) {
+        if !same(
+            &JsValue::Number(x.to_number()),
+            &decode(case.get("number").unwrap()),
+        ) {
             failures.push(format!("Number({x:?})"));
         }
         if x.to_js_string().as_str() != case.get("string").unwrap().as_str() {
@@ -93,7 +98,12 @@ fn operators_match_v8() {
         }
     }
     eprintln!("{checked} operator results compared");
-    assert!(failures.is_empty(), "{} mismatches:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} mismatches:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 #[test]
@@ -104,14 +114,20 @@ fn math_round_and_remainder_match_v8() {
         let c = case.as_array().unwrap();
         let (x, want) = (f(&c[0]), f(&c[1]));
         let got = math_round(x);
-        assert!(got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()), "Math.round({x:e}) = {got:e}, want {want:e}");
+        assert!(
+            got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()),
+            "Math.round({x:e}) = {got:e}, want {want:e}"
+        );
         n += 1;
     }
     for case in v.get("rem").unwrap().as_array().unwrap() {
         let c = case.as_array().unwrap();
         let (a, b, want) = (f(&c[0]), f(&c[1]), f(&c[2]));
         let got = rem(a, b);
-        assert!(got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()), "{a:e} % {b:e} = {got:e}, want {want:e}");
+        assert!(
+            got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()),
+            "{a:e} % {b:e} = {got:e}, want {want:e}"
+        );
         n += 1;
     }
     eprintln!("{n} Math.round and % results compared");
@@ -125,7 +141,11 @@ fn radix_strings_and_parse_int_match_v8() {
         let c = case.as_array().unwrap();
         let x = f(&c[0]);
         let radix = c[1].as_f64().unwrap() as u32;
-        assert_eq!(number_to_string_radix(x, radix), c[2].as_str().unwrap(), "({x:e}).toString({radix})");
+        assert_eq!(
+            number_to_string_radix(x, radix),
+            c[2].as_str().unwrap(),
+            "({x:e}).toString({radix})"
+        );
         n += 1;
     }
     for case in v.get("parse").unwrap().as_array().unwrap() {
@@ -134,12 +154,18 @@ fn radix_strings_and_parse_int_match_v8() {
         let radix = c[1].as_f64().unwrap() as i32;
         let want = f(&c[2]);
         let got = parse_int(&s, radix);
-        assert!(got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()), "parseInt({s:?}, {radix}) = {got:e}, want {want:e}");
+        assert!(
+            got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()),
+            "parseInt({s:?}, {radix}) = {got:e}, want {want:e}"
+        );
         n += 1;
     }
     for case in v.get("pad").unwrap().as_array().unwrap() {
         let c = case.as_array().unwrap();
-        assert_eq!(pad_start(c[0].as_str().unwrap(), c[1].as_f64().unwrap() as usize, '0'), c[2].as_str().unwrap());
+        assert_eq!(
+            pad_start(c[0].as_str().unwrap(), c[1].as_f64().unwrap() as usize, '0'),
+            c[2].as_str().unwrap()
+        );
         n += 1;
     }
     eprintln!("{n} radix, parseInt, and padStart results compared");

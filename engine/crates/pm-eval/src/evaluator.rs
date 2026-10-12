@@ -44,7 +44,7 @@ use std::sync::Arc;
 use pm_model::{Document, JsString, Node};
 
 use crate::address::{self, DefinitionLabels, NoDefinitions, PropEntry};
-use crate::comp::{Comp, IdKey, LayerIndex, group_ancestors};
+use crate::comp::{Comp, LayerIndex, group_ancestors};
 use crate::easing::SpringTables;
 use crate::expr::{CompiledExpression, ExprContext, ExpressionEngine, messages};
 use crate::js_sem::{JsResult, JsValue};
@@ -98,7 +98,11 @@ pub trait EvalHooks: Send + Sync {
     }
 
     /// Labels for extension-layer parameters in `allProps`.
-    fn extension_labels(&self, definition: &JsValue, param: &JsString) -> (Option<JsValue>, Option<JsValue>) {
+    fn extension_labels(
+        &self,
+        definition: &JsValue,
+        param: &JsString,
+    ) -> (Option<JsValue>, Option<JsValue>) {
         NoDefinitions.extension_labels(definition, param)
     }
 }
@@ -112,7 +116,11 @@ impl EvalHooks for NoHooks {}
 struct HookLabels<'a>(&'a dyn EvalHooks);
 
 impl DefinitionLabels for HookLabels<'_> {
-    fn extension_labels(&self, definition: &JsValue, param: &JsString) -> (Option<JsValue>, Option<JsValue>) {
+    fn extension_labels(
+        &self,
+        definition: &JsValue,
+        param: &JsString,
+    ) -> (Option<JsValue>, Option<JsValue>) {
         self.0.extension_labels(definition, param)
     }
 }
@@ -232,15 +240,19 @@ struct CompiledCache {
 }
 
 impl CompiledCache {
-    fn get(&mut self, engine: Option<&dyn ExpressionEngine>, source: &JsString) -> Option<Arc<dyn CompiledExpression>> {
+    fn get(
+        &mut self,
+        engine: Option<&dyn ExpressionEngine>,
+        source: &JsString,
+    ) -> Option<Arc<dyn CompiledExpression>> {
         if let Some(hit) = self.map.get(source) {
             return hit.clone();
         }
         let compiled = engine.and_then(|e| e.compile(source));
-        if self.map.len() >= EXPR_CACHE_MAX {
-            if let Some(old) = self.order.pop_front() {
-                self.map.remove(&old);
-            }
+        if self.map.len() >= EXPR_CACHE_MAX
+            && let Some(old) = self.order.pop_front()
+        {
+            self.map.remove(&old);
         }
         self.order.push_back(source.clone());
         self.map.insert(source.clone(), compiled.clone());
@@ -274,7 +286,7 @@ struct SlotState {
 
 #[derive(Clone, Debug)]
 struct Slot {
-    address: PropAddress,
+    address: Arc<PropAddress>,
     state: Option<SlotState>,
     live: bool,
 }
@@ -284,6 +296,12 @@ struct IndexEntry {
     len: usize,
     index: Arc<LayerIndex>,
 }
+
+/// Compositions resolved during one call (a batch shares them).
+#[derive(Default)]
+struct Resolved<'d>(Vec<(JsString, Option<ResolvedComp<'d>>)>);
+
+type ResolvedComp<'d> = (Comp<'d>, Arc<LayerIndex>);
 
 /// The evaluator. See the module documentation.
 pub struct Evaluator {
@@ -317,7 +335,9 @@ impl core::fmt::Debug for Evaluator {
 }
 
 fn layer_id_string(layer: Option<&Node>) -> JsString {
-    node::string(node::member(layer, "id")).cloned().unwrap_or_default()
+    node::string(node::member(layer, "id"))
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// `T - L.from` (throws when `L` is `null` or `undefined`).
@@ -426,16 +446,27 @@ impl Evaluator {
     // ── by node ──────────────────────────────────────────────────────────
 
     /// `evalKfs(kf, t, interpolateColor)`.
-    pub fn eval_keyframes(&mut self, kf: Option<&Node>, t: f64, interpolate_color: bool) -> JsResult<JsValue> {
+    pub fn eval_keyframes(
+        &mut self,
+        kf: Option<&Node>,
+        t: f64,
+        interpolate_color: bool,
+    ) -> JsResult<JsValue> {
         crate::keyframes::evaluate(kf, t, interpolate_color, &mut self.springs)
     }
 
     /// `PM.ev(L, key, T)`: one channel of `L.p` at composition time `T`.
-    pub fn ev(&mut self, cx: &Comp<'_>, layer: Option<&Node>, key: &JsString, time: f64) -> JsResult<JsValue> {
-        if self.hooks.overrides_channels() {
-            if let Some(r) = self.hooks.clone().channel(cx, layer, key, time) {
-                return r;
-            }
+    pub fn ev(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: Option<&Node>,
+        key: &JsString,
+        time: f64,
+    ) -> JsResult<JsValue> {
+        if self.hooks.overrides_channels()
+            && let Some(r) = self.hooks.clone().channel(cx, layer, key, time)
+        {
+            return r;
         }
         let p = node::get_checked(layer, b"p")?;
         let prop = match p {
@@ -480,14 +511,17 @@ impl Evaluator {
         time: f64,
         key: &JsString,
     ) -> JsResult<JsValue> {
-        if self.hooks.overrides_channels() {
-            if let Some(r) = self.hooks.clone().channel(cx, layer, key, time) {
-                return r;
-            }
+        if self.hooks.overrides_channels()
+            && let Some(r) = self.hooks.clone().channel(cx, layer, key, time)
+        {
+            return r;
         }
         let Some(p) = prop.filter(|p| {
             node::truthy(Some(p))
-                && matches!(p.kind(), pm_model::NodeKind::Object(_) | pm_model::NodeKind::Array(_))
+                && matches!(
+                    p.kind(),
+                    pm_model::NodeKind::Object(_) | pm_model::NodeKind::Array(_)
+                )
         }) else {
             return Ok(JsValue::Null);
         };
@@ -518,7 +552,8 @@ impl Evaluator {
         time: f64,
         key: &JsString,
     ) -> JsResult<JsValue> {
-        let keys = node::member(Some(prop), "kf").filter(|k| node::array(Some(k)).is_some_and(|a| !a.is_empty()));
+        let keys = node::member(Some(prop), "kf")
+            .filter(|k| node::array(Some(k)).is_some_and(|a| !a.is_empty()));
         let value = match keys {
             Some(kf) => self.eval_keyframes(Some(kf), tl, interpolates_color(key.as_bytes()))?,
             None => node::get(prop, b"v").to_js(),
@@ -556,12 +591,15 @@ impl Evaluator {
                 Ok(r)
             }
             Ok(_) => {
-                self.errors.insert(error_key, messages::NOT_FINITE.to_owned());
+                self.errors
+                    .insert(error_key, messages::NOT_FINITE.to_owned());
                 Ok(value)
             }
             Err(e) => {
-                self.errors
-                    .insert(error_key, e.message.unwrap_or_else(|| messages::FAILED.to_owned()));
+                self.errors.insert(
+                    error_key,
+                    e.message.unwrap_or_else(|| messages::FAILED.to_owned()),
+                );
                 Ok(value)
             }
         }
@@ -570,10 +608,12 @@ impl Evaluator {
     fn layer_index(&mut self, cx: &Comp<'_>) -> Arc<LayerIndex> {
         let layers_rev = cx.layers_node().map_or(0, Node::rev);
         let len = cx.layers().len();
-        if let Some(entry) = self.indexes.get(cx.id()) {
-            if layers_rev <= entry.validated && entry.validated <= cx.revision() && entry.len == len {
-                return entry.index.clone();
-            }
+        if let Some(entry) = self.indexes.get(cx.id())
+            && layers_rev <= entry.validated
+            && entry.validated <= cx.revision()
+            && entry.len == len
+        {
+            return entry.index.clone();
         }
         let index = Arc::new(LayerIndex::build(cx.layers()));
         self.indexes.insert(
@@ -588,7 +628,11 @@ impl Evaluator {
     }
 
     /// `PM.groupAncestors(L)` in the composition.
-    pub fn group_ancestors<'d>(&mut self, cx: &Comp<'d>, layer: &'d Node) -> JsResult<Vec<&'d Node>> {
+    pub fn group_ancestors<'d>(
+        &mut self,
+        cx: &Comp<'d>,
+        layer: &'d Node,
+    ) -> JsResult<Vec<&'d Node>> {
         let index = self.layer_index(cx);
         group_ancestors(layer, cx.layers(), &index)
     }
@@ -597,7 +641,9 @@ impl Evaluator {
     fn on(&mut self, cx: &Comp<'_>, layer: Option<&Node>, time: f64) -> JsResult<bool> {
         let on = node::member(layer, "on");
         if node::is_property(on) {
-            Ok(self.ev_p(cx, layer, on, time, &JsString::from("l.on"))?.truthy())
+            Ok(self
+                .ev_p(cx, layer, on, time, &JsString::from("l.on"))?
+                .truthy())
         } else {
             Ok(node::truthy(on))
         }
@@ -611,12 +657,12 @@ impl Evaluator {
     }
 
     fn active_base(&mut self, cx: &Comp<'_>, layer: Option<&Node>, time: f64) -> JsResult<bool> {
-        if let Some(l) = layer {
-            if node::truthy(node::member(Some(l), "group")) {
-                for group in self.group_ancestors(cx, l)? {
-                    if !self.on(cx, Some(group), time)? {
-                        return Ok(false);
-                    }
+        if let Some(l) = layer
+            && node::truthy(node::member(Some(l), "group"))
+        {
+            for group in self.group_ancestors(cx, l)? {
+                if !self.on(cx, Some(group), time)? {
+                    return Ok(false);
                 }
             }
         }
@@ -650,10 +696,10 @@ impl Evaluator {
         let d = node::get_checked(Some(layer), b"d")?;
         let mut content = Content::new();
         let mut sources: Vec<(JsString, Got<'_>)> = Vec::new();
-        if let Got::Node(d) = &d {
-            if !node::is_nullish(Some(d)) {
-                sources = node::entries(d);
-            }
+        if let Got::Node(d) = &d
+            && !node::is_nullish(Some(d))
+        {
+            sources = node::entries(d);
         }
         let ty = node::to_js_string(node::member(Some(layer), "type"));
         let fields = address::content_fields(ty.as_bytes());
@@ -692,7 +738,7 @@ impl Evaluator {
             return id;
         }
         let slot = Slot {
-            address: address.clone(),
+            address: Arc::new(address.clone()),
             state: None,
             live: true,
         };
@@ -715,18 +761,18 @@ impl Evaluator {
         self.slots
             .get(id.0 as usize)
             .filter(|s| s.live)
-            .map(|s| &s.address)
+            .map(|s| s.address.as_ref())
     }
 
     /// Releases an id; it may be reused by a later [`Evaluator::intern`].
     pub fn release(&mut self, id: PropId) {
-        if let Some(slot) = self.slots.get_mut(id.0 as usize) {
-            if slot.live {
-                slot.live = false;
-                slot.state = None;
-                self.ids.remove(&slot.address);
-                self.free.push(id.0);
-            }
+        if let Some(slot) = self.slots.get_mut(id.0 as usize)
+            && slot.live
+        {
+            slot.live = false;
+            slot.state = None;
+            self.ids.remove(slot.address.as_ref());
+            self.free.push(id.0);
         }
     }
 
@@ -737,6 +783,16 @@ impl Evaluator {
 
     /// Evaluates an interned id at composition time `T` (seconds).
     pub fn ev_id(&mut self, doc: &Document, id: PropId, time: f64) -> JsResult<JsValue> {
+        self.ev_id_in(doc, id, time, &mut Resolved::default())
+    }
+
+    fn ev_id_in<'d>(
+        &mut self,
+        doc: &'d Document,
+        id: PropId,
+        time: f64,
+        resolved: &mut Resolved<'d>,
+    ) -> JsResult<JsValue> {
         self.observe(doc.revision());
         let revision = doc.revision();
         let index = id.0 as usize;
@@ -744,32 +800,32 @@ impl Evaluator {
             return Ok(JsValue::Undefined);
         };
         let time_bits = time.to_bits();
-        if let Some(state) = &slot.state {
-            if state.validated == revision {
-                if let Some((t, value)) = &state.memo {
-                    if *t == time_bits {
-                        self.stats.memo_hits += 1;
-                        return value.clone();
-                    }
+        if let Some(state) = &slot.state
+            && state.validated == revision
+        {
+            if let Some((t, value)) = &state.memo
+                && *t == time_bits
+            {
+                self.stats.memo_hits += 1;
+                return value.clone();
+            }
+            match &state.plan {
+                Plan::Const(value) => return value.clone(),
+                Plan::Temporal { track, first } => {
+                    let tl = time - state.from;
+                    let value = if tl.is_finite() {
+                        Ok(track.value(tl))
+                    } else {
+                        Ok(first.clone())
+                    };
+                    let state = self.slots[index].state.as_mut().expect("state");
+                    state.memo = Some((time_bits, value.clone()));
+                    return value;
                 }
-                match &state.plan {
-                    Plan::Const(value) => return value.clone(),
-                    Plan::Temporal { track, first } => {
-                        let tl = time - state.from;
-                        let value = if tl.is_finite() {
-                            Ok(track.value(tl))
-                        } else {
-                            Ok(first.clone())
-                        };
-                        let state = self.slots[index].state.as_mut().expect("state");
-                        state.memo = Some((time_bits, value.clone()));
-                        return value;
-                    }
-                    Plan::Live { .. } => {}
-                }
+                Plan::Live { .. } => {}
             }
         }
-        let value = self.ev_slot_slow(doc, index, time);
+        let value = self.ev_slot_slow(doc, index, time, resolved);
         if let Some(state) = self.slots[index].state.as_mut() {
             state.memo = Some((time_bits, value.clone()));
         }
@@ -781,10 +837,18 @@ impl Evaluator {
     /// # Panics
     ///
     /// Panics if `out` or `kinds` is shorter than `ids`.
-    pub fn ev_batch(&mut self, doc: &Document, ids: &[PropId], time: f64, out: &mut [f64], kinds: &mut [ValueKind]) {
+    pub fn ev_batch(
+        &mut self,
+        doc: &Document,
+        ids: &[PropId],
+        time: f64,
+        out: &mut [f64],
+        kinds: &mut [ValueKind],
+    ) {
         assert!(out.len() >= ids.len() && kinds.len() >= ids.len());
+        let mut resolved = Resolved::default();
         for (i, &id) in ids.iter().enumerate() {
-            match self.ev_id(doc, id, time) {
+            match self.ev_id_in(doc, id, time, &mut resolved) {
                 Ok(JsValue::Number(n)) => {
                     out[i] = n;
                     kinds[i] = ValueKind::Number;
@@ -802,22 +866,38 @@ impl Evaluator {
     }
 
     /// Revalidates (or plans) a slot at the current revision and evaluates.
-    fn ev_slot_slow(&mut self, doc: &Document, index: usize, time: f64) -> JsResult<JsValue> {
+    fn ev_slot_slow<'d>(
+        &mut self,
+        doc: &'d Document,
+        index: usize,
+        time: f64,
+        resolved: &mut Resolved<'d>,
+    ) -> JsResult<JsValue> {
         let revision = doc.revision();
         let address = self.slots[index].address.clone();
-        let comp_id = address.comp.as_str().map(str::to_owned).unwrap_or_else(|| address.comp.to_string_lossy());
-        let Ok(cx) = Comp::resolve(doc, &comp_id) else {
+        let entry = match resolved.0.iter().position(|(id, _)| *id == address.comp) {
+            Some(i) => i,
+            None => {
+                let comp = Comp::resolve(doc, &address.comp.to_string_lossy())
+                    .ok()
+                    .map(|cx| {
+                        let index = self.layer_index(&cx);
+                        (cx, index)
+                    });
+                resolved.0.push((address.comp.clone(), comp));
+                resolved.0.len() - 1
+            }
+        };
+        let Some((cx, layer_index)) = &resolved.0[entry].1 else {
             self.slots[index].state = None;
             return Ok(JsValue::Undefined);
         };
-        let layer_index = self.layer_index(&cx);
-        let key = IdKey::String(address.layer.clone());
-        let Some(&pos) = layer_index.first.get(&key) else {
+        let Some(&(pos, duplicated)) = layer_index.strings.get(&address.layer) else {
             self.slots[index].state = None;
             return Ok(JsValue::Undefined);
         };
         let layer = &cx.layers()[pos];
-        let unique = !layer_index.duplicated.contains(&key);
+        let unique = !duplicated;
 
         // Keep the previous plan when the inputs provably did not change.
         let keep = match &self.slots[index].state {
@@ -830,9 +910,13 @@ impl Evaluator {
                 let unchanged = same_layer
                     && (layer.rev() <= state.validated
                         || match &address.via {
-                            Via::Channel => node::member(node::member(Some(layer), "p"), &key_str(&address.key))
-                                .is_some_and(|n| n.rev() <= state.validated),
-                            Via::Member(path) => member_path(layer, path).is_some_and(|n| n.rev() <= state.validated),
+                            Via::Channel => {
+                                node::member(node::member(Some(layer), "p"), &key_str(&address.key))
+                                    .is_some_and(|n| n.rev() <= state.validated)
+                            }
+                            Via::Member(path) => {
+                                member_path(layer, path).is_some_and(|n| n.rev() <= state.validated)
+                            }
                             Via::Find => false,
                         });
                 let expression = matches!(state.plan, Plan::Live { expression: true });
@@ -863,7 +947,7 @@ impl Evaluator {
             }
             None => {
                 self.stats.plans += 1;
-                let (plan, from) = self.plan(&cx, layer, &address);
+                let (plan, from) = self.plan(cx, layer, &address);
                 self.slots[index].state = Some(SlotState {
                     validated: revision,
                     unique,
@@ -874,23 +958,33 @@ impl Evaluator {
             }
         }
         let state = self.slots[index].state.as_ref().expect("planned");
-        if let Some((t, value)) = &state.memo {
-            if *t == time.to_bits() {
-                return value.clone();
-            }
+        if let Some((t, value)) = &state.memo
+            && *t == time.to_bits()
+        {
+            return value.clone();
         }
         match &state.plan {
             Plan::Const(value) => value.clone(),
             Plan::Temporal { track, first } => {
                 let tl = time - state.from;
-                Ok(if tl.is_finite() { track.value(tl) } else { first.clone() })
+                Ok(if tl.is_finite() {
+                    track.value(tl)
+                } else {
+                    first.clone()
+                })
             }
-            Plan::Live { .. } => self.ev_address(&cx, layer, &address, time),
+            Plan::Live { .. } => self.ev_address(cx, layer, &address, time),
         }
     }
 
     /// Evaluates an address on its nodes, uncached.
-    fn ev_address(&mut self, cx: &Comp<'_>, layer: &Node, address: &PropAddress, time: f64) -> JsResult<JsValue> {
+    fn ev_address(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: &Node,
+        address: &PropAddress,
+        time: f64,
+    ) -> JsResult<JsValue> {
         match &address.via {
             Via::Channel => self.ev(cx, Some(layer), &address.key, time),
             Via::Find => {
@@ -927,11 +1021,19 @@ impl Evaluator {
         };
         let missing = match &address.via {
             Via::Channel => !prop.truthy(),
-            _ => !matches!(prop.node().map(Node::kind), Some(pm_model::NodeKind::Object(_) | pm_model::NodeKind::Array(_)))
-                || !prop.truthy(),
+            _ => {
+                !matches!(
+                    prop.node().map(Node::kind),
+                    Some(pm_model::NodeKind::Object(_) | pm_model::NodeKind::Array(_))
+                ) || !prop.truthy()
+            }
         };
         if missing {
-            let value = if address.via == Via::Channel { JsValue::Number(0.0) } else { JsValue::Null };
+            let value = if address.via == Via::Channel {
+                JsValue::Number(0.0)
+            } else {
+                JsValue::Null
+            };
             return (Plan::Const(Ok(value)), from);
         }
         // A computed value (a string's character) has no members.
@@ -941,7 +1043,8 @@ impl Evaluator {
         if node::get(p, b"expr").truthy() {
             return (Plan::Live { expression: true }, from);
         }
-        self.errors.remove(&Self::error_key(cx, Some(layer), &address.key));
+        self.errors
+            .remove(&Self::error_key(cx, Some(layer), &address.key));
         if !kf_length_truthy(&prop) {
             return (Plan::Const(Ok(node::get(p, b"v").to_js())), from);
         }
@@ -951,7 +1054,9 @@ impl Evaluator {
             PreparedTrack::Temporal(track) => {
                 let first = node::array(kf)
                     .and_then(|k| k.first())
-                    .map_or(JsValue::Null, |k| node::get(k, b"v").to_js().or_nullish(JsValue::Null));
+                    .map_or(JsValue::Null, |k| {
+                        node::get(k, b"v").to_js().or_nullish(JsValue::Null)
+                    });
                 (Plan::Temporal { track, first }, from)
             }
             _ => (Plan::Live { expression: false }, from),

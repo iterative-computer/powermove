@@ -329,7 +329,7 @@ pub fn math_round(x: f64) -> f64 {
     if x > 0.0 && x < 0.5 {
         return 0.0;
     }
-    if x < 0.0 && x >= -0.5 {
+    if (-0.5..0.0).contains(&x) {
         return -0.0;
     }
     let floor = x.floor();
@@ -370,10 +370,7 @@ pub fn parse_int(input: &JsString, radix: i32) -> f64 {
         s = &s[2..];
         radix = 16;
     }
-    let digits: Vec<u32> = s
-        .chars()
-        .map_while(|c| c.to_digit(radix as u32))
-        .collect();
+    let digits: Vec<u32> = s.chars().map_while(|c| c.to_digit(radix as u32)).collect();
     if digits.is_empty() {
         return f64::NAN;
     }
@@ -447,7 +444,7 @@ fn power_of_two_radix(digits: &[u32], radix: u32) -> f64 {
     if extra_bits > 1100 {
         return f64::INFINITY;
     }
-    base * 2f64.powi(extra_bits)
+    libm::scalbn(base, extra_bits)
 }
 
 const RADIX_DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
@@ -492,8 +489,7 @@ pub fn number_to_string_radix(value: f64, radix: u32) -> String {
             let digit = fraction as usize;
             frac_digits.push(RADIX_DIGITS[digit]);
             fraction -= digit as f64;
-            if (fraction > 0.5 || (fraction == 0.5 && (digit & 1) == 1)) && fraction + delta > 1.0
-            {
+            if (fraction > 0.5 || (fraction == 0.5 && (digit & 1) == 1)) && fraction + delta > 1.0 {
                 // Round up, propagating the carry through written digits.
                 loop {
                     match frac_digits.pop() {
@@ -604,13 +600,16 @@ mod tests {
     #[test]
     fn plus_concatenates_strings() {
         let five = JsValue::from("5");
-        assert_eq!(
-            add(&five, &JsValue::Number(2.5)),
-            JsValue::from("52.5")
-        );
+        assert_eq!(add(&five, &JsValue::Number(2.5)), JsValue::from("52.5"));
         assert_eq!(sub(&five, &JsValue::Number(1.0)), 4.0);
-        assert_eq!(add(&JsValue::Null, &JsValue::Number(2.0)), JsValue::Number(2.0));
-        assert_eq!(add(&JsValue::Bool(true), &JsValue::Bool(true)), JsValue::Number(2.0));
+        assert_eq!(
+            add(&JsValue::Null, &JsValue::Number(2.0)),
+            JsValue::Number(2.0)
+        );
+        assert_eq!(
+            add(&JsValue::Bool(true), &JsValue::Bool(true)),
+            JsValue::Number(2.0)
+        );
     }
 
     #[test]

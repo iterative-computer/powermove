@@ -53,7 +53,7 @@ pub struct Comp<'d> {
     id: JsString,
     node: &'d Node,
     revision: u64,
-    rate: Option<IngestRate>,
+    rate: std::cell::OnceCell<Option<IngestRate>>,
     /// The open composition of a canonical document (see above).
     open_canonical: bool,
 }
@@ -86,7 +86,6 @@ impl<'d> Comp<'d> {
                 }
             }
         };
-        let rate = IngestRate::of_composition(&node.to_value_shallow_rate()).ok();
         let open_canonical = !std::ptr::eq(node, root)
             && node::string(node::member(Some(root), "compId"))
                 .is_some_and(|open| open.as_bytes() == comp_id.as_bytes());
@@ -95,7 +94,7 @@ impl<'d> Comp<'d> {
             id: JsString::from(comp_id),
             node,
             revision,
-            rate,
+            rate: std::cell::OnceCell::new(),
             open_canonical,
         })
     }
@@ -122,7 +121,9 @@ impl<'d> Comp<'d> {
     /// The composition's exact rate (section 5), when its `fps` and
     /// `fpsRational` give a valid one.
     pub fn rate(&self) -> Option<IngestRate> {
-        self.rate
+        *self
+            .rate
+            .get_or_init(|| IngestRate::of_composition(&self.node.to_value_shallow_rate()).ok())
     }
 
     /// `comp.layers`, or no layers when it is not an array.
@@ -198,7 +199,7 @@ impl<'d> Comp<'d> {
     /// document's own float) for a frame start, `ticks / TICKS` otherwise
     /// (`IngestRate::seconds_of`). Without a valid rate, `ticks / TICKS`.
     pub fn seconds_at(&self, ticks: Tick) -> f64 {
-        match self.rate {
+        match self.rate() {
             Some(rate) => rate.seconds_of(ticks),
             None => pm_time::seconds_from_ticks(ticks),
         }
@@ -206,7 +207,7 @@ impl<'d> Comp<'d> {
 
     /// The composition frame containing a time in seconds (section 5, rule 9).
     pub fn frame_at(&self, seconds: f64) -> Option<i64> {
-        let rate = self.rate?;
+        let rate = self.rate()?;
         let t = rate.time(seconds).ok()?;
         Some(t.frame.unwrap_or_else(|| rate.rate.frame_of(t.ticks)))
     }
@@ -261,7 +262,11 @@ impl IdKey {
             JsValue::String(s) => IdKey::String(s.clone()),
             JsValue::Number(n) => {
                 let n = if *n == 0.0 { 0.0 } else { *n };
-                IdKey::Number(if n.is_nan() { f64::NAN.to_bits() } else { n.to_bits() })
+                IdKey::Number(if n.is_nan() {
+                    f64::NAN.to_bits()
+                } else {
+                    n.to_bits()
+                })
             }
             JsValue::Bool(b) => IdKey::Bool(*b),
             JsValue::Null => IdKey::Null,
@@ -285,6 +290,8 @@ pub struct LayerIndex {
     /// Whether some element of `layers` is `null` (building the legacy
     /// group index throws then).
     pub has_nullish: bool,
+    /// String ids: the first layer and whether the id is duplicated.
+    pub strings: HashMap<JsString, (usize, bool)>,
 }
 
 impl LayerIndex {
@@ -299,6 +306,13 @@ impl LayerIndex {
             };
             match id {
                 Some(key) => {
+                    if let IdKey::String(s) = &key {
+                        index
+                            .strings
+                            .entry(s.clone())
+                            .and_modify(|e| e.1 = true)
+                            .or_insert((i, false));
+                    }
                     if index.first.contains_key(&key) {
                         index.duplicated.insert(key.clone());
                     } else {

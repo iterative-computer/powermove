@@ -392,7 +392,10 @@ mod tests {
     #[test]
     fn integer_keys_come_first() {
         let o = n(r#"{"b":1,"10":2,"a":3,"2":4}"#);
-        let keys: Vec<String> = for_in_keys(Some(&o)).iter().map(|k| k.to_string_lossy()).collect();
+        let keys: Vec<String> = for_in_keys(Some(&o))
+            .iter()
+            .map(|k| k.to_string_lossy())
+            .collect();
         assert_eq!(keys, ["2", "10", "a", "b"]);
     }
 

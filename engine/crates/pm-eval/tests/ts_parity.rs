@@ -19,8 +19,8 @@ use pm_eval::keyframes::{self, PreparedTrack};
 use pm_eval::node::Got;
 use pm_eval::temporal::{self, EaseKeyframe, Interp, Side, TemporalEase};
 use pm_eval::{
-    Comp, CompiledExpression, ExprContext, ExprError, ExpressionEngine, Evaluator, JsResult, JsValue,
-    PropAddress, Via, js_sem,
+    Comp, CompiledExpression, Evaluator, ExprContext, ExprError, ExpressionEngine, JsResult,
+    JsValue, PropAddress, Via, js_sem,
 };
 use pm_model::json::{parse, to_canonical_string};
 use pm_model::{Document, JsString, Node, Value};
@@ -67,7 +67,11 @@ impl Stats {
             self.max_abs = self.max_abs.max(diff);
             return;
         }
-        self.fail(format!("{what}: got {got:e} ({:016x}) want {want:e} ({:016x})", got.to_bits(), want.to_bits()));
+        self.fail(format!(
+            "{what}: got {got:e} ({:016x}) want {want:e} ({:016x})",
+            got.to_bits(),
+            want.to_bits()
+        ));
     }
 
     fn fail(&mut self, message: String) {
@@ -88,7 +92,11 @@ impl Stats {
             return;
         }
         let Ok(got) = got else {
-            self.fail(format!("{what}: threw {:?}, want {}", got, to_canonical_string(want)));
+            self.fail(format!(
+                "{what}: threw {:?}, want {}",
+                got,
+                to_canonical_string(want)
+            ));
             return;
         };
         if let Some(n) = want_map.get("n") {
@@ -105,13 +113,16 @@ impl Stats {
             JsValue::Bool(b) => want_map.get("b").and_then(Value::as_bool) == Some(*b),
             JsValue::String(text) => want_map.get("s").and_then(Value::as_js_string) == Some(text),
             JsValue::Number(_) => false,
-            JsValue::Object(v) => want_map
-                .get("j")
-                .is_some_and(|j| to_canonical_string(&parse(s(j)).expect("json")) == to_canonical_string(&**v)),
+            JsValue::Object(v) => want_map.get("j").is_some_and(|j| {
+                to_canonical_string(&parse(s(j)).expect("json")) == to_canonical_string(&**v)
+            }),
         };
         if !ok {
             self.others -= 1;
-            self.fail(format!("{what}: got {got:?}, want {}", to_canonical_string(want)));
+            self.fail(format!(
+                "{what}: got {got:?}, want {}",
+                to_canonical_string(want)
+            ));
         }
     }
 
@@ -120,7 +131,11 @@ impl Stats {
             "{section}: {} numbers ({} bit-identical, max |diff| {:e}), {} other values",
             self.numbers, self.identical, self.max_abs, self.others
         );
-        assert!(self.failures.is_empty(), "{section} mismatches:\n{}", self.failures.join("\n"));
+        assert!(
+            self.failures.is_empty(),
+            "{section} mismatches:\n{}",
+            self.failures.join("\n")
+        );
     }
 }
 
@@ -133,16 +148,26 @@ fn easing_matches_typescript() {
         let curve = easing::bezier(c[0], c[1], c[2], c[3]);
         if let Some(Value::String(name)) = case.get("name") {
             let p = easing::preset(name.as_str().unwrap());
-            assert_eq!(p.map(f64::to_bits), [c[0], c[1], c[2], c[3]].map(f64::to_bits), "preset {name}");
+            assert_eq!(
+                p.map(f64::to_bits),
+                [c[0], c[1], c[2], c[3]].map(f64::to_bits),
+                "preset {name}"
+            );
         }
-        for (x, y) in fs(case.get("xs").unwrap()).into_iter().zip(fs(case.get("ys").unwrap())) {
+        for (x, y) in fs(case.get("xs").unwrap())
+            .into_iter()
+            .zip(fs(case.get("ys").unwrap()))
+        {
             stats.number(&format!("bezier {c:?} at {x}"), curve.eval(x), y, true);
         }
     }
     for case in vectors.get("names").unwrap().as_array().unwrap() {
         let eo = fs(case.get("eo").unwrap());
         let ei = fs(case.get("ei").unwrap());
-        assert_eq!(easing::name_of([eo[0], eo[1]], [ei[0], ei[1]]), s(case.get("name").unwrap()));
+        assert_eq!(
+            easing::name_of([eo[0], eo[1]], [ei[0], ei[1]]),
+            s(case.get("name").unwrap())
+        );
         stats.others += 1;
     }
     stats.check("easing");
@@ -161,8 +186,16 @@ fn springs_match_typescript() {
         let cfg_text = s(case.get("cfg").unwrap());
         let cfg_node = Node::from_value(parse(cfg_text).unwrap(), 0);
         let cfg = SpringConfig::from_node(Some(&cfg_node));
-        for (t, y) in fs(case.get("ts").unwrap()).into_iter().zip(fs(case.get("ys").unwrap())) {
-            stats.number(&format!("spring {cfg_text} at {t}"), tables.spring(t, cfg), y, true);
+        for (t, y) in fs(case.get("ts").unwrap())
+            .into_iter()
+            .zip(fs(case.get("ys").unwrap()))
+        {
+            stats.number(
+                &format!("spring {cfg_text} at {t}"),
+                tables.spring(t, cfg),
+                y,
+                true,
+            );
         }
         stats.number(
             &format!("springDuration {cfg_text}"),
@@ -209,7 +242,12 @@ fn temporal_ease_matches_typescript() {
     let mut stats = Stats::default();
     for case in temporal_v.get("solve").unwrap().as_array().unwrap() {
         let v = fs(case);
-        stats.number(&format!("solveCurveParam{v:?}"), temporal::solve_curve_param(v[0], v[1], v[2]), v[3], true);
+        stats.number(
+            &format!("solveCurveParam{v:?}"),
+            temporal::solve_curve_param(v[0], v[1], v[2]),
+            v[3],
+            true,
+        );
     }
     for case in temporal_v.get("segments").unwrap().as_array().unwrap() {
         let a = typed_key(case.get("a").unwrap());
@@ -220,20 +258,38 @@ fn temporal_ease_matches_typescript() {
             .zip(fs(case.get("values").unwrap()))
             .zip(fs(case.get("params").unwrap()))
         {
-            stats.number("valueAtTime", temporal::value_at_time(&a, &b, *t), value, true);
-            stats.number("segmentParamAtTime", temporal::segment_param_at_time(&a, &b, *t), param, true);
+            stats.number(
+                "valueAtTime",
+                temporal::value_at_time(&a, &b, *t),
+                value,
+                true,
+            );
+            stats.number(
+                "segmentParamAtTime",
+                temporal::segment_param_at_time(&a, &b, *t),
+                param,
+                true,
+            );
         }
-        match (temporal::segment_unit_curve(&a, &b), case.get("unit").unwrap()) {
+        match (
+            temporal::segment_unit_curve(&a, &b),
+            case.get("unit").unwrap(),
+        ) {
             (None, Value::Null) => stats.others += 1,
             (Some(got), want @ Value::Array(_)) => {
                 for (g, w) in got.iter().zip(fs(want)) {
                     stats.number("segmentUnitCurve", *g, w, true);
                 }
             }
-            (got, want) => stats.fail(format!("segmentUnitCurve {got:?} vs {}", to_canonical_string(want))),
+            (got, want) => stats.fail(format!(
+                "segmentUnitCurve {got:?} vs {}",
+                to_canonical_string(want)
+            )),
         }
         let p = temporal::segment_control_points(&a, &b);
-        let got = [p.p0.t, p.p0.v, p.p1.t, p.p1.v, p.p2.t, p.p2.v, p.p3.t, p.p3.v];
+        let got = [
+            p.p0.t, p.p0.v, p.p1.t, p.p1.v, p.p2.t, p.p2.v, p.p3.t, p.p3.v,
+        ];
         for (g, w) in got.iter().zip(fs(case.get("points").unwrap())) {
             stats.number("segmentControlPoints", *g, w, true);
         }
@@ -242,23 +298,40 @@ fn temporal_ease_matches_typescript() {
         let h = fs(case.get("handle").unwrap());
         let dt = f(case.get("dt").unwrap());
         let dv = f(case.get("dv").unwrap());
-        let side = if s(case.get("side").unwrap()) == "in" { Side::In } else { Side::Out };
+        let side = if s(case.get("side").unwrap()) == "in" {
+            Side::In
+        } else {
+            Side::Out
+        };
         let e = temporal::ease_from_unit_handle([h[0], h[1]], dt, dv, side);
         let want = fs(case.get("ease").unwrap());
         stats.number("easeFromUnitHandle speed", e.speed, want[0], true);
         stats.number("easeFromUnitHandle influence", e.influence, want[1], true);
-        match (temporal::unit_handle_from_ease(e, dt, dv, side), case.get("back").unwrap()) {
+        match (
+            temporal::unit_handle_from_ease(e, dt, dv, side),
+            case.get("back").unwrap(),
+        ) {
             (None, Value::Null) => stats.others += 1,
             (Some(got), want @ Value::Array(_)) => {
                 for (g, w) in got.iter().zip(fs(want)) {
                     stats.number("unitHandleFromEase", *g, w, true);
                 }
             }
-            (got, want) => stats.fail(format!("unitHandleFromEase {got:?} vs {}", to_canonical_string(want))),
+            (got, want) => stats.fail(format!(
+                "unitHandleFromEase {got:?} vs {}",
+                to_canonical_string(want)
+            )),
         }
     }
     for case in temporal_v.get("auto").unwrap().as_array().unwrap() {
-        let keys: Vec<EaseKeyframe> = case.get("keys").unwrap().as_array().unwrap().iter().map(typed_key).collect();
+        let keys: Vec<EaseKeyframe> = case
+            .get("keys")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(typed_key)
+            .collect();
         stats.number(
             "autoBezierSpeed",
             temporal::auto_bezier_speed(Some(&keys[0]), &keys[1], Some(&keys[2])),
@@ -285,12 +358,26 @@ fn keyframe_tracks_match_typescript() {
         let outs = case.get("out").unwrap().as_array().unwrap();
         for (t, want) in times.iter().zip(outs) {
             let what = format!("{kind} {text} color={color} at {t}");
-            stats.js(&what, &keyframes::evaluate(Some(&kf), *t, color, &mut springs), want);
-            stats.js(&format!("prepared {what}"), &prepared.value(Some(&kf), *t, color, &mut springs), want);
-            if let (Some(track), Some(n)) = (prepared.temporal(), want.get("n")) {
-                if track.is_numeric() && t.is_finite() {
-                    stats.number(&format!("value_number {what}"), track.value_number(*t), f(n), true);
-                }
+            stats.js(
+                &what,
+                &keyframes::evaluate(Some(&kf), *t, color, &mut springs),
+                want,
+            );
+            stats.js(
+                &format!("prepared {what}"),
+                &prepared.value(Some(&kf), *t, color, &mut springs),
+                want,
+            );
+            if let (Some(track), Some(n)) = (prepared.temporal(), want.get("n"))
+                && track.is_numeric()
+                && t.is_finite()
+            {
+                stats.number(
+                    &format!("value_number {what}"),
+                    track.value_number(*t),
+                    f(n),
+                    true,
+                );
             }
         }
         *by_kind.entry(kind).or_default() += 1;
@@ -309,8 +396,20 @@ struct Mock(&'static str);
 impl ExpressionEngine for MockEngine {
     fn compile(&self, source: &JsString) -> Option<Arc<dyn CompiledExpression>> {
         const KNOWN: [&str; 14] = [
-            "value * 2", "t", "time", "fps", "idx", "param('speed')", "param('missing')", "'label'", "1/0",
-            "value > 0", "ch", "value + 'x'", "layer.from", "comp.dur",
+            "value * 2",
+            "t",
+            "time",
+            "fps",
+            "idx",
+            "param('speed')",
+            "param('missing')",
+            "'label'",
+            "1/0",
+            "value > 0",
+            "ch",
+            "value + 'x'",
+            "layer.from",
+            "comp.dur",
         ];
         KNOWN
             .iter()
@@ -325,7 +424,9 @@ impl CompiledExpression for Mock {
     }
 
     fn evaluate(&self, cx: &ExprContext<'_>) -> Result<JsValue, ExprError> {
-        let thrown = |e: pm_eval::JsThrow| ExprError { message: Some(e.message) };
+        let thrown = |e: pm_eval::JsThrow| ExprError {
+            message: Some(e.message),
+        };
         Ok(match self.0 {
             "value * 2" => JsValue::Number(cx.value.to_number() * 2.0),
             "t" => JsValue::Number(cx.t),
@@ -338,7 +439,10 @@ impl CompiledExpression for Mock {
             "1/0" => JsValue::Number(1.0 / 0.0),
             "value > 0" => JsValue::Bool(cx.value.to_number() > 0.0),
             "ch" => JsValue::String(cx.channel.clone()),
-            "value + 'x'" => js_sem::add(&JsValue::String(cx.value.to_js_string()), &JsValue::from("x")),
+            "value + 'x'" => js_sem::add(
+                &JsValue::String(cx.value.to_js_string()),
+                &JsValue::from("x"),
+            ),
             // member(): own properties of objects only.
             "layer.from" => pm_eval::node::js_value_opt(pm_eval::node::member(cx.layer, "from")),
             "comp.dur" => pm_eval::node::js_value_opt(cx.comp.member("dur")),
@@ -358,9 +462,9 @@ fn run_comp(doc: &Document, case_list: &[Value], stats: &mut Stats, form: &str) 
     let first_of_id = |index: usize| {
         let id = pm_eval::node::string(pm_eval::node::member(Some(&layers[index]), "id"));
         id.and_then(|id| {
-            layers
-                .iter()
-                .position(|l| pm_eval::node::string(pm_eval::node::member(Some(l), "id")) == Some(id))
+            layers.iter().position(|l| {
+                pm_eval::node::string(pm_eval::node::member(Some(l), "id")) == Some(id)
+            })
         }) == Some(index)
     };
     for case in case_list {
@@ -380,30 +484,57 @@ fn run_comp(doc: &Document, case_list: &[Value], stats: &mut Stats, form: &str) 
                         if w.get("throw").and_then(Value::as_str) == Some(e.kind) {
                             stats.others += 1;
                         } else {
-                            stats.fail(what(&format!("threw {e:?}, want {}", to_canonical_string(want))));
+                            stats.fail(what(&format!(
+                                "threw {e:?}, want {}",
+                                to_canonical_string(want)
+                            )));
                         }
                     }
                     (Ok(entries), Value::Array(w)) => {
-                        let got_keys: Vec<String> = entries.iter().map(|e| e.key.to_string_lossy()).collect();
-                        let want_keys: Vec<String> =
-                            w.iter().map(|e| s(e.get("address").unwrap()).to_owned()).collect();
+                        let got_keys: Vec<String> =
+                            entries.iter().map(|e| e.key.to_string_lossy()).collect();
+                        let want_keys: Vec<String> = w
+                            .iter()
+                            .map(|e| s(e.get("address").unwrap()).to_owned())
+                            .collect();
                         if got_keys != want_keys {
                             stats.fail(what(&format!("keys {got_keys:?}\n want {want_keys:?}")));
                             continue;
                         }
                         for (e, wv) in entries.iter().zip(w) {
                             let k = e.key.to_string_lossy();
-                            stats.js(&what(&format!("{k} label")), &Ok(e.label.clone()), wv.get("label").unwrap());
-                            stats.js(&what(&format!("{k} group")), &Ok(e.group.clone()), wv.get("group").unwrap());
-                            stats.js(&what(&format!("{k} prop")), &Ok(enc_got(&e.prop)), wv.get("prop").unwrap());
+                            stats.js(
+                                &what(&format!("{k} label")),
+                                &Ok(e.label.clone()),
+                                wv.get("label").unwrap(),
+                            );
+                            stats.js(
+                                &what(&format!("{k} group")),
+                                &Ok(e.group.clone()),
+                                wv.get("group").unwrap(),
+                            );
+                            stats.js(
+                                &what(&format!("{k} prop")),
+                                &Ok(enc_got(&e.prop)),
+                                wv.get("prop").unwrap(),
+                            );
                         }
                     }
-                    (got, _) => stats.fail(what(&format!("got {got:?}, want {}", to_canonical_string(want)))),
+                    (got, _) => stats.fail(what(&format!(
+                        "got {got:?}, want {}",
+                        to_canonical_string(want)
+                    ))),
                 }
             }
             "find" => {
                 let key = JsString::from(s(case.get("address").unwrap()));
-                let got = address::find_prop(layer, &key).map(|g| if g.is_nullish() { JsValue::Null } else { g.to_js() });
+                let got = address::find_prop(layer, &key).map(|g| {
+                    if g.is_nullish() {
+                        JsValue::Null
+                    } else {
+                        g.to_js()
+                    }
+                });
                 stats.js(&what(&key.to_string_lossy()), &got, want);
             }
             "ev" | "evP" => {
@@ -412,14 +543,24 @@ fn run_comp(doc: &Document, case_list: &[Value], stats: &mut Stats, form: &str) 
                 let got = if op == "ev" {
                     ev.ev(&cx, Some(layer), &key, t)
                 } else {
-                    let prop = address::find_prop(layer, &key).expect("generator skipped throwing finds");
+                    let prop =
+                        address::find_prop(layer, &key).expect("generator skipped throwing finds");
                     ev.ev_p(&cx, Some(layer), prop.node(), t, &key)
                 };
-                stats.js(&what(&format!("{} at {t}", key.to_string_lossy())), &got, want);
-                let err = ev.expression_error("C", &layer_id, &key.to_string_lossy()).map(str::to_owned);
+                stats.js(
+                    &what(&format!("{} at {t}", key.to_string_lossy())),
+                    &got,
+                    want,
+                );
+                let err = ev
+                    .expression_error("C", &layer_id, &key.to_string_lossy())
+                    .map(str::to_owned);
                 let want_err = case.get("err").unwrap().as_str().map(str::to_owned);
                 if err != want_err {
-                    stats.fail(what(&format!("{} at {t}: error {err:?}, want {want_err:?}", key.to_string_lossy())));
+                    stats.fail(what(&format!(
+                        "{} at {t}: error {err:?}, want {want_err:?}",
+                        key.to_string_lossy()
+                    )));
                 }
                 // The cached path must agree, evaluated twice (memo).
                 if first_of_id(index) && !layer_id.is_empty() {
@@ -432,7 +573,11 @@ fn run_comp(doc: &Document, case_list: &[Value], stats: &mut Stats, form: &str) 
                     let id = ev.intern(address);
                     for round in 0..2 {
                         let got = ev.ev_id(doc, id, t);
-                        stats.js(&what(&format!("ev_id#{round} {} at {t}", key.to_string_lossy())), &got, want);
+                        stats.js(
+                            &what(&format!("ev_id#{round} {} at {t}", key.to_string_lossy())),
+                            &got,
+                            want,
+                        );
                     }
                 }
             }
@@ -446,25 +591,38 @@ fn run_comp(doc: &Document, case_list: &[Value], stats: &mut Stats, form: &str) 
                 match (ev.resolve_content(&cx, layer, t), want) {
                     (Err(e), Value::Object(w)) if w.get("throw").is_some() => {
                         if w.get("throw").and_then(Value::as_str) != Some(e.kind) {
-                            stats.fail(what(&format!("threw {e:?}, want {}", to_canonical_string(want))));
+                            stats.fail(what(&format!(
+                                "threw {e:?}, want {}",
+                                to_canonical_string(want)
+                            )));
                         }
                     }
                     (Ok(content), Value::Object(w)) => {
-                        let got_keys: Vec<String> = content.keys().map(|k| k.to_string_lossy()).collect();
-                        let mut want_keys: Vec<String> = w.keys().map(|k| k.to_string_lossy()).collect();
+                        let got_keys: Vec<String> =
+                            content.keys().map(|k| k.to_string_lossy()).collect();
+                        let mut want_keys: Vec<String> =
+                            w.keys().map(|k| k.to_string_lossy()).collect();
                         want_keys.sort();
                         let mut sorted = got_keys.clone();
                         sorted.sort();
                         if sorted != want_keys {
-                            stats.fail(what(&format!("content keys {sorted:?} want {want_keys:?}")));
+                            stats
+                                .fail(what(&format!("content keys {sorted:?} want {want_keys:?}")));
                             continue;
                         }
                         for (k, v) in &content {
                             let wv = w.get_key(k).unwrap();
-                            stats.js(&what(&format!("content {} at {t}", k.to_string_lossy())), &Ok(v.clone()), wv);
+                            stats.js(
+                                &what(&format!("content {} at {t}", k.to_string_lossy())),
+                                &Ok(v.clone()),
+                                wv,
+                            );
                         }
                     }
-                    (got, _) => stats.fail(what(&format!("got {got:?}, want {}", to_canonical_string(want)))),
+                    (got, _) => stats.fail(what(&format!(
+                        "got {got:?}, want {}",
+                        to_canonical_string(want)
+                    ))),
                 }
             }
             other => panic!("unknown op {other}"),

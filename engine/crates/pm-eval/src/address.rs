@@ -56,7 +56,11 @@ pub struct PropEntry<'a> {
 pub trait DefinitionLabels {
     /// `(definition label, parameter label)` for an extension layer's
     /// definition value and parameter key.
-    fn extension_labels(&self, definition: &JsValue, param: &JsString) -> (Option<JsValue>, Option<JsValue>);
+    fn extension_labels(
+        &self,
+        definition: &JsValue,
+        param: &JsString,
+    ) -> (Option<JsValue>, Option<JsValue>);
 }
 
 /// No registry: groups are `Extension`, labels the keys.
@@ -73,17 +77,44 @@ impl DefinitionLabels for NoDefinitions {
 pub fn content_fields(layer_type: &[u8]) -> &'static [&'static str] {
     match layer_type {
         b"text" => &[
-            "text", "font", "weight", "size", "tracking", "leading", "align", "color", "italic",
-            "boxWidth", "boxHeight",
+            "text",
+            "font",
+            "weight",
+            "size",
+            "tracking",
+            "leading",
+            "align",
+            "color",
+            "italic",
+            "boxWidth",
+            "boxHeight",
         ],
         b"solid" => &["color", "w", "h", "radius"],
         b"shape" => &[
-            "color", "shape", "w", "h", "radius", "radiusTL", "radiusTR", "radiusBR", "radiusBL",
-            "smoothing", "stroke", "strokeColor", "points",
+            "color",
+            "shape",
+            "w",
+            "h",
+            "radius",
+            "radiusTL",
+            "radiusTR",
+            "radiusBR",
+            "radiusBL",
+            "smoothing",
+            "stroke",
+            "strokeColor",
+            "points",
         ],
         b"image" => &["fit", "w", "h"],
         b"video" => &[
-            "fit", "w", "h", "trim", "speed", "timeRemap", "sourceTime", "audioGain",
+            "fit",
+            "w",
+            "h",
+            "trim",
+            "speed",
+            "timeRemap",
+            "sourceTime",
+            "audioGain",
         ],
         b"audio" => &["trim", "gain", "fadeIn", "fadeOut"],
         b"shader" | b"extension" => &["w", "h"],
@@ -94,7 +125,9 @@ pub fn content_fields(layer_type: &[u8]) -> &'static [&'static str] {
 
 /// `/^fontAxis\.[\x20-\x7e]{4}$/`.
 pub fn is_font_axis_key(key: &[u8]) -> bool {
-    key.len() == 13 && key.starts_with(b"fontAxis.") && key[9..].iter().all(|c| (0x20..=0x7e).contains(c))
+    key.len() == 13
+        && key.starts_with(b"fontAxis.")
+        && key[9..].iter().all(|c| (0x20..=0x7e).contains(c))
 }
 
 fn layer_type(layer: &Node) -> JsString {
@@ -104,7 +137,9 @@ fn layer_type(layer: &Node) -> JsString {
 /// `canAnimateContent(layer, key)`.
 pub fn can_animate_content(layer: &Node, key: &[u8]) -> bool {
     let ty = layer_type(layer);
-    content_fields(ty.as_bytes()).iter().any(|f| f.as_bytes() == key)
+    content_fields(ty.as_bytes())
+        .iter()
+        .any(|f| f.as_bytes() == key)
         || (ty.as_bytes() == b"text" && is_font_axis_key(key))
 }
 
@@ -262,7 +297,11 @@ fn entries_or_empty(value: Option<&Node>) -> Vec<(JsString, Got<'_>)> {
 }
 
 /// `collect(path, prefix)` of `structuredProperties`.
-fn collect_path<'a>(out: &mut Vec<PropEntry<'a>>, path: &Item<'a>, prefix: &JsString) -> JsResult<()> {
+fn collect_path<'a>(
+    out: &mut Vec<PropEntry<'a>>,
+    path: &Item<'a>,
+    prefix: &JsString,
+) -> JsResult<()> {
     let group = match path {
         Item::Node(n) => or_str(node::member(Some(n), "name"), "Path"),
         Item::Char(_) => js("Path"),
@@ -376,7 +415,12 @@ pub fn layer3d_role(layer: &Node) -> Option<Layer3dRole> {
 
 /// `collect(p, prefix, group)` of `layer3DProperties`: members with an array
 /// `kf` (no `v` requirement).
-fn collect_kf<'a>(out: &mut Vec<PropEntry<'a>>, p: Option<&'a Node>, prefix: &JsString, group: &JsValue) {
+fn collect_kf<'a>(
+    out: &mut Vec<PropEntry<'a>>,
+    p: Option<&'a Node>,
+    prefix: &JsString,
+    group: &JsValue,
+) {
     for (key, prop) in entries_or_empty(p) {
         if prop.truthy() && node::has_kf_array(prop.node()) {
             out.push(PropEntry {
@@ -400,15 +444,30 @@ pub fn layer3d_properties(layer: &Node) -> JsResult<Vec<PropEntry<'_>>> {
         return Ok(out);
     }
     if node::truthy(modeling) {
-        collect_kf(&mut out, node::member(modeling, "p"), &s("model"), &js("Model"));
+        collect_kf(
+            &mut out,
+            node::member(modeling, "p"),
+            &s("model"),
+            &js("Model"),
+        );
     }
     match role {
         Some(Layer3dRole::Object) => {
             let object = node::member_checked(data, "object")?;
             let material = node::member(object, "material");
-            collect_kf(&mut out, node::member(material, "p"), &s("m"), &js("Material"));
+            collect_kf(
+                &mut out,
+                node::member(material, "p"),
+                &s("m"),
+                &js("Material"),
+            );
             let shader = node::member(material, "shader");
-            collect_kf(&mut out, node::member(shader, "p"), &s("shader"), &js("Shader"));
+            collect_kf(
+                &mut out,
+                node::member(shader, "p"),
+                &s("shader"),
+                &js("Shader"),
+            );
             for slot in node::for_of_or_empty(node::member(object, "slots"))? {
                 let name = match &slot {
                     Item::Node(n) => node::js_value_opt(node::member(Some(n), "name")),
@@ -429,11 +488,21 @@ pub fn layer3d_properties(layer: &Node) -> JsResult<Vec<PropEntry<'_>>> {
         }
         Some(Layer3dRole::Light) => {
             let light = node::member_checked(data, "light")?;
-            collect_kf(&mut out, node::member(light, "p"), &s("light"), &js("Light"));
+            collect_kf(
+                &mut out,
+                node::member(light, "p"),
+                &s("light"),
+                &js("Light"),
+            );
         }
         Some(Layer3dRole::Camera) => {
             let camera = node::member_checked(data, "camera")?;
-            collect_kf(&mut out, node::member(camera, "p"), &s("camera"), &js("Camera"));
+            collect_kf(
+                &mut out,
+                node::member(camera, "p"),
+                &s("camera"),
+                &js("Camera"),
+            );
             let environment = node::member(data, "environment");
             collect_kf(
                 &mut out,
@@ -448,14 +517,22 @@ pub fn layer3d_properties(layer: &Node) -> JsResult<Vec<PropEntry<'_>>> {
 }
 
 /// `collect(node, prefix, name)` of `sceneProperties`: `node?.p`.
-fn collect_node<'a>(out: &mut Vec<PropEntry<'a>>, item: Option<&'a Node>, prefix: &JsString, name: &JsValue) {
+fn collect_node<'a>(
+    out: &mut Vec<PropEntry<'a>>,
+    item: Option<&'a Node>,
+    prefix: &JsString,
+    name: &JsValue,
+) {
     collect_kf(out, node::member(item, "p"), prefix, name);
 }
 
 /// `sceneProperties(layer)`: legacy `scene3d` layers (`d.data.scene`), else
 /// [`layer3d_properties`].
 pub fn scene_properties(layer: &Node) -> JsResult<Vec<PropEntry<'_>>> {
-    let scene = node::member(node::member(node::member(Some(layer), "d"), "data"), "scene");
+    let scene = node::member(
+        node::member(node::member(Some(layer), "d"), "data"),
+        "scene",
+    );
     if !node::truthy(scene) {
         return layer3d_properties(layer);
     }
@@ -473,7 +550,12 @@ pub fn scene_properties(layer: &Node) -> JsResult<Vec<PropEntry<'_>>> {
         collect_node(&mut out, object.node(), &prefix, &name);
         let material_name = js_sem::add(&name, &js(" material"));
         let material = item_member(&object, "material")?;
-        collect_node(&mut out, material, &cat(&[&prefix, &s(".m")]), &material_name);
+        collect_node(
+            &mut out,
+            material,
+            &cat(&[&prefix, &s(".m")]),
+            &material_name,
+        );
     }
     for light in node::for_of_or_empty(node::member(scene, "lights"))? {
         let lid = match &light {
@@ -486,7 +568,12 @@ pub fn scene_properties(layer: &Node) -> JsResult<Vec<PropEntry<'_>>> {
         };
         collect_node(&mut out, light.node(), &cat(&[&s("light."), &lid]), &name);
     }
-    collect_node(&mut out, node::member(scene, "camera"), &s("camera"), &js("Camera"));
+    collect_node(
+        &mut out,
+        node::member(scene, "camera"),
+        &s("camera"),
+        &js("Camera"),
+    );
     collect_node(
         &mut out,
         node::member(scene, "environment"),
@@ -498,10 +585,11 @@ pub fn scene_properties(layer: &Node) -> JsResult<Vec<PropEntry<'_>>> {
 
 /// `/^(?:m\.[^.]+$|(?:o|light|camera|environment|shader|slots|model)\.)/`.
 pub fn is_scene_key(key: &[u8]) -> bool {
-    if let Some(rest) = key.strip_prefix(b"m.") {
-        if !rest.is_empty() && !rest.contains(&b'.') {
-            return true;
-        }
+    if let Some(rest) = key.strip_prefix(b"m.")
+        && !rest.is_empty()
+        && !rest.contains(&b'.')
+    {
+        return true;
     }
     [
         &b"o."[..],
@@ -526,15 +614,13 @@ pub fn is_structured_key(key: &[u8]) -> bool {
 /// `/^(transitionIn|transitionOut)\.p\.([a-zA-Z][a-zA-Z0-9]*)$/`.
 fn transition_key(key: &[u8]) -> Option<(&'static str, &[u8])> {
     for field in ["transitionIn", "transitionOut"] {
-        if let Some(rest) = key.strip_prefix(field.as_bytes()) {
-            if let Some(param) = rest.strip_prefix(b".p.") {
-                if !param.is_empty()
-                    && param[0].is_ascii_alphabetic()
-                    && param.iter().all(u8::is_ascii_alphanumeric)
-                {
-                    return Some((field, param));
-                }
-            }
+        if let Some(rest) = key.strip_prefix(field.as_bytes())
+            && let Some(param) = rest.strip_prefix(b".p.")
+            && !param.is_empty()
+            && param[0].is_ascii_alphabetic()
+            && param.iter().all(u8::is_ascii_alphanumeric)
+        {
+            return Some((field, param));
         }
     }
     None
@@ -559,7 +645,13 @@ pub fn find_prop<'a>(layer: &'a Node, key: &JsString) -> JsResult<Got<'a>> {
     let found = |list: Vec<PropEntry<'a>>| -> Got<'a> {
         list.into_iter()
             .find(|e| e.key == *key)
-            .map_or(Got::Undefined, |e| if e.prop.is_nullish() { Got::Undefined } else { e.prop })
+            .map_or(Got::Undefined, |e| {
+                if e.prop.is_nullish() {
+                    Got::Undefined
+                } else {
+                    e.prop
+                }
+            })
     };
     // Every branch reads a member of the layer first.
     if matches!(layer.kind(), pm_model::NodeKind::Null) {
@@ -574,26 +666,42 @@ pub fn find_prop<'a>(layer: &'a Node, key: &JsString) -> JsResult<Got<'a>> {
         return Ok(found(structured_properties(layer)?));
     }
     let l = Some(layer);
-    if let Some(p) = node::member(l, "p") {
-        if !node::is_nullish(Some(p)) {
-            let got = node::get(p, k);
-            if got.truthy() {
-                return Ok(got);
-            }
+    if let Some(p) = node::member(l, "p")
+        && !node::is_nullish(Some(p))
+    {
+        let got = node::get(p, k);
+        if got.truthy() {
+            return Ok(got);
         }
     }
     if k == b"l.blend" || k == b"l.mblur" || k == b"l.matteMode" {
         let v = node::member(l, std::str::from_utf8(&k[2..]).expect("ascii"));
-        return Ok(if node::is_property(v) { Got::Node(v.expect("property")) } else { Got::Undefined });
+        return Ok(if node::is_property(v) {
+            Got::Node(v.expect("property"))
+        } else {
+            Got::Undefined
+        });
     }
     if let Some(field) = k.strip_prefix(b"c.") {
         let d = node::member(l, "d");
-        let v = if node::is_nullish(d) { Got::Undefined } else { node::get(d.expect("d"), field) };
-        return Ok(if node::is_property(v.node()) { v } else { Got::Undefined });
+        let v = if node::is_nullish(d) {
+            Got::Undefined
+        } else {
+            node::get(d.expect("d"), field)
+        };
+        return Ok(if node::is_property(v.node()) {
+            v
+        } else {
+            Got::Undefined
+        });
     }
     if let Some((field, param)) = transition_key(k) {
         let p = node::member(node::member(l, field), "p");
-        let v = if node::is_nullish(p) { Got::Undefined } else { node::get(p.expect("p"), param) };
+        let v = if node::is_nullish(p) {
+            Got::Undefined
+        } else {
+            node::get(p.expect("p"), param)
+        };
         return Ok(if v.truthy() { v } else { Got::Undefined });
     }
     for (prefix, member) in [(&b"u."[..], "uniforms"), (b"x.", "params")] {
@@ -612,11 +720,11 @@ pub fn find_prop<'a>(layer: &'a Node, key: &JsString) -> JsResult<Got<'a>> {
         let mut found_mask = None;
         for m in masks {
             let id = node::get_checked(Some(m), b"id")?;
-            if let (Some(mid), Got::Node(idn)) = (mid, &id) {
-                if node::string(Some(idn)).is_some_and(|s| s.as_bytes() == mid) {
-                    found_mask = Some(m);
-                    break;
-                }
+            if let (Some(mid), Got::Node(idn)) = (mid, &id)
+                && node::string(Some(idn)).is_some_and(|s| s.as_bytes() == mid)
+            {
+                found_mask = Some(m);
+                break;
             }
         }
         let Some(m) = found_mask else {
@@ -631,7 +739,11 @@ pub fn find_prop<'a>(layer: &'a Node, key: &JsString) -> JsResult<Got<'a>> {
             return Ok(direct);
         }
         let own = node::get(m, mk);
-        return Ok(if node::is_property(own.node()) { own } else { Got::Undefined });
+        return Ok(if node::is_property(own.node()) {
+            own
+        } else {
+            Got::Undefined
+        });
     }
     let fid = split_part(k, 0).unwrap_or(b"");
     let pk = split_part(k, 1);
@@ -639,11 +751,11 @@ pub fn find_prop<'a>(layer: &'a Node, key: &JsString) -> JsResult<Got<'a>> {
     let mut found_fx = None;
     for f in effects {
         let id = node::get_checked(Some(f), b"id")?;
-        if let Got::Node(idn) = &id {
-            if node::string(Some(idn)).is_some_and(|s| s.as_bytes() == fid) {
-                found_fx = Some(f);
-                break;
-            }
+        if let Got::Node(idn) = &id
+            && node::string(Some(idn)).is_some_and(|s| s.as_bytes() == fid)
+        {
+            found_fx = Some(f);
+            break;
         }
     }
     let Some(fx) = found_fx else {
@@ -651,7 +763,11 @@ pub fn find_prop<'a>(layer: &'a Node, key: &JsString) -> JsResult<Got<'a>> {
     };
     if pk == Some(b"$enabled") {
         let on = node::member(Some(fx), "on");
-        return Ok(if node::is_property(on) { Got::Node(on.expect("on")) } else { Got::Undefined });
+        return Ok(if node::is_property(on) {
+            Got::Node(on.expect("on"))
+        } else {
+            Got::Undefined
+        });
     }
     let p = node::get_checked(Some(fx), b"p")?;
     match p {
@@ -662,10 +778,15 @@ pub fn find_prop<'a>(layer: &'a Node, key: &JsString) -> JsResult<Got<'a>> {
 }
 
 /// `PM.allProps(L)`.
-pub fn all_props<'a>(layer: &'a Node, definitions: &dyn DefinitionLabels) -> JsResult<Vec<PropEntry<'a>>> {
+pub fn all_props<'a>(
+    layer: &'a Node,
+    definitions: &dyn DefinitionLabels,
+) -> JsResult<Vec<PropEntry<'a>>> {
     let l = Some(layer);
     if matches!(layer.kind(), pm_model::NodeKind::Null) {
-        return Err(crate::js_sem::JsThrow::type_error("Cannot read properties of null (reading 'p')"));
+        return Err(crate::js_sem::JsThrow::type_error(
+            "Cannot read properties of null (reading 'p')",
+        ));
     }
     let mut out = Vec::new();
     let p = node::member(l, "p");
@@ -696,7 +817,11 @@ pub fn all_props<'a>(layer: &'a Node, definitions: &dyn DefinitionLabels) -> JsR
             out.push(PropEntry {
                 key: s(&format!("l.{key}")),
                 prop: Got::Node(v.expect("property")),
-                label: js(if key == "blend" { "Blend mode" } else { "Motion blur" }),
+                label: js(if key == "blend" {
+                    "Blend mode"
+                } else {
+                    "Motion blur"
+                }),
                 group: js("Layer"),
             });
         }
@@ -726,7 +851,10 @@ pub fn all_props<'a>(layer: &'a Node, definitions: &dyn DefinitionLabels) -> JsR
             }
         }
     }
-    for (index, m) in node::array_or_empty(node::member(l, "masks"))?.iter().enumerate() {
+    for (index, m) in node::array_or_empty(node::member(l, "masks"))?
+        .iter()
+        .enumerate()
+    {
         let group = JsValue::from(format!("Mask {}", index + 1).as_str());
         let mid_got = node::get_checked(Some(m), b"id")?;
         let mid = mid_got.to_js();
@@ -744,7 +872,10 @@ pub fn all_props<'a>(layer: &'a Node, definitions: &dyn DefinitionLabels) -> JsR
         let mp = node::get(m, b"p");
         if let Got::Node(mp) = mp {
             for k in node::for_in_keys(Some(mp)) {
-                let key = js_sem::add(&js_sem::add(&js_sem::add(&js("m."), &mid), &js(".")), &JsValue::String(k.clone()));
+                let key = js_sem::add(
+                    &js_sem::add(&js_sem::add(&js("m."), &mid), &js(".")),
+                    &JsValue::String(k.clone()),
+                );
                 out.push(PropEntry {
                     key: key.to_js_string(),
                     prop: node::get(mp, k.as_bytes()),
@@ -779,12 +910,17 @@ pub fn all_props<'a>(layer: &'a Node, definitions: &dyn DefinitionLabels) -> JsR
                     key: cat(&[&s("x."), &k]),
                     prop: node::get(params.expect("truthy"), k.as_bytes()),
                     label: label.filter(JsValue::truthy).unwrap_or(JsValue::String(k)),
-                    group: group.filter(JsValue::truthy).unwrap_or_else(|| js("Extension")),
+                    group: group
+                        .filter(JsValue::truthy)
+                        .unwrap_or_else(|| js("Extension")),
                 });
             }
         }
     }
-    for (field, label) in [("transitionIn", "Transition in"), ("transitionOut", "Transition out")] {
+    for (field, label) in [
+        ("transitionIn", "Transition in"),
+        ("transitionOut", "Transition out"),
+    ] {
         let tp = node::member(node::member(l, field), "p");
         if node::truthy(tp) {
             for k in node::for_in_keys(tp) {
@@ -838,6 +974,15 @@ mod tests {
         assert_eq!(get("f2.amount"), Got::Undefined);
         let all = all_props(&layer, &NoDefinitions).unwrap();
         let keys: Vec<String> = all.iter().map(|e| e.key.to_string_lossy()).collect();
-        assert_eq!(keys, ["opacity", "f1.$enabled", "f1.amount", "m.k.on", "m.k.feather"]);
+        assert_eq!(
+            keys,
+            [
+                "opacity",
+                "f1.$enabled",
+                "f1.amount",
+                "m.k.on",
+                "m.k.feather"
+            ]
+        );
     }
 }

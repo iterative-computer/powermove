@@ -308,7 +308,15 @@ pub fn value_at_time(a: &EaseKeyframe, b: &EaseKeyframe, time: f64) -> f64 {
             return vb;
         }
         let x = (time - a.t) / dt;
-        return va + (vb - va) * (if x < 0.0 { 0.0 } else if x > 1.0 { 1.0 } else { x });
+        return va
+            + (vb - va)
+                * (if x < 0.0 {
+                    0.0
+                } else if x > 1.0 {
+                    1.0
+                } else {
+                    x
+                });
     }
     let curve = segment_control_points(a, b);
     let u = segment_param_at_time(a, b, time);

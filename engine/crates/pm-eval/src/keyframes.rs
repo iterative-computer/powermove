@@ -205,7 +205,10 @@ fn adopt(keys: &[Node]) -> JsResult<Vec<SegKey>> {
             // normalizeKeyEase
             seg.in_interp = in_i;
             seg.out_interp = out_i;
-            seg.auto_bezier = matches!(node::member(k, "autoBezier").map(Node::kind), Some(NodeKind::Bool(true)));
+            seg.auto_bezier = matches!(
+                node::member(k, "autoBezier").map(Node::kind),
+                Some(NodeKind::Bool(true))
+            );
             out.push(seg);
             continue;
         }
@@ -214,7 +217,10 @@ fn adopt(keys: &[Node]) -> JsResult<Vec<SegKey>> {
         let out_handle = legacy_handle(node::member(k, "eo"), [0.0, 0.0]);
         let in_handle = legacy_handle(node::member(k, "ei"), [1.0, 1.0]);
         let value = node::to_number(node::member(k, "v"));
-        let hold = matches!(node::member(k, "hold").map(Node::kind), Some(NodeKind::Bool(true)));
+        let hold = matches!(
+            node::member(k, "hold").map(Node::kind),
+            Some(NodeKind::Bool(true))
+        );
         if hold {
             seg.out_interp = Interp::Hold;
             seg.out_ease = make_ease(0.0, LINEAR_INFLUENCE);
@@ -224,7 +230,8 @@ fn adopt(keys: &[Node]) -> JsResult<Vec<SegKey>> {
         } else {
             let next = next.expect("truthy");
             let next_value = node::to_number(node::get(next, b"v").node());
-            let dt = node::get(next, b"t").to_js().to_number() - node::to_number(node::member(k, "t"));
+            let dt =
+                node::get(next, b"t").to_js().to_number() - node::to_number(node::member(k, "t"));
             let dv = if next_value.is_finite() && value.is_finite() {
                 next_value - value
             } else {
@@ -239,7 +246,8 @@ fn adopt(keys: &[Node]) -> JsResult<Vec<SegKey>> {
         } else {
             let previous = previous.expect("truthy");
             let previous_value = node::to_number(node::get(previous, b"v").node());
-            let dt = node::to_number(node::member(k, "t")) - node::get(previous, b"t").to_js().to_number();
+            let dt = node::to_number(node::member(k, "t"))
+                - node::get(previous, b"t").to_js().to_number();
             let dv = if previous_value.is_finite() && value.is_finite() {
                 value - previous_value
             } else {
@@ -794,7 +802,10 @@ mod tests {
     fn empty_and_non_finite() {
         assert_eq!(ev("[]", 0.0, false).unwrap(), JsValue::Null);
         assert_eq!(ev("{}", 0.0, false).unwrap(), JsValue::Null);
-        assert_eq!(ev(r#"[{"t":0,"v":3}]"#, f64::NAN, false).unwrap(), JsValue::Number(3.0));
+        assert_eq!(
+            ev(r#"[{"t":0,"v":3}]"#, f64::NAN, false).unwrap(),
+            JsValue::Number(3.0)
+        );
         assert_eq!(ev(r#"[null]"#, f64::NAN, false).unwrap(), JsValue::Null);
         assert!(ev(r#"[null]"#, 0.0, false).is_err());
         assert!(ev(r#"[{"t":0,"v":1},5,{"t":2,"v":3}]"#, 1.0, false).is_err());

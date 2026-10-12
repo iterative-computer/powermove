@@ -29,7 +29,14 @@ fn addresses() -> Vec<PropAddress> {
         for key in ["position.x", "position.y", "opacity", "rotation", "missing"] {
             out.push(PropAddress::channel("C", layer, key));
         }
-        for key in ["c.color", "c.text", "f1.amount", "f1.$enabled", "position.x", "nope"] {
+        for key in [
+            "c.color",
+            "c.text",
+            "f1.amount",
+            "f1.$enabled",
+            "position.x",
+            "nope",
+        ] {
             out.push(PropAddress::find("C", layer, key));
         }
         out.push(PropAddress {
@@ -44,7 +51,9 @@ fn addresses() -> Vec<PropAddress> {
 
 fn same(a: &JsResult<JsValue>, b: &JsResult<JsValue>) -> bool {
     match (a, b) {
-        (Ok(JsValue::Number(x)), Ok(JsValue::Number(y))) => x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()),
+        (Ok(JsValue::Number(x)), Ok(JsValue::Number(y))) => {
+            x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan())
+        }
         (Err(x), Err(y)) => x.kind == y.kind,
         _ => a == b,
     }
@@ -87,7 +96,10 @@ fn check_all(ev: &mut Evaluator, doc: &Document, ids: &[(PropId, PropAddress)], 
         for (id, address) in ids {
             let got = ev.ev_id(doc, *id, t);
             let want = fresh(doc, address, t);
-            assert!(same(&got, &want), "{address:?} at {t}: cached {got:?}, fresh {want:?}");
+            assert!(
+                same(&got, &want),
+                "{address:?} at {t}: cached {got:?}, fresh {want:?}"
+            );
             let again = ev.ev_id(doc, *id, t);
             assert!(same(&again, &want));
         }
@@ -109,7 +121,10 @@ fn layer_path(index: usize, rest: &[&str]) -> Vec<PathPart> {
 fn edits_replan_only_what_they_touch() {
     let mut doc = Document::new(Some(parse(DOC).unwrap()), 1);
     let mut ev = Evaluator::new();
-    let ids: Vec<(PropId, PropAddress)> = addresses().into_iter().map(|a| (ev.intern(a.clone()), a)).collect();
+    let ids: Vec<(PropId, PropAddress)> = addresses()
+        .into_iter()
+        .map(|a| (ev.intern(a.clone()), a))
+        .collect();
     let times = [0.5, 1.5, 2.0, 3.25];
     check_all(&mut ev, &doc, &ids, &times);
     let first = ev.cache_stats();
@@ -128,39 +143,100 @@ fn edits_replan_only_what_they_touch() {
     // (position.x, rotation, missing) and every Find id on A (the layer
     // changed); kept: A's position.y, opacity, and member id, and all of B.
     let replanned = after.plans - before.plans;
-    let a_find = ["c.color", "c.text", "f1.amount", "f1.$enabled", "position.x", "nope"].len() as u64;
+    let a_find = [
+        "c.color",
+        "c.text",
+        "f1.amount",
+        "f1.$enabled",
+        "position.x",
+        "nope",
+    ]
+    .len() as u64;
     assert_eq!(replanned, 3 + a_find, "{before:?} -> {after:?}");
 
     // Reordering layers re-plans nothing.
     let root = doc.to_value().unwrap();
-    let mut layers = root.get("comps").unwrap().get("C").unwrap().get("layers").unwrap().as_array().unwrap().clone();
+    let mut layers = root
+        .get("comps")
+        .unwrap()
+        .get("C")
+        .unwrap()
+        .get("layers")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .clone();
     layers.reverse();
-    doc.apply(&[Patch::set(key(&["comps", "C", "layers"]), Value::Array(layers))]).unwrap();
+    doc.apply(&[Patch::set(
+        key(&["comps", "C", "layers"]),
+        Value::Array(layers),
+    )])
+    .unwrap();
     let before = ev.cache_stats();
     check_all(&mut ev, &doc, &ids, &times);
     assert_eq!(ev.cache_stats().plans, before.plans, "reorder");
 
     // A layer that takes A's id in front of A: A's ids now address it.
     let mut newcomer = parse(r#"{"id":"A","type":"solid","from":0,"dur":3,"on":true,"p":{"position.x":{"v":42,"kf":[],"expr":null}}}"#).unwrap();
-    let mut layers = doc.to_value().unwrap().get("comps").unwrap().get("C").unwrap().get("layers").unwrap().as_array().unwrap().clone();
+    let mut layers = doc
+        .to_value()
+        .unwrap()
+        .get("comps")
+        .unwrap()
+        .get("C")
+        .unwrap()
+        .get("layers")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .clone();
     layers.insert(0, newcomer.clone());
-    doc.apply(&[Patch::set(key(&["comps", "C", "layers"]), Value::Array(layers))]).unwrap();
+    doc.apply(&[Patch::set(
+        key(&["comps", "C", "layers"]),
+        Value::Array(layers),
+    )])
+    .unwrap();
     check_all(&mut ev, &doc, &ids, &times);
-    assert_eq!(ev.ev_id(&doc, ids[0].0, 1.0).unwrap(), JsValue::Number(42.0));
+    assert_eq!(
+        ev.ev_id(&doc, ids[0].0, 1.0).unwrap(),
+        JsValue::Number(42.0)
+    );
 
     // Deleting B: B's ids answer undefined.
-    let layers: Vec<Value> = doc.to_value().unwrap().get("comps").unwrap().get("C").unwrap().get("layers").unwrap().as_array().unwrap()
-        .iter().filter(|l| l.get("id").and_then(Value::as_str) != Some("B")).cloned().collect();
-    doc.apply(&[Patch::set(key(&["comps", "C", "layers"]), Value::Array(layers))]).unwrap();
+    let layers: Vec<Value> = doc
+        .to_value()
+        .unwrap()
+        .get("comps")
+        .unwrap()
+        .get("C")
+        .unwrap()
+        .get("layers")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|l| l.get("id").and_then(Value::as_str) != Some("B"))
+        .cloned()
+        .collect();
+    doc.apply(&[Patch::set(
+        key(&["comps", "C", "layers"]),
+        Value::Array(layers),
+    )])
+    .unwrap();
     check_all(&mut ev, &doc, &ids, &times);
-    let b = ids.iter().find(|(_, a)| a.layer.as_str() == Some("B")).unwrap().0;
+    let b = ids
+        .iter()
+        .find(|(_, a)| a.layer.as_str() == Some("B"))
+        .unwrap()
+        .0;
     assert_eq!(ev.ev_id(&doc, b, 1.0).unwrap(), JsValue::Undefined);
 
     // Renaming the newcomer away from A: A's ids address the original again.
     if let Some(map) = newcomer.as_object_mut() {
         map.insert("id", Value::from("N"));
     }
-    doc.apply(&[Patch::set(layer_path(0, &["id"]), Value::from("N"))]).unwrap();
+    doc.apply(&[Patch::set(layer_path(0, &["id"]), Value::from("N"))])
+        .unwrap();
     check_all(&mut ev, &doc, &ids, &times);
 
     // Releasing and reinterning reuses the slot.
@@ -169,7 +245,10 @@ fn edits_replan_only_what_they_touch() {
     assert!(ev.address(id).is_none());
     let again = ev.intern(address.clone());
     assert_eq!(again, id);
-    assert!(same(&ev.ev_id(&doc, again, 1.0), &fresh(&doc, &address, 1.0)));
+    assert!(same(
+        &ev.ev_id(&doc, again, 1.0),
+        &fresh(&doc, &address, 1.0)
+    ));
 }
 
 /// A small deterministic generator.
@@ -203,7 +282,10 @@ fn random_patches_shadow_fresh_evaluation() {
     let mut rng = Rng(seed);
     let mut doc = Document::new(Some(parse(DOC).unwrap()), 1);
     let mut ev = Evaluator::new();
-    let ids: Vec<(PropId, PropAddress)> = addresses().into_iter().map(|a| (ev.intern(a.clone()), a)).collect();
+    let ids: Vec<(PropId, PropAddress)> = addresses()
+        .into_iter()
+        .map(|a| (ev.intern(a.clone()), a))
+        .collect();
     let values = [
         Value::Number(3.5),
         Value::from("7"),
@@ -216,21 +298,38 @@ fn random_patches_shadow_fresh_evaluation() {
     ];
     let mut patches_applied = 0;
     for _round in 0..rounds {
-        let layer_count = Comp::resolve(&doc, "C").map(|c| c.layers().len()).unwrap_or(0);
+        let layer_count = Comp::resolve(&doc, "C")
+            .map(|c| c.layers().len())
+            .unwrap_or(0);
         let mut batch = Vec::new();
         for _ in 0..1 + rng.below(3) {
-            let index = if layer_count == 0 { 0 } else { rng.below(layer_count) };
+            let index = if layer_count == 0 {
+                0
+            } else {
+                rng.below(layer_count)
+            };
             let path = match rng.below(9) {
-                0 => layer_path(index, &["p", ["position.x", "position.y", "opacity", "rotation"][rng.below(4)], "v"]),
+                0 => layer_path(
+                    index,
+                    &[
+                        "p",
+                        ["position.x", "position.y", "opacity", "rotation"][rng.below(4)],
+                        "v",
+                    ],
+                ),
                 1 => {
-                    let mut p = layer_path(index, &["p", ["position.x", "opacity"][rng.below(2)], "kf"]);
+                    let mut p =
+                        layer_path(index, &["p", ["position.x", "opacity"][rng.below(2)], "kf"]);
                     p.push(PathPart::Index(rng.below(3) as f64));
                     p.push(PathPart::from(["v", "t", "hold", "spring"][rng.below(4)]));
                     p
                 }
                 2 => layer_path(index, &["from"]),
                 3 => layer_path(index, &["id"]),
-                4 => layer_path(index, &["p", ["position.x", "position.y", "rotation"][rng.below(3)]]),
+                4 => layer_path(
+                    index,
+                    &["p", ["position.x", "position.y", "rotation"][rng.below(3)]],
+                ),
                 5 => layer_path(index, &["d", ["color", "text"][rng.below(2)]]),
                 6 => layer_path(index, &["p", "position.x", "kf"]),
                 7 => {
@@ -242,22 +341,42 @@ fn random_patches_shadow_fresh_evaluation() {
                 _ => {
                     // Reorder.
                     let root = doc.to_value().unwrap();
-                    let mut layers = root.get("comps").unwrap().get("C").unwrap().get("layers").unwrap().as_array().unwrap().clone();
+                    let mut layers = root
+                        .get("comps")
+                        .unwrap()
+                        .get("C")
+                        .unwrap()
+                        .get("layers")
+                        .unwrap()
+                        .as_array()
+                        .unwrap()
+                        .clone();
                     if !layers.is_empty() {
                         let i = rng.below(layers.len());
                         let l = layers.remove(i);
                         layers.insert(rng.below(layers.len() + 1), l);
                     }
-                    batch.push(Patch::set(key(&["comps", "C", "layers"]), Value::Array(layers)));
+                    batch.push(Patch::set(
+                        key(&["comps", "C", "layers"]),
+                        Value::Array(layers),
+                    ));
                     continue;
                 }
             };
             let value = match path.last() {
-                Some(PathPart::Key(k)) if k.as_str() == Some("id") => Value::from(["A", "B", "Z", "Q"][rng.below(4)]),
-                Some(PathPart::Key(k)) if k.as_str() == Some("t") || k.as_str() == Some("from") => Value::Number((rng.unit() * 6.0 - 1.0 * 1.0).floor() / 2.0),
+                Some(PathPart::Key(k)) if k.as_str() == Some("id") => {
+                    Value::from(["A", "B", "Z", "Q"][rng.below(4)])
+                }
+                Some(PathPart::Key(k)) if k.as_str() == Some("t") || k.as_str() == Some("from") => {
+                    Value::Number((rng.unit() * 6.0 - 1.0 * 1.0).floor() / 2.0)
+                }
                 _ => values[rng.below(values.len())].clone(),
             };
-            batch.push(if rng.below(10) == 0 { Patch::delete(path) } else { Patch::set(path, value) });
+            batch.push(if rng.below(10) == 0 {
+                Patch::delete(path)
+            } else {
+                Patch::set(path, value)
+            });
         }
         if doc.apply(&batch).is_ok() {
             patches_applied += batch.len();
@@ -269,7 +388,16 @@ fn random_patches_shadow_fresh_evaluation() {
             assert!(
                 same(&got, &want),
                 "round {_round}: {address:?} at {t}: cached {got:?}, fresh {want:?}\nbatch {batch:?}\nlayers {}",
-                pm_model::json::to_canonical_string(doc.to_value().unwrap().get("comps").unwrap().get("C").unwrap().get("layers").unwrap())
+                pm_model::json::to_canonical_string(
+                    doc.to_value()
+                        .unwrap()
+                        .get("comps")
+                        .unwrap()
+                        .get("C")
+                        .unwrap()
+                        .get("layers")
+                        .unwrap()
+                )
             );
         }
     }
