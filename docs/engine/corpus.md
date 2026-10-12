@@ -232,6 +232,23 @@ opened through the app's Open command, so the original is never written; its has
 checked before and after. It is sampled every 2 s and at its last frame. Its captured
 data stays under the capture directory like everything else.
 
+## Legacy behavior the v0 capture recorded
+
+Recorded as captured, not worked around; candidates for appendix A review.
+
+- **Shader layers raise GL_INVALID_OPERATION (1282)** on every render of the four shader
+  presets that declare `vec3` color parameters and of `layers/shader-binding-quirks`;
+  Liquid Chrome (float parameters only) raises none. Recorded per sample in `glErrors`.
+- **`renderSnapshot` throws on unlit glTF materials** with source materials on
+  (`3d/gltf-materials`): it reads `emissive` from a `MeshBasicMaterial`
+  ("Cannot read properties of undefined (reading 'getHexString')",
+  `core/scene3d/rendering.ts`), so Blender output of such a model fails today. The
+  project's Blender passes record the error and no snapshots.
+- **A composition cycle** makes `prepareFrame` throw "Composition nesting is too deep"
+  (`precomps/cycle`); the compositor still draws, and the frame is captured.
+- **Effect parameter keyframe ids** are reassigned on every open (all effect projects);
+  `loaded.json` has the ids the app settled on.
+
 ## Not covered yet
 
 - Blender-rendered surfaces, recipes (Rocket, Staircase, 3D Text, mesh recipes with
