@@ -83,8 +83,16 @@ export class MeterLoop {
     this.draw(view);
   }
 
+  /** A colour that did not resolve (an empty string: the panel was not in a
+   *  rendered document when it was read) keeps the previous one, since a
+   *  gradient stop of '' throws. */
   setPalette(palette: MeterPalette): void {
-    this.palette = palette;
+    const next = { ...this.palette };
+    for (const key of Object.keys(next) as (keyof MeterPalette)[]) {
+      const value = palette[key];
+      if (typeof value === 'string' && value.trim()) next[key] = value;
+    }
+    this.palette = next;
     for (const view of this.views.values()) { view.gradient = null; view.drawn = ''; this.draw(view); }
   }
 
