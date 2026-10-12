@@ -204,6 +204,7 @@ pub struct CoreTextRegistry {
     /// path reads), by family.
     sources: HashMap<String, (FontBytes, String)>,
     subsets: HashMap<(String, u32), Arc<Vec<u8>>>,
+    manifests: HashMap<String, FallbackManifest>,
     generation: u64,
 }
 
@@ -231,6 +232,7 @@ impl CoreTextRegistry {
             project: Vec::new(),
             sources: HashMap::new(),
             subsets: HashMap::new(),
+            manifests: HashMap::new(),
             generation: 0,
         })
     }
@@ -406,7 +408,20 @@ impl CoreTextRegistry {
     /// The fallback order level 2 layout gives Parley, built from CoreText's
     /// substitutes for `MANIFEST_SAMPLES` with `base_family` as the font
     /// being substituted (`system-ui` for the system UI font).
+    ///
+    /// Building one costs about 0.6 s (CoreText loads every substitute), so
+    /// manifests are cached per base family; they depend only on installed
+    /// fonts.
     pub fn fallback_manifest(&mut self, base_family: &str) -> FallbackManifest {
+        if let Some(m) = self.manifests.get(base_family) {
+            return m.clone();
+        }
+        let manifest = self.build_fallback_manifest(base_family);
+        self.manifests.insert(base_family.to_string(), manifest.clone());
+        manifest
+    }
+
+    fn build_fallback_manifest(&mut self, base_family: &str) -> FallbackManifest {
         let mut manifest = FallbackManifest { base_family: base_family.to_string(), ..Default::default() };
         // Regular and bold bases, so the manifest carries both weights of
         // each substitute.

@@ -57,7 +57,12 @@ fn main() {
     println!("  System Font variable source: {:?}", system.map(|f| r.face(f).postscript_name.clone()));
 
     // Fallback manifest.
+    let started = std::time::Instant::now();
     let manifest = r.fallback_manifest("system-ui");
+    let built = started.elapsed();
+    let started = std::time::Instant::now();
+    check("manifest cached", r.fallback_manifest("system-ui") == manifest && started.elapsed() < built / 10, format!("{:?} then {:?}", built, started.elapsed()));
+    println!("  manifest built in {built:?}, cached in {:?}", started.elapsed());
     let has = |script: &str| manifest.scripts.iter().any(|s| s.script == script && !s.families.is_empty());
     check("manifest scripts", has("Hani") && has("Arab") && has("Hebr") && has("Deva") && has("Thai") && has("Hang"), format!("{manifest:?}"));
     check("manifest emoji", manifest.emoji.as_deref() == Some("Apple Color Emoji"), format!("{:?}", manifest.emoji));
