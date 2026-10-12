@@ -14,6 +14,8 @@ default = ["system", "level2"]
 system = []
 # Level 2 layout on Parley.
 level2 = ["dep:parley"]
+# The corpus tool (`pm-text-corpus`): fixtures, comparisons, WASM exports.
+corpus-tools = ["system", "dep:flate2"]
 
 [dependencies]
 harfrust = "0.14"
@@ -26,6 +28,7 @@ serde_json = { workspace = true, features = ["float_roundtrip"] }
 sha2.workspace = true
 thiserror.workspace = true
 parley = { version = "0.12", default-features = false, features = ["std"], optional = true }
+flate2 = { version = "1.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 memmap2 = "0.9"
@@ -42,7 +45,12 @@ flate2 = "1.1"
 [[bin]]
 name = "pm-text-corpus"
 path = "src/bin/pm-text-corpus.rs"
-required-features = ["system"]
+required-features = ["corpus-tools"]
+
+[[test]]
+# Runs on the main thread (the CoreText registry uses AppKit's font manager).
+name = "corpus"
+harness = false
 
 [[example]]
 # The level 1 layout over subsets as a plain wasm32-unknown-unknown module, for

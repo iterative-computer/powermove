@@ -228,6 +228,13 @@ impl CoreTextRegistry {
         }
     }
 
+    /// Installed font files read so far, with their sizes.
+    pub fn files_read(&self) -> Vec<(PathBuf, u64)> {
+        let mut out: Vec<(PathBuf, u64)> = self.files.iter().map(|(p, (d, _))| (p.clone(), d.as_slice().len() as u64)).collect();
+        out.sort();
+        out
+    }
+
     pub fn faces(&self) -> impl Iterator<Item = (FaceId, &FaceInfo)> {
         self.faces.iter().enumerate().map(|(i, f)| (i as FaceId, &f.info))
     }
