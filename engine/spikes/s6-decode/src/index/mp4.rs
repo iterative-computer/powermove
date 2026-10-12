@@ -255,18 +255,18 @@ pub fn build(path: &std::path::Path) -> Result<FrameIndex> {
 
     // Edit list.
     let mut edits = Vec::new();
-    if let Some(edts) = child(trak, b"edts")? {
-        if let Some(elst) = child(edts, b"elst")? {
-            let mut c = Cur::new(elst);
-            let v = c.u8()?;
-            c.skip(3)?;
-            for _ in 0..c.u32()? {
-                let (segment_duration, media_time) =
-                    if v == 1 { (c.u64()?, c.i64()?) } else { (c.u32()? as u64, c.i32()? as i64) };
-                let rate_int = c.u16()? as i16;
-                c.skip(2)?;
-                edits.push(Edit { segment_duration, media_time, rate_int });
-            }
+    if let Some(edts) = child(trak, b"edts")?
+        && let Some(elst) = child(edts, b"elst")?
+    {
+        let mut c = Cur::new(elst);
+        let v = c.u8()?;
+        c.skip(3)?;
+        for _ in 0..c.u32()? {
+            let (segment_duration, media_time) =
+                if v == 1 { (c.u64()?, c.i64()?) } else { (c.u32()? as u64, c.i32()? as i64) };
+            let rate_int = c.u16()? as i16;
+            c.skip(2)?;
+            edits.push(Edit { segment_duration, media_time, rate_int });
         }
     }
 

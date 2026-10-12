@@ -277,7 +277,7 @@ impl Cf {
 
 impl std::fmt::Debug for Cf {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Cf({})", cf_describe(self.0))
+        write!(f, "Cf({})", unsafe { cf_describe(self.0) })
     }
 }
 
@@ -339,7 +339,10 @@ pub fn cf_dict(pairs: &[(CFTypeRef, CFTypeRef)]) -> Cf {
 }
 
 /// Human-readable CF description, for reports.
-pub fn cf_describe(cf: CFTypeRef) -> String {
+///
+/// # Safety
+/// `cf` is null or a valid CF object.
+pub unsafe fn cf_describe(cf: CFTypeRef) -> String {
     if cf.is_null() {
         return "null".into();
     }
@@ -351,7 +354,10 @@ pub fn cf_describe(cf: CFTypeRef) -> String {
 
 /// Short value text for CFString, CFBoolean, and CFNumber; the CF description
 /// otherwise.
-pub fn cf_value(cf: CFTypeRef) -> String {
+///
+/// # Safety
+/// `cf` is null or a valid CF object.
+pub unsafe fn cf_value(cf: CFTypeRef) -> String {
     if cf.is_null() {
         return "absent".into();
     }
@@ -366,10 +372,12 @@ pub fn cf_value(cf: CFTypeRef) -> String {
             return v.to_string();
         }
     }
-    cf_string_value(cf).unwrap_or_else(|| cf_describe(cf))
+    unsafe { cf_string_value(cf).unwrap_or_else(|| cf_describe(cf)) }
 }
 
-pub fn cf_string_value(s: CFTypeRef) -> Option<String> {
+/// # Safety
+/// `s` is null or a valid CF object.
+pub unsafe fn cf_string_value(s: CFTypeRef) -> Option<String> {
     if s.is_null() {
         return None;
     }

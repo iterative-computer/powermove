@@ -200,7 +200,7 @@ impl FrameIndex {
         for s in &mut self.samples {
             let Loc::File { offset, size, .. } = s.loc else { anyhow::bail!("NAL scan needs file locations") };
             let mut p = 0u64;
-            while p + length_size as u64 + 1 <= size as u64 {
+            while p + (length_size as u64) < size as u64 {
                 let mut h = [0u8; 5];
                 f.read_exact_at(&mut h[..length_size + 1], offset + p)?;
                 let len = h[..length_size].iter().fold(0u64, |a, &b| (a << 8) | b as u64);

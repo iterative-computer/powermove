@@ -207,10 +207,10 @@ pub fn build(path: &std::path::Path) -> Result<FrameIndex> {
                                 _ => {}
                             }
                         }
-                        if tr == track.number {
-                            if let Some(t) = time {
-                                cues.push((t, seg_data + pos));
-                            }
+                        if tr == track.number
+                            && let Some(t) = time
+                        {
+                            cues.push((t, seg_data + pos));
                         }
                     }
                     _ => {}
@@ -329,16 +329,16 @@ fn scan_cluster(r: &mut Reader, mut off: u64, end: u64, track: u64, out: &mut Ve
                     }
                     p = cdata + csize;
                 }
-                if let Some((bd, bs)) = blk {
-                    if let Some(mut s) = block(r, bd, bs, cluster_ts, track, Some(!has_ref))? {
-                        if let Loc::File { additional: a, .. } = &mut s.loc {
-                            *a = additional;
-                        }
-                        if let Some(d) = duration {
-                            s.duration = d;
-                        }
-                        out.push(s);
+                if let Some((bd, bs)) = blk
+                    && let Some(mut s) = block(r, bd, bs, cluster_ts, track, Some(!has_ref))?
+                {
+                    if let Loc::File { additional: a, .. } = &mut s.loc {
+                        *a = additional;
                     }
+                    if let Some(d) = duration {
+                        s.duration = d;
+                    }
+                    out.push(s);
                 }
             }
             _ => {}
