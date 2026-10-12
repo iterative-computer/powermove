@@ -73,10 +73,14 @@ function loadQuarantine(): QuarantineEntry[] {
 
 const entries = loadQuarantine();
 const wholeFiles = entries.filter(entry => !entry.tests).map(entry => entry.spec);
-// Playwright matches grep against "<file path> <describe titles> <test title>",
-// so anchoring on the file name keeps a title from matching in another spec.
+// Playwright matches grep against "<file path> <describe titles> <test title>
+// <tags>", where "@tag" words in titles are repeated as trailing tags.
+// Anchoring on the file name keeps a title from matching in another spec, and
+// anchoring the title on a word boundary keeps "x" from matching "a x".
 const titles = entries.flatMap(entry =>
-  (entry.tests ?? []).map(title => new RegExp(`(^|[/\\\\ ])${escapeRegExp(entry.spec)} .*${escapeRegExp(title)}$`))
+  (entry.tests ?? []).map(title => new RegExp(
+    `(^|[/\\\\ ])${escapeRegExp(entry.spec)} (.* )?${escapeRegExp(title)}( @\\S+)*$`
+  ))
 );
 
 export default defineConfig({
