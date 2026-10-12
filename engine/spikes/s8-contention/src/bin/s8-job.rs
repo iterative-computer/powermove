@@ -171,6 +171,8 @@ struct Ctl {
     /// only `relay_delay_ns` after it was sent.
     relay_delay_ns: u64,
     held: VecDeque<signal::Message>,
+    /// Yield windows (host ns start, end) for the raw log.
+    yield_windows: Vec<(u64, u64)>,
 }
 
 impl Ctl {
@@ -231,8 +233,12 @@ impl Ctl {
             if trigger && react {
                 if self.yield_until <= now {
                     self.yields += 1;
+                    self.yield_windows.push((now, now + yield_ns));
                 }
                 self.yield_until = self.yield_until.max(now + yield_ns);
+                if let Some(w) = self.yield_windows.last_mut() {
+                    w.1 = self.yield_until;
+                }
             }
         }
     }
@@ -326,6 +332,7 @@ fn main() {
     let iters: u32 = args.num("iters", 6);
     let heavy_radius: i32 = args.num("heavy-radius", 384);
     let fifo = args.str("signal-fifo").map(str::to_string);
+    let raw_path = args.str("raw").map(str::to_string);
     let vt_sessions: usize = args.num("vt-sessions", 0);
     let vt_codec = vt::Codec::parse(&args.string_or("vt-codec", "hevc10")).expect("vt-codec");
     let vt_fps: f64 = args.num("vt-fps", 0.0);
@@ -651,6 +658,7 @@ fn main() {
     };
     let mut retired_since_flush = 0usize;
     let mut planned: Option<(wgpu::CommandBuffer, InFlight)> = None;
+    let mut submits: Vec<(usize, u64)> = Vec::new();
     let yield_ns = (yield_ms * 1e6) as u64;
     let guard_ns = (align_guard_ms * 1e6) as u64;
 
@@ -781,6 +789,7 @@ fn main() {
             let (cb, mut f) = planned.take().unwrap();
             f.submit_ns = clock::now_ns();
             f.index = Some(queue.submit([cb]));
+            submits.push((f.entry, f.submit_ns));
             inflight.push_back(f);
             // Bookkeeping while the GPU works: batch-resolve timestamps of retired
             // command buffers and feed measured GPU time back into the cost model.
@@ -823,12 +832,37 @@ fn main() {
     }
     let end_ns = clock::now_ns();
     let submitted_upto = if planned.is_some() { entry - 1 } else { entry };
-    let mut spans: Vec<(f64, f64)> = ts
+    let entries: Vec<(usize, (f64, f64))> = ts
         .finish(device, queue, submitted_upto)
         .into_iter()
         .filter(|(e, _)| *e >= first_run_entry && *e < submitted_upto)
-        .filter_map(|(_, v)| v)
+        .filter_map(|(e, v)| v.map(|v| (e, v)))
         .collect();
+    if let Some(path) = &raw_path {
+        // Command-buffer GPU spans and yield windows on the host clock, for attributing
+        // A's late frames (see s8-run).
+        let submit_of: std::collections::HashMap<usize, u64> = submits.iter().copied().collect();
+        let mut out = String::new();
+        for (e, (b, en)) in &entries {
+            out.push_str(
+                &serde_json::json!({
+                    "kind": "cb",
+                    "entry": e,
+                    "submit_ns": submit_of.get(e),
+                    "gpu_begin_ns": *b as u64,
+                    "gpu_end_ns": *en as u64,
+                })
+                .to_string(),
+            );
+            out.push('\n');
+        }
+        for (a, z) in &ctl.yield_windows {
+            out.push_str(&serde_json::json!({"kind": "yield", "start_ns": a, "end_ns": z}).to_string());
+            out.push('\n');
+        }
+        std::fs::write(path, out).expect("write raw");
+    }
+    let mut spans: Vec<(f64, f64)> = entries.iter().map(|(_, v)| *v).collect();
     spans.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     let cb_gpu: Vec<f64> = spans.iter().map(|(b, e)| (e - b) / 1e6).collect();
     // Busy time = union of command-buffer GPU spans (they can overlap with 2 in flight).

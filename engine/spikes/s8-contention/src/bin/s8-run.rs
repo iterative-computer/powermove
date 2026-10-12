@@ -470,6 +470,50 @@ fn scenarios() -> Vec<Scenario> {
             ]),
         ),
         s(
+            "gate-pause-vt30",
+            "As gate-pause with the HEVC session paced at 30 fps (an export's encode rate, not flat out)",
+            &["--warmup", "0"],
+            b(&[
+                SLICED,
+                ALIGN,
+                &[
+                    "--slice-ms",
+                    "2",
+                    "--yield-on",
+                    "miss",
+                    "--vt-sessions",
+                    "1",
+                    "--vt-codec",
+                    "hevc10",
+                    "--vt-fps",
+                    "30",
+                ],
+                BLENDER,
+                &["--blender-policy", "pause"],
+            ]),
+        ),
+        s(
+            "export-align+hevc10-vt30",
+            "B sliced 2 ms frame-aligned plus 1 HEVC Main10 session paced at 30 fps",
+            &[],
+            b(&[
+                SLICED,
+                ALIGN,
+                &[
+                    "--slice-ms",
+                    "2",
+                    "--yield-on",
+                    "miss",
+                    "--vt-sessions",
+                    "1",
+                    "--vt-codec",
+                    "hevc10",
+                    "--vt-fps",
+                    "30",
+                ],
+            ]),
+        ),
+        s(
             "gate-throttle",
             "S8 row: as gate-pause but Blender duty-cycled 10/40 ms during playback",
             &[],
@@ -806,9 +850,11 @@ fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::
                 }
             })
             .collect();
+        let b_raw = out.join("raw").join(format!("{}-b.jsonl", s.name));
         let mut child = Command::new(bin.join("s8-job"))
             .args(&b_args)
             .args(["--signal-fifo", &fifo, "--label", s.name])
+            .args(["--raw", b_raw.to_str().unwrap()])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -868,6 +914,17 @@ fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::
         None
     };
     let _ = std::fs::remove_file(&fifo);
+    let attribution = a
+        .as_ref()
+        .and_then(|a| a["fps"].as_f64())
+        .filter(|_| s.b.is_some())
+        .map(|fps| {
+            attribute(
+                &out.join("raw").join(format!("{}-a.jsonl", s.name)),
+                &out.join("raw").join(format!("{}-b.jsonl", s.name)),
+                1e9 / fps,
+            )
+        });
     json!({
         "scenario": s.name,
         "what": s.what,
@@ -879,8 +936,126 @@ fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::
         "gpu_util_idle_before": stats::dist(&idle),
         "gpu_util_during": stats::dist(&during),
         "control": control,
+        "attribution": attribution,
         "a": a,
         "b": b,
+    })
+}
+
+/// Union of spans, sorted and disjoint (B's command buffers overlap with 2 in flight).
+fn merge(mut spans: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+    spans.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    let mut out: Vec<(f64, f64)> = Vec::with_capacity(spans.len());
+    for (x, y) in spans {
+        match out.last_mut() {
+            Some(last) if x <= last.1 => last.1 = last.1.max(y),
+            _ => out.push((x, y)),
+        }
+    }
+    out
+}
+
+/// Overlap (ns) of `[a, b)` with sorted, disjoint spans.
+fn overlap(spans: &[(f64, f64)], a: f64, b: f64) -> f64 {
+    let start = spans.partition_point(|s| s.1 <= a);
+    let mut sum = 0.0;
+    for &(x, y) in &spans[start..] {
+        if x >= b {
+            break;
+        }
+        sum += (y.min(b) - x.max(a)).max(0.0);
+    }
+    sum
+}
+
+/// Attribute A's late frames: for each frame that missed the one-frame deadline, how
+/// much of its GPU start delay (submit to first GPU work) and of its GPU execution B's
+/// command buffers covered, and whether B was inside a yield window at submit. A late
+/// frame whose delay B did not cover was held up by something else (the encoder,
+/// WindowServer, other apps, or A's own backlog, which `prev_late` marks).
+fn attribute(a_raw: &std::path::Path, b_raw: &std::path::Path, period_ns: f64) -> Value {
+    let read = |p: &std::path::Path| -> Vec<Value> {
+        std::fs::read_to_string(p)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
+    };
+    let a = read(a_raw);
+    let b = read(b_raw);
+    let cbs = merge(
+        b.iter()
+            .filter(|v| v["kind"] == "cb")
+            .filter_map(|v| Some((v["gpu_begin_ns"].as_f64()?, v["gpu_end_ns"].as_f64()?)))
+            .collect(),
+    );
+    let yields: Vec<(f64, f64)> = b
+        .iter()
+        .filter(|v| v["kind"] == "yield")
+        .filter_map(|v| Some((v["start_ns"].as_f64()?, v["end_ns"].as_f64()?)))
+        .collect();
+    let f = |v: &Value, k: &str| v[k].as_f64();
+    let mut rows = Vec::new();
+    let mut prev_end = 0.0f64;
+    let (mut late, mut b_delay, mut backlog, mut other, mut skipped) = (0, 0, 0, 0, 0);
+    let mut b_share_all = Vec::new();
+    for v in &a {
+        let Some(tick) = f(v, "tick_ns") else { continue };
+        let (Some(submit), Some(begin), Some(end), Some(done)) = (
+            f(v, "submit_ns"),
+            f(v, "gpu_begin_ns"),
+            f(v, "gpu_end_ns"),
+            f(v, "done_ns"),
+        ) else {
+            if v["skipped"] == true {
+                skipped += 1;
+            }
+            continue;
+        };
+        let delay = (begin - submit).max(0.0);
+        let b_in_delay = overlap(&cbs, submit, begin);
+        if delay > 0.0 {
+            b_share_all.push(b_in_delay / delay);
+        }
+        // A's previous frame still on the GPU when this one was submitted.
+        let behind_self = prev_end > submit;
+        prev_end = prev_end.max(end);
+        if done - tick <= period_ns {
+            continue;
+        }
+        late += 1;
+        let in_yield = yields.iter().any(|&(y0, y1)| submit >= y0 && submit < y1);
+        let class = if behind_self {
+            backlog += 1;
+            "backlog"
+        } else if delay > 1e6 && b_in_delay >= 0.5 * delay {
+            b_delay += 1;
+            "b"
+        } else {
+            other += 1;
+            "other"
+        };
+        if rows.len() < 60 {
+            rows.push(json!({
+                "t_s": v["t_s"],
+                "class": class,
+                "latency_ms": stats::r((done - tick) / 1e6, 2),
+                "start_delay_ms": stats::r(delay / 1e6, 2),
+                "b_in_delay_ms": stats::r(b_in_delay / 1e6, 2),
+                "exec_ms": stats::r((end - begin) / 1e6, 2),
+                "b_in_exec_ms": stats::r(overlap(&cbs, begin, end) / 1e6, 2),
+                "b_in_yield": in_yield,
+            }));
+        }
+    }
+    json!({
+        "late_frames": late,
+        "skipped_frames": skipped,
+        "late_b_held_start": b_delay,
+        "late_behind_own_backlog": backlog,
+        "late_other": other,
+        "b_share_of_start_delay_all_frames": stats::dist(&b_share_all).rounded(3),
+        "late": rows,
     })
 }
 
@@ -1014,6 +1189,16 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlap_sums_intersections() {
+        let spans = merge(vec![(20.0, 30.0), (0.0, 10.0), (25.0, 40.0), (2.0, 5.0)]);
+        assert_eq!(spans, vec![(0.0, 10.0), (20.0, 40.0)]);
+        assert_eq!(overlap(&spans, 5.0, 22.0), 7.0);
+        assert_eq!(overlap(&spans, 10.0, 20.0), 0.0);
+        assert_eq!(overlap(&spans, 26.0, 28.0), 2.0);
+        assert_eq!(overlap(&spans, 35.0, 60.0), 5.0);
+    }
 
     #[test]
     fn parses_agx_user_clients() {

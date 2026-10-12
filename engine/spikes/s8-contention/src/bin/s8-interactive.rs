@@ -158,6 +158,11 @@ struct FrameRec {
     /// GPU start of the frame's first pass minus CPU submit time: queueing delay.
     gpu_start_ms: f64,
     skipped: bool,
+    /// Absolute host times (ns) for the raw log only: tick, submit, GPU begin, GPU end,
+    /// done (NaN where unknown). Used to attribute late frames to whatever else had the
+    /// GPU at the time (B's command buffers are logged on the same clock).
+    #[serde(skip)]
+    abs: [f64; 5],
 }
 
 #[derive(Serialize)]
@@ -808,6 +813,13 @@ fn run(args: &Args, g: gpu::Gpu, presenter: Option<(Presenter, String, bool)>) {
             gpu_ms,
             gpu_start_ms,
             skipped: false,
+            abs: [
+                s.tick as f64,
+                s.submit as f64,
+                pair.map(|p| p.0).unwrap_or(f64::NAN),
+                pair.map(|p| p.1).unwrap_or(f64::NAN),
+                *done as f64,
+            ],
         });
     }
     let skipped_measured: Vec<_> = skipped.iter().filter(|(n, ..)| *n >= warm_frames).collect();
@@ -822,6 +834,7 @@ fn run(args: &Args, g: gpu::Gpu, presenter: Option<(Presenter, String, bool)>) {
             gpu_ms: f64::NAN,
             gpu_start_ms: f64::NAN,
             skipped: true,
+            abs: [*tick as f64, f64::NAN, f64::NAN, f64::NAN, f64::NAN],
         });
         miss_times.push(stats::r((tick - t0) as f64 / 1e9 - warmup, 3));
     }
@@ -850,7 +863,20 @@ fn run(args: &Args, g: gpu::Gpu, presenter: Option<(Presenter, String, bool)>) {
         let mut all = frames.clone();
         all.sort_by_key(|f| f.n);
         for f in &all {
-            out.push_str(&serde_json::to_string(f).unwrap());
+            let mut v = serde_json::to_value(f).unwrap();
+            let abs = |x: f64| {
+                if x.is_finite() {
+                    serde_json::json!(x as u64)
+                } else {
+                    serde_json::Value::Null
+                }
+            };
+            v["tick_ns"] = abs(f.abs[0]);
+            v["submit_ns"] = abs(f.abs[1]);
+            v["gpu_begin_ns"] = abs(f.abs[2]);
+            v["gpu_end_ns"] = abs(f.abs[3]);
+            v["done_ns"] = abs(f.abs[4]);
+            out.push_str(&v.to_string());
             out.push('\n');
         }
         std::fs::write(&path, out).expect("write raw");
