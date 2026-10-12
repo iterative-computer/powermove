@@ -29,10 +29,12 @@ use rspirv::spirv::{Decoration, Op, StorageClass, Word};
 /// the real budget). ANGLE accepted a 4 MiB program of comments in 11 s.
 pub const MAX_SOURCE_BYTES: usize = 8 << 20;
 /// Tokens after macro expansion. ANGLE accepted about 33 million (2^23 macro
-/// doubling, 2.6 to 7 s) and failed near 67 million; glslang needs 5.6 s for
-/// the 4.2 million of a 2^20 doubling, so the engine stops at 6 million (a
-/// 2^21 doubling, 8.4 million, is refused).
-pub const MAX_EXPANDED_TOKENS: usize = 6_000_000;
+/// doubling, 2.6 to 7 s) and failed near 67 million. glslang needs 5.6 s and
+/// 1.9 GB for the 4.2 million of a 2^20 doubling, so the engine stops at one
+/// million: 300 times the largest corpus program, about 1 s and 0.5 GB. A
+/// 2^18 doubling (1,048,573 tokens), which WebGL compiles in 0.17 s, is
+/// refused: a deliberate divergence (S3.md, "Resource limits").
+pub const MAX_EXPANDED_TOKENS: usize = 1_000_000;
 /// Statements (`;` after expansion). glslang's front end is quadratic in the
 /// length of one function body: 55,000 statements (a 1 MiB program) take 4.4 s
 /// per glslang pass and the pipeline runs two; 220,000 (4 MiB) did not finish
@@ -743,7 +745,8 @@ mod tests {
 
     #[test]
     fn macro_bombs_stop_at_the_budget_quickly() {
-        assert!(check_source(&doubling(20)).is_ok(), "ANGLE accepts a 2^20 doubling in 0.6 s");
+        assert!(check_source(&doubling(17)).is_ok(), "524,285 tokens");
+        assert_eq!(check_source(&doubling(18)).unwrap_err().rule, "preprocessor", "1,048,573 tokens");
         let started = std::time::Instant::now();
         let error = check_source(&doubling(40)).unwrap_err();
         assert_eq!(error.rule, "preprocessor");
