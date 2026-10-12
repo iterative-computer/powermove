@@ -17,15 +17,20 @@
 //! timestamp-measured GPU time), so a during-run reading is not evidence of external
 //! load. Instead each attempt is bracketed: before it, the orchestrator waits until
 //! external GPU time over a 3 s window is below `--max-external-pct` of wall time; after
-//! it, it samples another 3 s window. An attempt whose after-window exceeds the limit is
-//! rerun (up to `--retries`); the attempt with the quietest bracket is kept and every
-//! attempt is recorded.
+//! it, it samples another 3 s window.
+//!
+//! Load from other processes also changes over minutes, so every scenario with a B
+//! first runs A alone for `--control-s` seconds (the paired control) with the same A
+//! arguments. An attempt is rerun (up to `--retries`) when its after-window exceeds the
+//! limit or its control dropped frames; the cleanest attempt is kept, every attempt is
+//! recorded, and a scenario is marked `contaminated` when no attempt was clean.
 //!
 //! Blender scenarios need `--blender PATH` (the Blender executable); without it they are
 //! skipped and listed as skipped.
 //!
 //! Usage: `s8-run [--seconds 60] [--only a,b,c] [--out results/<dir>] [--list]
-//!         [--max-external-pct 10] [--quiet-wait-s 900] [--retries 2] [--blender PATH]`
+//!         [--max-external-pct 10] [--quiet-wait-s 900] [--retries 2] [--blender PATH]
+//!         [--control-s 20]`
 
 use s8_contention::{Args, display, signal, stats};
 use serde_json::{Value, json};
@@ -485,6 +490,12 @@ fn scenarios() -> Vec<Scenario> {
             b(&[SLICED, ALIGN, &["--slice-ms", "2", "--yield-on", "miss"]]),
         ),
         s(
+            "present-blender",
+            "As present-baseline with Blender EEVEE rendering, no policy",
+            PRESENT,
+            b(&[&["--mode", "none"], BLENDER]),
+        ),
+        s(
             "present-gate-pause",
             "As gate-pause, presenting on screen",
             &[
@@ -609,11 +620,12 @@ fn external_fraction(window: Duration) -> f64 {
 }
 
 /// Gate on a quiet GPU, run, sample the GPU again afterwards, and retry when the
-/// after-window was busy. Keeps the attempt with the quietest bracket and records every
-/// attempt.
+/// attempt was not clean: the after-window was busy, or the paired control (A alone just
+/// before B started) already dropped frames. Keeps the cleanest attempt (fewest control
+/// drops, then quietest bracket) and records every attempt.
 fn run(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::Path, gate: &Gate) -> Value {
     let mut attempts = Vec::new();
-    let mut best: Option<(f64, Value)> = None;
+    let mut best: Option<((u64, f64), Value)> = None;
     for attempt in 0..=gate.retries {
         let t = Instant::now();
         let mut before = external_fraction(Duration::from_secs(3));
@@ -625,6 +637,7 @@ fn run(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::Path,
         let mut v = run_once(s, bin, seconds, out, gate);
         let after = external_fraction(Duration::from_secs(3));
         let worst = before.max(after);
+        let control_drops = v["control"]["drops_1f"].as_u64().unwrap_or(0);
         v["external_gpu_before"] = json!(stats::r(before, 4));
         v["external_gpu_after"] = json!(stats::r(after, 4));
         v["quiet_wait_s"] = json!(stats::r(t.elapsed().as_secs_f64() - seconds, 1));
@@ -632,24 +645,27 @@ fn run(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::Path,
             "attempt": attempt,
             "external_gpu_before": stats::r(before, 4),
             "external_gpu_after": stats::r(after, 4),
+            "control_drops_1f": v["control"]["drops_1f"],
             "drops_1f": v["a"]["drops"]["deadline_1_frame"],
             "drops_2f": v["a"]["drops"]["deadline_2_frames"],
         }));
         eprintln!(
-            "   attempt {attempt}: external GPU {:.1}% before, {:.1}% after",
+            "   attempt {attempt}: external GPU {:.1}% before, {:.1}% after; control drops {control_drops}; drops {}",
             before * 100.0,
-            after * 100.0
+            after * 100.0,
+            v["a"]["drops"]["deadline_1_frame"],
         );
-        if best.as_ref().is_none_or(|(b, _)| worst < *b) {
-            best = Some((worst, v));
+        let key = (control_drops, worst);
+        if best.as_ref().is_none_or(|(b, _)| key < *b) {
+            best = Some((key, v));
         }
-        if worst <= gate.max_ext {
+        if worst <= gate.max_ext && control_drops == 0 {
             break;
         }
     }
-    let (worst, mut v) = best.unwrap();
+    let ((control_drops, worst), mut v) = best.unwrap();
     v["attempts"] = json!(attempts);
-    v["contaminated"] = json!(worst > gate.max_ext);
+    v["contaminated"] = json!(worst > gate.max_ext || control_drops > 0);
     v
 }
 
@@ -658,6 +674,8 @@ struct Gate {
     wait_s: f64,
     retries: usize,
     blender: Option<String>,
+    /// Seconds of A alone run just before each scenario that has a B (0: none).
+    control_s: f64,
 }
 
 fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::Path, gate: &Gate) -> Value {
@@ -673,6 +691,11 @@ fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::
     let fifo = std::env::temp_dir().join(format!("s8-{}-{}.fifo", std::process::id(), s.name));
     let fifo = fifo.to_str().unwrap().to_string();
     signal::make_fifo(&fifo).expect("mkfifo");
+
+    let control = (s.b.is_some() && gate.control_s > 0.0)
+        .then(|| run_a(s, bin, gate.control_s, &["--label", "control"]))
+        .flatten()
+        .map(|a| control_summary(&a));
 
     let mut b_child = None;
     let b_out = Arc::new(Mutex::new(String::new()));
@@ -723,21 +746,19 @@ fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::
     let sampler = sample_util(stop.clone());
     let raw = out.join("raw").join(format!("{}-a.jsonl", s.name));
     let t = Instant::now();
-    let a_out = Command::new(bin.join("s8-interactive"))
-        .args(&s.a)
-        .args([
-            "--seconds",
-            &seconds.to_string(),
+    let a = run_a(
+        s,
+        bin,
+        seconds,
+        &[
             "--signal-fifo",
             &fifo,
             "--label",
             s.name,
             "--raw",
             raw.to_str().unwrap(),
-        ])
-        .stderr(Stdio::inherit())
-        .output()
-        .expect("spawn s8-interactive");
+        ],
+    );
     let a_secs = t.elapsed().as_secs_f64();
     stop.store(true, Ordering::Relaxed);
     let during = sampler.join().unwrap();
@@ -752,7 +773,6 @@ fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::
         None
     };
     let _ = std::fs::remove_file(&fifo);
-    let a = parse_result(&String::from_utf8_lossy(&a_out.stdout));
     json!({
         "scenario": s.name,
         "what": s.what,
@@ -763,8 +783,36 @@ fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::
         "screen_locked": screen_locked,
         "gpu_util_idle_before": stats::dist(&idle),
         "gpu_util_during": stats::dist(&during),
+        "control": control,
         "a": a,
         "b": b,
+    })
+}
+
+/// Run process A with the scenario's arguments for `seconds` and parse its summary.
+fn run_a(s: &Scenario, bin: &std::path::Path, seconds: f64, extra: &[&str]) -> Option<Value> {
+    let out = Command::new(bin.join("s8-interactive"))
+        .args(&s.a)
+        .args(["--seconds", &seconds.to_string()])
+        .args(extra)
+        .stderr(Stdio::inherit())
+        .output()
+        .expect("spawn s8-interactive");
+    parse_result(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The paired control: A alone, with the scenario's A arguments, immediately before B
+/// starts. Machine load from other processes changes over minutes, so a scenario's
+/// drops are attributed to B only when the control just before it was clean.
+fn control_summary(a: &Value) -> Value {
+    json!({
+        "frames": a["frames_measured"],
+        "drops_1f": a["drops"]["deadline_1_frame"],
+        "drops_2f": a["drops"]["deadline_2_frames"],
+        "drops_3f": a["drops"]["deadline_3_frames"],
+        "latency_ms": a["latency_ms"],
+        "gpu_exec_ms": a["gpu_exec_ms"],
+        "presentation": a["presentation"],
     })
 }
 
@@ -783,8 +831,13 @@ fn row(v: &Value) -> String {
         vt_fps = fps.join("/");
     }
     format!(
-        "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+        "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
         v["scenario"].as_str().unwrap_or("?"),
+        if v["control"].is_null() {
+            "-".to_string()
+        } else {
+            v["control"]["drops_1f"].to_string()
+        },
         a["frames_measured"],
         a["drops"]["deadline_1_frame"],
         a["drops"]["deadline_2_frames"],
@@ -815,6 +868,7 @@ fn main() {
         wait_s: args.num("quiet-wait-s", 900.0),
         retries: args.num("retries", 2),
         blender: args.str("blender").map(str::to_string),
+        control_s: args.num("control-s", 20.0),
     };
     if let Some(p) = &gate.blender {
         assert!(std::path::Path::new(p).is_file(), "--blender {p}: no such file");
@@ -823,7 +877,7 @@ fn main() {
     let bin = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
     let out = std::path::PathBuf::from(args.string_or("out", "results/latest"));
     std::fs::create_dir_all(out.join("raw")).unwrap();
-    let header = "| scenario | frames | drops 1f | drops 2f | drops 3f | lat p50 | lat p99 | lat max | jitter p99 | gpu start delay p99 | B fps | B cb p99 ms | VT fps |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|";
+    let header = "| scenario | ctl 1f | frames | drops 1f | drops 2f | drops 3f | lat p50 | lat p99 | lat max | jitter p99 | gpu start delay p99 | B fps | B cb p99 ms | VT fps |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|";
     println!("{header}");
     let mut results = Vec::new();
     for s in all
