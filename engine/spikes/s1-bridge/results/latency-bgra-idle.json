@@ -1,0 +1,675 @@
+{
+  "run": "latency-bgra-idle",
+  "scenario": "latency",
+  "config": {
+    "scenario": "latency",
+    "format": "bgra",
+    "width": 3840,
+    "height": 2160,
+    "poolSize": 8,
+    "leadFrames": 4,
+    "extraPasses": 0,
+    "durationMs": 20000,
+    "load": false,
+    "drawPath": "copy",
+    "hdrCanvas": false,
+    "latencyModes": [
+      "baseline",
+      "gesture",
+      "orbit",
+      "walk"
+    ],
+    "inputHz": 120,
+    "releaseMode": "gpu-done",
+    "transport": "per-frame",
+    "redraw": "none",
+    "onscreen": false,
+    "edrOnscreen": false,
+    "trace": true
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54",
+    "node": "24.18.1"
+  },
+  "display": {
+    "bounds": {
+      "x": 0,
+      "y": 0,
+      "width": 1512,
+      "height": 982
+    },
+    "scaleFactor": 2,
+    "hz": 120.0006103515625,
+    "colorDepth": 30,
+    "colorSpace": "{primaries:P3, transfer:{0.0777*x + 0.0000 if abs(x) < 0.0450 else sign(x)*((0.9495*abs(x) + 0.0495)**2.3955 + 0.0003)}, matrix:RGB, range:FULL}"
+  },
+  "machineLoad": {
+    "before": {
+      "loadavg": [
+        10.03,
+        6.96,
+        7.09
+      ],
+      "busyProcesses": [
+        {
+          "cpu": 52.9,
+          "name": "other"
+        },
+        {
+          "cpu": 77.1,
+          "name": "other"
+        },
+        {
+          "cpu": 48.3,
+          "name": "other"
+        },
+        {
+          "cpu": 64.4,
+          "name": "other"
+        },
+        {
+          "cpu": 32.7,
+          "name": "other"
+        },
+        {
+          "cpu": 98.6,
+          "name": "s4-render"
+        },
+        {
+          "cpu": 98.7,
+          "name": "s3-shaders"
+        },
+        {
+          "cpu": 89.8,
+          "name": "rustc"
+        },
+        {
+          "cpu": 100.1,
+          "name": "rustc"
+        },
+        {
+          "cpu": 26.8,
+          "name": "Electron"
+        }
+      ]
+    },
+    "after": {
+      "loadavg": [
+        9.67,
+        7.71,
+        7.37
+      ],
+      "busyProcesses": [
+        {
+          "cpu": 55.4,
+          "name": "other"
+        },
+        {
+          "cpu": 34.2,
+          "name": "other"
+        },
+        {
+          "cpu": 82.5,
+          "name": "s4-render"
+        },
+        {
+          "cpu": 102.4,
+          "name": "Electron Helper"
+        },
+        {
+          "cpu": 103.2,
+          "name": "other"
+        }
+      ]
+    }
+  },
+  "errors": [],
+  "bridge": {
+    "policy": "unsigned-dev-bypass",
+    "serviceNameLength": 56,
+    "expected": {
+      "pid": 69317,
+      "pidversion": 110474,
+      "spawnUs": 7453
+    },
+    "accepted": {
+      "pid": 69317,
+      "pidversion": 110474,
+      "atUs": 3124366939
+    },
+    "gone": 3215172773
+  },
+  "engine": {
+    "adapter": "Apple M4 Max",
+    "backend": "Metal",
+    "width": 3840,
+    "height": 2160,
+    "format": "bgra",
+    "pool_size": 8,
+    "pool_bytes": 265420800,
+    "lead_frames": 4,
+    "extra_passes": 0,
+    "bridge_pid": 69296,
+    "checkin_us": 290
+  },
+  "engineStats": {
+    "busy": [],
+    "stats": {
+      "frames": 6948,
+      "gesture_frames": 6858,
+      "gpu_us_max": 56987,
+      "gpu_us_sum": 12486905,
+      "late_skipped": 0,
+      "max_busy_slots": 7,
+      "max_retime_us": 4135,
+      "playback_frames": 90,
+      "pool_exhausted_waits": 0,
+      "regrids": 12,
+      "release_mismatches": 0,
+      "releases": 6948,
+      "send_failures": 0
+    }
+  },
+  "imports": {
+    "surfaces": [
+      {
+        "pool": 0,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.4499589999999216
+      },
+      {
+        "pool": 1,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.053541999999993095
+      },
+      {
+        "pool": 2,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.03270800000007057
+      },
+      {
+        "pool": 3,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.03191599999991013
+      },
+      {
+        "pool": 4,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.027291999999988548
+      },
+      {
+        "pool": 5,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.025291999999922155
+      },
+      {
+        "pool": 6,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.027166999999963082
+      },
+      {
+        "pool": 7,
+        "format": "bgra",
+        "width": 3840,
+        "height": 2160,
+        "bytesPerRow": 15360,
+        "importMs": 0.024957999999969616
+      }
+    ],
+    "allReleased": 8,
+    "releasedAfterTeardown": 8,
+    "heldAfterTeardown": 0
+  },
+  "sendsPerImport": {
+    "0": 4110,
+    "1": 2647,
+    "2": 108,
+    "3": 44,
+    "4": 34,
+    "5": 4,
+    "6": 1,
+    "7": 0
+  },
+  "receiver": {
+    "received": 6948,
+    "receiveErrors": 0,
+    "errors": [],
+    "releaseMode": "gpu-done",
+    "releasesSent": 6948,
+    "persistentSlots": 0,
+    "persistentErrors": 0
+  },
+  "load": null,
+  "frameForwarding": {
+    "transport": "per-frame",
+    "frames": 6948,
+    "status": {
+      "ok": 6948,
+      "pending": 0,
+      "noTarget": 0,
+      "failed": 0,
+      "engineToViewerDirect": 0
+    },
+    "transferMs": {
+      "n": 6948,
+      "p50": 0.32,
+      "p95": 0.55,
+      "p99": 1.36,
+      "max": 8.89,
+      "min": 0.12
+    }
+  },
+  "latency": {
+    "baseline": {
+      "stagesMs": {
+        "handlerToRenderStart": {
+          "n": 0
+        },
+        "render": {
+          "n": 0
+        },
+        "gpuDoneToNativeRecv": {
+          "n": 0
+        },
+        "nativeRecvToForwarderJs": {
+          "n": 0
+        },
+        "forwarderJsToReceiver": {
+          "n": 0
+        },
+        "receiverToMainWorld": {
+          "n": 0
+        },
+        "mainWorldToRaf": {
+          "n": 0
+        },
+        "rafToPresent": {
+          "n": 2401,
+          "p50": 11.6,
+          "p95": 12.42,
+          "p99": 19.85,
+          "max": 19.99,
+          "min": 11.42
+        }
+      },
+      "events": 2401,
+      "dispatches": 2401,
+      "draws": 2401,
+      "unmatched": 0,
+      "unpresented": 0,
+      "pointerToPixelMs": {
+        "n": 2401,
+        "p50": 16.84,
+        "p95": 17.36,
+        "p99": 25.05,
+        "max": 26.04,
+        "min": 16.37
+      },
+      "generatedToEventTimestampMs": {
+        "n": 2401,
+        "p50": 0.07,
+        "p95": 0.14,
+        "p99": 0.17,
+        "max": 2.16,
+        "min": -0.05
+      },
+      "eventToHandlerMs": {
+        "n": 2401,
+        "p50": 5.4,
+        "p95": 5.9,
+        "p99": 6.3,
+        "max": 6.6,
+        "min": 3.5
+      },
+      "integrity": {
+        "checked": 1,
+        "ok": 1,
+        "bad": [],
+        "skipped": 0
+      },
+      "clock": {
+        "pingOffsetVsTraceUs": -62
+      }
+    },
+    "gesture": {
+      "stagesMs": {
+        "handlerToRenderStart": {
+          "n": 2397,
+          "p50": 0.09,
+          "p95": 0.16,
+          "p99": 0.19,
+          "max": 0.84,
+          "min": -0.04
+        },
+        "render": {
+          "n": 2397,
+          "p50": 1.16,
+          "p95": 2.63,
+          "p99": 5.71,
+          "max": 7.92,
+          "min": 0.57
+        },
+        "gpuDoneToNativeRecv": {
+          "n": 2397,
+          "p50": 0.01,
+          "p95": 0.02,
+          "p99": 0.02,
+          "max": 0.02,
+          "min": 0.01
+        },
+        "nativeRecvToForwarderJs": {
+          "n": 2397,
+          "p50": 0.04,
+          "p95": 0.07,
+          "p99": 0.12,
+          "max": 4.08,
+          "min": 0.02
+        },
+        "forwarderJsToReceiver": {
+          "n": 2397,
+          "p50": 0.15,
+          "p95": 0.26,
+          "p99": 0.3,
+          "max": 0.69,
+          "min": 0
+        },
+        "receiverToMainWorld": {
+          "n": 2397,
+          "p50": 0,
+          "p95": 0.1,
+          "p99": 0.1,
+          "max": 0.2,
+          "min": 0
+        },
+        "mainWorldToRaf": {
+          "n": 2397,
+          "p50": 6.6,
+          "p95": 7.2,
+          "p99": 7.7,
+          "max": 8.1,
+          "min": -0.2
+        },
+        "rafToPresent": {
+          "n": 2397,
+          "p50": 11.63,
+          "p95": 19.97,
+          "p99": 20.02,
+          "max": 20.85,
+          "min": 11.44
+        }
+      },
+      "events": 2401,
+      "dispatches": 2400,
+      "draws": 2397,
+      "unmatched": 0,
+      "unpresented": 0,
+      "pointerToPixelMs": {
+        "n": 2401,
+        "p50": 24.93,
+        "p95": 33.28,
+        "p99": 33.74,
+        "max": 42.01,
+        "min": 24.37
+      },
+      "generatedToEventTimestampMs": {
+        "n": 2400,
+        "p50": 0.02,
+        "p95": 0.09,
+        "p99": 0.14,
+        "max": 4.3,
+        "min": -0.09
+      },
+      "eventToHandlerMs": {
+        "n": 2400,
+        "p50": 5.1,
+        "p95": 5.7,
+        "p99": 6,
+        "max": 6.2,
+        "min": 0.7
+      },
+      "integrity": {
+        "checked": 2397,
+        "ok": 2397,
+        "bad": [],
+        "skipped": 0
+      },
+      "clock": {
+        "pingOffsetVsTraceUs": -70
+      }
+    },
+    "orbit": {
+      "stagesMs": {
+        "handlerToRenderStart": {
+          "n": 2023,
+          "p50": 0.09,
+          "p95": 0.17,
+          "p99": 1.17,
+          "max": 12.69,
+          "min": -0.03
+        },
+        "render": {
+          "n": 2023,
+          "p50": 2.25,
+          "p95": 5.64,
+          "p99": 9.71,
+          "max": 56.99,
+          "min": 0.81
+        },
+        "gpuDoneToNativeRecv": {
+          "n": 2023,
+          "p50": 0.01,
+          "p95": 0.02,
+          "p99": 0.02,
+          "max": 0.04,
+          "min": 0.01
+        },
+        "nativeRecvToForwarderJs": {
+          "n": 2023,
+          "p50": 0.06,
+          "p95": 0.09,
+          "p99": 0.13,
+          "max": 0.61,
+          "min": 0.03
+        },
+        "forwarderJsToReceiver": {
+          "n": 2023,
+          "p50": 0.22,
+          "p95": 0.32,
+          "p99": 0.35,
+          "max": 0.96,
+          "min": 0.05
+        },
+        "receiverToMainWorld": {
+          "n": 2023,
+          "p50": 0,
+          "p95": 0.1,
+          "p99": 0.1,
+          "max": 0.3,
+          "min": 0
+        },
+        "mainWorldToRaf": {
+          "n": 2023,
+          "p50": 5.3,
+          "p95": 6.8,
+          "p99": 7.6,
+          "max": 76,
+          "min": -6.5
+        },
+        "rafToPresent": {
+          "n": 2022,
+          "p50": 19.69,
+          "p95": 21.63,
+          "p99": 53.47,
+          "max": 168.72,
+          "min": 11.43
+        }
+      },
+      "events": 2401,
+      "dispatches": 2069,
+      "draws": 2023,
+      "unmatched": 0,
+      "unpresented": 4,
+      "pointerToPixelMs": {
+        "n": 2397,
+        "p50": 28.6,
+        "p95": 56.81,
+        "p99": 138.47,
+        "max": 265.48,
+        "min": 19.51
+      },
+      "generatedToEventTimestampMs": {
+        "n": 2069,
+        "p50": 0.05,
+        "p95": 0.13,
+        "p99": 0.17,
+        "max": 1.93,
+        "min": -0.09
+      },
+      "eventToHandlerMs": {
+        "n": 2069,
+        "p50": 3.8,
+        "p95": 8.5,
+        "p99": 8.7,
+        "max": 9.4,
+        "min": 0
+      },
+      "integrity": {
+        "checked": 2023,
+        "ok": 2023,
+        "bad": [],
+        "skipped": 0
+      },
+      "clock": {
+        "pingOffsetVsTraceUs": -62
+      }
+    },
+    "walk": {
+      "stagesMs": {
+        "handlerToRenderStart": {
+          "n": 2349,
+          "p50": 0.09,
+          "p95": 0.37,
+          "p99": 1.07,
+          "max": 4.63,
+          "min": -0.09
+        },
+        "render": {
+          "n": 2349,
+          "p50": 1.28,
+          "p95": 2.31,
+          "p99": 2.93,
+          "max": 4.71,
+          "min": 0.63
+        },
+        "gpuDoneToNativeRecv": {
+          "n": 2349,
+          "p50": 0.01,
+          "p95": 0.03,
+          "p99": 0.13,
+          "max": 2.31,
+          "min": 0.01
+        },
+        "nativeRecvToForwarderJs": {
+          "n": 2349,
+          "p50": 0.09,
+          "p95": 0.82,
+          "p99": 2.03,
+          "max": 17.48,
+          "min": 0.03
+        },
+        "forwarderJsToReceiver": {
+          "n": 2349,
+          "p50": 0.36,
+          "p95": 0.49,
+          "p99": 0.76,
+          "max": 2.88,
+          "min": 0.17
+        },
+        "receiverToMainWorld": {
+          "n": 2349,
+          "p50": 0,
+          "p95": 0.1,
+          "p99": 0.1,
+          "max": 0.6,
+          "min": 0
+        },
+        "mainWorldToRaf": {
+          "n": 2349,
+          "p50": 2.9,
+          "p95": 4,
+          "p99": 4.7,
+          "max": 7.3,
+          "min": -3
+        },
+        "rafToPresent": {
+          "n": 2349,
+          "p50": 19.93,
+          "p95": 20.49,
+          "p99": 20.79,
+          "max": 20.94,
+          "min": 11.51
+        }
+      },
+      "events": 2401,
+      "dispatches": 2401,
+      "draws": 2349,
+      "unmatched": 0,
+      "unpresented": 0,
+      "pointerToPixelMs": {
+        "n": 2401,
+        "p50": 25.33,
+        "p95": 26.21,
+        "p99": 33.71,
+        "max": 67.11,
+        "min": 16.55
+      },
+      "generatedToEventTimestampMs": {
+        "n": 2401,
+        "p50": 0.16,
+        "p95": 1.42,
+        "p99": 3.56,
+        "max": 31.96,
+        "min": -0.02
+      },
+      "eventToHandlerMs": {
+        "n": 2401,
+        "p50": 0.2,
+        "p95": 0.4,
+        "p99": 0.9,
+        "max": 4.4,
+        "min": 0
+      },
+      "integrity": {
+        "checked": 2349,
+        "ok": 2349,
+        "bad": [],
+        "skipped": 0
+      },
+      "clock": {
+        "pingOffsetVsTraceUs": -18
+      }
+    }
+  }
+}
