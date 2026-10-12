@@ -1074,6 +1074,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "s7-blender"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "png",
+ "serde_json",
+]
+
+[[package]]
 name = "s7-geom3d"
 version = "0.0.0"
 dependencies = [

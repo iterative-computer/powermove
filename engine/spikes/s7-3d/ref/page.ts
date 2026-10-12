@@ -266,3 +266,115 @@ async function pickScene(id: string, options: { times: number[]; cols: number; r
 }
 
 (globalThis as any).S7.pickScene = pickScene;
+
+/** Blender render snapshot for a corpus scene: a port of `renderSnapshot`'s collection
+ *  (core/scene3d/rendering.ts) over the production SceneRuntime, so the spike drives the
+ *  shipped Blender worker with the geometry, UVs, materials, lights, camera, depth sets,
+ *  and textures the app sends today. Texture and asset bytes come back base64-encoded. */
+async function blenderSnapshot(id: string, settings: Record<string, unknown> = {}) {
+  const def: SceneDef = await (await fetch(`/corpus/scenes/${id}.json`)).json();
+  const loaded = await loadAssets(def);
+  const runtime = new SceneRuntime();
+  const scene = parseScene(def.scene) as any;
+  runtime.sync(scene, (assetId: string) => loaded.get(assetId), (prop: any) => prop.v, def.time);
+  runtime.resizeCamera(def.width, def.height);
+  runtime.scene.updateMatrixWorld(true);
+  const toBase64 = async (blob: Blob) => { const b = new Uint8Array(await blob.arrayBuffer()); let s = ''; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode(...b.subarray(i, i + 0x8000)); return btoa(s); };
+  const colorHex = (c: any) => '#' + c.getHexString(THREE.SRGBColorSpace);
+  const assets: { id: string; name: string; data: string }[] = [];
+  const textureIds = new Map<any, string>();
+  const textureAsset = async (texture: any): Promise<string | undefined> => {
+    if (!texture?.image) return;
+    const existing = textureIds.get(texture);
+    if (existing) return existing;
+    const tid = `texture_${textureIds.size}`, image = texture.image, canvas = document.createElement('canvas');
+    canvas.width = image.width; canvas.height = image.height;
+    canvas.getContext('2d')!.drawImage(image, 0, 0);
+    textureIds.set(texture, tid);
+    const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob(b => (b ? resolve(b) : reject(new Error('toBlob'))), 'image/png'));
+    assets.push({ id: tid, name: tid + '.png', data: await toBase64(blob) });
+    return tid;
+  };
+  // Corpus image assets referenced by primitive material maps.
+  const used = new Set<string>();
+  for (const node of scene.objects) for (const m of [node.material, ...(node.slots || []).map((s: any) => s.material)]) if (m) for (const v of Object.values<string>(m.maps || {})) used.add(v);
+  for (const assetId of used) {
+    const a = def.assets[assetId];
+    if (!a) continue;
+    assets.push({ id: assetId, name: `${assetId}.${a.file.split('.').pop()}`, data: await toBase64(await (await fetch(`/corpus/${a.file}`)).blob()) });
+  }
+  const objects: any[] = [];
+  const pending: Promise<void>[] = [];
+  for (const node of scene.objects) {
+    const root = runtime.objects.get(node.id);
+    if (!root) continue;
+    const meshes: any[] = [];
+    root.traverse((mesh: any) => {
+      if (!mesh.isMesh || !mesh.visible) return;
+      const g = mesh.geometry, position = g.attributes.position, normal = g.attributes.normal, uv = g.attributes.uv;
+      if (!position) return;
+      const groups = g.groups.length ? g.groups : [{ start: 0, count: g.index?.count || position.count, materialIndex: 0 }];
+      const point = new THREE.Vector3(), direction = new THREE.Vector3();
+      for (const group of groups) {
+        const positions: number[] = [], normals: number[] = [], uvs: number[] = [];
+        const end = Math.min(group.start + group.count, g.index?.count || position.count);
+        for (let i = group.start; i < end; i++) {
+          const index = g.index ? g.index.getX(i) : i;
+          mesh.getVertexPosition(index, point);
+          positions.push(point.x, point.y, point.z);
+          if (normal) {
+            direction.fromBufferAttribute(normal, index);
+            if (mesh.isSkinnedMesh) { const origin = new THREE.Vector3().fromBufferAttribute(position, index); direction.add(origin); mesh.applyBoneTransform(index, direction); direction.sub(point); }
+            direction.normalize();
+            normals.push(direction.x, direction.y, direction.z);
+          }
+          uvs.push(uv?.getX(index) || 0, uv?.getY(index) || 0);
+        }
+        const slot = node.slots?.[group.materialIndex || 0];
+        let material: any = slot?.material || node.material;
+        const matrix = mesh.matrixWorld.elements.slice();
+        pending.push((async () => {
+          if (node.useSourceMaterials && !slot) {
+            const source = (Array.isArray(mesh.material) ? mesh.material[group.materialIndex || 0] : mesh.material);
+            const maps: any = {};
+            for (const [key, prop] of [['color', 'map'], ['normal', 'normalMap'], ['roughness', 'roughnessMap'], ['metalness', 'metalnessMap'], ['emissive', 'emissiveMap'], ['ao', 'aoMap']] as const) {
+              const tid = await textureAsset(source[prop] || undefined);
+              if (tid) maps[key] = tid;
+            }
+            material = { p: { color: { v: colorHex(source.color) }, roughness: { v: source.roughness }, metalness: { v: source.metalness }, emissive: { v: colorHex(source.emissive) }, emissiveIntensity: { v: source.emissiveIntensity }, opacity: { v: source.opacity } }, maps };
+          }
+          meshes.push({ positions, normals, uvs, materialIndex: group.materialIndex || 0, matrix, material, smooth: true });
+        })());
+      }
+    });
+    objects.push({ id: node.id, meshes, castShadow: node.castShadow && scene.environment.shadows, receiveShadow: node.receiveShadow });
+  }
+  await Promise.all(pending);
+  const lights = scene.lights.map((node: any) => {
+    const light = runtime.objects.get(node.id) as any;
+    return {
+      id: node.id, type: node.type, position: light?.position.toArray() || [node.p.x.v, node.p.y.v, node.p.z.v], target: light?.target?.position.toArray() || [0, 0, 0],
+      color: node.p.color.v, intensity: node.p.intensity.v, distance: node.p.distance.v, angle: node.p.angle.v, penumbra: node.p.penumbra.v,
+      width: node.p.width?.v ?? 1, height: node.p.height?.v ?? 1, castShadow: node.castShadow && scene.environment.shadows,
+    };
+  });
+  const blocks: Record<string, string[]> = {}, backgroundFor: string[] = [];
+  for (const set of def.sets) {
+    const ordered = [...set].sort((a, b) => cameraDepth(runtime, b) - cameraDepth(runtime, a));
+    for (const objectId of set) blocks[objectId] = [...set];
+    backgroundFor.push(ordered.at(-1)!);
+  }
+  const c: any = runtime.camera;
+  const snapshot = {
+    width: def.width, height: def.height,
+    settings: { enabled: true, engine: 'eevee', samples: 64, previewSamples: 16, previewScale: 0.5, denoise: true, device: 'auto', ...settings },
+    objects, lights, blocks, backgroundFor,
+    environment: Object.fromEntries(Object.entries<any>(scene.environment.p).map(([key, prop]) => [key, prop.v])),
+    background: scene.environment.background,
+    camera: { matrix: c.matrixWorld.elements.slice(), orthographic: !!c.isOrthographicCamera, orthoHeight: c.isOrthographicCamera ? c.top - c.bottom : 4, fov: c.isPerspectiveCamera ? c.fov : 45, zoom: c.zoom, near: c.near, far: c.far },
+  };
+  runtime.dispose();
+  return { snapshot, assets };
+}
+
+(globalThis as any).S7.blenderSnapshot = blenderSnapshot;
