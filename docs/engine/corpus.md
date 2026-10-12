@@ -281,6 +281,34 @@ rerun"). Two of them change what v1 records compared with v0:
 The others (restart restore, pre-compose parenting, history compaction) do not
 change any captured frame.
 
+## Corpus v1
+
+Captured 2026-10-12 after the amendment 14 fixes:
+`v1-20261012-230504-ae47a3b3` under the capture root (commit `ae47a3b3` on
+`feat/ne-legacy2`, clean tree, build hash `abaec8ba…`), 214 s, 637 MB.
+`verify.ts`: 1,603 files checked, 0 problems, 0 unlisted files.
+
+| | v0 | v1 |
+|---|---|---|
+| Projects | 132 (131 synthetic, the real project) | 132 |
+| Frames, float frames, evaluation dumps | 422, 99, 422 | 422, 99, 422 |
+| Failed samples | 0 | 0 |
+| Blender dumps | 32 | 32 |
+| Blender snapshots, final and preview | 80 | 84 (`3d/gltf-materials` now records its 4) |
+| Blender snapshots, export and exportAlpha | none | 74 |
+| Projects with Blender problems | `3d/gltf-materials` | none |
+| Projects with GL errors | the four colour shader presets and `layers/shader-binding-quirks` | `layers/shader-binding-quirks` (the `int`, `vec2`, `vec4` binding above) |
+| Shader presets match `PM.SHADER_PRESETS` | yes | yes |
+| Real project | 45 of 45 samples | 45 of 45 samples |
+
+Effect projects still reassign effect keyframe ids on open (17 projects, recorded
+in `loaded.json`). The real project's original was not written (its hash is checked
+before and after).
+
+`perf/` under the same root holds the copies of Jude's project used for
+`PM_PERF_PROJECT`, `PM_PERF_FILE`, and `PM_PLAYBACK_PROJECT` (see the e2e ledger);
+it is not a capture.
+
 ## Not covered yet
 
 - Blender-rendered surfaces, recipes (Rocket, Staircase, 3D Text, mesh recipes with
