@@ -4,7 +4,7 @@
 //! This is how `pm-wasm` lays out text without platform font APIs: main owns
 //! font resolution, the renderer owns layout.
 
-use crate::font::{FaceId, FaceInfo, FontBytes, FontDesc, FontResolver};
+use crate::font::{FaceFacts, FaceId, FaceInfo, FontBytes, FontDesc, FontResolver};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -61,6 +61,7 @@ pub struct FaceRecord {
     pub typeface_key: String,
     #[serde(default)]
     pub fallback_key: Option<String>,
+    pub facts: FaceFacts,
 }
 
 /// The log in a serializable shape.
@@ -116,6 +117,7 @@ impl ReplayResolver {
                 postscript_name: r.postscript_name.clone(),
                 typeface_key: r.typeface_key.clone(),
                 fallback_key: r.fallback_key.clone(),
+                facts: r.facts,
             });
         }
         ReplayResolver {
@@ -170,4 +172,36 @@ impl FontResolver for ReplayResolver {
         self.next_custom += 1;
         id
     }
+}
+
+/// Rewrites a log so every face reads a metrics-and-shaping subset
+/// (`sub-<blob>-<index>.bin`, face index 0). `blob` loads the original bytes.
+/// Returns the new log and the subset bytes by name.
+pub fn subset_log(file: &LogFile, mut blob: impl FnMut(&str) -> FontBytes) -> (LogFile, std::collections::BTreeMap<String, Vec<u8>>) {
+    let mut out = file.clone();
+    let mut subsets = std::collections::BTreeMap::new();
+    let mut originals: HashMap<String, FontBytes> = HashMap::new();
+    for r in &mut out.faces {
+        let name = format!("sub-{}-{}.bin", r.blob.trim_end_matches(".bin"), r.index);
+        if !subsets.contains_key(&name) {
+            let data = originals.entry(r.blob.clone()).or_insert_with(|| blob(&r.blob)).clone();
+            let (bytes, _) = crate::subset::metrics_subset(data.as_slice(), r.index).expect("registry faces are fonts");
+            subsets.insert(name.clone(), bytes);
+        }
+        r.blob = name;
+        r.index = 0;
+    }
+    (out, subsets)
+}
+
+/// Runs the corpus with a replay resolver (behind Blink's fallback cache, as
+/// natively) and returns every case's layout. This is the code `pm-wasm`
+/// runs; the native comparison runs the same function.
+pub fn run_corpus(file: &LogFile, blob: impl FnMut(&str) -> FontBytes, corpus_json: &str) -> (Vec<crate::corpus::CaseOutput>, Vec<Query>) {
+    let cases = crate::corpus::load_corpus(&crate::corpus::sanitize_lone_surrogates(corpus_json));
+    let mut resolver = crate::fallback_cache::FallbackCached::new(ReplayResolver::new(file, blob));
+    let mut cache = crate::font::PreparedCache::default();
+    let custom: HashMap<String, FaceId> = file.custom_names.iter().cloned().collect();
+    let outputs = cases.iter().map(|case| crate::corpus::run_case(&mut resolver, &mut cache, case, &custom)).collect();
+    (outputs, resolver.inner.misses)
 }

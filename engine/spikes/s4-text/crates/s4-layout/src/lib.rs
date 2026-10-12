@@ -9,3 +9,4 @@ pub mod legacy;
 pub mod ots;
 pub mod font;
 pub mod replay;
+pub mod subset;

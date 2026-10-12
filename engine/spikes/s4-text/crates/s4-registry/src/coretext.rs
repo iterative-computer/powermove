@@ -12,7 +12,7 @@ use objc2_core_text::{
     kCTFontVariationAxisMinimumValueKey, kCTFontWeightTrait,
 };
 use objc2_foundation::{NSArray, NSNumber, NSString};
-use s4_layout::font::{FaceId, FaceInfo, FontBytes, FontDesc, FontResolver};
+use s4_layout::font::{FaceFacts, FaceId, FaceInfo, FontBytes, FontDesc, FontResolver};
 use s4_layout::replay::{Answer, Query, ResolverLog};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -417,6 +417,7 @@ impl CoreTextRegistry {
         };
         let synthesized_hyphens = [hyphen_glyph(&ct, data.as_slice(), index, 0x2010), hyphen_glyph(&ct, data.as_slice(), index, 0x2011)];
         let fallback_key = fallback_identifier(&ct);
+        let facts = FaceFacts::of(data.as_slice(), index);
         let info = FaceInfo {
             data,
             index,
@@ -428,6 +429,7 @@ impl CoreTextRegistry {
             postscript_name: ps,
             typeface_key,
             fallback_key,
+            facts,
         };
         let id = self.faces.len() as FaceId;
         self.faces.push(Face { info, ct });
@@ -733,7 +735,7 @@ fn sfnt_from_tables(ct: &CTFont) -> Vec<u8> {
     if let Some(tags) = tags {
         for i in 0..tags.len() {
             // The array stores tags as raw integers, not CF objects.
-            let raw = unsafe { objc2_core_foundation::CFArrayGetValueAtIndex(&tags, i as isize) } as usize as u32;
+            let raw = unsafe { tags.value_at_index(i as isize) } as usize as u32;
             if let Some(data) = unsafe { ct.table(raw, CTFontTableOptions(0)) } {
                 tables.push((raw, data.to_vec()));
             }

@@ -24,6 +24,33 @@ impl FontBytes {
     }
 }
 
+/// Facts about a face that layout needs from tables a metrics-and-shaping
+/// subset drops. The registry reads them from the full font.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FaceFacts {
+    /// `sbix` present (CoreText sizes color glyph advances by strike).
+    pub has_sbix: bool,
+    /// Any color glyph table (`sbix`, `COLR`, `CBDT`, `SVG `): Blink's
+    /// variation selector handling depends on it.
+    pub has_color_table: bool,
+    /// Advances vary through `gvar` phantom points (no `HVAR`); CoreText
+    /// rounds those to whole units.
+    pub phantom_advances: bool,
+}
+
+impl FaceFacts {
+    pub fn of(data: &[u8], index: u32) -> FaceFacts {
+        let Ok(f) = FontRef::from_index(data, index) else { return FaceFacts::default() };
+        let has = |t: &[u8; 4]| f.table_data(Tag::new(t)).is_some();
+        let has_sbix = has(b"sbix");
+        FaceFacts {
+            has_sbix,
+            has_color_table: has_sbix || has(b"COLR") || has(b"CBDT") || has(b"SVG "),
+            phantom_advances: has(b"fvar") && has(b"gvar") && !has(b"HVAR"),
+        }
+    }
+}
+
 /// One platform typeface as Blink's `FontPlatformData` sees it.
 #[derive(Clone)]
 pub struct FaceInfo {
@@ -46,6 +73,7 @@ pub struct FaceInfo {
     /// font being substituted (PostScript name, or UI usage and language for
     /// hidden system fonts); `None` disables the ideograph fallback cache.
     pub fallback_key: Option<String>,
+    pub facts: FaceFacts,
 }
 
 /// The parts of Blink's `FontDescription` that font resolution depends on.
@@ -209,9 +237,9 @@ pub fn prepare(info: &FaceInfo, coords: Vec<(u32, f32)>, size: f32, em_advance: 
     let fref = FontRef::from_index(info.data.as_slice(), info.index).ok()?;
     let has = |t: &[u8; 4]| fref.table_data(Tag::new(t)).is_some();
     let has_trak = has(b"trak");
-    let has_sbix = has(b"sbix");
-    let has_color_table = has_sbix || has(b"COLR") || has(b"CBDT") || has(b"SVG ");
-    let phantom_advances = !coords.is_empty() && has(b"gvar") && !has(b"HVAR");
+    let has_sbix = info.facts.has_sbix;
+    let has_color_table = info.facts.has_color_table;
+    let phantom_advances = !coords.is_empty() && info.facts.phantom_advances;
     let upem = font.units_per_em();
     let space_glyph = font.charmap().map_unicode(0x20u32).map(|g| g.to_u32());
     Some(PreparedFace {
@@ -252,8 +280,7 @@ impl PreparedCache {
         if let Some(p) = self.map.get(&key) {
             return Some(p.clone());
         }
-        let has_sbix = FontRef::from_index(info.data.as_slice(), info.index).ok().is_some_and(|f| f.table_data(Tag::new(b"sbix")).is_some());
-        let em = if has_sbix { em_advance() } else { None };
+        let em = if info.facts.has_sbix { em_advance() } else { None };
         let p = Arc::new(prepare(info, coords, size, em)?);
         self.map.insert(key, p.clone());
         Some(p)

@@ -2,6 +2,7 @@
 //! registry and compares every case with today's Canvas2D capture.
 //!
 //! s4-compare [--root out] [--group G] [--id ID] [--verbose]
+//! s4-compare --replay [--subsets]   (registry log replay; see `replay`)
 //! Writes out/compare-native.json (summary and failures), out/native-output.json
 //! (every case's layout, for the WASM identity check), and out/resolver-log.json
 //! (the registry answers the replay resolver needs).
@@ -32,6 +33,10 @@ fn main() {
         return;
     }
     let root = PathBuf::from(arg("--root").unwrap_or_else(|| "out".into()));
+    if flag("--replay") {
+        replay(&root, flag("--subsets"));
+        return;
+    }
     let corpus_json = corpus::sanitize_lone_surrogates(&std::fs::read_to_string(root.join("corpus.json")).expect("out/corpus.json (run bun capture/run.ts measure)"));
     let canvas: Value = serde_json::from_str(&corpus::sanitize_lone_surrogates(&std::fs::read_to_string(root.join("canvas2d.json")).expect("out/canvas2d.json"))).unwrap();
     let expected: HashMap<String, Value> =
@@ -152,6 +157,7 @@ fn write_log(registry: &CoreTextRegistry, custom: &[(String, FaceId)], root: &st
                 postscript_name: info.postscript_name.clone(),
                 typeface_key: info.typeface_key.clone(),
                 fallback_key: info.fallback_key.clone(),
+                facts: info.facts,
             },
         ));
     }
@@ -220,5 +226,73 @@ pub fn shape_debug(text: &str) {
                 run.glyphs.iter().map(|g| g.glyph).collect::<Vec<_>>(), adv
             );
         }
+    }
+}
+
+/// Replays the recorded registry answers from font bytes alone (the
+/// `pm-wasm` path) and checks the layout is bit-identical to the native run.
+/// With `--subsets`, every face is first reduced to its metrics-and-shaping
+/// subset; the subsets and their log are written to out/subsets for the
+/// WASM identity run.
+fn replay(root: &std::path::Path, subsets: bool) {
+    let log: LogFile = serde_json::from_str(&std::fs::read_to_string(root.join("resolver-log.json")).expect("run s4-compare first")).unwrap();
+    let corpus_json = std::fs::read_to_string(root.join("corpus.json")).unwrap();
+    let native: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(root.join("native-output.json")).unwrap()).unwrap();
+    let load = |dir: PathBuf| move |name: &str| FontBytes(Arc::new(std::fs::read(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"))));
+    let (log, dir) = if subsets {
+        let started = Instant::now();
+        let (sub_log, bytes) = s4_layout::replay::subset_log(&log, load(root.join("blobs")));
+        let elapsed = started.elapsed();
+        let dir = root.join("subsets");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut full_total = 0u64;
+        let mut seen = std::collections::HashSet::new();
+        for r in &log.faces {
+            if seen.insert(r.blob.clone()) {
+                full_total += std::fs::metadata(root.join("blobs").join(&r.blob)).unwrap().len();
+            }
+        }
+        let sub_total: usize = bytes.values().map(|b| b.len()).sum();
+        for (name, b) in &bytes {
+            std::fs::write(dir.join(name), b).unwrap();
+        }
+        std::fs::write(dir.join("resolver-log.json"), serde_json::to_string(&sub_log).unwrap()).unwrap();
+        println!(
+            "subsets: {} faces from {} font files; {:.1} MB of font files -> {:.2} MB of subsets ({:.2}%), built in {:.2}s",
+            bytes.len(), seen.len(), full_total as f64 / 1e6, sub_total as f64 / 1e6, 100.0 * sub_total as f64 / full_total as f64, elapsed.as_secs_f64()
+        );
+        (sub_log, dir)
+    } else {
+        (log, root.join("blobs"))
+    };
+    let started = Instant::now();
+    let (outputs, misses) = s4_layout::replay::run_corpus(&log, load(dir), &corpus_json);
+    let elapsed = started.elapsed();
+    let name = if subsets { "replay-subsets-output.json" } else { "replay-output.json" };
+    std::fs::write(root.join(name), serde_json::to_string(&outputs).unwrap()).unwrap();
+    let mut identical = 0;
+    let mut first_diffs = Vec::new();
+    for (o, n) in outputs.iter().zip(native.iter()) {
+        // Both sides through `Value`, so key order and float printing match;
+        // f64 values compare exactly.
+        let ours = serde_json::to_value(o).unwrap();
+        let theirs = n;
+        let ours = &ours;
+        if ours == theirs {
+            identical += 1;
+        } else if first_diffs.len() < 10 {
+            first_diffs.push(o.id.clone());
+        }
+    }
+    println!(
+        "replay{}: {} cases, {} bit-identical to the native CoreText run, {} resolver misses; layout {:.2}s",
+        if subsets { " (subsets)" } else { "" }, outputs.len(), identical, misses.len(), elapsed.as_secs_f64()
+    );
+    if !first_diffs.is_empty() {
+        println!("  first differing cases: {first_diffs:?}");
+    }
+    if outputs.len() != native.len() || identical != outputs.len() || !misses.is_empty() {
+        std::process::exit(1);
     }
 }
