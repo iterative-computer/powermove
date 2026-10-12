@@ -36,6 +36,7 @@
 //! freshly loaded project does, as each module documents.
 #![forbid(unsafe_code)]
 
+pub mod address;
 pub mod easing;
 pub mod js_sem;
 pub mod keyframes;
