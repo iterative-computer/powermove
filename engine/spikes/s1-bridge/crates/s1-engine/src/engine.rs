@@ -144,9 +144,15 @@ struct State {
     log: Vec<FrameLog>,
 }
 
+/// Called on the render thread with each completed frame's descriptor, after it was
+/// sent to main. The persistent-import transport uses it to send descriptors straight
+/// to the viewer, so main's JavaScript thread is off the per-frame path.
+pub type FrameHook = Box<dyn Fn(&FrameDescriptor) + Send + Sync>;
+
 pub struct Shared {
     state: Mutex<State>,
     cv: Condvar,
+    hook: Mutex<Option<FrameHook>>,
 }
 
 pub struct Engine {
@@ -221,6 +227,7 @@ impl Engine {
                 log: Vec::with_capacity(4096),
             }),
             cv: Condvar::new(),
+            hook: Mutex::new(None),
         });
         let thread_shared = shared.clone();
         let (w, h) = (cfg.width, cfg.height);
@@ -247,6 +254,10 @@ impl Engine {
                 g.next_k = None; // re-seed from "now" on the next iteration
             }
         });
+    }
+
+    pub fn set_frame_hook(&self, hook: Option<FrameHook>) {
+        *self.shared.hook.lock().unwrap() = hook;
     }
 
     pub fn set_lead_frames(&self, lead: u32) {
@@ -351,16 +362,22 @@ fn render_loop(shared: Arc<Shared>, gpu: Gpu, surfaces: Vec<Surface>, client: Cl
     let mut seq: u64 = 0;
     let mut last_gesture_rev: u64 = 0;
     loop {
+        // Decide and wait under one lock: an input or release that arrives between
+        // deciding to wait and starting to wait would otherwise be missed until the
+        // timeout expires (a lost wakeup adds up to the wait to pointer-to-pixel).
         let job = {
             let mut st = shared.state.lock().unwrap();
-            next_job(&mut st, &mut seq, &mut last_gesture_rev, start, w, h)
+            loop {
+                match next_job(&mut st, &mut seq, &mut last_gesture_rev, start, w, h) {
+                    Job::Wait(d) if d.is_zero() => continue,
+                    Job::Wait(d) => st = shared.cv.wait_timeout(st, d).unwrap().0,
+                    other => break other,
+                }
+            }
         };
         match job {
             Job::Stop => break,
-            Job::Wait(d) => {
-                let st = shared.state.lock().unwrap();
-                let _ = shared.cv.wait_timeout(st, d).unwrap();
-            }
+            Job::Wait(_) => unreachable!("waits are handled under the lock"),
             Job::Frame { slot, params, k, pts, dur, input_ts, gesture, three_d } => {
                 let t_start = now_us();
                 let idx = gpu.render(&surfaces[slot], &params);
@@ -389,6 +406,9 @@ fn render_loop(shared: Arc<Shared>, gpu: Gpu, surfaces: Vec<Surface>, client: Cl
                     overlay: params.marker,
                 };
                 let sent = ok.is_ok() && client.send_frame(&desc, Duration::from_millis(50)).is_ok();
+                if sent && let Some(hook) = shared.hook.lock().unwrap().as_ref() {
+                    hook(&desc);
+                }
                 let t_sent = now_us();
                 let mut st = shared.state.lock().unwrap();
                 st.stats.frames += 1;

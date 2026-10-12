@@ -1,6 +1,7 @@
 //! napi bindings (feature `node`): the addon surface used by the utility process.
 use crate::engine;
 use napi::bindgen_prelude::*;
+use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use s1_mach::wire::PixelFormat;
 
@@ -14,6 +15,26 @@ pub struct EngineConfig {
     pub lead_frames: u32,
     pub extra_passes: u32,
 }
+
+/// A completed frame, as delivered to the utility process's JavaScript.
+#[napi(object)]
+pub struct JsFrame {
+    pub pool_index: u32,
+    pub seq: f64,
+    pub pts_us: f64,
+    pub duration_us: f64,
+    pub revision: f64,
+    pub input_ts_us: f64,
+    pub render_start_us: f64,
+    pub gpu_done_us: f64,
+    /// When the render thread handed the frame to JavaScript (CLOCK_UPTIME_RAW us).
+    pub hook_us: f64,
+    pub flags: u32,
+    pub color_space: u32,
+    pub overlay: Vec<f64>,
+}
+
+type FrameCallback = ThreadsafeFunction<JsFrame, (), JsFrame, Status, false>;
 
 /// The engine as seen from the utility process's JavaScript.
 #[napi(js_name = "Engine")]
@@ -66,6 +87,30 @@ impl JsEngine {
         Ok(())
     }
 
+    /// Delivers every completed frame's descriptor to `callback` (in addition to main).
+    #[napi]
+    pub fn on_frame(&self, callback: FrameCallback) {
+        self.inner.set_frame_hook(Some(Box::new(move |d| {
+            callback.call(
+                JsFrame {
+                    pool_index: d.pool_index,
+                    seq: d.seq as f64,
+                    pts_us: d.pts_us as f64,
+                    duration_us: d.duration_us as f64,
+                    revision: d.revision as f64,
+                    input_ts_us: d.input_ts_us as f64,
+                    render_start_us: d.render_start_us as f64,
+                    gpu_done_us: d.gpu_done_us as f64,
+                    hook_us: s1_mach::now_us() as f64,
+                    flags: d.flags,
+                    color_space: d.color_space,
+                    overlay: d.overlay.iter().map(|&v| f64::from(v)).collect(),
+                },
+                ThreadsafeFunctionCallMode::NonBlocking,
+            );
+        })));
+    }
+
     #[napi]
     pub fn set_lead_frames(&self, lead: u32) {
         self.inner.set_lead_frames(lead);
@@ -106,6 +151,7 @@ impl JsEngine {
 
     #[napi]
     pub fn stop(&mut self) {
+        self.inner.set_frame_hook(None);
         self.inner.stop();
     }
 }
