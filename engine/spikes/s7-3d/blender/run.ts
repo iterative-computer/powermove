@@ -20,6 +20,9 @@ const args = process.argv.slice(2);
 const flag = (name: string, fallback: string) => { const i = args.indexOf(name); if (i < 0) return fallback; const v = args[i + 1]!; args.splice(i, 2); return v; };
 const blender = flag('--blender', '/Applications/Blender.app/Contents/MacOS/Blender');
 const variant = flag('--variant', 'pinned');
+// --no-stamp: also turn off Blender's PNG text metadata (date, render time, ...) so
+// surface files are byte-stable, not just pixel-stable.
+const noStamp = args.includes('--no-stamp');
 const engine = flag('--engine', 'eevee');
 const samples = Number(flag('--samples', '16'));
 const device = flag('--device', 'cpu');
@@ -33,11 +36,12 @@ const PINNED = [
   "scene.display_settings.display_device='sRGB';scene.view_settings.view_transform='AgX';scene.view_settings.look='None';scene.view_settings.gamma=1",
   "scene.render.image_settings.color_management='FOLLOW_SCENE'",
 ].map(l => '    ' + l).join('\n');
+const NO_STAMP = "    scene.render.use_stamp_date=False;scene.render.use_stamp_time=False;scene.render.use_stamp_render_time=False;scene.render.use_stamp_frame=False;scene.render.use_stamp_camera=False;scene.render.use_stamp_scene=False;scene.render.use_stamp_filename=False;scene.render.use_stamp_memory=False;scene.render.use_stamp_hostname=False;scene.render.use_stamp_lens=False;scene.render.use_stamp_marker=False;scene.render.use_stamp_frame_range=False;scene.render.use_stamp_sequencer_strip=False;scene.render.use_stamp_note=False";
 function workerSource(): string {
   if (variant === 'today') return BLENDER_WORKER;
   const anchor = '    scene.render.use_file_extension=True\n';
   if (!BLENDER_WORKER.includes(anchor)) throw new Error('worker anchor moved');
-  return BLENDER_WORKER.replace(anchor, anchor + PINNED + '\n');
+  return BLENDER_WORKER.replace(anchor, anchor + PINNED + '\n' + (noStamp ? NO_STAMP + '\n' : ''));
 }
 
 // Snapshots from the reference page (production SceneRuntime in headless Chromium).
@@ -100,7 +104,7 @@ class Worker {
   close() { this.proc.stdin.end(); }
 }
 
-const tag = `${variant}-${engine}${engine === 'cycles' ? samples + (device === 'cpu' ? '' : '-' + device) : ''}`;
+const tag = `${variant}${noStamp ? '-nostamp' : ''}-${engine}${engine === 'cycles' ? samples + (device === 'cpu' ? '' : '-' + device) : ''}`;
 const results: any[] = [];
 for (const id of scenes) {
   const { snapshot, assets } = snapshots[id];
