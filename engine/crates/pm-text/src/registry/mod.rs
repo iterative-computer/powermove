@@ -79,7 +79,77 @@ impl Default for ProjectDescriptors {
 /// Blink's italic slope value and threshold (`font_selection_types.h`).
 pub const ITALIC_SLOPE: f32 = 20.0;
 
+/// A `FontFace` descriptor the registry cannot parse (the `FontFace`
+/// constructor throws a `SyntaxError` for it).
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[error("invalid FontFace {descriptor} descriptor {value:?}")]
+pub struct DescriptorError {
+    pub descriptor: &'static str,
+    pub value: String,
+}
+
+/// One or two numbers (a range is ordered), each from `one`.
+fn css_range(descriptor: &'static str, value: &str, one: impl Fn(&str) -> Option<f32>) -> Result<(f32, f32), DescriptorError> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    let bad = || DescriptorError { descriptor, value: value.to_string() };
+    match parts.as_slice() {
+        [a] => one(a).map(|a| (a, a)).ok_or_else(bad),
+        [a, b] => match (one(a), one(b)) {
+            (Some(a), Some(b)) => Ok((a.min(b), a.max(b))),
+            _ => Err(bad()),
+        },
+        _ => Err(bad()),
+    }
+}
+
+fn css_angle(v: &str) -> Option<f32> {
+    let n: f32 = v.strip_suffix("deg")?.parse().ok()?;
+    (-90.0..=90.0).contains(&n).then_some(n)
+}
+
 impl ProjectDescriptors {
+    /// Parses the CSS descriptors a project font is registered with
+    /// (`new FontFace(family, data, { weight, style, stretch })`), as Blink
+    /// does for its selection capabilities: `weight` is `normal`, `bold`, or
+    /// one or two numbers in [1, 1000]; `style` is `normal`, `italic`,
+    /// `oblique` (the italic slope, as Blink treats it), or `oblique` with
+    /// one or two angles; `stretch` is `normal`, a width keyword, or one or
+    /// two percentages. Ranges are ordered. Empty strings mean the default.
+    pub fn from_css(weight: &str, style: &str, stretch: &str) -> Result<Self, DescriptorError> {
+        let (weight, style, stretch) = (weight.trim(), style.trim(), stretch.trim());
+        let weight = match weight.to_ascii_lowercase().as_str() {
+            "" | "normal" => (400.0, 400.0),
+            "bold" => (700.0, 700.0),
+            w => css_range("weight", w, |v| v.parse::<f32>().ok().filter(|n| (1.0..=1000.0).contains(n)))?,
+        };
+        let lower = style.to_ascii_lowercase();
+        let style = match lower.split_whitespace().collect::<Vec<_>>().as_slice() {
+            [] | ["normal"] => ProjectStyle::Normal,
+            ["italic"] | ["oblique"] => ProjectStyle::Italic,
+            ["oblique", angles @ ..] => {
+                let (lo, hi) = css_range("style", &angles.join(" "), css_angle).map_err(|_| DescriptorError { descriptor: "style", value: style.to_string() })?;
+                ProjectStyle::Oblique { lo, hi }
+            }
+            _ => return Err(DescriptorError { descriptor: "style", value: style.to_string() }),
+        };
+        let keyword = |v: &str| -> Option<f32> {
+            Some(match v {
+                "ultra-condensed" => 50.0,
+                "extra-condensed" => 62.5,
+                "condensed" => 75.0,
+                "semi-condensed" => 87.5,
+                "normal" => 100.0,
+                "semi-expanded" => 112.5,
+                "expanded" => 125.0,
+                "extra-expanded" => 150.0,
+                "ultra-expanded" => 200.0,
+                _ => v.strip_suffix('%')?.parse::<f32>().ok().filter(|n| *n >= 0.0)?,
+            })
+        };
+        let stretch = if stretch.is_empty() { normal_stretch() } else { css_range("stretch", &stretch.to_ascii_lowercase(), keyword)? };
+        Ok(ProjectDescriptors { weight, style, stretch })
+    }
+
     /// Blink's selection capabilities for the face (slope in CSS degrees).
     pub fn slope(&self) -> (f32, f32) {
         match self.style {
@@ -339,6 +409,19 @@ pub const COMMON_SCRIPT: &str = "Zyyy";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn css_descriptors_parse_as_blink_reads_them() {
+        let d = |w: &str, s: &str, st: &str| ProjectDescriptors::from_css(w, s, st);
+        assert_eq!(d("", "", "").unwrap(), ProjectDescriptors::default());
+        assert_eq!(d("bold", "italic", "condensed").unwrap(), ProjectDescriptors { weight: (700.0, 700.0), style: ProjectStyle::Italic, stretch: (75.0, 75.0) });
+        assert_eq!(d("900 100", "oblique 10deg 0deg", "50% 200%").unwrap(), ProjectDescriptors { weight: (100.0, 900.0), style: ProjectStyle::Oblique { lo: 0.0, hi: 10.0 }, stretch: (50.0, 200.0) });
+        assert_eq!(d("350", "oblique", "normal").unwrap().style, ProjectStyle::Italic);
+        assert_eq!(d("1 1000", "oblique -12deg", "").unwrap().style, ProjectStyle::Oblique { lo: -12.0, hi: -12.0 });
+        for (w, s, st) in [("0", "", ""), ("heavy", "", ""), ("100 200 300", "", ""), ("", "slanted", ""), ("", "oblique 91deg", ""), ("", "oblique 10", ""), ("", "", "wide"), ("", "", "-5%")] {
+            assert!(d(w, s, st).is_err(), "{w:?} {s:?} {st:?}");
+        }
+    }
 
     fn face(lo: f32, hi: f32, style: ProjectStyle) -> ProjectDescriptors {
         ProjectDescriptors { weight: (lo, hi), style, stretch: (100.0, 100.0) }

@@ -9,7 +9,7 @@
 use crate::answers::{Answers, ReplayResolver};
 use crate::compat::{Compat, GlyphLayout, Measure, TextContent, wrap};
 use crate::font::{FontBytes, FontResolver};
-use crate::registry::{ProjectDescriptors, ProjectStyle};
+use crate::registry::ProjectDescriptors;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -71,14 +71,7 @@ pub struct ProjectFontSpec {
 
 impl ProjectFontSpec {
     pub fn descriptors(&self) -> ProjectDescriptors {
-        let w: Vec<f32> = self.weight.split_whitespace().filter_map(|v| v.parse().ok()).collect();
-        let weight = match w.as_slice() {
-            [a] => (*a, *a),
-            [a, b, ..] => (a.min(*b), a.max(*b)),
-            [] => (400.0, 400.0),
-        };
-        let style = if self.style == "italic" { ProjectStyle::Italic } else { ProjectStyle::Normal };
-        ProjectDescriptors { weight, style, ..Default::default() }
+        ProjectDescriptors::from_css(&self.weight, &self.style, "").unwrap_or_default()
     }
 }
 
