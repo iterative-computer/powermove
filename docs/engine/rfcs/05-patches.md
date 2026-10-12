@@ -112,3 +112,11 @@ renderer, which produces JSON natively.
 3. Asset-level facts that must survive a relaunch (a found relink) are
    metadata writes; whether they need their own `PatchOrigin` beyond
    `metadata` is up to the writer inventory.
+4. The body format. On `feat/ne-model` (2026-10-11), `pm-model` encodes
+   patch lists as JSON in `shared/patch.ts`'s leaf form
+   (`patches_to_value`, `patches_from_value`) and has no binary format yet.
+   If the canonical binary format is not specified when Phase 1 starts,
+   the fallback is a second variant, `leafJsonV1` (UTF-8 JSON leaf
+   patches), added before the freeze so `pm-wasm` and the engines can run
+   the stream end to end. `PatchEncoding` has only `canonicalV1` until
+   `pm-model` decides.
