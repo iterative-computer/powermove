@@ -11,7 +11,10 @@
  * Usage: bun scripts/webgl-compile.ts --dir work/fuzz/mutants-seed1 [--angle metal|swiftshader] [--deadline 20] [--draw]
  *
  * --draw also draws one 1x1 point after linking, which makes ANGLE build the
- * Metal pipeline (link alone may not). Programs whose name starts with
+ * Metal pipeline (link alone may not), with a 1x1 RGBA16F texture on unit 0
+ * as the compositor binds u_tex, so `drawError` is what the compositor's draw
+ * would raise. (Before 2026-10-12 the render target itself sat on unit 0, so
+ * any program sampling unit 0 failed the draw as a feedback loop.) Programs whose name starts with
  * `loop-` are never drawn: they are meant to run for seconds on the GPU.
  * Output: <dir>/webgl-<angle>.json
  */
@@ -85,16 +88,25 @@ async function attempt(source: string, drawIt: boolean) {
     const log = linked ? '' : ((gl.getShaderInfoLog(f) || '') + (gl.getProgramInfoLog(p) || '')).slice(0, 400);
     let drawError = 0;
     if (linked && drawIt) {
-      // One pixel through a framebuffer: forces pipeline creation.
-      const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+      // One pixel through a framebuffer: forces pipeline creation. The target
+      // is not bound to any texture unit (sampling it would be a feedback
+      // loop, which WebGL rejects at draw); unit 0 holds a 1x1 RGBA16F input,
+      // as the compositor's u_tex does, so sampler2D uniforms (all on unit 0
+      // by default) sample a valid texture.
+      gl.getExtension('EXT_color_buffer_float');
+      const target = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, target);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      const input = gl.createTexture(); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, input);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, 1, 1, 0, gl.RGBA, gl.HALF_FLOAT, new Uint16Array([0x3c00, 0x3800, 0, 0x3c00]));
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
       const fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, target, 0);
       gl.viewport(0, 0, 1, 1); gl.useProgram(p);
       gl.drawArrays(gl.POINTS, 0, 1);
       const px = new Uint8Array(4); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
       drawError = gl.getError();
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.deleteFramebuffer(fb); gl.deleteTexture(tex);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.deleteFramebuffer(fb);
+      gl.bindTexture(gl.TEXTURE_2D, null); gl.deleteTexture(target); gl.deleteTexture(input);
     }
     gl.deleteProgram(p); gl.deleteShader(v); gl.deleteShader(f);
     return { linked, log, lost: gl.isContextLost(), ...(drawIt ? { drawError } : {}) };
