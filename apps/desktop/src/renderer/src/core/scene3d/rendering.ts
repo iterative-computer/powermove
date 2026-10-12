@@ -268,6 +268,62 @@ function colorHex(c: THREE.Color) {
   return "#" + c.getHexString(THREE.SRGBColorSpace);
 }
 
+/** A model's own material as the Blender worker's Principled surface takes it.
+ *  glTF loads as MeshStandardMaterial or MeshPhysicalMaterial; unlit glTF
+ *  (KHR_materials_unlit) loads as MeshBasicMaterial, which has no emissive,
+ *  roughness, or metalness. An unlit surface shows its colour whatever the
+ *  lighting, so it becomes a black, fully rough base with that colour (or its
+ *  colour map, which then wins over a tint) as emission at strength 1. Any
+ *  other material type keeps the fields it has, with the worker's defaults
+ *  for the rest. */
+export async function sourceMaterialSnapshot(
+  source: THREE.Material | undefined,
+  textureAsset: (texture: THREE.Texture | undefined) => Promise<string | undefined>,
+) {
+  const any = (source || {}) as any;
+  const maps: Record<string, string> = {};
+  const opacity = Number.isFinite(any.opacity) ? any.opacity : 1;
+  if (any.isMeshBasicMaterial) {
+    const map = await textureAsset(any.map || undefined);
+    if (map) maps.emissive = map;
+    return {
+      p: {
+        color: { v: "#000000" },
+        roughness: { v: 1 },
+        metalness: { v: 0 },
+        emissive: { v: map ? "#FFFFFF" : any.color?.isColor ? colorHex(any.color) : "#FFFFFF" },
+        emissiveIntensity: { v: 1 },
+        opacity: { v: opacity },
+      },
+      maps,
+    };
+  }
+  for (const [key, prop] of [
+    ["color", "map"],
+    ["normal", "normalMap"],
+    ["roughness", "roughnessMap"],
+    ["metalness", "metalnessMap"],
+    ["emissive", "emissiveMap"],
+    ["ao", "aoMap"],
+  ] as const) {
+    const id = await textureAsset(any[prop] || undefined);
+    if (id) maps[key] = id;
+  }
+  const number = (value: unknown, fallback: number) =>
+    typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  return {
+    p: {
+      color: { v: any.color?.isColor ? colorHex(any.color) : "#FFFFFF" },
+      roughness: { v: number(any.roughness, 1) },
+      metalness: { v: number(any.metalness, 0) },
+      emissive: { v: any.emissive?.isColor ? colorHex(any.emissive) : "#000000" },
+      emissiveIntensity: { v: number(any.emissiveIntensity, 1) },
+      opacity: { v: opacity },
+    },
+    maps,
+  };
+}
+
 /** Snapshot evaluated geometry and world matrices; Blender never owns the project or its timeline. */
 export async function renderSnapshot(
   PM: any,
@@ -400,30 +456,8 @@ export async function renderSnapshot(
                     Array.isArray(mesh.material)
                       ? mesh.material[group.materialIndex || 0]
                       : mesh.material
-                  ) as THREE.MeshStandardMaterial;
-                  const maps: any = {};
-                  for (const [key, prop] of [
-                    ["color", "map"],
-                    ["normal", "normalMap"],
-                    ["roughness", "roughnessMap"],
-                    ["metalness", "metalnessMap"],
-                    ["emissive", "emissiveMap"],
-                    ["ao", "aoMap"],
-                  ] as const) {
-                    const id = await textureAsset(source[prop] || undefined);
-                    if (id) maps[key] = id;
-                  }
-                  material = {
-                    p: {
-                      color: { v: colorHex(source.color) },
-                      roughness: { v: source.roughness },
-                      metalness: { v: source.metalness },
-                      emissive: { v: colorHex(source.emissive) },
-                      emissiveIntensity: { v: source.emissiveIntensity },
-                      opacity: { v: source.opacity },
-                    },
-                    maps,
-                  };
+                  ) as THREE.Material;
+                  material = await sourceMaterialSnapshot(source, textureAsset);
                 }
                 meshes.push({
                   positions,
