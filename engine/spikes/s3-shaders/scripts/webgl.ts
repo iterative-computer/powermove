@@ -4,8 +4,15 @@
  * with LINEAR + CLAMP_TO_EDGE, clear to transparent, blending off, a
  * TRIANGLE_STRIP quad, the recorded uniform calls), then reads back RGBA16F.
  *
- * Usage: bun scripts/webgl.ts [--angle metal|swiftshader] [--filter <s>]
+ * Usage: bun scripts/webgl.ts [--angle metal|swiftshader] [--filter <s>] [--perturb]
  * Output: work/webgl/<angle>/<case>/<variant>.f16 and work/webgl/<angle>/status.json
+ *
+ * --perturb renders every case again with each float uniform except the quad
+ * geometry (u_m, u_uv) scaled by 1 + 2^-20 (about 8 float ulps), into
+ * work/webgl/<angle>-perturbed. Comparing that with the unperturbed run shows
+ * which shaders are so ill-conditioned that rounding-level differences
+ * (expression order, fused multiply-add) exceed the parity tolerance by
+ * themselves, independent of any translator.
  *
  * The browser is headless; nothing is shown on screen.
  */
@@ -19,8 +26,9 @@ const { chromium } = await import(join(SPIKE, '..', '..', '..', 'apps', 'desktop
 const args = process.argv.slice(2);
 const angle = args.includes('--angle') ? args[args.indexOf('--angle') + 1]! : 'metal';
 const filter = args.includes('--filter') ? args[args.indexOf('--filter') + 1]! : null;
+const perturb = args.includes('--perturb');
 const corpus = JSON.parse(await readFile(join(WORK, 'corpus.json'), 'utf8'));
-const out = join(WORK, 'webgl', angle);
+const out = join(WORK, 'webgl', perturb ? `${angle}-perturbed` : angle);
 await mkdir(out, { recursive: true });
 
 const launchArgs = angle === 'swiftshader'
@@ -75,7 +83,7 @@ const status: Record<string, unknown> = { ...previous };
 let compiled = 0, failed = 0;
 for (const c of corpus.cases) {
   if (filter && !c.id.includes(filter)) continue;
-  const result = await page.evaluate((c: any) => {
+  const result = await page.evaluate(({ c, perturb }: { c: any; perturb: boolean }) => {
     const w = window as any;
     const gl: WebGL2RenderingContext = w.gl;
     const shader = (type: number, source: string) => {
@@ -124,7 +132,8 @@ for (const c of corpus.cases) {
           let location = gl.getUniformLocation(program, call.name);
           if (location === null && call.alt) location = gl.getUniformLocation(program, call.alt);
           if (location === null) continue;
-          const x = call.v;
+          const geometry = call.name === 'u_m' || call.name === 'u_uv';
+          const x = perturb && call.fn !== '1i' && !geometry ? call.v.map((v: number) => Math.fround(v * (1 + 2 ** -20))) : call.v;
           if (call.fn === '1f') gl.uniform1f(location, x[0]);
           else if (call.fn === '2f') gl.uniform2f(location, x[0], x[1]);
           else if (call.fn === '3f') gl.uniform3f(location, x[0], x[1], x[2]);
@@ -161,7 +170,7 @@ for (const c of corpus.cases) {
     gl.deleteProgram(program);
     const error = gl.getError();
     return { ok: true, outputs, ms: performance.now() - started, glError: error };
-  }, c);
+  }, { c, perturb });
   if (!result.ok) {
     failed++;
     status[c.id] = { compiled: false, log: result.log };
@@ -173,6 +182,6 @@ for (const c of corpus.cases) {
   await mkdir(dir, { recursive: true });
   for (const [name, data] of Object.entries(result.outputs as Record<string, string>)) await writeFile(join(dir, `${name}.f16`), Buffer.from(data, 'base64'));
 }
-await writeFile(join(out, 'status.json'), JSON.stringify({ renderer, browser: browser.version(), angle, cases: status }, null, 1));
+await writeFile(join(out, 'status.json'), JSON.stringify({ renderer, browser: browser.version(), angle, perturb, cases: status }, null, 1));
 await browser.close();
 console.log(`${compiled} compiled, ${failed} failed (${angle})`);
