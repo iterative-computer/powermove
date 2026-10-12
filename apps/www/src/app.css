@@ -277,13 +277,16 @@ h1 .muted{color:var(--tx-3)}
 
 /* ---- footer ---- */
 footer{padding:96px 0 48px}
-.foot{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:40px 24px;max-width:640px;justify-items:center;text-align:center;font-size:var(--fs-md)}
+.foot{display:grid;grid-template-columns:minmax(0,1fr);gap:40px 24px;max-width:640px;justify-items:center;text-align:center;font-size:var(--fs-md)}
 .foot .logo{grid-column:1/-1;justify-content:center}
 .foot-title{display:block;font-weight:500}
 .foot ul{margin-top:14px;display:grid;gap:12px;color:var(--tx-2)}
 .foot ul a{transition:color var(--dur-1)}
 .foot ul a:hover{color:var(--tx)}
-.foot-copy{grid-column:1/-1;margin-top:24px;color:var(--tx-3);font-size:var(--fs-sm)}
+.foot-copy{grid-column:1/-1;margin-top:24px;color:var(--tx-3);font-size:var(--fs-sm);display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:12px 24px}
+.foot-legal{display:flex;gap:16px}
+.foot-legal a{transition:color var(--dur-1)}
+.foot-legal a:hover{color:var(--tx)}
 
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*::before,*::after{transition:none!important;animation:none!important}}
 @media(max-width:639px){.manifest pre{padding:12px;font-size:11px}.handoff{transform:translateY(-14%)}.toggle{left:8%;bottom:6%}}

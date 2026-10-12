@@ -4,7 +4,7 @@
   import HeroAnimation from '$lib/HeroAnimation.svelte';
   import LogoCloud from '$lib/LogoCloud.svelte';
   import Features from '$lib/Features.svelte';
-  import { GITHUB } from '$lib/links';
+  import { DISCORD, GITHUB } from '$lib/links';
   import { download, resolveDownload, stars } from '$lib/download.svelte';
 
 
@@ -94,14 +94,13 @@
     <div class="wrap foot">
       <a class="logo" href="/#top" aria-label="Powermove home"><img src="/powermove-logo.svg" width="24" height="21" alt="" /></a>
       <div>
-        <span class="foot-title">Product</span>
-        <ul><li><a href="#editor">Editor</a></li><li><a href="#agent">Agent</a></li><li><a href="#extensions">Extensions</a></li><li><a href="#export">Export</a></li></ul>
-      </div>
-      <div>
         <span class="foot-title">Company</span>
-        <ul><li><a href={GITHUB} target="_blank" rel="noopener">GitHub</a></li><li><a href="mailto:hello@iterative.computer">hello@iterative.computer</a></li><li><a href="/privacy">Privacy</a></li><li><a href="/terms">Terms</a></li></ul>
+        <ul><li><a href={GITHUB} target="_blank" rel="noopener">GitHub</a></li><li><a href={DISCORD} target="_blank" rel="noopener">Join our Discord</a></li><li><a href="mailto:hello@iterative.computer">hello@iterative.computer</a></li></ul>
       </div>
-      <div class="foot-copy">© Iterative Computer {year}. Open source.</div>
+      <div class="foot-copy">
+        <span>© Iterative Computer {year}. Open source.</span>
+        <nav class="foot-legal" aria-label="Legal"><a href="/privacy">Privacy</a><a href="/terms">Terms</a></nav>
+      </div>
     </div>
   </footer>
 </main>
