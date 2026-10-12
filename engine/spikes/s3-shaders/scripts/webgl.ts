@@ -5,7 +5,11 @@
  * TRIANGLE_STRIP quad, the recorded uniform calls), then reads back RGBA16F.
  *
  * Usage: bun scripts/webgl.ts [--angle metal|swiftshader] [--filter <s>] [--perturb [k]]
+ *                            [--corpus work/corpus.json] [--out work/webgl/<angle>]
  * Output: work/webgl/<angle>/<case>/<variant>.f16 and work/webgl/<angle>/status.json
+ * (image files resolve against the corpus file's folder). status.json records
+ * any GL error raised by a case's draws (`glError`): a program that links but
+ * whose draw WebGL rejects renders nothing in the compositor.
  *
  * --perturb renders every case again with each float uniform except the quad
  * geometry (u_m, u_uv) scaled by 1 + 2^-20 (about 8 float ulps), into
@@ -18,7 +22,7 @@
  * The browser is headless; nothing is shown on screen.
  */
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const SPIKE = join(import.meta.dir, '..');
 const WORK = join(SPIKE, 'work');
@@ -30,8 +34,9 @@ const filter = args.includes('--filter') ? args[args.indexOf('--filter') + 1]! :
 const perturb = args.includes('--perturb');
 const perturbArg = perturb ? args[args.indexOf('--perturb') + 1] : undefined;
 const perturbK = perturbArg !== undefined && /^-?\d+(\.\d+)?$/.test(perturbArg) ? Number(perturbArg) : 1;
-const corpus = JSON.parse(await readFile(join(WORK, 'corpus.json'), 'utf8'));
-const out = join(WORK, 'webgl', perturb ? `${angle}-perturbed${perturbK === 1 ? '' : perturbK}` : angle);
+const corpusPath = args.includes('--corpus') ? join(SPIKE, args[args.indexOf('--corpus') + 1]!) : join(WORK, 'corpus.json');
+const corpus = JSON.parse(await readFile(corpusPath, 'utf8'));
+const out = args.includes('--out') ? join(SPIKE, args[args.indexOf('--out') + 1]!) : join(WORK, 'webgl', perturb ? `${angle}-perturbed${perturbK === 1 ? '' : perturbK}` : angle);
 await mkdir(out, { recursive: true });
 
 const launchArgs = angle === 'swiftshader'
@@ -43,7 +48,7 @@ await page.goto('about:blank');
 
 const images: Record<string, { width: number; height: number; data: string }> = {};
 for (const image of corpus.images) {
-  images[image.name] = { width: image.width, height: image.height, data: (await readFile(join(WORK, image.file))).toString('base64') };
+  images[image.name] = { width: image.width, height: image.height, data: (await readFile(join(dirname(corpusPath), image.file))).toString('base64') };
 }
 
 const renderer = await page.evaluate(({ vertex, images }) => {
@@ -110,6 +115,7 @@ for (const c of corpus.cases) {
     gl.deleteShader(v); gl.deleteShader(f);
     const a = gl.getAttribLocation(program, 'a_pos');
     const outputs: Record<string, string> = {};
+    let glError = 0;
     const started = performance.now();
     for (const variant of c.variants) {
       const targets: { tex: WebGLTexture; fb: WebGLFramebuffer }[] = [];
@@ -147,6 +153,8 @@ for (const c of corpus.cases) {
         while (gl.getError() !== gl.NO_ERROR) { /* mismatched glUniform calls, as in the compositor */ }
         gl.disable(gl.BLEND);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        const drawError = gl.getError();
+        if (drawError !== gl.NO_ERROR && !glError) glError = drawError;
         targets.push({ tex, fb });
       }
       const last = targets[targets.length - 1]!;
@@ -171,8 +179,8 @@ for (const c of corpus.cases) {
       for (const t of targets) { gl.deleteFramebuffer(t.fb); gl.deleteTexture(t.tex); }
     }
     gl.deleteProgram(program);
-    const error = gl.getError();
-    return { ok: true, outputs, ms: performance.now() - started, glError: error };
+    const after = gl.getError();
+    return { ok: true, outputs, ms: performance.now() - started, glError: glError || after };
   }, { c, perturb, perturbK });
   if (!result.ok) {
     failed++;
@@ -180,7 +188,7 @@ for (const c of corpus.cases) {
     continue;
   }
   compiled++;
-  status[c.id] = { compiled: true, ms: result.ms };
+  status[c.id] = { compiled: true, ms: result.ms, ...(result.glError ? { glError: result.glError } : {}) };
   const dir = join(out, c.id.replaceAll('/', '__'));
   await mkdir(dir, { recursive: true });
   for (const [name, data] of Object.entries(result.outputs as Record<string, string>)) await writeFile(join(dir, `${name}.f16`), Buffer.from(data, 'base64'));
