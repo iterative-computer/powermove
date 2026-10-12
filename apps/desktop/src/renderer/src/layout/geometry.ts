@@ -1,4 +1,4 @@
-import { ensureDockFill, keepPanelAtSetHeight, type Workspace } from './model';
+import { ensureDockFill, type Workspace } from './model';
 
 type Rect = {
   left: number;
@@ -149,6 +149,23 @@ export function transferPanelHeights(
   return { before, after: total - before };
 }
 
+/* In a scrolling side column the divider follows the pointer: the panel above
+   takes the new height, and the one below gives up height only down to its
+   floor. Past that the pair grows and the column scrolls, so a panel is never
+   capped at the column's visible height. */
+export function growPanelPair(
+  beforeStart: number,
+  afterStart: number,
+  delta: number,
+  beforeMin = 88,
+  afterMin = 88
+): { before: number; after: number } {
+  const minBefore = Math.max(72, Number(beforeMin) || 88);
+  const minAfter = Math.max(72, Number(afterMin) || 88);
+  const before = Math.max(minBefore, beforeStart + delta);
+  return { before, after: Math.max(minAfter, beforeStart + afterStart - before) };
+}
+
 /* Every rendered side column needs one panel that absorbs the window's spare
    height. Saved workspaces from older builds, and a splitter drag that pins
    both neighbours when nothing else was fluid, can leave a dock with every
@@ -168,10 +185,7 @@ export function visibleDockPlan(
          an empty slot has no element for the neighbouring splitters to
          measure, and if it was the column's fluid panel nothing fills. */
       const specs = (dock.panels || []).filter((spec) => !isDetached(spec.id) && isAvailable(spec.id));
-      if (specs.length && !specs.some((spec) => spec.flex)) {
-        const fill = [...specs].reverse().find((spec) => !keepPanelAtSetHeight(spec)) ?? null;
-        if (fill) fill.flex = true;
-      }
+      ensureDockFill({ ...dock, panels: specs });
       return { dock, specs };
     })
     .filter((item) => !item.dock.hidden && item.specs.length > 0);

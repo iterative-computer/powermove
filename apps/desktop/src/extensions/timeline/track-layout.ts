@@ -79,7 +79,9 @@ interface Unit {
   inner: number;
 }
 
-const EPS = 1e-9;
+// Times are stored rounded to 6 decimals, so a clip snapped onto a
+// neighbour's edge can land a hair inside it; that still counts as touching.
+const EPS = 1e-5;
 const overlaps = (a: { from: number; end: number }, b: { from: number; end: number }) =>
   a.from < b.end - EPS && b.from < a.end - EPS;
 

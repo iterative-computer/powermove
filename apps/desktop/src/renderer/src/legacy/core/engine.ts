@@ -122,6 +122,11 @@ function plannedVideoClips(time: number): VideoClip[] {
   if (!clips) { clips = videoClipsAt(PM, time); videoClipPlans.set(time, clips); }
   return clips;
 }
+function sameVideoClips(first: number, second: number): boolean {
+  if (first === second) return true;
+  const before = plannedVideoClips(first), after = plannedVideoClips(second);
+  return before.length === after.length && before.every((clip, index) => clip.id === after[index]!.id);
+}
 function flushFrameVideoSeeks() {
   for (const [el, target] of frameVideoSeeks) seekPreviewVideo(el, target, .0005);
   frameVideoSeeks.clear();
@@ -386,6 +391,9 @@ function frame(now: any) {
         || synchronizedFrame.generation !== contentGeneration
         || synchronizedFrame.seekGeneration !== videoSeekGeneration)) synchronizedFrame = null;
     const drawn = Math.floor(t * drawnFps() + 1e-7) / drawnFps();
+    // A held decode belongs to its visible clips. Once playback crosses a cut,
+    // waiting for an outgoing clip must not block the incoming composition.
+    if (synchronizedFrame && !sameVideoClips(synchronizedFrame.time, drawn)) synchronizedFrame = null;
     // A high-refresh display must not redo decoder ownership, lookahead and
     // timeline evaluation between project frames. Only skip a frame that was
     // actually presented: pending decodes still retry on every display tick.
@@ -415,6 +423,9 @@ function frame(now: any) {
   // pointer position. Chasing a changing target in the compositor's readiness
   // gate otherwise hides every completed seek until the user stops dragging.
   if (PM.playing || pausedFrame?.project !== p || pausedFrame?.generation !== contentGeneration) pausedFrame = null;
+  // Retain completed seeks during a drag within a clip, but abandon an old
+  // request when the user moves across a cut (including into an empty gap).
+  if (pausedFrame && !sameVideoClips(pausedFrame.time, PM.time)) pausedFrame = null;
   if (!PM.playing) pausedFrame ??= { time: PM.time, project: p, generation: contentGeneration };
   let renderTime=PM.playing ? (synchronizedFrame?.time ?? Math.floor(PM.time * drawnFps() + 1e-7) / drawnFps()) : pausedFrame!.time;
   // A saved composition frame may bypass compositor readiness entirely.

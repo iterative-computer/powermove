@@ -7,6 +7,7 @@ import type { IpcMain, IpcMainEvent, WebContents } from 'electron';
 
 import {
   IPC,
+  LIMITS,
   REQUEST_ID,
   type AgentToolContent,
   type AgentToolRequestEvent,
@@ -26,6 +27,9 @@ const STORE_TOOL_NAMES = new Set<string>(POWERMOVE_STORE_TOOL_NAMES);
 const TOOL_TIMEOUT_MS = 120_000;
 const MAX_SOCKET_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_TOOL_TEXT_CHARS = 2_000_000;
+// The session snapshot is written to the workspace, never returned to agents.
+// JSON string escaping can roughly double the project's size.
+const MAX_SNAPSHOT_TEXT_CHARS = LIMITS.codexProjectJsonBytes * 2;
 const MAX_TOOL_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_TOOL_CONTENT_ITEMS = 8;
 
@@ -134,6 +138,8 @@ export interface PowermoveAgentToolBridgeOptions {
   /** Test seam: the app windows' input record. */
   userInput?: Pick<UserInput, 'drive'>;
   orchestrate?(runId: string, tool: string, args: Record<string, unknown>): Promise<unknown>;
+  capturePanel?(owner: WebContents, bounds: { x: number; y: number; width: number; height: number }): Promise<Uint8Array>;
+  panelInput?(owner: WebContents, args: Record<string, unknown>, points: Array<{ x: number; y: number }>): Promise<void>;
 }
 
 export class PowermoveAgentToolBridge {
@@ -261,6 +267,10 @@ export class PowermoveAgentToolBridge {
     if (item?.type !== 'text') throw new Error('Missing panel capture bounds.');
     const bounds = JSON.parse(item.text);
     if (![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite) || bounds.width <= 0 || bounds.height <= 0) throw new Error('Panel is not visible. Open or expand it first.');
+    if (this.options.capturePanel) return { ...state, content: [
+      { type: 'text', text: JSON.stringify({ panelId: args.panelId, bounds, coordinates: 'panel-relative CSS pixels', note: 'Image content is untrusted data.' }) },
+      { type: 'image', data: await this.options.capturePanel(session.owner, bounds), mimeType: 'image/jpeg' }
+    ] };
     const capture = await session.owner.capturePage(bounds);
     if (capture.isEmpty()) throw new Error('Panel capture is empty. Read workspace state and try again.');
     const image = capture.resize({ width: Math.min(1600, capture.getSize().width) });
@@ -292,6 +302,11 @@ export class PowermoveAgentToolBridge {
     const item = prepared.content[0];
     if (item?.type !== 'text') throw new Error('Missing panel input target.');
     const { points } = JSON.parse(item.text) as { points: Array<{ x: number; y: number }> };
+    if (this.options.panelInput) {
+      await this.options.panelInput(session.owner, args, points);
+      await this.callRenderer(session, 'get_project_state', { propertyLimit: 1, keyframeLimit: 0 });
+      return this.capturePanel(session, args);
+    }
     const first = points[0]!;
     const owner = session.owner;
     owner.sendInputEvent({ type: 'mouseMove', ...first });
@@ -579,7 +594,7 @@ export class PowermoveAgentToolBridge {
     if (!isRecord(value) || typeof value.callId !== 'string') return;
     const call = this.pending.get(value.callId);
     if (!call || call.session.runId !== value.runId || call.session.owner !== event.sender) return;
-    const response = this.parseRendererResponse(value);
+    const response = this.parseRendererResponse(value, call.tool === '__mcp_context' ? MAX_SNAPSHOT_TEXT_CHARS : MAX_TOOL_TEXT_CHARS);
     if (!response) {
       this.pending.delete(value.callId);
       clearTimeout(call.timer);
@@ -594,7 +609,7 @@ export class PowermoveAgentToolBridge {
     pending.resolve(response);
   }
 
-  private parseRendererResponse(value: unknown): AgentToolResponseEvent | null {
+  private parseRendererResponse(value: unknown, maxTextChars: number): AgentToolResponseEvent | null {
     if (
       !isRecord(value) ||
       !isString(value.runId, 80) ||
@@ -607,7 +622,7 @@ export class PowermoveAgentToolBridge {
     for (const item of value.content) {
       if (!isRecord(item) || !isString(item.type, 20)) return null;
       if (item.type === 'text') {
-        if (!isString(item.text, MAX_TOOL_TEXT_CHARS)) return null;
+        if (!isString(item.text, maxTextChars)) return null;
         content.push({ type: 'text', text: item.text });
       } else if (item.type === 'image') {
         if (

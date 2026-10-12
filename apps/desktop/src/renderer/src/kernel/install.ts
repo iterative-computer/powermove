@@ -47,6 +47,7 @@ import type { ExtensionsBridge } from '../../../shared/extensions';
 import type { VarsBridge } from '../../../shared/vars-ipc';
 import type { PowermoveExtensionsBridge } from '../../../shared/ipc';
 import { createExtensionAPI, type ExtensionHandle, type HostDeps, type PanelsBackend } from './host';
+import { retryPendingWorkspaceAppearance } from './workspace-appearance';
 import { createLoader, type BuiltinFactory, type Loader } from './loader';
 import { createKernel, runKernelCommand, type Kernel } from './registries';
 import { makeScene3DAPI } from '../core/scene3d/api';
@@ -731,6 +732,22 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
     uiState: makeUIState(PM),
     dnd: makeDnd(PM),
     workspace: makeWorkspace(PM),
+    workspaceAppearance: {
+      load: () => PM?.store?.get?.('extensionWorkspaceAppearance', null),
+      save: (state) => PM?.store?.set?.('extensionWorkspaceAppearance', state),
+      get: (id) => PM?.WS?.current?.id === id ? PM.WS.current : PM?.WS?.get?.(id) ?? null,
+      mutate: (id, fn) => {
+        if (PM?.WS?.current?.id === id) PM.WS.mutate?.(fn, { inPlace: true });
+        else {
+          const workspace = PM?.WS?.get?.(id);
+          if (workspace) { fn(workspace); PM.WS.save?.(); }
+        }
+      }
+    },
+    themeAppearance: {
+      load: () => PM?.store?.get?.('extensionThemeAppearance', null),
+      save: (state) => PM?.store?.set?.('extensionThemeAppearance', state)
+    },
     util,
     ease: makeEase(PM),
     space3d: makeSpace3D(PM),
@@ -749,6 +766,10 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
 
   const handles = new Map<string, ExtensionHandle>();
   const subscriptions: Array<() => void> = [];
+  // Saved project workspaces can be loaded after extensions booted on Home.
+  subscriptions.push(PM?.bus?.on?.('workspaces', () => {
+    retryPendingWorkspaceAppearance(deps.workspace!);
+  }) ?? (() => {}));
 
   // Capture the native rasterizer once (it normally installs after the kernel).
   // Then leave PM.raster as an ordinary writable function so legacy wrappers

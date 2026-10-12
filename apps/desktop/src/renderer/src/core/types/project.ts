@@ -159,6 +159,7 @@ export interface TextContent {
   weight: number;
   size: number;
   tracking: number;
+  /** Line height as a multiple of size: 1.2 means 120%, not 120. */
   leading: number;
   color: string;
   align: 'left' | 'center' | 'right';

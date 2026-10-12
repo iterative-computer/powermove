@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest';
-import type { ExtensionRecord, Project, ProjectAPI, StorageAPI } from './api';
+import type { ExtensionRecord, Project, ProjectAPI, StorageAPI, WorkspaceAPI } from './api';
 import { createExtensionAPI, type HostDeps } from './host';
 import { createKernel, type Kernel } from './registries';
 
@@ -88,6 +88,22 @@ function harness(kernel: Kernel = createKernel()) {
 }
 
 describe('createExtensionAPI', () => {
+  it('restores timeline appearance when a mod unloads, retaining later user edits', () => {
+    const { kernel, deps } = harness();
+    let workspace: any = { id: 'design', chrome: { timeline: { rowHeight: 30, gutterWidth: 224 } } };
+    deps.workspace = {
+      current: () => workspace,
+      mutate: (fn) => { fn(workspace); workspace = structuredClone(workspace); return workspace; }
+    } as WorkspaceAPI;
+    const mod = createExtensionAPI(kernel, record(), deps);
+    mod.api.workspace.mutate(ws => { ws.chrome.timeline.rowHeight = 22; ws.chrome.timeline.gutterWidth = 340; });
+    expect(workspace.chrome.timeline).toEqual({ rowHeight: 22, gutterWidth: 340 });
+    // A user adjustment made after the mod must survive disabling it.
+    workspace.chrome.timeline.gutterWidth = 280;
+    mod.disposeAll();
+    expect(workspace.chrome.timeline).toEqual({ rowHeight: 30, gutterWidth: 280 });
+  });
+
   it('owns import defaults, copies inputs and restores prior overrides on unload', () => {
     const { kernel, deps } = harness();
     const first = createExtensionAPI(kernel, record('first'), deps);

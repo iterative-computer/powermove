@@ -76,6 +76,8 @@ import { extensionLoad } from '../runtime/extension-load';
 import { IMPORT_DEFAULTS_SERVICE, validatedImportDefaults } from './import-defaults';
 import { bridge as hostBridge } from './bridge';
 import { PANEL_FRAME, type PanelFrame } from './panel-frame';
+import { ownWorkspaceAppearance, type WorkspaceAppearanceBackend } from './workspace-appearance';
+import { ownThemeState, type ThemeStateBackend } from './theme-state';
 
 /* Extensions never see the raw bridge (bridge.ts); haptics is the one bit a
    built-in (the viewer's snapping) needs, so it goes through the API. */
@@ -130,6 +132,8 @@ export interface HostDeps {
   uiState?: UIStateAPI;
   dnd?: DndAPI;
   workspace?: WorkspaceAPI;
+  workspaceAppearance?: WorkspaceAppearanceBackend;
+  themeAppearance?: ThemeStateBackend;
   util?: UtilAPI;
   ease?: EaseAPI;
   space3d?: Space3DAPI;
@@ -194,6 +198,9 @@ export function createExtensionAPI(
   const disposers: Array<() => void> = [];
   let disposed = false;
   let activating = false;
+  const workspace = deps.workspace && record.scope !== 'builtin'
+    ? ownWorkspaceAppearance(deps.workspace, id, deps.workspaceAppearance) : null;
+  const themeState = record.scope !== 'builtin' ? ownThemeState(kernel, id, deps.themeAppearance) : null;
 
   const log = (level: 'info' | 'warn' | 'error', message: string, ...data: unknown[]): void => {
     const line = `[ext:${id}] ${message}`;
@@ -429,11 +436,11 @@ export function createExtensionAPI(
       }
       return collect(kernel.themes.register(id, def));
     },
-    activate: (themeId) => kernel.activateTheme(themeId),
+    activate: (themeId) => themeState ? themeState.activate(themeId) : kernel.activateTheme(themeId),
     active: reactive(reads.theme, () => kernel.theme.activeId),
     list: () => kernel.themes.list(),
     scheme: reactive(reads.theme, () => kernel.theme.scheme),
-    setScheme: (mode) => kernel.setScheme(mode)
+    setScheme: (mode) => themeState ? themeState.setScheme(mode) : kernel.setScheme(mode)
   };
 
   /* ── palette, menus, status ────────────────────────────── */
@@ -585,7 +592,7 @@ export function createExtensionAPI(
     uiState: deps.uiState as UIStateAPI,
     ui: extensionUI,
     dnd: deps.dnd as DndAPI,
-    workspace: deps.workspace as WorkspaceAPI,
+    workspace: workspace?.api ?? deps.workspace as WorkspaceAPI,
     util: deps.util as UtilAPI,
     ease: deps.ease as EaseAPI,
     space3d: deps.space3d as Space3DAPI,
@@ -625,6 +632,9 @@ export function createExtensionAPI(
           log('error', 'disposer failed', error);
         }
       }
+      try { workspace?.dispose(); }
+      catch (error) { log('error', 'workspace cleanup failed', error); }
+      themeState?.dispose();
       kernel.disposeOwner(id);
     }
   };

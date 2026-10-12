@@ -298,6 +298,46 @@ describe('timeline extension', () => {
     expect(snap.hidden).toBe(true);
   });
 
+  it.each(['cancel', 'escape', 'dispose'] as const)('restores a live multi-clip track drag on %s, including absent track fields', finish => {
+    const value = harness();
+    const layers = ['First', 'Second', 'Base'].map((name, index) => ({
+      id: name, name, type: 'solid', from: index < 2 ? 2 : 0, dur: index < 2 ? 2 : 10,
+      collapsed: true, d: {}, p: {}, fx: [], masks: [],
+    })) as any[];
+    value.state.project.layers = layers;
+    value.state.selection.layers = ['First', 'Second'];
+    const original = JSON.stringify(layers);
+    let drag: any;
+    vi.mocked(value.api.ui.drag).mockImplementation((_event: any, handlers: any) => {
+      drag = handlers;
+      return { cancel: () => handlers.cancel() };
+    });
+    activate(value);
+    const body = build(value);
+    body.querySelector<HTMLButtonElement>('[data-mode="tracks"]')!.click();
+    const timeline = value.state.timeline as any;
+    timeline.pps = 100; timeline.scrollT = 0; timeline.trackSnap = false;
+    const x = timeline.gut + 300;
+    const y = timeline.trackView.laneY('video', 2) + timeline.trackView.rowHeight() / 2;
+    timeline.trackView.down(new PointerEvent('pointerdown', { clientX: x, clientY: y }), x, y);
+    expect(drag).toBeDefined();
+    drag.move(1, 0, {});
+    expect(value.api.history.begin).not.toHaveBeenCalled();
+    expect(JSON.stringify(value.state.project.layers)).toBe(original);
+    drag.move(100, 0, {});
+    expect(layers.slice(0, 2).map(layer => layer.from)).toEqual([3, 3]);
+    expect(value.api.transport.invalidate).toHaveBeenLastCalledWith(undefined);
+    expect(value.api.history.begin).toHaveBeenCalledExactlyOnceWith('Move clips');
+    if (finish === 'dispose') value.dispose();
+    else if (finish === 'escape') window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    else drag.cancel();
+    expect(JSON.stringify(value.state.project.layers)).toBe(original);
+    expect(value.state.project.layers).toBe(layers);
+    expect(value.api.edit.mutate).not.toHaveBeenCalled();
+    expect(value.api.history.cancel).toHaveBeenCalledOnce();
+    expect(timeline.trackDrag).toBeNull();
+  });
+
   it('preserves the live panel move handle when the extension rebuilds in place', () => {
     const value = activate();
     const body = build(value);

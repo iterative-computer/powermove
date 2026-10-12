@@ -1,5 +1,6 @@
 import { registerFontsIpc } from './fonts';
 import { registerAgentNotifications } from './agent-notifications';
+import { registerClaudeDesktopMcp } from './claude-desktop-mcp';
 import { installUpdates } from './updates';
 import { installWhatsNew, whatsNewOptions } from './whats-new';
 import { installTextContextMenu } from './text-context-menu';
@@ -19,6 +20,7 @@ import {
   type WebContents
 } from 'electron';
 import { mkdir, readFile, readdir } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 import {
@@ -861,6 +863,15 @@ if (!hasSingleInstanceLock) {
   });
 
   void app.whenReady().then(async () => {
+    if (process.platform === 'darwin' && app.isPackaged && !isBackgroundTest && !userDataOverride) {
+      const registration = registerClaudeDesktopMcp({
+        homeDir: app.getPath('home'), userDataDir: app.getPath('userData'), executablePath: process.execPath,
+        claudeInstalled: existsSync('/Applications/Claude.app') || existsSync(path.join(app.getPath('home'), 'Applications', 'Claude.app'))
+      });
+      if (registration === 'registered' || registration === 'failed') {
+        console.info(`[Powermove MCP] Claude desktop connection: ${registration}`);
+      }
+    }
     const proxyEncoder = app.isPackaged
       ? path.join(process.resourcesPath, 'encoder', 'ffmpeg')
       : path.join(app.getAppPath(), 'node_modules', 'ffmpeg-static', 'ffmpeg');
@@ -1193,6 +1204,7 @@ if (!hasSingleInstanceLock) {
       agentToolCommand: process.execPath,
       agentToolCommandArgs: [...(app.isPackaged ? [] : [app.getAppPath()]), '--powermove-agent-tools'],
       refreshExtensions: refreshRestoredExtensions,
+      externalMcp: {},
       storeAgent: () => storeAgentGateway,
       openExternal: async (url) => { await shell.openExternal(url); }
     });

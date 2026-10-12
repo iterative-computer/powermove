@@ -32,6 +32,21 @@ describe('transferPanelHeights', () => {
 });
 
 describe('visibleDockPlan', () => {
+  it.each(['detached', 'unavailable'])('fills with the agent when its neighbour is %s and restores its saved height when it returns', (state) => {
+    const agent = { id: 'agent', size: 431 };
+    const workspace = { layout: { docks: [
+      { id: 'left', panels: [{ id: 'assets', flex: true }, agent] },
+    ] } };
+    const plan = visibleDockPlan(workspace,
+      id => state === 'detached' && id === 'assets',
+      id => state !== 'unavailable' || id !== 'assets');
+    expect(plan[0]!.specs).toEqual([{ id: 'agent', size: 431, flex: true }]);
+
+    const restored = visibleDockPlan(workspace);
+    expect(restored[0]!.specs.map(spec => !!spec.flex)).toEqual([true, false]);
+    expect(agent.size).toBe(431);
+  });
+
   it('gives a dock whose panels are all sized one fluid panel so the column fills the window', () => {
     const workspace = {
       layout: {

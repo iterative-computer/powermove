@@ -9,6 +9,7 @@ import {
   effectPasteCommands
 } from './effect-clipboard';
 import type { InspectorRuntimeService } from './context';
+import { showFxMenu } from './actions';
 import { inspectorRefresh } from './refresh.svelte.js';
 import { shaderDefinitions, syncShaderUniforms } from './shader';
 
@@ -112,6 +113,18 @@ export default function activate(api: PowermoveAPI): void {
     icon: 'diamond',
     title: 'Layer Effects',
     component: EffectsPanel as any,
-    header: () => {}
+    header: (header) => {
+      const add = document.createElement('button');
+      add.type = 'button';
+      add.className = 'iconbtn';
+      add.title = 'Add effect';
+      add.setAttribute('aria-label', 'Add effect');
+      add.innerHTML = api.ui.icon('plus');
+      add.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        showFxMenu(api, add);
+      });
+      header.insertBefore(add, header.querySelector('.panel-options'));
+    }
   });
 }

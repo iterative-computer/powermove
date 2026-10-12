@@ -229,9 +229,4 @@
 
 <style>
   .agent-setup-scroll { padding: 10px 16px 16px; mask-image: none; }
-  /* Docked, the set-height variable is updated by explicit splitter resizing;
-     the popover sizes the panel itself (agent-shell.css). */
-  :global(.dock #panel-agent:not([data-collapsed="1"])) {
-    flex: 0 0 var(--set-panel-height, 350px) !important;
-  }
 </style>

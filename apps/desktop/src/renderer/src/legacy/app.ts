@@ -928,8 +928,8 @@ PM.newProject = () => {
 };
 /** A default-format project without the New project dialog. Onboarding opens
  * one so an imported workspace is arranged around a real composition. */
-PM.newBlankProject = () => {
-  switchProject(PM.mkProject({}));
+PM.newBlankProject = (options: any = {}) => {
+  switchProject(PM.mkProject(options));
   PM.ProjectsScreen?.hide?.();
 };
 /**

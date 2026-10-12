@@ -13,7 +13,7 @@ import {
   layoutTracks, planTrackMove,
   type TrackArea, type TrackItem, type TrackLayer, type TrackLayout, type TrackLayoutOptions, type TrackMovePlan,
 } from './track-layout';
-import type { EdgeSnapProbe } from './timeline';
+import type { EdgeSnapProbe, PropertyValueColumn, PropertyValueField } from './timeline';
 import { trackChannels } from './property-tracks';
 
 export type TimelineMode = 'layers' | 'tracks';
@@ -61,6 +61,11 @@ export interface TrackViewHost {
   supportsParent(layer: any): boolean;
   icoAnimationDiamond(c: CanvasRenderingContext2D, x: number, y: number, animated: boolean, current: boolean): void;
   fitValue(c: CanvasRenderingContext2D, value: any, unit: string, width: number): string;
+  valueColumns(left: number, gutter: number, count: number, actionWidth?: number): PropertyValueColumn[];
+  drawScaleLink(c: CanvasRenderingContext2D, x: number, y: number, linked: boolean): void;
+  toggleScaleLink(layer: any): void;
+  dragValue(event: PointerEvent, row: any, field: PropertyValueField): void;
+  editValue(row: any, field: PropertyValueField): void;
   visible(layer: any): boolean;
   beginDrag(event: PointerEvent, options: any): any;
   invalidate(what?: string): void;
@@ -279,6 +284,31 @@ export function createTrackView(host: TrackViewHost) {
       if (!fallback || (selected.includes(id) && !selected.includes(fallback.L.id))) fallback = row;
     }
     return fallback;
+  }
+
+  /** Drawing, pointer hits, and the inline editor share the same value bounds. */
+  const isScale = (row: any) => row?.key === 'scale' && trackChannels(row).length === 2;
+  const valueColumns = (row: any) => {
+    const actionWidth = isScale(row) ? 24 : 0;
+    return host.valueColumns(T.gut - 100 - actionWidth, T.gut - 4, trackChannels(row).length, actionWidth);
+  };
+  function scaleLinkAt(x: number, y: number) {
+    if (x < T.gut - 24 || x >= T.gut) return null;
+    const hit = drawerAt(T.gut + 1, y);
+    const drawer = hit && drawerOf(hit.lane);
+    const row = hit && drawer ? readoutRow(drawer, hit.key) : null;
+    return isScale(row) ? row : null;
+  }
+  function valueAt(x: number, y: number) {
+    if (x >= T.gut) return null;
+    const hit = drawerAt(T.gut + 1, y);
+    const drawer = hit && drawerOf(hit.lane);
+    const row = hit && drawer ? readoutRow(drawer, hit.key) : null;
+    if (!hit || !row) return null;
+    const columns = valueColumns(row);
+    const index = columns.findIndex(column => x >= column.left - 4 && x < column.right + 4);
+    if (index < 0) return null;
+    return { row, field: { ...columns[index]!, index, top: hit.cy - PROPERTY_LANE / 2 + 3, height: PROPERTY_LANE - 6 } };
   }
 
   /* ── drawing ────────────────────────────────────────────── */
@@ -570,15 +600,19 @@ export function createTrackView(host: TrackViewHost) {
           channels.some(axis => !!api.anim.hasKeyAt(row.L, axis.prop, time)));
       }
       c.font = '400 11px ' + host.fui(); c.fillStyle = selected ? theme.accent : theme.tx3;
-      const valueX = T.gut - 12, labelMax = Math.max(0, T.gut - 64 - 92);
+      const labelMax = Math.max(0, T.gut - 64 - 104 - (isScale(row) ? 24 : 0));
       host.clipText(c, entry.label, 64, cy, labelMax);
       if (!row) return;
       const active = time >= row.L.from && time < row.L.from + row.L.dur;
       const values = trackChannels(row).map(axis => api.anim.evP(row.L, axis.prop, time, axis.key));
       c.font = '400 10px ' + host.fmono(); c.textAlign = 'right';
       c.fillStyle = active ? theme.accent : theme.tx3;
-      const text = values.map(value => host.fitValue(c, value, row.channels ? '%' : '', 44)).join('  ');
-      host.clipText(c, text, valueX, cy, 88);
+      const columns = valueColumns(row);
+      values.forEach((value, index) => {
+        const column = columns[index]!;
+        c.fillText(host.fitValue(c, value, row.channels ? '%' : '', column.width), column.right, cy);
+      });
+      if (isScale(row)) host.drawScaleLink(c, T.gut - 12, cy, !!row.L.scaleLinked);
       c.textAlign = 'left';
     });
   }
@@ -688,7 +722,7 @@ export function createTrackView(host: TrackViewHost) {
     return moveClips(event);
   }
 
-  function headerDown(_event: PointerEvent, x: number, y: number) {
+  function headerDown(event: PointerEvent, x: number, y: number) {
     const lane = laneAt(y);
     if (!lane) return;
     if (y >= lane.y + rowH()) {
@@ -696,8 +730,16 @@ export function createTrackView(host: TrackViewHost) {
       const drawer = drawerOf(lane);
       const row = hit && drawer ? readoutRow(drawer, hit.key) : null;
       if (!row) return;
-      if (x >= 44 && x < 60 && !row.L.lock) host.toggleAnimation(row);
-      else host.focusRow(row);
+      if (x >= 44 && x < 60 && !lockedLayer(row.L)) host.toggleAnimation(row);
+      else {
+        host.focusRow(row);
+        if (scaleLinkAt(x, y)) {
+          if (!lockedLayer(row.L)) host.toggleScaleLink(row.L);
+        } else {
+          const value = valueAt(x, y);
+          if (value && !lockedLayer(value.row.L)) host.dragValue(event, value.row, value.field);
+        }
+      }
       host.invalidate('timeline');
       return;
     }
@@ -730,6 +772,10 @@ export function createTrackView(host: TrackViewHost) {
     const ids = roots.map((layer: any) => layer.id);
     const moving = new Set(api.groups.expand(ids));
     const source = snapshot(project.layers);
+    const originalLayers = project.layers;
+    const originalTiming = originalLayers.map((layer: any) => ({
+      layer, from: layer.from, track: layer.track, hasTrack: Object.hasOwn(layer, 'track'),
+    }));
     const layoutOptions = options(project.layers);
     const start = counts();
     // Track moves follow the pointer over the tracks as drawn when the drag began.
@@ -746,12 +792,34 @@ export function createTrackView(host: TrackViewHost) {
     const startArea = layout().byId.get(ids[0]!)?.area ?? 'video';
     let active = false;
     let plan: TrackMovePlan | null = null;
-    const clear = () => { T.trackDrag = null; T.snapGuide = null; host.invalidate('timeline'); };
-    host.beginDrag(event, {
+    let control: { cancel(): void };
+    const cancelOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault(); event.stopImmediatePropagation(); control.cancel();
+    };
+    const clear = () => {
+      window.removeEventListener('keydown', cancelOnEscape, true);
+      T.trackDrag = null; T.snapGuide = null; host.invalidate('timeline');
+    };
+    const restore = () => {
+      if (!active) return;
+      for (const entry of originalTiming) {
+        entry.layer.from = entry.from;
+        if (entry.hasTrack) entry.layer.track = entry.track;
+        else delete entry.layer.track;
+      }
+      project.layers = originalLayers;
+      api.anim.touch();
+      api.history.cancel();
+    };
+    control = host.beginDrag(event, {
       cursor: 'grabbing',
       move: (dx: number, dy: number, ev: PointerEvent) => {
         if (!active && Math.hypot(dx, dy) < 3) return;
-        active = true;
+        if (!active) {
+          api.history.begin('Move clips');
+          active = true;
+        }
         const requested = dx / T.pps;
         const { delta, snapped } = host.edgeSnapping(ev) ? snapper.resolve(probes, requested) : snapper.release(requested);
         let dt = snapped ? delta : Math.round(delta * fps) / fps;
@@ -765,31 +833,42 @@ export function createTrackView(host: TrackViewHost) {
           video: Math.max(start.video, preview.video + 1), audio: Math.max(start.audio, preview.audio + 1),
         } satisfies TrackDrag;
         T.trackHover = { area: startArea, lane: laneIndexIn(startLanes, startArea, y) };
-        host.invalidate('timeline');
+        // The compositor must see the same timing and stack as the track preview.
+        updatePlanLayers(plan);
+        api.anim.touch();
+        host.invalidate();
       },
       up: () => {
         const result = plan;
+        // Commit from the pointer-down state so the whole live preview remains
+        // one structural edit, with the original Undo and provenance boundary.
+        restore();
         clear();
         if (!active || !result) return;
         applyPlan('Move clips', result);
       },
-      cancel: clear,
+      cancel: () => { restore(); clear(); if (active) host.invalidate(); },
     });
+    window.addEventListener('keydown', cancelOnEscape, true);
+  }
+
+  function updatePlanLayers(plan: TrackMovePlan) {
+    const project = api.project.get();
+    const byId = new Map(project.layers.map((layer: any) => [layer.id, layer]));
+    const ordered: any[] = [];
+    for (const entry of plan.layers) {
+      const layer: any = byId.get(entry.id);
+      if (!layer) continue;
+      layer.from = api.util.round(entry.from, 6);
+      layer.track = entry.track;
+      ordered.push(layer);
+    }
+    project.layers = ordered;
   }
 
   function applyPlan(label: string, plan: TrackMovePlan) {
     api.edit.mutate(label, () => {
-      const project = api.project.get();
-      const byId = new Map(project.layers.map((layer: any) => [layer.id, layer]));
-      const ordered: any[] = [];
-      for (const entry of plan.layers) {
-        const layer: any = byId.get(entry.id);
-        if (!layer) continue;
-        layer.from = api.util.round(entry.from, 6);
-        layer.track = entry.track;
-        ordered.push(layer);
-      }
-      project.layers = ordered;
+      updatePlanLayers(plan);
       api.groups.normalizeStack();
       api.anim.touch();
     }, { origin: 'timeline' });
@@ -859,6 +938,13 @@ export function createTrackView(host: TrackViewHost) {
     if (y >= lane.y + rowH()) {
       const hit = drawerAt(x < T.gut ? T.gut + 1 : x, y);
       if (!hit) return { cursor: 'default', title: '' };
+      const scale = scaleLinkAt(x, y);
+      if (scale) return { cursor: lockedLayer(scale.L) ? 'default' : 'pointer', title: scale.L.scaleLinked ? 'Unlock aspect ratio' : 'Lock aspect ratio' };
+      const value = valueAt(x, y);
+      if (value) {
+        const axis = trackChannels(value.row)[value.field.index]!;
+        return { cursor: lockedLayer(value.row.L) ? 'default' : typeof api.anim.evP(value.row.L, axis.prop, api.transport.time(), axis.key) === 'number' ? 'ew-resize' : 'pointer', title: axis.label ?? hit.label };
+      }
       if (x < T.gut) return x >= 44 && x < 60 ? { cursor: 'pointer', title: 'Animate this property' } : { cursor: 'pointer', title: hit.label };
       if (!hit.row) return { cursor: 'crosshair', title: '' };
       const layer = hit.layer;
@@ -893,6 +979,12 @@ export function createTrackView(host: TrackViewHost) {
   }
 
   function doubleClick(x: number, y: number) {
+    if (scaleLinkAt(x, y)) return true;
+    const value = valueAt(x, y);
+    if (value) {
+      if (!lockedLayer(value.row.L)) host.editValue(value.row, value.field);
+      return true;
+    }
     const drawerHit = drawerAt(x, y);
     if (drawerHit) return drawerHit.row ? host.editKeyAt(drawerHit.row, x) : false;
     const hit = hitItem(x, y);

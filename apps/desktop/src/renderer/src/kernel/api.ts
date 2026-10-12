@@ -810,7 +810,7 @@ export interface DndAPI {
 export interface WorkspaceMutateOptions { inPlace?: boolean }
 
 /**
- * Workspace exposes the active layout and persists mutations through the legacy workspace manager, including built-in-to-user cloning unless `inPlace` is requested. Panel operations mutate layout state, normalize dock fill, apply the layout and emit workspace/layout events; they do not touch project history.
+ * Workspace exposes the active layout and persists mutations through the legacy workspace manager, including built-in-to-user cloning unless `inPlace` is requested. For user mods, current() returns a snapshot; mutate() owns appearance changes (density, theme overrides, chrome and dock/panel geometry) until unload, retaining later user edits. Panel membership/order remains a saved layout edit. Panel operations normalize dock fill, apply the layout and emit workspace/layout events; they do not touch project history.
  */
 export interface WorkspaceAPI {
   current(): WorkspaceManifest | null;

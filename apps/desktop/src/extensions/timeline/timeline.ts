@@ -107,6 +107,13 @@ export interface PropertyValueColumn {
   width: number;
 }
 
+/** Bounds and axis of a value edited outside the layer-row layout. */
+export interface PropertyValueField extends PropertyValueColumn {
+  index: number;
+  top: number;
+  height: number;
+}
+
 /** Keep property values aligned and visibly separated from one another and
     from trailing row actions such as the Scale link control. */
 export function propertyValueColumns(
@@ -1175,6 +1182,11 @@ const trackView = createTrackView({
   toggleAnimation: (row) => togglePropertyAnimation(row),
   icoAnimationDiamond: (c, x, y, animated, current) => icoAnimationDiamond(c, x, y, animated, current),
   fitValue: (c, value, unit, width) => fittedPropertyValue(c, value, unit, width),
+  valueColumns: propertyValueColumns,
+  drawScaleLink: icoScaleLink,
+  toggleScaleLink: (layer) => toggleTimelineScaleLink(api, layer),
+  dragValue: (event, row, field) => dragPropertyValue(event, row, -1, field),
+  editValue: (row, field) => editPropertyValue(row, -1, field.index, field),
   clipPalette: (L) => clipPalette(L) as any,
   roundRect, clipText, rgba,
   fui: () => fui(), fmono: () => fmono(), niceStep,
@@ -3098,12 +3110,13 @@ function applySelectedValueKeys(keys: Array<Array<{ key: any; start: number }>>,
   api.anim.touch();
 }
 
-function dragPropertyValue(event: any, row: any, rowIndex: number) {
+function dragPropertyValue(event: any, row: any, rowIndex: number, field?: PropertyValueField) {
+  if (row.L.lock || api.groups.ancestors(row.L).some((group: any) => group.lock)) return;
   const time = api.transport.time();
-  const scaleIndex = isScaleTrack(row) ? scaleValueIndex(event.offsetX) : 0;
+  const scaleIndex = field?.index ?? (isScaleTrack(row) ? scaleValueIndex(event.offsetX) : 0);
   const channels = (target: any) => trackChannels(target).map(axis => ({ ...axis, value: api.anim.evP(target.L, axis.prop, time, axis.key), meta: propertyMetadata(api, target.L, axis.key) }));
   if (!channels(row).every(axis => typeof axis.value === 'number')) {
-    editPropertyValue(row, rowIndex, scaleIndex); return;
+    editPropertyValue(row, rowIndex, scaleIndex, field); return;
   }
   // Every selected layer showing this property moves by the same drag delta,
   // each from its own starting value.
@@ -3140,19 +3153,19 @@ function dragPropertyValue(event: any, row: any, rowIndex: number) {
       });
       invalidate();
     },
-    up: () => { cleanup(); if (editing) keyedEdit ? api.history.commit(label) : api.edit.commit(label); else editPropertyValue(row, rowIndex, scaleIndex); },
+    up: () => { cleanup(); if (editing) keyedEdit ? api.history.commit(label) : api.edit.commit(label); else editPropertyValue(row, rowIndex, scaleIndex, field); },
     cancel: () => { cleanup(); if (editing) keyedEdit ? (api.history.cancel(), api.anim.touch()) : api.edit.cancel(); }
   });
 }
 
-function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0) {
-  if (row.L.lock) return;
+function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0, field?: PropertyValueField) {
+  if (row.L.lock || api.groups.ancestors(row.L).some((group: any) => group.lock)) return;
   const scale = isScaleTrack(row);
   const axes = scale ? [trackChannels(row)[scaleIndex]!] : trackChannels(row);
   const values = axes.map(axis => api.anim.evP(row.L, axis.prop, api.transport.time(), axis.key));
   const time = api.transport.time();
   const scaleCommand = scale ? scaleValueCommand(row, scaleIndex, time) : null;
-  const column = scale ? propertyValueColumns(T.propertyValueX, T.gut, 2, 24)[scaleIndex]! : null;
+  const column = field ?? (scale ? propertyValueColumns(T.propertyValueX, T.gut, 2, 24)[scaleIndex]! : null);
   const choices: Record<string, readonly string[]> = {
     'l.blend': api.model.BLENDS, 'c.align': ['left', 'center', 'right'], 'c.shape': ['rect', 'ellipse', 'polygon', 'star', 'line'],
     'c.fit': ['cover', 'contain', 'stretch']
@@ -3161,8 +3174,8 @@ function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0) {
     ?? (/^m\..+\.shape$/.test(row.key) ? ['rect', 'ellipse'] : /^m\..+\.mode$/.test(row.key) ? ['add', 'subtract'] : null);
   const isColor = !options && typeof values[0] === 'string' && /^#[0-9a-f]{6}$/i.test(values[0]);
   const input = h(options ? 'select' : 'input', { value: values.join(', '), 'aria-label': scale ? `Scale ${scaleIndex === 0 ? 'X' : 'Y'}` : row.label,
-    style: { position: 'absolute', left: `${column?.left ?? T.propertyValueX}px`, top: `${rowY(rowIndex) + 3}px`,
-      width: `${column?.width ?? T.gut - T.propertyValueX - 6}px`, height: `${T.row - 6}px`, background: 'var(--bg-row)',
+    style: { position: 'absolute', left: `${column?.left ?? T.propertyValueX}px`, top: `${field?.top ?? rowY(rowIndex) + 3}px`,
+      width: `${column?.width ?? T.gut - T.propertyValueX - 6}px`, height: `${field?.height ?? T.row - 6}px`, background: 'var(--bg-row)',
       border: '1px solid var(--accent)', color: 'var(--tx)', padding: isColor ? '1px' : '0 4px', zIndex: 9 } });
   if (options) { options.forEach(value => input.appendChild(h('option', { value }, value))); input.value = String(values[0]); }
   else if (isColor) { input.type = 'color'; input.value = String(values[0]).toLowerCase(); }

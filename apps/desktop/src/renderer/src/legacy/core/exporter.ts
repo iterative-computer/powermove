@@ -397,6 +397,8 @@ function progressUI(total: any) {
 }
 
 let destinationToken: string | null = null;
+/** The file the last export wrote, reported back to MCP callers. */
+let lastOutputPath: string | null = null;
 let nativeToken: string | null = null;
 let sequenceDirectory: any = null;
 
@@ -463,6 +465,7 @@ async function deliver(blob: Blob, name: string): Promise<boolean> {
   }
   if (result?.cancelled) return false;
   if (result?.ok === false) throw new Error(result.error || 'Save failed');
+  lastOutputPath = typeof result?.path === 'string' ? result.path : null;
   return true;
 }
 
@@ -498,7 +501,7 @@ async function runPrepared(opts: any) {
       await PM.app?.importQueue;
       const data = await packProjectFileBlob({ ...JSON.parse(PM.serialize()), history: PM.hist.export?.() }, PM.MediaStore);
       if (!await deliver(data, (p.name || 'powermove') + '.pmv')) return { cancelled: true };
-      PM.toast('Project exported');return {cancelled:false};
+      PM.toast('Project exported');return {cancelled:false, ...(opts.reportPath && lastOutputPath ? { path: lastOutputPath } : {})};
     } catch (error) { const message=error instanceof Error?error.message:String(error);PM.toast('Could not export project: '+message,6000);return {error:message}; }
   }
   if (opts.format === 'still') {
@@ -518,6 +521,7 @@ async function runPrepared(opts: any) {
   let ui: any;
   const bitrate: any = exportBitrateMbps(opts.quality) * 1e6;
   const t: any = window.performance.now();
+  lastOutputPath = null;
 
   try {
     PM.pause();
@@ -538,7 +542,7 @@ async function runPrepared(opts: any) {
     }
     if (X.cancel) PM.toast('Export cancelled');
     else PM.toast(`Export finished in ${((window.performance.now() - t) / 1000).toFixed(1)}s`, 3400);
-    return {cancelled:X.cancel};
+    return {cancelled:X.cancel, ...(opts.reportPath && !X.cancel && lastOutputPath ? { path: lastOutputPath } : {})};
   } catch (e: any) {
     window.console.error(e);
     PM.toast('Export failed: ' + e.message, 5000);
@@ -640,6 +644,7 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
     nativeToken = null;
     if (result.cancelled) X.cancel = true;
     else if (!result.path) throw new Error('Could not save video');
+    lastOutputPath = result.path || null;
   } finally {
     if (preview) { preview.width = 0; preview.height = 0; }
   }

@@ -37,7 +37,10 @@ class FakeWebContents extends EventEmitter {
   }
 }
 
-function rpc(child: ChildProcessWithoutNullStreams, message: Record<string, unknown>): Promise<any> {
+const initializedClients = new WeakSet<ChildProcessWithoutNullStreams>();
+async function rpc(child: ChildProcessWithoutNullStreams, message: Record<string, unknown>): Promise<any> {
+  if (message.method !== 'initialize' && !initializedClients.has(child)) await rpc(child, { jsonrpc: '2.0', id: 'fixture-initialize', method: 'initialize', params: { protocolVersion: '2025-06-18' } });
+  if (message.method === 'initialize') initializedClients.add(child);
   return new Promise((resolve, reject) => {
     let output = '';
     const onData = (chunk: Buffer): void => {
@@ -376,6 +379,7 @@ describe('native Powermove agent tool bridge', () => {
     bridges.push(bridge);
     const session = await bridge.openSession({ runId: 'native-run-large', owner: owner as never, baseRevision: 0 });
     await expect(bridge.callRenderer(session, 'get_project_state', {})).rejects.toThrow('oversized response');
+    await expect(bridge.callRenderer(session, '__mcp_context', {})).resolves.toMatchObject({ ok: true });
     owner.destroyed = true;
   });
 

@@ -185,6 +185,26 @@ function record(label: any, origin: any, applied: any, detail: any = {}) {
   PM.proj.edits = compactEditLog([...PM.proj.edits, clone(entry)]);
 }
 
+function constantVideoSpeed(layer: any): number | null {
+  if (layer.type !== 'video') return null;
+  const remap = layer.d.timeRemap;
+  if (isProperty(remap) ? remap.v || remap.kf.length || remap.expr : remap) return null;
+  const speed = layer.d.speed;
+  if (isProperty(speed) && (speed.kf.length || speed.expr)) return null;
+  const value = Number(isProperty(speed) ? speed.v : speed ?? 1);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function resizeVideoForSpeed(layer: any, previous: number | null): void {
+  const next = constantVideoSpeed(layer);
+  if (previous == null || next == null || previous === next) return;
+  // Keep the retained source range and in-point; only its timeline span changes.
+  const duration = layer.dur * previous / next;
+  if (!Number.isFinite(duration)) return;
+  layer.dur = Math.max(1 / PM.proj.fps, duration);
+  PM.ProjectIndex?.invalidate();
+}
+
 function setProperty(command: any) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
@@ -203,7 +223,9 @@ function setProperty(command: any) {
     const key: any = PM.setKeyOn(prop, time - layer.from, value, command.ease || 'linear', PM.proj.fps);
     if (command.hold != null) key.hold = !!command.hold;
   } else {
+    const previousSpeed = channel === 'c.speed' ? constantVideoSpeed(layer) : null;
     prop.v = value;
+    if (channel === 'c.speed') resizeVideoForSpeed(layer, previousSpeed);
     PM.touch();
   }
   if (command.markIntent) {
@@ -324,9 +346,11 @@ function setContent(command: any, meta: any = {}) {
     }
   }
   if (!Object.keys(patch).length) return { id: layer.id };
+  const previousSpeed = Object.hasOwn(patch, 'speed') ? constantVideoSpeed(layer) : null;
   if (layer.type === 'audio') setAudioContent(layer, patch);
   else if (layer.type === 'extension') setExtensionContent(layer, patch);
   else Object.assign(layer.d, patch);
+  if (Object.hasOwn(patch, 'speed')) resizeVideoForSpeed(layer, previousSpeed);
   if (layer.type === 'shader' && Object.hasOwn(patch, 'code')) {
     shaderHooks(PM)?.syncShaderUniforms(layer);
     if (layer._shaderKey && PM.GL) PM.GL.dropProgram(layer._shaderKey);

@@ -232,6 +232,21 @@ describe('legacy engine install', () => {
     expect(foreground.el.paused).toBe(true);
   });
 
+  it('abandons an unfinished synchronized frame when playback passes the overlap end', () => {
+    const foreground = delayedVideo(), background = delayedVideo();
+    const layer = { id: 'foreground', type: 'video', from: 0, dur: 1, d: { asset: 'asset-1', speed: 1, trim: 0, timeRemap: true } };
+    const { PM, assets, runFrame } = engine({ layer, media: foreground });
+    assets.set('asset-2', { el: background.el, dur: 10 });
+    PM.proj.layers.push({ ...layer, id: 'background', dur: 3, d: { ...layer.d, asset: 'asset-2', timeRemap: false } });
+    PM.GL.gl = {}; PM.GL.render = vi.fn(() => false);
+    PM.play(); runFrame(100);
+    for (let now = 200; now <= 1200; now += 100) runFrame(now);
+    expect(PM.GL.render.mock.calls.at(-1)[0]).toBe(1.2);
+    expect(PM.videoFrameSync).toBe(false);
+    expect(background.el.playCalls).toBe(1);
+    expect(foreground.el.paused).toBe(true);
+  });
+
   it('starts the playback clock after synchronous audio device setup', () => {
     const { PM, runFrame, audioCalls } = engine({ audioStartupDelay: 250 });
     PM.time = 119 / 30;
@@ -290,6 +305,33 @@ describe('legacy engine install', () => {
     PM.setTime(1, { raw: true }); runFrame(16);
     PM.setTime(3, { raw: true }); PM.bus.emit('layers'); runFrame(32);
     expect(PM.GL.render.mock.calls.at(-1)[0]).toBe(3);
+  });
+
+  it.each([1.2, 2.2])('abandons an unfinished outgoing video when scrubbing to %s after its cut', (target) => {
+    const outgoing = delayedVideo(), incoming = delayedVideo();
+    const layer = { id: 'outgoing', type: 'video', from: 0, dur: 1, d: { asset: 'asset-1', speed: 1, trim: 0 } };
+    const { PM, assets, runFrame } = engine({ layer, media: outgoing });
+    assets.set('asset-2', { el: incoming.el, dur: 10 });
+    PM.proj.layers.push({ ...layer, id: 'incoming', from: 1, d: { ...layer.d, asset: 'asset-2' } });
+    PM.GL.gl = {}; PM.GL.render = vi.fn(() => false);
+    PM.setTime(.8, { raw: true }); runFrame(16);
+    PM.setTime(target, { raw: true }); runFrame(32);
+    expect(PM.GL.render.mock.calls.at(-1)[0]).toBe(target);
+    expect(outgoing.el.currentTime).toBe(.8);
+    if (target < 2) expect(incoming.el.currentTime).toBeCloseTo(target - 1);
+  });
+
+  it('abandons an unfinished incoming video when scrubbing backwards across its cut', () => {
+    const outgoing = delayedVideo(), incoming = delayedVideo();
+    const layer = { id: 'outgoing', type: 'video', from: 0, dur: 1, d: { asset: 'asset-1', speed: 1, trim: 0 } };
+    const { PM, assets, runFrame } = engine({ layer, media: outgoing });
+    assets.set('asset-2', { el: incoming.el, dur: 10 });
+    PM.proj.layers.push({ ...layer, id: 'incoming', from: 1, d: { ...layer.d, asset: 'asset-2' } });
+    PM.GL.gl = {}; PM.GL.render = vi.fn(() => false);
+    PM.setTime(1.2, { raw: true }); runFrame(16);
+    PM.setTime(.8, { raw: true }); runFrame(32);
+    expect(PM.GL.render.mock.calls.at(-1)[0]).toBe(.8);
+    expect(outgoing.el.currentTime).toBe(.8);
   });
 
   it('does not render the same project frame twice on a high refresh display', () => {

@@ -256,6 +256,18 @@ describe('agent harness oracle', () => {
     await expect(call('apply_commands', { commands: [{ type: 'add_layer', layerType: 'text' }] })).rejects.toThrow('revision 3');
   });
 
+  it('returns the full MCP session snapshot for projects over the response budget', async () => {
+    const PM = harnessEditor();
+    const layer = PM.mkLayer('text');
+    layer.d.text = 'x'.repeat(2_000_000);
+    PM.proj.layers.push(layer);
+    const result = await PM.AgentHarness.test.handleLiveAgentTool({
+      runId: 'large-context', callId: 'context', tool: '__mcp_context', arguments: {}, baseRevision: 0,
+    });
+    const snapshot = JSON.parse((result.content[0] as any).text);
+    expect(JSON.parse(snapshot.projectJSON).layers[0].d.text).toHaveLength(2_000_000);
+  });
+
   it('never refreshes or rolls a transaction into a different project with the same revision', async () => {
     const PM = harnessEditor();
     const call = (tool: string, args: any = {}) => PM.AgentHarness.test.handleLiveAgentTool({

@@ -3,7 +3,7 @@ import { attachAreaCorners } from './area-drag';
 import { beginPanelDrag } from './drag';
 import { openPanelMenu } from './menu';
 import { dismissedMenu } from '../overlays/dismissal';
-import { applyPanelSize, findPanel, panelMinHeight, setPanelCollapsed, type DockSpec, type PanelSpec, type Workspace } from './model';
+import { applyPanelSize, findPanel, setPanelCollapsed, type DockSpec, type PanelSpec, type Workspace } from './model';
 import { movePreservingFocus, parkPanel, stagePanelMove } from './portal';
 import { panelFrameOf } from '../kernel/panel-frame';
 
@@ -75,8 +75,7 @@ export function syncPanelManifest(PM: PMRegistry, id: string, spec: PanelSpec, d
   inst.spec = spec;
   inst.dock = dock;
   inst.def = PM.PANELS[id] ?? inst.def;
-  applyPanelSize(inst.el, spec, inst.def);
-  inst.el.style.minHeight = `${panelMinHeight(spec, inst.def)}px`;
+  applyPanelSize(inst.el, spec, inst.def, dock.id);
   inst.el.querySelector('.ptitle')?.replaceChildren(spec.title || inst.def.title);
   setPanelCollapsed(PM, id, !!findPanel(PM.Layout.ws as Workspace, id)?.spec.collapsed, false);
   return inst.el;
@@ -122,8 +121,7 @@ export function ensurePanel(PM: PMRegistry, spec: PanelSpec, dock: DockSpec): HT
   element.appendChild(body);
 
   Object.assign(inst, { el: element, body, header, def, spec, dock, moveHandle: null, cache: body });
-  applyPanelSize(element, spec, def);
-  element.style.minHeight = `${panelMinHeight(spec, def)}px`;
+  applyPanelSize(element, spec, def, dock.id);
 
   body.textContent = '';
   try {
