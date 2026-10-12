@@ -37,6 +37,12 @@ impl Args {
         let mut i = 0;
         while i < raw.len() {
             let key = raw[i].trim_start_matches("--").to_string();
+            // `--key=value` carries values that themselves start with `--`.
+            if let Some((k, v)) = key.split_once('=') {
+                items.push((k.to_string(), Some(v.to_string())));
+                i += 1;
+                continue;
+            }
             if i + 1 < raw.len() && !raw[i + 1].starts_with("--") {
                 items.push((key, Some(raw[i + 1].clone())));
                 i += 2;
@@ -89,5 +95,12 @@ mod tests {
         assert_eq!(a.str("mode"), Some("sliced"));
         assert_eq!(a.num::<f64>("slice-ms", 0.0), 2.5);
         assert_eq!(a.num::<u32>("absent", 7), 7);
+        let b = Args::parse(
+            ["--desk=--fps 60 --layers 2", "--desk-n", "3"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        assert_eq!(b.str("desk"), Some("--fps 60 --layers 2"));
+        assert_eq!(b.num::<usize>("desk-n", 1), 3);
     }
 }

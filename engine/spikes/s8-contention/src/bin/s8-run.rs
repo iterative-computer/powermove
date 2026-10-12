@@ -30,7 +30,7 @@
 //!
 //! Usage: `s8-run [--seconds 60] [--only a,b,c] [--out results/<dir>] [--list]
 //!         [--max-external-pct 10] [--quiet-wait-s 900] [--retries 2] [--blender PATH]
-//!         [--control-s 20] [--desk "<s8-interactive args>" --desk-n 3]`; `s8-run --reattribute results/<dir>` recomputes the
+//!         [--control-s 20] [--desk="<s8-interactive args>" --desk-n 3]`; `s8-run --reattribute results/<dir>` recomputes the
 //!         late-frame attribution of finished scenarios from their raw logs.
 
 use s8_contention::{Args, display, signal, stats};
@@ -1215,6 +1215,10 @@ fn main() {
         desk: args.str("desk").map(str::to_string),
         desk_n: args.num("desk-n", 1),
     };
+    assert!(
+        !args.flag("desk") || gate.desk.is_some(),
+        "--desk needs a value; write --desk=\"<s8-interactive args>\""
+    );
     if let Some(p) = &gate.blender {
         assert!(std::path::Path::new(p).is_file(), "--blender {p}: no such file");
     }
