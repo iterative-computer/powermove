@@ -1,0 +1,548 @@
+{
+ "id": "P3d-legacy-scene",
+ "name": "Legacy scene3d layer",
+ "w": 640,
+ "h": 360,
+ "fps": 30,
+ "dur": 3,
+ "bg": "#0C0D12",
+ "backgroundFill": {
+  "type": "linear",
+  "angle": 35,
+  "stops": [
+   {
+    "id": "stop-1",
+    "color": "#0C0D12",
+    "position": 0
+   },
+   {
+    "id": "stop-2",
+    "color": "#1B2A4A",
+    "position": 55
+   },
+   {
+    "id": "stop-3",
+    "color": "#3A2A5A",
+    "position": 100
+   }
+  ]
+ },
+ "compId": "P3d-legacy-scene-root",
+ "compName": "Legacy scene3d layer",
+ "layers": [
+  {
+   "id": "L001",
+   "type": "extension",
+   "name": "Legacy 3D Scene",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": false,
+   "solo": false,
+   "color": "#9B8CFF",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 80,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 45,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "definition": "powermove.3d.scene",
+    "version": 1,
+    "w": 480,
+    "h": 270,
+    "params": {},
+    "data": {
+     "scene": {
+      "version": 1,
+      "objects": [
+       {
+        "id": "cube",
+        "name": "Cube",
+        "parent": null,
+        "source": {
+         "primitive": "box"
+        },
+        "p": {
+         "x": {
+          "v": 0,
+          "kf": [],
+          "expr": null
+         },
+         "y": {
+          "v": 0,
+          "kf": [],
+          "expr": null
+         },
+         "z": {
+          "v": 0,
+          "kf": [],
+          "expr": null
+         },
+         "rx": {
+          "v": 0,
+          "kf": [],
+          "expr": null
+         },
+         "ry": {
+          "v": 0,
+          "kf": [
+           {
+            "t": 0,
+            "v": 0,
+            "i": "legacy-k0"
+           },
+           {
+            "t": 3,
+            "v": 180,
+            "i": "legacy-k1"
+           }
+          ],
+          "expr": null
+         },
+         "rz": {
+          "v": 0,
+          "kf": [],
+          "expr": null
+         },
+         "sx": {
+          "v": 1,
+          "kf": [],
+          "expr": null
+         },
+         "sy": {
+          "v": 1,
+          "kf": [],
+          "expr": null
+         },
+         "sz": {
+          "v": 1,
+          "kf": [],
+          "expr": null
+         },
+         "visible": {
+          "v": true,
+          "kf": [],
+          "expr": null
+         }
+        },
+        "material": {
+         "p": {
+          "color": {
+           "v": "#FF6B1A",
+           "kf": [],
+           "expr": null
+          },
+          "roughness": {
+           "v": 0.4,
+           "kf": [],
+           "expr": null
+          },
+          "metalness": {
+           "v": 0.1,
+           "kf": [],
+           "expr": null
+          },
+          "emissive": {
+           "v": "#000000",
+           "kf": [],
+           "expr": null
+          },
+          "emissiveIntensity": {
+           "v": 1,
+           "kf": [],
+           "expr": null
+          },
+          "opacity": {
+           "v": 1,
+           "kf": [],
+           "expr": null
+          }
+         },
+         "maps": {},
+         "doubleSided": true
+        },
+        "useSourceMaterials": false,
+        "slots": [],
+        "castShadow": true,
+        "receiveShadow": true
+       },
+       {
+        "id": "ring",
+        "name": "Ring",
+        "parent": "cube",
+        "source": {
+         "primitive": "torus"
+        },
+        "p": {
+         "x": {
+          "v": 1.2,
+          "kf": [],
+          "expr": null
+         },
+         "y": {
+          "v": 0,
+          "kf": [],
+          "expr": null
+         },
+         "z": {
+          "v": 0,
+          "kf": [],
+          "expr": null
+         },
+         "rx": {
+          "v": 0,
+          "kf": [],
+          "expr": null
+         },
+         "ry": {
+          "v": 0,
+          "kf": [],
+          "expr": null
+         },
+         "rz": {
+          "v": 0,
+          "kf": [],
+          "expr": null
+         },
+         "sx": {
+          "v": 1,
+          "kf": [],
+          "expr": null
+         },
+         "sy": {
+          "v": 1,
+          "kf": [],
+          "expr": null
+         },
+         "sz": {
+          "v": 1,
+          "kf": [],
+          "expr": null
+         },
+         "visible": {
+          "v": true,
+          "kf": [],
+          "expr": null
+         }
+        },
+        "material": {
+         "p": {
+          "color": {
+           "v": "#4C8DFF",
+           "kf": [],
+           "expr": null
+          },
+          "roughness": {
+           "v": 0.4,
+           "kf": [],
+           "expr": null
+          },
+          "metalness": {
+           "v": 0.1,
+           "kf": [],
+           "expr": null
+          },
+          "emissive": {
+           "v": "#000000",
+           "kf": [],
+           "expr": null
+          },
+          "emissiveIntensity": {
+           "v": 1,
+           "kf": [],
+           "expr": null
+          },
+          "opacity": {
+           "v": 1,
+           "kf": [],
+           "expr": null
+          }
+         },
+         "maps": {},
+         "doubleSided": true
+        },
+        "useSourceMaterials": false,
+        "slots": [],
+        "castShadow": true,
+        "receiveShadow": true
+       }
+      ],
+      "lights": [
+       {
+        "id": "key",
+        "name": "Key",
+        "type": "sun",
+        "p": {
+         "x": {
+          "v": -3,
+          "kf": [],
+          "expr": null
+         },
+         "y": {
+          "v": 5,
+          "kf": [],
+          "expr": null
+         },
+         "z": {
+          "v": 4,
+          "kf": [],
+          "expr": null
+         },
+         "targetX": {
+          "v": 0,
+          "kf": [],
+          "expr": null
+         },
+         "targetY": {
+          "v": 0,
+          "kf": [],
+          "expr": null
+         },
+         "targetZ": {
+          "v": 0,
+          "kf": [],
+          "expr": null
+         },
+         "color": {
+          "v": "#FFFFFF",
+          "kf": [],
+          "expr": null
+         },
+         "intensity": {
+          "v": 3,
+          "kf": [],
+          "expr": null
+         },
+         "distance": {
+          "v": 0,
+          "kf": [],
+          "expr": null
+         },
+         "decay": {
+          "v": 2,
+          "kf": [],
+          "expr": null
+         },
+         "angle": {
+          "v": 45,
+          "kf": [],
+          "expr": null
+         },
+         "penumbra": {
+          "v": 0.4,
+          "kf": [],
+          "expr": null
+         },
+         "width": {
+          "v": 1,
+          "kf": [],
+          "expr": null
+         },
+         "height": {
+          "v": 1,
+          "kf": [],
+          "expr": null
+         },
+         "visible": {
+          "v": true,
+          "kf": [],
+          "expr": null
+         }
+        },
+        "castShadow": true
+       }
+      ],
+      "camera": {
+       "projection": "perspective",
+       "p": {
+        "x": {
+         "v": 3,
+         "kf": [],
+         "expr": null
+        },
+        "y": {
+         "v": 2,
+         "kf": [],
+         "expr": null
+        },
+        "z": {
+         "v": 6,
+         "kf": [],
+         "expr": null
+        },
+        "targetX": {
+         "v": 0,
+         "kf": [],
+         "expr": null
+        },
+        "targetY": {
+         "v": 0,
+         "kf": [],
+         "expr": null
+        },
+        "targetZ": {
+         "v": 0,
+         "kf": [],
+         "expr": null
+        },
+        "fov": {
+         "v": 45,
+         "kf": [],
+         "expr": null
+        },
+        "zoom": {
+         "v": 1,
+         "kf": [],
+         "expr": null
+        },
+        "near": {
+         "v": 0.01,
+         "kf": [],
+         "expr": null
+        },
+        "far": {
+         "v": 1000,
+         "kf": [],
+         "expr": null
+        }
+       }
+      },
+      "environment": {
+       "p": {
+        "ambient": {
+         "v": 0.5,
+         "kf": [],
+         "expr": null
+        },
+        "ambientColor": {
+         "v": "#FFFFFF",
+         "kf": [],
+         "expr": null
+        },
+        "exposure": {
+         "v": 1,
+         "kf": [],
+         "expr": null
+        }
+       },
+       "background": "#101820",
+       "shadows": true
+      }
+     }
+    }
+   },
+   "locked_intent": {}
+  }
+ ],
+ "comps": {},
+ "assets": {},
+ "markers": [],
+ "work": [
+  0,
+  3
+ ],
+ "params": {},
+ "revision": 0,
+ "edits": [],
+ "created": 1791676800000,
+ "shutter": 0.5
+}

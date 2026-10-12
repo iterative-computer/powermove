@@ -1,0 +1,224 @@
+{
+ "id": "Players-shader-binding-quirks",
+ "name": "Shader uniform binding quirks",
+ "w": 640,
+ "h": 360,
+ "fps": 30,
+ "dur": 3,
+ "bg": "#000000",
+ "backgroundFill": {
+  "type": "solid",
+  "angle": 0,
+  "stops": [
+   {
+    "id": "stop-1",
+    "color": "#000000",
+    "position": 0
+   }
+  ]
+ },
+ "compId": "Players-shader-binding-quirks-root",
+ "compName": "Shader uniform binding quirks",
+ "layers": [
+  {
+   "id": "L003",
+   "type": "shader",
+   "name": "Binding quirks",
+   "from": 0,
+   "dur": 3,
+   "on": true,
+   "lock": false,
+   "shy": false,
+   "collapsed": true,
+   "threeD": false,
+   "solo": false,
+   "color": "#FF6B1A",
+   "blend": "normal",
+   "mblur": false,
+   "parent": null,
+   "group": null,
+   "matteSource": null,
+   "p": {
+    "perspective": {
+     "v": 50,
+     "kf": [],
+     "expr": null
+    },
+    "position.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "scale.z": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "rotation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "orientation.z": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.x": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "anchor.y": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "position.x": {
+     "v": 40,
+     "kf": [],
+     "expr": null
+    },
+    "position.y": {
+     "v": 20,
+     "kf": [],
+     "expr": null
+    },
+    "scale.x": {
+     "v": 85,
+     "kf": [],
+     "expr": null
+    },
+    "scale.y": {
+     "v": 85,
+     "kf": [],
+     "expr": null
+    },
+    "rotation": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    },
+    "opacity": {
+     "v": 100,
+     "kf": [],
+     "expr": null
+    },
+    "skew": {
+     "v": 0,
+     "kf": [],
+     "expr": null
+    }
+   },
+   "fx": [],
+   "transitionIn": null,
+   "transitionOut": null,
+   "masks": [],
+   "d": {
+    "code": "uniform float uAmount; // @param 0.6 0 1\nuniform vec2 uOffset;  // @param 0.25 -1 1\nuniform int uSteps;    // @param 6 1 12\nuniform bool uInvert;  // @param true\nuniform vec3 uColor;   // @param #3FCF8E\nuniform vec4 uExtra;   // @param 0.5\nvoid main(){\n  vec2 p = uv + uOffset;\n  float bands = floor(p.x * float(max(uSteps, 1)) * 4.0) / 4.0;\n  vec3 c = mix(vec3(0.05), uColor, fract(bands + iTime * 0.2) * uAmount);\n  if (uInvert) c = 1.0 - c;\n  fragColor = vec4(c + uExtra.rgb * 0.0, 1.0);\n}",
+    "w": 640,
+    "h": 360,
+    "uniforms": {
+     "uAmount": {
+      "v": 0.2,
+      "kf": [
+       {
+        "t": 0,
+        "v": 0.2,
+        "i": "k001",
+        "inInterp": "linear",
+        "outInterp": "linear",
+        "inEase": {
+         "speed": 0,
+         "influence": 33.333333333333336
+        },
+        "outEase": {
+         "speed": 0,
+         "influence": 33.333333333333336
+        },
+        "autoBezier": false,
+        "continuous": false
+       },
+       {
+        "t": 2,
+        "v": 1,
+        "i": "k002",
+        "inInterp": "linear",
+        "outInterp": "linear",
+        "inEase": {
+         "speed": 0,
+         "influence": 33.333333333333336
+        },
+        "outEase": {
+         "speed": 0,
+         "influence": 33.333333333333336
+        },
+        "autoBezier": false,
+        "continuous": false
+       }
+      ],
+      "expr": null
+     },
+     "uOffset": {
+      "v": 0.25,
+      "kf": [],
+      "expr": null
+     },
+     "uSteps": {
+      "v": 9,
+      "kf": [],
+      "expr": null
+     },
+     "uInvert": {
+      "v": true,
+      "kf": [],
+      "expr": null
+     },
+     "uColor": {
+      "v": "#3FCF8E",
+      "kf": [],
+      "expr": null
+     },
+     "uExtra": {
+      "v": 0.5,
+      "kf": [],
+      "expr": null
+     }
+    }
+   },
+   "locked_intent": {}
+  }
+ ],
+ "comps": {},
+ "assets": {},
+ "markers": [],
+ "work": [
+  0,
+  3
+ ],
+ "params": {},
+ "revision": 0,
+ "edits": [],
+ "created": 1791676800000,
+ "shutter": 0.5
+}
