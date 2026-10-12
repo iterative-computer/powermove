@@ -1,0 +1,14 @@
+[package]
+name = "pm-expr"
+description = "Project expression language: bounded parser and interpreter, V8-identical Math (sections 3, 5, 7)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+pm-model = { path = "../pm-model" }
+# Correctly rounded sin, cos, tan, asin, acos, atan2, exp, log (CORE-MATH and
+# LLVM libc algorithms); see src/jsmath/mod.rs. BSD-3-Clause OR Apache-2.0.
+pxfm = "=0.1.30"
