@@ -651,4 +651,20 @@ void main() {
     vec3 hue = c.rgb / m;
     o = vec4(clamp(hue, 0.0, 1.0) * c.a, c.a);`,
     }),
+  fx('nearest-bright-pixel-infinity', ['nonFiniteConstant', 'dataDependentLoop'],
+    'Glow toward the nearest bright pixel; start the search distance at infinity.', {
+      params: [{ k: 'reach', label: 'Reach', def: 12, min: 2, max: 24, step: 1 }],
+      frag: `
+    const float FAR = 1e39;
+    vec4 c = texture(u_tex, v_st);
+    float best = FAR;
+    for (int i = -6; i <= 6; i++) {
+      for (int j = -6; j <= 6; j++) {
+        vec2 off = vec2(float(i), float(j)) * u_reach / 6.0;
+        if (luma(src(v_st + off * u_texel).rgb) > 0.6) best = min(best, length(off));
+      }
+    }
+    float glow = isinf(best) ? 0.0 : exp(-best / max(u_reach, 1.0) * 3.0);
+    o = vec4(c.rgb + glow * vec3(1.0, 0.8, 0.4) * (1.0 - c.a), max(c.a, glow));`,
+    }),
 ];

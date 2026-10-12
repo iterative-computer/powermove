@@ -133,6 +133,25 @@ void main(){
   float tilt = abs(dFdx(g.x));
   fragColor = vec4(mix(vec3(0.97), uLine, line) * (0.9 + 0.1 * slope) + vec3(tilt * 0.0), 1.0);
 }`),
+
+  shader('ray-miss-infinity', ['shaderLayer', 'nonFiniteConstant'],
+    'Two shaded spheres on a sky gradient; misses return infinity like in my ray tracer.', `
+const float NO_HIT = 1.0 / 0.0;
+uniform float uRadius; // @param 0.6 0.2 1
+float hit(vec3 ro, vec3 rd, vec3 c, float r){
+  vec3 oc = ro - c;
+  float b = dot(oc, rd);
+  float h = b * b - dot(oc, oc) + r * r;
+  return h < 0.0 ? NO_HIT : -b - sqrt(h);
+}
+void main(){
+  vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);
+  vec3 ro = vec3(0.0, 0.0, -3.0);
+  vec3 rd = normalize(vec3(p, 1.5));
+  float t = min(hit(ro, rd, vec3(-0.5, 0.0, 0.0), uRadius), hit(ro, rd, vec3(0.6, 0.1, 0.5), uRadius * 0.8));
+  vec3 col = isinf(t) ? mix(vec3(0.1, 0.12, 0.2), vec3(0.4, 0.5, 0.7), uv.y) : vec3(0.9, 0.6, 0.3) * (1.0 - 0.15 * (t - 2.0));
+  fragColor = vec4(col, 1.0);
+}`),
 ];
 
 export const EXTENSION_LAYERS: GeneratedShader[] = [
