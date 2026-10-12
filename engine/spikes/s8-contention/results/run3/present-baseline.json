@@ -1,0 +1,283 @@
+{
+  "a": {
+    "adapter": "Apple M4 Max (Metal, )",
+    "at_risk": 0,
+    "blur_radius": 8,
+    "clock": "grid",
+    "completion_jitter_ms": {
+      "max": 4.465,
+      "mean": 0.332,
+      "min": 0.0,
+      "n": 3599,
+      "p50": 0.223,
+      "p95": 1.043,
+      "p99": 1.827,
+      "p999": 2.732
+    },
+    "display_refresh_ms": 8.3333,
+    "drops": {
+      "deadline_1_frame": 0,
+      "deadline_2_frames": 0,
+      "deadline_3_frames": 0,
+      "skipped_pacing": 0,
+      "skipped_ring_full": 0
+    },
+    "encode_ms": {
+      "max": 0.429,
+      "mean": 0.169,
+      "min": 0.076,
+      "n": 3600,
+      "p50": 0.175,
+      "p95": 0.215,
+      "p99": 0.234,
+      "p999": 0.338
+    },
+    "fps": 60.00030000150001,
+    "frames_measured": 3600,
+    "gpu_exec_ms": {
+      "max": 7.965,
+      "mean": 5.945,
+      "min": 2.784,
+      "n": 3600,
+      "p50": 6.195,
+      "p95": 6.911,
+      "p99": 7.09,
+      "p999": 7.499
+    },
+    "gpu_priority": 1,
+    "gpu_start_delay_ms": {
+      "max": 0.568,
+      "mean": 0.286,
+      "min": 0.082,
+      "n": 3600,
+      "p50": 0.359,
+      "p95": 0.412,
+      "p99": 0.476,
+      "p999": 0.517
+    },
+    "height": 2160,
+    "label": "present-baseline",
+    "latency_ms": {
+      "max": 8.433,
+      "mean": 6.515,
+      "min": 3.531,
+      "n": 3600,
+      "p50": 6.735,
+      "p95": 7.519,
+      "p99": 7.694,
+      "p999": 8.157
+    },
+    "layers": 3,
+    "miss_times_s": [],
+    "nominal_refresh_ms": 8.3333,
+    "presentation": {
+      "drawable_wait_ms": {
+        "max": 1.62,
+        "mean": 0.024,
+        "min": 0.007,
+        "n": 3720,
+        "p50": 0.024,
+        "p95": 0.035,
+        "p99": 0.04,
+        "p999": 0.068
+      },
+      "handler_calls": 3600,
+      "irregular_intervals": 22,
+      "not_presented": 0,
+      "placement": "corner",
+      "present_interval_ms": {
+        "max": 25.0,
+        "mean": 16.667,
+        "min": 8.333,
+        "n": 3599,
+        "p50": 16.667,
+        "p95": 16.667,
+        "p99": 16.667,
+        "p999": 25.0
+      },
+      "present_latency_ms": {
+        "max": 33.233,
+        "mean": 24.902,
+        "min": 24.766,
+        "n": 3600,
+        "p50": 24.875,
+        "p95": 24.98,
+        "p99": 24.99,
+        "p999": 33.225
+      },
+      "presented": 3600,
+      "window_visible": false
+    },
+    "process": "interactive",
+    "realtime_thread": true,
+    "refreshes_per_frame": 2,
+    "seconds": 60.0,
+    "signals_dropped": 3381,
+    "signals_sent": 341,
+    "wake_late_ms": {
+      "max": 0.022,
+      "mean": 0.006,
+      "min": 0.002,
+      "n": 3600,
+      "p50": 0.006,
+      "p95": 0.01,
+      "p99": 0.012,
+      "p999": 0.018
+    },
+    "warmup_seconds": 2.0,
+    "width": 3840,
+    "worst": [
+      {
+        "encode_ms": 0.171,
+        "gpu_ms": 7.965,
+        "gpu_start_ms": 0.128,
+        "latency_ms": 8.433,
+        "n": 1807,
+        "skipped": false,
+        "t_s": 28.1165,
+        "wake_late_ms": 0.004
+      },
+      {
+        "encode_ms": 0.188,
+        "gpu_ms": 7.721,
+        "gpu_start_ms": 0.294,
+        "latency_ms": 8.356,
+        "n": 2856,
+        "skipped": false,
+        "t_s": 45.5998,
+        "wake_late_ms": 0.008
+      },
+      {
+        "encode_ms": 0.188,
+        "gpu_ms": 7.678,
+        "gpu_start_ms": 0.188,
+        "latency_ms": 8.181,
+        "n": 2196,
+        "skipped": false,
+        "t_s": 34.5998,
+        "wake_late_ms": 0.006
+      },
+      {
+        "encode_ms": 0.158,
+        "gpu_ms": 7.499,
+        "gpu_start_ms": 0.397,
+        "latency_ms": 8.157,
+        "n": 1606,
+        "skipped": false,
+        "t_s": 24.7665,
+        "wake_late_ms": 0.009
+      },
+      {
+        "encode_ms": 0.214,
+        "gpu_ms": 7.337,
+        "gpu_start_ms": 0.392,
+        "latency_ms": 8.073,
+        "n": 1487,
+        "skipped": false,
+        "t_s": 22.7832,
+        "wake_late_ms": 0.005
+      },
+      {
+        "encode_ms": 0.164,
+        "gpu_ms": 7.419,
+        "gpu_start_ms": 0.361,
+        "latency_ms": 8.057,
+        "n": 1603,
+        "skipped": false,
+        "t_s": 24.7165,
+        "wake_late_ms": 0.008
+      },
+      {
+        "encode_ms": 0.203,
+        "gpu_ms": 7.149,
+        "gpu_start_ms": 0.392,
+        "latency_ms": 7.877,
+        "n": 1498,
+        "skipped": false,
+        "t_s": 22.9665,
+        "wake_late_ms": 0.006
+      },
+      {
+        "encode_ms": 0.151,
+        "gpu_ms": 7.424,
+        "gpu_start_ms": 0.168,
+        "latency_ms": 7.853,
+        "n": 2689,
+        "skipped": false,
+        "t_s": 42.8164,
+        "wake_late_ms": 0.004
+      },
+      {
+        "encode_ms": 0.165,
+        "gpu_ms": 7.436,
+        "gpu_start_ms": 0.135,
+        "latency_ms": 7.84,
+        "n": 1632,
+        "skipped": false,
+        "t_s": 25.1999,
+        "wake_late_ms": 0.004
+      },
+      {
+        "encode_ms": 0.171,
+        "gpu_ms": 7.153,
+        "gpu_start_ms": 0.402,
+        "latency_ms": 7.84,
+        "n": 946,
+        "skipped": false,
+        "t_s": 13.7666,
+        "wake_late_ms": 0.008
+      }
+    ]
+  },
+  "a_args": [
+    "--present",
+    "corner",
+    "--window-width",
+    "16",
+    "--window-height",
+    "9"
+  ],
+  "a_wall_seconds": 63.69,
+  "attempts": [
+    {
+      "attempt": 0,
+      "control_drops_1f": null,
+      "drops_1f": 0,
+      "drops_2f": 0,
+      "external_gpu_after": 0.4563,
+      "external_gpu_before": 0.388
+    }
+  ],
+  "attribution": null,
+  "b": null,
+  "b_args": null,
+  "contaminated": false,
+  "control": null,
+  "display_asleep": false,
+  "external_gpu_after": 0.4563,
+  "external_gpu_before": 0.388,
+  "gpu_util_during": {
+    "max": 63.0,
+    "mean": 56.83739837398374,
+    "min": 23.0,
+    "n": 123,
+    "p50": 58.0,
+    "p95": 62.0,
+    "p99": 62.0,
+    "p999": 63.0
+  },
+  "gpu_util_idle_before": {
+    "max": 56.0,
+    "mean": 52.666666666666664,
+    "min": 50.0,
+    "n": 6,
+    "p50": 52.0,
+    "p95": 56.0,
+    "p99": 56.0,
+    "p999": 56.0
+  },
+  "quiet_wait_s": 12.9,
+  "scenario": "present-baseline",
+  "screen_locked": false,
+  "what": "A alone, presenting through a small on-screen CAMetalLayer window"
+}
