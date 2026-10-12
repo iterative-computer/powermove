@@ -222,13 +222,24 @@ fn the_one_million_round_trip_at_every_float_rate() {
         let r = rate(fps);
         let time = r.time(1_000_000.0 / fps).unwrap();
         assert_eq!(time.ticks, exact.frame_start(1_000_000).unwrap());
-        assert_eq!(time.write_back(&r, time.ticks).to_bits(), (1_000_000.0 / fps).to_bits());
+        assert_eq!(
+            time.write_back(&r, time.ticks).to_bits(),
+            (1_000_000.0 / fps).to_bits()
+        );
         for delta in [-3i64, -1, 1, 2, 1_000] {
             let moved = exact.frame_start(1_000_000 + delta).unwrap();
             let written = time.write_back(&r, moved);
-            assert_eq!(written.to_bits(), ((1_000_000 + delta) as f64 / fps).to_bits(), "{fps} {delta}");
+            assert_eq!(
+                written.to_bits(),
+                ((1_000_000 + delta) as f64 / fps).to_bits(),
+                "{fps} {delta}"
+            );
             let back = r.time(written).unwrap();
-            assert_eq!((back.frame, back.ticks), (Some(1_000_000 + delta), moved), "{fps} {delta}");
+            assert_eq!(
+                (back.frame, back.ticks),
+                (Some(1_000_000 + delta), moved),
+                "{fps} {delta}"
+            );
         }
         // Moved off the grid: ticks / TICKS, and the offset survives.
         let off = time.ticks + exact.exact_frame_ticks().unwrap() / 2;
@@ -300,7 +311,10 @@ fn write_back_echoes_and_creates() {
     assert_eq!(time.write_back(&r, moved), seconds_from_ticks(moved));
     // Moved onto a frame start: n / fps.
     let frame = Rate::FPS_24.frame_start(7).unwrap();
-    assert_eq!(time.write_back(&r, frame).to_bits(), (7.0f64 / 24.0).to_bits());
+    assert_eq!(
+        time.write_back(&r, frame).to_bits(),
+        (7.0f64 / 24.0).to_bits()
+    );
     assert_eq!(r.seconds_of(TICKS_PER_SECOND / 2), 0.5);
 }
 
@@ -398,7 +412,10 @@ fn every_corpus_project_ingests_and_paths_classify() {
             );
             // Synthetic corpus times are frame-aligned or whole milliseconds.
             assert_eq!(
-                field.time.write_back(&comp.rate, field.time.ticks).to_bits(),
+                field
+                    .time
+                    .write_back(&comp.rate, field.time.ticks)
+                    .to_bits(),
                 field.time.original.to_bits()
             );
         }
