@@ -177,6 +177,13 @@ pub struct Hello {
     pub max_message_bytes: u32,
 }
 
+/// The build id this crate's peers send in `Hello` and `Welcome`: a hash of
+/// the `pm-protocol` sources (computed by `build.rs`). Draft contracts
+/// interoperate only between equal build ids, and two builds agree exactly
+/// when their protocol sources agree, whatever else in the tree changed. The
+/// generated TypeScript exports the same value as `PROTOCOL_BUILD`.
+pub const SOURCE_BUILD: &str = concat!("protocol-", env!("PM_PROTOCOL_SOURCE_HASH"));
+
 /// Smallest message limit a peer may announce.
 pub const MIN_MESSAGE_LIMIT: u32 = 64 * 1024;
 

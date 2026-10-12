@@ -4,6 +4,9 @@
 // docs/engine/rfcs/09-protocol-codec.md). Every integer is a safe JS number;
 // every float is finite (no NaN or Infinity).
 
+/** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */
+export const PROTOCOL_BUILD = "protocol-5c936431d1cc3f66";
+
 export type { AgentFrame } from "./AgentFrame";
 export type { AgentFrameOutcome } from "./AgentFrameOutcome";
 export type { AgentFrameRequest } from "./AgentFrameRequest";

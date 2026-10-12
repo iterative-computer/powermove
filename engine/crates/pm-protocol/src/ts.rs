@@ -130,6 +130,10 @@ pub fn generate() -> Result<BTreeMap<PathBuf, String>, String> {
         .collect();
     let mut index = String::from(INDEX_HEADER);
     index.push('\n');
+    index.push_str(&format!(
+        "/** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */\nexport const PROTOCOL_BUILD = \"{}\";\n\n",
+        crate::version::SOURCE_BUILD
+    ));
     for path in files.keys() {
         let module = path.with_extension("");
         let name = module
