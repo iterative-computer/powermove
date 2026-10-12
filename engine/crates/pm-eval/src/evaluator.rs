@@ -832,6 +832,25 @@ impl Evaluator {
         value
     }
 
+    /// Evaluates an interned id at a tick of its composition's grid. The tick
+    /// becomes the document's own float seconds ([`Comp::seconds_at`]), so a
+    /// frame-aligned tick evaluates exactly where the legacy evaluator does.
+    pub fn ev_id_ticks(
+        &mut self,
+        doc: &Document,
+        id: PropId,
+        ticks: pm_time::Tick,
+    ) -> JsResult<JsValue> {
+        let Some(address) = self.address(id) else {
+            return Ok(JsValue::Undefined);
+        };
+        let seconds = match Comp::resolve(doc, &address.comp.to_string_lossy()) {
+            Ok(cx) => cx.seconds_at(ticks),
+            Err(_) => pm_time::seconds_from_ticks(ticks),
+        };
+        self.ev_id(doc, id, seconds)
+    }
+
     /// Evaluates many ids at one time into `out` (numbers) and `kinds`.
     ///
     /// # Panics

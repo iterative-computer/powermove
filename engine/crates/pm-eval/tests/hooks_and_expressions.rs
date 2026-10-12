@@ -123,6 +123,15 @@ fn expression_errors_and_context() {
     let rate = cx.rate().unwrap();
     let ticks = rate.rate.frame_start(60).unwrap();
     assert_eq!(cx.seconds_at(ticks), 60.0 / 29.97);
+    let id = ev.intern(PropAddress::channel("C", "A", "skew"));
+    assert_eq!(
+        ev.ev_id_ticks(&doc, id, ticks).unwrap(),
+        JsValue::Number(60.0)
+    );
+    assert_eq!(
+        ev.ev_id(&doc, id, 60.0 / 29.97).unwrap(),
+        JsValue::Number(60.0)
+    );
 }
 
 struct Hooks;
