@@ -1,46 +1,14 @@
 /* Runs inside a hidden Electron window. Measures every corpus case with the
    legacy engine's own code: `textSourceLines` and `glyphLayout` are imported
    from legacy/core/text-layout.ts and variable fonts go through
-   typography/font-renderer.ts, exactly as raster.ts uses them. `fontStr` and
-   the caret boundaries are verbatim copies of the private helpers in
-   legacy/gl/raster.ts (they live inside `install()` and cannot be imported). */
+   typography/font-renderer.ts, exactly as raster.ts uses them (fonts.ts).
+   The caret boundaries follow raster.ts's private textCaretLayout. */
 
 import { glyphLayout, textSourceLines } from '../../../../apps/desktop/src/renderer/src/legacy/core/text-layout';
-import { createVariableFontRenderer } from '../../../../apps/desktop/src/renderer/src/typography/font-renderer';
+import { fontStr, nodeRequire, variationFontFamily } from './fonts';
 
-// Node integration is on in the capture window; keep these out of the bundle.
-const nodeRequire = (window as any).require as (id: string) => any;
 const fs = nodeRequire('fs');
 const { ipcRenderer } = nodeRequire('electron');
-
-const VARIABLE_SOURCES: Record<string, string> = {
-  'Skia': '/System/Library/Fonts/Supplemental/Skia.ttf',
-  'STIX Two Text': '/System/Library/Fonts/Supplemental/STIXTwoText.ttf',
-  'Kefa III': '/System/Library/Fonts/Supplemental/KefaIII.ttf',
-  'Noto Sans Syriac': '/System/Library/Fonts/Supplemental/NotoSansSyriac-Regular.ttf',
-  'System Font': '/System/Library/Fonts/SFNS.ttf',
-};
-const sourceCache = new Map<string, ArrayBuffer | undefined>();
-function packagedSource(family: string): ArrayBuffer | undefined {
-  if (!sourceCache.has(family)) {
-    const path = VARIABLE_SOURCES[family];
-    const bytes = path ? fs.readFileSync(path) : undefined;
-    sourceCache.set(family, bytes ? bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) : undefined);
-  }
-  return sourceCache.get(family);
-}
-const variationFontFamily = createVariableFontRenderer(() => {}, packagedSource);
-
-const cssString = (value: unknown) => String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-// Verbatim from legacy/gl/raster.ts.
-function fontStr(d: any) {
-  const variableFamily = variationFontFamily(d);
-  const families = [variableFamily, d.font, 'SF Pro Display']
-    .filter(Boolean)
-    .map((family) => `"${cssString(family)}"`)
-    .join(', ');
-  return `${d.italic ? 'italic ' : ''}${d.weight || 500} ${d.size}px ${families}, -apple-system, sans-serif`;
-}
 
 function graphemesOf(value: string): string[] {
   return [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(value)].map(item => item.segment);

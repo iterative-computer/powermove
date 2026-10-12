@@ -55,8 +55,12 @@ app.whenReady().then(async () => {
     clearTimeout(timeout);
     app.exit(0);
   });
-  ipcMain.handle('rendered', (_event, count) => {
+  ipcMain.handle('rendered', async (_event, count) => {
     console.log(`rendered ${count} scenes`);
+    try {
+      const gpu = { featureStatus: app.getGPUFeatureStatus(), info: await app.getGPUInfo('basic') };
+      fs.writeFileSync(path.join(path.resolve(args.out || ''), 'gpu.json'), JSON.stringify(gpu, null, 2));
+    } catch (error) { return fail(`gpu info failed: ${error && error.stack || error}`); }
     clearTimeout(timeout);
     app.exit(0);
   });

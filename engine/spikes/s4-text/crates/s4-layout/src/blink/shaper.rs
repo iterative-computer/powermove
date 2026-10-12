@@ -34,6 +34,9 @@ pub struct Run {
     pub glyphs: Vec<GlyphData>,
     pub width: f32,
     pub size: f32,
+    /// The face's final variation coordinates (user space) at this size,
+    /// for renderers that instance the same face.
+    pub coords: Vec<(u32, f32)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -632,6 +635,7 @@ impl<'r> Shaper<'r> {
                 glyphs,
                 width,
                 size: face.size,
+                coords: face.coords.clone(),
             });
         };
 
