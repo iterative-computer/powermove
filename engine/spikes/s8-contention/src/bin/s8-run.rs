@@ -30,7 +30,7 @@
 //!
 //! Usage: `s8-run [--seconds 60] [--only a,b,c] [--out results/<dir>] [--list]
 //!         [--max-external-pct 10] [--quiet-wait-s 900] [--retries 2] [--blender PATH]
-//!         [--control-s 20]`; `s8-run --reattribute results/<dir>` recomputes the
+//!         [--control-s 20] [--desk "<s8-interactive args>" --desk-n 3]`; `s8-run --reattribute results/<dir>` recomputes the
 //!         late-frame attribution of finished scenarios from their raw logs.
 
 use s8_contention::{Args, display, signal, stats};
@@ -816,6 +816,11 @@ struct Gate {
     blender: Option<String>,
     /// Seconds of A alone run just before each scenario that has a B (0: none).
     control_s: f64,
+    /// Arguments for unmeasured `s8-interactive` processes run alongside every scenario
+    /// (desktop-load stand-in); `None` for none.
+    desk: Option<String>,
+    /// How many desk-load processes (`--desk-n`, default 1).
+    desk_n: usize,
 }
 
 fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::Path, gate: &Gate) -> Value {
@@ -827,6 +832,28 @@ fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::
         })
         .collect();
     let display_asleep = display::main_display_asleep();
+    // Optional extra GPU clients standing in for an active desktop (WindowServer
+    // compositing, browsers playing video, other apps): `desk_n` interactive-style
+    // processes with their own devices, started before the control and stopped after A.
+    // Their frames are not measured.
+    let mut desk: Vec<std::process::Child> = Vec::new();
+    for i in 0..gate.desk_n {
+        let Some(d) = gate.desk.as_ref() else { break };
+        let child = Command::new(bin.join("s8-interactive"))
+            .args(d.split_whitespace())
+            // Long enough to outlast the control, B's start-up (Blender may take minutes),
+            // and A; it is killed after A anyway.
+            .args(["--seconds", &(gate.control_s + seconds + 300.0).to_string()])
+            .args(["--warmup", "0", "--label", &format!("desk{i}"), "--no-rt"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn desk load");
+        desk.push(child);
+    }
+    if !desk.is_empty() {
+        std::thread::sleep(Duration::from_secs(3));
+    }
     let screen_locked = display::screen_locked();
     let fifo = std::env::temp_dir().join(format!("s8-{}-{}.fifo", std::process::id(), s.name));
     let fifo = fifo.to_str().unwrap().to_string();
@@ -914,6 +941,10 @@ fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::
     } else {
         None
     };
+    for mut d in desk {
+        let _ = d.kill();
+        let _ = d.wait();
+    }
     let _ = std::fs::remove_file(&fifo);
     let attribution = a
         .as_ref()
@@ -933,6 +964,8 @@ fn run_once(s: &Scenario, bin: &std::path::Path, seconds: f64, out: &std::path::
         "b_args": s.b,
         "a_wall_seconds": stats::r(a_secs, 2),
         "display_asleep": display_asleep,
+        "desk_load": gate.desk,
+        "desk_processes": if gate.desk.is_some() { gate.desk_n } else { 0 },
         "screen_locked": screen_locked,
         "gpu_util_idle_before": stats::dist(&idle),
         "gpu_util_during": stats::dist(&during),
@@ -1179,6 +1212,8 @@ fn main() {
         retries: args.num("retries", 2),
         blender: args.str("blender").map(str::to_string),
         control_s: args.num("control-s", 20.0),
+        desk: args.str("desk").map(str::to_string),
+        desk_n: args.num("desk-n", 1),
     };
     if let Some(p) = &gate.blender {
         assert!(std::path::Path::new(p).is_file(), "--blender {p}: no such file");
