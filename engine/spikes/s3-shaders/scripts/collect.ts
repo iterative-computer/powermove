@@ -7,12 +7,18 @@
  * transition registries), kernel/extension-layers.ts, and the preambles that
  * legacy/gl/shaders.ts and transitions.ts install.
  *
- * Usage: bun scripts/collect.ts [--no-store]
+ * Usage: bun scripts/collect.ts [--no-store] [--local <path>]...
  * Output: work/corpus.json, work/images/*.f16 (gitignored; Store sources are
  * third-party code and never committed).
+ *
+ * --local adds private sources from this machine as the `local` group: a
+ * `.pmv` project (shader-layer code in its layers and edit history) or an
+ * extensions folder (each subfolder's index.ts). Their code stays in work/;
+ * case ids are content hashes and the report prints no source text for them.
  */
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join, relative } from 'node:path';
 import vm from 'node:vm';
 
@@ -25,6 +31,7 @@ const APP = join(REPO, 'apps', 'desktop');
 const RENDERER = join(APP, 'src', 'renderer', 'src');
 const WORK = join(SPIKE, 'work');
 const withStore = !process.argv.includes('--no-store');
+const localPaths = process.argv.flatMap((arg, i, all) => (arg === '--local' && all[i + 1] ? [all[i + 1]!] : []));
 
 /* ── the real generators ───────────────────────────────────────────── */
 const shaders = await import(join(RENDERER, 'legacy/gl/shaders.ts'));
@@ -56,6 +63,8 @@ interface Case {
   /** Contract features exercised (generated corpus), for the coverage table. */
   covers?: string[];
   flags?: Record<string, unknown>;
+  /** Private local source: the report prints no source text or labels. */
+  private?: boolean;
 }
 
 /* compositor.ts setU: how a JS value list becomes a glUniform call. */
@@ -274,13 +283,14 @@ async function activateModule(entry: string, project = { w: WIDTH, h: HEIGHT }):
   return out;
 }
 
-function addRegistered(group: string, prefix: string, items: Registered[], source: string) {
-  for (const { kind, def } of items) {
-    const id = `${prefix}/${slug(def.id)}`;
-    if (kind === 'effect') effectCase(group, id, def, source);
-    else if (kind === 'transition') transitionCase(group, id, def, source);
-    else extensionCase(group, id, def, source);
-  }
+function addRegistered(group: string, prefix: string, items: Registered[], source: string, extra: Partial<Case> = {}) {
+  items.forEach(({ kind, def }, index) => {
+    const id = extra.private ? `${prefix}/${index}` : `${prefix}/${slug(def.id)}`;
+    const label = extra.private ? { label: 'Local extension' } : {};
+    if (kind === 'effect') effectCase(group, id, def, source, { ...extra, ...label });
+    else if (kind === 'transition') transitionCase(group, id, def, source, { ...extra, ...label });
+    else extensionCase(group, id, def, source, { ...extra, ...label });
+  });
 }
 
 /* Evaluate `api.<registry>.register({...})` object literals in test files. */
@@ -487,7 +497,48 @@ if (withStore) {
   }
 }
 
-/* ── 10. generated agent corpus ────────────────────────────────────── */
+/* ── 10. private sources on this machine (opt-in) ──────────────────── */
+const hash8 = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 8);
+for (const path of localPaths) {
+  if (path.endsWith('.pmv')) {
+    // PMV4: a header line, then the project JSON, then binary payloads.
+    const bytes = await readFile(path);
+    const header = bytes.subarray(0, 5).toString('latin1');
+    if (header !== 'PMV4\n') { activationNotes.push(`local project skipped (format ${JSON.stringify(header.trim())})`); continue; }
+    const text = bytes.subarray(5).toString('utf8');
+    let depth = 0, end = 0, quote = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i]!;
+      if (quote) { if (ch === '\\') i++; else if (ch === '"') quote = false; continue; }
+      if (ch === '"') quote = true;
+      else if (ch === '{') depth++;
+      else if (ch === '}' && --depth === 0) { end = i + 1; break; }
+    }
+    const project = JSON.parse(text.slice(0, end));
+    // Shader-layer code: current layers plus every distinct version in the edit history.
+    const codes = new Set<string>();
+    const walk = (value: unknown, key = '') => {
+      if (typeof value === 'string') { if (key === 'code' && /void\s+main\s*\(/.test(value)) codes.add(value); return; }
+      if (Array.isArray(value)) { for (const item of value) walk(item, key); return; }
+      if (value && typeof value === 'object') for (const [k, v] of Object.entries(value)) walk(v, k);
+    };
+    walk(project.proj);
+    for (const code of codes) {
+      const id = `shader-${hash8(code)}`;
+      if (seen.has(`local/${id}`)) continue;
+      shaderCase('local', id, code, 'Local shader layer', 'local project (private)', { private: true });
+    }
+  } else {
+    for (const dir of (await readdir(path)).sort()) {
+      const entry = join(path, dir, 'index.ts');
+      if (!existsSync(entry)) continue;
+      const text = await readFile(entry, 'utf8');
+      addRegistered('local', `ext-${hash8(text)}`, await activateModule(entry), 'local extension (private)', { private: true });
+    }
+  }
+}
+
+/* ── 11. generated agent corpus ────────────────────────────────────── */
 for (const g of GENERATED as GeneratedShader[]) {
   const extra = { covers: g.covers };
   if (g.kind === 'effect') effectCase('generated', g.name, g.def, `engine/spikes/s3-shaders/corpus/generated (${g.name})`, extra);
