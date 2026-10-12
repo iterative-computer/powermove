@@ -174,7 +174,7 @@ fn seek_corpus() {
 /// Regression: FFmpeg 8.1's HEVC alpha path releases the alpha-layer
 /// picture's luma buffer reference mid-decode (`replace_alpha_plane`). With a
 /// single buffer reference per frame that freed the slot under a live decode
-/// and corrupted random-access frames in about 40% of runs at 4 threads;
+/// and corrupted random-access frames in 6 of 12 runs at 4 threads;
 /// `get_buffer2` now gives every plane its own reference. Ten runs with frame
 /// threading must all be exact.
 #[test]

@@ -397,7 +397,7 @@ pub struct FfDecoder {
 unsafe impl Send for FfDecoder {}
 
 /// FFmpeg decoders that advertise DR1 but copy from the library's own frame
-/// into the `get_buffer2` frame (checked against FFmpeg 9.0.2's
+/// into the `get_buffer2` frame (checked against FFmpeg 8.1.2's
 /// `libavcodec/libvpxdec.c`: VP8 has no external frame buffers in libvpx).
 const INTERNAL_COPY: [&str; 1] = ["libvpx"];
 
@@ -426,7 +426,7 @@ unsafe extern "C" fn get_buffer2(ctx: *mut ff::AVCodecContext, frame: *mut ff::A
         // plane and keeps writing the other planes: with one reference that
         // frees the whole slot under a live decode, and the stray writes land
         // in whichever frame reuses it (measured: 128-valued chroma blocks in
-        // random-access frames of hevc-alpha.mov, about 40% of runs at 4
+        // random-access frames of hevc-alpha.mov in 6 of 12 runs at 4
         // threads).
         let n = layout.planes.len();
         for p in 0..n {
@@ -587,9 +587,9 @@ impl FfDecoder {
             let (slots, copied) = if let Some(slots) = found {
                 // The frame is in our slots: rendered there by the decoder, or
                 // copied there by the wrapper (`internal_copy`).
-                for p in 0..layout.planes.len() {
-                    layout.planes[p].offset = (*f).data[p].offset_from(slots[p].ptr()) as usize;
-                    layout.planes[p].stride = (*f).linesize[p] as usize;
+                for (p, (pl, slot)) in layout.planes.iter_mut().zip(&slots).enumerate() {
+                    pl.offset = (*f).data[p].offset_from(slot.ptr()) as usize;
+                    pl.stride = (*f).linesize[p] as usize;
                 }
                 if self.internal_copy {
                     self.copies += 1;
