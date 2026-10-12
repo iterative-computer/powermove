@@ -485,6 +485,28 @@ describe('legacy app install', () => {
     expect(memory.has('autosave')).toBe(false);
   });
 
+  it('keeps a never-saved project for the restored session when Don’t Save answers a quit', async () => {
+    const { PM, timers } = appRegistry();
+    installProjects(PM);
+    PM.proj.name = 'Keep me';
+    PM.autosave();
+    await timers.get(PM.app.saveTimer)();
+    const confirmProjectClose = vi.fn(async () => 'discard');
+    (window as any).powermove = { confirmProjectClose };
+    installBridgeForTests((window as any).powermove);
+
+    expect(await PM.prepareToClose({ quitting: true })).toBe(true);
+    expect(confirmProjectClose).toHaveBeenCalledOnce();
+    await PM.flushProject();
+    PM.autosave();
+    expect(PM.Projects.get('P1')?.name).toBe('Keep me');
+    expect(PM.Projects.list().map((project: any) => project.id)).toEqual(['P1']);
+
+    // The answer does not linger: closing the window afterwards still discards.
+    expect(await PM.prepareToClose()).toBe(true);
+    expect(PM.Projects.get('P1')).toBeNull();
+  });
+
   it('removes a never-saved tab without recapturing it when showing its neighbour', async () => {
     const { PM, listeners } = appRegistry();
     installProjects(PM);

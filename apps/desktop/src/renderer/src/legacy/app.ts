@@ -543,7 +543,9 @@ if (bootSession?.timeline && bootTimeline) {
   bootTimeline.graph = !!bootSession.timeline.graph;
 }
 PM.hist.import?.(bootSession?.history);
-restoreProjectAssets(PM.proj);
+// The same promise a project switch publishes, so callers can wait for the
+// restored project's media however it was opened.
+PM.projectAssetsReady = restoreProjectAssets(PM.proj);
 
 /* ── shell ─────────────────────────────────────────────── */
 /** Export defaults live on the project, so every write is an ordinary edit. */
@@ -1128,8 +1130,12 @@ PM.confirmCloseProject = async (id: string) => {
   return true;
 };
 /* Closing the window closes every tab, so each one with unsaved file changes
-   gets its own chance to be saved. */
-PM.prepareToClose = async () => {
+   gets its own chance to be saved. Quitting asks the same question, but the
+   window session is put back at the next launch (main's restoreWindows), so
+   Don't Save there only skips the file write: the local project stays, as the
+   prompt says ("Local recovery is kept separately"). Closing a window or a tab
+   is the user putting a document away, and a never-saved one is discarded. */
+PM.prepareToClose = async ({ quitting = false }: { quitting?: boolean } = {}) => {
   const ids = [...new Set([PM.proj.id, ...tabIds])];
   for (const id of ids) {
     if (!await PM.confirmCloseProject(id)) {
@@ -1138,7 +1144,10 @@ PM.prepareToClose = async () => {
       return false;
     }
   }
-  for (const id of ids) discardUnsavedProject(id);
+  for (const id of ids) {
+    if (quitting) pendingDiscards.delete(id);
+    else discardUnsavedProject(id);
+  }
   return true;
 };
 

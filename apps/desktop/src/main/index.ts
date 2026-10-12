@@ -179,11 +179,15 @@ function drainPendingOpenFiles(): void {
     });
   }
 }
-async function prepareEditorClose(window: BrowserWindow): Promise<void> {
+/** Asks the window's editor to close its projects. `quitting` tells it the
+ *  window session is restored at the next launch, so a Don't Save answer keeps
+ *  the local project instead of discarding a never-saved one. */
+async function prepareEditorClose(window: BrowserWindow, { quitting = false }: { quitting?: boolean } = {}): Promise<void> {
   if (window.isDestroyed() || window.webContents.isDestroyed()
     || !isAllowedNavigation(window.webContents.getURL(), devRendererUrl)) return;
   // User decisions and large file saves must not be cut off by the recovery-flush timeout.
-  const allowed = await window.webContents.executeJavaScript('window.PM?.prepareToClose?.() ?? true');
+  const allowed = await window.webContents.executeJavaScript(
+    `window.PM?.prepareToClose?.(${JSON.stringify({ quitting })}) ?? true`);
   if (!allowed) throw new Error('Close cancelled');
   await flushEditor(window);
 }
@@ -917,7 +921,7 @@ if (!hasSingleInstanceLock) {
     };
     registerWindowIpc();
     const quitBarrier = installQuitFlush(app, store, async () => {
-      for (const window of BrowserWindow.getAllWindows()) await prepareEditorClose(window);
+      for (const window of BrowserWindow.getAllWindows()) await prepareEditorClose(window, { quitting: true });
     });
     quitPrepared = quitBarrier.isPrepared;
 
