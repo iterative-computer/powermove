@@ -1,0 +1,12 @@
+[package]
+name = "s7-blender"
+description = "Blender surface import and the S7 Blender checks: 16-bit AgX surfaces, straight alpha, batching equality, appendix A items 38 and 39 (spike S7)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+png.workspace = true
