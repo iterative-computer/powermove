@@ -177,6 +177,8 @@ struct ProjectFace {
 pub enum RegistryError {
     #[error("the data is not a font CoreText and the web font sanitizer accept")]
     NotAFont,
+    #[error("unknown face {0}")]
+    UnknownFace(u32),
     #[error("unknown font blob {0}")]
     UnknownBlob(String),
     #[error("font blob {blob} has no face {index}: {source}")]
@@ -209,8 +211,13 @@ impl CoreTextRegistry {
     /// Must run on the main thread (AppKit's shared font manager); Electron
     /// main's JavaScript thread is the process's main thread.
     pub fn new() -> Self {
-        let mtm = MainThreadMarker::new().expect("CoreTextRegistry must be created on the main thread");
-        CoreTextRegistry {
+        Self::try_new().expect("CoreTextRegistry must be created on the main thread")
+    }
+
+    /// `new`, or `None` off the main thread.
+    pub fn try_new() -> Option<Self> {
+        let mtm = MainThreadMarker::new()?;
+        Some(CoreTextRegistry {
             fm: NSFontManager::sharedFontManager(mtm),
             faces: Vec::new(),
             by_key: HashMap::new(),
@@ -225,7 +232,7 @@ impl CoreTextRegistry {
             sources: HashMap::new(),
             subsets: HashMap::new(),
             generation: 0,
-        }
+        })
     }
 
     /// Installed font files read so far, with their sizes.
@@ -462,6 +469,24 @@ impl CoreTextRegistry {
         manifest.last_resort = self.match_font_family("Times", &FontDesc { weight: 400.0, italic: false, size: 16.0 }).map(|f| unsafe { f.family_name() }.to_string());
         manifest.faces = faces;
         manifest
+    }
+
+    // ------------------------------------------------------------ answers
+
+    /// Answers a batch of resolver queries (a replay's misses, or the
+    /// families a document names on open) with the records of every face
+    /// they name. Queries naming a face this registry never handed out are
+    /// refused: face ids are only meaningful to the registry that made them.
+    pub fn answer(&mut self, queries: &[crate::answers::Query]) -> Result<crate::answers::Answers, RegistryError> {
+        use crate::answers::Query;
+        for q in queries {
+            if let Query::Fallback { primary: id, .. } | Query::EmAdvance { face: id, .. } = q
+                && *id as usize >= self.faces.len()
+            {
+                return Err(RegistryError::UnknownFace(*id));
+            }
+        }
+        Ok(crate::answers::answer_batch(self, queries))
     }
 
     // ------------------------------------------------------------ bytes and subsets

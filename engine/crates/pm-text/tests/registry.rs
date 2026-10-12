@@ -96,6 +96,54 @@ fn main() {
         println!("  {family}: subset {} bytes from {} ({} tables)", subset.len(), source.as_slice().len(), tags.len());
     }
     check("unknown blob", r.subset("nope", 0).is_err(), String::new());
+
+    // The incremental protocol main serves pm-wasm: a replay starts with no
+    // answers and no fonts, reports misses and pending faces, main answers
+    // them in batches and serves subsets, and the layout converges on the
+    // native result.
+    {
+        use pm_text::answers::{Answers, Query, ReplayResolver};
+        use pm_text::compat::{Compat, TextContent};
+        use pm_text::corpus::{Case, run_case};
+        use pm_text::font::FontBytes;
+        let case = |id: &str, d: serde_json::Value| Case { id: id.into(), group: "protocol".into(), d: TextContent::from_json(&d) };
+        let cases = [
+            case("latin", serde_json::json!({ "text": "Hello, world. The quick brown fox", "font": "Helvetica Neue", "size": 48, "weight": 500, "boxWidth": 400 })),
+            case("mixed", serde_json::json!({ "text": "Mixed 世界 مرحبا שלום 😀 नमस्ते", "font": "Avenir Next", "size": 32, "tracking": 4 })),
+            case("system", serde_json::json!({ "text": "System UI, bold italic", "size": 24, "weight": 700, "italic": true })),
+            case("variable", serde_json::json!({ "text": "Skia axes", "font": "Skia", "size": 40, "fontAxis.wght": 1.6 })),
+        ];
+        let mut native = Compat::new(CoreTextRegistry::new());
+        let want: Vec<_> = cases.iter().map(|c| run_case(&mut native, c)).collect();
+
+        let mut resolver = ReplayResolver::new(&Answers::default());
+        let mut rounds = 0;
+        let mut batches = Vec::new();
+        let got = loop {
+            rounds += 1;
+            assert!(rounds <= 8, "the protocol did not converge");
+            let mut compat = Compat::new(resolver);
+            let out: Vec<_> = cases.iter().map(|c| run_case(&mut compat, c)).collect();
+            resolver = compat.into_resolver();
+            if resolver.misses.is_empty() && resolver.pending_blobs.is_empty() {
+                break out;
+            }
+            let misses: Vec<Query> = resolver.misses.clone();
+            let pending: Vec<(String, u32)> = resolver.pending_blobs.iter().cloned().collect();
+            resolver.clear_reports();
+            let reply = r.answer(&misses).expect("answers");
+            batches.push((misses.len(), reply.faces.len(), pending.len()));
+            resolver.add_answers(&reply);
+            for (blob, index) in reply.sources().into_iter().chain(pending) {
+                let subset = r.subset(&blob, index).expect("subset");
+                resolver.add_font(&blob, index, FontBytes::new(subset.to_vec()), 0);
+            }
+        };
+        check("incremental protocol converges on the native layout", got == want, format!("{batches:?}"));
+        println!("  protocol: {} rounds, batches (misses, faces, pending) {batches:?}", rounds);
+        let bogus = Query::Fallback { weight: 0, italic: false, size: 0, ch: 0x4e00, primary: u32::MAX, emoji: false };
+        check("answers refuse unknown faces", r.answer(&[bogus]).is_err(), String::new());
+    }
     println!("{checks} checks passed");
 }
 

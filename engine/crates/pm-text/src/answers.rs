@@ -391,6 +391,33 @@ pub fn answer_query(resolver: &mut dyn FontResolver, q: &Query) -> Answer {
     Answer { query: q.clone(), face, advance: None }
 }
 
+/// Answers a batch of queries (main's reply to a replay's `misses`, or a
+/// prefetch) as an incremental `Answers`: each query once, in query order,
+/// with the records of every face the answers and queries name, so the
+/// replay can `add_answers` it directly.
+pub fn answer_batch(resolver: &mut dyn FontResolver, queries: &[Query]) -> Answers {
+    let mut by_query: BTreeMap<Query, Answer> = BTreeMap::new();
+    for q in queries {
+        if !by_query.contains_key(q) {
+            by_query.insert(q.clone(), answer_query(resolver, q));
+        }
+    }
+    let mut ids: BTreeSet<FaceId> = BTreeSet::new();
+    for a in by_query.values() {
+        ids.extend(a.face);
+        match a.query {
+            Query::Fallback { primary, .. } => {
+                ids.insert(primary);
+            }
+            Query::EmAdvance { face, .. } => {
+                ids.insert(face);
+            }
+            _ => {}
+        }
+    }
+    Answers { faces: ids.into_iter().map(|id| FaceRecord::of(id, resolver.face(id))).collect(), answers: by_query.into_values().collect() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,6 +465,58 @@ mod tests {
             answers: vec![Answer { query: Query::family("B", &desc()), face: Some(1), advance: None }],
         });
         assert_eq!(r.family("B", &desc()), Some(1));
+    }
+
+    /// Resolves family "A" to face 0 and everything else to nothing.
+    struct Fake(Vec<FaceInfo>);
+
+    impl FontResolver for Fake {
+        fn face(&self, id: FaceId) -> &FaceInfo {
+            &self.0[id as usize]
+        }
+        fn family(&mut self, family: &str, _: &FontDesc) -> Option<FaceId> {
+            (family == "A").then_some(0)
+        }
+        fn standard(&mut self, _: &FontDesc) -> Option<FaceId> {
+            Some(1)
+        }
+        fn fallback_for_char(&mut self, _: &FontDesc, _: u32, _: FaceId, _: bool) -> Option<FaceId> {
+            None
+        }
+        fn last_resort(&mut self, _: &FontDesc) -> Option<FaceId> {
+            None
+        }
+        fn variable_face(&mut self, _: &str) -> Option<FaceId> {
+            None
+        }
+        fn em_advance(&mut self, _: FaceId, size: f32) -> Option<f32> {
+            Some(size)
+        }
+    }
+
+    #[test]
+    fn batches_answer_each_query_once_with_the_faces_they_name() {
+        let face = |b: &str| rec(0, b).info(FontBytes::new(vec![]), 0);
+        let mut r = Fake(vec![face("a"), face("t"), face("p")]);
+        let queries = [
+            Query::family("B", &desc()),
+            Query::family("A", &desc()),
+            Query::family("A", &desc()),
+            Query::fallback(&desc(), 0x4e00, 2, false),
+            Query::em_advance(1, 20.0),
+        ];
+        let a = answer_batch(&mut r, &queries);
+        assert_eq!(a.answers.len(), 4);
+        assert_eq!(a.faces.iter().map(|f| (f.id, f.blob.as_str())).collect::<Vec<_>>(), [(0, "a"), (1, "t"), (2, "p")]);
+        let em = a.answers.iter().find(|x| matches!(x.query, Query::EmAdvance { .. })).unwrap();
+        assert_eq!((em.face, em.advance), (None, Some(20.0)));
+        // The replay takes the batch as is.
+        let mut replay = ReplayResolver::new(&Answers::default());
+        replay.add_answers(&a);
+        replay.add_font("a", 0, FontBytes::new(vec![]), 0);
+        assert_eq!(replay.family("A", &desc()), Some(0));
+        assert_eq!(replay.family("B", &desc()), None);
+        assert!(replay.misses.is_empty());
     }
 
     #[test]
