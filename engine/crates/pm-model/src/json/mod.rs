@@ -9,7 +9,7 @@
 //!   `\uD800` escapes survive a round trip ([`JsString`] stores them as WTF-8);
 //! * object keys are unique (the last duplicate wins, as in `JSON.parse`) and
 //!   their order carries no meaning;
-//! * serialization ([`write`]) reproduces `JSON.stringify` byte for byte for
+//! * serialization ([`write`](mod@write)) reproduces `JSON.stringify` byte for byte for
 //!   strings and numbers, with object keys sorted by UTF-16 code units.
 
 mod jsnum;
@@ -40,7 +40,7 @@ pub enum Value {
 
 /// A JSON object: unique keys, no meaningful order.
 ///
-/// Stored sorted by WTF-8 bytes (code point order); [`write`] re-sorts by
+/// Stored sorted by WTF-8 bytes (code point order); [`write`](mod@write) re-sorts by
 /// UTF-16 code units where the two orders differ.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Map(BTreeMap<JsString, Value>);

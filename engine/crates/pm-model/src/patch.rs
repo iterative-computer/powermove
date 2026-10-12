@@ -3,7 +3,7 @@
 //! [`apply_patches`] reproduces `applyPatch` on the JSON-visible state of the
 //! document, and [`crate::doc::Document::apply`] does the same on the
 //! revisioned tree with id-keyed reconciliation. Both run one implementation,
-//! generic over [`Tree`], so the semantics cannot drift apart.
+//! generic over one private `Tree` trait, so the semantics cannot drift apart.
 //!
 //! What "exact" covers, beyond ordinary sets and deletes:
 //!
