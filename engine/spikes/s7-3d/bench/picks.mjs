@@ -101,9 +101,9 @@ for (const id of scenes) {
     }
   }
   const vertices = ref.ids.reduce((n, _, i) => n + w.s7_layer_vertices(i), 0);
-  const entry = { scene: id, vertices, load, rays: total, agree, max_rel_distance: maxRel, frames, time_change_first_pick_ms: { median: pct(changes, 0.5), p95: pct(changes, 0.95), max: pct(changes, 1) }, warm_footprint_pick_ms: { median: pct(warm, 0.5), p95: pct(warm, 0.95), max: pct(warm, 1), hits: hotHits, rays: warm.length } };
+  const entry = { scene: id, vertices, wasm_memory_mb: w.memory.buffer.byteLength / 2 ** 20, load, rays: total, agree, max_rel_distance: maxRel, frames, time_change_first_pick_ms: { median: pct(changes, 0.5), p95: pct(changes, 0.95), max: pct(changes, 1) }, warm_footprint_pick_ms: { median: pct(warm, 0.5), p95: pct(warm, 0.95), max: pct(warm, 1), hits: hotHits, rays: warm.length } };
   report.push(entry);
-  console.log(`${id}: ${vertices} vertices, load ${load.map(l => l.load_ms.toFixed(0)).join('+')} ms, ${agree}/${total} picks agree (max rel distance ${maxRel.toExponential(2)})`);
+  console.log(`${id}: ${vertices} vertices, wasm memory ${entry.wasm_memory_mb.toFixed(0)} MiB, load ${load.map(l => l.load_ms.toFixed(0)).join('+')} ms, ${agree}/${total} picks agree (max rel distance ${maxRel.toExponential(2)})`);
   for (const f of frames) console.log(`  t=${f.time}: first pick ${f.first_pick_ms.toFixed(2)} ms (update ${f.update_ms.toFixed(2)} ms), median ${f.median_ms.toFixed(4)} ms, p95 ${f.p95_ms.toFixed(4)} ms, max ${f.max_ms.toFixed(4)} ms`);
   const tc = entry.time_change_first_pick_ms, wm = entry.warm_footprint_pick_ms;
   console.log(`  footprint rays, first pick after a time change (200): median ${tc.median.toFixed(3)} ms, p95 ${tc.p95.toFixed(3)} ms, max ${tc.max.toFixed(3)} ms`);
