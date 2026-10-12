@@ -137,7 +137,11 @@ fn naga_stage(mut module: rspirv::dr::Module, spv: &compile::Spirv, timings: &mu
         Err(_) => return Err(Failure::new("naga-parse", "naga SPIR-V front end panicked")),
     };
     timings.insert(format!("{prefix}naga-parse"), ms(start));
-    derivative_uniformity_off(&mut naga_module);
+    // `S3_UNIFORMITY=on` keeps naga's derivative-uniformity analysis, to
+    // measure how many WebGL-valid shaders step 5's filter is needed for.
+    if std::env::var("S3_UNIFORMITY").as_deref() != Ok("on") {
+        derivative_uniformity_off(&mut naga_module);
+    }
     let start = Instant::now();
     naga_validate(&naga_module).map_err(|e| Failure::new("naga-validate", e))?;
     timings.insert(format!("{prefix}naga-validate"), ms(start));
