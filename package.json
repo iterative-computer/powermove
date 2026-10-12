@@ -24,8 +24,7 @@
     "@anthropic-ai/claude-code",
     "@powermove/macos-haptics",
     "electron",
-    "esbuild",
-    "ffmpeg-static"
+    "esbuild"
   ],
   "engines": {
     "bun": ">=1.3"
