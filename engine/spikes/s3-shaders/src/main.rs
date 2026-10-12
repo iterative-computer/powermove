@@ -11,6 +11,7 @@
 //!   s3-shaders fuzz [--iterations N] [--seed S] [--bombs] [--metal] [--deadline seconds]
 //!   s3-shaders fuzz-dump [--iterations N] [--seed S] [--bombs] [--out dir]
 //!   s3-shaders translate --frag <file> [--path naga|spvc]
+//!   s3-shaders envelope --perturbed work/webgl/metal-perturbed,... [--webgl work/webgl/metal] [--results work/results]
 
 mod case;
 mod compare;
@@ -190,6 +191,64 @@ fn msl(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// For every variant that failed the parity check on a path, split the
+/// engine's out-of-tolerance pixels into those inside WebGL's own
+/// perturbation envelope (pixels where WebGL, given uniforms scaled by a few
+/// float ulps, already moves by more than 1 CV) and those outside it. A
+/// mismatch entirely inside the envelope is a property of the shader's
+/// conditioning, not of the translation. One JSON line per failing variant.
+fn envelope(args: &[String]) -> anyhow::Result<()> {
+    let corpus_path = PathBuf::from(arg(args, "--corpus").unwrap_or_else(|| "work/corpus.json".into()));
+    let reference = PathBuf::from(arg(args, "--webgl").unwrap_or_else(|| "work/webgl/metal".into()));
+    let results = PathBuf::from(arg(args, "--results").unwrap_or_else(|| "work/results".into()));
+    let perturbed: Vec<PathBuf> = arg(args, "--perturbed").expect("--perturbed dir[,dir...]").split(',').map(PathBuf::from).collect();
+    let corpus: case::Corpus = serde_json::from_slice(&std::fs::read(&corpus_path)?)?;
+    let q = |v: f16| if v.to_f32().is_nan() { -1 } else { (v.to_f32().clamp(0.0, 1.0) * 255.0).round() as i32 };
+    let worst = |a: &[f16], b: &[f16], p: usize| (0..4).map(|c| (q(a[p * 4 + c]) - q(b[p * 4 + c])).unsigned_abs()).max().unwrap();
+    for path in ["naga", "spvc"] {
+        for case in &corpus.cases {
+            for variant in &case.variants {
+                let name = format!("{}.f16", variant.name);
+                let Some(engine) = read_f16(&results.join(path).join(sanitize(&case.id)).join(&name)) else { continue };
+                let Some(webgl) = read_f16(&reference.join(sanitize(&case.id)).join(&name)) else { continue };
+                if engine.len() != webgl.len() {
+                    continue;
+                }
+                let runs: Vec<Vec<f16>> = perturbed.iter().filter_map(|d| read_f16(&d.join(sanitize(&case.id)).join(&name))).filter(|r| r.len() == webgl.len()).collect();
+                let pixels = webgl.len() / 4;
+                let (mut over, mut inside, mut outside_max, mut envelope_size) = (0usize, 0usize, 0u32, 0usize);
+                let mut outside_over_one = 0usize;
+                for p in 0..pixels {
+                    let in_envelope = runs.iter().any(|r| worst(&webgl, r, p) > 1);
+                    envelope_size += usize::from(in_envelope);
+                    let d = worst(&webgl, &engine, p);
+                    if d > 1 {
+                        over += 1;
+                        if in_envelope {
+                            inside += 1;
+                        } else {
+                            outside_over_one += 1;
+                        }
+                    }
+                    if !in_envelope {
+                        outside_max = outside_max.max(d);
+                    }
+                }
+                let outside_pass = outside_max <= 4 && (outside_over_one as f64) <= 0.001 * (pixels - envelope_size).max(1) as f64;
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "path": path, "id": case.id, "variant": variant.name, "perturbed_runs": runs.len(),
+                        "envelope_pixels": envelope_size, "over_one": over, "over_one_inside_envelope": inside,
+                        "over_one_outside_envelope": outside_over_one, "max_diff_outside_envelope": outside_max, "pass_outside_envelope": outside_pass,
+                    })
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Translate one fragment source file (with the corpus vertex shader) and
 /// print the outcome and per-stage timings, for triaging slow or failing
 /// inputs.
@@ -289,6 +348,7 @@ fn dispatch() -> anyhow::Result<()> {
         Some("fuzz-worker") => fuzz::worker(&args),
         Some("fuzz-dump") => fuzz::dump(&args),
         Some("translate") => translate_file(&args),
+        Some("envelope") => envelope(&args),
         _ => {
             eprintln!("usage: s3-shaders run|msl|diff|refcmp|fuzz [options]");
             std::process::exit(2);

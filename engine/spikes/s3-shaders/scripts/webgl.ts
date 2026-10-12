@@ -4,12 +4,13 @@
  * with LINEAR + CLAMP_TO_EDGE, clear to transparent, blending off, a
  * TRIANGLE_STRIP quad, the recorded uniform calls), then reads back RGBA16F.
  *
- * Usage: bun scripts/webgl.ts [--angle metal|swiftshader] [--filter <s>] [--perturb]
+ * Usage: bun scripts/webgl.ts [--angle metal|swiftshader] [--filter <s>] [--perturb [k]]
  * Output: work/webgl/<angle>/<case>/<variant>.f16 and work/webgl/<angle>/status.json
  *
  * --perturb renders every case again with each float uniform except the quad
  * geometry (u_m, u_uv) scaled by 1 + 2^-20 (about 8 float ulps), into
- * work/webgl/<angle>-perturbed. Comparing that with the unperturbed run shows
+ * work/webgl/<angle>-perturbed (`--perturb k` scales by 1 + k * 2^-20 into
+ * <angle>-perturbed<k>, for more directions). Comparing that with the unperturbed run shows
  * which shaders are so ill-conditioned that rounding-level differences
  * (expression order, fused multiply-add) exceed the parity tolerance by
  * themselves, independent of any translator.
@@ -27,8 +28,10 @@ const args = process.argv.slice(2);
 const angle = args.includes('--angle') ? args[args.indexOf('--angle') + 1]! : 'metal';
 const filter = args.includes('--filter') ? args[args.indexOf('--filter') + 1]! : null;
 const perturb = args.includes('--perturb');
+const perturbArg = perturb ? args[args.indexOf('--perturb') + 1] : undefined;
+const perturbK = perturbArg !== undefined && /^-?\d+(\.\d+)?$/.test(perturbArg) ? Number(perturbArg) : 1;
 const corpus = JSON.parse(await readFile(join(WORK, 'corpus.json'), 'utf8'));
-const out = join(WORK, 'webgl', perturb ? `${angle}-perturbed` : angle);
+const out = join(WORK, 'webgl', perturb ? `${angle}-perturbed${perturbK === 1 ? '' : perturbK}` : angle);
 await mkdir(out, { recursive: true });
 
 const launchArgs = angle === 'swiftshader'
@@ -83,7 +86,7 @@ const status: Record<string, unknown> = { ...previous };
 let compiled = 0, failed = 0;
 for (const c of corpus.cases) {
   if (filter && !c.id.includes(filter)) continue;
-  const result = await page.evaluate(({ c, perturb }: { c: any; perturb: boolean }) => {
+  const result = await page.evaluate(({ c, perturb, perturbK }: { c: any; perturb: boolean; perturbK: number }) => {
     const w = window as any;
     const gl: WebGL2RenderingContext = w.gl;
     const shader = (type: number, source: string) => {
@@ -133,7 +136,7 @@ for (const c of corpus.cases) {
           if (location === null && call.alt) location = gl.getUniformLocation(program, call.alt);
           if (location === null) continue;
           const geometry = call.name === 'u_m' || call.name === 'u_uv';
-          const x = perturb && call.fn !== '1i' && !geometry ? call.v.map((v: number) => Math.fround(v * (1 + 2 ** -20))) : call.v;
+          const x = perturb && call.fn !== '1i' && !geometry ? call.v.map((v: number) => Math.fround(v * (1 + perturbK * 2 ** -20))) : call.v;
           if (call.fn === '1f') gl.uniform1f(location, x[0]);
           else if (call.fn === '2f') gl.uniform2f(location, x[0], x[1]);
           else if (call.fn === '3f') gl.uniform3f(location, x[0], x[1], x[2]);
@@ -170,7 +173,7 @@ for (const c of corpus.cases) {
     gl.deleteProgram(program);
     const error = gl.getError();
     return { ok: true, outputs, ms: performance.now() - started, glError: error };
-  }, { c, perturb });
+  }, { c, perturb, perturbK });
   if (!result.ok) {
     failed++;
     status[c.id] = { compiled: false, log: result.log };
@@ -182,6 +185,6 @@ for (const c of corpus.cases) {
   await mkdir(dir, { recursive: true });
   for (const [name, data] of Object.entries(result.outputs as Record<string, string>)) await writeFile(join(dir, `${name}.f16`), Buffer.from(data, 'base64'));
 }
-await writeFile(join(out, 'status.json'), JSON.stringify({ renderer, browser: browser.version(), angle, perturb, cases: status }, null, 1));
+await writeFile(join(out, 'status.json'), JSON.stringify({ renderer, browser: browser.version(), angle, perturb: perturb ? perturbK : 0, cases: status }, null, 1));
 await browser.close();
 console.log(`${compiled} compiled, ${failed} failed (${angle})`);
