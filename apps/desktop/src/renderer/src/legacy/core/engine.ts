@@ -16,7 +16,9 @@ import type { PMRegistry } from '../registry';
 const ENGINE_RUNTIME = Symbol.for('powermove.engine.runtime');
 
 export function install(PM: PMRegistry): void {
-PM.prepareFrame=(time:number)=>prepareFrame(PM,time);
+/* Options are the exporter's (output size, motion blur, shutter samples); without
+   them a frame is prepared at composition size with the preview's samples. */
+PM.prepareFrame=(time:number,options?:{width?:number;height?:number;mblur?:boolean;mbSamples?:number;shutter?:number})=>prepareFrame(PM,time,PM.proj,options);
 
 // Renderer bootstrap can be evaluated again while the same PM registry stays
 // alive. A second animation loop advances the shared playhead a second time on
