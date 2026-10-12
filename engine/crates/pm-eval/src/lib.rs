@@ -49,7 +49,7 @@ pub mod temporal;
 
 pub use comp::{Comp, CompError};
 pub use evaluator::{
-    Content, ErrorKey, EvalHooks, Evaluator, NoHooks, PropAddress, PropEval, PropId, ValueKind, Via,
+    CacheStats, Content, ErrorKey, EvalHooks, Evaluator, NoHooks, PropAddress, PropEval, PropId, ValueKind, Via,
 };
 pub use expr::{CompiledExpression, ExprContext, ExprDeps, ExprError, ExpressionEngine};
 pub use js_sem::{JsResult, JsThrow, JsValue};

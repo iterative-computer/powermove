@@ -202,6 +202,17 @@ pub enum ValueKind {
     Threw = 2,
 }
 
+/// Counters of the interned-id caches (for tests and diagnostics).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CacheStats {
+    /// Plans built (an id resolved and its track prepared).
+    pub plans: u64,
+    /// Plans kept across a document revision.
+    pub reused: u64,
+    /// Answers served from the last answer at the same revision and time.
+    pub memo_hits: u64,
+}
+
 /// Where expression errors are kept (`PM.expressionErrors`, keyed by the
 /// channel object in JavaScript).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -254,6 +265,8 @@ enum Plan {
 #[derive(Clone, Debug)]
 struct SlotState {
     validated: u64,
+    /// Whether the layer's id was unique in the composition when validated.
+    unique: bool,
     plan: Plan,
     from: f64,
     memo: Option<(u64, JsResult<JsValue>)>,
@@ -284,6 +297,7 @@ pub struct Evaluator {
     free: Vec<u32>,
     indexes: HashMap<JsString, IndexEntry>,
     last_revision: u64,
+    stats: CacheStats,
 }
 
 impl Default for Evaluator {
@@ -341,6 +355,7 @@ impl Evaluator {
             free: Vec::new(),
             indexes: HashMap::new(),
             last_revision: 0,
+            stats: CacheStats::default(),
         }
     }
 
@@ -372,6 +387,11 @@ impl Evaluator {
             self.reset();
         }
         self.last_revision = revision;
+    }
+
+    /// The interned-id cache counters.
+    pub fn cache_stats(&self) -> CacheStats {
+        self.stats
     }
 
     /// The spring tables built so far.
@@ -728,6 +748,7 @@ impl Evaluator {
             if state.validated == revision {
                 if let Some((t, value)) = &state.memo {
                     if *t == time_bits {
+                        self.stats.memo_hits += 1;
                         return value.clone();
                     }
                 }
@@ -801,7 +822,10 @@ impl Evaluator {
         // Keep the previous plan when the inputs provably did not change.
         let keep = match &self.slots[index].state {
             Some(state) if state.validated <= revision => {
+                // Unique now and then: the same logical layer (see the module
+                // documentation).
                 let same_layer = unique
+                    && state.unique
                     && node::member(Some(layer), "id").is_some_and(|n| n.rev() <= state.validated);
                 let unchanged = same_layer
                     && (layer.rev() <= state.validated
@@ -828,17 +852,21 @@ impl Evaluator {
         };
         match keep {
             Some((memo_ok, from)) => {
+                self.stats.reused += 1;
                 let state = self.slots[index].state.as_mut().expect("state");
                 state.validated = revision;
+                state.unique = unique;
                 state.from = from;
                 if !memo_ok {
                     state.memo = None;
                 }
             }
             None => {
+                self.stats.plans += 1;
                 let (plan, from) = self.plan(&cx, layer, &address);
                 self.slots[index].state = Some(SlotState {
                     validated: revision,
+                    unique,
                     plan,
                     from,
                     memo: None,
