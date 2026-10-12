@@ -11,7 +11,7 @@ use core::f64::consts::PI;
 
 use kurbo::{Affine, BezPath, Cap, Join, Rect, Stroke};
 
-use crate::canvas::{CanvasPath, NegativeRadius};
+use crate::canvas::{CanvasPath, CanvasTransform, NegativeRadius};
 use crate::corner::{self, CornerContent};
 use crate::js;
 
@@ -25,7 +25,9 @@ pub const MAX_RASTER_SIZE: f64 = 8192.0;
 /// count loops until the renderer hangs; the engine stops here instead.
 pub const MAX_POLYGON_VERTICES: f64 = 1_048_576.0;
 
-/// Canvas2D's default miter limit.
+/// Canvas2D's default miter limit. (Canvas2D's default caps are butt and its
+/// default join miter; kurbo's `Stroke::new` defaults to round for both, so
+/// every stroke here sets them explicitly.)
 pub const CANVAS_MITER_LIMIT: f64 = 10.0;
 
 /// `d.shape`. Anything other than the four named shapes draws a rectangle.
@@ -167,6 +169,7 @@ fn shape_stroke(d: &ShapeContent) -> Option<ShapeStroke> {
     (d.stroke > 0.0).then(|| ShapeStroke {
         style: Stroke::new(if d.stroke.is_finite() { d.stroke } else { 1.0 })
             .with_join(Join::Round)
+            .with_caps(Cap::Butt)
             .with_miter_limit(CANVAS_MITER_LIMIT),
         paint: StrokePaint::StrokeColor,
     })
@@ -184,15 +187,24 @@ pub fn shape_geometry(d: &ShapeContent) -> Result<ShapeGeometry, ShapeError> {
             let star = d.shape == ShapeKind::Star;
             let n = js::max(3.0, js::or(d.points, 5.0));
             let outer = js::min(w, h) / 2.0;
-            let inner = if star { outer * STAR_INNER_RATIO } else { outer };
-            let count = js::min(n * if star { 2.0 } else { 1.0 }, MAX_POLYGON_VERTICES);
+            let inner = if star {
+                outer * STAR_INNER_RATIO
+            } else {
+                outer
+            };
+            let total = n * if star { 2.0 } else { 1.0 };
+            let count = js::min(total, MAX_POLYGON_VERTICES);
             let mut i = 0u32;
             while f64::from(i) < count {
                 let fi = f64::from(i);
-                let a = -PI / 2.0 + (fi * PI * 2.0) / count;
+                let a = -PI / 2.0 + (fi * PI * 2.0) / total;
                 let radius = if star && i % 2 == 1 { inner } else { outer };
                 let (x, y) = (w / 2.0 + js::cos(a) * radius, h / 2.0 + js::sin(a) * radius);
-                if i == 0 { path.move_to(x, y) } else { path.line_to(x, y) }
+                if i == 0 {
+                    path.move_to(x, y)
+                } else {
+                    path.line_to(x, y)
+                }
                 i += 1;
             }
             path.close_path();
@@ -226,7 +238,11 @@ pub fn shape_geometry(d: &ShapeContent) -> Result<ShapeGeometry, ShapeError> {
             }
         }
     }
-    Ok(ShapeGeometry { path: path.finish(), fill: true, stroke: shape_stroke(d) })
+    Ok(ShapeGeometry {
+        path: path.finish(),
+        fill: true,
+        stroke: shape_stroke(d),
+    })
 }
 
 /// Today's selection box in layer space (`shapeRasterGeometry().selection`).
@@ -291,7 +307,10 @@ impl ShapeRaster {
     /// Shape space to bitmap pixels (the canvas transform `scale(density)`
     /// then `translate(pad, pad)`).
     pub fn shape_to_pixels(&self) -> Affine {
-        Affine::new([self.density, 0.0, 0.0, self.density, self.density * self.pad, self.density * self.pad])
+        let mut t = CanvasTransform::IDENTITY;
+        t.scale(self.density, self.density);
+        t.translate(self.pad, self.pad);
+        t.affine()
     }
 
     /// Shape space to layer space as today's compositor presents the bitmap:
@@ -311,15 +330,27 @@ mod tests {
     use kurbo::{PathEl, Point, Shape};
 
     fn shape(kind: ShapeKind, w: f64, h: f64) -> ShapeContent {
-        ShapeContent { shape: kind, w, h, ..ShapeContent::default() }
+        ShapeContent {
+            shape: kind,
+            w,
+            h,
+            ..ShapeContent::default()
+        }
     }
 
     #[test]
     fn star_alternates_radii() {
-        let g = shape_geometry(&ShapeContent { points: 5.0, ..shape(ShapeKind::Star, 100.0, 100.0) }).unwrap();
+        let g = shape_geometry(&ShapeContent {
+            points: 5.0,
+            ..shape(ShapeKind::Star, 100.0, 100.0)
+        })
+        .unwrap();
         let els = g.path.elements();
         assert_eq!(els.len(), 11);
-        assert_eq!(els[0], PathEl::MoveTo(Point::new(50.0 + js::cos(-PI / 2.0) * 50.0, 0.0)));
+        assert_eq!(
+            els[0],
+            PathEl::MoveTo(Point::new(50.0 + js::cos(-PI / 2.0) * 50.0, 0.0))
+        );
         let PathEl::LineTo(p) = els[1] else { panic!() };
         assert!(((p - Point::new(50.0, 50.0)).hypot() - 23.0).abs() < 1e-12);
     }
@@ -328,14 +359,22 @@ mod tests {
     fn polygon_defaults_to_five_points_and_at_least_three() {
         let five = shape_geometry(&shape(ShapeKind::Polygon, 10.0, 10.0)).unwrap();
         assert_eq!(five.path.elements().len(), 6);
-        let three = shape_geometry(&ShapeContent { points: 1.0, ..shape(ShapeKind::Polygon, 10.0, 10.0) }).unwrap();
+        let three = shape_geometry(&ShapeContent {
+            points: 1.0,
+            ..shape(ShapeKind::Polygon, 10.0, 10.0)
+        })
+        .unwrap();
         assert_eq!(three.path.elements().len(), 4);
     }
 
     #[test]
     fn fractional_points_draw_the_extra_vertex() {
         // `for (i = 0; i < 5.5; i++)` runs six times.
-        let g = shape_geometry(&ShapeContent { points: 5.5, ..shape(ShapeKind::Polygon, 10.0, 10.0) }).unwrap();
+        let g = shape_geometry(&ShapeContent {
+            points: 5.5,
+            ..shape(ShapeKind::Polygon, 10.0, 10.0)
+        })
+        .unwrap();
         assert_eq!(g.path.elements().len(), 7);
     }
 
@@ -350,8 +389,27 @@ mod tests {
     }
 
     #[test]
+    fn shape_strokes_use_canvas_butt_caps_and_round_joins() {
+        let g = shape_geometry(&ShapeContent {
+            stroke: 3.0,
+            points: 6.0,
+            ..shape(ShapeKind::Polygon, 10.0, 10.0)
+        })
+        .unwrap();
+        let stroke = g.stroke.unwrap().style;
+        assert_eq!(
+            (stroke.start_cap, stroke.end_cap, stroke.join),
+            (Cap::Butt, Cap::Butt, Join::Round)
+        );
+        assert_eq!(stroke.width, 3.0);
+    }
+
+    #[test]
     fn negative_uniform_radius_fails_like_canvas() {
-        let d = ShapeContent { radius: -5.0, ..shape(ShapeKind::Rect, 10.0, 10.0) };
+        let d = ShapeContent {
+            radius: -5.0,
+            ..shape(ShapeKind::Rect, 10.0, 10.0)
+        };
         assert_eq!(shape_geometry(&d), Err(ShapeError::NegativeRadius));
     }
 
@@ -359,18 +417,35 @@ mod tests {
     fn square_rect_is_four_lines() {
         let g = shape_geometry(&shape(ShapeKind::Rect, 30.0, 20.0)).unwrap();
         assert_eq!(g.path.bounding_box(), Rect::new(0.0, 0.0, 30.0, 20.0));
-        assert!(g.path.elements().iter().all(|e| !matches!(e, PathEl::CurveTo(..))));
+        assert!(
+            g.path
+                .elements()
+                .iter()
+                .all(|e| !matches!(e, PathEl::CurveTo(..)))
+        );
     }
 
     #[test]
     fn raster_geometry_caps_density() {
-        let r = ShapeRaster::new(&ShapeContent { stroke: 0.0, ..shape(ShapeKind::Rect, 100.1, 50.2) }, 1.25);
+        let r = ShapeRaster::new(
+            &ShapeContent {
+                stroke: 0.0,
+                ..shape(ShapeKind::Rect, 100.1, 50.2)
+            },
+            1.25,
+        );
         assert_eq!(r.pad, 4.0);
         assert_eq!(r.width, libm::ceil(108.1 * 1.25));
         let big = ShapeRaster::new(&shape(ShapeKind::Rect, 1000.0, 1000.0), 32.0);
         assert_eq!(big.width, 8192.0);
         // The layer mapping keeps the box centered when the bitmap is exact.
-        let exact = ShapeRaster::new(&ShapeContent { stroke: 0.0, ..shape(ShapeKind::Rect, 92.0, 42.0) }, 2.0);
+        let exact = ShapeRaster::new(
+            &ShapeContent {
+                stroke: 0.0,
+                ..shape(ShapeKind::Rect, 92.0, 42.0)
+            },
+            2.0,
+        );
         let m = exact.shape_to_layer();
         assert_eq!(m * Point::new(0.0, 0.0), Point::new(-46.0, -21.0));
         assert_eq!(m * Point::new(92.0, 42.0), Point::new(46.0, 21.0));

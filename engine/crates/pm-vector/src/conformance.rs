@@ -8,7 +8,7 @@
 use kurbo::{Affine, BezPath, PathEl, Point};
 
 use crate::corner::{self, CornerContent};
-use crate::mask::{LayerMasks, MaskMode, MaskShape, MaskValues};
+use crate::mask::{LayerMasks, MaskMode, MaskShape, MaskValues, layer_inverse};
 use crate::path::{PathLayer, PathNode, PathValues, Vertex, path_points};
 use crate::shape::{ShapeContent, ShapeKind, ShapeRaster, shape_geometry};
 
@@ -86,7 +86,14 @@ impl Digest {
 fn vertex(rng: &mut Rng) -> Vertex {
     let tangent = rng.below(3) == 0;
     let t = |rng: &mut Rng| if tangent { rng.range(-80.0, 80.0) } else { 0.0 };
-    Vertex { x: rng.range(-300.0, 300.0), y: rng.range(-300.0, 300.0), in_x: t(rng), in_y: t(rng), out_x: t(rng), out_y: t(rng) }
+    Vertex {
+        x: rng.range(-300.0, 300.0),
+        y: rng.range(-300.0, 300.0),
+        in_x: t(rng),
+        in_y: t(rng),
+        out_x: t(rng),
+        out_y: t(rng),
+    }
 }
 
 fn path_values(rng: &mut Rng) -> PathValues {
@@ -116,11 +123,26 @@ fn path_values(rng: &mut Rng) -> PathValues {
 /// Digest and number of values hashed over `cases` generated cases per family.
 pub fn digest(cases: u32) -> (u64, u64) {
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-    let mut d = Digest { hash: 0xCBF2_9CE4_8422_2325, values: 0 };
-    let kinds = [ShapeKind::Rect, ShapeKind::Ellipse, ShapeKind::Polygon, ShapeKind::Star, ShapeKind::Line];
+    let mut d = Digest {
+        hash: 0xCBF2_9CE4_8422_2325,
+        values: 0,
+    };
+    let kinds = [
+        ShapeKind::Rect,
+        ShapeKind::Ellipse,
+        ShapeKind::Polygon,
+        ShapeKind::Star,
+        ShapeKind::Line,
+    ];
     for _ in 0..cases {
         let independent = rng.below(2) == 0;
-        let mut radius = || if rng.below(5) == 0 { None } else { Some(rng.range(-10.0, 300.0)) };
+        let mut radius = || {
+            if rng.below(5) == 0 {
+                None
+            } else {
+                Some(rng.range(-10.0, 300.0))
+            }
+        };
         let corner_radii = [radius(), radius(), radius(), radius()];
         let shape = ShapeContent {
             shape: kinds[rng.below(5) as usize],
@@ -129,17 +151,30 @@ pub fn digest(cases: u32) -> (u64, u64) {
             radius: rng.range(0.0, 400.0),
             independent_corners: independent,
             corner_radii,
-            smoothing: if rng.below(2) == 0 { 0.0 } else { rng.range(0.0, 120.0) },
+            smoothing: if rng.below(2) == 0 {
+                0.0
+            } else {
+                rng.range(0.0, 120.0)
+            },
             stroke: rng.range(-2.0, 30.0),
             points: rng.range(0.0, 14.0),
         };
         let corners: CornerContent = shape.corners();
-        corner::corner_radii(&corners).iter().for_each(|&r| d.f64(r));
+        corner::corner_radii(&corners)
+            .iter()
+            .for_each(|&r| d.f64(r));
         d.f64(corner::corner_inset(&corners));
         d.path(&corner::rounded_rect_path(&corners));
         if let Ok(g) = shape_geometry(&shape) {
             d.path(&g.path);
-            d.f64(g.stroke.map_or(-1.0, |s| s.style.width));
+            match g.stroke {
+                Some(s) => {
+                    d.f64(s.style.width);
+                    d.f64(s.style.start_cap as u8 as f64);
+                    d.f64(s.style.join as u8 as f64);
+                }
+                None => d.f64(-1.0),
+            }
         }
         let raster = ShapeRaster::new(&shape, rng.range(0.1, 40.0));
         d.affine(raster.shape_to_layer());
@@ -153,13 +188,21 @@ pub fn digest(cases: u32) -> (u64, u64) {
             })
             .collect();
         for node in &nodes {
-            path_points(&node.values).into_iter().for_each(|p| d.point(p));
+            path_points(&node.values)
+                .into_iter()
+                .for_each(|p| d.point(p));
         }
         let layer = PathLayer::new(&nodes);
         layer.traced.iter().for_each(|p| d.path(p));
+        let raster = layer.raster(rng.range(0.1, 16.0));
+        let base = layer.bitmap_transform(&raster);
+        d.f64(raster.width);
+        d.f64(raster.height);
         for draw in &layer.draws {
             d.affine(draw.transform);
+            d.affine(draw.transform_from(base).affine());
             d.f64(draw.fill.unwrap_or(-1.0));
+            d.f64(draw.stroke.as_ref().map_or(-1.0, |s| s.style.width));
         }
         let b = layer.bounds;
         [b.x0, b.y0, b.x1, b.y1].into_iter().for_each(|v| d.f64(v));
@@ -172,23 +215,51 @@ pub fn digest(cases: u32) -> (u64, u64) {
                 h: rng.range(-300.0, 300.0),
                 rotation: rng.range(-180.0, 180.0),
                 feather: rng.range(-5.0, 40.0),
-                shape: if rng.below(2) == 0 { MaskShape::Rect } else { MaskShape::Ellipse },
-                mode: if rng.below(3) == 0 { MaskMode::Subtract } else { MaskMode::Add },
+                shape: if rng.below(2) == 0 {
+                    MaskShape::Rect
+                } else {
+                    MaskShape::Ellipse
+                },
+                mode: if rng.below(3) == 0 {
+                    MaskMode::Subtract
+                } else {
+                    MaskMode::Add
+                },
                 path: (rng.below(8) == 0).then(|| path_values(&mut rng)),
             })
             .collect();
         match LayerMasks::new(&masks) {
             LayerMasks::None => d.f64(0.0),
             LayerMasks::Parametric(p) => {
+                let world = [
+                    rng.range(-3.0, 3.0),
+                    rng.range(-3.0, 3.0),
+                    rng.range(-3.0, 3.0),
+                    rng.range(-3.0, 3.0),
+                    rng.range(-500.0, 500.0),
+                    rng.range(-500.0, 500.0),
+                ];
+                d.affine(layer_inverse(world).unwrap_or(Affine::IDENTITY));
+                p.masks.iter().for_each(|m| d.path(&m.outline()));
                 for _ in 0..16 {
                     let at = Point::new(rng.range(-300.0, 300.0), rng.range(-300.0, 300.0));
                     d.f32(p.coverage(at));
                 }
             }
             LayerMasks::Path(p) => {
+                let world = [
+                    rng.range(-3.0, 3.0),
+                    rng.range(-3.0, 3.0),
+                    rng.range(-3.0, 3.0),
+                    rng.range(-3.0, 3.0),
+                    rng.range(-500.0, 500.0),
+                    rng.range(-500.0, 500.0),
+                ];
                 for m in &p.masks {
                     d.path(&m.path);
                     d.affine(m.transform);
+                    d.affine(m.transform_from(world).affine());
+                    d.f64(m.blur_sigma(Affine::new(world)));
                 }
             }
         }

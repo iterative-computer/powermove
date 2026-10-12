@@ -7,9 +7,9 @@
 //! draw, with the bounds and bitmap size `rasterPaths` computes. Values are
 //! already evaluated (`pathValues`); paths are in layer pixels.
 
-use kurbo::{Affine, BezPath, Join, Point, Stroke};
+use kurbo::{Affine, BezPath, Cap, Join, Point, Stroke};
 
-use crate::canvas::CanvasPath;
+use crate::canvas::{CanvasPath, CanvasTransform, TransformOp};
 use crate::js;
 use crate::shape::{CANVAS_MITER_LIMIT, MAX_RASTER_SIZE};
 
@@ -34,7 +34,11 @@ pub struct Vertex {
 impl Vertex {
     /// A corner vertex (zero tangents).
     pub fn corner(x: f64, y: f64) -> Self {
-        Self { x, y, ..Self::default() }
+        Self {
+            x,
+            y,
+            ..Self::default()
+        }
     }
 }
 
@@ -152,7 +156,11 @@ impl PathValues {
 }
 
 fn opacity(percent: f64) -> f64 {
-    if percent.is_finite() { js::clamp(percent, 0.0, 100.0) / 100.0 } else { 1.0 }
+    if percent.is_finite() {
+        js::clamp(percent, 0.0, 100.0) / 100.0
+    } else {
+        1.0
+    }
 }
 
 /// `PM.mul`: the 2×3 product `m · n` with the legacy evaluation order.
@@ -190,8 +198,14 @@ pub fn path_points(v: &PathValues) -> Vec<Point> {
             let t = f64::from(j) / f64::from(SAMPLES_PER_SEGMENT);
             let u = 1.0 - t;
             points.push(Point::new(
-                u * u * u * a.x + 3.0 * u * u * t * a_out.x + 3.0 * u * t * t * b_in.x + t * t * t * b.x,
-                u * u * u * a.y + 3.0 * u * u * t * a_out.y + 3.0 * u * t * t * b_in.y + t * t * t * b.y,
+                u * u * u * a.x
+                    + 3.0 * u * u * t * a_out.x
+                    + 3.0 * u * t * t * b_in.x
+                    + t * t * t * b.x,
+                u * u * u * a.y
+                    + 3.0 * u * u * t * a_out.y
+                    + 3.0 * u * t * t * b_in.y
+                    + t * t * t * b.y,
             ));
         }
     }
@@ -235,7 +249,11 @@ pub fn trace_path(v: &PathValues) -> BezPath {
     let offset = ((js::or0(v.trim_offset) / 360.0) % 1.0 + 1.0) % 1.0;
     let lo = (start + offset) % 1.0;
     let hi = lo + span;
-    let ranges: &[(f64, f64)] = if hi <= 1.0 { &[(lo, hi)] } else { &[(lo, 1.0), (0.0, hi - 1.0)] };
+    let ranges: &[(f64, f64)] = if hi <= 1.0 {
+        &[(lo, hi)]
+    } else {
+        &[(lo, 1.0), (0.0, hi - 1.0)]
+    };
     for &(from, to) in ranges {
         let mut drawing = false;
         for i in 1..points.len() {
@@ -307,7 +325,9 @@ pub fn copy_matrix(v: &PathValues, i: u32) -> Affine {
 }
 
 /// The stroke a path draws, if any: `lineWidth = max(0, strokeWidth)` with
-/// Canvas2D's default miter joins and butt caps, when `strokeWidth > 0`.
+/// Canvas2D's default miter joins and butt caps, when `strokeWidth > 0`. A
+/// non-finite width is ignored by the `lineWidth` setter, so the draw keeps
+/// the default width 1.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PathStroke {
     pub style: Stroke,
@@ -315,16 +335,30 @@ pub struct PathStroke {
 }
 
 /// One draw: path `path` (an index into the layer's paths and
-/// [`PathLayer::traced`]) as repeater copy `copy`, with its transform into
-/// layer pixels. Fill (with `d.paths[path].fill`) comes before stroke.
+/// [`PathLayer::traced`]) as repeater copy `copy`. Fill (with
+/// `d.paths[path].fill`) comes before stroke.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PathDraw {
     pub path: usize,
     pub copy: u32,
+    /// The canvas calls placing the copy: `transform(groupMatrix)`,
+    /// `translate(i · repeatX, i · repeatY)`, `rotate(i · repeatRotation)`.
+    pub ops: [TransformOp; 3],
+    /// `ops` applied to the identity: path space to layer pixels.
     pub transform: Affine,
     /// Fill alpha when the copy is filled.
     pub fill: Option<f64>,
     pub stroke: Option<PathStroke>,
+}
+
+impl PathDraw {
+    /// Path space to the space of `base` (for example a bitmap or a viewport
+    /// transform), composed call by call as the canvas does.
+    pub fn transform_from(&self, base: CanvasTransform) -> CanvasTransform {
+        let mut t = base;
+        t.apply_all(&self.ops);
+        t
+    }
 }
 
 /// `rasterPaths` bounds in layer pixels, including stroke and a 4 px margin.
@@ -365,7 +399,12 @@ pub struct PathLayer {
 impl PathLayer {
     pub fn new(paths: &[PathNode]) -> Self {
         let matrices: Vec<Affine> = (0..paths.len()).map(|i| group_matrix(paths, i)).collect();
-        let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+        let (mut x0, mut y0, mut x1, mut y1) = (
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        );
         let mut draws = Vec::new();
         let mut traced = Vec::with_capacity(paths.len());
         for (index, node) in paths.iter().enumerate() {
@@ -375,7 +414,8 @@ impl PathLayer {
             for i in 0..v.copy_count() {
                 let m = mul(matrices[index], copy_matrix(v, i));
                 let c = m.as_coeffs();
-                let pad = v.stroke_width * js::max(js::hypot(c[0], c[1]), js::hypot(c[2], c[3])) + 4.0;
+                let pad =
+                    v.stroke_width * js::max(js::hypot(c[0], c[1]), js::hypot(c[2], c[3])) + 4.0;
                 for p in &points {
                     let x = c[0] * p.x + c[2] * p.y + c[4];
                     let y = c[1] * p.x + c[3] * p.y + c[5];
@@ -384,14 +424,23 @@ impl PathLayer {
                     x1 = js::max(x1, x + pad);
                     y1 = js::max(y1, y + pad);
                 }
+                let fi = f64::from(i);
+                let ops = [
+                    TransformOp::Transform(matrices[index].as_coeffs()),
+                    TransformOp::Translate(fi * v.repeat_x, fi * v.repeat_y),
+                    TransformOp::Rotate(fi * v.repeat_rotation * core::f64::consts::PI / 180.0),
+                ];
+                let width = js::max(0.0, v.stroke_width);
                 draws.push(PathDraw {
                     path: index,
                     copy: i,
-                    transform: m,
+                    ops,
+                    transform: CanvasTransform::of(&ops).affine(),
                     fill: v.fills().then(|| v.fill_alpha()),
                     stroke: (v.stroke_width > 0.0).then(|| PathStroke {
-                        style: Stroke::new(js::max(0.0, v.stroke_width))
+                        style: Stroke::new(if width.is_finite() { width } else { 1.0 })
                             .with_join(Join::Miter)
+                            .with_caps(Cap::Butt)
                             .with_miter_limit(CANVAS_MITER_LIMIT),
                         alpha: v.stroke_alpha(),
                     }),
@@ -401,8 +450,19 @@ impl PathLayer {
         if !x0.is_finite() {
             (x0, y0, x1, y1) = (0.0, 0.0, 1.0, 1.0);
         }
-        let bounds = PathBounds { x0, y0, x1, y1, w: js::max(1.0, x1 - x0), h: js::max(1.0, y1 - y0) };
-        Self { traced, draws, bounds }
+        let bounds = PathBounds {
+            x0,
+            y0,
+            x1,
+            y1,
+            w: js::max(1.0, x1 - x0),
+            h: js::max(1.0, y1 - y0),
+        };
+        Self {
+            traced,
+            draws,
+            bounds,
+        }
     }
 
     /// The bitmap size for a render scale (`density = min(scale, 8192 / w, 8192 / h)`).
@@ -419,10 +479,26 @@ impl PathLayer {
     }
 
     /// Layer pixels to bitmap pixels for a raster (`scale(density)`, then
-    /// `translate(-x0, -y0)`).
+    /// `translate(-x0, -y0)`). Compose a draw onto it with
+    /// [`PathDraw::transform_from`].
+    pub fn bitmap_transform(&self, raster: &PathRaster) -> CanvasTransform {
+        let mut t = CanvasTransform::IDENTITY;
+        t.scale(raster.density, raster.density);
+        t.translate(-self.bounds.x0, -self.bounds.y0);
+        t
+    }
+
+    /// [`Self::bitmap_transform`] as an affine.
     pub fn layer_to_pixels(&self, raster: &PathRaster) -> Affine {
-        let d = raster.density;
-        Affine::new([d, 0.0, 0.0, d, -self.bounds.x0 * d, -self.bounds.y0 * d])
+        self.bitmap_transform(raster).affine()
+    }
+
+    /// `rasterPathsToViewport`'s transform for a draw: the layer's `world`
+    /// matrix (layer pixels to viewport backing pixels), then the draw.
+    pub fn viewport_transform(draw: &PathDraw, world: [f64; 6]) -> Affine {
+        let mut base = CanvasTransform::IDENTITY;
+        base.transform(world);
+        draw.transform_from(base).affine()
     }
 
     /// Layer pixels to presented layer pixels as today's compositor draws the
@@ -430,7 +506,8 @@ impl PathLayer {
     /// (x0, y0), so content shrinks slightly when the pixel size rounds up.
     pub fn presented(&self, raster: &PathRaster) -> Affine {
         let (sx, sy) = (self.bounds.w / raster.width, self.bounds.h / raster.height);
-        Affine::new([sx, 0.0, 0.0, sy, self.bounds.x0, self.bounds.y0]) * self.layer_to_pixels(raster)
+        Affine::new([sx, 0.0, 0.0, sy, self.bounds.x0, self.bounds.y0])
+            * self.layer_to_pixels(raster)
     }
 
     /// Geometric bounds of every draw (fill and stroke outline excluded), for
@@ -481,24 +558,44 @@ mod tests {
 
     #[test]
     fn trim_halves_the_outline() {
-        let v = PathValues { trim_end: 50.0, ..square(true) };
+        let v = PathValues {
+            trim_end: 50.0,
+            ..square(true)
+        };
         let path = trace_path(&v);
         let els = path.elements();
         assert_eq!(els[0], PathEl::MoveTo(Point::new(0.0, 0.0)));
-        assert_eq!(*els.last().unwrap(), PathEl::LineTo(Point::new(100.0, 100.0)));
+        assert_eq!(
+            *els.last().unwrap(),
+            PathEl::LineTo(Point::new(100.0, 100.0))
+        );
     }
 
     #[test]
     fn trim_offset_wraps_into_two_runs() {
-        let v = PathValues { trim_end: 50.0, trim_offset: 270.0, ..square(true) };
+        let v = PathValues {
+            trim_end: 50.0,
+            trim_offset: 270.0,
+            ..square(true)
+        };
         let path = trace_path(&v);
-        let moves = path.elements().iter().filter(|e| matches!(e, PathEl::MoveTo(_))).count();
+        let moves = path
+            .elements()
+            .iter()
+            .filter(|e| matches!(e, PathEl::MoveTo(_)))
+            .count();
         assert_eq!(moves, 2);
     }
 
     #[test]
     fn copies_round_and_clamp() {
-        let count = |copies| PathValues { copies, ..PathValues::default() }.copy_count();
+        let count = |copies| {
+            PathValues {
+                copies,
+                ..PathValues::default()
+            }
+            .copy_count()
+        };
         assert_eq!(count(2.5), 3);
         assert_eq!(count(0.0), 1);
         assert_eq!(count(1000.0), 256);
@@ -510,7 +607,10 @@ mod tests {
         let node = |id: &str, parent: Option<&str>, x: f64| PathNode {
             id: id.into(),
             parent: parent.map(Into::into),
-            values: PathValues { x, ..PathValues::default() },
+            values: PathValues {
+                x,
+                ..PathValues::default()
+            },
         };
         let paths = [node("a", Some("b"), 1.0), node("b", None, 10.0)];
         assert_eq!(group_matrix(&paths, 0).as_coeffs()[4], 11.0);
@@ -521,13 +621,22 @@ mod tests {
 
     #[test]
     fn bounds_include_stroke_and_margin() {
-        let layer = PathLayer::new(&[PathNode { id: "p".into(), parent: None, values: square(true) }]);
+        let layer = PathLayer::new(&[PathNode {
+            id: "p".into(),
+            parent: None,
+            values: square(true),
+        }]);
         let b = layer.bounds;
         assert_eq!((b.x0, b.y0, b.x1, b.y1), (-6.0, -6.0, 106.0, 106.0));
         let raster = layer.raster(2.0);
         assert_eq!((raster.width, raster.anchor_x), (224.0, 6.0));
         assert_eq!(layer.draws.len(), 1);
         assert_eq!(layer.draws[0].fill, Some(1.0));
+        let stroke = &layer.draws[0].stroke.as_ref().unwrap().style;
+        assert_eq!(
+            (stroke.start_cap, stroke.end_cap, stroke.join),
+            (Cap::Butt, Cap::Butt, Join::Miter)
+        );
     }
 
     #[test]

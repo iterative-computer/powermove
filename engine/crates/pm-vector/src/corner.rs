@@ -46,7 +46,11 @@ impl Default for CornerContent {
 
 /// `number()` in corner-geometry.ts: finite values clamped at 0, else 0.
 fn non_negative(value: f64) -> f64 {
-    if value.is_finite() { js::max(0.0, value) } else { 0.0 }
+    if value.is_finite() {
+        js::max(0.0, value)
+    } else {
+        0.0
+    }
 }
 
 /// `cornerRadii(d)`.
@@ -87,7 +91,10 @@ pub fn corner_inset(d: &CornerContent) -> f64 {
     let radii = clamped_radii(d);
     let largest = radii.iter().copied().fold(f64::NEG_INFINITY, js::max);
     let reach = largest * (1.0 + smoothing);
-    js::max(0.0, js::min(js::min(reach, js::or0(d.w) / 2.0), js::or0(d.h) / 2.0))
+    js::max(
+        0.0,
+        js::min(js::min(reach, js::or0(d.w) / 2.0), js::or0(d.h) / 2.0),
+    )
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -115,14 +122,26 @@ fn corner_params(r: f64, smoothing: f64, budget: f64) -> CornerParams {
     let c = p3p4 * js::cos(js::radians(beta));
     let d = c * js::tan(js::radians(beta));
     let b = (p - arc - c - d) / 3.0;
-    CornerParams { r, a: 2.0 * b, b, c, d, p, arc }
+    CornerParams {
+        r,
+        a: 2.0 * b,
+        b,
+        c,
+        d,
+        p,
+        arc,
+    }
 }
 
 /// Room each corner may use along its edges, shared proportionally with its neighbours.
 fn budgets(radii: CornerRadii, w: f64, h: f64) -> [f64; 4] {
     let [tl, tr, br, bl] = radii;
     let share = |r: f64, neighbour: f64, side: f64| {
-        if r + neighbour == 0.0 { side } else { r / (r + neighbour) * side }
+        if r + neighbour == 0.0 {
+            side
+        } else {
+            r / (r + neighbour) * side
+        }
     };
     [
         js::min(share(tl, tr, w), share(tl, bl, h)),
@@ -146,7 +165,11 @@ enum Command {
     LineRel(f64, f64),
     CurveRel([f64; 6]),
     /// `a r r 0 0 1 dx dy`.
-    ArcRel { r: f64, dx: f64, dy: f64 },
+    ArcRel {
+        r: f64,
+        dx: f64,
+        dy: f64,
+    },
     Close,
 }
 
@@ -159,36 +182,96 @@ fn commands(d: &CornerContent) -> Vec<Command> {
     let budget = budgets(radii, w, h);
     let [tl, tr, br, bl] = [0, 1, 2, 3].map(|i| corner_params(radii[i], smoothing, budget[i]));
     let curve = |v: [f64; 6]| CurveRel(v.map(f));
-    let arc = |k: &CornerParams, x: f64, y: f64| ArcRel { r: f(k.r), dx: f(x), dy: f(y) };
+    let arc = |k: &CornerParams, x: f64, y: f64| ArcRel {
+        r: f(k.r),
+        dx: f(x),
+        dy: f(y),
+    };
     let mut out = vec![MoveAbs(f(w - tr.p), 0.0)];
     if js::truthy(tr.r) {
-        out.push(curve([tr.a, 0.0, tr.a + tr.b, 0.0, tr.a + tr.b + tr.c, tr.d]));
+        out.push(curve([
+            tr.a,
+            0.0,
+            tr.a + tr.b,
+            0.0,
+            tr.a + tr.b + tr.c,
+            tr.d,
+        ]));
         out.push(arc(&tr, tr.arc, tr.arc));
-        out.push(curve([tr.d, tr.c, tr.d, tr.b + tr.c, tr.d, tr.a + tr.b + tr.c]));
+        out.push(curve([
+            tr.d,
+            tr.c,
+            tr.d,
+            tr.b + tr.c,
+            tr.d,
+            tr.a + tr.b + tr.c,
+        ]));
     } else {
         out.push(LineRel(f(tr.p), 0.0));
     }
     out.push(LineAbs(f(w), f(h - br.p)));
     if js::truthy(br.r) {
-        out.push(curve([0.0, br.a, 0.0, br.a + br.b, -br.d, br.a + br.b + br.c]));
+        out.push(curve([
+            0.0,
+            br.a,
+            0.0,
+            br.a + br.b,
+            -br.d,
+            br.a + br.b + br.c,
+        ]));
         out.push(arc(&br, -br.arc, br.arc));
-        out.push(curve([-br.c, br.d, -(br.b + br.c), br.d, -(br.a + br.b + br.c), br.d]));
+        out.push(curve([
+            -br.c,
+            br.d,
+            -(br.b + br.c),
+            br.d,
+            -(br.a + br.b + br.c),
+            br.d,
+        ]));
     } else {
         out.push(LineRel(0.0, f(br.p)));
     }
     out.push(LineAbs(f(bl.p), f(h)));
     if js::truthy(bl.r) {
-        out.push(curve([-bl.a, 0.0, -(bl.a + bl.b), 0.0, -(bl.a + bl.b + bl.c), -bl.d]));
+        out.push(curve([
+            -bl.a,
+            0.0,
+            -(bl.a + bl.b),
+            0.0,
+            -(bl.a + bl.b + bl.c),
+            -bl.d,
+        ]));
         out.push(arc(&bl, -bl.arc, -bl.arc));
-        out.push(curve([-bl.d, -bl.c, -bl.d, -(bl.b + bl.c), -bl.d, -(bl.a + bl.b + bl.c)]));
+        out.push(curve([
+            -bl.d,
+            -bl.c,
+            -bl.d,
+            -(bl.b + bl.c),
+            -bl.d,
+            -(bl.a + bl.b + bl.c),
+        ]));
     } else {
         out.push(LineRel(f(-bl.p), 0.0));
     }
     out.push(LineAbs(0.0, f(tl.p)));
     if js::truthy(tl.r) {
-        out.push(curve([0.0, -tl.a, 0.0, -(tl.a + tl.b), tl.d, -(tl.a + tl.b + tl.c)]));
+        out.push(curve([
+            0.0,
+            -tl.a,
+            0.0,
+            -(tl.a + tl.b),
+            tl.d,
+            -(tl.a + tl.b + tl.c),
+        ]));
         out.push(arc(&tl, tl.arc, -tl.arc));
-        out.push(curve([tl.c, -tl.d, tl.b + tl.c, -tl.d, tl.a + tl.b + tl.c, -tl.d]));
+        out.push(curve([
+            tl.c,
+            -tl.d,
+            tl.b + tl.c,
+            -tl.d,
+            tl.a + tl.b + tl.c,
+            -tl.d,
+        ]));
     } else {
         out.push(LineRel(0.0, f(-tl.p)));
     }
@@ -207,7 +290,9 @@ pub fn rounded_rect_svg(d: &CornerContent) -> String {
             Command::LineAbs(x, y) => format!("L {} {}", n(x), n(y)),
             Command::LineRel(x, y) => format!("l {} {}", n(x), n(y)),
             Command::CurveRel(v) => format!("c {}", v.map(n).join(" ")),
-            Command::ArcRel { r, dx, dy } => format!("a {} {} 0 0 1 {} {}", n(r), n(r), n(dx), n(dy)),
+            Command::ArcRel { r, dx, dy } => {
+                format!("a {} {} 0 0 1 {} {}", n(r), n(r), n(dx), n(dy))
+            }
             Command::Close => "Z".to_owned(),
         })
         .collect::<Vec<_>>()
@@ -254,7 +339,13 @@ mod tests {
     use kurbo::Shape;
 
     fn content(w: f64, h: f64, radius: f64, smoothing: f64) -> CornerContent {
-        CornerContent { w, h, radius, smoothing, ..CornerContent::default() }
+        CornerContent {
+            w,
+            h,
+            radius,
+            smoothing,
+            ..CornerContent::default()
+        }
     }
 
     #[test]
@@ -282,9 +373,17 @@ mod tests {
         let path = rounded_rect_path(&d);
         assert!(path.area() < 200.0 * 200.0);
         let b = path.bounding_box();
-        assert!(b.x0.abs() < 1e-9 && b.y0.abs() < 1e-9 && (b.x1 - 200.0).abs() < 1e-9 && (b.y1 - 200.0).abs() < 1e-9);
+        assert!(
+            b.x0.abs() < 1e-9
+                && b.y0.abs() < 1e-9
+                && (b.x1 - 200.0).abs() < 1e-9
+                && (b.y1 - 200.0).abs() < 1e-9
+        );
         // The top edge starts its curve at (1 + s) r from the corner.
-        assert_eq!(path.elements()[0], kurbo::PathEl::MoveTo(Point::new(136.0, 0.0)));
+        assert_eq!(
+            path.elements()[0],
+            kurbo::PathEl::MoveTo(Point::new(136.0, 0.0))
+        );
     }
 
     #[test]

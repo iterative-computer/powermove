@@ -17,7 +17,7 @@
 
 use kurbo::{Affine, BezPath, Point};
 
-use crate::canvas::CanvasPath;
+use crate::canvas::{CanvasPath, CanvasTransform, TransformOp};
 use crate::js;
 use crate::path::{self, PathValues};
 
@@ -33,7 +33,11 @@ pub enum MaskShape {
 
 impl MaskShape {
     pub fn from_name(name: &str) -> Self {
-        if name == "ellipse" { Self::Ellipse } else { Self::Rect }
+        if name == "ellipse" {
+            Self::Ellipse
+        } else {
+            Self::Rect
+        }
     }
 }
 
@@ -46,7 +50,11 @@ pub enum MaskMode {
 
 impl MaskMode {
     pub fn from_name(name: &str) -> Self {
-        if name == "subtract" { Self::Subtract } else { Self::Add }
+        if name == "subtract" {
+            Self::Subtract
+        } else {
+            Self::Add
+        }
     }
 }
 
@@ -125,6 +133,26 @@ impl ParametricMask {
     }
 }
 
+/// Composition pixels to layer pixels for the parametric route (`u_inv`):
+/// the inverse of the layer's 2×3 world matrix, or `None` when its
+/// determinant is not finite or below 1e-9, in which case today's compositor
+/// skips the layer's masks entirely.
+pub fn layer_inverse(world: [f64; 6]) -> Option<Affine> {
+    let w = world;
+    let det = w[0] * w[3] - w[1] * w[2];
+    if !det.is_finite() || det.abs() < 1e-9 {
+        return None;
+    }
+    Some(Affine::new([
+        w[3] / det,
+        -w[1] / det,
+        -w[2] / det,
+        w[0] / det,
+        (-w[3] * w[4] + w[2] * w[5]) / det,
+        (w[1] * w[4] - w[0] * w[5]) / det,
+    ]))
+}
+
 /// The parametric route: up to 8 masks, evaluated per pixel.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParametricMasks {
@@ -141,12 +169,25 @@ impl ParametricMasks {
         let mut q = [0f32; 32];
         for (i, m) in self.masks.iter().enumerate() {
             let k = i * 4;
-            g[k..k + 4].copy_from_slice(&[m.center.x as f32, m.center.y as f32, m.size.0 as f32, m.size.1 as f32]);
+            g[k..k + 4].copy_from_slice(&[
+                m.center.x as f32,
+                m.center.y as f32,
+                m.size.0 as f32,
+                m.size.1 as f32,
+            ]);
             q[k..k + 4].copy_from_slice(&[
                 m.rotation as f32,
                 m.feather as f32,
-                if m.shape == MaskShape::Ellipse { 1.0 } else { 0.0 },
-                if m.mode == MaskMode::Subtract { 1.0 } else { 0.0 },
+                if m.shape == MaskShape::Ellipse {
+                    1.0
+                } else {
+                    0.0
+                },
+                if m.mode == MaskMode::Subtract {
+                    1.0
+                } else {
+                    0.0
+                },
             ]);
         }
         (g, q)
@@ -180,8 +221,18 @@ impl ParametricMasks {
                 (libm::sqrtf(ex * ex + ey * ey) - 1.0) * hx.min(hy)
             };
             let f = feather.max(0.0);
-            let a = if f > 0.01 { 1.0 - smoothstep(-f * 0.5, f * 0.5, d) } else if d <= 0.0 { 1.0 } else { 0.0 };
-            cov = if mode < 0.5 { cov.max(a) } else { cov.min(1.0 - a) };
+            let a = if f > 0.01 {
+                1.0 - smoothstep(-f * 0.5, f * 0.5, d)
+            } else if d <= 0.0 {
+                1.0
+            } else {
+                0.0
+            };
+            cov = if mode < 0.5 {
+                cov.max(a)
+            } else {
+                cov.min(1.0 - a)
+            };
         }
         cov
     }
@@ -197,7 +248,11 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 pub struct PathMask {
     /// Filled with the nonzero rule.
     pub path: BezPath,
-    /// Mask space to layer pixels.
+    /// The canvas calls placing the mask in layer pixels: `translate(x, y)`,
+    /// `rotate(rotation)`, and for a bezier mask its path's own
+    /// `translate`, `rotate`, and `scale`.
+    pub ops: Vec<TransformOp>,
+    /// `ops` applied to the identity: mask space to layer pixels.
     pub transform: Affine,
     pub mode: MaskMode,
     /// `max(0, feather)`, layer units.
@@ -205,6 +260,15 @@ pub struct PathMask {
 }
 
 impl PathMask {
+    /// Mask space to composition pixels for a layer whose world matrix is
+    /// `world`, composed call by call as today's coverage canvas does.
+    pub fn transform_from(&self, world: [f64; 6]) -> CanvasTransform {
+        let mut t = CanvasTransform::IDENTITY;
+        t.transform(world);
+        t.apply_all(&self.ops);
+        t
+    }
+
     /// Gaussian blur standard deviation in composition pixels for a layer
     /// whose world matrix is `world` (CSS `blur(feather · hypot(a, b) / 2 px)`).
     pub fn blur_sigma(&self, world: Affine) -> f64 {
@@ -241,8 +305,11 @@ impl LayerMasks {
                 masks: masks.iter().map(path_mask).collect(),
             });
         }
-        let masks: Vec<ParametricMask> =
-            masks.iter().take(MAX_PARAMETRIC_MASKS).map(ParametricMask::new).collect();
+        let masks: Vec<ParametricMask> = masks
+            .iter()
+            .take(MAX_PARAMETRIC_MASKS)
+            .map(ParametricMask::new)
+            .collect();
         let has_add = masks.iter().any(|m| m.mode == MaskMode::Add);
         Self::Parametric(ParametricMasks { masks, has_add })
     }
@@ -250,28 +317,51 @@ impl LayerMasks {
 
 fn path_mask(m: &MaskValues) -> PathMask {
     let (x, y, w, h) = (js::or0(m.x), js::or0(m.y), js::or0(m.w), js::or0(m.h));
-    let rotation = js::or0(m.rotation) * core::f64::consts::PI / 180.0;
-    let mut transform = Affine::translate((x, y)) * path::rotate(rotation);
+    let mut ops = vec![
+        TransformOp::Translate(x, y),
+        TransformOp::Rotate(js::or0(m.rotation) * core::f64::consts::PI / 180.0),
+    ];
     let path = match &m.path {
         Some(v) => {
-            transform = transform
-                * Affine::translate((v.x, v.y))
-                * path::rotate(js::radians(v.rotation))
-                * Affine::scale_non_uniform(v.scale_x / 100.0, v.scale_y / 100.0);
-            path::trace_path(&PathValues { closed: true, trim_start: 0.0, trim_end: 100.0, ..v.clone() })
+            ops.extend([
+                TransformOp::Translate(v.x, v.y),
+                TransformOp::Rotate(js::radians(v.rotation)),
+                TransformOp::Scale(v.scale_x / 100.0, v.scale_y / 100.0),
+            ]);
+            path::trace_path(&PathValues {
+                closed: true,
+                trim_start: 0.0,
+                trim_end: 100.0,
+                ..v.clone()
+            })
         }
         None => {
             let mut ctx = CanvasPath::new();
             match m.shape {
+                // Absolute radii never throw.
                 MaskShape::Ellipse => {
-                    let _ = ctx.ellipse(0.0, 0.0, w.abs() / 2.0, h.abs() / 2.0, 0.0, 0.0, core::f64::consts::TAU);
+                    let _ = ctx.ellipse(
+                        0.0,
+                        0.0,
+                        w.abs() / 2.0,
+                        h.abs() / 2.0,
+                        0.0,
+                        0.0,
+                        core::f64::consts::TAU,
+                    );
                 }
                 MaskShape::Rect => ctx.rect(-w / 2.0, -h / 2.0, w, h),
             }
             ctx.finish()
         }
     };
-    PathMask { path, transform, mode: m.mode, feather: js::max(0.0, js::or0(m.feather)) }
+    PathMask {
+        path,
+        transform: CanvasTransform::of(&ops).affine(),
+        ops,
+        mode: m.mode,
+        feather: js::max(0.0, js::or0(m.feather)),
+    }
 }
 
 #[cfg(test)]
@@ -280,7 +370,13 @@ mod tests {
     use crate::path::Vertex;
 
     fn rect(x: f64, y: f64, w: f64, h: f64) -> MaskValues {
-        MaskValues { x, y, w, h, ..MaskValues::default() }
+        MaskValues {
+            x,
+            y,
+            w,
+            h,
+            ..MaskValues::default()
+        }
     }
 
     fn parametric(masks: &[MaskValues]) -> ParametricMasks {
@@ -300,7 +396,10 @@ mod tests {
 
     #[test]
     fn feather_is_half_at_the_edge() {
-        let p = parametric(&[MaskValues { feather: 10.0, ..rect(0.0, 0.0, 100.0, 100.0) }]);
+        let p = parametric(&[MaskValues {
+            feather: 10.0,
+            ..rect(0.0, 0.0, 100.0, 100.0)
+        }]);
         assert!((p.coverage(Point::new(50.0, 0.0)) - 0.5).abs() < 1e-6);
         assert_eq!(p.coverage(Point::new(44.0, 0.0)), 1.0);
         assert_eq!(p.coverage(Point::new(56.0, 0.0)), 0.0);
@@ -308,7 +407,10 @@ mod tests {
 
     #[test]
     fn subtract_only_starts_covered() {
-        let p = parametric(&[MaskValues { mode: MaskMode::Subtract, ..rect(0.0, 0.0, 10.0, 10.0) }]);
+        let p = parametric(&[MaskValues {
+            mode: MaskMode::Subtract,
+            ..rect(0.0, 0.0, 10.0, 10.0)
+        }]);
         assert!(!p.has_add);
         assert_eq!(p.coverage(Point::new(0.0, 0.0)), 0.0);
         assert_eq!(p.coverage(Point::new(20.0, 0.0)), 1.0);
@@ -316,16 +418,31 @@ mod tests {
 
     #[test]
     fn rotation_turns_the_mask_clockwise_in_y_down_space() {
-        let p = parametric(&[MaskValues { rotation: 90.0, ..rect(0.0, 0.0, 40.0, 4.0) }]);
+        let p = parametric(&[MaskValues {
+            rotation: 90.0,
+            ..rect(0.0, 0.0, 40.0, 4.0)
+        }]);
         assert_eq!(p.coverage(Point::new(0.0, 15.0)), 1.0);
         assert_eq!(p.coverage(Point::new(15.0, 0.0)), 0.0);
     }
 
     #[test]
     fn ellipse_distance_is_scaled_by_the_short_radius() {
-        let p = parametric(&[MaskValues { shape: MaskShape::Ellipse, ..rect(0.0, 0.0, 40.0, 20.0) }]);
+        let p = parametric(&[MaskValues {
+            shape: MaskShape::Ellipse,
+            ..rect(0.0, 0.0, 40.0, 20.0)
+        }]);
         assert_eq!(p.coverage(Point::new(19.0, 0.0)), 1.0);
         assert_eq!(p.coverage(Point::new(0.0, 11.0)), 0.0);
+    }
+
+    #[test]
+    fn layer_inverse_inverts_or_skips_singular_worlds() {
+        let world = [2.0, 0.0, 0.0, 4.0, 10.0, 20.0];
+        let inv = layer_inverse(world).unwrap();
+        assert_eq!(inv * Point::new(30.0, 60.0), Point::new(10.0, 10.0));
+        assert!(layer_inverse([1e-5, 0.0, 0.0, 1e-5, 0.0, 0.0]).is_none());
+        assert!(layer_inverse([f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0]).is_none());
     }
 
     #[test]
@@ -343,20 +460,37 @@ mod tests {
     #[test]
     fn any_path_mask_moves_every_mask_to_the_path_route() {
         let shape = PathValues {
-            vertices: vec![Vertex::corner(0.0, 0.0), Vertex::corner(10.0, 0.0), Vertex::corner(0.0, 10.0)],
+            vertices: vec![
+                Vertex::corner(0.0, 0.0),
+                Vertex::corner(10.0, 0.0),
+                Vertex::corner(0.0, 10.0),
+            ],
             trim_end: 20.0,
             ..PathValues::default()
         };
         let mut masks: Vec<_> = (0..9).map(|_| rect(0.0, 0.0, -10.0, 10.0)).collect();
-        masks.push(MaskValues { path: Some(shape), mode: MaskMode::Subtract, feather: 4.0, ..MaskValues::default() });
-        let LayerMasks::Path(p) = LayerMasks::new(&masks) else { panic!() };
+        masks.push(MaskValues {
+            path: Some(shape),
+            mode: MaskMode::Subtract,
+            feather: 4.0,
+            ..MaskValues::default()
+        });
+        let LayerMasks::Path(p) = LayerMasks::new(&masks) else {
+            panic!()
+        };
         assert_eq!(p.masks.len(), 10);
         assert!(!p.start_covered);
         // Trim is ignored and the path is closed.
-        assert!(matches!(p.masks[9].path.elements().last(), Some(kurbo::PathEl::ClosePath)));
+        assert!(matches!(
+            p.masks[9].path.elements().last(),
+            Some(kurbo::PathEl::ClosePath)
+        ));
         // Signed rectangle size is kept on this route.
         use kurbo::Shape;
-        assert_eq!(p.masks[0].path.bounding_box(), kurbo::Rect::new(-5.0, -5.0, 5.0, 5.0));
+        assert_eq!(
+            p.masks[0].path.bounding_box(),
+            kurbo::Rect::new(-5.0, -5.0, 5.0, 5.0)
+        );
         assert_eq!(p.masks[9].blur_sigma(Affine::scale(2.0)), 4.0);
     }
 }

@@ -13,7 +13,7 @@
 
 use core::f64::consts::{PI, TAU};
 
-use kurbo::{BezPath, PathEl, Point, Vec2};
+use kurbo::{Affine, BezPath, PathEl, Point, Vec2};
 
 /// Largest arc sweep, in radians, approximated by one cubic segment.
 pub const MAX_ARC_SEGMENT: f64 = PI / 8.0;
@@ -119,7 +119,14 @@ impl CanvasPath {
 
     /// `ctx.arcTo(x1, y1, x2, y2, radius)`. A negative radius throws an
     /// `IndexSizeError` in the browser; here it returns `Err`.
-    pub fn arc_to(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, radius: f64) -> Result<(), NegativeRadius> {
+    pub fn arc_to(
+        &mut self,
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        radius: f64,
+    ) -> Result<(), NegativeRadius> {
         if !finite(&[x1, y1, x2, y2, radius]) {
             return Ok(());
         }
@@ -163,7 +170,14 @@ impl CanvasPath {
             sweep += TAU;
         }
         self.line_to(t0.x, t0.y);
-        append_arc(&mut self.path, center, Vec2::new(radius, radius), a0, sweep, t2);
+        append_arc(
+            &mut self.path,
+            center,
+            Vec2::new(radius, radius),
+            a0,
+            sweep,
+            t2,
+        );
         self.current = Some(t2);
         Ok(())
     }
@@ -210,8 +224,20 @@ impl CanvasPath {
         } else {
             self.move_to(first.x, first.y);
         }
-        let last = if sweep == TAU { first } else { at(start + sweep) };
-        append_rotated_arc(&mut self.path, Point::new(x, y), Vec2::new(rx, ry), rotation, start, sweep, last);
+        let last = if sweep == TAU {
+            first
+        } else {
+            at(start + sweep)
+        };
+        append_rotated_arc(
+            &mut self.path,
+            Point::new(x, y),
+            Vec2::new(rx, ry),
+            rotation,
+            start,
+            sweep,
+            last,
+        );
         self.current = Some(last);
         Ok(())
     }
@@ -241,7 +267,11 @@ impl CanvasPath {
         }
         let num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p;
         let den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
-        let mut coef = if den == 0.0 { 0.0 } else { libm::sqrt((num / den).max(0.0)) };
+        let mut coef = if den == 0.0 {
+            0.0
+        } else {
+            libm::sqrt((num / den).max(0.0))
+        };
         if large_arc == sweep_flag {
             coef = -coef;
         }
@@ -261,6 +291,104 @@ impl CanvasPath {
         }
         append_arc(&mut self.path, center, Vec2::new(rx, ry), start, sweep, to);
         self.current = Some(to);
+    }
+}
+
+/// One Canvas2D transform call.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransformOp {
+    /// `ctx.transform(a, b, c, d, e, f)`.
+    Transform([f64; 6]),
+    /// `ctx.translate(x, y)`.
+    Translate(f64, f64),
+    /// `ctx.rotate(radians)`.
+    Rotate(f64),
+    /// `ctx.scale(x, y)`.
+    Scale(f64, f64),
+}
+
+/// A current transformation matrix with Canvas2D semantics: each call
+/// post-multiplies (`ctm = ctm · m`, the legacy `PM.mul` arithmetic), and a
+/// call with any non-finite argument is ignored, as the HTML specification
+/// requires. The legacy renderer leans on that rule: a NaN group or repeater
+/// transform leaves the matrix unchanged instead of poisoning it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CanvasTransform(pub [f64; 6]);
+
+impl Default for CanvasTransform {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+impl CanvasTransform {
+    pub const IDENTITY: Self = Self([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+
+    fn multiply(&mut self, n: [f64; 6]) {
+        let m = self.0;
+        self.0 = [
+            m[0] * n[0] + m[2] * n[1],
+            m[1] * n[0] + m[3] * n[1],
+            m[0] * n[2] + m[2] * n[3],
+            m[1] * n[2] + m[3] * n[3],
+            m[0] * n[4] + m[2] * n[5] + m[4],
+            m[1] * n[4] + m[3] * n[5] + m[5],
+        ];
+    }
+
+    /// `ctx.transform(a, b, c, d, e, f)`.
+    pub fn transform(&mut self, m: [f64; 6]) {
+        if finite(&m) {
+            self.multiply(m);
+        }
+    }
+
+    /// `ctx.translate(x, y)`.
+    pub fn translate(&mut self, x: f64, y: f64) {
+        if finite(&[x, y]) {
+            self.multiply([1.0, 0.0, 0.0, 1.0, x, y]);
+        }
+    }
+
+    /// `ctx.rotate(radians)`, with `libm` trigonometry.
+    pub fn rotate(&mut self, radians: f64) {
+        if radians.is_finite() {
+            let (c, s) = (libm::cos(radians), libm::sin(radians));
+            self.multiply([c, s, -s, c, 0.0, 0.0]);
+        }
+    }
+
+    /// `ctx.scale(x, y)`.
+    pub fn scale(&mut self, x: f64, y: f64) {
+        if finite(&[x, y]) {
+            self.multiply([x, 0.0, 0.0, y, 0.0, 0.0]);
+        }
+    }
+
+    /// Applies one call.
+    pub fn apply(&mut self, op: TransformOp) {
+        match op {
+            TransformOp::Transform(m) => self.transform(m),
+            TransformOp::Translate(x, y) => self.translate(x, y),
+            TransformOp::Rotate(r) => self.rotate(r),
+            TransformOp::Scale(x, y) => self.scale(x, y),
+        }
+    }
+
+    /// Applies calls in order.
+    pub fn apply_all(&mut self, ops: &[TransformOp]) {
+        ops.iter().for_each(|&op| self.apply(op));
+    }
+
+    /// The matrix of `ops` applied to the identity.
+    pub fn of(ops: &[TransformOp]) -> Self {
+        let mut t = Self::IDENTITY;
+        t.apply_all(ops);
+        t
+    }
+
+    pub fn affine(&self) -> Affine {
+        Affine::new(self.0)
     }
 }
 
@@ -306,7 +434,11 @@ fn append_rotated_arc(
     };
     let (mut s0, mut c0) = (libm::sin(start), libm::cos(start));
     for i in 0..n {
-        let a1 = if i + 1 == n { start + sweep } else { start + step * (i + 1) as f64 };
+        let a1 = if i + 1 == n {
+            start + sweep
+        } else {
+            start + step * (i + 1) as f64
+        };
         let (s1, c1) = (libm::sin(a1), libm::cos(a1));
         let cp1 = map(c0 - k * s0, s0 + k * c0);
         let cp2 = map(c1 + k * s1, s1 - k * c1);
@@ -329,7 +461,10 @@ mod tests {
         p.line_to(3.0, 4.0);
         assert_eq!(
             p.finish().elements(),
-            &[PathEl::MoveTo(Point::new(1.0, 2.0)), PathEl::LineTo(Point::new(3.0, 4.0))]
+            &[
+                PathEl::MoveTo(Point::new(1.0, 2.0)),
+                PathEl::LineTo(Point::new(3.0, 4.0))
+            ]
         );
     }
 
@@ -360,7 +495,9 @@ mod tests {
         let path = p.finish();
         let els = path.elements();
         assert_eq!(els[1], PathEl::LineTo(Point::new(6.0, 0.0)));
-        let PathEl::CurveTo(_, _, end) = *els.last().unwrap() else { panic!() };
+        let PathEl::CurveTo(_, _, end) = *els.last().unwrap() else {
+            panic!()
+        };
         assert!((end - Point::new(10.0, 4.0)).hypot() < 1e-12);
         // Every arc sample is on the circle of radius 4 around (6, 4).
         for seg in path.segments().skip(1) {
@@ -369,6 +506,32 @@ mod tests {
                 assert!((r - 4.0).abs() < 1e-6, "{r}");
             }
         }
+    }
+
+    #[test]
+    fn transform_calls_with_non_finite_arguments_are_ignored() {
+        let mut t = CanvasTransform::IDENTITY;
+        t.scale(2.0, 3.0);
+        t.translate(f64::NAN, 1.0);
+        t.rotate(f64::INFINITY);
+        t.transform([1.0, 0.0, 0.0, 1.0, f64::NEG_INFINITY, 0.0]);
+        t.scale(f64::NAN, 1.0);
+        assert_eq!(t.0, [2.0, 0.0, 0.0, 3.0, 0.0, 0.0]);
+        t.translate(5.0, 7.0);
+        assert_eq!(t.0, [2.0, 0.0, 0.0, 3.0, 10.0, 21.0]);
+    }
+
+    #[test]
+    fn transform_ops_post_multiply() {
+        let ops = [
+            TransformOp::Translate(10.0, 0.0),
+            TransformOp::Rotate(PI / 2.0),
+            TransformOp::Scale(2.0, 1.0),
+        ];
+        let m = CanvasTransform::of(&ops).affine();
+        let p = m * Point::new(1.0, 0.0);
+        // Scale, then rotate a quarter turn clockwise in y-down space, then translate.
+        assert!((p - Point::new(10.0, 2.0)).hypot() < 1e-12, "{p:?}");
     }
 
     #[test]
