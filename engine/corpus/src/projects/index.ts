@@ -1,4 +1,5 @@
 import { animationProjects } from './animation';
+import { parseRender3D } from '../catalog';
 import type { CorpusProject } from './common';
 import { compositingProjects } from './compositing';
 import { effectProjects } from './effects';
@@ -22,6 +23,7 @@ export function allProjects(): CorpusProject[] {
     ids.add(item.id);
     if (!item.samples.length) throw new Error(`${item.id} has no sample times`);
     for (const t of item.samples) if (!(t >= 0 && t <= item.doc.dur)) throw new Error(`${item.id} samples ${t}s outside its ${item.doc.dur}s duration`);
+    if (item.blender) parseRender3D({ ...item.blender, enabled: true });
   }
   return projects;
 }

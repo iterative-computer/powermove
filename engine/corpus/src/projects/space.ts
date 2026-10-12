@@ -48,7 +48,8 @@ function primitives(): CorpusProject {
   )));
   b.add(b.light3d({ type: 'sun', p: { intensity: 2.5, color: '#FFF4E0' } }, { position: [-4, 6, 4] }));
   b.add(camera(b));
-  return project(b, { group: '3D', title: 'Primitives with shadows', covers: ['primitives: box, sphere, plane, cylinder, cone, torus, capsule, icosahedron', 'standard material color, roughness, metalness, emissive', 'sun shadow', 'receive shadow', 'animated 3D rotation'], samples: [0, 1.5, 3], alpha: true });
+  return project(b, { group: '3D', title: 'Primitives with shadows', covers: ['primitives: box, sphere, plane, cylinder, cone, torus, capsule, icosahedron', 'standard material color, roughness, metalness, emissive', 'sun shadow', 'receive shadow', 'animated 3D rotation'], samples: [0, 1.5, 3], alpha: true,
+    blender: { engine: 'eevee', samples: 32, previewSamples: 8, previewScale: .5 } });
 }
 
 function latheExtrude(): CorpusProject {
@@ -74,7 +75,8 @@ function lights(): CorpusProject {
   b.add(b.light3d({ type: 'area', p: { intensity: 4, color: '#3FCF8E', width: 2, height: 1, targetX: 0, targetY: 0, targetZ: 0 } }, { name: 'Area (no native shadow)', position: [0, 2, 3] }));
   b.add(b.light3d({ type: 'point', p: { intensity: 10, color: '#F2C14E' } }, { name: 'Fifth shadow light (over the limit of 4)', position: [3, 1, -2] }));
   b.add(camera(b, { environment: { p: { ambient: .3, ambientColor: '#8899FF', exposure: 1.1 } } }, [0, 2.5, 7]));
-  return project(b, { group: '3D', title: 'Light types and shadow limits', covers: ['sun, point, spot, area lights', 'hemisphere ambient', 'exposure', 'shadow map limit (first 4 shadow lights)', 'area light LTC without shadows'], samples: [0], alpha: true });
+  return project(b, { group: '3D', title: 'Light types and shadow limits', covers: ['sun, point, spot, area lights', 'hemisphere ambient', 'exposure', 'shadow map limit (first 4 shadow lights)', 'area light LTC without shadows'], samples: [0], alpha: true,
+    blender: { engine: 'cycles', samples: 128, previewSamples: 4, previewScale: .25, denoise: false, device: 'cpu' } });
 }
 
 function cameras(): CorpusProject[] {
@@ -96,6 +98,16 @@ function cameras(): CorpusProject[] {
     project(ortho, { group: '3D', title: 'Orthographic camera', covers: ['orthographic camera (half-height 3 / zoom)', 'animated zoom'], samples: [0, 1.25, 2.5] }),
     project(persp, { group: '3D', title: 'Animated perspective camera', covers: ['perspective camera', 'animated field of view', 'camera roll from layer rotation', 'environment background', 'near and far'], samples: [0, 1.25, 2.5] }),
   ];
+}
+
+function motionBlur(): CorpusProject {
+  const b = newProject('3d/motion-blur', { name: '3D motion blur', backgroundFill: BLACK, shutter: .75 });
+  b.add(b.object3d({ source: { primitive: 'box', parameters: { width: 1.6, height: .4, depth: .4 } }, material: material('#FF6B1A') }, { name: 'Spinning bar (blurred)', mblur: true, position: [-1.2, 0, 0], p: { 'rotation.y': b.ch(0, [[0, 0], [2, 720]]) } }));
+  b.add(b.object3d({ source: { primitive: 'sphere', parameters: { radius: .4 } }, material: material('#4C8DFF') }, { name: 'Sliding sphere (blurred)', mblur: true, p: { 'position.x': b.ch(-.5, [[0, -.5], [2, 3]]), 'position.y': -1 } }));
+  b.add(b.object3d({ source: { primitive: 'torus' }, material: material('#3FCF8E') }, { name: 'Spinning torus (no blur)', position: [1.6, .8, 0], p: { 'rotation.x': b.ch(0, [[0, 0], [2, 720]]) } }));
+  b.add(b.light3d({ type: 'sun' }, { position: [-3, 5, 4] }));
+  b.add(camera(b, {}, [0, .5, 6]));
+  return project(b, { group: '3D', title: '3D layers with motion blur', covers: ['3D motion blur', 'per-layer motion blur on 3D objects', 'composition shutter 270°', 'Blender shutter-sample snapshots'], samples: [.5, 1.2] });
 }
 
 function transparency(): CorpusProject {
@@ -202,5 +214,5 @@ function special(): CorpusProject[] {
 }
 
 export function spaceProjects(): CorpusProject[] {
-  return [...layers25d(), primitives(), latheExtrude(), lights(), ...cameras(), transparency(), depthSets(), studioDefaults(), gltf(), meshSlots(), ...special()];
+  return [...layers25d(), primitives(), latheExtrude(), lights(), ...cameras(), motionBlur(), transparency(), depthSets(), studioDefaults(), gltf(), meshSlots(), ...special()];
 }

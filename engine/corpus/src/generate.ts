@@ -17,7 +17,7 @@ import { validateDocument, type Issue } from './validate';
 export interface GeneratedProject {
   id: string; group: string; title: string; covers: string[]; samples: number[]; alpha: boolean;
   size: [number, number]; media: string[]; documentSha256: string; notes?: string;
-  layerTypes: string[];
+  layerTypes: string[]; blender?: Record<string, unknown>;
 }
 
 export interface GeneratedCorpus { projects: GeneratedProject[]; media: Record<string, { bytes: number; sha256: string }> }
@@ -40,6 +40,7 @@ export function describeProject(item: CorpusProject): GeneratedProject {
     size: item.size ?? [item.doc.w, item.doc.h],
     media: [...mediaRefs(item.doc)].sort(), documentSha256: sha256(document),
     ...(item.notes ? { notes: item.notes } : {}), layerTypes: layerTypesOf(item.doc),
+    ...(item.blender ? { blender: item.blender } : {}),
   };
 }
 
