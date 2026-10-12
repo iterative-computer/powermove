@@ -471,6 +471,27 @@ fn scenarios() -> Vec<Scenario> {
             ]),
         ),
         s(
+            "gate-pause-1ms",
+            "As gate-pause with 1 ms slices (keeps command buffers under 2 ms when the GPU is shared)",
+            &["--warmup", "0"],
+            b(&[
+                SLICED,
+                ALIGN,
+                &[
+                    "--slice-ms",
+                    "1",
+                    "--yield-on",
+                    "miss",
+                    "--vt-sessions",
+                    "1",
+                    "--vt-codec",
+                    "hevc10",
+                ],
+                BLENDER,
+                &["--blender-policy", "pause"],
+            ]),
+        ),
+        s(
             "gate-pause-vt30",
             "As gate-pause with the HEVC session paced at 30 fps (an export's encode rate, not flat out)",
             &["--warmup", "0"],
@@ -643,6 +664,12 @@ fn scenarios() -> Vec<Scenario> {
             "A heavy; B sliced 2 ms frame-aligned",
             AHEAVY,
             b(&[SLICED, ALIGN, &["--slice-ms", "2", "--yield-on", "miss"]]),
+        ),
+        s(
+            "aheavy-vt-hevc10",
+            "A heavy; B only one HEVC Main10 session, flat out (the encoder's share of aheavy-gate-pause)",
+            &["--layers", "8", "--blur-radius", "40", "--warmup", "0"],
+            b(&[&["--mode", "none", "--vt-sessions", "1", "--vt-codec", "hevc10"]]),
         ),
         s(
             "aheavy-gate-pause",
@@ -1008,8 +1035,10 @@ fn overlap(spans: &[(f64, f64)], a: f64, b: f64) -> f64 {
 /// `backlog` (A's previous frame was still on the GPU at submit), `b-start` (the start
 /// delay exceeded 1 ms and B's command buffers covered at least half of it),
 /// `b-concurrent` (A started promptly but ran alongside B for at least half of its
-/// execution and was slowed), and `other` (B was mostly idle: the encoder, WindowServer,
-/// other apps, or A's CPU side).
+/// execution and was slowed), and `other` (B's command buffers were mostly idle: the
+/// encoder, Blender, WindowServer, other apps, or A's CPU side; this attribution cannot
+/// see the encoder's or Blender's GPU work). `backlog` takes precedence, so its root
+/// cause is tracked separately (`late_backlog_after_b`).
 fn attribute(a_raw: &std::path::Path, b_raw: &std::path::Path, period_ns: f64) -> Value {
     let read = |p: &std::path::Path| -> Vec<Value> {
         std::fs::read_to_string(p)
@@ -1036,7 +1065,11 @@ fn attribute(a_raw: &std::path::Path, b_raw: &std::path::Path, period_ns: f64) -
     let mut prev_end = 0.0f64;
     let (mut late, mut b_delay, mut b_conc, mut backlog, mut other, mut skipped) = (0, 0, 0, 0, 0, 0);
     let mut in_yield_n = 0;
+    let mut backlog_after_b = 0;
     let mut b_share_all = Vec::new();
+    // Root cause of the previous frame when it was late: a `backlog` frame inherits it,
+    // so a queue behind one B-caused frame is counted back to B as well.
+    let mut prev_root: Option<&'static str> = None;
     for v in &a {
         let Some(tick) = f(v, "tick_ns") else { continue };
         let (Some(submit), Some(begin), Some(end), Some(done)) = (
@@ -1048,6 +1081,7 @@ fn attribute(a_raw: &std::path::Path, b_raw: &std::path::Path, period_ns: f64) -
             if v["skipped"] == true {
                 skipped += 1;
             }
+            prev_root = None;
             continue;
         };
         let delay = (begin - submit).max(0.0);
@@ -1059,6 +1093,7 @@ fn attribute(a_raw: &std::path::Path, b_raw: &std::path::Path, period_ns: f64) -
         let behind_self = prev_end > submit;
         prev_end = prev_end.max(end);
         if done - tick <= period_ns {
+            prev_root = None;
             continue;
         }
         late += 1;
@@ -1069,6 +1104,12 @@ fn attribute(a_raw: &std::path::Path, b_raw: &std::path::Path, period_ns: f64) -
         let b_in_exec = overlap(&cbs, begin, end);
         let class = if behind_self {
             backlog += 1;
+            // Behind a frame that was not itself late: A's own load.
+            let root = prev_root.unwrap_or("other");
+            if root == "b-start" || root == "b-concurrent" {
+                backlog_after_b += 1;
+            }
+            prev_root = Some(root);
             "backlog"
         } else if delay > 1e6 && b_in_delay >= 0.5 * delay {
             b_delay += 1;
@@ -1080,6 +1121,9 @@ fn attribute(a_raw: &std::path::Path, b_raw: &std::path::Path, period_ns: f64) -
             other += 1;
             "other"
         };
+        if class != "backlog" {
+            prev_root = Some(class);
+        }
         if rows.len() < 60 {
             rows.push(json!({
                 "t_s": v["t_s"],
@@ -1099,6 +1143,10 @@ fn attribute(a_raw: &std::path::Path, b_raw: &std::path::Path, period_ns: f64) -
         "late_b_held_start": b_delay,
         "late_b_concurrent": b_conc,
         "late_behind_own_backlog": backlog,
+        // Backlog frames whose queue started at a `b-start` or `b-concurrent` frame:
+        // `late_b_held_start + late_b_concurrent` is a lower bound on B-caused late
+        // frames, and adding this gives the count with the queues behind them.
+        "late_backlog_after_b": backlog_after_b,
         "late_other": other,
         "late_submitted_in_b_yield": in_yield_n,
         "b_share_of_start_delay_all_frames": stats::dist(&b_share_all).rounded(3),
@@ -1277,6 +1325,40 @@ mod tests {
         assert_eq!(overlap(&spans, 10.0, 20.0), 0.0);
         assert_eq!(overlap(&spans, 26.0, 28.0), 2.0);
         assert_eq!(overlap(&spans, 35.0, 60.0), 5.0);
+    }
+
+    #[test]
+    fn backlog_inherits_the_root_cause() {
+        let ms = |x: f64| x * 1e6;
+        let dir = std::env::temp_dir().join(format!("s8-attr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // (tick, submit, gpu begin, gpu end) in ms; done = gpu end.
+        let frames = [
+            (0.0, 0.0, 0.1, 20.0),     // late, B ran through it: b-concurrent
+            (16.67, 16.8, 20.0, 34.0), // queued behind frame 0: backlog after B
+            (33.33, 33.4, 34.0, 36.0), // on time
+            (50.0, 50.1, 50.2, 70.0),  // late, B idle: other
+            (66.67, 66.8, 70.0, 85.0), // queued behind frame 3: backlog, not after B
+        ];
+        let a: String = frames
+            .iter()
+            .map(|&(t, s, b, e)| {
+                json!({"tick_ns": ms(t), "submit_ns": ms(s), "gpu_begin_ns": ms(b),
+                    "gpu_end_ns": ms(e), "done_ns": ms(e), "t_s": t / 1e3})
+                .to_string()
+                    + "\n"
+            })
+            .collect();
+        let b = json!({"kind": "cb", "entry": 1, "gpu_begin_ns": ms(0.0), "gpu_end_ns": ms(19.0)}).to_string();
+        std::fs::write(dir.join("a.jsonl"), a).unwrap();
+        std::fs::write(dir.join("b.jsonl"), b).unwrap();
+        let v = attribute(&dir.join("a.jsonl"), &dir.join("b.jsonl"), 1e9 / 60.0);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(v["late_frames"], 4);
+        assert_eq!(v["late_b_concurrent"], 1);
+        assert_eq!(v["late_other"], 1);
+        assert_eq!(v["late_behind_own_backlog"], 2);
+        assert_eq!(v["late_backlog_after_b"], 1);
     }
 
     #[test]
