@@ -17,7 +17,7 @@
 //! float rate `fps_f64` ([`IngestRate::time`]):
 //!
 //! 1. `x = t × fps_f64` (one f64 multiplication) and `n = round(x)`, halves
-//!    away from zero (`f64::round`). If `|x − n| < 1e-6 × max(1, |n|)` the
+//!    away from zero (`f64::round`). If `|x − n| < 1e-9 × max(1, |n|)` the
 //!    time is frame-aligned: its ticks are `R.frame_start(n)`.
 //! 2. Otherwise its ticks are the nearest tick to `t`, ties to even, computed
 //!    exactly from the float's binary value ([`pm_time::ticks_from_seconds`]).
@@ -28,17 +28,26 @@
 //! the float 29.97 keeps every frame-aligned time on its frame of the exact
 //! 30000/1001 grid at any length.
 //!
-//! Note the tolerance is relative: once `|n| > 500,000` it exceeds half a
-//! frame, so every time that far out lands on its nearest frame's start.
+//! The tolerance is section 26's amendment 1 (it was `1e-6` in section 5).
+//! The float error of a frame-aligned time written by JavaScript (`n / fps`,
+//! `n × (1 / fps)`, a step from the previous frame) is a few ulps, about
+//! `1e-15 × n` relative, so `1e-9 × |n|` still captures every one of them up
+//! to 10⁸ frames, while it stays a tenth of a frame or less up to 10⁸
+//! frames: off-grid times far from zero keep their offset instead of being
+//! pulled onto the nearest frame (with `1e-6` that happened beyond 500,000
+//! frames).
 //!
 //! # Writing back
 //!
 //! Every [`IngestedTime`] keeps the original f64. [`IngestedTime::write_back`]
-//! echoes it for a time the engine did not change and writes `ticks / TICKS`
-//! (correctly rounded) for one it did, so ingest never perturbs untouched
-//! values in the document. In documents that store a float NTSC rate,
-//! `ticks / TICKS` does not round-trip far from zero; see
-//! [`IngestRate::seconds_of`] for why and for the alternative that does.
+//! echoes it for a time the engine did not change, so ingest never perturbs
+//! untouched values in the document. A time the engine created or moved is
+//! written by [`IngestRate::seconds_of`] (amendment 1 to section 5, rule 4):
+//! on a frame boundary as `n / fps_f64`, which re-ingests to the same frame at
+//! every `n`, and off the grid as `ticks / TICKS` (correctly rounded).
+//! `ticks / TICKS` for a frame start does not round-trip in a document that
+//! stores a float NTSC rate: 29.97 is one part in a million slower than
+//! 30000/1001, so frame 10⁶ written that way re-ingests as frame 999,999.
 //!
 //! # Which document members are times
 //!
@@ -79,8 +88,8 @@ use pm_time::{
 use crate::json::{JsString, Value};
 use crate::patch::PathPart;
 
-/// The relative tolerance of the frame-index rule.
-pub const FRAME_TOLERANCE: f64 = 1e-6;
+/// The relative tolerance of the frame-index rule (section 26, amendment 1).
+pub const FRAME_TOLERANCE: f64 = 1e-9;
 
 /// A composition rate as ingested.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -105,19 +114,14 @@ pub struct IngestedTime {
 
 impl IngestedTime {
     /// The float to store for `ticks`: the original when unchanged, otherwise
-    /// `ticks / TICKS` correctly rounded.
-    pub fn write_back(&self, ticks: Tick) -> f64 {
+    /// [`IngestRate::seconds_of`] at the composition's rate `rate`.
+    pub fn write_back(&self, rate: &IngestRate, ticks: Tick) -> f64 {
         if ticks == self.ticks {
             self.original
         } else {
-            seconds_from_ticks(ticks)
+            rate.seconds_of(ticks)
         }
     }
-}
-
-/// The float stored for a time the engine created: `ticks / TICKS`.
-pub fn created_seconds(ticks: Tick) -> f64 {
-    seconds_from_ticks(ticks)
 }
 
 /// `[num, den]` from a document `fpsRational` when both are safe integers.
@@ -191,22 +195,20 @@ impl IngestRate {
         })
     }
 
-    /// A float for `ticks` that [`IngestRate::time`] maps back to `ticks`:
-    /// for a frame start, `n / fps_f64` (the document's own float grid) when
-    /// that round-trips; otherwise `ticks / TICKS`.
+    /// The float stored for a time the engine created or moved (section 5,
+    /// rule 4, as amended): for a frame start, `n / fps_f64` (the document's
+    /// own float grid); off the grid, `ticks / TICKS`.
     ///
-    /// Section 5 rule 4 writes created times as `ticks / TICKS`. In a document
-    /// whose stored `fps` is the float 29.97 (or 23.976, 59.94, ...), that
-    /// float differs from the exact rate by one part in a million, so
-    /// `ticks / TICKS` for frame `n` re-ingests as frame
-    /// `n − round(n × 1e-6)`: wrong from `|n| ≥ 500,000` (about 4.6 hours at
-    /// 29.97). This function is the round-trip-safe alternative; the
-    /// `ingest` tests show both behaviors.
-    ///
-    /// A tick that is not a frame start but lies within the tolerance of one
-    /// has no float that maps back to it (rule 1 claims every such float);
-    /// for those this returns `ticks / TICKS`, which ingests to the frame
-    /// start.
+    /// [`IngestRate::time`] maps the result back to `ticks` for every frame
+    /// start whose float `n / fps_f64` round-trips (every `n` the `ingest`
+    /// tests try, to ±10⁸ at every supported rate and the float NTSC rates),
+    /// and for every off-grid tick whose `ticks / TICKS` is farther than the
+    /// tolerance from the document's float grid. An off-grid tick within the
+    /// tolerance of that grid has no float that maps back to it (rule 1 claims
+    /// every such float); it re-ingests as that frame's start. With a float
+    /// NTSC rate the float grid drifts from the exact one by `1e-6 × n`
+    /// frames, so this can happen for ticks a fraction of a frame from a
+    /// frame start once `|n|` passes about 200,000.
     pub fn seconds_of(&self, ticks: Tick) -> f64 {
         let n = self.rate.frame_of(ticks);
         if self.rate.frame_start(n) == Ok(ticks) {

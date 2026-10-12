@@ -4,13 +4,13 @@ use std::path::PathBuf;
 
 use pm_model::canonical::{canonical_project, project_of};
 use pm_model::ingest::{
-    FRAME_TOLERANCE, IngestRate, TimeKind, classify_time_path, created_seconds, ingest_project,
+    FRAME_TOLERANCE, IngestRate, TimeKind, classify_time_path, ingest_project,
     ingest_stored_project, root_is_composition,
 };
 use pm_model::json::{Value, parse};
 use pm_model::patch::PathPart;
 use pm_model::path;
-use pm_time::{Rate, RateSource, TICKS_PER_SECOND, TimeError, seconds_from_ticks};
+use pm_time::{Rate, RateSource, SUPPORTED_RATES, TICKS_PER_SECOND, TimeError, seconds_from_ticks};
 use proptest::prelude::*;
 
 /// The float rates documents store for NTSC, with the exact rate each means.
@@ -51,7 +51,7 @@ fn ntsc_floats_ingest_on_their_frames_at_one_million() {
                     assert_eq!(time.ticks, exact.frame_start(n).unwrap(), "{fps} n={n}");
                     assert_eq!(exact.frame_of(time.ticks), n);
                     assert_eq!(time.original.to_bits(), t.to_bits());
-                    assert_eq!(time.write_back(time.ticks).to_bits(), t.to_bits());
+                    assert_eq!(time.write_back(&r, time.ticks).to_bits(), t.to_bits());
                 }
             }
         }
@@ -140,11 +140,23 @@ proptest! {
     }
 
     #[test]
-    fn seconds_of_round_trips_mid_frame_ticks(which in 0usize..4, n in -99_999i64..=99_999, eighths in 2i64..=6) {
-        // Ticks at least a quarter frame from a frame start. The float grid
-        // of a 29.97 document drifts 1e-6 × n frames from the exact one and
-        // the tolerance adds 1e-6 × |n|; below 100,000 frames the two stay
-        // under a quarter frame.
+    fn seconds_of_round_trips_frame_starts_at_every_rate(which in 0usize..SUPPORTED_RATES.len(), n in -100_000_000i64..=100_000_000) {
+        // Amendment 1: created frame-aligned times are n / fps_f64, which
+        // re-ingests to the same frame at every n, for every supported rate
+        // stored as its nearest float.
+        let exact = SUPPORTED_RATES[which];
+        let r = IngestRate::from_document(None, Some(exact.to_f64())).unwrap();
+        prop_assert_eq!(r.rate, exact);
+        let ticks = exact.frame_start(n).unwrap();
+        prop_assert_eq!(r.time(r.seconds_of(ticks)).unwrap().ticks, ticks);
+    }
+
+    #[test]
+    fn seconds_of_round_trips_mid_frame_ticks(which in 0usize..4, n in -199_999i64..=199_999, eighths in 2i64..=6) {
+        // Ticks at least a quarter frame from a frame start are written as
+        // ticks / TICKS. The float grid of a 29.97 document drifts 1e-6 × n
+        // frames from the exact one and the tolerance adds 1e-9 × |n|; below
+        // 200,000 frames the two stay under a quarter frame.
         let (fps, exact) = NTSC_FLOATS[which];
         let r = rate(fps);
         let ticks = exact.frame_start(n).unwrap() + exact.exact_frame_ticks().unwrap() * eighths / 8;
@@ -154,30 +166,77 @@ proptest! {
     }
 
     #[test]
-    fn engine_times_round_trip_below_half_a_million_frames(which in 0usize..4, n in -499_999i64..=499_999) {
-        // Below |n| = 500,000 `ticks / TICKS` re-ingests to the same tick
-        // whether rule 1 or rule 2 applies.
-        let (fps, exact) = NTSC_FLOATS[which];
-        let ticks = exact.frame_start(n).unwrap();
-        prop_assert_eq!(rate(fps).time(created_seconds(ticks)).unwrap().ticks, ticks);
+    fn off_grid_ticks_round_trip_with_exact_floats(which in 0usize..SUPPORTED_RATES.len(), n in -100_000_000i64..=100_000_000, eighths in 1i64..=7) {
+        // With the exact rate stored (fpsRational, or a float that is the
+        // exact rate), the float grid is the exact grid; off-grid ticks an
+        // eighth of a frame or more from a frame start round-trip to ±10⁸.
+        let exact = SUPPORTED_RATES[which];
+        let r = IngestRate::from_document(Some([exact.num(), exact.den()]), Some(exact.to_f64())).unwrap();
+        let ticks = exact.frame_start(n).unwrap() + exact.exact_frame_ticks().unwrap() * eighths / 8;
+        let seconds = r.seconds_of(ticks);
+        prop_assert_eq!(seconds.to_bits(), seconds_from_ticks(ticks).to_bits());
+        let back = r.time(seconds).unwrap();
+        prop_assert_eq!(back.ticks, ticks);
+        prop_assert_eq!(back.frame, None);
+    }
+
+    #[test]
+    fn off_grid_floats_keep_their_offset_to_1e8(which in 0usize..4, n in -100_000_000i64..=100_000_000, fraction in 0.2f64..0.8) {
+        // Amendment 1: a time a fifth of a frame or more from the document's
+        // float grid is never pulled onto a frame, however far from zero
+        // (with section 5's 1e-6 this failed beyond 500,000 frames).
+        let (fps, _) = NTSC_FLOATS[which];
+        let t = (n as f64 + fraction) / fps;
+        let time = rate(fps).time(t).unwrap();
+        prop_assert_eq!(time.frame, None);
+        prop_assert_eq!(time.ticks, pm_time::ticks_from_seconds(t).unwrap());
     }
 }
 
 #[test]
 fn ticks_over_ticks_drifts_a_frame_at_one_million_with_float_29_97() {
-    // Section 5 rule 4 writes created times as ticks / TICKS. Measured: in a
-    // document that stores fps 29.97, frame 10^6 written that way re-ingests
-    // as frame 999,999. `seconds_of` writes n / 29.97 instead, which holds.
+    // Why amendment 1 writes created frame starts with seconds_of: in a
+    // document that stores fps 29.97, frame 10^6 written as ticks / TICKS
+    // re-ingests as frame 999,999. `seconds_of` writes 10^6 / 29.97, which
+    // holds.
     let r = rate(29.97);
     let ticks = Rate::FPS_29_97.frame_start(1_000_000).unwrap();
-    let written = created_seconds(ticks);
+    let written = seconds_from_ticks(ticks);
     let back = r.time(written).unwrap();
     assert_eq!(back.frame, Some(999_999));
     assert_ne!(back.ticks, ticks);
-    assert_eq!(r.time(r.seconds_of(ticks)).unwrap().ticks, ticks);
-    // With the exact float stored, ticks / TICKS round-trips.
+    let seconds = r.seconds_of(ticks);
+    assert_eq!(seconds.to_bits(), (1_000_000.0f64 / 29.97).to_bits());
+    let back = r.time(seconds).unwrap();
+    assert_eq!((back.frame, back.ticks), (Some(1_000_000), ticks));
+    // With the exact float stored, ticks / TICKS lands on the frame too.
     let exact = rate(30000.0 / 1001.0);
     assert_eq!(exact.time(written).unwrap().ticks, ticks);
+}
+
+#[test]
+fn the_one_million_round_trip_at_every_float_rate() {
+    // n = 10^6 (about 9.3 hours at 29.97): ingest, move by whole frames,
+    // write back, re-ingest.
+    for (fps, exact) in NTSC_FLOATS {
+        let r = rate(fps);
+        let time = r.time(1_000_000.0 / fps).unwrap();
+        assert_eq!(time.ticks, exact.frame_start(1_000_000).unwrap());
+        assert_eq!(time.write_back(&r, time.ticks).to_bits(), (1_000_000.0 / fps).to_bits());
+        for delta in [-3i64, -1, 1, 2, 1_000] {
+            let moved = exact.frame_start(1_000_000 + delta).unwrap();
+            let written = time.write_back(&r, moved);
+            assert_eq!(written.to_bits(), ((1_000_000 + delta) as f64 / fps).to_bits(), "{fps} {delta}");
+            let back = r.time(written).unwrap();
+            assert_eq!((back.frame, back.ticks), (Some(1_000_000 + delta), moved), "{fps} {delta}");
+        }
+        // Moved off the grid: ticks / TICKS, and the offset survives.
+        let off = time.ticks + exact.exact_frame_ticks().unwrap() / 2;
+        let written = time.write_back(&r, off);
+        assert_eq!(written.to_bits(), seconds_from_ticks(off).to_bits());
+        let back = r.time(written).unwrap();
+        assert_eq!((back.frame, back.ticks), (None, off), "{fps}");
+    }
 }
 
 #[test]
@@ -189,35 +248,42 @@ fn off_frame_times_take_the_nearest_tick() {
         (1_000, 0.01),
         (-30, 0.75),
         (100_000, 0.2),
+        (1_000_000, 0.25),
+        (100_000_000, 0.3),
     ] {
         let t = (n as f64 + fraction) / 29.97;
         let time = r.time(t).unwrap();
         assert_eq!(time.frame, None, "{n} {fraction}");
         assert_eq!(time.ticks, pm_time::ticks_from_seconds(t).unwrap());
-        assert_eq!(time.write_back(time.ticks).to_bits(), t.to_bits());
+        assert_eq!(time.write_back(&r, time.ticks).to_bits(), t.to_bits());
     }
     // A time within the tolerance of a frame is on it.
     let near = (1_000.0 + 0.5 * FRAME_TOLERANCE * 1_000.0) / 29.97;
     assert_eq!(r.time(near).unwrap().frame, Some(1_000));
-    // Below one frame the tolerance is absolute (1e-6 of a frame).
-    let t = 0.4e-6 / 29.97;
+    let far = (1_000.0 + 2.0 * FRAME_TOLERANCE * 1_000.0) / 29.97;
+    assert_eq!(r.time(far).unwrap().frame, None);
+    // Below one frame the tolerance is absolute (1e-9 of a frame).
+    let t = 0.4e-9 / 29.97;
     assert_eq!(r.time(t).unwrap().frame, Some(0));
     assert_eq!(r.time(t).unwrap().ticks, 0);
-    let t = 2e-6 / 29.97;
+    let t = 2e-9 / 29.97;
     assert_eq!(r.time(t).unwrap().frame, None);
 }
 
 #[test]
-fn tolerance_is_relative_as_written() {
-    // 1e-6 × |n| exceeds half a frame beyond 500,000 frames, so every time
-    // there lands on the nearest frame start (section 5, rule 1 as written).
+fn tolerance_is_relative_and_amended() {
+    // Amendment 1: 1e-9 × |n|. A quarter frame off the grid at 10^6 frames
+    // keeps its offset; with section 5's 1e-6 it landed on frame 10^6.
+    assert_eq!(FRAME_TOLERANCE, 1e-9);
     let r = rate(29.97);
     let t = (1_000_000.0 + 0.25) / 29.97;
     let time = r.time(t).unwrap();
-    assert_eq!(time.frame, Some(1_000_000));
-    // write_back still echoes the original when the engine changes nothing.
-    assert_eq!(time.write_back(time.ticks).to_bits(), t.to_bits());
-    let t = (200_000.0 + 0.25) / 29.97;
+    assert_eq!(time.frame, None);
+    assert_eq!(time.write_back(&r, time.ticks).to_bits(), t.to_bits());
+    // At 10^8 frames the tolerance is a tenth of a frame.
+    let t = (100_000_000.0 + 0.05) / 29.97;
+    assert_eq!(r.time(t).unwrap().frame, Some(100_000_000));
+    let t = (100_000_000.0 + 0.15) / 29.97;
     assert_eq!(r.time(t).unwrap().frame, None);
 }
 
@@ -226,12 +292,16 @@ fn write_back_echoes_and_creates() {
     let r = rate(24.0);
     let time = r.time(-0.0).unwrap();
     assert_eq!(time.ticks, 0);
-    assert_eq!(time.write_back(0).to_bits(), (-0.0f64).to_bits());
+    assert_eq!(time.write_back(&r, 0).to_bits(), (-0.0f64).to_bits());
     let time = r.time(0.1).unwrap();
-    assert_eq!(time.write_back(time.ticks), 0.1);
+    assert_eq!(time.write_back(&r, time.ticks), 0.1);
+    // Moved by a frame from an off-grid time: still off the grid.
     let moved = time.ticks + Rate::FPS_24.exact_frame_ticks().unwrap();
-    assert_eq!(time.write_back(moved), seconds_from_ticks(moved));
-    assert_eq!(created_seconds(TICKS_PER_SECOND / 2), 0.5);
+    assert_eq!(time.write_back(&r, moved), seconds_from_ticks(moved));
+    // Moved onto a frame start: n / fps.
+    let frame = Rate::FPS_24.frame_start(7).unwrap();
+    assert_eq!(time.write_back(&r, frame).to_bits(), (7.0f64 / 24.0).to_bits());
+    assert_eq!(r.seconds_of(TICKS_PER_SECOND / 2), 0.5);
 }
 
 #[test]
@@ -328,7 +398,7 @@ fn every_corpus_project_ingests_and_paths_classify() {
             );
             // Synthetic corpus times are frame-aligned or whole milliseconds.
             assert_eq!(
-                field.time.write_back(field.time.ticks).to_bits(),
+                field.time.write_back(&comp.rate, field.time.ticks).to_bits(),
                 field.time.original.to_bits()
             );
         }
