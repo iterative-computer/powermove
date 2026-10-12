@@ -18,6 +18,7 @@ import type { OpenSession } from "./OpenSession";
 import type { OutputDestinationRequest } from "./OutputDestinationRequest";
 import type { Persist } from "./Persist";
 import type { RegisterExtension } from "./RegisterExtension";
+import type { ResolveHandle } from "./ResolveHandle";
 import type { Resync } from "./Resync";
 import type { SubmitJob } from "./SubmitJob";
 import type { ToolCall } from "./ToolCall";
@@ -25,4 +26,4 @@ import type { ToolCall } from "./ToolCall";
 /**
  * Requests. Each names its direction; a peer answers only requests it serves.
  */
-export type Request = { "type": "openSession" } & OpenSession | { "type": "closeSession" } | { "type": "resync" } & Resync | { "type": "checkConsistency" } & ConsistencyCheck | { "type": "renderFrame" } & FrameRequest | { "type": "evaluate" } & EvaluateRequest | { "type": "agentFrames" } & AgentFrameRequest | { "type": "submitJob" } & SubmitJob | { "type": "cancelJobs" } & CancelJobs | { "type": "pushDefinitions" } & DefinitionsUpdate | { "type": "grantLease" } & Lease | { "type": "requestLease" } & LeaseRequest | { "type": "mintHandle" } & MintHandle | { "type": "outputDestination" } & OutputDestinationRequest | { "type": "commitOutput" } & CommitOutput | { "type": "hardwareSessions" } & HardwareSessionRequest | { "type": "blenderRender" } & BlenderJobRequest | { "type": "blenderStatus" } | { "type": "blenderModel" } & BlenderModelJob | { "type": "openProject" } & OpenProject | { "type": "closeProject" } & CloseProject | { "type": "persist" } & Persist | { "type": "registerExtension" } & RegisterExtension | { "type": "toolCall" } & ToolCall;
+export type Request = { "type": "openSession" } & OpenSession | { "type": "closeSession" } | { "type": "resync" } & Resync | { "type": "checkConsistency" } & ConsistencyCheck | { "type": "renderFrame" } & FrameRequest | { "type": "evaluate" } & EvaluateRequest | { "type": "agentFrames" } & AgentFrameRequest | { "type": "submitJob" } & SubmitJob | { "type": "cancelJobs" } & CancelJobs | { "type": "pushDefinitions" } & DefinitionsUpdate | { "type": "grantLease" } & Lease | { "type": "requestLease" } & LeaseRequest | { "type": "mintHandle" } & MintHandle | { "type": "resolveHandle" } & ResolveHandle | { "type": "outputDestination" } & OutputDestinationRequest | { "type": "commitOutput" } & CommitOutput | { "type": "hardwareSessions" } & HardwareSessionRequest | { "type": "blenderRender" } & BlenderJobRequest | { "type": "blenderStatus" } | { "type": "blenderModel" } & BlenderModelJob | { "type": "openProject" } & OpenProject | { "type": "closeProject" } & CloseProject | { "type": "persist" } & Persist | { "type": "registerExtension" } & RegisterExtension | { "type": "toolCall" } & ToolCall;

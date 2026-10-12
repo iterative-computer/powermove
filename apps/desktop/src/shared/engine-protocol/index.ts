@@ -5,7 +5,7 @@
 // every float is finite (no NaN or Infinity).
 
 /** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */
-export const PROTOCOL_BUILD = "protocol-5c936431d1cc3f66";
+export const PROTOCOL_BUILD = "protocol-73662d8e2dff5056";
 
 export type { AgentFrame } from "./AgentFrame";
 export type { AgentFrameOutcome } from "./AgentFrameOutcome";
@@ -96,7 +96,9 @@ export type { FrameRate } from "./FrameRate";
 export type { FrameRelease } from "./FrameRelease";
 export type { FrameRequest } from "./FrameRequest";
 export type { GradientStop } from "./GradientStop";
+export type { HandleAccess } from "./HandleAccess";
 export type { HandleGrant } from "./HandleGrant";
+export type { HandleResolved } from "./HandleResolved";
 export type { HardwareSessionGrant } from "./HardwareSessionGrant";
 export type { HardwareSessionKind } from "./HardwareSessionKind";
 export type { HardwareSessionRequest } from "./HardwareSessionRequest";
@@ -180,6 +182,7 @@ export type { Representation } from "./Representation";
 export type { Request } from "./Request";
 export type { RequestId } from "./RequestId";
 export type { RequestedDevice } from "./RequestedDevice";
+export type { ResolveHandle } from "./ResolveHandle";
 export type { ResolvedDevice } from "./ResolvedDevice";
 export type { Response } from "./Response";
 export type { Resync } from "./Resync";

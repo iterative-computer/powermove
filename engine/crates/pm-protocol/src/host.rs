@@ -137,6 +137,62 @@ pub struct HandleGrant {
     pub content_hash: Option<ContentHash>,
 }
 
+/// How an engine may open the file a handle names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub enum HandleAccess {
+    /// Media reads, project store, extension bundles.
+    Read,
+    /// Cache areas.
+    ReadWrite,
+    /// One job's temporary output (created by the host, written by the engine).
+    Write,
+}
+
+impl CapabilityKind {
+    /// The access a handle of this kind grants.
+    pub const fn access(&self) -> HandleAccess {
+        match self {
+            CapabilityKind::MediaRead { .. }
+            | CapabilityKind::ProjectStore
+            | CapabilityKind::ExtensionBundle => HandleAccess::Read,
+            CapabilityKind::Cache { .. } => HandleAccess::ReadWrite,
+            CapabilityKind::OutputWrite { .. } => HandleAccess::Write,
+        }
+    }
+}
+
+/// Engine to host, on the engine's host port only: what file does this
+/// handle name? Renderers pass handles, never paths; the engine resolves
+/// each one with the host before it opens anything. The host checks the
+/// binding against the session and the port the request arrived on, so a
+/// handle minted for another engine launch or session is refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveHandle {
+    pub handle: CapabilityHandle,
+    pub session: SessionId,
+}
+
+/// The host's answer: the absolute path a handle names and how it may be
+/// opened. Only the host sends it, only on an engine's host port, and only
+/// for a handle bound to that port.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct HandleResolved {
+    pub handle: CapabilityHandle,
+    pub kind: CapabilityKind,
+    pub access: HandleAccess,
+    /// Absolute, at most 4096 bytes, no NUL. A directory for cache areas.
+    pub path: String,
+}
+
+/// Longest path a [`HandleResolved`] may carry (macOS `PATH_MAX`).
+pub const MAX_RESOLVED_PATH_BYTES: usize = 4096;
+
 /// What happens when an output's name is taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
@@ -274,6 +330,12 @@ pub trait HostServices {
         session: SessionId,
         port: PortId,
     ) -> Result<CapabilityKind, Self::Error>;
+    /// Resolves a handle presented on `port` to the file it names.
+    fn resolve_handle(
+        &self,
+        request: &ResolveHandle,
+        port: PortId,
+    ) -> Result<HandleResolved, Self::Error>;
     fn revoke_session(&mut self, session: SessionId);
     fn output_destination(
         &mut self,
@@ -400,6 +462,22 @@ impl Validate for OutputDestinationRequest {
     }
 }
 
+impl Validate for HandleResolved {
+    fn validate(&self) -> Result<(), Violation> {
+        const C: ContractId = ContractId::HostServices;
+        ensure(self.access == self.kind.access(), C, || {
+            "the access must be the one the handle's kind grants".into()
+        })?;
+        ensure(
+            self.path.starts_with('/')
+                && self.path.len() <= MAX_RESOLVED_PATH_BYTES
+                && !self.path.contains('\0'),
+            C,
+            || format!("a resolved path is absolute, at most {MAX_RESOLVED_PATH_BYTES} bytes, without NUL"),
+        )
+    }
+}
+
 impl Validate for HardwareSessionRequest {
     fn validate(&self) -> Result<(), Violation> {
         ensure(self.delta != 0, ContractId::HostServices, || {
@@ -450,6 +528,43 @@ mod tests {
         assert_eq!(
             table.check(&handle, session, PortId(3)),
             Err(HandleRejection::Unknown)
+        );
+    }
+
+    #[test]
+    fn resolved_handles_carry_an_absolute_path_and_their_kind_s_access() {
+        let resolved = HandleResolved {
+            handle: CapabilityHandle::from_random_bytes([1; 16]),
+            kind: CapabilityKind::MediaRead { asset: "a".into() },
+            access: HandleAccess::Read,
+            path: "/Users/someone/Movies/clip.mov".into(),
+        };
+        assert!(resolved.validate().is_ok());
+        let writable = HandleResolved {
+            access: HandleAccess::Write,
+            ..resolved.clone()
+        };
+        assert!(writable.validate().is_err(), "media reads are read-only");
+        let relative = HandleResolved {
+            path: "Movies/clip.mov".into(),
+            ..resolved.clone()
+        };
+        assert!(relative.validate().is_err());
+        let nul = HandleResolved {
+            path: "/tmp/a\0b".into(),
+            ..resolved
+        };
+        assert!(nul.validate().is_err());
+        assert_eq!(
+            CapabilityKind::OutputWrite { job: "j".into() }.access(),
+            HandleAccess::Write
+        );
+        assert_eq!(
+            CapabilityKind::Cache {
+                cache: CacheKind::Scratch
+            }
+            .access(),
+            HandleAccess::ReadWrite
         );
     }
 

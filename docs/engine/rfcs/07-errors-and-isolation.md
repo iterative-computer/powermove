@@ -61,7 +61,11 @@ reported by the host (`Event::Crash`).
    attributable, and `InFlight::validate` rejects them as suspects).
    Restarts back off exponentially (`restart_backoff_ms`, tested); the host
    resets the attempt count after the engine has stayed up for a healthy
-   interval (60 s in main and `pm-host`).
+   interval (60 s in main and `pm-host`). After a restarted engine's
+   handshake the host sends it `Event::Crash` with `marked_failed` listing
+   every item failed so far in the session, and the engine refuses work on
+   those items with `CrashAttributed` (item scope) instead of crashing on
+   them again.
 5. **Messages are for people.** One sentence, 1 to 4096 bytes, saying what
    failed and what to do; no paths the engine was not given, no secrets.
    Length is checked by `EngineError::validate`.

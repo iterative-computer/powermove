@@ -27,6 +27,7 @@ contract that only the desktop meets today (section 17; appendix A item 37).
 | `CacheKind` | Media index, thumbnails, generated media, render cache, Blender surfaces, shader cache, font subsets, large-still mips, scratch (section 14.7) |
 | `MintHandle`, `HandleGrant` | `Request::MintHandle` (engine → host): a kind for a session; the grant carries the handle and, for media, the content hash the host verified |
 | `PortId`, `HandleTable`, `HandleRejection` | The host's binding table: handle → (kind, session, port); check, revoke per session |
+| `ResolveHandle`, `HandleResolved`, `HandleAccess` | `Request::ResolveHandle` (engine → host, on the engine's host port only): the host checks the binding against the session and the port the request arrived on, and answers with the absolute path the handle names and the access its kind grants (read for media, project store, and bundles; read-write for caches; write for one job's temporary output) |
 | `OutputChoice` | `agentAutomatic {suggestedName, extension}` (MCP and agent tools: the host picks a unique name, no dialog) or `userChosen {destination}` (export sheet or CLI, already a handle) |
 | `OverwritePolicy` | Unique name, replace after verification, fail |
 | `OutputDestinationRequest`, `OutputDestination` | `Request::OutputDestination` (job engine → host): the host answers with a handle to a temporary file in the destination folder |
@@ -51,7 +52,14 @@ definition-snapshot source (contract 10), and engine crash reports
    else (`HandleTable::check`, tested: unknown, wrong session, wrong port).
    The host checks every handle an engine presents and never trusts the
    engine's word about what a handle grants. Closing a session or
-   restarting an engine revokes its handles.
+   restarting an engine revokes its handles. `PortId` names one engine
+   launch's host connection, so a restarted engine starts with no handles.
+   **Paths reach an engine only as `HandleResolved`**, only on its host
+   port, and only for a handle bound to that port: renderers and the peer
+   engine pass handles and cannot answer a `resolveHandle` they were never
+   sent (the engine correlates answers per connection). `HandleResolved`
+   validates that the path is absolute, at most 4,096 bytes, without NUL,
+   and that the access equals the kind's (tested).
 3. **Only the host mints**, from a cryptographic RNG. A duplicate handle
    means the RNG is broken; `HandleTable::bind` refuses it and the host must
    not use it.
@@ -86,6 +94,13 @@ definition-snapshot source (contract 10), and engine crash reports
    on the desktop and hidden hosts).
 
 ## Versioning
+
+`ResolveHandle` and `HandleResolved` were added in the draft (Phase 2
+infrastructure): file access by handle needs a way for the engine to open
+the file, and an Electron utility process cannot receive a file descriptor
+over a `MessagePort`. If a sandbox profile is adopted later and descriptors
+travel over the Mach rendezvous instead, the request keeps its shape and the
+answer gains a descriptor variant (a version bump).
 
 Version 0 until Phase 2 starts. New capability kinds, cache kinds, or
 hardware session kinds are new variants and a version bump. The

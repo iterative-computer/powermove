@@ -46,7 +46,7 @@ use crate::frame::{
 };
 use crate::host::{
     CacheKind, CapabilityHandle, CapabilityKind, CommitOutput, HandleGrant, HardwareSessionGrant,
-    HardwareSessionKind, HardwareSessionRequest, MintHandle, OutputChoice, OutputCommitted,
+    HandleAccess, HandleResolved, HardwareSessionKind, HardwareSessionRequest, MintHandle, ResolveHandle, OutputChoice, OutputCommitted,
     OutputDestination, OutputDestinationRequest, OutputVerification, OverwritePolicy,
 };
 use crate::interop::{PlatformSurface, SurfaceDescriptor, SurfaceFormat, SurfacePool};
@@ -682,6 +682,13 @@ pub fn requests() -> Vec<Envelope> {
             }),
         ),
         request(
+            id(40),
+            Request::ResolveHandle(ResolveHandle {
+                handle: handle(15),
+                session: session(),
+            }),
+        ),
+        request(
             id(14),
             Request::OutputDestination(OutputDestinationRequest {
                 job: "job-1".into(),
@@ -899,6 +906,15 @@ pub fn responses() -> Vec<Envelope> {
                 handle: handle(15),
                 kind: CapabilityKind::MediaRead { asset: "a1".into() },
                 content_hash: Some(hash(16)),
+            }),
+        ),
+        response(
+            40,
+            Response::HandleResolved(HandleResolved {
+                handle: handle(15),
+                kind: CapabilityKind::MediaRead { asset: "a1".into() },
+                access: HandleAccess::Read,
+                path: "/Users/someone/Movies/Interview A.mov".into(),
             }),
         ),
         response(
@@ -1280,9 +1296,10 @@ pub const fn request_index(request: &Request) -> usize {
         Request::Persist(_) => 21,
         Request::RegisterExtension(_) => 22,
         Request::ToolCall(_) => 23,
+        Request::ResolveHandle(_) => 24,
     }
 }
-pub const REQUEST_VARIANTS: usize = 24;
+pub const REQUEST_VARIANTS: usize = 25;
 
 /// Exhaustive index of response variants.
 pub const fn response_index(response: &Response) -> usize {
@@ -1309,9 +1326,10 @@ pub const fn response_index(response: &Response) -> usize {
         Response::Persisted(_) => 19,
         Response::ExtensionRegistered(_) => 20,
         Response::ToolResult(_) => 21,
+        Response::HandleResolved(_) => 22,
     }
 }
-pub const RESPONSE_VARIANTS: usize = 22;
+pub const RESPONSE_VARIANTS: usize = 23;
 
 /// Exhaustive index of event variants.
 pub const fn event_index(event: &Event) -> usize {
