@@ -35,7 +35,7 @@ pub const MAX_SOURCE_BYTES: usize = 8 << 20;
 /// 2^18 doubling (1,048,573 tokens), which WebGL compiles in 0.17 s, is
 /// refused: a deliberate divergence (S3.md, "Resource limits").
 pub const MAX_EXPANDED_TOKENS: usize = 1_000_000;
-/// Statements (`;` after expansion). glslang's front end and the Metal
+/// Statements (`;` after expansion) per function body. glslang's front end and the Metal
 /// compiler are both superlinear in the length of one function: a 256 KiB
 /// program (13,800 statements) takes 5.2 s through the naga path including
 /// Metal, a 512 KiB one did not finish in 90 s. WebGL did no better: ANGLE
@@ -558,9 +558,32 @@ pub fn check_source(source: &str) -> Result<(), LimitError> {
         return Err(LimitError::new("source-size", format!("program is {} bytes; the limit is {MAX_SOURCE_BYTES}", source.len()), None));
     }
     let tokens = preprocess(source)?;
-    let statements = tokens.iter().filter(|t| t.text == ";").count();
-    if statements > MAX_STATEMENTS {
-        return Err(LimitError::new("statements", format!("program has {statements} statements; the limit is {MAX_STATEMENTS}"), None));
+    // The cost is superlinear per function body, so the cap applies per
+    // top-level block (a function body); the program total gets 4 times it.
+    let (mut depth, mut in_body, mut total) = (0usize, 0usize, 0usize);
+    for t in &tokens {
+        match t.text {
+            "{" => depth += 1,
+            "}" => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    in_body = 0;
+                }
+            }
+            ";" => {
+                total += 1;
+                if depth > 0 {
+                    in_body += 1;
+                    if in_body > MAX_STATEMENTS {
+                        return Err(LimitError::new("statements", format!("a function body has more than {MAX_STATEMENTS} statements"), Some(t.line)));
+                    }
+                }
+                if total > 4 * MAX_STATEMENTS {
+                    return Err(LimitError::new("statements", format!("program has more than {} statements", 4 * MAX_STATEMENTS), Some(t.line)));
+                }
+            }
+            _ => {}
+        }
     }
     check_struct_nesting(&tokens)
 }
@@ -801,8 +824,11 @@ mod tests {
     #[test]
     fn statements_are_capped() {
         let many = |n: usize| format!("{H}void main(){{ float f = 0.0;\n{} o = vec4(f); }}\n", "f += 1.0;\n".repeat(n));
-        check_source(&many(MAX_STATEMENTS - 4)).expect("4 statements around the loop body");
-        assert_eq!(check_source(&many(MAX_STATEMENTS - 3)).unwrap_err().rule, "statements");
+        check_source(&many(MAX_STATEMENTS - 2)).expect("2 more statements in main");
+        assert_eq!(check_source(&many(MAX_STATEMENTS - 1)).unwrap_err().rule, "statements");
+        // Many short functions are cheap and allowed (WebGL draws 20,000 in 0.4 s).
+        let functions: String = (0..20_000).map(|i| format!("float f{i}(float x){{ return x * {i}.0; }}\n")).collect();
+        check_source(&format!("{H}{functions}void main(){{ o = vec4(f19999(1.0)); }}\n")).expect("20,000 one-statement functions");
     }
 
     #[test]
