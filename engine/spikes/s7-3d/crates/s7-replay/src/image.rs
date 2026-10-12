@@ -3,6 +3,7 @@
 use anyhow::{Result, bail};
 use std::path::Path;
 
+#[derive(Clone)]
 pub struct Rgba8 {
     pub width: u32,
     pub height: u32,

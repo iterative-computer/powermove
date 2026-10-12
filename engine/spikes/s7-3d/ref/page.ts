@@ -73,6 +73,29 @@ function masks(runtime: SceneRuntime, def: SceneDef, exposure: number, shadows: 
   r.render(scene, camera);
   const noAA = readCanvas(gl, w, h, true);
 
+  // 1b. The same per-layer passes as the output, without MSAA: each layer output gets its
+  //     own MSAA-edge mask (a layer's visible edges differ from the whole scene's).
+  const layers: { name: string; pixels: Uint8Array }[] = [];
+  {
+    const own = (runtime as any).renderer;
+    (runtime as any).renderer = r;
+    try {
+      runtime.render(w, h); // a whole-scene pass resets the shared depth-prepass cache
+      for (const set of def.sets) {
+        const ids = new Set(set);
+        const ordered = [...set].sort((a, b) => cameraDepth(runtime, b) - cameraDepth(runtime, a));
+        const bottom = ordered.at(-1);
+        for (const objectId of [...ordered].reverse()) {
+          runtime.render(w, h, objectId, ids, objectId === bottom);
+          layers.push({ name: `layer-${objectId}`, pixels: readCanvas(gl, w, h, true) });
+        }
+      }
+    } finally {
+      (runtime as any).renderer = own;
+    }
+  }
+  r.setClearColor(0, 0); r.autoClear = true; r.shadowMap.autoUpdate = true;
+
   // 2. Shadow factor: ShadowMaterial alpha = 1 - shadow mask; 0 < alpha < 1 is penumbra.
   const background = scene.background;
   scene.background = null;
@@ -103,7 +126,7 @@ function masks(runtime: SceneRuntime, def: SceneDef, exposure: number, shadows: 
   list.forEach((d, i) => { d.object.material = saved[i]; });
   for (const m of made) m.dispose();
   scene.background = background;
-  return { noAA, shadow, ids, list: list.map((d, i) => ({ id: i + 1, owner: d.owner, name: d.name, kind: d.kind })) };
+  return { noAA, layers, shadow, ids, list: list.map((d, i) => ({ id: i + 1, owner: d.owner, name: d.name, kind: d.kind })) };
 }
 
 async function renderScene(id: string, options: { trace?: boolean; tag?: string; fsTail?: string; fsMatch?: string } = {}) {
@@ -160,6 +183,7 @@ async function renderScene(id: string, options: { trace?: boolean; tag?: string;
   const shadows = def.scene.environment?.shadows !== false;
   const m = masks(runtime, def, typeof exposure === 'object' ? exposure.v : exposure, shadows);
   await post(`${tag}/${id}/mask-noaa.rgba`, m.noAA, { w, h });
+  for (const layer of m.layers) await post(`${tag}/${id}/mask-noaa-${layer.name}.rgba`, layer.pixels, { w, h });
   await post(`${tag}/${id}/mask-shadow.rgba`, m.shadow, { w, h });
   await post(`${tag}/${id}/mask-ids.rgba`, m.ids, { w, h });
   const info = {

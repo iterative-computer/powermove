@@ -2,8 +2,10 @@
 //! any pixel outside MSAA edges and shadow penumbrae, per-object SSIM at least 0.99.
 //!
 //! Classification masks come from the reference run (`ref/page.ts`):
-//! * MSAA edges: pixels where the scene rendered without MSAA differs from the MSAA
-//!   render, dilated by one pixel.
+//! * MSAA edges: pixels where the output rendered without MSAA differs from the MSAA
+//!   render, dilated by one pixel. Each layer output has its own no-MSAA render
+//!   (`mask-noaa-<output>.png`, the same per-layer passes); `full` uses `mask-noaa.png`.
+//!   References captured before per-layer masks existed fall back to the scene mask.
 //! * Penumbrae: pixels whose shadow factor is strictly between 0 and 1 (ShadowMaterial
 //!   alpha 1..254), dilated by one pixel.
 //! * Object ids: flat id colors without MSAA; index = drawable list index + 1.
@@ -122,7 +124,8 @@ pub fn ssim_map(a: &Rgba8, b: &Rgba8) -> Vec<f64> {
 }
 
 pub struct SceneMasks {
-    pub excluded: Vec<bool>,
+    /// Shadow penumbrae (dilated), shared by every output of the scene.
+    pub penumbra: Vec<bool>,
     pub ids: Vec<u32>,
     pub drawables: Vec<(u32, String, String, String)>,
     pub width: usize,
@@ -131,25 +134,35 @@ pub struct SceneMasks {
 
 pub fn load_masks(ref_dir: &Path) -> Result<SceneMasks> {
     let info: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(ref_dir.join("info.json"))?)?;
-    let full = read_png(&ref_dir.join("full.png"))?;
-    let noaa = read_png(&ref_dir.join("mask-noaa.png"))?;
     let shadow = read_png(&ref_dir.join("mask-shadow.png"))?;
     let ids = read_png(&ref_dir.join("mask-ids.png"))?;
-    let (w, h) = (full.width as usize, full.height as usize);
-    let msaa: Vec<bool> = (0..w * h).map(|i| (0..4).any(|c| full.data[i * 4 + c] != noaa.data[i * 4 + c])).collect();
+    let (w, h) = (shadow.width as usize, shadow.height as usize);
     let penumbra: Vec<bool> = (0..w * h).map(|i| (1..=254).contains(&shadow.data[i * 4 + 3])).collect();
-    let msaa = dilate(&msaa, w, h);
     let penumbra = dilate(&penumbra, w, h);
-    let excluded = msaa.iter().zip(&penumbra).map(|(a, b)| *a || *b).collect();
     let id_values = (0..w * h).map(|i| ids.data[i * 4] as u32 | (ids.data[i * 4 + 1] as u32) << 8 | (ids.data[i * 4 + 2] as u32) << 16).collect();
     let drawables = info["drawables"]
         .as_array()
         .map(|a| a.iter().map(|d| (d["id"].as_u64().unwrap_or(0) as u32, d["owner"].as_str().unwrap_or("").to_string(), d["name"].as_str().unwrap_or("").to_string(), d["kind"].as_str().unwrap_or("").to_string())).collect())
         .unwrap_or_default();
-    Ok(SceneMasks { excluded, ids: id_values, drawables, width: w, height: h })
+    Ok(SceneMasks { penumbra, ids: id_values, drawables, width: w, height: h })
 }
 
-pub fn score(output: &str, reference: &Rgba8, test: &Rgba8, masks: &SceneMasks) -> Result<(OutputScore, Vec<u8>)> {
+/// Pixels excluded from the 12 CV maximum for one output: its MSAA edges (dilated) and
+/// the scene's penumbrae.
+pub fn excluded_pixels(ref_dir: &Path, output: &str, reference: &Rgba8, masks: &SceneMasks) -> Result<Vec<bool>> {
+    let own = ref_dir.join(format!("mask-noaa-{output}.png"));
+    let noaa = if own.exists() { read_png(&own)? } else { read_png(&ref_dir.join("mask-noaa.png"))? };
+    // Without a per-layer mask, edges are those of the whole scene.
+    let with_aa = if own.exists() || output == "full" { reference.clone() } else { read_png(&ref_dir.join("full.png"))? };
+    let (w, h) = (masks.width, masks.height);
+    if (noaa.width as usize, noaa.height as usize) != (w, h) || (with_aa.width as usize, with_aa.height as usize) != (w, h) {
+        bail!("{output}: mask size mismatch");
+    }
+    let msaa: Vec<bool> = (0..w * h).map(|i| (0..4).any(|c| with_aa.data[i * 4 + c] != noaa.data[i * 4 + c])).collect();
+    Ok(dilate(&msaa, w, h).iter().zip(&masks.penumbra).map(|(a, b)| *a || *b).collect())
+}
+
+pub fn score(output: &str, reference: &Rgba8, test: &Rgba8, masks: &SceneMasks, excluded: &[bool]) -> Result<(OutputScore, Vec<u8>)> {
     if reference.width != test.width || reference.height != test.height {
         bail!("{output}: size mismatch {}x{} vs {}x{}", reference.width, reference.height, test.width, test.height);
     }
@@ -165,14 +178,14 @@ pub fn score(output: &str, reference: &Rgba8, test: &Rgba8, masks: &SceneMasks) 
             within += 1;
         }
         max_cv = max_cv.max(d);
-        if !masks.excluded[i] {
+        if !excluded[i] {
             max_outside = max_outside.max(d);
             if d > MAX_CV_OUTSIDE {
                 over += 1;
             }
         }
         let v = (d as u32 * 16).min(255) as u8;
-        heat[i * 4..i * 4 + 4].copy_from_slice(&[v, if masks.excluded[i] { 40 } else { 0 }, 0, 255]);
+        heat[i * 4..i * 4 + 4].copy_from_slice(&[v, if excluded[i] { 40 } else { 0 }, 0, 255]);
     }
     // Objects drawn into this output.
     let owner = output.strip_prefix("layer-");
@@ -208,7 +221,7 @@ pub fn score(output: &str, reference: &Rgba8, test: &Rgba8, masks: &SceneMasks) 
             fraction_within_2: fraction,
             max_cv,
             max_cv_outside_edges: max_outside,
-            excluded_pixels: masks.excluded.iter().filter(|e| **e).count(),
+            excluded_pixels: excluded.iter().filter(|e| **e).count(),
             over_12_outside: over,
             min_object_ssim: min_ssim,
             objects,
@@ -234,7 +247,8 @@ pub fn score_scene(ref_dir: &Path, test_dir: &Path, heat_dir: Option<&Path>) -> 
             bail!("{}: missing", test_path.display());
         }
         let test = read_png(&test_path)?;
-        let (s, heat) = score(name, &reference, &test, &masks)?;
+        let excluded = excluded_pixels(ref_dir, name, &reference, &masks)?;
+        let (s, heat) = score(name, &reference, &test, &masks, &excluded)?;
         if let Some(dir) = heat_dir {
             std::fs::create_dir_all(dir)?;
             crate::image::write_png(&dir.join(format!("{name}.diff.png")), reference.width, reference.height, &heat)?;
