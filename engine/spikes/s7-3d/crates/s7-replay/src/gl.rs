@@ -1431,9 +1431,11 @@ impl Replayer {
             (vs.ok_or_else(|| anyhow!("no vertex shader"))?, fs.ok_or_else(|| anyhow!("no fragment shader"))?)
         };
         self.stats.programs += 1;
-        // Debug aid: S7_FS_TAIL appends statements to the end of every fragment main.
+        // Debug aid: S7_FS_TAIL appends statements to the end of every fragment main whose
+        // source contains S7_FS_MATCH (default: the standard material).
+        let matcher = std::env::var("S7_FS_MATCH").unwrap_or_else(|_| "SHADER_TYPE MeshStandardMaterial".into());
         let fs = match std::env::var("S7_FS_TAIL") {
-            Ok(tail) if fs.contains("SHADER_TYPE MeshStandardMaterial") => {
+            Ok(tail) if fs.contains(&matcher) => {
                 let end = fs.rfind('}').unwrap();
                 format!("{}{tail}\n}}\n", &fs[..end])
             }

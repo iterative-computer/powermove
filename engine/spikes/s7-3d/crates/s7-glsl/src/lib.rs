@@ -483,6 +483,46 @@ pub fn add_missing_varyings(vs: &str, fs: &str) -> String {
     format!("{vs}{extra}")
 }
 
+/// Step 2j: explicit, program-wide varying locations. glslang's automatic mapping
+/// numbers each stage's inputs and outputs in declaration order, and three.js declares
+/// varyings in different orders per stage (the transmission program declares
+/// `vWorldPosition` before `vNormal` in the vertex stage and after it in the fragment
+/// stage), so the stages would disagree. GL links varyings by name; this gives every
+/// fragment input the location of its position in the fragment stage and the vertex
+/// output of the same name the same location. Vertex outputs the fragment stage does not
+/// read follow. Runs after [`add_missing_varyings`] and [`expand_io_arrays`], so every
+/// varying is a single non-array declaration.
+pub fn assign_varying_locations(vs: &str, fs: &str) -> Result<[String; 2]> {
+    fn varying(line: &str, kw: &str) -> Option<String> {
+        let t = line.trim();
+        let tokens: Vec<&str> = t.trim_end_matches(';').split_whitespace().collect();
+        if !t.ends_with(';') || t.contains('(') || t.contains('[') || t.starts_with("layout") || t.starts_with('#') || !tokens.contains(&kw) || tokens.len() < 3 {
+            return None;
+        }
+        Some(tokens[tokens.len() - 1].to_string())
+    }
+    let mut locations: Vec<String> = fs.lines().filter_map(|l| varying(l, "in")).collect();
+    for name in vs.lines().filter_map(|l| varying(l, "out")) {
+        if !locations.contains(&name) {
+            locations.push(name);
+        }
+    }
+    let rewrite = |src: &str, kw: &str| -> Result<String> {
+        let mut out = String::with_capacity(src.len() + locations.len() * 24);
+        for line in src.lines() {
+            if let Some(name) = varying(line, kw) {
+                let index = locations.iter().position(|n| *n == name).ok_or_else(|| anyhow!("varying {name} has no location"))?;
+                out.push_str(&format!("layout(location = {index}) {}\n", line.trim()));
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        Ok(out)
+    };
+    Ok([rewrite(vs, "out")?, rewrite(fs, "in")?])
+}
+
 /// Step 2i: std140 gives `uniform float a[N]` (and `vec2`, `int`, `ivec2`, `uint`,
 /// `bool` arrays) a 16-byte stride; naga's MSL back end lays such arrays out at the
 /// element size, so later block members move. The array is declared as the matching
@@ -899,6 +939,7 @@ pub fn compile(vertex_src: &str, fragment_src: &str) -> Result<Program> {
     let (fs, fs_wide) = widen_uniform_arrays(&fs)?;
     let [vs, fs] = assign_sampler_bindings([&vs, &fs]);
     let vs = add_missing_varyings(&vs, &fs);
+    let [vs, fs] = assign_varying_locations(&vs, &fs)?;
     let vs = wrap_vertex_main(&vs)?;
     let (vs_spv, fs_spv) = glslang.compile(&vs, &fs)?;
     let vs_spv = split_combined_samplers(&inline_opaque(&vs_spv).context("vertex inline")?).context("vertex split")?;
@@ -1124,6 +1165,28 @@ mod tests {
         assert_eq!(p.uniforms["w[1]"].rows, 1);
         assert_eq!(p.uniforms["w"].count, 3);
         assert_eq!(p.uniforms["after"].offset, 48);
+    }
+
+    #[test]
+    fn varyings_link_by_name_not_declaration_order() {
+        // The vertex stage declares a, extra, b; the fragment stage reads b, then a.
+        let vs = "#version 300 es\nin vec3 position;\nout vec3 a;\nout float extra;\nout vec3 b;\nvoid main() { a = position; extra = 1.0; b = -position; gl_Position = vec4(position, 1.0); }\n";
+        let fs = "#version 300 es\nprecision highp float;\nin vec3 b;\nin vec3 a;\nlayout(location = 0) out vec4 o;\nvoid main() { o = vec4(a - b, 1.0); }\n";
+        let p = compile(vs, fs).expect("compile");
+        let [v, f] = &p.preprocessed;
+        assert!(f.contains("layout(location = 0) in vec3 b;") && f.contains("layout(location = 1) in vec3 a;"), "{f}");
+        assert!(v.contains("layout(location = 0) out vec3 b;") && v.contains("layout(location = 1) out vec3 a;") && v.contains("layout(location = 2) out float extra;"), "{v}");
+        let inputs: HashMap<String, u32> = p.fragment.entry_points[0]
+            .function
+            .arguments
+            .iter()
+            .filter_map(|a| match (&a.name, &a.binding) {
+                (Some(n), Some(naga::Binding::Location { location, .. })) => Some((n.clone(), *location)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(inputs.get("b"), Some(&0));
+        assert_eq!(inputs.get("a"), Some(&1));
     }
 
     #[test]
