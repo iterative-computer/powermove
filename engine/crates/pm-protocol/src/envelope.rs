@@ -27,7 +27,7 @@ use crate::document_host::{
     CloseProject, ExtensionRegistered, OpenProject, Persist, Persisted, ProjectOpened,
     RegisterExtension, ToolCall, ToolResult,
 };
-use crate::error::{CrashReport, EngineError, EngineProcess, FailureReport};
+use crate::error::{CrashReport, EngineError, EngineProcess, FailureReport, InFlight};
 use crate::frame::{
     FrameDescriptor, FrameQuality, FrameRelease, FrameRequest, ViewOverride, ViewerState,
 };
@@ -287,6 +287,8 @@ pub enum Event {
     Failure(FailureReport),
     /// Host → renderer: an engine crashed and is restarting.
     Crash(CrashReport),
+    /// Engine → host: the attributable items in flight (crash breadcrumb).
+    InFlight(InFlight),
     /// Engine → host: periodic lease usage.
     LeaseUsage(LeaseUsage),
     /// Job engine → host → renderer: job status.
@@ -434,7 +436,7 @@ impl Event {
             Event::SurfacePool(_) => ContractId::GpuInterop,
             Event::Transport(_) | Event::Clock(_) => ContractId::Clock,
             Event::Deadline(_) | Event::Slicing(_) => ContractId::Slicing,
-            Event::Failure(_) | Event::Crash(_) => ContractId::Errors,
+            Event::Failure(_) | Event::Crash(_) | Event::InFlight(_) => ContractId::Errors,
             Event::LeaseUsage(_) => ContractId::Lease,
             Event::JobStatus(_) => ContractId::Priority,
             Event::BlenderProgress(_) | Event::BlenderSurface(_) => ContractId::Blender,
@@ -533,6 +535,7 @@ impl Validate for Event {
             Event::BlenderSurface(surface) => surface.validate(),
             Event::Viewer(state) => state.validate(),
             Event::Failure(report) => report.error.validate(),
+            Event::InFlight(in_flight) => in_flight.validate(),
             _ => Ok(()),
         }
     }

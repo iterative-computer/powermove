@@ -27,6 +27,7 @@ reported by the host (`Event::Crash`).
 | `EngineProcess` | Interactive or job |
 | `CrashReport` | Which process, consecutive attempt, exit, suspects in flight, items now marked failed, restart delay |
 | `CrashLedger` | Host-side attribution |
+| `InFlight` | `Event::InFlight` (engine → host): the attributable items the engine is working on, sent whenever the set changes; the host keeps the last one per process as the crash's suspects |
 | `restart_backoff_ms` | 250 ms doubling per attempt, capped at 30 s |
 
 ## Invariants
@@ -57,8 +58,10 @@ reported by the host (`Event::Crash`).
 4. **Crash attribution:** an asset, effect, definition, or layer suspected
    in two crashes is marked failed for the session (`CrashLedger`, tested:
    reported once, on the second crash; sessions and connections are never
-   attributable). Restarts back off exponentially (`restart_backoff_ms`,
-   tested).
+   attributable, and `InFlight::validate` rejects them as suspects).
+   Restarts back off exponentially (`restart_backoff_ms`, tested); the host
+   resets the attempt count after the engine has stayed up for a healthy
+   interval (60 s in main and `pm-host`).
 5. **Messages are for people.** One sentence, 1 to 4096 bytes, saying what
    failed and what to do; no paths the engine was not given, no secrets.
    Length is checked by `EngineError::validate`.

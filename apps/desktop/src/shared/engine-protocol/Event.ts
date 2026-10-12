@@ -8,6 +8,7 @@ import type { EngineFact } from "./EngineFact";
 import type { FailureReport } from "./FailureReport";
 import type { FrameDescriptor } from "./FrameDescriptor";
 import type { FrameRelease } from "./FrameRelease";
+import type { InFlight } from "./InFlight";
 import type { JobStatus } from "./JobStatus";
 import type { LeaseUsage } from "./LeaseUsage";
 import type { PatchBatch } from "./PatchBatch";
@@ -20,4 +21,4 @@ import type { ViewerState } from "./ViewerState";
 /**
  * One-way messages. Each names its direction.
  */
-export type Event = { "type": "applyPatches" } & PatchBatch | { "type": "patchesApplied" } & PatchesApplied | { "type": "frame" } & FrameDescriptor | { "type": "releaseFrame" } & FrameRelease | { "type": "surfacePool" } & SurfacePool | { "type": "viewer" } & ViewerState | { "type": "transport" } & TransportCommand | { "type": "clock" } & ClockSample | { "type": "deadline" } & DeadlineSignal | { "type": "slicing" } & SlicingPolicy | { "type": "failure" } & FailureReport | { "type": "crash" } & CrashReport | { "type": "leaseUsage" } & LeaseUsage | { "type": "jobStatus" } & JobStatus | { "type": "blenderProgress" } & BlenderProgress | { "type": "blenderSurface" } & BlenderSurface | { "type": "fact" } & EngineFact;
+export type Event = { "type": "applyPatches" } & PatchBatch | { "type": "patchesApplied" } & PatchesApplied | { "type": "frame" } & FrameDescriptor | { "type": "releaseFrame" } & FrameRelease | { "type": "surfacePool" } & SurfacePool | { "type": "viewer" } & ViewerState | { "type": "transport" } & TransportCommand | { "type": "clock" } & ClockSample | { "type": "deadline" } & DeadlineSignal | { "type": "slicing" } & SlicingPolicy | { "type": "failure" } & FailureReport | { "type": "crash" } & CrashReport | { "type": "inFlight" } & InFlight | { "type": "leaseUsage" } & LeaseUsage | { "type": "jobStatus" } & JobStatus | { "type": "blenderProgress" } & BlenderProgress | { "type": "blenderSurface" } & BlenderSurface | { "type": "fact" } & EngineFact;

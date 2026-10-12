@@ -100,6 +100,7 @@ export type { HardwareSessionRequest } from "./HardwareSessionRequest";
 export type { Hello } from "./Hello";
 export type { HostMicros } from "./HostMicros";
 export type { ImagePayload } from "./ImagePayload";
+export type { InFlight } from "./InFlight";
 export type { InstanceId } from "./InstanceId";
 export type { JobAccepted } from "./JobAccepted";
 export type { JobId } from "./JobId";
