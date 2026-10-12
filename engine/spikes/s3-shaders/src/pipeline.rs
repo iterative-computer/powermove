@@ -16,6 +16,7 @@ use std::time::Instant;
 
 use crate::compile::{self, Stage};
 use crate::errors::{self, Diagnostic};
+use crate::limits;
 use crate::normalize;
 use crate::reflect::{self, Reflection};
 use crate::rewrite::{self, SplitBinding};
@@ -71,6 +72,13 @@ pub struct Translated {
     pub timings_ms: HashMap<String, f64>,
 }
 
+/// `S3_TRACE=1` prints each stage as it starts (triage for hangs).
+fn trace(stage: &str) {
+    if std::env::var_os("S3_TRACE").is_some() {
+        eprintln!("[s3] {stage}");
+    }
+}
+
 fn ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }
@@ -107,6 +115,7 @@ pub fn naga_validate(module: &naga::Module) -> Result<naga::valid::ModuleInfo, S
 }
 
 fn stage_spirv(source: &str, stage: Stage, line_offset: u32, timings: &mut HashMap<String, f64>, prefix: &str) -> Result<(rspirv::dr::Module, compile::Spirv), Failure> {
+    trace(&format!("{prefix}glslang"));
     let start = Instant::now();
     let spv = compile::compile(source, stage).map_err(|e| Failure {
         stage: "glslang".into(),
@@ -128,6 +137,7 @@ fn naga_stage(mut module: rspirv::dr::Module, spv: &compile::Spirv, timings: &mu
     let splits = rewrite::split_combined_samplers(&mut module).map_err(|e| Failure::new("rewrite", e.0))?;
     timings.insert(format!("{prefix}split"), ms(start));
     let words = rewrite::assemble(&module);
+    trace(&format!("{prefix}naga-parse"));
     let start = Instant::now();
     let options = naga::front::spv::Options { adjust_coordinate_space: true, strict_capabilities: false, block_ctx_dump_prefix: None };
     let parsed = std::panic::catch_unwind(|| naga::front::spv::Frontend::new(words.into_iter(), &options).parse());
@@ -212,8 +222,20 @@ fn spvc_stage(module: rspirv::dr::Module, spv: &compile::Spirv, stage: Stage, ti
     Ok(StageOutput { reflection, splits: Vec::new(), naga: None, msl: Some(msl), entry_point: entry })
 }
 
+fn limit_failure(error: &limits::LimitError, line_offset: u32) -> Failure {
+    Failure { stage: "limits".into(), message: error.to_string(), diagnostics: errors::map(&error.to_string(), line_offset) }
+}
+
 pub fn translate(gl_vertex: &str, fragment: &str, line_offset: u32, path: Path) -> Result<Translated, Failure> {
     let mut timings = HashMap::new();
+    trace("limits");
+    let start = Instant::now();
+    // `S3_LIMITS=off` skips the source budgets, only to measure what they prevent.
+    if std::env::var("S3_LIMITS").as_deref() != Ok("off") {
+        limits::check_source(fragment).map_err(|e| limit_failure(&e, line_offset))?;
+    }
+    timings.insert("limits".into(), ms(start));
+    trace("es-validate");
     let start = Instant::now();
     compile::validate_es(gl_vertex, &normalize::rename_reserved(fragment)).map_err(|e| Failure {
         stage: "es-validate".into(),
@@ -231,6 +253,13 @@ pub fn translate(gl_vertex: &str, fragment: &str, line_offset: u32, path: Path) 
     timings.insert("normalize".into(), ms(start));
     let (vmod, vspv) = stage_spirv(&vertex.source, Stage::Vertex, 0, &mut timings, "vertex-")?;
     let (fmod, fspv) = stage_spirv(&normalized.source, Stage::Fragment, line_offset, &mut timings, "")?;
+    let start = Instant::now();
+    let active: std::collections::HashSet<u32> = reflect::reflect(&fmod, &reflect::bool_uniforms(&fspv.preprocessed))
+        .block
+        .map(|b| b.members.iter().enumerate().filter(|(_, m)| m.active).map(|(k, _)| k as u32).collect())
+        .unwrap_or_default();
+    limits::check_spirv(&fmod, &active).map_err(|e| limit_failure(&e, line_offset))?;
+    timings.insert("limits-spirv".into(), ms(start));
     let (vertex_out, fragment_out) = match path {
         Path::Naga => (naga_stage(vmod, &vspv, &mut timings, "vertex-")?, naga_stage(fmod, &fspv, &mut timings, "")?),
         Path::SpirvCross => (

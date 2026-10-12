@@ -6,11 +6,18 @@
 //!   s3-shaders run --corpus work/corpus.json --webgl work/webgl/metal --out work/results
 //!                  [--paths naga,spvc] [--filter <substring>]
 //!   s3-shaders msl --corpus work/corpus.json --case <id> [--path naga|spvc]
+//!   s3-shaders diff --a <reference.f16> --b <rendered.f16> [--width 256]
+//!   s3-shaders refcmp --a work/webgl/metal --b work/webgl/swiftshader --out <file.jsonl>
+//!   s3-shaders fuzz [--iterations N] [--seed S] [--bombs] [--metal] [--deadline seconds]
+//!   s3-shaders fuzz-dump [--iterations N] [--seed S] [--bombs] [--out dir]
+//!   s3-shaders translate --frag <file> [--path naga|spvc]
 
 mod case;
 mod compare;
 mod compile;
 mod errors;
+mod fuzz;
+mod limits;
 mod normalize;
 mod pipeline;
 mod reflect;
@@ -183,6 +190,32 @@ fn msl(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Translate one fragment source file (with the corpus vertex shader) and
+/// print the outcome and per-stage timings, for triaging slow or failing
+/// inputs.
+fn translate_file(args: &[String]) -> anyhow::Result<()> {
+    let corpus_path = PathBuf::from(arg(args, "--corpus").unwrap_or_else(|| "work/corpus.json".into()));
+    let file = PathBuf::from(arg(args, "--frag").expect("--frag <file>"));
+    let path = match arg(args, "--path").as_deref() {
+        Some("spvc") => Path::SpirvCross,
+        _ => Path::Naga,
+    };
+    let corpus: case::Corpus = serde_json::from_slice(&std::fs::read(&corpus_path)?)?;
+    let source = std::fs::read_to_string(&file)?;
+    let started = Instant::now();
+    let result = pipeline::translate(&corpus.vertex, &source, 0, path);
+    let total = started.elapsed().as_secs_f64() * 1000.0;
+    match result {
+        Ok(t) => {
+            let mut timings: Vec<_> = t.timings_ms.into_iter().collect();
+            timings.sort_by(|a, b| a.0.cmp(&b.0));
+            println!("ok in {total:.1} ms: {timings:?}");
+        }
+        Err(f) => println!("reject at {} in {total:.1} ms: {}", f.stage, f.message.lines().next().unwrap_or_default()),
+    }
+    Ok(())
+}
+
 /// List the pixels of a rendered variant that differ from the WebGL reference
 /// by more than 1 (8-bit), with coordinates in GL row order.
 fn diff(args: &[String]) -> anyhow::Result<()> {
@@ -233,15 +266,31 @@ fn refcmp(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Stack for the thread that translates and builds pipelines. glslang's ES
+/// front end, glslang's SPIR-V back end, naga, and SPIRV-Cross all recurse
+/// per expression nesting level; a 100,000-deep swizzle chain (which WebGL
+/// accepts) overflows the default 8 MiB main stack. Address space is reserved,
+/// not committed. See S3.md, "Resource limits".
+const TRANSLATION_STACK_BYTES: usize = 1 << 30;
+
 fn main() -> anyhow::Result<()> {
+    let worker = std::thread::Builder::new().name("s3-translate".into()).stack_size(TRANSLATION_STACK_BYTES).spawn(dispatch)?;
+    worker.join().map_err(|_| anyhow::anyhow!("translation thread panicked"))?
+}
+
+fn dispatch() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("run") => run(&args),
         Some("msl") => msl(&args),
         Some("diff") => diff(&args),
         Some("refcmp") => refcmp(&args),
+        Some("fuzz") => fuzz::run(&args),
+        Some("fuzz-worker") => fuzz::worker(&args),
+        Some("fuzz-dump") => fuzz::dump(&args),
+        Some("translate") => translate_file(&args),
         _ => {
-            eprintln!("usage: s3-shaders run|msl|diff|refcmp [options]");
+            eprintln!("usage: s3-shaders run|msl|diff|refcmp|fuzz [options]");
             std::process::exit(2);
         }
     }
