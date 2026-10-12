@@ -31,7 +31,7 @@ fn layer(i: usize) -> String {
         .collect();
     format!(
         r##"{{"id":"layer-{i}","name":"Layer {i}","type":"{}","from":{},"dur":5,"p":{{{}}},"d":{{"fill":"#336699","stroke":null,"path":[{}]}}}}"##,
-        if i % 7 == 0 { "text" } else { "shape" },
+        if i.is_multiple_of(7) { "text" } else { "shape" },
         i as f64 / 30.0,
         channels.join(","),
         path.join(",")

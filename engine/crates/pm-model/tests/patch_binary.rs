@@ -43,7 +43,10 @@ fn field<'a>(case: &'a Value, key: &str) -> &'a Value {
 #[test]
 fn typescript_bytes_decode_reencode_and_match_the_rust_generator() {
     let vectors = vectors();
-    assert_eq!(vectors.get("format").and_then(Value::as_str), Some("canonicalV1"));
+    assert_eq!(
+        vectors.get("format").and_then(Value::as_str),
+        Some("canonicalV1")
+    );
     let cases = field(&vectors, "cases").as_array().unwrap();
     assert!(cases.len() >= 400, "expected the generated cases");
     let mut kinds = [0usize; 4];
@@ -75,11 +78,19 @@ fn typescript_bytes_decode_reencode_and_match_the_rust_generator() {
         // Applying them gives `after`, as patch.ts's leaf patches do.
         let mut root = before.clone();
         apply_ops(&mut root, &decoded).unwrap_or_else(|e| panic!("{name}: {e}"));
-        assert_eq!(canonical(root.as_ref()), canonical(after.as_ref()), "{name}");
+        assert_eq!(
+            canonical(root.as_ref()),
+            canonical(after.as_ref()),
+            "{name}"
+        );
         let (leaf, _) = diff_patches(before.as_ref(), after.as_ref());
         let mut by_leaf = before.clone();
         apply_patches(&mut by_leaf, &leaf).unwrap();
-        assert_eq!(canonical(by_leaf.as_ref()), canonical(after.as_ref()), "{name}");
+        assert_eq!(
+            canonical(by_leaf.as_ref()),
+            canonical(after.as_ref()),
+            "{name}"
+        );
 
         // On the revisioned document: the same tree and revisions as the
         // leaf patches' id-keyed reconciliation.
@@ -89,7 +100,10 @@ fn typescript_bytes_decode_reencode_and_match_the_rust_generator() {
         reconciled.apply_at(&leaf, 2).unwrap();
         assert_eq!(by_ops, reconciled, "{name}");
     }
-    assert!(kinds.iter().all(|&n| n > 50), "every operation kind is covered: {kinds:?}");
+    assert!(
+        kinds.iter().all(|&n| n > 50),
+        "every operation kind is covered: {kinds:?}"
+    );
 }
 
 #[test]
@@ -129,7 +143,11 @@ fn apply_cases_match_typescript_results_and_errors() {
                 (e.index, kind.to_owned())
             });
             assert_eq!(error, expected_error, "{name}");
-            assert_eq!(canonical(result.as_ref()), canonical(expected.as_ref()), "{name}");
+            assert_eq!(
+                canonical(result.as_ref()),
+                canonical(expected.as_ref()),
+                "{name}"
+            );
         }
     }
 }
@@ -159,7 +177,12 @@ fn decoding_never_panics_on_mutated_vectors() {
         state ^= state << 17;
         state
     };
-    for case in field(&vectors, "cases").as_array().unwrap().iter().take(120) {
+    for case in field(&vectors, "cases")
+        .as_array()
+        .unwrap()
+        .iter()
+        .take(120)
+    {
         let bytes = unhex(field(case, "hex").as_str().unwrap());
         for end in 0..bytes.len().min(400) {
             assert!(decode(&bytes[..end]).is_err());
