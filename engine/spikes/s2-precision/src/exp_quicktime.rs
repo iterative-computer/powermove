@@ -103,7 +103,7 @@ pub fn chart_buffer() -> Result<PixelBuffer> {
     Ok(pb)
 }
 
-fn half_to_f32(h: u16) -> f32 {
+pub fn half_to_f32(h: u16) -> f32 {
     let s = ((h >> 15) as u32) << 31;
     let e = ((h >> 10) & 0x1f) as i32;
     let m = (h & 0x3ff) as u32;
@@ -205,6 +205,12 @@ fn spin(seconds: f64) {
 
 /// Play `path` with AVPlayer and return the frame at `t` from AVPlayerItemVideoOutput.
 pub fn player_frame(path: &Path, format: u32, t_value: i64, mtm: MainThreadMarker) -> Result<PixelBuffer> {
+    player_frame_timed(path, format, t_value, mtm).map(|(pb, _)| pb)
+}
+
+/// As `player_frame`, also returning the delivered frame's display time in
+/// `material::TIMESCALE` units (from `itemTimeForDisplay`).
+pub fn player_frame_timed(path: &Path, format: u32, t_value: i64, mtm: MainThreadMarker) -> Result<(PixelBuffer, i64)> {
     let url = avio::file_url(path);
     let item = unsafe { AVPlayerItem::playerItemWithURL(&url, mtm) };
     let attrs = Dict::new()
@@ -227,16 +233,34 @@ pub fn player_frame(path: &Path, format: u32, t_value: i64, mtm: MainThreadMarke
     let t = avio::time(t_value, material::TIMESCALE);
     let zero = avio::time(0, 1);
     unsafe { player.seekToTime_toleranceBefore_toleranceAfter(t, zero, zero) };
+    // The output can first hand out the item's initial frame (time 0) before the seek
+    // lands; keep pulling until the delivered frame is the one containing `t` (within
+    // half a frame: AVFoundation-written material uses a 600 timescale, where frame 2
+    // starts at 2000/24000 rather than 2002/24000).
     let t0 = Instant::now();
+    let mut last = None;
     loop {
         if unsafe { output.hasNewPixelBufferForItemTime(t) } {
-            if let Some(pb) = unsafe { output.copyPixelBufferForItemTime_itemTimeForDisplay(t, std::ptr::null_mut()) } {
+            let mut shown = avio::time(-1, material::TIMESCALE);
+            if let Some(pb) = unsafe { output.copyPixelBufferForItemTime_itemTimeForDisplay(t, &mut shown) } {
                 let p = NonNull::new(Retained::as_ptr(&pb) as *mut CVPixelBuffer).unwrap();
-                return Ok(unsafe { PixelBuffer::retain(p) });
+                let at = if shown.timescale > 0 {
+                    ((shown.value as i128 * material::TIMESCALE as i128) / shown.timescale as i128) as i64
+                } else {
+                    -1
+                };
+                let frame = unsafe { PixelBuffer::retain(p) };
+                if (at - t_value).abs() <= material::FRAME_DUR / 2 {
+                    return Ok((frame, at));
+                }
+                last = Some((frame, at));
             }
         }
         if t0.elapsed() > Duration::from_secs(20) {
-            return err("AVPlayerItemVideoOutput produced no frame");
+            return match last {
+                Some(l) => Ok(l),
+                None => err("AVPlayerItemVideoOutput produced no frame"),
+            };
         }
         spin(0.01);
     }

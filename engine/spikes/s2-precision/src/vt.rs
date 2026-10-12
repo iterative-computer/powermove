@@ -45,11 +45,20 @@ fn session_bool(session: &CFType, key: &CFString) -> Option<bool> {
 /// Decode every frame of the first video track to `format` with VTDecompressionSession,
 /// sorted by presentation time.
 pub fn decode_file(path: &Path, format: u32) -> Result<DecodeInfo> {
+    decode_file_as(path, Some(format))
+}
+
+/// Decode to the decoder's native output format (no pixel format requested).
+pub fn decode_file_native(path: &Path) -> Result<DecodeInfo> {
+    decode_file_as(path, None)
+}
+
+fn decode_file_as(path: &Path, format: Option<u32>) -> Result<DecodeInfo> {
     let samples = avio::read_compressed(path)?;
     let first = samples.first().ok_or_else(|| cf::Error("no samples".into()))?;
     let fd = unsafe { first.format_description() }.ok_or_else(|| cf::Error("no format description".into()))?;
     let codec = unsafe { fd.media_sub_type() };
-    let attrs = pixbuf::surface_attrs(Some(format));
+    let attrs = pixbuf::surface_attrs(format);
     let spec = cf::Dict::new().build();
     let mut sess_ptr: *mut VTDecompressionSession = std::ptr::null_mut();
     let st = unsafe {
@@ -62,7 +71,7 @@ pub fn decode_file(path: &Path, format: u32) -> Result<DecodeInfo> {
             NonNull::from(&mut sess_ptr),
         )
     };
-    check(st, &format!("VTDecompressionSessionCreate ('{}' → '{}')", cf::fourcc_str(codec), cf::fourcc_str(format)))?;
+    check(st, &format!("VTDecompressionSessionCreate ('{}' → '{}')", cf::fourcc_str(codec), format.map(cf::fourcc_str).unwrap_or_else(|| "native".into())))?;
     let session = unsafe { CFRetained::from_raw(NonNull::new_unchecked(sess_ptr)) };
     let hardware =
         session_bool(&session, unsafe { kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder });
@@ -146,8 +155,8 @@ pub fn mux(
     Ok(fd)
 }
 
-/// Encode buffers with VTCompressionSession; compressed samples in decode order.
-pub fn encode_samples(spec: &EncodeSpec, frames: &[&PixelBuffer]) -> Result<Vec<CFRetained<CMSampleBuffer>>> {
+/// Create a compression session for `spec` with its properties set and frames prepared.
+pub fn create_session(spec: &EncodeSpec) -> Result<CFRetained<VTCompressionSession>> {
     let enc_spec = spec.encoder_id.map(|id| {
         cf::Dict::new()
             .cfkey(unsafe { kVTVideoEncoderSpecification_EncoderID }, &NSString::from_str(id))
@@ -171,13 +180,25 @@ pub fn encode_samples(spec: &EncodeSpec, frames: &[&PixelBuffer]) -> Result<Vec<
     check(st, &format!("VTCompressionSessionCreate '{}'", cf::fourcc_str(spec.codec)))?;
     let session = unsafe { CFRetained::from_raw(NonNull::new_unchecked(sess_ptr)) };
     for (k, v) in &spec.properties {
-        let st = unsafe {
-            VTSessionSetProperty(&session, k, Some(&*(&**v as *const AnyObject as *const CFType)))
-        };
+        let st = unsafe { VTSessionSetProperty(&session, k, Some(&*(&**v as *const AnyObject as *const CFType))) };
         check(st, &format!("VTSessionSetProperty {}", cf::ns(k)))?;
     }
     unsafe { VTCompressionSession::prepare_to_encode_frames(&session) };
+    Ok(session)
+}
 
+/// The pixel buffer attributes of the session's pool: the encoder's native input formats.
+pub fn native_input_attributes(spec: &EncodeSpec) -> Result<Vec<(String, String)>> {
+    let session = create_session(spec)?;
+    let pool = unsafe { session.pixel_buffer_pool() }.ok_or_else(|| cf::Error("no pixel buffer pool".into()))?;
+    let attrs = pool.pixel_buffer_attributes().ok_or_else(|| cf::Error("no pool attributes".into()))?;
+    unsafe { session.invalidate() };
+    Ok(pixbuf::dict_pairs(&attrs))
+}
+
+/// Encode buffers with VTCompressionSession; compressed samples in decode order.
+pub fn encode_samples(spec: &EncodeSpec, frames: &[&PixelBuffer]) -> Result<Vec<CFRetained<CMSampleBuffer>>> {
+    let session = create_session(spec)?;
     let out: Arc<Mutex<Vec<CFRetained<CMSampleBuffer>>>> = Arc::new(Mutex::new(vec![]));
     let errors: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(vec![]));
     for (i, pb) in frames.iter().enumerate() {
@@ -270,4 +291,40 @@ pub fn cf_true() -> Retained<AnyObject> {
 
 pub fn cf_str(s: &CFString) -> Retained<AnyObject> {
     unsafe { Retained::retain(s as *const CFString as *mut AnyObject).unwrap() }
+}
+
+/// Convert `src` to `format` with VTPixelTransferSession (the converter VideoToolbox
+/// uses between decoder or encoder native formats and the client's format).
+pub fn transfer(src: &PixelBuffer, format: u32) -> Result<PixelBuffer> {
+    let dst = PixelBuffer::new(src.width(), src.height(), format)?;
+    let mut sess: *mut VTPixelTransferSession = std::ptr::null_mut();
+    let st = unsafe { VTPixelTransferSession::create(None, NonNull::from(&mut sess)) };
+    check(st, "VTPixelTransferSessionCreate")?;
+    let session = unsafe { CFRetained::from_raw(NonNull::new_unchecked(sess)) };
+    let st = unsafe { session.transfer_image(src.as_cf(), dst.as_cf()) };
+    unsafe { session.invalidate() };
+    check(st, &format!("VTPixelTransferSessionTransferImage '{}' → '{}'", cf::fourcc_str(src.format()), cf::fourcc_str(format)))?;
+    Ok(dst)
+}
+
+/// Read session properties by key name after the session is prepared (descriptions).
+pub fn session_properties(spec: &EncodeSpec, keys: &[&str]) -> Result<Vec<(String, String)>> {
+    let session = create_session(spec)?;
+    let mut out = vec![];
+    for k in keys {
+        let key = CFString::from_str(k);
+        let mut v: *const CFType = std::ptr::null();
+        let st = unsafe { VTSessionCopyProperty(&session, &key, None, &mut v as *mut _ as *mut std::ffi::c_void) };
+        let desc = if st != 0 {
+            format!("error {st}")
+        } else if v.is_null() {
+            "null".into()
+        } else {
+            let r = unsafe { CFRetained::from_raw(NonNull::new_unchecked(v as *mut CFType)) };
+            cf::describe_cf(&r).split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        out.push((k.to_string(), desc));
+    }
+    unsafe { session.invalidate() };
+    Ok(out)
 }

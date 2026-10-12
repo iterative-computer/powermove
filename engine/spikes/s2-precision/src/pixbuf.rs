@@ -21,6 +21,15 @@ pub const RGBA_HALF: u32 = kCVPixelFormatType_64RGBAHalf; // 'RGhA'
 pub const RGBA64: u32 = kCVPixelFormatType_64RGBALE; // 'l64r'
 pub const B64A: u32 = kCVPixelFormatType_64ARGB; // 'b64a' (big-endian)
 pub const V216: u32 = kCVPixelFormatType_422YpCbCr16; // 'v216' (packed Cb Y0 Cr Y1)
+/// 'v0a8': 8-bit 4:2:0 video range Y′, CbCr, and an 8-bit alpha plane (HEVC with alpha, Main).
+pub const V0A8: u32 = kCVPixelFormatType_420YpCbCr8VideoRange_8A_TriPlanar;
+/// 'x0a8': 10-bit 4:2:0 video range Y′ and CbCr (u16 MSB-aligned) and an 8-bit alpha plane
+/// (HEVC with alpha, Main10). No public CoreVideo constant name in the 0.3 bindings.
+pub const X0A8: u32 = u32::from_be_bytes(*b"x0a8");
+/// 'x2a8' and 'x4a8': the 4:2:2 and 4:4:4 counterparts of 'x0a8' (HEVC with alpha at
+/// Main42210 and Main44410), also undocumented.
+pub const X2A8: u32 = u32::from_be_bytes(*b"x2a8");
+pub const X4A8: u32 = u32::from_be_bytes(*b"x4a8");
 
 /// A retained CVPixelBuffer.
 pub struct PixelBuffer(pub CFRetained<CVPixelBuffer>);
@@ -111,6 +120,34 @@ impl PixelBuffer {
                 out.extend_from_slice(row);
             }
             Ok((out, comps, h))
+        })
+    }
+
+    /// Raw bytes of a plane with its geometry: (bytes, bytes per row, width, height).
+    /// For formats this module does not know the layout of (diagnostics).
+    pub fn read_plane_raw(&self, plane: Option<usize>) -> Result<(Vec<u8>, usize, usize, usize)> {
+        self.with_lock(true, |pb| {
+            let (base, bpr, w, h) = plane_geom(pb, plane);
+            if base.is_null() {
+                return err("null base address");
+            }
+            let bytes = unsafe { std::slice::from_raw_parts(base as *const u8, bpr * h) }.to_vec();
+            Ok((bytes, bpr, w, h))
+        })
+    }
+
+    /// Write a plane row by row from `rows` (each `row_bytes` long, at most bytes per row).
+    pub fn write_plane_raw(&self, plane: Option<usize>, data: &[u8], row_bytes: usize) -> Result<()> {
+        self.with_lock(false, |pb| {
+            let (base, bpr, _, h) = plane_geom(pb, plane);
+            if base.is_null() || row_bytes > bpr || data.len() != row_bytes * h {
+                return err(format!("write_plane_raw: bad geometry (bpr {bpr}, row {row_bytes}, rows {h}, len {})", data.len()));
+            }
+            for y in 0..h {
+                let row = unsafe { std::slice::from_raw_parts_mut((base as *mut u8).add(y * bpr), row_bytes) };
+                row.copy_from_slice(&data[y * row_bytes..(y + 1) * row_bytes]);
+            }
+            Ok(())
         })
     }
 
@@ -221,8 +258,9 @@ fn row_samples(pb: &CVPixelBuffer, plane: Option<usize>, w: usize) -> usize {
     match (f, plane) {
         (Y416, _) | (RGBA_HALF, _) | (RGBA64, _) | (B64A, _) | (BGRA, _) => w * 4,
         (V216, _) => w * 2,
-        (X422 | X420 | XF20 | V420 | F420, Some(0)) => w,
-        (X422 | X420 | XF20 | V420 | F420, Some(1)) => w * 2,
+        (X422 | X420 | XF20 | V420 | F420 | X0A8 | X2A8 | X4A8 | V0A8, Some(0)) => w,
+        (X422 | X420 | XF20 | V420 | F420 | X0A8 | X2A8 | X4A8 | V0A8, Some(1)) => w * 2,
+        (X0A8 | X2A8 | X4A8 | V0A8, Some(2)) => w,
         _ => w * 4,
     }
 }

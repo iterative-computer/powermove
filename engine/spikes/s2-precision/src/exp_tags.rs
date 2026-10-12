@@ -176,10 +176,32 @@ pub struct OnDisk {
     pub pasp: Option<(u32, u32)>,
     pub child_boxes: Vec<String>,
     pub h264_vui: Option<Vui>,
+    /// HEVC decoder configuration (base layer) from `hvcC`.
+    pub hvcc: Option<Hvcc>,
     pub mvhd_timescale: Option<u32>,
     pub mdhd_timescale: Option<u32>,
     /// Video `stts` entries: (sample count, sample delta).
     pub stts: Vec<(u32, u32)>,
+}
+
+/// Fields of an HEVCDecoderConfigurationRecord (ISO/IEC 14496-15).
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct Hvcc {
+    pub profile_idc: u8,
+    pub level_idc: u8,
+    pub chroma_format_idc: u8,
+    pub bit_depth_luma: u8,
+    pub bit_depth_chroma: u8,
+}
+
+pub fn parse_hvcc(p: &[u8]) -> Option<Hvcc> {
+    (p.len() >= 23).then(|| Hvcc {
+        profile_idc: p[1] & 0x1f,
+        level_idc: p[12],
+        chroma_format_idc: p[16] & 0x03,
+        bit_depth_luma: (p[17] & 0x07) + 8,
+        bit_depth_chroma: (p[18] & 0x07) + 8,
+    })
 }
 
 fn be16(d: &[u8], o: usize) -> u16 {
@@ -270,6 +292,7 @@ pub fn parse_file(path: &Path) -> Result<OnDisk> {
                 "gama" => out.gama = Some(be32(&d, *s) as f64 / 65536.0),
                 "fiel" => out.fiel = Some((d[*s], d[s + 1])),
                 "pasp" => out.pasp = Some((be32(&d, *s), be32(&d, s + 4))),
+                "hvcC" => out.hvcc = parse_hvcc(&d[*s..*end]),
                 "avcC" => {
                     let nsps = (d[s + 5] & 0x1f) as usize;
                     if nsps > 0 {
