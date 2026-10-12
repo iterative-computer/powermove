@@ -32,8 +32,31 @@ const vertex: string = JSON.parse(await readFile(join(SPIKE, 'work', 'corpus.jso
 const files = (await readdir(dir)).filter((f) => f.endsWith('.frag')).sort((a, b) => parseInt(a) - parseInt(b));
 const launchArgs = angle === 'swiftshader' ? ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] : ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'];
 
+// browser.close() can wait forever on a hung GPU process, so after a grace
+// period every descendant process of this script (only this run's browser)
+// is killed.
 let browser: any = null, page: any = null, renderer = '';
-async function open() {
+function descendants(pid: number): number[] {
+  const out = Bun.spawnSync(['pgrep', '-P', String(pid)]).stdout.toString().split('\n').filter(Boolean).map(Number);
+  return out.flatMap((child) => [child, ...descendants(child)]);
+}
+async function close() {
+  const closing = browser ? browser.close().catch(() => {}) : Promise.resolve();
+  await Promise.race([closing, new Promise((resolve) => setTimeout(resolve, 5000))]);
+  for (const pid of descendants(process.pid)) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+  browser = page = null;
+}
+async function open(tries = 3): Promise<void> {
+  try {
+    await openOnce();
+  } catch (error) {
+    await close();
+    if (tries <= 1) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    return open(tries - 1);
+  }
+}
+async function openOnce() {
   browser = await chromium.launch({ headless: true, args: launchArgs });
   page = await browser.newPage();
   await page.goto('about:blank');
@@ -85,11 +108,12 @@ for (const file of files) {
   const index = parseInt(file);
   const source = await readFile(join(dir, file), 'utf8');
   const drawIt = draw && !(existsSync(join(dir, `${index}.name`)) && readFileSync(join(dir, `${index}.name`), 'utf8').startsWith('loop-'));
+  process.stderr.write(`${index} `);
   let { result, ms } = await attempt(source, drawIt);
   // A previous program can take the GPU process down; the context comes back
   // lost. Retry once in a fresh browser so the answer belongs to this program.
   if (result !== 'timeout' && result.linked === null) {
-    await browser.close().catch(() => {});
+    await close();
     await open();
     ({ result, ms } = await attempt(source, drawIt));
   }
@@ -98,9 +122,9 @@ for (const file of files) {
   } else {
     results[index] = { ...result, ms, ...(result.lost ? { outcome: 'context lost after link' } : {}) };
   }
-  if (result === 'timeout' || result.linked === null || result.lost) { await browser.close().catch(() => {}); await open(); }
+  if (result === 'timeout' || result.linked === null || result.lost) { await close(); await open(); }
 }
-await browser.close();
+await close();
 await writeFile(join(dir, `webgl-${angle}${draw ? '-draw' : ''}.json`), JSON.stringify({ renderer, angle, results }, null, 1));
 const linked = Object.values(results).filter((r) => r.linked === true).length;
 console.log(`${files.length} programs: ${linked} linked, ${Object.values(results).filter((r) => r.linked === false).length} rejected, ${Object.values(results).filter((r) => r.linked === null).length} no answer (${renderer})`);
