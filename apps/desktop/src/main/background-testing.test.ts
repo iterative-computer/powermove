@@ -4,6 +4,7 @@ import { backgroundTesting, backgroundWindowOptions } from './background-testing
 describe('background-only Electron testing', () => {
   it('does not alter ordinary windows', () => {
     expect(backgroundTesting({}, '/user/live')).toBe(false);
+    // No e2e bridge switch (shared/test-bridge.ts) outside hidden test launches.
     expect(backgroundWindowOptions(false)).toEqual({});
   });
   it('fails closed without a separate absolute profile', () => {
