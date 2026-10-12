@@ -187,6 +187,40 @@ mod tests {
         ));
     }
 
+    /// JavaScript has one number type, so a TypeScript writer (Electron
+    /// main) encodes a whole-valued float as a MessagePack integer and a
+    /// fractional one as float64. Float fields must accept both, and integer
+    /// fields must refuse fractions.
+    #[test]
+    fn float_fields_accept_integers_written_by_javascript() {
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct Floats {
+            a: f32,
+            b: f64,
+            c: f64,
+        }
+        // {"a": 1, "b": -3, "c": 0.5}
+        let mut bytes = vec![0x83, 0xa1, b'a', 0x01, 0xa1, b'b', 0xfd, 0xa1, b'c', 0xcb];
+        bytes.extend_from_slice(&0.5f64.to_be_bytes());
+        let floats: Floats = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(
+            floats,
+            Floats {
+                a: 1.0,
+                b: -3.0,
+                c: 0.5
+            }
+        );
+        #[derive(serde::Deserialize, Debug)]
+        #[allow(dead_code)]
+        struct Int {
+            a: u32,
+        }
+        let mut fraction = vec![0x81, 0xa1, b'a', 0xcb];
+        fraction.extend_from_slice(&1.5f64.to_be_bytes());
+        assert!(rmp_serde::from_slice::<Int>(&fraction).is_err());
+    }
+
     #[test]
     fn rejects_deep_nesting() {
         // 200 nested single-element arrays.
