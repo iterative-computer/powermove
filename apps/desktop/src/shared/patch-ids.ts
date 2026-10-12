@@ -156,21 +156,8 @@ const byCodeUnits = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
  * id-keyed arrays (see the header). The undo direction is
  * `diffOps(after, before)`.
  */
-export function diffOps(before: any, after: any, path: PathPart[] = [], out: PatchOp[] = []): PatchOp[] {
-  if (Object.is(before, after)) return out;
-  if (Array.isArray(before) && Array.isArray(after)) return diffArrayOps(before, after, path, out);
-  if (isRecord(before) && isRecord(after)) {
-    const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort(byCodeUnits);
-    for (const key of keys) {
-      const inBefore = Object.hasOwn(before, key);
-      const inAfter = Object.hasOwn(after, key);
-      if (inBefore && inAfter) diffOps(before[key], after[key], [...path, key], out);
-      else if (inAfter) out.push({ path: [...path, key], exists: true, value: clonePatchValue(after[key]) });
-      else out.push({ path: [...path, key], exists: false });
-    }
-    return out;
-  }
-  out.push({ path, exists: true, value: clonePatchValue(after) });
+export function diffOps(before: any, after: any, path: readonly PathPart[] = [], out: PatchOp[] = []): PatchOp[] {
+  walk(before, after, path.slice(), out);
   return out;
 }
 
@@ -179,33 +166,78 @@ export function diffOps(before: any, after: any, path: PathPart[] = [], out: Pat
  * operations when both arrays are id-keyed and share an id, otherwise what
  * diffPatches emits for the pair.
  */
-export function diffArrayOps(before: readonly any[], after: readonly any[], path: PathPart[] = [], out: PatchOp[] = []): PatchOp[] {
+export function diffArrayOps(before: readonly any[], after: readonly any[], path: readonly PathPart[] = [], out: PatchOp[] = []): PatchOp[] {
+  walkArrays(before, after, path.slice(), out);
+  return out;
+}
+
+// `path` is one mutable stack for the whole walk; emitted operations copy it.
+// Unchanged subtrees are compared without allocating.
+
+function walk(before: any, after: any, path: PathPart[], out: PatchOp[]): void {
+  if (Object.is(before, after)) return;
+  if (Array.isArray(before) && Array.isArray(after)) return walkArrays(before, after, path, out);
+  if (isRecord(before) && isRecord(after)) {
+    // Members are visited in insertion order and their operations are put in
+    // code unit order afterwards, so unchanged objects are never sorted.
+    let segments: [string, number, number][] | undefined;
+    const member = (key: string, inBefore: boolean, inAfter: boolean) => {
+      const start = out.length;
+      path.push(key);
+      if (inBefore && inAfter) walk(before[key], after[key], path, out);
+      else if (inAfter) out.push({ path: path.slice(), exists: true, value: clonePatchValue(after[key]) });
+      else out.push({ path: path.slice(), exists: false });
+      path.pop();
+      if (out.length > start) (segments ??= []).push([key, start, out.length]);
+    };
+    for (const key of Object.keys(before)) member(key, true, Object.hasOwn(after, key));
+    for (const key of Object.keys(after)) if (!Object.hasOwn(before, key)) member(key, false, true);
+    if (segments && segments.length > 1) {
+      const base = segments[0]![1];
+      const sorted = [...segments].sort((a, b) => byCodeUnits(a[0], b[0]));
+      if (sorted.some((segment, index) => segment !== segments![index])) {
+        const ops = out.slice(base);
+        out.length = base;
+        for (const [, start, end] of sorted) for (let i = start; i < end; i++) out.push(ops[i - base]!);
+      }
+    }
+    return;
+  }
+  out.push({ path: path.slice(), exists: true, value: clonePatchValue(after) });
+}
+
+function walkArrays(before: readonly any[], after: readonly any[], path: PathPart[], out: PatchOp[]): void {
   const identityOrderChanged = before.length === after.length && before.some((item, index) => {
     const a = recordId(item), b = recordId(after[index]);
     return a !== undefined && b !== undefined && a !== b;
   });
   if (before.length === after.length && !identityOrderChanged) {
-    for (let index = 0; index < before.length; index++) diffOps(before[index], after[index], [...path, index], out);
-    return out;
+    for (let index = 0; index < before.length; index++) {
+      path.push(index);
+      walk(before[index], after[index], path, out);
+      path.pop();
+    }
+    return;
   }
   const replace = () => {
-    out.push({ path, exists: true, value: clonePatchValue(after) });
-    return out;
+    out.push({ path: path.slice(), exists: true, value: clonePatchValue(after) });
   };
   if (!isIdKeyed(before) || !isIdKeyed(after)) return replace();
   const oldIndex = new Map<string, number>(before.map((item, index) => [item.id, index]));
   const newIndex = new Map<string, number>(after.map((item, index) => [item.id, index]));
   if (!before.some((item) => newIndex.has(item.id))) return replace();
-  for (const item of before) if (!newIndex.has(item.id)) out.push({ op: 'delete', path, id: item.id });
+  for (const item of before) if (!newIndex.has(item.id)) out.push({ op: 'delete', path: path.slice(), id: item.id });
   const survivorsOld = before.filter((item) => newIndex.has(item.id)).map((item) => item.id as string);
   const survivorsNew = after.filter((item) => oldIndex.has(item.id)).map((item) => item.id as string);
-  if (survivorsOld.some((id, index) => id !== survivorsNew[index])) out.push({ op: 'order', path, ids: survivorsNew });
+  if (survivorsOld.some((id, index) => id !== survivorsNew[index])) out.push({ op: 'order', path: path.slice(), ids: survivorsNew });
   after.forEach((item, index) => {
-    if (!oldIndex.has(item.id)) out.push({ op: 'insert', path, index, value: clonePatchValue(item) });
+    if (!oldIndex.has(item.id)) out.push({ op: 'insert', path: path.slice(), index, value: clonePatchValue(item) });
   });
   after.forEach((item, index) => {
     const from = oldIndex.get(item.id);
-    if (from !== undefined) diffOps(before[from], item, [...path, index], out);
+    if (from === undefined) return;
+    path.push(index);
+    walk(before[from], item, path, out);
+    path.pop();
   });
-  return out;
 }
