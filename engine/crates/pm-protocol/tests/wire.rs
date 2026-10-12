@@ -222,6 +222,8 @@ proptest! {
     #[test]
     fn arbitrary_bytes_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..512)) {
         let _ = decode(&bytes);
+        // The float scan is also reachable directly; it must not panic either.
+        let _ = pm_protocol::codec::check_finite(&bytes);
     }
 
     #[test]

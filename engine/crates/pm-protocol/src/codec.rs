@@ -33,6 +33,8 @@ pub enum CodecError {
     TrailingBytes(usize),
     #[error("non-finite float at byte {offset}")]
     NonFinite { offset: usize },
+    #[error("malformed MessagePack at byte {offset}")]
+    Malformed { offset: usize },
     #[error("encode failed: {0}")]
     Encode(#[from] rmp_serde::encode::Error),
     #[error("decode failed: {0}")]
@@ -97,15 +99,16 @@ pub fn decode_unvalidated(bytes: &[u8]) -> Result<Envelope, CodecError> {
 ///
 /// A linear scan: container headers carry only counts, so every value of a
 /// well-formed message is visited in order without tracking nesting. Bytes
-/// that end inside a value are reported as non-finite at that offset rather
-/// than panicking (the deserializer has already rejected them by the time
-/// [`decode_unvalidated`] calls this, so that path is defensive).
+/// that end inside a value, and the never-used marker `0xc1`, are reported
+/// as malformed rather than panicking (the deserializer has already rejected
+/// them by the time [`decode_unvalidated`] calls this, so that path is
+/// defensive).
 pub fn check_finite(bytes: &[u8]) -> Result<(), CodecError> {
     let mut at = 0usize;
     let payload = |at: usize, n: usize| -> Result<&[u8], CodecError> {
         bytes
             .get(at + 1..at + 1 + n)
-            .ok_or(CodecError::NonFinite { offset: at })
+            .ok_or(CodecError::Malformed { offset: at })
     };
     let length = |at: usize, n: usize| -> Result<usize, CodecError> {
         let raw = payload(at, n)?;
@@ -116,7 +119,7 @@ pub fn check_finite(bytes: &[u8]) -> Result<(), CodecError> {
         // Bytes after the marker: fixed payloads, then any variable body.
         let skip = match marker {
             // positive fixint, fixmap, fixarray, nil, bool, negative fixint
-            0x00..=0x7f | 0x80..=0x9f | 0xc0..=0xc3 | 0xe0..=0xff => 0,
+            0x00..=0x7f | 0x80..=0x9f | 0xc0 | 0xc2 | 0xc3 | 0xe0..=0xff => 0,
             0xa0..=0xbf => (marker & 0x1f) as usize,
             0xca => {
                 let raw = payload(at, 4)?;
@@ -151,12 +154,12 @@ pub fn check_finite(bytes: &[u8]) -> Result<(), CodecError> {
             0xc9 => 5 + length(at, 4)?,
             0xdc | 0xde => 2,
             0xdd | 0xdf => 4,
-            0xc1 => return Err(CodecError::NonFinite { offset: at }),
+            0xc1 => return Err(CodecError::Malformed { offset: at }),
         };
         at = at
             .checked_add(1 + skip)
             .filter(|&next| next <= bytes.len())
-            .ok_or(CodecError::NonFinite { offset: at })?;
+            .ok_or(CodecError::Malformed { offset: at })?;
     }
     Ok(())
 }
@@ -221,9 +224,17 @@ mod tests {
         let mut fixstr = vec![0xa1, 0xcb];
         fixstr.push(0xc0);
         assert!(check_finite(&fixstr).is_ok());
-        // Truncated input reports instead of panicking.
-        assert!(check_finite(&[0xcb, 0, 0]).is_err());
-        assert!(check_finite(&[0xdb, 0xff, 0xff, 0xff, 0xff]).is_err());
+        // Truncated input and the unused marker report instead of panicking.
+        for malformed in [
+            &[0xcb, 0, 0][..],
+            &[0xdb, 0xff, 0xff, 0xff, 0xff],
+            &[0x91, 0xc1],
+        ] {
+            assert!(matches!(
+                check_finite(malformed),
+                Err(CodecError::Malformed { .. })
+            ));
+        }
     }
 
     #[test]
