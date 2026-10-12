@@ -51,10 +51,34 @@ fn ensure_process() {
     let _ = glslang::Compiler::acquire().expect("glslang process initialization");
 }
 
+/// glslang's defaults with the limits WebGL2 reports on this machine
+/// (`gl.getParameter`, ANGLE Metal in Chromium 151). They are the values of the
+/// GLSL ES built-in constants (`gl_MaxDrawBuffers`, `gl_MaxTextureImageUnits`,
+/// ...) and bound texel offsets and output locations at validation, so a
+/// program reads the same constants and is refused at the same limits as in
+/// WebGL. glslang's defaults (32 draw buffers, 32 texture units, 4096 uniform
+/// vectors) made `gl_MaxDrawBuffers` and friends differ (coverage sweep,
+/// `variables/gl_MaxDrawBuffers-constants`).
 fn resource() -> &'static sys::glslang_resource_t {
-    static LIMITS: glslang::limits::ResourceLimits = glslang::limits::DEFAULT_LIMITS;
+    static LIMITS: std::sync::OnceLock<glslang::limits::ResourceLimits> = std::sync::OnceLock::new();
+    let limits = LIMITS.get_or_init(|| {
+        let mut l = glslang::limits::DEFAULT_LIMITS;
+        l.set_max_draw_buffers(8);
+        l.set_max_texture_image_units(16);
+        l.set_max_vertex_texture_image_units(16);
+        l.set_max_combined_texture_image_units(32);
+        l.set_max_fragment_uniform_vectors(1024);
+        l.set_max_vertex_uniform_vectors(1024);
+        l.set_max_varying_vectors(30);
+        l.set_max_vertex_output_vectors(30);
+        l.set_max_fragment_input_vectors(30);
+        l.set_max_vertex_attribs(16);
+        l.set_min_program_texel_offset(-8);
+        l.set_max_program_texel_offset(7);
+        l
+    });
     // SAFETY: `ResourceLimits` is `#[repr(transparent)]` over `glslang_resource_t`.
-    unsafe { &*(&LIMITS as *const glslang::limits::ResourceLimits as *const sys::glslang_resource_t) }
+    unsafe { &*(limits as *const glslang::limits::ResourceLimits as *const sys::glslang_resource_t) }
 }
 
 struct ShaderHandle(NonNull<sys::glslang_shader_t>);

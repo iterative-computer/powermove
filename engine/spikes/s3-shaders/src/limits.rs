@@ -417,8 +417,16 @@ fn condition<'a>(ex: &mut Expander<'a>, rest: &[Tok<'a>]) -> Result<bool, LimitE
 
 /// Run the preprocessor over `source` within the budget; returns the
 /// expanded tokens of the active code.
+/// Macros GLSL ES 3.00 predefines in a WebGL2 fragment shader, so `#ifdef
+/// GL_ES` and `#if __VERSION__ == 300` take the branch WebGL takes.
+/// `__LINE__` and `__FILE__` stay tokens (integers to glslang).
+fn predefined<'a>() -> HashMap<&'a str, Macro<'a>> {
+    let number = |text: &'static str| Macro { params: None, body: vec![Tok { text, kind: Kind::Number, line: 0, space: true }] };
+    HashMap::from([("GL_ES", number("1")), ("__VERSION__", number("300")), ("GL_FRAGMENT_PRECISION_HIGH", number("1"))])
+}
+
 fn preprocess(source: &str) -> Result<Vec<Tok<'_>>, LimitError> {
-    let mut ex = Expander { macros: HashMap::new(), work: 0 };
+    let mut ex = Expander { macros: predefined(), work: 0 };
     let mut out = Vec::new();
     // Conditional stack: (this branch active, some branch already taken, parent active).
     let mut stack: Vec<(bool, bool, bool)> = Vec::new();
@@ -445,6 +453,11 @@ fn preprocess(source: &str) -> Result<Vec<Tok<'_>>, LimitError> {
         match name {
             "define" if active(&stack) => {
                 let Some(id) = t.get(2) else { continue };
+                // ANGLE's preprocessor: macro names starting with `GL_` are
+                // reserved. (`__` in a macro name is accepted: measured.)
+                if id.text.starts_with("GL_") {
+                    return Err(LimitError::new("webgl-identifier", format!("'{}' : macro name is reserved", id.text), Some(id.line)));
+                }
                 let function_like = t.get(3).is_some_and(|p| p.text == "(" && !p.space);
                 let (params, body_start) = if function_like {
                     let close = t[3..].iter().position(|p| p.text == ")").map_or(t.len(), |p| p + 3);
@@ -490,6 +503,11 @@ fn preprocess(source: &str) -> Result<Vec<Tok<'_>>, LimitError> {
             // this; the fuzz found it.
             "extension" if active(&stack) && !out.is_empty() => {
                 return Err(LimitError::new("es-rule", "extension directive must occur before any non-preprocessor tokens in ES", t.first().map(|t| t.line)));
+            }
+            // ANGLE: "#pragma STDGL invariant(all) can not be used in
+            // fragment shader" (GLSL ES 3.00 allows it in vertex shaders only).
+            "pragma" if active(&stack) && t.get(2).is_some_and(|x| x.text == "STDGL") && t.get(3).is_some_and(|x| x.text == "invariant") => {
+                return Err(LimitError::new("es-rule", "'invariant' : #pragma STDGL invariant(all) can not be used in fragment shader", t.first().map(|t| t.line)));
             }
             _ => {}
         }
@@ -552,12 +570,33 @@ fn check_struct_nesting(tokens: &[Tok<'_>]) -> Result<(), LimitError> {
     Ok(())
 }
 
+/// WebGL's identifier rules, which GLSL ES itself only reserves (glslang's ES
+/// front end accepts them): ANGLE refuses an identifier containing `__`
+/// ("reserved as possible future keywords") and the `webgl_` and `_webgl_`
+/// prefixes ("reserved built-in name"). Checked on the expanded tokens, where
+/// `__LINE__` and `__FILE__` are the only legal `__` words left.
+fn check_webgl_identifiers(tokens: &[Tok<'_>]) -> Result<(), LimitError> {
+    for t in tokens {
+        if t.kind != Kind::Ident || matches!(t.text, "__LINE__" | "__FILE__") {
+            continue;
+        }
+        if t.text.contains("__") {
+            return Err(LimitError::new("webgl-identifier", format!("'{}' : identifiers containing two consecutive underscores (__) are reserved as possible future keywords", t.text), Some(t.line)));
+        }
+        if t.text.starts_with("webgl_") || t.text.starts_with("_webgl_") {
+            return Err(LimitError::new("webgl-identifier", format!("'{}' : reserved built-in name", t.text), Some(t.line)));
+        }
+    }
+    Ok(())
+}
+
 /// Source-level limits on the author's program, before glslang.
 pub fn check_source(source: &str) -> Result<(), LimitError> {
     if source.len() > MAX_SOURCE_BYTES {
         return Err(LimitError::new("source-size", format!("program is {} bytes; the limit is {MAX_SOURCE_BYTES}", source.len()), None));
     }
     let tokens = preprocess(source)?;
+    check_webgl_identifiers(&tokens)?;
     // The cost is superlinear per function body, so the cap applies per
     // top-level block (a function body); the program total gets 4 times it.
     let (mut depth, mut in_body, mut total) = (0usize, 0usize, 0usize);
@@ -837,6 +876,18 @@ mod tests {
         let late = format!("{H}#extension GL_EXT_shader_texture_lod : enable\nvoid main(){{ o = vec4(1.0); }}\n");
         let e = check_source(&late).unwrap_err();
         assert_eq!((e.rule, e.line), ("es-rule", Some(4)));
+    }
+
+    #[test]
+    fn webgl_identifier_and_pragma_rules() {
+        let body = |b: &str| format!("{H}{b}\nvoid main(){{ o = vec4(1.0); }}\n");
+        check_source(&body("float a_b; float x = float(__LINE__);")).expect("legal names and __LINE__");
+        check_source(&body("#ifdef GL_ES\nfloat ok;\n#else\nfloat a__b;\n#endif")).expect("GL_ES is predefined");
+        for bad in ["float a__b;", "float webgl_x;", "float _webgl_x;", "#define N(x) x ## __\nfloat q__;"] {
+            assert_eq!(check_source(&body(bad)).unwrap_err().rule, "webgl-identifier", "{bad}");
+        }
+        assert_eq!(check_source(&body("#pragma STDGL invariant(all)")).unwrap_err().rule, "es-rule");
+        check_source(&body("#pragma optimize(off)")).expect("other pragmas");
     }
 
     #[test]

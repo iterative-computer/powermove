@@ -20,7 +20,20 @@ const KEYWORDS_450_ONLY: &[&str] = &[
     "buffer", "shared", "precise", "dmat2", "dmat3", "dmat4", "dmat2x2", "dmat2x3", "dmat2x4", "dmat3x2", "dmat3x3", "dmat3x4", "dmat4x2",
     "dmat4x3", "dmat4x4", "samplerCubeArray", "samplerCubeArrayShadow", "isamplerCubeArray", "usamplerCubeArray", "imageCubeArray",
     "iimageCubeArray", "uimageCubeArray", "iimage2DRect", "uimage2DRect", "image2DRect", "image2DMS", "iimage2DMS", "uimage2DMS",
-    "image2DMSArray", "iimage2DMSArray", "uimage2DMSArray", "dvec2", "dvec3", "dvec4",
+    "image2DMSArray", "iimage2DMSArray", "uimage2DMSArray",
+    // `dvec2`, `dvec3`, `dvec4` are not here: GLSL ES 3.00 reserves them, so
+    // WebGL refuses them as identifiers, and so must the engine (coverage
+    // sweep, `identifiers/local-dvec2`).
+    // Types of the Vulkan GLSL dialect glslang parses under relaxed Vulkan
+    // rules (separate textures and samplers, subpass inputs). Plain
+    // identifiers in GLSL ES 3.00: `texture2D` is a common user function or
+    // macro name in shaders ported from WebGL 1.
+    "sampler", "samplerShadow", "texture1D", "texture2D", "texture3D", "textureCube", "texture2DRect", "texture1DArray",
+    "texture2DArray", "textureBuffer", "texture2DMS", "texture2DMSArray", "textureCubeArray", "itexture1D", "itexture2D",
+    "itexture3D", "itextureCube", "itexture2DRect", "itexture1DArray", "itexture2DArray", "itextureBuffer", "itexture2DMS",
+    "itexture2DMSArray", "itextureCubeArray", "utexture1D", "utexture2D", "utexture3D", "utextureCube", "utexture2DRect",
+    "utexture1DArray", "utexture2DArray", "utextureBuffer", "utexture2DMS", "utexture2DMSArray", "utextureCubeArray",
+    "subpassInput", "isubpassInput", "usubpassInput", "subpassInputMS", "isubpassInputMS", "usubpassInputMS",
 ];
 
 /// GLSL 4.50 built-in functions that GLSL ES 3.00 does not have. A 4.50 shader
@@ -40,10 +53,19 @@ const BUILTINS_450_ONLY: &[&str] = &[
     "shadow1DProjLod", "shadow2DProjLod", "textureCubeLod", "anyInvocation", "allInvocations", "allInvocationsEqual", "subpassLoad",
 ];
 
-/// GLSL built-ins naga's MSL back end cannot emit (`naga::back::msl`:
-/// `UnsupportedCall("Inverse")`, `UnsupportedCall("Outer")`). On the naga path
+/// GLSL built-ins naga cannot take as glslang emits them. On the naga path
 /// they are renamed to `pm_` overloads injected after the version directive.
-/// SPIRV-Cross emits both natively, so its path keeps the built-ins.
+/// SPIRV-Cross handles all of them natively, so its path keeps the built-ins.
+///
+/// * `inverse`, `outerProduct`: naga's MSL back end has neither
+///   (`UnsupportedCall("Inverse")`, `UnsupportedCall("Outer")`).
+/// * `modf`: naga's SPIR-V front end builds the `__modf_result` struct without
+///   registering naga's special type, so validation fails with
+///   `MissingSpecialType` (coverage sweep, `builtin-common/modf*`).
+/// * `normalize`, `faceforward`, `reflect`, `refract` on `float`: GLSL's
+///   genType overloads include scalars, naga's built-ins take only vectors
+///   (`BuiltinArgumentsInvalid("Normalize")`). The vector overloads call the
+///   built-ins unchanged; the scalar ones use the specification's formulas.
 const POLYFILLS: &[(&str, &str)] = &[
     (
         // Same expressions and evaluation order as ANGLE's Metal translator
@@ -90,6 +112,38 @@ mat2x4 pm_outerProduct(vec4 c, vec2 r){ return mat2x4(c * r.x, c * r.y); } \
 mat4x2 pm_outerProduct(vec2 c, vec4 r){ return mat4x2(c * r.x, c * r.y, c * r.z, c * r.w); } \
 mat3x4 pm_outerProduct(vec4 c, vec3 r){ return mat3x4(c * r.x, c * r.y, c * r.z); } \
 mat4x3 pm_outerProduct(vec3 c, vec4 r){ return mat4x3(c * r.x, c * r.y, c * r.z, c * r.w); }",
+    ),
+    (
+        // GLSL: the whole part (`trunc`) goes to `i`, the fraction with the
+        // sign of `x` is returned; an infinite `x` has fraction 0, as
+        // `metal::modf` (ANGLE's translation) and C's `modf` return.
+        "modf",
+        "float pm_modf(float x, out float i){ i = trunc(x); return isinf(x) ? 0.0 : x - i; } \
+vec2 pm_modf(vec2 x, out vec2 i){ i = trunc(x); return mix(x - i, vec2(0.0), isinf(x)); } \
+vec3 pm_modf(vec3 x, out vec3 i){ i = trunc(x); return mix(x - i, vec3(0.0), isinf(x)); } \
+vec4 pm_modf(vec4 x, out vec4 i){ i = trunc(x); return mix(x - i, vec4(0.0), isinf(x)); }",
+    ),
+    (
+        "normalize",
+        "float pm_normalize(float x){ return sign(x); } \
+vec2 pm_normalize(vec2 x){ return normalize(x); } vec3 pm_normalize(vec3 x){ return normalize(x); } vec4 pm_normalize(vec4 x){ return normalize(x); }",
+    ),
+    (
+        "faceforward",
+        "float pm_faceforward(float n, float i, float r){ return r * i < 0.0 ? n : -n; } \
+vec2 pm_faceforward(vec2 n, vec2 i, vec2 r){ return faceforward(n, i, r); } vec3 pm_faceforward(vec3 n, vec3 i, vec3 r){ return faceforward(n, i, r); } \
+vec4 pm_faceforward(vec4 n, vec4 i, vec4 r){ return faceforward(n, i, r); }",
+    ),
+    (
+        "reflect",
+        "float pm_reflect(float i, float n){ return i - 2.0 * (n * i) * n; } \
+vec2 pm_reflect(vec2 i, vec2 n){ return reflect(i, n); } vec3 pm_reflect(vec3 i, vec3 n){ return reflect(i, n); } vec4 pm_reflect(vec4 i, vec4 n){ return reflect(i, n); }",
+    ),
+    (
+        "refract",
+        "float pm_refract(float i, float n, float eta){ float d = n * i; float k = 1.0 - eta * eta * (1.0 - d * d); return k < 0.0 ? 0.0 : eta * i - (eta * d + sqrt(k)) * n; } \
+vec2 pm_refract(vec2 i, vec2 n, float eta){ return refract(i, n, eta); } vec3 pm_refract(vec3 i, vec3 n, float eta){ return refract(i, n, eta); } \
+vec4 pm_refract(vec4 i, vec4 n, float eta){ return refract(i, n, eta); }",
     ),
 ];
 
@@ -225,13 +279,16 @@ fn inject(body: &str, text: &str) -> String {
     out
 }
 
-/// Rename identifiers that are legal in WebGL's GLSL ES 3.00 but keywords in
-/// glslang's grammar (`shared`, `buffer`, `precise`, ...), leaving the version
-/// directive alone. Used before the ES validation step so glslang does not
-/// reject what ANGLE accepts.
+/// Rename identifiers that are legal in WebGL's GLSL ES 3.00 but keywords or
+/// built-in functions to glslang (`shared`, `buffer`, `precise`, and
+/// `textureGather`, which glslang's ES 3.00 front end declares although it is
+/// GLSL ES 3.10), leaving the version directive alone. Used before the ES
+/// validation step so glslang does not reject what ANGLE accepts. A call to
+/// one of these names without a user definition is still refused (as an
+/// undeclared `pm_` function).
 pub fn rename_reserved(source: &str) -> String {
     let mut body = source.to_string();
-    for name in KEYWORDS_450_ONLY {
+    for name in KEYWORDS_450_ONLY.iter().chain(BUILTINS_450_ONLY) {
         if find_token(&body, name).is_some() {
             body = rename_token(&body, name, &format!("pm_{name}")).0;
         }
