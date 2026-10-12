@@ -15,7 +15,7 @@ system = []
 # Level 2 layout on Parley.
 level2 = ["dep:parley", "dep:parlance"]
 # The corpus tool (`pm-text-corpus`): fixtures, comparisons, WASM exports.
-corpus-tools = ["system", "dep:flate2"]
+corpus-tools = ["system", "level2", "dep:flate2"]
 
 [dependencies]
 harfrust = "0.14"

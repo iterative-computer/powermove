@@ -559,6 +559,60 @@ pub fn run_native(corpus: &CorpusFile) -> Result<NativeRun, String> {
     Ok(NativeRun { outputs, answers, registry: recorder.inner, seconds })
 }
 
+/// What level 2 layout needs to lay the corpus out: the fallback manifest
+/// and every face, keyed by `answers::subset_key`, with the family to add it
+/// under, in the order to add them.
+#[cfg(feature = "level2")]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Level2Inputs {
+    pub manifest: crate::registry::FallbackManifest,
+    pub fonts: Vec<Level2Font>,
+}
+
+#[cfg(feature = "level2")]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Level2Font {
+    pub key: String,
+    pub family: String,
+}
+
+/// Level 2 inputs for the corpus from the native registry: the manifest
+/// for the system UI font and the faces of every family the cases name.
+#[cfg(all(target_os = "macos", feature = "system", feature = "level2"))]
+pub fn level2_inputs(registry: &mut crate::registry::CoreTextRegistry, cases: &[Case]) -> Level2Inputs {
+    let manifest = registry.fallback_manifest("system-ui");
+    let mut fonts: Vec<Level2Font> = Vec::new();
+    let mut push = |family: &str, blob: &str, index: u32| {
+        let f = Level2Font { key: crate::answers::subset_key(blob, index), family: family.to_string() };
+        if !fonts.contains(&f) {
+            fonts.push(f);
+        }
+    };
+    for f in &manifest.faces {
+        push(&f.family, &f.source.blob, f.source.index);
+    }
+    let families: std::collections::BTreeSet<String> = cases.iter().filter_map(|c| c.d.font.as_deref().map(str::trim).filter(|f| !f.is_empty()).map(str::to_string)).collect();
+    for family in families {
+        for source in registry.family_faces(&family) {
+            push(&family, &source.blob, source.index);
+        }
+    }
+    Level2Inputs { manifest, fonts }
+}
+
+/// Lays the cases out with level 2 over the inputs' fonts. `font` returns
+/// the bytes for a key (subsets in `pm-wasm` and in the identity check).
+#[cfg(feature = "level2")]
+pub fn run_level2(inputs: &Level2Inputs, mut font: impl FnMut(&str) -> Option<FontBytes>, cases: &[Case]) -> Result<Vec<(String, crate::level2::Level2Layout)>, String> {
+    let mut l2 = crate::level2::Level2::new();
+    for f in &inputs.fonts {
+        let data = font(&f.key).ok_or_else(|| format!("no font {}", f.key))?;
+        l2.add_font(&f.key, data, &f.family);
+    }
+    l2.set_manifest(&inputs.manifest);
+    Ok(cases.iter().map(|c| (c.id.clone(), l2.layout(&c.d))).collect())
+}
+
 impl Fixture {
     pub fn from_json(json: &str) -> Result<Fixture, serde_json::Error> {
         serde_json::from_str(&sanitize_lone_surrogates(json))

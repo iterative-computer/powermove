@@ -3,7 +3,9 @@
    (examples/layout_wasm.rs) over the metrics-and-shaping subsets and the
    recorded registry answers, then compares its JSON output byte for byte
    with the native run of the same inputs (replay-subsets-output.json) and
-   value for value with the native CoreText run (native-output.json).
+   value for value with the native CoreText run (native-output.json). Then
+   runs level 2 (Parley) over the same subsets and compares its output byte
+   for byte with the native level 2 run (level2-output.json).
 
    Inputs come from `pm-text-corpus export` (scripts/check.sh runs it all).
    Usage: bun scripts/wasm-identity.mjs <export dir> <module.wasm>
@@ -67,6 +69,16 @@ for (let i = 0; i < Math.max(wasm.length, native.length); i++) {
   if (JSON.stringify(wasm[i]) === JSON.stringify(native[i])) identical++;
   else if (differing.length < 10) differing.push(wasm[i]?.id ?? native[i]?.id ?? String(i));
 }
+// Level 2 over the same module and fonts.
+const [ip, il] = put(readFileSync(join(dir, 'level2-inputs.json')));
+const [cp2, cl2] = put(readFileSync(join(dir, 'corpus.json')));
+const level2Started = performance.now();
+const level2Status = x.pm_run_level2(ip, il, cp2, cl2);
+if (level2Status !== 0) throw new Error(`pm_run_level2 failed with status ${level2Status}`);
+const level2Seconds = (performance.now() - level2Started) / 1000;
+const level2Out = new Uint8Array(x.memory.buffer, x.pm_out_ptr(), x.pm_out_len()).slice();
+const level2Identical = Buffer.compare(Buffer.from(level2Out), readFileSync(join(dir, 'level2-output.json'))) === 0;
+
 const stripped = strippedSize(module);
 const result = {
   runtime,
@@ -82,7 +94,9 @@ const result = {
   differing,
   loadSeconds: (loaded - started) / 1000,
   layoutSeconds: (laidOut - loaded) / 1000,
+  level2BytesIdenticalToNative: level2Identical,
+  level2Seconds,
 };
 writeFileSync(join(dir, `wasm-identity-${globalThis.Bun ? 'jsc' : 'v8'}.json`), JSON.stringify(result, null, 2));
 console.log(JSON.stringify(result, null, 2));
-if (!bytesIdentical || identical !== native.length || wasm.length !== native.length || result.misses !== 0 || result.pending !== 0) process.exit(1);
+if (!bytesIdentical || !level2Identical || identical !== native.length || wasm.length !== native.length || result.misses !== 0 || result.pending !== 0) process.exit(1);

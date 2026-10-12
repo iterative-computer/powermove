@@ -14,7 +14,7 @@
 
 use pm_text::corpus::{self, CaseDiff, CorpusFile, Expected, Fixture, FixtureCase, FontFile, Packed};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -135,6 +135,7 @@ fn compare(fixture: &Fixture) -> Result<bool, String> {
 fn export(fixture: &Fixture, out: &Path) -> Result<(), String> {
     let corpus = fixture.corpus();
     let run = corpus::run_native(&corpus)?;
+    let _ = std::fs::remove_dir_all(out.join("subsets"));
     std::fs::create_dir_all(out.join("subsets")).map_err(|e| e.to_string())?;
     let write = |name: &str, bytes: &[u8]| std::fs::write(out.join(name), bytes).map_err(|e| format!("{name}: {e}"));
     write("answers.json", &serde_json::to_vec(&run.answers).map_err(|e| e.to_string())?)?;
@@ -164,6 +165,28 @@ fn export(fixture: &Fixture, out: &Path) -> Result<(), String> {
     let replay_json = serde_json::to_vec(&replayed).map_err(|e| e.to_string())?;
     write("replay-subsets-output.json", &replay_json)?;
     let identical = replayed.iter().zip(&run.outputs).filter(|(a, b)| a == b).count();
+
+    // Level 2 over subsets of the manifest's faces and every family the cases name.
+    let mut registry = run.registry;
+    let inputs = corpus::level2_inputs(&mut registry, &corpus.cases);
+    let mut level2_fonts: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for f in &inputs.fonts {
+        if level2_fonts.contains_key(&f.key) {
+            continue;
+        }
+        let (blob, index) = f.key.rsplit_once('.').ok_or("subset key")?;
+        let index: u32 = index.parse().map_err(|_| "subset key index")?;
+        let bytes = registry.subset(blob, index).map_err(|e| e.to_string())?;
+        write(&format!("subsets/{}.bin", f.key), &bytes)?;
+        level2_fonts.insert(f.key.clone(), bytes.to_vec());
+    }
+    write("level2-inputs.json", &serde_json::to_vec(&inputs).map_err(|e| e.to_string())?)?;
+    let started = std::time::Instant::now();
+    let level2 = corpus::run_level2(&inputs, |k| level2_fonts.get(k).map(|b| pm_text::font::FontBytes::new(b.clone())), &corpus.cases)?;
+    let level2_seconds = started.elapsed().as_secs_f64();
+    let missing: usize = level2.iter().map(|(_, l)| l.missing_glyphs).sum();
+    write("level2-output.json", &serde_json::to_vec(&level2).map_err(|e| e.to_string())?)?;
+
     let report = json!({
         "cases": run.outputs.len(),
         "faces": run.answers.faces.len(),
@@ -176,6 +199,10 @@ fn export(fixture: &Fixture, out: &Path) -> Result<(), String> {
         "replayIdenticalToNative": identical,
         "misses": misses,
         "pendingBlobs": pending,
+        "level2Fonts": inputs.fonts.len(),
+        "level2FontBytes": level2_fonts.values().map(Vec::len).sum::<usize>(),
+        "level2Seconds": level2_seconds,
+        "level2MissingGlyphs": missing,
     });
     write("export.json", serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?.as_bytes())?;
     println!("{report}");
