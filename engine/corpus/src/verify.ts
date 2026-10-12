@@ -49,13 +49,14 @@ export function verifyCapture(dir: string): VerifyResult {
     } catch (error) { problems.push(`${what}: ${record!.file} does not decode: ${(error as Error).message}`); }
   };
 
-  let frames = 0, floatFrames = 0, evalDumps = 0, failedSamples = 0, bytes = 0;
+  let frames = 0, floatFrames = 0, evalDumps = 0, blenderDumps = 0, failedSamples = 0, bytes = 0;
   for (const project of manifest.projects ?? []) {
     const where = project.id;
     check(project.document, `${where} document`);
     check(project.loaded, `${where} loaded`);
     listed.add(`${project.dir}/project.json`);
     if (!existsSync(path.join(dir, project.dir, 'project.json'))) problems.push(`${where}: ${project.dir}/project.json is missing`);
+    for (const asset of project.blender?.assets ?? []) { bytes += asset.bytes; check(asset, `${where} Blender asset`); }
     for (const sample of project.samples ?? []) {
       const at = `${where} @ ${sample.time}`;
       if (sample.error) failedSamples++;
@@ -78,6 +79,20 @@ export function verifyCapture(dir: string): VerifyResult {
           } catch (error) { problems.push(`${at}: ${(error as Error).message}`); }
         }
       }
+      if (sample.blender) {
+        blenderDumps++;
+        bytes += sample.blender.bytes;
+        const dump = check(sample.blender, `${at} blender`);
+        if (dump) {
+          try {
+            const parsed = JSON.parse(dump.toString('utf8'));
+            if (parsed.format !== 'powermove-corpus-blender' || parsed.time !== sample.time) problems.push(`${at}: Blender dump has format ${parsed.format} at ${parsed.time}`);
+            for (const pass of [parsed.final, parsed.preview]) for (const snapshot of pass?.snapshots ?? []) for (const asset of snapshot.assets ?? []) {
+              if (!(project.blender?.assets ?? []).some((record: FileRecord) => record.file === asset.file && record.sha256 === asset.sha256)) problems.push(`${at}: Blender asset ${asset.file} is not in the project's asset list`);
+            }
+          } catch (error) { problems.push(`${at}: Blender dump is not JSON: ${(error as Error).message}`); }
+        }
+      }
       if (sample.eval) {
         evalDumps++;
         bytes += sample.eval.bytes;
@@ -93,7 +108,8 @@ export function verifyCapture(dir: string): VerifyResult {
   }
   const totals = manifest.totals ?? {};
   const expect = (name: string, actual: number) => { if (totals[name] !== actual) problems.push(`totals.${name} is ${totals[name]}, the project list gives ${actual}`); };
-  expect('frames', frames); expect('floatFrames', floatFrames); expect('evalDumps', evalDumps); expect('failedSamples', failedSamples); expect('bytes', bytes);
+  expect('frames', frames); expect('floatFrames', floatFrames); expect('evalDumps', evalDumps);
+  if (totals.blenderDumps !== undefined || blenderDumps) expect('blenderDumps', blenderDumps); expect('failedSamples', failedSamples); expect('bytes', bytes);
   expect('projects', (manifest.projects ?? []).length);
 
   const scenarios = manifest.scenarios;

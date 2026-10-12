@@ -40,6 +40,8 @@ const captions = await import(path.join(rendererSrc, 'captions/model.ts'));
 const validator = await import(path.join(rendererSrc, 'core/validate/project.ts'));
 const projectTypes = await import(path.join(rendererSrc, 'core/types/project.ts'));
 const matte = await import(path.join(rendererSrc, 'legacy/core/matte.ts'));
+const blender = await import(path.join(desktopSrc, 'shared/blender.ts'));
+const ipc = await import(path.join(desktopSrc, 'shared/ipc.ts'));
 
 export interface ParamDef { k: string; def: unknown; type?: string; min?: number; max?: number }
 export interface EffectDef { id: string; label: string; params: ParamDef[] }
@@ -75,6 +77,11 @@ export const captionModel = {
 };
 
 export const sanitizeProject: (raw: unknown) => any = validator.sanitizeProject;
+
+/** Composition 3D render settings (`render3d`), parsed strictly as the app parses them. */
+export const parseRender3D: (raw: unknown) => Record<string, unknown> = raw => blender.render3DSchema.parse(raw);
+/** The IPC channel the renderer sends Blender jobs on; the capture records jobs there instead of running Blender. */
+export const BLENDER_RUN_CHANNEL: string = ipc.IPC.blenderRun;
 
 /**
  * Shader-layer presets live inside `legacy/gl/shaders.ts`'s installer, which
