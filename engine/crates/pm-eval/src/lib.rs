@@ -37,11 +37,19 @@
 #![forbid(unsafe_code)]
 
 pub mod address;
+pub mod comp;
 pub mod easing;
+pub mod evaluator;
+pub mod expr;
 pub mod js_sem;
 pub mod keyframes;
 pub mod math;
 pub mod node;
 pub mod temporal;
 
+pub use comp::{Comp, CompError};
+pub use evaluator::{
+    Content, ErrorKey, EvalHooks, Evaluator, NoHooks, PropAddress, PropEval, PropId, ValueKind, Via,
+};
+pub use expr::{CompiledExpression, ExprContext, ExprDeps, ExprError, ExpressionEngine};
 pub use js_sem::{JsResult, JsThrow, JsValue};
