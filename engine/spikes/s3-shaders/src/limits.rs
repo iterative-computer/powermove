@@ -35,11 +35,13 @@ pub const MAX_SOURCE_BYTES: usize = 8 << 20;
 /// 2^18 doubling (1,048,573 tokens), which WebGL compiles in 0.17 s, is
 /// refused: a deliberate divergence (S3.md, "Resource limits").
 pub const MAX_EXPANDED_TOKENS: usize = 1_000_000;
-/// Statements (`;` after expansion). glslang's front end is quadratic in the
-/// length of one function body: 55,000 statements (a 1 MiB program) take 4.4 s
-/// per glslang pass and the pipeline runs two; 220,000 (4 MiB) did not finish
-/// in 60 s. ANGLE accepted the 1 MiB program and rejected the 4 MiB one.
-pub const MAX_STATEMENTS: usize = 65_536;
+/// Statements (`;` after expansion). glslang's front end and the Metal
+/// compiler are both superlinear in the length of one function: a 256 KiB
+/// program (13,800 statements) takes 5.2 s through the naga path including
+/// Metal, a 512 KiB one did not finish in 90 s. WebGL did no better: ANGLE
+/// needed 19 s to draw the 256 KiB program and did not draw the 512 KiB one
+/// within 90 s.
+pub const MAX_STATEMENTS: usize = 16_384;
 /// Nested macro expansions (ANGLE: `maxMacroExpansionDepth` 1000).
 pub const MAX_MACRO_DEPTH: usize = 1000;
 /// WebGL: "structure nesting level exceeds 4".

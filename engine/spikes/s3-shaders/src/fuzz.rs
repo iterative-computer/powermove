@@ -350,7 +350,12 @@ pub fn worker(args: &[String]) -> anyhow::Result<()> {
         writeln!(stdout.lock(), "done naga {naga}")?;
         writeln!(stdout.lock(), "path spvc")?;
         stdout.lock().flush()?;
-        let (spvc, _) = outcome_of(&corpus.vertex, &source, offset, Path::SpirvCross, gpu.as_ref());
+        // `S3_FUZZ_PATHS=naga` measures the naga path alone.
+        let (spvc, _) = if std::env::var("S3_FUZZ_PATHS").as_deref() == Ok("naga") {
+            ("not-run".to_string(), String::new())
+        } else {
+            outcome_of(&corpus.vertex, &source, offset, Path::SpirvCross, gpu.as_ref())
+        };
         let outcome = Outcome { index, naga, spvc, detail, ms: started.elapsed().as_secs_f64() * 1000.0, max_rss_mb: max_rss_mb() };
         writeln!(stdout.lock(), "{}", serde_json::to_string(&outcome)?)?;
         stdout.lock().flush()?;
