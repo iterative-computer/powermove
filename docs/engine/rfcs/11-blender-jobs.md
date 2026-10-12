@@ -1,0 +1,149 @@
+# RFC 11: The Blender job protocol, snapshot, and surface format
+
+Status: draft, version 0. Module: `pm_protocol::blender` (plus
+`EngineFact::BlenderResult` in `patch`). Gates Phase 2; freezes when
+Phase 3a starts (Blender surface compositing is a Phase 3a item; S7 informs
+it). Owner: 3D (`pm-blender`), with Engine and platform for host services
+(Blender supervision, contract 14).
+
+## Purpose
+
+Compositions with `render3d.enabled` get each 3D layer's pixels from a
+user-installed Blender (plan sections 8, 9, 17). Today the renderer prepares
+one Blender render per 3D layer per motion-blur sample through one worker,
+in 8-bit PNG, and any edit during an export invalidates prepared frames
+(appendix A items 26, 31, 34). In the engine:
+
+- the **job engine** builds Blender snapshots from `pm-eval` and
+  `pm-geom3d`, verified equal to today's `renderSnapshot` output
+  (section 25, the Blender snapshots class);
+- **host services** run them in a supervised Blender worker with a scrubbed
+  environment, and return one **surface** per layer, frame, shutter sample,
+  and nested composition;
+- surfaces are **16-bit RGBA PNG through AgX with straight alpha**
+  (decision 15), cached by content key, never re-rendered within a job, and
+  composited by the engine as a source node with its crop rectangle;
+- model operations (recipe generation, `.blend` import) run through the same
+  host services and come back as an engine fact the renderer commits as one
+  undoable edit, dropped if the revision moved.
+
+## Types
+
+| Type | Meaning |
+|---|---|
+| `BlenderJobRequest` | `Request::BlenderRender` (job engine → host, answered `ack`): job id, `PriorityClass` (contract 12), the snapshot, the worker-script hash, referenced assets, settings, the surfaces wanted, whether a frame's layers may be batched in one worker invocation, and the output cache handle |
+| `SnapshotRef`, `SnapshotEncoding` | The snapshot in a cache file behind a capability handle, addressed by its BLAKE3 hash; encoding `renderSnapshotJsonV1` (today's `renderSnapshot` JSON) |
+| `BlenderAsset` | A texture or `.blend` source the snapshot references: asset id, content hash, read handle |
+| `BlenderSettings`, `BlenderEngine`, `RequestedDevice` | From the composition's `render3d`: EEVEE or Cycles, samples, preview flag and preview scale, denoise, device as stored (`auto`, `cpu`, `gpu`) |
+| `SurfaceRequest`, `ShutterSample` | One surface: layer, composition path (outermost first, depth 1 to 8), evaluation time with the shutter offset included, shutter sample index and count, size, cache key |
+| `BlenderSurface` | `Event::BlenderSurface` (host → job engine), one per finished surface: job, request index, key, full size, crop rectangle, the PNG's handle and byte size, the device Blender actually used |
+| `ResolvedDevice` | CPU, Metal, OptiX, CUDA, HIP, oneAPI with the device name. `auto` is resolved and recorded per job (appendix A item 33) |
+| `BlenderProgress` | `Event::BlenderProgress`: completed and total surfaces |
+| `BlenderStatus` | `Request::BlenderStatus` → `blenderStatus`: available, `major.minor.patch`, error. `supported()` checks Blender 4.5 or newer |
+| `BlenderModelJob`, `BlenderModelOperation` | `Request::BlenderModel` (renderer or document host → host, answered `ack`): `generate {recipe}` (the document's `ModelRecipe` JSON, validated by the kernel schema) or `import {source, object?}` from a `.blend` asset, at a document revision |
+| `BlenderOutputFile` | One file a model operation produced (GLB, textures) in the host's scratch cache |
+| `EngineFact::BlenderResult` (contract 5) | The model operation's result: job, the revision it was requested at, output files, and the worker's manifest JSON |
+| `SurfaceKey` | Every input of a surface's cache key (section 14.7); `key_bytes()` is a stable positional encoding the job engine hashes with BLAKE3 |
+| `PINNED_OUTPUT`, `WORKER_FLAGS`, `MIN_BLENDER_VERSION`, `limits` | The worker's fixed output settings and flags, and the section 3 limits |
+
+## Invariants
+
+1. **Pinned output** (section 17, not configurable and not on the wire;
+   the worker script and the cache key assume it): PNG, 16-bit, RGBA,
+   `view_transform = 'AgX'`, `look = 'None'`, sRGB display device,
+   `dither_intensity = 0`, gamma 1, scene-following image color
+   management, fast compression. The engine ignores the PNG `gAMA`, `sRGB`,
+   and `iCCP` chunks. AgX's piecewise-sRGB output codes are E (contract 4),
+   so the engine reads them as E-encoded, straight-alpha values and
+   premultiplies on input (contract 3, `import_blender_surface`).
+2. **The worker runs least-privileged** (section 19, security):
+   `--background --factory-startup --disable-autoexec --offline-mode`
+   (the Powermove worker still runs through `--python`), a scrubbed
+   environment instead of main's full environment (appendix A item 29),
+   scratch `BLENDER_USER_*` directories, and external texture paths packed
+   or reported at import.
+3. **Limits** (section 3; may be raised, never lowered), checked by
+   `BlenderJobRequest::validate` and `BlenderModelJob::validate`: Blender
+   4.5 or newer; 1 to 4,096 surfaces per job (the nested-frame limit); at
+   most 512 assets; snapshots at most 64 MB; surfaces 1 to 8192 px per
+   edge (Blender jobs reject larger sizes today; native 3D silently caps,
+   appendix A item 27); nesting depth 1 to 8; shutter index below its count;
+   samples 1 to 4,096 (final) or 1 to 512 (preview); preview scale 0.1 to 1;
+   recipes 1 byte to 8 MiB; `.blend` object names 1 to 160 characters, and
+   the source `.blend` among the job's assets. Inputs up to 256 MB, a queue
+   of 16 jobs, and the 10-minute timeout are enforced by host services.
+4. **Output cap.** Today's 512 MB output cap cannot hold one 8192² 16-bit
+   RGBA surface (512 MiB of pixels), so surfaces stream per layer: the cap
+   applies per surface, `MAX_OUTPUT_BYTES_PER_SURFACE` = one 8192² RGBA16
+   frame plus 16 MiB of PNG overhead (`BlenderSurface::validate`).
+5. **Crop.** A surface's crop rectangle lies inside its full size; pixels
+   outside it are transparent.
+6. **Content-keyed cache.** A surface's key covers the snapshot hash, the
+   worker-script hash, the sorted asset hashes, the Blender version, the
+   settings, the resolved device, the preview flag, the evaluated camera,
+   the size, the layer, and the shutter sample (section 14.7). Asset order
+   does not change the key; any listed input does (tested). Within a job a
+   surface is rendered once; edits never invalidate an export's prepared
+   surfaces because the job renders from its own snapshot session.
+7. **A missing surface fails the export** (`ErrorCode::BlenderFailed`, job
+   scope); exports never deliver draft shading in place of a Blender
+   surface. Agent frames may stand in native shading and say so
+   (contract 12, `BlenderUse::Pending`).
+8. **Batching only when proven.** `batch_layers` may be set only after S7
+   shows batched and per-layer surfaces are equal; several workers run only
+   within the memory lease (section 17). Blender's own memory is outside
+   leases; workers are bounded by measured RSS (contract 8).
+9. **Blender during playback** pauses or throttles (contract 13,
+   `BlenderThrottle`). Cancel stops Blender.
+10. **Model results respect the revision** (section 6, engine-originated
+    facts): the renderer commits a `BlenderResult` as one undoable edit and
+    drops it if the document is no longer at the requested revision, as
+    today. The renderer mints asset ids on commit; the engine never writes
+    the document.
+
+## Versioning
+
+Version 0 until Phase 3a starts. The snapshot encoding versions separately
+through `SnapshotEncoding`: a change to the worker script's input is a new
+variant and a contract bump, and the worker-script hash in every key keeps
+old cached surfaces from being reused. Raising a section 3 limit is
+compatible for readers but still a bump after the freeze, because an older
+host would reject what a newer engine sends.
+
+## What Phase 0 must confirm
+
+- **S7 (3D):** 16-bit Blender surfaces with straight alpha after AgX into
+  the job engine; batching equality (decides whether `batch_layers` is ever
+  set); orthographic framing (appendix A item 38: Blender fits the wider
+  dimension, native uses a fixed half-height of 3; which to preserve is
+  Jude's decision) and glTF source texture orientation (appendix A
+  item 39); the PNG compression level for "fast compression"
+  (`PinnedOutput::compression_percent` is `None` until S7 measures write
+  cost).
+- **Blender snapshot parity (section 25):** that `pm-blender` snapshots
+  equal today's `renderSnapshot` output for every 3D corpus frame (preview
+  and final, every shutter sample, nested compositions). The harness is
+  built against `SnapshotEncoding::RenderSnapshotJsonV1`.
+- **Phase 0 security evaluation:** a network-denying sandbox profile for the
+  Blender worker (`sandbox-exec` is deprecated, a feasibility risk). The
+  flags and the scrubbed environment in invariant 2 do not depend on it.
+- **S8:** that pausing Blender during playback (the default
+  `BlenderThrottle::Pause`) is required, or that throttling to one worker
+  keeps zero drops while Blender EEVEE renders.
+
+## Open questions
+
+1. Whether surfaces should be written as raw RGBA16 (or EXR half) instead of
+   16-bit PNG to avoid PNG encode and decode cost at 8K. Decision 15 fixes
+   16-bit PNG through AgX for cutover; S7's write-cost measurement may
+   reopen it after cutover.
+2. Whether the job engine or host services own the surface cache directory.
+   Current answer: host services mint the `BlenderSurfaces` cache handle and
+   the job engine owns eviction under its lease.
+3. Whether agent `BlenderPolicy::Render` requests (contract 12) share the
+   user's Blender queue of 16 or get their own lane. Section 17 gives agent
+   exports their own lane; Blender jobs inherit the requesting job's class.
+4. The mapping of today's `render3d` sample and denoise fields onto Cycles
+   and EEVEE settings stays in the worker script; whether the snapshot or
+   `BlenderSettings` carries engine-specific extras (EEVEE shadows,
+   Cycles light paths) is decided when Phase 3b ports the worker.

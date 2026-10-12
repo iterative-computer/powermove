@@ -1,0 +1,87 @@
+# RFC 06: The playback clock
+
+Status: draft, version 0. Module: `pm_protocol::clock`. Gates Phase 2;
+freezes when Phase 2 starts. Owner: Audio (the Audio lane joins in Phase 0
+for this contract, section 27).
+
+## Purpose
+
+The master clock is the audio device clock, including device latency (plan
+section 15). The interactive engine publishes clock samples, each a line
+"at host instant H the listener hears media time M, advancing at rate R".
+Every consumer (the viewer's presentation, the A/V sync measurement, the
+job engine's slicing governor) derives media time from the latest sample
+with the same integer math, so they agree to the tick. Transport commands
+from the renderer are notifications; the clock samples are the answer.
+
+## Types
+
+| Type | Meaning |
+|---|---|
+| `ClockSample` | `seq`, `epoch`, `TransportState`, `host_time` (µs), `media_time` (ticks), `PlaybackRate` (signed rational), output latency (informational), device sample rate, optional loop range |
+| `TransportState` | Stopped, playing, shuttling (scrub or J/K/L at a non-real-time rate, audio scrub active) |
+| `TransportCommand` | Play at a rate, pause, seek (exact or scrub), step by whole frames, set the loop range, play around the current frame, audio scrub on or off |
+| `SeekMode` | Exact (original quality as soon as it decodes) or scrub (nearest fast frame, bypassing the jitter buffer) |
+| `JKL_RATES` | 1× and 2×, forward and reverse |
+| `HostMicros` (contract 9) | A monotonic host instant in microseconds shared by every process on the machine: `mach_absolute_time` converted to µs on macOS, `QueryPerformanceCounter` on Windows, `CLOCK_MONOTONIC` on Linux |
+
+## Invariants
+
+1. **One formula.** `ClockSample::media_time_at(at)` is the only way to
+   derive media time: `media_time + floor((at − host_time) × TICKS × num /
+   (10⁶ × den))` in i128 with Euclidean division, then wrapped into the
+   loop range with `rem_euclid`, then clamped to the safe tick range.
+   Stopped clocks return `media_time`. Tested at 1×, −2×, before the
+   anchor (floored toward −∞), across a loop wrap, and at 1000/1001 where
+   1001 s of host time is exactly 1000 s of media.
+2. **Publication.** A sample is published on every discontinuity (play,
+   pause, seek, rate change, loop wrap, device change) with a new `epoch`,
+   and at least 4 times a second while playing. Samples with the same epoch
+   describe one continuous line; a consumer replaces its line only when the
+   epoch or `seq` advances.
+3. **Latency is folded in.** `host_time` is when `media_time` reaches the
+   listener, output latency included; `output_latency_us` is for logs only.
+4. **State and rate agree.** A stopped clock has rate 0 and a running clock
+   does not; the sample rate is 8 to 192 kHz; a loop range is non-empty.
+   Checked by `ClockSample::validate`.
+5. **Commands are well formed.** Play needs a non-zero rate with a positive
+   denominator; a step moves at least one frame; pre-roll and post-roll are
+   non-negative; a loop range is non-empty. Checked by
+   `TransportCommand::validate`.
+6. **Presentation** (section 15): the viewer presents the frame whose PTS
+   interval contains the predicted display time, computed from the clock
+   and the display link, not the rAF callback time.
+
+## Versioning
+
+Version 0 until Phase 2 starts. Reverse audio, faster shuttle, and frame
+blending after cutover may add `TransportState` or `TransportCommand`
+variants; each is a version bump.
+
+## What Phase 0 must confirm
+
+- **Audio lane, device clock:** that `cpal` on macOS exposes the device's
+  presentation timestamps and latency precisely enough to produce
+  `host_time` within the A/V sync bound (±10 ms, measured by photodiode
+  loopback in the lab and frame-callback timing in the app).
+- **S1 (frame bridge):** that the viewer's display link and the engine's
+  `HostMicros` share a timebase across processes (`mach_absolute_time` is
+  system-wide on macOS; S1 verifies against `requestVideoFrameCallback`
+  presentation times), and that 4 samples a second keep presentation
+  within the cadence bar (23.976 and 25 fps on 60 Hz and 120 Hz with zero
+  irregular repeats over 60 s).
+- **S8:** that the job engine can use the same samples for its slicing
+  decisions (contract 13) without its own audio device.
+
+## Open questions
+
+1. Whether µs host time is fine-grained enough. One µs is 705.6 ticks, well
+   under a frame at 240 fps (2,940,000 ticks); drift is impossible because
+   each sample re-anchors. Nanoseconds would overflow the safe integer range
+   after 104 days of uptime, so µs stays.
+2. Whether scrub audio needs its own sample stream (short grains at the
+   scrub position) or rides on `shuttling` samples. Audio lane decides in
+   Phase 3b with J/K/L and audio scrub.
+3. Whether a device change should pause playback or continue on the new
+   device with a new epoch. The contract allows both; the Audio lane picks
+   with Jude.
