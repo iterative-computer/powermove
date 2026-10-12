@@ -469,6 +469,15 @@ export function install(PM: PMRegistry): void {
     const comp: any = blankComp({ name, w: host.w, h: host.h, fps: host.fps, dur, bg: host.bg, render3d:host.render3d });
     comp.name = name;
     const index = host.layers.findIndex((layer: any) => pickedIds.has(layer.id));
+    /* Parenting cannot cross a composition boundary, so links to layers left
+       outside are cut. When every moved root hung from the same outside layer
+       (a child pre-composed without its rig), the new precomp layer takes that
+       parent instead: its own transform maps the composition onto the host
+       one to one, so the moved layers keep their animated placement. */
+    const roots = picked.filter((layer: any) => !layer.parent || !pickedIds.has(layer.parent));
+    const outsideParent = roots[0]?.parent && !pickedIds.has(roots[0].parent)
+      && host.layers.some((layer: any) => layer.id === roots[0].parent)
+      && roots.every((layer: any) => layer.parent === roots[0].parent) ? roots[0].parent : null;
     let layer: any = null;
     transact('Pre-compose', () => {
       comp.layers = picked;
@@ -481,6 +490,7 @@ export function install(PM: PMRegistry): void {
       PM.proj.comps = { ...comps(), [comp.id]: comp };
       layer = makeLayer(comp.id, host, start);
       layer.p['anchor.x'].v = comp.w / 2; layer.p['anchor.y'].v = comp.h / 2;
+      if (outsideParent) layer.parent = outsideParent;
       const rest = host.layers.filter((item: any) => !pickedIds.has(item.id));
       for (const item of rest) {
         if (pickedIds.has(item.parent)) item.parent = null;
