@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+parley = { version = "0.12", default-features = false, features = ["std"] }
+fontique = { version = "0.12", default-features = false, features = ["std"] }
+harfrust = "0.14"
+skrifa = "0.48"
+read-fonts = "0.45"
+write-fonts = "0.54"
+icu_segmenter = "2"
+
+[profile.release]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2

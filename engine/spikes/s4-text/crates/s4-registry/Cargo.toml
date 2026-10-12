@@ -1,0 +1,18 @@
+[package]
+name = "s4-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+s4-layout = { path = "../s4-layout" }
+read-fonts.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSValue", "NSDictionary"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSFont", "NSFontManager", "objc2-core-foundation"] }
+objc2-core-foundation = "0.3"
+objc2-core-text = "0.3"
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGFont"] }

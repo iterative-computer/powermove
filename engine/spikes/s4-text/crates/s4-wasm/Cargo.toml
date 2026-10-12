@@ -1,0 +1,13 @@
+[package]
+name = "s4-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+s4-layout = { path = "../s4-layout" }
+serde_json.workspace = true
