@@ -31,6 +31,8 @@ const cfg = Object.assign(
     hdrCanvas: false,
     latencyModes: ['baseline', 'gesture', 'orbit', 'walk'],
     inputHz: 120,
+    // Engine gestures read pointerrawupdate instead of rAF-aligned pointermove.
+    rawInput: false,
     // 'gpu-done' (onSubmittedWorkDone after close) or 'callback' (per-use release
     // callback, subtle.release(cb)); see preload.cjs.
     releaseMode: 'gpu-done',
@@ -504,6 +506,15 @@ function analyzeCapture(buf, size, held) {
   return r;
 }
 
+/**
+ * Build tools and the other engine spikes keep their executable name; anything else
+ * (the person's own apps) is reported only as "other", so committed summaries carry
+ * no private process names.
+ */
+function publicProcessName(base) {
+  return /^(Electron( Helper.*)?|rustc|cargo|clang|ld|ffmpeg|bun|node|Blender|xcodebuild|swift(c)?|s\d+(-[a-z0-9]+)?)$/i.test(base) ? base : 'other';
+}
+
 /** Load from everything else on the machine (other agents' builds and spikes). */
 function machineLoad() {
   let busy = [];
@@ -514,7 +525,7 @@ function machineLoad() {
       .filter(m => m && +m[1] >= 20 && !m[2].includes('s1-bridge'))
       // Build tools and other spikes by name; anything else (the person's own apps)
       // only as "other", so the committed summaries carry no private process names.
-      .map(m => ({ cpu: +m[1], name: /electron|rustc|cargo|clang|ld$|ffmpeg|bun|node|\/s\d\b|blender|xcodebuild|swift/i.test(m[2]) ? path.basename(m[2]) : 'other' }));
+      .map(m => ({ cpu: +m[1], name: publicProcessName(path.basename(m[2])) }));
   } catch {}
   return { loadavg: os.loadavg().map(x => +x.toFixed(2)), busyProcesses: busy };
 }
@@ -527,7 +538,7 @@ async function main() {
   result.display = { bounds: d.bounds, scaleFactor: d.scaleFactor, hz: d.displayFrequency, colorDepth: d.colorDepth, colorSpace: d.colorSpace };
   await createWindow();
   await startEngine();
-  const ready = await viewer('init', { displayHz: d.displayFrequency, format: cfg.format, width: cfg.width, height: cfg.height, drawPath: cfg.drawPath, hdrCanvas: cfg.hdrCanvas, poolSize: cfg.poolSize, leadFrames: cfg.leadFrames, releaseMode: cfg.releaseMode, redraw: cfg.redraw });
+  const ready = await viewer('init', { displayHz: d.displayFrequency, format: cfg.format, width: cfg.width, height: cfg.height, drawPath: cfg.drawPath, hdrCanvas: cfg.hdrCanvas, poolSize: cfg.poolSize, leadFrames: cfg.leadFrames, releaseMode: cfg.releaseMode, redraw: cfg.redraw, rawInput: cfg.rawInput });
   result.viewerInit = ready;
   log(`viewer ready: ${JSON.stringify(ready).slice(0, 300)}`);
 

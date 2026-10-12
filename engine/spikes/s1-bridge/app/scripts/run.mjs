@@ -26,6 +26,8 @@ const arg = (name, dflt) => {
   return i > 0 ? process.argv[i + 1] : dflt;
 };
 const seconds = Number(arg('seconds', '60'));
+// --tag r2 writes <name>-r2 so a repeat run sits next to the first one.
+const tag = arg('tag', '');
 const only = arg('only', '')
   .split(',')
   .filter(Boolean);
@@ -75,6 +77,9 @@ const runs = [
   { name: 'latency-bgra-load-persistent', ...lat, format: 'bgra', load: LOAD, transport: 'persistent' },
   { name: 'latency-bgra-idle', ...lat, format: 'bgra', load: false },
   { name: 'latency-bgra-idle-persistent', ...lat, format: 'bgra', load: false, transport: 'persistent' },
+  // Tuned input: pointerrawupdate for engine gestures.
+  { name: 'latency-bgra-load-persistent-raw', ...lat, format: 'bgra', load: LOAD, transport: 'persistent', rawInput: true },
+  { name: 'latency-bgra-idle-persistent-raw', ...lat, format: 'bgra', load: false, transport: 'persistent', rawInput: true },
   // Image quality: capturePage, banding, values above 1.0.
   { name: 'quality-bgra', scenario: 'quality', format: 'bgra', load: false },
   { name: 'quality-rgbaf16', scenario: 'quality', format: 'rgbaf16', load: false, hdrCanvas: true, edrOnscreen: true }
@@ -82,7 +87,8 @@ const runs = [
 
 for (const run of runs) {
   if (only.length && !only.includes(run.name)) continue;
-  const { name, ...config } = run;
+  const { name: base, ...config } = run;
+  const name = tag ? `${base}-${tag}` : base;
   const out = path.join(rawDir, `${name}.json`);
   const env = { ...process.env, S1_CONFIG: JSON.stringify({ ...config, out }), S1_ALLOW_UNSIGNED_DEV: '1' };
   delete env.ELECTRON_RUN_AS_NODE;

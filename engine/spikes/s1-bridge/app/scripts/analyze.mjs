@@ -161,6 +161,8 @@ function analyzePlayback(raw, events) {
   const loadEvents = raw.run.load?.events ?? [];
   const attribution = {};
   const irregular = [];
+  // Every frame that was not presented at all, with the compositor's frame state.
+  const missing = [];
   for (const p of perFrame) {
     const f = byK.get(p.k);
     const off = p.presentUs != null && Math.abs(p.presentUs - p.ptsTraceUs - med) > periodUs / 2;
@@ -169,6 +171,7 @@ function analyzePlayback(raw, events) {
     const near = pts == null ? [] : loadEvents.filter(([, u, d]) => u <= pts && u >= pts - 300_000 && u + d * 1000 >= pts - 50_000).map(e => e[0]);
     const key = near.length ? [...new Set(near)].sort().join('+') : 'none';
     attribution[key] = (attribution[key] ?? 0) + 1;
+    if (p.status !== 'ok' && p.status !== 'late') missing.push({ k: p.k, status: p.status, state: p.state ?? null, near: key });
     if (irregular.length < 40)
       irregular.push({
         k: p.k,
@@ -213,6 +216,7 @@ function analyzePlayback(raw, events) {
     redraws: v.redraws ?? 0,
     viewerDropReasons: v.viewerDrops.reduce((a, d) => ((a[d[2]] = (a[d[2]] ?? 0) + 1), a), {}),
     irregularByLoadEvent: attribution,
+    missing,
     irregular
   };
 }
@@ -313,6 +317,14 @@ function analyzeLatency(raw, events) {
   return out;
 }
 
+/** Same rule as main.cjs: only build tools and spike binaries keep their names. */
+function publicLoad(m) {
+  if (!m) return null;
+  const name = n => (/^(Electron( Helper.*)?|rustc|cargo|clang|ld|ffmpeg|bun|node|Blender|xcodebuild|swift(c)?|s\d+(-[a-z0-9]+)?)$/i.test(n) ? n : 'other');
+  const side = x => (x ? { loadavg: x.loadavg, busyProcesses: (x.busyProcesses ?? []).map(p => ({ cpu: p.cpu, name: name(p.name) })) } : null);
+  return { before: side(m.before), after: side(m.after) };
+}
+
 const events = raw.trace ? loadTrace(raw.trace) : null;
 const { out: _out, ...config } = raw.config;
 const summary = {
@@ -321,7 +333,7 @@ const summary = {
   config,
   versions: raw.versions,
   display: raw.display,
-  machineLoad: raw.machineLoad ?? null,
+  machineLoad: publicLoad(raw.machineLoad),
   errors: raw.errors,
   bridge: raw.bridge,
   engine: raw.engine,

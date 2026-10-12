@@ -491,7 +491,28 @@ function frameLoop(rafMs) {
 
 const decodeSeq = (x, y) => (y - 300) * 1200 + (x - 200);
 
+// With rawInput, engine gestures take pointer input from pointerrawupdate, which
+// Chromium dispatches as events arrive instead of aligning them to the next rAF as it
+// does pointermove. Today's path ('baseline') always uses pointermove.
+const rawInput = () => S.cfg && S.cfg.rawInput && 'onpointerrawupdate' in window;
+const engineGesture = () => S.mode === 'gesture' || S.mode === 'orbit';
+
+window.addEventListener('pointerrawupdate', e => {
+  if (!rawInput() || !engineGesture()) return;
+  const rev = ++S.rev;
+  const x = e.clientX * 2;
+  const y = e.clientY * 2;
+  S.pointer = [x, y];
+  post({ t: 'input', rev, x, y, ts: uptimeUs(e.timeStamp), kind: 0 });
+  if (S.recording) {
+    const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+    const seqs = (events.length ? events : [e]).map(c => decodeSeq(Math.round(c.clientX), Math.round(c.clientY)));
+    S.inputs.push([rev, seqs, e.timeStamp, performance.now()]);
+  }
+});
+
 window.addEventListener('pointermove', e => {
+  if (rawInput() && engineGesture()) return;
   const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
   const seqs = (events.length ? events : [e]).map(c => decodeSeq(Math.round(c.clientX), Math.round(c.clientY)));
   const rev = ++S.rev;
