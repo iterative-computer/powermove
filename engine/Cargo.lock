@@ -281,6 +281,12 @@ version = "0.1.0"
 [[package]]
 name = "pm-engine"
 version = "0.1.0"
+dependencies = [
+ "libc",
+ "pm-protocol",
+ "proptest",
+ "thiserror",
+]
 
 [[package]]
 name = "pm-eval"
@@ -330,6 +336,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+ "sha2",
  "thiserror",
  "ts-rs",
 ]

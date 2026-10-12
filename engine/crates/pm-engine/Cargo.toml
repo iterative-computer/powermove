@@ -8,3 +8,9 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+pm-protocol = { path = "../pm-protocol", default-features = false }
+thiserror.workspace = true
+libc = "0.2"
+
+[dev-dependencies]
+proptest.workspace = true
