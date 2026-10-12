@@ -87,8 +87,17 @@ async function main() {
     manifest.scenes.push({ id: scene.id, width: scene.width, height: scene.height });
   }
   // Stress: redraw every frame with a subpixel shift (results cannot be
-  // reused; glyph caches can), synchronized by a one-pixel readback.
+  // reused; glyph caches can), then upload the canvas into a WebGL texture
+  // as the legacy compositor does, synchronized by a one-pixel readPixels.
+  // A 2D getImageData would read back the whole canvas and can move it to
+  // the CPU, so it is used only once, after the timed frames.
   const frames = file.stressFrames ?? 30;
+  const glCanvas = document.createElement('canvas');
+  glCanvas.width = glCanvas.height = 4;
+  const gl = glCanvas.getContext('webgl2')!;
+  const tex = gl.createTexture();
+  const fb = gl.createFramebuffer();
+  const px = new Uint8Array(4);
   for (const scene of file.stress) {
     const c = canvasFor(scene);
     const times: number[] = [];
@@ -96,7 +105,11 @@ async function main() {
       const started = performance.now();
       c.clearRect(0, 0, scene.width, scene.height);
       drawScene(c, scene, (f * 0.137) % 1);
-      c.getImageData(0, 0, 1, 1);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c.canvas);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
       times.push(performance.now() - started);
     }
     const data = c.getImageData(0, 0, scene.width, scene.height).data;

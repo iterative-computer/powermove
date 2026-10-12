@@ -25,7 +25,7 @@ use std::time::Duration;
 /// `+cg` variants use the CoreGraphics-smoothing tune, `+canvas` the
 /// Canvas2D tune (vello_r::Tune).
 const RENDERERS: &[&str] = &[
-    "coretext", "coretext-smooth", "canvas2d", "vello", "vello_gpu", "vello_cpu", "skia-graphite", "vello+cg", "vello_gpu+cg", "vello_cpu+cg", "vello+canvas", "vello_gpu+canvas",
+    "coretext", "coretext-smooth", "canvas2d", "vello", "vello_gpu", "vello_cpu", "skia-graphite", "vello+cg", "vello_gpu+cg", "vello_cpu+cg", "vello+canvas", "vello_gpu+canvas", "vello_gpu+cg+atlas",
 ];
 
 fn arg(name: &str) -> Option<String> {
@@ -74,13 +74,30 @@ struct Backends {
     vcpu_cg: vello_r::VelloCpu,
     vello_cv: vello_r::VelloClassic,
     vgpu_cv: vello_r::VelloGpu,
+    vgpu_atlas: vello_r::VelloGpu,
 }
 
 impl Backends {
     fn new() -> Self {
+        let t = std::time::Instant::now();
         let gpu = vello_r::Gpu::new();
+        let t_gpu = t.elapsed();
+        let t = std::time::Instant::now();
         let vello = vello_r::VelloClassic::new(&gpu);
+        let t_vello = t.elapsed();
+        let t = std::time::Instant::now();
         let vgpu = vello_r::VelloGpu::new(&gpu, 64, 64);
+        let t_vgpu = t.elapsed();
+        let t = std::time::Instant::now();
+        let skia = skia::SkiaGraphite::new();
+        let t_skia = t.elapsed();
+        println!(
+            "init: wgpu device {:.1} ms, vello renderer {:.1} ms, vello_gpu renderer {:.1} ms, Skia Graphite context {:.1} ms",
+            t_gpu.as_secs_f64() * 1e3,
+            t_vello.as_secs_f64() * 1e3,
+            t_vgpu.as_secs_f64() * 1e3,
+            t_skia.as_secs_f64() * 1e3
+        );
         let tuned = |t: vello_r::Tune| {
             let mut v = vello_r::VelloClassic::new(&gpu);
             v.fonts.tune = t;
@@ -92,7 +109,11 @@ impl Backends {
         };
         let (vello_cg, vgpu_cg, vcpu_cg) = tuned(vello_r::Tune::COREGRAPHICS);
         let (vello_cv, vgpu_cv, _) = tuned(vello_r::Tune::CANVAS2D);
+        let mut vgpu_atlas = vello_r::VelloGpu::new(&gpu, 64, 64);
+        vgpu_atlas.fonts.tune = vello_r::Tune::COREGRAPHICS;
+        vgpu_atlas.atlas = true;
         Backends {
+            vgpu_atlas,
             vello_cg,
             vgpu_cg,
             vcpu_cg,
@@ -103,7 +124,7 @@ impl Backends {
             vello,
             vgpu,
             vcpu: vello_r::VelloCpu::new(64, 64),
-            skia: skia::SkiaGraphite::new(),
+            skia,
             gpu,
         }
     }
@@ -121,6 +142,7 @@ impl Backends {
             "vello_cpu+cg" => self.vcpu_cg.render(p, faces),
             "vello+canvas" => self.vello_cv.render(&self.gpu, p, faces),
             "vello_gpu+canvas" => self.vgpu_cv.render(&self.gpu, p, faces),
+            "vello_gpu+cg+atlas" => self.vgpu_atlas.render(&self.gpu, p, faces),
             _ => unreachable!(),
         }
     }
@@ -140,6 +162,13 @@ impl Backends {
             "vello+cg" => self.vello_cg.frame(&self.gpu, p, faces),
             "vello_gpu+cg" => self.vgpu_cg.frame(&self.gpu, p, faces),
             "vello_cpu+cg" => self.vcpu_cg.frame(p, faces),
+            "vello_gpu+cg+atlas" => self.vgpu_atlas.frame(&self.gpu, p, faces),
+            "coretext-smooth" => {
+                let started = std::time::Instant::now();
+                self.ct_smooth.render(p, faces);
+                let t = started.elapsed();
+                vello_r::FrameTime { encode: t, total: t }
+            }
             _ => unreachable!(),
         }
     }
@@ -285,8 +314,9 @@ fn run_stress(root: &Path, file: &scene::SceneFile) {
     for p in &prepared {
         println!("{}: {}x{}, {} glyphs, {} path elements", p.id, p.width, p.height, p.glyphs, p.path_segments);
         let mut per = serde_json::Map::new();
-        let reference = b.render("coretext", p, &prep.faces);
-        for r in ["vello", "vello_gpu", "vello_cpu", "skia-graphite", "coretext"] {
+        let plain = b.render("coretext", p, &prep.faces);
+        let smooth = b.render("coretext-smooth", p, &prep.faces);
+        for r in ["vello", "vello_gpu", "vello_cpu", "vello+cg", "vello_gpu+cg", "vello_cpu+cg", "vello_gpu+cg+atlas", "skia-graphite", "coretext", "coretext-smooth"] {
             // The first frame includes glyph outline and atlas caches.
             let first = b.frame(r, p, &prep.faces);
             let mut enc = Vec::new();
@@ -298,25 +328,27 @@ fn run_stress(root: &Path, file: &scene::SceneFile) {
                 tot.push(t.total);
             }
             let img = b.render(r, p, &prep.faces);
-            let cmp = compare(&img, &reference);
+            // Tuned renderers aim at CoreText with font smoothing; plain ones at plain CoreText.
+            let (rname, refimg) = if r.contains("+cg") || r == "coretext-smooth" || r == "skia-graphite" { ("coretext-smooth", &smooth) } else { ("coretext", &plain) };
+            let cmp = compare(&img, refimg);
             let st = stats(&tot);
             println!(
-                "  {r:<14} first {:>8.2} ms   frame median {:>8.2} ms p95 {:>8.2} ms (CPU encode median {:>7.2} ms)   alpha SSIM vs CoreText ink {:.4}",
+                "  {r:<19} first {:>8.2} ms   frame median {:>8.2} ms p95 {:>8.2} ms (CPU encode median {:>7.2} ms)   alpha SSIM vs {rname} ink {:.4}",
                 first.total.as_secs_f64() * 1000.0,
                 st["median"].as_f64().unwrap(),
                 st["p95"].as_f64().unwrap(),
                 stats(&enc)["median"].as_f64().unwrap(),
                 cmp.alpha.ink
             );
-            per.insert(r.into(), json!({ "firstMs": first.total.as_secs_f64() * 1000.0, "frameMs": st, "encodeMs": stats(&enc), "vsCoreText": cmp }));
+            per.insert(r.into(), json!({ "firstMs": first.total.as_secs_f64() * 1000.0, "frameMs": st, "encodeMs": stats(&enc), "reference": rname, "vsReference": cmp }));
         }
         if let Some(m) = canvas_manifest.as_ref().and_then(|m| m["stress"].as_array()).and_then(|a| a.iter().find(|s| s["id"] == p.id.as_str())) {
             let ms: Vec<Duration> = m["frameMs"].as_array().unwrap().iter().map(|v| Duration::from_secs_f64(v.as_f64().unwrap() / 1000.0)).collect();
             let canvas_img = load_canvas(root, p);
             let st = stats(&ms);
-            let cmp = canvas_img.map(|c| compare(&c, &reference));
-            println!("  {:<14} first {:>8.2} ms   frame median {:>8.2} ms p95 {:>8.2} ms (draw + 1 px readback, Electron)", "canvas2d", m["firstMs"].as_f64().unwrap(), st["median"].as_f64().unwrap(), st["p95"].as_f64().unwrap());
-            per.insert("canvas2d".into(), json!({ "firstMs": m["firstMs"], "frameMs": st, "vsCoreText": cmp }));
+            let cmp = canvas_img.map(|c| compare(&c, &smooth));
+            println!("  {:<19} first {:>8.2} ms   frame median {:>8.2} ms p95 {:>8.2} ms (draw + WebGL texture upload + 1 px readPixels, Electron)", "canvas2d", m["firstMs"].as_f64().unwrap(), st["median"].as_f64().unwrap(), st["p95"].as_f64().unwrap());
+            per.insert("canvas2d".into(), json!({ "firstMs": m["firstMs"], "frameMs": st, "reference": "coretext-smooth", "vsReference": cmp }));
         }
         out.insert(p.id.clone(), json!({ "width": p.width, "height": p.height, "glyphs": p.glyphs, "pathElements": p.path_segments, "frames": frames, "renderers": per }));
     }

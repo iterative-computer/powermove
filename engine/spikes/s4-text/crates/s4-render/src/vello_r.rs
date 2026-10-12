@@ -313,6 +313,9 @@ impl VelloClassic {
 }
 
 pub struct VelloGpu {
+    /// Route every glyph through vello_gpu's glyph atlas (cached coverage at
+    /// quantized subpixel offsets) instead of drawing outlines each frame.
+    pub atlas: bool,
     renderer: vello_gpu::Renderer,
     resources: vello_gpu::Resources,
     pub fonts: Fonts,
@@ -324,15 +327,16 @@ pub struct VelloGpu {
 impl VelloGpu {
     pub fn new(gpu: &Gpu, w: u16, h: u16) -> Self {
         let (renderer, resources) = vello_gpu::Renderer::new(&gpu.device, &vello_gpu::RenderTargetConfig { format: wgpu::TextureFormat::Rgba8Unorm, width: w, height: h });
-        VelloGpu { renderer, resources, fonts: Fonts::default(), size: (w, h), target: None, scene: vello_gpu::Scene::new(w, h) }
+        VelloGpu { atlas: false, renderer, resources, fonts: Fonts::default(), size: (w, h), target: None, scene: vello_gpu::Scene::new(w, h) }
     }
 
     pub fn frame(&mut self, gpu: &Gpu, scene: &Prepared, faces: &BTreeMap<FaceId, FaceData>) -> FrameTime {
         let (w, h) = (scene.width as u16, scene.height as u16);
         if self.size != (w, h) {
-            let tune = self.fonts.tune;
+            let (tune, atlas) = (self.fonts.tune, self.atlas);
             *self = VelloGpu::new(gpu, w, h);
             self.fonts.tune = tune;
+            self.atlas = atlas;
         }
         let started = Instant::now();
         let s = &mut self.scene;
@@ -362,7 +366,7 @@ impl VelloGpu {
                             // vello_gpu draws bitmap glyphs only through its glyph atlas
                             // (direct bitmap paints panic: "pixmap image sources are not
                             // supported"); outlines are drawn directly.
-                            let b = s.glyph_run(&mut self.resources, &font).font_size(run.size).normalized_coords(&coords).hint(false).atlas_cache(faces[&run.face].bitmap)
+                            let b = s.glyph_run(&mut self.resources, &font).font_size(run.size).normalized_coords(&coords).hint(false).atlas_cache(self.atlas || faces[&run.face].bitmap)
                                 .font_embolden(glifo_embolden(tune.amount(run.size, bitmap) * self.fonts.upem(faces, run.face) as f64 / run.size as f64));
                             let r = if pass { b.stroke_glyphs(glyphs) } else { b.fill_glyphs(glyphs) };
                             r.expect("vello_gpu glyphs");
