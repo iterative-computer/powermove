@@ -12,7 +12,8 @@
  * third-party code and never committed).
  *
  * --local adds private sources from this machine as the `local` group: a
- * `.pmv` project (shader-layer code in its layers and edit history) or an
+ * `.pmv` project of any container version (shader-layer code anywhere in the
+ * document, including its edit history) or an
  * extensions folder (each subfolder's index.ts). Their code stays in work/;
  * case ids are content hashes and the report prints no source text for them.
  */
@@ -37,6 +38,7 @@ const localPaths = process.argv.flatMap((arg, i, all) => (arg === '--local' && a
 const shaders = await import(join(RENDERER, 'legacy/gl/shaders.ts'));
 const transitions = await import(join(RENDERER, 'legacy/gl/transitions.ts'));
 const extensionLayers = await import(join(RENDERER, 'kernel/extension-layers.ts'));
+const { decodeProjectContainer } = await import(join(APP, 'src/shared/project-container.ts'));
 const PM: any = { uid: () => 'fx', P: (v: unknown) => ({ v }) };
 shaders.install(PM);
 transitions.install(PM);
@@ -501,20 +503,14 @@ if (withStore) {
 const hash8 = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 8);
 for (const path of localPaths) {
   if (path.endsWith('.pmv')) {
-    // PMV4: a header line, then the project JSON, then binary payloads.
-    const bytes = await readFile(path);
-    const header = bytes.subarray(0, 5).toString('latin1');
-    if (header !== 'PMV4\n') { activationNotes.push(`local project skipped (format ${JSON.stringify(header.trim())})`); continue; }
-    const text = bytes.subarray(5).toString('utf8');
-    let depth = 0, end = 0, quote = false;
-    for (let i = 0; i < text.length; i++) {
-      const ch = text[i]!;
-      if (quote) { if (ch === '\\') i++; else if (ch === '"') quote = false; continue; }
-      if (ch === '"') quote = true;
-      else if (ch === '{') depth++;
-      else if (ch === '}' && --depth === 0) { end = i + 1; break; }
+    // The app's own reader (PMV3 containers, PMV4 incremental saves, plain JSON).
+    let project: any;
+    try {
+      project = decodeProjectContainer(new Uint8Array(await readFile(path))).document;
+    } catch (error) {
+      activationNotes.push(`local project skipped (${String(error).slice(0, 80)})`);
+      continue;
     }
-    const project = JSON.parse(text.slice(0, end));
     // Shader-layer code: current layers plus every distinct version in the edit history.
     const codes = new Set<string>();
     const walk = (value: unknown, key = '') => {
@@ -522,7 +518,7 @@ for (const path of localPaths) {
       if (Array.isArray(value)) { for (const item of value) walk(item, key); return; }
       if (value && typeof value === 'object') for (const [k, v] of Object.entries(value)) walk(v, k);
     };
-    walk(project.proj);
+    walk(project);
     for (const code of codes) {
       const id = `shader-${hash8(code)}`;
       if (seen.has(`local/${id}`)) continue;
