@@ -1794,6 +1794,50 @@ Gates, per consumer:
   contracts gate Phase 2.
 - S3, S4's rendering half, and S7 gate Phase 3a; S7 also gates Phase 3b.
 
+### Phase 0 results and plan amendments
+
+Phase 0 ran on 2026-10-11 and 2026-10-12 (reports in `docs/engine/spikes/`,
+contract drafts in `docs/engine/rfcs/`, ledger in `docs/engine/e2e-ledger.md`,
+corpus tooling in `engine/corpus/`). Where this subsection and an earlier section
+disagree, this subsection wins; the earlier text is kept for history.
+
+**Results**
+
+| Item | Outcome |
+|---|---|
+| FFmpeg | Pass. LGPL 2.1+ build (FFmpeg 9.0.2), self-contained dylibs plus `ffmpeg`/`ffprobe`, 146 required components present, no gpl, nonfree, or version3. Today's libx264 and `prores_ks` call sites are listed in `engine/third_party/ffmpeg/README.md` |
+| Legacy fixes, writer inventory | Pass. README, duplicates, varyings, timecode, `minReaderVersion` guard (session edits are not yet blocked; main does not refuse a save on its own), `scripts/engine-writers.mjs` with a snapshot test |
+| pm-time, pm-model | Pass. Frame math exhaustive to ±10⁸ at all 16 rates; lossless schema round trip on every fixture; PMV3/PMV4 readers; patch semantics on 1,548 vectors from `patch.ts`; canonical hash matched by `shared/canonical-json.ts` |
+| Contracts | Drafted (15 RFCs, `pm-protocol` with MessagePack and `ts-rs`) |
+| S1 frame bridge | Bridge works and adds no measurable error; quality lines pass. Jitter, drops under main load, and pointer-to-pixel fail, and fail equally in control runs without the bridge (Chromium's compositor and main-thread stalls) |
+| S2 precision | Transparency passes. Codec generation passes for ProRes via `v216`/`y416` inputs; fails as written for ProRes 422 via `x422`, ProRes 4444 alpha edges, and H.264 |
+| S3 shaders | naga path adopted; 260 of 270 drawn coverage probes and 324 of 326 corpus variants match; remaining failures are non-`sampler2D` samplers and one WebGL-unstable shader |
+| S4 text | Layout passes (5,110 cases, identical breaks, max error 0.001 px) with a Rust port of Blink's `measureText` over HarfRust; Parley rejected for level 1. Rendering: Vello with stem-darkening profiles |
+| S5 WASM evaluator | Pass (`evP` about 19 ns; property edits 0.025 ms; structural edits 0.1 to 0.2 ms with id-keyed order patches) |
+| S6 decode | Pass on 36 files: random access equals sequential on 5,806 frames, zero-copy into wgpu, VideoToolbox and FFmpeg bit-identical |
+| S7 3D | Pass: all 80 outputs within the 3D bar with Metal safe math (79 of 80 with fast math); pm-geom3d picks pass; Blender 16-bit surfaces byte-stable |
+| S8 GPU contention | Pass with a 1 ms prediction target (0 drops in the gate scenario); a 90% fill of 2 ms overshoots |
+| Corpus v0 | Captured (131 synthetic projects, 12 pixel-hash scenarios, the Powermove ad project) |
+| E2E ledger | 547 tests: 466 pass, 57 fail, 24 skipped, 1 flaky; every failure predates the rewrite |
+
+**Amendments (orchestrator decisions under the delegation in section 29)**
+
+1. **Time (section 5).** Rule 1's tolerance becomes `1e-9 × max(1, |n|)`. The legacy float error is about 1e-15 × n, so this still captures every frame-aligned time, and off-grid times beyond 500,000 frames keep their offset. Rule 4: times `pm-edit` creates on a frame boundary are written as `n / fps_f64` (`IngestRate::seconds_of`), which round-trips at every n; off-grid times use `ticks / TICKS`.
+2. **Nominal rate (section 13 item 5).** If several supported rates qualify, the one closest to the mean frame duration over the same window wins.
+3. **Patch stream (section 6).** Structural edits reach the mirrors as id-keyed order, insert, and delete patches (or the history's UTF-8 bytes), never as a stringified whole array (S5: 2.4 to 3.0 ms). RFC 05 defines the canonical binary patch format before Phase 1 work depends on it.
+4. **Frame bridge (section 18).** Each surface is imported once and sent once per receiver; per-frame descriptors go from the engine to the viewer over its `MessageChannelMain` port, not through main per frame (forwarding through main cost up to 153 ms under load). Slots are released after `VideoFrame.close()` on `queue.onSubmittedWorkDone()`, never on `subtle.release(cb)`. Formats: `rgbaf16` on EDR displays, `bgra` with blue-noise dither elsewhere.
+5. **S1 gate (section 18).** The absolute jitter, drop, and pointer-to-pixel lines cannot be met by any Chromium-composited path on this machine, today's viewer included. They become: the engine path is no worse than today's viewer on the same harness, at p50 and p99, idle and under the load profile; and the quality lines stay absolute. Phase 2 adds two items: autosave serialization moves off main's thread (it causes the remaining drops and input-latency outliers on every path), and a C′ prototype (`CAContext`/`CALayerHost`, playback only) is measured with the S1 harness; it is adopted for playback presentation only if it meets the original 4 ms cadence line.
+6. **Decode and encode (sections 13 and 17).** ProRes 422 decodes to `v216` (16-bit) whenever the frame can reach an export, and `v216` is the ProRes 422 encoder input; `y416` for ProRes 4444. VideoToolbox sessions are pooled and reused across seeks, with an end-of-sequence sample before each seek. VP8 and VP9 with alpha use two paired FFmpeg native decoders; AV1 uses dav1d directly; FFmpeg's `get_buffer2` gives every plane its own buffer reference.
+7. **Color tags (section 9).** "Rec.709 (QuickTime and Safari)" is CICP 1-13-1, limited range. Color tags are set as encoder session properties for every codec, and movie and media timescales are always set.
+8. **Quality bar (section 2).** Transparency compares against the reference clipped to the codable range. H.264 codec generation is judged by PSNR at a matched data rate against Apple's re-encode (Apple's own re-encodes differ by 164 CV). ProRes 4444 alpha generation is judged on premultiplied values. Exports keep defaulting to 32-bit precision when any source exceeds 10 bits, including 16-bit Blender, PNG, and TIFF surfaces (f16 keeps only 7,169 to 13,558 of 65,536 levels on 16-bit ramps).
+9. **Shaders (section 11).** The naga path is adopted with the full pipeline in S3.md (limits, polyfills, SPIR-V rewrites, bind check). Programs the bind check refuses (non-`sampler2D` sampler types) route to the decision 19 fallback runner. The 394-probe coverage sweep runs as a regression suite next to the corpus, and a probe is added for every user shader that fails. Shaders whose WebGL output is itself unstable form a named "WebGL-unstable" parity class judged by review.
+10. **Text (section 12).** Level 1 measures with the Rust port of Blink's `measureText` over HarfRust; Parley is used for level 2 layout. The subset table adds `maxp`, `feat`, `STAT`, and `ankr` (plus a synthesized `HVAR` for `gvar`-only fonts). Rendering uses Vello 0.11 with engine-owned stem-darkening profiles (Canvas2D profile for level 1, CoreText profile for level 2), float paint as the engine's own pass over Vello's 8-bit coverage, and `vello_cpu` as the CPU fallback. Gates: level 1 against Canvas2D, level 2 against CoreText with smoothing; Apple Color Emoji placement follows Canvas2D. The Canvas2D profile is refined for sizes up to 18 px and stroked captions in Phase 3a.
+11. **3D (sections 8 and 11, contract 11).** The native port vendors three.js r180's GLSL chunks (MIT) and ports `WebGLProgram`'s prefix and define assembly to Rust, verified byte for byte against the recorded programs, compiled through the naga pipeline with a disk program cache. 3D fragment shaders write an all-ones sample mask, link varyings by name, and compile with Metal's safe math mode (carried as a pinned wgpu-hal patch until upstream has the option). Blender surfaces decode as code/65535, ignore PNG color chunks, and premultiply in E at f32; batching a frame's layers in one invocation is allowed.
+12. **GPU time slicing (contract 13).** Keep a 2 ms maximum command buffer and predict to a 1 ms target. The S8 gate becomes: zero drops at the 2-frame deadline; at the 1-frame deadline, zero late frames overlapping job-engine GPU work and no more drops than the interactive engine's paired control.
+13. **FFmpeg ProRes decoder (decision 22).** FFmpeg's software ProRes decoder stays in our build because agent media tools and VideoToolbox hardware decoding through FFmpeg attach to it; the engine itself decodes ProRes only through VideoToolbox. Revisit with counsel before Linux or Windows work.
+14. **Legacy fixes added to Phase 0** (before the corpus v1 capture): the restart-restore bug (the app reopens a new Untitled project instead of the last one), a supported test seam for the 21 specs that read `window.powermove`, Blender discovery of versioned bundles, and a look at `ae-audit-implementation.spec.ts:42`, `font-anchor.spec.ts:6`, and `memory-history-persistence.spec.ts:5`. Then corpus v1 is captured. Appendix A gains the corpus findings: `renderSnapshot` reads `emissive` from `MeshBasicMaterial` (Blender fails for unlit glTF with source materials), and shader layers with `vec3` color `@param`s are sometimes bound with `uniform1f`.
+15. **Phase overlap.** Phase 1 starts now. Phase 2 infrastructure that does not depend on `pm-eval` (engine processes and host services, the production bridge, `pm-media`, VideoToolbox export, FFmpeg wiring) starts in parallel; the Phase 2 gate still requires the Phase 1 gate.
+
 ### Phase 1: Evaluation and the write path
 
 `pm-time`, `pm-model` (`v1_ingest`, reconciliation, identity registry), `pm-eval`,
@@ -2032,6 +2076,7 @@ Jude delegated these decisions on 2026-10-11, except the ones marked **Open**.
 | 19 | Shader fallback runner | Keep a minimal in-renderer GLSL runner for shaders that fail translation |
 | 20 | CI hardware | No self-hosted runners on the public repository. Hosted runners run unit, lint, and build jobs; parity and performance gates run locally on the reference machines and their reports are attached to each PR |
 | 21 | Worker models | Opus 5.5 for implementation and reviews |
+| 22 | FFmpeg ProRes decoder | Kept in our FFmpeg build for agent media tools; the engine decodes ProRes only through VideoToolbox (Phase 0 amendment 13) |
 
 ## 30. Appendix A: defects found during the survey
 
