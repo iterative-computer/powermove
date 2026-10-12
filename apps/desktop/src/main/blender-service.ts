@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import {
   access,
   mkdtemp,
+  readdir,
   writeFile,
   readFile,
   rm,
@@ -206,37 +207,92 @@ export function validateBlenderJob(raw: BlenderJob): BlenderJob {
   return raw;
 }
 
+/** A Blender bundle or install folder name, with the version it names (a
+ *  bare "Blender.app" names none). Matches "Blender.app", "Blender 4.5.app",
+ *  "Blender-4.5.14.app", "Blender_5.0.app" and, on Windows, "Blender 4.5". */
+const VERSIONED_BLENDER = /^Blender(?:[ _-]?(\d+(?:\.\d+){0,3}))?(\.app)?$/i;
+
+function versionKey(version: string | undefined): number[] {
+  return (version || "").split(".").filter(Boolean).map(Number);
+}
+
+/** Newest first; an unversioned name sorts before every versioned one. */
+function compareVersionsDescending(a: string | undefined, b: string | undefined): number {
+  if (!a || !b) return a ? 1 : b ? -1 : 0;
+  const left = versionKey(a), right = versionKey(b);
+  for (let index = 0; index < Math.max(left.length, right.length); index++) {
+    const difference = (right[index] ?? 0) - (left[index] ?? 0);
+    if (difference) return difference;
+  }
+  return 0;
+}
+
+type ListDirectory = (directory: string) => Promise<string[]>;
+const listDirectory: ListDirectory = (directory) =>
+  readdir(directory).catch(() => [] as string[]);
+
+/** Blender executables in one folder of applications: every Blender bundle
+ *  (or, on Windows, install folder), unversioned first, then newest first. */
+async function bundlesIn(
+  directory: string,
+  platform: NodeJS.Platform,
+  list: ListDirectory,
+): Promise<string[]> {
+  const bundles = (await list(directory))
+    .map((name) => ({ name, match: VERSIONED_BLENDER.exec(name) }))
+    .filter(({ match }) => match && (platform === "darwin" ? !!match[2] : !match[2]))
+    .sort((a, b) => compareVersionsDescending(a.match![1], b.match![1]) || a.name.localeCompare(b.name));
+  return bundles.map(({ name }) =>
+    platform === "darwin"
+      ? path.posix.join(directory, name, "Contents/MacOS/Blender")
+      : path.win32.join(directory, name, "blender.exe"),
+  );
+}
+
+/** Where Blender is looked for, in order: POWERMOVE_BLENDER_PATH, the
+ *  platform's application folders (including versioned bundles such as
+ *  ~/Applications/Blender-4.5.14.app), then PATH. */
+export async function blenderCandidates({
+  env = process.env,
+  platform = process.platform,
+  home = os.homedir(),
+  list = listDirectory,
+}: {
+  env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
+  home?: string;
+  list?: ListDirectory;
+} = {}): Promise<string[]> {
+  const installed =
+    platform === "darwin"
+      ? [
+          ...(await bundlesIn("/Applications", platform, list)),
+          ...(await bundlesIn(path.posix.join(home, "Applications"), platform, list)),
+        ]
+      : platform === "win32"
+        ? await bundlesIn("C:\\Program Files\\Blender Foundation", platform, list)
+        : ["/usr/bin/blender", "/usr/local/bin/blender"];
+  const join = platform === "win32" ? path.win32.join : path.posix.join;
+  const delimiter = platform === "win32" ? ";" : ":";
+  return [
+    env["POWERMOVE_BLENDER_PATH"],
+    ...installed,
+    ...(env["PATH"] || "")
+      .split(delimiter)
+      .filter(Boolean)
+      .map((p) => join(p, platform === "win32" ? "blender.exe" : "blender")),
+  ].filter((s, index, all): s is string => !!s && all.indexOf(s) === index);
+}
+
+/** The first supported Blender among `candidates` (default: the configured
+ *  executable, else blenderCandidates()). */
 export async function discoverBlender(
   configured?: string,
+  { candidates: searched }: { candidates?: string[] } = {},
 ): Promise<BlenderStatus> {
-  const candidates = configured
-    ? [configured]
-    : [
-        process.env["POWERMOVE_BLENDER_PATH"],
-        ...(process.platform === "darwin"
-          ? [
-              "/Applications/Blender.app/Contents/MacOS/Blender",
-              path.join(
-                os.homedir(),
-                "Applications/Blender.app/Contents/MacOS/Blender",
-              ),
-            ]
-          : process.platform === "win32"
-            ? [
-                "C:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe",
-                "C:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe",
-              ]
-            : ["/usr/bin/blender", "/usr/local/bin/blender"]),
-        ...(process.env["PATH"] || "")
-          .split(path.delimiter)
-          .filter(Boolean)
-          .map((p) =>
-            path.join(
-              p,
-              process.platform === "win32" ? "blender.exe" : "blender",
-            ),
-          ),
-      ].filter((s): s is string => !!s);
+  const candidates = configured ? [configured] : searched ?? await blenderCandidates();
+  // An older Blender found first must not hide a supported one found later.
+  let tooOld: BlenderStatus | null = null;
   for (const executable of candidates) {
     if (!path.isAbsolute(executable)) continue;
     if (
@@ -273,16 +329,19 @@ export async function discoverBlender(
         !match ||
         Number(match[1]) < 4 ||
         (Number(match[1]) === 4 && Number(match[2]) < 5)
-      )
-        return {
+      ) {
+        tooOld ||= {
           available: false,
           error: "Blender 4.5 or newer is required",
           version,
           path: executable,
         };
+        continue;
+      }
       return { available: true, path: executable, version };
     } catch {}
   }
+  if (tooOld) return tooOld;
   return {
     available: false,
     error:
