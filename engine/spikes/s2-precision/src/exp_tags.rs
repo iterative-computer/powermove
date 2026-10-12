@@ -103,14 +103,18 @@ pub fn encode_tagged(path: &Path, mp4: bool, codec: Codec, frames: &[PixelBuffer
         match tags.gamma {
             Some(g) => {
                 let n = num(g);
-                let cf: &objc2_core_foundation::CFType = unsafe { &*(Retained::as_ptr(&n) as *const objc2_core_foundation::CFType) };
+                let cf: &objc2_core_foundation::CFType =
+                    unsafe { &*(Retained::as_ptr(&n) as *const objc2_core_foundation::CFType) };
                 f.set_attachment(unsafe { kCVImageBufferGammaLevelKey }, cf);
             }
             None => f.as_cf().remove_attachment(unsafe { kCVImageBufferGammaLevelKey }),
         }
     }
     let mut properties: Vec<(&CFString, Retained<AnyObject>)> = unsafe {
-        vec![(kVTCompressionPropertyKey_ColorPrimaries, any(tags.primaries)), (kVTCompressionPropertyKey_YCbCrMatrix, any(tags.matrix))]
+        vec![
+            (kVTCompressionPropertyKey_ColorPrimaries, any(tags.primaries)),
+            (kVTCompressionPropertyKey_YCbCrMatrix, any(tags.matrix)),
+        ]
     };
     if let Some(t) = tags.transfer {
         properties.push((unsafe { kVTCompressionPropertyKey_TransferFunction }, any(t)));
@@ -122,7 +126,10 @@ pub fn encode_tagged(path: &Path, mp4: bool, codec: Codec, frames: &[PixelBuffer
         Codec::ProRes422HQ => objc2_core_media::kCMVideoCodecType_AppleProRes422HQ,
         Codec::H264 => objc2_core_media::kCMVideoCodecType_H264,
         Codec::Hevc10 => {
-            properties.push((unsafe { kVTCompressionPropertyKey_ProfileLevel }, any(unsafe { kVTProfileLevel_HEVC_Main10_AutoLevel })));
+            properties.push((
+                unsafe { kVTCompressionPropertyKey_ProfileLevel },
+                any(unsafe { kVTProfileLevel_HEVC_Main10_AutoLevel }),
+            ));
             objc2_core_media::kCMVideoCodecType_HEVC
         }
     };
@@ -480,11 +487,18 @@ pub fn test_frames(gpu: &Gpu, format: u32, n: usize) -> Result<Vec<PixelBuffer>>
 pub fn run(gpu: &Gpu, dir: &Path) -> Result<Vec<TagRow>> {
     std::fs::create_dir_all(dir).map_err(|e| cf::Error(e.to_string()))?;
     let mut rows = vec![];
-    for (codec, mp4) in [(Codec::ProRes422HQ, false), (Codec::H264, false), (Codec::H264, true), (Codec::Hevc10, false), (Codec::Hevc10, true)] {
+    for (codec, mp4) in [
+        (Codec::ProRes422HQ, false),
+        (Codec::H264, false),
+        (Codec::H264, true),
+        (Codec::Hevc10, false),
+        (Codec::Hevc10, true),
+    ] {
         let frames = test_frames(gpu, codec.input_format(), 4)?;
         for tags in candidates() {
             let ext = if mp4 { "mp4" } else { "mov" };
-            let path: PathBuf = dir.join(format!("tags_{:?}_{}.{ext}", codec, tags.name.split(' ').next().unwrap().replace('?', "x")));
+            let path: PathBuf =
+                dir.join(format!("tags_{:?}_{}.{ext}", codec, tags.name.split(' ').next().unwrap().replace('?', "x")));
             let r = encode_tagged(&path, mp4, codec, &frames, &tags);
             let (on_disk, read_back, error) = match r {
                 Ok(()) => {
@@ -492,7 +506,14 @@ pub fn run(gpu: &Gpu, dir: &Path) -> Result<Vec<TagRow>> {
                     let rb = avio::track_info(&path)?
                         .extensions
                         .into_iter()
-                        .filter(|(k, _)| k.contains("Color") || k.contains("Transfer") || k.contains("Matrix") || k.contains("Gamma") || k.contains("FullRange") || k.contains("Chroma"))
+                        .filter(|(k, _)| {
+                            k.contains("Color")
+                                || k.contains("Transfer")
+                                || k.contains("Matrix")
+                                || k.contains("Gamma")
+                                || k.contains("FullRange")
+                                || k.contains("Chroma")
+                        })
                         .collect();
                     (Some(od), rb, None)
                 }
@@ -564,10 +585,33 @@ mod tests {
         };
         let pieces: Vec<String> = vec![
             format!("{:08b}{:08b}{:08b}", 100, 0, 40),
-            ue(0), ue(1), ue(0), ue(0), "0".into(), "0".into(),
-            ue(0), ue(0), ue(0), ue(4), "0".into(), ue(119), ue(67), "1".into(), "1".into(),
-            "1".into(), ue(0), ue(0), ue(0), ue(4),
-            "1".into(), "0".into(), "0".into(), "1".into(), "101".into(), "0".into(), "1".into(),
+            ue(0),
+            ue(1),
+            ue(0),
+            ue(0),
+            "0".into(),
+            "0".into(),
+            ue(0),
+            ue(0),
+            ue(0),
+            ue(4),
+            "0".into(),
+            ue(119),
+            ue(67),
+            "1".into(),
+            "1".into(),
+            "1".into(),
+            ue(0),
+            ue(0),
+            ue(0),
+            ue(4),
+            "1".into(),
+            "0".into(),
+            "0".into(),
+            "1".into(),
+            "101".into(),
+            "0".into(),
+            "1".into(),
             format!("{:08b}{:08b}{:08b}", 1, 13, 1),
             "0".into(),
             "1".into(),

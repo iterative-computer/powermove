@@ -6,9 +6,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
+use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::AnyThread;
 use objc2_av_foundation::*;
 use objc2_core_foundation::CFRetained;
 use objc2_core_media::{CMFormatDescription, CMSampleBuffer, CMTime};
@@ -89,12 +89,22 @@ impl VideoWriter {
     }
 
     /// Encoding writer: AVAssetWriter compresses appended pixel buffers with `settings`.
-    pub fn encoding(path: &Path, file_type: &AVFileType, settings: &NSDictionary<NSString, AnyObject>, timescale: i32) -> Result<Self> {
+    pub fn encoding(
+        path: &Path,
+        file_type: &AVFileType,
+        settings: &NSDictionary<NSString, AnyObject>,
+        timescale: i32,
+    ) -> Result<Self> {
         Self::new_inner(path, file_type, Some(settings), None, true, timescale)
     }
 
     /// Pass-through writer for samples compressed by our own VTCompressionSession.
-    pub fn passthrough(path: &Path, file_type: &AVFileType, hint: &CMFormatDescription, timescale: i32) -> Result<Self> {
+    pub fn passthrough(
+        path: &Path,
+        file_type: &AVFileType,
+        hint: &CMFormatDescription,
+        timescale: i32,
+    ) -> Result<Self> {
         Self::new_inner(path, file_type, None, Some(hint), false, timescale)
     }
 
@@ -201,8 +211,9 @@ pub fn read_compressed(path: &Path) -> Result<Vec<CFRetained<CMSampleBuffer>>> {
 pub fn export_session(src: &Path, dst: &Path, preset: &NSString, file_type: &AVFileType) -> Result<()> {
     remove(dst);
     let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&file_url(src), None) };
-    let session = unsafe { AVAssetExportSession::initWithAsset_presetName(AVAssetExportSession::alloc(), &asset, preset) }
-        .ok_or_else(|| cf::Error(format!("AVAssetExportSession init failed for preset {preset}")))?;
+    let session =
+        unsafe { AVAssetExportSession::initWithAsset_presetName(AVAssetExportSession::alloc(), &asset, preset) }
+            .ok_or_else(|| cf::Error(format!("AVAssetExportSession init failed for preset {preset}")))?;
     unsafe {
         session.setOutputURL(Some(&file_url(dst)));
         session.setOutputFileType(Some(file_type));

@@ -25,20 +25,12 @@ pub fn err<T>(msg: impl Into<String>) -> Result<T> {
 
 /// Checks an OSStatus-like code.
 pub fn check(status: i32, what: &str) -> Result<()> {
-    if status == 0 {
-        Ok(())
-    } else {
-        err(format!("{what} failed: OSStatus {status} ({})", fourcc_or_num(status)))
-    }
+    if status == 0 { Ok(()) } else { err(format!("{what} failed: OSStatus {status} ({})", fourcc_or_num(status))) }
 }
 
 fn fourcc_or_num(v: i32) -> String {
     let b = v.to_be_bytes();
-    if b.iter().all(|c| c.is_ascii_graphic()) {
-        format!("'{}'", String::from_utf8_lossy(&b))
-    } else {
-        v.to_string()
-    }
+    if b.iter().all(|c| c.is_ascii_graphic()) { format!("'{}'", String::from_utf8_lossy(&b)) } else { v.to_string() }
 }
 
 /// Toll-free bridge a CFString key to NSString.

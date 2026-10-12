@@ -71,10 +71,16 @@ fn decode_file_as(path: &Path, format: Option<u32>) -> Result<DecodeInfo> {
             NonNull::from(&mut sess_ptr),
         )
     };
-    check(st, &format!("VTDecompressionSessionCreate ('{}' → '{}')", cf::fourcc_str(codec), format.map(cf::fourcc_str).unwrap_or_else(|| "native".into())))?;
+    check(
+        st,
+        &format!(
+            "VTDecompressionSessionCreate ('{}' → '{}')",
+            cf::fourcc_str(codec),
+            format.map(cf::fourcc_str).unwrap_or_else(|| "native".into())
+        ),
+    )?;
     let session = unsafe { CFRetained::from_raw(NonNull::new_unchecked(sess_ptr)) };
-    let hardware =
-        session_bool(&session, unsafe { kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder });
+    let hardware = session_bool(&session, unsafe { kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder });
 
     let frames: Arc<Mutex<Vec<Frame>>> = Arc::new(Mutex::new(vec![]));
     let errors: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(vec![]));
@@ -158,9 +164,7 @@ pub fn mux(
 /// Create a compression session for `spec` with its properties set and frames prepared.
 pub fn create_session(spec: &EncodeSpec) -> Result<CFRetained<VTCompressionSession>> {
     let enc_spec = spec.encoder_id.map(|id| {
-        cf::Dict::new()
-            .cfkey(unsafe { kVTVideoEncoderSpecification_EncoderID }, &NSString::from_str(id))
-            .build()
+        cf::Dict::new().cfkey(unsafe { kVTVideoEncoderSpecification_EncoderID }, &NSString::from_str(id)).build()
     });
     let mut sess_ptr: *mut VTCompressionSession = std::ptr::null_mut();
     let st = unsafe {
@@ -267,7 +271,9 @@ pub fn encoder_list() -> Result<Vec<EncoderEntry>> {
             encoder_id: get(unsafe { kVTVideoEncoderList_EncoderID }),
             encoder_name: get(unsafe { kVTVideoEncoderList_EncoderName }),
             hardware: hw,
-            fields: pixbuf::dict_pairs(unsafe { &*(&*d as *const NSDictionary<NSString, AnyObject> as *const CFDictionary) }),
+            fields: pixbuf::dict_pairs(unsafe {
+                &*(&*d as *const NSDictionary<NSString, AnyObject> as *const CFDictionary)
+            }),
         });
     }
     Ok(out)
@@ -303,7 +309,14 @@ pub fn transfer(src: &PixelBuffer, format: u32) -> Result<PixelBuffer> {
     let session = unsafe { CFRetained::from_raw(NonNull::new_unchecked(sess)) };
     let st = unsafe { session.transfer_image(src.as_cf(), dst.as_cf()) };
     unsafe { session.invalidate() };
-    check(st, &format!("VTPixelTransferSessionTransferImage '{}' → '{}'", cf::fourcc_str(src.format()), cf::fourcc_str(format)))?;
+    check(
+        st,
+        &format!(
+            "VTPixelTransferSessionTransferImage '{}' → '{}'",
+            cf::fourcc_str(src.format()),
+            cf::fourcc_str(format)
+        ),
+    )?;
     Ok(dst)
 }
 

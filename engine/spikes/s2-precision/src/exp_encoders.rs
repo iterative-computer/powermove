@@ -193,7 +193,13 @@ fn supported(codec: u32) -> SupportedProps {
                 .map(|(k, v)| (k, v.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(900).collect()))
                 .collect(),
         },
-        Err(e) => SupportedProps { codec: cf::fourcc_str(codec), encoder_id: None, error: Some(e.0), selected: vec![], all_keys: vec![] },
+        Err(e) => SupportedProps {
+            codec: cf::fourcc_str(codec),
+            encoder_id: None,
+            error: Some(e.0),
+            selected: vec![],
+            all_keys: vec![],
+        },
     }
 }
 
@@ -411,7 +417,9 @@ fn check_against(t: &Tri, got: &PixelBuffer) -> Result<(f64, f64, Option<f64>)> 
                 ly = ly.max((p[1] as f64 / scale - t.y[y * w + x] as f64).abs());
                 if interior(x, y) {
                     let s = site(x, y);
-                    lc = lc.max((p[2] as f64 / scale - t.cb[s] as f64).abs()).max((p[3] as f64 / scale - t.cr[s] as f64).abs());
+                    lc = lc
+                        .max((p[2] as f64 / scale - t.cb[s] as f64).abs())
+                        .max((p[3] as f64 / scale - t.cr[s] as f64).abs());
                 }
                 let a = la.get_or_insert(0.0);
                 *a = a.max((p[0] as f64 / 257.0 - t.a[y * w + x] as f64).abs());
@@ -450,12 +458,17 @@ fn check_against(t: &Tri, got: &PixelBuffer) -> Result<(f64, f64, Option<f64>)> 
         let (yo, ys, co, cs) = if t.bits == 10 { (64.0, 876.0, 512.0, 896.0) } else { (16.0, 219.0, 128.0, 224.0) };
         for y in 0..h {
             for x in 0..w {
-                let p: Vec<f64> = d[(y * w + x) * 4..(y * w + x) * 4 + 4].iter().map(|v| exp_quicktime::half_to_f32(*v) as f64).collect();
+                let p: Vec<f64> = d[(y * w + x) * 4..(y * w + x) * 4 + 4]
+                    .iter()
+                    .map(|v| exp_quicktime::half_to_f32(*v) as f64)
+                    .collect();
                 let ycc = color::rgb_to_ycbcr([p[0], p[1], p[2]]);
                 ly = ly.max((ycc[0] * ys + yo - t.y[y * w + x] as f64).abs());
                 if interior(x, y) {
                     let s = site(x, y);
-                    lc = lc.max((ycc[1] * cs + co - t.cb[s] as f64).abs()).max((ycc[2] * cs + co - t.cr[s] as f64).abs());
+                    lc = lc
+                        .max((ycc[1] * cs + co - t.cb[s] as f64).abs())
+                        .max((ycc[2] * cs + co - t.cr[s] as f64).abs());
                 }
                 let a = la.get_or_insert(0.0);
                 *a = a.max((p[3] * 255.0 - t.a[y * w + x] as f64).abs());
@@ -505,7 +518,15 @@ fn transfer_checks() -> Vec<TransferCheck> {
         let src = match write_tri(&t) {
             Ok(b) => b,
             Err(e) => {
-                out.push(TransferCheck { from: name, to: "-".into(), error: Some(e.0), luma_max_err_codes: None, chroma_max_err_codes: None, alpha_max_err_8bit: None, ok: false });
+                out.push(TransferCheck {
+                    from: name,
+                    to: "-".into(),
+                    error: Some(e.0),
+                    luma_max_err_codes: None,
+                    chroma_max_err_codes: None,
+                    alpha_max_err_8bit: None,
+                    ok: false,
+                });
                 continue;
             }
         };
@@ -520,7 +541,15 @@ fn transfer_checks() -> Vec<TransferCheck> {
                     alpha_max_err_8bit: a,
                     ok: l <= 1.0 && c <= 1.0 && a.map(|a| a <= 1.0).unwrap_or(true),
                 },
-                Err(e) => TransferCheck { from, to: cf::fourcc_str(to), error: Some(e.0), luma_max_err_codes: None, chroma_max_err_codes: None, alpha_max_err_8bit: None, ok: false },
+                Err(e) => TransferCheck {
+                    from,
+                    to: cf::fourcc_str(to),
+                    error: Some(e.0),
+                    luma_max_err_codes: None,
+                    chroma_max_err_codes: None,
+                    alpha_max_err_8bit: None,
+                    ok: false,
+                },
             };
             out.push(row);
         };
@@ -663,7 +692,10 @@ fn hevc_profile(path: &Path) -> Option<String> {
     };
     let cf = ["4:0:0", "4:2:0", "4:2:2", "4:4:4"][h.chroma_format_idc as usize];
     let lhvc = if d.child_boxes.iter().any(|b| b == "lhvC") { ", lhvC present" } else { ", no lhvC" };
-    Some(format!("{name} (profile_idc {}), {cf}, {}-bit luma, {}-bit chroma{lhvc}", h.profile_idc, h.bit_depth_luma, h.bit_depth_chroma))
+    Some(format!(
+        "{name} (profile_idc {}), {cf}, {}-bit luma, {}-bit chroma{lhvc}",
+        h.profile_idc, h.bit_depth_luma, h.bit_depth_chroma
+    ))
 }
 
 /// Quality of an HEVC-with-alpha file against the reference decode, from native planes.
@@ -674,7 +706,8 @@ fn alpha_quality(path: &Path, source: &str, reference: &[vt::Frame]) -> Result<A
     let track = avio::track_info(path)?;
     let dec = decode_native(path)?;
     let native = dec.frames[0].buffer.format();
-    let (mut a8, mut y10, mut cb10, mut cr10) = (DiffStats::default(), DiffStats::default(), DiffStats::default(), DiffStats::default());
+    let (mut a8, mut y10, mut cb10, mut cr10) =
+        (DiffStats::default(), DiffStats::default(), DiffStats::default(), DiffStats::default());
     for (f, r) in dec.frames.iter().zip(reference) {
         let t = read_tri(&f.buffer)?;
         let (rd, _, _) = r.buffer.read_u16(None)?;
@@ -693,7 +726,9 @@ fn alpha_quality(path: &Path, source: &str, reference: &[vt::Frame]) -> Result<A
                 if rows.iter().any(|&i| rd[i] == 0) {
                     continue;
                 }
-                let avg = |c: usize| (rows.iter().map(|&i| rd[i + c] as f64).sum::<f64>() / rows.len() as f64 / 64.0).round() as i64;
+                let avg = |c: usize| {
+                    (rows.iter().map(|&i| rd[i + c] as f64).sum::<f64>() / rows.len() as f64 / 64.0).round() as i64
+                };
                 let s = cy * t.cw() + cx;
                 cb10.add(t.cb[s] as i64 * k, avg(2));
                 cr10.add(t.cr[s] as i64 * k, avg(3));
@@ -728,7 +763,8 @@ fn rgha_floats(pb: &PixelBuffer) -> Result<Vec<f32>> {
 
 fn playback(files: &[(String, std::path::PathBuf)], source: &Path, mtm: MainThreadMarker) -> Vec<PlaybackRow> {
     let t = 2 * material::FRAME_DUR;
-    let reference = exp_quicktime::player_frame_timed(source, pixbuf::RGBA_HALF, t, mtm).and_then(|(f, at)| Ok((rgha_floats(&f)?, at)));
+    let reference = exp_quicktime::player_frame_timed(source, pixbuf::RGBA_HALF, t, mtm)
+        .and_then(|(f, at)| Ok((rgha_floats(&f)?, at)));
     files
         .iter()
         .map(|(name, path)| {
@@ -749,7 +785,9 @@ fn playback(files: &[(String, std::path::PathBuf)], source: &Path, mtm: MainThre
                 row.frame_time = Some(at);
                 let half = material::FRAME_DUR / 2;
                 if (at - t).abs() > half || (ref_at - t).abs() > half {
-                    return cf::err(format!("not frame 2: file at {at}, source at {ref_at}, requested {t} (24000 timescale)"));
+                    return cf::err(format!(
+                        "not frame 2: file at {at}, source at {ref_at}, requested {t} (24000 timescale)"
+                    ));
                 }
                 let got = rgha_floats(&frame)?;
                 if got.len() != refv.len() {
@@ -769,7 +807,9 @@ fn playback(files: &[(String, std::path::PathBuf)], source: &Path, mtm: MainThre
                     }
                 }
                 let n_px = (got.len() / 4) as f64;
-                let ps = |se: f64, n: f64| if se == 0.0 { f64::INFINITY } else { 10.0 * (1023.0f64.powi(2) / (se / n)).log10() };
+                let ps = |se: f64, n: f64| {
+                    if se == 0.0 { f64::INFINITY } else { 10.0 * (1023.0f64.powi(2) / (se / n)).log10() }
+                };
                 row.premultiplied_rgb_psnr = Some(ps(se_p, 3.0 * n_px));
                 row.straight_rgb_psnr_alpha_quarter = Some(ps(se_s, n_s as f64));
                 row.alpha_psnr = Some(ps(se_a, n_px));
@@ -785,7 +825,8 @@ fn playback(files: &[(String, std::path::PathBuf)], source: &Path, mtm: MainThre
 }
 
 pub fn run(gpu: &Gpu, m: &Material) -> Result<EncodersReport> {
-    let mtm = MainThreadMarker::new().ok_or_else(|| cf::Error("encoders experiment must run on the main thread".into()))?;
+    let mtm =
+        MainThreadMarker::new().ok_or_else(|| cf::Error("encoders experiment must run on the main thread".into()))?;
     let dir = m.dir.join("../encoders");
     std::fs::create_dir_all(&dir).map_err(|e| cf::Error(e.to_string()))?;
     let encoders = vt::encoder_list()?;
@@ -803,7 +844,9 @@ pub fn run(gpu: &Gpu, m: &Material) -> Result<EncodersReport> {
     let main10 = || profile(unsafe { kVTProfileLevel_HEVC_Main10_AutoLevel });
     let main42210 = || profile(unsafe { kVTProfileLevel_HEVC_Main42210_AutoLevel });
     // No binding for the Main44410 constant in objc2-video-toolbox 0.3; the value is its name.
-    let main44410 = || (unsafe { kVTCompressionPropertyKey_ProfileLevel }, any_str(&CFString::from_str("HEVC_Main44410_AutoLevel")));
+    let main44410 = || {
+        (unsafe { kVTCompressionPropertyKey_ProfileLevel }, any_str(&CFString::from_str("HEVC_Main44410_AutoLevel")))
+    };
     let configs: Vec<(u32, &str, Props)> = vec![
         (kCMVideoCodecType_HEVCWithAlpha, "default", vec![]),
         (kCMVideoCodecType_HEVCWithAlpha, "Main10", vec![main10()]),
@@ -835,11 +878,24 @@ pub fn run(gpu: &Gpu, m: &Material) -> Result<EncodersReport> {
             Ok(a) => (a, None),
             Err(e) => (vec![], Some(e.0)),
         };
-        native_input.push(NativeInput { codec: cf::fourcc_str(codec), settings: settings.into(), error, pixel_formats: pool_formats(&pool_attributes), pool_attributes });
+        native_input.push(NativeInput {
+            codec: cf::fourcc_str(codec),
+            settings: settings.into(),
+            error,
+            pixel_formats: pool_formats(&pool_attributes),
+            pool_attributes,
+        });
         if codec == kCMVideoCodecType_HEVCWithAlpha || codec == kCMVideoCodecType_HEVC {
             session_properties.push(match vt::session_properties(&spec(codec, props), SESSION_KEYS) {
-                Ok(p) => SessionProps { codec: cf::fourcc_str(codec), settings: settings.into(), error: None, properties: p },
-                Err(e) => SessionProps { codec: cf::fourcc_str(codec), settings: settings.into(), error: Some(e.0), properties: vec![] },
+                Ok(p) => {
+                    SessionProps { codec: cf::fourcc_str(codec), settings: settings.into(), error: None, properties: p }
+                }
+                Err(e) => SessionProps {
+                    codec: cf::fourcc_str(codec),
+                    settings: settings.into(),
+                    error: Some(e.0),
+                    properties: vec![],
+                },
             });
         }
     }
@@ -852,7 +908,10 @@ pub fn run(gpu: &Gpu, m: &Material) -> Result<EncodersReport> {
         ("default", vec![straight()]),
         ("Main10 profile", vec![straight(), main10()]),
         ("OutputBitDepth 10", vec![straight(), (unsafe { kVTCompressionPropertyKey_OutputBitDepth }, any_num(10.0))]),
-        ("Main10 profile, OutputBitDepth 10", vec![straight(), main10(), (unsafe { kVTCompressionPropertyKey_OutputBitDepth }, any_num(10.0))]),
+        (
+            "Main10 profile, OutputBitDepth 10",
+            vec![straight(), main10(), (unsafe { kVTCompressionPropertyKey_OutputBitDepth }, any_num(10.0))],
+        ),
         (
             "Main10 profile, Quality 1.0, TargetQualityForAlpha 1.0",
             vec![
@@ -873,10 +932,16 @@ pub fn run(gpu: &Gpu, m: &Material) -> Result<EncodersReport> {
     let reference = vt::decode_file(&m.natural_4444xq_alpha, pixbuf::Y416)?.frames;
     let mut hevc_alpha_quality = vec![];
     let apple = dir.join("alpha_apple_preset.mov");
-    avio::export_session(&m.natural_4444xq_alpha, &apple, unsafe { objc2_av_foundation::AVAssetExportPresetHEVCHighestQualityWithAlpha }, avio::mov())?;
+    avio::export_session(
+        &m.natural_4444xq_alpha,
+        &apple,
+        unsafe { objc2_av_foundation::AVAssetExportPresetHEVCHighestQualityWithAlpha },
+        avio::mov(),
+    )?;
     hevc_alpha_quality.push(alpha_quality(&apple, "AVAssetExportPresetHEVCHighestQualityWithAlpha", &reference)?);
     let p = PipeParams::standard(Precision::F32);
-    let inputs: Vec<PixelBuffer> = reference.iter().map(|f| gpu.engine_convert(&f.buffer, pixbuf::Y416, &p)).collect::<Result<_>>()?;
+    let inputs: Vec<PixelBuffer> =
+        reference.iter().map(|f| gpu.engine_convert(&f.buffer, pixbuf::Y416, &p)).collect::<Result<_>>()?;
     let refs: Vec<&PixelBuffer> = inputs.iter().collect();
     let mut playback_files = vec![("AVAssetExportPresetHEVCHighestQualityWithAlpha".to_string(), apple.clone())];
     let quality_configs: Vec<(&str, Props)> = vec![
@@ -933,12 +998,15 @@ mod tests {
             assert_eq!(distinct.len(), (hi - lo + 1) as usize);
             assert!(t.cb.iter().chain(&t.cr).all(|&v| v >= lo && v <= if bits == 10 { 960 } else { 240 }));
             assert_eq!(t.cb.len(), t.w * t.h / (sx * sy));
-            assert_eq!(tri_format(bits, sx, sy), match (bits, sx, sy) {
-                (8, _, _) => pixbuf::V0A8,
-                (_, 2, 2) => pixbuf::X0A8,
-                (_, 2, 1) => pixbuf::X2A8,
-                _ => pixbuf::X4A8,
-            });
+            assert_eq!(
+                tri_format(bits, sx, sy),
+                match (bits, sx, sy) {
+                    (8, _, _) => pixbuf::V0A8,
+                    (_, 2, 2) => pixbuf::X0A8,
+                    (_, 2, 1) => pixbuf::X2A8,
+                    _ => pixbuf::X4A8,
+                }
+            );
             // Chroma is constant over 8×8 pixel blocks at every subsampling.
             assert_eq!(t.cb[t.site(0, 0)], t.cb[t.site(7, 7)]);
             assert_ne!(t.cb[t.site(0, 0)], t.cb[t.site(8, 0)]);
@@ -953,7 +1021,16 @@ mod tests {
             0xfa, 0x00, 0x00, 0x0f, 0x04,
         ];
         let h = exp_tags::parse_hvcc(&p).unwrap();
-        assert_eq!(h, exp_tags::Hvcc { profile_idc: 2, level_idc: 120, chroma_format_idc: 1, bit_depth_luma: 10, bit_depth_chroma: 10 });
+        assert_eq!(
+            h,
+            exp_tags::Hvcc {
+                profile_idc: 2,
+                level_idc: 120,
+                chroma_format_idc: 1,
+                bit_depth_luma: 10,
+                bit_depth_chroma: 10
+            }
+        );
         assert!(exp_tags::parse_hvcc(&p[..10]).is_none());
     }
 

@@ -40,7 +40,14 @@ fn main() {
         for (px, py) in [(100usize, 100usize), (960, 540), (1800, 1000)] {
             let o = py * bpr + px * 2;
             let v = u16::from_le_bytes([ya[o], ya[o + 1]]);
-            println!("  ({px},{py}) x0a8 Y raw {v} (>>6 {}), x420 Y {} (>>6 {}), y416 Y {} A {}", v >> 6, yb[py * w + px], yb[py * w + px] >> 6, yd[(py * w + px) * 4 + 1], yd[(py * w + px) * 4]);
+            println!(
+                "  ({px},{py}) x0a8 Y raw {v} (>>6 {}), x420 Y {} (>>6 {}), y416 Y {} A {}",
+                v >> 6,
+                yb[py * w + px],
+                yb[py * w + px] >> 6,
+                yd[(py * w + px) * 4 + 1],
+                yd[(py * w + px) * 4]
+            );
         }
         if fa.plane_count() > 2 {
             let (al, abpr, aw, _) = fa.read_plane_raw(Some(2)).unwrap();

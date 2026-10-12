@@ -217,7 +217,9 @@ pub fn player_frame_timed(path: &Path, format: u32, t_value: i64, mtm: MainThrea
         .cfkey(unsafe { kCVPixelBufferPixelFormatTypeKey }, &NSNumber::new_u32(format))
         .cfkey(unsafe { kCVPixelBufferIOSurfacePropertiesKey }, &Dict::new().build())
         .build();
-    let output = unsafe { AVPlayerItemVideoOutput::initWithPixelBufferAttributes(AVPlayerItemVideoOutput::alloc(), Some(&attrs)) };
+    let output = unsafe {
+        AVPlayerItemVideoOutput::initWithPixelBufferAttributes(AVPlayerItemVideoOutput::alloc(), Some(&attrs))
+    };
     unsafe { item.addOutput(&output) };
     let player = unsafe { AVPlayer::playerWithPlayerItem(Some(&item), mtm) };
     let t0 = Instant::now();
@@ -311,23 +313,28 @@ fn frame_color_space(pb: &PixelBuffer) -> Option<CFRetained<CGColorSpace>> {
 }
 
 pub fn run(gpu: &Gpu, dir: &Path) -> Result<QtReport> {
-    let mtm = MainThreadMarker::new().ok_or_else(|| cf::Error("quicktime experiment must run on the main thread".into()))?;
+    let mtm =
+        MainThreadMarker::new().ok_or_else(|| cf::Error("quicktime experiment must run on the main thread".into()))?;
     std::fs::create_dir_all(dir).map_err(|e| cf::Error(e.to_string()))?;
     let srgb = named(unsafe { kCGColorSpaceSRGB })?;
     let lin = named(unsafe { kCGColorSpaceExtendedLinearSRGB })?;
     let main_display = CGDisplayCopyColorSpace(CGMainDisplayID());
-    let mut displays: Vec<(String, CFRetained<CGColorSpace>)> = vec![("Display P3".into(), named(unsafe { kCGColorSpaceDisplayP3 })?)];
+    let mut displays: Vec<(String, CFRetained<CGColorSpace>)> =
+        vec![("Display P3".into(), named(unsafe { kCGColorSpaceDisplayP3 })?)];
     displays.insert(0, ("main display profile".into(), main_display));
     let chart = chart_buffer()?;
-    let codes: Vec<[f32; 3]> = CHART.iter().map(|(_, c)| [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0]).collect();
+    let codes: Vec<[f32; 3]> =
+        CHART.iter().map(|(_, c)| [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0]).collect();
     let p = PipeParams::standard(Precision::F32);
     let mut cases = vec![];
     let mut errors = vec![];
     for (codec, mp4) in [(Codec::ProRes422HQ, false), (Codec::H264, true), (Codec::Hevc10, true)] {
-        let frames: Vec<PixelBuffer> = (0..6).map(|_| gpu.engine_convert(&chart, codec.input_format(), &p)).collect::<Result<_>>()?;
+        let frames: Vec<PixelBuffer> =
+            (0..6).map(|_| gpu.engine_convert(&chart, codec.input_format(), &p)).collect::<Result<_>>()?;
         for tags in exp_tags::candidates() {
             let ext = if mp4 { "mp4" } else { "mov" };
-            let path = dir.join(format!("qt_{codec:?}_{}.{ext}", tags.name.split(' ').next().unwrap().replace('?', "x")));
+            let path =
+                dir.join(format!("qt_{codec:?}_{}.{ext}", tags.name.split(' ').next().unwrap().replace('?', "x")));
             if let Err(e) = exp_tags::encode_tagged(&path, mp4, codec, &frames, &tags) {
                 errors.push(format!("{} {codec:?}: {e}", tags.name));
                 continue;

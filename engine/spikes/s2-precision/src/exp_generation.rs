@@ -36,8 +36,7 @@ impl Channels {
     }
 }
 
-#[derive(Serialize)]
-#[derive(Clone, Copy)]
+#[derive(Serialize, Clone, Copy)]
 pub struct Psnr {
     pub y: f64,
     pub cb: f64,
@@ -198,7 +197,13 @@ fn planes(pb: &PixelBuffer) -> Result<Planes> {
         pixbuf::X422 => {
             let (y, _, _) = pb.read_u16(Some(0))?;
             let (c, _, _) = pb.read_u16(Some(1))?;
-            Planes { y, cb: c.iter().step_by(2).copied().collect(), cr: c.iter().skip(1).step_by(2).copied().collect(), a: None, chroma_px: 2 }
+            Planes {
+                y,
+                cb: c.iter().step_by(2).copied().collect(),
+                cr: c.iter().skip(1).step_by(2).copied().collect(),
+                a: None,
+                chroma_px: 2,
+            }
         }
         pixbuf::V216 => {
             let (d, _, _) = pb.read_u16(None)?;
@@ -306,7 +311,8 @@ fn run_case(gpu: &Gpu, out_dir: &Path, s: &Spec) -> Result<GenCase> {
     let mut input_mismatch = 0u64;
     if s.encoder_input == s.decode {
         for (f, e) in src.frames.iter().zip(&inputs) {
-            let planes: Vec<Option<usize>> = if e.plane_count() == 0 { vec![None] } else { (0..e.plane_count()).map(Some).collect() };
+            let planes: Vec<Option<usize>> =
+                if e.plane_count() == 0 { vec![None] } else { (0..e.plane_count()).map(Some).collect() };
             for p in planes {
                 let (a, _, _) = f.buffer.read_u16(p)?;
                 let (b, _, _) = e.read_u16(p)?;
@@ -318,16 +324,28 @@ fn run_case(gpu: &Gpu, out_dir: &Path, s: &Spec) -> Result<GenCase> {
     let rate_cell = std::cell::Cell::new(apple.estimated_data_rate_bps.round() as i64);
     let props = || {
         let mut properties = vec![
-            (unsafe { objc2_video_toolbox::kVTCompressionPropertyKey_ColorPrimaries }, vt::cf_str(unsafe { objc2_core_video::kCVImageBufferColorPrimaries_ITU_R_709_2 })),
-            (unsafe { objc2_video_toolbox::kVTCompressionPropertyKey_TransferFunction }, vt::cf_str(unsafe { objc2_core_video::kCVImageBufferTransferFunction_ITU_R_709_2 })),
-            (unsafe { objc2_video_toolbox::kVTCompressionPropertyKey_YCbCrMatrix }, vt::cf_str(unsafe { objc2_core_video::kCVImageBufferYCbCrMatrix_ITU_R_709_2 })),
+            (
+                unsafe { objc2_video_toolbox::kVTCompressionPropertyKey_ColorPrimaries },
+                vt::cf_str(unsafe { objc2_core_video::kCVImageBufferColorPrimaries_ITU_R_709_2 }),
+            ),
+            (
+                unsafe { objc2_video_toolbox::kVTCompressionPropertyKey_TransferFunction },
+                vt::cf_str(unsafe { objc2_core_video::kCVImageBufferTransferFunction_ITU_R_709_2 }),
+            ),
+            (
+                unsafe { objc2_video_toolbox::kVTCompressionPropertyKey_YCbCrMatrix },
+                vt::cf_str(unsafe { objc2_core_video::kCVImageBufferYCbCrMatrix_ITU_R_709_2 }),
+            ),
         ];
         if s.h264 {
             // Match Apple's measured average bitrate and the High profile.
             let rate = rate_cell.get();
             properties.push((
                 unsafe { objc2_video_toolbox::kVTCompressionPropertyKey_AverageBitRate },
-                objc2::rc::Retained::into_super(objc2::rc::Retained::into_super(objc2_foundation::NSNumber::new_i64(rate))).into(),
+                objc2::rc::Retained::into_super(objc2::rc::Retained::into_super(objc2_foundation::NSNumber::new_i64(
+                    rate,
+                )))
+                .into(),
             ));
             properties.push((
                 unsafe { objc2_video_toolbox::kVTCompressionPropertyKey_ProfileLevel },
@@ -376,7 +394,9 @@ fn run_case(gpu: &Gpu, out_dir: &Path, s: &Spec) -> Result<GenCase> {
     if s.encoder_input == s.decode {
         vt::encode_to_file(&direct_path, s.file_type, &props(), &direct_refs)?;
     } else {
-        notes.push("direct control encodes the decoded 4:2:2 buffers; VideoToolbox converts them to 4:2:0 itself".into());
+        notes.push(
+            "direct control encodes the decoded 4:2:2 buffers; VideoToolbox converts them to 4:2:0 itself".into(),
+        );
         vt::encode_to_file(&direct_path, s.file_type, &props(), &direct_refs)?;
     }
 
@@ -398,7 +418,10 @@ fn run_case(gpu: &Gpu, out_dir: &Path, s: &Spec) -> Result<GenCase> {
     let pe = psnr(&er, peak);
     let pa = psnr(&ar, peak);
     let originals: Vec<vt::Frame> = (0..reference.len())
-        .map(|f| material::natural_frame(f, s.original.0, s.original.1).map(|b| vt::Frame { pts: reference[f].pts, buffer: b }))
+        .map(|f| {
+            material::natural_frame(f, s.original.0, s.original.1)
+                .map(|b| vt::Frame { pts: reference[f].pts, buffer: b })
+        })
         .collect::<Result<_>>()?;
     let peo = psnr(&compare_all(&de, &originals, s.depth)?, peak);
     let pao = psnr(&compare_all(&da, &originals, s.depth)?, peak);

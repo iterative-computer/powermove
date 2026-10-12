@@ -101,7 +101,14 @@ pub fn run(gpu: &Gpu) -> Result<Vec<Row>> {
     // 12-bit random triplets over the full 12-bit range.
     let mut rng = Rng::new(7);
     let rand12: Vec<[u16; 4]> = (0..1 << 20)
-        .map(|_| [65535, (rng.range(0, 4095) << 4) as u16, (rng.range(0, 4095) << 4) as u16, (rng.range(0, 4095) << 4) as u16])
+        .map(|_| {
+            [
+                65535,
+                (rng.range(0, 4095) << 4) as u16,
+                (rng.range(0, 4095) << 4) as u16,
+                (rng.range(0, 4095) << 4) as u16,
+            ]
+        })
         .collect();
     // 16-bit luma ramp: every 16-bit value.
     let ramp16: Vec<[u16; 4]> = (0..65536u32).map(|c| [65535, c as u16, 32768, 32768]).collect();
@@ -130,9 +137,42 @@ pub fn run(gpu: &Gpu) -> Result<Vec<Row>> {
     for (p, linear) in MODES {
         let out = gpu.engine_copy(&pb, &params(p, linear))?;
         let (od, _, _) = out.read_u16(None)?;
-        rows.push(measure("RGBA16 grey ramp (65536 values), at 16-bit", p, linear, &d, &od, 65536, 4, &[0], 0, Some(0)));
-        rows.push(measure("RGBA16 grey ramp (65536 values), at 12-bit", p, linear, &d, &od, 65536, 4, &[0], 4, Some(0)));
-        rows.push(measure("RGBA16 grey ramp (65536 values), at 10-bit", p, linear, &d, &od, 65536, 4, &[0], 6, Some(0)));
+        rows.push(measure(
+            "RGBA16 grey ramp (65536 values), at 16-bit",
+            p,
+            linear,
+            &d,
+            &od,
+            65536,
+            4,
+            &[0],
+            0,
+            Some(0),
+        ));
+        rows.push(measure(
+            "RGBA16 grey ramp (65536 values), at 12-bit",
+            p,
+            linear,
+            &d,
+            &od,
+            65536,
+            4,
+            &[0],
+            4,
+            Some(0),
+        ));
+        rows.push(measure(
+            "RGBA16 grey ramp (65536 values), at 10-bit",
+            p,
+            linear,
+            &d,
+            &od,
+            65536,
+            4,
+            &[0],
+            6,
+            Some(0),
+        ));
         rows.push(measure("RGBA16 grey ramp (65536 values), at 8-bit", p, linear, &d, &od, 65536, 4, &[0], 8, Some(0)));
     }
     // 16-bit straight RGBA with an alpha ramp and a fixed color: premultiply round trip.

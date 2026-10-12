@@ -11,7 +11,12 @@ fn main() {
     let (xc, _, _) = x.frames[0].buffer.read_u16(Some(1)).unwrap();
     println!("v216 comps/row {comps} rows {h}; x422 width {w}");
     for i in 0..4 {
-        println!("v216 texel {i}: {:?}  x422 Y {:?} C {:?}", &vd[i * 4..i * 4 + 4], &xy[i * 2..i * 2 + 2], &xc[i * 2..i * 2 + 2]);
+        println!(
+            "v216 texel {i}: {:?}  x422 Y {:?} C {:?}",
+            &vd[i * 4..i * 4 + 4],
+            &xy[i * 2..i * 2 + 2],
+            &xc[i * 2..i * 2 + 2]
+        );
     }
     let low6 = vd.iter().filter(|s| *s & 63 != 0).count() as f64 / vd.len() as f64;
     // Does x422 equal round(v216 / 64) * 64?
@@ -20,7 +25,12 @@ fn main() {
     for y in 0..h {
         for t in 0..w / 2 {
             let b = (y * w / 2 + t) * 4;
-            let pairs = [(vd[b + 1], xy[y * w + 2 * t]), (vd[b + 3], xy[y * w + 2 * t + 1]), (vd[b], xc[y * w + 2 * t]), (vd[b + 2], xc[y * w + 2 * t + 1])];
+            let pairs = [
+                (vd[b + 1], xy[y * w + 2 * t]),
+                (vd[b + 3], xy[y * w + 2 * t + 1]),
+                (vd[b], xc[y * w + 2 * t]),
+                (vd[b + 2], xc[y * w + 2 * t + 1]),
+            ];
             for (a, c) in pairs {
                 n += 1;
                 if ((a as u32 + 32) >> 6).min(1023) == (c as u32 >> 6) {

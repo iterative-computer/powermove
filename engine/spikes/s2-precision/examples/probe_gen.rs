@@ -20,7 +20,12 @@ fn main() {
                     n += 1.0;
                 }
             }
-            println!("frame {i} pts {} band {band}: mean diff {:.3} rms {:.3}", { ft.pts.value }, sd / n, (sa / n).sqrt());
+            println!(
+                "frame {i} pts {} band {band}: mean diff {:.3} rms {:.3}",
+                { ft.pts.value },
+                sd / n,
+                (sa / n).sqrt()
+            );
         }
     }
 }

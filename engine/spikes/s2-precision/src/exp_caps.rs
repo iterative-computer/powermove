@@ -87,7 +87,11 @@ fn fs_const(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 
 fn fmt_flags(gpu: &Gpu, f: wgpu::TextureFormat) -> FormatCaps {
     let ff = gpu.adapter.get_texture_format_features(f);
-    FormatCaps { format: format!("{f:?}"), allowed_usages: format!("{:?}", ff.allowed_usages), flags: format!("{:?}", ff.flags) }
+    FormatCaps {
+        format: format!("{f:?}"),
+        allowed_usages: format!("{:?}", ff.allowed_usages),
+        flags: format!("{:?}", ff.flags),
+    }
 }
 
 pub fn run(gpu: &Gpu) -> Result<CapsReport> {
@@ -129,7 +133,10 @@ struct Rig {
 
 fn rig(gpu: &Gpu, filterable: bool) -> Rig {
     let dev = &gpu.device;
-    let module = dev.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("caps"), source: wgpu::ShaderSource::Wgsl(TEST_WGSL.into()) });
+    let module = dev.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("caps"),
+        source: wgpu::ShaderSource::Wgsl(TEST_WGSL.into()),
+    });
     let bgl = dev.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
         entries: &[
@@ -146,18 +153,30 @@ fn rig(gpu: &Gpu, filterable: bool) -> Rig {
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
                 visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(if filterable { wgpu::SamplerBindingType::Filtering } else { wgpu::SamplerBindingType::NonFiltering }),
+                ty: wgpu::BindingType::Sampler(if filterable {
+                    wgpu::SamplerBindingType::Filtering
+                } else {
+                    wgpu::SamplerBindingType::NonFiltering
+                }),
                 count: None,
             },
             wgpu::BindGroupLayoutEntry {
                 binding: 2,
                 visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
                 count: None,
             },
         ],
     });
-    let layout = dev.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
+    let layout = dev.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &[Some(&bgl)],
+        immediate_size: 0,
+    });
     Rig { module, bgl, layout }
 }
 
@@ -169,7 +188,10 @@ fn tex32(gpu: &Gpu, w: u32, h: u32, data: Option<&[f32]>) -> wgpu::Texture {
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba32Float,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
     if let Some(d) = data {
@@ -186,11 +208,19 @@ fn tex32(gpu: &Gpu, w: u32, h: u32, data: Option<&[f32]>) -> wgpu::Texture {
 fn read_tex32(gpu: &Gpu, t: &wgpu::Texture) -> Vec<f32> {
     let (w, h) = (t.width(), t.height());
     let bpr = (w * 16).div_ceil(256) * 256;
-    let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (bpr * h) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: (bpr * h) as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let mut enc = gpu.device.create_command_encoder(&Default::default());
     enc.copy_texture_to_buffer(
         t.as_image_copy(),
-        wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bpr), rows_per_image: None } },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buf,
+            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bpr), rows_per_image: None },
+        },
         wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
     );
     gpu.queue.submit([enc.finish()]);
@@ -206,17 +236,36 @@ fn read_tex32(gpu: &Gpu, t: &wgpu::Texture) -> Vec<f32> {
 }
 
 fn uniform(gpu: &Gpu, v: [f32; 8]) -> wgpu::Buffer {
-    let b = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 32, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let b = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 32,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     gpu.queue.write_buffer(&b, 0, &v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>());
     b
 }
 
-fn draw(gpu: &Gpu, r: &Rig, entry: &str, src: &wgpu::Texture, u: &wgpu::Buffer, target: &wgpu::Texture, blend: Option<wgpu::BlendState>, load: wgpu::LoadOp<wgpu::Color>) {
+fn draw(
+    gpu: &Gpu,
+    r: &Rig,
+    entry: &str,
+    src: &wgpu::Texture,
+    u: &wgpu::Buffer,
+    target: &wgpu::Texture,
+    blend: Option<wgpu::BlendState>,
+    load: wgpu::LoadOp<wgpu::Color>,
+) {
     let dev = &gpu.device;
     let pipeline = dev.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(entry),
         layout: Some(&r.layout),
-        vertex: wgpu::VertexState { module: &r.module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+        vertex: wgpu::VertexState {
+            module: &r.module,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
         primitive: Default::default(),
         depth_stencil: None,
         multisample: Default::default(),
@@ -224,7 +273,11 @@ fn draw(gpu: &Gpu, r: &Rig, entry: &str, src: &wgpu::Texture, u: &wgpu::Buffer, 
             module: &r.module,
             entry_point: Some(entry),
             compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState { format: target.format(), blend, write_mask: wgpu::ColorWrites::ALL })],
+            targets: &[Some(wgpu::ColorTargetState {
+                format: target.format(),
+                blend,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
         }),
         multiview_mask: None,
         cache: None,
@@ -251,7 +304,12 @@ fn draw(gpu: &Gpu, r: &Rig, entry: &str, src: &wgpu::Texture, u: &wgpu::Buffer, 
     {
         let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: None,
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &tv, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load, store: wgpu::StoreOp::Store } })],
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &tv,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
+            })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
@@ -339,8 +397,16 @@ fn blend_test(gpu: &Gpu) -> BlendTest {
     let tiny = 2f32.powi(-22);
     let u = uniform(gpu, [0.0, 0.0, 0.0, 0.0, tiny, tiny, tiny, 0.0]);
     let add = wgpu::BlendState {
-        color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
-        alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
     };
     draw(gpu, &r, "fs_const", &dummy, &u, &target, Some(add), wgpu::LoadOp::Load);
     let out = read_tex32(gpu, &target);
@@ -364,5 +430,10 @@ fn blend_test(gpu: &Gpu) -> BlendTest {
             max_ulp = max_ulp.max(((out[i * 4 + c] as f64) - want).abs() / ulp);
         }
     }
-    BlendTest { additive_expected: add_exp, additive_got: add_got, additive_exact: add_got == add_exp, over_max_ulp: max_ulp }
+    BlendTest {
+        additive_expected: add_exp,
+        additive_got: add_got,
+        additive_exact: add_got == add_exp,
+        over_max_ulp: max_ulp,
+    }
 }

@@ -139,8 +139,7 @@ pub fn delta_e2000(lab1: [f64; 3], lab2: [f64; 3]) -> f64 {
     let sc = 1.0 + 0.045 * cbarp;
     let sh = 1.0 + 0.015 * cbarp * t;
     let rt = -(2.0 * dtheta * PI / 180.0).sin() * rc;
-    ((dlp / sl).powi(2) + (dcp / sc).powi(2) + (dhp_big / sh).powi(2) + rt * (dcp / sc) * (dhp_big / sh))
-        .sqrt()
+    ((dlp / sl).powi(2) + (dcp / sc).powi(2) + (dhp_big / sh).powi(2) + rt * (dcp / sc) * (dhp_big / sh)).sqrt()
 }
 
 /// Statistics of per-sample differences between two integer planes.

@@ -179,8 +179,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 /// Translate WGSL to MSL with naga (the translator wgpu uses), optionally rewriting
 /// transcendental calls into `metal::precise::`. Returns the MSL and entry point name.
 pub fn naga_msl(wgsl: &str, precise: bool) -> std::result::Result<(String, String), String> {
-    use wgpu::naga;
     use naga::back::msl;
+    use wgpu::naga;
     let module = naga::front::wgsl::parse_str(wgsl).map_err(|e| e.emit_to_string(wgsl))?;
     let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
         .validate(&module)
@@ -193,9 +193,11 @@ pub fn naga_msl(wgsl: &str, precise: bool) -> std::result::Result<(String, Strin
         );
     }
     let mut per_entry_point_map = msl::EntryPointResourceMap::default();
-    per_entry_point_map.insert("main".into(), msl::EntryPointResources { resources, immediates_buffer: None, sizes_buffer: None });
+    per_entry_point_map
+        .insert("main".into(), msl::EntryPointResources { resources, immediates_buffer: None, sizes_buffer: None });
     let options = msl::Options { lang_version: (3, 0), per_entry_point_map, ..Default::default() };
-    let (mut src, tinfo) = msl::write_string(&module, &info, &options, &msl::PipelineOptions::default()).map_err(|e| format!("{e:?}"))?;
+    let (mut src, tinfo) =
+        msl::write_string(&module, &info, &options, &msl::PipelineOptions::default()).map_err(|e| format!("{e:?}"))?;
     let entry = tinfo.entry_point_names.first().cloned().ok_or("no entry point")?.map_err(|e| format!("{e:?}"))?;
     if precise {
         for f in ["pow", "exp2", "log2", "exp", "log", "sqrt", "sin", "cos", "tan", "powr"] {
@@ -219,8 +221,10 @@ fn run_variant(gpu: &Gpu, name: &str, src: Source, xs: &[f32]) -> Variant {
             };
         }
     };
-    let mut funcs: Vec<FuncError> =
-        FUNCS.iter().map(|f| FuncError { func: f.to_string(), max_ulp: 0.0, max_abs: 0.0, max_ulp_unit: 0.0, max_abs_unit: 0.0 }).collect();
+    let mut funcs: Vec<FuncError> = FUNCS
+        .iter()
+        .map(|f| FuncError { func: f.to_string(), max_ulp: 0.0, max_abs: 0.0, max_ulp_unit: 0.0, max_abs_unit: 0.0 })
+        .collect();
     for (i, &x) in xs.iter().enumerate() {
         for (k, fe) in funcs.iter_mut().enumerate() {
             let got = ys[i * 6 + k] as f64;
@@ -268,7 +272,9 @@ fn roundtrip(gpu: &Gpu, name: &str, make: &dyn Fn() -> Source, levels: u32) -> O
 fn dispatch(gpu: &Gpu, name: &str, src: Source, xs: &[f32]) -> std::result::Result<Vec<f32>, String> {
     let dev = &gpu.device;
     let n = xs.len();
-    let mk = |size: usize, usage| dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: size as u64, usage, mapped_at_creation: false });
+    let mk = |size: usize, usage| {
+        dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: size as u64, usage, mapped_at_creation: false })
+    };
     let xbuf = mk(n * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
     gpu.queue.write_buffer(&xbuf, 0, &xs.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>());
     let ybuf = mk(n * 24, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
@@ -282,11 +288,17 @@ fn dispatch(gpu: &Gpu, name: &str, src: Source, xs: &[f32]) -> std::result::Resu
     };
     let scope = dev.push_error_scope(wgpu::ErrorFilter::Validation);
     let module = match src {
-        Source::Wgsl => dev.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(name), source: wgpu::ShaderSource::Wgsl(WGSL.into()) }),
+        Source::Wgsl => dev.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(name),
+            source: wgpu::ShaderSource::Wgsl(WGSL.into()),
+        }),
         Source::Msl(code, entry) => unsafe {
             dev.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
                 label: Some(name),
-                entry_points: Cow::Owned(vec![wgpu::PassthroughShaderEntryPoint { name: entry.clone().into(), workgroup_size: (64, 1, 1) }]),
+                entry_points: Cow::Owned(vec![wgpu::PassthroughShaderEntryPoint {
+                    name: entry.clone().into(),
+                    workgroup_size: (64, 1, 1),
+                }]),
                 msl: Some(Cow::Owned(code)),
                 ..Default::default()
             })
@@ -294,7 +306,10 @@ fn dispatch(gpu: &Gpu, name: &str, src: Source, xs: &[f32]) -> std::result::Resu
         Source::Metallib(bytes) => unsafe {
             dev.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
                 label: Some(name),
-                entry_points: Cow::Owned(vec![wgpu::PassthroughShaderEntryPoint { name: "main0".into(), workgroup_size: (64, 1, 1) }]),
+                entry_points: Cow::Owned(vec![wgpu::PassthroughShaderEntryPoint {
+                    name: "main0".into(),
+                    workgroup_size: (64, 1, 1),
+                }]),
                 metallib: Some(Cow::Owned(bytes)),
                 ..Default::default()
             })
@@ -303,7 +318,11 @@ fn dispatch(gpu: &Gpu, name: &str, src: Source, xs: &[f32]) -> std::result::Resu
     let storage = |binding, ro| wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: ro }, has_dynamic_offset: false, min_binding_size: None },
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: ro },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
         count: None,
     };
     let mut entries = vec![storage(0, true), storage(1, false)];
@@ -311,12 +330,20 @@ fn dispatch(gpu: &Gpu, name: &str, src: Source, xs: &[f32]) -> std::result::Resu
         entries.push(wgpu::BindGroupLayoutEntry {
             binding: 2,
             visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
             count: None,
         });
     }
     let bgl = dev.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &entries });
-    let layout = dev.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
+    let layout = dev.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &[Some(&bgl)],
+        immediate_size: 0,
+    });
     let pipeline = dev.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some(name),
         layout: Some(&layout),
@@ -373,7 +400,13 @@ fn offline_metallib(src: &str, flags: &[&str], tag: &str) -> std::result::Result
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).into_owned());
     }
-    let out = Command::new("xcrun").args(["-sdk", "macosx", "metallib"]).arg(&air).arg("-o").arg(&lib).output().map_err(|e| e.to_string())?;
+    let out = Command::new("xcrun")
+        .args(["-sdk", "macosx", "metallib"])
+        .arg(&air)
+        .arg("-o")
+        .arg(&lib)
+        .output()
+        .map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).into_owned());
     }
@@ -401,10 +434,7 @@ pub fn run(gpu: &Gpu) -> Result<MathReport> {
             "MSL passthrough, #pragma METAL fp math_mode(safe)",
             Box::new(|| Ok(Source::Msl(msl("#pragma METAL fp math_mode(safe)", ""), "main0".into()))),
         ),
-        (
-            "naga MSL, unmodified, via passthrough",
-            Box::new(|| naga_msl(WGSL_N, false).map(|(s, e)| Source::Msl(s, e))),
-        ),
+        ("naga MSL, unmodified, via passthrough", Box::new(|| naga_msl(WGSL_N, false).map(|(s, e)| Source::Msl(s, e)))),
         (
             "naga MSL rewritten to metal::precise::, via passthrough",
             Box::new(|| naga_msl(WGSL_N, true).map(|(s, e)| Source::Msl(s, e))),
@@ -444,10 +474,11 @@ pub fn run(gpu: &Gpu) -> Result<MathReport> {
         }
     }
     Ok(MathReport {
-        wgpu_compile_options_note: "wgpu-hal 30.0.1 metal/device.rs compiles naga output with MTLCompileOptions::new() \
+        wgpu_compile_options_note:
+            "wgpu-hal 30.0.1 metal/device.rs compiles naga output with MTLCompileOptions::new() \
             plus languageVersion and preserveInvariance; MSL passthrough uses MTLCompileOptions::new() unchanged. \
             Neither sets fastMathEnabled or mathMode, so both use Metal's default (fast math)."
-            .into(),
+                .into(),
         variants,
     })
 }

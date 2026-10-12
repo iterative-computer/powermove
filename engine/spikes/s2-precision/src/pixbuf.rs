@@ -141,7 +141,10 @@ impl PixelBuffer {
         self.with_lock(false, |pb| {
             let (base, bpr, _, h) = plane_geom(pb, plane);
             if base.is_null() || row_bytes > bpr || data.len() != row_bytes * h {
-                return err(format!("write_plane_raw: bad geometry (bpr {bpr}, row {row_bytes}, rows {h}, len {})", data.len()));
+                return err(format!(
+                    "write_plane_raw: bad geometry (bpr {bpr}, row {row_bytes}, rows {h}, len {})",
+                    data.len()
+                ));
             }
             for y in 0..h {
                 let row = unsafe { std::slice::from_raw_parts_mut((base as *mut u8).add(y * bpr), row_bytes) };
@@ -274,7 +277,8 @@ pub fn key_name(k: &CFString) -> String {
 /// plane order (`y416`: AYCbCr u16; `x422`/`x420`: Y′ u16 then CbCr u16; `420v`: u8).
 pub fn write_raw_sink(pb: &PixelBuffer, path: &std::path::Path) -> Result<u64> {
     let mut bytes: Vec<u8> = vec![];
-    let planes: Vec<Option<usize>> = if pb.plane_count() == 0 { vec![None] } else { (0..pb.plane_count()).map(Some).collect() };
+    let planes: Vec<Option<usize>> =
+        if pb.plane_count() == 0 { vec![None] } else { (0..pb.plane_count()).map(Some).collect() };
     for plane in planes {
         if pb.format() == V420 || pb.format() == F420 {
             bytes.extend(pb.read_u8(plane)?.0);
@@ -290,7 +294,8 @@ pub fn write_raw_sink(pb: &PixelBuffer, path: &std::path::Path) -> Result<u64> {
 pub fn read_raw_sink(path: &std::path::Path, width: usize, height: usize, format: u32) -> Result<PixelBuffer> {
     let bytes = std::fs::read(path).map_err(|e| cf::Error(format!("{}: {e}", path.display())))?;
     let pb = PixelBuffer::new(width, height, format)?;
-    let planes: Vec<Option<usize>> = if pb.plane_count() == 0 { vec![None] } else { (0..pb.plane_count()).map(Some).collect() };
+    let planes: Vec<Option<usize>> =
+        if pb.plane_count() == 0 { vec![None] } else { (0..pb.plane_count()).map(Some).collect() };
     let mut off = 0usize;
     for plane in planes {
         if format == V420 || format == F420 {
@@ -299,7 +304,8 @@ pub fn read_raw_sink(path: &std::path::Path, width: usize, height: usize, format
             off += n;
         } else {
             let n = pb.read_u16(plane)?.0.len();
-            let v: Vec<u16> = bytes[off..off + 2 * n].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            let v: Vec<u16> =
+                bytes[off..off + 2 * n].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
             pb.write_u16(plane, &v)?;
             off += 2 * n;
         }

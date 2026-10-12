@@ -88,11 +88,7 @@ pub fn y416_frame(f: usize, alpha_ramp: bool) -> Result<PixelBuffer> {
         for x in 0..W {
             let [yv, cb, cr] = pattern(f, x, y, &mut rng, 4096.0);
             let i = (y * W + x) * 4;
-            let a = if alpha_ramp {
-                if y % 270 < 30 { 0.0 } else { x as f64 / (W - 1) as f64 }
-            } else {
-                1.0
-            };
+            let a = if alpha_ramp { if y % 270 < 30 { 0.0 } else { x as f64 / (W - 1) as f64 } } else { 1.0 };
             let q = |v: f64| v.round().clamp(256.0, 65264.0) as u16;
             d[i] = (a * 65535.0).round() as u16;
             d[i + 1] = q(yv * color::Y416_Y_SCALE + color::Y416_Y_OFF);
@@ -136,7 +132,8 @@ pub fn yuv420_frame(f: usize, ten_bit: bool) -> Result<PixelBuffer> {
     let mut rng = Rng::new(f as u64 + 201);
     let mut yp = vec![0u16; W * H];
     let mut cp = vec![0u16; W * H / 2];
-    let (yo, ys, co, cs, max) = if ten_bit { (64.0, 876.0, 512.0, 896.0, 1019.0) } else { (16.0, 219.0, 128.0, 224.0, 254.0) };
+    let (yo, ys, co, cs, max) =
+        if ten_bit { (64.0, 876.0, 512.0, 896.0, 1019.0) } else { (16.0, 219.0, 128.0, 224.0, 254.0) };
     for y in 0..H {
         for x in 0..W {
             let [yv, cb, cr] = pattern(f, x, y, &mut rng, 1024.0);
@@ -169,7 +166,10 @@ pub fn color_props_709() -> Retained<NSDictionary<NSString, AnyObject>> {
     }
 }
 
-pub fn writer_settings(codec: &NSString, extra: Option<Retained<NSDictionary<NSString, AnyObject>>>) -> Retained<NSDictionary<NSString, AnyObject>> {
+pub fn writer_settings(
+    codec: &NSString,
+    extra: Option<Retained<NSDictionary<NSString, AnyObject>>>,
+) -> Retained<NSDictionary<NSString, AnyObject>> {
     let mut d = unsafe {
         Dict::new()
             .str(AVVideoCodecKey.unwrap(), codec)
@@ -183,7 +183,12 @@ pub fn writer_settings(codec: &NSString, extra: Option<Retained<NSDictionary<NSS
     d.build()
 }
 
-pub fn write_frames(path: &Path, file_type: &AVFileType, settings: &NSDictionary<NSString, AnyObject>, frames: &[PixelBuffer]) -> Result<()> {
+pub fn write_frames(
+    path: &Path,
+    file_type: &AVFileType,
+    settings: &NSDictionary<NSString, AnyObject>,
+    frames: &[PixelBuffer],
+) -> Result<()> {
     let mut w = VideoWriter::encoding(path, file_type, settings, TIMESCALE)?;
     for (i, f) in frames.iter().enumerate() {
         w.append_pixel_buffer(f, avio::time(i as i64 * FRAME_DUR, TIMESCALE))?;
@@ -210,7 +215,12 @@ fn natural(f: usize, x: usize, y: usize) -> ([f64; 3], f64) {
     let t = f as f64 / NATURAL_FRAMES as f64;
     let (xf, yf) = (x as f64 / W as f64, y as f64 / H as f64);
     let mut rgb = if yf > 0.85 {
-        if xf < 0.5 { BARS[(xf * 16.0) as usize % 8] } else { let g = (xf - 0.5) * 2.0; [g, g, g] }
+        if xf < 0.5 {
+            BARS[(xf * 16.0) as usize % 8]
+        } else {
+            let g = (xf - 0.5) * 2.0;
+            [g, g, g]
+        }
     } else {
         let h = 2.0 * PI * (xf * 0.7 + yf * 0.3 + t);
         [0.5 + 0.3 * h.sin(), 0.5 + 0.3 * (h + 2.1).sin(), 0.5 + 0.3 * (h + 4.2).sin()]
@@ -322,20 +332,38 @@ pub fn ensure(dir: &Path) -> Result<Material> {
     unsafe {
         if !m.prores4444xq.exists() {
             let frames: Vec<_> = (0..FRAMES).map(|f| y416_frame(f, false)).collect::<Result<_>>()?;
-            write_frames(&m.prores4444xq, avio::mov(), &writer_settings(AVVideoCodecTypeAppleProRes4444XQ.unwrap(), None), &frames)?;
+            write_frames(
+                &m.prores4444xq,
+                avio::mov(),
+                &writer_settings(AVVideoCodecTypeAppleProRes4444XQ.unwrap(), None),
+                &frames,
+            )?;
         }
         if !m.prores4444xq_alpha.exists() {
             let frames: Vec<_> = (0..FRAMES).map(|f| y416_frame(f, true)).collect::<Result<_>>()?;
-            write_frames(&m.prores4444xq_alpha, avio::mov(), &writer_settings(AVVideoCodecTypeAppleProRes4444XQ.unwrap(), None), &frames)?;
+            write_frames(
+                &m.prores4444xq_alpha,
+                avio::mov(),
+                &writer_settings(AVVideoCodecTypeAppleProRes4444XQ.unwrap(), None),
+                &frames,
+            )?;
         }
         if !m.prores422hq.exists() {
             let frames: Vec<_> = (0..FRAMES).map(x422_frame).collect::<Result<_>>()?;
-            write_frames(&m.prores422hq, avio::mov(), &writer_settings(AVVideoCodecTypeAppleProRes422HQ.unwrap(), None), &frames)?;
+            write_frames(
+                &m.prores422hq,
+                avio::mov(),
+                &writer_settings(AVVideoCodecTypeAppleProRes422HQ.unwrap(), None),
+                &frames,
+            )?;
         }
         if !m.hevc10.exists() {
             let frames: Vec<_> = (0..FRAMES).map(|f| yuv420_frame(f, true)).collect::<Result<_>>()?;
             let comp = Dict::new()
-                .cfkey(objc2_video_toolbox::kVTCompressionPropertyKey_ProfileLevel, &*crate::vt::cf_str(objc2_video_toolbox::kVTProfileLevel_HEVC_Main10_AutoLevel))
+                .cfkey(
+                    objc2_video_toolbox::kVTCompressionPropertyKey_ProfileLevel,
+                    &*crate::vt::cf_str(objc2_video_toolbox::kVTProfileLevel_HEVC_Main10_AutoLevel),
+                )
                 .i64(AVVideoAverageBitRateKey.unwrap(), 40_000_000)
                 .build();
             write_frames(&m.hevc10, avio::mov(), &writer_settings(AVVideoCodecTypeHEVC.unwrap(), Some(comp)), &frames)?;
@@ -351,7 +379,8 @@ pub fn ensure(dir: &Path) -> Result<Material> {
             (&m.natural_4444xq_alpha, AVVideoCodecTypeAppleProRes4444XQ.unwrap(), pixbuf::Y416, true),
         ] {
             if !path.exists() {
-                let frames: Vec<_> = (0..NATURAL_FRAMES).map(|f| natural_frame(f, format, alpha)).collect::<Result<_>>()?;
+                let frames: Vec<_> =
+                    (0..NATURAL_FRAMES).map(|f| natural_frame(f, format, alpha)).collect::<Result<_>>()?;
                 write_frames(path, avio::mov(), &writer_settings(codec, None), &frames)?;
             }
         }

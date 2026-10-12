@@ -196,9 +196,7 @@ impl Gpu {
             (pb.width(), pb.height())
         };
         let usage = MTLTextureUsage::ShaderRead | MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderWrite;
-        let attrs = Dict::new()
-            .cfkey(unsafe { kCVMetalTextureUsage }, &NSNumber::new_usize(usage.0))
-            .build();
+        let attrs = Dict::new().cfkey(unsafe { kCVMetalTextureUsage }, &NSNumber::new_usize(usage.0)).build();
         let mut out: *mut CVMetalTexture = std::ptr::null_mut();
         let r = unsafe {
             CVMetalTextureCache::create_texture_from_image(
@@ -352,7 +350,10 @@ impl Gpu {
                     view: &view,
                     depth_slice: None,
                     resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,

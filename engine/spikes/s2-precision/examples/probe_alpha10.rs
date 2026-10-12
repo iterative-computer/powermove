@@ -33,8 +33,16 @@ fn main() {
                             }
                         }
                     }
-                    println!("  {} delivered '{}':{}  attachments {:?}", cf::fourcc_str(fmt), cf::fourcc_str(b.format()), s,
-                        b.attachments().iter().filter(|(k, _)| k.contains("Matrix") || k.contains("Transfer") || k.contains("Primaries")).collect::<Vec<_>>());
+                    println!(
+                        "  {} delivered '{}':{}  attachments {:?}",
+                        cf::fourcc_str(fmt),
+                        cf::fourcc_str(b.format()),
+                        s,
+                        b.attachments()
+                            .iter()
+                            .filter(|(k, _)| k.contains("Matrix") || k.contains("Transfer") || k.contains("Primaries"))
+                            .collect::<Vec<_>>()
+                    );
                 }
                 Err(e) => println!("  {}: error {e}", cf::fourcc_str(fmt)),
             }

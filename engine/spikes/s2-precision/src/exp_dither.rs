@@ -76,7 +76,8 @@ fn offsets() -> OffsetStats {
 /// rounded to 16 bits. Returns the buffer and the exact per-column E values.
 fn grey_ramp(w: usize, h: usize, lo: f64, hi: f64) -> Result<(PixelBuffer, Vec<f64>)> {
     let pb = PixelBuffer::new(w, h, pixbuf::RGBA64)?;
-    let vals: Vec<u16> = (0..w).map(|x| ((lo + (hi - lo) * x as f64 / (w - 1) as f64) * 65535.0).round() as u16).collect();
+    let vals: Vec<u16> =
+        (0..w).map(|x| ((lo + (hi - lo) * x as f64 / (w - 1) as f64) * 65535.0).round() as u16).collect();
     let mut d = vec![0u16; w * h * 4];
     for y in 0..h {
         for x in 0..w {
@@ -215,7 +216,11 @@ fn alpha_changed(gpu: &Gpu, format: u32) -> Result<usize> {
     src.write_u16(None, &d)?;
     src.tag_709();
     let off = gpu.engine_convert(&src, format, &PipeParams::standard(Precision::F32))?;
-    let on = gpu.engine_convert(&src, format, &PipeParams { dither: true, frame: 3, ..PipeParams::standard(Precision::F32) })?;
+    let on = gpu.engine_convert(
+        &src,
+        format,
+        &PipeParams { dither: true, frame: 3, ..PipeParams::standard(Precision::F32) },
+    )?;
     let (a, _, _) = off.read_u16(None)?;
     let (b, _, _) = on.read_u16(None)?;
     let ai = if format == pixbuf::Y416 { 0 } else { 3 };

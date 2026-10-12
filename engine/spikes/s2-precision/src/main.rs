@@ -39,7 +39,20 @@ fn run(exp: &str, work: &std::path::Path) -> cf::Result<()> {
     if all || exp == "formats" {
         emit(work, "formats", &exp_formats::run(&m)?)?;
     }
-    let needs_gpu = all || matches!(exp, "transparency" | "precision" | "generation" | "math" | "caps" | "tags" | "quicktime" | "hevc-alpha" | "encoders" | "dither");
+    let needs_gpu = all
+        || matches!(
+            exp,
+            "transparency"
+                | "precision"
+                | "generation"
+                | "math"
+                | "caps"
+                | "tags"
+                | "quicktime"
+                | "hevc-alpha"
+                | "encoders"
+                | "dither"
+        );
     let gpu = if needs_gpu { Some(gpu::Gpu::new()?) } else { None };
     if all || exp == "transparency" {
         emit(work, "transparency", &exp_transparency::run(gpu.as_ref().unwrap(), &m)?)?;

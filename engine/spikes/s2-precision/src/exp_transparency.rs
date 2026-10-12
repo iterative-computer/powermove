@@ -55,7 +55,14 @@ fn configs() -> Vec<(&'static str, PipeParams)> {
     ]
 }
 
-pub fn compare_y416(reference: &PixelBuffer, out: &PixelBuffer, acc: &mut [ChannelStats; 4], alpha_zero: &mut u64, outside: &mut u64, vs_clipped: &mut u64) -> Result<()> {
+pub fn compare_y416(
+    reference: &PixelBuffer,
+    out: &PixelBuffer,
+    acc: &mut [ChannelStats; 4],
+    alpha_zero: &mut u64,
+    outside: &mut u64,
+    vs_clipped: &mut u64,
+) -> Result<()> {
     let (a, _, _) = reference.read_u16(None)?;
     let (b, _, _) = out.read_u16(None)?;
     for (pa, pb) in a.chunks(4).zip(b.chunks(4)) {
@@ -81,7 +88,13 @@ pub fn compare_y416(reference: &PixelBuffer, out: &PixelBuffer, acc: &mut [Chann
     Ok(())
 }
 
-pub fn compare_x422(reference: &PixelBuffer, out: &PixelBuffer, acc: &mut [ChannelStats; 4], outside: &mut u64, vs_clipped: &mut u64) -> Result<()> {
+pub fn compare_x422(
+    reference: &PixelBuffer,
+    out: &PixelBuffer,
+    acc: &mut [ChannelStats; 4],
+    outside: &mut u64,
+    vs_clipped: &mut u64,
+) -> Result<()> {
     for plane in 0..2 {
         let (a, _, _) = reference.read_u16(Some(plane))?;
         let (b, _, _) = out.read_u16(Some(plane))?;
@@ -102,7 +115,13 @@ pub fn compare_x422(reference: &PixelBuffer, out: &PixelBuffer, acc: &mut [Chann
 }
 
 /// 'v216' (Cb, Y′0, Cr, Y′1): differences in 16-bit units and at 10-bit (codec depth).
-pub fn compare_v216(reference: &PixelBuffer, out: &PixelBuffer, acc: &mut [ChannelStats; 4], outside: &mut u64, vs_clipped: &mut u64) -> Result<()> {
+pub fn compare_v216(
+    reference: &PixelBuffer,
+    out: &PixelBuffer,
+    acc: &mut [ChannelStats; 4],
+    outside: &mut u64,
+    vs_clipped: &mut u64,
+) -> Result<()> {
     let (a, _, _) = reference.read_u16(None)?;
     let (b, _, _) = out.read_u16(None)?;
     for (i, (&x, &y)) in a.iter().zip(&b).enumerate() {
@@ -125,7 +144,11 @@ pub fn compare_v216(reference: &PixelBuffer, out: &PixelBuffer, acc: &mut [Chann
 }
 
 fn new_acc() -> [ChannelStats; 4] {
-    ["Y", "Cb", "Cr", "A"].map(|c| ChannelStats { channel: c.into(), at16: DiffStats::default(), at_codec_depth: DiffStats::default() })
+    ["Y", "Cb", "Cr", "A"].map(|c| ChannelStats {
+        channel: c.into(),
+        at16: DiffStats::default(),
+        at_codec_depth: DiffStats::default(),
+    })
 }
 
 fn raw_sink(sink: &PixelBuffer, dir: &std::path::Path, stem: &str) -> Result<RawSink> {
@@ -134,7 +157,8 @@ fn raw_sink(sink: &PixelBuffer, dir: &std::path::Path, stem: &str) -> Result<Raw
     let path = dir.join(format!("{stem}.{ext}"));
     let bytes = pixbuf::write_raw_sink(sink, &path)?;
     let back = pixbuf::read_raw_sink(&path, sink.width(), sink.height(), sink.format())?;
-    let planes: Vec<Option<usize>> = if sink.plane_count() == 0 { vec![None] } else { (0..sink.plane_count()).map(Some).collect() };
+    let planes: Vec<Option<usize>> =
+        if sink.plane_count() == 0 { vec![None] } else { (0..sink.plane_count()).map(Some).collect() };
     let mut same = true;
     for p in planes {
         same &= sink.read_u16(p)?.0 == back.read_u16(p)?.0;
