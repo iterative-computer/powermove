@@ -286,6 +286,9 @@ export function installCorpusPage(): void {
         // the corpus records the error and still captures what the compositor draws.
         try { await PM.prepareFrame(time); }
         catch (error: any) { out.prepareError = String(error?.message || error); }
+        // GL error flags are sticky: drain what earlier renders (the viewer, the previous
+        // project) left so the errors recorded below belong to this sample's renders.
+        for (let i = 0, error = gl.getError(); error !== gl.NO_ERROR && i < 32; i++, error = gl.getError()) out.warnings.push(`GL error ${error} pending before the sample's renders`);
         const opaqueOptions = { mblur: true, mbSamples: 16, shutter, opaque: true, topDownOpaque: true };
         const opaque = PM.GL.renderToPixels(time, width, height, opaqueOptions);
         if (!opaque || opaque.length !== width * height * 4) throw new Error('Opaque capture returned no pixels');
