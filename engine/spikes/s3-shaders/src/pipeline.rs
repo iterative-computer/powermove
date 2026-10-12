@@ -60,6 +60,8 @@ pub struct StageOutput {
     pub naga: Option<naga::Module>,
     pub msl: Option<String>,
     pub entry_point: String,
+    /// Non-finite constants rebuilt at run time for naga (see `rewrite`).
+    pub materialized: usize,
 }
 
 pub struct Translated {
@@ -133,6 +135,7 @@ fn stage_spirv(source: &str, stage: Stage, line_offset: u32, timings: &mut HashM
 
 fn naga_stage(mut module: rspirv::dr::Module, spv: &compile::Spirv, timings: &mut HashMap<String, f64>, prefix: &str) -> Result<StageOutput, Failure> {
     let reflection = reflect::reflect(&module, &reflect::bool_uniforms(&spv.preprocessed));
+    let materialized = rewrite::materialize_non_finite_constants(&mut module);
     let start = Instant::now();
     let splits = rewrite::split_combined_samplers(&mut module).map_err(|e| Failure::new("rewrite", e.0))?;
     timings.insert(format!("{prefix}split"), ms(start));
@@ -162,7 +165,7 @@ fn naga_stage(mut module: rspirv::dr::Module, spv: &compile::Spirv, timings: &mu
         entry_point = format!("main_{nonce}");
         naga_module.entry_points[0].name = entry_point.clone();
     }
-    Ok(StageOutput { reflection, splits, naga: Some(naga_module), msl: None, entry_point })
+    Ok(StageOutput { reflection, splits, naga: Some(naga_module), msl: None, entry_point, materialized })
 }
 
 /// Metal resource indices as wgpu-hal assigns them for our layouts (see
@@ -219,7 +222,7 @@ fn spvc_stage(module: rspirv::dr::Module, spv: &compile::Spirv, stage: Stage, ti
     if let Ok(nonce) = std::env::var("S3_NONCE") {
         msl = format!("// {nonce}\n{msl}");
     }
-    Ok(StageOutput { reflection, splits: Vec::new(), naga: None, msl: Some(msl), entry_point: entry })
+    Ok(StageOutput { reflection, splits: Vec::new(), naga: None, msl: Some(msl), entry_point: entry, materialized: 0 })
 }
 
 fn limit_failure(error: &limits::LimitError, line_offset: u32) -> Failure {
@@ -267,5 +270,9 @@ pub fn translate(gl_vertex: &str, fragment: &str, line_offset: u32, path: Path) 
             spvc_stage(fmod, &fspv, Stage::Fragment, &mut timings, "")?,
         ),
     };
-    Ok(Translated { vertex: vertex_out, fragment: fragment_out, renamed: normalized.renamed, polyfilled: normalized.polyfilled, warnings: fspv.warnings.trim().to_string(), timings_ms: timings })
+    let mut polyfilled = normalized.polyfilled;
+    if fragment_out.materialized > 0 {
+        polyfilled.push(format!("non-finite constants ({})", fragment_out.materialized));
+    }
+    Ok(Translated { vertex: vertex_out, fragment: fragment_out, renamed: normalized.renamed, polyfilled, warnings: fspv.warnings.trim().to_string(), timings_ms: timings })
 }

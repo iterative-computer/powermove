@@ -9,7 +9,7 @@
 //!   function parameters, and call sites. naga's SPIR-V front end maps a
 //!   combined type onto the bare image and loses the sampler.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rspirv::dr::{Instruction, Module, Operand};
 use rspirv::spirv::{Decoration, Op, StorageClass, Word};
@@ -398,6 +398,166 @@ pub fn split_combined_samplers(module: &mut Module) -> Result<Vec<SplitBinding>,
     Ok(bindings)
 }
 
+/// naga's validator rejects non-finite float literals in constant
+/// expressions (`ConstExpression { source: Literal(Infinity) }`), while WebGL
+/// accepts them: `1e39` and `1.0 / 0.0` fold to infinity in ANGLE and in
+/// glslang. Every non-finite `OpConstant` (and every constant composite built
+/// from one) is rebuilt at run time in the functions that use it, from the
+/// same bits through `OpBitcast` of a `uint` constant, which naga does not
+/// fold. Private variable initializers that use one become stores at the
+/// start of the entry point. Returns the number of constants rewritten.
+pub fn materialize_non_finite_constants(module: &mut Module) -> usize {
+    let float_types: HashSet<Word> = module
+        .types_global_values
+        .iter()
+        .filter(|i| i.class.opcode == Op::TypeFloat && matches!(i.operands.first(), Some(Operand::LiteralBit32(32))))
+        .filter_map(|i| i.result_id)
+        .collect();
+    let mut tainted: Vec<Word> = Vec::new();
+    let mut tainted_set: HashSet<Word> = HashSet::new();
+    let mut bits_of: HashMap<Word, u32> = HashMap::new();
+    for inst in &module.types_global_values {
+        let Some(id) = inst.result_id else { continue };
+        let hit = match inst.class.opcode {
+            Op::Constant if inst.result_type.is_some_and(|t| float_types.contains(&t)) => match inst.operands.first() {
+                Some(Operand::LiteralBit32(bits)) if !f32::from_bits(*bits).is_finite() => {
+                    bits_of.insert(id, *bits);
+                    true
+                }
+                _ => false,
+            },
+            Op::ConstantComposite => inst.operands.iter().any(|o| matches!(o, Operand::IdRef(r) if tainted_set.contains(r))),
+            _ => false,
+        };
+        if hit {
+            tainted.push(id);
+            tainted_set.insert(id);
+        }
+    }
+    if tainted.is_empty() {
+        return 0;
+    }
+    let uint = find_or_add_type(module, Op::TypeInt, vec![Operand::LiteralBit32(32), Operand::LiteralBit32(0)]);
+    let mut uint_constant: HashMap<u32, Word> = HashMap::new();
+    for bits in bits_of.values() {
+        if uint_constant.contains_key(bits) {
+            continue;
+        }
+        let existing = module
+            .types_global_values
+            .iter()
+            .find(|i| i.class.opcode == Op::Constant && i.result_type == Some(uint) && i.operands == [Operand::LiteralBit32(*bits)])
+            .and_then(|i| i.result_id);
+        let id = existing.unwrap_or_else(|| {
+            let id = fresh(module);
+            let position = after_dependencies(module, &[Operand::IdRef(uint)]);
+            module.types_global_values.insert(position, Instruction::new(Op::Constant, Some(uint), Some(id), vec![Operand::LiteralBit32(*bits)]));
+            id
+        });
+        uint_constant.insert(*bits, id);
+    }
+    let definitions: HashMap<Word, Instruction> = module.types_global_values.iter().filter(|i| i.result_id.is_some_and(|id| tainted_set.contains(&id))).map(|i| (i.result_id.unwrap(), i.clone())).collect();
+    // Private variable initializers become stores in the entry point.
+    let mut global_stores: Vec<(Word, Word)> = Vec::new();
+    for inst in module.types_global_values.iter_mut() {
+        if inst.class.opcode == Op::Variable {
+            if let Some(Operand::IdRef(init)) = inst.operands.get(1) {
+                if tainted_set.contains(init) {
+                    global_stores.push((inst.result_id.unwrap(), *init));
+                    inst.operands.truncate(1);
+                }
+            }
+        }
+    }
+    let entry = module.entry_points.first().and_then(|e| id_operand(e, 1));
+    for index in 0..module.functions.len() {
+        let is_entry = module.functions[index].def.as_ref().and_then(|d| d.result_id) == entry;
+        // Tainted ids this function needs, including composite operands.
+        let mut needed: HashSet<Word> = HashSet::new();
+        let mut stack: Vec<Word> = Vec::new();
+        for block in &module.functions[index].blocks {
+            for inst in &block.instructions {
+                for op in &inst.operands {
+                    if let Operand::IdRef(r) = op {
+                        if tainted_set.contains(r) {
+                            stack.push(*r);
+                        }
+                    }
+                }
+            }
+        }
+        if is_entry {
+            stack.extend(global_stores.iter().map(|(_, v)| *v));
+        }
+        while let Some(id) = stack.pop() {
+            if needed.insert(id) {
+                for op in &definitions[&id].operands {
+                    if let Operand::IdRef(r) = op {
+                        if tainted_set.contains(r) {
+                            stack.push(*r);
+                        }
+                    }
+                }
+            }
+        }
+        if needed.is_empty() {
+            continue;
+        }
+        let mut map: HashMap<Word, Word> = HashMap::new();
+        let mut prologue = Vec::new();
+        for id in tainted.iter().filter(|id| needed.contains(id)) {
+            let def = &definitions[id];
+            let new = fresh(module);
+            map.insert(*id, new);
+            if let Some(bits) = bits_of.get(id) {
+                prologue.push(Instruction::new(Op::Bitcast, def.result_type, Some(new), vec![Operand::IdRef(uint_constant[bits])]));
+            } else {
+                let operands = def.operands.iter().map(|o| match o {
+                    Operand::IdRef(r) => Operand::IdRef(*map.get(r).unwrap_or(r)),
+                    other => other.clone(),
+                });
+                prologue.push(Instruction::new(Op::CompositeConstruct, def.result_type, Some(new), operands.collect()));
+            }
+        }
+        let function = &mut module.functions[index];
+        let mut stores = Vec::new();
+        for block in function.blocks.iter_mut() {
+            for inst in block.instructions.iter_mut() {
+                // Function-local variable initializers become stores too.
+                if inst.class.opcode == Op::Variable {
+                    if let Some(Operand::IdRef(init)) = inst.operands.get(1) {
+                        if let Some(new) = map.get(init) {
+                            stores.push(Instruction::new(Op::Store, None, None, vec![Operand::IdRef(inst.result_id.unwrap()), Operand::IdRef(*new)]));
+                            inst.operands.truncate(1);
+                            continue;
+                        }
+                    }
+                }
+                for op in inst.operands.iter_mut() {
+                    if let Operand::IdRef(r) = op {
+                        if let Some(new) = map.get(r) {
+                            *r = *new;
+                        }
+                    }
+                }
+            }
+        }
+        if is_entry {
+            for (var, value) in &global_stores {
+                stores.push(Instruction::new(Op::Store, None, None, vec![Operand::IdRef(*var), Operand::IdRef(map[value])]));
+            }
+        }
+        let first = &mut function.blocks[0];
+        let at = first.instructions.iter().position(|i| i.class.opcode != Op::Variable).unwrap_or(first.instructions.len());
+        first.instructions.splice(at..at, prologue.into_iter().chain(stores));
+    }
+    // The global constants are now unused; naga would still reject them.
+    module.types_global_values.retain(|i| !i.result_id.is_some_and(|id| tainted_set.contains(&id)));
+    module.debug_names.retain(|i| !id_operand(i, 0).is_some_and(|id| tainted_set.contains(&id)));
+    module.annotations.retain(|i| !id_operand(i, 0).is_some_and(|id| tainted_set.contains(&id)));
+    tainted.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,5 +628,19 @@ mod tests {
                 assert_eq!(decoration_value(&module, id, Decoration::Location), Some(2));
             }
         }
+    }
+
+    #[test]
+    fn non_finite_constants_reach_naga_as_runtime_values() {
+        let src = "#version 450\nlayout(location=0) in vec2 v_st;\nout vec4 o;\nconst float INF = 1.0 / 0.0;\nconst vec3 FAR = vec3(1e39, 0.0, -1e39);\nfloat far(float x){ return min(x, INF); }\nvoid main(){ vec3 f = FAR; float n = 0.0 / 0.0; o = vec4(far(v_st.x), f.x > 1.0 ? 1.0 : 0.0, isinf(f.z) ? 1.0 : 0.0, isnan(n) ? 1.0 : 0.5); }\n";
+        let spv = compile(src, Stage::Fragment).unwrap();
+        let mut module = load(&spv.words).unwrap();
+        assert!(materialize_non_finite_constants(&mut module) >= 2);
+        let words = assemble(&module);
+        let options = naga::front::spv::Options { adjust_coordinate_space: true, strict_capabilities: false, block_ctx_dump_prefix: None };
+        let naga_module = naga::front::spv::Frontend::new(words.into_iter(), &options).parse().expect("naga parses");
+        let info = crate::pipeline::naga_validate(&naga_module).expect("naga validates");
+        let (msl, _) = naga::back::msl::write_string(&naga_module, &info, &Default::default(), &Default::default()).expect("msl");
+        assert!(msl.contains("as_type<float>"), "{msl}");
     }
 }
