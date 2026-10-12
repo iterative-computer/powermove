@@ -56,10 +56,55 @@ impl std::fmt::Display for EvalError {
 
 impl std::error::Error for EvalError {}
 
+/// A read path as a linked list from the leaf up, so extending it is O(1);
+/// flattened into [`FieldRead`]s once, when the evaluation finishes.
 #[derive(Debug)]
 struct Path {
     root: Root,
-    steps: Vec<Step>,
+    parent: Option<Rc<Path>>,
+    step: Option<Step>,
+}
+
+impl Path {
+    fn root(root: Root) -> Rc<Path> {
+        Rc::new(Path {
+            root,
+            parent: None,
+            step: None,
+        })
+    }
+
+    fn to_field_read(&self) -> FieldRead {
+        let mut steps = Vec::new();
+        let mut node = Some(self);
+        while let Some(n) = node {
+            if let Some(step) = &n.step {
+                steps.push(step.clone());
+            }
+            node = n.parent.as_deref();
+        }
+        steps.reverse();
+        FieldRead {
+            root: self.root,
+            path: steps,
+        }
+    }
+}
+
+/// Keys the interpreter itself looks up, allocated once.
+struct Keys {
+    to_string: JsStr,
+    params: JsStr,
+    value: JsStr,
+}
+
+fn keys() -> &'static Keys {
+    static KEYS: std::sync::OnceLock<Keys> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| Keys {
+        to_string: JsStr::from("toString"),
+        params: JsStr::from("params"),
+        value: JsStr::from("value"),
+    })
 }
 
 /// A document handle plus the path it was reached by.
@@ -250,14 +295,12 @@ enum MathLookup {
 }
 
 fn math_lookup(name: &JsStr) -> MathLookup {
-    if let Some(text) = name.to_rust_string() {
-        if let Some(f) = MathFunction::from_name(&text) {
-            return MathLookup::Function(f);
-        }
-        for (key, function) in OBJECT_PROTOTYPE {
-            if text == key {
-                return MathLookup::Inherited(function.map(|_| key));
-            }
+    if let Some(&f) = MathFunction::ALL.iter().find(|f| name.eq_str(f.name())) {
+        return MathLookup::Function(f);
+    }
+    for (key, function) in OBJECT_PROTOTYPE {
+        if name.eq_str(key) {
+            return MathLookup::Inherited(function.map(|_| key));
         }
     }
     MathLookup::Missing
@@ -274,7 +317,8 @@ pub(crate) struct Evaluator<'a, H: Host> {
     host: &'a H,
     ctx: &'a Context<H::Obj>,
     dialect: Dialect,
-    pub deps: Dependencies,
+    context: ContextReads,
+    reads: Vec<Rc<Path>>,
 }
 
 impl<'a, H: Host> Evaluator<'a, H> {
@@ -283,7 +327,19 @@ impl<'a, H: Host> Evaluator<'a, H> {
             host,
             ctx,
             dialect,
-            deps: Dependencies::default(),
+            context: ContextReads::empty(),
+            reads: Vec::new(),
+        }
+    }
+
+    /// What the evaluation read, sorted and deduplicated.
+    pub fn dependencies(&self) -> Dependencies {
+        let mut fields: Vec<FieldRead> = self.reads.iter().map(|p| p.to_field_read()).collect();
+        fields.sort();
+        fields.dedup();
+        Dependencies {
+            context: self.context,
+            fields,
         }
     }
 
@@ -295,28 +351,19 @@ impl<'a, H: Host> Evaluator<'a, H> {
             Root::Comp => &self.ctx.comp,
             Root::Value => &self.ctx.value,
         };
-        self.deps.fields.push(FieldRead {
-            root,
-            path: Vec::new(),
-        });
-        let path = Rc::new(Path {
-            root,
-            steps: Vec::new(),
-        });
+        let path = Path::root(root);
+        self.reads.push(path.clone());
         value.clone().map_doc(|obj| Tracked { obj, path })
     }
 
     fn record(&mut self, parent: &Tracked<H::Obj>, step: Step) -> Rc<Path> {
-        let mut steps = parent.path.steps.clone();
-        steps.push(step);
-        self.deps.fields.push(FieldRead {
+        let path = Rc::new(Path {
             root: parent.path.root,
-            path: steps.clone(),
+            parent: Some(parent.path.clone()),
+            step: Some(step),
         });
-        Rc::new(Path {
-            root: parent.path.root,
-            steps,
-        })
+        self.reads.push(path.clone());
+        path
     }
 
     fn length(&mut self, array: &Tracked<H::Obj>) -> usize {
@@ -359,10 +406,7 @@ impl<'a, H: Host> Evaluator<'a, H> {
 
     /// `String(value)` for a value from outside an evaluation.
     pub fn string_of(&mut self, value: &Value<H::Obj>) -> R<JsStr> {
-        let path = Rc::new(Path {
-            root: Root::Value,
-            steps: Vec::new(),
-        });
+        let path = Path::root(Root::Value);
         let value = value.clone().map_doc(|obj| Tracked { obj, path });
         self.js_string(&value)
     }
@@ -380,7 +424,7 @@ impl<'a, H: Host> Evaluator<'a, H> {
                     // A non-callable own `toString` (every JSON value) makes
                     // both conversion orders fail; otherwise the inherited
                     // `Object.prototype.toString` answers.
-                    if self.property(t, &JsStr::from("toString")).is_some() {
+                    if self.property(t, &keys().to_string).is_some() {
                         return Err(EvalError::ToPrimitive);
                     }
                     Value::String(JsStr::from("[object Object]"))
@@ -577,35 +621,35 @@ impl<'a, H: Host> Evaluator<'a, H> {
         let ctx = self.ctx;
         match name {
             "time" | "T" => {
-                self.deps.context.insert(ContextReads::TIME);
+                self.context.insert(ContextReads::TIME);
                 Value::Number(ctx.time)
             }
             "PI" => Value::Number(std::f64::consts::PI),
             "Math" => Value::Object(Object::Math),
             "t" => {
-                self.deps.context.insert(ContextReads::LOCAL_TIME);
+                self.context.insert(ContextReads::LOCAL_TIME);
                 Value::Number(ctx.t)
             }
             "fps" => {
-                self.deps.context.insert(ContextReads::FPS);
+                self.context.insert(ContextReads::FPS);
                 Value::Number(ctx.fps)
             }
             "value" => {
-                self.deps.context.insert(ContextReads::VALUE);
+                self.context.insert(ContextReads::VALUE);
                 self.root(Root::Value)
             }
             "layer" => self.root(Root::Layer),
             "comp" => self.root(Root::Comp),
             "ch" => {
-                self.deps.context.insert(ContextReads::CHANNEL);
+                self.context.insert(ContextReads::CHANNEL);
                 Value::String(ctx.channel.clone())
             }
             "idx" => {
-                self.deps.context.insert(ContextReads::INDEX);
+                self.context.insert(ContextReads::INDEX);
                 Value::Number(ctx.idx)
             }
             "frame" if self.dialect == Dialect::Native => {
-                self.deps.context.insert(ContextReads::FRAME);
+                self.context.insert(ContextReads::FRAME);
                 Value::Number(ctx.frame)
             }
             _ => {
@@ -783,7 +827,7 @@ impl<'a, H: Host> Evaluator<'a, H> {
                 Value::Number(value - jsmath::floor(value))
             }
             Helper::Wiggle => {
-                self.deps.context.insert(ContextReads::LOCAL_TIME);
+                self.context.insert(ContextReads::LOCAL_TIME);
                 let t = self.ctx.t;
                 let frequency = n(0).unwrap_or(0.0);
                 let mut amplitude = n(1).unwrap_or(0.0);
@@ -850,7 +894,7 @@ impl<'a, H: Host> Evaluator<'a, H> {
     /// `p ? p.value : 0`, with ordinary JavaScript property lookups.
     fn param(&mut self, name: &JsStr) -> R<V<H::Obj>> {
         let comp = self.root(Root::Comp);
-        let params = match self.get(Got::Value(comp), &JsStr::from("params"))? {
+        let params = match self.get(Got::Value(comp), &keys().params)? {
             Got::Value(v) if v.truthy() => v,
             Got::Value(_) => return Ok(Value::Number(0.0)),
             Got::Inherited => unreachable!("\"params\" is no prototype member"),
@@ -858,7 +902,7 @@ impl<'a, H: Host> Evaluator<'a, H> {
         let p = self.get(Got::Value(params), name)?;
         match p {
             Got::Value(v) if !v.truthy() => Ok(Value::Number(0.0)),
-            p => match self.get(p, &JsStr::from("value"))? {
+            p => match self.get(p, &keys().value)? {
                 Got::Value(v) => Ok(v),
                 Got::Inherited => unreachable!("\"value\" is no prototype member"),
             },
@@ -949,14 +993,11 @@ impl<'a, H: Host> Evaluator<'a, H> {
 
 /// `Object.hasOwn(MATH_VALUE, key) ? MATH_VALUE[key] : undefined`.
 fn math_member<O>(key: &JsStr) -> Value<O> {
-    let Some(text) = key.to_rust_string() else {
-        return Value::Undefined;
-    };
-    if let Some((_, v)) = MATH_CONSTANTS.iter().find(|(name, _)| *name == text) {
+    if let Some((_, v)) = MATH_CONSTANTS.iter().find(|(name, _)| key.eq_str(name)) {
         return Value::Number(*v);
     }
-    match MathFunction::from_name(&text) {
-        Some(f) => Value::Object(Object::MathFunction(f)),
+    match MathFunction::ALL.iter().find(|f| key.eq_str(f.name())) {
+        Some(&f) => Value::Object(Object::MathFunction(f)),
         None => Value::Undefined,
     }
 }

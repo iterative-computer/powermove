@@ -227,9 +227,10 @@ impl Expression {
         let result = evaluator
             .evaluate(&self.tree)
             .map(|v| v.map_doc(|t| t.into_obj()));
-        let mut deps = evaluator.deps;
-        deps.finish();
-        Evaluation { result, deps }
+        Evaluation {
+            result,
+            deps: evaluator.dependencies(),
+        }
     }
 }
 

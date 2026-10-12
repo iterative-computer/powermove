@@ -113,9 +113,4 @@ impl Dependencies {
             .iter()
             .any(|f| f.root == root && f.path.starts_with(path))
     }
-
-    pub(crate) fn finish(&mut self) {
-        self.fields.sort();
-        self.fields.dedup();
-    }
 }
