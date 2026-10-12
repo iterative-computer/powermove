@@ -46,7 +46,7 @@ test('an API connection creates a keyframeable effect and verifies it through li
     await session.openEditor(); await session.openAgent();
     await session.page.evaluate(async port => {
       const w = window as any;
-      await w.powermove.compatible.configure({ baseUrl: `http://127.0.0.1:${port}/v1`, model: 'test-author', vision: true });
+      await w.__powermoveTestBridge.compatible.configure({ baseUrl: `http://127.0.0.1:${port}/v1`, model: 'test-author', vision: true });
       w.PM.AgentUI.setAccess('project');
       w.PM.AgentUI.setProvider('compatible');
       w.PM.SpatialAssistant.open();

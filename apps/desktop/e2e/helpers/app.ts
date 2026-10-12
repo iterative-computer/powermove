@@ -20,6 +20,15 @@ import { _electron, type ElectronApplication, type Page } from 'playwright';
  * helper functions, so keeping this lookup page-side is intentional.
  */
 
+/**
+ * Host bridge in specs: the kernel removes `window.powermove` at boot so page
+ * code never reaches raw IPC. Hidden test launches (every launch here except
+ * `normalWindow`) also publish the same bridge as `window.__powermoveTestBridge`
+ * (src/shared/test-bridge.ts); specs call host APIs through that name, e.g.
+ *
+ *   await (window as any).__powermoveTestBridge.store.flush();
+ */
+
 const execFileAsync = promisify(execFile);
 export const repoRoot = path.resolve(__dirname, '../..');
 const mainEntry = path.join(repoRoot, 'out/main/index.js');

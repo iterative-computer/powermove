@@ -15,19 +15,27 @@ test.describe('@security Electron renderer boundaries', () => {
     await page.waitForTimeout(250);
     expect(app.windows()).toHaveLength(windowsBefore);
 
+    // The kernel takes the preload bridge off the page at boot (bfcd2c88), so
+    // page code, extensions included, never reaches it. Hidden test launches
+    // also get the e2e seam (shared/test-bridge.ts), which is the same bridge:
+    // it must not carry Node or Electron either.
     const bridge = await page.evaluate(() => {
       const powermove = (window as any).powermove;
+      const descriptor = Object.getOwnPropertyDescriptor(window, 'powermove');
+      const seam = (window as any).__powermoveTestBridge;
       return {
-        present: Boolean(powermove),
-        hasIpcRenderer: Boolean(powermove && ('ipcRenderer' in powermove)),
-        hasRequire: Boolean(powermove && ('require' in powermove)),
+        sealed: powermove === undefined && descriptor?.configurable === false && descriptor?.writable === false,
+        seamPresent: Boolean(seam?.store?.flush),
+        seamHasIpcRenderer: Boolean(seam && ('ipcRenderer' in seam)),
+        seamHasRequire: Boolean(seam && ('require' in seam)),
         globalRequire: typeof (window as any).require
       };
     });
     expect(bridge).toEqual({
-      present: true,
-      hasIpcRenderer: false,
-      hasRequire: false,
+      sealed: true,
+      seamPresent: true,
+      seamHasIpcRenderer: false,
+      seamHasRequire: false,
       globalRequire: 'undefined'
     });
   });

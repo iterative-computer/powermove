@@ -15,7 +15,7 @@ describe('background-only Electron testing', () => {
     expect(backgroundTesting({ POWERMOVE_BACKGROUND_TEST: '1', POWERMOVE_USER_DATA: '/tmp/test-profile' }, '/user/live')).toBe(true);
     expect(backgroundWindowOptions(true)).toEqual({
       show: false, skipTaskbar: true, focusable: false,
-      webPreferences: { backgroundThrottling: false, devTools: false }
+      webPreferences: { backgroundThrottling: false, devTools: false, additionalArguments: ['--powermove-test-bridge'] }
     });
   });
 });

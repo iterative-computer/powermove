@@ -49,7 +49,7 @@ export default function activate(api: PowermoveAPI) {
   expect(await page.evaluate(id => (window as any).PM.L(id).p['anchor.x'].v, imported.id)).toBe(12);
   await page.evaluate(() => (window as any).PM.hist.undo());
   expect(await page.evaluate(id => (window as any).PM.L(id).p['anchor.x'].v, imported.id)).toBe(imported.center[0]);
-  await page.evaluate(async () => { await (window as any).powermove.extensions.setEnabled({ id:'import-anchor-presets', enabled:false }); });
+  await page.evaluate(async () => { await (window as any).__powermoveTestBridge.extensions.setEnabled({ id:'import-anchor-presets', enabled:false }); });
   await expect(section).toHaveCount(0);
   await page.waitForFunction(() => (window as any).PM.Kernel.api('mod-probe').media.getImportDefaults() === null);
   expect(await page.evaluate(id => (window as any).PM.L(id).p['anchor.x'].v, imported.id)).toBe(imported.center[0]);

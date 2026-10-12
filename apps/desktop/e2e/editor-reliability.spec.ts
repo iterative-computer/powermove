@@ -90,7 +90,7 @@ test('cancelled Save never reports a saved file; successful Save writes a reopen
   }, Array.from(savedBytes));
   expect(await page.evaluate(() => (window as any).PM.proj.layers[0].p['position.x'].kf.map((k: any) => [k.t, k.v]))).toEqual([[0, 100], [2, 300]]);
   await page.screenshot({ path: info.outputPath('saved-project.png') });
-  await page.evaluate(async () => { await new Promise(resolve => setTimeout(resolve, 800)); await (window as any).powermove.store.flush(); });
+  await page.evaluate(async () => { await new Promise(resolve => setTimeout(resolve, 800)); await (window as any).__powermoveTestBridge.store.flush(); });
   await session.relaunch(); // Only the isolated temporary test app, never the working app.
   await session.openEditor();
   await session.page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
