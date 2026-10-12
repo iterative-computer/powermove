@@ -44,22 +44,14 @@ export function installCorpusPage(): void {
   const isProperty = (value: any) => !!value && typeof value === 'object' && Array.isArray(value.kf) && 'v' in value;
   const helpers = () => (globalThis as any).__powermove_runtime?.powermove;
 
-  /** `legacy/core/retiming.ts` sourceTime, which the renderer does not expose on PM. */
-  const integrals = new WeakMap<object, { version: number; step: number; sums: number[] }>();
-  const sourceTime = (layer: any, time: number): number => {
-    const d = PM.resolveContent(layer, time), local = time - layer.from;
-    if (d.timeRemap && isProperty(layer.d.sourceTime)) return Number(PM.evP(layer, layer.d.sourceTime, time, 'c.sourceTime')) || 0;
-    const speed = layer.d.speed;
-    if (!isProperty(speed) || (!speed.kf.length && !speed.expr)) return local * Number(d.speed ?? 1) + Number(d.trim || 0);
-    const value = (t: number) => Number(isProperty(speed) ? PM.evP(layer, speed, t, 'c.speed') : speed);
-    const end = Math.max(0, local), step = 1 / (Math.max(30, PM.proj.fps) * 2), version = PM.animVersion();
-    let cached = integrals.get(speed);
-    if (!cached || cached.version !== version || cached.step !== step) { cached = { version, step, sums: [0] }; integrals.set(speed, cached); }
-    const full = Math.floor(end / step);
-    for (let i = cached.sums.length - 1; i < full; i++) cached.sums.push(cached.sums[i]! + value(layer.from + (i + .5) * step) * step);
-    const remainder = end - full * step;
-    return cached.sums[full]! + value(layer.from + full * step + remainder / 2) * remainder + Number(d.trim || 0);
+  /** The bundled legacy helpers (inject.ts): the app's own source, loaded beside it. */
+  const legacy = () => {
+    const helpers = w.__corpusLegacy;
+    if (!helpers) throw new Error('The legacy helper bundle is not installed');
+    return helpers;
   };
+  /** `legacy/core/retiming.ts` sourceTime. */
+  const sourceTime = (layer: any, time: number): number => legacy().sourceTime(PM, layer, time);
 
   /** `legacy/gl/raster.ts` resolvedTextContent, which the renderer does not expose on PM. */
   const resolvedTextContent = (layer: any, time: number) => {
@@ -82,14 +74,13 @@ export function installCorpusPage(): void {
 
   /**
    * Animator and range-style state and the posed glyphs, through the bundled
-   * `legacy/core/text-animation.ts` (inject.ts), called exactly as raster.ts
+   * `legacy/core/text-animation.ts`, called exactly as raster.ts
    * calls it. Glyph matrices are relative to each glyph's baseline origin.
    * raster.ts later shifts glyphs by range-font advance differences measured
    * with Canvas2D; those shifts are rasterization and are not included.
    */
   const textAnimation = (layer: any, time: number) => {
-    const T = w.__corpusTextAnimation;
-    if (!T) throw new Error('text-animation bundle not installed');
+    const T = legacy();
     const d = resolvedTextContent(layer, time), layout = PM.textLayout(layer, time);
     const animation = T.textAnimationState(PM, layer, time, layout);
     const glyphs = T.animatedGlyphs(PM, layer, time, d, layout, animation);
@@ -361,6 +352,79 @@ export function installCorpusPage(): void {
         PM.quality = quality;
       }
       return out;
+    },
+
+    /**
+     * Blender snapshot pass, run after a project's frames: turn on Blender output
+     * (`render3d`) for every composition holding 3D objects, in memory only.
+     */
+    enableBlenderOutput(args: { settings: Record<string, unknown>; objectDefinition: string }): string[] {
+      const changed: string[] = [];
+      for (const comp of [PM.proj, ...Object.values<any>(PM.proj.comps || {})]) {
+        if (!comp.layers.some((layer: any) => layer.d?.definition === args.objectDefinition)) continue;
+        comp.render3d = { ...args.settings, enabled: true };
+        changed.push(comp.compId || comp.id || 'root');
+      }
+      PM.touch?.();
+      return changed;
+    },
+
+    /**
+     * Final-output snapshots: `PM.prepareFrame(t)` sends one Blender job per entry of
+     * `blenderFrameRequests` (every nested composition and shutter sample). The scene
+     * revision is bumped first so no request is answered from the frame cache, which
+     * keeps jobs and requests in the same order.
+     */
+    async blenderFinal(time: number): Promise<{ requests: any[]; error?: string }> {
+      PM.pause();
+      PM.Export.busy = true;
+      PM._scene3dRevision = (PM._scene3dRevision || 0) + 1;
+      try {
+        const requests = legacy().blenderFrameRequests(PM, time, PM.proj, { shutter: PM.proj.shutter || .5 })
+          .map((request: any) => ({ comp: request.comp.compId || request.comp.id || 'root', time: request.time, width: request.width, height: request.height, preview: false }));
+        try { await PM.prepareFrame(time); return { requests }; }
+        catch (error: any) { return { requests, error: String(error?.message || error) }; }
+      } finally {
+        PM.preparedVideoFrames = null;
+        PM.Export.busy = false;
+      }
+    },
+
+    /**
+     * Paused rendered-preview snapshots: the scene3d API's `renderFrame`
+     * (`renderBlenderPreview`) at time t. Requests follow its walk: the current
+     * composition, then active precomps at their source times, each composition
+     * once per time, a job only where the composition holds a 3D object.
+     */
+    async blenderPreview(args: { time: number; objectDefinition: string }): Promise<{ requests: any[]; view: string | null; error?: string }> {
+      PM.pause();
+      PM._scene3dRevision = (PM._scene3dRevision || 0) + 1;
+      const api = PM.Kernel.api('powermove.engine-corpus').scene3d;
+      const requests: any[] = [], visited = new Set<string>();
+      const visit = (comp: any, time: number, depth: number) => {
+        if (depth > 8) return;
+        const id = comp.compId || comp.id || 'root', key = `${id}:${time}`;
+        if (visited.has(key)) return;
+        visited.add(key);
+        let children: Array<{ comp: any; time: number }> = [];
+        PM.scope.push(comp);
+        try {
+          children = comp.layers.filter((layer: any) => layer.type === 'precomp' && PM.active(layer, time)).flatMap((layer: any) => {
+            const sub = PM.compOf?.(layer) || comp.comps?.[layer.d.comp] || PM.proj.comps?.[layer.d.comp];
+            return sub ? [{ comp: sub, time: sourceTime(layer, time) }] : [];
+          });
+        } finally { PM.scope.pop(); }
+        if (comp.layers.some((layer: any) => layer.d?.definition === args.objectDefinition)) requests.push({ comp: id, time, preview: true });
+        for (const child of children) visit(child.comp, child.time, depth + 1);
+      };
+      const previousTime = PM.time;
+      PM.time = args.time;
+      try {
+        visit(PM.curComp?.() || PM.proj, args.time, 0);
+        const view = api.getView?.() ?? null;
+        try { await api.renderFrame(); return { requests, view }; }
+        catch (error: any) { return { requests, view, error: String(error?.message || error) }; }
+      } finally { PM.time = previousTime; }
     },
 
     shaderPresets(): Record<string, string> { return { ...PM.SHADER_PRESETS }; },

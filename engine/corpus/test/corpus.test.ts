@@ -6,7 +6,7 @@ import path from 'node:path';
 import { animatorPresets, blendModes, captionModel, effects, layerTypes, makeAnimator, matteModes, scene3d, transitions } from '../src/catalog';
 import { generateCorpus, validateAll } from '../src/generate';
 import { corpusGlb } from '../src/glb';
-import { TEXT_ANIMATION_GLOBAL, TEXT_ANIMATION_MODULE, textAnimationScript } from '../src/inject';
+import { LEGACY_GLOBAL, RETIMING_MODULE, TEXT_ANIMATION_MODULE, legacyScript } from '../src/inject';
 import { FIXTURE_FILES, GENERATED_MEDIA, mediaRefs, MISSING_MEDIA, resolveMedia } from '../src/media';
 import { readFloat, straightTopDown, writeFile, writeFloat, writePng } from '../src/output';
 import { decodePng, encodePng } from '../src/png';
@@ -15,6 +15,13 @@ import { validateDocument } from '../src/validate';
 import { verifyCapture } from '../src/verify';
 
 const projects = allProjects();
+/** Run the legacy helper bundle in a fresh context, as the renderer does. */
+const bundle = async () => {
+  const context: Record<string, any> = {};
+  context.globalThis = context;
+  expect(vm.runInNewContext(await legacyScript(), context)).toBe(true);
+  return context[LEGACY_GLOBAL];
+};
 const temp = (label: string) => mkdtempSync(path.join(os.tmpdir(), `pm-corpus-${label}-`));
 
 /** Every value of `key` anywhere in the documents, across compositions and nested data. */
@@ -235,11 +242,7 @@ describe('capture formats', () => {
 
 describe('renderer injection', () => {
   test('the bundled text-animation module poses glyphs exactly as the source module does', async () => {
-    const script = await textAnimationScript();
-    const context: Record<string, any> = {};
-    context.globalThis = context;
-    expect(vm.runInNewContext(script, context)).toBe(true);
-    const bundled = context[TEXT_ANIMATION_GLOBAL];
+    const bundled = await bundle();
     const source = await import(TEXT_ANIMATION_MODULE);
     // A stub PM: channels evaluate to their static value, as the evaluator does for a channel without keys.
     const PM = { evP: (_layer: unknown, p: any) => (p && typeof p === 'object' && 'v' in p ? p.v : p) };
@@ -263,6 +266,65 @@ describe('renderer injection', () => {
   });
 });
 
+describe('bundled retiming and Blender requests', () => {
+  /** A stub PM: channels evaluate linearly between their keys, as the evaluator does for linear keys. */
+  const evaluate = (p: any, t: number) => {
+    if (!p || typeof p !== 'object' || !('v' in p)) return p;
+    const kf = p.kf ?? [];
+    if (!kf.length) return p.v;
+    if (t <= kf[0].t) return kf[0].v;
+    for (let i = 1; i < kf.length; i++) if (t <= kf[i].t) return kf[i - 1].v + (kf[i].v - kf[i - 1].v) * (t - kf[i - 1].t) / (kf[i].t - kf[i - 1].t);
+    return kf.at(-1).v;
+  };
+  const makePM = (proj: any) => ({
+    proj, scope: [] as any[], animVersion: () => 1,
+    evP: (_layer: unknown, p: any, t: number) => evaluate(p, t),
+    active: (layer: any, t: number) => t >= layer.from && t < layer.from + layer.dur,
+  });
+
+  test('sourceTime matches the source module for trims, speed ramps, and remaps', async () => {
+    const bundled = await bundle();
+    const source = await import(RETIMING_MODULE);
+    const proj = { fps: 30 };
+    const layers = [
+      { type: 'precomp', from: .5, dur: 4, d: { trim: .25, speed: 2 } },
+      { type: 'video', from: 0, dur: 4, d: { trim: .1, speed: { v: 1, kf: [{ t: 0, v: .5 }, { t: 2, v: 3 }], expr: null } } },
+      { type: 'precomp', from: 0, dur: 4, d: { timeRemap: true, sourceTime: { v: 0, kf: [{ t: 0, v: 3 }, { t: 3, v: 0 }], expr: null } } },
+    ];
+    for (const layer of layers) for (const t of [0, .4, 1.33, 2.9, 3.7]) {
+      expect(bundled.sourceTime(makePM(proj), layer, t)).toBe(source.sourceTime(makePM(proj), layer, t));
+    }
+  });
+
+  test('blenderFrameRequests lists nested compositions and shutter samples in order', async () => {
+    const bundled = await bundle();
+    const object = (id: string, extra: any = {}) => ({ id, type: 'extension', from: 0, dur: 3, mblur: false, d: { definition: scene3d.definitions.object, data: { object: {} } }, ...extra });
+    const inner = { compId: 'inner', w: 320, h: 180, fps: 24, render3d: { enabled: true }, layers: [object('a')] };
+    const proj = {
+      compId: 'root', w: 640, h: 360, fps: 30, shutter: .5, render3d: { enabled: true }, comps: { inner },
+      layers: [object('b', { mblur: true }), { id: 'p', type: 'precomp', from: 0, dur: 3, d: { comp: 'inner', w: 320, h: 180 } }],
+    };
+    const requests = bundled.blenderFrameRequests(makePM(proj), 1, proj, { shutter: .5 });
+    const roots = requests.filter((request: any) => request.comp === proj);
+    // The frame time, then ten shutter samples spread over 0.5 / 30 s.
+    expect(roots.map((request: any) => request.time)).toEqual([1, ...Array.from({ length: 10 }, (_, i) => 1 + ((i + .5) / 10 - .5) * (.5 / 30))]);
+    expect(roots.every((request: any) => request.width === 640 && request.height === 360)).toBe(true);
+    const nested = requests.filter((request: any) => request.comp === inner);
+    expect(nested).toHaveLength(11);
+    expect(nested.every((request: any) => request.width === 320 && request.height === 180)).toBe(true);
+    proj.render3d.enabled = false;
+    expect(bundled.blenderFrameRequests(makePM(proj), 1, proj, {}).every((request: any) => request.comp === inner)).toBe(true);
+  });
+
+  test('the bundle carries the legacy sources and none of the renderer or media modules', async () => {
+    const script = await legacyScript();
+    const modules = [...script.matchAll(/^ {2}\/\/ (.+)$/gm)].map(match => match[1]!).filter(file => !file.endsWith('legacy-entry.ts'));
+    expect(modules.map(file => file.replace(/^.*\/src\/renderer\/src\//, ''))).toEqual([
+      'legacy/core/text-animation.ts', 'legacy/core/content-properties.ts', 'legacy/core/retiming.ts', 'legacy/core/frame-preparation.ts',
+    ]);
+  });
+});
+
 describe('capture verification', () => {
   test('accepts a consistent capture and reports corruption, missing, and unlisted files', () => {
     const dir = temp('verify');
@@ -271,13 +333,18 @@ describe('capture verification', () => {
       const float = writeFloat(dir, 'projects/a/frames/t0.rgba32f', { width: 2, height: 1, rowOrder: 'top-down', alpha: 'premultiplied', time: 0, sourcePrecision: 'binary16', encoding: '', source: '' }, new Uint8Array(32));
       const evalRecord = writeFile(dir, 'projects/a/eval/t0.json', JSON.stringify({ format: 'powermove-corpus-eval', version: 1, time: 0 }));
       writeFile(dir, 'projects/a/project.json', '{}');
-      const sample = { time: 0, width: 2, height: 1, png, float, eval: evalRecord };
-      const bytes = png.bytes + float.data.bytes + float.header.bytes + evalRecord.bytes;
-      writeFile(dir, 'manifest.json', JSON.stringify({
-        format: 'powermove-engine-corpus', version: 1, projects: [{ id: 'a', dir: 'projects/a', samples: [sample] }],
-        totals: { projects: 1, frames: 1, floatFrames: 1, evalDumps: 1, failedSamples: 0, bytes },
+      const asset = writeFile(dir, 'projects/a/blender/assets/x.png', new Uint8Array([9, 9]));
+      const blender = writeFile(dir, 'projects/a/blender/t0.json', JSON.stringify({
+        format: 'powermove-corpus-blender', version: 1, time: 0,
+        final: { snapshots: [{ request: { comp: 'root', time: 0, preview: false }, snapshot: {}, assets: [{ id: 't', name: 'x.png', ...asset }] }] }, preview: { snapshots: [] },
       }));
-      expect(verifyCapture(dir)).toEqual({ problems: [], checked: 4, unlisted: [] });
+      const sample = { time: 0, width: 2, height: 1, png, float, eval: evalRecord, blender };
+      const bytes = png.bytes + float.data.bytes + float.header.bytes + evalRecord.bytes + blender.bytes + asset.bytes;
+      writeFile(dir, 'manifest.json', JSON.stringify({
+        format: 'powermove-engine-corpus', version: 1, projects: [{ id: 'a', dir: 'projects/a', blender: { assets: [asset] }, samples: [sample] }],
+        totals: { projects: 1, frames: 1, floatFrames: 1, evalDumps: 1, blenderDumps: 1, failedSamples: 0, bytes },
+      }));
+      expect(verifyCapture(dir)).toEqual({ problems: [], checked: 6, unlisted: [] });
       writeFileSync(path.join(dir, 'projects/a/frames/t0.png'), new Uint8Array(png.bytes));
       writeFileSync(path.join(dir, 'stray.bin'), 'x');
       rmSync(path.join(dir, 'projects/a/eval/t0.json'));
