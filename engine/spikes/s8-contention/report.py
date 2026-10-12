@@ -1,8 +1,11 @@
 """Render S8 result JSON files as Markdown tables for docs/engine/spikes/S8.md.
 
 Usage: python3 -I report.py results/<dir> [scenario ...]
+       python3 -I report.py results run3/full run5/full ...
 
-With scenario names, only those rows are printed, in that order.
+With scenario names, only those rows are printed, in that order. A name of the form
+`<run>/<scenario>` reads `results/<run>/<scenario>.json` and labels the row with the
+run.
 """
 
 import json
@@ -81,12 +84,20 @@ HEAD = [
 
 def main():
     d = sys.argv[1]
-    data = load(d)
-    names = sys.argv[2:] or sorted(data)
-    print("| " + " | ".join(HEAD) + " |")
-    print("|" + "---|" * len(HEAD))
+    names = sys.argv[2:]
+    mixed = any("/" in n for n in names)
+    data = {} if mixed else load(d)
+    names = names or sorted(data)
+    head = (["run"] if mixed else []) + HEAD
+    print("| " + " | ".join(head) + " |")
+    print("|" + "---|" * len(head))
     for n in names:
-        if n in data:
+        if mixed:
+            run, scen = n.split("/", 1)
+            path = os.path.join(d, run, scen + ".json")
+            if os.path.exists(path):
+                print("| " + " | ".join([run] + row(json.load(open(path)))) + " |")
+        elif n in data:
             print("| " + " | ".join(row(data[n])) + " |")
 
 
