@@ -526,7 +526,7 @@ impl Evaluator {
             frame: cx.frame_at(time),
             value: &value,
             layer,
-            comp: Some(cx.node()),
+            comp: cx,
             channel: key,
             idx,
         };

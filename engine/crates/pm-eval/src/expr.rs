@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use pm_model::{JsString, Node};
 
+use crate::comp::Comp;
 use crate::js_sem::{JsResult, JsValue};
 use crate::node::{self, Got};
 
@@ -90,8 +91,8 @@ pub struct ExprContext<'a> {
     pub value: &'a JsValue,
     /// The layer (`None` for `undefined`).
     pub layer: Option<&'a Node>,
-    /// The composition.
-    pub comp: Option<&'a Node>,
+    /// The composition, read as the legacy object ([`Comp::member`]).
+    pub comp: &'a Comp<'a>,
     /// The channel key (`ch`).
     pub channel: &'a JsString,
     /// The layer's index in the composition when [`CompiledExpression::needs_idx`],
@@ -103,12 +104,7 @@ impl ExprContext<'_> {
     /// `param(name)`: `comp.params && comp.params[name]`, then its `value`,
     /// or 0 when there is no such parameter.
     pub fn param(&self, name: &JsString) -> JsResult<JsValue> {
-        let Some(comp) = self.comp else {
-            return Err(crate::js_sem::JsThrow::type_error(
-                "Cannot read properties of undefined (reading 'params')",
-            ));
-        };
-        let params = node::get(comp, b"params");
+        let params = self.comp.get(b"params");
         if !params.truthy() {
             return Ok(JsValue::Number(0.0));
         }

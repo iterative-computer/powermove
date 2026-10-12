@@ -8,8 +8,9 @@
 //!
 //! The operations IEEE 754 requires to be correctly rounded (`+ - * /`,
 //! `sqrt`, `floor`, `ceil`, `trunc`, `abs`) are deterministic everywhere and
-//! use Rust's own; `fma` is never used, so expressions keep JavaScript's
-//! operation order.
+//! use Rust's own. `fma` is never used, so expressions keep JavaScript's
+//! operation order (the one exception reproduces V8's own fused
+//! multiply-add in `parseInt`, `js_sem::parse_int`).
 //!
 //! These do not always equal V8's results to the bit: V8 uses its own fdlibm
 //! port for `sin`, `cos`, `tan` (S5 measured world matrices within 2 ulps,

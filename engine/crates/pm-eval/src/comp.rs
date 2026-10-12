@@ -35,6 +35,18 @@ impl core::fmt::Display for CompError {
 impl std::error::Error for CompError {}
 
 /// One composition of a document revision.
+///
+/// # The legacy composition object
+///
+/// The legacy code reads the open composition as `PM.proj`, the stored
+/// project, whose top level mixes the composition's fields (`w`, `h`, `fps`,
+/// `dur`, `layers`, ...) with the project's (`id`, `name`, `params`,
+/// `assets`, ...). In the canonical form the open composition lives in
+/// `comps[compId]` with only its own fields. [`Comp::member`] answers member
+/// reads the way the legacy object would: composition fields from the
+/// composition, everything else from the project root. Nested compositions
+/// are plain objects in both forms. The one difference: the legacy `comps`
+/// member omits the open composition, the canonical one includes it.
 #[derive(Clone, Debug)]
 pub struct Comp<'d> {
     root: &'d Node,
@@ -42,6 +54,8 @@ pub struct Comp<'d> {
     node: &'d Node,
     revision: u64,
     rate: Option<IngestRate>,
+    /// The open composition of a canonical document (see above).
+    open_canonical: bool,
 }
 
 impl<'d> Comp<'d> {
@@ -73,12 +87,16 @@ impl<'d> Comp<'d> {
             }
         };
         let rate = IngestRate::of_composition(&node.to_value_shallow_rate()).ok();
+        let open_canonical = !std::ptr::eq(node, root)
+            && node::string(node::member(Some(root), "compId"))
+                .is_some_and(|open| open.as_bytes() == comp_id.as_bytes());
         Ok(Comp {
             root,
             id: JsString::from(comp_id),
             node,
             revision,
             rate,
+            open_canonical,
         })
     }
 
@@ -117,6 +135,38 @@ impl<'d> Comp<'d> {
         node::member(Some(self.node), "layers")
     }
 
+    /// A member of the legacy composition object (see the type
+    /// documentation).
+    pub fn member(&self, key: &str) -> Option<&'d Node> {
+        if !self.open_canonical {
+            return node::member(Some(self.node), key);
+        }
+        if pm_model::canonical::COMP_FIELDS.contains(&key) {
+            return node::member(Some(self.node), key);
+        }
+        match key {
+            "compName" => node::member(Some(self.node), "name"),
+            _ => node::member(Some(self.root), key),
+        }
+    }
+
+    /// `comp[key]` on the legacy composition object for any key.
+    pub fn get(&self, key: &[u8]) -> Got<'d> {
+        if !self.open_canonical {
+            return node::get(self.node, key);
+        }
+        match std::str::from_utf8(key) {
+            Ok(k) => self.member(k).map_or(Got::Undefined, Got::Node),
+            Err(_) => node::get(self.root, key),
+        }
+    }
+
+    /// Whether this is the open composition of a canonical document, whose
+    /// legacy object merges project fields (see the type documentation).
+    pub fn is_open_canonical(&self) -> bool {
+        self.open_canonical
+    }
+
     /// The open composition's `fps` (`PM.proj.fps`): the stored form keeps it
     /// at the top level, the canonical form in `comps[compId]`.
     pub fn project_fps(&self) -> JsValue {
@@ -131,7 +181,7 @@ impl<'d> Comp<'d> {
 
     /// `comp.fps || PM.proj.fps`, the `fps` expressions see.
     pub fn expression_fps(&self) -> JsValue {
-        let fps = node::member(Some(self.node), "fps");
+        let fps = self.member("fps");
         if node::truthy(fps) {
             node::js_value_opt(fps)
         } else {
@@ -141,7 +191,7 @@ impl<'d> Comp<'d> {
 
     /// `Number(comp.dur)`.
     pub fn duration(&self) -> f64 {
-        node::to_number(node::member(Some(self.node), "dur"))
+        node::to_number(self.member("dur"))
     }
 
     /// Seconds for a tick on this composition's grid: `n / fps` (the
