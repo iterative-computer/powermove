@@ -3,6 +3,7 @@
 //! directly with their own frame allocators pointed at the Metal-shared pool.
 
 pub mod dav1d;
+pub mod ffalpha;
 pub mod vpx;
 
 use crate::ff::Packet;
@@ -21,8 +22,11 @@ pub trait SwDecoder: Send {
     fn name(&self) -> String;
     /// Whether the decoder renders into pool memory itself.
     fn direct(&self) -> bool;
-    /// Frames the spike had to copy into pool memory.
+    /// Frames copied into pool memory (by the spike, or inside a wrapper).
     fn copies(&self) -> usize;
+    /// Drops all decoder state so decoding can restart at any random-access
+    /// point (a seek within one session).
+    fn flush(&mut self);
 }
 
 impl SwDecoder for crate::ff::FfDecoder {
@@ -37,5 +41,8 @@ impl SwDecoder for crate::ff::FfDecoder {
     }
     fn copies(&self) -> usize {
         self.copies
+    }
+    fn flush(&mut self) {
+        crate::ff::FfDecoder::flush(self)
     }
 }

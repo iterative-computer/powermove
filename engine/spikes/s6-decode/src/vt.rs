@@ -271,7 +271,7 @@ fn annexb_to_avcc(extradata: &[u8]) -> Result<Vec<u8>> {
 pub fn annexb_to_length_prefixed(b: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(b.len() + 16);
     for n in annexb_nals(b) {
-        if matches!(n[0] & 0x1F, 7 | 8 | 9) {
+        if matches!(n[0] & 0x1F, 7..=9) {
             continue;
         }
         out.extend_from_slice(&(n.len() as u32).to_be_bytes());
@@ -294,7 +294,11 @@ struct Collector {
     count_only: std::sync::atomic::AtomicBool,
     counted: std::sync::atomic::AtomicUsize,
     failed: std::sync::atomic::AtomicUsize,
+    eos_callbacks: std::sync::atomic::AtomicUsize,
 }
+
+/// `sourceFrameRefCon` of end-of-sequence samples (`start_sequence`).
+const EOS_REFCON: usize = 1;
 
 unsafe extern "C" fn on_output(
     refcon: *mut c_void,
@@ -307,6 +311,12 @@ unsafe extern "C" fn on_output(
 ) {
     use std::sync::atomic::Ordering::Relaxed;
     let c = unsafe { &*(refcon as *const Collector) };
+    if _src as usize == EOS_REFCON {
+        // The end-of-sequence sample has no picture; VideoToolbox reports it
+        // as bad data (-12909). Recorded, never surfaced as a frame.
+        c.eos_callbacks.fetch_add(1, Relaxed);
+        return;
+    }
     if c.count_only.load(Relaxed) {
         if status == 0 && !image.is_null() {
             c.counted.fetch_add(1, Relaxed);
@@ -325,8 +335,16 @@ pub struct VtDecoder {
     collector: Box<Collector>,
     timescale: i32,
     annexb: bool,
+    /// H.264 or HEVC: NAL length size of the submitted samples.
+    nal: Option<(NalKind, usize)>,
     pub hardware: bool,
     pub requested: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NalKind {
+    H264,
+    Hevc,
 }
 
 unsafe impl Send for VtDecoder {}
@@ -358,6 +376,7 @@ impl VtDecoder {
                 count_only: Default::default(),
                 counted: Default::default(),
                 failed: Default::default(),
+                eos_callbacks: Default::default(),
             });
             let rec = VTDecompressionOutputCallbackRecord {
                 callback: on_output,
@@ -387,12 +406,20 @@ impl VtDecoder {
             if !hw.is_null() {
                 CFRelease(hw);
             }
+            let atom = |n: &[u8; 4]| p.atoms.iter().find(|a| &a.0 == n).map(|a| a.1.as_slice());
+            let nal = match &p.codec_fcc.to_be_bytes() {
+                b"avc1" if p.annexb => Some((NalKind::H264, 4)),
+                b"avc1" => atom(b"avcC").filter(|c| c.len() > 4).map(|c| (NalKind::H264, (c[4] & 3) as usize + 1)),
+                b"hvc1" => atom(b"hvcC").filter(|c| c.len() > 21).map(|c| (NalKind::Hevc, (c[21] & 3) as usize + 1)),
+                _ => None,
+            };
             Ok(VtDecoder {
                 session,
                 format,
                 collector,
                 timescale: timescale as i32,
                 annexb: p.annexb,
+                nal,
                 hardware,
                 requested: p.format_fcc,
             })
@@ -426,6 +453,40 @@ impl VtDecoder {
         self.submit(pkt, 0)
     }
 
+    /// Submits one sample with asynchronous decompression; `finish` collects
+    /// the output.
+    pub fn decode_async(&mut self, pkt: &Packet) -> Result<OSStatus> {
+        self.submit(pkt, 1 /* kVTDecodeFrame_EnableAsynchronousDecompression */)
+    }
+
+    /// Starts a new coded video sequence before the next sample: a seek
+    /// within the session. VideoToolbox has no reference-flush call, and an
+    /// H.264 decoder keeps its short-term references across a non-IDR I
+    /// picture, so an open-GOP random-access point decoded after unrelated
+    /// pictures builds its reference lists from stale pictures (measured: 35
+    /// of 150 seeks wrong on `h264-opengop.mov`). An end-of-sequence NAL unit
+    /// (H.264 type 10, HEVC type 36) submitted as its own sample ends the
+    /// previous sequence, so the next picture decodes as at the start of a
+    /// stream. Prepending it to the next sample's NAL units does not work.
+    /// Returns the synchronous status; no-op for other codecs.
+    pub fn start_sequence(&mut self) -> Result<OSStatus> {
+        let Some((kind, ls)) = self.nal else { return Ok(0) };
+        let eos: &[u8] = match kind {
+            NalKind::H264 => &[0x0A],
+            NalKind::Hevc => &[36 << 1, 0x01],
+        };
+        let mut v = Vec::with_capacity(ls + eos.len());
+        v.extend_from_slice(&(eos.len() as u64).to_be_bytes()[8 - ls..]);
+        v.extend_from_slice(eos);
+        let timing = Packet { data: vec![], additional: None, pts: 0, dts: None, duration: 0, key: false };
+        self.submit_bytes(&v, &timing, 0, EOS_REFCON)
+    }
+
+    /// End-of-sequence samples submitted so far whose callbacks arrived.
+    pub fn eos_callbacks(&self) -> usize {
+        self.collector.eos_callbacks.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn submit(&mut self, pkt: &Packet, flags: u32) -> Result<OSStatus> {
         let converted;
         let data: &[u8] = if self.annexb {
@@ -434,6 +495,10 @@ impl VtDecoder {
         } else {
             &pkt.data
         };
+        self.submit_bytes(data, pkt, flags, 0)
+    }
+
+    fn submit_bytes(&mut self, data: &[u8], pkt: &Packet, flags: u32, refcon: usize) -> Result<OSStatus> {
         unsafe {
             let mut bb: CMBlockBufferRef = std::ptr::null_mut();
             let st = CMBlockBufferCreateWithMemoryBlock(
@@ -471,7 +536,7 @@ impl VtDecoder {
             ensure!(st == 0, "CMSampleBufferCreateReady: {st}");
             let sb = Cf::from_create(sb as CFTypeRef).unwrap();
             let mut info = 0u32;
-            let st = VTDecompressionSessionDecodeFrame(self.session, sb.as_mut_ptr(), flags, std::ptr::null_mut(), &mut info);
+            let st = VTDecompressionSessionDecodeFrame(self.session, sb.as_mut_ptr(), flags, refcon as *mut c_void, &mut info);
             Ok(st)
         }
     }

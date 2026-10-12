@@ -204,25 +204,28 @@ fn print_summary(r: &run::FileReport) {
         if let Some(e) = &b.error {
             println!("      error: {e}");
         }
-        let rnd = &b.random;
         println!(
-            "      frames {} unique {} | decode-only {:.0} fps (verifying pass {:.0} ms) | random {}/{} (mismatch {:?}, missing {:?}, selection {:?}; leading failures {}, RASL skipped {}) mean {:.2} p95 {:.2} max {:.2} ms, {:.1} pkts avg",
-            b.frames,
-            b.unique_hashes,
-            b.throughput_fps,
-            b.sequential_pass_ms,
-            rnd.matched,
-            rnd.probes,
-            rnd.mismatched,
-            rnd.missing,
-            rnd.selection_mismatches,
-            rnd.leading_failures,
-            rnd.rasl_skipped,
-            rnd.mean_ms,
-            rnd.p95_ms,
-            rnd.max_ms,
-            rnd.mean_packets
+            "      frames {} unique {} | decode-only {:.0} fps (verifying pass {:.0} ms)",
+            b.frames, b.unique_hashes, b.throughput_fps, b.sequential_pass_ms
         );
+        for (label, rnd) in [("random, new session", &b.random), ("random, same session", &b.random_warm)] {
+            println!(
+                "      {label}: {}/{} (mismatch {:?}, missing {:?}, selection {:?}; leading failures {}, RASL skipped {}) mean {:.2} p50 {:.2} p95 {:.2} max {:.2} ms, {:.1} pkts avg, {} max",
+                rnd.matched,
+                rnd.probes,
+                rnd.mismatched,
+                rnd.missing,
+                rnd.selection_mismatches,
+                rnd.leading_failures,
+                rnd.rasl_skipped,
+                rnd.mean_ms,
+                rnd.p50_ms,
+                rnd.p95_ms,
+                rnd.max_ms,
+                rnd.mean_packets,
+                rnd.max_packets
+            );
+        }
         for (label, rc) in [("ref", &b.reference), ("sw", &b.software_crosscheck), ("avf", &b.avfoundation)] {
             if let Some(rc) = rc {
                 print_ref(label, rc, b.frames);

@@ -4,8 +4,9 @@
 //! FFmpeg's libvpx wrapper does; FFmpeg's wrapper allocates from its own pool,
 //! so through FFmpeg those frames need a copy.
 //!
-//! libvpx supports external frame buffers for VP9 only; VP8 with alpha keeps
-//! FFmpeg's libvpx wrapper and its copy.
+//! libvpx supports external frame buffers for VP9 only (VP8 returns
+//! `VPX_CODEC_INCAPABLE`). VP8 with alpha goes through two FFmpeg native VP8
+//! decoders instead (`ffalpha`), which render into the pool.
 
 use super::SwDecoder;
 use super::sys::*;
@@ -40,16 +41,26 @@ unsafe extern "C" fn release_fb(_priv: *mut c_void, fb: *mut vpx_codec_frame_buf
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Codec {
+    Vp8,
+    Vp9,
+}
+
 struct Ctx {
     ctx: Box<vpx_codec_ctx_t>,
 }
 
 impl Ctx {
-    fn new(pool: &Arc<MetalPool>, threads: u32) -> Result<Ctx> {
+    fn new(codec: Codec, pool: &Arc<MetalPool>, threads: u32) -> Result<Ctx> {
         unsafe {
             let mut ctx: Box<vpx_codec_ctx_t> = Box::new(std::mem::zeroed());
             let cfg = vpx_codec_dec_cfg_t { threads, w: 0, h: 0 };
-            let r = vpx_codec_dec_init_ver(&mut *ctx, vpx_codec_vp9_dx(), &cfg, 0, VPX_DECODER_ABI_VERSION as c_int);
+            let iface = match codec {
+                Codec::Vp8 => vpx_codec_vp8_dx(),
+                Codec::Vp9 => vpx_codec_vp9_dx(),
+            };
+            let r = vpx_codec_dec_init_ver(&mut *ctx, iface, &cfg, 0, VPX_DECODER_ABI_VERSION as c_int);
             ensure!(r == VPX_CODEC_OK, "vpx_codec_dec_init: {r}");
             let r = vpx_codec_set_frame_buffer_functions(
                 &mut *ctx,
@@ -59,7 +70,7 @@ impl Ctx {
             );
             if r != VPX_CODEC_OK {
                 vpx_codec_destroy(&mut *ctx);
-                bail!("vpx_codec_set_frame_buffer_functions: {r}");
+                bail!("libvpx {codec:?} rejects external frame buffers (vpx_codec_set_frame_buffer_functions: {r})");
             }
             Ok(Ctx { ctx })
         }
@@ -86,6 +97,7 @@ impl Drop for Ctx {
 }
 
 pub struct VpxDecoder {
+    codec: Codec,
     main: Ctx,
     alpha: Option<Ctx>,
     // Declared last: dropped after both decoders have released their buffers.
@@ -96,10 +108,10 @@ unsafe impl Send for VpxDecoder {}
 
 impl VpxDecoder {
     /// `pool` must come from `MetalPool::new_zeroed` and serve only libvpx.
-    pub fn new(pool: Arc<MetalPool>, alpha: bool, threads: u32) -> Result<Self> {
-        let main = Ctx::new(&pool, threads)?;
-        let alpha = if alpha { Some(Ctx::new(&pool, threads)?) } else { None };
-        Ok(VpxDecoder { main, alpha, pool })
+    pub fn new(codec: Codec, pool: Arc<MetalPool>, alpha: bool, threads: u32) -> Result<Self> {
+        let main = Ctx::new(codec, &pool, threads)?;
+        let alpha = if alpha { Some(Ctx::new(codec, &pool, threads)?) } else { None };
+        Ok(VpxDecoder { codec, main, alpha, pool })
     }
 }
 
@@ -130,7 +142,7 @@ unsafe fn plane(img: *const vpx_image_t, slot: &SlotRef, i: usize, w: usize, h: 
 
 impl SwDecoder for VpxDecoder {
     fn send(&mut self, p: Option<&Packet>, out: &mut Vec<(i64, PoolFrame)>) -> Result<()> {
-        // VP9 has no reordering delay in libvpx's serial decoder: nothing to drain.
+        // No reordering delay in libvpx's serial decoder: nothing to drain.
         let Some(p) = p else { return Ok(()) };
         let Some(img) = self.main.decode(&p.data)? else { return Ok(()) };
         let alpha_img = match (&mut self.alpha, &p.additional) {
@@ -181,7 +193,7 @@ impl SwDecoder for VpxDecoder {
         Ok(())
     }
     fn name(&self) -> String {
-        format!("libvpx-vp9{}", if self.alpha.is_some() { " + alpha decoder" } else { "" })
+        format!("libvpx-{}{}", if self.codec == Codec::Vp9 { "vp9" } else { "vp8" }, if self.alpha.is_some() { " + alpha decoder" } else { "" })
     }
     fn direct(&self) -> bool {
         let _ = &self.pool;
@@ -189,5 +201,10 @@ impl SwDecoder for VpxDecoder {
     }
     fn copies(&self) -> usize {
         0
+    }
+    fn flush(&mut self) {
+        // libvpx has no flush: its serial decoder holds no pending output, and
+        // every random-access point is a keyframe, which resets all reference
+        // state. The warm random-access pass verifies this.
     }
 }

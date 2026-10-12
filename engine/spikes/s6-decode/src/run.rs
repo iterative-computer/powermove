@@ -10,9 +10,10 @@ use crate::time::{self, NominalRate, Rational, SelectionCheck};
 use crate::pool::MetalPool;
 use crate::sw::SwDecoder;
 use crate::sw::dav1d::Dav1dDecoder;
-use crate::sw::vpx::VpxDecoder;
+use crate::sw::ffalpha::FfAlphaDecoder;
+use crate::sw::vpx::{Codec as VpxCodec, VpxDecoder};
 use crate::vt::{self, BufferFacts, VtDecoder, VtPlan};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use md5::{Digest, Md5};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -157,7 +158,11 @@ pub struct BackendReport {
     /// VideoToolbox versus AVFoundation (`AVAssetReader`, edit lists applied the
     /// QuickTime way), aligned by presentation time. MOV/MP4 only.
     pub avfoundation: Option<RefCompare>,
+    /// Random access with a fresh decoder (new session) per probe.
     pub random: RandomReport,
+    /// Random access within one session: flush (software) or idle session
+    /// (VideoToolbox, asynchronous submission), as playback seeks would.
+    pub random_warm: RandomReport,
     pub gpu: GpuReport,
     pub buffer: Option<BufferFacts>,
     pub checks: Vec<String>,
@@ -244,6 +249,56 @@ impl Dec {
             _ => 0,
         }
     }
+
+    /// Prepares the open session for decoding from another random-access
+    /// point (a seek). VideoToolbox sessions are idle after `finish`; an
+    /// end-of-sequence sample drops H.264 and HEVC references (see
+    /// `VtDecoder::start_sequence`). Software decoders flush.
+    fn seek(&mut self) -> Result<()> {
+        match self {
+            Dec::Vt { dec, .. } => {
+                // `S6_NO_EOS` reproduces the stale-reference failure.
+                if std::env::var_os("S6_NO_EOS").is_none() {
+                    let st = dec.as_mut().context("no session")?.start_sequence()?;
+                    ensure!(st == 0, "end-of-sequence sample: OSStatus {st}");
+                }
+            }
+            Dec::Sw { dec, .. } => dec.as_mut().context("no decoder")?.flush(),
+        }
+        Ok(())
+    }
+
+    /// Like `feed`, but VideoToolbox gets every packet asynchronously with one
+    /// wait at the end (how a seek submits a GOP).
+    fn feed_batch(&mut self, pkts: &[Packet], on: &mut dyn FnMut(Event) -> Result<()>, busy: &mut f64) -> Result<()> {
+        match self {
+            Dec::Vt { dec, .. } => {
+                let d = dec.as_mut().context("no session")?;
+                let t = Instant::now();
+                let mut rejected = vec![];
+                for p in pkts {
+                    let st = d.decode_async(p)?;
+                    if st != 0 {
+                        rejected.push((p.pts, st));
+                    }
+                }
+                let frames = d.finish()?;
+                *busy += t.elapsed().as_secs_f64();
+                for f in frames {
+                    rejected.retain(|r| r.0 != f.pts);
+                    match f.buffer {
+                        Some(b) if f.status == 0 => on(Event::Frame(Decoded { pts: f.pts, px: Pixels::Vt(b) }))?,
+                        _ => on(Event::Failed { pts: f.pts, status: f.status })?,
+                    }
+                }
+                for (pts, status) in rejected {
+                    on(Event::Failed { pts, status })?;
+                }
+                Ok(())
+            }
+            Dec::Sw { .. } => self.feed(pkts, on, busy),
+        }
+    }
 }
 
 pub fn build_index(path: &Path, inp: &Input) -> Result<FrameIndex> {
@@ -270,12 +325,12 @@ pub fn build_index(path: &Path, inp: &Input) -> Result<FrameIndex> {
         NalCodec::H264 if c.len() > 4 => Some((c[4] & 3) as usize + 1),
         _ => None,
     };
-    if let Some((codec, c)) = config {
-        if let Some(ls) = length_size(codec, &c) {
-            let t0 = Instant::now();
-            idx.mark_nal_types(path, codec, ls)?;
-            idx.stats.build_ms += t0.elapsed().as_secs_f64() * 1e3;
-        }
+    if let Some((codec, c)) = config
+        && let Some(ls) = length_size(codec, &c)
+    {
+        let t0 = Instant::now();
+        idx.mark_nal_types(path, codec, ls)?;
+        idx.stats.build_ms += t0.elapsed().as_secs_f64() * 1e3;
     }
     Ok(idx)
 }
@@ -545,11 +600,25 @@ fn run_file_inner(path: &Path, gpu: &Gpu, opt: &Options, rep: &mut FileReport) -
         let make = move || -> Result<Box<dyn SwDecoder>> { Ok(Box::new(Dav1dDecoder::new(pool.clone(), threads)?)) };
         backends.push(("dav1d".into(), Ok(Dec::Sw { make: Box::new(make), dec: None, copies: 0 })));
     }
-    if info.codec == "vp9" && info.alpha_mode {
+    if matches!(info.codec.as_str(), "vp8" | "vp9") && info.alpha_mode {
+        let codec = if info.codec == "vp9" { VpxCodec::Vp9 } else { VpxCodec::Vp8 };
         let pool = MetalPool::new_zeroed(gpu.pool.device());
         let threads = opt.threads.max(0) as u32;
-        let make = move || -> Result<Box<dyn SwDecoder>> { Ok(Box::new(VpxDecoder::new(pool.clone(), true, threads)?)) };
-        backends.push(("libvpx".into(), Ok(Dec::Sw { make: Box::new(make), dec: None, copies: 0 })));
+        // Probe once: libvpx supports external frame buffers for VP9 only.
+        match VpxDecoder::new(codec, pool.clone(), true, threads) {
+            Ok(_) => {
+                let make = move || -> Result<Box<dyn SwDecoder>> {
+                    Ok(Box::new(VpxDecoder::new(codec, pool.clone(), true, threads)?))
+                };
+                backends.push(("libvpx".into(), Ok(Dec::Sw { make: Box::new(make), dec: None, copies: 0 })));
+            }
+            Err(e) => backends.push(("libvpx".into(), Err(format!("{e:#}; two FFmpeg native decoders are the zero-copy path")))),
+        }
+        // Color and alpha through two FFmpeg native decoders (direct rendering).
+        let alpha_inp = Input::open(path)?;
+        let (pool, threads) = (gpu.pool.clone(), opt.threads);
+        let make = move || -> Result<Box<dyn SwDecoder>> { Ok(Box::new(FfAlphaDecoder::new(&alpha_inp, pool.clone(), threads)?)) };
+        backends.push(("FFmpeg native + alpha".into(), Ok(Dec::Sw { make: Box::new(make), dec: None, copies: 0 })));
     }
 
     for (name, dec) in backends {
@@ -563,6 +632,8 @@ fn run_file_inner(path: &Path, gpu: &Gpu, opt: &Options, rep: &mut FileReport) -
                 br.ok = br.error.is_none()
                     && br.random.matched == br.random.probes
                     && br.random.selection_mismatches.is_empty()
+                    && br.random_warm.matched == br.random_warm.probes
+                    && br.random_warm.probes == br.random.probes
                     && br.frames == idx.order.len()
                     && br.avfoundation.as_ref().is_none_or(|a| a.ok(br.frames));
                 br.zero_copy = opt.gpu && br.error.is_none() && br.gpu.frames == br.frames && br.gpu.aliased == br.gpu.frames;
@@ -785,81 +856,11 @@ fn run_backend(
     }
 
     // Random access: composition frames in shuffled order. Rule 7 picks the
-    // source frame for each, which is decoded from its random-access point by a
-    // fresh decoder and compared with the sequential decode of that frame.
-    let tb = idx.timebase;
-    let pts = idx.presented_pts();
-    let grid = time::grid(&pts, tb, nominal.rate);
-    let comp = (*grid.last().unwrap() + 1) as usize;
-    let order = shuffled(comp, 0x5eed_0006 ^ comp as u64);
-    let probes_n = opt.random_limit.map(|l| l.min(comp)).unwrap_or(comp);
-    let mut times = vec![];
-    let mut fed = vec![];
-    for &cn in order.iter().take(probes_n) {
-        br.random.probes += 1;
-        let (tn, td) = time::frame_time(pts[0], tb, nominal.rate, cn as i64);
-        let Some(target) = time::select_frame(&pts, tb, nominal.rate, tn, td) else {
-            br.random.missing.push(cn);
-            continue;
-        };
-        if Some(target) != time::expected_frame(&grid, cn as i64) {
-            br.random.selection_mismatches.push(cn);
-        }
-        let plan = idx.decode_plan(target);
-        br.random.rasl_skipped += idx.decode_range(target).count() - plan.len();
-        let want = idx.samples[idx.order[target]].pts;
-        let t0 = Instant::now();
-        let pkts = reader.read(idx, &plan)?;
-        dec.reset()?;
-        let mut got: Option<String> = None;
-        let mut target_failed = None;
-        let mut leading = 0;
-        let mut busy = 0.0;
-        let mut hit_ms = 0.0;
-        let trace = std::env::var_os("S6_TRACE").is_some();
-        if trace {
-            eprintln!("probe comp {cn} -> frame {target} (pts {want}), samples {plan:?}");
-        }
-        dec.feed(
-            &pkts,
-            &mut |ev| {
-                if trace {
-                    match &ev {
-                        Event::Frame(d) => eprintln!("  frame pts {}", d.pts),
-                        Event::Failed { pts, status } => eprintln!("  failed pts {pts} status {status}"),
-                    }
-                }
-                match ev {
-                    Event::Frame(d) if d.pts == want && got.is_none() => {
-                        hit_ms = t0.elapsed().as_secs_f64() * 1e3;
-                        got = Some(d.md5()?);
-                    }
-                    Event::Frame(_) => {}
-                    Event::Failed { pts, status } if pts == want => target_failed = Some(status),
-                    Event::Failed { .. } => leading += 1,
-                }
-                Ok(())
-            },
-            &mut busy,
-        )?;
-        br.random.leading_failures += leading;
-        times.push(hit_ms);
-        fed.push(pkts.len());
-        match (got, target_failed) {
-            (Some(h), _) if h == seq[target] => br.random.matched += 1,
-            (Some(_), _) => br.random.mismatched.push(cn),
-            (None, _) => br.random.missing.push(cn),
-        }
-    }
-    br.random.mean_packets = fed.iter().sum::<usize>() as f64 / fed.len().max(1) as f64;
-    br.random.max_packets = fed.iter().copied().max().unwrap_or(0);
-    br.random.mean_ms = times.iter().sum::<f64>() / times.len().max(1) as f64;
-    br.random.p50_ms = pct(&mut times, 0.5);
-    br.random.p95_ms = pct(&mut times, 0.95);
-    br.random.max_ms = pct(&mut times, 1.0);
-    br.random.mismatched.truncate(20);
-    br.random.missing.truncate(20);
-    br.random.selection_mismatches.truncate(20);
+    // source frame for each, which is decoded from its random-access point and
+    // compared with the sequential decode of that frame: first with a fresh
+    // decoder per probe, then within one session.
+    br.random = random_pass(idx, nominal, dec, &mut reader, &seq, opt.random_limit, false)?;
+    br.random_warm = random_pass(idx, nominal, dec, &mut reader, &seq, opt.random_limit, true)?;
 
     br.gpu = GpuReport {
         frames: gpu_frames,
@@ -874,6 +875,102 @@ fn run_backend(
 
     content_checks(info, probes, &kept, br);
     Ok(())
+}
+
+/// One random-access pass over the composition frames (shuffled, the same
+/// order for both passes). `warm` keeps one decoder open and seeks within it.
+#[allow(clippy::too_many_arguments)]
+fn random_pass(
+    idx: &FrameIndex,
+    nominal: &NominalRate,
+    dec: &mut Dec,
+    reader: &mut PacketReader,
+    seq: &[String],
+    limit: Option<usize>,
+    warm: bool,
+) -> Result<RandomReport> {
+    let mut r = RandomReport::default();
+    let tb = idx.timebase;
+    let pts = idx.presented_pts();
+    let grid = time::grid(&pts, tb, nominal.rate);
+    let comp = (*grid.last().unwrap() + 1) as usize;
+    let order = shuffled(comp, 0x5eed_0006 ^ comp as u64);
+    let probes_n = limit.map(|l| l.min(comp)).unwrap_or(comp);
+    let trace = std::env::var_os("S6_TRACE").is_some();
+    let mut times = vec![];
+    let mut fed = vec![];
+    if warm {
+        dec.reset()?;
+    }
+    for &cn in order.iter().take(probes_n) {
+        r.probes += 1;
+        let (tn, td) = time::frame_time(pts[0], tb, nominal.rate, cn as i64);
+        let Some(target) = time::select_frame(&pts, tb, nominal.rate, tn, td) else {
+            r.missing.push(cn);
+            continue;
+        };
+        if Some(target) != time::expected_frame(&grid, cn as i64) {
+            r.selection_mismatches.push(cn);
+        }
+        let plan = idx.decode_plan(target);
+        r.rasl_skipped += idx.decode_range(target).count() - plan.len();
+        let want = idx.samples[idx.order[target]].pts;
+        let t0 = Instant::now();
+        let pkts = reader.read(idx, &plan)?;
+        if warm {
+            dec.seek()?;
+        } else {
+            dec.reset()?;
+        }
+        let mut got: Option<String> = None;
+        let mut leading = 0;
+        let mut busy = 0.0;
+        let mut hit_ms = 0.0;
+        if trace {
+            eprintln!("probe{} comp {cn} -> frame {target} (pts {want}), samples {plan:?}", if warm { " (warm)" } else { "" });
+        }
+        let mut on = |ev: Event| -> Result<()> {
+            if trace {
+                match &ev {
+                    Event::Frame(d) => eprintln!("  frame pts {}", d.pts),
+                    Event::Failed { pts, status } => eprintln!("  failed pts {pts} status {status}"),
+                }
+            }
+            match ev {
+                Event::Frame(d) if d.pts == want && got.is_none() => {
+                    hit_ms = t0.elapsed().as_secs_f64() * 1e3;
+                    got = Some(d.md5()?);
+                }
+                Event::Frame(_) => {}
+                Event::Failed { pts, .. } if pts == want => {}
+                Event::Failed { .. } => leading += 1,
+            }
+            Ok(())
+        };
+        if warm {
+            dec.feed_batch(&pkts, &mut on, &mut busy)?;
+        } else {
+            dec.feed(&pkts, &mut on, &mut busy)?;
+        }
+        r.leading_failures += leading;
+        times.push(hit_ms);
+        fed.push(pkts.len());
+        match got {
+            Some(h) if h == seq[target] => r.matched += 1,
+            Some(_) => r.mismatched.push(cn),
+            None => r.missing.push(cn),
+        }
+    }
+    r.mean_packets = fed.iter().sum::<usize>() as f64 / fed.len().max(1) as f64;
+    r.max_packets = fed.iter().copied().max().unwrap_or(0);
+    r.mean_ms = times.iter().sum::<f64>() / times.len().max(1) as f64;
+    r.p50_ms = pct(&mut times, 0.5);
+    r.p95_ms = pct(&mut times, 0.95);
+    r.max_ms = pct(&mut times, 1.0);
+    r.mismatched.truncate(20);
+    r.missing.truncate(20);
+    r.selection_mismatches.truncate(20);
+    Ok(r)
 }
 
 /// Content checks on the normalized GPU output of the fixture probes: the

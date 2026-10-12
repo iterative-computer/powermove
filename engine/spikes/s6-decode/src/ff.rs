@@ -380,12 +380,26 @@ pub struct FfDecoder {
     pkt: *mut ff::AVPacket,
     frame: *mut ff::AVFrame,
     pub name: String,
+    /// The decoder writes its output into `get_buffer2` frames itself.
     pub dr1: bool,
+    /// The wrapper decodes into the library's own memory and copies each frame
+    /// into a `get_buffer2` frame (FFmpeg's VP8 libvpx wrapper:
+    /// `libvpxdec.c` calls `ff_get_buffer` then `av_image_copy2`). The frame
+    /// lands in a pool slot, so the copy is invisible to the slot lookup and is
+    /// declared here instead.
+    pub internal_copy: bool,
+    /// Frames copied, by the spike (decoders that ignore `get_buffer2`) or
+    /// inside the wrapper (`internal_copy`).
     pub copies: usize,
     pub frames: usize,
 }
 
 unsafe impl Send for FfDecoder {}
+
+/// FFmpeg decoders that advertise DR1 but copy from the library's own frame
+/// into the `get_buffer2` frame (checked against FFmpeg 9.0.2's
+/// `libavcodec/libvpxdec.c`: VP8 has no external frame buffers in libvpx).
+const INTERNAL_COPY: [&str; 1] = ["libvpx"];
 
 struct Opaque {
     pool: Arc<MetalPool>,
@@ -474,14 +488,17 @@ impl FfDecoder {
                 (*ctx).get_buffer2 = Some(get_buffer2);
             }
             check(ff::avcodec_open2(ctx, codec, ptr::null_mut()), "open decoder")?;
-            let dr1 = (*codec).capabilities & ff::AV_CODEC_CAP_DR1 as c_int != 0;
+            let name = CStr::from_ptr((*codec).name).to_string_lossy().into_owned();
+            let internal_copy = INTERNAL_COPY.contains(&name.as_str());
+            let dr1 = (*codec).capabilities & ff::AV_CODEC_CAP_DR1 as c_int != 0 && !internal_copy;
             Ok(FfDecoder {
                 ctx,
                 pool,
                 pkt: ff::av_packet_alloc(),
                 frame: ff::av_frame_alloc(),
-                name: CStr::from_ptr((*codec).name).to_string_lossy().into_owned(),
+                name,
                 dr1,
+                internal_copy,
                 copies: 0,
                 frames: 0,
             })
@@ -537,7 +554,8 @@ impl FfDecoder {
     }
 
     /// Wraps a frame; copies it into a pool slot only if the decoder did not
-    /// render into one (decoders without DR1: libdav1d, libvpx).
+    /// render into one (decoders that ignore `get_buffer2`: libdav1d,
+    /// libvpx-vp9).
     fn adopt(&mut self, f: *mut ff::AVFrame) -> Result<PoolFrame> {
         unsafe {
             self.frames += 1;
@@ -550,12 +568,16 @@ impl FfDecoder {
             let decoder_ptrs: Vec<usize> = (0..layout.planes.len()).map(|p| (*f).data[p] as usize).collect();
             let buf0 = (*f).buf[0];
             let (slot, copied) = if let Some(slot) = (!buf0.is_null()).then(|| self.pool.find((*buf0).data)).flatten() {
-                // The decoder rendered into our slot (direct rendering).
+                // The frame is in our slot: rendered there by the decoder, or
+                // copied there by the wrapper (`internal_copy`).
                 for p in 0..layout.planes.len() {
                     layout.planes[p].offset = (*f).data[p].offset_from(slot.ptr()) as usize;
                     layout.planes[p].stride = (*f).linesize[p] as usize;
                 }
-                (slot, false)
+                if self.internal_copy {
+                    self.copies += 1;
+                }
+                (slot, self.internal_copy)
             } else {
                 // Not ours: one CPU copy into Metal-shared memory.
                 let align = [0 as c_int; 8];

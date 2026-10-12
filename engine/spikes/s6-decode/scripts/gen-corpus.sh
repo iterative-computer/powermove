@@ -82,6 +82,11 @@ ff -f lavfi -i "testsrc2=size=$SMALL:rate=30,format=yuva420p,geq=lum='lum(X,Y)':
   -frames:v 60 -c:v libvpx-vp9 -pix_fmt yuva420p -g 30 -b:v 1M -deadline good -cpu-used 4 \
   -auto-alt-ref 0 vp9-alpha.webm
 
+# VP8 with alpha (libvpx; libvpx has no external frame buffers for VP8).
+ff -f lavfi -i "testsrc2=size=$SMALL:rate=30,format=yuva420p,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='mod(X+N*4,256)'" \
+  -frames:v 60 -c:v libvpx -pix_fmt yuva420p -g 30 -b:v 1M -deadline good -cpu-used 4 \
+  -auto-alt-ref 0 vp8-alpha.webm
+
 # AV1 10-bit (VideoToolbox AV1 on M3 and later; dav1d otherwise).
 ff -f lavfi -i "$(src 30 $SMALL 0 yuv420p10le)" -frames:v 90 -c:v libsvtav1 -g 30 \
   -preset 8 -pix_fmt yuv420p10le av1-10bit.mp4

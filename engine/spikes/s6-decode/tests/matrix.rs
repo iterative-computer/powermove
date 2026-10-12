@@ -44,10 +44,12 @@ fn videos(dir: &Path) -> Vec<PathBuf> {
     v
 }
 
-/// Backends whose frames are allowed to be copied: FFmpeg's wrappers that
-/// ignore get_buffer2 (the direct dav1d and libvpx sessions cover them).
+/// Backends whose frames are allowed to be copied: FFmpeg's libdav1d and
+/// libvpx wrappers (they decode into their own memory). The direct dav1d and
+/// libvpx-vp9 sessions and the paired native VP8/VP9 decoders cover those
+/// streams without a copy; `zero_copy_path` checks that one exists.
 fn copy_allowed(detail: &str) -> bool {
-    detail.starts_with("libdav1d") || detail.starts_with("libvpx")
+    detail.starts_with("libdav1d") || detail.starts_with("libvpx ") || detail.starts_with("libvpx-vp9 (own")
 }
 
 /// Fixture content checks known to fail for a reason outside the decoder.
@@ -62,16 +64,14 @@ fn check(r: &FileReport, failures: &mut Vec<String>) {
     for e in &r.errors {
         failures.push(format!("{name}: {e}"));
     }
-    if let Some(ix) = &r.index {
-        if !ix.demux_crosscheck_ok && ix.stats.edit_list.is_none() {
+    if let Some(ix) = &r.index
+        && !ix.demux_crosscheck_ok && ix.stats.edit_list.is_none() {
             failures.push(format!("{name}: index differs from FFmpeg's demuxer: {}", ix.demux_crosscheck));
         }
-    }
-    if let Some(s) = &r.selection {
-        if s.rule7_mismatches != 0 {
+    if let Some(s) = &r.selection
+        && s.rule7_mismatches != 0 {
             failures.push(format!("{name}: rule 7 selected the wrong frame {} times", s.rule7_mismatches));
         }
-    }
     let mut decoded = 0;
     for b in &r.backends {
         if b.frames == 0 && b.error.is_none() {
@@ -85,12 +85,21 @@ fn check(r: &FileReport, failures: &mut Vec<String>) {
         }
         if !b.ok {
             failures.push(format!(
-                "{tag}: decode checks failed (random {}/{}, mismatched {:?}, missing {:?}, selection {:?})",
-                b.random.matched, b.random.probes, b.random.mismatched, b.random.missing, b.random.selection_mismatches
+                "{tag}: decode checks failed (random {}/{}, mismatched {:?}, missing {:?}, selection {:?}; same session {}/{}, mismatched {:?}, missing {:?})",
+                b.random.matched,
+                b.random.probes,
+                b.random.mismatched,
+                b.random.missing,
+                b.random.selection_mismatches,
+                b.random_warm.matched,
+                b.random_warm.probes,
+                b.random_warm.mismatched,
+                b.random_warm.missing
             ));
         }
-        if b.random.probes != r.selection.as_ref().map(|s| s.composition_frames).unwrap_or(0) {
-            failures.push(format!("{tag}: probed {} composition frames, not all", b.random.probes));
+        let comp = r.selection.as_ref().map(|s| s.composition_frames).unwrap_or(0);
+        if b.random.probes != comp || b.random_warm.probes != comp {
+            failures.push(format!("{tag}: probed {} and {} of {comp} composition frames", b.random.probes, b.random_warm.probes));
         }
         let known = KNOWN_CONTENT.iter().find(|k| k.0 == name);
         for c in b.checks.iter().filter(|c| c.contains("FAIL")) {
@@ -114,14 +123,18 @@ fn check(r: &FileReport, failures: &mut Vec<String>) {
                 failures.push(format!("{tag}: {} matched {}/{} (offset {})", rc.reference, rc.matched, b.frames, rc.offset));
             }
         }
-        if let Some(a) = &b.avfoundation {
-            if !a.ok(b.frames) {
+        if let Some(a) = &b.avfoundation
+            && !a.ok(b.frames) {
                 failures.push(format!("{tag}: {} matched {}/{} {:?}", a.reference, a.matched, b.frames, a.error));
             }
-        }
     }
     if decoded == 0 {
         failures.push(format!("{name}: no backend decoded it"));
+    }
+    // Every file needs at least one passing backend that reached wgpu without
+    // a copy.
+    if !r.backends.iter().any(|b| b.ok && b.zero_copy) {
+        failures.push(format!("{name}: no zero-copy backend passed"));
     }
     for c in &r.cross_backend {
         if c.matched != c.frames {

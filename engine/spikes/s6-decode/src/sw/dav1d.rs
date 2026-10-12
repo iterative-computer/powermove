@@ -33,7 +33,7 @@ unsafe extern "C" fn alloc_picture(pic: *mut Dav1dPicture, cookie: *mut c_void) 
             let v = v.div_ceil(ALIGN) * ALIGN;
             // As dav1d's default allocator: avoid strides that are multiples of
             // 1024, which alias cache sets across superblock rows.
-            if v % 1024 == 0 { v + ALIGN } else { v }
+            if v.is_multiple_of(1024) { v + ALIGN } else { v }
         };
         let y_stride = round(aligned_w << hbd);
         let uv_stride = if has_chroma { round((aligned_w >> ss_hor) << hbd) } else { 0 };
@@ -191,6 +191,9 @@ impl SwDecoder for Dav1dDecoder {
     }
     fn name(&self) -> String {
         "dav1d".into()
+    }
+    fn flush(&mut self) {
+        unsafe { dav1d_flush(self.ctx) }
     }
     fn direct(&self) -> bool {
         true
