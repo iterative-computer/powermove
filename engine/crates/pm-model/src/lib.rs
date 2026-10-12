@@ -6,6 +6,7 @@
 //! * [`patch`]: leaf patches with the exact semantics of `src/shared/patch.ts`.
 //! * [`ops`]: id-keyed structural operations (order, insert, delete) and
 //!   their generator, alongside leaf patches.
+//! * [`binary`]: the canonical binary patch format (contract 5, `canonicalV1`).
 //! * [`doc`]: the revisioned document tree with id-keyed reconciliation.
 //! * [`container`]: read-only JSON, PMV3, and PMV4 project file readers.
 //! * [`ingest`]: `v1_ingest`, float seconds to ticks at the document boundary.
@@ -14,6 +15,7 @@
 //!   uniformly) and the legacy composition helpers.
 #![forbid(unsafe_code)]
 
+pub mod binary;
 pub mod canonical;
 pub mod container;
 pub mod doc;
