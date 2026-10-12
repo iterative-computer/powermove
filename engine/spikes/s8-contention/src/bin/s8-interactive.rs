@@ -216,9 +216,13 @@ struct Summary {
     layers: u32,
     blur_radius: i32,
     realtime_thread: bool,
-    /// `display` (CVDisplayLink vsyncs) or `timer` (free-running absolute timer).
+    /// `grid` (absolute timer on the vsync grid), `display` (every k-th CVDisplayLink
+    /// callback), or `timer` (free-running absolute timer).
     clock: &'static str,
+    /// Refresh period measured from display-link callbacks before the run.
     display_refresh_ms: Option<f64>,
+    /// CoreVideo's nominal refresh period.
+    nominal_refresh_ms: Option<f64>,
     refreshes_per_frame: Option<u64>,
     gpu_priority: Option<usize>,
     frames_measured: usize,
@@ -295,15 +299,23 @@ fn run(args: &Args, g: gpu::Gpu, presenter: Option<(Presenter, String, bool)>) {
     let realtime = !args.flag("no-rt");
     let raw_path = args.str("raw").map(str::to_string);
     let fifo = args.str("signal-fifo").map(str::to_string);
-    let clock_kind = args.string_or("clock", "display");
+    let clock_kind = args.string_or("clock", "grid");
     assert!((1..=8).contains(&layers));
 
-    // Display-link clock: frames start on every k-th vsync of the main display.
-    let dl = match clock_kind.as_str() {
-        "display" => Some(DisplayLink::start().expect("display link")),
+    // `grid` (default): an absolute timer on the panel's vsync grid. It is anchored once
+    // on a display-link vsync (`output` host time, which is exact on an idle machine) and
+    // advances by k nominal refreshes per frame. `display`: frames start on every k-th
+    // display-link callback; under GPU load the callbacks on this machine stray by
+    // several milliseconds and arrive at ~114 Hz instead of 120 Hz (`vsync_probe`
+    // example), so deadlines measured against them are noisy. `timer`: a free-running
+    // 60 Hz timer with no display at all.
+    let grid = clock_kind == "grid";
+    let mut dl = match clock_kind.as_str() {
+        "display" | "grid" => Some(DisplayLink::start().expect("display link")),
         "timer" => None,
-        c => panic!("--clock display|timer, not {c}"),
+        c => panic!("--clock grid|display|timer, not {c}"),
     };
+    let nominal_ns = dl.as_ref().map(|d| d.refresh_ns).filter(|r| r.is_finite());
     let refresh_ns = dl.as_ref().map(|d| d.measure_refresh(120));
     let k = dl.as_ref().zip(refresh_ns).map(|(d, r)| {
         // Pick k from the nominal period when CoreVideo reports one.
@@ -312,8 +324,10 @@ fn run(args: &Args, g: gpu::Gpu, presenter: Option<(Presenter, String, bool)>) {
             .unwrap_or_else(|| panic!("{fps} fps is not a whole number of {:.3} ms refreshes", basis / 1e6))
     });
     if let (Some(r), Some(k)) = (refresh_ns, k) {
-        // Deadlines follow the panel's measured rate, not the nominal content rate.
-        fps = 1e9 / (r * k as f64);
+        // Deadlines follow the panel's rate, not the nominal content rate: the nominal
+        // refresh on the grid clock, the measured one on the display-link clock.
+        let basis = if grid { nominal_ns.unwrap_or(r) } else { r };
+        fps = 1e9 / (basis * k as f64);
     }
     let gpu_priority = match args.str("gpu-priority") {
         Some(p) => Some(gpu::set_private_gpu_priority(&g.queue, p.parse().unwrap()).expect("gpu priority")),
@@ -698,7 +712,18 @@ fn run(args: &Args, g: gpu::Gpu, presenter: Option<(Presenter, String, bool)>) {
     // refreshes between successive callbacks (robust to a missed callback).
     let mut vs_idx: u64 = 0;
     let mut vs_prev: u64 = 0;
+    let frame_ns = 1e9 / fps;
     let t0 = match &dl {
+        Some(d) if grid => {
+            while d.rx.try_recv().is_ok() {}
+            let v = d.rx.recv().expect("vsync");
+            // First grid point at least 2 ms ahead.
+            let mut t = v.output_ns as f64;
+            while t < (clock::now_ns() + 2_000_000) as f64 {
+                t += frame_ns;
+            }
+            t as u64
+        }
         Some(d) => {
             while d.rx.try_recv().is_ok() {}
             let v = d.rx.recv().expect("vsync");
@@ -707,8 +732,17 @@ fn run(args: &Args, g: gpu::Gpu, presenter: Option<(Presenter, String, bool)>) {
         }
         None => clock::now_ns() + 200_000_000,
     };
+    if grid {
+        // The link was only needed for the anchor.
+        drop(dl.take());
+    }
     for n in 0..total_frames {
         let tick = match (&dl, refresh_ns, k) {
+            _ if grid => {
+                let tick = t0 + (n as f64 * frame_ns).round() as u64;
+                clock::sleep_until_ns(tick);
+                tick
+            }
             (Some(d), Some(r), Some(k)) => {
                 let target = n * k;
                 while vs_idx < target {
@@ -892,7 +926,7 @@ fn run(args: &Args, g: gpu::Gpu, presenter: Option<(Presenter, String, bool)>) {
         let ticks: std::collections::HashMap<u64, u64> = recs.iter().map(|(s, _)| (s.n, s.tick)).collect();
         let shown: Vec<(u64, u64)> = log.iter().copied().filter(|(_, t)| *t > 0).collect();
         let submitted_measured = recs.iter().filter(|(s, _)| s.n >= warm_frames).count();
-        let half_refresh = refresh_ns.unwrap_or(period_ns as f64) / 2.0;
+        let half_refresh = nominal_ns.or(refresh_ns).unwrap_or(period_ns as f64) / 2.0;
         let intervals: Vec<f64> = shown.windows(2).map(|w| w[1].1 as f64 - w[0].1 as f64).collect();
         let expected: Vec<f64> = shown
             .windows(2)
@@ -931,8 +965,13 @@ fn run(args: &Args, g: gpu::Gpu, presenter: Option<(Presenter, String, bool)>) {
         layers,
         blur_radius: radius,
         realtime_thread: rt_ok,
-        clock: if dl.is_some() { "display" } else { "timer" },
+        clock: match clock_kind.as_str() {
+            "grid" => "grid",
+            "display" => "display",
+            _ => "timer",
+        },
         display_refresh_ms: refresh_ns.map(|r| stats::r(r / 1e6, 4)),
+        nominal_refresh_ms: nominal_ns.map(|r| stats::r(r / 1e6, 4)),
         refreshes_per_frame: k,
         gpu_priority,
         frames_measured: completed.len() + sk,
