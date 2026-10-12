@@ -85,7 +85,7 @@ for (const [name, rs] of Object.entries(paths)) {
     if (!r.compiled) { failureRows.push([name, r.id, `compile failure at ${r.failure?.stage}`, (r.failure?.message ?? '').replace(/\s+/g, ' ').slice(0, 160)]); continue; }
     for (const v of r.variants) {
       if (!v.metrics) failureRows.push([name, r.id, `${v.variant}: no comparison`, v.note ?? '']);
-      else if (!v.metrics.pass) failureRows.push([name, r.id, `${v.variant}: pixel mismatch`, `max ${v.metrics.max_diff_8bit} CV; ${v.metrics.over_one} px > 1 CV (${pct(v.metrics.over_one, v.metrics.pixels)}); max |Δ| ${v.metrics.max_abs_float.toFixed(4)}`]);
+      else if (!v.metrics.pass) failureRows.push([name, r.id, `${v.variant}: pixel mismatch`, `max ${v.metrics.max_diff_8bit} CV; ${v.metrics.over_one} px > 1 CV (${((100 * v.metrics.over_one) / v.metrics.pixels).toFixed(3)}% of ${v.metrics.pixels}; allowance 0.1%); max |Δ| ${v.metrics.max_abs_float.toFixed(4)}`]);
     }
   }
 }
