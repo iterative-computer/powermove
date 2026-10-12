@@ -46,6 +46,7 @@ def row(v):
             str(at.get(k, 0))
             for k in ("late_b_held_start", "late_b_concurrent", "late_behind_own_backlog", "late_other")
         )
+    after_b = "-" if not at else str(at.get("late_backlog_after_b", 0))
     mode = b.get("mode")
     b_fps = f(b.get("export_fps")) if mode and mode != "none" else "-"
     b_cb = f(b.get("cb_gpu_ms", {}).get("p99")) if mode and mode != "none" else "-"
@@ -63,9 +64,18 @@ def row(v):
         "/".join(f"{s['fps']:.0f}" for s in vt) or "-",
         str(bl.get("frames", "-")) if bl else "-",
         attr,
+        after_b,
         "-" if pres is None else f"{pres['irregular_intervals']}",
         f"{100 * v.get('external_gpu_before', 0):.0f}/{100 * v.get('external_gpu_after', 0):.0f}",
+        display(v),
     ]
+
+
+def display(v):
+    """Display state during the scenario: on, locked (on, screen locked), or off."""
+    if v.get("display_asleep"):
+        return "off"
+    return "locked" if v.get("screen_locked") else "on"
 
 
 HEAD = [
@@ -82,8 +92,10 @@ HEAD = [
     "VT fps",
     "Bl fr",
     "late s/c/b/o",
+    "b after B",
     "irr",
     "ext %",
+    "disp",
 ]
 
 
