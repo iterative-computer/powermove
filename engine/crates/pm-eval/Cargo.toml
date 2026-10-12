@@ -11,3 +11,7 @@ publish.workspace = true
 pm-model = { path = "../pm-model" }
 pm-time = { path = "../pm-time" }
 libm.workspace = true
+
+[[example]]
+name = "wasm_identity"
+crate-type = ["cdylib"]
