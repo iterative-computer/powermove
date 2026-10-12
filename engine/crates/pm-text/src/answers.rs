@@ -228,11 +228,10 @@ impl ReplayResolver {
         let key = (blob.to_string(), index);
         self.pending_blobs.remove(&key);
         for (rec, face) in self.records.iter().zip(self.faces.iter_mut()) {
-            if let Some(rec) = rec {
-                if rec.blob == blob && rec.index == index {
+            if let Some(rec) = rec
+                && rec.blob == blob && rec.index == index {
                     *face = Some(rec.info(data.clone(), read_index));
                 }
-            }
         }
         self.fonts.insert(key, (data, read_index));
     }

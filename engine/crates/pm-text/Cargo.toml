@@ -13,7 +13,7 @@ default = ["system", "level2"]
 # answers registry queries from answers and subsets main serves.
 system = []
 # Level 2 layout on Parley.
-level2 = ["dep:parley"]
+level2 = ["dep:parley", "dep:parlance"]
 # The corpus tool (`pm-text-corpus`): fixtures, comparisons, WASM exports.
 corpus-tools = ["system", "dep:flate2"]
 
@@ -28,6 +28,7 @@ serde_json = { workspace = true, features = ["float_roundtrip"] }
 sha2.workspace = true
 thiserror.workspace = true
 parley = { version = "0.12", default-features = false, features = ["std"], optional = true }
+parlance = { version = "0.1.1", default-features = false, optional = true }
 flate2 = { version = "1.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

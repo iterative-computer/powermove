@@ -91,6 +91,8 @@ fn normalize(text: &[u16]) -> (Vec<u16>, bool) {
     let mut i = 0;
     while i < text.len() {
         let (c, n) = next_cp(text, i);
+        // Branches mirror Blink's `NormalizeSpacesAndMirrorChars` order.
+        #[allow(clippy::if_same_then_else)]
         let normalized = if chars::is_normalized_canvas_space(c) {
             chars::SPACE
         } else if chars::is_treat_as_space(c) && c != chars::NO_BREAK_SPACE {

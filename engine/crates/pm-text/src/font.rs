@@ -323,10 +323,13 @@ pub fn prepare(info: &FaceInfo, coords: Vec<(u32, f32)>, size: f32, em_advance: 
     })
 }
 
+/// (face, size bits, coordinate bits).
+type PreparedKey = (FaceId, u32, Vec<(u32, u32)>);
+
 /// Caches prepared faces by (face, size, coordinates).
 #[derive(Default)]
 pub struct PreparedCache {
-    map: HashMap<(FaceId, u32, Vec<(u32, u32)>), Arc<PreparedFace>>,
+    map: HashMap<PreparedKey, Arc<PreparedFace>>,
 }
 
 impl PreparedCache {

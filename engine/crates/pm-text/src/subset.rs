@@ -120,9 +120,9 @@ fn synthesize_hvar(font: &FontRef) -> Result<Vec<u8>, ReadError> {
             for d in tuple.deltas() {
                 let p = d.position as usize;
                 if p == left {
-                    dl = d.x_delta as i32;
+                    dl = d.x_delta;
                 } else if p == right {
-                    dr = d.x_delta as i32;
+                    dr = d.x_delta;
                 }
             }
             let delta = dr - dl;

@@ -438,13 +438,11 @@ impl CoreTextRegistry {
         let cg_ps = unsafe { ct.graphics_font(std::ptr::null_mut()) };
         let cg_ps = objc2_core_graphics::CGFont::post_script_name(Some(&cg_ps)).map(|s| s.to_string()).unwrap_or_default();
         let url = unsafe { ct.attribute(kCTFontURLAttribute) }.and_then(|u| u.downcast::<CFURL>().ok()).and_then(|u| u.to_file_path());
-        if let Some(path) = url {
-            if let Some((data, key)) = self.file_bytes(&path) {
-                if let Some(index) = face_index(data.as_slice(), &[&ps, &cg_ps]) {
+        if let Some(path) = url
+            && let Some((data, key)) = self.file_bytes(&path)
+                && let Some(index) = face_index(data.as_slice(), &[&ps, &cg_ps]) {
                     return (data, index, key);
                 }
-            }
-        }
         // No file (or no matching face in it): rebuild an sfnt from the
         // tables CoreText serves, as Skia does for HarfBuzz on macOS.
         if let Some((d, key)) = self.table_fonts.get(&ps) {
@@ -524,21 +522,19 @@ impl CoreTextRegistry {
     /// `FontPlatformDataCache::GetOrCreateFontPlatformData` with alternates.
     fn get_font_data(&mut self, family: &str, desc: &FontDesc, allow_alternate: bool) -> Option<FaceId> {
         let key = (family.to_string(), desc.weight.to_bits(), desc.italic, desc.size.to_bits());
-        if let Some(r) = self.family_cache.get(&key) {
-            if r.is_some() || !allow_alternate {
+        if let Some(r) = self.family_cache.get(&key)
+            && (r.is_some() || !allow_alternate) {
                 return *r;
             }
-        }
         let mut result = self.create_platform_data(family, desc);
         self.family_cache.insert(key.clone(), result);
-        if result.is_none() && allow_alternate {
-            if let Some(alt) = alternate_family(family) {
+        if result.is_none() && allow_alternate
+            && let Some(alt) = alternate_family(family) {
                 result = self.get_font_data(alt, desc, false);
                 if result.is_some() {
                     self.family_cache.insert(key, result);
                 }
             }
-        }
         result
     }
 
@@ -697,8 +693,8 @@ impl CoreTextRegistry {
         let desired_traits = Self::desired_traits(desc);
         let desired_weight = desc.weight as i32;
         let mut found = self.best_style_match_ns(family, desired_traits, desired_weight, size);
-        if found.is_none() {
-            if let Some(ps) = self.match_by_postscript_ns(family, size) {
+        if found.is_none()
+            && let Some(ps) = self.match_by_postscript_ns(family, size) {
                 // NSFontTraitMask: italic 1, bold 2 (same bits as CoreText for these).
                 let desired_ns = desired_traits & (TRAIT_ITALIC | TRAIT_BOLD);
                 let traits = self.fm.traitsOfFont(&ps).0 as u32;
@@ -709,7 +705,6 @@ impl CoreTextRegistry {
                 let fam = ps.familyName().map(|s| s.to_string()).unwrap_or_default();
                 return self.best_style_match_ns(&fam, desired_traits, desired_weight, size);
             }
-        }
         if found.is_none() {
             self.unavailable.insert(family.to_string());
         }
@@ -727,11 +722,10 @@ impl CoreTextRegistry {
         if desc.weight >= BOLD_THRESHOLD {
             traits |= TRAIT_BOLD;
         }
-        if traits != 0 {
-            if let Some(f) = unsafe { font.copy_with_symbolic_traits(size, std::ptr::null(), CTFontSymbolicTraits(traits), CTFontSymbolicTraits(traits)) } {
+        if traits != 0
+            && let Some(f) = unsafe { font.copy_with_symbolic_traits(size, std::ptr::null(), CTFontSymbolicTraits(traits), CTFontSymbolicTraits(traits)) } {
                 font = f;
             }
-        }
         let mut weight = desc.weight;
         if weight == NORMAL_WEIGHT as f32 {
             return Some(font);
@@ -743,11 +737,10 @@ impl CoreTextRegistry {
                 let id = axis.get(unsafe { kCTFontVariationAxisIdentifierKey }).and_then(|v| num_i64(&v));
                 let min = axis.get(unsafe { kCTFontVariationAxisMinimumValueKey }).and_then(|v| num_f32(&v));
                 let max = axis.get(unsafe { kCTFontVariationAxisMaximumValueKey }).and_then(|v| num_f32(&v));
-                if let (Some(id), Some(min), Some(max)) = (id, min, max) {
-                    if id as u32 == u32::from_be_bytes(*b"wght") {
+                if let (Some(id), Some(min), Some(max)) = (id, min, max)
+                    && id as u32 == u32::from_be_bytes(*b"wght") {
                         weight = weight.clamp(min, max);
                     }
-                }
             }
         }
         let wght = CFNumber::new_i64(u32::from_be_bytes(*b"wght") as i64);
@@ -803,8 +796,8 @@ impl CoreTextRegistry {
         let mut sub_traits = symbolic(&substitute);
         let sub_weight = ct_font_weight(&substitute);
         let mask = IMPORTANT_TRAITS;
-        if (traits & mask) != (sub_traits & mask) || weight != sub_weight {
-            if let Some(best) = copy_with_traits_and_weight(&substitute, traits, weight, size) {
+        if ((traits & mask) != (sub_traits & mask) || weight != sub_weight)
+            && let Some(best) = copy_with_traits_and_weight(&substitute, traits, weight, size) {
                 let best_traits = symbolic(&best);
                 let best_weight = ct_font_weight(&best);
                 let charset: CFRetained<CFCharacterSet> = unsafe { best.character_set() };
@@ -813,7 +806,6 @@ impl CoreTextRegistry {
                     sub_traits = symbolic(&substitute);
                 }
             }
-        }
         let synthetic_bold = traits & TRAIT_BOLD != 0 && sub_traits & TRAIT_BOLD == 0;
         let synthetic_italic = traits & TRAIT_ITALIC != 0 && sub_traits & TRAIT_ITALIC == 0;
         Some(self.intern(substitute, synthetic_bold, synthetic_italic, None))

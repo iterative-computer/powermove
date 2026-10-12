@@ -399,11 +399,10 @@ impl<'a> ScriptRunIterator<'a> {
         for (depth, idx) in (0..self.brackets.len()).rev().enumerate() {
             if self.brackets[idx].ch == target {
                 let mut script = self.brackets[idx].script;
-                if is_han_script(script) {
-                    if let Some(&h) = self.current.iter().find(|&&s| is_han_script(s)) {
+                if is_han_script(script)
+                    && let Some(&h) = self.current.iter().find(|&&s| is_han_script(s)) {
                         script = h;
                     }
-                }
                 if script != Script::Common {
                     self.next = vec![script];
                 }

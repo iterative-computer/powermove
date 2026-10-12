@@ -64,13 +64,11 @@ impl<R: FontResolver> FontResolver for FallbackCached<R> {
         } else {
             None
         };
-        if let Some(k) = &key {
-            if let Some(&cached) = self.map.get(k) {
-                if has_glyph(self.inner.face(cached), ch) {
+        if let Some(k) = &key
+            && let Some(&cached) = self.map.get(k)
+                && has_glyph(self.inner.face(cached), ch) {
                     return Some(cached);
                 }
-            }
-        }
         let found = self.inner.fallback_for_char(desc, ch, primary, emoji);
         if let (Some(k), Some(f)) = (key, found) {
             // WTF::HashMap::insert keeps an existing entry.

@@ -368,11 +368,10 @@ impl<'r> Shaper<'r> {
             return None;
         }
         let mut idx = 0;
-        if hint.len() > 1 {
-            if let Some(i) = (1..hint.len()).find(|&i| chars::has_likely_script(hint[i])) {
+        if hint.len() > 1
+            && let Some(i) = (1..hint.len()).find(|&i| chars::has_likely_script(hint[i])) {
                 idx = i;
             }
-        }
         let ch = hint[idx];
         if ch == 0 || it.previously_asked.contains(&ch) {
             return None;
@@ -504,7 +503,7 @@ impl<'r> Shaper<'r> {
     }
 
     fn shape_range(&self, text: &[u16], item: QItem, face: &PreparedFace, script: Script, rtl: bool, vs_mode: VsMode) -> Buffer {
-        let funcs = BlinkFuncs { face, vs_mode: Cell::new(vs_mode), skia_advances: !(face.has_trak && !face.has_sbix) };
+        let funcs = BlinkFuncs { face, vs_mode: Cell::new(vs_mode), skia_advances: !face.has_trak || face.has_sbix };
         let scale = (face.size * 65536.0f32) as i32;
         let shaper_font = ShaperFont::new(&face.font).with_scale(scale).with_font_funcs(Some(&funcs));
         let mut buffer = Buffer::new();
@@ -643,6 +642,8 @@ impl<'r> Shaper<'r> {
             let previous_cluster = current_cluster;
             current_cluster = info.cluster;
             let gid = info.glyph_id;
+            // Branches mirror Blink's `ExtractShapeResults` checks one by one.
+            #[allow(clippy::if_same_then_else)]
             let glyph_result = if gid == 0 {
                 Cr::NotDef
             } else if Some(gid) == space_glyph && !is_last(*stage) && text[current_cluster as usize] as u32 == chars::IDEOGRAPHIC_SPACE {

@@ -499,28 +499,6 @@ pub struct Summary {
     pub groups: std::collections::BTreeMap<String, (usize, usize, usize, f64)>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn packing_round_trips() {
-        let e = Expected {
-            lines: vec![("ab".into(), 0), ("".into(), 3), ("c".into(), 4)],
-            caret: vec![vec![(0, 0), (1, 1234), (2, 2468)], vec![(3, 0)], vec![(4, 0), (5, 999)]],
-            characters: vec![[0, 0, 1234, 0, 0], [1234, 0, 1234, 0, 1], [-5, 4600, 999, 2, 4]],
-            words: vec![[0, 0, 2468, 0, 0], [-5, 4600, 999, 2, 4]],
-            line_units: vec![[0, 0, 2468, 0, 0], [0, 4600, 999, 2, 4]],
-        };
-        let p = Packed::pack(&e).unwrap();
-        assert_eq!(p.ys, vec![Some(0), None, Some(4600)]);
-        assert_eq!(p.unpack(), e);
-        let mut bad = e.clone();
-        bad.words[0][1] = 7;
-        assert!(Packed::pack(&bad).is_err());
-    }
-}
-
 pub fn summarize(diffs: &[CaseDiff]) -> Summary {
     let mut s = Summary { cases: diffs.len(), ..Default::default() };
     let mut errors = Vec::new();
@@ -584,5 +562,27 @@ pub fn run_native(corpus: &CorpusFile) -> Result<NativeRun, String> {
 impl Fixture {
     pub fn from_json(json: &str) -> Result<Fixture, serde_json::Error> {
         serde_json::from_str(&sanitize_lone_surrogates(json))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packing_round_trips() {
+        let e = Expected {
+            lines: vec![("ab".into(), 0), ("".into(), 3), ("c".into(), 4)],
+            caret: vec![vec![(0, 0), (1, 1234), (2, 2468)], vec![(3, 0)], vec![(4, 0), (5, 999)]],
+            characters: vec![[0, 0, 1234, 0, 0], [1234, 0, 1234, 0, 1], [-5, 4600, 999, 2, 4]],
+            words: vec![[0, 0, 2468, 0, 0], [-5, 4600, 999, 2, 4]],
+            line_units: vec![[0, 0, 2468, 0, 0], [0, 4600, 999, 2, 4]],
+        };
+        let p = Packed::pack(&e).unwrap();
+        assert_eq!(p.ys, vec![Some(0), None, Some(4600)]);
+        assert_eq!(p.unpack(), e);
+        let mut bad = e.clone();
+        bad.words[0][1] = 7;
+        assert!(Packed::pack(&bad).is_err());
     }
 }

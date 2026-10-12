@@ -805,6 +805,7 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-core-text",
  "objc2-foundation",
+ "parlance",
  "parley",
  "read-fonts 0.45.0",
  "serde",
