@@ -1068,6 +1068,50 @@ pub fn compile(vertex_src: &str, fragment_src: &str) -> Result<Program> {
     Ok(program)
 }
 
+/// Builds a [`Program`] from hand-written WGSL (the comparison path for S7). The modules
+/// follow the same conventions as compiled GLSL: one default uniform block at group 0,
+/// binding [`DEFAULT_BLOCK_BINDING`], whose member names are the GL uniform names; each
+/// texture at its binding with its sampler at binding + [`SAMPLER_BINDING_OFFSET`]; GL
+/// sampler arrays as `name_pmK`; vertex inputs named as the GL attributes; and the
+/// replay's clip-space conventions applied by the vertex stage itself.
+pub fn from_wgsl(vertex_wgsl: &str, fragment_wgsl: &str) -> Result<Program> {
+    let parse = |src: &str, stage: &str| -> Result<(naga::Module, naga::valid::ModuleInfo)> {
+        let module = naga::front::wgsl::parse_str(src).map_err(|e| anyhow!("{stage} WGSL: {}", e.emit_to_string(src)))?;
+        let info = validate(&module).with_context(|| format!("{stage} WGSL"))?;
+        Ok((module, info))
+    };
+    let (vertex, vertex_info) = parse(vertex_wgsl, "vertex")?;
+    let (fragment, fragment_info) = parse(fragment_wgsl, "fragment")?;
+    let mut program = Program {
+        vertex,
+        fragment,
+        vertex_info,
+        fragment_info,
+        block_size: 0,
+        block_stages: Vec::new(),
+        uniforms: HashMap::new(),
+        textures: HashMap::new(),
+        attributes: HashMap::new(),
+        outputs: Vec::new(),
+        preprocessed: [vertex_wgsl.to_string(), fragment_wgsl.to_string()],
+    };
+    let mut array_names = HashMap::new();
+    for module in [&program.vertex, &program.fragment] {
+        for (_, var) in module.global_variables.iter() {
+            if let Some(name) = &var.name {
+                if let Some(pos) = name.rfind("_pm") {
+                    if let Ok(k) = name[pos + 3..].parse::<u32>() {
+                        array_names.insert(name.clone(), format!("{}[{k}]", &name[..pos]));
+                    }
+                }
+            }
+        }
+    }
+    reflect(&mut program, Stage::Vertex, &array_names)?;
+    reflect(&mut program, Stage::Fragment, &array_names)?;
+    Ok(program)
+}
+
 fn reflect(program: &mut Program, stage: Stage, array_names: &HashMap<String, String>) -> Result<()> {
     let module = match stage {
         Stage::Vertex => &program.vertex,
