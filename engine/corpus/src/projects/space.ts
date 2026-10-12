@@ -159,6 +159,18 @@ function gltf(): CorpusProject {
   return project(b, { group: '3D', title: 'Generated glTF: texture, vertex colors, skinning, two clips', covers: ['imported glTF', 'source materials', 'base color texture', 'vertex colors', 'KHR_materials_emissive_strength', 'skinning', 'multi-clip animation', 'material override'], samples: [0, .5, 1, 1.5, 2] });
 }
 
+function gltfMaterials(): CorpusProject {
+  const b = newProject('3d/gltf-materials', { name: 'glTF materials and extensions', backgroundFill: BLACK });
+  b.add(b.object3d({ source: { assetId: ref('corpus-materials.glb') }, useSourceMaterials: true, material: material('#FFFFFF') }, { name: 'Extension sampler', scale: [300, 300, 300] }));
+  b.add(b.light3d({ type: 'sun', p: { intensity: 1.5 } }, { position: [-3, 5, 4] }));
+  b.add(camera(b, {}, [0, 0, 6]));
+  return project(b, {
+    group: '3D', title: 'glTF extensions r180 honors, alpha modes, maps, morphs, points and lines, instancing, embedded lights',
+    covers: ['KHR_materials_unlit, clearcoat, sheen, iridescence, transmission, volume, ior, specular, anisotropy, dispersion', 'EXT_materials_bump', 'KHR_texture_transform', 'EXT_texture_webp, EXT_texture_avif', 'KHR_mesh_quantization', 'EXT_mesh_gpu_instancing', 'KHR_lights_punctual (embedded, outside the light limits)', 'alpha mask and blend', 'normal map', 'occlusion on the second UV set', 'morph target animation', 'point and line primitives', 'flat shading without normals', 'transmission pass'],
+    samples: [0, 1], alpha: true,
+  });
+}
+
 function meshSlots(): CorpusProject {
   const b = newProject('3d/mesh-slots-maps', { name: 'Indexed mesh, slots, and maps', backgroundFill: BLACK });
   const positions = [-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0, -1, -1, -1, 1, -1, -1];
@@ -214,5 +226,5 @@ function special(): CorpusProject[] {
 }
 
 export function spaceProjects(): CorpusProject[] {
-  return [...layers25d(), primitives(), latheExtrude(), lights(), ...cameras(), motionBlur(), transparency(), depthSets(), studioDefaults(), gltf(), meshSlots(), ...special()];
+  return [...layers25d(), primitives(), latheExtrude(), lights(), ...cameras(), motionBlur(), transparency(), depthSets(), studioDefaults(), gltf(), gltfMaterials(), meshSlots(), ...special()];
 }

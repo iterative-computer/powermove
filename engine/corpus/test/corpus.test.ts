@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import path from 'node:path';
 import { animatorPresets, blendModes, captionModel, effects, layerTypes, makeAnimator, matteModes, scene3d, transitions } from '../src/catalog';
 import { generateCorpus, validateAll } from '../src/generate';
-import { corpusGlb } from '../src/glb';
+import { corpusGlb, corpusMaterialsGlb } from '../src/glb';
 import { LEGACY_GLOBAL, RETIMING_MODULE, TEXT_ANIMATION_MODULE, legacyScript } from '../src/inject';
 import { FIXTURE_FILES, GENERATED_MEDIA, mediaRefs, MISSING_MEDIA, resolveMedia } from '../src/media';
 import { readFloat, straightTopDown, writeFile, writeFloat, writePng } from '../src/output';
@@ -156,8 +156,8 @@ describe('generation', () => {
     } finally { rmSync(a, { recursive: true, force: true }); rmSync(b, { recursive: true, force: true }); }
   });
 
-  test('the generated GLB is structurally valid glTF 2.0', () => {
-    const bytes = corpusGlb();
+  /** Container, accessor bounds, attribute counts, and index ranges of a generated GLB. */
+  const checkGlb = (bytes: Uint8Array) => {
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     expect(view.getUint32(0, true)).toBe(0x46546c67); // 'glTF'
     expect(view.getUint32(4, true)).toBe(2);
@@ -171,32 +171,53 @@ describe('generation', () => {
     expect(gltf.asset.version).toBe('2.0');
     expect(gltf.buffers[0].byteLength).toBeLessThanOrEqual(binLength);
     const size: Record<string, number> = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 };
-    const component: Record<number, number> = { 5121: 1, 5123: 2, 5126: 4 };
+    const component: Record<number, number> = { 5120: 1, 5121: 1, 5122: 2, 5123: 2, 5126: 4 };
     for (const accessor of gltf.accessors) {
       const bufferView = gltf.bufferViews[accessor.bufferView];
+      const element = size[accessor.type]! * component[accessor.componentType]!;
+      const stride = bufferView.byteStride ?? element;
       expect(bufferView.byteOffset % 4).toBe(0);
-      expect(accessor.count * size[accessor.type]! * component[accessor.componentType]!).toBeLessThanOrEqual(bufferView.byteLength);
+      expect(stride % 4 === 0 || !bufferView.target || bufferView.target === 34963).toBe(true);
+      expect((accessor.count - 1) * stride + element).toBeLessThanOrEqual(bufferView.byteLength);
       expect(bufferView.byteOffset + bufferView.byteLength).toBeLessThanOrEqual(gltf.buffers[0].byteLength);
     }
+    const bin = (index: number) => { const bufferView = gltf.bufferViews[index]; return bytes.subarray(binOffset + 8 + bufferView.byteOffset, binOffset + 8 + bufferView.byteOffset + bufferView.byteLength); };
     for (const mesh of gltf.meshes) for (const primitive of mesh.primitives) {
       const count = gltf.accessors[primitive.attributes.POSITION].count;
       for (const accessor of Object.values<number>(primitive.attributes)) expect(gltf.accessors[accessor].count).toBe(count);
+      for (const target of primitive.targets ?? []) for (const accessor of Object.values<number>(target)) expect(gltf.accessors[accessor].count).toBe(count);
+      if ((primitive.mode ?? 4) === 4) expect((primitive.indices !== undefined ? gltf.accessors[primitive.indices].count : count) % 3).toBe(0);
       if (primitive.indices !== undefined) {
         const indices = gltf.accessors[primitive.indices];
-        const bufferView = gltf.bufferViews[indices.bufferView];
-        const values = new Uint16Array(bytes.buffer.slice(bytes.byteOffset + binOffset + 8 + bufferView.byteOffset, bytes.byteOffset + binOffset + 8 + bufferView.byteOffset + indices.count * 2));
+        const values = new Uint16Array(bin(indices.bufferView).slice(0, indices.count * 2).buffer);
         expect(Math.max(...values)).toBeLessThan(count);
       }
+      expect(gltf.materials[primitive.material]).toBeDefined();
     }
-    expect(gltf.animations).toHaveLength(2);
-    expect(gltf.skins).toHaveLength(1);
-    const image = gltf.images[0];
-    const png = bytes.subarray(binOffset + 8 + gltf.bufferViews[image.bufferView].byteOffset, binOffset + 8 + gltf.bufferViews[image.bufferView].byteOffset + gltf.bufferViews[image.bufferView].byteLength);
-    expect(decodePng(png).width).toBeGreaterThan(0);
+    for (const image of gltf.images) expect(bin(image.bufferView).length).toBeGreaterThan(0);
+    for (const image of gltf.images.filter((item: any) => item.mimeType === 'image/png')) expect(decodePng(bin(image.bufferView)).width).toBeGreaterThan(0);
+    return gltf;
+  };
+
+  test('the generated GLBs are structurally valid glTF 2.0', () => {
+    const model = checkGlb(corpusGlb());
+    expect(model.animations).toHaveLength(2);
+    expect(model.skins).toHaveLength(1);
+    const materials = checkGlb(corpusMaterialsGlb());
+    expect(materials.extensionsUsed).toEqual([
+      'EXT_materials_bump', 'EXT_mesh_gpu_instancing', 'EXT_texture_avif', 'EXT_texture_webp', 'KHR_lights_punctual', 'KHR_materials_anisotropy',
+      'KHR_materials_clearcoat', 'KHR_materials_dispersion', 'KHR_materials_ior', 'KHR_materials_iridescence', 'KHR_materials_sheen', 'KHR_materials_specular',
+      'KHR_materials_transmission', 'KHR_materials_unlit', 'KHR_materials_volume', 'KHR_mesh_quantization', 'KHR_texture_transform',
+    ]);
+    const modes = new Set(materials.meshes.flatMap((mesh: any) => mesh.primitives.map((primitive: any) => primitive.mode ?? 4)));
+    expect([...modes].sort()).toEqual([0, 2, 3, 4]);
+    expect(materials.meshes.some((mesh: any) => mesh.primitives.some((primitive: any) => primitive.targets?.length))).toBe(true);
+    expect(materials.meshes.some((mesh: any) => mesh.primitives.some((primitive: any) => primitive.attributes.NORMAL === undefined && (primitive.mode ?? 4) === 4))).toBe(true);
+    expect(materials.animations.map((animation: any) => animation.channels[0].target.path)).toEqual(['weights']);
   });
 
   test('generated media are listed', () => {
-    expect(Object.keys(GENERATED_MEDIA).sort()).toEqual(['corpus-art.svg', 'corpus-gem.obj', 'corpus-model.glb']);
+    expect(Object.keys(GENERATED_MEDIA).sort()).toEqual(['corpus-art.svg', 'corpus-gem.obj', 'corpus-materials.glb', 'corpus-model.glb']);
   });
 });
 

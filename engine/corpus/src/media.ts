@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fixturesDir, repoRoot } from './catalog';
-import { corpusGlb, corpusObj, corpusSvg } from './glb';
+import { corpusGlb, corpusMaterialsGlb, corpusObj, corpusSvg } from './glb';
 
 export const MEDIA_PREFIX = 'media:';
 /** A reference no file satisfies, for the missing-model behavior. */
@@ -37,6 +37,7 @@ export const FIXTURE_FILES = [
 
 export const GENERATED_MEDIA: Record<string, () => Uint8Array> = {
   'corpus-model.glb': corpusGlb,
+  'corpus-materials.glb': corpusMaterialsGlb,
   'corpus-gem.obj': () => new TextEncoder().encode(corpusObj()),
   'corpus-art.svg': () => new TextEncoder().encode(corpusSvg()),
 };
