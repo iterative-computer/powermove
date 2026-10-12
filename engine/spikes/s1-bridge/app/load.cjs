@@ -78,8 +78,12 @@ function buildProject({ layers = 884, keysPerProperty = 12, historyEntries = 120
 }
 
 class MainLoad {
-  constructor({ win, ipcMain, log }) {
+  constructor({ win, ipcMain, log, nowUs }) {
     this.win = win;
+    // CLOCK_UPTIME_RAW microseconds, the clock every other S1 timestamp uses, so the
+    // analysis can line load events up with presented frames.
+    this.nowUs = nowUs;
+    this.events = [];
     this.ipcMain = ipcMain;
     this.log = log;
     this.timers = [];
@@ -100,10 +104,12 @@ class MainLoad {
       this.timers.push(
         setInterval(() => {
           const t0 = performance.now();
+          const u0 = this.nowUs();
           while (performance.now() - t0 < 50) {
             /* the 50 ms long task */
           }
           this.records.longTasks.push([t0, performance.now() - t0]);
+          this.events.push(['longTask', u0, performance.now() - t0]);
         }, 1000)
       );
     }
@@ -134,14 +140,16 @@ class MainLoad {
           const base = this.win.getBounds();
           let n = 0;
           const t0 = performance.now();
+          const u0 = this.nowUs();
           const step = setInterval(() => {
             if (this.win.isDestroyed()) return clearInterval(step);
-            const dw = Math.round(160 * Math.sin((n / 60) * Math.PI * 2));
+            const dw = Math.round(Math.min(160, base.width * 0.4) * Math.sin((n / 60) * Math.PI * 2));
             this.win.setBounds({ x: base.x, y: base.y, width: base.width + dw, height: base.height + Math.round(dw * 0.5625) });
             if (++n > 60) {
               clearInterval(step);
               this.win.setBounds(base);
               this.records.resizes.push([t0, performance.now() - t0, n]);
+              this.events.push(['resize', u0, performance.now() - t0]);
             }
           }, 1000 / 60);
           this.timers.push(step);
@@ -152,10 +160,12 @@ class MainLoad {
 
   autosave() {
     const t0 = performance.now();
+    const u0 = this.nowUs();
     const value = JSON.parse(this.serialized);
     const cloned = structuredClone(value);
     const text = JSON.stringify(cloned);
     const sync = performance.now() - t0;
+    this.events.push(['autosave', u0, sync]);
     fs.promises.writeFile(this.tmp, text).then(
       () => this.records.autosaves.push([t0, sync, performance.now() - t0]),
       err => this.log(`autosave write failed: ${err.message}`)
@@ -182,7 +192,9 @@ class MainLoad {
       longTasks: { n: r.longTasks.length, ms: stat(r.longTasks.map(x => x[1])) },
       autosaves: { n: r.autosaves.length, mainThreadMs: stat(r.autosaves.map(x => x[1])), totalMs: stat(r.autosaves.map(x => x[2])) },
       agent: { requests: r.agent.sent, replies: r.agent.replies, replyBytes: r.agent.replyBytes, mainUs: stat(r.agent.mainUs) },
-      resizes: { n: r.resizes.length, steps: r.resizes.reduce((a, x) => a + x[2], 0) }
+      resizes: { n: r.resizes.length, steps: r.resizes.reduce((a, x) => a + x[2], 0) },
+      // [kind, start (CLOCK_UPTIME_RAW us), main-thread duration ms]
+      events: this.events.map(([k, u, d]) => [k, Math.round(u), +d.toFixed(2)])
     };
   }
 }

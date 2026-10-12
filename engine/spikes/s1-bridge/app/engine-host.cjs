@@ -7,8 +7,9 @@
 //   - process.parentPort, from main: start, stop, stats, and releases for frames
 //     whose transfer failed in main.
 //   - a MessagePort from the viewer's window (MessageChannelMain made by main): input,
-//     per-frame releases, display timing, mode, and clock pings. Main's JavaScript
-//     thread is never on this path.
+//     per-frame releases, display timing, mode, and clock pings, and (persistent
+//     transport only) per-frame descriptors to the viewer. Main's JavaScript thread is
+//     never on this path.
 
 const path = require('node:path');
 const addon = require(path.join(__dirname, 'native', 's1_engine.node'));
@@ -57,7 +58,34 @@ process.parentPort.on('message', e => {
       break;
     case 'start':
       try {
-        engine = new addon.Engine(m.config);
+        const { transport, ...config } = m.config;
+        engine = new addon.Engine(config);
+        if (transport === 'persistent') {
+          // Persistent-import transport: the viewer holds one import per pool slot, so
+          // each descriptor goes straight to it and main's JavaScript is never on the
+          // per-frame path. Main still receives every descriptor over Mach.
+          engine.onFrame(f => {
+            if (!viewer) return;
+            viewer.postMessage({
+              t: 'frame',
+              d: {
+                poolIndex: f.poolIndex,
+                seq: f.seq,
+                ptsUs: f.ptsUs,
+                durationUs: f.durationUs,
+                revision: f.revision,
+                inputTsUs: f.inputTsUs,
+                renderStartUs: f.renderStartUs,
+                gpuDoneUs: f.gpuDoneUs,
+                bridgeRecvUs: f.hookUs,
+                mainJsUs: addon.nowUs(),
+                flags: f.flags,
+                colorSpace: f.colorSpace,
+                overlay: f.overlay
+              }
+            });
+          });
+        }
         process.parentPort.postMessage({ type: 'ready', info: JSON.parse(engine.info()) });
         for (const p of pending.splice(0)) handleViewer(p);
       } catch (err) {

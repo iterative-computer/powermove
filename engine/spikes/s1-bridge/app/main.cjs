@@ -31,6 +31,22 @@ const cfg = Object.assign(
     hdrCanvas: false,
     latencyModes: ['baseline', 'gesture', 'orbit', 'walk'],
     inputHz: 120,
+    // 'gpu-done' (onSubmittedWorkDone after close) or 'callback' (per-use release
+    // callback, subtle.release(cb)); see preload.cjs.
+    releaseMode: 'gpu-done',
+    // 'per-frame': main calls sendSharedTexture for every frame (plan section 18 step 3).
+    // 'persistent': main sends each pool slot to the viewer once; descriptors go engine
+    // -> viewer over the MessagePort and the viewer makes a VideoFrame per frame from
+    // the import it holds, so main's JavaScript is off the per-frame path.
+    transport: 'per-frame',
+    // 'none' or 'every-vsync': redraw the last frame on vsyncs without a new one.
+    redraw: 'none',
+    // Place the window in a small on-screen corner instead of off every screen (a
+    // validity check of off-screen presentation timing). Off by default.
+    onscreen: false,
+    // Quality runs: briefly show the brightest HDR patch in a small on-screen window
+    // and read the display's EDR headroom while it is visible.
+    edrOnscreen: false,
     trace: true,
     out: null
   },
@@ -145,6 +161,7 @@ function onBridgeEvent(ev) {
         });
         imported.set(ev.poolIndex, tex);
         sendsPerImport.set(ev.poolIndex, 0);
+        if (cfg.transport === 'persistent') sendPersistent(ev.poolIndex, tex);
         (result.imports.surfaces ??= []).push({ pool: ev.poolIndex, format: ev.format, width: ev.width, height: ev.height, bytesPerRow: ev.bytesPerRow, importMs: performance.now() - t0 });
       } catch (err) {
         fail(`importSharedTexture(${ev.poolIndex}): ${err.message}`);
@@ -167,11 +184,24 @@ function onBridgeEvent(ev) {
   }
 }
 
+function sendPersistent(poolIndex, tex) {
+  const t0 = nowUs();
+  sendsPerImport.set(poolIndex, sendsPerImport.get(poolIndex) + 1);
+  sharedTexture.sendSharedTexture({ frame: win.webContents.mainFrame, importedSharedTexture: tex }, { persistent: true, poolIndex }).then(
+    () => (result.imports.persistentSends ??= []).push({ pool: poolIndex, ms: (nowUs() - t0) / 1000 }),
+    err => fail(`persistent sendSharedTexture(${poolIndex}): ${err.message}`)
+  );
+}
+
 const frameLog = [];
 function forwardFrame(ev, jsUs) {
   const tex = imported.get(ev.poolIndex);
   const rec = [ev.seq, ev.poolIndex, ev.gpuDoneUs, ev.recvUs, jsUs, 0, 0];
   frameLog.push(rec);
+  if (cfg.transport === 'persistent') {
+    rec[6] = 4; // delivered engine -> viewer directly
+    return;
+  }
   if (!tex || !win || win.isDestroyed()) {
     engine?.postMessage({ type: 'release', pool: ev.poolIndex, seq: ev.seq });
     rec[6] = 2;
@@ -245,7 +275,7 @@ async function startEngine() {
   win.webContents.postMessage('s1:port', null, [port1]);
   engine.postMessage({
     type: 'start',
-    config: { width: cfg.width, height: cfg.height, format: cfg.format, poolSize: cfg.poolSize, leadFrames: cfg.leadFrames, extraPasses: cfg.extraPasses }
+    config: { width: cfg.width, height: cfg.height, format: cfg.format, poolSize: cfg.poolSize, leadFrames: cfg.leadFrames, extraPasses: cfg.extraPasses, transport: cfg.transport }
   });
   const info = await engineReady;
   result.engine = info;
@@ -277,11 +307,21 @@ async function createWindow() {
   });
   win.webContents.on('render-process-gone', (_e, d) => fail(`renderer gone: ${d.reason}`));
   await win.loadFile(path.join(__dirname, 'viewer.html'));
-  // Shown without activation, then moved off every screen.
+  // Shown without activation, then moved off every screen (or into a small corner of
+  // the primary display for the on-screen validity run).
   win.showInactive();
-  const off = { x: -12000, y: -12000, width: cfg.width / 2, height: cfg.height / 2 };
-  win.setBounds(off);
+  win.setBounds(cfg.onscreen ? cornerBounds(160, 90) : offscreenBounds());
   result.window = { bounds: win.getBounds(), contentBounds: win.getContentBounds(), visible: win.isVisible(), focused: win.isFocused() };
+}
+
+function offscreenBounds() {
+  return { x: -12000, y: -12000, width: cfg.width / 2, height: cfg.height / 2 };
+}
+
+/** A small rectangle in the bottom-right corner of the primary display's work area. */
+function cornerBounds(width, height) {
+  const wa = screen.getPrimaryDisplay().workArea;
+  return { x: wa.x + wa.width - width - 8, y: wa.y + wa.height - height - 8, width, height };
 }
 
 // --- Scenarios ----------------------------------------------------------------------------------
@@ -306,6 +346,8 @@ async function engineSnapshot() {
 }
 
 async function runPlayback(load) {
+  // On screen, show the calm grey grid rather than the flickering frame code.
+  if (cfg.onscreen) await viewer('view-origin', { x: 2400, y: 1400 });
   await viewer('mode', { mode: 'playback' });
   await sleep(1500); // fill the jitter buffer
   if (load) load.start(cfg.load);
@@ -376,6 +418,25 @@ async function runQuality() {
   out.capture = analyzeCapture(bitmap, image.getSize(), held);
   out.capture.size = size;
   out.capture.scaleFactors = image.getScaleFactors();
+  if (cfg.edrOnscreen) {
+    // The held frame is drawn in an rgba16float canvas with extended tone mapping.
+    // Show the 4.0 patch (frame x 3360-3840, y 576-832) in a 64 x 40 pt window for
+    // about two seconds and sample the display's EDR headroom: macOS raises the
+    // current headroom above 1.0 only while EDR content is visible on that screen.
+    await viewer('view-origin', { x: 3400, y: 600 });
+    const before = safe(() => bridgeAddon.edrHeadroom());
+    win.setBounds(cornerBounds(64, 40));
+    const samples = [];
+    for (let i = 0; i < 8; i++) {
+      await sleep(250);
+      samples.push({ t: i * 250 + 250, screens: safe(() => bridgeAddon.edrHeadroom()) });
+    }
+    win.setBounds(offscreenBounds());
+    await sleep(750);
+    const after = safe(() => bridgeAddon.edrHeadroom());
+    await viewer('view-origin', { x: 0, y: 0 });
+    out.edrOnscreen = { window: '64 x 40 pt, bottom-right of the primary display', patch: 4.0, before, samples, after };
+  }
   await viewer('hold', { hold: false });
   await viewer('mode', { mode: 'idle' });
   return out;
@@ -449,7 +510,9 @@ function machineLoad() {
       .split('\n')
       .map(l => l.trim().match(/^([\d.]+)\s+(.*)$/))
       .filter(m => m && +m[1] >= 20 && !m[2].includes('s1-bridge'))
-      .map(m => ({ cpu: +m[1], name: path.basename(m[2]) }));
+      // Build tools and other spikes by name; anything else (the person's own apps)
+      // only as "other", so the committed summaries carry no private process names.
+      .map(m => ({ cpu: +m[1], name: /electron|rustc|cargo|clang|ld$|ffmpeg|bun|node|\/s\d\b|blender|xcodebuild|swift/i.test(m[2]) ? path.basename(m[2]) : 'other' }));
   } catch {}
   return { loadavg: os.loadavg().map(x => +x.toFixed(2)), busyProcesses: busy };
 }
@@ -462,11 +525,11 @@ async function main() {
   result.display = { bounds: d.bounds, scaleFactor: d.scaleFactor, hz: d.displayFrequency, colorDepth: d.colorDepth, colorSpace: d.colorSpace };
   await createWindow();
   await startEngine();
-  const ready = await viewer('init', { format: cfg.format, width: cfg.width, height: cfg.height, drawPath: cfg.drawPath, hdrCanvas: cfg.hdrCanvas, poolSize: cfg.poolSize, leadFrames: cfg.leadFrames });
+  const ready = await viewer('init', { format: cfg.format, width: cfg.width, height: cfg.height, drawPath: cfg.drawPath, hdrCanvas: cfg.hdrCanvas, poolSize: cfg.poolSize, leadFrames: cfg.leadFrames, releaseMode: cfg.releaseMode, redraw: cfg.redraw });
   result.viewerInit = ready;
   log(`viewer ready: ${JSON.stringify(ready).slice(0, 300)}`);
 
-  const load = cfg.load ? new MainLoad({ win, ipcMain, log }) : null;
+  const load = cfg.load ? new MainLoad({ win, ipcMain, log, nowUs }) : null;
   await withTrace(async () => {
     if (cfg.scenario === 'playback') result.run = await runPlayback(load);
     else if (cfg.scenario === 'latency') result.run = await runLatency(load);
@@ -482,6 +545,7 @@ async function main() {
 
   // Teardown: release main's references; allReferencesReleased must fire for every
   // surface once the renderer has released all of its per-transfer references.
+  if (cfg.transport === 'persistent') result.receiver.persistentReleased = (await viewer('release-persistent', {})).released;
   for (const tex of imported.values()) tex.release();
   await sleep(1500);
   result.imports.releasedAfterTeardown = result.imports.allReleased ?? 0;

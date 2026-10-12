@@ -35,15 +35,25 @@ const runs = [
   // The S1 gate: 4K 60 fps for 60 s with main under load.
   { name: 'playback-bgra-load', scenario: 'playback', format: 'bgra', load: LOAD, durationMs: seconds * 1000 },
   { name: 'playback-rgbaf16-load', scenario: 'playback', format: 'rgbaf16', load: LOAD, durationMs: seconds * 1000, hdrCanvas: true },
-  { name: 'playback-bgra-load-external', scenario: 'playback', format: 'bgra', load: LOAD, durationMs: seconds * 1000, drawPath: 'external' },
+  { name: 'playback-bgra-load-external', scenario: 'playback', format: 'bgra', load: LOAD, durationMs: seconds * 1000, drawPath: 'external', transport: 'persistent' },
+  // Tuned transport: one persistent import per slot in the viewer, descriptors engine
+  // -> viewer directly (main's JavaScript off the per-frame path).
+  { name: 'playback-bgra-load-persistent', scenario: 'playback', format: 'bgra', load: LOAD, durationMs: seconds * 1000, transport: 'persistent' },
+  { name: 'playback-rgbaf16-load-persistent', scenario: 'playback', format: 'rgbaf16', load: LOAD, durationMs: seconds * 1000, hdrCanvas: true, transport: 'persistent' },
+  { name: 'playback-bgra-load-persistent-redraw', scenario: 'playback', format: 'bgra', load: LOAD, durationMs: seconds * 1000, transport: 'persistent', redraw: 'every-vsync' },
+  // Release through the per-use release callback instead of onSubmittedWorkDone.
+  { name: 'playback-bgra-load-callback', scenario: 'playback', format: 'bgra', load: LOAD, durationMs: seconds * 1000, releaseMode: 'callback' },
+  // Validity check: a small on-screen window instead of off every screen (15 s).
+  { name: 'playback-bgra-load-onscreen', scenario: 'playback', format: 'bgra', load: LOAD, durationMs: 15_000, onscreen: true, transport: 'persistent' },
   // Control: the same without main load.
   { name: 'playback-bgra-idle', scenario: 'playback', format: 'bgra', load: false, durationMs: seconds * 1000 },
   // Pointer-to-pixel: today's in-renderer path vs the engine path, main under load.
   { name: 'latency-bgra-load', scenario: 'latency', format: 'bgra', load: LOAD, durationMs: 20_000, extraPasses: 0, poolSize: 8, leadFrames: 4 },
+  { name: 'latency-bgra-load-persistent', scenario: 'latency', format: 'bgra', load: LOAD, durationMs: 20_000, extraPasses: 0, poolSize: 8, leadFrames: 4, transport: 'persistent' },
   { name: 'latency-bgra-idle', scenario: 'latency', format: 'bgra', load: false, durationMs: 20_000, extraPasses: 0, poolSize: 8, leadFrames: 4 },
   // Image quality: capturePage, banding, values above 1.0.
   { name: 'quality-bgra', scenario: 'quality', format: 'bgra', load: false },
-  { name: 'quality-rgbaf16', scenario: 'quality', format: 'rgbaf16', load: false, hdrCanvas: true }
+  { name: 'quality-rgbaf16', scenario: 'quality', format: 'rgbaf16', load: false, hdrCanvas: true, edrOnscreen: true }
 ];
 
 for (const run of runs) {

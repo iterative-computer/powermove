@@ -35,6 +35,9 @@ const S = {
   inputs: [],
   integrity: { checked: 0, ok: 0, bad: [], skipped: 0 },
   releasesSent: 0,
+  // [seq, submitMs, gpuDoneMs, releaseCallbackMs] per drawn frame while recording
+  releaseTiming: [],
+  releasePending: new Map(),
   rev: 0,
   keySeq: 0,
   baselineRev: 0,
@@ -63,6 +66,23 @@ const portReady = new Promise(resolve => {
 const pongs = new Map();
 function onEngineMessage(e) {
   const m = e.data;
+  if (m.t === 'frame') {
+    // Persistent-import transport: a fresh VideoFrame from the held import per frame.
+    const recvMs = performance.now();
+    let frame = null;
+    try {
+      frame = window.s1.frameFor(m.d.poolIndex);
+    } catch (err) {
+      S.persistentErrors = (S.persistentErrors ?? 0) + 1;
+      if (S.persistentErrors < 5) log(`frameFor(${m.d.poolIndex}): ${err.message}`);
+    }
+    if (!frame) {
+      post({ t: 'release', pool: m.d.poolIndex, seq: m.d.seq });
+      return;
+    }
+    intake(frame, m.d, recvMs, null);
+    return;
+  }
   if (m.t === 'pong') {
     const w = pongs.get(m.id);
     if (w) {
@@ -243,7 +263,16 @@ function drawFrame(item) {
   const submitMs = performance.now();
   item.frame.close();
   const { poolIndex, seq, revision } = item.desc;
+  const timing = S.recording ? [seq, submitMs, 0, 0] : null;
+  if (timing) S.releaseTiming.push(timing);
+  if (item.done) {
+    // 'callback' mode: the slot goes back from the per-use release callback.
+    if (timing) S.releasePending.set(seq, timing);
+    item.done();
+  }
   device.queue.onSubmittedWorkDone().then(() => {
+    if (timing) timing[2] = performance.now();
+    if (item.done) return;
     post({ t: 'release', pool: poolIndex, seq });
     S.releasesSent += 1;
   });
@@ -277,16 +306,21 @@ function verifyCode(buf, seq, rev) {
 
 function releaseUndrawn(item, reason) {
   item.frame.close();
-  post({ t: 'release', pool: item.desc.poolIndex, seq: item.desc.seq });
-  S.releasesSent += 1;
+  if (item.done) item.done();
+  else {
+    post({ t: 'release', pool: item.desc.poolIndex, seq: item.desc.seq });
+    S.releasesSent += 1;
+  }
   if (S.recording) S.viewerDrops.push([item.desc.seq, item.desc.ptsUs, reason, performance.now()]);
 }
 
 // --- Frame intake -------------------------------------------------------------------------------
 
-window.s1.onFrame((frame, desc, recvMs) => {
+window.s1.onFrame((frame, desc, recvMs, done) => intake(frame, desc, recvMs, done));
+
+function intake(frame, desc, recvMs, done) {
   const arriveMs = performance.now();
-  const item = { frame, desc, recvMs, arriveMs };
+  const item = { frame, desc, recvMs, arriveMs, done };
   if (S.recording) S.arrivals.push([desc.seq, desc.ptsUs, desc.gpuDoneUs, desc.bridgeRecvUs, desc.mainJsUs, recvMs, arriveMs, desc.flags]);
   if (desc.flags & FLAG_GESTURE) {
     if (S.gestureFrame) releaseUndrawn(S.gestureFrame, 'superseded');
@@ -301,7 +335,7 @@ window.s1.onFrame((frame, desc, recvMs) => {
   let i = S.queue.length;
   while (i > 0 && S.queue[i - 1].desc.ptsUs > desc.ptsUs) i--;
   S.queue.splice(i, 0, item);
-});
+}
 
 // --- The frame loop -----------------------------------------------------------------------------
 
@@ -371,7 +405,19 @@ function frameLoop(rafMs) {
     const t = uptimeUs(snapToVsync(rafMs));
     let pick = -1;
     for (let i = 0; i < S.queue.length; i++) if (S.queue[i].desc.ptsUs <= t) pick = i;
-    if (pick < 0) return;
+    if (pick < 0) {
+      // Optionally keep the canvas producing a frame on every vsync by redrawing the
+      // last frame (copy path: it is still in frameTex), so Chromium's pipeline depth
+      // does not change between vsyncs with and without new content.
+      if (S.cfg.redraw === 'every-vsync' && S.displayed && S.cfg.drawPath === 'copy') {
+        const enc = S.device.createCommandEncoder();
+        const bg = S.device.createBindGroup({ layout: G.pipe('2d', S.canvasFormat).getBindGroupLayout(0), entries: [{ binding: 0, resource: G.frameView }] });
+        pass(enc, S.context.getCurrentTexture().createView(), G.pipe('2d', S.canvasFormat), bg);
+        S.device.queue.submit([enc.finish()]);
+        if (S.recording) S.redraws = (S.redraws ?? 0) + 1;
+      }
+      return;
+    }
     for (const old of S.queue.splice(0, pick)) releaseUndrawn(old, 'late');
     const item = S.queue.shift();
     if (S.qualityWaiter) {
@@ -436,6 +482,9 @@ function resetLogs() {
   S.arrivals = [];
   S.inputs = [];
   S.integrity = { checked: 0, ok: 0, bad: [], skipped: 0 };
+  S.releaseTiming = [];
+  S.releasePending = new Map();
+  S.redraws = 0;
   S.keySeq = 0;
 }
 
@@ -455,6 +504,17 @@ const commands = {
     S.W = args.width;
     S.H = args.height;
     await portReady;
+    if (args.releaseMode === 'callback') {
+      window.s1.setReleaseMode('callback', (pool, seq, t) => {
+        post({ t: 'release', pool, seq });
+        S.releasesSent += 1;
+        const timing = S.releasePending.get(seq);
+        if (timing) {
+          timing[3] = t;
+          S.releasePending.delete(seq);
+        }
+      });
+    }
     const clock = await syncClock();
     const gpu = await initGpu(args);
     performance.mark('s1-origin');
@@ -494,8 +554,18 @@ const commands = {
   async held() {
     return S.displayed;
   },
+  // Shift the canvas so a small on-screen window shows the region at (x, y) frame
+  // pixels (the brightest HDR patch for the EDR check).
+  async 'view-origin'({ x, y }) {
+    const c = document.getElementById('view');
+    c.style.transform = `translate(${-x / devicePixelRatio}px, ${-y / devicePixelRatio}px)`;
+    return { transform: c.style.transform };
+  },
   async 'receiver-stats'() {
-    return { ...window.s1.receiverStats(), releasesSent: S.releasesSent };
+    return { ...window.s1.receiverStats(), releasesSent: S.releasesSent, persistentSlots: window.s1.persistentSlots(), persistentErrors: S.persistentErrors ?? 0 };
+  },
+  async 'release-persistent'() {
+    return { released: window.s1.releasePersistent() };
   }
 };
 
@@ -523,6 +593,9 @@ function collect(extra) {
     inputs: S.inputs,
     integrity: S.integrity,
     releasesSent: S.releasesSent,
+    releaseMode: S.cfg.releaseMode ?? 'gpu-done',
+    redraws: S.redraws ?? 0,
+    releaseTiming: S.releaseTiming,
     periodUs: S.periodUs,
     vsyncFit: S.vsyncFit ?? null
   };
@@ -647,7 +720,10 @@ async function qualityProbe() {
   canvasRow.destroy();
   item.frame.close();
   await device.queue.onSubmittedWorkDone();
-  post({ t: 'release', pool: item.desc.poolIndex, seq: item.desc.seq });
-  S.releasesSent += 1;
+  if (item.done) item.done();
+  else {
+    post({ t: 'release', pool: item.desc.poolIndex, seq: item.desc.seq });
+    S.releasesSent += 1;
+  }
   return out;
 }
