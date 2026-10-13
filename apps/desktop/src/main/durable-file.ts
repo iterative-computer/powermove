@@ -39,7 +39,15 @@ export async function readExactly(handle: FileHandle, position: number, length: 
 export async function hashHandle(handle: FileHandle, offset = 0, length?: number): Promise<Hash> {
   const hash = createHash('sha256');
   if (length === 0) return hash;
-  for await (const data of handle.createReadStream({ start: offset, ...(length === undefined ? {} : { end: offset + length - 1 }), autoClose: false, highWaterMark: 1024 * 1024 })) hash.update(data);
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  for (let position = offset; ;) {
+    const count = length === undefined ? buffer.length : Math.min(buffer.length, offset + length - position);
+    if (count <= 0) break;
+    const { bytesRead } = await readWithRetry(() => handle.read(buffer, 0, count, position));
+    if (!bytesRead) break;
+    hash.update(buffer.subarray(0, bytesRead));
+    position += bytesRead;
+  }
   return hash;
 }
 export const sameFile = (a: Stats, b: Stats) => a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;

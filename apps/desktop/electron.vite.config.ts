@@ -52,6 +52,8 @@ export default defineConfig({
     resolve: { alias: { powermove: path.resolve(__dirname, 'src/renderer/src/kernel/api.ts') } },
     build: {
       outDir: 'out/renderer',
+      // Live editor windows can still request lazy chunks from the previous build.
+      emptyOutDir: false,
       rollupOptions: {
         input: {
           index: path.resolve(__dirname, 'src/renderer/index.html'),
