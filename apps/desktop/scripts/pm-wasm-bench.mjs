@@ -23,11 +23,21 @@ const appDir = path.resolve(here, '..');
 const rounds = Number(process.argv[process.argv.indexOf('--rounds') + 1]) || 200;
 
 const userData = await mkdtemp(path.join(tmpdir(), 'pm-wasm-bench-'));
-const env = { ...process.env, POWERMOVE_USER_DATA: userData, POWERMOVE_DEVTOOLS: '0', POWERMOVE_BACKGROUND_TEST: '1' };
+// The e2e harness's offline agent runtime: no real app-server outlives the app.
+const env = {
+  ...process.env,
+  CODEX_BINARY: path.join(appDir, 'src/main/codex/__fixtures__/fake-codex-app-server.sh'),
+  POWERMOVE_FAKE_CHATGPT_STATUS: 'connected',
+  POWERMOVE_USER_DATA: userData, POWERMOVE_DEVTOOLS: '0', POWERMOVE_BACKGROUND_TEST: '1'
+};
 delete env.ELECTRON_RUN_AS_NODE;
 const app = await _electron.launch({ args: ['.'], cwd: appDir, env });
 // A stuck page must not leave a hidden Electron behind.
-const deadline = setTimeout(() => { console.error('[bench] timed out'); app.close().catch(() => {}).finally(() => process.exit(3)); }, 20 * 60_000);
+const quit = async () => {
+  const closed = app.close().then(() => true, () => false);
+  if (!(await Promise.race([closed, new Promise(r => setTimeout(() => r(false), 10_000))]))) app.process().kill('SIGKILL');
+};
+const deadline = setTimeout(() => { console.error('[bench] timed out'); quit().finally(() => process.exit(3)); }, 20 * 60_000);
 try {
   let page = await app.firstWindow();
   await page.waitForFunction(() => Boolean(window.PM?.ProjectsScreen && window.PM?.mkProject));
@@ -145,6 +155,6 @@ try {
   console.log(JSON.stringify(result, null, 2));
 } finally {
   clearTimeout(deadline);
-  await app.close().catch(() => {});
+  await quit();
   await rm(userData, { recursive: true, force: true });
 }
