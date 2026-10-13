@@ -13,15 +13,18 @@ export type ReportEvent =
   | { type: 'summary'; [key: string]: unknown }
   | { type: 'ready' | 'dead' | 'error'; [key: string]: unknown };
 
+import { bridge as hostBridge } from '../kernel/bridge';
+
 export type Sink = (line: string) => void;
 
 /** Below the host log's per-line limit (`LIMITS.logChars`, 8,000) with the prefix. */
 const MAX_LINE = 7_900;
 
 export function hostSink(): Sink {
-  const bridge = (globalThis as any).powermove;
+  // The kernel takes the preload's bridge off `window` at boot
+  // (kernel/capture-bridge.ts); the captured one is read per line.
   return (line: string) => {
-    try { bridge?.log?.('warn', line); } catch { /* the bridge is gone */ }
+    try { (hostBridge() as any)?.log?.('warn', line); } catch { /* the bridge is gone */ }
     console.warn(line);
   };
 }

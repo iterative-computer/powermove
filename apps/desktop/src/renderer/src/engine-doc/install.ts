@@ -30,6 +30,7 @@ import { createTracker, patchCloning, type Tracker } from './proxy';
 import { hostSink, Reporter, type Sink } from './report';
 import { compileFrom, instantiate, MODULE_PATH, type PmWasm } from './wasm';
 import { FontLoader, type FontProvider } from './fonts';
+import { bridge as hostBridge } from '../kernel/bridge';
 import { setEvaluationWriteHook } from '../legacy/core/temporal-bridge';
 import { inversePlane, is3DLayer, local3D, parent3D, perspectiveAmount, planeContains, planeMatrix, projectPoint, world3D } from '../legacy/core/space-3d';
 import { groupMatrix, pathValues } from '../legacy/core/vector-paths';
@@ -322,7 +323,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
 /** The editor's font channel to main, when the preload exposes one
  *  (`engine-fonts:answer` and `engine-fonts:subset`, docs/engine/text.md). */
 function editorFonts(): FontProvider | null {
-  const bridge = (globalThis as any).powermove?.engineFonts;
+  const bridge = (hostBridge() as any)?.engineFonts;
   if (!bridge || typeof bridge.answer !== 'function' || typeof bridge.subset !== 'function') return null;
   const unwrapResult = (r: any) => { if (r && r.ok === false) throw new Error(r.error); return r && 'value' in r ? r.value : r; };
   return {
