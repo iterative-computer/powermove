@@ -343,7 +343,9 @@ export function createLoader(options: LoaderOptions): Loader {
     if (entry) {
       try {
         if (entry.sandbox) entry.sandbox.dispose();
-        else await entry.module?.deactivate?.();
+        // Cleanup must not hold the reload queue or its owner registrations
+        // forever when an extension returns a promise that never settles.
+        else await withTimeout(Promise.resolve(entry.module?.deactivate?.()), timeoutMs, `deactivate() of "${id}" timed out`);
       } catch (error) {
         console.error(`[kernel] extension "${id}" deactivate() threw`, error);
       }
