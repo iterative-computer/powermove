@@ -458,3 +458,43 @@ describe('retired extension registrations', () => {
     current.disposeAll();
   });
 });
+
+it.each([false, true])('retired unbind(all=%s) cannot remove a reloaded mod shortcut or other owners', async all => {
+  const { kernel, deps } = harness();
+  const retired = createExtensionAPI(kernel, record('notes'), deps);
+  retired.api.keybindings.bind({ key: 'cmd+9', command: 'notes.open' });
+  retired.disposeAll();
+  const current = createExtensionAPI(kernel, record('notes'), deps);
+  const run = vi.fn(() => true), fallback = vi.fn(() => true);
+  current.api.commands.register({ id: 'notes.open', label: 'Open notes', run });
+  current.api.keybindings.bind({ key: 'cmd+9', command: 'notes.open' });
+  kernel.commands.register('legacy', { id: 'fallback', label: 'Fallback', run: fallback });
+  kernel.bind('legacy', { key: 'cmd+9', command: 'fallback', priority: 100 });
+  const listener = kernel.installKeyListener((id, args) => kernel.commands.get(id)?.run(...args) ?? false);
+  const press = () => {
+    const event = new KeyboardEvent('keydown', { key: '9', code: 'Digit9', metaKey: true, bubbles: true, cancelable: true });
+    window.dispatchEvent(event);
+    return event;
+  };
+  try {
+    expect(press().defaultPrevented).toBe(true);
+    expect(run).toHaveBeenCalledOnce();
+    run.mockClear();
+    expect(fallback).not.toHaveBeenCalled();
+    // An old asynchronous cleanup task resumes after a new activation installed its binding.
+    await Promise.resolve();
+    retired.api.keybindings.unbind('cmd+9', all);
+    const event = press();
+    expect(run).toHaveBeenCalledOnce();
+    expect(fallback).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(true);
+    expect(kernel.bindingsFor('cmd+9')).toHaveLength(2);
+    // The current owner's explicit unbind still works, with its original all semantics.
+    current.api.keybindings.unbind('cmd+9', all);
+    expect(kernel.bindingsFor('cmd+9')).toHaveLength(all ? 0 : 1);
+  } finally {
+    listener.dispose();
+    current.disposeAll();
+    kernel.dispose();
+  }
+});

@@ -410,7 +410,7 @@ export function createExtensionAPI(
 
   const keybindings: KeybindingsAPI = {
     bind: (def: KeybindingDefinition) => contribute(() => kernel.bind(id, def)),
-    unbind: (key, all) => kernel.unbind(id, key, all),
+    unbind: (key, all) => { if (!disposed) kernel.unbind(id, key, all); },
     list: () => kernel.listBindings(),
     chordOf: (event) => chordOfEvent(event)
   };
