@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { install } from './exporter';
+import * as framePreparation from './frame-preparation';
 
 vi.mock('./export-preview', () => ({ animateExportPreview: () => () => {} }));
 vi.mock('../../player/export-web', () => ({
@@ -286,6 +287,51 @@ describe('export delivery', () => {
     release({ ok: false, cancelled: true });
     expect(await result).toEqual({ cancelled: true });
     expect(download).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['preparation', 'encoding'])('stops PNG delivery after Cancel during frame %s and permits retry', async phase => {
+    const { X, PM, frame, download } = setup();
+    let entered!: () => void, release!: () => void;
+    const blocked = new Promise<void>(resolve => { entered = resolve; });
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const originalPrepare = framePreparation.prepareFrame;
+    let prepared = 0, encoded = 0;
+    vi.spyOn(framePreparation, 'prepareFrame').mockImplementation(async (...args) => {
+      if (++prepared === 2 && phase === 'preparation') { entered(); await pending; }
+      return originalPrepare(...args);
+    });
+    const encode = frame.toBlob;
+    frame.toBlob = (callback: (blob: Blob) => void) => {
+      if (++encoded === 2 && phase === 'encoding') {
+        entered(); void pending.then(() => encode(callback));
+      } else encode(callback);
+    };
+    let cancel!: () => void;
+    const close = vi.fn();
+    PM.modal = (options: any) => {
+      cancel = options.actions[0].run;
+      return { el: document.createElement('div'), close };
+    };
+    PM.playing = true;
+    PM.pause = vi.fn(() => { PM.playing = false; });
+    PM.play = vi.fn(() => { PM.playing = true; });
+    PM.setTime = vi.fn();
+    const result = X.run(options);
+    await blocked;
+    expect(download.mock.calls.map(([, name]: any[]) => name)).toEqual(['Test_00000.png']);
+    cancel();
+    release();
+    expect(await result).toEqual({ cancelled: true });
+    // The completed first frame stays; the interrupted second frame is never delivered.
+    expect(download.mock.calls.map(([, name]: any[]) => name)).toEqual(['Test_00000.png']);
+    expect(close).toHaveBeenCalledOnce();
+    expect(X.busy).toBe(false);
+    expect(PM.preparedVideoFrames).toBeNull();
+    expect(PM.setTime).toHaveBeenCalledWith(0, { force: true });
+    expect(PM.playing).toBe(true);
+    expect(await X.run(options)).toEqual({ cancelled: false });
+    expect(download.mock.calls.map(([, name]: any[]) => name)).toEqual(['Test_00000.png', 'Test_00000.png', 'Test_00001.png']);
+    expect(X.busy).toBe(false);
   });
 
   it('delivers a PNG sequence one save at a time without a folder picker', async () => {

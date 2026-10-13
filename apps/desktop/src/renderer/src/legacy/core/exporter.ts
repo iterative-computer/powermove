@@ -849,11 +849,13 @@ async function exportPNGs({ opts, W, H, t0, total, ui, pctx }: any) {
     if (X.cancel) break;
     const T: any = t0 + i / opts.fps;
     await prepareFrame(PM,T);
+    if (X.cancel) break;
     let cv: any;
     if (opts.alpha) cv = alphaFrame(T, W, H, opts.mblur);
     if (!cv) cv = PM.renderFrameTo(T, W, H, { mblur: opts.mblur });
     const blob: Blob = await new Promise((resolve, reject) => cv.toBlob((encoded: Blob | null) =>
       encoded ? resolve(encoded) : reject(new Error('Could not encode frame')), 'image/png'));
+    if (X.cancel) break;
     const name: any = `${PM.proj.name || 'frame'}_${String(i).padStart(5, '0')}.png`;
     if (dir) {
       const fh: any = await dir.getFileHandle(name, { create: true });
