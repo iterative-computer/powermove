@@ -106,7 +106,10 @@ const PARK_TIMEOUT_MS = 1000;
 
 export class EnginePresenter {
   private readonly buffer = new JitterBuffer<Payload>();
-  private readonly vsync: VsyncEstimator;
+  private vsync: VsyncEstimator;
+  private cancelFrame: (id: number) => void = (id) => cancelAnimationFrame(id);
+  /** Bumped when the loop moves, so a stale loop's callbacks stop. */
+  private loop = 0;
   private clock: ClockSample | null = null;
   /** performance.now() ms → host µs: host = ms × 1000 + offset. */
   private hostOffsetUs: number | null = null;
@@ -142,13 +145,37 @@ export class EnginePresenter {
   }
 
   /** Starts presenting at every animation frame. */
-  start(requestFrame: (cb: (t: number) => void) => number = (cb) => requestAnimationFrame(cb)): void {
+  start(
+    requestFrame: (cb: (t: number) => void) => number = (cb) => requestAnimationFrame(cb),
+    cancelFrame: (id: number) => void = (id) => cancelAnimationFrame(id)
+  ): void {
+    if (this.raf) this.cancelFrame(this.raf);
+    this.raf = 0;
+    this.cancelFrame = cancelFrame;
+    const token = ++this.loop;
     const loop = (t: number): void => {
-      if (this.disposed) return;
+      if (this.disposed || token !== this.loop) return;
       this.raf = requestFrame(loop);
       this.refresh(t);
     };
     this.raf = requestFrame(loop);
+  }
+
+  /**
+   * Moves the loop to another window's animation frames (the viewer moved
+   * to a popout, or back): a different display has its own refresh grid,
+   * so the timing fit starts over. Queued frames stay queued.
+   */
+  retarget(
+    requestFrame: (cb: (t: number) => void) => number,
+    cancelFrame: (id: number) => void,
+    displayHz: number | null = null
+  ): void {
+    if (this.disposed) return;
+    this.vsync = new VsyncEstimator(displayHz);
+    this.offsetKey = '';
+    this.offsetUs = 0;
+    this.start(requestFrame, cancelFrame);
   }
 
   onPresented(listener: (frame: PresentedFrame) => void): () => void {
@@ -328,13 +355,13 @@ export class EnginePresenter {
     }
   }
 
-  dispose(cancelFrame: (id: number) => void = (id) => cancelAnimationFrame(id)): void {
+  dispose(cancelFrame: (id: number) => void = this.cancelFrame): void {
     if (this.disposed) return;
     for (const item of this.buffer.clear()) this.dropItem(item, 'disposed');
     for (const { desc } of this.parked) this.releaseDesc(desc, 'disposed');
     this.parked = [];
     this.disposed = true;
-    cancelFrame(this.raf);
+    if (this.raf) cancelFrame(this.raf);
     this.unsubscribe();
     this.listeners.clear();
   }
