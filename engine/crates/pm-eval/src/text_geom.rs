@@ -211,8 +211,10 @@ pub fn text_geometry(d: &Content, measure: &mut dyn TextMeasure) -> TextGeometry
         } else {
             0.0
         };
-        let left_metric = -m.ink[0] + dx;
-        let right_metric = m.ink[2] - dx;
+        // `text_align_dx_` and the glyph bounds are `float`, and so is the
+        // arithmetic (`-glyph_bounds.x() + text_align_dx_`).
+        let left_metric = f64::from(-(m.ink[0] as f32) + dx as f32);
+        let right_metric = f64::from(m.ink[2] as f32 - dx as f32);
         let ascent_metric = -m.ink[1];
         let descent_metric = m.ink[3];
         let fallback_left = if center {
