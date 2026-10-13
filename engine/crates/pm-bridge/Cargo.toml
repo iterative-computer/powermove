@@ -1,10 +1,27 @@
 [package]
 name = "pm-bridge"
-description = "napi-rs addon in main for the frame bridge (section 18)"
+description = "napi-rs addon in main for the frame bridge (section 18) and, before Phase 2, the font registry (section 12)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+crate-type = ["cdylib"]
+# napi symbols resolve only when Node loads the addon; the exports are
+# tested from JavaScript (scripts/fonts-smoke.mjs) and their logic in pm-text.
+test = false
+doctest = false
+
 [dependencies]
+napi = { version = "3.14", default-features = false, features = ["napi9"] }
+napi-derive = "3.6"
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+pm-text = { path = "../pm-text", default-features = false, features = ["system"] }
+
+[build-dependencies]
+napi-build = "2.6"
