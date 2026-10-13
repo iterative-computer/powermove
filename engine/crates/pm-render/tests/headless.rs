@@ -624,10 +624,21 @@ fn render_into_a_callers_target_equals_render() {
     // copied out; no storage or copy-in usage).
     let presenter = pm_gpu::bridge_out::display::WorkingTexture::new(r.device(), Size::new(W, H));
     let wrapped = pm_gpu::Target::wrap(presenter.texture.clone());
-    r.render_into(&doc, "Ptest-root", ticks(0.4), &request, &resolver, &wrapped, None)
-        .unwrap();
+    r.render_into(
+        &doc,
+        "Ptest-root",
+        ticks(0.4),
+        &request,
+        &resolver,
+        &wrapped,
+        None,
+    )
+    .unwrap();
     let got = pm_gpu::readback::read_raw(r.device(), r.queue(), &presenter.texture).unwrap();
-    assert!(got == expected, "the presenter's texture holds the same frame");
+    assert!(
+        got == expected,
+        "the presenter's texture holds the same frame"
+    );
     // A target of the wrong size is refused.
     let small = pm_gpu::Target::new(
         r.device(),
@@ -729,7 +740,13 @@ fn frame_time_at_1080p() {
         for i in 0..40 {
             let t0 = std::time::Instant::now();
             let frame = r
-                .render(&doc, "Ptest-root", ticks(0.5 + f64::from(i) / 30.0), &request, &resolver)
+                .render(
+                    &doc,
+                    "Ptest-root",
+                    ticks(0.5 + f64::from(i) / 30.0),
+                    &request,
+                    &resolver,
+                )
                 .unwrap();
             let _ = r.device().poll(wgpu::PollType::wait_indefinitely());
             if i >= 5 {
