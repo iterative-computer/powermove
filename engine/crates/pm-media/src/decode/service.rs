@@ -81,6 +81,18 @@ impl MediaSource {
     }
 }
 
+/// Frames around a presented frame, for deinterlacing.
+#[derive(Clone, Debug)]
+pub struct FieldFrames {
+    pub prev: DecodedFrame,
+    pub cur: DecodedFrame,
+    pub next: DecodedFrame,
+    /// No previous frame (the current one stands in).
+    pub first: bool,
+    /// No next frame (the current one stands in).
+    pub last: bool,
+}
+
 /// Which playback or render instance a session serves (each viewer,
 /// each export job). Sessions are pooled per source and instance.
 pub type InstanceId = u64;
@@ -201,6 +213,27 @@ impl SessionGuard<'_> {
             Some(n) => self.frame(n).map(Some),
             None => Ok(None),
         }
+    }
+
+    /// The previous, current, and next presented frames around `n`, for
+    /// deinterlacing (random access includes neighboring fields). At the
+    /// ends the current frame stands in for the missing neighbor, and
+    /// `first`/`last` say so (bwdif then interpolates that field spatially).
+    pub fn fields(&mut self, n: usize) -> Result<FieldFrames> {
+        let count = self.source.index.frames.len();
+        if n >= count {
+            return Err(MediaError::invalid(format!("frame {n} out of range")));
+        }
+        let prev = if n > 0 { Some(self.frame(n - 1)?) } else { None };
+        let cur = self.frame(n)?;
+        let next = if n + 1 < count { Some(self.frame(n + 1)?) } else { None };
+        Ok(FieldFrames {
+            first: prev.is_none(),
+            last: next.is_none(),
+            prev: prev.unwrap_or_else(|| cur.clone()),
+            next: next.unwrap_or_else(|| cur.clone()),
+            cur,
+        })
     }
 
     /// Decodes the read-ahead plan from presented frame `from` into the

@@ -24,6 +24,7 @@ pub mod frame;
 pub mod hash;
 pub mod image;
 pub mod index;
+pub mod interlace;
 pub mod pool;
 pub mod probe;
 pub mod sys;

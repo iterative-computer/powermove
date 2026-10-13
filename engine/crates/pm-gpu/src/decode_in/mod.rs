@@ -15,6 +15,8 @@
 //! and `create_texture_from_hal`; each texture's drop callback keeps the
 //! decoded frame (and its CoreVideo texture) alive until wgpu is done.
 
+pub mod deinterlace;
+
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{
