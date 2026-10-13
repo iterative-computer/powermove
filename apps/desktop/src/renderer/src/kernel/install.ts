@@ -595,7 +595,15 @@ function makeAssets(PM: LegacyPM): AssetsAPI {
       if (!(blob instanceof Blob)) throw new Error(`Asset data is missing: ${meta.name || id}`);
       return blob.text();
     },
-    importUrl: (async (url: string, admit?: AdmitDownload) => (await assets.import(await fetchRemoteMedia(url, undefined, admit))).id) satisfies ImportUrl
+    importUrl: (async (url: string, admit?: AdmitDownload) => {
+      const project = PM?.proj;
+      const file = await fetchRemoteMedia(url, undefined, admit);
+      if (PM?.proj !== project) throw Object.assign(
+        new Error('Import stopped because you switched projects · import the URL again in the intended project'),
+        { code: 'STALE_MEDIA_IMPORT' }
+      );
+      return (await assets.import(file)).id;
+    }) satisfies ImportUrl
   };
   return assets;
 }
