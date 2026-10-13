@@ -177,3 +177,33 @@ Later production findings (details and measurements in
   the pool at every step.
 - **`ViewerState.edr` follows the hosting window**, and a setting can turn
   it off (8-bit presentation on an EDR display).
+
+### Version note: `ViewerState.vsync` (amendment 18, after `protocol-16c8e6e125019103`)
+
+An additive, optional field (`PROTOCOL_BUILD` `protocol-4263a0f5f5f748a0`):
+
+```rust
+pub vsync: Option<VsyncHint>, // #[serde(default)], TypeScript `vsync?: VsyncHint | null`
+pub struct VsyncHint { pub host_time: HostMicros, pub period_us: f64 }
+```
+
+- **What it is.** The refresh grid of the display showing the viewer, on
+  the shared host clock: refreshes (BeginFrame times, the viewer's rAF
+  timestamps) fall at `host_time + n × period_us`. The viewer fits it from
+  its animation frames (`VsyncEstimator`) and maps it to the host clock
+  with the offset it already keeps for the jitter buffer.
+- **Why.** The engine starts a timed playback frame at a fixed phase of
+  that grid (half a refresh after the BeginFrame by default), so its GPU
+  work lands after Chromium's compositor drew that refresh instead of
+  contending with it at viz's deadline (S1: viz's draw took 2.6 to 2.7 ms
+  instead of 0.6 ms for frames that reached the display a refresh late).
+- **Compatibility.** Optional on the wire: a peer built before the field
+  sends no `vsync` key and decodes as `None`; the engine then renders at
+  the due time as before. Old TypeScript that builds a `ViewerState`
+  without it still type-checks.
+- **Not a new view.** A hint-only change keeps `viewSeq` and does not make
+  the engine redraw a paused frame. The viewer sends it when first known,
+  when the period moves by more than 0.1% or the phase by more than 250 µs,
+  and at most once a second unless the display link's phase jumped.
+- **Invariant.** `period_us` is finite and within 2,000 to 100,000 µs
+  (`ViewerState::validate`).
