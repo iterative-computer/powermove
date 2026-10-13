@@ -31,7 +31,7 @@ import { hostSink, Reporter, type Sink } from './report';
 import { compileFrom, instantiate, MODULE_PATH, type PmWasm } from './wasm';
 import { FontLoader, type FontProvider } from './fonts';
 import { bridge as hostBridge } from '../kernel/bridge';
-import { setEvaluationWriteHook } from '../legacy/core/temporal-bridge';
+import { setEvaluationWriter } from '../legacy/core/temporal-bridge';
 import { inversePlane, is3DLayer, local3D, parent3D, perspectiveAmount, planeContains, planeMatrix, projectPoint, world3D } from '../legacy/core/space-3d';
 import { groupMatrix, pathValues } from '../legacy/core/vector-paths';
 import { evaluatedValue } from '../legacy/core/content-properties';
@@ -188,9 +188,12 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   PM.doc = doc;
   const held = new Map<string, PathPart[]>();
 
-  /** A write without a path: inside a scoped transaction its held paths, otherwise a structural diff. */
+  /** A write without a path: inside a scoped transaction its held paths, otherwise a structural diff.
+   *  The tracking Proxy does not replace it: writers announce writes made
+   *  through references the Proxy never handed out (a new layer from
+   *  `PM.mkLayer`, edited after insertion). */
   const unknownWrite = () => {
-    if (!barrier || tracker || coveredDepth > 0) return;
+    if (!barrier || coveredDepth > 0) return;
     if (PM.hist?.scoped?.()) { if (held.size) barrier.touched([...held.values()]); return; }
     held.clear();
     barrier.touchAll();
@@ -212,12 +215,15 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     PM.hist.cancel = (...args: unknown[]) => {
       const wasBusy = !!PM.hist.busy?.();
       try { return cancel.apply(PM.hist, args); }
-      finally { held.clear(); if (wasBusy && barrier && !tracker) barrier.touchAll(); }
+      finally { held.clear(); if (wasBusy && barrier) barrier.touchAll(); }
     };
   }
   // Legacy evaluation adopts old keyframe handles into the live document
-  // (temporal-bridge.ts): a write without a path.
-  setEvaluationWriteHook(() => { if (barrier && !tracker) barrier.touchAll(); });
+  // (temporal-bridge.ts): a known writer without a path.
+  setEvaluationWriter({
+    scope: fn => { writerDepth += 1; try { return fn(); } finally { writerDepth -= 1; } },
+    wrote: () => barrier?.touchAll(),
+  });
 
   // ── the native evaluator ──────────────────────────────────────────────
   const dual = mode.dual ? new DualAnswers(m => reporter.emit({ type: 'dual', ...m })) : null;

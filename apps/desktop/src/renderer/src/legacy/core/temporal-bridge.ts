@@ -2,9 +2,18 @@ import { adoptTemporalEase, easeFromUnitHandle, unitHandleFromEase, valueAtTime,
 const owners = new WeakMap<object,any[]>();
 /* Adopting legacy handles and refreshing auto-bezier keys rewrite live keys
    while evaluating: a document write without a path. The native engine's
-   write barrier listens (engine-doc/install.ts). */
-let evaluationWrite: (() => void) | null = null;
-export function setEvaluationWriteHook(fn: (() => void) | null): void { evaluationWrite = fn; }
+   write barrier is the writer (engine-doc/install.ts): adoption runs inside
+   its scope, so the tracking Proxy sees a known writer, and a rewrite the JSON
+   can see is announced for a structural diff. */
+export interface EvaluationWriter {
+  /** Runs an adoption as a known document writer. */
+  scope<T>(fn: () => T): T;
+  /** The adoption changed the keys' JSON. */
+  wrote(): void;
+}
+let writer: EvaluationWriter | null = null;
+export function setEvaluationWriter(next: EvaluationWriter | null): void { writer = next; }
+const adopt = <T>(fn: () => T): T => (writer ? writer.scope(fn) : fn());
 const enumerable = (k: any, key: string) => Object.prototype.propertyIsEnumerable.call(k, key);
 /* Adoption writes speed and influence where they are missing, refreshes
    auto-bezier keys, and turns stored eo/ei/hold/bezierMode into
@@ -22,12 +31,17 @@ export function temporalKeys(keys: any[], version?:number): any[] {
   if (!keys.length) return keys;
   // Only a rewrite the JSON can see is a document write (auto-bezier keys
   // are refreshed on every version and usually come out the same).
-  const before = evaluationWrite && rewritesKeys(keys) ? JSON.stringify(keys) : null;
+  const before = writer && rewritesKeys(keys) ? JSON.stringify(keys) : null;
   if (keys.every(key=>owners.get(key)===keys)) {
-    refreshAutoBezier(keys);
-    if (before !== null && JSON.stringify(keys) !== before) evaluationWrite!();
+    adopt(() => refreshAutoBezier(keys));
+    if (before !== null && JSON.stringify(keys) !== before) writer?.wrote();
     return keys;
   }
+  adopt(() => adoptAccessors(keys));
+  if (before !== null && JSON.stringify(keys) !== before) writer?.wrote();
+  return keys;
+}
+function adoptAccessors(keys: any[]): void {
   adoptTemporalEase(keys);
   for (const key of keys) {
     // Existing accessors already resolve their neighbours from this array.
@@ -57,8 +71,6 @@ export function temporalKeys(keys: any[], version?:number): any[] {
     }});
     Object.defineProperty(key,'bezierMode',{configurable:true,enumerable:false,get:()=>key.continuous?'continuous':'split',set:(v)=>{key.continuous=v==='continuous';}});
   }
-  if (before !== null && JSON.stringify(keys) !== before) evaluationWrite!();
-  return keys;
 }
 export function temporalValue(keys: any[], left: number, time: number, state = prepared.get(keys)): number {
   if(!state) return valueAtTime(keys[left],keys[left+1],time);
@@ -85,9 +97,9 @@ export function temporalEvaluate(keys:any[],time:number,version:number,spring:(t
   let state=prepared.get(keys);
   if(!state||state.version!==version||state.length!==keys.length||state.first!==keys[0]||state.last!==keys[keys.length-1]){
     // Evaluation needs native timing data, not a legacy UI accessor on every key.
-    const before = evaluationWrite && rewritesKeys(keys) ? JSON.stringify(keys) : null;
-    adoptTemporalEase(keys);
-    if (before !== null && JSON.stringify(keys) !== before) evaluationWrite!();
+    const before = writer && rewritesKeys(keys) ? JSON.stringify(keys) : null;
+    adopt(() => adoptTemporalEase(keys));
+    if (before !== null && JSON.stringify(keys) !== before) writer?.wrote();
     state={version,length:keys.length,first:keys[0],last:keys[keys.length-1],curves:[]};prepared.set(keys,state);
   }
   if (state.evaluatedTime === time && state.evaluatedSpring === spring) return state.evaluatedValue!;

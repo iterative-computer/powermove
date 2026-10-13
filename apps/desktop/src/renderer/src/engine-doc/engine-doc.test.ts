@@ -349,3 +349,38 @@ describe('deepKeyOrder', () => {
     expect(JSON.stringify(ordered)).toBe(JSON.stringify({ text: 'a', animators: [{ id: 'A', name: 'Rise', enabled: true }], data: { objects: [], camera: {} }, fontAnchorBounds: { x0: 1, y0: 3, x1: 2, y1: 4 } }));
   });
 });
+
+describe.skipIf(!built)('the tracking Proxy', () => {
+  it('treats legacy key adoption during evaluation as a known writer, and keeps the mirror right', async () => {
+    const { PM, doc } = await editor('strict');
+    PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid')));
+    // Keys in the stored legacy form: evaluation adopts them (writes speed and
+    // influence, turns eo/ei into views), which strict mode would throw on if
+    // it were not a writer.
+    PM.hist.do('Keys', () => {
+      PM.proj.layers[0].p.rotation.kf = [
+        { t: 0, v: 0, eo: [0.4, 0], inInterp: 'bezier', outInterp: 'bezier' },
+        { t: 1, v: 90, ei: [0.6, 1], inInterp: 'bezier', outInterp: 'bezier' },
+      ];
+    });
+    const L = PM.proj.layers[0];
+    expect(() => PM.ev(L, 'rotation', 0.5)).not.toThrow();
+    expect(doc.tracker!.violations()).toEqual([]);
+    expect(Object.prototype.propertyIsEnumerable.call(PM.proj.layers[0].p.rotation.kf[0], 'eo')).toBe(false);
+    expect(doc.api!.ev(L, 'rotation', 0.5)).toBe(PM.ev(L, 'rotation', 0.5));
+    expect(doc.auditor!.audit()).toBe(true);
+    expect(mismatches(doc)).toEqual([]);
+  });
+
+  it('diffs on a touch() that announces writes made through a reference the Proxy never handed out', async () => {
+    const { PM, doc } = await editor('audit-proxy');
+    const raw = PM.mkLayer('solid');
+    PM.hist.do('Add', () => PM.addLayer(raw));
+    // `raw` is the factory's object, not a proxy: the Proxy cannot see this.
+    raw.p['position.x'].v = 432;
+    PM.touch();
+    expect(doc.api!.ev(PM.proj.layers[0], 'position.x', 0)).toBe(432);
+    expect(doc.dual!.total().stale).toBe(0);
+    expect(doc.auditor!.audit()).toBe(true);
+  });
+});

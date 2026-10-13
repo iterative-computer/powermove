@@ -110,7 +110,7 @@ import {
 import { bridge as hostBridge } from './bridge';
 import { parseExtensionUrl } from '../../../shared/extension-url';
 import { fetchRemoteMedia, type AdmitDownload, type ImportUrl } from './remote-media';
-import { writeDocument } from '../engine-doc/write';
+import { touchedDocument, writeDocument } from '../engine-doc/write';
 
 type LegacyPM = Record<string, any>;
 type ExtensionsHostBridge = ExtensionsBridge & Partial<Pick<PowermoveExtensionsBridge, 'fork'>>;
@@ -392,7 +392,14 @@ function makeUIState(PM: LegacyPM): UIStateAPI {
   return {
     timelineVersion: () => Number(PM?.UIState?.timelineVersion?.() ?? 0),
     getLayerCollapsed: (layer) => !!PM?.UIState?.getLayerCollapsed?.(layer),
-    setLayerCollapsed: (layer, collapsed) => !!PM?.UIState?.setLayerCollapsed?.(layer, collapsed),
+    setLayerCollapsed: (layer, collapsed) => {
+      const result = !!PM?.UIState?.setLayerCollapsed?.(layer, collapsed);
+      // The timeline's disclosure toggle stores `layer.collapsed` (a document
+      // field outside history) just before this call: the barrier records it.
+      const index = Array.isArray(PM?.proj?.layers) ? PM.proj.layers.indexOf(layer) : -1;
+      if (index >= 0) touchedDocument(PM, [['layers', index, 'collapsed']]);
+      return result;
+    },
     getGroupCollapsed: (layer) => !!PM?.UIState?.getGroupCollapsed?.(layer),
     setGroupCollapsed: (layer, collapsed) => !!PM?.UIState?.setGroupCollapsed?.(layer, collapsed),
     getKeyHandles: (key) => PM?.UIState?.getKeyHandles?.(key) ?? null,

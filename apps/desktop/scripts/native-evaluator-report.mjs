@@ -90,6 +90,9 @@ const report = {
     auditFailures: totals.audit.failures,
     consistencyMismatches: events.consistency.length,
     violations: events.violation.length,
+    // Writes from code a test evaluates in the page (directly, or an app
+    // function it called outside the app's own transaction) are the test's.
+    appViolations: events.violation.filter(e => !String(e.site ?? '').startsWith('page.evaluate')).length,
     errors: events.error.length,
     dead: events.dead.length,
   },
@@ -104,7 +107,7 @@ if (asJson) {
   console.log(`launches ${totals.launches} (ready ${totals.ready}), unparsed lines ${report.unparsed}`);
   console.log(`dual: compared ${v.compared}, mismatched ${v.mismatched}, stale ${v.stale}, allowed ${v.allowed}; fragile ${v.fragile.cases}, differed ${v.fragile.differed} (${v.fragile.ok ? 'within' : 'over'} 5%)`);
   console.log(`audit: ${totals.audit.audits} audits, ${totals.audit.failures} failures (missed writes ${totals.audit.missedWrites}, mirror ${totals.audit.mirrorMismatches})`);
-  console.log(`consistency mismatches ${v.consistencyMismatches}, violations ${v.violations}, errors ${v.errors}, dead ${v.dead}`);
+  console.log(`consistency mismatches ${v.consistencyMismatches}, violations ${v.violations} (app writers ${v.appViolations}), errors ${v.errors}, dead ${v.dead}`);
   console.log(`barrier: ${JSON.stringify(totals.barrier)}`);
   console.log(`fallbacks: ${JSON.stringify(totals.native.fallbacks)}`);
   const byOp = {};
@@ -125,6 +128,17 @@ if (asJson) {
     }
   }
   for (const e of events.consistency.slice(0, 5)) console.log(`\nconsistency ${e.reason}: ${JSON.stringify(e.missed?.slice(0, 5))}`);
-  for (const e of events.violation.slice(0, 10)) console.log(`violation ${e.path} at ${e.site} (${e.count})`);
+  const writers = {};
+  for (const e of events.violation) {
+    const site = String(e.site ?? '');
+    const writer = site.startsWith('page.evaluate via ') ? `page.evaluate via ${site.slice(18).split(' (')[0]}`
+      : site.startsWith('page.evaluate') ? 'page.evaluate' : site.split(' (')[0];
+    const w = (writers[writer] ??= { count: 0, paths: new Set(), site });
+    w.count += e.count ?? 1;
+    w.paths.add(String(e.path).replace(/\.\d+/g, '.N'));
+  }
+  const ranked = Object.entries(writers).sort((a, b) => b[1].count - a[1].count);
+  if (ranked.length) console.log('\nviolations by writer:');
+  for (const [writer, w] of ranked) console.log(`  ${w.count} ${writer} ${JSON.stringify([...w.paths].slice(0, 4))}${writer === w.site ? '' : ` at ${w.site}`}`);
   for (const e of events.error.slice(0, 5)) console.log(`error ${e.message}`);
 }

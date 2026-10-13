@@ -20,7 +20,7 @@ import { createNewProjectForm } from './ui/project-settings';
 import { inspectorService, shaderHooks, timelineService, viewerService } from './core/services';
 import { bridge as hostBridge } from '../kernel/bridge';
 import { CURRENT_READER_VERSION, NEWER_PROJECT_MESSAGE, needsNewerReader, requiredReaderVersion } from '../../../shared/reader-version';
-import { touchedDocument } from '../engine-doc/write';
+import { touchedDocument, writeDocument } from '../engine-doc/write';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -1054,7 +1054,7 @@ function switchProject(p: any, history?: any, live?: ParkedTab) {
   if (live) {
     // Renamed from Projects while in the background: the library has the name.
     const name = PM.Projects.list().find((meta: any) => meta.id === PM.proj.id)?.name;
-    if (name) PM.proj.name = name;
+    if (name && PM.proj.name !== name) writeDocument(PM, [['name']], () => { PM.proj.name = name; });
   }
   const isTab = PM.proj.id !== homeProjectId;
   // Opening something new adds it after the other tabs; an existing tab keeps its place.

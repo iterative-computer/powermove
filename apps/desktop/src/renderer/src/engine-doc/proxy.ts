@@ -52,11 +52,15 @@ const firstAppFrame = (stack: string | undefined): string => {
   // writerStack already dropped the Proxy's frames; native frames have no location.
   const own = /\((native|<anonymous>)\)$/;
   const first = lines.find(line => !own.test(line)) ?? '';
+  const harness = /eval at evaluate|__playwright|UtilityScript|<anonymous>:\d+:\d+\)?$/;
   // Code a test harness evaluates in the page (Playwright's page.evaluate),
   // not one of the app's writers.
-  if (/eval at evaluate|__playwright|UtilityScript|<anonymous>:\d+:\d+\)?$/.test(first)) return `page.evaluate ${first.trim().replace(/^at\s+/, '').slice(0, 160)}`;
+  if (harness.test(first)) return `page.evaluate ${first.trim().replace(/^at\s+/, '').slice(0, 160)}`;
   const frame = lines.find(line => !own.test(line) && !/<anonymous>/.test(line)) || lines[0] || '';
-  return frame.trim().replace(/^at\s+/, '').replace(/\?[^:)]*/, '').slice(0, 200);
+  const where = frame.trim().replace(/^at\s+/, '').replace(/\?[^:)]*/, '').slice(0, 200);
+  // An app function a test called directly (`PM.groupLayers(...)` from
+  // page.evaluate) outside the transaction the app's own callers open.
+  return lines.some(line => harness.test(line)) ? `page.evaluate via ${where}` : where;
 };
 
 export function createTracker(options: {

@@ -1000,8 +1000,9 @@ async function recoverSourceAsset(meta: any, file: File, current: () => boolean)
   assertCurrentProject();
   const imported = await prepareImportedAsset(file, { id: meta.id, assertCurrentProject });
   if (!current()) { disposeAsset(imported.prepared); return; }
-  Object.assign(meta, assetIdentity(meta.id, file, imported.kind, imported.prepared,
-    imported.fingerprint, imported.storageKey, imported.sourcePath, imported.persisted, meta.layerDefinition));
+  // `meta` is the document's own record (PM.proj.assets[id]).
+  writeDocument(PM, [['assets', meta.id]], () => Object.assign(meta, assetIdentity(meta.id, file, imported.kind, imported.prepared,
+    imported.fingerprint, imported.storageKey, imported.sourcePath, imported.persisted, meta.layerDefinition)));
   Object.assign(imported.prepared, meta);
   PM.assets.map.set(meta.id, imported.prepared);
   PM.assets.errors.delete(meta.id);
