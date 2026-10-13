@@ -219,6 +219,9 @@ pub struct Stats {
     pub remote_frames: u64,
     pub remote_presented: u64,
     pub remote_dropped: u64,
+    /// Frames the C′ layer skipped to bring presentation back to its asked
+    /// times after a stall left it a frame late.
+    pub remote_resyncs: u64,
     pub remote_error: Option<String>,
     /// The refresh rate the C′ prototype asked for while playing.
     pub remote_rate_hz: Option<f64>,
@@ -759,6 +762,7 @@ impl Thread {
                     descriptor.seq.get(),
                     shown_from.round() as i64,
                 )
+                .map(|shown| (shown, remote.resyncs()))
                 .map_err(|e| e.to_string()),
             _ => Err("no remote layer or surface".into()),
         };
@@ -768,7 +772,12 @@ impl Thread {
         });
         let mut stats = self.stats();
         match result {
-            Ok(()) => stats.remote_frames += 1,
+            Ok((true, resyncs)) => {
+                stats.remote_frames += 1;
+                stats.remote_resyncs = resyncs;
+            }
+            // Skipped to drain Core Animation's queue (Pacing).
+            Ok((false, resyncs)) => stats.remote_resyncs = resyncs,
             Err(error) => stats.remote_error = Some(error),
         }
     }

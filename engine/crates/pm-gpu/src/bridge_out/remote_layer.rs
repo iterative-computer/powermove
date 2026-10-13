@@ -63,6 +63,72 @@ pub struct Presented {
     pub presented_us: Option<i64>,
 }
 
+/// Keeps the remote layer's presentation latency from creeping up.
+///
+/// `presentDrawable:atTime:` never drops a queued drawable. When one frame
+/// reaches the display a content frame late (a WindowServer stall), the next
+/// one, asked for its own time, finds that refresh taken and follows it, and
+/// so on: every later frame shows one frame late for the rest of the run
+/// (measured on the S1 harness: due-to-present 14.3 ms, then 31 ms after
+/// one stall, with no way back). A late frame is already a visible hitch;
+/// staying late also moves the picture against the audio clock. So when
+/// presentations run more than half a content frame later than the lowest
+/// latency seen recently, for two frames in a row, the layer skips one
+/// frame, which lets the queue drain back to its own times. At most once
+/// per [`Pacing::WINDOW`] frames: if the latency really moved (a display
+/// mode change), the window forgets the old one and no more frames are
+/// skipped.
+#[derive(Debug, Default)]
+pub struct Pacing {
+    /// Due-to-present latencies of the latest presented frames (µs).
+    recent: std::collections::VecDeque<i64>,
+    /// Consecutive presented frames later than the threshold.
+    late_streak: u32,
+    /// The content frame interval (µs), from consecutive asked times.
+    frame_us: i64,
+    /// Frames asked for since the last skip.
+    since_skip: u32,
+    /// Frames skipped to drain the queue.
+    pub resyncs: u64,
+}
+
+impl Pacing {
+    /// Frames of latency history, and the least distance between skips.
+    pub const WINDOW: usize = 120;
+    /// Late presented frames in a row before a skip.
+    pub const STREAK: u32 = 2;
+
+    /// A frame reached the display `latency_us` after the time it was asked for.
+    pub fn presented(&mut self, latency_us: i64) {
+        let floor = self.recent.iter().copied().min();
+        if self.recent.len() == Self::WINDOW {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(latency_us);
+        let late = match floor {
+            Some(floor) if self.frame_us > 0 => latency_us - floor > self.frame_us / 2,
+            _ => false,
+        };
+        self.late_streak = if late { self.late_streak + 1 } else { 0 };
+    }
+
+    /// Whether to skip the frame about to be asked for (`interval_us` after
+    /// the previous one).
+    pub fn skip_next(&mut self, interval_us: Option<i64>) -> bool {
+        if let Some(i) = interval_us.filter(|i| *i > 0 && *i < 1_000_000) {
+            self.frame_us = i;
+        }
+        self.since_skip = self.since_skip.saturating_add(1);
+        if self.late_streak >= Self::STREAK && self.since_skip as usize > Self::WINDOW {
+            self.late_streak = 0;
+            self.since_skip = 0;
+            self.resyncs += 1;
+            return true;
+        }
+        false
+    }
+}
+
 /// A `CAContext` with a `CAMetalLayer`, presenting copies of pool surfaces.
 pub struct RemoteLayer {
     context: Retained<AnyObject>,
@@ -74,6 +140,9 @@ pub struct RemoteLayer {
     /// Metal textures over pool surfaces, by IOSurface id.
     sources: HashMap<u32, Retained<ProtocolObject<dyn MTLTexture>>>,
     presented: Arc<Mutex<Vec<Presented>>>,
+    pacing: Arc<Mutex<Pacing>>,
+    /// The time the previous frame was asked for (host µs).
+    last_asked_us: Option<i64>,
 }
 
 // SAFETY: the layer, context, device, and queue are used from the one
@@ -322,6 +391,12 @@ impl RemoteLayer {
             format,
             sources: HashMap::new(),
             presented: Arc::new(Mutex::new(Vec::new())),
+            // Begin able to skip: a run can start in the late mode.
+            pacing: Arc::new(Mutex::new(Pacing {
+                since_skip: Pacing::WINDOW as u32,
+                ..Pacing::default()
+            })),
+            last_asked_us: None,
         })
     }
 
@@ -374,13 +449,24 @@ impl RemoteLayer {
     /// whose GPU work completed) into the next drawable and presents it at
     /// host µs `at_us`. Blocks up to a second when all three drawables are
     /// queued. Returns when the copy is committed; its fate arrives later
-    /// in [`Self::take_presented`].
+    /// in [`Self::take_presented`]. Returns `false` when it skipped the
+    /// frame to bring presentation back to its asked times ([`Pacing`]).
     pub fn present(
         &mut self,
         surface: &SharedIoSurface,
         seq: u64,
         at_us: i64,
-    ) -> Result<(), RemoteLayerError> {
+    ) -> Result<bool, RemoteLayerError> {
+        let interval = self.last_asked_us.map(|last| at_us - last);
+        self.last_asked_us = Some(at_us);
+        if self
+            .pacing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .skip_next(interval)
+        {
+            return Ok(false);
+        }
         let source = self.source(surface)?;
         let drawable = self
             .layer
@@ -398,11 +484,17 @@ impl RemoteLayer {
         unsafe { blit.copyFromTexture_toTexture(&source, &target) };
         blit.endEncoding();
         let presented = self.presented.clone();
+        let pacing = self.pacing.clone();
         let handler = RcBlock::new(
             move |drawable: std::ptr::NonNull<ProtocolObject<dyn MTLDrawable>>| {
                 // SAFETY: Metal passes the live drawable to its presented handler.
                 let time = unsafe { drawable.as_ref() }.presentedTime();
                 let presented_us = (time > 0.0).then(|| (time * 1e6).round() as i64);
+                if let Some(at) = presented_us
+                    && let Ok(mut pacing) = pacing.lock()
+                {
+                    pacing.presented(at - at_us);
+                }
                 if let Ok(mut list) = presented.lock() {
                     list.push(Presented {
                         seq,
@@ -420,7 +512,15 @@ impl RemoteLayer {
         buffer.commit();
         // The pool surface is free again once the copy ran.
         buffer.waitUntilCompleted();
-        Ok(())
+        Ok(true)
+    }
+
+    /// Frames skipped so far to bring presentation back to its asked times.
+    pub fn resyncs(&self) -> u64 {
+        self.pacing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .resyncs
     }
 
     /// Presentation results so far, emptied.
@@ -449,6 +549,52 @@ mod tests {
     use super::*;
     use crate::bridge_out::surface::ExportedSurface;
     use pm_protocol::interop::SurfaceRequest;
+
+    /// The S1 smoke run's pattern: 14.3 ms latency, then one stall puts
+    /// every later frame a content frame (16.7 ms) later.
+    #[test]
+    fn pacing_skips_one_frame_when_presentation_stays_a_frame_late() {
+        let mut pacing = Pacing {
+            since_skip: Pacing::WINDOW as u32,
+            ..Pacing::default()
+        };
+        let frame = 16_667;
+        let mut skips = Vec::new();
+        for n in 0..400 {
+            if pacing.skip_next(Some(frame)) {
+                skips.push(n);
+                continue;
+            }
+            // Frames 0..200 on time; later ones a frame late until a skip.
+            let late = n >= 200 && skips.is_empty();
+            pacing.presented(if late { 31_000 } else { 14_300 });
+        }
+        // Two late frames, then one skip; none after it.
+        assert_eq!(skips, vec![202]);
+        assert_eq!(pacing.resyncs, 1);
+    }
+
+    #[test]
+    fn pacing_does_not_skip_for_refresh_sized_noise_or_a_lasting_latency_change() {
+        let mut pacing = Pacing::default();
+        let frame = 16_667;
+        // One 120 Hz refresh of jitter is not a stuffed queue.
+        for n in 0..300 {
+            assert!(!pacing.skip_next(Some(frame)));
+            pacing.presented(if n % 7 == 0 { 22_600 } else { 14_300 });
+        }
+        // A lasting move to a higher latency: at most one skip, then the
+        // window adopts the new latency.
+        let mut skips = 0;
+        for _ in 0..600 {
+            if pacing.skip_next(Some(frame)) {
+                skips += 1;
+                continue;
+            }
+            pacing.presented(31_000);
+        }
+        assert!(skips <= 1, "{skips}");
+    }
 
     #[test]
     fn the_preferred_refresh_is_a_multiple_of_the_content_rate() {
@@ -504,8 +650,8 @@ mod tests {
         )
         .unwrap();
         let now = pm_protocol_now_us();
-        layer.present(&surface.iosurface, 1, now + 20_000).unwrap();
-        layer.present(&surface.iosurface, 2, now + 40_000).unwrap();
+        assert!(layer.present(&surface.iosurface, 1, now + 20_000).unwrap());
+        assert!(layer.present(&surface.iosurface, 2, now + 40_000).unwrap());
         // One Metal texture per pool surface.
         assert_eq!(layer.sources.len(), 1);
     }
