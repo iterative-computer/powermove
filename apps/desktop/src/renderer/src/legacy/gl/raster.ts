@@ -663,7 +663,11 @@ function waitForVideoMetadata(el: any, fileName: any, timeout: any = 15000) {
     loaded();
   });
 }
-async function playbackProxy(file: any, name: string, onStage?: (label: string) => void): Promise<any> {
+async function playbackProxy(file: any, name: string, onStage?: (label: string) => void, storageKey?: string): Promise<any> {
+  /* With the media store keeping originals (new engine), the browser
+     rendition is generated media kept beside the original: reuse it. */
+  const kept = storageKey ? await PM.MediaStore?.rendition?.get?.(storageKey).catch(() => null) : null;
+  if (kept) return kept;
   const media = hostBridge()?.media;
   if (!media?.createPlaybackProxy) {
     throw new Error(videoImportFailureMessage(name, { code: 4 }));
@@ -673,7 +677,9 @@ async function playbackProxy(file: any, name: string, onStage?: (label: string) 
   const result = await media.createPlaybackProxy(file, cloudSourcePaths.get(file));
   if (!result.ok) throw new Error(result.error);
   onStage?.('Loading optimized video');
-  return readProxyFile(result, name, file.lastModified);
+  const proxy = await readProxyFile(result, name, file.lastModified);
+  if (storageKey && PM.MediaStore?.keepsOriginals) await PM.MediaStore.rendition.put(storageKey, proxy);
+  return proxy;
 }
 async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
   const imageSequence = importedSequences.get(blob) || meta.imageSequence;
@@ -755,7 +761,7 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
           el.load();
         }
         window.URL.revokeObjectURL(url);
-        sourceBlob = await playbackProxy(blob, name, onStage);
+        sourceBlob = await playbackProxy(blob, name, onStage, meta.storageKey);
         playbackProxyUsed = true;
         playbackProxyVersion = 3;
         url = window.URL.createObjectURL(sourceBlob);
@@ -765,15 +771,20 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
         }
       }
     } else throw new Error('Unsupported media kind');
+    /* The new engine plays originals, so its media store keeps them: the
+       playback proxy is only this viewer's rendition (section 21). */
+    const keepOriginal = playbackProxyUsed && meta.playbackProxy !== true && PM.MediaStore?.keepsOriginals === true;
+    if (keepOriginal) { playbackProxyUsed = false; playbackProxyVersion = 0; }
     const asset: any = {
       id, name, kind, url, el, storageKey: meta.storageKey,
       w: w || meta.w || 0, h: hh || meta.h || 0,
-      dur: dur || meta.dur || 0, size: sourceBlob.size || meta.size || 0,
+      dur: dur || meta.dur || 0, size: (keepOriginal ? blob.size : sourceBlob.size) || meta.size || 0,
       ...(kind === 'video' ? { fps: imageSequence?.fps || meta.fps || await mp4FrameRate(blob) } : {}),
       playbackProxy: playbackProxyUsed,
       playbackProxyVersion,
       ...(kind === 'video' ? { videoTimestampScale: await webmTimestampScale(sourceBlob) } : {}),
-      persistBlob: sourceBlob,
+      persistBlob: keepOriginal ? blob : sourceBlob,
+      ...(keepOriginal ? { rendition: true } : {}),
       ...(imageSequence ? { imageSequence } : {}),
       ...(imageFormat ? { format: imageFormat } : {}),
       ...(svg ? { svg } : {}),
@@ -833,6 +844,11 @@ function assetIdentity(id: any, file: any, kind: any, prepared: any, fingerprint
     ...(prepared.poster === true ? { poster: true } : {}),
     ...(prepared.format ? { format: prepared.format } : {}),
     ...(prepared.svg ? { editablePaths: prepared.svg.paths.length } : {}),
+    /* Media store (section 21): the content hash, a browser rendition kept as
+       generated media, and Link to files. Absent storage means copied. */
+    ...(prepared.rendition ? { rendition: true } : {}),
+    ...(typeof prepared.contentHash === 'string' ? { contentHash: prepared.contentHash } : {}),
+    ...(prepared.storage === 'linked' && prepared.link ? { storage: 'linked', link: prepared.link } : {}),
     ...(kind === 'video' ? {
       hasAudio: prepared.hasAudio === true,
       audioDur: prepared.hasAudio ? prepared.audioDur || prepared.dur || 0 : 0,
@@ -853,7 +869,7 @@ function checkpointAssetMetadata(project: any) {
   try { PM.Projects?.put?.(project); } catch (error) { }
 }
 /** Import and replacement share all reading, decoding, conversion, and storage. */
-async function prepareImportedAsset(file: any, { id, assertCurrentProject, resolved: settled, onStage }: any) {
+async function prepareImportedAsset(file: any, { id, assertCurrentProject, resolved: settled, onStage, storage }: any) {
   const resolved = settled || await resolveAssetKind(file);
   const kind = resolved.kind;
   if (!kind) throw new Error('Unsupported media file');
@@ -879,6 +895,13 @@ async function prepareImportedAsset(file: any, { id, assertCurrentProject, resol
     assertCurrentProject();
     meta = { format: extension };
   }
+  /* Copy into project or Link to files (section 21; new engine only). */
+  const decision = PM.HostMedia?.enabled ? await PM.HostMedia.decide({
+    kind, sourcePath, requested: storage === 'link' || storage === 'copy' ? storage : undefined,
+    projectSetting: PM.HostMedia.projectStorage(), converted: source !== file,
+  }) : null;
+  assertCurrentProject();
+  const link = decision?.storage === 'linked' ? decision.link : null;
   onStage?.('Preparing media');
   const preparation = prepareAsset({ id, name: file.name, kind, blob: source, meta: { ...meta, storageKey }, onStage });
   /* Images/audio can persist while they decode. Video preparation may replace
@@ -886,7 +909,7 @@ async function prepareImportedAsset(file: any, { id, assertCurrentProject, resol
      decision before writing any video bytes to durable storage. */
   const mayNeedPlaybackProxy = kind === 'video' && !resolved.animated && mayNeedVideoProxy(extension);
   // Observe storage failures immediately, even while decoding is still pending.
-  const persist = (blob: any) => Promise.resolve().then(() => PM.MediaStore.put(storageKey, blob, {
+  const persist = (blob: any) => Promise.resolve().then(() => link ? true : PM.MediaStore.put(storageKey, blob, {
     storageKey, fingerprint, type: blob.type || file.type,
   })).then(value => ({ status: 'fulfilled', value }), reason => ({ status: 'rejected', reason }));
   const eagerPersist = mayNeedPlaybackProxy ? null : persist(source);
@@ -907,9 +930,14 @@ async function prepareImportedAsset(file: any, { id, assertCurrentProject, resol
   try { assertCurrentProject(); }
   catch (error) { disposeAsset(prepared); throw error; }
   const persisted = persistedResult.value;
+  if (link) Object.assign(prepared, { storage: 'linked', link, contentHash: link.hash });
+  else {
+    const record = PM.MediaStore.recordFor?.(storageKey);
+    if (persisted && record?.hash) prepared.contentHash = record.hash;
+  }
   return { prepared, kind, fingerprint, storageKey, sourcePath, persisted };
 }
-async function ingestAsset(file: any, { silent = false, layerDefinition, onStage, assertCurrent, requirePersisted = false, newAsset = false }: any = {}) {
+async function ingestAsset(file: any, { silent = false, layerDefinition, onStage, assertCurrent, requirePersisted = false, newAsset = false, storage }: any = {}) {
   const targetProject = PM.proj;
   const targetEpoch = assetEpoch;
   const assertCurrentProject = () => {
@@ -922,7 +950,7 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
   };
   const provisionalId = PM.uid('a');
   const { prepared, kind, fingerprint, storageKey, sourcePath, persisted } = await prepareImportedAsset(file, {
-    id: provisionalId, assertCurrentProject, onStage,
+    id: provisionalId, assertCurrentProject, onStage, storage,
   });
   if (requirePersisted && !persisted) {
     disposeAsset(prepared);
@@ -997,7 +1025,8 @@ async function recoverSourceAsset(meta: any, file: File, current: () => boolean)
     throw new Error('The source file has changed. Use Locate File to choose a replacement.');
   }
   assertCurrentProject();
-  const imported = await prepareImportedAsset(file, { id: meta.id, assertCurrentProject });
+  // Recovery keeps the asset's storage; it is not a new import.
+  const imported = await prepareImportedAsset(file, { id: meta.id, assertCurrentProject, storage: meta.storage === 'linked' ? 'link' : 'copy' });
   if (!current()) { disposeAsset(imported.prepared); return; }
   Object.assign(meta, assetIdentity(meta.id, file, imported.kind, imported.prepared,
     imported.fingerprint, imported.storageKey, imported.sourcePath, imported.persisted, meta.layerDefinition));
@@ -1019,7 +1048,7 @@ PM.assets = {
     result.asset.importResult = result;
     return result.asset;
   },
-  async importBatch(files: any, { concurrency, onProgress, onStage, replaceAssetId }: any = {}) {
+  async importBatch(files: any, { concurrency, onProgress, onStage, replaceAssetId, storage }: any = {}) {
     const list = Array.from(files || []);
     if (replaceAssetId != null && list.length !== 1) throw new Error('Choose one file or one image sequence to replace this media');
     const cores = Math.max(1, Number(window.navigator && window.navigator.hardwareConcurrency) || 4);
@@ -1027,7 +1056,7 @@ PM.assets = {
     let completed = 0;
     const results = await PM.MediaImport.mapBounded(list, limit, async (file: any, index: any) => {
       let result: any;
-      const options = { silent: true, onStage: onStage
+      const options = { silent: true, storage, onStage: onStage
         ? (label: string) => onStage({ file, index, label, completed, total: list.length }) : undefined };
       try {
         result = replaceAssetId != null
@@ -1047,7 +1076,7 @@ PM.assets = {
     }
     return results;
   },
-  async replace(id: any, file: any, { onStage, assertCurrent }: any = {}) {
+  async replace(id: any, file: any, { onStage, assertCurrent, storage }: any = {}) {
     const targetProject = PM.proj;
     const targetProjectId = targetProject?.id;
     const targetEpoch = assetEpoch;
@@ -1070,7 +1099,7 @@ PM.assets = {
     };
     let prepared: any = null;
     try {
-      const imported = await prepareImportedAsset(file, { id, assertCurrentProject, resolved, onStage });
+      const imported = await prepareImportedAsset(file, { id, assertCurrentProject, resolved, onStage, storage });
       prepared = imported.prepared;
       const { fingerprint, storageKey, sourcePath, persisted } = imported;
       if (!persisted) throw new Error('Could not store the replacement media · the original file is unchanged');
