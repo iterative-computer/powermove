@@ -70,17 +70,17 @@ const RUNS = [
   // The C′ prototype (amendment 5): playback through a remote Core
   // Animation layer; presentation times from Core Animation. Core Animation
   // only presents a layer whose window is on a display, so C′ runs (and the
-  // Chromium runs they are compared with) use an invisible on-screen window
-  // (`placement: 'transparent'`).
-  { name: 'playback-cprime-idle', ...playback, mode: 'engine', load: false, remoteLayer: true, placement: 'transparent' },
-  { name: 'playback-cprime-load', ...playback, mode: 'engine', load: true, loadProfile: 'no-autosave', remoteLayer: true, placement: 'transparent' },
-  { name: 'playback-today-idle-transparent', ...playback, mode: 'today', load: false, placement: 'transparent' },
-  { name: 'playback-engine-idle-transparent', ...playback, mode: 'engine', load: false, placement: 'transparent' },
+  // Chromium runs they are compared with) use a window on the primary
+  // display behind the desktop picture (`placement: 'behind'`).
+  { name: 'playback-cprime-idle', ...playback, mode: 'engine', load: false, remoteLayer: true, placement: 'behind' },
+  { name: 'playback-cprime-load', ...playback, mode: 'engine', load: true, loadProfile: 'no-autosave', remoteLayer: true, placement: 'behind' },
+  { name: 'playback-today-idle-behind', ...playback, mode: 'today', load: false, placement: 'behind' },
+  { name: 'playback-engine-idle-behind', ...playback, mode: 'engine', load: false, placement: 'behind' },
   // ProMotion (section 15): 25 fps content on the 120 Hz panel, with and
   // without asking for a multiple of the content rate (C′ only: Electron
   // has no refresh-rate request for its compositor).
-  { name: 'playback-cprime-25-idle', ...playback, mode: 'engine', load: false, remoteLayer: true, fps: 25, placement: 'transparent' },
-  { name: 'playback-cprime-25-rate-idle', ...playback, mode: 'engine', load: false, remoteLayer: true, fps: 25, placement: 'transparent', env: { POWERMOVE_BRIDGE_REMOTE_RATE: '1' } },
+  { name: 'playback-cprime-25-idle', ...playback, mode: 'engine', load: false, remoteLayer: true, fps: 25, placement: 'behind' },
+  { name: 'playback-cprime-25-rate-idle', ...playback, mode: 'engine', load: false, remoteLayer: true, fps: 25, placement: 'behind', env: { POWERMOVE_BRIDGE_REMOTE_RATE: '1' } },
   { name: 'playback-engine-25-idle', ...playback, mode: 'engine', load: false, fps: 25 },
   { name: 'playback-engine-load-noautosave-phaseoff', ...playback, mode: 'engine', load: true, loadProfile: 'no-autosave', env: { POWERMOVE_BRIDGE_PHASE: 'off' } },
   { name: 'playback-engine-idle-phaseoff', ...playback, mode: 'engine', load: false, env: { POWERMOVE_BRIDGE_PHASE: 'off' } },
@@ -97,10 +97,10 @@ const RUNS = [
   { name: 'app-playback-engine-load-phase750', ...playback, app: true, mode: 'engine', load: true, loadProfile: 'no-autosave', env: { POWERMOVE_BRIDGE_PHASE: '750' } },
   // The C′ prototype in the real app: playback through the remote layer
   // over the real viewer's stage.
-  { name: 'app-playback-cprime-idle', ...playback, app: true, mode: 'engine', load: false, remoteLayer: true, placement: 'transparent' },
-  { name: 'app-playback-cprime-load', ...playback, app: true, mode: 'engine', load: true, loadProfile: 'no-autosave', remoteLayer: true, placement: 'transparent' },
-  { name: 'app-playback-today-idle-transparent', ...playback, app: true, mode: 'today', load: false, placement: 'transparent' },
-  { name: 'app-playback-today-load-transparent', ...playback, app: true, mode: 'today', load: true, loadProfile: 'no-autosave', placement: 'transparent' },
+  { name: 'app-playback-cprime-idle', ...playback, app: true, mode: 'engine', load: false, remoteLayer: true, placement: 'behind' },
+  { name: 'app-playback-cprime-load', ...playback, app: true, mode: 'engine', load: true, loadProfile: 'no-autosave', remoteLayer: true, placement: 'behind' },
+  { name: 'app-playback-today-idle-behind', ...playback, app: true, mode: 'today', load: false, placement: 'behind' },
+  { name: 'app-playback-today-load-behind', ...playback, app: true, mode: 'today', load: true, loadProfile: 'no-autosave', placement: 'behind' },
   // Gestures: the engine path pans the view (it draws the test source, not
   // the document, so a layer drag would change nothing it renders); today
   // pans the same way and drags a layer. `-move`: before step 2

@@ -46,7 +46,7 @@ type Config = {
    *  main hosts its remote layer over the page. */
   remoteLayer?: boolean;
   /** Where the window sits: off every screen (default) or invisible on screen. */
-  placement?: 'offscreen' | 'transparent';
+  placement?: 'offscreen' | 'behind';
   /** Latency: input modes to run, each for `durationMs`. */
   inputModes?: ('drag' | 'orbit' | 'walk' | 'baseline')[];
   out: string;
@@ -55,6 +55,7 @@ type Config = {
 
 type HarnessAddon = {
   nowUs(): number;
+  placeBehindDesktop(viewHandle: Buffer): number;
   hostRemoteLayer(viewHandle: Buffer, contextId: number, x: number, y: number, width: number, height: number): number;
   removeRemoteLayer(id: number): boolean;
   InputGenerator: new (hz: number, durationMs: number, kind: number, callback: (input: { seq: number; tsUs: number; x: number; y: number }) => void) => { stop(): void };
@@ -90,18 +91,21 @@ async function waitFor<T>(label: string, poll: () => Promise<T | null | undefine
 }
 
 /**
- * `transparent` placement (C′ runs): Core Animation never shows, and so
- * never frees, the drawables of a layer in a window that is on no display,
- * so the remote layer needs a window on screen. This one is on the primary
- * display but invisible: opacity 0, ignoring the mouse, never activated,
- * above other windows so they do not occlude it.
+ * `behind` placement (C′ runs and the Chromium runs they are compared
+ * with): Core Animation neither shows nor reports, and so never frees, the
+ * drawables of a layer whose window is off every screen or at opacity 0
+ * (measured: every C′ frame unpresented both ways), so the remote layer
+ * needs a window on a display. This one is on the primary display one
+ * level below the desktop picture, which covers it: ignoring the mouse,
+ * never activated, on every Space, out of Mission Control's cycle.
  */
-function placeTransparent(win: BrowserWindow, width: number, height: number): void {
+function placeBehind(win: BrowserWindow, harness: HarnessAddon, width: number, height: number): number {
   const area = screen.getPrimaryDisplay().workArea;
-  win.setOpacity(0);
+  const level = harness.placeBehindDesktop(win.getNativeWindowHandle());
   win.setIgnoreMouseEvents(true);
-  win.setAlwaysOnTop(true, 'floating');
+  // The same 1920 × 1080 points as off screen (frameless, larger than the screen allowed).
   win.setBounds({ x: area.x, y: area.y, width, height });
+  return level;
 }
 
 function offscreen(width: number, height: number): Electron.Rectangle {
@@ -177,14 +181,17 @@ async function main(): Promise<void> {
     win.webContents.on('console-message', (event) => log(`page ${event.level}: ${event.message}`));
     installed.attachWindow(win);
     await win.loadFile(path.join(outDir, 'measure.html'), { query: { hz: String(hz), edr: cfg.edr ?? 'auto', raw: cfg.rawInput ? '1' : '0' } });
-    if (cfg.placement === 'transparent') {
-      placeTransparent(win, 1920, 1080);
+    let level: number | null = null;
+    if (cfg.placement === 'behind') {
+      placeBehind(win, harness, 1920, 1080);
       win.showInactive();
+      // Showing must not lift it: set again and check.
+      level = harness.placeBehindDesktop(win.getNativeWindowHandle());
     } else {
       win.showInactive();
       win.setBounds(offscreen(1920, 1080));
     }
-    result['placement'] = { kind: cfg.placement ?? 'offscreen', bounds: win.getBounds(), opacity: win.getOpacity() };
+    result['placement'] = { kind: cfg.placement ?? 'offscreen', bounds: win.getBounds(), level };
     const page = win;
     const call = <T>(expression: string): Promise<T> => page.webContents.executeJavaScript(expression) as Promise<T>;
     await call(`window.__measure.start(${JSON.stringify(cfg.mode)})`);

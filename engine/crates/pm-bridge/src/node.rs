@@ -504,6 +504,60 @@ mod harness {
         Ok(class.name().to_string_lossy().into_owned())
     }
 
+    /// Puts the window owning `view_handle` behind the desktop picture: one
+    /// window level below `kCGDesktopWindowLevel`, on every Space,
+    /// stationary in Mission Control, out of the window cycle, ignoring the
+    /// mouse. It is on a display (Core Animation presents its layers and
+    /// reports their presentation times, which it does not for a window off
+    /// every screen or at opacity 0) but the desktop picture covers it, so
+    /// nothing shows while Jude uses the machine. Returns the level. Call
+    /// on the main thread before showing the window. Measurement processes
+    /// only.
+    #[napi]
+    pub fn place_behind_desktop(view_handle: napi::bindgen_prelude::Buffer) -> Result<i64> {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+
+        unsafe extern "C" {
+            /// CoreGraphics (public): the level for a `CGWindowLevelKey`.
+            fn CGWindowLevelForKey(key: i32) -> i32;
+        }
+        /// `kCGDesktopWindowLevelKey`.
+        const DESKTOP_LEVEL_KEY: i32 = 2;
+        /// NSWindowCollectionBehavior: CanJoinAllSpaces | Stationary | IgnoresCycle.
+        const BEHAVIOR: usize = (1 << 0) | (1 << 4) | (1 << 6);
+
+        objc2_foundation::MainThreadMarker::new().ok_or_else(|| err("not on the main thread"))?;
+        let bytes: &[u8] = &view_handle;
+        let raw: [u8; 8] = bytes
+            .get(..8)
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| err("the handle is not an NSView pointer"))?;
+        let view = usize::from_ne_bytes(raw) as *const AnyObject;
+        if view.is_null() {
+            return Err(err("null view"));
+        }
+        // SAFETY: `getNativeWindowHandle()` returns the window's live content
+        // NSView; main thread; documented NSWindow setters.
+        unsafe {
+            let window: *const AnyObject = msg_send![&*view, window];
+            if window.is_null() {
+                return Err(err("the view has no window"));
+            }
+            let level = isize::try_from(CGWindowLevelForKey(DESKTOP_LEVEL_KEY))
+                .map_err(|_| err("window level"))?
+                - 1;
+            let _: () = msg_send![&*window, setLevel: level];
+            let _: () = msg_send![&*window, setCollectionBehavior: BEHAVIOR];
+            let _: () = msg_send![&*window, setIgnoresMouseEvents: true];
+            let set: isize = msg_send![&*window, level];
+            if set != level {
+                return Err(err("the window level did not take"));
+            }
+            Ok(set as i64)
+        }
+    }
+
     thread_local! {
         /// The C′ prototype's `CALayerHost`s by id (main thread only).
         static LAYER_HOSTS: std::cell::RefCell<std::collections::HashMap<u32, objc2::rc::Retained<objc2::runtime::AnyObject>>> =

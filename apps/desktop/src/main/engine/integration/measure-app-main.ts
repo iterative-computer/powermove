@@ -47,7 +47,7 @@ type AppConfig = {
    *  main hosts its remote layer over the viewer's stage. */
   remoteLayer?: boolean;
   /** Where the window sits: off every screen (default) or invisible on screen. */
-  placement?: 'offscreen' | 'transparent';
+  placement?: 'offscreen' | 'behind';
   pageScript: string;
   out: string;
   trace: string;
@@ -56,6 +56,7 @@ type AppConfig = {
 type HarnessAddon = {
   nowUs(): number;
   allowOffscreenWindow(viewHandle: Buffer): string;
+  placeBehindDesktop(viewHandle: Buffer): number;
   hostRemoteLayer(viewHandle: Buffer, contextId: number, x: number, y: number, width: number, height: number): number;
   removeRemoteLayer(id: number): boolean;
   InputGenerator: new (hz: number, durationMs: number, kind: number, callback: (input: { seq: number; tsUs: number; x: number; y: number }) => void) => { stop(): void };
@@ -80,18 +81,22 @@ async function waitFor<T>(label: string, poll: () => Promise<T | null | undefine
 }
 
 /**
- * `transparent` placement (C′ runs): Core Animation never shows, and so
- * never frees, the drawables of a layer in a window that is on no display,
- * so the remote layer needs a window on screen. This one is on the primary
- * display but invisible: opacity 0, ignoring the mouse, never activated,
- * above other windows so they do not occlude it.
+ * `behind` placement (C′ runs and the WebGL runs they are compared with):
+ * Core Animation neither shows nor reports, and so never frees, the
+ * drawables of a layer whose window is off every screen or at opacity 0
+ * (measured: every C′ frame unpresented both ways), so the remote layer
+ * needs a window on a display. This one is on the primary display one
+ * level below the desktop picture, which covers it: ignoring the mouse,
+ * never activated, on every Space, out of Mission Control's cycle, at the
+ * same 1920 × 1080 points as the off-screen runs.
  */
-function placeTransparent(win: BrowserWindow, width: number, height: number): void {
+function placeBehind(win: BrowserWindow, harness: HarnessAddon, width: number, height: number): number {
   const area = screen.getPrimaryDisplay().workArea;
-  win.setOpacity(0);
+  harness.allowOffscreenWindow(win.getNativeWindowHandle());
+  const level = harness.placeBehindDesktop(win.getNativeWindowHandle());
   win.setIgnoreMouseEvents(true);
-  win.setAlwaysOnTop(true, 'floating');
   win.setBounds({ x: area.x, y: area.y, width, height });
+  return level;
 }
 
 function offscreen(width: number, height: number): Electron.Rectangle {
@@ -143,15 +148,16 @@ async function run(config: AppConfig): Promise<void> {
     await waitFor('the page', () => call<boolean>('!!(window.PM && window.PM.Kernel && window.PM.ProjectsScreen && window.PM.mkProject)'));
     await run('builtins', 'window.PM.Kernel.loader.builtinsReady');
 
-    // Off every screen, never activated; refuse to run if it would show
-    // anywhere. AppKit pulls titled windows onto a screen when they are
+    // Off every screen (or behind the desktop picture), never activated;
+    // refuse to run if it would show anywhere. AppKit pulls titled windows onto a screen when they are
     // shown, so the harness addon lets this one stay off.
-    if (config.placement === 'transparent') {
-      placeTransparent(win, 1920, 1080);
-      if (win.getOpacity() !== 0) throw new Error('the measurement window would be visible');
+    if (config.placement === 'behind') {
+      placeBehind(win, harness, 1920, 1080);
       win.showInactive();
+      // Showing must not lift it: set again and check.
+      const level = harness.placeBehindDesktop(win.getNativeWindowHandle());
       await sleep(300);
-      result['window'] = { placement: 'transparent', bounds: win.getBounds(), content: win.getContentBounds(), opacity: win.getOpacity() };
+      result['window'] = { placement: 'behind', level, bounds: win.getBounds(), content: win.getContentBounds() };
     } else {
       result['windowClass'] = harness.allowOffscreenWindow(win.getNativeWindowHandle());
       win.setBounds(offscreen(1920, 1080));
