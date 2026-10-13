@@ -33,6 +33,10 @@ type Config = {
   scenario: 'playback' | 'latency';
   mode: 'engine' | 'today';
   load: boolean;
+  /** `no-autosave`: the gate load without its main-thread autosave, as the
+   *  app runs since autosave serialization moved to a persistence worker
+   *  (docs/engine/autosave-off-main.md). Default: S1's gate load. */
+  loadProfile?: 'gate' | 'no-autosave';
   durationMs: number;
   /** `off`: the engine presents 8-bit even on an EDR display. */
   edr?: 'auto' | 'off';
@@ -158,7 +162,7 @@ async function main(): Promise<void> {
     const agent = { requests: 0, replies: 0, replyBytes: 0, mainMs: [] as number[] };
     if (cfg.load) {
       load = new MainLoad({ win, ipcMain, log, nowUs: () => harness.nowUs() });
-      load.start({ longTask: true, autosave: true, agent: false, resize: true });
+      load.start({ longTask: true, autosave: cfg.loadProfile !== 'no-autosave', agent: false, resize: true });
       const payload = { tool: 'get_layers', args: { detail: 'full', ids: Array.from({ length: 2000 }, (_, i) => `layer-${i}`) }, blob: 'x'.repeat(40_000) };
       agentTimer = setInterval(() => {
         if (page.isDestroyed()) return;

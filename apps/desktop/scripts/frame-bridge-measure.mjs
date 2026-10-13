@@ -46,6 +46,10 @@ const RUNS = [
   { name: 'playback-today-load', ...playback, mode: 'today', load: true },
   { name: 'playback-engine-load', ...playback, mode: 'engine', load: true },
   { name: 'playback-engine-bgra-load', ...playback, mode: 'engine', load: true, edr: 'off' },
+  // The gate load without main-thread autosave: the app since autosave
+  // serialization moved to a persistence worker (amendment 5).
+  { name: 'playback-today-load-noautosave', ...playback, mode: 'today', load: true, loadProfile: 'no-autosave' },
+  { name: 'playback-engine-load-noautosave', ...playback, mode: 'engine', load: true, loadProfile: 'no-autosave' },
   // Render-ahead 8 frames (pool 12): slack for GPU-process stalls that hold slots.
   { name: 'playback-engine-lead8-load', ...playback, mode: 'engine', load: true, lead: 8 },
   { name: 'latency-today-idle', ...latency, mode: 'today', load: false, inputModes: ['baseline'] },
@@ -292,7 +296,7 @@ try {
     try {
       summary = {
         run: name,
-        config: { scenario: run.scenario, mode: run.mode, load: run.load, edr: run.edr ?? 'auto', rawInput: !!run.rawInput, lead: run.lead ?? 4, durationMs: run.durationMs, inputModes: run.inputModes },
+        config: { scenario: run.scenario, mode: run.mode, load: run.load, loadProfile: run.load ? (run.loadProfile ?? 'gate') : null, edr: run.edr ?? 'auto', rawInput: !!run.rawInput, lead: run.lead ?? 4, durationMs: run.durationMs, inputModes: run.inputModes },
         versions: raw.versions,
         display: raw.display,
         machineLoad: raw.machineLoad,
