@@ -142,9 +142,9 @@ reference machine, other lanes building at the same time, e2e niced.
 | Bridge seam | Since `bfcd2c88` the kernel seals `window.powermove` at boot (intended) | Hidden test launches (`POWERMOVE_BACKGROUND_TEST=1`, isolated profile) start editor windows with `--powermove-test-bridge`; only then does the preload also publish the same bridge as `window.__powermoveTestBridge`. Normal launches never pass the switch | `test-bridge.test.ts`, `background-testing.test.ts`; 21 specs updated; `security.spec.ts` now checks the seal and that the seam carries no Node or Electron |
 | Gradient Tint id | The shipped sample registers `gradient-tint.effect` since `512b5ead` (registration ids carry the extension id); `compatible-authoring.spec.ts` also matched system-prompt wording that changed | Specs updated | `effect-authoring.spec.ts:5`, `compatible-authoring.spec.ts:6` pass |
 | Blender discovery | Only `Blender.app` was looked for | Every `Blender*.app` in `/Applications` and `~/Applications` (unversioned first, then newest first), every install folder under `Blender Foundation` on Windows; `POWERMOVE_BLENDER_PATH` stays first; an older Blender found first no longer hides a supported one | `blender-service.test.ts`; `blender-motion.spec.ts` 3 of 3 pass |
-| `ae-audit-implementation.spec.ts:42` | Real bug. Since `f5f993d3` pre-compose moves layers into a nested composition and cuts parent links to layers left outside; pre-composing a child without its animated rig moved it (mean difference 12.17 CV at t = 0.4, 1, 1.8) | When every moved root hangs from the same outside layer, the precomp layer takes that parent (its own transform is the identity). Mixed outside parents are still cut | Mean difference now 0.0010 to 0.0015 CV; `compositions.test.ts` |
+| `ae-audit-implementation.spec.ts:42` | Real bug. Since `f5f993d3` pre-compose moves layers into a nested composition and cuts parent links to layers left outside; pre-composing a child without its animated rig moved it (mean difference 12.17 CV at t = 0.4, 1, 1.8) | When every moved root hangs from the same outside layer, the precomp layer takes that parent (its own transform is the identity). Mixed outside parents are still cut. Known limit: the precomp is the host's size and sits in the rig's local space, so moved content that lies outside `[0, w] x [0, h]` in the rig's local coordinates (a child at a negative offset from its null, for example) is clipped by the precomp frame. The spec's child sits at (+100, +100); a negative-offset case is not covered | Mean difference now 0.0010 to 0.0015 CV; `compositions.test.ts` |
 | `font-anchor.spec.ts:6` | Intended behaviour. Since `c2139713` an alignment change drops the preserved anchor bounds so the pivot follows the alignment origin (unit-tested in `font-anchor.test.ts`); every sample after `align: 'right'` drifted because the spec expected the old rule | Spec checks that alignment releases the anchor, re-centres, and keeps the 0.001 px limit for font and animated size changes | Passes |
-| `memory-history-persistence.spec.ts:5` | Real bug. History entries hold composition paths (`['comps', id, 'layers']`) since `f5f993d3`, but record sharing and the on-disk dictionary only recognised `['layers']` and `['edits']`, so undo history was neither shared in memory nor packed on disk | Both accept the composition paths; unpacking validates references with the same rule | `history-memory.test.ts`; spec passes (format, cursor, fewer than 24 records) |
+| `memory-history-persistence.spec.ts:5` | Real bug. History entries hold composition paths (`['comps', id, 'layers']`) since `f5f993d3`, but record sharing and the on-disk dictionary only recognised `['layers']` and `['edits']`, so undo history was neither shared in memory nor packed on disk | Both accept the composition paths; unpacking validates references with the same rule. The dictionary stays version 1: builds before this fix stored these histories raw, and a downgraded build reading a newly packed one rejects it (`Invalid history reference`), so a downgrade loses undo history. A version bump would not change that, since older builds reject unknown versions too | `history-memory.test.ts`; spec passes (format, cursor, fewer than 24 records) |
 | Corpus: unlit glTF | `renderSnapshot` read `emissive` from a `MeshBasicMaterial` | `sourceMaterialSnapshot`: standard materials unchanged; unlit ones become emission; other types get the worker defaults | `rendering.test.ts` |
 | Corpus: `vec3` colour `@param`s | The compositor took `@param` definitions from UI state, which the Inspector fills only for a layer it has shown; other shader layers bound colours with `uniform1f` (GL_INVALID_OPERATION, colour 0) | Definitions are parsed from the layer's code, cached by program key. `int`, `vec2`, and `vec4` scalar params keep today's binding (they stay 0 and raise GL_INVALID_OPERATION); known legacy behaviour, recorded in `docs/engine/corpus.md` | `shader-color-uniform.spec.ts` (fails with 1282 before, passes after) |
 
@@ -154,17 +154,18 @@ worker, no retries, one Electron instance, 7.7 min. 105 passed, 27 failed, 1 ski
 (`editor-responsiveness.spec.ts:6`, needs `PM_PERF_PROJECT`; run below).
 
 - 31 of the 58 quarantined tests now pass and left `quarantine.json`: the 21 bridge
-  tests, the 5 relaunch tests plus `timeline.spec.ts:459` (same family), the two
-  Gradient Tint specs, and the three investigated specs.
+  tests (one of them, `compatible-authoring.spec.ts:6`, also needed the Gradient Tint
+  update), the 5 relaunch tests plus `timeline.spec.ts:459` (same family),
+  `effect-authoring.spec.ts:5` (Gradient Tint), and the three investigated specs.
 - The 27 failures are the remaining quarantined tests, each failing as described in
   its row. No test outside the quarantine failed.
 - `project-file-media.spec.ts:9` failed again (4 of 4 including 3 repeats).
 - `timeline.spec.ts:459` passed 3 of 3 repeats.
 - `editor-responsiveness.spec.ts:65` measured 132.9 ms (limit 100 ms).
 
-**Performance specs with Jude's project.** `~/Documents/Powermove ad.pmv` (884
-layers, 1920x1080, 30 fps, 87.4 s; SHA-256 `ee7cdbff…a1d095`, unchanged) was copied to
-`~/Library/Application Support/Powermove Engine Corpus/perf/` outside the repository.
+**Performance specs with Jude's project.** The decision 13 project was copied to
+`~/Library/Application Support/Powermove Engine Corpus/perf/` outside the repository;
+the original's hash was checked before and after and did not change.
 `PM_PERF_FILE` is the `.pmv` copy; `PM_PERF_PROJECT` is a JSON document of its
 `proj` and `ws` only (1.4 MB): the full decoded document is 134 MB because of its
 undo history, and passing it to `page.evaluate` ran the Playwright worker out of

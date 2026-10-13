@@ -178,6 +178,10 @@ with the project's `blender` settings if it names any, and for each sample:
 - `exportAlpha` (transparent projects only): the same with `mbSamples: 20`, the
   exporter's alpha sample count.
 
+Both export passes always use `mblur: true`. The exporter passes the export's own
+motion-blur setting, which can be false, so v1's export snapshots cover only the
+motion-blur path; each snapshot's `options` records what was used.
+
 `export` and `exportAlpha` exist from corpus v1: `PM.prepareFrame` forwards the
 exporter's options since then. On an older build the pass records an error instead of
 snapshots.
