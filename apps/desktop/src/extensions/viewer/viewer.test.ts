@@ -536,6 +536,21 @@ describe('viewer runtime', () => {
     expect(editableTextAtPoint(api, 800, 350, 0, space3d)).toBeNull();
   });
 
+  it.each(['selected', 'picked'])('refuses %s text under a locked group and restores editing after unlocking', route => {
+    const layer = { id: 'text', type: 'text', lock: false };
+    const group = { id: 'outer', lock: true };
+    const api = viewerApi();
+    api.selection.layers = () => route === 'selected' ? [layer.id] : [];
+    api.model.layer = () => layer as any;
+    api.groups.ancestors = () => [group] as any;
+    api.render.gl.pick = () => route === 'picked' ? layer as any : null;
+    api.render.gl.bounds = () => ({ x0: -100, y0: -25, x1: 100, y1: 25 });
+    api.anim.worldMatrix = () => [1, 0, 0, 1, 500, 350];
+    expect(editableTextAtPoint(api, 500, 350, 0, testSpace3d(api))).toBeNull();
+    group.lock = false;
+    expect(editableTextAtPoint(api, 500, 350, 0, testSpace3d(api))).toBe(layer);
+  });
+
   it('resizes edge handles on one axis and preserves the opposite midpoint', () => {
     const bounds = { x0: -100, y0: -50, x1: 100, y1: 50, w: 200, h: 100 };
 

@@ -1,6 +1,7 @@
 import {mount,unmount} from 'svelte';
 import GizmoToolbar from './GizmoToolbar.svelte';
 import type { EditCommand, InspectorService, PowermoveAPI, Space3DAPI, ToolService, ViewerService } from 'powermove';
+import { layerIsLocked } from './layer-locks';
 
 type ViewerSpace3D = Pick<Space3DAPI, 'is3DLayer' | 'planeMatrix' | 'planeContains' | 'projectPoint' | 'inversePlane'>;
 export function visualSelection(api: PowermoveAPI): any[] {
@@ -679,12 +680,12 @@ export function drillTarget(api: PowermoveAPI, hit: any): any | null {
     overlay layer sits above it in the render stack. */
 export function editableTextAtPoint(api: PowermoveAPI, x: number, y: number, T: number, space3d: ViewerSpace3D = api.space3d): any | null {
   const selected = visualSelection(api).filter((layer: any) =>
-    layer?.type === 'text' && !layer.lock && api.anim.active(layer, T) !== false);
+    layer?.type === 'text' && !layerIsLocked(api, layer) && api.anim.active(layer, T) !== false);
   for (let index = selected.length - 1; index >= 0; index -= 1) {
     if (layerContainsPoint(api, selected[index], x, y, T, space3d)) return selected[index];
   }
   const picked = api.render.gl?.pick?.(x, y, T);
-  return picked?.type === 'text' && !picked.lock ? picked : null;
+  return picked?.type === 'text' && !layerIsLocked(api, picked) ? picked : null;
 }
 
 /** Install the viewer controller against the typed kernel API. */
@@ -1610,7 +1611,7 @@ function bindStage(stage: any, inner: any): () => void {
       const L=api.selection.first();
       const paths=L ? (L.d as any).paths as any[] | undefined : undefined;
       const path=paths?.find((candidate:any)=>candidate.id===V.activePath)||L?.masks?.find(mask=>mask.path?.id===V.activePath)?.path;
-      if(path&&L&&!L.lock){api.edit.mutate('Close path',()=>{if(path.p.closed.kf.length)api.anim.setKeyOn(path.p.closed,api.transport.time()-L.from,true);else path.p.closed.v=true;V.activePath=null;},{origin:'canvas'});invalidate();refreshInspector();}
+      if(path&&L&&!layerIsLocked(api,L)){api.edit.mutate('Close path',()=>{if(path.p.closed.kf.length)api.anim.setKeyOn(path.p.closed,api.transport.time()-L.from,true);else path.p.closed.v=true;V.activePath=null;},{origin:'canvas'});invalidate();refreshInspector();}
       e.preventDefault();e.stopPropagation();return;
     }
     const [x, y] = toComp(e);
@@ -1619,7 +1620,7 @@ function bindStage(stage: any, inner: any): () => void {
     const remembered = V.textDoubleClickCandidate;
     if (!L && remembered && Date.now() - remembered.at < 700) {
       const candidate = api.model.layer(remembered.id);
-      if (candidate?.type === 'text' && !candidate.lock
+      if (candidate?.type === 'text' && !layerIsLocked(api, candidate)
         && api.anim.active(candidate, api.transport.time()) !== false
         && layerContainsPoint(api, candidate, x, y, api.transport.time(), space3d)) L = candidate;
     }
@@ -1781,7 +1782,7 @@ function onDown(e: any) {
     if (remembered && Date.now() - remembered.at < 700
       && Math.hypot(e.clientX - remembered.clientX, e.clientY - remembered.clientY) < 6) {
       const layer = api.model.layer(remembered.id);
-      if (layer?.type === 'text' && !layer.lock && api.anim.active(layer, api.transport.time()) !== false) {
+      if (layer?.type === 'text' && !layerIsLocked(api, layer) && api.anim.active(layer, api.transport.time()) !== false) {
         V.textDoubleClickCandidate = null;
         e.preventDefault();
         e.stopPropagation();
@@ -1806,7 +1807,7 @@ function onDown(e: any) {
     }
     const point = pointerComp(e);
     const candidate = visualSelection(api).find((layer: any) =>
-      layer?.type === 'text' && !layer.lock
+      layer?.type === 'text' && !layerIsLocked(api, layer)
       && api.anim.active(layer, api.transport.time()) !== false
       && layerContainsPoint(api, layer, point.x, point.y, api.transport.time(), space3d));
     if (candidate) V.textDoubleClickCandidate = {
@@ -2036,7 +2037,7 @@ function openTextEditor(layer: any, options: Omit<TextEditOptions, 'drag' | 'onF
 function startText(e: any): void {
   const [hitX, hitY] = toComp(e);
   const hit = api.render.gl.pick(hitX, hitY, api.transport.time());
-  if (hit?.type === 'text' && !hit.lock && !e.shiftKey) {
+  if (hit?.type === 'text' && !layerIsLocked(api, hit) && !e.shiftKey) {
     openTextEditor(hit, { caretAt: { x: hitX, y: hitY } });
     return;
   }

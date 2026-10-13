@@ -38,6 +38,10 @@ test('Pen edits protect nested locked groups and work after unlocking with one U
   await drag();
   expect(await page.evaluate(() => JSON.stringify((window as any).PM.L('pen-shape').d.paths))).toBe(fixture.paths);
   expect(await page.evaluate(() => (window as any).PM.hist.list().length)).toBe(0);
+  const lockedPoint = await point(290, 85);
+  await page.mouse.dblclick(lockedPoint.x, lockedPoint.y);
+  expect(await page.evaluate(() => JSON.stringify((window as any).PM.L('pen-shape').d.paths))).toBe(fixture.paths);
+  expect(await page.evaluate(() => (window as any).PM.hist.list().length)).toBe(0);
   await page.evaluate(group => {
     const PM = (window as any).PM; PM.L(group).lock = false; PM.touch(); PM.invalidate();
   }, fixture.group);
