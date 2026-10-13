@@ -1,8 +1,42 @@
 import { describe, expect, it, vi } from 'vitest';
-import { packProjectFile, restoreProjectFileMedia, unpackProjectFile, unpackProjectFileBlob, packProjectFileBlob, restoreProjectFileStream, saveIncrementalProject } from './project-file';
+import { packProjectFile, readProjectFileDocument, restoreProjectFileMedia, unpackProjectFile, unpackProjectFileBlob, packProjectFileBlob, restoreProjectFileStream, saveIncrementalProject } from './project-file';
 import { sha256Hex } from '../../../../shared/sha256';
 
 describe('portable project media', () => {
+  it('assembles a large document in bounded reads without splitting Unicode or losing Undo records', async () => {
+    const prefix = '{"proj":{"w":1920,"h":1080,"layers":[],"assets":{},"note":"';
+    const note = 'x'.repeat(1024 * 1024 - prefix.length - 1) + '🟢 Café';
+    const json = prefix + note + '"},"history":{"version":1,"index":0,"entries":[{"label":"Undo ☃",'
+      + '"forward":[{"path":["name"],"exists":true,"value":"Après"}],"backward":[]}]}}';
+    const data = new TextEncoder().encode(json), offset = 42;
+    expect(data.indexOf(0xf0)).toBe(1024 * 1024 - 1);
+    const read = vi.fn(async (at: number, length: number) => data.subarray(at - offset, at - offset + length));
+    const progress = vi.fn();
+    const document = await readProjectFileDocument({ offset, length: data.length, sha256: sha256Hex(data) }, offset + data.length, read, progress);
+    expect(document).toEqual(JSON.parse(json));
+    expect(document.proj.note).toBe(note);
+    expect(read.mock.calls).toEqual([[offset, 1024 * 1024], [offset + 1024 * 1024, data.length - 1024 * 1024]]);
+    expect(progress).toHaveBeenLastCalledWith(data.length, data.length);
+  });
+
+  it('handles short document reads and rejects truncation or altered content', async () => {
+    const data = new TextEncoder().encode('{"proj":{"layers":[]},"history":{"entries":[]}}');
+    const range = { offset: 0, length: data.length, sha256: sha256Hex(data) };
+    expect(await readProjectFileDocument(range, data.length, async (offset, length) => data.subarray(offset, offset + Math.min(3, length))))
+      .toEqual(JSON.parse(new TextDecoder().decode(data)));
+    await expect(readProjectFileDocument(range, data.length, async () => new Uint8Array())).rejects.toThrow('truncated');
+    const changed = data.slice(); changed[1] = changed[1]! ^ 1;
+    await expect(readProjectFileDocument(range, data.length, async () => changed)).rejects.toThrow('checksum');
+    await expect(readProjectFileDocument(range, data.length, async () => new Uint8Array(data.length + 1))).rejects.toThrow('truncated');
+  });
+
+  it.each([{ offset: -1 }, { length: 0 }, { offset: Number.MAX_SAFE_INTEGER }, { sha256: 'invalid' }])
+    ('rejects an invalid document range before requesting file bytes: %j', async override => {
+      const read = vi.fn();
+      await expect(readProjectFileDocument({ offset: 0, length: 2, sha256: 'a'.repeat(64), ...override }, 20, read)).rejects.toThrow('range');
+      expect(read).not.toHaveBeenCalled();
+    });
+
   it('uploads only requested media, including media reachable solely from Undo', async () => {
     const old = { id: 'deleted' }, current = { id: 'current' };
     const snapshot = { proj: { assets: { current } }, history: { entries: [{ backward: [{ exists: true, path: ['assets', 'deleted'], value: old }] }] } };

@@ -52,8 +52,7 @@ export type LaunchedApp = {
   /** A fresh profile boots to the Projects home screen. Specs that exercise
    * editor panels open an empty composition first, the way a user would. */
   openEditor(): Promise<void>;
-  /** Opens the agent popover under its titlebar launcher. Sending a message
-   * folds it away, so call again to read the conversation after a send. */
+  /** Opens the agent popover under its titlebar launcher. */
   openAgent(): Promise<void>;
   close(): Promise<void>;
 };

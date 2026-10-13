@@ -64,7 +64,7 @@ const LAYER_FIELDS = new Set([
 ]);
 const COMPOSITION_FIELDS = new Set([
   'name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill',
-  'shutter', 'workArea'
+  'shutter', 'workArea', 'colorDepth'
 ]);
 const EFFECT_FIELDS = new Set(['enabled', 'open', 'index']);
 const EASING_PRESETS = new Set([
@@ -421,6 +421,12 @@ function parseCompositionPatch(value: unknown): CompositionPatch | ValidationErr
     if (!COMPOSITION_FIELDS.has(key)) return invalid(`unknown composition field "${key}"`, 'patch');
   }
   const out: CompositionPatch = {};
+  if (patch.colorDepth != null) {
+    if (patch.colorDepth !== 8 && patch.colorDepth !== 16 && patch.colorDepth !== 32) {
+      return invalid('must be 8, 16, or 32', 'patch.colorDepth');
+    }
+    out.colorDepth = patch.colorDepth;
+  }
   for (const key of ['width', 'height', 'fps', 'duration', 'shutter'] as const) {
     if (patch[key] == null) continue;
     const number = finite(patch[key], `patch.${key}`);

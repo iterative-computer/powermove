@@ -98,6 +98,12 @@ export async function openProjectForWindow(
     timer.unref();
     state.readers.set(opened.token, { owner: webContents, timer });
     watchProjectReaderOwner(ctx.projects, webContents);
+    // Electron's context bridge deeply copies objects. Large PMV4 documents
+    // use the existing bounded reader instead of copying their full history.
+    if (opened.documentRange && opened.documentRange.length >= FILE_CHUNK_BYTES) {
+      return { ok: true, path: opened.path, projectId: opened.projectId, token: opened.token,
+        size: opened.size, media: opened.media, documentRange: opened.documentRange };
+    }
     return { ok: true, ...opened };
   } catch (error: any) {
     return { ok: false, cancelled: false, error: error.message || 'Could not open project.' };

@@ -10,6 +10,7 @@ import { installPreviewCache } from './preview-cache';
 import { sourceTime } from './retiming';
 import { viewerService } from './services';
 import { createPreviewQualityMonitor } from './preview-quality';
+import { installPreviewResolution } from './preview-resolution';
 /* Ported from js/core/engine.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
@@ -35,6 +36,7 @@ PM.loop = true;
 
 const E = { fps: 0, ms: 0, drops: 0, budget: 1000 / 60, auto: true };
 PM.perf = E;
+installPreviewResolution(PM);
 const previewQuality = createPreviewQualityMonitor();
 
 /* Video uses HTMLMediaElement.play(), which settles asynchronously. A pause can
@@ -111,7 +113,8 @@ function ensureMediaPaused(el: any) {
   if (mustStopPendingStart || !el.paused) { try { el.pause(); } catch (e) { } }
 }
 let playingVideos = new Set<any>();
-let decoderAssets = new Set<any>();
+let decoderOwnership = new Map<any, Set<string>>();
+const emptyDecoderOwnership = new Set<string>();
 let bufferedVideos = new Set<HTMLVideoElement>();
 const frameVideoSeeks = new Map<any, number>();
 // Ownership, synchronization and lookahead frequently ask for the same time.
@@ -191,11 +194,20 @@ function scrubVideos(T: any, lookahead = true) {
 
   // Do not retain a decoder (and its decoded frame buffers) for every clip
   // ever visited. Only visible clips and the bounded lookahead stay allocated.
-  const empty = new Set<string>();
-  for (const asset of new Set([...decoderAssets, ...retained.keys()])) {
-    pruneVideoInstances(asset, retained.get(asset) ?? empty, true);
+  // Stable clips keep the same pool through playback and scrub redraws. Prune
+  // only when ownership changes; proxy replacement is handled by layerVideoElement.
+  for (const asset of decoderOwnership.keys()) {
+    if (!retained.has(asset)) pruneVideoInstances(asset, emptyDecoderOwnership, true);
   }
-  decoderAssets = new Set(retained.keys());
+  for (const [asset, ids] of retained) {
+    const previous = decoderOwnership.get(asset);
+    let changed = !previous || previous.size !== ids.size;
+    if (!changed) for (const id of ids) {
+      if (!previous!.has(id)) { changed = true; break; }
+    }
+    if (changed) pruneVideoInstances(asset, ids, true);
+  }
+  decoderOwnership = retained;
   for (const el of bufferedVideos) if (!buffers.has(el)) stopPlaybackVideoFrames(el);
   bufferedVideos = buffers;
 

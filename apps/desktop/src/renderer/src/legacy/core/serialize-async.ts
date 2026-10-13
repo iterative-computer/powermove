@@ -3,6 +3,12 @@ export async function stringifyAsync(value: unknown, yieldTask = () => new Promi
   type Task = { value: any } | { text: string } | { leave: object } | { string: string; offset: number };
   const tasks: Task[] = [{ value }], ancestors = new Set<object>(), chunks: string[] = [], parts: string[] = [];
   let deadline = performance.now() + 4, steps = 0;
+  // Small keyframe/property leaves are cheap for the native serializer. Keep
+  // strings and arrays bounded so this fast path cannot become one large task.
+  const primitive = (item: any) => item === null || (typeof item !== 'object' && typeof item !== 'bigint'
+    && (typeof item !== 'string' || item.length <= 1024));
+  const smallArray = (item: any) => Array.isArray(item) && item.length <= 16 && !('toJSON' in item)
+    && item.every(value => typeof value !== 'function' && primitive(value));
   while (tasks.length) {
     const task = tasks.pop()!;
     if ('string' in task) {
@@ -20,18 +26,29 @@ export async function stringifyAsync(value: unknown, yieldTask = () => new Promi
       else if (item === null || typeof item !== 'object') chunks.push(JSON.stringify(item) ?? 'null');
       else {
         if (ancestors.has(item)) throw new TypeError('Cannot save circular project data');
-        ancestors.add(item);
-        tasks.push({ leave: item });
         const array = Array.isArray(item);
-        const keys = array ? null : Object.keys(item).filter(key => item[key] !== undefined && typeof item[key] !== 'function' && typeof item[key] !== 'symbol');
-        chunks.push(array ? '[' : '{');
-        tasks.push({ text: array ? ']' : '}' });
-        const count = array ? item.length : keys!.length;
-        for (let i = count - 1; i >= 0; i--) {
-          if (i < count - 1) tasks.push({ text: ',' });
-          const key = array ? i : keys![i]!;
-          tasks.push({ value: item[key] });
-          if (!array) tasks.push({ text: JSON.stringify(key) + ':' });
+        const ownKeys = array ? null : Object.keys(item);
+        const keys = ownKeys?.filter(key => item[key] !== undefined && typeof item[key] !== 'function' && typeof item[key] !== 'symbol');
+        const prototype = array ? null : Object.getPrototypeOf(item);
+        const native = array ? smallArray(item) : keys!.length <= 16
+          && (prototype === Object.prototype || prototype === null) && !('toJSON' in item)
+          // Native JSON can call a function value's toJSON before omitting it.
+          // Project object fields have always omitted functions without hooks.
+          && ownKeys!.every(key => typeof item[key] !== 'function')
+          && keys!.every(key => primitive(item[key]) || smallArray(item[key]));
+        if (native) chunks.push(JSON.stringify(item));
+        else {
+          ancestors.add(item);
+          tasks.push({ leave: item });
+          chunks.push(array ? '[' : '{');
+          tasks.push({ text: array ? ']' : '}' });
+          const count = array ? item.length : keys!.length;
+          for (let i = count - 1; i >= 0; i--) {
+            if (i < count - 1) tasks.push({ text: ',' });
+            const key = array ? i : keys![i]!;
+            tasks.push({ value: item[key] });
+            if (!array) tasks.push({ text: JSON.stringify(key) + ':' });
+          }
         }
       }
     }

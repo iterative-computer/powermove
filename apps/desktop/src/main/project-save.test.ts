@@ -11,6 +11,7 @@ import { build } from 'esbuild';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { FILE_CHUNK_BYTES } from './file-upload';
 
 let directory: string, destination: string, registry: string, files: ProjectFiles;
 const document = (name: string) => Buffer.from(JSON.stringify({ proj: { name, w: 100, h: 100, layers: [], assets: { clip: { id: 'clip' } } }, history: { entries: [], index: -1 }, ws: { panels: [] } }));
@@ -36,6 +37,48 @@ async function index() {
 }
 
 describe('incremental project transactions', () => {
+  it.each(['small', 'large'])('keeps the internal %s PMV4 document and exposes its validated byte range', async size => {
+    const value = JSON.parse(document('native open').toString());
+    value.history.note = size === 'large' ? 'synthetic history '.repeat(80_000) : 'synthetic history';
+    const json = Buffer.from(JSON.stringify(value));
+    const upload = await files.beginIncremental('one', [], json.length, destination);
+    for (let offset = 0; offset < json.length; offset += FILE_CHUNK_BYTES) {
+      await upload.write(null, json.subarray(offset, offset + FILE_CHUNK_BYTES));
+    }
+    await upload.finish();
+    const ranges = await index(), native = await files.open(destination);
+    try {
+      expect(native.document).toEqual(value);
+      expect(native.documentRange).toEqual(ranges.document);
+      expect(ranges.document.length).toBe(json.length);
+      expect(ranges.document.sha256).toBe(await nativeHash(json));
+      const chunks: Uint8Array[] = [];
+      for (let offset = 0; offset < json.length; offset += FILE_CHUNK_BYTES) {
+        chunks.push(await files.read(native.token, ranges.document.offset + offset, Math.min(FILE_CHUNK_BYTES, json.length - offset)));
+      }
+      expect(Buffer.concat(chunks)).toEqual(json);
+      if (size === 'large') {
+        expect(json.length).toBeGreaterThan(FILE_CHUNK_BYTES);
+        await expect(files.read(native.token, ranges.document.offset, FILE_CHUNK_BYTES + 1)).rejects.toThrow('range');
+      }
+    } finally { await files.close(native.token); }
+  });
+  it.each(['PMV3', 'legacy JSON'])('keeps %s documents without inventing a PMV4 document range', async format => {
+    const json = document('older format');
+    await writeFile(destination, format === 'PMV3' ? encodeProjectContainer(JSON.parse(json.toString()), []) : json);
+    const native = await files.open(destination);
+    try {
+      expect(native.document).toEqual(JSON.parse(json.toString()));
+      expect(native).not.toHaveProperty('documentRange');
+    } finally { await files.close(native.token); }
+  });
+  it('rejects a PMV4 document with a mismatched checksum before granting a read range', async () => {
+    await save('first', [], undefined, destination);
+    const bytes = await readFile(destination), ranges = await index();
+    bytes[ranges.document.offset] = bytes[ranges.document.offset]! ^ 1;
+    await writeFile(destination, bytes);
+    await expect(files.open(destination)).rejects.toThrow('document checksum');
+  });
   it('writes a portable file and reuses unchanged media ranges on the next save and after restart', async () => {
     expect(await save('first', [clip()], undefined, destination)).toEqual(['clip']);
     const first = await index(), oldSize = (await stat(destination)).size;

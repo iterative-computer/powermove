@@ -305,7 +305,7 @@ PM.MediaTiming = {
   },
   earliestStart(L: any) {
     const trim: any = Math.max(0, Number(L ? resolveContent(PM, L, PM.time).trim : 0) || 0);
-    return Math.max(0, Number(L.from || 0) - trim / this.rate(L));
+    return Number(L.from || 0) - trim / this.rate(L);
   },
 };
 }

@@ -79,13 +79,35 @@ R.recover = (proj: any, thumb: any) => {
   if (thumb) meta.thumb = thumb;
   R.upsertMeta(meta);
   PM.store.set(R.trashKey, R.trashList().filter((item: any) => item.id !== proj.id));
-  const raw = PM.store.get(R.SLOT + proj.id, null);
+  const raw = PM.store.has ? PM.store.has(R.SLOT + proj.id) : PM.store.get(R.SLOT + proj.id, null);
   const entries = journal(proj.id);
   if (!raw || !entries.length || journalBytes(entries) > MAX_JOURNAL_BYTES
       || Number(proj.revision || 0) % CHECKPOINT_REVISIONS === 0) {
     return R.put(proj, thumb);
   }
   return meta;
+};
+
+/** Playback-safe checkpoint. Explicit save/close still uses the synchronous
+ * barrier in put, which supersedes any in-progress background checkpoint. */
+R.recoverAsync = async (proj: any, thumb: any, isCurrent: () => boolean) => {
+  if (!proj?.id || !isCurrent()) return false;
+  if (!PM.store.setSnapshotAsync) { R.recover(proj, thumb); return true; }
+  const meta: any = { id: proj.id, name: proj.name || 'Untitled', at: Date.now(), w: proj.w, h: proj.h };
+  if (thumb) meta.thumb = thumb;
+  R.upsertMeta(meta);
+  PM.store.set(R.trashKey, R.trashList().filter((item: any) => item.id !== proj.id));
+  const entries = journal(proj.id);
+  if (PM.store.has(R.SLOT + proj.id) && entries.length && journalBytes(entries) <= MAX_JOURNAL_BYTES
+      && Number(proj.revision || 0) % CHECKPOINT_REVISIONS !== 0) return true;
+  const saved = await PM.store.setSnapshotAsync(R.SLOT + proj.id, { v: PM.version || '1.0.0', proj }, isCurrent);
+  if (!saved) return false;
+  // Edits can arrive while native storage commits. Retain patches newer than
+  // the captured prefix instead of deleting their recovery journal.
+  const remaining = journal(proj.id).slice(entries.length);
+  if (remaining.length) PM.store.set(R.JOURNAL + proj.id, remaining);
+  else PM.store.del(R.JOURNAL + proj.id);
+  return true;
 };
 
 /** Update metadata only — never touches stored project data. */

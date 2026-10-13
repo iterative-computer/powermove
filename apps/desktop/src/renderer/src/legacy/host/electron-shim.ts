@@ -315,12 +315,15 @@ export function install(PM: PMRegistry): void {
     bridge.log('error', `store snapshot failed: ${errorText(error, 'unknown error')}`);
   }
   const cached = new Map(Object.entries(snapshot).map(([key, value]) => [`pm.${key}`, value]));
+  // Recovery checkpoints stay encoded until explicitly opened. Saving must
+  // not parse or clone a multi-megabyte document on the playback thread.
+  const encoded = new Map<string, string>();
   const historyRecords = new HistoryRecords();
   const lazy = new Set<string>(Array.isArray((snapshot as any).__powermoveLazyKeys) ? (snapshot as any).__powermoveLazyKeys : []);
   const serviceKey = (key: any) => String(key).startsWith('pm.') ? String(key).slice(3) : String(key);
   const legacyKey = (key: any) => `pm.${serviceKey(key)}`;
   const saveErrors = new Map<string, string>();
-  const asyncWrites = new Map<string, Promise<void>>();
+  const asyncWrites = new Map<string, Promise<unknown>>();
   const writeVersions = new Map<string, number>();
   /* Every window caches the store, so a sibling's write leaves this copy stale.
      Main names the keys that moved; they are re-read from the store on the next
@@ -332,6 +335,7 @@ export function install(PM: PMRegistry): void {
     if (!get) return;
     try {
       const serialized = get(service);
+      encoded.delete(service);
       if (serialized === null) cached.delete(legacyKey(service));
       else cached.set(legacyKey(service), JSON.parse(serialized));
       stale.delete(service); lazy.delete(service);
@@ -344,9 +348,18 @@ export function install(PM: PMRegistry): void {
     // A development renderer may reload before its native process. Keep using
     // the legacy envelope until the native process advertises the new write API.
     separateHistory: (snapshot as any).__powermoveAsyncStore === true && typeof bridge.store.setSerialized === 'function',
+    has(key: string) {
+      const service = serviceKey(key);
+      if (stale.has(service)) refill(service);
+      return lazy.has(service) || encoded.has(service) || cached.has(legacyKey(service));
+    },
     get(key: any, fallback: any, options: { omitHistory?: boolean } = {}) {
       const stored = legacyKey(key);
       if (stale.has(serviceKey(key)) || lazy.has(serviceKey(key))) refill(serviceKey(key));
+      if (encoded.has(serviceKey(key))) {
+        cached.set(stored, JSON.parse(encoded.get(serviceKey(key))!));
+        encoded.delete(serviceKey(key));
+      }
       if (!cached.has(stored)) return fallback;
       try {
         const value: any = cached.get(stored);
@@ -357,10 +370,38 @@ export function install(PM: PMRegistry): void {
         return unpackStoredHistory(serviceKey(key), cloneValue(value));
       } catch { return fallback; }
     },
+    /** A mutable live document is valid only while the caller's generation
+     * stays current. Check at every yield and discard superseded snapshots. */
+    setSnapshotAsync(key: string, value: any, isCurrent: () => boolean) {
+      if (!bridge.store.setSerialized) return Promise.resolve(isCurrent() && PM.store.set(key, value));
+      const service = serviceKey(key), version = (writeVersions.get(service) || 0) + 1;
+      writeVersions.set(service, version);
+      const current = () => writeVersions.get(service) === version && isCurrent();
+      const superseded = new Error('Snapshot superseded');
+      const write = stringifyAsync(value, async () => {
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+        if (!current()) throw superseded;
+      }).then(async serialized => {
+        if (!current()) return false;
+        await bridge.store.setSerialized(service, serialized);
+        if (writeVersions.get(service) !== version) return false;
+        stale.delete(service); lazy.delete(service);
+        cached.delete(legacyKey(service)); encoded.set(service, serialized);
+        saveErrors.delete(service);
+        return true;
+      }).catch(error => {
+        if (error === superseded) return false;
+        if (writeVersions.get(service) === version) saveErrors.set(service, errorText(error, 'Save failed'));
+        throw error;
+      }).finally(() => { if (asyncWrites.get(service) === write) asyncWrites.delete(service); });
+      asyncWrites.set(service, write);
+      return write;
+    },
     /** Internal immutable snapshots (history patches), serialized without blocking input. */
     setAsync(key: string, value: any) {
       if (!bridge.store.setSerialized) return Promise.resolve(PM.store.set(key, value));
       const service = serviceKey(key), version = (writeVersions.get(service) || 0) + 1;
+      encoded.delete(service);
       stale.delete(service); lazy.delete(service);
       writeVersions.set(service, version);
       const packed = packStoredHistory(service, value, historyRecords);
@@ -380,6 +421,7 @@ export function install(PM: PMRegistry): void {
     },
     set(key: any, value: any) {
       const service = serviceKey(key);
+      encoded.delete(service);
       stale.delete(service); lazy.delete(service);
       writeVersions.set(service, (writeVersions.get(service) || 0) + 1);
       try {
@@ -396,6 +438,7 @@ export function install(PM: PMRegistry): void {
     },
     del(key: any) {
       const service = serviceKey(key);
+      encoded.delete(service);
       stale.delete(service); lazy.delete(service);
       writeVersions.set(service, (writeVersions.get(service) || 0) + 1);
       cached.delete(legacyKey(service));

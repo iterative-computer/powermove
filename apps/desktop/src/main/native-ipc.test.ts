@@ -43,6 +43,7 @@ import {
 import { IPC, LIMITS, type FileSaveResult } from '../shared/ipc';
 import { ProjectFiles } from './project-files';
 import { decodeProjectContainer } from '../shared/project-container';
+import { FILE_CHUNK_BYTES } from './file-upload';
 
 type InvokeHandler = (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown;
 type OnHandler = (event: IpcMainEvent, ...args: unknown[]) => void;
@@ -238,6 +239,41 @@ describe('save IPC', () => {
     await call(IPC.projectOpen);
     sender.emit('destroyed');
     expect(projects.close).toHaveBeenLastCalledWith('read-token', false);
+  });
+
+  it('keeps a streamed document reader alive through bounded owner reads and expires it after inactivity', async () => {
+    vi.useFakeTimers();
+    try {
+      const sender = { once: vi.fn(), isDestroyed: () => false }, other = { once: vi.fn(), isDestroyed: () => false };
+      const documentRange = { offset: 5, length: FILE_CHUNK_BYTES * 3, sha256: 'a'.repeat(64) };
+      const projects = {
+        open: vi.fn(async () => ({ token: 'stream-token', path: '/chosen.pmv', projectId: 'project-1',
+          document: { proj: {} }, documentRange, media: [], size: documentRange.length + 100 })),
+        read: vi.fn(async (_token: string, _offset: number, length: number) => new Uint8Array(length)),
+        close: vi.fn(async () => undefined)
+      };
+      electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
+      electronMocks.dialogShowOpen.mockResolvedValue({ canceled: false, filePaths: ['/chosen.pmv'] });
+      const { ipcMain, invokes } = fakeIpcMain();
+      registerSaveIpc(ipcMain, { isTrustedSender: () => true, projects: projects as any });
+      const call = (channel: string, payload?: unknown, owner = sender) => invokes.get(channel)!(invokeEvent(owner), payload);
+      const result = await call(IPC.projectOpen);
+      expect(result).toMatchObject({ ok: true, documentRange });
+      expect(result).not.toHaveProperty('document');
+      for (let offset = 0; offset < documentRange.length; offset += FILE_CHUNK_BYTES) {
+        await vi.advanceTimersByTimeAsync(119_000);
+        const request = { token: 'stream-token', offset: documentRange.offset + offset, length: FILE_CHUNK_BYTES };
+        await expect(call(IPC.projectRead, request, other)).rejects.toThrow('token');
+        expect((await call(IPC.projectRead, request) as Uint8Array).length).toBe(FILE_CHUNK_BYTES);
+        expect(projects.close).not.toHaveBeenCalled();
+      }
+      expect(projects.read).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(119_000);
+      await expect(call(IPC.projectRead, { token: 'stream-token', offset: 5, length: 1 }, other)).rejects.toThrow('token');
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(projects.close).toHaveBeenCalledWith('stream-token', false);
+      await expect(call(IPC.projectRead, { token: 'stream-token', offset: 5, length: 1 })).rejects.toThrow('token');
+    } finally { vi.useRealTimers(); }
   });
 
   it('opens a picked project by path and refuses anything else', async () => {

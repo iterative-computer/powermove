@@ -10,7 +10,7 @@ const literal = (value: unknown) => JSON.stringify(value).replace(/</g, '\\u003c
 
 /** Only render source crosses the boundary; workspace, notes and edit history stay in the app. */
 function cleanProject(comp: any): any {
-  const fields = ['id', 'name', 'w', 'h', 'fps', 'dur', 'bg', 'backgroundFill', 'layers', 'assets', 'params', 'shutter'];
+  const fields = ['id', 'name', 'w', 'h', 'fps', 'dur', 'bg', 'backgroundFill', 'layers', 'assets', 'params', 'shutter', 'colorDepth'];
   const copy = Object.fromEntries(fields.filter(key => comp[key] !== undefined).map(key => [key, structuredClone(comp[key])]));
   copy.comps = Object.fromEntries(Object.entries(comp.comps || {}).map(([id, sub]) => [id, cleanProject(sub)]));
   for (const layer of copy.layers) delete layer.locked_intent;

@@ -9,14 +9,15 @@ import {
 } from './project-settings';
 
 function bridge(overrides: Partial<ProjectSettingsBridge> = {}) {
-  const state = { name: 'Reel', w: 1920, h: 1080, fps: 30, dur: 10 };
+  const state = { name: 'Reel', w: 1920, h: 1080, fps: 30, dur: 10, colorDepth: 16 };
   let defaults = normalizeExportDefaults({});
   const applyComposition = vi.fn((patch) => Object.assign(state, {
     name: patch.name ?? state.name,
     w: patch.width ?? state.w,
     h: patch.height ?? state.h,
     fps: patch.fps ?? state.fps,
-    dur: patch.duration ?? state.dur
+    dur: patch.duration ?? state.dur,
+    colorDepth: patch.colorDepth ?? state.colorDepth
   }));
   const applyExportDefaults = vi.fn((patch) => { defaults = normalizeExportDefaults({ ...defaults, ...patch }); });
   return {
@@ -39,6 +40,25 @@ const field = (control: { element: HTMLElement }, label: string) =>
 const change = (node: HTMLElement) => node.dispatchEvent(new Event('change'));
 
 describe('project settings control', () => {
+  it('changes working precision and refreshes it after external edits', () => {
+    const host = bridge({ supportedColorDepths: () => [8, 16, 32] });
+    const control = createProjectSettingsControl(host.api);
+    const depth = field(control, 'Color depth') as HTMLSelectElement;
+    expect(depth.value).toBe('16');
+    depth.value = '32'; change(depth);
+    expect(host.applyComposition).toHaveBeenCalledWith({ colorDepth: 32 });
+    expect(depth.value).toBe('32');
+    host.state.colorDepth = 8; control.refresh();
+    expect(depth.value).toBe('8');
+    control.destroy();
+  });
+
+  it('disables unsupported precision options', () => {
+    const control = createProjectSettingsControl(bridge({ supportedColorDepths: () => [8, 16] }).api);
+    const depth = field(control, 'Color depth') as HTMLSelectElement;
+    expect([...depth.options].map(item => item.disabled)).toEqual([false, false, true]);
+    control.destroy();
+  });
   it('shows composition and export sections seeded from the project', () => {
     const host = bridge();
     const control = createProjectSettingsControl(host.api);

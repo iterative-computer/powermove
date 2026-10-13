@@ -290,7 +290,10 @@ function makeTransport(PM: LegacyPM): TransportAPI {
     get perf() { return PM?.perf ?? emptyPerf; },
     invalidate: (...args) => PM?.invalidate?.(...args),
     get previewResolution() { return PM?.previewResolution ?? null; },
-    set previewResolution(value: string | number | null) { PM.previewResolution = value; }
+    set previewResolution(value: string | number | null) {
+      if (PM.setPreviewResolution && value != null) PM.setPreviewResolution(value);
+      else PM.previewResolution = value;
+    }
   };
 }
 
@@ -868,6 +871,7 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
   on('transport', () => kernel.events.emit('transport', { playing: !!PM?.playing }));
   on('fonts', (families: string[]) => kernel.events.emit('fonts', families));
   on('layout', () => kernel.events.emit('layout', undefined));
+  on('quality', () => kernel.events.emit('layout', undefined));
   on('draw', () => kernel.events.emit('invalidate', 'render'));
   on('draw:timeline', () => kernel.events.emit('invalidate', 'timeline'));
   on('draw:ui', () => kernel.events.emit('invalidate', 'ui'));

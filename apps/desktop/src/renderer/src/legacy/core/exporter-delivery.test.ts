@@ -179,6 +179,48 @@ describe('export delivery', () => {
     expect(X.busy).toBe(false);
   });
 
+  it('reuses static pixels in bounded batches and cancels after the current batch', async () => {
+    const { X, PM } = setup();
+    PM.proj.fps = 30; PM.proj.dur = 2;
+    let release!: () => void;
+    const repeat = vi.fn((_token: string, _count: number) => new Promise<void>(resolve => { release = resolve; }));
+    const write = vi.fn(async () => {}), finish = vi.fn(), cancel = vi.fn(async () => {});
+    (window as any).powermove = { render: { start: async () => 'render', write, repeat, finish, cancel } };
+    const pending = X.run({ ...options, format: 'mp4', fps: 30 });
+    await vi.waitFor(() => expect(repeat).toHaveBeenCalledOnce());
+    expect(repeat).toHaveBeenCalledWith('render', 8);
+    expect(PM.GL.renderToPixels).toHaveBeenCalledOnce();
+    expect(write).toHaveBeenCalledOnce();
+    expect(write.mock.calls[0]).toEqual(['render', expect.any(Uint8Array), false, true]);
+    X.cancel = true; release();
+    expect(await pending).toEqual({ cancelled: true });
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(finish).not.toHaveBeenCalled();
+  });
+
+  it('invalidates retained pixels after an edit during export', async () => {
+    const { X, PM } = setup();
+    let version = 0;
+    PM.animVersion = () => version;
+    const write = vi.fn(async () => { if (version === 0) version++; });
+    (window as any).powermove = { render: {
+      start: async () => 'render', write, finish: async () => ({ path: '/tmp/out.mp4' }), cancel: vi.fn(),
+    } };
+    expect(await X.run({ ...options, format: 'mp4' })).toEqual({ cancelled: false });
+    expect(PM.GL.renderToPixels).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects context loss before repeating a retained frame', async () => {
+    const { X, PM } = setup();
+    const write = vi.fn(async () => { PM.GL.contextLost = true; });
+    const repeat = vi.fn(), finish = vi.fn(), cancel = vi.fn(async () => {});
+    (window as any).powermove = { render: { start: async () => 'render', write, repeat, finish, cancel } };
+    expect(await X.run({ ...options, format: 'mp4' })).toEqual({ error: 'The GPU could not capture the export frame' });
+    expect(repeat).not.toHaveBeenCalled();
+    expect(finish).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
   it.each(['capture', 'write', 'finish'])('releases the native job and preview after a %s failure, then allows retry', async failure => {
     const { X, PM } = setup();
     PM.time = .25; PM.quality = .5;

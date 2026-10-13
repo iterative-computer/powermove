@@ -179,6 +179,17 @@ describe('EditCommand contract', () => {
 });
 
 describe('parseEditCommand', () => {
+  it('accepts only supported color depth values through the shared edit contract', () => {
+    for (const colorDepth of [8, 16, 32]) {
+      const command = { type: 'set_composition', patch: { colorDepth } };
+      expect(parseEditCommand(command)).toEqual(command);
+      expect(parseAgentEditCommand(command)).toEqual(command);
+    }
+    for (const colorDepth of [24, '32', true]) {
+      expect(parseEditCommand({ type: 'set_composition', patch: { colorDepth } })).toBeInstanceOf(ValidationError);
+    }
+  });
+
   it('accepts adjustment layers as canonical add-layer commands', () => {
     expect(parseEditCommand({
       type: 'add_layer', id: 'grade', layerType: 'adjustment', name: 'Global Grade',

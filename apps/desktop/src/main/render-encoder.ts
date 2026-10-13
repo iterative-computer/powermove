@@ -6,7 +6,7 @@ import { app, BrowserWindow, dialog, type IpcMain } from 'electron';
 import { IPC } from '../shared/ipc';
 
 export type EncoderOptions={width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number};
-type Job={destination?:string;dir:string;file:string;audio:string;process:ChildProcessWithoutNullStreams;done:Promise<void>;bytes:number;frameBytes:number;frames:number;options:EncoderOptions;owner:number;error:string};
+type Job={destination?:string;dir:string;file:string;audio:string;process:ChildProcessWithoutNullStreams;done:Promise<void>;bytes:number;frameBytes:number;frames:number;options:EncoderOptions;owner:number;error:string;retained?:Uint8Array;pendingFrame?:Uint8Array};
 export function encoderArgs(options:EncoderOptions,output:string):string[]{
   return ['-hide_banner','-loglevel','error','-f','rawvideo','-pixel_format','rgba','-video_size',`${options.width}x${options.height}`,'-framerate',String(options.fps),'-i','pipe:0','-an',
     '-vf','scale=in_range=full:out_range=limited:out_color_matrix=bt709',
@@ -27,7 +27,49 @@ export class RenderEncoder {
     const token=randomUUID();this.jobs.set(token,{dir,file,audio:path.join(dir,'audio.wav'),process:proc,done,bytes:0,frameBytes:options.width*options.height*4,frames:0,options,owner,error});return token;
   }
   job(token:string,owner:number){const job=this.jobs.get(token);if(!job||job.owner!==owner)throw new Error('Unknown render job');return job;}
-  async write(token:string,owner:number,data:Uint8Array,audio=false){const job=this.job(token,owner);if(!(data instanceof Uint8Array)||data.byteLength===0||data.byteLength>4*1024*1024)throw new Error('Invalid render chunk');if(audio){await appendFile(job.audio,data);return;}if(job.process.exitCode!==null)await job.done;await new Promise<void>((resolve,reject)=>job.process.stdin.write(data,e=>e?reject(e):resolve()));job.bytes+=data.byteLength;}
+  async write(token: string, owner: number, data: Uint8Array, audio = false, retain = false) {
+    const job = this.job(token, owner);
+    if (!(data instanceof Uint8Array) || data.byteLength === 0 || data.byteLength > 4 * 1024 * 1024) {
+      throw new Error('Invalid render chunk');
+    }
+    if (audio) { await appendFile(job.audio, data); return; }
+    if (retain) {
+      // Retain one explicitly marked frame, assembled from bounded IPC chunks.
+      // Ordinary animated delivery never allocates this extra frame buffer.
+      const offset = job.bytes % job.frameBytes;
+      if (data.byteLength > job.frameBytes - offset) throw new Error('Invalid retained frame chunk');
+      if (offset === 0) {
+        job.retained = undefined;
+        job.pendingFrame = new Uint8Array(job.frameBytes);
+      }
+      if (!job.pendingFrame) throw new Error('Incomplete retained frame');
+      job.pendingFrame.set(data, offset);
+    } else {
+      job.retained = undefined;
+      job.pendingFrame = undefined;
+    }
+    if (job.process.exitCode !== null) await job.done;
+    await new Promise<void>((resolve, reject) => job.process.stdin.write(data, error => error ? reject(error) : resolve()));
+    job.bytes += data.byteLength;
+    if (retain && job.bytes % job.frameBytes === 0) {
+      job.retained = job.pendingFrame;
+      job.pendingFrame = undefined;
+    }
+  }
+  async repeat(token: string, owner: number, count: number) {
+    const job = this.job(token, owner);
+    if (!Number.isInteger(count) || count < 1 || count > 8) throw new Error('Invalid render repeat count');
+    const frame = job.retained;
+    if (!frame || job.bytes % job.frameBytes) throw new Error('No complete frame to repeat');
+    for (let i = 0; i < count; i++) {
+      if (job.process.exitCode !== null || job.process.signalCode !== null) {
+        await job.done;
+        throw new Error('Video encoder stopped');
+      }
+      await new Promise<void>((resolve, reject) => job.process.stdin.write(frame, error => error ? reject(error) : resolve()));
+      job.bytes += frame.byteLength;
+    }
+  }
   async finish(token:string,owner:number){const job=this.job(token,owner);if(!job.bytes||job.bytes%job.frameBytes)throw new Error('Incomplete render frame');job.process.stdin.end();await job.done;
     const audio=await stat(job.audio).catch(()=>null);if(audio?.size){const mux=path.join(job.dir,job.options.format==='prores'?'final.mov':'final.mp4');await new Promise<void>((resolve,reject)=>{const p=spawn(this.binary,['-hide_banner','-loglevel','error','-i',job.file,'-i',job.audio,'-map','0:v','-map','1:a','-c:v','copy','-c:a',job.options.format==='prores'?'pcm_s24le':'aac','-shortest','-y',mux]);let error='';p.stderr.on('data',d=>error+=d);p.on('error',reject);p.on('close',code=>code===0?resolve():reject(new Error(error)));});job.file=mux;}return job.file;
   }
@@ -52,7 +94,7 @@ export function registerRenderEncoder(ipc:IpcMain,ctx:{isTrustedSender:(event:an
     encoder.job(token,owner).destination=result.filePath;
     return token;
   });
-  ipc.handle(IPC.renderWrite,(e,r)=>encoder.write(r.token,trusted(e),r.data,!!r.audio));
+  ipc.handle(IPC.renderWrite,(e,r)=>r.repeat!==undefined?encoder.repeat(r.token,trusted(e),r.repeat):encoder.write(r.token,trusted(e),r.data,!!r.audio,!!r.retain));
   ipc.handle(IPC.renderFinish,async(e,r)=>{
     const owner=trusted(e),job=encoder.job(r.token,owner);
     try{

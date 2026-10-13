@@ -1,7 +1,7 @@
 import { decodeProjectContainer, encodeProjectContainerBlob, encodeTextChunks, isProjectContainer, projectContainerIndex, type ProjectMediaRange } from '../../../../shared/project-container';
 import { stringifyAsync } from './serialize-async';
 import { bridge as hostBridge } from '../../kernel/bridge';
-import { isIncrementalProject, readIncrementalIndex, type SaveMedia } from '../../../../shared/project-incremental';
+import { isIncrementalProject, readIncrementalIndex, type ProjectRecord, type SaveMedia } from '../../../../shared/project-incremental';
 import { Sha256, sha256HexOf } from '../../../../shared/sha256';
 import type { PowermoveBridge, FileSaveResult } from '../../../../shared/ipc';
 
@@ -151,6 +151,29 @@ export async function unpackProjectFileBlob(file: Blob): Promise<any> {
   const index = projectContainerIndex(JSON.parse(await file.slice(9, 9 + headerLength).text()), 9 + headerLength, file.size);
   index.document.containerMedia = index.media.map(item => ({ ...item, data: file.slice(item.offset, item.offset + item.length, item.type) }));
   return index.document;
+}
+
+/** Large document graphs must not cross Electron's context bridge. Decode the
+ * validated file range through bounded reads, retaining project and Undo data. */
+export async function readProjectFileDocument(range: ProjectRecord, size: number,
+  read: (offset: number, length: number) => Promise<Uint8Array>,
+  onProgress?: (completed: number, total: number) => void): Promise<any> {
+  if (!range || !Number.isSafeInteger(size) || !Number.isSafeInteger(range.offset) || range.offset < 0
+      || !Number.isSafeInteger(range.length) || range.length < 2 || range.offset > size || range.length > size - range.offset
+      || typeof range.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(range.sha256)) throw new Error('The project document range is invalid.');
+  const parts: string[] = [], decoder = new TextDecoder(), digest = new Sha256();
+  for (let offset = 0; offset < range.length;) {
+    const length = Math.min(1024 * 1024, range.length - offset);
+    const chunk = await read(range.offset + offset, length);
+    if (!(chunk instanceof Uint8Array) || !chunk.length || chunk.length > length) throw new Error('The project document is truncated.');
+    digest.update(chunk);
+    parts.push(decoder.decode(chunk, { stream: true }));
+    offset += chunk.length;
+    onProgress?.(offset, range.length);
+  }
+  parts.push(decoder.decode());
+  if (digest.digest() !== range.sha256) throw new Error('The project document checksum does not match.');
+  return JSON.parse(parts.join(''));
 }
 
 /** Stage native ranges on disk, then commit file-backed Blobs to the media store. */

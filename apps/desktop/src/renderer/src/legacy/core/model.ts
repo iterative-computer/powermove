@@ -1,4 +1,5 @@
 import { CHANNELS_3D } from './space-3d';
+import { normalizeColorDepth } from '../../core/color-depth';
 /* Ported from js/core/model.js — behavior-preserving. */
 import { normalizeExportDefaults } from '../../core/export-defaults';
 import type { PMRegistry } from '../registry';
@@ -173,6 +174,7 @@ PM.normalizeFill = (value: any, fallback = '#000000') => {
 
 PM.mkProject = (o: any = {}) => ({
   id: uid('P'),
+  colorDepth: normalizeColorDepth(o.colorDepth),
   name: o.name || 'Untitled',
   w: o.w || 1920, h: o.h || 1080, fps: o.fps || 30, dur: o.dur || 10,
   bg: o.bg || '#000000',

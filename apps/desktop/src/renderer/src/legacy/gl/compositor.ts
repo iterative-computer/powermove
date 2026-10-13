@@ -1,4 +1,5 @@
 import {viewportCamera,viewportRevision,getViewportMode} from '../../core/scene3d/viewport';
+import { availableColorDepth, colorBufferBytes, normalizeColorDepth, supportedColorDepths } from '../../core/color-depth';
 import { videoClipsAt } from '../core/video-timeline';
 import { sizeAnchorOffset } from '../core/size-anchor';
 import { previewSeekFrame, seekPreviewVideo } from '../core/video-seek';
@@ -206,7 +207,7 @@ for (const event of ['project', 'layers', 'assets', 'quality', 'fonts']) PM.bus?
   previewFrames.clear(); previewSignature = ''; scenePreviewPlan = null;
 });
 const previewStateKey = () => JSON.stringify([PM.animVersion?.(), sourceGeneration, GL.canvas?.width, GL.canvas?.height,
-  GL.previewViewport, PM.quality, PM.previewResolution, PM.previewFps, PM.proj.fps, PM.proj.layers.length,viewportRevision(PM)]);
+  GL.previewViewport, PM.quality, PM.previewResolution, PM.previewFps, PM.proj.fps, PM.proj.layers.length,viewportRevision(PM), normalizeColorDepth(PM.proj.colorDepth)]);
 const canCachePreview = (opt: any) => opt.previewReuse !== false && !opt.exporting && !PM.Export?.busy && !PM.agentFrameCapture
   && !PM.Preview?.preparing && !PM.Preview?.active && !PM.preparedVideoFrames && !PM.assets?.loading?.size;
 function previewFrameKey(T: number, opt: any, key?: string | number): string {
@@ -309,6 +310,9 @@ function program(key: any, frag: any, vert?: any) {
   }
   let p = GL.progs.get(key);
   if (p !== undefined) { GL.progs.delete(key); GL.progs.set(key, p); return p; }
+  // Float buffers alone are insufficient: the default sampler precision can
+  // round values while reading the preceding pass, including raw extensions.
+  frag = frag.replace(/^(#version[^\n]*\n)/, '$1precision highp sampler2D;\n');
   if (allowParallelCompile && parallelShaderCompile && /^(sh:|extension:|fx:|tr:)/.test(key)) {
     if (compileSubmitMs >= 4 || pendingPrograms.size >= 8) { pollCompiles(); return null; }
     const started = performance.now();
@@ -405,15 +409,29 @@ function setParam(p: any, pd: any, index: number, value: any) {
 }
 
 /* ── FBO pool ──────────────────────────────────────────── */
+const warnedDepths = new Set<number>();
+function workingColorDepth() {
+  const requested = normalizeColorDepth(PM.proj.colorDepth);
+  const actual = availableColorDepth(requested, GL.supportedColorDepths || [8, 16]);
+  if (actual !== requested && !warnedDepths.has(requested)) {
+    warnedDepths.add(requested);
+    PM.toast?.(`${requested}-bit color is unavailable on this GPU. Using ${actual}-bit rendering.`);
+  }
+  GL.colorDepth = actual;
+  return actual;
+}
 function grab(w: any, h: any, depth = false) {
   const gl = GL.gl;
+  const colorDepth = workingColorDepth();
   for (let i = 0; i < GL.pool.length; i++) {
     const f = GL.pool[i];
-    if (!f.busy && f.w === w && f.h === h && !!f.depth === depth) { f.busy = true; f.used = ++resourceTick; return f; }
+    if (!f.busy && f.w === w && f.h === h && !!f.depth === depth && f.colorDepth === colorDepth) { f.busy = true; f.used = ++resourceTick; return f; }
   }
   const tex = gl.createTexture();
   bindTex(0, tex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+  const format = colorDepth === 32 ? gl.RGBA32F : colorDepth === 16 ? gl.RGBA16F : gl.RGBA8;
+  const type = colorDepth === 32 ? gl.FLOAT : colorDepth === 16 ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+  gl.texImage2D(gl.TEXTURE_2D, 0, format, w, h, 0, gl.RGBA, type, null);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -430,7 +448,12 @@ function grab(w: any, h: any, depth = false) {
     gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthBuffer);
     gl.bindRenderbuffer(gl.RENDERBUFFER, null);
   }
-  const f = { fb, tex, depth, depthBuffer, w, h, busy: true, used: ++resourceTick, bytes: Math.max(0, w * h * (depth ? 10 : 8)) };
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+    gl.deleteFramebuffer(fb); gl.deleteTexture(tex);
+    if (depthBuffer) gl.deleteRenderbuffer(depthBuffer);
+    throw new Error(`Could not allocate a ${colorDepth}-bit color buffer (${w}×${h})`);
+  }
+  const f = { fb, tex, depth, depthBuffer, colorDepth, w, h, busy: true, used: ++resourceTick, bytes: colorBufferBytes(w, h, colorDepth, depth) };
   GL.pool.push(f);
   poolBytes += f.bytes;
   return f;
@@ -450,7 +473,7 @@ function disposeFbo(f: any) {
 function trimPool(targetBytes: number = MAX_FBO_BYTES) {
   const freeEntries = GL.pool.filter((f: any) => !f.busy).sort((a: any, b: any) => a.used - b.used);
   for (const f of freeEntries) {
-    if (poolBytes <= targetBytes) break;
+    if (poolBytes <= targetBytes && f.colorDepth === GL.colorDepth) continue;
     const index = GL.pool.indexOf(f);
     if (index >= 0) GL.pool.splice(index, 1);
     disposeFbo(f);
@@ -508,6 +531,32 @@ function effectViewportCoordinates(W: number, H: number): { uv: [number, number,
     uv: [origin[0] / resolution[0], origin[1] / resolution[1], W / resolution[0], H / resolution[1]],
   };
 }
+
+/** Map composition pixels back to the layer's uncropped, normalized bounds.
+ * Effects still sample the full-frame buffer; only their gradient geometry
+ * follows the layer, including parent transforms and perspective. */
+function effectLayerCoordinates(L: any, T: number, W: number, H: number) {
+  const bounds = GL.bounds(L, T);
+  const [sx, sy] = outputScale(W, H);
+  const world = PM.worldMatrix(L, T);
+  const plane = is3DLayer(PM, L) ? planeMatrix(PM, L, T)
+    : [world[0], world[1], 0, world[2], world[3], 0, world[4], world[5], 1];
+  const inverse = inversePlane([plane[0] * sx, plane[1] * sy, plane[2],
+    plane[3] * sx, plane[4] * sy, plane[5], plane[6] * sx, plane[7] * sy, plane[8]]);
+  if (bounds && bounds.w > 0 && bounds.h > 0 && inverse) {
+    return {
+      uv: new Float32Array([0, 1, 2].flatMap(i => {
+        const x = inverse[i * 3]!, y = inverse[i * 3 + 1]!, w = inverse[i * 3 + 2]!;
+        return [(x - bounds.x0 * w) / bounds.w, (y - bounds.y0 * w) / bounds.h, w];
+      })),
+      resolution: [bounds.w, bounds.h],
+    };
+  }
+  // Adjustment layers have no source bounds and operate on the composition.
+  const { resolution } = effectViewportCoordinates(W, H);
+  return { uv: new Float32Array([1 / resolution[0], 0, 0, 0, 1 / resolution[1], 0, 0, 0, 1]), resolution };
+}
+
 function scaledWorld(layer: any, time: any, W: number, H: number): [number, number, number, number, number, number] {
   const world = PM.worldMatrix(layer, time);
   const [sx, sy] = outputScale(W, H);
@@ -539,6 +588,7 @@ function texFor(key: any, source: any, opts: any = {}) {
     GL.texes.set(key, t);
   }
   t.used = ++resourceTick;
+  t.warmUntil = preparingSource ? performance.now() + 2500 : 0;
   if (opts.version !== undefined && t.v === opts.version) return t.tex;
   bindTex(0, t.tex);
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
@@ -562,10 +612,21 @@ function texFor(key: any, source: any, opts: any = {}) {
 function trimTextures(targetBytes: number = MAX_TEXTURE_BYTES, protectedKeys?: ReadonlySet<string>) {
   if (textureBytes <= targetBytes && GL.texes.size <= MAX_TEXTURE_ENTRIES) return;
   const entries = [...GL.texes.entries()].sort((a: any, b: any) => a[1].used - b[1].used);
-  for (const [key, entry] of entries) {
+  // Prefer disposable old variants over sources prepared for the next scene.
+  // A second pass still enforces the hard budget under foreground pressure.
+  for (const protectWarm of [true, false]) for (const [key, entry] of entries) {
     if (textureBytes <= targetBytes && GL.texes.size <= MAX_TEXTURE_ENTRIES || GL.texes.size <= 1) break;
-    if (boundTex.includes(entry.tex) || protectedKeys?.has(key)) continue;
+    if (!GL.texes.has(key) || boundTex.includes(entry.tex) || protectedKeys?.has(key)
+        || protectWarm && entry.warmUntil > performance.now()) continue;
     GL.gl?.deleteTexture?.(entry.tex);
+    textureBytes = Math.max(0, textureBytes - (entry.bytes || 0));
+    GL.texes.delete(key);
+  }
+}
+function dropTextures(prefix: string) {
+  for (const [key, entry] of GL.texes) {
+    if (!key.startsWith(prefix)) continue;
+    if (GL.gl && entry.tex) GL.gl.deleteTexture(entry.tex);
     textureBytes = Math.max(0, textureBytes - (entry.bytes || 0));
     GL.texes.delete(key);
   }
@@ -573,20 +634,17 @@ function trimTextures(targetBytes: number = MAX_TEXTURE_BYTES, protectedKeys?: R
 GL.dropTextures = (prefix = '') => {
   previewFrames.clear();
   sourceGeneration++;
-  for (const [key, entry] of GL.texes) {
-    if (!key.startsWith(prefix)) continue;
-    if (GL.gl && entry.tex) GL.gl.deleteTexture(entry.tex);
-    textureBytes = Math.max(0, textureBytes - (entry.bytes || 0));
-    GL.texes.delete(key);
-  }
+  dropTextures(prefix);
 };
 
 function trimViewportPathRasters() {
   for (const [id, entry] of viewportPathRasters) {
-    if (entry.frame >= viewportPathFrame - 1) continue;
+    if (entry.frame >= viewportPathFrame - 1 || entry.warmUntil > performance.now()) continue;
     entry.cv.width = 0; entry.cv.height = 0;
     viewportPathRasters.delete(id);
-    GL.dropTextures('viewport-path:' + id);
+    // Cache eviction changes no artwork. Do not invalidate every prepared
+    // scene or remembered frame when one obsolete path bitmap is released.
+    dropTextures('viewport-path:' + id);
   }
 }
 
@@ -724,9 +782,9 @@ GL.init = (canvas: any, options: { alpha?: boolean; quiet?: boolean } = {}) => {
       if (GL.init(canvas, options)) { GL.contextLost = false; PM.invalidate(); }
     });
   }
-  gl.getExtension('EXT_color_buffer_half_float');
-  gl.getExtension('EXT_color_buffer_float');
-  gl.getExtension('OES_texture_float_linear');
+  GL.supportedColorDepths = supportedColorDepths(gl);
+  warnedDepths.clear();
+  workingColorDepth();
   GL.quad = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, GL.quad);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
@@ -840,15 +898,35 @@ function meshExtensionQuad(L: any, T: any, w: number, h: number, targetW: number
   return { tex: f.tex, w, h, ax: 0, ay: 0, uv: [0, 0, 1, 1], fromFbo: true, tmp: f };
 }
 
-function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
-  const source = nativeContentQuad(L, T, W, H, clip);
+function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, maxSourceBytes = Infinity) {
+  const source = nativeContentQuad(L, T, W, H, clip, maxSourceBytes);
   if (!source || source.screenSpace) return source;
   const offset = sizeAnchorOffset(PM, L, T);
   if (!offset.x && !offset.y) return source;
   return { ...source, ax: source.ax - offset.x, ay: source.ay - offset.y };
 }
 
-function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
+const shaderUniformDefinitions = new WeakMap<object, { code: string; definitions: any[] }>();
+
+function viewportPathQuad(L: any, T: any, W: number, H: number, maxSourceBytes: number) {
+  const world = scaledWorld(L, T, W, H);
+  const previous = viewportPathRasters.get(L.id);
+  if (W * H * 4 > maxSourceBytes) return null;
+  if (preparingSource && !previous && [...viewportPathRasters.values()].reduce((bytes, entry) => bytes + entry.cv.width * entry.cv.height * 4, W * H * 4) > MAX_TEXTURE_BYTES) return null;
+  const raster = rasterPathsToViewport(PM, L, T, W, H, world, previous);
+  if (raster !== previous) {
+    if (previous?.cv) { previous.cv.width = 0; previous.cv.height = 0; }
+    raster.version = ++viewportPathVersion;
+    viewportPathRasters.set(L.id, raster);
+  }
+  raster.frame = viewportPathFrame;
+  raster.warmUntil = preparingSource ? performance.now() + 2500 : 0;
+  GL.stats.viewportVectors = (GL.stats.viewportVectors || 0) + 1;
+  const tex = texFor('viewport-path:' + L.id, raster.cv, { version: raster.version });
+  return { tex, w: W, h: H, ax: 0, ay: 0, uv: [0, 0, 1, 1], screenSpace: true };
+}
+
+function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, maxSourceBytes = Infinity) {
   /* returns {tex, w, h, ax, ay, uv:[ox,oy,sx,sy], fromFbo, solid, tmp} */
   const d = resolveContent(PM, L, T);
   if (L.type === 'solid') {
@@ -856,18 +934,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) 
   }
   if (L.type === 'shape' && L.d.paths?.length && activePreviewViewport(W, H)
       && (PM.previewResolution === '1' || PM.perf?.auto === false && PM.quality === 1)) {
-    const world = scaledWorld(L, T, W, H);
-    const previous = viewportPathRasters.get(L.id);
-    const raster = rasterPathsToViewport(PM, L, T, W, H, world, previous);
-    if (raster !== previous) {
-      if (previous?.cv) { previous.cv.width = 0; previous.cv.height = 0; }
-      raster.version = ++viewportPathVersion;
-      viewportPathRasters.set(L.id, raster);
-    }
-    raster.frame = viewportPathFrame;
-    GL.stats.viewportVectors = (GL.stats.viewportVectors || 0) + 1;
-    const tex = texFor('viewport-path:' + L.id, raster.cv, { version: raster.version });
-    return { tex, w: W, h: H, ax: 0, ay: 0, uv: [0, 0, 1, 1], screenSpace: true };
+    return viewportPathQuad(L, T, W, H, maxSourceBytes);
   }
   if (L.type === 'text' || L.type === 'shape') {
     /* Render editable text/shape source at the density it occupies in this
@@ -907,7 +974,14 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) 
     // CPU bitmaps and uploaded textures have independent memory budgets. A
     // bitmap evicted under CPU pressure need not be drawn and uploaded again
     // while its identical GPU source is still available.
-    const r = PM.raster(L, ss, T, (key: string) => GL.texes.get('r:' + key)?.raster, crop);
+    // Keep small path bitmaps reusable across animated transforms. Oversized
+    // plain backgrounds only need visible pixels; a full 8192² bitmap can
+    // otherwise evict all the sources prepared for the next scene.
+    const clipLargePaths = canClipPreviewSources(W, H) && L.d.paths?.length && !is3DLayer(PM, L)
+      && !hasRenderableEffects(L.fx, PM, L, T) && !L.masks?.length && !L.matteSource && !L.transitionIn && !L.transitionOut;
+    const r = PM.raster(L, ss, T, (key: string) => GL.texes.get('r:' + key)?.raster, crop,
+      clipLargePaths ? Math.min(maxSourceBytes, 4 * 1024 * 1024) : maxSourceBytes);
+    if (!r) return clipLargePaths ? viewportPathQuad(L, T, W, H, maxSourceBytes) : null;
     // A recoverable blank is not a completed frame. Its retry has the same
     // source key, so keep a distinct texture version until real pixels arrive.
     if (r.blank) frameFailed = true;
@@ -991,7 +1065,14 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) 
     const key = 'sh:' + L.id;
     const codeKey = key + ':' + hashStr(d.code);
     const p = program(codeKey, PM.SHADER_HEADER + '\n' + d.code, PM.VERT);
-    PM.UIState.setShaderMeta(L, { shaderKey: codeKey });
+    // Uniform types belong to the shader source. Inspector metadata starts
+    // empty after opening a project and must not decide how colors are bound.
+    let uniforms = shaderUniformDefinitions.get(L);
+    if (!uniforms || uniforms.code !== d.code) {
+      uniforms = { code: d.code, definitions: PM.parseUniforms(d.code || '') };
+      shaderUniformDefinitions.set(L, uniforms);
+    }
+    PM.UIState.setShaderMeta(L, { shaderKey: codeKey, udefs: uniforms.definitions });
     if (!p) return null;
     /* nested content renders into its own FBO; the caller's target is restored
        before drawContent samples the result (otherwise the draw reads and writes
@@ -1007,7 +1088,7 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) 
     setI(p, 'iFrame', Math.round(T * PM.proj.fps));
     setU(p, 'iMouse', [0, 0]);
     for (const un in d.uniforms) {
-      const def = PM.UIState.getShaderMeta(L).udefs.find((u: any) => u.name === un);
+      const def = uniforms.definitions.find((u: any) => u.name === un);
       const val = PM.evP(L, d.uniforms[un], T, un);
       if (def && def.control === 'color') setU(p, un, PM.hex2rgb(String(val)));
       else if (def && def.control === 'toggle') setI(p, un, val ? 1 : 0);
@@ -1185,6 +1266,7 @@ function drawContent(L: any, T: any, W: any, H: any, alpha: any, clip?: RasterWi
 function runEffects(L: any, T: any, srcF: any, W: any, H: any, backdropF: any = null) {
   let cur = srcF;
   const coordinates = effectViewportCoordinates(W, H);
+  let layerCoordinates: ReturnType<typeof effectLayerCoordinates> | undefined;
   for (const fx of L.fx) {
     /* `missing` marks an effect whose type is not registered (the extension
        providing it is off or gone). Skip it and keep its data intact. */
@@ -1194,6 +1276,8 @@ function runEffects(L: any, T: any, srcF: any, W: any, H: any, backdropF: any = 
     const key = 'fx:' + fx.type;
     const p = program(key, def.frag);
     if (!p) continue;
+    const usesLayerCoordinates = uloc(p, 'u_layerUV') !== null;
+    if (usesLayerCoordinates) layerCoordinates ??= effectLayerCoordinates(L, T, W, H);
     const orig = def.keepOrig ? cur : null;
     let input = cur;
     for (let pass = 0; pass < def.passes; pass++) {
@@ -1207,6 +1291,10 @@ function runEffects(L: any, T: any, srcF: any, W: any, H: any, backdropF: any = 
       if (def.backdrop) { bindTex(2, backdropF?.tex || null); setI(p, 'u_backdrop', 2); }
       g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', ...coordinates.uv);
       g.u('u_coordRes', ...coordinates.resolution); g.u('u_pxOrigin', ...coordinates.origin);
+      if (usesLayerCoordinates) {
+        g.u('u_layerUV', layerCoordinates!.uv);
+        g.u('u_layerRes', ...layerCoordinates!.resolution);
+      }
       g.u('u_texel', 1 / W, 1 / H);
       g.u('u_time', T);
       setI(p, 'u_pass', pass);
@@ -1509,13 +1597,16 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   // preview prefix there would rescale stale or low-resolution artwork.
   if (rememberingPreview && proj === PM.proj && !opt.groupParent && !opt.mattePass && canCachePreview(opt)
       && !solo && scenePreviewPlan && !orderedLayers.some((layer: any) => layer.threeD || layer.matteSource)) {
-    while (prefixStart > 0 && scenePreviewPlan.staticLayers.has(layers[prefixStart - 1])) prefixStart--;
     const radius = previewHasMotionBlur && opt.mblur !== false ? (opt.shutter || .5) / Math.max(1, proj.fps) : 0;
+    prefixStart = scenePreviewPlan.prefixStart(layers, T, radius);
     const interval = scenePreviewPlan.interval(T, radius);
     if (layers.length - prefixStart >= 4 && interval !== null)
       prefixKey = 'prefix:' + previewFrameKey(T, opt, `${prefixStart}:${interval}`);
   }
   const prefix = prefixKey ? previewFrames.get(prefixKey) : undefined;
+  // Retained pixels still depend on their shaders. Count those programs as
+  // active so a dense prefix does not evict itself at the end of this frame.
+  if (prefix) for (const key of prefix.programKeys || []) framePrograms.add(key);
 
   // Only local, ordinary 2D compositing is eligible. Effects, mattes and
   // non-normal blends can depend on pixels hidden by an opaque layer later.
@@ -1571,6 +1662,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   for (let i = prefix ? prefixStart - 1 : layers.length - 1; i >= 0; i--) {
     if (!prefix && prefixKey && i === prefixStart - 1) {
       const saved = copyFbo(acc, W, H);
+      saved.programKeys = [...framePrograms];
       if (!rememberPreview(prefixKey, saved)) free(saved);
     }
     const L = layers[i];
@@ -1693,22 +1785,16 @@ const requestSourceWarmup = createPreviewWarmup(
   (layer, time) => {
     // Speculation must fit the existing cache and leave room for the next
     // visible frame. A large source keeps the normal demand-driven path.
-    if (layer.d.paths?.length) return;
     const W = GL.canvas.width, H = GL.canvas.height;
     PM.scope.push(PM.proj); PM.beginEval(time);
     previewViewportActive = !!GL.previewViewport; previewSourceClipping = true; preparingSource = true;
     try {
       if (!PM.active(layer, time)) return;
-      const scale = continuousRasterScale(scaledWorld(layer, time, W, H));
-      const geometry = layer.type === 'shape' ? shapeRasterGeometry(resolveContent(PM, layer, time), scale)
-        : PM.textRasterGeometry(layer, scale, time);
-      const bytes = geometry.width * geometry.height * 4;
-      if (bytes > 4 * 1024 * 1024) return;
       // Old zoom/animation variants are disposable; the last visible frame's
       // sources are not. Reclaim only unused variants for speculative uploads.
-      const target = MAX_TEXTURE_BYTES - bytes - 4 * 1024 * 1024;
+      const target = MAX_TEXTURE_BYTES - 8 * 1024 * 1024;
       if (textureBytes > target) trimTextures(target, visibleTextures);
-      if (textureBytes <= target) contentQuad(layer, time, W, H);
+      if (textureBytes <= target) contentQuad(layer, time, W, H, undefined, 4 * 1024 * 1024);
     } finally {
       bindTex(0, null);
       previewViewportActive = false; previewSourceClipping = false; preparingSource = false;
@@ -1729,7 +1815,14 @@ GL.render = (T: any, opt: any = {}) => {
   if (previewProject !== PM.proj || previewLayers !== PM.proj.layers || previewSignature !== signature) {
     previewFrames.clear(); previewProject = PM.proj; previewLayers = PM.proj.layers; previewSignature = signature;
     previewHasMotionBlur = (PM.ProjectIndex?.allLayers?.() || PM.proj.layers).some((layer: any) => layer.mblur || layer.type === 'comp');
-    scenePreviewPlan = previewPlan(PM.proj);
+    scenePreviewPlan = previewPlan(PM.proj, (effect: any) => {
+      // The linked program is the authority on temporal shader inputs. A
+      // declared but unused clock is optimized away; unknown/uncompiled
+      // shaders retain their ordinary per-frame path.
+      const definition = PM.FX[effect.type], linked = GL.progs.get('fx:' + effect.type);
+      return !!definition && !!linked && !definition.backdrop
+        && uloc(linked, 'u_time') === null && uloc(linked, 'u_prog') === null;
+    });
   }
   const cacheable = canCachePreview(opt);
   const frameKey = previewFrameKey(T, opt);
@@ -1771,7 +1864,7 @@ GL.render = (T: any, opt: any = {}) => {
   previewSourceClipping = opt.sourceClipping !== false && !opt.exporting;
   let acc;
   const priorParallel = allowParallelCompile; allowParallelCompile = !opt.exporting;
-  rememberingPreview = cacheable && (PM.Memory?.budget?.('preview') ?? 256 * 1024 * 1024) >= W * H * 8;
+  rememberingPreview = cacheable && (PM.Memory?.budget?.('preview') ?? 256 * 1024 * 1024) >= colorBufferBytes(W, H, workingColorDepth());
   try {
     acc = cached || GL.renderProject(PM.proj, T, W, H, {...opt,editorViewport:!opt.exporting&&!PM.agentFrameCapture});
   } finally {
@@ -1849,6 +1942,8 @@ GL.renderToPixels = (T: any, W: any, H: any, opt: any = {}) => {
         gl.deleteFramebuffer(target); gl.deleteRenderbuffer(color);
         bind(null);
       }
+    } else if (acc.colorDepth === 8) {
+      gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
     } else {
       const floats=new Float32Array(W*H*4);
       gl.readPixels(0,0,W,H,gl.RGBA,gl.FLOAT,floats);

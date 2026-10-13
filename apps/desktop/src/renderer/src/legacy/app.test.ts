@@ -7,10 +7,14 @@ import { install } from './app';
 import { install as installHistory } from './core/history';
 import { install as installProjects } from './core/projects';
 import { unpackProjectFile } from './core/project-file';
+import * as fingerprints from './core/project-fingerprint';
+import * as serialization from './core/serialize-async';
+import { sha256Hex } from '../../../shared/sha256';
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   resetBridgeForTests();
   if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow);
@@ -157,10 +161,10 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
         transitionIn: null, transitionOut: null, d: type === 'shader' ? { uniforms: {} } : {},
       };
     },
-    normalizeKeyframes(keys: any, fallback: any) {
+    normalizeKeyframes(keys: any, fallback: any, _fps: any, minTime = 0) {
       normalizationCalls.push({ keys, fallback });
       return (Array.isArray(keys) ? keys : []).filter((key: any) =>
-        key && Number.isFinite(key.t) && key.t >= 0 && typeof key.v === typeof fallback);
+        key && Number.isFinite(key.t) && key.t >= minTime && typeof key.v === typeof fallback);
     },
     WS: { init() {}, restoreSnapshot() {}, snapshot: () => ({}), get: (id: string) => ({ id }), activate() {}, editing: false },
     selectLayers() {},
@@ -212,6 +216,79 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
 }
 
 describe('legacy app install', () => {
+  it('ignores runtime preview readiness while still autosaving asset metadata changes', () => {
+    const { PM } = appRegistry();
+    const previous = { timer: PM.app.saveTimer, dirty: PM.app.dirty };
+    const handlers = PM.__busHandlers.get('assets');
+    handlers.forEach((run: any) => run({ runtimeOnly: true }));
+    expect(PM.app.saveTimer).toBe(previous.timer);
+    expect(PM.app.dirty).toBe(previous.dirty);
+    PM.proj.assets.source = { id: 'source', name: 'Edited media' };
+    handlers.forEach((run: any) => run());
+    expect(PM.app.saveTimer).not.toBe(previous.timer);
+    expect(PM.app.dirty).toBe(true);
+  });
+
+  it('checks autosave file status once while retaining exact Close comparisons', async () => {
+    const { PM, timers } = appRegistry();
+    await vi.waitFor(() => expect(PM.projectFileState().dirty).toBe(false));
+    PM.Projects.recoverAsync = vi.fn(async () => true);
+    const stringify = vi.spyOn(serialization, 'stringifyAsync');
+    PM.autosave(); await timers.get(PM.app.saveTimer)();
+    expect(stringify).toHaveBeenCalledTimes(1);
+    stringify.mockClear();
+    expect(await PM.confirmCloseProject(PM.proj.id)).toBe(true);
+    expect(stringify).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['name', 'assets', 'composition', 'animation', 'history', 'project'])('abandons an autosave comparison when %s changes during hashing', async change => {
+    const { PM, timers } = appRegistry();
+    await vi.waitFor(() => expect(PM.projectFileState().dirty).toBe(false));
+    let editVersion = 1, editing = false;
+    PM.animVersion = () => editVersion;
+    PM.hist.busy = () => editing;
+    PM.Projects.recoverAsync = vi.fn(async () => true);
+    let finish!: (hash: string) => void;
+    const fingerprint = vi.spyOn(fingerprints, 'projectFingerprint').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const emit = vi.spyOn(PM.bus, 'emit');
+    const project = PM.proj, baseline = PM.projectFileState().baselineHash;
+    PM.autosave();
+    const saving = timers.get(PM.app.saveTimer)();
+    await vi.waitFor(() => expect(fingerprint).toHaveBeenCalledOnce());
+    if (change === 'name') { project.name = 'Newer edit'; PM.autosave(); }
+    else if (change === 'assets') {
+      project.assets.source = { id: 'source', name: 'Newer metadata' };
+      PM.__busHandlers.get('assets').forEach((run: any) => run());
+    } else if (change === 'composition') {
+      project.comps.sub = { layers: [], dur: 2 };
+      PM.__busHandlers.get('project').forEach((run: any) => run());
+    } else if (change === 'animation') { project.name = 'Newer edit'; editVersion++; }
+    else if (change === 'history') { project.name = 'Newer edit'; editing = true; }
+    else PM.proj = { ...project, name: 'Replacement project' };
+    emit.mockClear(); finish(baseline); await saving;
+    expect(PM.projectFileState().dirty).toBe(true);
+    expect(emit.mock.calls.some(([event]: any[]) => event === 'project:recovered')).toBe(false);
+  });
+
+  it('awaits recovery and abandons a superseded autosave before writing its session', async () => {
+    const { PM, timers } = appRegistry();
+    let finish!: (saved: boolean) => void;
+    let current!: () => boolean;
+    PM.Projects.recoverAsync = vi.fn((_project, _thumb, guard) => {
+      current = guard; return new Promise<boolean>(resolve => finish = resolve);
+    });
+    const putState = vi.spyOn(PM.Projects, 'putState');
+    PM.store.flush = vi.fn(async () => undefined);
+    PM.autosave();
+    const saving = timers.get(PM.app.saveTimer)();
+    expect(current()).toBe(true);
+    expect(putState).not.toHaveBeenCalled();
+    PM.proj.name = 'Newer edit'; PM.autosave();
+    expect(current()).toBe(false);
+    finish(true); await saving;
+    expect(putState).not.toHaveBeenCalled();
+    expect(PM.store.flush).not.toHaveBeenCalled();
+  });
   it('opens a project delivered by the external-open subscription', async () => {
     let externalOpen!: (result: any) => Promise<void>;
     const onProjectOpenExternal = vi.fn((callback: typeof externalOpen) => {
@@ -239,6 +316,21 @@ describe('legacy app install', () => {
     expect(PM.proj.id).toBe('from-finder');
     expect(hide).toHaveBeenCalledOnce();
     expect(toasts).toContain('Opened Finder Project.pmv');
+  });
+
+  it('reopens negative strip starts and their earlier local keys, including nested compositions', () => {
+    const { PM } = appRegistry();
+    const layer = {
+      id: 'early', type: 'solid', from: -6, dur: 8,
+      p: { opacity: { v: 100, kf: [{ i: 'before', t: -1, v: 0 }, { i: 'after', t: 1, v: 100 }] } },
+    };
+    const source = { ...PM.proj, layers: [layer], comps: {
+      nested: { ...PM.proj, layers: [{ ...layer, id: 'nested-early', p: {} }] },
+    } };
+    const restored = PM.hydrateProject(source);
+    expect(restored.layers[0].from).toBe(-6);
+    expect(restored.layers[0].p.opacity.kf.map((key: any) => key.t)).toEqual([-1, 1]);
+    expect(restored.comps.nested.layers[0].from).toBe(-6);
   });
 
   it('compacts oversized provenance when reopening without removing source', () => {
@@ -675,7 +767,7 @@ describe('legacy app install', () => {
     const shape: any = PM.proj.layers[0];
     const shader: any = PM.proj.layers[1];
 
-    expect(shape.p.opacity.kf).toEqual([{ t: 1, v: 50 }]);
+    expect(shape.p.opacity.kf.map(({ t, v }: any) => ({ t, v }))).toEqual([{ t: 1, v: 50 }, { t: -1, v: 80 }]);
     expect(shape.p.opacity.expr).toBeNull();
     expect(shape.fx[0].missing).toBe(true);
     expect(shape.fx[0].p.amount.kf).toHaveLength(1);
@@ -725,6 +817,40 @@ it('saves real undo and redo history in the native file and local session', asyn
   expect(PM.proj.name).toBe('Two');
   PM.hist.undo();
   expect(PM.proj.name).toBe('One');
+});
+
+it('opens streamed document ranges with Unicode and working Undo and Redo', async () => {
+  const { PM, toasts } = appRegistry();
+  installHistory(PM);
+  PM.pause = vi.fn(); PM.rasterClear = vi.fn(); PM.WS.activate = vi.fn(); PM.touch = vi.fn();
+  PM.replaceProject = (next: any) => { PM.proj = next; };
+  PM.proj.note = 'x'.repeat(1024 * 1024) + '🟢 Café';
+  PM.hist.do('Rename ☃ one', () => { PM.proj.name = 'One ☃'; });
+  PM.hist.do('Rename 🟢 two', () => { PM.proj.name = 'Two 🟢'; });
+  PM.hist.undo();
+  const document = { proj: PM.proj, history: PM.hist.export({ copy: false }) };
+  const bytes = new TextEncoder().encode(JSON.stringify(document)), offset = 5;
+  const read = vi.fn(async (token: string, at: number, length: number) => {
+    expect(token).toBe('streamed-document');
+    return bytes.subarray(at - offset, at - offset + length);
+  });
+  const close = vi.fn(async () => undefined);
+  PM.MediaStore = { get: async () => null, put: async () => true };
+  (window as any).powermove = { openProjectFile: async () => ({ ok: true, path: '/tmp/Streamed.pmv',
+    projectId: 'streamed-open', token: 'streamed-document', size: offset + bytes.length, media: [],
+    documentRange: { offset, length: bytes.length, sha256: sha256Hex(bytes) } }), projectRead: { read, close } };
+  installBridgeForTests((window as any).powermove);
+  await PM.openProject();
+  expect(PM.proj.id).toBe('streamed-open');
+  expect(PM.proj.note).toBe(document.proj.note);
+  expect(PM.hist.export().entries.map((entry: any) => entry.label)).toEqual(['Rename ☃ one', 'Rename 🟢 two']);
+  expect(PM.hist.canUndo()).toBe(true); expect(PM.hist.canRedo()).toBe(true);
+  PM.hist.redo(); expect(PM.proj.name).toBe('Two 🟢');
+  PM.hist.undo(); expect(PM.proj.name).toBe('One ☃');
+  expect(read.mock.calls.length).toBeGreaterThan(1);
+  expect(read.mock.calls.every(([, , length]) => length <= 1024 * 1024)).toBe(true);
+  expect(close).toHaveBeenCalledWith('streamed-document');
+  expect(toasts.some(message => message.startsWith('Could not open'))).toBe(false);
 });
 
 it('does not recapture a trashed active project while switching, but still captures an ordinary outgoing project', () => {

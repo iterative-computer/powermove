@@ -130,7 +130,8 @@ const bridge: PowermoveBridge = {
 
   render: {
     start: options => ipcRenderer.invoke(IPC.renderStart,options),
-    write: (token,data,audio) => ipcRenderer.invoke(IPC.renderWrite,{token,data,audio}),
+    write: (token,data,audio,retain) => ipcRenderer.invoke(IPC.renderWrite,{token,data,audio,retain}),
+    repeat: (token,count) => ipcRenderer.invoke(IPC.renderWrite,{token,repeat:count}),
     finish: token => ipcRenderer.invoke(IPC.renderFinish,{token}),
     cancel: token => ipcRenderer.invoke(IPC.renderCancel,{token}),
   },

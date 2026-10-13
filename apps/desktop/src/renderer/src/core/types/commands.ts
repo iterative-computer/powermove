@@ -117,6 +117,8 @@ export interface SetLayerCommand extends LayerTargetedCommand {
 }
 
 export interface CompositionPatch {
+  /** Project-wide working precision, in bits per color channel. */
+  colorDepth?: import('../color-depth').ColorDepth;
   name?: string;
   width?: number;
   height?: number;

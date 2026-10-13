@@ -1,6 +1,7 @@
 import { animateExportPreview } from './export-preview';
 import { prepareFrame } from './frame-preparation';
 import { captureFramePixels, renderOpaqueFrame } from './frame-capture';
+import { staticExportPlan } from './static-export';
 import { installRenderQueue, wavBytes } from './render-queue';
 /* Ported from js/core/exporter.js — behavior-preserving. */
 import {
@@ -601,7 +602,7 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
   if (!bridge) throw new Error('The native encoder requires the updated desktop runtime.');
   const token = nativeToken;
   if (!token) throw new Error('Export destination is unavailable');
-  const chunks = async (bytes: Uint8Array, audio = false) => {
+  const chunks = async (bytes: Uint8Array, audio = false, retain = false) => {
     const limit = 4 * 1024 * 1024;
     for (let at = 0; at < bytes.length; at += limit) {
       // A view of a large buffer can serialize its entire backing store through
@@ -609,7 +610,7 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
       // complete frame/audio buffer that fits in one message.
       const chunk = bytes.length <= limit && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
         ? bytes : bytes.slice(at, at + limit);
-      await bridge.write(token, chunk, audio);
+      await bridge.write(token, chunk, audio, retain);
     }
   };
   // The canvas is only the progress preview for opaque frames. Retain one
@@ -619,9 +620,31 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
     if (preview) { preview.width = W; preview.height = H; }
     const previewContext = preview?.getContext('2d');
     if (preview && !previewContext) throw new Error('Could not create export preview');
+    let project = PM.proj, version = PM.animVersion?.();
+    let plan = staticExportPlan(project, opts.mblur !== false);
+    let lastKey: string | null = null, retained: Uint8Array | null = null;
     for (let i = 0; i < total; i++) {
       if (X.cancel) break;
       const T = t0 + i / opts.fps;
+      if (project !== PM.proj || version !== PM.animVersion?.()) {
+        project = PM.proj; version = PM.animVersion?.();
+        plan = staticExportPlan(project, opts.mblur !== false);
+        lastKey = null; retained = null;
+      }
+      if (PM.GL.contextLost || PM.GL.gl?.isContextLost?.()) throw new Error('The GPU could not capture the export frame');
+      const key = plan?.(T) ?? null;
+      if (key !== null && key === lastKey && retained) {
+        let count = 1;
+        if (bridge.repeat) {
+          // Small batches bound backpressure and keep Cancel responsive.
+          while (count < 8 && i + count < total && plan!(t0 + (i + count) / opts.fps) === key) count++;
+          await bridge.repeat(token, count);
+        } else await chunks(retained);
+        i += count - 1;
+        ui.set(i + 1, opts.format === 'prores' ? 'ProRes 4444' : 'H.264');
+        await new Promise(resolve => setTimeout(resolve, 0));
+        continue;
+      }
       await prepareFrame(PM, T);
       if (X.cancel) break;
       // Preserve Canvas2D's established premultiply/unpremultiply rounding for
@@ -629,7 +652,9 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
       const image = preview ? renderOpaqueFrame(PM, T, W, H, { mblur: opts.mblur }) : null;
       const cv = preview || alphaFrame(T, W, H, opts.mblur);
       const pixels = image ? image.data : cv.getContext('2d').getImageData(0, 0, W, H).data;
-      await chunks(new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength));
+      const bytes = new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength);
+      await chunks(bytes, false, key !== null && !!bridge.repeat);
+      retained = key !== null ? bytes : null; lastKey = key;
       if (image) previewContext!.putImageData(image, 0, 0);
       pctx.drawImage(cv, 0, 0, ui.prev.width, ui.prev.height);
       ui.set(i + 1, opts.format === 'prores' ? 'ProRes 4444' : 'H.264');

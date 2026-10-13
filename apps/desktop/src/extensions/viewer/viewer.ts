@@ -873,7 +873,15 @@ V.attach = (stage: HTMLElement) => {
     preview.replaceChildren();
     const quality=document.createElement('select');quality.setAttribute('aria-label','Preview resolution');quality.style.cssText='width:82px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui)';
     for(const [value,label] of [['auto','Auto'],['1','Full'],['0.5','Half'],['0.25','Quarter']]){const option=document.createElement('option');option.value=value!;option.textContent=label!;quality.append(option);}
-    quality.value=api.transport.perf.auto?'auto':String(api.transport.quality);quality.onchange=()=>{api.transport.perf.auto=quality.value==='auto';api.transport.quality=quality.value==='auto'?1:Number(quality.value);api.transport.previewResolution=quality.value;V.layout();};preview.append(quality);
+    quality.value=api.transport.perf.auto?'auto':String(api.transport.quality);
+    quality.onchange=()=>{
+      api.transport.perf.auto=quality.value==='auto';
+      api.transport.quality=quality.value==='auto'?1:Number(quality.value);
+      api.transport.previewResolution=quality.value;
+      V.layout();
+    };
+    V.qualityControl=quality;
+    preview.append(quality);
     V.previewOff?.(); V.previewOff = undefined;
 
     zoomControl.onchange = () => { if (zoomControl.value === 'fit') V.returnToComposition(); else V.setZoom(Number(zoomControl.value)); };
@@ -894,6 +902,7 @@ V.layout = (panOnly = false, gesture = panOnly === true) => {
   const now = window.performance.now();
   if (gesture) { navigationUntil = now + 250; zoomGestureUntil = now + 100; }
   if (!V.el || !V.stage) return;
+  if (V.qualityControl) V.qualityControl.value = api.transport.perf.auto ? 'auto' : String(api.transport.quality);
   const gl = V.el as HTMLCanvasElement;
   const p = api.project.get();
   const r = gesture && stageGeometry ? stageGeometry : V.stage.getBoundingClientRect();

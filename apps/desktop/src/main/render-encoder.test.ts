@@ -11,6 +11,32 @@ afterEach(() => vi.restoreAllMocks());
 import {registerRenderEncoder,RenderEncoder,validateEncoderOptions,encoderArgs} from './render-encoder';
 const binary=path.resolve('node_modules/ffmpeg-static/ffmpeg');
 describe('native frame encoder',()=>{
+ it.each(['mp4', 'prores'] as const)('repeats complete %s frames in order at a fractional frame rate',async format=>{
+  const temp=await mkdtemp(path.join(os.tmpdir(),'pm-repeat-test-')),service=new RenderEncoder(binary,temp);
+  const token=await service.start({width:16,height:16,fps:24000/1001,format,alpha:format==='prores',name:'Repeated'},1);
+  const frame=(green:boolean)=>Uint8Array.from({length:16*16*4},(_,i)=>i%4===3?(green?255:128):i%4===(green?1:0)?255:0);
+  try{
+   await expect(service.repeat(token,1,1)).rejects.toThrow('No complete frame');
+   await expect(service.repeat(token,2,1)).rejects.toThrow('Unknown render job');
+   await service.write(token,1,frame(false).slice(0,512),false,true);
+   await expect(service.repeat(token,1,1)).rejects.toThrow('No complete frame');
+   await service.write(token,1,frame(false).slice(512),false,true);
+   await expect(service.repeat(token,1,9)).rejects.toThrow('Invalid render repeat count');
+   await service.repeat(token,1,4);
+   await service.write(token,1,frame(true),false,true);
+   await service.repeat(token,1,2);
+   const file=await service.finish(token,1);
+   const {stdout}=await promisify(execFile)(binary,['-v','error','-i',file,'-f','rawvideo','-pix_fmt','rgba','pipe:1'],{encoding:'buffer',maxBuffer:1024*1024});
+   expect(stdout.length).toBe(8*16*16*4);
+   for(let i=0;i<8;i++){
+    const offset=i*16*16*4;
+    expect(stdout[offset+(i<5?0:1)]).toBeGreaterThan(245);
+    expect(stdout[offset+(i<5?1:0)]).toBeLessThan(10);
+    // ProRes converts 8-bit alpha through its 10-bit pixel format.
+    expect(Math.abs(stdout[offset+3]!-(format==='prores'&&i<5?128:255))).toBeLessThanOrEqual(2);
+   }
+  }finally{await service.release(token,1);await rm(temp,{recursive:true,force:true});}
+ },30000);
  it('rejects invalid sizes and unauthorized render chunks',async()=>{expect(()=>validateEncoderOptions({width:8193})).toThrow();const service=new RenderEncoder(binary,os.tmpdir());expect(()=>service.job('unknown',1)).toThrow();});
  it('encodes exact fractional-rate ProRes with retained alpha',async()=>{const temp=await mkdtemp(path.join(os.tmpdir(),'pm-encoder-test-')),service=new RenderEncoder(binary,temp);let token='';try{token=await service.start({width:16,height:16,fps:24000/1001,format:'prores',alpha:true,name:'Test'},1);const bytes=new Uint8Array(16*16*4);for(let i=0;i<256;i++){bytes[i*4]=255;bytes[i*4+3]=i%16<8?255:0;}for(let i=0;i<3;i++)await service.write(token,1,bytes);const file=await service.finish(token,1);expect((await readFile(file)).length).toBeGreaterThan(1000);const {stdout}=await promisify(execFile)(binary,['-hide_banner','-loglevel','error','-i',file,'-f','rawvideo','-pix_fmt','rgba','pipe:1'],{encoding:'buffer',maxBuffer:1024*1024});expect(stdout.length).toBe(16*16*4*3);expect(stdout[3]).toBeGreaterThan(250);expect(stdout[8*4+3]).toBeLessThan(5);}finally{if(token)await service.release(token,1);await rm(temp,{recursive:true,force:true});}},30000);
 });

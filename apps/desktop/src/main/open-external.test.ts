@@ -6,6 +6,7 @@ vi.mock('electron', () => ({
 }));
 
 import { openProjectForWindow } from './save';
+import { FILE_CHUNK_BYTES } from './file-upload';
 
 function sender() {
   let destroyed = false;
@@ -21,6 +22,34 @@ function sender() {
 }
 
 describe('external project open', () => {
+  it.each([FILE_CHUNK_BYTES, FILE_CHUNK_BYTES * 2])('omits the whole document from a %i-byte PMV4 bridge response', async length => {
+    const document = { proj: {}, history: { note: 'synthetic'.repeat(length / 8) } };
+    const documentRange = { offset: 5, length, sha256: 'a'.repeat(64) };
+    const opened = { path: '/tmp/large.pmv', projectId: 'project-1', token: 'large-reader', size: length + 100,
+      document, media: [], documentRange };
+    const projects = { open: vi.fn(async () => opened), close: vi.fn(async () => undefined) };
+    const owner = sender();
+    const result = await openProjectForWindow({ projects: projects as any }, owner as any, opened.path);
+    expect(Object.hasOwn(result, 'document')).toBe(false);
+    expect(result).toEqual({ ok: true, path: opened.path, projectId: opened.projectId, token: opened.token,
+      size: opened.size, media: [], documentRange });
+    expect(opened.document).toBe(document);
+    owner.destroy();
+  });
+
+  it.each(['small PMV4', 'PMV3 or legacy'])('preserves the %s document in the bridge response', async format => {
+    const document = { proj: {}, history: { entries: [] } };
+    const opened = { path: '/tmp/small.pmv', projectId: 'project-1', token: 'small-reader', size: FILE_CHUNK_BYTES + 100,
+      document, media: [], ...(format === 'small PMV4'
+        ? { documentRange: { offset: 5, length: FILE_CHUNK_BYTES - 1, sha256: 'a'.repeat(64) } } : {}) };
+    const projects = { open: vi.fn(async () => opened), close: vi.fn(async () => undefined) };
+    const owner = sender();
+    const result = await openProjectForWindow({ projects: projects as any }, owner as any, opened.path);
+    expect(result).toEqual({ ok: true, ...opened });
+    expect(result).toHaveProperty('document', document);
+    owner.destroy();
+  });
+
   it('returns the opened path and reader token', async () => {
     const projects = {
       open: vi.fn(async (filePath: string) => ({

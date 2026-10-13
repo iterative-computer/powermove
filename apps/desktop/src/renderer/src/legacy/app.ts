@@ -11,7 +11,7 @@ import { canAnimateContent, isProperty } from './core/content-properties';
 import { normalizeExportDefaults, type ExportDefaults } from '../core/export-defaults';
 import { compactEditLog } from '../core/edit-log';
 import type { PMRegistry } from './registry';
-import { packProjectFileBlob, saveIncrementalProject, restoreProjectFileMedia, restoreProjectFileStream, unpackProjectFileBlob, unpackProjectFile } from './core/project-file';
+import { packProjectFileBlob, readProjectFileDocument, saveIncrementalProject, restoreProjectFileMedia, restoreProjectFileStream, unpackProjectFileBlob, unpackProjectFile } from './core/project-file';
 import { projectFingerprint } from './core/project-fingerprint';
 import { stringifyAsync } from './core/serialize-async';
 import { createNewProjectForm } from './ui/project-settings';
@@ -67,7 +67,7 @@ function fileUI() {
   PM.invalidate('status'); PM.bus.emit('projects:open');
   document.title = `${APP.dirty ? '• ' : ''}${PM.proj.name} — Powermove`;
 }
-async function refreshFileDirty(project = PM.proj): Promise<boolean> {
+async function refreshFileDirty(project = PM.proj, isCurrent?: () => boolean): Promise<boolean> {
   const state = fileState(project.id);
   const json = await stringifyAsync(project);
   const version = (comparisonVersions.get(project.id) || 0) + 1;
@@ -75,7 +75,10 @@ async function refreshFileDirty(project = PM.proj): Promise<boolean> {
   await state.baselineReady;
   const hash = await projectFingerprint(json);
   // A newer edit wins over an in-flight comparison.
-  if (await stringifyAsync(project) !== json) return true;
+  // Autosave already owns an edit-generation guard. Use it to avoid walking
+  // the whole document twice. Close and explicit comparisons retain the full
+  // equality check, including callers that changed data without an edit event.
+  if (isCurrent ? !isCurrent() : await stringifyAsync(project) !== json) return true;
   const baseline = state.savedHash || state.baselineHash;
   const dirty = !baseline || baseline !== hash;
   // Concurrent comparisons of the same content are not edits. Only the
@@ -281,10 +284,12 @@ function hydrate(p: any) {
     return transition;
   };
   const sanitizeLayers = (layers: any, container: any) => {
+    // Moving a strip before zero must preserve all of its layer-local keys.
+    const minKeyTime = -Infinity;
     layers.forEach((L: any, li: any) => {
       L.id = typeof L.id === 'string' && L.id ? L.id : PM.uid('L');
       if (!L.name || typeof L.name !== 'string') L.name = 'Layer ' + (li + 1);
-      L.from = L.type === 'group' ? num(L.from, 0) : Math.max(0, num(L.from, 0));
+      L.from = num(L.from, 0);
       L.dur = Math.max(.01, num(L.dur, 5));
       if (L.type != null && !PM.TYPE_META[L.type]) L.type = 'null';
       L.on = isProperty(L.on) ? L.on : L.on !== false; L.lock = !!L.lock; L.solo = !!L.solo; L.shy = !!L.shy;
@@ -294,11 +299,11 @@ function hydrate(p: any) {
       if (L.parent === L.id || (typeof L.parent === 'string' && !container.layers.some((o: any) => o.id === L.parent))) L.parent = null;
       const fresh = PM.mkLayer(L.type || 'null', {}, container);
       if (L.type === 'text') for (const key of ['boxWidth', 'boxHeight']) if (!isProperty(L.d[key])) L.d[key] = fresh.d[key];
-      for (const [key, value] of Object.entries(L.d)) if (canAnimateContent(L, key) && isProperty(value)) sanitizeProp(value, { v: isProperty(fresh.d[key]) ? fresh.d[key].v : fresh.d[key] ?? (value as any).v }, -L.from);
-      for (const key of ['blend', 'mblur', 'on']) if (isProperty(L[key])) sanitizeProp(L[key], { v: key === 'blend' ? 'normal' : key === 'on' }, -L.from);
+      for (const [key, value] of Object.entries(L.d)) if (canAnimateContent(L, key) && isProperty(value)) sanitizeProp(value, { v: isProperty(fresh.d[key]) ? fresh.d[key].v : fresh.d[key] ?? (value as any).v }, minKeyTime);
+      for (const key of ['blend', 'mblur', 'on']) if (isProperty(L[key])) sanitizeProp(L[key], { v: key === 'blend' ? 'normal' : key === 'on' }, minKeyTime);
       Object.keys(fresh.p).forEach(k => {
         if (!L.p[k] || typeof L.p[k] !== 'object') L.p[k] = fresh.p[k];
-        sanitizeProp(L.p[k], fresh.p[k], -L.from);
+        sanitizeProp(L.p[k], fresh.p[k], minKeyTime);
       });
       Object.keys(L.p).forEach(k => { if (!(k in fresh.p)) delete L.p[k]; });
       /* An effect whose type is not registered right now is kept as a marked
@@ -309,37 +314,37 @@ function hydrate(p: any) {
         .filter((f: any) => f && typeof f === 'object' && typeof f.type === 'string')
         .map((f: any) => (PM.FX && PM.FX[f.type] ? (f.missing ? (({ missing, ...rest }: any) => rest)(f) : f) : { ...f, missing: true }));
       L.fx.forEach((f: any) => {
-        f.id = f.id || PM.uid('fx'); f.p = sanitizeLooseParams(f.p, -L.from); f.on = isProperty(f.on) ? f.on : f.on !== false;
-        if (isProperty(f.on)) sanitizeProp(f.on, { v: true }, -L.from);
+        f.id = f.id || PM.uid('fx'); f.p = sanitizeLooseParams(f.p, minKeyTime); f.on = isProperty(f.on) ? f.on : f.on !== false;
+        if (isProperty(f.on)) sanitizeProp(f.on, { v: true }, minKeyTime);
         const definition = PM.FX?.[f.type];
         for (const param of definition?.params || []) {
           if (!f.p[param.k] || typeof f.p[param.k] !== 'object') f.p[param.k] = PM.P(param.def);
-          sanitizeProp(f.p[param.k], { v: param.def }, -L.from);
+          sanitizeProp(f.p[param.k], { v: param.def }, minKeyTime);
         }
       });
-      L.transitionIn = sanitizeTransition(L.transitionIn, -L.from);
-      L.transitionOut = sanitizeTransition(L.transitionOut, -L.from);
+      L.transitionIn = sanitizeTransition(L.transitionIn, minKeyTime);
+      L.transitionOut = sanitizeTransition(L.transitionOut, minKeyTime);
       if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].effects === false) L.fx = [];
       /* masks: validate shape/mode and every animatable channel */
       L.masks = Array.isArray(L.masks) ? L.masks.filter((m: any) => m && typeof m === 'object' && m.p && typeof m.p === 'object') : [];
       L.masks.forEach((m: any) => {
         m.id = typeof m.id === 'string' && m.id ? m.id : PM.uid('K');
-        if (isProperty(m.shape)) sanitizeProp(m.shape, { v: 'rect' }, -L.from);
+        if (isProperty(m.shape)) sanitizeProp(m.shape, { v: 'rect' }, minKeyTime);
         else if (!PM.MASK_SHAPES.includes(m.shape)) m.shape = 'rect';
-        if (isProperty(m.mode)) sanitizeProp(m.mode, { v: 'add' }, -L.from);
+        if (isProperty(m.mode)) sanitizeProp(m.mode, { v: 'add' }, minKeyTime);
         else if (m.mode !== 'subtract') m.mode = 'add';
         m.on = isProperty(m.on) ? m.on : m.on !== false;
-        if (isProperty(m.on)) sanitizeProp(m.on, { v: true }, -L.from);
+        if (isProperty(m.on)) sanitizeProp(m.on, { v: true }, minKeyTime);
         const freshM = PM.mkMask(m.shape, container);
         Object.keys(freshM.p).forEach(k => {
           if (!m.p[k] || typeof m.p[k] !== 'object') m.p[k] = freshM.p[k];
-          sanitizeProp(m.p[k], freshM.p[k], -L.from);
+          sanitizeProp(m.p[k], freshM.p[k], minKeyTime);
         });
         Object.keys(m.p).forEach(k => { if (!(k in freshM.p)) delete m.p[k]; });
       });
       if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].masks === false) L.masks = [];
       if (L.type === 'shader') {
-        L.d.uniforms = sanitizeLooseParams(L.d.uniforms, -L.from);
+        L.d.uniforms = sanitizeLooseParams(L.d.uniforms, minKeyTime);
         shaderHooks(PM)?.syncShaderUniforms(L);
       }
       if (L.type === 'extension') {
@@ -347,7 +352,7 @@ function hydrate(p: any) {
         L.d.version = Math.max(1, Math.round(num(L.d.version, 1)));
         if (!isProperty(L.d.w)) L.d.w = PM.clamp(num(L.d.w, container.w), 1, 16384);
         if (!isProperty(L.d.h)) L.d.h = PM.clamp(num(L.d.h, container.h), 1, 16384);
-        L.d.params = sanitizeLooseParams(L.d.params, -L.from);
+        L.d.params = sanitizeLooseParams(L.d.params, minKeyTime);
         L.d.data = sanitizeJson(L.d.data) || {};
       }
     });
@@ -640,17 +645,23 @@ PM.autosave = () => {
   fileState().dirty = true;
   comparisonVersions.set(PM.proj.id, (comparisonVersions.get(PM.proj.id) || 0) + 1);
   fileUI();
-  const generation = ++saveGeneration, projectId = PM.proj.id;
+  const generation = ++saveGeneration, project = PM.proj, projectId = project.id;
   window.clearTimeout(APP.saveTimer);
   APP.saveTimer = window.setTimeout(async () => {
-    if (discardedProjects.has(projectId)) return;
+    const isCurrent = () => generation === saveGeneration && PM.proj === project && !discardedProjects.has(projectId);
+    if (!isCurrent()) return;
     try {
-      if (!persistCurrent(true)) throw new Error('Project storage is unavailable or full');
+      if (PM.Projects.recoverAsync) {
+        if (!await PM.Projects.recoverAsync(project, projectThumb(), isCurrent) || !isCurrent()) return;
+      } else if (!persistCurrent(true)) throw new Error('Project storage is unavailable or full');
       PM.Projects.putState(PM.proj.id, { ...PM.Projects.getState(PM.proj.id, { history: false }), history: PM.hist.export?.({ copy: false }) });
       await PM.store.flush?.();
-      if (generation !== saveGeneration || projectId !== PM.proj.id) return;
+      if (!isCurrent()) return;
       // Local recovery is not the user's .pmv file and must never mark it saved.
-      await refreshFileDirty();
+      const editVersion = PM.animVersion?.();
+      const comparisonCurrent = () => isCurrent() && editVersion === PM.animVersion?.() && !PM.hist.busy?.();
+      await refreshFileDirty(project, comparisonCurrent);
+      if (!comparisonCurrent()) return;
       PM.bus.emit('project:recovered');
     } catch (error) {
       APP.dirty = true;
@@ -661,7 +672,9 @@ PM.autosave = () => {
   }, 550);
 };
 PM.bus.on('storage:error', () => { APP.dirty = true; PM.invalidate('status'); });
-['layers','project','assets','library'].forEach(ev => PM.bus.on(ev, PM.autosave));
+['layers','project','library'].forEach(ev => PM.bus.on(ev, PM.autosave));
+// Disposable decoder previews change runtime readiness, not saved project data.
+PM.bus.on('assets', (change: any) => { if (!change?.runtimeOnly) PM.autosave(); });
 
 async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {}): Promise<boolean> {
   APP.saving = true; PM.invalidate('status');
@@ -806,10 +819,15 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     let o: any, mediaRestored = false;
     if (file.native && 'token' in file.native) {
       const bridge = hostBridge()!.projectRead!;
-      const { token, document, media } = file.native;
+      const { token, media, documentRange } = file.native;
       try {
+        const documentBytes = 'document' in file.native ? 0 : documentRange?.length || 0;
+        const total = documentBytes + media.reduce((sum: number, source: any) => sum + source.length, 0);
+        const document = 'document' in file.native ? file.native.document
+          : await readProjectFileDocument(documentRange, file.native.size, (offset, length) => bridge.read(token, offset, length),
+            completed => opening.update({ label: file.name, completed, total }));
         await restoreProjectFileStream(document, media, PM.MediaStore, (offset, length) => bridge.read(token, offset, length),
-          (completed, total) => opening.update({ label: file.name, completed, total }));
+          completed => opening.update({ label: file.name, completed: documentBytes + completed, total }));
         o = document; mediaRestored = true;
       } finally { await bridge.close(token); }
     } else if (file.native) o = unpackProjectFile(file.native.data);

@@ -5,7 +5,7 @@ import { PROJECT_ID } from '../shared/ipc';
 import { isProjectContainer, projectContainerIndex, type ProjectMediaRange } from '../shared/project-container';
 import { FILE_CHUNK_BYTES } from './file-upload';
 import { checkVersion, changedFile, copySnapshot, fileVersion, hashHandle, publishFile, syncDirectory, syncFile, temporarySibling, type FileVersion } from './durable-file';
-import { isIncrementalProject, readIncrementalIndex, type SaveMedia } from '../shared/project-incremental';
+import { isIncrementalProject, readIncrementalIndex, type ProjectRecord, type SaveMedia } from '../shared/project-incremental';
 import { nativeHash, ProjectSave, validateSaveMedia } from './project-save';
 
 /** Replace only after every byte has reached disk; a failed write preserves the original. */
@@ -193,7 +193,7 @@ export class ProjectFiles {
       } finally { await unlink(temporary).catch(() => undefined); }
     });
   }
-  open(filePath: string): Promise<{ path: string; projectId: string; token: string; size: number; document: any; media: ProjectMediaRange[] }> {
+  open(filePath: string): Promise<{ path: string; projectId: string; token: string; size: number; document: any; media: ProjectMediaRange[]; documentRange?: ProjectRecord }> {
     return this.serial(async () => {
       const handle = await open(filePath, 'r');
       try {
@@ -209,7 +209,7 @@ export class ProjectFiles {
           return buffer;
         };
         const prefix = await readExactly(0, Math.min(9, info.size));
-        let document: any, media: ProjectMediaRange[] = [];
+        let document: any, media: ProjectMediaRange[] = [], documentRange: ProjectRecord | undefined;
         if (isIncrementalProject(prefix)) {
           const index = await readIncrementalIndex(info.size, readExactly, nativeHash);
           const bytes = await readExactly(index.document.offset, index.document.length);
@@ -218,6 +218,7 @@ export class ProjectFiles {
           for (const item of index.media) {
             if ((await hashHandle(handle, item.offset, item.length)).digest('hex') !== item.sha256) throw new Error('The project media checksum does not match.');
           }
+          documentRange = { offset: index.document.offset, length: index.document.length, sha256: index.document.sha256 };
         } else if (isProjectContainer(prefix)) {
           if (prefix.length < 9) throw new Error('The project container is truncated.');
           const headerLength = prefix.readUInt32LE(5);
@@ -239,7 +240,7 @@ export class ProjectFiles {
         this.associations.set(projectId, { path: filePath, hash: digest.digest('hex') });
         await this.persist();
         this.readers.set(token, { handle, size: info.size, mtime: info.mtimeMs, ctime: info.ctimeMs, busy: false });
-        return { path: filePath, projectId, token, size: info.size, document, media };
+        return { path: filePath, projectId, token, size: info.size, document, media, ...(documentRange ? { documentRange } : {}) };
       } catch (error) { await handle.close(); throw error; }
     });
   }

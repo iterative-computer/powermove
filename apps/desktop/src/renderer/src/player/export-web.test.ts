@@ -37,6 +37,13 @@ describe('portable web export', () => {
     expect(new DataView(result.bytes.buffer).getUint32(0, true)).toBe(0x04034b50);
   });
 
+  it('keeps the selected working precision in portable web scenes', async () => {
+    const PM = fixture();
+    PM.proj.colorDepth = 32;
+    const result = await buildWebExport(PM);
+    expect(result.scene.project.colorDepth).toBe(32);
+  });
+
   it('fails on missing definitions and media instead of flattening or omitting them', async () => {
     const PM = fixture();
     PM.proj.layers[0].fx.push({ type: 'missing', p: {}, on: true });

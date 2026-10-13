@@ -41,7 +41,7 @@ function audioLayers(project: any = PM.proj) {
       if (!layer || layer.on === false || (comp.layers.some((l: any) => l.solo) && !layer.solo && !(PM.groupAncestors?.(layer, comp.layers) || []).some((group: any) => group.solo))) continue;
       const groupChain = (PM.groupAncestors?.(layer, comp.layers) || []).map((group: any) => ({ group, offset }));
       if (groupChain.some(({ group }: any) => group.on === false)) continue;
-      const naturalStart: any = offset + Math.max(0, finite(layer.from));
+      const naturalStart: any = offset + finite(layer.from);
       const start: any = Math.max(windowStart, naturalStart);
       const end: any = Math.min(windowEnd, naturalStart + Math.max(0, finite(layer.dur)));
       if (end - start <= 1e-4) continue;
@@ -371,7 +371,7 @@ function envelopePoints(layer: any, localStart: any, duration: any, audibleDurat
 
 function plan(layer: any, asset: any, rangeStart: any, rangeEnd: any) {
   if (!layer || layer.type !== 'audio' || layer.on === false || !layer.d || !layer.d.asset || !asset) return null;
-  const layerStart: any = Math.max(0, finite(layer.from));
+  const layerStart: any = finite(layer.from);
   const layerDuration: any = Math.max(0, finite(layer.dur));
   const windowStart: any = Math.max(layerStart, finite(layer._audioWindowStart, layerStart));
   const windowEnd: any = Math.min(layerStart + layerDuration, finite(layer._audioWindowEnd, layerStart + layerDuration));

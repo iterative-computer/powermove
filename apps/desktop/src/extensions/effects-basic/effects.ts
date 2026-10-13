@@ -241,18 +241,19 @@ const FX: Record<string, Omit<EffectDefinition, 'id' | 'rawShader'>> = {
              { k: 'amount', label: 'Amount', def: 100, min: 0, max: 100, step: 1, unit: '%' }],
     /* Named uniforms (the current param contract) rather than the positional
        u_p<i> of the older effects above — eleven params read better by name.
-       The ramp spans the frame like Vignette, and paints inside the layer's own
-       alpha, so text and shapes keep their edges instead of being replaced by a
-       full-frame fill. */
+       The ramp uses the layer's own bounds and transform, and paints inside
+       its alpha so the colors stay attached to text, shapes and footage. */
     frag: F(`
       vec4 c = texture(u_tex, v_st); if (c.a < .0005) { o = c; return; }
       vec3 x = c.rgb / c.a;
-      vec2 p = (vec2(v_uv.x, 1. - v_uv.y) - .5) - vec2(u_centerX, -u_centerY) / 200.;
+      vec3 local = u_layerUV * vec3(v_px, 1.);
+      vec2 uv = local.xy / local.z;
+      vec2 p = (vec2(uv.x, 1. - uv.y) - .5) - vec2(u_centerX, -u_centerY) / 200.;
       float span = max(u_spread / 100., .001);
       float a = radians(u_angle);
       /* Aspect-correct the radial distance so the rings stay circular. */
       float t = u_radial > .5
-        ? length(p * vec2(u_coordRes.x / max(u_coordRes.y, 1.), 1.)) * 2. / span
+        ? length(p * vec2(u_layerRes.x / max(u_layerRes.y, 1.), 1.)) * 2. / span
         : dot(p, vec2(cos(a), -sin(a))) / span + .5;
       /* Static per-pixel jitter breaks 8-bit banding without shimmering. */
       t = clamp(t + (hash(v_px) - .5) * u_dither * .004, 0., 1.);
@@ -260,7 +261,9 @@ const FX: Record<string, Omit<EffectDefinition, 'id' | 'rawShader'>> = {
       vec3 g = mix(u_startColor, u_endColor, t);
       if (u_shade > .5) { vec3 h = rgb2hsv(g); g = hsv2rgb(vec3(h.x, h.y, rgb2hsv(max(x, 0.)).z)); }
       o = vec4(mix(x, g, u_amount / 100.) * c.a, c.a);`,
-      `uniform vec3 u_startColor,u_endColor;
+      `uniform mat3 u_layerUV;
+       uniform vec2 u_layerRes;
+       uniform vec3 u_startColor,u_endColor;
        uniform float u_angle,u_centerX,u_centerY,u_spread,u_midpoint,u_radial,u_shade,u_dither,u_amount;`),
   },
 };

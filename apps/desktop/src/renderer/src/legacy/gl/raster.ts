@@ -11,7 +11,7 @@ import {
 import { fontAnchorOffset } from '../core/font-anchor';
 import { animatedGlyphs, isIdentityGlyph, textAnimationKey, textAnimationState } from '../core/text-animation';
 import { glyphLayout, textSourceLines } from '../core/text-layout';
-import { rasterPaths, pathValues, groupMatrix } from '../core/vector-paths';
+import { rasterPaths, pathRasterGeometry, pathValues, groupMatrix } from '../core/vector-paths';
 import { createVariableFontRenderer, variationEntries, variationSettings } from '../../typography/font-renderer';
 export { variationEntries as textVariationEntries, variationSettings as formatFontVariationSettings } from '../../typography/font-renderer';
 import { resolveContent } from '../core/content-properties';
@@ -459,7 +459,7 @@ function rasterShape(d: any, scale: any, crop?: RasterWindow) {
 }
 
 /** Get (and cache) a rasterized bitmap for a layer. `scale` = render supersample. */
-PM.raster = (L: any, scale: any = 1, time: any = PM.time, uploaded?: (key: string) => any, crop?: RasterWindow) => {
+PM.raster = (L: any, scale: any = 1, time: any = PM.time, uploaded?: (key: string) => any, crop?: RasterWindow, maxSourceBytes = Infinity) => {
   const d = L.type === 'text' ? resolvedTextContent(L, time) : resolveContent(PM, L, time);
   const animation=L.type==='text'&&(L.d.animators?.length||L.d.styles?.length)?textAnimation(L,d,time):null;
   // Above the bitmap dimension limit, different requested zoom densities
@@ -468,7 +468,8 @@ PM.raster = (L: any, scale: any = 1, time: any = PM.time, uploaded?: (key: strin
   const rasterScale = L.type === 'shape' && !L.d.paths?.length ? shapeRasterGeometry(d, scale).density
     : L.type === 'text' && !L.d.animators?.length && !L.d.styles?.length ? textRasterGeometry(d, scale).density
     : scale;
-  const key = (L.d.paths?.length ? 'paths|'+JSON.stringify(L.d.paths.map((path:any)=>({values:pathValues(PM,L,path,time),matrix:groupMatrix(PM,L,path,time)})))+'|'+scale : L.type === 'text'
+  const paths = L.d.paths?.length ? L.d.paths.map((path:any)=>({values:pathValues(PM,L,path,time),matrix:groupMatrix(PM,L,path,time)})) : null;
+  const key = (paths ? 'paths|'+JSON.stringify(paths)+'|'+scale : L.type === 'text'
     ? 't|' + [d.text, d.boxWidth, d.boxHeight, d.font, d.weight, d.size, d.tracking, d.leading, d.color, d.align, d.italic, variationSettings(d), animation ? textAnimationKey(animation) : '', rasterScale].join('|')
     : 's|' + [d.shape, d.color, d.w, d.h, d.radius, d.independentCorners ? cornerRadii(d).join(',') : '', d.smoothing, d.stroke, d.strokeColor, d.points, rasterScale].join('|'))
     + (crop ? `|crop:${crop.x},${crop.y},${crop.width},${crop.height}` : '');
@@ -481,8 +482,15 @@ PM.raster = (L: any, scale: any = 1, time: any = PM.time, uploaded?: (key: strin
     if (Date.now() >= e.retryAt) { release(key, e); e = null; }
   }
   if (!e && !L.d.fontAnchorBounds) { const stub = uploaded?.(key); if (stub && !stub.blank) e = stub; }
+  if (e && e.bytes > maxSourceBytes) return null;
   if (!e) {
-    e = L.d.paths?.length ? rasterPaths(PM,L,time,scale) : L.type === 'text' ? (animation ? rasterAnimatedText(L,d,time,scale,animation) : rasterText(d, scale, crop)) : rasterShape(d, scale, crop);
+    const geometry = paths ? pathRasterGeometry(PM,L,time,scale,paths.map((record:any)=>({v:record.values,matrix:record.matrix})))
+      : L.type === 'text' ? textRasterGeometry(d,scale) : shapeRasterGeometry(d,scale);
+    if ((crop?.width ?? geometry.width) * (crop?.height ?? geometry.height) * 4 > maxSourceBytes) return null;
+    // Animated text can paint beyond the ordinary text geometry; leave that
+    // source to the visible render when speculation has a finite budget.
+    if (animation && Number.isFinite(maxSourceBytes)) return null;
+    e = paths ? rasterPaths(PM,L,time,scale,geometry) : L.type === 'text' ? (animation ? rasterAnimatedText(L,d,time,scale,animation) : rasterText(d, scale, crop)) : rasterShape(d, scale, crop);
     e.dirty = true;
     e.used = ++tick;
     e.bytes = Math.max(0, Number(e.cv?.width || 0) * Number(e.cv?.height || 0) * 4);

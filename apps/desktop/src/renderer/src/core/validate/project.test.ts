@@ -77,6 +77,20 @@ function serializedLegacyDemo(): string {
 }
 
 describe('sanitizeProject', () => {
+  it('preserves negative layer starts in saved and nested compositions', () => {
+    const PM = legacyModel();
+    const source = PM.mkProject({ dur: 10 });
+    const nested = PM.mkProject({ dur: 5 });
+    source.layers = ['solid', 'text', 'video', 'audio', 'group'].map((type, index) =>
+      PM.mkLayer(type, { from: -6 - index }, source));
+    nested.layers = [PM.mkLayer('solid', { from: -2 }, nested)];
+    source.comps = { nested };
+
+    const project = sanitizeProject(JSON.stringify({ proj: source }));
+    expect(project.layers.map(layer => layer.from)).toEqual([-6, -7, -8, -9, -10]);
+    expect(project.comps.nested!.layers[0]!.from).toBe(-2);
+  });
+
   it('preserves group effects and masks as editable project source', () => {
     const PM = legacyModel();
     const source = PM.mkProject({ dur: 4 });
@@ -215,7 +229,7 @@ describe('sanitizeProject', () => {
 
     const bad = project.layers[0];
     expect(bad?.type).toBe('null');
-    expect(bad).toMatchObject({ name: 'Layer 1', from: 0, dur: 5, parent: null, fx: [] });
+    expect(bad).toMatchObject({ name: 'Layer 1', from: -8, dur: 5, parent: null, fx: [] });
     expect(Object.keys(bad?.p ?? {})).toEqual(Object.keys((project.layers[2] as Exclude<Layer, { type: 'audio' }>).p));
     expect(bad && bad.type !== 'audio' && bad.type !== 'group' ? bad.p.opacity.v : null).toBe(100);
     expect(bad && bad.type !== 'audio' && bad.type !== 'group' ? bad.p.opacity.kf : []).toHaveLength(1);

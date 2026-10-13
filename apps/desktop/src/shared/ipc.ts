@@ -273,10 +273,12 @@ export interface ProjectSaveRequest {
   media: import('./project-incremental').SaveMedia[];
 }
 export type ProjectSaveBeginResult = { ok: true; token: string; required: string[] } | { ok: false; cancelled: boolean; error?: string };
-export type ProjectOpenResult = {
+export type ProjectOpenResult = ({
   ok: true; path: string; projectId: string; token: string; size: number;
-  document: any; media: import('./project-container').ProjectMediaRange[];
-} | { ok: true; path: string; projectId: string; data: Uint8Array }
+  media: import('./project-container').ProjectMediaRange[];
+} & ({ document: any; documentRange?: import('./project-incremental').ProjectRecord }
+  | { document?: never; documentRange: import('./project-incremental').ProjectRecord }))
+  | { ok: true; path: string; projectId: string; data: Uint8Array }
   | { ok: false; cancelled: boolean; error?: string };
 export type CloseDecision = 'save' | 'discard' | 'cancel';
 /** The longest text `clipboard:write-text` takes: 1 MB of UTF-16. */
@@ -725,7 +727,8 @@ export interface PowermoveBridge {
 
   render: {
     start(options:{width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number}):Promise<string | null>;
-    write(token:string,data:Uint8Array,audio?:boolean):Promise<void>;
+    write(token:string,data:Uint8Array,audio?:boolean,retain?:boolean):Promise<void>;
+    repeat?(token:string,count:number):Promise<void>;
     finish(token:string):Promise<{path?:string;cancelled?:boolean}>;
     cancel(token:string):Promise<void>;
   };
