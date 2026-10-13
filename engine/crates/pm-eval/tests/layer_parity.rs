@@ -49,7 +49,9 @@ fn get<'v>(v: &'v Value, k: &str) -> Option<&'v Value> {
 }
 
 fn dec(v: &Value) -> V {
-    let Value::Object(m) = v else { panic!("encoded value") };
+    let Value::Object(m) = v else {
+        panic!("encoded value")
+    };
     let (k, x) = m.iter().next().unwrap();
     match k.as_str().unwrap() {
         "u" => V::U,
@@ -60,7 +62,11 @@ fn dec(v: &Value) -> V {
         "a" => V::A(x.as_array().unwrap().iter().map(dec).collect()),
         "o" => {
             let Value::Object(o) = x else { unreachable!() };
-            V::O(o.iter().map(|(k, v)| (k.to_string_lossy(), dec(v))).collect())
+            V::O(
+                o.iter()
+                    .map(|(k, v)| (k.to_string_lossy(), dec(v)))
+                    .collect(),
+            )
         }
         "throw" => V::Throw(x.as_js_string().unwrap().to_string_lossy()),
         other => panic!("unknown encoding {other}"),
@@ -75,7 +81,11 @@ fn to_value(v: &V) -> Value {
         V::S(s) => Value::String(JsString::from(s.as_str())),
         V::B(b) => Value::Bool(*b),
         V::A(a) => Value::Array(a.iter().map(to_value).collect()),
-        V::O(o) => Value::Object(o.iter().map(|(k, v)| (JsString::from(k.as_str()), to_value(v))).collect()),
+        V::O(o) => Value::Object(
+            o.iter()
+                .map(|(k, v)| (JsString::from(k.as_str()), to_value(v)))
+                .collect(),
+        ),
     }
 }
 
@@ -108,12 +118,20 @@ fn from_json(v: &Value) -> V {
         Value::Number(n) => V::N(*n),
         Value::String(s) => V::S(s.to_string_lossy()),
         Value::Array(a) => V::A(a.iter().map(from_json).collect()),
-        Value::Object(o) => V::O(o.iter().map(|(k, v)| (k.to_string_lossy(), from_json(v))).collect()),
+        Value::Object(o) => V::O(
+            o.iter()
+                .map(|(k, v)| (k.to_string_lossy(), from_json(v)))
+                .collect(),
+        ),
     }
 }
 
 fn content(c: &Content) -> V {
-    V::O(c.iter().map(|(k, v)| (k.to_string_lossy(), from_js(v))).collect())
+    V::O(
+        c.iter()
+            .map(|(k, v)| (k.to_string_lossy(), from_js(v)))
+            .collect(),
+    )
 }
 
 fn nums(xs: &[f64]) -> V {
@@ -151,7 +169,9 @@ impl Stats {
                 }
                 ok
             }
-            (V::A(a), V::A(b)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.same(x, y)),
+            (V::A(a), V::A(b)) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.same(x, y))
+            }
             (V::O(a), V::O(b)) => {
                 a.len() == b.len()
                     && a.iter().all(|(k, x)| {
@@ -185,7 +205,8 @@ impl Stats {
 
     fn check(&mut self, what: impl FnOnce() -> String, ours: V, want: &V) {
         if !self.same(&ours, want) && self.failures.len() < 40 {
-            self.failures.push(format!("{}: ours {ours:?}, want {want:?}", what()));
+            self.failures
+                .push(format!("{}: ours {ours:?}, want {want:?}", what()));
         }
     }
 }
@@ -199,16 +220,28 @@ fn result<T>(r: Result<T, pm_eval::JsThrow>, f: impl FnOnce(T) -> V) -> V {
 
 fn load() -> Value {
     let path = std::env::var("PM_LAYER_VECTORS").unwrap_or_else(|_| {
-        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/vectors/layer-vectors.json.gz").to_owned()
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/vectors/layer-vectors.json.gz"
+        )
+        .to_owned()
     });
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     let mut text = String::new();
-    flate2::read::GzDecoder::new(&bytes[..]).read_to_string(&mut text).unwrap();
+    flate2::read::GzDecoder::new(&bytes[..])
+        .read_to_string(&mut text)
+        .unwrap();
     parse(&text).unwrap()
 }
 
 fn hexes(case: &Value, key: &str) -> Vec<f64> {
-    get(case, key).unwrap().as_array().unwrap().iter().map(hexf).collect()
+    get(case, key)
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(hexf)
+        .collect()
 }
 
 fn rect_obj(r: &pm_eval::space3d::Rect) -> V {
@@ -221,7 +254,11 @@ fn rect_obj(r: &pm_eval::space3d::Rect) -> V {
 }
 
 fn pairs(list: &[(&str, f64)]) -> V {
-    V::O(list.iter().map(|(k, v)| ((*k).to_owned(), V::N(*v))).collect())
+    V::O(
+        list.iter()
+            .map(|(k, v)| ((*k).to_owned(), V::N(*v)))
+            .collect(),
+    )
 }
 
 #[test]
@@ -251,13 +288,33 @@ fn layer_queries_match_typescript() {
                 "depth" => {
                     let all: Vec<&Node> = layers.iter().collect();
                     result(scope.depth_ordered_layers(&all, t), |o| {
-                        V::A(o.iter().map(|l| V::N(layers.iter().position(|x| std::ptr::eq(x, *l)).unwrap() as f64)).collect())
+                        V::A(
+                            o.iter()
+                                .map(|l| {
+                                    V::N(layers.iter().position(|x| std::ptr::eq(x, *l)).unwrap()
+                                        as f64)
+                                })
+                                .collect(),
+                        )
                     })
                 }
                 "roots" => {
-                    let ids: Vec<JsValue> = get(case, "ids").unwrap().as_array().unwrap().iter().map(|v| to_js(&dec(v))).collect();
+                    let ids: Vec<JsValue> = get(case, "ids")
+                        .unwrap()
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| to_js(&dec(v)))
+                        .collect();
                     result(scope.transform_roots(&ids), |o| {
-                        V::A(o.iter().map(|l| V::N(layers.iter().position(|x| std::ptr::eq(x, *l)).unwrap() as f64)).collect())
+                        V::A(
+                            o.iter()
+                                .map(|l| {
+                                    V::N(layers.iter().position(|x| std::ptr::eq(x, *l)).unwrap()
+                                        as f64)
+                                })
+                                .collect(),
+                        )
                     })
                 }
                 _ => {
@@ -266,7 +323,9 @@ fn layer_queries_match_typescript() {
                         "active" => result(scope.active(l, t), V::B),
                         "local" => result(scope.local_matrix(l, t), |m| nums(&m)),
                         "world" => result(scope.world_matrix(l, t), |m| nums(&m)),
-                        "parent2d" => result(scope.transform_parent_matrix(l, t, None), |m| nums(&m)),
+                        "parent2d" => {
+                            result(scope.transform_parent_matrix(l, t, None), |m| nums(&m))
+                        }
                         "opacity" => result(scope.world_opacity(l, t), V::N),
                         "local3d" => result(scope.local3d(l, t), |m| nums(&m)),
                         "parent3d" => result(scope.parent3d(l, t, None), |m| nums(&m)),
@@ -286,12 +345,23 @@ fn layer_queries_match_typescript() {
                         "pose3d" => {
                             let world: [f64; 16] = hexes(case, "world").try_into().unwrap();
                             let parent: [f64; 16] = hexes(case, "parent").try_into().unwrap();
-                            result(scope.pose_values3d(l, &world, t, Some(&parent)), |p| pairs(&p.channels()))
+                            result(scope.pose_values3d(l, &world, t, Some(&parent)), |p| {
+                                pairs(&p.channels())
+                            })
                         }
                         "pose2d" | "pose2dzero" => {
                             let world: [f64; 6] = hexes(case, "world").try_into().unwrap();
                             let parent: [f64; 6] = hexes(case, "parent").try_into().unwrap();
-                            result(scope.world_pose_values(l, &world, t, Some(&parent), op == "pose2dzero"), |p| pairs(&p.channels()))
+                            result(
+                                scope.world_pose_values(
+                                    l,
+                                    &world,
+                                    t,
+                                    Some(&parent),
+                                    op == "pose2dzero",
+                                ),
+                                |p| pairs(&p.channels()),
+                            )
                         }
                         "aim" => result(scope.world_aim3d(l, t), |a| a.map_or(V::Z, |a| nums(&a))),
                         "aimvalues" => {
@@ -302,34 +372,65 @@ fn layer_queries_match_typescript() {
                             })
                         }
                         "contains" => {
-                            let b: Vec<f64> = get(case, "b").unwrap().as_array().unwrap().iter().map(hexf).collect();
-                            let rect = pm_eval::space3d::Rect { x0: b[0], y0: b[1], x1: b[2], y1: b[3] };
-                            let (x, y) = (hexf(get(case, "x").unwrap()), hexf(get(case, "y").unwrap()));
+                            let b: Vec<f64> = get(case, "b")
+                                .unwrap()
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(hexf)
+                                .collect();
+                            let rect = pm_eval::space3d::Rect {
+                                x0: b[0],
+                                y0: b[1],
+                                x1: b[2],
+                                y1: b[3],
+                            };
+                            let (x, y) =
+                                (hexf(get(case, "x").unwrap()), hexf(get(case, "y").unwrap()));
                             result(scope.plane_contains(l, t, x, y, &rect), V::B)
                         }
                         "cycle" => {
                             let target = target_node.as_ref().unwrap();
-                            result(scope.would_cycle(l, &pm_eval::node::Got::Node(target)), V::B)
+                            result(
+                                scope.would_cycle(l, &pm_eval::node::Got::Node(target)),
+                                V::B,
+                            )
                         }
                         "matte" => {
                             let target = pm_eval::node::js_value(target_node.as_ref().unwrap());
                             V::B(pm_eval::matte::valid_matte_source(layers, l, &target))
                         }
-                        "sizeBounds" => result(scope.size_bounds(l, t), |b| b.map_or(V::Z, |b| rect_obj(&b))),
-                        "sizeAnchor" => result(scope.size_anchor_offset(l, t), |o| pairs(&[("x", o.x), ("y", o.y)])),
-                        "sourceTime" => result(scope.source_time_with(l, t, Retiming::Legacy, None), V::N),
-                        "span" => result(scope.group_span(l), |s| pairs(&[("from", s.from), ("dur", s.dur)])),
+                        "sizeBounds" => result(scope.size_bounds(l, t), |b| {
+                            b.map_or(V::Z, |b| rect_obj(&b))
+                        }),
+                        "sizeAnchor" => result(scope.size_anchor_offset(l, t), |o| {
+                            pairs(&[("x", o.x), ("y", o.y)])
+                        }),
+                        "sourceTime" => {
+                            result(scope.source_time_with(l, t, Retiming::Legacy, None), V::N)
+                        }
+                        "span" => result(scope.group_span(l), |s| {
+                            pairs(&[("from", s.from), ("dur", s.dur)])
+                        }),
                         "expand" => {
                             let id = pm_eval::node::get(l, b"id").to_js();
                             result(scope.expand_groups(&[id]), |o| {
-                                V::A(o.iter().map(|x| from_js(&pm_eval::node::get(x, b"id").to_js())).collect())
+                                V::A(
+                                    o.iter()
+                                        .map(|x| from_js(&pm_eval::node::get(x, b"id").to_js()))
+                                        .collect(),
+                                )
                             })
                         }
                         other => panic!("unknown op {other}"),
                     }
                 }
             };
-            stats.check(|| format!("{comp_id} {op} layer {index:?} t={t}"), ours, &want);
+            stats.check(
+                || format!("{comp_id} {op} layer {index:?} t={t}"),
+                ours,
+                &want,
+            );
         }
     }
 
@@ -340,7 +441,8 @@ fn layer_queries_match_typescript() {
         let doc = Document::new(Some(root), 1);
         let comp = Comp::resolve(&doc, &comp_id).unwrap();
         let layer = &comp.layers()[0];
-        let layout: GlyphLayout = serde_json::from_str(get(entry, "layout").unwrap().as_str().unwrap()).unwrap();
+        let layout: GlyphLayout =
+            serde_json::from_str(get(entry, "layout").unwrap().as_str().unwrap()).unwrap();
         let mut ev = Evaluator::new();
         for case in get(entry, "cases").unwrap().as_array().unwrap() {
             *stats.ops.entry("text".into()).or_default() += 1;
@@ -371,14 +473,18 @@ fn layer_queries_match_typescript() {
                     glyphs
                         .iter()
                         .map(|g| {
-                            let style = |k: &str| g.style.get(&JsString::from(k)).map_or(V::U, from_js);
+                            let style =
+                                |k: &str| g.style.get(&JsString::from(k)).map_or(V::U, from_js);
                             V::O(BTreeMap::from([
                                 ("index".to_owned(), V::N(g.unit.index as f64)),
                                 ("x".to_owned(), V::N(g.unit.x)),
                                 ("matrix".to_owned(), nums(&g.matrix)),
                                 ("opacity".to_owned(), V::N(g.opacity)),
                                 ("blur".to_owned(), V::N(g.blur)),
-                                ("color".to_owned(), g.color.as_ref().map_or(V::Z, |c| V::S(c.to_string_lossy()))),
+                                (
+                                    "color".to_owned(),
+                                    g.color.as_ref().map_or(V::Z, |c| V::S(c.to_string_lossy())),
+                                ),
                                 ("tracking".to_owned(), V::N(g.tracking)),
                                 ("trackingShift".to_owned(), V::N(g.tracking_shift)),
                                 (
@@ -420,7 +526,13 @@ fn layer_queries_match_typescript() {
         };
         let ours = match op {
             "countUnits" => {
-                let lines: Vec<JsString> = get(case, "lines").unwrap().as_array().unwrap().iter().map(|l| l.as_js_string().unwrap().clone()).collect();
+                let lines: Vec<JsString> = get(case, "lines")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|l| l.as_js_string().unwrap().clone())
+                    .collect();
                 let unit = match get(case, "unit").unwrap().as_str().unwrap() {
                     "words" => UnitKind::Words,
                     "lines" => UnitKind::Lines,
@@ -439,11 +551,21 @@ fn layer_queries_match_typescript() {
                     },
                     _ => text_anim::Order::Forward,
                 };
-                V::N(text_anim::unit_rank(order, num("index") as usize, num("count") as usize, hexf(get(case, "seed").unwrap())))
+                V::N(text_anim::unit_rank(
+                    order,
+                    num("index") as usize,
+                    num("count") as usize,
+                    hexf(get(case, "seed").unwrap()),
+                ))
             }
             "weight" => {
-                let V::O(p) = dec(get(case, "p").unwrap()) else { unreachable!() };
-                let p: Content = p.iter().map(|(k, v)| (JsString::from(k.as_str()), to_js(v))).collect();
+                let V::O(p) = dec(get(case, "p").unwrap()) else {
+                    unreachable!()
+                };
+                let p: Content = p
+                    .iter()
+                    .map(|(k, v)| (JsString::from(k.as_str()), to_js(v)))
+                    .collect();
                 let shape = match dec(get(case, "shape").unwrap()) {
                     V::S(s) => match s.as_str() {
                         "rampUp" => Shape::RampUp,
@@ -454,7 +576,12 @@ fn layer_queries_match_typescript() {
                     },
                     _ => Shape::Square,
                 };
-                V::N(text_anim::animator_weight(&p, hexf(get(case, "rank").unwrap()), num("count") as usize, shape))
+                V::N(text_anim::animator_weight(
+                    &p,
+                    hexf(get(case, "rank").unwrap()),
+                    num("count") as usize,
+                    shape,
+                ))
             }
             "ease" => {
                 let easing = match dec(get(case, "easing").unwrap()) {
@@ -463,8 +590,16 @@ fn layer_queries_match_typescript() {
                 };
                 // `Ease.spring` reads `tbl[NaN]` (undefined) for a NaN time; every
                 // caller turns it into NaN arithmetic, which the port returns.
-                let v = text_anim::ease_progress(&mut springs, easing.as_ref(), hexf(get(case, "progress").unwrap()));
-                if v.is_nan() && want == V::U { V::U } else { V::N(v) }
+                let v = text_anim::ease_progress(
+                    &mut springs,
+                    easing.as_ref(),
+                    hexf(get(case, "progress").unwrap()),
+                );
+                if v.is_nan() && want == V::U {
+                    V::U
+                } else {
+                    V::N(v)
+                }
             }
             "fontAnchor" => {
                 let node = |k: &str| Node::from_value(to_value(&dec(get(case, k).unwrap())), 1);
@@ -479,7 +614,11 @@ fn layer_queries_match_typescript() {
             }
             other => panic!("unknown helper {other}"),
         };
-        stats.check(|| format!("helper {op} {}", pm_model::json::to_canonical_string(case)), ours, &want);
+        stats.check(
+            || format!("helper {op} {}", pm_model::json::to_canonical_string(case)),
+            ours,
+            &want,
+        );
     }
 
     eprintln!(
@@ -490,5 +629,9 @@ fn layer_queries_match_typescript() {
     for f in &stats.failures {
         eprintln!("  {f}");
     }
-    assert!(stats.failures.is_empty(), "{} mismatches", stats.failures.len());
+    assert!(
+        stats.failures.is_empty(),
+        "{} mismatches",
+        stats.failures.len()
+    );
 }

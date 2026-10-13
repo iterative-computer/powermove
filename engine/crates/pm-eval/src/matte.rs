@@ -66,9 +66,21 @@ mod tests {
         );
         assert!(valid_matte_source(&l, &l[0], &JsValue::from("b")));
         assert!(valid_matte_source(&l, &l[0], &JsValue::Null));
-        assert!(!valid_matte_source(&l, &l[0], &JsValue::from("d")), "null layers are not sources");
-        assert!(!valid_matte_source(&l, &l[0], &JsValue::from("x")), "missing");
-        assert!(!valid_matte_source(&l, &l[0], &JsValue::from("e")), "e -> a is a cycle");
-        assert!(!valid_matte_source(&l, &l[2], &JsValue::from("a")), "a -> b -> c revisits c");
+        assert!(
+            !valid_matte_source(&l, &l[0], &JsValue::from("d")),
+            "null layers are not sources"
+        );
+        assert!(
+            !valid_matte_source(&l, &l[0], &JsValue::from("x")),
+            "missing"
+        );
+        assert!(
+            !valid_matte_source(&l, &l[0], &JsValue::from("e")),
+            "e -> a is a cycle"
+        );
+        assert!(
+            !valid_matte_source(&l, &l[2], &JsValue::from("a")),
+            "a -> b -> c revisits c"
+        );
     }
 }

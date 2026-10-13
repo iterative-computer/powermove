@@ -70,7 +70,10 @@ impl<'d> Scope<'_, 'd> {
     /// duration for an empty group.
     pub fn group_span(&mut self, group: &'d Node) -> JsResult<Span> {
         let members = self.expand_groups(&[node::get(group, b"id").to_js()])?;
-        let ids: Vec<JsValue> = members.iter().map(|l| node::get(l, b"id").to_js()).collect();
+        let ids: Vec<JsValue> = members
+            .iter()
+            .map(|l| node::get(l, b"id").to_js())
+            .collect();
         let children: Vec<&'d Node> = self
             .project
             .layers()
@@ -79,7 +82,10 @@ impl<'d> Scope<'_, 'd> {
             .collect();
         if children.is_empty() {
             let end = node::to_number(self.project.member("dur"));
-            return Ok(Span { from: 0.0, dur: end });
+            return Ok(Span {
+                from: 0.0,
+                dur: end,
+            });
         }
         let mut from = f64::INFINITY;
         let mut end = f64::NEG_INFINITY;
@@ -89,7 +95,10 @@ impl<'d> Scope<'_, 'd> {
             from = js_min(from, start.to_number());
             end = js_max(end, js_sem::add(&start, &dur).to_number());
         }
-        Ok(Span { from, dur: end - from })
+        Ok(Span {
+            from,
+            dur: end - from,
+        })
     }
 
     /// `PM.transformRoots(ids)`: the selected layers that move on their own
@@ -110,8 +119,10 @@ impl<'d> Scope<'_, 'd> {
             }
             selected.push(layer);
         }
-        let selected_ids: Vec<JsValue> =
-            selected.iter().map(|l| node::get(l, b"id").to_js()).collect();
+        let selected_ids: Vec<JsValue> = selected
+            .iter()
+            .map(|l| node::get(l, b"id").to_js())
+            .collect();
         let mut out = Vec::new();
         'layers: for &layer in &selected {
             let mut seen: Vec<JsValue> = Vec::new();
@@ -180,7 +191,12 @@ impl<'d> Scope<'_, 'd> {
             let on = node::member_checked(Some(effect), "on")?;
             let enabled = self.evaluated(layer, on, time, &key)?.truthy();
             let missing = node::member(Some(effect), "missing");
-            if enabled && !matches!(missing.map(Node::kind), Some(pm_model::NodeKind::Bool(true))) {
+            if enabled
+                && !matches!(
+                    missing.map(Node::kind),
+                    Some(pm_model::NodeKind::Bool(true))
+                )
+            {
                 return Ok(true);
             }
         }

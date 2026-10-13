@@ -77,7 +77,12 @@ impl RetimeCache {
 
 impl<'d> Scope<'_, 'd> {
     /// `sourceTime(PM, layer, time)` with the engine's integration step.
-    pub fn source_time(&mut self, layer: &'d Node, time: f64, cache: Option<&mut RetimeCache>) -> JsResult<f64> {
+    pub fn source_time(
+        &mut self,
+        layer: &'d Node,
+        time: f64,
+        cache: Option<&mut RetimeCache>,
+    ) -> JsResult<f64> {
         self.source_time_with(layer, time, Retiming::Engine, cache)
     }
 
@@ -199,4 +204,3 @@ impl<'d> Scope<'_, 'd> {
         Ok(self.evaluated(layer, speed, at, "c.speed")?.to_number())
     }
 }
-

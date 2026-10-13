@@ -80,7 +80,11 @@ pub fn font_anchor_offset(
     let (Some(r), Some(b)) = (reference, bounds) else {
         return Offset::default();
     };
-    let offset = |start: &JsValue, end: &JsValue, next_start: &JsValue, next_end: &JsValue, anchor: &JsValue| {
+    let offset = |start: &JsValue,
+                  end: &JsValue,
+                  next_start: &JsValue,
+                  next_end: &JsValue,
+                  anchor: &JsValue| {
         let (Some(start), Some(end), Some(next_start), Some(next_end), Some(anchor)) = (
             finite(start),
             finite(end),
@@ -102,7 +106,15 @@ pub fn font_anchor_offset(
 }
 
 /// The layer types whose content has a native size (`sizedTypes`).
-const SIZED_TYPES: [&str; 7] = ["shape", "solid", "image", "video", "shader", "extension", "precomp"];
+const SIZED_TYPES: [&str; 7] = [
+    "shape",
+    "solid",
+    "image",
+    "video",
+    "shader",
+    "extension",
+    "precomp",
+];
 
 impl<'d> Scope<'_, 'd> {
     /// `sizeBounds(PM, layer, time)`: native content bounds without stroke or
@@ -122,7 +134,10 @@ impl<'d> Scope<'_, 'd> {
             node::js_value_opt(self.project.member("h")),
         );
         let pick = |key: &str, fallback: &JsValue| {
-            let v = d.get(&pm_model::JsString::from(key)).cloned().unwrap_or_default();
+            let v = d
+                .get(&pm_model::JsString::from(key))
+                .cloned()
+                .unwrap_or_default();
             if v.truthy() { v } else { fallback.clone() }
         };
         let w = pick("w", &pw).to_number();
@@ -130,7 +145,9 @@ impl<'d> Scope<'_, 'd> {
         if !(w.is_finite() && w > 0.0 && h.is_finite() && h > 0.0) {
             return Ok(None);
         }
-        let centered = ["shape", "image", "video"].iter().any(|t| node::is_str(ty, t));
+        let centered = ["shape", "image", "video"]
+            .iter()
+            .any(|t| node::is_str(ty, t));
         Ok(Some(if centered {
             Rect {
                 x0: -w / 2.0,
@@ -157,6 +174,11 @@ impl<'d> Scope<'_, 'd> {
         let bounds = self.size_bounds(layer, time)?.map(BoundsValues::from);
         let ax = self.channel(layer, "anchor.x", time)?;
         let ay = self.channel(layer, "anchor.y", time)?;
-        Ok(font_anchor_offset(Some(&reference), bounds.as_ref(), &ax, &ay))
+        Ok(font_anchor_offset(
+            Some(&reference),
+            bounds.as_ref(),
+            &ax,
+            &ay,
+        ))
     }
 }

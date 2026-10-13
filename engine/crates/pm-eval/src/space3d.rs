@@ -172,7 +172,13 @@ impl<'d> Scope<'_, 'd> {
     /// `value(PM, L, key, T, fallback)`: the channel as a finite number, or
     /// `fallback` when the channel is missing (`L.p?.[key] == null`) or not
     /// finite.
-    pub fn value3d(&mut self, layer: &'d Node, key: &str, time: f64, fallback: f64) -> JsResult<f64> {
+    pub fn value3d(
+        &mut self,
+        layer: &'d Node,
+        key: &str,
+        time: f64,
+        fallback: f64,
+    ) -> JsResult<f64> {
         let p = node::get(layer, b"p");
         let prop = match p {
             node::Got::Node(p) => node::get(p, key.as_bytes()),
@@ -278,12 +284,20 @@ impl<'d> Scope<'_, 'd> {
             .find(|g| flag(g, "threeD"))
             .copied()
             .unwrap_or(layer);
-        Ok(js_max(0.001, self.value3d(owner, "perspective", time, 50.0)?))
+        Ok(js_max(
+            0.001,
+            self.value3d(owner, "perspective", time, 50.0)?,
+        ))
     }
 
     /// `planeMatrix(PM, L, T, positioning)`: layer pixels to composition
     /// pixels.
-    pub fn plane_matrix(&mut self, layer: &'d Node, time: f64, positioning: bool) -> JsResult<Mat3> {
+    pub fn plane_matrix(
+        &mut self,
+        layer: &'d Node,
+        time: f64,
+        positioning: bool,
+    ) -> JsResult<Mat3> {
         if !self.is_3d_layer(layer)? {
             let m = self.world_matrix(layer, time)?;
             return Ok([m[0], m[1], 0.0, m[2], m[3], 0.0, m[4], m[5], 1.0]);
@@ -308,7 +322,14 @@ impl<'d> Scope<'_, 'd> {
 
     /// `planeContains(PM, L, T, x, y, b)`: whether a composition point hits
     /// the layer's bounds in front of the camera.
-    pub fn plane_contains(&mut self, layer: &'d Node, time: f64, x: f64, y: f64, b: &Rect) -> JsResult<bool> {
+    pub fn plane_contains(
+        &mut self,
+        layer: &'d Node,
+        time: f64,
+        x: f64,
+        y: f64,
+        b: &Rect,
+    ) -> JsResult<bool> {
         let m = self.plane_matrix(layer, time, false)?;
         let Some(inv) = inverse_plane(&m) else {
             return Ok(false);
@@ -325,7 +346,11 @@ impl<'d> Scope<'_, 'd> {
     /// surfaces (coplanar layers, in timeline order) sorted back to front by
     /// the depth of their first layer's anchor. Returns the input order when
     /// no layer is 3D.
-    pub fn depth_ordered_layers(&mut self, layers: &[&'d Node], time: f64) -> JsResult<Vec<&'d Node>> {
+    pub fn depth_ordered_layers(
+        &mut self,
+        layers: &[&'d Node],
+        time: f64,
+    ) -> JsResult<Vec<&'d Node>> {
         let mut flags = Vec::with_capacity(layers.len());
         for l in layers {
             flags.push(self.is_3d_layer(l)?);
@@ -433,14 +458,18 @@ impl<'d> Scope<'_, 'd> {
         let m = multiply(&inv, world);
         let sx = js_hypot(&[m[0], m[1], m[2]]);
         if sx < 1e-9 {
-            return Err(JsThrow::error("Increase zero scale before changing the 3D hierarchy"));
+            return Err(JsThrow::error(
+                "Increase zero scale before changing the 3D hierarchy",
+            ));
         }
         let x = [m[0] / sx, m[1] / sx, m[2] / sx];
         let xy = x[0] * m[4] + x[1] * m[5] + x[2] * m[6];
         let mut y = [m[4] - xy * x[0], m[5] - xy * x[1], m[6] - xy * x[2]];
         let sy = js_hypot(&y);
         if sy < 1e-9 {
-            return Err(JsThrow::error("Increase zero scale before changing the 3D hierarchy"));
+            return Err(JsThrow::error(
+                "Increase zero scale before changing the 3D hierarchy",
+            ));
         }
         for v in &mut y {
             *v /= sy;
@@ -460,7 +489,11 @@ impl<'d> Scope<'_, 'd> {
         }
         let ry = math::asin(js_max(-1.0, crate::scope::js_min(1.0, -x[2])));
         let regular = math::cos(ry).abs() > 1e-7;
-        let rx = if regular { math::atan2(y[2], z[2]) } else { 0.0 };
+        let rx = if regular {
+            math::atan2(y[2], z[2])
+        } else {
+            0.0
+        };
         let rz = if regular {
             math::atan2(x[1], x[0])
         } else {

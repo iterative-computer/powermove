@@ -113,7 +113,9 @@ pub trait LayerHost {
 fn host_only(what: &str) -> JsThrow {
     JsThrow {
         kind: HOST_ONLY,
-        message: format!("{what} come from the host's 3D runtime or captions rasterizer in Phase 1"),
+        message: format!(
+            "{what} come from the host's 3D runtime or captions rasterizer in Phase 1"
+        ),
     }
 }
 
@@ -124,7 +126,9 @@ impl LayerHost for NoHost {}
 
 /// `PM.TYPE_META[type].pickable === false`.
 fn unpickable(layer: &Node) -> bool {
-    ["audio", "adjustment", "group"].iter().any(|t| is_type(layer, t))
+    ["audio", "adjustment", "group"]
+        .iter()
+        .any(|t| is_type(layer, t))
 }
 
 fn content_get<'c>(d: &'c Content, key: &str) -> &'c JsValue {
@@ -134,7 +138,11 @@ fn content_get<'c>(d: &'c Content, key: &str) -> &'c JsValue {
 
 /// `a || b` on JavaScript values, then `Number`.
 fn or_number(a: &JsValue, b: &JsValue) -> f64 {
-    if a.truthy() { a.to_number() } else { b.to_number() }
+    if a.truthy() {
+        a.to_number()
+    } else {
+        b.to_number()
+    }
 }
 
 /// Evaluated values of one editable path (`pathValues`).
@@ -152,7 +160,11 @@ impl EvaluatedPath {
     pub fn path_values(&self) -> PathValues {
         let n = |k: &str| content_get(&self.values, k).to_number();
         let vertex = |v: &Vec<(JsString, f64)>| {
-            let get = |k: &str| v.iter().find(|(key, _)| key.as_str() == Some(k)).map_or(0.0, |(_, x)| *x);
+            let get = |k: &str| {
+                v.iter()
+                    .find(|(key, _)| key.as_str() == Some(k))
+                    .map_or(0.0, |(_, x)| *x)
+            };
             Vertex {
                 x: get("x"),
                 y: get("y"),
@@ -187,12 +199,20 @@ impl EvaluatedPath {
 
 impl<'d> Scope<'_, 'd> {
     /// `pathValues(PM, layer, path, time, prefix)`.
-    pub fn path_values(&mut self, layer: &'d Node, path: &'d Node, time: f64, prefix: &str) -> JsResult<EvaluatedPath> {
+    pub fn path_values(
+        &mut self,
+        layer: &'d Node,
+        path: &'d Node,
+        time: f64,
+        prefix: &str,
+    ) -> JsResult<EvaluatedPath> {
         let mut values = Content::new();
         let p = node::get_checked(Some(path), b"p")?;
         if let Got::Node(p) = &p {
             if node::is_nullish(Some(p)) {
-                return Err(JsThrow::type_error("Cannot convert undefined or null to object"));
+                return Err(JsThrow::type_error(
+                    "Cannot convert undefined or null to object",
+                ));
             }
             for (k, prop) in node::entries(p) {
                 let key = format!("{prefix}.{}", k.to_string_lossy());
@@ -200,7 +220,9 @@ impl<'d> Scope<'_, 'd> {
                 values.insert(k, v);
             }
         } else {
-            return Err(JsThrow::type_error("Cannot convert undefined or null to object"));
+            return Err(JsThrow::type_error(
+                "Cannot convert undefined or null to object",
+            ));
         }
         let mut vertices = Vec::new();
         let list = node::get_checked(Some(path), b"vertices")?;
@@ -210,7 +232,9 @@ impl<'d> Scope<'_, 'd> {
             if let Some(vp) = node::member(Some(v), "p") {
                 for (k, prop) in node::entries(vp) {
                     let key = format!("{prefix}.v.{id}.{}", k.to_string_lossy());
-                    let x = crate::scope::or0(self.evaluated(layer, prop.node(), time, &key)?.to_number());
+                    let x = crate::scope::or0(
+                        self.evaluated(layer, prop.node(), time, &key)?.to_number(),
+                    );
                     out.push((k, x));
                 }
             }
@@ -236,7 +260,11 @@ impl<'d> Scope<'_, 'd> {
     }
 
     /// `groupMatrix` for each path, and the `rasterPaths` bounds.
-    pub fn path_geometry(&mut self, layer: &'d Node, time: f64) -> JsResult<(Vec<EvaluatedPath>, Vec<[f64; 6]>, PathLayer)> {
+    pub fn path_geometry(
+        &mut self,
+        layer: &'d Node,
+        time: f64,
+    ) -> JsResult<(Vec<EvaluatedPath>, Vec<[f64; 6]>, PathLayer)> {
         let evaluated = self.layer_paths(layer, time)?;
         let d = node::member(Some(layer), "d");
         let stored = node::array(node::member(d, "paths")).unwrap_or(&[]);
@@ -262,7 +290,12 @@ impl<'d> Scope<'_, 'd> {
     /// scene has no background (`!runtime.scene.background`): a legacy scene
     /// layer whose environment has no background color, or a mesh
     /// definition layer with an asset and a falsy `background` parameter.
-    pub fn backgroundless_scene(&mut self, layer: &'d Node, time: f64, host: &dyn LayerHost) -> JsResult<bool> {
+    pub fn backgroundless_scene(
+        &mut self,
+        layer: &'d Node,
+        time: f64,
+        host: &dyn LayerHost,
+    ) -> JsResult<bool> {
         let d = node::member(Some(layer), "d");
         let definition = node::member(d, "definition");
         if node::is_str(definition, "powermove.3d.scene") {
@@ -278,7 +311,9 @@ impl<'d> Scope<'_, 'd> {
         };
         let params = node::member(d, "params");
         let background = match node::member(params, "background") {
-            Some(prop) if node::truthy(Some(prop)) => self.channel_p(layer, Some(prop), time, "x.background")?,
+            Some(prop) if node::truthy(Some(prop)) => {
+                self.channel_p(layer, Some(prop), time, "x.background")?
+            }
             _ => JsValue::from("#0C0D12"),
         };
         let asset = node::member(node::member(d, "data"), &field);
@@ -354,7 +389,10 @@ impl<'d> Scope<'_, 'd> {
                 ay: r.anchor_y,
             }));
         }
-        if !matches!(ty, "solid" | "shader" | "extension" | "null" | "precomp" | "shape" | "image" | "video") {
+        if !matches!(
+            ty,
+            "solid" | "shader" | "extension" | "null" | "precomp" | "shape" | "image" | "video"
+        ) {
             return Ok(None);
         }
         if ty == "shape" && has_paths(layer)? {
@@ -400,8 +438,16 @@ impl<'d> Scope<'_, 'd> {
                 }));
             }
             "null" => {
-                let w = if w_raw.truthy() { w_raw.to_number() } else { 100.0 };
-                let h = if h_raw.truthy() { h_raw.to_number() } else { 100.0 };
+                let w = if w_raw.truthy() {
+                    w_raw.to_number()
+                } else {
+                    100.0
+                };
+                let h = if h_raw.truthy() {
+                    h_raw.to_number()
+                } else {
+                    100.0
+                };
                 (w, h, 0.0, 0.0)
             }
             "image" | "video" => {
@@ -522,7 +568,9 @@ impl<'d> Scope<'_, 'd> {
             .filter(|l| match options.local_view {
                 Some(ids) => {
                     Role3d::of(l) != Some(Role3d::Object)
-                        || ids.iter().any(|id| crate::js_sem::strict_eq(id, &node::get(l, b"id").to_js()))
+                        || ids
+                            .iter()
+                            .any(|id| crate::js_sem::strict_eq(id, &node::get(l, b"id").to_js()))
                 }
                 None => true,
             })
@@ -533,7 +581,8 @@ impl<'d> Scope<'_, 'd> {
                 continue;
             }
             if !options.include_locked
-                && (flag(layer, "lock") || self.group_ancestors(layer)?.iter().any(|g| flag(g, "lock")))
+                && (flag(layer, "lock")
+                    || self.group_ancestors(layer)?.iter().any(|g| flag(g, "lock")))
             {
                 continue;
             }
@@ -551,9 +600,11 @@ impl<'d> Scope<'_, 'd> {
                 continue;
             };
             if self.plane_contains(layer, time, x, y, &b.rect())? {
-                let scene = is_type(layer, "extension") && self.backgroundless_scene(layer, time, host)?;
+                let scene =
+                    is_type(layer, "extension") && self.backgroundless_scene(layer, time, host)?;
                 if scene {
-                    let Some(inverse) = inverse_plane(&self.plane_matrix(layer, time, false)?) else {
+                    let Some(inverse) = inverse_plane(&self.plane_matrix(layer, time, false)?)
+                    else {
                         continue;
                     };
                     let (px, py) = project_point(&inverse, x, y);

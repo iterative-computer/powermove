@@ -49,7 +49,11 @@ impl<R: FontResolver> CompatMeasure<R> {
     }
 
     fn glyph_box(&mut self, face: FaceId, glyph: u32, coords: &[(u32, f32)]) -> GlyphBox {
-        let key = (face, glyph, coords.iter().map(|(t, v)| (*t, v.to_bits())).collect());
+        let key = (
+            face,
+            glyph,
+            coords.iter().map(|(t, v)| (*t, v.to_bits())).collect(),
+        );
         if let Some(b) = self.boxes.get(&key) {
             return *b;
         }
@@ -103,9 +107,11 @@ impl OutlinePen for ControlBox {
 fn outline_box(data: &[u8], index: u32, glyph: u32, coords: &[(u32, f32)]) -> GlyphBox {
     let font = FontRef::from_index(data, index).ok()?;
     let upem = f32::from(font.head().ok()?.units_per_em());
-    let location: Location = font
-        .axes()
-        .location(coords.iter().map(|(t, v)| (Tag::from_be_bytes(t.to_be_bytes()), *v)));
+    let location: Location = font.axes().location(
+        coords
+            .iter()
+            .map(|(t, v)| (Tag::from_be_bytes(t.to_be_bytes()), *v)),
+    );
     let outline = font.outline_glyphs().get(GlyphId::new(glyph))?;
     let mut pen = ControlBox {
         b: [0.0; 4],
@@ -113,7 +119,8 @@ fn outline_box(data: &[u8], index: u32, glyph: u32, coords: &[(u32, f32)]) -> Gl
     };
     outline
         .draw(
-            DrawSettings::unhinted(Size::unscaled(), &location).with_path_style(PathStyle::HarfBuzz),
+            DrawSettings::unhinted(Size::unscaled(), &location)
+                .with_path_style(PathStyle::HarfBuzz),
             &mut pen,
         )
         .ok()?;
@@ -133,7 +140,12 @@ struct RectF {
 impl RectF {
     /// `gfx::SkRectToRectF`.
     fn from_sk(l: f32, t: f32, r: f32, b: f32) -> RectF {
-        RectF { x: l, y: t, w: (r - l).max(0.0), h: (b - t).max(0.0) }
+        RectF {
+            x: l,
+            y: t,
+            w: (r - l).max(0.0),
+            h: (b - t).max(0.0),
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -166,7 +178,12 @@ impl RectF {
         let t = self.y.min(o.y);
         let r = self.right().max(o.right());
         let b = self.bottom().max(o.bottom());
-        *self = RectF { x: l, y: t, w: (r - l).max(0.0), h: (b - t).max(0.0) };
+        *self = RectF {
+            x: l,
+            y: t,
+            w: (r - l).max(0.0),
+            h: (b - t).max(0.0),
+        };
     }
 }
 
@@ -199,7 +216,10 @@ impl<R: FontResolver> CompatMeasure<R> {
                         let [l, t, r, bt] = skia_glyph_rect(b, scale);
                         let mut rect = RectF::from_sk(l, t, r, bt);
                         if !rect.is_empty() {
-                            rect.offset(origin + g.x_offset as f32 / 65536.0, -(g.y_offset as f32 / 65536.0));
+                            rect.offset(
+                                origin + g.x_offset as f32 / 65536.0,
+                                -(g.y_offset as f32 / 65536.0),
+                            );
                             run_ink.union(&rect);
                         }
                     }
@@ -267,7 +287,12 @@ impl<R: FontResolver> TextMeasure for CompatMeasure<R> {
             .into_iter()
             .map(|(text, measured)| {
                 let r = self.ink(&measured);
-                let ink = [f64::from(r.x), f64::from(r.y), f64::from(r.right()), f64::from(r.bottom())];
+                let ink = [
+                    f64::from(r.x),
+                    f64::from(r.y),
+                    f64::from(r.right()),
+                    f64::from(r.bottom()),
+                ];
                 MeasuredLine {
                     text,
                     width: f64::from(measured.width),

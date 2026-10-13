@@ -23,10 +23,10 @@ use pm_model::json::{Map, Value, parse};
 use pm_model::{Document, JsString, Node};
 use pm_text::compat::{GlyphLayout, Unit};
 
-use support::pm_expr_engine::PmExprEngine;
 use pm_eval::bounds::{Bounds, HOST_ONLY, LayerHost};
 use pm_eval::text_measure::CompatMeasure;
 use pm_text::registry::CoreTextRegistry;
+use support::pm_expr_engine::PmExprEngine;
 
 fn corpus_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("PM_ENGINE_CORPUS") {
@@ -151,7 +151,9 @@ fn plain(v: &Value) -> Value {
         })),
         Value::Number(n) if *n == 0.0 => Value::Number(0.0),
         Value::Array(items) => Value::Array(items.iter().map(plain).collect()),
-        Value::Object(map) => Value::Object(map.iter().map(|(k, v)| (k.clone(), plain(v))).collect()),
+        Value::Object(map) => {
+            Value::Object(map.iter().map(|(k, v)| (k.clone(), plain(v))).collect())
+        }
         other => other.clone(),
     }
 }
@@ -177,9 +179,49 @@ fn same(ours: &Value, want: &Value, abs: f64, rel: f64, err: &mut f64) -> bool {
         }
         (Value::Object(a), Value::Object(b)) => {
             a.len() == b.len()
-                && a.iter().all(|(k, x)| b.get_key(k).is_some_and(|y| same(x, y, abs, rel, err)))
+                && a.iter()
+                    .all(|(k, x)| b.get_key(k).is_some_and(|y| same(x, y, abs, rel, err)))
         }
         _ => false,
+    }
+}
+
+/// Where two values first differ (a JSON path with both sides).
+fn first_difference(ours: &Value, want: &Value, tol: (f64, f64), path: String) -> Option<String> {
+    let mut err = 0.0;
+    if same(ours, want, tol.0, tol.1, &mut err) {
+        return None;
+    }
+    match (ours, want) {
+        (Value::Object(a), Value::Object(b)) => {
+            for (k, x) in a.iter() {
+                let p = format!("{path}.{}", k.to_string_lossy());
+                match b.get_key(k) {
+                    Some(y) => {
+                        if let Some(d) = first_difference(x, y, tol, p) {
+                            return Some(d);
+                        }
+                    }
+                    None => return Some(format!("{p} (only ours)")),
+                }
+            }
+            for (k, _) in b.iter() {
+                if a.get_key(k).is_none() {
+                    return Some(format!("{path}.{} (only want)", k.to_string_lossy()));
+                }
+            }
+            None
+        }
+        (Value::Array(a), Value::Array(b)) if a.len() == b.len() => a
+            .iter()
+            .zip(b)
+            .enumerate()
+            .find_map(|(i, (x, y))| first_difference(x, y, tol, format!("{path}[{i}]"))),
+        _ => Some(format!(
+            "{path} ({} vs {})",
+            pm_model::json::to_canonical_string(ours),
+            pm_model::json::to_canonical_string(want)
+        )),
     }
 }
 
@@ -227,7 +269,16 @@ const VARIABLE_INK: (f64, f64) = (2e-4, 0.0);
 
 fn bounds_value(b: &Bounds) -> Value {
     let mut m = Map::new();
-    for (k, v) in [("x0", b.x0), ("y0", b.y0), ("x1", b.x1), ("y1", b.y1), ("w", b.w), ("h", b.h), ("ax", b.ax), ("ay", b.ay)] {
+    for (k, v) in [
+        ("x0", b.x0),
+        ("y0", b.y0),
+        ("x1", b.x1),
+        ("y1", b.y1),
+        ("w", b.w),
+        ("h", b.h),
+        ("ax", b.ax),
+        ("ay", b.ay),
+    ] {
         m.insert(k, Value::Number(v));
     }
     Value::Object(m)
@@ -235,7 +286,14 @@ fn bounds_value(b: &Bounds) -> Value {
 
 fn selection_value(s: &pm_eval::text_geom::Selection) -> Value {
     let mut m = Map::new();
-    for (k, v) in [("x0", s.x0), ("y0", s.y0), ("x1", s.x1), ("y1", s.y1), ("w", s.w), ("h", s.h)] {
+    for (k, v) in [
+        ("x0", s.x0),
+        ("y0", s.y0),
+        ("x1", s.x1),
+        ("y1", s.y1),
+        ("w", s.w),
+        ("h", s.h),
+    ] {
         m.insert(k, Value::Number(v));
     }
     Value::Object(m)
@@ -249,8 +307,14 @@ fn unit_value(u: &Unit, kind: &str) -> Value {
     m.insert("w", Value::Number(u.w));
     m.insert("line", Value::Number(u.line as f64));
     if kind == "characters" {
-        m.insert("lineUnit", u.line_unit.map_or(Value::Null, |x| Value::Number(x as f64)));
-        m.insert("word", u.word.map_or(Value::Null, |x| Value::Number(x as f64)));
+        m.insert(
+            "lineUnit",
+            u.line_unit.map_or(Value::Null, |x| Value::Number(x as f64)),
+        );
+        m.insert(
+            "word",
+            u.word.map_or(Value::Null, |x| Value::Number(x as f64)),
+        );
     }
     m.insert("sourceStart", Value::Number(u.source_start as f64));
     m.insert("index", Value::Number(u.index as f64));
@@ -259,9 +323,23 @@ fn unit_value(u: &Unit, kind: &str) -> Value {
 
 fn layout_value(l: &GlyphLayout) -> Value {
     let mut m = Map::new();
-    m.insert("characters", Value::Array(l.characters.iter().map(|u| unit_value(u, "characters")).collect()));
-    m.insert("words", Value::Array(l.words.iter().map(|u| unit_value(u, "words")).collect()));
-    m.insert("lines", Value::Array(l.lines.iter().map(|u| unit_value(u, "lines")).collect()));
+    m.insert(
+        "characters",
+        Value::Array(
+            l.characters
+                .iter()
+                .map(|u| unit_value(u, "characters"))
+                .collect(),
+        ),
+    );
+    m.insert(
+        "words",
+        Value::Array(l.words.iter().map(|u| unit_value(u, "words")).collect()),
+    );
+    m.insert(
+        "lines",
+        Value::Array(l.lines.iter().map(|u| unit_value(u, "lines")).collect()),
+    );
     Value::Object(m)
 }
 
@@ -284,8 +362,9 @@ impl Ctx<'_> {
                 self.stats.error(category, err);
                 let project = self.project;
                 self.stats.record(category, ok, || {
+                    let at = first_difference(&v, want, tol, String::new()).unwrap_or_default();
                     format!(
-                        "{project} {what}: ours {} want {}{}",
+                        "{project} {what}: first difference at {at}: ours {} want {}{}",
                         pm_model::json::to_canonical_string(&v),
                         pm_model::json::to_canonical_string(want),
                         if threw { " (legacy threw)" } else { "" }
@@ -296,7 +375,10 @@ impl Ctx<'_> {
                 let ok = threw || matches!(want, Value::Null);
                 let project = self.project;
                 self.stats.record(category, ok, || {
-                    format!("{project} {what}: ours threw {e}, want {}", pm_model::json::to_canonical_string(want))
+                    format!(
+                        "{project} {what}: ours threw {e}, want {}",
+                        pm_model::json::to_canonical_string(want)
+                    )
                 });
             }
         }
@@ -326,19 +408,35 @@ fn compare_comp(
     let mut variable_text: Vec<usize> = Vec::new();
     for l in dumped {
         let index = member(l, "index").and_then(dumped_number).unwrap() as usize;
-        let Some(layer) = layers.get(index) else { continue };
-        if member(l, "type").and_then(|t| t.as_js_string()).and_then(|s| s.as_str()) != Some("text") {
+        let Some(layer) = layers.get(index) else {
+            continue;
+        };
+        if member(l, "type")
+            .and_then(|t| t.as_js_string())
+            .and_then(|s| s.as_str())
+            != Some("text")
+        {
             continue;
         }
         let mut scope = Scope::new(ev, comp, project);
         if let Ok(layout) = scope.text_layout(layer, time, &mut *cx.measure) {
             let mut err = 0.0;
-            if !member(l, "textLayout").is_some_and(|want| same(&plain(&layout_value(&layout)), want, BOUNDS.0, BOUNDS.1, &mut err)) {
+            if !member(l, "textLayout").is_some_and(|want| {
+                same(
+                    &plain(&layout_value(&layout)),
+                    want,
+                    BOUNDS.0,
+                    BOUNDS.1,
+                    &mut err,
+                )
+            }) {
                 text_differs.push(index);
             }
         }
         if let Ok(d) = scope.resolved_text_content(layer, time)
-            && cx.measure.uses_variations(&pm_eval::text_geom::text_content(&d))
+            && cx
+                .measure
+                .uses_variations(&pm_eval::text_geom::text_content(&d))
         {
             variable_text.push(index);
         }
@@ -346,7 +444,9 @@ fn compare_comp(
     let members_of = |group: &Node, ev: &mut Evaluator, list: &[usize]| -> bool {
         let gid = group.get("id").map(|n| n.to_value());
         list.iter().any(|&i| {
-            let Some(child) = layers.get(i) else { return false };
+            let Some(child) = layers.get(i) else {
+                return false;
+            };
             ev.group_ancestors(comp, child)
                 .unwrap_or_default()
                 .iter()
@@ -356,17 +456,34 @@ fn compare_comp(
     for l in dumped {
         let index = member(l, "index").and_then(dumped_number).unwrap() as usize;
         let Some(layer) = layers.get(index) else {
-            cx.stats.record("layer-index", false, || format!("{} {path} missing layer {index}", cx.project));
+            cx.stats.record("layer-index", false, || {
+                format!("{} {path} missing layer {index}", cx.project)
+            });
             continue;
         };
-        let id = member(l, "id").map(|v| pm_model::json::to_canonical_string(v)).unwrap_or_default();
-        let ty = member(l, "type").and_then(|t| t.as_js_string()).map(|s| s.to_string_lossy()).unwrap_or_default();
+        let id = member(l, "id")
+            .map(pm_model::json::to_canonical_string)
+            .unwrap_or_default();
+        let ty = member(l, "type")
+            .and_then(|t| t.as_js_string())
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default();
         let at = |what: &str| format!("{path} {id} t={time} {what}");
         let mut scope = Scope::new(ev, comp, project);
 
         // Active state.
-        let active = scope.active(layer, time).map(Value::Bool).map_err(|e| e.to_string());
-        cx.check("active", &at("active"), active, member(l, "active"), layer_error(l, "active"), NUM);
+        let active = scope
+            .active(layer, time)
+            .map(Value::Bool)
+            .map_err(|e| e.to_string());
+        cx.check(
+            "active",
+            &at("active"),
+            active,
+            member(l, "active"),
+            layer_error(l, "active"),
+            NUM,
+        );
 
         // Channels.
         if let Some(Value::Object(channels)) = member(l, "channels") {
@@ -376,10 +493,15 @@ fn compare_comp(
                 let got = if in_p {
                     scope.ev.ev(comp, Some(layer), key, time)
                 } else {
-                    let prop = props.iter().find(|p| &p.key == key).and_then(|p| p.prop.node());
+                    let prop = props
+                        .iter()
+                        .find(|p| &p.key == key)
+                        .and_then(|p| p.prop.node());
                     scope.ev.ev_p(comp, Some(layer), prop, time, key)
                 };
-                let threw = member(l, "errors").and_then(|e| member(e, &key.to_string_lossy())).is_some()
+                let threw = member(l, "errors")
+                    .and_then(|e| member(e, &key.to_string_lossy()))
+                    .is_some()
                     && !matches!(want, Value::Number(_) | Value::String(_) | Value::Bool(_));
                 cx.check(
                     "channels",
@@ -397,23 +519,76 @@ fn compare_comp(
             let got = scope
                 .ev
                 .resolve_content(comp, layer, time)
-                .map(|c| Value::Object(c.iter().map(|(k, v)| (k.clone(), js_to_value(v))).collect::<Map>()))
+                .map(|c| {
+                    Value::Object(
+                        c.iter()
+                            .map(|(k, v)| (k.clone(), js_to_value(v)))
+                            .collect::<Map>(),
+                    )
+                })
                 .map_err(|e| e.to_string());
-            cx.check("content", &at("content"), got, member(l, "content"), layer_error(l, "content"), NUM);
+            cx.check(
+                "content",
+                &at("content"),
+                got,
+                member(l, "content"),
+                layer_error(l, "content"),
+                NUM,
+            );
         }
 
         if ty != "audio" {
-            let got = scope.local_matrix(layer, time).map(|m| numbers(&m)).map_err(|e| e.to_string());
-            cx.check("localMatrix", &at("localMatrix"), got, member(l, "localMatrix"), layer_error(l, "localMatrix"), NUM);
-            let got = scope.world_matrix(layer, time).map(|m| numbers(&m)).map_err(|e| e.to_string());
-            cx.check("worldMatrix", &at("worldMatrix"), got, member(l, "worldMatrix"), layer_error(l, "worldMatrix"), NUM);
-            let got = scope.world_opacity(layer, time).map(Value::Number).map_err(|e| e.to_string());
-            cx.check("worldOpacity", &at("worldOpacity"), got, member(l, "worldOpacity"), layer_error(l, "worldOpacity"), NUM);
+            let got = scope
+                .local_matrix(layer, time)
+                .map(|m| numbers(&m))
+                .map_err(|e| e.to_string());
+            cx.check(
+                "localMatrix",
+                &at("localMatrix"),
+                got,
+                member(l, "localMatrix"),
+                layer_error(l, "localMatrix"),
+                NUM,
+            );
+            let got = scope
+                .world_matrix(layer, time)
+                .map(|m| numbers(&m))
+                .map_err(|e| e.to_string());
+            cx.check(
+                "worldMatrix",
+                &at("worldMatrix"),
+                got,
+                member(l, "worldMatrix"),
+                layer_error(l, "worldMatrix"),
+                NUM,
+            );
+            let got = scope
+                .world_opacity(layer, time)
+                .map(Value::Number)
+                .map_err(|e| e.to_string());
+            cx.check(
+                "worldOpacity",
+                &at("worldOpacity"),
+                got,
+                member(l, "worldOpacity"),
+                layer_error(l, "worldOpacity"),
+                NUM,
+            );
         }
         let three_d = member(l, "layerFields").and_then(|f| member(f, "threeD"));
         if matches!(three_d, Some(Value::Bool(true))) {
-            let got = scope.plane_matrix(layer, time, false).map(|m| numbers(&m)).map_err(|e| e.to_string());
-            cx.check("planeMatrix", &at("planeMatrix"), got, member(l, "planeMatrix"), layer_error(l, "planeMatrix"), NUM);
+            let got = scope
+                .plane_matrix(layer, time, false)
+                .map(|m| numbers(&m))
+                .map_err(|e| e.to_string());
+            cx.check(
+                "planeMatrix",
+                &at("planeMatrix"),
+                got,
+                member(l, "planeMatrix"),
+                layer_error(l, "planeMatrix"),
+                NUM,
+            );
         }
         if let Some(want) = member(l, "textAnimation") {
             compare_text_animation(cx, &mut scope, layer, time, l, want, &at("textAnimation"));
@@ -426,11 +601,21 @@ fn compare_comp(
         let variable = variable_text.contains(&index)
             || (ty == "group" && members_of(layer, scope.ev, &variable_text));
         if ty == "text" {
-            let got = scope.text_layout(layer, time, &mut *cx.measure).map(|l| layout_value(&l)).map_err(|e| e.to_string());
+            let got = scope
+                .text_layout(layer, time, &mut *cx.measure)
+                .map(|l| layout_value(&l))
+                .map_err(|e| e.to_string());
             if layout_differs {
                 cx.stats.record("textLayout (pm-text)", true, String::new);
             } else {
-                cx.check("textLayout", &at("textLayout"), got, member(l, "textLayout"), layer_error(l, "textLayout"), BOUNDS);
+                cx.check(
+                    "textLayout",
+                    &at("textLayout"),
+                    got,
+                    member(l, "textLayout"),
+                    layer_error(l, "textLayout"),
+                    BOUNDS,
+                );
             }
         }
         if ty != "audio" {
@@ -446,22 +631,41 @@ fn compare_comp(
             } else {
                 "bounds"
             };
-            let tol = if variable && !layout_differs { VARIABLE_INK } else { BOUNDS };
+            let tol = if variable && !layout_differs {
+                VARIABLE_INK
+            } else {
+                BOUNDS
+            };
             match got {
-                Err(e) if e.kind == HOST_ONLY => cx.stats.record("bounds (host)", true, String::new),
+                Err(e) if e.kind == HOST_ONLY => {
+                    cx.stats.record("bounds (host)", true, String::new)
+                }
                 got if layout_differs => {
                     let _ = got;
                     cx.stats.record(category, true, String::new);
                 }
                 got => {
-                    let got = got.map(|b| b.map_or(Value::Null, |b| bounds_value(&b))).map_err(|e| e.to_string());
-                    cx.check(category, &at(&format!("{ty} bounds")), got, member(l, "bounds"), layer_error(l, "bounds"), tol);
+                    let got = got
+                        .map(|b| b.map_or(Value::Null, |b| bounds_value(&b)))
+                        .map_err(|e| e.to_string());
+                    cx.check(
+                        category,
+                        &at(&format!("{ty} bounds")),
+                        got,
+                        member(l, "bounds"),
+                        layer_error(l, "bounds"),
+                        tol,
+                    );
                 }
             }
         }
-        if ty == "text" && !layout_differs {
-            if let Some(want) = member(l, "textRaster") {
-                let got = scope.text_geometry(layer, time, &mut *cx.measure).map(|g| {
+        if ty == "text"
+            && !layout_differs
+            && let Some(want) = member(l, "textRaster")
+        {
+            let got = scope
+                .text_geometry(layer, time, &mut *cx.measure)
+                .map(|g| {
                     let mut m = Map::new();
                     m.insert("w", Value::Number(g.w));
                     m.insert("h", Value::Number(g.h));
@@ -470,47 +674,114 @@ fn compare_comp(
                     m.insert("density", Value::Number(g.density(1.0)));
                     m.insert("selection", selection_value(&g.selection));
                     Value::Object(m)
-                }).map_err(|e| e.to_string());
-                let (category, tol) = if variable { ("textRaster (variable font)", VARIABLE_INK) } else { ("textRaster", BOUNDS) };
-                cx.check(category, &at("textRaster"), got, Some(want), layer_error(l, "textRaster"), tol);
-            }
+                })
+                .map_err(|e| e.to_string());
+            let (category, tol) = if variable {
+                ("textRaster (variable font)", VARIABLE_INK)
+            } else {
+                ("textRaster", BOUNDS)
+            };
+            cx.check(
+                category,
+                &at("textRaster"),
+                got,
+                Some(want),
+                layer_error(l, "textRaster"),
+                tol,
+            );
         }
         if let Some(want) = member(l, "paths") {
-            let got = scope.path_geometry(layer, time).map(|(paths, matrices, _)| {
-                Value::Array(paths.iter().zip(&matrices).map(|(p, m)| {
-                    let mut o = Map::new();
-                    o.insert("id", js_to_value(&p.id));
-                    let mut values: Map = p.values.iter().map(|(k, v)| (k.clone(), js_to_value(v))).collect();
-                    values.insert("vertices", Value::Array(p.vertices.iter().map(|v| Value::Object(v.iter().map(|(k, x)| (k.clone(), Value::Number(*x))).collect())).collect()));
-                    o.insert("values", Value::Object(values));
-                    o.insert("matrix", numbers(m));
-                    Value::Object(o)
-                }).collect())
-            }).map_err(|e| e.to_string());
-            cx.check("paths", &at("paths"), got, Some(want), layer_error(l, "paths"), NUM);
+            let got = scope
+                .path_geometry(layer, time)
+                .map(|(paths, matrices, _)| {
+                    Value::Array(
+                        paths
+                            .iter()
+                            .zip(&matrices)
+                            .map(|(p, m)| {
+                                let mut o = Map::new();
+                                o.insert("id", js_to_value(&p.id));
+                                let mut values: Map = p
+                                    .values
+                                    .iter()
+                                    .map(|(k, v)| (k.clone(), js_to_value(v)))
+                                    .collect();
+                                values.insert(
+                                    "vertices",
+                                    Value::Array(
+                                        p.vertices
+                                            .iter()
+                                            .map(|v| {
+                                                Value::Object(
+                                                    v.iter()
+                                                        .map(|(k, x)| {
+                                                            (k.clone(), Value::Number(*x))
+                                                        })
+                                                        .collect(),
+                                                )
+                                            })
+                                            .collect(),
+                                    ),
+                                );
+                                o.insert("values", Value::Object(values));
+                                o.insert("matrix", numbers(m));
+                                Value::Object(o)
+                            })
+                            .collect(),
+                    )
+                })
+                .map_err(|e| e.to_string());
+            cx.check(
+                "paths",
+                &at("paths"),
+                got,
+                Some(want),
+                layer_error(l, "paths"),
+                NUM,
+            );
         }
         if matches!(ty.as_str(), "video" | "precomp" | "audio") {
             let got = scope
                 .source_time_with(layer, time, Retiming::Legacy, None)
                 .map(Value::Number)
                 .map_err(|e| e.to_string());
-            cx.check("sourceTime", &at("sourceTime"), got, member(l, "sourceTime"), layer_error(l, "sourceTime"), NUM);
+            cx.check(
+                "sourceTime",
+                &at("sourceTime"),
+                got,
+                member(l, "sourceTime"),
+                layer_error(l, "sourceTime"),
+                NUM,
+            );
         }
     }
 
     // Nested compositions at their source times.
     if let Some(Value::Array(nested)) = member(state, "precomps") {
         for entry in nested {
-            let comp_id = member(entry, "comp").and_then(|c| c.as_js_string()).map(|s| s.to_string_lossy()).unwrap();
+            let comp_id = member(entry, "comp")
+                .and_then(|c| c.as_js_string())
+                .map(|s| s.to_string_lossy())
+                .unwrap();
             let Ok(sub) = Comp::resolve(doc, &comp_id) else {
-                cx.stats.record("precomp", false, || format!("{} {path}: no composition {comp_id}", cx.project));
+                cx.stats.record("precomp", false, || {
+                    format!("{} {path}: no composition {comp_id}", cx.project)
+                });
                 continue;
             };
             let sub_state = member(entry, "state").unwrap();
             let want_time = dumped_number(member(entry, "time").unwrap()).unwrap();
             let got_time = dumped_number(member(sub_state, "time").unwrap()).unwrap();
             assert_eq!(want_time.to_bits(), got_time.to_bits());
-            compare_comp(cx, ev, doc, &sub, project, sub_state, &format!("{path}>{comp_id}"));
+            compare_comp(
+                cx,
+                ev,
+                doc,
+                &sub,
+                project,
+                sub_state,
+                &format!("{path}>{comp_id}"),
+            );
         }
     }
 }
@@ -518,7 +789,10 @@ fn compare_comp(
 fn unit_of(v: &Value) -> Unit {
     let n = |k: &str| member(v, k).and_then(dumped_number);
     Unit {
-        text: member(v, "text").and_then(|t| t.as_js_string()).map(|s| s.to_string_lossy()).unwrap_or_default(),
+        text: member(v, "text")
+            .and_then(|t| t.as_js_string())
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default(),
         x: n("x").unwrap(),
         y: n("y").unwrap(),
         w: n("w").unwrap(),
@@ -535,17 +809,36 @@ fn layout_of(v: &Value) -> GlyphLayout {
         Some(Value::Array(items)) => items.iter().map(unit_of).collect(),
         _ => Vec::new(),
     };
-    GlyphLayout { characters: list("characters"), words: list("words"), lines: list("lines") }
+    GlyphLayout {
+        characters: list("characters"),
+        words: list("words"),
+        lines: list("lines"),
+    }
 }
 
 fn content_value(c: &pm_eval::evaluator::Content) -> Value {
-    Value::Object(c.iter().filter(|(_, v)| !matches!(v, JsValue::Undefined)).map(|(k, v)| (k.clone(), js_to_value(v))).collect::<Map>())
+    Value::Object(
+        c.iter()
+            .filter(|(_, v)| !matches!(v, JsValue::Undefined))
+            .map(|(k, v)| (k.clone(), js_to_value(v)))
+            .collect::<Map>(),
+    )
 }
 
 /// Animator weights, range styles, and posed glyphs, from the dumped layout
 /// (layout itself is pm-text's comparison).
-fn compare_text_animation<'d>(cx: &mut Ctx<'_>, scope: &mut Scope<'_, 'd>, layer: &'d Node, time: f64, l: &Value, want: &Value, what: &str) {
-    let Some(layout) = member(l, "textLayout") else { return };
+fn compare_text_animation<'d>(
+    cx: &mut Ctx<'_>,
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    time: f64,
+    l: &Value,
+    want: &Value,
+    what: &str,
+) {
+    let Some(layout) = member(l, "textLayout") else {
+        return;
+    };
     let layout = layout_of(layout);
     let threw = layer_error(l, "textAnimation");
     let result = scope.resolved_text_content(layer, time).and_then(|d| {
@@ -556,7 +849,14 @@ fn compare_text_animation<'d>(cx: &mut Ctx<'_>, scope: &mut Scope<'_, 'd>, layer
     let (state, glyphs) = match result {
         Ok(x) => x,
         Err(e) => {
-            cx.check("textAnimation", what, Err(e.to_string()), Some(want), threw, NUM);
+            cx.check(
+                "textAnimation",
+                what,
+                Err(e.to_string()),
+                Some(want),
+                threw,
+                NUM,
+            );
             return;
         }
     };
@@ -575,10 +875,33 @@ fn compare_text_animation<'d>(cx: &mut Ctx<'_>, scope: &mut Scope<'_, 'd>, layer
             })
             .collect(),
     );
-    cx.check("textAnimators", &format!("{what} animators"), Ok(animators), member(want, "animators"), threw, NUM);
-    let styles = Value::Array(state.styles.iter().map(|s| content_value(&s.item)).collect());
-    cx.check("textStyles", &format!("{what} styles"), Ok(styles), member(want, "styles"), threw, NUM);
-    let mut keys: Vec<JsString> = ["font", "weight", "size", "color", "italic", "tracking"].iter().map(|k| JsString::from(*k)).collect();
+    cx.check(
+        "textAnimators",
+        &format!("{what} animators"),
+        Ok(animators),
+        member(want, "animators"),
+        threw,
+        NUM,
+    );
+    let styles = Value::Array(
+        state
+            .styles
+            .iter()
+            .map(|s| content_value(&s.item))
+            .collect(),
+    );
+    cx.check(
+        "textStyles",
+        &format!("{what} styles"),
+        Ok(styles),
+        member(want, "styles"),
+        threw,
+        NUM,
+    );
+    let mut keys: Vec<JsString> = ["font", "weight", "size", "color", "italic", "tracking"]
+        .iter()
+        .map(|k| JsString::from(*k))
+        .collect();
     for s in &state.styles {
         for k in s.p.keys() {
             if !keys.contains(k) {
@@ -595,7 +918,10 @@ fn compare_text_animation<'d>(cx: &mut Ctx<'_>, scope: &mut Scope<'_, 'd>, layer
                 m.insert("index", Value::Number(u.index as f64));
                 m.insert("text", Value::String(JsString::from(u.text.as_str())));
                 m.insert("line", Value::Number(u.line as f64));
-                m.insert("word", u.word.map_or(Value::Null, |w| Value::Number(w as f64)));
+                m.insert(
+                    "word",
+                    u.word.map_or(Value::Null, |w| Value::Number(w as f64)),
+                );
                 m.insert("x", Value::Number(u.x));
                 m.insert("y", Value::Number(u.y));
                 m.insert("w", Value::Number(u.w));
@@ -614,7 +940,14 @@ fn compare_text_animation<'d>(cx: &mut Ctx<'_>, scope: &mut Scope<'_, 'd>, layer
             })
             .collect(),
     );
-    cx.check("textGlyphs", &format!("{what} glyphs"), Ok(glyphs), member(want, "glyphs"), threw, NUM);
+    cx.check(
+        "textGlyphs",
+        &format!("{what} glyphs"),
+        Ok(glyphs),
+        member(want, "glyphs"),
+        threw,
+        NUM,
+    );
 }
 
 fn node_has(layer: &Node, member: &str, key: &JsString) -> bool {
@@ -657,7 +990,10 @@ fn corpus_evaluation_matches_legacy() {
         for eval in evals {
             let dump = parse(&std::fs::read_to_string(&eval).unwrap()).unwrap();
             let state = member(&dump, "composition").unwrap();
-            let id = member(state, "id").and_then(|c| c.as_js_string()).map(|s| s.to_string_lossy()).unwrap();
+            let id = member(state, "id")
+                .and_then(|c| c.as_js_string())
+                .map(|s| s.to_string_lossy())
+                .unwrap();
             let project = Comp::resolve(&doc, &id).expect("open composition");
             let mut ev = Evaluator::new().with_expressions(Arc::new(PmExprEngine));
             let mut cx = Ctx {
@@ -666,6 +1002,26 @@ fn corpus_evaluation_matches_legacy() {
                 measure: &mut measure,
             };
             compare_comp(&mut cx, &mut ev, &doc, &project, &project, state, &id);
+            if let Some(want) = member(&dump, "scene3d").filter(|s| !matches!(s, Value::Null)) {
+                let time = dumped_number(member(state, "time").unwrap()).unwrap();
+                let mut scope = Scope::open(&mut ev, &project);
+                match scope.composition_scene(time) {
+                    Ok(s) if !s.recipe_parts.is_empty() => {
+                        cx.stats.record("scene3d (recipe parts)", true, String::new)
+                    }
+                    got => {
+                        let got = got.map(|s| s.scene).map_err(|e| e.to_string());
+                        cx.check(
+                            "scene3d",
+                            &format!("{id} t={time} scene3d"),
+                            got,
+                            Some(want),
+                            false,
+                            NUM,
+                        );
+                    }
+                }
+            }
             count += 1;
         }
     }

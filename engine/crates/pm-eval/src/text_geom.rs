@@ -126,10 +126,15 @@ fn value_to_serde(v: &pm_model::Value) -> serde_json::Value {
     match v {
         V::Null => serde_json::Value::Null,
         V::Bool(b) => serde_json::Value::Bool(*b),
-        V::Number(n) => serde_json::Number::from_f64(*n).map_or(serde_json::Value::Null, serde_json::Value::Number),
+        V::Number(n) => serde_json::Number::from_f64(*n)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
         V::String(s) => serde_json::Value::String(s.to_string_lossy()),
         V::Array(a) => serde_json::Value::Array(a.iter().map(value_to_serde).collect()),
-        V::Object(m) => serde_json::Value::Object(m.iter().map(|(k, v)| (k.to_string_lossy(), value_to_serde(v))).collect()),
+        V::Object(m) => serde_json::Value::Object(
+            m.iter()
+                .map(|(k, v)| (k.to_string_lossy(), value_to_serde(v)))
+                .collect(),
+        ),
     }
 }
 
@@ -152,7 +157,12 @@ pub fn text_geometry(d: &Content, measure: &mut dyn TextMeasure) -> TextGeometry
     let center = is_align(d, "center");
     let right = is_align(d, "right");
     let leading = get(d, "leading");
-    let lh = size * if leading.truthy() { leading.to_number() } else { 1.15 };
+    let lh = size
+        * if leading.truthy() {
+            leading.to_number()
+        } else {
+            1.15
+        };
     let measured = measure.measure_lines(&text_content(d));
     let mut w_max = 1.0;
     for m in &measured {
@@ -161,8 +171,16 @@ pub fn text_geometry(d: &Content, measure: &mut dyn TextMeasure) -> TextGeometry
     let paragraph = get(d, "paragraph").truthy();
     let bw = get(d, "boxWidth").to_number();
     let bh = get(d, "boxHeight").to_number();
-    let paragraph_width = if paragraph && bw.is_finite() { js_max(1.0, bw) } else { 0.0 };
-    let paragraph_height = if paragraph && bh.is_finite() { js_max(1.0, bh) } else { 0.0 };
+    let paragraph_width = if paragraph && bw.is_finite() {
+        js_max(1.0, bw)
+    } else {
+        0.0
+    };
+    let paragraph_height = if paragraph && bh.is_finite() {
+        js_max(1.0, bh)
+    } else {
+        0.0
+    };
     let w = js_max(w_max, paragraph_width).ceil() + pad * 2.0;
     let hh = js_max(lh * measured.len() as f64, paragraph_height).ceil() + pad * 2.0;
     let x = if center {
@@ -174,8 +192,12 @@ pub fn text_geometry(d: &Content, measure: &mut dyn TextMeasure) -> TextGeometry
     };
     let anchor_x = x;
     let anchor_y = pad;
-    let (mut min_x, mut min_y, mut max_x, mut max_y) =
-        (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    );
     for (i, m) in measured.iter().enumerate() {
         let baseline = pad + lh * i as f64 + size * 0.82;
         // Blink's TextMetrics: offsets from the alignment point.
@@ -201,8 +223,16 @@ pub fn text_geometry(d: &Content, measure: &mut dyn TextMeasure) -> TextGeometry
         let horizontal = left_metric.is_finite()
             && right_metric.is_finite()
             && (left_metric != 0.0 || right_metric != 0.0);
-        let left = if horizontal { x - left_metric } else { fallback_left };
-        let right = if horizontal { x + right_metric } else { fallback_right };
+        let left = if horizontal {
+            x - left_metric
+        } else {
+            fallback_left
+        };
+        let right = if horizontal {
+            x + right_metric
+        } else {
+            fallback_right
+        };
         let top = if ascent_metric.is_finite() && ascent_metric > 0.0 {
             baseline - ascent_metric
         } else {
@@ -266,7 +296,12 @@ impl<'d> Scope<'_, 'd> {
     /// `PM.raster(L, 1, T)`'s placement for a text layer: the raster box,
     /// anchor, and selection, with range fonts, animator poses, and the font
     /// anchor applied.
-    pub fn text_raster(&mut self, layer: &'d Node, time: f64, measure: &mut dyn TextMeasure) -> JsResult<TextRaster> {
+    pub fn text_raster(
+        &mut self,
+        layer: &'d Node,
+        time: f64,
+        measure: &mut dyn TextMeasure,
+    ) -> JsResult<TextRaster> {
         self.text_raster_with(layer, time, measure, true, true)
     }
 
@@ -280,7 +315,11 @@ impl<'d> Scope<'_, 'd> {
     ) -> JsResult<TextRaster> {
         let d = self.resolved_text_content(layer, time)?;
         let ld = node::member(Some(layer), "d");
-        let count = |key: &str| node::member(ld, key).map(|n| node::get(n, b"length").truthy()).unwrap_or(false);
+        let count = |key: &str| {
+            node::member(ld, key)
+                .map(|n| node::get(n, b"length").truthy())
+                .unwrap_or(false)
+        };
         let has_animators = animators && count("animators");
         let has_styles = count("styles");
         let mut raster = if has_animators || has_styles {
@@ -304,13 +343,19 @@ impl<'d> Scope<'_, 'd> {
         if let Some(reference) = reference {
             // Character animator movement must not be canceled by typography anchoring.
             let type_bounds = if has_animators {
-                self.text_raster_with(layer, time, measure, false, false)?.selection
+                self.text_raster_with(layer, time, measure, false, false)?
+                    .selection
             } else {
                 raster.selection
             };
             let ax = self.channel(layer, "anchor.x", time)?;
             let ay = self.channel(layer, "anchor.y", time)?;
-            let offset = font_anchor_offset(Some(&reference), Some(&BoundsValues::from(type_bounds.rect())), &ax, &ay);
+            let offset = font_anchor_offset(
+                Some(&reference),
+                Some(&BoundsValues::from(type_bounds.rect())),
+                &ax,
+                &ay,
+            );
             raster.anchor_x -= offset.x;
             raster.anchor_y -= offset.y;
             raster.selection = raster.selection.shifted(offset.x, offset.y);
@@ -370,7 +415,11 @@ impl<'d> Scope<'_, 'd> {
         for g in glyphs.iter().filter(|g| g.opacity > 0.0) {
             let w = measure.plain_width(&text_content(&g.style), &g.unit.text);
             let style_size = get(&g.style, "size").to_number();
-            let h = if style_size == 0.0 || style_size.is_nan() { d_size } else { style_size };
+            let h = if style_size == 0.0 || style_size.is_nan() {
+                d_size
+            } else {
+                style_size
+            };
             let baseline = g.unit.y + d_size * 0.82;
             let m = g.matrix;
             let pad = 4.0 + g.blur * 2.0;
@@ -386,7 +435,14 @@ impl<'d> Scope<'_, 'd> {
         let w = js_max(1.0, x1 - x0);
         let h = js_max(1.0, y1 - y0);
         let selection = if !state.styles.is_empty() {
-            Selection { x0, y0, x1, y1, w, h }
+            Selection {
+                x0,
+                y0,
+                x1,
+                y1,
+                w,
+                h,
+            }
         } else {
             text_geometry(d, measure).selection
         };
@@ -401,13 +457,23 @@ impl<'d> Scope<'_, 'd> {
 
     /// `PM.textRasterGeometry(layer, scale, time)` without the canvas sizes:
     /// the plain text geometry (no animators, styles, or font anchor).
-    pub fn text_geometry(&mut self, layer: &'d Node, time: f64, measure: &mut dyn TextMeasure) -> JsResult<TextGeometry> {
+    pub fn text_geometry(
+        &mut self,
+        layer: &'d Node,
+        time: f64,
+        measure: &mut dyn TextMeasure,
+    ) -> JsResult<TextGeometry> {
         let d = self.resolved_text_content(layer, time)?;
         Ok(text_geometry(&d, measure))
     }
 
     /// `PM.textLayout(layer, time)`.
-    pub fn text_layout(&mut self, layer: &'d Node, time: f64, measure: &mut dyn TextMeasure) -> JsResult<GlyphLayout> {
+    pub fn text_layout(
+        &mut self,
+        layer: &'d Node,
+        time: f64,
+        measure: &mut dyn TextMeasure,
+    ) -> JsResult<GlyphLayout> {
         let d = self.resolved_text_content(layer, time)?;
         Ok(measure.glyph_layout(&text_content(&d)))
     }

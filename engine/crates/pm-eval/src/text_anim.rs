@@ -266,7 +266,11 @@ pub fn animator_weight(p: &Content, rank: f64, count: usize, shape: Shape) -> f6
         return 0.0;
     }
     if matches!(shape, Shape::Triangle | Shape::Round) {
-        let u = if span > 0.0 { (position - start) / span } else { 0.5 };
+        let u = if span > 0.0 {
+            (position - start) / span
+        } else {
+            0.5
+        };
         return if shape == Shape::Triangle {
             1.0 - (u * 2.0 - 1.0).abs()
         } else {
@@ -277,7 +281,10 @@ pub fn animator_weight(p: &Content, rank: f64, count: usize, shape: Shape) -> f6
     if feather == 0.0 || feather.is_nan() {
         return 1.0;
     }
-    let weight = clamp01(js_min((position - start) / feather, (end - position) / feather));
+    let weight = clamp01(js_min(
+        (position - start) / feather,
+        (end - position) / feather,
+    ));
     weight * weight * (3.0 - 2.0 * weight)
 }
 
@@ -289,7 +296,11 @@ const SPRING: crate::easing::SpringConfig = crate::easing::SpringConfig {
 };
 
 /// `easeProgress(PM, easing, progress)`: eased progress for a stagger unit.
-pub fn ease_progress(springs: &mut crate::easing::SpringTables, easing: Option<&Node>, progress: f64) -> f64 {
+pub fn ease_progress(
+    springs: &mut crate::easing::SpringTables,
+    easing: Option<&Node>,
+    progress: f64,
+) -> f64 {
     let t = clamp01(progress);
     if t <= 0.0 || t >= 1.0 {
         return t;
@@ -585,7 +596,12 @@ impl<'d> Scope<'_, 'd> {
             };
             let prefix = if k == 0 { "ta" } else { "ts" };
             for item in items {
-                if k == 0 && matches!(node::member(Some(item), "enabled").map(Node::kind), Some(pm_model::NodeKind::Bool(false))) {
+                if k == 0
+                    && matches!(
+                        node::member(Some(item), "enabled").map(Node::kind),
+                        Some(pm_model::NodeKind::Bool(false))
+                    )
+                {
                     continue;
                 }
                 let id = node::to_js_string(node::member(Some(item), "id")).to_string_lossy();
@@ -608,12 +624,23 @@ impl<'d> Scope<'_, 'd> {
     }
 
     /// `unitWeights(PM, layer, animator, values, count, time)`.
-    pub fn unit_weights(&mut self, layer: &'d Node, animator: &'d Node, values: &Content, count: usize, time: f64) -> Vec<f64> {
+    pub fn unit_weights(
+        &mut self,
+        layer: &'d Node,
+        animator: &'d Node,
+        values: &Content,
+        count: usize,
+        time: f64,
+    ) -> Vec<f64> {
         let a = Some(animator);
         let mode = Mode::of(a);
         let offset = js_max(0.0, num_node(node::member(a, "unitOffset"), 0.0).floor()) as usize;
         let total_raw = num_node(node::member(a, "unitTotal"), 0.0).floor();
-        let total_raw = if total_raw == 0.0 || total_raw.is_nan() { 0.0 } else { total_raw };
+        let total_raw = if total_raw == 0.0 || total_raw.is_nan() {
+            0.0
+        } else {
+            total_raw
+        };
         let total = js_max(js_max((count + offset) as f64, total_raw), 1.0) as usize;
         let amount = num(get(values, "amount"), 100.0) / 100.0;
         let order = Order::of(a);
@@ -635,7 +662,8 @@ impl<'d> Scope<'_, 'd> {
                     } else {
                         0.0
                     };
-                    let eased = ease_progress(self.ev.springs(), node::member(a, "easing"), progress);
+                    let eased =
+                        ease_progress(self.ev.springs(), node::member(a, "easing"), progress);
                     if node::is_str(node::member(a, "direction"), "out") {
                         eased
                     } else {
@@ -664,25 +692,42 @@ impl<'d> Scope<'_, 'd> {
 
     /// `textAnimationState(PM, layer, time, layout)`: every enabled
     /// animator's values and per-unit weights, and the range styles.
-    pub fn text_animation_state(&mut self, layer: &'d Node, time: f64, layout: &GlyphLayout) -> JsResult<TextAnimation> {
+    pub fn text_animation_state(
+        &mut self,
+        layer: &'d Node,
+        time: f64,
+        layout: &GlyphLayout,
+    ) -> JsResult<TextAnimation> {
         let (animators, styles) = self.text_control_values(layer, time)?;
         let mut out = TextAnimation::default();
         for (item, values) in styles {
             let mut content = Content::new();
-            if let Some(n) = Some(item).filter(|n| matches!(n.kind(), pm_model::NodeKind::Object(_))) {
+            if let Some(n) =
+                Some(item).filter(|n| matches!(n.kind(), pm_model::NodeKind::Object(_)))
+            {
                 for (k, v) in node::entries(n) {
                     content.insert(k, v.to_js());
                 }
             }
-            let p_value = pm_model::Value::Object(values.iter().filter_map(|(k, v)| v.to_json().map(|j| (k.clone(), j))).collect());
+            let p_value = pm_model::Value::Object(
+                values
+                    .iter()
+                    .filter_map(|(k, v)| v.to_json().map(|j| (k.clone(), j)))
+                    .collect(),
+            );
             content.insert(JsString::from("p"), JsValue::Object(Box::new(p_value)));
-            out.styles.push(StyleState { item: content, p: values });
+            out.styles.push(StyleState {
+                item: content,
+                p: values,
+            });
         }
         for (item, values) in animators {
             let raw_unit = node::js_value_opt(node::member(Some(item), "unit"));
-            let unit = UnitKind::of_js(&raw_unit).unwrap_or_else(|| match UnitKind::of_js(get(&values, "unit")) {
-                Some(u @ (UnitKind::Words | UnitKind::Lines)) => u,
-                _ => UnitKind::Characters,
+            let unit = UnitKind::of_js(&raw_unit).unwrap_or_else(|| {
+                match UnitKind::of_js(get(&values, "unit")) {
+                    Some(u @ (UnitKind::Words | UnitKind::Lines)) => u,
+                    _ => UnitKind::Characters,
+                }
             });
             let count = unit_count(layout, unit);
             let weights = self.unit_weights(layer, item, &values, count, time);
@@ -714,8 +759,16 @@ impl<'d> Scope<'_, 'd> {
                 let mut style = d.clone();
                 let source = JsValue::Number(glyph.source_start as f64);
                 for range in &state.styles {
-                    let start = range.item.get(&JsString::from("start")).cloned().unwrap_or_default();
-                    let end = range.item.get(&JsString::from("end")).cloned().unwrap_or_default();
+                    let start = range
+                        .item
+                        .get(&JsString::from("start"))
+                        .cloned()
+                        .unwrap_or_default();
+                    let end = range
+                        .item
+                        .get(&JsString::from("end"))
+                        .cloned()
+                        .unwrap_or_default();
                     if js_sem::greater_equal(&source, &start) && js_sem::less_than(&source, &end) {
                         for (k, v) in &range.p {
                             style.insert(k.clone(), v.clone());
@@ -731,7 +784,10 @@ impl<'d> Scope<'_, 'd> {
                         UnitKind::Words => glyph.word,
                         UnitKind::Characters => Some(glyph.index),
                     };
-                    let w = index.and_then(|i| animator.weights.get(i)).copied().unwrap_or(0.0);
+                    let w = index
+                        .and_then(|i| animator.weights.get(i))
+                        .copied()
+                        .unwrap_or(0.0);
                     if w == 0.0 || w.is_nan() {
                         continue;
                     }
@@ -745,20 +801,28 @@ impl<'d> Scope<'_, 'd> {
                         None => glyph.w / 2.0,
                     };
                     let r = math::deg_to_rad(num(get(p, "rotation"), 0.0) * w);
-                    let k = math::tan(math::deg_to_rad(js_max(-80.0, js_min(80.0, num(get(p, "skew"), 0.0) * w))));
+                    let k = math::tan(math::deg_to_rad(js_max(
+                        -80.0,
+                        js_min(80.0, num(get(p, "skew"), 0.0) * w),
+                    )));
                     let s = 1.0 + (num(get(p, "scale"), 100.0) / 100.0 - 1.0) * w;
                     let cos = math::cos(r) * s;
                     let sin = math::sin(r) * s;
                     let mut local: Mat2d = [cos, sin, cos * -k - sin, sin * -k + cos, 0.0, 0.0];
-                    local[4] = px + num(get(p, "x"), 0.0) * w - (local[0] * px + local[2] * pivot_y);
-                    local[5] = pivot_y + num(get(p, "y"), 0.0) * w - (local[1] * px + local[3] * pivot_y);
+                    local[4] =
+                        px + num(get(p, "x"), 0.0) * w - (local[0] * px + local[2] * pivot_y);
+                    local[5] =
+                        pivot_y + num(get(p, "y"), 0.0) * w - (local[1] * px + local[3] * pivot_y);
                     matrix = multiply(&local, &matrix);
                     opacity *= 1.0 + (num(get(p, "opacity"), 100.0) / 100.0 - 1.0) * w;
                     blur += js_max(0.0, num(get(p, "blur"), 0.0)) * w.abs();
                     tracking += num(get(p, "tracking"), 0.0) * w;
                     let pc = get(p, "color");
-                    if !matches!(pc, JsValue::Undefined | JsValue::Null) && *pc != JsValue::from("") {
-                        let base = color.clone().unwrap_or_else(|| get(&style, "color").to_js_string());
+                    if !matches!(pc, JsValue::Undefined | JsValue::Null) && *pc != JsValue::from("")
+                    {
+                        let base = color
+                            .clone()
+                            .unwrap_or_else(|| get(&style, "color").to_js_string());
                         color = Some(mix_color(&base, &pc.to_js_string(), w));
                     }
                 }
