@@ -196,15 +196,22 @@ PM.evP = (L: any, prop: any, T: any, key: any) => {
 };
 
 PM.active = (L: any, T: any) => {
-  if (L?.group && PM.groupAncestors?.(L).some((group: any) => !(isProperty(group.on) ? PM.evP(group, group.on, T, 'l.on') : group.on))) return false;
   const start = Number(L?.from), duration = Number(L?.dur), time = Number(T);
-  if (!(isProperty(L?.on) ? PM.evP(L, L.on, T, 'l.on') : L?.on) || !Number.isFinite(start) || !Number.isFinite(duration) || duration <= 0 || !Number.isFinite(time)) return false;
-  if (L.type === 'group') return true;
-  const end = start + duration;
-  if (time < start - 1e-6) return false;
-  const compEnd = Number(PM.curComp()?.dur);
-  return time < end - 1e-6 ||
-    (Number.isFinite(compEnd) && Math.abs(time - compEnd) <= 1e-6 && Math.abs(end - compEnd) <= 1e-6);
+  if (!Number.isFinite(start) || !Number.isFinite(duration) || duration <= 0 || !Number.isFinite(time)) return false;
+  // Most layers in a long edit are outside the visible frame. Reject them
+  // before walking group visibility or evaluating expression/keyframe switches.
+  // Groups govern their children independently of the group's own timeline bar.
+  if (L.type !== 'group') {
+    if (time < start - 1e-6) return false;
+    const end = start + duration;
+    if (time >= end - 1e-6) {
+      const compEnd = Number(PM.curComp()?.dur);
+      if (!(Number.isFinite(compEnd) && Math.abs(time - compEnd) <= 1e-6 && Math.abs(end - compEnd) <= 1e-6)) return false;
+    }
+  }
+  if (!(isProperty(L.on) ? PM.evP(L, L.on, T, 'l.on') : L.on)) return false;
+  if (L.group && PM.groupAncestors?.(L).some((group: any) => !(isProperty(group.on) ? PM.evP(group, group.on, T, 'l.on') : group.on))) return false;
+  return true;
 };
 
 /* ── transform matrices (2x3, column-major [a,b,c,d,e,f]) ── */

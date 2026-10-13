@@ -33,7 +33,8 @@ export const PROPERTY_LANE = 24;
 /** Wide enough for the ruler gutter's transport, view switch and magnet. */
 export const TRACK_GUTTER = 272;
 /** Pointer reach of a clip's disclosure arrow, from its visible left edge. */
-const DISCLOSURE = 18;
+const DISCLOSURE = 22;
+const DISCLOSURE_PAD = '      ';
 /** Pickwhip reach around its spiral centre: the spiral, then the parent menu chevron. */
 const WHIP_LEFT = 8, WHIP_SPLIT = 10, WHIP_RIGHT = 25;
 
@@ -373,15 +374,17 @@ export function createTrackView(host: TrackViewHost) {
       const from = planned?.get(item.id)?.from ?? layer.from;
       if (item.kind === 'group') {
         const collapsed = api.uiState.getGroupCollapsed(layer);
-        const name = `${collapsed ? '▸' : '▾'}  ${layer.name}`;
+        const name = `${DISCLOSURE_PAD}${layer.name}`;
         host.drawClip(c, { ...layer, from: item.from, dur: item.dur, name }, y, h);
+        drawDisclosure(c, layer, item.from, item.dur, !collapsed, y, h);
         placeWhip(c, layer, item.from, item.dur, name, y, h);
       } else {
         if (drag?.moving.has(item.id)) c.globalAlpha = .85;
         const open = isOpen(layer);
         // Animated clips carry the same disclosure arrow as group bars.
-        const name = openable(layer) ? `${open ? '▾' : '▸'}  ${layer.name}` : layer.name;
+        const name = openable(layer) ? `${DISCLOSURE_PAD}${layer.name}` : layer.name;
         host.drawClip(c, { ...layer, from, name }, y, h);
+        if (openable(layer)) drawDisclosure(c, layer, from, layer.dur, open, y, h);
         if (!drag?.moving.has(item.id)) placeWhip(c, layer, from, layer.dur, name, y, h);
         if (!open || !drawerOf(item)) drawClipKeys(c, layer, from, y, h);
         c.globalAlpha = 1;
@@ -660,6 +663,20 @@ export function createTrackView(host: TrackViewHost) {
   /* Each clip's parent pickwhip follows its name, as the layer timeline's
      ends the name column. Positions come from the last draw, for hit tests. */
   let whips = new Map<string, { x: number; cy: number }>();
+  /* The disclosure arrow is drawn as a path: the text glyph was too small to
+     read or hit. The label is padded with spaces to leave room for it. */
+  function drawDisclosure(c: CanvasRenderingContext2D, layer: any, from: number, dur: number, open: boolean, y: number, h: number) {
+    const x0 = Math.max(host.t2x(from), T.gut), x1 = host.t2x(from + dur);
+    if (x1 - x0 < 22) return;
+    const cx = x0 + 6 + 6, cy = h >= 32 ? y + 11 : y + h / 2 + .5;
+    c.save();
+    c.fillStyle = host.clipPalette(layer).foreground; c.globalAlpha = .85;
+    c.beginPath();
+    if (open) { c.moveTo(cx - 5, cy - 3); c.lineTo(cx + 5, cy - 3); c.lineTo(cx, cy + 4); }
+    else { c.moveTo(cx - 3, cy - 5); c.lineTo(cx + 4, cy); c.lineTo(cx - 3, cy + 5); }
+    c.closePath(); c.fill();
+    c.restore();
+  }
   function placeWhip(c: CanvasRenderingContext2D, layer: any, from: number, dur: number, name: string, y: number, h: number) {
     if (!host.supportsParent(layer)) return;
     const lx = Math.max(host.t2x(from), T.gut) + 6, maxX = host.t2x(from + dur) - 6;
@@ -783,7 +800,6 @@ export function createTrackView(host: TrackViewHost) {
     const rect = T.cv.getBoundingClientRect();
     const startY = event.clientY - rect.top;
     const clips = project.layers.filter((layer: any) => moving.has(layer.id) && layer.type !== 'group');
-    const earliest = Math.min(...clips.map((layer: any) => Number(layer.from) || 0), Infinity);
     const probes: EdgeSnapProbe[] = clips.flatMap((layer: any) => [
       { time: layer.from, edge: 'in' as const }, { time: layer.from + layer.dur, edge: 'out' as const },
     ]);
@@ -822,8 +838,7 @@ export function createTrackView(host: TrackViewHost) {
         }
         const requested = dx / T.pps;
         const { delta, snapped } = host.edgeSnapping(ev) ? snapper.resolve(probes, requested) : snapper.release(requested);
-        let dt = snapped ? delta : Math.round(delta * fps) / fps;
-        if (Number.isFinite(earliest)) dt = Math.max(dt, -earliest);
+        const dt = snapped ? delta : Math.round(delta * fps) / fps;
         const y = startY + dy;
         const shift = (area: TrackArea) => laneIndexIn(startLanes, area, y) - laneIndexIn(startLanes, area, startY);
         plan = planTrackMove(source, layoutOptions, { ids, dt, lanes: { video: shift('video'), audio: shift('audio') } });

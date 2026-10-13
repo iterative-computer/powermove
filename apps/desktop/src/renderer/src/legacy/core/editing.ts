@@ -97,7 +97,7 @@ function commandScopes(command: any): any[][] {
   const type = command?.type;
   if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group'].includes(type)) return [['layers'], ['comps']];
   if (type === 'set_composition') {
-    return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work']];
+    return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work'], ['colorDepth']];
   }
   if (type === 'set_scene_parameter') return [['params', String(command.name || '').trim()]];
   if (type === 'add_marker') return [['markers']];
@@ -431,7 +431,7 @@ function setLayer(command: any) {
     if (patch.motionBlur !== undefined && patch.motionBlur !== false) throw new Error('Audio layers do not support motion blur');
   }
   if (patch.name != null) layer.name = String(patch.name).trim() || layer.name;
-  if (patch.from != null) layer.from = Math.max(layer.type === 'group' ? -Infinity : 0, finite(patch.from, 'layer start'));
+  if (patch.from != null) layer.from = finite(patch.from, 'layer start');
   if (patch.duration != null) layer.dur = Math.max(1 / PM.proj.fps, finite(patch.duration, 'layer duration'));
   if (patch.visible != null) layer.on = !!patch.visible;
   if (patch.locked != null) layer.lock = !!patch.locked;
@@ -472,9 +472,16 @@ function setLayer(command: any) {
 
 function setComposition(command: any) {
   const patch: any = safePatch(command.patch, 'composition patch');
-  const allowed: any = new Set(['name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill', 'shutter', 'workArea']);
+  const allowed: any = new Set(['name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill', 'shutter', 'workArea', 'colorDepth']);
   for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new Error(`Composition field “${key}” is not editable`);
   const p: any = PM.proj;
+  if (patch.colorDepth != null) {
+    if (![8, 16, 32].includes(patch.colorDepth)) throw new Error('Color depth must be 8, 16, or 32');
+    if (PM.GL?.supportedColorDepths && !PM.GL.supportedColorDepths.includes(patch.colorDepth)) {
+      throw new Error(`${patch.colorDepth}-bit color is not supported by this GPU`);
+    }
+    p.colorDepth = patch.colorDepth;
+  }
   if (patch.name != null) p.name = String(patch.name).trim() || p.name;
   if (patch.width != null) p.w = Math.max(16, Math.round(finite(patch.width, 'width')));
   if (patch.height != null) p.h = Math.max(16, Math.round(finite(patch.height, 'height')));
@@ -556,7 +563,7 @@ function addLayer(command: any) {
     if (PM.L(command.id)) throw new Error(`Layer id already exists: ${command.id}`);
     layer.id = String(command.id);
   }
-  layer.from = command.from == null ? PM.snapF(PM.time, PM.proj.fps) : Math.max(0, finite(command.from, 'layer start'));
+  layer.from = command.from == null ? PM.snapF(PM.time, PM.proj.fps) : finite(command.from, 'layer start');
   layer.dur = command.duration == null
     ? Math.max(.1, PM.proj.dur - layer.from)
     : Math.max(1 / PM.proj.fps, finite(command.duration, 'layer duration'));

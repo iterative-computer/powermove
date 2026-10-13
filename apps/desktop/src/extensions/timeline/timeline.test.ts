@@ -18,6 +18,7 @@ import {
   shouldDrawClipLabel,
   timelinePropertyTargets,
   timelineWorkArea,
+  timelineStartTime,
   toggleTimelineDisclosure,
   toggleTimelinePropertyKeys,
   toggleTimelineScaleLink,
@@ -53,6 +54,14 @@ function timelineHarness() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('timeline runtime', () => {
+  it('leaves five seconds before the work area and expands for earlier strips', () => {
+    expect(timelineStartTime([0, 10], [])).toBe(-5);
+    expect(timelineStartTime([8, 10], [{ from: 9 }])).toBe(3);
+    expect(timelineStartTime([8, 10], [{ from: 2 }])).toBe(-3);
+    expect(timelineStartTime([0, 10], [{ from: -12 }, { from: -3 }])).toBe(-17);
+    expect(timelineStartTime(undefined, [{ from: NaN }, { from: Infinity }])).toBe(-5);
+  });
+
   it('opens a group hierarchy without opening its property strip', () => {
     const harness = timelineHarness();
     const group = { id: 'group', type: 'group', collapsed: true };

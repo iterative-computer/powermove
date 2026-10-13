@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
 import { install } from './anim';
@@ -142,6 +142,39 @@ describe('legacy animation install', () => {
     expect(PM.active({ on: true, from: 5, dur: 5 }, 10)).toBe(true);
     expect(PM.active({ on: true, from: NaN, dur: 5 }, 1)).toBe(false);
     expect(PM.active({ on: true, from: 0, dur: Infinity }, 1)).toBe(false);
+  });
+
+  it('rejects inactive ranges before evaluating animated visibility or group ancestors', () => {
+    const PM = animRegistry();
+    PM.proj = { dur: 10, layers: [] };
+    PM.groupAncestors = vi.fn(() => [{ on: true }]);
+    const visibility = vi.spyOn(PM, 'evP');
+    const layer = { type: 'solid', group: 'group', on: { v: true, kf: [] }, from: 5, dur: 2 };
+    for (const time of [0, 7, 8, Infinity, NaN]) expect(PM.active(layer, time)).toBe(false);
+    expect(PM.active({ ...layer, dur: 0 }, 5)).toBe(false);
+    expect(PM.groupAncestors).not.toHaveBeenCalled();
+    expect(visibility).not.toHaveBeenCalled();
+  });
+
+  it('preserves boundary tolerance and animated visibility on active layers and groups', () => {
+    const PM = animRegistry();
+    PM.proj = { dur: 10, layers: [] };
+    const animated = { v: true, kf: [{ t: 0, v: true }, { t: 1, v: false }, { t: 2, v: true }] };
+    const group = { type: 'group', from: 5, dur: 2, on: animated };
+    PM.groupAncestors = vi.fn(() => [group]);
+    const layer = { type: 'solid', group: 'group', on: true, from: 5, dur: 5 };
+    expect(PM.active(layer, 5 - .5e-6)).toBe(true);
+    expect(PM.active(layer, 5 - 2e-6)).toBe(false);
+    expect(PM.active(layer, 5.5)).toBe(true);
+    expect(PM.active(layer, 6.5)).toBe(false);
+    expect(PM.active(layer, 10)).toBe(true);
+    // A group's switch governs its children independently of its own bar.
+    expect(PM.active(group, 0)).toBe(true);
+    expect(PM.active(group, 10)).toBe(true);
+    layer.on = animated as any;
+    PM.groupAncestors = () => [];
+    expect(PM.active(layer, 6.5)).toBe(false);
+    expect(PM.active(layer, 7)).toBe(true);
   });
 
   it('exposes transition channels through the shared animation registry', () => {

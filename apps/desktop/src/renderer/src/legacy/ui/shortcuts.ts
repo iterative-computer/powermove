@@ -121,6 +121,7 @@ def('newText', 'New text layer', '⌘T', () => addLayer('text', { name: 'Headlin
 def('newSolid', 'New solid', '⌘Y', () => addLayer('solid', { name: 'Solid' }), 'Create');
 def('newShape', 'New shape', '⌘⇧Y', () => addLayer('shape', { name: 'Shape', p: center() }), 'Create');
 def('newNull', 'New null object', '⌘⌥⇧Y', () => addLayer('null', { name: 'Null', p: center() }), 'Create');
+def('newAdjustment', 'New adjustment layer', '⌘⌥Y', () => addLayer('adjustment', { name: 'Adjustment Layer' }), 'Create');
 def('import', 'Import media…', '⌘I', () => PM.pickFiles(), 'Create');
 def('importSequence', 'Import image sequence…', null, () => PM.pickFiles(true), 'Create');
 def('importFolder', 'Import folder…', null, () => PM.pickFolder(), 'Create');

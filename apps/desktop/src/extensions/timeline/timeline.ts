@@ -87,6 +87,14 @@ export const timelineWorkArea = {
     return { workArea: [nextStart, nextStart + span] as [number, number] };
   },
 };
+
+/** Keep five seconds of room before the work area or the earliest strip. */
+export function timelineStartTime(work: readonly number[] | undefined, layers: readonly { from: number }[]): number {
+  let first = Number.isFinite(work?.[0]) ? work![0]! : 0;
+  for (const layer of layers) if (Number.isFinite(layer.from)) first = Math.min(first, layer.from);
+  return first - 5;
+}
+
 export interface QuickOffsetTimingItem {
   time: number;
   offsetIndex: number;
@@ -639,6 +647,10 @@ let backdrop: HTMLCanvasElement | null = null;
 let backdropKey: unknown[] | null = null;
 let backdropDirty = true;
 let timePaintPending = false;
+let graphPlaybackFrame = -Infinity;
+let graphPlaybackProject: any = null;
+// Integer frame boundaries can arrive a few floating-point bits below whole.
+const graphFrameIndex = () => Math.floor(api.transport.time() * api.project.get().fps + 1e-7);
 function releaseBackdrop() {
   if (backdrop) { backdrop.width = 0; backdrop.height = 0; }
   backdrop = null; backdropKey = null;
@@ -735,6 +747,7 @@ const WorkArea = timelineWorkArea;
 
 let attachedHead: HTMLElement | null = null;
 let attachedWrap: HTMLElement | null = null;
+let measuredWrap: HTMLElement | null = null;
 
 T.attachHead = (head: HTMLElement) => {
     if (attachedHead === head) return;
@@ -756,6 +769,7 @@ T.attachCanvas = (wrap: HTMLElement) => {
     canvasCleanups = [];
     resizeObserver?.disconnect(); resizeObserver = null;
     attachedWrap = wrap;
+    measuredWrap = null;
     T.__timelineWrap = wrap;
     /* Keep the backing store transparent while a host resize is in flight.
        An opaque 2D canvas is cleared to black as soon as its bitmap changes,
@@ -804,7 +818,7 @@ function buildHead(head: any) {
       if (!times.length) return;
       const first = Math.min(...times), last = Math.max(...times);
       T.pps = clamp((T.w - T.gut - 48) / Math.max(1 / api.project.get().fps, last - first), 4, 4000);
-      T.scrollT = Math.max(-.4, first - 24 / T.pps);
+      T.scrollT = Math.max(minimumScrollTime(), first - 24 / T.pps);
       T.graphViewBounds = null; invalidate('timeline');
     } },
   ]), 'Graph options');
@@ -972,6 +986,7 @@ function resize(wrap?: any) {
   if (r.width < 8 || r.height < 8) return; /* detached / mid-remount */
   T.dpr = Math.min(window.devicePixelRatio || 1, 2);
   T.w = r.width; T.hgt = r.height;
+  measuredWrap = wrap;
   const width = Math.max(2, Math.round(r.width * T.dpr));
   const height = Math.max(2, Math.round(r.height * T.dpr));
   const changed = T.cv.width !== width || T.cv.height !== height;
@@ -1070,6 +1085,10 @@ function visibleProps(L: any) {
 
 const x2t = (x: any) => (x - T.gut) / T.pps + T.scrollT;
 const t2x = (t: any) => T.gut + (t - T.scrollT) * T.pps;
+const minimumScrollTime = () => {
+  const project = api.project.get();
+  return timelineStartTime(project.work, project.layers);
+};
 /* Unshifted row geometry. While a media drag is over the canvas, rows at or
    below the insertion slot move down one row so the ghost lands in a real
    gap: a new layer strip, never on top of an existing one. */
@@ -1089,10 +1108,21 @@ onEvent('invalidate', (what) => {
   if (what !== 'timeline') return;
   // Unexplained host repaints (for example waveform completion while paused)
   // refresh the backdrop. Time and trail frames have an explicit cheap path.
-  if (!timePaintPending) backdropDirty = true;
+  const timeOnly = timePaintPending;
+  if (!timeOnly) backdropDirty = true;
   timePaintPending = false;
   if (!api.uiState.timelineVersion) rowsDirty = true;
-  draw();
+  // A graph's current-value text follows composition frames. On a 120 Hz
+  // display a 30 fps picture has the same curve readout for four refreshes.
+  // Keep audio/transport continuous, and leave paused pointer scrubs precise.
+  if (timeOnly && api.transport.playing() && T.graph && scrubPresentationTime === null
+      && !backdropDirty && !rowsDirty && backdrop && backdropKey
+      && graphPlaybackProject === api.project.get()
+      && graphPlaybackFrame === graphFrameIndex()) {
+    const key = timelineBackdropKey();
+    if (key && key.length === backdropKey.length && key.every((value, index) => value === backdropKey![index])) return;
+  }
+  draw(timeOnly);
 });
 onEvent('time', invalidateTime);
 onEvent('selection', () => {
@@ -1199,8 +1229,8 @@ const trackView = createTrackView({
 });
 T.trackView = trackView;
 
-function draw() {
-  try { drawInner(); } catch (e: any) { console.error('[timeline draw]', e, e.stack); }
+function draw(timeOnly = false) {
+  try { drawInner(undefined, timeOnly); } catch (e: any) { console.error('[timeline draw]', e, e.stack); }
 }
 type TimelinePreviewTarget = { canvas: HTMLCanvasElement; width: number; height: number };
 
@@ -1215,17 +1245,21 @@ function animatedTimelineFlag(value: any): boolean {
 }
 
 function timelineBackdropKey(): unknown[] | null {
-  // Graph curves and active drag adornments keep their full drawing path.
-  // One bounded viewport bitmap is sufficient; no frame history is retained.
-  if (T.graph || T.drop || T.reorder || T.marquee || T.quickOffset || T.trackDrag || T.trackDrop || !api.uiState.timelineVersion
+  // Curves, their editable handles, and the timeline describe fixed times.
+  // Retain one bounded viewport bitmap; moving readouts are painted afterward.
+  // Active edits and expression curves keep their conservative drawing path.
+  if (T.drop || T.reorder || T.marquee || T.quickOffset || T.trackDrag || T.trackDrop || T.graphDragBounds || T.graphReadout || !api.uiState.timelineVersion
       || (tracksMode() && trackView.unfolded())
+      || (T.graph && T._graph?.series?.some((axis: any) => axis.prop.expr))
       || T.cv.width * T.cv.height * 4 > 32 * 1024 * 1024) return null;
   const p = api.project.get();
   const key: unknown[] = [T.cv, T.ctx, T.cv.width, T.cv.height, T.w, T.hgt, T.dpr,
     T.rows, T.gut, T.row, T.ruler, T.pps, T.scrollT, T.scrollY, T.hoverRow, T.dropRow,
     T.style.clipRadius, T.style.keyframeSize, T.style.showLayerNumbers, T.style.showTypeBadges,
     theme, p, p.dur, p.fps, p.work?.[0], p.work?.[1], api.project.revision(),
-    api.anim.version(), api.uiState.timelineVersion(), T.mode, T.trackHover?.area, T.trackHover?.lane, T.trackHover?.clip, T.trackScrollY];
+    api.anim.version(), api.uiState.timelineVersion(), T.mode, T.trackHover?.area, T.trackHover?.lane, T.trackHover?.clip, T.trackScrollY,
+    T.graph, T.graphCombined, T.graphSplit, T.graphType, T.graphMerge, T.graphFocus?.layerId, T.graphFocus?.trackKey,
+    T.graphShown, T.graphViewBounds?.[0], T.graphViewBounds?.[1]];
   const [first, end] = visibleRowRange();
   for (let i = first; i < end; i++) {
     const row = T.rows[i];
@@ -1254,7 +1288,7 @@ function rememberBackdrop(key: unknown[] | null) {
   backdropDirty = false;
 }
 
-function drawInner(preview?: TimelinePreviewTarget) {
+function drawInner(preview?: TimelinePreviewTarget, timeOnly = false) {
   if (!preview) refreshTimelineManifest();
   /* Re-resolve the live canvas every frame: workspace rebuilds can replace the
      panel element, and drawing into a detached canvas is the root cause of
@@ -1270,12 +1304,21 @@ function drawInner(preview?: TimelinePreviewTarget) {
   } else {
     const liveCv = document.querySelector<HTMLCanvasElement>('#tl-canvas');
     if (liveCv && liveCv !== T.cv) { T.cv = liveCv; T.ctx = liveCv.getContext('2d'); }
-    /* Unconditional size sync: measure the wrap every draw so the bitmap always
-       matches the laid-out size, regardless of missed observer/RAF frames. */
+    /* The attached host already reports size changes through ResizeObserver.
+       Reading its bounds after every paused time update forces the entire
+       editor's pending layout. Keep that read for structural paints, new hosts
+       and fallback canvases; observed time-only paints reuse the latest size.
+       A resize callback paints synchronously when it changes the bitmap. */
     const host = T.cv && T.cv.parentElement;
-    if (host && ((!api.transport.playing() && scrubPresentationTime === null) || !T.w || !T.hgt)) {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const observedTimePaint = timeOnly && !backdropDirty && T.w && T.hgt && resizeObserver
+      && host === attachedWrap && host === measuredWrap && T.dpr === dpr
+      && T.cv.width === Math.max(2, Math.round(T.w * dpr)) && T.cv.height === Math.max(2, Math.round(T.hgt * dpr))
+      && T.cv === host?.querySelector(':scope > #tl-canvas');
+    if (host && !observedTimePaint && ((!api.transport.playing() && scrubPresentationTime === null) || !T.w || !T.hgt)) {
       const r = host.getBoundingClientRect();
       if (r.width >= 8 && r.height >= 8) {
+        T.dpr = dpr; measuredWrap = host;
         const bw = Math.max(2, Math.round(r.width * T.dpr));
         const bh = Math.max(2, Math.round(r.height * T.dpr));
         if (T.cv.width !== bw || T.cv.height !== bh || T.w !== r.width || T.hgt !== r.height) {
@@ -1324,7 +1367,7 @@ function drawInner(preview?: TimelinePreviewTarget) {
     const visibleWidth = W - T.gut;
     if (px > W - Math.min(50, visibleWidth * .1)) T.scrollT = api.transport.time() - visibleWidth * .2 / T.pps;
     else if (px < T.gut) T.scrollT = api.transport.time() - visibleWidth * .8 / T.pps;
-    T.scrollT = Math.max(-.4, T.scrollT);
+    T.scrollT = Math.max(minimumScrollTime(), T.scrollT);
   }
 
   const backgroundKey = preview ? null : timelineBackdropKey();
@@ -1375,7 +1418,6 @@ function drawInner(preview?: TimelinePreviewTarget) {
     }
     else { drawClips(c, W, H); drawDropGhost(c, W, H); }
     if (!tracks) drawGutter(c, W, H);
-    if (T.graph) drawGraphReadout(c, W, H);
     if (T.reorder) {
       const d = T.reorder, y = rowY(d.row), left = 74 + Math.min(48, d.depth * 12);
       c.save(); c.beginPath(); c.rect(0, T.ruler, W, H - T.ruler); c.clip();
@@ -1396,7 +1438,15 @@ function drawInner(preview?: TimelinePreviewTarget) {
     drawRuler(c, W, H);
     if (!preview) rememberBackdrop(backgroundKey ? timelineBackdropKey() : null);
   }
+  if (T.graph) {
+    drawGraphTime(c, W, H);
+    drawGraphReadout(c, W, H);
+  }
   drawPlayhead(c, W, H);
+  if (!preview) {
+    graphPlaybackProject = api.project.get();
+    graphPlaybackFrame = graphFrameIndex();
+  }
   if (T.snapGuide != null) drawDirectionalSnapGuide(c, {
     x: t2x(T.snapGuide), top: T.ruler, bottom: H, left: T.gut, right: W,
   }, '#e7c84b');
@@ -1582,9 +1632,12 @@ function drawWorkBracket(c: any, x: any, idx: any) {
   c.closePath(); c.fill();
 }
 function fmtRuler(t: any, step: any, fps: any) {
-  if (step < 1) return api.util.tc(t, fps).slice(-5);
-  const m = Math.floor(t / 60), s = Math.round(t % 60);
-  return (m ? m + ':' : '0:') + String(s).padStart(2, '0');
+  const sign = t < 0 ? '-' : '';
+  const magnitude = Math.abs(t);
+  if (step < 1) return sign + api.util.tc(magnitude, fps).slice(-5);
+  const seconds = Math.round(magnitude);
+  const m = Math.floor(seconds / 60), s = seconds % 60;
+  return sign + m + ':' + String(s).padStart(2, '0');
 }
 const fui = () => '"SF Pro Text",-apple-system,BlinkMacSystemFont,sans-serif';
 const fmono = () => '"JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace';
@@ -2318,7 +2371,7 @@ function graphMoveReadout(snapshot: any, x: number, y: number, timeDelta: number
 const graphSamples = createGraphSampleCache((axis, time, speed) => graphSample(api, axis, time, speed));
 function drawGraph(c: any, W: any, H: any) {
   const plotTop = graphTop();
-  graphSamples.begin(api.project.get(), [api.anim.version(), api.project.get().fps, T.pps, T.scrollT, W, T.graphType].join(':'));
+  graphSamples.begin(api.project.get(), [api.project.revision(), api.anim.version(), api.project.get().fps, T.pps, T.scrollT, W, T.graphType].join(':'));
   T._graph = null;
   /* Build from every project property, not only expanded timeline rows. A
      collapsed strip must not make the focused curve disappear. */
@@ -2409,7 +2462,7 @@ function drawGraph(c: any, W: any, H: any) {
   if (T.graphDragBounds) [vmin, vmax] = T.graphDragBounds;
   const top = plotTop + 42, bot = Math.max(top + 1, H - 16);
   const v2y = (v: any) => bot - (v - vmin) / (vmax - vmin) * (bot - top);
-  T._graph = { target, series, linked, vmin, vmax, v2y, y2v: (y: any) => vmin + (bot - y) / (bot - top) * (vmax - vmin), points: [], selectionBounds: null, transform: null };
+  T._graph = { target, series, linked, merged, vmin, vmax, v2y, y2v: (y: any) => vmin + (bot - y) / (bot - top) * (vmax - vmin), points: [], selectionBounds: null, transform: null };
 
   /* value gridlines */
   c.strokeStyle = INK.grid; c.font = '400 9.5px ' + fui(); c.fillStyle = theme.tx3;
@@ -2438,7 +2491,6 @@ function drawGraph(c: any, W: any, H: any) {
      keys up as it sweeps. `selectedKeyIds` only decides which curves are on
      screen, and stays frozen for the duration of that marquee. */
   const liveSelected = new Set(api.selection.keys());
-  const labelPositions: number[] = [];
   series.forEach((axis: any, axisIndex: number) => {
   const L = axis.L;
   const kf = axis.prop.kf;
@@ -2486,20 +2538,7 @@ function drawGraph(c: any, W: any, H: any) {
     drawGraphVertex(c, x, y, curveColor, sel, k);
     api.uiState.setKeyHandles(k, { pt: [x, y] });
   });
-  // Read the value where the playhead meets each curve, as in the reference.
-  const time = api.transport.time(), playX = t2x(time);
-  const current = graphSamples.sample(axis, time, speedMode), currentY = v2y(current);
   c.font = '500 10px ' + fmono(); c.fillStyle = curveColor;
-  if (playX >= T.gut + 35 && playX < W - 40 && currentY >= top && currentY <= bot) {
-    c.beginPath(); c.arc(playX, currentY, 3, 0, Math.PI * 2); c.fill();
-    let labelY = clamp(currentY - 7, top + 10, bot - 3);
-    while (labelPositions.some(y => Math.abs(y - labelY) < 13) && labelY < bot - 16) labelY += 13;
-    if (labelPositions.some(y => Math.abs(y - labelY) < 13)) {
-      labelY = currentY - 20;
-      while (labelPositions.some(y => Math.abs(y - labelY) < 13)) labelY -= 13;
-    }
-    if (labelY >= top + 10) { labelPositions.push(labelY); c.fillText(graphValueText(current), playX + 7, labelY); }
-  }
   const last = kf[kf.length - 1];
   if (last && t2x(L.from + last.t) < W - 55) {
     const endValue = graphSamples.sample(axis, x2t(W - 16), speedMode);
@@ -2551,6 +2590,42 @@ function drawGraph(c: any, W: any, H: any) {
     c.fillStyle = theme.tx2; c.fillText(text, legendX + 15, plotTop + 17);
     legendX += width;
   }
+  c.restore();
+}
+
+let graphReadoutFont: { context: any; value: string } | null = null;
+const refreshTimelineFonts = () => { propertyLabelWidth = null; graphReadoutFont = null; invalidate('timeline'); };
+onEvent('fonts', refreshTimelineFonts);
+listen(document.fonts, 'loadingdone', refreshTimelineFonts);
+/** The playhead changes on every tick; curves and their hit targets do not. */
+function drawGraphTime(c: any, W: number, H: number) {
+  const graph = T._graph;
+  if (!graph || graph.merged) return;
+  const time = api.transport.time(), playX = t2x(time);
+  if (playX < T.gut + 35 || playX >= W - 40) return;
+  const top = graphTop() + 42, bot = Math.max(top + 1, H - 16);
+  const labelPositions: number[] = [];
+  // Keep the font after restoring the drawing state. Assigning it every tick
+  // enters Chromium's style/font machinery even when the text style is fixed.
+  // Compare its canonical value; browsers normalize CSS font whitespace.
+  if (!graphReadoutFont || graphReadoutFont.context !== c || c.font !== graphReadoutFont.value) {
+    c.font = '500 10px ' + fmono();
+    graphReadoutFont = { context: c, value: c.font };
+  }
+  c.save(); c.beginPath(); c.rect(T.gut, graphTop(), W - T.gut, H - graphTop()); c.clip();
+  graph.series.forEach((axis: any, axisIndex: number) => {
+    const current = graphSamples.sample(axis, time, T.graphType === 'speed'), currentY = graph.v2y(current);
+    if (currentY < top || currentY > bot || !Number.isFinite(currentY)) return;
+    c.fillStyle = graphAxisColor(axis.key, axisIndex);
+    c.beginPath(); c.arc(playX, currentY, 3, 0, Math.PI * 2); c.fill();
+    let labelY = clamp(currentY - 7, top + 10, bot - 3);
+    while (labelPositions.some(y => Math.abs(y - labelY) < 13) && labelY < bot - 16) labelY += 13;
+    if (labelPositions.some(y => Math.abs(y - labelY) < 13)) {
+      labelY = currentY - 20;
+      while (labelPositions.some(y => Math.abs(y - labelY) < 13)) labelY -= 13;
+    }
+    if (labelY >= top + 10) { labelPositions.push(labelY); c.fillText(graphValueText(current), playX + 7, labelY); }
+  });
   c.restore();
 }
 
@@ -2714,7 +2789,7 @@ function bind(cv: any, wrap: any) {
       else T.scrollY += e.deltaY;
       T.scrollT += e.deltaX / T.pps;
     }
-    T.scrollT = Math.max(-.4, T.scrollT);
+    T.scrollT = Math.max(minimumScrollTime(), T.scrollT);
     invalidate('timeline');
   }, { passive: false }, canvasCleanups);
 }
@@ -2887,7 +2962,7 @@ function panViewport(e: PointerEvent) {
   beginDrag(e, {
     cursor: 'grabbing',
     move: (dx: number, dy: number) => {
-      T.scrollT = Math.max(-.4, start - dx / T.pps);
+      T.scrollT = Math.max(minimumScrollTime(), start - dx / T.pps);
       if (g) { const delta = g.y2v(0) - g.y2v(dy); T.graphViewBounds = [g.vmin + delta, g.vmax + delta]; }
       invalidate('timeline');
     },
@@ -2915,7 +2990,7 @@ function quickOffsetLayers(e: any) {
   if (groups.some((members: any[]) => members.some((layer: any) => layer.lock
       || api.groups.ancestors(layer).some((group: any) => group.lock)))) return;
   const timing = groups.flatMap((members: any[], offsetIndex: number) => members.map((L: any) => ({
-    L, time: Number(L.from) || 0, offsetIndex, offsetCount: groups.length, minTime: L.type === 'group' ? -Infinity : 0,
+    L, time: Number(L.from) || 0, offsetIndex, offsetCount: groups.length, minTime: -Infinity,
   })));
   api.edit.begin('Quick offset layers', { origin: 'timeline' });
   let moved = false;
@@ -3336,7 +3411,6 @@ function slide(e: any) {
   const probes: EdgeSnapProbe[] = start.flatMap((s: any) => [
     { time: s.from, edge: 'in' as const }, { time: s.from + s.L.dur, edge: 'out' as const },
   ]);
-  const earliest = Math.min(...start.map((item: any) => item.from));
   let moved = false;
   beginDrag(e, {
     cursor: 'grabbing',
@@ -3344,9 +3418,8 @@ function slide(e: any) {
       moved = true;
       const requested = dx / T.pps;
       const { delta, snapped } = edgeSnapping(ev) ? snapper.resolve(probes, requested) : snapper.release(requested);
-      const dt = Math.max(delta, -earliest);
-      if (Math.abs(dt - delta) > 1e-9) T.snapGuide = null;
-      const at = (from: number) => snapped ? Math.max(0, from + dt) : Math.max(0, api.util.snapF(from + dt, api.project.get().fps));
+      const dt = delta;
+      const at = (from: number) => snapped ? from + dt : api.util.snapF(from + dt, api.project.get().fps);
       groupStart.forEach((s: any) => api.edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { from: snapped ? s.from + dt : api.util.snapF(s.from + dt, api.project.get().fps) } }));
       start.forEach((s: any) => api.edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { from: at(s.from) } }));
     },
@@ -3411,7 +3484,7 @@ function trim(e: any, side: any) {
       const dt = snapped ? delta : api.util.snapF(delta, api.project.get().fps);
       start.forEach((s: any) => {
         if (side === 'in') {
-          let nf = clamp(s.from + dt, 0, s.from + s.dur - 1 / api.project.get().fps);
+          let nf = Math.min(s.from + dt, s.from + s.dur - 1 / api.project.get().fps);
           if (api.media.timing.isTimed(s.L)) nf = Math.max(nf, api.media.timing.earliestStart({ ...s.L, from: s.from, d: { ...s.L.d, trim: s.trim } }));
           api.edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { from: nf, duration: s.dur + (s.from - nf) } });
           if (api.media.timing.isTimed(s.L)) {
