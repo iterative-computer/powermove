@@ -66,6 +66,8 @@ ff -f lavfi -i "testsrc2=size=$SMALL:rate=30,format=yuva420p,geq=lum='lum(X,Y)':
 ff -f lavfi -i "$(src 30 $SMALL yuv420p10le)" -frames:v 90 -c:v libsvtav1 -g 30 -preset 8 -pix_fmt yuv420p10le av1-10bit.mp4
 # ProRes in MXF (RDD 44) and in Matroska (frames without their icpf header).
 ff -f lavfi -i "$(src 25 $SMALL yuv422p10le)" -frames:v 25 -c:v prores_ks -profile:v 3 prores-hq.mxf
+# MXF at 29.97: timebase 1001/30000 (a numerator other than 1 reaches VideoToolbox).
+ff -f lavfi -i "$(src $NTSC30 $SMALL yuv422p10le)" -frames:v 30 -c:v prores_ks -profile:v 3 prores-hq-2997.mxf
 ff -f lavfi -i "$(src 25 $SMALL yuv422p10le)" -frames:v 25 -c:v prores_ks -profile:v 2 prores-422.mkv
 for r in "$NTSC24:23976" "$NTSC30:2997"; do
   rate="${r%%:*}"; tag="${r##*:}"

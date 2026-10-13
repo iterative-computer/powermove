@@ -302,7 +302,7 @@ fn open_vt(
             "no hardware {codec:?} session available"
         )));
     }
-    let dec = VtDecoder::new(&cfg, spec.index.timebase.den(), permit.is_some())?;
+    let dec = VtDecoder::new(&cfg, spec.index.timebase, permit.is_some())?;
     Ok(Decoder::Vt {
         dec,
         cfg,
