@@ -10,6 +10,12 @@
 //!
 //! A slot returns to the pool when its last reference drops (a decoder's
 //! buffer reference, a frame in a cache, a texture still in use on the GPU).
+//!
+//! The pool also accounts for the CoreVideo buffers VideoToolbox hands to
+//! the decoders it serves ([`FramePool::hold_external`]): VideoToolbox owns
+//! that memory, but while any frame over a buffer lives (in a session's
+//! window, in the frame cache, in a renderer) it counts here, so the lease
+//! report sees every decoded frame the process holds.
 
 use crate::error::{MediaError, Result};
 use std::any::Any;
@@ -127,6 +133,37 @@ struct State {
     live_bytes: usize,
     free_bytes: usize,
     max_free_bytes: usize,
+    external: usize,
+    external_bytes: usize,
+}
+
+/// Bytes held outside the pool's slots (a CoreVideo buffer), counted in
+/// [`PoolStats::external_bytes`] until the last clone of the hold drops.
+pub struct ExternalHold {
+    bytes: usize,
+    pool: Weak<PoolInner>,
+}
+
+impl ExternalHold {
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+impl Drop for ExternalHold {
+    fn drop(&mut self) {
+        if let Some(p) = self.pool.upgrade() {
+            let mut g = p.state.lock().unwrap();
+            g.external -= 1;
+            g.external_bytes -= self.bytes;
+        }
+    }
+}
+
+impl std::fmt::Debug for ExternalHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ExternalHold({} bytes)", self.bytes)
+    }
 }
 
 struct PoolInner {
@@ -145,6 +182,10 @@ pub struct PoolStats {
     pub bytes: usize,
     pub live_bytes: usize,
     pub free_bytes: usize,
+    /// Buffers decoded outside the pool (VideoToolbox's CoreVideo buffers)
+    /// that frames still reference; not part of `bytes`.
+    pub external_buffers: usize,
+    pub external_bytes: usize,
 }
 
 /// Page-aligned frame memory shared by the software decoders of a process.
@@ -219,6 +260,18 @@ impl FramePool {
             .map(SlotRef)
     }
 
+    /// Counts `bytes` of memory decoded outside the pool (a CoreVideo
+    /// buffer) until the returned hold and all its clones drop.
+    pub fn hold_external(&self, bytes: usize) -> Arc<ExternalHold> {
+        let mut g = self.0.state.lock().unwrap();
+        g.external += 1;
+        g.external_bytes += bytes;
+        Arc::new(ExternalHold {
+            bytes,
+            pool: Arc::downgrade(&self.0),
+        })
+    }
+
     /// Releases free slots beyond `keep_bytes` (a lease shrink).
     pub fn trim(&self, keep_bytes: usize) {
         let mut g = self.0.state.lock().unwrap();
@@ -238,6 +291,8 @@ impl FramePool {
             bytes: g.bytes,
             live_bytes: g.live_bytes,
             free_bytes: g.free_bytes,
+            external_buffers: g.external,
+            external_bytes: g.external_bytes,
         }
     }
 }
@@ -267,7 +322,8 @@ mod tests {
                 slots: 1,
                 bytes: PAGE,
                 live_bytes: 0,
-                free_bytes: PAGE
+                free_bytes: PAGE,
+                ..Default::default()
             }
         );
         let b = pool.acquire(PAGE).unwrap();
@@ -289,5 +345,21 @@ mod tests {
         // A full free list drops returned slots instead of keeping them.
         drop(s);
         assert_eq!(pool.stats().slots, 0);
+    }
+
+    #[test]
+    fn external_holds_count_until_the_last_clone_drops() {
+        let pool = FramePool::new(0);
+        let h = pool.hold_external(1000);
+        let h2 = h.clone();
+        let s = pool.stats();
+        assert_eq!(
+            (s.external_buffers, s.external_bytes, s.bytes),
+            (1, 1000, 0)
+        );
+        drop(h);
+        assert_eq!(pool.stats().external_bytes, 1000);
+        drop(h2);
+        assert_eq!(pool.stats(), PoolStats::default());
     }
 }

@@ -39,9 +39,12 @@ exist. Only box, element, or KLV headers and table payloads are read:
 | MPEG-TS, M2TS, MTS, MPEG-PS, VOB, FLV, ASF/WMV, Ogg | FFmpeg demux scan | No frame tables exist; payloads are demuxed, nothing decoded |
 | AVI or elementary streams with B frames | Demux scan plus a decode-order pass | See below |
 
-H.264 and HEVC samples are tagged with their first VCL NAL type (a few header
-bytes per sample), so open-GOP sync samples (HEVC CRA and BLA, H.264 non-IDR
-I) and leading pictures (RASL) are known. A decode for frame N starts at the
+H.264 and HEVC sync samples in MOV/MP4 and Matroska are tagged with their
+first VCL NAL type (one 64-byte read per sync sample, never non-sync samples),
+so open-GOP sync samples (HEVC CRA and BLA, H.264 non-IDR I) and their leading
+pictures (RASL) are known. On a 108,000-frame H.264 MP4 (432 sync samples) this
+takes 3.7 ms of a warm-cache index build, against 155 ms when every sample's
+headers were read one byte at a time. A decode for frame N starts at the
 last sync sample not after N and skips that sync sample's leading pictures.
 
 **Scanned packets** are addressed by byte position plus their ordinal among
@@ -129,13 +132,28 @@ next backend).
 
 `cache::FrameCache` holds decoded frames by source, sample, and purpose under a
 byte budget, least recently used first. A frame evicted while a renderer
-still holds it stays alive. `DecodeService::apply_lease` sets the cache budget
-and trims free pool memory, and `MediaUsage::lease_categories` reports the
-contract 8 frame-cache and decoder categories: the cache counts CoreVideo and
-pool frames it holds; the decoder category is pool memory the cache does not
-hold (decoder references, frames held after eviction, free slots), so nothing
-is counted twice. VideoToolbox's own buffer pools are not visible to the
-process and are not in either number.
+still holds it stays alive.
+
+`MediaUsage::lease_categories` reports the contract 8 frame-cache and decoder
+categories, each decoded frame counted once. The frame cache counts the
+CoreVideo and pool frames it holds. The decoder category counts every other
+decoded frame the process holds: pool slots outside the cache (decoder
+references, session windows, frames held after eviction, free slots) and
+VideoToolbox's CoreVideo buffers outside the cache. VideoToolbox buffers are
+counted through a hold in the frame pool (`FramePool::hold_external`) that
+lives as long as any clone of the frame, wherever it is (a session window,
+the cache, a renderer). VideoToolbox's internal buffer pools and session state
+are not visible to the process and are not in either number.
+
+`DecodeService::apply_lease(MediaLease { frame_cache, decoders })` enforces
+both shares. The cache evicts down to its share. Over the decoder share, idle
+sessions drop their windows, free pool slots are released, and idle sessions
+close until usage fits. A zero share closes every idle session, because the
+session state VideoToolbox keeps cannot be measured. A session in use gives its
+window back after each request while usage is over, and closes when it returns
+if usage is still over (always under a zero share). Frames a renderer holds
+stay counted until the renderer lets go, so the acknowledgement can report
+more than the lease only while that happens.
 
 ## GPU import and normalization (`pm-gpu::decode_in`)
 
@@ -196,12 +214,14 @@ and container breadth (ASF, FLV, M2TS, MTS, 3GP, 3G2, Ogg, M2V, M4V, AVI with B
 frames).
 
 Measured 2026-10-12 on the M4 Max with other lanes running (release build):
-57 files (11 fixtures, 46 generated), 87 file and backend pairs, 15,512 random
-accesses (both passes), 0 mismatches, 0 copied frames. Mean time per random
-access with a new session: VideoToolbox 1.8 to 24.8 ms (24.8 is 4K HEVC
-Main10), FFmpeg 0.24 to 117 ms (117 is 4K HEVC Main10 in software), dav1d 0.7
-to 2.9 ms, alpha pairs 2.2 to 3.6 ms. Index builds: 0.03 to 1.1 ms from tables
-and scans, 2.7 to 5.4 ms with a decode-order pass.
+68 files, 103 file and backend runs (a few files run in two groups), 17,330
+random accesses (both passes), 0 mismatches, 0 copied frames. Mean time per
+random access with a new session: VideoToolbox 1.6 to 23.5 ms (23.5 is 4K HEVC
+Main10), FFmpeg 0.21 to 117 ms (117 is 4K HEVC Main10 in software), dav1d 0.7
+to 2.9 ms, alpha pairs 2.2 to 3.6 ms. Slowest single probe: 189 ms (FFmpeg,
+4K HEVC Main10); the suite fails any probe over 2 s and aborts one running past
+60 s. Index builds: 0.03 to 1.1 ms from tables and scans on the corpus, 3.7 ms
+for a 108,000-frame H.264 MP4, 2.7 to 5.4 ms with a decode-order pass.
 
 ## Not done here
 

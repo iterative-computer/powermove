@@ -17,7 +17,10 @@ import type { EngineBootstrap, EngineControl, EngineNotice } from './ports';
 type EngineAction = { kind: 'send' | 'close' | 'log'; port: number; bytes?: Uint8Array | null; level?: string | null; message?: string | null };
 
 type Addon = {
-  EngineHost: new (process: string) => {
+  /** `onActions` receives the actions the engine produces off this thread
+   *  (the viewer presenter's frame descriptors, clock samples, and frame
+   *  responses, sent straight to the viewer's port: amendment 4). */
+  EngineHost: new (process: string, onActions?: (actions: EngineAction[]) => void) => {
     attach(port: number, peer: string): EngineAction[];
     detach(port: number): EngineAction[];
     receive(port: number, bytes: Uint8Array): EngineAction[];
@@ -52,16 +55,16 @@ function main(): void {
   }
   let addon: Addon;
   let engine: InstanceType<Addon['EngineHost']>;
+  const ports = new Map<number, MessagePortMain>();
   try {
     addon = loadAddon(addonPath);
-    engine = new addon.EngineHost(kind);
+    engine = new addon.EngineHost(kind, (actions) => run(actions));
   } catch (error) {
     notify({ type: 'fatal', message: `could not load the engine: ${error instanceof Error ? error.message : String(error)}` });
     process.exit(70);
   }
-  const ports = new Map<number, MessagePortMain>();
 
-  const run = (actions: EngineAction[]): void => {
+  function run(actions: EngineAction[]): void {
     for (const action of actions) {
       if (action.kind === 'send') {
         const port = ports.get(action.port);
@@ -74,7 +77,7 @@ function main(): void {
         notify({ type: 'log', level: action.level === 'error' ? 'error' : action.level === 'warn' ? 'warn' : 'info', message: action.message });
       }
     }
-  };
+  }
 
   let control: MessagePortMain | null = null;
   const shutdown = (): void => {

@@ -10,7 +10,8 @@ const electronMocks = vi.hoisted(() => ({
   removeListener: vi.fn(),
   send: vi.fn(),
   sendSync: vi.fn(),
-  getPathForFile: vi.fn()
+  getPathForFile: vi.fn(),
+  setSharedTextureReceiver: vi.fn()
 }));
 
 vi.mock('electron', () => ({
@@ -31,7 +32,8 @@ vi.mock('electron', () => ({
     send: electronMocks.send,
     sendSync: electronMocks.sendSync
   },
-  webUtils: { getPathForFile: electronMocks.getPathForFile }
+  webUtils: { getPathForFile: electronMocks.getPathForFile },
+  sharedTexture: { setSharedTextureReceiver: electronMocks.setSharedTextureReceiver }
 }));
 
 await import('./index');
@@ -66,6 +68,8 @@ beforeEach(() => {
 describe('preload bridge', () => {
   it('hands the page a configurable global so the kernel can take it away', () => {
     expect(electronMocks.configurable).toBe(true);
+    // The frame bridge receiver is exposed (inert until main sends surfaces).
+    expect(typeof electronMocks.bridge?.frameBridge?.videoFrame).toBe('function');
     expect(typeof bridge().extensionStore.trust).toBe('function');
   });
 

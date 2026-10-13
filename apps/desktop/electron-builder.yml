@@ -18,14 +18,17 @@ asarUnpack:
   - node_modules/@koromix/koffi-darwin-arm64/**
   # The native engine's pm-node addon (engine/crates/pm-node), loaded by the
   # interactive and job engine utility processes with process.dlopen, which
-  # cannot map out of the asar. Built by `bun run build:engine` into native/;
-  # the release script builds and verifies it with --with-engine.
+  # cannot map out of the asar, and main's pm-bridge addon (the frame bridge,
+  # engine/crates/pm-bridge), which main loads from app.asar.unpacked/native.
+  # Built by `bun run build:engine` into native/; the release script builds
+  # and verifies both with --with-engine.
   - native/**
 electronLanguages:
   - en
 files:
   - out/**
   - native/pm_node.node
+  - native/pm_bridge.node
   - "!**/* [2-9].*"
   - "!**/* [2-9]"
   # The native agent runtimes are copied once below, at the paths used by the

@@ -270,11 +270,14 @@ pub enum Event {
     ApplyPatches(PatchBatch),
     /// Engine → renderer: coalesced acknowledgement of applied patches.
     PatchesApplied(PatchesApplied),
-    /// Engine → host → viewer: a presented frame (playback and scrubbing).
+    /// Engine → viewer, over the viewer's port (never through main,
+    /// amendment 4): a presented frame (playback and scrubbing).
     Frame(FrameDescriptor),
     /// Viewer → engine: release a frame.
     ReleaseFrame(FrameRelease),
-    /// Engine → host: the surface pool (sent once per generation).
+    /// Engine → viewer: the surface pool, once per generation. The
+    /// surfaces themselves reach the viewer once each through the frame
+    /// bridge (main imports each once and sends it once per receiver).
     SurfacePool(SurfacePool),
     /// Viewer → engine: size, zoom, resolution, view override.
     Viewer(ViewerState),
@@ -525,6 +528,7 @@ impl Validate for Response {
     fn validate(&self) -> Result<(), Violation> {
         match self {
             Response::Scene(scene) => scene.validate(),
+            Response::Frame(descriptor) => descriptor.validate(),
             Response::LeaseUsage(usage) => usage.validate(),
             Response::Lease(lease) => lease.validate(),
             Response::HandleResolved(resolved) => resolved.validate(),
@@ -537,6 +541,7 @@ impl Validate for Event {
     fn validate(&self) -> Result<(), Violation> {
         match self {
             Event::ApplyPatches(batch) => batch.validate(),
+            Event::Frame(descriptor) => descriptor.validate(),
             Event::SurfacePool(pool) => pool.validate(),
             Event::Transport(command) => command.validate(),
             Event::Clock(sample) => sample.validate(),

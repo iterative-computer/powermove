@@ -17,8 +17,9 @@
 use crate::apple::cf::*;
 use crate::error::{MediaError, Result};
 use crate::ff::{CodecInfo, Packet};
-use crate::frame::{DecodedFrame, Pixels, corevideo_format, fourcc::*};
+use crate::frame::{CvBuffer, DecodedFrame, Pixels, corevideo_format, fourcc::*};
 use crate::index::FrameIndex;
+use pm_time::Rational;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
@@ -520,7 +521,11 @@ pub struct VtDecoder {
     session: VTDecompressionSessionRef,
     format: Cf,
     collector: Box<Collector>,
+    /// CMTime timescale: the media timebase's denominator. Timestamps in
+    /// media units are multiplied by `unit` (the timebase's numerator) so
+    /// VideoToolbox sees real durations; outputs are divided back.
     timescale: i32,
+    unit: i64,
     annexb: bool,
     nal: Option<(NalKind, usize)>,
     hardware: bool,
@@ -535,9 +540,14 @@ unsafe impl Send for VtDecoder {}
 impl VtDecoder {
     /// `allow_hardware` false asks for VideoToolbox's software decoder
     /// (when the hardware arbiter has no session to give).
-    pub fn new(cfg: &VtConfig, timebase_den: i64, allow_hardware: bool) -> Result<Self> {
-        let timescale = i32::try_from(timebase_den)
+    /// `timebase` is the media timebase of the timestamps fed in (and out).
+    pub fn new(cfg: &VtConfig, timebase: Rational, allow_hardware: bool) -> Result<Self> {
+        let timescale = i32::try_from(timebase.den())
             .map_err(|_| MediaError::unsupported("timescale too large for CMTime"))?;
+        let unit = timebase.num();
+        if unit <= 0 {
+            return Err(MediaError::invalid(format!("timebase {timebase:?}")));
+        }
         unsafe {
             let format = cfg
                 .format
@@ -608,6 +618,7 @@ impl VtDecoder {
                 format,
                 collector,
                 timescale,
+                unit,
                 annexb: cfg.annexb,
                 nal,
                 hardware,
@@ -715,13 +726,18 @@ impl VtDecoder {
                     status: st,
                 });
             }
+            let at = |v: i64| {
+                v.checked_mul(self.unit)
+                    .map(|v| CMTime::new(v, self.timescale))
+                    .ok_or_else(|| MediaError::invalid(format!("timestamp {v} overflows CMTime")))
+            };
             let timing = CMSampleTimingInfo {
-                duration: CMTime::new(pkt.duration, self.timescale),
-                pts: CMTime::new(pkt.pts, self.timescale),
-                dts: pkt
-                    .dts
-                    .map(|d| CMTime::new(d, self.timescale))
-                    .unwrap_or(CMTime::invalid()),
+                duration: at(pkt.duration)?,
+                pts: at(pkt.pts)?,
+                dts: match pkt.dts {
+                    Some(d) => at(d)?,
+                    None => CMTime::invalid(),
+                },
             };
             let size = data.len();
             let mut sb: CMSampleBufferRef = std::ptr::null_mut();
@@ -761,7 +777,7 @@ impl VtDecoder {
             if flags & kVTDecodeInfo_FrameDropped != 0 {
                 continue;
             }
-            if !pts.is_valid() || pts.timescale != self.timescale {
+            if !pts.is_valid() || pts.timescale != self.timescale || pts.value % self.unit != 0 {
                 return Err(MediaError::decode(format!(
                     "VideoToolbox output time {pts:?}"
                 )));
@@ -783,13 +799,13 @@ impl VtDecoder {
                     }
                     let format = corevideo_format(&pb)?;
                     out.push(DecodedFrame {
-                        pts: pts.value,
+                        pts: pts.value / self.unit,
                         format: Arc::new(format),
-                        pixels: Pixels::CoreVideo(pb),
+                        pixels: Pixels::CoreVideo(CvBuffer::untracked(pb)),
                         color: None,
                     });
                 }
-                _ => self.failures.push((pts.value, status)),
+                _ => self.failures.push((pts.value / self.unit, status)),
             }
         }
         Ok(())

@@ -321,9 +321,13 @@ impl FrameIndex {
         self.decode_plan(self.frames[n].sample)
     }
 
-    /// Reads the NAL unit headers of every sample (length-prefixed H.264 or
-    /// HEVC in MOV/MP4 or Matroska) and records the first VCL NAL type.
-    /// Reads a few bytes per NAL unit, never a payload.
+    /// Reads the NAL unit headers of every sync sample (length-prefixed
+    /// H.264 or HEVC in MOV/MP4 or Matroska) and records the first VCL NAL
+    /// type, which tells open-GOP sync samples apart. One read of
+    /// [`NAL_PEEK`] bytes per sync sample usually covers every header before
+    /// the first slice; parameter sets or SEI longer than that cost another
+    /// read at the next header. Never reads a payload, and never touches
+    /// non-sync samples (random access only needs their key flags and CTS).
     pub fn mark_nal_types(
         &mut self,
         path: &Path,
@@ -338,30 +342,39 @@ impl FrameIndex {
         let f = File::open(path)?;
         self.nal_codec = Some(codec);
         let strip = self.config.strip_prefix.clone().unwrap_or_default();
-        for s in &mut self.samples {
+        let mut buf = Vec::with_capacity(NAL_PEEK);
+        for s in self.samples.iter_mut().filter(|s| s.key) {
             let Loc::File { offset, size, .. } = s.loc else {
                 return Err(MediaError::invalid("NAL scan needs file locations"));
             };
             // With header stripping the stored bytes start mid-sample; the
             // stripped prefix comes first.
-            let mut p = 0u64;
             let total = size as u64 + strip.len() as u64;
-            let mut hdr = [0u8; 5];
+            // `buf` holds sample bytes [at, at + buf.len()).
+            let mut at = 0u64;
+            buf.clear();
+            let mut p = 0u64;
             while p + (length_size as u64) < total {
-                for (i, b) in hdr[..length_size + 1].iter_mut().enumerate() {
-                    let at = p + i as u64;
-                    *b = if at < strip.len() as u64 {
-                        strip[at as usize]
-                    } else {
-                        let mut one = [0u8; 1];
-                        f.read_exact_at(&mut one, offset + at - strip.len() as u64)?;
-                        one[0]
-                    };
+                let need = length_size as u64 + 1;
+                if p < at || p + need > at + buf.len() as u64 {
+                    at = p;
+                    let n = (total - p).min(NAL_PEEK as u64) as usize;
+                    buf.resize(n, 0);
+                    let mut filled = 0usize;
+                    while filled < n && p + (filled as u64) < strip.len() as u64 {
+                        buf[filled] = strip[(p + filled as u64) as usize];
+                        filled += 1;
+                    }
+                    if filled < n {
+                        let file_at = offset + p + filled as u64 - strip.len() as u64;
+                        f.read_exact_at(&mut buf[filled..], file_at)?;
+                    }
                 }
-                let len = hdr[..length_size]
+                let h = &buf[(p - at) as usize..(p - at + need) as usize];
+                let len = h[..length_size]
                     .iter()
                     .fold(0u64, |a, &b| (a << 8) | b as u64);
-                if let Some(t) = codec.first_vcl([&hdr[length_size..length_size + 1]]) {
+                if let Some(t) = codec.first_vcl([&h[length_size..]]) {
                     s.nal_type = Some(t);
                     break;
                 }
@@ -399,6 +412,9 @@ impl FrameIndex {
         ));
     }
 }
+
+/// Bytes read per sync sample to find its first slice's NAL type.
+pub const NAL_PEEK: usize = 64;
 
 /// Builds the index of stream `stream` (an FFmpeg stream index) of the file,
 /// choosing the container tables when they exist.

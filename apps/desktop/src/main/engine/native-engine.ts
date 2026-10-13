@@ -234,6 +234,17 @@ export class NativeEngine {
     client.deliver({ process: launch.process, port, generation: launch.generation }, port2);
   }
 
+  /** The client (window) holding `port` to an engine's current launch, if any
+   *  (the frame bridge sends a viewer's surfaces to that window). */
+  clientForPort(process: EngineProcess, port: number): number | null {
+    const generation = this.supervisors[process].current?.generation;
+    for (const [id, client] of this.clients) {
+      const held = client.ports.get(process);
+      if (held && held.port === port && held.generation === generation) return id;
+    }
+    return null;
+  }
+
   /** The port a client holds to an engine (for handle binding by clients). */
   clientPort(id: number, process: EngineProcess): { port: number; generation: number } | null {
     return this.clients.get(id)?.ports.get(process) ?? null;

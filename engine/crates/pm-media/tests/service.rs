@@ -8,7 +8,7 @@ use common::*;
 use pm_media::decode::Backend;
 use pm_media::decode::arbiter::{HardwareArbiter, HwCodec, LocalArbiter};
 use pm_media::decode::service::{
-    DecodeService, Direction, MediaSource, ReadAhead, ServiceConfig, read_ahead_order,
+    DecodeService, Direction, MediaLease, MediaSource, ReadAhead, ServiceConfig, read_ahead_order,
 };
 use pm_media::vt::DecodePurpose;
 use std::sync::Arc;
@@ -89,7 +89,10 @@ fn frame_cache_obeys_its_lease() {
     s.frame(19).unwrap();
     assert_eq!(svc.usage().cache.hits, hits + 1);
     // A shrink to zero empties the cache and trims free pool memory.
-    let after = svc.apply_lease(0, 0);
+    let after = svc.apply_lease(MediaLease {
+        frame_cache: 0,
+        decoders: 0,
+    });
     assert_eq!(
         (after.frame_cache, after.cache.frames, after.pool.free_bytes),
         (0, 0, 0)
@@ -216,6 +219,8 @@ fn lease_report_counts_every_frame_once() {
     }
     let u = svc.usage();
     assert!(u.frame_cache > 0 && u.cache.pool_bytes == 0, "{u:?}");
+    // The idle session's window shares its frames with the cache.
+    assert_eq!(u.pool.external_bytes, u.frame_cache, "{u:?}");
     assert_eq!(u.decoders, u.pool.bytes);
     let held = {
         let mut ff = svc
@@ -240,9 +245,89 @@ fn lease_report_counts_every_frame_once() {
         (u.frame_cache + u.decoders) as u64
     );
     // Shrink to zero while a renderer holds a pool frame: the cache empties,
-    // and the held frame moves to the decoder category.
-    let after = svc.apply_lease(0, 0);
+    // idle sessions close with their windows, free slots go, and only the
+    // held frame remains, in the decoder category.
+    let after = svc.apply_lease(MediaLease {
+        frame_cache: 0,
+        decoders: 0,
+    });
     assert_eq!((after.frame_cache, after.cache.pool_bytes), (0, 0));
-    assert!(after.decoders >= held.bytes(), "{after:?}");
+    assert_eq!(after.sessions, 0, "{after:?}");
+    assert_eq!(after.pool.external_bytes, 0, "{after:?}");
+    assert_eq!(after.pool.free_bytes, 0, "{after:?}");
+    assert_eq!(after.decoders, held.bytes(), "{after:?}");
     drop(held);
+    assert_eq!(svc.usage().decoders, 0);
+}
+
+/// Frames a session keeps in its window after the cache let them go are
+/// counted (VideoToolbox's CoreVideo buffers included), and the lease's
+/// decoder share takes them back: from idle sessions at once, from a session
+/// in use at its next request, and by closing sessions when that is not
+/// enough.
+#[test]
+fn session_windows_count_and_shrink_under_the_lease() {
+    let src = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
+    let svc = DecodeService::new(ServiceConfig {
+        cache_bytes: 0,
+        ..Default::default()
+    });
+    let one = {
+        let mut vt = svc
+            .session_with(&src, 1, DecodePurpose::Display, Some(Backend::VideoToolbox))
+            .unwrap();
+        assert_eq!(vt.info().backend, Backend::VideoToolbox);
+        for n in 0..5 {
+            vt.frame(n).unwrap();
+        }
+        vt.frame(0).unwrap().bytes()
+    };
+    // The cache holds nothing; the idle session's window holds the frames.
+    let u = svc.usage();
+    assert_eq!((u.frame_cache, u.sessions), (0, 1), "{u:?}");
+    assert!(u.pool.external_bytes >= 5 * one, "{u:?}");
+    assert_eq!(u.decoders, u.pool.bytes + u.pool.external_bytes, "{u:?}");
+    // A share of two frames: the idle window empties, the session stays.
+    let share = 2 * one;
+    let after = svc.apply_lease(MediaLease {
+        frame_cache: 0,
+        decoders: share,
+    });
+    assert_eq!((after.decoders, after.sessions), (0, 1), "{after:?}");
+    // In use under that share, the window gives frames back as it decodes:
+    // only the frame the caller holds counts.
+    {
+        let mut vt = svc
+            .session_with(&src, 1, DecodePurpose::Display, Some(Backend::VideoToolbox))
+            .unwrap();
+        for n in 5..15 {
+            let f = vt.frame(n).unwrap();
+            let u = svc.usage();
+            assert!(u.decoders <= share, "frame {n}: {u:?}");
+            drop(f);
+        }
+        // A zero share while the session is in use: it closes on return.
+        svc.apply_lease(MediaLease {
+            frame_cache: 0,
+            decoders: 0,
+        });
+        vt.frame(20).unwrap();
+    }
+    let u = svc.usage();
+    assert_eq!(
+        (u.decoders, u.sessions, u.pool.external_buffers),
+        (0, 0, 0),
+        "{u:?}"
+    );
+    // Growth restores normal behavior: windows keep frames again.
+    svc.apply_lease(MediaLease::UNLIMITED);
+    {
+        let mut vt = svc
+            .session_with(&src, 1, DecodePurpose::Display, Some(Backend::VideoToolbox))
+            .unwrap();
+        vt.frame(3).unwrap();
+    }
+    let u = svc.usage();
+    assert_eq!(u.sessions, 1, "{u:?}");
+    assert!(u.frame_cache > 0 && u.pool.external_bytes > 0, "{u:?}");
 }

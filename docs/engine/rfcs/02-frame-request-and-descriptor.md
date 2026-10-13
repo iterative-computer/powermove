@@ -115,3 +115,65 @@ measures that cost under main-process load.
    per-clip offline or proxy badge) rather than the lowest across sources.
    Appendix D only needs the lowest; per-clip status comes from the media
    index.
+
+## Implementation notes (production bridge, Phase 2)
+
+Draft changes made while building the production frame bridge (plan
+section 18 with amendments 4 and 5; design notes in
+[`../bridge.md`](../bridge.md)).
+
+**Needs the contract owner's sign-off.** These are not additive: the four
+new fields are required (`FrameDescriptor.view_seq` and `duration`,
+`ViewerState.edr` and `view_seq`; `duration` is an `Option` but the field
+itself must be present), the descriptor gained validation, the ts-rs types
+and wire fixtures were regenerated, and `PROTOCOL_BUILD` changed from
+`protocol-15e365d7043a8bfe` to `protocol-16c8e6e125019103`. Every lane that
+constructs these structs or speaks the protocol must regenerate and rebuild
+after the merge; draft contracts interoperate only between equal builds.
+
+- **`FrameDescriptor.view_seq`** and **`ViewerState.view_seq`**: the viewer
+  numbers its states; each descriptor echoes the state it shows. With
+  `revision` it tags a frame completely, so overlays drawn from its geometry
+  match its pixels during view gestures (zoom, pan, orbit, walk), which
+  change no document revision.
+- **`FrameDescriptor.duration`**: `Some` for timed (playback) frames, shown
+  from `pts` for that long and presented by the viewer's jitter buffer at
+  their predicted display time; `None` for frames shown at the next refresh
+  (paused, scrub, gesture). This replaces inferring presentation from the
+  transport state, which races at play and pause.
+- **`ViewerState.edr`**: the canvas's display can show values above 1.0
+  (CSS `dynamic-range: high`). The engine presents through an `rgbaf16` pool
+  when it is set and the lease allows, and `bgra` with the blue-noise dither
+  otherwise (amendment 4). `ViewerColorSpace` keeps its two values: an
+  `rgbaf16` pool's format already says the values are extended.
+- **`FrameDescriptor` validation**: a positive duration, a viewer format, and
+  finite overlay geometry.
+- **Release (`FrameRelease`)**: S1 confirmed the API. The viewer calls
+  `VideoFrame.close()` after submitting the draw that read the frame and
+  releases the slot when `queue.onSubmittedWorkDone()` resolves; the per-use
+  release callback runs before the GPU finishes reading and is not used.
+  Frames the viewer never drew are released as soon as they are closed.
+- **Transport (amendment 4)**: `Event::Frame` and `Event::SurfacePool` go from
+  the engine to the viewer over the viewer's `MessageChannelMain` port;
+  main is never on the per-frame path. Main sees each surface once over Mach
+  and imports it once.
+
+Open question 1 (overlay geometry as a separate event) stays open: the test
+source sends one overlay layer per frame, and frames without selection
+changes still carry it. The descriptor's size with one layer is in
+[`../bridge.md`](../bridge.md).
+
+Later production findings (details and measurements in
+[`../bridge.md`](../bridge.md)):
+
+- **A page that goes away never reports its imports released.** Electron
+  drops the renderer's release notice once a page unloads, so main reclaims
+  the surfaces of a reloaded, navigated, crashed, or closed receiver after a
+  grace period once its own import is released. `FrameRelease` and
+  `allReferencesReleased` are unchanged for live pages.
+- **Sizes settle before they reach the engine.** The viewer sends a new
+  `ViewerState.size` only once it held still for 150 ms; zoom, pan, and the
+  view override still go at once. A live window resize otherwise replaces
+  the pool at every step.
+- **`ViewerState.edr` follows the hosting window**, and a setting can turn
+  it off (8-bit presentation on an EDR display).

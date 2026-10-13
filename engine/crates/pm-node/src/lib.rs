@@ -13,8 +13,13 @@ use pm_engine::{Action, Engine, EngineConfig, EngineStatus, PeerKind};
 use pm_protocol::error::EngineProcess;
 use pm_protocol::host::PortId;
 
+// napi registers the exports; unit tests never call them.
 #[cfg(feature = "node")]
+#[cfg_attr(test, allow(dead_code))]
 mod node;
+
+#[cfg(target_os = "macos")]
+pub mod present;
 
 /// Parses `"interactive"` or `"job"`.
 pub fn parse_process(text: &str) -> Result<EngineProcess, String> {
@@ -37,17 +42,60 @@ pub fn parse_peer(text: &str) -> Result<PeerKind, String> {
 
 pub use pm_engine::qos::{apply_process_qos, current_qos};
 
+/// Where actions produced off the JavaScript thread go (the viewer
+/// presenter's frames): pm-node's threadsafe function posts them on the
+/// utility process's ports.
+pub type ActionSink = std::sync::Arc<dyn Fn(Vec<Action>) + Send + Sync>;
+
+#[cfg(target_os = "macos")]
+type PresenterStats = std::sync::Arc<std::sync::Mutex<present::Stats>>;
+#[cfg(not(target_os = "macos"))]
+type PresenterStats = ();
+
 /// One engine process as its JavaScript host sees it.
 pub struct EngineHost {
     engine: Engine,
+    presenter: Option<PresenterStats>,
 }
 
 impl EngineHost {
     pub fn new(process: EngineProcess) -> Result<Self, String> {
+        Self::with_sink(process, None, |key| std::env::var(key).ok())
+    }
+
+    /// An engine whose asynchronous actions go to `sink`. The interactive
+    /// engine installs the frame-bridge presenter when main passed it a
+    /// bridge name (`POWERMOVE_FRAME_BRIDGE`) and a sink exists.
+    pub fn with_sink(
+        process: EngineProcess,
+        sink: Option<ActionSink>,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, String> {
         apply_process_qos(process)?;
-        Ok(Self {
-            engine: Engine::new(EngineConfig::new(process)),
-        })
+        #[allow(unused_mut)]
+        let mut engine = Engine::new(EngineConfig::new(process));
+        #[allow(unused_mut)]
+        let mut presenter = None;
+        #[cfg(target_os = "macos")]
+        if let (Some(sink), Some(config)) = (sink, present::PresenterConfig::from_env(process, env))
+        {
+            let bridge = present::BridgePresenter::start(config, sink)?;
+            presenter = Some(bridge.stats_handle());
+            engine.set_presenter(Box::new(bridge));
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (sink, env);
+        Ok(Self { engine, presenter })
+    }
+
+    /// The presenter's per-frame trace as JSON (S1 harness), emptied.
+    pub fn take_present_trace(&self) -> String {
+        #[cfg(target_os = "macos")]
+        if let Some(stats) = &self.presenter {
+            let trace = std::mem::take(&mut stats.lock().unwrap_or_else(|e| e.into_inner()).trace);
+            return serde_json::to_string(&trace).unwrap_or_else(|_| "[]".into());
+        }
+        "[]".into()
     }
 
     pub fn attach(&mut self, port: u32, peer: &str) -> Result<Vec<Action>, String> {
@@ -71,11 +119,20 @@ impl EngineHost {
         self.engine.status()
     }
 
-    /// Status as JSON, with the thread's QoS class added.
+    /// Status as JSON, with the thread's QoS class and the presenter's
+    /// counters added.
     pub fn status_json(&self) -> String {
         let mut value = serde_json::to_value(self.status()).unwrap_or_default();
         if let Some(object) = value.as_object_mut() {
             object.insert("qos".into(), current_qos().into());
+            #[cfg(target_os = "macos")]
+            if let Some(stats) = &self.presenter {
+                let stats = stats.lock().unwrap_or_else(|e| e.into_inner());
+                object.insert(
+                    "presenter".into(),
+                    serde_json::to_value(&*stats).unwrap_or_default(),
+                );
+            }
         }
         value.to_string()
     }
