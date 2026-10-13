@@ -90,12 +90,15 @@ export class RestartPolicy {
   }
 }
 
-/** Describes how a utility process ended, for the log. */
+const SIGNALS: Readonly<Record<number, string>> = { 1: 'SIGHUP', 2: 'SIGINT', 4: 'SIGILL', 5: 'SIGTRAP', 6: 'SIGABRT', 8: 'SIGFPE', 9: 'SIGKILL', 10: 'SIGBUS', 11: 'SIGSEGV', 13: 'SIGPIPE', 15: 'SIGTERM' };
+
+/** Describes how a utility process ended, for the log. Electron reports
+ *  `WEXITSTATUS` for a normal exit and `WTERMSIG` for a signal in the same
+ *  number, so a small status names the signal it would be. */
 export function describeExit(code: number | null): string {
   if (code === null) return 'exited';
-  // Node reports a signal death as 128 + signal on macOS utility processes.
-  if (code > 128 && code < 160) return `signal ${code - 128}`;
-  return `exit code ${code}`;
+  const signal = SIGNALS[code];
+  return signal ? `exit status ${code} (${signal} if signalled)` : `exit status ${code}`;
 }
 
 export function crashReport(process: EngineProcess, attempt: number, exit: string, suspects: ErrorScope[], markedFailed: ErrorScope[], restartInMs: number): CrashReport {

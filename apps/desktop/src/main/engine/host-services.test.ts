@@ -231,7 +231,8 @@ describe('hardware sessions', () => {
 describe('crash handling', () => {
   it('backs off 250 ms doubling to 30 s', () => {
     expect([0, 1, 2, 3, 8, 1000].map(restartBackoffMs)).toEqual([250, 250, 500, 1000, 30_000, 30_000]);
-    expect(describeExit(0)).toBe('exit code 0');
+    expect(describeExit(0)).toBe('exit status 0');
+    expect(describeExit(9)).toBe('exit status 9 (SIGKILL if signalled)');
   });
 
   it('resets the attempt count after a healthy interval', () => {

@@ -134,6 +134,7 @@ export class NativeEngine {
         handler: (launch) => this.handlerFor(process, launch),
         ledger: this.ledger,
         log: options.log,
+        hostNow: options.hostNow,
         ...(options.now ? { now: options.now } : {}),
         ...(options.schedule ? { schedule: options.schedule } : {})
       });

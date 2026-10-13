@@ -20,9 +20,11 @@ export type Launch = {
   generation: number;
   hostPort: number;
   connection: HostConnection;
-  pid: number | undefined;
+  readonly pid: number | undefined;
   /** Posts a control message (with transferred ports) to the engine. */
   control(message: EngineControl, transfer?: PortLike[]): void;
+  /** What the engine reported when it started (build, pid, clock check). */
+  started?: { build: string; pid: number; clockSkewUs: number | null };
 };
 
 export type SupervisorOptions = {
@@ -35,6 +37,8 @@ export type SupervisorOptions = {
   handler: (launch: () => Launch | null) => HostHandler;
   ledger: CrashLedger;
   log: Log;
+  /** The shared host clock in µs, to check the engine reads the same one. */
+  hostNow?: () => number;
   now?: () => number;
   /** Delays restarts (tests pass a fake). */
   schedule?: (fn: () => void, ms: number) => { cancel(): void };
@@ -133,7 +137,10 @@ export class EngineSupervisor {
       generation,
       hostPort,
       connection,
-      pid: child.pid,
+      // Known once the process has spawned.
+      get pid() {
+        return child.pid;
+      },
       control: (message, transfer) => {
         if (this.child === child) child.postMessage(message, transfer);
       }
@@ -143,6 +150,14 @@ export class EngineSupervisor {
       if (!isEngineNotice(notice)) return;
       if (notice.type === 'log') this.options.log(notice.level, `[${process} engine] ${notice.message}`);
       else if (notice.type === 'fatal') this.options.log('error', `[${process} engine] ${notice.message}`);
+      else if (notice.type === 'started') {
+        // The engine stamped `clock` just before posting; main reads its
+        // own host clock on arrival. A large or negative difference means
+        // the two do not share the clock contract 13 depends on.
+        const skew = this.options.hostNow ? this.options.hostNow() - notice.clock : null;
+        launch.started = { build: notice.build, pid: notice.pid, clockSkewUs: skew };
+        this.options.log('info', `the ${process} engine started (pid ${notice.pid}, ${notice.build}${skew === null ? '' : `, clock delivered after ${skew} µs`})`);
+      }
     });
     child.on('exit', (code: number) => this.onExit(launch, code));
     child.postMessage({ type: 'connect', port: hostPort, peer: 'host' } satisfies EngineControl, [port1]);
