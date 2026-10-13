@@ -73,7 +73,6 @@ export function storeByteLimit(key: string): number {
 const encoder = new TextEncoder();
 
 export class StoreEngine {
-  private readonly records = new HistoryRecords();
   private readonly pending = new Map<string, PendingWrite>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly queues = new Map<string, Promise<void>>();
@@ -175,7 +174,7 @@ export class StoreEngine {
   private pack(key: string, value: unknown): string {
     let serialized: string | undefined;
     try {
-      serialized = JSON.stringify(packStoredHistory(key, value, this.records));
+      serialized = JSON.stringify(packStored(key, value));
     } catch (error) {
       throw new Rejection(IPC.storeSet, `value is not JSON-serialisable: ${errorText(error)}`);
     }
@@ -192,7 +191,7 @@ export class StoreEngine {
     try { value = JSON.parse(serialized); }
     catch { throw new Rejection(IPC.storeSetSerialized, 'invalid JSON'); }
     if (key.startsWith('projectState.')) return this.encodeValue(key, value);
-    const packed = packStoredHistory(key, value, this.records);
+    const packed = packStored(key, value);
     return packed === value ? serialized : JSON.stringify(packed);
   }
 
@@ -214,7 +213,6 @@ export class StoreEngine {
     const entries: Array<[string, Uint8Array]> = [];
     const loadedProjectIds = new Set<string>();
     let registry: unknown;
-    this.records.clear();
     // Mirrors main, which replaces everything it held with what is on disk.
     this.sessions.clear();
     this.unread.clear();
@@ -239,7 +237,7 @@ export class StoreEngine {
 
       try {
         const value: unknown = JSON.parse(serialized);
-        const packed = packStoredHistory(candidateKey, value, this.records);
+        const packed = packStored(candidateKey, value);
         const before = candidateKey.startsWith('projectState.') && isRecord(value) ? value.history : value;
         const after = candidateKey.startsWith('projectState.') && isRecord(packed) ? packed.history : packed;
         // Finish lossless migration through the normal atomic writer. Otherwise
@@ -389,6 +387,13 @@ export class StoreEngine {
   private emitError(key: string, error: string): void {
     this.reply({ type: 'error', key, error });
   }
+}
+
+/* Every value arrives here freshly parsed or cloned, so records interned for
+   an earlier value can never match a later one: each value is packed with its
+   own interning table, which still shares equal records within its history. */
+function packStored(key: string, value: unknown): unknown {
+  return packStoredHistory(key, value, new HistoryRecords());
 }
 
 function withHistory(value: Record<string, unknown>, stored: string | null): unknown {
