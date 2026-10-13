@@ -49,6 +49,15 @@ export const CHECK_IN_TIMEOUT_MS = 15_000;
  *  `allReferencesReleased` before main drops its reference anyway. */
 export const RECLAIM_GRACE_MS = 2000;
 
+/** Delays before sending an import again after a failed send (or when no
+ *  window owned its client port yet). A surface that never reaches the
+ *  preload leaves its pool slot undrawable: every descriptor for it would
+ *  park and be released undrawn until the pool is replaced. */
+export const SEND_RETRY_MS = [16, 100, 500, 2000] as const;
+
+/** Ended launches kept while Chromium may still release their surfaces. */
+export const MAX_ENDED_LAUNCHES = 4;
+
 /** One event from pm-bridge's receive thread (`BridgeEvent`). */
 export type BridgeEvent = {
   kind: 'accepted' | 'rejected' | 'surface' | 'retire' | 'goodbye' | 'gone' | 'error';
@@ -78,7 +87,10 @@ export interface BridgeHostLike {
   held(): { count: number; bytes: number };
   /** The retain count of a held surface's IOSurfaceRef in main (tests). */
   surfaceRetainCount?(generation: number, poolIndex: number): number | null;
+  /** Returns at once; the receive thread ends on its own shortly after. */
   stop(): void;
+  /** Whether the receive thread is still running (tests). */
+  running?(): boolean;
   releaseAll(): void;
 }
 
@@ -158,6 +170,9 @@ type Import = {
   args: SurfaceArgs;
   sent: number;
   sendFailures: number;
+  /** Retries scheduled so far, and the pending retry timer. */
+  retries: number;
+  retry: unknown;
   /** Main released its own reference (retired, or the launch ended). */
   released: boolean;
   /** The window it was sent to, and whether that page is gone. */
@@ -174,9 +189,12 @@ export type BridgeLaunchStats = {
   rejections: number;
   surfaces: number;
   imports: number;
-  /** Sends per import: 1 for every import (amendment 4). */
+  /** Sends per import: 1 for every import (amendment 4), plus retries. */
   sends: number;
   sendFailures: number;
+  /** Sends repeated after a failure; imports that never reached a window. */
+  sendRetries: number;
+  undelivered: number;
   retired: number;
   allReleased: number;
   /** Surfaces dropped after their receiver went away without releasing them. */
@@ -197,6 +215,8 @@ export class BridgeLaunch {
     imports: 0,
     sends: 0,
     sendFailures: 0,
+    sendRetries: 0,
+    undelivered: 0,
     retired: 0,
     allReleased: 0,
     reclaimed: 0,
@@ -234,7 +254,10 @@ export class BridgeLaunch {
     }
   }
 
-  /** The launch ended: stop receiving and release main's references. */
+  /** The launch ended: stop receiving and release main's references.
+   *  Never blocks: pm-bridge's receive thread sees the stop within 50 ms
+   *  (100 ms after the check-in), even when the engine exited before it
+   *  checked in, and events it still had in flight are ignored here. */
   ended(): void {
     if (this.stopped) return;
     this.stopped = true;
@@ -242,12 +265,17 @@ export class BridgeLaunch {
     for (const entry of this.imports.values()) this.releaseImport(entry);
   }
 
-  /** Drops everything main holds (app quit). */
+  /** Drops everything main holds (app quit, or an old ended launch). */
   dispose(): void {
     this.ended();
     for (const entry of this.imports.values()) if (entry.reclaim !== null) this.timers.clear(entry.reclaim);
     this.imports.clear();
     this.host.releaseAll();
+  }
+
+  /** Whether the launch ended and main no longer holds any of its surfaces. */
+  get finished(): boolean {
+    return this.stopped && this.host.held().count === 0;
   }
 
   /** A window's page went away (reload, navigation, crash, close): what was
@@ -256,6 +284,10 @@ export class BridgeLaunch {
     for (const entry of this.imports.values()) {
       if (entry.owner !== owner || entry.receiverGone) continue;
       entry.receiverGone = true;
+      if (entry.retry !== null) {
+        this.timers.clear(entry.retry);
+        entry.retry = null;
+      }
       this.scheduleReclaim(entry);
     }
   }
@@ -290,6 +322,8 @@ export class BridgeLaunch {
   }
 
   private onEvent(event: BridgeEvent): void {
+    // Events the receive thread had in flight when the launch ended.
+    if (this.stopped) return;
     try {
       this.handle(event);
     } catch (error) {
@@ -356,17 +390,23 @@ export class BridgeLaunch {
     }
     this.stats.imports++;
     const args: SurfaceArgs = { kind: 'powermove-frame-surface', launch: this.id, generation, poolIndex, poolSize, width, height, format };
-    const entry: Import = { imported, clientPort, args, sent: 0, sendFailures: 0, released: false, owner: null, receiverGone: false, reclaim: null };
+    const entry: Import = { imported, clientPort, args, sent: 0, sendFailures: 0, retries: 0, retry: null, released: false, owner: null, receiverGone: false, reclaim: null };
     this.imports.set(key, entry);
     this.send(entry);
   }
 
-  /** Sends an import to the window that owns its client port, once. */
+  /** Sends an import to the window that owns its client port: once, or
+   *  again after a failed send (`SEND_RETRY_MS`) while the import is live
+   *  and its page is still there. */
   private send(entry: Import): void {
+    entry.retry = null;
+    if (entry.released || entry.receiverGone || this.stopped) return;
+    const what = `generation ${entry.args.generation} surface ${entry.args.poolIndex}`;
     const receiver = this.resolve(entry.clientPort);
     const frame = receiver?.frame;
     if (!receiver || !frame || frame.isDestroyed?.() || frame.detached) {
-      this.log('warn', `frame bridge: no window for client port ${entry.clientPort}; generation ${entry.args.generation} surface ${entry.args.poolIndex} not sent`);
+      this.log('warn', `frame bridge: no window for client port ${entry.clientPort}; ${what} not sent`);
+      this.retrySend(entry);
       return;
     }
     entry.owner = receiver.owner;
@@ -375,8 +415,22 @@ export class BridgeLaunch {
     this.sharedTexture.sendSharedTexture({ frame: frame as never, importedSharedTexture: entry.imported }, entry.args).catch((error: unknown) => {
       entry.sendFailures++;
       this.stats.sendFailures++;
-      this.log('warn', `frame bridge: sending generation ${entry.args.generation} surface ${entry.args.poolIndex} failed: ${error instanceof Error ? error.message : String(error)}`);
+      this.log('warn', `frame bridge: sending ${what} failed: ${error instanceof Error ? error.message : String(error)}`);
+      this.retrySend(entry);
     });
+  }
+
+  private retrySend(entry: Import): void {
+    if (entry.released || entry.receiverGone || this.stopped || entry.retry !== null) return;
+    const delay = SEND_RETRY_MS[entry.retries];
+    if (delay === undefined) {
+      this.stats.undelivered++;
+      this.log('error', `frame bridge: generation ${entry.args.generation} surface ${entry.args.poolIndex} never reached client port ${entry.clientPort}; that slot stays undrawn until the pool is replaced`);
+      return;
+    }
+    entry.retries++;
+    this.stats.sendRetries++;
+    entry.retry = this.timers.set(() => this.send(entry), delay);
   }
 
   private retire(clientPort: number, generation: number): void {
@@ -393,6 +447,10 @@ export class BridgeLaunch {
   private releaseImport(entry: Import): void {
     if (entry.released) return;
     entry.released = true;
+    if (entry.retry !== null) {
+      this.timers.clear(entry.retry);
+      entry.retry = null;
+    }
     try {
       entry.imported.release();
     } catch (error) {
@@ -432,8 +490,13 @@ export class FrameBridge {
       this.current.ended();
       this.previous.push(this.current);
       // An ended launch's imports are released; keep it while Chromium may
-      // still report (or a reclaim may still drop) its surfaces.
-      this.previous = this.previous.filter((l) => l.status().held.count > 0).slice(-4);
+      // still report (or a reclaim may still drop) its surfaces. Launches
+      // past the newest few are disposed (main drops its references) rather
+      // than left to the garbage collector.
+      const keep: BridgeLaunch[] = [];
+      for (const launch of this.previous) if (!launch.finished) keep.push(launch);
+      for (const launch of keep.splice(0, Math.max(0, keep.length - MAX_ENDED_LAUNCHES))) launch.dispose();
+      this.previous = keep;
     }
     try {
       const host = new this.options.addon.BridgeHost(this.options.addon.serviceName(), this.options.allowUnsignedDev);

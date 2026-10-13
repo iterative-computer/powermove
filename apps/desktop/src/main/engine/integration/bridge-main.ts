@@ -21,15 +21,20 @@
  * the presented frame. And the bridge's own behaviour: playback through
  * the jitter buffer, view changes tagging frames, a resize replacing the
  * pool, popout following, a reload re-sending surfaces to the new
- * receiver, an engine crash with a new rendezvous, and teardown.
+ * receiver, an engine crash with a new rendezvous, an engine that exits
+ * before it checks in (stopping its launch must not block main), and
+ * teardown.
  */
+import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 
 import { app, BrowserWindow, ipcMain, screen, type NativeImage } from 'electron';
 
-import { installNativeEngine, type InstalledNativeEngine } from '../index';
+import type { BridgeAddon, BridgeEvent } from '../bridge';
+import { bridgeAddonPath, installNativeEngine, type InstalledNativeEngine } from '../index';
 
 type Step = { name: string; ms: number; detail?: unknown };
 const steps: Step[] = [];
@@ -119,6 +124,8 @@ async function main(): Promise<void> {
     check(accepted.accepted!.pidversion > 0, 'the audit token carried a pidversion');
     check(accepted.rejections === 0, 'no message was refused');
     step('rendezvous: one verified check-in from the spawned engine', { policy: accepted.policy, pid: firstPid, pidversion: accepted.accepted!.pidversion, name: accepted.name });
+
+    await stopBeforeCheckIn(bridgeAddonPath({ isPackaged: false, resourcesPath: '', appPath: desktop, env: process.env }));
 
     win = new BrowserWindow({
       show: false,
@@ -361,6 +368,37 @@ async function main(): Promise<void> {
     await rm(home, { recursive: true, force: true });
     process.stdout.write(`${JSON.stringify({ steps, totalMs: Math.round(performance.now() - started), versions: { electron: process.versions.electron, chrome: process.versions.chrome }, log: logs.slice(-120) })}\n`);
   }
+}
+
+/**
+ * An engine that exits before it checks in (the addon failed to load, an
+ * early crash, a quit during startup): main stops its launch from the
+ * JavaScript thread in the child's exit handler. That must return at once,
+ * not when the 15 s check-in wait runs out, and the receive thread must end
+ * on its own shortly after, reporting nothing.
+ */
+async function stopBeforeCheckIn(addonFile: string): Promise<void> {
+  const addon = createRequire(__filename)(addonFile) as BridgeAddon;
+  const host = new addon.BridgeHost(addon.serviceName(), true);
+  check(typeof host.running === 'function', 'pm-bridge reports whether its receive thread runs');
+  const child = spawn('/bin/sleep', ['0.2'], { stdio: 'ignore' });
+  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  host.expectChild(child.pid!);
+  const events: BridgeEvent[] = [];
+  host.start((event) => events.push(event), 15_000);
+  await exited;
+  check(host.running!(), 'the receive thread is waiting for the check-in');
+  const asked = performance.now();
+  host.stop();
+  const blockedMs = performance.now() - asked;
+  check(blockedMs < 20, `stop returned at once (${blockedMs.toFixed(2)} ms)`);
+  await waitFor('the receive thread ended', () => !host.running!(), 1000);
+  const endedMs = performance.now() - asked;
+  check(endedMs < 500, `the receive thread ended within ${endedMs.toFixed(0)} ms of the stop`);
+  await sleep(50);
+  check(events.length === 0, `a stop reports nothing (${JSON.stringify(events)})`);
+  host.releaseAll();
+  step('an engine that exits before its check-in: stopping the launch does not block main', { blockedMs: Math.round(blockedMs * 100) / 100, endedMs: Math.round(endedMs) });
 }
 
 /** Reads the frame code and the 8-bit ramp row from a capture of a frame
