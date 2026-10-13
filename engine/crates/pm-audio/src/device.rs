@@ -149,6 +149,22 @@ pub mod coreaudio {
     }
 }
 
+/// The default output device's id and its presentation latency in µs at
+/// `rate` (device + stream latency), for following device changes.
+pub fn default_output_state(rate: u32) -> Option<(u32, u32)> {
+    #[cfg(target_os = "macos")]
+    {
+        let id = coreaudio::default_output()?;
+        let (latency, _, _, _) = coreaudio::latency(id)?;
+        Some((id, (latency as u64 * 1_000_000 / rate.max(1) as u64) as u32))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = rate;
+        None
+    }
+}
+
 /// The default output device's format and latency.
 pub fn default_output_info() -> Result<DeviceInfo> {
     let host = cpal::default_host();

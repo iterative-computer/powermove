@@ -98,6 +98,9 @@ impl DeviceSide {
     }
 }
 
+/// Reads the output device's id and presentation latency (µs).
+type DeviceWatch = Box<dyn FnMut() -> Option<(u32, u32)> + Send>;
+
 enum Control {
     Command(TransportCommand, std::sync::mpsc::SyncSender<Result<()>>),
     Project(
@@ -107,6 +110,8 @@ enum Control {
         Option<i64>,
     ),
     Solo(Option<HashSet<String>>),
+    /// Polled about once a second: the output device id and its latency.
+    Watch(DeviceWatch),
     Shutdown,
 }
 
@@ -179,6 +184,10 @@ impl Playback {
             .shared
             .latency_us
             .store(stream.info.latency_us(), Ordering::Relaxed);
+        let rate = stream.info.sample_rate;
+        let _ = playback.tx.send(Control::Watch(Box::new(move || {
+            crate::device::default_output_state(rate)
+        })));
         playback.stream = Some(stream);
         Ok(playback)
     }
@@ -244,6 +253,9 @@ impl Playback {
             stopped_published: false,
             stop_pending: false,
             core: ClockCore::new(device_rate, seq.clone()),
+            watch: None,
+            device_state: None,
+            last_watch: std::time::Instant::now(),
         };
         let thread = std::thread::Builder::new()
             .name("pm-audio-render".into())
@@ -312,6 +324,14 @@ impl Playback {
         answer
             .recv_timeout(Duration::from_secs(5))
             .map_err(|_| AudioError::Device("the render thread did not answer".into()))?
+    }
+
+    /// Follows an output device the host owns: `watch` reports its id and
+    /// presentation latency (µs) and is polled about once a second. A change
+    /// re-anchors the clock on a new epoch from what is heard (playback
+    /// continues). [`Playback::start`] watches the default output itself.
+    pub fn set_device_watch(&self, watch: impl FnMut() -> Option<(u32, u32)> + Send + 'static) {
+        let _ = self.tx.send(Control::Watch(Box::new(watch)));
     }
 
     /// The mixer's monitor solo (strip ids heard; empty or `None`: all).
@@ -455,6 +475,9 @@ struct RenderThread {
     /// A run ended; publish the stopped clock once the ring has played out.
     stop_pending: bool,
     core: ClockCore,
+    watch: Option<DeviceWatch>,
+    device_state: Option<(u32, u32)>,
+    last_watch: std::time::Instant,
 }
 
 impl RenderThread {
@@ -493,6 +516,9 @@ impl RenderThread {
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(_) => return,
+            }
+            if self.last_watch.elapsed() >= Duration::from_secs(1) && self.device_changed() {
+                need_preroll = true;
             }
             if !self.transport.is_running() {
                 if self.stop_pending && self.ring.queued() == 0 {
@@ -594,8 +620,53 @@ impl RenderThread {
                 self.solo = s;
                 false
             }
+            Control::Watch(w) => {
+                self.watch = Some(w);
+                self.device_state = self.watch.as_mut().and_then(|w| w());
+                false
+            }
             Control::Shutdown => false,
         }
+    }
+
+    /// Follows the output device (contract 6, open question 3: playback
+    /// continues on a new device with a new epoch). Returns whether playback
+    /// restarted.
+    fn device_changed(&mut self) -> bool {
+        self.last_watch = std::time::Instant::now();
+        let Some(watch) = self.watch.as_mut() else {
+            return false;
+        };
+        let now = watch();
+        if now.is_none() || now == self.device_state {
+            return false;
+        }
+        self.device_state = now;
+        if let Some((_, latency)) = now {
+            self.shared.latency_us.store(latency, Ordering::Relaxed);
+        }
+        if !self.transport.is_running() {
+            self.stopped_published = false;
+            self.publish_stopped();
+            return false;
+        }
+        // Re-anchor on a new epoch from what is heard now.
+        let at = self.heard_sample().unwrap_or(self.transport.position());
+        let ticks =
+            pm_protocol::common::Ticks::saturating_from_i128(self.transport.ticks_of(at) as i128);
+        if self
+            .transport
+            .apply(&TransportCommand::Seek {
+                time: ticks,
+                mode: pm_protocol::clock::SeekMode::Exact,
+            })
+            .is_ok()
+        {
+            self.ring.set_epoch(self.transport.epoch());
+            self.shared.reanchor.store(true, Ordering::Relaxed);
+            return true;
+        }
+        false
     }
 
     fn publish_stopped(&mut self) {

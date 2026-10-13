@@ -464,3 +464,50 @@ fn a_device_at_another_rate() {
     assert_eq!(clock.sample_rate, 44_100);
     assert_eq!(playback.device_rate(), 44_100);
 }
+
+/// A device change (here, its latency) re-anchors on a new epoch and
+/// playback continues from what was heard.
+#[test]
+fn a_device_change_re_anchors() {
+    let dir = temp_dir("device-change");
+    let file = ramp_file(&dir, 6);
+    let (playback, mut dev, _rig) = setup(&file, 6.0, SR, 0.0);
+    let state = std::sync::Arc::new(std::sync::Mutex::new((7u32, LATENCY_US)));
+    let seen = state.clone();
+    playback.set_device_watch(move || Some(*seen.lock().unwrap()));
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    dev.run(100);
+    let before = playback.clock().unwrap();
+    *state.lock().unwrap() = (7, 30_000);
+    dev.run(160);
+    let after = playback.clock().unwrap();
+    assert!(after.epoch > before.epoch, "a new epoch");
+    assert_eq!(after.output_latency_us, 30_000);
+    assert_eq!(after.state, TransportState::Playing);
+    // Media continued: no jump back to the start.
+    let positions: Vec<i64> = dev
+        .log
+        .iter()
+        .filter(|(_, b)| b[1] == 0.5)
+        .map(|(_, b)| position_of(b[0]))
+        .collect();
+    assert!(
+        positions.windows(2).all(|w| w[1] >= w[0] - SR as i64 / 10),
+        "playback went back"
+    );
+    // And the new line predicts the device with the new latency.
+    let (host, buf) = dev.log.last().unwrap();
+    let predicted = after
+        .media_time_at(HostMicros::new(host + 30_000).unwrap())
+        .get() as f64
+        / TICKS_PER_SECOND as f64;
+    let actual = position_of(buf[0]) as f64 / SR as f64;
+    assert!(
+        (predicted - actual).abs() < 0.001,
+        "{predicted} vs {actual}"
+    );
+}
