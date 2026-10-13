@@ -228,6 +228,8 @@ pub fn frame_descriptor() -> FrameDescriptor {
             pool_index: 9,
             seq: seq(11),
         }),
+        view_seq: seq(17),
+        duration: Some(ticks(11_760_000)),
     }
 }
 
@@ -1049,6 +1051,8 @@ pub fn events() -> Vec<Envelope> {
             color_space: ViewerColorSpace::DisplayP3,
             view: Some(view_override()),
             play_every_frame: true,
+            edr: true,
+            view_seq: seq(17),
         })),
         event(Event::Transport(TransportCommand::Seek {
             time: ticks(-705_600_000),

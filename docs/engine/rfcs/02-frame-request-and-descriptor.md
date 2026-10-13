@@ -115,3 +115,42 @@ measures that cost under main-process load.
    per-clip offline or proxy badge) rather than the lowest across sources.
    Appendix D only needs the lowest; per-clip status comes from the media
    index.
+
+## Implementation notes (production bridge, Phase 2)
+
+Draft changes made while building the production frame bridge (plan
+section 18 with amendments 4 and 5; design notes in
+[`../bridge.md`](../bridge.md)). All are additive; the protocol build id
+changed with them.
+
+- **`FrameDescriptor.view_seq`** and **`ViewerState.view_seq`**: the viewer
+  numbers its states; each descriptor echoes the state it shows. With
+  `revision` it tags a frame completely, so overlays drawn from its geometry
+  match its pixels during view gestures (zoom, pan, orbit, walk), which
+  change no document revision.
+- **`FrameDescriptor.duration`**: `Some` for timed (playback) frames, shown
+  from `pts` for that long and presented by the viewer's jitter buffer at
+  their predicted display time; `None` for frames shown at the next refresh
+  (paused, scrub, gesture). This replaces inferring presentation from the
+  transport state, which races at play and pause.
+- **`ViewerState.edr`**: the canvas's display can show values above 1.0
+  (CSS `dynamic-range: high`). The engine presents through an `rgbaf16` pool
+  when it is set and the lease allows, and `bgra` with the blue-noise dither
+  otherwise (amendment 4). `ViewerColorSpace` keeps its two values: an
+  `rgbaf16` pool's format already says the values are extended.
+- **`FrameDescriptor` validation**: a positive duration, a viewer format, and
+  finite overlay geometry.
+- **Release (`FrameRelease`)**: S1 confirmed the API. The viewer calls
+  `VideoFrame.close()` after submitting the draw that read the frame and
+  releases the slot when `queue.onSubmittedWorkDone()` resolves; the per-use
+  release callback runs before the GPU finishes reading and is not used.
+  Frames the viewer never drew are released as soon as they are closed.
+- **Transport (amendment 4)**: `Event::Frame` and `Event::SurfacePool` go from
+  the engine to the viewer over the viewer's `MessageChannelMain` port;
+  main is never on the per-frame path. Main sees each surface once over Mach
+  and imports it once.
+
+Open question 1 (overlay geometry as a separate event) stays open: the test
+source sends one overlay layer per frame, and frames without selection
+changes still carry it. The descriptor's size with one layer is in
+[`../bridge.md`](../bridge.md).

@@ -2,6 +2,7 @@
 import type { CompositionId } from "./CompositionId";
 import type { MediaPreference } from "./MediaPreference";
 import type { PreviewResolution } from "./PreviewResolution";
+import type { Seq } from "./Seq";
 import type { Size } from "./Size";
 import type { ViewOverride } from "./ViewOverride";
 import type { ViewerColorSpace } from "./ViewerColorSpace";
@@ -17,4 +18,15 @@ size: Size, devicePixelRatio: number, zoom: number, pan: [number, number], resol
 /**
  * Play Every Frame (viewer menu check item).
  */
-playEveryFrame: boolean, };
+playEveryFrame: boolean, 
+/**
+ * The canvas's display can show values above 1.0 (CSS
+ * `dynamic-range: high`): the engine then presents through an `rgbaf16`
+ * pool (amendment 4).
+ */
+edr: boolean, 
+/**
+ * Increases whenever the viewer state changes; descriptors echo the
+ * state they show.
+ */
+viewSeq: Seq, };
