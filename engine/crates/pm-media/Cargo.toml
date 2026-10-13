@@ -16,11 +16,11 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = { workspace = true, features = ["std"] }
 blake3 = "1.8"
+md-5 = "0.10"
 libc = "0.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "bmp", "ico", "gif", "webp"] }
 
 [dev-dependencies]
-md-5 = "0.10"
 proptest.workspace = true
 
 [build-dependencies]
