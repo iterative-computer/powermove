@@ -72,7 +72,7 @@
     "asset-metadata": 3,
     "project-write": 67,
     "render-queue-swap": 3,
-    "home-composition-match": 7,
+    "home-composition-match": 1,
     "blender-source-asset": 1,
     "agent-media-folders": 1,
     "extension-layer-refresh": 1,
@@ -741,46 +741,10 @@
       "code": "touchedDocument(PM, [['assets', result.asset.id, 'folder']])"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1409",
-      "class": "home-composition-match",
-      "scope": "install > importFiles",
-      "code": "targetProject.w = source.w"
-    },
-    {
       "site": "apps/desktop/src/renderer/src/legacy/app.ts:1410",
       "class": "home-composition-match",
       "scope": "install > importFiles",
-      "code": "targetProject.h = source.h"
-    },
-    {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1414",
-      "class": "home-composition-match",
-      "scope": "install > importFiles",
-      "code": "targetProject.fps = rate.fps"
-    },
-    {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1415",
-      "class": "home-composition-match",
-      "scope": "install > importFiles",
-      "code": "targetProject.fpsRational = rate.fpsRational"
-    },
-    {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1416",
-      "class": "home-composition-match",
-      "scope": "install > importFiles",
-      "code": "targetProject.exportDefaults = { ...readExportDefaults(), fps: rate.fps }"
-    },
-    {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1419",
-      "class": "home-composition-match",
-      "scope": "install > importFiles",
-      "code": "targetProject.dur = source.dur"
-    },
-    {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1420",
-      "class": "home-composition-match",
-      "scope": "install > importFiles",
-      "code": "targetProject.work = [0, source.dur]"
+      "code": "writeDocument(targetProject === PM.proj ? PM : null, [['w'], ['h'], ['fps'], ['fpsRational'], ['exportDefaults'], ['dur'], ['work']], () ..."
     },
     {
       "site": "apps/desktop/src/renderer/src/legacy/assistant/media-management.ts:93",

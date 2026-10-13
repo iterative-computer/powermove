@@ -105,7 +105,8 @@ export const ORIGINS = {
  */
 export const NAMED_SITES = [
   { class: 'render-queue-swap', file: 'renderer/src/legacy/core/render-queue.ts', from: ['project-swap'] },
-  { class: 'home-composition-match', file: 'renderer/src/legacy/app.ts', scope: /(^| > )importFiles$/, code: /^targetProject\.(w|h|fps|fpsRational|exportDefaults|dur|work)\b/ },
+  // The match runs inside writeDocument (a barrier writer): the call is the site.
+  { class: 'home-composition-match', file: 'renderer/src/legacy/app.ts', scope: /(^| > )importFiles$/, from: ['doc.write'], code: /^writeDocument\(targetProject === PM\.proj/ },
   { class: 'blender-source-asset', file: 'renderer/src/core/scene3d/modeling.ts', from: ['asset-metadata'] },
   { class: 'agent-media-folders', file: 'renderer/src/legacy/assistant/media-management.ts', scope: /(^| > )importMedia$/, code: /\.folder\s*=/ },
   // The refresh runs inside writeDocument (a barrier writer): the call is the site.

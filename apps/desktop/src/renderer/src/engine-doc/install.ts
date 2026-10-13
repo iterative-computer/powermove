@@ -61,6 +61,9 @@ export interface DocApi {
   touched(paths: readonly PathPart[][], options?: { canonical?: boolean; origin?: 'edit' | 'undo' | 'redo' | 'metadata' }): void;
   /** History's `track`: paths a scoped transaction is about to write, held until it ends. */
   track(paths: readonly PathPart[][]): void;
+  /** Records a write to `object`, wherever it is in the document (its path
+   *  is searched for; an object outside the document is not a document write). */
+  wroteObject(object: unknown): void;
   /** Flushes pending writes into the mirror now. */
   flush(): void;
 }
@@ -97,6 +100,7 @@ const noopDoc: DocApi = {
   write: (_paths, fn) => fn?.(),
   touched: () => {},
   track: () => {},
+  wroteObject: () => {},
   flush: () => {},
 };
 
@@ -189,6 +193,11 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       if (PM.hist?.scoped?.()) for (const path of paths) held.set(JSON.stringify(path), [...path]);
       record(paths);
     },
+    wroteObject(object) {
+      if (!barrier || !object || typeof object !== 'object') return;
+      const path = findPath(current, unwrap(object), 16);
+      if (path) barrier.touched([path]);
+    },
     flush: () => barrier?.flush(),
   };
   PM.doc = doc;
@@ -250,11 +259,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     // The keys are usually in a composition that is not open (a precomp's
     // layer evaluated for the open one): find them and name their path.
     // Keys outside the document (a detached layer) are not a document write.
-    wrote: (keys) => {
-      if (!barrier) return;
-      const path = findPath(current, unwrap(keys), 16);
-      if (path) barrier.touched([path]);
-    },
+    wrote: (keys) => doc.wroteObject(keys),
   });
 
   // ── the native evaluator ──────────────────────────────────────────────

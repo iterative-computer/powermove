@@ -10,13 +10,17 @@
  * | Value | Mirror and queries | Auditor | Dual answers | Tracking Proxy |
  * |---|---|---|---|---|
  * | `off` (default) | no | no | no | no |
- * | `on` | yes | no | no | development builds |
+ * | `on` | yes | no | no | no |
  * | `audit` | yes | yes | yes | no |
  * | `audit-proxy` | yes | yes | yes | yes (violations reported) |
  * | `strict` | yes | yes | yes | yes (violations throw) |
  *
- * Production builds keep the barrier's `doc.write` / `doc.touched` and the
- * structural diff of `touch()`; the Proxy is for development and tests.
+ * Every build keeps the barrier's `doc.write` / `doc.touched` and the
+ * structural diff of `touch()`. The tracking Proxy is opt-in (`audit-proxy`,
+ * `strict`) for development and tests: it is a second identity for every
+ * document object, and code that compares a reference held across tasks with
+ * a later read sees two objects (docs/engine/write-path.md lists the e2e tests
+ * that do), so it never runs in the plain `on` mode.
  */
 import type { ViolationMode } from './proxy';
 
@@ -33,11 +37,11 @@ export const OFF: EngineDocMode = { evaluator: false, audit: false, dual: false,
 
 export const STORAGE_KEY = 'powermove:native-evaluator';
 
-export function parseMode(value: unknown, development = false): EngineDocMode {
+export function parseMode(value: unknown): EngineDocMode {
   const name = typeof value === 'string' ? value.trim().toLowerCase() : '';
   switch (name) {
     case 'on': case '1': case 'true':
-      return { evaluator: true, audit: false, dual: false, proxy: development ? 'report' : false, name: 'on' };
+      return { evaluator: true, audit: false, dual: false, proxy: false, name: 'on' };
     case 'audit':
       return { evaluator: true, audit: true, dual: true, proxy: false, name };
     case 'audit-proxy':
@@ -55,5 +59,5 @@ export function rendererMode(): EngineDocMode {
   try { stored = globalThis.localStorage?.getItem(STORAGE_KEY) ?? null; } catch { /* storage unavailable */ }
   const env = (import.meta as any).env ?? {};
   const value = stored ?? env.VITE_POWERMOVE_NATIVE_EVALUATOR ?? 'off';
-  return parseMode(value, !!env.DEV);
+  return parseMode(value);
 }

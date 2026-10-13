@@ -14,7 +14,7 @@ headless document host (default `on` there).
 | Value | Mirror and kernel queries | Auditor | Dual answers | Tracking Proxy |
 |---|---|---|---|---|
 | `off` (default) | no (`PM.doc` no-ops only) | no | no | no |
-| `on` | yes | no | no | development builds |
+| `on` | yes | no | no | no |
 | `audit` | yes | yes | yes | no |
 | `audit-proxy` | yes | yes | yes | yes, violations reported |
 | `strict` | yes | yes | yes | yes, violations throw |
@@ -79,7 +79,7 @@ How writes reach the barrier:
 | `PM.proj = another project` | resync at the next flush |
 | `PM.proj = another version of this project` | a whole-document diff |
 | Writers that know their paths | `PM.doc.write(paths, fn)` / `PM.doc.touched(paths)` |
-| Development and test (`audit-proxy`, `strict`, `on` in dev) | the tracking Proxy records every write through `PM.proj` |
+| Development and test (`audit-proxy`, `strict`) | the tracking Proxy records every write through `PM.proj` |
 
 `scripts/engine-writers.mjs` classifies `PM.touch(paths)`, `PM.doc.write`, and
 `PM.doc.touched`, and records the `PatchOrigin` every writer class reaches the mirror
@@ -110,7 +110,15 @@ three rules that the e2e suite found necessary:
   when it is next read, so the raw document never holds a proxy and saves can clone it.
 
 `===` between a raw reference held across tasks and a later read can still differ;
-that is a limit of the tracking modes (development and test), never of production.
+that is a limit of the tracking modes, never of production. The full e2e suite in
+`audit-proxy` (2026-10-13) fails 8 tests that pass in `audit`, all from that limit:
+a test that holds a layer across an `await` and asks for its index
+(`expression-csp.spec.ts:3`, `idx` reads 0), keyframe and graph drags whose hit
+targets and later reads are different identities (`timeline-keyframe-drag.spec.ts:4`
+twice, `graph-picking.spec.ts:131` and `:172`, `graph-reference.spec.ts:3`), an
+imported SVG's asset record (`import-svg.spec.ts:7`), and an image-sequence export
+capture (`import-image-sequence.spec.ts:7`, 12 fps). Because the Proxy changes
+behavior, it is opt-in: `on` never installs it, development builds included.
 
 Violations are attributed to the writing code. A violation whose stack contains a
 Playwright `page.evaluate` frame is the test's (`page.evaluate`, or

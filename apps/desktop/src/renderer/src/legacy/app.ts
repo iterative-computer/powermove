@@ -1405,7 +1405,9 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
     assertCurrent();
     if (matchSource) {
       const source = layerResults[0]?.asset;
-      if (source) {
+      // Composition settings outside history (a new project matched to its
+      // first media): the native engine's write barrier records them.
+      if (source) writeDocument(targetProject === PM.proj ? PM : null, [['w'], ['h'], ['fps'], ['fpsRational'], ['exportDefaults'], ['dur'], ['work']], () => {
         if (Number.isFinite(source.w) && source.w > 0) targetProject.w = source.w;
         if (Number.isFinite(source.h) && source.h > 0) targetProject.h = source.h;
         // Media rates are nominal rates (the single frame-rate validator).
@@ -1419,6 +1421,8 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
           targetProject.dur = source.dur;
           targetProject.work = [0, source.dur];
         }
+      });
+      if (source) {
         PM.bus.emit('project');
         viewerService(PM)?.layout();
         PM.invalidate('all');
