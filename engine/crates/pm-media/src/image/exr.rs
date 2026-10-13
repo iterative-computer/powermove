@@ -79,7 +79,8 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
         .collect();
     let has = |n: &str| names.iter().any(|e| e.0 == n);
     let gray = !has("R") && has("Y");
-    if !gray && !(has("R") && has("G") && has("B")) {
+    let rgb = has("R") && has("G") && has("B");
+    if !gray && !rgb {
         return Err(MediaError::unsupported(format!(
             "OpenEXR channels {:?} (RGB, RGBA, Y, or YA)",
             names.iter().map(|n| n.0.as_str()).collect::<Vec<_>>()

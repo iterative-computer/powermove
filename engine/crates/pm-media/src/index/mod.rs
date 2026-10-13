@@ -383,11 +383,9 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
     };
     // Open GOP: NAL types from the length-prefixed samples (MPEG-TS packets
     // are marked during the scan).
-    let config = match (&idx.config.fourcc, idx.config.codec_id.as_deref()) {
-        (Some(f), _) if matches!(f, b"hvc1" | b"hev1" | b"dvh1" | b"dvhe") => {
-            idx.config.atom(b"hvcC").map(|a| (NalCodec::Hevc, a.to_vec()))
-        }
-        (Some(f), _) if matches!(f, b"avc1" | b"avc3") => idx.config.atom(b"avcC").map(|a| (NalCodec::H264, a.to_vec())),
+    let config = match (idx.config.fourcc.as_ref(), idx.config.codec_id.as_deref()) {
+        (Some(b"hvc1" | b"hev1" | b"dvh1" | b"dvhe"), _) => idx.config.atom(b"hvcC").map(|a| (NalCodec::Hevc, a.to_vec())),
+        (Some(b"avc1" | b"avc3"), _) => idx.config.atom(b"avcC").map(|a| (NalCodec::H264, a.to_vec())),
         (None, Some("V_MPEGH/ISO/HEVC")) => idx.config.codec_private.clone().map(|c| (NalCodec::Hevc, c)),
         (None, Some("V_MPEG4/ISO/AVC")) => idx.config.codec_private.clone().map(|c| (NalCodec::H264, c)),
         _ => None,

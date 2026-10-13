@@ -564,9 +564,9 @@ unsafe fn convert_to_planar(pool: &FramePool, f: *const ff::AVFrame, range: Rang
                     // Palette entries are native-endian 0xAARRGGBB.
                     let palette = (*f).data[1] as *const u32;
                     let idx = (*f).data[0].offset(y as isize * (*f).linesize[0] as isize);
-                    for x in 0..w {
+                    for (x, slot) in line.iter_mut().enumerate().take(w) {
                         let argb = *palette.add(*idx.add(x) as usize);
-                        line[x] = match op {
+                        *slot = match op {
                             0 => (argb >> 8) & 0xFF,
                             1 => argb & 0xFF,
                             2 => (argb >> 16) & 0xFF,

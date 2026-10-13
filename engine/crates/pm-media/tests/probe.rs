@@ -149,7 +149,7 @@ fn waveform_peaks() {
     assert_eq!(pk.data.len() as u64, pk.samples.div_ceil(480) * 2);
     let max = pk.data.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
     let min = pk.data.iter().map(|p| p[0]).fold(f32::MAX, f32::min);
-    assert!(max > 0.05 && max <= 1.0 && min < -0.05 && min >= -1.0, "{min} {max}");
+    assert!(max > 0.05 && max <= 1.0 && (-1.0..-0.05).contains(&min), "{min} {max}");
     // Skipping priming shortens the decoded program audio by exactly that much.
     let skipped = pm_media::probe::peaks::peaks(&f, None, 480, 1000).unwrap();
     assert_eq!(skipped.skipped, 1000);

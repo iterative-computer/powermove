@@ -246,7 +246,7 @@ fn openexr_tiled_zip_and_dwaa() {
     let (w, h) = (40, 24);
     let px: Vec<f32> = (0..w * h * 4).map(|i| ((i * 37) % 1000) as f32 / 250.0 - 0.5).collect();
     let zip = tmp("tiled-zip.exr");
-    write_tiled_exr(&zip, w as i32, h as i32, false, EXR_COMPRESSION_ZIP as u32, &px);
+    write_tiled_exr(&zip, w as i32, h as i32, false, EXR_COMPRESSION_ZIP, &px);
     let s = image::read(&zip, &pool).unwrap();
     assert!(s.frame.format.label.contains("tiled"));
     // The display window is 8 pixels wider and taller; the data sits at (4, 4).
@@ -263,7 +263,7 @@ fn openexr_tiled_zip_and_dwaa() {
     assert_eq!(at(0, 0, 3), 0.0, "outside the data window is transparent black");
     // DWAA (lossy, half): decodes through OpenEXRCore and stays close.
     let dwaa = tmp("tiled-dwaa.exr");
-    write_tiled_exr(&dwaa, w as i32, h as i32, true, EXR_COMPRESSION_DWAA as u32, &px);
+    write_tiled_exr(&dwaa, w as i32, h as i32, true, EXR_COMPRESSION_DWAA, &px);
     let d = image::read(&dwaa, &pool).unwrap();
     assert_eq!(d.frame.format.planes[0].format, PlaneFormat::Rgba16Float);
 }

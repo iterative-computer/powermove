@@ -355,11 +355,10 @@ fn video_probe(path: &Path, input: &Input, v: usize) -> Result<(VideoProbe, Fram
     let (w, h) = (info.width.max(0) as u32, info.height.max(0) as u32);
     let clean_aperture = atom(b"clap").and_then(|c| clean_aperture(c, w, h));
     let mut fields = field_info(&info, atom(b"fiel"));
-    if fields.order == FieldOrder::Unknown && matches!(info.codec.as_str(), "dvvideo" | "mpeg2video" | "h264" | "dnxhd" | "mjpeg") {
-        if let Some(f) = first_frame_fields(input, v, &idx, path) {
+    if fields.order == FieldOrder::Unknown && matches!(info.codec.as_str(), "dvvideo" | "mpeg2video" | "h264" | "dnxhd" | "mjpeg")
+        && let Some(f) = first_frame_fields(input, v, &idx, path) {
             fields = f;
         }
-    }
 
     let pts = idx.presented_pts();
     let nominal = nominal_rate(&pts, idx.timebase);
@@ -555,9 +554,9 @@ mod tests {
     fn clean_aperture_rectangle() {
         // 1920×1080 frame, 1888×1062 aperture centered: (16, 9, 1888, 1062).
         let mut c = vec![];
-        for (n, d) in [(1888, 1), (1062, 1), (0, 1), (0, 1)] {
-            c.extend_from_slice(&(n as i32).to_be_bytes());
-            c.extend_from_slice(&(d as i32).to_be_bytes());
+        for (n, d) in [(1888i32, 1i32), (1062, 1), (0, 1), (0, 1)] {
+            c.extend_from_slice(&n.to_be_bytes());
+            c.extend_from_slice(&d.to_be_bytes());
         }
         let a = clean_aperture(&c, 1920, 1080).unwrap();
         assert_eq!(a.rect, (16, 9, 1888, 1062));

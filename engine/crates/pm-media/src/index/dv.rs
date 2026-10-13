@@ -15,7 +15,7 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
     let size = size as u64;
     // DIF sequences are 12,000 bytes; a frame is 10 (525/60) or 12 (625/50)
     // of them per channel.
-    if size % 12_000 != 0 {
+    if !size.is_multiple_of(12_000) {
         return Err(MediaError::unsupported(format!("DV frame size {size} is not whole DIF sequences")));
     }
     let n = len / size;

@@ -43,16 +43,14 @@ pub const MP3_DECODER_DELAY: i64 = 529;
 /// Priming of an audio stream. `track_id` is the MP4 track (FFmpeg stream id),
 /// `codec` FFmpeg's codec name, `initial_padding` FFmpeg's codec-level delay.
 pub fn priming(path: &Path, format: &str, track_id: u64, codec: &str, sample_rate: i64, initial_padding: i64) -> Option<Priming> {
-    if format.contains("mov") || format.contains("mp4") {
-        if let Some(p) = mp4_priming(path, track_id as u32, codec, sample_rate) {
+    if (format.contains("mov") || format.contains("mp4"))
+        && let Some(p) = mp4_priming(path, track_id as u32, codec, sample_rate) {
             return Some(p);
         }
-    }
-    if codec == "mp3" {
-        if let Some(p) = lame_priming(path) {
+    if codec == "mp3"
+        && let Some(p) = lame_priming(path) {
             return Some(p);
         }
-    }
     if format == "mp3"
         && let Some(p) = id3_itunsmpb(path)
     {

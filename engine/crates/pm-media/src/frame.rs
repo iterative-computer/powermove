@@ -230,6 +230,9 @@ impl std::fmt::Debug for DecodedFrame {
     }
 }
 
+/// CPU reference output: luma-resolution pairs and chroma-resolution pairs.
+pub type Reference = (Vec<[f32; 2]>, Vec<[f32; 2]>);
+
 /// A CPU view of one plane (verification).
 pub struct PlaneView<'a> {
     pub ptr: *const u8,
@@ -342,7 +345,7 @@ impl DecodedFrame {
     /// CPU reference of the normalization in f64, rounded to f32:
     /// (luma-resolution [Y′, A], chroma-resolution [Cb, Cr]). RGB layouts
     /// return [G, A] and [B, R] in the same positions (no matrix).
-    pub fn reference(&self) -> Result<(Vec<[f32; 2]>, Vec<[f32; 2]>)> {
+    pub fn reference(&self) -> Result<Reference> {
         let d = self.format.clone();
         let n = d.norm();
         self.with_planes(|pl| {

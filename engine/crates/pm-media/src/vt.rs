@@ -32,6 +32,9 @@ pub enum DecodePurpose {
     Export,
 }
 
+/// Sample description extension atoms: (type, payload).
+pub type Atoms = Vec<([u8; 4], Vec<u8>)>;
+
 /// How a stream decodes through VideoToolbox.
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,7 +46,7 @@ pub struct VtConfig {
     #[serde(skip)]
     pub format_fcc: u32,
     #[serde(skip)]
-    pub atoms: Vec<([u8; 4], Vec<u8>)>,
+    pub atoms: Atoms,
     /// Packets are Annex B (MPEG-TS) and are rewritten to 4-byte length prefixes.
     pub annexb: bool,
     pub alpha_layer: bool,
@@ -79,7 +82,7 @@ impl VtConfig {
         init();
         let cfg = &idx.config;
         let mut prores_header = false;
-        let (codec, atoms, annexb): (u32, Vec<([u8; 4], Vec<u8>)>, bool) = if let Some(f) = cfg.fourcc {
+        let (codec, atoms, annexb): (u32, Atoms, bool) = if let Some(f) = cfg.fourcc {
             let codec = match &f {
                 b"avc1" | b"avc3" => fcc(b"avc1"),
                 b"hvc1" | b"hev1" => fcc(b"hvc1"),

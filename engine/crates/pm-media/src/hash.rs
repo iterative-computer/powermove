@@ -135,7 +135,7 @@ pub fn hash_file(path: &Path, settle: Settle, cancel: &AtomicBool, progress: &dy
             hasher.update(&buf[..n]);
             done += n as u64;
             tick += 1;
-            if tick % 64 == 0 {
+            if tick.is_multiple_of(64) {
                 progress(HashStatus::Hashing { done, total: size });
             }
         }
