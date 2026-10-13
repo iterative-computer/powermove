@@ -162,7 +162,11 @@ fixtures).
   When the interactive engine dies, main sends `playbackStopped` itself
   (RFC 13 invariant 9).
 - The job engine runs at utility QoS (`pthread_set_qos_class_self_np`),
-  never in the Darwin background state.
+  never in the Darwin background state. macOS threads do not inherit
+  their creator's QoS, so every engine thread starts through
+  `pm_engine::qos::spawn_engine_thread`, which applies the class first.
+  Threads Chromium starts in the utility process (IO, IPC) keep their own
+  classes; they only move messages.
 - The shared host clock: engines read `CLOCK_UPTIME_RAW`, main reads
   libuv's `hrtime`; both are `mach_absolute_time`. Each engine stamps its
   start notice and main checks the delivery delay (77 to 387 µs measured).
@@ -195,6 +199,30 @@ main; `checkConsistency` compares hashes at one revision. Patch batches
 follow the applied revision and apply through a pluggable RFC 05 decoder;
 until the model lane's binary decoder is installed, a batch is reported as
 `unsupported` once per session and the mirror keeps the resynced revision.
+
+Known limit: a resync from a staged file is read (`std::fs::read`, up to
+256 MiB) and parsed on the utility process's JavaScript thread, as an
+inline resync is parsed there; while it runs that engine's ticks and port
+traffic wait. Before large documents take this path, the read, parse, and
+hash check move to an engine thread (`spawn_engine_thread`), with the
+mirror installed when the thread finishes.
+
+Disk: a window may stage at most 16 documents of at most 256 MiB per
+engine launch in `Engine Cache/Scratch`; they are removed when the launch
+ends and the folder is wiped at the next engine start. Temporary
+`.powermove-*.part` outputs are removed when their launch ends; after main
+itself crashes, only the automatic `~/Powermove` folder is swept at the
+next start, so a partial file can remain in a user-chosen export folder.
+
+## Amendment 5 items outside this lane
+
+Amendment 5 (S1 gate) adds two Phase 2 items that are not delivered here:
+moving autosave serialization off main's thread (it touches the project
+store and autosave code in main and the renderer, which this lane does not
+own) and the C′ prototype (`CAContext`/`CALayerHost` presentation from the
+utility process for playback, measured with the S1 harness), which belongs
+to the frame bridge work. The engine processes here are where a C′ layer
+would be created, so that lane builds on them.
 
 ## Packaging and signing
 
