@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -61,15 +62,30 @@ async function signingInfo(file) {
   };
 }
 
-/* The transcription utility process loads koffi's native addon, which
-   dlopens transcribe.cpp's libtranscribe and ggml dylibs from
-   app.asar.unpacked. Under the hardened runtime, library validation refuses
-   them unless they carry the app's own Team ID, so prove the signing pass
-   covered every one before anything ships. */
+/* Native code that main or a utility process loads from app.asar.unpacked
+   must carry the app's own Team ID and the hardened runtime, or library
+   validation refuses it at load time on users' machines:
+   - the transcription utility process loads koffi's addon, which dlopens
+     transcribe.cpp's libtranscribe and ggml dylibs;
+   - the native engine's utility processes load pm-node (native/pm_node.node,
+     built by `bun run build:engine`, shipped with --with-engine).
+   Every .node and .dylib anywhere under app.asar.unpacked is checked, not
+   only these; the list says which must be present. */
 const NATIVE_RUNTIME = [
   { dir: 'node_modules/@transcribe-cpp/darwin-arm64-metal', expect: ['libtranscribe.dylib', 'libggml.dylib', 'libggml-base.dylib', 'libggml-cpu.dylib', 'libggml-metal.dylib'] },
   { dir: 'node_modules/@koromix/koffi-darwin-arm64/darwin_arm64', expect: ['koffi.node'] }
 ];
+const ENGINE_RUNTIME = { dir: 'native', expect: ['pm_node.node'] };
+
+async function nativeBinaries(root) {
+  const found = [];
+  for (const entry of await readdir(root, { withFileTypes: true, recursive: true })) {
+    if (entry.isFile() && (entry.name.endsWith('.node') || entry.name.endsWith('.dylib'))) {
+      found.push(path.join(entry.parentPath ?? entry.path, entry.name));
+    }
+  }
+  return found.sort();
+}
 
 /* The packaged worker points transcribe-cpp at the unpacked library through
    TRANSCRIBE_LIBRARY, which skips the binding's own contract check (the
@@ -87,24 +103,26 @@ async function verifyRuntimeContract(app) {
   process.stdout.write(`Transcription runtime ${contract.version} matches its binding (header ${headerHash}).\n`);
 }
 
-async function verifyNativeAddons(app) {
+async function verifyNativeAddons(app, { withEngine }) {
   await verifyRuntimeContract(app);
   const appInfo = await signingInfo(app);
-  const signed = [];
-  for (const { dir: relative, expect } of NATIVE_RUNTIME) {
-    const dir = path.join(app, 'Contents/Resources/app.asar.unpacked', relative);
-    const binaries = (await readdir(dir)).filter((name) => name.endsWith('.node') || name.endsWith('.dylib'));
-    const missing = expect.filter((name) => !binaries.includes(name));
-    if (missing.length) throw new Error(`Transcription runtime binaries missing from ${dir}: ${missing.join(', ')}.`);
-    for (const name of binaries) {
-      const info = await signingInfo(path.join(dir, name));
-      if (info.team !== appInfo.team || !info.runtime) {
-        throw new Error(`${name} is not signed for library validation (team ${info.team}, app team ${appInfo.team}, runtime ${info.runtime}).`);
-      }
-      signed.push(name);
-    }
+  const unpacked = path.join(app, 'Contents/Resources/app.asar.unpacked');
+  const required = withEngine ? [...NATIVE_RUNTIME, ENGINE_RUNTIME] : NATIVE_RUNTIME;
+  for (const { dir: relative, expect } of required) {
+    const dir = path.join(unpacked, relative);
+    const names = await readdir(dir).catch(() => []);
+    const missing = expect.filter((name) => !names.includes(name));
+    if (missing.length) throw new Error(`Native binaries missing from ${dir}: ${missing.join(', ')}.`);
   }
-  process.stdout.write(`Transcription runtime signed with team ${appInfo.team}: ${signed.join(', ')}\n`);
+  const signed = [];
+  for (const file of await nativeBinaries(unpacked)) {
+    const info = await signingInfo(file);
+    if (info.team !== appInfo.team || !info.runtime) {
+      throw new Error(`${path.relative(unpacked, file)} is not signed for library validation (team ${info.team}, app team ${appInfo.team}, runtime ${info.runtime}).`);
+    }
+    signed.push(path.relative(unpacked, file));
+  }
+  process.stdout.write(`Native binaries signed with team ${appInfo.team} and the hardened runtime: ${signed.join(', ')}\n`);
 }
 
 async function main() {
@@ -123,7 +141,14 @@ async function main() {
   const { version } = JSON.parse(await readFile(path.join(repository, 'package.json'), 'utf8'));
   const channel = /^\d+\.\d+\.\d+-([a-z]+)\./i.exec(version)?.[1]?.toLowerCase() ?? 'latest';
 
+  // The native engine ships only when asked: it is behind "Use New Engine"
+  // and needs the pinned Rust toolchain (engine/env.sh) on the build host.
+  const withEngine = process.argv.includes('--with-engine');
+  if (!withEngine && existsSync(path.join(repository, 'native', 'pm_node.node'))) {
+    throw new Error('native/pm_node.node is present but --with-engine was not given: electron-builder would ship it. Remove native/ or pass --with-engine.');
+  }
   await run('bun', ['run', 'build']);
+  if (withEngine) await run('node', [path.join(repository, 'scripts/build-engine-addon.mjs')]);
   await run(path.join(repository, 'node_modules/.bin/electron-builder'), [
     '--mac', '--arm64', '--publish', 'never',
     '--config', 'electron-builder.yml',
@@ -137,7 +162,7 @@ async function main() {
 
   const app = await findPackagedApp();
   await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', app]);
-  await verifyNativeAddons(app);
+  await verifyNativeAddons(app, { withEngine });
   await run('/usr/sbin/spctl', ['--assess', '--type', 'execute', '--verbose=4', app]);
   await run('/usr/bin/xcrun', ['stapler', 'validate', app]);
 

@@ -27,13 +27,13 @@ use crate::document_host::{
     CloseProject, ExtensionRegistered, OpenProject, Persist, Persisted, ProjectOpened,
     RegisterExtension, ToolCall, ToolResult,
 };
-use crate::error::{CrashReport, EngineError, EngineProcess, FailureReport};
+use crate::error::{CrashReport, EngineError, EngineProcess, FailureReport, InFlight};
 use crate::frame::{
     FrameDescriptor, FrameQuality, FrameRelease, FrameRequest, ViewOverride, ViewerState,
 };
 use crate::host::{
-    CommitOutput, HandleGrant, HardwareSessionGrant, HardwareSessionRequest, MintHandle,
-    OutputCommitted, OutputDestination, OutputDestinationRequest,
+    CommitOutput, HandleGrant, HandleResolved, HardwareSessionGrant, HardwareSessionRequest,
+    MintHandle, OutputCommitted, OutputDestination, OutputDestinationRequest, ResolveHandle,
 };
 use crate::interop::SurfacePool;
 use crate::lease::{Lease, LeaseRequest, LeaseUsage};
@@ -197,6 +197,8 @@ pub enum Request {
     RequestLease(LeaseRequest),
     /// Engine → host. Answer: `handle`.
     MintHandle(MintHandle),
+    /// Engine → host, on the engine's host port only. Answer: `handleResolved`.
+    ResolveHandle(ResolveHandle),
     /// Job engine → host. Answer: `outputDestination`.
     OutputDestination(OutputDestinationRequest),
     /// Job engine → host. Answer: `outputCommitted`.
@@ -244,6 +246,7 @@ pub enum Response {
     LeaseUsage(LeaseUsage),
     Lease(Lease),
     Handle(HandleGrant),
+    HandleResolved(HandleResolved),
     OutputDestination(OutputDestination),
     OutputCommitted(OutputCommitted),
     HardwareSessions(HardwareSessionGrant),
@@ -285,8 +288,13 @@ pub enum Event {
     Slicing(SlicingPolicy),
     /// Engine → renderer: an isolated failure.
     Failure(FailureReport),
-    /// Host → renderer: an engine crashed and is restarting.
+    /// Host → renderer: an engine crashed and is restarting. Host → the
+    /// restarted engine, after its handshake: the session's attribution so
+    /// far (`marked_failed` lists every item failed this session), so it
+    /// refuses work on them before it can crash again.
     Crash(CrashReport),
+    /// Engine → host: the attributable items in flight (crash breadcrumb).
+    InFlight(InFlight),
     /// Engine → host: periodic lease usage.
     LeaseUsage(LeaseUsage),
     /// Job engine → host → renderer: job status.
@@ -315,6 +323,7 @@ pub enum ResponseKind {
     LeaseUsage,
     Lease,
     Handle,
+    HandleResolved,
     OutputDestination,
     OutputCommitted,
     HardwareSessions,
@@ -345,6 +354,7 @@ impl Request {
             Request::GrantLease(_) => ResponseKind::LeaseUsage,
             Request::RequestLease(_) => ResponseKind::Lease,
             Request::MintHandle(_) => ResponseKind::Handle,
+            Request::ResolveHandle(_) => ResponseKind::HandleResolved,
             Request::OutputDestination(_) => ResponseKind::OutputDestination,
             Request::CommitOutput(_) => ResponseKind::OutputCommitted,
             Request::HardwareSessions(_) => ResponseKind::HardwareSessions,
@@ -369,6 +379,7 @@ impl Request {
             Request::PushDefinitions(_) => ContractId::Definitions,
             Request::GrantLease(_) | Request::RequestLease(_) => ContractId::Lease,
             Request::MintHandle(_)
+            | Request::ResolveHandle(_)
             | Request::OutputDestination(_)
             | Request::CommitOutput(_)
             | Request::HardwareSessions(_) => ContractId::HostServices,
@@ -414,6 +425,7 @@ impl Response {
             Response::LeaseUsage(_) => ResponseKind::LeaseUsage,
             Response::Lease(_) => ResponseKind::Lease,
             Response::Handle(_) => ResponseKind::Handle,
+            Response::HandleResolved(_) => ResponseKind::HandleResolved,
             Response::OutputDestination(_) => ResponseKind::OutputDestination,
             Response::OutputCommitted(_) => ResponseKind::OutputCommitted,
             Response::HardwareSessions(_) => ResponseKind::HardwareSessions,
@@ -434,7 +446,7 @@ impl Event {
             Event::SurfacePool(_) => ContractId::GpuInterop,
             Event::Transport(_) | Event::Clock(_) => ContractId::Clock,
             Event::Deadline(_) | Event::Slicing(_) => ContractId::Slicing,
-            Event::Failure(_) | Event::Crash(_) => ContractId::Errors,
+            Event::Failure(_) | Event::Crash(_) | Event::InFlight(_) => ContractId::Errors,
             Event::LeaseUsage(_) => ContractId::Lease,
             Event::JobStatus(_) => ContractId::Priority,
             Event::BlenderProgress(_) | Event::BlenderSurface(_) => ContractId::Blender,
@@ -497,6 +509,7 @@ impl Validate for Request {
             | Request::CheckConsistency(_)
             | Request::RequestLease(_)
             | Request::MintHandle(_)
+            | Request::ResolveHandle(_)
             | Request::CommitOutput(_)
             | Request::BlenderStatus
             | Request::CancelJobs(_)
@@ -514,6 +527,7 @@ impl Validate for Response {
             Response::Scene(scene) => scene.validate(),
             Response::LeaseUsage(usage) => usage.validate(),
             Response::Lease(lease) => lease.validate(),
+            Response::HandleResolved(resolved) => resolved.validate(),
             _ => Ok(()),
         }
     }
@@ -533,6 +547,7 @@ impl Validate for Event {
             Event::BlenderSurface(surface) => surface.validate(),
             Event::Viewer(state) => state.validate(),
             Event::Failure(report) => report.error.validate(),
+            Event::InFlight(in_flight) => in_flight.validate(),
             _ => Ok(()),
         }
     }

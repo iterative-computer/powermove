@@ -947,6 +947,10 @@ export interface PowermoveBridge {
   /* ── transcription lane ── */
   /** On-device transcription: models, downloads, transcribe (absent on hosts without the engine). */
   transcription?: import('./transcription').TranscriptionBridge;
+
+  /* ── native engine (behind "Use New Engine") ── */
+  /** The native engine's status, staged resync documents, and definition updates. */
+  nativeEngine?: import('./engine-ipc').EngineBridge;
 }
 
 export interface SandboxInputKey {

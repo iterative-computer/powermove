@@ -39,6 +39,7 @@ import { MEDIA_PATH_IPC } from '../shared/media-tools';
 import { CLOUD_IPC, type CloudChannel, type CloudChannels } from '../shared/cloud-ipc';
 import { STORE_IPC, type StoreChannel, type StoreChannels } from '../shared/store-ipc';
 import { TRANSCRIPTION_IPC, type TranscribeProgress, type TranscribeResult, type TranscriptionStatus } from '../shared/transcription';
+import { ENGINE_IPC, ENGINE_WINDOW_MESSAGE, type EngineStatusMessage, type StageDocumentResult } from '../shared/engine-ipc';
 
 /** One typed invoke for every `cloud:*` channel (store plan §2.7). */
 function cloudInvoke<C extends CloudChannel>(channel: C, request?: CloudChannels[C]['req']): Promise<CloudChannels[C]['res']> {
@@ -498,8 +499,38 @@ const bridge: PowermoveBridge = {
     onStatus: cloudEvent<TranscriptionStatus>(TRANSCRIPTION_IPC.statusChanged),
     onProgress: cloudEvent<TranscribeProgress>(TRANSCRIPTION_IPC.progress),
     onModelRequested: cloudEvent<{ reason: string }>(TRANSCRIPTION_IPC.modelRequested)
+  },
+
+  /* ── native engine (behind "Use New Engine") ── */
+  nativeEngine: {
+    status: () => ipcRenderer.invoke(ENGINE_IPC.getStatus) as Promise<EngineStatusMessage>,
+    stageDocument: (request) => ipcRenderer.invoke(ENGINE_IPC.stageDocument, {
+      process: request.process,
+      session: request.session,
+      bytes: request.bytes
+    }) as Promise<StageDocumentResult>,
+    pushDefinitions: (update) => ipcRenderer.send(ENGINE_IPC.definitions, update)
   }
 };
+
+/*
+ * Native engine ports. Main posts them to this window's main frame only
+ * (never to extension sandbox frames) when "Use New Engine" is on. A
+ * MessagePort cannot cross the context bridge, so it reaches the page as a
+ * transferred window message addressed to this page's own origin.
+ */
+const pageOrigin = (): string => (window.location.origin && window.location.origin !== 'null' ? window.location.origin : '*');
+ipcRenderer.on(ENGINE_IPC.port, (event, info: unknown) => {
+  const port = event.ports[0];
+  if (!port || typeof info !== 'object' || info === null) return;
+  window.postMessage({ ...(info as object), type: ENGINE_WINDOW_MESSAGE.port }, pageOrigin(), [port]);
+});
+ipcRenderer.on(ENGINE_IPC.crash, (_event, report: unknown) => {
+  window.postMessage({ type: ENGINE_WINDOW_MESSAGE.crash, report }, pageOrigin());
+});
+ipcRenderer.on(ENGINE_IPC.status, (_event, status: unknown) => {
+  window.postMessage({ type: ENGINE_WINDOW_MESSAGE.status, status }, pageOrigin());
+});
 
 /*
  * The bridge is handed to the page as a *configurable* global, not through

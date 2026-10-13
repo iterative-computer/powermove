@@ -87,6 +87,8 @@ import { OnboardingFlow, onboardingCompleted, onboardingEnabled } from './onboar
 /* ── transcription (on-device speech models) ── */
 import { installTranscription, utilityWorker } from './transcription/install';
 import { TRANSCRIPTION_IPC } from '../shared/transcription';
+/* ── native engine (behind "Use New Engine") ── */
+import { installNativeEngine, newEngineEnabled, NEW_ENGINE_STORE_KEY } from './engine';
 
 const APP_ORIGIN = 'app://powermove';
 
@@ -131,6 +133,8 @@ const currentEditor = (): BrowserWindow | null => {
 };
 /* Set once the store exists; before that a window cannot have a project yet. */
 let persistOpenWindows: () => void = () => {};
+/** Gives a new editor window its engine ports (a no-op with the flag off). */
+let attachEngineWindow: (window: BrowserWindow) => void = () => {};
 let onboardingFlow: OnboardingFlow | null = null;
 let startupInitialized = false;
 let projects: ProjectFiles | null = null;
@@ -500,6 +504,7 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
 
   editors.add(window, projectId, tabs);
   persistOpenWindows();
+  attachEngineWindow(window);
   window.on('focus', () => editors.touch(window));
   // Drained once the page has both loaded and subscribed, in either order.
   window.webContents.on('did-finish-load', drainPendingOpenFiles);
@@ -916,6 +921,24 @@ if (!hasSingleInstanceLock) {
       store.set('windowTabs', editors.openSessions());
     };
     registerWindowIpc();
+    /* The native engine starts only with "Use New Engine" on (read once at
+       launch; flipping it takes a relaunch). Off, nothing below runs. */
+    const nativeEngine = installNativeEngine({
+      enabled: newEngineEnabled(process.env, store.get?.(NEW_ENGINE_STORE_KEY)),
+      ipc: ipcMain,
+      isTrustedSender,
+      userData: app.getPath('userData'),
+      home: app.getPath('home'),
+      appPath: app.getAppPath(),
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      mainDirectory: __dirname,
+      windows: () => editors.all()
+    });
+    attachEngineWindow = nativeEngine.attachWindow;
+    // e2e reaches the engine host only in an isolated background test profile.
+    if (isBackgroundTest) (globalThis as { __powermoveNativeEngine?: unknown }).__powermoveNativeEngine = nativeEngine;
+    app.once('will-quit', () => { void nativeEngine.dispose(); });
     const quitBarrier = installQuitFlush(app, store, async () => {
       for (const window of BrowserWindow.getAllWindows()) await prepareEditorClose(window);
     });
