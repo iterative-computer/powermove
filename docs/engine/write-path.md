@@ -73,7 +73,8 @@ How writes reach the barrier:
 | History commits | `PM.touch(canonicalPaths, true)` after the commit's patches |
 | Scoped transactions (gestures, `Edit.apply`) | `hist.track(paths)` hands its paths over before the writes |
 | Undo, redo, scoped rollback | `PM.doc.write(paths, fn)` around the restore |
-| `touch()` without paths | a structural diff of the open composition and every project member except `comps` (in every mode, the tracking ones included: writers announce writes made through references the Proxy never handed out) |
+| `touch()` without paths | a structural diff of the open composition, compositions added or removed, and every project member except `comps` (in every mode, the tracking ones included: writers announce writes made through references the Proxy never handed out) |
+| Queries inside a plain (unscoped) history transaction | every flush adds the structural diff: the transaction's writes reach the barrier at its commit, and code inside it (the pen tool between `begin` and its first `touch()`) may ask before then |
 | Legacy key adoption during evaluation (`temporal-bridge.ts`) | runs inside a barrier writer scope (`setEvaluationWriter`); a rewrite the JSON can see asks for a structural diff |
 | `PM.proj = another project` | resync at the next flush |
 | `PM.proj = another version of this project` | a whole-document diff |
@@ -176,9 +177,11 @@ glyph positions, and widths need no outlines.
   members and listings in order. pm-eval lists object members sorted (allowed
   difference 5); the native API puts `allProps`, `resolveContent`, and `pathValues`
   back in the document's own order, because the timeline lists rows in that order
-  (`property-reveal.spec.ts` caught it). A mismatch that disappears after repairing the
-  mirror is a **stale answer** (a barrier gap, reported as `stale-answer`), not an
-  evaluation mismatch.
+  (`property-reveal.spec.ts` caught it); members a query answers unevaluated (an
+  extension layer's `params`) keep the property's own order. A mismatch that disappears after repairing the
+  mirror is a **stale answer** (a barrier gap, reported as `stale-answer` with the
+  query's call site, `page.evaluate: …` when a test evaluated it), not an
+  evaluation mismatch. Stale answers count as auditor failures.
 - **Allowed differences** (amendments 16 and 20), counted under `allowed` by
   `<op>:<class>`, never as mismatches:
   - `atan2`: one answer 180 and the other −180 (within the evaluation tolerance),
