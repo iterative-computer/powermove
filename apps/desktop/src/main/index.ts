@@ -90,7 +90,8 @@ import { OnboardingFlow, onboardingCompleted, onboardingEnabled } from './onboar
 import { installTranscription, utilityWorker } from './transcription/install';
 import { TRANSCRIPTION_IPC } from '../shared/transcription';
 /* ── native engine (behind "Use New Engine") ── */
-import { installNativeEngine, newEngineEnabled, NEW_ENGINE_STORE_KEY } from './engine';
+import { bridgeAddonPath as engineBridgeAddonPath, installNativeEngine, newEngineEnabled, NEW_ENGINE_STORE_KEY } from './engine';
+import { setupEngineFonts } from './engine-fonts';
 
 const APP_ORIGIN = 'app://powermove';
 
@@ -1058,6 +1059,15 @@ if (!hasSingleInstanceLock) {
     registerThemeIpc(ipcMain, ctx);
     registerHapticsIpc(ipcMain, ctx);
     registerFontsIpc(ipcMain, ctx);
+    // The native font registry for pm-wasm's text layout (POWERMOVE_ENGINE_FONTS=1,
+    // docs/engine/text.md): the same pm-bridge copy the frame bridge loads.
+    setupEngineFonts({
+      ipc: ipcMain,
+      ctx,
+      env: { ...process.env, POWERMOVE_PM_BRIDGE: engineBridgeAddonPath({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath(), env: process.env }) },
+      appPath: app.getAppPath(),
+      log: (message) => console.warn(message)
+    });
     registerContextMenuIpc(ipcMain, ctx);
     registerConfirmIpc(ipcMain, ctx);
     registerClipboardIpc(ipcMain, ctx);

@@ -10,8 +10,9 @@
  * name, and ask again, until a pass needs nothing (or 6 rounds). With an
  * asynchronous provider (the editor, through main) the query falls back to the
  * legacy answer and the same loop runs in the background, so the next query
- * answers natively. Without a provider (the editor today: the preload exposes
- * no engine-fonts channel) text stays with the legacy code.
+ * answers natively. Without a provider, or once the provider has failed
+ * `MAX_FAILURES` times in a row (main without POWERMOVE_ENGINE_FONTS=1 has no
+ * channel), text stays with the legacy code (counted as `fonts` fallbacks).
  */
 import type { PmWasm } from './wasm';
 
@@ -25,6 +26,8 @@ export interface FontProvider {
 }
 
 const MAX_ROUNDS = 6;
+/** Consecutive failed loads after which the provider is given up. */
+export const MAX_FAILURES = 3;
 
 /** Loads what the last layout lacked; returns whether anything was added. */
 function loadOnce(wasm: PmWasm, provider: FontProvider, loaded: Set<string>, generation: { value: number | null }):
@@ -73,6 +76,9 @@ export class FontLoader {
   private busy: Promise<void> | null = null;
   rounds = 0;
   failures = 0;
+  private failedInARow = 0;
+  /** Set after MAX_FAILURES failures in a row: the provider is unavailable. */
+  disabled = false;
 
   constructor(readonly provider: FontProvider) {}
 
@@ -82,6 +88,7 @@ export class FontLoader {
    * loading in the background and returns null.
    */
   resolve<T>(wasm: PmWasm, retry: () => T, needsFonts: (reply: T) => boolean): T | null {
+    if (this.disabled) return null;
     if (!this.provider.sync) {
       this.busy ??= (async () => {
         try {
@@ -89,9 +96,9 @@ export class FontLoader {
             this.rounds += 1;
             if (!(await loadOnce(wasm, this.provider, this.loaded, this.generation))) break;
           }
+          this.failedInARow = 0;
         } catch (error) {
-          this.failures += 1;
-          console.warn('[engine-doc] font loading failed', error);
+          this.failed(error);
         } finally { this.busy = null; }
       })();
       return null;
@@ -101,12 +108,20 @@ export class FontLoader {
         this.rounds += 1;
         if (!(loadOnce(wasm, this.provider, this.loaded, this.generation) as boolean)) return null;
         const reply = retry();
-        if (!needsFonts(reply)) return reply;
+        if (!needsFonts(reply)) { this.failedInARow = 0; return reply; }
       }
     } catch (error) {
-      this.failures += 1;
-      console.warn('[engine-doc] font loading failed', error);
+      this.failed(error);
     }
     return null;
+  }
+
+  private failed(error: unknown) {
+    this.failures += 1;
+    this.failedInARow += 1;
+    if (this.failedInARow >= MAX_FAILURES) {
+      this.disabled = true;
+      console.warn('[engine-doc] the font provider failed repeatedly; text layout stays with the legacy code', error);
+    } else console.warn('[engine-doc] font loading failed', error);
   }
 }

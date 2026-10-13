@@ -164,3 +164,11 @@ describe.skipIf(process.platform !== 'darwin' || !existsSync(addon))('engine fon
     expect(call(ENGINE_FONTS_IPC.clearProjectFonts)).toEqual({ ok: true, value: before + 2 });
   });
 });
+
+describe('the preload channels', () => {
+  it('name the registry channels main registers', async () => {
+    const { IPC } = await import('../shared/ipc');
+    expect(IPC.engineFontsAnswer).toBe(ENGINE_FONTS_IPC.answer);
+    expect(IPC.engineFontsSubset).toBe(ENGINE_FONTS_IPC.subset);
+  });
+});

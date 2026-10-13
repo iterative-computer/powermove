@@ -325,7 +325,11 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
 function editorFonts(): FontProvider | null {
   const bridge = (hostBridge() as any)?.engineFonts;
   if (!bridge || typeof bridge.answer !== 'function' || typeof bridge.subset !== 'function') return null;
-  const unwrapResult = (r: any) => { if (r && r.ok === false) throw new Error(r.error); return r && 'value' in r ? r.value : r; };
+  const unwrapResult = (r: any) => {
+    if (!r || typeof r !== 'object') throw new Error('the font registry did not answer');
+    if (r.ok === false) throw new Error(r.error);
+    return r.value;
+  };
   return {
     sync: false,
     answer: async (queries: string) => unwrapResult(await bridge.answer(queries)),
