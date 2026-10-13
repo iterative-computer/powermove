@@ -473,12 +473,12 @@ impl MediaCache {
         // The decoded pixels must outlive the commands reading them; the
         // imported textures hold the frame until wgpu releases them.
         drop(imported);
-        self.bytes += target.bytes();
         // Older versions of the same file are dropped.
         // (Dropped, not destroyed: a frame being recorded may still use it.)
         self.images
             .retain(|k, _| k.path != key.path || k.precision != key.precision);
         self.images.insert(key, target.clone());
+        self.recount();
         Ok(target)
     }
 
@@ -580,6 +580,7 @@ impl MediaCache {
             k.path != key.path || k.precision != key.precision || k.export != key.export
         });
         self.frames.insert(key, target.clone());
+        self.recount();
         Ok(Some(target))
     }
 
@@ -596,6 +597,18 @@ impl MediaCache {
             }
         }
         self.frames.retain(|k, _| k.path != path);
+        self.recount();
+    }
+
+    /// The coded size of a video file's frames.
+    pub fn video_size(&mut self, path: &Path) -> Result<(u32, u32), MediaFailure> {
+        let src = self.source(path)?;
+        let v = src
+            .probe
+            .video
+            .as_ref()
+            .ok_or_else(|| MediaFailure::Failed("no video stream".into()))?;
+        Ok((v.width, v.height))
     }
 
     /// The color reading of a video file: an override, or the probe's.
@@ -604,6 +617,16 @@ impl MediaCache {
             return Ok(*c);
         }
         Ok(self.source(path)?.color)
+    }
+
+    /// Bytes of converted textures held.
+    fn recount(&mut self) {
+        self.bytes = self
+            .images
+            .values()
+            .chain(self.frames.values())
+            .map(Target::bytes)
+            .sum();
     }
 
     /// Releases CoreVideo texture cache entries no longer in use.

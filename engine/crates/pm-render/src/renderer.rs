@@ -37,6 +37,15 @@ pub struct Frame {
     pub seconds: f64,
 }
 
+/// A pass-through candidate ([`Renderer::pass_through`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PassThrough {
+    pub path: std::path::PathBuf,
+    /// Source time in seconds (the frame is selected by section 5 rule 7).
+    pub seconds: f64,
+    pub facts: pm_color::chroma::FrameFacts,
+}
+
 /// What a render into a caller's target reports.
 pub struct Rendered {
     pub legend: Vec<String>,
@@ -352,6 +361,53 @@ impl Renderer {
             .map(|t| pm_gpu::readback::read_f32(&self.device, &self.queue, &t.texture))
             .transpose()
             .map_err(Into::into)
+    }
+
+    /// Section 9's pass-through candidate: when the frame is one video
+    /// source drawn 1:1 over the whole output (no transform, crop,
+    /// resampling, or opacity), the source, its time, and the frame facts
+    /// `pm_color::chroma::pass_through` needs. The exporter then compares
+    /// the source's format, range, subsampling, and siting with the output
+    /// and copies its Y′CbCr planes when they match. `None` for any other
+    /// frame.
+    pub fn pass_through(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+    ) -> Result<Option<PassThrough>, RenderError> {
+        request.validate()?;
+        let (plan, _) = self.plan(document, composition, time, request, assets)?;
+        let [draw] = plan.draws.as_slice() else {
+            return Ok(None);
+        };
+        let plan::Content::Texture { source, uv, alpha } = &draw.content else {
+            return Ok(None);
+        };
+        let plan::Source::Video { path, time, .. } = source else {
+            return Ok(None);
+        };
+        let (w, h) = (request.output_size.width, request.output_size.height);
+        let size = self
+            .media
+            .video_size(path)
+            .map_err(|e| RenderError::Media(format!("{e:?}")))?;
+        let full = [f64::from(w), 0.0, 0.0, f64::from(h), 0.0, 0.0];
+        let untransformed = draw.matrix == full
+            && *uv == [0.0, 0.0, 1.0, 1.0]
+            && size == (w, h)
+            && request.region.is_none();
+        Ok(Some(PassThrough {
+            path: path.clone(),
+            seconds: *time,
+            facts: pm_color::chroma::FrameFacts {
+                single_source: true,
+                untransformed,
+                effect_free: *alpha == 1.0,
+            },
+        }))
     }
 
     /// The plan of a frame without rendering it (tests, `pm-cli parity`).

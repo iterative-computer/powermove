@@ -308,3 +308,107 @@ fn requests_are_validated() {
     let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
     assert!(r.render(&doc, "nope", ticks(0.0), &request, &resolver).is_err());
 }
+
+#[test]
+fn pass_through_candidates() {
+    let fixtures = repo_root().join("apps/desktop/e2e/fixtures");
+    let clip = |rotation: f64, extra: bool| {
+        let mut v = layer("v", "video", json!({ "asset": "clip", "fit": "stretch", "w": 160, "h": 90, "trim": 0, "speed": 1 }), 80.0, 45.0, 2.0);
+        set(&mut v, "rotation", json!(rotation));
+        let mut layers = vec![v];
+        if extra {
+            layers.insert(0, layer("s", "solid", json!({ "color": "#FFFFFF", "w": 10, "h": 10 }), 0.0, 0.0, 2.0));
+        }
+        let mut doc = project(160, 90, 2.0, no_fill(), layers);
+        asset(&mut doc, "clip", "video", "mp4", 160, 90, 2.0);
+        load(&doc)
+    };
+    let mut resolver = MapResolver::default();
+    resolver.paths.insert("clip".into(), fixtures.join("h264-aac.mp4"));
+    let mut r = Renderer::headless().unwrap();
+    let request = RenderRequest::at_scale(Size::new(160, 90), 1.0, Precision::Float16);
+    let p = r.pass_through(&clip(0.0, false), "Ptest-root", ticks(0.5), &request, &resolver).unwrap().unwrap();
+    assert_eq!(p.facts, pm_color::chroma::FrameFacts { single_source: true, untransformed: true, effect_free: true });
+    assert!((p.seconds - 0.5).abs() < 1e-12);
+    let p = r.pass_through(&clip(3.0, false), "Ptest-root", ticks(0.5), &request, &resolver).unwrap().unwrap();
+    assert!(!p.facts.untransformed, "a rotated frame is resampled");
+    assert!(r.pass_through(&clip(0.0, true), "Ptest-root", ticks(0.5), &request, &resolver).unwrap().is_none());
+    // At another output size the source is resampled.
+    let half = RenderRequest::at_scale(Size::new(160, 90), 0.5, Precision::Float16);
+    let p = r.pass_through(&clip(0.0, false), "Ptest-root", ticks(0.5), &half, &resolver).unwrap().unwrap();
+    assert!(!p.facts.untransformed);
+}
+
+#[test]
+fn render_into_a_callers_target_equals_render() {
+    let (doc, resolver) = everything();
+    let doc = load(&doc);
+    let mut r = Renderer::headless().unwrap();
+    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
+    let (expected, _, _) = render_bytes(&mut r, &doc, 0.4, &request, &resolver);
+    // A presenter's working texture (or an export buffer).
+    let target = pm_gpu::Target::new(
+        r.device(),
+        "caller",
+        W,
+        H,
+        wgpu::TextureFormat::Rgba16Float,
+        pm_gpu::target::working_usage(),
+    );
+    let out = r.render_into(&doc, "Ptest-root", ticks(0.4), &request, &resolver, &target, None).unwrap();
+    assert!(out.failures.is_empty());
+    let got = pm_gpu::readback::read_raw(r.device(), r.queue(), &target.texture).unwrap();
+    assert!(got == expected);
+    // A target of the wrong size is refused.
+    let small = pm_gpu::Target::new(r.device(), "small", 10, 10, wgpu::TextureFormat::Rgba16Float, pm_gpu::target::working_usage());
+    assert!(r.render_into(&doc, "Ptest-root", ticks(0.4), &request, &resolver, &small, None).is_err());
+}
+
+#[test]
+fn contract_2_requests_convert() {
+    use pm_protocol::color::OutputColor;
+    use pm_protocol::common::{CompositionId, Ticks};
+    use pm_protocol::frame::{FramePurpose, FrameRequest, MediaPreference, MotionBlurKind, PreviewResolution};
+    use pm_protocol::priority::PriorityClass;
+    let mut request = FrameRequest {
+        composition: CompositionId::new("Ptest-root"),
+        time: Ticks::ZERO,
+        purpose: FramePurpose::Export,
+        priority: PriorityClass::UserJob,
+        output_size: Size::new(W, H),
+        region: Some(PixelRect { x: 10, y: 20, width: 100, height: 50 }),
+        scale: 1.0,
+        resolution: PreviewResolution::Full,
+        media: MediaPreference::Originals,
+        color: OutputColor::SrgbImage,
+        precision: Precision::Float32,
+        motion_blur: MotionBlurKind::Export,
+        view: None,
+        draft_3d: false,
+        draft_render: false,
+        depth_id: true,
+        overlay: false,
+    };
+    // Final outputs carry no depth and id surface (contract 2).
+    assert!(RenderRequest::from_frame_request(&request).is_err());
+    request.depth_id = false;
+    let r = RenderRequest::from_frame_request(&request).unwrap();
+    assert!(r.export && !r.depth_id && r.precision == Precision::Float32);
+    let mut viewer = request.clone();
+    viewer.purpose = FramePurpose::Viewer;
+    viewer.priority = PriorityClass::Interactive;
+    viewer.depth_id = true;
+    viewer.color = OutputColor::Viewer { space: pm_protocol::color::ViewerColorSpace::Srgb };
+    let v = RenderRequest::from_frame_request(&viewer).unwrap();
+    assert!(!v.export && v.depth_id);
+    assert_eq!((r.output_size, r.region, r.scale), (Size::new(W, H), request.region, Some((1.0, 1.0))));
+    assert_eq!(r.target_size(), Size::new(100, 50));
+    // The frame renders at the region's size.
+    let (doc, resolver) = everything();
+    let mut renderer = Renderer::headless().unwrap();
+    let frame = renderer.render(&load(&doc), "Ptest-root", ticks(0.0), &r, &resolver).unwrap();
+    assert_eq!((frame.color.width(), frame.color.height()), (100, 50));
+    // An invalid request is refused.
+    request.scale = 40.0;
+    assert!(RenderRequest::from_frame_request(&request).is_err());
+}
