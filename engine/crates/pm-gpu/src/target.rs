@@ -61,6 +61,13 @@ impl Target {
         Target { texture, view }
     }
 
+    /// A target over an existing texture (the presenter's working texture,
+    /// an export buffer), with its default view.
+    pub fn wrap(texture: wgpu::Texture) -> Target {
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Target { texture, view }
+    }
+
     pub fn width(&self) -> u32 {
         self.texture.width()
     }

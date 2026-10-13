@@ -620,6 +620,14 @@ fn render_into_a_callers_target_equals_render() {
     assert!(out.failures.is_empty());
     let got = pm_gpu::readback::read_raw(r.device(), r.queue(), &target.texture).unwrap();
     assert!(got == expected);
+    // The bridge presenter's working texture (render target, sampled,
+    // copied out; no storage or copy-in usage).
+    let presenter = pm_gpu::bridge_out::display::WorkingTexture::new(r.device(), Size::new(W, H));
+    let wrapped = pm_gpu::Target::wrap(presenter.texture.clone());
+    r.render_into(&doc, "Ptest-root", ticks(0.4), &request, &resolver, &wrapped, None)
+        .unwrap();
+    let got = pm_gpu::readback::read_raw(r.device(), r.queue(), &presenter.texture).unwrap();
+    assert!(got == expected, "the presenter's texture holds the same frame");
     // A target of the wrong size is refused.
     let small = pm_gpu::Target::new(
         r.device(),
@@ -704,4 +712,36 @@ fn contract_2_requests_convert() {
     // An invalid request is refused.
     request.scale = 40.0;
     assert!(RenderRequest::from_frame_request(&request).is_err());
+}
+
+/// Frame time of the composition above at 1920 × 1080 (run with
+/// `--ignored --release`; reported, not gated: Phase 2's performance rows
+/// are measured in the app).
+#[test]
+#[ignore]
+fn frame_time_at_1080p() {
+    let (doc, resolver) = everything();
+    let doc = load(&doc);
+    let mut r = Renderer::headless().unwrap();
+    for precision in [Precision::Float16, Precision::Float32] {
+        let request = RenderRequest::at_scale(Size::new(W, H), 6.0, precision);
+        let mut times = Vec::new();
+        for i in 0..40 {
+            let t0 = std::time::Instant::now();
+            let frame = r
+                .render(&doc, "Ptest-root", ticks(0.5 + f64::from(i) / 30.0), &request, &resolver)
+                .unwrap();
+            let _ = r.device().poll(wgpu::PollType::wait_indefinitely());
+            if i >= 5 {
+                times.push(t0.elapsed().as_secs_f64() * 1000.0);
+            }
+            drop(frame);
+        }
+        times.sort_by(f64::total_cmp);
+        eprintln!(
+            "{precision:?} 1920×1080: median {:.2} ms, p95 {:.2} ms (CPU plan + GPU, video decode included)",
+            times[times.len() / 2],
+            times[times.len() * 95 / 100]
+        );
+    }
 }
