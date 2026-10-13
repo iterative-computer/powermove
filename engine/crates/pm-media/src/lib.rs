@@ -22,6 +22,7 @@ pub mod error;
 pub mod ff;
 pub mod frame;
 pub mod hash;
+pub mod image;
 pub mod index;
 pub mod pool;
 pub mod probe;

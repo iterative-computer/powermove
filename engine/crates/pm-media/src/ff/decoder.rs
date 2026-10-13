@@ -71,8 +71,10 @@ impl PlanarLayout {
             let rgb = flags & ff::AV_PIX_FMT_FLAG_RGB != 0;
             let mut planes = Vec::with_capacity(n);
             for i in 0..n {
-                let c = d.comp[i];
-                // One component per plane, in order (gbrp stores G, B, R).
+                // Y′CbCr(A): component i on plane i. RGB: planes hold G, B, R,
+                // then A (gbrp order), and the descriptor lists R, G, B, A.
+                let comp = if rgb { [1, 2, 0, 3][i] } else { i };
+                let c = d.comp[comp];
                 if c.plane as usize != i || c.offset != 0 || c.shift != 0 || c.depth != depth {
                     return None;
                 }
