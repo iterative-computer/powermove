@@ -212,10 +212,10 @@ describe('agent harness oracle', () => {
       runId: 'validate-effect', callId: 'validate', tool: 'validate_effect',
       arguments: { definition }, baseRevision: 0
     });
-    await expect(call()).rejects.toThrow('too many params (36 > 32)');
-    definition.params = definition.params.slice(0, 32);
+    // Registration supports effects with more than 32 named uniforms.
+    // Preflight must accept the same definitions and still reject invalid ones.
     const result = await call();
-    expect(JSON.parse(result.content[0].text)).toMatchObject({ valid: true, id: 'typewriter', parameterCount: 32 });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ valid: true, id: 'typewriter', parameterCount: 36 });
     expect(result.changed).not.toBe(true);
     expect(JSON.stringify(PM.proj)).toBe(before);
     definition.params[1]!.k = definition.params[0]!.k;
