@@ -1,12 +1,15 @@
-// Loads the wasm_identity example module and prints its digest of the
-// vectors (see examples/wasm_identity.rs).
+// Loads a wasm identity example module (wasm_identity or
+// wasm_layer_identity) and prints its digest of the vectors. A `.gz`
+// vectors file is decompressed first.
 import { readFileSync } from 'node:fs';
+import { gunzipSync } from 'node:zlib';
 
 const [wasmPath, vectorsPath] = process.argv.slice(2);
 const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), {});
 const { memory, alloc, digest, count } = instance.exports;
+const raw = readFileSync(vectorsPath);
+const bytes = vectorsPath.endsWith('.gz') ? gunzipSync(raw) : raw;
 const run = (fn) => {
-  const bytes = readFileSync(vectorsPath);
   const ptr = alloc(bytes.length);
   new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
   return fn(ptr, bytes.length);

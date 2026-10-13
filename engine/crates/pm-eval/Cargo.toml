@@ -23,6 +23,10 @@ libm.workspace = true
 name = "wasm_identity"
 crate-type = ["cdylib"]
 
+[[example]]
+name = "wasm_layer_identity"
+crate-type = ["cdylib"]
+
 [dev-dependencies]
 pm-expr = { path = "../pm-expr" }
 pm-text = { path = "../pm-text", features = ["system"] }
