@@ -48,9 +48,9 @@ describe('precompose boundary rig preservation', () => {
     });
   });
 
-  it('copies shared group spaces once and preserves group opacity without doubling transforms', () => {
+  it('copies shared transform-only group spaces once without doubling transforms', () => {
     const PM = editor();
-    const group = PM.mkLayer('group', { p: { 'position.x': 40, opacity: 65 } });
+    const group = PM.mkLayer('group', { p: { 'position.x': 40 } });
     group.p.rotation.kf = [PM.KF(0, 0), PM.KF(2, 50)];
     const parent = PM.mkLayer('null', { p: { 'position.x': 80 } });
     parent.group = group.id;
@@ -70,7 +70,7 @@ describe('precompose boundary rig preservation', () => {
       [first, second].forEach((child, index) => {
         pose(PM, child, time, comp).forEach((value, channel) => expect(value).toBeCloseTo(before[frame]![index]![channel]!, 6));
         PM.scope.push(comp);
-        try { expect(PM.worldOpacity(child, time)).toBeCloseTo(0.65, 6); }
+        try { expect(PM.worldOpacity(child, time)).toBeCloseTo(1, 6); }
         finally { PM.scope.pop(); }
       });
     });

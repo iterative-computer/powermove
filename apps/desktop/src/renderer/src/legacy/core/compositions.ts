@@ -455,7 +455,7 @@ export function install(PM: PMRegistry): void {
   /** Keep animated coordinate spaces when only part of a rig crosses a comp boundary.
    * Copies are non-rendering nulls (or groups for membership), with independent keys.
    * Plan both sides before touching links on the original layers. */
-  const boundaryRigs = (members: any[], source: any[]) => {
+  const boundaryRigs = (members: any[], source: any[], sharedGroups = new Set<string>()) => {
     const originals = new Map(source.map(layer => [layer.id, layer]));
     const local = new Map(members.map(layer => [layer.id, layer]));
     const copies: any[] = [], links = new Map<any, { parent: string | null; group: string | null }>();
@@ -470,6 +470,9 @@ export function install(PM: PMRegistry): void {
         copy.type = original.type === 'group' ? 'group' : 'null';
         copy.fx = []; copy.masks = []; copy.matteSource = null;
         copy.transitionIn = null; copy.transitionOut = null;
+        if (sharedGroups.has(id)) {
+          copy.p.opacity = PM.P(100); copy.blend = 'normal'; copy.mblur = false;
+        }
         if (copy.type === 'null') copy.solo = false;
         local.set(id, copy); copies.push(copy); queue.push(copy);
       }
@@ -503,6 +506,37 @@ export function install(PM: PMRegistry): void {
       return leaveAttributes(layer, name, options.open === true);
     }
     const pickedIds = new Set(picked.map((layer: any) => layer.id));
+    // Keep a shared visual boundary outside the precomp, rather than applying
+    // opacity/effects separately to its moved and remaining children. This is
+    // safe only in an unchanged coordinate space: nested comps have a fixed
+    // viewport, so moving a transformed group outside can clip its contents.
+    const styled = (group: any) => {
+      const differs = (prop: any, value: any) => prop && typeof prop === 'object'
+        ? !!(prop.expr || prop.kf?.length || prop.v !== value) : prop !== value;
+      return differs(group.p.opacity, 100) || group.fx?.length || group.masks?.length
+        || group.matteSource || differs(group.blend, 'normal') || differs(group.mblur, false)
+        || group.transitionIn || group.transitionOut;
+    };
+    const ancestors = (item: any) => PM.groupAncestors(item, host.layers) as any[];
+    const external = picked.flatMap(ancestors).filter((group: any) => !pickedIds.has(group.id));
+    let sharedGroup: any = null;
+    const sharedGroups = new Set<string>();
+    if (external.some(styled)) {
+      const roots = picked.filter((item: any) => !ancestors(item).some(group => pickedIds.has(group.id)));
+      sharedGroup = host.layers.find((item: any) => item.id === roots[0]?.group);
+      const chain = sharedGroup ? [sharedGroup, ...ancestors(sharedGroup)] : [];
+      const transformKeys = ['position.x', 'position.y', 'anchor.x', 'anchor.y', 'scale.x', 'scale.y', 'rotation', 'skew'];
+      const identity = [1, 0, 0, 1, 0, 0];
+      const safe = sharedGroup && roots.every((item: any) => item.group === sharedGroup.id)
+        && external.every((group: any) => chain.includes(group))
+        && !picked.some((item: any) => item.threeD)
+        && chain.every((group: any) => !group.threeD && !group.parent
+          && !pickedIds.has(group.matteSource)
+          && transformKeys.every(key => !group.p[key]?.expr && !group.p[key]?.kf?.length)
+          && PM.localMatrix(group, 0).every((value: number, index: number) => Math.abs(value - identity[index]!) < 1e-8));
+      if (!safe) throw new Error('Select the whole styled group to pre-compose it without changing its appearance.');
+      chain.forEach((group: any) => sharedGroups.add(group.id));
+    }
     let start = 0, dur = host.dur;
     if (options.adjustDuration) {
       start = Math.min(...picked.map((layer: any) => layer.from));
@@ -514,7 +548,7 @@ export function install(PM: PMRegistry): void {
     let layer: any = null;
     transact('Pre-compose', () => {
       const rest = host.layers.filter((item: any) => !pickedIds.has(item.id));
-      const innerRig = boundaryRigs(picked, host.layers), outerRig = boundaryRigs(rest, host.layers);
+      const innerRig = boundaryRigs(picked, host.layers, sharedGroups), outerRig = boundaryRigs(rest, host.layers);
       comp.layers = innerRig.layers;
       for (const moved of comp.layers) {
         const links = innerRig.links.get(moved);
@@ -524,6 +558,7 @@ export function install(PM: PMRegistry): void {
       }
       PM.proj.comps = { ...comps(), [comp.id]: comp };
       layer = makeLayer(comp.id, host, start);
+      if (sharedGroup) layer.group = sharedGroup.id;
       layer.p['anchor.x'].v = comp.w / 2; layer.p['anchor.y'].v = comp.h / 2;
       for (const item of rest) {
         Object.assign(item, outerRig.links.get(item));
