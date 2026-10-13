@@ -186,6 +186,25 @@ describe('ViewerPresentation', () => {
     expect(stage.contains(presentation.canvas)).toBe(false);
   });
 
+  it('re-sends the current view with the vsync hint (same viewSeq) and keeps the hint on later states', async () => {
+    const service = new Service();
+    Object.assign(service, { hostOffsetUs: () => 2_000_000, displayHz: () => 120 });
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => new Painter() });
+    await settle();
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    expect(channel.states).toHaveLength(1);
+    expect(channel.states[0]!.vsync).toBeUndefined();
+    for (let i = 0, t = 500; i < 30; i++, t += 1000 / 120) runFrames(rafs, t);
+    expect(channel.states).toHaveLength(2);
+    expect(channel.states[1]!.viewSeq).toBe(1);
+    expect(channel.states[1]!.vsync?.periodUs).toBeCloseTo(8333.33, 1);
+    presentation.update({ ...PARAMS, pan: [4, 0] });
+    expect(channel.states[2]).toMatchObject({ viewSeq: 2, vsync: channel.states[1]!.vsync });
+    presentation.dispose();
+  });
+
   it('hides on a closed session and reopens with the current state when the engine is ready again', async () => {
     const service = new Service();
     const { stage, overlay, rafs } = stageIn(window as unknown as Window);

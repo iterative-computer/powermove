@@ -20,7 +20,7 @@
  * app; the bridge's integration test and the S1 harness do.
  */
 import { decisionOffsetUs, JitterBuffer, type Queued } from './jitter-buffer';
-import { nextVsync, VsyncEstimator, type VsyncFit } from './display-timing';
+import { HINT_INTERVAL_MS, hintChanged, nextVsync, VsyncEstimator, type VsyncFit } from './display-timing';
 import type { FramePainter } from './gpu';
 import type {
   ClockSample,
@@ -29,7 +29,8 @@ import type {
   FrameRelease,
   OverlayGeometry,
   SurfacePool,
-  ViewerState
+  ViewerState,
+  VsyncHint
 } from './protocol';
 
 /** The engine connection as the presenter uses it. */
@@ -78,6 +79,12 @@ export type PresenterOptions = {
    * presenter's video clock stamps when they are sent.
    */
   hostOffsetUs?: () => number | null;
+  /**
+   * The display's refresh grid on the host clock changed (amendment 18):
+   * the presentation re-sends its viewer state with the hint, so the
+   * engine starts timed frames just after the compositor's GPU work.
+   */
+  onVsync?: (hint: VsyncHint) => void;
 };
 
 type Payload = { frame: VideoFrame };
@@ -120,6 +127,8 @@ export class EnginePresenter {
   /** The last timed frame's duration (ticks), for the decision phase. */
   private lastFrameTicks: number | null = null;
   private listeners = new Set<(frame: PresentedFrame) => void>();
+  private hint: VsyncHint | null = null;
+  private hintSentMs = -Infinity;
   private raf = 0;
   private disposed = false;
   private unsubscribe: () => void;
@@ -175,6 +184,9 @@ export class EnginePresenter {
     this.vsync = new VsyncEstimator(displayHz);
     this.offsetKey = '';
     this.offsetUs = 0;
+    // Another display: its grid replaces the old one as soon as it is fitted.
+    this.hint = null;
+    this.hintSentMs = -Infinity;
     this.start(requestFrame, cancelFrame);
   }
 
@@ -263,6 +275,7 @@ export class EnginePresenter {
     if (this.disposed) return;
     this.trace?.rafs.push(rafMs);
     const fit = this.vsync.sample(rafMs);
+    this.updateHint(rafMs, fit);
     this.expireParked(rafMs);
     const decisionMs = this.decisionMs(rafMs, fit);
     const atUs = this.hostUs(decisionMs);
@@ -270,6 +283,23 @@ export class EnginePresenter {
     const { show, drop } = this.buffer.pick(atUs ?? 0, this.clock);
     for (const { item, reason } of drop) this.dropItem(item, reason);
     if (show) this.draw(show, rafMs);
+  }
+
+  /** The refresh grid on the host clock, for the engine (amendment 18). */
+  get vsyncHint(): VsyncHint | null {
+    return this.hint;
+  }
+
+  private updateHint(rafMs: number, fit: VsyncFit | null): void {
+    if (!fit || !this.options.onVsync) return;
+    const host = this.hostUs(fit.vsyncMs);
+    if (host === null) return;
+    const next: VsyncHint = { hostTime: Math.round(host), periodUs: fit.periodMs * 1000 };
+    if (!hintChanged(this.hint, next)) return;
+    if (this.hint && !fit.jumped && rafMs - this.hintSentMs < HINT_INTERVAL_MS) return;
+    this.hint = next;
+    this.hintSentMs = rafMs;
+    this.options.onVsync(next);
   }
 
   /** The predicted display time of this refresh's frame, moved so frame

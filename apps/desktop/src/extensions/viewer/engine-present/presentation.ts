@@ -32,7 +32,7 @@
  */
 import { createWebGpuPainter, type FramePainter } from './gpu';
 import { EnginePresenter, type FrameLink, type FrameSource, type PresentedFrame, type PresenterStats } from './presenter';
-import type { EngineFrameMessage, OverlayGeometry, PathCommand, Quad, ViewerState } from './protocol';
+import type { EngineFrameMessage, OverlayGeometry, PathCommand, Quad, ViewerState, VsyncHint } from './protocol';
 import { canvasColorSpace, displayIsEdr, ViewSequencer, type ViewInput } from './view-state';
 
 /** The service name the kernel's engine connection registers. */
@@ -141,6 +141,8 @@ export class ViewerPresentation {
   private appliedSize: { width: number; height: number } | null = null;
   private settleTimer = 0;
   private settleDue = false;
+  /** The display's refresh grid, sent with every state (amendment 18). */
+  private vsync: VsyncHint | null = null;
 
   constructor(private readonly options: PresentationOptions) {
     const doc = options.stage.ownerDocument;
@@ -204,7 +206,19 @@ export class ViewerPresentation {
     if (!changed) return;
     this.states.push(state);
     if (this.states.length > STATE_HISTORY) this.states.shift();
-    this.presenter?.setViewerState(state);
+    this.presenter?.setViewerState(this.withHint(state));
+  }
+
+  /** A state as sent: with the newest vsync hint, which is not part of the view. */
+  private withHint(state: ViewerState): ViewerState {
+    return this.vsync ? { ...state, vsync: this.vsync } : state;
+  }
+
+  /** The presenter fitted a new refresh grid: re-send the current view with it (same `viewSeq`). */
+  private onVsync(hint: VsyncHint): void {
+    this.vsync = hint;
+    const state = this.sequencer.current;
+    if (state) this.presenter?.setViewerState(this.withHint(state));
   }
 
   /** The size to send: a new size only once it held still (live resizes). */
@@ -316,7 +330,8 @@ export class ViewerPresentation {
       source: this.options.service.source,
       painter: this.painter,
       trace: this.options.trace,
-      hostOffsetUs: this.options.service.hostOffsetUs ? () => this.options.service.hostOffsetUs!() : undefined
+      hostOffsetUs: this.options.service.hostOffsetUs ? () => this.options.service.hostOffsetUs!() : undefined,
+      onVsync: (hint) => this.onVsync(hint)
     });
     this.presenter = presenter;
     presenter.onPresented((frame) => {
@@ -329,7 +344,7 @@ export class ViewerPresentation {
     if (!view) presenter.start();
     // A new session knows nothing yet: send the current state.
     const state = this.sequencer.current;
-    if (state) presenter.setViewerState(state);
+    if (state) presenter.setViewerState(this.withHint(state));
     else if (this.params) this.update(this.params);
   }
 

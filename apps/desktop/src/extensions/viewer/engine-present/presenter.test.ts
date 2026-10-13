@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { FramePainter } from './gpu';
 import { EnginePresenter, type FrameLink, type FrameSource, type PresentedFrame } from './presenter';
-import { TICKS_PER_SECOND, type ClockSample, type FrameDescriptor, type FrameRelease, type ViewerState } from './protocol';
+import { TICKS_PER_SECOND, type ClockSample, type FrameDescriptor, type FrameRelease, type ViewerState, type VsyncHint } from './protocol';
 
 const F = TICKS_PER_SECOND / 60;
 
@@ -212,5 +212,43 @@ describe('EnginePresenter', () => {
     ]);
     presenter.receive({ type: 'frame', frame: desc(4) });
     expect(link.releases).toHaveLength(2);
+  });
+
+  it('tells the engine the refresh grid on the host clock once it is fitted, and again only when it moves', () => {
+    const hints: VsyncHint[] = [];
+    // host µs = performance.now() ms × 1000 + 5,000,000
+    const presenter = new EnginePresenter({
+      link: new Link(),
+      source: new Source(),
+      painter: new Painter(),
+      displayHz: 120,
+      hostOffsetUs: () => 5_000_000,
+      onVsync: (hint) => hints.push(hint)
+    });
+    const period = 1000 / 120;
+    let t = 1000.4;
+    for (let i = 0; i < 30; i++, t += period) presenter.refresh(t);
+    expect(hints).toHaveLength(1);
+    expect(hints[0]!.periodUs).toBeCloseTo(8333.33, 1);
+    // On the grid: hostTime is a refresh, 1000.4 ms + n periods.
+    const phase = (((hints[0]!.hostTime - 5_000_000 - 1_000_400) % hints[0]!.periodUs) + hints[0]!.periodUs) % hints[0]!.periodUs;
+    expect(Math.min(phase, hints[0]!.periodUs - phase)).toBeLessThan(1);
+    // The same grid two seconds later: nothing new.
+    for (let i = 0; i < 240; i++, t += period) presenter.refresh(t);
+    expect(hints).toHaveLength(1);
+    // The display link's phase jumps by half a refresh: a new hint at once.
+    t += period / 2;
+    for (let i = 0; i < 24; i++, t += period) presenter.refresh(t);
+    expect(hints).toHaveLength(2);
+    const moved = (((hints[1]!.hostTime - hints[0]!.hostTime) % hints[0]!.periodUs) + hints[0]!.periodUs) % hints[0]!.periodUs;
+    expect(moved).toBeCloseTo(hints[0]!.periodUs / 2, -1);
+    expect(presenter.vsyncHint).toEqual(hints[1]);
+  });
+
+  it('sends no hint without a host clock offset', () => {
+    const hints: VsyncHint[] = [];
+    const presenter = new EnginePresenter({ link: new Link(), source: new Source(), painter: new Painter(), displayHz: 120, onVsync: (hint) => hints.push(hint) });
+    for (let i = 0, t = 0; i < 60; i++, t += 1000 / 120) presenter.refresh(t);
+    expect(hints).toEqual([]);
   });
 });
