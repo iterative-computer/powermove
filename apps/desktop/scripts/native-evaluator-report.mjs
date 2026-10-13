@@ -3,12 +3,14 @@
    (docs/engine/write-path.md, "Dual answers, the auditor, and the
    consistency check").
 
-     node scripts/native-evaluator-report.mjs <report.jsonl> [--json]
+     node scripts/native-evaluator-report.mjs <report.jsonl> [--results playwright.json] [--json]
 
    The file is what main appends when POWERMOVE_NATIVE_REPORT_FILE is set:
    one JSON event per line (engine-doc/report.ts). Each launch's last summary
    holds its totals (summaries are cumulative per page); events (`dual`,
-   `audit`, `consistency`, `violation`, `error`, `dead`) are listed by kind. */
+   `audit`, `consistency`, `violation`, `error`, `dead`) are listed by kind.
+   With Playwright's JSON results, each event is attributed to the test that
+   was running when it was reported (events carry `at`, wall-clock ms). */
 import { readFileSync } from 'node:fs';
 
 const [file, ...rest] = process.argv.slice(2);
@@ -17,6 +19,31 @@ if (!file) {
   process.exit(2);
 }
 const asJson = rest.includes('--json');
+const resultsFile = rest.includes('--results') ? rest[rest.indexOf('--results') + 1] : null;
+
+/** Test runs from Playwright's JSON reporter: [start, end, title, status]. */
+const runs = [];
+if (resultsFile) {
+  const visit = (suite, titles) => {
+    for (const child of suite.suites ?? []) visit(child, [...titles, child.title].filter(Boolean));
+    for (const spec of suite.specs ?? []) {
+      for (const test of spec.tests ?? []) {
+        for (const result of test.results ?? []) {
+          const start = Date.parse(result.startTime);
+          runs.push([start, start + result.duration, `${spec.file}:${spec.line} ${[...titles.slice(1), spec.title].join(' › ')}`, result.status]);
+        }
+      }
+    }
+  };
+  const results = JSON.parse(readFileSync(resultsFile, 'utf8'));
+  for (const suite of results.suites ?? []) visit(suite, [suite.title]);
+  runs.sort((a, b) => a[0] - b[0]);
+}
+const testAt = (at) => {
+  if (typeof at !== 'number') return undefined;
+  for (const [start, end, title] of runs) if (at >= start && at <= end + 2000) return title;
+  return undefined;
+};
 
 const lines = readFileSync(file, 'utf8').split('\n').filter(Boolean);
 const last = new Map();
@@ -26,7 +53,7 @@ for (const line of lines) {
   try { event = JSON.parse(line); } catch { events.unparsed += 1; continue; }
   if (event.type === 'summary') last.set(event.session ?? `anonymous-${last.size}`, event);
   else if (event.type === 'ready') events.ready += 1;
-  else if (Array.isArray(events[event.type])) events[event.type].push(event);
+  else if (Array.isArray(events[event.type])) events[event.type].push(resultsFile ? { ...event, test: testAt(event.at) } : event);
 }
 
 const add = (into, from) => { for (const [k, v] of Object.entries(from ?? {})) if (typeof v === 'number') into[k] = (into[k] ?? 0) + v; };
@@ -84,13 +111,18 @@ if (asJson) {
   for (const e of events.dual) (byOp[e.op] ??= []).push(e);
   for (const [op, list] of Object.entries(byOp)) {
     console.log(`\n${op}: ${list.length} reported mismatches`);
-    for (const e of list.slice(0, 5)) console.log(`  ${e.path} where=${JSON.stringify(e.where)}\n    native ${e.native}\n    legacy ${e.legacy}`);
+    for (const e of list.slice(0, 5)) console.log(`  ${e.path} where=${JSON.stringify(e.where)}${e.test ? ` [${e.test}]` : ''}\n    native ${e.native}\n    legacy ${e.legacy}`);
   }
   const byKind = {};
   for (const e of events.audit) (byKind[e.kind] ??= []).push(e);
   for (const [kind, list] of Object.entries(byKind)) {
     console.log(`\naudit ${kind}: ${list.length}`);
-    for (const e of list.slice(0, 5)) console.log(`  ${e.detail} ${JSON.stringify(e.paths?.slice(0, 5))}`);
+    for (const e of list.slice(0, 5)) console.log(`  ${e.detail} ${JSON.stringify(e.paths?.slice(0, 5))}${e.test ? ` [${e.test}]` : ''}`);
+    if (resultsFile) {
+      const tests = {};
+      for (const e of list) tests[e.test ?? '(unattributed)'] = (tests[e.test ?? '(unattributed)'] ?? 0) + 1;
+      for (const [test, n] of Object.entries(tests).sort((a, b) => b[1] - a[1])) console.log(`    ${n} in ${test}`);
+    }
   }
   for (const e of events.consistency.slice(0, 5)) console.log(`\nconsistency ${e.reason}: ${JSON.stringify(e.missed?.slice(0, 5))}`);
   for (const e of events.violation.slice(0, 10)) console.log(`violation ${e.path} at ${e.site} (${e.count})`);

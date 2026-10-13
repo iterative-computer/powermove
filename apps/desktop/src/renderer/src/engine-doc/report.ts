@@ -36,6 +36,8 @@ export class Reporter {
   emit(event: ReportEvent): void {
     if (this.lines >= this.limit && event.type !== 'summary') return;
     this.lines += 1;
+    // Wall-clock time, so a test run can attribute events to tests.
+    event = { ...event, at: Date.now() } as ReportEvent;
     let text: string;
     try { text = JSON.stringify(event); } catch { text = String(event.type); }
     // Summaries stay whole JSON within the host log's line limit: the least
