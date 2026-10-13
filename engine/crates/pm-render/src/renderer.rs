@@ -102,6 +102,13 @@ impl Renderer {
         self.pool.bytes()
     }
 
+    /// Keeps translated 3D programs in `dir` across processes (amendment
+    /// 11's disk program cache); the engine host passes its cache
+    /// directory.
+    pub fn set_program_cache_dir(&mut self, dir: Option<std::path::PathBuf>) {
+        self.scene3d.set_program_cache(dir);
+    }
+
     /// 3D layers render without MSAA when `false` (only for the parity
     /// lane's classification of MSAA edge pixels, section 25; output always
     /// uses today's 4 samples).

@@ -401,10 +401,13 @@ mod tests {
     #[test]
     fn colors_decode_like_three() {
         let c = color_hex("#4C8DFF").unwrap();
-        // Recorded `diffuse` for #4C8DFF (tests/fixtures, sphere-corpus).
-        assert_eq!(c[0], 0.0722718506743852);
-        assert_eq!(c[1], 0.2663556047920505);
-        assert_eq!(c[2], 1.0);
+        // Recorded `diffuse` for #4C8DFF (sphere-corpus). `libm::pow` and
+        // V8's differ by at most an ulp of f64; the GPU receives f32.
+        let recorded = [0.0722718506743852f64, 0.2663556047920505, 1.0];
+        for k in 0..3 {
+            assert_eq!(c[k] as f32, recorded[k] as f32);
+            assert!((c[k] - recorded[k]).abs() <= 2.0 * f64::EPSILON * recorded[k]);
+        }
         assert_eq!(color_hex("#4C8DF"), None);
     }
 

@@ -5,5 +5,6 @@
 
 #[rustfmt::skip]
 pub mod chunks;
+pub mod cache;
 pub mod math;
 pub mod program;

@@ -20,6 +20,11 @@
 use crate::glsl::naga;
 use naga::back::msl;
 
+/// Revision of the translation this module and `crate::glsl` produce. Disk
+/// caches of translated programs include it in their keys; bump it whenever
+/// a rewrite, option, or naga upgrade changes the MSL.
+pub const TRANSLATION_REVISION: u32 = 1;
+
 /// Metal's floating-point math mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MathMode {
@@ -146,6 +151,37 @@ pub fn write(
     Ok((format!("{}{source}", mode.pragma()), name))
 }
 
+/// A wgpu module from MSL [`write`] produced earlier (a disk cache of
+/// translated programs). Needs [`supported`].
+pub fn from_source(
+    device: &wgpu::Device,
+    label: &str,
+    source: &str,
+    entry_point: &str,
+) -> Result<MslStage, String> {
+    if !supported(device) {
+        return Err("the device does not accept passthrough MSL".to_owned());
+    }
+    let entry = [wgpu::PassthroughShaderEntryPoint {
+        name: entry_point.to_owned().into(),
+        workgroup_size: (0, 0, 0),
+    }];
+    // SAFETY: as in `module`: the source is this module's own translation.
+    let module = unsafe {
+        device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
+            label: Some(label),
+            entry_points: std::borrow::Cow::Borrowed(&entry),
+            msl: Some(std::borrow::Cow::Borrowed(source)),
+            ..Default::default()
+        })
+    };
+    Ok(MslStage {
+        module,
+        entry_point: entry_point.to_owned(),
+        source: source.to_owned(),
+    })
+}
+
 /// A wgpu module for the single `stage` entry point of `module`, compiled
 /// by Metal with `mode`. Needs [`supported`].
 pub fn module(
@@ -161,24 +197,6 @@ pub fn module(
         return Err("the device does not accept passthrough MSL".to_owned());
     }
     let (source, entry_point) = write(module, info, stage, slots, mode)?;
-    let entry = [wgpu::PassthroughShaderEntryPoint {
-        name: entry_point.clone().into(),
-        workgroup_size: (0, 0, 0),
-    }];
-    // SAFETY: the MSL is naga's translation of a validated module with the
-    // resource slots and vertex attributes the pipeline layout and vertex
-    // buffer layouts give it (wgpu-hal's conventions, module docs).
-    let module = unsafe {
-        device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
-            label: Some(label),
-            entry_points: std::borrow::Cow::Borrowed(&entry),
-            msl: Some(std::borrow::Cow::Borrowed(source.as_str())),
-            ..Default::default()
-        })
-    };
-    Ok(MslStage {
-        module,
-        entry_point,
-        source,
-    })
+    from_source(device, label, &source, &entry_point)
 }
+

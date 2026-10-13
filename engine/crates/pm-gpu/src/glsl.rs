@@ -79,7 +79,7 @@ pub enum Stage {
 }
 
 /// A uniform's location in the default block.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UniformSlot {
     pub offset: u32,
     pub kind: ScalarKind,

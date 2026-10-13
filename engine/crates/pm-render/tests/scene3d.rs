@@ -249,3 +249,44 @@ fn run_cases(gpu: &pm_gpu::Gpu, dir: &std::path::Path, math: MathMode) -> Vec<St
     }
     failed
 }
+
+#[test]
+fn programs_come_from_the_disk_cache() {
+    let gpu = pm_gpu::Gpu::new("pm-render 3d cache test").expect("a Metal device");
+    let dir = std::env::temp_dir().join(format!("pm-render-programs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let case = cases().into_iter().find(|c| c["id"] == "cone-metal-three-suns").unwrap();
+    let plan = plan_of(&case);
+    let render = |scene: &mut Scene3dRenderer| {
+        let mut pool = pm_gpu::TargetPool::new();
+        let t0 = std::time::Instant::now();
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let out = scene
+            .render(&gpu.device, &gpu.queue, &mut encoder, &mut pool, &plan, false)
+            .unwrap();
+        gpu.queue.submit([encoder.finish()]);
+        let bytes = pm_gpu::readback::read_raw(&gpu.device, &gpu.queue, &out.color.texture).unwrap();
+        (bytes, t0.elapsed())
+    };
+    let mut cold = Scene3dRenderer::default();
+    cold.set_program_cache(Some(dir.clone()));
+    let (a, translate) = render(&mut cold);
+    assert_eq!(cold.program_cache_stats(), (0, 0));
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "one program stored");
+    let mut warm = Scene3dRenderer::default();
+    warm.set_program_cache(Some(dir.clone()));
+    let (b, cached) = render(&mut warm);
+    assert_eq!(warm.program_cache_stats(), (1, 0), "the program came from the cache");
+    assert!(a == b, "a cached program renders the same pixels");
+    eprintln!("first frame: translated {translate:?}, from the disk cache {cached:?}");
+    // A corrupted entry is a miss and is rewritten.
+    for e in std::fs::read_dir(&dir).unwrap() {
+        std::fs::write(e.unwrap().path(), "{").unwrap();
+    }
+    let mut again = Scene3dRenderer::default();
+    again.set_program_cache(Some(dir.clone()));
+    let (c, _) = render(&mut again);
+    assert_eq!(again.program_cache_stats(), (0, 0));
+    assert!(a == c);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

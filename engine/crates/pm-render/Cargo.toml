@@ -22,8 +22,8 @@ thiserror.workspace = true
 libm.workspace = true
 regex = "1"
 sha2 = { workspace = true, features = ["std"] }
+serde_json.workspace = true
 
 [dev-dependencies]
 pm-export = { path = "../pm-export", features = ["test-sinks"] }
 png = "0.18"
-serde_json.workspace = true

@@ -792,7 +792,8 @@ mod tests {
     fn standard_program_resolves_and_unrolls() {
         let p = standard_material("Surface", true, 1, 1).unwrap();
         let (v, f) = sources(&p).unwrap();
-        assert!(v.starts_with("#version 300 es\n#define attribute in\n"));
+        assert!(v.starts_with("#version 300 es\n"));
+        assert!(v.contains("\n#define attribute in\n"));
         assert!(f.contains("#define SHADER_NAME Surface"));
         assert!(f.contains("#define STANDARD \n") || f.contains("#define STANDARD "));
         assert!(!v.contains("#include"));

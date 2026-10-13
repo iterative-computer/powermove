@@ -33,6 +33,7 @@ use pm_model::json::{Map, Value};
 use pm_model::{JsString, Node, NodeKind};
 
 use crate::js;
+use crate::three::cache;
 use crate::three::math::{self, Mat4, Vec3};
 use crate::three::program::{Parameters as ProgramParameters, sources, standard_material};
 
@@ -605,7 +606,11 @@ pub struct Rendered3d {
 }
 
 struct Compiled {
-    program: glsl::Program,
+    block_size: u32,
+    /// GL uniform name to default-block slot.
+    uniforms: HashMap<String, glsl::UniformSlot>,
+    /// GL attribute name to shader location.
+    attributes: HashMap<String, u32>,
     vertex: wgpu::ShaderModule,
     fragment: wgpu::ShaderModule,
     /// Entry points of passthrough MSL modules (`None`: naga modules).
@@ -690,6 +695,10 @@ pub struct Scene3dRenderer {
     meshes: HashMap<u64, Arc<Mesh>>,
     attachments: Option<Attachments>,
     depth_surface: Option<DepthSurface>,
+    /// The disk cache of translated programs (amendment 11).
+    cache: Option<cache::ProgramCache>,
+    cache_hits: u64,
+    cache_write_failures: u64,
 }
 
 impl Default for Scene3dRenderer {
@@ -702,6 +711,9 @@ impl Default for Scene3dRenderer {
             meshes: HashMap::new(),
             attachments: None,
             depth_surface: None,
+            cache: None,
+            cache_hits: 0,
+            cache_write_failures: 0,
         }
     }
 }
@@ -724,13 +736,14 @@ fn primitive_key(p: &Primitive) -> u64 {
 /// Writes one uniform into a default-block image (std140, from the
 /// program's reflection). Unknown names are uniforms the compiler
 /// eliminated.
-fn write_uniform(program: &glsl::Program, block: &mut [u8], name: &str, values: &[f64]) {
+fn write_uniform(
+    uniforms: &HashMap<String, glsl::UniformSlot>,
+    block: &mut [u8],
+    name: &str,
+    values: &[f64],
+) {
     let base = name.strip_suffix("[0]").unwrap_or(name);
-    let Some(slot) = program
-        .uniforms
-        .get(name)
-        .or_else(|| program.uniforms.get(base))
-    else {
+    let Some(slot) = uniforms.get(name).or_else(|| uniforms.get(base)) else {
         return;
     };
     let per = (slot.columns * slot.rows) as usize;
@@ -758,6 +771,17 @@ fn write_uniform(program: &glsl::Program, block: &mut [u8], name: &str, values: 
 }
 
 impl Scene3dRenderer {
+    /// Keeps translated programs in `dir` across processes (the engine
+    /// passes its cache directory; `None` translates in memory only).
+    pub fn set_program_cache(&mut self, dir: Option<std::path::PathBuf>) {
+        self.cache = dir.map(cache::ProgramCache::new);
+    }
+
+    /// Programs read from the disk cache, and cache writes that failed.
+    pub fn program_cache_stats(&self) -> (u64, u64) {
+        (self.cache_hits, self.cache_write_failures)
+    }
+
     /// Sets the Metal math mode of the 3D programs (safe by default,
     /// amendment 11; fast only for comparisons).
     pub fn set_math_mode(&mut self, math: MathMode) {
@@ -792,39 +816,84 @@ impl Scene3dRenderer {
         if let Some(c) = self.programs.get(&key) {
             return Ok((key, c.clone()));
         }
-        let program = glsl::compile(&vs, &fs).map_err(|e| format!("3D program: {e}"))?;
-        if !program.textures.is_empty() {
-            return Err("3D program samples textures this pass does not bind".to_owned());
-        }
         // Amendment 11: Metal's safe math mode, through passthrough MSL
-        // (wgpu compiles naga modules with fast math). Devices without
-        // passthrough shaders get wgpu's own compile and report fast math.
-        let (vertex, fragment, vertex_entry, fragment_entry, math) =
-            if self.math != MathMode::Fast && pm_gpu::msl::supported(device) {
-                let slots = [pm_gpu::msl::Slot {
-                    group: 0,
-                    binding: glsl::DEFAULT_BLOCK_BINDING,
-                    buffer: Some(0),
-                    texture: None,
-                    sampler: None,
-                }];
-                let vs = pm_gpu::msl::module(
-                    device,
-                    "three vs",
-                    &program.vertex,
-                    &program.vertex_info,
-                    glsl::naga::ShaderStage::Vertex,
-                    &slots,
-                    self.math,
-                )?;
-                let fs = pm_gpu::msl::module(
+        // (wgpu compiles naga modules with fast math), translated once per
+        // machine (the disk program cache). Devices without passthrough
+        // shaders get wgpu's own compile and report fast math.
+        let translate = || -> Result<glsl::Program, String> {
+            let program = glsl::compile(&vs, &fs).map_err(|e| format!("3D program: {e}"))?;
+            if !program.textures.is_empty() {
+                return Err("3D program samples textures this pass does not bind".to_owned());
+            }
+            Ok(program)
+        };
+        let reflection = |p: &glsl::Program| {
+            (
+                p.block_size,
+                p.uniforms.clone(),
+                p.attributes
+                    .iter()
+                    .map(|(n, a)| (n.clone(), a.location))
+                    .collect::<HashMap<_, _>>(),
+            )
+        };
+        let safe = self.math != MathMode::Fast && pm_gpu::msl::supported(device);
+        let (vertex, fragment, vertex_entry, fragment_entry, math, (block_size, uniforms, attributes)) =
+            if safe {
+                let disk_key = cache::key(&vs, &fs, &mode);
+                let entry = match self.cache.as_ref().and_then(|c| c.load(&disk_key)) {
+                    Some(e) => {
+                        self.cache_hits += 1;
+                        e
+                    }
+                    None => {
+                        let program = translate()?;
+                        let slots = [pm_gpu::msl::Slot {
+                            group: 0,
+                            binding: glsl::DEFAULT_BLOCK_BINDING,
+                            buffer: Some(0),
+                            texture: None,
+                            sampler: None,
+                        }];
+                        let (vertex_msl, vertex_entry) = pm_gpu::msl::write(
+                            &program.vertex,
+                            &program.vertex_info,
+                            glsl::naga::ShaderStage::Vertex,
+                            &slots,
+                            self.math,
+                        )?;
+                        let (fragment_msl, fragment_entry) = pm_gpu::msl::write(
+                            &program.fragment,
+                            &program.fragment_info,
+                            glsl::naga::ShaderStage::Fragment,
+                            &slots,
+                            self.math,
+                        )?;
+                        let (block_size, uniforms, attributes) = reflection(&program);
+                        let e = cache::CachedProgram {
+                            block_size,
+                            uniforms,
+                            attributes,
+                            vertex_msl,
+                            vertex_entry,
+                            fragment_msl,
+                            fragment_entry,
+                        };
+                        if let Some(c) = &self.cache
+                            && c.store(&disk_key, &e).is_err()
+                        {
+                            // A read-only or full cache only costs translation time.
+                            self.cache_write_failures += 1;
+                        }
+                        e
+                    }
+                };
+                let vs = pm_gpu::msl::from_source(device, "three vs", &entry.vertex_msl, &entry.vertex_entry)?;
+                let fs = pm_gpu::msl::from_source(
                     device,
                     "three fs",
-                    &program.fragment,
-                    &program.fragment_info,
-                    glsl::naga::ShaderStage::Fragment,
-                    &slots,
-                    self.math,
+                    &entry.fragment_msl,
+                    &entry.fragment_entry,
                 )?;
                 (
                     vs.module,
@@ -832,8 +901,10 @@ impl Scene3dRenderer {
                     Some(vs.entry_point),
                     Some(fs.entry_point),
                     self.math,
+                    (entry.block_size, entry.uniforms, entry.attributes),
                 )
             } else {
+                let program = translate()?;
                 let module = |m: &glsl::naga::Module, label: &str| {
                     device.create_shader_module(wgpu::ShaderModuleDescriptor {
                         label: Some(label),
@@ -846,6 +917,7 @@ impl Scene3dRenderer {
                     None,
                     None,
                     MathMode::Fast,
+                    reflection(&program),
                 )
             };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -856,7 +928,7 @@ impl Scene3dRenderer {
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(u64::from(program.block_size)),
+                    min_binding_size: wgpu::BufferSize::new(u64::from(block_size)),
                 },
                 count: None,
             }],
@@ -867,7 +939,9 @@ impl Scene3dRenderer {
             immediate_size: 0,
         });
         let c = Arc::new(Compiled {
-            program,
+            block_size,
+            uniforms,
+            attributes,
             vertex,
             fragment,
             vertex_entry,
@@ -969,8 +1043,8 @@ impl Scene3dRenderer {
         }
         let mut inputs: Vec<(u32, &str)> = Vec::new();
         for name in ["position", "normal", "uv"] {
-            if let Some(a) = compiled.program.attributes.get(name) {
-                inputs.push((a.location, name));
+            if let Some(&location) = compiled.attributes.get(name) {
+                inputs.push((location, name));
             }
         }
         let formats = |name: &str| match name {
@@ -1143,10 +1217,10 @@ impl Scene3dRenderer {
         let (program_key, compiled) = self.program(device, &params)?;
         let mesh = self.mesh(device, &plan.primitive);
         // Uniform block.
-        let mut block = vec![0u8; compiled.program.block_size as usize];
+        let mut block = vec![0u8; compiled.block_size as usize];
         let values = uniforms(plan);
         for (name, v) in &values {
-            write_uniform(&compiled.program, &mut block, name, v);
+            write_uniform(&compiled.uniforms, &mut block, name, v);
         }
         let ubuf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("three uniforms"),
@@ -1198,10 +1272,9 @@ impl Scene3dRenderer {
                 .iter()
                 .filter_map(|n| {
                     compiled
-                        .program
                         .attributes
                         .get(*n)
-                        .map(|a| (a.location, &mesh.buffers[n]))
+                        .map(|&location| (location, &mesh.buffers[n]))
                 })
                 .collect();
             v.sort_by_key(|(l, _)| *l);
