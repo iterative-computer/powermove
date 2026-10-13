@@ -49,7 +49,8 @@ const isTrackable = (v: unknown): v is object => {
 
 const firstAppFrame = (stack: string | undefined): string => {
   const lines = (stack || '').split('\n').slice(1);
-  const own = /engine-doc\/proxy|engine-doc\/barrier|\bat (Object\.)?(set|deleteProperty|defineProperty) \[as /;
+  // writerStack already dropped the Proxy's frames; native frames have no location.
+  const own = /\((native|<anonymous>)\)$/;
   const first = lines.find(line => !own.test(line)) ?? '';
   // Code a test harness evaluates in the page (Playwright's page.evaluate),
   // not one of the app's writers.
@@ -111,7 +112,16 @@ export function createTracker(options: {
     return visit(value);
   };
 
-  const record = (target: object, key: PathPart | null) => {
+  /** The stack from the writing code: frames from `trap` up (the Proxy's own) are dropped. */
+  const writerStack = (trap: Function): string | undefined => {
+    const holder: { stack?: string } = {};
+    const capture = (Error as unknown as { captureStackTrace?: (o: object, f: Function) => void }).captureStackTrace;
+    if (typeof capture !== 'function') return new Error().stack;
+    capture(holder, trap);
+    return `Error\n${String(holder.stack ?? '').split('\n').slice(1).join('\n')}`;
+  };
+
+  const record = (target: object, key: PathPart | null, trap: Function) => {
     const base = pathOf(target);
     // Writes to objects that left the document are not document writes.
     if (!base) return;
@@ -119,7 +129,7 @@ export function createTracker(options: {
     // the array, so the barrier diffs it with id-keyed operations.
     const path = Array.isArray(target) || key === null ? base : [...base, key];
     if (!options.inWriter()) {
-      const where = firstAppFrame(new Error().stack);
+      const where = firstAppFrame(writerStack(trap));
       const text = path.map(String).join('.');
       const id = `${text} @ ${where}`;
       const known = violations.get(id);
@@ -166,19 +176,19 @@ export function createTracker(options: {
     set(target, prop, value, receiver) {
       const raw = unwrapDeep(value);
       const key = keyOf(target, prop);
-      if (key !== null) record(target, key);
+      if (key !== null) record(target, key, handler.set!);
       return Reflect.set(target, prop, raw, receiver === proxies.get(target) ? target : receiver);
     },
     deleteProperty(target, prop) {
       const key = keyOf(target, prop);
-      if (key !== null && Object.prototype.hasOwnProperty.call(target, prop)) record(target, key);
+      if (key !== null && Object.prototype.hasOwnProperty.call(target, prop)) record(target, key, handler.deleteProperty!);
       return Reflect.deleteProperty(target, prop);
     },
     defineProperty(target, prop, descriptor) {
       const key = keyOf(target, prop);
       // Non-enumerable accessors (temporalKeys' legacy views) are not JSON.
       const visible = descriptor.enumerable !== false || Object.prototype.propertyIsEnumerable.call(target, prop);
-      if (key !== null && visible) record(target, key);
+      if (key !== null && visible) record(target, key, handler.defineProperty!);
       if ('value' in descriptor) descriptor = { ...descriptor, value: unwrapDeep(descriptor.value) };
       return Reflect.defineProperty(target, prop, descriptor);
     },

@@ -33,6 +33,8 @@ describe('the write-tracking Proxy', () => {
     const report = tracked('report');
     report.doc.name = 'x';
     expect(report.tracker.violations()).toEqual([expect.objectContaining({ path: 'name', count: 1 })]);
+    // The site is the writing code, not the Proxy's own frames.
+    expect(report.tracker.violations()[0]!.site).toMatch(/proxy\.test\.ts/);
     report.writer.on = true;
     report.doc.name = 'y';
     expect(report.tracker.violations()[0]!.count).toBe(1);
