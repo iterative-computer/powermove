@@ -323,6 +323,10 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       barrier = new DocumentBarrier(wasm, () => current, {
         onMismatch, revision: barrier?.revision ?? 0,
         beforeFlush: transactionWrites,
+        scoped: () => {
+          const comp = PM.scope?.length ? unwrap(PM.curComp?.()) : null;
+          return comp && typeof comp.id === 'string' && comp !== current ? comp.id : null;
+        },
       });
       barrier.subscribe(batch => subscribers.forEach(fn => { try { fn(batch); } catch (error) { console.error(error); } }));
       api.reset();

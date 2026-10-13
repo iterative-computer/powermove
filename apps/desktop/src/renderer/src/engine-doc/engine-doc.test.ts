@@ -339,6 +339,22 @@ describe.skipIf(!built)('writes inside open transactions', () => {
     expect(doc.check('test')!.ok).toBe(true);
   });
 
+  it('diffs the entered composition on a touch() without paths', async () => {
+    const { PM, doc } = await editor('on');
+    const sub = PM.mkProject({ w: 100, h: 100, dur: 2 });
+    const inner = PM.mkLayer('solid', {}, sub);
+    sub.layers.push(inner);
+    PM.hist.do('Nest', () => { PM.proj.comps[sub.id] = sub; });
+    doc.barrier!.flush();
+    PM.scope = [PM.proj.comps[sub.id]];
+    try {
+      inner.p['position.x'].v = 33;
+      PM.touch();
+      expect(doc.api!.ev(inner, 'position.x', 0)).toBe(33);
+      expect(doc.barrier!.shadowMatches().ok).toBe(true);
+    } finally { PM.scope = []; }
+  });
+
   it('diffs compositions added outside the open one on a structural diff', async () => {
     const { PM, doc } = await editor('on');
     doc.barrier!.flush();

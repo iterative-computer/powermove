@@ -156,13 +156,16 @@ export class DocumentBarrier {
    * transaction's, which its commit hands over only at the end).
    */
   private beforeFlush: () => void;
+  /** The nested composition the editor has entered (`PM.curComp()`), if any. */
+  private scopedComp: () => string | null;
 
   constructor(
     public wasm: PmWasm,
     /** The live document (raw, never the tracking Proxy). */
     private project: () => any,
-    options: { onMismatch?: (result: ConsistencyResult) => void; revision?: number; beforeFlush?: () => void } = {},
+    options: { onMismatch?: (result: ConsistencyResult) => void; revision?: number; beforeFlush?: () => void; scoped?: () => string | null } = {},
   ) {
+    this.scopedComp = options.scoped ?? (() => null);
     this.onMismatch = options.onMismatch ?? (() => {});
     this.beforeFlush = options.beforeFlush ?? (() => {});
     // A replacement instance (after a trap) continues the revisions, so the
@@ -218,7 +221,7 @@ export class DocumentBarrier {
     this.emit({ baseRevision: this.revision - 1, revision: this.revision, origin: 'load', count: 1, body: encodePatchOps([{ path: [], exists: json !== undefined, value: this.shadow }]) });
   }
 
-  /** The paths a structural diff covers: the open composition, compositions added or removed, and every project member but `comps`. */
+  /** The paths a structural diff covers: the open composition, the entered one, compositions added or removed, and every project member but `comps`. */
   private structuralPaths(live: any): PathPart[][] {
     if (!isRecord(live)) return [[]];
     const paths: PathPart[][] = [];
@@ -227,6 +230,9 @@ export class DocumentBarrier {
     const open = live.compId;
     if (typeof open === 'string' && isRecord(live.comps)) {
       paths.push(['comps', open]);
+      // The composition the editor has entered, whose layers are being edited.
+      const scoped = this.scopedComp();
+      if (scoped && scoped !== open) paths.push(['comps', scoped]);
       // Compositions added or removed (a precompose, an import that nests).
       const before = isRecord(this.shadow) && isRecord(this.shadow.comps) ? this.shadow.comps : {};
       for (const id of Object.keys(live.comps)) if (!Object.prototype.hasOwnProperty.call(before, id)) paths.push(['comps', id]);
