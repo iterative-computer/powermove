@@ -1579,6 +1579,12 @@ function bindStage(stage: any, inner: any): () => void {
     V.returnToComposition();
   }) as EventListener);
   listen(window, 'keydown', ((e: any) => {
+    if (e.key === 'Escape' && activeDrag) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      activeDrag.cancel();
+      return;
+    }
     if (!V.pointerOver || e.code !== 'Space' || e.repeat || e.target?.closest?.('input,textarea,[contenteditable]')) return;
     /* Space remains the global transport shortcut even while the pointer is
        over the canvas. The viewer may temporarily expose Hand for a Space-drag,

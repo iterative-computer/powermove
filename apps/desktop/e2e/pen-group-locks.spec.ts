@@ -45,5 +45,14 @@ test('Pen edits protect nested locked groups and work after unlocking with one U
   expect(await page.evaluate(() => JSON.stringify((window as any).PM.L('pen-shape').d.paths))).not.toBe(fixture.paths);
   expect(await page.evaluate(() => (window as any).PM.hist.undo())).toBe(true);
   expect(await page.evaluate(() => JSON.stringify((window as any).PM.L('pen-shape').d.paths))).toBe(fixture.paths);
+  const history = await page.evaluate(() => (window as any).PM.hist.list().length);
+  const start = await point(290, 85), end = await point(310, 105);
+  await page.mouse.move(start.x, start.y); await page.mouse.down();
+  await page.mouse.move(end.x, end.y, { steps: 4 });
+  await expect.poll(() => page.evaluate(() => JSON.stringify((window as any).PM.L('pen-shape').d.paths))).not.toBe(fixture.paths);
+  await page.keyboard.press('Escape'); await page.mouse.up();
+  expect(await page.evaluate(() => JSON.stringify((window as any).PM.L('pen-shape').d.paths))).toBe(fixture.paths);
+  expect(await page.evaluate(() => (window as any).PM.hist.list().length)).toBe(history);
+  expect(await page.evaluate(() => (window as any).PM.sel.layers)).toEqual(['pen-shape']);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

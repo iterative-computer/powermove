@@ -3,12 +3,12 @@ import { makePM } from '../../renderer/src/legacy/__tests__/make-pm';
 import { makeVectorPath, makeVertex } from '../../renderer/src/legacy/core/vector-paths';
 import { startPathEdit } from './path-editing';
 
-function fixture(lock: 'layer' | 'group' | 'nested group' | 'none') {
+function fixture(lock: 'layer' | 'group' | 'nested group' | 'none', type = 'shape') {
   const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing');
   PM.proj = PM.mkProject({ dur: 3 }); PM.time = 0;
   const path = makeVectorPath(PM);
   path.vertices = [makeVertex(PM, 0, 0), makeVertex(PM, 100, 0), makeVertex(PM, 0, 100)];
-  const layer = PM.mkLayer('shape', { d: { paths: [path] } });
+  const layer = PM.mkLayer(type, { d: type === 'shape' ? { paths: [path] } : {} });
   PM.proj.layers = [layer]; PM.ProjectIndex.invalidate();
   const inner = PM.groupLayers([layer.id]);
   const outer = PM.groupLayers([inner.id]);
@@ -24,7 +24,7 @@ function fixture(lock: 'layer' | 'group' | 'nested group' | 'none') {
     anim: { worldMatrix: PM.worldMatrix, mul: PM.mul, evP: PM.evP, touch: PM.touch, setKeyOn: PM.setKeyOn },
     transport: { time: () => PM.time, invalidate: vi.fn() }, services: { get: vi.fn() }
   };
-  const state = { activePath: path.id, requestOverlay: vi.fn() };
+  const state = { activePath: type === 'shape' ? path.id : null, requestOverlay: vi.fn() };
   let drag: any;
   const beginDrag = vi.fn((_event, callbacks) => { drag = callbacks; });
   const event = (x: number, y: number, extra = {}) => {
@@ -62,5 +62,45 @@ it.each(['add', 'move', 'close', 'delete'])('keeps unlocked pen %s edits availab
   expect(JSON.stringify(f.PM.proj)).not.toBe(before);
   expect(f.PM.hist.undo()).toBe(true);
   expect(JSON.stringify(f.PM.proj)).toBe(before);
+  expect(f.PM.hist.undo()).toBe(false);
+});
+
+it.each(['add', 'move', 'handle'])('restores the path and history when a pen %s gesture is cancelled', action => {
+  const f = fixture('none');
+  const before = JSON.stringify(f.PM.proj);
+  f.start(action);
+  f.drag().move(20, 30, f.event(120, 30, action === 'handle' ? { altKey: true } : {}));
+  expect(JSON.stringify(f.PM.proj)).not.toBe(before);
+  f.drag().cancel();
+  expect(JSON.stringify(f.PM.proj)).toBe(before);
+  expect(f.state.activePath).toBe(f.path.id);
+  expect(f.PM.hist.busy()).toBe(false);
+  expect(f.PM.hist.undo()).toBe(false);
+});
+
+it('removes a newly drawn mask and restores the active path on cancellation', () => {
+  const f = fixture('none', 'solid'), before = JSON.stringify(f.PM.proj);
+  f.start('add');
+  expect(f.layer.masks).toHaveLength(1);
+  f.drag().move(20, 30, f.event(220, 230));
+  f.drag().cancel();
+  expect(JSON.stringify(f.PM.proj)).toBe(before);
+  expect(f.state.activePath).toBeNull();
+  expect(f.PM.hist.busy()).toBe(false);
+  expect(f.PM.hist.undo()).toBe(false);
+});
+
+it.each([false, true])('restores newly added paths when the transform is singular=%s', singular => {
+  const f = fixture('none');
+  f.layer.d.paths = []; f.state.activePath = null;
+  if (singular) f.layer.p['scale.x'].v = 0;
+  f.PM.touch();
+  const before = JSON.stringify(f.PM.proj);
+  f.start('add');
+  if (!singular) { expect(f.layer.d.paths).toHaveLength(1); f.drag().cancel(); }
+  else expect(f.beginDrag).not.toHaveBeenCalled();
+  expect(JSON.stringify(f.PM.proj)).toBe(before);
+  expect(f.state.activePath).toBeNull();
+  expect(f.PM.hist.busy()).toBe(false);
   expect(f.PM.hist.undo()).toBe(false);
 });

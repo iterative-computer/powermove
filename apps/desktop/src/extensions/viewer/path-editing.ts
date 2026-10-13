@@ -65,11 +65,19 @@ export function startPathEdit(api:PowermoveAPI,state:PathEditingState,event:any,
   }
   if(hit && (event.detail>1 || (hit.index===0 && hit.side==='point' && hit.path.vertices.length>=3 && state.activePath===hit.path.id && !event.altKey && !event.metaKey && !event.ctrlKey))){api.edit.mutate('Close path',()=>{hit.path.p.closed.v=true;state.activePath=null;},{origin:'canvas'});api.transport.invalidate();state.requestOverlay?.();return;}
   if(hit && (event.metaKey||event.ctrlKey)){api.edit.mutate('Delete path vertex',()=>hit.path.vertices.splice(hit.index,1),{origin:'canvas'});api.transport.invalidate();state.requestOverlay?.();return;}
+  const content=layer.d as any,originalPaths=content.paths===undefined?undefined:structuredClone(content.paths);
+  const originalMasks=structuredClone(layer.masks),originalActivePath=state.activePath;
+  const cancel=()=>{
+    if(originalPaths===undefined)delete content.paths;else content.paths=originalPaths;
+    layer!.masks=originalMasks;state.activePath=originalActivePath;
+    api.history.cancel();api.anim.touch();api.transport.invalidate();state.requestOverlay?.();
+    api.services.get<{refresh():void}>('inspector')?.refresh();
+  };
   if(!hit){
     let target=targets.find((candidate:any)=>candidate.path.id===state.activePath && !api.anim.evP(layer!,candidate.path.p.closed,time,candidate.prefix+'.closed'));
     api.history.begin('Draw path vertex');
     if(!target){const path=makeVectorPath(api,layer.type==='shape'?'Path':'Mask path');if(layer.type==='shape'){const content=layer.d as any;const paths=(content.paths??=[]) as VectorPath[];paths.push(path);target={path,prefix:`g.${path.id}`};}else{const mask=api.model.mkMask('rect');mask.path=path as any;mask.p.feather!.v=0;(layer.masks||=[]).push(mask);target={path,prefix:`mp.${mask.id}`};}state.activePath=path.id;}
-    const matrix=api.anim.mul(api.anim.worldMatrix(layer,time),targetTransform(api,layer,target,time)),p=inverse(matrix,world);if(!p){api.history.cancel();return;}
+    const matrix=api.anim.mul(api.anim.worldMatrix(layer,time),targetTransform(api,layer,target,time)),p=inverse(matrix,world);if(!p){cancel();return;}
     const vertex=makeVertex(api,p.x,p.y);target.path.vertices.push(vertex);hit={...target,matrix,p,vertex,values:{x:p.x,y:p.y,inX:0,inY:0,outX:0,outY:0},side:'new'};
   }else api.history.begin('Edit path vertex');
   api.anim.touch();api.transport.invalidate();state.requestOverlay?.();
@@ -78,5 +86,5 @@ export function startPathEdit(api:PowermoveAPI,state:PathEditingState,event:any,
     const write=(key:string,next:number)=>{if(value[key].kf.length)api.anim.setKeyOn(value[key],time-layer!.from,next,'linear',api.project.get().fps);else value[key].v=next;};
     if(hit.side==='point'&&!e.altKey){write('x',hit.values.x+dx);write('y',hit.values.y+dy);}else{const side=hit.side==='in'?'in':'out';write(side+'X',hit.values[side+'X']+dx);write(side+'Y',hit.values[side+'Y']+dy);if(!e.altKey){const other=side==='in'?'out':'in';write(other+'X',-hit.values[side+'X']-dx);write(other+'Y',-hit.values[side+'Y']-dy);}}
     api.anim.touch();api.transport.invalidate('render');state.requestOverlay?.();
-  },up:()=>{api.history.commit();api.transport.invalidate();state.requestOverlay?.();api.services.get<{refresh():void}>('inspector')?.refresh();},cancel:()=>{api.history.cancel();api.transport.invalidate();state.requestOverlay?.();}});
+  },up:()=>{api.history.commit();api.transport.invalidate();state.requestOverlay?.();api.services.get<{refresh():void}>('inspector')?.refresh();},cancel});
 }
