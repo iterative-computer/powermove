@@ -319,7 +319,8 @@ const AGENT_PROVIDERS: any = [
   { id: 'compatible', label: 'API / local model' },
 ];
 function ensureClaudeModelChoice(model: string): void {
-  if (/^claude-[a-z0-9-]{1,100}$/.test(model) && !AGENT_MODELS.claude.some(item => item.id === model)) {
+  // Keep any saved id the CLI accepts (claude-*, aliases like opusplan or sonnet[1m]) so the picker never shows a blank model.
+  if (/^[a-z][a-z0-9.\-]{0,100}(?:\[[a-z0-9]{1,10}\])?$/.test(model) && !AGENT_MODELS.claude.some(item => item.id === model)) {
     AGENT_MODELS.claude.push({ id: model, label: model });
   }
 }
