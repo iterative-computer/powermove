@@ -10,6 +10,7 @@
 //! on that port must carry the same audit token.
 
 use std::ffi::CString;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::audit::{AuditToken, ExpectedPeer};
@@ -32,6 +33,10 @@ pub enum BridgeError {
     Rejected(String),
     #[error("peer is gone")]
     PeerGone,
+    /// The caller asked the wait to end (the launch ended before the engine
+    /// checked in).
+    #[error("stopped")]
+    Stopped,
 }
 
 /// An owned receive right.
@@ -307,6 +312,10 @@ pub struct Rejection {
     pub reason: String,
 }
 
+/// The longest single wait inside [`Rendezvous::accept_until`]: how quickly
+/// a stop request is seen while no engine has checked in yet.
+pub const STOP_POLL: Duration = Duration::from_millis(50);
+
 /// Queued check-ins main keeps on the service port.
 const SERVICE_QUEUE: u32 = 16;
 /// Queued control messages on the connection (a pool is at most 32 surfaces,
@@ -349,16 +358,33 @@ impl Rendezvous {
         expected: &ExpectedPeer,
         timeout: Duration,
     ) -> Result<(Connection, Vec<Rejection>), (BridgeError, Vec<Rejection>)> {
+        self.accept_until(expected, timeout, &AtomicBool::new(false))
+    }
+
+    /// [`Rendezvous::accept`] that also ends with [`BridgeError::Stopped`]
+    /// within [`STOP_POLL`] of `stop` being set. The engine may exit (or the
+    /// app quit) before it checks in; whoever owns the launch must not wait
+    /// out the whole check-in timeout to stop it.
+    #[allow(clippy::result_large_err)]
+    pub fn accept_until(
+        self,
+        expected: &ExpectedPeer,
+        timeout: Duration,
+        stop: &AtomicBool,
+    ) -> Result<(Connection, Vec<Rejection>), (BridgeError, Vec<Rejection>)> {
         let deadline = Instant::now() + timeout;
         let mut rejections = Vec::new();
         let mut buf = RecvBuf::boxed();
         loop {
+            if stop.load(Ordering::SeqCst) {
+                return Err((BridgeError::Stopped, rejections));
+            }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Err((BridgeError::TimedOut, rejections));
             }
-            match receive(self.service.name(), &mut buf, left) {
-                Ok(Received::TimedOut) => return Err((BridgeError::TimedOut, rejections)),
+            match receive(self.service.name(), &mut buf, left.min(STOP_POLL)) {
+                Ok(Received::TimedOut) => continue,
                 Err(e) => return Err((e, rejections)),
                 Ok(Received::Message) => {}
             }

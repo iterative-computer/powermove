@@ -161,6 +161,9 @@ pub struct JsBridgeHost {
     expected: Option<ExpectedPeer>,
     table: Arc<Mutex<SurfaceTable>>,
     stop: Arc<AtomicBool>,
+    /// Set by the receive thread as it exits.
+    finished: Arc<AtomicBool>,
+    started: bool,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -184,6 +187,8 @@ impl JsBridgeHost {
             expected: None,
             table: Arc::new(Mutex::new(SurfaceTable::default())),
             stop: Arc::new(AtomicBool::new(false)),
+            finished: Arc::new(AtomicBool::new(false)),
+            started: false,
             thread: None,
         })
     }
@@ -207,7 +212,7 @@ impl JsBridgeHost {
     /// accepted.
     #[napi]
     pub fn expect_child(&mut self, pid: i32) -> Result<ExpectedEngine> {
-        if self.thread.is_some() {
+        if self.started {
             return Err(err("the bridge already started"));
         }
         let expected = ExpectedPeer::for_child(pid, self.policy.clone()).map_err(err)?;
@@ -234,6 +239,7 @@ impl JsBridgeHost {
             .ok_or_else(|| err("the bridge already started"))?;
         let table = self.table.clone();
         let stop = self.stop.clone();
+        let finished = self.finished.clone();
         let timeout = Duration::from_millis(accept_timeout_ms.into());
         let thread = std::thread::Builder::new()
             .name("pm-bridge".into())
@@ -252,8 +258,10 @@ impl JsBridgeHost {
                         );
                     },
                 );
+                finished.store(true, Ordering::SeqCst);
             })
             .map_err(err)?;
+        self.started = true;
         self.thread = Some(thread);
         Ok(())
     }
@@ -287,16 +295,28 @@ impl JsBridgeHost {
         }
     }
 
-    /// Stops the receive thread. Surfaces stay held until released (Chromium
-    /// may still show them); `releaseAll` drops every reference.
+    /// Stops the receive thread without waiting for it: main's JavaScript
+    /// thread calls this when the engine exits, possibly before it checked
+    /// in, and must not block. The thread sees the flag within
+    /// `STOP_POLL` (waiting for the check-in) or `RECV_POLL` (after it),
+    /// emits nothing more, takes no more surfaces, and drops the bootstrap
+    /// name or the connection as it exits. Surfaces already held stay held
+    /// until released (Chromium may still show them); `releaseAll` drops
+    /// every reference.
     #[napi]
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         // Never started: dropping the rendezvous deregisters the name.
         self.rendezvous = None;
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        // Detached: it only touches the shared table and its own ports.
+        drop(self.thread.take());
+    }
+
+    /// Whether the receive thread was started and has not exited yet
+    /// (tests: it ends shortly after `stop`, check-in or not).
+    #[napi]
+    pub fn running(&self) -> bool {
+        self.started && !self.finished.load(Ordering::SeqCst)
     }
 
     /// Drops every surface reference main holds (app quit).

@@ -15,7 +15,7 @@ use objc2_core_foundation::CFRetained;
 use objc2_io_surface::IOSurfaceRef;
 
 use crate::audit::ExpectedPeer;
-use crate::rendezvous::{Event, Rendezvous};
+use crate::rendezvous::{BridgeError, Event, Rendezvous};
 use crate::wire::{PixelFormat, SurfaceInfo};
 
 /// Most surfaces main holds for one engine launch: four live pools of the
@@ -107,8 +107,14 @@ pub enum HostEvent {
     },
 }
 
+/// The longest wait for one message after the check-in.
+pub const RECV_POLL: Duration = Duration::from_millis(100);
+
 /// Runs one launch's receive loop on the calling thread until the engine is
-/// gone, `stop` is set, or a fatal error. Events go to `emit` in order.
+/// gone, `stop` is set, or a fatal error. Events go to `emit` in order. A
+/// stop is seen within [`crate::rendezvous::STOP_POLL`] while waiting for the check-in (the
+/// engine may exit before it checks in) and within [`RECV_POLL`] after it;
+/// nothing is emitted for a stop.
 pub fn run(
     rendezvous: Rendezvous,
     expected: &ExpectedPeer,
@@ -117,7 +123,8 @@ pub fn run(
     stop: &AtomicBool,
     emit: &mut dyn FnMut(HostEvent),
 ) {
-    let (mut connection, rejections) = match rendezvous.accept(expected, accept_timeout) {
+    let (mut connection, rejections) = match rendezvous.accept_until(expected, accept_timeout, stop)
+    {
         Ok(v) => v,
         Err((error, rejections)) => {
             for r in rejections {
@@ -125,6 +132,10 @@ pub fn run(
                     pid: r.pid,
                     reason: r.reason,
                 });
+            }
+            if matches!(error, BridgeError::Stopped) {
+                // Stopped on purpose: nothing went wrong, nothing follows.
+                return;
             }
             emit(HostEvent::Error {
                 reason: format!("check-in: {error}"),
@@ -144,10 +155,10 @@ pub fn run(
         pidversion: peer.pidversion(),
     });
     while !stop.load(Ordering::SeqCst) {
-        let event = match connection.recv(Duration::from_millis(100)) {
+        let event = match connection.recv(RECV_POLL) {
             Ok(None) => continue,
             Ok(Some(event)) => event,
-            Err(crate::rendezvous::BridgeError::Rejected(reason)) => {
+            Err(BridgeError::Rejected(reason)) => {
                 emit(HostEvent::Rejected { pid: -1, reason });
                 continue;
             }
@@ -158,6 +169,11 @@ pub fn run(
                 return;
             }
         };
+        if stop.load(Ordering::SeqCst) {
+            // Stopped while this message was in flight: main no longer takes
+            // surfaces for this launch (its table may already be cleared).
+            return;
+        }
         match event {
             Event::Surface { surface, info } => {
                 // Takes main's own +1 reference; the port right is released

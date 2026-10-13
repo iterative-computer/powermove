@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use pm_bridge::audit::{AuditToken, ExpectedPeer, SignaturePolicy};
 use pm_bridge::host::{self, HostEvent, SurfaceTable};
-use pm_bridge::rendezvous::{BridgeError, Rendezvous, SERVICE_PREFIX, random_service_name};
+use pm_bridge::rendezvous::{
+    BridgeError, Client, Rendezvous, SERVICE_PREFIX, STOP_POLL, random_service_name,
+};
 use pm_bridge::wire::PixelFormat;
 
 fn name() -> String {
@@ -251,6 +253,86 @@ fn nobody_checking_in_ends_the_loop_with_an_error() {
         matches!(&events[..], [HostEvent::Error { reason }] if reason.contains("timed out")),
         "{events:?}"
     );
+}
+
+/// The engine can exit before it checks in (the addon failed to load, an
+/// early crash, the app quit during startup). Main stops the launch from its
+/// JavaScript thread then; the receive loop must end within `STOP_POLL`,
+/// not at the 15 s check-in timeout, and must deregister the name.
+#[test]
+fn a_stop_while_waiting_for_the_check_in_ends_the_loop_at_once() {
+    let name = name();
+    let server = Rendezvous::register(&name).unwrap();
+    let exp = ExpectedPeer::for_child(
+        std::process::id() as i32,
+        SignaturePolicy::UnsignedDevBypass,
+    )
+    .unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let handle = std::thread::spawn(move || {
+        let table = Arc::new(Mutex::new(SurfaceTable::default()));
+        let mut events = Vec::new();
+        host::run(
+            server,
+            &exp,
+            Duration::from_secs(15),
+            &table,
+            &flag,
+            &mut |e| events.push(e),
+        );
+        events
+    });
+    std::thread::sleep(Duration::from_millis(150));
+    let asked = std::time::Instant::now();
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let events = handle.join().unwrap();
+    let took = asked.elapsed();
+    assert!(
+        took < STOP_POLL + Duration::from_millis(200),
+        "the loop took {took:?} to stop"
+    );
+    // A stop on purpose reports nothing.
+    assert!(events.is_empty(), "{events:?}");
+    // The service right went with the loop: the name is gone.
+    match Client::check_in(&name, Duration::from_millis(300)) {
+        Err(BridgeError::Bootstrap { op, .. }) => assert_eq!(op, "bootstrap_look_up"),
+        Err(other) => panic!("expected the name to be gone, got {other}"),
+        Ok(_) => panic!("expected the name to be gone, the check-in succeeded"),
+    }
+}
+
+/// `accept_until` sees a stop set before it starts waiting, and a stop while
+/// it waits, without waiting out its timeout.
+#[test]
+fn accept_until_returns_stopped() {
+    let exp = ExpectedPeer::for_child(
+        std::process::id() as i32,
+        SignaturePolicy::UnsignedDevBypass,
+    )
+    .unwrap();
+    let set = AtomicBool::new(true);
+    let started = std::time::Instant::now();
+    let result = Rendezvous::register(&name())
+        .unwrap()
+        .accept_until(&exp, Duration::from_secs(15), &set);
+    assert!(matches!(result, Err((BridgeError::Stopped, _))));
+    assert!(started.elapsed() < Duration::from_millis(100));
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let server = Rendezvous::register(&name()).unwrap();
+    let waiter = std::thread::spawn(move || {
+        matches!(
+            server.accept_until(&exp, Duration::from_secs(15), &flag),
+            Err((BridgeError::Stopped, _))
+        )
+    });
+    std::thread::sleep(Duration::from_millis(120));
+    let asked = std::time::Instant::now();
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(waiter.join().unwrap());
+    assert!(asked.elapsed() < STOP_POLL + Duration::from_millis(200));
 }
 
 #[test]
