@@ -1,8 +1,9 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest';
-import type { ExtensionRecord, Project, ProjectAPI, StorageAPI, WorkspaceAPI } from './api';
+import type { ExtensionRecord, Project, ProjectAPI, StorageAPI, WorkspaceAPI, PowermoveAPI } from './api';
 import { createExtensionAPI, type HostDeps } from './host';
 import { createKernel, type Kernel } from './registries';
+import { install as installLayout } from '../legacy/ui/layout';
 
 function record(id = 'vhs'): ExtensionRecord {
   return {
@@ -358,5 +359,102 @@ describe('createExtensionAPI', () => {
     handle.disposeAll();
     handle.api.commands.register({ id: 'late', label: 'Late', run: () => 1 });
     expect(kernel.commands.has('late')).toBe(false);
+  });
+});
+
+describe('retired extension registrations', () => {
+  it.each(['public panel', 'sandbox frame'] as const)('a late %s cannot rebuild the live panel and discard its field', variant => {
+    const { kernel, deps } = harness();
+    const PM: any = { Kernel: kernel };
+    installLayout(PM);
+    const retired = createExtensionAPI(kernel, record('notes'), deps);
+    retired.disposeAll();
+    const current = createExtensionAPI(kernel, record('notes'), deps);
+    const build = vi.fn((body: HTMLElement) => {
+      const field = document.createElement('input');
+      field.value = 'Initial';
+      body.append(field);
+    });
+    current.api.panels.register({ id: 'notes', title: 'Notes', build });
+    const body = document.createElement('div');
+    document.body.append(body);
+    const inst = { el: body, body, def: kernel.panels.get('notes'), spec: {} };
+    PM.panelInst.notes = inst;
+    PM.Layout.refresh = () => { body.replaceChildren(); inst.def?.build?.(body, inst); };
+    try {
+      PM.Layout.refresh();
+      body.querySelector('input')!.value = 'Unsaved note';
+      if (variant === 'public panel') retired.api.panels.register({ id: 'notes', title: 'Stale', build: () => {} });
+      else retired.registerFramePanel({ id: 'notes', title: 'Stale' }, { mount: () => ({ dispose() {} }) });
+      expect(kernel.panels.get('notes')?.title).toBe('Notes');
+      expect(body.querySelector('input')!.value).toBe('Unsaved note');
+      expect(build).toHaveBeenCalledTimes(1);
+    } finally {
+      current.disposeAll();
+      body.remove();
+    }
+  });
+
+  const registrations: Array<{ registry: 'commands'|'keybindings'|'effects'|'transitions'|'layerTypes'|'themes'|'status'|'inspectorSections'; register(api: PowermoveAPI): { dispose(): void } }> = [
+    { registry: 'commands', register: api => api.commands.register({ id: 'late', label: 'Late', run: () => 1 }) },
+    { registry: 'keybindings', register: api => api.keybindings.bind({ key: 'cmd+9', command: 'late' }) },
+    { registry: 'effects', register: api => api.effects.register({ id: 'late', label: 'Late', group: 'Test', params: [], frag: 'o=vec4(1.);' }) },
+    { registry: 'transitions', register: api => api.transitions.register({ id: 'late', label: 'Late', params: [], frag: 'o=vec4(1.);' }) },
+    { registry: 'layerTypes', register: api => api.layers.register({ id: 'late', label: 'Late', version: 1, params: [], renderer: { kind: 'fragment', fragment: 'void main(){o=vec4(1.);}' } }) },
+    { registry: 'themes', register: api => api.theme.register({ id: 'late', name: 'Late', scheme: 'dark', tokens: { '--accent': '#f60' } }) },
+    { registry: 'status', register: api => api.status.register({ id: 'late', text: () => 'Late' }) },
+    { registry: 'inspectorSections', register: api => api.inspector.registerSection({ id: 'late', title: 'Late', build: () => {} }) }
+  ];
+  it.each(registrations)('does not publish transient $registry changes from a retired API', ({ registry, register }) => {
+    const { kernel, deps } = harness();
+    const handle = createExtensionAPI(kernel, record(), deps);
+    handle.disposeAll();
+    const changes = vi.fn();
+    const subscription = kernel[registry].onChange(changes);
+    const dropped = register(handle.api);
+    dropped.dispose();
+    dropped.dispose();
+    expect(kernel[registry].list()).toEqual([]);
+    expect(changes).not.toHaveBeenCalled();
+    subscription.dispose();
+  });
+
+  it('still runs a cleanup hook registered after retirement immediately and exactly once', () => {
+    const { kernel, deps } = harness();
+    const handle = createExtensionAPI(kernel, record(), deps);
+    const oldCleanup = vi.fn();
+    handle.api.onDispose(oldCleanup);
+    handle.disposeAll();
+    const lateCleanup = vi.fn();
+    handle.api.onDispose(lateCleanup);
+    expect(oldCleanup).toHaveBeenCalledOnce();
+    expect(lateCleanup).toHaveBeenCalledOnce();
+    handle.disposeAll();
+    expect(oldCleanup).toHaveBeenCalledOnce();
+    expect(lateCleanup).toHaveBeenCalledOnce();
+  });
+
+  it('keeps current service and import defaults when a retired owner tries to contribute', () => {
+    const { kernel, deps } = harness();
+    const retired = createExtensionAPI(kernel, record('notes'), deps);
+    retired.disposeAll();
+    const current = createExtensionAPI(kernel, record('notes'), deps);
+    const service = { value: 'Current' };
+    current.api.services.register('notes', service);
+    current.api.media.registerImportDefaults({ anchor: { x: 0.5, y: 0.5 } });
+    const dropped = [
+      retired.api.services.register('notes', { value: 'Stale' }),
+      retired.api.media.registerImportDefaults({ anchor: { x: 0, y: 0 } }),
+      retired.api.palette.registerProvider(() => [{ id: 'stale', label: 'Stale', category: 'Notes', run() {} }]),
+      retired.api.menus.contribute('layer:context', () => [{ label: 'Stale' }]),
+      retired.api.events.on('layout', () => { throw new Error('Stale callback ran'); })
+    ];
+    for (const registration of dropped) { registration.dispose(); registration.dispose(); }
+    expect(current.api.services.get('notes')).toBe(service);
+    expect(current.api.media.getImportDefaults()).toEqual({ anchor: { x: 0.5, y: 0.5 } });
+    expect(kernel.paletteProviders()).toEqual([]);
+    expect(kernel.collectMenu('layer:context')).toEqual([]);
+    kernel.events.emit('layout', undefined);
+    current.disposeAll();
   });
 });
