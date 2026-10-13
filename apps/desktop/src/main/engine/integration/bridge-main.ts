@@ -201,6 +201,33 @@ async function main(): Promise<void> {
     check(captured.rampMaxError <= 1, `the 8-bit ramp row survives capture (max error ${captured.rampMaxError} CV8)`);
     step('capturePage reads back the presented frame', { seq: captured.seq, rampMaxError: captured.rampMaxError, size: image.getSize() });
 
+    // ── quality lines: a 10-bit ramp without banding, values above 1.0 ──
+    const quality = await call<{ format: string; rows: { width: number; ramp: number[]; patches: number[] } }>('window.__bridgeIt.quality()');
+    const ramp = quality.rows.ramp;
+    const width = quality.rows.width;
+    let monotonic = true;
+    let maxErrorCv10 = 0;
+    for (let x = 0; x < ramp.length; x++) {
+      if (x > 0 && ramp[x]! < ramp[x - 1]! - 1e-6) monotonic = false;
+      maxErrorCv10 = Math.max(maxErrorCv10, Math.abs(ramp[x]! - (x + 0.5) / width) * 1023);
+    }
+    const codes10 = new Set(ramp.map((v) => Math.round(v * 1023))).size;
+    const PATCHES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 4];
+    if (quality.format === 'rgbaf16') {
+      check(monotonic && codes10 >= 1020 && maxErrorCv10 <= 0.5, `the rgbaf16 ramp has no banding (${codes10} of 1024 10-bit codes, max error ${maxErrorCv10.toFixed(3)} CV10, monotonic ${monotonic})`);
+      const patchError = Math.max(...quality.rows.patches.map((v, i) => Math.abs(v - PATCHES[i]!) / PATCHES[i]!));
+      check(patchError < 0.002, `values above 1.0 survive import and sampling (${quality.rows.patches.map((v) => v.toFixed(4)).join(', ')})`);
+    } else {
+      check(quality.rows.patches.slice(3).every((v) => Math.abs(v - 1) < 0.002), `bgra clips at 1.0 (${quality.rows.patches.join(', ')})`);
+    }
+    step('quality lines through the Electron path', {
+      format: quality.format,
+      rampCodes10: codes10,
+      rampMaxErrorCv10: +maxErrorCv10.toFixed(3),
+      monotonic,
+      patches: quality.rows.patches.map((v) => +v.toFixed(4))
+    });
+
     // ── a view change tags frames and moves overlay geometry ──
     const zoom = 320 / 3840;
     const viewSeq = await call<number>(`window.__bridgeIt.setView({ zoom: ${zoom}, pan: [40, -20] })`);

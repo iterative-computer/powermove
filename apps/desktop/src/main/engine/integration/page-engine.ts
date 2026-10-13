@@ -224,12 +224,77 @@ struct U { cell: f32, width: f32, height: f32, pad: f32 };
   return textureSampleBaseClampToEdge(src, samp, uv);
 }`;
 
+/** Samples one frame row at `n` evenly spaced columns into an n×1 rgba32float
+ *  target (exact for half floats: an f16 target would add its own rounding;
+ *  Apple GPUs truncate on render-target writes). */
+const ROW_SHADER = /* wgsl */ `
+struct U { y: f32, height: f32, n: f32, pad: f32 };
+@group(0) @binding(0) var src: texture_external;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var<uniform> u: U;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  return textureSampleBaseClampToEdge(src, samp, vec2f((floor(pos.x) + 0.5) / u.n, (u.y + 0.5) / u.height));
+}`;
+
+/** The test pattern's quality rows read back from one drawn frame. */
+export type QualityRows = { width: number; height: number; ramp: number[]; patches: number[] };
+
 export type CodeCheck = { checked: number; ok: number; mismatches: string[]; distinctSeqs: Set<number> };
 
 export class CodeReader {
   readonly check: CodeCheck = { checked: 0, ok: 0, mismatches: [], distinctSeqs: new Set() };
   private queue: Promise<{ seq: number; view: number }>[] = [];
+  private rowPipeline: any = null;
+  private quality: ((rows: Promise<QualityRows>) => void) | null = null;
   private constructor(private readonly device: any, private readonly pipeline: any, private readonly sampler: any) {}
+
+  /** Reads the ramp (every column of row 192) and the HDR patches (row 704)
+   *  of the next frame drawn. */
+  nextQuality(): Promise<QualityRows> {
+    return new Promise((resolve) => (this.quality = (rows) => void rows.then(resolve)));
+  }
+
+  private readRow(frame: VideoFrame, y: number, n: number): Promise<number[]> {
+    const d = this.device;
+    if (!this.rowPipeline) {
+      const module = d.createShaderModule({ code: ROW_SHADER });
+      this.rowPipeline = d.createRenderPipeline({ layout: 'auto', vertex: { module, entryPoint: 'vs' }, fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba32float' }] }, primitive: { topology: 'triangle-list' } });
+    }
+    const uniform = d.createBuffer({ size: 16, usage: 0x40 | 0x08 });
+    d.queue.writeBuffer(uniform, 0, new Float32Array([y, frame.codedHeight, n, 0]));
+    const target = d.createTexture({ size: [n, 1], format: 'rgba32float', usage: 0x10 | 0x01 });
+    const bytesPerRow = Math.ceil((n * 16) / 256) * 256;
+    const out = d.createBuffer({ size: bytesPerRow, usage: 0x01 | 0x08 });
+    const group = d.createBindGroup({
+      layout: this.rowPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: d.importExternalTexture({ source: frame }) },
+        { binding: 1, resource: this.sampler },
+        { binding: 2, resource: { buffer: uniform } }
+      ]
+    });
+    const encoder = d.createCommandEncoder();
+    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+    pass.setPipeline(this.rowPipeline);
+    pass.setBindGroup(0, group);
+    pass.draw(3);
+    pass.end();
+    encoder.copyTextureToBuffer({ texture: target }, { buffer: out, bytesPerRow }, [n, 1]);
+    d.queue.submit([encoder.finish()]);
+    return out.mapAsync(1).then(() => {
+      const floats = new Float32Array(out.getMappedRange());
+      const red = Array.from({ length: n }, (_, i) => floats[i * 4]!);
+      out.unmap();
+      out.destroy();
+      target.destroy();
+      uniform.destroy();
+      return red;
+    });
+  }
 
   static async create(): Promise<CodeReader> {
     const gpu = (navigator as any).gpu;
@@ -247,6 +312,13 @@ export class CodeReader {
 
   /** Records a readback of `frame`'s code (call before the frame closes). */
   record(frame: VideoFrame): void {
+    if (this.quality) {
+      const deliver = this.quality;
+      this.quality = null;
+      const width = frame.codedWidth;
+      const height = frame.codedHeight;
+      deliver(Promise.all([this.readRow(frame, 192, width), this.readRow(frame, 704, 8)]).then(([ramp, patches]) => ({ width, height, ramp, patches })));
+    }
     const d = this.device;
     const width = frame.codedWidth;
     const cell = Math.min(32, Math.max(1, Math.floor(width / 64)));

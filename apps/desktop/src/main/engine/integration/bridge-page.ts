@@ -83,6 +83,13 @@ const api = {
     popout = null;
     return true;
   },
+  /** The next drawn frame's ramp and HDR patch rows (a view change forces one). */
+  async quality(): Promise<{ format: string; rows: import('./page-engine').QualityRows }> {
+    const rows = reader!.nextQuality();
+    view = { ...view, pan: [view.pan[0] + 1, view.pan[1]] };
+    presentation!.update(view);
+    return { format: presentation!.state?.edr ? 'rgbaf16' : 'bgra', rows: await rows };
+  },
   stats() {
     const latest = presentation?.latest ?? null;
     return {
