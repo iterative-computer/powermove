@@ -13,8 +13,10 @@ import {
   installQuitFlush,
   registerStoreIpc,
   type Store,
+  type StoreChannel,
   type StoreFileSystem
 } from './storage';
+import type { StoreReply } from './store-engine';
 
 const temporaryDirectories: string[] = [];
 
@@ -312,6 +314,31 @@ describe('file store', () => {
     await store.load();
     expect(() => store.set('theme', { render: () => 1 })).toThrow(IpcValidationError);
     await expect(store.set('theme', undefined)).rejects.toThrow('value is not JSON-serialisable');
+    expect(store.snapshot()).toEqual({});
+  });
+
+  it('reports writes as failed, without throwing, once the storage worker is gone', async () => {
+    let alive = true;
+    let deliver!: (reply: StoreReply) => void;
+    const channel: StoreChannel = {
+      post(request) {
+        if (!alive) throw new Error('The persistence worker stopped.');
+        const reply = request.op === 'init' ? { type: 'ready', id: request.id }
+          : request.op === 'load' ? { type: 'loaded', id: request.id, entries: [] } : { type: 'flushed', id: request.id };
+        queueMicrotask(() => deliver(reply as StoreReply));
+      },
+      onReply(listener) { deliver = listener; },
+      waitSync: () => true
+    };
+    const store = createStore(await temporaryDirectory(), { thread: { storeChannel: () => channel } });
+    await store.load();
+    alive = false;
+    const errors: Array<{ key: string; error: string }> = [];
+    store.onError(event => errors.push(event));
+    await expect(store.set('theme', 'dark')).rejects.toThrow('stopped');
+    await expect(store.delete('theme')).rejects.toThrow('stopped');
+    await expect(store.flushAll()).rejects.toThrow('stopped');
+    expect(errors).toEqual([{ key: 'theme', error: 'The persistence worker stopped.' }, { key: 'theme', error: 'The persistence worker stopped.' }]);
     expect(store.snapshot()).toEqual({});
   });
 

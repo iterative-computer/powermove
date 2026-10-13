@@ -215,7 +215,11 @@ class FileStore implements Store {
       // Values reach the engine as a structured clone, which refuses what
       // JSON cannot represent either (functions, symbols, host objects).
       if (error instanceof Error && error.name === 'DataCloneError') throw new IpcValidationError(channel, `value is not JSON-serialisable: ${error.message}`);
-      throw error;
+      // The storage worker is gone for good; report it like a failed write.
+      this.emitError(key, errorText(error));
+      const failed = Promise.reject(error);
+      failed.catch(() => undefined);
+      return failed;
     }
     this.unsettled.set(key, { id: posted.id, present });
     const done = posted.settled.then(() => undefined);
@@ -458,7 +462,7 @@ export function registerStoreIpc(
         sendValidationError(event, payload, error);
         return;
       }
-      throw error;
+      sendStoreError(event, payload, error);
     }
   });
 
@@ -475,7 +479,7 @@ export function registerStoreIpc(
         sendValidationError(event, payload, error);
         return;
       }
-      throw error;
+      sendStoreError(event, payload, error);
     }
   });
 

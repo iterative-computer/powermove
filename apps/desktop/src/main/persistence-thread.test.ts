@@ -155,6 +155,26 @@ describe('store on the persistence worker thread', () => {
     expect(errors).toEqual([]);
   });
 
+  it('stops replacing a worker that keeps failing and reports every later write', async () => {
+    const faults: string[] = [];
+    const thread = new PersistenceThread(entry, { onFault: detail => faults.push(detail) });
+    threads.push(thread);
+    const store = createStore(await temporaryDirectory(), { thread });
+    await store.load();
+    const worker = () => (thread as unknown as { worker: { terminate(): Promise<number> } }).worker;
+    for (let fault = 0; fault < 5; fault++) {
+      const before = thread.threadId;
+      await worker().terminate();
+      await expect.poll(() => thread.threadId).not.toBe(before);
+    }
+    await store.set('theme', 'still saved');
+    await worker().terminate();
+    await expect.poll(() => faults.length).toBe(6);
+    await expect(store.set('theme', 'lost')).rejects.toThrow('Saving is unavailable until Powermove restarts.');
+    await expect(thread.validateProjectDocument('/nonexistent', 0, 2)).rejects.toThrow('unavailable');
+    expect(store.get!('theme')).toBe('still saved');
+  });
+
   it('checks a saved project document on the worker', async () => {
     const directory = await temporaryDirectory();
     const thread = startThread();
