@@ -467,6 +467,12 @@ impl<'d> Walk<'_, 'd> {
         };
         let source = match self.cache.open(&file, None) {
             Ok(s) => s,
+            // A video without a soundtrack has nothing to play.
+            Err(AudioError::Media(pm_media::MediaError::Invalid(m)))
+                if kind == VoiceKind::Embedded && m == "no audio stream" =>
+            {
+                return Ok(());
+            }
             Err(e) => {
                 self.problems.push((name, asset, e.to_string()));
                 return Ok(());

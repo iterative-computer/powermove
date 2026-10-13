@@ -457,3 +457,68 @@ fn missing_media_is_reported() {
     assert_eq!(graph.problems.len(), 1);
     assert_eq!(graph.problems[0].1, "nowhere");
 }
+
+/// The monitor solo is a listening aid: strips outside it are silent in the
+/// mix, but their meters (read before the solo, as the legacy taps) move.
+#[test]
+fn monitor_solo_and_meters() {
+    use pm_audio::RenderOptions;
+    let dir = temp_dir("monitor");
+    let a = dir.join("a.wav");
+    let b = dir.join("b.wav");
+    write_wav(&a, SR, &[vec![0.25; SR as usize]]);
+    write_wav(&b, SR, &[vec![0.5; SR as usize]]);
+    let doc = project(
+        30.0,
+        1.0,
+        &[
+            audio("A", "a", 0.0, 1.0, "", ""),
+            audio("B", "b", 0.0, 1.0, "", ""),
+        ],
+        &[],
+        r#","audioGain":0.5"#,
+    );
+    let rig = Rig::new(&[("a", &a), ("b", &b)]);
+    let mut m = rig.mixer(doc, "C", MixFormat::stereo(SR));
+    let mut out = vec![Vec::new(), Vec::new()];
+    let options = RenderOptions {
+        wait: true,
+        monitor_solo: Some(["B".to_string()].into_iter().collect()),
+        meters: true,
+    };
+    m.render(1000, 4096, &mut out, &options).unwrap();
+    assert!((out[0][100] - 0.25).abs() < 1e-7, "{}", out[0][100]); // B × master 0.5
+    let meters = m.meters(5096);
+    let strip = |id: &str| {
+        meters
+            .strips
+            .iter()
+            .find(|(s, _)| s == id)
+            .unwrap()
+            .1
+            .clone()
+    };
+    assert!((strip("A")[0].peak - 0.25).abs() < 1e-7);
+    assert!((strip("B")[1].rms - 0.5).abs() < 1e-6);
+    assert!((meters.master[0].peak - 0.25).abs() < 1e-7);
+}
+
+/// A video without a soundtrack plays nothing and reports nothing.
+#[test]
+fn a_silent_video_is_not_a_problem() {
+    let fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../apps/desktop/e2e/fixtures");
+    let v = layer(
+        "V",
+        "video",
+        0.0,
+        1.0,
+        r#"{"asset":"v","embeddedAudio":true}"#,
+        "",
+    );
+    let doc = project(30.0, 1.0, &[v], &[], "");
+    let rig = Rig::new(&[("v", &fixtures.join("prores4444-alpha.mov"))]);
+    let graph = rig.graph(&doc, "C");
+    assert!(graph.voices.is_empty());
+    assert!(graph.problems.is_empty(), "{:?}", graph.problems);
+}
