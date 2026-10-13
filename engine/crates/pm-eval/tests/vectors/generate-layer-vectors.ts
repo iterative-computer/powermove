@@ -26,6 +26,7 @@ import { sourceTime } from '../../../../../apps/desktop/src/renderer/src/legacy/
 import { sizeBounds, sizeAnchorOffset } from '../../../../../apps/desktop/src/renderer/src/legacy/core/size-anchor';
 import { fontAnchorOffset } from '../../../../../apps/desktop/src/renderer/src/legacy/core/font-anchor';
 import * as TA from '../../../../../apps/desktop/src/renderer/src/legacy/core/text-animation';
+import { compositingLayers, hasRenderableEffects } from '../../../../../apps/desktop/src/renderer/src/legacy/gl/compositor';
 
 const SCALE = Number(process.env.PM_LAYER_SCALE ?? 1);
 const OUT = process.env.PM_LAYER_OUT ?? new URL('./layer-vectors.json.gz', import.meta.url).pathname;
@@ -158,6 +159,11 @@ function makeDoc(index: number): any {
       else if (kind < 0.6) layer.d.speed = channel(1, 1.5, true);
       else if (kind < 0.7) { layer.d.timeRemap = { v: true, kf: [], expr: null }; layer.d.sourceTime = channel(1, 2, true); }
     }
+    if (chance(0.4)) layer.fx = Array.from({ length: int(0, 3) }, (_, k) => ({
+      id: `fx${k}`, type: 'blur', p: {},
+      on: chance(0.6) ? chance(0.8) : { v: chance(0.5), kf: [{ t: 0.5, v: chance(0.5), i: 'k' }], expr: null },
+      ...(chance(0.2) ? { missing: pick([true, 'yes', false]) } : {}),
+    }));
     if (chance(0.2) && ['shape', 'solid', 'image', 'video', 'shader', 'precomp'].includes(type)) layer.d.sizeAnchorBounds = { x0: range(-100, 0), y0: range(-100, 0), x1: range(1, 200), y1: range(1, 200) };
     if (role) {
       layer.d = { definition: `powermove.3d.${role}`, data: { [role]: { p: {
@@ -297,6 +303,12 @@ for (let index = 0; index < COUNT; index++) {
         c('expand', () => PM.expandGroups([layer.id]));
       }
     }
+    for (let i = 0; i < L.length; i++) cases.push({ op: 'effects', layer: i, t: hex(T), out: run(() => hasRenderableEffects(L[i].fx || [], PM, L[i], T)) });
+    const boundaries = L.filter((l: any) => l.type === 'group' && chance(0.5)).map((l: any) => l.id);
+    for (const parent of [null, ...L.filter((l: any) => l.type === 'group').map((l: any) => l.id)]) {
+      cases.push({ op: 'compositing', t: hex(T), parent: enc(parent), boundaries: boundaries.map(enc),
+        out: run(() => compositingLayers(L, parent, (layer: any) => boundaries.includes(layer.id)).map((l: any) => L.indexOf(l))) });
+    }
     const ids = L.filter(() => chance(0.5)).map((l: any) => l.id);
     cases.push({ op: 'roots', t: hex(T), ids: ids.map(enc), out: run(() => PM.transformRoots(ids).map((l: any) => L.indexOf(l))) });
   }
@@ -355,3 +367,5 @@ for (let i = 0; i < 100 * SCALE; i++) {
 writeFileSync(OUT, gzipSync(JSON.stringify({ docs, texts, helpers }), { level: 9 }));
 const total = docs.reduce((n, d) => n + d.cases.length, 0) + texts.reduce((n, d) => n + d.cases.length, 0) + helpers.length;
 console.log(`wrote ${OUT}: ${docs.length} documents, ${texts.length} text documents, ${total} cases`);
+// The compositor module keeps timers alive; leave once the file is written.
+process.exit(0);

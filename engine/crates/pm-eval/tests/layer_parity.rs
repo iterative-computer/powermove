@@ -298,6 +298,40 @@ fn layer_queries_match_typescript() {
                         )
                     })
                 }
+                "compositing" => {
+                    let parent = to_js(&dec(get(case, "parent").unwrap()));
+                    let boundaries: Vec<JsValue> = get(case, "boundaries")
+                        .unwrap()
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| to_js(&dec(v)))
+                        .collect();
+                    let all: Vec<&Node> = layers.iter().collect();
+                    let parent = (!matches!(parent, JsValue::Null)).then_some(parent);
+                    let mut boundary =
+                        |_: &mut Scope<'_, '_>, l: &Node| -> Result<bool, pm_eval::JsThrow> {
+                            let id = pm_eval::node::get(l, b"id").to_js();
+                            Ok(boundaries
+                                .iter()
+                                .any(|b| pm_eval::js_sem::strict_eq(b, &id)))
+                        };
+                    result(
+                        scope.compositing_layers(&all, parent.as_ref(), &mut boundary),
+                        |o| {
+                            V::A(
+                                o.iter()
+                                    .map(|l| {
+                                        V::N(
+                                            layers.iter().position(|x| std::ptr::eq(x, *l)).unwrap()
+                                                as f64,
+                                        )
+                                    })
+                                    .collect(),
+                            )
+                        },
+                    )
+                }
                 "roots" => {
                     let ids: Vec<JsValue> = get(case, "ids")
                         .unwrap()
@@ -321,6 +355,7 @@ fn layer_queries_match_typescript() {
                     let l = layer.unwrap();
                     match op {
                         "active" => result(scope.active(l, t), V::B),
+                        "effects" => result(scope.has_renderable_effects(l, t), V::B),
                         "local" => result(scope.local_matrix(l, t), |m| nums(&m)),
                         "world" => result(scope.world_matrix(l, t), |m| nums(&m)),
                         "parent2d" => {

@@ -15,7 +15,7 @@
 use pm_model::{JsString, Node};
 
 use crate::comp::{Comp, IdKey};
-use crate::js_sem::{self, JsResult, JsValue};
+use crate::js_sem::{self, JsResult, JsThrow, JsValue};
 use crate::node;
 use crate::parenting::Role3d;
 use crate::scope::{Scope, clamp, flag, is_type, js_max, js_min, or0, same};
@@ -339,6 +339,15 @@ impl<'d> Scope<'_, 'd> {
                 continue;
             };
             if is_type(layer, "group") && !boundary(self, layer)? {
+                // Group membership forming a cycle recurses until the
+                // JavaScript stack overflows; a nesting deeper than the
+                // layer count is such a cycle.
+                if stack.len() > layers.len() {
+                    return Err(JsThrow {
+                        kind: "RangeError",
+                        message: "Maximum call stack size exceeded".to_owned(),
+                    });
+                }
                 let id = node::get(layer, b"id").to_js();
                 let children: Vec<&'d Node> = layers
                     .iter()
