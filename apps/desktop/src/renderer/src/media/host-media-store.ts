@@ -222,7 +222,7 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
         if (blob) return blob;
         return storeGet(value).catch(() => null);
       }
-      const blob = await storeGet(value);
+      const blob = await storeGet(value).catch((error) => { warn('could not read from the media store', error); return null; });
       if (blob) return blob;
       const old = await legacy.get(value);
       if (old) {
