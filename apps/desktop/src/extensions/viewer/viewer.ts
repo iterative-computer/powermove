@@ -2423,7 +2423,7 @@ function startCommonTransform(e: any, selection: SelectionGeometry, hit: any, T:
       const c = resolvedContent(api, L, T);
       return { w: Number(c.w) || 0, h: Number(c.h) || 0, stroke: Math.max(0, Number(c.stroke) || 0) };
     })(),
-    textOwnsDescendants: L.type === 'text' && api.project.get().layers.some((layer: any) => layer.parent === L.id),
+    ownsDescendants: api.project.get().layers.some((layer: any) => layer.parent === L.id),
   }));
   if (!snapshots.length) return;
 
@@ -2475,12 +2475,13 @@ function startCommonTransform(e: any, selection: SelectionGeometry, hit: any, T:
         const scaleX = next.scaleX, scaleY = next.scaleY;
         const pivot = next.pivotLocal;
         for (const snapshot of snapshots) {
-          if (snapshot.textSize != null && !snapshot.textOwnsDescendants) {
+          // Roots with children use transform scale so the whole subtree follows.
+          if (snapshot.textSize != null && !snapshot.ownsDescendants) {
             api.edit.dispatch({
               type: 'set_content', target: snapshot.L.id,
               patch: { size: api.util.round(Math.max(4, snapshot.textSize * scaleX), 2) },
             });
-          } else if (snapshot.shape) {
+          } else if (snapshot.shape && !snapshot.ownsDescendants) {
             const { w, h, stroke } = snapshot.shape;
             setOrKey(snapshot.L, 'c.w', api.util.round(Math.max(1, (w + stroke) * scaleX - stroke), 3), T);
             setOrKey(snapshot.L, 'c.h', api.util.round(Math.max(1, (h + stroke) * scaleY - stroke), 3), T);

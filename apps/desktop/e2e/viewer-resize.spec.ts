@@ -1,6 +1,78 @@
 import { expect, test } from './helpers/app';
 
 test.describe('@viewer direct resize', () => {
+  test('resizes a shape parent and its selected child together around the common fixed corner', async ({ session }) => {
+    await session.openEditor();
+    const { page } = session;
+    const setup = await page.evaluate(async () => {
+      const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer');
+      const project = PM.mkProject({ name: 'Shape subtree resize', w: 640, h: 360, fps: 30, dur: 4 });
+      const parent = PM.mkLayer('shape', { name: 'Shape parent', d: { w: 100, h: 100 }, p: { 'position.x': 200, 'position.y': 180 } }, project);
+      const child = PM.mkLayer('shape', { name: 'Selected child', d: { w: 20, h: 20 }, p: { 'position.x': 75, 'position.y': 0 } }, project);
+      child.parent = parent.id;
+      const other = PM.mkLayer('shape', { name: 'Other root', d: { w: 100, h: 100 }, p: { 'position.x': 400, 'position.y': 180 } }, project);
+      project.layers = [child, parent, other];
+      PM.replaceProject(project);
+      PM.Kernel.services.get('tool').tool = 'select';
+      PM.setKey(parent, 'scale.x', 0, 100);
+      PM.setKey(parent, 'scale.y', 0, 100);
+      PM.setTime(1, { raw: true, force: true });
+      PM.selectLayers([parent.id, child.id, other.id]);
+      viewer.layout();
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      const selection = viewer.resolveSelectionGeometry();
+      const rect = viewer.inner.getBoundingClientRect();
+      return {
+        parentId: parent.id, childId: child.id, otherId: other.id,
+        roots: selection.roots.map((layer: any) => layer.id),
+        bounds: selection.bounds,
+        handle: { x: rect.left + selection.handles.se.x * viewer.shown, y: rect.top + selection.handles.se.y * viewer.shown },
+        childWorld: [...PM.worldMatrix(child, 1)], childProperties: JSON.stringify(child.p),
+        parentSize: [PM.resolveContent(parent, 1).w, PM.resolveContent(parent, 1).h],
+        otherSize: [PM.resolveContent(other, 1).w, PM.resolveContent(other, 1).h],
+      };
+    });
+    expect([...setup.roots].sort()).toEqual([setup.parentId, setup.otherId].sort());
+    await page.mouse.move(setup.handle.x, setup.handle.y);
+    await expect(page.locator('#stage-inner')).toHaveCSS('cursor', 'nwse-resize');
+    await page.mouse.down();
+    await page.mouse.move(setup.handle.x + 72, setup.handle.y + 36, { steps: 8 });
+    await page.mouse.up();
+    const read = () => page.evaluate(({ parentId, childId, otherId }) => {
+      const PM = (window as any).PM, parent = PM.L(parentId), child = PM.L(childId), other = PM.L(otherId);
+      return {
+        bounds: PM.Kernel.services.get('viewer').resolveSelectionGeometry().bounds,
+        parentScale: [PM.ev(parent, 'scale.x', 1), PM.ev(parent, 'scale.y', 1)],
+        parentKeys: [parent.p['scale.x'].kf.length, parent.p['scale.y'].kf.length],
+        parentSize: [PM.resolveContent(parent, 1).w, PM.resolveContent(parent, 1).h],
+        otherSize: [PM.resolveContent(other, 1).w, PM.resolveContent(other, 1).h],
+        childWorld: [...PM.worldMatrix(child, 1)], childProperties: JSON.stringify(child.p),
+      };
+    }, setup);
+    const resized = await read();
+    const factor = resized.parentScale[0] / 100;
+    expect(factor).toBeGreaterThan(1);
+    expect(resized.parentScale[1]).toBe(resized.parentScale[0]);
+    expect(resized.parentKeys).toEqual([2, 2]);
+    expect(resized.parentSize).toEqual(setup.parentSize);
+    expect(resized.otherSize[0]).toBeGreaterThan(setup.otherSize[0]);
+    expect(resized.otherSize[1]).toBeGreaterThan(setup.otherSize[1]);
+    expect(resized.childProperties).toBe(setup.childProperties);
+    for (let index = 0; index < 4; index++) expect(resized.childWorld[index]).toBeCloseTo(setup.childWorld[index] * factor, 3);
+    expect(resized.childWorld[4]).toBeCloseTo(setup.bounds.x0 + (setup.childWorld[4] - setup.bounds.x0) * factor, 2);
+    expect(resized.childWorld[5]).toBeCloseTo(setup.bounds.y0 + (setup.childWorld[5] - setup.bounds.y0) * factor, 2);
+    expect(resized.bounds.x0).toBeCloseTo(setup.bounds.x0, 2);
+    expect(resized.bounds.y0).toBeCloseTo(setup.bounds.y0, 2);
+    expect(await page.evaluate(() => (window as any).PM.hist.undo())).toBe(true);
+    const undone = await read();
+    expect(undone.childWorld).toEqual(setup.childWorld);
+    expect(undone.parentKeys).toEqual([1, 1]);
+    expect(undone.otherSize).toEqual(setup.otherSize);
+    expect(await page.evaluate(() => (window as any).PM.hist.redo())).toBe(true);
+    expect(await read()).toEqual(resized);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
   test('resizes the selected layer in local space with a fixed opposite edge and correct cursors', async ({ session }) => {
     await session.openEditor();
     const { page } = session;
