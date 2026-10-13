@@ -95,18 +95,23 @@ impl AtomicOutput {
             })?,
             Overwrite::Fail => {
                 match fs::hard_link(&self.temp, &self.destination) {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        let _ = fs::remove_file(&self.temp);
+                    }
                     Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                         return Err(Error::Exists(self.destination.clone()));
                     }
-                    Err(e) => {
-                        return Err(Error::Io(format!(
-                            "moving into {}: {e}",
-                            self.destination.display()
-                        )));
+                    // Volumes without hard links (exFAT, FAT, some network shares): check,
+                    // then rename. Only a file created in between can be replaced.
+                    Err(_) => {
+                        if fs::symlink_metadata(&self.destination).is_ok() {
+                            return Err(Error::Exists(self.destination.clone()));
+                        }
+                        fs::rename(&self.temp, &self.destination).map_err(|e| {
+                            Error::Io(format!("moving into {}: {e}", self.destination.display()))
+                        })?;
                     }
                 }
-                let _ = fs::remove_file(&self.temp);
             }
         }
         self.committed = true;
