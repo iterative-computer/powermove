@@ -46,6 +46,8 @@ const RUNS = [
   { name: 'playback-today-load', ...playback, mode: 'today', load: true },
   { name: 'playback-engine-load', ...playback, mode: 'engine', load: true },
   { name: 'playback-engine-bgra-load', ...playback, mode: 'engine', load: true, edr: 'off' },
+  // Render-ahead 8 frames (pool 12): slack for GPU-process stalls that hold slots.
+  { name: 'playback-engine-lead8-load', ...playback, mode: 'engine', load: true, lead: 8 },
   { name: 'latency-today-idle', ...latency, mode: 'today', load: false, inputModes: ['baseline'] },
   { name: 'latency-engine-idle', ...latency, mode: 'engine', load: false, inputModes: ['drag', 'orbit', 'walk'] },
   { name: 'latency-engine-raw-idle', ...latency, mode: 'engine', load: false, rawInput: true, inputModes: ['drag', 'orbit', 'walk'] },
@@ -172,6 +174,19 @@ function analyzePlayback(raw) {
     }
     per.push({ k, presentUs: pf.end, dueUs: ctx.hostToTrace(hostOfMedia(line, k * frameTicks)), rafToPresentUs: pf.end - ctx.toTrace(rafMs) });
   }
+  // Every missing frame with the main-process load events whose main-thread
+  // span started up to 300 ms before its due time and ended no earlier than
+  // 50 ms before it (S1's attribution).
+  const loadEvents = raw.load?.events ?? [];
+  const missing = [];
+  for (let k = kFirst, i = 0; k <= kLast; k++, i++) {
+    if (per[i]) continue;
+    const due = hostOfMedia(line, k * frameTicks);
+    const near = loadEvents.filter(([, u, d]) => u <= due && u >= due - 300_000 && u + d * 1000 >= due - 50_000).map((e) => e[0]);
+    const rafMs = byPts.get(k);
+    const state = rafMs == null ? 'not-drawn' : (ctx.frameAt(rafMs)?.state ?? 'no-reporter');
+    missing.push({ k, state, near: near.length ? [...new Set(near)].sort().join('+') : 'none' });
+  }
   const presented = per.filter(Boolean);
   const offsets = presented.map((p) => p.presentUs - p.dueUs);
   const median = pct(offsets, 0.5);
@@ -190,6 +205,24 @@ function analyzePlayback(raw) {
     intervalErrorAbsMs: dist(intervalErrMs.map(Math.abs), 3),
     irregularIntervals: intervalErrMs.filter((e) => Math.abs(e) > periodUs / 2000).length,
     rafToPresentMs: dist(presented.map((p) => p.rafToPresentUs / 1000), 2),
+    ...(page.mode === 'engine'
+      ? (() => {
+          const t = page.engineTrace;
+          // Renderer main-thread time of each draw (rAF to submit), and how
+          // far ahead of its due time each timed frame arrived.
+          const drawMs = t.draws.map((d) => d[5] - d[0]);
+          const leadMs = t.arrivals.filter((a) => a[4] === 1).map((a) => (hostOfMedia(line, a[1]) - raw.clock.offsetUs) / 1000 - a[2]);
+          const gaps = [];
+          for (let i = 1; i < t.rafs.length; i++) gaps.push(t.rafs[i] - t.rafs[i - 1]);
+          return { drawMainThreadMs: dist(drawMs, 3), arrivalLeadMs: dist(leadMs.map((x) => -x), 2), rafGapMs: dist(gaps, 2), rafGapsOver25Ms: gaps.filter((g) => g > 25).length };
+        })()
+      : (() => {
+          const gaps = [];
+          const r = page.today.rafs;
+          for (let i = 1; i < r.length; i++) gaps.push(r[i] - r[i - 1]);
+          return { rafGapMs: dist(gaps, 2), rafGapsOver25Ms: gaps.filter((g) => g > 25).length };
+        })()),
+    missing,
     pipelineDepthRefreshes: depth,
     presenter: page.presenter,
     receiver: page.receiver
@@ -244,6 +277,7 @@ try {
       PM_MEASURE: JSON.stringify({ ...run, out, trace }),
       POWERMOVE_PM_BRIDGE: harnessAddon,
       POWERMOVE_ENGINE_FRAME_SOURCE: 'test-pattern',
+      ...(run.lead ? { POWERMOVE_BRIDGE_LEAD: String(run.lead) } : {}),
       ELECTRON_DISABLE_SECURITY_WARNINGS: '1'
     };
     delete env.ELECTRON_RUN_AS_NODE;
@@ -258,7 +292,7 @@ try {
     try {
       summary = {
         run: name,
-        config: { scenario: run.scenario, mode: run.mode, load: run.load, edr: run.edr ?? 'auto', rawInput: !!run.rawInput, durationMs: run.durationMs, inputModes: run.inputModes },
+        config: { scenario: run.scenario, mode: run.mode, load: run.load, edr: run.edr ?? 'auto', rawInput: !!run.rawInput, lead: run.lead ?? 4, durationMs: run.durationMs, inputModes: run.inputModes },
         versions: raw.versions,
         display: raw.display,
         machineLoad: raw.machineLoad,
