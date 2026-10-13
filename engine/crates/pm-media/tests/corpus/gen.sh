@@ -110,6 +110,10 @@ ff -f lavfi -i "$(src 25 $SMALL yuvj420p)" -frames:v 50 -c:v mjpeg -q:v 3 -pix_f
 # Fragmented MP4 (moof/trun instead of stbl sample tables).
 ff -f lavfi -i "$(src 30 $SMALL)" -frames:v 120 -c:v libx264 -x264-params "bframes=2:keyint=30:min-keyint=30:scenecut=0" \
   -pix_fmt yuv420p -movflags +frag_keyframe+empty_moov+default_base_moof h264-fragmented.mp4
+# Negative composition offsets (ctts version 1) and no edit list.
+ff -f lavfi -i "$(src 25 $SMALL)" -frames:v 75 -c:v libx264 \
+  -x264-params "bframes=3:b-pyramid=normal:keyint=25:min-keyint=25:scenecut=0" -pix_fmt yuv420p \
+  -movflags +negative_cts_offsets -use_editlist 0 h264-negative-cts.mp4
 # Variable frame rate: 30 fps with every fifth frame dropped (VFR timestamps).
 ff -f lavfi -i "$(src 30 $SMALL)" -frames:v 150 -vf "select='not(eq(mod(n,5),4))'" -fps_mode vfr \
   -c:v libx264 -x264-params "bframes=0:keyint=30" -pix_fmt yuv420p vfr-h264.mp4

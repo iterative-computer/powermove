@@ -130,12 +130,15 @@ fn mjpeg() {
     }
 }
 
-/// Fragmented MP4, variable frame rate, and MPEG-2 program stream.
+/// Fragmented MP4, negative composition offsets, variable frame rate, and
+/// MPEG-2 program stream.
 #[test]
 #[ignore]
 fn other_containers() {
     run_all(
-        &videos(&corpus_dir(), &|n| n.starts_with("h264-fragmented") || n.starts_with("vfr-") || n.starts_with("mpeg2")),
+        &videos(&corpus_dir(), &|n| {
+            n.starts_with("h264-fragmented") || n.starts_with("h264-negative-cts") || n.starts_with("vfr-") || n.starts_with("mpeg2")
+        }),
         DecodePurpose::Display,
     );
 }
