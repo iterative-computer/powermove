@@ -1,5 +1,6 @@
 import { LIMITS, type CodexTraceEvent } from '../../shared/ipc';
 import { fragmentText, humanLabel, outputExcerpt, toolDetail } from '../agent-tools/trace-format';
+import { isConnectionRetry, RECONNECTING_PROGRESS, RECONNECTED_PROGRESS } from './connection-status';
 
 export const MAX_CODEX_EVENT_LINE_BYTES = 1024 * 1024;
 
@@ -159,10 +160,12 @@ export function progressForCodexEvent(event: unknown): string | null {
   // `codex exec` reports stream retries ("Reconnecting... 2/5") as top-level
   // errors and non-fatal problems as error items; neither ends the run.
   if (isRecord(event) && event.type === 'error' && typeof event.message === 'string') {
+    if (isConnectionRetry(event.message)) return RECONNECTING_PROGRESS;
     return event.message.replace(/\s+/g, ' ').trim().slice(0, LIMITS.codexProgressChars) || null;
   }
   if (!isRecord(event) || !isRecord(event.item)) return null;
   if (event.type === 'item.completed' && event.item.type === 'error' && typeof event.item.message === 'string') {
+    if (isConnectionRetry(event.item.message)) return RECONNECTING_PROGRESS;
     return event.item.message.replace(/\s+/g, ' ').trim().slice(0, LIMITS.codexProgressChars) || null;
   }
 
@@ -229,6 +232,7 @@ export class CodexEventParser {
   private droppingLongLine = false;
   private finished = false;
   private threadId: string | null = null;
+  private reconnecting = false;
 
   constructor(private readonly callbacks: CodexEventParserCallbacks = {}) {}
 
@@ -298,7 +302,19 @@ export class CodexEventParser {
     }
 
     const progress = progressForCodexEvent(event);
-    if (progress !== null) this.callbacks.onProgress?.(progress);
+    if (progress === RECONNECTING_PROGRESS) {
+      if (!this.reconnecting) this.callbacks.onProgress?.(progress);
+      this.reconnecting = true;
+    } else {
+      const resumed = isRecord(event) && (event.type === 'turn.completed'
+        || ((event.type === 'item.started' || event.type === 'item.completed')
+          && isRecord(event.item) && event.item.type !== 'error'));
+      if (this.reconnecting && resumed) {
+        this.reconnecting = false;
+        this.callbacks.onProgress?.(RECONNECTED_PROGRESS);
+      }
+      if (progress !== null) this.callbacks.onProgress?.(progress);
+    }
     const trace = traceForCodexEvent(event);
     if (trace !== null) this.callbacks.onTrace?.(trace);
   }

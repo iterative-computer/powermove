@@ -212,13 +212,8 @@
       {/if}
       {#if showPreview}<PlanPreview {PM} />{/if}
       {#if showResult}<ResultActions {PM} />{/if}
-      <!-- In the popover, sending folds it into the titlebar launcher and Escape
-           closes it; docked, the composer keeps its usual focus behavior. -->
-      <Composer {PM} {panelId} onsubmit={() => {
-        const popover = !!PM.AgentShell?.isOpen?.();
-        PM.AgentShell?.collapse?.();
-        return popover;
-      }} onescape={() => {
+      <!-- Escape closes the popover; docked, it releases composer focus. -->
+      <Composer {PM} {panelId} onescape={() => {
         if (!PM.AgentShell?.isOpen?.()) return false;
         PM.AgentShell.close();
         return true;

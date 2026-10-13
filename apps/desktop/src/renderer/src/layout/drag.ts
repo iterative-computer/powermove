@@ -99,7 +99,12 @@ function placePreview(
   }
 }
 
-export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelSpec, dock: DockSpec, element: HTMLElement): void {
+type FloatingDrag = {
+  move(event: PointerEvent): void;
+  finish(cancelled: boolean): void;
+};
+
+export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelSpec, dock: DockSpec, element: HTMLElement, floating?: FloatingDrag): void {
   const ghost = document.createElement('div');
   ghost.className = 'panel-ghost';
   const card = document.createElement('div');
@@ -114,7 +119,7 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
   const preview = document.createElement('div');
   preview.className = 'panel-drop-preview';
   document.body.append(ghost, preview);
-  element.classList.add('drag-src');
+  if (!floating) element.classList.add('drag-src');
 
   const fromIndex = Math.max(0, dock.panels.findIndex((panel) => panel.id === spec.id));
   let moved = false;
@@ -130,6 +135,18 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
     if (!next) return;
     const docks = liveTargets(PM);
     dropTarget = PM.Layout.hitTestDockPlacement(docks, next.clientX, next.clientY);
+    if (floating) {
+      floating.move(next);
+      // Leave the middle of the workspace free for floating. Dock only at
+      // column edges or between panels, using the existing placement preview.
+      const target = docks.find(item => item.id === dropTarget?.dockId);
+      if (target && !target.virtual) {
+        const nearEdge = Math.min(Math.abs(next.clientX - target.rect.left), Math.abs(next.clientX - target.rect.right),
+          Math.abs(next.clientY - target.rect.top), Math.abs(next.clientY - target.rect.bottom)) <= 32;
+        const nearPanel = target.panels.some(panel => Math.min(Math.abs(next.clientY - panel.rect.top), Math.abs(next.clientY - panel.rect.bottom)) <= 24);
+        if (!nearEdge && !nearPanel) dropTarget = null;
+      }
+    }
     if (!dropTarget) {
       preview.classList.remove('on');
       previewTarget.key = '';
@@ -162,10 +179,12 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
     document.body.classList.remove('panel-dragging');
     if (!moved) return;
     if (cancelled) {
+      floating?.finish(true);
       PM.toast('Move cancelled');
       return;
     }
     if (!dropTarget) {
+      if (floating) { floating.finish(false); return; }
       PM.toast(`Drop on a panel or dock to move ${PM.PANELS[spec.id]?.title || spec.id}`);
       return;
     }
@@ -191,7 +210,7 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
         destination.textContent = 'Move panel';
         document.body.classList.add('panel-dragging');
       }
-      ghost.classList.add('on');
+      if (!floating) ghost.classList.add('on');
       queue(next);
     },
     up: (_dx: number, _dy: number, next: PointerEvent) => {

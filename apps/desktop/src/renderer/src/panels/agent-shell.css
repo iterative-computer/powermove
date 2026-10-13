@@ -73,6 +73,10 @@
 /* Without the panel header above it, the thread bar takes the same inset from
    the top as from the right edge. */
 #agent-popover .thread-bar { margin-top: 10px; }
+#agent-popover .thread-bar,
+#agent-popover .thread-trigger { cursor: grab; touch-action: none; }
+#agent-popover .thread-bar:active,
+#agent-popover .thread-trigger:active { cursor: grabbing; }
 
 /* ── floating window chrome, shared with the extension repair chat ── */
 .agent-floating-window {

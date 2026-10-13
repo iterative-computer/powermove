@@ -544,7 +544,7 @@ describe('CodexAppServerRunner questions', () => {
     child.notify('model/rerouted', { ...scope, fromModel: 'gpt-6', toModel: 'gpt-6-mini', reason: 'highRiskCyberActivity' });
     child.notify('warning', { threadId: null, message: 'Usage is nearly exhausted.' });
     await vi.waitFor(() => expect(progress).toEqual([
-      'Connection interrupted. Retrying…', 'Continuing on gpt-6-mini', 'Usage is nearly exhausted.'
+      'Connection interrupted. Reconnecting…', 'Continuing on gpt-6-mini', 'Usage is nearly exhausted.'
     ]));
     expect(traces).toEqual([
       { kind: 'tool-start', itemId: 'cmp', toolName: 'compact', label: 'Compacting context' },
@@ -554,6 +554,21 @@ describe('CodexAppServerRunner questions', () => {
     child.notify('turn/completed', { threadId: 'thr_123', turn: { id: 'turn_456', status: 'failed',
       error: { message: 'context_length_exceeded', codexErrorInfo: 'contextWindowExceeded' } } });
     await expect(run).resolves.toMatchObject({ ok: false, error: expect.stringContaining('even after compacting') });
+    await runner.shutdown();
+  });
+
+  it('keeps transport retries simple until the provider resumes streaming', async () => {
+    const { child, runner, progress, run } = start();
+    await vi.waitFor(() => expect(child.messages.some(message => message.method === 'turn/start')).toBe(true));
+    child.notify('error', { ...scope, willRetry: true, error: { message: 'Reconnecting... 4/5', additionalDetails: 'websocket closed by server before response.completed' } });
+    child.notify('error', { ...scope, willRetry: true, error: { message: 'Reconnecting... 5/5' } });
+    child.notify('warning', { threadId: scope.threadId, message: 'Falling back from WebSockets to HTTPS transport. stream disconnected before completion: websocket closed by server before response.completed' });
+    await vi.waitFor(() => expect(progress).toEqual(['Connection interrupted. Reconnecting…']));
+    child.notify('item/agentMessage/delta', { ...scope, itemId: 'answer', delta: 'Continuing the task.' });
+    child.notify('item/agentMessage/delta', { ...scope, itemId: 'answer', delta: ' Still working.' });
+    await vi.waitFor(() => expect(progress).toEqual(['Connection interrupted. Reconnecting…', 'Connected. Continuing…']));
+    complete(child);
+    await expect(run).resolves.toMatchObject({ ok: true });
     await runner.shutdown();
   });
 });

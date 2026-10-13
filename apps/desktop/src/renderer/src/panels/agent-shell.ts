@@ -23,11 +23,12 @@ function reducedMotion(): boolean {
 
 /** One host for the registered agent panel. The panel's Svelte instance is
  * moved, never rebuilt, so drafts, threads and active runs survive closing the
- * popover, switching projects and layout changes. Dragging the launcher onto
- * the workspace docks the same panel; the popover then stands aside. */
+ * popover, switching projects and layout changes. Its thread bar can float it
+ * or dock the same panel; the launcher also supports docking. */
 export function installAgentShell(PM: PM) {
   activeShell?.destroy();
   let open = false;
+  let floatingPosition: { left: number; top: number } | null = null;
   let collapseTimer: ReturnType<typeof setTimeout> | undefined;
 
   const root = document.createElement('div');
@@ -58,10 +59,11 @@ export function installAgentShell(PM: PM) {
     const view = viewport();
     const anchor = launcher()?.getBoundingClientRect();
     const width = Math.max(1, Math.min(WIDTH, view.width - EDGE * 2));
-    const top = (anchor ? anchor.bottom : 44) + GAP;
+    const floatingHeight = Math.max(1, Math.min(HEIGHT, view.height - EDGE * 2));
+    const top = floatingPosition ? clamp(floatingPosition.top, EDGE, view.height - floatingHeight - EDGE) : (anchor ? anchor.bottom : 44) + GAP;
     const height = Math.max(1, Math.min(HEIGHT, view.height - top - EDGE));
     const centre = anchor ? anchor.left + anchor.width / 2 : view.width / 2;
-    const left = clamp(centre - width / 2, EDGE, view.width - width - EDGE);
+    const left = clamp(floatingPosition?.left ?? centre - width / 2, EDGE, view.width - width - EDGE);
     Object.assign(surface.style, { left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px` });
     // Open and collapse grow from, and fold into, the launcher.
     const originX = anchor ? clamp(anchor.left + anchor.width / 2 - left, 0, width) : width / 2;
@@ -198,8 +200,44 @@ export function installAgentShell(PM: PM) {
     return was;
   }
 
+  let headerDragged = false;
+  surface.addEventListener('pointerdown', (event) => {
+    headerDragged = false;
+    const target = event.target as Element | null;
+    if (!open || event.button !== 0 || !target?.closest('.thread-bar') || target.closest('.thread-new') || !PM.WS?.current || PM.ProjectsScreen?.isOpen) return;
+    event.stopPropagation();
+    const previous = floatingPosition;
+    const left = parseFloat(surface.style.left), top = parseFloat(surface.style.top);
+    const width = parseFloat(surface.style.width), height = parseFloat(surface.style.height);
+    beginPanelDrag(PM as never, event, { id: 'agent' }, { id: 'titlebar', panels: [] }, surface, {
+      move: next => {
+        headerDragged = true;
+        const view = viewport();
+        floatingPosition = {
+          left: clamp(left + next.clientX - event.clientX, EDGE, view.width - width - EDGE),
+          top: clamp(top + next.clientY - event.clientY, EDGE, view.height - height - EDGE)
+        };
+        surface.style.left = `${floatingPosition.left}px`;
+        surface.style.top = `${floatingPosition.top}px`;
+      },
+      finish: cancelled => {
+        if (cancelled) floatingPosition = previous;
+        position();
+      }
+    });
+    // Keep a stationary press targeted at the thread button. The shared drag
+    // helper otherwise captures on the surface and redirects its click.
+    try { target.closest('.thread-trigger')?.setPointerCapture(event.pointerId); } catch { }
+  }, { signal: listeners.signal, capture: true });
+  surface.addEventListener('click', event => {
+    if (!headerDragged || event.detail === 0) return;
+    headerDragged = false;
+    event.preventDefault();
+    event.stopPropagation();
+  }, { signal: listeners.signal, capture: true });
+
   document.addEventListener('pointerdown', (event) => {
-    if (!open) return;
+    if (!open || floatingPosition) return;
     const target = event.target as Node | null;
     if (!target || surface.contains(target) || launcher()?.contains(target)) return;
     // Menus, pickers and dialogs opened from the conversation float outside it.

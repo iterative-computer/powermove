@@ -476,14 +476,19 @@ describe('AgentPanel', () => {
     expect(document.activeElement).not.toBe(textarea);
   });
 
-  it('folds the popover into the launcher when a message is sent', () => {
+  it.each(['Enter', 'Send button'])('keeps the popover open and composer focused after sending with %s', (method) => {
     PM.AgentShell = { close: vi.fn(), collapse: vi.fn(), isOpen: () => true };
     renderPanel(snapshot({ composerDraft: 'Make the title bigger' }));
     const textarea = target.querySelector<HTMLDivElement>('.agent-inline-prompt')!;
     flushSync(() => textarea.focus());
-    flushSync(() => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })));
-    expect(PM.AgentUI.submit).toHaveBeenCalledOnce();
-    expect(PM.AgentShell.collapse).toHaveBeenCalledOnce();
+    flushSync(() => {
+      if (method === 'Enter') textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      else target.querySelector<HTMLButtonElement>('.agent-send')!.click();
+    });
+    expect(PM.AgentUI.submit).toHaveBeenCalledExactlyOnceWith('Make the title bigger');
+    expect(PM.AgentShell.collapse).not.toHaveBeenCalled();
+    expect(PM.AgentShell.close).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(textarea);
   });
 
   it('renders steering as a compact continuation of the active user request', () => {

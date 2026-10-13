@@ -1636,11 +1636,9 @@ function conversationReply(plan: any) {
   return plan.message || `I prepared the ${plan.section.title} section.`;
 }
 
-/* A sent request runs in the titlebar launcher; the conversation stays one
-   click away instead of covering the editor. */
+/* Dismiss the spatial composer while keeping the agent conversation open. */
 function promoteToConversation() {
   dismissOverlay(true);
-  PM.AgentShell?.collapse?.();
 }
 
 function setAgentAccessMode(mode: any) {
