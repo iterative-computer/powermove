@@ -94,11 +94,12 @@ const RUNS = [
   // over the real viewer's stage.
   { name: 'app-playback-cprime-idle', ...playback, app: true, mode: 'engine', load: false, remoteLayer: true },
   { name: 'app-playback-cprime-load', ...playback, app: true, mode: 'engine', load: true, loadProfile: 'no-autosave', remoteLayer: true },
-  // Gestures: today drags a layer; the engine path pans the view (the
-  // engine draws the test source, not the document, so a layer drag would
-  // change nothing it renders). `-move`: before step 2 (pointermove).
-  { name: 'app-latency-today-idle', ...latency, app: true, mode: 'today', load: false, inputModes: ['drag'] },
-  { name: 'app-latency-today-load', ...latency, app: true, mode: 'today', load: true, loadProfile: 'no-autosave', inputModes: ['drag'] },
+  // Gestures: the engine path pans the view (it draws the test source, not
+  // the document, so a layer drag would change nothing it renders); today
+  // pans the same way and drags a layer. `-move`: before step 2
+  // (pointermove).
+  { name: 'app-latency-today-idle', ...latency, app: true, mode: 'today', load: false, inputModes: ['pan', 'drag'] },
+  { name: 'app-latency-today-load', ...latency, app: true, mode: 'today', load: true, loadProfile: 'no-autosave', inputModes: ['pan', 'drag'] },
   { name: 'app-latency-engine-idle-move', ...latency, app: true, mode: 'engine', load: false, rawGestures: false, inputModes: ['pan'] },
   { name: 'app-latency-engine-load-move', ...latency, app: true, mode: 'engine', load: true, loadProfile: 'no-autosave', rawGestures: false, inputModes: ['pan'] },
   { name: 'app-latency-engine-idle', ...latency, app: true, mode: 'engine', load: false, inputModes: ['pan'] },

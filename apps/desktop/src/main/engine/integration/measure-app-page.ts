@@ -26,9 +26,12 @@
  *
  * Gestures. `drag` (today) presses on a layer with the Select tool and
  * moves it; each draw is tagged with the newest handled pointer event whose
- * layer position it shows. `pan` (engine) presses the middle button on the
- * stage and pans the view, which the engine renders; frames echo the view
- * sequence. Pointer coordinates encode their sequence numbers.
+ * layer position it shows. `pan` presses the middle button on the stage
+ * and pans the view: the same viewer handler on both paths. Today moves
+ * the WebGL canvas with CSS, so every animation frame is tagged with the
+ * newest handled event; the engine renders the panned view, and its frames
+ * echo the view sequence. Pointer coordinates encode their sequence
+ * numbers.
  */
 import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, type EngineViewerService } from '../../../extensions/viewer/engine-present/presentation';
 import type { TransportCommand } from '../../../shared/engine-protocol';
@@ -83,6 +86,32 @@ let dragLayer: any = null;
 let inputs: [number, number[], number, number][] = [];
 /** Today's drag: handled seq → layer position key. */
 let positions: [number, string][] = [];
+/** Today's pan: the newest handled pointer sequence. */
+let panSeq = -1;
+let panLoop = false;
+
+/**
+ * Today's pan: every animation frame commits the canvas position the
+ * handled pointer events set (rAF-aligned pointer events are dispatched
+ * before the frame's callbacks), so each frame is a draw tagged with the
+ * newest handled sequence.
+ */
+function panFrames(): void {
+  if (panLoop) return;
+  panLoop = true;
+  const tick = (t: number): void => {
+    if (inputMode !== 'pan' || mode !== 'today') {
+      panLoop = false;
+      return;
+    }
+    if (panSeq >= 0) draws.push([t, 0, 0, panSeq, 0, 0, 1]);
+    nativeRaf(tick);
+  };
+  nativeRaf(tick);
+}
+
+/** Durations of the viewer's layout calls while an input mode runs (ms). */
+let layoutMs: number[] = [];
 const CODE_X = 400;
 const CODE_SPAN = CODE_X * 6;
 
@@ -123,6 +152,11 @@ function onPointer(event: PointerEvent): void {
   const seq = seqs[seqs.length - 1]!;
   if (inputMode === 'drag') {
     positions.push([seq, positionKey()]);
+    inputs.push([seq, seqs, event.timeStamp, handled]);
+  } else if (mode === 'today') {
+    // Today's pan moves the WebGL canvas with CSS: the next animation
+    // frame's commit shows it (panFrames).
+    panSeq = seq;
     inputs.push([seq, seqs, event.timeStamp, handled]);
   } else {
     inputs.push([viewSeq(), seqs, event.timeStamp, handled]);
@@ -193,6 +227,18 @@ const api = {
     if (mode === 'engine') startEngine(options.displayHz);
     // Before step 2: the viewer's drags keep pointermove.
     if (!options.rawGestures) viewer().rawGestures = () => false;
+    // How long the viewer's layout (pan steps) holds the main thread.
+    const v = viewer();
+    const layout = v.layout.bind(v);
+    v.layout = (...args: unknown[]): unknown => {
+      if (!inputMode) return layout(...args);
+      const t0 = performance.now();
+      try {
+        return layout(...args);
+      } finally {
+        layoutMs.push(+(performance.now() - t0).toFixed(3));
+      }
+    };
   },
   ready(): boolean {
     if (mode === 'engine') return !!viewer()?.enginePresentation?.presenting;
@@ -236,6 +282,7 @@ const api = {
     rafs.length = 0;
     inputs = [];
     positions = [];
+    layoutMs = [];
     clocks.length = 0;
   },
   /**
@@ -268,6 +315,8 @@ const api = {
   },
   setInputMode(m: InputMode | null): void {
     inputMode = m;
+    panSeq = -1;
+    if (m === 'pan' && mode === 'today') panFrames();
   },
   collect(): unknown {
     const pm = PM();
@@ -284,6 +333,7 @@ const api = {
       today: { draws, rafs: [...rafs] },
       clocks: clocks.splice(0),
       inputs,
+      layoutMs,
       dragLayer: dragLayer ? { id: dragLayer.id, type: dragLayer.type } : null,
       state: presentation?.state ?? null,
       receiver: engine?.source.stats() ?? null,
