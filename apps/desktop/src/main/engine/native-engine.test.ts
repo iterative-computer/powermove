@@ -1,0 +1,342 @@
+// NativeEngine (host services, supervision, client ports) against fake
+// engine processes that speak the protocol through main's own codec. The
+// real engines run in scripts/engine-host-integration.mjs.
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+import { PROTOCOL_BUILD, type CrashReport, type EngineProcess, type Envelope, type Event, type Request, type Response } from '../../shared/engine-protocol';
+import { NativeEngine } from './native-engine';
+import type { ChildLike, ClientPortInfo, EngineControl, PortLike } from './ports';
+import { decodeEnvelope, encodeEnvelope, envelope, eventMessage, localRanges, requestMessage, responseMessage } from './protocol';
+
+/* ── in-memory MessageChannelMain ───────────────────────────────────── */
+
+class FakePort implements PortLike {
+  other: FakePort | null = null;
+  closed = false;
+  private started = false;
+  private queue: unknown[] = [];
+  private onMessage: Array<(e: { data: unknown }) => void> = [];
+  private onClose: Array<() => void> = [];
+  postMessage(message: unknown): void {
+    const other = this.other;
+    if (this.closed || !other || other.closed) return;
+    other.queue.push(message);
+    queueMicrotask(() => other.flush());
+  }
+  on(event: 'message' | 'close', listener: never): this {
+    if (event === 'message') this.onMessage.push(listener);
+    else this.onClose.push(listener);
+    return this;
+  }
+  start(): void {
+    this.started = true;
+    queueMicrotask(() => this.flush());
+  }
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    for (const l of this.onClose) l();
+    if (this.other && !this.other.closed) this.other.close();
+  }
+  private flush(): void {
+    if (!this.started || this.closed) return;
+    while (this.queue.length) {
+      const data = this.queue.shift();
+      for (const l of this.onMessage) l({ data });
+    }
+  }
+}
+
+const channel = () => {
+  const port1 = new FakePort();
+  const port2 = new FakePort();
+  port1.other = port2;
+  port2.other = port1;
+  return { port1, port2 };
+};
+
+/* ── a fake engine process ──────────────────────────────────────────── */
+
+class FakeEngine implements ChildLike {
+  static nextPid = 100;
+  readonly pid = FakeEngine.nextPid++;
+  ports = new Map<number, { port: FakePort; peer: string }>();
+  received: Envelope[] = [];
+  private exitListeners: Array<(code: number) => void> = [];
+  dead = false;
+
+  constructor(readonly process: EngineProcess) {}
+
+  on(event: string, listener: never): this {
+    if (event === 'exit') this.exitListeners.push(listener);
+    return this;
+  }
+
+  postMessage(message: unknown, transfer?: PortLike[]): void {
+    const control = message as EngineControl;
+    if (control.type === 'connect') {
+      const port = transfer![0] as FakePort;
+      this.ports.set(control.port, { port, peer: control.peer });
+      port.on('message', ((e: { data: unknown }) => this.receive(control.port, e.data as Uint8Array)) as never);
+      port.start();
+    } else if (control.type === 'disconnect') {
+      this.ports.get(control.port)?.port.close();
+      this.ports.delete(control.port);
+    } else if (control.type === 'shutdown') {
+      this.exit(0);
+    }
+  }
+
+  kill(): boolean {
+    this.exit(137);
+    return true;
+  }
+
+  exit(code: number): void {
+    if (this.dead) return;
+    this.dead = true;
+    for (const { port } of this.ports.values()) port.close();
+    queueMicrotask(() => { for (const l of this.exitListeners) l(code); });
+  }
+
+  hostPort(): FakePort {
+    return [...this.ports.values()].find((p) => p.peer === 'host')!.port;
+  }
+
+  private send(port: number, value: Envelope): void {
+    this.ports.get(port)?.port.postMessage(encodeEnvelope(value));
+  }
+
+  /** Engine → host request; resolves with the host's answer. */
+  hostId = 1000;
+  answers = new Map<number, (m: Envelope) => void>();
+  ask(body: Request, session: number | null = null): Promise<Envelope> {
+    const id = this.hostId++;
+    const port = [...this.ports.entries()].find(([, p]) => p.peer === 'host')![0];
+    const answer = new Promise<Envelope>((resolve) => this.answers.set(id, resolve));
+    this.send(port, envelope(requestMessage(id, body), session));
+    return answer;
+  }
+
+  tell(body: Event): void {
+    const port = [...this.ports.entries()].find(([, p]) => p.peer === 'host')![0];
+    this.send(port, envelope(eventMessage(body)));
+  }
+
+  private receive(port: number, bytes: Uint8Array): void {
+    const message = decodeEnvelope(bytes);
+    this.received.push(message);
+    const body = message.message;
+    if (body.kind === 'hello') {
+      this.send(port, envelope({
+        kind: 'welcome',
+        role: this.process === 'interactive' ? 'interactiveEngine' : 'jobEngine',
+        wire: 1,
+        build: PROTOCOL_BUILD,
+        contracts: localRanges().map((r) => ({ contract: r.contract, version: 0 })),
+        maxMessageBytes: 1 << 24
+      }));
+    } else if (body.kind === 'request' && body.body.type === 'grantLease') {
+      const lease = body.body;
+      const response: Response = {
+        type: 'leaseUsage', process: lease.process, epoch: lease.epoch, total: 0, ack: true,
+        categories: { frameCache: 0, renderCache: 0, blenderSurfaces: 0, geometry3d: 0, surfacePool: 0, decoders: 0, pipelines: 0, other: 0 }
+      };
+      this.send(port, envelope(responseMessage(body.id, response)));
+    } else if (body.kind === 'response' || body.kind === 'error') {
+      this.answers.get(body.id)?.(message);
+    }
+  }
+
+  events(type: string): Event[] {
+    return this.received.flatMap((e) => (e.message.kind === 'event' && e.message.body.type === type ? [e.message.body] : []));
+  }
+}
+
+const settle = async (rounds = 20): Promise<void> => {
+  for (let i = 0; i < rounds; i++) await new Promise((r) => setImmediate(r));
+};
+
+describe('NativeEngine with fake engines', () => {
+  let dir: string;
+  let engines: FakeEngine[];
+  let timers: Array<{ fn: () => void; ms: number; cancelled: boolean }>;
+  let host: NativeEngine;
+  let logs: string[];
+  let now: number;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), 'pm-native-'));
+    engines = [];
+    timers = [];
+    logs = [];
+    now = 0;
+    host = new NativeEngine({
+      spawn: (process) => {
+        const engine = new FakeEngine(process);
+        engines.push(engine);
+        return engine;
+      },
+      channel,
+      cacheDirectory: path.join(dir, 'cache'),
+      automaticOutputDirectory: path.join(dir, 'Powermove'),
+      physicalMemory: 16 * 1024 ** 3,
+      log: (level, message) => logs.push(`${level}: ${message}`),
+      hostNow: () => 42,
+      now: () => now,
+      schedule: (fn, ms) => {
+        const timer = { fn, ms, cancelled: false };
+        timers.push(timer);
+        return { cancel: () => { timer.cancelled = true; } };
+      }
+    });
+    await host.start();
+    await settle();
+  });
+
+  afterEach(async () => {
+    await host.stop();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const live = (process: EngineProcess) => engines.filter((e) => e.process === process && !e.dead).at(-1)!;
+
+  it('negotiates both engines, grants leases, sends the slicing policy, and links them', () => {
+    expect(host.status().interactive.state).toBe('ready');
+    expect(host.status().job.state).toBe('ready');
+    for (const engine of engines) {
+      const hello = engine.received[0]!.message;
+      expect(hello.kind).toBe('hello');
+      expect(engine.received.some((e) => e.message.kind === 'request' && e.message.body.type === 'grantLease')).toBe(true);
+      expect([...engine.ports.values()].filter((p) => p.peer === 'peer')).toHaveLength(1);
+    }
+    expect(live('job').events('slicing')).toHaveLength(1);
+    expect(live('interactive').events('slicing')).toHaveLength(0);
+    expect(host.memory.isAcknowledged('interactive')).toBe(true);
+  });
+
+  it('gives each client a port per engine, on the main frame only, with the launch generation', () => {
+    const delivered: ClientPortInfo[] = [];
+    host.addClient(1, (info) => delivered.push(info));
+    expect(delivered.map((d) => [d.process, d.generation])).toEqual([['interactive', 1], ['job', 1]]);
+    expect([...live('job').ports.values()].filter((p) => p.peer === 'renderer')).toHaveLength(1);
+    host.reconnectClient(1);
+    expect(delivered).toHaveLength(4);
+    expect([...live('job').ports.values()].filter((p) => p.peer === 'renderer')).toHaveLength(1);
+    host.removeClient(1);
+    expect([...live('job').ports.values()].filter((p) => p.peer === 'renderer')).toHaveLength(0);
+  });
+
+  it('restarts a crashed engine with backoff, attributes suspects, and reconnects clients for a resync', async () => {
+    const delivered: ClientPortInfo[] = [];
+    host.addClient(1, (info) => delivered.push(info));
+    const reports: CrashReport[] = [];
+    host.listen({ crash: (r) => reports.push(r) });
+    const suspect = { kind: 'asset' as const, asset: 'clip' };
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const victim = live('interactive');
+      victim.tell({ type: 'inFlight', suspects: [suspect] });
+      await settle();
+      victim.exit(139);
+      await settle();
+      expect(host.status().interactive.state).toBe('restarting');
+      const timer = timers.at(-1)!;
+      expect(timer.ms).toBe(attempt === 1 ? 250 : 500);
+      timer.fn();
+      await settle();
+      expect(host.status().interactive.state).toBe('ready');
+    }
+    expect(reports.map((r) => [r.attempt, r.markedFailed.length])).toEqual([[1, 0], [2, 1]]);
+    expect(reports[1]!.suspects).toEqual([suspect]);
+    // The restarted engine is told which items failed; clients got new ports.
+    const crash = live('interactive').events('crash') as Array<Extract<Event, { type: 'crash' }>>;
+    expect(crash[0]!.markedFailed).toEqual([suspect]);
+    expect(delivered.filter((d) => d.process === 'interactive').map((d) => d.generation)).toEqual([1, 2, 3]);
+    // The direct port was rebuilt for the new launch.
+    expect([...live('job').ports.values()].filter((p) => p.peer === 'peer')).toHaveLength(1);
+    // A healthy minute resets the attempt count.
+    now += 61_000;
+    live('interactive').exit(139);
+    await settle();
+    expect(timers.at(-1)!.ms).toBe(250);
+  });
+
+  it('serves handles and outputs only on the launch that owns them, and cleans up after a crash', async () => {
+    const job = live('job');
+    const minted = await job.ask({ type: 'mintHandle', kind: { kind: 'cache', cache: 'renderCache' }, session: 4 });
+    expect(minted.message.kind).toBe('response');
+    const handle = minted.message.kind === 'response' && minted.message.body.type === 'handle' ? minted.message.body.handle : '';
+    const resolved = await job.ask({ type: 'resolveHandle', handle, session: 4 });
+    expect(resolved.message.kind === 'response' && resolved.message.body.type === 'handleResolved' && resolved.message.body.path).toBe(path.join(dir, 'cache', 'Render Cache'));
+    // The interactive engine cannot use the job engine's handle.
+    const stolen = await live('interactive').ask({ type: 'resolveHandle', handle, session: 4 });
+    expect(stolen.message.kind === 'error' && stolen.message.error.code).toBe('capabilityRejected');
+    const wrongSession = await job.ask({ type: 'resolveHandle', handle, session: 5 });
+    expect(wrongSession.message.kind === 'error' && wrongSession.message.error.code).toBe('capabilityRejected');
+    // Outputs: only the job engine; agents never pick a path.
+    const fromInteractive = await live('interactive').ask({ type: 'outputDestination', job: 'j', choice: { kind: 'agentAutomatic', suggestedName: 'Cut', extension: 'mov' }, overwrite: 'uniqueName' });
+    expect(fromInteractive.message.kind === 'error' && fromInteractive.message.error.code).toBe('capabilityRejected');
+    const escape = await job.ask({ type: 'outputDestination', job: 'j', choice: { kind: 'agentAutomatic', suggestedName: '../x', extension: 'mov' }, overwrite: 'uniqueName' });
+    expect(escape.message.kind === 'error' && escape.message.error.code).toBe('invalidMessage');
+    const out = await job.ask({ type: 'outputDestination', job: 'j', choice: { kind: 'agentAutomatic', suggestedName: 'Cut', extension: 'mov' }, overwrite: 'uniqueName' }, 4);
+    expect(out.message.kind === 'response' && out.message.body.type).toBe('outputDestination');
+    expect(host.outputs.size).toBe(1);
+    // Hardware sessions and unsupported Blender requests.
+    const hw = await job.ask({ type: 'hardwareSessions', kind: 'proResEncode', delta: 3 });
+    expect(hw.message.kind === 'response' && hw.message.body).toEqual({ type: 'hardwareSessions', kind: 'proResEncode', held: 2 });
+    const blender = await job.ask({ type: 'blenderStatus' });
+    expect(blender.message.kind === 'error' && blender.message.error.code).toBe('unsupported');
+
+    job.exit(139);
+    await settle();
+    expect(host.handles.size).toBe(0);
+    expect(host.outputs.size).toBe(0);
+    expect(host.hardware.total('proResEncode')).toBe(0);
+  });
+
+  it('relays playback signals, moves leases, and stops playback for a dead interactive engine', async () => {
+    const playback: boolean[] = [];
+    host.listen({ playback: (p) => playback.push(p) });
+    const before = host.memory.current('job')!.bytes;
+    live('interactive').tell({ type: 'deadline', signal: 'playbackStarted', at: 1, rate: { num: 1, den: 1 }, frameBudgetUs: 16_666 });
+    await settle();
+    const relayed = live('job').events('deadline');
+    expect(relayed).toHaveLength(1);
+    expect(host.memory.current('job')!.bytes).toBeLessThan(before);
+    expect(host.memory.current('job')!.reason).toBe('playbackStarted');
+    // A job engine that restarts during playback hears about it again.
+    live('job').exit(139);
+    await settle();
+    timers.at(-1)!.fn();
+    await settle();
+    expect(live('job').events('deadline').map((e) => (e as { signal: string }).signal)).toEqual(['playbackStarted']);
+    live('interactive').exit(139);
+    await settle();
+    expect(live('job').events('deadline').map((e) => (e as { signal: string }).signal)).toEqual(['playbackStarted', 'playbackStopped']);
+    expect(playback).toEqual([true, false]);
+    // The job engine may not send deadline signals.
+    live('job').tell({ type: 'deadline', signal: 'playbackStopped', at: 3 });
+    await settle();
+    expect(logs.some((l) => l.includes('only the interactive engine'))).toBe(true);
+  });
+
+  it('stages resync documents as cache files bound to the session and launch', async () => {
+    const staged = await host.stageDocument('interactive', 3, new TextEncoder().encode('{"a":1}'));
+    expect(staged.length).toBe(7);
+    const engine = live('interactive');
+    const ok = await engine.ask({ type: 'resolveHandle', handle: staged.handle, session: 3 });
+    expect(ok.message.kind === 'response' && ok.message.body.type === 'handleResolved' && ok.message.body.access).toBe('readWrite');
+    const otherEngine = await live('job').ask({ type: 'resolveHandle', handle: staged.handle, session: 3 });
+    expect(otherEngine.message.kind).toBe('error');
+  });
+
+  it('stops without restarting', async () => {
+    await host.stop();
+    expect(host.status().interactive.state).toBe('stopped');
+    expect(timers.filter((t) => !t.cancelled)).toHaveLength(0);
+  });
+});
