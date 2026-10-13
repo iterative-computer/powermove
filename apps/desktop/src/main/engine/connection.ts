@@ -54,6 +54,7 @@ export class HostConnection {
   private negotiated: Negotiated | null = null;
   private closed = false;
   private handshake: { resolve: (n: Negotiated) => void; reject: (e: Error) => void } | null = null;
+  private closeListeners: Array<(reason: Error) => void> = [];
 
   constructor(
     readonly process: EngineProcess,
@@ -100,6 +101,12 @@ export class HostConnection {
     this.shutdown(new ProtocolError('internal', `the ${this.process} engine connection closed`));
   }
 
+  /** Called once when the connection ends, for any reason. */
+  onClose(listener: (reason: Error) => void): void {
+    if (this.closed) listener(new ProtocolError('internal', 'already closed'));
+    else this.closeListeners.push(listener);
+  }
+
   private send(value: Envelope): void {
     if (this.closed) return;
     let bytes: Uint8Array;
@@ -123,6 +130,7 @@ export class HostConnection {
     this.handshake = null;
     this.outstanding.failAll(reason);
     try { this.port.close(); } catch { /* already closed */ }
+    for (const listener of this.closeListeners.splice(0)) listener(reason);
   }
 
   private receive(data: unknown): void {

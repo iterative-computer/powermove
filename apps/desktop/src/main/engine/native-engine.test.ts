@@ -354,6 +354,18 @@ describe('NativeEngine with fake engines', () => {
     expect(reports[0]!.exit).toContain('image not found');
   });
 
+  it('replaces an engine whose host connection ends while it keeps running', async () => {
+    const engine = live('interactive');
+    engine.hostPort().close();
+    await settle();
+    expect(engine.dead).toBe(true);
+    expect(host.status().interactive.state).toBe('restarting');
+    timers.at(-1)!.fn();
+    await settle();
+    expect(host.status().interactive.state).toBe('ready');
+    expect(host.status().interactive.generation).toBe(2);
+  });
+
   it('stops without restarting', async () => {
     await host.stop();
     expect(host.status().interactive.state).toBe('stopped');

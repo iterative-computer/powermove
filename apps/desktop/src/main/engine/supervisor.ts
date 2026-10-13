@@ -167,6 +167,13 @@ export class EngineSupervisor {
     });
     child.on('exit', (code: number) => this.onExit(launch, code, fatal));
     child.postMessage({ type: 'connect', port: hostPort, peer: 'host' } satisfies EngineControl, [port1]);
+    connection.onClose((reason) => {
+      // A live engine without its host connection cannot get leases,
+      // handles, or relays: replace it. (Its exit, not this, restarts it.)
+      if (this.launch !== launch || this.stopping || this.child !== child) return;
+      this.options.log('error', `the ${process} engine's host connection ended (${reason.message}); restarting it`);
+      child.kill();
+    });
     connection.open().then(
       async () => {
         if (this.launch !== launch) return;
