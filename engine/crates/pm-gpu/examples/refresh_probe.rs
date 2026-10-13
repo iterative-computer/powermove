@@ -17,14 +17,20 @@ unsafe extern "C" {}
 #[cfg(target_os = "macos")]
 fn main() {
     use pm_gpu::bridge_out::remote_layer::{RatePreference, take_display_ticks};
-    let seconds = std::env::args().nth(1).and_then(|s| s.parse::<f64>().ok()).unwrap_or(3.0);
+    let seconds = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(3.0);
     // A WindowServer connection as an accessory-less background process
     // (activation policy prohibited: no Dock icon, no menu bar, no focus).
     // SAFETY: AppKit class methods on the main thread.
     unsafe {
         use objc2::msg_send;
         use objc2::runtime::{AnyClass, AnyObject};
-        let app: *mut AnyObject = msg_send![AnyClass::get(c"NSApplication").expect("AppKit"), sharedApplication];
+        let app: *mut AnyObject = msg_send![
+            AnyClass::get(c"NSApplication").expect("AppKit"),
+            sharedApplication
+        ];
         let _: bool = msg_send![app, setActivationPolicy: 2_isize];
     }
     let mut out = Vec::new();
@@ -38,9 +44,18 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
         drop(link);
         let ticks = take_display_ticks();
-        let mut intervals: Vec<f64> = ticks.windows(2).map(|w| (w[1].0 - w[0].0) * 1000.0).filter(|d| *d > 0.0).collect();
+        let mut intervals: Vec<f64> = ticks
+            .windows(2)
+            .map(|w| (w[1].0 - w[0].0) * 1000.0)
+            .filter(|d| *d > 0.0)
+            .collect();
         intervals.sort_by(f64::total_cmp);
-        let pct = |p: f64| intervals.get(((intervals.len().saturating_sub(1)) as f64 * p) as usize).copied().unwrap_or(f64::NAN);
+        let pct = |p: f64| {
+            intervals
+                .get(((intervals.len().saturating_sub(1)) as f64 * p) as usize)
+                .copied()
+                .unwrap_or(f64::NAN)
+        };
         let near = |ms: f64| intervals.iter().filter(|d| (**d - ms).abs() < 0.5).count();
         let line = format!(
             "{{\"request\":{},\"callbacks\":{},\"intervalMs\":{{\"p05\":{:.3},\"p50\":{:.3},\"p95\":{:.3}}},\"near8.33\":{},\"near10\":{},\"near16.67\":{},\"near20.83\":{}}}",
