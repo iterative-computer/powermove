@@ -106,6 +106,11 @@ pub struct Norm {
 }
 
 impl PixelFormat {
+    /// Samples are half or single floats (images only).
+    pub fn is_float(&self) -> bool {
+        self.planes.iter().any(|p| matches!(p.format, PlaneFormat::Rgba16Float | PlaneFormat::Rgba32Float))
+    }
+
     pub fn has_alpha(&self) -> bool {
         self.alpha_bits > 0
     }
@@ -121,6 +126,9 @@ impl PixelFormat {
     /// The section 13 constants for this format, from contract 4's
     /// reference (`pm_protocol::color::normalization`).
     pub fn norm(&self) -> Norm {
+        if self.is_float() {
+            return Norm { y_off: 0.0, y_div: 1.0, c_off: 0.0, c_div: 1.0, a_div: 1.0 };
+        }
         let n = match self.layout {
             Layout::PlanarRgb | Layout::Rgba => {
                 let m = ((1u64 << self.bits) - 1) as f64;
@@ -315,16 +323,18 @@ impl DecodedFrame {
         })
     }
 
-    /// Raw sample code at (plane, x, y, component).
+    /// Raw sample code at (plane, x, y, component); float samples as values.
     fn code(p: &PlaneView<'_>, x: usize, y: usize, c: usize) -> f64 {
         let b = p.desc.format.bytes();
         let cb = b / p.desc.format.components();
         let off = y * p.stride + x * b + c * cb;
         unsafe {
-            if cb == 1 {
-                *p.ptr.add(off) as f64
-            } else {
-                u16::from_le_bytes([*p.ptr.add(off), *p.ptr.add(off + 1)]) as f64
+            let at = |i: usize| *p.ptr.add(off + i);
+            match (p.desc.format, cb) {
+                (PlaneFormat::Rgba32Float, _) => f32::from_le_bytes([at(0), at(1), at(2), at(3)]) as f64,
+                (PlaneFormat::Rgba16Float, _) => half_to_f64(u16::from_le_bytes([at(0), at(1)])),
+                (_, 1) => at(0) as f64,
+                _ => u16::from_le_bytes([at(0), at(1)]) as f64,
             }
         }
     }
@@ -375,6 +385,19 @@ impl DecodedFrame {
             }
             (ya, cc)
         })
+    }
+}
+
+/// IEEE half to f64 (exact).
+pub fn half_to_f64(h: u16) -> f64 {
+    let s = if h >> 15 == 1 { -1.0 } else { 1.0 };
+    let e = ((h >> 10) & 0x1F) as i32;
+    let m = (h & 0x3FF) as f64;
+    s * match e {
+        0 => m * 2f64.powi(-24),
+        31 if m == 0.0 => f64::INFINITY,
+        31 => f64::NAN,
+        _ => (1.0 + m / 1024.0) * 2f64.powi(e - 15),
     }
 }
 
