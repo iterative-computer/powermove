@@ -1,3 +1,4 @@
+import { readWithRetry } from './read-retry';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, readdir, rename, unlink, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
@@ -202,7 +203,7 @@ export class ProjectFiles {
         const readExactly = async (position: number, length: number) => {
           const buffer = Buffer.allocUnsafe(length);
           for (let offset = 0; offset < length;) {
-            const { bytesRead } = await handle.read(buffer, offset, length - offset, position + offset);
+            const { bytesRead } = await readWithRetry(() => handle.read(buffer, offset, length - offset, position + offset));
             if (!bytesRead) throw new Error('The project container is truncated.');
             offset += bytesRead;
           }
@@ -252,7 +253,7 @@ export class ProjectFiles {
     reader.busy = true;
     try {
       const data = Buffer.allocUnsafe(length);
-      const { bytesRead } = await reader.handle.read(data, 0, length, offset);
+      const { bytesRead } = await readWithRetry(() => reader.handle.read(data, 0, length, offset));
       if (!bytesRead) throw new Error('The project container is truncated.');
       return data.subarray(0, bytesRead);
     } finally { reader.busy = false; }

@@ -1,3 +1,4 @@
+import { readWithRetry } from './read-retry';
 import { createHash, type Hash, randomUUID } from 'node:crypto';
 import { constants, type Stats } from 'node:fs';
 import { copyFile, lstat, open, rename, unlink, type FileHandle } from 'node:fs/promises';
@@ -29,7 +30,7 @@ export async function copySnapshot(source: string, destination: string): Promise
 export async function readExactly(handle: FileHandle, position: number, length: number): Promise<Buffer> {
   const data = Buffer.allocUnsafe(length);
   for (let offset = 0; offset < length;) {
-    const { bytesRead } = await handle.read(data, offset, length - offset, position + offset);
+    const { bytesRead } = await readWithRetry(() => handle.read(data, offset, length - offset, position + offset));
     if (!bytesRead) throw new Error('The project container is truncated.');
     offset += bytesRead;
   }

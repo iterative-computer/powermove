@@ -1,3 +1,4 @@
+import { readWithRetry } from './read-retry';
 import { mkdtemp, open, rm, type FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -52,7 +53,7 @@ export class FileUpload {
     const buffer = Buffer.allocUnsafe(FILE_CHUNK_BYTES);
     for (let offset = 0; offset < this.size;) {
       if (this.disposed) throw new Error('Save cancelled');
-      const { bytesRead } = await this.handle.read(buffer, 0, Math.min(buffer.length, this.size - offset), offset);
+      const { bytesRead } = await readWithRetry(() => this.handle.read(buffer, 0, Math.min(buffer.length, this.size - offset), offset));
       if (!bytesRead) throw new Error('The save upload is truncated.');
       yield buffer.subarray(0, bytesRead);
       offset += bytesRead;
