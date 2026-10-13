@@ -657,7 +657,7 @@ impl Evaluator {
 
     /// The composition's layer index, reused while its `layers` node provably
     /// did not change (see [`IndexEntry`]).
-    fn layer_index(&mut self, cx: &Comp<'_>) -> Arc<LayerIndex> {
+    pub(crate) fn layer_index(&mut self, cx: &Comp<'_>) -> Arc<LayerIndex> {
         let layers_node = cx.layers_node();
         let layers_rev = layers_node.map_or(0, Node::rev);
         let len = cx.layers().len();

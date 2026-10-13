@@ -1498,9 +1498,15 @@ dependencies = [
 name = "pm-eval"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "libm",
+ "pm-expr",
  "pm-model",
+ "pm-text",
  "pm-time",
+ "pm-vector",
+ "serde_json",
+ "skrifa",
 ]
 
 [[package]]

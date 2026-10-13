@@ -10,8 +10,30 @@ publish.workspace = true
 [dependencies]
 pm-model = { path = "../pm-model" }
 pm-time = { path = "../pm-time" }
+# Level 1 text layout (units for text animators, text bounds) without the
+# platform registry, so the same code runs in pm-wasm.
+pm-text = { path = "../pm-text", default-features = false }
+pm-vector = { path = "../pm-vector" }
+# Glyph outline boxes for text ink bounds (already in the tree through parley).
+skrifa = "0.44"
+serde_json.workspace = true
 libm.workspace = true
 
 [[example]]
 name = "wasm_identity"
 crate-type = ["cdylib"]
+
+[[example]]
+name = "wasm_layer_identity"
+crate-type = ["cdylib"]
+
+[dev-dependencies]
+pm-expr = { path = "../pm-expr" }
+pm-text = { path = "../pm-text", features = ["system"] }
+flate2 = "1.1"
+
+[[test]]
+# Runs on the main thread: the native font registry (CoreText) uses AppKit's
+# font manager.
+name = "corpus"
+harness = false
