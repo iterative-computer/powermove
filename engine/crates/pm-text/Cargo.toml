@@ -1,10 +1,65 @@
 [package]
 name = "pm-text"
-description = "Font registry, shaping, layout, outlines (section 12)"
+description = "Font registry, subsetting, shaping, layout, caret geometry (section 12)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = ["system", "level2"]
+# The native font registry (CoreText on macOS). Off for `pm-wasm`, which
+# answers registry queries from answers and subsets main serves.
+system = []
+# Level 2 layout on Parley.
+level2 = ["dep:parley", "dep:parlance"]
+# The corpus tool (`pm-text-corpus`): fixtures, comparisons, WASM exports.
+corpus-tools = ["system", "level2", "dep:flate2"]
+
 [dependencies]
+harfrust = "0.14"
+read-fonts = "0.45"
+icu_segmenter = "2"
+icu_properties = "2"
+unicode-bidi = "0.3.18"
+serde.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+sha2.workspace = true
+thiserror.workspace = true
+parley = { version = "0.12", default-features = false, features = ["std"], optional = true }
+parlance = { version = "0.1.1", default-features = false, optional = true }
+flate2 = { version = "1.1", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+memmap2 = "0.9"
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSString", "NSValue", "NSDictionary"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSFont", "NSFontManager", "objc2-core-foundation"] }
+objc2-core-foundation = "0.3.2"
+objc2-core-text = "0.3.2"
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGFont"] }
+
+[dev-dependencies]
+flate2 = "1.1"
+
+[[bin]]
+name = "pm-text-corpus"
+path = "src/bin/pm-text-corpus.rs"
+required-features = ["corpus-tools"]
+
+[[test]]
+# Runs on the main thread (the CoreText registry uses AppKit's font manager).
+name = "corpus"
+harness = false
+
+[[test]]
+# Runs on the main thread (the CoreText registry uses AppKit's font manager).
+name = "registry"
+harness = false
+
+[[example]]
+# The level 1 layout over subsets as a plain wasm32-unknown-unknown module, for
+# the native vs WASM identity check (scripts/wasm-identity.mjs).
+name = "layout_wasm"
+crate-type = ["cdylib"]
