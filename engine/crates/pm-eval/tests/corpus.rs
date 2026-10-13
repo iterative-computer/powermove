@@ -91,6 +91,10 @@ struct Stats {
     failed: BTreeMap<&'static str, usize>,
     max_error: BTreeMap<&'static str, f64>,
     samples: BTreeMap<&'static str, Vec<String>>,
+    /// Values not compared, by category and reason.
+    skipped: BTreeMap<(&'static str, &'static str), usize>,
+    /// Text layers whose pm-text layout differs from the capture, by font.
+    layout_fonts: BTreeMap<String, usize>,
     verbose: bool,
 }
 
@@ -104,6 +108,11 @@ impl Stats {
                 list.push(what());
             }
         }
+    }
+
+    /// A value this run does not compare, and why.
+    fn skip(&mut self, category: &'static str, reason: &'static str) {
+        *self.skipped.entry((category, reason)).or_default() += 1;
     }
 
     fn error(&mut self, category: &'static str, e: f64) {
@@ -387,6 +396,10 @@ impl Ctx<'_> {
 
 const NUM: (f64, f64) = (1e-9, 1e-9);
 
+/// Why a text layer's geometry is not compared: pm-text measures it
+/// differently from the capture (a pm-text difference, reported by font).
+const PM_TEXT_DIFFERS: &str = "pm-text layout differs from the capture";
+
 fn compare_comp(
     cx: &mut Ctx<'_>,
     ev: &mut Evaluator,
@@ -430,6 +443,21 @@ fn compare_comp(
                     &mut err,
                 )
             }) {
+                let font = scope
+                    .resolved_text_content(layer, time)
+                    .ok()
+                    .and_then(|d| d.get(&JsString::from("font")).map(|f| f.to_js_string()))
+                    .map_or_else(|| "(none)".to_owned(), |f| f.to_string_lossy());
+                *cx.stats.layout_fonts.entry(font).or_default() += 1;
+                if cx.stats.verbose {
+                    let ours = plain(&layout_value(&layout));
+                    let want = member(l, "textLayout").cloned().unwrap_or(Value::Null);
+                    eprintln!(
+                        "pm-text layout differs: {} {path} layer {index} at {}",
+                        cx.project,
+                        first_difference(&ours, &want, BOUNDS, String::new()).unwrap_or_default()
+                    );
+                }
                 text_differs.push(index);
             }
         }
@@ -606,7 +634,7 @@ fn compare_comp(
                 .map(|l| layout_value(&l))
                 .map_err(|e| e.to_string());
             if layout_differs {
-                cx.stats.record("textLayout (pm-text)", true, String::new);
+                cx.stats.skip("textLayout", PM_TEXT_DIFFERS);
             } else {
                 cx.check(
                     "textLayout",
@@ -620,9 +648,7 @@ fn compare_comp(
         }
         if ty != "audio" {
             let got = scope.bounds(layer, time, &mut *cx.measure, &mut CorpusHost);
-            let category: &'static str = if layout_differs {
-                "bounds (pm-text)"
-            } else if variable {
+            let category: &'static str = if variable {
                 "bounds (variable font)"
             } else if ty == "text" {
                 "bounds text"
@@ -637,13 +663,8 @@ fn compare_comp(
                 BOUNDS
             };
             match got {
-                Err(e) if e.kind == HOST_ONLY => {
-                    cx.stats.record("bounds (host)", true, String::new)
-                }
-                got if layout_differs => {
-                    let _ = got;
-                    cx.stats.record(category, true, String::new);
-                }
+                Err(e) if e.kind == HOST_ONLY => cx.stats.skip("bounds", "host answers in Phase 1"),
+                _ if layout_differs => cx.stats.skip("bounds", PM_TEXT_DIFFERS),
                 got => {
                     let got = got
                         .map(|b| b.map_or(Value::Null, |b| bounds_value(&b)))
@@ -1007,7 +1028,7 @@ fn corpus_evaluation_matches_legacy() {
                 let mut scope = Scope::open(&mut ev, &project);
                 match scope.composition_scene(time) {
                     Ok(s) if !s.recipe_parts.is_empty() => {
-                        cx.stats.record("scene3d (recipe parts)", true, String::new)
+                        cx.stats.skip("scene3d", "recipe parts need pm-geom3d")
                     }
                     got => {
                         let got = got.map(|s| s.scene).map_err(|e| e.to_string());
@@ -1038,6 +1059,17 @@ fn corpus_evaluation_matches_legacy() {
             for s in stats.samples.get(category).into_iter().flatten() {
                 eprintln!("      {s}");
             }
+        }
+    }
+    for ((category, reason), n) in &stats.skipped {
+        eprintln!("  {category:<14} {n:>7} not compared: {reason}");
+    }
+    if !stats.layout_fonts.is_empty() {
+        eprintln!(
+            "  text layouts (layer × dump) pm-text lays out differently from the capture, by font:"
+        );
+        for (font, n) in &stats.layout_fonts {
+            eprintln!("    {font:<24} {n:>7}");
         }
     }
     assert!(!failed, "corpus mismatches (see above)");
