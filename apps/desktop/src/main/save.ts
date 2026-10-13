@@ -19,6 +19,7 @@ import { atomicWrite, type ProjectFiles } from './project-files';
 import { rememberExport } from './export-sidecar';
 import { FileUpload, FILE_CHUNK_BYTES } from './file-upload';
 import { validateSaveMedia, type ProjectSave } from './project-save';
+import { isRendererUnavailable } from './renderer-recovery';
 
 const MAX_SAVE_NAME_CHARS = 200;
 
@@ -75,11 +76,13 @@ function watchProjectReaderOwner(projects: ProjectFiles, owner: WebContents): vo
   const state = projectReaderState(projects);
   if (state.watchedOwners.has(owner)) return;
   state.watchedOwners.add(owner);
-  owner.once('destroyed', () => {
+  const release = () => {
     for (const [token, reader] of state.readers) {
       if (reader.owner === owner) void closeProjectReader(projects, token).catch(() => undefined);
     }
-  });
+  };
+  owner.once('destroyed', release);
+  owner.on('render-process-gone', release);
 }
 
 export async function openProjectForWindow(
@@ -87,10 +90,16 @@ export async function openProjectForWindow(
   webContents: WebContents,
   filePath: string
 ): Promise<ProjectOpenResult> {
+  // Recovery reuses WebContents. An open started by the old renderer must not
+  // grant its completed reader to the replacement process.
+  let rendererGone = false;
+  const gone = () => { rendererGone = true; };
+  webContents.once('render-process-gone', gone);
   try {
+    if (isRendererUnavailable(webContents)) throw new Error('Project window is unavailable');
     const opened = await ctx.projects.open(filePath, { allowDocumentRange: true });
-    if (webContents.isDestroyed()) {
-      await ctx.projects.close(opened.token, false);
+    if (rendererGone || isRendererUnavailable(webContents)) {
+      await ctx.projects.close(opened.token, false).catch(() => undefined);
       throw new Error('Project window is unavailable');
     }
     const state = projectReaderState(ctx.projects);
@@ -109,7 +118,7 @@ export async function openProjectForWindow(
     return { ok: true, ...opened };
   } catch (error: any) {
     return { ok: false, cancelled: false, error: error.message || 'Could not open project.' };
-  }
+  } finally { webContents.removeListener('render-process-gone', gone); }
 }
 
 /** Convert an untrusted suggestion into one plain filename. */

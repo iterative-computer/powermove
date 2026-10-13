@@ -262,7 +262,9 @@ describe('save IPC', () => {
   it('keeps a streamed document reader alive through bounded owner reads and expires it after inactivity', async () => {
     vi.useFakeTimers();
     try {
-      const sender = { once: vi.fn(), isDestroyed: () => false }, other = { once: vi.fn(), isDestroyed: () => false };
+      const { EventEmitter } = await import('node:events');
+      const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false });
+      const other = Object.assign(new EventEmitter(), { isDestroyed: () => false });
       const documentRange = { offset: 5, length: FILE_CHUNK_BYTES * 3, sha256: 'a'.repeat(64) };
       const projects = {
         open: vi.fn(async () => ({ token: 'stream-token', path: '/chosen.pmv', projectId: 'project-1',
