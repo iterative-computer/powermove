@@ -203,8 +203,9 @@ fn blob_source(data: &FontBytes) -> Source {
 
 /// Final coordinates for an installed face (`FontPlatformDataFromCTFont`):
 /// the typeface's own coordinates, then `opsz` set to the specified size
-/// when the font has that axis (font-optical-sizing: auto).
-pub fn platform_coords(info: &FaceInfo, size: f32) -> Vec<(u32, f32)> {
+/// (`specified`, not the effective size the face is measured at) when the
+/// font has that axis (font-optical-sizing: auto).
+pub fn platform_coords(info: &FaceInfo, specified: f32) -> Vec<(u32, f32)> {
     let axes = axes(info.data.as_slice(), info.index);
     if axes.is_empty() {
         return Vec::new();
@@ -219,7 +220,7 @@ pub fn platform_coords(info: &FaceInfo, size: f32) -> Vec<(u32, f32)> {
     for (t, v) in coords.iter_mut() {
         if *t == OPSZ {
             let a = axes.iter().find(|a| a.tag == OPSZ).expect("opsz axis");
-            *v = size.clamp(a.min, a.max);
+            *v = specified.clamp(a.min, a.max);
         }
     }
     coords
@@ -249,8 +250,9 @@ pub fn requested_slope(desc: &FontDesc) -> f32 {
 /// Final coordinates for a web font (`FontCustomPlatformData::GetFontPlatformData`):
 /// the request's weight, stretch, and slope clamped to the face's descriptor
 /// ranges, then the face's `variationSettings` (`settings`; the last value for
-/// an axis wins), then `opsz` set to the size unless the settings name it.
-pub fn custom_coords(info: &FaceInfo, desc: &FontDesc, settings: &[(u32, f32)]) -> Vec<(u32, f32)> {
+/// an axis wins), then `opsz` set to the specified size
+/// (`adjusted_specified_size`) unless the settings name it.
+pub fn custom_coords(info: &FaceInfo, desc: &FontDesc, specified: f32, settings: &[(u32, f32)]) -> Vec<(u32, f32)> {
     let axes = axes(info.data.as_slice(), info.index);
     if axes.is_empty() {
         return Vec::new();
@@ -272,7 +274,7 @@ pub fn custom_coords(info: &FaceInfo, desc: &FontDesc, settings: &[(u32, f32)]) 
         requested.push((t, v));
     }
     if !explicit_opsz {
-        requested.push((OPSZ, desc.size));
+        requested.push((OPSZ, specified));
     }
     axes.iter()
         .map(|a| {
@@ -287,7 +289,7 @@ pub fn custom_coords(info: &FaceInfo, desc: &FontDesc, settings: &[(u32, f32)]) 
 /// variable `FontFace`s) through `custom_coords`, installed fonts through
 /// `platform_coords`.
 pub fn face_coords(info: &FaceInfo, desc: &FontDesc, settings: &[(u32, f32)]) -> Vec<(u32, f32)> {
-    if info.custom { custom_coords(info, desc, settings) } else { platform_coords(info, desc.size) }
+    if info.custom { custom_coords(info, desc, desc.size, settings) } else { platform_coords(info, desc.size) }
 }
 
 pub fn prepare(info: &FaceInfo, coords: Vec<(u32, f32)>, size: f32, em_advance: Option<f32>) -> Option<PreparedFace> {

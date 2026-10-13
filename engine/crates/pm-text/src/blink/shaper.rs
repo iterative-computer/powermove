@@ -67,9 +67,29 @@ impl GroupFont {
 /// the description, and features derived from letter spacing.
 pub struct FontSetup {
     pub group: Vec<GroupFont>,
+    /// The description at Blink's effective size (`desc.size`), which fonts
+    /// are created, scaled, and measured at.
     pub desc: FontDesc,
+    /// `FontDescription::SpecifiedSize()`: the size as given, before the
+    /// effective-size floor. HarfBuzz looks `trak` up at it
+    /// (`HarfBuzzFace::GetScaledFont` sets `ptem` to it) and
+    /// `FontPlatformDataFromCTFont` sets `opsz` to it (font-optical-sizing:
+    /// auto).
+    pub specified: f32,
+    /// Installed group fonts whose platform data Blink's font cache already
+    /// held, created at another specified size (see
+    /// [`crate::blink::measure::FontCacheSeed`]): `(face, specified size)`.
+    pub seeded_opsz: Vec<(FaceId, f32)>,
     pub letter_spacing: f32,
     pub primary: Option<FaceId>,
+}
+
+impl FontSetup {
+    /// The size `opsz` follows for an installed face: the specified size of
+    /// whoever created its platform data.
+    pub fn optical_size(&self, face: FaceId) -> f32 {
+        self.seeded_opsz.iter().find(|(f, _)| *f == face).map_or(self.specified, |(_, s)| *s)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -226,20 +246,28 @@ impl BlinkFuncs<'_> {
 }
 
 impl BlinkFuncs<'_> {
-    /// HarfBuzz's `hb_ot` advance (Chromium's pinned HarfBuzz): the unvaried
-    /// `hmtx` advance plus the variation delta rounded to a whole unit
-    /// (`hmtx_accelerator_t::get_advance_with_var_unscaled`), then scaled
-    /// with `em_mult`. HarfRust keeps the fractional delta instead.
-    fn harfbuzz_advance(&self, font: &ShaperFont, glyph: GlyphId) -> i32 {
-        let Some(default) = &self.face.default_font else {
-            return font.default_glyph_h_advance(glyph);
+    /// HarfBuzz's `hb_ot` advance as Blink gets it. The advance comes in
+    /// font units from the parent `hb_ot` font (`HarfBuzzFontData`'s
+    /// `ot_font`, unscaled, so its scale is the upem): the `hmtx` advance plus
+    /// the variation delta rounded to a whole unit
+    /// (`hmtx_accelerator_t::get_advance_with_var_unscaled`; HarfRust keeps
+    /// the fractional delta instead). The scaled sub-font Blink shapes with
+    /// has no advance function of its own, so HarfBuzz converts the parent's
+    /// value with `parent_scale_x_distance`, `v * x_scale / parent_x_scale`
+    /// in `int64_t`: a truncating division, not `em_mult`'s rounding. At
+    /// fractional sizes that is one 16.16 unit less about half the time.
+    fn harfbuzz_advance(&self, glyph: GlyphId) -> i32 {
+        let units = match &self.face.default_font {
+            Some(default) => {
+                let base = default.glyph_metrics().h_advance(glyph) as f64;
+                let varied = self.face.font.glyph_metrics().h_advance_exact(glyph).to_f64();
+                let delta = (varied - base) as f32;
+                (base as f32 + delta.round()).max(0.0) as i64
+            }
+            None => self.face.font.glyph_metrics().h_advance(glyph).max(0.0) as i64,
         };
-        let base = default.glyph_metrics().h_advance(glyph) as f64;
-        let varied = self.face.font.glyph_metrics().h_advance_exact(glyph).to_f64();
-        let delta = (varied - base) as f32;
-        let units = (base as f32 + delta.round()).max(0.0) as i32;
-        let scale = (self.face.size * 65536.0f32) as i32;
-        harfrust::Scale::new(Some((scale, scale)), self.face.upem as i32).scale_x(units)
+        let scale = i64::from((self.face.size * 65536.0f32) as i32);
+        (units * scale / i64::from(self.face.upem)) as i32
     }
 }
 
@@ -250,13 +278,13 @@ impl FontFuncs for BlinkFuncs<'_> {
     fn variation_glyph(&self, font: &ShaperFont, c: u32, vs: u32) -> Option<GlyphId> {
         self.get_glyph(font, c, vs)
     }
-    fn glyph_h_advance(&self, font: &ShaperFont, glyph: GlyphId) -> i32 {
+    fn glyph_h_advance(&self, _font: &ShaperFont, glyph: GlyphId) -> i32 {
         if self.skia_advances {
             self.skia_advance(glyph)
         } else if glyph.to_u32() == UNMATCHED_VS_GLYPH {
             0
         } else {
-            self.harfbuzz_advance(font, glyph)
+            self.harfbuzz_advance(glyph)
         }
     }
 }
@@ -287,8 +315,8 @@ impl<'r> Shaper<'r> {
         let size = self.setup.desc.size;
         let info = self.resolver.face(font.face()).clone();
         let coords = match font {
-            GroupFont::Installed(_) => crate::font::platform_coords(&info, size),
-            GroupFont::Custom { settings, .. } => crate::font::custom_coords(&info, &self.setup.desc, settings),
+            GroupFont::Installed(f) => crate::font::platform_coords(&info, self.setup.optical_size(*f)),
+            GroupFont::Custom { settings, .. } => crate::font::custom_coords(&info, &self.setup.desc, self.setup.specified, settings),
         };
         let face = font.face();
         let resolver = &mut *self.resolver;
@@ -539,7 +567,7 @@ impl<'r> Shaper<'r> {
             }
         }
         features.push(Feature::new(Tag::new(b"chws"), 1, ..));
-        let options = ShapeOptions::new().features(&features).point_size(Some(self.setup.desc.size));
+        let options = ShapeOptions::new().features(&features).point_size(Some(self.setup.specified));
         harfrust::shape(&shaper_font, &mut buffer, options).expect("direction is set");
         buffer
     }

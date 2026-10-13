@@ -23,6 +23,7 @@ pub use canvas::CanvasMeasurer;
 pub use content::{Align, TextContent};
 pub use wrap::{GlyphLayout, Measure, SourceLine, Unit, glyph_layout, graphemes, text_source_lines};
 
+pub use crate::blink::measure::FontCacheSeed;
 use crate::blink::shaper::UNMATCHED_VS_GLYPH;
 use crate::fallback_cache::FallbackCached;
 use crate::font::{FaceId, FontResolver, PreparedCache};
@@ -105,11 +106,23 @@ pub struct LineRuns {
 pub struct Compat<R> {
     resolver: FallbackCached<R>,
     cache: PreparedCache,
+    seeds: Vec<FontCacheSeed>,
 }
 
 impl<R: FontResolver> Compat<R> {
     pub fn new(resolver: R) -> Self {
-        Compat { resolver: FallbackCached::new(resolver), cache: PreparedCache::default() }
+        Compat { resolver: FallbackCached::new(resolver), cache: PreparedCache::default(), seeds: Vec::new() }
+    }
+
+    /// Declares the platform data Blink's font cache already holds in the
+    /// renderer being reproduced (see [`FontCacheSeed`]). Empty by default:
+    /// a fresh renderer.
+    pub fn set_font_cache_seeds(&mut self, seeds: Vec<FontCacheSeed>) {
+        self.seeds = seeds;
+    }
+
+    pub fn font_cache_seeds(&self) -> &[FontCacheSeed] {
+        &self.seeds
     }
 
     pub fn resolver(&self) -> &R {
@@ -132,7 +145,7 @@ impl<R: FontResolver> Compat<R> {
 
     /// A measuring context configured for `d`.
     pub fn measurer(&mut self, d: &TextContent) -> CanvasMeasurer<'_> {
-        CanvasMeasurer::new(&mut self.resolver, &mut self.cache, d)
+        CanvasMeasurer::new(&mut self.resolver, &mut self.cache, d, &self.seeds)
     }
 
     /// `measureText(text).width` in `d`'s context.
