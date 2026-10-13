@@ -169,6 +169,10 @@ test('leaving a local project for another and coming back keeps imported audio',
 
 test('local recovery keeps imported audio after closing and relaunching Powermove', async ({ session }) => {
   await importFixture(session.page, 'tone.wav');
+  await session.app.evaluate(({ dialog }, filePath) => {
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+  }, path.join(session.userData, 'Audio recovery.pmv'));
+  expect(await session.page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
   const projectId = await session.page.evaluate(async () => {
     const PM = (window as any).PM;
     await PM.flushProject();
