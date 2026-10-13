@@ -358,7 +358,8 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     if (!isRecord(request) || typeof request.token !== 'string' || readers.get(request.token)?.owner !== event.sender) throw new Error('Unknown project read token');
     const reader = readers.get(request.token)!; reader.timer.refresh();
     const data = await ctx.projects!.read(request.token, request.offset as number, request.length as number);
-    reader.timer.refresh(); return data;
+    if (readers.get(request.token) === reader) reader.timer.refresh();
+    return data;
   });
   ipcMain.handle(IPC.projectReadClose, async (event, token: unknown) => {
     if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
