@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile, open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { atomicWrite, ProjectFiles } from './project-files';
 
 let directory: string;
@@ -61,6 +61,22 @@ describe('real project files', () => {
     expect(backups).toHaveLength(1);
     expect(await readFile(backups[0]!)).toEqual(bytes('first'));
     expect((await readdir(directory)).some(name => name.endsWith('.tmp'))).toBe(false);
+  });
+  it('retries a transient macOS read deadlock while checking the existing project', async () => {
+    const destination = path.join(directory, 'Demo.pmv');
+    await files.save('one', bytes('first'), destination);
+    const handle = await open(destination, 'r');
+    const prototype = Object.getPrototypeOf(handle) as { read: typeof handle.read };
+    await handle.close();
+    const originalRead = prototype.read;
+    const deadlock = Object.assign(new Error('Unknown system error -11, read'), { errno: -11, code: 'Unknown system error -11' });
+    const read = vi.spyOn(prototype, 'read').mockRejectedValueOnce(deadlock).mockImplementation(originalRead);
+    try {
+      await files.save('one', bytes('second'));
+      expect(await readFile(destination)).toEqual(bytes('second'));
+      expect(await readFile((await files.backups('one'))[0]!)).toEqual(bytes('first'));
+      expect(read).toHaveBeenCalled();
+    } finally { read.mockRestore(); }
   });
   it('Save As changes only that project’s destination', async () => {
     const a = path.join(directory, 'a.pmv'), b = path.join(directory, 'b.pmv');
