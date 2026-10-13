@@ -191,6 +191,51 @@ describe('portable project media', () => {
     } finally { vi.unstubAllGlobals(); }
   });
 
+  it('preserves a corrupt-media error when removing its import staging file also fails', async () => {
+    const writer = { write: vi.fn(async () => undefined), close: vi.fn(async () => undefined), abort: vi.fn(async () => undefined) };
+    const root = { getFileHandle: vi.fn(async () => ({ createWritable: async () => writer })),
+      removeEntry: vi.fn(async () => { throw new Error('Could not remove staging file.'); }) };
+    vi.stubGlobal('navigator', { storage: { getDirectory: async () => root } });
+    const put = vi.fn(async () => true);
+    try {
+      await expect(restoreProjectFileStream({ proj: { assets: { video: { id: 'video' } } } },
+        [{ id: 'video', type: 'video/webm', offset: 9, length: 3, sha256: sha256Hex(new Uint8Array([1, 2, 3])) }],
+        { get: async () => null, put }, async () => new Uint8Array([4, 5, 6]))).rejects.toThrow('project media checksum');
+      expect(writer.close).toHaveBeenCalledOnce();
+      expect(root.removeEntry).toHaveBeenCalledOnce();
+      expect(put).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('still removes staging and preserves the read error when abort throws synchronously', async () => {
+    const writer = { write: vi.fn(), abort: vi.fn(() => { throw new Error('Writer abort failed.'); }) };
+    const root = { getFileHandle: vi.fn(async () => ({ createWritable: async () => writer })), removeEntry: vi.fn(async () => undefined) };
+    vi.stubGlobal('navigator', { storage: { getDirectory: async () => root } });
+    try {
+      await expect(restoreProjectFileStream({ proj: { assets: { video: { id: 'video' } } } },
+        [{ id: 'video', type: 'video/webm', offset: 9, length: 3 }], { get: async () => null, put: vi.fn() },
+        async () => { throw new Error('Native project media read failed.'); })).rejects.toThrow('Native project media read failed.');
+      expect(writer.abort).toHaveBeenCalledOnce();
+      expect(root.removeEntry).toHaveBeenCalledOnce();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('reports staging removal errors when the media import itself succeeded', async () => {
+    const data = new Uint8Array([1, 2, 3]);
+    const writer = { write: vi.fn(async () => undefined), close: vi.fn(async () => undefined) };
+    const root = { getFileHandle: vi.fn(async () => ({ createWritable: async () => writer, getFile: async () => new Blob([data]) })),
+      removeEntry: vi.fn(async () => { throw new Error('Could not remove staging file.'); }) };
+    vi.stubGlobal('navigator', { storage: { getDirectory: async () => root } });
+    const put = vi.fn(async () => true);
+    try {
+      await expect(restoreProjectFileStream({ proj: { assets: { video: { id: 'video' } } } },
+        [{ id: 'video', type: 'video/webm', offset: 9, length: data.length }],
+        { get: async () => null, put }, async () => data)).rejects.toThrow('Could not remove staging file.');
+      expect(put).toHaveBeenCalledOnce();
+      expect(root.removeEntry).toHaveBeenCalledOnce();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it('keeps legacy project files compatible', async () => {
     const put = vi.fn(async () => true);
     await restoreProjectFileMedia({ proj: { assets: {} } }, { get: async () => null, put });

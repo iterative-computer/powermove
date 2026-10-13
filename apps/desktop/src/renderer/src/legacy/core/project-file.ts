@@ -216,6 +216,7 @@ export async function restoreProjectFileStream(document: any, media: ProjectMedi
     const name = 'project-import-' + (crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
     const file = await root.getFileHandle(name, { create: true });
     let writer: FileSystemWritableFileStream | undefined;
+    let failed = false;
     const digest = source.sha256 ? new Sha256() : null;
     try {
       writer = await file.createWritable();
@@ -234,9 +235,14 @@ export async function restoreProjectFileStream(document: any, media: ProjectMedi
       if (!await store.put(source.id, blob, assets[source.id], source.revision)) {
         throw new Error(`Could not restore ${assets[source.id].name || source.id}. Check available disk space.`);
       }
-    } finally {
-      await writer?.abort().catch(() => undefined);
-      await root.removeEntry(name);
+    } catch (error) { failed = true; throw error; }
+    finally {
+      try { await writer?.abort(); } catch { /* Still remove staging if abort fails. */ }
+      try { await root.removeEntry(name); }
+      catch (error) {
+        if (!failed) throw error;
+        console.error('[project import] staging cleanup failed after import error', error);
+      }
     }
   }
 }
