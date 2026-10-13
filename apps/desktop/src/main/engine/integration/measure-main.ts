@@ -42,6 +42,9 @@ type Config = {
   edr?: 'auto' | 'off';
   /** Engine gestures read `pointerrawupdate`. */
   rawInput?: boolean;
+  /** The C′ prototype presents playback (POWERMOVE_BRIDGE_REMOTE_LAYER=1);
+   *  main hosts its remote layer over the page. */
+  remoteLayer?: boolean;
   /** Latency: input modes to run, each for `durationMs`. */
   inputModes?: ('drag' | 'orbit' | 'walk' | 'baseline')[];
   out: string;
@@ -50,6 +53,8 @@ type Config = {
 
 type HarnessAddon = {
   nowUs(): number;
+  hostRemoteLayer(viewHandle: Buffer, contextId: number, x: number, y: number, width: number, height: number): number;
+  removeRemoteLayer(id: number): boolean;
   InputGenerator: new (hz: number, durationMs: number, kind: number, callback: (input: { seq: number; tsUs: number; x: number; y: number }) => void) => { stop(): void };
 };
 
@@ -120,6 +125,26 @@ async function main(): Promise<void> {
     });
     const engine = installed.engine!;
     await waitFor('the interactive engine', async () => engine.status().interactive.state === 'ready');
+    // The C′ prototype: host the engine's remote layer over the page.
+    const layerHosts = new Map<number, number>();
+    const remoteLayers: Record<string, unknown>[] = [];
+    installed.frameBridge?.listen((event) => {
+      if (event.kind !== 'remoteLayer' || !cfg.remoteLayer || !win || win.isDestroyed()) return;
+      const port = event.clientPort ?? -1;
+      const old = layerHosts.get(port);
+      if (old !== undefined) harness.removeRemoteLayer(old);
+      layerHosts.delete(port);
+      if (!event.contextId || !event.width || !event.height || !event.scale) return;
+      try {
+        const id = harness.hostRemoteLayer(win.getNativeWindowHandle(), event.contextId, 0, 0, event.width / event.scale, event.height / event.scale);
+        layerHosts.set(port, id);
+        remoteLayers.push({ contextId: event.contextId, width: event.width, height: event.height, scale: event.scale, hostedUs: harness.nowUs() });
+        log(`hosted remote layer ${event.contextId} (${event.width}x${event.height} at ${event.scale}x)`);
+      } catch (error) {
+        log(`could not host remote layer ${event.contextId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+    result['remoteLayers'] = remoteLayers;
 
     win = new BrowserWindow({
       show: false,
