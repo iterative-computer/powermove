@@ -172,9 +172,23 @@ pub fn upsample(
     out
 }
 
+/// The declared 4:2:0 vertical decimation filter (section 9: "with a
+/// declared filter for 4:2:0"): taps on luma rows `2y − 1, 2y, 2y + 1,
+/// 2y + 2` for a chroma row centered between rows `2y` and `2y + 1`.
+///
+/// It is the exact inverse of the linear vertical upsampler: upsampled rows
+/// are `r(2y) = ¼ c(y−1) + ¾ c(y)` and `r(2y+1) = ¾ c(y) + ¼ c(y+1)`, and
+/// `(3 r(2y) − r(2y−1) + 3 r(2y+1) − r(2y+2)) / 4 = c(y)`, also at the
+/// frame edges with clamped rows. A 4:2:0 source exported to 4:2:0
+/// therefore keeps its chroma (section 2, invariant (1)); a two-row average
+/// would blur it by `[1, 6, 1] / 8` on every round trip.
+pub const VERTICAL_420: [(i64, f64); 4] = [(-1, -0.25), (0, 0.75), (1, 0.75), (2, -0.25)];
+
 /// Decimates a luma-resolution channel to chroma resolution for an output
-/// with `siting` (encoder input): point sampling at co-sited positions, a
-/// two-sample average where the output siting is centered between samples.
+/// with `siting` (encoder input): point sampling at co-sited positions;
+/// where a 2× output sample is centered between two rows or columns, the
+/// declared inverse-linear filter ([`VERTICAL_420`]); other factors average
+/// the two neighbours.
 pub fn downsample(
     full: &[f32],
     width: u32,
@@ -193,6 +207,11 @@ pub fn downsample(
         let clamp = |v: f64| (v as i64).clamp(0, i64::from(size) - 1) as u32;
         if p == lo {
             vec![(clamp(lo), 1.0)]
+        } else if factor == 2 && p - lo == 0.5 {
+            VERTICAL_420
+                .iter()
+                .map(|&(k, w)| (clamp(lo + k as f64), w))
+                .collect()
         } else {
             let t = p - lo;
             vec![(clamp(lo), 1.0 - t), (clamp(lo + 1.0), t)]
@@ -329,6 +348,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn declared_420_filter_inverts_linear_upsampling() {
+        // Left siting (type 0): co-sited horizontally, centered vertically.
+        let (cw, ch) = (5u32, 6u32);
+        let samples: Vec<f32> = (0..cw * ch)
+            .map(|i| ((i * 37 % 101) as f32) / 101.0 - 0.2)
+            .collect();
+        let plane = Plane {
+            width: cw,
+            height: ch,
+            samples: &samples,
+        };
+        let f = Factors { x: 2, y: 2 };
+        let full = upsample(&plane, cw * 2, ch * 2, f, ChromaSiting::Left);
+        let back = downsample(&full, cw * 2, ch * 2, f, ChromaSiting::Left);
+        for (a, b) in back.iter().zip(&samples) {
+            assert!((a - b).abs() < 1e-6, "{a} against {b}");
+        }
+        let weights: f64 = VERTICAL_420.iter().map(|t| t.1).sum();
+        assert_eq!(weights, 1.0);
     }
 
     #[test]
