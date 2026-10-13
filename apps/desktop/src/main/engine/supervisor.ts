@@ -9,7 +9,7 @@
 import type { CrashReport, EngineProcess, ErrorScope, Event, InFlight, Request, Response } from '../../shared/engine-protocol';
 import { HostConnection, type HostHandler, type Log } from './connection';
 import { CrashLedger, crashReport, describeExit, RestartPolicy } from './crash';
-import type { ChannelFactory, ChildLike, EngineControl, PortLike, SpawnEngine } from './ports';
+import type { ChannelFactory, ChildLike, EngineBootstrap, EngineControl, PortLike, SpawnEngine } from './ports';
 import { isEngineNotice } from './ports';
 
 export type SupervisorState = 'stopped' | 'starting' | 'ready' | 'restarting';
@@ -21,7 +21,12 @@ export type Launch = {
   hostPort: number;
   connection: HostConnection;
   readonly pid: number | undefined;
-  /** Posts a control message (with transferred ports) to the engine. */
+  /** True once main asked the engine to shut down, killed it, or its
+   *  control port closed: control messages are dropped from then on. */
+  readonly exiting: boolean;
+  /** Posts a control message (with transferred ports) to the engine over
+   *  its control port. Dropped, and the transferred ports closed, once the
+   *  launch is exiting. */
   control(message: EngineControl, transfer?: PortLike[]): void;
   /** What the engine reported when it started (build, pid, clock check). */
   started?: { build: string; pid: number; clockSkewUs: number | null };
@@ -53,6 +58,10 @@ export interface SupervisorListener {
   state?(state: SupervisorState, generation: number): void;
 }
 
+/** How long an engine whose host connection ended may take to exit on
+ *  its own before main kills it. */
+const HOST_LOSS_GRACE_MS = 500;
+
 const defaultSchedule = (fn: () => void, ms: number): { cancel(): void } => {
   const timer = setTimeout(fn, ms);
   return { cancel: () => clearTimeout(timer) };
@@ -61,6 +70,8 @@ const defaultSchedule = (fn: () => void, ms: number): { cancel(): void } => {
 export class EngineSupervisor {
   private child: ChildLike | null = null;
   private launch: Launch | null = null;
+  /** Ends the running launch's control channel (shutdown or kill). */
+  private endControl: ((how: 'shutdown' | 'kill') => void) | null = null;
   private generation = 0;
   private stateValue: SupervisorState = 'stopped';
   private stopping = false;
@@ -101,6 +112,17 @@ export class EngineSupervisor {
     this.lastInFlight = crumb.suspects;
   }
 
+  /** A listener that throws must not stop the restart or the others. */
+  private emitEnded(launch: Launch, report: CrashReport | null): void {
+    for (const l of this.listeners) {
+      try {
+        l.ended?.(launch, report);
+      } catch (error) {
+        this.options.log('error', `${this.options.process} engine cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+
   private setState(state: SupervisorState): void {
     this.stateValue = state;
     for (const l of this.listeners) l.state?.(state, this.generation);
@@ -128,6 +150,32 @@ export class EngineSupervisor {
       return;
     }
     this.child = child;
+    // The only post to the utility process itself; see `ChildLike`.
+    const control = this.options.channel();
+    child.postMessage({ type: 'control' } satisfies EngineBootstrap, [control.port1]);
+    const controlPort = control.port2;
+    let exiting = false;
+    const send = (message: EngineControl, transfer?: PortLike[]): void => {
+      if (exiting || this.child !== child) {
+        // Closing the ports tells whoever holds their other ends.
+        for (const port of transfer ?? []) port.close();
+        return;
+      }
+      controlPort.postMessage(message, transfer ?? []);
+    };
+    controlPort.on('close', () => {
+      exiting = true;
+    });
+    controlPort.start();
+    this.endControl = (how) => {
+      if (exiting) {
+        if (how === 'kill' && this.child === child) child.kill();
+        return;
+      }
+      if (how === 'shutdown') send({ type: 'shutdown' });
+      exiting = true;
+      if (how === 'kill') child.kill();
+    };
     const { port1, port2 } = this.options.channel();
     const hostPort = this.options.nextPortId();
     const launchRef = (): Launch | null => (this.launch?.generation === generation ? this.launch : null);
@@ -141,9 +189,10 @@ export class EngineSupervisor {
       get pid() {
         return child.pid;
       },
-      control: (message, transfer) => {
-        if (this.child === child) child.postMessage(message, transfer);
-      }
+      get exiting() {
+        return exiting;
+      },
+      control: send
     };
     this.launch = launch;
     let fatal: string | null = null;
@@ -165,14 +214,26 @@ export class EngineSupervisor {
         this.options.log('info', `the ${process} engine started (pid ${notice.pid}, ${notice.build}${skew === null ? '' : `, clock delivered after ${skew} µs`})`);
       }
     });
-    child.on('exit', (code: number) => this.onExit(launch, code, fatal));
-    child.postMessage({ type: 'connect', port: hostPort, peer: 'host' } satisfies EngineControl, [port1]);
+    let hostLoss: { cancel(): void } | null = null;
+    child.on('exit', (code: number) => {
+      hostLoss?.cancel();
+      exiting = true;
+      controlPort.close();
+      this.onExit(launch, code, fatal);
+    });
+    send({ type: 'connect', port: hostPort, peer: 'host' }, [port1]);
     connection.onClose((reason) => {
       // A live engine without its host connection cannot get leases,
       // handles, or relays: replace it. (Its exit, not this, restarts it.)
+      // A dying engine closes its ports just before it exits, so wait
+      // briefly for the exit: the crash report then carries the real
+      // exit status instead of our kill.
       if (this.launch !== launch || this.stopping || this.child !== child) return;
-      this.options.log('error', `the ${process} engine's host connection ended (${reason.message}); restarting it`);
-      child.kill();
+      hostLoss = (this.options.schedule ?? defaultSchedule)(() => {
+        if (this.launch !== launch || this.stopping || this.child !== child) return;
+        this.options.log('error', `the ${process} engine's host connection ended (${reason.message}); restarting it`);
+        this.endControl?.('kill');
+      }, HOST_LOSS_GRACE_MS);
     });
     connection.open().then(
       async () => {
@@ -191,7 +252,7 @@ export class EngineSupervisor {
         if (this.launch !== launch) return;
         this.options.log('error', `the ${process} engine handshake failed: ${error instanceof Error ? error.message : String(error)}`);
         // A launch that cannot negotiate is killed; the exit restarts it.
-        child.kill();
+        if (this.child === child) this.endControl?.('kill');
       }
     );
   }
@@ -201,17 +262,21 @@ export class EngineSupervisor {
     const process = this.options.process;
     this.child = null;
     this.launch = null;
+    this.endControl = null;
     launch?.connection.close();
     if (this.stopping) {
-      if (launch) for (const l of this.listeners) l.ended?.(launch, null);
+      if (launch) this.emitEnded(launch, null);
       this.setState('stopped');
-      this.resolveStopped?.();
+      const resolve = this.resolveStopped;
+      this.stopped = null;
+      this.resolveStopped = null;
+      resolve?.();
       return;
     }
     if (fatal !== null) {
       const report = crashReport(process, this.restart.attempts, `${describeExit(code < 0 ? null : code)}: ${fatal}`, [], [], 0);
       this.options.log('error', `the ${process} engine cannot run here and stays stopped: ${fatal}`);
-      if (launch) for (const l of this.listeners) l.ended?.(launch, report);
+      if (launch) this.emitEnded(launch, report);
       this.setState('stopped');
       return;
     }
@@ -220,7 +285,7 @@ export class EngineSupervisor {
     const markedFailed = this.options.ledger.record(suspects);
     const report = crashReport(process, attempt, describeExit(code < 0 ? null : code), suspects, markedFailed, delayMs);
     this.options.log('error', `the ${process} engine ${report.exit}; restart ${attempt} in ${delayMs} ms${suspects.length ? ` (${suspects.length} suspect item(s), ${markedFailed.length} now failed)` : ''}`);
-    if (launch) for (const l of this.listeners) l.ended?.(launch, report);
+    if (launch) this.emitEnded(launch, report);
     this.setState('restarting');
     const schedule = this.options.schedule ?? defaultSchedule;
     this.pendingRestart = schedule(() => {
@@ -241,9 +306,9 @@ export class EngineSupervisor {
     this.stopped ??= new Promise<void>((resolve) => {
       this.resolveStopped = resolve;
     });
-    child.postMessage({ type: 'shutdown' } satisfies EngineControl);
+    this.endControl?.('shutdown');
     const timer = setTimeout(() => {
-      if (this.child === child) child.kill();
+      if (this.child === child) this.endControl?.('kill');
     }, timeoutMs);
     return this.stopped.finally(() => clearTimeout(timer));
   }

@@ -104,6 +104,9 @@ export class NativeEngine {
   private listeners = new Set<NativeEngineListener>();
   private lastPlaybackStarted: DeadlineSignal | null = null;
   private staged = new Map<number, string[]>();
+  /** Set by `stop()`: no control messages go to engines that are shutting
+   *  down (they would be dropped anyway; see `Launch.exiting`). */
+  private stopping = false;
 
   get handles(): HandleTable {
     return this.services.handles;
@@ -158,12 +161,14 @@ export class NativeEngine {
   }
 
   async start(): Promise<void> {
+    this.stopping = false;
     await this.prepareCaches();
     this.supervisors.interactive.start();
     this.supervisors.job.start();
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
     await Promise.all([this.supervisors.interactive.stop(), this.supervisors.job.stop()]);
   }
 
@@ -209,13 +214,17 @@ export class NativeEngine {
     const client = this.clients.get(id);
     if (!client) return;
     this.clients.delete(id);
-    for (const [process, { port }] of client.ports) {
-      this.supervisors[process].current?.control({ type: 'disconnect', port });
+    if (!this.stopping) {
+      for (const [process, { port, generation }] of client.ports) {
+        const launch = this.supervisors[process].current;
+        if (launch?.generation === generation) launch.control({ type: 'disconnect', port });
+      }
     }
     this.definitions.forget(id);
   }
 
   private connectClient(client: Client, launch: Launch): void {
+    if (launch.exiting) return;
     const previous = client.ports.get(launch.process);
     if (previous && previous.generation === launch.generation) launch.control({ type: 'disconnect', port: previous.port });
     const { port1, port2 } = this.options.channel();
@@ -318,8 +327,9 @@ export class NativeEngine {
       for (const l of this.listeners) l.playback?.(false);
     }
     if (this.peer) {
+      // While stopping, the survivor is shutting down too: leave it alone.
       const survivor: EngineProcess = process === 'interactive' ? 'job' : 'interactive';
-      this.supervisors[survivor].current?.control({ type: 'disconnect', port: this.peer[survivor] });
+      if (!this.stopping) this.supervisors[survivor].current?.control({ type: 'disconnect', port: this.peer[survivor] });
       this.peer = null;
     }
     for (const client of this.clients.values()) {
@@ -333,7 +343,7 @@ export class NativeEngine {
   private connectPeer(): void {
     const interactive = this.supervisors.interactive.current;
     const job = this.supervisors.job.current;
-    if (!interactive || !job) return;
+    if (!interactive || !job || interactive.exiting || job.exiting || this.stopping) return;
     if (this.peer && this.peer.generations[0] === interactive.generation && this.peer.generations[1] === job.generation) return;
     if (this.peer) {
       interactive.control({ type: 'disconnect', port: this.peer.interactive });

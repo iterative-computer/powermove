@@ -42,13 +42,37 @@ Main creates every `MessageChannelMain`:
   whenever either engine restarts.
 
 The utility process tells the engine which kind of peer each port leads to
-(`connect {port, peer}` over its parent port). The engine refuses a `hello`
+(`connect {port, peer}` over its control port). The engine refuses a `hello`
 whose role does not match, so a renderer cannot pose as the host to grant
 leases, relay deadline signals, report crashes, or answer the engine's
 `resolveHandle`. Sessions belong to the port that opened them.
 
 Per-frame descriptors (amendment 4) will travel engine → viewer on the
 client port; main stays off the per-frame path.
+
+### Control port
+
+Main posts to a `UtilityProcess` exactly once, right after the fork: a
+`{type: 'control'}` message carrying a `MessageChannelMain` port. Every
+later control message (`connect`, `disconnect`, `shutdown`) goes over that
+port. `UtilityProcess.postMessage` to a child that is exiting or has
+exited crashes Electron's main process (SIGSEGV, SEGV_ACCERR near 0xf8),
+and main cannot know a child is exiting before its `exit` event, so a
+window closing or reloading while an engine dies, or one engine's exit
+cleanup during `stop()`, could take the app down. A `MessagePortMain`
+whose other end is gone drops the message instead.
+
+On top of that, each launch has an `exiting` flag, set when main sends
+`shutdown`, kills the engine, sees its control port close, or gets its
+`exit`. Control messages to an exiting launch are dropped and the ports
+they carried are closed (so their holders see the close). While
+`NativeEngine.stop()` runs, the peer and client disconnects that an
+engine's exit would otherwise send to the other engine are skipped. The
+engine exits when its control port closes, as on `shutdown`.
+
+An engine whose host connection ends gets 500 ms to exit on its own
+before main kills it: a dying engine closes its ports just before its
+exit, and the wait keeps the real exit status in the crash report.
 
 ## Version negotiation
 
@@ -188,10 +212,12 @@ until the model lane's binary decoder is installed, a batch is reported as
 | Addon glue, utility QoS | `cargo test -p pm-node` |
 | CLI host and the shared host contract | `cargo test -p pm-host` |
 | Main's codec, host services, supervision with fake engines, shared contract | `vitest run src/main/engine` |
-| Both engines in Electron: negotiate, resync, SIGKILL each, restart, resync, clean stop | `bun run test:engine-host` |
+| Both engines in Electron: negotiate, resync, SIGKILL each, restart, resync, reconnects racing a dying engine, clean stop, restart, stop while an engine crashes | `bun run test:engine-host` |
 | The flag in the real app (hidden window) | `playwright test e2e/native-engine.spec.ts --workers=1` |
 
-Measured on the reference machine (M4 Max, shared with other lanes): both
-engines start and negotiate in 79 to 100 ms; a SIGKILLed engine is back,
-renegotiated, and resynced by the client in 324 to 330 ms, of which 250 ms
-is the first backoff step.
+Measured on the reference machine (M4 Max, shared with other lanes), 20
+consecutive runs of `bun run test:engine-host`, 20 passed: both engines
+start and negotiate in 75 to 86 ms; a SIGKILLed engine is back,
+renegotiated, and resynced by the client in 313 to 337 ms, of which 250 ms
+is the first backoff step. Before the control port, Electron main died
+with SIGSEGV during `stop()` in about a third of runs.

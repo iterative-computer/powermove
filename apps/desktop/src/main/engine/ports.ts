@@ -5,10 +5,11 @@
  */
 import type { EngineProcess } from '../../shared/engine-protocol';
 
-/** `MessagePortMain`. */
+/** `MessagePortMain`. Posting on a port whose other end is gone (closed,
+ *  or its process died) drops the message; it never crashes main. */
 export interface PortLike {
-  postMessage(message: unknown): void;
-  on(event: 'message', listener: (event: { data: unknown }) => void): unknown;
+  postMessage(message: unknown, transfer?: PortLike[]): void;
+  on(event: 'message', listener: (event: { data: unknown; ports?: PortLike[] }) => void): unknown;
   on(event: 'close', listener: () => void): unknown;
   start(): void;
   close(): void;
@@ -19,7 +20,12 @@ export type ChannelPair = { port1: PortLike; port2: PortLike };
 /** `new MessageChannelMain()`. */
 export type ChannelFactory = () => ChannelPair;
 
-/** `UtilityProcess`. */
+/** `UtilityProcess`. Main posts to it exactly once, right after the fork
+ *  (`EngineBootstrap`): `UtilityProcess.postMessage` to a child that is
+ *  exiting or has exited crashes Electron's main process (SIGSEGV), and
+ *  main cannot know a child is exiting until its `exit` event. Everything
+ *  else goes over the control port, a `MessageChannelMain` that simply
+ *  drops messages once the child is gone. */
 export interface ChildLike {
   readonly pid?: number | undefined;
   postMessage(message: unknown, transfer?: PortLike[]): void;
@@ -32,7 +38,13 @@ export interface ChildLike {
 /** Starts one engine utility process. */
 export type SpawnEngine = (process: EngineProcess) => ChildLike;
 
-/** Control messages from main to an engine process (over its parent port). */
+/** The one message main posts over an engine's parent port: it carries
+ *  the control port (`ports[0]`). */
+export type EngineBootstrap = { type: 'control' };
+
+/** Control messages from main to an engine process, over its control
+ *  port. The engine exits when the control port closes, as on
+ *  `shutdown`. */
 export type EngineControl =
   | { type: 'connect'; port: number; peer: 'host' | 'renderer' | 'peer' }
   | { type: 'disconnect'; port: number }

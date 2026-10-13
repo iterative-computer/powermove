@@ -166,6 +166,7 @@ async function main(): Promise<void> {
         process.kill(pid, 'SIGKILL');
         const report = await waitFor(`${kind} crash report`, () => crashes.length > crashesBefore && crashes.at(-1));
         check(report.process === kind && report.attempt === 1 && report.restartInMs === 250, `${kind} crash reported with attempt 1 and a 250 ms backoff (${JSON.stringify(report)})`);
+        check(report.exit.startsWith('exit status 9'), `${kind} crash report carries the SIGKILL status, not main's own kill (${report.exit})`);
         await waitFor(`${kind} restart`, () => engine.supervisor(kind).current?.generation === generation + 1);
         const restartMs = Math.round(performance.now() - killedAt);
         await waitFor(`${kind} new client port`, () => latest(kind)?.generation === generation + 1);
@@ -181,6 +182,20 @@ async function main(): Promise<void> {
           step(`the ${other} engine was unaffected`);
         }
       }
+      // Control messages that race an engine's death (a window reloading
+      // while the engine dies) are dropped, never posted to the dying
+      // process: posting to an exiting utility process crashes main.
+      {
+        const dying = engine.supervisor('job').current!;
+        process.kill(dying.pid!, 'SIGKILL');
+        for (let i = 0; i < 40; i++) {
+          engine.reconnectClient(1);
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        await waitFor('job restart after the reconnect storm', () => engine.supervisor('job').current?.generation === dying.generation + 1);
+        await waitFor('job client port after the reconnect storm', () => latest('job')?.generation === dying.generation + 1);
+        step('reconnects racing a dying engine were dropped; the engine restarted');
+      }
       check(engine.handles.size >= 0 && engine.outputs.size === 0, 'no outputs left behind');
       await waitFor('leases after restarts', () => engine.memory.isAcknowledged('interactive') && engine.memory.isAcknowledged('job'));
       step('leases re-granted to both restarted engines');
@@ -195,6 +210,17 @@ async function main(): Promise<void> {
       };
       await waitFor('engine processes to be reaped', () => [...pids.interactive, ...pids.job].every((pid) => !alive(pid)), 5000);
       step('no engine process left running', pids);
+
+      // Stopping while an engine is crashing: the crash's cleanup must not
+      // reach the other engine, which is shutting down.
+      await engine.start();
+      await waitFor('both engines ready again', () => engine.status().interactive.state === 'ready' && engine.status().job.state === 'ready');
+      process.kill(engine.supervisor('interactive').current!.pid!, 'SIGKILL');
+      engine.removeClient(1);
+      await engine.stop();
+      check(engine.status().interactive.state === 'stopped' && engine.status().job.state === 'stopped', 'both engines stopped after a crash during stop');
+      await waitFor('engine processes to be reaped after the second stop', () => [...pids.interactive, ...pids.job].every((pid) => !alive(pid)), 5000);
+      step('restarted, then stopped while the interactive engine crashed');
     })();
   } finally {
     await engine.stop().catch(() => {});
@@ -202,6 +228,12 @@ async function main(): Promise<void> {
     process.stdout.write(`${JSON.stringify({ steps, crashes, totalMs: Math.round(performance.now() - started), log: logs.slice(-80) })}\n`);
   }
 }
+
+// Main's own errors fail the test instead of opening Electron's dialog.
+process.on('uncaughtException', (error) => {
+  process.stdout.write(`ENGINE-HOST-IT FAIL uncaught ${error.stack ?? error.message}\n`);
+  app.exit(1);
+});
 
 app.dock?.hide();
 app.on('window-all-closed', () => {});

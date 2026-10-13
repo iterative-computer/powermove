@@ -3,15 +3,16 @@
  * engine; plan section 19). Built to out/main/engine-process.js and started
  * by main with `utilityProcess.fork`.
  *
- * It loads the pm-node addon, takes ports from main over its parent port
- * (`connect` with the peer kind main assigned), and moves bytes between
+ * It loads the pm-node addon, takes its control port from main over its
+ * parent port, takes ports over the control port (`connect` with the peer
+ * kind main assigned), and moves bytes between
  * the ports and the engine. The engine decides everything; this file only
  * carries out its actions. Engine work never runs here beyond decoding
  * and dispatch: rendering lanes run on the engine's own threads.
  */
 import type { MessagePortMain } from 'electron';
 
-import type { EngineControl, EngineNotice } from './ports';
+import type { EngineBootstrap, EngineControl, EngineNotice } from './ports';
 
 type EngineAction = { kind: 'send' | 'close' | 'log'; port: number; bytes?: Uint8Array | null; level?: string | null; message?: string | null };
 
@@ -75,7 +76,14 @@ function main(): void {
     }
   };
 
-  parent.on('message', (event) => {
+  let control: MessagePortMain | null = null;
+  const shutdown = (): void => {
+    for (const port of ports.values()) port.close();
+    ports.clear();
+    process.exit(0);
+  };
+
+  const onControl = (event: Electron.MessageEvent): void => {
     const message = event.data as EngineControl;
     if (message?.type === 'connect') {
       const port = event.ports[0];
@@ -107,10 +115,19 @@ function main(): void {
       run(engine.detach(message.port));
       port?.close();
     } else if (message?.type === 'shutdown') {
-      for (const port of ports.values()) port.close();
-      ports.clear();
-      process.exit(0);
+      shutdown();
     }
+  };
+
+  parent.on('message', (event) => {
+    const message = event.data as EngineBootstrap;
+    const port = event.ports[0];
+    if (message?.type !== 'control' || !port || control) return;
+    control = port;
+    control.on('message', onControl);
+    // Main closed its end or went away: nothing can reach this engine any more.
+    control.on('close', shutdown);
+    control.start();
   });
 
   setInterval(() => run(engine.tick()), TICK_MS);

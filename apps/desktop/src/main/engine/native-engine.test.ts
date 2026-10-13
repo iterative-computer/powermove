@@ -17,13 +17,17 @@ class FakePort implements PortLike {
   other: FakePort | null = null;
   closed = false;
   private started = false;
-  private queue: unknown[] = [];
-  private onMessage: Array<(e: { data: unknown }) => void> = [];
+  private queue: Array<{ data: unknown; ports: PortLike[] }> = [];
+  private onMessage: Array<(e: { data: unknown; ports: PortLike[] }) => void> = [];
   private onClose: Array<() => void> = [];
-  postMessage(message: unknown): void {
+  postMessage(message: unknown, transfer: PortLike[] = []): void {
     const other = this.other;
-    if (this.closed || !other || other.closed) return;
-    other.queue.push(message);
+    if (this.closed || !other || other.closed) {
+      // Like MessageChannelMain: dropped; transferred ports die with it.
+      for (const port of transfer) port.close();
+      return;
+    }
+    other.queue.push({ data: message, ports: transfer });
     queueMicrotask(() => other.flush());
   }
   on(event: 'message' | 'close', listener: never): this {
@@ -44,8 +48,8 @@ class FakePort implements PortLike {
   private flush(): void {
     if (!this.started || this.closed) return;
     while (this.queue.length) {
-      const data = this.queue.shift();
-      for (const l of this.onMessage) l({ data });
+      const event = this.queue.shift()!;
+      for (const l of this.onMessage) l(event);
     }
   }
 }
@@ -68,6 +72,11 @@ class FakeEngine implements ChildLike {
   private exitListeners: Array<(code: number) => void> = [];
   private messageListeners: Array<(message: unknown) => void> = [];
   dead = false;
+  control: FakePort | null = null;
+  /** Posts main made to the utility process itself (only the bootstrap). */
+  parentPosts: unknown[] = [];
+  /** Control messages that reached the engine. */
+  controls: EngineControl[] = [];
 
   constructor(readonly process: EngineProcess) {}
 
@@ -83,9 +92,22 @@ class FakeEngine implements ChildLike {
   }
 
   postMessage(message: unknown, transfer?: PortLike[]): void {
-    const control = message as EngineControl;
+    // Electron's main process crashes when it posts to a child that is
+    // exiting or gone; the fake makes that a test failure.
+    if (this.dead) throw new Error(`main posted ${JSON.stringify(message)} to an exited ${this.process} engine`);
+    this.parentPosts.push(message);
+    if ((message as { type?: string }).type !== 'control') throw new Error('only the bootstrap goes over the parent port');
+    this.control = transfer![0] as FakePort;
+    this.control.on('message', ((e: { data: unknown; ports: PortLike[] }) => this.onControl(e.data as EngineControl, e.ports)) as never);
+    this.control.on('close', (() => this.exit(0)) as never);
+    this.control.start();
+  }
+
+  private onControl(control: EngineControl, transfer: PortLike[]): void {
+    if (this.dead) return;
+    this.controls.push(control);
     if (control.type === 'connect') {
-      const port = transfer![0] as FakePort;
+      const port = transfer[0] as FakePort;
       this.ports.set(control.port, { port, peer: control.peer });
       port.on('message', ((e: { data: unknown }) => this.receive(control.port, e.data as Uint8Array)) as never);
       port.start();
@@ -106,6 +128,7 @@ class FakeEngine implements ChildLike {
     if (this.dead) return;
     this.dead = true;
     for (const { port } of this.ports.values()) port.close();
+    this.control?.close();
     queueMicrotask(() => { for (const l of this.exitListeners) l(code); });
   }
 
@@ -225,16 +248,51 @@ describe('NativeEngine with fake engines', () => {
     expect(host.memory.isAcknowledged('interactive')).toBe(true);
   });
 
-  it('gives each client a port per engine, on the main frame only, with the launch generation', () => {
+  it('gives each client a port per engine, on the main frame only, with the launch generation', async () => {
     const delivered: ClientPortInfo[] = [];
     host.addClient(1, (info) => delivered.push(info));
+    await settle();
     expect(delivered.map((d) => [d.process, d.generation])).toEqual([['interactive', 1], ['job', 1]]);
     expect([...live('job').ports.values()].filter((p) => p.peer === 'renderer')).toHaveLength(1);
     host.reconnectClient(1);
+    await settle();
     expect(delivered).toHaveLength(4);
     expect([...live('job').ports.values()].filter((p) => p.peer === 'renderer')).toHaveLength(1);
     host.removeClient(1);
+    await settle();
     expect([...live('job').ports.values()].filter((p) => p.peer === 'renderer')).toHaveLength(0);
+  });
+
+  it('posts to a utility process only once, and sends nothing to an engine after shutdown', async () => {
+    host.addClient(1, () => {});
+    await settle();
+    const [interactive, job] = [live('interactive'), live('job')];
+    for (const engine of [interactive, job]) expect(engine.parentPosts).toEqual([{ type: 'control' }]);
+    // Each engine's exit during stop() must not reach the other, which is
+    // shutting down too (a post to an exiting child crashed main).
+    const stopped = host.stop();
+    host.removeClient(1);
+    await stopped;
+    for (const engine of [interactive, job]) {
+      expect(engine.dead).toBe(true);
+      const shutdown = engine.controls.findIndex((c) => c.type === 'shutdown');
+      expect(shutdown).toBeGreaterThanOrEqual(0);
+      expect(engine.controls.slice(shutdown + 1)).toEqual([]);
+    }
+    expect(host.supervisor('job').current).toBeNull();
+  });
+
+  it('drops control messages to a launch that is exiting and closes the ports they carried', async () => {
+    const launch = host.supervisor('job').current!;
+    launch.connection.close();
+    await settle();
+    timers.at(-1)!.fn();
+    await settle();
+    // The host connection ended: the supervisor killed the engine.
+    expect(launch.exiting).toBe(true);
+    const { port1, port2 } = channel();
+    launch.control({ type: 'connect', port: 999, peer: 'renderer' }, [port1]);
+    expect(port1.closed && port2.closed).toBe(true);
   });
 
   it('restarts a crashed engine with backoff, attributes suspects, and reconnects clients for a resync', async () => {
@@ -349,7 +407,7 @@ describe('NativeEngine with fake engines', () => {
     engine.exit(70);
     await settle();
     expect(host.status().job.state).toBe('stopped');
-    expect(timers).toHaveLength(0);
+    expect(timers.filter((t) => !t.cancelled)).toHaveLength(0);
     expect(reports[0]).toMatchObject({ process: 'job', restartInMs: 0 });
     expect(reports[0]!.exit).toContain('image not found');
   });
@@ -358,12 +416,31 @@ describe('NativeEngine with fake engines', () => {
     const engine = live('interactive');
     engine.hostPort().close();
     await settle();
+    // It gets a moment to exit on its own (a dying engine closes its ports
+    // first), then main kills it.
+    expect(engine.dead).toBe(false);
+    timers.at(-1)!.fn();
+    await settle();
     expect(engine.dead).toBe(true);
     expect(host.status().interactive.state).toBe('restarting');
     timers.at(-1)!.fn();
     await settle();
     expect(host.status().interactive.state).toBe('ready');
     expect(host.status().interactive.generation).toBe(2);
+  });
+
+  it('starts again after a stop, and the second stop waits for the exits even when one engine crashes', async () => {
+    await host.stop();
+    await host.start();
+    await settle();
+    expect(host.status().interactive.state).toBe('ready');
+    const [interactive, job] = [live('interactive'), live('job')];
+    interactive.kill();
+    await host.stop();
+    expect(interactive.dead && job.dead).toBe(true);
+    expect(host.status().interactive.state).toBe('stopped');
+    expect(host.status().job.state).toBe('stopped');
+    expect(timers.filter((t) => !t.cancelled)).toHaveLength(0);
   });
 
   it('stops without restarting', async () => {
