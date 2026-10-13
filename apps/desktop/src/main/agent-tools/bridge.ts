@@ -1,5 +1,5 @@
 import { withAgentExport } from '../agent-export';
-import { isRendererUnavailable } from '../renderer-recovery';
+import { isRendererUnavailable, watchRendererDocument } from '../renderer-recovery';
 import { randomBytes, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import net, { type Server, type Socket } from 'node:net';
@@ -79,6 +79,7 @@ export class PowermoveAgentToolSession {
   readonly mcpConfig: NativeMcpServerConfig;
   changed = false;
   private closed = false;
+  private readonly stopWatchingDocument: () => void;
   private finishing: Promise<AgentToolFinishResult> | null = null;
   readonly openedAt = Date.now();
   stagingDirectory: string | null = null;
@@ -98,6 +99,10 @@ export class PowermoveAgentToolSession {
     readonly inspectionOnly = false
   ) {
     this.mcpConfig = mcpConfig;
+    this.stopWatchingDocument = watchRendererDocument(owner, () => {
+      this.closed = true;
+      this.bridge.closeSession(this, tool => new Error(`Powermove renderer closed or crashed, or navigated to a new document, while running ${tool}. The action outcome is unknown; inspect the project before repeating edits.`));
+    });
   }
 
   async finish(commit: boolean): Promise<AgentToolFinishResult> {
@@ -115,6 +120,7 @@ export class PowermoveAgentToolSession {
       }
     } finally {
       this.closed = true;
+      this.stopWatchingDocument();
       this.bridge.closeSession(this);
     }
     if (!response) return { changed: this.changed };
@@ -374,7 +380,7 @@ export class PowermoveAgentToolBridge {
     return this.capturePanel(session, args);
   }
 
-  closeSession(session: PowermoveAgentToolSession): void {
+  closeSession(session: PowermoveAgentToolSession, failure?: (tool: string) => Error): void {
     for (const controller of this.mediaCalls.get(session) ?? []) controller.abort();
     this.mediaCalls.delete(session);
     if (this.sessionsByToken.get(session.token) === session) this.sessionsByToken.delete(session.token);
@@ -382,7 +388,7 @@ export class PowermoveAgentToolBridge {
     for (const [callId, pending] of this.pending) {
       if (pending.session !== session) continue;
       clearTimeout(pending.timer);
-      pending.reject(new Error('Agent tool session ended.'));
+      pending.reject(failure?.(pending.tool) ?? new Error('Agent tool session ended.'));
       this.pending.delete(callId);
     }
   }

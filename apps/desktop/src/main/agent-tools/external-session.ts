@@ -10,7 +10,7 @@ import { agentInstructions, agentResultSchema } from '../codex/instructions';
 import { prepareAgentWorkspace, discardPartialRun, discardExtensionStage, removeEmptyRunDirectory, type AgentWorkspace, type AgentApiPackFile } from '../codex/workspace';
 import { withStageSnapshot, publishExtensionChanges } from '../codex/change-history';
 import { validateStagedExtensions } from '../codex/validate-staged-extensions';
-import { isRendererUnavailable } from '../renderer-recovery';
+import { isRendererUnavailable, watchRendererDocument } from '../renderer-recovery';
 
 const start = z.object({ prompt: z.string().min(1).max(200000), access: z.enum(['project', 'editor']).default('project'), context: z.enum(['project', 'app']).default('project') }).strict();
 const changes = z.object({ extensions: z.array(z.object({ id: z.string(), action: z.enum(['created', 'updated', 'removed']), summary: z.string().max(4000) }).strict()).max(100) }).strict();
@@ -35,6 +35,7 @@ export class ExternalAgentSession {
   private request: CodexRunRequest | null = null;
   private opening: Promise<unknown> | null = null;
   private ownerUnavailable = false;
+  private stopWatchingOwner: (() => void) | null = null;
   private readonly ownerClosed = () => {
     // Losing an editor ends its transaction, not the external MCP connection.
     this.ownerUnavailable = true;
@@ -152,8 +153,7 @@ export class ExternalAgentSession {
     const session = await this.options.bridge.openSession({ runId: `mcp-${randomUUID()}`, owner, baseRevision: 0, context: input.context, inspectionOnly: input.access === 'editor' });
     this.session = session;
     this.ownerUnavailable = false;
-    owner.once('destroyed', this.ownerClosed);
-    owner.once('render-process-gone', this.ownerClosed);
+    this.stopWatchingOwner = watchRendererDocument(owner, this.ownerClosed);
     try {
       const snapshot = await this.renderer(session, '__mcp_context', {});
       if (input.context === 'project' && (snapshot.home || !PROJECT_ID.test(snapshot.projectId))) throw new Error('Create or open a project before starting a project session.');
@@ -201,10 +201,7 @@ export class ExternalAgentSession {
       try {
         try {
           try { await this.detach?.(); }
-          finally { if (this.session) {
-            this.session.owner.removeListener('destroyed', this.ownerClosed);
-            this.session.owner.removeListener('render-process-gone', this.ownerClosed);
-          } }
+          finally { this.stopWatchingOwner?.(); this.stopWatchingOwner = null; }
           result = await this.session?.finish(commit) ?? result;
         } catch (error) { failed = true; failure = error; }
         // Child teardown, renderer rollback and workspace disposal must each
