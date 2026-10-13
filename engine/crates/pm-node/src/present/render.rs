@@ -8,6 +8,7 @@
 //! never written while the viewer holds it (contract 2's `PoolLedger`).
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -41,6 +42,65 @@ use super::view;
 pub type Sink = Arc<dyn Fn(Vec<Action>) + Send + Sync>;
 
 pub type Key = (PortId, SessionId);
+
+/// Pool generation numbers, shared by the JavaScript side (new pools) and
+/// the render thread (a pool made again after a failed hand-off).
+#[derive(Debug, Clone)]
+pub struct Generations(Arc<AtomicU32>);
+
+impl Default for Generations {
+    fn default() -> Self {
+        Self(Arc::new(AtomicU32::new(1)))
+    }
+}
+
+impl Generations {
+    /// The next generation: never 0, never repeated before the counter wraps.
+    pub fn next(&self) -> u32 {
+        loop {
+            let g = self.0.fetch_add(1, Ordering::Relaxed);
+            if g != 0 {
+                return g;
+            }
+        }
+    }
+}
+
+/// Delays before making a pool again after its hand-off to main failed
+/// part-way (a send timed out, main's queue was full). After the last one
+/// the view waits for its next viewer state.
+pub const POOL_RETRY_US: [i64; 4] = [50_000, 250_000, 1_000_000, 4_000_000];
+
+/// A pool to make again: the spec the JavaScript side charged, and when.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolRetry {
+    pub spec: PoolSpec,
+    /// Failed attempts so far.
+    pub failures: u32,
+    /// Host µs of the next attempt; `None` once the retries ran out.
+    pub at: Option<i64>,
+}
+
+impl PoolRetry {
+    /// The retry after the `failures`-th failed attempt at `now`.
+    pub fn after_failure(spec: PoolSpec, failures: u32, now: i64) -> Self {
+        let at = POOL_RETRY_US
+            .get(failures.saturating_sub(1) as usize)
+            .map(|delay| now + delay);
+        Self { spec, failures, at }
+    }
+
+    pub fn due(&self, now: i64) -> bool {
+        self.at.is_some_and(|at| at <= now)
+    }
+
+    /// A new viewer state for the view: an exhausted retry tries again now.
+    pub fn rearm(&mut self, now: i64) {
+        if self.at.is_none() {
+            self.at = Some(now);
+        }
+    }
+}
 
 /// A pool the JavaScript side sized and charged to the lease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +185,8 @@ pub struct Stats {
     pub bridge_error: Option<String>,
     pub adapter: Option<String>,
     pub pools: u64,
+    /// Pools whose creation or hand-off to main failed (each attempt).
+    pub pool_failures: u64,
     pub surfaces_sent: u64,
     pub frames: u64,
     pub timed_frames: u64,
@@ -169,6 +231,8 @@ struct View {
     next_seq: u64,
     dirty: bool,
     requests: VecDeque<(RequestId, FrameRequest, Option<Revision>)>,
+    /// The pool to make again after a failed hand-off.
+    retry: Option<PoolRetry>,
 }
 
 struct Thread {
@@ -179,6 +243,7 @@ struct Thread {
     gpu: Option<Gpu>,
     views: BTreeMap<Key, View>,
     frame_ticks: i64,
+    generations: Generations,
 }
 
 fn now() -> i64 {
@@ -186,7 +251,13 @@ fn now() -> i64 {
 }
 
 /// The render thread's body.
-pub fn run(config: ThreadConfig, rx: Receiver<Command>, sink: Sink, stats: Arc<Mutex<Stats>>) {
+pub fn run(
+    config: ThreadConfig,
+    rx: Receiver<Command>,
+    sink: Sink,
+    stats: Arc<Mutex<Stats>>,
+    generations: Generations,
+) {
     pm_bridge::set_thread_user_interactive();
     let fps = i64::from(config.fps.max(1));
     let mut thread = Thread {
@@ -197,6 +268,7 @@ pub fn run(config: ThreadConfig, rx: Receiver<Command>, sink: Sink, stats: Arc<M
         bridge: None,
         gpu: None,
         views: BTreeMap::new(),
+        generations,
     };
     thread.check_in();
     loop {
@@ -416,6 +488,7 @@ impl Thread {
             next_seq: 1,
             dirty: true,
             requests: VecDeque::new(),
+            retry: None,
         });
         view.state = state;
         if let Some(revision) = revision {
@@ -423,27 +496,86 @@ impl Thread {
         }
         view.dirty = true;
         let Some(spec) = pool else {
+            // The same pool as before. If making it failed and the retries
+            // ran out, this new viewer state tries again.
+            if let Some(retry) = view.retry.as_mut() {
+                retry.rearm(now());
+            }
             return;
         };
+        view.retry = None;
         if let Some(old) = self.views.get_mut(&key).and_then(|v| v.pool.take()) {
             self.retire_pool(key, old);
         }
+        self.make_pool(key, spec, 0);
+    }
+
+    /// Makes and hands off a pool; on failure, schedules it again with a
+    /// fresh generation (`PoolRetry`). The JavaScript side charged the
+    /// lease for `spec` and records it as the viewer's pool, so it would
+    /// never ask again for an identical viewer state: the render thread
+    /// must.
+    fn make_pool(&mut self, key: Key, spec: PoolSpec, failures: u32) {
         match self.create_pool(key, spec) {
             Ok(live) => {
                 let descriptor = live.pool.descriptor();
                 if let Some(view) = self.views.get_mut(&key) {
                     view.pool = Some(live);
+                    view.retry = None;
+                    view.dirty = true;
+                }
+                if failures > 0 {
+                    self.log(
+                        LogLevel::Info,
+                        format!(
+                            "frame bridge: pool generation {} made after {failures} failed attempts",
+                            spec.generation
+                        ),
+                    );
                 }
                 self.event(key, Event::SurfacePool(descriptor), None);
             }
-            Err(error) => self.log(
-                LogLevel::Error,
-                format!(
-                    "frame bridge: pool generation {} ({}x{} {:?}) failed: {error}",
-                    spec.generation, spec.size.width, spec.size.height, spec.format
-                ),
-            ),
+            Err(error) => {
+                let failures = failures + 1;
+                self.stats().pool_failures += 1;
+                // Without a bridge nothing can succeed; do not retry.
+                let retry = self
+                    .bridge
+                    .as_ref()
+                    .map(|_| PoolRetry::after_failure(spec, failures, now()));
+                let next = match retry.and_then(|r| r.at) {
+                    Some(at) => format!("trying again in {} ms", (at - now()).max(0) / 1000),
+                    None => "waiting for the next viewer state".into(),
+                };
+                self.log(
+                    LogLevel::Error,
+                    format!(
+                        "frame bridge: pool generation {} ({}x{} {:?}) failed: {error}; {next}",
+                        spec.generation, spec.size.width, spec.size.height, spec.format
+                    ),
+                );
+                if let Some(view) = self.views.get_mut(&key) {
+                    view.retry = retry;
+                }
+            }
         }
+    }
+
+    /// Makes a failed pool again once its retry is due, as a new generation.
+    fn retry_pool(&mut self, key: Key) {
+        let Some(retry) = self
+            .views
+            .get(&key)
+            .and_then(|v| v.retry)
+            .filter(|r| r.due(now()))
+        else {
+            return;
+        };
+        let spec = PoolSpec {
+            generation: self.generations.next(),
+            ..retry.spec
+        };
+        self.make_pool(key, spec, retry.failures);
     }
 
     fn create_pool(&mut self, key: Key, spec: PoolSpec) -> Result<Live, String> {
@@ -482,9 +614,18 @@ impl Thread {
                 format,
                 bytes_per_row: surface.iosurface.bytes_per_row(),
             };
-            bridge
-                .send_surface(SendRight::from_raw(port), &info)
-                .map_err(|e| format!("sending surface {index}: {e}"))?;
+            if let Err(e) = bridge.send_surface(SendRight::from_raw(port), &info) {
+                // Main may hold the surfaces sent before this one: retire the
+                // generation so it lets go of them now, not at engine exit.
+                if index > 0
+                    && let Err(retire) = bridge.retire(key.0.0, spec.generation)
+                {
+                    return Err(format!(
+                        "sending surface {index}: {e}; retiring the {index} sent: {retire}"
+                    ));
+                }
+                return Err(format!("sending surface {index}: {e}"));
+            }
         }
         let mut stats = self.stats();
         stats.pools += 1;
@@ -504,6 +645,9 @@ impl Thread {
         let now = now();
         let mut wake = now + 50_000;
         for view in self.views.values() {
+            if let Some(at) = view.retry.and_then(|r| r.at) {
+                wake = wake.min(at);
+            }
             if view.dirty || !view.requests.is_empty() || view.sample_due {
                 return Duration::ZERO;
             }
@@ -534,6 +678,7 @@ impl Thread {
 
     fn work_view(&mut self, key: Key) {
         let lead = self.config.lead;
+        self.retry_pool(key);
         // Clock samples.
         if let Some(view) = self.views.get_mut(&key) {
             let t = now();
@@ -809,5 +954,58 @@ impl Thread {
         if let Some(bridge) = self.bridge.take() {
             let _ = bridge.goodbye();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec() -> PoolSpec {
+        PoolSpec {
+            generation: 3,
+            size: Size::new(1280, 720),
+            format: SurfaceFormat::Bgra8Unorm,
+            count: 8,
+        }
+    }
+
+    #[test]
+    fn a_failed_pool_is_retried_with_backoff_then_waits_for_a_new_viewer_state() {
+        let mut at = Vec::new();
+        for failures in 1..=POOL_RETRY_US.len() as u32 + 1 {
+            let retry = PoolRetry::after_failure(spec(), failures, 1_000);
+            at.push(retry.at);
+        }
+        let expected: Vec<Option<i64>> = POOL_RETRY_US
+            .iter()
+            .map(|d| Some(1_000 + d))
+            .chain([None])
+            .collect();
+        assert_eq!(at, expected);
+
+        let mut retry = PoolRetry::after_failure(spec(), 1, 0);
+        assert!(!retry.due(POOL_RETRY_US[0] - 1));
+        assert!(retry.due(POOL_RETRY_US[0]));
+        // A new viewer state does not hurry a pending retry...
+        retry.rearm(10);
+        assert_eq!(retry.at, Some(POOL_RETRY_US[0]));
+        // ...but tries again at once after the retries ran out.
+        let mut exhausted = PoolRetry::after_failure(spec(), POOL_RETRY_US.len() as u32 + 1, 0);
+        assert!(!exhausted.due(i64::MAX));
+        exhausted.rearm(77);
+        assert!(exhausted.due(77));
+        assert_eq!(exhausted.spec, spec());
+    }
+
+    #[test]
+    fn generations_are_shared_and_never_zero() {
+        let a = Generations::default();
+        let b = a.clone();
+        assert_eq!(a.next(), 1);
+        assert_eq!(b.next(), 2);
+        let wrap = Generations(Arc::new(AtomicU32::new(u32::MAX)));
+        assert_eq!(wrap.next(), u32::MAX);
+        assert_eq!(wrap.next(), 1);
     }
 }

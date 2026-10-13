@@ -37,7 +37,7 @@ use pm_protocol::host::PortId;
 use pm_protocol::interop::SurfaceFormat;
 
 use render::{Command, Key};
-pub use render::{FrameTrace, PoolSpec, Sink, Stats, ThreadConfig};
+pub use render::{FrameTrace, Generations, PoolSpec, Sink, Stats, ThreadConfig};
 
 /// Environment main sets for the interactive engine: the per-launch
 /// bootstrap name.
@@ -111,7 +111,7 @@ pub struct BridgePresenter {
     thread: Option<JoinHandle<()>>,
     stats: Arc<Mutex<Stats>>,
     views: BTreeMap<Key, Meta>,
-    next_generation: u32,
+    generations: Generations,
     told_no_source: bool,
 }
 
@@ -122,10 +122,12 @@ impl BridgePresenter {
         let stats = Arc::new(Mutex::new(Stats::default()));
         let thread_stats = stats.clone();
         let thread_config = config.thread.clone();
+        let generations = Generations::default();
+        let thread_generations = generations.clone();
         let thread = pm_engine::qos::spawn_engine_thread(
             EngineProcess::Interactive,
             "pm-viewer-present",
-            move || render::run(thread_config, rx, sink, thread_stats),
+            move || render::run(thread_config, rx, sink, thread_stats, thread_generations),
         )
         .map_err(|e| format!("could not start the viewer presenter: {e}"))?;
         Ok(Self {
@@ -134,7 +136,7 @@ impl BridgePresenter {
             thread: Some(thread),
             stats,
             views: BTreeMap::new(),
-            next_generation: 1,
+            generations,
             told_no_source: false,
         })
     }
@@ -203,12 +205,11 @@ impl BridgePresenter {
             (SurfaceFormat::Bgra8Unorm, bgra_bytes)
         };
         let spec = PoolSpec {
-            generation: self.next_generation,
+            generation: self.generations.next(),
             size,
             format,
             count,
         };
-        self.next_generation = self.next_generation.wrapping_add(1).max(1);
         self.views.insert(
             key,
             Meta {
