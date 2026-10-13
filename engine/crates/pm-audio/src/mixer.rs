@@ -127,6 +127,8 @@ pub struct Mixer {
     gains: Vec<f32>,
     locals: Vec<f64>,
     positions: Vec<f64>,
+    /// Source samples per output sample, per sample (free reads).
+    steps: Vec<f64>,
     src: Vec<Vec<f32>>,
     voice_out: Vec<Vec<f32>>,
     strips: Vec<Vec<Vec<f32>>>,
@@ -158,6 +160,7 @@ impl Mixer {
             gains: vec![],
             locals: vec![],
             positions: vec![],
+            steps: vec![],
             src: vec![],
             voice_out: vec![],
             strips: vec![],
@@ -345,6 +348,7 @@ impl Mixer {
             }
             self.locals.clear();
             self.positions.clear();
+            self.steps.clear();
             for i in 0..n {
                 let s = a + i as i64;
                 let k = ((s - c0) / CONTROL) as usize;
@@ -369,6 +373,11 @@ impl Mixer {
                 if !linear {
                     let st = l.source_time + (r.source_time - l.source_time) * x;
                     self.positions.push(st * source_rate);
+                    // The read rate of the control interval (not of this
+                    // render's samples), so the filter is the same whatever
+                    // block the sample falls in.
+                    self.steps
+                        .push((r.source_time - l.source_time).abs() * source_rate / CONTROL as f64);
                 }
                 self.locals.push(local);
             }
@@ -447,13 +456,7 @@ impl Mixer {
                         i += run;
                         continue;
                     }
-                    let mut step = 1.0f64;
-                    for w in seg.windows(2) {
-                        step = step.max((w[1] - w[0]).abs());
-                    }
-                    if let Some(next) = self.positions.get(i + run) {
-                        step = step.max((next - seg[run - 1]).abs());
-                    }
+                    let step = self.steps[i..i + run].iter().fold(1.0f64, |m, &s| m.max(s));
                     let bank = kernel::free_bank(step);
                     let (mut pmin, mut pmax) = (f64::INFINITY, f64::NEG_INFINITY);
                     for &pos in seg {
