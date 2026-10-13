@@ -35,53 +35,7 @@ pub fn parse_peer(text: &str) -> Result<PeerKind, String> {
     }
 }
 
-/// The job engine runs at utility QoS, never in the Darwin background
-/// state (contract 13, invariant 10: background slows its reaction to
-/// deadline signals and has no GPU effect). The interactive engine keeps
-/// the default class; its render and audio threads raise their own.
-pub fn apply_process_qos(process: EngineProcess) -> Result<(), String> {
-    if process != EngineProcess::Job {
-        return Ok(());
-    }
-    #[cfg(target_vendor = "apple")]
-    {
-        // SAFETY: sets the calling thread's QoS class; no pointers involved.
-        let status =
-            unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) };
-        if status != 0 {
-            return Err(format!("pthread_set_qos_class_self_np failed ({status})"));
-        }
-    }
-    Ok(())
-}
-
-/// The calling thread's QoS class as text (for status and tests).
-pub fn current_qos() -> &'static str {
-    #[cfg(target_vendor = "apple")]
-    {
-        let mut class = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
-        let mut priority = 0;
-        // SAFETY: both out-pointers are valid for writes.
-        let status = unsafe {
-            libc::pthread_get_qos_class_np(libc::pthread_self(), &mut class, &mut priority)
-        };
-        if status != 0 {
-            return "unknown";
-        }
-        match class {
-            libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE => "userInteractive",
-            libc::qos_class_t::QOS_CLASS_USER_INITIATED => "userInitiated",
-            libc::qos_class_t::QOS_CLASS_DEFAULT => "default",
-            libc::qos_class_t::QOS_CLASS_UTILITY => "utility",
-            libc::qos_class_t::QOS_CLASS_BACKGROUND => "background",
-            _ => "unspecified",
-        }
-    }
-    #[cfg(not(target_vendor = "apple"))]
-    {
-        "unspecified"
-    }
-}
+pub use pm_engine::qos::{apply_process_qos, current_qos};
 
 /// One engine process as its JavaScript host sees it.
 pub struct EngineHost {
