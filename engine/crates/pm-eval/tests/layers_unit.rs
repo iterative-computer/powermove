@@ -114,9 +114,7 @@ impl LayerHost for ObjectHost {
 
 #[test]
 fn object_picks_go_to_the_host() {
-    let object = format!(
-        r#"{{"id":"model","type":"extension","from":0,"dur":10,"on":true,"threeD":true,"p":{{}},"d":{{"definition":"powermove.3d.object","data":{{"object":{{}}}}}}}}"#
-    );
+    let object = r#"{"id":"model","type":"extension","from":0,"dur":10,"on":true,"threeD":true,"p":{},"d":{"definition":"powermove.3d.object","data":{"object":{}}}}"#.to_string();
     let d = doc(&project(&[object, layer("below", "solid", 0.0, 0.0, "")]));
     let comp = Comp::resolve(&d, "C").unwrap();
     let mut ev = Evaluator::new();

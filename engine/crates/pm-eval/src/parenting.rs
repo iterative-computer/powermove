@@ -12,7 +12,7 @@
 
 use pm_model::Node;
 
-use crate::js_sem::{JsResult, JsThrow};
+use crate::js_sem::{JsResult, JsThrow, JsValue};
 use crate::math;
 use crate::node;
 use crate::scope::{Scope, js_hypot};
@@ -96,27 +96,31 @@ pub fn transform_aim(m: &Mat4, p: &[f64; 3]) -> [f64; 3] {
 }
 
 /// `worldPoseValues`' 2D answer: the channels that reproduce a world matrix.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Pose2d {
     /// `position.x`, `position.y`.
     pub position: [f64; 2],
     /// `scale.x`, `scale.y` (percent).
     pub scale: [f64; 2],
-    /// Degrees.
-    pub rotation: f64,
+    /// Degrees. A number, except for a layer collapsed to a point (both
+    /// columns zero, `allow_zero`): then it is `PM.ev(layer, 'rotation', T)`
+    /// as stored, which may be a string or another non-number that the
+    /// ungroup bake carries into its keys (`value += …` concatenates).
+    pub rotation: JsValue,
     /// Degrees.
     pub skew: f64,
 }
 
 impl Pose2d {
-    pub fn channels(&self) -> [(&'static str, f64); 6] {
+    /// The channels in `worldPoseValues`' key order.
+    pub fn channels(&self) -> [(&'static str, JsValue); 6] {
         [
-            ("position.x", self.position[0]),
-            ("position.y", self.position[1]),
-            ("scale.x", self.scale[0]),
-            ("scale.y", self.scale[1]),
-            ("rotation", self.rotation),
-            ("skew", self.skew),
+            ("position.x", JsValue::Number(self.position[0])),
+            ("position.y", JsValue::Number(self.position[1])),
+            ("scale.x", JsValue::Number(self.scale[0])),
+            ("scale.y", JsValue::Number(self.scale[1])),
+            ("rotation", self.rotation.clone()),
+            ("skew", JsValue::Number(self.skew)),
         ]
     }
 }
@@ -210,11 +214,11 @@ impl<'d> Scope<'_, 'd> {
             let ax = self.num(layer, "anchor.x", time)?;
             let ay = self.num(layer, "anchor.y", time)?;
             let rotation = if sx >= 1e-10 {
-                deg(math::atan2(b, a))
+                JsValue::Number(deg(math::atan2(b, a)))
             } else if column_y >= 1e-10 {
-                deg(math::atan2(-c, d))
+                JsValue::Number(deg(math::atan2(-c, d)))
             } else {
-                self.num(layer, "rotation", time)?
+                self.channel(layer, "rotation", time)?
             };
             return Ok(Pose2d {
                 position: [x + a * ax + c * ay, y + b * ax + d * ay],
@@ -229,7 +233,7 @@ impl<'d> Scope<'_, 'd> {
         Ok(Pose2d {
             position: [x + a * ax + c * ay, y + b * ax + d * ay],
             scale: [sx * 100.0, sy * 100.0],
-            rotation: deg(math::atan2(b, a)),
+            rotation: JsValue::Number(deg(math::atan2(b, a))),
             skew: deg(math::atan((a * c + b * d) / (sx * sy))),
         })
     }

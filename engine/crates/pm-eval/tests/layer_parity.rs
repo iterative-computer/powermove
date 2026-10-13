@@ -35,6 +35,9 @@ enum V {
     A(Vec<V>),
     O(BTreeMap<String, V>),
     Throw(String),
+    /// A port throw whose message is an engine description (`TypeError`,
+    /// `RangeError`), not text the user sees: matches any throw.
+    ThrowInternal(String),
 }
 
 fn hexf(v: &Value) -> f64 {
@@ -76,7 +79,7 @@ fn dec(v: &Value) -> V {
 /// A decoded value as a JSON value (for building inputs).
 fn to_value(v: &V) -> Value {
     match v {
-        V::U | V::Z | V::Throw(_) => Value::Null,
+        V::U | V::Z | V::Throw(_) | V::ThrowInternal(_) => Value::Null,
         V::N(n) => Value::Number(*n),
         V::S(s) => Value::String(JsString::from(s.as_str())),
         V::B(b) => Value::Bool(*b),
@@ -91,7 +94,7 @@ fn to_value(v: &V) -> Value {
 
 fn to_js(v: &V) -> JsValue {
     match v {
-        V::U | V::Throw(_) => JsValue::Undefined,
+        V::U | V::Throw(_) | V::ThrowInternal(_) => JsValue::Undefined,
         V::Z => JsValue::Null,
         V::N(n) => JsValue::Number(*n),
         V::S(s) => JsValue::from(s.as_str()),
@@ -147,6 +150,8 @@ struct Stats {
     max_error: f64,
     /// Angles that matched only modulo 360 (see `same`).
     wrapped: usize,
+    /// User-facing `Error` messages compared exactly.
+    messages: usize,
     ops: BTreeMap<String, usize>,
 }
 
@@ -192,7 +197,14 @@ impl Stats {
                         })
                     })
             }
-            (V::Throw(_), V::Throw(_)) => {
+            // `Error` messages reach the user (toasts, agent tool results):
+            // they must match. Engine-internal kinds only need to throw.
+            (V::Throw(a), V::Throw(b)) => {
+                self.values += 1;
+                self.messages += 1;
+                a == b
+            }
+            (V::ThrowInternal(_), V::Throw(_)) => {
                 self.values += 1;
                 true
             }
@@ -214,7 +226,8 @@ impl Stats {
 fn result<T>(r: Result<T, pm_eval::JsThrow>, f: impl FnOnce(T) -> V) -> V {
     match r {
         Ok(v) => f(v),
-        Err(e) => V::Throw(e.message),
+        Err(e) if e.kind == "Error" => V::Throw(e.message),
+        Err(e) => V::ThrowInternal(format!("{}: {}", e.kind, e.message)),
     }
 }
 
@@ -395,7 +408,14 @@ fn layer_queries_match_typescript() {
                                     Some(&parent),
                                     op == "pose2dzero",
                                 ),
-                                |p| pairs(&p.channels()),
+                                |p| {
+                                    V::O(
+                                        p.channels()
+                                            .iter()
+                                            .map(|(k, v)| ((*k).to_owned(), from_js(v)))
+                                            .collect(),
+                                    )
+                                },
                             )
                         }
                         "aim" => result(scope.world_aim3d(l, t), |a| a.map_or(V::Z, |a| nums(&a))),
@@ -544,7 +564,7 @@ fn layer_queries_match_typescript() {
                     ("identity".to_owned(), identity),
                 ])))
             })()
-            .unwrap_or_else(|e| V::Throw(e.message));
+            .unwrap_or_else(|e| result(Err::<(), _>(e), |_| unreachable!()));
             stats.check(|| format!("{comp_id} text t={t}"), ours, &want);
         }
     }
@@ -657,8 +677,8 @@ fn layer_queries_match_typescript() {
     }
 
     eprintln!(
-        "layer vectors: {} numbers ({} bit-identical, {} angles equal modulo 360, max relative error {:.3e}), {} other values",
-        stats.numbers, stats.exact, stats.wrapped, stats.max_error, stats.values
+        "layer vectors: {} numbers ({} bit-identical, {} angles equal modulo 360, max relative error {:.3e}), {} other values ({} error messages)",
+        stats.numbers, stats.exact, stats.wrapped, stats.max_error, stats.values, stats.messages
     );
     eprintln!("ops: {:?}", stats.ops);
     for f in &stats.failures {
