@@ -137,9 +137,28 @@ objc2::define_class!(
 
     impl RateTarget {
         #[unsafe(method(tick:))]
-        fn tick(&self, _link: &AnyObject) {}
+        fn tick(&self, link: &AnyObject) {
+            // SAFETY: CADisplayLink's timestamp properties.
+            let (now, target): (f64, f64) = unsafe { (msg_send![link, timestamp], msg_send![link, targetTimestamp]) };
+            if let Ok(mut ticks) = TICKS.lock()
+                && ticks.len() < MAX_TICKS
+            {
+                ticks.push((now, target));
+            }
+        }
     }
 );
+
+/// Display link callbacks seen (`timestamp`, `targetTimestamp`, seconds on
+/// the host clock), for the refresh-rate probe; capped.
+static TICKS: Mutex<Vec<(f64, f64)>> = Mutex::new(Vec::new());
+const MAX_TICKS: usize = 20_000;
+
+/// The display link callbacks recorded so far, emptied: when the display
+/// actually refreshed while a [`RatePreference`] lived.
+pub fn take_display_ticks() -> Vec<(f64, f64)> {
+    std::mem::take(&mut *TICKS.lock().unwrap_or_else(|e| e.into_inner()))
+}
 
 /// A display link that asks the main display for a refresh rate while it
 /// lives (`-[NSScreen displayLinkWithTarget:selector:]` and
@@ -148,12 +167,23 @@ objc2::define_class!(
 pub struct RatePreference {
     stop: Arc<std::sync::atomic::AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
-    /// The rate asked for.
+    /// The rate asked for (0 when only observing).
     pub hz: f64,
 }
 
 impl RatePreference {
+    /// Asks for `hz` (exactly: minimum = maximum = preferred).
     pub fn request(hz: f64) -> Result<Self, RemoteLayerError> {
+        Self::start(Some(hz))
+    }
+
+    /// A display link that asks for nothing (it only observes refreshes).
+    pub fn observe() -> Result<Self, RemoteLayerError> {
+        Self::start(None)
+    }
+
+    fn start(want: Option<f64>) -> Result<Self, RemoteLayerError> {
+        let hz = want.unwrap_or(0.0);
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = stop.clone();
         let (tx, rx) = std::sync::mpsc::channel::<Result<(), RemoteLayerError>>();
@@ -181,12 +211,14 @@ impl RatePreference {
                         let _ = tx.send(Err(RemoteLayerError::Missing("a display link")));
                         return;
                     };
-                    let range = objc2_quartz_core::CAFrameRateRange {
-                        minimum: hz as f32,
-                        maximum: hz as f32,
-                        preferred: hz as f32,
-                    };
-                    let _: () = msg_send![&*link, setPreferredFrameRateRange: range];
+                    if want.is_some() {
+                        let range = objc2_quartz_core::CAFrameRateRange {
+                            minimum: hz as f32,
+                            maximum: hz as f32,
+                            preferred: hz as f32,
+                        };
+                        let _: () = msg_send![&*link, setPreferredFrameRateRange: range];
+                    }
                     let run_loop: Retained<AnyObject> = msg_send![AnyClass::get(c"NSRunLoop").expect("NSRunLoop"), currentRunLoop];
                     let _: () = msg_send![&*link, addToRunLoop: &*run_loop, forMode: objc2_foundation::NSRunLoopCommonModes];
                     let _ = tx.send(Ok(()));
@@ -418,9 +450,6 @@ mod tests {
     use crate::bridge_out::surface::ExportedSurface;
     use pm_protocol::interop::SurfaceRequest;
 
-    /// A context with a layer exists, has an id main can host, and takes
-    /// copies of pool surfaces with a presentation time. Nothing hosts the
-    /// context here, so nothing reaches a display.
     #[test]
     fn the_preferred_refresh_is_a_multiple_of_the_content_rate() {
         let close = |a: f64, b: f64| (a - b).abs() < 1e-6;
@@ -437,6 +466,9 @@ mod tests {
         assert!(close(preferred_refresh(25.0, 60.0), 50.0));
     }
 
+    /// A context with a layer exists, has an id main can host, and takes
+    /// copies of pool surfaces with a presentation time. Nothing hosts the
+    /// context here, so nothing reaches a display.
     #[test]
     fn a_remote_layer_has_a_context_id_and_takes_pool_surfaces() {
         let (device, _queue, _) = crate::bridge_out::metal_device("remote layer test").unwrap();
