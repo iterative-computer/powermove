@@ -16,7 +16,7 @@ use crate::sys::ffmpeg as ff;
 use crate::time::{NominalRate, nominal_rate};
 use color::{ColorInfo, SideData};
 use pm_protocol::color::AlphaMode;
-use pm_time::{Rate, Rational, TimecodeFormat};
+use pm_time::{Rate, TimecodeFormat};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use timing::Priming;
@@ -192,7 +192,7 @@ pub struct MediaProbe {
     pub path: PathBuf,
     pub size: u64,
     pub container: String,
-    /// Container duration in seconds as [num, den] (FFmpeg's AV_TIME_BASE units).
+    /// Container duration and start in microseconds (FFmpeg's AV_TIME_BASE).
     pub duration_us: Option<i64>,
     pub start_us: Option<i64>,
     pub streams: Vec<StreamProbe>,
@@ -541,13 +541,61 @@ pub fn nominal(probe: &MediaProbe) -> Option<Rate> {
     probe.video.as_ref()?.nominal_rate.as_ref().map(|n| n.rate)
 }
 
-/// The stream timebase of an index as a rational.
-pub fn timebase(idx: &FrameIndex) -> Rational {
-    idx.timebase
-}
-
 impl MediaProbe {
     pub fn to_json(&self) -> Result<String> {
         serde_json::to_string_pretty(self).map_err(|e| MediaError::invalid(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_aperture_rectangle() {
+        // 1920×1080 frame, 1888×1062 aperture centered: (16, 9, 1888, 1062).
+        let mut c = vec![];
+        for (n, d) in [(1888, 1), (1062, 1), (0, 1), (0, 1)] {
+            c.extend_from_slice(&(n as i32).to_be_bytes());
+            c.extend_from_slice(&(d as i32).to_be_bytes());
+        }
+        let a = clean_aperture(&c, 1920, 1080).unwrap();
+        assert_eq!(a.rect, (16, 9, 1888, 1062));
+        // A horizontal offset of −8.5 pixels.
+        c[16..20].copy_from_slice(&(-17i32).to_be_bytes());
+        c[20..24].copy_from_slice(&2i32.to_be_bytes());
+        assert_eq!(clean_aperture(&c, 1920, 1080).unwrap().horizontal_offset, -8.5);
+    }
+
+    #[test]
+    fn fiel_atom_orders() {
+        let info = |fo| CodecInfo {
+            codec: "x".into(),
+            codec_id: 0,
+            codec_tag: None,
+            profile: 0,
+            profile_name: None,
+            width: 0,
+            height: 0,
+            pix_fmt: String::new(),
+            bit_depth: 8,
+            log2_chroma_w: 1,
+            log2_chroma_h: 1,
+            pix_fmt_alpha: false,
+            full_range: false,
+            alpha_mode: false,
+            color_primaries: 2,
+            color_trc: 2,
+            color_space: 2,
+            color_range: 0,
+            chroma_location: 0,
+            field_order: fo,
+            sample_aspect: (0, 1),
+        };
+        assert_eq!(field_info(&info(0), Some(&[2, 9])).order, FieldOrder::TopFirst);
+        assert_eq!(field_info(&info(0), Some(&[2, 14])).order, FieldOrder::BottomFirst);
+        assert_eq!(field_info(&info(0), Some(&[1, 0])).order, FieldOrder::Progressive);
+        assert_eq!(field_info(&info(ff::AV_FIELD_BB), None).order, FieldOrder::BottomFirst);
+        assert_eq!(field_info(&info(0), None).order, FieldOrder::Unknown);
     }
 }

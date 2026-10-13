@@ -218,6 +218,84 @@ fn id3_itunsmpb(path: &Path) -> Option<Priming> {
 mod tests {
     use super::*;
 
+    fn bx(ty: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut v = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(ty);
+        v.extend_from_slice(body);
+        v
+    }
+
+    /// A minimal movie with one AAC track: optional edit list media time,
+    /// handler name, and iTunSMPB.
+    fn movie(media_time: Option<i32>, handler: &str, smpb: Option<&str>) -> Vec<u8> {
+        let mut mvhd = vec![0u8; 4 + 8];
+        mvhd.extend_from_slice(&48000u32.to_be_bytes());
+        mvhd.extend_from_slice(&[0u8; 80]);
+        let mut tkhd = vec![0u8; 4 + 8];
+        tkhd.extend_from_slice(&1u32.to_be_bytes());
+        tkhd.extend_from_slice(&[0u8; 68]);
+        let mut mdhd = vec![0u8; 4 + 8];
+        mdhd.extend_from_slice(&48000u32.to_be_bytes());
+        mdhd.extend_from_slice(&[0u8; 8]);
+        let mut hdlr = vec![0u8; 8];
+        hdlr.extend_from_slice(b"soun");
+        hdlr.extend_from_slice(&[0u8; 12]);
+        hdlr.extend_from_slice(handler.as_bytes());
+        hdlr.push(0);
+        let mut stsd = vec![0, 0, 0, 0, 0, 0, 0, 1];
+        stsd.extend(bx(b"mp4a", &[0u8; 28]));
+        let empty = [0u8; 8];
+        let stbl = [bx(b"stsd", &stsd), bx(b"stts", &empty), bx(b"stsc", &empty), bx(b"stsz", &[0u8; 12]), bx(b"stco", &empty)].concat();
+        let mdia = [bx(b"mdhd", &mdhd), bx(b"hdlr", &hdlr), bx(b"minf", &bx(b"stbl", &stbl))].concat();
+        let mut trak = bx(b"tkhd", &tkhd);
+        if let Some(mt) = media_time {
+            let mut elst = vec![0u8; 4];
+            elst.extend_from_slice(&1u32.to_be_bytes());
+            elst.extend_from_slice(&48000u32.to_be_bytes());
+            elst.extend_from_slice(&mt.to_be_bytes());
+            elst.extend_from_slice(&[0, 1, 0, 0]);
+            trak.extend(bx(b"edts", &bx(b"elst", &elst)));
+        }
+        trak.extend(bx(b"mdia", &mdia));
+        let mut moov = [bx(b"mvhd", &mvhd), bx(b"trak", &trak)].concat();
+        if let Some(t) = smpb {
+            let mut data = vec![0, 0, 0, 1, 0, 0, 0, 0];
+            data.extend_from_slice(t.as_bytes());
+            let mut mean = vec![0u8; 4];
+            mean.extend_from_slice(b"com.apple.iTunes");
+            let mut name = vec![0u8; 4];
+            name.extend_from_slice(b"iTunSMPB");
+            let item = [bx(b"mean", &mean), bx(b"name", &name), bx(b"data", &data)].concat();
+            let mut meta = vec![0u8; 4];
+            meta.extend(bx(b"ilst", &bx(b"----", &item)));
+            moov.extend(bx(b"udta", &bx(b"meta", &meta)));
+        }
+        [bx(b"ftyp", b"M4A \0\0\0\0"), bx(b"moov", &moov)].concat()
+    }
+
+    fn priming_of(bytes: &[u8]) -> Option<Priming> {
+        let p = std::env::temp_dir().join(format!("pm-media-priming-{}-{}.m4a", std::process::id(), bytes.len()));
+        std::fs::write(&p, bytes).unwrap();
+        let r = mp4_priming(&p, 1, "aac", 48000);
+        std::fs::remove_file(&p).ok();
+        r
+    }
+
+    #[test]
+    fn mp4_priming_precedence() {
+        // The edit list wins over iTunSMPB.
+        let p = priming_of(&movie(Some(1024), "", Some(" 00000000 00000840 00000100 0000000000001000"))).unwrap();
+        assert_eq!((p.samples, p.source, p.padding), (1024, PrimingSource::EditList, Some(256)));
+        let p = priming_of(&movie(None, "", Some(" 00000000 00000840 00000100 0000000000001000"))).unwrap();
+        assert_eq!((p.samples, p.source), (2112, PrimingSource::ITunSmpb));
+        // Apple-encoded without metadata: 2112.
+        let p = priming_of(&movie(None, "Core Media Audio", None)).unwrap();
+        assert_eq!((p.samples, p.source), (2112, PrimingSource::AppleDefault));
+        // Not Apple, no metadata: nothing assumed.
+        assert_eq!(priming_of(&movie(None, "SoundHandler", None)), None);
+        assert_eq!(priming_of(&movie(Some(0), "SoundHandler", None)), None);
+    }
+
     #[test]
     fn itunsmpb_fields() {
         let p = parse_itunsmpb(" 00000000 00000840 000001C4 0000000000003A3C 00000000").unwrap();
