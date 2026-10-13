@@ -73,6 +73,29 @@ fn instance_of(layer: &str) -> u64 {
     h
 }
 
+/// A region of interest renders the full frame's geometry through a
+/// viewport placed so the region lands at the target's origin. Targets are in
+/// GL row order: the region's bottom row is full row `H − y − h`.
+fn region_viewport(
+    pass: &mut wgpu::RenderPass<'_>,
+    region: Option<Region>,
+    full_width: u32,
+    full_height: u32,
+    target_height: u32,
+) {
+    if let Some(g) = region {
+        let below = full_height - g.y - target_height;
+        pass.set_viewport(
+            -(g.x as f32),
+            -(below as f32),
+            full_width as f32,
+            full_height as f32,
+            0.0,
+            1.0,
+        );
+    }
+}
+
 impl Exec<'_> {
     fn fail(&mut self, plan: &CompPlan, draw: &Draw, error: MediaFailure) {
         match error {
@@ -213,19 +236,23 @@ impl Exec<'_> {
     ) -> Vec<Resolved> {
         let resolved = self.resolve(encoder, plan, region);
         let (ox, oy) = region.map_or((0.0, 0.0), |g| (f64::from(g.x), f64::from(g.y)));
-        let (tw, th) = (target.width(), target.height());
-        let format = target.format();
+        let (th, format) = (target.height(), target.format());
+        // Draws keep full-frame coordinates; a region of interest moves the
+        // viewport instead (`region_viewport`), so the rasterizer sees the
+        // same vertex positions as in the full frame and every pixel of the
+        // region equals the full frame's.
+        let (fw, fh) = (plan.width, plan.height);
         // Uniforms: one slot per draw plus the background quad.
         let slots = resolved.len() + 1;
         let mut data = vec![0u8; slots * UNIFORM_STRIDE as usize];
         let quad = |m: [f64; 6], uv: [f64; 4], color: [f64; 4]| QuadUniform {
-            m: m3(&[m[0], m[1], m[2], m[3], m[4] - ox, m[5] - oy]),
-            res: [tw as f32, th as f32, 0.0, 0.0],
+            m: m3(&m),
+            res: [fw as f32, fh as f32, 0.0, 0.0],
             uv: uv.map(|v| v as f32),
             color: color.map(|v| v as f32),
         };
         let background = quad(
-            [f64::from(tw), 0.0, 0.0, f64::from(th), ox, oy],
+            [f64::from(fw), 0.0, 0.0, f64::from(fh), 0.0, 0.0],
             [0.0, 0.0, 1.0, 1.0],
             [0.0; 4],
         );
@@ -338,6 +365,7 @@ impl Exec<'_> {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        region_viewport(&mut pass, region, fw, fh, th);
         if let Some(fill) = &fill_bind {
             pass.set_pipeline(self.pipelines.background(format));
             pass.set_bind_group(0, &quad_bind, &[0]);
@@ -367,18 +395,17 @@ impl Exec<'_> {
         encoder: &mut wgpu::CommandEncoder,
         resolved: &[Resolved],
         region: Option<Region>,
+        full: (u32, u32),
         target: &Target,
     ) {
-        let (ox, oy) = region.map_or((0.0, 0.0), |g| (f64::from(g.x), f64::from(g.y)));
-        let (tw, th) = (target.width(), target.height());
+        let th = target.height();
         let mut data = vec![0u8; resolved.len().max(1) * UNIFORM_STRIDE as usize];
         for (i, r) in resolved.iter().enumerate() {
             let id = i as u32;
             let alpha = r.solid.map_or(r.alpha, |c| c[3]);
-            let m = r.matrix;
             let u = QuadUniform {
-                m: m3(&[m[0], m[1], m[2], m[3], m[4] - ox, m[5] - oy]),
-                res: [tw as f32, th as f32, 0.0, 0.0],
+                m: m3(&r.matrix),
+                res: [full.0 as f32, full.1 as f32, 0.0, 0.0],
                 uv: r.uv.map(|v| v as f32),
                 color: [
                     alpha as f32,
@@ -462,6 +489,7 @@ impl Exec<'_> {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        region_viewport(&mut pass, region, full.0, full.1, th);
         for (i, r) in resolved.iter().enumerate() {
             let offset = (i as u64 * UNIFORM_STRIDE) as u32;
             match (&binds[i], r.solid) {

@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+pub mod doc;
+
 use std::path::{Path, PathBuf};
 
 use pm_model::Document;
