@@ -181,7 +181,9 @@ async function run(config: AppConfig): Promise<void> {
     await waitFor('the editor', () => call<boolean>('!window.PM.ProjectsScreen.isOpen'));
     const before = await call<string>('window.PM.proj.id');
     await run('open project', 'window.PM.openProject()');
-    await waitFor('the project to open', () => call<boolean>(`window.PM.proj.id !== ${JSON.stringify(before)} && window.PM.proj.layers.length > 0`), 180_000);
+    // Opening the 884-layer corpus project took 66 to 95 s on a loaded
+    // machine and passed 180 s in two runs.
+    await waitFor('the project to open', () => call<boolean>(`window.PM.proj.id !== ${JSON.stringify(before)} && window.PM.proj.layers.length > 0`), 420_000);
     await run('project assets', 'window.PM.projectAssetsReady');
     // The whole project plays (its saved work area would loop after 30 s).
     result['project'] = await call(`(() => { const p = window.PM.proj; p.work = [0, p.dur]; return { name: p.name, w: p.w, h: p.h, fps: p.fps, dur: p.dur, layers: p.layers.length }; })()`);

@@ -476,7 +476,7 @@ try {
     }
     process.stdout.write(`\n== ${name}\n`);
     const t0 = Date.now();
-    const r = spawnSync(electron, args, { env, encoding: 'utf8', timeout: run.durationMs * (run.inputModes?.length ?? 1) * 3 + 240_000 });
+    const r = spawnSync(electron, args, { env, encoding: 'utf8', timeout: run.durationMs * (run.inputModes?.length ?? 1) * 3 + (run.app ? 720_000 : 240_000) });
     if (profile) fs.rmSync(profile, { recursive: true, force: true });
     const verdict = (r.stdout ?? '').split('\n').find((l) => l.startsWith('MEASURE')) ?? `MEASURE FAIL exit ${r.status}`;
     process.stdout.write(`   ${verdict} after ${((Date.now() - t0) / 1000).toFixed(1)} s\n`);
