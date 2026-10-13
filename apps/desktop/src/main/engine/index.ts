@@ -19,8 +19,13 @@ import { ENGINE_IPC, type EngineStatusMessage, type StageDocumentRequest, type S
 import type { EngineProcess } from '../../shared/engine-protocol';
 import type { Log } from './connection';
 import { BRIDGE_ADDON_FILE, FrameBridge, type BridgeAddon, type BridgeLaunch, type SharedTextureLike } from './bridge';
+import { EngineFontClient, installEngineFontService } from '../engine-fonts';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
 import type { ChildLike, PortLike } from './ports';
+
+/** Main's own client id for its font port to the interactive engine (never
+ *  a window id: those are positive). */
+export const FONT_CLIENT_ID = -1;
 
 export { NEW_ENGINE_ENV, NEW_ENGINE_STORE_KEY, newEngineEnabled } from './flag';
 
@@ -194,6 +199,13 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     status: (status) => broadcast(ENGINE_IPC.status, statusMessage(true, status))
   });
 
+  // The font registry and subsetting run in the interactive engine (plan
+  // section 12, Phase 2): main relays pm-wasm's font requests over its own
+  // font port and keeps only the project fonts a restarted engine needs.
+  const fontClient = new EngineFontClient({ log });
+  const uninstallFonts = installEngineFontService(options.ipc, { isTrustedSender: options.isTrustedSender }, fontClient);
+  engine.addClient(FONT_CLIENT_ID, (_info, port) => fontClient.connect(port), { peer: 'fonts', processes: ['interactive'] });
+
   options.ipc.handle(ENGINE_IPC.stageDocument, async (event, request: unknown): Promise<StageDocumentResult> => {
     if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     if (!validStageRequest(request)) throw new Error('A staged document names an engine, a session, and its bytes.');
@@ -249,6 +261,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     attachWindow,
     dispose: async () => {
       options.ipc.removeHandler(ENGINE_IPC.stageDocument);
+      uninstallFonts();
+      fontClient.disconnect();
       options.ipc.removeAllListeners(ENGINE_IPC.definitions);
       await engine?.stop();
       frameBridge?.dispose();

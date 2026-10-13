@@ -1,41 +1,40 @@
-/* The native font registry in main (native engine plan, section 12), behind
-   the POWERMOVE_ENGINE_FONTS=1 flag.
+/* The native font registry for pm-wasm's text layout (native engine plan,
+   section 12, docs/engine/text.md).
 
-   Before Phase 2, main hosts the native registry through the pm-bridge addon
-   (engine/crates/pm-bridge, `FontRegistry`) and serves pm-wasm in the
-   renderer: batched registry answers for the layout's misses, metrics-and-
-   shaping subsets for the faces those answers name, the level 2 fallback
-   manifest, and project fonts. Answers, manifests, and face lists cross as
-   pm-text's JSON strings and go into pm-wasm untouched.
+   The renderer asks main over the `engine-fonts:*` channels: batched
+   registry answers for the layout's misses, metrics-and-shaping subsets for
+   the faces those answers name, the level 2 fallback manifest, and project
+   fonts. Answers, manifests, and face lists cross as pm-text's JSON strings
+   and go into pm-wasm untouched. Two providers serve the same channels:
 
-   With the flag off (the default) nothing loads and no channel is
-   registered. With the flag on and no addon, main logs why and carries on
-   without it. Development builds find the addon at
-   engine/target/pm-bridge/pm_bridge.node (engine/crates/pm-bridge/scripts/
-   build.sh); POWERMOVE_PM_BRIDGE overrides the path. */
+   - "Use New Engine" on (Phase 2): the registry and subsetting run in the
+     interactive engine (pm-node's font service). Main holds a font port to
+     it (`EngineFontClient`) and relays requests and replies; it keeps only
+     what a restarted engine needs (the project fonts, replayed in order) and
+     never loads a registry of its own.
+   - "Use New Engine" off, POWERMOVE_ENGINE_FONTS=1: main hosts the registry
+     through the pm-bridge addon (`FontRegistry`), as before Phase 2.
+     Development builds find the addon at engine/target/pm-bridge/
+     pm_bridge.node (engine/crates/pm-bridge/scripts/build.sh);
+     POWERMOVE_PM_BRIDGE overrides the path.
+
+   With both off nothing loads and no channel is registered. With a flag on
+   and no addon, main logs why and carries on without it. */
 import type { IpcMain, IpcMainInvokeEvent } from 'electron';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
+import { ENGINE_FONTS_IPC, type EngineFontsResult, type FontFaceDescriptors } from '../shared/engine-fonts-ipc';
+import type { PortLike } from './engine/ports';
+
 export const ENGINE_FONTS_FLAG = 'POWERMOVE_ENGINE_FONTS';
 export const ENGINE_BRIDGE_PATH = 'POWERMOVE_PM_BRIDGE';
 
-export const ENGINE_FONTS_IPC = {
-  /** `Query[]` JSON → `{ generation, faces, answers }` JSON. */
-  answer: 'engine-fonts:answer',
-  /** `(blob, index)` → the face's subset bytes. */
-  subset: 'engine-fonts:subset',
-  /** Base family → `FallbackManifest` JSON (level 2). */
-  manifest: 'engine-fonts:manifest',
-  /** Family → `FaceSource[]` JSON (level 2). */
-  familyFaces: 'engine-fonts:family-faces',
-  addProjectFont: 'engine-fonts:add-project-font',
-  setFontSource: 'engine-fonts:set-font-source',
-  clearProjectFonts: 'engine-fonts:clear-project-fonts',
-  generation: 'engine-fonts:generation'
-} as const;
+export { ENGINE_FONTS_IPC };
+export type { EngineFontsResult, FontFaceDescriptors };
 
+/** Main's argument limits; the engine's font service checks the same family, descriptor, font, and face index limits (pm-node `fonts`). */
 export const ENGINE_FONTS_LIMITS = {
   queryJsonChars: 4 * 1024 * 1024,
   familyChars: 512,
@@ -44,12 +43,6 @@ export const ENGINE_FONTS_LIMITS = {
   fontBytes: 128 * 1024 * 1024,
   faceIndex: 0xffff
 } as const;
-
-export interface FontFaceDescriptors {
-  weight?: string;
-  style?: string;
-  stretch?: string;
-}
 
 /** pm-bridge's `FontRegistry`. */
 export interface NativeFontRegistry {
@@ -64,10 +57,48 @@ export interface NativeFontRegistry {
   subset(blob: string, index: number): Uint8Array;
 }
 
-export type EngineFontsResult<T> = { ok: true; value: T } | { ok: false; error: string };
+type MaybePromise<T> = T | Promise<T>;
+
+/** What serves the channels: main's own registry (values) or the engine's
+ *  font service (promises). */
+export interface FontsProvider {
+  /** `known` is the registry generation the asking renderer last saw. */
+  answer(queries: string, known: number | null): MaybePromise<string>;
+  subset(blob: string, index: number): MaybePromise<Uint8Array>;
+  manifest(base: string): MaybePromise<string>;
+  familyFaces(family: string): MaybePromise<string>;
+  addProjectFont(family: string, data: Uint8Array, descriptors: FontFaceDescriptors, index: number | undefined): MaybePromise<number>;
+  setFontSource(family: string, data: Uint8Array): MaybePromise<number>;
+  clearProjectFonts(): MaybePromise<number>;
+  generation(): MaybePromise<number>;
+}
+
+/** Main's own registry as a provider (the flag-off path). */
+export function registryProvider(registry: NativeFontRegistry): FontsProvider {
+  return {
+    answer: queries => registry.answer(queries),
+    subset: (blob, index) => registry.subset(blob, index),
+    manifest: base => registry.fallbackManifest(base),
+    familyFaces: family => registry.familyFaces(family),
+    addProjectFont(family, data, descriptors, index) {
+      registry.addProjectFont(family, data, descriptors, index);
+      return registry.generation;
+    },
+    setFontSource(family, data) {
+      registry.setFontSource(family, data);
+      return registry.generation;
+    },
+    clearProjectFonts() {
+      registry.clearProjectFonts();
+      return registry.generation;
+    },
+    generation: () => registry.generation
+  };
+}
 
 export interface EngineFontsContext {
-  isTrustedSenderContents(sender: IpcMainInvokeEvent['sender']): boolean;
+  /** Main's sender check: an editor window's main frame. */
+  isTrustedSender(event: IpcMainInvokeEvent): boolean;
 }
 
 export function engineFontsEnabled(env: NodeJS.ProcessEnv): boolean {
@@ -114,53 +145,75 @@ function descriptors(value: unknown): FontFaceDescriptors | null {
   return out;
 }
 
-function run<T>(fn: () => T): EngineFontsResult<T> {
+const message = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+/** Runs a provider call; a value stays a value (main's registry answers
+ *  synchronously), a promise stays a promise (the engine's service). */
+function run<T>(fn: () => MaybePromise<T>, then?: (value: T) => void): MaybePromise<EngineFontsResult<T>> {
+  const ok = (value: T): EngineFontsResult<T> => {
+    then?.(value);
+    return { ok: true, value };
+  };
   try {
-    return { ok: true, value: fn() };
+    const value = fn();
+    return value instanceof Promise ? value.then(ok, (error: unknown) => ({ ok: false, error: message(error) })) : ok(value);
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    return { ok: false, error: message(error) };
   }
 }
 
 const invalid = (what: string): EngineFontsResult<never> => ({ ok: false, error: `invalid ${what}` });
 
-/** Registers the registry's channels. Untrusted senders get null. */
-export function registerEngineFontsIpc(ipc: Pick<IpcMain, 'handle'>, ctx: EngineFontsContext, registry: NativeFontRegistry): void {
-  const handle = (channel: string, fn: (...args: unknown[]) => EngineFontsResult<unknown>) =>
-    ipc.handle(channel, (event, ...args: unknown[]) => (ctx.isTrustedSenderContents(event.sender) ? fn(...args) : null));
+/** The generation an answer reply carries (`"generation":N` is the last key
+ *  of pm-text's serialized answers; read without parsing the whole reply). */
+export function answerGeneration(json: string): number | null {
+  const match = /"generation":(\d+)\}\s*$/.exec(json.slice(-40));
+  return match ? Number(match[1]) : null;
+}
 
-  handle(ENGINE_FONTS_IPC.answer, queries => (isText(queries, ENGINE_FONTS_LIMITS.queryJsonChars) ? run(() => registry.answer(queries)) : invalid('queries')));
-  handle(ENGINE_FONTS_IPC.subset, (blob, index) => (typeof blob === 'string' && BLOB_KEY.test(blob) && isIndex(index) ? run(() => registry.subset(blob, index)) : invalid('subset key')));
-  handle(ENGINE_FONTS_IPC.manifest, base => (isText(base, ENGINE_FONTS_LIMITS.familyChars) ? run(() => registry.fallbackManifest(base)) : invalid('family')));
-  handle(ENGINE_FONTS_IPC.familyFaces, family => (isText(family, ENGINE_FONTS_LIMITS.familyChars) ? run(() => registry.familyFaces(family)) : invalid('family')));
-  handle(ENGINE_FONTS_IPC.addProjectFont, (family, data, desc, index) => {
+type IpcLike = Pick<IpcMain, 'handle'>;
+
+/** Which path registered the channels on an `ipcMain`: the engine's font
+ *  service (installed first, at engine start) wins over main's registry. */
+const owners = new WeakMap<object, 'engine' | 'main'>();
+
+/** Registers the channels over a provider. Untrusted senders get null. */
+export function registerEngineFontsIpc(ipc: IpcLike, ctx: EngineFontsContext, source: NativeFontRegistry | FontsProvider): void {
+  const provider: FontsProvider = 'fallbackManifest' in source ? registryProvider(source) : source;
+  /** The generation each renderer last received, for the engine's handling
+   *  of answers asked under an earlier generation. */
+  const seen = new Map<number, number>();
+  const handle = (channel: string, fn: (sender: number, ...args: unknown[]) => MaybePromise<EngineFontsResult<unknown>>) =>
+    ipc.handle(channel, (event, ...args: unknown[]) =>
+      ctx.isTrustedSender(event) ? fn(event.sender?.id ?? 0, ...args) : null);
+
+  handle(ENGINE_FONTS_IPC.answer, (sender, queries) =>
+    isText(queries, ENGINE_FONTS_LIMITS.queryJsonChars)
+      ? run(() => provider.answer(queries, seen.get(sender) ?? null), (json) => {
+          const generation = answerGeneration(json);
+          if (generation !== null) seen.set(sender, generation);
+        })
+      : invalid('queries'));
+  handle(ENGINE_FONTS_IPC.subset, (_, blob, index) => (typeof blob === 'string' && BLOB_KEY.test(blob) && isIndex(index) ? run(() => provider.subset(blob, index)) : invalid('subset key')));
+  handle(ENGINE_FONTS_IPC.manifest, (_, base) => (isText(base, ENGINE_FONTS_LIMITS.familyChars) ? run(() => provider.manifest(base)) : invalid('family')));
+  handle(ENGINE_FONTS_IPC.familyFaces, (_, family) => (isText(family, ENGINE_FONTS_LIMITS.familyChars) ? run(() => provider.familyFaces(family)) : invalid('family')));
+  handle(ENGINE_FONTS_IPC.addProjectFont, (_, family, data, desc, index) => {
     const bytes = fontBytes(data);
     const d = descriptors(desc);
     if (!isText(family, ENGINE_FONTS_LIMITS.familyChars) || !bytes || !d || (index !== undefined && !isIndex(index))) return invalid('project font');
-    return run(() => {
-      registry.addProjectFont(family, bytes, d, index as number | undefined);
-      return registry.generation;
-    });
+    return run(() => provider.addProjectFont(family, bytes, d, index as number | undefined));
   });
-  handle(ENGINE_FONTS_IPC.setFontSource, (family, data) => {
+  handle(ENGINE_FONTS_IPC.setFontSource, (_, family, data) => {
     const bytes = fontBytes(data);
     if (!isText(family, ENGINE_FONTS_LIMITS.familyChars) || !bytes) return invalid('font source');
-    return run(() => {
-      registry.setFontSource(family, bytes);
-      return registry.generation;
-    });
+    return run(() => provider.setFontSource(family, bytes));
   });
-  handle(ENGINE_FONTS_IPC.clearProjectFonts, () =>
-    run(() => {
-      registry.clearProjectFonts();
-      return registry.generation;
-    })
-  );
-  handle(ENGINE_FONTS_IPC.generation, () => run(() => registry.generation));
+  handle(ENGINE_FONTS_IPC.clearProjectFonts, () => run(() => provider.clearProjectFonts()));
+  handle(ENGINE_FONTS_IPC.generation, () => run(() => provider.generation()));
 }
 
 export interface EngineFontsSetup {
-  ipc: Pick<IpcMain, 'handle'>;
+  ipc: IpcLike;
   ctx: EngineFontsContext;
   env: NodeJS.ProcessEnv;
   appPath: string;
@@ -168,8 +221,11 @@ export interface EngineFontsSetup {
   load?: (file: string) => unknown;
 }
 
-/** Behind the flag: loads the registry and registers its channels. Returns the registry, or null when off or unavailable. */
+/** Main's own registry, behind POWERMOVE_ENGINE_FONTS=1 with "Use New
+ *  Engine" off. Returns the registry, or null when off, unavailable, or when
+ *  the engine's font service already serves the channels. */
 export function setupEngineFonts({ ipc, ctx, env, appPath, log = console.warn, load }: EngineFontsSetup): NativeFontRegistry | null {
+  if (owners.get(ipc) === 'engine') return null;
   if (!engineFontsEnabled(env)) return null;
   const file = bridgeAddonPath(env, appPath);
   if (!existsSync(file)) {
@@ -179,9 +235,327 @@ export function setupEngineFonts({ ipc, ctx, env, appPath, log = console.warn, l
   try {
     const registry = loadNativeFontRegistry(file, load);
     registerEngineFontsIpc(ipc, ctx, registry);
+    owners.set(ipc, 'main');
     return registry;
   } catch (error) {
-    log(`[engine-fonts] could not load the font registry from ${file}: ${error instanceof Error ? error.message : String(error)}`);
+    log(`[engine-fonts] could not load the font registry from ${file}: ${message(error)}`);
     return null;
   }
+}
+
+/* ── The engine's font service (Use New Engine) ──────────────────────── */
+
+/** Operations of the font port's wire format (pm-node `fonts::wire::Op`). */
+export const FONT_OP = {
+  open: 1,
+  answer: 2,
+  subset: 3,
+  manifest: 4,
+  familyFaces: 5,
+  addProjectFont: 6,
+  setFontSource: 7,
+  clearProjectFonts: 8,
+  generation: 9,
+  familyNames: 10
+} as const;
+
+/** Reply statuses (pm-node `fonts::wire::Status`). */
+export const FONT_STATUS = { json: 0, bytes: 1, error: 2 } as const;
+
+type FontOp = (typeof FONT_OP)[keyof typeof FONT_OP];
+
+const utf8 = new TextEncoder();
+const fromUtf8 = new TextDecoder('utf-8', { fatal: true });
+
+/** `id u32 LE | op u8 | json length u32 LE | JSON | binary tail`. */
+export function encodeFontRequest(id: number, op: FontOp, json: string, tail?: Uint8Array): Uint8Array {
+  const text = utf8.encode(json);
+  const out = new Uint8Array(9 + text.byteLength + (tail?.byteLength ?? 0));
+  const view = new DataView(out.buffer);
+  view.setUint32(0, id, true);
+  view.setUint8(4, op);
+  view.setUint32(5, text.byteLength, true);
+  out.set(text, 9);
+  if (tail) out.set(tail, 9 + text.byteLength);
+  return out;
+}
+
+/** `id u32 LE | status u8 | payload`, or null when it is not a reply. */
+export function decodeFontReply(data: unknown): { id: number; status: number; payload: Uint8Array } | null {
+  if (!(data instanceof Uint8Array) || data.byteLength < 5) return null;
+  const status = data[4]!;
+  if (status !== FONT_STATUS.json && status !== FONT_STATUS.bytes && status !== FONT_STATUS.error) return null;
+  return { id: new DataView(data.buffer, data.byteOffset, 4).getUint32(0, true), status, payload: data.subarray(5) };
+}
+
+/** Changes a restarted engine must see again, in order. */
+type ProjectChange = { op: typeof FONT_OP.addProjectFont | typeof FONT_OP.setFontSource; json: string; bytes: Uint8Array };
+
+type Pending = {
+  op: FontOp;
+  json: string;
+  tail: Uint8Array | undefined;
+  /** The open and the replay: sent again by every new port, never requeued. */
+  internal: boolean;
+  resolve: (reply: { status: number; payload: Uint8Array }) => void;
+  reject: (error: Error) => void;
+  timer: { cancel(): void } | null;
+};
+
+export type EngineFontClientOptions = {
+  log?: (level: 'info' | 'warn' | 'error', message: string) => void;
+  /** How long a request may wait for the engine (queued while it restarts). */
+  timeoutMs?: number;
+  schedule?: (fn: () => void, ms: number) => { cancel(): void };
+};
+
+const MUTATING = new Set<FontOp>([FONT_OP.addProjectFont, FONT_OP.setFontSource, FONT_OP.clearProjectFonts]);
+
+/**
+ * Main's end of the font port to the interactive engine's font service.
+ *
+ * Requests made while the engine is down (starting, or restarting after a
+ * crash) wait for the next port. Every new port opens with a generation
+ * base above every generation main has seen, then gets the project fonts
+ * replayed, so a restarted engine never reuses an earlier launch's
+ * generations: the renderer sees a new generation and starts its answers
+ * again. Read-only requests in flight when a port goes away are sent again
+ * on the next one; project font changes in flight are already in the
+ * replay and settle with the replay's generation.
+ */
+export class EngineFontClient implements FontsProvider {
+  private port: PortLike | null = null;
+  private nextId = 1;
+  private pending = new Map<number, Pending>();
+  /** Requests waiting for a port, in order. */
+  private queue: Pending[] = [];
+  private project: ProjectChange[] = [];
+  private maxGeneration = 0;
+  private readonly log: NonNullable<EngineFontClientOptions['log']>;
+  private readonly timeoutMs: number;
+  private readonly schedule: NonNullable<EngineFontClientOptions['schedule']>;
+
+  constructor(options: EngineFontClientOptions = {}) {
+    this.log = options.log ?? (() => {});
+    this.timeoutMs = options.timeoutMs ?? 30_000;
+    this.schedule = options.schedule ?? ((fn, ms) => {
+      const t = setTimeout(fn, ms);
+      return { cancel: () => clearTimeout(t) };
+    });
+  }
+
+  /** Whether a font port to a running engine is connected. */
+  get connected(): boolean {
+    return this.port !== null;
+  }
+
+  /** The highest registry generation any reply carried. */
+  get generationSeen(): number {
+    return this.maxGeneration;
+  }
+
+  /** A new font port (an engine launch). Replaces the current one. */
+  connect(port: PortLike): void {
+    const previous = this.port;
+    this.port = port;
+    if (previous) previous.close();
+    this.requeueInFlight();
+    port.on('message', (event) => this.onReply(port, event.data));
+    port.on('close', () => {
+      if (this.port !== port) return;
+      this.port = null;
+      this.requeueInFlight();
+    });
+    port.start();
+    // The open and the replay go first; queued requests follow in order.
+    const base = this.maxGeneration + 1;
+    this.send(this.internal(FONT_OP.open, JSON.stringify({ generationBase: base }), undefined));
+    for (const change of this.project) this.send(this.internal(change.op, change.json, change.bytes));
+    const queued = this.queue;
+    this.queue = [];
+    for (const p of queued) this.send(p);
+  }
+
+  /** The port went away for good (the engine stopped). Waiting requests fail. */
+  disconnect(reason = 'the interactive engine stopped'): void {
+    this.port?.close();
+    this.port = null;
+    const all = [...this.pending.values(), ...this.queue];
+    this.pending.clear();
+    this.queue = [];
+    for (const p of all) {
+      p.timer?.cancel();
+      p.reject(new Error(reason));
+    }
+  }
+
+  answer(queries: string, known: number | null): Promise<string> {
+    // `queries` is the renderer's JSON array; splice it in without parsing.
+    const json = `{"queries":${queries}${known === null ? '' : `,"known":${known}`}}`;
+    return this.call(FONT_OP.answer, json).then((r) => this.json(r));
+  }
+
+  subset(blob: string, index: number): Promise<Uint8Array> {
+    return this.call(FONT_OP.subset, JSON.stringify({ blob, index })).then((r) => {
+      if (r.status !== FONT_STATUS.bytes) throw new Error('the font service sent no subset bytes');
+      return r.payload;
+    });
+  }
+
+  manifest(base: string): Promise<string> {
+    return this.call(FONT_OP.manifest, JSON.stringify({ base })).then((r) => this.json(r));
+  }
+
+  familyFaces(family: string): Promise<string> {
+    return this.call(FONT_OP.familyFaces, JSON.stringify({ family })).then((r) => this.json(r));
+  }
+
+  familyNames(): Promise<string[]> {
+    return this.call(FONT_OP.familyNames, '{}').then((r) => JSON.parse(this.json(r)) as string[]);
+  }
+
+  addProjectFont(family: string, data: Uint8Array, descriptors: FontFaceDescriptors, index: number | undefined): Promise<number> {
+    const json = JSON.stringify({ family, ...descriptors, ...(index === undefined ? {} : { index }) });
+    return this.change({ op: FONT_OP.addProjectFont, json, bytes: data.slice() });
+  }
+
+  setFontSource(family: string, data: Uint8Array): Promise<number> {
+    return this.change({ op: FONT_OP.setFontSource, json: JSON.stringify({ family }), bytes: data.slice() });
+  }
+
+  clearProjectFonts(): Promise<number> {
+    this.project = [];
+    return this.call(FONT_OP.clearProjectFonts, '{}').then((r) => this.generationOf(r));
+  }
+
+  generation(): Promise<number> {
+    return this.call(FONT_OP.generation, '{}').then((r) => this.generationOf(r));
+  }
+
+  /** A project font change. It joins the replay when sent (so a restart
+   *  while it is in flight replays it) and leaves it if the engine refuses
+   *  it (data that is not a font, invalid descriptors). */
+  private change(change: ProjectChange): Promise<number> {
+    this.project.push(change);
+    return this.call(change.op, change.json, change.bytes).then(
+      (r) => this.generationOf(r),
+      (error: unknown) => {
+        this.project = this.project.filter((c) => c !== change);
+        throw error;
+      }
+    );
+  }
+
+  private json(reply: { status: number; payload: Uint8Array }): string {
+    if (reply.status !== FONT_STATUS.json) throw new Error('the font service sent no JSON');
+    const text = fromUtf8.decode(reply.payload);
+    const generation = answerGeneration(text);
+    if (generation !== null) this.maxGeneration = Math.max(this.maxGeneration, generation);
+    return text;
+  }
+
+  private generationOf(reply: { status: number; payload: Uint8Array }): number {
+    const value = (JSON.parse(this.json(reply)) as { generation?: unknown }).generation;
+    if (typeof value !== 'number') throw new Error('the font service sent no generation');
+    this.maxGeneration = Math.max(this.maxGeneration, value);
+    return value;
+  }
+
+  /** The open and replayed changes: their replies only move the generation. */
+  private internal(op: FontOp, json: string, tail: Uint8Array | undefined): Pending {
+    return {
+      op,
+      json,
+      tail,
+      internal: true,
+      resolve: (reply) => {
+        if (reply.status === FONT_STATUS.error) {
+          this.log('warn', `[engine-fonts] the engine refused a replayed project font: ${fromUtf8.decode(reply.payload)}`);
+          return;
+        }
+        try {
+          if (reply.status === FONT_STATUS.json) this.generationOf(reply);
+        } catch (error) {
+          this.log('warn', `[engine-fonts] ${message(error)}`);
+        }
+      },
+      reject: () => {},
+      timer: null
+    };
+  }
+
+  private call(op: FontOp, json: string, tail?: Uint8Array): Promise<{ status: number; payload: Uint8Array }> {
+    return new Promise((resolve, reject) => {
+      const p: Pending = {
+        op,
+        json,
+        tail,
+        internal: false,
+        resolve: (reply) => {
+          if (reply.status === FONT_STATUS.error) reject(new Error(fromUtf8.decode(reply.payload)));
+          else resolve(reply);
+        },
+        reject,
+        timer: null
+      };
+      p.timer = this.schedule(() => {
+        this.queue = this.queue.filter((q) => q !== p);
+        for (const [id, q] of this.pending) if (q === p) this.pending.delete(id);
+        reject(new Error(`the font service did not answer within ${this.timeoutMs} ms`));
+      }, this.timeoutMs);
+      if (this.port) this.send(p);
+      else this.queue.push(p);
+    });
+  }
+
+  private send(p: Pending): void {
+    const id = this.nextId++;
+    if (this.nextId > 0xffff_ffff) this.nextId = 1;
+    this.pending.set(id, p);
+    this.port!.postMessage(encodeFontRequest(id, p.op, p.json, p.tail));
+  }
+
+  private onReply(port: PortLike, data: unknown): void {
+    if (port !== this.port) return;
+    const reply = decodeFontReply(data);
+    if (!reply) {
+      this.log('warn', '[engine-fonts] a malformed message on the font port was dropped');
+      return;
+    }
+    const p = this.pending.get(reply.id);
+    if (!p) return;
+    this.pending.delete(reply.id);
+    p.timer?.cancel();
+    p.resolve(reply);
+  }
+
+  /** In-flight requests of a port that went away: read-only ones go back in
+   *  the queue; project font changes are in the replay already, so they
+   *  settle with the generation after the next port's replay. The open and
+   *  the replay itself are sent again by the next port. */
+  private requeueInFlight(): void {
+    const inFlight = [...this.pending.values()];
+    this.pending.clear();
+    const again = inFlight.filter((p) => !p.internal);
+    for (const p of again) {
+      if (!MUTATING.has(p.op)) continue;
+      p.op = FONT_OP.generation;
+      p.json = '{}';
+      p.tail = undefined;
+    }
+    this.queue = [...again, ...this.queue];
+  }
+}
+
+/** Installs the engine's font service as the channels' provider (Use New
+ *  Engine on). Main's own registry is then never loaded. Returns the
+ *  uninstall (handlers removed). */
+export function installEngineFontService(ipc: IpcLike & Pick<IpcMain, 'removeHandler'>, ctx: EngineFontsContext, client: EngineFontClient): () => void {
+  if (owners.has(ipc)) throw new Error('the engine-fonts channels are already registered');
+  registerEngineFontsIpc(ipc, ctx, client);
+  owners.set(ipc, 'engine');
+  return () => {
+    for (const channel of Object.values(ENGINE_FONTS_IPC)) ipc.removeHandler(channel);
+    owners.delete(ipc);
+  };
 }
