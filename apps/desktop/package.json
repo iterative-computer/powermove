@@ -11,6 +11,7 @@
     "build": "electron-vite build",
     "build:engine": "node scripts/build-engine-addon.mjs",
     "test:engine-host": "node scripts/engine-host-integration.mjs",
+    "test:frame-bridge": "node scripts/frame-bridge-integration.mjs",
     "preview": "electron-vite preview",
     "test": "vitest run",
     "test:unit": "vitest run",

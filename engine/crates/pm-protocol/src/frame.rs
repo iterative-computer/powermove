@@ -416,10 +416,58 @@ pub struct FrameDescriptor {
     pub quality: FrameQuality,
     pub overlay: Option<OverlayGeometry>,
     pub depth_id: Option<DepthIdSurface>,
+    /// The viewer state the frame shows ([`ViewerState::view_seq`]): with
+    /// `revision`, it tags the frame so overlays drawn from its geometry match
+    /// its pixels during view gestures (zoom, pan, orbit, walk).
+    pub view_seq: Seq,
+    /// `Some`: a timed frame, shown from `pts` for this long while the clock
+    /// runs (playback); the viewer's jitter buffer presents it by predicted
+    /// display time. `None`: shown at the next refresh (paused frames, scrub,
+    /// gestures).
+    pub duration: Option<Ticks>,
 }
 
-/// The viewer is done with a frame: `VideoFrame.close()` and the imported
-/// texture's per-use release callback both happened.
+impl Validate for FrameDescriptor {
+    fn validate(&self) -> Result<(), Violation> {
+        const C: ContractId = ContractId::Frame;
+        ensure(self.duration.is_none_or(|d| d.get() > 0), C, || {
+            "a timed frame lasts a positive time".into()
+        })?;
+        ensure(
+            matches!(
+                self.format,
+                SurfaceFormat::Bgra8Unorm | SurfaceFormat::Rgba16Float
+            ),
+            C,
+            || "viewer frames are bgra8 or rgba16float".into(),
+        )?;
+        if let Some(overlay) = &self.overlay {
+            let finite = |v: f64| v.is_finite();
+            ensure(
+                [
+                    overlay.viewport.x,
+                    overlay.viewport.y,
+                    overlay.viewport.width,
+                    overlay.viewport.height,
+                ]
+                .into_iter()
+                .all(finite)
+                    && overlay
+                        .layers
+                        .iter()
+                        .all(|l| l.bounds.iter().flatten().copied().all(finite)),
+                C,
+                || "overlay geometry must be finite".into(),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// The viewer is done with a frame: it called `VideoFrame.close()` after
+/// submitting the GPU work that read it, and that work completed
+/// (`queue.onSubmittedWorkDone()`). The per-use release callback is not a
+/// completion signal (S1: it runs before the GPU finished reading).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
@@ -445,6 +493,13 @@ pub struct ViewerState {
     pub view: Option<ViewOverride>,
     /// Play Every Frame (viewer menu check item).
     pub play_every_frame: bool,
+    /// The canvas's display can show values above 1.0 (CSS
+    /// `dynamic-range: high`): the engine then presents through an `rgbaf16`
+    /// pool (amendment 4).
+    pub edr: bool,
+    /// Increases whenever the viewer state changes; descriptors echo the
+    /// state they show.
+    pub view_seq: Seq,
 }
 
 impl Validate for ViewerState {

@@ -21,6 +21,8 @@ export function selectionOutlineColor(project: any): string {
 
 import { beginTextEdit, type TextEditOptions, type TextEditSession } from './text-editor';
 import { drawEditablePaths, startPathEdit } from './path-editing';
+import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, ViewerPresentation, type EngineViewerService } from './engine-present/presentation';
+import { viewParamsFor } from './engine-present/view-params';
 /* Ported from js/ui/viewer.js — behavior-preserving. */
 export const viewerPanelOptions = {
   title: 'Composition', flush: true, noscroll: true, headless: true, hideMoveHandle: false,
@@ -777,12 +779,53 @@ const displayViewport = (viewport: PreviewViewport, zoom = viewport.cssWidth / v
 };
 const eventOffs: Array<() => void> = [];
 
+/* Engine presentation, behind "Use New Engine": present only when the
+   kernel's engine connection registered `engine.viewer` (plan section 18). */
+let enginePresentation: ViewerPresentation | null = null;
+let engineService: EngineViewerService | null = null;
+let engineFrameTag = '';
+const syncEnginePresentation = () => {
+  if (disposed || !V.stage || !V.ov) return;
+  const service = api.services.get<EngineViewerService>(ENGINE_VIEWER_SERVICE);
+  if (enginePresentation && service !== engineService) {
+    // The service went away (engine off) or was replaced: detach; the
+    // current engine's canvas underneath shows until a new one presents.
+    enginePresentation.dispose(); enginePresentation = null; V.enginePresentation = null; engineFrameTag = '';
+  }
+  engineService = service;
+  if (!enginePresentation) {
+    if (!service) return;
+    const presentation = new ViewerPresentation({ service, stage: V.stage, before: V.ov, log: (level, message) => api.log(level, message) });
+    // Overlays redraw at each new frame tag (revision, view sequence), so
+    // handles drawn from the frame's geometry never lead its pixels.
+    presentation.onPresented((frame) => {
+      const tag = `${frame.revision}:${frame.viewSeq}`;
+      if (tag === engineFrameTag) return;
+      engineFrameTag = tag;
+      schedulePresentation();
+    });
+    enginePresentation = presentation;
+    V.enginePresentation = presentation;
+  }
+  const scene = api.scene3d?.viewport?.state?.();
+  enginePresentation.update(viewParamsFor({
+    shown: V.shown, fit: V.fit, pan: V.pan, previewResolution: api.transport.previewResolution,
+    scene3d: scene ? { hasScene: scene.hasScene, shading: scene.shading, xray: scene.xray } : null,
+  }));
+};
+/** The engine frame on screen: its tags and overlay geometry in stage CSS pixels. */
+V.engineFrame = () => {
+  const frame = enginePresentation?.presenting ? enginePresentation.latest : null;
+  return frame ? { seq: frame.seq, revision: frame.revision, viewSeq: frame.viewSeq, pts: frame.pts, overlay: enginePresentation!.overlayInCss(frame) } : null;
+};
+
 let viewport3d:ReturnType<PowermoveAPI['scene3d']['viewport']['attach']>|null=null;
 let viewportHeader:any=null,viewportHeaderHost:HTMLElement|null=null,viewportPanels:any[]=[];
 const isModel3D=(layer:any)=>['powermove.3d.object','powermove.3d.light','powermove.3d.camera'].includes(layer?.d?.definition) || !!api.scene3d?.isGroup?.(layer?.id);
 const disposeRuntime = () => {
   if (disposed) return;
   disposed = true;
+  enginePresentation?.dispose(); enginePresentation = null; V.enginePresentation = null; engineFrameTag = ''; engineService = null;
   viewport3d?.dispose();viewport3d=null;V.viewport3d=null;V.sceneGizmo=null;
   if(viewportHeader)void unmount(viewportHeader);viewportHeaderHost?.remove();for(const panel of viewportPanels.splice(0))void unmount(panel);
   activeDrag?.cancel(); activeDrag = null;
@@ -980,6 +1023,7 @@ V.layout = (panOnly = false, gesture = panOnly === true) => {
   if (V.ov.height !== overlayHeight) V.ov.height = overlayHeight;
   V.ov.style.width = r.width + 'px'; V.ov.style.height = r.height + 'px';
   V.updateRecovery?.();
+  syncEnginePresentation();
   /* Geometry changes immediately during zoom/pan. Repaint handles and paths in
      the same event so they never lag or blink while the GL frame catches up. */
   drawOverlay();
@@ -1023,7 +1067,15 @@ const listen = <K extends Parameters<PowermoveAPI['events']['on']>[0]>(event: K,
 };
 listen('project:changed', () => { viewportPlan = null; V.layout(); });
 listen('extensions:changed', () => { viewportPlan = null; V.layout(); });
+// The engine connection registered or disposed `engine.viewer`: attach or
+// detach now, without a full layout.
+const onEngineViewerChanged = () => syncEnginePresentation();
+window.addEventListener(ENGINE_VIEWER_CHANGED, onEngineViewerChanged);
+eventOffs.push(() => window.removeEventListener(ENGINE_VIEWER_CHANGED, onEngineViewerChanged));
 listen('layout', () => V.layout());
+// Shading and X-ray are part of the engine's view override.
+const viewportChange = api.scene3d?.viewport?.onChange?.(() => syncEnginePresentation());
+if (viewportChange) eventOffs.push(() => viewportChange.dispose());
 listen('selection', () => { invalidate('render'); drawOverlay(); scheduleHover(); });
 let observedQuality = api.transport.quality;
 listen('time', () => {

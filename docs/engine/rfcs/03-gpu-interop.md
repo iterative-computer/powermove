@@ -101,3 +101,22 @@ trait methods; if it needs a method, that is a bump.
 3. Whether encoder input needs a 4:4:4 Y′CbCr layout for ProRes 4444 at
    12 bits (`y416` input to VideoToolbox) or always goes through RGB. S2
    decides, together with the pipeline transparency bar.
+
+## Implementation notes (production bridge, Phase 2)
+
+- The export half is `pm_gpu::bridge_out`: `ExportedSurface::create` takes
+  this contract's `SurfaceRequest` and returns the IOSurface and the wgpu
+  texture over it; `SurfacePool::descriptor` is this contract's
+  `SurfacePool`. It is not yet a `GpuInterop` impl: `decode_in` (media) is
+  the import half, and one impl over a shared device type waits for
+  `encoder_input` and `import_blender_surface`.
+- `pm-gpu`'s `decode_in` is behind a default `decode-in` feature; the
+  interactive engine's presenter builds without it so the engine addon does
+  not link FFmpeg before media reaches the engine.
+- The viewer display transform rounds `rgbaf16` results to f16
+  (`quantizeToF16`) before the render-target write: Apple GPUs truncate on
+  those writes, which after the display-p3 conversion cost up to 0.97 CV10
+  on a grey ramp.
+- Electron's `importSharedTexture` keeps no reference to the
+  `IOSurfaceRef` in main (retain count 1 with an import alive); the GPU
+  process holds its own.

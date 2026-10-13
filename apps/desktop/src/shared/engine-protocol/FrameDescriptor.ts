@@ -27,4 +27,17 @@ pts: Ticks,
 /**
  * The exact revision rendered (≥ the request's minimum).
  */
-revision: Revision, colorSpace: ViewerColorSpace, format: SurfaceFormat, quality: FrameQuality, overlay: OverlayGeometry | null, depthId: DepthIdSurface | null, };
+revision: Revision, colorSpace: ViewerColorSpace, format: SurfaceFormat, quality: FrameQuality, overlay: OverlayGeometry | null, depthId: DepthIdSurface | null, 
+/**
+ * The viewer state the frame shows ([`ViewerState::view_seq`]): with
+ * `revision`, it tags the frame so overlays drawn from its geometry match
+ * its pixels during view gestures (zoom, pan, orbit, walk).
+ */
+viewSeq: Seq, 
+/**
+ * `Some`: a timed frame, shown from `pts` for this long while the clock
+ * runs (playback); the viewer's jitter buffer presents it by predicted
+ * display time. `None`: shown at the next refresh (paused frames, scrub,
+ * gestures).
+ */
+duration: Ticks | null, };

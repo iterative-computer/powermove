@@ -6,6 +6,10 @@
  * as main's generated types: draft contracts interoperate only between
  * equal builds, so a stale addon would fail every handshake.
  *
+ * Also builds main's pm-bridge addon (the frame bridge and the font
+ * registry) into native/pm_bridge.node for packaging and
+ * engine/target/pm-bridge/pm_bridge.node, where development runs load it.
+ *
  *   node scripts/build-engine-addon.mjs [--debug]
  */
 import { execFileSync } from 'node:child_process';
@@ -18,8 +22,14 @@ const engine = path.resolve(desktop, '../../engine');
 const debug = process.argv.includes('--debug');
 const profile = debug ? 'debug' : 'release';
 
-const cargo = `. ./env.sh && exec cargo build ${debug ? '' : '--release '}--locked -p pm-node --features node`;
+const cargo = `. ./env.sh && cargo build ${debug ? '' : '--release '}--locked -p pm-node --features node && exec cargo build ${debug ? '' : '--release '}--locked -p pm-bridge --lib --features node`;
 execFileSync('/bin/sh', ['-c', cargo], { cwd: engine, stdio: 'inherit' });
+
+const bridgeBuilt = path.join(engine, 'target', profile, 'libpm_bridge.dylib');
+for (const bridgeTarget of [path.join(desktop, 'native', 'pm_bridge.node'), path.join(engine, 'target', 'pm-bridge', 'pm_bridge.node')]) {
+  mkdirSync(path.dirname(bridgeTarget), { recursive: true });
+  copyFileSync(bridgeBuilt, bridgeTarget);
+}
 
 const built = path.join(engine, 'target', profile, 'libpm_node.dylib');
 const target = path.join(desktop, 'native', 'pm_node.node');
@@ -32,4 +42,7 @@ const actual = addon.buildId();
 if (!expected || actual !== expected) {
   throw new Error(`pm_node.node speaks ${actual}, but main's generated types are ${expected}. Regenerate with pm-protocol-gen and rebuild.`);
 }
+const bridge = createRequire(import.meta.url)(path.join(desktop, 'native', 'pm_bridge.node'));
+if (typeof bridge.BridgeHost !== 'function') throw new Error('pm_bridge.node does not export BridgeHost');
+process.stdout.write(`pm_bridge.node (${profile}, ${(statSync(bridgeBuilt).size / 1e6).toFixed(1)} MB) loads\n`);
 process.stdout.write(`pm_node.node (${profile}, ${(statSync(target).size / 1e6).toFixed(1)} MB) speaks ${actual}\n`);

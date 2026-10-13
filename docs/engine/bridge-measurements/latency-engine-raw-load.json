@@ -1,0 +1,143 @@
+{
+  "run": "latency-engine-raw-load",
+  "config": {
+    "scenario": "latency",
+    "mode": "engine",
+    "load": true,
+    "edr": "auto",
+    "rawInput": true,
+    "durationMs": 20000,
+    "inputModes": [
+      "drag",
+      "orbit",
+      "walk"
+    ]
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "machineLoad": {
+    "before": [
+      4.62353515625,
+      5.1376953125,
+      5.1376953125
+    ],
+    "after": [
+      5.30419921875,
+      5.216796875,
+      5.1640625
+    ]
+  },
+  "clock": {
+    "rttUs": 45,
+    "offsetUs": 90439933117.49998
+  },
+  "load": {
+    "documentBytes": 7061889,
+    "longTasks": {
+      "n": 66,
+      "ms": {
+        "n": 66,
+        "p50": 50.00029200000063,
+        "max": 50.05020800000011
+      }
+    },
+    "autosaves": {
+      "n": 33,
+      "mainThreadMs": {
+        "n": 33,
+        "p50": 106.99899999999616,
+        "max": 128.1911250000012
+      },
+      "totalMs": {
+        "n": 33,
+        "p50": 110.50479199999972,
+        "max": 181.6526249999988
+      }
+    },
+    "agent": {
+      "requests": 1211,
+      "replies": 1211,
+      "replyBytes": 95296214,
+      "mainMsP50": 0.08583399999770336
+    },
+    "resizes": {
+      "n": 13,
+      "steps": 793
+    },
+    "eventCount": 112
+  },
+  "bridge": {
+    "launch": 1,
+    "policy": "unsigned-dev-bypass",
+    "name": "com.powermove.engine-bridge.82755a9f6665e842df50ba7c03091191",
+    "accepted": {
+      "pid": 70662,
+      "pidversion": 1206961
+    },
+    "rejections": 0,
+    "surfaces": 8,
+    "imports": 8,
+    "sends": 8,
+    "sendFailures": 0,
+    "retired": 0,
+    "allReleased": 0,
+    "reclaimed": 0,
+    "gone": false,
+    "held": {
+      "count": 8,
+      "bytes": 530841600
+    },
+    "live": 8
+  },
+  "latency": {
+    "drag": {
+      "events": 2401,
+      "dispatches": 2212,
+      "draws": 1861,
+      "unmatched": 0,
+      "unpresented": 0,
+      "pointerToPixelMs": {
+        "n": 2401,
+        "p50": 26.47,
+        "p95": 55.58,
+        "p99": 110.07,
+        "max": 135.24
+      }
+    },
+    "orbit": {
+      "events": 2401,
+      "dispatches": 2211,
+      "draws": 2036,
+      "unmatched": 0,
+      "unpresented": 1,
+      "pointerToPixelMs": {
+        "n": 2400,
+        "p50": 29.58,
+        "p95": 54.86,
+        "p99": 104.85,
+        "max": 129.78
+      }
+    },
+    "walk": {
+      "events": 2401,
+      "dispatches": 2208,
+      "draws": 1633,
+      "unmatched": 0,
+      "unpresented": 0,
+      "pointerToPixelMs": {
+        "n": 2401,
+        "p50": 23.78,
+        "p95": 57.54,
+        "p99": 115.02,
+        "max": 132.21
+      }
+    }
+  }
+}

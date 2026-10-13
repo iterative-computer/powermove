@@ -2,7 +2,9 @@
 import type { Seq } from "./Seq";
 
 /**
- * The viewer is done with a frame: `VideoFrame.close()` and the imported
- * texture's per-use release callback both happened.
+ * The viewer is done with a frame: it called `VideoFrame.close()` after
+ * submitting the GPU work that read it, and that work completed
+ * (`queue.onSubmittedWorkDone()`). The per-use release callback is not a
+ * completion signal (S1: it runs before the GPU finished reading).
  */
 export type FrameRelease = { poolIndex: number, seq: Seq, };

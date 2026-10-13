@@ -1,0 +1,381 @@
+//! Viewer traffic reaches the installed presenter only for sessions the
+//! port owns; everything else keeps today's answers.
+
+use std::sync::{Arc, Mutex};
+
+use pm_engine::engine::testing::{hello, sent};
+use pm_engine::engine::{Engine, EngineConfig, PeerKind};
+use pm_engine::lease::Category;
+use pm_engine::present::{FramePresenter, PresentContext};
+use pm_protocol::clock::TransportCommand;
+use pm_protocol::codec;
+use pm_protocol::color::{OutputColor, Precision, ViewerColorSpace};
+use pm_protocol::common::{
+    ByteSize, HostMicros, PlaybackRate, RequestId, Revision, Seq, SessionId, Size, Ticks,
+};
+use pm_protocol::envelope::{
+    Envelope, Event, Message, OpenSession, Request, Response, SessionRole,
+};
+use pm_protocol::error::{EngineError, EngineProcess, ErrorCode, ErrorScope};
+use pm_protocol::frame::{
+    FramePurpose, FrameRelease, FrameRequest, MediaPreference, MotionBlurKind, PreviewResolution,
+    ViewerState,
+};
+use pm_protocol::host::PortId;
+use pm_protocol::lease::{Lease, LeaseReason};
+use pm_protocol::priority::PriorityClass;
+use pm_protocol::version::PeerRole;
+
+const HOST: PortId = PortId(1);
+const WINDOW: PortId = PortId(2);
+const OTHER: PortId = PortId(3);
+
+#[derive(Debug, Clone, PartialEq)]
+enum Call {
+    Viewer(PortId, SessionId, u64, Option<Revision>),
+    Release(PortId, SessionId, FrameRelease),
+    Transport(PortId, SessionId, TransportCommand),
+    Render(PortId, SessionId, RequestId, FramePurpose),
+    SessionClosed(PortId, SessionId),
+    PortClosed(PortId),
+}
+
+struct Recorder {
+    calls: Arc<Mutex<Vec<Call>>>,
+    pool_bytes: u64,
+}
+
+impl FramePresenter for Recorder {
+    fn viewer(
+        &mut self,
+        ctx: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        state: ViewerState,
+        revision: Option<Revision>,
+    ) {
+        if !ctx.charge_pool(self.pool_bytes) {
+            ctx.charge_over(self.pool_bytes);
+            ctx.log(pm_engine::LogLevel::Warn, "pool over the lease");
+        }
+        self.calls.lock().unwrap().push(Call::Viewer(
+            port,
+            session,
+            state.view_seq.get(),
+            revision,
+        ));
+    }
+
+    fn release(&mut self, port: PortId, session: SessionId, release: FrameRelease) {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(Call::Release(port, session, release));
+    }
+
+    fn transport(
+        &mut self,
+        _: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        command: TransportCommand,
+    ) {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(Call::Transport(port, session, command));
+    }
+
+    fn render(
+        &mut self,
+        _: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        id: RequestId,
+        request: FrameRequest,
+        _: Option<Revision>,
+    ) -> Result<(), Box<EngineError>> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(Call::Render(port, session, id, request.purpose));
+        if request.output_size.width == 13 {
+            return Err(Box::new(EngineError::new(
+                ErrorCode::Unsupported,
+                ErrorScope::Request { id },
+                "thirteen",
+            )));
+        }
+        Ok(())
+    }
+
+    fn session_closed(&mut self, ctx: &mut PresentContext<'_>, port: PortId, session: SessionId) {
+        ctx.release_pool(self.pool_bytes);
+        self.calls
+            .lock()
+            .unwrap()
+            .push(Call::SessionClosed(port, session));
+    }
+
+    fn port_closed(&mut self, _: &mut PresentContext<'_>, port: PortId) {
+        self.calls.lock().unwrap().push(Call::PortClosed(port));
+    }
+}
+
+fn at(us: u64) -> HostMicros {
+    HostMicros::new(us).unwrap()
+}
+
+fn rid(n: u64) -> RequestId {
+    RequestId::new(n).unwrap()
+}
+
+fn send(engine: &mut Engine, port: PortId, envelope: Envelope) -> Vec<pm_engine::Action> {
+    engine.receive(port, &codec::encode(&envelope).unwrap(), at(10))
+}
+
+fn request(id: u64, body: Request, session: Option<SessionId>) -> Envelope {
+    let mut envelope = Envelope::new(Message::Request { id: rid(id), body });
+    envelope.session = session;
+    envelope
+}
+
+fn event(body: Event, session: Option<SessionId>) -> Envelope {
+    let mut envelope = Envelope::new(Message::Event { body });
+    envelope.session = session;
+    envelope
+}
+
+fn setup(pool_bytes: u64) -> (Engine, Arc<Mutex<Vec<Call>>>, SessionId) {
+    let mut engine = Engine::new(EngineConfig::new(EngineProcess::Interactive));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    engine.set_presenter(Box::new(Recorder {
+        calls: calls.clone(),
+        pool_bytes,
+    }));
+    for (port, kind, role) in [
+        (HOST, PeerKind::Host, PeerRole::Host),
+        (WINDOW, PeerKind::Renderer, PeerRole::Renderer),
+        (OTHER, PeerKind::Renderer, PeerRole::Renderer),
+    ] {
+        engine.attach(port, kind);
+        engine.receive(port, &hello(role), at(0));
+    }
+    let out = send(
+        &mut engine,
+        WINDOW,
+        request(
+            1,
+            Request::OpenSession(OpenSession {
+                document: "doc".into(),
+                process: EngineProcess::Interactive,
+                role: SessionRole::Interactive,
+                color: pm_protocol::color::ProjectColor::DEFAULT,
+            }),
+            None,
+        ),
+    );
+    let session = match &sent(&out, WINDOW)[0].message {
+        Message::Response {
+            body: Response::SessionOpened { session },
+            ..
+        } => *session,
+        other => panic!("{other:?}"),
+    };
+    (engine, calls, session)
+}
+
+fn viewer_state(view_seq: u64) -> ViewerState {
+    ViewerState {
+        composition: "main".into(),
+        size: Size::new(1600, 900),
+        device_pixel_ratio: 2.0,
+        zoom: 0.5,
+        pan: [0.0, 0.0],
+        resolution: PreviewResolution::Automatic,
+        media: MediaPreference::Automatic,
+        color_space: ViewerColorSpace::Srgb,
+        view: None,
+        play_every_frame: false,
+        edr: false,
+        view_seq: Seq::new(view_seq).unwrap(),
+    }
+}
+
+fn frame_request(purpose: FramePurpose, width: u32) -> FrameRequest {
+    FrameRequest {
+        composition: "main".into(),
+        time: Ticks::ZERO,
+        purpose,
+        priority: PriorityClass::Interactive,
+        output_size: Size::new(width, 900),
+        region: None,
+        scale: 1.0,
+        resolution: PreviewResolution::Full,
+        media: MediaPreference::Automatic,
+        color: OutputColor::Viewer {
+            space: ViewerColorSpace::Srgb,
+        },
+        precision: Precision::Float16,
+        motion_blur: MotionBlurKind::PreviewPaused,
+        view: None,
+        draft_3d: true,
+        draft_render: false,
+        depth_id: false,
+        overlay: true,
+    }
+}
+
+#[test]
+fn viewer_traffic_for_an_owned_session_reaches_the_presenter() {
+    let (mut engine, calls, session) = setup(4096);
+    let grant = Lease {
+        process: EngineProcess::Interactive,
+        ack_deadline_ms: 1000,
+        epoch: Seq::new(1).unwrap(),
+        bytes: ByteSize::new(1 << 30).unwrap(),
+        reason: LeaseReason::Initial,
+    };
+    send(
+        &mut engine,
+        HOST,
+        request(1, Request::GrantLease(grant), None),
+    );
+
+    let mut viewer = event(Event::Viewer(viewer_state(3)), Some(session));
+    viewer.revision = Some(Revision::new(7).unwrap());
+    send(&mut engine, WINDOW, viewer);
+    let release = FrameRelease {
+        pool_index: 2,
+        seq: Seq::new(9).unwrap(),
+    };
+    send(
+        &mut engine,
+        WINDOW,
+        event(Event::ReleaseFrame(release), Some(session)),
+    );
+    let play = TransportCommand::Play {
+        rate: PlaybackRate::NORMAL,
+    };
+    send(
+        &mut engine,
+        WINDOW,
+        event(Event::Transport(play), Some(session)),
+    );
+    let out = send(
+        &mut engine,
+        WINDOW,
+        request(
+            5,
+            Request::RenderFrame(frame_request(FramePurpose::Scrub, 1600)),
+            Some(session),
+        ),
+    );
+    assert!(
+        sent(&out, WINDOW).is_empty(),
+        "the presenter answers later: {out:?}"
+    );
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![
+            Call::Viewer(WINDOW, session, 3, Some(Revision::new(7).unwrap())),
+            Call::Release(WINDOW, session, release),
+            Call::Transport(WINDOW, session, play),
+            Call::Render(WINDOW, session, rid(5), FramePurpose::Scrub),
+        ]
+    );
+    assert_eq!(engine.lease().used_in(Category::SurfacePool), 4096);
+}
+
+#[test]
+fn another_ports_session_never_reaches_the_presenter() {
+    let (mut engine, calls, session) = setup(0);
+    let out = send(
+        &mut engine,
+        OTHER,
+        event(Event::Viewer(viewer_state(1)), Some(session)),
+    );
+    assert!(out.iter().any(|a| matches!(a, pm_engine::Action::Log { message, .. } if message.contains("unknown session"))));
+    let out = send(
+        &mut engine,
+        OTHER,
+        request(
+            2,
+            Request::RenderFrame(frame_request(FramePurpose::Viewer, 1600)),
+            Some(session),
+        ),
+    );
+    assert!(
+        matches!(&sent(&out, OTHER)[0].message, Message::Error { error, .. } if error.code == ErrorCode::UnknownSession)
+    );
+    assert!(calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_presenter_refusal_is_answered_and_other_purposes_stay_unsupported() {
+    let (mut engine, _calls, session) = setup(0);
+    let out = send(
+        &mut engine,
+        WINDOW,
+        request(
+            2,
+            Request::RenderFrame(frame_request(FramePurpose::Viewer, 13)),
+            Some(session),
+        ),
+    );
+    assert!(
+        matches!(&sent(&out, WINDOW)[0].message, Message::Error { id, error } if *id == rid(2) && error.message == "thirteen")
+    );
+    let mut thumbnail = frame_request(FramePurpose::Thumbnail, 1600);
+    thumbnail.priority = PriorityClass::Interactive;
+    let out = send(
+        &mut engine,
+        WINDOW,
+        request(3, Request::RenderFrame(thumbnail), Some(session)),
+    );
+    assert!(
+        matches!(&sent(&out, WINDOW)[0].message, Message::Error { error, .. } if error.code == ErrorCode::Unsupported)
+    );
+}
+
+#[test]
+fn closing_a_session_or_its_port_tells_the_presenter() {
+    let (mut engine, calls, session) = setup(100);
+    send(
+        &mut engine,
+        WINDOW,
+        event(Event::Viewer(viewer_state(1)), Some(session)),
+    );
+    let out = send(
+        &mut engine,
+        WINDOW,
+        request(2, Request::CloseSession, Some(session)),
+    );
+    assert!(matches!(
+        &sent(&out, WINDOW)[0].message,
+        Message::Response {
+            body: Response::Ack,
+            ..
+        }
+    ));
+    assert_eq!(engine.lease().used_in(Category::SurfacePool), 0);
+    engine.detach(WINDOW);
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls[1], Call::SessionClosed(WINDOW, session));
+    assert_eq!(calls[2], Call::PortClosed(WINDOW));
+}
+
+#[test]
+fn a_pool_past_the_lease_is_charged_over_and_logged() {
+    let (mut engine, _calls, session) = setup(1 << 20);
+    // No lease granted yet: the pool does not fit, so it is charged over.
+    let out = send(
+        &mut engine,
+        WINDOW,
+        event(Event::Viewer(viewer_state(1)), Some(session)),
+    );
+    assert!(out.iter().any(
+        |a| matches!(a, pm_engine::Action::Log { message, .. } if message == "pool over the lease")
+    ));
+    assert_eq!(engine.lease().used_in(Category::SurfacePool), 1 << 20);
+}

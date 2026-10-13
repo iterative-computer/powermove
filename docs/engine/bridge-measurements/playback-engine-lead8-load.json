@@ -1,0 +1,244 @@
+{
+  "run": "playback-engine-lead8-load",
+  "config": {
+    "scenario": "playback",
+    "mode": "engine",
+    "load": true,
+    "edr": "auto",
+    "rawInput": false,
+    "lead": 8,
+    "durationMs": 60000
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "machineLoad": {
+    "before": [
+      4.517578125,
+      4.74853515625,
+      4.9404296875
+    ],
+    "after": [
+      3.6298828125,
+      4.4560546875,
+      4.81689453125
+    ]
+  },
+  "clock": {
+    "rttUs": 49,
+    "offsetUs": 91489286910.5
+  },
+  "load": {
+    "documentBytes": 7061889,
+    "longTasks": {
+      "n": 63,
+      "ms": {
+        "n": 63,
+        "p50": 50.00041699999929,
+        "max": 50.03916699999991
+      }
+    },
+    "autosaves": {
+      "n": 32,
+      "mainThreadMs": {
+        "n": 32,
+        "p50": 113.7388749999991,
+        "max": 125.86779200000001
+      },
+      "totalMs": {
+        "n": 32,
+        "p50": 118.34970899999826,
+        "max": 179.6875
+      }
+    },
+    "agent": {
+      "requests": 1139,
+      "replies": 1139,
+      "replyBytes": 89630246,
+      "mainMsP50": 0.08550000000104774
+    },
+    "resizes": {
+      "n": 12,
+      "steps": 732
+    },
+    "eventCount": 107
+  },
+  "bridge": {
+    "launch": 1,
+    "policy": "unsigned-dev-bypass",
+    "name": "com.powermove.engine-bridge.9eb71b5a07669c65e659fa239831fe96",
+    "accepted": {
+      "pid": 81676,
+      "pidversion": 1223151
+    },
+    "rejections": 0,
+    "surfaces": 12,
+    "imports": 12,
+    "sends": 12,
+    "sendFailures": 0,
+    "retired": 0,
+    "allReleased": 0,
+    "reclaimed": 0,
+    "gone": false,
+    "held": {
+      "count": 12,
+      "bytes": 796262400
+    },
+    "live": 12
+  },
+  "playback": {
+    "window": {
+      "seconds": 60.05,
+      "displayHz": 120.0006103515625,
+      "reporterFrames": 7741
+    },
+    "frames": {
+      "expected": 3590,
+      "notDrawn": 6,
+      "notPresented": 10,
+      "drops": 16,
+      "presented": 3574,
+      "offSlot": 1218
+    },
+    "jitterAbsMs": {
+      "n": 3574,
+      "p50": 0.174,
+      "p95": 8.421,
+      "p99": 12.622,
+      "max": 58.362
+    },
+    "intervalErrorAbsMs": {
+      "n": 3566,
+      "p50": 0.001,
+      "p95": 8.333,
+      "p99": 8.335,
+      "max": 16.665
+    },
+    "irregularIntervals": 558,
+    "rafToPresentMs": {
+      "n": 3574,
+      "p50": 19.88,
+      "p95": 20.7,
+      "p99": 20.83,
+      "max": 78.54
+    },
+    "missing": [
+      {
+        "k": 1116,
+        "state": "STATE_DROPPED",
+        "near": "longTask"
+      },
+      {
+        "k": 1117,
+        "state": "STATE_DROPPED",
+        "near": "longTask"
+      },
+      {
+        "k": 2009,
+        "state": "STATE_DROPPED",
+        "near": "autosave"
+      },
+      {
+        "k": 2010,
+        "state": "STATE_DROPPED",
+        "near": "autosave"
+      },
+      {
+        "k": 2012,
+        "state": "not-drawn",
+        "near": "autosave"
+      },
+      {
+        "k": 2013,
+        "state": "not-drawn",
+        "near": "autosave"
+      },
+      {
+        "k": 2014,
+        "state": "not-drawn",
+        "near": "autosave"
+      },
+      {
+        "k": 2609,
+        "state": "STATE_DROPPED",
+        "near": "autosave"
+      },
+      {
+        "k": 2610,
+        "state": "STATE_DROPPED",
+        "near": "autosave"
+      },
+      {
+        "k": 2611,
+        "state": "STATE_DROPPED",
+        "near": "autosave"
+      },
+      {
+        "k": 2613,
+        "state": "not-drawn",
+        "near": "autosave"
+      },
+      {
+        "k": 2614,
+        "state": "not-drawn",
+        "near": "autosave"
+      },
+      {
+        "k": 2615,
+        "state": "not-drawn",
+        "near": "autosave"
+      },
+      {
+        "k": 2619,
+        "state": "STATE_DROPPED",
+        "near": "longTask"
+      },
+      {
+        "k": 2858,
+        "state": "STATE_DROPPED",
+        "near": "autosave+longTask+resize"
+      },
+      {
+        "k": 2859,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      }
+    ],
+    "pipelineDepthRefreshes": {
+      "1": 583,
+      "2": 2962,
+      "3": 27,
+      "9": 2
+    },
+    "presenter": {
+      "received": 3706,
+      "drawn": 3692,
+      "dropped": {
+        "late": 6
+      },
+      "released": 3698,
+      "parked": 0,
+      "parkTimeouts": 0,
+      "staleGeneration": 0,
+      "maxQueued": 11,
+      "generation": 1,
+      "sessions": 1,
+      "viewSeq": 1
+    },
+    "receiver": {
+      "launch": 1,
+      "held": 12,
+      "received": 12,
+      "released": 0,
+      "videoFrames": 3706,
+      "misses": 0,
+      "errors": []
+    }
+  }
+}

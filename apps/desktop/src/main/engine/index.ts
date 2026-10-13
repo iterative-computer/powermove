@@ -9,14 +9,16 @@
  * the engines' host requests (native-engine.ts).
  */
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 
-import { MessageChannelMain, utilityProcess, type BrowserWindow, type IpcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
+import { MessageChannelMain, sharedTexture, utilityProcess, webContents, type BrowserWindow, type IpcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 
 import { ENGINE_IPC, type EngineStatusMessage, type StageDocumentRequest, type StageDocumentResult } from '../../shared/engine-ipc';
 import type { EngineProcess } from '../../shared/engine-protocol';
 import type { Log } from './connection';
+import { BRIDGE_ADDON_FILE, FrameBridge, type BridgeAddon, type BridgeLaunch, type SharedTextureLike } from './bridge';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
 import type { ChildLike, PortLike } from './ports';
 
@@ -33,6 +35,34 @@ export function engineAddonPath(options: { isPackaged: boolean; resourcesPath: s
   return options.isPackaged
     ? path.join(options.resourcesPath, 'app.asar.unpacked', 'native', ADDON_FILE)
     : path.join(options.appPath, 'native', ADDON_FILE);
+}
+
+/** Where the pm-bridge addon is (the frame bridge in main, section 18):
+ *  POWERMOVE_PM_BRIDGE, else unpacked from the asar in a packaged app, else
+ *  the development build that the font registry also loads
+ *  (engine/target/pm-bridge, engine-fonts.ts), so main loads one copy. */
+export function bridgeAddonPath(options: { isPackaged: boolean; resourcesPath: string; appPath: string; env: Record<string, string | undefined> }): string {
+  const override = options.env['POWERMOVE_PM_BRIDGE'];
+  if (override && path.isAbsolute(override)) return override;
+  return options.isPackaged
+    ? path.join(options.resourcesPath, 'app.asar.unpacked', 'native', BRIDGE_ADDON_FILE)
+    : path.resolve(options.appPath, '../../engine/target/pm-bridge', BRIDGE_ADDON_FILE);
+}
+
+/** Loads pm-bridge, or explains why viewer frames are unavailable. */
+function loadBridgeAddon(file: string, log: Log): BridgeAddon | null {
+  if (!existsSync(file)) {
+    log('warn', `the frame bridge addon is missing at ${file}; the new engine cannot present viewer frames (build it with \`bun run build:engine\`)`);
+    return null;
+  }
+  try {
+    const addon = createRequire(__filename)(file) as BridgeAddon;
+    if (typeof addon.BridgeHost !== 'function') throw new Error('it does not export BridgeHost');
+    return addon;
+  } catch (error) {
+    log('error', `the frame bridge addon at ${file} does not load: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
 }
 
 /** The shared host clock in µs: libuv's hrtime reads the same
@@ -59,6 +89,8 @@ export type InstallNativeEngineOptions = {
 
 export type InstalledNativeEngine = {
   engine: NativeEngine | null;
+  /** The frame bridge, when its addon loaded. */
+  frameBridge?: FrameBridge | null;
   attachWindow(window: BrowserWindow): void;
   dispose(): Promise<void>;
 };
@@ -107,13 +139,36 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   const script = path.join(options.mainDirectory, 'engine-process.js');
   if (!existsSync(addon)) log('error', `the engine addon is missing at ${addon}; build it with \`bun run build:engine\``);
 
+  // The frame bridge (section 18): one per-launch rendezvous for every
+  // interactive engine; surfaces go to the window owning the viewer's port.
+  const bridgeAddon = loadBridgeAddon(bridgeAddonPath({ isPackaged: options.isPackaged, resourcesPath: options.resourcesPath, appPath: options.appPath, env }), log);
+  const frameBridge = bridgeAddon
+    ? new FrameBridge({
+        addon: bridgeAddon,
+        sharedTexture: sharedTexture as unknown as SharedTextureLike,
+        // Only unsigned development builds; a signed main always requires its Team ID.
+        allowUnsignedDev: !options.isPackaged,
+        resolve: (port) => {
+          const id = engine?.clientForPort('interactive', port);
+          const contents = id == null ? null : webContents.fromId(id);
+          return contents && !contents.isDestroyed() ? { frame: contents.mainFrame, owner: contents.id } : null;
+        },
+        log
+      })
+    : null;
+
   engine = new NativeEngine({
     spawn: (process) => {
+      const launch: BridgeLaunch | null = process === 'interactive' ? (frameBridge?.prepareLaunch() ?? null) : null;
       const child = utilityProcess.fork(script, [], {
         serviceName: process === 'interactive' ? 'Powermove Interactive Engine' : 'Powermove Job Engine',
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...env, POWERMOVE_ENGINE_PROCESS: process, POWERMOVE_ENGINE_ADDON: addon }
+        env: { ...env, ...(launch?.env ?? {}), POWERMOVE_ENGINE_PROCESS: process, POWERMOVE_ENGINE_ADDON: addon }
       });
+      if (launch) {
+        child.once('spawn', () => launch.spawned(child.pid));
+        child.once('exit', () => launch.ended());
+      }
       const forward = (level: 'info' | 'warn') => (chunk: Buffer) => {
         for (const line of chunk.toString().split('\n')) if (line.trim()) log(level, `[${process} engine] ${line}`);
       };
@@ -177,15 +232,26 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       attached = true;
     });
     window.once('closed', () => engine?.removeClient(id));
+    // A page that goes away never reports its frame surfaces released.
+    if (frameBridge) {
+      const gone = (): void => frameBridge.receiverGone(id);
+      contents.on('did-start-navigation', (details) => {
+        if (details.isMainFrame && !details.isSameDocument) gone();
+      });
+      contents.on('render-process-gone', gone);
+      contents.once('destroyed', gone);
+    }
   };
 
   return {
     engine,
+    frameBridge,
     attachWindow,
     dispose: async () => {
       options.ipc.removeHandler(ENGINE_IPC.stageDocument);
       options.ipc.removeAllListeners(ENGINE_IPC.definitions);
       await engine?.stop();
+      frameBridge?.dispose();
     }
   };
 }
