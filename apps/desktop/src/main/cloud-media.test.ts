@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -125,4 +126,86 @@ it('validates trust and paths before local recovery', async () => {
   await expect(ipc(service, false).call(IPC.mediaOpenLocalSource, '/tmp/a.mov')).rejects.toThrow('Unauthorized');
   await expect(ipc(service).call(IPC.mediaOpenLocalSource, 'relative.mov')).rejects.toThrow('absolute');
   expect(inspect).not.toHaveBeenCalled();
+});
+
+it('closes owned local and downloaded source handles exactly once after a renderer crash, then allows fresh reads', async () => {
+  const source = await file();
+  const service = new CloudMediaService(vi.fn().mockResolvedValue('local'), vi.fn());
+  const { call, sender } = ipc(service);
+  const local = await call(IPC.mediaOpenLocalSource, source);
+  const localHandle: FileHandle = await mocks.open.mock.results.at(-1)!.value;
+  const downloaded = await call(IPC.cloudDownload, source);
+  const downloadHandle: FileHandle = await mocks.open.mock.results.at(-1)!.value;
+  const localClose = vi.spyOn(localHandle, 'close');
+  const downloadClose = vi.spyOn(downloadHandle, 'close');
+  try {
+    sender.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 1 });
+    expect(sender.isDestroyed()).toBe(false);
+    await vi.waitFor(() => {
+      expect(localHandle.fd).toBe(-1);
+      expect(downloadHandle.fd).toBe(-1);
+    });
+    expect(localClose).toHaveBeenCalledTimes(1);
+    expect(downloadClose).toHaveBeenCalledTimes(1);
+    expect(sender.listenerCount('destroyed')).toBe(0);
+    expect(sender.listenerCount('render-process-gone')).toBe(0);
+    await expect(call(IPC.cloudRead, { token: local.token, offset: 0, length: 1 })).rejects.toThrow('Unknown');
+    await expect(call(IPC.cloudRead, { token: downloaded.token, offset: 0, length: 1 })).rejects.toThrow('Unknown');
+    sender.emit('did-finish-load');
+    const fresh = await call(IPC.mediaOpenLocalSource, source);
+    expect(new TextDecoder().decode(await call(IPC.cloudRead, { token: fresh.token, offset: 0, length: fresh.size }))).toBe('video bytes');
+    await call(IPC.cloudRelease, fresh.token);
+    sender.emit('destroyed');
+    expect(localClose).toHaveBeenCalledTimes(1);
+    expect(downloadClose).toHaveBeenCalledTimes(1);
+  } finally {
+    await call(IPC.cloudRelease, local.token);
+    await call(IPC.cloudRelease, downloaded.token);
+    sender.emit('destroyed');
+  }
+});
+
+it.each(['status', 'download', 'stat'] as const)('does not publish an old source token after recovery during %s', async stage => {
+  const source = await file();
+  const service = new CloudMediaService(vi.fn().mockResolvedValue('local'), vi.fn());
+  const { call, sender } = ipc(service);
+  let resume!: () => void;
+  const pause = new Promise<void>(resolve => { resume = resolve; });
+  let waiting = false;
+  let handle: FileHandle | undefined;
+  let close: ReturnType<typeof vi.spyOn> | undefined;
+  if (stage === 'status') vi.spyOn(service, 'status').mockImplementationOnce(async () => { waiting = true; await pause; return 'local'; });
+  if (stage === 'download') vi.spyOn(service, 'download').mockImplementationOnce(async () => { waiting = true; await pause; });
+  if (stage === 'stat') {
+    const actualFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    mocks.open.mockImplementationOnce(async (filePath: string, flags: string) => {
+      handle = await actualFs.open(filePath, flags);
+      close = vi.spyOn(handle, 'close');
+      const originalStat = handle.stat.bind(handle);
+      vi.spyOn(handle, 'stat').mockImplementationOnce(async () => { waiting = true; await pause; return originalStat(); });
+      return handle;
+    });
+  }
+  let result: { token?: string; error?: Error } | undefined;
+  const pending = call(stage === 'download' ? IPC.cloudDownload : IPC.mediaOpenLocalSource, source)
+    .then((opened: { token: string }) => { result = opened; }, (error: Error) => { result = { error }; });
+  try {
+    await vi.waitFor(() => expect(waiting).toBe(true));
+    sender.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 1 });
+    sender.emit('did-finish-load');
+    resume();
+    await pending;
+    expect(result).toEqual({ error: expect.objectContaining({ message: 'The media renderer has closed or crashed' }) });
+    if (stage === 'stat') {
+      expect(handle!.fd).toBe(-1);
+      expect(close).toHaveBeenCalledTimes(1);
+    } else expect(mocks.open).not.toHaveBeenCalled();
+    expect(sender.listenerCount('render-process-gone')).toBe(0);
+    expect(sender.listenerCount('destroyed')).toBe(0);
+  } finally {
+    resume();
+    await pending;
+    if (result?.token) await call(IPC.cloudRelease, result.token);
+    if (handle && handle.fd !== -1) await handle.close();
+  }
 });

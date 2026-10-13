@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { BrowserWindow, dialog, type IpcMain, type IpcMainInvokeEvent } from 'electron';
 import { cloudFileState } from '@powermove/macos-haptics';
 import { IPC, type CloudFileState } from '../shared/ipc';
+import { isRendererUnavailable } from './renderer-recovery';
 
 const DOWNLOAD_TIMEOUT = 5 * 60_000;
 const CHUNK_BYTES = 4 * 1024 * 1024;
@@ -114,36 +115,52 @@ export function registerCloudMediaIpc(ipc: Pick<IpcMain, 'handle'>, ctx: {
     const result = await dialog.showMessageBox(window, cloudPromptOptions(names));
     return { download: result.response === 0, automatic: result.checkboxChecked };
   });
-  const openSource = async (event: IpcMainInvokeEvent, source: string) => {
-    if (event.sender.isDestroyed()) throw new Error('The project window closed');
-    const handle = await open(source, 'r');
+  const openSource = async (event: IpcMainInvokeEvent, source: string, prepare: () => Promise<boolean>) => {
+    // Recovery reuses WebContents, so availability alone cannot distinguish
+    // an old request from one initiated by the replacement renderer.
+    let rendererGone = false;
+    const gone = () => { rendererGone = true; };
+    const checkRenderer = () => {
+      if (rendererGone || isRendererUnavailable(event.sender)) throw new Error('The media renderer has closed or crashed');
+    };
+    event.sender.once('render-process-gone', gone);
     try {
-      const info = await handle.stat();
-      if (!info.isFile()) throw new Error('The media source is not a file');
-      const size = info.size;
-      if (event.sender.isDestroyed()) throw new Error('The project window closed');
-      const token = randomUUID();
-      const cleanup = () => { void release(token).catch(() => undefined); };
-      const timer = setTimeout(cleanup, DOWNLOAD_TIMEOUT);
-      timer.unref();
-      files.set(token, { owner: event.sender.id, handle, size, timer, detach: () => event.sender.removeListener('destroyed', cleanup) });
-      event.sender.once('destroyed', cleanup);
-      return { token, size };
-    } catch (error) { await handle.close(); throw error; }
+      checkRenderer();
+      const available = await prepare();
+      checkRenderer();
+      if (!available) return null;
+      const handle = await open(source, 'r');
+      try {
+        checkRenderer();
+        const info = await handle.stat();
+        checkRenderer();
+        if (!info.isFile()) throw new Error('The media source is not a file');
+        const size = info.size;
+        const token = randomUUID();
+        const cleanup = () => { void release(token).catch(() => undefined); };
+        const timer = setTimeout(cleanup, DOWNLOAD_TIMEOUT);
+        timer.unref();
+        files.set(token, { owner: event.sender.id, handle, size, timer, detach: () => {
+          event.sender.removeListener('destroyed', cleanup);
+          event.sender.removeListener('render-process-gone', cleanup);
+        } });
+        event.sender.once('destroyed', cleanup);
+        event.sender.once('render-process-gone', cleanup);
+        return { token, size };
+      } catch (error) { await handle.close().catch(() => undefined); throw error; }
+    } finally { event.sender.removeListener('render-process-gone', gone); }
   };
   ipc.handle(IPC.mediaOpenLocalSource, async (event, input: unknown) => {
     trusted(event);
     const source = cloudPath(input);
     // Inspect metadata before opening the data fork: cache recovery must not
     // silently download an offloaded file or bypass the cloud preference.
-    if (await service.status(source) !== 'local') return null;
-    return openSource(event, source);
+    return openSource(event, source, async () => await service.status(source) === 'local');
   });
   ipc.handle(IPC.cloudDownload, async (event, input: unknown) => {
     trusted(event);
     const source = cloudPath(input);
-    await service.download(source);
-    return openSource(event, source);
+    return openSource(event, source, async () => { await service.download(source); return true; });
   });
   ipc.handle(IPC.cloudRead, async (event, input: { token: string; offset: number; length: number }) => {
     trusted(event);
