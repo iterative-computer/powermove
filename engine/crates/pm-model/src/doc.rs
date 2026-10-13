@@ -39,6 +39,7 @@ use std::collections::{BTreeMap, VecDeque};
 use crate::hash::{canonical_digest, canonical_hash};
 use crate::json::write::{JsonTree, View};
 use crate::json::{JsString, Map, Value};
+use crate::ops::{self, Op};
 use crate::patch::{self, NodeMut, Patch, PatchError, PathPart, Tree};
 
 /// One node of the revisioned tree.
@@ -274,6 +275,10 @@ impl Tree for Node {
     fn touch(&mut self, rev: u64) {
         self.rev = rev;
     }
+
+    fn record_id(&self) -> Option<&JsString> {
+        Node::record_id(self)
+    }
 }
 
 impl JsonTree for Node {
@@ -361,6 +366,32 @@ impl Document {
         let mut changed = false;
         for (index, patch) in patches.iter().enumerate() {
             changed |= patch::apply_one(&mut self.root, patch, index, revision)?;
+        }
+        Ok(ApplyOutcome { revision, changed })
+    }
+
+    /// Applies a batch of operations (leaf patches and id-keyed structural
+    /// operations, [`crate::ops`]) as the next revision.
+    pub fn apply_ops(&mut self, ops: &[Op]) -> Result<ApplyOutcome, PatchError> {
+        self.apply_ops_at(ops, self.revision + 1)
+    }
+
+    /// Applies a batch of operations as revision `revision`, with the same
+    /// error behavior as [`Document::apply_at`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `revision` does not exceed the current revision.
+    pub fn apply_ops_at(&mut self, ops: &[Op], revision: u64) -> Result<ApplyOutcome, PatchError> {
+        assert!(
+            revision > self.revision,
+            "revision {revision} must exceed {}",
+            self.revision
+        );
+        self.revision = revision;
+        let mut changed = false;
+        for (index, op) in ops.iter().enumerate() {
+            changed |= ops::apply_op(&mut self.root, op, index, revision)?;
         }
         Ok(ApplyOutcome { revision, changed })
     }
