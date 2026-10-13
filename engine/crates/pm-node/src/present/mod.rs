@@ -58,6 +58,9 @@ pub const PHASE_ENV: &str = "POWERMOVE_BRIDGE_PHASE";
 pub const REMOTE_LAYER_ENV: &str = "POWERMOVE_BRIDGE_REMOTE_LAYER";
 /// Where the C′ prototype appends its presentation records (JSON lines).
 pub const REMOTE_TRACE_ENV: &str = "POWERMOVE_BRIDGE_REMOTE_TRACE";
+/// `1`: while the C′ layer plays, ask the display for a refresh rate that
+/// is a multiple of the content rate (plan section 15).
+pub const REMOTE_RATE_ENV: &str = "POWERMOVE_BRIDGE_REMOTE_RATE";
 
 /// Default render phase: thousandths of a refresh after the BeginFrame
 /// (docs/engine/bridge.md, "Vsync-phase hint").
@@ -115,6 +118,7 @@ impl PresenterConfig {
                 },
                 remote_layer: env(REMOTE_LAYER_ENV).as_deref() == Some("1"),
                 remote_trace: env(REMOTE_TRACE_ENV).filter(|p| !p.is_empty()),
+                remote_rate: env(REMOTE_RATE_ENV).as_deref() == Some("1"),
             },
             source: match env(SOURCE_ENV).as_deref() {
                 Some("test-pattern") => Some(FrameSource::TestPattern),

@@ -18,7 +18,9 @@ use pm_bridge::wire::{PixelFormat, SurfaceInfo};
 use pm_engine::{Action, LogLevel};
 use pm_gpu::bridge_out::display::{DisplayParams, DisplayTransform, WorkingTexture};
 use pm_gpu::bridge_out::pool::SurfacePool;
-use pm_gpu::bridge_out::remote_layer::{Presented, RemoteLayer, raw_metal_device};
+use pm_gpu::bridge_out::remote_layer::{
+    Presented, RatePreference, RemoteLayer, preferred_refresh, raw_metal_device,
+};
 use pm_gpu::bridge_out::test_source::{TestFrame, TestSource};
 use pm_protocol::clock::TransportCommand;
 use pm_protocol::codec;
@@ -165,6 +167,9 @@ pub struct ThreadConfig {
     pub remote_layer: bool,
     /// File the C′ prototype appends presentation records to.
     pub remote_trace: Option<String>,
+    /// While the C′ layer plays, ask the display for a multiple of the
+    /// content rate (plan section 15, ProMotion).
+    pub remote_rate: bool,
 }
 
 /// One frame's record for the S1 harness.
@@ -215,6 +220,8 @@ pub struct Stats {
     pub remote_presented: u64,
     pub remote_dropped: u64,
     pub remote_error: Option<String>,
+    /// The refresh rate the C′ prototype asked for while playing.
+    pub remote_rate_hz: Option<f64>,
     #[serde(skip)]
     pub trace: Vec<FrameTrace>,
 }
@@ -251,6 +258,10 @@ struct View {
     requests: VecDeque<(RequestId, FrameRequest, Option<Revision>)>,
     /// The pool to make again after a failed hand-off.
     retry: Option<PoolRetry>,
+    /// The C′ prototype's refresh-rate request while it plays, and whether
+    /// this playback already tried (a failed request is not repeated).
+    rate: Option<RatePreference>,
+    rate_tried: bool,
 }
 
 struct Thread {
@@ -516,6 +527,8 @@ impl Thread {
             dirty: true,
             requests: VecDeque::new(),
             retry: None,
+            rate: None,
+            rate_tried: false,
         });
         // A new vsync hint alone is not a new view: nothing to redraw.
         let hint_only = view.state.vsync != state.vsync && {
@@ -848,6 +861,50 @@ impl Thread {
         }
         if self.config.remote_layer {
             self.collect_remote();
+            if self.config.remote_rate {
+                self.request_rates();
+            }
+        }
+    }
+
+    /// Holds a refresh-rate request for each view whose C′ layer plays,
+    /// and drops it when playback stops.
+    fn request_rates(&mut self) {
+        let fps = f64::from(self.config.fps);
+        let mut asked = None;
+        let mut failed = None;
+        for view in self.views.values_mut() {
+            let playing =
+                view.clock.is_playing() && view.pool.as_ref().is_some_and(|l| l.remote.is_some());
+            if !playing {
+                view.rate = None;
+                view.rate_tried = false;
+                continue;
+            }
+            if view.rate_tried {
+                continue;
+            }
+            view.rate_tried = true;
+            let max_hz = view
+                .state
+                .vsync
+                .map_or(120.0, |h| (1e6 / h.period_us).round());
+            match RatePreference::request(preferred_refresh(fps, max_hz)) {
+                Ok(rate) => {
+                    asked = Some(rate.hz);
+                    view.rate = Some(rate);
+                }
+                Err(error) => failed = Some(error.to_string()),
+            }
+        }
+        if asked.is_some() || failed.is_some() {
+            let mut stats = self.stats();
+            if let Some(hz) = asked {
+                stats.remote_rate_hz = Some(hz);
+            }
+            if let Some(error) = failed {
+                stats.remote_error = Some(format!("refresh rate: {error}"));
+            }
         }
     }
 

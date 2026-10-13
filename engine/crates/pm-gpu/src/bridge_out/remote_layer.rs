@@ -117,6 +117,107 @@ fn color_space(
     CGColorSpace::with_name(Some(name))
 }
 
+/// The refresh rate to ask the display for while content at `content_fps`
+/// plays (plan section 15: a multiple of the content rate): the largest
+/// multiple not above `max_hz`, or `max_hz` when the content is faster.
+/// 24 → 120, 25 → 100, 29.97 → 119.88, 30 → 120, 50 → 100, 60 → 120 on a
+/// 120 Hz ProMotion panel.
+pub fn preferred_refresh(content_fps: f64, max_hz: f64) -> f64 {
+    let valid = content_fps.is_finite() && max_hz.is_finite() && content_fps > 0.0 && max_hz > 0.0;
+    if !valid || content_fps >= max_hz {
+        return max_hz;
+    }
+    (max_hz / content_fps + 1e-9).floor() * content_fps
+}
+
+objc2::define_class!(
+    /// The display link's target: the link only carries the rate request.
+    #[unsafe(super(objc2_foundation::NSObject))]
+    struct RateTarget;
+
+    impl RateTarget {
+        #[unsafe(method(tick:))]
+        fn tick(&self, _link: &AnyObject) {}
+    }
+);
+
+/// A display link that asks the main display for a refresh rate while it
+/// lives (`-[NSScreen displayLinkWithTarget:selector:]` and
+/// `preferredFrameRateRange`, macOS 14). It runs on its own run-loop
+/// thread; its callbacks do nothing.
+pub struct RatePreference {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    /// The rate asked for.
+    pub hz: f64,
+}
+
+impl RatePreference {
+    pub fn request(hz: f64) -> Result<Self, RemoteLayerError> {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<Result<(), RemoteLayerError>>();
+        let thread = std::thread::Builder::new()
+            .name("pm-remote-layer-rate".into())
+            .spawn(move || {
+                let screen_class = match AnyClass::get(c"NSScreen") {
+                    Some(c) => c,
+                    None => {
+                        let _ = tx.send(Err(RemoteLayerError::Missing("NSScreen")));
+                        return;
+                    }
+                };
+                // SAFETY: class methods and properties of AppKit and Core
+                // Animation, used on this thread only.
+                unsafe {
+                    let screen: Option<Retained<AnyObject>> = msg_send![screen_class, mainScreen];
+                    let Some(screen) = screen else {
+                        let _ = tx.send(Err(RemoteLayerError::Missing("a main screen")));
+                        return;
+                    };
+                    let target: Retained<RateTarget> = msg_send![<RateTarget as objc2::ClassType>::class(), new];
+                    let link: Option<Retained<AnyObject>> = msg_send![&*screen, displayLinkWithTarget: &*target, selector: objc2::sel!(tick:)];
+                    let Some(link) = link else {
+                        let _ = tx.send(Err(RemoteLayerError::Missing("a display link")));
+                        return;
+                    };
+                    let range = objc2_quartz_core::CAFrameRateRange {
+                        minimum: hz as f32,
+                        maximum: hz as f32,
+                        preferred: hz as f32,
+                    };
+                    let _: () = msg_send![&*link, setPreferredFrameRateRange: range];
+                    let run_loop: Retained<AnyObject> = msg_send![AnyClass::get(c"NSRunLoop").expect("NSRunLoop"), currentRunLoop];
+                    let _: () = msg_send![&*link, addToRunLoop: &*run_loop, forMode: objc2_foundation::NSRunLoopCommonModes];
+                    let _ = tx.send(Ok(()));
+                    while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        objc2_core_foundation::CFRunLoop::run_in_mode(objc2_core_foundation::kCFRunLoopDefaultMode, 0.25, false);
+                    }
+                    let _: () = msg_send![&*link, invalidate];
+                }
+            })
+            .map_err(|_| RemoteLayerError::Missing("a thread"))?;
+        match rx.recv() {
+            Ok(Ok(())) => Ok(Self {
+                stop,
+                thread: Some(thread),
+                hz,
+            }),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(RemoteLayerError::Missing("the display link thread")),
+        }
+    }
+}
+
+impl Drop for RatePreference {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// The Metal device under a wgpu device (the presenter's), for the layer.
 pub fn raw_metal_device(device: &wgpu::Device) -> Option<Retained<ProtocolObject<dyn MTLDevice>>> {
     // SAFETY: the hal device is only read to clone its retained MTLDevice.
@@ -320,6 +421,22 @@ mod tests {
     /// A context with a layer exists, has an id main can host, and takes
     /// copies of pool surfaces with a presentation time. Nothing hosts the
     /// context here, so nothing reaches a display.
+    #[test]
+    fn the_preferred_refresh_is_a_multiple_of_the_content_rate() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        assert!(close(preferred_refresh(24.0, 120.0), 120.0));
+        assert!(close(preferred_refresh(25.0, 120.0), 100.0));
+        assert!(close(
+            preferred_refresh(30_000.0 / 1001.0, 120.0),
+            120_000.0 / 1001.0
+        ));
+        assert!(close(preferred_refresh(30.0, 120.0), 120.0));
+        assert!(close(preferred_refresh(50.0, 120.0), 100.0));
+        assert!(close(preferred_refresh(60.0, 120.0), 120.0));
+        assert!(close(preferred_refresh(144.0, 120.0), 120.0));
+        assert!(close(preferred_refresh(25.0, 60.0), 50.0));
+    }
+
     #[test]
     fn a_remote_layer_has_a_context_id_and_takes_pool_surfaces() {
         let (device, _queue, _) = crate::bridge_out::metal_device("remote layer test").unwrap();
