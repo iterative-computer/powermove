@@ -396,7 +396,9 @@ export class NativeApi {
   private stamp(): { revision: number; cur: unknown } | null {
     const barrier = this.barrier();
     if (!barrier) return null;
-    if (barrier.pending) barrier.flush();
+    // flush() returns at once when nothing waits (it also notices writes a
+    // plain transaction has not announced yet).
+    barrier.flush();
     return { revision: barrier.revision, cur: this.PM.scope?.length ? this.unwrap(this.PM.curComp()) : null };
   }
 

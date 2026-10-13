@@ -76,7 +76,14 @@ const firstAppFrame = (stack: string | undefined): string => {
  * first frames outside the native evaluator, and whether a test evaluated
  * the code in the page. The writer that skipped the barrier ran before it.
  */
-export function querySite(stack: string | undefined = new Error().stack, frames = 4): string {
+export function querySite(stack?: string, frames = 4): string {
+  if (stack === undefined) {
+    // Deep enough to reach a test's page.evaluate frames past the UI listeners.
+    const E = Error as unknown as { stackTraceLimit?: number };
+    const limit = E.stackTraceLimit;
+    E.stackTraceLimit = 60;
+    try { stack = new Error().stack; } finally { E.stackTraceLimit = limit; }
+  }
   const lines = (stack || '').split('\n').slice(1).map(line => line.trim());
   const own = /NativeApi\.|DualAnswers\.|onStale|querySite|\((native|<anonymous>)\)$/;
   const harness = /eval at evaluate|__playwright|UtilityScript/;

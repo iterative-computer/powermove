@@ -321,6 +321,24 @@ describe.skipIf(!built)('writes inside open transactions', () => {
     expect(doc.check('test')!.ok).toBe(true);
   });
 
+  it('diffs once per synchronous run inside a plain transaction', async () => {
+    const { PM, doc } = await editor('on');
+    PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid')));
+    const L = PM.proj.layers[0];
+    doc.barrier!.flush();
+    const diffs = () => doc.barrier!.stats.structuralDiffs;
+    PM.hist.begin('Drag');
+    const before = diffs();
+    for (let i = 0; i < 5; i++) doc.api!.ev(L, 'position.x', 0);
+    expect(diffs()).toBe(before + 1);
+    await Promise.resolve();
+    L.p['position.x'].v = 12;
+    expect(doc.api!.ev(L, 'position.x', 0)).toBe(12);
+    expect(diffs()).toBe(before + 2);
+    PM.hist.commit('Drag');
+    expect(doc.check('test')!.ok).toBe(true);
+  });
+
   it('diffs compositions added outside the open one on a structural diff', async () => {
     const { PM, doc } = await editor('on');
     doc.barrier!.flush();

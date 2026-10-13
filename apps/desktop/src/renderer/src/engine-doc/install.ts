@@ -123,6 +123,8 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   let replacing = false;
   let current: any = PM.proj;
   let pendingReplace: 'resync' | 'diff' | null = null;
+  /** Whether this synchronous run already diffed inside a plain transaction. */
+  let diffedThisRun = false;
 
   // ── tracking Proxy (development and test) ─────────────────────────────
   const tracker: Tracker | null = mode.proxy ? createTracker({
@@ -288,8 +290,14 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       barrier = new DocumentBarrier(wasm, () => current, {
         onMismatch, revision: barrier?.revision ?? 0,
         // A plain transaction's writes reach the barrier at its commit (or at a
-        // touch()); queries made inside it before then diff the open composition.
-        unannounced: () => !!PM.hist?.busy?.() && !PM.hist?.scoped?.() && coveredDepth === 0,
+        // touch()); the first query of each synchronous run inside it diffs the
+        // open composition (once per run: a drag's many queries per event stay cheap).
+        unannounced: () => {
+          if (diffedThisRun || !PM.hist?.busy?.() || PM.hist?.scoped?.() || coveredDepth > 0) return false;
+          diffedThisRun = true;
+          queueMicrotask(() => { diffedThisRun = false; });
+          return true;
+        },
       });
       barrier.subscribe(batch => subscribers.forEach(fn => { try { fn(batch); } catch (error) { console.error(error); } }));
       api.reset();
