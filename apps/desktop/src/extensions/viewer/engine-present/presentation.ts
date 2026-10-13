@@ -183,14 +183,17 @@ export class ViewerPresentation {
   /**
    * The viewer's layout changed (size, zoom, pan, resolution, view
    * override) or the window did. Sends the state when it differs from the
-   * last one.
+   * last one. `stage` is the stage's size when the caller already knows it
+   * (the viewer keeps it during gestures): reading it here after the
+   * viewer wrote styles would force a synchronous layout of the page in
+   * every pointer event.
    */
-  update(params: ViewParams): void {
+  update(params: ViewParams, stage?: { width: number; height: number }): void {
     if (this.disposed) return;
     this.params = params;
     const view = this.follow();
     if (!view) return;
-    const rect = this.options.stage.getBoundingClientRect();
+    const rect = stage ?? this.options.stage.getBoundingClientRect();
     if (rect.width < 1 || rect.height < 1) return;
     const size = this.settledSize(view, rect.width, rect.height);
     const dpr = Math.min(view.devicePixelRatio || 1, this.options.maxDpr ?? 2);

@@ -785,7 +785,7 @@ const eventOffs: Array<() => void> = [];
 let enginePresentation: ViewerPresentation | null = null;
 let engineService: EngineViewerService | null = null;
 let engineFrameTag = '';
-const syncEnginePresentation = () => {
+const syncEnginePresentation = (stage?: { width: number; height: number }) => {
   if (disposed || !V.stage || !V.ov) return;
   const service = api.services.get<EngineViewerService>(ENGINE_VIEWER_SERVICE);
   if (enginePresentation && service !== engineService) {
@@ -812,7 +812,7 @@ const syncEnginePresentation = () => {
   enginePresentation.update(viewParamsFor({
     shown: V.shown, fit: V.fit, pan: V.pan, previewResolution: api.transport.previewResolution,
     scene3d: scene ? { hasScene: scene.hasScene, shading: scene.shading, xray: scene.xray } : null,
-  }));
+  }), stage);
 };
 /** The engine frame on screen: its tags and overlay geometry in stage CSS pixels. */
 V.engineFrame = () => {
@@ -965,6 +965,10 @@ V.layout = (panOnly = false, gesture = panOnly === true) => {
   let z = V.fit ? Math.min((r.width - pad * 2) / p.w, (r.height - pad * 2) / p.h) : V.zoom;
   z = clamp(z, .02, 8);
   V.shown = z;
+  /* The engine's view first: before this layout writes styles (so the
+     presentation reads no layout) and before the WebGL bookkeeping below,
+     so a gesture's state leaves for the engine as early as it can. */
+  syncEnginePresentation(r);
   if (V.zoomControl) {
     const control = V.zoomControl as HTMLSelectElement;
     control.options[0]!.textContent = `Fit (${Math.round(z * 1000) / 10}%)`;
@@ -1032,7 +1036,6 @@ V.layout = (panOnly = false, gesture = panOnly === true) => {
   if (V.ov.height !== overlayHeight) V.ov.height = overlayHeight;
   V.ov.style.width = r.width + 'px'; V.ov.style.height = r.height + 'px';
   V.updateRecovery?.();
-  syncEnginePresentation();
   /* Geometry changes immediately during zoom/pan. Repaint handles and paths in
      the same event so they never lag or blink while the GL frame catches up. */
   drawOverlay();

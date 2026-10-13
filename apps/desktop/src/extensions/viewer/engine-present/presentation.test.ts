@@ -205,6 +205,25 @@ describe('ViewerPresentation', () => {
     presentation.dispose();
   });
 
+  it('takes the stage size from the caller without reading layout (gesture steps)', async () => {
+    const service = new Service();
+    const { stage, overlay } = stageIn(window as unknown as Window);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => new Painter() });
+    await settle();
+    presentation.update(PARAMS);
+    let reads = 0;
+    const read = stage.getBoundingClientRect.bind(stage);
+    stage.getBoundingClientRect = () => {
+      reads++;
+      return read();
+    };
+    presentation.update({ ...PARAMS, pan: [12, 0] }, { width: 640, height: 360 });
+    expect(reads).toBe(0);
+    const channel = service.channels[0]!;
+    expect(channel.states.map((s) => s.viewSeq)).toEqual([1, 2]);
+    presentation.dispose();
+  });
+
   it('hides on a closed session and reopens with the current state when the engine is ready again', async () => {
     const service = new Service();
     const { stage, overlay, rafs } = stageIn(window as unknown as Window);
