@@ -13,4 +13,3 @@ libm.workspace = true
 
 [dev-dependencies]
 sha2 = { workspace = true, features = ["std"] }
-proptest.workspace = true
