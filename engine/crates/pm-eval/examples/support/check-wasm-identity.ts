@@ -2,8 +2,9 @@
  * Native and wasm32 builds of pm-eval must answer bit-identically (plan
  * section 7, determinism; Phase 1 gate). Builds the identity examples
  * natively and for wasm32-unknown-unknown, runs both over the evaluation
- * vectors (`eval-vectors.json`) and the layer vectors (`layer-vectors.json.gz`
- * or the files given), and fails unless every pair of digests agrees.
+ * vectors (`eval-vectors.json`) and the layer and caption vectors
+ * (`layer-vectors.json.gz`, `caption-vectors.json.gz`, or the files given),
+ * and fails unless every pair of digests agrees.
  *
  *   source engine/env.sh
  *   bun engine/crates/pm-eval/examples/support/check-wasm-identity.ts [layer-vectors.json.gz ...]
@@ -46,6 +47,7 @@ function native(example: string, file: string) {
 const checks: [string, string, string][] = [
   ['identity_native', 'wasm_identity', path.join(vectors, 'eval-vectors.json')],
   ...(process.argv.length > 2 ? process.argv.slice(2).map(f => path.resolve(f)) : [path.join(vectors, 'layer-vectors.json.gz')])
+    .concat(process.argv.length > 2 ? [] : [path.join(vectors, 'caption-vectors.json.gz')])
     .map((f): [string, string, string] => ['layer_identity_native', 'wasm_layer_identity', f]),
 ];
 let failed = false;

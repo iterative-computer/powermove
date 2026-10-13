@@ -1,11 +1,14 @@
-//! A digest of every answer the layer replay gives
-//! (`tests/support/layer_replay.rs`), for the native/wasm32 bit-identity
-//! check of the layer queries (plan section 7, determinism; Phase 1 gate).
+//! A digest of every answer the layer replay (`tests/support/layer_replay.rs`)
+//! or the captions replay (`tests/support/caption_replay.rs`) gives, for the
+//! native/wasm32 bit-identity check of the layer queries (plan section 7,
+//! determinism; Phase 1 gate).
 //!
 //! Numbers are hashed by their IEEE-754 bits, so `-0` and `0` differ; every
 //! NaN hashes alike (JavaScript cannot tell NaNs apart, and wasm32 does not
 //! fix the sign or payload of a NaN an operation produces).
 
+#[path = "../../tests/support/caption_replay.rs"]
+mod caption_replay;
 #[path = "../../tests/support/layer_replay.rs"]
 mod layer_replay;
 
@@ -90,13 +93,20 @@ impl Digest {
 }
 
 /// The digest of the port's answers to the vectors in `text` (the JSON of
-/// `layer-vectors.json.gz`, decompressed).
+/// `layer-vectors.json.gz` or `caption-vectors.json.gz`, decompressed).
 pub fn digest(text: &str) -> Digest {
-    let vectors = pm_model::json::parse(text).expect("layer vectors JSON");
+    let vectors = pm_model::json::parse(text).expect("vectors JSON");
     let mut d = Digest::new();
-    layer_replay::replay(&vectors, &mut |op, _, ours, _| {
-        d.text(op);
-        d.value(&ours);
-    });
+    if layer_replay::get(&vectors, "docs").is_some() {
+        layer_replay::replay(&vectors, &mut |op, _, ours, _| {
+            d.text(op);
+            d.value(&ours);
+        });
+    } else {
+        caption_replay::replay(&vectors, &mut |op, _, ours, _| {
+            d.text(op);
+            d.value(&ours);
+        });
+    }
     d
 }
