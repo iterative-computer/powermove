@@ -154,3 +154,18 @@ Open question 1 (overlay geometry as a separate event) stays open: the test
 source sends one overlay layer per frame, and frames without selection
 changes still carry it. The descriptor's size with one layer is in
 [`../bridge.md`](../bridge.md).
+
+Later production findings (details and measurements in
+[`../bridge.md`](../bridge.md)):
+
+- **A page that goes away never reports its imports released.** Electron
+  drops the renderer's release notice once a page unloads, so main reclaims
+  the surfaces of a reloaded, navigated, crashed, or closed receiver after a
+  grace period once its own import is released. `FrameRelease` and
+  `allReferencesReleased` are unchanged for live pages.
+- **Sizes settle before they reach the engine.** The viewer sends a new
+  `ViewerState.size` only once it held still for 150 ms; zoom, pan, and the
+  view override still go at once. A live window resize otherwise replaces
+  the pool at every step.
+- **`ViewerState.edr` follows the hosting window**, and a setting can turn
+  it off (8-bit presentation on an EDR display).
