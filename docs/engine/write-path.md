@@ -148,8 +148,11 @@ glyph positions, and widths need no outlines.
 
 - **Dual answers** (`engine-doc/dual.ts`): the native answer is returned; the legacy
   answer is computed and compared with section 25's tolerances (evaluation
-  1e-9 + 1e-9·|b|, bounds 1e-6, text 0.25 px), live objects by identity, `allProps`
-  as key sets (allowed difference 5). A mismatch that disappears after repairing the
+  1e-9 + 1e-9·|b|, bounds 1e-6, text 0.25 px), live objects by identity, object
+  members and listings in order. pm-eval lists object members sorted (allowed
+  difference 5); the native API puts `allProps`, `resolveContent`, and `pathValues`
+  back in the document's own order, because the timeline lists rows in that order
+  (`property-reveal.spec.ts` caught it). A mismatch that disappears after repairing the
   mirror is a **stale answer** (a barrier gap, reported as `stale-answer`), not an
   evaluation mismatch.
 - **Auditor** (`engine-doc/auditor.ts`): at task boundaries (every 100 ms, backing

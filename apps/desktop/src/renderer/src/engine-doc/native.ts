@@ -60,6 +60,43 @@ export function findPath(root: any, target: any, limit = 12): PathPart[] | null 
   return visit(root, 0) ? path : null;
 }
 
+/**
+ * `obj` with its keys in the order JavaScript lists `live`'s (pm-model stores
+ * members sorted; callers that iterate answers see the document's order).
+ * Keys `live` lacks follow in their given order.
+ */
+export function keyOrder(obj: any, live: any): any {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj) || !live || typeof live !== 'object') return obj;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(live)) if (Object.prototype.hasOwnProperty.call(obj, key)) out[key] = obj[key];
+  for (const key of Object.keys(obj)) if (!Object.prototype.hasOwnProperty.call(out, key)) out[key] = obj[key];
+  return out;
+}
+
+/**
+ * `allProps` entries with runs that list members of one object put back in
+ * the object's own key order (the legacy listing order; pm-eval's is sorted).
+ */
+export function liveMemberOrder(L: any, entries: any[]): any[] {
+  const out = entries.slice();
+  let start = 0;
+  const parentKey = (e: any) => (Array.isArray(e?.path) && e.path.length ? JSON.stringify(e.path.slice(0, -1)) : null);
+  while (start < out.length) {
+    const parent = parentKey(out[start]);
+    let end = start + 1;
+    while (parent !== null && end < out.length && parentKey(out[end]) === parent) end++;
+    if (parent !== null && end - start > 1) {
+      const owner = at(L, JSON.parse(parent));
+      const order = owner && typeof owner === 'object' ? Object.keys(owner) : [];
+      const rank = (e: any) => { const i = order.indexOf(String(e.path[e.path.length - 1])); return i < 0 ? Number.MAX_SAFE_INTEGER : i; };
+      const run = out.slice(start, end).map((e, i) => [e, rank(e), i] as const).sort((a, b) => a[1] - b[1] || a[2] - b[2]).map(x => x[0]);
+      out.splice(start, end - start, ...run);
+    }
+    start = end;
+  }
+  return out;
+}
+
 /** The value at a path of own members (null when missing). */
 export function at(root: any, path: readonly PathPart[]): any {
   let node = root;
@@ -410,7 +447,7 @@ export class NativeApi {
   allProps(L: any): any[] {
     return this.answer('allProps', () => {
       this.defineFor(L);
-      return this.layerQuery('allProps', L, {}, (entries: any[]) => entries.map(e => ({
+      return this.layerQuery('allProps', L, {}, (entries: any[]) => liveMemberOrder(L, entries).map(e => ({
         key: e.key,
         prop: Array.isArray(e.path) ? at(L, e.path) : e.path && typeof e.path === 'object' ? e.path.value : undefined,
         label: e.label,
@@ -449,7 +486,7 @@ export class NativeApi {
   }
 
   resolveContent(L: any, T: any = this.PM.time): any {
-    return this.answer('resolveContent', () => this.layerQuery('resolveContent', L, { t: T }),
+    return this.answer('resolveContent', () => this.layerQuery('resolveContent', L, { t: T }, (d: any) => keyOrder(d, this.unwrap(L)?.d)),
       () => this.legacy.resolveContent(L, T), () => ({ layer: L?.id, t: T }));
   }
 
@@ -613,7 +650,16 @@ export class NativeApi {
       if (!ctx) return { fallback: 'context' };
       const index = (Array.isArray(ctx.raw.d?.paths) ? ctx.raw.d.paths : []).indexOf(this.unwrap(path));
       if (index < 0) return { fallback: 'detached-path' };
-      return this.query('pathValues', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, index, t: time, ...(prefix === undefined ? {} : { prefix }) });
+      const live = this.unwrap(path);
+      return this.query('pathValues', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, index, t: time, ...(prefix === undefined ? {} : { prefix }) },
+        (v: any) => {
+          const out = keyOrder(v, live?.p);
+          // `vertices` last, each in its own `p` order, as pathValues builds them.
+          const vertices = Array.isArray(v?.vertices) ? v.vertices.map((x: any, i: number) => keyOrder(x, live?.vertices?.[i]?.p)) : v?.vertices;
+          delete out.vertices;
+          out.vertices = vertices;
+          return out;
+        });
     }, () => this.legacy.pathValues(L, path, time, prefix), () => ({ layer: L?.id, t: time }));
   }
 

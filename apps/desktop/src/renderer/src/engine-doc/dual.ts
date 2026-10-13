@@ -8,9 +8,11 @@
  * - text layout and raster placement: within 0.25 px (section 12's advance
  *   tolerance), identical line breaks and text.
  *
- * Live objects (layers, channels, keyframes) compare by identity; object keys
- * compare as sets (pm-model stores members sorted, allowed difference 5 in
- * docs/engine/pm-eval.md). A throw matches a throw. The native answer is the
+ * Live objects (layers, channels, keyframes) compare by identity, and object
+ * members and listings in order: the native API restores the document's member
+ * order (pm-eval lists them sorted, allowed difference 5 in
+ * docs/engine/pm-eval.md), so an order change is a mismatch. A throw matches a
+ * throw. The native answer is the
  * one returned; mismatches are recorded and reported.
  */
 
@@ -98,11 +100,9 @@ export class DualAnswers {
   /** Where two answers differ beyond the tolerances, or null. */
   check(op: string, native: Answer, legacy: Answer, unwrap: <T>(v: T) => T): string | null {
     if ('threw' in native || 'threw' in legacy) return ('threw' in native) === ('threw' in legacy) ? null : '(throw)';
-    // allProps lists object members in pm-model's sorted order (allowed
-    // difference 5): compare the listings as sets of keys.
-    const a = op === 'allProps' ? byKey(native.value) : native.value;
-    const b = op === 'allProps' ? byKey(legacy.value) : legacy.value;
-    return identity(op, a, b, unwrap) ?? differs(a, b, tolerance(op), unwrap);
+    // Order matters: the native API restores the document's member order
+    // (pm-eval's own listing is sorted, allowed difference 5).
+    return identity(op, native.value, legacy.value, unwrap) ?? differs(native.value, legacy.value, tolerance(op), unwrap) ?? keyOrderDiffers(native.value, legacy.value);
   }
 
   /** Counts a comparison and records an evaluation mismatch when `path` is set. */
@@ -137,9 +137,24 @@ export class DualAnswers {
   }
 }
 
-const byKey = (list: unknown) => Array.isArray(list)
-  ? [...list].sort((x: any, y: any) => (String(x?.key) < String(y?.key) ? -1 : String(x?.key) > String(y?.key) ? 1 : 0))
-  : list;
+/** Where two equal answers list object members in a different order, or null. */
+function keyOrderDiffers(a: unknown, b: unknown, path = ''): string | null {
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return null;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    for (let i = 0; i < Math.min(a.length, b.length); i++) { const d = keyOrderDiffers(a[i], b[i], `${path}[${i}]`); if (d) return d; }
+    return null;
+  }
+  const ka = Object.keys(a).filter(k => (a as any)[k] !== undefined), kb = Object.keys(b).filter(k => (b as any)[k] !== undefined);
+  if (ka.join('\u0000') !== kb.join('\u0000')) return `${path}(member order)`;
+  for (const k of ka) {
+    const x = (a as any)[k], y = (b as any)[k];
+    // Live document objects are the same objects; only answers are compared.
+    if (x === y) continue;
+    const d = keyOrderDiffers(x, y, `${path}.${k}`);
+    if (d) return d;
+  }
+  return null;
+}
 
 /** Live objects in answers (layers, channels, keyframes) must be the very same objects. */
 function identity(op: string, a: any, b: any, unwrap: <T>(v: T) => T): string | null {
