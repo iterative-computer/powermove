@@ -67,15 +67,16 @@ async function signingInfo(file) {
    validation refuses it at load time on users' machines:
    - the transcription utility process loads koffi's addon, which dlopens
      transcribe.cpp's libtranscribe and ggml dylibs;
-   - the native engine's utility processes load pm-node (native/pm_node.node,
-     built by `bun run build:engine`, shipped with --with-engine).
+   - the native engine's utility processes load pm-node (native/pm_node.node)
+     and main loads pm-bridge for the frame bridge (native/pm_bridge.node),
+     both built by `bun run build:engine` and shipped with --with-engine.
    Every .node and .dylib anywhere under app.asar.unpacked is checked, not
    only these; the list says which must be present. */
 const NATIVE_RUNTIME = [
   { dir: 'node_modules/@transcribe-cpp/darwin-arm64-metal', expect: ['libtranscribe.dylib', 'libggml.dylib', 'libggml-base.dylib', 'libggml-cpu.dylib', 'libggml-metal.dylib'] },
   { dir: 'node_modules/@koromix/koffi-darwin-arm64/darwin_arm64', expect: ['koffi.node'] }
 ];
-const ENGINE_RUNTIME = { dir: 'native', expect: ['pm_node.node'] };
+const ENGINE_RUNTIME = { dir: 'native', expect: ['pm_node.node', 'pm_bridge.node'] };
 
 async function nativeBinaries(root) {
   const found = [];
@@ -169,8 +170,10 @@ async function main() {
   // The native engine ships only when asked: it is behind "Use New Engine"
   // and needs the pinned Rust toolchain (engine/env.sh) on the build host.
   const withEngine = process.argv.includes('--with-engine');
-  if (!withEngine && existsSync(path.join(repository, 'native', 'pm_node.node'))) {
-    throw new Error('native/pm_node.node is present but --with-engine was not given: electron-builder would ship it. Remove native/ or pass --with-engine.');
+  for (const file of ENGINE_RUNTIME.expect) {
+    if (!withEngine && existsSync(path.join(repository, ENGINE_RUNTIME.dir, file))) {
+      throw new Error(`native/${file} is present but --with-engine was not given: electron-builder would ship it. Remove native/ or pass --with-engine.`);
+    }
   }
   await run('bun', ['run', 'build']);
   if (withEngine) await run('node', [path.join(repository, 'scripts/build-engine-addon.mjs')]);
