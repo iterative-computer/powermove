@@ -4,7 +4,7 @@
 //!   (Newton, then bisection, with the legacy constants: 6 Newton steps at
 //!   1e-6, 24 bisection steps).
 //! * [`PRESETS`], [`preset`], [`handles`], [`name_of`].
-//! * [`spring`]: the spring table. The simulation runs in `f64` at a fixed
+//! * [`SpringTables::spring`]: the spring table. The simulation runs in `f64` at a fixed
 //!   1/480 s step and stores positions in a `Float32Array`, so every answer is
 //!   an `f32` widened to `f64`, as in V8.
 //! * [`spring_duration`].
