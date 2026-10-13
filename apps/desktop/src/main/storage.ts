@@ -51,7 +51,11 @@ export interface StoreChannel {
   onReply(listener: (reply: StoreReply) => void): void;
   /** A replacement engine started; it knows nothing until the store re-initialises it. */
   onRestart?(listener: () => void): void;
-  /** Delivers replies synchronously until `done()`; false if the deadline passed first. */
+  /**
+   * Delivers replies synchronously until `done()`; false if the deadline
+   * passed first. Throws if the answer can never arrive while this thread
+   * waits, so a read is refused instead of answered with an older value.
+   */
   waitSync(done: () => boolean, timeoutMs: number): boolean;
 }
 
@@ -70,7 +74,9 @@ export interface StoreOptions {
  * The engine on the calling thread, for hosts without the persistence worker
  * (the `powermove serve` host) and for tests that substitute the filesystem.
  * Requests are copied as they would be for a worker, and encoding finishes
- * before `post` returns.
+ * before `post` returns, except while the engine waits on the disk (loading,
+ * or reading back a stored session before it has loaded). Nothing on this
+ * thread can finish that wait, so a synchronous read behind it is refused.
  */
 export class InlineStoreChannel implements StoreChannel {
   private readonly engine: StoreEngine;
@@ -90,7 +96,8 @@ export class InlineStoreChannel implements StoreChannel {
 
   waitSync(done: () => boolean): boolean {
     while (!done() && this.queue.length) this.listener?.(this.queue.shift()!);
-    return done();
+    if (done()) return true;
+    throw new Error('The store cannot answer this read until a pending write finishes reading from disk.');
   }
 
   private enqueue(reply: StoreReply): void {

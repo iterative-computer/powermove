@@ -105,6 +105,51 @@ describe('file store', () => {
     expect(reopened.snapshot()['projectState.demo']).toEqual({ history, time: 3 });
   });
 
+  it('answers a read right after a metadata-only session write on this thread', async () => {
+    const directory = await temporaryDirectory();
+    const history = { version: 1, index: 0, entries: [{ label: 'Edit', forward: [], backward: [] }] };
+    await fs.writeFile(path.join(directory, 'projectState.stored.json'), JSON.stringify({ history, time: 1 }));
+    const store = createStore(directory);
+    await store.load();
+    // The `powermove serve` host reads synchronously in the same turn as the
+    // write; the stored history must already be known, not read from disk.
+    store.set('projectState.stored', { time: 2 });
+    expect(JSON.parse(store.getSerialized!('projectState.stored')!)).toEqual({ history, time: 2 });
+    store.set('projectState.fresh', { ok: true });
+    expect(JSON.parse(store.getSerialized!('projectState.fresh')!)).toEqual({ ok: true });
+    await store.flushAll();
+    const reopened = createStore(directory); await reopened.load();
+    expect(reopened.get!('projectState.stored')).toEqual({ history, time: 2 });
+    expect(reopened.get!('projectState.fresh')).toEqual({ ok: true });
+  });
+
+  it('refuses a read it cannot answer on this thread instead of returning an older value', async () => {
+    const directory = await temporaryDirectory();
+    const history = { version: 1, index: 0, entries: [{ label: 'Edit', forward: [], backward: [] }] };
+    await fs.writeFile(path.join(directory, 'projectState.stored.json'), JSON.stringify({ history, time: 1 }));
+    let failRead = true;
+    const readFile = (async (...args: Parameters<typeof fs.readFile>) => {
+      if (failRead && String(args[0]).endsWith('projectState.stored.json')) {
+        failRead = false;
+        throw Object.assign(new Error('Busy'), { code: 'EBUSY' });
+      }
+      return fs.readFile(...args);
+    }) as StoreFileSystem['readFile'];
+    const store = createStore(directory, { fs: fileSystemWith({ readFile }) });
+    const errors: string[] = [];
+    store.onError(event => errors.push(event.error));
+    await store.load();
+    expect(errors.some(error => error.includes('could not be read'))).toBe(true);
+    // The session was not read at load, so its history must come from disk
+    // before the write can be published; a read in the meantime is refused.
+    const written = store.set('projectState.stored', { time: 2 });
+    expect(() => store.getSerialized!('projectState.stored')).toThrow(/pending write/);
+    await written;
+    expect(JSON.parse(store.getSerialized!('projectState.stored')!)).toEqual({ history, time: 2 });
+    await store.flushAll();
+    expect(JSON.parse(await fs.readFile(path.join(directory, 'projectState.stored.json'), 'utf8')).time).toBe(2);
+  });
+
   it('round-trips set, snapshot, delete, and load without sharing references', async () => {
     const directory = await temporaryDirectory();
     const store = createStore(directory);

@@ -77,10 +77,15 @@ export class StoreEngine {
   private readonly pending = new Map<string, PendingWrite>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly queues = new Map<string, Promise<void>>();
-  /* The newest encoded legacy session per projectState key written in this
-     engine's lifetime: a metadata-only update keeps that undo history. Keys
-     not written yet read their history back from disk, which then holds it. */
+  /* The newest encoded session per projectState key (null: none), so a
+     metadata-only update keeps the stored undo history. Load fills it from
+     disk; afterwards every key is either here or has no file. Only an engine
+     that has not loaded (a replacement after a worker fault) reads a session
+     back from disk, asynchronously. */
   private readonly sessions = new Map<string, string | null>();
+  private loaded = false;
+  /** projectState keys whose file existed at load but could not be read. */
+  private readonly unread = new Set<string>();
   private readonly backlog: StoreRequest[] = [];
   private busy = false;
   private directory = '';
@@ -161,6 +166,7 @@ export class StoreEngine {
     if (key.startsWith('projectState.') && isRecord(value) && !Object.hasOwn(value, 'history')) {
       const known = this.sessions.get(key);
       if (known !== undefined) return this.pack(key, withHistory(value, known));
+      if (this.loaded && !this.unread.has(key)) return this.pack(key, value);
       return this.readStored(key).then(stored => this.pack(key, withHistory(value, stored)));
     }
     return this.pack(key, value);
@@ -209,6 +215,9 @@ export class StoreEngine {
     const loadedProjectIds = new Set<string>();
     let registry: unknown;
     this.records.clear();
+    // Mirrors main, which replaces everything it held with what is on disk.
+    this.sessions.clear();
+    this.unread.clear();
 
     for (const name of names) {
       if (!name.endsWith('.json')) continue;
@@ -224,6 +233,7 @@ export class StoreEngine {
         serialized = await fs.readFile(path.join(this.directory, name), 'utf8');
       } catch (error) {
         this.emitError(candidateKey, `store file could not be read: ${errorText(error)}`);
+        if (candidateKey.startsWith('projectState.')) this.unread.add(candidateKey);
         continue;
       }
 
@@ -236,9 +246,9 @@ export class StoreEngine {
         // inactive legacy histories re-create the same huge parse peak each boot.
         if (isHistoryDictionary(after) && !isHistoryDictionary(before)) {
           serialized = JSON.stringify(packed);
-          if (candidateKey.startsWith('projectState.')) this.sessions.set(candidateKey, serialized);
           this.schedule(candidateKey, { id: 0, kind: 'set', data: serialized });
         }
+        if (candidateKey.startsWith('projectState.')) this.sessions.set(candidateKey, serialized);
         entries.push([candidateKey, encoder.encode(serialized)]);
         if (candidateKey === 'projects') registry = value;
         if (parsedKey.kind === 'dynamic' && parsedKey.prefix === 'project') loadedProjectIds.add(parsedKey.id);
@@ -248,6 +258,7 @@ export class StoreEngine {
     }
 
     this.reportProjectReconciliation(registry, loadedProjectIds);
+    this.loaded = true;
     return entries;
   }
 
