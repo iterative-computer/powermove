@@ -401,6 +401,91 @@ pub fn demux_scan(path: &Path, i: usize) -> Result<(Vec<DemuxPacket>, Rational, 
     Ok((out, inp.timebase(i)?, inp.codec_id(i)))
 }
 
+/// Presentation order of stream `i` for containers that carry no
+/// presentation timestamps on a codec that reorders (AVI and elementary
+/// streams with B frames): one pass through FFmpeg's decoder with
+/// reconstruction skipped (no IDCT, no loop filter), each packet tagged with
+/// its decode-order ordinal. Returns the ordinals in output order; packets
+/// the decoder never outputs (undecodable leading pictures) are absent.
+pub fn decode_order(path: &Path, i: usize, threads: i32) -> Result<Vec<usize>> {
+    let inp = Input::open(path)?;
+    unsafe {
+        let par = inp.par(i);
+        let codec = ff::avcodec_find_decoder((*par).codec_id);
+        if codec.is_null() {
+            return Err(MediaError::unsupported(format!("no FFmpeg decoder for {}", inp.codec_name(i))));
+        }
+        let mut ctx = ff::avcodec_alloc_context3(codec);
+        if ctx.is_null() {
+            return Err(MediaError::OutOfMemory(0));
+        }
+        let mut pkt = ff::av_packet_alloc();
+        let mut frame = ff::av_frame_alloc();
+        let result = (|| {
+            check(ff::avcodec_parameters_to_context(ctx, par), "codec parameters")?;
+            (*ctx).thread_count = threads;
+            (*ctx).skip_idct = ff::AVDISCARD_ALL;
+            (*ctx).skip_loop_filter = ff::AVDISCARD_ALL;
+            check(ff::avcodec_open2(ctx, codec, ptr::null_mut()), "open decoder")?;
+            let mut order = Vec::new();
+            let mut ordinal: i64 = 0;
+            let receive = |order: &mut Vec<usize>| -> Result<()> {
+                loop {
+                    let r = ff::avcodec_receive_frame(ctx, frame);
+                    if r == ff::averror(libc::EAGAIN) || r == ff::AVERROR_EOF {
+                        return Ok(());
+                    }
+                    if r == ff::AVERROR_INVALIDDATA {
+                        continue;
+                    }
+                    check(r, "receive frame")?;
+                    if (*frame).pts != ff::AV_NOPTS_VALUE && (*frame).pts >= 0 {
+                        order.push((*frame).pts as usize);
+                    }
+                    ff::av_frame_unref(frame);
+                }
+            };
+            loop {
+                let r = ff::av_read_frame(inp.fmt, pkt);
+                if r == ff::AVERROR_EOF {
+                    break;
+                }
+                check(r, "read")?;
+                if (*pkt).stream_index as usize == i {
+                    (*pkt).pts = ordinal;
+                    (*pkt).dts = ff::AV_NOPTS_VALUE;
+                    ordinal += 1;
+                    let r = ff::avcodec_send_packet(ctx, pkt);
+                    if r < 0 && r != ff::AVERROR_INVALIDDATA {
+                        check(r, "send packet")?;
+                    }
+                    receive(&mut order)?;
+                }
+                ff::av_packet_unref(pkt);
+            }
+            let r = ff::avcodec_send_packet(ctx, ptr::null());
+            if r < 0 && r != ff::AVERROR_EOF {
+                check(r, "drain")?;
+            }
+            receive(&mut order)?;
+            Ok(order)
+        })();
+        ff::av_frame_free(&mut frame);
+        ff::av_packet_free(&mut pkt);
+        ff::avcodec_free_context(&mut ctx);
+        result
+    }
+}
+
+/// Where a demuxed read starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seek {
+    /// A byte position (0 is the start of the file).
+    Byte(i64),
+    /// A timestamp in the stream timebase, seeking backwards.
+    Time(i64),
+}
+
 /// Reads indexed samples: file reads where the container gives offsets,
 /// otherwise a byte seek in FFmpeg's demuxer to the first needed packet.
 pub struct PacketReader {
@@ -454,10 +539,10 @@ impl PacketReader {
 
     fn read_demuxed(&mut self, idx: &crate::index::FrameIndex, which: &[usize]) -> Result<Vec<Packet>> {
         use crate::index::Loc;
-        let want: Vec<(i64, u32, usize)> = which
+        let want: Vec<(i64, u16, u32, usize)> = which
             .iter()
             .map(|&i| match idx.samples[i].loc {
-                Loc::Demux { pos, size } => Ok((pos, size, i)),
+                Loc::Demux { pos, nth, size } => Ok((pos, nth, size, i)),
                 _ => Err(MediaError::invalid("mixed sample locations")),
             })
             .collect::<Result<_>>()?;
@@ -474,8 +559,14 @@ impl PacketReader {
             })
             .collect();
         earlier.sort_unstable();
-        let mut attempts: Vec<i64> = earlier.iter().rev().take(3).copied().collect();
-        attempts.push(0);
+        let mut attempts: Vec<Seek> = earlier.iter().rev().take(3).map(|&p| Seek::Byte(p)).collect();
+        attempts.push(Seek::Byte(0));
+        // Demuxers whose byte seeks drop the packet they land on (ASF loses
+        // the first packet of the data object): a timestamp seek backwards
+        // from the first wanted sample, which demuxers implement with their
+        // own index or a resynchronizing search.
+        let first = &idx.samples[want[0].3];
+        attempts.push(Seek::Time(first.dts.unwrap_or(first.cts)));
         attempts.dedup();
         let mut last_err = None;
         for seek in attempts {
@@ -487,21 +578,27 @@ impl PacketReader {
         Err(last_err.unwrap())
     }
 
-    fn read_from(&mut self, seek: i64, want: &[(i64, u32, usize)], idx: &crate::index::FrameIndex) -> Result<Vec<Packet>> {
+    fn read_from(&mut self, seek: Seek, want: &[(i64, u16, u32, usize)], idx: &crate::index::FrameIndex) -> Result<Vec<Packet>> {
         if self.demux.is_none() {
             self.demux = Some(Input::open(&self.path)?);
         }
         let inp = self.demux.as_ref().unwrap();
         let mut out = Vec::with_capacity(want.len());
         unsafe {
-            if seek == 0 {
-                check(ff::avformat_seek_file(inp.fmt, -1, i64::MIN, 0, 0, ff::AVSEEK_FLAG_BYTE as c_int), "seek to start")?;
-            } else {
-                check(ff::av_seek_frame(inp.fmt, self.stream as c_int, seek, ff::AVSEEK_FLAG_BYTE as c_int), "byte seek")?;
-            }
+            match seek {
+                Seek::Byte(0) => {
+                    check(ff::avformat_seek_file(inp.fmt, -1, i64::MIN, 0, 0, ff::AVSEEK_FLAG_BYTE as c_int), "seek to start")?
+                }
+                Seek::Byte(b) => check(ff::av_seek_frame(inp.fmt, self.stream as c_int, b, ff::AVSEEK_FLAG_BYTE as c_int), "byte seek")?,
+                Seek::Time(t) => {
+                    check(ff::av_seek_frame(inp.fmt, self.stream as c_int, t, ff::AVSEEK_FLAG_BACKWARD as c_int), "timestamp seek")?
+                }
+            };
             let mut pkt = ff::av_packet_alloc();
             let mut k = 0;
             let mut err = None;
+            // Ordinal of the packet among this stream's packets at the same position.
+            let (mut at, mut nth) = (i64::MIN, 0u16);
             while k < want.len() {
                 let r = ff::av_read_frame(inp.fmt, pkt);
                 if r == ff::AVERROR_EOF {
@@ -513,8 +610,13 @@ impl PacketReader {
                 }
                 if (*pkt).stream_index as usize == self.stream {
                     let p = (*pkt).pos;
-                    let (wpos, wsize, i) = want[k];
-                    if p == wpos {
+                    if p == at {
+                        nth = nth.saturating_add(1);
+                    } else {
+                        (at, nth) = (p, 0);
+                    }
+                    let (wpos, wnth, wsize, i) = want[k];
+                    if p == wpos && nth == wnth {
                         if (*pkt).size as u32 != wsize {
                             err = Some(MediaError::invalid(format!(
                                 "packet at byte {wpos} read back with {} bytes, indexed with {wsize}",
@@ -528,7 +630,7 @@ impl PacketReader {
                         self.bytes_read += data.len() as u64;
                         out.push(Packet { data, additional: None, pts: s.cts, dts: s.dts, duration: s.duration, key: s.key });
                         k += 1;
-                    } else if p > wpos && p >= 0 {
+                    } else if (p > wpos || (p == wpos && nth > wnth)) && p >= 0 {
                         err = Some(MediaError::invalid(format!("the demuxer passed byte {wpos} without returning the indexed packet")));
                         ff::av_packet_unref(pkt);
                         break;

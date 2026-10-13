@@ -119,7 +119,14 @@ impl VtConfig {
             // MXF (RDD 44) and other containers: the codec tag, else FFmpeg's profile.
             let tag = info.codec_tag.as_deref().and_then(|t| <[u8; 4]>::try_from(t.as_bytes()).ok()).filter(is_prores_fourcc);
             (u32::from_be_bytes(tag.unwrap_or(prores_fourcc(info.profile))), vec![], false)
+        } else if info.codec == "h264" && extradata.first() == Some(&1) {
+            // FLV and others: the extradata is already an `avcC` record and
+            // samples are length-prefixed.
+            (fcc(b"avc1"), vec![(*b"avcC", extradata.to_vec())], false)
+        } else if info.codec == "hevc" && extradata.first() == Some(&1) && extradata.len() > 22 {
+            (fcc(b"hvc1"), vec![(*b"hvcC", extradata.to_vec())], false)
         } else if info.codec == "h264" && !extradata.is_empty() {
+            // MPEG-TS, AVI: Annex B parameter sets and samples.
             (fcc(b"avc1"), vec![(*b"avcC", annexb_to_avcc(extradata)?)], true)
         } else {
             return Err(MediaError::unsupported(format!("{} without MOV, MP4, or Matroska configuration goes to FFmpeg", info.codec)));

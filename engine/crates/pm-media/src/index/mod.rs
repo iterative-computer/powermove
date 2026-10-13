@@ -37,10 +37,18 @@ pub enum Loc {
     /// Bytes at a file offset. `additional` is a Matroska BlockAdditional
     /// with id 1 (VP8 and VP9 alpha).
     File { offset: u64, size: u32, additional: Option<(u64, u32)> },
-    /// A packet only the demuxer can reassemble (MPEG-TS and PS); `pos` is
-    /// the byte position FFmpeg reports for it, `size` its size (checked
-    /// when the packet is read again).
-    Demux { pos: i64, size: u32 },
+    /// A packet only the demuxer can reassemble (MPEG-TS and PS, FLV, ASF,
+    /// Ogg, elementary streams); `pos` is the byte position FFmpeg reports
+    /// for it, `nth` its ordinal among this stream's packets reported at the
+    /// same position (Ogg reports the page position for every packet that
+    /// starts on the page), and `size` its size (checked when the packet is
+    /// read again).
+    Demux {
+        pos: i64,
+        #[serde(default)]
+        nth: u16,
+        size: u32,
+    },
 }
 
 /// One coded sample (access unit) in decode order.
@@ -89,6 +97,11 @@ pub enum IndexSource {
     DvConstantFrames,
     /// No container index: every packet demuxed (payloads read, nothing decoded).
     DemuxScan,
+    /// No container index and no presentation timestamps on a codec that
+    /// reorders (AVI and elementary streams with B frames): every packet
+    /// demuxed, and presentation order taken from one decode pass with
+    /// reconstruction skipped (no IDCT, no loop filter).
+    DemuxScanDecodeOrder,
 }
 
 /// Facts about how the index was built.
@@ -461,7 +474,7 @@ mod tests {
     use super::*;
 
     fn sample(cts: i64, key: bool) -> Sample {
-        Sample { dts: None, cts, duration: 1, key, loc: Loc::Demux { pos: 0, size: 1 }, nal_type: None }
+        Sample { dts: None, cts, duration: 1, key, loc: Loc::Demux { pos: 0, nth: 0, size: 1 }, nal_type: None }
     }
 
     fn index(samples: Vec<Sample>) -> FrameIndex {

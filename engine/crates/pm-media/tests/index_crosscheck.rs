@@ -18,7 +18,7 @@ fn crosscheck(path: &Path) -> Result<String, String> {
     let (pkts, tb, _) = demux_scan(path, v).map_err(|e| e.to_string())?;
     let name = path.file_name().unwrap().to_string_lossy();
     let line = format!("{name}: {:?}, {} samples, {} presented, {} sync", idx.source, idx.samples.len(), idx.frames.len(), idx.stats.sync_samples);
-    if idx.source == IndexSource::DemuxScan {
+    if matches!(idx.source, IndexSource::DemuxScan | IndexSource::DemuxScanDecodeOrder) {
         return Ok(line);
     }
     if pkts.len() != idx.samples.len() {
