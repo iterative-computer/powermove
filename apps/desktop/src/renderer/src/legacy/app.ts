@@ -670,6 +670,7 @@ PM.autosave = () => {
       // A read-only project only tracks whether it differs from its file.
       const readOnly = isReadOnlyProject(PM.proj);
       if (!readOnly) {
+        PM.EngineDoc?.beforeSave?.('autosave');
         if (!persistCurrent(true)) throw new Error('Project storage is unavailable or full');
         PM.Projects.putState(PM.proj.id, { ...PM.Projects.getState(PM.proj.id, { history: false }), history: PM.hist.export?.({ copy: false }) });
         await PM.store.flush?.();
@@ -701,6 +702,8 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
     (window.document.activeElement as HTMLElement | null)?.blur?.();
     PM.bus.emit('project:flush-edits');
     await APP.importQueue;
+    // The native engine's consistency check (docs/rust-engine.md, section 6).
+    PM.EngineDoc?.beforeSave?.('save');
     progress(0.05);
     const project = projectId === PM.proj.id ? PM.proj : PM.Projects.get(projectId);
     if (!project) throw new Error('This project is no longer available.');
