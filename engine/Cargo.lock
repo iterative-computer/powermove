@@ -1215,10 +1215,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e022c9d066895efa1345f8e33e584b9f958da2fd4cd116792e15e07e4720a807"
 dependencies = [
  "bitflags",
+ "block2",
  "dispatch2",
+ "libc",
  "objc2",
  "objc2-core-foundation",
  "objc2-io-surface",
+ "objc2-metal",
 ]
 
 [[package]]
@@ -1362,9 +1365,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96c1358452b371bf9f104e21ec536d37a650eb10f7ee379fff67d2e08d537f1f"
 dependencies = [
  "bitflags",
+ "block2",
+ "libc",
  "objc2",
  "objc2-core-foundation",
  "objc2-core-graphics",
+ "objc2-core-video",
  "objc2-foundation",
  "objc2-metal",
 ]
@@ -1493,6 +1499,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",
  "objc2-foundation",
@@ -1583,10 +1590,14 @@ version = "0.1.0"
 name = "pm-gpu"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "objc2",
  "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation",
  "objc2-io-surface",
  "objc2-metal",
+ "objc2-quartz-core",
  "pm-media",
  "pm-protocol",
  "pollster",

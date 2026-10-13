@@ -28,7 +28,7 @@ fn err(e: impl std::fmt::Display) -> Error {
 #[napi(object)]
 #[derive(Default)]
 pub struct BridgeEvent {
-    /// `accepted`, `rejected`, `surface`, `retire`, `goodbye`, `gone`, or `error`.
+    /// `accepted`, `rejected`, `surface`, `retire`, `remoteLayer`, `goodbye`, `gone`, or `error`.
     pub kind: String,
     pub reason: Option<String>,
     pub pid: Option<i32>,
@@ -48,6 +48,10 @@ pub struct BridgeEvent {
     pub io_surface: Option<Buffer>,
     /// `CLOCK_UPTIME_RAW` µs when the native thread received the message.
     pub received_us: Option<f64>,
+    /// `remoteLayer` (the C′ prototype): the Core Animation context id (0:
+    /// gone) and its scale (device pixels per point).
+    pub context_id: Option<u32>,
+    pub scale: Option<f64>,
 }
 
 impl BridgeEvent {
@@ -94,6 +98,24 @@ impl BridgeEvent {
                 kind: "retire".into(),
                 client_port: Some(client_port),
                 generation: Some(generation),
+                received_us,
+                ..Default::default()
+            },
+            HostEvent::RemoteLayer {
+                client_port,
+                generation,
+                context_id,
+                width,
+                height,
+                scale_milli,
+            } => Self {
+                kind: "remoteLayer".into(),
+                client_port: Some(client_port),
+                generation: Some(generation),
+                context_id: Some(context_id),
+                width: Some(width),
+                height: Some(height),
+                scale: Some(f64::from(scale_milli) / 1000.0),
                 received_us,
                 ..Default::default()
             },
@@ -423,6 +445,155 @@ mod harness {
         pub current: f64,
         pub potential: f64,
         pub reference: f64,
+    }
+
+    /// Lets the window owning `view_handle` (`getNativeWindowHandle()`, an
+    /// `NSView*`) sit off every screen even though it has a title bar.
+    /// AppKit constrains titled windows onto a screen when they are shown
+    /// or moved; the real-app measurement must keep the editor window off
+    /// screen while Jude uses the machine, so this replaces
+    /// `constrainFrameRect:toScreen:` on the window's class with one that
+    /// returns the frame unchanged. Measurement processes only (the
+    /// `harness` feature is never in release builds). Call on the main
+    /// thread before showing the window.
+    #[napi]
+    pub fn allow_offscreen_window(view_handle: napi::bindgen_prelude::Buffer) -> Result<String> {
+        use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+        use objc2::{msg_send, sel};
+        use objc2_foundation::NSRect;
+
+        extern "C-unwind" fn unconstrained(
+            _this: &AnyObject,
+            _cmd: Sel,
+            frame: NSRect,
+            _screen: *mut AnyObject,
+        ) -> NSRect {
+            frame
+        }
+
+        objc2_foundation::MainThreadMarker::new().ok_or_else(|| err("not on the main thread"))?;
+        let bytes: &[u8] = &view_handle;
+        let raw: [u8; 8] = bytes
+            .get(..8)
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| err("the handle is not an NSView pointer"))?;
+        let view = usize::from_ne_bytes(raw) as *const AnyObject;
+        if view.is_null() {
+            return Err(err("null view"));
+        }
+        // SAFETY: `getNativeWindowHandle()` returns the window's live content
+        // NSView; we are on the main thread.
+        let window: *const AnyObject = unsafe { msg_send![&*view, window] };
+        if window.is_null() {
+            return Err(err("the view has no window"));
+        }
+        let class: &AnyClass = unsafe { &*window }.class();
+        let method = class
+            .instance_method(sel!(constrainFrameRect:toScreen:))
+            .ok_or_else(|| err("no constrainFrameRect:toScreen:"))?;
+        let imp = unconstrained
+            as extern "C-unwind" fn(&AnyObject, Sel, NSRect, *mut AnyObject) -> NSRect;
+        // SAFETY: the replacement has the method's exact signature
+        // (`- (NSRect)constrainFrameRect:(NSRect)r toScreen:(NSScreen*)s`).
+        unsafe {
+            method.set_implementation(std::mem::transmute::<
+                extern "C-unwind" fn(&AnyObject, Sel, NSRect, *mut AnyObject) -> NSRect,
+                Imp,
+            >(imp))
+        };
+        Ok(class.name().to_string_lossy().into_owned())
+    }
+
+    thread_local! {
+        /// The C′ prototype's `CALayerHost`s by id (main thread only).
+        static LAYER_HOSTS: std::cell::RefCell<std::collections::HashMap<u32, objc2::rc::Retained<objc2::runtime::AnyObject>>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+        static NEXT_HOST: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
+    }
+
+    /// The C′ prototype (docs/engine/bridge.md): hosts the engine's remote
+    /// Core Animation context `context_id` in the window owning
+    /// `view_handle` (`getNativeWindowHandle()`), as a `CALayerHost` over
+    /// the web contents at `x, y, width, height` points from the content
+    /// view's top left. `CALayerHost` is private API, which is why this is
+    /// a harness function: the prototype is measured, not shipped. Returns
+    /// an id for [`remove_remote_layer`].
+    #[napi]
+    pub fn host_remote_layer(
+        view_handle: napi::bindgen_prelude::Buffer,
+        context_id: u32,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    ) -> Result<u32> {
+        use objc2::msg_send;
+        use objc2::rc::Retained;
+        use objc2::runtime::{AnyClass, AnyObject};
+        use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+        objc2_foundation::MainThreadMarker::new().ok_or_else(|| err("not on the main thread"))?;
+        let bytes: &[u8] = &view_handle;
+        let raw: [u8; 8] = bytes
+            .get(..8)
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| err("the handle is not an NSView pointer"))?;
+        let view = usize::from_ne_bytes(raw) as *const AnyObject;
+        if view.is_null() {
+            return Err(err("null view"));
+        }
+        let class =
+            AnyClass::get(c"CALayerHost").ok_or_else(|| err("CALayerHost is unavailable"))?;
+        // SAFETY: main thread; the view is the window's live content view.
+        unsafe {
+            let parent: *const AnyObject = msg_send![&*view, layer];
+            if parent.is_null() {
+                return Err(err("the content view has no layer"));
+            }
+            let flipped: bool = msg_send![&*parent, isGeometryFlipped];
+            let bounds: NSRect = msg_send![&*parent, bounds];
+            let host: Retained<AnyObject> = msg_send![class, new];
+            let _: () = msg_send![objc2_quartz_core_transaction(), begin];
+            let _: () = msg_send![objc2_quartz_core_transaction(), setDisableActions: true];
+            let _: () = msg_send![&*host, setContextId: context_id];
+            let top = if flipped {
+                y
+            } else {
+                bounds.size.height - y - height
+            };
+            let frame = NSRect::new(NSPoint::new(x, top), NSSize::new(width, height));
+            let _: () = msg_send![&*host, setFrame: frame];
+            let _: () = msg_send![&*host, setZPosition: 1000.0f64];
+            let _: () = msg_send![&*parent, addSublayer: &*host];
+            let _: () = msg_send![objc2_quartz_core_transaction(), commit];
+            let id = NEXT_HOST.with(|n| {
+                let id = n.get();
+                n.set(id + 1);
+                id
+            });
+            LAYER_HOSTS.with(|hosts| hosts.borrow_mut().insert(id, host));
+            Ok(id)
+        }
+    }
+
+    /// Removes a `CALayerHost` made by [`host_remote_layer`].
+    #[napi]
+    pub fn remove_remote_layer(id: u32) -> Result<bool> {
+        use objc2::msg_send;
+        objc2_foundation::MainThreadMarker::new().ok_or_else(|| err("not on the main thread"))?;
+        let host = LAYER_HOSTS.with(|hosts| hosts.borrow_mut().remove(&id));
+        Ok(match host {
+            Some(host) => {
+                // SAFETY: main thread; a layer we added.
+                let _: () = unsafe { msg_send![&*host, removeFromSuperlayer] };
+                true
+            }
+            None => false,
+        })
+    }
+
+    fn objc2_quartz_core_transaction() -> &'static objc2::runtime::AnyClass {
+        objc2::runtime::AnyClass::get(c"CATransaction").expect("CATransaction")
     }
 
     /// EDR headroom per screen. Call on the main thread.

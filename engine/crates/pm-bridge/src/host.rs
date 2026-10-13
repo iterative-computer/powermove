@@ -97,6 +97,15 @@ pub enum HostEvent {
         client_port: u32,
         generation: u32,
     },
+    /// The C′ prototype's remote layer for a viewer.
+    RemoteLayer {
+        client_port: u32,
+        generation: u32,
+        context_id: u32,
+        width: u32,
+        height: u32,
+        scale_milli: u32,
+    },
     Goodbye,
     /// The engine exited or crashed (its last send right went away).
     Gone,
@@ -221,6 +230,21 @@ pub fn run(
             } => emit(HostEvent::Retire {
                 client_port,
                 generation,
+            }),
+            Event::RemoteLayer {
+                client_port,
+                generation,
+                context_id,
+                width,
+                height,
+                scale_milli,
+            } => emit(HostEvent::RemoteLayer {
+                client_port,
+                generation,
+                context_id,
+                width,
+                height,
+                scale_milli,
             }),
             Event::Goodbye => emit(HostEvent::Goodbye),
             Event::PeerGone => {
