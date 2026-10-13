@@ -291,7 +291,12 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     if (!window || window.isDestroyed()) throw new Error('Save window is unavailable');
     const marker = claimPending(event.sender);
     watchOwner(event.sender);
+    let rendererGone = false;
+    const gone = () => { rendererGone = true; };
+    const isCurrent = () => !rendererGone && !isRendererUnavailable(event.sender);
+    event.sender.once('render-process-gone', gone);
     try {
+      if (!isCurrent()) return null;
       let selectedPath: string | undefined;
       if (request.directory) {
         const result = await dialog.showOpenDialog(window, { title: 'Export PNG Sequence', properties: ['openDirectory', 'createDirectory'] });
@@ -299,16 +304,20 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
       } else {
         const options = { defaultPath: name, filters: saveFiltersForName(name) };
         selectedPath = await agentExportDestination(event.sender, name);
+        if (!isCurrent()) return null;
         if (!selectedPath) {
           const result = ctx.dialogs?.showSave ? await ctx.dialogs.showSave(window, options) : await dialog.showSaveDialog(window, options);
           if (!result.canceled) selectedPath = result.filePath;
         }
       }
-      if (!selectedPath || window.isDestroyed()) return null;
+      if (!selectedPath || window.isDestroyed() || !isCurrent()) return null;
       const token = randomUUID();
       destinations.set(event.sender, { token, path: selectedPath, directory: !!request.directory });
       return token;
-    } finally { releasePending(event.sender, marker); }
+    } finally {
+      event.sender.removeListener('render-process-gone', gone);
+      releasePending(event.sender, marker);
+    }
   });
   ipcMain.handle(IPC.exportRelease, (event, token: unknown) => {
     if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
@@ -395,19 +404,30 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
 
     if (pending.has(event.sender)) return { ok: false, cancelled: false, error: 'A save is already in progress.' };
     const marker = claimPending(event.sender);
+    watchOwner(event.sender);
+    let rendererGone = false;
+    const gone = () => { rendererGone = true; };
+    const checkRenderer = () => { if (rendererGone || isRendererUnavailable(event.sender)) throw new Error('Save cancelled'); };
+    event.sender.once('render-process-gone', gone);
     try {
+      checkRenderer();
       const window = BrowserWindow.fromWebContents(event.sender);
       if (!window || window.isDestroyed()) throw new Error('Save window is unavailable');
       const known = projectId && ctx.projects ? await ctx.projects.destination(projectId) : undefined;
+      checkRenderer();
       let selectedPath = destination ? (destination.directory ? path.join(destination.path, name) : destination.path) : undefined;
       if (!destination && (!known || payload['saveAs'])) {
         const options: SaveDialogOptions = { defaultPath: known || name, filters: saveFiltersForName(name) };
         const result = ctx.dialogs?.showSave
           ? await ctx.dialogs.showSave(window, options)
           : await dialog.showSaveDialog(window, options);
+        checkRenderer();
         if (result.canceled || !result.filePath) return { ok: false, cancelled: true };
         selectedPath = result.filePath;
       }
+      // Once the writer starts, its durable outcome must still reach the
+      // caller. Only abandoned destination selection is cancelled here.
+      checkRenderer();
       if (projectId && ctx.projects) {
         return { ok: true, path: await ctx.projects.save(projectId, stream || data as Uint8Array, selectedPath) };
       }
@@ -417,6 +437,7 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     } catch (error: any) {
       return { ok: false, cancelled: false, error: error.message || 'Save failed. Check disk space and folder permissions.' };
     } finally {
+      event.sender.removeListener('render-process-gone', gone);
       releasePending(event.sender, marker);
       if (typeof payload.uploadId === 'string') await discardUpload(event.sender, payload.uploadId);
     }

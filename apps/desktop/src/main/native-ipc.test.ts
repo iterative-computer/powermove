@@ -82,7 +82,7 @@ describe('save IPC', () => {
   it('delivers an agent project through the existing save pipeline without a dialog', async () => {
     const folder = await mkdtemp(path.join(tmpdir(), 'pm-agent-save-'));
     const { ipcMain, invokes } = fakeIpcMain();
-    const sender = new EventEmitter(), event = invokeEvent(sender);
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false }), event = invokeEvent(sender);
     const showSave = vi.fn();
     electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
     registerSaveIpc(ipcMain, { isTrustedSender: () => true, dialogs: { showSave } });
@@ -136,12 +136,12 @@ describe('save IPC', () => {
     electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
     const { ipcMain, invokes } = fakeIpcMain();
     registerSaveIpc(ipcMain, { isTrustedSender: () => true, dialogs: { showSave } });
-    const sender = new EventEmitter();
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false });
     const call = (channel: string, payload: unknown, owner = sender) => invokes.get(channel)!(invokeEvent(owner), payload);
     try {
       const token = await call(IPC.exportChoose, { name: 'chosen.png', directory });
       expect(await readdir(folder)).toEqual([]);
-      await expect(call(IPC.fileSave, { name: 'chosen.png', data: new Uint8Array([7]), destinationToken: token }, new EventEmitter())).rejects.toThrow('Unknown export destination');
+      await expect(call(IPC.fileSave, { name: 'chosen.png', data: new Uint8Array([7]), destinationToken: token }, Object.assign(new EventEmitter(), { isDestroyed: () => false }))).rejects.toThrow('Unknown export destination');
       if (directory) await expect(call(IPC.fileSave, { name: '../escape.png', data: new Uint8Array([7]), destinationToken: token })).rejects.toThrow('Invalid export frame name');
       expect(await call(IPC.fileSave, { name: 'chosen.png', data: new Uint8Array([7]), destinationToken: token })).toEqual({ ok: true, path: output });
       expect([...await readFile(output)]).toEqual([7]);
@@ -156,7 +156,7 @@ describe('save IPC', () => {
     const showSave = vi.fn(async () => ({ canceled: true, filePath: '' }));
     const { ipcMain, invokes } = fakeIpcMain();
     registerSaveIpc(ipcMain, { isTrustedSender: () => true, dialogs: { showSave } });
-    const event = invokeEvent(new EventEmitter());
+    const event = invokeEvent(Object.assign(new EventEmitter(), { isDestroyed: () => false }));
     expect(await invokes.get(IPC.exportChoose)!(event, { name: 'export.webm' })).toBeNull();
     expect(await invokes.get(IPC.exportChoose)!(event, { name: 'export.webm' })).toBeNull();
     expect(showSave).toHaveBeenCalledTimes(2);
@@ -182,7 +182,7 @@ describe('save IPC', () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'powermove-save-test-'));
     const destination = path.join(directory, 'chosen.pmv');
     const showSave = vi.fn().mockResolvedValue({ canceled: false, filePath: destination });
-    const sender = {};
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false });
     const window = { isDestroyed: () => false };
     electronMocks.browserWindowFromWebContents.mockReturnValue(window);
     const { ipcMain, invokes } = fakeIpcMain();
