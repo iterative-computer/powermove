@@ -12,6 +12,16 @@ import {
 } from './spec';
 
 describe('Powermove agent tool spec', () => {
+  it('explains grouping coordinates and directs sibling ordering to strip anchors', () => {
+    const description = POWERMOVE_AGENT_TOOLS.find(tool => tool.name === 'apply_commands')!.description;
+    expect(description).toContain('move_to_group preserves world pose at the playhead');
+    expect(description).toContain('including scale');
+    expect(description).toContain('does not preserve the whole animation');
+    expect(description).toContain('Join before animating the rig');
+    expect(description).toContain('reorder_layer index is composition-wide');
+    expect(description).toContain('may change group membership');
+    expect(description).toContain('edit_layer_strips operation reorder with sibling anchorId');
+  });
   it('offers delivery by default to project agents but excludes planning and app-only runs', () => {
     for (const name of ['save_project', 'export_video']) {
       expect(POWERMOVE_AGENT_TOOLS.some(tool => tool.name === name)).toBe(true);
