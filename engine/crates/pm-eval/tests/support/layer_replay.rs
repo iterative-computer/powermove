@@ -8,13 +8,15 @@
 use std::collections::BTreeMap;
 
 use pm_eval::anchor::{BoundsValues, font_anchor_offset};
+use pm_eval::bounds::{Bounds, NoHost, PickOptions};
 use pm_eval::evaluator::Content;
 use pm_eval::retime::Retiming;
 use pm_eval::text_anim::{self, Shape, UnitKind};
+use pm_eval::text_geom::{MeasuredLine, TextMeasure};
 use pm_eval::{Comp, Evaluator, JsValue, Scope};
 use pm_model::json::{Value, parse};
 use pm_model::{Document, JsString, Node};
-use pm_text::compat::GlyphLayout;
+use pm_text::compat::{GlyphLayout, TextContent};
 
 /// A decoded JavaScript value.
 #[derive(Clone, Debug, PartialEq)]
@@ -568,5 +570,100 @@ pub fn replay(vectors: &Value, check: &mut Check<'_>) {
             ours,
             &want,
         );
+    }
+
+    // Bounds and picks (text layers, cameras, and lights are nulls here).
+    for entry in get(vectors, "picks").map_or(&[][..], |p| p.as_array().unwrap()) {
+        let root = parse(get(entry, "doc").unwrap().as_str().unwrap()).unwrap();
+        let comp_id = get(&root, "compId").unwrap().as_str().unwrap().to_owned();
+        let doc = Document::new(Some(root), 1);
+        let comp = Comp::resolve(&doc, &comp_id).unwrap();
+        let layers = comp.layers();
+        let mut ev = Evaluator::new();
+        for case in get(entry, "cases").unwrap().as_array().unwrap() {
+            let op = get(case, "op").unwrap().as_str().unwrap();
+            let t = hexf(get(case, "t").unwrap());
+            let want = dec(get(case, "out").unwrap());
+            let mut scope = Scope::open(&mut ev, &comp);
+            let ours = match op {
+                "bounds" => {
+                    let i = match get(case, "layer") {
+                        Some(Value::Number(n)) => *n as usize,
+                        _ => unreachable!(),
+                    };
+                    result(scope.bounds(&layers[i], t, &mut NoText, &mut NoHost), |b| {
+                        b.map_or(V::Z, |b| bounds_obj(&b))
+                    })
+                }
+                "pick" => {
+                    let options = PickOptions {
+                        include_locked: matches!(
+                            get(case, "includeLocked"),
+                            Some(Value::Bool(true))
+                        ),
+                        local_view: None,
+                    };
+                    let (x, y) = (hexf(get(case, "x").unwrap()), hexf(get(case, "y").unwrap()));
+                    result(
+                        scope.pick(x, y, t, &options, &mut NoText, &mut NoHost),
+                        |hit| {
+                            hit.map_or(V::Z, |l| {
+                                V::N(layers.iter().position(|x| std::ptr::eq(x, l)).unwrap() as f64)
+                            })
+                        },
+                    )
+                }
+                other => panic!("unknown pick op {other}"),
+            };
+            // Fragile cases (see the generator) are reported apart.
+            let fragile = matches!(get(case, "fragile"), Some(Value::Bool(true)));
+            check(
+                match (fragile, op) {
+                    (false, _) => op,
+                    (true, "pick") => "pick (fragile)",
+                    (true, _) => "bounds (fragile)",
+                },
+                &|| {
+                    format!(
+                        "{comp_id} {op} {}",
+                        pm_model::json::to_canonical_string(case)
+                    )
+                },
+                ours,
+                &want,
+            );
+        }
+    }
+}
+
+/// `GL.bounds`' answer as the TypeScript object.
+pub fn bounds_obj(b: &Bounds) -> V {
+    pairs(&[
+        ("x0", b.x0),
+        ("y0", b.y0),
+        ("x1", b.x1),
+        ("y1", b.y1),
+        ("w", b.w),
+        ("h", b.h),
+        ("ax", b.ax),
+        ("ay", b.ay),
+    ])
+}
+
+/// Text measurement for documents without text layers.
+pub struct NoText;
+
+impl TextMeasure for NoText {
+    fn measure_lines(&mut self, _: &TextContent) -> Vec<MeasuredLine> {
+        unreachable!("no text layers")
+    }
+    fn plain_width(&mut self, _: &TextContent, _: &str) -> f64 {
+        unreachable!("no text layers")
+    }
+    fn glyph_layout(&mut self, _: &TextContent) -> GlyphLayout {
+        unreachable!("no text layers")
+    }
+    fn spaced_width(&mut self, _: &TextContent, _: &str) -> f64 {
+        unreachable!("no text layers")
     }
 }

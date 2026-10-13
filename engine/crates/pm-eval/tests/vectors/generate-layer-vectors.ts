@@ -3,8 +3,9 @@
  * layer queries under bun: `legacy/core/anim.ts` (localMatrix, worldMatrix,
  * transformParentMatrix, worldOpacity, wouldCycle, active), `space-3d.ts`,
  * `parenting.ts`, `layer-groups.ts`, `matte.ts`, `retiming.ts`,
- * `size-anchor.ts`, `font-anchor.ts`, and `text-animation.ts`, installed on a
- * minimal `PM` the way the app installs them. `tests/layer_parity.rs`
+ * `size-anchor.ts`, `font-anchor.ts`, `text-animation.ts`, and the
+ * compositor's `GL.bounds` and `GL.pick`, installed on a minimal `PM` the way
+ * the app installs them. `tests/layer_parity.rs`
  * replays every case.
  *
  *   bun engine/crates/pm-eval/tests/vectors/generate-layer-vectors.ts
@@ -26,7 +27,7 @@ import { sourceTime } from '../../../../../apps/desktop/src/renderer/src/legacy/
 import { sizeBounds, sizeAnchorOffset } from '../../../../../apps/desktop/src/renderer/src/legacy/core/size-anchor';
 import { fontAnchorOffset } from '../../../../../apps/desktop/src/renderer/src/legacy/core/font-anchor';
 import * as TA from '../../../../../apps/desktop/src/renderer/src/legacy/core/text-animation';
-import { compositingLayers, hasRenderableEffects } from '../../../../../apps/desktop/src/renderer/src/legacy/gl/compositor';
+import { compositingLayers, hasRenderableEffects, install as installCompositor } from '../../../../../apps/desktop/src/renderer/src/legacy/gl/compositor';
 
 const SCALE = Number(process.env.PM_LAYER_SCALE ?? 1);
 const OUT = process.env.PM_LAYER_OUT ?? new URL('./layer-vectors.json.gz', import.meta.url).pathname;
@@ -364,8 +365,80 @@ for (let i = 0; i < 100 * SCALE; i++) {
   helpers.push({ op: 'fontAnchor', ref: enc(ref), bounds: enc(bounds), ax: enc(ax), ay: enc(ay), out: run(() => fontAnchorOffset(ref, bounds, ax as any, ay)) });
 }
 
-writeFileSync(OUT, gzipSync(JSON.stringify({ docs, texts, helpers }), { level: 9 }));
-const total = docs.reduce((n, d) => n + d.cases.length, 0) + texts.reduce((n, d) => n + d.cases.length, 0) + helpers.length;
+// Bounds and picking (`GL.bounds`, `GL.pick`) through the compositor's own
+// install. Text layers become nulls here (their bounds come from canvas
+// measurement, which the corpus compares), and so do cameras and lights: a
+// pick skips them, and with one present the legacy pick first builds the
+// three.js scene, which these minimal camera contents do not satisfy.
+installCompositor(PM);
+const picks: any[] = [];
+for (let index = 0; index < 36 * SCALE; index++) {
+  const doc = makeDoc(1000 + index);
+  for (const layer of doc.layers) if (layer.type === 'text' || layer.d?.definition) { layer.type = 'null'; layer.d = {}; }
+  if (chance(0.5)) for (const layer of doc.layers) if (chance(0.3)) layer.lock = !layer.lock;
+  PM.proj = JSON.parse(JSON.stringify(doc));
+  PM.ProjectIndex?.invalidate?.();
+  PM.touch();
+  const L = PM.proj.layers;
+  const cases: any[] = [];
+  for (const T of [0, range(-1, 5), range(0, doc.dur)]) {
+    PM.time = T;
+    // A case is fragile when a 1e-12 change of time (or, for picks, a 1e-7
+    // move of the point) changes the answer by more than the tolerance:
+    // near-singular group matrices, points on a layer's edge. Last-bit
+    // differences of sin and cos decide those; the replay reports them apart.
+    const T2 = T + 1e-12 * (1 + Math.abs(T));
+    const far = (a: any, b: any): boolean => {
+      if (typeof a === 'number' && typeof b === 'number') return !(Math.abs(a - b) <= 1e-7 * (1 + Math.abs(b)));
+      if (a && b && typeof a === 'object' && typeof b === 'object') return Object.keys(a).some(k => far(a[k], b[k]));
+      return a !== b;
+    };
+    const quiet = (fn: () => unknown) => { try { return fn(); } catch (e) { return `throw ${(e as Error)?.message}`; } };
+    for (let i = 0; i < L.length; i++) {
+      // Group bounds map members through the inverse of the group's matrix:
+      // a near-singular one (condition above 1e5) amplifies last bits.
+      const ill = L[i].type === 'group' && quiet(() => {
+        const [a, b, c, d2] = PM.worldMatrix(L[i], T);
+        return (a * a + b * b + c * c + d2 * d2) / Math.abs(a * d2 - b * c) > 1e5;
+      }) === true;
+      const fragile = ill || far(quiet(() => PM.GL.bounds(L[i], T)), quiet(() => PM.GL.bounds(L[i], T2)));
+      cases.push({ op: 'bounds', layer: i, t: hex(T), ...(fragile ? { fragile } : {}), out: run(() => PM.GL.bounds(L[i], T)) });
+    }
+    for (let k = 0; k < 24; k++) {
+      // Points near layer origins hit something more often than uniform ones.
+      // Points inside some layer's bounds hit something more often than
+      // uniform ones.
+      let x = range(-200, 2100), y = range(-200, 2100);
+      try {
+        const target = chance(0.85) && L.length ? pick(L) : null, b = target && PM.GL.bounds(target, T);
+        if (b) {
+          const m = S3.planeMatrix(PM, target, T), u = b.x0 + (b.x1 - b.x0) * range(-0.1, 1.1), v = b.y0 + (b.y1 - b.y0) * range(-0.1, 1.1);
+          const w = m[2] * u + m[5] * v + m[8];
+          if (w) { x = (m[0] * u + m[3] * v + m[6]) / w; y = (m[1] * u + m[4] * v + m[7]) / w; }
+        }
+      } catch { /* a uniform point */ }
+      const includeLocked = chance(0.3);
+      const at = (px: number, py: number, t: number) => quiet(() => { const hit = PM.GL.pick(px, py, t, { includeLocked }); return hit ? L.indexOf(hit) : null; });
+      const answer = at(x, y, T), d = 1e-7 * (1 + Math.abs(x) + Math.abs(y));
+      // On some layer's edge (in layer space): a zero-width layer is hit
+      // only exactly on its line, which a nudge of the point cannot show.
+      const onEdge = L.some((layer: any) => quiet(() => {
+        const b = PM.GL.bounds(layer, T), inv = b && S3.inversePlane(S3.planeMatrix(PM, layer, T));
+        if (!inv) return false;
+        const q = S3.projectPoint(inv, { x, y }), e = (v: number) => 1e-6 * (1 + Math.abs(v));
+        const near = (v: number, a: number, b2: number) => v >= a - e(v) && v <= b2 + e(v) && (Math.abs(v - a) <= e(v) || Math.abs(v - b2) <= e(v));
+        const inside = (v: number, a: number, b2: number) => v >= a - e(v) && v <= b2 + e(v);
+        return (near(q.x, b.x0, b.x1) && inside(q.y, b.y0, b.y1)) || (near(q.y, b.y0, b.y1) && inside(q.x, b.x0, b.x1));
+      }) === true);
+      const fragile = onEdge || [at(x + d, y, T), at(x - d, y, T), at(x, y + d, T), at(x, y - d, T), at(x, y, T2)].some(other => other !== answer);
+      cases.push({ op: 'pick', t: hex(T), x: hex(x), y: hex(y), includeLocked, ...(fragile ? { fragile } : {}), out: run(() => { const hit = PM.GL.pick(x, y, T, { includeLocked }); return hit ? L.indexOf(hit) : null; }) });
+    }
+  }
+  picks.push({ doc: JSON.stringify(doc), cases });
+}
+
+writeFileSync(OUT, gzipSync(JSON.stringify({ docs, texts, helpers, picks }), { level: 9 }));
+const total = docs.reduce((n, d) => n + d.cases.length, 0) + texts.reduce((n, d) => n + d.cases.length, 0) + helpers.length + picks.reduce((n, d) => n + d.cases.length, 0);
 console.log(`wrote ${OUT}: ${docs.length} documents, ${texts.length} text documents, ${total} cases`);
 // The compositor module keeps timers alive; leave once the file is written.
 process.exit(0);
