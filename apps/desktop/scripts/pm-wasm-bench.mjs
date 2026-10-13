@@ -26,6 +26,8 @@ const userData = await mkdtemp(path.join(tmpdir(), 'pm-wasm-bench-'));
 const env = { ...process.env, POWERMOVE_USER_DATA: userData, POWERMOVE_DEVTOOLS: '0', POWERMOVE_BACKGROUND_TEST: '1' };
 delete env.ELECTRON_RUN_AS_NODE;
 const app = await _electron.launch({ args: ['.'], cwd: appDir, env });
+// A stuck page must not leave a hidden Electron behind.
+const deadline = setTimeout(() => { console.error('[bench] timed out'); app.close().catch(() => {}).finally(() => process.exit(3)); }, 20 * 60_000);
 try {
   let page = await app.firstWindow();
   await page.waitForFunction(() => Boolean(window.PM?.ProjectsScreen && window.PM?.mkProject));
@@ -36,6 +38,7 @@ try {
   const ready = await page.evaluate(() => window.PM.EngineDoc.whenReady);
   if (!ready) throw new Error('pm-wasm did not load in the renderer');
 
+  page.on('console', (m) => { if (m.text().startsWith('[bench]')) console.error(m.text()); });
   const synthetic = project884();
   // The synthetic project keeps every composition field at the root (the stored form).
   const project = { ...synthetic, id: 'P-bench', compId: 'C-bench', compName: 'Bench', comps: {}, assets: {}, markers: [], work: [0, synthetic.dur ?? 60] };
@@ -47,6 +50,8 @@ try {
     PM.ProjectsScreen.hide();
     await new Promise(r => setTimeout(r, 500));
     const barrier = doc.barrier, wasm = doc.wasm, api = doc.api;
+    const phase = (name) => console.log(`[bench] ${name} ${performance.now().toFixed(0)}`);
+    phase('open');
     const quantile = (xs, q) => { const s = [...xs].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(q * s.length))]; };
     const stats = (xs) => ({ p50: quantile(xs, 0.5), p95: quantile(xs, 0.95), mean: xs.reduce((a, b) => a + b, 0) / xs.length, n: xs.length });
 
@@ -75,6 +80,7 @@ try {
       for (let i = 0; i < passes; i++) for (const [L, p, k] of list) PM.evP(L, p, T, k);
       return (performance.now() - t) * 1e6 / (passes * list.length);
     };
+    phase('evP');
     const evPAllNs = timeEvP(channels, 1.5, 20);
     const evPAnimatedNs = timeEvP(animated, 1.5, 200);
     const legacyAllNs = timeLegacy(channels, 1.5, 20);
@@ -89,6 +95,7 @@ try {
     for (let i = 0; i < 50; i++) wasm.evBatch(ids, 1.5);
     const batchNs = (performance.now() - tb) * 1e6 / (50 * ids.length);
 
+    phase('property edits');
     // Property edits through the Edit pipeline (history and the barrier).
     applies.length = 0; flushes.length = 0;
     const target = layers[Math.floor(layers.length / 2)];
@@ -97,17 +104,18 @@ try {
       flush();
     }
     const property = { apply: stats(applies.slice()), flush: stats(flushes.slice()) };
-    // Back-to-back: 200 edits, then one flush each (the mean, below timer resolution).
+    // Back-to-back: `rounds` edits, one flush each (the mean, below timer resolution).
     applies.length = 0;
     const tp = performance.now();
-    for (let i = 0; i < 200; i++) { target.p['position.y'].v = i; PM.touch([['layers', layers.indexOf(target), 'p', 'position.y', 'v']]); barrier.flush(); }
-    const propertyBackToBackMs = (performance.now() - tp) / 200;
+    for (let i = 0; i < rounds; i++) { target.p['position.y'].v = i; PM.touch([['layers', layers.indexOf(target), 'p', 'position.y', 'v']]); barrier.flush(); }
+    const propertyBackToBackMs = (performance.now() - tp) / rounds;
 
+    phase('structural edits');
     // Structural edits: reorder one layer, insert one, delete one.
     const structural = {};
     for (const kind of ['reorder', 'insert', 'delete']) {
       applies.length = 0; flushes.length = 0;
-      const n = Math.max(20, Math.floor(rounds / 5));
+      const n = Math.max(10, Math.floor(rounds / 5));
       for (let i = 0; i < n; i++) {
         PM.hist.do(kind, () => {
           const list = PM.proj.layers;
@@ -119,6 +127,7 @@ try {
       }
       structural[kind] = { apply: stats(applies.slice()), flush: stats(flushes.slice()) };
     }
+    phase('memory and consistency');
     wasm.apply = apply;
     const heap = wasm.heap();
     const check = doc.check('bench');
@@ -135,6 +144,7 @@ try {
   }, { project, rounds });
   console.log(JSON.stringify(result, null, 2));
 } finally {
+  clearTimeout(deadline);
   await app.close().catch(() => {});
   await rm(userData, { recursive: true, force: true });
 }
