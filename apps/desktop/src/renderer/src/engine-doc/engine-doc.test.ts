@@ -315,3 +315,13 @@ describe('dual answers: allowed differences (amendment 20)', () => {
     legacy.bounds = original;
   });
 });
+
+describe('deepKeyOrder', () => {
+  it('orders members as the live content at every depth, and computed bounds as the legacy code', async () => {
+    const { deepKeyOrder } = await import('./native');
+    const live = { text: { v: 'a', kf: [], expr: null }, animators: [{ id: 'A', name: 'Rise', enabled: true }], data: { objects: [], camera: {} } };
+    const answer = { animators: [{ enabled: true, id: 'A', name: 'Rise' }], data: { camera: {}, objects: [] }, fontAnchorBounds: { x0: 1, x1: 2, y0: 3, y1: 4 }, text: 'a' };
+    const ordered = deepKeyOrder(answer, live);
+    expect(JSON.stringify(ordered)).toBe(JSON.stringify({ text: 'a', animators: [{ id: 'A', name: 'Rise', enabled: true }], data: { objects: [], camera: {} }, fontAnchorBounds: { x0: 1, y0: 3, x1: 2, y1: 4 } }));
+  });
+});

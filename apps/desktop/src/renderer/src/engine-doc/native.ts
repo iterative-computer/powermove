@@ -79,6 +79,35 @@ export function keyOrder(obj: any, live: any): any {
   return out;
 }
 
+const BOUNDS_ORDER = ['x0', 'y0', 'x1', 'y1'];
+const isBounds = (v: any) => !!v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 4 && BOUNDS_ORDER.every(k => k in v);
+const isLiveProperty = (v: any) => !!v && typeof v === 'object' && Array.isArray(v.kf) && 'v' in v;
+
+/**
+ * `keyOrder` through the whole answer: members follow the live object's order
+ * at every depth (an animated member's order is its value's), and computed
+ * bounds (`sizeAnchorBounds`, `fontAnchorBounds`) list x0, y0, x1, y1 as the
+ * legacy code builds them. pm-eval lists members sorted (allowed difference 5).
+ */
+export function deepKeyOrder(obj: any, live: any, depth = 0): any {
+  if (!obj || typeof obj !== 'object' || depth > 32) return obj;
+  if (isLiveProperty(live)) live = live.v;
+  if (Array.isArray(obj)) {
+    if (!Array.isArray(live)) return obj.map(v => deepKeyOrder(v, undefined, depth + 1));
+    return obj.map((v, i) => deepKeyOrder(v, live[i], depth + 1));
+  }
+  if (!live || typeof live !== 'object' || Array.isArray(live)) {
+    if (isBounds(obj)) return { x0: obj.x0, y0: obj.y0, x1: obj.x1, y1: obj.y1 };
+    let changed = false;
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(obj)) { const v = deepKeyOrder(obj[key], undefined, depth + 1); if (v !== obj[key]) changed = true; out[key] = v; }
+    return changed ? out : obj;
+  }
+  const ordered = keyOrder(obj, live);
+  for (const key of Object.keys(ordered)) ordered[key] = deepKeyOrder(ordered[key], Object.prototype.hasOwnProperty.call(live, key) ? live[key] : undefined, depth + 1);
+  return ordered;
+}
+
 /**
  * `allProps` entries with runs that list members of one object put back in
  * the object's own key order (the legacy listing order; pm-eval's is sorted).
@@ -513,7 +542,7 @@ export class NativeApi {
   }
 
   resolveContent(L: any, T: any = this.PM.time): any {
-    return this.answer('resolveContent', () => this.layerQuery('resolveContent', L, { t: T }, (d: any) => keyOrder(d, this.unwrap(L)?.d)),
+    return this.answer('resolveContent', () => this.layerQuery('resolveContent', L, { t: T }, (d: any) => deepKeyOrder(d, this.unwrap(L)?.d)),
       () => this.legacy.resolveContent(L, T), () => ({ layer: L?.id, t: T }));
   }
 
