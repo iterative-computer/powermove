@@ -40,6 +40,13 @@ function nextCompName(PM: PMRegistry): string {
 export function precomposeDialog(PM: PMRegistry, ids: string[] = PM.sel.layers): void {
   const layers = ids.map((layerId: string) => PM.L(layerId)).filter(Boolean);
   if (!layers.length) { PM.toast?.('Select one or more layers to pre-compose'); return; }
+  const locked = (layer: any) => layer.lock || (PM.groupAncestors?.(layer) || []).some((group: any) => group.lock);
+  if (layers.some(locked)) {
+    PM.toast?.('Selected layers are locked. Unlock them or their group before pre-composing.');
+    return;
+  }
+  const projectId = PM.proj.id, compositionId = PM.Comps.active();
+  const targets = layers.map((layer: any) => layer.id);
   const h = PM.h;
   const single = layers.length === 1 ? layers[0] : null;
   const canLeave = !!single && PM.Comps.canLeave(single);
@@ -77,7 +84,17 @@ export function precomposeDialog(PM: PMRegistry, ids: string[] = PM.sel.layers):
     actions: [
       { label: 'Cancel' },
       { label: 'OK', pri: true, run: () => {
-        const created = PM.Comps.precompose(layers.map((layer: any) => layer.id), {
+        if (PM.proj.id !== projectId || PM.Comps.active() !== compositionId) {
+          throw new Error('The project or composition has changed. Close this dialog and try again.');
+        }
+        const current = targets.map((id: string) => PM.L(id));
+        if (current.some((layer: any) => !layer)) {
+          throw new Error('A selected layer is no longer available. Close this dialog and try again.');
+        }
+        if (current.some(locked)) {
+          throw new Error('These layers are now locked. Unlock them or their group before pre-composing.');
+        }
+        const created = PM.Comps.precompose(targets, {
           name: name.value.trim() || `Pre-comp ${n}`,
           mode: leave.checked ? 'leave' : 'move',
           adjustDuration: move.checked && adjust.checked,
