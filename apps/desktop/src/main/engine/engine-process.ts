@@ -92,7 +92,14 @@ function main(): void {
         ports.delete(message.port);
         run(engine.detach(message.port));
       });
-      run(engine.attach(message.port, message.peer));
+      try {
+        run(engine.attach(message.port, message.peer));
+      } catch (error) {
+        notify({ type: 'log', level: 'error', message: `could not attach port ${message.port}: ${error instanceof Error ? error.message : String(error)}` });
+        ports.delete(message.port);
+        port.close();
+        return;
+      }
       port.start();
     } else if (message?.type === 'disconnect') {
       const port = ports.get(message.port);
