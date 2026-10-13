@@ -18,8 +18,8 @@ describe('keymap-default', () => {
     activate({ keybindings: { bind } } as unknown as PowermoveAPI);
 
     expect(captured).toEqual(KEYMAP_DEFAULT);
-    expect(captured).toHaveLength(192);
-    expect(captured.filter(({ command }) => command !== 'blurField')).toHaveLength(191);
+    expect(captured).toHaveLength(194);
+    expect(captured.filter(({ command }) => command !== 'blurField')).toHaveLength(193);
     expect(captured.find(({ command }) => command === 'blurField')).toEqual({
       key: 'escape',
       command: 'blurField',

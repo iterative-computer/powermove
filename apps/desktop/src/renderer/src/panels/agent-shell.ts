@@ -201,11 +201,11 @@ export function installAgentShell(PM: PM) {
     const top = parseFloat(surface.style.top);
     const height = parseFloat(surface.style.height);
     beginPanelDrag(PM as never, event, { id: 'agent' }, { id: 'titlebar', panels: [] }, surface, {
-      move: (dx, dy) => {
-        floatingPosition = { left: left + dx, top: top + dy, height };
+      move: next => {
+        floatingPosition = { left: left + next.clientX - event.clientX, top: top + next.clientY - event.clientY, height };
         position();
       },
-      cancel: () => { floatingPosition = previous; position(); },
+      finish: cancelled => { if (cancelled) floatingPosition = previous; position(); },
       dockIds: PM.ProjectsScreen?.isOpen || !PM.WS?.current ? [] : ['left', 'right']
     });
   }

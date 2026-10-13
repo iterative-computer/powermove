@@ -427,7 +427,13 @@ function parseCompositionPatch(value: unknown): CompositionPatch | ValidationErr
     if (!COMPOSITION_FIELDS.has(key)) return invalid(`unknown composition field "${key}"`, 'patch');
   }
   const out: CompositionPatch = {};
-  for (const key of ['width', 'height', 'fps', 'duration', 'shutter', 'audioGain', 'colorDepth'] as const) {
+  if (patch.colorDepth != null) {
+    if (patch.colorDepth !== 8 && patch.colorDepth !== 16 && patch.colorDepth !== 32) {
+      return invalid('must be 8, 16, or 32', 'patch.colorDepth');
+    }
+    out.colorDepth = patch.colorDepth;
+  }
+  for (const key of ['width', 'height', 'fps', 'duration', 'shutter', 'audioGain'] as const) {
     if (patch[key] == null) continue;
     const number = finite(patch[key], `patch.${key}`);
     if (number instanceof ValidationError) return number;

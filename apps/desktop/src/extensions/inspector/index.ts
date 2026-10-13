@@ -11,7 +11,6 @@ import {
   effectPasteCommands
 } from './effect-clipboard';
 import type { InspectorRuntimeService } from './context';
-import { showFxMenu } from './actions';
 import { inspectorRefresh } from './refresh.svelte.js';
 import { shaderDefinitions, syncShaderUniforms } from './shader';
 
@@ -122,7 +121,8 @@ export default function activate(api: PowermoveAPI): void {
       add.title = 'Add effect';
       add.setAttribute('aria-label', 'Add effect');
       add.innerHTML = api.ui.icon('plus');
-      add.addEventListener('click', () => {
+      add.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
         const layers = api.selection.layers()
           .map((id) => api.model.layer(id))
           .filter((layer): layer is Layer => layer !== null);

@@ -102,6 +102,7 @@ function placePreview(
 type FloatingDrag = {
   move(event: PointerEvent): void;
   finish(cancelled: boolean): void;
+  dockIds?: string[];
 };
 
 export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelSpec, dock: DockSpec, element: HTMLElement, floating?: FloatingDrag): void {
@@ -133,7 +134,7 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
     const next = pending;
     pending = null;
     if (!next) return;
-    const docks = liveTargets(PM);
+    const docks = liveTargets(PM).filter(dock => !floating?.dockIds || floating.dockIds.includes(dock.id));
     dropTarget = PM.Layout.hitTestDockPlacement(docks, next.clientX, next.clientY);
     if (floating) {
       floating.move(next);
