@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, expect, it, vi } from 'vitest';
-import { installRendererRecovery, isRendererUnavailable, recoverRenderer } from './renderer-recovery';
+import { installRendererRecovery, isRendererUnavailable, recoverRenderer, watchRendererDocument } from './renderer-recovery';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -17,6 +17,27 @@ function harness() {
 }
 
 const settle = () => new Promise<void>(resolve => setImmediate(resolve));
+
+it.each(['navigation', 'crash', 'destroy'])('ends document operations once on %s and releases all listeners', reason => {
+  const contents = new EventEmitter();
+  const lost = vi.fn();
+  const stop = watchRendererDocument(contents as never, lost);
+  contents.emit('did-start-navigation', { isMainFrame: false, isSameDocument: false });
+  contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: true });
+  expect(lost).not.toHaveBeenCalled();
+  if (reason === 'navigation') contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+  else contents.emit(reason === 'crash' ? 'render-process-gone' : 'destroyed');
+  contents.emit('render-process-gone'); contents.emit('destroyed'); stop(); stop();
+  expect(lost).toHaveBeenCalledOnce();
+  expect(contents.eventNames()).toEqual([]);
+});
+
+it('stops watching a finished operation without cancelling it', () => {
+  const contents = new EventEmitter(), lost = vi.fn();
+  const stop = watchRendererDocument(contents as never, lost);
+  stop(); contents.emit('render-process-gone');
+  expect(lost).not.toHaveBeenCalled(); expect(contents.eventNames()).toEqual([]);
+});
 
 it('defers the native prompt until teardown completes and never prompts for clean exits', async () => {
   const h = harness();

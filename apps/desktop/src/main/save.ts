@@ -19,7 +19,7 @@ import { atomicWrite, type ProjectFiles } from './project-files';
 import { rememberExport } from './export-sidecar';
 import { FileUpload, FILE_CHUNK_BYTES } from './file-upload';
 import { validateSaveMedia, type ProjectSave } from './project-save';
-import { isRendererUnavailable } from './renderer-recovery';
+import { isRendererUnavailable, watchRendererDocument } from './renderer-recovery';
 
 const MAX_SAVE_NAME_CHARS = 200;
 
@@ -77,12 +77,12 @@ function watchProjectReaderOwner(projects: ProjectFiles, owner: WebContents): vo
   if (state.watchedOwners.has(owner)) return;
   state.watchedOwners.add(owner);
   const release = () => {
+    state.watchedOwners.delete(owner);
     for (const [token, reader] of state.readers) {
       if (reader.owner === owner) void closeProjectReader(projects, token).catch(() => undefined);
     }
   };
-  owner.once('destroyed', release);
-  owner.on('render-process-gone', release);
+  watchRendererDocument(owner, release);
 }
 
 export async function openProjectForWindow(
@@ -94,7 +94,7 @@ export async function openProjectForWindow(
   // grant its completed reader to the replacement process.
   let rendererGone = false;
   const gone = () => { rendererGone = true; };
-  webContents.once('render-process-gone', gone);
+  const stopWatching = watchRendererDocument(webContents, gone);
   try {
     if (isRendererUnavailable(webContents)) throw new Error('Project window is unavailable');
     const opened = await ctx.projects.open(filePath, { allowDocumentRange: true });
@@ -118,7 +118,7 @@ export async function openProjectForWindow(
     return { ok: true, ...opened };
   } catch (error: any) {
     return { ok: false, cancelled: false, error: error.message || 'Could not open project.' };
-  } finally { webContents.removeListener('render-process-gone', gone); }
+  } finally { stopWatching(); }
 }
 
 /** Convert an untrusted suggestion into one plain filename. */
@@ -203,6 +203,7 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     if (watchedOwners.has(owner)) return;
     watchedOwners.add(owner);
     const release = () => {
+      watchedOwners.delete(owner);
       destinations.delete(owner);
       // A final transaction may already be publishing. Let it finish while
       // disposal waits; an abandoned native dialog can release its lock now.
@@ -210,8 +211,7 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
       void discardUpload(owner).catch(() => undefined);
       void discardProjectSave(owner).catch(() => undefined);
     };
-    owner.once('destroyed', release);
-    owner.on('render-process-gone', release);
+    watchRendererDocument(owner, release);
   };
   ipcMain.handle(IPC.projectSaveBegin, async (event, request: unknown): Promise<ProjectSaveBeginResult> => {
     if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
@@ -228,7 +228,7 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     let rendererGone = false;
     const gone = () => { rendererGone = true; };
     const checkRenderer = () => { if (rendererGone || isRendererUnavailable(event.sender)) throw new Error('Save cancelled'); };
-    event.sender.once('render-process-gone', gone);
+    const stopWatching = watchRendererDocument(event.sender, gone);
     let id: string | undefined;
     try {
       checkRenderer();
@@ -256,7 +256,7 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
       if (id) await discardProjectSave(event.sender, id).catch(() => undefined);
       releasePending(event.sender, marker);
       return { ok: false, cancelled: false, error: error.message || 'Could not start saving.' };
-    } finally { event.sender.removeListener('render-process-gone', gone); }
+    } finally { stopWatching(); }
   });
   ipcMain.handle(IPC.projectSaveChunk, async (event, request: unknown) => {
     if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
@@ -294,7 +294,7 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     let rendererGone = false;
     const gone = () => { rendererGone = true; };
     const isCurrent = () => !rendererGone && !isRendererUnavailable(event.sender);
-    event.sender.once('render-process-gone', gone);
+    const stopWatching = watchRendererDocument(event.sender, gone);
     try {
       if (!isCurrent()) return null;
       let selectedPath: string | undefined;
@@ -315,7 +315,7 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
       destinations.set(event.sender, { token, path: selectedPath, directory: !!request.directory });
       return token;
     } finally {
-      event.sender.removeListener('render-process-gone', gone);
+      stopWatching();
       releasePending(event.sender, marker);
     }
   });
@@ -413,7 +413,7 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     let rendererGone = false;
     const gone = () => { rendererGone = true; };
     const checkRenderer = () => { if (rendererGone || isRendererUnavailable(event.sender)) throw new Error('Save cancelled'); };
-    event.sender.once('render-process-gone', gone);
+    const stopWatching = watchRendererDocument(event.sender, gone);
     let saveFailed = false;
     try {
       checkRenderer();
@@ -444,7 +444,7 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
       saveFailed = true;
       return { ok: false, cancelled: false, error: error.message || 'Save failed. Check disk space and folder permissions.' };
     } finally {
-      event.sender.removeListener('render-process-gone', gone);
+      stopWatching();
       releasePending(event.sender, marker);
       if (typeof payload.uploadId === 'string') {
         const cleanup = discardUpload(event.sender, payload.uploadId);
@@ -456,15 +456,19 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
   ipcMain.handle(IPC.projectOpen, async (event): Promise<ProjectOpenResult> => {
     if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     const window = BrowserWindow.fromWebContents(event.sender);
-    if (!window || window.isDestroyed() || !ctx.projects) throw new Error('Project window is unavailable');
+    if (!window || window.isDestroyed() || !ctx.projects || isRendererUnavailable(event.sender)) throw new Error('Project window is unavailable');
+    let documentGone = false;
+    const stopWatching = watchRendererDocument(event.sender, () => { documentGone = true; });
     try {
       const result = await dialog.showOpenDialog(window, {
         title: 'Open Project', properties: ['openFile'],
         filters: [{ name: 'Powermove Project', extensions: ['pmv', 'json'] }]
       });
+      if (documentGone || isRendererUnavailable(event.sender)) throw new Error('Project window is unavailable');
       if (result.canceled || !result.filePaths[0]) return { ok: false, cancelled: true };
       return await openProjectForWindow({ projects: ctx.projects }, event.sender, result.filePaths[0]);
     } catch (error: any) { return { ok: false, cancelled: false, error: error.message || 'Could not open project.' }; }
+    finally { stopWatching(); }
   });
   ipcMain.handle(IPC.projectConfirmClose, async (event, name: unknown): Promise<CloseDecision> => {
     if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');

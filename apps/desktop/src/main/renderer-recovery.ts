@@ -3,6 +3,26 @@ import type { BrowserWindow, Dialog, WebContents } from 'electron';
 const unavailableRenderers = new WeakSet<WebContents>();
 const pendingReloads = new WeakSet<BrowserWindow>();
 
+/** Operations belong to one document, even when navigation reuses WebContents. */
+export function watchRendererDocument(contents: WebContents, onLoss: () => void): () => void {
+  let stopped = false;
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    contents.removeListener('destroyed', lose);
+    contents.removeListener('render-process-gone', lose);
+    contents.removeListener('did-start-navigation', navigate);
+  };
+  const lose = () => { if (!stopped) { stop(); onLoss(); } };
+  const navigate = (details: { isMainFrame: boolean; isSameDocument: boolean }) => {
+    if (details.isMainFrame && !details.isSameDocument) lose();
+  };
+  contents.on('destroyed', lose);
+  contents.on('render-process-gone', lose);
+  contents.on('did-start-navigation', navigate);
+  return stop;
+}
+
 export function isRendererUnavailable(contents: WebContents): boolean {
   return contents.isDestroyed() || contents.isCrashed?.() === true || unavailableRenderers.has(contents);
 }
