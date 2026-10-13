@@ -8,7 +8,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-pm-media = { path = "../pm-media" }
+# decode_in (feature `decode-in`, on by default) reads pm-media frames.
+pm-media = { path = "../pm-media", optional = true }
 pm-protocol = { path = "../pm-protocol", default-features = false }
 thiserror.workspace = true
 wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
@@ -19,3 +20,18 @@ objc2-metal = { version = "0.3", features = ["objc2-io-surface"] }
 objc2-io-surface = "0.3.2"
 objc2-core-foundation = "0.3.2"
 pollster = "0.4"
+
+[features]
+default = ["decode-in"]
+# The decode-in half of the interop trait. Hosts that only present (the
+# interactive engine's viewer presenter today) build without it, so they do
+# not link FFmpeg until media reaches the engine.
+decode-in = ["dep:pm-media"]
+
+[[test]]
+name = "decode_import"
+required-features = ["decode-in"]
+
+[[test]]
+name = "deinterlace"
+required-features = ["decode-in"]

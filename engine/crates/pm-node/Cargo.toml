@@ -26,7 +26,8 @@ napi-derive = { version = "3.6", optional = true }
 # and the check-in with main.
 [target.'cfg(target_os = "macos")'.dependencies]
 pm-bridge = { path = "../pm-bridge" }
-pm-gpu = { path = "../pm-gpu" }
+# Without decode-in until media reaches the engine (no FFmpeg in the addon yet).
+pm-gpu = { path = "../pm-gpu", default-features = false }
 wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
 
 [features]

@@ -10,6 +10,7 @@
 //! - [`bridge_out`] exports IOSurface-backed viewer surfaces and runs the
 //!   viewer's display transform.
 
+#[cfg(feature = "decode-in")]
 pub mod decode_in;
 
 #[cfg(target_os = "macos")]
