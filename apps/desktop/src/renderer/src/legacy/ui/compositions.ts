@@ -7,6 +7,7 @@ import { createNewProjectForm } from './project-settings';
 export function compositionSettingsDialog(PM: PMRegistry, id?: string | null): void {
   const existing = id ? PM.Comps.get(id) : null;
   if (id && !existing) return;
+  const projectId = PM.proj.id;
   /* AE seeds a new comp from the one open; settings seed from the comp itself. */
   const source = existing || PM.Comps.get(PM.Comps.active());
   const seed = {
@@ -22,9 +23,15 @@ export function compositionSettingsDialog(PM: PMRegistry, id?: string | null): v
     actions: [
       { label: 'Cancel' },
       { label: 'OK', pri: true, run: () => {
+        if (PM.projectLoading || PM.proj.id !== projectId) {
+          throw new Error('The project has changed or is still opening. Close this dialog and try again.');
+        }
         const values = form.values();
-        if (existing) PM.Comps.setSettings(existing.id, values);
-        else PM.Comps.create(values);
+        if (existing) {
+          if (!PM.Comps.exists(existing.id) || !PM.Comps.setSettings(existing.id, values)) {
+            throw new Error('This composition is no longer available. Close this dialog and try again.');
+          }
+        } else PM.Comps.create(values);
       } },
     ],
   });
@@ -84,7 +91,7 @@ export function precomposeDialog(PM: PMRegistry, ids: string[] = PM.sel.layers):
     actions: [
       { label: 'Cancel' },
       { label: 'OK', pri: true, run: () => {
-        if (PM.proj.id !== projectId || PM.Comps.active() !== compositionId) {
+        if (PM.projectLoading || PM.proj.id !== projectId || PM.Comps.active() !== compositionId) {
           throw new Error('The project or composition has changed. Close this dialog and try again.');
         }
         const current = targets.map((id: string) => PM.L(id));
@@ -114,9 +121,19 @@ export function deleteCompositionPrompt(PM: PMRegistry, id: string): void {
   if (PM.Comps.list().length <= 1) { PM.toast?.('A project needs at least one composition'); return; }
   const uses = PM.Comps.users(id).length;
   if (!uses) { PM.Comps.remove(id); return; }
+  const projectId = PM.proj.id;
   void PM.confirm({
     message: `Delete “${comp.name}”?`,
     detail: `It is used by ${uses} ${uses === 1 ? 'layer' : 'layers'} in other compositions, which will also be removed. You can undo this.`,
     confirmLabel: 'Delete',
-  }).then((ok: boolean) => { if (ok) PM.Comps.remove(id); });
+  }).then((ok: boolean) => {
+    if (!ok) return;
+    if (PM.projectLoading || PM.proj.id !== projectId) {
+      PM.toast?.('The project has changed or is still opening. Select the composition again before deleting it.');
+      return;
+    }
+    if (!PM.Comps.exists(id)) { PM.toast?.('This composition is no longer available.'); return; }
+    if (PM.Comps.list().length <= 1) { PM.toast?.('A project needs at least one composition'); return; }
+    PM.Comps.remove(id);
+  });
 }
