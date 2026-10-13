@@ -936,6 +936,8 @@ if (!hasSingleInstanceLock) {
       windows: () => editors.all()
     });
     attachEngineWindow = nativeEngine.attachWindow;
+    // e2e reaches the engine host only in an isolated background test profile.
+    if (isBackgroundTest) (globalThis as { __powermoveNativeEngine?: unknown }).__powermoveNativeEngine = nativeEngine;
     app.once('will-quit', () => { void nativeEngine.dispose(); });
     const quitBarrier = installQuitFlush(app, store, async () => {
       for (const window of BrowserWindow.getAllWindows()) await prepareEditorClose(window);
