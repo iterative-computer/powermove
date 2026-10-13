@@ -953,6 +953,8 @@ export interface PowermoveBridge {
   nativeEngine?: import('./engine-ipc').EngineBridge;
   /** The frame bridge's receiver (behind "Use New Engine"). */
   frameBridge?: import('./frame-bridge').FrameBridgeApi;
+  /** pm-wasm's font registry channels (desktop host). */
+  engineFonts?: import('./engine-fonts-ipc').EngineFontsBridge;
 }
 
 export interface SandboxInputKey {

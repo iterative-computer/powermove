@@ -41,6 +41,7 @@ import { CLOUD_IPC, type CloudChannel, type CloudChannels } from '../shared/clou
 import { STORE_IPC, type StoreChannel, type StoreChannels } from '../shared/store-ipc';
 import { TRANSCRIPTION_IPC, type TranscribeProgress, type TranscribeResult, type TranscriptionStatus } from '../shared/transcription';
 import { ENGINE_IPC, ENGINE_WINDOW_MESSAGE, type EngineStatusMessage, type StageDocumentResult } from '../shared/engine-ipc';
+import { ENGINE_FONTS_IPC, type EngineFontsBridge, type EngineFontsResult } from '../shared/engine-fonts-ipc';
 import { installFrameBridgeReceiver, type ReceiverModule } from './frame-bridge';
 
 /** One typed invoke for every `cloud:*` channel (store plan §2.7). */
@@ -69,6 +70,28 @@ function cloudEvent<T>(channel: string) {
 const frameBridge = sharedTexture ? installFrameBridgeReceiver(sharedTexture as unknown as ReceiverModule) : undefined;
 
 let nextMediaRequest = 0;
+
+/** The font registry's channels, arguments passed field by field. */
+function engineFontsBridge(): EngineFontsBridge {
+  const invoke = <T>(channel: string, ...args: unknown[]) => ipcRenderer.invoke(channel, ...args) as Promise<EngineFontsResult<T>>;
+  return {
+    answer: (queries) => invoke(ENGINE_FONTS_IPC.answer, String(queries)),
+    subset: (blob, index) => invoke(ENGINE_FONTS_IPC.subset, String(blob), Number(index)),
+    manifest: (base) => invoke(ENGINE_FONTS_IPC.manifest, String(base)),
+    familyFaces: (family) => invoke(ENGINE_FONTS_IPC.familyFaces, String(family)),
+    addProjectFont: (family, data, descriptors, index) => invoke(
+      ENGINE_FONTS_IPC.addProjectFont,
+      String(family),
+      data,
+      descriptors ? { ...(descriptors.weight === undefined ? {} : { weight: String(descriptors.weight) }), ...(descriptors.style === undefined ? {} : { style: String(descriptors.style) }), ...(descriptors.stretch === undefined ? {} : { stretch: String(descriptors.stretch) }) } : undefined,
+      ...(index === undefined ? [] : [Number(index)])
+    ),
+    setFontSource: (family, data) => invoke(ENGINE_FONTS_IPC.setFontSource, String(family), data),
+    clearProjectFonts: () => invoke(ENGINE_FONTS_IPC.clearProjectFonts),
+    generation: () => invoke(ENGINE_FONTS_IPC.generation)
+  };
+}
+
 const bridge: PowermoveBridge = {
   onInputKey: (cb) => {
     const listener = (_event: IpcRendererEvent, input: import('../shared/ipc').SandboxInputKey): void => cb(input);
@@ -520,6 +543,9 @@ const bridge: PowermoveBridge = {
     }) as Promise<StageDocumentResult>,
     pushDefinitions: (update) => ipcRenderer.send(ENGINE_IPC.definitions, update)
   },
+  /* pm-wasm's font registry channels (docs/engine/text.md): main or the
+     interactive engine answers, depending on "Use New Engine". */
+  engineFonts: engineFontsBridge(),
   ...(frameBridge ? { frameBridge } : {})
 };
 

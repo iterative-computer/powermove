@@ -91,6 +91,7 @@ import { installTranscription, utilityWorker } from './transcription/install';
 import { TRANSCRIPTION_IPC } from '../shared/transcription';
 /* ── native engine (behind "Use New Engine") ── */
 import { installNativeEngine, newEngineEnabled, NEW_ENGINE_STORE_KEY } from './engine';
+import { setupEngineFonts } from './engine-fonts';
 
 const APP_ORIGIN = 'app://powermove';
 
@@ -947,6 +948,10 @@ if (!hasSingleInstanceLock) {
       windows: () => editors.all()
     });
     attachEngineWindow = nativeEngine.attachWindow;
+    // pm-wasm's font registry: the interactive engine serves it when "Use
+    // New Engine" is on (installNativeEngine registered the channels); with
+    // it off, main's own registry behind POWERMOVE_ENGINE_FONTS=1.
+    setupEngineFonts({ ipc: ipcMain, ctx: { isTrustedSender }, env: process.env, appPath: app.getAppPath() });
     // e2e reaches the engine host only in an isolated background test profile.
     if (isBackgroundTest) (globalThis as { __powermoveNativeEngine?: unknown }).__powermoveNativeEngine = nativeEngine;
     app.once('will-quit', () => { void nativeEngine.dispose(); });
