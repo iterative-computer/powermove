@@ -73,6 +73,54 @@ pub fn videos(dir: &Path, filter: &dyn Fn(&str) -> bool) -> Vec<PathBuf> {
     v
 }
 
+/// A random-access probe slower than this fails the suite: the slowest
+/// legitimate probe (4K HEVC Main10 in software, new session) took 187 ms on
+/// the M4 Max, so this only catches stalls.
+pub const PROBE_LIMIT_MS: f64 = 2_000.0;
+/// A probe still running after this aborts the test process with the file
+/// and frame, so a hung decoder fails instead of stalling the suite.
+const PROBE_HANG_S: u64 = 60;
+
+/// Watches probes in flight (per test thread) and aborts on a hang.
+mod watchdog {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::thread::ThreadId;
+    use std::time::{Duration, Instant};
+
+    static PROBES: OnceLock<Mutex<HashMap<ThreadId, (Instant, String)>>> = OnceLock::new();
+
+    fn probes() -> &'static Mutex<HashMap<ThreadId, (Instant, String)>> {
+        PROBES.get_or_init(|| {
+            std::thread::spawn(|| {
+                loop {
+                    std::thread::sleep(Duration::from_millis(500));
+                    let g = probes().lock().unwrap();
+                    for (start, what) in g.values() {
+                        if start.elapsed() > Duration::from_secs(super::PROBE_HANG_S) {
+                            eprintln!("probe hung for over {} s: {what}", super::PROBE_HANG_S);
+                            std::process::abort();
+                        }
+                    }
+                }
+            });
+            Mutex::new(HashMap::new())
+        })
+    }
+
+    /// Runs `f` as a watched probe.
+    pub fn watch<R>(what: impl FnOnce() -> String, f: impl FnOnce() -> R) -> R {
+        let id = std::thread::current().id();
+        probes()
+            .lock()
+            .unwrap()
+            .insert(id, (Instant::now(), what()));
+        let r = f();
+        probes().lock().unwrap().remove(&id);
+        r
+    }
+}
+
 #[derive(Default, Debug)]
 pub struct RandomReport {
     pub probes: usize,
@@ -389,12 +437,17 @@ pub fn run_file(path: &Path, only: Option<&[Backend]>, purpose: DecodePurpose) -
                     r.selection_mismatches += 1;
                 }
                 let t0 = Instant::now();
-                let got = if warm {
-                    s.presented(target)
-                } else {
-                    session(&source, b, &pool, purpose)
-                        .and_then(|mut fresh| fresh.presented(target))
-                };
+                let got = watchdog::watch(
+                    || format!("{name} [{b:?}] frame {target} (same session: {warm})"),
+                    || {
+                        if warm {
+                            s.presented(target)
+                        } else {
+                            session(&source, b, &pool, purpose)
+                                .and_then(|mut fresh| fresh.presented(target))
+                        }
+                    },
+                );
                 times.push(t0.elapsed().as_secs_f64() * 1e3);
                 match got.and_then(|f| f.md5_hex()) {
                     Ok(h) if h == run.seq_md5[target] => r.matched += 1,
@@ -434,6 +487,12 @@ pub fn check(r: &FileRun) -> Vec<String> {
             ("new session", &run.new_session),
             ("same session", &run.same_session),
         ] {
+            if rr.max_ms > PROBE_LIMIT_MS {
+                f.push(format!(
+                    "{tag}: random access ({label}) slowest probe {:.1} ms (limit {PROBE_LIMIT_MS} ms, mean {:.2} ms)",
+                    rr.max_ms, rr.mean_ms
+                ));
+            }
             if rr.matched != rr.probes || !rr.errors.is_empty() || rr.selection_mismatches != 0 {
                 f.push(format!(
                     "{tag}: random access ({label}) {}/{} exact, mismatched {:?}, errors {:?}, selection {}",
@@ -447,8 +506,9 @@ pub fn check(r: &FileRun) -> Vec<String> {
         }
         if let Some((refname, matched, frames, offset)) = &run.reference {
             // FFmpeg drops the frame straddling an edit list's start; the other
-            // frames must match, offset by one.
-            let tolerated = edit_list && *offset == 1 && *matched == *frames;
+            // frames must match, offset by one, and we have exactly one more.
+            let tolerated =
+                edit_list && *offset == 1 && *matched == *frames && run.frames == *frames + 1;
             if !(tolerated || (*matched == *frames && *frames == run.frames && *offset == 0)) {
                 f.push(format!(
                     "{tag}: {refname} matched {matched}/{frames} (ours {}, offset {offset})",
@@ -495,7 +555,7 @@ pub fn summary(r: &FileRun) -> String {
     );
     for run in &r.runs {
         s.push_str(&format!(
-            "\n  {:?} {} hw={} out={} copied={} new {}/{} ({:.2} ms mean) same {}/{} ({:.2} ms) ref {:?}",
+            "\n  {:?} {} hw={} out={} copied={} new {}/{} ({:.2} ms mean, {:.1} max) same {}/{} ({:.2} ms mean, {:.1} max) ref {:?}",
             run.backend,
             run.name,
             run.hardware,
@@ -504,9 +564,11 @@ pub fn summary(r: &FileRun) -> String {
             run.new_session.matched,
             run.new_session.probes,
             run.new_session.mean_ms,
+            run.new_session.max_ms,
             run.same_session.matched,
             run.same_session.probes,
             run.same_session.mean_ms,
+            run.same_session.max_ms,
             run.reference.as_ref().map(|r| (r.1, r.2, r.3))
         ));
     }
