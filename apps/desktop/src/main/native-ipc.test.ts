@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { IpcMain, IpcMainEvent, IpcMainInvokeEvent } from 'electron';
@@ -81,7 +82,7 @@ describe('save IPC', () => {
   it('delivers an agent project through the existing save pipeline without a dialog', async () => {
     const folder = await mkdtemp(path.join(tmpdir(), 'pm-agent-save-'));
     const { ipcMain, invokes } = fakeIpcMain();
-    const sender = { once: vi.fn() }, event = invokeEvent(sender);
+    const sender = new EventEmitter(), event = invokeEvent(sender);
     const showSave = vi.fn();
     electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
     registerSaveIpc(ipcMain, { isTrustedSender: () => true, dialogs: { showSave } });
@@ -100,7 +101,8 @@ describe('save IPC', () => {
     const output = path.join(folder, 'Project.pmv');
     const projects = new ProjectFiles(path.join(folder, 'registry.json'), path.join(folder, 'backups'));
     const { ipcMain, invokes } = fakeIpcMain();
-    const sender = { once: vi.fn(), isDestroyed: () => false }, other = { once: vi.fn(), isDestroyed: () => false };
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false });
+    const other = Object.assign(new EventEmitter(), { isDestroyed: () => false });
     const call = (channel: string, payload: unknown, owner = sender): Promise<any> => Promise.resolve(invokes.get(channel)!(invokeEvent(owner), payload));
     electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
     registerSaveIpc(ipcMain, { isTrustedSender: () => true, projects,
@@ -134,12 +136,12 @@ describe('save IPC', () => {
     electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
     const { ipcMain, invokes } = fakeIpcMain();
     registerSaveIpc(ipcMain, { isTrustedSender: () => true, dialogs: { showSave } });
-    const sender = { once: vi.fn() };
+    const sender = new EventEmitter();
     const call = (channel: string, payload: unknown, owner = sender) => invokes.get(channel)!(invokeEvent(owner), payload);
     try {
       const token = await call(IPC.exportChoose, { name: 'chosen.png', directory });
       expect(await readdir(folder)).toEqual([]);
-      await expect(call(IPC.fileSave, { name: 'chosen.png', data: new Uint8Array([7]), destinationToken: token }, { once: vi.fn() })).rejects.toThrow('Unknown export destination');
+      await expect(call(IPC.fileSave, { name: 'chosen.png', data: new Uint8Array([7]), destinationToken: token }, new EventEmitter())).rejects.toThrow('Unknown export destination');
       if (directory) await expect(call(IPC.fileSave, { name: '../escape.png', data: new Uint8Array([7]), destinationToken: token })).rejects.toThrow('Invalid export frame name');
       expect(await call(IPC.fileSave, { name: 'chosen.png', data: new Uint8Array([7]), destinationToken: token })).toEqual({ ok: true, path: output });
       expect([...await readFile(output)]).toEqual([7]);
@@ -154,7 +156,7 @@ describe('save IPC', () => {
     const showSave = vi.fn(async () => ({ canceled: true, filePath: '' }));
     const { ipcMain, invokes } = fakeIpcMain();
     registerSaveIpc(ipcMain, { isTrustedSender: () => true, dialogs: { showSave } });
-    const event = invokeEvent({ once: vi.fn() });
+    const event = invokeEvent(new EventEmitter());
     expect(await invokes.get(IPC.exportChoose)!(event, { name: 'export.webm' })).toBeNull();
     expect(await invokes.get(IPC.exportChoose)!(event, { name: 'export.webm' })).toBeNull();
     expect(showSave).toHaveBeenCalledTimes(2);
@@ -209,7 +211,8 @@ describe('save IPC', () => {
 
   it('bounds uploads to their sender, rejects incomplete writes and cleans up after repeated saves', async () => {
     const { EventEmitter } = await import('node:events');
-    const sender = new EventEmitter(), other = new EventEmitter();
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false });
+    const other = Object.assign(new EventEmitter(), { isDestroyed: () => false });
     const directory = await mkdtemp(path.join(tmpdir(), 'pm-upload-'));
     const destination = path.join(directory, 'chunks.pmv');
     electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
@@ -228,8 +231,9 @@ describe('save IPC', () => {
       }
       expect([...await readFile(destination)]).toEqual([1, 2, 3]);
       expect(sender.listenerCount('destroyed')).toBe(1);
-      await call(IPC.fileSaveUpload, 3);
+      const discarded = await call(IPC.fileSaveUpload, 3);
       sender.emit('destroyed');
+      await call(IPC.fileSaveAbort, discarded);
       const finalUpload = await call(IPC.fileSaveUpload, 3);
       expect(finalUpload).toBeTypeOf('string');
       await call(IPC.fileSaveAbort, finalUpload);
