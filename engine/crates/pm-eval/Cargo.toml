@@ -15,3 +15,6 @@ libm.workspace = true
 [[example]]
 name = "wasm_identity"
 crate-type = ["cdylib"]
+
+[dev-dependencies]
+pm-expr = { path = "../pm-expr" }
