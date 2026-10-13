@@ -70,41 +70,43 @@ disposable profile: 884 layers with 48 keyframes each (a 9.9 MB document) and an
 history of 42 MB (one batch) or 124 MB (three batches; the editor's history budget).
 Main samples its event loop every 2 ms. Ten autosave cycles alternate checkpoint and
 journal writes, then three native Saves. Same machine (Apple Silicon, shared with
-other agents), 2026-10-12, built from `feat/native-engine` (before) and this branch
-(after). A hidden app's timers are coalesced, so the idle floor is 15 to 32 ms.
+other agents), 2026-10-12. "Before" is `feat/native-engine` before this branch; an
+independent review re-measured `fe3a8302` at 277 ms for both autosave and Save with
+the 124 MB history. "After" is this branch at its final commit. A hidden app's
+timers are coalesced, so the idle floor is 14 to 16 ms.
 
 | Scenario | Main's longest stall before | After | Gaps over 50 ms before | After |
 |---|---|---|---|---|
-| Autosave, 42 MB history, all cycles (max / median of cycle maxima) | 88.4 / 84.9 ms | 48.9 / 47.6 ms | 15 | 0 |
-| Autosave, 42 MB history, journal cycles | 84.9 ms | 31.1 ms | 5 | 0 |
-| Native Save, 42 MB history (max / median) | 98.0 / 96.9 ms | 62.5 / 48.7 ms | 11 | 1 |
-| Autosave, 124 MB history, all cycles | 270.7 / 245.9 ms | 65.4 / 47.5 ms | 15 | 2 |
-| Autosave, 124 MB history, journal cycles | 270.7 ms | 31.4 ms | 5 | 0 |
-| Native Save, 124 MB history | 270.9 / 264.1 ms | 50.8 / 49.7 ms | 12 | 1 |
+| Autosave, 42 MB history, all cycles (max / median of cycle maxima) | 88.4 / 84.9 ms | 50.9 / 47.4 ms | 15 | 2 |
+| Autosave, 42 MB history, journal cycles (max / median) | 84.9 ms | 28.6 / 15.2 ms | 5 | 0 |
+| Native Save, 42 MB history (max / median) | 98.0 / 96.9 ms | 50.8 / 50.3 ms | 11 | 2 |
+| Autosave, 124 MB history, all cycles | 270.7 / 245.9 ms | 66.2 / 47.4 ms | 15 | 2 |
+| Autosave, 124 MB history, journal cycles | 270.7 ms | 30.8 / 29.7 ms | 5 | 0 |
+| Native Save, 124 MB history | 270.9 / 264.1 ms | 49.9 / 49.8 ms | 12 | 0 |
 
-Synchronous handler time on main for `store:set-serialized projectHistory` (124 MB):
-226 to 262 ms before, 6 to 8 ms after (copying the string to the worker). For
-`store:set project` (9.9 MB object): 54 to 65 ms before, 19 to 22 ms after.
+The gaps over 50 ms that remain are checkpoint cycles and Saves, 50.3 to 66.2 ms,
+explained below. Earlier runs of this branch landed within a few milliseconds of these
+figures (42 MB autosave max 48.9 and 65.7 ms in two runs; the machine is shared).
+
+Synchronous handler time on main for `store:set-serialized projectHistory`: 226 to
+262 ms before, 6.1 to 7.9 ms after (124 MB; copying the string to the worker) and 2.2
+to 2.4 ms after (42 MB). For `store:set project` (9.9 MB object): 54 to 65 ms before,
+19.2 to 20.6 ms after.
 
 Main's memory after the 124 MB run (`process.memoryUsage`, MiB): heap used 529 before,
-142 after; external 516 before, 251 after; RSS 1,342 before, 1,444 after (the
-worker's heap is in the same process).
-
-A repeat of the 42 MB run on this branch rebased onto `fe3a8302` (same machine,
-2026-10-12): autosave max 65.7 ms, median of cycle maxima 48.4 ms (checkpoint cycles
-48.4 to 65.7 ms, journal cycles 14.3 to 18.0 ms against an idle floor of 15.8 ms);
-native Save max 50.5 ms, median 49.8 ms. Synchronous handler time: 19.6 to 20.2 ms for
-`store:set project`, 2.2 to 2.4 ms for `store:set-serialized projectHistory`. Main's
-heap used 102 MiB, RSS 670 MiB.
+261 after; external 516 before, 382 after; RSS 1,342 before, 1,576 after (the
+worker's heap is in the same process). After the 42 MB run: heap used 102, RSS 646.
 
 ## Tests
 
-Run serially (one vitest worker, one Electron instance) on the rebased branch:
+Run serially (one vitest worker, one Electron instance) on the final commit:
 
 - Unit: `persistence-thread`, `storage`, `project-save`, `project-files`,
-  `history-memory`, `project-container`, `project-incremental`, `reader-version`,
-  `store-keys`, `extensions-lifecycle`, `native-ipc`, `file-upload`,
-  `media-path-cache`, `server/sessions`: 149 passed.
+  `native-ipc`, all of `src/shared` and `src/server` (including
+  `reconnect.integration`, which reads a session synchronously right after writing
+  it on the `powermove serve` host): 369 passed in 36 files. `history-memory`,
+  `project-container`, `project-incremental`, `reader-version`, `store-keys`,
+  `extensions-lifecycle`, `file-upload`, `media-path-cache`: 44 passed.
 - e2e (`--workers=1`): `project-save`, `project-save-large-history`,
   `project-save-large-media`, `menu-save`, `persistence`, `memory-history-persistence`,
   `large-store-startup`, `project-panel-persistence`, `agent-project-persistence`,
@@ -113,6 +115,18 @@ Run serially (one vitest worker, one Electron instance) on the rebased branch:
   same errors (`persistence` and `large-store-startup` read the sealed
   `window.powermove` bridge; `memory-history-persistence` expects the compact history
   dictionary on disk, owned by the renderer write path).
+
+## Sessions written without history
+
+Current renderers write `projectState.<id>` without its `history` field; the engine
+keeps the stored history (a legacy session may still hold one). It caches every
+session it loads and, after load, treats a key it has not seen as having none, so
+such a write encodes synchronously. Only an engine that has not loaded (a replacement
+after a worker fault) or a session whose file could not be read at load reads the
+stored file back first. On the worker, main's synchronous read waits for that as for
+any encode. On the inline channel nothing can finish that read while the thread
+waits, so the read is refused with an error instead of answered with the previous
+value.
 
 ## What still runs on main
 
@@ -124,8 +138,15 @@ Run serially (one vitest worker, one Electron instance) on the rebased branch:
   that is a renderer change (`legacy/core/projects.ts`, `legacy/host/electron-shim.ts`)
   and must keep the slot write ordered before the journal delete.
 - Copying a history string to the worker (6 to 8 ms for 124 MB).
-- Rare synchronous reads that hit a key still being encoded, and whole-store
-  snapshots (boot only).
+- Rare synchronous reads that hit a key still being encoded. The engine answers in
+  order, so such a read (or a new window's bootstrap) also waits behind any earlier
+  encode, up to the 5 s ceiling; a 124 MB history encode takes a few hundred
+  milliseconds on the worker.
+- Whole-store snapshots (`store:snapshot`, boot only) and the `store:get-sync`
+  fallback parse the published bytes on main, and for undo histories also unpack
+  and re-serialize them. Desktop renderers read through `store:get-encoded-sync`,
+  which does neither; the `powermove serve` host uses the fallback, on its own
+  thread.
 
 A renderer-to-worker channel that bypasses main entirely would need a
 `utilityProcess` host (Electron `MessagePortMain` cannot reach a worker thread) and a
