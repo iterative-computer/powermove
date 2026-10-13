@@ -543,13 +543,13 @@
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/viewer/viewer.ts:1606",
+      "site": "apps/desktop/src/extensions/viewer/viewer.ts:1658",
       "class": "edit.mutate",
       "scope": "createViewerRuntime > bindStage > guarded(callback)",
       "code": "api.edit.mutate('Close path',()=>{if(path.p.closed.kf.length)api.anim.setKeyOn(path.p.closed,api.transport.time()-L.from,true);else path...."
     },
     {
-      "site": "apps/desktop/src/extensions/viewer/viewer.ts:1991",
+      "site": "apps/desktop/src/extensions/viewer/viewer.ts:2043",
       "class": "edit.mutate",
       "scope": "createViewerRuntime > createShape",
       "code": "api.edit.mutate('Draw mask', () => { const mask = api.model.mkMask(variant === 'ellipse' ? 'ellipse' : 'rect'); mask.p.x!.v = (first.x + ..."
@@ -1305,13 +1305,13 @@
       "code": "PM.replaceProject(next, selection ? { selection } : {})"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:312",
+      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:314",
       "class": "project-replace",
       "scope": "install > restoreSnapshot > H.do(callback)",
       "code": "PM.replaceProject(parsed)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:442",
+      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:444",
       "class": "hist.do",
       "scope": "install > restore",
       "code": "PM.hist.do('Restore ' + take.label, () => restore(take.json))"
