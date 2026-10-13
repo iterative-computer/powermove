@@ -147,6 +147,46 @@ pub fn hash_file(path: &Path, settle: Settle, cancel: &AtomicBool, progress: &dy
     }
 }
 
+/// What a full hash says about a file whose fingerprint was looked up.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+pub enum Resolution {
+    /// The content was known under this fingerprint.
+    Known,
+    /// New content. `collided_with` lists different content that shares the
+    /// fingerprint (appendix A item 22): matching on the fingerprint alone
+    /// would have picked the wrong file.
+    New { collided_with: Vec<ContentHash> },
+}
+
+/// Known content by sampled fingerprint. The fingerprint is cheap (three
+/// 64 KiB reads), so it finds candidates while the full hash runs in the
+/// background; only the full hash decides identity (relinking, deduplicating
+/// imports, cache keys).
+#[derive(Clone, Debug, Default)]
+pub struct ContentHints {
+    by_fingerprint: std::collections::HashMap<String, Vec<ContentHash>>,
+}
+
+impl ContentHints {
+    /// Content previously seen with this fingerprint: a hint, not an identity.
+    pub fn candidates(&self, fingerprint: &str) -> &[ContentHash] {
+        self.by_fingerprint.get(fingerprint).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Records a file's full hash under its fingerprint and says whether the
+    /// content was already known there.
+    pub fn resolve(&mut self, fingerprint: &str, hash: ContentHash) -> Resolution {
+        let known = self.by_fingerprint.entry(fingerprint.to_string()).or_default();
+        if known.contains(&hash) {
+            return Resolution::Known;
+        }
+        let collided_with = known.clone();
+        known.push(hash);
+        Resolution::New { collided_with }
+    }
+}
+
 /// A background hash request.
 #[derive(Clone)]
 pub struct HashTicket {
@@ -292,6 +332,31 @@ mod tests {
         h.update(&data[300_000 - 65_536..]);
         let want: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(sampled_fingerprint(&p).unwrap(), format!("v2:300000:{want}"));
+    }
+
+    #[test]
+    fn fingerprints_hint_and_full_hashes_decide() {
+        // Same size and the same three sampled windows, different bytes
+        // between them: the fingerprints collide.
+        let mut a: Vec<u8> = (0..400_000u32).map(|i| (i % 249) as u8).collect();
+        let pa = tmp("collide-a.bin", &a);
+        a[100_000] ^= 0xff;
+        let pb = tmp("collide-b.bin", &a);
+        let (fa, fb) = (sampled_fingerprint(&pa).unwrap(), sampled_fingerprint(&pb).unwrap());
+        assert_eq!(fa, fb);
+        let never = AtomicBool::new(false);
+        let settle = Settle { quiet: Duration::ZERO, poll: Duration::from_millis(1) };
+        let ha = hash_file(&pa, settle, &never, &|_| {}).unwrap();
+        let hb = hash_file(&pb, settle, &never, &|_| {}).unwrap();
+        assert_ne!(ha, hb);
+        let mut hints = ContentHints::default();
+        assert!(hints.candidates(&fa).is_empty());
+        assert_eq!(hints.resolve(&fa, ha), Resolution::New { collided_with: vec![] });
+        // B looks like A by fingerprint; the full hash says it is not.
+        assert_eq!(hints.candidates(&fb), &[ha]);
+        assert_eq!(hints.resolve(&fb, hb), Resolution::New { collided_with: vec![ha] });
+        assert_eq!(hints.resolve(&fa, ha), Resolution::Known);
+        assert_eq!(hints.candidates(&fa), &[ha, hb]);
     }
 
     #[test]
