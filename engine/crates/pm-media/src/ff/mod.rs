@@ -25,11 +25,25 @@ pub(crate) fn check(e: c_int, what: &str) -> Result<c_int> {
     if e < 0 { Err(MediaError::Ffmpeg { what: what.into(), code: e, message: err_str(e) }) } else { Ok(e) }
 }
 
-/// FFmpeg logs warnings for recoverable stream damage to stderr; the engine
-/// reports errors through its own channels, so only errors are logged.
+/// FFmpeg logs recoverable stream damage to stderr (for example `mmco:
+/// unref short failure` when decoding starts at an open-GOP H.264 I picture,
+/// which is expected). The engine detects damage from frame flags and
+/// reports it through its own channels, so FFmpeg logs only fatal errors
+/// unless `PM_FFMPEG_LOG` names another level (`error`, `warning`, `info`,
+/// `debug`).
 pub(crate) fn init() {
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| unsafe { ff::av_log_set_level(ff::AV_LOG_ERROR as c_int) });
+    ONCE.call_once(|| {
+        let level = match std::env::var("PM_FFMPEG_LOG").as_deref() {
+            Ok("quiet") => ff::AV_LOG_QUIET,
+            Ok("error") => ff::AV_LOG_ERROR as i32,
+            Ok("warning") => ff::AV_LOG_WARNING as i32,
+            Ok("info") => ff::AV_LOG_INFO as i32,
+            Ok("debug") => ff::AV_LOG_DEBUG as i32,
+            _ => ff::AV_LOG_FATAL as i32,
+        };
+        unsafe { ff::av_log_set_level(level as c_int) }
+    });
 }
 
 pub(crate) unsafe fn cstr(p: *const std::ffi::c_char) -> Option<String> {
@@ -108,6 +122,15 @@ impl Input {
         unsafe {
             let d = ff::avcodec_descriptor_get(self.codec_id(i));
             !d.is_null() && (*d).props & ff::AV_CODEC_PROP_INTRA_ONLY as c_int != 0
+        }
+    }
+
+    /// The codec may reorder frames (B frames): composition times differ
+    /// from decode order.
+    pub fn codec_reorders(&self, i: usize) -> bool {
+        unsafe {
+            let d = ff::avcodec_descriptor_get(self.codec_id(i));
+            d.is_null() || (*d).props & ff::AV_CODEC_PROP_REORDER as c_int != 0
         }
     }
 
@@ -431,20 +454,51 @@ impl PacketReader {
 
     fn read_demuxed(&mut self, idx: &crate::index::FrameIndex, which: &[usize]) -> Result<Vec<Packet>> {
         use crate::index::Loc;
+        let want: Vec<(i64, u32, usize)> = which
+            .iter()
+            .map(|&i| match idx.samples[i].loc {
+                Loc::Demux { pos, size } => Ok((pos, size, i)),
+                _ => Err(MediaError::invalid("mixed sample locations")),
+            })
+            .collect::<Result<_>>()?;
+        // A byte seek lands the demuxer mid-packet: the first packet it
+        // returns can be a fragment carrying the wanted position (MPEG-PS:
+        // the parser resyncs inside the frame). Seek to an earlier packet and
+        // read forward, further back when the wanted packet is still short.
+        let mut earlier: Vec<i64> = idx
+            .samples
+            .iter()
+            .filter_map(|s| match s.loc {
+                Loc::Demux { pos, .. } if pos < want[0].0 => Some(pos),
+                _ => None,
+            })
+            .collect();
+        earlier.sort_unstable();
+        let mut attempts: Vec<i64> = earlier.iter().rev().take(3).copied().collect();
+        attempts.push(0);
+        attempts.dedup();
+        let mut last_err = None;
+        for seek in attempts {
+            match self.read_from(seek, &want, idx) {
+                Ok(p) => return Ok(p),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap())
+    }
+
+    fn read_from(&mut self, seek: i64, want: &[(i64, u32, usize)], idx: &crate::index::FrameIndex) -> Result<Vec<Packet>> {
         if self.demux.is_none() {
             self.demux = Some(Input::open(&self.path)?);
         }
         let inp = self.demux.as_ref().unwrap();
-        let want: Vec<(i64, usize)> = which
-            .iter()
-            .map(|&i| match idx.samples[i].loc {
-                Loc::Demux { pos } => Ok((pos, i)),
-                _ => Err(MediaError::invalid("mixed sample locations")),
-            })
-            .collect::<Result<_>>()?;
         let mut out = Vec::with_capacity(want.len());
         unsafe {
-            check(ff::av_seek_frame(inp.fmt, self.stream as c_int, want[0].0, ff::AVSEEK_FLAG_BYTE as c_int), "byte seek")?;
+            if seek == 0 {
+                check(ff::avformat_seek_file(inp.fmt, -1, i64::MIN, 0, 0, ff::AVSEEK_FLAG_BYTE as c_int), "seek to start")?;
+            } else {
+                check(ff::av_seek_frame(inp.fmt, self.stream as c_int, seek, ff::AVSEEK_FLAG_BYTE as c_int), "byte seek")?;
+            }
             let mut pkt = ff::av_packet_alloc();
             let mut k = 0;
             let mut err = None;
@@ -459,17 +513,24 @@ impl PacketReader {
                 }
                 if (*pkt).stream_index as usize == self.stream {
                     let p = (*pkt).pos;
-                    if p == want[k].0 {
-                        let s = &idx.samples[want[k].1];
+                    let (wpos, wsize, i) = want[k];
+                    if p == wpos {
+                        if (*pkt).size as u32 != wsize {
+                            err = Some(MediaError::invalid(format!(
+                                "packet at byte {wpos} read back with {} bytes, indexed with {wsize}",
+                                (*pkt).size
+                            )));
+                            ff::av_packet_unref(pkt);
+                            break;
+                        }
+                        let s = &idx.samples[i];
                         let data = std::slice::from_raw_parts((*pkt).data, (*pkt).size as usize).to_vec();
                         self.bytes_read += data.len() as u64;
                         out.push(Packet { data, additional: None, pts: s.cts, dts: s.dts, duration: s.duration, key: s.key });
                         k += 1;
-                    } else if p > want[k].0 {
-                        err = Some(MediaError::invalid(format!(
-                            "the demuxer passed byte {} without returning the indexed packet",
-                            want[k].0
-                        )));
+                    } else if p > wpos && p >= 0 {
+                        err = Some(MediaError::invalid(format!("the demuxer passed byte {wpos} without returning the indexed packet")));
+                        ff::av_packet_unref(pkt);
                         break;
                     }
                 }
@@ -480,7 +541,7 @@ impl PacketReader {
                 return Err(e);
             }
             if k != want.len() {
-                return Err(MediaError::invalid(format!("demux seek delivered {k} of {} packets", want.len())));
+                return Err(MediaError::invalid(format!("demuxed read delivered {k} of {} packets", want.len())));
             }
         }
         Ok(out)

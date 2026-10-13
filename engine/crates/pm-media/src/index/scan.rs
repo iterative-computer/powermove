@@ -40,7 +40,7 @@ pub fn build(path: &Path, stream: usize) -> Result<FrameIndex> {
                 cts,
                 duration: p.duration,
                 key: p.key,
-                loc: Loc::Demux { pos: p.pos },
+                loc: Loc::Demux { pos: p.pos, size: u32::try_from(p.size).unwrap_or(u32::MAX) },
                 nal_type: p.nal_type,
             })
         })

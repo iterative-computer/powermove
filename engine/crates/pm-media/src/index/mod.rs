@@ -38,8 +38,9 @@ pub enum Loc {
     /// with id 1 (VP8 and VP9 alpha).
     File { offset: u64, size: u32, additional: Option<(u64, u32)> },
     /// A packet only the demuxer can reassemble (MPEG-TS and PS); `pos` is
-    /// the byte position FFmpeg reports for it.
-    Demux { pos: i64 },
+    /// the byte position FFmpeg reports for it, `size` its size (checked
+    /// when the packet is read again).
+    Demux { pos: i64, size: u32 },
 }
 
 /// One coded sample (access unit) in decode order.
@@ -348,14 +349,14 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
     let t0 = std::time::Instant::now();
     let format = input.format_name();
     let track_id = input.stream_id(stream);
-    let intra_only = input.codec_is_intra_only(stream);
+    let reorders = input.codec_reorders(stream);
     let attempt: Option<Result<FrameIndex>> = if format.contains("mov") || format.contains("mp4") {
         Some(mp4::build(path, mp4::TrackSelect::Id(track_id as u32)))
     } else if format.contains("matroska") || format.contains("webm") {
         Some(mkv::build(path, track_id))
     } else if format == "mxf" {
         Some(mxf::build(path, input, stream))
-    } else if format == "avi" && intra_only {
+    } else if format == "avi" && !reorders {
         Some(avi::build(path, input, stream))
     } else if format == "dv" {
         Some(dv::build(path, input, stream))
@@ -373,7 +374,7 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
         None => {
             let mut idx = scan::build(path, stream)?;
             idx.stats.fallback_reason = Some(if format == "avi" {
-                "AVI with a reordering codec: timestamps come from the demuxer".into()
+                "AVI with a reordering codec (AVI has no composition times): timestamps come from the demuxer".into()
             } else {
                 format!("{format} has no frame table")
             });
@@ -462,7 +463,7 @@ mod tests {
     use super::*;
 
     fn sample(cts: i64, key: bool) -> Sample {
-        Sample { dts: None, cts, duration: 1, key, loc: Loc::Demux { pos: 0 }, nal_type: None }
+        Sample { dts: None, cts, duration: 1, key, loc: Loc::Demux { pos: 0, size: 1 }, nal_type: None }
     }
 
     fn index(samples: Vec<Sample>) -> FrameIndex {

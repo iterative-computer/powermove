@@ -1,6 +1,7 @@
 //! AVI frame index from OpenDML `indx`/`ix##` standard indexes or the legacy
-//! `idx1`, for intra-only codecs (MJPEG, DV, CineForm, ...). AVI stores no
-//! composition offsets, so reordering codecs go through the demux scan.
+//! `idx1`, for codecs without frame reordering (MJPEG, DV, CineForm, ...).
+//! AVI stores no composition offsets, so reordering codecs go through the
+//! demux scan.
 
 use super::{CodecConfig, Frame, FrameIndex, IndexSource, IndexStats, Loc, Sample};
 use crate::error::{MediaError, Result};
@@ -118,8 +119,8 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
     let tag = format!("{number:02}");
     let is_ours = |id: &[u8]| id[..2] == *tag.as_bytes() && matches!(&id[2..4], b"dc" | b"db");
 
-    // (data offset, size) per frame in order; size 0 is a dropped frame.
-    let mut entries: Vec<(u64, u32)> = Vec::new();
+    // (data offset, size, keyframe) per frame in order; size 0 is a dropped frame.
+    let mut entries: Vec<(u64, u32, bool)> = Vec::new();
     let mut source = "idx1";
     if let Some(si) = &sh.super_index
         && si.len() >= 24
@@ -142,7 +143,7 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
             for i in 0..n {
                 let q = 24 + i * 8;
                 let Some(e) = b.get(q..q + 8) else { break };
-                entries.push((base + le32(e) as u64, le32(&e[4..]) & 0x7FFF_FFFF));
+                entries.push((base + le32(e) as u64, le32(&e[4..]) & 0x7FFF_FFFF, le32(&e[4..]) & 0x8000_0000 == 0));
             }
         }
         source = "OpenDML";
@@ -150,20 +151,20 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
         let movi = movi.ok_or_else(|| MediaError::invalid("AVI without a movi list"))?;
         let mut b = vec![0u8; ix.size as usize];
         f.read_exact_at(&mut b, ix.data)?;
-        let raw: Vec<(&[u8], u64, u32)> =
-            b.chunks_exact(16).map(|e| (&e[..4], le32(&e[8..]) as u64, le32(&e[12..]))).collect();
+        let raw: Vec<(&[u8], u32, u64, u32)> =
+            b.chunks_exact(16).map(|e| (&e[..4], le32(&e[4..]), le32(&e[8..]) as u64, le32(&e[12..]))).collect();
         // Offsets are relative to the 'movi' fourcc, or (some writers) absolute.
         let relative = match raw.iter().find(|e| is_ours(e.0)) {
-            Some(&(id, off, _)) => {
+            Some(&(id, _, off, _)) => {
                 let mut probe = [0u8; 4];
                 f.read_exact_at(&mut probe, movi + off).is_ok() && probe == id[..4]
             }
             None => true,
         };
-        for (id, off, size) in raw {
+        for (id, flags, off, size) in raw {
             if is_ours(id) {
                 let header = if relative { movi + off } else { off };
-                entries.push((header + 8, size));
+                entries.push((header + 8, size, flags & 0x10 != 0)); // AVIIF_KEYFRAME
             }
         }
     } else {
@@ -173,7 +174,8 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
         return Err(MediaError::invalid("AVI index lists no frames for the video stream"));
     }
     let mut samples = Vec::new();
-    for (k, &(data, size)) in entries.iter().enumerate() {
+    let intra_only = input.codec_is_intra_only(stream);
+    for (k, &(data, size, key)) in entries.iter().enumerate() {
         if size == 0 {
             continue; // a dropped frame: the previous one holds
         }
@@ -185,7 +187,7 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
             dts: Some(t),
             cts: t,
             duration: 1,
-            key: true, // intra-only codecs only reach this indexer
+            key: key || intra_only,
             loc: Loc::File { offset: data, size, additional: None },
             nal_type: None,
         });

@@ -23,22 +23,20 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
         return Err(MediaError::invalid("DV file shorter than one frame"));
     }
     let timebase = input.timebase(stream)?;
+    // FFmpeg's raw DV demuxer counts in its own timebase (1/60000 at 29.97):
+    // every frame lasts the first packet's duration.
+    let d = input.packet_duration(stream).ok_or_else(|| MediaError::unsupported("DV packet without a duration"))?;
     let samples: Vec<Sample> = (0..n)
         .map(|k| Sample {
-            dts: Some(k as i64),
-            cts: k as i64,
-            duration: 1,
+            dts: Some(k as i64 * d),
+            cts: k as i64 * d,
+            duration: d,
             key: true,
             loc: Loc::File { offset: k * size, size: size as u32, additional: None },
             nal_type: None,
         })
         .collect();
-    // The demuxer's timebase is one frame for raw DV; check that.
-    let frame_duration = input.packet_duration(stream).unwrap_or(1);
-    if frame_duration != 1 {
-        return Err(MediaError::unsupported(format!("DV packet duration {frame_duration} in the stream timebase")));
-    }
-    let frames = (0..samples.len()).map(|i| Frame { sample: i, pts: i as i64 }).collect();
+    let frames = samples.iter().enumerate().map(|(i, s)| Frame { sample: i, pts: s.cts }).collect();
     let mut idx = FrameIndex {
         source: IndexSource::DvConstantFrames,
         track: 0,

@@ -55,7 +55,7 @@ fn prores_422_export_bound() {
 #[test]
 #[ignore]
 fn interlaced_mxf() {
-    let files = videos(&corpus_dir(), &|n| n.starts_with("mxf-"));
+    let files = videos(&corpus_dir(), &|n| n.starts_with("mxf-") && !n.contains("opatom"));
     assert_eq!(files.len(), 2);
     for f in &files {
         let r = run_file(f, None, DecodePurpose::Display);
@@ -66,6 +66,21 @@ fn interlaced_mxf() {
         let failures = check(&r);
         assert!(failures.is_empty(), "{failures:#?}");
     }
+}
+
+/// OP-Atom MXF: clip-wrapped essence, edit units at constant byte offsets
+/// inside one KLV.
+#[test]
+#[ignore]
+fn mxf_clip_wrapped() {
+    let files = videos(&corpus_dir(), &|n| n.contains("opatom"));
+    assert_eq!(files.len(), 1);
+    let r = run_file(&files[0], None, DecodePurpose::Display);
+    eprintln!("{}", summary(&r));
+    assert_eq!(r.source.index.source, pm_media::index::IndexSource::MxfIndexTables);
+    assert!(r.source.index.stats.detail.as_deref().unwrap_or("").contains("clip-wrapped"));
+    let failures = check(&r);
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 #[test]

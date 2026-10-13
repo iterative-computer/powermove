@@ -608,7 +608,7 @@ mod tests {
                 cts: c,
                 duration: 10,
                 key: false,
-                loc: Loc::Demux { pos: 0 },
+                loc: Loc::Demux { pos: 0, size: 1 },
                 nal_type: None,
             })
             .collect()

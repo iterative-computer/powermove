@@ -90,6 +90,9 @@ ff -f lavfi -i "$(src $NTSC30 1920x1080 yuv422p)" -frames:v 45 -c:v mpeg2video -
 # encoder writes top field first whatever -top says; DV below covers bottom first.
 ff -f lavfi -i "$(src 25 1920x1080 yuv422p)" -frames:v 30 -c:v dnxhd -b:v 120M -pix_fmt yuv422p \
   -flags +ildct mxf-dnxhd-1080i.mxf
+# OP-Atom DNxHD: clip-wrapped essence (one KLV for every frame).
+ff -f lavfi -i "$(src 25 1920x1080 yuv422p)" -frames:v 12 -c:v dnxhd -b:v 120M -pix_fmt yuv422p \
+  -f mxf_opatom mxf-opatom-dnxhd.mxf
 # DNxHR HQ (8-bit 4:2:2), HQX (10-bit 4:2:2), and 444 (10-bit 4:4:4).
 ff -f lavfi -i "$(src $NTSC24 1280x720 yuv422p)" -frames:v 48 -c:v dnxhd -profile:v dnxhr_hq -pix_fmt yuv422p dnxhr-hq.mov
 ff -f lavfi -i "$(src 25 1280x720 yuv422p10le)" -frames:v 50 -c:v dnxhd -profile:v dnxhr_hqx -pix_fmt yuv422p10le dnxhr-hqx.mov

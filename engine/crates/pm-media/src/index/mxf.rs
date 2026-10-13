@@ -405,7 +405,12 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
             dts: Some(k as i64),
             cts: pts_of[k].unwrap_or(k as i64),
             duration: 1,
-            key: flags & 0x80 != 0,
+            // Random access (0x80), or an I picture (neither forward nor
+            // backward prediction, 0x30): writers flag only closed-GOP I
+            // pictures as random access, and decoding from an open-GOP I
+            // picture is exact for every frame at or after it (its leading
+            // pictures are skipped by the decode plan).
+            key: flags & 0x80 != 0 || flags & 0x30 == 0,
             loc: Loc::File { offset, size, additional: None },
             nal_type: None,
         });

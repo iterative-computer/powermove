@@ -360,6 +360,14 @@ impl FfDecoder {
                 check(r, "receive frame")?;
                 let flags = (*self.frame).flags as u32;
                 if flags & ff::AV_FRAME_FLAG_CORRUPT != 0 || (*self.frame).decode_error_flags != 0 {
+                    if std::env::var_os("PM_MEDIA_TRACE").is_some() {
+                        eprintln!(
+                            "{}: corrupt frame pts {} (flags {flags:#x}, decode_error_flags {:#x})",
+                            self.name,
+                            (*self.frame).pts,
+                            (*self.frame).decode_error_flags
+                        );
+                    }
                     self.corrupt += 1;
                     ff::av_frame_unref(self.frame);
                     continue;
