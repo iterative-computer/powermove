@@ -156,6 +156,64 @@ function scenes3d(): CorpusProject[] {
   });
 }
 
+const noShadows = (extra: Doc = {}) => ({ camera: { p: { targetX: 0, targetY: 0, targetZ: 0 } }, environment: { shadows: false, ...extra } });
+
+/** A 3D primitive inside a precomp drawn scaled and rotated, a single-sided
+ *  cylinder lit by two suns. */
+function precomp3d(): CorpusProject {
+  const b = newProject('render/3d-precomp', { name: '3D in a precomp', backgroundFill: GRADIENT, w: 640, h: 360, dur: 2 });
+  const inner = b.composition({ name: '3D inner', w: 320, h: 240, dur: 2, bg: '#000000' });
+  b.within(inner, () => {
+    b.add(b.object3d({ source: { primitive: 'cylinder', parameters: { radiusTop: .3, radiusBottom: .8, height: 1.6, segments: 24 } }, material: { ...material('#E8E2CF', { roughness: .5, metalness: 0 }), doubleSided: false } },
+      { name: 'Cylinder', p: { 'rotation.y': b.ch(0, [[0, 0], [2, 90]]), 'rotation.x': -20 } }));
+    b.add(b.light3d({ type: 'sun', castShadow: false, p: { intensity: 2, color: '#FFFFFF' } }, { position: [-4, 6, 4] }));
+    b.add(b.light3d({ type: 'sun', castShadow: false, p: { intensity: 1.5, color: '#FF8844' } }, { position: [5, -1, 2] }));
+    b.add(b.camera3d(noShadows({ p: { ambient: .3 } }), { position: [2.5, 1.5, 3.5] }));
+  });
+  b.add(b.layer('solid', { name: 'Back', d: { color: '#202436', w: 300, h: 360 } }));
+  b.add(b.layer('precomp', { name: '3D precomp', d: { comp: inner.id, w: 320, h: 240 }, p: { 'position.x': 160, 'position.y': 60, 'scale.x': 110, 'scale.y': 110, rotation: 8, opacity: 90 } }));
+  return project(b, { group: 'Render', title: '3D primitive in a precomp', covers: ['layer3d in a precomp', 'single-sided material', 'two suns', 'precomp transform over 3D'], samples: [0, 1.5], alpha: true });
+}
+
+/** Parented 3D layers: an object under a rotating 3D null, a light aimed
+ *  through its parent's space, an orthographic camera rolled by its layer
+ *  rotation; animated material and exposure. */
+function rig3d(): CorpusProject {
+  const b = newProject('render/3d-rig', { name: '3D rig', backgroundFill: DARK, w: 640, h: 360, dur: 2 });
+  const rig = b.add(b.layer('null', { name: 'Rig', threeD: true, p: { 'position.x': 0, 'position.y': 0, 'anchor.x': 0, 'anchor.y': 0, 'rotation.y': b.ch(0, [[0, 0], [2, 60]]) } }));
+  b.add(b.object3d({ source: { primitive: 'torus', parameters: { radius: 1, tube: .35, segments: 48 } }, material: { p: { color: b.ch('#A73366', [[0, '#A73366'], [2, '#4C8DFF']]), roughness: b.ch(.3, [[0, .3], [2, .8]]), metalness: .4 } } },
+    { name: 'Torus', parent: rig.id, position: [0.5, 0, 0], rotation: [60, 20, 0] }));
+  const lamp = b.add(b.layer('null', { name: 'Lamp rig', threeD: true, p: { 'position.x': 0, 'position.y': 0, 'anchor.x': 0, 'anchor.y': 0, rotation: 30 } }));
+  b.add(b.light3d({ type: 'sun', castShadow: true, p: { intensity: 3, color: '#FFFFFF', targetX: 1, targetY: 0, targetZ: 0 } }, { position: [-3, 5, 4], parent: lamp.id }));
+  b.add(b.camera3d({ camera: { projection: 'orthographic', p: { targetX: 0, targetY: 0, targetZ: 0, zoom: 1.3 } }, environment: { shadows: false, p: { exposure: b.ch(1, [[0, .8], [2, 1.6]]) } } },
+    { position: [3, 2, 6], p: { rotation: 12 } }));
+  return project(b, { group: 'Render', title: 'Parented 3D layers', covers: ['3D parenting through a null', 'light aim through its parent space', 'orthographic camera', 'camera roll', 'animated material', 'animated exposure'], samples: [0, 1, 2] });
+}
+
+/** The studio defaults: no light layer (the studio sun), environment shadows
+ *  off, a background on the bottom layer, a half-transparent layer (no depth
+ *  writes), and a hidden light. */
+function studio3d(): CorpusProject {
+  const b = newProject('render/3d-studio', { name: '3D studio', backgroundFill: GRADIENT, w: 640, h: 360, dur: 2 });
+  b.add(b.object3d({ source: { primitive: 'sphere', parameters: { radius: 1.2, segments: 24 } }, material: material('#7DD3FC') },
+    { name: 'Faded sphere', position: [0, 0, 0], p: { opacity: 55, 'rotation.y': b.ch(0, [[0, 0], [2, 40]]) } }));
+  b.add(b.light3d({ type: 'sun', castShadow: false, p: { intensity: 9, color: '#FF0000' } }, { position: [3, 1, 2], on: false }));
+  b.add(b.camera3d(noShadows({ background: '#1B2A4A', p: { ambient: .6, ambientColor: '#FFE0C0' } }), { position: [0, 1.5, 5] }));
+  b.add(b.layer('solid', { name: 'Over', d: { color: '#E8E2CF', w: 60, h: 60 }, p: { 'position.x': 20, 'position.y': 280, opacity: 70 } }));
+  return project(b, { group: 'Render', title: 'Studio sun, background, faded layer', covers: ['studio sun', 'hidden light layer', '3D background', 'layer opacity without depth writes'], samples: [0, 2], alpha: true });
+}
+
+/** A 3D capture at a size other than the composition's. */
+function scaled3d(): CorpusProject {
+  const b = newProject('render/3d-scaled', { name: '3D scaled capture', backgroundFill: GRADIENT, w: 640, h: 360, dur: 2 });
+  b.add(b.object3d({ source: { primitive: 'cone', parameters: { radius: .8, height: 1.5, segments: 40 } }, material: material('#D4AF37', { roughness: .15, metalness: 1 }) },
+    { name: 'Cone', rotation: [10, 0, 8] }));
+  b.add(b.light3d({ type: 'sun', castShadow: false, p: { intensity: 3 } }, { position: [-3, 5, 4] }));
+  b.add(b.light3d({ type: 'sun', castShadow: false, p: { intensity: 2, color: '#88AAFF' } }, { position: [4, 2, 1] }));
+  b.add(b.camera3d(noShadows({ p: { ambient: .2, exposure: 1.2 } }), { position: [0, .5, 3.2] }));
+  return project(b, { group: 'Render', title: '3D at another output size', covers: ['3D output scale', 'metallic material'], samples: [0], size: [533, 300] });
+}
+
 export function renderProjects(): CorpusProject[] {
-  return [transforms(), precomps(), groups(), solo(), ...backgrounds(), scaled(), video(), ...scenes3d()];
+  return [transforms(), precomps(), groups(), solo(), ...backgrounds(), scaled(), video(), ...scenes3d(), precomp3d(), rig3d(), studio3d(), scaled3d()];
 }

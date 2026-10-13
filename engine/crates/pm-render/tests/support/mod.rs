@@ -322,3 +322,72 @@ pub fn float_max_cv(a: &[f32], b: &[f32]) -> f64 {
         .map(|(x, y)| (f64::from(*x) - f64::from(*y)).abs() * 255.0)
         .fold(0.0, f64::max)
 }
+
+impl Diff {
+    /// [`Diff::of`] over the pixels where `mask` is set.
+    pub fn of_masked(a: &[u8], b: &[u8], mask: &[bool]) -> Diff {
+        assert_eq!(a.len(), b.len());
+        let mut d = Diff::default();
+        for ((p, q), &m) in a.chunks_exact(4).zip(b.chunks_exact(4)).zip(mask) {
+            if !m {
+                continue;
+            }
+            let m = (0..4).map(|i| p[i].abs_diff(q[i])).max().unwrap();
+            d.pixels += 1;
+            if m <= 1 {
+                d.within_one += 1;
+            }
+            if m == 0 {
+                d.exact += 1;
+            }
+            d.max = d.max.max(m);
+        }
+        d
+    }
+}
+
+/// [`float_max_cv`] over the pixels where `mask` is set.
+pub fn float_max_cv_masked(a: &[f32], b: &[f32], mask: &[bool]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    let mut max = 0.0f64;
+    for (i, &m) in mask.iter().enumerate() {
+        if !m {
+            continue;
+        }
+        for c in 0..4 {
+            max = max.max((f64::from(a[i * 4 + c]) - f64::from(b[i * 4 + c])).abs() * 255.0);
+        }
+    }
+    max
+}
+
+/// Premultiplied float RGBA to 8-bit RGBA (alpha kept).
+pub fn rgba8(rgba: &[f32]) -> Vec<u8> {
+    rgba.iter().map(|v| unorm8(*v)).collect()
+}
+
+/// Whether a document holds 3D object layers in any composition.
+pub fn has_3d_objects(document: &pm_model::Document) -> bool {
+    fn layers_have(v: Option<&pm_model::Node>) -> bool {
+        let Some(v) = v else { return false };
+        let Some(layers) = v.get("layers") else { return false };
+        match layers.kind() {
+            pm_model::NodeKind::Array(list) => list.iter().any(|l| {
+                l.get("d")
+                    .and_then(|d| d.get("definition"))
+                    .is_some_and(|d| {
+                        matches!(d.kind(), pm_model::NodeKind::String(s) if s.to_string_lossy() == "powermove.3d.object")
+                    })
+            }),
+            _ => false,
+        }
+    }
+    let Some(root) = document.root() else { return false };
+    if layers_have(Some(root)) {
+        return true;
+    }
+    match root.get("comps").map(|c| c.kind()) {
+        Some(pm_model::NodeKind::Object(map)) => map.iter().any(|(_, c)| layers_have(Some(c))),
+        _ => false,
+    }
+}

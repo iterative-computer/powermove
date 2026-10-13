@@ -93,6 +93,14 @@ impl Renderer {
         self.pool.bytes()
     }
 
+    /// 3D layers render without MSAA when `false` (only for the parity
+    /// lane's classification of MSAA edge pixels, section 25; output always
+    /// uses today's 4 samples).
+    pub fn set_3d_msaa(&mut self, on: bool) {
+        self.scene3d
+            .set_samples(if on { crate::scene3d::SAMPLES } else { 1 });
+    }
+
     /// Frees idle intermediate targets down to `bytes` (lease pressure).
     pub fn trim(&mut self, bytes: u64) {
         self.pool.trim(bytes);

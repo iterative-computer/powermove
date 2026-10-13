@@ -10,6 +10,12 @@
 //! interpreted as it was encoded (BT.709 coefficients, straight alpha; see
 //! below).
 //!
+//! Projects with 3D object layers use section 25's 3D class on the 3D
+//! pixels: the pixels where a 3D surface is on top (the depth and id
+//! surface) grown by one pixel, plus the MSAA edges (pixels that change when
+//! the 3D pass renders without MSAA), are judged by section 2's 3D bar
+//! (`pm_render::parity`); every other pixel keeps the Standard class.
+//!
 //! `PM_ENGINE_CORPUS` picks captures (comma-separated; default: the newest
 //! `v1-*` and the newest `render-*`);
 //! `PM_RENDER_ONLY` limits to project names with a prefix;
@@ -19,6 +25,7 @@ mod support;
 
 use pm_protocol::color::Precision;
 use pm_protocol::common::Size;
+use pm_render::parity::{bar_3d, dilate, msaa_edges};
 use pm_render::{RenderRequest, Renderer, unsupported_with_media};
 use support::*;
 
@@ -165,6 +172,32 @@ fn corpus_render_parity() {
                 }
                 continue;
             }
+            // 3D class: the 3D pixels and MSAA edges, measured on our renders.
+            let three_d = if support::has_3d_objects(&p.document) {
+                let mut with_ids = request;
+                with_ids.depth_id = true;
+                let ids = renderer
+                    .render(&p.document, &p.composition, ticks(s.time), &with_ids, &p.resolver)
+                    .expect("depth and id render");
+                let surface = renderer.read_depth_id(&ids).unwrap().unwrap();
+                renderer.set_3d_msaa(false);
+                let plain = renderer
+                    .render(&p.document, &p.composition, ticks(s.time), &request, &p.resolver)
+                    .expect("render without MSAA");
+                renderer.set_3d_msaa(true);
+                let plain = opaque8(&renderer.read_rgba(&plain).unwrap());
+                let (w, h) = (s.width as usize, s.height as usize);
+                let object: Vec<bool> = surface.chunks_exact(4).map(|px| px[0].is_finite()).collect();
+                let edges = msaa_edges(&ours, &plain, w, h);
+                let class: Vec<bool> = dilate(&object, w, h)
+                    .iter()
+                    .zip(&edges)
+                    .map(|(a, b)| *a || *b)
+                    .collect();
+                Some((object, edges, class))
+            } else {
+                None
+            };
             // Transparent captures (`renderToPixels(…, {transparent: true})`):
             // premultiplied float values, section 25's alpha class (within
             // 1 CV of the reference).
@@ -182,29 +215,61 @@ fn corpus_render_parity() {
                     .expect("transparent render");
                 let ours = renderer.read_rgba(&frame).unwrap();
                 let reference = read_float(float);
-                let max = float_max_cv(&ours, &reference);
+                let (max, bar) = match &three_d {
+                    None => (float_max_cv(&ours, &reference), None),
+                    Some((object, edges, class)) => {
+                        let rest: Vec<bool> = class.iter().map(|c| !c).collect();
+                        let (w, h) = (s.width as usize, s.height as usize);
+                        let bar = bar_3d(&rgba8(&reference), &rgba8(&ours), edges, object, w, h);
+                        (float_max_cv_masked(&ours, &reference, &rest), Some(bar))
+                    }
+                };
                 let line = format!(
-                    "{:<40} t={:<6} transparent float  max {max:.4} CV",
-                    p.name, s.time
+                    "{:<40} t={:<6} transparent float  max {max:.4} CV{}",
+                    p.name,
+                    s.time,
+                    bar.as_ref().map_or(String::new(), |b| format!(
+                        " outside 3D; 3D bar ≤2 {:.4}% max outside edges {} SSIM {:.5}",
+                        100.0 * b.fraction_within_2,
+                        b.max_cv_outside_edges,
+                        b.object_ssim.unwrap_or(f64::NAN)
+                    ))
                 );
                 eprintln!("{line}");
-                if max > 1.0 {
+                if max > 1.0 || bar.is_some_and(|b| !b.pass()) {
                     failed.push(line);
                 }
             }
-            let d = Diff::of(&ours, &reference);
+            let (d, bar) = match &three_d {
+                None => (Diff::of(&ours, &reference), None),
+                Some((object, edges, class)) => {
+                    let rest: Vec<bool> = class.iter().map(|c| !c).collect();
+                    let (w, h) = (s.width as usize, s.height as usize);
+                    (
+                        Diff::of_masked(&ours, &reference, &rest),
+                        Some(bar_3d(&reference, &ours, edges, object, w, h)),
+                    )
+                }
+            };
             compared += 1;
             let line = format!(
-                "{:<40} t={:<6} {:>7} px  exact {:>6.2}%  ≤1 {:>7.3}%  max {}",
+                "{:<40} t={:<6} {:>7} px  exact {:>6.2}%  ≤1 {:>7.3}%  max {}{}",
                 p.name,
                 s.time,
                 d.pixels,
                 100.0 * d.exact as f64 / d.pixels as f64,
                 100.0 * d.fraction_within_one(),
-                d.max
+                d.max,
+                bar.as_ref().map_or(String::new(), |b| format!(
+                    " (2D); 3D bar ≤2 {:.4}% max {} max outside edges {} SSIM {:.5}",
+                    100.0 * b.fraction_within_2,
+                    b.max_cv,
+                    b.max_cv_outside_edges,
+                    b.object_ssim.unwrap_or(f64::NAN)
+                ))
             );
             eprintln!("{line}");
-            if !d.passes() {
+            if !d.passes() || bar.is_some_and(|b| !b.pass()) {
                 failed.push(line);
                 if let Some(dir) = &diffs {
                     std::fs::create_dir_all(dir).unwrap();

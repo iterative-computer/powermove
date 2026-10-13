@@ -327,8 +327,13 @@ fn check_composition(
             add(layer, Feature::MotionBlur);
         }
         // 3D object, light, and camera layers draw in screen space; their
-        // 3D switch does not make them 2.5D planes.
-        if js::flag(layer, "threeD") && pm_eval::parenting::Role3d::of(layer).is_none() {
+        // 3D switch does not make them 2.5D planes. Nulls and audio draw
+        // nothing (a 3D null only places its children). A 3D group is
+        // listed itself, which covers its members.
+        if js::flag(layer, "threeD")
+            && pm_eval::parenting::Role3d::of(layer).is_none()
+            && !NOT_VISUAL.contains(&ty.as_str())
+        {
             add(layer, Feature::TwoAndAHalfD);
         }
         if node::member(Some(layer), "compat").is_some_and(|c| node::to_number(Some(c)) >= 2.0) {

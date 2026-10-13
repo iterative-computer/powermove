@@ -620,6 +620,7 @@ struct Mesh {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct PipelineKey {
     program: u64,
+    samples: u32,
     color: bool,
     depth_write: bool,
     cull: Option<wgpu::Face>,
@@ -629,6 +630,7 @@ struct PipelineKey {
 struct Attachments {
     width: u32,
     height: u32,
+    samples: u32,
     color: wgpu::TextureView,
     depth: wgpu::TextureView,
 }
@@ -669,13 +671,29 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
 
 /// The 3D scene pass: compiled programs, pipelines, meshes, and MSAA
 /// attachments, kept across frames.
-#[derive(Default)]
 pub struct Scene3dRenderer {
+    /// MSAA samples: [`SAMPLES`], or 1 for the parity lane's edge
+    /// classification (section 25: MSAA edges are the pixels that change
+    /// without multisampling).
+    samples: u32,
     programs: HashMap<u64, Arc<Compiled>>,
     pipelines: HashMap<PipelineKey, wgpu::RenderPipeline>,
     meshes: HashMap<u64, Arc<Mesh>>,
     attachments: Option<Attachments>,
     depth_surface: Option<DepthSurface>,
+}
+
+impl Default for Scene3dRenderer {
+    fn default() -> Self {
+        Scene3dRenderer {
+            samples: SAMPLES,
+            programs: HashMap::new(),
+            pipelines: HashMap::new(),
+            meshes: HashMap::new(),
+            attachments: None,
+            depth_surface: None,
+        }
+    }
 }
 
 fn hash_of(parts: &[&[u8]]) -> u64 {
@@ -730,6 +748,13 @@ fn write_uniform(program: &glsl::Program, block: &mut [u8], name: &str, values: 
 }
 
 impl Scene3dRenderer {
+    /// Sets the MSAA sample count (4 as today's canvas; 1 only to classify
+    /// MSAA edges for parity).
+    pub fn set_samples(&mut self, samples: u32) {
+        assert!(samples == 1 || samples == SAMPLES, "MSAA samples must be 1 or {SAMPLES}");
+        self.samples = samples;
+    }
+
     fn program(
         &mut self,
         device: &wgpu::Device,
@@ -827,7 +852,9 @@ impl Scene3dRenderer {
     }
 
     fn attachments(&mut self, device: &wgpu::Device, width: u32, height: u32) -> &Attachments {
-        if !matches!(&self.attachments, Some(a) if a.width == width && a.height == height) {
+        let samples = self.samples;
+        if !matches!(&self.attachments, Some(a) if a.width == width && a.height == height && a.samples == samples)
+        {
             let make = |format: wgpu::TextureFormat, label: &str| {
                 device
                     .create_texture(&wgpu::TextureDescriptor {
@@ -838,7 +865,7 @@ impl Scene3dRenderer {
                             depth_or_array_layers: 1,
                         },
                         mip_level_count: 1,
-                        sample_count: SAMPLES,
+                        sample_count: samples,
                         dimension: wgpu::TextureDimension::D2,
                         format,
                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -849,6 +876,7 @@ impl Scene3dRenderer {
             self.attachments = Some(Attachments {
                 width,
                 height,
+                samples,
                 color: make(wgpu::TextureFormat::Rgba8Unorm, "3d msaa color"),
                 depth: make(wgpu::TextureFormat::Depth32Float, "3d msaa depth"),
             });
@@ -929,7 +957,7 @@ impl Scene3dRenderer {
                 bias: Default::default(),
             }),
             multisample: wgpu::MultisampleState {
-                count: SAMPLES,
+                count: key.samples,
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
@@ -1069,8 +1097,10 @@ impl Scene3dRenderer {
             Some(wgpu::Face::Back)
         };
         let front_face_cw = math::determinant(&plan.model) < 0.0;
+        let samples = self.samples;
         let key = |color: bool, depth_write: bool| PipelineKey {
             program: program_key,
+            samples,
             color,
             depth_write,
             cull,
@@ -1150,16 +1180,22 @@ impl Scene3dRenderer {
             },
             None => wgpu::Color::TRANSPARENT,
         };
+        // Without MSAA the pass draws into the output directly.
+        let (view, resolve_target, store) = if samples > 1 {
+            (&attachments.color, Some(&resolve.view), wgpu::StoreOp::Discard)
+        } else {
+            (&resolve.view, None, wgpu::StoreOp::Store)
+        };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("3d color"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &attachments.color,
+                    view,
                     depth_slice: None,
-                    resolve_target: Some(&resolve.view),
+                    resolve_target,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(clear),
-                        store: wgpu::StoreOp::Discard,
+                        store,
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
