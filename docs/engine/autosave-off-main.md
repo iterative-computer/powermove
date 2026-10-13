@@ -90,6 +90,30 @@ Main's memory after the 124 MB run (`process.memoryUsage`, MiB): heap used 529 b
 142 after; external 516 before, 251 after; RSS 1,342 before, 1,444 after (the
 worker's heap is in the same process).
 
+A repeat of the 42 MB run on this branch rebased onto `fe3a8302` (same machine,
+2026-10-12): autosave max 65.7 ms, median of cycle maxima 48.4 ms (checkpoint cycles
+48.4 to 65.7 ms, journal cycles 14.3 to 18.0 ms against an idle floor of 15.8 ms);
+native Save max 50.5 ms, median 49.8 ms. Synchronous handler time: 19.6 to 20.2 ms for
+`store:set project`, 2.2 to 2.4 ms for `store:set-serialized projectHistory`. Main's
+heap used 102 MiB, RSS 670 MiB.
+
+## Tests
+
+Run serially (one vitest worker, one Electron instance) on the rebased branch:
+
+- Unit: `persistence-thread`, `storage`, `project-save`, `project-files`,
+  `history-memory`, `project-container`, `project-incremental`, `reader-version`,
+  `store-keys`, `extensions-lifecycle`, `native-ipc`, `file-upload`,
+  `media-path-cache`, `server/sessions`: 149 passed.
+- e2e (`--workers=1`): `project-save`, `project-save-large-history`,
+  `project-save-large-media`, `menu-save`, `persistence`, `memory-history-persistence`,
+  `large-store-startup`, `project-panel-persistence`, `agent-project-persistence`,
+  `agent-revision-recovery`: 16 passed, 3 failed. All three failures are listed in
+  `apps/desktop/e2e/quarantine.json` as failing on the integration branch with the
+  same errors (`persistence` and `large-store-startup` read the sealed
+  `window.powermove` bridge; `memory-history-persistence` expects the compact history
+  dictionary on disk, owned by the renderer write path).
+
 ## What still runs on main
 
 - Deserializing each IPC message from the renderer. For a checkpoint, the 9.9 MB
