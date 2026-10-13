@@ -340,7 +340,7 @@ function analyzePlayback(raw) {
  * for the Chromium paths; an interval is irregular when it is more than half
  * a refresh off the frame duration.
  */
-function analyzeRemote(raw, jsonl) {
+function analyzeRemote(raw, jsonl, ticksText = '') {
   const page = raw.page;
   const fps = page.fps ?? FPS;
   const frameTicks = TICKS / fps;
@@ -382,6 +382,19 @@ function analyzeRemote(raw, jsonl) {
     irregularIntervals: intervalErrMs.filter((e) => Math.abs(e) > periodUs / 2000).length,
     dueToPresentMs: dist(offsets.map((o) => o / 1000), 2),
     remoteLayers: raw.remoteLayers ?? null,
+    // With the refresh-rate request: the refresh intervals the request's
+    // display link saw (ms, 0.5 ms bins), i.e. the rate the panel ran at.
+    refreshIntervalsMs: (() => {
+      const ticks = ticksText.split('\n').filter(Boolean).map(Number);
+      if (ticks.length < 2) return null;
+      const bins = {};
+      for (let i = 1; i < ticks.length; i++) {
+        const ms = Math.round(((ticks[i] - ticks[i - 1]) / 1000) * 2) / 2;
+        bins[ms] = (bins[ms] ?? 0) + 1;
+      }
+      return bins;
+    })(),
+    engineStatus: raw.engineStatus ?? null,
     presenter: page.presenter,
     receiver: page.receiver
   };
@@ -487,7 +500,7 @@ try {
         bridge: raw.bridge,
         ...(run.scenario === 'playback'
           ? run.remoteLayer
-            ? { playback: analyzeRemote(raw, fs.existsSync(remoteTrace) ? fs.readFileSync(remoteTrace, 'utf8') : '') }
+            ? { playback: analyzeRemote(raw, fs.existsSync(remoteTrace) ? fs.readFileSync(remoteTrace, 'utf8') : '', fs.existsSync(`${remoteTrace}.ticks`) ? fs.readFileSync(`${remoteTrace}.ticks`, 'utf8') : '') }
             : { playback: analyzePlayback(raw) }
           : { latency: analyzeLatency(raw) })
       };

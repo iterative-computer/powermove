@@ -19,7 +19,7 @@ use pm_engine::{Action, LogLevel};
 use pm_gpu::bridge_out::display::{DisplayParams, DisplayTransform, WorkingTexture};
 use pm_gpu::bridge_out::pool::SurfacePool;
 use pm_gpu::bridge_out::remote_layer::{
-    Presented, RatePreference, RemoteLayer, preferred_refresh, raw_metal_device,
+    Presented, RatePreference, RemoteLayer, preferred_refresh, raw_metal_device, take_display_ticks,
 };
 use pm_gpu::bridge_out::test_source::{TestFrame, TestSource};
 use pm_protocol::clock::TransportCommand;
@@ -776,6 +776,27 @@ impl Thread {
     /// Collects the remote layers' presentation records into the stats and
     /// the trace file.
     fn collect_remote(&mut self) {
+        // The refreshes the rate request's display link saw, next to the
+        // presentation records (`<trace>.ticks`: host µs of each refresh).
+        if self.config.remote_rate
+            && let Some(path) = &self.config.remote_trace
+        {
+            let ticks = take_display_ticks();
+            if !ticks.is_empty() {
+                use std::io::Write;
+                let mut text = String::new();
+                for (at, _) in ticks {
+                    text.push_str(&format!("{}\n", (at * 1e6).round() as i64));
+                }
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(format!("{path}.ticks"))
+                {
+                    let _ = file.write_all(text.as_bytes());
+                }
+            }
+        }
         let mut records: Vec<Presented> = Vec::new();
         for view in self.views.values() {
             if let Some(remote) = view.pool.as_ref().and_then(|l| l.remote.as_ref()) {
