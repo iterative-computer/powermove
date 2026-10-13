@@ -15,6 +15,8 @@ test.describe('@security Electron renderer boundaries', () => {
     await page.waitForTimeout(250);
     expect(app.windows()).toHaveLength(windowsBefore);
 
+    // The kernel captures the host bridge before extensions run; the raw
+    // bridge must remain unavailable on window, along with Node/Electron APIs.
     const bridge = await page.evaluate(() => {
       const powermove = (window as any).powermove;
       return {
@@ -25,7 +27,7 @@ test.describe('@security Electron renderer boundaries', () => {
       };
     });
     expect(bridge).toEqual({
-      present: true,
+      present: false,
       hasIpcRenderer: false,
       hasRequire: false,
       globalRequire: 'undefined'
