@@ -40,6 +40,26 @@ function harness(level = { peak: 0.5, rms: 0.3 }) {
 }
 
 describe('meter loop', () => {
+  it('keeps the previous colour for any palette entry that did not resolve', () => {
+    const h = harness();
+    const stops: string[] = [];
+    const context = {
+      globalAlpha: 1, fillStyle: '',
+      clearRect: () => {}, fillRect: () => {},
+      createLinearGradient: () => ({ addColorStop: (_offset: number, color: string) => {
+        if (!color) throw new SyntaxError('The value provided (\'\') could not be parsed as a color.');
+        stops.push(color);
+      } })
+    };
+    const element = { width: 0, height: 0, getContext: () => context } as unknown as HTMLCanvasElement;
+    h.loop.attach('music', element, () => {});
+    h.loop.resize('music', 12, 100, 2);
+    h.loop.setPalette({ track: '', nominal: 'rgb(1, 2, 3)', warn: '', hot: '' });
+    h.loop.setVisible(true);
+    expect(() => h.step()).not.toThrow();
+    expect(stops.slice(-6)).toEqual(['rgb(1, 2, 3)', 'rgb(1, 2, 3)', '#F59E0B', '#F59E0B', '#F36357', '#F36357']);
+  });
+
   it('draws nothing and holds no taps while hidden', () => {
     const h = harness();
     const view = canvas();

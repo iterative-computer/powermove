@@ -72,87 +72,117 @@ Follow-up runs on the same code:
 
 ## Failures by cause
 
+Counts after the Phase 0 amendment 14 fixes (section "Amendment 14 rerun" below);
+the baseline count is in brackets.
+
 | Cause | Tests | Notes |
 |---|---|---|
-| Spec reads the sealed `window.powermove` bridge | 21 | Since `bfcd2c88` (2026-09-23) the renderer captures the preload bridge at boot and replaces `window.powermove` with `undefined`. These specs call `powermove.store`, `.media`, `.extensions`, `.codex`, or `.compatible` directly. They need a test seam that does not reopen the bridge to extensions, or a rewrite through `PM` APIs |
-| Relaunch does not restore the last active project | 5 | A probe on the same build: before relaunch `PM.proj.id` was `Pol5olf7` with one imported layer; after relaunch the tab strip still listed it, but the app booted to Projects with a fresh `Untitled` (`Py3jztv7`). Every spec that checks persistence across `session.relaunch()` without opening a file fails this way |
-| Spec predates a UI change | 6 | Stale selectors or expectations: text animator presets, Settings tabs, color picker anatomy, toast details button |
-| UI behavior differs from the spec | 18 | Some are regressions, some are intended changes the spec missed; each needs a decision before its test is rewritten or the product fixed |
-| Agent requests carry extra images | 2 | Requests include viewer-capture JPEGs the specs do not expect |
-| Rendering, evaluation, text, and persistence | 5 | Directly relevant to engine parity: precompose pixels, text anchor, history on disk, save responsiveness, Studio Cube property controls |
-| Flaky | 1 | `project-file-media.spec.ts:9` |
+| Spec reads the sealed `window.powermove` bridge | 0 [21] | Fixed by the e2e bridge seam: hidden test launches publish the same bridge as `window.__powermoveTestBridge` (`src/shared/test-bridge.ts`); the specs use it. `window.powermove` stays sealed for page code |
+| Relaunch does not restore the last active project | 0 [5] | Fixed: quitting answered the close prompt's Don't Save, which since `61425cc8` discarded every never-saved project, so the next launch had nothing to restore. Don't Save at quit now keeps the local project; closing a window or tab still discards a never-saved one. `timeline.spec.ts:459` was in this family too (it renames, relaunches, and reads the tab) |
+| Spec predates a UI change | 6 [6] | Stale selectors or expectations: text animator presets, Settings tabs, color picker anatomy, toast details button. `effect-authoring.spec.ts` (renamed effect id) and `compatible-authoring.spec.ts` (staging prompt wording) were updated |
+| UI behavior differs from the spec | 16 [18] | Some are regressions, some are intended changes the spec missed; each needs a decision before its test is rewritten or the product fixed |
+| Agent requests carry extra images | 2 [2] | Requests include viewer-capture JPEGs the specs do not expect |
+| Rendering, evaluation, text, and persistence | 2 [5] | Precompose pixels, the text anchor, and history on disk are resolved (below). Left: save responsiveness and Studio Cube property controls |
+| Flaky | 1 [1] | `project-file-media.spec.ts:9` |
 
-By owner: Viewer and settings UI 29, Proxies and storage 7, Export and agents 6,
-Engine and platform 6, Renderer write path 5, Text and vectors 2, Model and
-evaluation 1, Media 1, 3D 1. Lanes without engine scope for a test (for example a
-toast layout) get it through the closest UI owner; Parity and QA tracks all of them.
+By owner (27 quarantined): Viewer and settings UI 21, Export and agents 2, Text and
+vectors 1, Renderer write path 1, Proxies and storage 1, 3D 1. Lanes without engine
+scope for a test (for example a toast layout) get it through the closest UI owner;
+Parity and QA tracks all of them.
 
 ## Failing and flaky tests
 
 Each test below failed on `feat/native-engine` as-is: on the first attempt, on the
-retry, and in the comparison run at `b1d3e7f7`. The flaky test is described in its
-row.
+retry, and in the comparison run at `b1d3e7f7`, and again in the amendment 14 rerun.
+The flaky test is described in its row. Rows for tests fixed by amendment 14 were
+removed; they are listed in the next section.
 
 | Spec | Test | Status | Owner | Error and reason |
 |---|---|---|---|---|
 | `ae-audit-implementation.spec.ts:9` | editable Pen, canvas text, graph and preview controls render coherently | fail | Text and vectors | Timeout waiting for the "Text animator presets" group and its Rise button; that group no longer exists in src (removed in a5e3fbb6, 2026-10-05). Stale spec; the text animator UI it drives was redesigned. |
-| `ae-audit-implementation.spec.ts:42` | precompose preserves cross-boundary animated rig pixels at several frames | fail | Model and evaluation | PM.precompose of a parented, rotating rig changes rendered pixels: the mean absolute difference at t = 0.4, 1, 1.8 is not below 1 CV for every sample (expected all true, got false). Evaluation parity across a precomposition boundary. |
 | `agent-attachment-preview.spec.ts:3` | agent image attachments open a fitted preview and Escape returns focus | fail | Viewer and settings UI | Escape closes the preview but focus does not return to the "View reference.png" trigger. Pointer-clicked buttons are blurred since 352f1d1e (2026-10-09, "Fix pointer-clicked buttons retaining keyboard focus"), so the trigger the spec clicks has no focus to restore. Product and spec disagree; decide which behavior is intended. |
 | `agent-media-tools.spec.ts:41` | the agent watches and listens to imported footage through the media tools | fail | Export and agents | The final model request carries 8 data:image attachments; the spec expects 4 (2 frames + 1 sheet + 1 composition sheet). Suspected extra visual-context frames from e7e3ccb1 ("Improve agent visual context"). Agent snapshots move to the engine, so the count matters for the port. |
-| `agent-mod-capabilities.spec.ts:5` | a real mod supplies import defaults and Properties controls with automatic cleanup | fail | Viewer and settings UI | Stale spec: reads the raw window.powermove bridge (powermove.extensions.setEnabled), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
 | `captions-ui.spec.ts:42` | captions surfaces in light mode | fail | Viewer and settings UI | Escape does not close the Export dialog, so Export Captions opens on top of it and locator('.export-modal') matches two dialogs (strict mode). Suspected cause: pointer-clicked buttons are blurred since 352f1d1e (2026-10-09, "Fix pointer-clicked buttons retaining keyboard focus"), after which the dialog no longer holds focus for Escape. |
 | `captions-ui.spec.ts:42` | captions surfaces in dark mode | fail | Viewer and settings UI | Same failure as the light-mode case: two .export-modal dialogs (Export and Export Captions) are open at once. |
-| `chatgpt-connection.spec.ts:90` | large images and files cross the real renderer-to-main agent boundary | fail | Export and agents | Stale spec: reads the raw window.powermove bridge (powermove.codex), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
-| `chatgpt-connection.spec.ts:124` | Claude subscription status and structured runs cross the real hidden app boundary | fail | Export and agents | Stale spec: reads the raw window.powermove bridge (powermove.codex), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
 | `color-picker-overlay.spec.ts:4` | color picker stays above adjacent panels and inside the viewport | fail | Viewer and settings UI | The first open passes; after Escape the inspector Fill row no longer contains a .color-field trigger and the loop times out (30 s). Suspected stale selector after the color picker unification (f8734eb3, 2026-09-25). |
-| `compatible-authoring.spec.ts:6` | an API connection creates a keyframeable effect and verifies it through live tools | fail | Export and agents | Stale spec: reads the raw window.powermove bridge (powermove.compatible), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
-| `compatible-provider.spec.ts:56` | provider models, reasoning, and flat error actions remain usable in a narrow panel | fail | Export and agents | Stale spec: reads the raw window.powermove bridge (powermove.compatible), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
 | `design-language.spec.ts:3` | flat controls remain consistent across home, editor, settings, library, and export in both themes | fail | Viewer and settings UI | In the dark editor the selected timeline mode button ("tl-mode-button on", Layers) draws a 1 px box-shadow ring, which the flat-controls rule forbids. The mode switch arrived in 19c910e4 (2026-10-03). |
 | `dropdown-toggle.spec.ts:6` | native dropdowns reopen and custom pickers toggle on repeated clicks | fail | Viewer and settings UI | The 19th menu button, "Caption actions" (captions panel, 416e3a45, 2026-10-04), sits outside the viewport in the default layout, so the click never lands and the test times out. |
-| `editor-reliability.spec.ts:60` | cancelled Save never reports a saved file; successful Save writes a reopenable project | fail | Renderer write path | Stale spec: reads the raw window.powermove bridge (powermove.store.flush), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
-| `editor-responsiveness.spec.ts:65` | saving a large undo history yields to input and preserves the file | fail | Renderer write path | Longest main-thread gap while saving a 36 MB undo history was 220.6 ms (limit 100 ms) on both attempts and on the baseline run. Measured on the reference M4 Max while other lanes were compiling at nice 15; not yet re-measured on an idle machine. |
-| `effect-authoring.spec.ts:5` | the shipped effect sample validates, registers, animates and undoes without creating a panel | fail | Viewer and settings UI | docs/samples/gradient-tint copied into the profile's extensions folder is not registered as an effect after relaunch (Kernel.effects.get('gradient-tint') stays empty for 30 s). Cause not isolated (unverified guess: local extensions now need enabling or trust since Sandbox v2). The effect contract itself belongs to GPU and render. |
+| `editor-responsiveness.spec.ts:65` | saving a large undo history yields to input and preserves the file | fail | Renderer write path | Longest main-thread gap while saving a 36 MB undo history was 220.6 ms (limit 100 ms) on both attempts and on the baseline run. Measured on the reference M4 Max while other lanes were compiling at nice 15; not yet re-measured on an idle machine. Amendment 14 rerun: 132.9 ms (limit 100 ms), machine shared with other lanes. |
 | `extension-sandbox-clipboard.spec.ts:9` | a sandboxed panel imports a 5 MB image, and copies only with the clipboard permission | fail | Viewer and settings UI | Clicking inside the sandboxed panel never arms the gesture (outcome.armed stays false for 15 s). Same family as extension-sandbox.spec.ts: pointer input does not reach or focus the sandboxed view iframe in the hidden harness. |
 | `extension-sandbox.spec.ts:52` | a store extension’s Svelte panel renders in its own view iframe with host chrome and keys | fail | Viewer and settings UI | Clicking the empty panel area leaves document.activeElement with no class (expected ext-panel-frame), so the sandboxed view never takes focus. |
-| `extensions.spec.ts:29` | replaces panel source in place without changing the document, window, or docking | fail | Viewer and settings UI | Stale spec: reads the raw window.powermove bridge (powermove.extensions), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
-| `extensions.spec.ts:54` | a user extension activates, contributes a command and an effect, and survives disable | fail | Viewer and settings UI | Stale spec: reads the raw window.powermove bridge (powermove.extensions), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
-| `extensions.spec.ts:103` | timeline replacements swap with the built-in timeline without corrupting the live panel | fail | Viewer and settings UI | Stale spec: reads the raw window.powermove bridge (powermove.extensions), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
-| `extensions.spec.ts:243` | turning the built-in timeline off and on restores its live panel in place | fail | Viewer and settings UI | Stale spec: reads the raw window.powermove bridge (powermove.extensions), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
-| `font-anchor.spec.ts:6` | font changes and animation preserve a centered text anchor | fail | Text and vectors | Centered text anchor drifts after font changes and animation: maximum position error 630.87 px (limit 0.001); samples 1 to 10 and the last two are exact; samples 11 to 24 are off by 70 to 631 px. Anchor bounds do persist. |
-| `import-mp4.spec.ts:17` | keeps imported video playable after the source is removed and the app closes | fail | Engine and platform | After session.relaunch() the app restores the tab strip but boots to Projects with a fresh Untitled placeholder instead of the last active project (probe: id before relaunch Pol5olf7, after Py3jztv7, ProjectsScreen open). Suspected window session restore (main EditorWindows / renderer loadBootProject). |
-| `import-prores-alpha.spec.ts:9` | imports ProRes 4444 with transparency and restores playable media | fail | Media | Stale spec: reads the raw window.powermove bridge (powermove.media), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
-| `import-prores.spec.ts:7` | converts ProRes once, presents video frames, and restores the durable proxy | fail | Engine and platform | After session.relaunch() the app restores the tab strip but boots to Projects with a fresh Untitled placeholder instead of the last active project (probe: id before relaunch Pol5olf7, after Py3jztv7, ProjectsScreen open). Suspected window session restore (main EditorWindows / renderer loadBootProject). |
-| `large-store-startup.spec.ts:6` | opens with a large recovery tree and preserves every record | fail | Renderer write path | Stale spec: reads the raw window.powermove bridge (powermove.store), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
-| `local-media-recovery.spec.ts:7` | restores tone.wav from its local source when cached bytes are missing | fail | Proxies and storage | Stale spec: reads the raw window.powermove bridge (powermove.media), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
-| `local-media-recovery.spec.ts:7` | restores tone.mp3 from its local source when cached bytes are missing | fail | Proxies and storage | Stale spec: reads the raw window.powermove bridge (powermove.media), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
-| `local-media-recovery.spec.ts:7` | restores h264-aac.mp4 from its local source when cached bytes are missing | fail | Proxies and storage | Stale spec: reads the raw window.powermove bridge (powermove.media), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
-| `local-media-recovery.spec.ts:7` | restores converted.mkv from its local source when cached bytes are missing | fail | Proxies and storage | Stale spec: reads the raw window.powermove bridge (powermove.media), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
-| `local-media-recovery.spec.ts:7` | restores still.heic from its local source when cached bytes are missing | fail | Proxies and storage | Stale spec: reads the raw window.powermove bridge (powermove.media), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
-| `local-media-recovery.spec.ts:7` | restores animated.gif from its local source when cached bytes are missing | fail | Proxies and storage | Stale spec: reads the raw window.powermove bridge (powermove.media), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
 | `media-bulk-selection.spec.ts:20` | drag a selection box, delete media, and undo the whole batch in both themes | fail | Viewer and settings UI | Dragging across the media grid never shows .asset-selection-box (10 s). The selection box still exists in src; the drag start point or the library layout changed under the spec. |
-| `memory-history-persistence.spec.ts:5` | compact history preserves pixels, every action, and pending redo through pressure and relaunch | fail | Renderer write path | store/projectHistory.<id>.json on disk has no format field (expected "powermove-history-dictionary", src/shared/history-memory.ts). The compact history dictionary is not what reaches disk after PM.flushProject(). |
 | `panel-popout.spec.ts:3` | a panel opens in a native window, keeps edits, and returns to the layout | fail | Viewer and settings UI | getByRole(textbox, "Project notes") matches two textareas: the docked Notes panel and the Library's "Edit Notes" card preview. Strict-mode violation; spec or Library card markup needs to disambiguate. |
 | `panel-workflow.spec.ts:19` | library shows a panel grid, adds panels to the workspace, and edits panels with the agent | fail | Viewer and settings UI | The Library shows 14 panel cards; PM.PANELS (minus toolbar) has 15. One registered panel is missing from the Library grid. |
-| `performance-warning.spec.ts:3` | identifies a slow extension and lets the user turn it off | fail | Viewer and settings UI | Stale spec: reads the raw window.powermove bridge (powermove.extensions), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
-| `persistence.spec.ts:26` | autosaves a project and restores it after relaunch | fail | Renderer write path | Stale spec: reads the raw window.powermove bridge (powermove.store.flush), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page. |
-| `playback-audio.spec.ts:100` | the restored project keeps playing audio through quality changes | fail | Engine and platform | After session.relaunch() the app restores the tab strip but boots to Projects with a fresh Untitled placeholder instead of the last active project (probe: id before relaunch Pol5olf7, after Py3jztv7, ProjectsScreen open). Suspected window session restore (main EditorWindows / renderer loadBootProject). |
 | `precomp.spec.ts:46` | canvas and timeline open the same compact layer menu | fail | Viewer and settings UI | The timeline layer menu has "Import Captions…" and the canvas layer menu does not (captions, 416e3a45). The two menus are meant to match. |
-| `project-file-media.spec.ts:158` | local recovery keeps imported audio after closing and relaunching Powermove | fail | Engine and platform | After session.relaunch() the app restores the tab strip but boots to Projects with a fresh Untitled placeholder instead of the last active project (probe: id before relaunch Pol5olf7, after Py3jztv7, ProjectsScreen open). Suspected window session restore (main EditorWindows / renderer loadBootProject). |
-| `project-file-media.spec.ts:9` | saved project files restore imported video without the original session media | flaky | Proxies and storage | After reopening a saved .pmv, the metadata-only re-save returns false. Passed once in the full suite; failed 9 of 9 later runs (baseline file run, 5 isolated repeats, 3 whole-file repeats). |
+| `project-file-media.spec.ts:9` | saved project files restore imported video without the original session media | flaky | Proxies and storage | After reopening a saved .pmv, the metadata-only re-save returns false. Passed once in the baseline suite; failed 9 of 9 later baseline runs and 4 of 4 runs after the amendment 14 fixes. Unrelated to the restart-restore fix (the spec reopens the file explicitly). |
 | `project-settings.spec.ts:3` | Settings › Project edits the live composition and its export settings | fail | Viewer and settings UI | Settings tabs are project, general, accounts, transcription, extensions; the spec predates the Transcription tab (d63f9e55, 2026-10-04). Stale expectation. |
 | `project-settings.spec.ts:57` | New project asks for the settings that matter before creating | fail | Viewer and settings UI | The Background color dialog has no .fill-sv plane; the color picker anatomy changed in f8734eb3 ("unify color pickers", 2026-09-25). Stale selector. |
 | `prompt-attachments.spec.ts:5` | floating prompt attaches images and binary files, removes them, and sends their contents | fail | Export and agents | CodexBridge.request receives 4 images (the attached PNG plus three 480x270 JPEG viewer captures); the spec expects only the attachment. Suspected visual-context frames from e7e3ccb1 bypassing the stubbed AgentHarness.observe. |
 | `property-animation.spec.ts:68` | text, shader, extension, blend, and mask stopwatches animate their real values | fail | 3D | The Studio Cube extension layer's "x.objectColor" stopwatch resolves but is never visible (collapsed or hidden section), so the click times out. |
-| `security.spec.ts:4` | blocks traversal, popups, and Node/Electron escape hatches | fail | Engine and platform | Expects the bridge to be present on window (present: true); since bfcd2c88 the renderer seals window.powermove at boot, so present is false. Stale expectation; the security property it checks still holds. |
 | `shell.spec.ts:260` | keeps a usable window drag area with crowded tabs and overlays | fail | Viewer and settings UI | The Library screen top is 42.32 px; the spec requires ≥ 44 px so it clears the titlebar drag area. |
 | `timeline-layer-rows.spec.ts:3` | compact layer rows keep names centered and parenting in dedicated controls | fail | Viewer and settings UI | Clicking the row disclosure for the nested composition never reveals its child row "Prompt" (30 s timeout). |
-| `timeline.spec.ts:55` | Scale keys move outside the layer, delete together, and never delete their layer | fail | Engine and platform | After session.relaunch() the app restores the tab strip but boots to Projects with a fresh Untitled placeholder instead of the last active project (probe: id before relaunch Pol5olf7, after Py3jztv7, ProjectsScreen open). Suspected window session restore (main EditorWindows / renderer loadBootProject). Here PM.L(id) is null after relaunch. |
 | `timeline.spec.ts:100` | the easing grid applies a curve to both Scale dimensions and preserves linear defaults | fail | Viewer and settings UI | Choosing "Ease out" in the keyframe easing grid leaves both Scale keys at ei [1, 1] (expected [0.58, 1]); the menu item click does not apply the curve. |
-| `timeline.spec.ts:459` | project rename is available from the tab menu and persists the live document | fail | Viewer and settings UI | Pressing Enter in "Rename project" does not commit: the tab keeps "E2E composition". |
 | `toast-error.spec.ts:61` | the error toast matches the status toast it stacks with | fail | Viewer and settings UI | The error toast has no "Technical details" button; it was removed in dbd1c23a ("Redesign agent errors", 2026-09-22). Stale spec. |
 | `user-feedback.spec.ts:5` | background picker keeps every channel above the hex field | fail | Viewer and settings UI | The Background color dialog has no .color-dialog-value element (removed in f8734eb3, "unify color pickers"). Stale selector. |
 | `viewer-resize.spec.ts:4` | resizes the selected layer in local space with a fixed opposite edge and correct cursors | fail | Viewer and settings UI | Dragging the east handle leaves scale.x at 100. The handle hit-test works (the resize cursor matches) but the drag does not resize. |
 | `viewer-resize.spec.ts:199` | resizes and rotates a multi-selection around the common pivot with one-step undo | fail | Viewer and settings UI | The multi-selection resize drag leaves the shape scale at 100, the same failure as the single-layer case. |
+
+## Amendment 14 rerun
+
+Plan section 26, amendment 14: the legacy fixes that precede the corpus v1 capture.
+Branch `feat/ne-legacy2` (from `feat/native-engine` at `bb013c14`), 2026-10-12, same
+reference machine, other lanes building at the same time, e2e niced.
+
+**Fixes and conclusions**
+
+| Item | Cause | Change | Tests |
+|---|---|---|---|
+| Restart restore | Quitting runs the same Save / Cancel / Don't Save prompt as closing a window. Since `61425cc8` (2026-10-02) Don't Save discards every never-saved project, so the restored window session named a project that no longer existed and the app booted to Projects with a fresh Untitled. The e2e harness answers every message box with Don't Save, which is how all relaunch specs hit it; a user who quits and picks Don't Save (the prompt promises "Local recovery is kept separately") hits the same thing | Main tells the editor when a close is part of a quit (`prepareToClose({ quitting: true })`); Don't Save then skips only the file write. Closing a window or a tab still discards a never-saved project. Boot publishes `PM.projectAssetsReady` like a project switch | `app.test.ts` (quit keeps, window close still discards); `project-close-unchanged.spec.ts` new case; 6 relaunch specs pass |
+| Mixer after restore | A restored project mounts the Mixer before its panel is in the rendered page; the palette read returns empty strings and the first meter draw throws in `addColorStop` (surfaced as page errors in `playback-audio.spec.ts:100` once restore worked) | Empty palette entries keep the previous colour; the panel reads the palette again when shown | `meter-loop.test.ts` |
+| Bridge seam | Since `bfcd2c88` the kernel seals `window.powermove` at boot (intended) | Hidden test launches (`POWERMOVE_BACKGROUND_TEST=1`, isolated profile) start editor windows with `--powermove-test-bridge`; only then does the preload also publish the same bridge as `window.__powermoveTestBridge`. Normal launches never pass the switch | `test-bridge.test.ts`, `background-testing.test.ts`; 21 specs updated; `security.spec.ts` now checks the seal and that the seam carries no Node or Electron |
+| Gradient Tint id | The shipped sample registers `gradient-tint.effect` since `512b5ead` (registration ids carry the extension id); `compatible-authoring.spec.ts` also matched system-prompt wording that changed | Specs updated | `effect-authoring.spec.ts:5`, `compatible-authoring.spec.ts:6` pass |
+| Blender discovery | Only `Blender.app` was looked for | Every `Blender*.app` in `/Applications` and `~/Applications` (unversioned first, then newest first), every install folder under `Blender Foundation` on Windows; `POWERMOVE_BLENDER_PATH` stays first; an older Blender found first no longer hides a supported one | `blender-service.test.ts`; `blender-motion.spec.ts` 3 of 3 pass |
+| `ae-audit-implementation.spec.ts:42` | Real bug. Since `f5f993d3` pre-compose moves layers into a nested composition and cuts parent links to layers left outside; pre-composing a child without its animated rig moved it (mean difference 12.17 CV at t = 0.4, 1, 1.8) | When every moved root hangs from the same outside layer, the precomp layer takes that parent (its own transform is the identity). Mixed outside parents are still cut. Known limit: the precomp is the host's size and sits in the rig's local space, so moved content that lies outside `[0, w] x [0, h]` in the rig's local coordinates (a child at a negative offset from its null, for example) is clipped by the precomp frame. The spec's child sits at (+100, +100); a negative-offset case is not covered | Mean difference now 0.0010 to 0.0015 CV; `compositions.test.ts` |
+| `font-anchor.spec.ts:6` | Intended behaviour. Since `c2139713` an alignment change drops the preserved anchor bounds so the pivot follows the alignment origin (unit-tested in `font-anchor.test.ts`); every sample after `align: 'right'` drifted because the spec expected the old rule | Spec checks that alignment releases the anchor, re-centres, and keeps the 0.001 px limit for font and animated size changes | Passes |
+| `memory-history-persistence.spec.ts:5` | Real bug. History entries hold composition paths (`['comps', id, 'layers']`) since `f5f993d3`, but record sharing and the on-disk dictionary only recognised `['layers']` and `['edits']`, so undo history was neither shared in memory nor packed on disk | Both accept the composition paths; unpacking validates references with the same rule. The dictionary stays version 1: builds before this fix stored these histories raw, and a downgraded build reading a newly packed one rejects it (`Invalid history reference`), so a downgrade loses undo history. A version bump would not change that, since older builds reject unknown versions too | `history-memory.test.ts`; spec passes (format, cursor, fewer than 24 records) |
+| Corpus: unlit glTF | `renderSnapshot` read `emissive` from a `MeshBasicMaterial` | `sourceMaterialSnapshot`: standard materials unchanged; unlit ones become emission; other types get the worker defaults | `rendering.test.ts` |
+| Corpus: `vec3` colour `@param`s | The compositor took `@param` definitions from UI state, which the Inspector fills only for a layer it has shown; other shader layers bound colours with `uniform1f` (GL_INVALID_OPERATION, colour 0) | Definitions are parsed from the layer's code, cached by program key. `int`, `vec2`, and `vec4` scalar params keep today's binding (they stay 0 and raise GL_INVALID_OPERATION); known legacy behaviour, recorded in `docs/engine/corpus.md` | `shader-color-uniform.spec.ts` (fails with 1282 before, passes after) |
+
+**Rerun.** Every previously quarantined spec file plus `blender-motion`,
+`project-close-unchanged`, and `shader-color-uniform`: 46 files, 133 tests, one
+worker, no retries, one Electron instance, 7.7 min. 105 passed, 27 failed, 1 skipped
+(`editor-responsiveness.spec.ts:6`, needs `PM_PERF_PROJECT`; run below).
+
+- 31 of the 58 quarantined tests now pass and left `quarantine.json`: the 21 bridge
+  tests (one of them, `compatible-authoring.spec.ts:6`, also needed the Gradient Tint
+  update), the 5 relaunch tests plus `timeline.spec.ts:459` (same family),
+  `effect-authoring.spec.ts:5` (Gradient Tint), and the three investigated specs.
+- The 27 failures are the remaining quarantined tests, each failing as described in
+  its row. No test outside the quarantine failed.
+- `project-file-media.spec.ts:9` failed again (4 of 4 including 3 repeats).
+- `timeline.spec.ts:459` passed 3 of 3 repeats.
+- `editor-responsiveness.spec.ts:65` measured 132.9 ms (limit 100 ms).
+
+**Performance specs with Jude's project.** The decision 13 project was copied to
+`~/Library/Application Support/Powermove Engine Corpus/perf/` outside the repository;
+the original's hash was checked before and after and did not change.
+`PM_PERF_FILE` is the `.pmv` copy; `PM_PERF_PROJECT` is a JSON document of its
+`proj` and `ws` only (1.4 MB): the full decoded document is 134 MB because of its
+undo history, and passing it to `page.evaluate` ran the Playwright worker out of
+heap. All 9 tests passed (2.4 min, one Electron instance), and `project-playback-profile` with
+`PM_PLAYBACK_PROJECT` set to the `.pmv` copy passed (2.1 min). Measured, machine shared
+with other lanes:
+
+| Spec | Result |
+|---|---|
+| `composition-playback-profile.spec.ts:6` | Playback render p95 4.3 ms over 240 frames; scrub render p95 1.6 ms over 51 |
+| `editor-responsiveness.spec.ts:6` (`.pmv` opened through Open) | Scrub sample p50 8.2 ms, p95 15.8 ms, max 22.6 ms (80); render p95 8.0 ms (limit 16.7), max 15.3 ms (limit 100) |
+| `high-zoom-performance.spec.ts:7` | 800% wheel pan frames about 8 to 9 ms; pinch median 8.3, p95 9.0, max 9.2 ms; high-zoom render p95 1.4 ms, frame p95 11.6 ms |
+| `playback-performance-benchmark.spec.ts:7` | 29.98 to 29.99 fps actual at 30 fps (zoom 1 and 8), paused 0 fps, frame interval p95 34.1 ms |
+| `project-performance-benchmark.spec.ts:5` | 884 layers at 1280x720: render p50 4.5, p95 5.9, max 6.2 ms (25); interactions 9 to 19.9 ms |
+| `region-pan-performance.spec.ts:9` (3) | Median 8.3 ms, p95 9.3 to 10.4 ms, max 39.5 to 40.8 ms; 3 to 6 renders; pixels identical |
+| `zoom-performance-benchmark.spec.ts:5` | First render at 50% 25.4 ms, at 100% 11.9 ms, then 0.8 to 1.6 ms; gesture 0.9 to 5.4 ms |
+| `project-playback-profile.spec.ts:6` (`PM_PLAYBACK_PROJECT` = the `.pmv` copy) | 29.90 fps actual at fit and at 100%; render median 1.0 to 1.1 ms, p95 3.9 to 4.2 ms, max 11.8 to 18.5 ms |
 
 ## Skipped (environment-dependent)
 
@@ -165,22 +195,22 @@ candidate for `PM_PERF_PROJECT` on the reference machine.
 | Spec | Tests | Requirement | Owner |
 |---|---|---|---|
 | `agent-panel.spec.ts:188` | 1 | `POWERMOVE_E2E_LIVE=1` and a signed-in Codex account (live run) | Export and agents |
-| `blender-motion.spec.ts:5, 265, 452` | 3 | Blender at a discovered path or `POWERMOVE_BLENDER_PATH`; all 3 pass with Blender 4.5.14 LTS, including in the full ledger run | 3D |
+| `blender-motion.spec.ts:5, 265, 452` | 3 | Blender at a discovered path or `POWERMOVE_BLENDER_PATH`. Discovery now also finds versioned bundles such as `~/Applications/Blender-4.5.14.app` (amendment 14); all 3 pass with Blender 4.5.14 LTS | 3D |
 | `composited-video-sync.spec.ts:73` | 1 | `PM_SYNC_PROJECT`, a private layered cutout project | Media |
-| `composition-playback-profile.spec.ts:6` | 1 | `PM_PERF_PROJECT`, a copied project | Parity and QA |
-| `editor-responsiveness.spec.ts:6` | 1 | `PM_PERF_PROJECT` or `PM_PERF_FILE` | Parity and QA |
-| `high-zoom-performance.spec.ts:7` | 1 | `PM_PERF_PROJECT` | Parity and QA |
+| `composition-playback-profile.spec.ts:6` | 1 | `PM_PERF_PROJECT`, a copied project; passes with the copies above (amendment 14) | Parity and QA |
+| `editor-responsiveness.spec.ts:6` | 1 | `PM_PERF_PROJECT` or `PM_PERF_FILE`; passes with the copies above (amendment 14) | Parity and QA |
+| `high-zoom-performance.spec.ts:7` | 1 | `PM_PERF_PROJECT`; passes with the copies above (amendment 14) | Parity and QA |
 | `media-intelligence.spec.ts:161, 259` | 2 | `POWERMOVE_E2E_PARAKEET_DIR`, a downloaded Parakeet model | Audio |
-| `playback-performance-benchmark.spec.ts:7` | 1 | `PM_PERF_PROJECT` | Parity and QA |
+| `playback-performance-benchmark.spec.ts:7` | 1 | `PM_PERF_PROJECT`; passes with the copies above (amendment 14) | Parity and QA |
 | `project-export-fixture.spec.ts:11` | 1 | `POWERMOVE_EXPORT_FIXTURE`, a project file | Export and agents |
-| `project-performance-benchmark.spec.ts:5` | 1 | `PM_PERF_PROJECT` | Parity and QA |
-| `project-playback-profile.spec.ts:6` | 1 | `PM_PLAYBACK_PROJECT` | Parity and QA |
-| `region-pan-performance.spec.ts:9` | 3 | `PM_PERF_PROJECT` | Parity and QA |
+| `project-performance-benchmark.spec.ts:5` | 1 | `PM_PERF_PROJECT`; passes with the copies above (amendment 14) | Parity and QA |
+| `project-playback-profile.spec.ts:6` | 1 | `PM_PLAYBACK_PROJECT`; passes with the `.pmv` copy above (amendment 14) | Parity and QA |
+| `region-pan-performance.spec.ts:9` | 3 | `PM_PERF_PROJECT`; passes with the copies above (amendment 14) | Parity and QA |
 | `transcription.spec.ts:281` | 1 | `POWERMOVE_E2E_PARAKEET_DIR` | Audio |
 | `variable-font-sliders.spec.ts:4, 52, 88` | 3 | Geist Width variable font installed | Text and vectors |
 | `variable-font-sliders.spec.ts:129` | 1 | SF Pro installed | Text and vectors |
 | `video-playback-regression.spec.ts:26` | 1 | `PM_VIDEO_FIXTURE`, a private 4K source | Media |
-| `zoom-performance-benchmark.spec.ts:5` | 1 | `PM_PERF_PROJECT` | Parity and QA |
+| `zoom-performance-benchmark.spec.ts:5` | 1 | `PM_PERF_PROJECT`; passes with the copies above (amendment 14) | Parity and QA |
 
 Conditional skips that did not trigger on this machine: `boot.spec.ts` (WebGPU
 present), `gpu-recovery.spec.ts`, `native-export-performance.spec.ts`, and
@@ -202,3 +232,15 @@ worker, no retries, no sharding.
 | Flaky | 0 |
 | Skipped | 21 (the 24 environment skips above, minus the 3 Blender tests, which passed) |
 | Wall time | 945 s (15 min 45 s) |
+
+After the amendment 14 fixes (`feat/ne-legacy2`, 2026-10-12): the same command,
+one worker, no retries.
+
+| | |
+|---|---|
+| Tests run | 522 (549 minus 27 quarantined; the suite gained 2 tests: Don't Save at quit in `project-close-unchanged.spec.ts`, and `shader-color-uniform.spec.ts`) |
+| Passed | 501 (Blender found through discovery) |
+| Failed | 0 |
+| Flaky | 0 |
+| Skipped | 21 (environment; the `PM_PERF_PROJECT` and `PM_PLAYBACK_PROJECT` specs were run separately, above) |
+| Wall time | 996 s (16 min 36 s) |

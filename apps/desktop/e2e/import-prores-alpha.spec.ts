@@ -48,7 +48,7 @@ test('imports ProRes 4444 with transparency and restores playable media', async 
     expect(imported.min).toBe(0);
     expect(imported.max).toBe(255);
     const previewAlpha = await session.page.evaluate(async id => {
-      const PM = (window as any).PM, media = (window as any).powermove.media;
+      const PM = (window as any).PM, media = (window as any).__powermoveTestBridge.media;
       const original = await PM.MediaStore.get(PM.proj.assets[id]);
       const token = await media.beginPreview(original.size);
       try {

@@ -1,6 +1,8 @@
 import path from 'node:path';
 import type { BrowserWindowConstructorOptions } from 'electron';
 
+import { TEST_BRIDGE_SWITCH } from '../shared/test-bridge';
+
 /** Refuse a hidden test launch unless it names a separate, absolute profile. */
 export function backgroundTesting(env: NodeJS.ProcessEnv, liveProfile: string): boolean {
   if (env.POWERMOVE_BACKGROUND_TEST !== '1') return false;
@@ -11,11 +13,13 @@ export function backgroundTesting(env: NodeJS.ProcessEnv, liveProfile: string): 
   return true;
 }
 
+/** Hidden test windows: never shown or focused, and their preload publishes
+ *  the e2e bridge seam (shared/test-bridge.ts). Ordinary windows get nothing. */
 export function backgroundWindowOptions(background: boolean): BrowserWindowConstructorOptions {
   return background ? {
     show: false,
     skipTaskbar: true,
     focusable: false,
-    webPreferences: { backgroundThrottling: false, devTools: false }
+    webPreferences: { backgroundThrottling: false, devTools: false, additionalArguments: [TEST_BRIDGE_SWITCH] }
   } : {};
 }

@@ -26,7 +26,7 @@ test.describe('@persistence native project persistence', () => {
   test('autosaves a project and restores it after relaunch', async ({ session }) => {
     const storeWired = await session.page.evaluate(async () => {
       try {
-        await (window as any).powermove?.store?.flush();
+        await (window as any).__powermoveTestBridge?.store?.flush();
         return true;
       } catch {
         return false;
@@ -34,7 +34,7 @@ test.describe('@persistence native project persistence', () => {
     });
     test.fixme(
       !storeWired,
-      'Waiting for the main-process store IPC handlers to back window.powermove.store'
+      'Waiting for the main-process store IPC handlers to back the test bridge store'
     );
 
     await session.page.evaluate(() => (window as any).PM.cmd('newProject'));
@@ -48,7 +48,7 @@ test.describe('@persistence native project persistence', () => {
     expect(result.ok).toBe(true);
 
     await session.page.waitForTimeout(750); // autosave debounce is 550 ms
-    await session.page.evaluate(() => (window as any).powermove.store.flush());
+    await session.page.evaluate(() => (window as any).__powermoveTestBridge.store.flush());
     await session.relaunch();
 
     await session.page.waitForFunction(() => Boolean((window as any).PM?.Projects));

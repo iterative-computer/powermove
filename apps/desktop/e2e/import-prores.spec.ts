@@ -34,6 +34,8 @@ test.describe('@import-prores automatic playback proxy', () => {
 
     await session.relaunch();
     await session.page.waitForFunction((id) => (window as any).PM.proj.id === id, projectId);
+    // Media restore is asynchronous after boot.
+    await session.page.evaluate(() => (window as any).PM.projectAssetsReady);
     const restored = await session.page.evaluate(async () => {
       const PM = (window as any).PM;
       const asset = [...PM.assets.map.values()].find((candidate: any) => candidate.name === 'prores422.mov') as any;

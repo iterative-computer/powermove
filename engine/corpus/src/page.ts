@@ -394,6 +394,32 @@ export function installCorpusPage(): void {
     },
 
     /**
+     * Export-path snapshots: `PM.prepareFrame(t, options)` with the exporter's
+     * options (output size, motion blur on, 16 shutter samples for opaque
+     * exports and 20 for alpha ones), labelled by `blenderFrameRequests` with
+     * the same options. Builds whose `PM.prepareFrame` takes only a time
+     * (before corpus v1) report an error instead of mislabelled snapshots.
+     */
+    async blenderExport(args: { time: number; width: number; height: number; mbSamples: number }): Promise<{ requests: any[]; options: any; error?: string }> {
+      const options = { width: args.width, height: args.height, mblur: true, mbSamples: args.mbSamples };
+      if (typeof PM.prepareFrame !== 'function' || PM.prepareFrame.length < 2) {
+        return { requests: [], options, error: 'PM.prepareFrame does not take export options in this build' };
+      }
+      PM.pause();
+      PM.Export.busy = true;
+      PM._scene3dRevision = (PM._scene3dRevision || 0) + 1;
+      try {
+        const requests = legacy().blenderFrameRequests(PM, args.time, PM.proj, { ...options, shutter: PM.proj.shutter || .5 })
+          .map((request: any) => ({ comp: request.comp.compId || request.comp.id || 'root', time: request.time, width: request.width, height: request.height, preview: false }));
+        try { await PM.prepareFrame(args.time, options); return { requests, options }; }
+        catch (error: any) { return { requests, options, error: String(error?.message || error) }; }
+      } finally {
+        PM.preparedVideoFrames = null;
+        PM.Export.busy = false;
+      }
+    },
+
+    /**
      * Paused rendered-preview snapshots: the scene3d API's `renderFrame`
      * (`renderBlenderPreview`) at time t. Requests follow its walk: the current
      * composition, then active precomps at their source times, each composition

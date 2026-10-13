@@ -34,6 +34,30 @@ describe('lossless history memory', () => {
     expect(restored.entries[0].forward[0].value[0]).toBe(restored.entries[2].backward[0].value[0]);
   });
 
+  it('compacts the composition-independent paths history entries hold since compositions', () => {
+    const value: any = fixture();
+    for (const entry of value.entries) for (const patch of [...entry.forward, ...entry.backward]) patch.path = ['comps', 'C1', 'layers'];
+    value.entries[0].forward.push({ path: ['comps', 'C1', 'edits'], exists: true, value: [{ id: 'e1', kind: 'edit' }] });
+    const expected = structuredClone(value), records = new HistoryRecords();
+    records.share(value);
+    expect(value.entries[0].forward[0].value[0]).toBe(value.entries[2].backward[0].value[0]);
+    const packed = packStoredHistory('projectHistory.demo', value, records);
+    expect(packed).toMatchObject({ format: 'powermove-history-dictionary', version: 1 });
+    expect(packed.records).toHaveLength(5);
+    expect(packed.history.entries[0].forward[0]).toMatchObject({ patch: { path: ['comps', 'C1', 'layers'] }, refs: [0, 1] });
+    expect(unpackStoredHistory('projectHistory.demo', JSON.parse(JSON.stringify(packed)))).toEqual(expected);
+  });
+
+  it.each([[['comps', '', 'layers']], [['comps', 'C1', 'assets']], [['comps', 'C1', 'layers', 0]], [['assets']]])(
+    'leaves other list paths alone and refuses references on them (%j)', path => {
+      const value: any = fixture();
+      value.entries[0].forward[0].path = path;
+      const packed = packHistory(value);
+      expect(packed.history.entries[0].forward[0]).toEqual({ patch: value.entries[0].forward[0] });
+      packed.history.entries[0].forward[0] = { patch: { path, exists: true }, refs: [0] };
+      expect(() => unpackHistory(packed)).toThrow('Invalid history reference');
+    });
+
   it('does not reinterpret unrelated store values or invalid legacy histories', () => {
     const unrelated = { entries: [{ payload: 'recovery metadata' }] };
     const records = new HistoryRecords();

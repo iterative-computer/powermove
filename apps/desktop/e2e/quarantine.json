@@ -11,15 +11,6 @@
       "reason": "Timeout waiting for the \"Text animator presets\" group and its Rise button; that group no longer exists in src (removed in a5e3fbb6, 2026-10-05). Stale spec; the text animator UI it drives was redesigned."
     },
     {
-      "spec": "ae-audit-implementation.spec.ts",
-      "tests": [
-        "precompose preserves cross-boundary animated rig pixels at several frames"
-      ],
-      "status": "fail",
-      "owner": "Model and evaluation",
-      "reason": "PM.precompose of a parented, rotating rig changes rendered pixels: the mean absolute difference at t = 0.4, 1, 1.8 is not below 1 CV for every sample (expected all true, got false). Evaluation parity across a precomposition boundary."
-    },
-    {
       "spec": "agent-attachment-preview.spec.ts",
       "tests": [
         "agent image attachments open a fitted preview and Escape returns focus"
@@ -36,15 +27,6 @@
       "status": "fail",
       "owner": "Export and agents",
       "reason": "The final model request carries 8 data:image attachments; the spec expects 4 (2 frames + 1 sheet + 1 composition sheet). Suspected extra visual-context frames from e7e3ccb1 (\"Improve agent visual context\"). Agent snapshots move to the engine, so the count matters for the port."
-    },
-    {
-      "spec": "agent-mod-capabilities.spec.ts",
-      "tests": [
-        "a real mod supplies import defaults and Properties controls with automatic cleanup"
-      ],
-      "status": "fail",
-      "owner": "Viewer and settings UI",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.extensions.setEnabled), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
     },
     {
       "spec": "captions-ui.spec.ts",
@@ -65,24 +47,6 @@
       "reason": "Same failure as the light-mode case: two .export-modal dialogs (Export and Export Captions) are open at once."
     },
     {
-      "spec": "chatgpt-connection.spec.ts",
-      "tests": [
-        "large images and files cross the real renderer-to-main agent boundary"
-      ],
-      "status": "fail",
-      "owner": "Export and agents",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.codex), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
-    },
-    {
-      "spec": "chatgpt-connection.spec.ts",
-      "tests": [
-        "Claude subscription status and structured runs cross the real hidden app boundary"
-      ],
-      "status": "fail",
-      "owner": "Export and agents",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.codex), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
-    },
-    {
       "spec": "color-picker-overlay.spec.ts",
       "tests": [
         "color picker stays above adjacent panels and inside the viewport"
@@ -90,24 +54,6 @@
       "status": "fail",
       "owner": "Viewer and settings UI",
       "reason": "The first open passes; after Escape the inspector Fill row no longer contains a .color-field trigger and the loop times out (30 s). Suspected stale selector after the color picker unification (f8734eb3, 2026-09-25)."
-    },
-    {
-      "spec": "compatible-authoring.spec.ts",
-      "tests": [
-        "an API connection creates a keyframeable effect and verifies it through live tools"
-      ],
-      "status": "fail",
-      "owner": "Export and agents",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.compatible), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
-    },
-    {
-      "spec": "compatible-provider.spec.ts",
-      "tests": [
-        "provider models, reasoning, and flat error actions remain usable in a narrow panel"
-      ],
-      "status": "fail",
-      "owner": "Export and agents",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.compatible), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
     },
     {
       "spec": "design-language.spec.ts",
@@ -128,15 +74,6 @@
       "reason": "The 19th menu button, \"Caption actions\" (captions panel, 416e3a45, 2026-10-04), sits outside the viewport in the default layout, so the click never lands and the test times out."
     },
     {
-      "spec": "editor-reliability.spec.ts",
-      "tests": [
-        "cancelled Save never reports a saved file; successful Save writes a reopenable project"
-      ],
-      "status": "fail",
-      "owner": "Renderer write path",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.store.flush), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
-    },
-    {
       "spec": "editor-responsiveness.spec.ts",
       "tests": [
         "saving a large undo history yields to input and preserves the file"
@@ -144,15 +81,6 @@
       "status": "fail",
       "owner": "Renderer write path",
       "reason": "Longest main-thread gap while saving a 36 MB undo history was 220.6 ms (limit 100 ms) on both attempts and on the baseline run. Measured on the reference M4 Max while other lanes were compiling at nice 15; not yet re-measured on an idle machine."
-    },
-    {
-      "spec": "effect-authoring.spec.ts",
-      "tests": [
-        "the shipped effect sample validates, registers, animates and undoes without creating a panel"
-      ],
-      "status": "fail",
-      "owner": "Viewer and settings UI",
-      "reason": "docs/samples/gradient-tint copied into the profile's extensions folder is not registered as an effect after relaunch (Kernel.effects.get('gradient-tint') stays empty for 30 s). Cause not isolated (unverified guess: local extensions now need enabling or trust since Sandbox v2). The effect contract itself belongs to GPU and render."
     },
     {
       "spec": "extension-sandbox-clipboard.spec.ts",
@@ -173,141 +101,6 @@
       "reason": "Clicking the empty panel area leaves document.activeElement with no class (expected ext-panel-frame), so the sandboxed view never takes focus."
     },
     {
-      "spec": "extensions.spec.ts",
-      "tests": [
-        "replaces panel source in place without changing the document, window, or docking"
-      ],
-      "status": "fail",
-      "owner": "Viewer and settings UI",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.extensions), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
-    },
-    {
-      "spec": "extensions.spec.ts",
-      "tests": [
-        "a user extension activates, contributes a command and an effect, and survives disable"
-      ],
-      "status": "fail",
-      "owner": "Viewer and settings UI",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.extensions), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
-    },
-    {
-      "spec": "extensions.spec.ts",
-      "tests": [
-        "timeline replacements swap with the built-in timeline without corrupting the live panel"
-      ],
-      "status": "fail",
-      "owner": "Viewer and settings UI",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.extensions), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
-    },
-    {
-      "spec": "extensions.spec.ts",
-      "tests": [
-        "turning the built-in timeline off and on restores its live panel in place"
-      ],
-      "status": "fail",
-      "owner": "Viewer and settings UI",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.extensions), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
-    },
-    {
-      "spec": "font-anchor.spec.ts",
-      "tests": [
-        "font changes and animation preserve a centered text anchor"
-      ],
-      "status": "fail",
-      "owner": "Text and vectors",
-      "reason": "Centered text anchor drifts after font changes and animation: maximum position error 630.87 px (limit 0.001); samples 1 to 10 and the last two are exact; samples 11 to 24 are off by 70 to 631 px. Anchor bounds do persist."
-    },
-    {
-      "spec": "import-mp4.spec.ts",
-      "tests": [
-        "keeps imported video playable after the source is removed and the app closes"
-      ],
-      "status": "fail",
-      "owner": "Engine and platform",
-      "reason": "After session.relaunch() the app restores the tab strip but boots to Projects with a fresh Untitled placeholder instead of the last active project (probe: id before relaunch Pol5olf7, after Py3jztv7, ProjectsScreen open). Suspected window session restore (main EditorWindows / renderer loadBootProject)."
-    },
-    {
-      "spec": "import-prores-alpha.spec.ts",
-      "tests": [
-        "imports ProRes 4444 with transparency and restores playable media"
-      ],
-      "status": "fail",
-      "owner": "Media",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.media), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
-    },
-    {
-      "spec": "import-prores.spec.ts",
-      "tests": [
-        "converts ProRes once, presents video frames, and restores the durable proxy"
-      ],
-      "status": "fail",
-      "owner": "Engine and platform",
-      "reason": "After session.relaunch() the app restores the tab strip but boots to Projects with a fresh Untitled placeholder instead of the last active project (probe: id before relaunch Pol5olf7, after Py3jztv7, ProjectsScreen open). Suspected window session restore (main EditorWindows / renderer loadBootProject)."
-    },
-    {
-      "spec": "large-store-startup.spec.ts",
-      "tests": [
-        "opens with a large recovery tree and preserves every record"
-      ],
-      "status": "fail",
-      "owner": "Renderer write path",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.store), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
-    },
-    {
-      "spec": "local-media-recovery.spec.ts",
-      "tests": [
-        "restores tone.wav from its local source when cached bytes are missing"
-      ],
-      "status": "fail",
-      "owner": "Proxies and storage",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.media), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
-    },
-    {
-      "spec": "local-media-recovery.spec.ts",
-      "tests": [
-        "restores tone.mp3 from its local source when cached bytes are missing"
-      ],
-      "status": "fail",
-      "owner": "Proxies and storage",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.media), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
-    },
-    {
-      "spec": "local-media-recovery.spec.ts",
-      "tests": [
-        "restores h264-aac.mp4 from its local source when cached bytes are missing"
-      ],
-      "status": "fail",
-      "owner": "Proxies and storage",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.media), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
-    },
-    {
-      "spec": "local-media-recovery.spec.ts",
-      "tests": [
-        "restores converted.mkv from its local source when cached bytes are missing"
-      ],
-      "status": "fail",
-      "owner": "Proxies and storage",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.media), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
-    },
-    {
-      "spec": "local-media-recovery.spec.ts",
-      "tests": [
-        "restores still.heic from its local source when cached bytes are missing"
-      ],
-      "status": "fail",
-      "owner": "Proxies and storage",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.media), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
-    },
-    {
-      "spec": "local-media-recovery.spec.ts",
-      "tests": [
-        "restores animated.gif from its local source when cached bytes are missing"
-      ],
-      "status": "fail",
-      "owner": "Proxies and storage",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.media), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
-    },
-    {
       "spec": "media-bulk-selection.spec.ts",
       "tests": [
         "drag a selection box, delete media, and undo the whole batch in both themes"
@@ -315,15 +108,6 @@
       "status": "fail",
       "owner": "Viewer and settings UI",
       "reason": "Dragging across the media grid never shows .asset-selection-box (10 s). The selection box still exists in src; the drag start point or the library layout changed under the spec."
-    },
-    {
-      "spec": "memory-history-persistence.spec.ts",
-      "tests": [
-        "compact history preserves pixels, every action, and pending redo through pressure and relaunch"
-      ],
-      "status": "fail",
-      "owner": "Renderer write path",
-      "reason": "store/projectHistory.<id>.json on disk has no format field (expected \"powermove-history-dictionary\", src/shared/history-memory.ts). The compact history dictionary is not what reaches disk after PM.flushProject()."
     },
     {
       "spec": "panel-popout.spec.ts",
@@ -344,33 +128,6 @@
       "reason": "The Library shows 14 panel cards; PM.PANELS (minus toolbar) has 15. One registered panel is missing from the Library grid."
     },
     {
-      "spec": "performance-warning.spec.ts",
-      "tests": [
-        "identifies a slow extension and lets the user turn it off"
-      ],
-      "status": "fail",
-      "owner": "Viewer and settings UI",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.extensions), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
-    },
-    {
-      "spec": "persistence.spec.ts",
-      "tests": [
-        "autosaves a project and restores it after relaunch"
-      ],
-      "status": "fail",
-      "owner": "Renderer write path",
-      "reason": "Stale spec: reads the raw window.powermove bridge (powermove.store.flush), which the renderer seals at boot since bfcd2c88 (2026-09-23, sandbox X1b); window.powermove is undefined in the page."
-    },
-    {
-      "spec": "playback-audio.spec.ts",
-      "tests": [
-        "the restored project keeps playing audio through quality changes"
-      ],
-      "status": "fail",
-      "owner": "Engine and platform",
-      "reason": "After session.relaunch() the app restores the tab strip but boots to Projects with a fresh Untitled placeholder instead of the last active project (probe: id before relaunch Pol5olf7, after Py3jztv7, ProjectsScreen open). Suspected window session restore (main EditorWindows / renderer loadBootProject)."
-    },
-    {
       "spec": "precomp.spec.ts",
       "tests": [
         "canvas and timeline open the same compact layer menu"
@@ -382,20 +139,11 @@
     {
       "spec": "project-file-media.spec.ts",
       "tests": [
-        "local recovery keeps imported audio after closing and relaunching Powermove"
-      ],
-      "status": "fail",
-      "owner": "Engine and platform",
-      "reason": "After session.relaunch() the app restores the tab strip but boots to Projects with a fresh Untitled placeholder instead of the last active project (probe: id before relaunch Pol5olf7, after Py3jztv7, ProjectsScreen open). Suspected window session restore (main EditorWindows / renderer loadBootProject)."
-    },
-    {
-      "spec": "project-file-media.spec.ts",
-      "tests": [
         "saved project files restore imported video without the original session media"
       ],
       "status": "flaky",
       "owner": "Proxies and storage",
-      "reason": "After reopening a saved .pmv, the metadata-only re-save returns false. Passed once in the full suite; failed 9 of 9 later runs (baseline file run, 5 isolated repeats, 3 whole-file repeats)."
+      "reason": "After reopening a saved .pmv, the metadata-only re-save returns false. Passed once in the 2026-10-12 baseline suite; failed 9 of 9 later baseline runs and 4 of 4 runs after the Phase 0 amendment 14 fixes (rerun plus 3 repeats). Kept as flaky because it has passed once; not related to the restart-restore fix (it reopens the file explicitly)."
     },
     {
       "spec": "project-settings.spec.ts",
@@ -434,15 +182,6 @@
       "reason": "The Studio Cube extension layer's \"x.objectColor\" stopwatch resolves but is never visible (collapsed or hidden section), so the click times out."
     },
     {
-      "spec": "security.spec.ts",
-      "tests": [
-        "blocks traversal, popups, and Node/Electron escape hatches"
-      ],
-      "status": "fail",
-      "owner": "Engine and platform",
-      "reason": "Expects the bridge to be present on window (present: true); since bfcd2c88 the renderer seals window.powermove at boot, so present is false. Stale expectation; the security property it checks still holds."
-    },
-    {
       "spec": "shell.spec.ts",
       "tests": [
         "keeps a usable window drag area with crowded tabs and overlays"
@@ -463,29 +202,11 @@
     {
       "spec": "timeline.spec.ts",
       "tests": [
-        "Scale keys move outside the layer, delete together, and never delete their layer"
-      ],
-      "status": "fail",
-      "owner": "Engine and platform",
-      "reason": "After session.relaunch() the app restores the tab strip but boots to Projects with a fresh Untitled placeholder instead of the last active project (probe: id before relaunch Pol5olf7, after Py3jztv7, ProjectsScreen open). Suspected window session restore (main EditorWindows / renderer loadBootProject). Here PM.L(id) is null after relaunch."
-    },
-    {
-      "spec": "timeline.spec.ts",
-      "tests": [
         "the easing grid applies a curve to both Scale dimensions and preserves linear defaults"
       ],
       "status": "fail",
       "owner": "Viewer and settings UI",
       "reason": "Choosing \"Ease out\" in the keyframe easing grid leaves both Scale keys at ei [1, 1] (expected [0.58, 1]); the menu item click does not apply the curve."
-    },
-    {
-      "spec": "timeline.spec.ts",
-      "tests": [
-        "project rename is available from the tab menu and persists the live document"
-      ],
-      "status": "fail",
-      "owner": "Viewer and settings UI",
-      "reason": "Pressing Enter in \"Rename project\" does not commit: the tab keeps \"E2E composition\"."
     },
     {
       "spec": "toast-error.spec.ts",

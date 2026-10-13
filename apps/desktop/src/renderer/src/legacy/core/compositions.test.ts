@@ -121,6 +121,38 @@ describe('compositions', () => {
     expect(PM.Comps.exists(id)).toBe(false);
   });
 
+  it('keeps a pre-composed child on its outside rig by parenting the precomp layer', () => {
+    const PM = composer();
+    const rig = PM.mkLayer('null', { name: 'Rig' }, PM.proj);
+    const arm = PM.mkLayer('shape', { name: 'Arm' }, PM.proj);
+    const hand = PM.mkLayer('shape', { name: 'Hand' }, PM.proj);
+    arm.parent = rig.id; hand.parent = arm.id;
+    PM.proj.layers.push(arm, hand, rig);
+
+    const id = PM.Comps.precompose([arm.id, hand.id], { name: 'Limb' });
+    const layer = PM.proj.layers[0];
+    expect(layer).toMatchObject({ type: 'precomp', parent: rig.id, d: { comp: id } });
+    // The precomp layer's own transform is the identity: anchor on position.
+    expect([layer.p['position.x'].v, layer.p['position.y'].v]).toEqual([layer.p['anchor.x'].v, layer.p['anchor.y'].v]);
+    expect([arm.parent, hand.parent]).toEqual([null, arm.id]);
+
+    PM.hist.undo();
+    expect(names(PM)).toEqual(['Arm', 'Hand', 'Rig']);
+    expect(PM.proj.layers.map((item: any) => item.parent ?? null)).toEqual([rig.id, arm.id, null]);
+  });
+
+  it('leaves the precomp layer unparented when moved roots hang from different layers', () => {
+    const PM = composer();
+    const left = PM.mkLayer('null', { name: 'Left' }, PM.proj);
+    const right = PM.mkLayer('null', { name: 'Right' }, PM.proj);
+    const a = PM.mkLayer('shape', { name: 'A' }, PM.proj); a.parent = left.id;
+    const b = PM.mkLayer('shape', { name: 'B' }, PM.proj); b.parent = right.id;
+    PM.proj.layers.push(a, b, left, right);
+    PM.Comps.precompose([a.id, b.id], { name: 'Pair' });
+    expect(PM.proj.layers[0].parent ?? null).toBeNull();
+    expect([a.parent, b.parent]).toEqual([null, null]);
+  });
+
   it('pre-composes one layer leaving its attributes in place', () => {
     const PM = composer();
     const solid = PM.mkLayer('solid', { name: 'Plate', d: { w: 800, h: 600 } }, PM.proj);

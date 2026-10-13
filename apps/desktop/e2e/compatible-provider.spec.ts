@@ -76,7 +76,7 @@ test('provider models, reasoning, and flat error actions remain usable in a narr
     const { page } = session;
     const address = server.address() as { port: number };
     await page.evaluate(async port => {
-      const config = await (window as any).powermove.compatible.configure({ baseUrl: `http://127.0.0.1:${port}/v1`, model: 'gpt-6-astra', vision: false });
+      const config = await (window as any).__powermoveTestBridge.compatible.configure({ baseUrl: `http://127.0.0.1:${port}/v1`, model: 'gpt-6-astra', vision: false });
       window.dispatchEvent(new CustomEvent('pm-provider-connected', { detail: config }));
       const PM = (window as any).PM;
       PM.SpatialAssistant.open();

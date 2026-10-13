@@ -5,6 +5,7 @@ import os from "node:os";
 import {
   BlenderWorker,
   validateBlenderJob,
+  blenderCandidates,
   discoverBlender,
 } from "./blender-service";
 import { recipeSchema, render3DSchema } from "../shared/blender";
@@ -195,5 +196,59 @@ describe("bounded Blender protocol", () => {
     expect(
       (await discoverBlender("/nonexistent/powermove-blender")).available,
     ).toBe(false);
+  });
+});
+
+describe("Blender discovery", () => {
+  const folders: Record<string, string[]> = {
+    "/Applications": ["Blender.app", "Safari.app", "Blender 4.2.app"],
+    "/Users/me/Applications": ["Blender-4.5.14.app", "Blender-5.0.1.app", "Blender-4.5.2.app", "BlenderKit.app", "Blender-4.5.14.zip"],
+  };
+  const list = async (directory: string) => folders[directory] ?? [];
+
+  it("finds versioned bundles after the configured path, newest first per folder", async () => {
+    expect(await blenderCandidates({
+      env: { POWERMOVE_BLENDER_PATH: "/opt/blender/Blender", PATH: "/usr/local/bin:/opt/homebrew/bin" },
+      platform: "darwin", home: "/Users/me", list,
+    })).toEqual([
+      "/opt/blender/Blender",
+      "/Applications/Blender.app/Contents/MacOS/Blender",
+      "/Applications/Blender 4.2.app/Contents/MacOS/Blender",
+      "/Users/me/Applications/Blender-5.0.1.app/Contents/MacOS/Blender",
+      "/Users/me/Applications/Blender-4.5.14.app/Contents/MacOS/Blender",
+      "/Users/me/Applications/Blender-4.5.2.app/Contents/MacOS/Blender",
+      "/usr/local/bin/blender",
+      "/opt/homebrew/bin/blender",
+    ]);
+  });
+
+  it("finds every Blender install folder on Windows", async () => {
+    const windows = async (directory: string) =>
+      directory === "C:\\Program Files\\Blender Foundation" ? ["Blender 4.5", "Blender 5.2", "Docs"] : [];
+    expect(await blenderCandidates({ env: {}, platform: "win32", home: "C:\\Users\\me", list: windows })).toEqual([
+      "C:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe",
+      "C:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe",
+    ]);
+  });
+
+  it("keeps looking past an older Blender for a supported one", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "powermove-blender-discovery-"));
+    try {
+      const fake = async (name: string, version: string) => {
+        const file = path.join(directory, name);
+        await writeFile(file, `#!/bin/sh\necho "Blender ${version}"\n`);
+        await chmod(file, 0o755);
+        return file;
+      };
+      const old = await fake("old", "4.2.3 LTS");
+      const current = await fake("current", "4.5.14 LTS");
+      expect(await discoverBlender(old)).toMatchObject({ available: false, error: "Blender 4.5 or newer is required" });
+      expect(await discoverBlender(undefined, { candidates: [path.join(directory, "missing"), old, current] }))
+        .toMatchObject({ available: true, path: current, version: "Blender 4.5.14 LTS" });
+      expect(await discoverBlender(undefined, { candidates: [old] }))
+        .toMatchObject({ available: false, path: old, version: "Blender 4.2.3 LTS" });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

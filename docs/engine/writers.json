@@ -655,61 +655,61 @@
       "code": "PM.proj = loadBootProject()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:556",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:558",
       "class": "hist.do",
       "scope": "install > writeExportDefaults",
       "code": "PM.hist.do('Export settings', () => { PM.proj.exportDefaults = next; })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1043",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1045",
       "class": "project-swap",
       "scope": "install > switchProject",
       "code": "PM.proj = live ? live.project : hydrate(p)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1047",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1049",
       "class": "project-write",
       "scope": "install > switchProject",
       "code": "PM.proj.name = name"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1369",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1378",
       "class": "asset-metadata",
       "scope": "install > importFiles",
       "code": "meta.folder = target"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1378",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1387",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "targetProject.w = source.w"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1379",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1388",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "targetProject.h = source.h"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1381",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1390",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "targetProject.fps = source.fps"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1382",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1391",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "targetProject.exportDefaults = { ...readExportDefaults(), fps: source.fps }"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1385",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1394",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "targetProject.dur = source.dur"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1386",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1395",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "targetProject.work = [0, source.dur]"
@@ -883,13 +883,13 @@
       "code": "transact('Add Composition', () => { PM.addLayer(layer, options.index ?? 0); PM.selectLayers(layer.id); })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/compositions.ts:473",
+      "site": "apps/desktop/src/renderer/src/legacy/core/compositions.ts:482",
       "class": "hist.do",
       "scope": "install > precompose",
       "code": "transact('Pre-compose', () => { comp.layers = picked; for (const moved of picked) { if (moved.parent && !pickedIds.has(moved.parent)) mov..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/compositions.ts:519",
+      "site": "apps/desktop/src/renderer/src/legacy/core/compositions.ts:529",
       "class": "hist.do",
       "scope": "install > leaveAttributes",
       "code": "transact('Pre-compose', () => { comp.layers = [inner]; PM.proj.comps = { ...comps(), [comp.id]: comp }; const shift = (prop: any, by: num..."

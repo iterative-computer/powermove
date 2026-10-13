@@ -43,7 +43,7 @@ test.describe('@extensions user extensions load through the kernel', () => {
     const before = await page.evaluate(() => JSON.stringify((window as any).PM.WS.current));
     const pid = app.process().pid;
     await writeFile(path.join(session.userData, 'extensions/reload-panel/index.ts'), source('After edit'));
-    await page.evaluate(async () => { await (window as any).powermove.extensions.reload({ id: 'reload-panel' }); });
+    await page.evaluate(async () => { await (window as any).__powermoveTestBridge.extensions.reload({ id: 'reload-panel' }); });
     await expect(page.locator('#body #panel-reload-panel .body')).toHaveText('After edit');
     expect(await page.evaluate(() => JSON.stringify((window as any).PM.WS.current))).toBe(before);
     expect(await page.evaluate(() => (window as any).__reloadDocument === document && (window as any).__reloadProject === (window as any).PM.proj)).toBe(true);
@@ -90,7 +90,7 @@ export default function activate(api: PowermoveAPI) {
 
     // Disable through the bridge; the contribution must disappear.
     const afterDisable = await page.evaluate(async () => {
-      const bridge = (window as unknown as Record<string, any>).powermove;
+      const bridge = (window as unknown as Record<string, any>).__powermoveTestBridge;
       await bridge.extensions.setEnabled({ id: 'e2e-probe', enabled: false });
       await new Promise((resolve) => setTimeout(resolve, 500));
       const PM = (window as unknown as Record<string, any>).PM;
@@ -134,14 +134,14 @@ export default function activate(api: PowermoveAPI) {
 
     for (let cycle = 0; cycle < 2; cycle += 1) {
       await page.evaluate(async () => {
-        await (window as any).powermove.extensions.setEnabled({ id: 'e2e-timeline-replacement', enabled: false });
+        await (window as any).__powermoveTestBridge.extensions.setEnabled({ id: 'e2e-timeline-replacement', enabled: false });
       });
       await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.loader.activeIds())).toContain('timeline');
       await expect(page.locator('#body #panel-timeline #tl-canvas')).toHaveCount(1);
       await expect(page.locator('#body #panel-timeline .panel-move-handle')).toHaveCount(1);
 
       await page.evaluate(async () => {
-        await (window as any).powermove.extensions.setEnabled({ id: 'e2e-timeline-replacement', enabled: true });
+        await (window as any).__powermoveTestBridge.extensions.setEnabled({ id: 'e2e-timeline-replacement', enabled: true });
       });
       await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.loader.activeIds())).toContain('e2e-timeline-replacement');
       await expect(page.locator('#body #panel-timeline [data-timeline-replacement="active"]')).toBeVisible();
@@ -257,12 +257,12 @@ export default function activate(api: PowermoveAPI) {
     expect(before.active).toBe(true);
 
     await page.evaluate(async () => {
-      await (window as any).powermove.extensions.setEnabled({ id: 'timeline', enabled: false });
+      await (window as any).__powermoveTestBridge.extensions.setEnabled({ id: 'timeline', enabled: false });
     });
     await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.loader.activeIds().includes('timeline'))).toBe(false);
 
     await page.evaluate(async () => {
-      await (window as any).powermove.extensions.setEnabled({ id: 'timeline', enabled: true });
+      await (window as any).__powermoveTestBridge.extensions.setEnabled({ id: 'timeline', enabled: true });
     });
     await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.loader.activeIds().includes('timeline'))).toBe(true);
     await expect(page.locator('#panel-timeline')).toBeVisible();

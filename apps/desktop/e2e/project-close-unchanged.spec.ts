@@ -75,3 +75,26 @@ test('Don’t Save on window close survives the final recovery flush', async ({ 
   await expect(session.page.getByText('Discarded window project', { exact: true })).toHaveCount(0);
   expect(await session.page.evaluate((id) => (window as any).PM.Projects.get(id), id)).toBeNull();
 });
+
+test('Don’t Save when quitting keeps a never-saved project and the next launch reopens it', async ({ session }) => {
+  await session.app.evaluate(({ dialog }) => {
+    dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false });
+  });
+  const { id, dirty } = await session.page.evaluate(async () => {
+    const PM = (window as any).PM;
+    PM.proj.name = 'Kept across quit';
+    PM.proj.layers.push(PM.mkLayer('shape', { name: 'Kept layer' }));
+    PM.autosave();
+    await PM.flushProject();
+    return { id: PM.proj.id, dirty: PM.projectFileState(PM.proj.id).dirty };
+  });
+  // Edited and never saved to a file, so quitting asks, and Don't Save answers.
+  expect(dirty).toBe(true);
+  // Playwright closes the app with app.quit(), the same path as Quit Powermove.
+  await session.relaunch();
+  await session.page.waitForFunction(() => Boolean((window as any).PM?.ProjectsScreen));
+  expect(await session.page.evaluate(() => {
+    const PM = (window as any).PM;
+    return { id: PM.proj.id, name: PM.proj.name, layers: PM.proj.layers.map((layer: any) => layer.name), projects: PM.ProjectsScreen.isOpen, placeholder: PM.isHomeProject() };
+  })).toEqual({ id, name: 'Kept across quit', layers: ['Kept layer'], projects: false, placeholder: false });
+});
