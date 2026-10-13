@@ -273,12 +273,12 @@ mod tests {
         // 3×2 image, one component: 1 2 3 / 4 5 6.
         let px = [1, 2, 3, 4, 5, 6];
         assert_eq!(orient(&px, 3, 2, 1, 1), (px.to_vec(), 3, 2));
-        assert_eq!(orient(&px, 3, 2, 2, 1).0, vec![3, 2, 1, 6, 5, 4]);
-        assert_eq!(orient(&px, 3, 2, 3, 1).0, vec![6, 5, 4, 3, 2, 1]);
+        assert_eq!(orient(&px, 3, 2, 1, 2).0, vec![3, 2, 1, 6, 5, 4]);
+        assert_eq!(orient(&px, 3, 2, 1, 3).0, vec![6, 5, 4, 3, 2, 1]);
         // 6: rotate 90° clockwise to display.
-        assert_eq!(orient(&px, 3, 2, 6, 1), (vec![4, 1, 5, 2, 6, 3], 2, 3));
+        assert_eq!(orient(&px, 3, 2, 1, 6), (vec![4, 1, 5, 2, 6, 3], 2, 3));
         // 8: rotate 90° counterclockwise.
-        assert_eq!(orient(&px, 3, 2, 8, 1), (vec![3, 6, 2, 5, 1, 4], 2, 3));
+        assert_eq!(orient(&px, 3, 2, 1, 8), (vec![3, 6, 2, 5, 1, 4], 2, 3));
     }
 
     #[test]
