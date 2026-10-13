@@ -214,12 +214,14 @@ and container breadth (ASF, FLV, M2TS, MTS, 3GP, 3G2, Ogg, M2V, M4V, AVI with B
 frames).
 
 Measured 2026-10-12 on the M4 Max with other lanes running (release build):
-57 files (11 fixtures, 46 generated), 87 file and backend pairs, 15,512 random
-accesses (both passes), 0 mismatches, 0 copied frames. Mean time per random
-access with a new session: VideoToolbox 1.8 to 24.8 ms (24.8 is 4K HEVC
-Main10), FFmpeg 0.24 to 117 ms (117 is 4K HEVC Main10 in software), dav1d 0.7
-to 2.9 ms, alpha pairs 2.2 to 3.6 ms. Index builds: 0.03 to 1.1 ms from tables
-and scans, 2.7 to 5.4 ms with a decode-order pass.
+68 files, 103 file and backend runs (a few files run in two groups), 17,330
+random accesses (both passes), 0 mismatches, 0 copied frames. Mean time per
+random access with a new session: VideoToolbox 1.6 to 23.5 ms (23.5 is 4K HEVC
+Main10), FFmpeg 0.21 to 117 ms (117 is 4K HEVC Main10 in software), dav1d 0.7
+to 2.9 ms, alpha pairs 2.2 to 3.6 ms. Slowest single probe: 189 ms (FFmpeg,
+4K HEVC Main10); the suite fails any probe over 2 s and aborts one running past
+60 s. Index builds: 0.03 to 1.1 ms from tables and scans on the corpus, 3.7 ms
+for a 108,000-frame H.264 MP4, 2.7 to 5.4 ms with a decode-order pass.
 
 ## Not done here
 
