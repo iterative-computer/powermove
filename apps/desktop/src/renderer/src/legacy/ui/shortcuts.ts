@@ -258,7 +258,11 @@ def('separateAudio', 'Separate audio', null, (id?: any) => separateVideoAudio(PM
 def('selectAll', 'Select all layers', '⌘A', () => PM.selectLayers(PM.proj.layers.map((l: any) => l.id)), 'Edit');
 def('deselect', 'Deselect', '⎋', () => { PM.selectLayers([]); PM.sel.keys = []; }, 'Edit');
 def('groupLayers', 'Group layers', '⌘G', () => PM.Edit.apply({ type: 'group_layers', targets: PM.sel.layers }, { label: 'Group layers', origin: 'timeline' }), 'Edit');
-def('ungroupLayers', 'Ungroup layers', '⌘⇧G', () => PM.Edit.apply({ type: 'ungroup_layers', targets: PM.sel.layers }, { label: 'Ungroup layers', origin: 'timeline' }), 'Edit');
+def('ungroupLayers', 'Ungroup layers', '⌘⇧G', () => {
+  const result = PM.Edit.apply({ type: 'ungroup_layers', targets: PM.sel.layers }, { label: 'Ungroup layers', origin: 'timeline' });
+  if (!result.ok) PM.toast(result.message);
+  return result;
+}, 'Edit');
 
 /* ── layer clipboard ───────────────────────────────────── */
 let layerClip: any = null;
