@@ -87,7 +87,6 @@ test('provider models, reasoning, and flat error actions remain usable in a narr
     await session.openAgent();
     await page.evaluate(() => {
       const PM = (window as any).PM;
-      PM.AgentHarness.observe = async () => ({ state: {}, times: [], images: [] });
       PM.theme.apply('dark');
     });
     await expect(page.locator('select[aria-label="Model"] option')).toHaveCount(4);
