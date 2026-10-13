@@ -698,7 +698,15 @@ impl Engine {
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
-                let prop = if get(request, "path").is_some_and(Value::is_null) {
+                // A channel object outside the layer (evaluated ad hoc from
+                // its JSON, with the layer as context).
+                let detached_prop = match get(request, "prop") {
+                    Some(v @ Value::Object(_)) => Some(Node::from_value(v.clone(), revision)),
+                    _ => None,
+                };
+                let prop = if detached_prop.is_some() {
+                    detached_prop.as_ref()
+                } else if get(request, "path").is_some_and(Value::is_null) {
                     None
                 } else {
                     at_path(l, &path)
@@ -900,6 +908,61 @@ impl Engine {
                 let ids = js_values(get(request, "ids"));
                 let roots = try_js!(scope.transform_roots(&ids));
                 indexes(out, layers, &roots);
+            }
+            "pathValues" => {
+                // `pathValues(PM, layer, path, time, prefix)` for `d.paths[index]`.
+                let l = layer!();
+                let index = number(get(request, "index")).unwrap_or(-1.0);
+                let paths = node::array(node::member(node::member(Some(l), "d"), "paths")).unwrap_or(&[]);
+                let Some(path) = (index >= 0.0).then(|| paths.get(index as usize)).flatten() else {
+                    return Ok(Err(JsThrow::type_error("Cannot read properties of undefined (reading 'p')")));
+                };
+                let prefix = match get(request, "prefix").and_then(Value::as_str) {
+                    Some(p) => p.to_owned(),
+                    None => format!("g.{}", node::to_js_string(node::member(Some(path), "id")).to_string_lossy()),
+                };
+                let e = try_js!(scope.path_values(l, path, t, &prefix));
+                out.raw("{");
+                let mut first = true;
+                for (k, v) in &e.values {
+                    if !first {
+                        out.raw(",");
+                    }
+                    first = false;
+                    out.js_str(k);
+                    out.raw(":");
+                    out.js(v);
+                }
+                if !first {
+                    out.raw(",");
+                }
+                out.raw("\"vertices\":[");
+                for (i, v) in e.vertices.iter().enumerate() {
+                    if i > 0 {
+                        out.raw(",");
+                    }
+                    out.raw("{");
+                    for (j, (k, x)) in v.iter().enumerate() {
+                        if j > 0 {
+                            out.raw(",");
+                        }
+                        out.js_str(k);
+                        out.raw(":");
+                        out.num(*x);
+                    }
+                    out.raw("}");
+                }
+                out.raw("]}");
+            }
+            "groupMatrix" => {
+                // `groupMatrix(PM, layer, d.paths[index], time)`.
+                let l = layer!();
+                let index = number(get(request, "index")).unwrap_or(-1.0);
+                let (_, matrices, _) = try_js!(scope.path_geometry(l, t));
+                match (index >= 0.0).then(|| matrices.get(index as usize)).flatten() {
+                    Some(m) => out.nums(m),
+                    None => out.raw("null"),
+                }
             }
             "validMatteSource" => {
                 let l = layer!();

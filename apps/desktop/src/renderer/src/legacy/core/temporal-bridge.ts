@@ -1,5 +1,16 @@
 import { adoptTemporalEase, easeFromUnitHandle, unitHandleFromEase, valueAtTime, refreshAutoBezier, segmentControlPoints, solveCurveParam } from '../../core/anim/temporal-ease';
 const owners = new WeakMap<object,any[]>();
+/* Adopting legacy handles and refreshing auto-bezier keys rewrite live keys
+   while evaluating: a document write without a path. The native engine's
+   write barrier listens (engine-doc/install.ts). */
+let evaluationWrite: (() => void) | null = null;
+export function setEvaluationWriteHook(fn: (() => void) | null): void { evaluationWrite = fn; }
+const enumerable = (k: any, key: string) => Object.prototype.propertyIsEnumerable.call(k, key);
+/* Adoption writes speed and influence where they are missing, refreshes
+   auto-bezier keys, and turns stored eo/ei/hold/bezierMode into
+   non-enumerable views (they leave the JSON). */
+const rewritesKeys = (keys: any[]) => keys.some(k => k && typeof k === 'object' && (k.outEase === undefined || k.inEase === undefined
+  || k.autoBezier === true || enumerable(k, 'eo') || enumerable(k, 'ei') || enumerable(k, 'hold') || enumerable(k, 'bezierMode')));
 type PreparedTrack = {version:number; length:number; first:any; last:any; curves:any[]; times?:Float64Array; values?:Float64Array; evaluatedTime?:number; evaluatedValue?:number; evaluatedSpring?:(time:number,config:any)=>number};
 const prepared = new WeakMap<any[], PreparedTrack>();
 /** Legacy controls are views of native speed/influence, never persisted copies. */
@@ -9,6 +20,7 @@ export function temporalKeys(keys: any[], version?:number): any[] {
   if(version !== undefined) prepared.set(keys,{version,length:keys.length,first:keys[0],last:keys.at(-1),curves:[]});
   if (keys.some(k => typeof k.v !== 'number')) return keys;
   if (!keys.length) return keys;
+  if (evaluationWrite && rewritesKeys(keys)) evaluationWrite();
   if (keys.every(key=>owners.get(key)===keys)) { refreshAutoBezier(keys); return keys; }
   adoptTemporalEase(keys);
   for (const key of keys) {
@@ -66,6 +78,7 @@ export function temporalEvaluate(keys:any[],time:number,version:number,spring:(t
   let state=prepared.get(keys);
   if(!state||state.version!==version||state.length!==keys.length||state.first!==keys[0]||state.last!==keys[keys.length-1]){
     // Evaluation needs native timing data, not a legacy UI accessor on every key.
+    if (evaluationWrite && rewritesKeys(keys)) evaluationWrite();
     adoptTemporalEase(keys);
     state={version,length:keys.length,first:keys[0],last:keys[keys.length-1],curves:[]};prepared.set(keys,state);
   }

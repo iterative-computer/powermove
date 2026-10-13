@@ -1,0 +1,254 @@
+/*
+ * The write barrier, the mirror, and the native evaluator against the legacy
+ * evaluator, with the real pm-wasm module (built by
+ * engine/crates/pm-wasm/scripts/build.mjs into public/engine/).
+ */
+import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it } from 'vitest';
+
+import { canonicalProject, canonicalProjectHash } from '../../../shared/canonical-json';
+import { diffOps } from '../../../shared/patch-ids';
+import { decodePatchOps } from '../../../shared/patch-binary';
+import { makePM } from '../legacy/__tests__/make-pm';
+import { installEngineDoc, type EngineDoc } from './install';
+import { parseMode } from './flags';
+
+const MODULE = fileURLToPath(new URL('../../public/engine/pm_wasm.wasm', import.meta.url));
+const built = existsSync(MODULE);
+if (!built && process.env.PM_WASM_REQUIRED) throw new Error(`pm-wasm is not built (${MODULE}); run node engine/crates/pm-wasm/scripts/build.mjs`);
+let compiled: Promise<WebAssembly.Module> | null = null;
+const loadModule = () => (compiled ??= WebAssembly.compile(readFileSync(MODULE)));
+
+/** A seeded PRNG (mulberry32). */
+function rng(seed: number) {
+  return () => {
+    seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+async function editor(mode = 'audit', lines: string[] = []) {
+  const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing', 'gl/compositor');
+  const doc: EngineDoc = installEngineDoc(PM, { mode: parseMode(mode), loadModule, sink: line => lines.push(line), auditMs: 1e9 });
+  PM.proj = PM.mkProject({ dur: 10 });
+  PM.time = 0;
+  expect(await doc.whenReady).toBe(true);
+  doc.auditor?.stop();
+  return { PM, doc, lines };
+}
+
+/** Random 2D content: parents, groups, keys (bezier, hold, springs), expressions, effects, masks. */
+function populate(PM: any, random: () => number, count = 24) {
+  const types = ['solid', 'shape', 'null', 'image', 'video', 'precomp', 'adjustment', 'shader', 'audio'];
+  const layers: any[] = [];
+  for (let i = 0; i < count; i++) {
+    const type = types[Math.floor(random() * types.length)]!;
+    const layer = PM.mkLayer(type, { name: `L${i}`, from: Math.round(random() * 4 * 30) / 30, dur: 1 + Math.round(random() * 6 * 30) / 30 });
+    for (const key of ['position.x', 'position.y', 'rotation', 'scale.x', 'opacity', 'skew', 'anchor.x']) {
+      const prop = layer.p[key];
+      if (!prop) continue;
+      const roll = random();
+      if (roll < 0.3) {
+        const keys = 2 + Math.floor(random() * 3);
+        prop.kf = [];
+        for (let k = 0; k < keys; k++) prop.kf.push(PM.KF(Math.round((k + random()) * 30) / 30, Math.round(random() * 400 - 200), ['linear', 'power', 'hold', 'easeOut'][Math.floor(random() * 4)]));
+        prop.kf.sort((a: any, b: any) => a.t - b.t);
+      } else if (roll < 0.4) prop.expr = ['value + 10', 'time * 30', 'Math.sin(time) * 50 + value', 'wiggle(2, 10)', 'value *'][Math.floor(random() * 5)];
+      else prop.v = Math.round(random() * 300);
+    }
+    if (type === 'solid' && random() < 0.5) layer.d.w = PM.P(Math.round(random() * 400) + 10, { kf: [PM.KF(0, 10), PM.KF(2, 300)] });
+    if (random() < 0.3) layer.fx = [{ id: PM.uid('F'), type: 'blur', on: true, p: { amount: PM.P(Math.round(random() * 20), random() < 0.5 ? { kf: [PM.KF(0, 0), PM.KF(1, 30)] } : {}) } }];
+    if (random() < 0.2 && layer.masks) layer.masks = [PM.mkMask('rect', PM.proj)];
+    if (random() < 0.2) layer.lock = true;
+    layers.push(layer);
+  }
+  // Parents (no cycles by construction) and a group.
+  layers.forEach((layer, i) => { if (i > 0 && random() < 0.3) layer.parent = layers[Math.floor(random() * i)]!.id; });
+  PM.proj.layers = layers;
+  PM.ProjectIndex.invalidate();
+  PM.touch();
+  const members = layers.filter(l => !l.parent && !l.lock && l.type !== 'audio').slice(0, 3).map(l => l.id);
+  if (members.length > 1) PM.groupLayers(members, 'Group');
+  PM.touch();
+}
+
+function exercise(PM: any, doc: EngineDoc, random: () => number) {
+  const api = doc.api!;
+  const layers: any[] = PM.proj.layers;
+  for (const L of layers) {
+    for (const t of [0, 0.5, 1.25, 2, 3.999, 7, -1]) {
+      api.active(L, t);
+      api.localMatrix(L, t);
+      api.worldMatrix(L, t);
+      api.transformParentMatrix(L, t);
+      api.resolveContent(L, t);
+      for (const key of Object.keys(L.p || {})) {
+        api.ev(L, key, t);
+        api.evP(L, L.p[key], t, key);
+      }
+      for (const { key, prop } of api.allProps(L)) if (prop && typeof prop === 'object') api.evP(L, prop, t, key);
+      api.local3D(L, t);
+      api.world3D(L, t);
+      api.planeMatrix(L, t);
+      api.perspectiveAmount(L, t);
+      api.bounds(L, t);
+      if (L.type === 'group') { api.groupBounds(L, t); api.groupSpan(L); }
+    }
+    api.is3DLayer(L);
+    api.groupAncestors(L);
+    for (const key of ['position.x', 'rotation', 'c.w', 'nope', `${L.fx?.[0]?.id}.amount`]) api.findProp(L, key);
+    for (const other of layers.slice(0, 5)) api.wouldCycle(L, other.id);
+    api.wouldCycle(L, null);
+    if (L.p?.rotation?.kf?.length) api.hasKeyAt(L, L.p.rotation, L.from + L.p.rotation.kf[0].t);
+  }
+  for (let i = 0; i < 40; i++) {
+    const x = random() * PM.proj.w, y = random() * PM.proj.h;
+    api.pick(x, y, random() * 5);
+    api.pick(x, y, random() * 5, { includeLocked: true });
+  }
+  api.transformRoots(layers.map(l => l.id));
+  api.expandGroups(layers.filter(l => l.type === 'group').map(l => l.id));
+}
+
+const mismatches = (doc: EngineDoc) => doc.dual!.stats.samples;
+
+describe.skipIf(!built)('engine-doc with pm-wasm', () => {
+  it('answers every routed query like the legacy evaluator on random projects', async () => {
+    for (const seed of [1, 2, 3, 4, 5]) {
+      const { PM, doc } = await editor();
+      const random = rng(seed);
+      populate(PM, random);
+      exercise(PM, doc, random);
+      expect(mismatches(doc), `seed ${seed}`).toEqual([]);
+      expect(doc.dual!.total().compared).toBeGreaterThan(1000);
+      expect(doc.auditor!.audit()).toBe(true);
+    }
+  });
+
+  it('keeps the mirror equal to the document through edits, undo, redo, and structural changes', async () => {
+    const { PM, doc } = await editor();
+    const random = rng(42);
+    populate(PM, random, 16);
+    const check = (label = '') => {
+      doc.barrier!.flush();
+      const mirror = JSON.parse(doc.wasm!.toJson());
+      expect(diffOps(mirror, JSON.parse(JSON.stringify(canonicalProject(PM.proj)))), label).toEqual([]);
+      expect(doc.wasm!.hash()).toBe(canonicalProjectHash(PM.proj));
+      expect(doc.barrier!.shadowMatches().ok).toBe(true);
+    };
+    check();
+    for (let step = 0; step < 60; step++) {
+      const layers = PM.proj.layers;
+      const L = layers[Math.floor(random() * layers.length)];
+      switch (step % 6) {
+        case 0: PM.Edit.apply({ type: 'set_property', target: L.id, path: 'position.x', value: Math.round(random() * 500) }); break;
+        case 1: PM.Edit.apply({ type: 'set_property', target: L.id, path: 'opacity', value: Math.round(random() * 100), time: Math.round(random() * 60) / 30 }); break;
+        case 2: PM.hist.do('Reorder', () => { const [moved] = layers.splice(0, 1); layers.splice(Math.floor(random() * layers.length), 0, moved); }); break;
+        case 3: PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid', { name: `N${step}` }), Math.floor(random() * layers.length))); break;
+        case 4: PM.hist.undo(); break;
+        case 5: PM.hist.redo(); break;
+      }
+      check(`step ${step}`);
+      // Edits are visible to the very next query (flush before query).
+      const cur = PM.proj.layers[0];
+      const native = doc.api!.worldMatrix(cur, 1), legacy = PM.worldMatrix(cur, 1);
+      native.forEach((v: number, i: number) => expect(Math.abs(v - legacy[i]!)).toBeLessThanOrEqual(1e-9 + 1e-9 * Math.abs(legacy[i]!)));
+    }
+    // Direct writes with a bare touch() (production): a structural diff.
+    PM.proj.layers[0].p['position.y'].v = 1234;
+    PM.touch();
+    check();
+    expect(doc.barrier!.stats.refused).toBe(0);
+    expect(mismatches(doc)).toEqual([]);
+  });
+
+  it('sends structural edits as id-keyed operations and property edits as leaf patches', async () => {
+    const { PM, doc } = await editor();
+    populate(PM, rng(7), 30);
+    doc.barrier!.flush();
+    const batches: any[] = [];
+    doc.subscribe(batch => batches.push(batch));
+    PM.hist.do('Reorder', () => { const layers = PM.proj.layers; layers.push(layers.shift()); });
+    doc.barrier!.flush();
+    PM.Edit.apply({ type: 'set_property', target: PM.proj.layers[0].id, path: 'rotation', value: 33 });
+    doc.barrier!.flush();
+    expect(batches).toHaveLength(2);
+    // An order patch names the 30-odd ids; a whole-array leaf set would carry every layer.
+    const layersJson = JSON.stringify(PM.proj.layers).length;
+    expect(batches[0].body.length).toBeLessThan(layersJson / 4);
+    expect(batches[0].origin).toBe('edit');
+    const ops = decodePatchOps(batches[1].body);
+    expect(ops.some((op: any) => 'op' in op)).toBe(false);
+    expect(ops.some((op: any) => op.path.includes('rotation'))).toBe(true);
+    expect(decodePatchOps(batches[0].body).filter((op: any) => 'op' in op).map((op: any) => op.op)).toEqual(['order']);
+    expect(batches[1].revision).toBe(batches[0].revision + 1);
+  });
+
+  it('resyncs when the project changes and diffs when a version of it replaces it', async () => {
+    const { PM, doc } = await editor();
+    populate(PM, rng(9), 6);
+    doc.barrier!.flush();
+    const resyncs = doc.barrier!.stats.resyncs;
+    PM.replaceProject(JSON.parse(JSON.stringify(PM.proj)));
+    doc.barrier!.flush();
+    expect(doc.barrier!.stats.resyncs).toBe(resyncs);
+    PM.replaceProject(PM.mkProject({ name: 'Other' }));
+    doc.barrier!.flush();
+    expect(doc.barrier!.stats.resyncs).toBe(resyncs + 1);
+    expect(doc.wasm!.hash()).toBe(canonicalProjectHash(PM.proj));
+  });
+
+  it('the consistency check finds writes the barrier missed and resyncs', async () => {
+    const lines: string[] = [];
+    const { PM, doc } = await editor('on', lines);
+    populate(PM, rng(11), 4);
+    expect(doc.check('test')!.ok).toBe(true);
+    // A write with no touch(): invisible until the check.
+    PM.proj.layers[1].name = 'Changed behind the barrier';
+    const result = doc.check('save')!;
+    expect(result.ok).toBe(false);
+    expect(result.missed.some(p => p.endsWith('.name'))).toBe(true);
+    expect(lines.some(line => line.includes('"consistency"'))).toBe(true);
+    expect(doc.check('save')!.ok).toBe(true);
+  });
+
+  it('the auditor reports a write the barrier missed and repairs the mirror', async () => {
+    const lines: string[] = [];
+    const { PM, doc } = await editor('audit', lines);
+    populate(PM, rng(12), 4);
+    expect(doc.auditor!.audit()).toBe(true);
+    PM.proj.layers[0].p.opacity.v = 12;
+    expect(doc.auditor!.audit()).toBe(false);
+    expect(doc.auditor!.stats.missedWrites).toBe(1);
+    expect(lines.some(line => line.includes('"missed-write"'))).toBe(true);
+    expect(doc.auditor!.audit()).toBe(true);
+    expect(doc.api!.ev(PM.proj.layers[0], 'opacity', 0)).toBe(PM.ev(PM.proj.layers[0], 'opacity', 0));
+  });
+
+  it('returns live objects and fills expression errors on live channels', async () => {
+    const { PM, doc } = await editor();
+    const L = PM.mkLayer('solid');
+    L.p.rotation.expr = 'time *';
+    L.fx = [{ id: 'F1', type: 'blur', on: true, p: { amount: PM.P(5) } }];
+    PM.hist.do('Add', () => PM.addLayer(L));
+    const live = PM.proj.layers[0];
+    expect(doc.api!.findProp(live, 'F1.amount')).toBe(live.fx[0].p.amount);
+    const props = doc.api!.allProps(live);
+    expect(props.find((p: any) => p.key === 'rotation').prop).toBe(live.p.rotation);
+    doc.api!.ev(live, 'rotation', 0);
+    expect(doc.api!.errors.get(live.p.rotation)).toBe('Expression syntax is invalid.');
+    PM.hist.do('Fix', () => { live.p.rotation.expr = 'time * 2'; });
+    expect(doc.api!.ev(live, 'rotation', 3)).toBe(6);
+    expect(doc.api!.errors.has(live.p.rotation)).toBe(false);
+    // A detached layer (api.model.mkLayer) is evaluated ad hoc.
+    const detached = PM.mkLayer('null');
+    detached.p['position.x'].v = 77;
+    expect(doc.api!.ev(detached, 'position.x', 0)).toBe(77);
+    expect(doc.api!.allProps(detached).length).toBe(PM.allProps(detached).length);
+    expect(doc.api!.pick(live.p['position.x'].v, live.p['position.y'].v, 0)).toBe(live);
+    expect(mismatches(doc)).toEqual([]);
+  });
+});

@@ -1,0 +1,231 @@
+/*
+ * The write-tracking Proxy for development and test builds (docs/rust-engine.md,
+ * section 6, "Making every write visible", item 1).
+ *
+ * `PM.proj` hands out proxies; every write through them records its path
+ * (relative to `PM.proj`) with the barrier. A write while no known writer is
+ * active (a history transaction, `PM.doc.write`, a document replacement) is a
+ * violation: `throw` mode throws, `report` mode records it and lets it
+ * through. The underlying document always holds raw objects: proxies are
+ * created on read and unwrapped on write, so serialization, cloning, and
+ * identity checks inside the document are unchanged.
+ *
+ * Writes to an object obtained without going through `PM.proj` (a layer
+ * created by a factory, then inserted and edited through the original
+ * reference) are invisible to the Proxy. The shadow-replay auditor is the net
+ * for those.
+ */
+import type { PathPart } from '../../../shared/patch';
+
+export type ViolationMode = 'throw' | 'report';
+
+export interface Violation {
+  path: string;
+  /** The first application frame of the stack, when available. */
+  site: string;
+  count: number;
+}
+
+const PROXIED = Symbol('pm-doc-proxied');
+
+interface Link { parent: object | null; key: PathPart }
+
+export interface Tracker {
+  /** The proxy for a document root. */
+  wrap(root: any): any;
+  /** The raw object behind a proxy (or the value itself). */
+  unwrap<T>(value: T): T;
+  /** Deep-unwraps proxies inside a new value about to enter the document. */
+  unwrapDeep<T>(value: T): T;
+  violations(): Violation[];
+  clearViolations(): void;
+}
+
+const isTrackable = (v: unknown): v is object => {
+  if (!v || typeof v !== 'object') return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === Array.prototype || proto === null;
+};
+
+const firstAppFrame = (stack: string | undefined): string => {
+  const lines = (stack || '').split('\n').slice(1);
+  const frame = lines.find(line => !/engine-doc\/proxy|engine-doc\/barrier|<anonymous>/.test(line)) || lines[0] || '';
+  return frame.trim().replace(/^at\s+/, '').replace(/\?[^:)]*/, '').slice(0, 200);
+};
+
+export function createTracker(options: {
+  /** Called with the path (relative to the root) of every write. */
+  onWrite(path: PathPart[]): void;
+  /** Whether a known writer is active. */
+  inWriter(): boolean;
+  mode: ViolationMode;
+}): Tracker {
+  const proxies = new WeakMap<object, any>();
+  const targets = new WeakMap<object, object>();
+  const links = new WeakMap<object, Link>();
+  const roots = new WeakSet<object>();
+  const violations = new Map<string, Violation>();
+
+  const pathOf = (target: object): PathPart[] | null => {
+    const out: PathPart[] = [];
+    let cur: object | null = target;
+    for (let guard = 0; cur && guard < 4096; guard++) {
+      if (roots.has(cur)) return out.reverse();
+      const link = links.get(cur);
+      if (!link) return null;
+      out.push(link.key);
+      cur = link.parent;
+    }
+    return null;
+  };
+
+  const unwrap = <T>(value: T): T => (value && typeof value === 'object' ? (targets.get(value as any) as any) ?? value : value);
+
+  const unwrapDeep = <T>(value: T): T => {
+    const seen = new Set<object>();
+    const visit = (v: any): any => {
+      if (!v || typeof v !== 'object') return v;
+      const raw = targets.get(v);
+      if (raw) return raw; // raw trees never hold proxies
+      if (seen.has(v) || !isTrackable(v)) return v;
+      seen.add(v);
+      if (Array.isArray(v)) {
+        for (let i = 0; i < v.length; i++) { const u = visit(v[i]); if (u !== v[i]) v[i] = u; }
+      } else {
+        for (const key of Object.keys(v)) {
+          const desc = Object.getOwnPropertyDescriptor(v, key);
+          if (!desc || !('value' in desc)) continue;
+          const u = visit(desc.value);
+          if (u !== desc.value) (v as Record<string, unknown>)[key] = u;
+        }
+      }
+      return v;
+    };
+    return visit(value);
+  };
+
+  const record = (target: object, key: PathPart | null) => {
+    const base = pathOf(target);
+    // Writes to objects that left the document are not document writes.
+    if (!base) return;
+    // An array's elements and length are the array's own structure: record
+    // the array, so the barrier diffs it with id-keyed operations.
+    const path = Array.isArray(target) || key === null ? base : [...base, key];
+    if (!options.inWriter()) {
+      const where = firstAppFrame(new Error().stack);
+      const text = path.map(String).join('.');
+      const id = `${text} @ ${where}`;
+      const known = violations.get(id);
+      if (known) known.count += 1;
+      else violations.set(id, { path: text, site: where, count: 1 });
+      if (options.mode === 'throw') throw new Error(`[engine-doc] document write outside a known writer: ${text} (${where})`);
+    }
+    options.onWrite(path);
+  };
+
+  const keyOf = (target: object, prop: string | symbol): PathPart | null => {
+    if (typeof prop === 'symbol') return null;
+    if (Array.isArray(target)) {
+      const n = Number(prop);
+      return Number.isInteger(n) && n >= 0 && String(n) === prop ? n : prop;
+    }
+    return prop;
+  };
+
+  const SEARCH = new Set(['indexOf', 'lastIndexOf', 'includes']);
+
+  const handler: ProxyHandler<any> = {
+    get(target, prop, receiver) {
+      if (prop === PROXIED) return true;
+      if (Array.isArray(target) && typeof prop === 'string' && SEARCH.has(prop)) {
+        const method = (Array.prototype as any)[prop];
+        return (search: unknown, from?: number) => method.call(target, unwrap(search), from);
+      }
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof prop === 'symbol' || !isTrackable(value)) return value;
+      const key = keyOf(target, prop);
+      if (key === null) return value;
+      // Accessor-backed members are views, not document objects.
+      const desc = Object.getOwnPropertyDescriptor(target, prop);
+      if (!desc || !('value' in desc)) return value;
+      const link = links.get(value);
+      if (!link || link.parent !== target || link.key !== key) links.set(value, { parent: target, key });
+      return proxyOf(value);
+    },
+    set(target, prop, value, receiver) {
+      const raw = unwrapDeep(value);
+      const key = keyOf(target, prop);
+      if (key !== null) record(target, key);
+      return Reflect.set(target, prop, raw, receiver === proxies.get(target) ? target : receiver);
+    },
+    deleteProperty(target, prop) {
+      const key = keyOf(target, prop);
+      if (key !== null && Object.prototype.hasOwnProperty.call(target, prop)) record(target, key);
+      return Reflect.deleteProperty(target, prop);
+    },
+    defineProperty(target, prop, descriptor) {
+      const key = keyOf(target, prop);
+      // Non-enumerable accessors (temporalKeys' legacy views) are not JSON.
+      const visible = descriptor.enumerable !== false || Object.prototype.propertyIsEnumerable.call(target, prop);
+      if (key !== null && visible) record(target, key);
+      if ('value' in descriptor) descriptor = { ...descriptor, value: unwrapDeep(descriptor.value) };
+      return Reflect.defineProperty(target, prop, descriptor);
+    },
+  };
+
+  const proxyOf = (target: object): any => {
+    let proxy = proxies.get(target);
+    if (!proxy) {
+      proxy = new Proxy(target, handler);
+      proxies.set(target, proxy);
+      targets.set(proxy, target);
+    }
+    return proxy;
+  };
+
+  return {
+    wrap(root: any) {
+      if (!isTrackable(root)) return root;
+      const raw = unwrap(root);
+      roots.add(raw);
+      links.delete(raw);
+      return proxyOf(raw);
+    },
+    unwrap,
+    unwrapDeep,
+    violations: () => [...violations.values()].sort((a, b) => b.count - a.count),
+    clearViolations: () => violations.clear(),
+  };
+}
+
+/** Whether a value is a tracking proxy. */
+export const isTrackingProxy = (value: unknown): boolean => !!value && typeof value === 'object' && (value as any)[PROXIED] === true;
+
+/**
+ * Proxies cannot be structured-cloned or posted. In tracking mode the page's
+ * `structuredClone` and `postMessage` unwrap them first (only proxies need
+ * it: the raw document never holds a proxy).
+ */
+export function patchCloning(tracker: Tracker, scope: any = globalThis): () => void {
+  const restores: Array<() => void> = [];
+  const original = scope.structuredClone;
+  if (typeof original === 'function') {
+    scope.structuredClone = (value: unknown, options?: StructuredSerializeOptions) => original.call(scope, tracker.unwrapDeep(shallowCopyIfProxy(tracker, value)), options);
+    restores.push(() => { scope.structuredClone = original; });
+  }
+  for (const ctor of ['MessagePort', 'Worker', 'BroadcastChannel', 'Window', 'DedicatedWorkerGlobalScope']) {
+    const proto = scope[ctor]?.prototype;
+    const post = proto && Object.getOwnPropertyDescriptor(proto, 'postMessage')?.value;
+    if (typeof post !== 'function') continue;
+    proto.postMessage = function (this: unknown, message: unknown, ...rest: unknown[]) {
+      return post.call(this, tracker.unwrapDeep(shallowCopyIfProxy(tracker, message)), ...rest);
+    };
+    restores.push(() => { proto.postMessage = post; });
+  }
+  return () => restores.forEach(fn => fn());
+}
+
+/** A message that is itself a proxy unwraps to its target; containers built by the caller are fixed in place. */
+function shallowCopyIfProxy(tracker: Tracker, value: unknown): unknown {
+  return tracker.unwrap(value);
+}

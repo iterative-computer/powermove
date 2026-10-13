@@ -193,28 +193,42 @@ const EMPTY_AFFINE = [1, 0, 0, 1, 0, 0] as const;
 const EMPTY_MAT3 = [1, 0, 0, 0, 1, 0, 0, 0, 1] as const;
 const EMPTY_MAT4 = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] as const;
 
+/** The native evaluator (engine-doc), when the flag is on; it answers through
+ *  pm-wasm and falls back to the legacy code itself. */
+function native(PM: LegacyPM): import('../engine-doc/native').NativeApi | null {
+  const doc = PM?.EngineDoc;
+  return doc?.enabled && doc.api ? doc.api : null;
+}
+
 function makeAnim(PM: LegacyPM): AnimAPI {
   const emptyErrors = new WeakMap<object, string>();
+  /* With the native evaluator, expression errors land on the live channels
+     pm-wasm evaluated; channels only the renderer evaluated keep theirs. */
+  class ErrorsView extends WeakMap<object, string> {
+    override get(key: object) { const n = native(PM); return n?.errors.has(key) ? n.errors.get(key) : (PM?.expressionErrors ?? emptyErrors).get(key); }
+    override has(key: object) { const n = native(PM); return !!n?.errors.has(key) || !!(PM?.expressionErrors ?? emptyErrors).has(key); }
+  }
+  const errorsView = new ErrorsView();
   return {
-    ev: (layer, key, time) => PM?.ev?.(layer, key, time) ?? null,
-    evP: (layer, prop, time, key) => PM?.evP?.(layer, prop, time, key) ?? null,
-    active: (layer, time) => !!PM?.active?.(layer, time),
-    findProp: (layer, key) => PM?.findProp?.(layer, key) ?? null,
-    allProps: (layer) => PM?.allProps?.(layer) ?? [],
-    hasKeyAt: (layer, prop, time) => PM?.hasKeyAt?.(layer, prop, time) ?? null,
+    ev: (layer, key, time) => { const n = native(PM); return (n ? n.ev(layer, key, time) : PM?.ev?.(layer, key, time)) ?? null; },
+    evP: (layer, prop, time, key) => { const n = native(PM); return (n ? n.evP(layer, prop, time, key) : PM?.evP?.(layer, prop, time, key)) ?? null; },
+    active: (layer, time) => { const n = native(PM); return !!(n ? n.active(layer, time) : PM?.active?.(layer, time)); },
+    findProp: (layer, key) => { const n = native(PM); return (n ? n.findProp(layer, key) : PM?.findProp?.(layer, key)) ?? null; },
+    allProps: (layer) => { const n = native(PM); return (n ? n.allProps(layer) : PM?.allProps?.(layer)) ?? []; },
+    hasKeyAt: (layer, prop, time) => { const n = native(PM); return (n ? n.hasKeyAt(layer, prop, time) : PM?.hasKeyAt?.(layer, prop, time)) ?? null; },
     setKey: (...args) => PM?.setKey?.(...args) ?? null,
     setKeyOn: (...args) => PM?.setKeyOn?.(...args) ?? null,
     removeKey: (prop, key) => PM?.removeKey?.(prop, key),
     applyEaseTo: (keys, name) => PM?.applyEaseTo?.(keys, name),
-    wouldCycle: (layer, parentId) => !!PM?.wouldCycle?.(layer, parentId),
-    resolveContent: (...args) => PM?.resolveContent?.(...args) ?? args[0].d,
-    get expressionErrors() { return PM?.expressionErrors ?? emptyErrors; },
+    wouldCycle: (layer, parentId) => { const n = native(PM); return !!(n ? n.wouldCycle(layer, parentId) : PM?.wouldCycle?.(layer, parentId)); },
+    resolveContent: (...args) => { const n = native(PM); return (n ? n.resolveContent(...args) : PM?.resolveContent?.(...args)) ?? args[0].d; },
+    get expressionErrors() { return native(PM) ? errorsView : PM?.expressionErrors ?? emptyErrors; },
     version: () => Number(PM?.animVersion?.() ?? 0),
     touch: () => PM?.touch?.(),
-    worldMatrix: (layer, time) => PM?.worldMatrix?.(layer, time) ?? [...EMPTY_AFFINE],
-    localMatrix: (layer, time) => PM?.localMatrix?.(layer, time) ?? [...EMPTY_AFFINE],
-    transformParentMatrix: (...args) => PM?.transformParentMatrix?.(...args) ?? [...EMPTY_AFFINE],
-    mul: (left, right) => PM?.mul?.(left, right) ?? [...EMPTY_AFFINE]
+    worldMatrix: (layer, time) => { const n = native(PM); return (n ? n.worldMatrix(layer, time) : PM?.worldMatrix?.(layer, time)) ?? [...EMPTY_AFFINE]; },
+    localMatrix: (layer, time) => { const n = native(PM); return (n ? n.localMatrix(layer, time) : PM?.localMatrix?.(layer, time)) ?? [...EMPTY_AFFINE]; },
+    transformParentMatrix: (...args) => { const n = native(PM); return (n ? n.transformParentMatrix(...args) : PM?.transformParentMatrix?.(...args)) ?? [...EMPTY_AFFINE]; },
+    mul: (left, right) => { const n = native(PM); return (n ? n.mul(left, right) : PM?.mul?.(left, right)) ?? [...EMPTY_AFFINE]; }
   } as AnimAPI;
 }
 
@@ -264,11 +278,11 @@ function makeSelection(PM: LegacyPM): SelectionAPI {
 
 function makeGroups(PM: LegacyPM): GroupsAPI {
   return {
-    ancestors: (...args) => PM?.groupAncestors?.(...args) ?? [],
-    transformRoots: (ids) => PM?.transformRoots?.(ids) ?? [],
-    bounds: (group, time) => PM?.groupBounds?.(group, time) ?? null,
-    span: (group) => PM?.groupSpan?.(group) ?? { from: 0, dur: 0 },
-    expand: (ids) => PM?.expandGroups?.(ids) ?? [...ids],
+    ancestors: (...args) => { const n = native(PM); return (n ? n.groupAncestors(...args) : PM?.groupAncestors?.(...args)) ?? []; },
+    transformRoots: (ids) => { const n = native(PM); return (n ? n.transformRoots(ids) : PM?.transformRoots?.(ids)) ?? []; },
+    bounds: (group, time) => { const n = native(PM); return (n ? n.groupBounds(group, time) : PM?.groupBounds?.(group, time)) ?? null; },
+    span: (group) => { const n = native(PM); return (n ? n.groupSpan(group) : PM?.groupSpan?.(group)) ?? { from: 0, dur: 0 }; },
+    expand: (ids) => { const n = native(PM); return (n ? n.expandGroups(ids) : PM?.expandGroups?.(ids)) ?? [...ids]; },
     normalizeStack: () => PM?.normalizeStack?.(),
     moveToGroup: (ids, target) => PM?.moveToGroup?.(ids, target) ?? { ids: [...ids], group: target }
   };
@@ -348,18 +362,26 @@ function makeMedia(PM: LegacyPM): MediaAPI {
 }
 
 function makeRender(PM: LegacyPM): RenderAPI {
+  /* Raster pixels stay the renderer's; with the native evaluator a text
+     layer's placement metrics come from pm-wasm (compared in dual mode). */
+  const raster = (...args: Parameters<RenderAPI['raster']>) => {
+    const surface = PM?.raster?.(...args) ?? null;
+    const n = native(PM);
+    if (!n || !surface || (args[1] ?? 1) !== 1) return surface;
+    return n.rasterSurface(surface, args[0], args[2] ?? PM?.time ?? 0);
+  };
   return {
     gl: {
-      bounds: (layer, time) => PM?.GL?.bounds?.(layer, time) ?? null,
-      pick: (x, y, time, options) => PM?.GL?.pick?.(x, y, time, options) ?? null,
+      bounds: (layer, time) => { const n = native(PM); return (n ? n.bounds(layer, time) : PM?.GL?.bounds?.(layer, time)) ?? null; },
+      pick: (x, y, time, options) => { const n = native(PM); return (n ? n.pick(x, y, time, options) : PM?.GL?.pick?.(x, y, time, options)) ?? null; },
       init: (...args) => !!PM?.GL?.init?.(...args),
       resize: (...args) => !!PM?.GL?.resize?.(...args),
       compileError: (key) => PM?.GL?.compileError?.(key) ?? null,
       get previewViewport() { return PM?.GL?.previewViewport ?? null; },
       get context() { return PM?.GL?.gl ?? null; }
     },
-    raster: (...args) => PM?.raster?.(...args) ?? null,
-    textLayout: (layer, time) => PM?.textCaretLayout?.(layer, time ?? PM?.time ?? 0) ?? null,
+    raster,
+    textLayout: (layer, time) => { const n = native(PM); const t = time ?? PM?.time ?? 0; return (n ? n.textLayout(layer, t) : PM?.textCaretLayout?.(layer, t)) ?? null; },
     renderFrameTo: (...args) => PM?.renderFrameTo?.(...args),
     snapshot: (...args) => PM?.Export?.snapshot?.(...args) ?? ''
   } as RenderAPI;
@@ -478,15 +500,15 @@ function makeSpace3D(PM: LegacyPM): Space3DAPI {
   };
   return {
     CHANNELS_3D,
-    local3D: (layer, time) => attempt(() => local3D(PM, layer, time), [...EMPTY_MAT4]),
-    parent3D: (...args) => attempt(() => parent3D(PM, ...args), [...EMPTY_MAT4]),
-    world3D: (...args) => attempt(() => world3D(PM, ...args), [...EMPTY_MAT4]),
-    is3DLayer: (layer) => attempt(() => is3DLayer(PM, layer), false),
-    perspectiveAmount: (layer, time) => attempt(() => perspectiveAmount(PM, layer, time), 0.001),
-    planeMatrix: (...args) => attempt(() => planeMatrix(PM, ...args), [...EMPTY_MAT3]),
-    projectPoint,
-    inversePlane,
-    planeContains: (layer, time, x, y, bounds) => attempt(() => planeContains(PM, layer, time, x, y, bounds), false)
+    local3D: (layer, time) => attempt(() => (native(PM)?.local3D(layer, time) as any) ?? local3D(PM, layer, time), [...EMPTY_MAT4]),
+    parent3D: (...args) => attempt(() => (native(PM)?.parent3D(...args) as any) ?? parent3D(PM, ...args), [...EMPTY_MAT4]),
+    world3D: (...args) => attempt(() => (native(PM)?.world3D(...args) as any) ?? world3D(PM, ...args), [...EMPTY_MAT4]),
+    is3DLayer: (layer) => attempt(() => { const n = native(PM); return n ? n.is3DLayer(layer) : is3DLayer(PM, layer); }, false),
+    perspectiveAmount: (layer, time) => attempt(() => native(PM)?.perspectiveAmount(layer, time) ?? perspectiveAmount(PM, layer, time), 0.001),
+    planeMatrix: (...args) => attempt(() => (native(PM)?.planeMatrix(...args) as any) ?? planeMatrix(PM, ...args), [...EMPTY_MAT3]),
+    projectPoint: (matrix, point) => native(PM)?.projectPoint(matrix, point) ?? projectPoint(matrix, point),
+    inversePlane: (matrix) => { const n = native(PM); return n ? n.inversePlane(matrix) as any : inversePlane(matrix); },
+    planeContains: (layer, time, x, y, bounds) => attempt(() => { const n = native(PM); return n ? n.planeContains(layer, time, x, y, bounds) : planeContains(PM, layer, time, x, y, bounds); }, false)
   } as Space3DAPI;
 }
 
