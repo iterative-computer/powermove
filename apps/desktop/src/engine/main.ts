@@ -9,6 +9,7 @@
  * to a live tab and this engine never sees them.
  */
 import { existsSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { Window } from 'happy-dom';
 import { WebSocket } from 'ws';
@@ -66,6 +67,22 @@ export function pmWasmPath(): string {
   return process.env['POWERMOVE_PM_WASM'] ?? fileURLToPath(new URL('../renderer/engine/pm_wasm.wasm', import.meta.url));
 }
 
+/** The native font registry (pm-bridge) in this process, behind
+ *  POWERMOVE_ENGINE_FONTS=1 as in main (docs/engine/text.md): text layout in
+ *  pm-wasm then resolves fonts synchronously. */
+export function headlessFonts(log: (line: string) => void): import('../renderer/src/engine-doc/fonts').FontProvider | null {
+  if (process.env['POWERMOVE_ENGINE_FONTS'] !== '1') return null;
+  const addon = process.env['POWERMOVE_PM_BRIDGE'] ?? fileURLToPath(new URL('../../../../engine/target/pm-bridge/pm_bridge.node', import.meta.url));
+  try {
+    const { FontRegistry } = createRequire(import.meta.url)(addon) as { FontRegistry: new () => { answer(q: string): string; subset(blob: string, index: number): Uint8Array } };
+    const registry = new FontRegistry();
+    return { sync: true, answer: (queries) => registry.answer(queries), subset: (blob, index) => registry.subset(blob, index) };
+  } catch (error) {
+    log(`[engine] font registry unavailable (${addon}): ${(error as Error).message}`);
+    return null;
+  }
+}
+
 /** Installs the document mirror and native evaluator for the headless host. */
 export async function installHeadlessEngineDoc(PM: Record<string, any>, log: (line: string) => void): Promise<{ ready: boolean; mode: string }> {
   const { installEngineDoc } = await import('../renderer/src/engine-doc/install');
@@ -78,6 +95,7 @@ export async function installHeadlessEngineDoc(PM: Record<string, any>, log: (li
     loadModule: () => WebAssembly.compile(readFileSync(path)),
     sink: (line) => log(`[engine] ${line}`),
     headless: true,
+    fonts: headlessFonts(log),
   });
   const ready = await doc.whenReady;
   log(`[engine] document mirror: ${ready ? `pm-wasm (${mode.name})` : 'legacy evaluator'}`);

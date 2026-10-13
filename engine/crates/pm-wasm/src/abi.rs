@@ -386,6 +386,12 @@ pub extern "C" fn pm_fonts_report() -> usize {
     })
 }
 
+/// Declares whether the faces added carry outlines (1) or are subsets (0).
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_fonts_outlines(outlines: u32) {
+    with(|s| s.engine.set_font_outlines(outlines != 0))
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn pm_fonts_clear() {
     with(|s| s.engine.clear_fonts())

@@ -117,6 +117,9 @@ impl EvalHooks for LabelsRef {
 
 /// Text measurement over the registry answers and font subsets main served.
 pub struct Fonts {
+    /// Whether the added faces carry outlines (whole fonts rather than
+    /// metrics-and-shaping subsets), so ink can be answered.
+    outlines: bool,
     answers: Answers,
     fonts: Vec<(String, u32, FontBytes)>,
     measure: CompatMeasure<ReplayResolver>,
@@ -126,6 +129,7 @@ impl Fonts {
     fn new() -> Fonts {
         let answers = Answers::default();
         Fonts {
+            outlines: false,
             measure: CompatMeasure::new(ReplayResolver::new(&answers)),
             answers,
             fonts: Vec::new(),
@@ -161,6 +165,37 @@ enum Unanswered {
     Host,
     /// Text layout met fonts the mirror does not have yet.
     Fonts,
+    /// The answer depends on glyph ink, and the faces are metrics-and-shaping
+    /// subsets without outlines (docs/engine/pm-eval-layers.md, allowed
+    /// difference 6).
+    Ink,
+}
+
+/// Measures through [`CompatMeasure`] and notes whether anything asked for
+/// glyph ink (`measure_lines`); widths, carets, and glyph positions need no
+/// outlines.
+struct InkProbe<'m> {
+    inner: &'m mut CompatMeasure<ReplayResolver>,
+    ink: bool,
+}
+
+impl pm_eval::text_geom::TextMeasure for InkProbe<'_> {
+    fn measure_lines(
+        &mut self,
+        d: &pm_text::compat::TextContent,
+    ) -> Vec<pm_eval::text_geom::MeasuredLine> {
+        self.ink = true;
+        self.inner.measure_lines(d)
+    }
+    fn plain_width(&mut self, d: &pm_text::compat::TextContent, text: &str) -> f64 {
+        self.inner.plain_width(d, text)
+    }
+    fn glyph_layout(&mut self, d: &pm_text::compat::TextContent) -> pm_text::compat::GlyphLayout {
+        self.inner.glyph_layout(d)
+    }
+    fn spaced_width(&mut self, d: &pm_text::compat::TextContent, text: &str) -> f64 {
+        self.inner.spaced_width(d, text)
+    }
 }
 
 type QueryResult = Result<Result<(), JsThrow>, Unanswered>;
@@ -508,7 +543,15 @@ impl Engine {
 
     /// Drops every answer and face (after a registry generation change).
     pub fn clear_fonts(&mut self) {
+        let outlines = self.fonts.outlines;
         self.fonts = Fonts::new();
+        self.fonts.outlines = outlines;
+    }
+
+    /// Declares that the faces added are whole fonts with outlines, so
+    /// ink-dependent answers (text bounds, raster placement) are native.
+    pub fn set_font_outlines(&mut self, outlines: bool) {
+        self.fonts.outlines = outlines;
     }
 
     // ── queries ───────────────────────────────────────────────────────────
@@ -574,6 +617,10 @@ impl Engine {
             Err(Unanswered::Fonts) => {
                 self.stats.unanswered += 1;
                 out.raw("{\"fonts\":true}");
+            }
+            Err(Unanswered::Ink) => {
+                self.stats.unanswered += 1;
+                out.raw("{\"ink\":true}");
             }
         }
         out
@@ -1007,12 +1054,21 @@ impl Engine {
             "bounds" | "groupBounds" | "pick" | "textLayout" | "textRaster" => {
                 fonts.clear_reports();
                 let mut host = RefuseHost;
+                let outlines = fonts.outlines;
+                let mut probe = InkProbe {
+                    inner: &mut fonts.measure,
+                    ink: false,
+                };
                 match op {
                     "bounds" => {
                         let l = layer!();
-                        let b = try_js!(scope.bounds(l, t, &mut fonts.measure, &mut host));
+                        let b = try_js!(scope.bounds(l, t, &mut probe, &mut host));
+                        let ink = probe.ink;
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
+                        }
+                        if ink && !outlines {
+                            return Err(Unanswered::Ink);
                         }
                         match b {
                             Some(b) => {
@@ -1025,9 +1081,13 @@ impl Engine {
                     }
                     "groupBounds" => {
                         let l = layer!();
-                        let b = try_js!(scope.group_bounds(l, t, &mut fonts.measure, &mut host));
+                        let b = try_js!(scope.group_bounds(l, t, &mut probe, &mut host));
+                        let ink = probe.ink;
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
+                        }
+                        if ink && !outlines {
+                            return Err(Unanswered::Ink);
                         }
                         match b {
                             Some(b) => {
@@ -1048,10 +1108,13 @@ impl Engine {
                         };
                         let x = number(get(request, "x")).unwrap_or(f64::NAN);
                         let y = number(get(request, "y")).unwrap_or(f64::NAN);
-                        let hit =
-                            try_js!(scope.pick(x, y, t, &options, &mut fonts.measure, &mut host));
+                        let hit = try_js!(scope.pick(x, y, t, &options, &mut probe, &mut host));
+                        let ink = probe.ink;
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
+                        }
+                        if ink && !outlines {
+                            return Err(Unanswered::Ink);
                         }
                         match hit {
                             Some(l) => indexes(out, layers, &[l]),
@@ -1061,7 +1124,7 @@ impl Engine {
                     "textLayout" => {
                         let l = layer!();
                         let d = try_js!(scope.resolved_text_content(l, t));
-                        let caret = fonts.measure.compat().caret_layout(&text_content(&d));
+                        let caret = probe.inner.compat().caret_layout(&text_content(&d));
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
                         }
@@ -1072,9 +1135,13 @@ impl Engine {
                     }
                     _ => {
                         let l = layer!();
-                        let r = try_js!(scope.text_raster(l, t, &mut fonts.measure));
+                        let r = try_js!(scope.text_raster(l, t, &mut probe));
+                        let ink = probe.ink;
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
+                        }
+                        if ink && !outlines {
+                            return Err(Unanswered::Ink);
                         }
                         let mut first = true;
                         out.raw("{");

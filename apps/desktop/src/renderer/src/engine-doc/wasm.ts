@@ -40,6 +40,7 @@ export interface PmWasmExports {
   pm_fonts_add(len: number): number;
   pm_fonts_report(): number;
   pm_fonts_clear(): void;
+  pm_fonts_outlines(outlines: number): void;
   pm_heap_live(): number;
   pm_heap_peak(): number;
   pm_heap_reset_peak(): void;

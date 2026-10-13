@@ -22,6 +22,7 @@ import { lookup, type DocumentBarrier } from './barrier';
 import type { PmWasm } from './wasm';
 import type { DualAnswers } from './dual';
 import { layer3DRole } from '../core/scene3d/layers';
+import type { FontLoader } from './fonts';
 
 type Legacy = Record<string, any>;
 
@@ -106,6 +107,8 @@ export class NativeApi {
   /** `expressionErrors` for channels evaluated natively (live objects). */
   readonly errors = new WeakMap<object, string>();
   private definitions = new Map<string, string>();
+  /** Where text layout gets registry answers and subsets (null: none). */
+  fonts: FontLoader | null = null;
   /** Called when a dual answer differed because the mirror missed a write. */
   onStale: ((op: string, paths: string[]) => void) | null = null;
 
@@ -191,6 +194,13 @@ export class NativeApi {
     if (!wasm) return { fallback: 'unavailable' };
     let reply: any;
     try { reply = wasm.query({ op, ...request }); } catch (error) { console.warn('[engine-doc] pm-wasm query failed', error); return { fallback: 'trap' }; }
+    if (reply?.fonts && this.fonts) {
+      // Text layout met fonts the mirror lacks: load them (at once from a
+      // synchronous registry, in the background otherwise) and ask again.
+      try {
+        reply = this.fonts.resolve(wasm, () => wasm.query({ op, ...request }), (r: any) => !!r?.fonts) ?? reply;
+      } catch (error) { console.warn('[engine-doc] pm-wasm query failed', error); return { fallback: 'trap' }; }
+    }
     if ('ok' in reply) return { value: map ? map(reply.ok) : reply.ok };
     if (reply.throw) {
       const error = new (reply.throw.kind === 'TypeError' ? TypeError : reply.throw.kind === 'RangeError' ? RangeError : Error)(reply.throw.message);
@@ -198,6 +208,7 @@ export class NativeApi {
     }
     if (reply.host) return { fallback: 'host' };
     if (reply.fonts) return { fallback: 'fonts' };
+    if (reply.ink) return { fallback: 'ink' };
     return { fallback: `error:${reply.error ?? 'unknown'}` };
   }
 

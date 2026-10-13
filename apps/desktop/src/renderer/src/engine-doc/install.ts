@@ -29,6 +29,7 @@ import { NativeApi } from './native';
 import { createTracker, patchCloning, type Tracker } from './proxy';
 import { hostSink, Reporter, type Sink } from './report';
 import { compileFrom, instantiate, MODULE_PATH, type PmWasm } from './wasm';
+import { FontLoader, type FontProvider } from './fonts';
 import { setEvaluationWriteHook } from '../legacy/core/temporal-bridge';
 import { inversePlane, is3DLayer, local3D, parent3D, perspectiveAmount, planeContains, planeMatrix, projectPoint, world3D } from '../legacy/core/space-3d';
 import { groupMatrix, pathValues } from '../legacy/core/vector-paths';
@@ -47,6 +48,9 @@ export interface EngineDocOptions {
   /** The headless document host: no renderer, so 2D bounds and picks
    *  (`PM.GL`) come from pm-wasm alone. */
   headless?: boolean;
+  /** Registry answers and subsets for text layout (engine-doc/fonts.ts). The
+   *  editor uses `window.powermove.engineFonts` when the preload exposes it. */
+  fonts?: FontProvider | null;
 }
 
 export interface DocApi {
@@ -184,6 +188,8 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       pick: (x: number, y: number, T: number, o?: any) => api.pick(x, y, T, o) };
   }
   const api = new NativeApi(PM, () => (state.ready ? wasm : null), () => barrier, unwrap, legacy, dual);
+  const fontProvider = options.fonts !== undefined ? options.fonts : editorFonts();
+  if (fontProvider) api.fonts = new FontLoader(fontProvider);
   api.onStale = (op, paths) => {
     reporter.emit({ type: 'audit', kind: 'stale-answer', revision: barrier?.revision ?? -1, paths: paths.slice(0, 20), detail: op });
     if (auditor) { auditor.stats.missedWrites += 1; auditor.stats.failures += 1; }
@@ -284,6 +290,19 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   }
 
   return state;
+}
+
+/** The editor's font channel to main, when the preload exposes one
+ *  (`engine-fonts:answer` and `engine-fonts:subset`, docs/engine/text.md). */
+function editorFonts(): FontProvider | null {
+  const bridge = (globalThis as any).powermove?.engineFonts;
+  if (!bridge || typeof bridge.answer !== 'function' || typeof bridge.subset !== 'function') return null;
+  const unwrapResult = (r: any) => { if (r && r.ok === false) throw new Error(r.error); return r && 'value' in r ? r.value : r; };
+  return {
+    sync: false,
+    answer: async (queries: string) => unwrapResult(await bridge.answer(queries)),
+    subset: async (blob: string, index: number) => new Uint8Array(unwrapResult(await bridge.subset(blob, index))),
+  };
 }
 
 function safeMode(): EngineDocMode {
