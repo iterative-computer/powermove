@@ -59,7 +59,8 @@ impl FontRegistry {
     /// Fails off the main thread.
     #[napi(constructor)]
     pub fn new() -> Result<Self> {
-        let inner = CoreTextRegistry::try_new().ok_or_else(|| err("FontRegistry must be created on the main thread"))?;
+        let inner = CoreTextRegistry::try_new()
+            .ok_or_else(|| err("FontRegistry must be created on the main thread"))?;
         Ok(FontRegistry { inner })
     }
 
@@ -80,7 +81,15 @@ impl FontRegistry {
     pub fn family_info(&mut self, family: String) -> Option<FontFamilyInfo> {
         self.inner.family_info(&family).map(|i| FontFamilyInfo {
             name: i.name,
-            styles: i.styles.into_iter().map(|s| FontStyleInfo { name: s.name, weight: s.weight as f64, italic: s.italic }).collect(),
+            styles: i
+                .styles
+                .into_iter()
+                .map(|s| FontStyleInfo {
+                    name: s.name,
+                    weight: s.weight as f64,
+                    italic: s.italic,
+                })
+                .collect(),
             variable: i.variable,
             project: i.project,
         })
@@ -102,10 +111,27 @@ impl FontRegistry {
     /// Registers a project font face. Throws for data that is not a font
     /// (after the web font sanitizer) and for invalid descriptors.
     #[napi]
-    pub fn add_project_font(&mut self, family: String, data: Uint8Array, descriptors: Option<FontFaceDescriptors>, index: Option<u32>) -> Result<()> {
-        let d = descriptors.unwrap_or(FontFaceDescriptors { weight: None, style: None, stretch: None });
-        let descriptors = ProjectDescriptors::from_css(d.weight.as_deref().unwrap_or(""), d.style.as_deref().unwrap_or(""), d.stretch.as_deref().unwrap_or("")).map_err(err)?;
-        self.inner.add_project_font(&family, &data, index.unwrap_or(0), descriptors).map_err(err)
+    pub fn add_project_font(
+        &mut self,
+        family: String,
+        data: Uint8Array,
+        descriptors: Option<FontFaceDescriptors>,
+        index: Option<u32>,
+    ) -> Result<()> {
+        let d = descriptors.unwrap_or(FontFaceDescriptors {
+            weight: None,
+            style: None,
+            stretch: None,
+        });
+        let descriptors = ProjectDescriptors::from_css(
+            d.weight.as_deref().unwrap_or(""),
+            d.style.as_deref().unwrap_or(""),
+            d.stretch.as_deref().unwrap_or(""),
+        )
+        .map_err(err)?;
+        self.inner
+            .add_project_font(&family, &data, index.unwrap_or(0), descriptors)
+            .map_err(err)
     }
 
     /// Sets `family`'s variable-font source (`PM.fontSource`) without
