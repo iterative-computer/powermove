@@ -7,4 +7,14 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Test-only sinks (in-memory and raw-file encoder-input sinks) for other crates' tests.
+test-sinks = []
+
 [dependencies]
+pm-time = { path = "../pm-time" }
+thiserror.workspace = true
+libm.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true

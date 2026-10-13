@@ -289,6 +289,12 @@ version = "0.1.0"
 [[package]]
 name = "pm-export"
 version = "0.1.0"
+dependencies = [
+ "libm",
+ "pm-time",
+ "sha2",
+ "thiserror",
+]
 
 [[package]]
 name = "pm-geom3d"

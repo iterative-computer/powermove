@@ -1,0 +1,657 @@
+//! Encoder input on the CPU (section 17, "Encoder input"; section 9).
+//!
+//! Converts premultiplied RGBA working frames (Rec.709 primaries; E-encoded in
+//! Standard, linear with linear blending on) into the Y′CbCr buffers VideoToolbox
+//! encodes: `y416` for ProRes 4444, `v216` for ProRes 422, `420v` for H.264
+//! (amendment 6). This is the reference the GPU encoder-input pass is checked against
+//! and the fallback when no GPU pass runs. It follows S2's prototype pass
+//! (`engine/spikes/s2-precision/src/pipeline.wgsl`) exactly, in f64:
+//!
+//! * alpha: opaque outputs take premultiplied values (compositing over black);
+//!   straight outputs unpremultiply, guarded below α = 1/4096; premultiplied outputs
+//!   premultiply in the encoded domain;
+//! * Rec.709 matrix (Kr 0.2126, Kb 0.0722);
+//! * normalization: 16-bit Y′ = 4096 + 56064·Y′, C = 32768 + 57344·C (section 13);
+//!   8-bit Y′ = 16 + 219·Y′, C = 128 + 224·C;
+//! * chroma: 4:2:2 by point decimation at the co-sited (even) column; 4:2:0 with
+//!   siting type 0 by point decimation horizontally and a two-tap average of rows
+//!   2y and 2y + 1 vertically, on Y′CbCr;
+//! * dither (when on): `dither_offset` at the codec's LSB — 16 units of `y416`
+//!   (12-bit), 64 units of `v216` (10-bit), one 8-bit code; never on alpha;
+//! * rounding half to even (WGSL `round`), then clipping to the codable range:
+//!   12-bit 16..4079 (`y416` 256..65264), 10-bit 4..1019 (`v216` 256..65216), 8-bit
+//!   1..254. Alpha is full range.
+
+use crate::Error;
+use crate::dither::dither_offset;
+use crate::settings::{AlphaOutput, InputFormat, WorkingEncoding};
+
+pub const KR: f64 = 0.2126;
+pub const KB: f64 = 0.0722;
+pub const KG: f64 = 1.0 - KR - KB;
+
+/// Below this alpha, unpremultiplied color is zero (section 9, "Alpha").
+pub const ALPHA_GUARD: f64 = 1.0 / 4096.0;
+
+/// A premultiplied RGBA working frame, row-major, tightly packed.
+#[derive(Clone, Copy, Debug)]
+pub struct WorkingFrame<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: &'a [f32],
+}
+
+/// One plane of encoder input, tightly packed rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlaneData {
+    U16(Vec<u16>),
+    U8(Vec<u8>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Plane {
+    pub data: PlaneData,
+    /// Samples (u16 or u8 units) per row.
+    pub row_samples: usize,
+    pub rows: usize,
+}
+
+impl Plane {
+    pub fn u16(&self) -> Option<&[u16]> {
+        match &self.data {
+            PlaneData::U16(v) => Some(v),
+            PlaneData::U8(_) => None,
+        }
+    }
+
+    pub fn u8(&self) -> Option<&[u8]> {
+        match &self.data {
+            PlaneData::U8(v) => Some(v),
+            PlaneData::U16(_) => None,
+        }
+    }
+
+    /// Bytes per tightly packed row.
+    pub fn row_bytes(&self) -> usize {
+        match self.data {
+            PlaneData::U16(_) => self.row_samples * 2,
+            PlaneData::U8(_) => self.row_samples,
+        }
+    }
+}
+
+/// An encoder-input frame: what is copied into the CVPixelBuffer VideoToolbox encodes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EncoderInput {
+    pub format: InputFormat,
+    pub width: u32,
+    pub height: u32,
+    pub planes: Vec<Plane>,
+}
+
+/// The plane geometry of `format` at `width` × `height`: (samples per row, rows, 16-bit).
+pub fn plane_layout(format: InputFormat, width: u32, height: u32) -> Vec<(usize, usize, bool)> {
+    let (w, h) = (width as usize, height as usize);
+    match format {
+        InputFormat::Y416 => vec![(w * 4, h, true)],
+        InputFormat::V216 => vec![(w * 2, h, true)],
+        InputFormat::V420 => vec![(w, h, false), (w, h / 2, false)],
+    }
+}
+
+impl EncoderInput {
+    /// Checks the planes match the format's layout.
+    pub fn validate(&self) -> Result<(), Error> {
+        let layout = plane_layout(self.format, self.width, self.height);
+        let ok = layout.len() == self.planes.len()
+            && layout
+                .iter()
+                .zip(&self.planes)
+                .all(|(&(samples, rows, wide), p)| {
+                    p.row_samples == samples
+                        && p.rows == rows
+                        && match &p.data {
+                            PlaneData::U16(v) => wide && v.len() == samples * rows,
+                            PlaneData::U8(v) => !wide && v.len() == samples * rows,
+                        }
+                });
+        if ok {
+            Ok(())
+        } else {
+            Err(Error::InvalidFrame(format!(
+                "encoder input does not match '{}' at {}×{}",
+                String::from_utf8_lossy(&self.format.fourcc()),
+                self.width,
+                self.height
+            )))
+        }
+    }
+}
+
+/// How working values become encoder input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConvertParams {
+    pub working: WorkingEncoding,
+    pub alpha: AlphaOutput,
+    pub dither: bool,
+    /// Frame index: the dither seed.
+    pub frame: u32,
+}
+
+/// The display encoding E: the sRGB piecewise curve extended to all reals.
+pub fn e_encode(x: f64) -> f64 {
+    let a = x.abs();
+    let v = if a <= 0.003_130_8 {
+        12.92 * a
+    } else {
+        1.055 * a.powf(1.0 / 2.4) - 0.055
+    };
+    v.copysign(x)
+}
+
+/// E⁻¹.
+pub fn e_decode(x: f64) -> f64 {
+    let a = x.abs();
+    let v = if a <= 0.040_45 {
+        a / 12.92
+    } else {
+        ((a + 0.055) / 1.055).powf(2.4)
+    };
+    v.copysign(x)
+}
+
+pub fn rgb_to_ycbcr(c: [f64; 3]) -> [f64; 3] {
+    let y = KR * c[0] + KG * c[1] + KB * c[2];
+    [
+        y,
+        (c[2] - y) / (2.0 * (1.0 - KB)),
+        (c[0] - y) / (2.0 * (1.0 - KR)),
+    ]
+}
+
+pub fn ycbcr_to_rgb(y: f64, cb: f64, cr: f64) -> [f64; 3] {
+    let r = y + 2.0 * (1.0 - KR) * cr;
+    let b = y + 2.0 * (1.0 - KB) * cb;
+    [r, (y - KR * r - KB * b) / KG, b]
+}
+
+/// Encoded (stream-domain) RGB and alpha of a premultiplied working pixel.
+pub fn output_rgba(w: [f32; 4], working: WorkingEncoding, alpha: AlphaOutput) -> ([f64; 3], f64) {
+    let c = [w[0] as f64, w[1] as f64, w[2] as f64];
+    let a = (w[3] as f64).clamp(0.0, 1.0);
+    let encode = |c: [f64; 3]| match working {
+        WorkingEncoding::Standard => c,
+        WorkingEncoding::Linear => [e_encode(c[0]), e_encode(c[1]), e_encode(c[2])],
+    };
+    let straight = || {
+        if a < ALPHA_GUARD {
+            [0.0; 3]
+        } else {
+            [c[0] / a, c[1] / a, c[2] / a]
+        }
+    };
+    match alpha {
+        AlphaOutput::None => (encode(c), 1.0),
+        AlphaOutput::Straight => (encode(straight()), a),
+        AlphaOutput::Premultiplied => match working {
+            // Identity output transform: premultiplied working values are written as they are.
+            WorkingEncoding::Standard => (c, a),
+            WorkingEncoding::Linear => {
+                let e = encode(straight());
+                ([e[0] * a, e[1] * a, e[2] * a], a)
+            }
+        },
+    }
+}
+
+fn code(v: f64, lo: f64, hi: f64) -> f64 {
+    v.round_ties_even().clamp(lo, hi)
+}
+
+fn pixel(frame: &WorkingFrame, x: usize, y: usize) -> [f32; 4] {
+    let i = (y * frame.width as usize + x) * 4;
+    [
+        frame.rgba[i],
+        frame.rgba[i + 1],
+        frame.rgba[i + 2],
+        frame.rgba[i + 3],
+    ]
+}
+
+/// Converts one working frame to `format`.
+pub fn convert(
+    frame: &WorkingFrame,
+    format: InputFormat,
+    params: &ConvertParams,
+) -> Result<EncoderInput, Error> {
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    if w == 0 || h == 0 || frame.rgba.len() != w * h * 4 {
+        return Err(Error::InvalidFrame(format!(
+            "working frame {}×{} has {} floats",
+            w,
+            h,
+            frame.rgba.len()
+        )));
+    }
+    if format != InputFormat::Y416 && w % 2 != 0 || format == InputFormat::V420 && h % 2 != 0 {
+        return Err(Error::InvalidFrame(
+            "subsampled encoder input needs even dimensions".into(),
+        ));
+    }
+    let d = |x: usize, y: usize, ch: u32| -> f64 {
+        if params.dither {
+            dither_offset(params.frame, x as u32, y as u32, ch)
+        } else {
+            0.0
+        }
+    };
+    let ycc = |x: usize, y: usize| -> ([f64; 3], f64) {
+        let (c, a) = output_rgba(pixel(frame, x, y), params.working, params.alpha);
+        (rgb_to_ycbcr(c), a)
+    };
+    let planes = match format {
+        InputFormat::Y416 => {
+            let mut out = Vec::with_capacity(w * h * 4);
+            for y in 0..h {
+                for x in 0..w {
+                    let (v, a) = ycc(x, y);
+                    out.push(code(a * 65535.0, 0.0, 65535.0) as u16);
+                    out.push(
+                        code(v[0] * 56064.0 + 4096.0 + 16.0 * d(x, y, 0), 256.0, 65264.0) as u16,
+                    );
+                    out.push(
+                        code(v[1] * 57344.0 + 32768.0 + 16.0 * d(x, y, 1), 256.0, 65264.0) as u16,
+                    );
+                    out.push(
+                        code(v[2] * 57344.0 + 32768.0 + 16.0 * d(x, y, 2), 256.0, 65264.0) as u16,
+                    );
+                }
+            }
+            vec![Plane {
+                data: PlaneData::U16(out),
+                row_samples: w * 4,
+                rows: h,
+            }]
+        }
+        InputFormat::V216 => {
+            let mut out = Vec::with_capacity(w * h * 2);
+            for y in 0..h {
+                for t in 0..w / 2 {
+                    let (x0, x1) = (2 * t, 2 * t + 1);
+                    let (a, _) = ycc(x0, y);
+                    let (b, _) = ycc(x1, y);
+                    out.push(
+                        code(a[1] * 57344.0 + 32768.0 + 64.0 * d(t, y, 1), 256.0, 65216.0) as u16,
+                    );
+                    out.push(
+                        code(a[0] * 56064.0 + 4096.0 + 64.0 * d(x0, y, 0), 256.0, 65216.0) as u16,
+                    );
+                    out.push(
+                        code(a[2] * 57344.0 + 32768.0 + 64.0 * d(t, y, 2), 256.0, 65216.0) as u16,
+                    );
+                    out.push(
+                        code(b[0] * 56064.0 + 4096.0 + 64.0 * d(x1, y, 0), 256.0, 65216.0) as u16,
+                    );
+                }
+            }
+            vec![Plane {
+                data: PlaneData::U16(out),
+                row_samples: w * 2,
+                rows: h,
+            }]
+        }
+        InputFormat::V420 => {
+            let mut luma = Vec::with_capacity(w * h);
+            for y in 0..h {
+                for x in 0..w {
+                    let (v, _) = ycc(x, y);
+                    luma.push(code(v[0] * 219.0 + 16.0 + d(x, y, 0), 1.0, 254.0) as u8);
+                }
+            }
+            let mut chroma = Vec::with_capacity(w * h / 2);
+            for cy in 0..h / 2 {
+                for cx in 0..w / 2 {
+                    let (a, _) = ycc(2 * cx, 2 * cy);
+                    let (b, _) = ycc(2 * cx, 2 * cy + 1);
+                    let (cb, cr) = ((a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5);
+                    chroma.push(code(cb * 224.0 + 128.0 + d(cx, cy, 1), 1.0, 254.0) as u8);
+                    chroma.push(code(cr * 224.0 + 128.0 + d(cx, cy, 2), 1.0, 254.0) as u8);
+                }
+            }
+            vec![
+                Plane {
+                    data: PlaneData::U8(luma),
+                    row_samples: w,
+                    rows: h,
+                },
+                Plane {
+                    data: PlaneData::U8(chroma),
+                    row_samples: w,
+                    rows: h / 2,
+                },
+            ]
+        }
+    };
+    Ok(EncoderInput {
+        format,
+        width: frame.width,
+        height: frame.height,
+        planes,
+    })
+}
+
+/// Decoded (straight) values of one encoder-input pixel as normalized Y′CbCr and
+/// alpha, for verification: (Y′, Cb, Cr, A) with A = 1 when the format has no alpha.
+pub fn sample_ycbcra(input: &EncoderInput, x: usize, y: usize) -> [f64; 4] {
+    match input.format {
+        InputFormat::Y416 => {
+            let p = input.planes[0].u16().expect("y416 is 16-bit");
+            let i = (y * input.width as usize + x) * 4;
+            [
+                (p[i + 1] as f64 - 4096.0) / 56064.0,
+                (p[i + 2] as f64 - 32768.0) / 57344.0,
+                (p[i + 3] as f64 - 32768.0) / 57344.0,
+                p[i] as f64 / 65535.0,
+            ]
+        }
+        InputFormat::V216 => {
+            let p = input.planes[0].u16().expect("v216 is 16-bit");
+            let i = (y * input.width as usize + (x & !1)) * 2;
+            let yv = if x.is_multiple_of(2) {
+                p[i + 1]
+            } else {
+                p[i + 3]
+            };
+            [
+                (yv as f64 - 4096.0) / 56064.0,
+                (p[i] as f64 - 32768.0) / 57344.0,
+                (p[i + 2] as f64 - 32768.0) / 57344.0,
+                1.0,
+            ]
+        }
+        InputFormat::V420 => {
+            let l = input.planes[0].u8().expect("420v is 8-bit");
+            let c = input.planes[1].u8().expect("420v is 8-bit");
+            let w = input.width as usize;
+            let ci = (y / 2) * w + (x / 2) * 2;
+            [
+                (l[y * w + x] as f64 - 16.0) / 219.0,
+                (c[ci] as f64 - 128.0) / 224.0,
+                (c[ci + 1] as f64 - 128.0) / 224.0,
+                1.0,
+            ]
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(w: u32, h: u32, f: impl Fn(u32, u32) -> [f32; 4]) -> Vec<f32> {
+        let f = &f;
+        (0..h)
+            .flat_map(|y| (0..w).flat_map(move |x| f(x, y)))
+            .collect::<Vec<_>>()
+    }
+
+    fn params(alpha: AlphaOutput, dither: bool) -> ConvertParams {
+        ConvertParams {
+            working: WorkingEncoding::Standard,
+            alpha,
+            dither,
+            frame: 0,
+        }
+    }
+
+    #[test]
+    fn e_curve_round_trips_and_extends_to_all_reals() {
+        for i in -100..=200 {
+            let x = i as f64 / 100.0;
+            assert!((e_decode(e_encode(x)) - x).abs() < 1e-12, "{x}");
+        }
+        assert!((e_encode(0.5) - 0.735_357).abs() < 1e-6);
+        assert_eq!(e_encode(-0.5), -e_encode(0.5));
+    }
+
+    #[test]
+    fn matrix_round_trips() {
+        for c in [[1.0, 0.0, 0.0], [0.2, 0.5, 0.9], [-0.1, 1.2, 0.3]] {
+            let v = rgb_to_ycbcr(c);
+            let back = ycbcr_to_rgb(v[0], v[1], v[2]);
+            for i in 0..3 {
+                assert!((back[i] - c[i]).abs() < 1e-12);
+            }
+        }
+    }
+
+    /// Black, white and the primaries land on the textbook Rec.709 codes.
+    #[test]
+    fn reference_codes_at_8_10_and_12_bits() {
+        let colors: [[f32; 4]; 3] = [
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+            [1.0, 0.0, 0.0, 1.0],
+        ];
+        let f = frame(2, 2, |x, y| colors[((x + y) as usize).min(2)]);
+        let wf = WorkingFrame {
+            width: 2,
+            height: 2,
+            rgba: &f,
+        };
+        let v420 = convert(&wf, InputFormat::V420, &params(AlphaOutput::None, false)).unwrap();
+        // (0,0) black, (1,0) white, (1,1) red.
+        assert_eq!(v420.planes[0].u8().unwrap(), &[16, 235, 235, 63]);
+        let y416 = convert(&wf, InputFormat::Y416, &params(AlphaOutput::None, false)).unwrap();
+        let p = y416.planes[0].u16().unwrap();
+        assert_eq!(&p[0..4], &[65535, 4096, 32768, 32768]);
+        assert_eq!(&p[4..8], &[65535, 60160, 32768, 32768]);
+        // Red at 12 bits: Y′ 0.2126 → 16 + 219·16·0.2126 → 1004.9 (×16 = 16079.9 → 16080).
+        let red = &p[12..16];
+        assert_eq!(
+            red[1],
+            (0.2126f64 * 56064.0 + 4096.0).round_ties_even() as u16
+        );
+        assert_eq!(red[3], 61440, "Cr of pure red is +0.5: 12-bit 3840 × 16");
+        let v216 = convert(&wf, InputFormat::V216, &params(AlphaOutput::None, false)).unwrap();
+        let p = v216.planes[0].u16().unwrap();
+        // Row 0: black (co-sited chroma) and white.
+        assert_eq!(&p[0..4], &[32768, 4096, 32768, 60160]);
+    }
+
+    #[test]
+    fn values_on_the_output_grid_survive_dither_and_neutral_stays_neutral() {
+        // Every 8-bit luma code 16..=235 as a grey, set exactly.
+        for code8 in 16..=235u32 {
+            let yv = (code8 as f64 - 16.0) / 219.0;
+            let f = frame(64, 64, |_, _| {
+                let v = yv as f32;
+                [v, v, v, 1.0]
+            });
+            let wf = WorkingFrame {
+                width: 64,
+                height: 64,
+                rgba: &f,
+            };
+            for frame_index in 0..2 {
+                let out = convert(
+                    &wf,
+                    InputFormat::V420,
+                    &ConvertParams {
+                        frame: frame_index,
+                        ..params(AlphaOutput::None, true)
+                    },
+                )
+                .unwrap();
+                assert!(
+                    out.planes[0]
+                        .u8()
+                        .unwrap()
+                        .iter()
+                        .all(|&v| v as u32 == code8),
+                    "code {code8}"
+                );
+                assert!(
+                    out.planes[1].u8().unwrap().iter().all(|&v| v == 128),
+                    "neutral chroma at code {code8}"
+                );
+            }
+        }
+    }
+
+    /// The bit-depth bar's dither clause as S2 measured it: on a shallow ramp (0.40 to
+    /// 0.42 over 1,920 columns), 16-column windows of the column means over 64 rows are
+    /// within 0.05 CV of ideal with dither (S2: 0.009), and not without (S2: 0.48).
+    #[test]
+    fn dither_removes_banding_on_a_shallow_ramp() {
+        let (w, h) = (1920u32, 64u32);
+        let ideal = |x: usize| (0.40 + 0.02 * x as f64 / (w - 1) as f64) * 219.0 + 16.0;
+        let f = frame(w, h, |x, _| {
+            let v = (0.40 + 0.02 * x as f64 / (w - 1) as f64) as f32;
+            [v, v, v, 1.0]
+        });
+        let wf = WorkingFrame {
+            width: w,
+            height: h,
+            rgba: &f,
+        };
+        let worst = |dither: bool| {
+            let out = convert(&wf, InputFormat::V420, &params(AlphaOutput::None, dither)).unwrap();
+            let l = out.planes[0].u8().unwrap();
+            let column: Vec<f64> = (0..w as usize)
+                .map(|x| {
+                    (0..h as usize)
+                        .map(|y| l[y * w as usize + x] as f64)
+                        .sum::<f64>()
+                        / h as f64
+                })
+                .collect();
+            (0..w as usize - 16)
+                .map(|x0| {
+                    let got = column[x0..x0 + 16].iter().sum::<f64>() / 16.0;
+                    let want = (x0..x0 + 16).map(ideal).sum::<f64>() / 16.0;
+                    (got - want).abs()
+                })
+                .fold(0.0, f64::max)
+        };
+        let (on, off) = (worst(true), worst(false));
+        assert!(off > 0.4, "undithered banding {off}");
+        assert!(on < 0.05, "dithered window error {on}");
+    }
+
+    #[test]
+    fn dither_is_deterministic_and_never_touches_alpha() {
+        let f = frame(64, 64, |x, y| {
+            let a = (x + y) as f32 / 126.0;
+            [0.3 * a, 0.6 * a, 0.2 * a, a]
+        });
+        let wf = WorkingFrame {
+            width: 64,
+            height: 64,
+            rgba: &f,
+        };
+        let p = |frame| ConvertParams {
+            frame,
+            ..params(AlphaOutput::Straight, true)
+        };
+        let a = convert(&wf, InputFormat::Y416, &p(3)).unwrap();
+        assert_eq!(a, convert(&wf, InputFormat::Y416, &p(3)).unwrap());
+        assert_ne!(a, convert(&wf, InputFormat::Y416, &p(4)).unwrap());
+        let undithered = convert(
+            &wf,
+            InputFormat::Y416,
+            &params(AlphaOutput::Straight, false),
+        )
+        .unwrap();
+        let (pa, pu) = (
+            a.planes[0].u16().unwrap(),
+            undithered.planes[0].u16().unwrap(),
+        );
+        for i in (0..pa.len()).step_by(4) {
+            assert_eq!(pa[i], pu[i], "alpha sample {i}");
+        }
+    }
+
+    #[test]
+    fn alpha_modes() {
+        // 50% alpha, premultiplied red.
+        let px = [0.5f32, 0.0, 0.0, 0.5];
+        let (c, a) = output_rgba(px, WorkingEncoding::Standard, AlphaOutput::Straight);
+        assert_eq!((c, a), ([1.0, 0.0, 0.0], 0.5));
+        let (c, _) = output_rgba(px, WorkingEncoding::Standard, AlphaOutput::Premultiplied);
+        assert_eq!(c, [0.5, 0.0, 0.0]);
+        let (c, a) = output_rgba(px, WorkingEncoding::Standard, AlphaOutput::None);
+        assert_eq!((c, a), ([0.5, 0.0, 0.0], 1.0));
+        // Linear working values: E after unpremultiplying, premultiplied again in E.
+        let lin = [0.25f32, 0.0, 0.0, 0.5];
+        let (c, _) = output_rgba(lin, WorkingEncoding::Linear, AlphaOutput::Premultiplied);
+        assert!((c[0] - e_encode(0.5) * 0.5).abs() < 1e-12);
+        // Below the guard, color is dropped.
+        let (c, a) = output_rgba(
+            [1e-5, 1e-5, 1e-5, 1e-4],
+            WorkingEncoding::Standard,
+            AlphaOutput::Straight,
+        );
+        assert_eq!(c, [0.0; 3]);
+        assert!((a - 1e-4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn superwhites_and_subblacks_clip_to_the_codable_range() {
+        let f = frame(2, 2, |x, _| {
+            if x == 0 {
+                [-0.5, -0.5, -0.5, 1.0]
+            } else {
+                [2.0, 2.0, 2.0, 1.0]
+            }
+        });
+        let wf = WorkingFrame {
+            width: 2,
+            height: 2,
+            rgba: &f,
+        };
+        let v = convert(&wf, InputFormat::V420, &params(AlphaOutput::None, false)).unwrap();
+        assert_eq!(&v.planes[0].u8().unwrap()[..2], &[1, 254]);
+        let v = convert(&wf, InputFormat::V216, &params(AlphaOutput::None, false)).unwrap();
+        assert_eq!(v.planes[0].u16().unwrap()[1], 256);
+        assert_eq!(v.planes[0].u16().unwrap()[3], 65216);
+        let v = convert(&wf, InputFormat::Y416, &params(AlphaOutput::None, false)).unwrap();
+        assert_eq!(v.planes[0].u16().unwrap()[1], 256);
+        assert_eq!(v.planes[0].u16().unwrap()[5], 65264);
+    }
+
+    #[test]
+    fn chroma_siting_and_sampling_round_trip() {
+        // Distinct colors per pixel: 4:2:2 takes the even column; 4:2:0 averages two rows.
+        let f = frame(4, 2, |x, y| [x as f32 / 4.0, y as f32 / 2.0, 0.25, 1.0]);
+        let wf = WorkingFrame {
+            width: 4,
+            height: 2,
+            rgba: &f,
+        };
+        let v216 = convert(&wf, InputFormat::V216, &params(AlphaOutput::None, false)).unwrap();
+        let s = sample_ycbcra(&v216, 1, 0);
+        let even = rgb_to_ycbcr([0.0, 0.0, 0.25]);
+        assert!(
+            (s[1] - even[1]).abs() < 1e-4,
+            "odd pixel carries the co-sited chroma"
+        );
+        let v420 = convert(&wf, InputFormat::V420, &params(AlphaOutput::None, false)).unwrap();
+        let s = sample_ycbcra(&v420, 2, 1);
+        let mean = (rgb_to_ycbcr([0.5, 0.0, 0.25])[2] + rgb_to_ycbcr([0.5, 0.5, 0.25])[2]) / 2.0;
+        assert!((s[2] - mean).abs() < 0.5 / 224.0 + 1e-9);
+        assert!(v420.validate().is_ok() && v216.validate().is_ok());
+        assert!(
+            convert(
+                &WorkingFrame {
+                    width: 3,
+                    height: 2,
+                    rgba: &[0.0; 24]
+                },
+                InputFormat::V216,
+                &params(AlphaOutput::None, false)
+            )
+            .is_err()
+        );
+    }
+}
