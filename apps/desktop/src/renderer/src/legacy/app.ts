@@ -20,6 +20,7 @@ import { createNewProjectForm } from './ui/project-settings';
 import { inspectorService, shaderHooks, timelineService, viewerService } from './core/services';
 import { bridge as hostBridge } from '../kernel/bridge';
 import { CURRENT_READER_VERSION, NEWER_PROJECT_MESSAGE, needsNewerReader, requiredReaderVersion } from '../../../shared/reader-version';
+import { touchedDocument } from '../engine-doc/write';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -1382,7 +1383,10 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
     if (target) for (const result of results) {
       const meta = result.status !== 'failed' ? targetProject.assets?.[result.asset?.id] : null;
       // Media already in the project stays where the user filed it.
-      if (meta && (result.status === 'created' || !validFolder(targetProject, meta.folder))) meta.folder = target;
+      if (meta && (result.status === 'created' || !validFolder(targetProject, meta.folder))) {
+        meta.folder = target;
+        if (targetProject === PM.proj) touchedDocument(PM, [['assets', result.asset.id, 'folder']]);
+      }
     }
     const failures = results.filter((result: any) => result.status === 'failed');
     failures.forEach((result: any) => PM.toast(result.error?.message || ('Could not import ' + result.file?.name), 5000, { error: true }));

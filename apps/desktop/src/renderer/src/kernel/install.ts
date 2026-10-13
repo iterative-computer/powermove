@@ -110,6 +110,7 @@ import {
 import { bridge as hostBridge } from './bridge';
 import { parseExtensionUrl } from '../../../shared/extension-url';
 import { fetchRemoteMedia, type AdmitDownload, type ImportUrl } from './remote-media';
+import { writeDocument } from '../engine-doc/write';
 
 type LegacyPM = Record<string, any>;
 type ExtensionsHostBridge = ExtensionsBridge & Partial<Pick<PowermoveExtensionsBridge, 'fork'>>;
@@ -821,15 +822,18 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
     const definition = kernel.layerTypes.get(change.id);
     if (definition) {
       const containers = [PM?.proj, ...Object.values(PM?.proj?.comps ?? {})] as Array<Record<string, any> | undefined>;
-      for (const container of containers) for (const layer of container?.layers ?? []) {
-        if (layer?.type !== 'extension' || layer?.d?.definition !== change.id) continue;
-        layer.d.params = layer.d.params && typeof layer.d.params === 'object' ? layer.d.params : {};
-        for (const param of definition.params) {
-          if (!layer.d.params[param.k] || typeof layer.d.params[param.k] !== 'object') {
-            layer.d.params[param.k] = PM?.P?.(param.def) ?? { v: param.def, kf: [], expr: null };
+      // Every composition's layers may gain parameters (a metadata write).
+      writeDocument(PM, [['layers'], ['comps']], () => {
+        for (const container of containers) for (const layer of container?.layers ?? []) {
+          if (layer?.type !== 'extension' || layer?.d?.definition !== change.id) continue;
+          layer.d.params = layer.d.params && typeof layer.d.params === 'object' ? layer.d.params : {};
+          for (const param of definition.params) {
+            if (!layer.d.params[param.k] || typeof layer.d.params[param.k] !== 'object') {
+              layer.d.params[param.k] = PM?.P?.(param.def) ?? { v: param.def, kf: [], expr: null };
+            }
           }
         }
-      }
+      });
       PM?.ProjectIndex?.invalidateKeyframes?.();
     }
     PM?.GL?.dropPrograms?.(`extension:${change.id}:`);

@@ -77,7 +77,7 @@ export const CLASSES = {
   'home-composition-match': "Home's Open matching the new composition to the first media source",
   'blender-source-asset': 'Blender source assets written into PM.proj.assets',
   'agent-media-folders': 'agent media import placing assets into folders',
-  'extension-layer-refresh': 'extension layers refilled with parameters when a definition registers',
+  'extension-layer-refresh': 'extension layers refilled with parameters when a definition registers (through writeDocument)',
   'material-fanout': 'shared-material channels copied to every peer layer',
   'aim-preserving': 'aim-preserving rewrites of 3D camera and light channels after reparenting',
 };
@@ -108,7 +108,8 @@ export const NAMED_SITES = [
   { class: 'home-composition-match', file: 'renderer/src/legacy/app.ts', scope: /(^| > )importFiles$/, code: /^targetProject\.(w|h|fps|fpsRational|exportDefaults|dur|work)\b/ },
   { class: 'blender-source-asset', file: 'renderer/src/core/scene3d/modeling.ts', from: ['asset-metadata'] },
   { class: 'agent-media-folders', file: 'renderer/src/legacy/assistant/media-management.ts', scope: /(^| > )importMedia$/, code: /\.folder\s*=/ },
-  { class: 'extension-layer-refresh', file: 'renderer/src/kernel/install.ts', scope: /kernel\.layerTypes\.onChange\(callback\)$/, derived: true },
+  // The refresh runs inside writeDocument (a barrier writer): the call is the site.
+  { class: 'extension-layer-refresh', file: 'renderer/src/kernel/install.ts', scope: /kernel\.layerTypes\.onChange\(callback\)$/, from: ['doc.write'] },
   { class: 'material-fanout', file: 'renderer/src/legacy/core/editing.ts', scope: /(^| > )synchronizePeers$/, params: true },
   { class: 'aim-preserving', file: 'renderer/src/legacy/core/parenting.ts', scope: /(^| > )preserveWorldAim$/, params: true },
 ];
