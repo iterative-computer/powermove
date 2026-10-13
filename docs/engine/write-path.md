@@ -129,6 +129,21 @@ the auditor is the net for those.
   three.js questions (3D objects, model groups, backgroundless extension scenes), and
   text layout before fonts are served.
 
+## Text
+
+Text layout runs in pm-wasm over the registry's answers and metrics-and-shaping
+subsets (docs/engine/text.md). A query that meets a missing answer or face replies
+`{fonts}`; a `FontProvider` (`engine-doc/fonts.ts`) loads what the layout lacked and
+the query is asked again: synchronously in the headless document host (pm-bridge's
+`FontRegistry` in process, `POWERMOVE_ENGINE_FONTS=1`, `POWERMOVE_PM_BRIDGE`), in the
+background in the editor once the preload exposes `engine-fonts:answer` and
+`engine-fonts:subset` (it does not yet; until then text queries keep the legacy
+answer and count as `fonts` fallbacks). Answers that depend on glyph ink (text and
+caption bounds, picks over text, raster placement) reply `{ink}` while the faces are
+subsets without outlines (pm-eval allowed difference 6) and keep the legacy answer;
+`pm_fonts_outlines(1)` declares whole fonts. Caret layout (`render.textLayout`),
+glyph positions, and widths need no outlines.
+
 ## Dual answers, the auditor, and the consistency check
 
 - **Dual answers** (`engine-doc/dual.ts`): the native answer is returned; the legacy
