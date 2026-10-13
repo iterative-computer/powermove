@@ -21,7 +21,7 @@ export function selectionOutlineColor(project: any): string {
 
 import { beginTextEdit, type TextEditOptions, type TextEditSession } from './text-editor';
 import { drawEditablePaths, startPathEdit } from './path-editing';
-import { ENGINE_VIEWER_SERVICE, ViewerPresentation, type EngineViewerService } from './engine-present/presentation';
+import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, ViewerPresentation, type EngineViewerService } from './engine-present/presentation';
 import { viewParamsFor } from './engine-present/view-params';
 /* Ported from js/ui/viewer.js — behavior-preserving. */
 export const viewerPanelOptions = {
@@ -782,11 +782,18 @@ const eventOffs: Array<() => void> = [];
 /* Engine presentation, behind "Use New Engine": present only when the
    kernel's engine connection registered `engine.viewer` (plan section 18). */
 let enginePresentation: ViewerPresentation | null = null;
+let engineService: EngineViewerService | null = null;
 let engineFrameTag = '';
 const syncEnginePresentation = () => {
   if (disposed || !V.stage || !V.ov) return;
+  const service = api.services.get<EngineViewerService>(ENGINE_VIEWER_SERVICE);
+  if (enginePresentation && service !== engineService) {
+    // The service went away (engine off) or was replaced: detach; the
+    // current engine's canvas underneath shows until a new one presents.
+    enginePresentation.dispose(); enginePresentation = null; V.enginePresentation = null; engineFrameTag = '';
+  }
+  engineService = service;
   if (!enginePresentation) {
-    const service = api.services.get<EngineViewerService>(ENGINE_VIEWER_SERVICE);
     if (!service) return;
     const presentation = new ViewerPresentation({ service, stage: V.stage, before: V.ov, log: (level, message) => api.log(level, message) });
     // Overlays redraw at each new frame tag (revision, view sequence), so
@@ -818,7 +825,7 @@ const isModel3D=(layer:any)=>['powermove.3d.object','powermove.3d.light','powerm
 const disposeRuntime = () => {
   if (disposed) return;
   disposed = true;
-  enginePresentation?.dispose(); enginePresentation = null; V.enginePresentation = null; engineFrameTag = '';
+  enginePresentation?.dispose(); enginePresentation = null; V.enginePresentation = null; engineFrameTag = ''; engineService = null;
   viewport3d?.dispose();viewport3d=null;V.viewport3d=null;V.sceneGizmo=null;
   if(viewportHeader)void unmount(viewportHeader);viewportHeaderHost?.remove();for(const panel of viewportPanels.splice(0))void unmount(panel);
   activeDrag?.cancel(); activeDrag = null;
@@ -1060,6 +1067,11 @@ const listen = <K extends Parameters<PowermoveAPI['events']['on']>[0]>(event: K,
 };
 listen('project:changed', () => { viewportPlan = null; V.layout(); });
 listen('extensions:changed', () => { viewportPlan = null; V.layout(); });
+// The engine connection registered or disposed `engine.viewer`: attach or
+// detach now, without a full layout.
+const onEngineViewerChanged = () => syncEnginePresentation();
+window.addEventListener(ENGINE_VIEWER_CHANGED, onEngineViewerChanged);
+eventOffs.push(() => window.removeEventListener(ENGINE_VIEWER_CHANGED, onEngineViewerChanged));
 listen('layout', () => V.layout());
 // Shading and X-ray are part of the engine's view override.
 const viewportChange = api.scene3d?.viewport?.onChange?.(() => syncEnginePresentation());

@@ -38,6 +38,18 @@ import { canvasColorSpace, displayIsEdr, ViewSequencer, type ViewInput } from '.
 /** The service name the kernel's engine connection registers. */
 export const ENGINE_VIEWER_SERVICE = 'engine.viewer';
 
+/**
+ * The window event the kernel's engine connection dispatches right after it
+ * registers or disposes `engine.viewer`. The services API has no change
+ * notification (and `extensions:changed` would refresh unrelated UI), so
+ * this is how a viewer that is already open attaches or detaches at once
+ * instead of at its next layout:
+ *
+ *   api.services.register(ENGINE_VIEWER_SERVICE, service);
+ *   window.dispatchEvent(new Event(ENGINE_VIEWER_CHANGED));
+ */
+export const ENGINE_VIEWER_CHANGED = 'powermove:engine-viewer-changed';
+
 /** One viewer session on the interactive engine. */
 export interface EngineViewerChannel extends FrameLink {
   /** Ends the session (the engine retires its pool). */
