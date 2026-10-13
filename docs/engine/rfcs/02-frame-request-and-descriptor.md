@@ -120,8 +120,16 @@ measures that cost under main-process load.
 
 Draft changes made while building the production frame bridge (plan
 section 18 with amendments 4 and 5; design notes in
-[`../bridge.md`](../bridge.md)). All are additive; the protocol build id
-changed with them.
+[`../bridge.md`](../bridge.md)).
+
+**Needs the contract owner's sign-off.** These are not additive: the four
+new fields are required (`FrameDescriptor.view_seq` and `duration`,
+`ViewerState.edr` and `view_seq`; `duration` is an `Option` but the field
+itself must be present), the descriptor gained validation, the ts-rs types
+and wire fixtures were regenerated, and `PROTOCOL_BUILD` changed from
+`protocol-15e365d7043a8bfe` to `protocol-16c8e6e125019103`. Every lane that
+constructs these structs or speaks the protocol must regenerate and rebuild
+after the merge; draft contracts interoperate only between equal builds.
 
 - **`FrameDescriptor.view_seq`** and **`ViewerState.view_seq`**: the viewer
   numbers its states; each descriptor echoes the state it shows. With
