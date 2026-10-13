@@ -96,9 +96,9 @@ fn long_sources_stream_without_a_limit() {
     let mut best = (f64::MAX, 0i64);
     for shift in -32i64..=32 {
         let mut e = 0f64;
-        for i in 64..4700usize {
+        for (i, &v) in out[0].iter().enumerate().take(4700).skip(64) {
             let j = (i as i64 + shift) as usize;
-            e = e.max((out[0][i] as f64 - reference[j] as f64).abs());
+            e = e.max((v as f64 - reference[j] as f64).abs());
         }
         if e < best.0 {
             best = (e, shift);

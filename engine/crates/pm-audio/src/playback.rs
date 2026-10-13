@@ -361,6 +361,11 @@ impl Playback {
         self.stream.as_ref().map(|s| &s.info)
     }
 
+    /// The output stream, when playback owns a device.
+    pub fn stream(&self) -> Option<&OutputStream> {
+        self.stream.as_ref()
+    }
+
     /// The device's sample rate.
     pub fn device_rate(&self) -> u32 {
         self.shared.device_rate

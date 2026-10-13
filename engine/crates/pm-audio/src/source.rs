@@ -74,6 +74,8 @@ impl Block {
 }
 
 type BlockKey = (u64, u64);
+/// A file and its FFmpeg stream index (the best audio stream when `None`).
+type SourceKey = (PathBuf, Option<usize>);
 
 struct Entry {
     block: Arc<Block>,
@@ -103,7 +105,7 @@ pub struct CacheStats {
 
 /// Shared by every mixer and render in one process.
 pub struct SourceCache {
-    sources: Mutex<HashMap<(PathBuf, Option<usize>), Arc<Source>>>,
+    sources: Mutex<HashMap<SourceKey, Arc<Source>>>,
     blocks: Mutex<Blocks>,
     ready: Condvar,
     work: Condvar,

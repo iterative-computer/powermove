@@ -11,7 +11,7 @@
 //! put the clock a buffer late, about 10 ms at 512 frames.)
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -186,6 +186,8 @@ pub struct OutputStream {
     stream: cpal::Stream,
     pub info: DeviceInfo,
     failed: Arc<AtomicBool>,
+    cpal_delay_us: Arc<AtomicU64>,
+    callbacks: Arc<AtomicU64>,
 }
 
 impl OutputStream {
@@ -205,11 +207,24 @@ impl OutputStream {
         let channels = info.channels;
         let failed = Arc::new(AtomicBool::new(false));
         let flag = failed.clone();
+        let cpal_delay_us = Arc::new(AtomicU64::new(0));
+        let delay = cpal_delay_us.clone();
+        let callbacks = Arc::new(AtomicU64::new(0));
+        let count = callbacks.clone();
         let stream = device
             .build_output_stream::<f32, _, _>(
                 config,
                 move |data: &mut [f32], cb: &cpal::OutputCallbackInfo| {
-                    let host_us = (cb.timestamp().callback.as_nanos() / 1_000) as u64;
+                    let ts = cb.timestamp();
+                    let host_us = (ts.callback.as_nanos() / 1_000) as u64;
+                    delay.store(
+                        (ts.playback
+                            .as_nanos()
+                            .saturating_sub(ts.callback.as_nanos())
+                            / 1_000) as u64,
+                        Ordering::Relaxed,
+                    );
+                    count.fetch_add(1, Ordering::Relaxed);
                     callback(data, channels, host_us);
                 },
                 move |_e| flag.store(true, Ordering::Relaxed),
@@ -223,7 +238,21 @@ impl OutputStream {
             stream,
             info,
             failed,
+            cpal_delay_us,
+            callbacks,
         })
+    }
+
+    /// cpal's own presentation estimate for the last buffer, minus the
+    /// callback's host time (diagnostics: it adds the I/O buffer to the
+    /// latency this crate uses).
+    pub fn cpal_playback_delay_us(&self) -> u64 {
+        self.cpal_delay_us.load(Ordering::Relaxed)
+    }
+
+    /// Callbacks so far.
+    pub fn callbacks(&self) -> u64 {
+        self.callbacks.load(Ordering::Relaxed)
     }
 
     /// The stream reported an error (device removed, ...).

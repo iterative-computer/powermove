@@ -179,25 +179,55 @@ impl Bank {
     }
 }
 
-/// A dot product with eight independent accumulators (vectorizes; the
-/// summation order is fixed, so results are reproducible).
+/// A dot product with a fixed summation order (reproducible run to run):
+/// sixteen lanes of fused multiply-add on aarch64 (NEON), eight independent
+/// accumulators elsewhere.
 #[inline]
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     let n = a.len().min(b.len());
     let (a, b) = (&a[..n], &b[..n]);
-    let mut acc = [0f32; 8];
-    let chunks = n / 8;
-    for c in 0..chunks {
-        let (x, y) = (&a[c * 8..c * 8 + 8], &b[c * 8..c * 8 + 8]);
-        for l in 0..8 {
-            acc[l] += x[l] * y[l];
+    #[cfg(target_arch = "aarch64")]
+    {
+        use std::arch::aarch64::*;
+        let chunks = n / 16;
+        // SAFETY: NEON is part of the aarch64 baseline; every load reads 4
+        // floats inside `a[..chunks * 16]` and `b[..chunks * 16]`.
+        let mut sum = unsafe {
+            let (pa, pb) = (a.as_ptr(), b.as_ptr());
+            let mut acc = [vdupq_n_f32(0.0); 4];
+            for c in 0..chunks {
+                let o = c * 16;
+                acc[0] = vfmaq_f32(acc[0], vld1q_f32(pa.add(o)), vld1q_f32(pb.add(o)));
+                acc[1] = vfmaq_f32(acc[1], vld1q_f32(pa.add(o + 4)), vld1q_f32(pb.add(o + 4)));
+                acc[2] = vfmaq_f32(acc[2], vld1q_f32(pa.add(o + 8)), vld1q_f32(pb.add(o + 8)));
+                acc[3] = vfmaq_f32(acc[3], vld1q_f32(pa.add(o + 12)), vld1q_f32(pb.add(o + 12)));
+            }
+            vaddvq_f32(vaddq_f32(
+                vaddq_f32(acc[0], acc[1]),
+                vaddq_f32(acc[2], acc[3]),
+            ))
+        };
+        for k in chunks * 16..n {
+            sum += a[k] * b[k];
         }
+        sum
     }
-    let mut tail = 0f32;
-    for k in chunks * 8..n {
-        tail += a[k] * b[k];
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let mut acc = [0f32; 8];
+        let chunks = n / 8;
+        for c in 0..chunks {
+            let (x, y) = (&a[c * 8..c * 8 + 8], &b[c * 8..c * 8 + 8]);
+            for l in 0..8 {
+                acc[l] += x[l] * y[l];
+            }
+        }
+        let mut tail = 0f32;
+        for k in chunks * 8..n {
+            tail += a[k] * b[k];
+        }
+        ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7])) + tail
     }
-    ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7])) + tail
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

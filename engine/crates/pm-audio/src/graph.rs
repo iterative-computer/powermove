@@ -629,32 +629,57 @@ impl VoicePlan {
                     out.active = false;
                 }
             }
-            let content = ev.resolve_content(comp, layer, tau)?;
-            let get = |k: &str| content.get(&JsString::from(k));
+            let d = node::member(Some(layer), "d");
+            // Only the content fields the level needs, each as
+            // `resolveContent` evaluates it (a channel through `evP`, any
+            // other value as it is).
+            let field = |ev: &mut Evaluator, key: &str| -> Result<JsValue> {
+                let v = node::member(d, key);
+                if node::is_property(v) {
+                    Ok(ev.ev_p(
+                        comp,
+                        Some(layer),
+                        v,
+                        tau,
+                        &JsString::from(format!("c.{key}").as_str()),
+                    )?)
+                } else {
+                    Ok(node::js_value_opt(v))
+                }
+            };
             if k < last {
-                out.gain *= level_of(get("audioGain")) * level.nested_level;
-                if get("audioMuted") == Some(&JsValue::Bool(true)) {
+                out.gain *= level_of(Some(&field(ev, "audioGain")?)) * level.nested_level;
+                if field(ev, "audioMuted")? == JsValue::Bool(true) {
                     out.active = false;
                 }
-                tau = Scope::new(ev, comp, open).source_time(layer, tau, Some(retime))?;
+                tau = if self.offset.is_some() {
+                    // A linear path: `local × 1 + trim` (sourceTime).
+                    let trim = node::js_value_opt(node::member(d, "trim"));
+                    (tau - from) * 1.0 + if trim.truthy() { trim.to_number() } else { 0.0 }
+                } else {
+                    Scope::new(ev, comp, open).source_time(layer, tau, Some(retime))?
+                };
                 continue;
             }
             out.local = tau - from;
             out.audible = dur;
             match self.kind {
                 VoiceKind::Audio => {
-                    out.gain *= get("gain").map_or(1.0, |g| finite(g, 1.0)).clamp(0.0, 4.0);
-                    out.fade_in = get("fadeIn").map_or(0.0, |v| finite(v, 0.0)).max(0.0);
-                    out.fade_out = get("fadeOut").map_or(0.0, |v| finite(v, 0.0)).max(0.0);
+                    out.gain *= finite(&field(ev, "gain")?, 1.0).clamp(0.0, 4.0);
+                    out.fade_in = finite(&field(ev, "fadeIn")?, 0.0).max(0.0);
+                    out.fade_out = finite(&field(ev, "fadeOut")?, 0.0).max(0.0);
                 }
                 VoiceKind::Embedded => {
-                    out.gain *= level_of(get("audioGain"));
-                    if get("audioMuted") == Some(&JsValue::Bool(true)) {
+                    out.gain *= level_of(Some(&field(ev, "audioGain")?));
+                    if field(ev, "audioMuted")? == JsValue::Bool(true) {
                         out.active = false;
                     }
                 }
             }
-            out.source_time = Scope::new(ev, comp, open).source_time(layer, tau, Some(retime))?;
+            out.source_time = match self.offset {
+                Some(offset) => t - offset,
+                None => Scope::new(ev, comp, open).source_time(layer, tau, Some(retime))?,
+            };
             // Where the source runs out, for linear maps: the clip stops there
             // and the fade out ends there (`audibleDuration`).
             if let Some(len) = self.source.info.duration() {
