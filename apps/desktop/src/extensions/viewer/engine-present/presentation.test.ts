@@ -223,6 +223,8 @@ describe('ViewerPresentation', () => {
 
     const popout = new HappyWindow() as unknown as Window;
     const target = stageIn(popout, 800, 450);
+    // The popout's clock starts 5 s after ours.
+    Object.defineProperty(popout, 'performance', { value: { timeOrigin: performance.timeOrigin + 5000, now: () => 0 }, configurable: true });
     Object.assign(popout, {
       devicePixelRatio: 1,
       matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} })
@@ -237,10 +239,14 @@ describe('ViewerPresentation', () => {
     const moved = channel.states.at(-1)!;
     expect(moved).toMatchObject({ size: { width: 800, height: 450 }, devicePixelRatio: 1, edr: false, viewSeq: 2 });
 
+    // Its rAF timestamps are shifted onto this realm's clock.
+    let seen = -1;
+    presentation.onPresented((frame) => (seen = frame.rafMs));
     channel.handlers.message({ type: 'frame', frame: desc(3, 2) }, performance.now());
-    runFrames(target.rafs, performance.now());
+    runFrames(target.rafs, 10);
     expect(presentation.latest?.seq).toBe(3);
     expect(target.rafs.size).toBe(1);
+    expect(seen).toBe(5010);
     presentation.dispose();
     await (popout as unknown as HappyWindow).happyDOM.close();
   });

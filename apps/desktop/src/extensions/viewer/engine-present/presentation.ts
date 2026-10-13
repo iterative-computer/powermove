@@ -191,14 +191,21 @@ export class ViewerPresentation {
     const refresh = (): void => {
       if (this.params) this.update(this.params);
     };
+    // A popout is sized after it opens: its resizes count as layout.
+    view.addEventListener?.('resize', refresh);
+    this.mediaOffs.push(() => view.removeEventListener?.('resize', refresh));
     for (const query of ['(dynamic-range: high)', '(color-gamut: p3)', `(resolution: ${view.devicePixelRatio || 1}dppx)`]) {
       const list = view.matchMedia?.(query);
       if (!list?.addEventListener) continue;
       list.addEventListener('change', refresh);
       this.mediaOffs.push(() => list.removeEventListener('change', refresh));
     }
+    // Every window has its own time origin: a popout's rAF timestamps are
+    // moved onto this realm's performance.now(), the clock the presenter
+    // stamps arrivals with and maps to host time.
+    const shift = timeOriginShift(view);
     this.presenter?.retarget(
-      (cb) => view.requestAnimationFrame(cb),
+      (cb) => view.requestAnimationFrame((t) => cb(t + shift)),
       (id) => view.cancelAnimationFrame(id),
       this.options.service.displayHz?.(view) ?? null
     );
@@ -277,6 +284,13 @@ export class ViewerPresentation {
     this.listeners.clear();
     this.canvas.remove();
   }
+}
+
+/** Milliseconds to add to `view`'s performance.now() to read this realm's. */
+export function timeOriginShift(view: Window): number {
+  const theirs = view.performance?.timeOrigin;
+  const ours = globalThis.performance?.timeOrigin;
+  return typeof theirs === 'number' && typeof ours === 'number' && Number.isFinite(theirs - ours) ? theirs - ours : 0;
 }
 
 const scalePoint = (p: [number, number], s: number): [number, number] => [p[0] * s, p[1] * s];
