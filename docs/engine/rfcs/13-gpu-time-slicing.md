@@ -103,6 +103,17 @@ in `validate` or adding a signal is a version bump. `frameDone` and the
 policy's target, in-flight, and guard fields were added in the draft
 (amendment 12) before the freeze.
 
+## Phase 2 infrastructure
+
+Main sends the job engine the default policy after every handshake,
+relays the interactive engine's non-per-frame signals, moves leases with
+playback, re-sends `playbackStarted` to a job engine that restarts during
+playback, and sends `playbackStopped` itself when the interactive engine
+dies (`apps/desktop/src/main/engine/native-engine.ts`). The interactive
+engine sends `frameDone` on the direct port (`Engine::signal_deadline`);
+the job engine feeds every signal to `JobSlicer`. The job engine's thread
+runs at utility QoS (`pm-node`). Notes: `docs/engine/host-processes.md`.
+
 ## Phase 0 results
 
 S8 passed with aligned slicing at a 1 ms prediction target (zero drops in

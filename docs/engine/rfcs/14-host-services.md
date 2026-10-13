@@ -93,6 +93,16 @@ definition-snapshot source (contract 10), and engine crash reports
    the same message sequences (the Phase 3c gate: byte-identical documents
    on the desktop and hidden hosts).
 
+## Implementation (Phase 2 infrastructure)
+
+Electron main: `HostServicesCore` (`apps/desktop/src/main/engine/services.ts`)
+behind each engine launch's host connection. CLI: `pm_host::CliHost`, which
+implements `HostServices` through `pm_host::Bound` (the trait with the
+connection's process, port, and envelope session). The shared sequence
+`engine/crates/pm-host/tests/fixtures/host-contract.json` runs against both
+(invariant 9). Output handles without an envelope session bind to session
+0. Notes: `docs/engine/host-processes.md`.
+
 ## Versioning
 
 `ResolveHandle` and `HandleResolved` were added in the draft (Phase 2

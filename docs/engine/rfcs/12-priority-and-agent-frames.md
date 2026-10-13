@@ -93,6 +93,13 @@ and generated media.
     and an error only when failed; progress is 0 to 1. Host services fill
     in the path; the engine never sees paths (contract 14).
 
+## Implementation (Phase 2 infrastructure)
+
+`pm_engine::priority::Scheduler`: one FIFO per class, the oldest item of
+the highest runnable class first, generation and background paused during
+playback, every job-engine class sliced during playback, work for the other
+process refused, and the queue time reported with each item.
+
 ## Versioning
 
 Version 0 until Phase 2 starts. New export formats after cutover (DNxHR,
