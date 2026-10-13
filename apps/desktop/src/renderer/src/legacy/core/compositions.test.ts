@@ -102,8 +102,10 @@ describe('compositions', () => {
     expect(layer).toMatchObject({ type: 'precomp', from: 2, dur: 5, d: { comp: id } });
     const comp = PM.proj.comps[id];
     expect(comp).toMatchObject({ name: 'Cards', w: 1920, h: 1080, dur: 5 });
-    expect(comp.layers.map((item: any) => [item.name, item.from])).toEqual([['A', 0], ['B', 1]]);
-    expect(b.parent).toBeNull(); // parent stayed behind in the outer comp
+    expect(comp.layers.map((item: any) => [item.name, item.from])).toEqual([['A', 0], ['B', 1], ['Keep', -2]]);
+    expect(comp.layers[2]).toMatchObject({ type: 'null', parent: null });
+    expect(b.parent).toBe(comp.layers[2].id); // the outer parent remains as an independent rig copy
+    expect(b.parent).not.toBe(keep.id);
 
     PM.hist.undo();
     expect(names(PM)).toEqual(['A', 'B', 'Keep']);

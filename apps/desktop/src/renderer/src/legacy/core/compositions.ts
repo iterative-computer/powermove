@@ -450,7 +450,38 @@ export function install(PM: PMRegistry): void {
   };
 
   /** Shift every time on a layer's timeline by `delta` seconds. */
-  const shiftLayer = (layer: any, delta: number) => { layer.from = Math.max(0, layer.from + delta); };
+  const shiftLayer = (layer: any, delta: number) => { layer.from += delta; };
+
+  /** Keep animated coordinate spaces when only part of a rig crosses a comp boundary.
+   * Copies are non-rendering nulls (or groups for membership), with independent keys.
+   * Plan both sides before touching links on the original layers. */
+  const boundaryRigs = (members: any[], source: any[]) => {
+    const originals = new Map(source.map(layer => [layer.id, layer]));
+    const local = new Map(members.map(layer => [layer.id, layer]));
+    const copies: any[] = [], links = new Map<any, { parent: string | null; group: string | null }>();
+    const queue = [...members];
+    for (let index = 0; index < queue.length; index++) {
+      for (const id of [queue[index].parent, queue[index].group]) {
+        if (!id || local.has(id)) continue;
+        const original = originals.get(id);
+        if (!original) continue;
+        const copy = PM.cloneLayer(original);
+        copy.name = original.name;
+        copy.type = original.type === 'group' ? 'group' : 'null';
+        copy.fx = []; copy.masks = []; copy.matteSource = null;
+        copy.transitionIn = null; copy.transitionOut = null;
+        if (copy.type === 'null') copy.solo = false;
+        local.set(id, copy); copies.push(copy); queue.push(copy);
+      }
+    }
+    for (let index = 0; index < queue.length; index++) {
+      const layer = queue[index];
+      const next = { parent: local.get(layer.parent)?.id ?? null, group: local.get(layer.group)?.id ?? null };
+      if (index < members.length) links.set(layer, next);
+      else Object.assign(layer, next);
+    }
+    return { copies, links, layers: source.map(layer => local.get(layer.id)).filter(Boolean) };
+  };
 
   /**
    * Layer ▸ Pre-compose (⇧⌘C).
@@ -482,23 +513,24 @@ export function install(PM: PMRegistry): void {
     const index = host.layers.findIndex((layer: any) => pickedIds.has(layer.id));
     let layer: any = null;
     transact('Pre-compose', () => {
-      comp.layers = picked;
-      for (const moved of picked) {
-        if (moved.parent && !pickedIds.has(moved.parent)) moved.parent = null;
-        if (moved.group && !pickedIds.has(moved.group)) moved.group = null;
+      const rest = host.layers.filter((item: any) => !pickedIds.has(item.id));
+      const innerRig = boundaryRigs(picked, host.layers), outerRig = boundaryRigs(rest, host.layers);
+      comp.layers = innerRig.layers;
+      for (const moved of comp.layers) {
+        const links = innerRig.links.get(moved);
+        if (links) Object.assign(moved, links);
         if (moved.matteSource && !pickedIds.has(moved.matteSource)) moved.matteSource = null;
         if (start) shiftLayer(moved, -start);
       }
       PM.proj.comps = { ...comps(), [comp.id]: comp };
       layer = makeLayer(comp.id, host, start);
       layer.p['anchor.x'].v = comp.w / 2; layer.p['anchor.y'].v = comp.h / 2;
-      const rest = host.layers.filter((item: any) => !pickedIds.has(item.id));
       for (const item of rest) {
-        if (pickedIds.has(item.parent)) item.parent = null;
+        Object.assign(item, outerRig.links.get(item));
         if (pickedIds.has(item.matteSource)) item.matteSource = null;
       }
       rest.splice(Math.max(0, Math.min(index, rest.length)), 0, layer);
-      host.layers = rest;
+      host.layers = [...rest, ...outerRig.copies];
       PM.ProjectIndex?.invalidate();
       PM.selectLayers(layer.id);
     });
