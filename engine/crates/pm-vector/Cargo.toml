@@ -1,10 +1,31 @@
 [package]
 name = "pm-vector"
-description = "Paths, strokes, booleans, coverage (section 10)"
+description = "Shape, path, and mask geometry (sections 10 and 31): ports of today's Canvas2D geometry onto kurbo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Deterministic geometry digest over generated cases, used to check that
+# native and wasm32 builds produce bit-identical output (see tests/wasm/).
+conformance = []
+
 [dependencies]
+kurbo = "0.13.1"
+libm.workspace = true
+ryu-js.workspace = true
+
+[dev-dependencies]
+# Exact float parsing for the bit-for-bit vector comparisons.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+
+[[example]]
+name = "digest"
+required-features = ["conformance"]
+
+[[example]]
+name = "digest_wasm"
+crate-type = ["cdylib"]
+required-features = ["conformance"]
