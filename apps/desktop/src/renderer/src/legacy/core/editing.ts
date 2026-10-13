@@ -213,7 +213,9 @@ function resizeVideoForSpeed(layer: any, previous: number | null): void {
   PM.ProjectIndex?.invalidate();
 }
 
-function setProperty(command: any) {
+type KeyPresets = Map<any, Map<any, string>>;
+
+function setProperty(command: any, presets?: KeyPresets) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
   const { channel, prop }: any = property(layer, command.path || command.channel);
@@ -228,8 +230,16 @@ function setProperty(command: any) {
   const time: any = command.time == null ? PM.time : finite(command.time, 'time');
   const mode: any = command.mode || 'auto';
   if (mode === 'keyframe' || (mode === 'auto' && prop.kf.length)) {
+    const previousCount = prop.kf.length;
     const key: any = PM.setKeyOn(prop, time - layer.from, value, command.ease || 'linear', PM.proj.fps);
     if (command.hold != null) key.hold = !!command.hold;
+    // Plain updates preserve native velocity. New keys and explicit presets
+    // are converted again once the batch supplies their final neighbours.
+    if (presets && (prop.kf.length !== previousCount || command.ease != null)) {
+      const keys = presets.get(prop) || new Map<any, string>();
+      keys.set(key, command.ease || 'linear');
+      presets.set(prop, keys);
+    }
   } else {
     const previousSpeed = channel === 'c.speed' ? constantVideoSpeed(layer) : null;
     prop.v = value;
@@ -907,7 +917,7 @@ function policyCommand(sourceCommand: any, meta: any = {}) {
   return { command };
 }
 
-function runOne(sourceCommand: any, meta: any = {}) {
+function runOne(sourceCommand: any, meta: any = {}, presets?: KeyPresets) {
   const policy: any = policyCommand(sourceCommand, meta);
   const command: any = policy.command;
   const fontLayer = findLayer(command.target || command.layer || command.targetId);
@@ -926,7 +936,7 @@ function runOne(sourceCommand: any, meta: any = {}) {
   } : null;
   let data: any;
   switch (command.type) {
-    case 'set_property': data = setProperty(command); break;
+    case 'set_property': data = setProperty(command, presets); break;
     case 'replace_keyframes': data = replaceKeyframes(command); break;
     case 'set_easing': data = setEasing(command); break;
     case 'set_expression': data = setExpression(command,meta); break;
@@ -991,6 +1001,25 @@ function runOne(sourceCommand: any, meta: any = {}) {
   }
   if (policy.message) data = { ...data, message: policy.message, skippedLocked: policy.skippedLocked };
   return { command, data, message: policy.message };
+}
+
+function runCommands(list: any[], meta: any) {
+  const presets: KeyPresets = new Map();
+  const finishPresets = () => {
+    for (const [prop, keys] of presets) {
+      PM.setKeysOn(prop, [...keys].map(([key, ease]) => ({ t: key.t, v: key.v, ease })), PM.proj.fps);
+    }
+    presets.clear();
+  };
+  const executed = [];
+  for (const command of list) {
+    // Complete property runs before another operation reads the animation or
+    // overrides its easing; command order must remain authoritative.
+    if (command.type !== 'set_property') finishPresets();
+    executed.push(runOne(command, meta, presets));
+  }
+  finishPresets();
+  return executed;
 }
 
 function recordedCommand(command: any, submitted: any) {
@@ -1164,7 +1193,7 @@ const Edit: any = {
     if (live) {
       try {
         trackCommands(list);
-        const executed: any = list.map((command: any) => runOne(command, meta));
+        const executed: any = runCommands(list, meta);
         const results: any = executed.map(({ command, data }: any) => ({ command: clone(command), data }));
         executed.forEach(({ command }: any) => rememberLive(command));
         changed(false);
@@ -1176,7 +1205,7 @@ const Edit: any = {
     PM.hist.beginScoped(meta.label || 'Edit source', meta.historyGroup || null, meta.origin || 'interface');
     try {
       trackCommands(list);
-      const executed: any = list.map((command: any) => runOne(command, meta));
+      const executed: any = runCommands(list, meta);
       const applied: any = executed.map((item: any, index: any) => recordedCommand(item.command, list[index]));
       const results: any = executed.map(({ command, data }: any) => ({ command: clone(command), data }));
       record(meta.label, meta.origin, applied);
