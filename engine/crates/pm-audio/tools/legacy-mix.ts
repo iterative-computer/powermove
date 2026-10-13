@@ -17,15 +17,20 @@
  *   projects/<name>/document.json    as built (media: references)
  *   projects/<name>/loaded.json      PM.proj after import (asset ids)
  *   projects/<name>/legacy.wav       renderOffline(0, dur): 32-bit float
+ *   real/media/                      audio extracted from the real project (private,
+ *                                    stays under the corpus root)
+ *
+ * `--real <file.pmv>` (default ~/Documents/Powermove ad.pmv, when present)
+ * adds Jude's real project; `--skip-real` leaves it out.
  *
  * The Rust side (`tests/legacy_parity.rs`) renders the same documents with
  * pm-audio and compares (docs/engine/pm-audio.md).
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { launchLegacyApp } from '../../../corpus/src/app';
+import { launchLegacyApp, type LegacyApp } from '../../../corpus/src/app';
 import { repoRoot } from '../../../corpus/src/catalog';
 import { newProject, type Builder, type Doc } from '../../../corpus/src/doc';
 import { resolveMedia, ref } from '../../../corpus/src/media';
@@ -180,6 +185,83 @@ function mediaRefs(value: unknown, out = new Set<string>()): Set<string> {
   return out;
 }
 
+/** `PM.Audio.renderOffline(0, dur)` in the app, as planar float channels. */
+async function renderLegacy(legacy: LegacyApp, dur: number): Promise<{ sampleRate: number; length: number; planar: Float32Array[]; decodeRates: Record<string, number> }> {
+  const mix: any = await legacy.evaluate(async (d: number) => {
+    const PM = (window as any).PM;
+    const buffer = await PM.Audio.renderOffline(0, d);
+    if (!buffer) return null;
+    const channels: string[] = [];
+    for (let c = 0; c < buffer.numberOfChannels; c++) {
+      const bytes = new Uint8Array(buffer.getChannelData(c).buffer.slice(0));
+      let text = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      channels.push(btoa(text));
+    }
+    const rates: Record<string, number> = {};
+    for (const [assetId, asset] of PM.assets.map) if (asset?.sampleRate) rates[assetId] = asset.sampleRate;
+    return { sampleRate: buffer.sampleRate, length: buffer.length, channels, decodeRates: rates };
+  }, dur);
+  if (!mix) throw new Error('renderOffline returned no mix');
+  const planar = mix.channels.map((b64: string) => new Float32Array(new Uint8Array(Buffer.from(b64, 'base64')).buffer));
+  return { sampleRate: mix.sampleRate, length: mix.length, planar, decodeRates: mix.decodeRates };
+}
+
+/** Opens a saved project in the app, extracts the audio its layers use, and captures its mix. */
+async function captureReal(legacy: LegacyApp, out: string, file: string): Promise<Record<string, any>> {
+  const slug = 'real-' + path.basename(file, path.extname(file)).toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  const dir = path.join(out, 'projects', slug);
+  mkdirSync(dir, { recursive: true });
+  const record: Record<string, any> = { name: slug, notes: 'A real project (outside the repository).', clicks: [], media: {} };
+  try {
+    const copy = path.join(legacy.userData, path.basename(file));
+    copyFileSync(file, copy);
+    await legacy.evaluateMain(({ dialog }: any, filePath: string) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] }); }, copy);
+    const before = await legacy.evaluate(() => (window as any).PM.proj.id);
+    await legacy.evaluate(() => (window as any).PM.openProject());
+    await legacy.waitFor((id: string) => (window as any).PM.proj.id !== id, before, 120_000);
+    await legacy.evaluate(async () => { await (window as any).PM.projectAssetsReady; });
+    record.mediaPending = await legacy.evaluate(() => (window as any).__corpus.waitForMedia(180000));
+    const loaded = await legacy.evaluate(() => JSON.stringify((window as any).PM.proj));
+    writeFileSync(path.join(dir, 'loaded.json'), loaded + '\n');
+    const doc = JSON.parse(loaded);
+    record.dur = doc.dur;
+    record.fps = doc.fps;
+    const media: Array<{ id: string; name: string; data: string }> = await legacy.evaluate(async () => {
+      const PM = (window as any).PM;
+      const ids = new Set<string>();
+      const visit = (comp: any) => { for (const l of comp?.layers || []) if (l?.d?.asset && (l.type === 'audio' || (l.type === 'video' && l.d.embeddedAudio))) ids.add(l.d.asset); };
+      visit(PM.proj);
+      for (const c of Object.values<any>(PM.proj.comps || {})) visit(c);
+      const outList: Array<{ id: string; name: string; data: string }> = [];
+      for (const id of ids) {
+        const asset = PM.assets.get(id);
+        const blob = asset?.audioBlob;
+        if (!blob) continue;
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        let text = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        outList.push({ id, name: String(asset.name || id), data: btoa(text) });
+      }
+      return outList;
+    });
+    const mediaDir = path.join(out, 'real', 'media');
+    mkdirSync(mediaDir, { recursive: true });
+    for (const m of media) {
+      const ext = path.extname(m.name) || '.bin';
+      const target = path.join(mediaDir, `${m.id}${ext}`);
+      writeFileSync(target, Buffer.from(m.data, 'base64'));
+      record.media[m.name] = { file: target, assetId: m.id, kind: 'audio' };
+    }
+    const mix = await renderLegacy(legacy, doc.dur);
+    writeFileSync(path.join(dir, 'legacy.wav'), wav(mix.sampleRate, mix.planar, mix.planar.length === 1 ? MONO : STEREO));
+    record.legacy = { sampleRate: mix.sampleRate, length: mix.length, channels: mix.planar.length, decodeRates: mix.decodeRates };
+  } catch (error) {
+    record.error = String((error as Error).message || error).split('\n')[0];
+  }
+  return record;
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const opt = (name: string) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
@@ -220,23 +302,8 @@ async function main() {
         record.mediaPending = await legacy.evaluate(() => (window as any).__corpus.waitForMedia(30000));
         const loaded = await legacy.evaluate(() => JSON.stringify((window as any).PM.proj));
         writeFileSync(path.join(dir, 'loaded.json'), loaded + '\n');
-        const mix: any = await legacy.evaluate(async (dur: number) => {
-          const PM = (window as any).PM;
-          const buffer = await PM.Audio.renderOffline(0, dur);
-          if (!buffer) return null;
-          const channels: string[] = [];
-          for (let c = 0; c < buffer.numberOfChannels; c++) {
-            const bytes = new Uint8Array(buffer.getChannelData(c).buffer.slice(0));
-            let text = '';
-            for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-            channels.push(btoa(text));
-          }
-          const rates: Record<string, number> = {};
-          for (const [assetId, asset] of PM.assets.map) if (asset?.sampleRate) rates[assetId] = asset.sampleRate;
-          return { sampleRate: buffer.sampleRate, length: buffer.length, channels, decodeRates: rates };
-        }, project.doc.dur);
-        if (!mix) throw new Error('renderOffline returned no mix');
-        const planar = mix.channels.map((b64: string) => new Float32Array(new Uint8Array(Buffer.from(b64, 'base64')).buffer));
+        const mix = await renderLegacy(legacy, project.doc.dur);
+        const planar = mix.planar;
         writeFileSync(path.join(dir, 'legacy.wav'), wav(mix.sampleRate, planar, planar.length === 1 ? MONO : STEREO));
         record.legacy = { sampleRate: mix.sampleRate, length: mix.length, channels: planar.length, decodeRates: mix.decodeRates };
       } catch (error) {
@@ -244,6 +311,12 @@ async function main() {
       }
       manifest.projects.push(record);
       console.log(`${project.name}: ${record.error ?? `${record.legacy?.length} samples`}`);
+    }
+    const real = opt('--real') ?? path.join(os.homedir(), 'Documents/Powermove ad.pmv');
+    if (!args.includes('--skip-real') && existsSync(real)) {
+      const record = await captureReal(legacy, out, real);
+      manifest.projects.push(record);
+      console.log(`${record.name}: ${record.error ?? `${record.legacy?.length} samples`}`);
     }
   } finally {
     manifest.pageErrors = legacy.pageErrors;
