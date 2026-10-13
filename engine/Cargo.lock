@@ -1514,6 +1514,12 @@ version = "0.1.0"
 [[package]]
 name = "pm-color"
 version = "0.1.0"
+dependencies = [
+ "libm",
+ "pm-protocol",
+ "proptest",
+ "sha2",
+]
 
 [[package]]
 name = "pm-edit"

@@ -8,3 +8,9 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+pm-protocol = { path = "../pm-protocol", default-features = false }
+libm.workspace = true
+
+[dev-dependencies]
+sha2 = { workspace = true, features = ["std"] }
+proptest.workspace = true
