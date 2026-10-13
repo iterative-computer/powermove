@@ -39,15 +39,7 @@ const byCodeUnits = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 /** A JSON copy of a live value (`clonePatchValue`). */
 const clone = (value: any) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
 
-/** The JSON members of a live object: [key, value] for each present member. */
-function members(obj: Record<string, any>): Map<string, any> {
-  const out = new Map<string, any>();
-  for (const key of Object.keys(obj)) {
-    const v = jsonValue(obj[key], key);
-    if (v !== ABSENT) out.set(key, v);
-  }
-  return out;
-}
+const isEnumerable = Object.prototype.propertyIsEnumerable;
 
 /** The JSON elements of a live array. */
 function elements(arr: readonly any[]): any[] {
@@ -77,19 +69,24 @@ function walk(before: any, after: any, path: PathPart[], out: PatchOp[]): void {
   if (Object.is(before, after)) return;
   if (Array.isArray(before) && Array.isArray(after)) return walkArrays(before, elements(after), path, out);
   if (isRecord(before) && isRecord(after)) {
-    const live = members(after);
     let segments: [string, number, number][] | undefined;
-    const member = (key: string, inBefore: boolean, inAfter: boolean) => {
+    const member = (key: string, inBefore: boolean, value: any) => {
       const start = out.length;
       path.push(key);
-      if (inBefore && inAfter) walk(before[key], live.get(key), path, out);
-      else if (inAfter) out.push({ path: path.slice(), exists: true, value: clone(live.get(key)) });
+      if (inBefore && value !== ABSENT) walk(before[key], value, path, out);
+      else if (value !== ABSENT) out.push({ path: path.slice(), exists: true, value: clone(value) });
       else out.push({ path: path.slice(), exists: false });
       path.pop();
       if (out.length > start) (segments ??= []).push([key, start, out.length]);
     };
-    for (const key of Object.keys(before)) member(key, true, live.has(key));
-    for (const key of live.keys()) if (!Object.hasOwn(before, key)) member(key, false, true);
+    // A live member is present when it is enumerable and has a JSON form.
+    const liveValue = (key: string) => (isEnumerable.call(after, key) ? jsonValue(after[key], key) : ABSENT);
+    for (const key of Object.keys(before)) member(key, true, liveValue(key));
+    for (const key of Object.keys(after)) {
+      if (Object.hasOwn(before, key)) continue;
+      const value = jsonValue(after[key], key);
+      if (value !== ABSENT) member(key, false, value);
+    }
     if (segments && segments.length > 1) {
       const base = segments[0]![1];
       const sorted = [...segments].sort((a, b) => byCodeUnits(a[0], b[0]));
