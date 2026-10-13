@@ -19,6 +19,7 @@
 pub mod display;
 mod noise;
 pub mod pool;
+pub mod remote_layer;
 pub mod surface;
 pub mod test_source;
 

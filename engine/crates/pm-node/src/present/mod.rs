@@ -53,6 +53,11 @@ pub const TRACE_ENV: &str = "POWERMOVE_BRIDGE_TRACE";
 /// Where timed frames start on the viewer's refresh grid, in thousandths of
 /// a refresh after it (`off` renders at the due time, as before the hint).
 pub const PHASE_ENV: &str = "POWERMOVE_BRIDGE_PHASE";
+/// The C′ prototype: `1` presents playback through a remote Core
+/// Animation layer main hosts in the viewer's window (measurement only).
+pub const REMOTE_LAYER_ENV: &str = "POWERMOVE_BRIDGE_REMOTE_LAYER";
+/// Where the C′ prototype appends its presentation records (JSON lines).
+pub const REMOTE_TRACE_ENV: &str = "POWERMOVE_BRIDGE_REMOTE_TRACE";
 
 /// Default render phase: thousandths of a refresh after the BeginFrame
 /// (docs/engine/bridge.md, "Vsync-phase hint").
@@ -108,6 +113,8 @@ impl PresenterConfig {
                         .or(Some(f64::from(DEFAULT_PHASE_PERMILLE) / 1000.0)),
                     None => Some(f64::from(DEFAULT_PHASE_PERMILLE) / 1000.0),
                 },
+                remote_layer: env(REMOTE_LAYER_ENV).as_deref() == Some("1"),
+                remote_trace: env(REMOTE_TRACE_ENV).filter(|p| !p.is_empty()),
             },
             source: match env(SOURCE_ENV).as_deref() {
                 Some("test-pattern") => Some(FrameSource::TestPattern),

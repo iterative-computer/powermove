@@ -18,6 +18,7 @@ use pm_bridge::wire::{PixelFormat, SurfaceInfo};
 use pm_engine::{Action, LogLevel};
 use pm_gpu::bridge_out::display::{DisplayParams, DisplayTransform, WorkingTexture};
 use pm_gpu::bridge_out::pool::SurfacePool;
+use pm_gpu::bridge_out::remote_layer::{Presented, RemoteLayer, raw_metal_device};
 use pm_gpu::bridge_out::test_source::{TestFrame, TestSource};
 use pm_protocol::clock::TransportCommand;
 use pm_protocol::codec;
@@ -159,6 +160,11 @@ pub struct ThreadConfig {
     /// frames start rendering, once the viewer sent its vsync hint; `None`
     /// renders at the due time.
     pub phase: Option<f64>,
+    /// The C′ prototype: timed playback frames go to a remote Core
+    /// Animation layer instead of the viewer (docs/engine/bridge.md).
+    pub remote_layer: bool,
+    /// File the C′ prototype appends presentation records to.
+    pub remote_trace: Option<String>,
 }
 
 /// One frame's record for the S1 harness.
@@ -203,6 +209,12 @@ pub struct Stats {
     pub gpu_us_max: i64,
     pub gpu_us_total: i64,
     pub max_held: u32,
+    /// The C′ prototype: frames given to the remote layer, and how many Core
+    /// Animation reported presented or dropped.
+    pub remote_frames: u64,
+    pub remote_presented: u64,
+    pub remote_dropped: u64,
+    pub remote_error: Option<String>,
     #[serde(skip)]
     pub trace: Vec<FrameTrace>,
 }
@@ -221,6 +233,8 @@ struct Live {
     ledger: PoolLedger,
     working: WorkingTexture,
     source: TestSource,
+    /// The C′ prototype's layer for this pool's size and format.
+    remote: Option<RemoteLayer>,
 }
 
 struct View {
@@ -456,6 +470,15 @@ impl Thread {
     }
 
     fn retire_pool(&self, key: Key, live: Live) {
+        if live.remote.is_some()
+            && let Some(bridge) = &self.bridge
+            && let Err(error) = bridge.remote_layer(key.0.0, live.spec.generation, 0, (0, 0), 0)
+        {
+            self.log(
+                LogLevel::Warn,
+                format!("frame bridge: could not withdraw the remote layer: {error}"),
+            );
+        }
         if let Some(bridge) = &self.bridge
             && let Err(error) = bridge.retire(key.0.0, live.spec.generation)
         {
@@ -643,13 +666,140 @@ impl Thread {
         stats.pools += 1;
         stats.surfaces_sent += u64::from(spec.count);
         drop(stats);
+        let remote = if self.config.remote_layer {
+            self.make_remote(key, spec)
+        } else {
+            None
+        };
         Ok(Live {
             spec,
             ledger: PoolLedger::new(pool.len()),
             pool,
             working,
             source,
+            remote,
         })
+    }
+
+    /// The C′ prototype: a remote layer for `spec`, announced to main.
+    fn make_remote(&mut self, key: Key, spec: PoolSpec) -> Option<RemoteLayer> {
+        let (scale, space) = self
+            .views
+            .get(&key)
+            .map(|v| (v.state.device_pixel_ratio, v.state.color_space))?;
+        let device = self
+            .gpu
+            .as_ref()
+            .and_then(|g| raw_metal_device(&g.device))?;
+        let made = RemoteLayer::new(device, spec.size, scale, spec.format, space)
+            .map_err(|e| e.to_string())
+            .and_then(|layer| {
+                let bridge = self.bridge.as_ref().ok_or("no bridge")?;
+                bridge
+                    .remote_layer(
+                        key.0.0,
+                        spec.generation,
+                        layer.context_id(),
+                        (spec.size.width, spec.size.height),
+                        (scale * 1000.0).round() as u32,
+                    )
+                    .map_err(|e| e.to_string())?;
+                Ok(layer)
+            });
+        match made {
+            Ok(layer) => {
+                self.log(
+                    LogLevel::Info,
+                    format!(
+                        "frame bridge: remote layer context {} for generation {} (C′ prototype)",
+                        layer.context_id(),
+                        spec.generation
+                    ),
+                );
+                Some(layer)
+            }
+            Err(error) => {
+                self.stats().remote_error = Some(error.clone());
+                self.log(
+                    LogLevel::Error,
+                    format!("frame bridge: no remote layer (C′ prototype): {error}"),
+                );
+                None
+            }
+        }
+    }
+
+    /// The C′ prototype: hands a rendered timed frame to the remote layer
+    /// to show at host µs `shown_from`, then frees its surface.
+    fn present_remote(&mut self, key: Key, descriptor: &FrameDescriptor, shown_from: f64) {
+        let Some(view) = self.views.get_mut(&key) else {
+            return;
+        };
+        let Some(live) = view.pool.as_mut() else {
+            return;
+        };
+        let index = descriptor.pool_index;
+        let result = match (live.remote.as_mut(), live.pool.surfaces.get(index as usize)) {
+            (Some(remote), Some(surface)) => remote
+                .present(
+                    &surface.iosurface,
+                    descriptor.seq.get(),
+                    shown_from.round() as i64,
+                )
+                .map_err(|e| e.to_string()),
+            _ => Err("no remote layer or surface".into()),
+        };
+        let _ = live.ledger.release(FrameRelease {
+            pool_index: index,
+            seq: descriptor.seq,
+        });
+        let mut stats = self.stats();
+        match result {
+            Ok(()) => stats.remote_frames += 1,
+            Err(error) => stats.remote_error = Some(error),
+        }
+    }
+
+    /// Collects the remote layers' presentation records into the stats and
+    /// the trace file.
+    fn collect_remote(&mut self) {
+        let mut records: Vec<Presented> = Vec::new();
+        for view in self.views.values() {
+            if let Some(remote) = view.pool.as_ref().and_then(|l| l.remote.as_ref()) {
+                records.extend(remote.take_presented());
+            }
+        }
+        if records.is_empty() {
+            return;
+        }
+        let mut stats = self.stats();
+        for r in &records {
+            if r.presented_us.is_some() {
+                stats.remote_presented += 1;
+            } else {
+                stats.remote_dropped += 1;
+            }
+        }
+        drop(stats);
+        if let Some(path) = &self.config.remote_trace {
+            use std::io::Write;
+            let mut text = String::new();
+            for r in &records {
+                text.push_str(&format!(
+                    "[{},{},{}]\n",
+                    r.seq,
+                    r.asked_us,
+                    r.presented_us.map_or("null".into(), |v| v.to_string())
+                ));
+            }
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = file.write_all(text.as_bytes());
+            }
+        }
     }
 
     /// The render phase for a view: its vsync hint and the configured
@@ -695,6 +845,9 @@ impl Thread {
         let keys: Vec<Key> = self.views.keys().copied().collect();
         for key in keys {
             self.work_view(key);
+        }
+        if self.config.remote_layer {
+            self.collect_remote();
         }
     }
 
@@ -770,9 +923,14 @@ impl Thread {
                         return;
                     };
                     view.schedule.rendered(&view.clock, k);
+                    let remote = view.pool.as_ref().is_some_and(|l| l.remote.is_some());
                     if let Some(descriptor) = rendered {
-                        let revision = descriptor.revision;
-                        self.event(key, Event::Frame(descriptor), Some(revision));
+                        if remote {
+                            self.present_remote(key, &descriptor, shown_from);
+                        } else {
+                            let revision = descriptor.revision;
+                            self.event(key, Event::Frame(descriptor), Some(revision));
+                        }
                     }
                 }
                 Next::Skip { .. } => {

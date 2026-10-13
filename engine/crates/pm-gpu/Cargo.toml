@@ -19,6 +19,11 @@ objc2-metal = { version = "0.3", features = ["objc2-io-surface"] }
 # The viewer's surfaces (bridge_out) and its device helper.
 objc2-io-surface = "0.3.2"
 objc2-core-foundation = "0.3.2"
+# The C′ prototype (bridge_out::remote_layer): a remote CAMetalLayer.
+objc2-quartz-core = { version = "0.3.2", features = ["objc2-metal", "objc2-core-graphics"] }
+objc2-core-graphics = "0.3.2"
+objc2-foundation = "0.3.2"
+block2 = "0.6"
 pollster = "0.4"
 
 [features]
