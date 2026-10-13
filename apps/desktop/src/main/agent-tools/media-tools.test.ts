@@ -12,6 +12,7 @@ import { TRANSCRIPTION_MODEL_MISSING, type Transcript } from '../../shared/trans
 import { TranscriptionModelMissingError, type TranscriptionService } from '../transcription/service';
 import { parseProbe } from './media-ffmpeg';
 import { AgentMediaTools, type MediaToolContext } from './media-tools';
+import { resolveFfmpeg } from '../ffmpeg-binary';
 
 /*
  * A real smoke run: footage generated with ffmpeg lavfi (a flat blue shot,
@@ -20,7 +21,7 @@ import { AgentMediaTools, type MediaToolContext } from './media-tools';
  */
 
 const run = promisify(execFile);
-const ffmpeg = path.resolve(__dirname, '../../../node_modules/ffmpeg-static/ffmpeg');
+const ffmpeg = resolveFfmpeg({ packaged: false, resourcesPath: '', appPath: path.resolve(__dirname, '../../..') }).ffmpeg;
 let directory = '';
 let footage = '';
 
@@ -33,7 +34,7 @@ async function generate(): Promise<void> {
     '-f', 'lavfi', '-i', 'smptebars=s=640x360:r=30:d=4',
     '-f', 'lavfi', '-i', 'sine=f=440:d=8:sample_rate=48000',
     '-filter_complex', "[0][1]concat=n=2:v=1:a=0[v];[2]volume=enable='between(t,2,3.5)+between(t,5.5,6.2)':volume=0,volume=4[a]",
-    '-map', '[v]', '-map', '[a]', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-g', '30', '-c:a', 'aac', '-b:a', '128k', footage
+    '-map', '[v]', '-map', '[a]', '-c:v', 'h264_videotoolbox', '-allow_sw', '1', '-b:v', '4M', '-pix_fmt', 'yuv420p', '-g', '30', '-c:a', 'aac', '-b:a', '128k', footage
   ]);
 }
 

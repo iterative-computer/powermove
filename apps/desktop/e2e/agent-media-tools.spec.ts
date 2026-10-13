@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
-import { expect, launchApp, repoRoot, test } from './helpers/app';
+import { expect, launchApp, test } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 
 /*
  * The agent watches and listens to real footage through the whole stack: a
@@ -15,7 +16,7 @@ import { expect, launchApp, repoRoot, test } from './helpers/app';
  */
 
 const run = promisify(execFile);
-const ffmpeg = path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg');
+const ffmpeg = ffmpegBinary;
 const SCREENSHOTS = process.env.POWERMOVE_MEDIA_TOOLS_SHOTS;
 
 async function footage(directory: string): Promise<string> {
@@ -27,7 +28,7 @@ async function footage(directory: string): Promise<string> {
     '-f', 'lavfi', '-i', 'smptebars=s=640x360:r=30:d=4',
     '-f', 'lavfi', '-i', 'sine=f=440:d=8:sample_rate=48000',
     '-filter_complex', "[0][1]concat=n=2:v=1:a=0[v];[2]volume=enable='between(t,2,3.5)+between(t,5.5,6.2)':volume=0,volume=4[a]",
-    '-map', '[v]', '-map', '[a]', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-g', '30', '-c:a', 'aac', file
+    '-map', '[v]', '-map', '[a]', '-c:v', 'h264_videotoolbox', '-allow_sw', '1', '-b:v', '4M', '-pix_fmt', 'yuv420p', '-g', '30', '-c:a', 'aac', file
   ]);
   return file;
 }

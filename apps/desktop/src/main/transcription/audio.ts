@@ -1,9 +1,7 @@
-import path from 'node:path';
-
 /*
  * ffmpeg turns any audio or video file into what the recognizer eats: 16 kHz
- * mono 32-bit float, streamed on stdout. The bundled ffmpeg-static binary is
- * the one media-proxy and render-encoder use.
+ * mono 32-bit float, streamed on stdout. It is Powermove's own FFmpeg build
+ * (main/ffmpeg-binary.ts), the one media-proxy and render-encoder use.
  */
 
 export interface DecodeSpan {
@@ -63,9 +61,4 @@ export function decodeError(stderr: string): string {
   if (/No such file or directory/i.test(stderr)) return 'The media file could not be found.';
   if (/Invalid data found|could not find codec|Unknown format/i.test(stderr)) return 'This file’s audio could not be read.';
   return 'The audio could not be decoded.';
-}
-
-/** Where the bundled ffmpeg lives in a packaged app and in development. */
-export function bundledFfmpeg(packaged: boolean, resourcesPath: string, appPath: string): string {
-  return packaged ? path.join(resourcesPath, 'encoder', 'ffmpeg') : path.join(appPath, 'node_modules', 'ffmpeg-static', 'ffmpeg');
 }

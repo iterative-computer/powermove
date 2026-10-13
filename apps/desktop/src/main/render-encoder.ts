@@ -9,10 +9,22 @@ import { rememberExport } from './export-sidecar';
 
 export type EncoderOptions={width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number};
 type Job={destination?:string;dir:string;file:string;audio:string;process:ChildProcessWithoutNullStreams;done:Promise<void>;bytes:number;frameBytes:number;frames:number;options:EncoderOptions;owner:number;error:string};
+/* CICP 1-13-1, limited range: "Rec.709 (QuickTime and Safari)" (plan section 9,
+   S2). VideoToolbox takes primaries and transfer from the frames' attachments,
+   not from the output options, so the frames are tagged too (setparams).
+   Encoding goes through VideoToolbox: Powermove's FFmpeg build has no libx264
+   and no prores_ks (plan section 24, engine/third_party/ffmpeg/README.md).
+   -allow_sw lets a Mac without a ProRes engine fall back to Apple's software
+   encoder instead of failing; hardware is still preferred. */
+const COLOR_TAGS='color_primaries=bt709:color_trc=iec61966-2-1:colorspace=bt709:range=tv';
 export function encoderArgs(options:EncoderOptions,output:string):string[]{
   return ['-hide_banner','-loglevel','error','-f','rawvideo','-pixel_format','rgba','-video_size',`${options.width}x${options.height}`,'-framerate',String(options.fps),'-i','pipe:0','-an',
-    '-vf','scale=in_range=full:out_range=limited:out_color_matrix=bt709',
-    ...(options.format==='prores'?['-c:v','prores_ks','-profile:v','4','-pix_fmt',options.alpha?'yuva444p10le':'yuv444p10le','-alpha_bits','16']:['-c:v','libx264','-pix_fmt','yuv420p','-b:v',`${options.bitrateMbps ?? 16}M`]),
+    '-vf',`scale=in_range=full:out_range=limited:out_color_matrix=bt709,setparams=${COLOR_TAGS}`,
+    // ProRes 4444 from 16-bit 4:4:4 Y'CbCr: with alpha as 'y416' (ayuv64le), opaque as 'sv44' (p416le, no alpha channel).
+    // Never hand VideoToolbox BGRA: it then converts with the Rec.709 matrix but tags the stream smpte170m.
+    ...(options.format==='prores'?['-c:v','prores_videotoolbox','-allow_sw','1','-profile:v','4444','-pix_fmt',options.alpha?'ayuv64le':'p416le']
+      // libx264's default keyframe interval (250) keeps seeking in exported files as it was.
+      :['-c:v','h264_videotoolbox','-allow_sw','1','-profile:v','high','-pix_fmt','yuv420p','-b:v',`${options.bitrateMbps ?? 16}M`,'-g','250']),
     '-color_primaries','bt709','-color_trc','iec61966-2-1','-colorspace','bt709','-color_range','tv','-movflags','+faststart','-y',output];
 }
 export function validateEncoderOptions(raw:any):EncoderOptions {
@@ -38,9 +50,9 @@ export class RenderEncoder {
   // kill it outright; otherwise release never settles and the export stays busy.
   async release(token:string,owner:number){const job=this.job(token,owner);this.jobs.delete(token);if(job.process.exitCode===null&&job.process.signalCode===null){job.process.stdin.destroy();job.process.kill('SIGKILL');}await job.done.catch(()=>undefined);await rm(job.dir,{recursive:true,force:true});}
 }
-export function registerRenderEncoder(ipc:IpcMain,ctx:{isTrustedSender:(event:any)=>boolean}) {
-  const binary=app.isPackaged?path.join(process.resourcesPath,'encoder','ffmpeg'):path.join(app.getAppPath(),'node_modules','ffmpeg-static','ffmpeg');
-  const encoder=new RenderEncoder(binary,app.getPath('temp'));
+/** `ffmpeg` is Powermove's own FFmpeg build (ffmpeg-binary.ts). */
+export function registerRenderEncoder(ipc:IpcMain,ctx:{isTrustedSender:(event:any)=>boolean;ffmpeg:string}) {
+  const encoder=new RenderEncoder(ctx.ffmpeg,app.getPath('temp'));
   const trusted=(event:any)=>{if(!ctx.isTrustedSender(event))throw new Error('Unauthorized encoder request');return event.sender.id;};
   ipc.handle(IPC.renderStart,async(e,r)=>{
     const owner=trusted(e),options=validateEncoderOptions(r);

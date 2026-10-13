@@ -36,7 +36,7 @@ beforeAll(async () => {
   dir = await mkdtemp(path.join(tmpdir(), 'pm-reconnect-'));
   server = await serve({
     host: '127.0.0.1', port: 0, userData: path.join(dir, 'profile'), exportsDir: path.join(dir, 'exports'),
-    rendererDir: path.join(dir, 'renderer'), resourcesDir: path.join(dir, 'resources'), appPath: dir,
+    rendererDir: path.join(dir, 'renderer'), resourcesDir: path.join(dir, 'resources'), appPath: dir, ffmpeg: 'ffmpeg',
     version: '0.0.0-test', codexBinary: null, claudeBinary: null, engineScript: null, installKind: 'source', insecure: true,
     log: () => undefined
   });

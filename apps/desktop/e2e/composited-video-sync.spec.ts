@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { copyFile, writeFile } from 'node:fs/promises';
-import { expect, test, repoRoot } from './helpers/app';
+import { expect, test } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 
 // Different codecs can start at different times even when both clips have the
 // same trim. An alpha cutout over its source exposes that as doubled subjects.
@@ -14,7 +15,7 @@ test('overlapping video layers present the same composition frame despite decode
     for (let pixel = 0; pixel < 64 * 64; pixel++) frame[pixel * 4 + 3] = pixel % 64 < 32 ? 0 : 255;
     return frame;
   }));
-  for (const [i, source] of sources.entries()) execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'), [
+  for (const [i, source] of sources.entries()) execFileSync(ffmpegBinary, [
     '-v', 'error', '-f', 'rawvideo', '-pix_fmt', i ? 'rgba' : 'rgb24', '-s', '64x64', '-r', '30', '-i', 'pipe:0',
     '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-lossless', '1', '-g', '1', source,
   ], { input: i ? cutout : raw });

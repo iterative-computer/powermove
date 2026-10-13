@@ -65,8 +65,10 @@ export interface ServeOptions {
   rendererDir: string;
   /** builtin-extensions/, api-pack/, agent-tools/ live here. */
   resourcesDir: string;
-  /** Directory whose node_modules holds ffmpeg-static (render-encoder resolves it from here). */
+  /** What `app.getAppPath()` answers inside the host. */
   appPath: string;
+  /** The FFmpeg executable for export, proxies, transcription and agent media tools (see cli.ts `hostFfmpeg`). */
+  ffmpeg: string;
   /** Where "Save…" writes on this machine. */
   exportsDir: string;
   version: string;
@@ -351,10 +353,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   registerCaptureIpc(ipcMain, ctx);
   registerShellIpc(ipcMain, { ...ctx, attachmentCacheDirectory: path.join(userData, 'Attachment Cache') });
   registerLogIpc(ipcMain, ctx);
-  const ffmpeg = path.join(options.appPath, 'node_modules', 'ffmpeg-static', 'ffmpeg');
+  const ffmpeg = options.ffmpeg;
   const mediaProxies = new MediaProxyService(app.getPath('temp'), playbackConverter(ffmpeg), imageSequenceConverter(ffmpeg), previewConverter(ffmpeg), stillImageConverter(ffmpeg));
   registerMediaProxyIpc(ipcMain, mediaProxies, ctx);
-  registerRenderEncoder(ipcMain, ctx);
+  registerRenderEncoder(ipcMain, { ...ctx, ffmpeg });
 
   /* agents */
   const apiPackDir = path.join(options.resourcesDir, 'api-pack');

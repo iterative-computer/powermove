@@ -2,15 +2,17 @@
  * Build the CLI first. All projects/media/exports stay in an isolated temp profile. */
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, writeFile, rm, stat } from 'node:fs/promises';
-import { createRequire } from 'node:module';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-const require = createRequire(path.join(repository, 'apps/desktop/package.json'));
-const ffmpeg = require('ffmpeg-static');
+// Powermove's FFmpeg build, found the way the CLI host finds it (src/server/cli.ts hostFfmpeg).
+const ffmpegDir = [process.env.PM_FFMPEG_DIR, path.join(os.homedir(), 'Library/Caches/powermove-engine/ffmpeg/out')]
+  .find(dir => dir && existsSync(path.join(dir, 'bin/ffmpeg')));
+const ffmpeg = process.env.POWERMOVE_FFMPEG || (ffmpegDir ? path.join(ffmpegDir, 'bin/ffmpeg') : 'ffmpeg');
 const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-mcp-video-'));
 const profile = path.join(root, 'profile'), exportsDir = path.join(root, 'exports');
 const audio = path.join(root, 'tone.wav');

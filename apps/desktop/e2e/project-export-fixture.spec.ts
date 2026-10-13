@@ -3,7 +3,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { decodeProjectContainer } from '../src/shared/project-container';
-import { expect, test, repoRoot } from './helpers/app';
+import { expect, test } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 
 test.beforeEach(async ({ session }) => { await session.openEditor(); });
 
@@ -77,7 +78,7 @@ test('reopens a media project, preserves source, and exports advancing frames', 
       return { layers: PM.proj.layers, frames: Math.ceil((PM.proj.work[1] - PM.proj.work[0]) * PM.proj.fps) };
     });
     expect(result.layers).toEqual(sourceLayers);
-    const hashes = execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'), ['-v', 'error', '-i', output, '-an', '-f', 'framemd5', 'pipe:1'], { encoding: 'utf8' })
+    const hashes = execFileSync(ffmpegBinary, ['-v', 'error', '-i', output, '-an', '-f', 'framemd5', 'pipe:1'], { encoding: 'utf8' })
       .split('\n').filter(line => line && !line.startsWith('#')).map(line => line.split(',').at(-1)!.trim());
     expect(hashes.length).toBe(result.frames);
     console.log(JSON.stringify({ originalLogBytes: JSON.stringify(original.edits).length, compactedLogBytes: loaded.editsBytes, frames: hashes.length, uniqueFrames: new Set(hashes).size, output }));

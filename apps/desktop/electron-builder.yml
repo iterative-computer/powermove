@@ -28,7 +28,6 @@ files:
   - native/pm_node.node
   - "!**/* [2-9].*"
   - "!**/* [2-9]"
-  - '!node_modules/ffmpeg-static/ffmpeg'
   # The native agent runtimes are copied once below, at the paths used by the
   # packaged binary resolvers. Keep their npm wrappers/metadata, but do not let
   # electron-builder auto-pack a second copy of either platform executable.
@@ -41,10 +40,16 @@ files:
 extraResources:
   - from: resources/sounds
     to: sounds
-  - from: node_modules/ffmpeg-static/ffmpeg
-    to: encoder/ffmpeg
-  - from: node_modules/ffmpeg-static/LICENSE
-    to: encoder/LICENSE
+  # Powermove's LGPL FFmpeg (engine/third_party/ffmpeg): bin/ffmpeg and
+  # bin/ffprobe, the libav* dylibs they load through @executable_path/../lib,
+  # NOTICE.txt, share/licenses and manifest.json. package.sh stages it into
+  # vendor/ffmpeg; after-pack.mjs refuses a bundle without it. The release
+  # signing pass signs every binary here with the Team ID and hardened runtime
+  # (scripts/release-mac.mjs checks).
+  - from: vendor/ffmpeg
+    to: ffmpeg
+    filter:
+      - "**/*"
   - from: node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin
     to: codex
     filter:

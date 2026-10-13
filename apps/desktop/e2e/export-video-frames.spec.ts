@@ -2,7 +2,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { expect, test, repoRoot } from './helpers/app';
+import { expect, test } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 
 const cases = [false, true].flatMap(restore => [10, 30].flatMap(fps =>
   ['webm', 'mp4'].map(format => ({ restore, fps, format, sourceFormat: 'webm' }))));
@@ -11,12 +12,12 @@ cases.push({ restore: true, fps: 30, format: 'mp4', sourceFormat: 'mp4' });
 for (const { restore, fps, format, sourceFormat } of cases) test(`exports each ${sourceFormat} source frame to ${format} at ${fps} fps ${restore ? 'after restoring media' : 'after import'}`, async ({ session }, info) => {
   await session.openEditor();
   const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-export-frames-'));
-  const ffmpeg = path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg');
+  const ffmpeg = ffmpegBinary;
   try {
     const source = path.join(root, `steps.${sourceFormat}`);
     const raw = Buffer.concat(Array.from({ length: 20 }, (_, i) => Buffer.alloc(64 * 64 * 3, 20 + i * 10)));
     execFileSync(ffmpeg, ['-v', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '64x64', '-r', String(fps), '-i', 'pipe:0',
-      ...(sourceFormat === 'webm' ? ['-c:v', 'libvpx-vp9', '-lossless', '1'] : ['-c:v', 'libx264', '-crf', '0', '-pix_fmt', 'yuv420p']), source], { input: raw });
+      ...(sourceFormat === 'webm' ? ['-c:v', 'libvpx-vp9', '-lossless', '1'] : ['-c:v', 'h264_videotoolbox', '-allow_sw', '1', '-b:v', '8M', '-pix_fmt', 'yuv420p']), source], { input: raw });
     await session.page.evaluate(fps => {
       const PM = (window as any).PM;
       PM.proj = PM.mkProject({ name: 'Frame test', w: 64, h: 64, fps, dur: 20 / fps });
