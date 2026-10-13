@@ -14,6 +14,21 @@
  * docs/engine/pm-eval.md), so an order change is a mismatch. A throw matches a
  * throw. The native answer is the
  * one returned; mismatches are recorded and reported.
+ *
+ * Allowed differences (docs/rust-engine.md, section 26, amendments 16 and 20;
+ * docs/engine/pm-eval-layers.md), counted under `allowed`, never as
+ * mismatches:
+ *
+ * - `atan2`: a number that is 180 on one side and −180 on the other (a
+ *   rotation exactly 360° apart at the `atan2` branch cut);
+ * - `fragile`: a bounds or pick case whose legacy answer itself changes under
+ *   a 1e-12 s time or 1e-7 px point perturbation. Every bounds and pick
+ *   comparison is classified, so `fragile` counts the population and
+ *   `allowed['<op>:fragile']` the fragile cases that differ; the gate allows
+ *   at most 5% of fragile cases to differ (`fragileBudget()`);
+ * - `nested-retime` (amendment 16): variable-speed source times of nested
+ *   compositions. No routed query integrates speed in Phase 1 (`sourceTime`
+ *   is not a kernel query), so this class is declared and stays at zero.
  */
 
 export interface Mismatch {
@@ -31,9 +46,19 @@ export interface DualStats {
   /** Answers that differed because the mirror missed a write (a barrier
    *  gap, repaired and re-answered; counted, not evaluation mismatches). */
   stale: Record<string, number>;
+  /** Differences of an allowed class, by `<op>:<class>` (never mismatches). */
+  allowed: Record<string, number>;
+  /** Bounds and pick comparisons whose legacy answer is fragile, by op. */
+  fragile: Record<string, number>;
   /** The first mismatches of each operation (bounded). */
   samples: Mismatch[];
 }
+
+/** Classes of allowed differences (amendments 16 and 20). */
+export type AllowedClass = 'atan2' | 'fragile' | 'nested-retime';
+
+/** The share of fragile bounds and pick cases allowed to differ (amendment 20). */
+export const FRAGILE_BUDGET = 0.05;
 
 type Answer = { value?: unknown; threw?: unknown };
 
@@ -41,10 +66,18 @@ const BOUNDS_OPS = new Set(['gl.bounds', 'groups.bounds']);
 const TEXT_OPS = new Set(['textLayout', 'rasterMetrics']);
 const MAX_SAMPLES_PER_OP = 20;
 
+export const FRAGILE_OPS = new Set(['gl.bounds', 'groups.bounds', 'gl.pick']);
+
 function tolerance(op: string): (a: number, b: number) => boolean {
   if (BOUNDS_OPS.has(op)) return (a, b) => Math.abs(a - b) <= 1e-6;
   if (TEXT_OPS.has(op)) return (a, b) => Math.abs(a - b) <= 0.25;
   return (a, b) => Math.abs(a - b) <= 1e-9 + 1e-9 * Math.abs(b);
+}
+
+/** 180 against −180 (either way), within the evaluation tolerance. */
+export function atan2BranchCut(a: number, b: number): boolean {
+  const near = (x: number, y: number) => Math.abs(x - y) <= 1e-9 + 1e-9 * Math.abs(y);
+  return (near(a, 180) && near(b, -180)) || (near(a, -180) && near(b, 180));
 }
 
 const show = (v: unknown): string => {
@@ -92,17 +125,51 @@ export function differs(a: unknown, b: unknown, close: (a: number, b: number) =>
 }
 
 export class DualAnswers {
-  readonly stats: DualStats = { compared: {}, mismatched: {}, stale: {}, samples: [] };
+  readonly stats: DualStats = { compared: {}, mismatched: {}, stale: {}, allowed: {}, fragile: {}, samples: [] };
   private perOp = new Map<string, number>();
 
   constructor(private report: (mismatch: Mismatch) => void = () => {}) {}
 
   /** Where two answers differ beyond the tolerances, or null. */
   check(op: string, native: Answer, legacy: Answer, unwrap: <T>(v: T) => T): string | null {
-    if ('threw' in native || 'threw' in legacy) return ('threw' in native) === ('threw' in legacy) ? null : '(throw)';
+    return this.classify(op, native, legacy, unwrap).path;
+  }
+
+  /**
+   * Where two answers differ beyond the tolerances (or null), and the allowed
+   * class that let a difference through (counted by `record`).
+   */
+  classify(op: string, native: Answer, legacy: Answer, unwrap: <T>(v: T) => T): { path: string | null; allowed: AllowedClass | null } {
+    if ('threw' in native || 'threw' in legacy) return { path: ('threw' in native) === ('threw' in legacy) ? null : '(throw)', allowed: null };
     // Order matters: the native API restores the document's member order
     // (pm-eval's own listing is sorted, allowed difference 5).
-    return identity(op, native.value, legacy.value, unwrap) ?? differs(native.value, legacy.value, tolerance(op), unwrap) ?? keyOrderDiffers(native.value, legacy.value);
+    const within = tolerance(op);
+    let allowed: AllowedClass | null = null;
+    const close = (a: number, b: number) => {
+      if (within(a, b)) return true;
+      if (!BOUNDS_OPS.has(op) && !TEXT_OPS.has(op) && atan2BranchCut(a, b)) { allowed = 'atan2'; return true; }
+      return false;
+    };
+    const path = identity(op, native.value, legacy.value, unwrap) ?? differs(native.value, legacy.value, close, unwrap) ?? keyOrderDiffers(native.value, legacy.value);
+    return { path, allowed: path === null ? allowed : null };
+  }
+
+  /** Counts a difference of an allowed class. */
+  allow(op: string, kind: AllowedClass): void {
+    const k = `${op}:${kind}`;
+    this.stats.allowed[k] = (this.stats.allowed[k] ?? 0) + 1;
+  }
+
+  /** Counts a fragile bounds or pick case (the population of the 5% budget). */
+  noteFragile(op: string): void {
+    this.stats.fragile[op] = (this.stats.fragile[op] ?? 0) + 1;
+  }
+
+  /** Fragile cases and how many of them differed, with the 5% verdict. */
+  fragileBudget(): { fragile: number; differed: number; ok: boolean } {
+    const fragile = Object.values(this.stats.fragile).reduce((a, b) => a + b, 0);
+    const differed = Object.entries(this.stats.allowed).filter(([k]) => k.endsWith(':fragile')).reduce((a, [, n]) => a + n, 0);
+    return { fragile, differed, ok: differed <= FRAGILE_BUDGET * fragile };
   }
 
   /** Counts a comparison and records an evaluation mismatch when `path` is set. */
@@ -124,16 +191,17 @@ export class DualAnswers {
     this.report(mismatch);
   }
 
-  /** `check` then `record`; true when the answers agree. */
+  /** `classify` then `record`; true when the answers agree. */
   compare(op: string, native: Answer, legacy: Answer, where: () => Record<string, unknown>, unwrap: <T>(v: T) => T): boolean {
-    const path = this.check(op, native, legacy, unwrap);
+    const { path, allowed } = this.classify(op, native, legacy, unwrap);
+    if (allowed) this.allow(op, allowed);
     this.record(op, path, native, legacy, where);
     return path === null;
   }
 
-  total(): { compared: number; mismatched: number; stale: number } {
+  total(): { compared: number; mismatched: number; stale: number; allowed: number } {
     const sum = (r: Record<string, number>) => Object.values(r).reduce((a, b) => a + b, 0);
-    return { compared: sum(this.stats.compared), mismatched: sum(this.stats.mismatched), stale: sum(this.stats.stale) };
+    return { compared: sum(this.stats.compared), mismatched: sum(this.stats.mismatched), stale: sum(this.stats.stale), allowed: sum(this.stats.allowed) };
   }
 }
 

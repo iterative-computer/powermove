@@ -77,7 +77,15 @@ export interface EngineDoc {
   check(reason: string): ConsistencyResult | null;
   beforeSave(reason?: string): void;
   beforeExport(reason?: string): void;
+  /**
+   * The canonical patch stream (contract 5) for engine sessions: every batch
+   * pm-wasm applied, in order. Receivers start from `snapshot()` and apply
+   * batches whose `baseRevision` equals their revision; `load` batches are
+   * resyncs. The tracer forwards the same stream to the interactive engine.
+   */
   subscribe(fn: (batch: PatchBatch) => void): () => void;
+  /** The flushed canonical document and its revision and hash (null until ready). */
+  snapshot(): ReturnType<DocumentBarrier['snapshot']> | null;
   stats(): Record<string, unknown>;
   summary(): void;
 }
@@ -95,13 +103,15 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     const off: EngineDoc = {
       mode: OFF, enabled: false, ready: false, api: null, barrier: null, wasm: null, auditor: null, dual: null, tracker: null,
       whenReady: Promise.resolve(false),
-      check: () => null, beforeSave: () => {}, beforeExport: () => {}, subscribe: () => () => {}, stats: () => ({ enabled: false }), summary: () => {},
+      check: () => null, beforeSave: () => {}, beforeExport: () => {}, subscribe: () => () => {}, snapshot: () => null, stats: () => ({ enabled: false }), summary: () => {},
     };
     PM.EngineDoc = off;
     return off;
   }
 
   const reporter = new Reporter(options.sink ?? hostSink());
+  /** Tells this page's summaries apart from other launches' in one report file. */
+  const session = Math.random().toString(36).slice(2, 10);
   let wasm: PmWasm | null = null;
   let barrier: DocumentBarrier | null = null;
   let writerDepth = 0;
@@ -115,6 +125,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     mode: mode.proxy,
     inWriter: () => writerDepth > 0 || replacing || !!PM.hist?.busy?.() || !!barrier?.flushing,
     onWrite: (path) => barrier?.touched([path]),
+    onViolation: (v) => reporter.emit({ type: 'violation', path: v.path, site: v.site, count: v.count }),
   }) : null;
   if (tracker) patchCloning(tracker);
   const unwrap = <T,>(v: T): T => (tracker ? tracker.unwrap(v) : v);
@@ -218,19 +229,20 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     },
     beforeSave(reason = 'save') { state.check(reason); },
     beforeExport(reason = 'export') { state.check(reason); },
-    subscribe(fn) { subscribers.add(fn); return () => subscribers.delete(fn); },
+    subscribe(fn) { subscribers.add(fn); return () => { subscribers.delete(fn); }; },
+    snapshot() { return state.ready && barrier ? barrier.snapshot() : null; },
     stats() {
       return {
         mode: mode.name, ready: state.ready,
         barrier: barrier ? { revision: barrier.revision, ...barrier.stats } : null,
         native: api.stats,
-        dual: dual ? { ...dual.total(), compared: dual.stats.compared, mismatched: dual.stats.mismatched, stale: dual.stats.stale } : null,
+        dual: dual ? { ...dual.total(), compared: dual.stats.compared, mismatched: dual.stats.mismatched, stale: dual.stats.stale, allowed: dual.stats.allowed, fragile: dual.stats.fragile, fragileBudget: dual.fragileBudget() } : null,
         audit: auditor ? { audits: auditor.stats.audits, failures: auditor.stats.failures, missedWrites: auditor.stats.missedWrites, mirrorMismatches: auditor.stats.mirrorMismatches, ms: Math.round(auditor.stats.ms) } : null,
         violations: tracker ? tracker.violations().slice(0, 50) : null,
         wasm: wasm && !wasm.dead ? { ...wasm.heap(), ...wasm.stats() } : null,
       };
     },
-    summary() { reporter.emit({ type: 'summary', ...state.stats() }); },
+    summary() { reporter.emit({ type: 'summary', session, ...state.stats() }); },
   };
   PM.EngineDoc = state;
 
@@ -239,7 +251,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const start = async (): Promise<boolean> => {
     try {
       wasm = await instantiate(await loadModule());
-      barrier = new DocumentBarrier(wasm, () => current, { onMismatch });
+      barrier = new DocumentBarrier(wasm, () => current, { onMismatch, revision: barrier?.revision ?? 0 });
       barrier.subscribe(batch => subscribers.forEach(fn => { try { fn(batch); } catch (error) { console.error(error); } }));
       api.reset();
       state.wasm = wasm;
@@ -262,8 +274,18 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     if (!ok) return;
     if (auditor) auditor.start(options.auditMs ?? 100);
     if (mode.audit || mode.dual) {
-      const timer = setInterval(() => state.summary(), 10_000);
+      // A summary every 2 s while counts change, and one as the page goes,
+      // so short-lived test windows report their totals too.
+      let last = '';
+      const flushSummary = () => {
+        const stats = JSON.stringify(state.stats());
+        if (stats === last) return;
+        last = stats;
+        state.summary();
+      };
+      const timer = setInterval(flushSummary, 2_000);
       (timer as any)?.unref?.();
+      (globalThis as any).addEventListener?.('pagehide', flushSummary);
     }
     scheduleIdleCheck();
   });

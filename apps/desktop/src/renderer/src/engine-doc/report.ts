@@ -15,6 +15,9 @@ export type ReportEvent =
 
 export type Sink = (line: string) => void;
 
+/** Below the host log's per-line limit (`LIMITS.logChars`, 8,000) with the prefix. */
+const MAX_LINE = 7_900;
+
 export function hostSink(): Sink {
   const bridge = (globalThis as any).powermove;
   return (line: string) => {
@@ -32,6 +35,16 @@ export class Reporter {
     this.lines += 1;
     let text: string;
     try { text = JSON.stringify(event); } catch { text = String(event.type); }
-    this.sink(`[pm-native] ${text.length > 4000 ? text.slice(0, 4000) + '…' : text}`);
+    // Summaries stay whole JSON within the host log's line limit: the least
+    // needed members go first.
+    if (event.type === 'summary' && text.length > MAX_LINE) {
+      const slim: Record<string, unknown> = { ...event };
+      for (const key of ['violations', 'wasm', 'native', 'barrier']) {
+        if (text.length <= MAX_LINE) break;
+        slim[key] = '(dropped: line limit)';
+        try { text = JSON.stringify(slim); } catch { break; }
+      }
+    }
+    this.sink(`[pm-native] ${text.length > MAX_LINE ? text.slice(0, MAX_LINE) + '…' : text}`);
   }
 }

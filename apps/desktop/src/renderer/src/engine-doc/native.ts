@@ -29,6 +29,12 @@ type Legacy = Record<string, any>;
 /** A native answer: the value, a throw to rethrow, or a reason to ask the legacy code. */
 type Native<T> = { value: T } | { threw: Error } | { fallback: string };
 
+/** Legacy answers at the time moved by ±1e-12 s (amendment 20's fragility test). */
+function timePerturbations<T>(time: unknown, at: (t: number) => T): Array<() => T> {
+  if (typeof time !== 'number' || !Number.isFinite(time)) return [];
+  return [() => at(time + 1e-12), () => at(time - 1e-12)];
+}
+
 /** A fast-path miss (the slow path answers). */
 const MISS = Symbol('miss');
 
@@ -255,8 +261,13 @@ export class NativeApi {
     return this.query(op, { comp: ctx.comp, open: ctx.open, layer: ctx.layer, ...extra }, map ? (v) => map(v, ctx) : undefined);
   }
 
-  /** Native answer (or legacy fallback), compared with the legacy answer in dual mode. */
-  private answer<T>(op: string, native: () => Native<T>, legacy: () => T, describe: () => Record<string, unknown>): T {
+  /**
+   * Native answer (or legacy fallback), compared with the legacy answer in
+   * dual mode. `perturbed` (bounds and picks) gives the legacy answers under
+   * a 1e-12 s or 1e-7 px perturbation: when one of them differs from the
+   * legacy answer, the case is fragile (amendment 20).
+   */
+  private answer<T>(op: string, native: () => Native<T>, legacy: () => T, describe: () => Record<string, unknown>, perturbed?: Array<() => T>): T {
     this.count(op);
     const run = (): Native<T> => {
       try { return native(); } catch (error) { console.warn(`[engine-doc] ${op} failed natively`, error); return { fallback: 'exception' }; }
@@ -267,24 +278,40 @@ export class NativeApi {
       return legacy();
     }
     if (this.dual) {
+      const dual = this.dual;
       let expected: { value?: T; threw?: unknown };
       try { expected = { value: legacy() }; } catch (error) { expected = { threw: error }; }
       const answer = (g: Native<T>) => ('value' in g ? { value: g.value } : { threw: (g as { threw: Error }).threw });
-      let path = this.dual.check(op, answer(got), expected, this.unwrap);
-      if (path !== null) {
+      let verdict = dual.classify(op, answer(got), expected, this.unwrap);
+      if (verdict.path !== null) {
         // A write the barrier did not see makes the mirror stale: that is a
         // barrier gap, not an evaluation difference. Repair, then ask again.
         const missed = this.barrier()?.repair('structuralDiff') ?? [];
         if (missed.length) {
-          this.dual.stats.stale[op] = (this.dual.stats.stale[op] ?? 0) + 1;
+          dual.stats.stale[op] = (dual.stats.stale[op] ?? 0) + 1;
           this.onStale?.(op, missed);
           const again = run();
           if ('fallback' in again) { this.fell(op, again.fallback); return legacy(); }
           got = again;
-          path = this.dual.check(op, answer(got), expected, this.unwrap);
+          verdict = dual.classify(op, answer(got), expected, this.unwrap);
         }
       }
-      this.dual.record(op, path, answer(got), expected, describe);
+      let fragile = false;
+      if (perturbed?.length && !('threw' in expected)) {
+        fragile = perturbed.some(other => {
+          let value: { value?: T; threw?: unknown };
+          try { value = { value: other() }; } catch (error) { value = { threw: error }; }
+          return dual.classify(op, value, expected, this.unwrap).path !== null;
+        });
+        if (fragile) dual.noteFragile(op);
+      }
+      if (verdict.path !== null && fragile) {
+        dual.allow(op, 'fragile');
+        dual.record(op, null, answer(got), expected, describe);
+      } else {
+        if (verdict.allowed) dual.allow(op, verdict.allowed);
+        dual.record(op, verdict.path, answer(got), expected, describe);
+      }
     }
     if ('threw' in got) throw got.threw;
     return got.value;
@@ -522,7 +549,8 @@ export class NativeApi {
 
   groupBounds(group: any, time: number): any {
     return this.answer('groups.bounds', () => this.layerQuery('groupBounds', group, { t: time }),
-      () => this.legacy.groupBounds(group, time), () => ({ layer: group?.id, t: time }));
+      () => this.legacy.groupBounds(group, time), () => ({ layer: group?.id, t: time }),
+      this.dual ? timePerturbations(time, t => this.legacy.groupBounds(group, t)) : undefined);
   }
 
   groupAncestors(L: any, layers?: any[]): any[] {
@@ -608,7 +636,8 @@ export class NativeApi {
   // ── render ────────────────────────────────────────────────────────────
 
   bounds(L: any, T: any): any {
-    return this.answer('gl.bounds', () => this.layerQuery('bounds', L, { t: T }), () => this.legacy.bounds(L, T), () => ({ layer: L?.id, t: T }));
+    return this.answer('gl.bounds', () => this.layerQuery('bounds', L, { t: T }), () => this.legacy.bounds(L, T), () => ({ layer: L?.id, t: T }),
+      this.dual ? timePerturbations(T, t => this.legacy.bounds(L, t)) : undefined);
   }
 
   pick(x: number, y: number, T: number, options: { includeLocked?: boolean } = {}): any {
@@ -622,7 +651,11 @@ export class NativeApi {
       const live = this.PM.proj.layers;
       return this.query('pick', { comp: c.open, open: c.open, x, y, t: T, includeLocked: !!options?.includeLocked, localView: null },
         (hit: number[] | null) => hit == null ? null : live[hit[0]!] ?? null);
-    }, () => this.legacy.pick(x, y, T, options), () => ({ x, y, t: T }));
+    }, () => this.legacy.pick(x, y, T, options), () => ({ x, y, t: T }),
+      this.dual ? [
+        ...timePerturbations(T, t => this.legacy.pick(x, y, t, options)),
+        ...[[1e-7, 0], [-1e-7, 0], [0, 1e-7], [0, -1e-7]].map(([dx, dy]) => () => this.legacy.pick(x + dx!, y + dy!, T, options)),
+      ] : undefined);
   }
 
   textLayout(L: any, T: number): any {

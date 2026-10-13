@@ -251,4 +251,67 @@ describe.skipIf(!built)('engine-doc with pm-wasm', () => {
     expect(doc.api!.pick(live.p['position.x'].v, live.p['position.y'].v, 0)).toBe(live);
     expect(mismatches(doc)).toEqual([]);
   });
+
+  it('gives a new receiver the document and continues revisions after a replaced instance', async () => {
+    const { PM, doc } = await editor('on');
+    const batches: any[] = [];
+    doc.subscribe(b => batches.push(b));
+    PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid')));
+    doc.barrier!.flush();
+    const snap = doc.snapshot()!;
+    expect(snap.revision).toBe(doc.barrier!.revision);
+    expect(snap.encoding).toBe('canonicalJsonV1');
+    expect(snap.hash).toBe(canonicalProjectHash(PM.proj));
+    expect(JSON.parse(snap.json)).toEqual(JSON.parse(JSON.stringify(canonicalProject(PM.proj))));
+    // A receiver that starts from the snapshot applies the batches after it.
+    batches.length = 0;
+    PM.hist.do('Move', () => { PM.proj.layers[0].p['position.x'].v = 321; });
+    doc.barrier!.flush();
+    expect(batches.map(b => b.baseRevision)).toEqual([snap.revision]);
+    // A trap replaces the instance: revisions keep moving forward.
+    const before = doc.barrier!.revision;
+    doc.wasm!.dead = true;
+    await new Promise(r => setTimeout(r, 1100));
+    for (let i = 0; i < 50 && !doc.ready; i++) await new Promise(r => setTimeout(r, 50));
+    expect(doc.ready).toBe(true);
+    expect(doc.barrier!.revision).toBeGreaterThan(before);
+    const load = batches.at(-1);
+    expect(load.origin).toBe('load');
+    expect(load.revision).toBeGreaterThan(before);
+  });
+});
+
+describe('dual answers: allowed differences (amendment 20)', () => {
+  it('allows 180 against -180 and nothing else near it', async () => {
+    const { DualAnswers } = await import('./dual');
+    const dual = new DualAnswers();
+    const id = <T,>(v: T) => v;
+    expect(dual.compare('ev', { value: 180 }, { value: -180 }, () => ({}), id)).toBe(true);
+    expect(dual.compare('evP', { value: [-180.0000000001, 3] }, { value: [180, 3] }, () => ({}), id)).toBe(true);
+    expect(dual.stats.allowed).toEqual({ 'ev:atan2': 1, 'evP:atan2': 1 });
+    expect(dual.compare('ev', { value: 179 }, { value: -181 }, () => ({}), id)).toBe(false);
+    expect(dual.compare('ev', { value: 540 }, { value: 180 }, () => ({}), id)).toBe(false);
+    // Bounds keep their own tolerance: no branch-cut class there.
+    expect(dual.compare('gl.bounds', { value: { x0: 180 } }, { value: { x0: -180 } }, () => ({}), id)).toBe(false);
+    expect(dual.total().mismatched).toBe(3);
+  });
+
+  it('classes a bounds difference as fragile when the legacy answer moves under a perturbation', async () => {
+    const { PM, doc } = await editor();
+    PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid')));
+    const L = PM.proj.layers[0];
+    const legacy = (doc.api as any).legacy;
+    const original = legacy.bounds;
+    // A legacy answer that jumps at t = 1 (a key edge): fragile there.
+    legacy.bounds = (layer: any, t: number) => { const b = original(layer, t); return b && t >= 1 ? { ...b, x0: b.x0 + 5 } : b; };
+    doc.api!.bounds(L, 1);
+    expect(doc.dual!.stats.fragile['gl.bounds']).toBe(1);
+    expect(doc.dual!.stats.allowed['gl.bounds:fragile']).toBe(1);
+    expect(doc.dual!.stats.mismatched['gl.bounds'] ?? 0).toBe(0);
+    // Away from the edge the same difference is a mismatch.
+    doc.api!.bounds(L, 2);
+    expect(doc.dual!.stats.mismatched['gl.bounds']).toBe(1);
+    expect(doc.dual!.fragileBudget()).toEqual({ fragile: 1, differed: 1, ok: false });
+    legacy.bounds = original;
+  });
 });

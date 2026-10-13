@@ -58,6 +58,8 @@ export function createTracker(options: {
   onWrite(path: PathPart[]): void;
   /** Whether a known writer is active. */
   inWriter(): boolean;
+  /** Called once per new violation (path and site). */
+  onViolation?(violation: Violation): void;
   mode: ViolationMode;
 }): Tracker {
   const proxies = new WeakMap<object, any>();
@@ -117,7 +119,11 @@ export function createTracker(options: {
       const id = `${text} @ ${where}`;
       const known = violations.get(id);
       if (known) known.count += 1;
-      else violations.set(id, { path: text, site: where, count: 1 });
+      else {
+        const violation = { path: text, site: where, count: 1 };
+        violations.set(id, violation);
+        try { options.onViolation?.(violation); } catch { /* reporting never breaks a write */ }
+      }
       if (options.mode === 'throw') throw new Error(`[engine-doc] document write outside a known writer: ${text} (${where})`);
     }
     options.onWrite(path);

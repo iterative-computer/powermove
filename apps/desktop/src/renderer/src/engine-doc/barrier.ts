@@ -34,7 +34,12 @@ import { APPLY, type PmWasm } from './wasm';
 /** Why a batch was produced (contract 5, `PatchOrigin`). */
 export type PatchOrigin = 'edit' | 'undo' | 'redo' | 'metadata' | 'structuralDiff' | 'load';
 
-/** A batch as the patch stream carries it (contract 5, `PatchBatch`). */
+/**
+ * A batch as the patch stream carries it (contract 5, `PatchBatch`). The body
+ * is `canonicalV1` (`shared/patch-binary.ts`). A batch with origin `load` is
+ * a resync: its body is one leaf set of the whole document at the empty path,
+ * applicable whatever the receiver's revision (contract 5, invariant 4).
+ */
 export interface PatchBatch {
   baseRevision: number;
   revision: number;
@@ -150,9 +155,12 @@ export class DocumentBarrier {
     public wasm: PmWasm,
     /** The live document (raw, never the tracking Proxy). */
     private project: () => any,
-    options: { onMismatch?: (result: ConsistencyResult) => void } = {},
+    options: { onMismatch?: (result: ConsistencyResult) => void; revision?: number } = {},
   ) {
     this.onMismatch = options.onMismatch ?? (() => {});
+    // A replacement instance (after a trap) continues the revisions, so the
+    // stream's receivers never see them move backward (contract 5, invariant 1).
+    this.revision = Math.max(0, Math.floor(options.revision ?? 0));
   }
 
   /** Whether anything waits to be flushed. */
@@ -336,6 +344,17 @@ export class DocumentBarrier {
     result.ms = performance.now() - started;
     if (!ok) this.onMismatch(result);
     return result;
+  }
+
+  /**
+   * The document a new receiver of the stream starts from (contract 5,
+   * `Resync` with `canonicalJsonV1`): flushed, the canonical JSON with sorted
+   * keys, its revision, and pm-wasm's canonical hash at that revision.
+   * Batches with `baseRevision === revision` follow.
+   */
+  snapshot(): { revision: number; encoding: 'canonicalJsonV1'; json: string; hash: string } {
+    this.flush();
+    return { revision: this.revision, encoding: 'canonicalJsonV1', json: canonicalStringify(this.shadow) ?? '', hash: this.wasm.hash() };
   }
 
   /** Whether the shadow equals the live document (the auditor's comparison). */
