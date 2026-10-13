@@ -54,7 +54,10 @@ impl std::fmt::Display for ApplyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ApplyError::Gap { have, base } => {
-                write!(f, "revision gap: the mirror is at {have}, the batch is based on {base}")
+                write!(
+                    f,
+                    "revision gap: the mirror is at {have}, the batch is based on {base}"
+                )
             }
             ApplyError::Revision => f.write_str("a batch must move the revision forward"),
             ApplyError::Decode(m) => write!(f, "malformed patch body: {m}"),
@@ -65,10 +68,13 @@ impl std::fmt::Display for ApplyError {
 
 /// Labels for extension-layer parameters (`PM.layerDefinition`), set by the
 /// renderer before an `allProps` query on an extension layer.
+/// A definition's label and its parameters' labels.
+type DefinitionLabelSet = (Option<String>, HashMap<String, String>);
+
 #[derive(Default)]
 struct Labels {
-    /// Definition id → (definition label, parameter key → label).
-    defs: RwLock<HashMap<String, (Option<String>, HashMap<String, String>)>>,
+    /// Definition id → labels.
+    defs: RwLock<HashMap<String, DefinitionLabelSet>>,
 }
 
 impl EvalHooks for Labels {
@@ -87,7 +93,9 @@ impl EvalHooks for Labels {
             return (None, None);
         };
         (
-            label.as_ref().map(|l| JsValue::String(JsString::from(l.as_str()))),
+            label
+                .as_ref()
+                .map(|l| JsValue::String(JsString::from(l.as_str()))),
             params
                 .get(&param.to_string_lossy())
                 .map(|l| JsValue::String(JsString::from(l.as_str()))),
@@ -482,7 +490,9 @@ impl Engine {
     /// Adds a metrics-and-shaping subset for face `index` of `blob`.
     pub fn add_font(&mut self, blob: &str, index: u32, bytes: Vec<u8>) {
         let data = FontBytes::new(bytes);
-        self.fonts.fonts.retain(|(b, i, _)| !(b == blob && *i == index));
+        self.fonts
+            .fonts
+            .retain(|(b, i, _)| !(b == blob && *i == index));
         self.fonts.fonts.push((blob.to_owned(), index, data));
         self.fonts.rebuild();
     }
@@ -508,7 +518,9 @@ impl Engine {
         let Some(id) = get(request, "id").and_then(Value::as_str) else {
             return;
         };
-        let label = get(request, "label").and_then(Value::as_str).map(str::to_owned);
+        let label = get(request, "label")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let params = get(request, "params")
             .and_then(Value::as_object)
             .map(|m| {
@@ -613,7 +625,9 @@ impl Engine {
                 return Ok(Ok(()));
             }
             "expressionDiagnostic" => {
-                let source = get(request, "source").map(Value::to_js_string).unwrap_or_default();
+                let source = get(request, "source")
+                    .map(Value::to_js_string)
+                    .unwrap_or_default();
                 let units: Vec<u16> = source.utf16_units().collect();
                 match pm_expr::expression_diagnostic_utf16(&units, pm_expr::Dialect::Legacy) {
                     Some(m) => out.str(&m),
@@ -633,13 +647,19 @@ impl Engine {
             return Ok(Err(JsThrow::type_error("The mirror holds no document")));
         };
         let comp_id = get(request, "comp").and_then(Value::as_str).unwrap_or("");
-        let open_id = get(request, "open").and_then(Value::as_str).unwrap_or(comp_id);
+        let open_id = get(request, "open")
+            .and_then(Value::as_str)
+            .unwrap_or(comp_id);
         let revision = self.doc.revision();
         let Ok(comp) = Comp::in_root(root, comp_id, revision) else {
-            return Ok(Err(JsThrow::type_error(format!("No composition {comp_id}"))));
+            return Ok(Err(JsThrow::type_error(format!(
+                "No composition {comp_id}"
+            ))));
         };
         let Ok(open) = Comp::in_root(root, open_id, revision) else {
-            return Ok(Err(JsThrow::type_error(format!("No composition {open_id}"))));
+            return Ok(Err(JsThrow::type_error(format!(
+                "No composition {open_id}"
+            ))));
         };
         let t = number(get(request, "t")).unwrap_or(f64::NAN);
         let layers = comp.layers();
@@ -687,13 +707,17 @@ impl Engine {
         match op {
             "ev" => {
                 let l = layer!();
-                let key = get(request, "key").map(Value::to_js_string).unwrap_or_default();
+                let key = get(request, "key")
+                    .map(Value::to_js_string)
+                    .unwrap_or_default();
                 let v = try_js!(scope.ev.ev(&comp, Some(l), &key, t));
                 out.js(&v);
             }
             "evP" => {
                 let l = layer!();
-                let key = get(request, "key").map(Value::to_js_string).unwrap_or_default();
+                let key = get(request, "key")
+                    .map(Value::to_js_string)
+                    .unwrap_or_default();
                 let path: Vec<Value> = get(request, "path")
                     .and_then(Value::as_array)
                     .cloned()
@@ -736,7 +760,9 @@ impl Engine {
             }
             "findProp" => {
                 let l = layer!();
-                let key = get(request, "key").map(Value::to_js_string).unwrap_or_default();
+                let key = get(request, "key")
+                    .map(Value::to_js_string)
+                    .unwrap_or_default();
                 match try_js!(scope.ev.find_prop(l, &key)) {
                     Got::Node(n) => {
                         let mut path = Vec::new();
@@ -913,13 +939,19 @@ impl Engine {
                 // `pathValues(PM, layer, path, time, prefix)` for `d.paths[index]`.
                 let l = layer!();
                 let index = number(get(request, "index")).unwrap_or(-1.0);
-                let paths = node::array(node::member(node::member(Some(l), "d"), "paths")).unwrap_or(&[]);
+                let paths =
+                    node::array(node::member(node::member(Some(l), "d"), "paths")).unwrap_or(&[]);
                 let Some(path) = (index >= 0.0).then(|| paths.get(index as usize)).flatten() else {
-                    return Ok(Err(JsThrow::type_error("Cannot read properties of undefined (reading 'p')")));
+                    return Ok(Err(JsThrow::type_error(
+                        "Cannot read properties of undefined (reading 'p')",
+                    )));
                 };
                 let prefix = match get(request, "prefix").and_then(Value::as_str) {
                     Some(p) => p.to_owned(),
-                    None => format!("g.{}", node::to_js_string(node::member(Some(path), "id")).to_string_lossy()),
+                    None => format!(
+                        "g.{}",
+                        node::to_js_string(node::member(Some(path), "id")).to_string_lossy()
+                    ),
                 };
                 let e = try_js!(scope.path_values(l, path, t, &prefix));
                 out.raw("{");
@@ -959,7 +991,10 @@ impl Engine {
                 let l = layer!();
                 let index = number(get(request, "index")).unwrap_or(-1.0);
                 let (_, matrices, _) = try_js!(scope.path_geometry(l, t));
-                match (index >= 0.0).then(|| matrices.get(index as usize)).flatten() {
+                match (index >= 0.0)
+                    .then(|| matrices.get(index as usize))
+                    .flatten()
+                {
                     Some(m) => out.nums(m),
                     None => out.raw("null"),
                 }
@@ -1013,7 +1048,8 @@ impl Engine {
                         };
                         let x = number(get(request, "x")).unwrap_or(f64::NAN);
                         let y = number(get(request, "y")).unwrap_or(f64::NAN);
-                        let hit = try_js!(scope.pick(x, y, t, &options, &mut fonts.measure, &mut host));
+                        let hit =
+                            try_js!(scope.pick(x, y, t, &options, &mut fonts.measure, &mut host));
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
                         }

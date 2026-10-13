@@ -171,7 +171,9 @@ impl CompiledExpression for Compiled {
             // ("did not return a finite value"); the evaluator only checks
             // for a finite number, a string, or a boolean.
             Ok(_) => Ok(JsValue::Undefined),
-            Err(e) => Err(ExprError { message: Some(e.message()) }),
+            Err(e) => Err(ExprError {
+                message: Some(e.message()),
+            }),
         }
     }
 }

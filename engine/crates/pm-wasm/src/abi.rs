@@ -113,7 +113,7 @@ fn reply(state: &mut State, text: &str, special: bool) -> usize {
 }
 
 fn revision(r: f64) -> Option<u64> {
-    (r.is_finite() && r >= 0.0 && r <= 9_007_199_254_740_991.0 && r.fract() == 0.0).then(|| r as u64)
+    ((0.0..=9_007_199_254_740_991.0).contains(&r) && r.fract() == 0.0).then_some(r as u64)
 }
 
 /// An input buffer of at least `len` bytes.
@@ -300,13 +300,15 @@ pub extern "C" fn pm_ev_batch(n: usize, t: f64) -> u32 {
 /// there is none.
 #[unsafe(no_mangle)]
 pub extern "C" fn pm_expr_error(id: u32) -> i32 {
-    with(|s| match s.engine.expression_error(PropId::from_index(id)) {
-        Some(m) => {
-            let m = m.to_owned();
-            i32::try_from(reply(s, &m, false)).unwrap_or(-1)
-        }
-        None => -1,
-    })
+    with(
+        |s| match s.engine.expression_error(PropId::from_index(id)) {
+            Some(m) => {
+                let m = m.to_owned();
+                i32::try_from(reply(s, &m, false)).unwrap_or(-1)
+            }
+            None => -1,
+        },
+    )
 }
 
 /// Answers the JSON request in `input[..len]`; the reply's length.
@@ -357,7 +359,10 @@ pub extern "C" fn pm_fonts_add(len: usize) -> u32 {
         let Some(key_len) = u32_at(0).map(|n| n as usize) else {
             return 1;
         };
-        let Some(key) = bytes.get(4..4 + key_len).and_then(|k| std::str::from_utf8(k).ok()) else {
+        let Some(key) = bytes
+            .get(4..4 + key_len)
+            .and_then(|k| std::str::from_utf8(k).ok())
+        else {
             return 1;
         };
         let Some(index) = u32_at(4 + key_len) else {

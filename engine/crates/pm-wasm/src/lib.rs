@@ -8,7 +8,7 @@
 //! raster metrics, and the editor helpers. Answers come from `pm-eval` (with
 //! `pm-expr` for expressions and `pm-text` for level 1 text), the same code the
 //! engine processes run natively, so native and WebAssembly answers are
-//! bit-identical (`tests/identity.rs`).
+//! bit-identical (`scripts/identity.mjs` with `examples/replay.rs`).
 //!
 //! * [`engine`]: [`Engine`], plain Rust, tested natively.
 //! * [`expr`]: the production expression engine (`pm-expr` reading the

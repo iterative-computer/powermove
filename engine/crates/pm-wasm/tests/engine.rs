@@ -47,40 +47,89 @@ fn ok(e: &mut Engine, request: &str) -> Value {
 }
 
 fn nums(v: &Value) -> Vec<f64> {
-    v.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect()
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_f64().unwrap())
+        .collect()
 }
 
 #[test]
 fn queries_answer_the_layer_questions() {
     let mut e = engine();
     // A rotates 0..90 over 2 s; B is parented to A.
-    let world = nums(&ok(&mut e, r#"{"op":"worldMatrix","comp":"C1","layer":1,"t":2}"#));
-    let a = nums(&ok(&mut e, r#"{"op":"worldMatrix","comp":"C1","layer":0,"t":2}"#));
-    let local_b = nums(&ok(&mut e, r#"{"op":"localMatrix","comp":"C1","layer":1,"t":2}"#));
+    let world = nums(&ok(
+        &mut e,
+        r#"{"op":"worldMatrix","comp":"C1","layer":1,"t":2}"#,
+    ));
+    let a = nums(&ok(
+        &mut e,
+        r#"{"op":"worldMatrix","comp":"C1","layer":0,"t":2}"#,
+    ));
+    let local_b = nums(&ok(
+        &mut e,
+        r#"{"op":"localMatrix","comp":"C1","layer":1,"t":2}"#,
+    ));
     let product = nums(&ok(
         &mut e,
         &format!(
             r#"{{"op":"mul","a":[{}],"b":[{}]}}"#,
             a.iter().map(f64::to_string).collect::<Vec<_>>().join(","),
-            local_b.iter().map(f64::to_string).collect::<Vec<_>>().join(",")
+            local_b
+                .iter()
+                .map(f64::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
         ),
     ));
     assert_eq!(world, product);
-    assert!(ok(&mut e, r#"{"op":"active","comp":"C1","layer":1,"t":1.5}"#).as_bool().unwrap());
-    assert!(!ok(&mut e, r#"{"op":"active","comp":"C1","layer":1,"t":0.5}"#).as_bool().unwrap());
+    assert!(
+        ok(&mut e, r#"{"op":"active","comp":"C1","layer":1,"t":1.5}"#)
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        !ok(&mut e, r#"{"op":"active","comp":"C1","layer":1,"t":0.5}"#)
+            .as_bool()
+            .unwrap()
+    );
     // Expression: opacity = value / 2.
-    assert_eq!(ok(&mut e, r#"{"op":"ev","comp":"C1","layer":0,"key":"opacity","t":0}"#).as_f64(), Some(50.0));
+    assert_eq!(
+        ok(
+            &mut e,
+            r#"{"op":"ev","comp":"C1","layer":0,"key":"opacity","t":0}"#
+        )
+        .as_f64(),
+        Some(50.0)
+    );
     // findProp answers a path the renderer resolves on its live layer.
-    let path = ok(&mut e, r#"{"op":"findProp","comp":"C1","layer":1,"key":"F1.amount"}"#);
-    assert_eq!(pm_model::json::write::to_canonical_string(&path), r#"["fx",0,"p","amount"]"#);
-    let v = ok(&mut e, r#"{"op":"evP","comp":"C1","layer":1,"path":["fx",0,"p","amount"],"key":"F1.amount","t":3}"#);
+    let path = ok(
+        &mut e,
+        r#"{"op":"findProp","comp":"C1","layer":1,"key":"F1.amount"}"#,
+    );
+    assert_eq!(
+        pm_model::json::write::to_canonical_string(&path),
+        r#"["fx",0,"p","amount"]"#
+    );
+    let v = ok(
+        &mut e,
+        r#"{"op":"evP","comp":"C1","layer":1,"path":["fx",0,"p","amount"],"key":"F1.amount","t":3}"#,
+    );
     assert_eq!(v.as_f64(), Some(4.0));
     let props = ok(&mut e, r#"{"op":"allProps","comp":"C1","layer":1}"#);
     let keys: Vec<String> = props
         .as_array()
         .unwrap()
         .iter()
-        .map(|p| p.as_object().unwrap().get("key").unwrap().as_str().unwrap().to_owned())
+        .map(|p| {
+            p.as_object()
+                .unwrap()
+                .get("key")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
         .collect();
     assert!(keys.contains(&"F1.amount".to_owned()));
     assert!(keys.contains(&"position.x".to_owned()));
@@ -91,23 +140,62 @@ fn queries_answer_the_layer_questions() {
     );
     assert_eq!(detached.as_f64(), Some(7.0));
     // Parenting cycles.
-    assert!(ok(&mut e, r#"{"op":"wouldCycle","comp":"C1","layer":0,"parent":"B"}"#).as_bool().unwrap());
-    assert!(!ok(&mut e, r#"{"op":"wouldCycle","comp":"C1","layer":1,"parent":null}"#).as_bool().unwrap());
+    assert!(
+        ok(
+            &mut e,
+            r#"{"op":"wouldCycle","comp":"C1","layer":0,"parent":"B"}"#
+        )
+        .as_bool()
+        .unwrap()
+    );
+    assert!(
+        !ok(
+            &mut e,
+            r#"{"op":"wouldCycle","comp":"C1","layer":1,"parent":null}"#
+        )
+        .as_bool()
+        .unwrap()
+    );
     // Picking: B is at A's position plus its own offset, 50 px square.
     let hit = ok(&mut e, r#"{"op":"pick","comp":"C1","x":100,"y":50,"t":0}"#);
     assert_eq!(nums(&hit), vec![0.0]);
-    assert!(ok(&mut e, r#"{"op":"pick","comp":"C1","x":1900,"y":1000,"t":0}"#).is_null());
+    assert!(
+        ok(
+            &mut e,
+            r#"{"op":"pick","comp":"C1","x":1900,"y":1000,"t":0}"#
+        )
+        .is_null()
+    );
     let b = ok(&mut e, r#"{"op":"bounds","comp":"C1","layer":0,"t":0}"#);
-    assert_eq!(b.as_object().unwrap().get("w").unwrap().as_f64(), Some(200.0));
+    assert_eq!(
+        b.as_object().unwrap().get("w").unwrap().as_f64(),
+        Some(200.0)
+    );
     // Key at a time, within half a frame of the open composition's rate.
-    assert_eq!(ok(&mut e, r#"{"op":"hasKeyAt","comp":"C1","layer":0,"path":["p","rotation"],"t":2.01}"#).as_f64(), Some(1.0));
-    assert!(ok(&mut e, r#"{"op":"hasKeyAt","comp":"C1","layer":0,"path":["p","rotation"],"t":1}"#).is_null());
+    assert_eq!(
+        ok(
+            &mut e,
+            r#"{"op":"hasKeyAt","comp":"C1","layer":0,"path":["p","rotation"],"t":2.01}"#
+        )
+        .as_f64(),
+        Some(1.0)
+    );
+    assert!(
+        ok(
+            &mut e,
+            r#"{"op":"hasKeyAt","comp":"C1","layer":0,"path":["p","rotation"],"t":1}"#
+        )
+        .is_null()
+    );
 }
 
 #[test]
 fn throws_and_unknown_compositions_are_reported() {
     let mut e = engine();
-    let v = q(&mut e, r#"{"op":"worldMatrix","comp":"NOPE","layer":0,"t":0}"#);
+    let v = q(
+        &mut e,
+        r#"{"op":"worldMatrix","comp":"NOPE","layer":0,"t":0}"#,
+    );
     assert!(v.as_object().unwrap().contains_key("throw"));
     let v = q(&mut e, r#"{"op":"nonsense","comp":"C1"}"#);
     assert!(v.as_object().unwrap().contains_key("throw"));
@@ -152,18 +240,33 @@ fn patches_apply_and_gaps_are_refused() {
             .as_array_mut()
             .unwrap();
         layers.swap(0, 1);
-        let a = layers[1].as_object_mut().unwrap().get_mut("p").unwrap().as_object_mut().unwrap();
-        a.insert("position.x", parse(r#"{"v":300,"kf":[],"expr":null}"#).unwrap());
+        let a = layers[1]
+            .as_object_mut()
+            .unwrap()
+            .get_mut("p")
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        a.insert(
+            "position.x",
+            parse(r#"{"v":300,"kf":[],"expr":null}"#).unwrap(),
+        );
     }
     let list = ops::diff_ops(Some(&before), Some(&after));
     assert!(list.iter().any(|op| matches!(op, ops::Op::Order { .. })));
     let body = binary::encode(&list).unwrap();
-    assert_eq!(e.apply(&body, 2, 3), Err(ApplyError::Gap { have: 1, base: 2 }));
+    assert_eq!(
+        e.apply(&body, 2, 3),
+        Err(ApplyError::Gap { have: 1, base: 2 })
+    );
     assert_eq!(e.apply(&body, 1, 1), Err(ApplyError::Revision));
     e.apply(&body, 1, 2).unwrap();
     assert_eq!(e.revision(), 2);
     assert_eq!(e.hash(), Some(pm_model::hash::canonical_hash(&after)));
-    let m = nums(&ok(&mut e, r#"{"op":"localMatrix","comp":"C1","layer":1,"t":0}"#));
+    let m = nums(&ok(
+        &mut e,
+        r#"{"op":"localMatrix","comp":"C1","layer":1,"t":0}"#,
+    ));
     assert_eq!(m[4], 300.0);
     assert!(matches!(e.apply(b"PMP", 2, 3), Err(ApplyError::Decode(_))));
     // An op on an id the mirror lacks means the mirror diverged.
@@ -191,7 +294,10 @@ fn the_fast_path_answers_by_id() {
     let (_, v) = e.ev_id(id, 2.0);
     assert_eq!(v, 90.0);
     let member = e
-        .intern(&parse(r#"{"comp":"C1","layer":"B","key":"F1.amount","via":["fx","0","p","amount"]}"#).unwrap())
+        .intern(
+            &parse(r#"{"comp":"C1","layer":"B","key":"F1.amount","via":["fx","0","p","amount"]}"#)
+                .unwrap(),
+        )
         .unwrap();
     let mut out = [0.0; 2];
     let mut kinds = [9u8; 2];
@@ -204,23 +310,45 @@ fn the_fast_path_answers_by_id() {
         .unwrap();
     let (_, v) = e.ev_id(bad, 0.0);
     assert_eq!(v, 0.0);
-    assert_eq!(e.expression_error(bad), Some("Expression syntax is invalid."));
+    assert_eq!(
+        e.expression_error(bad),
+        Some("Expression syntax is invalid.")
+    );
     assert_eq!(e.expression_error(id), None);
 }
 
 #[test]
 fn helpers_without_a_document() {
     let mut e = Engine::new();
-    assert_eq!(ok(&mut e, r#"{"op":"countTextUnits","lines":["ab cd","e"],"unit":"words"}"#).as_f64(), Some(3.0));
-    assert!(ok(&mut e, r#"{"op":"expressionDiagnostic","source":"time * 2"}"#).is_null());
-    assert!(ok(&mut e, r#"{"op":"expressionDiagnostic","source":"time *"}"#).as_str().is_some());
+    assert_eq!(
+        ok(
+            &mut e,
+            r#"{"op":"countTextUnits","lines":["ab cd","e"],"unit":"words"}"#
+        )
+        .as_f64(),
+        Some(3.0)
+    );
+    assert!(
+        ok(
+            &mut e,
+            r#"{"op":"expressionDiagnostic","source":"time * 2"}"#
+        )
+        .is_null()
+    );
+    assert!(
+        ok(&mut e, r#"{"op":"expressionDiagnostic","source":"time *"}"#)
+            .as_str()
+            .is_some()
+    );
     let rate = ok(&mut e, r#"{"op":"frameRate","fps":29.97}"#);
     let m = rate.as_object().unwrap();
     assert_eq!(m.get("num").unwrap().as_f64(), Some(30000.0));
     assert_eq!(m.get("den").unwrap().as_f64(), Some(1001.0));
     assert_eq!(m.get("supported").unwrap().as_bool(), Some(true));
     let odd = ok(&mut e, r#"{"op":"frameRate","fps":12.5}"#);
-    assert_eq!(odd.as_object().unwrap().get("supported").unwrap().as_bool(), Some(false));
+    assert_eq!(
+        odd.as_object().unwrap().get("supported").unwrap().as_bool(),
+        Some(false)
+    );
     assert!(ok(&mut e, r#"{"op":"frameRate","fps":-1}"#).is_null());
 }
-
