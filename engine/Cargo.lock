@@ -1676,6 +1676,23 @@ version = "0.1.0"
 [[package]]
 name = "pm-render"
 version = "0.1.0"
+dependencies = [
+ "libm",
+ "pm-color",
+ "pm-eval",
+ "pm-export",
+ "pm-expr",
+ "pm-geom3d",
+ "pm-gpu",
+ "pm-media",
+ "pm-model",
+ "pm-protocol",
+ "pm-time",
+ "png",
+ "sha2",
+ "thiserror",
+ "wgpu",
+]
 
 [[package]]
 name = "pm-text"
