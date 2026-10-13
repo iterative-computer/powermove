@@ -59,6 +59,8 @@ export interface DocApi {
   write<T>(paths: readonly PathPart[][], fn?: () => T, options?: { canonical?: boolean; origin?: 'edit' | 'undo' | 'redo' | 'metadata' }): T | undefined;
   /** Records paths written already. */
   touched(paths: readonly PathPart[][], options?: { canonical?: boolean; origin?: 'edit' | 'undo' | 'redo' | 'metadata' }): void;
+  /** History's `track`: paths a scoped transaction is about to write, held until it ends. */
+  track(paths: readonly PathPart[][]): void;
   /** Flushes pending writes into the mirror now. */
   flush(): void;
 }
@@ -94,6 +96,7 @@ export interface EngineDoc {
 const noopDoc: DocApi = {
   write: (_paths, fn) => fn?.(),
   touched: () => {},
+  track: () => {},
   flush: () => {},
 };
 
@@ -174,30 +177,42 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       }
     },
     touched: (paths, options) => record(paths, options),
+    track(paths) {
+      // A scoped transaction's declared paths stay held until it ends: its
+      // writes keep landing there, so every announcement re-marks them.
+      if (PM.hist?.scoped?.()) for (const path of paths) held.set(JSON.stringify(path), [...path]);
+      record(paths);
+    },
     flush: () => barrier?.flush(),
   };
   PM.doc = doc;
+  const held = new Map<string, PathPart[]>();
 
+  /** A write without a path: inside a scoped transaction its held paths, otherwise a structural diff. */
+  const unknownWrite = () => {
+    if (!barrier || tracker || coveredDepth > 0) return;
+    if (PM.hist?.scoped?.()) { if (held.size) barrier.touched([...held.values()]); return; }
+    held.clear();
+    barrier.touchAll();
+  };
   const legacyTouch = PM.touch;
   PM.touch = (paths?: PathPart[][], canonical?: boolean) => {
-    if (Array.isArray(paths)) record(paths, { canonical });
-    // Inside a history transaction the commit hands over every path it
-    // changed (a scoped one declared them with track() before writing).
-    else if (barrier && !tracker && coveredDepth === 0 && !PM.hist?.busy?.()) barrier.touchAll();
+    if (Array.isArray(paths)) {
+      record(paths, { canonical });
+      if (!PM.hist?.scoped?.()) held.clear();
+    } else unknownWrite();
     return legacyTouch?.();
   };
   // Writers that skip touch() still announce on the bus (PM.addLayer,
   // PM.removeLayers, settings, asset changes): diff what they may have written.
-  for (const event of ['layers', 'project', 'assets', 'comps']) {
-    PM.bus?.on?.(event, () => { if (barrier && !tracker && coveredDepth === 0 && !PM.hist?.busy?.()) barrier.touchAll(); });
-  }
+  for (const event of ['layers', 'project', 'assets', 'comps']) PM.bus?.on?.(event, unknownWrite);
   // A canceled transaction leaves its writes in place without a commit.
   if (PM.hist && typeof PM.hist.cancel === 'function') {
     const cancel = PM.hist.cancel;
     PM.hist.cancel = (...args: unknown[]) => {
       const wasBusy = !!PM.hist.busy?.();
       try { return cancel.apply(PM.hist, args); }
-      finally { if (wasBusy && barrier && !tracker) barrier.touchAll(); }
+      finally { held.clear(); if (wasBusy && barrier && !tracker) barrier.touchAll(); }
     };
   }
   // Legacy evaluation adopts old keyframe handles into the live document

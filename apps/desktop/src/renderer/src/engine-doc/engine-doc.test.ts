@@ -281,6 +281,30 @@ describe.skipIf(!built)('engine-doc with pm-wasm', () => {
   });
 });
 
+describe.skipIf(!built)('writes inside open transactions', () => {
+  it('re-marks a scoped transaction\'s held paths on every announcement, and diffs inside a plain one', async () => {
+    const { PM, doc } = await editor('on');
+    PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid')));
+    const L = PM.proj.layers[0];
+    // A gesture: one track() at the start, many writes, touch() after each.
+    PM.hist.beginScoped('Drag');
+    PM.hist.track([['layers', 0]]);
+    for (const x of [10, 20, 30]) {
+      L.p['position.x'].v = x;
+      PM.touch();
+      expect(doc.api!.ev(L, 'position.x', 0)).toBe(x);
+    }
+    PM.hist.commit('Drag');
+    // A plain transaction: queries inside it see its writes after touch().
+    PM.hist.begin('Move');
+    L.p['position.y'].v = 77;
+    PM.touch();
+    expect(doc.api!.ev(L, 'position.y', 0)).toBe(77);
+    PM.hist.commit('Move');
+    expect(doc.check('test')!.ok).toBe(true);
+  });
+});
+
 describe('dual answers: allowed differences (amendment 20)', () => {
   it('allows 180 against -180 and nothing else near it', async () => {
     const { DualAnswers } = await import('./dual');
