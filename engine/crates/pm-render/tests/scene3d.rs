@@ -347,3 +347,23 @@ fn programs_come_from_the_disk_cache() {
     assert!(a == c);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `renderPass` clamps the canvas to 1..8192 pixels a side and
+/// `resizeCamera` takes the aspect from the clamped size, so an oversized
+/// layer projects as an 8192-pixel one.
+#[test]
+fn oversized_layers_take_the_aspect_of_the_clamped_canvas() {
+    let projection = |width: u32, height: u32| {
+        let mut plan = plan_of(&cases()[0]);
+        plan.width = width;
+        plan.height = height;
+        uniforms(&plan)
+            .into_iter()
+            .find(|(k, _)| k == "projectionMatrix")
+            .unwrap()
+            .1
+    };
+    assert_eq!(projection(12_000, 1_000), projection(8192, 1_000));
+    assert_eq!(projection(1_000, 20_000), projection(1_000, 8192));
+    assert_ne!(projection(12_000, 1_000), projection(1_000, 1_000));
+}

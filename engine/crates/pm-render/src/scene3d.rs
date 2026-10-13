@@ -535,7 +535,10 @@ pub(crate) fn plan_object<'d>(
 /// Uniform values of the standard material's draw, by GL name, as three.js
 /// sets them (`WebGLRenderer.setProgram`, `WebGLLights`, `WebGLMaterials`).
 pub fn uniforms(plan: &Object3dPlan) -> Vec<(String, Vec<f64>)> {
-    let aspect = f64::from(plan.width) / jmax(1.0, f64::from(plan.height));
+    // `renderPass` clamps the canvas to 1..8192 and `resizeCamera` takes
+    // the aspect from the clamped size.
+    let (w, h) = (plan.width.clamp(1, 8192), plan.height.clamp(1, 8192));
+    let aspect = f64::from(w) / jmax(1.0, f64::from(h));
     let c = &plan.camera;
     let projection = if c.orthographic {
         math::orthographic(aspect, c.zoom, c.near, c.far)
