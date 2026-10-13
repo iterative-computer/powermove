@@ -6,9 +6,10 @@ import { randomUUID } from 'node:crypto';
 import { app, BrowserWindow, dialog, type IpcMain } from 'electron';
 import { IPC } from '../shared/ipc';
 import { rememberExport } from './export-sidecar';
+import { isRendererUnavailable } from './renderer-recovery';
 
 export type EncoderOptions={width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number};
-type Job={destination?:string;dir:string;file:string;audio:string;process:ChildProcessWithoutNullStreams;done:Promise<void>;bytes:number;frameBytes:number;frames:number;options:EncoderOptions;owner:number;error:string;retained?:Uint8Array;pendingFrame?:Uint8Array};
+type Job={destination?:string;dir:string;file:string;audio:string;process:ChildProcessWithoutNullStreams;done:Promise<void>;mux?:{process:ChildProcessWithoutNullStreams;done:Promise<void>};bytes:number;frameBytes:number;frames:number;options:EncoderOptions;owner:number;error:string;retained?:Uint8Array;pendingFrame?:Uint8Array};
 export function encoderArgs(options:EncoderOptions,output:string):string[]{
   return ['-hide_banner','-loglevel','error','-f','rawvideo','-pixel_format','rgba','-video_size',`${options.width}x${options.height}`,'-framerate',String(options.fps),'-i','pipe:0','-an',
     '-vf','scale=in_range=full:out_range=limited:out_color_matrix=bt709',
@@ -72,13 +73,39 @@ export class RenderEncoder {
       job.bytes += frame.byteLength;
     }
   }
-  async finish(token:string,owner:number){const job=this.job(token,owner);if(!job.bytes||job.bytes%job.frameBytes)throw new Error('Incomplete render frame');job.process.stdin.end();await job.done;
-    const audio=await stat(job.audio).catch(()=>null);if(audio?.size){const mux=path.join(job.dir,job.options.format==='prores'?'final.mov':'final.mp4');await new Promise<void>((resolve,reject)=>{const p=spawn(this.binary,['-hide_banner','-loglevel','error','-i',job.file,'-i',job.audio,'-map','0:v','-map','1:a','-c:v','copy','-c:a',job.options.format==='prores'?'pcm_s24le':'aac','-shortest','-y',mux]);let error='';p.stderr.on('data',d=>error+=d);p.on('error',reject);p.on('close',code=>code===0?resolve():reject(new Error(error)));});job.file=mux;}return job.file;
+  async finish(token:string,owner:number){
+    const job=this.job(token,owner);
+    if(!job.bytes||job.bytes%job.frameBytes)throw new Error('Incomplete render frame');
+    job.process.stdin.end();await job.done;
+    const audio=await stat(job.audio).catch(()=>null);
+    // Cancellation can occur while waiting for the encoder or filesystem.
+    this.job(token,owner);
+    if(audio?.size){
+      const mux=path.join(job.dir,job.options.format==='prores'?'final.mov':'final.mp4');
+      const proc=spawn(this.binary,['-hide_banner','-loglevel','error','-i',job.file,'-i',job.audio,'-map','0:v','-map','1:a','-c:v','copy','-c:a',job.options.format==='prores'?'pcm_s24le':'aac','-shortest','-y',mux]);
+      let error='';proc.stderr.on('data',d=>{error=(error+d.toString()).slice(-8000);});
+      const done=new Promise<void>((resolve,reject)=>{
+        proc.once('error',reject);
+        proc.once('close',code=>code===0?resolve():reject(new Error(error||'Video muxer stopped')));
+      });
+      job.mux={process:proc,done};
+      await done;
+      this.job(token,owner);
+      job.file=mux;
+    }
+    return job.file;
   }
   // A cancelled job's output is discarded. ffmpeg defers SIGTERM while it is
   // blocked reading frames from the still-open stdin, so close the pipe and
   // kill it outright; otherwise release never settles and the export stays busy.
-  async release(token:string,owner:number){const job=this.job(token,owner);this.jobs.delete(token);if(job.process.exitCode===null&&job.process.signalCode===null){job.process.stdin.destroy();job.process.kill('SIGKILL');}await job.done.catch(()=>undefined);await rm(job.dir,{recursive:true,force:true});}
+  async release(token:string,owner:number){
+    const job=this.job(token,owner);this.jobs.delete(token);
+    for(const proc of [job.process,job.mux?.process]){
+      if(proc&&proc.exitCode===null&&proc.signalCode===null){proc.stdin.destroy();proc.kill('SIGKILL');}
+    }
+    await Promise.all([job.done,job.mux?.done].map(done=>done?.catch(()=>undefined)));
+    await rm(job.dir,{recursive:true,force:true});
+  }
 }
 export function registerRenderEncoder(ipc:IpcMain,ctx:{isTrustedSender:(event:any)=>boolean}) {
   const binary=app.isPackaged?path.join(process.resourcesPath,'encoder','ffmpeg'):path.join(app.getAppPath(),'node_modules','ffmpeg-static','ffmpeg');
@@ -88,26 +115,62 @@ export function registerRenderEncoder(ipc:IpcMain,ctx:{isTrustedSender:(event:an
     const owner=trusted(e),options=validateEncoderOptions(r);
     const window=BrowserWindow.fromWebContents(e.sender);
     if(!window||window.isDestroyed())throw new Error('Export window is unavailable');
-    const extension=options.format==='prores'?'mov':'mp4';
-    const automatic=await agentExportDestination(e.sender,options.name+'.'+extension);
-    const result=automatic?{canceled:false,filePath:automatic}:await dialog.showSaveDialog(window,{defaultPath:options.name.replace(/[\\/:]/g,'_')+'.'+extension,filters:[{name:'Video',extensions:[extension]}]});
-    if(result.canceled||!result.filePath||window.isDestroyed())return null;
-    const token=await encoder.start(options,owner);
-    if(e.sender.isDestroyed()){await encoder.release(token,owner);return null;}
-    encoder.job(token,owner).destination=result.filePath;
-    return token;
+    let rendererGone=false;
+    const gone=()=>{rendererGone=true;};
+    const checkRenderer=()=>{
+      if(rendererGone||isRendererUnavailable(e.sender))throw new Error('Export renderer is unavailable');
+    };
+    e.sender.once('render-process-gone',gone);
+    let token:string|undefined;
+    try{
+      checkRenderer();
+      const extension=options.format==='prores'?'mov':'mp4';
+      const automatic=await agentExportDestination(e.sender,options.name+'.'+extension);
+      checkRenderer();
+      const result=automatic?{canceled:false,filePath:automatic}:await dialog.showSaveDialog(window,{defaultPath:options.name.replace(/[\\/:]/g,'_')+'.'+extension,filters:[{name:'Video',extensions:[extension]}]});
+      checkRenderer();
+      if(result.canceled||!result.filePath||window.isDestroyed())return null;
+      token=await encoder.start(options,owner);
+      checkRenderer();
+      encoder.job(token,owner).destination=result.filePath;
+      return token;
+    }catch(error){
+      if(token&&encoder.jobs.has(token))await encoder.release(token,owner).catch(()=>undefined);
+      throw error;
+    }finally{e.sender.removeListener('render-process-gone',gone);}
   });
   ipc.handle(IPC.renderWrite,(e,r)=>r.repeat!==undefined?encoder.repeat(r.token,trusted(e),r.repeat):encoder.write(r.token,trusted(e),r.data,!!r.audio,!!r.retain));
   ipc.handle(IPC.renderFinish,async(e,r)=>{
     const owner=trusted(e),job=encoder.job(r.token,owner);
+    let failed=false;
     try{
       if(!job.destination)throw new Error('Export destination is unavailable');
       const file=await encoder.finish(r.token,owner);
       await copyFile(file,job.destination);
       rememberExport(owner,job.destination);
       return {path:job.destination};
-    }finally{await encoder.release(r.token,owner);}
+    }catch(error){
+      failed=true;
+      throw error;
+    }finally{
+      // Renderer lifecycle cleanup may already have released this job.
+      // Keep the export failure if cleanup also fails; a cleanup-only error
+      // still reaches the caller after otherwise successful delivery.
+      if(encoder.jobs.has(r.token)){
+        const cleanup=encoder.release(r.token,owner);
+        if(failed)await cleanup.catch(()=>undefined);
+        else await cleanup;
+      }
+    }
   });
   ipc.handle(IPC.renderCancel,(e,r)=>encoder.release(r.token,trusted(e)));
-  app.on('web-contents-created',(_e,contents)=>contents.once('destroyed',()=>{for(const [token,job] of encoder.jobs)if(job.owner===contents.id)void encoder.release(token,job.owner);}));
+  app.on('web-contents-created',(_e,contents)=>{
+    const release=()=>{
+      for(const [token,job] of encoder.jobs){
+        if(job.owner===contents.id)void encoder.release(token,job.owner).catch(error=>console.error('[encoder] cleanup failed',error));
+      }
+    };
+    contents.once('destroyed',release);
+    contents.on('render-process-gone',release);
+  });
 }
