@@ -952,6 +952,7 @@ version = "0.1.0"
 name = "pm-eval"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "libm",
  "pm-expr",
  "pm-model",

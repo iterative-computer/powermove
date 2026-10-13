@@ -26,6 +26,7 @@ crate-type = ["cdylib"]
 [dev-dependencies]
 pm-expr = { path = "../pm-expr" }
 pm-text = { path = "../pm-text", features = ["system"] }
+flate2 = "1.1"
 
 [[test]]
 # Runs on the main thread: the native font registry (CoreText) uses AppKit's
