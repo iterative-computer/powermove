@@ -289,3 +289,61 @@ fn layouts_and_rates() {
     assert_eq!(total, 48_000 * 600);
     assert_eq!(d.info().length, Some(48_000 * 600));
 }
+
+/// Section 13's audio formats decode to their full program length.
+#[test]
+fn container_formats() {
+    for (name, args) in [
+        ("t.aiff", &["-c:a", "pcm_s16be"][..]),
+        ("t.caf", &["-c:a", "pcm_s24le"][..]),
+        ("t-alac.m4a", &["-c:a", "alac"][..]),
+        ("t.ogg", &["-c:a", "libopus"][..]),
+        ("t-pcm.mov", &["-c:a", "pcm_s24le"][..]),
+        ("t.ac3", &["-c:a", "ac3"][..]),
+        ("t.mkv", &["-c:a", "flac"][..]),
+    ] {
+        let file = generated(
+            name,
+            "sine=frequency=500:sample_rate=48000:duration=3",
+            args,
+        );
+        let (d, pcm) = decode_all(&file);
+        let n = pcm[0].len() as i64;
+        assert!(
+            (n - 144_000).abs() <= 1536,
+            "{name}: {n} samples ({:?})",
+            d.info().length
+        );
+        assert!(
+            d.info()
+                .length
+                .is_some_and(|l| (l as i64 - n).abs() <= 1536),
+            "{name}: metadata {:?}, decoded {n}",
+            d.info().length
+        );
+        eprintln!(
+            "{name}: {n} samples, metadata {:?}, priming {}",
+            d.info().length,
+            d.info().priming
+        );
+    }
+}
+
+/// WebM's millisecond timebase: positioned by counting; the length comes
+/// from the container and the Opus pre-skip is removed.
+#[test]
+fn webm_opus() {
+    let (d, pcm) = decode_all(&fixtures().join("vp9-opus.webm"));
+    let n = pcm[0].len() as i64;
+    assert!(!d.info().sample_exact_timestamps);
+    assert_eq!(d.info().priming, 312);
+    let length = d.info().length.unwrap() as i64;
+    eprintln!("vp9-opus.webm: decoded {n}, metadata {length}");
+    assert!((n - length).abs() <= 960, "decoded {n}, metadata {length}");
+    // A seek decodes forward from the start and lands on the same samples.
+    let mut s = AudioDecoder::open(&fixtures().join("vp9-opus.webm"), None).unwrap();
+    s.seek(30_000).unwrap();
+    let mut out = vec![Vec::new(); 2];
+    s.read(&mut out, 1000).unwrap();
+    assert_eq!(&out[0][..], &pcm[0][30_000..31_000]);
+}

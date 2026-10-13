@@ -413,7 +413,22 @@ impl AudioDecoder {
             let extra = (probe_priming - ffmpeg_skip).max(0);
             let duration = (*st).duration;
             let mut length = (duration != ff::AV_NOPTS_VALUE && duration > 0)
-                .then(|| ts_to_samples(duration, tb, rate));
+                .then(|| ts_to_samples(duration, tb, rate))
+                .or_else(|| {
+                    // Matroska and others keep only the container duration
+                    // (microseconds), measured from the container start.
+                    let fmt = out.input.fmt;
+                    let total = (*fmt).duration;
+                    (total != ff::AV_NOPTS_VALUE && total > 0).then(|| {
+                        let container_start = if (*fmt).start_time != ff::AV_NOPTS_VALUE {
+                            (*fmt).start_time
+                        } else {
+                            0
+                        };
+                        let stream_start = ts_to_samples(start_pts, tb, rate);
+                        ts_to_samples(total + container_start, (1, 1_000_000), rate) - stream_start
+                    })
+                });
             // Ogg reports the last granule, which counts the pre-skip.
             if out.info.container.contains("ogg") {
                 length = length.map(|n| n - ffmpeg_skip);
