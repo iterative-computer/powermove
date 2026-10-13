@@ -45,6 +45,9 @@ pub(crate) struct Exec<'a> {
     pub precision: Precision,
     pub working: WorkingEncoding,
     pub export: bool,
+    /// The frame also renders the depth and id surface (3D layers then
+    /// produce their linear view depth).
+    pub depth_id: bool,
     /// Pool targets to give back after the frame is submitted.
     pub taken: Vec<Target>,
     pub failures: Vec<LayerFailure>,
@@ -169,13 +172,23 @@ impl Exec<'_> {
                             }
                         }
                         Source::Object3d(object) => {
-                            match self
-                                .scene3d
-                                .render(self.device, self.queue, encoder, object)
-                            {
+                            match self.scene3d.render(
+                                self.device,
+                                self.queue,
+                                encoder,
+                                self.pool,
+                                object,
+                                self.depth_id,
+                            ) {
                                 Ok(out) => {
+                                    // The pass renders in GL row order.
                                     r.view = Some(out.color.view.clone());
-                                    r.depth = Some(out.depth.view.clone());
+                                    r.from_fbo = true;
+                                    r.depth = out.depth.as_ref().map(|d| d.view.clone());
+                                    self.taken.push(out.color);
+                                    if let Some(d) = out.depth {
+                                        self.taken.push(d);
+                                    }
                                 }
                                 Err(message) => {
                                     self.fail(plan, draw, MediaFailure::Failed(message))

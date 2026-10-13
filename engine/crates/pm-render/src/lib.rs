@@ -25,6 +25,7 @@ pub mod expr;
 pub mod js;
 pub mod media;
 mod pipelines;
+pub mod parity;
 pub mod plan;
 mod renderer;
 mod request;

@@ -251,6 +251,7 @@ impl Renderer {
                 precision: request.precision,
                 working: ProjectColor::DEFAULT.working(),
                 export: request.export,
+                depth_id: depth_id.is_some(),
                 taken: Vec::new(),
                 failures: Vec::new(),
                 unsupported: Vec::new(),
