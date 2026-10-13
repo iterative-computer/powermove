@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 
 vi.mock('electron', () => ({
   BrowserWindow: { fromWebContents: vi.fn() },
@@ -10,15 +11,14 @@ import { FILE_CHUNK_BYTES } from './file-upload';
 
 function sender() {
   let destroyed = false;
-  const handlers = new Map<string, () => void>();
-  return {
+  const owner = Object.assign(new EventEmitter(), {
     isDestroyed: () => destroyed,
-    once: vi.fn((event: string, callback: () => void) => { handlers.set(event, callback); }),
     destroy() {
       destroyed = true;
-      handlers.get('destroyed')?.();
+      owner.emit('destroyed');
     }
-  };
+  });
+  return owner;
 }
 
 describe('external project open', () => {
