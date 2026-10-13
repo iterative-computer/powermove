@@ -59,6 +59,8 @@ pub enum Decoder {
         dec: VtDecoder,
         cfg: VtConfig,
         _permit: Option<HwPermit>,
+        /// Accounts for the CoreVideo buffers this decoder outputs.
+        pool: FramePool,
     },
     Ff(FfDecoder),
     Dav1d(Dav1dDecoder),
@@ -102,7 +104,12 @@ impl Decoder {
     /// Sends one sample; appends any frames that are ready.
     pub fn send(&mut self, p: &Packet, out: &mut Vec<DecodedFrame>) -> Result<()> {
         match self {
-            Decoder::Vt { dec, .. } => dec.send(p, out),
+            Decoder::Vt { dec, pool, .. } => {
+                let from = out.len();
+                let r = dec.send(p, out);
+                track(pool, &mut out[from..]);
+                r
+            }
             Decoder::Ff(d) => d.send(Some(p), out),
             Decoder::Dav1d(d) => d.send(Some(p), out),
             Decoder::Alpha(d) => d.send(Some(p), out),
@@ -122,7 +129,12 @@ impl Decoder {
     /// frames; dav1d drains its frame threads).
     pub fn sync(&mut self, out: &mut Vec<DecodedFrame>) -> Result<()> {
         match self {
-            Decoder::Vt { dec, .. } => dec.sync(out),
+            Decoder::Vt { dec, pool, .. } => {
+                let from = out.len();
+                let r = dec.sync(out);
+                track(pool, &mut out[from..]);
+                r
+            }
             Decoder::Dav1d(d) => d.send(None, out),
             _ => Ok(()),
         }
@@ -132,7 +144,7 @@ impl Decoder {
     /// [`reset`](Decoder::reset) before more input.
     pub fn drain(&mut self, out: &mut Vec<DecodedFrame>) -> Result<()> {
         match self {
-            Decoder::Vt { dec, .. } => dec.sync(out),
+            Decoder::Vt { .. } => self.sync(out),
             Decoder::Ff(d) => d.send(None, out),
             Decoder::Dav1d(d) => d.send(None, out),
             Decoder::Alpha(d) => d.send(None, out),
@@ -173,6 +185,15 @@ impl Decoder {
             Decoder::Ff(d) => d.copies,
             Decoder::Alpha(d) => d.copies(),
             _ => 0,
+        }
+    }
+}
+
+/// Counts VideoToolbox's output buffers in the frame pool's report.
+fn track(pool: &FramePool, frames: &mut [DecodedFrame]) {
+    for f in frames {
+        if let crate::frame::Pixels::CoreVideo(b) = &mut f.pixels {
+            b.track(pool);
         }
     }
 }
@@ -239,7 +260,7 @@ pub fn open(
     let mut skipped = Vec::new();
     for b in order {
         let r = match b {
-            Backend::VideoToolbox => open_vt(spec, purpose, arbiter),
+            Backend::VideoToolbox => open_vt(spec, purpose, arbiter, pool),
             Backend::Ffmpeg => FfDecoder::new(spec.input, spec.stream, None, pool.clone(), threads)
                 .map(Decoder::Ff),
             Backend::Dav1d => Dav1dDecoder::new(pool.clone(), threads).map(Decoder::Dav1d),
@@ -264,6 +285,7 @@ fn open_vt(
     spec: &StreamSpec<'_>,
     purpose: DecodePurpose,
     arbiter: &dyn HardwareArbiter,
+    pool: &FramePool,
 ) -> Result<Decoder> {
     let cfg = VtConfig::new(spec.info, spec.index, spec.extradata, purpose)?;
     let codec = HwCodec::from_fourcc(cfg.codec_fcc);
@@ -285,5 +307,6 @@ fn open_vt(
         dec,
         cfg,
         _permit: permit,
+        pool: pool.clone(),
     })
 }

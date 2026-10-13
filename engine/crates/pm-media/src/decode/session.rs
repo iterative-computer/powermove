@@ -235,6 +235,12 @@ impl Session {
         }
     }
 
+    /// Drops every frame the window holds (a lease shrink). Decoding state
+    /// is kept: the next request continues the current run when it can.
+    pub fn clear_window(&mut self) {
+        self.window.clear();
+    }
+
     /// Frames currently held by the window.
     pub fn window_frames(&self) -> impl Iterator<Item = (usize, &DecodedFrame)> {
         self.window.iter().map(|(k, v)| (*k, v))

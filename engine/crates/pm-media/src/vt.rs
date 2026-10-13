@@ -17,7 +17,7 @@
 use crate::apple::cf::*;
 use crate::error::{MediaError, Result};
 use crate::ff::{CodecInfo, Packet};
-use crate::frame::{DecodedFrame, Pixels, corevideo_format, fourcc::*};
+use crate::frame::{CvBuffer, DecodedFrame, Pixels, corevideo_format, fourcc::*};
 use crate::index::FrameIndex;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -785,7 +785,7 @@ impl VtDecoder {
                     out.push(DecodedFrame {
                         pts: pts.value,
                         format: Arc::new(format),
-                        pixels: Pixels::CoreVideo(pb),
+                        pixels: Pixels::CoreVideo(CvBuffer::untracked(pb)),
                         color: None,
                     });
                 }

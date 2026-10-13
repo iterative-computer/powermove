@@ -129,13 +129,28 @@ next backend).
 
 `cache::FrameCache` holds decoded frames by source, sample, and purpose under a
 byte budget, least recently used first. A frame evicted while a renderer
-still holds it stays alive. `DecodeService::apply_lease` sets the cache budget
-and trims free pool memory, and `MediaUsage::lease_categories` reports the
-contract 8 frame-cache and decoder categories: the cache counts CoreVideo and
-pool frames it holds; the decoder category is pool memory the cache does not
-hold (decoder references, frames held after eviction, free slots), so nothing
-is counted twice. VideoToolbox's own buffer pools are not visible to the
-process and are not in either number.
+still holds it stays alive.
+
+`MediaUsage::lease_categories` reports the contract 8 frame-cache and decoder
+categories, each decoded frame counted once. The frame cache counts the
+CoreVideo and pool frames it holds. The decoder category counts every other
+decoded frame the process holds: pool slots outside the cache (decoder
+references, session windows, frames held after eviction, free slots) and
+VideoToolbox's CoreVideo buffers outside the cache. VideoToolbox buffers are
+counted through a hold in the frame pool (`FramePool::hold_external`) that
+lives as long as any clone of the frame, wherever it is (a session window,
+the cache, a renderer). VideoToolbox's internal buffer pools and session state
+are not visible to the process and are not in either number.
+
+`DecodeService::apply_lease(MediaLease { frame_cache, decoders })` enforces
+both shares. The cache evicts down to its share. Over the decoder share, idle
+sessions drop their windows, free pool slots are released, and idle sessions
+close until usage fits. A zero share closes every idle session, because the
+session state VideoToolbox keeps cannot be measured. A session in use gives its
+window back after each request while usage is over, and closes when it returns
+if usage is still over (always under a zero share). Frames a renderer holds
+stay counted until the renderer lets go, so the acknowledgement can report
+more than the lease only while that happens.
 
 ## GPU import and normalization (`pm-gpu::decode_in`)
 
