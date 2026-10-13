@@ -121,7 +121,10 @@ test('the agent watches and listens to imported footage through the media tools'
     expect(compSheet.json).toMatchObject({ target: 'composition', columns: 2, rows: 2 });
     expect(check.ok).toBe(true);
     expect(check.json.issues.map((issue: any) => issue.code)).toContain('empty-frames');
-    const images = last.messages.filter((message: any) => message.role === 'user' && Array.isArray(message.content))
+    // Tool-result image batches contain only images; the initial user request
+    // also carries text and the agent's captured context frames.
+    const images = last.messages.filter((message: any) => message.role === 'user' && Array.isArray(message.content)
+      && message.content.every((item: any) => item.type === 'image_url'))
       .flatMap((message: any) => message.content).filter((item: any) => item.image_url?.url?.startsWith('data:image/'));
     expect(images.length).toBe(2 + 1 + 1);
 
