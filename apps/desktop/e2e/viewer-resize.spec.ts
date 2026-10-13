@@ -101,6 +101,7 @@ test.describe('@viewer direct resize', () => {
       tool.tool = 'select';
       PM.setTime(1, { raw: true, force: true });
       PM.setKey(text, 'scale.y', 0, 100, 'linear');
+      PM.Edit.apply({ type: 'set_property', target: text.id, path: 'c.w', mode: 'keyframe', time: 0, value: 200 });
       PM.selectLayers(text.id);
       viewer.layout();
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
@@ -119,6 +120,8 @@ test.describe('@viewer direct resize', () => {
         eastCursor: viewer.resizeCursorForHandle(matrix, 'e'),
         scaleX: text.p['scale.x'].v, scaleY: text.p['scale.y'].v,
         scaleYKeys: text.p['scale.y'].kf.length,
+        size: [PM.resolveContent(text, 1).w, PM.resolveContent(text, 1).h],
+        widthKeys: text.d.w.kf.length,
         coverScaleX: cover.p['scale.x'].v,
         parentScaleX: parent.p['scale.x'].v,
       };
@@ -146,19 +149,37 @@ test.describe('@viewer direct resize', () => {
         selected: [...PM.sel.layers],
         scaleX: PM.ev(text, 'scale.x', 1), scaleY: PM.ev(text, 'scale.y', 1),
         scaleYKeys: text.p['scale.y'].kf.length,
+        size: [PM.resolveContent(text, 1).w, PM.resolveContent(text, 1).h],
+        widthKeys: text.d.w.kf.length,
         west: { x: matrix[0] * x + matrix[2] * y + matrix[4], y: matrix[1] * x + matrix[3] * y + matrix[5] },
         coverScaleX: PM.ev(PM.L(coverId), 'scale.x', 1),
         parentScaleX: PM.ev(PM.L(parentId), 'scale.x', 1),
       };
     }, { textId: setup.textId, coverId: setup.coverId, parentId: setup.parentId });
     expect(resized.selected).toEqual([setup.textId]);
-    expect(resized.scaleX).toBeGreaterThan(setup.scaleX);
+    expect(resized.size[0]).toBeGreaterThan(setup.size[0]);
+    expect(resized.size[1]).toBe(setup.size[1]);
+    expect(resized.widthKeys).toBeGreaterThan(setup.widthKeys);
+    expect(resized.scaleX).toBe(setup.scaleX);
     expect(resized.scaleY).toBe(setup.scaleY);
     expect(resized.scaleYKeys).toBe(setup.scaleYKeys);
     expect(resized.west.x).toBeCloseTo(setup.west.x, 2);
     expect(resized.west.y).toBeCloseTo(setup.west.y, 2);
     expect(resized.coverScaleX).toBe(setup.coverScaleX);
     expect(resized.parentScaleX).toBe(setup.parentScaleX);
+
+    const undone = await page.evaluate(textId => {
+      const PM = (window as any).PM;
+      const ok = PM.hist.undo(), layer = PM.L(textId), content = PM.resolveContent(layer, 1);
+      return { ok, size: [content.w, content.h], widthKeys: layer.d.w.kf.length };
+    }, setup.textId);
+    expect(undone).toEqual({ ok: true, size: setup.size, widthKeys: setup.widthKeys });
+    const redone = await page.evaluate(textId => {
+      const PM = (window as any).PM;
+      const ok = PM.hist.redo(), layer = PM.L(textId), content = PM.resolveContent(layer, 1);
+      return { ok, size: [content.w, content.h], widthKeys: layer.d.w.kf.length };
+    }, setup.textId);
+    expect(redone).toEqual({ ok: true, size: resized.size, widthKeys: resized.widthKeys });
 
     const rotatedNorth = await page.evaluate((textId) => {
       const PM = (window as any).PM;
@@ -303,6 +324,10 @@ test.describe('@viewer direct resize', () => {
       tool.tool = 'select';
       PM.setKey(shape, 'scale.x', 0, 100, 'linear');
       PM.setKey(shape, 'scale.y', 0, 100, 'linear');
+      PM.Edit.apply([
+        { type: 'set_property', target: shape.id, path: 'c.w', mode: 'keyframe', time: 0, value: 120 },
+        { type: 'set_property', target: shape.id, path: 'c.h', mode: 'keyframe', time: 0, value: 80 },
+      ]);
       PM.setKey(text, 'scale.x', 0, 100, 'linear');
       PM.setKey(text, 'scale.y', 0, 100, 'linear');
       PM.setTime(1, { raw: true, force: true });
@@ -328,10 +353,13 @@ test.describe('@viewer direct resize', () => {
           skew: PM.ev(shape, 'skew', 1),
         },
         shapeKeys: [shape.p['scale.x'].kf.length, shape.p['scale.y'].kf.length],
+        shapeSize: [PM.resolveContent(shape, 1).w, PM.resolveContent(shape, 1).h],
+        shapeSizeKeys: [shape.d.w.kf.length, shape.d.h.kf.length],
         textSize: text.d.size,
         textScale: [PM.ev(text, 'scale.x', 1), PM.ev(text, 'scale.y', 1)],
         textScaleKeys: [text.p['scale.x'].kf.length, text.p['scale.y'].kf.length],
         textChildScale: [PM.ev(textChild, 'scale.x', 1), PM.ev(textChild, 'scale.y', 1)],
+        textChildWorld: [...PM.worldMatrix(textChild, 1)],
         axes: { shape: axis(shape), text: axis(text) },
         positions: {
           shape: [PM.ev(shape, 'position.x', 1), PM.ev(shape, 'position.y', 1)],
@@ -369,24 +397,33 @@ test.describe('@viewer direct resize', () => {
         bounds: selection.bounds,
         shapeScale: [PM.ev(shape, 'scale.x', 1), PM.ev(shape, 'scale.y', 1)],
         shapeKeys: [shape.p['scale.x'].kf.length, shape.p['scale.y'].kf.length],
+        shapeSize: [PM.resolveContent(shape, 1).w, PM.resolveContent(shape, 1).h],
+        shapeSizeKeys: [shape.d.w.kf.length, shape.d.h.kf.length],
         textSize: text.d.size,
         textScale: [PM.ev(text, 'scale.x', 1), PM.ev(text, 'scale.y', 1)],
         textScaleKeys: [text.p['scale.x'].kf.length, text.p['scale.y'].kf.length],
         textChildScale: [PM.ev(textChild, 'scale.x', 1), PM.ev(textChild, 'scale.y', 1)],
+        textChildWorld: [...PM.worldMatrix(textChild, 1)],
       };
     }, { shapeId: setup.shapeId, textId: setup.textId, textChildId: setup.textChildId });
     expect(resized.bounds.x0).toBeCloseTo(setup.bounds.x0, 1);
     expect(resized.bounds.y0).toBeCloseTo(setup.bounds.y0, 1);
-    expect(resized.shapeScale[0]).toBeGreaterThan(setup.shapeScale[0]);
-    expect(resized.shapeScale[1]).toBeGreaterThan(setup.shapeScale[1]);
-    expect(resized.shapeKeys[0]).toBeGreaterThan(setup.shapeKeys[0]);
-    expect(resized.shapeKeys[1]).toBeGreaterThan(setup.shapeKeys[1]);
+    expect(resized.shapeScale).toEqual(setup.shapeScale);
+    expect(resized.shapeKeys).toEqual(setup.shapeKeys);
+    expect(resized.shapeSize[0]).toBeGreaterThan(setup.shapeSize[0]);
+    expect(resized.shapeSize[1]).toBeGreaterThan(setup.shapeSize[1]);
+    expect(resized.shapeSizeKeys[0]).toBeGreaterThan(setup.shapeSizeKeys[0]);
+    expect(resized.shapeSizeKeys[1]).toBeGreaterThan(setup.shapeSizeKeys[1]);
     expect(resized.textSize).toBe(setup.textSize);
     expect(resized.textScale[0]).toBeGreaterThan(setup.textScale[0]);
     expect(resized.textScale[1]).toBeGreaterThan(setup.textScale[1]);
     expect(resized.textScaleKeys[0]).toBeGreaterThan(setup.textScaleKeys[0]);
     expect(resized.textScaleKeys[1]).toBeGreaterThan(setup.textScaleKeys[1]);
     expect(resized.textChildScale).toEqual(setup.textChildScale);
+    const factor = resized.shapeSize[0] / setup.shapeSize[0];
+    for (let index = 0; index < 4; index++) expect(resized.textChildWorld[index]).toBeCloseTo(setup.textChildWorld[index] * factor, 3);
+    expect(resized.textChildWorld[4]).toBeCloseTo(setup.bounds.x0 + (setup.textChildWorld[4] - setup.bounds.x0) * factor, 2);
+    expect(resized.textChildWorld[5]).toBeCloseTo(setup.bounds.y0 + (setup.textChildWorld[5] - setup.bounds.y0) * factor, 2);
 
     const resizeUndone = await page.evaluate(({ shapeId, textId, textChildId }) => {
       const PM = (window as any).PM;
@@ -394,6 +431,8 @@ test.describe('@viewer direct resize', () => {
       return {
         ok,
         shapeScale: [PM.ev(shape, 'scale.x', 1), PM.ev(shape, 'scale.y', 1)],
+        shapeSize: [PM.resolveContent(shape, 1).w, PM.resolveContent(shape, 1).h],
+        shapeSizeKeys: [shape.d.w.kf.length, shape.d.h.kf.length],
         textSize: text.d.size,
         textScale: [PM.ev(text, 'scale.x', 1), PM.ev(text, 'scale.y', 1)],
         textChildScale: [PM.ev(textChild, 'scale.x', 1), PM.ev(textChild, 'scale.y', 1)],
@@ -404,7 +443,7 @@ test.describe('@viewer direct resize', () => {
       };
     }, { shapeId: setup.shapeId, textId: setup.textId, textChildId: setup.textChildId });
     expect(resizeUndone).toEqual({
-      ok: true, shapeScale: setup.shapeScale, textSize: setup.textSize,
+      ok: true, shapeScale: setup.shapeScale, shapeSize: setup.shapeSize, shapeSizeKeys: setup.shapeSizeKeys, textSize: setup.textSize,
       textScale: setup.textScale, textChildScale: setup.textChildScale, positions: setup.positions,
     });
 
