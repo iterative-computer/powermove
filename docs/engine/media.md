@@ -39,9 +39,12 @@ exist. Only box, element, or KLV headers and table payloads are read:
 | MPEG-TS, M2TS, MTS, MPEG-PS, VOB, FLV, ASF/WMV, Ogg | FFmpeg demux scan | No frame tables exist; payloads are demuxed, nothing decoded |
 | AVI or elementary streams with B frames | Demux scan plus a decode-order pass | See below |
 
-H.264 and HEVC samples are tagged with their first VCL NAL type (a few header
-bytes per sample), so open-GOP sync samples (HEVC CRA and BLA, H.264 non-IDR
-I) and leading pictures (RASL) are known. A decode for frame N starts at the
+H.264 and HEVC sync samples in MOV/MP4 and Matroska are tagged with their
+first VCL NAL type (one 64-byte read per sync sample, never non-sync samples),
+so open-GOP sync samples (HEVC CRA and BLA, H.264 non-IDR I) and their leading
+pictures (RASL) are known. On a 108,000-frame H.264 MP4 (432 sync samples) this
+takes 3.7 ms of a warm-cache index build, against 155 ms when every sample's
+headers were read one byte at a time. A decode for frame N starts at the
 last sync sample not after N and skips that sync sample's leading pictures.
 
 **Scanned packets** are addressed by byte position plus their ordinal among
