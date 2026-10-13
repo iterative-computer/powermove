@@ -78,7 +78,12 @@ pub fn is_prores_fourcc(f: &[u8; 4]) -> bool {
 impl VtConfig {
     /// Chooses the VideoToolbox codec, configuration atoms, and output
     /// format, or says why VideoToolbox is not the backend for this stream.
-    pub fn new(info: &CodecInfo, idx: &FrameIndex, extradata: &[u8], purpose: DecodePurpose) -> Result<VtConfig> {
+    pub fn new(
+        info: &CodecInfo,
+        idx: &FrameIndex,
+        extradata: &[u8],
+        purpose: DecodePurpose,
+    ) -> Result<VtConfig> {
         init();
         let cfg = &idx.config;
         let mut prores_header = false;
@@ -96,7 +101,15 @@ impl VtConfig {
                 }
             };
             // Every child atom of the sample entry, as AVFoundation passes them.
-            (codec, cfg.atoms.iter().filter(|a| a.1.len() < 1 << 20).cloned().collect(), false)
+            (
+                codec,
+                cfg.atoms
+                    .iter()
+                    .filter(|a| a.1.len() < 1 << 20)
+                    .cloned()
+                    .collect(),
+                false,
+            )
         } else if let Some(id) = &cfg.codec_id {
             let cp = cfg.codec_private.clone().unwrap_or_default();
             match id.as_str() {
@@ -106,19 +119,36 @@ impl VtConfig {
                 // Matroska ProRes: CodecPrivate is the four-character code;
                 // frames are stored without their 8-byte `icpf` header.
                 "V_PRORES" => {
-                    let f: [u8; 4] = cp.get(..4).and_then(|b| b.try_into().ok()).unwrap_or(prores_fourcc(info.profile));
+                    let f: [u8; 4] = cp
+                        .get(..4)
+                        .and_then(|b| b.try_into().ok())
+                        .unwrap_or(prores_fourcc(info.profile));
                     if !is_prores_fourcc(&f) {
-                        return Err(MediaError::invalid(format!("Matroska ProRes with CodecPrivate {cp:?}")));
+                        return Err(MediaError::invalid(format!(
+                            "Matroska ProRes with CodecPrivate {cp:?}"
+                        )));
                     }
                     prores_header = true;
                     (u32::from_be_bytes(f), vec![], false)
                 }
-                other => return Err(MediaError::unsupported(format!("{other} goes to FFmpeg (section 13)"))),
+                other => {
+                    return Err(MediaError::unsupported(format!(
+                        "{other} goes to FFmpeg (section 13)"
+                    )));
+                }
             }
         } else if info.codec == "prores" {
             // MXF (RDD 44) and other containers: the codec tag, else FFmpeg's profile.
-            let tag = info.codec_tag.as_deref().and_then(|t| <[u8; 4]>::try_from(t.as_bytes()).ok()).filter(is_prores_fourcc);
-            (u32::from_be_bytes(tag.unwrap_or(prores_fourcc(info.profile))), vec![], false)
+            let tag = info
+                .codec_tag
+                .as_deref()
+                .and_then(|t| <[u8; 4]>::try_from(t.as_bytes()).ok())
+                .filter(is_prores_fourcc);
+            (
+                u32::from_be_bytes(tag.unwrap_or(prores_fourcc(info.profile))),
+                vec![],
+                false,
+            )
         } else if info.codec == "h264" && extradata.first() == Some(&1) {
             // FLV and others: the extradata is already an `avcC` record and
             // samples are length-prefixed.
@@ -127,17 +157,30 @@ impl VtConfig {
             (fcc(b"hvc1"), vec![(*b"hvcC", extradata.to_vec())], false)
         } else if info.codec == "h264" && !extradata.is_empty() {
             // MPEG-TS, AVI: Annex B parameter sets and samples.
-            (fcc(b"avc1"), vec![(*b"avcC", annexb_to_avcc(extradata)?)], true)
+            (
+                fcc(b"avc1"),
+                vec![(*b"avcC", annexb_to_avcc(extradata)?)],
+                true,
+            )
         } else {
-            return Err(MediaError::unsupported(format!("{} without MOV, MP4, or Matroska configuration goes to FFmpeg", info.codec)));
+            return Err(MediaError::unsupported(format!(
+                "{} without MOV, MP4, or Matroska configuration goes to FFmpeg",
+                info.codec
+            )));
         };
         let hardware_supported = unsafe { VTIsHardwareDecodeSupported(codec) } != 0;
-        let hvcc = atoms.iter().find(|a| &a.0 == b"hvcC").map(|a| a.1.as_slice());
+        let hvcc = atoms
+            .iter()
+            .find(|a| &a.0 == b"hvcC")
+            .map(|a| a.1.as_slice());
         let alpha_layer = hvcc.map(hevc_max_layers).unwrap_or(1) > 1;
         let prores = is_prores_fourcc(&codec.to_be_bytes());
         let (format, format_source) = format_description(codec, &atoms, info.width, info.height)?;
         let ext_full = unsafe {
-            cf_bool_value(CMFormatDescriptionGetExtension(format.as_mut_ptr(), kCMFormatDescriptionExtension_FullRangeVideo))
+            cf_bool_value(CMFormatDescriptionGetExtension(
+                format.as_mut_ptr(),
+                kCMFormatDescriptionExtension_FullRangeVideo,
+            ))
         };
         let full = ext_full.unwrap_or(info.full_range);
         let (cw, ch) = (info.log2_chroma_w, info.log2_chroma_h);
@@ -232,18 +275,48 @@ fn parameter_sets(codec: u32, cfg: &[u8]) -> Option<Vec<&[u8]>> {
 /// count, and for HEVC with alpha `ContainsAlphaChannel` (without which
 /// VideoToolbox decodes only the base layer). Other codecs use the sample
 /// entry atoms.
-fn format_description(codec: u32, atoms: &[([u8; 4], Vec<u8>)], w: i32, h: i32) -> Result<(Cf, String)> {
-    let atom_pairs: Vec<(Cf, Cf)> = atoms.iter().map(|(k, v)| (cf_str(&String::from_utf8_lossy(k)), cf_data(v))).collect();
-    let atom_dict = cf_dict(&atom_pairs.iter().map(|(k, v)| (k.as_ptr(), v.as_ptr())).collect::<Vec<_>>());
-    let ext = unsafe { cf_dict(&[(kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms, atom_dict.as_ptr())]) };
-    let cfg_name: &[u8; 4] = if codec == fcc(b"hvc1") { b"hvcC" } else { b"avcC" };
-    let cfg = atoms.iter().find(|a| &a.0 == cfg_name).map(|a| a.1.as_slice());
+fn format_description(
+    codec: u32,
+    atoms: &[([u8; 4], Vec<u8>)],
+    w: i32,
+    h: i32,
+) -> Result<(Cf, String)> {
+    let atom_pairs: Vec<(Cf, Cf)> = atoms
+        .iter()
+        .map(|(k, v)| (cf_str(&String::from_utf8_lossy(k)), cf_data(v)))
+        .collect();
+    let atom_dict = cf_dict(
+        &atom_pairs
+            .iter()
+            .map(|(k, v)| (k.as_ptr(), v.as_ptr()))
+            .collect::<Vec<_>>(),
+    );
+    let ext = unsafe {
+        cf_dict(&[(
+            kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms,
+            atom_dict.as_ptr(),
+        )])
+    };
+    let cfg_name: &[u8; 4] = if codec == fcc(b"hvc1") {
+        b"hvcC"
+    } else {
+        b"avcC"
+    };
+    let cfg = atoms
+        .iter()
+        .find(|a| &a.0 == cfg_name)
+        .map(|a| a.1.as_slice());
     let mut fd: CMFormatDescriptionRef = std::ptr::null_mut();
     if let (true, Some(cfg)) = (codec == fcc(b"hvc1") || codec == fcc(b"avc1"), cfg) {
-        let sets = parameter_sets(codec, cfg).ok_or_else(|| MediaError::invalid("malformed decoder configuration record"))?;
+        let sets = parameter_sets(codec, cfg)
+            .ok_or_else(|| MediaError::invalid("malformed decoder configuration record"))?;
         let ptrs: Vec<*const u8> = sets.iter().map(|s| s.as_ptr()).collect();
         let sizes: Vec<usize> = sets.iter().map(|s| s.len()).collect();
-        let len_size = if codec == fcc(b"hvc1") { (cfg[21] & 3) as i32 + 1 } else { (cfg[4] & 3) as i32 + 1 };
+        let len_size = if codec == fcc(b"hvc1") {
+            (cfg[21] & 3) as i32 + 1
+        } else {
+            (cfg[4] & 3) as i32 + 1
+        };
         let st = unsafe {
             if codec == fcc(b"hvc1") {
                 CMVideoFormatDescriptionCreateFromHEVCParameterSets(
@@ -267,16 +340,39 @@ fn format_description(codec: u32, atoms: &[([u8; 4], Vec<u8>)], w: i32, h: i32) 
             }
         };
         if st != 0 {
-            return Err(MediaError::VideoToolbox { what: "format description from parameter sets".into(), status: st });
+            return Err(MediaError::VideoToolbox {
+                what: "format description from parameter sets".into(),
+                status: st,
+            });
         }
-        let src = format!("{} parameter sets", if codec == fcc(b"hvc1") { "HEVC" } else { "H.264" });
-        return Ok((unsafe { Cf::from_create(fd as CFTypeRef) }.ok_or_else(|| MediaError::invalid("null format description"))?, src));
+        let src = format!(
+            "{} parameter sets",
+            if codec == fcc(b"hvc1") {
+                "HEVC"
+            } else {
+                "H.264"
+            }
+        );
+        return Ok((
+            unsafe { Cf::from_create(fd as CFTypeRef) }
+                .ok_or_else(|| MediaError::invalid("null format description"))?,
+            src,
+        ));
     }
-    let st = unsafe { CMVideoFormatDescriptionCreate(kCFAllocatorDefault, codec, w, h, ext.as_ptr(), &mut fd) };
+    let st = unsafe {
+        CMVideoFormatDescriptionCreate(kCFAllocatorDefault, codec, w, h, ext.as_ptr(), &mut fd)
+    };
     if st != 0 {
-        return Err(MediaError::VideoToolbox { what: "format description".into(), status: st });
+        return Err(MediaError::VideoToolbox {
+            what: "format description".into(),
+            status: st,
+        });
     }
-    Ok((unsafe { Cf::from_create(fd as CFTypeRef) }.ok_or_else(|| MediaError::invalid("null format description"))?, "sample entry atoms".into()))
+    Ok((
+        unsafe { Cf::from_create(fd as CFTypeRef) }
+            .ok_or_else(|| MediaError::invalid("null format description"))?,
+        "sample entry atoms".into(),
+    ))
 }
 
 /// vps_max_layers_minus1 + 1 from the first VPS in an hvcC record.
@@ -323,7 +419,11 @@ pub fn annexb_nals(b: &[u8]) -> Vec<&[u8]> {
     }
     let mut out = Vec::new();
     for (k, &s) in starts.iter().enumerate() {
-        let mut e = if k + 1 < starts.len() { starts[k + 1] - 3 } else { b.len() };
+        let mut e = if k + 1 < starts.len() {
+            starts[k + 1] - 3
+        } else {
+            b.len()
+        };
         while e > s && b[e - 1] == 0 {
             e -= 1;
         }
@@ -339,9 +439,18 @@ fn annexb_to_avcc(extradata: &[u8]) -> Result<Vec<u8>> {
     let sps: Vec<&[u8]> = nals.iter().copied().filter(|n| n[0] & 0x1F == 7).collect();
     let pps: Vec<&[u8]> = nals.iter().copied().filter(|n| n[0] & 0x1F == 8).collect();
     if sps.is_empty() || pps.is_empty() || sps[0].len() < 4 {
-        return Err(MediaError::unsupported("no SPS and PPS in Annex B extradata"));
+        return Err(MediaError::unsupported(
+            "no SPS and PPS in Annex B extradata",
+        ));
     }
-    let mut v = vec![1, sps[0][1], sps[0][2], sps[0][3], 0xFF, 0xE0 | sps.len() as u8];
+    let mut v = vec![
+        1,
+        sps[0][1],
+        sps[0][2],
+        sps[0][3],
+        0xFF,
+        0xE0 | sps.len() as u8,
+    ];
     for s in &sps {
         v.extend_from_slice(&(s.len() as u16).to_be_bytes());
         v.extend_from_slice(s);
@@ -427,10 +536,17 @@ impl VtDecoder {
     /// `allow_hardware` false asks for VideoToolbox's software decoder
     /// (when the hardware arbiter has no session to give).
     pub fn new(cfg: &VtConfig, timebase_den: i64, allow_hardware: bool) -> Result<Self> {
-        let timescale = i32::try_from(timebase_den).map_err(|_| MediaError::unsupported("timescale too large for CMTime"))?;
+        let timescale = i32::try_from(timebase_den)
+            .map_err(|_| MediaError::unsupported("timescale too large for CMTime"))?;
         unsafe {
-            let format = cfg.format.clone().ok_or_else(|| MediaError::invalid("configuration without a format description"))?;
-            let spec = cf_dict(&[(kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder, cf_bool(allow_hardware))]);
+            let format = cfg
+                .format
+                .clone()
+                .ok_or_else(|| MediaError::invalid("configuration without a format description"))?;
+            let spec = cf_dict(&[(
+                kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder,
+                cf_bool(allow_hardware),
+            )]);
             let pixfmt = cf_i32(cfg.format_fcc as i32);
             let iosurface = cf_dict(&[]);
             let attrs = cf_dict(&[
@@ -438,16 +554,29 @@ impl VtDecoder {
                 (kCVPixelBufferMetalCompatibilityKey, cf_bool(true)),
                 (kCVPixelBufferIOSurfacePropertiesKey, iosurface.as_ptr()),
             ]);
-            let collector = Box::new(Collector { frames: Mutex::new(Vec::new()), eos_callbacks: AtomicUsize::new(0) });
+            let collector = Box::new(Collector {
+                frames: Mutex::new(Vec::new()),
+                eos_callbacks: AtomicUsize::new(0),
+            });
             let rec = VTDecompressionOutputCallbackRecord {
                 callback: on_output,
                 refcon: &*collector as *const Collector as *mut c_void,
             };
             let mut session: VTDecompressionSessionRef = std::ptr::null_mut();
-            let st = VTDecompressionSessionCreate(kCFAllocatorDefault, format.as_mut_ptr(), spec.as_ptr(), attrs.as_ptr(), &rec, &mut session);
+            let st = VTDecompressionSessionCreate(
+                kCFAllocatorDefault,
+                format.as_mut_ptr(),
+                spec.as_ptr(),
+                attrs.as_ptr(),
+                &rec,
+                &mut session,
+            );
             if st != 0 {
                 return Err(MediaError::VideoToolbox {
-                    what: format!("create session ({} to {})", cfg.codec_type, cfg.pixel_format),
+                    what: format!(
+                        "create session ({} to {})",
+                        cfg.codec_type, cfg.pixel_format
+                    ),
                     status: st,
                 });
             }
@@ -466,8 +595,12 @@ impl VtDecoder {
             let atom = |n: &[u8; 4]| cfg.atoms.iter().find(|a| &a.0 == n).map(|a| a.1.as_slice());
             let nal = match &cfg.codec_fcc.to_be_bytes() {
                 b"avc1" if cfg.annexb => Some((NalKind::H264, 4)),
-                b"avc1" => atom(b"avcC").filter(|c| c.len() > 4).map(|c| (NalKind::H264, (c[4] & 3) as usize + 1)),
-                b"hvc1" => atom(b"hvcC").filter(|c| c.len() > 21).map(|c| (NalKind::Hevc, (c[21] & 3) as usize + 1)),
+                b"avc1" => atom(b"avcC")
+                    .filter(|c| c.len() > 4)
+                    .map(|c| (NalKind::H264, (c[4] & 3) as usize + 1)),
+                b"hvc1" => atom(b"hvcC")
+                    .filter(|c| c.len() > 21)
+                    .map(|c| (NalKind::Hevc, (c[21] & 3) as usize + 1)),
                 _ => None,
             };
             Ok(VtDecoder {
@@ -533,7 +666,9 @@ impl VtDecoder {
         unsafe { VTDecompressionSessionWaitForAsynchronousFrames(self.session) };
         self.collector.frames.lock().unwrap().clear();
         self.failures.clear();
-        let Some((kind, ls)) = self.nal else { return Ok(()) };
+        let Some((kind, ls)) = self.nal else {
+            return Ok(());
+        };
         let eos: &[u8] = match kind {
             NalKind::H264 => &[0x0A],
             NalKind::Hevc => &[36 << 1, 0x01],
@@ -566,27 +701,56 @@ impl VtDecoder {
                 &mut bb,
             );
             if st != 0 {
-                return Err(MediaError::VideoToolbox { what: "block buffer".into(), status: st });
+                return Err(MediaError::VideoToolbox {
+                    what: "block buffer".into(),
+                    status: st,
+                });
             }
             let bb = Cf::from_create(bb as CFTypeRef).unwrap();
-            let st = CMBlockBufferReplaceDataBytes(data.as_ptr() as _, bb.as_mut_ptr(), 0, data.len());
+            let st =
+                CMBlockBufferReplaceDataBytes(data.as_ptr() as _, bb.as_mut_ptr(), 0, data.len());
             if st != 0 {
-                return Err(MediaError::VideoToolbox { what: "block buffer copy".into(), status: st });
+                return Err(MediaError::VideoToolbox {
+                    what: "block buffer copy".into(),
+                    status: st,
+                });
             }
             let timing = CMSampleTimingInfo {
                 duration: CMTime::new(pkt.duration, self.timescale),
                 pts: CMTime::new(pkt.pts, self.timescale),
-                dts: pkt.dts.map(|d| CMTime::new(d, self.timescale)).unwrap_or(CMTime::invalid()),
+                dts: pkt
+                    .dts
+                    .map(|d| CMTime::new(d, self.timescale))
+                    .unwrap_or(CMTime::invalid()),
             };
             let size = data.len();
             let mut sb: CMSampleBufferRef = std::ptr::null_mut();
-            let st = CMSampleBufferCreateReady(kCFAllocatorDefault, bb.as_mut_ptr(), self.format.as_mut_ptr(), 1, 1, &timing, 1, &size, &mut sb);
+            let st = CMSampleBufferCreateReady(
+                kCFAllocatorDefault,
+                bb.as_mut_ptr(),
+                self.format.as_mut_ptr(),
+                1,
+                1,
+                &timing,
+                1,
+                &size,
+                &mut sb,
+            );
             if st != 0 {
-                return Err(MediaError::VideoToolbox { what: "sample buffer".into(), status: st });
+                return Err(MediaError::VideoToolbox {
+                    what: "sample buffer".into(),
+                    status: st,
+                });
             }
             let sb = Cf::from_create(sb as CFTypeRef).unwrap();
             let mut info = 0u32;
-            Ok(VTDecompressionSessionDecodeFrame(self.session, sb.as_mut_ptr(), flags, refcon as *mut c_void, &mut info))
+            Ok(VTDecompressionSessionDecodeFrame(
+                self.session,
+                sb.as_mut_ptr(),
+                flags,
+                refcon as *mut c_void,
+                &mut info,
+            ))
         }
     }
 
@@ -598,7 +762,9 @@ impl VtDecoder {
                 continue;
             }
             if !pts.is_valid() || pts.timescale != self.timescale {
-                return Err(MediaError::decode(format!("VideoToolbox output time {pts:?}")));
+                return Err(MediaError::decode(format!(
+                    "VideoToolbox output time {pts:?}"
+                )));
             }
             match buf {
                 Some(pb) if status == 0 => {
@@ -611,10 +777,17 @@ impl VtDecoder {
                         )));
                     }
                     if unsafe { CVPixelBufferGetIOSurface(pb.as_mut_ptr()) }.is_null() {
-                        return Err(MediaError::decode("VideoToolbox buffer without an IOSurface"));
+                        return Err(MediaError::decode(
+                            "VideoToolbox buffer without an IOSurface",
+                        ));
                     }
                     let format = corevideo_format(&pb)?;
-                    out.push(DecodedFrame { pts: pts.value, format: Arc::new(format), pixels: Pixels::CoreVideo(pb), color: None });
+                    out.push(DecodedFrame {
+                        pts: pts.value,
+                        format: Arc::new(format),
+                        pixels: Pixels::CoreVideo(pb),
+                        color: None,
+                    });
                 }
                 _ => self.failures.push((pts.value, status)),
             }
@@ -639,10 +812,17 @@ mod tests {
 
     #[test]
     fn annexb_rewrites_to_length_prefixes_without_parameter_sets() {
-        let au = [0, 0, 0, 1, 0x67, 0x64, 0, 0x1F, 0, 0, 1, 0x68, 3, 0, 0, 1, 0x65, 9, 9, 9];
+        let au = [
+            0, 0, 0, 1, 0x67, 0x64, 0, 0x1F, 0, 0, 1, 0x68, 3, 0, 0, 1, 0x65, 9, 9, 9,
+        ];
         let v = annexb_to_length_prefixed(&au);
         assert_eq!(v, vec![0, 0, 0, 4, 0x65, 9, 9, 9]);
         let avcc = annexb_to_avcc(&au[..13]).unwrap();
-        assert_eq!(avcc, vec![1, 0x64, 0, 0x1F, 0xFF, 0xE1, 0, 4, 0x67, 0x64, 0, 0x1F, 1, 0, 2, 0x68, 3]);
+        assert_eq!(
+            avcc,
+            vec![
+                1, 0x64, 0, 0x1F, 0xFF, 0xE1, 0, 4, 0x67, 0x64, 0, 0x1F, 1, 0, 2, 0x68, 3
+            ]
+        );
     }
 }

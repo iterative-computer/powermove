@@ -11,7 +11,7 @@
 use super::Packet;
 use super::decoder::FfDecoder;
 use crate::error::{MediaError, Result};
-use crate::frame::{DecodedFrame, PlaneDesc, Pixels, PoolFrame, PoolPlane};
+use crate::frame::{DecodedFrame, Pixels, PlaneDesc, PoolFrame, PoolPlane};
 use crate::pool::FramePool;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -31,10 +31,16 @@ impl AlphaPairDecoder {
         let color = FfDecoder::new(input, stream, None, pool.clone(), threads)?;
         let alpha = FfDecoder::new(input, stream, None, pool.clone(), threads)?;
         if color.name() != "vp8" && color.name() != "vp9" {
-            return Err(MediaError::unsupported(format!("alpha pairing needs FFmpeg's vp8 or vp9, got {}", color.name())));
+            return Err(MediaError::unsupported(format!(
+                "alpha pairing needs FFmpeg's vp8 or vp9, got {}",
+                color.name()
+            )));
         }
         if !color.direct() || !alpha.direct() {
-            return Err(MediaError::unsupported(format!("{} does not render into pool frames", color.name())));
+            return Err(MediaError::unsupported(format!(
+                "{} does not render into pool frames",
+                color.name()
+            )));
         }
         Ok(AlphaPairDecoder {
             color,
@@ -62,7 +68,11 @@ impl AlphaPairDecoder {
                 self.colors.extend(got.drain(..).map(|f| (f.pts, f)));
                 match &p.additional {
                     Some(add) => {
-                        let ap = Packet { data: add.clone(), additional: None, ..p.clone() };
+                        let ap = Packet {
+                            data: add.clone(),
+                            additional: None,
+                            ..p.clone()
+                        };
                         self.alpha.send(Some(&ap), &mut got)?;
                         self.masks.extend(got.drain(..).map(|f| (f.pts, f)));
                     }
@@ -90,11 +100,17 @@ impl AlphaPairDecoder {
 
     /// Emits every frame whose color and alpha pictures have both arrived.
     fn pair(&mut self, out: &mut Vec<DecodedFrame>) -> Result<()> {
-        let ready: Vec<i64> =
-            self.colors.keys().copied().filter(|k| self.masks.contains_key(k) || self.opaque.contains(k)).collect();
+        let ready: Vec<i64> = self
+            .colors
+            .keys()
+            .copied()
+            .filter(|k| self.masks.contains_key(k) || self.opaque.contains(k))
+            .collect();
         for pts in ready {
             let c = self.colors.remove(&pts).unwrap();
-            let Pixels::Pool(cp) = &c.pixels else { unreachable!("FFmpeg frames live in the pool") };
+            let Pixels::Pool(cp) = &c.pixels else {
+                unreachable!("FFmpeg frames live in the pool")
+            };
             let mut format = (*c.format).clone();
             let alpha_plane = if self.opaque.remove(&pts) {
                 // No alpha for this frame: an opaque plane at the color depth.
@@ -115,14 +131,29 @@ impl AlphaPairDecoder {
                         }
                     }
                 }
-                PoolPlane { decoder_ptr: slot.ptr() as usize, slot, offset: 0, stride }
+                PoolPlane {
+                    decoder_ptr: slot.ptr() as usize,
+                    slot,
+                    offset: 0,
+                    stride,
+                }
             } else {
                 let a = self.masks.remove(&pts).unwrap();
-                let Pixels::Pool(ap) = &a.pixels else { unreachable!("FFmpeg frames live in the pool") };
-                if a.format.width != format.width || a.format.height != format.height || a.format.bits != format.bits {
+                let Pixels::Pool(ap) = &a.pixels else {
+                    unreachable!("FFmpeg frames live in the pool")
+                };
+                if a.format.width != format.width
+                    || a.format.height != format.height
+                    || a.format.bits != format.bits
+                {
                     return Err(MediaError::decode(format!(
                         "alpha picture {}x{} {}-bit differs from color {}x{} {}-bit",
-                        a.format.width, a.format.height, a.format.bits, format.width, format.height, format.bits
+                        a.format.width,
+                        a.format.height,
+                        a.format.bits,
+                        format.width,
+                        format.height,
+                        format.bits
                     )));
                 }
                 let plane = ap.planes[0].clone();
@@ -131,7 +162,11 @@ impl AlphaPairDecoder {
                 let owner = (c.clone(), a.clone());
                 let mut planes = cp.planes.clone();
                 planes.push(plane);
-                format.planes.push(PlaneDesc { format: a.format.planes[0].format, width: format.width, height: format.height });
+                format.planes.push(PlaneDesc {
+                    format: a.format.planes[0].format,
+                    width: format.width,
+                    height: format.height,
+                });
                 format.alpha_bits = format.bits;
                 format.label = format.label.replacen("yuv", "yuva", 1);
                 out.push(DecodedFrame {
@@ -148,7 +183,11 @@ impl AlphaPairDecoder {
             };
             let mut planes = cp.planes.clone();
             planes.push(alpha_plane);
-            format.planes.push(PlaneDesc { format: format.planes[0].format, width: format.width, height: format.height });
+            format.planes.push(PlaneDesc {
+                format: format.planes[0].format,
+                width: format.width,
+                height: format.height,
+            });
             format.alpha_bits = format.bits;
             format.label = format.label.replacen("yuv", "yuva", 1);
             out.push(DecodedFrame {

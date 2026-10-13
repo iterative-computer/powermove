@@ -20,8 +20,8 @@ pub mod deinterlace;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{
-    MTLBuffer, MTLDevice, MTLPixelFormat, MTLResourceOptions, MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureType,
-    MTLTextureUsage,
+    MTLBuffer, MTLDevice, MTLPixelFormat, MTLResourceOptions, MTLStorageMode, MTLTexture,
+    MTLTextureDescriptor, MTLTextureType, MTLTextureUsage,
 };
 use pm_media::apple::cf::*;
 use pm_media::frame::{DecodedFrame, Layout, PixelFormat, Pixels, PlaneFormat};
@@ -46,7 +46,12 @@ pub enum ImportError {
     #[error("{0}")]
     Media(#[from] pm_media::MediaError),
     #[error("plane {plane}: offset {offset} or stride {stride} is not {align}-byte aligned")]
-    Alignment { plane: usize, offset: usize, stride: usize, align: usize },
+    Alignment {
+        plane: usize,
+        offset: usize,
+        stride: usize,
+        align: usize,
+    },
     #[error("{0}")]
     Unsupported(String),
 }
@@ -65,9 +70,18 @@ fn plane_formats(f: PlaneFormat) -> (MTLPixelFormat, wgpu::TextureFormat) {
         PlaneFormat::R16 => (MTLPixelFormat::R16Unorm, wgpu::TextureFormat::R16Unorm),
         PlaneFormat::Rg16 => (MTLPixelFormat::RG16Unorm, wgpu::TextureFormat::Rg16Unorm),
         PlaneFormat::Rgba8 => (MTLPixelFormat::RGBA8Unorm, wgpu::TextureFormat::Rgba8Unorm),
-        PlaneFormat::Rgba16 => (MTLPixelFormat::RGBA16Unorm, wgpu::TextureFormat::Rgba16Unorm),
-        PlaneFormat::Rgba16Float => (MTLPixelFormat::RGBA16Float, wgpu::TextureFormat::Rgba16Float),
-        PlaneFormat::Rgba32Float => (MTLPixelFormat::RGBA32Float, wgpu::TextureFormat::Rgba32Float),
+        PlaneFormat::Rgba16 => (
+            MTLPixelFormat::RGBA16Unorm,
+            wgpu::TextureFormat::Rgba16Unorm,
+        ),
+        PlaneFormat::Rgba16Float => (
+            MTLPixelFormat::RGBA16Float,
+            wgpu::TextureFormat::Rgba16Float,
+        ),
+        PlaneFormat::Rgba32Float => (
+            MTLPixelFormat::RGBA32Float,
+            wgpu::TextureFormat::Rgba32Float,
+        ),
     }
 }
 
@@ -87,7 +101,10 @@ pub struct ImportedFrame {
 /// The normalization output.
 pub enum Normalized {
     /// (Y′, 0, 0, A) at luma resolution and (Cb, Cr) at chroma resolution.
-    YCbCr { luma: wgpu::Texture, chroma: wgpu::Texture },
+    YCbCr {
+        luma: wgpu::Texture,
+        chroma: wgpu::Texture,
+    },
     /// (R, G, B, A).
     Rgb { rgba: wgpu::Texture },
 }
@@ -131,11 +148,16 @@ unsafe impl Sync for SlotBuffer {}
 
 impl DecodeImporter {
     pub fn new(device: &wgpu::Device) -> Result<DecodeImporter> {
-        if !device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM) {
+        if !device
+            .features()
+            .contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM)
+        {
             return Err(ImportError::No16BitNorm);
         }
         let mtl = unsafe {
-            let hal = device.as_hal::<wgpu_hal::api::Metal>().ok_or(ImportError::NotMetal)?;
+            let hal = device
+                .as_hal::<wgpu_hal::api::Metal>()
+                .ok_or(ImportError::NotMetal)?;
             hal.raw_device().clone()
         };
         let device_id = mtl.registryID();
@@ -150,7 +172,10 @@ impl DecodeImporter {
             )
         };
         if st != 0 {
-            return Err(ImportError::CoreVideo { what: "CVMetalTextureCacheCreate".into(), status: st });
+            return Err(ImportError::CoreVideo {
+                what: "CVMetalTextureCacheCreate".into(),
+                status: st,
+            });
         }
         let cache = unsafe { Cf::from_create(cache as CFTypeRef) }.unwrap();
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -215,7 +240,11 @@ impl DecodeImporter {
             device
                 .create_texture(&wgpu::TextureDescriptor {
                     label: Some("pm-gpu placeholder"),
-                    size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
@@ -232,8 +261,14 @@ impl DecodeImporter {
             cache,
             pipeline,
             layout,
-            dummy: small(wgpu::TextureFormat::R8Unorm, wgpu::TextureUsages::TEXTURE_BINDING),
-            dummy_out: small(wgpu::TextureFormat::Rg32Float, wgpu::TextureUsages::STORAGE_BINDING),
+            dummy: small(
+                wgpu::TextureFormat::R8Unorm,
+                wgpu::TextureUsages::TEXTURE_BINDING,
+            ),
+            dummy_out: small(
+                wgpu::TextureFormat::Rg32Float,
+                wgpu::TextureUsages::STORAGE_BINDING,
+            ),
         })
     }
 
@@ -252,14 +287,22 @@ impl DecodeImporter {
                 MTLTextureType::Type2D,
                 1,
                 1,
-                wgpu_hal::CopyExtent { width: w, height: h, depth: 1 },
+                wgpu_hal::CopyExtent {
+                    width: w,
+                    height: h,
+                    depth: 1,
+                },
                 Some(keep),
             );
             self.device.create_texture_from_hal::<wgpu_hal::api::Metal>(
                 hal,
                 &wgpu::TextureDescriptor {
                     label: Some("decoded plane"),
-                    size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
@@ -281,7 +324,8 @@ impl DecodeImporter {
         match &frame.pixels {
             Pixels::CoreVideo(pb) => {
                 let planar = unsafe { CVPixelBufferIsPlanar(pb.as_mut_ptr()) } != 0;
-                let surface = unsafe { CVPixelBufferGetIOSurface(pb.as_mut_ptr()) } as *const std::ffi::c_void;
+                let surface = unsafe { CVPixelBufferGetIOSurface(pb.as_mut_ptr()) }
+                    as *const std::ffi::c_void;
                 for (i, p) in f.planes.iter().enumerate() {
                     let (mf, wf) = plane_formats(p.format);
                     let mut t: CVMetalTextureRef = std::ptr::null_mut();
@@ -299,15 +343,21 @@ impl DecodeImporter {
                         )
                     };
                     if st != 0 || t.is_null() {
-                        return Err(ImportError::CoreVideo { what: format!("texture from image, plane {i}"), status: st });
+                        return Err(ImportError::CoreVideo {
+                            what: format!("texture from image, plane {i}"),
+                            status: st,
+                        });
                     }
                     let cvt = unsafe { Cf::from_create(t as CFTypeRef) }.unwrap();
                     let raw = unsafe {
                         let mt = CVMetalTextureGetTexture(cvt.as_mut_ptr());
-                        Retained::retain(mt as *mut ProtocolObject<dyn MTLTexture>)
-                            .ok_or_else(|| ImportError::Metal("CVMetalTextureGetTexture returned null".into()))?
+                        Retained::retain(mt as *mut ProtocolObject<dyn MTLTexture>).ok_or_else(
+                            || ImportError::Metal("CVMetalTextureGetTexture returned null".into()),
+                        )?
                     };
-                    let tex_surface = raw.iosurface().map(|s| Retained::as_ptr(&s) as *const std::ffi::c_void);
+                    let tex_surface = raw
+                        .iosurface()
+                        .map(|s| Retained::as_ptr(&s) as *const std::ffi::c_void);
                     let plane_ok = !planar || raw.iosurfacePlane() == i;
                     aliased &= !surface.is_null() && tex_surface == Some(surface) && plane_ok;
                     let keep_frame = frame.clone();
@@ -324,20 +374,30 @@ impl DecodeImporter {
                     let handle = pl.slot.gpu_handle(self.device_id, || {
                         let ptr = NonNull::new(pl.slot.ptr() as *mut std::ffi::c_void).unwrap();
                         let buf = unsafe {
-                            self.mtl.newBufferWithBytesNoCopy_length_options_deallocator(
-                                ptr,
-                                pl.slot.len(),
-                                MTLResourceOptions::StorageModeShared,
-                                None,
-                            )
+                            self.mtl
+                                .newBufferWithBytesNoCopy_length_options_deallocator(
+                                    ptr,
+                                    pl.slot.len(),
+                                    MTLResourceOptions::StorageModeShared,
+                                    None,
+                                )
                         }
-                        .ok_or_else(|| pm_media::MediaError::invalid("newBufferWithBytesNoCopy failed"))?;
+                        .ok_or_else(|| {
+                            pm_media::MediaError::invalid("newBufferWithBytesNoCopy failed")
+                        })?;
                         Ok(Arc::new(SlotBuffer(buf)))
                     })?;
-                    let buf = handle.downcast_ref::<SlotBuffer>().ok_or_else(|| ImportError::Metal("slot handle type".into()))?;
+                    let buf = handle
+                        .downcast_ref::<SlotBuffer>()
+                        .ok_or_else(|| ImportError::Metal("slot handle type".into()))?;
                     let align = self.mtl.minimumLinearTextureAlignmentForPixelFormat(mf);
                     if pl.offset % align != 0 || pl.stride % align != 0 {
-                        return Err(ImportError::Alignment { plane: i, offset: pl.offset, stride: pl.stride, align });
+                        return Err(ImportError::Alignment {
+                            plane: i,
+                            offset: pl.offset,
+                            stride: pl.stride,
+                            align,
+                        });
                     }
                     let raw = unsafe {
                         let td = MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(mf, p.width, p.height, false);
@@ -345,9 +405,14 @@ impl DecodeImporter {
                         td.setUsage(MTLTextureUsage::ShaderRead);
                         buf.0
                             .newTextureWithDescriptor_offset_bytesPerRow(&td, pl.offset, pl.stride)
-                            .ok_or_else(|| ImportError::Metal(format!("linear texture for plane {i}")))?
+                            .ok_or_else(|| {
+                                ImportError::Metal(format!("linear texture for plane {i}"))
+                            })?
                     };
-                    let tex_ptr = raw.buffer().map(|b| b.contents().as_ptr() as usize + raw.bufferOffset()).unwrap_or(0);
+                    let tex_ptr = raw
+                        .buffer()
+                        .map(|b| b.contents().as_ptr() as usize + raw.bufferOffset())
+                        .unwrap_or(0);
                     aliased &= tex_ptr == pl.decoder_ptr;
                     let keep_frame = frame.clone();
                     let keep_handle = handle.clone();
@@ -363,13 +428,23 @@ impl DecodeImporter {
             (Some(layout), Some(color)) => Some(descriptor(&f, layout, color)),
             _ => None,
         };
-        Ok(ImportedFrame { textures, format: f, aliased, desc })
+        Ok(ImportedFrame {
+            textures,
+            format: f,
+            aliased,
+            desc,
+        })
     }
 
     /// Records the section 13 normalization of an imported frame into
     /// `encoder` and returns its output textures (rgba32float and rg32float,
     /// `STORAGE_BINDING | TEXTURE_BINDING | COPY_SRC`).
-    pub fn normalize(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, imp: &ImportedFrame) -> Result<Normalized> {
+    pub fn normalize(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        imp: &ImportedFrame,
+    ) -> Result<Normalized> {
         let f = &imp.format;
         let n = f.norm();
         let unorm_max = |pf: PlaneFormat| match pf {
@@ -398,7 +473,9 @@ impl DecodeImporter {
             sx: f.log2_chroma_w as u32,
             sy: f.log2_chroma_h as u32,
             code_max: unorm_max(f.planes[0].format),
-            a_code_max: alpha_plane.map(|p| unorm_max(f.planes[p].format)).unwrap_or(0.0),
+            a_code_max: alpha_plane
+                .map(|p| unorm_max(f.planes[p].format))
+                .unwrap_or(0.0),
             y_off: n.y_off as f32,
             y_div: n.y_div as f32,
             c_off: n.c_off as f32,
@@ -412,17 +489,28 @@ impl DecodeImporter {
         let mk = |w, h, format, label| {
             self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
-                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
-                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                usage: wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             })
         };
         let rgb = kind >= 4;
-        let out0 = mk(w, h, wgpu::TextureFormat::Rgba32Float, "normalized luma/rgba");
+        let out0 = mk(
+            w,
+            h,
+            wgpu::TextureFormat::Rgba32Float,
+            "normalized luma/rgba",
+        );
         let out1 = (!rgb).then(|| mk(cw, ch, wgpu::TextureFormat::Rg32Float, "normalized chroma"));
         let ubuf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("normalize params"),
@@ -431,9 +519,16 @@ impl DecodeImporter {
             mapped_at_creation: false,
         });
         queue.write_buffer(&ubuf, 0, unsafe {
-            std::slice::from_raw_parts(&params as *const Params as *const u8, std::mem::size_of::<Params>())
+            std::slice::from_raw_parts(
+                &params as *const Params as *const u8,
+                std::mem::size_of::<Params>(),
+            )
         });
-        let views: Vec<wgpu::TextureView> = imp.textures.iter().map(|t| t.create_view(&Default::default())).collect();
+        let views: Vec<wgpu::TextureView> = imp
+            .textures
+            .iter()
+            .map(|t| t.create_view(&Default::default()))
+            .collect();
         let v = |i: usize| views.get(i).unwrap_or(&self.dummy);
         let o0 = out0.create_view(&Default::default());
         let o1 = out1.as_ref().map(|t| t.create_view(&Default::default()));
@@ -441,20 +536,43 @@ impl DecodeImporter {
             label: Some("normalize"),
             layout: &self.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(v(0)) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(v(1)) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(v(2)) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(v(3)) },
-                wgpu::BindGroupEntry { binding: 4, resource: ubuf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&o0) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(v(0)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(v(1)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(v(2)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(v(3)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: ubuf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&o0),
+                },
                 wgpu::BindGroupEntry {
                     binding: 6,
-                    resource: wgpu::BindingResource::TextureView(o1.as_ref().unwrap_or(&self.dummy_out)),
+                    resource: wgpu::BindingResource::TextureView(
+                        o1.as_ref().unwrap_or(&self.dummy_out),
+                    ),
                 },
             ],
         });
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("normalize"), timestamp_writes: None });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("normalize"),
+                timestamp_writes: None,
+            });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bg, &[]);
             pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
@@ -472,13 +590,25 @@ impl DecodeImporter {
 }
 
 /// The contract 3 descriptor for a frame.
-pub fn descriptor(f: &PixelFormat, layout: pm_protocol::interop::DecodedLayout, color: ColorDescription) -> DecodedFrameDesc {
+pub fn descriptor(
+    f: &PixelFormat,
+    layout: pm_protocol::interop::DecodedLayout,
+    color: ColorDescription,
+) -> DecodedFrameDesc {
     DecodedFrameDesc {
-        size: Size { width: f.width as u32, height: f.height as u32 },
+        size: Size {
+            width: f.width as u32,
+            height: f.height as u32,
+        },
         layout,
         // The frame's own range and depth override the source's description
         // where they are facts of the pixel format.
-        color: ColorDescription { range: f.range, bit_depth: f.bits, subsampling: f.subsampling(), ..color },
+        color: ColorDescription {
+            range: f.range,
+            bit_depth: f.bits,
+            subsampling: f.subsampling(),
+            ..color
+        },
         clean_aperture: None::<PixelRect>,
     }
 }

@@ -39,18 +39,34 @@ impl ImageSequence {
 fn split(name: &str) -> Option<(&str, &str, &str)> {
     let ext_at = name.rfind('.').unwrap_or(name.len());
     let stem = &name[..ext_at];
-    let end = stem.char_indices().rev().find(|(_, c)| c.is_ascii_digit()).map(|(i, _)| i + 1)?;
-    let start = stem[..end].char_indices().rev().find(|(_, c)| !c.is_ascii_digit()).map(|(i, c)| i + c.len_utf8()).unwrap_or(0);
+    let end = stem
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_ascii_digit())
+        .map(|(i, _)| i + 1)?;
+    let start = stem[..end]
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !c.is_ascii_digit())
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
     Some((&name[..start], &name[start..end], &name[end..]))
 }
 
 /// The sequence `path` belongs to, or None when it has no frame number or
 /// is the only member.
 pub fn detect(path: &Path) -> Result<Option<ImageSequence>> {
-    let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return Ok(None) };
-    let Some((prefix, digits, suffix)) = split(name) else { return Ok(None) };
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return Ok(None);
+    };
+    let Some((prefix, digits, suffix)) = split(name) else {
+        return Ok(None);
+    };
     let padded = digits.len() > 1 && digits.starts_with('0');
-    let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let dir = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
     let mut frames: Vec<(i64, PathBuf)> = Vec::new();
     for e in std::fs::read_dir(&dir)? {
         let e = e?;
@@ -60,7 +76,11 @@ pub fn detect(path: &Path) -> Result<Option<ImageSequence>> {
         if p != prefix || s != suffix {
             continue;
         }
-        let ok = if padded { d.len() == digits.len() } else { d.len() == 1 || !d.starts_with('0') || d.len() == digits.len() };
+        let ok = if padded {
+            d.len() == digits.len()
+        } else {
+            d.len() == 1 || !d.starts_with('0') || d.len() == digits.len()
+        };
         if !ok {
             continue;
         }
@@ -95,7 +115,10 @@ mod tests {
 
     #[test]
     fn splits_on_the_last_number() {
-        assert_eq!(split("shot_v2.0001.exr"), Some(("shot_v2.", "0001", ".exr")));
+        assert_eq!(
+            split("shot_v2.0001.exr"),
+            Some(("shot_v2.", "0001", ".exr"))
+        );
         assert_eq!(split("frame12.png"), Some(("frame", "12", ".png")));
         assert_eq!(split("still.png"), None);
     }
@@ -110,7 +133,10 @@ mod tests {
         std::fs::write(dir.join("shot.12.png"), b"x").unwrap(); // other padding
         std::fs::write(dir.join("other.0004.png"), b"x").unwrap();
         let s = detect(&dir.join("shot.0003.png")).unwrap().unwrap();
-        assert_eq!(s.frames.iter().map(|f| f.0).collect::<Vec<_>>(), vec![1, 2, 3, 6, 7, 10]);
+        assert_eq!(
+            s.frames.iter().map(|f| f.0).collect::<Vec<_>>(),
+            vec![1, 2, 3, 6, 7, 10]
+        );
         assert_eq!(s.gaps, vec![(4, 5), (8, 9)]);
         assert_eq!(s.padding, 4);
         assert_eq!(s.file_for(5).unwrap().file_name().unwrap(), "shot.0003.png");

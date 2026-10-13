@@ -99,7 +99,8 @@ pub fn nominal_rate(pts: &[i64], timebase: Rational) -> Option<NominalRate> {
             let num = (pts.len() as i128 - 1) * td;
             let den = full_span * tn;
             let g = gcd(num, den);
-            let rate = Rate::new(i64::try_from(num / g).ok()?, i64::try_from(den / g).ok()?).ok()?;
+            let rate =
+                Rate::new(i64::try_from(num / g).ok()?, i64::try_from(den / g).ok()?).ok()?;
             (rate, RateMethod::Fallback)
         }
         1 => (candidates[0], RateMethod::Median),
@@ -124,7 +125,13 @@ pub fn nominal_rate(pts: &[i64], timebase: Rational) -> Option<NominalRate> {
             (best, RateMethod::MedianThenMean)
         }
     };
-    Some(NominalRate { rate, method, candidates, median_duration: median, window: window.len() })
+    Some(NominalRate {
+        rate,
+        method,
+        candidates,
+        median_duration: median,
+        window: window.len(),
+    })
 }
 
 pub(crate) fn gcd(a: i128, b: i128) -> i128 {
@@ -173,7 +180,11 @@ fn wide_mul(a: i128, b: i128) -> (i128, u128) {
 pub fn selection_quantum(timebase: Rational, rate: Rate) -> (i128, i128) {
     let tb = (timebase.num() as i128, timebase.den() as i128);
     let cap = (rate.den() as i128, 4 * rate.num() as i128);
-    if cmp_frac(tb.0, tb.1, cap.0, cap.1).is_le() { tb } else { cap }
+    if cmp_frac(tb.0, tb.1, cap.0, cap.1).is_le() {
+        tb
+    } else {
+        cap
+    }
 }
 
 /// Section 5 rule 7: the index of the last frame with PTS ≤ t + q/2, where q
@@ -194,15 +205,20 @@ pub fn select_frame(pts: &[i64], timebase: Rational, rate: Rate, t: Tick) -> Opt
 /// rule 7 fixes on coarse timebases.
 pub fn select_frame_naive(pts: &[i64], timebase: Rational, t: Tick) -> Option<usize> {
     let (tn, td) = (timebase.num() as i128, timebase.den() as i128);
-    let idx = pts
-        .partition_point(|&p| cmp_frac(p as i128 * tn, td, t as i128, TICKS_PER_SECOND as i128).is_le());
+    let idx = pts.partition_point(|&p| {
+        cmp_frac(p as i128 * tn, td, t as i128, TICKS_PER_SECOND as i128).is_le()
+    });
     idx.checked_sub(1)
 }
 
 /// Ticks of a timestamp with round-half-even (exact when the timebase
 /// divides the flick). Saturates far outside the representable range.
 pub fn ticks_of(pts: i64, timebase: Rational) -> Tick {
-    pm_time::ticks_from_timebase(pts, timebase).unwrap_or(if pts < 0 { Tick::MIN } else { Tick::MAX })
+    pm_time::ticks_from_timebase(pts, timebase).unwrap_or(if pts < 0 {
+        Tick::MIN
+    } else {
+        Tick::MAX
+    })
 }
 
 /// The composition slot of each source frame when the clip's frame 0 is its
@@ -210,7 +226,9 @@ pub fn ticks_of(pts: i64, timebase: Rational) -> Tick {
 /// Used to state the expected frame for each composition frame independently
 /// of rule 7 (tests and verification).
 pub fn grid(pts: &[i64], timebase: Rational, rate: Rate) -> Vec<i64> {
-    let Some(&p0) = pts.first() else { return vec![] };
+    let Some(&p0) = pts.first() else {
+        return vec![];
+    };
     let den = timebase.den() as i128 * rate.den() as i128;
     pts.iter()
         .map(|&p| {
@@ -232,7 +250,9 @@ pub fn expected_frame(grid: &[i64], n: i64) -> Option<usize> {
 pub fn frame_time(pts0: i64, timebase: Rational, rate: Rate, n: i64) -> Tick {
     let origin = (pts0 as i128 * timebase.num() as i128 * TICKS_PER_SECOND as i128)
         .div_euclid(timebase.den() as i128);
-    let start = rate.frame_start(n).unwrap_or(if n < 0 { Tick::MIN } else { Tick::MAX });
+    let start = rate
+        .frame_start(n)
+        .unwrap_or(if n < 0 { Tick::MIN } else { Tick::MAX });
     (origin + start as i128).clamp(Tick::MIN as i128, Tick::MAX as i128) as Tick
 }
 
@@ -253,8 +273,14 @@ pub struct SelectionCheck {
 /// (or hold the previous one across a hole in the source).
 pub fn check_selection(pts: &[i64], timebase: Rational, rate: Rate) -> SelectionCheck {
     let g = grid(pts, timebase, rate);
-    let Some(&last) = g.last() else { return SelectionCheck::default() };
-    let mut c = SelectionCheck { frames: pts.len(), composition_frames: (last + 1).max(0) as usize, ..Default::default() };
+    let Some(&last) = g.last() else {
+        return SelectionCheck::default();
+    };
+    let mut c = SelectionCheck {
+        frames: pts.len(),
+        composition_frames: (last + 1).max(0) as usize,
+        ..Default::default()
+    };
     for n in 0..=last {
         let expected = expected_frame(&g, n);
         if expected.is_some_and(|k| g[k] != n) {
@@ -297,7 +323,11 @@ mod tests {
             for tb in [r(1, 1000), r(1, 90000), r(1, 600)] {
                 let pts = rounded_pts(rate, tb, 20_000);
                 let c = check_selection(&pts, tb, rate);
-                assert_eq!(c.rule7_mismatches, 0, "rate {rate:?} tb {tb:?}: first {:?}", c.first_mismatch);
+                assert_eq!(
+                    c.rule7_mismatches, 0,
+                    "rate {rate:?} tb {tb:?}: first {:?}",
+                    c.first_mismatch
+                );
                 assert_eq!(c.composition_frames, 20_000);
             }
         }
@@ -314,16 +344,34 @@ mod tests {
     fn nominal_rate_breaks_ties_by_the_mean() {
         let tb = r(1, 1000);
         let n = nominal_rate(&rounded_pts(Rate::FPS_23_976, tb, 400), tb).unwrap();
-        assert_eq!((n.rate, n.method), (Rate::FPS_23_976, RateMethod::MedianThenMean));
+        assert_eq!(
+            (n.rate, n.method),
+            (Rate::FPS_23_976, RateMethod::MedianThenMean)
+        );
         assert!(n.candidates.contains(&Rate::FPS_24));
         let n = nominal_rate(&rounded_pts(Rate::FPS_24, tb, 400), tb).unwrap();
         assert_eq!(n.rate, Rate::FPS_24);
         let tb600 = r(1, 600);
-        assert_eq!(nominal_rate(&rounded_pts(Rate::FPS_29_97, tb600, 400), tb600).unwrap().rate, Rate::FPS_29_97);
-        assert_eq!(nominal_rate(&rounded_pts(Rate::FPS_30, tb600, 400), tb600).unwrap().rate, Rate::FPS_30);
+        assert_eq!(
+            nominal_rate(&rounded_pts(Rate::FPS_29_97, tb600, 400), tb600)
+                .unwrap()
+                .rate,
+            Rate::FPS_29_97
+        );
+        assert_eq!(
+            nominal_rate(&rounded_pts(Rate::FPS_30, tb600, 400), tb600)
+                .unwrap()
+                .rate,
+            Rate::FPS_30
+        );
         // Fine timebases where NTSC and integer rates differ by one unit per frame.
         for tb in [r(1, 24000), r(1, 30000), r(1, 15360)] {
-            for rate in [Rate::FPS_23_976, Rate::FPS_24, Rate::FPS_29_97, Rate::FPS_30] {
+            for rate in [
+                Rate::FPS_23_976,
+                Rate::FPS_24,
+                Rate::FPS_29_97,
+                Rate::FPS_30,
+            ] {
                 let n = nominal_rate(&rounded_pts(rate, tb, 400), tb).unwrap();
                 assert_eq!(n.rate, rate, "{rate:?} at {tb:?}");
             }
@@ -338,7 +386,10 @@ mod tests {
         // 12.5 fps is not a supported rate: (last − first)/(n − 1).
         let pts: Vec<i64> = (0..50).map(|i| i * 80).collect();
         let n = nominal_rate(&pts, r(1, 1000)).unwrap();
-        assert_eq!((n.rate, n.method), (Rate::new(25, 2).unwrap(), RateMethod::Fallback));
+        assert_eq!(
+            (n.rate, n.method),
+            (Rate::new(25, 2).unwrap(), RateMethod::Fallback)
+        );
         assert!(nominal_rate(&[5], r(1, 1000)).is_none());
         assert!(nominal_rate(&[5, 5], r(1, 1000)).is_none());
     }
@@ -348,16 +399,28 @@ mod tests {
         let tb = r(1, 12800);
         let pts: Vec<i64> = (0..100).map(|i| -1024 + i * 512).collect();
         assert_eq!(check_selection(&pts, tb, Rate::FPS_25).rule7_mismatches, 0);
-        assert_eq!(select_frame(&pts, tb, Rate::FPS_25, -ticks_of(2048, tb)), None);
-        assert_eq!(select_frame(&pts, tb, Rate::FPS_25, ticks_of(-1024, tb)), Some(0));
+        assert_eq!(
+            select_frame(&pts, tb, Rate::FPS_25, -ticks_of(2048, tb)),
+            None
+        );
+        assert_eq!(
+            select_frame(&pts, tb, Rate::FPS_25, ticks_of(-1024, tb)),
+            Some(0)
+        );
     }
 
     #[test]
     fn a_hole_holds_the_previous_frame() {
         let tb = r(1, 30000);
-        let pts: Vec<i64> = (0..10).filter(|&i| i != 5).map(|i| -962 + i * 1001).collect();
+        let pts: Vec<i64> = (0..10)
+            .filter(|&i| i != 5)
+            .map(|i| -962 + i * 1001)
+            .collect();
         let c = check_selection(&pts, tb, Rate::FPS_29_97);
-        assert_eq!((c.composition_frames, c.holes, c.doubled, c.rule7_mismatches), (10, 1, 0, 0));
+        assert_eq!(
+            (c.composition_frames, c.holes, c.doubled, c.rule7_mismatches),
+            (10, 1, 0, 0)
+        );
         let g = grid(&pts, tb, Rate::FPS_29_97);
         assert_eq!(expected_frame(&g, 5), Some(4));
         assert_eq!(expected_frame(&g, 6), Some(5));
@@ -389,7 +452,10 @@ mod tests {
     fn grid_rounds_coarse_timestamps_to_their_slot() {
         for tb in [r(1, 1000), r(1, 600), r(1, 90000)] {
             let pts = rounded_pts(Rate::FPS_23_976, tb, 5000);
-            assert_eq!(grid(&pts, tb, Rate::FPS_23_976), (0..5000).collect::<Vec<i64>>());
+            assert_eq!(
+                grid(&pts, tb, Rate::FPS_23_976),
+                (0..5000).collect::<Vec<i64>>()
+            );
         }
     }
 }

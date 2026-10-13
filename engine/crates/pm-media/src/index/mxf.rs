@@ -33,20 +33,27 @@ impl Klv {
     }
     /// Partition pack: 06.0E.2B.34.02.05.01.01.0D.01.02.01.01.{02,03,04}.xx.
     pub fn is_partition(&self) -> bool {
-        self.is(&[0x06, 0x0E, 0x2B, 0x34, 0x02, 0x05, 0x01, 0x01, 0x0D, 0x01, 0x02, 0x01, 0x01])
-            && matches!(self.key[13], 0x02..=0x04)
+        self.is(&[
+            0x06, 0x0E, 0x2B, 0x34, 0x02, 0x05, 0x01, 0x01, 0x0D, 0x01, 0x02, 0x01, 0x01,
+        ]) && matches!(self.key[13], 0x02..=0x04)
     }
     pub fn is_index_segment(&self) -> bool {
-        self.is(&[0x06, 0x0E, 0x2B, 0x34, 0x02, 0x53, 0x01, 0x01, 0x0D, 0x01, 0x02, 0x01, 0x01, 0x10, 0x01])
+        self.is(&[
+            0x06, 0x0E, 0x2B, 0x34, 0x02, 0x53, 0x01, 0x01, 0x0D, 0x01, 0x02, 0x01, 0x01, 0x10,
+            0x01,
+        ])
     }
     pub fn is_fill(&self) -> bool {
-        self.key[..4] == UL_PREFIX && self.key[4..7] == [0x01, 0x01, 0x01] && self.key[8..13] == [0x03, 0x01, 0x02, 0x10, 0x01]
+        self.key[..4] == UL_PREFIX
+            && self.key[4..7] == [0x01, 0x01, 0x01]
+            && self.key[8..13] == [0x03, 0x01, 0x02, 0x10, 0x01]
     }
     /// Generic container content-package items (system, picture, sound,
     /// data, compound), or Avid's essence keys.
     pub fn is_essence(&self) -> bool {
         self.key[..4] == UL_PREFIX
-            && (self.key[8..12] == [0x0D, 0x01, 0x03, 0x01] || self.key[8..12] == [0x0E, 0x04, 0x03, 0x01])
+            && (self.key[8..12] == [0x0D, 0x01, 0x03, 0x01]
+                || self.key[8..12] == [0x0E, 0x04, 0x03, 0x01])
     }
     /// A picture element (generic container 0x15, content package 0x05).
     pub fn is_picture(&self) -> bool {
@@ -66,16 +73,27 @@ pub fn parse_klv(buf: &[u8], base: u64, off: u64) -> Option<Klv> {
         if n == 0 || n > 8 {
             return None;
         }
-        (buf.get(p + 17..p + 17 + n)?.iter().fold(0u64, |a, &x| (a << 8) | x as u64), 1 + n)
+        (
+            buf.get(p + 17..p + 17 + n)?
+                .iter()
+                .fold(0u64, |a, &x| (a << 8) | x as u64),
+            1 + n,
+        )
     };
-    Some(Klv { key, offset: off, value: off + 16 + hl as u64, len })
+    Some(Klv {
+        key,
+        offset: off,
+        value: off + 16 + hl as u64,
+        len,
+    })
 }
 
 pub fn read_klv(f: &File, off: u64, file_len: u64) -> Result<Klv> {
     let mut b = [0u8; 25];
     let n = (file_len.saturating_sub(off) as usize).min(25);
     f.read_exact_at(&mut b[..n], off)?;
-    let k = parse_klv(&b[..n], off, off).ok_or_else(|| MediaError::invalid(format!("bad KLV at {off}")))?;
+    let k = parse_klv(&b[..n], off, off)
+        .ok_or_else(|| MediaError::invalid(format!("bad KLV at {off}")))?;
     if k.key[..4] != UL_PREFIX {
         return Err(MediaError::invalid(format!("no SMPTE key at {off}")));
     }
@@ -128,9 +146,13 @@ pub fn partitions(f: &File) -> Result<Vec<Partition>> {
         let mut t = [0u8; 4];
         f.read_exact_at(&mut t, len - 4)?;
         let rip_len = u32::from_be_bytes(t) as u64;
-        if rip_len >= 20 && rip_len < len
+        if rip_len >= 20
+            && rip_len < len
             && let Ok(k) = read_klv(f, len - rip_len, len)
-            && k.is(&[0x06, 0x0E, 0x2B, 0x34, 0x02, 0x05, 0x01, 0x01, 0x0D, 0x01, 0x02, 0x01, 0x01, 0x11, 0x01])
+            && k.is(&[
+                0x06, 0x0E, 0x2B, 0x34, 0x02, 0x05, 0x01, 0x01, 0x0D, 0x01, 0x02, 0x01, 0x01, 0x11,
+                0x01,
+            ])
         {
             let mut v = vec![0u8; k.len as usize];
             f.read_exact_at(&mut v, k.value)?;
@@ -144,7 +166,9 @@ pub fn partitions(f: &File) -> Result<Vec<Partition>> {
         // Footer chain.
         let mut at = header.footer;
         if at == 0 {
-            return Err(MediaError::unsupported("MXF without a Random Index Pack or footer partition"));
+            return Err(MediaError::unsupported(
+                "MXF without a Random Index Pack or footer partition",
+            ));
         }
         let mut seen = std::collections::HashSet::new();
         while seen.insert(at) {
@@ -158,7 +182,10 @@ pub fn partitions(f: &File) -> Result<Vec<Partition>> {
     }
     offsets.sort_unstable();
     offsets.dedup();
-    offsets.into_iter().map(|o| read_partition(f, o, len)).collect()
+    offsets
+        .into_iter()
+        .map(|o| read_partition(f, o, len))
+        .collect()
 }
 
 #[derive(Clone, Debug, Default)]
@@ -182,7 +209,9 @@ fn parse_segment(v: &[u8]) -> Result<IndexSegment> {
     while p + 4 <= v.len() {
         let tag = u16::from_be_bytes([v[p], v[p + 1]]);
         let n = u16::from_be_bytes([v[p + 2], v[p + 3]]) as usize;
-        let d = v.get(p + 4..p + 4 + n).ok_or_else(|| MediaError::invalid("index segment local set overruns"))?;
+        let d = v
+            .get(p + 4..p + 4 + n)
+            .ok_or_else(|| MediaError::invalid("index segment local set overruns"))?;
         let be32 = |b: &[u8]| u32::from_be_bytes(b[..4].try_into().unwrap());
         match tag {
             0x3F0B if n >= 8 => s.edit_rate = (be32(d) as i32, be32(&d[4..]) as i32),
@@ -211,7 +240,12 @@ fn parse_segment(v: &[u8]) -> Result<IndexSegment> {
         s.entries = (0..count)
             .map(|i| {
                 let e = &d[8 + i * item..];
-                (e[0] as i8, e[1] as i8, e[2], u64::from_be_bytes(e[3..11].try_into().unwrap()))
+                (
+                    e[0] as i8,
+                    e[1] as i8,
+                    e[2],
+                    u64::from_be_bytes(e[3..11].try_into().unwrap()),
+                )
             })
             .collect();
     }
@@ -279,7 +313,10 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
     for p in &parts {
         for s in segments_in(&f, p, len)? {
             // Header and footer often repeat a segment; keep the one with entries.
-            match segments.iter_mut().find(|e| e.index_sid == s.index_sid && e.start == s.start) {
+            match segments
+                .iter_mut()
+                .find(|e| e.index_sid == s.index_sid && e.start == s.start)
+            {
                 Some(e) if e.entries.len() < s.entries.len() => *e = s,
                 Some(_) => {}
                 None => segments.push(s),
@@ -291,7 +328,9 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
     }
     let body_sid = segments[0].body_sid;
     if segments.iter().any(|s| s.body_sid != body_sid) {
-        return Err(MediaError::unsupported("MXF with several indexed essence containers"));
+        return Err(MediaError::unsupported(
+            "MXF with several indexed essence containers",
+        ));
     }
     segments.sort_by_key(|s| s.start);
     let edit_rate = segments[0].edit_rate;
@@ -310,7 +349,9 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
         }
     }
     if regions.is_empty() {
-        return Err(MediaError::invalid("MXF index refers to a body with no essence"));
+        return Err(MediaError::invalid(
+            "MXF index refers to a body with no essence",
+        ));
     }
     let locate = |so: u64| -> Option<(u64, u64)> {
         regions
@@ -326,14 +367,26 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
     for s in &segments {
         if s.edit_unit_bytes != 0 {
             let total: u64 = regions.iter().map(|r| r.2 - r.1).sum();
-            let n = if s.duration > 0 { s.duration as u64 } else { total / s.edit_unit_bytes as u64 };
+            let n = if s.duration > 0 {
+                s.duration as u64
+            } else {
+                total / s.edit_unit_bytes as u64
+            };
             for k in 0..n {
                 units.push(((s.start as u64 + k) * s.edit_unit_bytes as u64, 0x80, 0));
             }
         } else {
             // Avid writes 2 × duration + 1 entries (one per field and a final one).
-            let delta = if s.duration > 0 && s.entries.len() as i64 == 2 * s.duration + 1 { 2 } else { 1 };
-            let n = if delta == 2 { s.entries.len() - 1 } else { s.entries.len() };
+            let delta = if s.duration > 0 && s.entries.len() as i64 == 2 * s.duration + 1 {
+                2
+            } else {
+                1
+            };
+            let n = if delta == 2 {
+                s.entries.len() - 1
+            } else {
+                s.entries.len()
+            };
             for j in (0..n).step_by(delta) {
                 let (to, _kfo, flags, so) = s.entries[j];
                 units.push((so, flags, to as i64 / delta as i64));
@@ -364,11 +417,15 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
         let (offset, size) = if clip_wrapped {
             let next = units.get(k + 1).map(|u| u.0).unwrap_or(first.len);
             if next > first.len || next < so {
-                return Err(MediaError::invalid("clip-wrapped MXF index exceeds its essence"));
+                return Err(MediaError::invalid(
+                    "clip-wrapped MXF index exceeds its essence",
+                ));
             }
             (first.value + so, next - so)
         } else {
-            let (at, region_end) = locate(so).ok_or_else(|| MediaError::invalid(format!("stream offset {so} outside the essence")))?;
+            let (at, region_end) = locate(so).ok_or_else(|| {
+                MediaError::invalid(format!("stream offset {so} outside the essence"))
+            })?;
             let cp_end = units
                 .get(k + 1)
                 .and_then(|u| locate(u.0))
@@ -390,7 +447,9 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
                     }
                 };
                 if kv.key[..4] != UL_PREFIX {
-                    return Err(MediaError::invalid(format!("no KLV at content package offset {p}")));
+                    return Err(MediaError::invalid(format!(
+                        "no KLV at content package offset {p}"
+                    )));
                 }
                 if kv.is_picture() {
                     found = Some((kv.value, kv.len));
@@ -398,9 +457,12 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
                 }
                 p = kv.end();
             }
-            found.ok_or_else(|| MediaError::invalid(format!("edit unit {k} has no picture element")))?
+            found.ok_or_else(|| {
+                MediaError::invalid(format!("edit unit {k} has no picture element"))
+            })?
         };
-        let size = u32::try_from(size).map_err(|_| MediaError::invalid("MXF picture element over 4 GiB"))?;
+        let size = u32::try_from(size)
+            .map_err(|_| MediaError::invalid("MXF picture element over 4 GiB"))?;
         samples.push(Sample {
             dts: Some(k as i64),
             cts: pts_of[k].unwrap_or(k as i64),
@@ -411,11 +473,22 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
             // picture is exact for every frame at or after it (its leading
             // pictures are skipped by the decode plan).
             key: flags & 0x80 != 0 || flags & 0x30 == 0,
-            loc: Loc::File { offset, size, additional: None },
+            loc: Loc::File {
+                offset,
+                size,
+                additional: None,
+            },
             nal_type: None,
         });
     }
-    let frames = samples.iter().enumerate().map(|(i, s)| Frame { sample: i, pts: s.cts }).collect();
+    let frames = samples
+        .iter()
+        .enumerate()
+        .map(|(i, s)| Frame {
+            sample: i,
+            pts: s.cts,
+        })
+        .collect();
     let mut idx = FrameIndex {
         source: IndexSource::MxfIndexTables,
         track: input.stream_id(stream),
@@ -429,9 +502,17 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
             detail: Some(format!(
                 "{} index segment(s), {}, {} partition(s) with essence{}",
                 segments.len(),
-                if segments.iter().all(|s| s.edit_unit_bytes != 0) { "constant edit-unit size" } else { "per-unit entries" },
+                if segments.iter().all(|s| s.edit_unit_bytes != 0) {
+                    "constant edit-unit size"
+                } else {
+                    "per-unit entries"
+                },
                 regions.len(),
-                if clip_wrapped { ", clip-wrapped" } else { ", frame-wrapped" }
+                if clip_wrapped {
+                    ", clip-wrapped"
+                } else {
+                    ", frame-wrapped"
+                }
             )),
             ..Default::default()
         },

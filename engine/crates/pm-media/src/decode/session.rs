@@ -57,7 +57,12 @@ pub const DEFAULT_WINDOW: usize = 16;
 const MAX_LOOKAHEAD: usize = 64;
 
 impl Session {
-    pub fn new(index: Arc<FrameIndex>, reader: PacketReader, decoder: Decoder, color: Option<ColorDescription>) -> Session {
+    pub fn new(
+        index: Arc<FrameIndex>,
+        reader: PacketReader,
+        decoder: Decoder,
+        color: Option<ColorDescription>,
+    ) -> Session {
         let mut by_cts = HashMap::with_capacity(index.samples.len());
         for (i, s) in index.samples.iter().enumerate() {
             by_cts.entry(s.cts).or_insert(i);
@@ -96,7 +101,12 @@ impl Session {
 
     /// The frame of presented frame `n` (presentation order).
     pub fn presented(&mut self, n: usize) -> Result<DecodedFrame> {
-        let s = self.index.frames.get(n).ok_or_else(|| MediaError::invalid(format!("frame {n} out of range")))?.sample;
+        let s = self
+            .index
+            .frames
+            .get(n)
+            .ok_or_else(|| MediaError::invalid(format!("frame {n} out of range")))?
+            .sample;
         self.sample(s)
     }
 
@@ -112,7 +122,9 @@ impl Session {
         }
         let sync = self.index.sync_for(s);
         let continuous = !self.drained
-            && self.run_start.is_some_and(|start| sync >= start && sync < self.next)
+            && self
+                .run_start
+                .is_some_and(|start| sync >= start && sync < self.next)
             && s >= self.next;
         if continuous {
             self.stats.continued += 1;
@@ -151,8 +163,12 @@ impl Session {
         let frame = self.window.get(&s).cloned().ok_or_else(|| {
             let cts = self.index.samples[s].cts;
             match failures.iter().find(|f| f.0 == cts) {
-                Some((_, st)) => MediaError::decode(format!("sample {s} (pts {cts}) failed to decode: status {st}")),
-                None => MediaError::decode(format!("the decoder did not output sample {s} (pts {cts})")),
+                Some((_, st)) => MediaError::decode(format!(
+                    "sample {s} (pts {cts}) failed to decode: status {st}"
+                )),
+                None => {
+                    MediaError::decode(format!("the decoder did not output sample {s} (pts {cts})"))
+                }
             }
         })?;
         self.trim(Some(s));
@@ -167,7 +183,9 @@ impl Session {
         }
         let start = self.run_start.expect("a run is open");
         let start_cts = self.index.samples[start].cts;
-        let gop_end = (start + 1..self.index.samples.len()).find(|&k| self.index.samples[k].key).unwrap_or(self.index.samples.len());
+        let gop_end = (start + 1..self.index.samples.len())
+            .find(|&k| self.index.samples[k].key)
+            .unwrap_or(self.index.samples.len());
         let which: Vec<usize> = (self.next..=upto)
             .filter(|&k| {
                 let leading = k > start && k < gop_end && self.index.samples[k].cts < start_cts;
@@ -188,10 +206,12 @@ impl Session {
 
     fn absorb(&mut self, out: &mut Vec<DecodedFrame>) -> Result<()> {
         for mut f in out.drain(..) {
-            let s = *self
-                .by_cts
-                .get(&f.pts)
-                .ok_or_else(|| MediaError::decode(format!("decoder output a frame at pts {} that no sample has", f.pts)))?;
+            let s = *self.by_cts.get(&f.pts).ok_or_else(|| {
+                MediaError::decode(format!(
+                    "decoder output a frame at pts {} that no sample has",
+                    f.pts
+                ))
+            })?;
             f.color = self.color;
             self.stats.frames_out += 1;
             self.window.insert(s, f);
@@ -206,7 +226,11 @@ impl Session {
             let first = *self.window.keys().next().unwrap();
             let last = *self.window.keys().next_back().unwrap();
             let c = around.unwrap_or(last);
-            let drop = if c.abs_diff(first) >= c.abs_diff(last) { first } else { last };
+            let drop = if c.abs_diff(first) >= c.abs_diff(last) {
+                first
+            } else {
+                last
+            };
             self.window.remove(&drop);
         }
     }

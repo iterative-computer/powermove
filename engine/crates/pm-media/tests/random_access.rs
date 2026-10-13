@@ -30,10 +30,27 @@ fn e2e_fixtures() {
 #[ignore]
 fn s6_corpus() {
     let s6 = [
-        "h264-bpyramid", "h264-opengop", "hevc-opengop", "hevc-main10", "hevc-422-10", "h264-422-10", "prores",
-        "editlist-trim", "vp9-10bit", "vp9-alpha", "vp8-alpha", "av1-10bit", "webm-1ms", "ts-90k", "mov-600", "uhd-",
+        "h264-bpyramid",
+        "h264-opengop",
+        "hevc-opengop",
+        "hevc-main10",
+        "hevc-422-10",
+        "h264-422-10",
+        "prores",
+        "editlist-trim",
+        "vp9-10bit",
+        "vp9-alpha",
+        "vp8-alpha",
+        "av1-10bit",
+        "webm-1ms",
+        "ts-90k",
+        "mov-600",
+        "uhd-",
     ];
-    run_all(&videos(&corpus_dir(), &|n| s6.iter().any(|p| n.starts_with(p))), DecodePurpose::Display);
+    run_all(
+        &videos(&corpus_dir(), &|n| s6.iter().any(|p| n.starts_with(p))),
+        DecodePurpose::Display,
+    );
 }
 
 /// ProRes in MXF (RDD 44) and Matroska (`icpf` header stripped):
@@ -41,7 +58,9 @@ fn s6_corpus() {
 #[test]
 #[ignore]
 fn prores_in_mxf_and_matroska() {
-    let files = videos(&corpus_dir(), &|n| n == "prores-hq.mxf" || n == "prores-422.mkv");
+    let files = videos(&corpus_dir(), &|n| {
+        n == "prores-hq.mxf" || n == "prores-422.mkv"
+    });
     assert_eq!(files.len(), 2);
     for f in &files {
         let r = run_file(f, None, DecodePurpose::Display);
@@ -56,7 +75,9 @@ fn prores_in_mxf_and_matroska() {
 #[test]
 #[ignore]
 fn prores_422_export_bound() {
-    let files = videos(&corpus_dir(), &|n| n.starts_with("prores422") || n.starts_with("mov-600-prores"));
+    let files = videos(&corpus_dir(), &|n| {
+        n.starts_with("prores422") || n.starts_with("mov-600-prores")
+    });
     for f in &files {
         let r = run_file(f, None, DecodePurpose::Export);
         eprintln!("{}", summary(&r));
@@ -71,14 +92,26 @@ fn prores_422_export_bound() {
 #[test]
 #[ignore]
 fn interlaced_mxf() {
-    let files = videos(&corpus_dir(), &|n| n.starts_with("mxf-") && !n.contains("opatom"));
+    let files = videos(&corpus_dir(), &|n| {
+        n.starts_with("mxf-") && !n.contains("opatom")
+    });
     assert_eq!(files.len(), 2);
     for f in &files {
         let r = run_file(f, None, DecodePurpose::Display);
         eprintln!("{}", summary(&r));
-        assert_eq!(r.source.index.source, pm_media::index::IndexSource::MxfIndexTables, "{}", r.name);
+        assert_eq!(
+            r.source.index.source,
+            pm_media::index::IndexSource::MxfIndexTables,
+            "{}",
+            r.name
+        );
         let fields = &r.source.probe.video.as_ref().unwrap().fields;
-        assert_eq!(fields.order, pm_media::probe::FieldOrder::TopFirst, "{}: {fields:?}", r.name);
+        assert_eq!(
+            fields.order,
+            pm_media::probe::FieldOrder::TopFirst,
+            "{}: {fields:?}",
+            r.name
+        );
         let failures = check(&r);
         assert!(failures.is_empty(), "{failures:#?}");
     }
@@ -93,8 +126,19 @@ fn mxf_clip_wrapped() {
     assert_eq!(files.len(), 1);
     let r = run_file(&files[0], None, DecodePurpose::Display);
     eprintln!("{}", summary(&r));
-    assert_eq!(r.source.index.source, pm_media::index::IndexSource::MxfIndexTables);
-    assert!(r.source.index.stats.detail.as_deref().unwrap_or("").contains("clip-wrapped"));
+    assert_eq!(
+        r.source.index.source,
+        pm_media::index::IndexSource::MxfIndexTables
+    );
+    assert!(
+        r.source
+            .index
+            .stats
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("clip-wrapped")
+    );
     let failures = check(&r);
     assert!(failures.is_empty(), "{failures:#?}");
 }
@@ -102,13 +146,19 @@ fn mxf_clip_wrapped() {
 #[test]
 #[ignore]
 fn dnxhr() {
-    run_all(&videos(&corpus_dir(), &|n| n.starts_with("dnxhr-")), DecodePurpose::Display);
+    run_all(
+        &videos(&corpus_dir(), &|n| n.starts_with("dnxhr-")),
+        DecodePurpose::Display,
+    );
 }
 
 #[test]
 #[ignore]
 fn cineform() {
-    run_all(&videos(&corpus_dir(), &|n| n.starts_with("cineform")), DecodePurpose::Display);
+    run_all(
+        &videos(&corpus_dir(), &|n| n.starts_with("cineform")),
+        DecodePurpose::Display,
+    );
 }
 
 #[test]
@@ -120,9 +170,17 @@ fn dv() {
         let r = run_file(f, None, DecodePurpose::Display);
         eprintln!("{}", summary(&r));
         let fields = &r.source.probe.video.as_ref().unwrap().fields;
-        assert_eq!(fields.order, pm_media::probe::FieldOrder::BottomFirst, "{}: {fields:?}", r.name);
+        assert_eq!(
+            fields.order,
+            pm_media::probe::FieldOrder::BottomFirst,
+            "{}: {fields:?}",
+            r.name
+        );
         if r.name.ends_with(".dv") {
-            assert_eq!(r.source.index.source, pm_media::index::IndexSource::DvConstantFrames);
+            assert_eq!(
+                r.source.index.source,
+                pm_media::index::IndexSource::DvConstantFrames
+            );
         }
         let failures = check(&r);
         assert!(failures.is_empty(), "{failures:#?}");
@@ -139,7 +197,10 @@ fn mjpeg() {
         // MJPEG reads as full range (section 9).
         assert_eq!(r.source.color.range, pm_protocol::color::Range::Full);
         if r.name.ends_with(".avi") {
-            assert_eq!(r.source.index.source, pm_media::index::IndexSource::AviIndex);
+            assert_eq!(
+                r.source.index.source,
+                pm_media::index::IndexSource::AviIndex
+            );
         }
         let failures = check(&r);
         assert!(failures.is_empty(), "{failures:#?}");
@@ -153,7 +214,10 @@ fn mjpeg() {
 fn other_containers() {
     run_all(
         &videos(&corpus_dir(), &|n| {
-            n.starts_with("h264-fragmented") || n.starts_with("h264-negative-cts") || n.starts_with("vfr-") || n.starts_with("mpeg2")
+            n.starts_with("h264-fragmented")
+                || n.starts_with("h264-negative-cts")
+                || n.starts_with("vfr-")
+                || n.starts_with("mpeg2")
         }),
         DecodePurpose::Display,
     );
@@ -187,5 +251,10 @@ fn container_breadth() {
         }
         failures.extend(check(&r));
     }
-    assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }

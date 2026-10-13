@@ -27,7 +27,9 @@ pub fn build(path: &Path, stream: usize) -> Result<FrameIndex> {
     let mut seen = std::collections::HashSet::new();
     for (k, p) in pkts.iter().enumerate() {
         let nth = match k.checked_sub(1).map(|j| (pkts[j].pos, nths[j])) {
-            Some((pos, n)) if pos == p.pos => n.checked_add(1).ok_or_else(|| MediaError::unsupported("too many packets at one byte position"))?,
+            Some((pos, n)) if pos == p.pos => n
+                .checked_add(1)
+                .ok_or_else(|| MediaError::unsupported("too many packets at one byte position"))?,
             _ => 0,
         };
         if p.pos < 0 || !seen.insert((p.pos, nth)) {
@@ -49,13 +51,20 @@ pub fn build(path: &Path, stream: usize) -> Result<FrameIndex> {
         .iter()
         .zip(&nths)
         .map(|(p, &nth)| {
-            let cts = p.pts.or(p.dts).ok_or_else(|| MediaError::unsupported("packets without timestamps"))?;
+            let cts = p
+                .pts
+                .or(p.dts)
+                .ok_or_else(|| MediaError::unsupported("packets without timestamps"))?;
             Ok(Sample {
                 dts: p.dts,
                 cts,
                 duration: p.duration,
                 key: p.key,
-                loc: Loc::Demux { pos: p.pos, nth, size: u32::try_from(p.size).unwrap_or(u32::MAX) },
+                loc: Loc::Demux {
+                    pos: p.pos,
+                    nth,
+                    size: u32::try_from(p.size).unwrap_or(u32::MAX),
+                },
                 nal_type: p.nal_type,
             })
         })
@@ -73,7 +82,11 @@ pub fn build(path: &Path, stream: usize) -> Result<FrameIndex> {
             samples.len()
         ));
     }
-    let nal = if pkts.iter().any(|p| p.nal_type.is_some()) { nal_codec(codec) } else { None };
+    let nal = if pkts.iter().any(|p| p.nal_type.is_some()) {
+        nal_codec(codec)
+    } else {
+        None
+    };
     let mut idx = FrameIndex {
         source,
         track: stream as u64,
@@ -82,7 +95,11 @@ pub fn build(path: &Path, stream: usize) -> Result<FrameIndex> {
         frames: vec![],
         config: CodecConfig::default(),
         nal_codec: nal,
-        stats: IndexStats { scan_reads: pkts.len(), detail, ..Default::default() },
+        stats: IndexStats {
+            scan_reads: pkts.len(),
+            detail,
+            ..Default::default()
+        },
     };
     // Packets the demuxer marks discardable (edit lists in MP4 read through
     // FFmpeg) are decoded but not presented, and so are packets a decode
@@ -92,7 +109,10 @@ pub fn build(path: &Path, stream: usize) -> Result<FrameIndex> {
         .iter()
         .enumerate()
         .filter(|(i, _)| !pkts[*i].discard && !hidden[*i])
-        .map(|(i, s)| super::Frame { sample: i, pts: s.cts })
+        .map(|(i, s)| super::Frame {
+            sample: i,
+            pts: s.cts,
+        })
         .collect();
     idx.finish();
     idx.summarize_open_gop();
@@ -103,19 +123,31 @@ pub fn build(path: &Path, stream: usize) -> Result<FrameIndex> {
 /// timestamps, sorted, are the presentation slots, and the k-th picture the
 /// decoder outputs takes slot k. Samples without output are hidden and take
 /// the remaining slots so every composition timestamp stays unique.
-fn presentation_from_order(samples: &mut [Sample], order: &[usize], hidden: &mut [bool]) -> Result<()> {
+fn presentation_from_order(
+    samples: &mut [Sample],
+    order: &[usize],
+    hidden: &mut [bool],
+) -> Result<()> {
     let mut slots: Vec<i64> = samples
         .iter()
-        .map(|s| s.dts.ok_or_else(|| MediaError::unsupported("packets without decode timestamps on a reordering codec")))
+        .map(|s| {
+            s.dts.ok_or_else(|| {
+                MediaError::unsupported("packets without decode timestamps on a reordering codec")
+            })
+        })
         .collect::<Result<_>>()?;
     slots.sort_unstable();
     if slots.windows(2).any(|w| w[0] == w[1]) {
-        return Err(MediaError::unsupported("repeated decode timestamps on a reordering codec without presentation timestamps"));
+        return Err(MediaError::unsupported(
+            "repeated decode timestamps on a reordering codec without presentation timestamps",
+        ));
     }
     let mut placed = vec![false; samples.len()];
     for &i in order {
         if i >= samples.len() || placed[i] {
-            return Err(MediaError::decode(format!("the decode pass output packet {i} twice or out of range")));
+            return Err(MediaError::decode(format!(
+                "the decode pass output packet {i} twice or out of range"
+            )));
         }
         placed[i] = true;
     }
@@ -137,7 +169,18 @@ mod tests {
     use super::*;
 
     fn s(dts: i64) -> Sample {
-        Sample { dts: Some(dts), cts: dts, duration: 1, key: false, loc: Loc::Demux { pos: dts, nth: 0, size: 1 }, nal_type: None }
+        Sample {
+            dts: Some(dts),
+            cts: dts,
+            duration: 1,
+            key: false,
+            loc: Loc::Demux {
+                pos: dts,
+                nth: 0,
+                size: 1,
+            },
+            nal_type: None,
+        }
     }
 
     #[test]
@@ -146,13 +189,19 @@ mod tests {
         let mut v = vec![s(0), s(1), s(2), s(3)];
         let mut hidden = vec![false; 4];
         presentation_from_order(&mut v, &[0, 2, 3, 1], &mut hidden).unwrap();
-        assert_eq!(v.iter().map(|s| s.cts).collect::<Vec<_>>(), vec![0, 3, 1, 2]);
+        assert_eq!(
+            v.iter().map(|s| s.cts).collect::<Vec<_>>(),
+            vec![0, 3, 1, 2]
+        );
         assert_eq!(hidden, vec![false; 4]);
         // A leading picture the decoder drops is hidden and keeps a unique slot.
         let mut v = vec![s(10), s(11), s(12)];
         let mut hidden = vec![false; 3];
         presentation_from_order(&mut v, &[0, 2], &mut hidden).unwrap();
-        assert_eq!(v.iter().map(|s| s.cts).collect::<Vec<_>>(), vec![10, 12, 11]);
+        assert_eq!(
+            v.iter().map(|s| s.cts).collect::<Vec<_>>(),
+            vec![10, 12, 11]
+        );
         assert_eq!(hidden, vec![false, true, false]);
         // Output twice is an error, not a silent reorder.
         assert!(presentation_from_order(&mut [s(0), s(1)], &[0, 0], &mut [false; 2]).is_err());

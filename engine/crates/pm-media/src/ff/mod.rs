@@ -22,7 +22,15 @@ pub fn err_str(e: c_int) -> String {
 }
 
 pub(crate) fn check(e: c_int, what: &str) -> Result<c_int> {
-    if e < 0 { Err(MediaError::Ffmpeg { what: what.into(), code: e, message: err_str(e) }) } else { Ok(e) }
+    if e < 0 {
+        Err(MediaError::Ffmpeg {
+            what: what.into(),
+            code: e,
+            message: err_str(e),
+        })
+    } else {
+        Ok(e)
+    }
 }
 
 /// FFmpeg logs recoverable stream damage to stderr (for example `mmco:
@@ -47,7 +55,11 @@ pub(crate) fn init() {
 }
 
 pub(crate) unsafe fn cstr(p: *const std::ffi::c_char) -> Option<String> {
-    if p.is_null() { None } else { Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()) }
+    if p.is_null() {
+        None
+    } else {
+        Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+    }
 }
 
 /// An open input.
@@ -62,18 +74,29 @@ impl Input {
     /// Opens and probes a file (`avformat_find_stream_info`).
     pub fn open(path: &Path) -> Result<Input> {
         let inp = Self::open_raw(path)?;
-        unsafe { check(ff::avformat_find_stream_info(inp.fmt, ptr::null_mut()), "stream info")? };
+        unsafe {
+            check(
+                ff::avformat_find_stream_info(inp.fmt, ptr::null_mut()),
+                "stream info",
+            )?
+        };
         Ok(inp)
     }
 
     /// Opens without probing stream info (packet reads only).
     pub fn open_raw(path: &Path) -> Result<Input> {
         init();
-        let c = CString::new(path.to_str().ok_or_else(|| MediaError::invalid("path is not UTF-8"))?)
-            .map_err(|_| MediaError::invalid("path contains NUL"))?;
+        let c = CString::new(
+            path.to_str()
+                .ok_or_else(|| MediaError::invalid("path is not UTF-8"))?,
+        )
+        .map_err(|_| MediaError::invalid("path contains NUL"))?;
         let mut fmt: *mut ff::AVFormatContext = ptr::null_mut();
         unsafe {
-            check(ff::avformat_open_input(&mut fmt, c.as_ptr(), ptr::null(), ptr::null_mut()), "open")?;
+            check(
+                ff::avformat_open_input(&mut fmt, c.as_ptr(), ptr::null(), ptr::null_mut()),
+                "open",
+            )?;
         }
         Ok(Input { fmt })
     }
@@ -136,19 +159,26 @@ impl Input {
 
     /// The best video stream (FFmpeg's choice, skipping attached pictures).
     pub fn best_video(&self) -> Option<usize> {
-        let s = unsafe { ff::av_find_best_stream(self.fmt, ff::AVMEDIA_TYPE_VIDEO, -1, -1, ptr::null_mut(), 0) };
+        let s = unsafe {
+            ff::av_find_best_stream(self.fmt, ff::AVMEDIA_TYPE_VIDEO, -1, -1, ptr::null_mut(), 0)
+        };
         (s >= 0).then_some(s as usize)
     }
 
     pub fn best_audio(&self) -> Option<usize> {
-        let s = unsafe { ff::av_find_best_stream(self.fmt, ff::AVMEDIA_TYPE_AUDIO, -1, -1, ptr::null_mut(), 0) };
+        let s = unsafe {
+            ff::av_find_best_stream(self.fmt, ff::AVMEDIA_TYPE_AUDIO, -1, -1, ptr::null_mut(), 0)
+        };
         (s >= 0).then_some(s as usize)
     }
 
     /// How many video streams precede `i`, when `i` is a video stream.
     pub fn video_ordinal(&self, i: usize) -> Option<usize> {
-        (self.media_type(i) == ff::AVMEDIA_TYPE_VIDEO)
-            .then(|| (0..i).filter(|&k| self.media_type(k) == ff::AVMEDIA_TYPE_VIDEO).count())
+        (self.media_type(i) == ff::AVMEDIA_TYPE_VIDEO).then(|| {
+            (0..i)
+                .filter(|&k| self.media_type(k) == ff::AVMEDIA_TYPE_VIDEO)
+                .count()
+        })
     }
 
     /// Stream metadata value.
@@ -183,7 +213,10 @@ impl Input {
                 if e.is_null() {
                     break;
                 }
-                out.push((cstr((*e).key).unwrap_or_default(), cstr((*e).value).unwrap_or_default()));
+                out.push((
+                    cstr((*e).key).unwrap_or_default(),
+                    cstr((*e).value).unwrap_or_default(),
+                ));
             }
         }
         out
@@ -195,7 +228,8 @@ impl Input {
             if (*par).extradata.is_null() || (*par).extradata_size <= 0 {
                 vec![]
             } else {
-                std::slice::from_raw_parts((*par).extradata, (*par).extradata_size as usize).to_vec()
+                std::slice::from_raw_parts((*par).extradata, (*par).extradata_size as usize)
+                    .to_vec()
             }
         }
     }
@@ -207,17 +241,29 @@ impl Input {
 
     /// Duration of the stream's first packet, in the stream timebase.
     pub fn packet_duration(&self, i: usize) -> Option<i64> {
-        self.with_first_packet(i, |p| unsafe { (*p).duration }).ok().filter(|&d| d > 0)
+        self.with_first_packet(i, |p| unsafe { (*p).duration })
+            .ok()
+            .filter(|&d| d > 0)
     }
 
-    fn with_first_packet<R>(&self, i: usize, f: impl FnOnce(*const ff::AVPacket) -> R) -> Result<R> {
+    fn with_first_packet<R>(
+        &self,
+        i: usize,
+        f: impl FnOnce(*const ff::AVPacket) -> R,
+    ) -> Result<R> {
         unsafe {
-            check(ff::av_seek_frame(self.fmt, -1, 0, ff::AVSEEK_FLAG_BYTE as c_int), "seek to start")?;
+            check(
+                ff::av_seek_frame(self.fmt, -1, 0, ff::AVSEEK_FLAG_BYTE as c_int),
+                "seek to start",
+            )?;
             let mut pkt = ff::av_packet_alloc();
             let result = loop {
                 let r = ff::av_read_frame(self.fmt, pkt);
                 if r < 0 {
-                    break Err(MediaError::invalid(format!("no packet for stream {i}: {}", err_str(r))));
+                    break Err(MediaError::invalid(format!(
+                        "no packet for stream {i}: {}",
+                        err_str(r)
+                    )));
                 }
                 if (*pkt).stream_index as usize == i {
                     break Ok(f(pkt));
@@ -279,7 +325,11 @@ impl Input {
         unsafe {
             let par = self.par(i);
             let fmt = (*par).format;
-            let desc = if (*par).codec_type == ff::AVMEDIA_TYPE_VIDEO { ff::av_pix_fmt_desc_get(fmt) } else { ptr::null() };
+            let desc = if (*par).codec_type == ff::AVMEDIA_TYPE_VIDEO {
+                ff::av_pix_fmt_desc_get(fmt)
+            } else {
+                ptr::null()
+            };
             let (depth, cw, ch, name, alpha) = if desc.is_null() {
                 (8, 1, 1, "none".to_string(), false)
             } else {
@@ -323,7 +373,10 @@ impl Input {
                 color_range: range,
                 chroma_location: (*par).chroma_location,
                 field_order: (*par).field_order,
-                sample_aspect: ((*par).sample_aspect_ratio.num, (*par).sample_aspect_ratio.den),
+                sample_aspect: (
+                    (*par).sample_aspect_ratio.num,
+                    (*par).sample_aspect_ratio.den,
+                ),
             }
         }
     }
@@ -370,7 +423,11 @@ pub fn demux_scan(path: &Path, i: usize) -> Result<(Vec<DemuxPacket>, Rational, 
                 break Ok(());
             }
             if r < 0 {
-                break Err(MediaError::Ffmpeg { what: "read".into(), code: r, message: err_str(r) });
+                break Err(MediaError::Ffmpeg {
+                    what: "read".into(),
+                    code: r,
+                    message: err_str(r),
+                });
             }
             if (*pkt).stream_index as usize == i {
                 let data = if (*pkt).data.is_null() {
@@ -413,7 +470,10 @@ pub fn decode_order(path: &Path, i: usize, threads: i32) -> Result<Vec<usize>> {
         let par = inp.par(i);
         let codec = ff::avcodec_find_decoder((*par).codec_id);
         if codec.is_null() {
-            return Err(MediaError::unsupported(format!("no FFmpeg decoder for {}", inp.codec_name(i))));
+            return Err(MediaError::unsupported(format!(
+                "no FFmpeg decoder for {}",
+                inp.codec_name(i)
+            )));
         }
         let mut ctx = ff::avcodec_alloc_context3(codec);
         if ctx.is_null() {
@@ -422,11 +482,17 @@ pub fn decode_order(path: &Path, i: usize, threads: i32) -> Result<Vec<usize>> {
         let mut pkt = ff::av_packet_alloc();
         let mut frame = ff::av_frame_alloc();
         let result = (|| {
-            check(ff::avcodec_parameters_to_context(ctx, par), "codec parameters")?;
+            check(
+                ff::avcodec_parameters_to_context(ctx, par),
+                "codec parameters",
+            )?;
             (*ctx).thread_count = threads;
             (*ctx).skip_idct = ff::AVDISCARD_ALL;
             (*ctx).skip_loop_filter = ff::AVDISCARD_ALL;
-            check(ff::avcodec_open2(ctx, codec, ptr::null_mut()), "open decoder")?;
+            check(
+                ff::avcodec_open2(ctx, codec, ptr::null_mut()),
+                "open decoder",
+            )?;
             let mut order = Vec::new();
             let mut ordinal: i64 = 0;
             let receive = |order: &mut Vec<usize>| -> Result<()> {
@@ -498,7 +564,13 @@ pub struct PacketReader {
 
 impl PacketReader {
     pub fn new(path: &Path, stream: usize) -> Result<Self> {
-        Ok(PacketReader { file: std::fs::File::open(path)?, path: path.into(), stream, demux: None, bytes_read: 0 })
+        Ok(PacketReader {
+            file: std::fs::File::open(path)?,
+            path: path.into(),
+            stream,
+            demux: None,
+            bytes_read: 0,
+        })
     }
 
     /// Reads the given samples (ascending decode-order indices).
@@ -508,14 +580,21 @@ impl PacketReader {
         if !which.windows(2).all(|w| w[0] < w[1]) {
             return Err(MediaError::invalid("sample list not ascending"));
         }
-        let Some(&first) = which.first() else { return Ok(vec![]) };
+        let Some(&first) = which.first() else {
+            return Ok(vec![]);
+        };
         let strip = idx.config.strip_prefix.as_deref().unwrap_or(&[]);
         match idx.samples[first].loc {
             Loc::File { .. } => which
                 .iter()
                 .map(|&i| {
                     let s = &idx.samples[i];
-                    let Loc::File { offset, size, additional } = s.loc else {
+                    let Loc::File {
+                        offset,
+                        size,
+                        additional,
+                    } = s.loc
+                    else {
                         return Err(MediaError::invalid("mixed sample locations"));
                     };
                     let mut data = vec![0u8; strip.len() + size as usize];
@@ -530,14 +609,25 @@ impl PacketReader {
                         }
                         None => None,
                     };
-                    Ok(Packet { data, additional, pts: s.cts, dts: s.dts, duration: s.duration, key: s.key })
+                    Ok(Packet {
+                        data,
+                        additional,
+                        pts: s.cts,
+                        dts: s.dts,
+                        duration: s.duration,
+                        key: s.key,
+                    })
                 })
                 .collect(),
             Loc::Demux { .. } => self.read_demuxed(idx, which),
         }
     }
 
-    fn read_demuxed(&mut self, idx: &crate::index::FrameIndex, which: &[usize]) -> Result<Vec<Packet>> {
+    fn read_demuxed(
+        &mut self,
+        idx: &crate::index::FrameIndex,
+        which: &[usize],
+    ) -> Result<Vec<Packet>> {
         use crate::index::Loc;
         let want: Vec<(i64, u16, u32, usize)> = which
             .iter()
@@ -559,7 +649,12 @@ impl PacketReader {
             })
             .collect();
         earlier.sort_unstable();
-        let mut attempts: Vec<Seek> = earlier.iter().rev().take(3).map(|&p| Seek::Byte(p)).collect();
+        let mut attempts: Vec<Seek> = earlier
+            .iter()
+            .rev()
+            .take(3)
+            .map(|&p| Seek::Byte(p))
+            .collect();
         attempts.push(Seek::Byte(0));
         // Demuxers whose byte seeks drop the packet they land on (ASF loses
         // the first packet of the data object): a timestamp seek backwards
@@ -578,7 +673,12 @@ impl PacketReader {
         Err(last_err.unwrap())
     }
 
-    fn read_from(&mut self, seek: Seek, want: &[(i64, u16, u32, usize)], idx: &crate::index::FrameIndex) -> Result<Vec<Packet>> {
+    fn read_from(
+        &mut self,
+        seek: Seek,
+        want: &[(i64, u16, u32, usize)],
+        idx: &crate::index::FrameIndex,
+    ) -> Result<Vec<Packet>> {
         if self.demux.is_none() {
             self.demux = Some(Input::open(&self.path)?);
         }
@@ -586,13 +686,35 @@ impl PacketReader {
         let mut out = Vec::with_capacity(want.len());
         unsafe {
             match seek {
-                Seek::Byte(0) => {
-                    check(ff::avformat_seek_file(inp.fmt, -1, i64::MIN, 0, 0, ff::AVSEEK_FLAG_BYTE as c_int), "seek to start")?
-                }
-                Seek::Byte(b) => check(ff::av_seek_frame(inp.fmt, self.stream as c_int, b, ff::AVSEEK_FLAG_BYTE as c_int), "byte seek")?,
-                Seek::Time(t) => {
-                    check(ff::av_seek_frame(inp.fmt, self.stream as c_int, t, ff::AVSEEK_FLAG_BACKWARD as c_int), "timestamp seek")?
-                }
+                Seek::Byte(0) => check(
+                    ff::avformat_seek_file(
+                        inp.fmt,
+                        -1,
+                        i64::MIN,
+                        0,
+                        0,
+                        ff::AVSEEK_FLAG_BYTE as c_int,
+                    ),
+                    "seek to start",
+                )?,
+                Seek::Byte(b) => check(
+                    ff::av_seek_frame(
+                        inp.fmt,
+                        self.stream as c_int,
+                        b,
+                        ff::AVSEEK_FLAG_BYTE as c_int,
+                    ),
+                    "byte seek",
+                )?,
+                Seek::Time(t) => check(
+                    ff::av_seek_frame(
+                        inp.fmt,
+                        self.stream as c_int,
+                        t,
+                        ff::AVSEEK_FLAG_BACKWARD as c_int,
+                    ),
+                    "timestamp seek",
+                )?,
             };
             let mut pkt = ff::av_packet_alloc();
             let mut k = 0;
@@ -605,7 +727,11 @@ impl PacketReader {
                     break;
                 }
                 if r < 0 {
-                    err = Some(MediaError::Ffmpeg { what: "read".into(), code: r, message: err_str(r) });
+                    err = Some(MediaError::Ffmpeg {
+                        what: "read".into(),
+                        code: r,
+                        message: err_str(r),
+                    });
                     break;
                 }
                 if (*pkt).stream_index as usize == self.stream {
@@ -626,12 +752,22 @@ impl PacketReader {
                             break;
                         }
                         let s = &idx.samples[i];
-                        let data = std::slice::from_raw_parts((*pkt).data, (*pkt).size as usize).to_vec();
+                        let data =
+                            std::slice::from_raw_parts((*pkt).data, (*pkt).size as usize).to_vec();
                         self.bytes_read += data.len() as u64;
-                        out.push(Packet { data, additional: None, pts: s.cts, dts: s.dts, duration: s.duration, key: s.key });
+                        out.push(Packet {
+                            data,
+                            additional: None,
+                            pts: s.cts,
+                            dts: s.dts,
+                            duration: s.duration,
+                            key: s.key,
+                        });
                         k += 1;
                     } else if (p > wpos || (p == wpos && nth > wnth)) && p >= 0 {
-                        err = Some(MediaError::invalid(format!("the demuxer passed byte {wpos} without returning the indexed packet")));
+                        err = Some(MediaError::invalid(format!(
+                            "the demuxer passed byte {wpos} without returning the indexed packet"
+                        )));
                         ff::av_packet_unref(pkt);
                         break;
                     }
@@ -643,7 +779,10 @@ impl PacketReader {
                 return Err(e);
             }
             if k != want.len() {
-                return Err(MediaError::invalid(format!("demuxed read delivered {k} of {} packets", want.len())));
+                return Err(MediaError::invalid(format!(
+                    "demuxed read delivered {k} of {} packets",
+                    want.len()
+                )));
             }
         }
         Ok(out)

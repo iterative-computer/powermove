@@ -32,11 +32,19 @@ use std::path::Path;
 
 /// Where a sample's bytes are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum Loc {
     /// Bytes at a file offset. `additional` is a Matroska BlockAdditional
     /// with id 1 (VP8 and VP9 alpha).
-    File { offset: u64, size: u32, additional: Option<(u64, u32)> },
+    File {
+        offset: u64,
+        size: u32,
+        additional: Option<(u64, u32)>,
+    },
     /// A packet only the demuxer can reassemble (MPEG-TS and PS, FLV, ASF,
     /// Ogg, elementary streams); `pos` is the byte position FFmpeg reports
     /// for it, `nth` its ordinal among this stream's packets reported at the
@@ -191,7 +199,10 @@ pub struct CodecConfig {
 
 impl CodecConfig {
     pub fn atom(&self, name: &[u8; 4]) -> Option<&[u8]> {
-        self.atoms.iter().find(|a| &a.0 == name).map(|a| a.1.as_slice())
+        self.atoms
+            .iter()
+            .find(|a| &a.0 == name)
+            .map(|a| a.1.as_slice())
     }
 }
 
@@ -241,7 +252,15 @@ impl FrameIndex {
 
     /// An index presenting every sample once at its composition time.
     pub(crate) fn present_all(&mut self) {
-        self.frames = self.samples.iter().enumerate().map(|(i, s)| Frame { sample: i, pts: s.cts }).collect();
+        self.frames = self
+            .samples
+            .iter()
+            .enumerate()
+            .map(|(i, s)| Frame {
+                sample: i,
+                pts: s.cts,
+            })
+            .collect();
     }
 
     /// Presented PTS in presentation order.
@@ -260,7 +279,10 @@ impl FrameIndex {
 
     /// Duplicate presentation timestamps make "frame N" ambiguous.
     pub fn duplicate_pts(&self) -> usize {
-        self.frames.windows(2).filter(|w| w[0].pts == w[1].pts).count()
+        self.frames
+            .windows(2)
+            .filter(|w| w[0].pts == w[1].pts)
+            .count()
     }
 
     /// The sync sample decoding starts at for sample `s`: the last sync
@@ -269,7 +291,10 @@ impl FrameIndex {
     /// sample).
     pub fn sync_for(&self, s: usize) -> usize {
         let cts = self.samples[s].cts;
-        (0..=s).rev().find(|&k| self.samples[k].key && self.samples[k].cts <= cts).unwrap_or(0)
+        (0..=s)
+            .rev()
+            .find(|&k| self.samples[k].key && self.samples[k].cts <= cts)
+            .unwrap_or(0)
     }
 
     /// Decode-order samples to feed to show sample `s`: from [`sync_for`]
@@ -284,7 +309,9 @@ impl FrameIndex {
     pub fn decode_plan(&self, s: usize) -> Vec<usize> {
         let start = self.sync_for(s);
         let sp = self.samples[start].cts;
-        (start..=s).filter(|&k| k == start || k == s || self.samples[k].cts >= sp).collect()
+        (start..=s)
+            .filter(|&k| k == start || k == s || self.samples[k].cts >= sp)
+            .collect()
     }
 
     /// [`decode_plan`] for presented frame `n` (presentation order).
@@ -297,9 +324,16 @@ impl FrameIndex {
     /// Reads the NAL unit headers of every sample (length-prefixed H.264 or
     /// HEVC in MOV/MP4 or Matroska) and records the first VCL NAL type.
     /// Reads a few bytes per NAL unit, never a payload.
-    pub fn mark_nal_types(&mut self, path: &Path, codec: NalCodec, length_size: usize) -> Result<()> {
+    pub fn mark_nal_types(
+        &mut self,
+        path: &Path,
+        codec: NalCodec,
+        length_size: usize,
+    ) -> Result<()> {
         if !(1..=4).contains(&length_size) {
-            return Err(MediaError::invalid(format!("NAL length size {length_size}")));
+            return Err(MediaError::invalid(format!(
+                "NAL length size {length_size}"
+            )));
         }
         let f = File::open(path)?;
         self.nal_codec = Some(codec);
@@ -324,7 +358,9 @@ impl FrameIndex {
                         one[0]
                     };
                 }
-                let len = hdr[..length_size].iter().fold(0u64, |a, &b| (a << 8) | b as u64);
+                let len = hdr[..length_size]
+                    .iter()
+                    .fold(0u64, |a, &b| (a << 8) | b as u64);
                 if let Some(t) = codec.first_vcl([&hdr[length_size..length_size + 1]]) {
                     s.nal_type = Some(t);
                     break;
@@ -339,19 +375,27 @@ impl FrameIndex {
     pub(crate) fn summarize_open_gop(&mut self) {
         let Some(codec) = self.nal_codec else { return };
         let open: Vec<usize> = (0..self.samples.len())
-            .filter(|&k| self.samples[k].key && self.samples[k].nal_type.is_some_and(|t| codec.open_sync(t)))
+            .filter(|&k| {
+                self.samples[k].key && self.samples[k].nal_type.is_some_and(|t| codec.open_sync(t))
+            })
             .collect();
         let mut leading = 0;
         for &k in &open {
             let sp = self.samples[k].cts;
-            let next = (k + 1..self.samples.len()).find(|&j| self.samples[j].key).unwrap_or(self.samples.len());
+            let next = (k + 1..self.samples.len())
+                .find(|&j| self.samples[j].key)
+                .unwrap_or(self.samples.len());
             leading += (k + 1..next).filter(|&j| self.samples[j].cts < sp).count();
         }
         let sync = self.samples.iter().filter(|s| s.key).count();
         self.stats.open_gop = Some(format!(
             "{codec:?}: {} of {sync} sync samples open ({}), {leading} leading pictures skipped on random access",
             open.len(),
-            if codec == NalCodec::Hevc { "CRA/BLA" } else { "non-IDR" }
+            if codec == NalCodec::Hevc {
+                "CRA/BLA"
+            } else {
+                "non-IDR"
+            }
         ));
     }
 }
@@ -397,15 +441,32 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
     // Open GOP: NAL types from the length-prefixed samples (MPEG-TS packets
     // are marked during the scan).
     let config = match (idx.config.fourcc.as_ref(), idx.config.codec_id.as_deref()) {
-        (Some(b"hvc1" | b"hev1" | b"dvh1" | b"dvhe"), _) => idx.config.atom(b"hvcC").map(|a| (NalCodec::Hevc, a.to_vec())),
-        (Some(b"avc1" | b"avc3"), _) => idx.config.atom(b"avcC").map(|a| (NalCodec::H264, a.to_vec())),
-        (None, Some("V_MPEGH/ISO/HEVC")) => idx.config.codec_private.clone().map(|c| (NalCodec::Hevc, c)),
-        (None, Some("V_MPEG4/ISO/AVC")) => idx.config.codec_private.clone().map(|c| (NalCodec::H264, c)),
+        (Some(b"hvc1" | b"hev1" | b"dvh1" | b"dvhe"), _) => idx
+            .config
+            .atom(b"hvcC")
+            .map(|a| (NalCodec::Hevc, a.to_vec())),
+        (Some(b"avc1" | b"avc3"), _) => idx
+            .config
+            .atom(b"avcC")
+            .map(|a| (NalCodec::H264, a.to_vec())),
+        (None, Some("V_MPEGH/ISO/HEVC")) => idx
+            .config
+            .codec_private
+            .clone()
+            .map(|c| (NalCodec::Hevc, c)),
+        (None, Some("V_MPEG4/ISO/AVC")) => idx
+            .config
+            .codec_private
+            .clone()
+            .map(|c| (NalCodec::H264, c)),
         _ => None,
     };
     if let Some((codec, c)) = config
         && let Some(ls) = nal_length_size(codec, &c)
-        && idx.samples.iter().all(|s| matches!(s.loc, Loc::File { .. }))
+        && idx
+            .samples
+            .iter()
+            .all(|s| matches!(s.loc, Loc::File { .. }))
     {
         idx.mark_nal_types(path, codec, ls)?;
     }
@@ -474,7 +535,18 @@ mod tests {
     use super::*;
 
     fn sample(cts: i64, key: bool) -> Sample {
-        Sample { dts: None, cts, duration: 1, key, loc: Loc::Demux { pos: 0, nth: 0, size: 1 }, nal_type: None }
+        Sample {
+            dts: None,
+            cts,
+            duration: 1,
+            key,
+            loc: Loc::Demux {
+                pos: 0,
+                nth: 0,
+                size: 1,
+            },
+            nal_type: None,
+        }
     }
 
     fn index(samples: Vec<Sample>) -> FrameIndex {

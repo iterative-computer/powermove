@@ -62,13 +62,24 @@ impl ContentHash {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "state")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "state"
+)]
 pub enum HashStatus {
     /// Waiting for the file to stop changing.
     Waiting,
-    Hashing { done: u64, total: u64 },
-    Done { hash: ContentHash },
-    Failed { message: String },
+    Hashing {
+        done: u64,
+        total: u64,
+    },
+    Done {
+        hash: ContentHash,
+    },
+    Failed {
+        message: String,
+    },
     Cancelled,
 }
 
@@ -82,7 +93,10 @@ pub struct Settle {
 
 impl Default for Settle {
     fn default() -> Self {
-        Settle { quiet: Duration::from_secs(2), poll: Duration::from_millis(250) }
+        Settle {
+            quiet: Duration::from_secs(2),
+            poll: Duration::from_millis(250),
+        }
     }
 }
 
@@ -93,7 +107,12 @@ fn stamp(path: &Path) -> Result<(u64, SystemTime)> {
 
 /// Hashes a file on the calling thread, waiting for it to settle first.
 /// `progress` receives bytes hashed so far; `cancel` stops the work.
-pub fn hash_file(path: &Path, settle: Settle, cancel: &AtomicBool, progress: &dyn Fn(HashStatus)) -> Result<ContentHash> {
+pub fn hash_file(
+    path: &Path,
+    settle: Settle,
+    cancel: &AtomicBool,
+    progress: &dyn Fn(HashStatus),
+) -> Result<ContentHash> {
     loop {
         // Settle: the same size and mtime for `quiet`.
         let mut last = stamp(path)?;
@@ -143,13 +162,20 @@ pub fn hash_file(path: &Path, settle: Settle, cancel: &AtomicBool, progress: &dy
         if stamp(path)? != last || done != size {
             continue;
         }
-        return Ok(ContentHash { blake3: *hasher.finalize().as_bytes(), size });
+        return Ok(ContentHash {
+            blake3: *hasher.finalize().as_bytes(),
+            size,
+        });
     }
 }
 
 /// What a full hash says about a file whose fingerprint was looked up.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum Resolution {
     /// The content was known under this fingerprint.
     Known,
@@ -171,13 +197,19 @@ pub struct ContentHints {
 impl ContentHints {
     /// Content previously seen with this fingerprint: a hint, not an identity.
     pub fn candidates(&self, fingerprint: &str) -> &[ContentHash] {
-        self.by_fingerprint.get(fingerprint).map(Vec::as_slice).unwrap_or(&[])
+        self.by_fingerprint
+            .get(fingerprint)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Records a file's full hash under its fingerprint and says whether the
     /// content was already known there.
     pub fn resolve(&mut self, fingerprint: &str, hash: ContentHash) -> Resolution {
-        let known = self.by_fingerprint.entry(fingerprint.to_string()).or_default();
+        let known = self
+            .by_fingerprint
+            .entry(fingerprint.to_string())
+            .or_default();
         if known.contains(&hash) {
             return Resolution::Known;
         }
@@ -236,7 +268,9 @@ impl BackgroundHasher {
         let worker = std::thread::Builder::new()
             .name("pm-media-hash".into())
             .spawn(move || {
-                unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) };
+                unsafe {
+                    libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0)
+                };
                 loop {
                     let job = {
                         let mut g = q.0.lock().unwrap();
@@ -261,12 +295,20 @@ impl BackgroundHasher {
                             set(HashStatus::Done { hash })
                         }
                         Err(MediaError::Cancelled) => set(HashStatus::Cancelled),
-                        Err(e) => set(HashStatus::Failed { message: e.to_string() }),
+                        Err(e) => set(HashStatus::Failed {
+                            message: e.to_string(),
+                        }),
                     }
                 }
             })
             .expect("spawn hash thread");
-        BackgroundHasher { queue, stop, worker: Some(worker), settle, hashed_bytes }
+        BackgroundHasher {
+            queue,
+            stop,
+            worker: Some(worker),
+            settle,
+            hashed_bytes,
+        }
     }
 
     /// Queues a file; the ticket reports progress and the result.
@@ -331,7 +373,10 @@ mod tests {
         h.update(&data[mid..mid + 65_536]);
         h.update(&data[300_000 - 65_536..]);
         let want: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(sampled_fingerprint(&p).unwrap(), format!("v2:300000:{want}"));
+        assert_eq!(
+            sampled_fingerprint(&p).unwrap(),
+            format!("v2:300000:{want}")
+        );
     }
 
     #[test]
@@ -342,19 +387,35 @@ mod tests {
         let pa = tmp("collide-a.bin", &a);
         a[100_000] ^= 0xff;
         let pb = tmp("collide-b.bin", &a);
-        let (fa, fb) = (sampled_fingerprint(&pa).unwrap(), sampled_fingerprint(&pb).unwrap());
+        let (fa, fb) = (
+            sampled_fingerprint(&pa).unwrap(),
+            sampled_fingerprint(&pb).unwrap(),
+        );
         assert_eq!(fa, fb);
         let never = AtomicBool::new(false);
-        let settle = Settle { quiet: Duration::ZERO, poll: Duration::from_millis(1) };
+        let settle = Settle {
+            quiet: Duration::ZERO,
+            poll: Duration::from_millis(1),
+        };
         let ha = hash_file(&pa, settle, &never, &|_| {}).unwrap();
         let hb = hash_file(&pb, settle, &never, &|_| {}).unwrap();
         assert_ne!(ha, hb);
         let mut hints = ContentHints::default();
         assert!(hints.candidates(&fa).is_empty());
-        assert_eq!(hints.resolve(&fa, ha), Resolution::New { collided_with: vec![] });
+        assert_eq!(
+            hints.resolve(&fa, ha),
+            Resolution::New {
+                collided_with: vec![]
+            }
+        );
         // B looks like A by fingerprint; the full hash says it is not.
         assert_eq!(hints.candidates(&fb), &[ha]);
-        assert_eq!(hints.resolve(&fb, hb), Resolution::New { collided_with: vec![ha] });
+        assert_eq!(
+            hints.resolve(&fb, hb),
+            Resolution::New {
+                collided_with: vec![ha]
+            }
+        );
         assert_eq!(hints.resolve(&fa, ha), Resolution::Known);
         assert_eq!(hints.candidates(&fa), &[ha, hb]);
     }
@@ -363,7 +424,10 @@ mod tests {
     fn background_hash_waits_for_a_settled_file() {
         let data = vec![7u8; 3 << 20];
         let p = tmp("bg.bin", &data);
-        let hasher = BackgroundHasher::new(Settle { quiet: Duration::from_millis(300), poll: Duration::from_millis(20) });
+        let hasher = BackgroundHasher::new(Settle {
+            quiet: Duration::from_millis(300),
+            poll: Duration::from_millis(20),
+        });
         let t = hasher.request(&p);
         // Keep writing for a moment: the hash must cover the final bytes.
         std::thread::sleep(Duration::from_millis(100));

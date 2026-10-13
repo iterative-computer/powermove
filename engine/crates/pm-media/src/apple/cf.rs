@@ -33,10 +33,20 @@ pub struct CMTime {
 impl CMTime {
     pub const FLAG_VALID: u32 = 1;
     pub fn new(value: i64, timescale: i32) -> Self {
-        CMTime { value, timescale, flags: Self::FLAG_VALID, epoch: 0 }
+        CMTime {
+            value,
+            timescale,
+            flags: Self::FLAG_VALID,
+            epoch: 0,
+        }
     }
     pub fn invalid() -> Self {
-        CMTime { value: 0, timescale: 0, flags: 0, epoch: 0 }
+        CMTime {
+            value: 0,
+            timescale: 0,
+            flags: 0,
+            epoch: 0,
+        }
     }
     pub fn is_valid(&self) -> bool {
         self.flags & Self::FLAG_VALID != 0
@@ -156,7 +166,10 @@ unsafe extern "C" {
         nal_unit_header_length: i32,
         out: *mut CMFormatDescriptionRef,
     ) -> OSStatus;
-    pub fn CMFormatDescriptionGetExtension(desc: CMFormatDescriptionRef, key: CFStringRef) -> CFTypeRef;
+    pub fn CMFormatDescriptionGetExtension(
+        desc: CMFormatDescriptionRef,
+        key: CFStringRef,
+    ) -> CFTypeRef;
     pub fn CMBlockBufferCreateWithMemoryBlock(
         alloc: CFAllocatorRef,
         memory_block: *mut c_void,
@@ -227,7 +240,11 @@ unsafe extern "C" {
     ) -> CVReturn;
     pub fn CVMetalTextureGetTexture(texture: CVMetalTextureRef) -> *mut c_void;
     pub fn CVMetalTextureCacheFlush(cache: CVMetalTextureCacheRef, options: u64);
-    pub fn CVBufferCopyAttachment(buf: CVPixelBufferRef, key: CFStringRef, mode: *mut u32) -> CFTypeRef;
+    pub fn CVBufferCopyAttachment(
+        buf: CVPixelBufferRef,
+        key: CFStringRef,
+        mode: *mut u32,
+    ) -> CFTypeRef;
     pub fn CVPixelBufferGetDataSize(pb: CVPixelBufferRef) -> usize;
     pub static kCVImageBufferYCbCrMatrixKey: CFStringRef;
     pub static kCVImageBufferColorPrimariesKey: CFStringRef;
@@ -255,8 +272,12 @@ unsafe extern "C" {
         source_frame_refcon: *mut c_void,
         info_out: *mut u32,
     ) -> OSStatus;
-    pub fn VTDecompressionSessionWaitForAsynchronousFrames(session: VTDecompressionSessionRef) -> OSStatus;
-    pub fn VTDecompressionSessionFinishDelayedFrames(session: VTDecompressionSessionRef) -> OSStatus;
+    pub fn VTDecompressionSessionWaitForAsynchronousFrames(
+        session: VTDecompressionSessionRef,
+    ) -> OSStatus;
+    pub fn VTDecompressionSessionFinishDelayedFrames(
+        session: VTDecompressionSessionRef,
+    ) -> OSStatus;
     pub fn VTDecompressionSessionInvalidate(session: VTDecompressionSessionRef);
     pub fn VTSessionCopyProperty(
         session: *mut c_void,
@@ -284,7 +305,11 @@ impl Cf {
     }
     /// Retains a +0 reference.
     pub unsafe fn retain(p: CFTypeRef) -> Option<Cf> {
-        if p.is_null() { None } else { Some(Cf(unsafe { CFRetain(p) })) }
+        if p.is_null() {
+            None
+        } else {
+            Some(Cf(unsafe { CFRetain(p) }))
+        }
     }
     pub fn as_ptr(&self) -> CFTypeRef {
         self.0
@@ -327,13 +352,24 @@ pub fn cf_str(s: &str) -> Cf {
 
 pub fn cf_i32(v: i32) -> Cf {
     unsafe {
-        Cf::from_create(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &v as *const i32 as _))
-            .expect("CFNumber")
+        Cf::from_create(CFNumberCreate(
+            kCFAllocatorDefault,
+            kCFNumberSInt32Type,
+            &v as *const i32 as _,
+        ))
+        .expect("CFNumber")
     }
 }
 
 pub fn cf_data(bytes: &[u8]) -> Cf {
-    unsafe { Cf::from_create(CFDataCreate(kCFAllocatorDefault, bytes.as_ptr(), bytes.len() as isize)).expect("CFData") }
+    unsafe {
+        Cf::from_create(CFDataCreate(
+            kCFAllocatorDefault,
+            bytes.as_ptr(),
+            bytes.len() as isize,
+        ))
+        .expect("CFData")
+    }
 }
 
 pub fn cf_bool(v: bool) -> CFTypeRef {
@@ -366,7 +402,9 @@ pub unsafe fn cf_describe(cf: CFTypeRef) -> String {
         return "null".into();
     }
     unsafe {
-        let Some(desc) = Cf::from_create(CFCopyDescription(cf)) else { return String::new() };
+        let Some(desc) = Cf::from_create(CFCopyDescription(cf)) else {
+            return String::new();
+        };
         cf_string_value(desc.as_ptr()).unwrap_or_default()
     }
 }
@@ -405,10 +443,20 @@ pub unsafe fn cf_string_value(s: CFTypeRef) -> Option<String> {
             return None;
         }
         let mut buf = vec![0 as c_char; 4096];
-        if CFStringGetCString(s, buf.as_mut_ptr(), buf.len() as isize, kCFStringEncodingUTF8) == 0 {
+        if CFStringGetCString(
+            s,
+            buf.as_mut_ptr(),
+            buf.len() as isize,
+            kCFStringEncodingUTF8,
+        ) == 0
+        {
             return None;
         }
-        Some(std::ffi::CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned())
+        Some(
+            std::ffi::CStr::from_ptr(buf.as_ptr())
+                .to_string_lossy()
+                .into_owned(),
+        )
     }
 }
 
@@ -434,7 +482,8 @@ pub unsafe fn cf_i64(cf: CFTypeRef) -> Option<i64> {
         return None;
     }
     let mut v = 0i64;
-    (unsafe { CFNumberGetValue(cf, kCFNumberSInt64Type, &mut v as *mut i64 as *mut c_void) } != 0).then_some(v)
+    (unsafe { CFNumberGetValue(cf, kCFNumberSInt64Type, &mut v as *mut i64 as *mut c_void) } != 0)
+        .then_some(v)
 }
 
 /// Reads a CFBoolean.
@@ -470,12 +519,23 @@ pub unsafe fn cf_data_bytes(cf: CFTypeRef) -> Option<Vec<u8>> {
     }
     let n = unsafe { CFDataGetLength(cf) } as usize;
     let p = unsafe { CFDataGetBytePtr(cf) };
-    Some(if n == 0 || p.is_null() { vec![] } else { unsafe { std::slice::from_raw_parts(p, n) }.to_vec() })
+    Some(if n == 0 || p.is_null() {
+        vec![]
+    } else {
+        unsafe { std::slice::from_raw_parts(p, n) }.to_vec()
+    })
 }
 
 /// A file URL for a path.
 pub fn cf_file_url(path: &std::path::Path) -> Option<Cf> {
     use std::os::unix::ffi::OsStrExt;
     let b = path.as_os_str().as_bytes();
-    unsafe { Cf::from_create(CFURLCreateFromFileSystemRepresentation(kCFAllocatorDefault, b.as_ptr(), b.len() as isize, 0)) }
+    unsafe {
+        Cf::from_create(CFURLCreateFromFileSystemRepresentation(
+            kCFAllocatorDefault,
+            b.as_ptr(),
+            b.len() as isize,
+            0,
+        ))
+    }
 }

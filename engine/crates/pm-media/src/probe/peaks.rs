@@ -55,7 +55,9 @@ impl Acc {
     fn flush(&mut self) {
         if self.filled > 0 {
             self.out.extend_from_slice(&self.cur);
-            self.cur.iter_mut().for_each(|e| *e = [f32::INFINITY, f32::NEG_INFINITY]);
+            self.cur
+                .iter_mut()
+                .for_each(|e| *e = [f32::INFINITY, f32::NEG_INFINITY]);
             self.filled = 0;
         }
     }
@@ -63,14 +65,21 @@ impl Acc {
 
 /// Decodes audio stream `stream` (the best audio stream when None) and
 /// returns its peaks.
-pub fn peaks(path: &Path, stream: Option<usize>, samples_per_peak: usize, skip_priming: i64) -> Result<Peaks> {
+pub fn peaks(
+    path: &Path,
+    stream: Option<usize>,
+    samples_per_peak: usize,
+    skip_priming: i64,
+) -> Result<Peaks> {
     if samples_per_peak == 0 {
         return Err(MediaError::invalid("samples per peak must be positive"));
     }
     let input = Input::open(path)?;
     let s = match stream {
         Some(s) => s,
-        None => input.best_audio().ok_or_else(|| MediaError::invalid("no audio stream"))?,
+        None => input
+            .best_audio()
+            .ok_or_else(|| MediaError::invalid("no audio stream"))?,
     };
     if input.media_type(s) != ff::AVMEDIA_TYPE_AUDIO {
         return Err(MediaError::invalid(format!("stream {s} is not audio")));
@@ -79,13 +88,22 @@ pub fn peaks(path: &Path, stream: Option<usize>, samples_per_peak: usize, skip_p
         let par = input.par(s);
         let codec = ff::avcodec_find_decoder((*par).codec_id);
         if codec.is_null() {
-            return Err(MediaError::unsupported(format!("no FFmpeg decoder for {}", input.codec_name(s))));
+            return Err(MediaError::unsupported(format!(
+                "no FFmpeg decoder for {}",
+                input.codec_name(s)
+            )));
         }
         let mut ctx = ff::avcodec_alloc_context3(codec);
         let guard = CtxGuard(&mut ctx);
-        check(ff::avcodec_parameters_to_context(*guard.0, par), "audio parameters")?;
+        check(
+            ff::avcodec_parameters_to_context(*guard.0, par),
+            "audio parameters",
+        )?;
         (**guard.0).pkt_timebase = (*input.st(s)).time_base;
-        check(ff::avcodec_open2(*guard.0, codec, ptr::null_mut()), "open audio decoder")?;
+        check(
+            ff::avcodec_open2(*guard.0, codec, ptr::null_mut()),
+            "open audio decoder",
+        )?;
         let channels = (*par).ch_layout.nb_channels.max(1) as usize;
         let mut acc = Acc {
             channels,
@@ -178,11 +196,19 @@ unsafe fn sample(p: *const u8, fmt: ff::AVSampleFormat) -> f32 {
     unsafe {
         match fmt {
             ff::AV_SAMPLE_FMT_U8 | ff::AV_SAMPLE_FMT_U8P => (*p as f32 - 128.0) / 128.0,
-            ff::AV_SAMPLE_FMT_S16 | ff::AV_SAMPLE_FMT_S16P => (p as *const i16).read_unaligned() as f32 / 32768.0,
-            ff::AV_SAMPLE_FMT_S32 | ff::AV_SAMPLE_FMT_S32P => (p as *const i32).read_unaligned() as f32 / 2147483648.0,
-            ff::AV_SAMPLE_FMT_S64 | ff::AV_SAMPLE_FMT_S64P => ((p as *const i64).read_unaligned() as f64 / 9.223372036854776e18) as f32,
+            ff::AV_SAMPLE_FMT_S16 | ff::AV_SAMPLE_FMT_S16P => {
+                (p as *const i16).read_unaligned() as f32 / 32768.0
+            }
+            ff::AV_SAMPLE_FMT_S32 | ff::AV_SAMPLE_FMT_S32P => {
+                (p as *const i32).read_unaligned() as f32 / 2147483648.0
+            }
+            ff::AV_SAMPLE_FMT_S64 | ff::AV_SAMPLE_FMT_S64P => {
+                ((p as *const i64).read_unaligned() as f64 / 9.223372036854776e18) as f32
+            }
             ff::AV_SAMPLE_FMT_FLT | ff::AV_SAMPLE_FMT_FLTP => (p as *const f32).read_unaligned(),
-            ff::AV_SAMPLE_FMT_DBL | ff::AV_SAMPLE_FMT_DBLP => (p as *const f64).read_unaligned() as f32,
+            ff::AV_SAMPLE_FMT_DBL | ff::AV_SAMPLE_FMT_DBLP => {
+                (p as *const f64).read_unaligned() as f32
+            }
             _ => 0.0,
         }
     }

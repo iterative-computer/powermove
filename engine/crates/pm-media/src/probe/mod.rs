@@ -233,7 +233,14 @@ pub fn probe(path: &Path) -> Result<Probed> {
     let mut streams = Vec::new();
     for i in 0..input.streams() {
         let st = input.st(i);
-        let (tb, start, dur, disposition) = unsafe { ((*st).time_base, (*st).start_time, (*st).duration, (*st).disposition) };
+        let (tb, start, dur, disposition) = unsafe {
+            (
+                (*st).time_base,
+                (*st).start_time,
+                (*st).duration,
+                (*st).disposition,
+            )
+        };
         let k = kind(input.media_type(i));
         let audio = (k == StreamKind::Audio).then(|| audio_probe(path, &input, i, &container));
         streams.push(StreamProbe {
@@ -272,16 +279,30 @@ pub fn probe(path: &Path) -> Result<Probed> {
         .or_else(|| find(&|k| k == "timecode"))
         .map(|text| {
             let drop_frame = text.contains(';') || text.contains(',');
-            let frame = video.as_ref().and_then(|v| v.nominal_rate.as_ref()).and_then(|n| {
-                let f = if drop_frame { TimecodeFormat::drop_frame(n.rate).ok()? } else { TimecodeFormat::non_drop(n.rate) };
-                f.parse(&text.replace(',', ";")).ok()
-            });
-            TimecodeInfo { text, drop_frame, frame }
+            let frame = video
+                .as_ref()
+                .and_then(|v| v.nominal_rate.as_ref())
+                .and_then(|n| {
+                    let f = if drop_frame {
+                        TimecodeFormat::drop_frame(n.rate).ok()?
+                    } else {
+                        TimecodeFormat::non_drop(n.rate)
+                    };
+                    f.parse(&text.replace(',', ";")).ok()
+                });
+            TimecodeInfo {
+                text,
+                drop_frame,
+                frame,
+            }
         });
     let (duration_us, start_us) = unsafe {
         let d = (*input.fmt).duration;
         let s = (*input.fmt).start_time;
-        ((d != ff::AV_NOPTS_VALUE).then_some(d), (s != ff::AV_NOPTS_VALUE).then_some(s))
+        (
+            (d != ff::AV_NOPTS_VALUE).then_some(d),
+            (s != ff::AV_NOPTS_VALUE).then_some(s),
+        )
     };
     let probe = MediaProbe {
         path: path.to_path_buf(),
@@ -294,7 +315,9 @@ pub fn probe(path: &Path) -> Result<Probed> {
         timecode,
         reel: find(&|k| k.contains("reel") || k.contains("tape_name")),
         umid: find(&|k| k.contains("umid")),
-        content_identifier: find(&|k| k.contains("content.identifier") || k == "content_identifier"),
+        content_identifier: find(&|k| {
+            k.contains("content.identifier") || k == "content_identifier"
+        }),
         creation_time: find(&|k| k == "creation_time"),
         sampled_fingerprint: crate::hash::sampled_fingerprint(path)?,
         streams,
@@ -308,11 +331,26 @@ fn audio_probe(path: &Path, input: &Input, i: usize, container: &str) -> AudioPr
         let par = input.par(i);
         let rate = (*par).sample_rate as i64;
         let mut layout_buf = [0 as std::ffi::c_char; 128];
-        let layout = (ff::av_channel_layout_describe(&(*par).ch_layout, layout_buf.as_mut_ptr(), layout_buf.len()) > 0)
-            .then(|| std::ffi::CStr::from_ptr(layout_buf.as_ptr()).to_string_lossy().into_owned());
+        let layout = (ff::av_channel_layout_describe(
+            &(*par).ch_layout,
+            layout_buf.as_mut_ptr(),
+            layout_buf.len(),
+        ) > 0)
+            .then(|| {
+                std::ffi::CStr::from_ptr(layout_buf.as_ptr())
+                    .to_string_lossy()
+                    .into_owned()
+            });
         let codec = input.codec_name(i);
         AudioProbe {
-            priming: timing::priming(path, container, input.stream_id(i), &codec, rate, (*par).initial_padding as i64),
+            priming: timing::priming(
+                path,
+                container,
+                input.stream_id(i),
+                &codec,
+                rate,
+                (*par).initial_padding as i64,
+            ),
             codec,
             sample_rate: rate,
             channels: (*par).ch_layout.nb_channels,
@@ -345,25 +383,38 @@ fn video_probe(path: &Path, input: &Input, v: usize) -> Result<(VideoProbe, Fram
         Some(p) => {
             let h = u32::from_be_bytes(p[..4].try_into().unwrap()) as i64;
             let w = u32::from_be_bytes(p[4..8].try_into().unwrap()) as i64;
-            if h > 0 && w > 0 { ((h, w), Some("pasp".into())) } else { ((1, 1), None) }
+            if h > 0 && w > 0 {
+                ((h, w), Some("pasp".into()))
+            } else {
+                ((1, 1), None)
+            }
         }
-        None if info.sample_aspect.0 > 0 && info.sample_aspect.1 > 0 => {
-            ((info.sample_aspect.0 as i64, info.sample_aspect.1 as i64), Some("container or bitstream (FFmpeg)".into()))
-        }
+        None if info.sample_aspect.0 > 0 && info.sample_aspect.1 > 0 => (
+            (info.sample_aspect.0 as i64, info.sample_aspect.1 as i64),
+            Some("container or bitstream (FFmpeg)".into()),
+        ),
         None => ((1, 1), None),
     };
     let (w, h) = (info.width.max(0) as u32, info.height.max(0) as u32);
     let clean_aperture = atom(b"clap").and_then(|c| clean_aperture(c, w, h));
     let mut fields = field_info(&info, atom(b"fiel"));
-    if fields.order == FieldOrder::Unknown && matches!(info.codec.as_str(), "dvvideo" | "mpeg2video" | "h264" | "dnxhd" | "mjpeg")
-        && let Some(f) = first_frame_fields(input, v, &idx, path) {
-            fields = f;
-        }
+    if fields.order == FieldOrder::Unknown
+        && matches!(
+            info.codec.as_str(),
+            "dvvideo" | "mpeg2video" | "h264" | "dnxhd" | "mjpeg"
+        )
+        && let Some(f) = first_frame_fields(input, v, &idx, path)
+    {
+        fields = f;
+    }
 
     let pts = idx.presented_pts();
     let nominal = nominal_rate(&pts, idx.timebase);
     let durations: Vec<i64> = pts.windows(2).map(|w| w[1] - w[0]).collect();
-    let (min_d, max_d) = (durations.iter().copied().min().unwrap_or(0), durations.iter().copied().max().unwrap_or(0));
+    let (min_d, max_d) = (
+        durations.iter().copied().min().unwrap_or(0),
+        durations.iter().copied().max().unwrap_or(0),
+    );
     let variable_rate = match &nominal {
         Some(n) => {
             let (tn, td) = (idx.timebase.num() as i128, idx.timebase.den() as i128);
@@ -375,12 +426,20 @@ fn video_probe(path: &Path, input: &Input, v: usize) -> Result<(VideoProbe, Fram
     };
     let decode = decode_cost(&info, &idx, input.codec_is_intra_only(v));
     let presented = idx.frames.len();
-    let sync_frames: Vec<usize> = (0..presented).filter(|&n| idx.samples[idx.frames[n].sample].key).collect();
-    let poster_frame = sync_frames.iter().copied().find(|&n| n >= presented / 10).unwrap_or(0);
+    let sync_frames: Vec<usize> = (0..presented)
+        .filter(|&n| idx.samples[idx.frames[n].sample].key)
+        .collect();
+    let poster_frame = sync_frames
+        .iter()
+        .copied()
+        .find(|&n| n >= presented / 10)
+        .unwrap_or(0);
     let filmstrip_seed = if sync_frames.len() <= 32 {
         sync_frames.clone()
     } else {
-        (0..32).map(|i| sync_frames[i * (sync_frames.len() - 1) / 31]).collect()
+        (0..32)
+            .map(|i| sync_frames[i * (sync_frames.len() - 1) / 31])
+            .collect()
     };
     let summary = IndexSummary {
         source: idx.source,
@@ -429,8 +488,17 @@ fn hevc_alpha_mode(info: &CodecInfo, idx: &FrameIndex) -> Option<AlphaMode> {
     }
     let cfg = crate::vt::VtConfig::new(info, idx, &[], crate::vt::DecodePurpose::Display).ok()?;
     let fd = cfg.format.as_ref()?;
-    let v = unsafe { cf_string_value(CMFormatDescriptionGetExtension(fd.as_mut_ptr(), cf_str("AlphaChannelMode").as_ptr())) }?;
-    Some(if v.contains("Premultiplied") { AlphaMode::Premultiplied } else { AlphaMode::Straight })
+    let v = unsafe {
+        cf_string_value(CMFormatDescriptionGetExtension(
+            fd.as_mut_ptr(),
+            cf_str("AlphaChannelMode").as_ptr(),
+        ))
+    }?;
+    Some(if v.contains("Premultiplied") {
+        AlphaMode::Premultiplied
+    } else {
+        AlphaMode::Straight
+    })
 }
 
 /// `clap`: cleanApertureWidthN/D, HeightN/D, horizOffN/D, vertOffN/D.
@@ -449,8 +517,19 @@ fn clean_aperture(c: &[u8], w: u32, h: u32) -> Option<CleanAperture> {
     }
     let x = (w as f64 - cw) / 2.0 + ho;
     let y = (h as f64 - ch) / 2.0 + vo;
-    let rect = (x.round().max(0.0) as u32, y.round().max(0.0) as u32, cw.round() as u32, ch.round() as u32);
-    Some(CleanAperture { width: cw, height: ch, horizontal_offset: ho, vertical_offset: vo, rect })
+    let rect = (
+        x.round().max(0.0) as u32,
+        y.round().max(0.0) as u32,
+        cw.round() as u32,
+        ch.round() as u32,
+    );
+    Some(CleanAperture {
+        width: cw,
+        height: ch,
+        horizontal_offset: ho,
+        vertical_offset: vo,
+        rect,
+    })
 }
 
 fn field_info(info: &CodecInfo, fiel: Option<&[u8]>) -> FieldInfo {
@@ -462,7 +541,10 @@ fn field_info(info: &CodecInfo, fiel: Option<&[u8]>) -> FieldInfo {
             _ => FieldOrder::Unknown,
         };
         if order != FieldOrder::Unknown {
-            return FieldInfo { order, source: "fiel".into() };
+            return FieldInfo {
+                order,
+                source: "fiel".into(),
+            };
         }
     }
     let order = match info.field_order {
@@ -473,7 +555,14 @@ fn field_info(info: &CodecInfo, fiel: Option<&[u8]>) -> FieldInfo {
         ff::AV_FIELD_BB | ff::AV_FIELD_TB => FieldOrder::BottomFirst,
         _ => FieldOrder::Unknown,
     };
-    FieldInfo { order, source: if order == FieldOrder::Unknown { "unknown".into() } else { "container or bitstream".into() } }
+    FieldInfo {
+        order,
+        source: if order == FieldOrder::Unknown {
+            "unknown".into()
+        } else {
+            "container or bitstream".into()
+        },
+    }
 }
 
 /// Field order from the first decoded frame's flags (DV, MPEG-2, H.264,
@@ -507,22 +596,35 @@ fn decode_cost(info: &CodecInfo, idx: &FrameIndex, intra_only: bool) -> DecodeCo
     let order = backends(info, idx);
     let backend = order[0];
     let hardware = backend == Backend::VideoToolbox && {
-        let f = idx.config.fourcc.map(u32::from_be_bytes).unwrap_or(match info.codec.as_str() {
-            "h264" => crate::apple::cf::fcc(b"avc1"),
-            "hevc" => crate::apple::cf::fcc(b"hvc1"),
-            "av1" => crate::apple::cf::fcc(b"av01"),
-            _ => 0,
-        });
+        let f = idx
+            .config
+            .fourcc
+            .map(u32::from_be_bytes)
+            .unwrap_or(match info.codec.as_str() {
+                "h264" => crate::apple::cf::fcc(b"avc1"),
+                "hevc" => crate::apple::cf::fcc(b"hvc1"),
+                "av1" => crate::apple::cf::fcc(b"av01"),
+                _ => 0,
+            });
         f != 0 && unsafe { crate::apple::cf::VTIsHardwareDecodeSupported(f) } != 0
     };
-    let syncs: Vec<usize> = (0..idx.samples.len()).filter(|&k| idx.samples[k].key).collect();
+    let syncs: Vec<usize> = (0..idx.samples.len())
+        .filter(|&k| idx.samples[k].key)
+        .collect();
     let mut gops: Vec<usize> = syncs.windows(2).map(|w| w[1] - w[0]).collect();
     if let Some(&last) = syncs.last() {
         gops.push(idx.samples.len() - last);
     }
     let max_gop = gops.iter().copied().max().unwrap_or(idx.samples.len());
-    let mean_gop = if gops.is_empty() { idx.samples.len() as f64 } else { gops.iter().sum::<usize>() as f64 / gops.len() as f64 };
-    let worst_seek_samples = (0..idx.frames.len()).map(|n| idx.decode_plan_for_frame(n).len()).max().unwrap_or(0);
+    let mean_gop = if gops.is_empty() {
+        idx.samples.len() as f64
+    } else {
+        gops.iter().sum::<usize>() as f64 / gops.len() as f64
+    };
+    let worst_seek_samples = (0..idx.frames.len())
+        .map(|n| idx.decode_plan_for_frame(n).len())
+        .max()
+        .unwrap_or(0);
     let pixels = info.width.max(0) as u64 * info.height.max(0) as u64;
     let above_hd = pixels > 1920 * 1080;
     let class = if worst_seek_samples > 120 || (!hardware && !intra_only && above_hd) {
@@ -532,7 +634,16 @@ fn decode_cost(info: &CodecInfo, idx: &FrameIndex, intra_only: bool) -> DecodeCo
     } else {
         CostClass::Medium
     };
-    DecodeCost { backend, hardware, intra_only, max_gop, mean_gop, worst_seek_samples, pixels_per_frame: pixels, class }
+    DecodeCost {
+        backend,
+        hardware,
+        intra_only,
+        max_gop,
+        mean_gop,
+        worst_seek_samples,
+        pixels_per_frame: pixels,
+        class,
+    }
 }
 
 /// The nominal rate of a probed video stream as an engine rate.
@@ -563,7 +674,10 @@ mod tests {
         // A horizontal offset of −8.5 pixels.
         c[16..20].copy_from_slice(&(-17i32).to_be_bytes());
         c[20..24].copy_from_slice(&2i32.to_be_bytes());
-        assert_eq!(clean_aperture(&c, 1920, 1080).unwrap().horizontal_offset, -8.5);
+        assert_eq!(
+            clean_aperture(&c, 1920, 1080).unwrap().horizontal_offset,
+            -8.5
+        );
     }
 
     #[test]
@@ -591,10 +705,22 @@ mod tests {
             field_order: fo,
             sample_aspect: (0, 1),
         };
-        assert_eq!(field_info(&info(0), Some(&[2, 9])).order, FieldOrder::TopFirst);
-        assert_eq!(field_info(&info(0), Some(&[2, 14])).order, FieldOrder::BottomFirst);
-        assert_eq!(field_info(&info(0), Some(&[1, 0])).order, FieldOrder::Progressive);
-        assert_eq!(field_info(&info(ff::AV_FIELD_BB), None).order, FieldOrder::BottomFirst);
+        assert_eq!(
+            field_info(&info(0), Some(&[2, 9])).order,
+            FieldOrder::TopFirst
+        );
+        assert_eq!(
+            field_info(&info(0), Some(&[2, 14])).order,
+            FieldOrder::BottomFirst
+        );
+        assert_eq!(
+            field_info(&info(0), Some(&[1, 0])).order,
+            FieldOrder::Progressive
+        );
+        assert_eq!(
+            field_info(&info(ff::AV_FIELD_BB), None).order,
+            FieldOrder::BottomFirst
+        );
         assert_eq!(field_info(&info(0), None).order, FieldOrder::Unknown);
     }
 }

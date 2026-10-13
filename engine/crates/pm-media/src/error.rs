@@ -14,7 +14,11 @@ pub enum MediaError {
     #[error("unsupported: {0}")]
     Unsupported(String),
     #[error("FFmpeg {what}: {message} ({code})")]
-    Ffmpeg { what: String, code: i32, message: String },
+    Ffmpeg {
+        what: String,
+        code: i32,
+        message: String,
+    },
     #[error("VideoToolbox {what}: OSStatus {status}")]
     VideoToolbox { what: String, status: i32 },
     #[error("CoreVideo {what}: CVReturn {status}")]
@@ -22,7 +26,11 @@ pub enum MediaError {
     #[error("dav1d {what}: {code}")]
     Dav1d { what: String, code: i32 },
     #[error("OpenEXR {what}: {message} ({code})")]
-    OpenExr { what: String, code: i32, message: String },
+    OpenExr {
+        what: String,
+        code: i32,
+        message: String,
+    },
     #[error("image: {0}")]
     Image(String),
     #[error("out of memory allocating {0} bytes of frame memory")]

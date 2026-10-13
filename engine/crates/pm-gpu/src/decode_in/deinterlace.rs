@@ -23,7 +23,11 @@ impl CodeSpace {
     pub fn of(f: &PixelFormat) -> CodeSpace {
         let n = f.norm();
         // MSB-aligned formats filter n-bit codes (c = v / 64 for x420).
-        let unit = if f.alignment == SampleAlignment::MsbIn16 { (1u32 << (16 - f.bits)) as f64 } else { 1.0 };
+        let unit = if f.alignment == SampleAlignment::MsbIn16 {
+            (1u32 << (16 - f.bits)) as f64
+        } else {
+            1.0
+        };
         let max = ((1u64 << f.bits) - 1) as f32;
         let amax = n.a_div as f32;
         let rgb = matches!(f.layout, Layout::PlanarRgb | Layout::Rgba);
@@ -63,7 +67,11 @@ impl FieldPass {
     /// For frame-rate or field-rate output of a frame with the given
     /// neighbors (`first`/`last` from `pm_media`'s `FieldFrames`).
     pub fn new(tff: bool, second: bool, first: bool, last: bool) -> FieldPass {
-        FieldPass { tff, second, intra: (first && !second) || (last && second) }
+        FieldPass {
+            tff,
+            second,
+            intra: (first && !second) || (last && second),
+        }
     }
 }
 
@@ -152,7 +160,11 @@ impl Deinterlacer {
                 compilation_options: Default::default(),
                 cache: None,
             });
-            Variant { pipeline, layout, format }
+            Variant {
+                pipeline,
+                layout,
+                format,
+            }
         };
         Deinterlacer {
             device: device.clone(),
@@ -180,7 +192,9 @@ impl Deinterlacer {
         };
         let (w, h) = (planes[1].width(), planes[1].height());
         if planes.iter().any(|t| t.width() != w || t.height() != h) {
-            return Err(ImportError::Unsupported("bwdif frames differ in size".into()));
+            return Err(ImportError::Unsupported(
+                "bwdif frames differ in size".into(),
+            ));
         }
         // FFmpeg: parity = tff ^ !is_second; prev2/next2 select on parity ^ tff.
         let parity = (pass.tff ^ !pass.second) as u32;
@@ -202,32 +216,62 @@ impl Deinterlacer {
             mapped_at_creation: false,
         });
         queue.write_buffer(&ubuf, 0, unsafe {
-            std::slice::from_raw_parts(&params as *const Params as *const u8, std::mem::size_of::<Params>())
+            std::slice::from_raw_parts(
+                &params as *const Params as *const u8,
+                std::mem::size_of::<Params>(),
+            )
         });
         let out = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("deinterlaced"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let views: Vec<wgpu::TextureView> = planes.iter().map(|t| t.create_view(&Default::default())).collect();
+        let views: Vec<wgpu::TextureView> = planes
+            .iter()
+            .map(|t| t.create_view(&Default::default()))
+            .collect();
         let ov = out.create_view(&Default::default());
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bwdif"),
             layout: &v.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&views[0]) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&views[1]) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&views[2]) },
-                wgpu::BindGroupEntry { binding: 3, resource: ubuf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&ov) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&views[0]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&views[1]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&views[2]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: ubuf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&ov),
+                },
             ],
         });
-        let mut cp = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("bwdif"), timestamp_writes: None });
+        let mut cp = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("bwdif"),
+            timestamp_writes: None,
+        });
         cp.set_pipeline(&v.pipeline);
         cp.set_bind_group(0, &bg, &[]);
         cp.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
@@ -250,17 +294,46 @@ impl Deinterlacer {
     ) -> Result<Normalized> {
         match (prev, cur, next) {
             (
-                Normalized::YCbCr { luma: pl, chroma: pc },
-                Normalized::YCbCr { luma: cl, chroma: cc },
-                Normalized::YCbCr { luma: nl, chroma: nc },
+                Normalized::YCbCr {
+                    luma: pl,
+                    chroma: pc,
+                },
+                Normalized::YCbCr {
+                    luma: cl,
+                    chroma: cc,
+                },
+                Normalized::YCbCr {
+                    luma: nl,
+                    chroma: nc,
+                },
             ) => Ok(Normalized::YCbCr {
-                luma: self.plane(queue, encoder, [pl, cl, nl], pass, codes.integer, codes.main)?,
-                chroma: self.plane(queue, encoder, [pc, cc, nc], pass, codes.integer, codes.chroma)?,
+                luma: self.plane(
+                    queue,
+                    encoder,
+                    [pl, cl, nl],
+                    pass,
+                    codes.integer,
+                    codes.main,
+                )?,
+                chroma: self.plane(
+                    queue,
+                    encoder,
+                    [pc, cc, nc],
+                    pass,
+                    codes.integer,
+                    codes.chroma,
+                )?,
             }),
-            (Normalized::Rgb { rgba: p }, Normalized::Rgb { rgba: c }, Normalized::Rgb { rgba: n }) => {
-                Ok(Normalized::Rgb { rgba: self.plane(queue, encoder, [p, c, n], pass, codes.integer, codes.main)? })
-            }
-            _ => Err(ImportError::Unsupported("bwdif frames differ in layout".into())),
+            (
+                Normalized::Rgb { rgba: p },
+                Normalized::Rgb { rgba: c },
+                Normalized::Rgb { rgba: n },
+            ) => Ok(Normalized::Rgb {
+                rgba: self.plane(queue, encoder, [p, c, n], pass, codes.integer, codes.main)?,
+            }),
+            _ => Err(ImportError::Unsupported(
+                "bwdif frames differ in layout".into(),
+            )),
         }
     }
 }

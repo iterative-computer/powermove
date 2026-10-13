@@ -23,7 +23,9 @@ fn ffmpeg_dir() -> PathBuf {
     let dir = std::env::var_os("PM_FFMPEG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| home().join("Library/Caches/powermove-engine/ffmpeg/out"));
-    if !dir.join("include/libavcodec/avcodec.h").is_file() || !dir.join("lib/libavcodec.dylib").exists() {
+    if !dir.join("include/libavcodec/avcodec.h").is_file()
+        || !dir.join("lib/libavcodec.dylib").exists()
+    {
         panic!(
             "pm-media needs Powermove's FFmpeg build at {} (PM_FFMPEG_DIR). Build it with \
              engine/third_party/ffmpeg/build.sh and `source engine/env.sh`.",
@@ -46,17 +48,29 @@ fn native_dir(manifest: &Path) -> PathBuf {
     let dir = std::env::var_os("PM_MEDIA_NATIVE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| home().join("Library/Caches/powermove-engine/media-native/out"));
-    let current = std::fs::read_to_string(dir.join("stamp")).map(|s| s.trim() == stamp).unwrap_or(false);
+    let current = std::fs::read_to_string(dir.join("stamp"))
+        .map(|s| s.trim() == stamp)
+        .unwrap_or(false);
     if !current {
-        println!("cargo:warning=building pm-media native libraries (dav1d, OpenEXRCore) into {}", dir.display());
+        println!(
+            "cargo:warning=building pm-media native libraries (dav1d, OpenEXRCore) into {}",
+            dir.display()
+        );
         let status = Command::new("bash")
             .arg(&script)
             .env("PM_MEDIA_NATIVE_DIR", &dir)
             .status()
             .expect("run native/build.sh");
-        assert!(status.success(), "native/build.sh failed; run it by hand to see the log");
+        assert!(
+            status.success(),
+            "native/build.sh failed; run it by hand to see the log"
+        );
         let built = std::fs::read_to_string(dir.join("stamp")).unwrap_or_default();
-        assert_eq!(built.trim(), stamp, "native/build.sh wrote a different stamp");
+        assert_eq!(
+            built.trim(),
+            stamp,
+            "native/build.sh wrote a different stamp"
+        );
     }
     dir
 }
@@ -74,7 +88,10 @@ fn bindings(name: &str, header: &str, include: &[&Path], allow: &[&str], out: &P
         b = b.clang_arg(format!("-I{}", dir.display()));
     }
     for pattern in allow {
-        b = b.allowlist_function(pattern).allowlist_type(pattern).allowlist_var(pattern);
+        b = b
+            .allowlist_function(pattern)
+            .allowlist_type(pattern)
+            .allowlist_var(pattern);
     }
     b.generate()
         .unwrap_or_else(|e| panic!("bindgen {name}: {e}"))
@@ -109,7 +126,10 @@ fn main() {
     }
     // Test and example binaries of this package find the dylibs without the
     // environment too.
-    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", ff.join("lib").display());
+    println!(
+        "cargo:rustc-link-arg=-Wl,-rpath,{}",
+        ff.join("lib").display()
+    );
     println!("cargo:ffmpeg_lib={}", ff.join("lib").display());
     let ff_inc = ff.join("include");
     bindings(
@@ -121,18 +141,35 @@ fn main() {
          #include <libavutil/channel_layout.h>\n#include <libavutil/samplefmt.h>\n#include <libavutil/error.h>\n\
          #include <libavutil/log.h>\n#include <libavutil/timecode.h>\n",
         &[&ff_inc],
-        &["av_.*", "avformat_.*", "avcodec_.*", "avio_.*", "AV.*", "FF_.*", "LIBAV.*"],
+        &[
+            "av_.*",
+            "avformat_.*",
+            "avcodec_.*",
+            "avio_.*",
+            "AV.*",
+            "FF_.*",
+            "LIBAV.*",
+        ],
         &out,
     );
 
     // dav1d and OpenEXRCore, static.
     let native = native_dir(&manifest);
-    println!("cargo:rustc-link-search=native={}", native.join("lib").display());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        native.join("lib").display()
+    );
     println!("cargo:rustc-link-lib=static=dav1d");
     println!("cargo:rustc-link-lib=static=OpenEXRCore-3_5");
     println!("cargo:rustc-link-lib=dylib=c++");
     let inc = native.join("include");
-    bindings("dav1d", "#include <dav1d/dav1d.h>\n", &[&inc], &["dav1d_.*", "Dav1d.*", "DAV1D_.*"], &out);
+    bindings(
+        "dav1d",
+        "#include <dav1d/dav1d.h>\n",
+        &[&inc],
+        &["dav1d_.*", "Dav1d.*", "DAV1D_.*"],
+        &out,
+    );
     bindings(
         "openexr",
         "#include <openexr/openexr.h>\n",
@@ -141,7 +178,14 @@ fn main() {
         &out,
     );
 
-    for fw in ["CoreFoundation", "CoreMedia", "CoreVideo", "VideoToolbox", "ImageIO", "CoreGraphics"] {
+    for fw in [
+        "CoreFoundation",
+        "CoreMedia",
+        "CoreVideo",
+        "VideoToolbox",
+        "ImageIO",
+        "CoreGraphics",
+    ] {
         println!("cargo:rustc-link-lib=framework={fw}");
     }
 }

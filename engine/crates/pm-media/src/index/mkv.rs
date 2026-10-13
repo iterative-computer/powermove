@@ -44,7 +44,16 @@ const BLOCK_ADDITIONAL: u32 = 0xA5;
 const BLOCK_DURATION: u32 = 0x9B;
 
 /// Top-level Segment children; an unknown-size Cluster ends at the next one.
-const TOP_LEVEL: [u32; 8] = [CLUSTER, CUES, INFO, TRACKS, 0x114D_9B74, 0x1043_A770, 0x1941_A469, 0x1254_C367];
+const TOP_LEVEL: [u32; 8] = [
+    CLUSTER,
+    CUES,
+    INFO,
+    TRACKS,
+    0x114D_9B74,
+    0x1043_A770,
+    0x1941_A469,
+    0x1254_C367,
+];
 
 struct Reader {
     f: File,
@@ -70,7 +79,9 @@ impl Reader {
 }
 
 fn vint_id(b: &[u8]) -> Result<(u32, usize)> {
-    let first = *b.first().ok_or_else(|| MediaError::invalid("end of file in an element id"))?;
+    let first = *b
+        .first()
+        .ok_or_else(|| MediaError::invalid("end of file in an element id"))?;
     let len = first.leading_zeros() as usize + 1;
     if len > 4 || b.len() < len {
         return Err(MediaError::invalid("bad EBML element id"));
@@ -79,7 +90,9 @@ fn vint_id(b: &[u8]) -> Result<(u32, usize)> {
 }
 
 pub(crate) fn vint_size(b: &[u8]) -> Result<(Option<u64>, usize)> {
-    let first = *b.first().ok_or_else(|| MediaError::invalid("end of file in an element size"))?;
+    let first = *b
+        .first()
+        .ok_or_else(|| MediaError::invalid("end of file in an element size"))?;
     let len = first.leading_zeros() as usize + 1;
     if len > 8 || b.len() < len {
         return Err(MediaError::invalid("bad EBML element size"));
@@ -104,7 +117,9 @@ fn kids(b: &[u8]) -> Result<Vec<(u32, std::ops::Range<usize>)>> {
     while p < b.len() {
         let (id, il) = vint_id(&b[p..])?;
         let (size, sl) = vint_size(&b[p + il..])?;
-        let size = size.ok_or_else(|| MediaError::invalid("unknown size inside a small master element"))? as usize;
+        let size = size
+            .ok_or_else(|| MediaError::invalid("unknown size inside a small master element"))?
+            as usize;
         let start = p + il + sl;
         if start + size > b.len() {
             return Err(MediaError::invalid("element overruns its parent"));
@@ -134,7 +149,11 @@ fn parse_track(e: &[u8]) -> Result<Track> {
         match k {
             TRACK_NUMBER => t.number = uint(&e[kr]),
             TRACK_TYPE => t.ty = uint(&e[kr]),
-            CODEC_ID => t.codec_id = String::from_utf8_lossy(&e[kr]).trim_end_matches('\0').to_string(),
+            CODEC_ID => {
+                t.codec_id = String::from_utf8_lossy(&e[kr])
+                    .trim_end_matches('\0')
+                    .to_string()
+            }
             CODEC_PRIVATE => t.codec_private = Some(e[kr].to_vec()),
             DEFAULT_DURATION => t.default_duration_ns = Some(uint(&e[kr])),
             CONTENT_ENCODINGS => {
@@ -166,8 +185,13 @@ fn parse_track(e: &[u8]) -> Result<Track> {
                     }
                     match (ty, algo) {
                         (0, Some(3)) => t.strip_prefix = settings,
-                        (0, Some(a)) => t.unsupported_encoding = Some(format!("Matroska content compression {a}")),
-                        (1, _) => t.unsupported_encoding = Some("Matroska content encryption".into()),
+                        (0, Some(a)) => {
+                            t.unsupported_encoding =
+                                Some(format!("Matroska content compression {a}"))
+                        }
+                        (1, _) => {
+                            t.unsupported_encoding = Some("Matroska content encryption".into())
+                        }
                         _ => {}
                     }
                 }
@@ -206,7 +230,10 @@ pub fn build(path: &Path, track: u64) -> Result<FrameIndex> {
         let (id, data, size) = r.header(off)?;
         match id {
             INFO => {
-                let b = r.read(data, size.ok_or_else(|| MediaError::invalid("Info of unknown size"))? as usize)?;
+                let b = r.read(
+                    data,
+                    size.ok_or_else(|| MediaError::invalid("Info of unknown size"))? as usize,
+                )?;
                 for (cid, rg) in kids(&b)? {
                     if cid == TIMESTAMP_SCALE {
                         ts_scale = uint(&b[rg]);
@@ -214,13 +241,20 @@ pub fn build(path: &Path, track: u64) -> Result<FrameIndex> {
                 }
             }
             TRACKS => {
-                let b = r.read(data, size.ok_or_else(|| MediaError::invalid("Tracks of unknown size"))? as usize)?;
+                let b = r.read(
+                    data,
+                    size.ok_or_else(|| MediaError::invalid("Tracks of unknown size"))? as usize,
+                )?;
                 for (cid, rg) in kids(&b)? {
                     if cid != TRACK_ENTRY {
                         continue;
                     }
                     let t = parse_track(&b[rg])?;
-                    let wanted = if track == 0 { t.ty == 1 } else { t.number == track };
+                    let wanted = if track == 0 {
+                        t.ty == 1
+                    } else {
+                        t.number == track
+                    };
                     if wanted && chosen.is_none() {
                         chosen = Some(t);
                     }
@@ -232,10 +266,16 @@ pub fn build(path: &Path, track: u64) -> Result<FrameIndex> {
                 }
             }
             CUES => {
-                cues_raw = Some(r.read(data, size.ok_or_else(|| MediaError::invalid("Cues of unknown size"))? as usize)?);
+                cues_raw = Some(r.read(
+                    data,
+                    size.ok_or_else(|| MediaError::invalid("Cues of unknown size"))? as usize,
+                )?);
             }
             CLUSTER => {
-                let number = chosen.as_ref().ok_or_else(|| MediaError::invalid("Cluster before Tracks, or no such track"))?.number;
+                let number = chosen
+                    .as_ref()
+                    .ok_or_else(|| MediaError::invalid("Cluster before Tracks, or no such track"))?
+                    .number;
                 let end = match size {
                     Some(s) => (data + s).min(seg_end),
                     None => unknown_cluster_end(&mut r, data, seg_end)?,
@@ -248,7 +288,11 @@ pub fn build(path: &Path, track: u64) -> Result<FrameIndex> {
         }
         match size {
             Some(s) => off = data + s,
-            None => return Err(MediaError::invalid(format!("unknown-size element 0x{id:X} outside a Cluster"))),
+            None => {
+                return Err(MediaError::invalid(format!(
+                    "unknown-size element 0x{id:X} outside a Cluster"
+                )));
+            }
         }
     }
     let t = chosen.ok_or_else(|| MediaError::invalid("no such track"))?;
@@ -286,9 +330,14 @@ pub fn build(path: &Path, track: u64) -> Result<FrameIndex> {
                 }
             }
         }
-        let keys: std::collections::HashSet<i64> = samples.iter().filter(|s| s.key).map(|s| s.cts).collect();
+        let keys: std::collections::HashSet<i64> =
+            samples.iter().filter(|s| s.key).map(|s| s.cts).collect();
         cue_points = Some(cues.len());
-        cue_matched = Some(cues.iter().filter(|&&tm| keys.contains(&(tm as i64))).count());
+        cue_matched = Some(
+            cues.iter()
+                .filter(|&&tm| keys.contains(&(tm as i64)))
+                .count(),
+        );
     }
 
     // Durations from the next PTS in presentation order (video blocks rarely
@@ -301,14 +350,26 @@ pub fn build(path: &Path, track: u64) -> Result<FrameIndex> {
         .unwrap_or(0);
     for w in 0..by_pts.len() {
         if samples[by_pts[w]].duration == 0 {
-            samples[by_pts[w]].duration =
-                if w + 1 < by_pts.len() { samples[by_pts[w + 1]].cts - samples[by_pts[w]].cts } else { default_dur };
+            samples[by_pts[w]].duration = if w + 1 < by_pts.len() {
+                samples[by_pts[w + 1]].cts - samples[by_pts[w]].cts
+            } else {
+                default_dur
+            };
         }
     }
 
-    let stats = IndexStats { cue_points, cue_points_matched: cue_matched, scan_reads: r.reads, ..Default::default() };
+    let stats = IndexStats {
+        cue_points,
+        cue_points_matched: cue_matched,
+        scan_reads: r.reads,
+        ..Default::default()
+    };
     let mut idx = FrameIndex {
-        source: if cues_raw.is_some() { IndexSource::MkvCuesAndBlockScan } else { IndexSource::MkvBlockScan },
+        source: if cues_raw.is_some() {
+            IndexSource::MkvCuesAndBlockScan
+        } else {
+            IndexSource::MkvBlockScan
+        },
         track: t.number,
         timebase: Rational::new(ts_scale as i64, 1_000_000_000)?,
         samples,
@@ -333,12 +394,21 @@ fn unknown_cluster_end(r: &mut Reader, mut off: u64, seg_end: u64) -> Result<u64
         if TOP_LEVEL.contains(&id) {
             return Ok(off);
         }
-        off = data + size.ok_or_else(|| MediaError::invalid("unknown size inside an unknown-size Cluster"))?;
+        off = data
+            + size.ok_or_else(|| {
+                MediaError::invalid("unknown size inside an unknown-size Cluster")
+            })?;
     }
     Ok(seg_end)
 }
 
-fn scan_cluster(r: &mut Reader, mut off: u64, end: u64, track: u64, out: &mut Vec<Sample>) -> Result<()> {
+fn scan_cluster(
+    r: &mut Reader,
+    mut off: u64,
+    end: u64,
+    track: u64,
+    out: &mut Vec<Sample>,
+) -> Result<()> {
     let mut cluster_ts: Option<i64> = None;
     while off < end {
         let (id, data, size) = r.header(off)?;
@@ -359,11 +429,14 @@ fn scan_cluster(r: &mut Reader, mut off: u64, end: u64, track: u64, out: &mut Ve
                 let mut duration = None;
                 while p < gend {
                     let (cid, cdata, csize) = r.header(p)?;
-                    let csize = csize.ok_or_else(|| MediaError::invalid("unknown size in a BlockGroup"))?;
+                    let csize =
+                        csize.ok_or_else(|| MediaError::invalid("unknown size in a BlockGroup"))?;
                     match cid {
                         BLOCK => blk = Some((cdata, csize)),
                         REFERENCE_BLOCK => has_ref = true,
-                        BLOCK_DURATION => duration = Some(uint(&r.read(cdata, csize as usize)?) as i64),
+                        BLOCK_DURATION => {
+                            duration = Some(uint(&r.read(cdata, csize as usize)?) as i64)
+                        }
                         BLOCK_ADDITIONS => {
                             let b = r.read(cdata, csize as usize)?;
                             for (k, kr) in kids(&b)? {
@@ -377,7 +450,10 @@ fn scan_cluster(r: &mut Reader, mut off: u64, end: u64, track: u64, out: &mut Ve
                                     match kk {
                                         BLOCK_ADD_ID => add_id = uint(&m[kkr]),
                                         BLOCK_ADDITIONAL => {
-                                            payload = Some((cdata + (kr.start + kkr.start) as u64, kkr.len() as u32))
+                                            payload = Some((
+                                                cdata + (kr.start + kkr.start) as u64,
+                                                kkr.len() as u32,
+                                            ))
                                         }
                                         _ => {}
                                     }
@@ -412,7 +488,14 @@ fn scan_cluster(r: &mut Reader, mut off: u64, end: u64, track: u64, out: &mut Ve
 
 /// `group_key`: None for a SimpleBlock (keyframe flag in its header); for a
 /// Block inside a BlockGroup, Some(no ReferenceBlock present).
-fn block(r: &mut Reader, data: u64, size: u64, cluster_ts: Option<i64>, track: u64, group_key: Option<bool>) -> Result<Option<Sample>> {
+fn block(
+    r: &mut Reader,
+    data: u64,
+    size: u64,
+    cluster_ts: Option<i64>,
+    track: u64,
+    group_key: Option<bool>,
+) -> Result<Option<Sample>> {
     let h = r.read(data, 12.min(size as usize))?;
     let (tn, tl) = vint_size(&h)?;
     if tn != Some(track) {
@@ -433,7 +516,11 @@ fn block(r: &mut Reader, data: u64, size: u64, cluster_ts: Option<i64>, track: u
         cts: ct + rel,
         duration: 0,
         key: group_key.unwrap_or(flags & 0x80 != 0),
-        loc: Loc::File { offset: data + hdr, size: (size - hdr) as u32, additional: None },
+        loc: Loc::File {
+            offset: data + hdr,
+            size: (size - hdr) as u32,
+            additional: None,
+        },
         nal_type: None,
     }))
 }

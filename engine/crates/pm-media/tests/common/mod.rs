@@ -32,7 +32,10 @@ pub fn fixtures_dir() -> PathBuf {
 pub fn corpus_dir() -> PathBuf {
     let dir = std::env::var_os("PM_MEDIA_CORPUS")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap()).join("Library/Caches/powermove-engine/media-corpus"));
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var("HOME").unwrap())
+                .join("Library/Caches/powermove-engine/media-corpus")
+        });
     assert!(
         dir.join("h264-bpyramid.mp4").is_file(),
         "the media corpus is missing at {}; run engine/crates/pm-media/tests/corpus/gen.sh",
@@ -44,7 +47,10 @@ pub fn corpus_dir() -> PathBuf {
 pub fn ffmpeg_bin() -> PathBuf {
     let dir = std::env::var_os("PM_FFMPEG_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap()).join("Library/Caches/powermove-engine/ffmpeg/out"));
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var("HOME").unwrap())
+                .join("Library/Caches/powermove-engine/ffmpeg/out")
+        });
     dir.join("bin/ffmpeg")
 }
 
@@ -56,9 +62,11 @@ pub fn videos(dir: &Path, filter: &dyn Fn(&str) -> bool) -> Vec<PathBuf> {
             let name = p.file_name().unwrap().to_string_lossy().to_string();
             let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
             [
-                "mp4", "mov", "m4v", "mkv", "webm", "ts", "m2ts", "mts", "mxf", "avi", "dv", "vob", "mpg", "m2v", "wmv", "asf", "flv",
-                "3gp", "3g2", "ogv",
-            ].contains(&ext) && filter(&name)
+                "mp4", "mov", "m4v", "mkv", "webm", "ts", "m2ts", "mts", "mxf", "avi", "dv", "vob",
+                "mpg", "m2v", "wmv", "asf", "flv", "3gp", "3g2", "ogv",
+            ]
+            .contains(&ext)
+                && filter(&name)
         })
         .collect();
     v.sort();
@@ -123,13 +131,27 @@ fn shuffled(n: usize, seed: u64) -> Vec<usize> {
     v
 }
 
-fn session(src: &MediaSource, b: Backend, pool: &FramePool, purpose: DecodePurpose) -> pm_media::Result<Session> {
+fn session(
+    src: &MediaSource,
+    b: Backend,
+    pool: &FramePool,
+    purpose: DecodePurpose,
+) -> pm_media::Result<Session> {
     let input = Input::open(src.path())?;
-    let spec = StreamSpec { input: &input, stream: src.stream, info: &src.info, index: &src.index, extradata: &src.extradata };
+    let spec = StreamSpec {
+        input: &input,
+        stream: src.stream,
+        info: &src.info,
+        index: &src.index,
+        extradata: &src.extradata,
+    };
     let (dec, _) = open(&spec, purpose, pool, &LocalArbiter::unlimited(), 4, Some(b))?;
     // `open` falls back to the next backend; the suite tests the one asked for.
     if dec.info().backend != b {
-        return Err(pm_media::MediaError::unsupported(format!("{b:?} did not open; {:?} would decode instead", dec.info().backend)));
+        return Err(pm_media::MediaError::unsupported(format!(
+            "{b:?} did not open; {:?} would decode instead",
+            dec.info().backend
+        )));
     }
     let reader = PacketReader::new(src.path(), src.stream)?;
     let mut s = Session::new(src.index.clone(), reader, dec, Some(src.color));
@@ -146,7 +168,11 @@ fn framemd5(args: &[&str]) -> Result<Vec<String>, String> {
         .output()
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("ffmpeg failed").to_string());
+        return Err(String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .last()
+            .unwrap_or("ffmpeg failed")
+            .to_string());
     }
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -156,12 +182,21 @@ fn framemd5(args: &[&str]) -> Result<Vec<String>, String> {
 }
 
 /// (reference, matched, frames, offset): aligned on the first reference frame.
-fn compare(name: String, r: Result<Vec<String>, String>, seq: &[String]) -> (String, usize, usize, isize) {
+fn compare(
+    name: String,
+    r: Result<Vec<String>, String>,
+    seq: &[String],
+) -> (String, usize, usize, isize) {
     match r {
         Err(e) => (format!("{name}: error {e}"), 0, 0, 0),
         Ok(h) => {
             let offset = match h.first() {
-                Some(f0) if seq.first() != Some(f0) => seq.iter().take(8).position(|s| s == f0).map(|p| p as isize).unwrap_or(0),
+                Some(f0) if seq.first() != Some(f0) => seq
+                    .iter()
+                    .take(8)
+                    .position(|s| s == f0)
+                    .map(|p| p as isize)
+                    .unwrap_or(0),
                 _ => 0,
             };
             let ours = &seq[offset as usize..];
@@ -185,18 +220,46 @@ fn reference_for(src: &MediaSource, run: &BackendRun) -> Option<(String, usize, 
                 _ => return None,
             };
             let vf = format!("hwdownload,format={fmt}");
-            let r = framemd5(&["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld", "-i", file, "-map", "0:v:0", "-vf", &vf, "-fps_mode", "passthrough"]);
-            return Some(compare(format!("ffmpeg -hwaccel videotoolbox ({fmt})"), r, &run.seq_md5));
+            let r = framemd5(&[
+                "-hwaccel",
+                "videotoolbox",
+                "-hwaccel_output_format",
+                "videotoolbox_vld",
+                "-i",
+                file,
+                "-map",
+                "0:v:0",
+                "-vf",
+                &vf,
+                "-fps_mode",
+                "passthrough",
+            ]);
+            return Some(compare(
+                format!("ffmpeg -hwaccel videotoolbox ({fmt})"),
+                r,
+                &run.seq_md5,
+            ));
         }
         Backend::Dav1d => args.extend(["-c:v", "libdav1d"]),
-        Backend::FfmpegAlphaPair => args.extend(["-c:v", if src.info.codec == "vp9" { "libvpx-vp9" } else { "libvpx" }]),
+        Backend::FfmpegAlphaPair => args.extend([
+            "-c:v",
+            if src.info.codec == "vp9" {
+                "libvpx-vp9"
+            } else {
+                "libvpx"
+            },
+        ]),
         Backend::Ffmpeg => {}
     }
     if run.copied_frames > 0 && run.backend == Backend::Ffmpeg && run.name.contains("converted") {
         return None;
     }
     args.extend(["-i", file, "-map", "0:v:0", "-fps_mode", "passthrough"]);
-    Some(compare("ffmpeg software framemd5".into(), framemd5(&args), &run.seq_md5))
+    Some(compare(
+        "ffmpeg software framemd5".into(),
+        framemd5(&args),
+        &run.seq_md5,
+    ))
 }
 
 pub fn run_file(path: &Path, only: Option<&[Backend]>, purpose: DecodePurpose) -> FileRun {
@@ -222,21 +285,44 @@ pub fn run_file(path: &Path, only: Option<&[Backend]>, purpose: DecodePurpose) -
         // Sequential: every sample in decode order through a fresh decoder.
         let t0 = Instant::now();
         let input = Input::open(path).unwrap();
-        let spec = StreamSpec { input: &input, stream: source.stream, info: &source.info, index: idx, extradata: &source.extradata };
-        let (mut dec, _) = open(&spec, purpose, &pool, &LocalArbiter::unlimited(), 4, Some(b)).unwrap();
+        let spec = StreamSpec {
+            input: &input,
+            stream: source.stream,
+            info: &source.info,
+            index: idx,
+            extradata: &source.extradata,
+        };
+        let (mut dec, _) = open(
+            &spec,
+            purpose,
+            &pool,
+            &LocalArbiter::unlimited(),
+            4,
+            Some(b),
+        )
+        .unwrap();
         let mut reader = PacketReader::new(path, source.stream).unwrap();
         let all: Vec<usize> = (0..idx.samples.len()).collect();
         let pkts = reader.read(idx, &all).unwrap();
         let mut out = vec![];
         for p in &pkts {
-            dec.send(p, &mut out).unwrap_or_else(|e| panic!("{name} [{b:?}]: sequential send: {e}"));
+            dec.send(p, &mut out)
+                .unwrap_or_else(|e| panic!("{name} [{b:?}]: sequential send: {e}"));
         }
         dec.drain(&mut out).unwrap();
-        let by_cts: HashMap<i64, usize> = idx.samples.iter().enumerate().map(|(i, s)| (s.cts, i)).collect();
+        let by_cts: HashMap<i64, usize> = idx
+            .samples
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.cts, i))
+            .collect();
         let mut by_sample: HashMap<usize, DecodedFrame> = HashMap::new();
         for f in out {
             let s = by_cts[&f.pts];
-            assert!(by_sample.insert(s, f).is_none(), "{name} [{b:?}]: sample {s} decoded twice");
+            assert!(
+                by_sample.insert(s, f).is_none(),
+                "{name} [{b:?}]: sample {s} decoded twice"
+            );
         }
         let mut seq_md5 = vec![];
         let mut norm = vec![];
@@ -244,7 +330,9 @@ pub fn run_file(path: &Path, only: Option<&[Backend]>, purpose: DecodePurpose) -
         let mut output = info.output.clone().unwrap_or_default();
         for k in 0..n {
             let s = idx.frames[k].sample;
-            let f = by_sample.get(&s).unwrap_or_else(|| panic!("{name} [{b:?}]: sequential decode missed frame {k}"));
+            let f = by_sample
+                .get(&s)
+                .unwrap_or_else(|| panic!("{name} [{b:?}]: sequential decode missed frame {k}"));
             if output.is_empty() {
                 output = f.format.label.clone();
             }
@@ -253,7 +341,11 @@ pub fn run_file(path: &Path, only: Option<&[Backend]>, purpose: DecodePurpose) -
             }
             match &f.pixels {
                 Pixels::CoreVideo(_) => {}
-                Pixels::Pool(p) => assert!(p.planes.iter().all(|pl| pl.ptr() as usize == pl.decoder_ptr)),
+                Pixels::Pool(p) => assert!(
+                    p.planes
+                        .iter()
+                        .all(|pl| pl.ptr() as usize == pl.decoder_ptr)
+                ),
             }
             seq_md5.push(f.md5_hex().unwrap());
             norm.push(norm_hash(f));
@@ -289,7 +381,8 @@ pub fn run_file(path: &Path, only: Option<&[Backend]>, purpose: DecodePurpose) -
                 r.probes += 1;
                 let t = frame_time(pts[0], idx.timebase, source.rate(), cn as i64);
                 let Some(target) = source.select(t) else {
-                    r.errors.push(format!("composition frame {cn} selects nothing"));
+                    r.errors
+                        .push(format!("composition frame {cn} selects nothing"));
                     continue;
                 };
                 if Some(target) != expected_frame(&g, cn as i64) {
@@ -299,7 +392,8 @@ pub fn run_file(path: &Path, only: Option<&[Backend]>, purpose: DecodePurpose) -
                 let got = if warm {
                     s.presented(target)
                 } else {
-                    session(&source, b, &pool, purpose).and_then(|mut fresh| fresh.presented(target))
+                    session(&source, b, &pool, purpose)
+                        .and_then(|mut fresh| fresh.presented(target))
                 };
                 times.push(t0.elapsed().as_secs_f64() * 1e3);
                 match got.and_then(|f| f.md5_hex()) {
@@ -318,7 +412,12 @@ pub fn run_file(path: &Path, only: Option<&[Backend]>, purpose: DecodePurpose) -
         }
         runs.push(run);
     }
-    FileRun { name, source, runs, errors }
+    FileRun {
+        name,
+        source,
+        runs,
+        errors,
+    }
 }
 
 /// Every check the suite makes; returns failures.
@@ -331,7 +430,10 @@ pub fn check(r: &FileRun) -> Vec<String> {
     let edit_list = r.source.index.stats.edit_list.is_some();
     for run in &r.runs {
         let tag = format!("{name} [{:?} {}]", run.backend, run.name);
-        for (label, rr) in [("new session", &run.new_session), ("same session", &run.same_session)] {
+        for (label, rr) in [
+            ("new session", &run.new_session),
+            ("same session", &run.same_session),
+        ] {
             if rr.matched != rr.probes || !rr.errors.is_empty() || rr.selection_mismatches != 0 {
                 f.push(format!(
                     "{tag}: random access ({label}) {}/{} exact, mismatched {:?}, errors {:?}, selection {}",
@@ -348,7 +450,10 @@ pub fn check(r: &FileRun) -> Vec<String> {
             // frames must match, offset by one.
             let tolerated = edit_list && *offset == 1 && *matched == *frames;
             if !(tolerated || (*matched == *frames && *frames == run.frames && *offset == 0)) {
-                f.push(format!("{tag}: {refname} matched {matched}/{frames} (ours {}, offset {offset})", run.frames));
+                f.push(format!(
+                    "{tag}: {refname} matched {matched}/{frames} (ours {}, offset {offset})",
+                    run.frames
+                ));
             }
         }
     }
@@ -367,7 +472,9 @@ pub fn check(r: &FileRun) -> Vec<String> {
         }
     }
     if !r.runs.iter().any(|run| run.copied_frames == 0) {
-        f.push(format!("{name}: no backend reached GPU-shareable memory without a copy"));
+        f.push(format!(
+            "{name}: no backend reached GPU-shareable memory without a copy"
+        ));
     }
     f
 }
@@ -414,5 +521,10 @@ pub fn run_all(files: &[PathBuf], purpose: DecodePurpose) {
         eprintln!("{}", summary(&r));
         failures.extend(check(&r));
     }
-    assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }

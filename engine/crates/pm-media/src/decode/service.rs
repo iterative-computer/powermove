@@ -44,10 +44,14 @@ impl MediaSource {
     /// Probes and indexes a file's best video stream.
     pub fn open(path: &Path) -> Result<Arc<MediaSource>> {
         let Probed { probe, index } = crate::probe::probe(path)?;
-        let stream = probe.video_stream.ok_or_else(|| MediaError::invalid("no video stream"))?;
+        let stream = probe
+            .video_stream
+            .ok_or_else(|| MediaError::invalid("no video stream"))?;
         let index = index.ok_or_else(|| MediaError::invalid("no video index"))?;
         let video = probe.video.as_ref().unwrap();
-        let nominal = video.nominal_rate.clone().ok_or_else(|| MediaError::invalid("the stream has no nominal rate (fewer than two frames)"))?;
+        let nominal = video.nominal_rate.clone().ok_or_else(|| {
+            MediaError::invalid("the stream has no nominal rate (fewer than two frames)")
+        })?;
         let input = Input::open(path)?;
         let pts = index.presented_pts();
         Ok(Arc::new(MediaSource {
@@ -207,8 +211,18 @@ impl SessionGuard<'_> {
 
     /// Presented frame `n`, through the cache.
     pub fn frame(&mut self, n: usize) -> Result<DecodedFrame> {
-        let sample = self.source.index.frames.get(n).ok_or_else(|| MediaError::invalid(format!("frame {n} out of range")))?.sample;
-        let key = FrameKey { source: self.source.id, sample, purpose: self.key.purpose };
+        let sample = self
+            .source
+            .index
+            .frames
+            .get(n)
+            .ok_or_else(|| MediaError::invalid(format!("frame {n} out of range")))?
+            .sample;
+        let key = FrameKey {
+            source: self.source.id,
+            sample,
+            purpose: self.key.purpose,
+        };
         if let Some(f) = self.service.cache.get(&key) {
             return Ok(f);
         }
@@ -216,7 +230,11 @@ impl SessionGuard<'_> {
         let f = s.sample(sample)?;
         // Everything the session decoded on the way is cached too.
         for (k, fr) in s.window_frames() {
-            let key = FrameKey { source: self.source.id, sample: k, purpose: self.key.purpose };
+            let key = FrameKey {
+                source: self.source.id,
+                sample: k,
+                purpose: self.key.purpose,
+            };
             if !self.service.cache.contains(&key) {
                 self.service.cache.insert(key, fr.clone());
             }
@@ -241,9 +259,17 @@ impl SessionGuard<'_> {
         if n >= count {
             return Err(MediaError::invalid(format!("frame {n} out of range")));
         }
-        let prev = if n > 0 { Some(self.frame(n - 1)?) } else { None };
+        let prev = if n > 0 {
+            Some(self.frame(n - 1)?)
+        } else {
+            None
+        };
         let cur = self.frame(n)?;
-        let next = if n + 1 < count { Some(self.frame(n + 1)?) } else { None };
+        let next = if n + 1 < count {
+            Some(self.frame(n + 1)?)
+        } else {
+            None
+        };
         Ok(FieldFrames {
             first: prev.is_none(),
             last: next.is_none(),
@@ -259,7 +285,11 @@ impl SessionGuard<'_> {
         let mut decoded = 0;
         for n in read_ahead_order(&self.source, from, plan) {
             let sample = self.source.index.frames[n].sample;
-            let key = FrameKey { source: self.source.id, sample, purpose: self.key.purpose };
+            let key = FrameKey {
+                source: self.source.id,
+                sample,
+                purpose: self.key.purpose,
+            };
             if !self.service.cache.contains(&key) {
                 self.frame(n)?;
                 decoded += 1;
@@ -309,7 +339,12 @@ impl DecodeService {
 
     /// A session for `source` serving `instance`: an idle one when the pool
     /// has it (reused across seeks), otherwise a new one.
-    pub fn session(&self, source: &Arc<MediaSource>, instance: InstanceId, purpose: DecodePurpose) -> Result<SessionGuard<'_>> {
+    pub fn session(
+        &self,
+        source: &Arc<MediaSource>,
+        instance: InstanceId,
+        purpose: DecodePurpose,
+    ) -> Result<SessionGuard<'_>> {
         self.session_with(source, instance, purpose, None)
     }
 
@@ -321,9 +356,15 @@ impl DecodeService {
         purpose: DecodePurpose,
         prefer: Option<Backend>,
     ) -> Result<SessionGuard<'_>> {
-        let key = SessionKey { source: source.id, instance, purpose };
+        let key = SessionKey {
+            source: source.id,
+            instance,
+            purpose,
+        };
         let reused = self.idle.lock().unwrap().get_mut(&key).and_then(|l| {
-            let at = l.iter().position(|s| prefer.is_none_or(|p| s.decoder_info().backend == p))?;
+            let at = l
+                .iter()
+                .position(|s| prefer.is_none_or(|p| s.decoder_info().backend == p))?;
             Some(l.remove(at))
         });
         let session = match reused {
@@ -337,7 +378,14 @@ impl DecodeService {
                     index: &source.index,
                     extradata: &source.extradata,
                 };
-                let (decoder, _skipped) = open(&spec, purpose, &self.pool, self.arbiter.as_ref(), self.config.threads, prefer)?;
+                let (decoder, _skipped) = open(
+                    &spec,
+                    purpose,
+                    &self.pool,
+                    self.arbiter.as_ref(),
+                    self.config.threads,
+                    prefer,
+                )?;
                 let reader = PacketReader::new(source.path(), source.stream)?;
                 let mut s = Session::new(source.index.clone(), reader, decoder, Some(source.color));
                 s.set_window(self.config.session_window);
@@ -345,7 +393,12 @@ impl DecodeService {
                 s
             }
         };
-        Ok(SessionGuard { service: self, key, source: source.clone(), session: Some(session) })
+        Ok(SessionGuard {
+            service: self,
+            key,
+            source: source.clone(),
+            session: Some(session),
+        })
     }
 
     /// Closes every idle session of an instance (a viewer closed, an export
@@ -353,9 +406,11 @@ impl DecodeService {
     pub fn release(&self, instance: Option<InstanceId>, source: Option<u64>) {
         let mut idle = self.idle.lock().unwrap();
         idle.retain(|k, v| {
-            let drop = instance.is_none_or(|i| k.instance == i) && source.is_none_or(|s| k.source == s);
+            let drop =
+                instance.is_none_or(|i| k.instance == i) && source.is_none_or(|s| k.source == s);
             if drop {
-                self.open_sessions.fetch_sub(v.len() as u64, Ordering::Relaxed);
+                self.open_sessions
+                    .fetch_sub(v.len() as u64, Ordering::Relaxed);
             }
             !drop
         });

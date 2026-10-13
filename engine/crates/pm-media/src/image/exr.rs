@@ -17,8 +17,14 @@ fn check(r: exr_result_t, what: &str) -> Result<()> {
     if r == EXR_ERR_SUCCESS as exr_result_t {
         return Ok(());
     }
-    let message = unsafe { CStr::from_ptr(exr_get_default_error_message(r)) }.to_string_lossy().into_owned();
-    Err(MediaError::OpenExr { what: what.into(), code: r, message })
+    let message = unsafe { CStr::from_ptr(exr_get_default_error_message(r)) }
+        .to_string_lossy()
+        .into_owned();
+    Err(MediaError::OpenExr {
+        what: what.into(),
+        code: r,
+        message,
+    })
 }
 
 struct Ctx(exr_context_t);
@@ -43,15 +49,21 @@ fn slot(name: &str, gray: bool) -> Option<&'static [usize]> {
 }
 
 pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
-    let cpath = CString::new(path.to_str().ok_or_else(|| MediaError::invalid("path is not UTF-8"))?)
-        .map_err(|_| MediaError::invalid("path contains NUL"))?;
+    let cpath = CString::new(
+        path.to_str()
+            .ok_or_else(|| MediaError::invalid("path is not UTF-8"))?,
+    )
+    .map_err(|_| MediaError::invalid("path contains NUL"))?;
     let init = exr_context_initializer_t {
         size: std::mem::size_of::<exr_context_initializer_t>(),
         flags: EXR_CONTEXT_FLAG_SILENT_HEADER_PARSE as c_int,
         ..Default::default()
     };
     let mut raw: exr_context_t = std::ptr::null_mut();
-    check(unsafe { exr_start_read(&mut raw, cpath.as_ptr(), &init) }, "open")?;
+    check(
+        unsafe { exr_start_read(&mut raw, cpath.as_ptr(), &init) },
+        "open",
+    )?;
     let ctx = Ctx(raw);
     let c = ctx.0 as exr_const_context_t;
     let part = 0;
@@ -62,18 +74,27 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
     }
     let mut dw = exr_attr_box2i_t::default();
     let mut disp = exr_attr_box2i_t::default();
-    check(unsafe { exr_get_data_window(c, part, &mut dw) }, "data window")?;
-    check(unsafe { exr_get_display_window(c, part, &mut disp) }, "display window")?;
+    check(
+        unsafe { exr_get_data_window(c, part, &mut dw) },
+        "data window",
+    )?;
+    check(
+        unsafe { exr_get_display_window(c, part, &mut disp) },
+        "display window",
+    )?;
     let (dx0, dy0, dx1, dy1) = (dw.min.x, dw.min.y, dw.max.x, dw.max.y);
     let w = (dx1 as i64 - dx0 as i64 + 1).max(0) as usize;
     let h = (dy1 as i64 - dy0 as i64 + 1).max(0) as usize;
     let mut chl: *const exr_attr_chlist_t = std::ptr::null();
     check(unsafe { exr_get_channels(c, part, &mut chl) }, "channels")?;
-    let entries = unsafe { std::slice::from_raw_parts((*chl).entries, (*chl).num_channels as usize) };
+    let entries =
+        unsafe { std::slice::from_raw_parts((*chl).entries, (*chl).num_channels as usize) };
     let names: Vec<(String, exr_pixel_type_t, i32, i32)> = entries
         .iter()
         .map(|e| {
-            let n = unsafe { CStr::from_ptr(e.name.str_) }.to_string_lossy().into_owned();
+            let n = unsafe { CStr::from_ptr(e.name.str_) }
+                .to_string_lossy()
+                .into_owned();
             (n, e.pixel_type, e.x_sampling, e.y_sampling)
         })
         .collect();
@@ -86,7 +107,10 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
             names.iter().map(|n| n.0.as_str()).collect::<Vec<_>>()
         )));
     }
-    let used: Vec<&(String, exr_pixel_type_t, i32, i32)> = names.iter().filter(|e| slot(&e.0, gray).is_some()).collect();
+    let used: Vec<&(String, exr_pixel_type_t, i32, i32)> = names
+        .iter()
+        .filter(|e| slot(&e.0, gray).is_some())
+        .collect();
     if used.iter().any(|e| e.2 != 1 || e.3 != 1) {
         return Err(MediaError::unsupported("subsampled OpenEXR channels"));
     }
@@ -107,63 +131,94 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
     // `origin` is the chunk's top-left pixel relative to the data window:
     // scanline chunks carry absolute coordinates, tile chunks carry tile
     // indices (OpenEXRCore `chunk.c`).
-    let decode_chunk = |cinfo: &exr_chunk_info_t, origin: (usize, usize), buf: &mut Vec<u8>| -> Result<()> {
-        let mut dec: exr_decode_pipeline_t = unsafe { std::mem::zeroed() };
-        check(unsafe { exr_decoding_initialize(c, part, cinfo, &mut dec) }, "decode init")?;
-        let (col0, row0) = origin;
-        for k in 0..dec.channel_count as usize {
-            let ch = unsafe { &mut *dec.channels.add(k) };
-            let name = unsafe { CStr::from_ptr(ch.channel_name) }.to_string_lossy();
-            match slot(&name, gray) {
-                Some(targets) => {
-                    let off = ((row0 * w + col0) * 4 + targets[0]) * elem;
-                    ch.__bindgen_anon_1.decode_to_ptr = unsafe { buf.as_mut_ptr().add(off) };
-                    ch.user_pixel_stride = (4 * elem) as i32;
-                    ch.user_line_stride = (w * 4 * elem) as i32;
-                    ch.user_data_type = if half { EXR_PIXEL_HALF as u16 } else { EXR_PIXEL_FLOAT as u16 };
-                    ch.user_bytes_per_element = elem as i16;
-                }
-                None => ch.__bindgen_anon_1.decode_to_ptr = std::ptr::null_mut(),
-            }
-        }
-        let r = (|| {
-            check(unsafe { exr_decoding_choose_default_routines(c, part, &mut dec) }, "decode routines")?;
-            check(unsafe { exr_decoding_run(c, part, &mut dec) }, "decode")
-        })();
-        unsafe { exr_decoding_destroy(c, &mut dec) };
-        r?;
-        // Gray: copy Y into G and B for this chunk.
-        if gray {
-            for y in row0..(row0 + cinfo.height as usize).min(h) {
-                for x in col0..(col0 + cinfo.width as usize).min(w) {
-                    let p = (y * w + x) * 4 * elem;
-                    let (r, rest) = buf[p..p + 3 * elem].split_at_mut(elem);
-                    rest[..elem].copy_from_slice(r);
-                    rest[elem..2 * elem].copy_from_slice(r);
+    let decode_chunk =
+        |cinfo: &exr_chunk_info_t, origin: (usize, usize), buf: &mut Vec<u8>| -> Result<()> {
+            let mut dec: exr_decode_pipeline_t = unsafe { std::mem::zeroed() };
+            check(
+                unsafe { exr_decoding_initialize(c, part, cinfo, &mut dec) },
+                "decode init",
+            )?;
+            let (col0, row0) = origin;
+            for k in 0..dec.channel_count as usize {
+                let ch = unsafe { &mut *dec.channels.add(k) };
+                let name = unsafe { CStr::from_ptr(ch.channel_name) }.to_string_lossy();
+                match slot(&name, gray) {
+                    Some(targets) => {
+                        let off = ((row0 * w + col0) * 4 + targets[0]) * elem;
+                        ch.__bindgen_anon_1.decode_to_ptr = unsafe { buf.as_mut_ptr().add(off) };
+                        ch.user_pixel_stride = (4 * elem) as i32;
+                        ch.user_line_stride = (w * 4 * elem) as i32;
+                        ch.user_data_type = if half {
+                            EXR_PIXEL_HALF as u16
+                        } else {
+                            EXR_PIXEL_FLOAT as u16
+                        };
+                        ch.user_bytes_per_element = elem as i16;
+                    }
+                    None => ch.__bindgen_anon_1.decode_to_ptr = std::ptr::null_mut(),
                 }
             }
-        }
-        Ok(())
-    };
+            let r = (|| {
+                check(
+                    unsafe { exr_decoding_choose_default_routines(c, part, &mut dec) },
+                    "decode routines",
+                )?;
+                check(unsafe { exr_decoding_run(c, part, &mut dec) }, "decode")
+            })();
+            unsafe { exr_decoding_destroy(c, &mut dec) };
+            r?;
+            // Gray: copy Y into G and B for this chunk.
+            if gray {
+                for y in row0..(row0 + cinfo.height as usize).min(h) {
+                    for x in col0..(col0 + cinfo.width as usize).min(w) {
+                        let p = (y * w + x) * 4 * elem;
+                        let (r, rest) = buf[p..p + 3 * elem].split_at_mut(elem);
+                        rest[..elem].copy_from_slice(r);
+                        rest[elem..2 * elem].copy_from_slice(r);
+                    }
+                }
+            }
+            Ok(())
+        };
     if storage == EXR_STORAGE_SCANLINE {
         let mut y = dy0;
         while y <= dy1 {
             let mut ci = exr_chunk_info_t::default();
-            check(unsafe { exr_read_scanline_chunk_info(c, part, y, &mut ci) }, "scanline chunk")?;
-            decode_chunk(&ci, ((ci.start_x - dx0) as usize, (ci.start_y - dy0) as usize), &mut buf)?;
+            check(
+                unsafe { exr_read_scanline_chunk_info(c, part, y, &mut ci) },
+                "scanline chunk",
+            )?;
+            decode_chunk(
+                &ci,
+                ((ci.start_x - dx0) as usize, (ci.start_y - dy0) as usize),
+                &mut buf,
+            )?;
             y = ci.start_y + ci.height.max(1);
         }
     } else {
         let (mut tx, mut ty): (i32, i32) = (0, 0);
-        check(unsafe { exr_get_tile_counts(c, part, 0, 0, &mut tx, &mut ty) }, "tile counts")?;
+        check(
+            unsafe { exr_get_tile_counts(c, part, 0, 0, &mut tx, &mut ty) },
+            "tile counts",
+        )?;
         let (mut tw, mut th) = (0u32, 0u32);
         let (mut lm, mut rm) = (0, 0);
-        check(unsafe { exr_get_tile_descriptor(c, part, &mut tw, &mut th, &mut lm, &mut rm) }, "tile descriptor")?;
+        check(
+            unsafe { exr_get_tile_descriptor(c, part, &mut tw, &mut th, &mut lm, &mut rm) },
+            "tile descriptor",
+        )?;
         for j in 0..ty {
             for i in 0..tx {
                 let mut ci = exr_chunk_info_t::default();
-                check(unsafe { exr_read_tile_chunk_info(c, part, i, j, 0, 0, &mut ci) }, "tile chunk")?;
-                decode_chunk(&ci, (i as usize * tw as usize, j as usize * th as usize), &mut buf)?;
+                check(
+                    unsafe { exr_read_tile_chunk_info(c, part, i, j, 0, 0, &mut ci) },
+                    "tile chunk",
+                )?;
+                decode_chunk(
+                    &ci,
+                    (i as usize * tw as usize, j as usize * th as usize),
+                    &mut buf,
+                )?;
             }
         }
     }
@@ -192,20 +247,38 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
         }
         (o, vw, vh)
     };
-    let label = format!("OpenEXR {} {}", if half { "half" } else { "float" }, if storage == EXR_STORAGE_TILED { "tiled" } else { "scanline" });
+    let label = format!(
+        "OpenEXR {} {}",
+        if half { "half" } else { "float" },
+        if storage == EXR_STORAGE_TILED {
+            "tiled"
+        } else {
+            "scanline"
+        }
+    );
     let frame = if half {
-        let v: Vec<u16> = out.chunks_exact(2).map(|b| u16::from_ne_bytes([b[0], b[1]])).collect();
+        let v: Vec<u16> = out
+            .chunks_exact(2)
+            .map(|b| u16::from_ne_bytes([b[0], b[1]]))
+            .collect();
         pool_rgba(pool, ow, oh, Rgba::F16(&v), alpha, 16, label)?
     } else {
-        let v: Vec<f32> = out.chunks_exact(4).map(|b| f32::from_ne_bytes([b[0], b[1], b[2], b[3]])).collect();
+        let v: Vec<f32> = out
+            .chunks_exact(4)
+            .map(|b| f32::from_ne_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
         pool_rgba(pool, ow, oh, Rgba::F32(&v), alpha, 32, label)?
     };
     let mut chroma = exr_attr_chromaticities_t::default();
     let name = CString::new("chromaticities").unwrap();
-    let has_chroma = unsafe { exr_attr_get_chromaticities(c, part, name.as_ptr(), &mut chroma) } == EXR_ERR_SUCCESS as exr_result_t;
+    let has_chroma = unsafe { exr_attr_get_chromaticities(c, part, name.as_ptr(), &mut chroma) }
+        == EXR_ERR_SUCCESS as exr_result_t;
     let chromaticities = has_chroma.then(|| {
         let ch = chroma;
-        [ch.red_x, ch.red_y, ch.green_x, ch.green_y, ch.blue_x, ch.blue_y, ch.white_x, ch.white_y]
+        [
+            ch.red_x, ch.red_y, ch.green_x, ch.green_y, ch.blue_x, ch.blue_y, ch.white_x,
+            ch.white_y,
+        ]
     });
     Ok(StillImage {
         frame,
@@ -218,7 +291,11 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
             icc_bytes: None,
             icc_class: None,
             transfer: Transfer::Linear,
-            alpha: if alpha { AlphaMode::Premultiplied } else { AlphaMode::Opaque },
+            alpha: if alpha {
+                AlphaMode::Premultiplied
+            } else {
+                AlphaMode::Opaque
+            },
             chromaticities,
         },
         orientation: 1,

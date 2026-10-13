@@ -14,7 +14,9 @@
 
 use super::{Input, Packet, check, cstr};
 use crate::error::{MediaError, Result};
-use crate::frame::{DecodedFrame, Layout, PixelFormat, PlaneDesc, PlaneFormat, Pixels, PoolFrame, PoolPlane};
+use crate::frame::{
+    DecodedFrame, Layout, PixelFormat, Pixels, PlaneDesc, PlaneFormat, PoolFrame, PoolPlane,
+};
 use crate::pool::{FramePool, PAGE, ROW_ALIGN, SlotRef, ceil_rshift};
 use crate::sys::ffmpeg as ff;
 use pm_protocol::color::{Range, SampleAlignment};
@@ -57,7 +59,13 @@ impl PlanarLayout {
             }
             let d = &*d;
             let flags = d.flags as u32;
-            if flags & (ff::AV_PIX_FMT_FLAG_HWACCEL | ff::AV_PIX_FMT_FLAG_PAL | ff::AV_PIX_FMT_FLAG_BITSTREAM | ff::AV_PIX_FMT_FLAG_FLOAT) != 0 {
+            if flags
+                & (ff::AV_PIX_FMT_FLAG_HWACCEL
+                    | ff::AV_PIX_FMT_FLAG_PAL
+                    | ff::AV_PIX_FMT_FLAG_BITSTREAM
+                    | ff::AV_PIX_FMT_FLAG_FLOAT)
+                != 0
+            {
                 return None;
             }
             let n = d.nb_components as usize;
@@ -79,7 +87,11 @@ impl PlanarLayout {
                     return None;
                 }
                 let chroma = !rgb && (i == 1 || i == 2);
-                let (lw, lh) = if chroma { (d.log2_chroma_w, d.log2_chroma_h) } else { (0, 0) };
+                let (lw, lh) = if chroma {
+                    (d.log2_chroma_w, d.log2_chroma_h)
+                } else {
+                    (0, 0)
+                };
                 planes.push(PlanePlacement {
                     offset: 0,
                     stride: 0,
@@ -109,7 +121,8 @@ impl PlanarLayout {
     pub fn pad_to(&mut self, w: usize, h: usize, linesize_align: &[i32; 8]) {
         let mut off = 0;
         for (i, p) in self.planes.iter_mut().enumerate() {
-            let a = (ROW_ALIGN.max(linesize_align[i].max(1) as usize)).div_ceil(ROW_ALIGN) * ROW_ALIGN;
+            let a =
+                (ROW_ALIGN.max(linesize_align[i].max(1) as usize)).div_ceil(ROW_ALIGN) * ROW_ALIGN;
             p.stride = (ceil_rshift(w, p.log2_w) * p.bytes_per_sample).div_ceil(a) * a;
             p.offset = off;
             off += p.stride * ceil_rshift(h, p.log2_h);
@@ -119,17 +132,39 @@ impl PlanarLayout {
         self.total = (off + ROW_ALIGN * 4).div_ceil(PAGE) * PAGE;
     }
 
-    pub fn pixel_format(&self, width: usize, height: usize, range: Range, label: String) -> PixelFormat {
-        let pf = if self.depth > 8 { PlaneFormat::R16 } else { PlaneFormat::R8 };
+    pub fn pixel_format(
+        &self,
+        width: usize,
+        height: usize,
+        range: Range,
+        label: String,
+    ) -> PixelFormat {
+        let pf = if self.depth > 8 {
+            PlaneFormat::R16
+        } else {
+            PlaneFormat::R8
+        };
         PixelFormat {
-            layout: if self.rgb { Layout::PlanarRgb } else { Layout::Planar },
+            layout: if self.rgb {
+                Layout::PlanarRgb
+            } else {
+                Layout::Planar
+            },
             bits: self.depth,
             alignment: SampleAlignment::Lsb,
             range: if self.rgb { Range::Full } else { range },
             log2_chroma_w: self.log2_chroma_w,
             log2_chroma_h: self.log2_chroma_h,
             alpha_bits: if self.alpha { self.depth } else { 0 },
-            planes: self.planes.iter().map(|p| PlaneDesc { format: pf, width: p.width, height: p.height }).collect(),
+            planes: self
+                .planes
+                .iter()
+                .map(|p| PlaneDesc {
+                    format: pf,
+                    width: p.width,
+                    height: p.height,
+                })
+                .collect(),
             width,
             height,
             label,
@@ -142,10 +177,16 @@ struct Opaque {
     pool: FramePool,
 }
 
-unsafe extern "C" fn get_buffer2(ctx: *mut ff::AVCodecContext, frame: *mut ff::AVFrame, flags: c_int) -> c_int {
+unsafe extern "C" fn get_buffer2(
+    ctx: *mut ff::AVCodecContext,
+    frame: *mut ff::AVFrame,
+    flags: c_int,
+) -> c_int {
     unsafe {
         let op = &*((*ctx).opaque as *const Opaque);
-        let Some(mut layout) = PlanarLayout::for_format((*frame).format, (*frame).width, (*frame).height) else {
+        let Some(mut layout) =
+            PlanarLayout::for_format((*frame).format, (*frame).width, (*frame).height)
+        else {
             return ff::avcodec_default_get_buffer2(ctx, frame, flags);
         };
         // Decoders may write past the visible size (macroblock and edge padding).
@@ -153,14 +194,26 @@ unsafe extern "C" fn get_buffer2(ctx: *mut ff::AVCodecContext, frame: *mut ff::A
         let mut align = [0 as c_int; 8];
         ff::avcodec_align_dimensions2(ctx, &mut w, &mut h, align.as_mut_ptr());
         layout.pad_to(w as usize, h as usize + 2, &align);
-        let Ok(slot) = op.pool.acquire(layout.total) else { return ff::averror(libc::ENOMEM) };
+        let Ok(slot) = op.pool.acquire(layout.total) else {
+            return ff::averror(libc::ENOMEM);
+        };
         let base = slot.ptr();
         let n = layout.planes.len();
         for p in 0..n {
             let start = layout.planes[p].offset;
-            let end = if p + 1 < n { layout.planes[p + 1].offset } else { layout.total };
+            let end = if p + 1 < n {
+                layout.planes[p + 1].offset
+            } else {
+                layout.total
+            };
             let token = Box::into_raw(Box::new(slot.clone()));
-            let buf = ff::av_buffer_create(base.add(start), end - start, Some(release), token as *mut c_void, 0);
+            let buf = ff::av_buffer_create(
+                base.add(start),
+                end - start,
+                Some(release),
+                token as *mut c_void,
+                0,
+            );
             if buf.is_null() {
                 drop(Box::from_raw(token));
                 for q in 0..p {
@@ -182,7 +235,10 @@ unsafe extern "C" fn release(opaque: *mut c_void, _data: *mut u8) {
 }
 
 /// Picks the first software format the decoder offers.
-unsafe extern "C" fn get_format(_ctx: *mut ff::AVCodecContext, fmt: *const ff::AVPixelFormat) -> ff::AVPixelFormat {
+unsafe extern "C" fn get_format(
+    _ctx: *mut ff::AVCodecContext,
+    fmt: *const ff::AVPixelFormat,
+) -> ff::AVPixelFormat {
     unsafe {
         let mut p = fmt;
         while *p != ff::AV_PIX_FMT_NONE {
@@ -244,7 +300,13 @@ unsafe impl Send for FfDecoder {}
 impl FfDecoder {
     /// Opens a decoder for stream `stream` of `input`: FFmpeg's native
     /// decoder for the codec, or `name` (for example `libdav1d`).
-    pub fn new(input: &Input, stream: usize, name: Option<&str>, pool: FramePool, threads: i32) -> Result<Self> {
+    pub fn new(
+        input: &Input,
+        stream: usize,
+        name: Option<&str>,
+        pool: FramePool,
+        threads: i32,
+    ) -> Result<Self> {
         unsafe {
             let par = input.par(stream);
             let codec = match name {
@@ -265,7 +327,10 @@ impl FfDecoder {
             if ctx.is_null() {
                 return Err(MediaError::OutOfMemory(0));
             }
-            if let Err(e) = check(ff::avcodec_parameters_to_context(ctx, par), "codec parameters") {
+            if let Err(e) = check(
+                ff::avcodec_parameters_to_context(ctx, par),
+                "codec parameters",
+            ) {
                 ff::avcodec_free_context(&mut ctx);
                 return Err(e);
             }
@@ -275,7 +340,10 @@ impl FfDecoder {
             (*ctx).opaque = op as *mut c_void;
             (*ctx).get_format = Some(get_format);
             (*ctx).get_buffer2 = Some(get_buffer2);
-            if let Err(e) = check(ff::avcodec_open2(ctx, codec, ptr::null_mut()), "open decoder") {
+            if let Err(e) = check(
+                ff::avcodec_open2(ctx, codec, ptr::null_mut()),
+                "open decoder",
+            ) {
                 ff::avcodec_free_context(&mut ctx);
                 drop(Box::from_raw(op));
                 return Err(e);
@@ -317,7 +385,10 @@ impl FfDecoder {
                         self.flush();
                     }
                     ff::av_packet_unref(self.pkt);
-                    check(ff::av_new_packet(self.pkt, p.data.len() as c_int), "allocate packet")?;
+                    check(
+                        ff::av_new_packet(self.pkt, p.data.len() as c_int),
+                        "allocate packet",
+                    )?;
                     ptr::copy_nonoverlapping(p.data.as_ptr(), (*self.pkt).data, p.data.len());
                     (*self.pkt).pts = p.pts;
                     (*self.pkt).dts = p.dts.unwrap_or(ff::AV_NOPTS_VALUE);
@@ -326,7 +397,11 @@ impl FfDecoder {
                         (*self.pkt).flags |= ff::AV_PKT_FLAG_KEY as c_int;
                     }
                     if let Some(a) = &p.additional {
-                        let sd = ff::av_packet_new_side_data(self.pkt, ff::AV_PKT_DATA_MATROSKA_BLOCKADDITIONAL, 8 + a.len());
+                        let sd = ff::av_packet_new_side_data(
+                            self.pkt,
+                            ff::AV_PKT_DATA_MATROSKA_BLOCKADDITIONAL,
+                            8 + a.len(),
+                        );
                         if sd.is_null() {
                             return Err(MediaError::OutOfMemory(a.len()));
                         }
@@ -402,8 +477,9 @@ impl FfDecoder {
             let full = (*f).color_range == ff::AVCOL_RANGE_JPEG || label.starts_with("yuvj");
             let range = if full { Range::Full } else { Range::Limited };
             if let Some(layout) = PlanarLayout::for_format(fmt, (*f).width, (*f).height) {
-                let slots: Option<Vec<SlotRef>> =
-                    (0..layout.planes.len()).map(|p| self.pool.find_containing((*f).data[p])).collect();
+                let slots: Option<Vec<SlotRef>> = (0..layout.planes.len())
+                    .map(|p| self.pool.find_containing((*f).data[p]))
+                    .collect();
                 if let Some(slots) = slots {
                     // Rendered into our slots by the decoder (or copied there by
                     // a wrapper that advertises DR1 but copies internally).
@@ -459,7 +535,11 @@ impl FfDecoder {
                 return Ok(DecodedFrame {
                     pts,
                     format: Arc::new(l.pixel_format(w, h, range, label)),
-                    pixels: Pixels::Pool(Arc::new(PoolFrame { planes, owner: None, copied: true })),
+                    pixels: Pixels::Pool(Arc::new(PoolFrame {
+                        planes,
+                        owner: None,
+                        copied: true,
+                    })),
                     color: None,
                 });
             }
@@ -492,7 +572,12 @@ impl Drop for FfDecoder {
 /// Converts any FFmpeg pixel format the importer cannot sample (packed,
 /// semi-planar, paletted, big-endian, gray) into planar Y′CbCr(A) or
 /// G, B, R(A) at the format's own depth, with one copy.
-unsafe fn convert_to_planar(pool: &FramePool, f: *const ff::AVFrame, range: Range, label: String) -> Result<DecodedFrame> {
+unsafe fn convert_to_planar(
+    pool: &FramePool,
+    f: *const ff::AVFrame,
+    range: Range,
+    label: String,
+) -> Result<DecodedFrame> {
     unsafe {
         let fmt = (*f).format;
         let d = ff::av_pix_fmt_desc_get(fmt);
@@ -501,7 +586,12 @@ unsafe fn convert_to_planar(pool: &FramePool, f: *const ff::AVFrame, range: Rang
         }
         let d = &*d;
         let flags = d.flags as u32;
-        if flags & (ff::AV_PIX_FMT_FLAG_HWACCEL | ff::AV_PIX_FMT_FLAG_BITSTREAM | ff::AV_PIX_FMT_FLAG_FLOAT) != 0 {
+        if flags
+            & (ff::AV_PIX_FMT_FLAG_HWACCEL
+                | ff::AV_PIX_FMT_FLAG_BITSTREAM
+                | ff::AV_PIX_FMT_FLAG_FLOAT)
+            != 0
+        {
             return Err(MediaError::unsupported(format!("pixel format {label}")));
         }
         let (w, h) = ((*f).width as usize, (*f).height as usize);
@@ -509,8 +599,19 @@ unsafe fn convert_to_planar(pool: &FramePool, f: *const ff::AVFrame, range: Rang
         let rgb = pal || flags & ff::AV_PIX_FMT_FLAG_RGB != 0;
         let gray = !rgb && d.nb_components <= 2;
         let alpha = flags & ff::AV_PIX_FMT_FLAG_ALPHA != 0;
-        let depth = if pal { 8 } else { (0..d.nb_components as usize).map(|c| d.comp[c].depth).max().unwrap_or(8) as u8 };
-        let (lw, lh) = if rgb || gray { (0, 0) } else { (d.log2_chroma_w, d.log2_chroma_h) };
+        let depth = if pal {
+            8
+        } else {
+            (0..d.nb_components as usize)
+                .map(|c| d.comp[c].depth)
+                .max()
+                .unwrap_or(8) as u8
+        };
+        let (lw, lh) = if rgb || gray {
+            (0, 0)
+        } else {
+            (d.log2_chroma_w, d.log2_chroma_h)
+        };
         let bps = if depth > 8 { 2 } else { 1 };
         let n = 3 + alpha as usize;
         let mut layout = PlanarLayout {
@@ -521,7 +622,11 @@ unsafe fn convert_to_planar(pool: &FramePool, f: *const ff::AVFrame, range: Rang
             log2_chroma_h: lh,
             planes: (0..n)
                 .map(|i| {
-                    let (pw, ph) = if !rgb && (i == 1 || i == 2) { (lw, lh) } else { (0, 0) };
+                    let (pw, ph) = if !rgb && (i == 1 || i == 2) {
+                        (lw, lh)
+                    } else {
+                        (0, 0)
+                    };
                     PlanePlacement {
                         offset: 0,
                         stride: 0,
@@ -577,8 +682,14 @@ unsafe fn convert_to_planar(pool: &FramePool, f: *const ff::AVFrame, range: Rang
                     line[..w].fill(neutral);
                 } else {
                     let c = if gray && op == 3 { 1 } else { src_comp(op) };
-                    let mut data: [*const u8; 4] = [(*f).data[0], (*f).data[1], (*f).data[2], (*f).data[3]];
-                    let linesize: [c_int; 4] = [(*f).linesize[0], (*f).linesize[1], (*f).linesize[2], (*f).linesize[3]];
+                    let mut data: [*const u8; 4] =
+                        [(*f).data[0], (*f).data[1], (*f).data[2], (*f).data[3]];
+                    let linesize: [c_int; 4] = [
+                        (*f).linesize[0],
+                        (*f).linesize[1],
+                        (*f).linesize[2],
+                        (*f).linesize[3],
+                    ];
                     ff::av_read_image_line2(
                         line.as_mut_ptr() as *mut c_void,
                         data.as_mut_ptr(),
@@ -605,12 +716,21 @@ unsafe fn convert_to_planar(pool: &FramePool, f: *const ff::AVFrame, range: Rang
         let planes = layout
             .planes
             .iter()
-            .map(|pl| PoolPlane { slot: slot.clone(), offset: pl.offset, stride: pl.stride, decoder_ptr: slot.ptr() as usize + pl.offset })
+            .map(|pl| PoolPlane {
+                slot: slot.clone(),
+                offset: pl.offset,
+                stride: pl.stride,
+                decoder_ptr: slot.ptr() as usize + pl.offset,
+            })
             .collect();
         Ok(DecodedFrame {
             pts: 0,
             format: Arc::new(layout.pixel_format(w, h, range, format!("{label} (converted)"))),
-            pixels: Pixels::Pool(Arc::new(PoolFrame { planes, owner: None, copied: true })),
+            pixels: Pixels::Pool(Arc::new(PoolFrame {
+                planes,
+                owner: None,
+                copied: true,
+            })),
             color: None,
         })
     }

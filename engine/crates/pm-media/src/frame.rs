@@ -108,7 +108,12 @@ pub struct Norm {
 impl PixelFormat {
     /// Samples are half or single floats (images only).
     pub fn is_float(&self) -> bool {
-        self.planes.iter().any(|p| matches!(p.format, PlaneFormat::Rgba16Float | PlaneFormat::Rgba32Float))
+        self.planes.iter().any(|p| {
+            matches!(
+                p.format,
+                PlaneFormat::Rgba16Float | PlaneFormat::Rgba32Float
+            )
+        })
     }
 
     pub fn has_alpha(&self) -> bool {
@@ -127,12 +132,23 @@ impl PixelFormat {
     /// reference (`pm_protocol::color::normalization`).
     pub fn norm(&self) -> Norm {
         if self.is_float() {
-            return Norm { y_off: 0.0, y_div: 1.0, c_off: 0.0, c_div: 1.0, a_div: 1.0 };
+            return Norm {
+                y_off: 0.0,
+                y_div: 1.0,
+                c_off: 0.0,
+                c_div: 1.0,
+                a_div: 1.0,
+            };
         }
         let n = match self.layout {
             Layout::PlanarRgb | Layout::Rgba => {
                 let m = ((1u64 << self.bits) - 1) as f64;
-                pm_protocol::color::Normalization { luma_offset: 0.0, luma_scale: m, chroma_offset: 0.0, chroma_scale: m }
+                pm_protocol::color::Normalization {
+                    luma_offset: 0.0,
+                    luma_scale: m,
+                    chroma_offset: 0.0,
+                    chroma_scale: m,
+                }
             }
             _ => normalization(self.bits, self.alignment, self.range),
         };
@@ -141,7 +157,11 @@ impl PixelFormat {
             y_div: n.luma_scale,
             c_off: n.chroma_offset,
             c_div: n.chroma_scale,
-            a_div: if self.alpha_bits > 0 { ((1u64 << self.alpha_bits) - 1) as f64 } else { 1.0 },
+            a_div: if self.alpha_bits > 0 {
+                ((1u64 << self.alpha_bits) - 1) as f64
+            } else {
+                1.0
+            },
         }
     }
 
@@ -149,30 +169,42 @@ impl PixelFormat {
     /// variant in contract 3 version 0 (see docs/engine/media.md).
     pub fn decoded_layout(&self) -> Option<DecodedLayout> {
         let full_range = self.range == Range::Full;
-        Some(match (self.layout, self.bits, self.log2_chroma_w, self.log2_chroma_h) {
-            (Layout::Biplanar, 8, 1, 1) => DecodedLayout::Biplanar420_8 { full_range },
-            (Layout::Biplanar, 8, 1, 0) => DecodedLayout::Biplanar422_8 { full_range },
-            (Layout::Biplanar, 10, 1, 1) => DecodedLayout::Biplanar420_10 { full_range },
-            (Layout::Biplanar, 10, 1, 0) => DecodedLayout::Biplanar422_10 { full_range },
-            (Layout::Ayuv16, ..) => DecodedLayout::Ayuv4444_16,
-            (Layout::Planar, bits, ..) => {
-                DecodedLayout::PlanarLsb { bits, subsampling: self.subsampling(), alpha: self.has_alpha() }
-            }
-            (Layout::Rgba, ..) => DecodedLayout::Rgba {
-                format: match self.planes[0].format {
-                    PlaneFormat::Rgba8 => SurfaceFormat::Bgra8Unorm,
-                    PlaneFormat::Rgba16 => SurfaceFormat::Rgba16Unorm,
-                    PlaneFormat::Rgba16Float => SurfaceFormat::Rgba16Float,
-                    _ => SurfaceFormat::Rgba32Float,
+        Some(
+            match (
+                self.layout,
+                self.bits,
+                self.log2_chroma_w,
+                self.log2_chroma_h,
+            ) {
+                (Layout::Biplanar, 8, 1, 1) => DecodedLayout::Biplanar420_8 { full_range },
+                (Layout::Biplanar, 8, 1, 0) => DecodedLayout::Biplanar422_8 { full_range },
+                (Layout::Biplanar, 10, 1, 1) => DecodedLayout::Biplanar420_10 { full_range },
+                (Layout::Biplanar, 10, 1, 0) => DecodedLayout::Biplanar422_10 { full_range },
+                (Layout::Ayuv16, ..) => DecodedLayout::Ayuv4444_16,
+                (Layout::Planar, bits, ..) => DecodedLayout::PlanarLsb {
+                    bits,
+                    subsampling: self.subsampling(),
+                    alpha: self.has_alpha(),
                 },
+                (Layout::Rgba, ..) => DecodedLayout::Rgba {
+                    format: match self.planes[0].format {
+                        PlaneFormat::Rgba8 => SurfaceFormat::Bgra8Unorm,
+                        PlaneFormat::Rgba16 => SurfaceFormat::Rgba16Unorm,
+                        PlaneFormat::Rgba16Float => SurfaceFormat::Rgba16Float,
+                        _ => SurfaceFormat::Rgba32Float,
+                    },
+                },
+                _ => return None,
             },
-            _ => return None,
-        })
+        )
     }
 
     /// Bytes the planes occupy (visible area), for cache accounting.
     pub fn visible_bytes(&self) -> usize {
-        self.planes.iter().map(|p| p.width * p.height * p.format.bytes()).sum()
+        self.planes
+            .iter()
+            .map(|p| p.width * p.height * p.format.bytes())
+            .sum()
     }
 }
 
@@ -226,7 +258,11 @@ pub struct DecodedFrame {
 
 impl std::fmt::Debug for DecodedFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "DecodedFrame(pts {}, {} {}x{})", self.pts, self.format.label, self.format.width, self.format.height)
+        write!(
+            f,
+            "DecodedFrame(pts {}, {} {}x{})",
+            self.pts, self.format.label, self.format.width, self.format.height
+        )
     }
 }
 
@@ -279,7 +315,10 @@ impl DecodedFrame {
                 let p = pb.as_mut_ptr();
                 let st = CVPixelBufferLockBaseAddress(p, kCVPixelBufferLock_ReadOnly);
                 if st != 0 {
-                    return Err(MediaError::CoreVideo { what: "lock".into(), status: st });
+                    return Err(MediaError::CoreVideo {
+                        what: "lock".into(),
+                        status: st,
+                    });
                 }
                 let planar = CVPixelBufferIsPlanar(p) != 0;
                 let views: Vec<PlaneView> = d
@@ -287,9 +326,16 @@ impl DecodedFrame {
                     .iter()
                     .enumerate()
                     .map(|(i, pd)| PlaneView {
-                        ptr: if planar { CVPixelBufferGetBaseAddressOfPlane(p, i) } else { CVPixelBufferGetBaseAddress(p) }
-                            as *const u8,
-                        stride: if planar { CVPixelBufferGetBytesPerRowOfPlane(p, i) } else { CVPixelBufferGetBytesPerRow(p) },
+                        ptr: if planar {
+                            CVPixelBufferGetBaseAddressOfPlane(p, i)
+                        } else {
+                            CVPixelBufferGetBaseAddress(p)
+                        } as *const u8,
+                        stride: if planar {
+                            CVPixelBufferGetBytesPerRowOfPlane(p, i)
+                        } else {
+                            CVPixelBufferGetBytesPerRow(p)
+                        },
                         desc: pd,
                     })
                     .collect();
@@ -302,7 +348,11 @@ impl DecodedFrame {
                     .planes
                     .iter()
                     .zip(&fr.planes)
-                    .map(|(pd, pl)| PlaneView { ptr: pl.ptr(), stride: pl.stride, desc: pd })
+                    .map(|(pd, pl)| PlaneView {
+                        ptr: pl.ptr(),
+                        stride: pl.stride,
+                        desc: pd,
+                    })
                     .collect();
                 Ok(f(&views))
             }
@@ -334,7 +384,9 @@ impl DecodedFrame {
         unsafe {
             let at = |i: usize| *p.ptr.add(off + i);
             match (p.desc.format, cb) {
-                (PlaneFormat::Rgba32Float, _) => f32::from_le_bytes([at(0), at(1), at(2), at(3)]) as f64,
+                (PlaneFormat::Rgba32Float, _) => {
+                    f32::from_le_bytes([at(0), at(1), at(2), at(3)]) as f64
+                }
                 (PlaneFormat::Rgba16Float, _) => half_to_f64(u16::from_le_bytes([at(0), at(1)])),
                 (_, 1) => at(0) as f64,
                 _ => u16::from_le_bytes([at(0), at(1)]) as f64,
@@ -360,13 +412,25 @@ impl DecodedFrame {
             for yy in 0..h {
                 for x in 0..w {
                     let (lv, av) = match d.layout {
-                        Layout::Ayuv16 => (y(Self::code(&pl[0], x, yy, 1)), a(Self::code(&pl[0], x, yy, 0))),
-                        Layout::Cbycry16 => (y(Self::code(&pl[0], x / 2, yy, 1 + 2 * (x & 1))), 1.0),
-                        Layout::BiplanarAlpha => (y(Self::code(&pl[0], x, yy, 0)), a(Self::code(&pl[2], x, yy, 0))),
-                        Layout::Planar | Layout::PlanarRgb if d.has_alpha() => {
-                            (y(Self::code(&pl[0], x, yy, 0)), a(Self::code(&pl[3], x, yy, 0)))
+                        Layout::Ayuv16 => (
+                            y(Self::code(&pl[0], x, yy, 1)),
+                            a(Self::code(&pl[0], x, yy, 0)),
+                        ),
+                        Layout::Cbycry16 => {
+                            (y(Self::code(&pl[0], x / 2, yy, 1 + 2 * (x & 1))), 1.0)
                         }
-                        Layout::Rgba => (y(Self::code(&pl[0], x, yy, 1)), a(Self::code(&pl[0], x, yy, 3))),
+                        Layout::BiplanarAlpha => (
+                            y(Self::code(&pl[0], x, yy, 0)),
+                            a(Self::code(&pl[2], x, yy, 0)),
+                        ),
+                        Layout::Planar | Layout::PlanarRgb if d.has_alpha() => (
+                            y(Self::code(&pl[0], x, yy, 0)),
+                            a(Self::code(&pl[3], x, yy, 0)),
+                        ),
+                        Layout::Rgba => (
+                            y(Self::code(&pl[0], x, yy, 1)),
+                            a(Self::code(&pl[0], x, yy, 3)),
+                        ),
                         _ => (y(Self::code(&pl[0], x, yy, 0)), 1.0),
                     };
                     ya[yy * w + x] = [lv, av];
@@ -375,13 +439,21 @@ impl DecodedFrame {
             for yy in 0..chh {
                 for x in 0..cw {
                     let (cb, cr) = match d.layout {
-                        Layout::Ayuv16 => (Self::code(&pl[0], x, yy, 2), Self::code(&pl[0], x, yy, 3)),
-                        Layout::Cbycry16 => (Self::code(&pl[0], x, yy, 0), Self::code(&pl[0], x, yy, 2)),
+                        Layout::Ayuv16 => {
+                            (Self::code(&pl[0], x, yy, 2), Self::code(&pl[0], x, yy, 3))
+                        }
+                        Layout::Cbycry16 => {
+                            (Self::code(&pl[0], x, yy, 0), Self::code(&pl[0], x, yy, 2))
+                        }
                         Layout::Biplanar | Layout::BiplanarAlpha => {
                             (Self::code(&pl[1], x, yy, 0), Self::code(&pl[1], x, yy, 1))
                         }
-                        Layout::Planar | Layout::PlanarRgb => (Self::code(&pl[1], x, yy, 0), Self::code(&pl[2], x, yy, 0)),
-                        Layout::Rgba => (Self::code(&pl[0], x, yy, 2), Self::code(&pl[0], x, yy, 0)),
+                        Layout::Planar | Layout::PlanarRgb => {
+                            (Self::code(&pl[1], x, yy, 0), Self::code(&pl[2], x, yy, 0))
+                        }
+                        Layout::Rgba => {
+                            (Self::code(&pl[0], x, yy, 2), Self::code(&pl[0], x, yy, 0))
+                        }
                     };
                     cc[yy * cw + x] = [c(cb), c(cr)];
                 }
@@ -446,9 +518,16 @@ pub fn corevideo_format(pb: &Cf) -> Result<PixelFormat> {
             rgba_premultiplied: false,
         };
         Ok(match f {
-            F_420V | F_420F => {
-                base(Layout::Biplanar, 8, SampleAlignment::Lsb, f == F_420F, 1, 1, 0, vec![plane(0, R8), plane(1, Rg8)])
-            }
+            F_420V | F_420F => base(
+                Layout::Biplanar,
+                8,
+                SampleAlignment::Lsb,
+                f == F_420F,
+                1,
+                1,
+                0,
+                vec![plane(0, R8), plane(1, Rg8)],
+            ),
             F_V0A8 => base(
                 Layout::BiplanarAlpha,
                 8,
@@ -477,7 +556,11 @@ pub fn corevideo_format(pb: &Cf) -> Result<PixelFormat> {
                 0,
                 0,
                 16,
-                vec![PlaneDesc { format: Rgba16, width: w, height: h }],
+                vec![PlaneDesc {
+                    format: Rgba16,
+                    width: w,
+                    height: h,
+                }],
             ),
             F_V216 => base(
                 Layout::Cbycry16,
@@ -487,9 +570,18 @@ pub fn corevideo_format(pb: &Cf) -> Result<PixelFormat> {
                 1,
                 0,
                 0,
-                vec![PlaneDesc { format: Rgba16, width: w.div_ceil(2), height: h }],
+                vec![PlaneDesc {
+                    format: Rgba16,
+                    width: w.div_ceil(2),
+                    height: h,
+                }],
             ),
-            other => return Err(MediaError::unsupported(format!("CoreVideo pixel format {}", fourcc(other)))),
+            other => {
+                return Err(MediaError::unsupported(format!(
+                    "CoreVideo pixel format {}",
+                    fourcc(other)
+                )));
+            }
         })
     }
 }
@@ -518,23 +610,58 @@ mod tests {
     #[test]
     fn section_13_constants() {
         // x420: c = v / 64; Y′ = (c − 64) / 876.
-        let n = fmt(Layout::Biplanar, 10, SampleAlignment::MsbIn16, Range::Limited).norm();
-        assert_eq!((n.y_off, n.y_div, n.c_off, n.c_div), (4096.0, 56064.0, 32768.0, 57344.0));
+        let n = fmt(
+            Layout::Biplanar,
+            10,
+            SampleAlignment::MsbIn16,
+            Range::Limited,
+        )
+        .norm();
+        assert_eq!(
+            (n.y_off, n.y_div, n.c_off, n.c_div),
+            (4096.0, 56064.0, 32768.0, 57344.0)
+        );
         // y416 and v216: Y′ = (v − 4096) / 56064, C = (v − 32768) / 57344.
         let n = fmt(Layout::Ayuv16, 16, SampleAlignment::Full16, Range::Limited).norm();
-        assert_eq!((n.y_off, n.y_div, n.c_off, n.c_div), (4096.0, 56064.0, 32768.0, 57344.0));
+        assert_eq!(
+            (n.y_off, n.y_div, n.c_off, n.c_div),
+            (4096.0, 56064.0, 32768.0, 57344.0)
+        );
         // FFmpeg LSB 10-bit: 16·4, 219·4, 128·4, 224·4.
         let n = fmt(Layout::Planar, 10, SampleAlignment::Lsb, Range::Limited).norm();
-        assert_eq!((n.y_off, n.y_div, n.c_off, n.c_div), (64.0, 876.0, 512.0, 896.0));
+        assert_eq!(
+            (n.y_off, n.y_div, n.c_off, n.c_div),
+            (64.0, 876.0, 512.0, 896.0)
+        );
         // Full range 8-bit: 0..255, chroma centered at 128.
         let n = fmt(Layout::Planar, 8, SampleAlignment::Lsb, Range::Full).norm();
-        assert_eq!((n.y_off, n.y_div, n.c_off, n.c_div), (0.0, 255.0, 128.0, 255.0));
+        assert_eq!(
+            (n.y_off, n.y_div, n.c_off, n.c_div),
+            (0.0, 255.0, 128.0, 255.0)
+        );
     }
 
     #[test]
     fn contract_layouts() {
-        let f = fmt(Layout::Biplanar, 10, SampleAlignment::MsbIn16, Range::Limited);
-        assert_eq!(f.decoded_layout(), Some(DecodedLayout::Biplanar420_10 { full_range: false }));
-        assert_eq!(fmt(Layout::Cbycry16, 16, SampleAlignment::Full16, Range::Limited).decoded_layout(), None);
+        let f = fmt(
+            Layout::Biplanar,
+            10,
+            SampleAlignment::MsbIn16,
+            Range::Limited,
+        );
+        assert_eq!(
+            f.decoded_layout(),
+            Some(DecodedLayout::Biplanar420_10 { full_range: false })
+        );
+        assert_eq!(
+            fmt(
+                Layout::Cbycry16,
+                16,
+                SampleAlignment::Full16,
+                Range::Limited
+            )
+            .decoded_layout(),
+            None
+        );
     }
 }

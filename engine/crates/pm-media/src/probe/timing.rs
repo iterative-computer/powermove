@@ -42,21 +42,34 @@ pub const MP3_DECODER_DELAY: i64 = 529;
 
 /// Priming of an audio stream. `track_id` is the MP4 track (FFmpeg stream id),
 /// `codec` FFmpeg's codec name, `initial_padding` FFmpeg's codec-level delay.
-pub fn priming(path: &Path, format: &str, track_id: u64, codec: &str, sample_rate: i64, initial_padding: i64) -> Option<Priming> {
+pub fn priming(
+    path: &Path,
+    format: &str,
+    track_id: u64,
+    codec: &str,
+    sample_rate: i64,
+    initial_padding: i64,
+) -> Option<Priming> {
     if (format.contains("mov") || format.contains("mp4"))
-        && let Some(p) = mp4_priming(path, track_id as u32, codec, sample_rate) {
-            return Some(p);
-        }
+        && let Some(p) = mp4_priming(path, track_id as u32, codec, sample_rate)
+    {
+        return Some(p);
+    }
     if codec == "mp3"
-        && let Some(p) = lame_priming(path) {
-            return Some(p);
-        }
+        && let Some(p) = lame_priming(path)
+    {
+        return Some(p);
+    }
     if format == "mp3"
         && let Some(p) = id3_itunsmpb(path)
     {
         return Some(p);
     }
-    (initial_padding > 0).then_some(Priming { samples: initial_padding, padding: None, source: PrimingSource::Codec })
+    (initial_padding > 0).then_some(Priming {
+        samples: initial_padding,
+        padding: None,
+        source: PrimingSource::Codec,
+    })
 }
 
 fn mp4_priming(path: &Path, track_id: u32, codec: &str, sample_rate: i64) -> Option<Priming> {
@@ -84,7 +97,11 @@ fn mp4_priming(path: &Path, track_id: u32, codec: &str, sample_rate: i64) -> Opt
         return Some(s);
     }
     if codec == "aac" && apple_encoded(&movie, track.trak) {
-        return Some(Priming { samples: APPLE_AAC_PRIMING, padding: None, source: PrimingSource::AppleDefault });
+        return Some(Priming {
+            samples: APPLE_AAC_PRIMING,
+            padding: None,
+            source: PrimingSource::AppleDefault,
+        });
     }
     None
 }
@@ -100,11 +117,17 @@ fn itunsmpb(moov: &[u8]) -> Option<Priming> {
             continue;
         }
         let kids = children(item).ok()?;
-        let name = kids.iter().find(|k| &k.0 == b"name").and_then(|k| k.1.get(4..))?;
+        let name = kids
+            .iter()
+            .find(|k| &k.0 == b"name")
+            .and_then(|k| k.1.get(4..))?;
         if name != b"iTunSMPB" {
             continue;
         }
-        let data = kids.iter().find(|k| &k.0 == b"data").and_then(|k| k.1.get(8..))?;
+        let data = kids
+            .iter()
+            .find(|k| &k.0 == b"data")
+            .and_then(|k| k.1.get(8..))?;
         return parse_itunsmpb(&String::from_utf8_lossy(data));
     }
     None
@@ -116,16 +139,26 @@ pub fn parse_itunsmpb(s: &str) -> Option<Priming> {
     let f: Vec<&str> = s.split_whitespace().collect();
     let priming = i64::from_str_radix(f.get(1)?, 16).ok()?;
     let padding = f.get(2).and_then(|p| i64::from_str_radix(p, 16).ok());
-    Some(Priming { samples: priming, padding, source: PrimingSource::ITunSmpb })
+    Some(Priming {
+        samples: priming,
+        padding,
+        source: PrimingSource::ITunSmpb,
+    })
 }
 
 /// Apple encoders name themselves in the handler or the tool tag.
 fn apple_encoded(movie: &Movie, trak: &[u8]) -> bool {
     let apple = |b: &[u8]| {
         let s = String::from_utf8_lossy(b);
-        s.contains("Apple") || s.contains("Core Media") || s.contains("iTunes") || s.contains("QuickTime")
+        s.contains("Apple")
+            || s.contains("Core Media")
+            || s.contains("iTunes")
+            || s.contains("QuickTime")
     };
-    let hdlr = child(trak, b"mdia").ok().flatten().and_then(|m| child(m, b"hdlr").ok().flatten());
+    let hdlr = child(trak, b"mdia")
+        .ok()
+        .flatten()
+        .and_then(|m| child(m, b"hdlr").ok().flatten());
     if hdlr.is_some_and(|h| h.len() > 24 && apple(&h[24..])) {
         return true;
     }
@@ -148,13 +181,17 @@ pub fn lame_priming(path: &Path) -> Option<Priming> {
     let mut h = [0u8; 10];
     f.read_exact_at(&mut h, 0).ok()?;
     if &h[..3] == b"ID3" {
-        let size = h[6..10].iter().fold(0u64, |a, &b| (a << 7) | (b & 0x7F) as u64);
+        let size = h[6..10]
+            .iter()
+            .fold(0u64, |a, &b| (a << 7) | (b & 0x7F) as u64);
         start = 10 + size + if h[5] & 0x10 != 0 { 10 } else { 0 };
     }
     let n = (len.saturating_sub(start)).min(1 << 16) as usize;
     let mut buf = vec![0u8; n];
     f.read_exact_at(&mut buf, start).ok()?;
-    let p = buf.windows(2).position(|w| w[0] == 0xFF && w[1] & 0xE0 == 0xE0)?;
+    let p = buf
+        .windows(2)
+        .position(|w| w[0] == 0xFF && w[1] & 0xE0 == 0xE0)?;
     let hdr = buf.get(p..p + 4)?;
     let version = (hdr[1] >> 3) & 3; // 3 = MPEG-1
     let mono = (hdr[3] >> 6) & 3 == 3;
@@ -192,7 +229,11 @@ pub fn lame_priming(path: &Path) -> Option<Priming> {
     let d = buf.get(q + 21..q + 24)?;
     let delay = ((d[0] as i64) << 4) | (d[1] as i64 >> 4);
     let padding = (((d[1] & 0x0F) as i64) << 8) | d[2] as i64;
-    Some(Priming { samples: delay + MP3_DECODER_DELAY, padding: Some(padding), source: PrimingSource::LameHeader })
+    Some(Priming {
+        samples: delay + MP3_DECODER_DELAY,
+        padding: Some(padding),
+        source: PrimingSource::LameHeader,
+    })
 }
 
 /// iTunSMPB in an MP3's ID3v2 COMM frame.
@@ -203,12 +244,24 @@ fn id3_itunsmpb(path: &Path) -> Option<Priming> {
     if &h[..3] != b"ID3" {
         return None;
     }
-    let size = h[6..10].iter().fold(0usize, |a, &b| (a << 7) | (b & 0x7F) as usize);
+    let size = h[6..10]
+        .iter()
+        .fold(0usize, |a, &b| (a << 7) | (b & 0x7F) as usize);
     let mut tag = vec![0u8; size.min(1 << 20)];
     f.read_exact_at(&mut tag, 10).ok()?;
     let at = tag.windows(8).position(|w| w == b"iTunSMPB")?;
     let rest = &tag[at + 8..];
-    let s: String = rest.iter().take(200).map(|&b| if b.is_ascii_hexdigit() || b == b' ' { b as char } else { ' ' }).collect();
+    let s: String = rest
+        .iter()
+        .take(200)
+        .map(|&b| {
+            if b.is_ascii_hexdigit() || b == b' ' {
+                b as char
+            } else {
+                ' '
+            }
+        })
+        .collect();
     parse_itunsmpb(&s)
 }
 
@@ -243,8 +296,20 @@ mod tests {
         let mut stsd = vec![0, 0, 0, 0, 0, 0, 0, 1];
         stsd.extend(bx(b"mp4a", &[0u8; 28]));
         let empty = [0u8; 8];
-        let stbl = [bx(b"stsd", &stsd), bx(b"stts", &empty), bx(b"stsc", &empty), bx(b"stsz", &[0u8; 12]), bx(b"stco", &empty)].concat();
-        let mdia = [bx(b"mdhd", &mdhd), bx(b"hdlr", &hdlr), bx(b"minf", &bx(b"stbl", &stbl))].concat();
+        let stbl = [
+            bx(b"stsd", &stsd),
+            bx(b"stts", &empty),
+            bx(b"stsc", &empty),
+            bx(b"stsz", &[0u8; 12]),
+            bx(b"stco", &empty),
+        ]
+        .concat();
+        let mdia = [
+            bx(b"mdhd", &mdhd),
+            bx(b"hdlr", &hdlr),
+            bx(b"minf", &bx(b"stbl", &stbl)),
+        ]
+        .concat();
         let mut trak = bx(b"tkhd", &tkhd);
         if let Some(mt) = media_time {
             let mut elst = vec![0u8; 4];
@@ -272,7 +337,11 @@ mod tests {
     }
 
     fn priming_of(bytes: &[u8]) -> Option<Priming> {
-        let p = std::env::temp_dir().join(format!("pm-media-priming-{}-{}.m4a", std::process::id(), bytes.len()));
+        let p = std::env::temp_dir().join(format!(
+            "pm-media-priming-{}-{}.m4a",
+            std::process::id(),
+            bytes.len()
+        ));
         std::fs::write(&p, bytes).unwrap();
         let r = mp4_priming(&p, 1, "aac", 48000);
         std::fs::remove_file(&p).ok();
@@ -282,9 +351,22 @@ mod tests {
     #[test]
     fn mp4_priming_precedence() {
         // The edit list wins over iTunSMPB.
-        let p = priming_of(&movie(Some(1024), "", Some(" 00000000 00000840 00000100 0000000000001000"))).unwrap();
-        assert_eq!((p.samples, p.source, p.padding), (1024, PrimingSource::EditList, Some(256)));
-        let p = priming_of(&movie(None, "", Some(" 00000000 00000840 00000100 0000000000001000"))).unwrap();
+        let p = priming_of(&movie(
+            Some(1024),
+            "",
+            Some(" 00000000 00000840 00000100 0000000000001000"),
+        ))
+        .unwrap();
+        assert_eq!(
+            (p.samples, p.source, p.padding),
+            (1024, PrimingSource::EditList, Some(256))
+        );
+        let p = priming_of(&movie(
+            None,
+            "",
+            Some(" 00000000 00000840 00000100 0000000000001000"),
+        ))
+        .unwrap();
         assert_eq!((p.samples, p.source), (2112, PrimingSource::ITunSmpb));
         // Apple-encoded without metadata: 2112.
         let p = priming_of(&movie(None, "Core Media Audio", None)).unwrap();

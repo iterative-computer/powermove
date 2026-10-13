@@ -94,7 +94,11 @@ impl SlotRef {
     }
     /// The importer's cached object for `device`, or a new one from `make`.
     /// A slot imported by a second device gets an uncached object.
-    pub fn gpu_handle(&self, device: u64, make: impl FnOnce() -> Result<GpuHandle>) -> Result<GpuHandle> {
+    pub fn gpu_handle(
+        &self,
+        device: u64,
+        make: impl FnOnce() -> Result<GpuHandle>,
+    ) -> Result<GpuHandle> {
         let mut g = self.slot().gpu.lock().unwrap();
         match &*g {
             Some((d, h)) if *d == device => Ok(h.clone()),
@@ -156,7 +160,10 @@ impl FramePool {
     pub fn with_zeroing(max_free_bytes: usize, zero_new: bool) -> FramePool {
         FramePool(Arc::new(PoolInner {
             id: NEXT_POOL.fetch_add(1, Ordering::Relaxed),
-            state: Mutex::new(State { max_free_bytes, ..Default::default() }),
+            state: Mutex::new(State {
+                max_free_bytes,
+                ..Default::default()
+            }),
             zero_new,
         }))
     }
@@ -184,12 +191,19 @@ impl FramePool {
                 }
                 g.allocated += 1;
                 g.bytes += len;
-                Arc::new(Slot { ptr: p as *mut u8, len, gpu: Mutex::new(None) })
+                Arc::new(Slot {
+                    ptr: p as *mut u8,
+                    len,
+                    gpu: Mutex::new(None),
+                })
             }
         };
         g.live_bytes += len;
         let key = slot.ptr as usize;
-        let lease = Arc::new(Lease { slot: Some(slot), pool: Arc::downgrade(&self.0) });
+        let lease = Arc::new(Lease {
+            slot: Some(slot),
+            pool: Arc::downgrade(&self.0),
+        });
         g.live.insert(key, Arc::downgrade(&lease));
         Ok(SlotRef(lease))
     }
@@ -200,7 +214,9 @@ impl FramePool {
         let a = addr as usize;
         let g = self.0.state.lock().unwrap();
         let (base, w) = g.live.range(..=a).next_back()?;
-        w.upgrade().filter(|l| a < *base + l.slot.as_ref().unwrap().len).map(SlotRef)
+        w.upgrade()
+            .filter(|l| a < *base + l.slot.as_ref().unwrap().len)
+            .map(SlotRef)
     }
 
     /// Releases free slots beyond `keep_bytes` (a lease shrink).
@@ -217,7 +233,12 @@ impl FramePool {
 
     pub fn stats(&self) -> PoolStats {
         let g = self.0.state.lock().unwrap();
-        PoolStats { slots: g.allocated, bytes: g.bytes, live_bytes: g.live_bytes, free_bytes: g.free_bytes }
+        PoolStats {
+            slots: g.allocated,
+            bytes: g.bytes,
+            live_bytes: g.live_bytes,
+            free_bytes: g.free_bytes,
+        }
     }
 }
 
@@ -240,7 +261,15 @@ mod tests {
         assert_eq!(pool.find_containing(inner).map(|s| s.id()), Some(id));
         assert!(pool.find_containing(unsafe { a.ptr().add(PAGE) }).is_none());
         drop(a);
-        assert_eq!(pool.stats(), PoolStats { slots: 1, bytes: PAGE, live_bytes: 0, free_bytes: PAGE });
+        assert_eq!(
+            pool.stats(),
+            PoolStats {
+                slots: 1,
+                bytes: PAGE,
+                live_bytes: 0,
+                free_bytes: PAGE
+            }
+        );
         let b = pool.acquire(PAGE).unwrap();
         assert_eq!(b.id(), id, "a free slot of the same size is reused");
         drop(b);

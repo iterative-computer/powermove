@@ -34,7 +34,11 @@ fn gpu() -> Gpu {
     }))
     .expect("a device");
     let importer = DecodeImporter::new(&device).expect("importer");
-    Gpu { device, queue, importer }
+    Gpu {
+        device,
+        queue,
+        importer,
+    }
 }
 
 fn read_texture(g: &Gpu, t: &wgpu::Texture) -> Vec<[f32; 4]> {
@@ -52,14 +56,27 @@ fn read_texture(g: &Gpu, t: &wgpu::Texture) -> Vec<[f32; 4]> {
         t.as_image_copy(),
         wgpu::TexelCopyBufferInfo {
             buffer: &buf,
-            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) },
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(h),
+            },
         },
-        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
     );
     g.queue.submit([enc.finish()]);
     let s = buf.slice(..);
     s.map_async(wgpu::MapMode::Read, |_| {});
-    g.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    g.device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
+        .unwrap();
     let data = s.get_mapped_range().unwrap();
     let comps = (bpp / 4) as usize;
     let mut out = Vec::with_capacity((w * h) as usize);
@@ -81,14 +98,22 @@ fn ulps(a: f32, b: f32) -> u32 {
         let i = x.to_bits() as i32;
         if i < 0 { i32::MIN.wrapping_sub(i) } else { i }
     };
-    (k(a) as i64 - k(b) as i64).unsigned_abs().min(u32::MAX as u64) as u32
+    (k(a) as i64 - k(b) as i64)
+        .unsigned_abs()
+        .min(u32::MAX as u64) as u32
 }
 
 /// Imports, normalizes, and compares with the CPU reference; returns the
 /// worst ULP difference.
 fn check_frame(g: &Gpu, f: &DecodedFrame, what: &str) -> u32 {
-    let imp = g.importer.import(f).unwrap_or_else(|e| panic!("{what}: import: {e}"));
-    assert!(imp.aliased, "{what}: textures do not alias the decoder's memory");
+    let imp = g
+        .importer
+        .import(f)
+        .unwrap_or_else(|e| panic!("{what}: import: {e}"));
+    assert!(
+        imp.aliased,
+        "{what}: textures do not alias the decoder's memory"
+    );
     assert_eq!(imp.textures.len(), f.format.planes.len());
     let mut enc = g.device.create_command_encoder(&Default::default());
     let n = g.importer.normalize(&g.queue, &mut enc, &imp).unwrap();
@@ -112,8 +137,12 @@ fn check_frame(g: &Gpu, f: &DecodedFrame, what: &str) -> u32 {
             // The CPU reference holds [G, A] and [B, R] for RGB layouts.
             let gv = read_texture(g, &rgba);
             for (i, v) in gv.iter().enumerate() {
-                worst = worst.max(ulps(v[1], luma[i][0])).max(ulps(v[3], luma[i][1]));
-                worst = worst.max(ulps(v[2], chroma[i][0])).max(ulps(v[0], chroma[i][1]));
+                worst = worst
+                    .max(ulps(v[1], luma[i][0]))
+                    .max(ulps(v[3], luma[i][1]));
+                worst = worst
+                    .max(ulps(v[2], chroma[i][0]))
+                    .max(ulps(v[0], chroma[i][1]));
             }
         }
     }
@@ -128,15 +157,24 @@ fn fixtures() -> PathBuf {
 fn corpus() -> PathBuf {
     let d = std::env::var_os("PM_MEDIA_CORPUS")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap()).join("Library/Caches/powermove-engine/media-corpus"));
-    assert!(d.is_dir(), "run engine/crates/pm-media/tests/corpus/gen.sh first");
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var("HOME").unwrap())
+                .join("Library/Caches/powermove-engine/media-corpus")
+        });
+    assert!(
+        d.is_dir(),
+        "run engine/crates/pm-media/tests/corpus/gen.sh first"
+    );
     d
 }
 
 /// Every backend of a file: three frames each (first, middle, last).
 fn run(g: &Gpu, path: &Path, purpose: DecodePurpose) -> Vec<String> {
     let src = MediaSource::open(path).unwrap();
-    let svc = DecodeService::new(ServiceConfig { cache_bytes: 0, ..Default::default() });
+    let svc = DecodeService::new(ServiceConfig {
+        cache_bytes: 0,
+        ..Default::default()
+    });
     let mut lines = vec![];
     let n = src.index.frames.len();
     for b in backends(&src.info, &src.index) {
@@ -153,10 +191,21 @@ fn run(g: &Gpu, path: &Path, purpose: DecodePurpose) -> Vec<String> {
         for k in [0, n / 2, n - 1] {
             let f = s.frame(k).unwrap();
             label = f.format.label.clone();
-            worst = worst.max(check_frame(g, &f, &format!("{} [{b:?}] frame {k}", path.display())));
+            worst = worst.max(check_frame(
+                g,
+                &f,
+                &format!("{} [{b:?}] frame {k}", path.display()),
+            ));
         }
-        assert!(worst <= 1, "{} [{b:?} {label}]: GPU normalization differs from the CPU reference by {worst} ULP", path.display());
-        lines.push(format!("{} [{b:?} {label}]: aliased, max {worst} ULP", path.file_name().unwrap().to_string_lossy()));
+        assert!(
+            worst <= 1,
+            "{} [{b:?} {label}]: GPU normalization differs from the CPU reference by {worst} ULP",
+            path.display()
+        );
+        lines.push(format!(
+            "{} [{b:?} {label}]: aliased, max {worst} ULP",
+            path.file_name().unwrap().to_string_lossy()
+        ));
     }
     lines
 }
@@ -167,7 +216,12 @@ fn e2e_fixtures() {
     let mut files: Vec<PathBuf> = std::fs::read_dir(fixtures())
         .unwrap()
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("mp4" | "mov" | "mkv" | "webm")))
+        .filter(|p| {
+            matches!(
+                p.extension().and_then(|e| e.to_str()),
+                Some("mp4" | "mov" | "mkv" | "webm")
+            )
+        })
         .collect();
     files.sort();
     for f in files {
@@ -181,7 +235,14 @@ fn e2e_fixtures() {
 fn still_images() {
     let g = gpu();
     let pool = pm_media::pool::FramePool::new(0);
-    for name in ["still-red.png", "still-alpha.png", "still.tiff", "still.webp", "still.heic", "still.avif"] {
+    for name in [
+        "still-red.png",
+        "still-alpha.png",
+        "still.tiff",
+        "still.webp",
+        "still.heic",
+        "still.avif",
+    ] {
         let img = pm_media::image::read(&fixtures().join(name), &pool).unwrap();
         // Image readers copy into pool memory once (decoded pixels are not
         // GPU-shareable as they come out of the decoders); the import itself
@@ -189,12 +250,18 @@ fn still_images() {
         let imp = g.importer.import(&img.frame).unwrap();
         assert_eq!(imp.textures.len(), 1);
         let mut enc = g.device.create_command_encoder(&Default::default());
-        let Normalized::Rgb { rgba } = g.importer.normalize(&g.queue, &mut enc, &imp).unwrap() else { panic!("{name}: RGB expected") };
+        let Normalized::Rgb { rgba } = g.importer.normalize(&g.queue, &mut enc, &imp).unwrap()
+        else {
+            panic!("{name}: RGB expected")
+        };
         g.queue.submit([enc.finish()]);
         let gv = read_texture(&g, &rgba);
         let (l, c) = img.frame.reference().unwrap();
         let worst = gv.iter().enumerate().fold(0, |w, (i, v)| {
-            w.max(ulps(v[1], l[i][0])).max(ulps(v[3], l[i][1])).max(ulps(v[2], c[i][0])).max(ulps(v[0], c[i][1]))
+            w.max(ulps(v[1], l[i][0]))
+                .max(ulps(v[3], l[i][1]))
+                .max(ulps(v[2], c[i][0]))
+                .max(ulps(v[0], c[i][1]))
         });
         assert!(worst <= 1, "{name}: {worst} ULP");
     }
@@ -209,10 +276,25 @@ fn planar_rgb_dpx() {
     let dpx = dir.join("frame.dpx");
     let ffmpeg = std::env::var_os("PM_FFMPEG_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap()).join("Library/Caches/powermove-engine/ffmpeg/out"))
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var("HOME").unwrap())
+                .join("Library/Caches/powermove-engine/ffmpeg/out")
+        })
         .join("bin/ffmpeg");
     let ok = std::process::Command::new(ffmpeg)
-        .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=64x36:rate=1", "-frames:v", "1", "-pix_fmt", "gbrp10le"])
+        .args([
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x36:rate=1",
+            "-frames:v",
+            "1",
+            "-pix_fmt",
+            "gbrp10le",
+        ])
         .arg(&dpx)
         .status()
         .unwrap()
@@ -231,19 +313,19 @@ fn corpus_layouts() {
     let g = gpu();
     let c = corpus();
     for (name, purpose) in [
-        ("prores422hq-vt.mov", DecodePurpose::Export), // v216
+        ("prores422hq-vt.mov", DecodePurpose::Export),   // v216
         ("prores4444xq-vt.mov", DecodePurpose::Display), // y416
-        ("hevc-main10.mov", DecodePurpose::Display),   // x420 and yuv420p10le
-        ("hevc-422-10.mov", DecodePurpose::Display),   // x422 and yuv422p10le
+        ("hevc-main10.mov", DecodePurpose::Display),     // x420 and yuv420p10le
+        ("hevc-422-10.mov", DecodePurpose::Display),     // x422 and yuv422p10le
         ("h264-422-10.mov", DecodePurpose::Display),
-        ("av1-10bit.mp4", DecodePurpose::Display),     // VideoToolbox AV1 and dav1d
+        ("av1-10bit.mp4", DecodePurpose::Display), // VideoToolbox AV1 and dav1d
         ("vp9-alpha.webm", DecodePurpose::Display),
         ("vp8-alpha.webm", DecodePurpose::Display),
         ("vp9-10bit.webm", DecodePurpose::Display),
         ("dnxhr-444.mxf", DecodePurpose::Display),
         ("cineform.mov", DecodePurpose::Display),
-        ("dv-ntsc.dv", DecodePurpose::Display),        // yuv411p
-        ("mjpeg.avi", DecodePurpose::Display),         // yuvj422p, full range
+        ("dv-ntsc.dv", DecodePurpose::Display), // yuv411p
+        ("mjpeg.avi", DecodePurpose::Display),  // yuvj422p, full range
         ("uhd-prores422hq.mov", DecodePurpose::Display),
     ] {
         for l in run(&g, &c.join(name), purpose) {

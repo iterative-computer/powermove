@@ -35,7 +35,11 @@ struct Chunk {
 fn read_chunk(f: &File, off: u64) -> Result<Chunk> {
     let mut h = [0u8; 8];
     f.read_exact_at(&mut h, off)?;
-    Ok(Chunk { id: h[..4].try_into().unwrap(), data: off + 8, size: le32(&h[4..]) as u64 })
+    Ok(Chunk {
+        id: h[..4].try_into().unwrap(),
+        data: off + 8,
+        size: le32(&h[4..]) as u64,
+    })
 }
 
 /// Children of a LIST payload region [start, end).
@@ -106,7 +110,9 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
         }
     }
     // The n-th video stream in FFmpeg's order is the n-th 'vids' strl.
-    let ordinal = input.video_ordinal(stream).ok_or_else(|| MediaError::invalid("not a video stream"))?;
+    let ordinal = input
+        .video_ordinal(stream)
+        .ok_or_else(|| MediaError::invalid("not a video stream"))?;
     let (number, sh) = streams
         .iter()
         .enumerate()
@@ -130,7 +136,9 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
         let used = le32(&si[4..]) as usize;
         for e in 0..used {
             let p = 24 + e * 16;
-            let Some(entry) = si.get(p..p + 16) else { break };
+            let Some(entry) = si.get(p..p + 16) else {
+                break;
+            };
             let ix_off = le64(entry);
             let ix = read_chunk(&f, ix_off)?;
             let mut b = vec![0u8; ix.size as usize];
@@ -143,7 +151,11 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
             for i in 0..n {
                 let q = 24 + i * 8;
                 let Some(e) = b.get(q..q + 8) else { break };
-                entries.push((base + le32(e) as u64, le32(&e[4..]) & 0x7FFF_FFFF, le32(&e[4..]) & 0x8000_0000 == 0));
+                entries.push((
+                    base + le32(e) as u64,
+                    le32(&e[4..]) & 0x7FFF_FFFF,
+                    le32(&e[4..]) & 0x8000_0000 == 0,
+                ));
             }
         }
         source = "OpenDML";
@@ -151,8 +163,10 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
         let movi = movi.ok_or_else(|| MediaError::invalid("AVI without a movi list"))?;
         let mut b = vec![0u8; ix.size as usize];
         f.read_exact_at(&mut b, ix.data)?;
-        let raw: Vec<(&[u8], u32, u64, u32)> =
-            b.chunks_exact(16).map(|e| (&e[..4], le32(&e[4..]), le32(&e[8..]) as u64, le32(&e[12..]))).collect();
+        let raw: Vec<(&[u8], u32, u64, u32)> = b
+            .chunks_exact(16)
+            .map(|e| (&e[..4], le32(&e[4..]), le32(&e[8..]) as u64, le32(&e[12..])))
+            .collect();
         // Offsets are relative to the 'movi' fourcc, or (some writers) absolute.
         let relative = match raw.iter().find(|e| is_ours(e.0)) {
             Some(&(id, _, off, _)) => {
@@ -171,7 +185,9 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
         return Err(MediaError::unsupported("AVI without idx1 or OpenDML index"));
     }
     if entries.is_empty() {
-        return Err(MediaError::invalid("AVI index lists no frames for the video stream"));
+        return Err(MediaError::invalid(
+            "AVI index lists no frames for the video stream",
+        ));
     }
     let mut samples = Vec::new();
     let intra_only = input.codec_is_intra_only(stream);
@@ -180,7 +196,9 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
             continue; // a dropped frame: the previous one holds
         }
         if data + size as u64 > len {
-            return Err(MediaError::invalid("AVI index entry past the end of the file"));
+            return Err(MediaError::invalid(
+                "AVI index entry past the end of the file",
+            ));
         }
         let t = sh.start as i64 + k as i64;
         samples.push(Sample {
@@ -188,11 +206,22 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
             cts: t,
             duration: 1,
             key: key || intra_only,
-            loc: Loc::File { offset: data, size, additional: None },
+            loc: Loc::File {
+                offset: data,
+                size,
+                additional: None,
+            },
             nal_type: None,
         });
     }
-    let frames = samples.iter().enumerate().map(|(i, s)| Frame { sample: i, pts: s.cts }).collect();
+    let frames = samples
+        .iter()
+        .enumerate()
+        .map(|(i, s)| Frame {
+            sample: i,
+            pts: s.cts,
+        })
+        .collect();
     let mut idx = FrameIndex {
         source: IndexSource::AviIndex,
         track: number as u64,
@@ -201,7 +230,10 @@ pub fn build(path: &Path, input: &crate::ff::Input, stream: usize) -> Result<Fra
         frames,
         config: CodecConfig::default(),
         nal_codec: None,
-        stats: IndexStats { detail: Some(format!("{source} index, stream {number}")), ..Default::default() },
+        stats: IndexStats {
+            detail: Some(format!("{source} index, stream {number}")),
+            ..Default::default()
+        },
     };
     idx.finish();
     Ok(idx)

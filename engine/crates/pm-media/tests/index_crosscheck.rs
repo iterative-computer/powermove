@@ -17,8 +17,17 @@ fn crosscheck(path: &Path) -> Result<String, String> {
     let idx = index::build(path, &input, v).map_err(|e| e.to_string())?;
     let (pkts, tb, _) = demux_scan(path, v).map_err(|e| e.to_string())?;
     let name = path.file_name().unwrap().to_string_lossy();
-    let line = format!("{name}: {:?}, {} samples, {} presented, {} sync", idx.source, idx.samples.len(), idx.frames.len(), idx.stats.sync_samples);
-    if matches!(idx.source, IndexSource::DemuxScan | IndexSource::DemuxScanDecodeOrder) {
+    let line = format!(
+        "{name}: {:?}, {} samples, {} presented, {} sync",
+        idx.source,
+        idx.samples.len(),
+        idx.frames.len(),
+        idx.stats.sync_samples
+    );
+    if matches!(
+        idx.source,
+        IndexSource::DemuxScan | IndexSource::DemuxScanDecodeOrder
+    ) {
         return Ok(line);
     }
     if pkts.len() != idx.samples.len() {
@@ -32,11 +41,17 @@ fn crosscheck(path: &Path) -> Result<String, String> {
     let mut theirs: Vec<i128> = pkts
         .iter()
         .filter(|p| !p.discard)
-        .filter_map(|p| p.pts.map(|t| t as i128 * tb.num() as i128 * idx.timebase.den() as i128))
+        .filter_map(|p| {
+            p.pts
+                .map(|t| t as i128 * tb.num() as i128 * idx.timebase.den() as i128)
+        })
         .collect();
     theirs.sort_unstable();
-    let ours: Vec<i128> =
-        idx.presented_pts().iter().map(|&t| t as i128 * idx.timebase.num() as i128 * tb.den() as i128).collect();
+    let ours: Vec<i128> = idx
+        .presented_pts()
+        .iter()
+        .map(|&t| t as i128 * idx.timebase.num() as i128 * tb.den() as i128)
+        .collect();
     if idx.stats.edit_list.is_some() && theirs.len() + 1 == ours.len() {
         // FFmpeg drops a frame that straddles the edit start; AVFoundation and
         // the index show it (S6).
@@ -50,7 +65,9 @@ fn crosscheck(path: &Path) -> Result<String, String> {
     }
     let off = theirs[0] - ours[0];
     if !ours.iter().zip(&theirs).all(|(a, b)| b - a == off) {
-        return Err(format!("{line}: presented timestamps differ from FFmpeg's beyond a constant offset"));
+        return Err(format!(
+            "{line}: presented timestamps differ from FFmpeg's beyond a constant offset"
+        ));
     }
     Ok(line)
 }

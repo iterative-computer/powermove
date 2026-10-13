@@ -55,7 +55,11 @@ pub struct DecoderInfo {
 
 /// One open decoder.
 pub enum Decoder {
-    Vt { dec: VtDecoder, cfg: VtConfig, _permit: Option<HwPermit> },
+    Vt {
+        dec: VtDecoder,
+        cfg: VtConfig,
+        _permit: Option<HwPermit>,
+    },
     Ff(FfDecoder),
     Dav1d(Dav1dDecoder),
     Alpha(AlphaPairDecoder),
@@ -78,9 +82,13 @@ impl Decoder {
                 zero_copy: d.direct(),
                 output: None,
             },
-            Decoder::Dav1d(_) => {
-                DecoderInfo { backend: Backend::Dav1d, name: "dav1d".into(), hardware: false, zero_copy: true, output: None }
-            }
+            Decoder::Dav1d(_) => DecoderInfo {
+                backend: Backend::Dav1d,
+                name: "dav1d".into(),
+                hardware: false,
+                zero_copy: true,
+                output: None,
+            },
             Decoder::Alpha(d) => DecoderInfo {
                 backend: Backend::FfmpegAlphaPair,
                 name: d.name(),
@@ -171,13 +179,22 @@ impl Decoder {
 
 /// Backend preferences for a stream, most preferred first.
 pub fn backends(info: &CodecInfo, idx: &FrameIndex) -> Vec<Backend> {
-    let prores = idx.config.fourcc.is_some_and(|f| crate::vt::is_prores_fourcc(&f)) || info.codec == "prores";
+    let prores = idx
+        .config
+        .fourcc
+        .is_some_and(|f| crate::vt::is_prores_fourcc(&f))
+        || info.codec == "prores";
     match info.codec.as_str() {
         _ if prores => vec![Backend::VideoToolbox],
-        "h264" if (info.log2_chroma_w, info.log2_chroma_h) != (1, 1) => vec![Backend::Ffmpeg, Backend::VideoToolbox],
+        "h264" if (info.log2_chroma_w, info.log2_chroma_h) != (1, 1) => {
+            vec![Backend::Ffmpeg, Backend::VideoToolbox]
+        }
         "h264" | "hevc" => vec![Backend::VideoToolbox, Backend::Ffmpeg],
         "av1" => {
-            if unsafe { crate::apple::cf::VTIsHardwareDecodeSupported(crate::apple::cf::fcc(b"av01")) } != 0 {
+            if unsafe {
+                crate::apple::cf::VTIsHardwareDecodeSupported(crate::apple::cf::fcc(b"av01"))
+            } != 0
+            {
                 vec![Backend::VideoToolbox, Backend::Dav1d]
             } else {
                 vec![Backend::Dav1d]
@@ -211,7 +228,10 @@ pub fn open(
     let mut order = backends(spec.info, spec.index);
     if let Some(p) = prefer {
         if !order.contains(&p) {
-            return Err(MediaError::unsupported(format!("{p:?} does not decode {}", spec.info.codec)));
+            return Err(MediaError::unsupported(format!(
+                "{p:?} does not decode {}",
+                spec.info.codec
+            )));
         }
         order.retain(|b| *b != p);
         order.insert(0, p);
@@ -220,10 +240,12 @@ pub fn open(
     for b in order {
         let r = match b {
             Backend::VideoToolbox => open_vt(spec, purpose, arbiter),
-            Backend::Ffmpeg => FfDecoder::new(spec.input, spec.stream, None, pool.clone(), threads).map(Decoder::Ff),
+            Backend::Ffmpeg => FfDecoder::new(spec.input, spec.stream, None, pool.clone(), threads)
+                .map(Decoder::Ff),
             Backend::Dav1d => Dav1dDecoder::new(pool.clone(), threads).map(Decoder::Dav1d),
             Backend::FfmpegAlphaPair => {
-                AlphaPairDecoder::new(spec.input, spec.stream, pool.clone(), threads).map(Decoder::Alpha)
+                AlphaPairDecoder::new(spec.input, spec.stream, pool.clone(), threads)
+                    .map(Decoder::Alpha)
             }
         };
         match r {
@@ -231,19 +253,37 @@ pub fn open(
             Err(e) => skipped.push(format!("{b:?}: {e}")),
         }
     }
-    Err(MediaError::unsupported(format!("no decoder for {}: {}", spec.info.codec, skipped.join("; "))))
+    Err(MediaError::unsupported(format!(
+        "no decoder for {}: {}",
+        spec.info.codec,
+        skipped.join("; ")
+    )))
 }
 
-fn open_vt(spec: &StreamSpec<'_>, purpose: DecodePurpose, arbiter: &dyn HardwareArbiter) -> Result<Decoder> {
+fn open_vt(
+    spec: &StreamSpec<'_>,
+    purpose: DecodePurpose,
+    arbiter: &dyn HardwareArbiter,
+) -> Result<Decoder> {
     let cfg = VtConfig::new(spec.info, spec.index, spec.extradata, purpose)?;
     let codec = HwCodec::from_fourcc(cfg.codec_fcc);
-    let permit = if cfg.hardware_supported { arbiter.try_acquire(codec) } else { None };
+    let permit = if cfg.hardware_supported {
+        arbiter.try_acquire(codec)
+    } else {
+        None
+    };
     // Without a hardware session: ProRes still decodes in VideoToolbox's
     // software decoder (decision 12 keeps ProRes in VideoToolbox); other
     // codecs fall back to the next backend.
     if cfg.hardware_supported && permit.is_none() && !cfg.prores {
-        return Err(MediaError::unsupported(format!("no hardware {codec:?} session available")));
+        return Err(MediaError::unsupported(format!(
+            "no hardware {codec:?} session available"
+        )));
     }
     let dec = VtDecoder::new(&cfg, spec.index.timebase.den(), permit.is_some())?;
-    Ok(Decoder::Vt { dec, cfg, _permit: permit })
+    Ok(Decoder::Vt {
+        dec,
+        cfg,
+        _permit: permit,
+    })
 }

@@ -27,7 +27,10 @@ pub mod ffmpeg {
     /// `AVERROR_INVALIDDATA`.
     pub const AVERROR_INVALIDDATA: i32 = fferrtag(b'I', b'N', b'D', b'A');
     /// `AV_TIME_BASE_Q`.
-    pub const AV_TIME_BASE_Q: AVRational = AVRational { num: 1, den: AV_TIME_BASE as i32 };
+    pub const AV_TIME_BASE_Q: AVRational = AVRational {
+        num: 1,
+        den: AV_TIME_BASE as i32,
+    };
 }
 
 pub mod dav1d {

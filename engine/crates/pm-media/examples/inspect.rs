@@ -40,13 +40,23 @@ fn main() {
         return;
     }
     let src = MediaSource::open(path).unwrap_or_else(|e| panic!("{e}"));
-    let svc = DecodeService::new(ServiceConfig { cache_bytes: 0, ..Default::default() });
-    let mut s = svc.session_with(&src, 1, purpose, backend).unwrap_or_else(|e| panic!("{e}"));
+    let svc = DecodeService::new(ServiceConfig {
+        cache_bytes: 0,
+        ..Default::default()
+    });
+    let mut s = svc
+        .session_with(&src, 1, purpose, backend)
+        .unwrap_or_else(|e| panic!("{e}"));
     println!("{:?}", s.info());
     for n in frames {
         let sample = src.index.frames[n].sample;
         match s.frame(n) {
-            Ok(f) => println!("frame {n} sample {sample} pts {} {} {}", f.pts, f.format.label, f.md5_hex().unwrap()),
+            Ok(f) => println!(
+                "frame {n} sample {sample} pts {} {} {}",
+                f.pts,
+                f.format.label,
+                f.md5_hex().unwrap()
+            ),
             Err(e) => println!("frame {n} sample {sample}: {e}"),
         }
     }

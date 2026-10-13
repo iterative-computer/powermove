@@ -13,15 +13,24 @@ use std::path::PathBuf;
 fn corpus() -> PathBuf {
     let d = std::env::var_os("PM_MEDIA_CORPUS")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap()).join("Library/Caches/powermove-engine/media-corpus"));
-    assert!(d.is_dir(), "run engine/crates/pm-media/tests/corpus/gen.sh first");
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var("HOME").unwrap())
+                .join("Library/Caches/powermove-engine/media-corpus")
+        });
+    assert!(
+        d.is_dir(),
+        "run engine/crates/pm-media/tests/corpus/gen.sh first"
+    );
     d
 }
 
 fn ffmpeg() -> PathBuf {
     std::env::var_os("PM_FFMPEG_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap()).join("Library/Caches/powermove-engine/ffmpeg/out"))
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var("HOME").unwrap())
+                .join("Library/Caches/powermove-engine/ffmpeg/out")
+        })
         .join("bin/ffmpeg")
 }
 
@@ -30,7 +39,11 @@ fn device() -> (wgpu::Device, wgpu::Queue) {
     desc.backends = wgpu::Backends::METAL;
     let instance = wgpu::Instance::new(desc);
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features: required_features(), ..Default::default() })).unwrap()
+    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: required_features(),
+        ..Default::default()
+    }))
+    .unwrap()
 }
 
 fn read(device: &wgpu::Device, queue: &wgpu::Queue, t: &wgpu::Texture) -> Vec<[f32; 4]> {
@@ -46,13 +59,29 @@ fn read(device: &wgpu::Device, queue: &wgpu::Queue, t: &wgpu::Texture) -> Vec<[f
     let mut enc = device.create_command_encoder(&Default::default());
     enc.copy_texture_to_buffer(
         t.as_image_copy(),
-        wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
-        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buf,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(h),
+            },
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
     );
     queue.submit([enc.finish()]);
     let s = buf.slice(..);
     s.map_async(wgpu::MapMode::Read, |_| {});
-    device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
+        .unwrap();
     let data = s.get_mapped_range().unwrap();
     let comps = (bpp / 4) as usize;
     let mut out = Vec::with_capacity((w * h) as usize);
@@ -60,7 +89,11 @@ fn read(device: &wgpu::Device, queue: &wgpu::Queue, t: &wgpu::Texture) -> Vec<[f
         for x in 0..w as usize {
             let mut v = [0f32; 4];
             for c in 0..comps {
-                v[c] = f32::from_ne_bytes(data[(y * row) as usize + (x * comps + c) * 4..][..4].try_into().unwrap());
+                v[c] = f32::from_ne_bytes(
+                    data[(y * row) as usize + (x * comps + c) * 4..][..4]
+                        .try_into()
+                        .unwrap(),
+                );
             }
             out.push(v);
         }
@@ -87,7 +120,16 @@ fn compare(name: &str, pix_fmt: &str, frames: &[usize]) -> (i32, f64) {
     let ok = std::process::Command::new(ffmpeg())
         .args(["-v", "error", "-y", "-i"])
         .arg(&path)
-        .args(["-map", "0:v:0", "-vf", "bwdif=mode=send_field:parity=auto:deint=all", "-f", "rawvideo", "-pix_fmt", pix_fmt])
+        .args([
+            "-map",
+            "0:v:0",
+            "-vf",
+            "bwdif=mode=send_field:parity=auto:deint=all",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            pix_fmt,
+        ])
         .arg(&raw)
         .status()
         .unwrap()
@@ -95,8 +137,15 @@ fn compare(name: &str, pix_fmt: &str, frames: &[usize]) -> (i32, f64) {
     assert!(ok, "ffmpeg bwdif");
     let reference = std::fs::read(&raw).unwrap();
     let frame_bytes = w * h + 2 * cw * ch;
-    assert_eq!(reference.len(), frame_bytes * 2 * src.index.frames.len(), "two fields per frame");
-    let svc = DecodeService::new(ServiceConfig { cache_bytes: 64 << 20, ..Default::default() });
+    assert_eq!(
+        reference.len(),
+        frame_bytes * 2 * src.index.frames.len(),
+        "two fields per frame"
+    );
+    let svc = DecodeService::new(ServiceConfig {
+        cache_bytes: 64 << 20,
+        ..Default::default()
+    });
     let mut s = svc.session(&src, 1, DecodePurpose::Display).unwrap();
     let norm = |f: &pm_media::frame::DecodedFrame| {
         let imp = importer.import(f).unwrap();
@@ -112,9 +161,21 @@ fn compare(name: &str, pix_fmt: &str, frames: &[usize]) -> (i32, f64) {
         for second in [false, true] {
             let mut enc = device.create_command_encoder(&Default::default());
             let codes = CodeSpace::of(&ff.cur.format);
-            let out = deint.run(&queue, &mut enc, &p, &c, &nx, FieldPass::new(tff, second, ff.first, ff.last), &codes).unwrap();
+            let out = deint
+                .run(
+                    &queue,
+                    &mut enc,
+                    &p,
+                    &c,
+                    &nx,
+                    FieldPass::new(tff, second, ff.first, ff.last),
+                    &codes,
+                )
+                .unwrap();
             queue.submit([enc.finish()]);
-            let Normalized::YCbCr { luma, chroma } = out else { panic!("Y'CbCr") };
+            let Normalized::YCbCr { luma, chroma } = out else {
+                panic!("Y'CbCr")
+            };
             let l = read(&device, &queue, &luma);
             let cc = read(&device, &queue, &chroma);
             let refp = &reference[(2 * n + second as usize) * frame_bytes..][..frame_bytes];
@@ -137,7 +198,12 @@ fn compare(name: &str, pix_fmt: &str, frames: &[usize]) -> (i32, f64) {
                 }
             }
             if std::env::var_os("PM_GPU_TRACE").is_some() && !rows.is_empty() {
-                eprintln!("frame {n} second {second}: luma rows with >1 differences: {} (first {:?}); rows {:?}", rows.len(), first, rows.iter().take(12).collect::<Vec<_>>());
+                eprintln!(
+                    "frame {n} second {second}: luma rows with >1 differences: {} (first {:?}); rows {:?}",
+                    rows.len(),
+                    first,
+                    rows.iter().take(12).collect::<Vec<_>>()
+                );
             }
             for i in 0..cw * ch {
                 cmp(code_c(cc[i][0]), refp[w * h + i]);
@@ -153,15 +219,31 @@ fn compare(name: &str, pix_fmt: &str, frames: &[usize]) -> (i32, f64) {
 #[ignore]
 fn xdcam_1080i_top_field_first() {
     let n = 45;
-    let (worst, share) = compare("mxf-xdcam422-1080i-tff.mxf", "yuv422p", &[0, 1, 2, 20, n - 2, n - 1]);
-    eprintln!("XDCAM 1080i TFF: max {worst} code, {:.4}% of samples differ", share * 100.0);
-    assert_eq!(worst, 0, "bwdif must equal FFmpeg's: max difference {worst} codes");
+    let (worst, share) = compare(
+        "mxf-xdcam422-1080i-tff.mxf",
+        "yuv422p",
+        &[0, 1, 2, 20, n - 2, n - 1],
+    );
+    eprintln!(
+        "XDCAM 1080i TFF: max {worst} code, {:.4}% of samples differ",
+        share * 100.0
+    );
+    assert_eq!(
+        worst, 0,
+        "bwdif must equal FFmpeg's: max difference {worst} codes"
+    );
 }
 
 #[test]
 #[ignore]
 fn dv_ntsc_bottom_field_first() {
     let (worst, share) = compare("dv-ntsc.dv", "yuv411p", &[0, 1, 2, 30, 58, 59]);
-    eprintln!("DV NTSC BFF 4:1:1: max {worst} code, {:.4}% of samples differ", share * 100.0);
-    assert_eq!(worst, 0, "bwdif must equal FFmpeg's: max difference {worst} codes");
+    eprintln!(
+        "DV NTSC BFF 4:1:1: max {worst} code, {:.4}% of samples differ",
+        share * 100.0
+    );
+    assert_eq!(
+        worst, 0,
+        "bwdif must equal FFmpeg's: max difference {worst} codes"
+    );
 }

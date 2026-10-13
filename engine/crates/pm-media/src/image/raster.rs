@@ -36,17 +36,32 @@ pub fn read(path: &Path, pool: &FramePool, format: ImageFormat) -> Result<StillI
         DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_) => {
             let px = img.to_rgba32f().into_raw();
             let (px, ow, oh) = orient(&px, w, h, 4, orientation);
-            (pool_rgba(pool, ow, oh, Rgba::F32(&px), false, 32, label)?, 32, true)
+            (
+                pool_rgba(pool, ow, oh, Rgba::F32(&px), false, 32, label)?,
+                32,
+                true,
+            )
         }
-        DynamicImage::ImageLuma16(_) | DynamicImage::ImageLumaA16(_) | DynamicImage::ImageRgb16(_) | DynamicImage::ImageRgba16(_) => {
+        DynamicImage::ImageLuma16(_)
+        | DynamicImage::ImageLumaA16(_)
+        | DynamicImage::ImageRgb16(_)
+        | DynamicImage::ImageRgba16(_) => {
             let px = img.to_rgba16().into_raw();
             let (px, ow, oh) = orient(&px, w, h, 4, orientation);
-            (pool_rgba(pool, ow, oh, Rgba::U16(&px), false, 16, label)?, 16, false)
+            (
+                pool_rgba(pool, ow, oh, Rgba::U16(&px), false, 16, label)?,
+                16,
+                false,
+            )
         }
         _ => {
             let px = img.to_rgba8().into_raw();
             let (px, ow, oh) = orient(&px, w, h, 4, orientation);
-            (pool_rgba(pool, ow, oh, Rgba::U8(&px), false, 8, label)?, 8, false)
+            (
+                pool_rgba(pool, ow, oh, Rgba::U8(&px), false, 8, label)?,
+                8,
+                false,
+            )
         }
     };
     let icc_class = profile.as_deref().map(icc::classify);
@@ -62,8 +77,16 @@ pub fn read(path: &Path, pool: &FramePool, format: ImageFormat) -> Result<StillI
             icc_class,
             // Float TIFF is scene-linear by convention; 8 and 16-bit stills
             // are display-encoded.
-            transfer: if float { Transfer::Linear } else { Transfer::DisplayE },
-            alpha: if color_type.has_alpha() { AlphaMode::Straight } else { AlphaMode::Opaque },
+            transfer: if float {
+                Transfer::Linear
+            } else {
+                Transfer::DisplayE
+            },
+            alpha: if color_type.has_alpha() {
+                AlphaMode::Straight
+            } else {
+                AlphaMode::Opaque
+            },
             chromaticities: None,
         },
         orientation,

@@ -48,7 +48,9 @@ pub struct HwPermit {
 
 impl HwPermit {
     pub fn new(release: impl FnOnce() + Send + Sync + 'static) -> HwPermit {
-        HwPermit { release: Some(Box::new(release)) }
+        HwPermit {
+            release: Some(Box::new(release)),
+        }
     }
 }
 
@@ -115,7 +117,14 @@ impl HardwareArbiter for LocalArbiter {
     }
 
     fn in_use(&self) -> HashMap<HwCodec, usize> {
-        self.inner.lock().unwrap().used.iter().filter(|(_, n)| **n > 0).map(|(k, v)| (*k, *v)).collect()
+        self.inner
+            .lock()
+            .unwrap()
+            .used
+            .iter()
+            .filter(|(_, n)| **n > 0)
+            .map(|(k, v)| (*k, *v))
+            .collect()
     }
 }
 

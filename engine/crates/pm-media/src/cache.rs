@@ -63,7 +63,12 @@ pub struct FrameCache {
 
 impl FrameCache {
     pub fn new(budget_bytes: usize) -> FrameCache {
-        FrameCache { inner: Mutex::new(Inner { budget: budget_bytes, ..Default::default() }) }
+        FrameCache {
+            inner: Mutex::new(Inner {
+                budget: budget_bytes,
+                ..Default::default()
+            }),
+        }
     }
 
     pub fn get(&self, key: &FrameKey) -> Option<DecodedFrame> {
@@ -97,7 +102,15 @@ impl FrameCache {
         }
         g.clock += 1;
         let stamp = g.clock;
-        if let Some(old) = g.map.insert(key, Entry { frame, bytes, pooled, stamp }) {
+        if let Some(old) = g.map.insert(
+            key,
+            Entry {
+                frame,
+                bytes,
+                pooled,
+                stamp,
+            },
+        ) {
             g.lru.remove(&old.stamp);
             Self::forget(&mut g, &old);
         }
@@ -122,7 +135,12 @@ impl FrameCache {
     /// Drops every frame of a source (the source changed or went offline).
     pub fn remove_source(&self, source: u64) {
         let mut g = self.inner.lock().unwrap();
-        let keys: Vec<FrameKey> = g.map.keys().filter(|k| k.source == source).copied().collect();
+        let keys: Vec<FrameKey> = g
+            .map
+            .keys()
+            .filter(|k| k.source == source)
+            .copied()
+            .collect();
         for k in keys {
             if let Some(e) = g.map.remove(&k) {
                 g.lru.remove(&e.stamp);
@@ -133,7 +151,9 @@ impl FrameCache {
 
     fn evict(g: &mut Inner) {
         while g.bytes > g.budget {
-            let Some((_, key)) = g.lru.pop_first() else { break };
+            let Some((_, key)) = g.lru.pop_first() else {
+                break;
+            };
             if let Some(e) = g.map.remove(&key) {
                 Self::forget(g, &e);
                 g.evictions += 1;

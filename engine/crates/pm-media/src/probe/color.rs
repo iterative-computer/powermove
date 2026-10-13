@@ -3,7 +3,10 @@
 
 use crate::ff::CodecInfo;
 use crate::sys::ffmpeg as ff;
-use pm_protocol::color::{AlphaMode, ChromaSiting, ColorDescription, MatrixCoefficients, Primaries, Range, Subsampling, Transfer};
+use pm_protocol::color::{
+    AlphaMode, ChromaSiting, ColorDescription, MatrixCoefficients, Primaries, Range, Subsampling,
+    Transfer,
+};
 use serde::Serialize;
 
 /// What the file says, before interpretation (H.273 code points).
@@ -47,7 +50,11 @@ pub enum HdrFormat {
     Hlg,
     /// Dolby Vision; the profile and whether the base layer is
     /// HDR10- or HLG-compatible (section 9 decodes the base layer).
-    DolbyVision { profile: u8, level: u8, base_compatibility: u8 },
+    DolbyVision {
+        profile: u8,
+        level: u8,
+        base_compatibility: u8,
+    },
 }
 
 /// The color section of a probe.
@@ -88,7 +95,12 @@ fn tag<T: Into<i64>>(v: T, unspecified: &[i64]) -> Option<u8> {
 /// * MJPEG, `yuvj`, and RGB codecs are full range; other Y′CbCr is limited;
 /// * untagged chroma siting is left (type 0);
 /// * BT.709, BT.601, BT.2020 SDR, and sRGB transfers read as display encoding E.
-pub fn interpret(info: &CodecInfo, colr: Option<&[u8]>, side: &SideData, alpha: Option<AlphaMode>) -> ColorInfo {
+pub fn interpret(
+    info: &CodecInfo,
+    colr: Option<&[u8]>,
+    side: &SideData,
+    alpha: Option<AlphaMode>,
+) -> ColorInfo {
     let mut tagged = TaggedColor {
         primaries: tag(info.color_primaries, &[2, 0]),
         transfer: tag(info.color_trc, &[2, 0]),
@@ -110,7 +122,9 @@ pub fn interpret(info: &CodecInfo, colr: Option<&[u8]>, side: &SideData, alpha: 
     }
     // FFmpeg reports matrix 0 (RGB) for untagged RGB codecs too; only an
     // RGB pixel format keeps it.
-    let rgb_format = info.pix_fmt.starts_with("gbr") || info.pix_fmt.starts_with("rgb") || info.pix_fmt.starts_with("bgr");
+    let rgb_format = info.pix_fmt.starts_with("gbr")
+        || info.pix_fmt.starts_with("rgb")
+        || info.pix_fmt.starts_with("bgr");
     if tagged.matrix == Some(0) && !rgb_format {
         tagged.matrix = None;
     }
@@ -124,11 +138,15 @@ pub fn interpret(info: &CodecInfo, colr: Option<&[u8]>, side: &SideData, alpha: 
             let m = u16::from_be_bytes([c[8], c[9]]);
             tagged.primaries = tagged.primaries.or(tag(p, &[2, 0]));
             tagged.transfer = tagged.transfer.or(tag(t, &[2, 0]));
-            tagged.matrix = tagged.matrix.or(tag(m, &[2]).filter(|&m| m != 0 || rgb_format));
+            tagged.matrix = tagged
+                .matrix
+                .or(tag(m, &[2]).filter(|&m| m != 0 || rgb_format));
             if kind == b"nclx" && c.len() >= 11 {
                 tagged.full_range = tagged.full_range.or(Some(c[10] & 0x80 != 0));
             }
-            tagged.source.push(format!("colr {}", String::from_utf8_lossy(kind)));
+            tagged
+                .source
+                .push(format!("colr {}", String::from_utf8_lossy(kind)));
         }
     }
 
@@ -174,16 +192,24 @@ pub fn interpret(info: &CodecInfo, colr: Option<&[u8]>, side: &SideData, alpha: 
             Some(5) | Some(6) => MatrixCoefficients::Bt601,
             Some(9) | Some(10) => MatrixCoefficients::Bt2020Ncl,
             _ => {
-                let m = if sd { MatrixCoefficients::Bt601 } else { MatrixCoefficients::Bt709 };
+                let m = if sd {
+                    MatrixCoefficients::Bt601
+                } else {
+                    MatrixCoefficients::Bt709
+                };
                 defaults.push(format!("untagged matrix: {m:?} (height {h})"));
                 m
             }
         }
     };
-    let jpeg_like = info.codec == "mjpeg" || info.codec == "mjpegb" || info.pix_fmt.starts_with("yuvj");
+    let jpeg_like =
+        info.codec == "mjpeg" || info.codec == "mjpegb" || info.pix_fmt.starts_with("yuvj");
     let range = if rgb_format || jpeg_like {
         if tagged.full_range != Some(true) {
-            defaults.push(format!("{} reads as full range", if rgb_format { "RGB" } else { "MJPEG/yuvj" }));
+            defaults.push(format!(
+                "{} reads as full range",
+                if rgb_format { "RGB" } else { "MJPEG/yuvj" }
+            ));
         }
         Range::Full
     } else {
@@ -240,7 +266,11 @@ pub fn interpret(info: &CodecInfo, colr: Option<&[u8]>, side: &SideData, alpha: 
         defaults_applied: defaults,
         mastering: side.mastering.clone(),
         content_light: side.content_light,
-        icc: side.icc.as_ref().map(|d| IccProfile { bytes: d.len(), blake3: blake3::hash(d).to_hex().to_string(), data: d.clone() }),
+        icc: side.icc.as_ref().map(|d| IccProfile {
+            bytes: d.len(),
+            blake3: blake3::hash(d).to_hex().to_string(),
+            data: d.clone(),
+        }),
         hdr,
     }
 }
@@ -262,8 +292,13 @@ impl SideData {
         unsafe {
             let par = input.par(stream);
             let get = |t: ff::AVPacketSideDataType| -> Option<&[u8]> {
-                let sd = ff::av_packet_side_data_get((*par).coded_side_data, (*par).nb_coded_side_data, t);
-                (!sd.is_null() && !(*sd).data.is_null()).then(|| std::slice::from_raw_parts((*sd).data, (*sd).size))
+                let sd = ff::av_packet_side_data_get(
+                    (*par).coded_side_data,
+                    (*par).nb_coded_side_data,
+                    t,
+                );
+                (!sd.is_null() && !(*sd).data.is_null())
+                    .then(|| std::slice::from_raw_parts((*sd).data, (*sd).size))
             };
             let q = |r: ff::AVRational| (r.den != 0).then(|| r.num as f64 / r.den as f64);
             if let Some(b) = get(ff::AV_PKT_DATA_MASTERING_DISPLAY_METADATA)
@@ -272,19 +307,46 @@ impl SideData {
                 let m = &*(b.as_ptr() as *const ff::AVMasteringDisplayMetadata);
                 let xy = |p: [ff::AVRational; 2]| Some((q(p[0])?, q(p[1])?));
                 s.mastering = Some(MasteringDisplay {
-                    red: if m.has_primaries != 0 { xy(m.display_primaries[0]) } else { None },
-                    green: if m.has_primaries != 0 { xy(m.display_primaries[1]) } else { None },
-                    blue: if m.has_primaries != 0 { xy(m.display_primaries[2]) } else { None },
-                    white: if m.has_primaries != 0 { xy(m.white_point) } else { None },
-                    min_luminance: if m.has_luminance != 0 { q(m.min_luminance) } else { None },
-                    max_luminance: if m.has_luminance != 0 { q(m.max_luminance) } else { None },
+                    red: if m.has_primaries != 0 {
+                        xy(m.display_primaries[0])
+                    } else {
+                        None
+                    },
+                    green: if m.has_primaries != 0 {
+                        xy(m.display_primaries[1])
+                    } else {
+                        None
+                    },
+                    blue: if m.has_primaries != 0 {
+                        xy(m.display_primaries[2])
+                    } else {
+                        None
+                    },
+                    white: if m.has_primaries != 0 {
+                        xy(m.white_point)
+                    } else {
+                        None
+                    },
+                    min_luminance: if m.has_luminance != 0 {
+                        q(m.min_luminance)
+                    } else {
+                        None
+                    },
+                    max_luminance: if m.has_luminance != 0 {
+                        q(m.max_luminance)
+                    } else {
+                        None
+                    },
                 });
             }
             if let Some(b) = get(ff::AV_PKT_DATA_CONTENT_LIGHT_LEVEL)
                 && b.len() >= std::mem::size_of::<ff::AVContentLightMetadata>()
             {
                 let c = &*(b.as_ptr() as *const ff::AVContentLightMetadata);
-                s.content_light = Some(ContentLight { max_cll: c.MaxCLL, max_fall: c.MaxFALL });
+                s.content_light = Some(ContentLight {
+                    max_cll: c.MaxCLL,
+                    max_fall: c.MaxFALL,
+                });
             }
             if let Some(b) = get(ff::AV_PKT_DATA_ICC_PROFILE) {
                 s.icc = Some(b.to_vec());
@@ -295,7 +357,11 @@ impl SideData {
                 // AVDOVIDecoderConfigurationRecord: version major/minor (u8 each),
                 // profile (u8), level (u8), rpu/el/bl present (u8 each),
                 // dv_bl_signal_compatibility_id (u8).
-                s.dovi = Some(HdrFormat::DolbyVision { profile: b[2], level: b[3], base_compatibility: b[7] });
+                s.dovi = Some(HdrFormat::DolbyVision {
+                    profile: b[2],
+                    level: b[3],
+                    base_compatibility: b[7],
+                });
             }
             if let Some(b) = get(ff::AV_PKT_DATA_DISPLAYMATRIX)
                 && b.len() >= 36

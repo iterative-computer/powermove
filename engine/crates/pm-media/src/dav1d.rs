@@ -5,7 +5,9 @@
 
 use crate::error::{MediaError, Result};
 use crate::ff::Packet;
-use crate::frame::{DecodedFrame, Layout, PixelFormat, PlaneDesc, PlaneFormat, Pixels, PoolFrame, PoolPlane};
+use crate::frame::{
+    DecodedFrame, Layout, PixelFormat, Pixels, PlaneDesc, PlaneFormat, PoolFrame, PoolPlane,
+};
 use crate::pool::{FramePool, SlotRef, ceil_rshift};
 use crate::sys::dav1d::*;
 use pm_protocol::color::{Range, SampleAlignment};
@@ -38,16 +40,31 @@ unsafe extern "C" fn alloc_picture(pic: *mut Dav1dPicture, cookie: *mut c_void) 
             if v.is_multiple_of(1024) { v + ALIGN } else { v }
         };
         let y_stride = round(aligned_w << hbd);
-        let uv_stride = if has_chroma { round((aligned_w >> ss_hor) << hbd) } else { 0 };
+        let uv_stride = if has_chroma {
+            round((aligned_w >> ss_hor) << hbd)
+        } else {
+            0
+        };
         let y_sz = y_stride * aligned_h;
         let uv_sz = uv_stride * (aligned_h >> ss_ver);
-        let Ok(slot) = c.pool.acquire(y_sz + 2 * uv_sz + DAV1D_PICTURE_ALIGNMENT as usize) else {
+        let Ok(slot) = c
+            .pool
+            .acquire(y_sz + 2 * uv_sz + DAV1D_PICTURE_ALIGNMENT as usize)
+        else {
             return -libc::ENOMEM;
         };
         let base = slot.ptr();
         (*pic).data[0] = base as *mut c_void;
-        (*pic).data[1] = if has_chroma { base.add(y_sz) as *mut c_void } else { std::ptr::null_mut() };
-        (*pic).data[2] = if has_chroma { base.add(y_sz + uv_sz) as *mut c_void } else { std::ptr::null_mut() };
+        (*pic).data[1] = if has_chroma {
+            base.add(y_sz) as *mut c_void
+        } else {
+            std::ptr::null_mut()
+        };
+        (*pic).data[2] = if has_chroma {
+            base.add(y_sz + uv_sz) as *mut c_void
+        } else {
+            std::ptr::null_mut()
+        };
         (*pic).stride[0] = y_stride as isize;
         (*pic).stride[1] = uv_stride as isize;
         (*pic).allocator_data = Box::into_raw(Box::new(slot)) as *mut c_void;
@@ -99,9 +116,15 @@ impl Dav1dDecoder {
             let mut ctx: *mut Dav1dContext = std::ptr::null_mut();
             let r = dav1d_open(&mut ctx, &s);
             if r != 0 || ctx.is_null() {
-                return Err(MediaError::Dav1d { what: "open".into(), code: r });
+                return Err(MediaError::Dav1d {
+                    what: "open".into(),
+                    code: r,
+                });
             }
-            Ok(Dav1dDecoder { ctx, _cookie: cookie })
+            Ok(Dav1dDecoder {
+                ctx,
+                _cookie: cookie,
+            })
         }
     }
 
@@ -115,7 +138,10 @@ impl Dav1dDecoder {
                 return Ok(());
             }
             if r != 0 {
-                return Err(MediaError::Dav1d { what: "get picture".into(), code: r });
+                return Err(MediaError::Dav1d {
+                    what: "get picture".into(),
+                    code: r,
+                });
             }
             out.push(adopt(pic)?);
         }
@@ -141,7 +167,10 @@ impl Dav1dDecoder {
                 }
                 if r != 0 {
                     dav1d_data_unref(&mut data);
-                    return Err(MediaError::Dav1d { what: "send data".into(), code: r });
+                    return Err(MediaError::Dav1d {
+                        what: "send data".into(),
+                        code: r,
+                    });
                 }
             }
         }
@@ -164,7 +193,9 @@ fn adopt(pic: Dav1dPicture) -> Result<DecodedFrame> {
         let owner = PicOwner(pic);
         let a = pic.allocator_data as *const SlotRef;
         if a.is_null() {
-            return Err(MediaError::decode("dav1d picture not from the pool allocator"));
+            return Err(MediaError::decode(
+                "dav1d picture not from the pool allocator",
+            ));
         }
         let slot = (*a).clone();
         let p = pic.p;
@@ -178,10 +209,19 @@ fn adopt(pic: Dav1dPicture) -> Result<DecodedFrame> {
         let (w, h) = (p.w as usize, p.h as usize);
         let plane = |i: usize, stride: isize| {
             let ptr = pic.data[i] as *const u8;
-            PoolPlane { slot: slot.clone(), offset: ptr.offset_from(slot.ptr()) as usize, stride: stride as usize, decoder_ptr: ptr as usize }
+            PoolPlane {
+                slot: slot.clone(),
+                offset: ptr.offset_from(slot.ptr()) as usize,
+                stride: stride as usize,
+                decoder_ptr: ptr as usize,
+            }
         };
         let (cw, ch) = (ceil_rshift(w, lw), ceil_rshift(h, lh));
-        let pf = if bits > 8 { PlaneFormat::R16 } else { PlaneFormat::R8 };
+        let pf = if bits > 8 {
+            PlaneFormat::R16
+        } else {
+            PlaneFormat::R8
+        };
         let full = !pic.seq_hdr.is_null() && (*pic.seq_hdr).color_range != 0;
         let sub = match (lw, lh) {
             (1, 1) => "420",
@@ -197,20 +237,43 @@ fn adopt(pic: Dav1dPicture) -> Result<DecodedFrame> {
             log2_chroma_h: lh,
             alpha_bits: 0,
             planes: vec![
-                PlaneDesc { format: pf, width: w, height: h },
-                PlaneDesc { format: pf, width: cw, height: ch },
-                PlaneDesc { format: pf, width: cw, height: ch },
+                PlaneDesc {
+                    format: pf,
+                    width: w,
+                    height: h,
+                },
+                PlaneDesc {
+                    format: pf,
+                    width: cw,
+                    height: ch,
+                },
+                PlaneDesc {
+                    format: pf,
+                    width: cw,
+                    height: ch,
+                },
             ],
             width: w,
             height: h,
-            label: format!("yuv{sub}p{}", if bits > 8 { format!("{bits}le") } else { String::new() }),
+            label: format!(
+                "yuv{sub}p{}",
+                if bits > 8 {
+                    format!("{bits}le")
+                } else {
+                    String::new()
+                }
+            ),
             rgba_premultiplied: false,
         };
         Ok(DecodedFrame {
             pts: pic.m.timestamp,
             format: Arc::new(format),
             pixels: Pixels::Pool(Arc::new(PoolFrame {
-                planes: vec![plane(0, pic.stride[0]), plane(1, pic.stride[1]), plane(2, pic.stride[1])],
+                planes: vec![
+                    plane(0, pic.stride[0]),
+                    plane(1, pic.stride[1]),
+                    plane(2, pic.stride[1]),
+                ],
                 owner: Some(Box::new(owner)),
                 copied: false,
             })),

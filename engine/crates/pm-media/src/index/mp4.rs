@@ -37,9 +37,16 @@ pub fn top_level(f: &File) -> Result<Vec<TopBox>> {
             s => (8, s),
         };
         if size < header {
-            return Err(MediaError::invalid(format!("bad top-level box size at {off}")));
+            return Err(MediaError::invalid(format!(
+                "bad top-level box size at {off}"
+            )));
         }
-        out.push(TopBox { ty, offset: off, header, size: size.min(len - off) });
+        out.push(TopBox {
+            ty,
+            offset: off,
+            header,
+            size: size.min(len - off),
+        });
         off += size;
     }
     Ok(out)
@@ -58,7 +65,10 @@ pub fn children(b: &[u8]) -> Result<Vec<([u8; 4], &[u8])>> {
             s => (8, s),
         };
         if size < hdr || (size - hdr) as usize > c.left() {
-            return Err(MediaError::invalid(format!("bad size for box {}", String::from_utf8_lossy(&ty))));
+            return Err(MediaError::invalid(format!(
+                "bad size for box {}",
+                String::from_utf8_lossy(&ty)
+            )));
         }
         out.push((ty, c.take((size - hdr) as usize)?));
     }
@@ -70,7 +80,8 @@ pub fn child<'a>(b: &'a [u8], ty: &[u8; 4]) -> Result<Option<&'a [u8]>> {
 }
 
 pub fn need<'a>(b: &'a [u8], ty: &[u8; 4]) -> Result<&'a [u8]> {
-    child(b, ty)?.ok_or_else(|| MediaError::invalid(format!("missing {} box", String::from_utf8_lossy(ty))))
+    child(b, ty)?
+        .ok_or_else(|| MediaError::invalid(format!("missing {} box", String::from_utf8_lossy(ty))))
 }
 
 /// The `moov` payload and the file's top-level layout.
@@ -95,7 +106,11 @@ impl Movie {
         c.skip(3)?;
         c.skip(if v == 1 { 16 } else { 8 })?;
         let timescale = c.u32()?;
-        Ok(Movie { moov, top, timescale })
+        Ok(Movie {
+            moov,
+            top,
+            timescale,
+        })
     }
 
     /// Every track.
@@ -119,7 +134,9 @@ impl Movie {
 
     /// `mvex/trex` defaults for a track (fragmented files).
     fn trex(&self, track: u32) -> Result<Option<Trex>> {
-        let Some(mvex) = child(&self.moov, b"mvex")? else { return Ok(None) };
+        let Some(mvex) = child(&self.moov, b"mvex")? else {
+            return Ok(None);
+        };
         for (ty, b) in children(mvex)? {
             if &ty != b"trex" {
                 continue;
@@ -184,7 +201,11 @@ impl<'a> Track<'a> {
         let id = c.u32()?;
         let mdia = need(trak, b"mdia")?;
         let hdlr = need(mdia, b"hdlr")?;
-        let handler: [u8; 4] = hdlr.get(8..12).ok_or_else(|| MediaError::invalid("short hdlr"))?.try_into().unwrap();
+        let handler: [u8; 4] = hdlr
+            .get(8..12)
+            .ok_or_else(|| MediaError::invalid("short hdlr"))?
+            .try_into()
+            .unwrap();
         let mut c = Cur::new(need(mdia, b"mdhd")?);
         let v = c.u8()?;
         c.skip(3)?;
@@ -202,14 +223,29 @@ impl<'a> Track<'a> {
             let v = c.u8()?;
             c.skip(3)?;
             for _ in 0..c.u32()? {
-                let (segment_duration, media_time) =
-                    if v == 1 { (c.u64()?, c.i64()?) } else { (c.u32()? as u64, c.i32()? as i64) };
+                let (segment_duration, media_time) = if v == 1 {
+                    (c.u64()?, c.i64()?)
+                } else {
+                    (c.u32()? as u64, c.i32()? as i64)
+                };
                 let rate = c.u16()? as i16 as i32;
                 let rate_fraction = c.u16()?;
-                edits.push(Edit { segment_duration, media_time, rate, rate_fraction });
+                edits.push(Edit {
+                    segment_duration,
+                    media_time,
+                    rate,
+                    rate_fraction,
+                });
             }
         }
-        Ok(Track { id, handler, timescale, trak, stbl, edits })
+        Ok(Track {
+            id,
+            handler,
+            timescale,
+            trak,
+            stbl,
+            edits,
+        })
     }
 
     /// The first sample entry: four-character code, coded size (visual
@@ -220,8 +256,14 @@ impl<'a> Track<'a> {
             return Err(MediaError::invalid("short stsd"));
         }
         let entries = children(&stsd[8..])?;
-        let (fourcc, body) = entries.first().copied().ok_or_else(|| MediaError::invalid("empty stsd"))?;
-        let mut cfg = CodecConfig { fourcc: Some(fourcc), ..Default::default() };
+        let (fourcc, body) = entries
+            .first()
+            .copied()
+            .ok_or_else(|| MediaError::invalid("empty stsd"))?;
+        let mut cfg = CodecConfig {
+            fourcc: Some(fourcc),
+            ..Default::default()
+        };
         if &self.handler == b"vide" {
             // VisualSampleEntry: 6 reserved + 2 data_reference_index + 70 bytes of fields.
             if body.len() < 78 {
@@ -229,7 +271,11 @@ impl<'a> Track<'a> {
             }
             cfg.width = u16::from_be_bytes([body[24], body[25]]);
             cfg.height = u16::from_be_bytes([body[26], body[27]]);
-            cfg.atoms = children(&body[78..]).unwrap_or_default().into_iter().map(|(t, p)| (t, p.to_vec())).collect();
+            cfg.atoms = children(&body[78..])
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(t, p)| (t, p.to_vec()))
+                .collect();
         } else if &self.handler == b"soun" && body.len() >= 28 {
             // AudioSampleEntry v0/v1/v2: child atoms after the version-dependent fields.
             let version = u16::from_be_bytes([body[8], body[9]]);
@@ -239,8 +285,11 @@ impl<'a> Track<'a> {
                 _ => 28,
             };
             if body.len() >= start {
-                cfg.atoms =
-                    children(&body[start..]).unwrap_or_default().into_iter().map(|(t, p)| (t, p.to_vec())).collect();
+                cfg.atoms = children(&body[start..])
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(t, p)| (t, p.to_vec()))
+                    .collect();
             }
         }
         Ok(cfg)
@@ -258,16 +307,32 @@ pub fn build(path: &Path, select: TrackSelect) -> Result<FrameIndex> {
     let fragmented = child(&movie.moov, b"mvex")?.is_some();
     if fragmented {
         let trex = movie.trex(track.id)?.unwrap_or_default();
-        let start_dts = samples.last().map(|s: &Sample| s.dts.unwrap_or(0) + s.duration).unwrap_or(0);
-        fragment_samples(&f, &movie.top, track.id, trex, start_dts, &mut samples, &mut stats)?;
+        let start_dts = samples
+            .last()
+            .map(|s: &Sample| s.dts.unwrap_or(0) + s.duration)
+            .unwrap_or(0);
+        fragment_samples(
+            &f,
+            &movie.top,
+            track.id,
+            trex,
+            start_dts,
+            &mut samples,
+            &mut stats,
+        )?;
     }
     if samples.is_empty() {
         return Err(MediaError::invalid("track has no samples"));
     }
-    let (frames, edit_desc) = apply_edits(&samples, &track.edits, movie.timescale, track.timescale)?;
+    let (frames, edit_desc) =
+        apply_edits(&samples, &track.edits, movie.timescale, track.timescale)?;
     stats.edit_list = edit_desc;
     let mut idx = FrameIndex {
-        source: if fragmented { IndexSource::Mp4Fragments } else { IndexSource::Mp4Tables },
+        source: if fragmented {
+            IndexSource::Mp4Fragments
+        } else {
+            IndexSource::Mp4Tables
+        },
         track: track.id as u64,
         timebase: Rational::new(1, track.timescale as i64)?,
         samples,
@@ -332,7 +397,11 @@ fn table_samples(stbl: &[u8], stats: &mut IndexStats) -> Result<Vec<Sample>> {
         let mut c = Cur::new(b);
         c.skip(4)?;
         let (fixed, count) = (c.u32()?, c.u32()? as usize);
-        if fixed != 0 { vec![fixed; count] } else { (0..count).map(|_| c.u32()).collect::<Result<_>>()? }
+        if fixed != 0 {
+            vec![fixed; count]
+        } else {
+            (0..count).map(|_| c.u32()).collect::<Result<_>>()?
+        }
     } else if let Some(b) = child(stbl, b"stz2")? {
         let mut c = Cur::new(b);
         c.skip(4 + 3)?;
@@ -364,12 +433,17 @@ fn table_samples(stbl: &[u8], stats: &mut IndexStats) -> Result<Vec<Sample>> {
         return Err(MediaError::invalid("no stsz or stz2"));
     };
     if sizes.len() != n {
-        return Err(MediaError::invalid(format!("stsz count {} != stts count {n}", sizes.len())));
+        return Err(MediaError::invalid(format!(
+            "stsz count {} != stts count {n}",
+            sizes.len()
+        )));
     }
     let chunk_off: Vec<u64> = if let Some(b) = child(stbl, b"stco")? {
         let mut c = Cur::new(b);
         c.skip(4)?;
-        (0..c.u32()?).map(|_| c.u32().map(|v| v as u64)).collect::<Result<_>>()?
+        (0..c.u32()?)
+            .map(|_| c.u32().map(|v| v as u64))
+            .collect::<Result<_>>()?
     } else {
         let mut c = Cur::new(need(stbl, b"co64")?);
         c.skip(4)?;
@@ -393,7 +467,11 @@ fn table_samples(stbl: &[u8], stats: &mut IndexStats) -> Result<Vec<Sample>> {
         while entry + 1 < stsc.len() && stsc[entry + 1].0 <= chunk {
             entry += 1;
         }
-        let per = stsc.get(entry).filter(|e| e.0 <= chunk).map(|e| e.1).unwrap_or(0);
+        let per = stsc
+            .get(entry)
+            .filter(|e| e.0 <= chunk)
+            .map(|e| e.1)
+            .unwrap_or(0);
         let mut o = base;
         for _ in 0..per {
             if s >= n {
@@ -405,7 +483,10 @@ fn table_samples(stbl: &[u8], stats: &mut IndexStats) -> Result<Vec<Sample>> {
         }
     }
     if offsets.len() != n {
-        return Err(MediaError::invalid(format!("stsc/stco cover {} of {n} samples", offsets.len())));
+        return Err(MediaError::invalid(format!(
+            "stsc/stco cover {} of {n} samples",
+            offsets.len()
+        )));
     }
     let mut dts = 0i64;
     let mut samples = Vec::with_capacity(n);
@@ -415,7 +496,11 @@ fn table_samples(stbl: &[u8], stats: &mut IndexStats) -> Result<Vec<Sample>> {
             cts: dts + cts_off[i],
             duration: durations[i] as i64,
             key: key[i],
-            loc: Loc::File { offset: offsets[i], size: sizes[i], additional: None },
+            loc: Loc::File {
+                offset: offsets[i],
+                size: sizes[i],
+                additional: None,
+            },
             nal_type: None,
         });
         dts += durations[i] as i64;
@@ -461,19 +546,43 @@ fn fragment_samples(
             let mut c = Cur::new(need(traf, b"tfhd")?);
             let flags = c.u32()? & 0x00FF_FFFF;
             let id = c.u32()?;
-            let base_data_offset = if flags & TFHD_BASE_DATA_OFFSET != 0 { Some(c.u64()?) } else { None };
+            let base_data_offset = if flags & TFHD_BASE_DATA_OFFSET != 0 {
+                Some(c.u64()?)
+            } else {
+                None
+            };
             if flags & TFHD_DESCRIPTION != 0 {
                 c.skip(4)?;
             }
-            let def_duration = if flags & TFHD_DURATION != 0 { c.u32()? } else { trex.duration };
-            let def_size = if flags & TFHD_SIZE != 0 { c.u32()? } else { trex.size };
-            let def_flags = if flags & TFHD_FLAGS != 0 { c.u32()? } else { trex.flags };
-            let base = base_data_offset.unwrap_or(if flags & TFHD_DEFAULT_BASE_IS_MOOF != 0 { m.offset } else { implicit_base });
+            let def_duration = if flags & TFHD_DURATION != 0 {
+                c.u32()?
+            } else {
+                trex.duration
+            };
+            let def_size = if flags & TFHD_SIZE != 0 {
+                c.u32()?
+            } else {
+                trex.size
+            };
+            let def_flags = if flags & TFHD_FLAGS != 0 {
+                c.u32()?
+            } else {
+                trex.flags
+            };
+            let base = base_data_offset.unwrap_or(if flags & TFHD_DEFAULT_BASE_IS_MOOF != 0 {
+                m.offset
+            } else {
+                implicit_base
+            });
             if let Some(tfdt) = child(traf, b"tfdt")? {
                 let mut c = Cur::new(tfdt);
                 let v = c.u8()?;
                 c.skip(3)?;
-                next_dts = if v == 1 { c.u64()? as i64 } else { c.u32()? as i64 };
+                next_dts = if v == 1 {
+                    c.u64()? as i64
+                } else {
+                    c.u32()? as i64
+                };
             }
             let mut data = base;
             for (ty, trun) in children(traf)? {
@@ -487,14 +596,38 @@ fn fragment_samples(
                 if tflags & TRUN_DATA_OFFSET != 0 {
                     data = (base as i64 + c.i32()? as i64) as u64;
                 }
-                let first_flags = if tflags & TRUN_FIRST_FLAGS != 0 { Some(c.u32()?) } else { None };
+                let first_flags = if tflags & TRUN_FIRST_FLAGS != 0 {
+                    Some(c.u32()?)
+                } else {
+                    None
+                };
                 for i in 0..count {
-                    let duration = if tflags & TRUN_DURATION != 0 { c.u32()? } else { def_duration };
-                    let size = if tflags & TRUN_SIZE != 0 { c.u32()? } else { def_size };
-                    let sflags = if tflags & TRUN_FLAGS != 0 { c.u32()? } else { def_flags };
-                    let sflags = if i == 0 { first_flags.unwrap_or(sflags) } else { sflags };
+                    let duration = if tflags & TRUN_DURATION != 0 {
+                        c.u32()?
+                    } else {
+                        def_duration
+                    };
+                    let size = if tflags & TRUN_SIZE != 0 {
+                        c.u32()?
+                    } else {
+                        def_size
+                    };
+                    let sflags = if tflags & TRUN_FLAGS != 0 {
+                        c.u32()?
+                    } else {
+                        def_flags
+                    };
+                    let sflags = if i == 0 {
+                        first_flags.unwrap_or(sflags)
+                    } else {
+                        sflags
+                    };
                     let cto = if tflags & TRUN_CTO != 0 {
-                        if version == 0 { c.u32()? as i64 } else { c.i32()? as i64 }
+                        if version == 0 {
+                            c.u32()? as i64
+                        } else {
+                            c.i32()? as i64
+                        }
                     } else {
                         0
                     };
@@ -504,7 +637,11 @@ fn fragment_samples(
                             cts: next_dts + cto,
                             duration: duration as i64,
                             key: sflags & NON_SYNC == 0,
-                            loc: Loc::File { offset: data, size, additional: None },
+                            loc: Loc::File {
+                                offset: data,
+                                size,
+                                additional: None,
+                            },
                             nal_type: None,
                         });
                         next_dts += duration as i64;
@@ -529,8 +666,22 @@ fn rescale(v: i64, from: i64, to: i64) -> i64 {
 /// their window (a sample straddling the window start is shown from the edit
 /// start); dwell edits (rate 0) hold one sample. Samples outside every edit
 /// are decoded but not presented.
-pub fn apply_edits(samples: &[Sample], edits: &[Edit], movie_ts: u32, media_ts: u32) -> Result<(Vec<Frame>, Option<String>)> {
-    let all = || samples.iter().enumerate().map(|(i, s)| Frame { sample: i, pts: s.cts }).collect();
+pub fn apply_edits(
+    samples: &[Sample],
+    edits: &[Edit],
+    movie_ts: u32,
+    media_ts: u32,
+) -> Result<(Vec<Frame>, Option<String>)> {
+    let all = || {
+        samples
+            .iter()
+            .enumerate()
+            .map(|(i, s)| Frame {
+                sample: i,
+                pts: s.cts,
+            })
+            .collect()
+    };
     if edits.is_empty() {
         return Ok((all(), None));
     }
@@ -541,7 +692,11 @@ pub fn apply_edits(samples: &[Sample], edits: &[Edit], movie_ts: u32, media_ts: 
     let mut pres = 0i64; // presentation position, media units
     let mut desc = Vec::new();
     let mut first_media = true;
-    let media_end = samples.iter().map(|s| s.cts + s.duration).max().unwrap_or(0);
+    let media_end = samples
+        .iter()
+        .map(|s| s.cts + s.duration)
+        .max()
+        .unwrap_or(0);
     for (k, e) in edits.iter().enumerate() {
         let dur = rescale(e.segment_duration as i64, movie_ts as i64, media_ts as i64);
         if e.media_time == -1 {
@@ -555,7 +710,11 @@ pub fn apply_edits(samples: &[Sample], edits: &[Edit], movie_ts: u32, media_ts: 
                 let start = e.media_time;
                 // A zero duration on the last edit means "to the end of the media"
                 // (fragmented files and some writers).
-                let end = if dur == 0 && last { media_end } else { start + dur };
+                let end = if dur == 0 && last {
+                    media_end
+                } else {
+                    start + dur
+                };
                 for (i, s) in samples.iter().enumerate() {
                     if s.cts + s.duration.max(1) > start && s.cts < end {
                         let mut pts = pres + (s.cts - start);
@@ -565,7 +724,14 @@ pub fn apply_edits(samples: &[Sample], edits: &[Edit], movie_ts: u32, media_ts: 
                         frames.push(Frame { sample: i, pts });
                     }
                 }
-                desc.push(format!("media_time {start} for {}", if dur == 0 && last { "rest".into() } else { dur.to_string() }));
+                desc.push(format!(
+                    "media_time {start} for {}",
+                    if dur == 0 && last {
+                        "rest".into()
+                    } else {
+                        dur.to_string()
+                    }
+                ));
                 pres += end - start;
                 first_media = false;
             }
@@ -577,7 +743,10 @@ pub fn apply_edits(samples: &[Sample], edits: &[Edit], movie_ts: u32, media_ts: 
                     .max_by_key(|(_, s)| s.cts)
                     .map(|(i, _)| i);
                 if let Some(i) = at {
-                    frames.push(Frame { sample: i, pts: pres });
+                    frames.push(Frame {
+                        sample: i,
+                        pts: pres,
+                    });
                 }
                 desc.push(format!("dwell at {} for {dur}", e.media_time));
                 pres += dur;
@@ -594,7 +763,10 @@ pub fn apply_edits(samples: &[Sample], edits: &[Edit], movie_ts: u32, media_ts: 
     if frames.is_empty() {
         return Err(MediaError::invalid("edit list presents no samples"));
     }
-    Ok((frames, Some(format!("{} edit(s): {}", edits.len(), desc.join(", ")))))
+    Ok((
+        frames,
+        Some(format!("{} edit(s): {}", edits.len(), desc.join(", "))),
+    ))
 }
 
 #[cfg(test)]
@@ -608,14 +780,23 @@ mod tests {
                 cts: c,
                 duration: 10,
                 key: false,
-                loc: Loc::Demux { pos: 0, nth: 0, size: 1 },
+                loc: Loc::Demux {
+                    pos: 0,
+                    nth: 0,
+                    size: 1,
+                },
                 nal_type: None,
             })
             .collect()
     }
 
     fn edit(dur: u64, media_time: i64, rate: i32) -> Edit {
-        Edit { segment_duration: dur, media_time, rate, rate_fraction: 0 }
+        Edit {
+            segment_duration: dur,
+            media_time,
+            rate,
+            rate_fraction: 0,
+        }
     }
 
     #[test]
@@ -623,15 +804,22 @@ mod tests {
         let s = samples(&[0, 10, 20, 30, 40]);
         let (f, _) = apply_edits(&s, &[edit(25, 15, 1)], 1, 1).unwrap();
         // Window [15, 40): samples at 10 (straddles), 20, 30.
-        assert_eq!(f.iter().map(|f| (f.sample, f.pts)).collect::<Vec<_>>(), vec![(1, -5), (2, 5), (3, 15)]);
+        assert_eq!(
+            f.iter().map(|f| (f.sample, f.pts)).collect::<Vec<_>>(),
+            vec![(1, -5), (2, 5), (3, 15)]
+        );
     }
 
     #[test]
     fn empty_edit_shifts_and_second_segment_repeats() {
         let s = samples(&[0, 10, 20, 30]);
         // 5 empty, then [0,20), then [0,10) again.
-        let (f, d) = apply_edits(&s, &[edit(5, -1, 1), edit(20, 0, 1), edit(10, 0, 1)], 1, 1).unwrap();
-        assert_eq!(f.iter().map(|f| (f.sample, f.pts)).collect::<Vec<_>>(), vec![(0, 5), (1, 15), (0, 25)]);
+        let (f, d) =
+            apply_edits(&s, &[edit(5, -1, 1), edit(20, 0, 1), edit(10, 0, 1)], 1, 1).unwrap();
+        assert_eq!(
+            f.iter().map(|f| (f.sample, f.pts)).collect::<Vec<_>>(),
+            vec![(0, 5), (1, 15), (0, 25)]
+        );
         assert!(d.unwrap().contains("3 edit(s)"));
     }
 
@@ -640,13 +828,21 @@ mod tests {
         let s = samples(&[0, 10, 20]);
         // Movie timescale 1, media 10: 2 movie units = 20 media units.
         let (f, _) = apply_edits(&s, &[edit(2, 0, 1), edit(1, 15, 0)], 1, 10).unwrap();
-        assert_eq!(f.iter().map(|f| (f.sample, f.pts)).collect::<Vec<_>>(), vec![(0, 0), (1, 10), (1, 20)]);
+        assert_eq!(
+            f.iter().map(|f| (f.sample, f.pts)).collect::<Vec<_>>(),
+            vec![(0, 0), (1, 10), (1, 20)]
+        );
     }
 
     #[test]
     fn unusual_rates_are_unsupported() {
         let s = samples(&[0, 10]);
-        let e = Edit { segment_duration: 10, media_time: 0, rate: 0, rate_fraction: 0x8000 };
+        let e = Edit {
+            segment_duration: 10,
+            media_time: 0,
+            rate: 0,
+            rate_fraction: 0x8000,
+        };
         assert!(apply_edits(&s, &[e], 1, 1).unwrap_err().is_unsupported());
     }
 }

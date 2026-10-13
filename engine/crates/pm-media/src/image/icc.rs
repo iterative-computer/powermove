@@ -49,7 +49,11 @@ fn xyz(icc: &[u8], sig: &[u8; 4]) -> Option<[f64; 3]> {
 
 /// The sRGB EOTF (IEC 61966-2-1).
 fn srgb(v: f64) -> f64 {
-    if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// Whether a `curv` or `para` tone curve is the sRGB curve (within 1/1024
@@ -66,20 +70,38 @@ fn is_srgb_curve(t: &[u8]) -> bool {
                 let p = x * (n - 1) as f64;
                 let i = (p.floor() as usize).min(n - 2);
                 let f = p - i as f64;
-                let a = u16::from_be_bytes(t.get(12 + 2 * i..14 + 2 * i)?.try_into().ok()?) as f64 / 65535.0;
-                let b = u16::from_be_bytes(t.get(14 + 2 * i..16 + 2 * i)?.try_into().ok()?) as f64 / 65535.0;
+                let a = u16::from_be_bytes(t.get(12 + 2 * i..14 + 2 * i)?.try_into().ok()?) as f64
+                    / 65535.0;
+                let b = u16::from_be_bytes(t.get(14 + 2 * i..16 + 2 * i)?.try_into().ok()?) as f64
+                    / 65535.0;
                 Some(a + (b - a) * f)
             })
         }
         Some(b"para") => {
-            let Some(kind) = t.get(8..10).map(|k| u16::from_be_bytes([k[0], k[1]])) else { return false };
+            let Some(kind) = t.get(8..10).map(|k| u16::from_be_bytes([k[0], k[1]])) else {
+                return false;
+            };
             if kind != 3 && kind != 4 {
                 return false;
             }
             let Some(g) = s15(t, 12) else { return false };
-            let (Some(a), Some(b), Some(c), Some(d)) = (s15(t, 16), s15(t, 20), s15(t, 24), s15(t, 28)) else { return false };
-            let (e, f) = if kind == 4 { (s15(t, 32).unwrap_or(0.0), s15(t, 36).unwrap_or(0.0)) } else { (0.0, 0.0) };
-            Box::new(move |x: f64| Some(if x >= d { (a * x + b).max(0.0).powf(g) + e } else { c * x + f }))
+            let (Some(a), Some(b), Some(c), Some(d)) =
+                (s15(t, 16), s15(t, 20), s15(t, 24), s15(t, 28))
+            else {
+                return false;
+            };
+            let (e, f) = if kind == 4 {
+                (s15(t, 32).unwrap_or(0.0), s15(t, 36).unwrap_or(0.0))
+            } else {
+                (0.0, 0.0)
+            };
+            Box::new(move |x: f64| {
+                Some(if x >= d {
+                    (a * x + b).max(0.0).powf(g) + e
+                } else {
+                    c * x + f
+                })
+            })
         }
         _ => return false,
     };
@@ -105,16 +127,27 @@ pub fn classify(icc: &[u8]) -> IccClass {
     if space != b"RGB " {
         return IccClass::Other;
     }
-    let (Some(r), Some(g), Some(b)) = (xyz(icc, b"rXYZ"), xyz(icc, b"gXYZ"), xyz(icc, b"bXYZ")) else {
+    let (Some(r), Some(g), Some(b)) = (xyz(icc, b"rXYZ"), xyz(icc, b"gXYZ"), xyz(icc, b"bXYZ"))
+    else {
         return IccClass::Other;
     };
-    let curves = [b"rTRC", b"gTRC", b"bTRC"].iter().all(|s| tag(icc, s).is_some_and(is_srgb_curve));
+    let curves = [b"rTRC", b"gTRC", b"bTRC"]
+        .iter()
+        .all(|s| tag(icc, s).is_some_and(is_srgb_curve));
     if !curves {
         return IccClass::Other;
     }
     // D50-adapted colorants (ICC v4 Bradford adaptation from D65).
-    const SRGB: [[f64; 3]; 3] = [[0.4361, 0.2225, 0.0139], [0.3851, 0.7169, 0.0971], [0.1431, 0.0606, 0.7141]];
-    const P3: [[f64; 3]; 3] = [[0.5151, 0.2412, -0.0011], [0.2920, 0.6922, 0.0419], [0.1571, 0.0666, 0.7841]];
+    const SRGB: [[f64; 3]; 3] = [
+        [0.4361, 0.2225, 0.0139],
+        [0.3851, 0.7169, 0.0971],
+        [0.1431, 0.0606, 0.7141],
+    ];
+    const P3: [[f64; 3]; 3] = [
+        [0.5151, 0.2412, -0.0011],
+        [0.2920, 0.6922, 0.0419],
+        [0.1571, 0.0666, 0.7841],
+    ];
     if close(r, SRGB[0]) && close(g, SRGB[1]) && close(b, SRGB[2]) {
         IccClass::Srgb
     } else if close(r, P3[0]) && close(g, P3[1]) && close(b, P3[2]) {
@@ -132,7 +165,11 @@ mod tests {
     pub(crate) fn profile(colorants: [[f64; 3]; 3], gamma_only: bool) -> Vec<u8> {
         let fx = |v: f64| ((v * 65536.0).round() as i32).to_be_bytes();
         let mut tags: Vec<([u8; 4], Vec<u8>)> = vec![];
-        for (sig, c) in [(*b"rXYZ", colorants[0]), (*b"gXYZ", colorants[1]), (*b"bXYZ", colorants[2])] {
+        for (sig, c) in [
+            (*b"rXYZ", colorants[0]),
+            (*b"gXYZ", colorants[1]),
+            (*b"bXYZ", colorants[2]),
+        ] {
             let mut t = b"XYZ \0\0\0\0".to_vec();
             for v in c {
                 t.extend_from_slice(&fx(v));
@@ -172,11 +209,23 @@ mod tests {
 
     #[test]
     fn classifies_by_colorants_and_curves() {
-        let srgb = [[0.4361, 0.2225, 0.0139], [0.3851, 0.7169, 0.0971], [0.1431, 0.0606, 0.7141]];
-        let p3 = [[0.5151, 0.2412, -0.0011], [0.2920, 0.6922, 0.0419], [0.1571, 0.0666, 0.7841]];
+        let srgb = [
+            [0.4361, 0.2225, 0.0139],
+            [0.3851, 0.7169, 0.0971],
+            [0.1431, 0.0606, 0.7141],
+        ];
+        let p3 = [
+            [0.5151, 0.2412, -0.0011],
+            [0.2920, 0.6922, 0.0419],
+            [0.1571, 0.0666, 0.7841],
+        ];
         assert_eq!(classify(&profile(srgb, false)), IccClass::Srgb);
         assert_eq!(classify(&profile(p3, false)), IccClass::DisplayP3);
-        assert_eq!(classify(&profile(srgb, true)), IccClass::Other, "gamma 2.2 is not the sRGB curve");
+        assert_eq!(
+            classify(&profile(srgb, true)),
+            IccClass::Other,
+            "gamma 2.2 is not the sRGB curve"
+        );
         assert_eq!(classify(&[0u8; 40]), IccClass::Other);
     }
 

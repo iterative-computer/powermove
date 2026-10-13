@@ -16,7 +16,9 @@ pub mod raster;
 pub mod sequence;
 
 use crate::error::{MediaError, Result};
-use crate::frame::{DecodedFrame, Layout, PixelFormat, PlaneDesc, PlaneFormat, Pixels, PoolFrame, PoolPlane};
+use crate::frame::{
+    DecodedFrame, Layout, PixelFormat, Pixels, PlaneDesc, PlaneFormat, PoolFrame, PoolPlane,
+};
 use crate::pool::{FramePool, ROW_ALIGN};
 use icc::IccClass;
 use pm_protocol::color::{AlphaMode, Range, SampleAlignment, Transfer};
@@ -136,7 +138,9 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
     match format {
         ImageFormat::Exr => exr::read(path, pool),
         ImageFormat::Dpx => ffmpeg_still(path, pool),
-        ImageFormat::Heif | ImageFormat::Avif | ImageFormat::Other => imageio::read_frame(path, 0, pool, format),
+        ImageFormat::Heif | ImageFormat::Avif | ImageFormat::Other => {
+            imageio::read_frame(path, 0, pool, format)
+        }
         _ => raster::read(path, pool, format),
     }
 }
@@ -166,7 +170,15 @@ pub(crate) enum Rgba<'a> {
 }
 
 /// Copies packed RGBA rows into a pool frame (Metal-aligned rows).
-pub(crate) fn pool_rgba(pool: &FramePool, w: usize, h: usize, px: Rgba<'_>, premultiplied: bool, bits: u8, label: String) -> Result<DecodedFrame> {
+pub(crate) fn pool_rgba(
+    pool: &FramePool,
+    w: usize,
+    h: usize,
+    px: Rgba<'_>,
+    premultiplied: bool,
+    bits: u8,
+    label: String,
+) -> Result<DecodedFrame> {
     let (pf, bpp) = match px {
         Rgba::U8(_) => (PlaneFormat::Rgba8, 4),
         Rgba::U16(_) => (PlaneFormat::Rgba16, 8),
@@ -177,14 +189,25 @@ pub(crate) fn pool_rgba(pool: &FramePool, w: usize, h: usize, px: Rgba<'_>, prem
     let slot = pool.acquire(stride * h.max(1))?;
     let src: &[u8] = match px {
         Rgba::U8(v) => v,
-        Rgba::U16(v) | Rgba::F16(v) => unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 2) },
+        Rgba::U16(v) | Rgba::F16(v) => unsafe {
+            std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 2)
+        },
         Rgba::F32(v) => unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) },
     };
     if src.len() < w * h * bpp {
-        return Err(MediaError::Image(format!("{} bytes for a {w}×{h} image", src.len())));
+        return Err(MediaError::Image(format!(
+            "{} bytes for a {w}×{h} image",
+            src.len()
+        )));
     }
     for y in 0..h {
-        unsafe { std::ptr::copy_nonoverlapping(src.as_ptr().add(y * w * bpp), slot.ptr().add(y * stride), w * bpp) };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                src.as_ptr().add(y * w * bpp),
+                slot.ptr().add(y * stride),
+                w * bpp,
+            )
+        };
     }
     let float = matches!(pf, PlaneFormat::Rgba16Float | PlaneFormat::Rgba32Float);
     Ok(DecodedFrame {
@@ -197,14 +220,23 @@ pub(crate) fn pool_rgba(pool: &FramePool, w: usize, h: usize, px: Rgba<'_>, prem
             log2_chroma_w: 0,
             log2_chroma_h: 0,
             alpha_bits: if float { 16 } else { bits },
-            planes: vec![PlaneDesc { format: pf, width: w, height: h }],
+            planes: vec![PlaneDesc {
+                format: pf,
+                width: w,
+                height: h,
+            }],
             width: w,
             height: h,
             label,
             rgba_premultiplied: premultiplied,
         }),
         pixels: Pixels::Pool(Arc::new(PoolFrame {
-            planes: vec![PoolPlane { decoder_ptr: slot.ptr() as usize, slot, offset: 0, stride }],
+            planes: vec![PoolPlane {
+                decoder_ptr: slot.ptr() as usize,
+                slot,
+                offset: 0,
+                stride,
+            }],
             owner: None,
             copied: true,
         })),
@@ -213,7 +245,13 @@ pub(crate) fn pool_rgba(pool: &FramePool, w: usize, h: usize, px: Rgba<'_>, prem
 }
 
 /// Applies EXIF orientation (1 to 8) to packed pixels of `c` components.
-pub(crate) fn orient<T: Copy>(px: &[T], w: usize, h: usize, c: usize, orientation: u8) -> (Vec<T>, usize, usize) {
+pub(crate) fn orient<T: Copy>(
+    px: &[T],
+    w: usize,
+    h: usize,
+    c: usize,
+    orientation: u8,
+) -> (Vec<T>, usize, usize) {
     let swap = matches!(orientation, 5..=8);
     let (ow, oh) = if swap { (h, w) } else { (w, h) };
     let mut out = Vec::with_capacity(px.len());
@@ -242,7 +280,9 @@ pub(crate) fn orient<T: Copy>(px: &[T], w: usize, h: usize, c: usize, orientatio
 pub fn ffmpeg_still(path: &Path, pool: &FramePool) -> Result<StillImage> {
     use crate::ff::{Input, PacketReader};
     let input = Input::open(path)?;
-    let v = input.best_video().ok_or_else(|| MediaError::invalid("no image stream"))?;
+    let v = input
+        .best_video()
+        .ok_or_else(|| MediaError::invalid("no image stream"))?;
     let idx = crate::index::build(path, &input, v)?;
     let mut dec = crate::ff::decoder::FfDecoder::new(&input, v, None, pool.clone(), 1)?;
     let mut reader = PacketReader::new(path, v)?;
@@ -252,14 +292,24 @@ pub fn ffmpeg_still(path: &Path, pool: &FramePool) -> Result<StillImage> {
         dec.send(Some(p), &mut out)?;
     }
     dec.send(None, &mut out)?;
-    let frame = out.into_iter().next().ok_or_else(|| MediaError::decode("FFmpeg output no image"))?;
+    let frame = out
+        .into_iter()
+        .next()
+        .ok_or_else(|| MediaError::decode("FFmpeg output no image"))?;
     let bits = frame.format.bits;
     Ok(StillImage {
         format: ImageFormat::Dpx,
         backend: ImageBackend::Ffmpeg,
         bit_depth: bits,
         float: false,
-        color: ImageColor { icc: None, icc_bytes: None, icc_class: None, transfer: Transfer::DisplayE, alpha: AlphaMode::Straight, chromaticities: None },
+        color: ImageColor {
+            icc: None,
+            icc_bytes: None,
+            icc_class: None,
+            transfer: Transfer::DisplayE,
+            alpha: AlphaMode::Straight,
+            chromaticities: None,
+        },
         orientation: 1,
         frame,
     })
@@ -285,8 +335,14 @@ mod tests {
     #[test]
     fn sniffs_formats() {
         assert_eq!(sniff(b"\x89PNG\r\n\x1a\n...."), ImageFormat::Png);
-        assert_eq!(sniff(b"\0\0\0\x1cftypheic\0\0\0\0mif1heic"), ImageFormat::Heif);
+        assert_eq!(
+            sniff(b"\0\0\0\x1cftypheic\0\0\0\0mif1heic"),
+            ImageFormat::Heif
+        );
         assert_eq!(sniff(b"\0\0\0\x1cftypavif\0\0\0\0"), ImageFormat::Avif);
-        assert_eq!(sniff(&[0x76, 0x2F, 0x31, 0x01, 2, 0, 0, 0]), ImageFormat::Exr);
+        assert_eq!(
+            sniff(&[0x76, 0x2F, 0x31, 0x01, 2, 0, 0, 0]),
+            ImageFormat::Exr
+        );
     }
 }
