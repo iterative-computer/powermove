@@ -62,7 +62,7 @@
     "project-replace": 7,
     "touch": 52,
     "touch.paths": 1,
-    "doc.write": 15,
+    "doc.write": 16,
     "doc.touched": 4,
     "anim.touch": 24,
     "shader-uniforms": 9,
@@ -705,73 +705,79 @@
       "code": "PM.proj = loadBootProject()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:563",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:484",
+      "class": "doc.write",
+      "scope": "install > revalidateContributionPlaceholders",
+      "code": "writeDocument(PM, paths, revalidateContributions)"
+    },
+    {
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:574",
       "class": "hist.do",
       "scope": "install > writeExportDefaults",
       "code": "PM.hist.do('Export settings', () => { PM.proj.exportDefaults = next; })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1053",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1064",
       "class": "project-swap",
       "scope": "install > switchProject",
       "code": "PM.proj = live ? live.project : hydrate(p)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1057",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1068",
       "class": "doc.write",
       "scope": "install > switchProject",
       "code": "writeDocument(PM, [['name']], () => { PM.proj.name = name; })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1387",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1398",
       "class": "asset-metadata",
       "scope": "install > importFiles",
       "code": "meta.folder = target"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1388",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1399",
       "class": "doc.touched",
       "scope": "install > importFiles",
       "code": "touchedDocument(PM, [['assets', result.asset.id, 'folder']])"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1398",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1409",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "targetProject.w = source.w"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1399",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1410",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "targetProject.h = source.h"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1403",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1414",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "targetProject.fps = rate.fps"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1404",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1415",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "targetProject.fpsRational = rate.fpsRational"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1405",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1416",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "targetProject.exportDefaults = { ...readExportDefaults(), fps: rate.fps }"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1408",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1419",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "targetProject.dur = source.dur"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1409",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1420",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "targetProject.work = [0, source.dur]"
