@@ -25,7 +25,7 @@ import { DocumentBarrier, type ConsistencyResult, type PatchBatch } from './barr
 import { ShadowAuditor } from './auditor';
 import { DualAnswers } from './dual';
 import { OFF, rendererMode, type EngineDocMode } from './flags';
-import { NativeApi } from './native';
+import { findPath, NativeApi } from './native';
 import { createTracker, patchCloning, querySite, type Tracker } from './proxy';
 import { hostSink, Reporter, type Sink } from './report';
 import { compileFrom, instantiate, MODULE_PATH, type PmWasm } from './wasm';
@@ -247,7 +247,14 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   // (temporal-bridge.ts): a known writer without a path.
   setEvaluationWriter({
     scope: fn => { writerDepth += 1; try { return fn(); } finally { writerDepth -= 1; } },
-    wrote: () => barrier?.touchAll(),
+    // The keys are usually in a composition that is not open (a precomp's
+    // layer evaluated for the open one): find them and name their path.
+    // Keys outside the document (a detached layer) are not a document write.
+    wrote: (keys) => {
+      if (!barrier) return;
+      const path = findPath(current, unwrap(keys), 16);
+      if (path) barrier.touched([path]);
+    },
   });
 
   // ── the native evaluator ──────────────────────────────────────────────

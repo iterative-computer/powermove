@@ -404,6 +404,27 @@ describe('deepKeyOrder', () => {
 });
 
 describe.skipIf(!built)('the tracking Proxy', () => {
+  it('names the path of keys adopted in a composition that is not open', async () => {
+    const { PM, doc } = await editor('audit');
+    const sub = PM.mkProject({ w: 100, h: 100, dur: 2 });
+    const star = PM.mkLayer('solid', {}, sub);
+    star.p.rotation.kf = [
+      { t: 0, v: 0, eo: [0.4, 0], inInterp: 'bezier', outInterp: 'bezier' },
+      { t: 1, v: 90, ei: [0.6, 1], inInterp: 'bezier', outInterp: 'bezier' },
+    ];
+    sub.layers.push(star);
+    PM.hist.do('Nest', () => { PM.proj.comps[sub.id] = sub; });
+    doc.barrier!.flush();
+    const diffs = doc.barrier!.stats.structuralDiffs;
+    // Evaluating the nested layer adopts its keys (a write in comps[sub.id]).
+    PM.ev(star, 'rotation', 0.5);
+    expect(Object.prototype.propertyIsEnumerable.call(star.p.rotation.kf[0], 'eo')).toBe(false);
+    doc.barrier!.flush();
+    expect(doc.barrier!.stats.structuralDiffs).toBe(diffs);
+    expect(doc.auditor!.audit()).toBe(true);
+    expect(doc.check('test')!.ok).toBe(true);
+  });
+
   it('treats legacy key adoption during evaluation as a known writer, and keeps the mirror right', async () => {
     const { PM, doc } = await editor('strict');
     PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid')));

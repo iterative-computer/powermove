@@ -8,8 +8,8 @@ const owners = new WeakMap<object,any[]>();
 export interface EvaluationWriter {
   /** Runs an adoption as a known document writer. */
   scope<T>(fn: () => T): T;
-  /** The adoption changed the keys' JSON. */
-  wrote(): void;
+  /** The adoption changed the JSON of these keys. */
+  wrote(keys: any[]): void;
 }
 let writer: EvaluationWriter | null = null;
 export function setEvaluationWriter(next: EvaluationWriter | null): void { writer = next; }
@@ -34,11 +34,11 @@ export function temporalKeys(keys: any[], version?:number): any[] {
   const before = writer && rewritesKeys(keys) ? JSON.stringify(keys) : null;
   if (keys.every(key=>owners.get(key)===keys)) {
     adopt(() => refreshAutoBezier(keys));
-    if (before !== null && JSON.stringify(keys) !== before) writer?.wrote();
+    if (before !== null && JSON.stringify(keys) !== before) writer?.wrote(keys);
     return keys;
   }
   adopt(() => adoptAccessors(keys));
-  if (before !== null && JSON.stringify(keys) !== before) writer?.wrote();
+  if (before !== null && JSON.stringify(keys) !== before) writer?.wrote(keys);
   return keys;
 }
 function adoptAccessors(keys: any[]): void {
@@ -99,7 +99,7 @@ export function temporalEvaluate(keys:any[],time:number,version:number,spring:(t
     // Evaluation needs native timing data, not a legacy UI accessor on every key.
     const before = writer && rewritesKeys(keys) ? JSON.stringify(keys) : null;
     adopt(() => adoptTemporalEase(keys));
-    if (before !== null && JSON.stringify(keys) !== before) writer?.wrote();
+    if (before !== null && JSON.stringify(keys) !== before) writer?.wrote(keys);
     state={version,length:keys.length,first:keys[0],last:keys[keys.length-1],curves:[]};prepared.set(keys,state);
   }
   if (state.evaluatedTime === time && state.evaluatedSpring === spring) return state.evaluatedValue!;
