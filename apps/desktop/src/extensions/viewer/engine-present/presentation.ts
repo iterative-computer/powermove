@@ -93,6 +93,9 @@ export type PresentationOptions = {
   timers?: { set(fn: () => void, ms: number): number; clear(id: number): void };
   /** Records per-frame timings (the S1 measurement harness). */
   trace?: boolean;
+  /** `off`: present 8-bit (`bgra` with dither) even on an EDR display
+   *  (a setting, and the harness's comparison); `auto` follows the display. */
+  edr?: 'auto' | 'off';
   log?: (level: 'info' | 'warn' | 'error', message: string) => void;
 };
 
@@ -180,7 +183,7 @@ export class ViewerPresentation {
       cssWidth: size.width,
       cssHeight: size.height,
       devicePixelRatio: dpr,
-      edr: displayIsEdr(view),
+      edr: this.options.edr !== 'off' && displayIsEdr(view),
       colorSpace: canvasColorSpace(view)
     });
     if (!changed) return;
