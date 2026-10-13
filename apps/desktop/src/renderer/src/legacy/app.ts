@@ -473,6 +473,17 @@ PM.bus.emit('project');
    provider activates, and becomes safely disabled again if that provider is
    turned off. Saved parameters and keyframes remain on the same objects. */
 function revalidateContributionPlaceholders() {
+  // Every layer with effects or transitions is rewritten in place (keys are
+  // normalized even when nothing else changes): the native engine's write
+  // barrier gets their paths.
+  const paths: any[][] = [];
+  const containers: Array<[any, any[]]> = [[PM.proj, []], ...Object.entries(PM.proj?.comps || {}).map(([id, comp]) => [comp, ['comps', id]] as [any, any[]])];
+  for (const [container, base] of containers) (container?.layers || []).forEach((layer: any, index: number) => {
+    if (layer?.fx?.length || layer?.transitionIn || layer?.transitionOut) paths.push([...base, 'layers', index]);
+  });
+  writeDocument(PM, paths, revalidateContributions);
+}
+function revalidateContributions() {
   let changed = false;
   const containers = [PM.proj, ...Object.values(PM.proj?.comps || {})] as any[];
   for (const container of containers) {
