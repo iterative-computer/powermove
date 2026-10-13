@@ -38,14 +38,15 @@ export function engineAddonPath(options: { isPackaged: boolean; resourcesPath: s
 }
 
 /** Where the pm-bridge addon is (the frame bridge in main, section 18):
- *  unpacked from the asar in a packaged app, `native/` in development, or
- *  POWERMOVE_PM_BRIDGE. */
+ *  POWERMOVE_PM_BRIDGE, else unpacked from the asar in a packaged app, else
+ *  the development build that the font registry also loads
+ *  (engine/target/pm-bridge, engine-fonts.ts), so main loads one copy. */
 export function bridgeAddonPath(options: { isPackaged: boolean; resourcesPath: string; appPath: string; env: Record<string, string | undefined> }): string {
   const override = options.env['POWERMOVE_PM_BRIDGE'];
   if (override && path.isAbsolute(override)) return override;
   return options.isPackaged
     ? path.join(options.resourcesPath, 'app.asar.unpacked', 'native', BRIDGE_ADDON_FILE)
-    : path.join(options.appPath, 'native', BRIDGE_ADDON_FILE);
+    : path.resolve(options.appPath, '../../engine/target/pm-bridge', BRIDGE_ADDON_FILE);
 }
 
 /** Loads pm-bridge, or explains why viewer frames are unavailable. */
