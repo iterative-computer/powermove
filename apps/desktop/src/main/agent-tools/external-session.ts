@@ -94,7 +94,7 @@ export class ExternalAgentSession {
         checkCurrent();
         await validateStagedExtensions(snapshot, input.extensions);
         checkCurrent();
-        return publishExtensionChanges(snapshot, input.extensions);
+        return publishExtensionChanges(snapshot, input.extensions, checkCurrent);
       }, input.extensions.map(change => change.id));
       const result = (stagingDirectory: string | null) => ({ changeSetId: changeSet?.id ?? null, extensions: input.extensions, stagingDirectory });
       await this.options.refreshExtensions?.(input.extensions.map(change => change.id));

@@ -11,6 +11,18 @@ const MAX_BYTES = 32 * 1024 * 1024;
 const RECORD_FILE = 'change-set.json';
 const SNAPSHOT_PREFIX = '.snapshot-';
 
+const liveTransactions = new Map<string, Promise<void>>();
+
+/** One live tree owns its publication, recovery and baseline snapshots. */
+function withLiveTransaction<T>(liveDirectory: string, task: () => Promise<T>): Promise<T> {
+  const key = path.resolve(liveDirectory);
+  const next = (liveTransactions.get(key) ?? Promise.resolve()).then(task);
+  const settled = next.then(() => undefined, () => undefined);
+  liveTransactions.set(key, settled);
+  void settled.then(() => { if (liveTransactions.get(key) === settled) liveTransactions.delete(key); });
+  return next;
+}
+
 export interface ExtensionStage {
   liveDirectory: string;
   stagingDirectory: string;
@@ -38,10 +50,14 @@ export async function prepareExtensionStage(options: {
   projectId: string;
   runId: string;
 }): Promise<ExtensionStage> {
+  return withLiveTransaction(options.liveDirectory, () => prepareExtensionStageLocked(options));
+}
+
+async function prepareExtensionStageLocked(options: Parameters<typeof prepareExtensionStage>[0]): Promise<ExtensionStage> {
   for (const directory of [options.liveDirectory, options.stagingDirectory, options.historyRoot]) {
     if (!path.isAbsolute(directory)) throw new Error('Extension isolation paths must be absolute.');
   }
-  await recoverInterruptedExtensionTransactions(options.historyRoot, options.liveDirectory);
+  await recoverInterruptedExtensionTransactionsLocked(options.historyRoot, options.liveDirectory);
   await fs.mkdir(options.liveDirectory, { recursive: true });
   await fs.rm(options.stagingDirectory, { recursive: true, force: true });
   await copyRegularTree(options.liveDirectory, options.stagingDirectory);
@@ -92,8 +108,18 @@ export async function withStageSnapshot<T>(
 
 export async function publishExtensionChanges(
   stage: ExtensionStage & { unchanged?: readonly string[] },
-  declaredChanges: readonly AgentExtensionChange[]
+  declaredChanges: readonly AgentExtensionChange[],
+  assertCurrent?: () => void
 ): Promise<ExtensionChangeSetRecord | null> {
+  return withLiveTransaction(stage.liveDirectory, () => publishExtensionChangesLocked(stage, declaredChanges, assertCurrent));
+}
+
+async function publishExtensionChangesLocked(
+  stage: ExtensionStage & { unchanged?: readonly string[] },
+  declaredChanges: readonly AgentExtensionChange[],
+  assertCurrent?: () => void
+): Promise<ExtensionChangeSetRecord | null> {
+  assertCurrent?.();
   const currentHashes = await extensionHashes(stage.liveDirectory);
   if (hashMap(currentHashes) !== stage.baselineRootHash) {
     throw new Error('Extensions changed while the agent was working. Nothing was overwritten; retry the request.');
@@ -158,6 +184,9 @@ export async function publishExtensionChanges(
   await fs.writeFile(path.join(pending, RECORD_FILE), `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
 
   try {
+    // A queued client may have disconnected during preparation. Check once
+    // before any live swap; a started promotion still completes or rolls back.
+    assertCurrent?.();
     for (const id of actualIds) {
       const live = path.join(stage.liveDirectory, id);
       if (await exists(live)) await fs.rename(live, path.join(before, id));
@@ -181,8 +210,12 @@ export async function restoreExtensionChangeSet(options: {
   historyRoot: string;
   changeSetId: string;
 }): Promise<ExtensionChangeSetRecord> {
+  return withLiveTransaction(options.liveDirectory, () => restoreExtensionChangeSetLocked(options));
+}
+
+async function restoreExtensionChangeSetLocked(options: Parameters<typeof restoreExtensionChangeSet>[0]): Promise<ExtensionChangeSetRecord> {
   if (!/^[A-Za-z0-9_-]{1,160}$/.test(options.changeSetId)) throw new Error('Invalid extension change-set id.');
-  await recoverInterruptedExtensionTransactions(options.historyRoot, options.liveDirectory);
+  await recoverInterruptedExtensionTransactionsLocked(options.historyRoot, options.liveDirectory);
   const directory = path.join(options.historyRoot, options.changeSetId);
   const record = JSON.parse(await fs.readFile(path.join(directory, RECORD_FILE), 'utf8')) as ExtensionChangeSetRecord;
   const currentHash = hashMap(await extensionHashes(options.liveDirectory));
@@ -215,6 +248,10 @@ export async function restoreExtensionChangeSet(options: {
 }
 
 export async function recoverInterruptedExtensionTransactions(historyRoot: string, liveDirectory: string): Promise<void> {
+  return withLiveTransaction(liveDirectory, () => recoverInterruptedExtensionTransactionsLocked(historyRoot, liveDirectory));
+}
+
+async function recoverInterruptedExtensionTransactionsLocked(historyRoot: string, liveDirectory: string): Promise<void> {
   await fs.mkdir(historyRoot, { recursive: true });
   const entries = await fs.readdir(historyRoot, { withFileTypes: true });
   for (const entry of entries) {
@@ -231,12 +268,16 @@ export async function recoverInterruptedExtensionTransactions(historyRoot: strin
 
 /** Boot-time repair across every project before the extension registry scans live files. */
 export async function recoverAllInterruptedExtensionTransactions(userData: string, liveDirectory: string): Promise<void> {
+  return withLiveTransaction(liveDirectory, () => recoverAllInterruptedExtensionTransactionsLocked(userData, liveDirectory));
+}
+
+async function recoverAllInterruptedExtensionTransactionsLocked(userData: string, liveDirectory: string): Promise<void> {
   const root = path.join(userData, 'Agent Change History');
   if (!await exists(root)) return;
   for (const entry of await fs.readdir(root, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const historyRoot = path.join(root, entry.name);
-    await recoverInterruptedExtensionTransactions(historyRoot, liveDirectory);
+    await recoverInterruptedExtensionTransactionsLocked(historyRoot, liveDirectory);
     // Only at boot: a run on this project may be using its snapshot now.
     for (const leftover of await fs.readdir(historyRoot)) {
       if (leftover.startsWith(SNAPSHOT_PREFIX)) await fs.rm(path.join(historyRoot, leftover), { recursive: true, force: true });
