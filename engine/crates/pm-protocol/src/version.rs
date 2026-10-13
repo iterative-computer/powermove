@@ -169,8 +169,8 @@ pub struct Hello {
     pub role: PeerRole,
     /// Must equal the peer's [`WIRE_VERSION`].
     pub wire: u16,
-    /// Source build identity (git commit plus dirty flag). Draft contracts
-    /// require equal build ids on both sides.
+    /// Protocol build id ([`SOURCE_BUILD`]): a hash of the `pm-protocol`
+    /// sources. Draft contracts require equal build ids on both sides.
     pub build: String,
     pub contracts: Vec<ContractRange>,
     /// Largest message the sender accepts, in bytes (at least 64 KiB).
