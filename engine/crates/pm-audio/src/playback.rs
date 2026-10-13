@@ -112,6 +112,7 @@ enum Control {
     Solo(Option<HashSet<String>>),
     /// Polled about once a second: the output device id and its latency.
     Watch(DeviceWatch),
+    Evaluator(Box<Evaluator>),
     Shutdown,
 }
 
@@ -282,10 +283,12 @@ impl Playback {
         ))
     }
 
-    /// The evaluator used to build mix graphs (configure its expression
-    /// engine here).
-    pub fn set_evaluator(&self, ev: Evaluator) {
-        *self.builder.lock().unwrap_or_else(|e| e.into_inner()) = ev;
+    /// The evaluators for building mix graphs and for the render thread's
+    /// automation (`make` is called twice; configure the expression engine
+    /// and hooks in it).
+    pub fn set_evaluator(&self, make: impl Fn() -> Evaluator) {
+        *self.builder.lock().unwrap_or_else(|e| e.into_inner()) = make();
+        let _ = self.tx.send(Control::Evaluator(Box::new(make())));
     }
 
     /// Plays `comp_id` of `doc` from now on (a new revision, or another
@@ -618,6 +621,10 @@ impl RenderThread {
             }
             Control::Solo(s) => {
                 self.solo = s;
+                false
+            }
+            Control::Evaluator(ev) => {
+                self.mixer.set_evaluator(*ev);
                 false
             }
             Control::Watch(w) => {

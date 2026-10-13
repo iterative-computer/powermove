@@ -175,6 +175,12 @@ impl Mixer {
         &self.format
     }
 
+    /// Replaces the evaluator (an expression engine, hooks).
+    pub fn set_evaluator(&mut self, ev: Evaluator) {
+        self.ev = ev;
+        self.retime.clear();
+    }
+
     pub fn cache(&self) -> &Arc<SourceCache> {
         &self.cache
     }
