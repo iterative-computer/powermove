@@ -233,11 +233,14 @@ export function installLayerGroups(PM: PMRegistry): void {
     if (PM.proj.layers.some((layer: any) => layer.lock && ancestors(layer,PM.proj.layers).some(group => ids.includes(group.id)))) throw new Error('Unlock the group contents before ungrouping');
     const styled = groups.find(hasVisualStyle);
     if (styled) throw new Error(`Remove visual compositing from “${styled.name}” before ungrouping`);
+    if (groups.some((group: any) => !constantProperty(group.on, true) && !constantProperty(group.on, false))) {
+      throw new Error('Pre-compose this group to keep its animated visibility before ungrouping.');
+    }
     // A shared alpha boundary cannot be distributed over overlapping children.
     // Only plain single-leaf groups can transfer opacity into an editable child.
     // Check the whole selection before changing any membership or animation.
     for (const group of groups) {
-      if (constantProperty(group.p.opacity, 100)) continue;
+      if (constantProperty(group.p.opacity, 100) || constantProperty(group.on, false) && !group.solo) continue;
       const descendants = PM.proj.layers.filter((layer: any) => ancestors(layer, PM.proj.layers).some(parent => parent.id === group.id));
       const drawable = descendants.filter((layer: any) => layer.type !== 'group' && PM.TYPE_META[layer.type]?.visual !== false);
       if (!drawable.length) continue;
@@ -251,6 +254,7 @@ export function installLayerGroups(PM: PMRegistry): void {
     const children: string[] = [];
     for (const group of groups) {
       const members = PM.proj.layers.filter((layer: any) => layer.group === group.id);
+      const invisible = constantProperty(group.on, false);
       // Ungrouping animation bakes editable channel keys at composition frames.
       // Include the playhead so this operation never jumps between frames either.
       const hasAnimation = (layer: any) => [...Object.values(layer.p),...aimProperties3D(layer).map(x=>x.prop)].some((prop: any) => prop.kf.length || prop.expr);
@@ -264,6 +268,7 @@ export function installLayerGroups(PM: PMRegistry): void {
       const perspectives = new Map(members.map((layer: any) => [layer.id, perspectiveAmount(PM,layer,PM.time)]));
       for (const layer of members) {
         layer.group = group.group || null; children.push(layer.id);
+        if (invisible) layer.on = false;
         if (poses.get(layer.id)?.length === 16) {
           for (const [key,fallback] of Object.entries(CHANNELS_3D)) layer.p[key] ||= PM.P(fallback);
           layer.threeD = true;

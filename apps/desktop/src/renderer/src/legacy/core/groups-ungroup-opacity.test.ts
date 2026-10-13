@@ -83,7 +83,7 @@ describe('ungroup shared opacity safety', () => {
     outer.p.opacity.v = 80; group.p.opacity.v = 50; PM.touch(); PM.hist.clear(); rejected(PM, [outer.id]);
   });
 
-  it.each(['effect', 'mask', 'matte', 'blend', 'transition', 'motion blur', 'transform expression', 'content expression', 'visibility expression', 'custom definition', '3D', 'hidden group', 'solo group'])(
+  it.each(['effect', 'mask', 'matte', 'blend', 'transition', 'motion blur', 'transform expression', 'content expression', 'visibility expression', 'custom definition', '3D', 'animated group visibility', 'solo group'])(
     'refuses an unsafe single child with %s', mode => {
       const { PM, group, children: [child] } = editor(1); group.p.opacity.v = 50;
       const leaf = child!;
@@ -98,7 +98,7 @@ describe('ungroup shared opacity safety', () => {
       if (mode === 'visibility expression') leaf.on = PM.P(true, { expr: 'layer.p.opacity.v > 80' });
       if (mode === 'custom definition') { leaf.type = 'extension'; leaf.d.definition = 'custom-fill'; }
       if (mode === '3D') leaf.threeD = true;
-      if (mode === 'hidden group') group.on = false;
+      if (mode === 'animated group visibility') group.on = PM.P(true, { expr: 'time > 1' });
       if (mode === 'solo group') group.solo = true;
       PM.touch(); rejected(PM, [group.id]);
     });
