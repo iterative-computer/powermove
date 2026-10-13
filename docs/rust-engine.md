@@ -1838,6 +1838,14 @@ disagree, this subsection wins; the earlier text is kept for history.
 14. **Legacy fixes added to Phase 0** (before the corpus v1 capture): the restart-restore bug (the app reopens a new Untitled project instead of the last one), a supported test seam for the 21 specs that read `window.powermove`, Blender discovery of versioned bundles, and a look at `ae-audit-implementation.spec.ts:42`, `font-anchor.spec.ts:6`, and `memory-history-persistence.spec.ts:5`. Then corpus v1 is captured. Appendix A gains the corpus findings: `renderSnapshot` reads `emissive` from `MeshBasicMaterial` (Blender fails for unlit glTF with source materials), and shader layers with `vec3` color `@param`s are sometimes bound with `uniform1f`.
 15. **Phase overlap.** Phase 1 starts now. Phase 2 infrastructure that does not depend on `pm-eval` (engine processes and host services, the production bridge, `pm-media`, VideoToolbox export, FFmpeg wiring) starts in parallel; the Phase 2 gate still requires the Phase 1 gate.
 
+**Amendments from the Phase 1 and Phase 2 infrastructure reviews (2026-10-13)**
+
+16. **Variable speed (section 5 rule 5).** Integration uses two midpoint samples per frame of the owning composition, at no less than 60 Hz. A root composition then matches today exactly. A nested composition uses its own rate rather than the open composition's (today's answer depends on which composition is open; appendix A). Dual-answer mode lists this nested case as an allowed difference and nothing else.
+17. **Contract 2.** The bridge lane's changes are accepted (`FrameDescriptor.view_seq` and `duration`, `ViewerState.edr` and `view_seq`, descriptor validation; `PROTOCOL_BUILD` protocol-16c8e6e125019103). Lanes regenerate against it.
+18. **S1 gate path.** The bridge merges behind "Use New Engine". Before the Phase 2 gate, the gate's "today" is the real WebGL viewer, not the harness stand-in. The gap is closed in this order, measuring after each step: engine-path gestures read `pointerrawupdate`; a vsync-phase hint in `ViewerState` so engine GPU work lands just after composition; the C′ prototype for playback. If the real viewer comparison still fails after all three, the Phase 2 gate reports it as measured and Jude decides.
+19. **Text measurement.** Level 1 measures at Blink's effective font size, `floorf(size × 100) / 100` in f32, applied once in `pm_text::compat`. The corpus comparison pins its "not compared" counts per font and fails if they grow.
+20. **Evaluation parity classes.** A rotation that differs by exactly 360° at the `atan2` branch cut (180° against −180°) is an allowed difference. Bounds and pick cases classed as fragile (the TypeScript answer changes under a 1e-12 s, 1e-7 px, or edge perturbation) may differ in at most 5% of fragile cases.
+
 ### Phase 1: Evaluation and the write path
 
 `pm-time`, `pm-model` (`v1_ingest`, reconciliation, identity registry), `pm-eval`,
