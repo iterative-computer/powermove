@@ -73,8 +73,8 @@ How writes reach the barrier:
 | History commits | `PM.touch(canonicalPaths, true)` after the commit's patches |
 | Scoped transactions (gestures, `Edit.apply`) | `hist.track(paths)` hands its paths over before the writes |
 | Undo, redo, scoped rollback | `PM.doc.write(paths, fn)` around the restore |
-| `touch()` without paths | a structural diff of the open composition and every project member except `comps` |
-| Legacy key adoption during evaluation (`temporal-bridge.ts`) | a structural diff (it rewrites keys without a path) |
+| `touch()` without paths | a structural diff of the open composition and every project member except `comps` (in every mode, the tracking ones included: writers announce writes made through references the Proxy never handed out) |
+| Legacy key adoption during evaluation (`temporal-bridge.ts`) | runs inside a barrier writer scope (`setEvaluationWriter`); a rewrite the JSON can see asks for a structural diff |
 | `PM.proj = another project` | resync at the next flush |
 | `PM.proj = another version of this project` | a whole-document diff |
 | Writers that know their paths | `PM.doc.write(paths, fn)` / `PM.doc.touched(paths)` |
@@ -94,7 +94,28 @@ reported in `audit-proxy`, thrown in `strict`. The document itself never holds a
 proxy (values are unwrapped on the way in), `indexOf`/`includes`/`lastIndexOf` unwrap
 their argument, and `structuredClone` and every `postMessage` unwrap proxies.
 Objects written through a reference obtained outside `PM.proj` are invisible to it;
-the auditor is the net for those.
+writers announce those (`touch()`, history), and the auditor is the net for the rest.
+
+Identity. A Proxy is a second identity for the same object, so the Proxy keeps
+three rules that the e2e suite found necessary:
+
+- An object that enters the document through a proxy (a new mask pushed onto
+  `layer.masks`) is handed out raw until the current task ends. The inserting code
+  holds the raw object and compares it with what it reads back
+  (`layer.masks.find(m => m.path === path)`); later tasks read it through the Proxy.
+- `PM.proj = next` deep-unwraps `next`: new documents are built from reads of the
+  current one (`rotateProject({ ...PM.proj })` when a composition opens).
+- A proxy stored into the document through a raw reference is replaced by its target
+  when it is next read, so the raw document never holds a proxy and saves can clone it.
+
+`===` between a raw reference held across tasks and a later read can still differ;
+that is a limit of the tracking modes (development and test), never of production.
+
+Violations are attributed to the writing code. A violation whose stack contains a
+Playwright `page.evaluate` frame is the test's (`page.evaluate`, or
+`page.evaluate via <function>` when a test calls an app function directly outside
+the transaction the app's own callers open); `native-evaluator-report.mjs` counts
+the others as app-writer violations and groups violations by writer.
 
 ## The identity registry and the native API (`engine-doc/native.ts`)
 
