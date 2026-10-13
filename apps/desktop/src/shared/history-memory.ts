@@ -6,8 +6,13 @@ const record = (value: any): value is RecordValue => value !== null && typeof va
 export const isHistoryDictionary = (value: any): boolean => record(value) && value.format === FORMAT;
 const history = (value: any): boolean => record(value) && value.version === 1 && Array.isArray(value.entries)
   && value.entries.every((entry: any) => record(entry) && Array.isArray(entry.forward) && Array.isArray(entry.backward));
-const recordArray = (patch: any): boolean => record(patch) && patch.exists === true && Array.isArray(patch.path) && patch.path.length === 1
-  && (patch.path[0] === 'layers' || patch.path[0] === 'edits') && Array.isArray(patch.value);
+/** Legacy history targets the root; current history identifies its composition. */
+export function isHistoryRecordArrayPath(value: unknown): boolean {
+  return Array.isArray(value) && ['layers', 'edits'].includes(value.at(-1))
+    && (value.length === 1 || value.length === 3 && value[0] === 'comps' && typeof value[1] === 'string' && value[1].length > 0);
+}
+const recordArray = (patch: any): boolean => record(patch) && patch.exists === true
+  && isHistoryRecordArrayPath(patch.path) && Array.isArray(patch.value);
 
 /** Weak ownership prevents removed projects/Redo branches living in this index. */
 export class HistoryRecords {
@@ -89,8 +94,7 @@ export function unpackHistory(value: any): any {
   const unpack = (item: any) => {
     if (!record(item) || !record(item.patch)) throw new Error('Invalid history patch');
     if (!Object.hasOwn(item, 'refs')) return item.patch;
-    if (!Array.isArray(item.refs) || !Array.isArray(item.patch.path) || item.patch.path.length !== 1
-      || !['layers', 'edits'].includes(item.patch.path[0]) || item.patch.exists !== true
+    if (!Array.isArray(item.refs) || !isHistoryRecordArrayPath(item.patch.path) || item.patch.exists !== true
       || item.refs.some((id: any) => !Number.isSafeInteger(id) || id < 0 || id >= value.records.length)) throw new Error('Invalid history reference');
     return { ...item.patch, value: item.refs.map((id: number) => value.records[id]) };
   };

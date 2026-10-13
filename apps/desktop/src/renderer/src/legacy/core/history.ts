@@ -1,7 +1,7 @@
 /* Compact, byte-budgeted project history. */
 import type { PMRegistry } from '../registry';
 import { timelineService } from './services';
-import { HistoryRecords, unpackHistory } from '../../../../shared/history-memory';
+import { HistoryRecords, isHistoryRecordArrayPath, unpackHistory } from '../../../../shared/history-memory';
 import { stringifyAsync } from './serialize-async';
 import { yieldTask } from './yield-task';
 import { canonicalizePatches } from './compositions';
@@ -374,7 +374,7 @@ export function install(PM: PMRegistry): void {
         }
         for (const patches of [entry.forward, entry.backward]) {
           for (const patch of patches) {
-            if (patch.exists && patch.path.length === 1 && ['layers', 'edits'].includes(patch.path[0]) && Array.isArray(patch.value)) {
+            if (patch.exists && isHistoryRecordArrayPath(patch.path) && Array.isArray(patch.value)) {
               for (let i = 0; i < patch.value.length; i++) {
                 patch.value[i] = shared.intern(patch.value[i]);
                 if (performance.now() >= deadline) await breathe();
