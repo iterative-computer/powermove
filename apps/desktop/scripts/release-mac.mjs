@@ -52,6 +52,61 @@ async function findPackagedApp() {
   throw new Error('The signed Powermove.app was not found in dist/.');
 }
 
+async function signingInfo(file) {
+  // codesign prints its details on stderr.
+  const { stderr } = await execFileAsync('/usr/bin/codesign', ['-dv', '--verbose=2', file]);
+  return {
+    team: /TeamIdentifier=(.+)/.exec(stderr)?.[1]?.trim() ?? 'not set',
+    runtime: /flags=0x[0-9a-f]+\([^)]*runtime[^)]*\)/.test(stderr)
+  };
+}
+
+/* The transcription utility process loads koffi's native addon, which
+   dlopens transcribe.cpp's libtranscribe and ggml dylibs from
+   app.asar.unpacked. Under the hardened runtime, library validation refuses
+   them unless they carry the app's own Team ID, so prove the signing pass
+   covered every one before anything ships. */
+const NATIVE_RUNTIME = [
+  { dir: 'node_modules/@transcribe-cpp/darwin-arm64-metal', expect: ['libtranscribe.dylib', 'libggml.dylib', 'libggml-base.dylib', 'libggml-cpu.dylib', 'libggml-metal.dylib'] },
+  { dir: 'node_modules/@koromix/koffi-darwin-arm64/darwin_arm64', expect: ['koffi.node'] }
+];
+
+/* The packaged worker points transcribe-cpp at the unpacked library through
+   TRANSCRIBE_LIBRARY, which skips the binding's own contract check (the
+   worker repeats it at runtime, runtime-contract.ts). Fail the release
+   rather than ship a library its binding does not match. */
+async function verifyRuntimeContract(app) {
+  const binding = path.join(repository, 'node_modules/transcribe-cpp');
+  const { version } = JSON.parse(await readFile(path.join(binding, 'package.json'), 'utf8'));
+  const headerHash = /PUBLIC_HEADER_HASH\s*=\s*["']([0-9a-f]+)["']/.exec(await readFile(path.join(binding, 'dist/_generated.js'), 'utf8'))?.[1];
+  const contract = JSON.parse(await readFile(path.join(app, 'Contents/Resources/app.asar.unpacked', NATIVE_RUNTIME[0].dir, 'contract.json'), 'utf8'));
+  const base = (value) => /^\d+(?:\.\d+)*/.exec(String(value).trim())?.[0];
+  if (!headerHash || contract.header_hash !== headerHash || base(contract.version) !== base(version)) {
+    throw new Error(`The unpacked transcription runtime (${contract.version}, header ${contract.header_hash}) does not match transcribe-cpp ${version} (header ${headerHash}).`);
+  }
+  process.stdout.write(`Transcription runtime ${contract.version} matches its binding (header ${headerHash}).\n`);
+}
+
+async function verifyNativeAddons(app) {
+  await verifyRuntimeContract(app);
+  const appInfo = await signingInfo(app);
+  const signed = [];
+  for (const { dir: relative, expect } of NATIVE_RUNTIME) {
+    const dir = path.join(app, 'Contents/Resources/app.asar.unpacked', relative);
+    const binaries = (await readdir(dir)).filter((name) => name.endsWith('.node') || name.endsWith('.dylib'));
+    const missing = expect.filter((name) => !binaries.includes(name));
+    if (missing.length) throw new Error(`Transcription runtime binaries missing from ${dir}: ${missing.join(', ')}.`);
+    for (const name of binaries) {
+      const info = await signingInfo(path.join(dir, name));
+      if (info.team !== appInfo.team || !info.runtime) {
+        throw new Error(`${name} is not signed for library validation (team ${info.team}, app team ${appInfo.team}, runtime ${info.runtime}).`);
+      }
+      signed.push(name);
+    }
+  }
+  process.stdout.write(`Transcription runtime signed with team ${appInfo.team}: ${signed.join(', ')}\n`);
+}
+
 async function main() {
   const missing = releaseCredentials(process.env);
   if (missing.length) {
@@ -82,6 +137,7 @@ async function main() {
 
   const app = await findPackagedApp();
   await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', app]);
+  await verifyNativeAddons(app);
   await run('/usr/sbin/spctl', ['--assess', '--type', 'execute', '--verbose=4', app]);
   await run('/usr/bin/xcrun', ['stapler', 'validate', app]);
 

@@ -225,4 +225,16 @@ describe('Claude housekeeping events', () => {
     ]);
     expect(onProgress).toHaveBeenCalledWith('Retrying the request (2 of 10)…');
   });
+
+  it('passes a media tool\'s sanitized subject so the row can name the clip', () => {
+    const onTrace = vi.fn();
+    const parser = new ClaudeEventParser({ onTrace });
+    feed(parser, [{
+      type: 'assistant', message: { id: 'media-message', content: [
+        { type: 'tool_use', id: 'tool-media', name: 'mcp__powermove__sample_media_frames', input: { assetId: 'a1', count: 6, quality: 'large' } }
+      ] }
+    }]);
+    expect(onTrace.mock.calls[0]![0]).toMatchObject({ kind: 'tool-start', toolName: 'mcp__powermove__sample_media_frames', subject: { assetId: 'a1', frames: 6 } });
+  });
 });
+

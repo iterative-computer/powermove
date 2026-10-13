@@ -175,6 +175,30 @@ describe('composition patch paths', () => {
     expect(canonical.backward).toEqual([{ path: ['comps', 'B'], exists: false }]);
   });
 
+  it('never carries one composition\'s output level into another', () => {
+    const project: any = { id: 'P', compId: 'Root', compName: 'Root', w: 10, h: 10, layers: [], audioGain: 0.5, comps: { Intro: { id: 'Intro', name: 'Intro', w: 10, h: 10, layers: [] } } };
+    const inside = rotateProject(project, 'Intro');
+    expect(Object.hasOwn(inside, 'audioGain')).toBe(false);
+    expect(inside.comps.Root.audioGain).toBe(0.5);
+    const back = rotateProject(inside, 'Root');
+    expect(back.audioGain).toBe(0.5);
+    expect(Object.hasOwn(back.comps.Intro, 'audioGain')).toBe(false);
+
+    // The reverse direction: a level set inside the child stays in the child.
+    const child: any = { ...inside, audioGain: 2 };
+    const root = rotateProject(child, 'Root');
+    expect(root.audioGain).toBe(0.5);
+    expect(root.comps.Intro.audioGain).toBe(2);
+
+    // Replacing the open composition wholesale clears a level the replacement lacks.
+    const realized = realizePatches([{ path: ['comps', 'Root'], exists: true, value: { id: 'Root', name: 'Root', layers: [] } }], back);
+    expect(realized).toContainEqual({ path: ['audioGain'], exists: false });
+    // A whole-project patch recorded inside the child is rotated without leaking.
+    const whole = realizePatches([{ path: [], exists: true, value: inside }], back);
+    expect(whole[0]!.value.audioGain).toBe(0.5);
+    expect(Object.hasOwn(whole[0]!.value.comps.Intro, 'audioGain')).toBe(false);
+  });
+
   it('rotates without mutating and flattens nested comps from older files', () => {
     const project: any = { id: 'P', compId: 'A', compName: 'A', w: 10, h: 10, layers: [1], comps: { B: { id: 'B', name: 'B', w: 20, h: 20, layers: [2] } } };
     const rotated = rotateProject(project, 'B');

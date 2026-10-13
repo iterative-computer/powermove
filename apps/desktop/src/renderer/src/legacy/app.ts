@@ -10,6 +10,7 @@ import { canAnimateContent, isProperty } from './core/content-properties';
 /* Ported from js/app.js — behavior-preserving. */
 import { normalizeExportDefaults, type ExportDefaults } from '../core/export-defaults';
 import { compactEditLog } from '../core/edit-log';
+import { normalizeCaptionsContent } from '../captions/model';
 import type { PMRegistry } from './registry';
 import { packProjectFileBlob, readProjectFileDocument, saveIncrementalProject, restoreProjectFileMedia, restoreProjectFileStream, unpackProjectFileBlob, unpackProjectFile } from './core/project-file';
 import { projectFingerprint } from './core/project-fingerprint';
@@ -355,6 +356,7 @@ function hydrate(p: any) {
         L.d.params = sanitizeLooseParams(L.d.params, minKeyTime);
         L.d.data = sanitizeJson(L.d.data) || {};
       }
+      if (L.type === 'captions') L.d = normalizeCaptionsContent(L.d);
     });
   };
   base.comps = p.comps && typeof p.comps === 'object' ? p.comps : {};
@@ -884,8 +886,8 @@ async function openProjectFile(file: any, association?: { path: string; projectI
 }
 const PROJECT_FILE = /\.(pmv|json)$/i;
 /* Home's Open takes a project or media. A project opens as itself, with any
-   media alongside imported into it; media alone starts a blank project in the
-   current format, named after the first file. */
+   media alongside imported into it; media alone starts a project matching the
+   first successfully decoded source, named after the first file. */
 PM.openFiles = () => {
   const inp = h('input', {
     type: 'file', multiple: true, accept: MEDIA_ACCEPT + ',.json',
@@ -914,7 +916,7 @@ async function openFiles(files: File[]) {
     }));
     PM.ProjectsScreen?.hide?.();
   }
-  if (media.length) await PM.importFiles(media);
+  if (media.length) await PM.importFiles(media, projectFile ? {} : { matchSource: true, placement: { at: 0 } });
 }
 async function openPickedProject(file: File) {
   const result = await hostBridge()?.openProjectFromFile?.(file);
@@ -1286,7 +1288,7 @@ PM.pickFiles = (sequence = false, { replaceAssetId }: { replaceAssetId?: string 
    - null      → assets only, no layers (drop on the Media panel)
    - {at,index}→ layers at a time and layer-stack position (drop on the timeline) */
 async function importFiles(files: any, placement?: { at: number; index?: number } | null, sequence?: boolean, replaceAssetId?: string,
-  { folder, sequenceNote }: { folder?: string | null; sequenceNote?: string } = {}) {
+  { folder, sequenceNote, matchSource }: { folder?: string | null; sequenceNote?: string; matchSource?: boolean } = {}) {
   let progress: ReturnType<typeof createImportProgress> | undefined;
   try {
     const targetProject = PM.proj;
@@ -1313,6 +1315,11 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
     if (replaceAssetId != null && files.length !== 1) throw new Error('Choose one file or one image sequence to replace this media');
     const mediaFiles: any = [];
     for (const f of files) {
+      // Subtitles become a captions layer, placed where the file was dropped.
+      if (PM.Captions?.isCaptionFile?.(f) && replaceAssetId == null) {
+        await PM.Captions.importFile(f, { at: placement ? placement.at : 0 });
+        continue;
+      }
       if (/\.pmv$/i.test(f.name)) {
         if (replaceAssetId != null) throw new Error('Choose a media file to replace this media');
         await openProjectFile(f);
@@ -1344,6 +1351,25 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
     const failures = results.filter((result: any) => result.status === 'failed');
     failures.forEach((result: any) => PM.toast(result.error?.message || ('Could not import ' + result.file?.name), 5000, { error: true }));
     const layerResults = results.filter((result: any) => result.status === 'created' || result.status === 'reused');
+    assertCurrent();
+    if (matchSource) {
+      const source = layerResults[0]?.asset;
+      if (source) {
+        if (Number.isFinite(source.w) && source.w > 0) targetProject.w = source.w;
+        if (Number.isFinite(source.h) && source.h > 0) targetProject.h = source.h;
+        if (Number.isFinite(source.fps) && source.fps > 0) {
+          targetProject.fps = source.fps;
+          targetProject.exportDefaults = { ...readExportDefaults(), fps: source.fps };
+        }
+        if (Number.isFinite(source.dur) && source.dur > 0) {
+          targetProject.dur = source.dur;
+          targetProject.work = [0, source.dur];
+        }
+        PM.bus.emit('project');
+        viewerService(PM)?.layout();
+        PM.invalidate('all');
+      }
+    }
     const commands = placement === null ? [] : layerResults.map((result: any, n: number) => {
       const command = PM.commandForAsset(result.asset.id, importAt);
       if (command && placement?.index != null) command.index = placement.index + n;
@@ -1386,7 +1412,7 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
    the contents of a dropped folder. `asFolder` (Option held during the drop,
    as in After Effects) files a folder's media into a matching media folder;
    otherwise a folder of numbered frames becomes one image sequence. */
-PM.importFiles = (files: any, { project = PM.proj, placement, sequence, replaceAssetId, folder, asFolder }: any = {}) => {
+PM.importFiles = (files: any, { project = PM.proj, placement, sequence, replaceAssetId, folder, asFolder, matchSource }: any = {}) => {
   const drop = typeof DataTransfer !== 'undefined' && files instanceof DataTransfer;
   const dropped = drop ? droppedFolders(files) : null;
   const loose: File[] = dropped ? dropped.files : Array.from((drop ? files.files : files) || []);
@@ -1403,7 +1429,7 @@ PM.importFiles = (files: any, { project = PM.proj, placement, sequence, replaceA
       } catch (error: any) { PM.toast(error?.message || 'Could not read the dropped folder', 6000, { error: true }); }
       return [];
     }
-    return importFiles(loose, placement, sequence, replaceAssetId, { folder });
+    return importFiles(loose, placement, sequence, replaceAssetId, { folder, matchSource });
   };
   APP.importQueue = APP.importQueue.then(run, run);
   return APP.importQueue;

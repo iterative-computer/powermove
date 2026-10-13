@@ -669,7 +669,7 @@ The bundled **3D Layers** extension provides this as **Import OBJ Model…**. Po
 
 **Replace a built-in** — call `await api.extensions.fork('timeline')`, then edit the created user extension. Turning your fork off brings the built-in back.
 
-**Updating a fork** — when Powermove ships a newer version of the built-in, call `api.extensions.rebase(id)` (or use the update notice). The agent stages the old pristine base, your fork, and the newly shipped source together, then performs a three-way merge that preserves your behavior and records the new `forkedFrom` version.
+**Updating a fork** — when Powermove ships a newer version of the built-in, call `api.extensions.rebase(id)` (or use the update notice). Powermove compares the old pristine base, your fork, and the newly shipped source locally. It applies untouched upstream changes and merges non-overlapping edits while preserving your custom identity and edits. The result is compiled and validated before installation, and the update offers Undo. Conflicts or validation failures keep the current version and offer **Update with agent**. The agent receives a working copy with straightforward changes already merged and resolves the remaining conflicts. A completed update records the new `forkedFrom` version; a loading or sandbox-check failure restores the previous copy when possible.
 
 **Override just a piece** — don't fork; register the same panel/command/effect `id`. The latest registration wins; disabling yours restores the original.
 
@@ -833,3 +833,16 @@ Do not use broad categories such as `panels`, extension names, or `forkedFrom` a
 proof of equivalence. A fork may retain custom behavior that the app does not have.
 Feature declarations are additive metadata and do not alter loading or replacement
 rules. Maintainers must include accurate declarations in releases that adopt features.
+
+### Agent media management
+
+Project agents can manage media directly, without generating a recovery extension:
+
+- `list_media` returns paged media IDs, source paths, fingerprints, storage and loading status, folders, and referencing layers. Use `missingOnly` to find unavailable media.
+- `replace_media { assetId, path }` replaces or relinks a local file while retaining the asset ID, timeline references, timing, animation and folder. `missingOnly: true` skips assets already available; `expectedFingerprint` checks the selected bytes. The source must be the same media kind. Locked referencing layers block replacement, including nested compositions and locked groups.
+- `import_media { path, folderId? }` imports into durable project storage without adding timeline layers. It returns an asset ID for later placement through the normal editing tools and reuses already imported matching bytes.
+- `manage_media` renames, moves and deletes media, and creates, renames, moves or deletes folders. Folder deletion keeps its contents. Referenced media deletion requires `removeReferenced: true`; locked or unsupported structured references block deletion. Source files on disk are never deleted.
+
+Paths must be absolute local paths. Imports read native file chunks, accept files up to 512 MiB and do not silently download cloud placeholders. Both import tools verify durable storage and live availability before returning success. Failed replacements leave the original intact. Retry only failed assets; media bytes never belong in extension source.
+
+Replacement and management use normal editor Undo. They are preserved if the agent run stops and cannot be restored with `rollback_changes`, because snapshot rollback cannot restore retained media runtime versions. Importing media follows normal import behavior: media survives timeline Undo. Planning runs can list media but cannot mutate it; app runs without an attached project receive none of these tools.

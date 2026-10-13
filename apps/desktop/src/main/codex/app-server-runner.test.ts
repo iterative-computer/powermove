@@ -148,8 +148,10 @@ describe('CodexAppServerRunner steering', () => {
           required: true,
           enabled_tools: [
             ...ORCHESTRATION_TOOL_NAMES,
-            'get_project_state', 'get_3d_scene', 'get_panel_layout', 'open_panel', 'get_panel_state',
+            'get_project_state', 'list_media', 'get_3d_scene', 'get_panel_layout', 'open_panel', 'get_panel_state',
             'capture_panel', 'get_workspace_state', 'validate_effect', 'render_frames',
+            'probe_media', 'sample_media_frames', 'media_contact_sheet', 'media_waveform',
+            'transcribe_media', 'check_project', 'export_captions',
             'store_search', 'store_extension', 'store_source', 'store_library'
           ],
           default_tools_approval_mode: 'approve'

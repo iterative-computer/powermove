@@ -7,6 +7,7 @@ import { preserveParentPose } from './parenting';
 import { expressionDiagnostic } from './expression';
 import { inspectorService, shaderHooks } from './services';
 import { compactEditLog } from '../../core/edit-log';
+import { addCaptions, editCaptions, setCaptionsContent } from '../../captions/commands';
 import { layer3DRole, parseLayer3DData, initializeLayer3D, validateLayer3DChannel } from '../../core/scene3d/layers';
 import { validateSceneLayer } from '../../core/scene3d/operations';
 import { sceneProperties,parseScene,validateSceneChannel,SCENE3D_DEFINITION } from '../../core/scene3d/schema';
@@ -24,7 +25,7 @@ const AUDIO_CONTENT_FIELDS: any = new Set(['asset', 'trim', 'gain', 'fadeIn', 'f
 const ORIGIN_TRUST: any = Object.freeze({
   interface: 'human', inspector: 'human', canvas: 'human', timeline: 'human',
   command: 'human', 'command-palette': 'human', 'effects-panel': 'human',
-  'shader-panel': 'human', library: 'human', import: 'human',
+  'shader-panel': 'human', library: 'human', import: 'human', mixer: 'human',
   agent: 'generated', 'generated-ui': 'generated',
   'generated-tool': 'generated', 'generated-script': 'generated',
 });
@@ -95,9 +96,9 @@ function layerPath(target: any): any[] | null {
 
 function commandScopes(command: any): any[][] {
   const type = command?.type;
-  if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group'].includes(type)) return [['layers'], ['comps']];
+  if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_captions'].includes(type)) return [['layers'], ['comps']];
   if (type === 'set_composition') {
-    return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work'], ['colorDepth']];
+    return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work'], ['colorDepth'], ['audioGain']];
   }
   if (type === 'set_scene_parameter') return [['params', String(command.name || '').trim()]];
   if (type === 'add_marker') return [['markers']];
@@ -119,6 +120,8 @@ const property: any = (layer: any, path: any) => {
   const channel: any = channelPath(path);
   if (channel.startsWith('c.')) {
     const key = channel.slice(2);
+    /* Optional levels are unity until first set, so they can be keyframed from absent. */
+    if (canAnimateContent(layer, key) && layer.d[key] == null && key === 'audioGain') layer.d[key] = 1;
     if (canAnimateContent(layer, key) && !isProperty(layer.d[key]) && layer.d[key] != null) layer.d[key] = PM.P(layer.d[key]);
   }
   if (channel === 'l.blend' || channel === 'l.mblur' || channel === 'l.matteMode') {
@@ -157,8 +160,13 @@ function rememberLive(command: any) {
   const copy: any = clone(command);
   const target: any = copy.target || copy.layer || copy.targetId || '';
   const mergeable: any = new Set(['set_property', 'set_layer', 'set_content', 'set_composition', 'set_scene_parameter', 'reorder_layer']);
-  if (!mergeable.has(copy.type)) { live.commands.push(copy); return; }
-  const key: any = copy.type === 'set_property'
+  /* A cue drag dispatches absolute times for the same cues every frame; only
+     the last one describes the edit. */
+  const captionDrag = copy.type === 'edit_captions' && (copy.op === 'update' || copy.op === 'style');
+  if (!mergeable.has(copy.type) && !captionDrag) { live.commands.push(copy); return; }
+  const key: any = captionDrag
+    ? `${copy.type}:${target}:${copy.op}:${copy.op === 'style' ? Object.keys(copy.style || {}).sort().join(',') : (copy.cues || []).map((cue: any) => cue.id).sort().join(',')}`
+    : copy.type === 'set_property'
     ? `${copy.type}:${target}:${copy.path || copy.channel}`
     : copy.type === 'set_scene_parameter'
       ? `${copy.type}:${copy.name}`
@@ -321,6 +329,25 @@ function setExpression(command: any, meta: any = {}) {
   return { id: layer.id, channel, expression: prop.expr };
 }
 
+/* Video soundtracks and precomps carry an optional audio level (absent = unity)
+   and a mute switch. Normalise them before they reach the layer so the engine
+   and the mixer never see a null, a string or an out-of-range level. Returns
+   true when the patch clears the level. */
+function normalizeAudioLevelPatch(layer: any, patch: any) {
+  if (layer.type !== 'video' && layer.type !== 'precomp') return false;
+  if (Object.hasOwn(patch, 'audioMuted') && typeof patch.audioMuted !== 'boolean') {
+    if (patch.audioMuted == null) patch.audioMuted = false;
+    else throw new Error('Audio mute must be on or off');
+  }
+  if (!Object.hasOwn(patch, 'audioGain')) return false;
+  const value: any = patch.audioGain;
+  if (value == null) { delete patch.audioGain; return true; }
+  if (isProperty(value)) return false;
+  if (typeof value !== 'number') throw new Error('Audio gain must be a finite number');
+  patch.audioGain = PM.clamp(finite(value, 'Audio gain'), 0, 4);
+  return false;
+}
+
 function setContent(command: any, meta: any = {}) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
@@ -339,16 +366,22 @@ function setContent(command: any, meta: any = {}) {
     for(const {key,prop} of sceneProperties(layer)) if(lockedIntent(layer,key) && JSON.stringify(prop)!==JSON.stringify(future.get(key)))
       throw new Error(`Preserved hand-edited ${key}; edit unprotected 3D channels instead`);
   }
+  const clearsLevel = normalizeAudioLevelPatch(layer, patch);
+  if (clearsLevel) delete layer.d.audioGain;
   for (const key of Object.keys(patch)) {
     if (isProperty(layer.d?.[key]) && !isProperty(patch[key]) && canAnimateContent(layer, key)) {
       setProperty({ target: layer.id, path: `c.${key}`, value: patch[key], preserveHandEdits: false });
       delete patch[key];
     }
   }
-  if (!Object.keys(patch).length) return { id: layer.id };
+  if (!Object.keys(patch).length) {
+    if (clearsLevel) PM.touch();
+    return { id: layer.id };
+  }
   const previousSpeed = Object.hasOwn(patch, 'speed') ? constantVideoSpeed(layer) : null;
   if (layer.type === 'audio') setAudioContent(layer, patch);
   else if (layer.type === 'extension') setExtensionContent(layer, patch);
+  else if (layer.type === 'captions') setCaptionsContent(layer, patch);
   else Object.assign(layer.d, patch);
   if (Object.hasOwn(patch, 'speed')) resizeVideoForSpeed(layer, previousSpeed);
   if (layer.type === 'shader' && Object.hasOwn(patch, 'code')) {
@@ -472,7 +505,7 @@ function setLayer(command: any) {
 
 function setComposition(command: any) {
   const patch: any = safePatch(command.patch, 'composition patch');
-  const allowed: any = new Set(['name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill', 'shutter', 'workArea', 'colorDepth']);
+  const allowed: any = new Set(['name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill', 'shutter', 'workArea', 'colorDepth', 'audioGain']);
   for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new Error(`Composition field “${key}” is not editable`);
   const p: any = PM.proj;
   if (patch.colorDepth != null) {
@@ -499,6 +532,7 @@ function setComposition(command: any) {
     p.bg = p.backgroundFill.stops[0].color;
   }
   if (patch.shutter != null) p.shutter = PM.clamp(finite(patch.shutter, 'shutter'), 0, 2);
+  if (patch.audioGain != null) p.audioGain = PM.clamp(finite(patch.audioGain, 'audio gain'), 0, 4);
   if (patch.workArea != null) {
     if (!Array.isArray(patch.workArea) || patch.workArea.length !== 2) throw new Error('workArea must contain start and end');
     const start: any = Math.max(0, finite(patch.workArea[0], 'work area start'));
@@ -916,6 +950,8 @@ function runOne(sourceCommand: any, meta: any = {}) {
     case 'add_marker': data = addMarker(command); break;
     case 'create_section': data = createSection(command); break;
     case 'update_section': data = updateSection(command); break;
+    case 'add_captions': data = addCaptions({ PM, findLayer }, command); break;
+    case 'edit_captions': data = editCaptions({ PM, findLayer }, command); break;
     default: throw new Error(`Unknown source edit: ${command.type}`);
   }
   if (anchorRaster?.fontOffset && anchorRaster.selection) {
@@ -949,7 +985,7 @@ function runOne(sourceCommand: any, meta: any = {}) {
     const created = PM.proj.layers.find((l: any) => l.id === data?.id);
     if (created) validateSceneLayer(created,PM);
   }
-  if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group'].includes(command.type)
+  if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_captions', 'edit_captions'].includes(command.type)
       || command.type === 'set_layer' && Object.keys(command.patch || {}).some((key: any) => ['name', 'from', 'duration', 'visible', 'parent'].includes(key))) {
     PM.ProjectIndex?.invalidate();
   } else if (['replace_keyframes', 'add_effect', 'remove_effect', 'set_transition'].includes(command.type)
@@ -1116,6 +1152,8 @@ const Edit: any = {
     create_section: { target: 'project', fields: ['section'] },
     update_section: { target: 'project', fields: ['sectionId', 'layers', 'thumb', 'version', 'at'] },
     transform_layers: { target: 'layer-collection', fields: ['transform', 'state'] },
+    add_captions: { target: 'project', fields: ['cues', 'text', 'format', 'offset', 'style', 'language', 'name', 'from', 'duration'] },
+    edit_captions: { target: 'layer', fields: ['op', 'cues', 'ids', 'id', 'at', 'by', 'text', 'format', 'replace', 'offset', 'style', 'language'] },
   }),
 
   apply(input: any, meta: any = {}) {

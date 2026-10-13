@@ -3,7 +3,17 @@
   import '../app.css';
 
   let { children } = $props();
+
+  // Cloudflare Web Analytics. The site token is public but lives in the
+  // gitignored .env so the secret scan stays strict; unset means no beacon.
+  const beaconToken = import.meta.env.VITE_CF_BEACON_TOKEN;
 </script>
+
+<svelte:head>
+  {#if beaconToken}
+    {@html `<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='${JSON.stringify({ token: beaconToken })}'></script>`}
+  {/if}
+</svelte:head>
 
 {@render children()}
 

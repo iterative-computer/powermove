@@ -169,7 +169,7 @@ describe('FxBrowserPanel', () => {
     await unmount(component);
   });
 
-  it('registers the five legacy panel ids, titles, and sizes', () => {
+  it('registers the simple panel ids, titles, and sizes', () => {
     const definitions = new Map<string, Record<string, any>>();
     registerSimplePanels({
       registerPanel(id: string, definition: Record<string, any>) {
@@ -180,6 +180,7 @@ describe('FxBrowserPanel', () => {
     expect([...definitions].map(([id, definition]) => [id, definition.title, definition.size])).toEqual([
       ['assets', 'Media', 200],
       ['fxbrowser', 'Effects', 240],
+      ['mixer', 'Mixer', 300],
       ['workspaces', 'Workspaces', 200],
       ['takes', 'Takes', 180],
       ['notes', 'Notes', 180]

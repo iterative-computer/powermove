@@ -13,16 +13,17 @@
   import { panelScope } from '../panels/agent/panel-focus';
   import { deletePanel, deletedPanelIds } from './panel-deletion';
   import { panelBelongsInLibrary, panelPreviewSize } from './panel-preview';
+  import { afterEffectsExtensionIds } from './after-effects-imports';
   import { panelFrameOf } from '../kernel/panel-frame';
   import { placePanel } from '../layout/portal';
-  import { artFor, statusText, storeBridge } from '../store/data';
+  import { artFor, KIND_ICON, KIND_PLURAL, statusText, storeBridge } from '../store/data';
   import type { LibraryItemDto } from '../../../shared/store-ipc';
   import { coverSize, MAX_PREVIEW_HEIGHT, MAX_PREVIEW_WIDTH, packRows, panelSource, shelfScale, SHELF_LABEL, SHELF_ORDER, type CoverSize, type ShelfId } from './shelves';
 
   let { PM }: { PM: Record<string, any> } = $props();
 
   let shown = $state(false);
-  let view = $state<'panels' | 'workspaces'>('panels');
+  let view = $state<'panels' | 'workspaces' | 'after-effects'>('panels');
   /* Which shelf the sidebar is showing; 'all' stacks every shelf. */
   let panelShelf = $state<'all' | ShelfId>('all');
   let workspaceShelf = $state<'all' | 'builtin' | 'custom'>('all');
@@ -60,7 +61,7 @@
     return item.origin?.repoId ?? `local:${item.localId}`;
   }
 
-  export function open(target?: 'panels' | 'workspaces'): void {
+  export function open(target?: 'panels' | 'workspaces' | 'after-effects'): void {
     if (target) view = target;
     void loadStoreItems();
     deletedIds = deletedPanelIds(PM);
@@ -111,7 +112,7 @@
   /** `content` also re-snapshots the previews (a panel definition changed). */
   export function refresh(content = false): void {
     version += 1;
-    if (content) snapshot += 1;
+    if (content) { snapshot += 1; void loadStoreItems(); }
   }
 
   function extensionRecord(id: string | undefined): { scope?: string; trust?: string; manifest?: { name?: string } | null } | undefined {
@@ -239,8 +240,22 @@
       .filter((shelf) => shelf.count > 0);
   });
 
-  const shelves = $derived(view === 'panels' ? panelShelves : workspaceShelves);
-  const pageTitle = $derived(view === 'panels'
+  const importedIds = $derived.by(() => { void version; return afterEffectsExtensionIds(PM as any); });
+  const importedExtensions = $derived(storeItems.filter(item => importedIds.has(item.localId)));
+  const importedWorkspaces = $derived(workspaces.filter(workspace => workspace.sourceApp === 'after-effects'));
+  const importedCount = $derived(importedExtensions.length + importedWorkspaces.length);
+  const importedShelves = $derived.by((): Shelf[] => {
+    const extensions: Book[] = importedExtensions
+      .filter(item => !query || `${item.name} ${item.localId}`.toLowerCase().includes(query))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map(item => ({ kind: 'idle', key: `import:${item.localId}`, item, cover: coverSize(DEFAULT_COVER, scale, rowWidth) }));
+    const layouts: Book[] = importedWorkspaces
+      .filter(workspace => !query || String(workspace.name || workspace.id).toLowerCase().includes(query))
+      .map(workspace => ({ kind: 'workspace', key: workspace.id, workspace, cover: coverSize(WORKSPACE_COVER, scale, rowWidth) }));
+    return [shelve('ae-extensions', 'Extensions', extensions), shelve('ae-workspaces', 'Workspaces', layouts)].filter(shelf => shelf.count > 0);
+  });
+  const shelves = $derived(view === 'after-effects' ? importedShelves : view === 'panels' ? panelShelves : workspaceShelves);
+  const pageTitle = $derived(view === 'after-effects' ? 'After Effects' : view === 'panels'
     ? (panelShelf === 'all' ? 'All panels' : SHELF_LABEL[panelShelf])
     : ({ all: 'All workspaces', builtin: 'Built-in workspaces', custom: 'Saved workspaces' } as const)[workspaceShelf]);
 
@@ -259,6 +274,16 @@
   function showWorkspaces(next: 'all' | 'builtin' | 'custom'): void {
     view = 'workspaces';
     workspaceShelf = next;
+  }
+
+  async function bringAfterEffects(): Promise<void> {
+    close();
+    try {
+      if (!await PM.AgentUI?.importWorkspace?.('after-effects')) throw new Error('Workspace transfer unavailable.');
+    } catch {
+      open('after-effects');
+      PM.toast?.('Could not start the workspace transfer. Try again.', 4000, { error: true });
+    }
   }
 
   function openStore(page: 'kind:panels' | 'library' = 'kind:panels'): void {
@@ -993,7 +1018,7 @@
             <input
               type="search"
               placeholder="Search"
-              aria-label={view === 'panels' ? 'Search panels' : 'Search workspaces'}
+              aria-label={view === 'after-effects' ? 'Search After Effects imports' : view === 'panels' ? 'Search panels' : 'Search workspaces'}
               bind:this={searchEl}
               bind:value={searchText}
             />
@@ -1019,6 +1044,8 @@
             {#if workspaceCounts.custom > 0}
               {@render navItem('userCircle', 'Saved by you', 'Saved workspaces', workspaceCounts.custom, view === 'workspaces' && workspaceShelf === 'custom', () => showWorkspaces('custom'))}
             {/if}
+            <span class="library-nav-label">Imported</span>
+            {@render navItem('download', 'After Effects', 'After Effects imports', importedCount, view === 'after-effects', () => { view = 'after-effects'; })}
           </div>
           {#if storeAvailable}
             <button class="library-navbtn library-store-link" type="button" onclick={() => openStore()}>
@@ -1038,6 +1065,8 @@
                   <Icon {PM} name="plus" />
                   New panel
                 </button>
+              {:else if view === 'after-effects'}
+                <button class="btn" type="button" onclick={() => void bringAfterEffects()}>Bring my workspace</button>
               {:else}
                 <button class="btn" type="button" onclick={() => PM.WS?.saveAsNew?.()}>
                   <Icon {PM} name="plus" />
@@ -1059,10 +1088,10 @@
             >
               {#each shelves as shelf (shelf.id)}
                 <section class="library-shelf" aria-label={shelf.label}>
-                  {#if shelves.length > 1 || (view === 'panels' ? panelShelf === 'all' : workspaceShelf === 'all')}
+                  {#if view === 'after-effects' || shelves.length > 1 || (view === 'panels' ? panelShelf === 'all' : workspaceShelf === 'all')}
                     <h3 class="library-shelf-title">{shelf.label}{#if shelf.count}<span class="library-count"><Scritto value={shelf.count} /></span>{/if}</h3>
                   {/if}
-                  <div class="library-shelf-books" role="list" aria-label={view === 'panels' ? `${shelf.label} panels` : `${shelf.label} workspaces`}>
+                  <div class="library-shelf-books" role="list" aria-label={view === 'after-effects' ? `After Effects ${shelf.label.toLowerCase()}` : view === 'panels' ? `${shelf.label} panels` : `${shelf.label} workspaces`}>
                     {#each shelf.rows as row, index (index)}
                       <div class="library-shelf-row" role="none">
                         {#each row as book (book.key)}
@@ -1071,7 +1100,7 @@
                           {:else if book.kind === 'workspace'}
                             {@render workspaceBook(book.workspace, book.cover)}
                           {:else if book.kind === 'idle'}
-                            {@render idleBook(book.item, book.cover)}
+                            {@render idleBook(book.item, book.cover, view === 'after-effects')}
                           {:else}
                             {@render storeBook(book.cover)}
                           {/if}
@@ -1083,7 +1112,7 @@
               {:else}
                 <div class="library-empty" role="status">
                   <Icon {PM} name={query ? 'search' : view === 'panels' ? 'panel' : 'grid'} />
-                  <b>{query ? "There's nothing here." : 'Nothing on this shelf yet.'}</b>
+                  <b>{query ? "There's nothing here." : view === 'after-effects' ? 'Your After Effects imports will appear here.' : 'Nothing on this shelf yet.'}</b>
                 </div>
               {/each}
             </div>
@@ -1152,7 +1181,7 @@
   </div>
 {/snippet}
 
-{#snippet idleBook(item: LibraryItemDto, cover: CoverSize)}
+{#snippet idleBook(item: LibraryItemDto, cover: CoverSize, imported = false)}
   {@const [a, b] = artFor(artSeed(item))}
   <div class="library-book library-book-idle" role="listitem" data-extension-id={item.localId}>
     <div class="library-book-cover">
@@ -1165,7 +1194,7 @@
       >
         <div class="library-live is-sandboxed has-art" style:width={`${cover.width}px`} style:height={`${cover.height}px`} style:--art-a={a} style:--art-b={b}>
           <span class="library-thumb-icon">
-            <Icon {PM} name="panel" />
+            <Icon {PM} name={imported ? KIND_ICON[item.category] : 'panel'} />
             <b>{item.name}</b>
           </span>
         </div>
@@ -1173,7 +1202,7 @@
     </div>
     <div class="library-book-label">
       <b>{item.name}</b>
-      <span>{statusText(item) ?? (item.enabled ? 'Not loaded' : 'Turned off')}</span>
+      <span>{statusText(item) ?? (item.enabled ? imported ? KIND_PLURAL[item.category] : 'Not loaded' : 'Turned off')}</span>
     </div>
   </div>
 {/snippet}

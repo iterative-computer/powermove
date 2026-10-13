@@ -145,3 +145,11 @@ it('releases local source handles after a truncated read', async () => {
   await expect(readLocalMediaSource(meta, () => true)).rejects.toThrow('ended unexpectedly');
   expect(media.releaseCloudSource).toHaveBeenCalledWith('local-token');
 });
+
+it('rejects oversized agent imports before reading bytes and releases the native handle', async () => {
+  const { media, meta } = setup();
+  media.openLocalSource.mockResolvedValue({ token: 'large-token', size: 513 * 1024 * 1024 });
+  await expect(readLocalMediaSource(meta, () => true, 512 * 1024 * 1024)).rejects.toThrow('import limit');
+  expect(media.readCloudSource).not.toHaveBeenCalled();
+  expect(media.releaseCloudSource).toHaveBeenCalledWith('large-token');
+});

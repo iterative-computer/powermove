@@ -26,6 +26,8 @@ export const IPC = {
   fileSave: 'file:save',
   exportChoose: 'export:choose',
   exportRelease: 'export:release',
+  /* Captions: an .srt/.vtt beside a video this window just exported. */
+  exportSidecar: 'export:sidecar',
   fileSaveUpload: 'file:save-upload',
   fileSaveChunk: 'file:save-chunk',
   fileSaveAbort: 'file:save-abort',
@@ -83,6 +85,7 @@ export const IPC = {
   codexCancelTask: 'codex:cancel-task',
   codexFixPrompt: 'codex:fix-prompt',
   codexRebasePrompt: 'codex:rebase-prompt',
+  codexUpdateFork: 'codex:update-fork',
   codexRestoreChangeSet: 'codex:restore-change-set',
   codexEvent: 'codex:event', // main → renderer
   agentToolRequest: 'agent-tool:request', // main → renderer
@@ -232,6 +235,9 @@ export interface OnboardingBridge {
   onLogoTarget(callback: (target: OnboardingLogoTarget) => void): () => void;
   begin(choice?: OnboardingChoice): Promise<void>;
   appearance(): Promise<'light' | 'dark'>;
+  /* ── transcription lane ── */
+  /** The Transcription step: start a model download that outlives onboarding. */
+  transcription?: import('./transcription').OnboardingTranscriptionBridge;
 }
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
@@ -242,7 +248,7 @@ const PROJECT_SNAPSHOT_BYTES = 32 * 1024 * 1024;
 
 export const LIMITS = {
   fileSaveBytes: 256 * 1024 * 1024, // direct IPC / local recovery bound
-  codexImages: 6,
+  codexImages: 12, // Six references, a selected region, and representative composition frames.
   codexImageBytes: 4 * 1024 * 1024,
   codexAttachments: 6,
   codexAttachmentBytes: 100 * 1024,
@@ -268,6 +274,10 @@ export interface FileSaveRequest {
   destinationToken?: string;
 }
 export type FileSaveResult = { ok: true; path: string } | { ok: false; cancelled: boolean; error?: string };
+/** Captions sidecar: `path` is the exported video; `suffix` adds ".en" etc. */
+export interface ExportSidecarRequest { path: string; extension: 'srt' | 'vtt'; suffix?: string; text: string }
+/** The only suffixes a sidecar may carry ("en", "pt-BR", "Notes-2"). */
+export const SIDECAR_SUFFIX_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
 export interface ProjectSaveRequest {
   name: string; projectId: string; saveAs?: boolean; documentBytes: number;
   media: import('./project-incremental').SaveMedia[];
@@ -311,6 +321,10 @@ export type CodexMode = 'editor' | 'autonomous';
 export type CodexAccess = 'editor' | 'project' | 'computer';
 export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 export type AgentProviderId = 'chatgpt' | 'claude' | 'compatible';
+/** Who approves an action the Project sandbox blocks: the person each time
+ * (`supervised`), or a provider's automatic reviewer where one exists (`auto`;
+ * providers without one still ask the person). */
+export type AgentApproval = 'supervised' | 'auto';
 
 export interface CodexModelOption {
   id: string;
@@ -343,6 +357,8 @@ export interface CodexRunRequest {
   context?: 'app' | 'project';
   attachments: CodexAttachment[];
   consentToken: string | null; // required when access === 'computer'
+  /** Project access only; omitted by older renderers, which meant `auto`. */
+  approval?: AgentApproval;
 }
 
 export interface AgentExtensionChange {
@@ -427,6 +443,10 @@ export interface CodexRebasePromptRequest {
   id: string;
 }
 
+export type ForkUpdateResult =
+  | { kind: 'updated'; version: string; projectId: string; changeSetId: string }
+  | { kind: 'needs-agent'; reason: 'conflict' | 'validation'; conflicts: string[] };
+
 /* Structured activity, streamed from main as it happens. Every `thought` and
    `answer` event is an APPEND-ONLY fragment: the renderer concatenates
    consecutive fragments into the current live row, so a provider that streams
@@ -448,6 +468,8 @@ export type CodexTraceEvent =
       label: string;
       /** The tool's primary argument in mono: a command, a file path, a query. ≤ LIMITS.codexToolDetailChars */
       detail?: string;
+      /** Agent media tools only: the sanitized target, so the row can name the clip. */
+      subject?: import('./media-tools').AgentMediaToolSubject;
     }
   | {
       kind: 'tool-end';
@@ -528,10 +550,14 @@ export interface ClaudeAccountStatus {
 }
 
 /* Computer authority: main shows a native confirmation and mints a one-use,
-   short-lived token. It is never persisted. */
+   short-lived token. It is never persisted. A `standing` request asks once
+   for Full access and then mints tokens without asking again, until `revoke`
+   or the app quits. */
 export interface ConsentRequest {
   projectName: string;
   summary: string;
+  standing?: boolean;
+  revoke?: boolean;
 }
 export type ConsentResult = { granted: true; token: string; expiresAt: number } | { granted: false };
 
@@ -707,6 +733,8 @@ export interface PowermoveBridge {
     choose(name: string, directory?: boolean): Promise<string | null>;
     release(token: string): Promise<void>;
   };
+  /** Captions: write a subtitle sidecar next to an exported video. */
+  exportSidecar?(request: ExportSidecarRequest): Promise<FileSaveResult>;
   saveFile(req: FileSaveRequest): Promise<FileSaveResult>;
   openProjectFile(): Promise<ProjectOpenResult>;
   /** Opens a project file the user already picked, keeping its path for Save.
@@ -761,6 +789,10 @@ export interface PowermoveBridge {
     reveal(request: AttachmentRevealRequest): Promise<void>;
   };
 
+  /* ── agent media tools: asset → readable file (media-tools lane) ── */
+  /** Resolve media assets to files main/the host can read (renderer/src/media/media-path.ts). */
+  mediaPath?: import('./media-tools').MediaPathBridge;
+
   codex: {
     run(
       req: CodexRunRequest,
@@ -773,6 +805,7 @@ export interface PowermoveBridge {
     cancelTask?(requestId: string, taskId: string): Promise<void>;
     fixPrompt(req: CodexFixPromptRequest): Promise<string>;
     rebasePrompt(req: CodexRebasePromptRequest): Promise<string>;
+    updateFork(req: CodexRebasePromptRequest): Promise<ForkUpdateResult>;
     restoreChangeSet(req: AgentChangeSetRestoreRequest): Promise<AgentChangeSetRestoreResult>;
     requestComputerConsent(req: ConsentRequest): Promise<ConsentResult>;
   };
@@ -903,6 +936,10 @@ export interface PowermoveBridge {
 
   /** The Store: browse the registry; install, update and remove store extensions. */
   extensionStore: import('./store-ipc').StoreBridge;
+
+  /* ── transcription lane ── */
+  /** On-device transcription: models, downloads, transcribe (absent on hosts without the engine). */
+  transcription?: import('./transcription').TranscriptionBridge;
 }
 
 export interface SandboxInputKey {

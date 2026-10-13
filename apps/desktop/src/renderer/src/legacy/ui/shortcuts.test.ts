@@ -393,6 +393,18 @@ describe('pro editor shortcut behavior', () => {
     expect(PM.L(video.id).d.embeddedAudio).toBe(true);
   });
 
+  it('keeps the soundtrack level and mute when separating audio', () => {
+    const PM = editorRuntime();
+    const video = layer(PM, 'video', {
+      type: 'video', name: 'Interview', from: 0, dur: 4,
+      d: { asset: 'video-asset', trim: 0, speed: 1, embeddedAudio: true, audioGain: 0.5, audioMuted: true },
+    });
+    PM.cmd('separateAudio', video.id);
+    const audio = PM.firstSel();
+    expect(audio.d.gain).toBe(0.5);
+    expect(audio.on).toBe(false);
+  });
+
   it('splits every visible unlocked root layer with no selection and treats boundaries as no-ops', () => {
     const PM = editorRuntime();
     const visible = layer(PM, 'visible', { from: 0, dur: 10 });

@@ -10,6 +10,8 @@ export interface AgentOption {
   id: string;
   label: string;
   detail?: string;
+  icon?: string;
+  tone?: 'warning';
 }
 
 export interface AgentMessage {
@@ -57,6 +59,8 @@ export type TraceStep =
       detail?: string;
       /** Bounded result excerpt, set on tool-end. */
       output?: string;
+      /** Agent media tools: settled without a final result (a transcription still running, or waiting on a model). */
+      outcome?: 'pending' | 'needs-model';
       startedAt?: number;
       endedAt?: number;
       task?: AgentTask;
@@ -105,6 +109,8 @@ export interface AgentSnapshot {
   model: string;
   reasoningEffort: string;
   accessMode: string;
+  /** The access picker's choice: editor, supervised, auto or full. */
+  permission: string;
   composerDraft: string;
   pendingEntering: boolean;
   models: AgentOption[];
@@ -154,6 +160,7 @@ const EMPTY_SNAPSHOT: AgentSnapshot = {
   model: 'gpt-5.6-sol',
   reasoningEffort: 'high',
   accessMode: 'editor',
+  permission: 'editor',
   composerDraft: '',
   pendingEntering: false,
   models: [],

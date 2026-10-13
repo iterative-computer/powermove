@@ -54,10 +54,20 @@ try {
   assert.equal((await rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'smoke', version: '1' } })).serverInfo.name, 'powermove');
   const tools = (await rpc('tools/list')).tools.map(tool => tool.name);
   for (const name of ['create_project', 'apply_commands', 'edit_video', 'probe_media', 'render_frames', 'delegate_task', 'export_video', 'save_project']) assert(tools.includes(name), name);
+  assert.equal(new Set(tools).size, tools.length, 'MCP tool names must be unique');
   const project = text(await tool('create_project', { name: 'MCP smoke video', width: 320, height: 180, fps: 12, duration: 1 }));
   await tool('start_session', { prompt: 'Create a red video with an audible tone' });
-  const imported = text(await tool('import_media', { path: audio, at: 0 }));
+  const firstImport = text(await tool('import_media', { path: audio }));
+  assert.equal(firstImport.status, 'imported'); assert.equal(firstImport.persisted, true);
+  assert.equal(text(await tool('get_project_state')).layerCount, 0);
+  const imported = text(await tool('import_media_to_timeline', { path: audio, at: 0 }));
   assert.equal(imported.layers[0].type, 'audio');
+  await tool('get_project_state');
+  const durable = text(await tool('import_media', { path: audio }));
+  assert.equal(durable.persisted, true);
+  assert.equal(durable.status, 'already_imported');
+  assert.equal(durable.assetId, firstImport.assetId);
+  assert.equal(typeof durable.assetId, 'string');
   await tool('get_project_state');
   await tool('apply_commands', { label: 'Red background', commands: [JSON.stringify({ type: 'add_layer', layerType: 'solid', name: 'Red', content: { color: '#e83a5e', w: 320, h: 180 }, duration: 1 })] });
   const reviewed = await tool('render_frames', { times: [0, 0.5], width: 320 });
@@ -91,4 +101,13 @@ try {
   await assert.rejects(readFile(path.join(profile, 'mcp-host.lock')));
   console.log('MCP smoke passed: real frames, audible MP4, editable project, rollback, planning access, clean shutdown.');
 } catch (error) { console.error(diagnostics); throw error; }
-finally { child.kill('SIGTERM'); await rm(root, { recursive: true, force: true }); }
+finally {
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill('SIGTERM');
+    await new Promise(resolve => {
+      const timer = setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 10000);
+      child.once('exit', () => { clearTimeout(timer); resolve(); });
+    });
+  }
+  await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}

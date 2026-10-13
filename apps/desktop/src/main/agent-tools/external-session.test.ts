@@ -37,6 +37,7 @@ describe('external Powermove MCP sessions', () => {
   it('exposes every shared harness tool and retains staged validation and commit lifecycle', async () => {
     const { root, session, attach, detach } = await setup();
     expect(session.tools()).toEqual(expect.arrayContaining([...POWERMOVE_AGENT_TOOLS]));
+    expect(new Set(session.tools().map(tool => tool.name)).size).toBe(session.tools().length);
     await expect(session.call('apply_commands', {})).rejects.toThrow('start_session');
     const opened: any = await session.call('start_session', { prompt: 'Create a video' });
     expect(opened).toMatchObject({ projectId: 'project-one', access: 'project' });
@@ -59,7 +60,7 @@ describe('external Powermove MCP sessions', () => {
     await session.call('start_session', { prompt: 'Inspect', access: 'editor' });
     await expect(session.call('create_project', { name: 'Other' })).rejects.toThrow('Finish');
     await expect(session.call('apply_commands', { commands: [] })).rejects.toThrow('only inspect');
-    await expect(session.call('export_video', {})).rejects.toThrow('project access');
+    await expect(session.call('export_video', {})).rejects.toThrow('only inspect');
     await expect(session.call('publish_extensions', { extensions: [] })).rejects.toThrow('Planning');
     expect(mcpToolResult(await session.call('get_project_state', {}))).toMatchObject({ isError: false });
   });

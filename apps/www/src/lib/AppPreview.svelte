@@ -1,12 +1,12 @@
 <script lang="ts">
   import { ChevronRight, CornerDownLeft, Plus } from '@lucide/svelte';
 
-  let { kind }: { kind: string } = $props();
+  let { kind, bare = false }: { kind: string; bare?: boolean } = $props();
 
   // UI details follow the app captures in design-references/2026-09-20.
 </script>
 
-<div class="app-preview" role="img" aria-label={kind === 'agent' ? 'Close-up of the Powermove prompt box with provider, model, and reasoning controls.' : kind === 'extensions' ? 'Example extensions in Powermove Settings, with Motion tracking switched off and Audio-reactive visuals switched on.' : 'Close-up of the Powermove Export dialog showing Code and Video choices and the live animation export description.'}>
+<div class="app-preview" class:bare role="img" aria-label={kind === 'agent' ? 'Close-up of the Powermove prompt box with provider, model, and reasoning controls.' : kind === 'extensions' ? 'Example extensions in Powermove Settings, with Motion tracking switched off and Audio-reactive visuals switched on.' : 'Close-up of the Powermove Export dialog showing Code and Video choices and the live animation export description.'}>
   {#if kind === 'agent'}
     <div class="agent-crop">
       <div class="agent" aria-hidden="true">
@@ -60,6 +60,8 @@
 <style>
   .app-preview{text-align:left;display:flex;align-items:center;justify-content:center;box-sizing:border-box;min-width:0;background:var(--bg-panel-2);font-family:var(--f-ui);font-size:13px;line-height:1.45;color:var(--tx);user-select:none}
   .app-preview{position:relative;width:min(calc(100% - 16px),1280px);aspect-ratio:16/9;padding:0;border-radius:var(--r-xl);box-shadow:var(--shadow-panel);overflow:hidden;isolation:isolate;container-type:inline-size}
+  .app-preview.bare{width:100%;border-radius:0;box-shadow:none}
+  .app-preview.bare::after{display:none}
   .app-preview::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 1px rgb(var(--ink-rgb) / .08);pointer-events:none}
   .preview-scene{position:absolute;left:0;top:0;width:360px;height:202.5px;transform:scale(calc(100cqw / 360px));transform-origin:top left}
   .extension-settings{position:absolute;left:50%;top:50%;width:312px;transform:translate(-50%,-50%)}

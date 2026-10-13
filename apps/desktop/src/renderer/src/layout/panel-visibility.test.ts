@@ -53,6 +53,46 @@ describe('panel visibility preferences', () => {
     expect(untouched.layout.docks[0]!.panels[0]).toMatchObject({ id: 'pexels', size: 510 });
   });
 
+  it('keeps a pinned agent in every project and workspace until explicitly closed', () => {
+    const { PM, saved } = harness();
+    const first = workspace(210);
+    const second = workspace(480);
+    rememberPanelVisibility(PM, 'agent', true);
+    expect(saved.get('panelVisibility')).toEqual({ agent: true });
+    expect(applyPanelVisibility(PM, first)).toBe(true);
+    expect(applyPanelVisibility(PM, second)).toBe(true);
+    expect(first.layout.docks[0]!.panels.at(-1)).toMatchObject({ id: 'agent' });
+    expect(second.layout.docks[0]!.panels.at(-1)).toMatchObject({ id: 'agent' });
+    expect(applyPanelVisibility(PM, second)).toBe(false);
+    rememberPanelVisibility(PM, 'agent', false);
+    expect(applyPanelVisibility(PM, first)).toBe(true);
+    expect(applyPanelVisibility(PM, second)).toBe(true);
+    expect(first.layout.docks[0]!.panels.map(panel => panel.id)).toEqual(['pexels']);
+    expect(second.layout.docks[0]!.panels.map(panel => panel.id)).toEqual(['pexels']);
+    expect(applyPanelVisibility(PM, workspace(260))).toBe(false);
+  });
+
+  it('restores the agent’s saved location and height when repinned', () => {
+    const { PM } = harness({ agent: true });
+    const current: Workspace = {
+      layout: { docks: [{ id: 'left', hidden: true, panels: [] }] },
+      hiddenPanels: [{ id: 'agent', dockId: 'left', index: 0, spec: { id: 'agent', size: 470 } }]
+    };
+    expect(applyPanelVisibility(PM, current)).toBe(true);
+    expect(current.layout.docks[0]).toMatchObject({ id: 'left', hidden: false, panels: [{ id: 'agent', size: 470 }] });
+  });
+
+  it('adopts existing pinned agents without overriding a later explicit close', () => {
+    const { PM } = harness();
+    const current = workspace(260);
+    current.layout.docks[0]!.panels.push({ id: 'agent', size: 410 });
+    expect(applyPanelVisibility(PM, current)).toBe(false);
+    expect(preferredPanelVisibility(PM, 'agent')).toBe(true);
+    rememberPanelVisibility(PM, 'agent', false);
+    expect(applyPanelVisibility(PM, current)).toBe(true);
+    expect(preferredPanelVisibility(PM, 'agent')).toBe(false);
+  });
+
   it('ignores invalid saved data and never hides the viewer', () => {
     const { PM, saved } = harness({ '../escape': false, viewer: false, pexels: 'no' });
     const current: Workspace = {

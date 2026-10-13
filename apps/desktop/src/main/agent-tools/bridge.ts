@@ -1,3 +1,4 @@
+import { withAgentExport } from '../agent-export';
 import { randomBytes, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import net, { type Server, type Socket } from 'node:net';
@@ -16,13 +17,26 @@ import {
 import { isRecord, isString } from '../../shared/guards';
 import { EXTENSION_ID } from '../../shared/extensions';
 import { forkBuiltinExtension } from '../extensions/fork';
-import { POWERMOVE_AGENT_TOOLS, POWERMOVE_APP_AGENT_TOOLS, POWERMOVE_LIVE_INSPECTION_TOOL_NAMES, POWERMOVE_STORE_TOOL_NAMES, type NativeMcpServerConfig } from './spec';
+import {
+  OUTSIDE_SANDBOX_CALL_MS,
+  OUTSIDE_SANDBOX_TOOL,
+  OUTSIDE_SANDBOX_TOOL_NAME,
+  POWERMOVE_AGENT_TOOLS,
+  POWERMOVE_APP_AGENT_TOOLS,
+  POWERMOVE_STORE_TOOL_NAMES,
+  POWERMOVE_LIVE_INSPECTION_TOOL_NAMES,
+  type NativeMcpServerConfig
+} from './spec';
 import { ORCHESTRATION_TOOL_NAMES } from '../../shared/agent-orchestration';
 import type { StoreAgentGateway, StoreInstallInput, StorePublishInput, StoreSearchInput } from '../cloud/store-agent';
-import { inspectCreativeWorkspace } from '../creative-workspace';
+import { inspectCreativeExtension, inspectCreativeWorkspace } from '../creative-workspace';
 import { userInput, type UserInput } from '../user-input';
+import { AgentMediaTools, CALL_BUDGET_MS, type CompositionInfo, type MediaToolContext } from './media-tools';
+import { AGENT_MEDIA_TOOL_NAMES, COMPOSITION_INFO_TOOL, MEDIA_SOURCE_TOOL, type AgentMediaSource } from '../../shared/media-tools';
+import type { TranscriptionService } from '../transcription/service';
 
 const STORE_TOOL_NAMES = new Set<string>(POWERMOVE_STORE_TOOL_NAMES);
+const MEDIA_TOOL_NAMES = new Set<string>(AGENT_MEDIA_TOOL_NAMES);
 
 const TOOL_TIMEOUT_MS = 120_000;
 const MAX_SOCKET_REQUEST_BYTES = 2 * 1024 * 1024;
@@ -50,6 +64,9 @@ interface PendingToolCall {
   timer: NodeJS.Timeout;
 }
 
+/** Asks the person, then runs one command without the sandbox; returns its report. */
+export type OutsideSandboxRunner = (args: { command: string; reason: string; timeoutMs: number }) => Promise<string>;
+
 export interface AgentToolFinishResult {
   changed: boolean;
   revision?: number;
@@ -64,6 +81,8 @@ export class PowermoveAgentToolSession {
   private finishing: Promise<AgentToolFinishResult> | null = null;
   readonly openedAt = Date.now();
   stagingDirectory: string | null = null;
+  /** Set for supervised Project runs that ask through run_outside_sandbox. */
+  outsideSandbox: OutsideSandboxRunner | null = null;
 
   constructor(
     readonly runId: string,
@@ -132,11 +151,21 @@ export interface PowermoveAgentToolBridgeOptions {
   /** Fixed Electron app entrypoint; omitted for standalone Node embeddings. */
   commandArgs?: string[];
   timeoutMs?: number;
+  /** Desktop agent deliveries avoid dialogs and use unique filenames here. */
+  exportDirectory?: string;
   stageForkRebase?(options: { forkId: string; stagingDirectory: string }): Promise<unknown>;
   /** The Store as the agent uses it; absent when cloud is unconfigured. */
   storeAgent?: StoreAgentGateway | null;
   /** Test seam: the app windows' input record. */
   userInput?: Pick<UserInput, 'drive'>;
+  /** Bundled ffmpeg for the media tools; absent disables them with a clear error. */
+  ffmpegPath?: string;
+  /** Test seams for the media tools. */
+  transcription?: () => TranscriptionService;
+  transcribeWaitMs?: number;
+  mediaFontFile?: string | null;
+  /** Test seam: how long one media tool call may take (defaults to CALL_BUDGET_MS). */
+  mediaCallBudgetMs?: number;
   orchestrate?(runId: string, tool: string, args: Record<string, unknown>): Promise<unknown>;
   capturePanel?(owner: WebContents, bounds: { x: number; y: number; width: number; height: number }): Promise<Uint8Array>;
   panelInput?(owner: WebContents, args: Record<string, unknown>, points: Array<{ x: number; y: number }>): Promise<void>;
@@ -150,6 +179,8 @@ export class PowermoveAgentToolBridge {
   private server: Server | null = null;
   private starting: Promise<number> | null = null;
   private readonly onRendererResponseBound: (event: IpcMainEvent, value: unknown) => void;
+  private mediaTools: AgentMediaTools | null = null;
+  private readonly mediaCalls = new Map<PowermoveAgentToolSession, Set<AbortController>>();
 
   constructor(
     private readonly ipcMain: IpcMain,
@@ -166,6 +197,7 @@ export class PowermoveAgentToolBridge {
     baseRevision: number;
     context?: 'app' | 'project';
     resolveStagingDirectory?: (forkId: string) => Promise<string>;
+    outsideSandbox?: OutsideSandboxRunner;
     transactionSession?: PowermoveAgentToolSession;
     inspectionOnly?: boolean;
   }): Promise<PowermoveAgentToolSession> {
@@ -182,7 +214,8 @@ export class PowermoveAgentToolBridge {
         POWERMOVE_AGENT_TOOL_TOKEN: token,
         POWERMOVE_AGENT_RUN_ID: options.runId,
         POWERMOVE_AGENT_TOOL_TIMEOUT_MS: String(this.timeoutMs)
-      }
+      },
+      toolTimeoutSec: Math.ceil(Math.max(3_600_000, options.outsideSandbox ? OUTSIDE_SANDBOX_CALL_MS : 0) / 1000)
     };
     const session = new PowermoveAgentToolSession(
       options.runId,
@@ -196,6 +229,7 @@ export class PowermoveAgentToolBridge {
       options.transactionSession,
       options.inspectionOnly
     );
+    session.outsideSandbox = options.outsideSandbox ?? null;
     this.sessionsByToken.set(token, session);
     this.sessionsByRun.set(options.runId, session);
     return session;
@@ -210,6 +244,8 @@ export class PowermoveAgentToolBridge {
       this.pending.delete(callId);
     }
     this.ipcMain.removeListener(IPC.agentToolResponse, this.onRendererResponseBound);
+    this.mediaTools?.dispose();
+    this.mediaTools = null;
     const server = this.server;
     this.server = null;
     this.starting = null;
@@ -247,7 +283,7 @@ export class PowermoveAgentToolBridge {
       };
       const fail = (error: Error) => { cleanup(); reject(error); };
       const unavailable = () => fail(new Error(`Powermove renderer closed or crashed while running ${tool}. The action outcome is unknown; inspect the project before repeating edits.`));
-      const timer = setTimeout(() => fail(new Error(`Powermove timed out while running ${tool}. Inspect get_workspace_state or capture_panel before retrying; an edit may already have completed.`)), this.timeoutMs);
+      const timer = setTimeout(() => fail(new Error(`Powermove timed out while running ${tool}. Inspect get_workspace_state or capture_panel before retrying; an edit may already have completed.`)), tool === '__mcp_export_video' || tool === '__mcp_save_project' ? 3_600_000 : this.timeoutMs);
       timer.unref();
       session.owner.once('destroyed', unavailable);
       session.owner.once('render-process-gone', unavailable);
@@ -337,6 +373,8 @@ export class PowermoveAgentToolBridge {
   }
 
   closeSession(session: PowermoveAgentToolSession): void {
+    for (const controller of this.mediaCalls.get(session) ?? []) controller.abort();
+    this.mediaCalls.delete(session);
     if (this.sessionsByToken.get(session.token) === session) this.sessionsByToken.delete(session.token);
     if (this.sessionsByRun.get(session.runId) === session) this.sessionsByRun.delete(session.runId);
     for (const [callId, pending] of this.pending) {
@@ -391,7 +429,7 @@ export class PowermoveAgentToolBridge {
       const newline = input.indexOf('\n');
       if (newline < 0) return;
       handled = true;
-      void this.dispatchSocket(input.slice(0, newline)).then(
+      void this.dispatchSocket(input.slice(0, newline), socket).then(
         (value) => this.writeSocket(socket, value),
         (error) => this.writeSocket(socket, {
           ok: false,
@@ -401,7 +439,7 @@ export class PowermoveAgentToolBridge {
     });
   }
 
-  private async dispatchSocket(line: string): Promise<Record<string, unknown>> {
+  private async dispatchSocket(line: string, socket?: Socket): Promise<Record<string, unknown>> {
     let value: unknown;
     try { value = JSON.parse(line); } catch { throw new Error('Invalid Powermove tool request.'); }
     const request = this.parseSocketRequest(value);
@@ -411,9 +449,15 @@ export class PowermoveAgentToolBridge {
     }
     if (request.tool === '__list_tools') {
       const tools = session.context === 'app' ? POWERMOVE_APP_AGENT_TOOLS : POWERMOVE_AGENT_TOOLS;
-      return { id: request.id, ok: true, tools: session.inspectionOnly ? tools.filter(tool => (POWERMOVE_LIVE_INSPECTION_TOOL_NAMES as readonly string[]).includes(tool.name)) : tools };
+      const visibleTools = session.inspectionOnly ? tools.filter(tool => (POWERMOVE_LIVE_INSPECTION_TOOL_NAMES as readonly string[]).includes(tool.name)) : tools;
+      return { id: request.id, ok: true, tools: session.outsideSandbox ? [...visibleTools, OUTSIDE_SANDBOX_TOOL] : visibleTools };
     }
-    if (!POWERMOVE_AGENT_TOOLS.some((tool) => tool.name === request.tool)) {
+    if (request.tool === OUTSIDE_SANDBOX_TOOL_NAME) {
+      // It waits on the person, far longer than any other tool call.
+      socket?.setTimeout(OUTSIDE_SANDBOX_CALL_MS + 5_000);
+    } else if (request.tool === 'export_video' || request.tool === 'save_project') {
+      socket?.setTimeout(3_605_000);
+    } else if (!POWERMOVE_AGENT_TOOLS.some((tool) => tool.name === request.tool)) {
       throw new Error(`Unknown Powermove tool: ${request.tool}`);
     }
     const response = await this.callTool(session, request.tool, request.arguments, request.workspace);
@@ -431,19 +475,26 @@ export class PowermoveAgentToolBridge {
    * staging handlers, not just the renderer's editing dispatcher. */
   async callTool(session: PowermoveAgentToolSession, tool: string, args: Record<string, unknown>, workspace = ''): Promise<AgentToolResponseEvent> {
     if (session.isClosed() || session.owner.isDestroyed()) throw new Error('Powermove tool session is not active.');
+    if (tool === OUTSIDE_SANDBOX_TOOL_NAME) return this.runOutsideSandbox(session, args);
     if (!POWERMOVE_AGENT_TOOLS.some(spec => spec.name === tool)) throw new Error(`Unknown Powermove tool: ${tool}`);
     if (session.inspectionOnly && !(POWERMOVE_LIVE_INSPECTION_TOOL_NAMES as readonly string[]).includes(tool)) throw new Error('This planning run can only inspect the project.');
     if (session.context === 'app' && !POWERMOVE_APP_AGENT_TOOLS.some(spec => spec.name === tool)) {
       throw new Error('This agent has no project attached. Open a project to use composition tools.');
+    }
+    if (tool === 'save_project' || tool === 'export_video') {
+      // The normal provider connection owns this session; no separate MCP setup.
+      await this.callRenderer(session, 'get_project_state', { propertyLimit: 1, keyframeLimit: 0 });
+      return withAgentExport(session.owner, this.options.exportDirectory, () =>
+        this.callRenderer(session, `__mcp_${tool}`, args));
     }
     if ((ORCHESTRATION_TOOL_NAMES as readonly string[]).includes(tool)) {
       if (!this.options.orchestrate) throw new Error('Subagent orchestration is unavailable in this connection.');
       const result = await this.options.orchestrate(session.runId, tool, args);
       return { runId: session.runId, callId: `tool-${randomUUID()}`, ok: true, content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
-    if (tool === 'inspect_creative_workspace') {
+    if (tool === 'inspect_creative_workspace' || tool === 'inspect_creative_extension') {
       return { runId: session.runId, callId: `tool-${randomUUID()}`, ok: true,
-        content: [{ type: 'text', text: JSON.stringify(await inspectCreativeWorkspace(args)) }] };
+        content: [{ type: 'text', text: JSON.stringify(await (tool === 'inspect_creative_workspace' ? inspectCreativeWorkspace(args) : inspectCreativeExtension(args))) }] };
     }
     if (tool === 'fork_builtin_extension') {
       const request: ToolSocketRequest = { token: session.token, runId: session.runId, id: null, tool, arguments: args, workspace };
@@ -457,6 +508,9 @@ export class PowermoveAgentToolBridge {
     if (STORE_TOOL_NAMES.has(tool)) {
       return this.callStoreTool(session, tool, args);
     }
+    if (MEDIA_TOOL_NAMES.has(tool)) {
+      return this.callMediaTool(session, tool, args);
+    }
     const response = tool === 'stage_fork_rebase'
       ? await this.callStageForkRebase(session, args, workspace)
       : tool === 'capture_panel'
@@ -466,6 +520,17 @@ export class PowermoveAgentToolBridge {
         : await this.callRenderer(session, tool, args);
     session.noteResponse(response);
     return response;
+  }
+
+  private async runOutsideSandbox(session: PowermoveAgentToolSession, args: Record<string, unknown>): Promise<AgentToolResponseEvent> {
+    if (!session.outsideSandbox) throw new Error(`${OUTSIDE_SANDBOX_TOOL_NAME} is not available in this run.`);
+    const { command, reason, timeoutMs } = args;
+    if (!isString(command, 20_000) || !command.trim() || !isString(reason, 600) || !reason.trim()
+      || (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || (timeoutMs as number) < 1 || (timeoutMs as number) > 600_000))) {
+      throw new Error(`${OUTSIDE_SANDBOX_TOOL_NAME} expects { command, reason, timeoutMs? }.`);
+    }
+    const text = await session.outsideSandbox({ command, reason, timeoutMs: (timeoutMs as number | undefined) ?? 120_000 });
+    return { runId: session.runId, callId: `tool-${randomUUID()}`, ok: true, content: [{ type: 'text', text }] };
   }
 
   /** Store tools run entirely in main (network/install/publish), never the
@@ -480,6 +545,81 @@ export class PowermoveAgentToolBridge {
       ok: true,
       content: [{ type: 'text', text: JSON.stringify(result ?? { ok: true }) }]
     };
+  }
+
+  /* ── watch and listen (media-tools lane) ──
+     Media tools run here, against a file the renderer names: the original
+     source, or the stored bytes staged once (see media-path-cache.ts). They
+     read the project but never change it, so no revision bookkeeping. */
+  private async callMediaTool(session: PowermoveAgentToolSession, tool: string, args: Record<string, unknown>): Promise<AgentToolResponseEvent> {
+    if (!this.options.ffmpegPath) throw new Error('Media tools are unavailable in this Powermove build.');
+    this.mediaTools ??= new AgentMediaTools({
+      ffmpegPath: this.options.ffmpegPath,
+      ...(this.options.transcription ? { transcription: this.options.transcription } : {}),
+      ...(this.options.transcribeWaitMs !== undefined ? { transcribeWaitMs: this.options.transcribeWaitMs } : {}),
+      ...(this.options.mediaFontFile !== undefined ? { fontFile: this.options.mediaFontFile } : {})
+    });
+    const controller = new AbortController();
+    const calls = this.mediaCalls.get(session) ?? new Set<AbortController>();
+    calls.add(controller);
+    this.mediaCalls.set(session, calls);
+    const rendererJson = async (name: string, rendererArgs: Record<string, unknown>): Promise<any> => {
+      const response = await this.callRenderer(session, name, rendererArgs);
+      if (!response.ok) throw new Error(response.error || `${name} failed.`);
+      const item = response.content.find((entry) => entry.type === 'text');
+      if (item?.type !== 'text') throw new Error(`${name} returned no data.`);
+      return { json: JSON.parse(item.text), response };
+    };
+    const context: MediaToolContext = {
+      signal: controller.signal,
+      deadline: Date.now() + (this.options.mediaCallBudgetMs ?? CALL_BUDGET_MS),
+      resolve: async (target) => (await rendererJson(MEDIA_SOURCE_TOOL, target)).json as AgentMediaSource,
+      renderFrames: async (times, width, until) => {
+        // render_frames takes 5 times a call. With a deadline, a batch that
+        // would not finish in time is not started, and one still rendering at
+        // the deadline is abandoned, so the tool answers within the client's
+        // tool timeout with the frames that did finish.
+        const frames: Array<{ data: Uint8Array; mimeType: 'image/png' | 'image/jpeg' }> = [];
+        let slowest = 0;
+        for (let offset = 0; offset < times.length; offset += 5) {
+          const left = until === undefined ? Infinity : until - Date.now();
+          if (left <= 0 || (frames.length && left < slowest)) break;
+          const batch = times.slice(offset, offset + 5);
+          const started = Date.now();
+          const pending = rendererJson('render_frames', { times: batch, width });
+          let response: AgentToolResponseEvent | null;
+          if (left === Infinity) response = (await pending).response;
+          else {
+            pending.catch(() => undefined);
+            let timer: NodeJS.Timeout | undefined;
+            response = await Promise.race([
+              pending.then((value) => value.response as AgentToolResponseEvent),
+              new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), left); timer.unref?.(); })
+            ]).finally(() => clearTimeout(timer));
+          }
+          if (!response) break;
+          const images = response.content.filter((item) => item.type === 'image');
+          if (images.length !== batch.length) throw new Error('The composition did not render every requested frame.');
+          for (const item of images) frames.push({ data: item.data, mimeType: item.mimeType });
+          slowest = Math.max(slowest, Date.now() - started);
+        }
+        if (!frames.length) throw new Error('The composition did not render in time for one tool call. Ask for fewer cells or a shorter span.');
+        return frames;
+      },
+      composition: async () => {
+        // Not get_project_state: that read moves the run's edit baseline (see harness.ts).
+        const { json } = await rendererJson(COMPOSITION_INFO_TOOL, {});
+        const comp = json ?? {};
+        const work = Array.isArray(comp.workArea) && comp.workArea.length === 2 && comp.workArea.every(Number.isFinite) ? comp.workArea as [number, number] : undefined;
+        return { duration: Number(comp.duration) || 0, fps: Number(comp.fps) || 30, width: Number(comp.width) || 1920, height: Number(comp.height) || 1080, ...(work ? { workArea: work } : {}) } satisfies CompositionInfo;
+      }
+    };
+    try {
+      const content = await this.mediaTools.call(tool, args, context);
+      return { runId: session.runId, callId: `main-${randomUUID()}`, ok: true, content };
+    } finally {
+      calls.delete(controller);
+    }
   }
 
   private dispatchStoreTool(store: StoreAgentGateway, tool: string, args: Record<string, unknown>): Promise<unknown> {

@@ -1,6 +1,7 @@
 import { LIMITS, type CodexTraceEvent } from '../../shared/ipc';
 import { fragmentText, humanLabel, outputExcerpt, toolDetail } from '../agent-tools/trace-format';
 import { isConnectionRetry, RECONNECTING_PROGRESS, RECONNECTED_PROGRESS } from './connection-status';
+import { mediaToolSubject } from '../../shared/media-tools';
 
 export const MAX_CODEX_EVENT_LINE_BYTES = 1024 * 1024;
 
@@ -106,9 +107,10 @@ function toolStart(item: Record<string, unknown>): CodexTraceEvent | null {
       const toolName = typeof item.tool === 'string' && item.tool ? item.tool : 'mcp';
       const name = typeof item.name === 'string' && item.name ? item.name : toolName;
       const detail = toolDetail(name, { tool: name });
+      const subject = mediaToolSubject(toolName, item.arguments);
       return {
         kind: 'tool-start', itemId, toolName: toolName.slice(0, 120), label: humanLabel(name),
-        ...(detail ? { detail } : {})
+        ...(detail ? { detail } : {}), ...(subject ? { subject } : {})
       };
     }
     default:

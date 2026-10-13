@@ -15,9 +15,28 @@ function normalizeText(value: string): string {
 }
 
 describe('autonomous agent contract', () => {
+  it('keeps simple animation focused while supplying procedures for extension and footage tasks', () => {
+    const base = { projectName: 'Project', artifactPath: 'artifacts/run', access: 'project' as const, extensionsDir: '/stage' };
+    const animation = agentInstructions({ ...base, request: 'Animate the title' });
+    expect(animation).toContain('CREATIVE JUDGMENT');
+    expect(animation).toContain('Auto and Supervised support project edits and extension creation');
+    expect(animation).not.toContain('EXTENSION COMPLETION');
+    expect(animation).not.toContain('FOOTAGE AND CAPTIONS');
+    expect(animation).not.toContain('Svelte 5');
+    expect(Buffer.byteLength(animation)).toBeLessThan(8000);
+    const effect = agentInstructions({ ...base, request: 'Create a glow effect' });
+    expect(effect).toContain('EXTENSION COMPLETION');
+    expect(effect).toContain('api.effects.register');
+    expect(effect).toContain('Test in Sandbox');
+    const footage = agentInstructions({ ...base, request: 'Trim this video and add captions' });
+    expect(footage).toContain('FOOTAGE AND CAPTIONS');
+    expect(footage).toContain('transcribe_media');
+    expect(agentInstructions({ ...base, request: 'Rename the title\n\nCONVERSATION IN THIS THREAD\nEarlier we made an effect.' })).not.toContain('EXTENSION COMPLETION');
+  });
+
   it('keeps every distinct edit command reachable by the agent', () => {
-    expect(EDIT_COMMAND_TYPES).toHaveLength(22);
-    expect(new Set(EDIT_COMMAND_TYPES).size).toBe(22);
+    expect(EDIT_COMMAND_TYPES).toHaveLength(24);
+    expect(new Set(EDIT_COMMAND_TYPES).size).toBe(24);
     expect(AGENT_COMMAND_TYPES).toEqual(EDIT_COMMAND_TYPES);
   });
 
@@ -166,7 +185,7 @@ describe('buildRebasePrompt', () => {
       current: '1.4.0'
     })).toBe(`Update the user fork \`my-timeline\`. It was forked from \`timeline@1.2.0\`, and Powermove now ships \`timeline@1.4.0\`.
 
-Call \`stage_fork_rebase\` with {"id":"my-timeline"}. Work only inside the returned staging paths. Merge every file in \`changedUpstream\` into \`workingDir\` using a three-way comparison: \`baseDir\` is the old base, the working copy is the user's version (theirs), and \`oursDir\` is the shipped version (ours). Preserve the user's changes, behavior, and intent. Treat every path in \`conflicts\` with care, and explain each conflict resolution in your final response. When finished, return the fork in the result's \`extensions\` array as {"id":"my-timeline","action":"updated","summary":"..."}.`);
+Call \`stage_fork_rebase\` with {"id":"my-timeline"}. Work only inside the returned staging paths. Powermove has already merged straightforward changes in \`mergedFiles\` into \`workingDir\`. Resolve only the remaining \`conflicts\` using a three-way comparison: \`baseDir\` is the old base, the working copy retains the user's customizations, and \`oursDir\` is the shipped version. Preserve the user's changes, behavior, and intent; do not redo completed merges. Compile the result and repair any remaining validation failure. Explain each conflict resolution in your final response. When finished, return the fork in the result's \`extensions\` array as {"id":"my-timeline","action":"updated","summary":"..."}.`);
   });
 
   it('stays below the 1.5 KB prompt budget', () => {

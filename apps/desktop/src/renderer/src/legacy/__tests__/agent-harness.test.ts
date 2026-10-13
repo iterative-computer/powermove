@@ -23,6 +23,67 @@ function harnessEditor(): PMRegistry {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('agent harness oracle', () => {
+  it('keeps oversized review context valid and directs discovery to complete live pages', async () => {
+    const PM = harnessEditor();
+    PM.proj.layers = [PM.mkLayer('text', { d: { text: 'Long content '.repeat(20_000) } })];
+    PM.CodexBridge = { request: vi.fn(async () => JSON.stringify({ status: 'pass', commands: [], reviewTimes: [] })) };
+    const proposal = PM.AgentHarness.sanitizeProposal({ commands: [{ type: 'set_composition', patch: { background: '#224466' } }] });
+    await PM.AgentHarness.execute('Change the background', proposal);
+    const prompt = PM.CodexBridge.request.mock.calls[0][0];
+    expect(prompt.length).toBeLessThan(200_000);
+    const source = JSON.parse(prompt.split('LIVE COMPOSITION SOURCE\n')[1].split('\n\nRENDERED FRAME TIMES')[0]);
+    expect(source.pagination.indexOnly).toBe(true);
+    expect(source.layers[0].id).toBe(PM.proj.layers[0].id);
+    expect(prompt).toContain('get_project_state');
+    expect(prompt).toContain('Representative frames attached');
+  });
+
+  it('automatically supplies representative visual context without moving the playhead', async () => {
+    const PM = harnessEditor();
+    const before = JSON.stringify(PM.proj);
+    const frames = await PM.AgentHarness.observeVisual();
+    expect(frames.images.length).toBeGreaterThanOrEqual(3);
+    expect(frames.times).toContain(1);
+    expect(frames.times.some((time: number) => time >= 5)).toBe(true);
+    expect(PM.time).toBe(1);
+    expect(JSON.stringify(PM.proj)).toBe(before);
+  });
+
+  it('uses the original provider, model, reasoning and thread for every repair review', async () => {
+    const PM = harnessEditor();
+    let reviews = 0;
+    PM.CodexBridge = { request: vi.fn(async () => JSON.stringify(reviews++ === 0
+      ? { status: 'repair', commands: [{ type: 'set_content', target: 'review-title', patch: { text: 'Fixed' } }], reviewTimes: [] }
+      : { status: 'pass', commands: [], reviewTimes: [] })) };
+    const settings = { provider: 'claude', model: 'claude-sonnet-5-5', reasoningEffort: 'high', threadId: 'agent-thread-review', projectId: PM.proj.id };
+    const proposal = PM.AgentHarness.sanitizeProposal({ commands: [{ type: 'add_layer', id: 'review-title', layerType: 'text' }] });
+    await PM.AgentHarness.execute('Add a title', proposal, () => {}, settings);
+    expect(PM.CodexBridge.request).toHaveBeenCalledTimes(2);
+    for (const call of PM.CodexBridge.request.mock.calls) {
+      expect(call[3]).toMatchObject(settings);
+      expect(call[2].length).toBeGreaterThanOrEqual(3);
+    }
+    expect(PM.L('review-title').d.text).toBe('Fixed');
+  });
+
+  it('discovers every layer through compact pages and can find a late named target', () => {
+    const PM = harnessEditor();
+    PM.proj.layers = Array.from({ length: 260 }, (_, i) => PM.mkLayer('shape', { name: i === 259 ? 'Final logo' : `Layer ${i}` }));
+    const found: string[] = [];
+    let offset: number | null = 0;
+    while (offset !== null) {
+      const page: any = PM.AgentHarness.projectState({ indexOnly: true, layerOffset: offset, layerLimit: 50 });
+      expect(page.layers.every((layer: any) => !Object.hasOwn(layer, 'properties'))).toBe(true);
+      found.push(...page.layers.map((layer: any) => layer.id));
+      offset = page.pagination.nextLayerOffset;
+      if (found.length > 300) throw new Error('Pagination did not finish');
+    }
+    expect(new Set(found).size).toBe(260);
+    const target = PM.AgentHarness.projectState({ layerSearch: 'final logo' });
+    expect(target.layers).toHaveLength(1);
+    expect(target.layers[0].name).toBe('Final logo');
+  });
+
   it('can redo an undone agent run after selecting another layer', async () => {
     const PM = harnessEditor();
     const existing = PM.mkLayer('shape');
@@ -81,9 +142,9 @@ describe('agent harness oracle', () => {
     expect(PM.time).toBe(1);
   });
 
-  it('reviews and completes an edit without frames when the agent leaves reviewTimes empty', async () => {
+  it('keeps the edit and reports a failed automatic visual capture', async () => {
     const PM = harnessEditor();
-    PM.Export.snapshot = vi.fn(() => { throw new Error('Unexpected frame capture'); });
+    PM.Export.snapshot = vi.fn(() => { throw new Error('GPU capture failed'); });
     PM.CodexBridge = { request: vi.fn(async () => JSON.stringify({ status: 'pass', message: 'Source checked', commands: [], reviewTimes: [] })) };
     const proposal = PM.AgentHarness.sanitizeProposal({
       commands: [{ type: 'add_layer', layerType: 'text', name: 'Title', content: { text: 'Hello' } }],
@@ -91,10 +152,12 @@ describe('agent harness oracle', () => {
     });
     const run = await PM.AgentHarness.execute('Add a title', proposal);
     expect(PM.proj.layers).toHaveLength(1);
-    expect(run.reviewError).toBe('');
+    expect(run.reviewError).toContain('GPU capture failed');
+    expect(run.frames.visualError).toContain('GPU capture failed');
+    expect(PM.CodexBridge.request.mock.calls[0][0]).toContain('GPU capture failed');
     expect(run.frames.images).toEqual([]);
     expect(PM.CodexBridge.request.mock.calls[0][2]).toEqual([]);
-    expect(PM.Export.snapshot).not.toHaveBeenCalled();
+    expect(PM.Export.snapshot).toHaveBeenCalled();
   });
 
   it('preflights effect definitions with the registration validator without changing the project', async () => {

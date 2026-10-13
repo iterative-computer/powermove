@@ -31,6 +31,7 @@ import { registerShellIpc } from '../main/shell';
 import { registerCaptureIpc } from '../main/capture';
 import { registerRenderEncoder } from '../main/render-encoder';
 import { MediaProxyService, imageSequenceConverter, playbackConverter, previewConverter, registerMediaProxyIpc, stillImageConverter } from '../main/media-proxy';
+import { MediaPathCache, registerMediaPathIpc } from '../main/media-path-cache';
 import { registerCodexIpc } from '../main/codex';
 import { recoverAllInterruptedExtensionTransactions } from '../main/codex/change-history';
 import { registerExtensionsIpc, serveExtensionAsset, sandboxManifestFor } from '../main/extensions';
@@ -267,6 +268,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   const runs = new RunHub({
     engine: () => ipc.engine(),
     tabs: () => [...ipc.all()].reverse(),
+    tabsOn: (projectId) => sessions.members(projectId).filter((member): member is RemoteClient => member instanceof RemoteClient && member.kind === 'tab').reverse(),
     respond: (owner, response) => ipc.emitOn(IPC.agentToolResponse, { sender: owner as unknown as RemoteClient, senderFrame: owner.mainFrame, preventDefault() {} }, response),
     log
   });
@@ -373,6 +375,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     claudeBinaryPref: () => options.claudeBinary,
     agentToolServerPath: path.join(options.resourcesDir, 'agent-tools', 'mcp-server.mjs'),
     agentToolCommand: process.execPath,
+    agentMediaFfmpeg: ffmpeg,
     refreshExtensions: refreshRestoredExtensions,
     externalMcp: options.externalMcp ?? {},
     builtinExtensionsDir: builtinResourcesDir,
@@ -426,6 +429,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   const uploads = new Map<string, Upload>();
   const uploadsRoot = { media: path.join(userData, 'Remote Uploads'), project: path.join(userData, 'Remote Projects'), blob: path.join(userData, 'Remote Uploads') };
   const mediaStoreDir = path.join(userData, 'Media Store');
+  /* agent media tools: an asset's bytes as a host path (media-tools lane) */
+  const mediaPaths = new MediaPathCache(path.join(userData, 'Media Tool Cache'), { mediaStoreDir });
+  registerMediaPathIpc(ipcMain, mediaPaths, ctx);
   const discardUpload = async (upload: Upload, keepFile: boolean): Promise<void> => {
     uploads.delete(upload.id);
     await upload.handle.close().catch(() => undefined);
@@ -703,6 +709,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       app.emit('will-quit');
       await mediaProxies.dispose();
+      await mediaPaths.dispose();
       await sessions.flush();
       await store.flushAll();
     }
