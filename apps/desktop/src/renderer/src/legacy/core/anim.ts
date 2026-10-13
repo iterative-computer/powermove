@@ -5,6 +5,7 @@ import type { PMRegistry } from '../registry';
 import { canAnimateContent, contentLabel, isProperty, resolveContent } from './content-properties';
 import { compileExpression } from './expression';
 import { temporalKeys, temporalValue, temporalEvaluate } from './temporal-bridge';
+import { applyUnitCurve } from '../../core/anim/temporal-ease';
 
 export function install(PM: PMRegistry): void {
 const Ease = PM.Ease, clamp = PM.clamp;
@@ -401,7 +402,7 @@ PM.setKey = (L: any, key: any, T: any, value: any, ease: any) => {
   if (!p) return null;
   return PM.setKeyOn(p, T - L.from, value, ease, PM.proj.fps);
 };
-PM.setKeyOn = (p: any, tLocal: any, value: any, ease: any = 'linear', fps: any = 30) => {
+const setKeyOn = (p: any, tLocal: any, value: any, ease: any = 'linear', fps: any = 30, prepare = true) => {
   if (!p || typeof p !== 'object') return null;
   p.kf = Array.isArray(p.kf) ? p.kf : [];
   const safeFps = Number.isFinite(Number(fps)) && Number(fps) > 0 ? Number(fps) : 30;
@@ -409,9 +410,28 @@ PM.setKeyOn = (p: any, tLocal: any, value: any, ease: any = 'linear', fps: any =
   let k = p.kf.find((k: any) => Math.abs(k.t - t) < .5 / safeFps);
   if (k) { k.v = value; }
   else { k = PM.KF(t, value, ease); p.kf.push(k); sortKf(p); }
-  temporalKeys(p.kf);
+  if (prepare) temporalKeys(p.kf);
   PM.touch();
   return k;
+};
+PM.setKeyOn = setKeyOn;
+/** Convert presets only after every key has its final segment duration/value. */
+PM.setKeysOn = (p: any, points: any[], fps: any = 30) => {
+  const edits = new Map<any, any>();
+  for (const point of points) {
+    const key = setKeyOn(p, point.t, point.v, point.ease || 'linear', fps, false);
+    if (key) edits.set(key, point);
+  }
+  temporalKeys(p.kf);
+  p.kf.forEach((key: any, index: number) => {
+    const point = edits.get(key);
+    if (!point) return;
+    if (point.hold != null) key.hold = !!point.hold;
+    const { eo, ei } = Ease.handles(point.ease || 'linear');
+    if (typeof key.v === 'number') applyUnitCurve(p.kf, index, [eo[0], eo[1], ei[0], ei[1]]);
+    else { key.eo = [...eo]; key.ei = [...ei]; }
+  });
+  PM.touch();
 };
 PM.removeKey = (p: any, k: any) => {
   if (!k) return;
@@ -447,7 +467,7 @@ PM.animate = (L: any, key: any, points: any, opt: any = {}) => {
   const p = L.p[key] || (opt.prop || null);
   if (!p) return false;
   if (!opt.keep) p.kf = [];
-  points.forEach((pt: any) => PM.setKeyOn(p, pt.t, pt.v, pt.ease || opt.ease || 'linear', PM.proj.fps));
+  PM.setKeysOn(p, points.map((pt: any) => ({ ...pt, ease: pt.ease || opt.ease || 'linear' })), PM.proj.fps);
   PM.touch();
   return true;
 };

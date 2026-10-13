@@ -271,10 +271,7 @@ function replaceKeyframes(command: any) {
     if (prop.kf.length && !next.length) prop.v = PM.evP(layer, prop, PM.time, channel);
     prop.kf = [];
   }
-  for (const key of next) {
-    const made: any = PM.setKeyOn(prop, key.time, key.value, key.ease, PM.proj.fps);
-    made.hold = key.hold;
-  }
+  PM.setKeysOn(prop, next.map((key: any) => ({ t: key.time, v: key.value, ease: key.ease, hold: key.hold })), PM.proj.fps);
   if (command.expression !== undefined) {const diagnostic=command.expression?expressionDiagnostic(command.expression):null;if(diagnostic)throw new Error(diagnostic);prop.expr=command.expression||null;}
   if((layer.d?.definition===SCENE3D_DEFINITION || layer3DRole(layer)))validate3DChannel(layer,channel,prop);
   PM.touch();

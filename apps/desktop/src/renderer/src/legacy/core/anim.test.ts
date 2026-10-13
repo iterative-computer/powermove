@@ -22,6 +22,78 @@ function animRegistry(): PMRegistry {
 }
 
 describe('legacy animation install', () => {
+  it.each(['replace_keyframes', 'animate'])('applies both preset handles after %s creates a complete numeric track', (path) => {
+    const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing');
+    PM.proj = PM.mkProject({ fps: 30 });
+    const layer = PM.mkLayer('solid'); PM.proj.layers = [layer];
+    const points = [{ t: 0, v: 10, ease: 'glide' }, { t: 2, v: 110, ease: 'glide' }, { t: 3, v: -40, ease: 'glide' }];
+    if (path === 'animate') expect(PM.animate(layer, 'rotation', points)).toBe(true);
+    else expect(PM.Edit.apply({ type: 'replace_keyframes', target: layer.id, path: 'rotation', keyframes: points.map(({ t, v, ease }) => ({ time: t, value: v, ease })) }).ok).toBe(true);
+    const keys = layer.p.rotation.kf;
+    for (const [index, start] of keys.entries()) {
+      const end = keys[index + 1];
+      if (!end) continue;
+      expect(start.eo).toEqual([.16, .84]);
+      expect(end.ei).toEqual([.24, 1]);
+      for (const progress of [.25, .5, .75]) {
+        expect(PM.ev(layer, 'rotation', start.t + (end.t - start.t) * progress)).toBeCloseTo(start.v + (end.v - start.v) * PM.Ease.fn('glide')(progress), 4);
+      }
+    }
+  });
+
+  it('applies appended and replaced key presets against final neighbours regardless of input order', () => {
+    const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing');
+    PM.proj = PM.mkProject({ fps: 30 });
+    const layer = PM.mkLayer('solid'); PM.proj.layers = [layer];
+    PM.setKeyOn(layer.p.rotation, 0, 0);
+    PM.setKeyOn(layer.p.rotation, 2, 20);
+    expect(PM.Edit.apply({ type: 'replace_keyframes', target: layer.id, path: 'rotation', replace: false, keyframes: [
+      { time: 3, value: 70, ease: 'quadIn' },
+      { time: 1, value: 100, ease: 'glide', hold: true },
+      { time: 0, value: 10, ease: 'glide' },
+      { time: 2, value: -40, ease: 'quadIn' },
+    ] }).ok).toBe(true);
+    const keys = layer.p.rotation.kf;
+    expect(keys.map((key: any) => key.t)).toEqual([0, 1, 2, 3]);
+    expect(keys[0].eo).toEqual([.16, .84]);
+    expect(keys[1].ei).toEqual([.24, 1]);
+    expect(keys[1].hold).toBe(true);
+    expect(PM.ev(layer, 'rotation', 1.5)).toBe(100);
+    expect(keys[2].eo).toEqual([.11, 0]);
+    expect(keys[3].ei).toEqual([.5, 0]);
+  });
+
+  it('keeps complete preset curves through undo, redo, and saved-project normalization', () => {
+    const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing');
+    PM.proj = PM.mkProject({ fps: 30 });
+    const layer = PM.mkLayer('solid'); PM.proj.layers = [layer];
+    expect(PM.Edit.apply({ type: 'replace_keyframes', target: layer.id, path: 'rotation', keyframes: [
+      { time: 0, value: 10, ease: 'glide' }, { time: 2, value: 110, ease: 'glide' },
+    ] }).ok).toBe(true);
+    const expected = 10 + 100 * PM.Ease.fn('glide')(.5);
+    expect(PM.ev(layer, 'rotation', 1)).toBeCloseTo(expected, 4);
+    const saved = JSON.parse(JSON.stringify(layer.p.rotation.kf));
+    expect(PM.hist.undo()).toBe(true);
+    expect(PM.L(layer.id).p.rotation.kf).toHaveLength(0);
+    expect(PM.hist.redo()).toBe(true);
+    expect(PM.ev(PM.L(layer.id), 'rotation', 1)).toBeCloseTo(expected, 4);
+    expect(PM.evalKfs(PM.normalizeKeyframes(saved, 0, 30), 1)).toBeCloseTo(expected, 4);
+  });
+
+  it('keeps the last preset and value for keys snapped onto the same frame', () => {
+    const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing');
+    PM.proj = PM.mkProject({ fps: 30 });
+    const layer = PM.mkLayer('solid'); PM.proj.layers = [layer];
+    expect(PM.Edit.apply({ type: 'replace_keyframes', target: layer.id, path: 'rotation', keyframes: [
+      { time: 2, value: 100, ease: 'glide' },
+      { time: 0, value: 0, ease: 'quadIn' },
+      { time: .001, value: 10, ease: 'glide' },
+    ] }).ok).toBe(true);
+    expect(layer.p.rotation.kf).toHaveLength(2);
+    expect(layer.p.rotation.kf[0].v).toBe(10);
+    expect(PM.ev(layer, 'rotation', 1)).toBeCloseTo(10 + 90 * PM.Ease.fn('glide')(.5), 4);
+  });
+
   it('defaults every new-key path to linear and preserves explicit easing', () => {
     const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing');
     PM.proj = PM.mkProject();
