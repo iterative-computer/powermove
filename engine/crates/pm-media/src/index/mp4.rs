@@ -718,7 +718,12 @@ pub fn apply_edits(
                 for (i, s) in samples.iter().enumerate() {
                     if s.cts + s.duration.max(1) > start && s.cts < end {
                         let mut pts = pres + (s.cts - start);
-                        if !first_media {
+                        // A frame straddling the edit's start shows from the
+                        // edit's start, not during what precedes it (an
+                        // earlier edit or an empty edit). Only at the very
+                        // start of the presentation does it keep its
+                        // negative time (it is the first frame shown).
+                        if !first_media || pres > 0 {
                             pts = pts.max(pres);
                         }
                         frames.push(Frame { sample: i, pts });
@@ -821,6 +826,18 @@ mod tests {
             vec![(0, 5), (1, 15), (0, 25)]
         );
         assert!(d.unwrap().contains("3 edit(s)"));
+    }
+
+    #[test]
+    fn a_frame_straddling_the_first_media_edit_waits_for_an_empty_edit() {
+        let s = samples(&[0, 10, 20, 30]);
+        // 5 empty, then [15, 35): the sample at 10 straddles 15 and shows
+        // from 5 (the end of the empty edit), not during it.
+        let (f, _) = apply_edits(&s, &[edit(5, -1, 1), edit(20, 15, 1)], 1, 1).unwrap();
+        assert_eq!(
+            f.iter().map(|f| (f.sample, f.pts)).collect::<Vec<_>>(),
+            vec![(1, 5), (2, 10), (3, 20)]
+        );
     }
 
     #[test]
