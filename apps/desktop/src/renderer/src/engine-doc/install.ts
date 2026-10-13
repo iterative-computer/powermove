@@ -181,14 +181,24 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const legacyTouch = PM.touch;
   PM.touch = (paths?: PathPart[][], canonical?: boolean) => {
     if (Array.isArray(paths)) record(paths, { canonical });
-    // A scoped transaction declared its paths with track() before writing.
-    else if (barrier && !tracker && coveredDepth === 0 && !PM.hist?.scoped?.()) barrier.touchAll();
+    // Inside a history transaction the commit hands over every path it
+    // changed (a scoped one declared them with track() before writing).
+    else if (barrier && !tracker && coveredDepth === 0 && !PM.hist?.busy?.()) barrier.touchAll();
     return legacyTouch?.();
   };
   // Writers that skip touch() still announce on the bus (PM.addLayer,
   // PM.removeLayers, settings, asset changes): diff what they may have written.
   for (const event of ['layers', 'project', 'assets', 'comps']) {
-    PM.bus?.on?.(event, () => { if (barrier && !tracker && coveredDepth === 0 && !PM.hist?.scoped?.()) barrier.touchAll(); });
+    PM.bus?.on?.(event, () => { if (barrier && !tracker && coveredDepth === 0 && !PM.hist?.busy?.()) barrier.touchAll(); });
+  }
+  // A canceled transaction leaves its writes in place without a commit.
+  if (PM.hist && typeof PM.hist.cancel === 'function') {
+    const cancel = PM.hist.cancel;
+    PM.hist.cancel = (...args: unknown[]) => {
+      const wasBusy = !!PM.hist.busy?.();
+      try { return cancel.apply(PM.hist, args); }
+      finally { if (wasBusy && barrier && !tracker) barrier.touchAll(); }
+    };
   }
   // Legacy evaluation adopts old keyframe handles into the live document
   // (temporal-bridge.ts): a write without a path.

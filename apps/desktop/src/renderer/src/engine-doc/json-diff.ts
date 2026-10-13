@@ -103,6 +103,63 @@ function walk(before: any, after: any, path: PathPart[], out: PatchOp[]): void {
 
 const idOf = (v: any): string | undefined => (isRecord(v) && typeof v.id === 'string' ? v.id : undefined);
 
+/**
+ * Whether the live value `after` serializes exactly to the plain JSON
+ * `before` (as `walk` would find no operation), without building operations:
+ * the fast test for the retained elements of an id-keyed array, which are
+ * almost always unchanged after a reorder, insert, or delete.
+ */
+export function sameJson(before: any, after: any): boolean {
+  if (before === after) return true;
+  switch (typeof after) {
+    case 'number': return Number.isFinite(after) ? false /* === failed; 0 and -0 are === */ : before === null;
+    case 'string': case 'boolean': return false;
+    case 'object': break;
+    default: return false;
+  }
+  if (after === null) return false;
+  if (typeof after.toJSON === 'function' || after instanceof Number || after instanceof String || after instanceof Boolean) {
+    const value = jsonValue(after, '');
+    return value !== ABSENT && value !== after && sameJson(before, value);
+  }
+  if (before === null || typeof before !== 'object') return false;
+  if (Array.isArray(after)) {
+    if (!Array.isArray(before) || before.length !== after.length) return false;
+    for (let i = 0; i < after.length; i++) {
+      const v = after[i];
+      if (v === undefined || typeof v === 'function' || typeof v === 'symbol') { if (before[i] !== null) return false; }
+      else if (!sameJson(before[i], v)) return false;
+    }
+    return true;
+  }
+  if (Array.isArray(before)) return false;
+  const keys = Object.keys(after);
+  // Plain JSON never holds undefined, so a missing member reads undefined
+  // (functions inherited from Object.prototype are not JSON either).
+  if (keys.length === Object.keys(before).length) {
+    let i = 0;
+    for (; i < keys.length; i++) {
+      const key = keys[i]!;
+      const v = after[key];
+      if (v === undefined || typeof v === 'function' || typeof v === 'symbol') break;
+      const b = before[key];
+      if (b === undefined || typeof b === 'function' || !Object.hasOwn(before, key)) return false;
+      if (!sameJson(b, v)) return false;
+    }
+    if (i === keys.length) return true;
+  }
+  // Members without a JSON form on the live side: count what JSON keeps.
+  let count = 0;
+  for (const key of keys) {
+    const v = after[key];
+    if (v === undefined || typeof v === 'function' || typeof v === 'symbol') continue;
+    if (typeof v === 'object' && v !== null && typeof v.toJSON === 'function' && jsonValue(v, key) === ABSENT) continue;
+    if (!Object.hasOwn(before, key) || !sameJson(before[key], v)) return false;
+    count++;
+  }
+  return count === Object.keys(before).length;
+}
+
 function walkArrays(before: readonly any[], after: readonly any[], path: PathPart[], out: PatchOp[]): void {
   const identityOrderChanged = before.length === after.length && before.some((item, index) => {
     const a = idOf(item), b = idOf(after[index]);
@@ -110,6 +167,7 @@ function walkArrays(before: readonly any[], after: readonly any[], path: PathPar
   });
   if (before.length === after.length && !identityOrderChanged) {
     for (let index = 0; index < before.length; index++) {
+      if (sameJson(before[index], after[index])) continue;
       path.push(index);
       walk(before[index], after[index], path, out);
       path.pop();
@@ -130,7 +188,7 @@ function walkArrays(before: readonly any[], after: readonly any[], path: PathPar
   });
   after.forEach((item, index) => {
     const from = oldIndex.get(item.id);
-    if (from === undefined) return;
+    if (from === undefined || sameJson(before[from], item)) return;
     path.push(index);
     walk(before[from], item, path, out);
     path.pop();
