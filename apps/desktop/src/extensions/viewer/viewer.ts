@@ -23,6 +23,7 @@ import { beginTextEdit, type TextEditOptions, type TextEditSession } from './tex
 import { drawEditablePaths, startPathEdit } from './path-editing';
 import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, ViewerPresentation, type EngineViewerService } from './engine-present/presentation';
 import { viewParamsFor } from './engine-present/view-params';
+import { rawDragMoves, supportsRawUpdates } from './engine-present/raw-gestures';
 /* Ported from js/ui/viewer.js — behavior-preserving. */
 export const viewerPanelOptions = {
   title: 'Composition', flush: true, noscroll: true, headless: true, hideMoveHandle: false,
@@ -795,7 +796,7 @@ const syncEnginePresentation = () => {
   engineService = service;
   if (!enginePresentation) {
     if (!service) return;
-    const presentation = new ViewerPresentation({ service, stage: V.stage, before: V.ov, log: (level, message) => api.log(level, message) });
+    const presentation = new ViewerPresentation({ service, stage: V.stage, before: V.ov, trace: service.trace === true, log: (level, message) => api.log(level, message) });
     // Overlays redraw at each new frame tag (revision, view sequence), so
     // handles drawn from the frame's geometry never lead its pixels.
     presentation.onPresented((frame) => {
@@ -846,15 +847,23 @@ const disposeRuntime = () => {
 V._disposeRuntime = disposeRuntime;
 V.dispose = disposeRuntime;
 
+/* While the engine presents, gestures read `pointerrawupdate` so the engine
+   hears about each move before the rAF that would carry it (amendment 18;
+   engine-present/raw-gestures.ts). The WebGL path keeps `pointermove`. */
+V.rawGestures = () => !!enginePresentation?.presenting && supportsRawUpdates(V.stage?.ownerDocument?.defaultView ?? window);
 const beginDrag = (event: any, options: any) => {
   activeDrag?.cancel();
   let control: any;
+  const host: Window = event?.view ?? V.stage?.ownerDocument?.defaultView ?? window;
+  const raw = options.move && !options.infinite && V.rawGestures() ? rawDragMoves(event, options.move, host) : null;
   const finish = (kind: 'up' | 'cancel', args: any[]) => {
+    raw?.stop();
     if (activeDrag === control) activeDrag = null;
     return options[kind]?.(...args);
   };
   control = api.ui.drag(event, {
     ...options,
+    ...(raw ? { move: raw.move } : {}),
     up: (...args: any[]) => finish('up', args),
     cancel: (...args: any[]) => finish('cancel', args),
   });

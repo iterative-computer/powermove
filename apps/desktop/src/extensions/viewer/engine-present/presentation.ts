@@ -79,6 +79,9 @@ export interface EngineViewerService {
   hostOffsetUs?(): number | null;
   /** The refresh rate of the display showing `view`, when main knows it. */
   displayHz?(view: Window): number | null;
+  /** Record per-frame timings in the viewer's presentation (the S1
+   *  measurement harness's connection sets it; the kernel's never does). */
+  readonly trace?: boolean;
 }
 
 /** What the viewer decides; the presentation adds what the window knows. */
