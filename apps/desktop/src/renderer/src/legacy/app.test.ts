@@ -803,6 +803,54 @@ describe('legacy app install', () => {
   });
 });
 
+it.each([
+  { renamed: false, delayedMetadata: false }, { renamed: true, delayedMetadata: false },
+  { renamed: false, delayedMetadata: true }
+])('saves the live inactive tab after recovery failure (renamed=$renamed metadata delayed=$delayedMetadata)', async ({ renamed, delayedMetadata }) => {
+  const { PM, listeners, memory } = appRegistry();
+  const set = PM.store.set;
+  PM.store.set = (key: string, value: any) => key === 'projectJournal.P2' ? false : set(key, JSON.parse(JSON.stringify(value)));
+  PM.store.has = (key: string) => memory.has(key);
+  installProjects(PM); installHistory(PM);
+  // Run the real journal listener, with its storage write failing. The live
+  // document and Undo remain usable even though recovery is behind them.
+  PM.bus.emit = (name: string, ...args: any[]) => {
+    if (name === 'history:project-patch') PM.__busHandlers.get(name)?.forEach((run: any) => run(...args));
+  };
+  PM.pause = vi.fn(); PM.rasterClear = vi.fn(); PM.WS.activate = vi.fn(); PM.touch = vi.fn();
+  PM.assets.suspend = () => ({ map: new Map() }); PM.assets.resume = vi.fn(); PM.assets.discard = vi.fn();
+  PM.replaceProject = (next: any) => { PM.proj = next; };
+  PM.Projects.put(PM.proj);
+  listeners.get('pm-open-project')![0]({ detail: PM.mkProject({ id: 'P2', name: 'Second' }) });
+  PM.hist.do('Edit live second', () => { PM.proj.name = 'Latest second'; PM.proj.bg = '#ff0000'; });
+  const live = PM.proj;
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  PM.store.setSnapshotAsync = vi.fn(async () => { await pending; return false; });
+  const recover = PM.Projects.recoverAsync;
+  if (delayedMetadata) PM.Projects.recoverAsync = async (...args: any[]) => { await pending; return recover(...args); };
+  const saveFile = vi.fn(async (_request: any) => ({ ok: true, path: '/tmp/Second.pmv' }));
+  installBridgeForTests({ saveFile } as any);
+  try {
+    expect(await PM.Tabs.activate('P1')).toBe(true);
+    expect(PM.proj.id).toBe('P1');
+    if (!delayedMetadata) expect(PM.store.setSnapshotAsync).toHaveBeenCalledOnce();
+    expect(PM.Projects.get('P2').name).toBe('Second');
+    if (renamed) PM.Projects.rename('P2', 'Renamed from Projects');
+    expect(await PM.saveProject({ projectId: 'P2' })).toBe(true);
+    const saved = unpackProjectFile(saveFile.mock.calls[0]![0].data);
+    expect(saved.proj.name).toBe(renamed ? 'Renamed from Projects' : 'Latest second');
+    expect(saved.proj.bg).toBe('#ff0000');
+    expect(saved.history.entries.map((entry: any) => entry.label)).toEqual(['Edit live second']);
+    expect(PM.projectFileState('P2').dirty).toBe(false);
+    expect(PM.proj.id).toBe('P1');
+    expect(await PM.Tabs.activate('P2')).toBe(true);
+    expect(PM.proj).toBe(live);
+    expect(PM.proj.name).toBe(renamed ? 'Renamed from Projects' : 'Latest second');
+    expect(PM.hist.undo()).toBe(true); expect(PM.proj.name).toBe('Second');
+  } finally { PM.Projects.recoverAsync = recover; release(); }
+});
+
 it('saves real undo and redo history in the native file and local session', async () => {
   const { PM, toasts } = appRegistry();
   installHistory(PM);

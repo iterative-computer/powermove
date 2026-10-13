@@ -753,9 +753,18 @@ PM.bus.on('storage:error', () => { APP.dirty = true; PM.invalidate('status'); })
 PM.bus.on('assets', (change: any) => { if (!change?.runtimeOnly) PM.autosave(); });
 
 async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {}): Promise<boolean> {
+  // A live background tab may be ahead of its recovery checkpoint.
+  const currentProject = () => {
+    if (projectId === PM.proj.id) return PM.proj;
+    const tab = parkedTabs.get(projectId);
+    if (!tab) return PM.Projects.get(projectId);
+    // Projects can rename an inactive tab without replacing its live edits.
+    const name = PM.Projects.list().find((meta: any) => meta.id === projectId)?.name;
+    return name && name !== tab.registryName ? { ...tab.project, name } : tab.project;
+  };
   APP.saving = true; PM.invalidate('status');
   const toastKey = 'project-save';
-  const name = safeName((projectId === PM.proj.id ? PM.proj : PM.Projects.get(projectId))?.name || 'Project') + '.pmv';
+  const name = safeName(currentProject()?.name || 'Project') + '.pmv';
   const progress = (value: number | null) => PM.toast('Saving ' + name, 2200, {
     key: toastKey, icon: 'export', error: false, sticky: true, dismissible: false, progress: value,
   });
@@ -765,7 +774,7 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
     PM.bus.emit('project:flush-edits');
     await APP.importQueue;
     progress(0.05);
-    const project = projectId === PM.proj.id ? PM.proj : PM.Projects.get(projectId);
+    const project = currentProject();
     if (!project) throw new Error('This project is no longer available.');
     let projectJSON: string, snapshot: any, serialized: string;
     let capturedGeneration = 0, capturedEditVersion: unknown;
@@ -774,7 +783,7 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
     for (;;) {
       const generation = comparisonVersions.get(projectId) || 0;
       const editVersion = PM.animVersion?.();
-      const current = projectId === PM.proj.id ? PM.proj : PM.Projects.get(projectId) || project;
+      const current = currentProject() || project;
       snapshot = { v: PM.version, proj: current,
         history: projectId === PM.proj.id ? PM.hist.export?.({ copy: false }) : PM.Projects.getState(projectId)?.history,
         ws: projectId === PM.proj.id ? PM.WS.snapshot() : PM.Projects.getState(projectId)?.workspace };
@@ -795,7 +804,7 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
       if (projectId === PM.proj.id && snapshot.proj === PM.proj && capturedEditVersion === PM.animVersion?.()
         && capturedGeneration === (comparisonVersions.get(projectId) || 0)) {
         state.dirty = false; fileUI();
-      } else await refreshFileDirty(projectId === PM.proj.id ? PM.proj : PM.Projects.get(projectId) || project);
+      } else await refreshFileDirty(currentProject() || project);
       let recoveryFailed = false;
       try {
         rememberFile(projectId, state);
@@ -1064,7 +1073,7 @@ function claimForThisWindow(id: string | null): void {
 /* Every open tab keeps its document and Undo state. Only decoded media has a
    recency limit; evicting those resources never unloads the tab itself. */
 const WARM_MEDIA_TABS = 3;
-type ParkedTab = { project: any; history: any; media: any };
+type ParkedTab = { project: any; history: any; media: any; registryName?: string };
 const parkedTabs = new Map<string, ParkedTab>();
 PM.parkedHistories = () => [...parkedTabs.values()].map(tab => tab.history);
 function discardParked(id: string) {
@@ -1075,7 +1084,8 @@ function discardParked(id: string) {
   PM.assets.discard?.(tab.media);
 }
 function park(project: any) {
-  parkedTabs.set(project.id, { project, history: PM.hist.suspend(), media: PM.assets.suspend() });
+  const registryName = PM.Projects.list().find((meta: any) => meta.id === project.id)?.name;
+  parkedTabs.set(project.id, { project, history: PM.hist.suspend(), media: PM.assets.suspend(), registryName });
   const media = [...parkedTabs.values()].filter(tab => tab.media?.map?.size);
   for (const tab of media.slice(0, Math.max(0, media.length - WARM_MEDIA_TABS))) {
     PM.assets.discard?.(tab.media);
@@ -1121,7 +1131,7 @@ function switchProject(p: any, history?: any, live?: ParkedTab, prepared?: { ses
   if (live) {
     // Renamed from Projects while in the background: the library has the name.
     const name = PM.Projects.list().find((meta: any) => meta.id === PM.proj.id)?.name;
-    if (name) PM.proj.name = name;
+    if (name && name !== live.registryName) PM.proj.name = name;
   }
   const isTab = PM.proj.id !== homeProjectId;
   // Opening something new adds it after the other tabs; an existing tab keeps its place.
