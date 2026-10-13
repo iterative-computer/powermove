@@ -829,10 +829,12 @@ impl Thread {
             let mut text = String::new();
             for r in &records {
                 text.push_str(&format!(
-                    "[{},{},{}]\n",
+                    "[{},{},{},{},{}]\n",
                     r.seq,
                     r.asked_us,
-                    r.presented_us.map_or("null".into(), |v| v.to_string())
+                    r.presented_us.map_or("null".into(), |v| v.to_string()),
+                    r.committed_us,
+                    r.drawable_wait_us
                 ));
             }
             if let Ok(mut file) = std::fs::OpenOptions::new()

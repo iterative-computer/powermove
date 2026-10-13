@@ -272,10 +272,26 @@ async function run(config: AppConfig): Promise<void> {
       if (!(await call<boolean>(`window.__measureApp.play(${config.startS ?? 0})`))) throw new Error('could not start playback');
       await sleep(1500);
       await run('reset', 'window.__measureApp.reset()');
+      // Diagnostics only (PM_MEASURE_CPU_PROFILE=<file>): a CPU profile of
+      // the editor's renderer over the recording window. Attaching the
+      // debugger costs time, so a profiled run is not a measurement.
+      const profilePath = process.env['PM_MEASURE_CPU_PROFILE'];
+      if (profilePath) {
+        contents.debugger.attach('1.3');
+        await contents.debugger.sendCommand('Profiler.enable');
+        await contents.debugger.sendCommand('Profiler.setSamplingInterval', { interval: 500 });
+        await contents.debugger.sendCommand('Profiler.start');
+      }
       const startMs = await call<number>(`window.__measureApp.mark('pm-record-start')`);
       await sleep(config.durationMs);
       const endMs = await call<number>(`window.__measureApp.mark('pm-record-end')`);
       result['recordWindow'] = { startMs, endMs };
+      if (profilePath) {
+        const { profile } = (await contents.debugger.sendCommand('Profiler.stop')) as { profile: unknown };
+        writeFileSync(profilePath, JSON.stringify(profile));
+        contents.debugger.detach();
+        result['cpuProfile'] = profilePath;
+      }
       result['page'] = await call('window.__measureApp.collect()');
       await run('pause', 'window.__measureApp.pause()');
     } else {

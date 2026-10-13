@@ -352,7 +352,9 @@ function analyzeRemote(raw, jsonl, ticksText = '') {
   const host = (ms) => ms * 1000 + raw.clock.offsetUs;
   const kFirst = Math.ceil((mediaAt(line, host(rec.startMs)) + 0.1 * TICKS) / frameTicks);
   const kLast = Math.floor((mediaAt(line, host(rec.endMs)) - 0.1 * TICKS) / frameTicks) - 1;
-  const byAsked = new Map(records.map(([seq, asked, presented]) => [Math.round(asked / 100), { seq, asked, presented }]));
+  // [seq, asked, presented, committed, drawable wait µs] (the last two from
+  // the run that added them on).
+  const byAsked = new Map(records.map(([seq, asked, presented, committed, waitUs]) => [Math.round(asked / 100), { seq, asked, presented, committed, waitUs }]));
   const per = [];
   const counts = { expected: 0, notAsked: 0, notPresented: 0 };
   for (let k = kFirst; k <= kLast; k++) {
@@ -365,7 +367,7 @@ function analyzeRemote(raw, jsonl, ticksText = '') {
     } else if (r.presented == null) {
       counts.notPresented++;
       per.push(null);
-    } else per.push({ k, presentUs: r.presented, dueUs: due });
+    } else per.push({ k, presentUs: r.presented, dueUs: due, committed: r.committed, waitUs: r.waitUs });
   }
   const presented = per.filter(Boolean);
   const offsets = presented.map((p) => p.presentUs - p.dueUs);
@@ -381,6 +383,27 @@ function analyzeRemote(raw, jsonl, ticksText = '') {
     intervalErrorAbsMs: dist(intervalErrMs.map(Math.abs), 3),
     irregularIntervals: intervalErrMs.filter((e) => Math.abs(e) > periodUs / 2000).length,
     dueToPresentMs: dist(offsets.map((o) => o / 1000), 2),
+    // Commit lead: how long before its due time each frame's copy reached
+    // Core Animation. Late frames (more than half a refresh after the
+    // median) committed well ahead were held up by the WindowServer.
+    ...(presented.some((p) => p.committed)
+      ? (() => {
+          const late = presented.filter((p) => p.presentUs - p.dueUs - median > periodUs / 2);
+          const lead = (p) => (p.dueUs - p.committed) / 1000;
+          return {
+            commitLeadMs: dist(presented.map(lead), 2),
+            drawableWaitMs: dist(presented.map((p) => p.waitUs / 1000), 2),
+            lateFrames: { n: late.length, commitLeadMs: dist(late.map(lead), 2), drawableWaitMs: dist(late.map((p) => p.waitUs / 1000), 2) }
+          };
+        })()
+      : {}),
+    // Frames the layer skipped to drain Core Animation's queue after a stall
+    // (Pacing in remote_layer.rs): sequence numbers missing from the records.
+    skippedSeqs: (() => {
+      let n = 0;
+      for (let i = 1; i < records.length; i++) if (records[i][0] > records[i - 1][0] + 1) n += records[i][0] - records[i - 1][0] - 1;
+      return n;
+    })(),
     remoteLayers: raw.remoteLayers ?? null,
     // With the refresh-rate request: the refresh intervals the request's
     // display link saw (ms, 0.5 ms bins), i.e. the rate the panel ran at.

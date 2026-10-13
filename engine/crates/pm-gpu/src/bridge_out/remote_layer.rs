@@ -61,6 +61,17 @@ pub struct Presented {
     pub asked_us: i64,
     /// Host µs it reached the display, or `None` if it never did.
     pub presented_us: Option<i64>,
+    /// Host µs its copy was committed to Core Animation: a frame that
+    /// shows late although it was committed well before `asked_us` was held
+    /// up by the WindowServer, not by the engine.
+    pub committed_us: i64,
+    /// How long `nextDrawable` blocked for it (µs): all drawables queued.
+    pub drawable_wait_us: i64,
+}
+
+/// Host µs now, on the clock `presentDrawable:atTime:` uses.
+fn host_now_us() -> i64 {
+    (objc2_quartz_core::CACurrentMediaTime() * 1e6).round() as i64
 }
 
 /// Keeps the remote layer's presentation latency from creeping up.
@@ -468,10 +479,13 @@ impl RemoteLayer {
             return Ok(false);
         }
         let source = self.source(surface)?;
+        let asked_drawable = host_now_us();
         let drawable = self
             .layer
             .nextDrawable()
             .ok_or(RemoteLayerError::Metal("no drawable within a second"))?;
+        let drawable_wait_us = host_now_us() - asked_drawable;
+        let committed = Arc::new(std::sync::atomic::AtomicI64::new(0));
         let target = drawable.texture();
         let buffer = self
             .queue
@@ -485,6 +499,7 @@ impl RemoteLayer {
         blit.endEncoding();
         let presented = self.presented.clone();
         let pacing = self.pacing.clone();
+        let committed_at = committed.clone();
         let handler = RcBlock::new(
             move |drawable: std::ptr::NonNull<ProtocolObject<dyn MTLDrawable>>| {
                 // SAFETY: Metal passes the live drawable to its presented handler.
@@ -500,6 +515,8 @@ impl RemoteLayer {
                         seq,
                         asked_us: at_us,
                         presented_us,
+                        committed_us: committed_at.load(std::sync::atomic::Ordering::Relaxed),
+                        drawable_wait_us,
                     });
                 }
             },
@@ -509,6 +526,7 @@ impl RemoteLayer {
         unsafe { as_drawable.addPresentedHandler(RcBlock::as_ptr(&handler)) };
         // Host µs and CACurrentMediaTime share mach_absolute_time's base.
         buffer.presentDrawable_atTime(as_drawable, at_us as f64 / 1e6);
+        committed.store(host_now_us(), std::sync::atomic::Ordering::Relaxed);
         buffer.commit();
         // The pool surface is free again once the copy ran.
         buffer.waitUntilCompleted();
