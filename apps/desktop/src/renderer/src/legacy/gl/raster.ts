@@ -978,8 +978,10 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
   const id = plan.canonicalId || provisionalId;
   if (!identity.poster && existingMeta?.poster) identity.poster = true;
   let asset = prepared;
-  const upgradesPlayback = !!(existingLive && prepared.playbackProxy
-    && (!existingLive.playbackProxy || prepared.playbackProxyVersion > (existingLive.playbackProxyVersion || 0)));
+  const upgradesPlayback = !!(existingLive && ((prepared.playbackProxy
+    && (!existingLive.playbackProxy || prepared.playbackProxyVersion > (existingLive.playbackProxyVersion || 0)))
+    // The original replaces an earlier converted copy under the same key.
+    || (prepared.rendition && existingLive.playbackProxy)));
   if (existingLive && !upgradesPlayback) {
     if (existingLive.playbackProxy) {
       identity.playbackProxy = true;
