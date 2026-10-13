@@ -337,6 +337,9 @@ function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:numb
       if(targets.length&&modes.includes(state.mode)){placePivot(targets);controls.setMode(state.mode);controls.setSpace(state.space);controls.attach(pivot);}
       else controls.detach();
     }
+    // Hit tests can run before the scheduled paint. Three refreshes picker
+    // geometry and the drag plane during this helper's matrix traversal.
+    controls.getHelper().updateMatrixWorld(true);
     request();
   }
   offState=onGizmoState(()=>refresh());
