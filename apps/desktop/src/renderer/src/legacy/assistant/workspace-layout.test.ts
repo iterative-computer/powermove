@@ -18,6 +18,18 @@ const arrangement = { name: 'From After Effects', docks: [
 ] };
 
 describe('agent workspace arrangement', () => {
+  it('retains import provenance through Undo and Redo and clears it on unrelated layouts', () => {
+    const { PM, checkpoints } = host();
+    setPanelLayout(PM, { ...arrangement, sourceApp: 'after-effects' });
+    expect(PM.WS.create).toHaveBeenLastCalledWith(expect.objectContaining({ sourceApp: 'after-effects' }));
+    checkpoints[0].undo();
+    expect(PM.WS.restoreHistorySnapshot).toHaveBeenLastCalledWith(expect.not.objectContaining({ sourceApp: 'after-effects' }));
+    checkpoints[0].redo();
+    expect(PM.WS.restoreHistorySnapshot).toHaveBeenLastCalledWith(expect.objectContaining({ sourceApp: 'after-effects' }));
+    setPanelLayout(PM, arrangement);
+    expect(PM.WS.create).toHaveBeenLastCalledWith(expect.objectContaining({ sourceApp: null }));
+    expect(() => setPanelLayout(PM, { ...arrangement, sourceApp: 'unknown' })).toThrow('supported workspace source');
+  });
   it('preserves panel order and sizes in a new global workspace with working Undo/Redo', () => {
     const { PM, checkpoints, getCurrent } = host();
     expect(setPanelLayout(PM, arrangement)).toMatchObject({ workspaceId: 'imported', historyId: 'layout-history' });
@@ -39,8 +51,21 @@ describe('agent workspace arrangement', () => {
     const docks = (PM.WS.create as any).mock.lastCall[0].layout.docks;
     expect(docks.find((dock: any) => dock.id === 'left').panels).toEqual([{ id: 'assets', flex: true }]);
   });
+  it('accepts a bottom dock for a full-width timeline and orders it before the right column', () => {
+    const { PM } = host();
+    setPanelLayout(PM, { name: 'Wide timeline', docks: [
+      { id: 'right', size: 320, panels: [{ id: 'inspector', flex: true }] },
+      { id: 'bottom', size: 340, panels: [{ id: 'timeline', flex: true }] },
+      { id: 'center', panels: [{ id: 'viewer', flex: true }] },
+      { id: 'left', panels: [{ id: 'assets', flex: true }, { id: 'layer-effects', size: 350 }] }
+    ] });
+    const docks = (PM.WS.create as any).mock.lastCall[0].layout.docks;
+    expect(docks.map((dock: any) => dock.id)).toEqual(['left', 'center', 'bottom', 'right']);
+    expect(docks[2]).toEqual({ id: 'bottom', size: 340, panels: [{ id: 'timeline', flex: true }] });
+  });
   it.each([
     { name: '', docks: arrangement.docks },
+    { ...arrangement, docks: [...arrangement.docks, { id: 'top', panels: [] }] },
     { ...arrangement, docks: [{ id: 'center', panels: [{ id: 'missing' }] }] },
     { ...arrangement, docks: [{ id: 'center', panels: [{ id: 'viewer' }, { id: 'viewer' }, { id: 'timeline' }] }] },
     { ...arrangement, docks: [{ id: 'center', panels: [{ id: 'timeline' }] }] },

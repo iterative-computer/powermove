@@ -6,6 +6,7 @@ import { install as installCompositions } from './compositions';
 import { installLayerGroups } from './layer-groups';
 import { installProjectIndex } from './project-index';
 import { timelineService } from './services';
+import { normalizeCaptionsContent, presetStyle } from '../../captions/model';
 
 export function selectLayers(PM: PMRegistry, ids: any, add = false): void {
   const before = { ...PM.sel, layers: [...PM.sel.layers], keys: [...PM.sel.keys] };
@@ -73,6 +74,7 @@ const TYPE_META: any = {
   null:   { icon: 'dot',    color: '#6a6a70', label: 'Null', visual: false, pickable: true },
   group: { icon: 'layers', color: '#3FCF8E', label: 'Group', visual: false, transform: true, pickable: false },
   precomp:{ icon: 'layers', color: '#3FCF8E', label: 'Precomp' },
+  captions: { icon: 'captions', color: '#F2C14E', label: 'Captions' },
 };
 PM.TYPE_META = TYPE_META;
 
@@ -141,6 +143,9 @@ const DEFAULTS: any = {
   },
   group: (L: any) => { L.d = {}; L.p['position.x'].v = 0; L.p['position.y'].v = 0; L.scaleLinked = true; },
   precomp:(L: any, c: any) => { L.d = { comp: null, w: c.w, h: c.h }; L.p['anchor.x'].v = 0; L.p['anchor.y'].v = 0; },
+  /* Captions draw in a space centred on the composition: the layer origin is
+     the frame centre, so scale and rotation pivot where a viewer expects. */
+  captions: (L: any, c: any) => { L.d = { cues: [], style: presetStyle('classic', c.h) }; },
 };
 
 PM.mkLayer = (type: any, opts: any = {}, comp: any) => {
@@ -148,6 +153,13 @@ PM.mkLayer = (type: any, opts: any = {}, comp: any) => {
   const L = baseLayer(type, opts.name || TYPE_META[type].label, comp);
   DEFAULTS[type] && DEFAULTS[type](L, comp);
   if (opts.d) Object.assign(L.d, opts.d);
+  if (type === 'captions') {
+    // A partial style fills in from its preset, sized for this composition.
+    const requested: any = opts.d && typeof opts.d === 'object' ? opts.d : {};
+    const style: any = requested.style && typeof requested.style === 'object' ? requested.style : {};
+    const base = presetStyle(typeof style.preset === 'string' ? style.preset : 'classic', comp ? comp.h : 1080);
+    L.d = normalizeCaptionsContent({ ...L.d, style: { ...base, ...style } });
+  }
   if (opts.from != null) L.from = opts.from;
   if (opts.dur != null) L.dur = opts.dur;
   if (opts.color) L.color = opts.color;

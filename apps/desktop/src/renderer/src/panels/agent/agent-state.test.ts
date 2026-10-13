@@ -27,6 +27,7 @@ function snapshot(trace: TraceStep[]): AgentSnapshot {
     model: 'gpt-5.6-sol',
     reasoningEffort: 'high',
     accessMode: 'editor',
+    permission: 'editor',
     composerDraft: '',
     pendingEntering: false,
     models: [],

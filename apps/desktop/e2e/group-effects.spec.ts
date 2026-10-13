@@ -59,8 +59,9 @@ test('groups composite their contents through visual layer features', async ({ s
 
   const inspector = page.locator('#panel-inspector');
   await expect(inspector.locator(`[data-inspector-layer="${proof.group}"]`)).toBeVisible();
-  await expect(inspector.getByRole('button', { name: 'Add effect', exact: true })).toBeVisible();
-  await expect(inspector.getByText('Gaussian Blur', { exact: true })).toBeVisible();
+  const effects = page.locator('#panel-layer-effects');
+  await expect(effects.locator('header').getByRole('button', { name: 'Add effect', exact: true })).toBeVisible();
+  await expect(effects.getByText('Gaussian Blur', { exact: true })).toBeVisible();
   await expect(inspector.getByText('Masks', { exact: true })).toBeVisible();
   await expect(inspector.getByRole('combobox', { name: 'Blend mode', exact: true })).toBeVisible();
   await expect(inspector.getByRole('radiogroup', { name: 'Motion blur', exact: true })).toBeVisible();

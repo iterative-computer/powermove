@@ -2,7 +2,7 @@
    extension they were copied from. The registry marks such records with
    `update` (see ExtensionRecord). This module turns that into one quiet
    notice (top-right toast) plus a home-screen sidebar block, and hands the
-   actual merge to the user's agent through `api.extensions.rebase`. Dismissal
+   merge to the local updater through `api.extensions.rebase`. Dismissal
    is remembered per fork and target version, so a dismissed notice does not
    return until the next shipped version. */
 import type { ExtensionRecord, PowermoveAPI } from '../kernel/api';
@@ -87,7 +87,7 @@ function refresh(): void {
   syncToast();
 }
 
-/** Hand every pending fork to the agent, one prompt per fork. */
+/** Update pending forks locally; unresolved customizations offer agent help. */
 export function updateAll(): void {
   if (!api) return;
   for (const update of pending) api.extensions.rebase(update.id);

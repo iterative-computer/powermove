@@ -111,4 +111,27 @@ describe('legacy spatial assistant install', () => {
     expect(result).toContain('Earlier project context was clipped');
     expect(result.endsWith(`USER REQUEST\n${request}`)).toBe(true);
   });
+
+  it('does not let an oversized selected layer hide all other editable targets', () => {
+    const result = spatialRegistry().SpatialAssistant.math.boundedEditableSource({
+      operations: ['set_property'], layers: [
+        { id: 'large', name: 'Large', controls: [{ value: 'x'.repeat(90_000) }] },
+        { id: 'small', name: 'Logo', controls: [{ path: 'opacity', value: 100 }] },
+      ],
+    }, 'Adjust the Logo', ['large']);
+    expect(result.layers.some((layer: any) => layer.id === 'small')).toBe(true);
+    expect(result.note).toContain('get_project_state');
+  });
+
+  it('preserves whole conversation and target sections ahead of an oversized manifest', () => {
+    const request = 'Move the logo right';
+    const conversation = JSON.stringify({ threadId: 'thread', messages: [{ role: 'user', text: 'Keep the readable hold.' }] });
+    const catalog = JSON.stringify({ layers: [{ id: 'logo', controls: [{ path: 'position.x' }] }] });
+    const prompt = `Instructions\n\nCURRENT WORKSPACE MANIFEST\n${JSON.stringify({ large: 'x'.repeat(210_000) })}\n\nCONVERSATION SO FAR\n${conversation}\n\nEDITABLE SOURCE CATALOG\n${catalog}\n\nUSER REQUEST\n${request}`;
+    const result = spatialRegistry().SpatialAssistant.math.boundedAgentPrompt(prompt, request, 1500);
+    expect(result).toContain(conversation);
+    expect(result).toContain(catalog);
+    expect(result).not.toContain('CURRENT WORKSPACE MANIFEST');
+    expect(result.length).toBeLessThanOrEqual(1500);
+  });
 });

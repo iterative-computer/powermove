@@ -632,6 +632,28 @@ describe('legacy app install', () => {
     expect(toasts.at(-1)).toMatch(/switched projects/);
   });
 
+  it.each([true, false])('matches source settings only for an Open import (%s)', async matchSource => {
+    const { PM } = appRegistry();
+    const asset = { id: 'clip', kind: 'video', name: 'Clip.mp4', w: 720, h: 1280, fps: 30000 / 1001, dur: 2.002 };
+    PM.assetKind = () => 'video';
+    PM.assets.importBatch = vi.fn(async () => [{ status: 'created', asset, persisted: true }]);
+    let settingsAtInsertion: any;
+    PM.commandForAsset = vi.fn((_id, at) => {
+      settingsAtInsertion = { w: PM.proj.w, h: PM.proj.h, fps: PM.proj.fps, dur: PM.proj.dur };
+      return { type: 'add_layer', from: at };
+    });
+    PM.Edit = { apply: vi.fn() };
+    await PM.importFiles([{ name: 'Clip.mp4' }], { matchSource, placement: { at: 0 }, sequence: false });
+    expect(PM.Edit.apply).toHaveBeenCalledOnce();
+    expect(settingsAtInsertion).toEqual(matchSource
+      ? { w: 720, h: 1280, fps: 30000 / 1001, dur: 2.002 }
+      : { w: 1920, h: 1080, fps: 30, dur: 10 });
+    if (matchSource) {
+      expect(PM.proj.work).toEqual([0, 2.002]);
+      expect(PM.proj.exportDefaults.fps).toBe(30000 / 1001);
+    }
+  });
+
   it('rejects multiple replacement files and project files without mutating the project', async () => {
     const { PM, toasts } = appRegistry();
     PM.proj.assets = { original: { id: 'original', name: 'Original.png', kind: 'image' } };

@@ -23,23 +23,12 @@
 
 </script>
 
-<section class="features" aria-labelledby="features-title">
-  <div class="wrap">
-    <h2 id="features-title" class="section-heading"><span class="strong">Welcome to malleable software.</span></h2>
-    <div class="feature-layout">
-      <div class="blocks">
-        {#each features as f (f.id)}
-          <article class="block" id={f.id}>
-            <AppPreview kind={f.id} />
-            <div class="copy">
-              <div>
-                <h3>{f.label}</h3>
-                <p class="lead"><span class="strong">{f.lead}</span> {f.text}</p>
-              </div>
-            </div>
-          </article>
-        {/each}
-      </div>
+{#each features as f (f.id)}
+  <article class="row" id={f.id} aria-labelledby="{f.id}-title">
+    <div class="row-copy">
+      <h3 id="{f.id}-title">{f.label}</h3>
+      <p><span class="strong">{f.lead}</span> {f.text}</p>
     </div>
-  </div>
-</section>
+    <div class="row-media"><AppPreview kind={f.id} bare /></div>
+  </article>
+{/each}

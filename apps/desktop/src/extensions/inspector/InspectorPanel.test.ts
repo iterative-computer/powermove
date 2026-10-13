@@ -355,12 +355,20 @@ function setup(
   doc.replace(currentProject as any);
   setSelection({ layers: selected, keys: [], chan: null });
   transport.time = 0;
-  const api = apiFor(runtime);
+  const register = vi.fn((_definition: Record<string, any>) => ({ dispose: vi.fn() }));
+  const api = apiFor(runtime, register);
   activeApi = api;
   activate(api);
   instance = mount(InspectorPanel, { target, props: { panelId: 'inspector', spec: {}, api } });
   /* Applied effects live in their own panel; mount it alongside Properties. */
-  if (options.effects) effectsInstance = mount(EffectsPanel, { target, props: { panelId: 'layer-effects', spec: {}, api } });
+  if (options.effects) {
+    const header = document.createElement('header');
+    header.innerHTML = '<span class="ptitle">Layer Effects</span><button class="panel-options"></button>';
+    target.appendChild(header);
+    const definition = register.mock.calls[1]![0] as any;
+    definition.header(header, {});
+    effectsInstance = mount(EffectsPanel, { target, props: { panelId: 'layer-effects', spec: {}, api } });
+  }
   flushSync();
 
   return { runtime, api, apply, menu, drag: () => dragOptions! };
@@ -895,9 +903,10 @@ describe('InspectorPanel', () => {
   it('sends the exact legacy add-effect and remove-effect commands', () => {
     const candidate = layer('A');
     const { apply, menu } = setup([candidate], ['A'], { effects: true });
-    target.querySelector<HTMLButtonElement>('[aria-label="Add effect"]')!.dispatchEvent(
-      new PointerEvent('pointerdown', { bubbles: true, button: 0 })
-    );
+    const add = target.querySelector<HTMLButtonElement>('header [aria-label="Add effect"]')!;
+    expect(add).not.toBeNull();
+    expect(target.querySelector('[data-effects-section] [aria-label="Add effect"]')).toBeNull();
+    add.click();
     const items = menu.mock.calls[0]![1] as Array<{ label?: string; run?: () => void }>;
     items.find((item) => item.label === 'Gaussian Blur')?.run?.();
     expect(apply).toHaveBeenCalledWith(
@@ -962,7 +971,10 @@ describe('InspectorPanel', () => {
       { id: 'fx-1', type: 'blur', on: false, open: false, p: { amount: channel(12, 'key-1') } },
       { id: 'fx-2', type: 'blur', on: true, open: true, p: { amount: channel(24, 'key-2') } }
     );
-    const { apply } = setup([candidate], ['A'], { effects: true });
+    const { apply, api } = setup([candidate], ['A'], { effects: true });
+    const copy = vi.spyOn(api.commands, 'run').mockImplementation(command => {
+      if (command === 'copyLayers') return api.services.get<InspectorService>('inspector')?.copySelectedEffects();
+    });
     const first = target.querySelector<HTMLElement>('[data-effect-id="fx-1"]')!;
     const second = target.querySelector<HTMLElement>('[data-effect-id="fx-2"]')!;
 
@@ -975,6 +987,7 @@ describe('InspectorPanel', () => {
     second.dispatchEvent(new KeyboardEvent('keydown', {
       key: 'c', metaKey: true, bubbles: true, cancelable: true
     }));
+    expect(copy).toHaveBeenCalledExactlyOnceWith('copyLayers');
     apply.mockClear();
     const paste = new KeyboardEvent('keydown', {
       key: 'v', metaKey: true, bubbles: true, cancelable: true

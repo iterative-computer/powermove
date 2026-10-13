@@ -250,7 +250,7 @@ def('duplicate', 'Duplicate layers', '⌘D', () => {
   return pasteLayers(PM, () => selected, { atPlayhead: false });
 }, 'Edit');
 def('delete', 'Delete selection', '⌫', () => deleteSelection(PM), 'Edit');
-def('split', 'Split at playhead', '⌘⇧D', () => splitLayers(PM), 'Edit');
+def('split', 'Split at playhead', '⌘⇧D', () => PM.Captions?.splitAtPlayhead?.() || splitLayers(PM), 'Edit');
 def('separateAudio', 'Separate audio', null, (id?: any) => separateVideoAudio(PM, id), 'Edit', hidden);
 def('selectAll', 'Select all layers', '⌘A', () => PM.selectLayers(PM.proj.layers.map((l: any) => l.id)), 'Edit');
 def('deselect', 'Deselect', '⎋', () => { PM.selectLayers([]); PM.sel.keys = []; }, 'Edit');
@@ -262,6 +262,11 @@ let layerClip: any = null;
 /* Selected keyframes take precedence over their layers, as Delete does.
    Only the most recent copy (effects, keyframes, or layers) stays pasteable. */
 let keyClip: KeyframeClipboard | null = null;
+let localClipboardWrite: Promise<void> = Promise.resolve();
+// A subsequent app copy replaces any older system media, just as text copy does.
+const markLocalClipboard = (text: string): void => {
+  localClipboardWrite = hostBridge()?.clipboardWriteText?.(text).catch(() => {}) ?? Promise.resolve();
+};
 const copySelectedKeyframes = (): boolean => {
   const copied = copyKeyframes(PM);
   if (!copied) return false;
@@ -269,12 +274,13 @@ const copySelectedKeyframes = (): boolean => {
   layerClip = null;
   inspectorService(PM)?.clearEffectClipboard();
   const count = copied.tracks.reduce((sum, track) => sum + track.keys.length, 0);
+  markLocalClipboard('Powermove keyframes');
   PM.toast?.(`Copied ${count} ${count === 1 ? 'keyframe' : 'keyframes'}`);
   return true;
 };
 def('copyLayers', 'Copy layers', '⌘C', () => {
   const inspector = inspectorService(PM);
-  if (inspector?.copySelectedEffects()) { keyClip = null; return; }
+  if (inspector?.copySelectedEffects()) { keyClip = null; markLocalClipboard('Powermove effects'); return; }
   if (copySelectedKeyframes()) return;
   const sels: any = selectedStackLayers(PM); if (!sels.length) return;
   /* An explicit layer copy becomes the active app-local clipboard payload.
@@ -283,11 +289,15 @@ def('copyLayers', 'Copy layers', '⌘C', () => {
   inspector?.clearEffectClipboard();
   keyClip = null;
   layerClip = sels.map((L: any) => JSON.parse(JSON.stringify(L)));
+  markLocalClipboard(sels.map((layer: any) => layer.name).join('\n'));
   PM.toast(`Copied ${layerClip.length} ${layerClip.length === 1 ? 'layer' : 'layers'}`);
 }, 'Edit');
 def('cutLayers', 'Cut layers', '⌘X', () => {
   if (copySelectedKeyframes()) return deleteSelection(PM);
-  return cutLayers(PM, (value: any[]) => { layerClip = value; keyClip = null; });
+  return cutLayers(PM, (value: any[]) => {
+    layerClip = value; keyClip = null;
+    markLocalClipboard(value.map(layer => layer.name).join('\n'));
+  });
 }, 'Edit');
 def('pasteLayers', 'Paste layers', '⌘V', () => {
   /* Effect paste deliberately routes through the ordinary global shortcut:
@@ -305,7 +315,22 @@ def('contextUndo', 'Undo', null, () => activeTextField() ? nativeEdit('undo') : 
 def('contextRedo', 'Redo', null, () => activeTextField() ? nativeEdit('redo') : readingText() ? false : PM.cmd('redo'), 'Edit', hidden);
 def('contextCut', 'Cut', null, () => activeTextField() ? nativeEdit('cut') : readingText() ? false : PM.cmd('cutLayers'), 'Edit', hidden);
 def('contextCopy', 'Copy', null, () => activeTextField() || readingText() || hasTextSelection() ? nativeEdit('copy') : PM.cmd('copyLayers'), 'Edit', hidden);
-def('contextPaste', 'Paste', null, () => activeTextField() ? nativeEdit('paste') : readingText() ? false : PM.cmd('pasteLayers'), 'Edit', hidden);
+def('contextPaste', 'Paste', null, () => {
+  if (activeTextField()) return nativeEdit('paste');
+  if (readingText()) return false;
+  const paste = hostBridge()?.pasteMedia;
+  if (paste) {
+    const project = PM.proj;
+    return localClipboardWrite.then(paste).then(handled => {
+      if (!handled && PM.proj === project && !activeTextField() && !readingText()) PM.cmd('pasteLayers');
+    }).catch(() => {
+      if (PM.proj === project && !activeTextField() && !readingText()) PM.cmd('pasteLayers');
+    });
+  }
+  // In browsers, let the user's shortcut produce the clipboard event.
+  if (typeof document !== 'undefined' && typeof ClipboardEvent !== 'undefined') return false;
+  return PM.cmd('pasteLayers');
+}, 'Edit', { ...hidden, preserveFalse: true });
 def('contextSelectAll', 'Select all', null, () => { const root = readingText(); return activeTextField() ? nativeEdit('selectAll') : root ? selectTextContents(root) : PM.cmd('selectAll'); }, 'Edit', hidden);
 def('toggleVisibility', 'Hide/show selected layers', null, () => toggleVisibility(PM), 'Edit');
 def('toggleLayerControls', 'Show/hide layer controls', '⌘⇧H', () => toggleLayerControls(PM), 'View', preserveFalse);
@@ -538,18 +563,32 @@ function crossesPlayhead(span: { from: number; dur: number }, time: number): boo
     && time > span.from && time < span.from + span.dur;
 }
 
+/** Content patch keeping a clip's content in place when its In point moves to
+ * `at`: timed media continue at the matching source time, caption cues are
+ * re-based (see PM.MediaTiming.startPatch). */
+function startContentPatch(PM: PMRegistry, layer: any, at: number): Record<string, unknown> | null {
+  if (PM.MediaTiming?.isTimed?.(layer)) {
+    return typeof PM.MediaTiming.trimAtStart === 'function' ? { trim: PM.MediaTiming.trimAtStart(layer, at) } : null;
+  }
+  return PM.MediaTiming?.startPatch?.(layer, at) ?? null;
+}
+
 function splitLayerClone(PM: PMRegistry, layer: any, tail: any, time: number): void {
   const sourceEnd = Number(layer.from) + Number(layer.dur);
   const sourceOffset = time - Number(layer.from);
   tail.from = time;
   tail.dur = sourceEnd - time;
   rebaseTailAnimation(PM, tail, sourceOffset);
-  if (PM.MediaTiming?.isTimed?.(layer)) {
+  /* Timed content continues across the cut: media at the matching source
+     time, caption cues re-based to the tail's In point (and trimmed from the
+     head), so neither half replays or loses what was heard there. */
+  const tailPatch = startContentPatch(PM, layer, time);
+  if (PM.MediaTiming?.isTimed?.(layer) || tailPatch) {
     tail.d = tail.d && typeof tail.d === 'object' ? tail.d : {};
-    if (typeof PM.MediaTiming.trimAtStart === 'function') {
-      tail.d.trim = PM.MediaTiming.trimAtStart(layer, time);
-    }
+    if (tailPatch) Object.assign(tail.d, tailPatch);
   }
+  const headPatch = PM.MediaTiming?.endPatch?.(layer, time);
+  if (headPatch && layer.d && typeof layer.d === 'object') Object.assign(layer.d, headPatch);
   /* The cut is an internal boundary, not a new entrance/exit. Keep the
      original entrance on the head and the original exit on the tail. */
   layer.transitionOut = null;
@@ -688,10 +727,12 @@ export function separateVideoAudio(PM: PMRegistry, layerId?: any): unknown {
       content: {
         asset: video.d.asset,
         trim: Math.max(0, Number(video.d.trim) || 0),
-        gain: 1,
+        /* The soundtrack keeps the level and mute it had in the mixer. */
+        gain: video.d.audioGain == null ? 1 : structuredClone(video.d.audioGain),
         fadeIn: 0,
         fadeOut: 0,
       },
+      ...(video.d.audioMuted === true ? { visible: false } : {}),
       select: true,
     },
   ], { label: 'Separate audio', origin: 'command' });
@@ -924,10 +965,9 @@ export function editSelectedLayerTiming(PM: PMRegistry, mode: LayerTimingEdit): 
     } else if (mode === 'outToEnd') {
       commands.push({ type: 'set_layer', target: layer.id, patch: { from: Math.max(0, Number(PM.proj.dur) - duration) } });
     } else if (mode === 'trimIn' && now > from && now < out) {
+      const content = startContentPatch(PM, layer, now);
       commands.push({ type: 'set_layer', target: layer.id, patch: { from: now, duration: out - now } });
-      if (PM.MediaTiming?.isTimed?.(layer)) {
-        commands.push({ type: 'set_content', target: layer.id, patch: { trim: PM.MediaTiming.trimAtStart(layer, now) } });
-      }
+      if (content) commands.push({ type: 'set_content', target: layer.id, patch: content });
     } else if (mode === 'trimOut' && now > from) {
       commands.push({ type: 'set_layer', target: layer.id, patch: { duration: Math.max(frame, now - from) } });
     }
@@ -1339,6 +1379,9 @@ function commandView(kernel: ReturnType<typeof ensureKernel>, id: string, put: (
 /** A keyframe deletion never falls through to its owning layer, including a
  * held Delete key after the first keyframe has already been removed. */
 export function deleteSelection(PM: PMRegistry): unknown {
+  // Selected caption cues delete before their layer does.
+  const cues = PM.Captions?.deleteSelectedCues?.();
+  if (cues) return cues;
   const timeline = timelineService(PM);
   if (PM.sel.keys.length || timeline?.keySelectionActive) {
     if (timeline) timeline.keySelectionActive = true;

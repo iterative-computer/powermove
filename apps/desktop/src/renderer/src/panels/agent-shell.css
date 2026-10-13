@@ -70,9 +70,18 @@
 }
 #agent-popover .agent-popover-panel-host > #panel-agent > header { display: none; }
 #agent-popover .agent-popover-panel-host > #panel-agent > .body { flex: 1; min-height: 0; }
-/* Without the panel header above it, the thread bar takes the same inset from
-   the top as from the right edge. */
-#agent-popover .thread-bar { margin-top: 10px; }
+#agent-popover .agent-panel-toolbar { display: flex; align-items: center; gap: 4px; padding: 10px 10px 6px; }
+#agent-popover .thread-bar { flex: 1; margin: 0; padding: 0; }
+#agent-popover .agent-popover-control {
+  display: grid; place-items: center; flex: none; width: 28px; height: 28px; padding: 6px;
+  border: 0; border-radius: var(--r-sm); background: transparent; color: var(--tx-3);
+}
+#agent-popover .agent-popover-control svg { width: 14px; height: 14px; }
+#agent-popover .agent-popover-control:hover:not(:disabled) { background: var(--ink-1); color: var(--tx-2); }
+#agent-popover .agent-popover-control:disabled { opacity: var(--disabled); }
+#agent-popover .agent-popover-control:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#agent-popover .agent-popover-grip { cursor: grab; touch-action: none; }
+#agent-popover .agent-popover-grip:active { cursor: grabbing; }
 
 /* ── floating window chrome, shared with the extension repair chat ── */
 .agent-floating-window {

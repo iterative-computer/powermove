@@ -4,7 +4,7 @@ import { dockLabel, insertPanel, removePanel, type DockSpec, type PanelSpec, typ
 type RectTarget = { id: string; el?: HTMLElement; virtual?: boolean; rect: DOMRect; panels: Array<{ el: HTMLElement; rect: DOMRect }> };
 type PreviewTarget = { key: string };
 
-const PANEL_SELECTOR = '#body > .dock .panel[data-panel]';
+const PANEL_SELECTOR = '#body .dock .panel[data-panel]';
 
 export function panelRects(): Map<string, DOMRect> {
   const rects = new Map<string, DOMRect>();
@@ -46,7 +46,7 @@ export function retargetPreview(preview: HTMLElement, target: PreviewTarget, key
 }
 
 function liveTargets(PM: PMRegistry): RectTarget[] {
-  const docks: RectTarget[] = [...document.querySelectorAll<HTMLElement>('#body > .dock')].map((element) => ({
+  const docks: RectTarget[] = [...document.querySelectorAll<HTMLElement>('#body .dock')].map((element) => ({
     id: element.id.replace('dock-', ''),
     el: element,
     rect: element.getBoundingClientRect(),
@@ -69,7 +69,15 @@ function placePreview(
   const dock = docks.find((item) => item.id === target.dockId);
   if (!dock) return;
   const rect = dock.rect;
-  if (dock.virtual) {
+  if (dock.virtual && dock.id === 'bottom') {
+    const height = Math.min(300, Math.max(120, Math.round(rect.height * 2.5)));
+    preview.classList.add('dock-edge');
+    preview.style.left = `${Math.round(rect.left)}px`;
+    preview.style.top = `${Math.round(rect.bottom - height)}px`;
+    preview.style.width = `${Math.round(rect.width)}px`;
+    preview.style.height = `${height}px`;
+    retargetPreview(preview, previewTarget, 'virtual:bottom');
+  } else if (dock.virtual) {
     const width = Math.min(dock.id === 'right' ? 300 : 250, Math.max(120, Math.round(rect.width * 2.5)));
     preview.classList.add('dock-edge');
     preview.style.left = `${Math.round(dock.id === 'right' ? rect.right - width : rect.left)}px`;
@@ -91,7 +99,9 @@ function placePreview(
   }
 }
 
-export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelSpec, dock: DockSpec, element: HTMLElement): void {
+type FloatingDrag = { move(dx: number, dy: number): void; cancel(): void; dockIds: string[] };
+
+export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelSpec, dock: DockSpec, element: HTMLElement, floating?: FloatingDrag): void {
   const ghost = document.createElement('div');
   ghost.className = 'panel-ghost';
   const card = document.createElement('div');
@@ -120,8 +130,9 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
     const next = pending;
     pending = null;
     if (!next) return;
-    const docks = liveTargets(PM);
+    const docks = liveTargets(PM).filter(target => !floating || floating.dockIds.includes(target.id));
     dropTarget = PM.Layout.hitTestDockPlacement(docks, next.clientX, next.clientY);
+    if (floating) ghost.classList.toggle('on', !!dropTarget);
     if (!dropTarget) {
       preview.classList.remove('on');
       previewTarget.key = '';
@@ -154,10 +165,12 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
     document.body.classList.remove('panel-dragging');
     if (!moved) return;
     if (cancelled) {
-      PM.toast('Move cancelled');
+      floating?.cancel();
+      if (!floating) PM.toast('Move cancelled');
       return;
     }
     if (!dropTarget) {
+      if (floating) return;
       PM.toast(`Drop on a panel or dock to move ${PM.PANELS[spec.id]?.title || spec.id}`);
       return;
     }
@@ -167,6 +180,7 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
       return;
     }
     const previous = panelRects();
+    PM.Layout.rememberPanelOpen?.(spec.id);
     PM.WS.mutate((workspace: Workspace) => {
       removePanel(workspace, spec.id);
       insertPanel(workspace, spec, dropTarget!.dockId, index);
@@ -183,11 +197,13 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
         destination.textContent = 'Move panel';
         document.body.classList.add('panel-dragging');
       }
-      ghost.classList.add('on');
+      floating?.move(dx, dy);
+      if (!floating) ghost.classList.add('on');
       queue(next);
     },
     up: (_dx: number, _dy: number, next: PointerEvent) => {
       if (moved) {
+        floating?.move(_dx, _dy);
         pending = next;
         render();
       }

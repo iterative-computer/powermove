@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import type { PMRegistry } from '../legacy/registry';
   import { clampPanelHeight, resolvePairResize, transferPanelHeights } from './geometry';
-  import { applyPanelSize, panelMinHeight, setPanelCollapsed, type DockSpec, type PanelSpec } from './model';
+  import { applyPanelSize, defaultDockSize, panelMinHeight, setPanelCollapsed, type DockSpec, type PanelSpec } from './model';
 
   let {
     PM,
@@ -29,7 +29,17 @@
   let minimum = $state<number | undefined>(undefined);
   let maximum = $state<number | undefined>(undefined);
 
+  /* A horizontal splitter with a dock (rather than two panels) sits above the
+     bottom dock and resizes that dock's height. */
+  const dockSplit = $derived(mode === 'vertical' || !!afterDock);
   const isFlexDock = (dock?: DockSpec): boolean => !dock || dock.id === 'center' || !!dock.flex;
+  const dockBounds = (element?: HTMLElement | null): { min: number; max: number } => {
+    if (mode === 'vertical') return { min: 200, max: 760 };
+    const stack = element?.parentElement?.getBoundingClientRect().height || 0;
+    return { min: 120, max: Math.max(120, stack - 160) };
+  };
+  const dockLength = (element: HTMLElement): number =>
+    mode === 'vertical' ? element.getBoundingClientRect().width : element.getBoundingClientRect().height;
   const isFlexPanel = (spec?: PanelSpec): boolean => {
     if (!spec) return true;
     const def = PM.PANELS[spec.id] || {};
@@ -74,9 +84,10 @@
   };
   const panelElement = (spec: PanelSpec): HTMLElement | null => PM.panelInst[spec.id]?.el ?? null;
   const readValue = (): number => {
-    if (mode === 'vertical') {
+    if (dockSplit) {
       const { target } = verticalTarget();
-      return Math.round(document.getElementById(`dock-${target.id}`)?.getBoundingClientRect().width || target.size || (target.id === 'right' ? 300 : 250));
+      const element = document.getElementById(`dock-${target.id}`);
+      return Math.round((element && dockLength(element)) || target.size || defaultDockSize(target.id));
     }
     const { spec } = horizontalPair();
     return Math.round(panelElement(spec)?.getBoundingClientRect().height || spec.size || PM.PANELS[spec.id]?.size || 180);
@@ -87,6 +98,7 @@
     value = readValue();
     minimum = mode === 'vertical' ? 200 : undefined;
     maximum = mode === 'vertical' ? 760 : undefined;
+    if (dockSplit) exposeBounds();
   });
 
   let frame = 0;
@@ -106,16 +118,17 @@
   };
   const setVertical = (next: number): void => {
     const { target } = verticalTarget();
-    const clamped = PM.clamp(next, 200, 760);
     const element = document.getElementById(`dock-${target.id}`);
     if (!element) return;
+    const bounds = dockBounds(element);
+    const clamped = PM.clamp(next, bounds.min, bounds.max);
     element.style.flex = `0 0 ${clamped}px`;
     target.size = Math.round(clamped);
     target.flex = false;
     value = Math.round(clamped);
     splitter?.setAttribute('aria-valuenow', String(value));
-    minimum = 200;
-    maximum = 760;
+    minimum = bounds.min;
+    maximum = bounds.max;
   };
   const panelMin = (spec: PanelSpec): number => panelMinHeight(spec, PM.PANELS[spec.id] || {});
   const horizontalGeometry = () => {
@@ -186,9 +199,11 @@
   }
 
   function exposeBounds(): void {
-    if (mode === 'vertical') {
-      minimum = 200;
-      maximum = 760;
+    if (dockSplit) {
+      const { target } = verticalTarget();
+      const bounds = dockBounds(document.getElementById(`dock-${target.id}`));
+      minimum = bounds.min;
+      maximum = bounds.max;
       return;
     }
     const geometry = horizontalGeometry();
@@ -211,20 +226,20 @@
     exposeBounds();
     trackPointer(event);
     splitter.classList.add('drag');
-    if (mode === 'vertical') {
+    if (dockSplit) {
       const { target, sign } = verticalTarget();
       const element = document.getElementById(`dock-${target.id}`);
       if (!element) {
         splitter.classList.remove('drag');
         return;
       }
-      const start = element.getBoundingClientRect().width;
+      const start = dockLength(element);
       const saved = { size: target.size, flex: target.flex };
       PM.drag(event, {
-        cursor: 'col-resize',
-        move: (dx: number, _dy: number, next: PointerEvent) => {
+        cursor: mode === 'vertical' ? 'col-resize' : 'row-resize',
+        move: (dx: number, dy: number, next: PointerEvent) => {
           trackPointer(next);
-          setVertical(start + sign * dx);
+          setVertical(start + sign * (mode === 'vertical' ? dx : dy));
           emitAtFrameCadence();
         },
         up: () => {
@@ -235,7 +250,7 @@
           splitter.classList.remove('drag');
           if (saved.size == null) delete target.size; else target.size = saved.size;
           if (saved.flex == null) delete target.flex; else target.flex = saved.flex;
-          element.style.flex = isFlexDock(target) ? '1 1 auto' : `0 0 ${target.size || (target.id === 'right' ? 300 : 250)}px`;
+          element.style.flex = isFlexDock(target) ? '1 1 auto' : `0 0 ${target.size || defaultDockSize(target.id)}px`;
           PM.bus.emit('layout:applied');
         }
       });
@@ -279,9 +294,9 @@
   }
 
   function resetVertical(): void {
-    if (mode !== 'vertical') return;
+    if (!dockSplit) return;
     const { target } = verticalTarget();
-    const next = target.id === 'right' ? 300 : 250;
+    const next = defaultDockSize(target.id);
     const element = document.getElementById(`dock-${target.id}`);
     if (!element) return;
     element.style.flex = `0 0 ${next}px`;
@@ -293,7 +308,7 @@
   }
 
   function onKeyDown(event: KeyboardEvent): void {
-    if (event.key === 'Enter' && mode === 'vertical') {
+    if (event.key === 'Enter' && dockSplit) {
       event.preventDefault();
       resetVertical();
       return;
@@ -303,7 +318,7 @@
       : event.key === 'ArrowDown' ? 10 : event.key === 'ArrowUp' ? -10 : null;
     if (delta == null) return;
     event.preventDefault();
-    if (mode === 'vertical') {
+    if (dockSplit) {
       const { sign } = verticalTarget();
       setVertical(value + sign * delta);
     } else {
@@ -325,7 +340,7 @@
   class:h={mode === 'horizontal'}
   role="separator"
   aria-orientation={mode}
-  aria-label={mode === 'vertical' ? 'Resize dock' : 'Resize panels'}
+  aria-label={dockSplit ? 'Resize dock' : 'Resize panels'}
   aria-valuenow={value}
   aria-valuemin={minimum}
   aria-valuemax={maximum}

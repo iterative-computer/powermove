@@ -31,6 +31,7 @@ test('generated PNGs reach the timeline and continuation groups and renders the 
         summary, commands: [], artifacts: files, extensions: [], notes: [], externalActions: [],
       }) });
       if (proof.calls === 1) return result('Prepared screen and frame', artifacts);
+      if (proof.calls === 3) return result('Verified the final grouped layers');
       if (proof.calls !== 2) throw new Error('Unexpected duplicate continuation');
       proof.prompt = prompt;
       const layers = PM.proj.layers.filter((layer: any) => ['screen.png', 'frame.png'].includes(layer.name));
@@ -54,7 +55,7 @@ test('generated PNGs reach the timeline and continuation groups and renders the 
     const PM = (window as any).PM;
     return { ...(window as any).__handoff, artifacts: PM.AgentUI.state.run.artifacts, error: PM.AgentUI.state.run.reviewError };
   });
-  expect(proof).toMatchObject({ calls: 2, grouped: true, rendered: true, error: '' });
+  expect(proof).toMatchObject({ calls: 3, grouped: true, rendered: true, error: '' });
   expect(proof.artifacts).toHaveLength(2);
   expect(proof.artifacts.every((artifact: any) => artifact.imported && artifact.layerIds.length === 1)).toBe(true);
   for (const id of proof.layerIds) expect(proof.prompt).toContain(id);

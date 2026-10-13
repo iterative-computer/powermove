@@ -33,7 +33,7 @@ function create() {
   PM.AgentUI?.setScope('workspace');
   PM.AgentUI?.setDraft('Create a new panel that ', true);
 }
-function open(view?: 'panels' | 'workspaces') {
+function open(view?: 'panels' | 'workspaces' | 'after-effects') {
   ensure().open(view);
 }
 function close() {
@@ -78,6 +78,7 @@ PM.LibraryUI = { open, close, reveal, create, get isOpen() { return !!screen?.is
 PM.WorkspaceEditor = WorkspaceEditor;
 PM.bus.on('layout:applied', () => { if (PM.LibraryUI.isOpen) screen?.refresh(); });
 PM.bus.on('workspaces', () => { if (PM.LibraryUI.isOpen) screen?.refresh(); });
+PM.bus.on('after-effects:imported', () => { if (PM.LibraryUI.isOpen) screen?.refresh(true); });
 PM.bus.on('project', close);
 PM.Kernel?.events?.on?.('extensions:changed', () => { if (PM.LibraryUI.isOpen) screen?.refresh(true); });
 }

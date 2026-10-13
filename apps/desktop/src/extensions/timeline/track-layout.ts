@@ -34,7 +34,7 @@ export interface TrackLayoutOptions {
   duration: number;
 }
 
-export type TrackArea = 'video' | 'audio';
+export type TrackArea = 'video' | 'audio' | 'captions';
 
 export interface TrackItem {
   id: string;
@@ -62,6 +62,8 @@ export interface TrackBand {
 export interface TrackLayout {
   video: number;
   audio: number;
+  /** Caption tracks sit above the video tracks, one captions layer each. */
+  captions: number;
   items: TrackItem[];
   bands: TrackBand[];
   byId: Map<string, TrackItem>;
@@ -84,6 +86,9 @@ const overlaps = (a: { from: number; end: number }, b: { from: number; end: numb
   a.from < b.end - EPS && b.from < a.end - EPS;
 
 export const isAudioLayer = (layer: Pick<TrackLayer, 'type'>) => layer.type === 'audio';
+export const isCaptionsLayer = (layer: Pick<TrackLayer, 'type'>) => layer.type === 'captions';
+export const areaOfType = (layer: Pick<TrackLayer, 'type'>): TrackArea =>
+  isAudioLayer(layer) ? 'audio' : isCaptionsLayer(layer) ? 'captions' : 'video';
 
 function childrenOf(layers: TrackLayer[]) {
   const ids = new Set(layers.map(layer => layer.id));
@@ -159,22 +164,33 @@ function emit(units: Unit[], area: TrackArea, offset: number, depth: number, par
   }
 }
 
-/** Top-level audio clips live in their own area below the video tracks.
-    Audio inside a group stays in the group's block. */
+/** Top-level audio clips live in their own area below the video tracks and
+    captions layers in theirs above them. Members of a group stay in the
+    group's block. */
 function rootUnits(layers: TrackLayer[], options: TrackLayoutOptions) {
   const children = childrenOf(layers);
   const units = buildUnits(children.get(null) || [], children, options, new Set());
   return {
-    video: units.filter(unit => !isAudioLayer(unit.layer)),
-    audio: units.filter(unit => isAudioLayer(unit.layer)),
+    video: units.filter(unit => areaOfType(unit.layer) === 'video'),
+    audio: units.filter(unit => areaOfType(unit.layer) === 'audio'),
+    captions: units.filter(unit => areaOfType(unit.layer) === 'captions'),
   };
 }
 
+/** Each captions layer gets a caption track of its own, in stack order: the
+    layer on top of the stack is the highest caption track. Two languages can
+    therefore always be told apart, even when their cues interleave. */
+function packCaptions(units: Unit[]): number {
+  units.forEach((unit, index) => { unit.base = units.length - 1 - index; });
+  return units.length;
+}
+
 export function layoutTracks(layers: TrackLayer[], options: TrackLayoutOptions): TrackLayout {
-  const { video, audio } = rootUnits(layers, options);
-  const layout: TrackLayout = { video: pack(video), audio: pack(audio), items: [], bands: [], byId: new Map() };
+  const { video, audio, captions } = rootUnits(layers, options);
+  const layout: TrackLayout = { video: pack(video), audio: pack(audio), captions: packCaptions(captions), items: [], bands: [], byId: new Map() };
   emit(video, 'video', 0, 0, null, layout);
   emit(audio, 'audio', 0, 0, null, layout);
+  emit(captions, 'captions', 0, 0, null, layout);
   return layout;
 }
 
@@ -184,7 +200,7 @@ export interface TrackMove {
   /** Time offset applied to every moved layer (including group members). */
   dt: number;
   /** Lane offset per area, in lanes. Positive moves to a higher track. */
-  lanes: Record<TrackArea, number>;
+  lanes: Record<'video' | 'audio', number> & Partial<Record<'captions', number>>;
 }
 
 export interface TrackMovePlan {
@@ -232,7 +248,7 @@ export function planTrackMove(layers: TrackLayer[], options: TrackLayoutOptions,
   const areaOf = (layer: TrackLayer): TrackArea => {
     let root = layer;
     for (let parent = parentKey(root); parent; parent = parentKey(root)) root = byId.get(parent)!;
-    return isAudioLayer(root) ? 'audio' : 'video';
+    return areaOfType(root);
   };
 
   const next = new Map<string, TrackLayer & { from: number; track: number }>();
@@ -245,13 +261,14 @@ export function planTrackMove(layers: TrackLayer[], options: TrackLayoutOptions,
       const lane = relativeLane(layer) ?? Math.max(0, Math.floor(Number(layer.track) || 0));
       if (!roots.has(layer.id)) { lanes.set(layer.id, lane); continue; }
       const area = areaOf(layer);
-      const limit = parent ? (blockHeight ?? 0) : area === 'audio' ? current.audio : current.video;
+      const limit = parent ? (blockHeight ?? 0) : area === 'audio' ? current.audio : area === 'captions' ? Math.max(0, current.captions - 1) : current.video;
       lanes.set(layer.id, Math.max(0, Math.min(limit, lane + (move.lanes[area] || 0))));
     }
-    // Slot-preserving sort: video and audio units each keep the stack slots
-    // they occupied, so moving tracks never reorders audio against video.
-    const sortSlots = (audio: boolean) => {
-      const slots = siblings.map((layer, index) => ({ layer, index })).filter(entry => isAudioLayer(entry.layer) === audio);
+    // Slot-preserving sort: video, audio and caption units each keep the
+    // stack slots they occupied, so moving tracks never reorders one area
+    // against another.
+    const sortSlots = (area: TrackArea) => {
+      const slots = siblings.map((layer, index) => ({ layer, index })).filter(entry => areaOfType(entry.layer) === area);
       const sorted = [...slots].sort((a, b) => (lanes.get(b.layer.id)! - lanes.get(a.layer.id)!)
         // On a shared lane the moved unit sits on top in the stack, so if it
         // collides with a resting clip it lands on the next free track.
@@ -260,7 +277,7 @@ export function planTrackMove(layers: TrackLayer[], options: TrackLayoutOptions,
       return slots.map((slot, i) => ({ index: slot.index, layer: sorted[i]!.layer }));
     };
     const placed = new Array<TrackLayer>(siblings.length);
-    for (const entry of [...sortSlots(false), ...sortSlots(true)]) placed[entry.index] = entry.layer;
+    for (const entry of [...sortSlots('video'), ...sortSlots('audio'), ...sortSlots('captions')]) placed[entry.index] = entry.layer;
     for (const layer of placed) {
       next.set(layer.id, { ...layer, from: timeOf(layer), track: lanes.get(layer.id)! });
       ordered.push(layer);

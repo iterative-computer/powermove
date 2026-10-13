@@ -1,6 +1,60 @@
 import { expect, test } from './helpers/app';
 
 test.describe('@agent-panel Svelte agent panel drives a real editor-mode run', () => {
+  test('fills its column when docked alone and keeps its resized height beside another panel', async ({ session }, testInfo) => {
+    await session.openEditor();
+    const { page } = session;
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.WS.mutate((workspace: any) => {
+        // Measure against a full-height left column, not one above the timeline.
+        PM.Layout.movePanel(workspace, 'timeline', 'center');
+        for (const spec of [...PM.Layout.ensureDock(workspace, 'left').panels]) {
+          PM.Layout.hidePanel(workspace, spec.id);
+        }
+        PM.Layout.addPanel(workspace, 'agent', 'left');
+      });
+    });
+    const panel = page.locator('#dock-left #panel-agent');
+    await expect(panel).toBeVisible();
+    const bottomGap = () => panel.evaluate(el =>
+      el.closest('.dock')!.getBoundingClientRect().bottom - el.getBoundingClientRect().bottom);
+    await page.screenshot({ path: testInfo.outputPath('agent-alone.png') });
+    await expect.poll(bottomGap).toBeLessThanOrEqual(1);
+    for (const theme of ['dark', 'light']) {
+      await page.evaluate(theme => (window as any).PM.theme.apply(theme), theme);
+      await page.setViewportSize({ width: 1440, height: theme === 'dark' ? 1000 : 800 });
+      await expect.poll(bottomGap).toBeLessThanOrEqual(1);
+      await expect(panel.getByRole('textbox', { name: 'Message Powermove agent', exact: true })).toBeInViewport();
+      expect(await panel.evaluate(el => {
+        const footer = el.querySelector('.agent-footer')!.getBoundingClientRect();
+        return Math.abs(el.getBoundingClientRect().bottom - footer.bottom);
+      })).toBeLessThanOrEqual(1);
+      await page.screenshot({ path: testInfo.outputPath(`agent-alone-${theme}.png`) });
+    }
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.WS.mutate((workspace: any) => PM.Layout.restorePanel(workspace, 'assets'));
+    });
+    await expect(page.locator('#dock-left #panel-assets')).toBeVisible();
+    const height = () => panel.evaluate(el => el.getBoundingClientRect().height);
+    await expect.poll(height).toBe(350);
+    await page.locator('#dock-left .splitter.h').press('ArrowUp');
+    await expect.poll(height).toBe(360);
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.WS.mutate((workspace: any) => PM.Layout.hidePanel(workspace, 'assets'));
+    });
+    await expect.poll(bottomGap).toBeLessThanOrEqual(1);
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.WS.mutate((workspace: any) => PM.Layout.restorePanel(workspace, 'assets'));
+    });
+    await expect.poll(height).toBe(360);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
   test('opens under the titlebar launcher, never in a dock, and follows the window', async ({ session }) => {
     await session.openEditor(); await session.openAgent();
     const { page } = session;
@@ -56,6 +110,78 @@ test.describe('@agent-panel Svelte agent panel drives a real editor-mode run', (
     await expect(launcher).toBeVisible();
     await session.openAgent();
     await expect(page.locator('#agent-popover #panel-agent')).toBeVisible();
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
+  test('the floating grip moves, cancels and docks the same conversation', async ({ session }) => {
+    await session.openEditor(); await session.openAgent();
+    const { page } = session;
+    const panel = page.locator('#agent-popover');
+    const grip = page.getByRole('button', { name: 'Move agent panel', exact: true });
+    await expect(grip).toBeVisible();
+    for (const theme of ['dark', 'light']) {
+      await page.evaluate(theme => (window as any).PM.theme.apply(theme), theme);
+      await page.screenshot({ path: `/tmp/powermove-agent-grip-${theme}.png` });
+    }
+    await page.evaluate(() => (window as any).PM.theme.apply('dark'));
+    await page.evaluate(() => { (window as any).__originalAgent = document.getElementById('panel-agent'); });
+    const start = (await panel.boundingBox())!;
+    const handle = (await grip.boundingBox())!;
+    const center = (await page.locator('#dock-center').boundingBox())!;
+    const x = center.x + center.width / 2;
+    const y = center.y + 90;
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(x, y, { steps: 12 });
+    await page.mouse.up();
+    await expect(panel).toBeVisible();
+    const moved = (await panel.boundingBox())!;
+    expect(Math.abs(moved.x - start.x)).toBeGreaterThan(30);
+    // Layout passes and reopening keep the user's floating placement.
+    await page.evaluate(() => (window as any).PM.bus.emit('layout:applied'));
+    await page.keyboard.press('Escape'); await session.openAgent();
+    expect((await panel.boundingBox())!.x).toBeCloseTo(moved.x, 0);
+    const next = (await grip.boundingBox())!;
+    await page.mouse.move(next.x + next.width / 2, next.y + next.height / 2);
+    await page.mouse.down(); await page.mouse.move(x + 80, y + 70, { steps: 8 });
+    await page.keyboard.press('Escape'); await page.mouse.up();
+    await expect(panel).toBeVisible();
+    expect((await panel.boundingBox())!.x).toBeCloseTo(moved.x, 0);
+    const dock = (await page.locator('#dock-right').boundingBox())!;
+    const last = (await grip.boundingBox())!;
+    await page.mouse.move(last.x + last.width / 2, last.y + last.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(dock.x + dock.width / 2, dock.y + dock.height - 40, { steps: 16 });
+    await expect(page.locator('.panel-drop-preview')).toHaveClass(/on/);
+    await page.mouse.up();
+    await expect(page.locator('#dock-right #panel-agent')).toBeVisible();
+    await expect(panel).toBeHidden();
+    expect(await page.evaluate(() => (window as any).__originalAgent === document.getElementById('panel-agent'))).toBe(true);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
+  test('the pin button keeps the conversation in the workspace', async ({ session }) => {
+    await session.openEditor(); await session.openAgent();
+    let { page } = session;
+    await page.getByRole('button', { name: 'Pin agent to workspace', exact: true }).click();
+    await expect(page.locator('#dock-right #panel-agent')).toBeVisible();
+    await expect(page.locator('#agent-popover')).toBeHidden();
+    await expect(page.locator('#agent-launcher')).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).PM.store.get('panelVisibility').agent)).toBe(true);
+    await session.relaunch(); await session.openEditor();
+    page = session.page;
+    await expect(page.locator('#body > .dock #panel-agent')).toBeVisible();
+    await page.evaluate(() => (window as any).PM.newProject());
+    await expect(page.locator('#body > .dock #panel-agent')).toBeVisible();
+    await page.evaluate(() => (window as any).PM.WS.activate('design', true));
+    await expect(page.locator('#body > .dock #panel-agent')).toBeVisible();
+    await page.evaluate(() => { const PM = (window as any).PM; PM.WS.mutate((ws: any) => PM.Layout.closePanel(ws, 'agent')); });
+    await session.openAgent();
+    await expect(page.getByRole('button', { name: 'Move agent panel', exact: true })).toBeVisible();
+    expect(await page.evaluate(() => (window as any).PM.store.get('panelVisibility').agent)).toBe(false);
+    await page.evaluate(() => (window as any).PM.newProject());
+    await expect(page.locator('#body > .dock #panel-agent')).toHaveCount(0);
+    await expect(page.locator('#agent-launcher')).toBeVisible();
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 

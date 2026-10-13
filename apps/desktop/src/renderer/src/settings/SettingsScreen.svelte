@@ -9,8 +9,9 @@
   import { clearSettingsSearch, searchSettings } from './search';
   import Avatar from '../cloud/Avatar.svelte';
   import { applyAccount, cloudBridge, openSignIn, signOut, subscribeAccount, type CloudUser } from '../cloud/account';
+  import TranscriptionSettings from '../transcription/TranscriptionSettings.svelte';
 
-  export type SettingsPage = 'general' | 'accounts' | 'extensions' | 'project';
+  export type SettingsPage = 'general' | 'accounts' | 'transcription' | 'extensions' | 'project';
 
   let { PM, projectBridge }: {
     PM: Record<string, any>;
@@ -33,6 +34,7 @@
       items: [
         { id: 'general', label: 'General', icon: 'gear' },
         { id: 'accounts', label: 'Accounts', icon: 'link' },
+        { id: 'transcription', label: 'Transcription', icon: 'waveform' },
         { id: 'extensions', label: 'Extensions', icon: 'puzzle' }
       ]
     }
@@ -74,6 +76,7 @@
   let account = $state<CloudUser | null>(null);
   let rememberInstalls = $state(true);
   let accountBusy = $state(false);
+  let workspaceImportBusy = $state(false);
   $effect(() => subscribeAccount((user, me) => {
     account = user;
     rememberInstalls = me?.settings.rememberInstalls ?? true;
@@ -307,6 +310,21 @@
     PM.store?.set?.('restoreWindows', restoreWindows);
   }
 
+  async function importWorkspace(): Promise<void> {
+    if (workspaceImportBusy) return;
+    workspaceImportBusy = true;
+    // Reveal the agent and its connection step instead of covering them with Settings.
+    close();
+    try {
+      if (!await PM.AgentUI?.importWorkspace?.('after-effects')) throw new Error('Workspace transfer unavailable.');
+    } catch {
+      open('general');
+      PM.toast?.('Could not start the workspace transfer. Try again.', 4000, { error: true });
+    } finally {
+      workspaceImportBusy = false;
+    }
+  }
+
   function keydown(event: KeyboardEvent): void {
     event.stopPropagation();
     if (event.key === 'Escape' || ((event.metaKey || event.ctrlKey) && event.key === ',' && !event.shiftKey && !event.altKey)) {
@@ -420,6 +438,18 @@
                         <option {value}>{label}</option>
                       {/each}
                     </select>
+                  </div>
+                </div>
+              </section>
+              <section class="sg-section">
+                <h3 class="sg-section-title">Workspace</h3>
+                <div class="sg-group">
+                  <div class="settings-row">
+                    <div class="settings-copy">
+                      <b>After Effects workspace</b>
+                      <span>Bring your saved panels and tools into Powermove with your agent.</span>
+                    </div>
+                    <button class="btn" type="button" disabled={workspaceImportBusy} onclick={() => void importWorkspace()}>Bring my workspace</button>
                   </div>
                 </div>
               </section>
@@ -543,6 +573,12 @@
                 <h3 class="sg-section-title">API or local model</h3>
                 <div class="sg-group" use:host={[controls?.compatible.element]}></div>
               </section>
+            {:else if item.id === 'transcription'}
+              <header class="sg-heading">
+                <h2>Transcription</h2>
+                <p>Turn speech into text for captions and your agent, on this Mac.</p>
+              </header>
+              <TranscriptionSettings {PM} />
             {:else if item.id === 'extensions'}
               <header class="sg-heading">
                 <h2>Extensions</h2>

@@ -18,7 +18,7 @@
 <SuitcaseTowers />
 
 <main class="workspace-step" aria-labelledby="workspace-title" aria-busy={busy}>
-  <button class="back" type="button" aria-label="Back to agent choice" disabled={busy} onclick={onback}>
+  <button class="back" type="button" aria-label="Back to speech model choice" disabled={busy} onclick={onback}>
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6" /></svg>
   </button>
   <p class="source" aria-label="From After Effects"><span class="app-mark" aria-hidden="true">Ae</span>After Effects</p>

@@ -92,7 +92,10 @@ it('prepares an older HD alpha proxy without waiting behind optional 4K work', a
   }
 });
 
-it('persists editing media separately and reuses it after reload without conversion', async () => {
+it.each([
+  { w: 1920, h: 1080 },
+  { w: 2160, h: 3840, imageSequence: { fps: 30, frames: 162 } },
+])('persists editing media separately and reuses it after reload without conversion ($w×$h)', async dimensions => {
   const store = new Map<string, Blob>();
   const media = {
     beginPreview: vi.fn(async () => 'preview'), writePreview: vi.fn(async () => {}),
@@ -108,7 +111,7 @@ it('persists editing media separately and reuses it after reload without convers
     bus: { emit: vi.fn() }, invalidate: vi.fn(),
   };
   const makeAsset = () => ({
-    w: 1920, h: 1080,
+    ...dimensions,
     storageKey: 'media:original', el: { pause: vi.fn() },
   } as any);
   const source = new Blob(['original bytes']); store.set('media:original', source);
@@ -132,7 +135,17 @@ it('persists editing media separately and reuses it after reload without convers
     expect(media.beginPreview).toHaveBeenCalledOnce();
     expect(store.get('media:original')).toBe(source);
     expect(PM.MediaStore.put).toHaveBeenCalledOnce();
+    expect(reloaded.imageSequence).toEqual(dimensions.imageSequence);
     URL.revokeObjectURL(first.preview.url); URL.revokeObjectURL(reloaded.preview.url);
   } finally { vi.unstubAllGlobals();
   resetBridgeForTests(); }
+});
+
+it('keeps small image sequences on the original without preparing an editing copy', async () => {
+  const media = { beginPreview: vi.fn() };
+  installBridgeForTests({ media } as any);
+  try {
+    await prepareVideoPreview({}, { w: 1080, h: 1920, imageSequence: { fps: 30, frames: 60 } }, new Blob(['sequence']), () => false);
+    expect(media.beginPreview).not.toHaveBeenCalled();
+  } finally { resetBridgeForTests(); }
 });

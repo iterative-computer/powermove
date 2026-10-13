@@ -14,7 +14,6 @@ async function exists(file: string): Promise<boolean> {
 
 test('agent extension changes are isolated, recorded, and recoverable through the app bridge', async () => {
   const extensionId = 'e2e-isolated-extension';
-  const projectId = 'e2e-isolated-project';
   const session = await launchApp({
     env: {
       CODEX_BINARY: path.join(repoRoot, 'src/main/codex/__fixtures__/fake-codex.sh'),
@@ -34,29 +33,30 @@ test('agent extension changes are isolated, recorded, and recoverable through th
     const liveExtension = path.join(session.userData, 'extensions', extensionId);
     expect(await exists(liveExtension)).toBe(false);
 
-    const result = await session.page.evaluate(async ({ projectId }) =>
-      await (window as any).powermove.codex.run({
-        id: 'e2e-isolated-extension-run',
-        mode: 'autonomous',
-        prompt: 'Create the requested test extension.',
-        schema: null,
-        images: [],
-        model: null,
-        reasoningEffort: null,
-        access: 'project',
-        projectId,
-        projectName: 'E2E isolated project',
-        projectJSON: '{"layers":[]}',
-        attachments: [],
-        consentToken: null
-      }), { projectId });
-
-    expect(result).toMatchObject({
-      ok: true,
-      extensions: [{ id: extensionId, action: 'created' }],
-      extensionChangeSetId: expect.any(String)
+    await session.openEditor();
+    const projectId = await session.page.evaluate(() => (window as any).PM.proj.id);
+    await session.page.evaluate(() => {
+      const PM = (window as any).PM;
+      const nativeRequest = PM.CodexBridge.request;
+      let requests = 0;
+      // Exercise the real staging/promotion path once. The follow-up review
+      // makes no additional changes; returning the same creation twice is not
+      // a faithful model response to automatic verification.
+      PM.CodexBridge.request = (...args: any[]) => requests++ === 0 ? nativeRequest(...args)
+        : Promise.resolve({ text: JSON.stringify({ summary: 'Verified the loaded extension.', commands: [], artifacts: [], externalActions: [], notes: [] }), extensions: [] });
+      PM.AgentUI.setAccess('project');
+      PM.AgentUI.submit('Create the requested test extension.');
     });
-    if (!result.ok || !result.extensionChangeSetId) throw new Error('Agent run did not create a recoverable change set.');
+    await session.page.waitForFunction(() => (window as any).PM.AgentUI.state.phase === 'result');
+    const result = await session.page.evaluate(() => {
+      const run = (window as any).PM.AgentUI.state.run;
+      return { extensions: run.extensions, extensionChangeSetId: run.undoRuns.find((entry: any) => entry.extensionChangeSetId)?.extensionChangeSetId, reviewError: run.reviewError };
+    });
+    expect(result).toMatchObject({
+      extensions: [{ id: extensionId, action: 'created' }],
+      extensionChangeSetId: expect.any(String), reviewError: '',
+    });
+    if (!result.extensionChangeSetId) throw new Error('Agent run did not create a recoverable change set.');
 
     expect(await exists(path.join(liveExtension, 'manifest.json'))).toBe(true);
     const recordPath = path.join(
@@ -73,16 +73,8 @@ test('agent extension changes are isolated, recorded, and recoverable through th
       changes: [{ id: extensionId, action: 'created' }]
     });
 
-    const restored = await session.page.evaluate(async ({ projectId, changeSetId }) =>
-      await (window as any).powermove.codex.restoreChangeSet({ projectId, changeSetId }), {
-        projectId,
-        changeSetId: result.extensionChangeSetId
-      });
-
-    expect(restored).toMatchObject({
-      changeSetId: result.extensionChangeSetId,
-      extensions: [{ id: extensionId, action: 'created' }]
-    });
+    await session.page.evaluate(() => (window as any).PM.AgentUI.undoSceneRun());
+    expect(await session.page.evaluate(() => (window as any).PM.AgentUI.state.conversation.at(-1)?.text)).toContain('restored');
     expect(await exists(liveExtension)).toBe(false);
     expect(await exists(path.join(path.dirname(recordPath), 'redo', extensionId, 'manifest.json'))).toBe(true);
     expect(session.diagnostics.pageErrors).toEqual([]);

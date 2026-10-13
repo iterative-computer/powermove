@@ -104,7 +104,8 @@ export function install(PM: PMRegistry): void {
       projectName: String(body.projectName || ''),
       projectJSON: typeof body.projectJSON === 'string' && body.projectJSON ? body.projectJSON : null,
       attachments,
-      consentToken: typeof body.consentToken === 'string' && body.consentToken ? body.consentToken : null
+      consentToken: typeof body.consentToken === 'string' && body.consentToken ? body.consentToken : null,
+      ...(access === 'project' ? { approval: body.approval === 'supervised' ? 'supervised' : 'auto' } : {})
     };
   }
 
@@ -191,9 +192,12 @@ export function install(PM: PMRegistry): void {
           void (async () => {
             let request = mapBody(body);
             if (request.access === 'computer' && !request.consentToken) {
+              // Full access is a standing choice: main asks once, then mints
+              // each run's token until the person picks another level.
               const consent = await bridge.codex.requestComputerConsent({
                 projectName: request.projectName || 'Untitled',
-                summary: request.prompt.slice(0, 500)
+                summary: request.prompt.slice(0, 500),
+                standing: true
               });
               if (!consent.granted) {
                 PM.CodexBridge.resolve(id, {

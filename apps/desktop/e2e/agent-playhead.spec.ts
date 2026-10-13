@@ -3,7 +3,7 @@ import { expect, test, repoRoot } from './helpers/app';
 
 test.use({ desktopLaunchOptions: { env: { CODEX_BINARY: path.join(repoRoot, 'src/main/codex/__fixtures__/fake-codex-app-server.sh') } } });
 
-test('sending messages preserves the paused playhead without capturing preview frames', async ({ session }) => {
+test('sending messages supplies composition frames while preserving the paused playhead', async ({ session }) => {
   await session.openEditor(); await session.openAgent();
   const { page } = session;
   await page.evaluate(() => {
@@ -33,8 +33,8 @@ test('sending messages preserves the paused playhead without capturing preview f
       await session.openAgent();
       await expect.poll(() => page.evaluate(() => (window as any).PM.AgentUI.state.legacyPhase)).toBe(access === 'editor' ? 'conversation' : 'result');
       expect(await page.evaluate(() => ({ time: (window as any).PM.time, playing: (window as any).PM.playing, events: (window as any).__sendTimes }))).toEqual({ time: 1.5, playing: false, events: [] });
-      expect(await page.evaluate(() => (window as any).__agentCaptures)).toBe(0);
-      expect(await page.evaluate(() => (window as any).__requestImages)).toEqual([]);
+      expect(await page.evaluate(() => (window as any).__agentCaptures)).toBeGreaterThan(0);
+      expect((await page.evaluate(() => (window as any).__requestImages)).length).toBeGreaterThanOrEqual(3);
     }
   }
   expect(session.diagnostics.pageErrors).toEqual([]);

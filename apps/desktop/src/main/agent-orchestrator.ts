@@ -56,6 +56,7 @@ interface Node {
   executing?: boolean;
   wakeControl?(): void;
   updateCount?: number;
+  external?: boolean;
 }
 interface Scope {
   key: string;
@@ -88,6 +89,32 @@ export class AgentOrchestrator {
   private readonly childQuestions = new Map<string, { runId: string; itemId: string; rootRunId: string; questions: CodexQuestion[]; blocking: boolean }>();
   private readonly threadRuns = new AgentThreadMonitor();
   constructor(private readonly options: AgentOrchestratorOptions) {}
+
+  /** An MCP client supplies the root agent. Children still use our providers,
+   * ownership checks, journals and transaction; no provider runs the root. */
+  async attachExternal(request: CodexRunRequest): Promise<() => Promise<void>> {
+    const key = `${request.projectId}/${request.threadId ?? 'legacy'}`;
+    if (this.activeScopes.has(key) || this.nodes.has(request.id)) throw new Error('This conversation is already active.');
+    let release!: () => void;
+    this.activeScopes.set(key, { runId: request.id, finished: new Promise(resolve => { release = resolve; }) });
+    try {
+      const scope = await this.loadScope(key, request, () => {}, () => {});
+      const node: Node = { request, scope, depth: 0, stopped: false, external: true,
+        done: Promise.resolve({ ok: true, text: '', access: request.access }) };
+      this.nodes.set(request.id, node);
+      let closing: Promise<void> | undefined;
+      return () => closing ??= (async () => {
+        node.stopped = true;
+        try { await this.stopChildren(node); await this.drainChildren(node); await this.save(scope); }
+        finally {
+          for (const watch of scope.watches.values()) { watch.release(); watch.remove(); }
+          for (const [id, entry] of this.nodes) if (entry.scope === scope) this.nodes.delete(id);
+          for (const [id, question] of this.childQuestions) if (question.rootRunId === request.id) this.childQuestions.delete(id);
+          this.scopes.delete(key); this.activeScopes.delete(key); this.cancelledRoots.delete(request.id); release();
+        }
+      })();
+    } catch (error) { this.scopes.delete(key); this.activeScopes.delete(key); release(); throw error; }
+  }
 
   async run(request: CodexRunRequest, onTrace: Scope['onTrace'], onProgress: Scope['onProgress']): Promise<CodexRunResult> {
     const key = `${request.projectId}/${request.threadId ?? 'legacy'}`;
@@ -219,7 +246,7 @@ export class AgentOrchestrator {
       parentThreadId: node.request.threadId ?? 'legacy', inheritedProviderInstanceId: node.request.provider ?? 'chatgpt',
       inheritedModel: node.request.model, runtimeMode: node.request.access, interactionMode: node.request.mode === 'editor' ? 'plan' : 'default',
       providers: await this.options.providers(),
-      features: { appOwnedSubagents: true, crossProviderSubagents: true, cancellation: true, automaticResultDelivery: true, liveSteering: true, threadManagement: Boolean(this.options.threadControl), threadWatching: Boolean(this.options.threadControl), maxTasks: MAX_TASKS, maxDepth: MAX_DEPTH, maxParallelTasks: MAX_ACTIVE_TASKS }
+      features: { appOwnedSubagents: true, crossProviderSubagents: true, cancellation: true, automaticResultDelivery: !node.external, liveSteering: true, threadManagement: Boolean(this.options.threadControl), threadWatching: Boolean(this.options.threadControl), maxTasks: MAX_TASKS, maxDepth: MAX_DEPTH, maxParallelTasks: MAX_ACTIVE_TASKS }
     };
   }
 

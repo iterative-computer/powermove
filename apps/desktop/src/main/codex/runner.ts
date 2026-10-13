@@ -47,6 +47,7 @@ import { imageExtension } from '../image-extension';
 
 const MODES = ['editor', 'autonomous'] as const;
 const ACCESS = ['editor', 'project', 'computer'] as const;
+const APPROVALS = ['supervised', 'auto'] as const;
 const EFFORTS = ['none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
 const PROVIDERS = ['chatgpt', 'claude', 'compatible'] as const;
 const DEFAULT_TIMEOUT_MS = 3_600_000;
@@ -128,6 +129,7 @@ export function isCodexRunRequest(value: unknown): value is CodexRunRequest {
     isRecord(attachment) && isString(attachment.name) &&
     isBytes(attachment.data))) return false;
   if (!(value.consentToken === null || isString(value.consentToken))) return false;
+  if (value.approval !== undefined && !isOneOf(value.approval, APPROVALS)) return false;
 
   return value.mode === 'editor' || value.projectJSON !== null;
 }
@@ -443,6 +445,7 @@ export class CodexRunner {
             artifactPath: `artifacts/${layout.runId}`,
             access: authority,
             context: req.context,
+            request: prompt,
             extensionsDir: layout.extensionsDir
           }) + (options.additionalInstructions ? `\n\n${options.additionalInstructions}` : ''),
           prompt,
@@ -451,6 +454,7 @@ export class CodexRunner {
           reasoningEffort: req.reasoningEffort,
           access: authority,
           shellNetwork: req.access === 'project',
+          approval: req.approval ?? 'auto',
           extensionsDir: layout.extensionsDir,
           sessionId,
           nativeTools: options.nativeTools,

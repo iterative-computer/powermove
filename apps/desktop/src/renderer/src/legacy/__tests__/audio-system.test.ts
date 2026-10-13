@@ -92,7 +92,7 @@ describe('legacy audio system behavior', () => {
     const context = h.contexts[0];
     expect(context.sources[0].starts[0]).toEqual({ when: 0.25, offset: 2, duration: 4 });
     expect(h.PM.Audio.inspect().voices).toEqual([
-      { layerId: 'audio-1', assetId: 'asset-1', sourceOffset: 2, duration: 4 },
+      { layerId: 'audio-1', assetId: 'asset-1', strip: 'audio-1', sourceOffset: 2, duration: 4 },
     ]);
     context.currentTime += 0.5;
     h.PM.Audio.tick(3.5);
@@ -129,7 +129,7 @@ describe('legacy audio system behavior', () => {
 
     expect(h.contexts[0].sources[0].starts[0]).toEqual({ when: 0.25, offset: 2, duration: 4 });
     expect(h.PM.Audio.inspect().voices).toEqual([
-      { layerId: 'video-1:embedded-audio', assetId: 'asset-1', sourceOffset: 2, duration: 4 },
+      { layerId: 'video-1:embedded-audio', assetId: 'asset-1', strip: 'video-1', sourceOffset: 2, duration: 4 },
     ]);
   });
 
@@ -295,7 +295,8 @@ describe('legacy audio system behavior', () => {
     expect(mix.start(0.1)).toBe(0.1);
     const source = h.contexts[0].sources[0];
     expect(source.starts[0]).toEqual({ when: 1.35, offset: 1, duration: 4 });
-    expect(source.connectedTo.connectedTo.stream).toBe(mix.stream);
+    // source → clip envelope → composition output level → isolated stream
+    expect(source.connectedTo.connectedTo.connectedTo.stream).toBe(mix.stream);
     mix.stop();
     expect(source.stopCalls).toBe(1);
     expect(mix.stream.getAudioTracks()[0].stopped).toBe(true);

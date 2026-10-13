@@ -14,6 +14,7 @@ import { WebSocket } from 'ws';
 import { IPC, type AgentToolRequestEvent, type AgentToolResponseEvent, type PowermoveBridge } from '../shared/ipc';
 import { Connection } from '../shared/link';
 import { WEB } from '../shared/wire';
+import { MEDIA_PATH_IPC, type MediaPathResult } from '../shared/media-tools';
 
 export interface EngineOptions {
   /** wss://127.0.0.1:<port>/__powermove/ws */
@@ -67,7 +68,8 @@ export async function startEngine(options: EngineOptions): Promise<{ close(): vo
     onRequest: (cb) => { onRequest = cb; return () => { if (onRequest === cb) onRequest = null; }; },
     respond: (response) => { for (const listener of responses) listener(response); }
   };
-  (window as unknown as { powermove: unknown }).powermove = bridgeStub(agentTools);
+  const stub = bridgeStub(agentTools);
+  (window as unknown as { powermove: unknown }).powermove = stub;
 
   const PM = ((window as unknown as { PM?: Record<string, any> }).PM = {});
   const [diag, util, kernel, uiState, memory, fonts, easing, model, selection, anim, history, library, projects, editing, capabilities, workspace, harness] = await Promise.all([
@@ -93,6 +95,9 @@ export async function startEngine(options: EngineOptions): Promise<{ close(): vo
     socket.once('error', (error) => reject(error));
   });
   const link = new Connection(socket as unknown as ConstructorParameters<typeof Connection>[0]);
+  /* Agent media tools find a project's media in the host's own store by key;
+     the engine has no bytes of its own to stage (media-tools lane). */
+  stub.mediaPath = { lookup: (request) => link.invoke<MediaPathResult | null>(MEDIA_PATH_IPC.lookup, request) };
   const { attachRemoteSync } = await import('../renderer/src/host/remote-sync');
   const detachSync = attachRemoteSync(link, PM as never);
 

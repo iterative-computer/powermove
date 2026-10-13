@@ -10,7 +10,7 @@ import { registerSveltePanel } from './registerSveltePanel';
 import { installAgentShell } from './agent-shell';
 
 export interface AgentLegacyBridge {
-  openGlobal?(): void;
+  openGlobal?(): boolean | void;
   importWorkspace?(appId: 'after-effects'): Promise<boolean>;
   resumeWorkspaceImport?(): void;
   repairExtension?(request: { id: string; name?: string; diagnostics?: string[] }): Promise<boolean>;

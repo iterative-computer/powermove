@@ -84,6 +84,9 @@ const HELP = `powermove — run the Powermove host on this machine and use it fr
 
 Usage:
   powermove serve [options]      Run the host in this terminal (try it: npx powermove-cli@latest serve)
+  powermove mcp [options]        MCP server with a hidden editor; create and export videos without opening the app
+  powermove mcp --connect --user-data <dir>   Connect MCP to an already running desktop app or host profile
+  powermove mcp-install-browser  Install the hidden Chromium renderer once
   powermove install [options]    Keep it running as a user service (systemd on Linux, launchd on macOS).
                                  No sudo: it installs under ~/.powermove. Run it again to update.
   powermove uninstall            Stop and remove the service
@@ -108,7 +111,7 @@ Sign in to ChatGPT or Claude on this machine first (\`codex login\`, \`claude au
 or use Settings › Agents in the browser; the sign-in link opens on your side.
 `;
 
-type Parsed = Partial<ServeOptions> & { help?: boolean; command?: string; dryRun?: boolean; lines?: number };
+type Parsed = Partial<ServeOptions> & { help?: boolean; command?: string; dryRun?: boolean; lines?: number; connect?: boolean };
 function parseArgs(argv: string[]): Parsed {
   const out: Parsed = {};
   const rest = [...argv];
@@ -123,6 +126,7 @@ function parseArgs(argv: string[]): Parsed {
       case '--exports': out.exportsDir = value(); break;
       case '--token': out.token = value(); break;
       case '--http': out.insecure = true; break;
+      case '--connect': out.connect = true; break;
       case '--dry-run': out.dryRun = true; break;
       case '-n': out.lines = Number(value()); break;
       case '-h': case '--help': out.help = true; break;
@@ -180,6 +184,25 @@ export async function main(argv: string[], layout: CliLayout): Promise<void> {
   let parsed;
   try { parsed = parseArgs(argv); } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exit(2); }
   if (parsed.help || parsed.command === 'help') { process.stdout.write(HELP); return; }
+  if (parsed.command === 'mcp-install-browser') {
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, [require.resolve('playwright/cli'), 'install', 'chromium'], { stdio: 'inherit', windowsHide: true });
+    const code = await new Promise<number>((resolve, reject) => { child.once('error', reject); child.once('exit', code => resolve(code ?? 1)); });
+    if (code) throw new Error('Chromium installation failed.'); return;
+  }
+  if (parsed.command === 'mcp') {
+    // Main modules may log diagnostics. Stdout belongs exclusively to MCP.
+    console.log = console.info = console.warn = (...values: unknown[]) => console.error(...values);
+    const { runHeadlessMcp, runConnectedMcp } = await import('./mcp');
+    const profile = path.resolve(parsed.userData ?? process.env['POWERMOVE_USER_DATA'] ?? path.join(homedir(), '.powermove-headless'));
+    if (parsed.connect) await runConnectedMcp(profile);
+    else await runHeadlessMcp({ host: '127.0.0.1', port: 0, insecure: true, userData: profile,
+      exportsDir: path.resolve(parsed.exportsDir ?? path.join(homedir(), 'Powermove')),
+      rendererDir: path.join(layout.distDir, 'renderer'), resourcesDir: path.join(layout.distDir, 'resources'),
+      appPath: ffmpegAppPath(), version: layout.version, codexBinary: bundledCodexBinary(), claudeBinary: bundledClaudeBinary()
+    });
+    return;
+  }
   const userData = parsed.userData ?? process.env['POWERMOVE_USER_DATA'] ?? path.join(homedir(), '.powermove');
   if (parsed.command && parsed.command !== 'serve') {
     refuseSudo(parsed.command);

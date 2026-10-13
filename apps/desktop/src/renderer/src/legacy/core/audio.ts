@@ -1,5 +1,6 @@
 import { AUDIO_EXTENSIONS as ACCEPTED_EXTENSIONS } from '../../../../shared/media-formats';
 import { evaluatedValue, isProperty, resolveContent } from './content-properties';
+import { measureBlock } from '../../mixer/levels';
 /* Ported from js/core/audio.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
@@ -19,6 +20,11 @@ const state: any = {
   project: null,
   running: false,
   generation: 0,
+  /* Mixer routing: voices → strip sum → strip solo → master → speakers. One
+     strip per top-level layer of the open composition. */
+  strips: new Map(),
+  monitorSolo: new Set<string>(),
+  meterTaps: new Map(),
 };
 let audioCacheProject: any = null;
 let audioCache: any[] | null = null;
@@ -35,7 +41,11 @@ function audioLayers(project: any = PM.proj) {
   if (project === PM.proj && project === audioCacheProject && audioCache) return audioCache;
   const output: any = [];
   const root: any = project;
-  const visit: any = (comp: any, offset: any, windowStart: any, windowEnd: any, path: any, depth: any) => {
+  /* `chain` lists every precomp a nested clip plays through, outermost first,
+     with the parent composition's offset (as for groups) and the nested
+     composition whose output level also applies. `strip` is the top-level
+     layer of the open composition that the clip is mixed into. */
+  const visit: any = (comp: any, offset: any, windowStart: any, windowEnd: any, path: any, depth: any, chain: any[] = [], strip: any = null) => {
     if (!comp || !Array.isArray(comp.layers) || depth > MAX_PRECOMP_DEPTH) return;
     for (const layer of comp.layers) {
       if (!layer || layer.on === false || (comp.layers.some((l: any) => l.solo) && !layer.solo && !(PM.groupAncestors?.(layer, comp.layers) || []).some((group: any) => group.solo))) continue;
@@ -46,12 +56,15 @@ function audioLayers(project: any = PM.proj) {
       const end: any = Math.min(windowEnd, naturalStart + Math.max(0, finite(layer.dur)));
       if (end - start <= 1e-4) continue;
       const itemPath: any = path ? `${path}/${layer.id}` : layer.id;
+      const stripId: any = strip || layer.id;
       if (layer.type === 'audio') {
         output.push({
           ...layer,
           id: itemPath,
           from: naturalStart,
           _audioGroups: groupChain,
+          _audioChain: chain,
+          _audioStrip: stripId,
           _audioSourceId: layer.id,
           _audioWindowStart: start,
           _audioWindowEnd: end,
@@ -63,23 +76,29 @@ function audioLayers(project: any = PM.proj) {
           ...layer,
           type: 'audio',
           id: `${itemPath}:embedded-audio`,
+          /* In parent time, like a nested audio clip, so a soundtrack inside a
+             precomp that does not start at 0 plays from the right point. */
+          from: naturalStart,
           d: {
             asset: layer.d.asset,
             trim: Math.max(0, finite(evaluatedValue(PM, layer, layer.d.trim, PM.time, 'c.trim'))),
-            gain: 1,
+            gain: layer.d.audioGain ?? 1,
             fadeIn: 0,
             fadeOut: 0,
           },
           _audioGroups: groupChain,
+          _audioChain: chain,
+          _audioStrip: stripId,
           _audioSourceId: layer.id,
           _audioWindowStart: start,
           _audioWindowEnd: end,
         });
         continue;
       }
-      if (layer.type !== 'precomp' || !layer.d || !layer.d.comp) continue;
+      if (layer.type !== 'precomp' || !layer.d || !layer.d.comp || layer.d.audioMuted === true) continue;
       const nested: any = root.comps && root.comps[layer.d.comp];
-      if (!evaluatedValue(PM,layer,layer.d.timeRemap,PM.time,'c.timeRemap')) visit(nested, naturalStart - Number(evaluatedValue(PM,layer,layer.d.trim,PM.time,'c.trim') || 0), start, end, itemPath, depth + 1);
+      if (!evaluatedValue(PM,layer,layer.d.timeRemap,PM.time,'c.timeRemap')) visit(nested, naturalStart - Number(evaluatedValue(PM,layer,layer.d.trim,PM.time,'c.trim') || 0), start, end, itemPath, depth + 1,
+        [...chain, { layer, offset, comp: nested }], stripId);
     }
   };
   visit(project, 0, 0, Infinity, '', 0);
@@ -133,9 +152,148 @@ function context() {
   try { state.context = new Ctor({ latencyHint: 'interactive' }); }
   catch (error: any) { state.context = new Ctor(); }
   state.master = state.context.createGain();
-  state.master.gain.value = 1;
+  state.masterLevel = masterLevel();
+  state.master.gain.value = state.masterLevel;
   state.master.connect(state.context.destination);
   return state.context;
+}
+
+/* The open composition's output level is the master fader. It lives on the
+   master node so moving it never re-schedules a voice. */
+/* An optional level field: absent or null means unity. */
+function levelOf(value: any) {
+  return value == null ? 1 : clamp(finite(value, 1), 0, 4);
+}
+
+function masterLevel() {
+  return levelOf(PM.proj?.audioGain);
+}
+
+function rampParam(param: any, value: number) {
+  const ctx: any = state.context;
+  try {
+    if (ctx && typeof param.setTargetAtTime === 'function') {
+      param.cancelScheduledValues?.(ctx.currentTime);
+      param.setValueAtTime?.(param.value, ctx.currentTime);
+      param.setTargetAtTime(value, ctx.currentTime, .008);
+      return;
+    }
+  } catch { /* fall through to a step */ }
+  param.value = value;
+}
+
+function applyMasterLevel() {
+  if (!state.master) return;
+  const level: any = masterLevel();
+  if (state.masterLevel === level) return;
+  state.masterLevel = level;
+  rampParam(state.master.gain, level);
+}
+
+/* One bus per mixer strip. The sum is what the strip's meter reads; the solo
+   stage after it is the monitor solo (a listening aid that never reaches the
+   project or an export). */
+function soloLevel(id: string) {
+  return state.monitorSolo.size && !state.monitorSolo.has(id) ? 0 : 1;
+}
+
+function stripBus(id: string) {
+  let bus: any = state.strips.get(id);
+  if (bus) return bus;
+  const ctx: any = context();
+  const sum: any = ctx.createGain();
+  const solo: any = ctx.createGain();
+  sum.gain.value = 1;
+  solo.gain.value = soloLevel(id);
+  sum.connect(solo);
+  solo.connect(state.master);
+  bus = { sum, solo };
+  state.strips.set(id, bus);
+  return bus;
+}
+
+function dropStrip(id: string) {
+  const bus: any = state.strips.get(id);
+  if (!bus) return;
+  releaseTap(id);
+  state.strips.delete(id);
+  try { bus.sum.disconnect(); } catch { }
+  try { bus.solo.disconnect(); } catch { }
+}
+
+function pruneStrips(keep: Set<string>) {
+  for (const id of [...state.strips.keys()]) {
+    if (keep.has(id)) continue;
+    if ([...state.voices.values()].some((voice: any) => voice.strip === id)) continue;
+    dropStrip(id);
+  }
+}
+
+function setMonitorSolo(ids: Iterable<string> | null | undefined) {
+  state.monitorSolo = new Set([...(ids || [])].filter((id) => typeof id === 'string' && id));
+  for (const [id, bus] of state.strips) rampParam(bus.solo.gain, soloLevel(id));
+  publishState();
+}
+
+/* ── level taps ──────────────────────────────────────────
+   A tap is a side branch (upmix → splitter → one analyser per side) hanging
+   off a strip sum or the master. Nothing feeds back into the mix, so what
+   you hear and export is unchanged. The mixer connects taps only while it is
+   visible and drawing, and releases them when it stops. */
+const MASTER_TAP = '$master';
+const TAP_SIZE = 2048;
+
+function tapSource(id: string) {
+  return id === MASTER_TAP ? state.master : state.strips.get(id)?.sum;
+}
+
+function releaseTap(id: string) {
+  const tap: any = state.meterTaps.get(id);
+  if (!tap) return;
+  state.meterTaps.delete(id);
+  try { tap.node.disconnect(tap.upmix); } catch { }
+  try { tap.upmix.disconnect(); } catch { }
+  try { tap.split.disconnect(); } catch { }
+}
+
+function releaseTaps() {
+  for (const id of [...state.meterTaps.keys()]) releaseTap(id);
+}
+
+function tapFor(id: string) {
+  const ctx: any = state.context;
+  const node: any = ctx && tapSource(id);
+  if (!node || typeof ctx.createAnalyser !== 'function') return null;
+  let tap: any = state.meterTaps.get(id);
+  if (tap && tap.node === node) return tap;
+  if (tap) releaseTap(id);
+  const upmix: any = ctx.createGain();
+  upmix.channelCount = 2;
+  upmix.channelCountMode = 'explicit';
+  upmix.channelInterpretation = 'speakers';
+  const split: any = ctx.createChannelSplitter(2);
+  const analysers: any[] = [ctx.createAnalyser(), ctx.createAnalyser()];
+  for (const analyser of analysers) { analyser.fftSize = TAP_SIZE; analyser.smoothingTimeConstant = 0; }
+  node.connect(upmix);
+  upmix.connect(split);
+  split.connect(analysers[0], 0);
+  split.connect(analysers[1], 1);
+  tap = { node, upmix, split, analysers, buffer: new Float32Array(TAP_SIZE) };
+  state.meterTaps.set(id, tap);
+  return tap;
+}
+
+/** Fill `out.peak`/`out.rms` (two channels, linear) for a strip or the master. */
+function readLevels(id: string, out: { peak: Float32Array | number[]; rms: Float32Array | number[] }) {
+  const tap: any = tapFor(id);
+  if (!tap) return false;
+  for (let channel = 0; channel < 2; channel++) {
+    tap.analysers[channel].getFloatTimeDomainData(tap.buffer);
+    const { peak, rms } = measureBlock(tap.buffer);
+    out.peak[channel] = peak;
+    out.rms[channel] = rms;
+  }
+  return true;
 }
 
 // Open the audio device while a paused project is idle, before Play starts
@@ -317,12 +475,27 @@ function disposeAsset(asset: any) {
   for (const [id, request] of state.decodeRequests) if (request.asset === asset) state.decodeRequests.delete(id);
 }
 
+/* A nested clip plays through each precomp's level and its composition's
+   output level. The open composition's own level is the master bus. */
+function chainGain(layer: any, time: number) {
+  let gain = 1;
+  for (const { layer: precomp, offset, comp } of layer._audioChain || []) {
+    gain *= levelOf(evaluatedValue(PM, precomp, precomp.d?.audioGain, time - offset, 'c.audioGain'));
+    gain *= levelOf(comp?.audioGain);
+  }
+  return gain;
+}
+
+function chainAnimated(layer: any) {
+  return (layer._audioChain || []).some(({ layer: precomp }: any) => isProperty(precomp.d?.audioGain));
+}
+
 function gainAt(layer: any, localTime: any, audibleDuration: any) {
   const time = finite(layer.from) + finite(localTime);
   if ((layer._audioGroups || []).some(({ group, offset }: any) => !evaluatedValue(PM, group, group.on, time - offset, 'l.on'))) return 0;
   if (evaluatedValue(PM, layer, layer.on, finite(layer.from) + finite(localTime), 'l.on') === false) return 0;
   const data: any = resolveContent(PM, layer, finite(layer.from) + finite(localTime));
-  const base: any = clamp(finite(data.gain, 1), 0, 4);
+  const base: any = clamp(finite(data.gain, 1), 0, 4) * chainGain(layer, time);
   const duration: any = Math.max(0, finite(audibleDuration, finite(layer && layer.dur)));
   const local: any = clamp(finite(localTime), 0, duration);
   const fadeIn: any = Math.max(0, finite(data.fadeIn));
@@ -351,7 +524,7 @@ function envelopePoints(layer: any, localStart: any, duration: any, audibleDurat
   const fadeIn: any = Math.max(0, finite(data.fadeIn));
   const fadeOut: any = Math.max(0, finite(data.fadeOut));
   const times: any = [start, end];
-  if ((layer._audioGroups || []).some(({ group }: any) => isProperty(group.on)) || isProperty(layer.on) || ['gain', 'fadeIn', 'fadeOut'].some(key => isProperty(layer.d?.[key]))) {
+  if ((layer._audioGroups || []).some(({ group }: any) => isProperty(group.on)) || isProperty(layer.on) || chainAnimated(layer) || ['gain', 'fadeIn', 'fadeOut'].some(key => isProperty(layer.d?.[key]))) {
     const step = 1 / Math.max(30, Number(PM.proj?.fps) || 30);
     for (let local = start + step; local < end; local += step) times.push(local);
     for (const key of ['gain', 'fadeIn', 'fadeOut']) for (const frame of layer.d?.[key]?.kf || []) if (frame.t > start && frame.t < end) times.push(frame.t);
@@ -391,10 +564,21 @@ function plan(layer: any, asset: any, rangeStart: any, rangeEnd: any) {
   return { layer, asset, start, end: start + duration, duration, localStart, sourceOffset, audibleDuration };
 }
 
+/* What a voice plays. A change here restarts the voice. */
 function voiceSignature(layer: any, asset: any) {
   const data: any = layer.d || {};
   return [asset.id, asset.audioToken && String(asset.audioToken), finite(layer.from), finite(layer.dur),
-    JSON.stringify([layer.on, data.trim, data.gain, data.fadeIn, data.fadeOut])].join('|');
+    finite(layer._audioWindowStart, -1), finite(layer._audioWindowEnd, -1), layer._audioStrip || '',
+    JSON.stringify(data.trim)].join('|');
+}
+
+/* How loud it plays. A change here only re-schedules the gain envelope, so a
+   fader moved during playback never interrupts the sound. */
+function levelSignature(layer: any) {
+  const data: any = layer.d || {};
+  return JSON.stringify([layer.on, data.gain, data.fadeIn, data.fadeOut,
+    (layer._audioGroups || []).map(({ group }: any) => group.on),
+    (layer._audioChain || []).map(({ layer: precomp, comp }: any) => [precomp.d?.audioGain, comp?.audioGain])]);
 }
 
 function publishState() {
@@ -404,6 +588,8 @@ function publishState() {
   root.dataset.audioEngine = 'decoded-buffer-v2';
   root.dataset.audioState = state.running ? 'playing' : 'paused';
   root.dataset.audioVoices = String(state.voices.size);
+  if (state.monitorSolo.size) root.dataset.audioMonitorSolo = [...state.monitorSolo].join(' ');
+  else delete root.dataset.audioMonitorSolo;
   const first: any = state.voices.values().next().value;
   if (first) root.dataset.audioSourceOffset = String(Math.round(first.sourceOffset * 1000) / 1000);
   else delete root.dataset.audioSourceOffset;
@@ -425,13 +611,32 @@ function stopAll() {
   publishState();
 }
 
-function applyEnvelope(param: any, layer: any, localStart: any, duration: any, at: any, audibleDuration: any) {
+/* Live level changes glide into the new envelope over this long instead of
+   stepping: a fader drag retunes ~60 times a second, and hard steps on a
+   sustained sound are audible as zipper noise. */
+const RETUNE_GLIDE = .012;
+
+/* Schedule a voice's gain envelope from `at`. With `glide`, the param leaves
+   its current value on a short ramp (live retune only; starts and the offline
+   export always begin exactly on the envelope). */
+function applyEnvelope(param: any, layer: any, localStart: any, duration: any, at: any, audibleDuration: any, glide = 0) {
   const points: any = envelopePoints(layer, localStart, duration, audibleDuration);
   try {
-    param.cancelScheduledValues(at);
-    param.setValueAtTime(points[0].value, at);
+    let first = 1;
+    if (glide > 0 && duration > glide && typeof param.linearRampToValueAtTime === 'function') {
+      if (typeof param.cancelAndHoldAtTime === 'function') param.cancelAndHoldAtTime(at);
+      else { param.cancelScheduledValues(at); param.setValueAtTime(param.value, at); }
+      const local: any = localStart + glide;
+      while (first < points.length && points[first].local <= local) first++;
+      const a: any = points[first - 1], b: any = points[first];
+      const value: any = b ? a.value + (b.value - a.value) * (local - a.local) / Math.max(1e-9, b.local - a.local) : a.value;
+      param.linearRampToValueAtTime(value, at + glide);
+    } else {
+      param.cancelScheduledValues(at);
+      param.setValueAtTime(points[0].value, at);
+    }
     if (duration > .002 && typeof param.linearRampToValueAtTime === 'function') {
-      for (let index: any = 1; index < points.length; index++) {
+      for (let index: any = first; index < points.length; index++) {
         param.linearRampToValueAtTime(points[index].value, at + points[index].local - localStart);
       }
     } else if (duration > .002 && typeof param.setValueCurveAtTime === 'function') {
@@ -445,8 +650,10 @@ function startVoice(clip: any, transportTime: any) {
   const ctx: any = context();
   const source: any = ctx.createBufferSource();
   const gain: any = ctx.createGain();
+  const strip: any = clip.layer._audioStrip || clip.layer.id;
   source.buffer = clip.asset.audioBuffer;
-  source.connect(gain).connect(state.master);
+  source.connect(gain);
+  gain.connect(stripBus(strip).sum);
   /* A clip whose in-point is later than the current playhead must be queued on
      the audio clock, not started early. Once the playhead is inside the clip,
      plan() sets clip.start to transportTime and this delay naturally becomes 0. */
@@ -458,6 +665,8 @@ function startVoice(clip: any, transportTime: any) {
     layerId: clip.layer.id,
     assetId: clip.asset.id,
     signature: voiceSignature(clip.layer, clip.asset),
+    level: levelSignature(clip.layer),
+    strip,
     sourceOffset: clip.sourceOffset,
     duration: clip.duration,
     curve,
@@ -499,6 +708,18 @@ function requestDecode(layer: any, asset: any, generation: any) {
   });
 }
 
+/* Re-schedule a playing voice's gain envelope from now, without restarting it. */
+function retuneVoice(voice: any, clip: any, time: any, level: string) {
+  const ctx: any = state.context;
+  if (!ctx || voice.scheduledAt > ctx.currentTime) {
+    stopVoice(clip.layer.id);
+    startVoice(clip, time);
+    return;
+  }
+  voice.curve = applyEnvelope(voice.gain.gain, clip.layer, clip.localStart, clip.duration, ctx.currentTime, clip.audibleDuration, RETUNE_GLIDE);
+  voice.level = level;
+}
+
 function voiceDrift(voice: any, layer: any, time: any, ctx: any) {
   if (!voice || !ctx) return Infinity;
   const audioUntilStart: any = voice.scheduledAt - ctx.currentTime;
@@ -515,7 +736,10 @@ function sync(time: any, force: any = false) {
   if (!state.running || !PM.proj) { stopAll(); return; }
   const generation: any = state.generation;
   const desired: any = new Set();
+  const strips: any = new Set<string>();
+  applyMasterLevel();
   for (const layer of audioLayers()) {
+    strips.add(layer._audioStrip || layer.id);
     const audibleStart: any = Math.max(finite(layer.from), finite(layer._audioWindowStart, finite(layer.from)));
     if (audibleStart - time > LIVE_LOOKAHEAD) continue;
     const asset: any = layer.d && layer.d.asset && PM.assets && PM.assets.get(layer.d.asset);
@@ -533,9 +757,13 @@ function sync(time: any, force: any = false) {
     if (force || !voice || voice.signature !== signature || drifted) {
       stopVoice(layer.id);
       startVoice(clip, time);
+      continue;
     }
+    const level: any = levelSignature(layer);
+    if (voice.level !== level) retuneVoice(voice, clip, time, level);
   }
   for (const id of [...state.voices.keys()]) if (!desired.has(id)) stopVoice(id);
+  pruneStrips(strips);
   publishState();
 }
 
@@ -569,11 +797,28 @@ function seek(time: any) {
 
 function tick(time: any) { sync(time, false); }
 
-function reconcile() {
+function reconcile(force: boolean = true) {
   state.project = PM.proj || null;
+  // An undone or agent-set master level reaches the master node even while paused.
+  applyMasterLevel();
   if (PM.audioDisabled || !PM.playing) { pause(); requestContextWarmup(); return; }
   state.generation++;
-  sync(PM.time, true);
+  sync(PM.time, force);
+}
+
+/* Layer edits keep the voices that still play the same source and only
+   re-schedule their levels; everything else restarts through signatures. */
+function reconcileLayers() {
+  invalidateAudioIndex();
+  reconcile(false);
+}
+
+/* A live edit (a dragged fader) does not announce itself on the bus until it
+   commits. The mixer calls this after each step so you hear the move. */
+function retune() {
+  invalidateAudioIndex();
+  applyMasterLevel();
+  if (state.running && PM.playing && !PM.audioDisabled) sync(PM.time, false);
 }
 
 function reconcileProject() {
@@ -678,12 +923,17 @@ async function renderOffline(t0: any, t1: any) {
     let offline: any;
     try { offline = new Offline(2, Math.ceil((to - from) * sampleRate), sampleRate); }
     catch (error: any) { throw new Error('Could not create the audio export mix'); }
+    /* The composition's output level, exactly as the live master applies it. */
+    const output: any = offline.createGain();
+    output.gain.value = masterLevel();
+    output.connect(offline.destination);
     for (const clip of clips) {
       try {
         const source: any = offline.createBufferSource();
         const gain: any = offline.createGain();
         source.buffer = clip.asset.audioBuffer;
-        source.connect(gain).connect(offline.destination);
+        source.connect(gain);
+        gain.connect(output);
         const at: any = clip.start - from;
         applyEnvelope(gain.gain, clip.layer, clip.localStart, clip.duration, at, clip.audibleDuration);
         source.start(at, clip.sourceOffset, clip.duration);
@@ -710,12 +960,16 @@ async function createRealtimeMix(t0: any, t1: any) {
     }
     if (ctx.state === 'suspended' && typeof ctx.resume === 'function') await ctx.resume();
     const destination: any = ctx.createMediaStreamDestination();
+    const output: any = ctx.createGain();
+    output.gain.value = masterLevel();
+    output.connect(destination);
     const nodes: any = [];
     for (const clip of clips) {
       const source: any = ctx.createBufferSource();
       const gain: any = ctx.createGain();
       source.buffer = clip.asset.audioBuffer;
-      source.connect(gain).connect(destination);
+      source.connect(gain);
+      gain.connect(output);
       nodes.push({ source, gain, clip });
     }
     let started: any = false;
@@ -742,6 +996,7 @@ async function createRealtimeMix(t0: any, t1: any) {
           try { source.disconnect(); } catch (error: any) { }
           try { gain.disconnect(); } catch (error: any) { }
         }
+        try { output.disconnect(); } catch (error: any) { }
         for (const track of destination.stream.getTracks ? destination.stream.getTracks() : []) {
           try { track.stop(); } catch (error: any) { }
         }
@@ -829,9 +1084,12 @@ const Audio: any = PM.Audio = {
     contextWarmup = undefined;
     pause();
     state.generation++;
+    releaseTaps();
+    for (const id of [...state.strips.keys()]) dropStrip(id);
     if (state.context) void state.context.close();
     state.context = null;
     state.master = null;
+    state.masterLevel = undefined;
   },
   accepts,
   normalizeLayer,
@@ -854,6 +1112,17 @@ const Audio: any = PM.Audio = {
   supportsOpus,
   encodeOpus,
   hasAudibleLayers,
+  retune,
+  setMonitorSolo,
+  monitorSolo: () => [...state.monitorSolo],
+  /* Level taps for the mixer. `read` connects a tap on first use; `release`
+     disconnects every tap so an idle mixer costs nothing. */
+  meters: {
+    MASTER: MASTER_TAP,
+    read: readLevels,
+    release: releaseTaps,
+    running: () => state.running && !!state.context,
+  },
   inspect: () => ({
     engine: 'decoded-buffer-v2',
     running: state.running,
@@ -861,9 +1130,14 @@ const Audio: any = PM.Audio = {
     voices: [...state.voices.values()].map((voice: any) => ({
       layerId: voice.layerId,
       assetId: voice.assetId,
+      strip: voice.strip,
       sourceOffset: voice.sourceOffset,
       duration: voice.duration,
     })),
+    strips: [...state.strips.entries()].map(([id, bus]: any) => ({ id, solo: bus.solo.gain.value })),
+    master: state.master ? state.master.gain.value : masterLevel(),
+    monitorSolo: [...state.monitorSolo],
+    taps: [...state.meterTaps.keys()],
     contextState: state.context && state.context.state || 'uninitialized',
   }),
 };
@@ -874,7 +1148,7 @@ PM.Memory?.register?.('audio', {
   trim: (target: number) => trimDecodedCache(target),
 });
 
-PM.bus.on('layers', () => { invalidateAudioIndex(); reconcile(); });
+PM.bus.on('layers', reconcileLayers);
 PM.bus.on('assets', reconcile);
 PM.bus.on('project', () => { invalidateAudioIndex(); reconcileProject(); requestContextWarmup(); });
 requestContextWarmup();
