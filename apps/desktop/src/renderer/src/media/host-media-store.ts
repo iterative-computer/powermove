@@ -113,7 +113,8 @@ export type HostMediaStoreOptions = {
   warn?(message: string, error: unknown): void;
 };
 
-export type HostMediaStore = LegacyMediaStore & {
+export type HostMediaStore = Omit<LegacyMediaStore, 'getForSave'> & {
+  getForSave(value: any): Promise<{ blob: Blob; revision: string } | null>;
   readonly enabled: boolean;
   /** True when imports keep the original and store renditions separately. */
   readonly keepsOriginals: boolean;
