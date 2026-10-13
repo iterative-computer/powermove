@@ -98,7 +98,12 @@ impl ClockCore {
         };
         if let Some(last) = &self.last {
             let same_line = last.epoch == heard.tag.epoch && last.state == state;
-            if same_line && presented_us < last.host_time.get() + REFRESH_US {
+            // An underrun or a loop wrap moves the media off the line: publish
+            // at once (a new `seq` replaces the line).
+            let on_line = HostMicros::new(presented_us).is_ok_and(|at| {
+                (last.media_time_at(at).get() - media).abs() <= TICKS_PER_SECOND / 1000
+            });
+            if same_line && on_line && presented_us < last.host_time.get() + REFRESH_US {
                 return None;
             }
         }
@@ -222,6 +227,15 @@ mod tests {
             .unwrap();
         assert_eq!(b.media_time.get(), 200 * 14_700);
         assert!(b.seq > a.seq);
+        // Off the line (an underrun delayed the media by 20 ms): immediately.
+        let d = core
+            .observe(
+                heard(0, 1, 400),
+                1_000_000 + REFRESH_US + 20_000 + 400 * 1_000_000 / 48_000,
+                5000,
+            )
+            .unwrap();
+        assert_eq!(d.media_time.get(), 400 * 14_700);
         // New epoch: immediately.
         let c = core
             .observe(
