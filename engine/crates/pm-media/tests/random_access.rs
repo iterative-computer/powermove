@@ -36,6 +36,22 @@ fn s6_corpus() {
     run_all(&videos(&corpus_dir(), &|n| s6.iter().any(|p| n.starts_with(p))), DecodePurpose::Display);
 }
 
+/// ProRes in MXF (RDD 44) and Matroska (`icpf` header stripped):
+/// VideoToolbox from the codec tag or profile.
+#[test]
+#[ignore]
+fn prores_in_mxf_and_matroska() {
+    let files = videos(&corpus_dir(), &|n| n == "prores-hq.mxf" || n == "prores-422.mkv");
+    assert_eq!(files.len(), 2);
+    for f in &files {
+        let r = run_file(f, None, DecodePurpose::Display);
+        eprintln!("{}", summary(&r));
+        assert_eq!(r.runs[0].backend, pm_media::decode::Backend::VideoToolbox);
+        let failures = check(&r);
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+}
+
 /// ProRes 422 decoded for export: VideoToolbox outputs `v216` (amendment 6).
 #[test]
 #[ignore]

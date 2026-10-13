@@ -13,6 +13,7 @@ pub mod exr;
 pub mod icc;
 pub mod imageio;
 pub mod raster;
+pub mod sequence;
 
 use crate::error::{MediaError, Result};
 use crate::frame::{DecodedFrame, Layout, PixelFormat, PlaneDesc, PlaneFormat, Pixels, PoolFrame, PoolPlane};

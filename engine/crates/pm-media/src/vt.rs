@@ -57,6 +57,9 @@ pub struct VtConfig {
     /// The bitstream range, from the format description when it says, else
     /// from FFmpeg's probe.
     pub full_range: bool,
+    /// ProRes frames stored without their 8-byte `icpf` header (Matroska):
+    /// it is restored before decoding.
+    pub prores_header: bool,
 }
 
 pub(crate) fn init() {
@@ -75,6 +78,7 @@ impl VtConfig {
     pub fn new(info: &CodecInfo, idx: &FrameIndex, extradata: &[u8], purpose: DecodePurpose) -> Result<VtConfig> {
         init();
         let cfg = &idx.config;
+        let mut prores_header = false;
         let (codec, atoms, annexb): (u32, Vec<([u8; 4], Vec<u8>)>, bool) = if let Some(f) = cfg.fourcc {
             let codec = match &f {
                 b"avc1" | b"avc3" => fcc(b"avc1"),
@@ -96,8 +100,22 @@ impl VtConfig {
                 "V_MPEG4/ISO/AVC" => (fcc(b"avc1"), vec![(*b"avcC", cp)], false),
                 "V_MPEGH/ISO/HEVC" => (fcc(b"hvc1"), vec![(*b"hvcC", cp)], false),
                 "V_AV1" => (fcc(b"av01"), vec![(*b"av1C", cp)], false),
+                // Matroska ProRes: CodecPrivate is the four-character code;
+                // frames are stored without their 8-byte `icpf` header.
+                "V_PRORES" => {
+                    let f: [u8; 4] = cp.get(..4).and_then(|b| b.try_into().ok()).unwrap_or(prores_fourcc(info.profile));
+                    if !is_prores_fourcc(&f) {
+                        return Err(MediaError::invalid(format!("Matroska ProRes with CodecPrivate {cp:?}")));
+                    }
+                    prores_header = true;
+                    (u32::from_be_bytes(f), vec![], false)
+                }
                 other => return Err(MediaError::unsupported(format!("{other} goes to FFmpeg (section 13)"))),
             }
+        } else if info.codec == "prores" {
+            // MXF (RDD 44) and other containers: the codec tag, else FFmpeg's profile.
+            let tag = info.codec_tag.as_deref().and_then(|t| <[u8; 4]>::try_from(t.as_bytes()).ok()).filter(is_prores_fourcc);
+            (u32::from_be_bytes(tag.unwrap_or(prores_fourcc(info.profile))), vec![], false)
         } else if info.codec == "h264" && !extradata.is_empty() {
             (fcc(b"avc1"), vec![(*b"avcC", annexb_to_avcc(extradata)?)], true)
         } else {
@@ -148,7 +166,20 @@ impl VtConfig {
             format_source,
             format: Some(format),
             full_range: full,
+            prores_header,
         })
+    }
+}
+
+/// FFmpeg's ProRes profile (`AV_PROFILE_PRORES_*`) as a four-character code.
+pub fn prores_fourcc(profile: i32) -> [u8; 4] {
+    match profile {
+        0 => *b"apco",
+        1 => *b"apcs",
+        3 => *b"apch",
+        4 => *b"ap4h",
+        5 => *b"ap4x",
+        _ => *b"apcn",
     }
 }
 
@@ -375,6 +406,7 @@ pub struct VtDecoder {
     nal: Option<(NalKind, usize)>,
     hardware: bool,
     requested: u32,
+    prores_header: bool,
     /// Frames whose decode failed: (PTS, OSStatus).
     pub failures: Vec<(i64, OSStatus)>,
 }
@@ -437,6 +469,7 @@ impl VtDecoder {
                 nal,
                 hardware,
                 requested: cfg.format_fcc,
+                prores_header: cfg.prores_header,
                 failures: vec![],
             })
         }
@@ -451,6 +484,13 @@ impl VtDecoder {
         let converted;
         let data: &[u8] = if self.annexb {
             converted = annexb_to_length_prefixed(&p.data);
+            &converted
+        } else if self.prores_header && p.data.get(4..8) != Some(b"icpf") {
+            let mut v = Vec::with_capacity(p.data.len() + 8);
+            v.extend_from_slice(&((p.data.len() + 8) as u32).to_be_bytes());
+            v.extend_from_slice(b"icpf");
+            v.extend_from_slice(&p.data);
+            converted = v;
             &converted
         } else {
             &p.data

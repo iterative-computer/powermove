@@ -63,6 +63,9 @@ ff -f lavfi -i "testsrc2=size=$SMALL:rate=30,format=yuva420p,geq=lum='lum(X,Y)':
 ff -f lavfi -i "testsrc2=size=$SMALL:rate=30,format=yuva420p,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='mod(X+N*4,256)'" \
   -frames:v 60 -c:v libvpx -pix_fmt yuva420p -g 30 -b:v 1M -deadline good -cpu-used 4 -auto-alt-ref 0 vp8-alpha.webm
 ff -f lavfi -i "$(src 30 $SMALL yuv420p10le)" -frames:v 90 -c:v libsvtav1 -g 30 -preset 8 -pix_fmt yuv420p10le av1-10bit.mp4
+# ProRes in MXF (RDD 44) and in Matroska (frames without their icpf header).
+ff -f lavfi -i "$(src 25 $SMALL yuv422p10le)" -frames:v 25 -c:v prores_ks -profile:v 3 prores-hq.mxf
+ff -f lavfi -i "$(src 25 $SMALL yuv422p10le)" -frames:v 25 -c:v prores_ks -profile:v 2 prores-422.mkv
 for r in "$NTSC24:23976" "$NTSC30:2997"; do
   rate="${r%%:*}"; tag="${r##*:}"
   ff -f lavfi -i "$(src "$rate" $SMALL)" -frames:v 150 -c:v libvpx-vp9 -g 24 -b:v 600k \
