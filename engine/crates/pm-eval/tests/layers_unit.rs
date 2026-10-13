@@ -24,6 +24,9 @@ impl TextMeasure for NoText {
     fn glyph_layout(&mut self, _: &TextContent) -> GlyphLayout {
         unreachable!("no text layers")
     }
+    fn spaced_width(&mut self, _: &TextContent, _: &str) -> f64 {
+        unreachable!("no text layers")
+    }
 }
 
 fn doc(text: &str) -> Document {

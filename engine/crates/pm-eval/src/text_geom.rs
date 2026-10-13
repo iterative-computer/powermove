@@ -41,6 +41,9 @@ pub trait TextMeasure {
     fn plain_width(&mut self, d: &TextContent, text: &str) -> f64;
     /// `PM.textLayout` (`glyphLayout` on the layer's context).
     fn glyph_layout(&mut self, d: &TextContent) -> GlyphLayout;
+    /// `measureText(text).width` with `font = fontStr(d)` and
+    /// `letterSpacing = d.tracking px` (the captions measuring canvas).
+    fn spaced_width(&mut self, d: &TextContent, text: &str) -> f64;
 }
 
 /// Selection bounds with their size.

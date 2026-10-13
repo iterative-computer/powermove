@@ -39,6 +39,7 @@
 pub mod address;
 pub mod anchor;
 pub mod bounds;
+pub mod captions;
 pub mod comp;
 pub mod easing;
 pub mod evaluator;

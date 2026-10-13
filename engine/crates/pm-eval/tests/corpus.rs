@@ -396,6 +396,18 @@ impl Ctx<'_> {
 
 const NUM: (f64, f64) = (1e-9, 1e-9);
 
+/// Why a caption's bounds are not compared: Blink measures at
+/// `FontDescription::EffectiveFontSize` (`floorf(size * 100) / 100` in
+/// `float`, the font cache key's precision); pm-text measures at the size
+/// given.
+const PM_TEXT_SIZE_GRID: &str = "caption size off Blink's 1/100 px font grid (pm-text)";
+
+/// Whether Blink's effective font size equals `size`.
+fn on_font_size_grid(size: f64) -> bool {
+    let s = size as f32;
+    (s * 100.0).floor() / 100.0 == s
+}
+
 /// Why a text layer's geometry is not compared: pm-text measures it
 /// differently from the capture (a pm-text difference, reported by font).
 const PM_TEXT_DIFFERS: &str = "pm-text layout differs from the capture";
@@ -646,7 +658,16 @@ fn compare_comp(
                 );
             }
         }
-        if ty != "audio" {
+        // A caption shrunk to fit its line budget is measured at a size off
+        // Blink's 1/100 px font size grid, which pm-text does not apply yet.
+        let off_grid_caption = ty == "captions"
+            && matches!(
+                scope.caption_frame(layer, time, &mut *cx.measure),
+                Ok(Some(f)) if !on_font_size_grid(f.layout.size)
+            );
+        if off_grid_caption {
+            cx.stats.skip("bounds", PM_TEXT_SIZE_GRID);
+        } else if ty != "audio" {
             let got = scope.bounds(layer, time, &mut *cx.measure, &mut CorpusHost);
             let category: &'static str = if variable {
                 "bounds (variable font)"

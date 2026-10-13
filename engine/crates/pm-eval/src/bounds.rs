@@ -5,11 +5,10 @@
 //!
 //! Bounds are in layer space before the layer transform, relative to the
 //! layer's anchor origin, with the anchor point (`ax`, `ay`) inside the
-//! raster box. Shapes, text, solids, media, shaders, extensions, nulls,
-//! precomps, and groups are answered here; what only today's 3D runtime or
-//! captions rasterizer can answer in Phase 1 (3D object bounds and picks,
-//! model groups, extension scenes without a background, caption blocks) is
-//! asked of a [`LayerHost`].
+//! raster box. Shapes, text, captions, solids, media, shaders, extensions,
+//! nulls, precomps, and groups are answered here; what only today's 3D
+//! runtime can answer in Phase 1 (3D object bounds and picks, model groups,
+//! extension scenes without a background) is asked of a [`LayerHost`].
 
 use pm_model::{JsString, Node};
 use pm_vector::{PathLayer, PathNode, PathValues, Vertex};
@@ -61,12 +60,12 @@ impl Bounds {
     }
 }
 
-/// The thrown kind for questions only the host's 3D runtime or captions
-/// rasterizer answers in Phase 1.
+/// The thrown kind for questions only the host's 3D runtime answers in
+/// Phase 1.
 pub const HOST_ONLY: &str = "HostOnly";
 
-/// What the engine cannot answer natively in Phase 1 (three.js and the
-/// captions rasterizer), plus registry facts. Every method's default throws
+/// What the engine cannot answer natively in Phase 1 (three.js), plus
+/// registry facts. Every method's default throws
 /// a [`HOST_ONLY`] error, so an unanswered question is never silently wrong.
 pub trait LayerHost {
     /// `compositionRuntime(...).bounds(...)` for a 3D object layer.
@@ -91,11 +90,6 @@ pub trait LayerHost {
         let _ = (layer, time);
         Err(host_only("extension scene bounds"))
     }
-    /// `PM.captionBounds(L, T)`.
-    fn caption_bounds(&mut self, layer: &Node, time: f64) -> JsResult<Option<Bounds>> {
-        let _ = (layer, time);
-        Err(host_only("caption bounds"))
-    }
     /// `runtime.pick(ndcX, ndcY, depthIds, camera) === layer.id` for a 3D
     /// object layer.
     fn pick_object(&mut self, layer: &Node, x: f64, y: f64, time: f64) -> JsResult<bool> {
@@ -113,9 +107,7 @@ pub trait LayerHost {
 fn host_only(what: &str) -> JsThrow {
     JsThrow {
         kind: HOST_ONLY,
-        message: format!(
-            "{what} come from the host's 3D runtime or captions rasterizer in Phase 1"
-        ),
+        message: format!("{what} come from the host's 3D runtime in Phase 1"),
     }
 }
 
@@ -373,7 +365,8 @@ impl<'d> Scope<'_, 'd> {
         let ty = node::to_js_string(node::member(Some(layer), "type"));
         let ty = ty.as_str().unwrap_or("");
         if ty == "captions" {
-            return host.caption_bounds(layer, time);
+            let b = self.caption_bounds(layer, time, measure)?;
+            return Ok(Some(Bounds::sized(b.x0, b.y0, b.x1, b.y1, 0.0, 0.0)));
         }
         if ty == "text" {
             let r = self.text_raster(layer, time, measure)?;

@@ -308,6 +308,10 @@ impl<R: FontResolver> TextMeasure for CompatMeasure<R> {
         self.compat.measure(&plain, text)
     }
 
+    fn spaced_width(&mut self, d: &TextContent, text: &str) -> f64 {
+        self.compat.measure(d, text)
+    }
+
     fn glyph_layout(&mut self, d: &TextContent) -> GlyphLayout {
         self.compat.glyph_layout(d)
     }
