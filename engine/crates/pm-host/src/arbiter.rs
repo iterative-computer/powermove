@@ -128,9 +128,24 @@ impl MemoryArbiter {
         self.make(process, bytes.min(room), reason)
     }
 
-    pub fn initial(&mut self, process: EngineProcess) -> Lease {
+    /// A freshly connected engine's first lease. If the other engine grew
+    /// past its share while this one was down, it is shrunk back to its
+    /// share first (`MemoryPressure`), and this engine's grant grows to its
+    /// share once that shrink is acknowledged.
+    pub fn initial(&mut self, process: EngineProcess) -> Vec<Lease> {
+        let mut grants = Vec::new();
+        let peer = other(process);
+        let peer_target = self.target(peer);
+        if self
+            .current(peer)
+            .is_some_and(|l| l.bytes.get() > peer_target)
+        {
+            self.deferred[slot(peer)] = None;
+            grants.push(self.make(peer, peer_target, LeaseReason::MemoryPressure));
+        }
         let target = self.target(process);
-        self.grant_up_to(process, target, LeaseReason::Initial)
+        grants.push(self.grant_up_to(process, target, LeaseReason::Initial));
+        grants
     }
 
     pub fn current(&self, process: EngineProcess) -> Option<&Lease> {
@@ -335,8 +350,8 @@ mod tests {
     #[test]
     fn playback_moves_memory_only_after_the_job_engine_gives_it_back() {
         let mut arbiter = MemoryArbiter::new(10_000);
-        let i = arbiter.initial(EngineProcess::Interactive);
-        let j = arbiter.initial(EngineProcess::Job);
+        let i = arbiter.initial(EngineProcess::Interactive)[0];
+        let j = arbiter.initial(EngineProcess::Job)[0];
         assert_eq!((i.bytes.get(), j.bytes.get()), (6000, 4000));
         arbiter
             .report(&usage(EngineProcess::Interactive, &i, 5000, true))
@@ -359,6 +374,60 @@ mod tests {
         let after = arbiter.exited(EngineProcess::Interactive);
         assert!(!arbiter.is_playing());
         assert_eq!(after.last().unwrap().reason, LeaseReason::PeerExited);
+    }
+
+    #[test]
+    fn a_restarted_engine_reclaims_its_share_from_one_that_grew_meanwhile() {
+        let mut arbiter = MemoryArbiter::new(10_000);
+        let i = arbiter.initial(EngineProcess::Interactive)[0];
+        let j = arbiter.initial(EngineProcess::Job)[0];
+        arbiter
+            .report(&usage(EngineProcess::Interactive, &i, 100, true))
+            .unwrap();
+        arbiter
+            .report(&usage(EngineProcess::Job, &j, 100, true))
+            .unwrap();
+        arbiter.exited(EngineProcess::Job);
+        let grown = arbiter
+            .request(&LeaseRequest {
+                process: EngineProcess::Interactive,
+                wanted: ByteSize::new(9900).unwrap(),
+                reason: LeaseReason::Requested,
+            })
+            .unwrap();
+        assert_eq!(grown.bytes.get(), 9900);
+        arbiter
+            .report(&usage(EngineProcess::Interactive, &grown, 9000, true))
+            .unwrap();
+        let back = arbiter.initial(EngineProcess::Job);
+        let summary: Vec<_> = back
+            .iter()
+            .map(|l| (l.process, l.bytes.get(), l.reason))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (
+                    EngineProcess::Interactive,
+                    6000,
+                    LeaseReason::MemoryPressure
+                ),
+                (EngineProcess::Job, 100, LeaseReason::Initial),
+            ]
+        );
+        let unblocked = arbiter
+            .report(&usage(EngineProcess::Interactive, &back[0], 5800, true))
+            .unwrap();
+        assert_eq!(
+            unblocked
+                .iter()
+                .map(|l| (l.process, l.bytes.get(), l.reason))
+                .collect::<Vec<_>>(),
+            vec![(EngineProcess::Job, 4000, LeaseReason::Initial)]
+        );
+        // An engine within its share is left alone.
+        arbiter.exited(EngineProcess::Job);
+        assert_eq!(arbiter.initial(EngineProcess::Job).len(), 1);
     }
 
     #[test]

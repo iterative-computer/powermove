@@ -133,6 +133,11 @@ fixtures).
   does not fit is deferred until the other engine acknowledges. At
   playback start the job engine shrinks first and the interactive engine
   grows after; at playback end the reverse.
+- While one engine is down, `requestLease` lets the other use what is
+  free, up to nearly the whole budget. When the down engine comes back,
+  its initial lease first shrinks the other back to its share (reason
+  `memoryPressure`), and the newcomer's grant grows to its share once that
+  shrink is acknowledged.
 - The engine (`pm_engine::lease::LeaseBudget`) charges every category,
   evicts in a fixed order (frame cache first, surface pool last), answers a
   grant with usage, and owes the acknowledgement until usage fits; it

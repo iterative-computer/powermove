@@ -97,9 +97,22 @@ export class MemoryArbiter {
     return this.make(process, Math.min(bytes, Math.max(room, 0)), reason);
   }
 
-  /** A freshly connected engine's first lease. */
-  initial(process: EngineProcess): LeaseGrant {
-    return this.grantUpTo(process, this.target(process), 'initial');
+  /** A freshly connected engine's first lease. If the other engine grew
+   *  past its share while this one was down (`request` gives it what is
+   *  free), it is shrunk back to its share first (`memoryPressure`), and
+   *  this engine's grant grows to its share once that shrink is
+   *  acknowledged; otherwise the newcomer would sit near zero until
+   *  playback next toggled. */
+  initial(process: EngineProcess): LeaseGrant[] {
+    const grants: LeaseGrant[] = [];
+    const other = this.other(process);
+    const held = this.leases.get(other);
+    if (held && held.current.bytes > this.target(other)) {
+      this.deferred.delete(other);
+      grants.push(this.make(other, this.target(other), 'memoryPressure'));
+    }
+    grants.push(this.grantUpTo(process, this.target(process), 'initial'));
+    return grants;
   }
 
   current(process: EngineProcess): Lease | null {

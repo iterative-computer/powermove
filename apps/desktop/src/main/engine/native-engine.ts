@@ -288,7 +288,7 @@ export class NativeEngine {
   private async onReady(launch: Launch): Promise<void> {
     const { process } = launch;
     this.options.log('info', `the ${process} engine is ready (generation ${launch.generation}, pid ${launch.pid ?? '?'})`);
-    this.sendGrants([this.memory.initial(process)]);
+    this.sendGrants(this.memory.initial(process));
     if (process === 'job') {
       launch.connection.event({ type: 'slicing', ...DEFAULT_SLICING_POLICY });
       if (this.memory.isPlaying && this.lastPlaybackStarted) launch.connection.event({ type: 'deadline', ...this.lastPlaybackStarted });

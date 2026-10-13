@@ -151,11 +151,12 @@ describe('output destinations', () => {
   });
 });
 
+const usage = (process: 'interactive' | 'job', epoch: number, total: number, ack: boolean): LeaseUsage => ({
+  process, epoch, total, ack,
+  categories: { frameCache: total, renderCache: 0, blenderSurfaces: 0, geometry3d: 0, surfacePool: 0, decoders: 0, pipelines: 0, other: 0 }
+});
+
 describe('memory arbiter', () => {
-  const usage = (process: 'interactive' | 'job', epoch: number, total: number, ack: boolean): LeaseUsage => ({
-    process, epoch, total, ack,
-    categories: { frameCache: total, renderCache: 0, blenderSurfaces: 0, geometry3d: 0, surfacePool: 0, decoders: 0, pipelines: 0, other: 0 }
-  });
 
   it('sizes one global budget from physical memory', () => {
     expect(globalBudget(8 * GiB)).toBe(4 * GiB);
@@ -167,12 +168,12 @@ describe('memory arbiter', () => {
   it('shrinks the job engine for playback and grows the interactive engine only after the job engine gives memory back', () => {
     let clock = 0;
     const arbiter = new MemoryArbiter(10_000, () => clock);
-    const [interactive] = [arbiter.initial('interactive')];
-    const job = arbiter.initial('job');
+    const [interactive] = arbiter.initial('interactive');
+    const [job] = arbiter.initial('job');
     expect(interactive!.lease.bytes).toBe(6000);
-    expect(job.lease.bytes).toBe(4000);
+    expect(job!.lease.bytes).toBe(4000);
     arbiter.report(usage('interactive', interactive!.lease.epoch, 5000, true));
-    arbiter.report(usage('job', job.lease.epoch, 3500, true));
+    arbiter.report(usage('job', job!.lease.epoch, 3500, true));
 
     const grants = arbiter.playbackStarted();
     const jobShrink = grants.find((g) => g.process === 'job')!;
@@ -201,17 +202,49 @@ describe('memory arbiter', () => {
 
   it('ignores stale reports, grants requests from free memory, and frees a dead engine', () => {
     const arbiter = new MemoryArbiter(10_000);
-    const i = arbiter.initial('interactive');
-    const j = arbiter.initial('job');
-    arbiter.report(usage('job', j.lease.epoch, 100, true));
-    arbiter.report(usage('interactive', i.lease.epoch, 100, true));
+    const [i] = arbiter.initial('interactive');
+    const [j] = arbiter.initial('job');
+    arbiter.report(usage('job', j!.lease.epoch, 100, true));
+    arbiter.report(usage('interactive', i!.lease.epoch, 100, true));
     const more = arbiter.request({ process: 'job', wanted: 9000, reason: 'requested' });
     expect(more.lease.bytes).toBe(4000);
-    expect(arbiter.report(usage('job', j.lease.epoch, 100, false))).toEqual([]);
+    expect(arbiter.report(usage('job', j!.lease.epoch, 100, false))).toEqual([]);
     arbiter.playbackStarted();
     const afterDeath = arbiter.exited('interactive');
     expect(arbiter.isPlaying).toBe(false);
     expect(afterDeath.find((g) => g.process === 'job')?.lease.reason).toBe('peerExited');
+  });
+});
+
+describe('memory leases after a restart', () => {
+  it('shrinks an engine that grew while the other was down, then grants the restarted engine its share', () => {
+    const arbiter = new MemoryArbiter(10_000);
+    const [i] = arbiter.initial('interactive');
+    const [j] = arbiter.initial('job');
+    arbiter.report(usage('interactive', i!.lease.epoch, 100, true));
+    arbiter.report(usage('job', j!.lease.epoch, 100, true));
+    arbiter.exited('job');
+    // With the job engine down, the interactive engine may use almost everything.
+    const grown = arbiter.request({ process: 'interactive', wanted: 9900, reason: 'requested' });
+    expect(grown.lease.bytes).toBe(9900);
+    arbiter.report(usage('interactive', grown.lease.epoch, 9000, true));
+    // The job engine comes back: the interactive engine shrinks to its share first.
+    const back = arbiter.initial('job');
+    expect(back.map((g) => [g.process, g.lease.bytes, g.lease.reason])).toEqual([
+      ['interactive', 6000, 'memoryPressure'],
+      ['job', 100, 'initial']
+    ]);
+    // Once the shrink is acknowledged, the job engine gets its full share.
+    const unblocked = arbiter.report(usage('interactive', back[0]!.lease.epoch, 5800, true));
+    expect(unblocked.map((g) => [g.process, g.lease.bytes, g.lease.reason])).toEqual([['job', 4000, 'initial']]);
+  });
+
+  it('leaves an engine within its share alone when the other restarts', () => {
+    const arbiter = new MemoryArbiter(10_000);
+    arbiter.initial('interactive');
+    arbiter.initial('job');
+    arbiter.exited('job');
+    expect(arbiter.initial('job').map((g) => [g.process, g.lease.bytes])).toEqual([['job', 4000]]);
   });
 });
 

@@ -72,7 +72,9 @@ is half of physical memory, at most physical minus 4 GiB, at least 1 GiB;
 the split is 600/400 per mille (interactive/job) idle and 850/150 during
 playback. Until an engine acknowledges a shrink, the host counts the larger
 of its old and new lease, and defers the other engine's growth until the
-acknowledgement. Notes: `docs/engine/host-processes.md`.
+acknowledgement. An engine that grew while the other was down is shrunk
+back to its share (`memoryPressure`) when the other engine's initial lease
+is granted. Notes: `docs/engine/host-processes.md`.
 
 ## Open questions
 
