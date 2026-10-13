@@ -210,6 +210,56 @@ fn rgbaf16_keeps_ten_bit_ramps_and_values_above_one() {
     }
 }
 
+/// Greys are the same in BT.709 and Display P3: a display-p3 canvas's
+/// transform (decode, matrix, encode) must not add banding to a grey ramp.
+/// Its result is rounded to f16 before the write: Apple GPUs truncate on
+/// render-target writes, which alone cost up to one f16 step (0.5 CV10 near
+/// 1.0) on top of the working texture's.
+#[test]
+fn rgbaf16_on_a_display_p3_canvas_keeps_ten_bit_grey_ramps() {
+    let gpu = gpu();
+    let pool = SurfacePool::new(
+        &gpu.device,
+        1,
+        Size::new(W, H),
+        SurfaceFormat::Rgba16Float,
+        4,
+    )
+    .unwrap();
+    render(
+        &gpu,
+        &pool.surfaces[0],
+        &frame(3, 1),
+        DisplayParams {
+            canvas: ViewerColorSpace::DisplayP3,
+            ..STANDARD_SRGB
+        },
+    );
+    let px = Pixels::of(&pool.surfaces[0]);
+    let mut codes = std::collections::BTreeSet::new();
+    let mut max_err = 0f32;
+    let mut previous = -1.0;
+    for x in 0..W {
+        let v = px.r(x, 100);
+        let ideal = (x as f32 + 0.5) / W as f32;
+        max_err = max_err.max((v - ideal).abs());
+        codes.insert((v * 1023.0).round() as u32);
+        assert!(v >= previous, "monotonic at {x}");
+        previous = v;
+    }
+    eprintln!(
+        "display-p3 grey ramp: max error {:.3} CV10, {} codes",
+        max_err * 1023.0,
+        codes.len()
+    );
+    assert_eq!(codes.len(), 1024, "distinct 10-bit codes");
+    assert!(
+        max_err * 1023.0 < 0.6,
+        "max error {} CV10",
+        max_err * 1023.0
+    );
+}
+
 #[test]
 fn bgra_dither_keeps_the_ten_bit_mean_and_eight_bit_values_exact() {
     let gpu = gpu();

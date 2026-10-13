@@ -5,7 +5,10 @@
 //   background; display encoding E unless linear blending is on.
 // - On a display-p3 canvas, BT.709 primaries are converted to P3 in linear
 //   light, then encoded with E.
-// - rgbaf16 pools keep values above 1.0 (EDR displays).
+// - rgbaf16 pools keep values above 1.0 (EDR displays). The result is
+//   rounded to the nearest f16 before the write: Apple GPUs truncate on
+//   render-target writes, which would add up to one f16 step after the
+//   P3 conversion (0.5 CV10 near 1.0, measured on a grey ramp).
 // - bgra pools clamp to 0..1 and quantize to 8 bits with a blue-noise RPDF
 //   dither of ±0.5 LSB. Values on the 8-bit grid stay exact: a working value
 //   within one f16 step of a grid code is that code (an 8-bit color stored in
@@ -81,6 +84,8 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         let grid = round(s);
         let on_grid = abs(s - grid) <= f16_step(c) * 255.0;
         c = select(floor(s + 0.5 + n), grid, on_grid) / 255.0;
+    } else {
+        c = quantizeToF16(c);
     }
     return vec4f(c, 1.0);
 }
