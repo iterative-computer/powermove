@@ -115,8 +115,12 @@ pub struct VoicePlan {
 /// One evaluation of a voice at a master time.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Point {
-    /// Every level is active (layer span, switched on, not muted).
+    /// Every level is switched on and not muted.
     pub active: bool,
+    /// Every level's time is inside its layer's span. Linear voices take the
+    /// span from their exact window instead (control points would round it
+    /// to the control interval).
+    pub in_span: bool,
     /// Level before fades (clip, precompositions, compositions).
     pub gain: f64,
     /// Source program time, seconds.
@@ -602,6 +606,7 @@ impl VoicePlan {
     ) -> Result<Point> {
         let mut out = Point {
             active: true,
+            in_span: true,
             gain: 1.0,
             ..Point::default()
         };
@@ -615,7 +620,7 @@ impl VoicePlan {
             let from = number(node::member(Some(layer), "from"), 0.0);
             let dur = number(node::member(Some(layer), "dur"), 0.0).max(0.0);
             if !(tau >= from && tau < from + dur) {
-                out.active = false;
+                out.in_span = false;
             }
             let on = node::member(Some(layer), "on");
             if node::is_property(on)

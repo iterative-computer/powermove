@@ -353,7 +353,8 @@ impl Mixer {
                 self.points.push(pt);
                 c += CONTROL;
             }
-            if self.points.iter().all(|pt| !pt.active || pt.gain == 0.0) {
+            let on = |pt: &Point| pt.active && (linear || pt.in_span);
+            if self.points.iter().all(|pt| !on(pt) || pt.gain == 0.0) {
                 return Ok(None);
             }
             self.locals.clear();
@@ -367,8 +368,8 @@ impl Mixer {
                     &self.points[k],
                     &self.points[(k + 1).min(self.points.len() - 1)],
                 );
-                let gl = if l.active { l.gain } else { 0.0 };
-                let gr = if r.active { r.gain } else { 0.0 };
+                let gl = if on(l) { l.gain } else { 0.0 };
+                let gr = if on(r) { r.gain } else { 0.0 };
                 let gain = gl + (gr - gl) * x;
                 let local = l.local + (r.local - l.local) * x;
                 // Fade parameters hold from the left control point.

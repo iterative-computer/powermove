@@ -522,3 +522,31 @@ fn a_silent_video_is_not_a_problem() {
     assert!(graph.voices.is_empty());
     assert!(graph.problems.is_empty(), "{:?}", graph.problems);
 }
+
+/// An animated clip that starts between control points starts on its sample.
+#[test]
+fn animated_clips_start_on_their_sample() {
+    let dir = temp_dir("start");
+    let dc = dir.join("dc.wav");
+    write_wav(&dc, SR, &[vec![0.5; SR as usize]]);
+    let from = 4805.0 / SR as f64;
+    let doc = project(
+        30.0,
+        1.0,
+        &[audio(
+            "A",
+            "dc",
+            from,
+            0.5,
+            &format!(r#","gain":{}"#, keys(&[(0.0, 1.0), (0.5, 1.0)])),
+            "",
+        )],
+        &[],
+        "",
+    );
+    let rig = Rig::new(&[("dc", &dc)]);
+    let mut m = rig.mixer(doc, "C", MixFormat::stereo(SR));
+    let out = rig.render(&mut m, 0, 9_600, 1024);
+    assert_eq!(out[0][4804], 0.0);
+    assert!((out[0][4805] - 0.5).abs() < 1e-7, "{}", out[0][4805]);
+}
