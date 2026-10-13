@@ -882,7 +882,7 @@ function policyCommand(sourceCommand: any, meta: any = {}) {
     const locked: any = layers.filter((layer: any) => layer.lock || (PM.groupAncestors?.(layer) || []).some((group: any) => group.lock));
     if (locked.length && base.some(layer => layer.type === 'group')) throw new Error('Unlock the group and its contents before deleting');
     if (!locked.length) return { command };
-    const editable: any = layers.filter((layer: any) => !layer.lock);
+    const editable: any = layers.filter((layer: any) => !locked.includes(layer));
     const names: any = locked.map((layer: any) => `“${layer.name}”`).join(', ');
     if (!editable.length) throw new Error(`All targeted layers are locked: ${names}`);
     command.targets = editable.map((layer: any) => layer.id);
@@ -897,7 +897,7 @@ function policyCommand(sourceCommand: any, meta: any = {}) {
 
   if (command.type === 'set_easing') {
     if (command.overrideLock !== true) {
-      const locked: any = keyframeLayers(command).find((layer: any) => layer.lock);
+      const locked: any = keyframeLayers(command).find((layer: any) => layer.lock || (PM.groupAncestors?.(layer, projectLayers()) || []).some((group: any) => group.lock));
       if (locked) throw new Error(lockedMessage(locked));
     }
     return { command };
