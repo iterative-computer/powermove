@@ -6,8 +6,9 @@ configuration includes GPL and nonfree components (plan section 24 item 1, decis
 links its dylibs; the `ffmpeg` and `ffprobe` executables come from the same configuration
 for transcription, agent media tools, the CLI, and test verification.
 
-This directory only builds and verifies it. Nothing in the app uses it yet: the desktop
-app keeps `ffmpeg-static` until Phase 2 wires this build in.
+The desktop app, the serve and MCP hosts, and the tests run this build; `ffmpeg-static`
+is gone. `package.sh` stages it for packaging (below), and
+`apps/desktop/src/main/ffmpeg-binary.ts` resolves it.
 
 ## Build
 
@@ -95,6 +96,29 @@ read ProRes on machines without a ProRes engine, such as base M1) is a product a
 licensing question for Phase 2; removing it is one line in `build.sh`
 (`--disable-decoder=prores`) and the matching row in `required-components.tsv`.
 
+## Packaging
+
+```sh
+engine/third_party/ffmpeg/package.sh [build-out-dir] [stage-dir]   # bun run stage:ffmpeg in apps/desktop
+```
+
+`package.sh` runs `verify.sh` on a build (default `$PM_FFMPEG_DIR`, then the shared
+`~/Library/Caches/powermove-engine/ffmpeg/out`), stages only what ships into
+`apps/desktop/vendor/ffmpeg` (gitignored): `bin/ffmpeg`, `bin/ffprobe`, each dylib once
+under its install name as a regular file, `share/licenses/`, `manifest.json`, and
+`NOTICE.txt` (the LGPL notice with the exact source URL and SHA-256). It then checks the
+stage (checksums against the manifest, every `@rpath` dependency inside `lib/`, the LGPL
+from both executables, the VideoToolbox encoders present, `libx264` and `prores_ks`
+absent) and replaces the stage atomically. electron-builder copies the stage to
+`Contents/Resources/ffmpeg`; `scripts/after-pack.mjs` refuses a bundle without it, and
+`scripts/release-mac.mjs` checks that every binary there carries the app's Team ID and the
+hardened runtime.
+
+At run time the packaged app uses only `Contents/Resources/ffmpeg`. Development and tests
+use `$PM_FFMPEG_DIR`, then `apps/desktop/vendor/ffmpeg`, then the shared build. The CLI
+host (`packages/cli`, which no longer depends on `ffmpeg-static`) uses
+`$POWERMOVE_FFMPEG`, then `$PM_FFMPEG_DIR` or the shared build, then `ffmpeg` from PATH.
+
 ## Output
 
 ```
@@ -151,9 +175,15 @@ checks decoded pixels and parsed results, not only exit codes. It also confirms 
 `prores_videotoolbox` produce correct output from the same arguments with the encoder
 swapped.
 
-## What breaks with this build
+## What broke with this build, and how it was switched
 
-These call sites use encoders the build excludes. None are wired to this build yet.
+These call sites used encoders the build excludes. All of them now run this build:
+`render-encoder.ts` encodes with `h264_videotoolbox` (High profile, `-g 250`) and
+`prores_videotoolbox -profile:v 4444` (`ayuv64le` with alpha, `p416le` opaque), both
+with `-allow_sw 1` and frames tagged 1-13-1 with `setparams`; the test fixtures below
+encode through VideoToolbox. `export-video-frames.spec.ts` uses an 8 Mbps
+`h264_videotoolbox` source of flat frames in place of lossless x264. The table records
+the original analysis.
 
 Every real MP4 or ProRes export runs through `encoderArgs` in `render-encoder.ts`, so
 each test that completes one fails with this build until that function moves to
