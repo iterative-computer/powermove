@@ -82,19 +82,39 @@ export class ExternalAgentSession {
     const session = this.requireSession();
     if (name === 'publish_extensions') {
       if (session.inspectionOnly) throw new Error('Planning access cannot publish extensions.');
-      const input = changes.parse(args), workspace = this.workspace!;
+      const input = changes.parse(args), workspace = this.workspace!, request = this.request!;
+      const isCurrent = () => !this.disconnected && !this.closing && !this.ownerUnavailable
+        && this.session === session && !isRendererUnavailable(session.owner);
+      const checkCurrent = () => {
+        if (this.disconnected) throw new Error('This MCP connection is closed.');
+        if (!isCurrent()) throw new Error('The MCP session ended before publishing extensions. Start a new session.');
+      };
       const changeSet = await withStageSnapshot(workspace, async snapshot => {
+        checkCurrent();
         await validateStagedExtensions(snapshot, input.extensions);
+        checkCurrent();
         return publishExtensionChanges(snapshot, input.extensions);
       }, input.extensions.map(change => change.id));
+      const result = (stagingDirectory: string | null) => ({ changeSetId: changeSet?.id ?? null, extensions: input.extensions, stagingDirectory });
       await this.options.refreshExtensions?.(input.extensions.map(change => change.id));
+      // Publication has completed. Keep that outcome when its session ends,
+      // and avoid preparing a new workspace for the disconnected client.
+      if (!isCurrent()) return result(null);
       // Continue from the promoted baseline, with a new run-private stage.
       await discardExtensionStage(workspace);
-      this.workspace = await prepareAgentWorkspace(this.request!, this.options.userData, 'project', agentResultSchema(), {
-        extensionsDir: this.options.extensionsDir, apiPackFiles: await this.options.apiPackFiles(), workspaceId: `mcp-${session.runId}`
+      if (!isCurrent()) return result(null);
+      const apiPackFiles = await this.options.apiPackFiles();
+      if (!isCurrent()) return result(null);
+      const nextWorkspace = await prepareAgentWorkspace(request, this.options.userData, 'project', agentResultSchema(), {
+        extensionsDir: this.options.extensionsDir, apiPackFiles, workspaceId: `mcp-${session.runId}`
       });
-      session.stagingDirectory = this.workspace.stagingDirectory;
-      return { changeSetId: changeSet?.id ?? null, extensions: input.extensions, stagingDirectory: this.workspace.stagingDirectory };
+      if (!isCurrent()) {
+        await discardPartialRun(nextWorkspace).catch(error => console.error('[MCP] cancelled replacement workspace cleanup failed', error));
+        return result(null);
+      }
+      this.workspace = nextWorkspace;
+      session.stagingDirectory = nextWorkspace.stagingDirectory;
+      return result(nextWorkspace.stagingDirectory);
     }
     if (name === 'import_media_to_timeline' || (name === 'import_media' && this.options.importMedia)) {
       if (session.inspectionOnly || session.context === 'app') throw new Error('This tool requires project access and an attached project.');
