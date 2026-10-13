@@ -1,10 +1,42 @@
 [package]
 name = "pm-bridge"
-description = "napi-rs addon in main for the frame bridge (section 18)"
+description = "The frame bridge (section 18): Mach rendezvous, audit-token and Team ID checks, surface hand-off; napi-rs addon in main"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# The addon is a cdylib loaded by Electron main. The engine processes link
+# the rlib for the client side of the rendezvous. The napi glue is behind
+# the `node` feature so the crate builds and tests without Node's symbols
+# (they resolve when Node loads the addon).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+# Plays the engine in the cross-process rendezvous tests.
+name = "pm-bridge-peer"
+path = "src/bin/pm-bridge-peer.rs"
+test = false
+
 [dependencies]
+libc = "0.2"
+thiserror.workspace = true
+napi = { version = "3.14", default-features = false, features = ["napi9"], optional = true }
+napi-derive = { version = "3.6", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = "0.3.2"
+objc2-io-surface = "0.3.2"
+objc2-foundation = { version = "0.3.2", optional = true }
+objc2-app-kit = { version = "0.3.2", optional = true }
+
+[features]
+node = ["dep:napi", "dep:napi-derive"]
+# Measurement helpers for the S1 harness (synthetic input, EDR headroom).
+# Never in release builds.
+harness = ["node", "dep:objc2-foundation", "dep:objc2-app-kit"]
+
+[build-dependencies]
+napi-build = "2.6"
