@@ -182,10 +182,10 @@
         </div>
       {:else}<span>{item.message}</span>{/if}
     {/if}
+    {#if item.action}
+      <button type="button" class="toast-action" onclick={() => { item.action?.run(); dismiss(item.id); }}>{item.action.label}</button>
+    {/if}
     {#if item.dismissible}
-      {#if item.action}
-        <button type="button" class="toast-action" onclick={() => { item.action?.run(); dismiss(item.id); }}>{item.action.label}</button>
-      {/if}
       <button type="button" class="toast-dismiss" aria-label="Dismiss notification" title="Dismiss notification" onclick={() => dismiss(item.id, true)}><Icon {PM} name="x" /></button>
     {/if}
   </div>
