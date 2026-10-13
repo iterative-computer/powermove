@@ -39,8 +39,26 @@ fn run(gpu: &pm_gpu::Gpu, mode: MathMode) -> (f32, String) {
         texture: None,
         sampler: None,
     }];
-    let vs = msl::module(device, "vs", &module, &info, naga::ShaderStage::Vertex, &slots, mode).unwrap();
-    let fs = msl::module(device, "fs", &module, &info, naga::ShaderStage::Fragment, &slots, mode).unwrap();
+    let vs = msl::module(
+        device,
+        "vs",
+        &module,
+        &info,
+        naga::ShaderStage::Vertex,
+        &slots,
+        mode,
+    )
+    .unwrap();
+    let fs = msl::module(
+        device,
+        "fs",
+        &module,
+        &info,
+        naga::ShaderStage::Fragment,
+        &slots,
+        mode,
+    )
+    .unwrap();
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
         entries: &[wgpu::BindGroupLayoutEntry {
@@ -134,7 +152,10 @@ fn run(gpu: &pm_gpu::Gpu, mode: MathMode) -> (f32, String) {
 #[test]
 fn safe_math_keeps_nan() {
     let gpu = pm_gpu::Gpu::new("pm-gpu msl test").expect("a Metal device");
-    assert!(msl::supported(&gpu.device), "the engine device has passthrough shaders");
+    assert!(
+        msl::supported(&gpu.device),
+        "the engine device has passthrough shaders"
+    );
     let (safe, source) = run(&gpu, MathMode::Safe);
     assert!(source.starts_with("#pragma METAL fp math_mode(safe)\n"));
     assert_eq!(safe, 1.0, "safe math: 0 / 0 is NaN");

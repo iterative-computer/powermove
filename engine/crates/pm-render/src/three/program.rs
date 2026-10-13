@@ -326,8 +326,8 @@ fn rec709_round_trip() -> [f64; 9] {
         0.9505322,
     ];
     let b = [
-        3.2409699, -1.5373832, -0.4986108, -0.9692436, 1.8759675, 0.0415551, 0.0556301,
-        -0.2039770, 1.0569715,
+        3.2409699, -1.5373832, -0.4986108, -0.9692436, 1.8759675, 0.0415551, 0.0556301, -0.2039770,
+        1.0569715,
     ];
     let (a11, a12, a13, a21, a22, a23, a31, a32, a33) =
         (a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8]);
@@ -370,7 +370,9 @@ fn texel_encoding(srgb: bool) -> String {
     } else {
         "LinearTransferOETF"
     };
-    format!("vec4 linearToOutputTexel( vec4 value ) {{\n\treturn {oetf}( vec4( value.rgb * {m}, value.a ) );\n}}")
+    format!(
+        "vec4 linearToOutputTexel( vec4 value ) {{\n\treturn {oetf}( vec4( value.rgb * {m}, value.a ) );\n}}"
+    )
 }
 
 /// `getLuminanceFunction` for the linear-sRGB working space.
@@ -420,7 +422,8 @@ pub fn resolve_includes(source: &str) -> Result<String, String> {
 /// `NUM_SPOT_LIGHT_COORDS` is replaced before `NUM_SPOT_LIGHTS` could
 /// match its prefix, exactly as the JavaScript does.
 fn replace_light_nums(s: &str, p: &Parameters) -> String {
-    let coords = p.num_spot_light_shadows + p.num_spot_light_maps - p.num_spot_light_shadows_with_maps;
+    let coords =
+        p.num_spot_light_shadows + p.num_spot_light_maps - p.num_spot_light_shadows_with_maps;
     let pairs: [(&str, u32); 11] = [
         ("NUM_DIR_LIGHTS", p.num_dir_lights),
         ("NUM_SPOT_LIGHTS", p.num_spot_lights),
@@ -430,7 +433,10 @@ fn replace_light_nums(s: &str, p: &Parameters) -> String {
         ("NUM_POINT_LIGHTS", p.num_point_lights),
         ("NUM_HEMI_LIGHTS", p.num_hemi_lights),
         ("NUM_DIR_LIGHT_SHADOWS", p.num_dir_light_shadows),
-        ("NUM_SPOT_LIGHT_SHADOWS_WITH_MAPS", p.num_spot_light_shadows_with_maps),
+        (
+            "NUM_SPOT_LIGHT_SHADOWS_WITH_MAPS",
+            p.num_spot_light_shadows_with_maps,
+        ),
         ("NUM_SPOT_LIGHT_SHADOWS", p.num_spot_light_shadows),
         ("NUM_POINT_LIGHT_SHADOWS", p.num_point_light_shadows),
     ];
@@ -505,20 +511,35 @@ pub fn sources(p: &Parameters) -> Result<(String, String), String> {
         line(p.ao_map, "#define USE_AOMAP"),
         line(p.bump_map, "#define USE_BUMPMAP"),
         line(p.normal_map, "#define USE_NORMALMAP"),
-        line(p.normal_map_object_space, "#define USE_NORMALMAP_OBJECTSPACE"),
-        line(p.normal_map_tangent_space, "#define USE_NORMALMAP_TANGENTSPACE"),
+        line(
+            p.normal_map_object_space,
+            "#define USE_NORMALMAP_OBJECTSPACE",
+        ),
+        line(
+            p.normal_map_tangent_space,
+            "#define USE_NORMALMAP_TANGENTSPACE",
+        ),
         line(p.displacement_map, "#define USE_DISPLACEMENTMAP"),
         line(p.emissive_map, "#define USE_EMISSIVEMAP"),
         line(p.anisotropy, "#define USE_ANISOTROPY"),
         line(p.anisotropy_map, "#define USE_ANISOTROPYMAP"),
         line(p.clearcoat_map, "#define USE_CLEARCOATMAP"),
-        line(p.clearcoat_roughness_map, "#define USE_CLEARCOAT_ROUGHNESSMAP"),
+        line(
+            p.clearcoat_roughness_map,
+            "#define USE_CLEARCOAT_ROUGHNESSMAP",
+        ),
         line(p.clearcoat_normal_map, "#define USE_CLEARCOAT_NORMALMAP"),
         line(p.iridescence_map, "#define USE_IRIDESCENCEMAP"),
-        line(p.iridescence_thickness_map, "#define USE_IRIDESCENCE_THICKNESSMAP"),
+        line(
+            p.iridescence_thickness_map,
+            "#define USE_IRIDESCENCE_THICKNESSMAP",
+        ),
         line(p.specular_map, "#define USE_SPECULARMAP"),
         line(p.specular_color_map, "#define USE_SPECULAR_COLORMAP"),
-        line(p.specular_intensity_map, "#define USE_SPECULAR_INTENSITYMAP"),
+        line(
+            p.specular_intensity_map,
+            "#define USE_SPECULAR_INTENSITYMAP",
+        ),
         line(p.roughness_map, "#define USE_ROUGHNESSMAP"),
         line(p.metalness_map, "#define USE_METALNESSMAP"),
         line(p.alpha_map, "#define USE_ALPHAMAP"),
@@ -543,7 +564,10 @@ pub fn sources(p: &Parameters) -> Result<(String, String), String> {
         uv_define("CLEARCOAT_NORMALMAP_UV", &p.clearcoat_normal_map_uv),
         uv_define("CLEARCOAT_ROUGHNESSMAP_UV", &p.clearcoat_roughness_map_uv),
         uv_define("IRIDESCENCEMAP_UV", &p.iridescence_map_uv),
-        uv_define("IRIDESCENCE_THICKNESSMAP_UV", &p.iridescence_thickness_map_uv),
+        uv_define(
+            "IRIDESCENCE_THICKNESSMAP_UV",
+            &p.iridescence_thickness_map_uv,
+        ),
         uv_define("SHEEN_COLORMAP_UV", &p.sheen_color_map_uv),
         uv_define("SHEEN_ROUGHNESSMAP_UV", &p.sheen_roughness_map_uv),
         uv_define("SPECULARMAP_UV", &p.specular_map_uv),
@@ -561,10 +585,16 @@ pub fn sources(p: &Parameters) -> Result<(String, String), String> {
         line(p.flat_shading, "#define FLAT_SHADED"),
         line(p.skinning, "#define USE_SKINNING"),
         line(p.morph_targets, "#define USE_MORPHTARGETS"),
-        line(p.morph_normals && !p.flat_shading, "#define USE_MORPHNORMALS"),
+        line(
+            p.morph_normals && !p.flat_shading,
+            "#define USE_MORPHNORMALS",
+        ),
         line(p.morph_colors, "#define USE_MORPHCOLORS"),
         if p.morph_targets_count > 0 {
-            format!("#define MORPHTARGETS_TEXTURE_STRIDE {}", p.morph_texture_stride)
+            format!(
+                "#define MORPHTARGETS_TEXTURE_STRIDE {}",
+                p.morph_texture_stride
+            )
         } else {
             String::new()
         },
@@ -579,7 +609,10 @@ pub fn sources(p: &Parameters) -> Result<(String, String), String> {
         line(p.shadow_map_enabled, &format!("#define {shadow_type}")),
         line(p.size_attenuation, "#define USE_SIZEATTENUATION"),
         line(p.num_light_probes > 0, "#define USE_LIGHT_PROBES"),
-        line(p.logarithmic_depth_buffer, "#define USE_LOGARITHMIC_DEPTH_BUFFER"),
+        line(
+            p.logarithmic_depth_buffer,
+            "#define USE_LOGARITHMIC_DEPTH_BUFFER",
+        ),
         line(p.reversed_depth_buffer, "#define USE_REVERSED_DEPTH_BUFFER"),
         "uniform mat4 modelMatrix;".into(),
         "uniform mat4 modelViewMatrix;".into(),
@@ -644,22 +677,37 @@ pub fn sources(p: &Parameters) -> Result<(String, String), String> {
         line(p.ao_map, "#define USE_AOMAP"),
         line(p.bump_map, "#define USE_BUMPMAP"),
         line(p.normal_map, "#define USE_NORMALMAP"),
-        line(p.normal_map_object_space, "#define USE_NORMALMAP_OBJECTSPACE"),
-        line(p.normal_map_tangent_space, "#define USE_NORMALMAP_TANGENTSPACE"),
+        line(
+            p.normal_map_object_space,
+            "#define USE_NORMALMAP_OBJECTSPACE",
+        ),
+        line(
+            p.normal_map_tangent_space,
+            "#define USE_NORMALMAP_TANGENTSPACE",
+        ),
         line(p.emissive_map, "#define USE_EMISSIVEMAP"),
         line(p.anisotropy, "#define USE_ANISOTROPY"),
         line(p.anisotropy_map, "#define USE_ANISOTROPYMAP"),
         line(p.clearcoat, "#define USE_CLEARCOAT"),
         line(p.clearcoat_map, "#define USE_CLEARCOATMAP"),
-        line(p.clearcoat_roughness_map, "#define USE_CLEARCOAT_ROUGHNESSMAP"),
+        line(
+            p.clearcoat_roughness_map,
+            "#define USE_CLEARCOAT_ROUGHNESSMAP",
+        ),
         line(p.clearcoat_normal_map, "#define USE_CLEARCOAT_NORMALMAP"),
         line(p.dispersion, "#define USE_DISPERSION"),
         line(p.iridescence, "#define USE_IRIDESCENCE"),
         line(p.iridescence_map, "#define USE_IRIDESCENCEMAP"),
-        line(p.iridescence_thickness_map, "#define USE_IRIDESCENCE_THICKNESSMAP"),
+        line(
+            p.iridescence_thickness_map,
+            "#define USE_IRIDESCENCE_THICKNESSMAP",
+        ),
         line(p.specular_map, "#define USE_SPECULARMAP"),
         line(p.specular_color_map, "#define USE_SPECULAR_COLORMAP"),
-        line(p.specular_intensity_map, "#define USE_SPECULAR_INTENSITYMAP"),
+        line(
+            p.specular_intensity_map,
+            "#define USE_SPECULAR_INTENSITYMAP",
+        ),
         line(p.roughness_map, "#define USE_ROUGHNESSMAP"),
         line(p.metalness_map, "#define USE_METALNESSMAP"),
         line(p.alpha_map, "#define USE_ALPHAMAP"),
@@ -672,7 +720,10 @@ pub fn sources(p: &Parameters) -> Result<(String, String), String> {
         line(p.transmission_map, "#define USE_TRANSMISSIONMAP"),
         line(p.thickness_map, "#define USE_THICKNESSMAP"),
         line(p.vertex_tangents && !p.flat_shading, "#define USE_TANGENT"),
-        line(p.vertex_colors || p.instancing_color || p.batching_color, "#define USE_COLOR"),
+        line(
+            p.vertex_colors || p.instancing_color || p.batching_color,
+            "#define USE_COLOR",
+        ),
         line(p.vertex_alphas, "#define USE_COLOR_ALPHA"),
         line(p.vertex_uv1s, "#define USE_UV1"),
         line(p.vertex_uv2s, "#define USE_UV2"),
@@ -687,8 +738,14 @@ pub fn sources(p: &Parameters) -> Result<(String, String), String> {
         line(p.premultiplied_alpha, "#define PREMULTIPLIED_ALPHA"),
         line(p.num_light_probes > 0, "#define USE_LIGHT_PROBES"),
         line(p.decode_video_texture, "#define DECODE_VIDEO_TEXTURE"),
-        line(p.decode_video_texture_emissive, "#define DECODE_VIDEO_TEXTURE_EMISSIVE"),
-        line(p.logarithmic_depth_buffer, "#define USE_LOGARITHMIC_DEPTH_BUFFER"),
+        line(
+            p.decode_video_texture_emissive,
+            "#define DECODE_VIDEO_TEXTURE_EMISSIVE",
+        ),
+        line(
+            p.logarithmic_depth_buffer,
+            "#define USE_LOGARITHMIC_DEPTH_BUFFER",
+        ),
         line(p.reversed_depth_buffer, "#define USE_REVERSED_DEPTH_BUFFER"),
         "uniform mat4 viewMatrix;".into(),
         "uniform vec3 cameraPosition;".into(),
@@ -722,8 +779,14 @@ pub fn sources(p: &Parameters) -> Result<(String, String), String> {
     fragment = unroll_loops(&fragment);
     // GLSL 3.0 conversion for built-in materials.
     let vertex_extensions = join(vec![
-        line(p.extension_clip_cull_distance, "#extension GL_ANGLE_clip_cull_distance : require"),
-        line(p.extension_multi_draw, "#extension GL_ANGLE_multi_draw : require"),
+        line(
+            p.extension_clip_cull_distance,
+            "#extension GL_ANGLE_clip_cull_distance : require",
+        ),
+        line(
+            p.extension_multi_draw,
+            "#extension GL_ANGLE_multi_draw : require",
+        ),
     ]);
     let prefix_vertex = [
         vertex_extensions.as_str(),
@@ -772,8 +835,12 @@ pub fn standard_material(
         shader_type: "MeshStandardMaterial".into(),
         shader_name: name.into(),
         defines: vec![("STANDARD".into(), String::new())],
-        vertex_shader: chunk("meshphysical_vert").ok_or("meshphysical_vert")?.into(),
-        fragment_shader: chunk("meshphysical_frag").ok_or("meshphysical_frag")?.into(),
+        vertex_shader: chunk("meshphysical_vert")
+            .ok_or("meshphysical_vert")?
+            .into(),
+        fragment_shader: chunk("meshphysical_frag")
+            .ok_or("meshphysical_frag")?
+            .into(),
         tone_mapping: ToneMapping::AcesFilmic,
         opaque: true,
         output_srgb: true,

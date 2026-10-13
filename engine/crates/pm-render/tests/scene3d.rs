@@ -13,7 +13,7 @@ mod support;
 use pm_geom3d::{Parameters, Primitive};
 use pm_render::parity::{bar_3d, msaa_edges};
 use pm_render::scene3d::{
-    Camera3d, MathMode, Material3d, Object3dPlan, Scene3dRenderer, Sun, uniforms,
+    Camera3d, Material3d, MathMode, Object3dPlan, Scene3dRenderer, Sun, uniforms,
 };
 use pm_render::three::math;
 use serde_json::Value;
@@ -36,7 +36,11 @@ fn capture() -> Option<std::path::PathBuf> {
 
 fn v3(v: &Value) -> [f64; 3] {
     let a = v.as_array().unwrap();
-    [a[0].as_f64().unwrap(), a[1].as_f64().unwrap(), a[2].as_f64().unwrap()]
+    [
+        a[0].as_f64().unwrap(),
+        a[1].as_f64().unwrap(),
+        a[2].as_f64().unwrap(),
+    ]
 }
 
 /// The plan `plan_object` would build for the case's scene.
@@ -112,7 +116,9 @@ fn plan_of(c: &Value) -> Object3dPlan {
             })
             .collect(),
         background: if c["bottom"].as_bool() == Some(true) {
-            env["background"].as_str().map(|s| math::color_hex(s).unwrap())
+            env["background"]
+                .as_str()
+                .map(|s| math::color_hex(s).unwrap())
         } else {
             None
         },
@@ -129,9 +135,10 @@ fn uniforms_equal_three_js() {
     let mut compared = 0;
     for c in cases() {
         let id = c["id"].as_str().unwrap();
-        let record: Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.join(id).join("record.json")).unwrap())
-                .unwrap();
+        let record: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join(id).join("record.json")).unwrap(),
+        )
+        .unwrap();
         // Draw 0 is the depth prepass, draw 1 the color pass (MSAA canvas).
         let draw = &record["draws"][1];
         assert_eq!(draw["depthMask"], false, "{id}: draw 1 is the color pass");
@@ -161,7 +168,10 @@ fn uniforms_equal_three_js() {
             }
         }
     }
-    eprintln!("{compared} uniform values; worst relative difference {:e} ({})", worst.0, worst.1);
+    eprintln!(
+        "{compared} uniform values; worst relative difference {:e} ({})",
+        worst.0, worst.1
+    );
     assert!(worst.0 <= 1e-6, "uniforms differ: {}", worst.1);
 }
 
@@ -177,9 +187,16 @@ fn primitives_within_the_3d_bar() {
     let safe = run_cases(&gpu, &dir, MathMode::Safe);
     let fast = run_cases(&gpu, &dir, MathMode::Fast);
     if !fast.is_empty() {
-        eprintln!("fast math outside the bar (not a product path):\n{}", fast.join("\n"));
+        eprintln!(
+            "fast math outside the bar (not a product path):\n{}",
+            fast.join("\n")
+        );
     }
-    assert!(safe.is_empty(), "outside the 3D bar (safe math):\n{}", safe.join("\n"));
+    assert!(
+        safe.is_empty(),
+        "outside the 3D bar (safe math):\n{}",
+        safe.join("\n")
+    );
 }
 
 /// Renders every case with `math`; the failing lines.
@@ -190,7 +207,11 @@ fn run_cases(gpu: &pm_gpu::Gpu, dir: &std::path::Path, math: MathMode) -> Vec<St
     let used = scene.math_mode(&gpu.device);
     eprintln!("math mode {math:?} (compiled as {used:?})");
     if math == MathMode::Safe {
-        assert_eq!(used, MathMode::Safe, "the engine device compiles 3D programs with safe math");
+        assert_eq!(
+            used,
+            MathMode::Safe,
+            "the engine device compiles 3D programs with safe math"
+        );
     }
     let mut pool = pm_gpu::TargetPool::new();
     let mut failed = Vec::new();
@@ -200,7 +221,14 @@ fn run_cases(gpu: &pm_gpu::Gpu, dir: &std::path::Path, math: MathMode) -> Vec<St
         let (w, h) = (plan.width as usize, plan.height as usize);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let out = scene
-            .render(&gpu.device, &gpu.queue, &mut encoder, &mut pool, &plan, true)
+            .render(
+                &gpu.device,
+                &gpu.queue,
+                &mut encoder,
+                &mut pool,
+                &plan,
+                true,
+            )
             .unwrap_or_else(|e| panic!("{id}: {e}"));
         gpu.queue.submit([encoder.finish()]);
         let gl = pm_gpu::readback::read_raw(&gpu.device, &gpu.queue, &out.color.texture).unwrap();
@@ -238,8 +266,18 @@ fn run_cases(gpu: &pm_gpu::Gpu, dir: &std::path::Path, math: MathMode) -> Vec<St
             failed.push(line);
             if let Some(d) = &diffs {
                 std::fs::create_dir_all(d).unwrap();
-                support::write_png(&d.join(format!("{id}-{math:?}-engine.png")), w as u32, h as u32, &ours);
-                support::write_png(&d.join(format!("{id}-three.png")), w as u32, h as u32, &reference);
+                support::write_png(
+                    &d.join(format!("{id}-{math:?}-engine.png")),
+                    w as u32,
+                    h as u32,
+                    &ours,
+                );
+                support::write_png(
+                    &d.join(format!("{id}-three.png")),
+                    w as u32,
+                    h as u32,
+                    &reference,
+                );
             }
         }
         pool.give(out.color);
@@ -255,28 +293,47 @@ fn programs_come_from_the_disk_cache() {
     let gpu = pm_gpu::Gpu::new("pm-render 3d cache test").expect("a Metal device");
     let dir = std::env::temp_dir().join(format!("pm-render-programs-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let case = cases().into_iter().find(|c| c["id"] == "cone-metal-three-suns").unwrap();
+    let case = cases()
+        .into_iter()
+        .find(|c| c["id"] == "cone-metal-three-suns")
+        .unwrap();
     let plan = plan_of(&case);
     let render = |scene: &mut Scene3dRenderer| {
         let mut pool = pm_gpu::TargetPool::new();
         let t0 = std::time::Instant::now();
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let out = scene
-            .render(&gpu.device, &gpu.queue, &mut encoder, &mut pool, &plan, false)
+            .render(
+                &gpu.device,
+                &gpu.queue,
+                &mut encoder,
+                &mut pool,
+                &plan,
+                false,
+            )
             .unwrap();
         gpu.queue.submit([encoder.finish()]);
-        let bytes = pm_gpu::readback::read_raw(&gpu.device, &gpu.queue, &out.color.texture).unwrap();
+        let bytes =
+            pm_gpu::readback::read_raw(&gpu.device, &gpu.queue, &out.color.texture).unwrap();
         (bytes, t0.elapsed())
     };
     let mut cold = Scene3dRenderer::default();
     cold.set_program_cache(Some(dir.clone()));
     let (a, translate) = render(&mut cold);
     assert_eq!(cold.program_cache_stats(), (0, 0));
-    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "one program stored");
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        1,
+        "one program stored"
+    );
     let mut warm = Scene3dRenderer::default();
     warm.set_program_cache(Some(dir.clone()));
     let (b, cached) = render(&mut warm);
-    assert_eq!(warm.program_cache_stats(), (1, 0), "the program came from the cache");
+    assert_eq!(
+        warm.program_cache_stats(),
+        (1, 0),
+        "the program came from the cache"
+    );
     assert!(a == b, "a cached program renders the same pixels");
     eprintln!("first frame: translated {translate:?}, from the disk cache {cached:?}");
     // A corrupted entry is a miss and is rewritten.

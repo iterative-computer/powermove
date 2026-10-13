@@ -199,4 +199,3 @@ pub fn module(
     let (source, entry_point) = write(module, info, stage, slots, mode)?;
     from_source(device, label, &source, &entry_point)
 }
-

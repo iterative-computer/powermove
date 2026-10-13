@@ -68,7 +68,11 @@ fn standard_programs_equal_three_js() {
                 .as_ref()
                 .and_then(|dir| std::fs::read_to_string(dir.join(case).join("record.json")).ok())
                 .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok())
-                .and_then(|r| r["programs"][0][stage].as_str().map(|t| first_difference(ours, t)))
+                .and_then(|r| {
+                    r["programs"][0][stage]
+                        .as_str()
+                        .map(|t| first_difference(ours, t))
+                })
                 .unwrap_or_else(|| "no reference capture on this machine".into());
             failures.push(format!(
                 "{case} {stage}: {} bytes against {} ({detail})",

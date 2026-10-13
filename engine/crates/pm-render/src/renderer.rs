@@ -300,7 +300,13 @@ impl Renderer {
                     wgpu::TextureFormat::Rgba16Float,
                     wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
                 );
-                exec.render_ids(&mut encoder, &resolved, region, (plan.width, plan.height), &id_rows);
+                exec.render_ids(
+                    &mut encoder,
+                    &resolved,
+                    region,
+                    (plan.width, plan.height),
+                    &id_rows,
+                );
                 exec.flip(&mut encoder, &id_rows, ids);
                 exec.taken.push(id_rows);
             }

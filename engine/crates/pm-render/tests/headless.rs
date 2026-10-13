@@ -21,34 +21,95 @@ fn everything() -> (Value, MapResolver) {
     let dur = 2.0;
     let mut layers = Vec::new();
     // Top to bottom.
-    let mut over = layer("over", "solid", json!({ "color": "#E8E2CF", "w": 40, "h": 40 }), 10.0, 120.0, dur);
+    let mut over = layer(
+        "over",
+        "solid",
+        json!({ "color": "#E8E2CF", "w": 40, "h": 40 }),
+        10.0,
+        120.0,
+        dur,
+    );
     set(&mut over, "opacity", json!(70));
-    set(&mut over, "rotation", keys(json!(0), &[(0.0, json!(0)), (2.0, json!(90))]));
+    set(
+        &mut over,
+        "rotation",
+        keys(json!(0), &[(0.0, json!(0)), (2.0, json!(90))]),
+    );
     layers.push(over);
-    layers.push(object3d("obj", "sphere", json!({ "radius": 1, "segments": 32 }), "#4C8DFF", W, H, dur));
+    layers.push(object3d(
+        "obj",
+        "sphere",
+        json!({ "radius": 1, "segments": 32 }),
+        "#4C8DFF",
+        W,
+        H,
+        dur,
+    ));
     layers.push(sun("sun", [-4.0, 6.0, 4.0], false, dur));
     layers.push(camera("cam", [0.0, 0.0, 5.0], false, dur));
-    let mut image = layer("img", "image", json!({ "asset": "still", "fit": "contain", "w": 80, "h": 45 }), 250.0, 40.0, dur);
+    let mut image = layer(
+        "img",
+        "image",
+        json!({ "asset": "still", "fit": "contain", "w": 80, "h": 45 }),
+        250.0,
+        40.0,
+        dur,
+    );
     set(&mut image, "rotation", json!(17));
     layers.push(image);
-    let mut video = layer("vid", "video", json!({ "asset": "clip", "fit": "cover", "w": 120, "h": 68, "trim": 0, "speed": 1 }), 80.0, 50.0, dur);
+    let mut video = layer(
+        "vid",
+        "video",
+        json!({ "asset": "clip", "fit": "cover", "w": 120, "h": 68, "trim": 0, "speed": 1 }),
+        80.0,
+        50.0,
+        dur,
+    );
     set(&mut video, "rotation", json!(-8));
     set(&mut video, "opacity", json!(85));
     layers.push(video);
-    let mut a = layer("ga", "solid", json!({ "color": "#FF6B1A", "w": 60, "h": 60 }), 200.0, 100.0, dur);
+    let mut a = layer(
+        "ga",
+        "solid",
+        json!({ "color": "#FF6B1A", "w": 60, "h": 60 }),
+        200.0,
+        100.0,
+        dur,
+    );
     a["group"] = json!("grp");
-    let mut b = layer("gb", "solid", json!({ "color": "#3FCF8E", "w": 60, "h": 60 }), 230.0, 120.0, dur);
+    let mut b = layer(
+        "gb",
+        "solid",
+        json!({ "color": "#3FCF8E", "w": 60, "h": 60 }),
+        230.0,
+        120.0,
+        dur,
+    );
     b["group"] = json!("grp");
     layers.push(a);
     layers.push(b);
     let mut group = layer("grp", "group", json!({}), 0.0, 0.0, dur);
     set(&mut group, "opacity", json!(60));
     layers.push(group);
-    let mut pre = layer("pre", "precomp", json!({ "comp": "inner", "w": 160, "h": 90 }), 150.0, 10.0, dur);
+    let mut pre = layer(
+        "pre",
+        "precomp",
+        json!({ "comp": "inner", "w": 160, "h": 90 }),
+        150.0,
+        10.0,
+        dur,
+    );
     set(&mut pre, "scale.x", json!(75));
     set(&mut pre, "scale.y", json!(75));
     layers.push(pre);
-    layers.push(layer("back", "solid", json!({ "color": "#202436", "w": 200, "h": 180 }), 0.0, 0.0, dur));
+    layers.push(layer(
+        "back",
+        "solid",
+        json!({ "color": "#202436", "w": 200, "h": 180 }),
+        0.0,
+        0.0,
+        dur,
+    ));
     let mut doc = project(W, H, dur, solid_fill("#14161C"), layers);
     composition(
         &mut doc,
@@ -57,16 +118,34 @@ fn everything() -> (Value, MapResolver) {
         90,
         dur,
         vec![
-            layer("in-img", "image", json!({ "asset": "still", "fit": "stretch", "w": 160, "h": 90 }), 80.0, 45.0, dur),
-            layer("in-solid", "solid", json!({ "color": "#A73366", "w": 160, "h": 90 }), 0.0, 0.0, dur),
+            layer(
+                "in-img",
+                "image",
+                json!({ "asset": "still", "fit": "stretch", "w": 160, "h": 90 }),
+                80.0,
+                45.0,
+                dur,
+            ),
+            layer(
+                "in-solid",
+                "solid",
+                json!({ "color": "#A73366", "w": 160, "h": 90 }),
+                0.0,
+                0.0,
+                dur,
+            ),
         ],
     );
     asset(&mut doc, "still", "image", "png", 160, 90, 0.0);
     asset(&mut doc, "clip", "video", "mp4", 320, 180, 2.0);
     let fixtures = repo_root().join("apps/desktop/e2e/fixtures");
     let mut resolver = MapResolver::default();
-    resolver.paths.insert("still".into(), fixtures.join("still-alpha.png"));
-    resolver.paths.insert("clip".into(), fixtures.join("h264-aac.mp4"));
+    resolver
+        .paths
+        .insert("still".into(), fixtures.join("still-alpha.png"));
+    resolver
+        .paths
+        .insert("clip".into(), fixtures.join("h264-aac.mp4"));
     (doc, resolver)
 }
 
@@ -81,11 +160,12 @@ fn render_bytes(
         .render(doc, "Ptest-root", ticks(t), request, resolver)
         .expect("render");
     assert!(frame.failures.is_empty(), "{:?}", frame.failures);
-    let color = pm_gpu::readback::read_raw(renderer.device(), renderer.queue(), &frame.color.texture).unwrap();
-    let ids = frame
-        .depth_id
-        .as_ref()
-        .map(|t| pm_gpu::readback::read_raw(renderer.device(), renderer.queue(), &t.texture).unwrap());
+    let color =
+        pm_gpu::readback::read_raw(renderer.device(), renderer.queue(), &frame.color.texture)
+            .unwrap();
+    let ids = frame.depth_id.as_ref().map(|t| {
+        pm_gpu::readback::read_raw(renderer.device(), renderer.queue(), &t.texture).unwrap()
+    });
     (color, ids, frame.legend)
 }
 
@@ -93,7 +173,11 @@ fn render_bytes(
 fn every_feature_is_supported_and_frames_are_deterministic() {
     let (doc, resolver) = everything();
     let doc = load(&doc);
-    assert_eq!(unsupported(&doc, "Ptest-root"), vec![], "the composition is within the renderer");
+    assert_eq!(
+        unsupported(&doc, "Ptest-root"),
+        vec![],
+        "the composition is within the renderer"
+    );
     let mut first = Renderer::headless().unwrap();
     let mut second = Renderer::headless().unwrap();
     for precision in [Precision::Float16, Precision::Float32] {
@@ -103,8 +187,14 @@ fn every_feature_is_supported_and_frames_are_deterministic() {
             let a = render_bytes(&mut first, &doc, t, &request, &resolver);
             let b = render_bytes(&mut first, &doc, t, &request, &resolver);
             let c = render_bytes(&mut second, &doc, t, &request, &resolver);
-            assert!(a.0 == b.0 && a.1 == b.1, "{precision:?} t={t}: the same renderer twice differs");
-            assert!(a.0 == c.0 && a.1 == c.1, "{precision:?} t={t}: two renderers differ");
+            assert!(
+                a.0 == b.0 && a.1 == b.1,
+                "{precision:?} t={t}: the same renderer twice differs"
+            );
+            assert!(
+                a.0 == c.0 && a.1 == c.1,
+                "{precision:?} t={t}: two renderers differ"
+            );
             assert!(a.0.iter().any(|&v| v != 0), "the frame drew something");
         }
     }
@@ -120,12 +210,36 @@ fn regions_equal_the_same_pixels_of_the_full_frame() {
         full.depth_id = true;
         let (whole, whole_ids, _) = render_bytes(&mut r, &doc, 0.6, &full, &resolver);
         let whole_ids = whole_ids.unwrap();
-        let bpp = if precision == Precision::Float16 { 8 } else { 16 };
+        let bpp = if precision == Precision::Float16 {
+            8
+        } else {
+            16
+        };
         for rect in [
-            PixelRect { x: 0, y: 0, width: W, height: H },
-            PixelRect { x: 101, y: 37, width: 150, height: 100 },
-            PixelRect { x: 1, y: 179, width: 319, height: 1 },
-            PixelRect { x: 140, y: 60, width: 60, height: 70 },
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: W,
+                height: H,
+            },
+            PixelRect {
+                x: 101,
+                y: 37,
+                width: 150,
+                height: 100,
+            },
+            PixelRect {
+                x: 1,
+                y: 179,
+                width: 319,
+                height: 1,
+            },
+            PixelRect {
+                x: 140,
+                y: 60,
+                width: 60,
+                height: 70,
+            },
         ] {
             let mut request = full;
             request.region = Some(rect);
@@ -151,7 +265,11 @@ fn regions_equal_the_same_pixels_of_the_full_frame() {
                 }
             }
             if !bad.is_empty() {
-                eprintln!("{precision:?} {rect:?}: {} pixels differ, first {:?}", bad.len(), &bad[..bad.len().min(12)]);
+                eprintln!(
+                    "{precision:?} {rect:?}: {} pixels differ, first {:?}",
+                    bad.len(),
+                    &bad[..bad.len().min(12)]
+                );
             }
             for y in 0..rect.height as usize {
                 let row = rect.width as usize * bpp;
@@ -168,18 +286,47 @@ fn regions_equal_the_same_pixels_of_the_full_frame() {
 #[test]
 fn depth_and_id_surface() {
     let dur = 2.0;
-    let mut doc = project(W, H, dur, solid_fill("#000000"), vec![
-        object3d("obj", "sphere", json!({ "radius": 1, "segments": 64 }), "#FFFFFF", W, H, dur),
-        sun("sun", [-4.0, 6.0, 4.0], false, dur),
-        camera("cam", [0.0, 0.0, 5.0], false, dur),
-        layer("left", "solid", json!({ "color": "#FF0000", "w": 60, "h": 180 }), 0.0, 0.0, dur),
-    ]);
+    let mut doc = project(
+        W,
+        H,
+        dur,
+        solid_fill("#000000"),
+        vec![
+            object3d(
+                "obj",
+                "sphere",
+                json!({ "radius": 1, "segments": 64 }),
+                "#FFFFFF",
+                W,
+                H,
+                dur,
+            ),
+            sun("sun", [-4.0, 6.0, 4.0], false, dur),
+            camera("cam", [0.0, 0.0, 5.0], false, dur),
+            layer(
+                "left",
+                "solid",
+                json!({ "color": "#FF0000", "w": 60, "h": 180 }),
+                0.0,
+                0.0,
+                dur,
+            ),
+        ],
+    );
     doc["layers"][3]["p"]["opacity"] = ch(json!(100));
     let doc = load(&doc);
     let mut r = Renderer::headless().unwrap();
     let mut request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
     request.depth_id = true;
-    let frame = r.render(&doc, "Ptest-root", ticks(0.0), &request, &MapResolver::default()).unwrap();
+    let frame = r
+        .render(
+            &doc,
+            "Ptest-root",
+            ticks(0.0),
+            &request,
+            &MapResolver::default(),
+        )
+        .unwrap();
     let surface = r.read_depth_id(&frame).unwrap().unwrap();
     let at = |x: usize, y: usize| {
         let i = (y * W as usize + x) * 4;
@@ -213,10 +360,24 @@ fn variant(edit: impl FnOnce(&mut Value)) -> Vec<Feature> {
 #[test]
 fn capability_check_lists_what_the_renderer_cannot_draw() {
     let layer_at = |doc: &mut Value, id: &str| -> usize {
-        doc["layers"].as_array().unwrap().iter().position(|l| l["id"] == id).unwrap()
+        doc["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|l| l["id"] == id)
+            .unwrap()
     };
     // Layer types and effects.
-    let f = variant(|d| d["layers"].as_array_mut().unwrap().push(layer("t", "text", json!({ "text": "x" }), 0.0, 0.0, 2.0)));
+    let f = variant(|d| {
+        d["layers"].as_array_mut().unwrap().push(layer(
+            "t",
+            "text",
+            json!({ "text": "x" }),
+            0.0,
+            0.0,
+            2.0,
+        ))
+    });
     assert!(f.contains(&Feature::LayerType("text".into())), "{f:?}");
     let f = variant(|d| {
         let i = layer_at(d, "back");
@@ -246,7 +407,10 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
     let f = variant(|d| d["color"] = json!({ "mode": "standard", "linearBlending": true }));
     assert!(f.contains(&Feature::ProjectColor), "{f:?}");
     // 3D beyond the Phase 2 primitive.
-    let scene = |f: &[Feature], what: &str| f.iter().any(|x| matches!(x, Feature::Scene3d(s) if s.contains(what)));
+    let scene = |f: &[Feature], what: &str| {
+        f.iter()
+            .any(|x| matches!(x, Feature::Scene3d(s) if s.contains(what)))
+    };
     let f = variant(|d| {
         let i = layer_at(d, "cam");
         d["layers"][i]["d"]["data"]["environment"]["shadows"] = json!(true);
@@ -260,7 +424,15 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
     });
     assert!(scene(&f, "point lights"), "{f:?}");
     let f = variant(|d| {
-        d["layers"].as_array_mut().unwrap().push(object3d("obj2", "box", json!({}), "#FFFFFF", W, H, 2.0));
+        d["layers"].as_array_mut().unwrap().push(object3d(
+            "obj2",
+            "box",
+            json!({}),
+            "#FFFFFF",
+            W,
+            H,
+            2.0,
+        ));
     });
     assert!(scene(&f, "more than one 3D object"), "{f:?}");
     let f = variant(|d| {
@@ -293,7 +465,12 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
     });
     assert!(scene(&f, "shadows"), "{f:?}");
     // Nested compositions are checked too.
-    let f = variant(|d| d["comps"]["inner"]["layers"].as_array_mut().unwrap().push(layer("s", "shape", json!({}), 0.0, 0.0, 2.0)));
+    let f = variant(|d| {
+        d["comps"]["inner"]["layers"]
+            .as_array_mut()
+            .unwrap()
+            .push(layer("s", "shape", json!({}), 0.0, 0.0, 2.0))
+    });
     assert!(f.contains(&Feature::LayerType("shape".into())), "{f:?}");
 }
 
@@ -303,39 +480,113 @@ fn requests_are_validated() {
     let doc = load(&doc);
     let mut r = Renderer::headless().unwrap();
     let mut request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
-    request.region = Some(PixelRect { x: 300, y: 0, width: 40, height: 10 });
-    assert!(r.render(&doc, "Ptest-root", ticks(0.0), &request, &resolver).is_err());
+    request.region = Some(PixelRect {
+        x: 300,
+        y: 0,
+        width: 40,
+        height: 10,
+    });
+    assert!(
+        r.render(&doc, "Ptest-root", ticks(0.0), &request, &resolver)
+            .is_err()
+    );
     let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
-    assert!(r.render(&doc, "nope", ticks(0.0), &request, &resolver).is_err());
+    assert!(
+        r.render(&doc, "nope", ticks(0.0), &request, &resolver)
+            .is_err()
+    );
 }
 
 #[test]
 fn pass_through_candidates() {
     let fixtures = repo_root().join("apps/desktop/e2e/fixtures");
     let clip = |rotation: f64, extra: bool| {
-        let mut v = layer("v", "video", json!({ "asset": "clip", "fit": "stretch", "w": 160, "h": 90, "trim": 0, "speed": 1 }), 80.0, 45.0, 2.0);
+        let mut v = layer(
+            "v",
+            "video",
+            json!({ "asset": "clip", "fit": "stretch", "w": 160, "h": 90, "trim": 0, "speed": 1 }),
+            80.0,
+            45.0,
+            2.0,
+        );
         set(&mut v, "rotation", json!(rotation));
         let mut layers = vec![v];
         if extra {
-            layers.insert(0, layer("s", "solid", json!({ "color": "#FFFFFF", "w": 10, "h": 10 }), 0.0, 0.0, 2.0));
+            layers.insert(
+                0,
+                layer(
+                    "s",
+                    "solid",
+                    json!({ "color": "#FFFFFF", "w": 10, "h": 10 }),
+                    0.0,
+                    0.0,
+                    2.0,
+                ),
+            );
         }
         let mut doc = project(160, 90, 2.0, no_fill(), layers);
         asset(&mut doc, "clip", "video", "mp4", 160, 90, 2.0);
         load(&doc)
     };
     let mut resolver = MapResolver::default();
-    resolver.paths.insert("clip".into(), fixtures.join("h264-aac.mp4"));
+    resolver
+        .paths
+        .insert("clip".into(), fixtures.join("h264-aac.mp4"));
     let mut r = Renderer::headless().unwrap();
     let request = RenderRequest::at_scale(Size::new(160, 90), 1.0, Precision::Float16);
-    let p = r.pass_through(&clip(0.0, false), "Ptest-root", ticks(0.5), &request, &resolver).unwrap().unwrap();
-    assert_eq!(p.facts, pm_color::chroma::FrameFacts { single_source: true, untransformed: true, effect_free: true });
+    let p = r
+        .pass_through(
+            &clip(0.0, false),
+            "Ptest-root",
+            ticks(0.5),
+            &request,
+            &resolver,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        p.facts,
+        pm_color::chroma::FrameFacts {
+            single_source: true,
+            untransformed: true,
+            effect_free: true
+        }
+    );
     assert!((p.seconds - 0.5).abs() < 1e-12);
-    let p = r.pass_through(&clip(3.0, false), "Ptest-root", ticks(0.5), &request, &resolver).unwrap().unwrap();
+    let p = r
+        .pass_through(
+            &clip(3.0, false),
+            "Ptest-root",
+            ticks(0.5),
+            &request,
+            &resolver,
+        )
+        .unwrap()
+        .unwrap();
     assert!(!p.facts.untransformed, "a rotated frame is resampled");
-    assert!(r.pass_through(&clip(0.0, true), "Ptest-root", ticks(0.5), &request, &resolver).unwrap().is_none());
+    assert!(
+        r.pass_through(
+            &clip(0.0, true),
+            "Ptest-root",
+            ticks(0.5),
+            &request,
+            &resolver
+        )
+        .unwrap()
+        .is_none()
+    );
     // At another output size the source is resampled.
     let half = RenderRequest::at_scale(Size::new(160, 90), 0.5, Precision::Float16);
-    let p = r.pass_through(&clip(0.0, false), "Ptest-root", ticks(0.5), &half, &resolver).unwrap().unwrap();
+    let p = r
+        .pass_through(
+            &clip(0.0, false),
+            "Ptest-root",
+            ticks(0.5),
+            &half,
+            &resolver,
+        )
+        .unwrap()
+        .unwrap();
     assert!(!p.facts.untransformed);
 }
 
@@ -355,20 +606,50 @@ fn render_into_a_callers_target_equals_render() {
         wgpu::TextureFormat::Rgba16Float,
         pm_gpu::target::working_usage(),
     );
-    let out = r.render_into(&doc, "Ptest-root", ticks(0.4), &request, &resolver, &target, None).unwrap();
+    let out = r
+        .render_into(
+            &doc,
+            "Ptest-root",
+            ticks(0.4),
+            &request,
+            &resolver,
+            &target,
+            None,
+        )
+        .unwrap();
     assert!(out.failures.is_empty());
     let got = pm_gpu::readback::read_raw(r.device(), r.queue(), &target.texture).unwrap();
     assert!(got == expected);
     // A target of the wrong size is refused.
-    let small = pm_gpu::Target::new(r.device(), "small", 10, 10, wgpu::TextureFormat::Rgba16Float, pm_gpu::target::working_usage());
-    assert!(r.render_into(&doc, "Ptest-root", ticks(0.4), &request, &resolver, &small, None).is_err());
+    let small = pm_gpu::Target::new(
+        r.device(),
+        "small",
+        10,
+        10,
+        wgpu::TextureFormat::Rgba16Float,
+        pm_gpu::target::working_usage(),
+    );
+    assert!(
+        r.render_into(
+            &doc,
+            "Ptest-root",
+            ticks(0.4),
+            &request,
+            &resolver,
+            &small,
+            None
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn contract_2_requests_convert() {
     use pm_protocol::color::OutputColor;
     use pm_protocol::common::{CompositionId, Ticks};
-    use pm_protocol::frame::{FramePurpose, FrameRequest, MediaPreference, MotionBlurKind, PreviewResolution};
+    use pm_protocol::frame::{
+        FramePurpose, FrameRequest, MediaPreference, MotionBlurKind, PreviewResolution,
+    };
     use pm_protocol::priority::PriorityClass;
     let mut request = FrameRequest {
         composition: CompositionId::new("Ptest-root"),
@@ -376,7 +657,12 @@ fn contract_2_requests_convert() {
         purpose: FramePurpose::Export,
         priority: PriorityClass::UserJob,
         output_size: Size::new(W, H),
-        region: Some(PixelRect { x: 10, y: 20, width: 100, height: 50 }),
+        region: Some(PixelRect {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 50,
+        }),
         scale: 1.0,
         resolution: PreviewResolution::Full,
         media: MediaPreference::Originals,
@@ -398,15 +684,22 @@ fn contract_2_requests_convert() {
     viewer.purpose = FramePurpose::Viewer;
     viewer.priority = PriorityClass::Interactive;
     viewer.depth_id = true;
-    viewer.color = OutputColor::Viewer { space: pm_protocol::color::ViewerColorSpace::Srgb };
+    viewer.color = OutputColor::Viewer {
+        space: pm_protocol::color::ViewerColorSpace::Srgb,
+    };
     let v = RenderRequest::from_frame_request(&viewer).unwrap();
     assert!(!v.export && v.depth_id);
-    assert_eq!((r.output_size, r.region, r.scale), (Size::new(W, H), request.region, Some((1.0, 1.0))));
+    assert_eq!(
+        (r.output_size, r.region, r.scale),
+        (Size::new(W, H), request.region, Some((1.0, 1.0)))
+    );
     assert_eq!(r.target_size(), Size::new(100, 50));
     // The frame renders at the region's size.
     let (doc, resolver) = everything();
     let mut renderer = Renderer::headless().unwrap();
-    let frame = renderer.render(&load(&doc), "Ptest-root", ticks(0.0), &r, &resolver).unwrap();
+    let frame = renderer
+        .render(&load(&doc), "Ptest-root", ticks(0.0), &r, &resolver)
+        .unwrap();
     assert_eq!((frame.color.width(), frame.color.height()), (100, 50));
     // An invalid request is refused.
     request.scale = 40.0;

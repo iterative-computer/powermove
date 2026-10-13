@@ -163,9 +163,7 @@ impl ProgramCache {
     /// Stores an entry atomically.
     pub fn store(&self, key: &str, program: &CachedProgram) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.dir)?;
-        let tmp = self
-            .dir
-            .join(format!(".{key}.{}.tmp", std::process::id()));
+        let tmp = self.dir.join(format!(".{key}.{}.tmp", std::process::id()));
         std::fs::write(&tmp, program.to_json(key).to_string())?;
         std::fs::rename(&tmp, self.path(key))
     }

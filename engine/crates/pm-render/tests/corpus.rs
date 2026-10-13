@@ -177,17 +177,32 @@ fn corpus_render_parity() {
                 let mut with_ids = request;
                 with_ids.depth_id = true;
                 let ids = renderer
-                    .render(&p.document, &p.composition, ticks(s.time), &with_ids, &p.resolver)
+                    .render(
+                        &p.document,
+                        &p.composition,
+                        ticks(s.time),
+                        &with_ids,
+                        &p.resolver,
+                    )
                     .expect("depth and id render");
                 let surface = renderer.read_depth_id(&ids).unwrap().unwrap();
                 renderer.set_3d_msaa(false);
                 let plain = renderer
-                    .render(&p.document, &p.composition, ticks(s.time), &request, &p.resolver)
+                    .render(
+                        &p.document,
+                        &p.composition,
+                        ticks(s.time),
+                        &request,
+                        &p.resolver,
+                    )
                     .expect("render without MSAA");
                 renderer.set_3d_msaa(true);
                 let plain = opaque8(&renderer.read_rgba(&plain).unwrap());
                 let (w, h) = (s.width as usize, s.height as usize);
-                let object: Vec<bool> = surface.chunks_exact(4).map(|px| px[0].is_finite()).collect();
+                let object: Vec<bool> = surface
+                    .chunks_exact(4)
+                    .map(|px| px[0].is_finite())
+                    .collect();
                 let edges = msaa_edges(&ours, &plain, w, h);
                 let class: Vec<bool> = dilate(&object, w, h)
                     .iter()

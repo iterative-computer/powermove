@@ -187,7 +187,8 @@ pub(crate) fn check(_root: &Node, comp: &Node, layers: &[Node], objects: usize) 
         }
         None
     };
-    let flag_not_false = |n: Option<&Node>| !matches!(n.map(Node::kind), Some(NodeKind::Bool(false)));
+    let flag_not_false =
+        |n: Option<&Node>| !matches!(n.map(Node::kind), Some(NodeKind::Bool(false)));
     let default_sun = lights.is_empty() || !lights.iter().any(|l| always_active(l, comp));
     let any_casting_light = default_sun
         || lights.iter().any(|l| {
@@ -204,7 +205,10 @@ pub(crate) fn check(_root: &Node, comp: &Node, layers: &[Node], objects: usize) 
             flag_not_false(node::member(env, "shadows"))
         });
     if any_casting_light && any_shadow_environment {
-        out.push((None, "shadows (a casting light with environment shadows on)".to_owned()));
+        out.push((
+            None,
+            "shadows (a casting light with environment shadows on)".to_owned(),
+        ));
     }
     for l in &lights {
         let ty = member(l, &["light", "type"]).unwrap_or_else(|| "sun".to_owned());
@@ -212,7 +216,10 @@ pub(crate) fn check(_root: &Node, comp: &Node, layers: &[Node], objects: usize) 
             out.push((Some(id(l)), format!("{ty} lights")));
         }
     }
-    for l in layers.iter().filter(|l| Role3d::of(l) == Some(Role3d::Object)) {
+    for l in layers
+        .iter()
+        .filter(|l| Role3d::of(l) == Some(Role3d::Object))
+    {
         let object = node::member(node::member(node::member(Some(l), "d"), "data"), "object");
         let source = node::member(object, "source");
         match str_member(source, "primitive") {
@@ -375,7 +382,10 @@ pub(crate) fn plan_object<'d>(
     if obj(material, "maps").is_some_and(|m| !m.is_empty()) {
         return Ok(Err("material texture maps".to_owned()));
     }
-    if material.get("shader").is_some_and(|s| !matches!(s, Value::Null)) {
+    if material
+        .get("shader")
+        .is_some_and(|s| !matches!(s, Value::Null))
+    {
         return Ok(Err("node materials (shader previews)".to_owned()));
     }
     let Some(mp) = obj(material, "p") else {
@@ -407,7 +417,9 @@ pub(crate) fn plan_object<'d>(
     let mut suns = Vec::new();
     let mut shadow_lights = 0;
     for light in arr(scene, "lights") {
-        let Value::Object(light) = light else { continue };
+        let Value::Object(light) = light else {
+            continue;
+        };
         let ty = text(light, "type").unwrap_or_else(|| "sun".to_owned());
         let lp = obj(light, "p").cloned().unwrap_or_default();
         let visible = boolean(&lp, "visible") != Some(false);
@@ -424,7 +436,9 @@ pub(crate) fn plan_object<'d>(
             return Ok(Err(format!("{ty} lights")));
         }
         if casts {
-            return Ok(Err("shadows (a casting light with environment shadows on)".to_owned()));
+            return Ok(Err(
+                "shadows (a casting light with environment shadows on)".to_owned()
+            ));
         }
         let lid = text(light, "id").unwrap_or_default();
         // A light layer is placed at its world position and aimed through its
@@ -542,12 +556,18 @@ pub fn uniforms(plan: &Object3dPlan) -> Vec<(String, Vec<f64>)> {
             "cameraPosition".into(),
             vec![c.world[12], c.world[13], c.world[14]],
         ),
-        ("isOrthographic".into(), vec![f64::from(u8::from(c.orthographic))]),
+        (
+            "isOrthographic".into(),
+            vec![f64::from(u8::from(c.orthographic))],
+        ),
         ("diffuse".into(), m.color.to_vec()),
         ("opacity".into(), vec![1.0]),
         (
             "emissive".into(),
-            m.emissive.iter().map(|v| v * m.emissive_intensity).collect(),
+            m.emissive
+                .iter()
+                .map(|v| v * m.emissive_intensity)
+                .collect(),
         ),
         ("roughness".into(), vec![m.roughness]),
         ("metalness".into(), vec![m.metalness]),
@@ -801,7 +821,10 @@ impl Scene3dRenderer {
     /// Sets the MSAA sample count (4 as today's canvas; 1 only to classify
     /// MSAA edges for parity).
     pub fn set_samples(&mut self, samples: u32) {
-        assert!(samples == 1 || samples == SAMPLES, "MSAA samples must be 1 or {SAMPLES}");
+        assert!(
+            samples == 1 || samples == SAMPLES,
+            "MSAA samples must be 1 or {SAMPLES}"
+        );
         self.samples = samples;
     }
 
@@ -838,88 +861,99 @@ impl Scene3dRenderer {
             )
         };
         let safe = self.math != MathMode::Fast && pm_gpu::msl::supported(device);
-        let (vertex, fragment, vertex_entry, fragment_entry, math, (block_size, uniforms, attributes)) =
-            if safe {
-                let disk_key = cache::key(&vs, &fs, &mode);
-                let entry = match self.cache.as_ref().and_then(|c| c.load(&disk_key)) {
-                    Some(e) => {
-                        self.cache_hits += 1;
-                        e
+        let (
+            vertex,
+            fragment,
+            vertex_entry,
+            fragment_entry,
+            math,
+            (block_size, uniforms, attributes),
+        ) = if safe {
+            let disk_key = cache::key(&vs, &fs, &mode);
+            let entry = match self.cache.as_ref().and_then(|c| c.load(&disk_key)) {
+                Some(e) => {
+                    self.cache_hits += 1;
+                    e
+                }
+                None => {
+                    let program = translate()?;
+                    let slots = [pm_gpu::msl::Slot {
+                        group: 0,
+                        binding: glsl::DEFAULT_BLOCK_BINDING,
+                        buffer: Some(0),
+                        texture: None,
+                        sampler: None,
+                    }];
+                    let (vertex_msl, vertex_entry) = pm_gpu::msl::write(
+                        &program.vertex,
+                        &program.vertex_info,
+                        glsl::naga::ShaderStage::Vertex,
+                        &slots,
+                        self.math,
+                    )?;
+                    let (fragment_msl, fragment_entry) = pm_gpu::msl::write(
+                        &program.fragment,
+                        &program.fragment_info,
+                        glsl::naga::ShaderStage::Fragment,
+                        &slots,
+                        self.math,
+                    )?;
+                    let (block_size, uniforms, attributes) = reflection(&program);
+                    let e = cache::CachedProgram {
+                        block_size,
+                        uniforms,
+                        attributes,
+                        vertex_msl,
+                        vertex_entry,
+                        fragment_msl,
+                        fragment_entry,
+                    };
+                    if let Some(c) = &self.cache
+                        && c.store(&disk_key, &e).is_err()
+                    {
+                        // A read-only or full cache only costs translation time.
+                        self.cache_write_failures += 1;
                     }
-                    None => {
-                        let program = translate()?;
-                        let slots = [pm_gpu::msl::Slot {
-                            group: 0,
-                            binding: glsl::DEFAULT_BLOCK_BINDING,
-                            buffer: Some(0),
-                            texture: None,
-                            sampler: None,
-                        }];
-                        let (vertex_msl, vertex_entry) = pm_gpu::msl::write(
-                            &program.vertex,
-                            &program.vertex_info,
-                            glsl::naga::ShaderStage::Vertex,
-                            &slots,
-                            self.math,
-                        )?;
-                        let (fragment_msl, fragment_entry) = pm_gpu::msl::write(
-                            &program.fragment,
-                            &program.fragment_info,
-                            glsl::naga::ShaderStage::Fragment,
-                            &slots,
-                            self.math,
-                        )?;
-                        let (block_size, uniforms, attributes) = reflection(&program);
-                        let e = cache::CachedProgram {
-                            block_size,
-                            uniforms,
-                            attributes,
-                            vertex_msl,
-                            vertex_entry,
-                            fragment_msl,
-                            fragment_entry,
-                        };
-                        if let Some(c) = &self.cache
-                            && c.store(&disk_key, &e).is_err()
-                        {
-                            // A read-only or full cache only costs translation time.
-                            self.cache_write_failures += 1;
-                        }
-                        e
-                    }
-                };
-                let vs = pm_gpu::msl::from_source(device, "three vs", &entry.vertex_msl, &entry.vertex_entry)?;
-                let fs = pm_gpu::msl::from_source(
-                    device,
-                    "three fs",
-                    &entry.fragment_msl,
-                    &entry.fragment_entry,
-                )?;
-                (
-                    vs.module,
-                    fs.module,
-                    Some(vs.entry_point),
-                    Some(fs.entry_point),
-                    self.math,
-                    (entry.block_size, entry.uniforms, entry.attributes),
-                )
-            } else {
-                let program = translate()?;
-                let module = |m: &glsl::naga::Module, label: &str| {
-                    device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                        label: Some(label),
-                        source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(m.clone())),
-                    })
-                };
-                (
-                    module(&program.vertex, "three vs"),
-                    module(&program.fragment, "three fs"),
-                    None,
-                    None,
-                    MathMode::Fast,
-                    reflection(&program),
-                )
+                    e
+                }
             };
+            let vs = pm_gpu::msl::from_source(
+                device,
+                "three vs",
+                &entry.vertex_msl,
+                &entry.vertex_entry,
+            )?;
+            let fs = pm_gpu::msl::from_source(
+                device,
+                "three fs",
+                &entry.fragment_msl,
+                &entry.fragment_entry,
+            )?;
+            (
+                vs.module,
+                fs.module,
+                Some(vs.entry_point),
+                Some(fs.entry_point),
+                self.math,
+                (entry.block_size, entry.uniforms, entry.attributes),
+            )
+        } else {
+            let program = translate()?;
+            let module = |m: &glsl::naga::Module, label: &str| {
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(label),
+                    source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(m.clone())),
+                })
+            };
+            (
+                module(&program.vertex, "three vs"),
+                module(&program.fragment, "three fs"),
+                None,
+                None,
+                MathMode::Fast,
+                reflection(&program),
+            )
+        };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("three program"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -1080,7 +1114,11 @@ impl Scene3dRenderer {
             wgpu::FrontFace::Cw
         };
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(if key.color { "three color" } else { "three depth" }),
+            label: Some(if key.color {
+                "three color"
+            } else {
+                "three depth"
+            }),
             layout: Some(&compiled.pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &compiled.vertex,
@@ -1331,7 +1369,11 @@ impl Scene3dRenderer {
         };
         // Without MSAA the pass draws into the output directly.
         let (view, resolve_target, store) = if samples > 1 {
-            (&attachments.color, Some(&resolve.view), wgpu::StoreOp::Discard)
+            (
+                &attachments.color,
+                Some(&resolve.view),
+                wgpu::StoreOp::Discard,
+            )
         } else {
             (&resolve.view, None, wgpu::StoreOp::Store)
         };
@@ -1392,7 +1434,10 @@ impl Scene3dRenderer {
                 .ok_or_else(|| format!("uniform {n}"))
         };
         let mut data = Vec::with_capacity(128);
-        for v in get("modelViewMatrix")?.iter().chain(get("projectionMatrix")?.iter()) {
+        for v in get("modelViewMatrix")?
+            .iter()
+            .chain(get("projectionMatrix")?.iter())
+        {
             data.extend_from_slice(&(*v as f32).to_le_bytes());
         }
         let surface = self.depth_surface(device);

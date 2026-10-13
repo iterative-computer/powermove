@@ -85,7 +85,15 @@ pub fn composition(doc: &mut Value, id: &str, w: u32, h: u32, dur: f64, layers: 
 }
 
 /// A 3D object layer with a primitive (`parseLayer3DData` shape).
-pub fn object3d(id: &str, primitive: &str, parameters: Value, color: &str, w: u32, h: u32, dur: f64) -> Value {
+pub fn object3d(
+    id: &str,
+    primitive: &str,
+    parameters: Value,
+    color: &str,
+    w: u32,
+    h: u32,
+    dur: f64,
+) -> Value {
     let mut l = layer(
         id,
         "extension",

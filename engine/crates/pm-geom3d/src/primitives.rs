@@ -49,12 +49,37 @@ impl Geometry {
 /// already applied (`p.width || 1` and so on; see [`Primitive::from_parameters`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Primitive {
-    Box { width: f64, height: f64, depth: f64 },
-    Sphere { radius: f64, width_segments: f64, height_segments: f64 },
-    Plane { width: f64, height: f64 },
-    Cylinder { radius_top: f64, radius_bottom: f64, height: f64, radial_segments: f64 },
-    Cone { radius: f64, height: f64, radial_segments: f64 },
-    Torus { radius: f64, tube: f64, radial_segments: f64, tubular_segments: f64 },
+    Box {
+        width: f64,
+        height: f64,
+        depth: f64,
+    },
+    Sphere {
+        radius: f64,
+        width_segments: f64,
+        height_segments: f64,
+    },
+    Plane {
+        width: f64,
+        height: f64,
+    },
+    Cylinder {
+        radius_top: f64,
+        radius_bottom: f64,
+        height: f64,
+        radial_segments: f64,
+    },
+    Cone {
+        radius: f64,
+        height: f64,
+        radial_segments: f64,
+    },
+    Torus {
+        radius: f64,
+        tube: f64,
+        radial_segments: f64,
+        tubular_segments: f64,
+    },
 }
 
 /// The primitive's parameters (`source.parameters`), each `None` when absent.
@@ -195,7 +220,8 @@ pub fn box_geometry(width: f64, height: f64, depth: f64) -> Geometry {
     let mut b = Buffers::default();
     let mut vertices_so_far = 0u32;
     // (u, v, w) axes, udir, vdir, width, height, depth.
-    let planes: [(usize, usize, usize, f64, f64, f64, f64, f64); 6] = [
+    type Side = (usize, usize, usize, f64, f64, f64, f64, f64);
+    let planes: [Side; 6] = [
         (2, 1, 0, -1.0, -1.0, depth, height, width),
         (2, 1, 0, 1.0, -1.0, depth, height, -width),
         (0, 2, 1, 1.0, 1.0, width, depth, height),
@@ -343,8 +369,11 @@ pub fn cylinder_geometry(
             let theta = u * theta_length + theta_start;
             let sin_theta = libm::sin(theta);
             let cos_theta = libm::cos(theta);
-            b.vertices
-                .extend_from_slice(&[radius * sin_theta, -v * height + half_height, radius * cos_theta]);
+            b.vertices.extend_from_slice(&[
+                radius * sin_theta,
+                -v * height + half_height,
+                radius * cos_theta,
+            ]);
             b.normals
                 .extend_from_slice(&normalize([sin_theta, slope, cos_theta]));
             b.uvs.push(u);
@@ -377,7 +406,8 @@ pub fn cylinder_geometry(
         let sign = if top { 1.0 } else { -1.0 };
         let center_start = index;
         for _ in 1..=rn {
-            b.vertices.extend_from_slice(&[0.0, half_height * sign, 0.0]);
+            b.vertices
+                .extend_from_slice(&[0.0, half_height * sign, 0.0]);
             b.normals.extend_from_slice(&[0.0, sign, 0.0]);
             b.uvs.extend_from_slice(&[0.5, 0.5]);
             index += 1;
@@ -388,8 +418,11 @@ pub fn cylinder_geometry(
             let theta = u * theta_length + theta_start;
             let cos_theta = libm::cos(theta);
             let sin_theta = libm::sin(theta);
-            b.vertices
-                .extend_from_slice(&[radius * sin_theta, half_height * sign, radius * cos_theta]);
+            b.vertices.extend_from_slice(&[
+                radius * sin_theta,
+                half_height * sign,
+                radius * cos_theta,
+            ]);
             b.normals.extend_from_slice(&[0.0, sign, 0.0]);
             b.uvs.push(cos_theta * 0.5 + 0.5);
             b.uvs.push(sin_theta * 0.5 * sign + 0.5);
@@ -431,7 +464,8 @@ pub fn torus_geometry(
             b.vertices.extend_from_slice(&[x, y, z]);
             let cx = radius * libm::cos(u);
             let cy = radius * libm::sin(u);
-            b.normals.extend_from_slice(&normalize([x - cx, y - cy, z - 0.0]));
+            b.normals
+                .extend_from_slice(&normalize([x - cx, y - cy, z - 0.0]));
             b.uvs.push(f64::from(i) / tubular);
             b.uvs.push(f64::from(j) / radial);
         }

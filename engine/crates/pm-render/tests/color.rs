@@ -41,7 +41,14 @@ fn grid(colors: &[[u8; 3]]) -> serde_json::Value {
         .map(|(i, c)| {
             let hex = format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
             let (x, y) = ((i % 16 * B) as f64, (i / 16 * B) as f64);
-            layer(&format!("s{i}"), "solid", json!({ "color": hex, "w": B, "h": B }), x, y, 1.0)
+            layer(
+                &format!("s{i}"),
+                "solid",
+                json!({ "color": hex, "w": B, "h": B }),
+                x,
+                y,
+                1.0,
+            )
         })
         .collect();
     project(G, G, 1.0, solid_fill("#000000"), layers)
@@ -67,7 +74,14 @@ fn palettes() -> Vec<Vec<[u8; 3]>> {
     vec![greys, colors]
 }
 
-fn render(renderer: &mut Renderer, doc: &serde_json::Value, precision: Precision, size: (u32, u32), t: f64, resolver: &MapResolver) -> Vec<f32> {
+fn render(
+    renderer: &mut Renderer,
+    doc: &serde_json::Value,
+    precision: Precision,
+    size: (u32, u32),
+    t: f64,
+    resolver: &MapResolver,
+) -> Vec<f32> {
     let request = RenderRequest::at_scale(Size::new(size.0, size.1), 1.0, precision);
     let frame = renderer
         .render(&load(doc), "Ptest-root", ticks(t), &request, resolver)
@@ -101,7 +115,11 @@ fn invariant_2_solids_decode_to_their_codes() {
         let doc = grid(&colors);
         for precision in [Precision::Float16, Precision::Float32] {
             let rgba = render(&mut r, &doc, precision, (G, G), 0.0, &none);
-            let frame = WorkingFrame { width: G, height: G, rgba: &rgba };
+            let frame = WorkingFrame {
+                width: G,
+                height: G,
+                rgba: &rgba,
+            };
             let ycc8 = convert(&frame, InputFormat::V420, &params()).unwrap();
             let v216 = convert(&frame, InputFormat::V216, &params()).unwrap();
             let y416 = convert(&frame, InputFormat::Y416, &params()).unwrap();
@@ -121,12 +139,20 @@ fn invariant_2_solids_decode_to_their_codes() {
                         // the value (the GPU's render-target conversion may
                         // round toward zero).
                         let half = f64::from(ideal) - f64::from(working[k]);
-                        assert!(half.abs() <= 2f64.powi(-15).max(f64::from(ideal) * 2f64.powi(-10)), "{c:?} working value at 16-bit: {}", working[k]);
+                        assert!(
+                            half.abs() <= 2f64.powi(-15).max(f64::from(ideal) * 2f64.powi(-10)),
+                            "{c:?} working value at 16-bit: {}",
+                            working[k]
+                        );
                     }
                 }
                 // sRGB PNG: exact.
                 for k in 0..3 {
-                    assert_eq!(unit_to_code(f64::from(working[k]), 8), u32::from(c[k]), "{c:?} sRGB PNG");
+                    assert_eq!(
+                        unit_to_code(f64::from(working[k]), 8),
+                        u32::from(c[k]),
+                        "{c:?} sRGB PNG"
+                    );
                 }
                 // Full-range RGB at 10 and 16 bits (32-bit precision exports).
                 if precision == Precision::Float32 {
@@ -165,7 +191,11 @@ fn invariant_2_solids_decode_to_their_codes() {
                         sample(&v216, 0, (row + x) * 2 + 2),
                     );
                     if c[0] == c[1] && c[1] == c[2] {
-                        assert_eq!((cb, cr), (32768, 32768), "grey {c:?} not neutral at 10 bits");
+                        assert_eq!(
+                            (cb, cr),
+                            (32768, 32768),
+                            "grey {c:?} not neutral at 10 bits"
+                        );
                     }
                     let back = ycbcr_to_rgb(
                         (f64::from(yy) - 4096.0) / 56064.0,
@@ -173,14 +203,23 @@ fn invariant_2_solids_decode_to_their_codes() {
                         (f64::from(cr) - 32768.0) / 57344.0,
                     );
                     for k in 0..3 {
-                        let d = unit_to_code(back[k], 10).abs_diff(pm_color::standard::ideal_code(c[k], 10));
+                        let d = unit_to_code(back[k], 10)
+                            .abs_diff(pm_color::standard::ideal_code(c[k], 10));
                         worst[2] = worst[2].max(d);
                         assert!(d <= 1, "{c:?} 10-bit Y′CbCr off by {d}");
                     }
                     let i4 = (row + x) * 4;
-                    let (yy, cb, cr) = (sample(&y416, 0, i4 + 1), sample(&y416, 0, i4 + 2), sample(&y416, 0, i4 + 3));
+                    let (yy, cb, cr) = (
+                        sample(&y416, 0, i4 + 1),
+                        sample(&y416, 0, i4 + 2),
+                        sample(&y416, 0, i4 + 3),
+                    );
                     if c[0] == c[1] && c[1] == c[2] {
-                        assert_eq!((cb, cr), (32768, 32768), "grey {c:?} not neutral at 12 bits");
+                        assert_eq!(
+                            (cb, cr),
+                            (32768, 32768),
+                            "grey {c:?} not neutral at 12 bits"
+                        );
                     }
                     let back = ycbcr_to_rgb(
                         (f64::from(yy) - 4096.0) / 56064.0,
@@ -188,7 +227,8 @@ fn invariant_2_solids_decode_to_their_codes() {
                         (f64::from(cr) - 32768.0) / 57344.0,
                     );
                     for k in 0..3 {
-                        let d = unit_to_code(back[k], 12).abs_diff(pm_color::standard::ideal_code(c[k], 12));
+                        let d = unit_to_code(back[k], 12)
+                            .abs_diff(pm_color::standard::ideal_code(c[k], 12));
                         worst[3] = worst[3].max(d);
                         assert!(d <= 1, "{c:?} 12-bit Y′CbCr off by {d}");
                     }
@@ -215,7 +255,12 @@ fn media(name: &str) -> Option<std::path::PathBuf> {
 
 /// A composition showing `path` (w × h) untransformed, full frame, as the
 /// only layer.
-fn full_frame_video(path: &std::path::Path, w: u32, h: u32, dur: f64) -> (serde_json::Value, MapResolver) {
+fn full_frame_video(
+    path: &std::path::Path,
+    w: u32,
+    h: u32,
+    dur: f64,
+) -> (serde_json::Value, MapResolver) {
     let mut doc = project(
         w,
         h,
@@ -242,7 +287,9 @@ fn reference_u16(path: &std::path::Path, n: usize) -> (Vec<u16>, String) {
     use pm_media::decode::service::{DecodeService, MediaSource, ServiceConfig};
     let service = DecodeService::new(ServiceConfig::default());
     let src = MediaSource::open(path).unwrap();
-    let mut session = service.session(&src, 1, pm_media::vt::DecodePurpose::Export).unwrap();
+    let mut session = service
+        .session(&src, 1, pm_media::vt::DecodePurpose::Export)
+        .unwrap();
     let frame = session.frame(n).unwrap();
     let label = frame.format.label.clone();
     let samples = frame
@@ -252,7 +299,9 @@ fn reference_u16(path: &std::path::Path, n: usize) -> (Vec<u16>, String) {
             let mut out = Vec::with_capacity(row * p.desc.height);
             for y in 0..p.desc.height {
                 // SAFETY: the plane view covers `height` rows of `stride` bytes.
-                let line = unsafe { std::slice::from_raw_parts(p.ptr.add(y * p.stride) as *const u16, row) };
+                let line = unsafe {
+                    std::slice::from_raw_parts(p.ptr.add(y * p.stride) as *const u16, row)
+                };
                 out.extend_from_slice(line);
             }
             out
@@ -263,7 +312,8 @@ fn reference_u16(path: &std::path::Path, n: usize) -> (Vec<u16>, String) {
 
 fn frame_of(path: &std::path::Path, t: f64) -> usize {
     let src = pm_media::decode::service::MediaSource::open(path).unwrap();
-    src.select((t * pm_time::TICKS_PER_SECOND as f64).round() as i64).unwrap()
+    src.select((t * pm_time::TICKS_PER_SECOND as f64).round() as i64)
+        .unwrap()
 }
 
 /// Transparency of one ProRes file into `format`: (samples, differing).
@@ -283,7 +333,9 @@ fn transparency(name: &str, format: InputFormat, luma_max: u16) -> Option<(usize
     request.background = false;
     let (mut total, mut bad, mut skipped) = (0, 0, 0);
     for t in [0.01, 1.01, 2.51] {
-        let frame = r.render(&load(&doc), "Ptest-root", ticks(t), &request, &resolver).unwrap();
+        let frame = r
+            .render(&load(&doc), "Ptest-root", ticks(t), &request, &resolver)
+            .unwrap();
         assert!(frame.failures.is_empty(), "{:?}", frame.failures);
         let rgba = r.read_rgba(&frame).unwrap();
         // ProRes 4444 carries alpha: straight output, as its encoder input.
@@ -291,7 +343,16 @@ fn transparency(name: &str, format: InputFormat, luma_max: u16) -> Option<(usize
         if format == InputFormat::Y416 {
             p.alpha = AlphaOutput::Straight;
         }
-        let input = convert(&WorkingFrame { width: w, height: h, rgba: &rgba }, format, &p).unwrap();
+        let input = convert(
+            &WorkingFrame {
+                width: w,
+                height: h,
+                rgba: &rgba,
+            },
+            format,
+            &p,
+        )
+        .unwrap();
         let ours = match &input.planes[0].data {
             pm_export::convert::PlaneData::U16(v) => v.clone(),
             _ => unreachable!(),
@@ -307,11 +368,17 @@ fn transparency(name: &str, format: InputFormat, luma_max: u16) -> Option<(usize
                 skipped += 1;
                 continue;
             }
-            let expected = if is_alpha { *b } else { (*b).clamp(256, luma_max) };
+            let expected = if is_alpha {
+                *b
+            } else {
+                (*b).clamp(256, luma_max)
+            };
             total += 1;
             if *a != expected {
                 if bad < 5 {
-                    eprintln!("{name} t={t} sample {i}: ours {a}, reference {b} (clipped {expected})");
+                    eprintln!(
+                        "{name} t={t} sample {i}: ours {a}, reference {b} (clipped {expected})"
+                    );
                 }
                 bad += 1;
             }
@@ -345,7 +412,9 @@ fn reference_u8(path: &std::path::Path, n: usize) -> (Vec<Vec<u8>>, String) {
     use pm_media::decode::service::{DecodeService, MediaSource, ServiceConfig};
     let service = DecodeService::new(ServiceConfig::default());
     let src = MediaSource::open(path).unwrap();
-    let mut session = service.session(&src, 1, pm_media::vt::DecodePurpose::Export).unwrap();
+    let mut session = service
+        .session(&src, 1, pm_media::vt::DecodePurpose::Export)
+        .unwrap();
     let frame = session.frame(n).unwrap();
     let label = frame.format.label.clone();
     let planes = frame
@@ -357,7 +426,9 @@ fn reference_u8(path: &std::path::Path, n: usize) -> (Vec<Vec<u8>>, String) {
                     let mut out = Vec::with_capacity(row * p.desc.height);
                     for y in 0..p.desc.height {
                         // SAFETY: the plane view covers `height` rows of `stride` bytes.
-                        out.extend_from_slice(unsafe { std::slice::from_raw_parts(p.ptr.add(y * p.stride), row) });
+                        out.extend_from_slice(unsafe {
+                            std::slice::from_raw_parts(p.ptr.add(y * p.stride), row)
+                        });
                     }
                     out
                 })
@@ -385,12 +456,27 @@ fn invariant_1_h264_420_keeps_luma_and_chroma_within_one() {
     request.export = true;
     let (mut luma_bad, mut chroma_max, mut chroma_off, mut samples) = (0, 0u8, 0, 0);
     for t in [0.02, 1.02, 3.52] {
-        let frame = r.render(&load(&doc), "Ptest-root", ticks(t), &request, &resolver).unwrap();
+        let frame = r
+            .render(&load(&doc), "Ptest-root", ticks(t), &request, &resolver)
+            .unwrap();
         let rgba = r.read_rgba(&frame).unwrap();
-        let input = convert(&WorkingFrame { width: w, height: h, rgba: &rgba }, InputFormat::V420, &params()).unwrap();
+        let input = convert(
+            &WorkingFrame {
+                width: w,
+                height: h,
+                rgba: &rgba,
+            },
+            InputFormat::V420,
+            &params(),
+        )
+        .unwrap();
         let (reference, label) = reference_u8(&path, frame_of(&path, t));
         assert_eq!(reference.len(), 2, "{label}: two planes");
-        eprintln!("reference {label}: planes {} and {} bytes", reference[0].len(), reference[1].len());
+        eprintln!(
+            "reference {label}: planes {} and {} bytes",
+            reference[0].len(),
+            reference[1].len()
+        );
         let plane = |i: usize| match &input.planes[i].data {
             pm_export::convert::PlaneData::U8(v) => v.clone(),
             _ => unreachable!(),

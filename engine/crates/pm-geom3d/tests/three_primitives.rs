@@ -46,10 +46,26 @@ fn primitives_equal_three_js() {
             .unwrap_or_else(|| panic!("{name} is a supported primitive"))
             .geometry();
         let what = format!("{name} {p}");
-        assert_eq!(g.vertex_count() as u64, case["vertices"].as_u64().unwrap(), "{what}");
-        assert_eq!(g.indices.len() as u64, case["indices"].as_u64().unwrap(), "{what}");
-        assert_eq!(hex(&f32_bytes(&g.positions)), case["position"], "{what}: positions");
-        assert_eq!(hex(&f32_bytes(&g.normals)), case["normal"], "{what}: normals");
+        assert_eq!(
+            g.vertex_count() as u64,
+            case["vertices"].as_u64().unwrap(),
+            "{what}"
+        );
+        assert_eq!(
+            g.indices.len() as u64,
+            case["indices"].as_u64().unwrap(),
+            "{what}"
+        );
+        assert_eq!(
+            hex(&f32_bytes(&g.positions)),
+            case["position"],
+            "{what}: positions"
+        );
+        assert_eq!(
+            hex(&f32_bytes(&g.normals)),
+            case["normal"],
+            "{what}: normals"
+        );
         assert_eq!(hex(&f32_bytes(&g.uvs)), case["uv"], "{what}: uvs");
         let idx: Vec<u8> = g.indices.iter().flat_map(|i| i.to_le_bytes()).collect();
         assert_eq!(hex(&idx), case["index"], "{what}: indices");

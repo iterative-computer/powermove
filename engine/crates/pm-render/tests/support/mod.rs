@@ -372,7 +372,9 @@ pub fn rgba8(rgba: &[f32]) -> Vec<u8> {
 pub fn has_3d_objects(document: &pm_model::Document) -> bool {
     fn layers_have(v: Option<&pm_model::Node>) -> bool {
         let Some(v) = v else { return false };
-        let Some(layers) = v.get("layers") else { return false };
+        let Some(layers) = v.get("layers") else {
+            return false;
+        };
         match layers.kind() {
             pm_model::NodeKind::Array(list) => list.iter().any(|l| {
                 l.get("d")
@@ -384,7 +386,9 @@ pub fn has_3d_objects(document: &pm_model::Document) -> bool {
             _ => false,
         }
     }
-    let Some(root) = document.root() else { return false };
+    let Some(root) = document.root() else {
+        return false;
+    };
     if layers_have(Some(root)) {
         return true;
     }
