@@ -1,4 +1,5 @@
 import { withAgentExport } from '../agent-export';
+import { isRendererUnavailable } from '../renderer-recovery';
 import { randomBytes, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import net, { type Server, type Socket } from 'node:net';
@@ -109,7 +110,7 @@ export class PowermoveAgentToolSession {
   private async finishOnce(commit: boolean): Promise<AgentToolFinishResult> {
     let response: AgentToolResponseEvent | null = null;
     try {
-      if (!this.transactionSession && !this.owner.isDestroyed()) {
+      if (!this.transactionSession && !isRendererUnavailable(this.owner)) {
         response = await this.bridge.callRenderer(this, '__finish_run', { commit });
       }
     } finally {
@@ -266,6 +267,7 @@ export class PowermoveAgentToolBridge {
     if (session.transactionSession) return this.callRenderer(session.transactionSession, tool, args);
     if (session.isClosed()) throw new Error('Agent tool session is closed.');
     if (session.owner.isDestroyed()) throw new Error('Powermove window is no longer available.');
+    if (isRendererUnavailable(session.owner)) throw new Error(`Powermove renderer is unavailable; ${tool} was not sent. Reload the editor and start a new session. Inspect the project before repeating earlier edits.`);
     const callId = `tool-${randomUUID()}`;
     const request: AgentToolRequestEvent = {
       runId: session.runId,

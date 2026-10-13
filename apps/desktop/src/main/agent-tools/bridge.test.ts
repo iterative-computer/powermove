@@ -15,11 +15,13 @@ class FakeIpcMain extends EventEmitter {}
 
 class FakeWebContents extends EventEmitter {
   destroyed = false;
+  crashed = false;
   readonly requests: AgentToolRequestEvent[] = [];
 
   constructor(private readonly ipc: FakeIpcMain) { super(); }
 
   isDestroyed(): boolean { return this.destroyed; }
+  isCrashed(): boolean { return this.crashed; }
 
   send(channel: string, request: AgentToolRequestEvent): void {
     expect(channel).toBe(IPC.agentToolRequest);
@@ -518,6 +520,19 @@ describe('native Powermove agent tool bridge', () => {
     await expect(bridge.callRenderer(session, 'interact_panel', {})).rejects.toThrow('outcome is unknown');
     expect(owner.listenerCount('render-process-gone')).toBe(0);
     owner.destroyed = true;
+  });
+
+  it('rejects calls to an already crashed renderer without sending or waiting for a timeout', async () => {
+    const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
+    owner.crashed = true;
+    const send = vi.spyOn(owner, 'send').mockImplementation(() => {});
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '', timeoutMs: 30 });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'native-run-already-crashed', owner: owner as never, baseRevision: 0 });
+    await expect(bridge.callRenderer(session, 'get_project_state', {})).rejects.toThrow('renderer is unavailable');
+    expect(send).not.toHaveBeenCalled();
+    await session.finish(false);
+    expect(send).not.toHaveBeenCalled();
   });
 
   it('marks the window driven by the agent in main and the renderer for all of computer_use_panel', async () => {

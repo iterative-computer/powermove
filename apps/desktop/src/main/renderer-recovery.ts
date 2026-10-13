@@ -1,9 +1,32 @@
-import type { BrowserWindow, Dialog } from 'electron';
+import type { BrowserWindow, Dialog, WebContents } from 'electron';
+
+const unavailableRenderers = new WeakSet<WebContents>();
+const pendingReloads = new WeakSet<BrowserWindow>();
+
+export function isRendererUnavailable(contents: WebContents): boolean {
+  return contents.isDestroyed() || contents.isCrashed?.() === true || unavailableRenderers.has(contents);
+}
+
+/** Recover the existing editor so its project tabs and local recovery survive. */
+export function recoverRenderer(window: BrowserWindow): boolean {
+  if (window.isDestroyed() || window.webContents.isDestroyed() || !isRendererUnavailable(window.webContents)) return false;
+  if (!pendingReloads.has(window)) {
+    pendingReloads.add(window);
+    setImmediate(() => {
+      pendingReloads.delete(window);
+      if (!window.isDestroyed() && !window.webContents.isDestroyed() && isRendererUnavailable(window.webContents)) window.webContents.reload();
+    });
+  }
+  return true;
+}
 
 /** A native prompt remains usable after the editor process has disappeared. */
-export function installRendererRecovery(window: BrowserWindow, dialog: Pick<Dialog, 'showMessageBox'>): void {
+export function installRendererRecovery(window: BrowserWindow, dialog: Pick<Dialog, 'showMessageBox'>, onUnavailable: () => void = () => {}): void {
   let prompting = false;
+  window.webContents.on('did-finish-load', () => unavailableRenderers.delete(window.webContents));
   window.webContents.on('render-process-gone', (_event, details) => {
+    unavailableRenderers.add(window.webContents);
+    onUnavailable();
     if (details.reason === 'clean-exit' || prompting || window.isDestroyed()) return;
     prompting = true;
     console.error(`[editor] renderer exited: ${details.reason} (${details.exitCode})`);

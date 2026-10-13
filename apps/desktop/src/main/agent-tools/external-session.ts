@@ -10,6 +10,7 @@ import { agentInstructions, agentResultSchema } from '../codex/instructions';
 import { prepareAgentWorkspace, discardPartialRun, discardExtensionStage, removeEmptyRunDirectory, type AgentWorkspace, type AgentApiPackFile } from '../codex/workspace';
 import { withStageSnapshot, publishExtensionChanges } from '../codex/change-history';
 import { validateStagedExtensions } from '../codex/validate-staged-extensions';
+import { isRendererUnavailable } from '../renderer-recovery';
 
 const start = z.object({ prompt: z.string().min(1).max(200000), access: z.enum(['project', 'editor']).default('project'), context: z.enum(['project', 'app']).default('project') }).strict();
 const changes = z.object({ extensions: z.array(z.object({ id: z.string(), action: z.enum(['created', 'updated', 'removed']), summary: z.string().max(4000) }).strict()).max(100) }).strict();
@@ -33,7 +34,16 @@ export class ExternalAgentSession {
   private disconnected = false;
   private request: CodexRunRequest | null = null;
   private opening: Promise<unknown> | null = null;
-  private readonly ownerClosed = () => { void this.close().catch(() => {}); };
+  private ownerUnavailable = false;
+  private readonly ownerClosed = () => {
+    // Losing an editor ends its transaction, not the external MCP connection.
+    this.ownerUnavailable = true;
+    const interrupted = this.session;
+    void (async () => {
+      await this.opening?.catch(() => {});
+      if (this.session === interrupted) await this.finish(false);
+    })().catch(() => {});
+  };
   constructor(private readonly options: ExternalSessionOptions) {}
 
   tools() { return [...EXTERNAL_MCP_TOOLS, ...POWERMOVE_AGENT_TOOLS]; }
@@ -53,11 +63,16 @@ export class ExternalAgentSession {
     if (name === 'list_projects' || name === 'create_project' || name === 'open_project') {
       if (name !== 'list_projects' && this.session) throw new Error('Finish the current session before changing projects.');
       const owner = this.options.getOwner();
-      if (!owner || owner.isDestroyed()) throw new Error('No Powermove editor is available. Use powermove mcp for a hidden host, or open an editor window.');
+      if (!owner || isRendererUnavailable(owner)) throw new Error('No Powermove editor is available. Reload the editor, use powermove mcp for a hidden host, or open an editor window.');
       // A short-lived inspection session authenticates main-to-renderer control.
       const session = await this.options.bridge.openSession({ runId: `mcp-${randomUUID()}`, owner, baseRevision: 0 });
+      let failed = false;
       try { return await this.renderer(session, `__mcp_${name}`, args); }
-      finally { await session.finish(false); }
+      catch (error) { failed = true; throw error; }
+      finally {
+        if (failed) await session.finish(false).catch(error => console.error('[MCP] rollback failed after tool error', error));
+        else await session.finish(false);
+      }
     }
     const session = this.requireSession();
     if (name === 'publish_extensions') {
@@ -92,6 +107,7 @@ export class ExternalAgentSession {
 
   private requireSession() {
     if (!this.session || this.closing) throw new Error('Call start_session before using Powermove tools.');
+    if (this.ownerUnavailable) throw new Error('The Powermove renderer closed or crashed. Reload the editor and call start_session before using Powermove tools.');
     return this.session;
   }
 
@@ -107,9 +123,10 @@ export class ExternalAgentSession {
     const input = start.parse(args);
     if (input.context === 'app' && input.access === 'editor') throw new Error('App sessions require project access.');
     const owner = this.options.getOwner();
-    if (!owner || owner.isDestroyed()) throw new Error('No Powermove editor is available. Use powermove mcp for a hidden host.');
+    if (!owner || isRendererUnavailable(owner)) throw new Error('No Powermove editor is available. Reload the editor or use powermove mcp for a hidden host.');
     const session = await this.options.bridge.openSession({ runId: `mcp-${randomUUID()}`, owner, baseRevision: 0, context: input.context, inspectionOnly: input.access === 'editor' });
     this.session = session;
+    this.ownerUnavailable = false;
     owner.once('destroyed', this.ownerClosed);
     owner.once('render-process-gone', this.ownerClosed);
     try {
@@ -132,12 +149,16 @@ export class ExternalAgentSession {
       }
       this.detach = await this.options.attach(request, session);
       if (this.disconnected) throw new Error('MCP disconnected while opening its session.');
+      if (this.ownerUnavailable || isRendererUnavailable(owner)) throw new Error('Powermove renderer closed or crashed while opening the session. Reload the editor and start a new session.');
       return { runId: session.runId, projectId: request.projectId, access: request.access,
         ...(this.workspace ? { workspace: this.workspace.root, stagingDirectory: this.workspace.stagingDirectory,
           apiPackDirectory: this.workspace.apiPackDirectory, artifactsDirectory: this.workspace.runDirectory,
           instructions: agentInstructions({ projectName: request.projectName, artifactPath: this.workspace.runDirectory, access: 'project', context: input.context, extensionsDir: this.workspace.stagingDirectory }) } : {})
       };
-    } catch (error) { await this.finish(false); throw error; }
+    } catch (error) {
+      await this.finish(false).catch(cleanupError => console.error('[MCP] rollback failed after session error', cleanupError));
+      throw error;
+    }
   }
 
   private finish(commit: boolean): Promise<unknown> {

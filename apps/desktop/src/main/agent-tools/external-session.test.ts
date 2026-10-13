@@ -18,7 +18,7 @@ describe('external Powermove MCP sessions', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-mcp-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
     const ipc = new EventEmitter();
-    const owner = Object.assign(new EventEmitter(), { id: 1, isDestroyed: () => false,
+    const owner = Object.assign(new EventEmitter(), { id: 1, isDestroyed: (): boolean => false, isCrashed: (): boolean => false,
       send: (_channel: string, request: AgentToolRequestEvent) => queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: owner }, {
         runId: request.runId, callId: request.callId, ok: true,
         content: [{ type: 'text', text: JSON.stringify(request.tool === '__mcp_context'
@@ -63,6 +63,26 @@ describe('external Powermove MCP sessions', () => {
     await expect(session.call('export_video', {})).rejects.toThrow('only inspect');
     await expect(session.call('publish_extensions', { extensions: [] })).rejects.toThrow('Planning');
     expect(mcpToolResult(await session.call('get_project_state', {}))).toMatchObject({ isError: false });
+  });
+
+  it.each(['list_projects', 'start_session'])('preserves the original %s failure when rollback also fails', async name => {
+    const { session, bridge } = await setup();
+    vi.spyOn(bridge, 'callRenderer').mockImplementation(async (_session, tool) => {
+      throw new Error(`Powermove timed out while running ${tool}.`);
+    });
+    await expect(session.call(name, name === 'start_session' ? { prompt: 'Build' } : {}))
+      .rejects.toThrow(name === 'start_session' ? '__mcp_context' : '__mcp_list_projects');
+  });
+
+  it('allows a new session on the same connection after the renderer recovers', async () => {
+    const { session, owner, detach } = await setup();
+    await session.call('start_session', { prompt: 'Inspect', access: 'editor' });
+    const crashed = vi.spyOn(owner, 'isCrashed').mockReturnValue(true);
+    owner.emit('render-process-gone');
+    await vi.waitFor(() => expect(detach).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(owner.listenerCount('render-process-gone')).toBe(0));
+    crashed.mockReturnValue(false);
+    await expect(session.call('start_session', { prompt: 'Inspect recovery', access: 'editor' })).resolves.toMatchObject({ projectId: 'project-one' });
   });
 
   it('authenticates local discovery and closes the owning session on disconnect', async () => {

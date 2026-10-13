@@ -57,7 +57,7 @@ import { createVarsService } from './env/service';
 import { createRemoveValuesPrompt, registerVarsIpc } from './env/ipc';
 import { startExtensionWatcher } from './extensions/watcher';
 import { registerLogIpc } from './log';
-import { installRendererRecovery } from './renderer-recovery';
+import { installRendererRecovery, isRendererUnavailable, recoverRenderer } from './renderer-recovery';
 import { MIME_TYPES } from './mime';
 import { registerHapticsIpc } from './haptics';
 import { registerContextMenuIpc } from './context-menu';
@@ -501,7 +501,7 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
   });
 
   editors.add(window, projectId, tabs);
-  installRendererRecovery(window, dialog);
+  installRendererRecovery(window, dialog, () => openReadyEditors.delete(window.webContents));
   persistOpenWindows();
   window.on('focus', () => { editors.touch(window); persistOpenWindows(); });
   // Drained once the page has both loaded and subscribed, in either order.
@@ -1281,7 +1281,7 @@ if (!hasSingleInstanceLock) {
       refreshExtensions: refreshRestoredExtensions,
       externalMcp: { getOwner: () => {
         const editor = currentEditor();
-        return editor && openReadyEditors.has(editor.webContents) ? editor.webContents : null;
+        return editor && !isRendererUnavailable(editor.webContents) && openReadyEditors.has(editor.webContents) ? editor.webContents : null;
       } },
       storeAgent: () => storeAgentGateway,
       openExternal: async (url) => { await shell.openExternal(url); }
@@ -1382,6 +1382,10 @@ if (!hasSingleInstanceLock) {
         return;
       }
       if (editors.size === 0) restoreWindows(store);
+      else {
+        const editor = currentEditor();
+        if (editor && recoverRenderer(editor)) editors.reveal(editor);
+      }
     });
   });
 }

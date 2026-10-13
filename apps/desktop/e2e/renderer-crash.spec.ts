@@ -1,4 +1,5 @@
 import { expect, test } from './helpers/app';
+import { connectMcpHost } from '../src/main/agent-tools/mcp-client.mjs';
 
 test('offers recovery after an editor process crashes and restores its latest saved project', async ({ session }) => {
   await session.openEditor();
@@ -46,4 +47,32 @@ test('a crashed editor can close without waiting for a save from the missing pro
   session.page.on('close', () => { closed = true; });
   await window.evaluate(window => window.webContents.forcefullyCrashRenderer());
   await expect.poll(() => closed).toBe(true);
+});
+
+test('the external MCP connection survives editor crash and reload without timing out', async ({ session }) => {
+  await session.openEditor();
+  await session.page.evaluate(async () => await (window as any).PM.flushProject());
+  const client = await connectMcpHost(session.userData);
+  try {
+    await client.callTool('start_session', { prompt: 'Inspect recovery', access: 'editor' });
+    // Keep the crashed window open until the test explicitly reloads it.
+    await session.app.evaluate(({ dialog }) => {
+      dialog.showMessageBox = () => new Promise(resolve => { (globalThis as any).__answerRecovery = resolve; });
+    });
+    const window = await session.app.browserWindow(session.page);
+    await window.evaluate(window => window.webContents.forcefullyCrashRenderer());
+    await expect.poll(() => window.evaluate(window => window.webContents.isCrashed())).toBe(true);
+    await expect(client.callTool('list_projects', {})).rejects.toThrow('No Powermove editor is available');
+    await expect.poll(() => session.app.evaluate(() => typeof (globalThis as any).__answerRecovery)).toBe('function');
+    await window.evaluate(window => window.webContents.reload());
+    await expect.poll(() => window.evaluate(async window => {
+      if (window.webContents.isCrashed() || window.webContents.isLoading()) return false;
+      return window.webContents.executeJavaScript('Boolean(window.PM?.app)').catch(() => false);
+    })).toBe(true);
+    await session.app.evaluate(() => (globalThis as any).__answerRecovery({ response: 0, checkboxChecked: false }));
+    await window.evaluate(window => window.webContents.executeJavaScript('window.PM.projectReady'));
+    await expect(client.callTool('start_session', { prompt: 'Inspect recovered project', access: 'editor' })).resolves.toMatchObject({ isError: false });
+    await expect(client.callTool('get_project_state', {})).resolves.toMatchObject({ isError: false });
+    await client.callTool('finish_session', { commit: false });
+  } finally { await client.close(); }
 });
