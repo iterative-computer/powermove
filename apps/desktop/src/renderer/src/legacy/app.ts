@@ -1425,7 +1425,13 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
       PM.autosave();
       if (placement === null || target) PM.bus.emit('assets');
       const parts: any = [];
-      if (layerResults.length) {
+      /* With the new engine's media store, say what was copied and linked
+         (appendix D: "Copied 12 clips · Linked 3"). */
+      const linkedCount = layerResults.filter((result: any) => result.asset.storage === 'linked').length;
+      if (layerResults.length && linkedCount) {
+        const copiedCount = layerResults.length - linkedCount;
+        parts.push([copiedCount ? `Copied ${copiedCount} ${copiedCount === 1 ? 'clip' : 'clips'}` : '', `Linked ${linkedCount}`].filter(Boolean).join(' · '));
+      } else if (layerResults.length) {
         const editableSvg = layerResults.length === 1 && layerResults[0].asset.format === 'svg' && layerResults[0].asset.svg?.paths?.length;
         parts.push(layerResults.length === 1
           ? `Imported ${layerResults[0].asset.name}${editableSvg ? ' as editable paths' : ''}`
