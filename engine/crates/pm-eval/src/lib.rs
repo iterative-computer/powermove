@@ -37,15 +37,29 @@
 #![forbid(unsafe_code)]
 
 pub mod address;
+pub mod anchor;
+pub mod bounds;
+pub mod captions;
 pub mod comp;
 pub mod easing;
 pub mod evaluator;
 pub mod expr;
+pub mod groups;
 pub mod js_sem;
 pub mod keyframes;
 pub mod math;
+pub mod matte;
 pub mod node;
+pub mod parenting;
+pub mod retime;
+pub mod scene3d;
+pub mod scope;
+pub mod space3d;
 pub mod temporal;
+pub mod text_anim;
+pub mod text_geom;
+pub mod text_measure;
+pub mod transform;
 
 pub use comp::{Comp, CompError};
 pub use evaluator::{
@@ -54,3 +68,4 @@ pub use evaluator::{
 };
 pub use expr::{CompiledExpression, ExprContext, ExprDeps, ExprError, ExpressionEngine};
 pub use js_sem::{JsResult, JsThrow, JsValue};
+pub use scope::Scope;

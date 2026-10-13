@@ -569,6 +569,15 @@ impl JsThrow {
             message: message.into(),
         }
     }
+
+    /// `new Error(message)`: the legacy code's own refusals, whose message
+    /// is the user-facing text.
+    pub fn error(message: impl Into<String>) -> JsThrow {
+        JsThrow {
+            kind: "Error",
+            message: message.into(),
+        }
+    }
 }
 
 impl core::fmt::Display for JsThrow {
