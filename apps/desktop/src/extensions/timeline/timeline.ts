@@ -4280,7 +4280,12 @@ function editKeyframeValues(clickedEntries: any[]) {
         const entry = entries[0];
         if (!Number.isFinite(time.valueAsNumber)) { message.textContent = 'Enter a finite time.'; return false; }
         nextTime = api.util.snapF(time.valueAsNumber - entry.L.from, fps);
-        if (nextTime < 0 || nextTime > entry.L.dur) { message.textContent = 'That time falls outside the layer.'; return false; }
+        // Match keyframe dragging: animation may extend beyond the visible
+        // layer strip, but new times stay inside the composition. Existing
+        // out-of-range keys can keep their time or move toward the composition.
+        const minTime = Math.min(entry.key.t, -entry.L.from);
+        const maxTime = Math.max(entry.key.t, api.project.get().dur - entry.L.from);
+        if (nextTime < minTime || nextTime > maxTime) { message.textContent = 'That time falls outside the composition.'; return false; }
         if (entry.prop.kf.some((key: any) => key !== entry.key && Math.abs(key.t - nextTime!) < .5 / fps)) {
           message.textContent = 'Another keyframe already sits on that frame.'; return false;
         }
