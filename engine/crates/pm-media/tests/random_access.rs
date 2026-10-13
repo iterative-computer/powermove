@@ -158,3 +158,34 @@ fn other_containers() {
         DecodePurpose::Display,
     );
 }
+
+/// The rest of section 13's container list: ASF (WMV), FLV (Sorenson and
+/// H.264), M2TS and MTS (192-byte packets), 3GP (H.263), 3G2, Ogg (VP8), a
+/// raw MPEG-2 elementary stream (M2V), M4V (MPEG-4 part 2 with B frames), and
+/// AVI with B frames (MPEG-4 part 2 and H.264). MP4-family files index from
+/// their tables; the rest are scanned, and streams without presentation
+/// timestamps on a reordering codec take their order from a decode pass.
+#[test]
+#[ignore]
+fn container_breadth() {
+    let files = videos(&corpus_dir(), &|n| n.starts_with("wrap-"));
+    assert_eq!(files.len(), 12, "{files:?}");
+    let mut failures = vec![];
+    for f in &files {
+        let r = run_file(f, None, DecodePurpose::Display);
+        eprintln!("{}", summary(&r));
+        let ext = f.extension().unwrap().to_str().unwrap();
+        use pm_media::index::IndexSource::*;
+        let want = match ext {
+            "3gp" | "3g2" | "m4v" => Mp4Tables,
+            "m2v" | "avi" => DemuxScanDecodeOrder,
+            _ => DemuxScan,
+        };
+        let source = r.source.index.source;
+        if source != want {
+            failures.push(format!("{}: indexed by {source:?}", r.name));
+        }
+        failures.extend(check(&r));
+    }
+    assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+}

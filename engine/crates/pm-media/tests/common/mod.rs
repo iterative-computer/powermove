@@ -55,7 +55,10 @@ pub fn videos(dir: &Path, filter: &dyn Fn(&str) -> bool) -> Vec<PathBuf> {
         .filter(|p| {
             let name = p.file_name().unwrap().to_string_lossy().to_string();
             let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
-            ["mp4", "mov", "mkv", "webm", "ts", "mxf", "avi", "dv", "vob"].contains(&ext) && filter(&name)
+            [
+                "mp4", "mov", "m4v", "mkv", "webm", "ts", "m2ts", "mts", "mxf", "avi", "dv", "vob", "mpg", "m2v", "wmv", "asf", "flv",
+                "3gp", "3g2", "ogv",
+            ].contains(&ext) && filter(&name)
         })
         .collect();
     v.sort();
@@ -124,6 +127,10 @@ fn session(src: &MediaSource, b: Backend, pool: &FramePool, purpose: DecodePurpo
     let input = Input::open(src.path())?;
     let spec = StreamSpec { input: &input, stream: src.stream, info: &src.info, index: &src.index, extradata: &src.extradata };
     let (dec, _) = open(&spec, purpose, pool, &LocalArbiter::unlimited(), 4, Some(b))?;
+    // `open` falls back to the next backend; the suite tests the one asked for.
+    if dec.info().backend != b {
+        return Err(pm_media::MediaError::unsupported(format!("{b:?} did not open; {:?} would decode instead", dec.info().backend)));
+    }
     let reader = PacketReader::new(src.path(), src.stream)?;
     let mut s = Session::new(src.index.clone(), reader, dec, Some(src.color));
     s.set_window(0);

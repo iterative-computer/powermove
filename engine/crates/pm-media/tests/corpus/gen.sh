@@ -13,8 +13,9 @@
 # PM_MEDIA_CORPUS or that default.
 #
 # Encoders: Homebrew FFmpeg (libx264, libx265, libvpx, SVT-AV1, VideoToolbox,
-# prores_ks, dnxhd, cfhd, dvvideo, mjpeg, mpeg2video). They only make test
-# media; nothing here ships. Takes about three minutes at -threads 4.
+# prores_ks, dnxhd, cfhd, dvvideo, mjpeg, mpeg2video, mpeg4, h263, wmv2, flv).
+# They only make test media; nothing here ships. Takes about three minutes at
+# -threads 4.
 set -euo pipefail
 
 OUT="${1:-${PM_MEDIA_CORPUS:-$HOME/Library/Caches/powermove-engine/media-corpus}}"
@@ -122,6 +123,27 @@ ff -f lavfi -i "$(src 30 $SMALL)" -frames:v 150 -vf "select='not(eq(mod(n,5),4))
   -c:v libx264 -x264-params "bframes=0:keyint=30" -pix_fmt yuv420p vfr-h264.mp4
 # MPEG-2 program stream and AVI with B frames (demux scan path).
 ff -f lavfi -i "$(src 25 $SMALL)" -frames:v 75 -c:v mpeg2video -g 12 -bf 2 -b:v 4M -f vob mpeg2.vob
+
+# The rest of section 13's containers (container_breadth): ASF, FLV, M2TS and
+# MTS, 3GP, 3G2, Ogg, a raw MPEG-2 elementary stream, M4V, and AVI with B
+# frames (no presentation timestamps: order from a decode pass).
+W25="$(src 25 $SMALL)"
+ff -f lavfi -i "$W25" -frames:v 75 -c:v wmv2 -g 25 -b:v 2M wrap-wmv2.wmv
+ff -f lavfi -i "$W25" -frames:v 75 -c:v flv -g 25 -b:v 2M wrap-flv1.flv
+ff -f lavfi -i "$W25" -frames:v 75 -c:v libx264 -x264-params "bframes=2:keyint=25:min-keyint=25:scenecut=0" \
+  -pix_fmt yuv420p wrap-h264.flv
+ff -f lavfi -i "$(src $NTSC30 $SMALL)" -frames:v 90 -c:v libx264 -x264-params "bframes=3:keyint=30:min-keyint=30:scenecut=0" \
+  -pix_fmt yuv420p -f mpegts -mpegts_m2ts_mode 1 wrap-h264.m2ts
+cp wrap-h264.m2ts wrap-h264.mts
+ff -f lavfi -i "$(src 25 352x288)" -frames:v 75 -c:v h263 -g 25 -b:v 1M wrap-h263.3gp
+ff -f lavfi -i "$W25" -frames:v 75 -c:v libx264 -x264-params "bframes=2:keyint=25:min-keyint=25:scenecut=0" \
+  -pix_fmt yuv420p -f 3g2 wrap-h264.3g2
+ff -f lavfi -i "$W25" -frames:v 75 -c:v libvpx -g 25 -b:v 1M -deadline good -cpu-used 5 wrap-vp8.ogv
+ff -f lavfi -i "$W25" -frames:v 75 -c:v mpeg2video -g 12 -bf 2 -b:v 4M -f mpeg2video wrap-mpeg2.m2v
+ff -f lavfi -i "$W25" -frames:v 75 -c:v mpeg4 -g 25 -bf 2 -b:v 2M wrap-mpeg4.m4v
+ff -f lavfi -i "$W25" -frames:v 75 -c:v mpeg4 -g 25 -bf 2 -b:v 2M -vtag XVID wrap-mpeg4.avi
+ff -f lavfi -i "$W25" -frames:v 75 -c:v libx264 -x264-params "bframes=2:keyint=25:min-keyint=25:scenecut=0" \
+  -pix_fmt yuv420p wrap-h264.avi
 
 # ── Audio (priming) ──────────────────────────────────────────────────────────
 
