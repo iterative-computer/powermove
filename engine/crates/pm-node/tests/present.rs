@@ -206,6 +206,7 @@ fn state(view_seq: u64, edr: bool, pan: [f64; 2]) -> ViewerState {
         play_every_frame: false,
         edr,
         view_seq: Seq::new(view_seq).unwrap(),
+        vsync: None,
     }
 }
 

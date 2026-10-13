@@ -50,6 +50,13 @@ pub const LEAD_ENV: &str = "POWERMOVE_BRIDGE_LEAD";
 pub const FPS_ENV: &str = "POWERMOVE_BRIDGE_TEST_FPS";
 pub const LOAD_ENV: &str = "POWERMOVE_BRIDGE_TEST_LOAD";
 pub const TRACE_ENV: &str = "POWERMOVE_BRIDGE_TRACE";
+/// Where timed frames start on the viewer's refresh grid, in thousandths of
+/// a refresh after it (`off` renders at the due time, as before the hint).
+pub const PHASE_ENV: &str = "POWERMOVE_BRIDGE_PHASE";
+
+/// Default render phase: thousandths of a refresh after the BeginFrame
+/// (docs/engine/bridge.md, "Vsync-phase hint").
+pub const DEFAULT_PHASE_PERMILLE: u32 = 500;
 
 /// Frames being rendered or waiting for their command buffer.
 pub const RING: u32 = 2;
@@ -91,6 +98,16 @@ impl PresenterConfig {
                 fps: number(FPS_ENV, 60, 240).max(1),
                 extra_passes: number(LOAD_ENV, 0, 8),
                 trace: env(TRACE_ENV).as_deref() == Some("1"),
+                phase: match env(PHASE_ENV).as_deref() {
+                    Some("off") => None,
+                    Some(v) => v
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|p| *p < 1000)
+                        .map(|p| f64::from(p) / 1000.0)
+                        .or(Some(f64::from(DEFAULT_PHASE_PERMILLE) / 1000.0)),
+                    None => Some(f64::from(DEFAULT_PHASE_PERMILLE) / 1000.0),
+                },
             },
             source: match env(SOURCE_ENV).as_deref() {
                 Some("test-pattern") => Some(FrameSource::TestPattern),

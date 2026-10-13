@@ -34,7 +34,7 @@ use pm_protocol::interop::SurfaceFormat;
 use serde::Serialize;
 
 use super::clock::{SAMPLE_INTERVAL_US, TransportClock};
-use super::schedule::{Next, Schedule};
+use super::schedule::{Next, Phase, Schedule};
 use super::view;
 
 /// Where the engine's actions go: posted on the utility process's ports by
@@ -155,6 +155,10 @@ pub struct ThreadConfig {
     pub extra_passes: u32,
     /// Keep a per-frame trace for the S1 harness.
     pub trace: bool,
+    /// Fraction of a refresh after the viewer's BeginFrame at which timed
+    /// frames start rendering, once the viewer sent its vsync hint; `None`
+    /// renders at the due time.
+    pub phase: Option<f64>,
 }
 
 /// One frame's record for the S1 harness.
@@ -490,11 +494,19 @@ impl Thread {
             requests: VecDeque::new(),
             retry: None,
         });
+        // A new vsync hint alone is not a new view: nothing to redraw.
+        let hint_only = view.state.vsync != state.vsync && {
+            let mut a = view.state.clone();
+            a.vsync = state.vsync;
+            a == state
+        };
         view.state = state;
         if let Some(revision) = revision {
             view.revision = view.revision.max(revision);
         }
-        view.dirty = true;
+        if !hint_only {
+            view.dirty = true;
+        }
         let Some(spec) = pool else {
             // The same pool as before. If making it failed and the retries
             // ran out, this new viewer state tries again.
@@ -640,6 +652,15 @@ impl Thread {
         })
     }
 
+    /// The render phase for a view: its vsync hint and the configured
+    /// fraction, when both exist.
+    fn phase(config: &ThreadConfig, state: &ViewerState) -> Option<Phase> {
+        Some(Phase {
+            hint: state.vsync?,
+            fraction: config.phase?,
+        })
+    }
+
     /// How long to wait for a command before there is work.
     fn next_wake(&self) -> Duration {
         let now = now();
@@ -655,7 +676,8 @@ impl Thread {
                 let sample_at = view.last_sample.unwrap_or(now) + SAMPLE_INTERVAL_US;
                 wake = wake.min(sample_at);
                 let mut schedule = view.schedule.clone();
-                match schedule.next(&view.clock, now, self.config.lead) {
+                let phase = Self::phase(&self.config, &view.state);
+                match schedule.next_in_phase(&view.clock, now, self.config.lead, phase) {
                     Next::WaitUntil(at) => wake = wake.min(at.ceil() as i64),
                     Next::Render { .. } | Next::Skip { .. } => {
                         // Waiting for a free slot: a release wakes us; poll
@@ -729,7 +751,8 @@ impl Thread {
                 return;
             }
             let t = now();
-            match view.schedule.next(&view.clock, t, lead) {
+            let phase = Self::phase(&self.config, &view.state);
+            match view.schedule.next_in_phase(&view.clock, t, lead, phase) {
                 Next::Render { k, shown_from } => {
                     if view
                         .pool
