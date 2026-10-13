@@ -183,6 +183,10 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       pick: (x: number, y: number, T: number, o?: any) => api.pick(x, y, T, o) };
   }
   const api = new NativeApi(PM, () => (state.ready ? wasm : null), () => barrier, unwrap, legacy, dual);
+  api.onStale = (op, paths) => {
+    reporter.emit({ type: 'audit', kind: 'stale-answer', revision: barrier?.revision ?? -1, paths: paths.slice(0, 20), detail: op });
+    if (auditor) { auditor.stats.missedWrites += 1; auditor.stats.failures += 1; }
+  };
   const auditor = mode.audit ? new ShadowAuditor(() => (state.ready ? barrier : null), f => reporter.emit({ type: 'audit', kind: f.kind, revision: f.revision, paths: f.paths, detail: f.detail })) : null;
 
   const onMismatch = (result: ConsistencyResult) => {
@@ -208,7 +212,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
         mode: mode.name, ready: state.ready,
         barrier: barrier ? { revision: barrier.revision, ...barrier.stats } : null,
         native: api.stats,
-        dual: dual ? { ...dual.total(), compared: dual.stats.compared, mismatched: dual.stats.mismatched } : null,
+        dual: dual ? { ...dual.total(), compared: dual.stats.compared, mismatched: dual.stats.mismatched, stale: dual.stats.stale } : null,
         audit: auditor ? { audits: auditor.stats.audits, failures: auditor.stats.failures, missedWrites: auditor.stats.missedWrites, mirrorMismatches: auditor.stats.mirrorMismatches, ms: Math.round(auditor.stats.ms) } : null,
         violations: tracker ? tracker.violations().slice(0, 50) : null,
         wasm: wasm && !wasm.dead ? { ...wasm.heap(), ...wasm.stats() } : null,

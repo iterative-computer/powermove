@@ -24,7 +24,11 @@ export interface Mismatch {
 
 export interface DualStats {
   compared: Record<string, number>;
+  /** Evaluation mismatches: the answers differ on the same document. */
   mismatched: Record<string, number>;
+  /** Answers that differed because the mirror missed a write (a barrier
+   *  gap, repaired and re-answered; counted, not evaluation mismatches). */
+  stale: Record<string, number>;
   /** The first mismatches of each operation (bounded). */
   samples: Mismatch[];
 }
@@ -86,44 +90,50 @@ export function differs(a: unknown, b: unknown, close: (a: number, b: number) =>
 }
 
 export class DualAnswers {
-  readonly stats: DualStats = { compared: {}, mismatched: {}, samples: [] };
+  readonly stats: DualStats = { compared: {}, mismatched: {}, stale: {}, samples: [] };
   private perOp = new Map<string, number>();
 
   constructor(private report: (mismatch: Mismatch) => void = () => {}) {}
 
-  compare(op: string, native: Answer, legacy: Answer, where: () => Record<string, unknown>, unwrap: <T>(v: T) => T): boolean {
-    this.stats.compared[op] = (this.stats.compared[op] ?? 0) + 1;
-    let path: string | null;
-    if ('threw' in native || 'threw' in legacy) {
-      path = ('threw' in native) === ('threw' in legacy) ? null : '(throw)';
-    } else {
-      // allProps lists object members in pm-model's sorted order (allowed
-      // difference 5): compare the listings as sets of keys.
-      const a = op === 'allProps' ? byKey(native.value) : native.value;
-      const b = op === 'allProps' ? byKey(legacy.value) : legacy.value;
-      path = identity(op, a, b, unwrap) ?? differs(a, b, tolerance(op), unwrap);
-    }
-    if (path === null) return true;
-    this.stats.mismatched[op] = (this.stats.mismatched[op] ?? 0) + 1;
-    const n = this.perOp.get(op) ?? 0;
-    if (n < MAX_SAMPLES_PER_OP) {
-      this.perOp.set(op, n + 1);
-      const mismatch: Mismatch = {
-        op,
-        where: safe(where),
-        path,
-        native: 'threw' in native ? `throw ${show(native.threw)}` : show(native.value),
-        legacy: 'threw' in legacy ? `throw ${show(legacy.threw)}` : show(legacy.value),
-      };
-      this.stats.samples.push(mismatch);
-      this.report(mismatch);
-    }
-    return false;
+  /** Where two answers differ beyond the tolerances, or null. */
+  check(op: string, native: Answer, legacy: Answer, unwrap: <T>(v: T) => T): string | null {
+    if ('threw' in native || 'threw' in legacy) return ('threw' in native) === ('threw' in legacy) ? null : '(throw)';
+    // allProps lists object members in pm-model's sorted order (allowed
+    // difference 5): compare the listings as sets of keys.
+    const a = op === 'allProps' ? byKey(native.value) : native.value;
+    const b = op === 'allProps' ? byKey(legacy.value) : legacy.value;
+    return identity(op, a, b, unwrap) ?? differs(a, b, tolerance(op), unwrap);
   }
 
-  total(): { compared: number; mismatched: number } {
+  /** Counts a comparison and records an evaluation mismatch when `path` is set. */
+  record(op: string, path: string | null, native: Answer, legacy: Answer, where: () => Record<string, unknown>): void {
+    this.stats.compared[op] = (this.stats.compared[op] ?? 0) + 1;
+    if (path === null) return;
+    this.stats.mismatched[op] = (this.stats.mismatched[op] ?? 0) + 1;
+    const n = this.perOp.get(op) ?? 0;
+    if (n >= MAX_SAMPLES_PER_OP) return;
+    this.perOp.set(op, n + 1);
+    const mismatch: Mismatch = {
+      op,
+      where: safe(where),
+      path,
+      native: 'threw' in native ? `throw ${show(native.threw)}` : show(native.value),
+      legacy: 'threw' in legacy ? `throw ${show(legacy.threw)}` : show(legacy.value),
+    };
+    this.stats.samples.push(mismatch);
+    this.report(mismatch);
+  }
+
+  /** `check` then `record`; true when the answers agree. */
+  compare(op: string, native: Answer, legacy: Answer, where: () => Record<string, unknown>, unwrap: <T>(v: T) => T): boolean {
+    const path = this.check(op, native, legacy, unwrap);
+    this.record(op, path, native, legacy, where);
+    return path === null;
+  }
+
+  total(): { compared: number; mismatched: number; stale: number } {
     const sum = (r: Record<string, number>) => Object.values(r).reduce((a, b) => a + b, 0);
-    return { compared: sum(this.stats.compared), mismatched: sum(this.stats.mismatched) };
+    return { compared: sum(this.stats.compared), mismatched: sum(this.stats.mismatched), stale: sum(this.stats.stale) };
   }
 }
 

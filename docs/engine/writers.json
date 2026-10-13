@@ -63,7 +63,7 @@
     "touch": 52,
     "touch.paths": 1,
     "doc.write": 3,
-    "doc.touched": 0,
+    "doc.touched": 1,
     "anim.touch": 24,
     "shader-uniforms": 9,
     "host.pm": 1,
@@ -1281,31 +1281,37 @@
       "code": "PM.replaceProject(next, { selection })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:205",
+      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:152",
+      "class": "doc.touched",
+      "scope": "install > track",
+      "code": "PM.doc?.touched?.(paths || [])"
+    },
+    {
+      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:207",
       "class": "touch.paths",
       "scope": "install > commit",
       "code": "PM.touch(patches.forward.map(patch => patch.path), true)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:217",
+      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:219",
       "class": "doc.write",
       "scope": "install > rollback",
       "code": "writeAt(patches.map(patch => patch.path), () => { const next = applyPatch(PM.proj, patches); PM.replaceProject(next, selection ? { select..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:219",
+      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:221",
       "class": "project-replace",
       "scope": "install > rollback > writeAt(callback)",
       "code": "PM.replaceProject(next, selection ? { selection } : {})"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:310",
+      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:312",
       "class": "project-replace",
       "scope": "install > restoreSnapshot > H.do(callback)",
       "code": "PM.replaceProject(parsed)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:440",
+      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:442",
       "class": "hist.do",
       "scope": "install > restore",
       "code": "PM.hist.do('Restore ' + take.label, () => restore(take.json))"

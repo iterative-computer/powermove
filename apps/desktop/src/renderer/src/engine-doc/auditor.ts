@@ -88,15 +88,25 @@ export class ShadowAuditor {
     this.report(failure);
   }
 
-  /** Audits at task boundaries, at most every `ms` milliseconds. */
+  /**
+   * Audits at task boundaries, every `ms` milliseconds, backing off so the
+   * audit itself never takes more than about 5% of the time (large projects).
+   */
   start(ms = 100): void {
     if (this.timer) return;
-    this.timer = setInterval(() => this.audit(), ms);
+    const tick = () => {
+      const started = performance.now();
+      this.audit();
+      const took = performance.now() - started;
+      this.timer = setTimeout(tick, Math.max(ms, took * 20));
+      (this.timer as any)?.unref?.();
+    };
+    this.timer = setTimeout(tick, ms);
     (this.timer as any)?.unref?.();
   }
 
   stop(): void {
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) clearTimeout(this.timer);
     this.timer = null;
   }
 }

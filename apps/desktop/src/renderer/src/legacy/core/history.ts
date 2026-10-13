@@ -148,6 +148,8 @@ export function install(PM: PMRegistry): void {
     },
     track(paths: PathPart[][]) {
       if (!pending?.scoped) return false;
+      // The native engine's write barrier: these paths are about to be written.
+      PM.doc?.touched?.(paths || []);
       for (const rawPath of paths || []) {
         const path = [...rawPath];
         /* A parent snapshot already covers this path. If a new parent arrives,

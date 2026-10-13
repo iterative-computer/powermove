@@ -18,7 +18,7 @@
  * served the fonts it needs.
  */
 import type { PathPart } from '../../../shared/patch';
-import type { DocumentBarrier } from './barrier';
+import { lookup, type DocumentBarrier } from './barrier';
 import type { PmWasm } from './wasm';
 import type { DualAnswers } from './dual';
 import { layer3DRole } from '../core/scene3d/layers';
@@ -83,13 +83,15 @@ interface Indexed { layers: any[]; revision: number; index: Map<any, number>; fi
 
 export interface NativeStats {
   calls: Record<string, number>;
+  /** Queries that found the mirror missing a structural write and repaired it first. */
+  repairs: number;
   fallbacks: Record<string, number>;
   fastPath: number;
   interned: number;
 }
 
 export class NativeApi {
-  readonly stats: NativeStats = { calls: {}, fallbacks: {}, fastPath: 0, interned: 0 };
+  readonly stats: NativeStats = { calls: {}, repairs: 0, fallbacks: {}, fastPath: 0, interned: 0 };
   /** Live channel object → interned id (validated on every use). */
   private props = new WeakMap<object, { layer: object; path: PathPart[]; comp: string; id: number }>();
   /** Live layer → its interned transform channels. */
@@ -101,6 +103,8 @@ export class NativeApi {
   /** `expressionErrors` for channels evaluated natively (live objects). */
   readonly errors = new WeakMap<object, string>();
   private definitions = new Map<string, string>();
+  /** Called when a dual answer differed because the mirror missed a write. */
+  onStale: ((op: string, paths: string[]) => void) | null = null;
 
   constructor(
     private PM: Legacy,
@@ -165,6 +169,16 @@ export class NativeApi {
     let i = idx.index.get(raw);
     if (i !== undefined && layers[i] !== raw) { this.indexed.delete(layers); i = this.index(layers).index.get(raw); }
     if (i === undefined) return { comp: c.comp, open: c.open, layer: JSON.parse(JSON.stringify(raw)), raw, first: false, live };
+    // The mirror must hold this layer at this index (the shadow is exactly
+    // what it holds). If not, a structural write bypassed the barrier: repair
+    // before answering rather than answer for another layer.
+    const barrier = this.barrier();
+    const mirrored = barrier ? lookup(barrier.shadow, ['comps', c.comp, 'layers', i, 'id']) : null;
+    if (barrier && (!mirrored?.exists || mirrored.value !== raw.id)) {
+      this.stats.repairs += 1;
+      const missed = barrier.repair('structuralDiff');
+      if (missed.length) this.onStale?.('context', missed);
+    }
     const first = typeof raw.id === 'string' && this.index(layers).firstById.get(raw.id) === i;
     return { comp: c.comp, open: c.open, layer: i, raw, first, live };
   }
@@ -193,8 +207,10 @@ export class NativeApi {
   /** Native answer (or legacy fallback), compared with the legacy answer in dual mode. */
   private answer<T>(op: string, native: () => Native<T>, legacy: () => T, describe: () => Record<string, unknown>): T {
     this.count(op);
-    let got: Native<T>;
-    try { got = native(); } catch (error) { got = { fallback: 'exception' }; console.warn(`[engine-doc] ${op} failed natively`, error); }
+    const run = (): Native<T> => {
+      try { return native(); } catch (error) { console.warn(`[engine-doc] ${op} failed natively`, error); return { fallback: 'exception' }; }
+    };
+    let got = run();
     if ('fallback' in got) {
       this.fell(op, got.fallback);
       return legacy();
@@ -202,7 +218,22 @@ export class NativeApi {
     if (this.dual) {
       let expected: { value?: T; threw?: unknown };
       try { expected = { value: legacy() }; } catch (error) { expected = { threw: error }; }
-      this.dual.compare(op, 'value' in got ? { value: got.value } : { threw: got.threw }, expected, describe, this.unwrap);
+      const answer = (g: Native<T>) => ('value' in g ? { value: g.value } : { threw: (g as { threw: Error }).threw });
+      let path = this.dual.check(op, answer(got), expected, this.unwrap);
+      if (path !== null) {
+        // A write the barrier did not see makes the mirror stale: that is a
+        // barrier gap, not an evaluation difference. Repair, then ask again.
+        const missed = this.barrier()?.repair('structuralDiff') ?? [];
+        if (missed.length) {
+          this.dual.stats.stale[op] = (this.dual.stats.stale[op] ?? 0) + 1;
+          this.onStale?.(op, missed);
+          const again = run();
+          if ('fallback' in again) { this.fell(op, again.fallback); return legacy(); }
+          got = again;
+          path = this.dual.check(op, answer(got), expected, this.unwrap);
+        }
+      }
+      this.dual.record(op, path, answer(got), expected, describe);
     }
     if ('threw' in got) throw got.threw;
     return got.value;
