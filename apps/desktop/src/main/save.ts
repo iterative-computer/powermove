@@ -19,6 +19,7 @@ import { atomicWrite, type ProjectFiles } from './project-files';
 import { rememberExport } from './export-sidecar';
 import { FileUpload, FILE_CHUNK_BYTES } from './file-upload';
 import { validateSaveMedia, type ProjectSave } from './project-save';
+import { validateLinkedRecords, type LinkedRecord } from '../shared/project-incremental';
 
 const MAX_SAVE_NAME_CHARS = 200;
 
@@ -186,6 +187,7 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
       || (request.saveAs !== undefined && typeof request.saveAs !== 'boolean') || typeof request.documentBytes !== 'number'
       || !Number.isSafeInteger(request.documentBytes) || request.documentBytes < 2 || request.documentBytes > 0xffffffff) throw new Error('Invalid project save request');
     validateSaveMedia(request.media);
+    if (request.linked !== undefined) validateLinkedRecords(request.linked);
     const name = sanitizeSaveName(request.name);
     if (!name) throw new Error('Invalid project save name');
     if (pending.has(event.sender) || uploads.has(event.sender) || projectSaves.has(event.sender)) throw new Error('A save is already in progress.');
@@ -205,7 +207,8 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
       if (window.isDestroyed() || event.sender.isDestroyed()) throw new Error('Save window is unavailable');
       id = randomUUID();
       const timer = setTimeout(() => { void discardProjectSave(event.sender, id).catch(() => undefined); }, 120_000); timer.unref();
-      const ready = ctx.projects.beginIncremental(request.projectId, request.media, request.documentBytes, selectedPath);
+      const ready = ctx.projects.beginIncremental(request.projectId, request.media, request.documentBytes, selectedPath,
+        request.linked === undefined ? undefined : request.linked as LinkedRecord[]);
       projectSaves.set(event.sender, { id, ready, timer, finishing: false });
       const save = await ready;
       if (event.sender.isDestroyed() || projectSaves.get(event.sender)?.id !== id) throw new Error('Save cancelled');
