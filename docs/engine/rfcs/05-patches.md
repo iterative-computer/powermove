@@ -321,6 +321,20 @@ so bodies stay canonical. Open question 5 is resolved this way: structural
 edits leave the renderer as id-keyed operations; `pm-wasm` does not convert
 whole-array leaf sets.
 
+### The renderer's stream for engine sessions (Phase 1)
+
+`PM.EngineDoc.subscribe(fn)` (`engine-doc/install.ts`) delivers every
+`PatchBatch` pm-wasm applied, in order, with a `canonicalV1` body; the tracer
+forwards the same batches to the interactive engine (open question 2: the
+renderer produces one stream; which process fans it out to the job engine is
+still the bridge's decision). A receiver opens with
+`PM.EngineDoc.snapshot()`: the flushed canonical document as
+`canonicalJsonV1` (sorted keys), its revision, and pm-wasm's canonical hash at
+that revision, which is the `Resync` of invariant 4. Batches with origin
+`load` are resyncs (one leaf set of the whole document at the empty path) and
+apply at any revision. Revisions continue across a replaced pm-wasm instance
+(invariant 1).
+
 ### `fpsRational` is a composition field
 
 The frame-rate validator stores `fpsRational` beside `fps` (section 5, rule

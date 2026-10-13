@@ -136,9 +136,12 @@ subsets (docs/engine/text.md). A query that meets a missing answer or face repli
 `{fonts}`; a `FontProvider` (`engine-doc/fonts.ts`) loads what the layout lacked and
 the query is asked again: synchronously in the headless document host (pm-bridge's
 `FontRegistry` in process, `POWERMOVE_ENGINE_FONTS=1`, `POWERMOVE_PM_BRIDGE`), in the
-background in the editor once the preload exposes `engine-fonts:answer` and
-`engine-fonts:subset` (it does not yet; until then text queries keep the legacy
-answer and count as `fonts` fallbacks). Answers that depend on glyph ink (text and
+background in the editor, where the first query keeps the legacy answer (a `fonts`
+fallback) and the next ones answer natively. Main registers `engine-fonts:answer` and
+`engine-fonts:subset` with `POWERMOVE_ENGINE_FONTS=1` (`setupEngineFonts` in
+`main/index.ts`, the same pm-bridge copy the frame bridge loads) and the preload
+exposes them as `engineFonts`; without the flag the calls reject and, after three
+failures in a row, the loader gives the provider up (text stays legacy). Answers that depend on glyph ink (text and
 caption bounds, picks over text, raster placement) reply `{ink}` while the faces are
 subsets without outlines (pm-eval allowed difference 6) and keep the legacy answer;
 `pm_fonts_outlines(1)` declares whole fonts. Caret layout (`render.textLayout`),
@@ -155,6 +158,19 @@ glyph positions, and widths need no outlines.
   (`property-reveal.spec.ts` caught it). A mismatch that disappears after repairing the
   mirror is a **stale answer** (a barrier gap, reported as `stale-answer`), not an
   evaluation mismatch.
+- **Allowed differences** (amendments 16 and 20), counted under `allowed` by
+  `<op>:<class>`, never as mismatches:
+  - `atan2`: one answer 180 and the other −180 (within the evaluation tolerance),
+    the rotation branch cut. Not applied to bounds or text, which have their own
+    tolerances.
+  - `fragile`: every `gl.bounds`, `groups.bounds`, and `gl.pick` comparison also asks
+    the legacy code at the time ±1e-12 s (picks also at the point ±1e-7 px on each
+    axis). When one of those answers differs from the legacy answer, the case is
+    fragile (`fragile[op]` counts the population); a difference on a fragile case
+    counts as `allowed['<op>:fragile']`. `fragileBudget()` checks the 5% line.
+  - `nested-retime` (amendment 16): declared, never counted. No routed query
+    integrates variable speed: `sourceTime` is not a kernel query, and pm-wasm's
+    queries never call `Scope::source_time`.
 - **Auditor** (`engine-doc/auditor.ts`): at task boundaries (every 100 ms, backing
   off to about 5% of the time on large projects) the shadow must equal
   `canonicalProject(PM.proj)` under sorted-key serialization, and pm-wasm's hash must
@@ -163,8 +179,25 @@ glyph positions, and widths need no outlines.
   export (`PM.Export.run`), and on idle after writes (at most every 30 s): flush,
   compare `canonicalProjectHash(PM.proj)` with pm-wasm's hash; on a mismatch list the
   missed paths, resync, emit `engine:consistency-mismatch`, and report.
-- Reports are `[pm-native] {json}` lines on the host log (main's stderr in the desktop
-  app) and the console.
+- Reports are `[pm-native] {json}` lines (each with `at`, wall-clock ms) through the
+  host bridge the kernel captured at boot (main's stderr in the desktop app) and the
+  console. With `POWERMOVE_NATIVE_REPORT_FILE` set, main also appends them, one JSON
+  per line, to that file (`main/log.ts`); test pages emit a summary every 2 s while
+  counts change and on `pagehide`, with a per-page `session`.
+  `scripts/native-evaluator-report.mjs <file> [--results playwright.json]` sums the
+  last summary of every page and attributes events to the test that was running.
+
+## The patch stream for engine sessions
+
+`PM.EngineDoc.subscribe(fn)` delivers every `PatchBatch` pm-wasm applied, in order
+(contract 5): `baseRevision`, `revision`, `origin`, `count`, and the `canonicalV1`
+body. A receiver starts from `PM.EngineDoc.snapshot()` (flushed; `revision`,
+`encoding: 'canonicalJsonV1'`, the canonical JSON with sorted keys, and pm-wasm's hash
+at that revision) and applies batches whose `baseRevision` equals its revision. A
+batch with origin `load` is a resync: one leaf set of the whole document at the empty
+path, applicable at any revision. When a trapped instance is replaced, the new
+barrier continues the revisions, so receivers never see them move backward. The
+tracer forwards the same batches to the interactive engine.
 
 ## The headless document host
 
