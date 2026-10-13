@@ -951,6 +951,8 @@ export interface PowermoveBridge {
   /* ── native engine (behind "Use New Engine") ── */
   /** The native engine's status, staged resync documents, and definition updates. */
   nativeEngine?: import('./engine-ipc').EngineBridge;
+  /** The frame bridge's receiver (behind "Use New Engine"). */
+  frameBridge?: import('./frame-bridge').FrameBridgeApi;
 }
 
 export interface SandboxInputKey {

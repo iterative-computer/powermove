@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
+import { contextBridge, ipcRenderer, sharedTexture, webUtils, type IpcRendererEvent } from 'electron';
 
 import {
   IPC,
@@ -40,6 +40,7 @@ import { CLOUD_IPC, type CloudChannel, type CloudChannels } from '../shared/clou
 import { STORE_IPC, type StoreChannel, type StoreChannels } from '../shared/store-ipc';
 import { TRANSCRIPTION_IPC, type TranscribeProgress, type TranscribeResult, type TranscriptionStatus } from '../shared/transcription';
 import { ENGINE_IPC, ENGINE_WINDOW_MESSAGE, type EngineStatusMessage, type StageDocumentResult } from '../shared/engine-ipc';
+import { installFrameBridgeReceiver, type ReceiverModule } from './frame-bridge';
 
 /** One typed invoke for every `cloud:*` channel (store plan §2.7). */
 function cloudInvoke<C extends CloudChannel>(channel: C, request?: CloudChannels[C]['req']): Promise<CloudChannels[C]['res']> {
@@ -58,6 +59,13 @@ function cloudEvent<T>(channel: string) {
     return () => ipcRenderer.removeListener(channel, listener);
   };
 }
+
+/*
+ * The frame bridge's receiver (behind "Use New Engine"): main sends this
+ * window the engine's viewer surfaces once each; the receiver keeps them.
+ * Installing it is inert until main sends something.
+ */
+const frameBridge = sharedTexture ? installFrameBridgeReceiver(sharedTexture as unknown as ReceiverModule) : undefined;
 
 let nextMediaRequest = 0;
 const bridge: PowermoveBridge = {
@@ -510,7 +518,8 @@ const bridge: PowermoveBridge = {
       bytes: request.bytes
     }) as Promise<StageDocumentResult>,
     pushDefinitions: (update) => ipcRenderer.send(ENGINE_IPC.definitions, update)
-  }
+  },
+  ...(frameBridge ? { frameBridge } : {})
 };
 
 /*
