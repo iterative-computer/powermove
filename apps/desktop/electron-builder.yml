@@ -16,10 +16,16 @@ asar: true
 asarUnpack:
   - node_modules/@transcribe-cpp/darwin-arm64-metal/**
   - node_modules/@koromix/koffi-darwin-arm64/**
+  # The native engine's pm-node addon (engine/crates/pm-node), loaded by the
+  # interactive and job engine utility processes with process.dlopen, which
+  # cannot map out of the asar. Built by `bun run build:engine` into native/;
+  # the release script builds and verifies it with --with-engine.
+  - native/**
 electronLanguages:
   - en
 files:
   - out/**
+  - native/pm_node.node
   - "!**/* [2-9].*"
   - "!**/* [2-9]"
   - '!node_modules/ffmpeg-static/ffmpeg'

@@ -4,6 +4,14 @@ import type { PlaybackRate } from "./PlaybackRate";
 import type { Seq } from "./Seq";
 
 /**
- * Signals relayed by main from the interactive engine to the job engine.
+ * Signals from the interactive engine to the job engine. Playback start,
+ * stop, misses, and quality steps go through main (which also moves the
+ * leases, contract 8); per-frame `frameDone` goes on the direct port main
+ * hands the two engines (S8: 4 ms of relay latency cut export throughput by
+ * 24 to 55%).
  */
-export type DeadlineSignal = { "signal": "playbackStarted", at: HostMicros, rate: PlaybackRate, frameBudgetUs: number, } | { "signal": "playbackStopped", at: HostMicros, } | { "signal": "deadlineMiss", at: HostMicros, frameSeq: Seq, overrunUs: number, } | { "signal": "qualityStepDown", at: HostMicros, };
+export type DeadlineSignal = { "signal": "playbackStarted", at: HostMicros, rate: PlaybackRate, frameBudgetUs: number, } | { "signal": "playbackStopped", at: HostMicros, } | { "signal": "deadlineMiss", at: HostMicros, frameSeq: Seq, overrunUs: number, } | { "signal": "qualityStepDown", at: HostMicros, } | { "signal": "frameDone", at: HostMicros, frameSeq: Seq, tick: HostMicros, nextSubmit: HostMicros, 
+/**
+ * The frame completed after its deadline.
+ */
+late: boolean, };

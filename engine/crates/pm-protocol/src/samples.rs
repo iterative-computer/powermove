@@ -37,7 +37,7 @@ use crate::envelope::{
 };
 use crate::error::{
     CrashReport, EngineError, EngineProcess, ErrorCode, ErrorDetail, ErrorScope, FailureReport,
-    Retry, ShaderDiagnostic,
+    InFlight, Retry, ShaderDiagnostic,
 };
 use crate::frame::{
     Caret, DepthIdSurface, EditorCamera, FrameDescriptor, FramePurpose, FrameQuality, FrameRelease,
@@ -45,9 +45,10 @@ use crate::frame::{
     PreviewResolution, Projection, Representation, Shading3d, ViewOverride, ViewerState,
 };
 use crate::host::{
-    CacheKind, CapabilityHandle, CapabilityKind, CommitOutput, HandleGrant, HardwareSessionGrant,
-    HardwareSessionKind, HardwareSessionRequest, MintHandle, OutputChoice, OutputCommitted,
-    OutputDestination, OutputDestinationRequest, OutputVerification, OverwritePolicy,
+    CacheKind, CapabilityHandle, CapabilityKind, CommitOutput, HandleAccess, HandleGrant,
+    HandleResolved, HardwareSessionGrant, HardwareSessionKind, HardwareSessionRequest, MintHandle,
+    OutputChoice, OutputCommitted, OutputDestination, OutputDestinationRequest, OutputVerification,
+    OverwritePolicy, ResolveHandle,
 };
 use crate::interop::{PlatformSurface, SurfaceDescriptor, SurfaceFormat, SurfacePool};
 use crate::lease::{Lease, LeaseCategories, LeaseReason, LeaseRequest, LeaseUsage};
@@ -682,6 +683,13 @@ pub fn requests() -> Vec<Envelope> {
             }),
         ),
         request(
+            id(40),
+            Request::ResolveHandle(ResolveHandle {
+                handle: handle(15),
+                session: session(),
+            }),
+        ),
+        request(
             id(14),
             Request::OutputDestination(OutputDestinationRequest {
                 job: "job-1".into(),
@@ -902,6 +910,15 @@ pub fn responses() -> Vec<Envelope> {
             }),
         ),
         response(
+            40,
+            Response::HandleResolved(HandleResolved {
+                handle: handle(15),
+                kind: CapabilityKind::MediaRead { asset: "a1".into() },
+                access: HandleAccess::Read,
+                path: "/Users/someone/Movies/Interview A.mov".into(),
+            }),
+        ),
+        response(
             15,
             Response::OutputDestination(OutputDestination {
                 job: "job-1".into(),
@@ -1056,6 +1073,13 @@ pub fn events() -> Vec<Envelope> {
             frame_seq: seq(812),
             overrun_us: 900,
         })),
+        event(Event::Deadline(DeadlineSignal::FrameDone {
+            at: HostMicros::new(123_456_810_500).expect("micros"),
+            frame_seq: seq(813),
+            tick: HostMicros::new(123_456_800_000).expect("micros"),
+            next_submit: HostMicros::new(123_456_816_666).expect("micros"),
+            late: false,
+        })),
         event(Event::Slicing(SlicingPolicy {
             blender: BlenderThrottle::Throttle { max_workers: 1 },
             ..SlicingPolicy::DEFAULT
@@ -1079,6 +1103,16 @@ pub fn events() -> Vec<Envelope> {
             suspects: vec![ErrorScope::Asset { asset: "a1".into() }],
             marked_failed: vec![ErrorScope::Asset { asset: "a1".into() }],
             restart_in_ms: 500,
+        })),
+        event(Event::InFlight(InFlight {
+            suspects: vec![
+                ErrorScope::Asset { asset: "a1".into() },
+                ErrorScope::Effect {
+                    layer: "title".into(),
+                    effect: "fx1".into(),
+                    definition: "acme.glow".into(),
+                },
+            ],
         })),
         event(Event::LeaseUsage(LeaseUsage {
             ack: false,
@@ -1205,17 +1239,23 @@ pub fn all() -> Vec<(String, Envelope)> {
                 _ => unreachable!("typed samples"),
             };
             let mut name = format!("{prefix}-{tag}");
-            if let Message::Event {
-                body: Event::Fact(fact),
-            } = &envelope.message
-            {
+            // Facts and deadline signals have several samples each, named by their inner tag.
+            let inner = match &envelope.message {
+                Message::Event {
+                    body: Event::Fact(fact),
+                } => serde_json::to_value(fact)
+                    .ok()
+                    .and_then(|v| v["kind"].as_str().map(str::to_owned)),
+                Message::Event {
+                    body: Event::Deadline(signal),
+                } => serde_json::to_value(signal)
+                    .ok()
+                    .and_then(|v| v["signal"].as_str().map(str::to_owned)),
+                _ => None,
+            };
+            if let Some(inner) = inner {
                 name.push('-');
-                name.push_str(
-                    &serde_json::to_value(fact)
-                        .ok()
-                        .and_then(|v| v["kind"].as_str().map(str::to_owned))
-                        .unwrap_or_default(),
-                );
+                name.push_str(&inner);
             }
             named.push((name, envelope));
         }
@@ -1257,9 +1297,10 @@ pub const fn request_index(request: &Request) -> usize {
         Request::Persist(_) => 21,
         Request::RegisterExtension(_) => 22,
         Request::ToolCall(_) => 23,
+        Request::ResolveHandle(_) => 24,
     }
 }
-pub const REQUEST_VARIANTS: usize = 24;
+pub const REQUEST_VARIANTS: usize = 25;
 
 /// Exhaustive index of response variants.
 pub const fn response_index(response: &Response) -> usize {
@@ -1286,9 +1327,10 @@ pub const fn response_index(response: &Response) -> usize {
         Response::Persisted(_) => 19,
         Response::ExtensionRegistered(_) => 20,
         Response::ToolResult(_) => 21,
+        Response::HandleResolved(_) => 22,
     }
 }
-pub const RESPONSE_VARIANTS: usize = 22;
+pub const RESPONSE_VARIANTS: usize = 23;
 
 /// Exhaustive index of event variants.
 pub const fn event_index(event: &Event) -> usize {
@@ -1310,9 +1352,10 @@ pub const fn event_index(event: &Event) -> usize {
         Event::BlenderProgress(_) => 14,
         Event::BlenderSurface(_) => 15,
         Event::Fact(_) => 16,
+        Event::InFlight(_) => 17,
     }
 }
-pub const EVENT_VARIANTS: usize = 17;
+pub const EVENT_VARIANTS: usize = 18;
 
 /// A sample color description for a 10-bit 4:2:2 ProRes source.
 pub fn prores_422_color() -> ColorDescription {

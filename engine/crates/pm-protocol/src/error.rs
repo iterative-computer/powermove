@@ -284,6 +284,48 @@ pub struct CrashReport {
     pub restart_in_ms: u32,
 }
 
+/// Engine to host: the attributable items the engine is working on right
+/// now (its crash breadcrumb). Sent whenever the set changes; after a crash
+/// the host reads the last one as the crash's suspects ([`CrashLedger`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct InFlight {
+    pub suspects: Vec<ErrorScope>,
+}
+
+/// Most suspects in one breadcrumb.
+pub const MAX_IN_FLIGHT_SUSPECTS: usize = 256;
+
+impl ErrorScope {
+    /// Whether crashes can be attributed to this scope (section 19): assets,
+    /// effects, definitions, and layers. Sessions and connections never are.
+    pub const fn is_attributable(&self) -> bool {
+        matches!(
+            self,
+            ErrorScope::Asset { .. }
+                | ErrorScope::Effect { .. }
+                | ErrorScope::Definition { .. }
+                | ErrorScope::Layer { .. }
+        )
+    }
+}
+
+impl crate::validate::Validate for InFlight {
+    fn validate(&self) -> Result<(), crate::validate::Violation> {
+        crate::validate::ensure(
+            self.suspects.len() <= MAX_IN_FLIGHT_SUSPECTS,
+            ContractId::Errors,
+            || format!("at most {MAX_IN_FLIGHT_SUSPECTS} suspects in flight"),
+        )?;
+        crate::validate::ensure(
+            self.suspects.iter().all(ErrorScope::is_attributable),
+            ContractId::Errors,
+            || "only assets, effects, definitions, and layers can be suspects".into(),
+        )
+    }
+}
+
 /// Crashes attributed to one item before it is marked failed (section 19).
 pub const CRASHES_BEFORE_MARKED_FAILED: u32 = 2;
 
@@ -309,13 +351,7 @@ impl CrashLedger {
     pub fn record(&mut self, suspects: &[ErrorScope]) -> Vec<ErrorScope> {
         let mut newly_failed = Vec::new();
         for suspect in suspects {
-            if !matches!(
-                suspect,
-                ErrorScope::Asset { .. }
-                    | ErrorScope::Effect { .. }
-                    | ErrorScope::Definition { .. }
-                    | ErrorScope::Layer { .. }
-            ) {
+            if !suspect.is_attributable() {
                 continue;
             }
             let count = match self.counts.iter_mut().find(|(scope, _)| scope == suspect) {

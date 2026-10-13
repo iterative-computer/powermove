@@ -88,8 +88,16 @@ fixtures.
 
 Every connection starts with `hello` from the side that opened it and
 `welcome` from the other side; both carry the peer role, `wire`, a source
-build id (git commit plus dirty flag), and the largest message the sender
-accepts.
+build id, and the largest message the sender accepts.
+
+The build id is `pm_protocol::version::SOURCE_BUILD`: `protocol-` and the
+first 16 hex digits of a SHA-256 over the `pm-protocol` sources, computed by
+the crate's `build.rs`. The generated TypeScript exports the same value as
+`PROTOCOL_BUILD`, and the regeneration check keeps the two equal. It
+replaces the draft's "git commit plus dirty flag", which made separately
+built peers from one dirty tree (main's bundle and the `pm-node` addon in
+development) disagree or agree by accident; the source hash is equal exactly
+when the draft types are.
 
 1. `wire` must match exactly.
 2. Each contract negotiates to the highest version in both ranges

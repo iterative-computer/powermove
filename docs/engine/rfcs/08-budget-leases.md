@@ -63,11 +63,24 @@ the total must keep equaling the sum on both sides.
 - **S6:** decoder memory per session for each hardware codec, which sets the
   decoder share of the interactive lease.
 
+## Implementation (Phase 2 infrastructure)
+
+Engine side: `pm_engine::lease::LeaseBudget`. Host side: main's
+`MemoryArbiter` (`apps/desktop/src/main/engine/arbiter.ts`) and pm-host's
+(`pm_host::arbiter`), with identical integer arithmetic. The global budget
+is half of physical memory, at most physical minus 4 GiB, at least 1 GiB;
+the split is 600/400 per mille (interactive/job) idle and 850/150 during
+playback. Until an engine acknowledges a shrink, the host counts the larger
+of its old and new lease, and defers the other engine's growth until the
+acknowledgement. An engine that grew while the other was down is shrunk
+back to its share (`memoryPressure`) when the other engine's initial lease
+is granted. Notes: `docs/engine/host-processes.md`.
+
 ## Open questions
 
 1. How the host splits the global budget initially (a fixed fraction of
-   physical memory, or measured headroom). Engine and platform decides with
-   the memory gate.
+   physical memory, or measured headroom). Interim answer above; Engine and
+   platform revisits it with the memory gate.
 2. Whether the acknowledgement deadline should scale with the shrink size.
    Eviction of GPU caches is fast; a large frame cache on disk-backed
    memory may not be.

@@ -9,6 +9,8 @@
     "dev": "electron-vite dev",
     "dev:local": "POWERMOVE_REGISTRY_URL=http://localhost:8787 POWERMOVE_DEV_PROTOCOL=1 electron-vite dev",
     "build": "electron-vite build",
+    "build:engine": "node scripts/build-engine-addon.mjs",
+    "test:engine-host": "node scripts/engine-host-integration.mjs",
     "preview": "electron-vite preview",
     "test": "vitest run",
     "test:unit": "vitest run",

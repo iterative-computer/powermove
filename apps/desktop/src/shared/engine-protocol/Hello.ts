@@ -11,8 +11,8 @@ export type Hello = { role: PeerRole,
  */
 wire: number, 
 /**
- * Source build identity (git commit plus dirty flag). Draft contracts
- * require equal build ids on both sides.
+ * Protocol build id ([`SOURCE_BUILD`]): a hash of the `pm-protocol`
+ * sources. Draft contracts require equal build ids on both sides.
  */
 build: string, contracts: Array<ContractRange>, 
 /**

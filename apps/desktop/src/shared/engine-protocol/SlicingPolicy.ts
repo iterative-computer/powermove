@@ -2,13 +2,29 @@
 import type { BlenderThrottle } from "./BlenderThrottle";
 
 /**
- * The job engine's slicing policy.
+ * The job engine's slicing policy (host → job engine).
  */
 export type SlicingPolicy = { 
 /**
- * Longest job-engine command buffer during playback (2 ms).
+ * Hard bound on any job-engine command buffer, and on any single
+ * dispatch in it, during playback (2 ms).
  */
 maxCommandBufferUs: number, 
+/**
+ * What the cost model predicts each command buffer to (1 ms). Filling to
+ * 90% of 2 ms overshot the bound once other GPU clients were active;
+ * a 1 ms target kept every buffer at 2.01 ms or less (S8).
+ */
+targetCommandBufferUs: number, 
+/**
+ * Job-engine command buffers in flight during playback (1).
+ */
+maxInFlight: number, 
+/**
+ * A slice must be predicted to end this long before the interactive
+ * engine's next submission (1 ms).
+ */
+alignGuardUs: number, 
 /**
  * After a deadline miss, the job engine submits nothing for this long.
  */

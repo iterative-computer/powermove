@@ -947,6 +947,14 @@ version = "0.1.0"
 [[package]]
 name = "pm-engine"
 version = "0.1.0"
+dependencies = [
+ "libc",
+ "pm-model",
+ "pm-protocol",
+ "proptest",
+ "serde",
+ "thiserror",
+]
 
 [[package]]
 name = "pm-eval"
@@ -980,6 +988,11 @@ version = "0.1.0"
 [[package]]
 name = "pm-host"
 version = "0.1.0"
+dependencies = [
+ "pm-protocol",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "pm-media"
@@ -998,6 +1011,15 @@ dependencies = [
 [[package]]
 name = "pm-node"
 version = "0.1.0"
+dependencies = [
+ "libc",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "pm-engine",
+ "pm-protocol",
+ "serde_json",
+]
 
 [[package]]
 name = "pm-protocol"
@@ -1009,6 +1031,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+ "sha2",
  "thiserror",
  "ts-rs",
 ]
