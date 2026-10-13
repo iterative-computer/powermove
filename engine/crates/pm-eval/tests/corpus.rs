@@ -1093,7 +1093,12 @@ fn corpus_evaluation_matches_legacy() {
         } else {
             seeds
                 .iter()
-                .map(|s| format!("{} {} at {} px from {} px", s.family, s.weight, s.size, s.specified))
+                .map(|s| {
+                    format!(
+                        "{} {} at {} px from {} px",
+                        s.family, s.weight, s.size, s.specified
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         }
@@ -1183,7 +1188,9 @@ fn corpus_evaluation_matches_legacy() {
     for (font, pin) in PINNED_TEXT_DIFFERENCES {
         let n = stats.layout_fonts.get(*font).copied().unwrap_or(0);
         if n < *pin {
-            eprintln!("  text layouts in {font} not compared: {n}, below its pin of {pin}; lower the pin");
+            eprintln!(
+                "  text layouts in {font} not compared: {n}, below its pin of {pin}; lower the pin"
+            );
         }
     }
     assert!(!failed, "corpus mismatches (see above)");
