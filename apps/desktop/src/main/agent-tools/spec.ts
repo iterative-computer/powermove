@@ -26,6 +26,35 @@ const closedObject = (properties: Record<string, unknown>, required: string[] = 
 
 export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   ...ORCHESTRATION_TOOLS,
+  {
+    name: 'get_timeline',
+    description: 'Read compact layer strips in visual stack order, with selection, frame positions, timing, source ranges, group/parent links, visibility, solo and locks. Page with offset/limit. Refreshes the revision baseline before editing. Every layer owns its own strip; vertical order controls compositing, not chronological order.',
+    inputSchema: closedObject({ offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 500 } })
+  },
+  {
+    name: 'edit_layer_strips',
+    description: 'Atomic human-style timeline gestures on explicit layerIds. move/duplicate: at places the earliest start, or delta shifts the block; relative timing and local animation stay intact. duplicate returns new IDs and remaps links within the copies. sequence lays individual strips in the supplied ID order from at, with optional gap (negative means overlap). align uses at and edge start/end. reorder moves sibling strips before/after anchorId without changing time. state applies patch name/color/visible/solo/shy/locked/collapsed. remove deletes strips; close_gap shifts only supplied strips after [start,end] and refuses intersecting clips. Times snap to composition frames. Groups expand for block operations. Locks and protected hand edits are respected; locked layers must be unlocked in the editor. Use edit_video for source-aware split/trim/slip/audio edits, apply_commands for groups, effects and keyframes. Shares Undo and rollback with other timeline tools.',
+    inputSchema: closedObject({
+      operation: { type: 'string', enum: ['move', 'duplicate', 'sequence', 'align', 'reorder', 'state', 'remove', 'close_gap'] },
+      layerIds: { type: 'array', minItems: 1, maxItems: 500, uniqueItems: true, items: { type: 'string' } },
+      at: { type: 'number', minimum: 0 }, delta: { type: 'number' }, gap: { type: 'number' },
+      start: { type: 'number', minimum: 0 }, end: { type: 'number', minimum: 0 },
+      edge: { type: 'string', enum: ['start', 'end'] }, anchorId: { type: 'string' }, placement: { type: 'string', enum: ['before', 'after'] },
+      patch: closedObject({ name: { type: 'string', minLength: 1 }, color: { type: 'string' }, visible: { type: 'boolean' }, solo: { type: 'boolean' }, shy: { type: 'boolean' }, locked: { type: 'boolean' }, collapsed: { type: 'boolean' } }),
+      label: { type: 'string', maxLength: 80 }
+    }, ['operation', 'layerIds'])
+  },
+  {
+    name: 'manage_project',
+    description: 'Manage the project library without dialogs: list, create and open in this window, rename, duplicate, save a durable local checkpoint, trash a closed project, or restore it. Create/open require an app thread; project threads stay attached to their project. Create requires name and accepts w/h/fps/dur. Duplicate requires name. Other operations use projectId (defaults to active). Library operations persist immediately, commit the previous edit group, and are outside rollback_changes. After switching, read manage_project list; project editing tools run in a project thread. Projects owned by another window cannot be opened here. Save checkpoints the local library, not an external .pmv file.',
+    inputSchema: closedObject({
+      operation: { type: 'string', enum: ['list', 'create', 'open', 'rename', 'duplicate', 'save', 'trash', 'restore'] },
+      projectId: { type: 'string' }, name: { type: 'string', minLength: 1, maxLength: 240 },
+      w: { type: 'integer', minimum: 2, maximum: 8192 }, h: { type: 'integer', minimum: 2, maximum: 8192 },
+      fps: { type: 'number', minimum: 1, maximum: 240 }, dur: { type: 'number', minimum: 0.01, maximum: 86400 }
+    }, ['operation'])
+  },
+
   { name: 'save_project', description: 'Save the current composition as an editable .pmv using Powermove\'s project packer, including its media. Returns the saved path. Saves without a file picker to the host export folder (desktop: ~/Powermove), using a unique filename.', inputSchema: closedObject({}) },
   { name: 'export_video', description: 'Render the current project to MP4 (default) or ProRes with its audio. Uses the production renderer and FFmpeg encoder; returns the actual file path after encoding finishes. Can take several minutes. Exports without a save dialog to the host export folder (desktop: ~/Powermove), using a unique filename.', inputSchema: closedObject({ name: { type: 'string', minLength: 1, maxLength: 120 }, format: { type: 'string', enum: ['mp4', 'prores'] }, range: { type: 'string', enum: ['all', 'work'] }, audio: { type: 'boolean' }, motionBlur: { type: 'boolean' }, alpha: { type: 'boolean' } }) },
   {
@@ -174,9 +203,9 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   },
   {
     name: 'edit_video',
-    description: 'Edit real video/audio timeline clips. Operations: insert an existing imported asset; split at a composition time (returns tailId); trim to a retained composition-time range; move; change constant video speed while preserving the source range; remove without ripple; separate_audio (returns audioId); set audio gain/fades. Times are seconds. Read get_project_state for layer and media asset IDs. Repeated calls share one Undo with apply_commands. Animated timing requires explicit property/keyframe commands. Use render_frames to review cuts.',
+    description: 'Edit real video/audio timeline clips. Operations: insert an existing imported asset; split at a composition time (returns tailId); trim or extend within source handles; slip sourceIn without moving the strip; move; change constant video speed while preserving the source range; remove without ripple; separate_audio (returns audioId); set audio gain/fades. Times are seconds. Read get_project_state for layer and media asset IDs. Repeated calls share one Undo with apply_commands. Animated timing requires explicit property/keyframe commands. Use render_frames to review cuts.',
     inputSchema: closedObject({
-      operation: { type: 'string', enum: ['insert', 'split', 'trim', 'move', 'speed', 'remove', 'separate_audio', 'audio'] },
+      operation: { type: 'string', enum: ['insert', 'split', 'trim', 'move', 'speed', 'remove', 'separate_audio', 'audio', 'slip'] },
       layerId: { type: 'string' },
       assetId: { type: 'string' },
       label: { type: 'string', maxLength: 80 },
@@ -378,10 +407,10 @@ export const POWERMOVE_STORE_READONLY_TOOL_NAMES = [
   'store_search', 'store_extension', 'store_source', 'store_library'
 ] as const;
 
-/** App runs may inspect and stage extensions and use the Store, but never
- * touch a composition. */
+/** App runs may manage the library, inspect and stage extensions, and use the
+ * Store. Composition edits require a project thread. */
 export const POWERMOVE_APP_AGENT_TOOLS = POWERMOVE_AGENT_TOOLS.filter((tool) =>
-  ['fork_builtin_extension', 'stage_fork_rebase', 'validate_effect', 'inspect_creative_workspace', 'inspect_creative_extension', 'get_panel_layout', 'set_panel_layout', ...POWERMOVE_STORE_TOOL_NAMES, ...ORCHESTRATION_TOOL_NAMES].includes(tool.name));
+  ['manage_project', 'fork_builtin_extension', 'stage_fork_rebase', 'validate_effect', 'inspect_creative_workspace', 'inspect_creative_extension', 'get_panel_layout', 'set_panel_layout', ...POWERMOVE_STORE_TOOL_NAMES, ...ORCHESTRATION_TOOL_NAMES].includes(tool.name));
 
 /** Read-only project inspection plus the minimum layout action required to
  * make a hidden panel observable. Editor/planning runs must never receive the
@@ -389,6 +418,7 @@ export const POWERMOVE_APP_AGENT_TOOLS = POWERMOVE_AGENT_TOOLS.filter((tool) =>
 export const POWERMOVE_LIVE_INSPECTION_TOOL_NAMES = [
   ...ORCHESTRATION_TOOL_NAMES,
   'get_project_state',
+  'get_timeline',
   'list_media',
   'get_3d_scene',
   'get_panel_layout',

@@ -869,6 +869,10 @@ const Spatial: any = {
   /* Small pure seams are exposed for deterministic regression tests. */
   math: { selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, sanitizePanelEdit, applyPanelEdit, applyChromeEdit, hintPosition, clampFloatingPosition, textareaLayout, composerMode, normalizeAutonomousResult, boundedEditableSource, boundedAgentPrompt },
   lifecycle: { applyExtensionChanges, reduceTrace, sealTrace },
+  canSwitchRunProject(runId: string) {
+    const session = [...sessions.values()].find(item => item.codexRequestId === runId);
+    return !session || session.projectId === APP_AGENT_PROJECT_ID;
+  },
   assertRunProject(runId: string) {
     const session = [...sessions.values()].find(item => item.codexRequestId === runId);
     if (session && session.projectId !== APP_AGENT_PROJECT_ID && session.projectId !== PM.proj?.id) {

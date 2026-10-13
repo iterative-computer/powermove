@@ -1,3 +1,5 @@
+import { editLayerStrips, timelineState } from './layer-strips';
+import { manageProject } from './project-tools';
 import { setPanelLayout } from './workspace-layout';
 import { mcpProjectTool } from './mcp-project-tools';
 import { createAgentCheckpoint } from './checkpoint';
@@ -375,6 +377,8 @@ async function execute(request: any, proposal: any, progress: any = () => {}, re
 }
 
 function rollback(checkpoint: any) {
+  if (checkpoint?.projectId && checkpoint.projectId !== PM.proj.id) return false;
+  if (checkpoint?.boundary !== undefined && checkpoint.boundary !== (PM.agentProjectBoundary || 0)) return false;
   if (checkpoint.historyId && PM.hist.undoIfTop?.(checkpoint.historyId)) return true;
   const take = checkpoint?.takeId && PM.takes?.all?.().find((item: any) => item.id === checkpoint.takeId);
   const json = checkpoint?.json || take?.json;
@@ -395,6 +399,7 @@ interface LiveToolTransaction {
 }
 
 const liveToolTransactions = new Map<string, LiveToolTransaction>();
+const committedToolChanges = new Set<string>();
 const liveToolObservations = new Map<string, { projectId: string; revision: number }>();
 
 /* Caption generation can outlast one tool call (the bridge fails a call after
@@ -592,6 +597,29 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     if (!PM.SpatialAssistant?.controlThread) throw new Error('Thread controls are unavailable.');
     return { ok: true, content: [toolText(await PM.SpatialAssistant.controlThread(request.arguments))] };
   }
+  if (request.tool === 'manage_project') {
+    const operation = String(request.arguments.operation);
+    if (!['list', 'create', 'open', 'rename', 'duplicate', 'save', 'trash', 'restore'].includes(operation)) throw new Error('Unknown project operation.');
+    if (['create', 'open'].includes(operation) && PM.SpatialAssistant?.canSwitchRunProject?.(request.runId) === false) {
+      throw new Error('Create or open projects from an app thread. This thread stays attached to its project.');
+    }
+    if (operation !== 'list') {
+      if (PM.Export?.busy || PM.agentFrameCapture) throw new Error('Wait for the current export or frame capture to finish.');
+      if (hostBridge()?.remote) throw new Error('Project library management requires a desktop window.');
+      const finished = await handleLiveAgentTool({ ...request, tool: '__finish_run', arguments: { commit: true } });
+      if (!finished.ok) throw new Error(finished.error);
+      if (finished.changed) committedToolChanges.add(request.runId);
+    }
+    if (operation !== 'list') PM.agentProjectBoundary = (PM.agentProjectBoundary || 0) + 1;
+    const result = await manageProject(PM, request.arguments);
+    if (operation !== 'list') { committedToolChanges.add(request.runId); refreshLiveTransaction(request); }
+    return { ok: true, content: [toolText(result)], changed: operation !== 'list', revision: currentRevision() };
+  }
+  if (request.tool === 'get_timeline') {
+    const content = toolText(timelineState(PM, request.arguments));
+    refreshLiveTransaction(request);
+    return { ok: true, content: [content], revision: currentRevision() };
+  }
   if (request.tool === 'select_layers') {
     const ids = request.arguments.layerIds;
     if (!Array.isArray(ids) || !ids.every(id => typeof id === 'string' && PM.L(id))) {
@@ -743,7 +771,7 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
       revision: currentRevision()
     };
   }
-  if (request.tool === 'apply_commands' || request.tool === 'edit_video' || request.tool === 'edit_3d') {
+  if (request.tool === 'apply_commands' || request.tool === 'edit_video' || request.tool === 'edit_3d' || request.tool === 'edit_layer_strips') {
     const rawCommands = Array.isArray(request.arguments.commands) ? request.arguments.commands : [];
     const commands = rawCommands.map(cleanCommand);
     const invalidIndex = commands.indexOf(null);
@@ -763,7 +791,7 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
       baseRevision: transaction.revision,
       historyGroup: transaction.historyGroup
     };
-    const applied = request.tool === 'edit_3d' ? editScene(PM,request.arguments as any,editMeta) : request.tool === 'edit_video'
+    const applied = request.tool === 'edit_layer_strips' ? editLayerStrips(PM, request.arguments, editMeta) : request.tool === 'edit_3d' ? editScene(PM,request.arguments as any,editMeta) : request.tool === 'edit_video'
       ? editVideo(PM, request.arguments, editMeta)
       : PM.Edit.apply(commands, editMeta);
     if (!applied.ok) throw new Error(applied.message);
@@ -774,6 +802,7 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
       ok: true,
       content: [toolText({
         applied: commands.map(describeCommand),
+        ...(request.tool === 'edit_layer_strips' ? { strips: applied.data?.result ?? applied.data } : {}),
         ...(request.tool === 'edit_3d' ? {layer:applied.data?.result ?? null,scene:applied.data?.result ?? null} : {clip:applied.data?.result ?? null}),
         message: applied.message || 'Applied editable Powermove commands.',
         revision: transaction.revision
@@ -858,10 +887,11 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
   }
   if (request.tool === '__finish_run') {
     cancelCaptionJobs(request.runId);
+    const committed = committedToolChanges.delete(request.runId);
     liveToolObservations.delete(request.runId);
     const transaction = liveToolTransactions.get(request.runId);
     if (!transaction) {
-      return { ok: true, content: [toolText({ changed: false })], changed: false, revision: currentRevision() };
+      return { ok: true, content: [toolText({ changed: committed })], changed: committed, revision: currentRevision() };
     }
     const commit = request.arguments.commit === true;
     try {
@@ -881,8 +911,8 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
       }
       return {
         ok: true,
-        content: [toolText({ changed: (commit || transaction.panelActions) && transaction.changed, historyId: historyId || null })],
-        changed: (commit || transaction.panelActions === true) && transaction.changed,
+        content: [toolText({ changed: committed || (commit || transaction.panelActions) && transaction.changed, historyId: historyId || null })],
+        changed: committed || (commit || transaction.panelActions === true) && transaction.changed,
         revision: currentRevision(),
         ...(historyId ? { historyId } : {})
       };

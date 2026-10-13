@@ -100,3 +100,10 @@ describe('Powermove agent tool spec', () => {
   });
 
 });
+
+it('exposes recovered timeline gestures to project runs and library management to app runs', () => {
+  for (const name of ['get_timeline', 'edit_layer_strips', 'manage_project']) expect(POWERMOVE_MCP_TOOL_NAMES).toContain(`mcp__powermove__${name}`);
+  expect(POWERMOVE_LIVE_INSPECTION_TOOL_NAMES).toContain('get_timeline');
+  expect(POWERMOVE_LIVE_INSPECTION_TOOL_NAMES).not.toContain('edit_layer_strips');
+  expect(POWERMOVE_APP_AGENT_TOOLS.some(tool => tool.name === 'manage_project')).toBe(true);
+});
