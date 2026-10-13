@@ -85,6 +85,20 @@ describe('external Powermove MCP sessions', () => {
     await expect(session.call('start_session', { prompt: 'Inspect recovery', access: 'editor' })).resolves.toMatchObject({ projectId: 'project-one' });
   });
 
+  it('preserves a detachment error and still removes the workspace when rollback fails', async () => {
+    const { session, bridge, detach } = await setup();
+    const opened: any = await session.call('start_session', { prompt: 'Build' });
+    await writeFile(path.join(opened.artifactsDirectory, 'partial.txt'), 'unfinished');
+    detach.mockRejectedValueOnce(new Error('Could not save the agent task journal.'));
+    const renderer = vi.spyOn(bridge, 'callRenderer').mockRejectedValue(new Error('Powermove timed out while running __finish_run.'));
+    await expect(session.call('finish_session', { commit: false })).rejects.toThrow('Could not save the agent task journal.');
+    expect(renderer).toHaveBeenCalledWith(expect.anything(), '__finish_run', { commit: false });
+    await expect(stat(opened.artifactsDirectory)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(opened.stagingDirectory)).rejects.toMatchObject({ code: 'ENOENT' });
+    renderer.mockRestore();
+    await expect(session.call('start_session', { prompt: 'Inspect', access: 'editor' })).resolves.toMatchObject({ projectId: 'project-one' });
+  });
+
   it('authenticates local discovery and closes the owning session on disconnect', async () => {
     const { root, session, detach } = await setup();
     const host = await startExternalMcp({ userData: root, createSession: () => session });

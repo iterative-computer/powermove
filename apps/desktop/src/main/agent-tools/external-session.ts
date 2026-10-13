@@ -164,23 +164,36 @@ export class ExternalAgentSession {
   private finish(commit: boolean): Promise<unknown> {
     if (this.closing) return this.closing;
     this.closing = (async () => {
+      let failed = false, failure: unknown;
+      let result: unknown = { changed: false };
+      const cleanup = async (action: () => Promise<unknown>) => {
+        try { await action(); }
+        catch (error) {
+          if (!failed) { failed = true; failure = error; }
+          else console.error('[MCP] session cleanup failed after an earlier error', error);
+        }
+      };
       try {
-        try { await this.detach?.(); }
-        finally { if (this.session) {
-          this.session.owner.removeListener('destroyed', this.ownerClosed);
-          this.session.owner.removeListener('render-process-gone', this.ownerClosed);
-        } }
-        return await this.session?.finish(commit) ?? { changed: false };
-      }
-      finally {
         try {
-          if (this.session && !this.session.isClosed()) await this.session.finish(false);
-          if (this.workspace) {
-            if (commit) { await discardExtensionStage(this.workspace); await removeEmptyRunDirectory(this.workspace); }
-            else await discardPartialRun(this.workspace);
-          }
-        } finally { this.detach = null; this.session = null; this.workspace = null; this.request = null; }
-      }
+          try { await this.detach?.(); }
+          finally { if (this.session) {
+            this.session.owner.removeListener('destroyed', this.ownerClosed);
+            this.session.owner.removeListener('render-process-gone', this.ownerClosed);
+          } }
+          result = await this.session?.finish(commit) ?? result;
+        } catch (error) { failed = true; failure = error; }
+        // Child teardown, renderer rollback and workspace disposal must each
+        // get their own attempt, without replacing the first meaningful error.
+        if (this.session && !this.session.isClosed()) await cleanup(() => this.session!.finish(false));
+        if (this.workspace) {
+          if (commit) {
+            await cleanup(() => discardExtensionStage(this.workspace!));
+            await cleanup(() => removeEmptyRunDirectory(this.workspace!));
+          } else await cleanup(() => discardPartialRun(this.workspace!));
+        }
+        if (failed) throw failure;
+        return result;
+      } finally { this.detach = null; this.session = null; this.workspace = null; this.request = null; }
     })().finally(() => { this.closing = null; });
     return this.closing;
   }
