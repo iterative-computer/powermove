@@ -348,6 +348,13 @@ describe('deepKeyOrder', () => {
     const ordered = deepKeyOrder(answer, live);
     expect(JSON.stringify(ordered)).toBe(JSON.stringify({ text: 'a', animators: [{ id: 'A', name: 'Rise', enabled: true }], data: { objects: [], camera: {} }, fontAnchorBounds: { x0: 1, y0: 3, x1: 2, y1: 4 } }));
   });
+
+  it('keeps a property answered unevaluated (extension params) in the property\'s own order', async () => {
+    const { deepKeyOrder } = await import('./native');
+    const live = { params: { yaw: { v: 28, kf: [], expr: null }, pitch: { v: { x: 1, y: 2 }, kf: [], expr: null } } };
+    const answer = { params: { pitch: { expr: null, kf: [], v: { x: 1, y: 2 } }, yaw: { expr: null, kf: [], v: 28 } } };
+    expect(JSON.stringify(deepKeyOrder(answer, live))).toBe(JSON.stringify(live));
+  });
 });
 
 describe.skipIf(!built)('the tracking Proxy', () => {

@@ -85,13 +85,15 @@ const isLiveProperty = (v: any) => !!v && typeof v === 'object' && Array.isArray
 
 /**
  * `keyOrder` through the whole answer: members follow the live object's order
- * at every depth (an animated member's order is its value's), and computed
+ * at every depth (an evaluated animated member's order is its value's), and computed
  * bounds (`sizeAnchorBounds`, `fontAnchorBounds`) list x0, y0, x1, y1 as the
  * legacy code builds them. pm-eval lists members sorted (allowed difference 5).
  */
 export function deepKeyOrder(obj: any, live: any, depth = 0): any {
   if (!obj || typeof obj !== 'object' || depth > 32) return obj;
-  if (isLiveProperty(live)) live = live.v;
+  // An evaluated member takes its value's order; a member answered unevaluated
+  // (an extension's raw `params`) keeps the property's own order.
+  if (isLiveProperty(live) && !isLiveProperty(obj)) live = live.v;
   if (Array.isArray(obj)) {
     if (!Array.isArray(live)) return obj.map(v => deepKeyOrder(v, undefined, depth + 1));
     return obj.map((v, i) => deepKeyOrder(v, live[i], depth + 1));
