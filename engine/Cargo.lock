@@ -947,9 +947,13 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "pm-bridge",
  "pm-engine",
+ "pm-gpu",
  "pm-protocol",
+ "serde",
  "serde_json",
+ "wgpu",
 ]
 
 [[package]]

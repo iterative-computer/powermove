@@ -2,6 +2,7 @@
 //! `apps/desktop/src/main/engine/engine-process.ts`.
 
 use napi::bindgen_prelude::*;
+use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use pm_engine::{Action, LogLevel};
 
@@ -57,6 +58,8 @@ fn convert(actions: Vec<Action>) -> Vec<EngineAction> {
         .collect()
 }
 
+type ActionCallback = ThreadsafeFunction<Vec<EngineAction>, (), Vec<EngineAction>, Status, false>;
+
 fn err(message: impl Into<String>) -> Error {
     Error::from_reason(message.into())
 }
@@ -71,11 +74,23 @@ pub struct JsEngineHost {
 impl JsEngineHost {
     /// `process` is `"interactive"` or `"job"`. The job engine moves the
     /// calling thread (the utility process's JavaScript thread) to utility QoS.
+    ///
+    /// `on_actions` receives actions the engine produces off this thread
+    /// (the viewer presenter's frames, clock samples, and frame responses);
+    /// carry them out like the actions the other methods return. Without it
+    /// the interactive engine does not present viewer frames.
     #[napi(constructor)]
-    pub fn new(process: String) -> Result<Self> {
+    pub fn new(process: String, on_actions: Option<ActionCallback>) -> Result<Self> {
         let process = crate::parse_process(&process).map_err(err)?;
+        let sink: Option<crate::ActionSink> = on_actions.map(|callback| {
+            let callback = std::sync::Arc::new(callback);
+            std::sync::Arc::new(move |actions: Vec<Action>| {
+                callback.call(convert(actions), ThreadsafeFunctionCallMode::NonBlocking);
+            }) as crate::ActionSink
+        });
         Ok(Self {
-            inner: EngineHost::new(process).map_err(err)?,
+            inner: EngineHost::with_sink(process, sink, |key| std::env::var(key).ok())
+                .map_err(err)?,
         })
     }
 
@@ -103,10 +118,17 @@ impl JsEngineHost {
         convert(self.inner.tick())
     }
 
-    /// The engine's state as JSON (sessions, ports, lease, QoS).
+    /// The engine's state as JSON (sessions, ports, lease, QoS, presenter).
     #[napi]
     pub fn status(&self) -> String {
         self.inner.status_json()
+    }
+
+    /// The viewer presenter's per-frame trace as JSON, emptied (the S1
+    /// harness; recorded only with `POWERMOVE_BRIDGE_TRACE=1`).
+    #[napi]
+    pub fn present_trace(&self) -> String {
+        self.inner.take_present_trace()
     }
 }
 
