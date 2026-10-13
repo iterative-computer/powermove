@@ -47,7 +47,24 @@ pub fn canvas_font(d: &TextContent, variable: Option<(FaceId, Vec<(u32, f32)>)>)
     // `-apple-system` is not a Blink generic; it is matched as a family name.
     families.push(Family::Named("-apple-system".into()));
     families.push(Family::Generic("sans-serif"));
-    CanvasFont { families, desc: FontDesc { weight: weight as f32, italic: d.italic.unwrap_or(false), size: size.unwrap_or(16.0) as f32 } }
+    CanvasFont { families, desc: FontDesc { weight: weight as f32, italic: d.italic.unwrap_or(false), size: effective_font_size(size.unwrap_or(16.0) as f32) } }
+}
+
+/// Blink's `FontDescription::EffectiveFontSize()`: the computed size floored
+/// to the font cache key's precision (`FontCacheKey::PrecisionMultiplier()`,
+/// 100), in `float`:
+///
+/// ```cpp
+/// return floorf(size * FontCacheKey::PrecisionMultiplier()) / FontCacheKey::PrecisionMultiplier();
+/// ```
+///
+/// Chrome creates, shapes, and measures every font at this size, so a
+/// caption shrunk to 15.9048 px measures at 15.9 px. The floor is not
+/// idempotent in `f32` (`1.06px` measures at 1.05 px, and flooring again gives 1.04),
+/// so it is applied exactly once, here, where the canvas font is parsed.
+pub fn effective_font_size(size: f32) -> f32 {
+    const PRECISION: f32 = 100.0;
+    (size * PRECISION).floor() / PRECISION
 }
 
 /// `meas.letterSpacing = (d.tracking || 0) + 'px'`.
@@ -120,5 +137,24 @@ mod tests {
         assert_eq!((f.desc.weight, f.desc.size), (500.0, 24.0));
         assert!(matches!(&f.families[0], Family::Named(n) if n == "Avenir"));
         assert_eq!(f.families.len(), 4);
+    }
+
+    #[test]
+    fn sizes_are_floored_to_blinks_font_cache_precision() {
+        let at = |size: f64| canvas_font(&TextContent { size: Some(size), ..Default::default() }, None).desc.size;
+        // The corpus caption `captions/middle-lines` shrinks to 15.9048 px;
+        // Chrome measures it at 15.9 px.
+        assert_eq!(at(15.9048), 15.9f32);
+        assert_eq!(at(9.3245), 9.32f32);
+        assert_eq!(at(10.1722), 10.17f32);
+        // Sizes on the grid stay (integers are exact in f32).
+        assert_eq!(at(24.0), 24.0);
+        assert_eq!(at(0.0), 0.0);
+        assert_eq!(at(0.004), 0.0);
+        // Some sizes on the decimal grid are not fixed points in f32, and the
+        // floor is not idempotent: Chrome measures `1.06px` at 1.05 px, and a
+        // second floor would give 1.04.
+        assert_eq!(at(1.06), 1.05f32);
+        assert_eq!(effective_font_size(effective_font_size(1.06)), 1.04f32);
     }
 }
