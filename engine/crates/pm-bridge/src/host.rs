@@ -48,6 +48,15 @@ impl SurfaceTable {
         self.held.len()
     }
 
+    /// The `IOSurfaceRef`'s retain count in this process (main's own
+    /// reference plus any Electron's imports took), for the bridge's tests.
+    pub fn retain_count(&self, generation: u32, pool_index: u32) -> Option<isize> {
+        self.held.get(&(generation, pool_index)).map(|s| {
+            let cf: &objc2_core_foundation::CFType = s.surface.as_ref();
+            objc2_core_foundation::CFGetRetainCount(Some(cf))
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.held.is_empty()
     }

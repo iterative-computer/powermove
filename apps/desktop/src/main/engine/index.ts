@@ -151,7 +151,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
         resolve: (port) => {
           const id = engine?.clientForPort('interactive', port);
           const contents = id == null ? null : webContents.fromId(id);
-          return contents && !contents.isDestroyed() ? contents.mainFrame : null;
+          return contents && !contents.isDestroyed() ? { frame: contents.mainFrame, owner: contents.id } : null;
         },
         log
       })
@@ -232,6 +232,15 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       attached = true;
     });
     window.once('closed', () => engine?.removeClient(id));
+    // A page that goes away never reports its frame surfaces released.
+    if (frameBridge) {
+      const gone = (): void => frameBridge.receiverGone(id);
+      contents.on('did-start-navigation', (details) => {
+        if (details.isMainFrame && !details.isSameDocument) gone();
+      });
+      contents.on('render-process-gone', gone);
+      contents.once('destroyed', gone);
+    }
   };
 
   return {

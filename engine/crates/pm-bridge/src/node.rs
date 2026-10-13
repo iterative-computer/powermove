@@ -267,6 +267,17 @@ impl JsBridgeHost {
             .release(generation, pool_index)
     }
 
+    /// The retain count of a held surface's `IOSurfaceRef` in main (tests:
+    /// whether an import keeps its own reference).
+    #[napi]
+    pub fn surface_retain_count(&self, generation: u32, pool_index: u32) -> Option<i64> {
+        self.table
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain_count(generation, pool_index)
+            .map(|n| n as i64)
+    }
+
     #[napi]
     pub fn held(&self) -> HeldSurfaces {
         let table = self.table.lock().unwrap_or_else(|e| e.into_inner());

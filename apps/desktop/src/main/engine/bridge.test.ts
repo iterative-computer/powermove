@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { FrameBridge, FRAME_BRIDGE_ENV, importColorSpace, type BridgeEvent, type BridgeHostLike, type ImportedTextureLike, type SharedTextureLike } from './bridge';
+import { FrameBridge, FRAME_BRIDGE_ENV, importColorSpace, RECLAIM_GRACE_MS, type BridgeEvent, type BridgeHostLike, type ImportedTextureLike, type SharedTextureLike } from './bridge';
 
 type Imported = ImportedTextureLike & { released: number; allReleased: () => void; info: unknown };
 
@@ -64,16 +64,30 @@ function fakes(options: { allowUnsignedDev?: boolean } = {}) {
       return failSends ? Promise.reject(new Error('receiver gone')) : Promise.resolve();
     }
   };
-  const windows = new Map<number, { detached?: boolean }>([[11, {}]]);
+  const windows = new Map<number, { frame: { detached?: boolean }; owner: number }>([[11, { frame: {}, owner: 3 }]]);
   const log = vi.fn();
+  const timers: { fn: () => void; ms: number; cleared: boolean }[] = [];
   const bridge = new FrameBridge({
     addon: addon as never,
     sharedTexture,
     allowUnsignedDev: options.allowUnsignedDev ?? true,
     resolve: (port) => windows.get(port) ?? null,
-    log
+    log,
+    timers: {
+      set: (fn, ms) => {
+        const timer = { fn, ms, cleared: false };
+        timers.push(timer);
+        return timer;
+      },
+      clear: (handle) => {
+        (handle as { cleared: boolean }).cleared = true;
+      }
+    }
   });
-  return { bridge, hosts, imports, sends, windows, log, failSends: () => (failSends = true) };
+  const runTimers = () => {
+    for (const timer of timers.splice(0)) if (!timer.cleared) timer.fn();
+  };
+  return { bridge, hosts, imports, sends, windows, log, timers, runTimers, failSends: () => (failSends = true) };
 }
 
 const surface = (generation: number, poolIndex: number, clientPort = 11, format: 'bgra' | 'rgbaf16' = 'bgra'): BridgeEvent => ({
@@ -164,5 +178,40 @@ describe('FrameBridge', () => {
     launch.spawned(5);
     hosts[0]!.emit({ kind: 'rejected', pid: 77, reason: 'sender pid 77 is not the engine pid 5' });
     expect(launch.status().rejections).toBe(1);
+  });
+
+  it('drops the surfaces of a page that went away once main released them, unless Chromium reports them first', () => {
+    const { bridge, hosts, imports, timers, runTimers } = fakes();
+    const launch = bridge.prepareLaunch()!;
+    launch.spawned(1);
+    for (let i = 0; i < 3; i++) hosts[0]!.emit(surface(1, i));
+    // The page reloads: nothing is dropped while main still holds its imports.
+    bridge.receiverGone(3);
+    expect(timers).toHaveLength(0);
+    // The engine retires the old page's pool (its port closed).
+    hosts[0]!.emit({ kind: 'retire', clientPort: 11, generation: 1 });
+    expect(timers.map((t) => t.ms)).toEqual([RECLAIM_GRACE_MS, RECLAIM_GRACE_MS, RECLAIM_GRACE_MS]);
+    // One surface's release notice did arrive in time.
+    imports[2]!.allReleased();
+    runTimers();
+    expect(hosts[0]!.released).toEqual([[1, 2], [1, 0], [1, 1]]);
+    expect(launch.status()).toMatchObject({ allReleased: 1, reclaimed: 2, live: 0 });
+    // A late notice for a reclaimed surface changes nothing.
+    imports[0]!.allReleased();
+    expect(hosts[0]!.released).toHaveLength(3);
+  });
+
+  it('keeps the surfaces of other windows and of live pages', () => {
+    const { bridge, hosts, timers, windows } = fakes();
+    windows.set(12, { frame: {}, owner: 4 });
+    const launch = bridge.prepareLaunch()!;
+    launch.spawned(1);
+    hosts[0]!.emit(surface(1, 0));
+    hosts[0]!.emit(surface(2, 0, 12));
+    hosts[0]!.emit({ kind: 'retire', clientPort: 11, generation: 1 });
+    hosts[0]!.emit({ kind: 'retire', clientPort: 12, generation: 2 });
+    bridge.receiverGone(4);
+    expect(timers).toHaveLength(1);
+    expect(launch.status().live).toBe(0);
   });
 });

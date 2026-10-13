@@ -22,7 +22,20 @@
  *
  * Popouts and reloads follow from ports: a popped-out or reloaded viewer
  * opens a session on its window's own port, and the engine makes it a pool
- * that this module sends to that window.
+ * that this module sends to that window. (Same-origin popouts draw from the
+ * opener's realm, so their surfaces go to the opener's frame.)
+ *
+ * A page that goes away (reload, navigation, a crashed or closed renderer)
+ * never reports its imports released: Electron sends the renderer's
+ * release notice from a callback that does not run once the page unloads
+ * (measured in the Electron integration test; the preload's `pagehide`
+ * release does not reach main either). `allReferencesReleased` then never
+ * fires and main would hold every surface of that page's pools for the
+ * rest of the launch. So once a receiver is gone and main released its
+ * own import, main drops its IOSurface reference after a grace period
+ * (`RECLAIM_GRACE_MS`). Main's reference is the only one in this process
+ * (the import keeps none: the retain count is 1 with an import alive), and
+ * the GPU process holds its own for as long as it still needs the surface.
  */
 import type { Log } from './connection';
 
@@ -31,6 +44,10 @@ export const FRAME_BRIDGE_ENV = 'POWERMOVE_FRAME_BRIDGE';
 
 /** How long main waits for the engine's check-in. */
 export const CHECK_IN_TIMEOUT_MS = 15_000;
+
+/** How long a surface whose receiver is gone may wait for
+ *  `allReferencesReleased` before main drops its reference anyway. */
+export const RECLAIM_GRACE_MS = 2000;
 
 /** One event from pm-bridge's receive thread (`BridgeEvent`). */
 export type BridgeEvent = {
@@ -59,6 +76,8 @@ export interface BridgeHostLike {
   start(callback: (event: BridgeEvent) => void, acceptTimeoutMs: number): void;
   releaseSurface(generation: number, poolIndex: number): boolean;
   held(): { count: number; bytes: number };
+  /** The retain count of a held surface's IOSurfaceRef in main (tests). */
+  surfaceRetainCount?(generation: number, poolIndex: number): number | null;
   stop(): void;
   releaseAll(): void;
 }
@@ -104,8 +123,24 @@ export type SurfaceArgs = {
 /** A window frame a surface can be sent to (`WebFrameMain`). */
 export type ReceiverFrame = { readonly detached?: boolean; readonly isDestroyed?: () => boolean };
 
-/** Finds the frame hosting the viewer that owns an interactive engine's client port. */
-export type ResolveReceiver = (clientPort: number) => ReceiverFrame | null;
+/** The frame hosting the viewer that owns a client port, and its owner
+ *  (the window's `webContents` id, for `FrameBridge.receiverGone`). */
+export type Receiver = { frame: ReceiverFrame; owner: number };
+
+/** Finds the receiver of an interactive engine's client port. */
+export type ResolveReceiver = (clientPort: number) => Receiver | null;
+
+/** Timers (injected by tests). */
+export type BridgeTimers = { set(fn: () => void, ms: number): unknown; clear(handle: unknown): void };
+
+const defaultTimers: BridgeTimers = {
+  set: (fn, ms) => {
+    const handle = setTimeout(fn, ms);
+    (handle as { unref?: () => void }).unref?.();
+    return handle;
+  },
+  clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
+};
 
 /**
  * Colour tags at import: the engine writes display-encoded BT.709 values
@@ -125,6 +160,10 @@ type Import = {
   sendFailures: number;
   /** Main released its own reference (retired, or the launch ended). */
   released: boolean;
+  /** The window it was sent to, and whether that page is gone. */
+  owner: number | null;
+  receiverGone: boolean;
+  reclaim: unknown;
 };
 
 export type BridgeLaunchStats = {
@@ -140,6 +179,8 @@ export type BridgeLaunchStats = {
   sendFailures: number;
   retired: number;
   allReleased: number;
+  /** Surfaces dropped after their receiver went away without releasing them. */
+  reclaimed: number;
   held: { count: number; bytes: number };
   live: number;
   gone: boolean;
@@ -158,6 +199,7 @@ export class BridgeLaunch {
     sendFailures: 0,
     retired: 0,
     allReleased: 0,
+    reclaimed: 0,
     gone: false
   };
   private started = false;
@@ -169,7 +211,8 @@ export class BridgeLaunch {
     private readonly sharedTexture: SharedTextureLike,
     private readonly resolve: ResolveReceiver,
     private readonly log: Log,
-    private readonly listener: (event: BridgeEvent, launch: BridgeLaunch) => void
+    private readonly listener: (event: BridgeEvent, launch: BridgeLaunch) => void,
+    private readonly timers: BridgeTimers = defaultTimers
   ) {
     this.env = { [FRAME_BRIDGE_ENV]: host.name };
   }
@@ -202,7 +245,37 @@ export class BridgeLaunch {
   /** Drops everything main holds (app quit). */
   dispose(): void {
     this.ended();
+    for (const entry of this.imports.values()) if (entry.reclaim !== null) this.timers.clear(entry.reclaim);
+    this.imports.clear();
     this.host.releaseAll();
+  }
+
+  /** A window's page went away (reload, navigation, crash, close): what was
+   *  sent to it will never be reported released. */
+  receiverGone(owner: number): void {
+    for (const entry of this.imports.values()) {
+      if (entry.owner !== owner || entry.receiverGone) continue;
+      entry.receiverGone = true;
+      this.scheduleReclaim(entry);
+    }
+  }
+
+  private scheduleReclaim(entry: Import): void {
+    if (!entry.released || !entry.receiverGone || entry.reclaim !== null) return;
+    const key = `${entry.args.generation}:${entry.args.poolIndex}`;
+    entry.reclaim = this.timers.set(() => {
+      entry.reclaim = null;
+      if (this.imports.get(key) !== entry) return;
+      this.imports.delete(key);
+      this.host.releaseSurface(entry.args.generation, entry.args.poolIndex);
+      this.stats.reclaimed++;
+    }, RECLAIM_GRACE_MS);
+  }
+
+  /** A held surface's IOSurfaceRef retain count in main (tests: main's
+   *  own reference plus the ones its imports keep). */
+  retainCount(generation: number, poolIndex: number): number | null {
+    return this.host.surfaceRetainCount?.(generation, poolIndex) ?? null;
   }
 
   status(): BridgeLaunchStats {
@@ -267,9 +340,12 @@ export class BridgeLaunch {
       imported = this.sharedTexture.importSharedTexture({
         textureInfo: { pixelFormat: format, codedSize: { width, height }, colorSpace: importColorSpace(format), handle: { ioSurface } },
         allReferencesReleased: () => {
+          const entry = this.imports.get(key);
+          if (entry?.imported !== imported) return;
           this.stats.allReleased++;
+          if (entry.reclaim !== null) this.timers.clear(entry.reclaim);
+          this.imports.delete(key);
           this.host.releaseSurface(generation, poolIndex);
-          if (this.imports.get(key)?.imported === imported) this.imports.delete(key);
         }
       });
     } catch (error) {
@@ -280,18 +356,20 @@ export class BridgeLaunch {
     }
     this.stats.imports++;
     const args: SurfaceArgs = { kind: 'powermove-frame-surface', launch: this.id, generation, poolIndex, poolSize, width, height, format };
-    const entry: Import = { imported, clientPort, args, sent: 0, sendFailures: 0, released: false };
+    const entry: Import = { imported, clientPort, args, sent: 0, sendFailures: 0, released: false, owner: null, receiverGone: false, reclaim: null };
     this.imports.set(key, entry);
     this.send(entry);
   }
 
   /** Sends an import to the window that owns its client port, once. */
   private send(entry: Import): void {
-    const frame = this.resolve(entry.clientPort);
-    if (!frame || frame.isDestroyed?.() || frame.detached) {
+    const receiver = this.resolve(entry.clientPort);
+    const frame = receiver?.frame;
+    if (!receiver || !frame || frame.isDestroyed?.() || frame.detached) {
       this.log('warn', `frame bridge: no window for client port ${entry.clientPort}; generation ${entry.args.generation} surface ${entry.args.poolIndex} not sent`);
       return;
     }
+    entry.owner = receiver.owner;
     entry.sent++;
     this.stats.sends++;
     this.sharedTexture.sendSharedTexture({ frame: frame as never, importedSharedTexture: entry.imported }, entry.args).catch((error: unknown) => {
@@ -320,6 +398,7 @@ export class BridgeLaunch {
     } catch (error) {
       this.log('warn', `frame bridge: releasing an import failed: ${error instanceof Error ? error.message : String(error)}`);
     }
+    this.scheduleReclaim(entry);
   }
 }
 
@@ -330,12 +409,15 @@ export type FrameBridgeOptions = {
   allowUnsignedDev: boolean;
   resolve: ResolveReceiver;
   log: Log;
+  timers?: BridgeTimers;
 };
 
 /** The bridge across interactive engine launches. */
 export class FrameBridge {
   private nextLaunch = 1;
   private current: BridgeLaunch | null = null;
+  /** Ended launches whose surfaces Chromium may still hold. */
+  private previous: BridgeLaunch[] = [];
   private listeners = new Set<(event: BridgeEvent, launch: BridgeLaunch) => void>();
 
   constructor(private readonly options: FrameBridgeOptions) {}
@@ -346,12 +428,26 @@ export class FrameBridge {
    * run; the engine then starts without one and presents nothing.
    */
   prepareLaunch(): BridgeLaunch | null {
-    this.current?.ended();
+    if (this.current) {
+      this.current.ended();
+      this.previous.push(this.current);
+      // An ended launch's imports are released; keep it while Chromium may
+      // still report (or a reclaim may still drop) its surfaces.
+      this.previous = this.previous.filter((l) => l.status().held.count > 0).slice(-4);
+    }
     try {
       const host = new this.options.addon.BridgeHost(this.options.addon.serviceName(), this.options.allowUnsignedDev);
-      const launch = new BridgeLaunch(this.nextLaunch++, host, this.options.sharedTexture, this.options.resolve, this.options.log, (event, from) => {
-        for (const l of this.listeners) l(event, from);
-      });
+      const launch = new BridgeLaunch(
+        this.nextLaunch++,
+        host,
+        this.options.sharedTexture,
+        this.options.resolve,
+        this.options.log,
+        (event, from) => {
+          for (const l of this.listeners) l(event, from);
+        },
+        this.options.timers
+      );
       this.current = launch;
       return launch;
     } catch (error) {
@@ -364,6 +460,12 @@ export class FrameBridge {
     return this.current;
   }
 
+  /** A window's page went away: its surfaces will never be reported released. */
+  receiverGone(owner: number): void {
+    this.current?.receiverGone(owner);
+    for (const launch of this.previous) launch.receiverGone(owner);
+  }
+
   listen(listener: (event: BridgeEvent, launch: BridgeLaunch) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -372,6 +474,8 @@ export class FrameBridge {
   dispose(): void {
     this.current?.dispose();
     this.current = null;
+    for (const launch of this.previous) launch.dispose();
+    this.previous = [];
   }
 }
 

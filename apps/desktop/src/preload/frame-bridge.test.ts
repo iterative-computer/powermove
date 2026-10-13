@@ -4,7 +4,8 @@ import { installFrameBridgeReceiver, type ImportedLike, type ReceiverModule } fr
 
 function harness() {
   let receiver: Parameters<ReceiverModule['setSharedTextureReceiver']>[0] | null = null;
-  const api = installFrameBridgeReceiver({ setSharedTextureReceiver: (cb) => (receiver = cb) });
+  const hide: (() => void)[] = [];
+  const api = installFrameBridgeReceiver({ setSharedTextureReceiver: (cb) => (receiver = cb) }, { addEventListener: (_type, listener) => hide.push(listener) });
   const imported = (): ImportedLike & { released: number; frames: number } => {
     const self = {
       released: 0,
@@ -30,7 +31,8 @@ function harness() {
     height: 32,
     format: 'bgra'
   });
-  return { api, imported, send, args };
+  const pagehide = () => hide.forEach((listener) => listener());
+  return { api, imported, send, args, pagehide };
 }
 
 describe('frame bridge receiver', () => {
@@ -79,5 +81,16 @@ describe('frame bridge receiver', () => {
     expect(stray.released).toBe(1);
     expect(api.stats()).toMatchObject({ held: 0, received: 0 });
     expect(api.stats().errors).toHaveLength(2);
+  });
+
+  it('releases every import when the page goes away (reload, navigation, close)', async () => {
+    const { api, imported, send, args, pagehide } = harness();
+    const a = imported();
+    const b = imported();
+    await send(a, args(1, 1, 0));
+    await send(b, args(1, 2, 0));
+    pagehide();
+    expect([a.released, b.released]).toEqual([1, 1]);
+    expect(api.stats().held).toBe(0);
   });
 });

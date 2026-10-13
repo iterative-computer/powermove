@@ -11,8 +11,13 @@
  *
  * Imports are released with `release()`, which also tells main (Electron's
  * own notice), so `allReferencesReleased` fires once main released its
- * reference too: when the viewer retires a generation, or when a surface of
- * a newer engine launch arrives (the old engine's pools are gone).
+ * reference too: when the viewer retires a generation, when a surface of
+ * a newer engine launch arrives (the old engine's pools are gone), and when
+ * the page goes away (`pagehide`). Electron sends the release notice from
+ * a callback that does not run once the page unloads, so main cannot rely
+ * on it for a reloading page and reclaims those surfaces itself (see
+ * main/engine/bridge.ts); releasing here still frees the renderer's
+ * references when the notice does get through.
  */
 import { isFrameSurfaceArgs, type FrameBridgeApi, type FrameBridgeStats } from '../shared/frame-bridge';
 
@@ -29,7 +34,10 @@ export interface ReceiverModule {
 
 const MAX_ERRORS = 8;
 
-export function installFrameBridgeReceiver(module: ReceiverModule): FrameBridgeApi {
+/** Where the receiver hears that its page is going away. */
+export type PageLifecycle = { addEventListener(type: 'pagehide', listener: () => void): void };
+
+export function installFrameBridgeReceiver(module: ReceiverModule, page: PageLifecycle | null = typeof window === 'undefined' ? null : window): FrameBridgeApi {
   let launch = 0;
   const imports = new Map<string, ImportedLike>();
   const listeners = new Set<(generation: number, poolIndex: number) => void>();
@@ -49,6 +57,11 @@ export function installFrameBridgeReceiver(module: ReceiverModule): FrameBridgeA
       fail(`release: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
+
+  // A reload or navigation: hand every surface back, or it stays allocated.
+  page?.addEventListener('pagehide', () => {
+    for (const k of [...imports.keys()]) release(k);
+  });
 
   module.setSharedTextureReceiver(async ({ importedSharedTexture }, ...args) => {
     const info = args[0];
