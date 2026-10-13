@@ -10,8 +10,8 @@
     "project-replace": "replaceProject: the whole-document restore path (undo, load, rollback, remote sync)",
     "touch": "PM.touch: a write that only announces the document changed (the barrier diffs the open composition)",
     "touch.paths": "PM.touch(paths): a write that announces exactly which paths changed",
-    "doc.write": "PM.doc.write: a write-barrier writer scope around a mutation, with its paths",
-    "doc.touched": "PM.doc.touched: a write-barrier record of paths already written",
+    "doc.write": "PM.doc.write or writeDocument (engine-doc/write.ts): a write-barrier writer scope around a mutation, with its paths",
+    "doc.touched": "PM.doc.touched or touchedDocument (engine-doc/write.ts): a write-barrier record of paths already written",
     "anim.touch": "api.anim.touch: the kernel form of PM.touch",
     "shader-uniforms": "shaderHooks.syncShaderUniforms: rewrites shader layer uniforms from source",
     "host.pm": "api.host.pm: hands the raw PM registry (and PM.proj) to extensions",
@@ -62,15 +62,15 @@
     "project-replace": 7,
     "touch": 52,
     "touch.paths": 1,
-    "doc.write": 3,
-    "doc.touched": 1,
+    "doc.write": 5,
+    "doc.touched": 2,
     "anim.touch": 24,
     "shader-uniforms": 9,
     "host.pm": 1,
     "project-swap": 4,
     "revision": 1,
     "asset-metadata": 6,
-    "project-write": 72,
+    "project-write": 70,
     "render-queue-swap": 3,
     "home-composition-match": 7,
     "blender-source-asset": 2,
@@ -619,6 +619,18 @@
       "class": "edit.mutate",
       "scope": "deleteKeyframes",
       "code": "PM.Edit.mutate('Delete keyframes',()=>{ for(const l of layers)for(const path of KEY_CHANNELS[layer3DRole(l)||'group']!){ const prop=chann..."
+    },
+    {
+      "site": "apps/desktop/src/renderer/src/engine-doc/write.ts:11",
+      "class": "doc.write",
+      "scope": "writeDocument",
+      "code": "doc.write(paths, fn)"
+    },
+    {
+      "site": "apps/desktop/src/renderer/src/engine-doc/write.ts:17",
+      "class": "doc.touched",
+      "scope": "touchedDocument",
+      "code": "doc.touched(paths)"
     },
     {
       "site": "apps/desktop/src/renderer/src/host/remote-sync.ts:51",
@@ -1918,15 +1930,9 @@
     },
     {
       "site": "apps/desktop/src/renderer/src/settings/install.ts:38",
-      "class": "project-write",
+      "class": "doc.write",
       "scope": "projectSettingsBridge > backgroundField > PM.fillField(callback)",
-      "code": "PM.proj.backgroundFill = PM.normalizeFill(value, PM.proj.bg)"
-    },
-    {
-      "site": "apps/desktop/src/renderer/src/settings/install.ts:39",
-      "class": "project-write",
-      "scope": "projectSettingsBridge > backgroundField > PM.fillField(callback)",
-      "code": "PM.proj.bg = PM.proj.backgroundFill.stops[0].color"
+      "code": "writeDocument(PM, [['backgroundFill'], ['bg']], () => { PM.proj.backgroundFill = PM.normalizeFill(value, PM.proj.bg); PM.proj.bg = PM.pro..."
     },
     {
       "site": "apps/desktop/src/server/mcp.ts:103",

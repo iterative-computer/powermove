@@ -64,8 +64,8 @@ export const CLASSES = {
   'project-replace': 'replaceProject: the whole-document restore path (undo, load, rollback, remote sync)',
   touch: 'PM.touch: a write that only announces the document changed (the barrier diffs the open composition)',
   'touch.paths': 'PM.touch(paths): a write that announces exactly which paths changed',
-  'doc.write': 'PM.doc.write: a write-barrier writer scope around a mutation, with its paths',
-  'doc.touched': 'PM.doc.touched: a write-barrier record of paths already written',
+  'doc.write': 'PM.doc.write or writeDocument (engine-doc/write.ts): a write-barrier writer scope around a mutation, with its paths',
+  'doc.touched': 'PM.doc.touched or touchedDocument (engine-doc/write.ts): a write-barrier record of paths already written',
   'anim.touch': 'api.anim.touch: the kernel form of PM.touch',
   'shader-uniforms': 'shaderHooks.syncShaderUniforms: rewrites shader layer uniforms from source',
   'host.pm': 'api.host.pm: hands the raw PM registry (and PM.proj) to extensions',
@@ -215,8 +215,8 @@ function callClass(segments) {
   if (/(^|\.)(hist|history)\.external$/.test(name)) return 'history.external';
   if (/(^|\.)replaceProject$/.test(name)) return 'project-replace';
   if (name === 'PM.touch' || /\.host\.pm\.touch$/.test(name)) return 'touch';
-  if (/(^|\.)doc\.write$/.test(name)) return 'doc.write';
-  if (/(^|\.)doc\.touched$/.test(name)) return 'doc.touched';
+  if (/(^|\.)doc\.write$/.test(name) || name === 'writeDocument') return 'doc.write';
+  if (/(^|\.)doc\.touched$/.test(name) || name === 'touchedDocument') return 'doc.touched';
   if (/(^|\.)anim\.touch$/.test(name)) return 'anim.touch';
   if (/(^|\.)syncShaderUniforms$/.test(name)) return 'shader-uniforms';
   return null;
