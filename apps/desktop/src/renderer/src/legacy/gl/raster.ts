@@ -892,9 +892,10 @@ async function prepareImportedAsset(file: any, { id, assertCurrentProject, resol
      decision before writing any video bytes to durable storage. */
   const mayNeedPlaybackProxy = kind === 'video' && !resolved.animated && mayNeedVideoProxy(extension);
   // Observe storage failures immediately, even while decoding is still pending.
-  const persist = (blob: any) => Promise.resolve().then(() => PM.MediaStore.put(storageKey, blob, {
-    storageKey, fingerprint, type: blob.type || file.type,
-  })).then(value => ({ status: 'fulfilled', value }), reason => ({ status: 'rejected', reason }));
+  const persist = (blob: any) => Promise.resolve().then(() => {
+    assertCurrentProject();
+    return PM.MediaStore.put(storageKey, blob, { storageKey, fingerprint, type: blob.type || file.type });
+  }).then(value => ({ status: 'fulfilled', value }), reason => ({ status: 'rejected', reason }));
   const eagerPersist = mayNeedPlaybackProxy ? null : persist(source);
   const preparedResult: any = await Promise.resolve(preparation).then(
     value => ({ status: 'fulfilled', value }),
@@ -1158,6 +1159,11 @@ PM.assets = {
   get: (id: any) => PM.assets.map.get(id),
   poster: (id: any) => posterUrls.get(String(id)) || '',
   revokePoster,
+  /** Stop pending source recovery before another project stages its media. */
+  cancelRestores() {
+    assetEpoch++;
+    cloudMedia.clear();
+  },
   clear() {
     disposeSceneRuntimes(PM);
     assetEpoch++;

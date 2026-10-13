@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PMRegistry } from '../registry';
 import { makePM } from '../__tests__/make-pm';
 import { install, videoImportFailureMessage, waitForPresentedVideoFrame } from './raster';
+import { restoreProjectFileStream } from '../core/project-file';
 
 function rasterRegistry(extra: Partial<PMRegistry> = {}): PMRegistry {
   const context2d: any = {
@@ -43,6 +44,71 @@ afterEach(() => {
 });
 
 describe('legacy raster install', () => {
+  it.each(['fingerprint pending', 'persistence queued', 'persistence started'])('preserves a native file media revision when older recovery has %s', async phase => {
+    const data = new Uint8Array([1, 2, 3]);
+    let record: { blob: Blob; revision: string } | undefined;
+    let recoveryStarted!: () => void, releaseRecovery!: () => void;
+    const started = new Promise<void>(resolve => { recoveryStarted = resolve; });
+    const released = new Promise<void>(resolve => { releaseRecovery = resolve; });
+    let storageQueue = Promise.resolve();
+    let localWrites = 0;
+    const PM = rasterRegistry();
+    (window as any).File = File;
+    (window as any).navigator = { hardwareConcurrency: 4 };
+    installBridgeForTests({ media: {
+      openLocalSource: async () => ({ token: 'source', size: data.length }),
+      readCloudSource: async () => data,
+      releaseCloudSource: async () => undefined,
+    } } as any);
+    vi.stubGlobal('navigator', { storage: {} });
+    const meta = { id: 'clip', name: 'clip.wav', kind: 'audio', storageKey: 'media:same-source', sourcePath: '/local/clip.wav', fingerprint: 'same-source' };
+    PM.proj = { id: 'recovering', assets: { clip: meta }, layers: [] };
+    PM.MediaImport = {
+      mapBounded: async (items: any[], _limit: number, action: (item: any) => Promise<any>) => Promise.all(items.map(action)),
+      fingerprint: async () => {
+        if (phase === 'fingerprint pending') { recoveryStarted(); await released; }
+        return 'same-source';
+      },
+      storageKeyFor: (fingerprint: string) => `media:${fingerprint}`,
+      posterKeyFor: (key: string) => `${key}:poster`,
+    };
+    PM.MediaStore = {
+      get: async () => record?.blob || null,
+      put: (_id: string, blob: Blob, _meta: any, revision?: string) => {
+        if (!revision) localWrites++;
+        // IndexedDB serializes readwrite transactions on the media store.
+        const write = storageQueue.then(async () => {
+          if (!revision && phase === 'persistence started') { recoveryStarted(); await released; }
+          record = { blob, revision: revision || 'local-recovery-revision' };
+        });
+        storageQueue = write;
+        return write.then(() => true);
+      },
+    };
+    PM.Audio = { accepts: () => true, prepareAsset: async ({ id, name, blob }: any) => {
+      if (phase === 'persistence queued') recoveryStarted();
+      return { id, name, kind: 'audio', audioBlob: blob, size: blob.size };
+    }, disposeAsset: vi.fn(), rebalanceCache() {} };
+    PM.touch = vi.fn(); PM.bus = { emit: vi.fn() }; PM.invalidate = vi.fn();
+    const recovery = PM.assets.restoreProject(PM.proj);
+    await started;
+    // Native opens stage media before publishing their incoming project. The
+    // old project's source restore still sees itself as current during staging.
+    PM.projectLoading = { id: 'incoming', generation: 1 };
+    PM.assets.cancelRestores();
+    const nativeRestore = restoreProjectFileStream({ proj: { assets: { clip: meta } } },
+      [{ id: 'clip', type: 'audio/wav', offset: 0, length: data.length, revision: 'native-saved-revision' }],
+      PM.MediaStore, async () => data);
+    if (phase === 'persistence started') releaseRecovery();
+    await nativeRestore;
+    expect(record?.revision).toBe('native-saved-revision');
+    releaseRecovery();
+    await recovery;
+    expect(record?.revision).toBe('native-saved-revision');
+    expect(PM.assets.map.size).toBe(0);
+    expect(localWrites).toBe(phase === 'persistence started' ? 1 : 0);
+  });
+
   it('keeps SVG sources with the same asset id separate across warm projects', () => {
     const PM = rasterRegistry();
     const context = (window as any).document.createElement('canvas').getContext('2d');

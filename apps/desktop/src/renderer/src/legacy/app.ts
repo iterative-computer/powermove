@@ -31,6 +31,7 @@ const comparisonVersions = new Map<string, number>();
 const pendingDiscards = new Set<string>();
 const discardedProjects = new Set<string>();
 let loadGeneration = 0;
+let loadingSourceProject: any = null;
 const yieldLoad = yieldTask;
 const paintProject = () => new Promise<void>(resolve => {
   // Hidden or background windows may suspend animation frames.
@@ -39,6 +40,10 @@ const paintProject = () => new Promise<void>(resolve => {
 });
 function beginProjectLoading(id: string | null, name: string) {
   const generation = ++loadGeneration;
+  loadingSourceProject = PM.proj;
+  // Keep decoded media visible while loading, but stop old source recovery
+  // from replacing revisions that the incoming file is about to restore.
+  PM.assets.cancelRestores?.();
   PM.projectLoading = { id, name, generation };
   PM.pause?.();
   window.clearTimeout(APP.saveTimer);
@@ -47,7 +52,10 @@ function beginProjectLoading(id: string | null, name: string) {
 }
 function finishProjectLoading(generation: number) {
   if (loadGeneration !== generation) return;
+  const resumeSource = loadingSourceProject === PM.proj;
+  loadingSourceProject = null;
   PM.projectLoading = null;
+  if (resumeSource) PM.projectAssetsReady = restoreProjectAssets(PM.proj, false);
   document.getElementById('boot-ghost')?.remove();
   PM.bus.emit('project:loading');
   // A failed or cancelled open must not strand edits whose recovery timer

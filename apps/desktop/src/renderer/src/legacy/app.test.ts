@@ -841,6 +841,52 @@ it('saves real undo and redo history in the native file and local session', asyn
   expect(PM.proj.name).toBe('One');
 });
 
+it.each(['failed', 'cancelled'])('resumes outgoing asset restoration after a %s native project open without clearing live media', async outcome => {
+  const { PM, toasts } = appRegistry();
+  const outgoing = PM.proj;
+  const runtime = { id: 'live-audio', kind: 'audio' };
+  PM.sel.layers = ['selected-outgoing-layer'];
+  PM.assets.map = new Map([[runtime.id, runtime]]);
+  PM.assets.cancelRestores = vi.fn();
+  PM.assets.clear = vi.fn();
+  PM.assets.restoreProject = vi.fn(async () => ({ stale: false, missing: [] }));
+  let readStarted!: () => void, rejectRead!: (error: Error) => void;
+  const started = new Promise<void>(resolve => { readStarted = resolve; });
+  const pending = new Promise<Uint8Array>((_resolve, reject) => { rejectRead = reject; });
+  const read = vi.fn(async () => {
+    readStarted();
+    if (outcome === 'failed') throw new Error('Native media read failed');
+    return pending;
+  });
+  const close = vi.fn(async () => undefined);
+  PM.MediaStore = { get: async () => null, put: vi.fn(async () => true) };
+  vi.stubGlobal('navigator', { storage: {} });
+  installBridgeForTests({ openProjectFile: async () => ({ ok: true, path: '/tmp/Incoming.pmv',
+    projectId: 'incoming', token: 'incoming-reader', size: 3,
+    document: { proj: PM.mkProject({ id: 'incoming', assets: { clip: { id: 'clip' } } }) },
+    media: [{ id: 'clip', type: 'audio/wav', offset: 0, length: 3 }] }), projectRead: { read, close } } as any);
+  const opening = PM.openProject();
+  await started;
+  if (outcome === 'cancelled') {
+    expect(await PM.openProjectHere(outgoing.id)).toBe(true);
+    rejectRead(new Error('Superseded read finished'));
+  }
+  await opening;
+  await PM.projectAssetsReady;
+  expect(PM.assets.cancelRestores).toHaveBeenCalledOnce();
+  expect(PM.assets.cancelRestores.mock.invocationCallOrder[0]).toBeLessThan(read.mock.invocationCallOrder[0]!);
+  expect(PM.assets.restoreProject).toHaveBeenCalledOnce();
+  expect(PM.assets.restoreProject).toHaveBeenCalledWith(outgoing);
+  expect(PM.assets.clear).not.toHaveBeenCalled();
+  expect(PM.proj).toBe(outgoing);
+  expect(PM.sel.layers).toEqual(['selected-outgoing-layer']);
+  expect(PM.assets.map.get(runtime.id)).toBe(runtime);
+  expect(PM.projectLoading).toBeNull();
+  expect(close).toHaveBeenCalledWith('incoming-reader');
+  expect(PM.MediaStore.put).not.toHaveBeenCalled();
+  expect(toasts.some(message => message.startsWith('Could not open'))).toBe(outcome === 'failed');
+});
+
 it('opens streamed document ranges with Unicode and working Undo and Redo', async () => {
   const { PM, toasts } = appRegistry();
   installHistory(PM);

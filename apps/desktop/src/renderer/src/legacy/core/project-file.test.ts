@@ -52,6 +52,42 @@ describe('portable project media', () => {
     expect(store.get).not.toHaveBeenCalled();
     expect(bridge.abort).toHaveBeenCalledWith('token');
   });
+
+  it.each(['memory', 'OPFS'])('keeps restored media revisions available for range reuse through %s staging', async staging => {
+    const data = new Uint8Array([1, 2, 3]);
+    const document = { proj: { assets: { clip: { id: 'clip', storageKey: 'media:clip' } } } };
+    const source = { id: 'clip', type: 'video/webm', offset: 9, length: data.length, revision: 'saved-revision', sha256: sha256Hex(data) };
+    const stored = new Map<string, { blob: Blob; revision: string }>();
+    const store = {
+      get: async (asset: any) => stored.get(asset.storageKey)?.blob || null,
+      put: vi.fn(async (_id: string, blob: Blob, asset: any, revision?: string) => {
+        stored.set(asset.storageKey, { blob, revision: revision || 'new-revision' });
+        return true;
+      }),
+      getForSave: async (asset: any) => stored.get(asset.storageKey) || null,
+    };
+    const parts: Uint8Array[] = [];
+    const writer = { write: async (chunk: Uint8Array) => { parts.push(chunk); }, close: async () => undefined };
+    const root = { getFileHandle: async () => ({ createWritable: async () => writer, getFile: async () => new Blob(parts as BlobPart[]) }), removeEntry: vi.fn(async () => undefined) };
+    vi.stubGlobal('navigator', { storage: staging === 'OPFS' ? { getDirectory: async () => root } : {} });
+    try {
+      await restoreProjectFileStream(document, [source], store, async (offset, length) => data.subarray(offset - source.offset, offset - source.offset + length));
+      expect(store.put).toHaveBeenCalledWith('clip', expect.any(Blob), document.proj.assets.clip, source.revision);
+      expect(new Uint8Array(await (await store.get(document.proj.assets.clip))!.arrayBuffer())).toEqual(data);
+      const blob = stored.get('media:clip')!.blob;
+      const slice = vi.fn(() => { throw new Error('Unchanged media was uploaded again'); });
+      Object.defineProperty(blob, 'slice', { value: slice });
+      const bridge = {
+        begin: vi.fn(async () => ({ ok: true as const, token: 'token', required: [] as string[] })),
+        chunk: vi.fn(async () => undefined), finish: async () => ({ ok: true as const, path: 'file.pmv' }), abort: async () => undefined,
+      };
+      expect(await saveIncrementalProject(document, JSON.stringify(document), store, bridge, { name: 'file.pmv', projectId: 'reopened', saveAs: false }, () => {})).toMatchObject({ ok: true });
+      expect(bridge.begin).toHaveBeenCalledWith(expect.objectContaining({ media: [{ id: 'clip', revision: source.revision, type: source.type, length: data.length }] }));
+      expect(slice).not.toHaveBeenCalled();
+      expect(bridge.chunk.mock.calls.map(call => (call as unknown as [string, string | null])[1])).toEqual([null]);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it('rejects corrupted streamed media before putting it into the local store', async () => {
     const put = vi.fn(async () => true);
     vi.stubGlobal('navigator', { storage: {} });

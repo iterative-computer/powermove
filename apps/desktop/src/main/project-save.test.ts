@@ -96,6 +96,23 @@ describe('incremental project transactions', () => {
     expect([...await files.read(native.token, native.media[0]!.offset, 3)]).toEqual([1, 2, 3]);
     await files.close(native.token);
   });
+  it('reuses file media after reopening under a fresh project identity and renaming the document', async () => {
+    await save('first', [clip()], undefined, destination);
+    const previous = await index();
+    const reopened = await files.open(destination);
+    expect(reopened.projectId).not.toBe('one');
+    expect(await files.destination(reopened.projectId)).toBe(destination);
+    await files.close(reopened.token);
+    reopened.document.proj.name = 'Reopened and renamed';
+    const json = Buffer.from(JSON.stringify(reopened.document));
+    const manifest = reopened.media.map(({ id, revision, type, length }) => ({ id, revision: revision!, type, length }));
+    const upload = await files.beginIncremental(reopened.projectId, manifest, json.length);
+    expect(upload.required).toEqual([]);
+    await upload.write(null, json);
+    await upload.finish();
+    expect((await index()).media).toEqual(previous.media);
+    expect(decodeProjectContainer(await readFile(destination)).document.proj.name).toBe('Reopened and renamed');
+  });
   it('uploads replacements with the same asset id and size, preserving the old version in backup', async () => {
     await save('first', [clip()], undefined, destination);
     expect(await save('changed', [clip('new')], Buffer.from([4, 5, 6]))).toEqual(['clip']);
