@@ -1,3 +1,4 @@
+import { validateFrameRate } from '../../../../shared/frame-rate';
 import {shaderPeers} from '../../core/scene3d/materials';
 import { generatedModelSchema, render3DSchema, materialKeyframeMinimum } from '../../../../shared/blender';
 import { captureFontAnchor } from './font-anchor';
@@ -523,7 +524,12 @@ function setComposition(command: any) {
   if (patch.name != null) p.name = String(patch.name).trim() || p.name;
   if (patch.width != null) p.w = Math.max(16, Math.round(finite(patch.width, 'width')));
   if (patch.height != null) p.h = Math.max(16, Math.round(finite(patch.height, 'height')));
-  if (patch.fps != null) p.fps = PM.clamp(Math.round(finite(patch.fps, 'fps')), 1, 240);
+  if (patch.fps != null) {
+    // The single frame-rate validator: fps and fpsRational together.
+    const rate = validateFrameRate(finite(patch.fps, 'fps'), 'new');
+    if (!rate.ok) throw new Error(rate.message);
+    p.fps = rate.fps; p.fpsRational = rate.fpsRational;
+  }
   if (patch.duration != null) {
     p.dur = Math.max(.1, finite(patch.duration, 'duration'));
     if (!patch.workArea) p.work = [0, p.dur];

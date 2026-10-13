@@ -1,3 +1,4 @@
+import { applyFrameRate, validateFrameRate } from '../../../shared/frame-rate';
 import { IMAGE_SEQUENCE_ACCEPT, sequenceCandidate } from '../../../shared/image-sequence';
 import { MEDIA_ACCEPT } from '../../../shared/media-formats';
 import { chooseSequence, convertImageSequence } from './core/image-sequence';
@@ -191,6 +192,8 @@ function loadBootProject() {
 function hydrate(p: any) {
   const base = PM.mkProject({ name: p.name, w: p.w, h: p.h, fps: p.fps, dur: p.dur, bg: p.bg });
   Object.assign(base, p);
+  // Loaded rates keep their float and gain their exact rational.
+  applyFrameRate(base, base.fps, 'document');
   base.edits = compactEditLog(Array.isArray(p.edits) ? p.edits : []);
   base.backgroundFill = PM.normalizeFill(p.backgroundFill, p.bg || '#000000');
   base.bg = base.backgroundFill.stops[0].color;
@@ -377,6 +380,7 @@ function hydrate(p: any) {
     c.name = typeof c.name === 'string' && c.name ? c.name : 'Precomp';
     c.w = Math.max(2, num(c.w, base.w)); c.h = Math.max(2, num(c.h, base.h));
     c.fps = Math.max(1, num(c.fps, base.fps)); c.dur = Math.max(.04, num(c.dur, base.dur));
+    applyFrameRate(c, c.fps, 'document');
     c.bg = typeof c.bg === 'string' ? c.bg : '#000000';
     c.params = sanitizeParams(c.params);
     c.layers = Array.isArray(c.layers) ? c.layers : [];
@@ -1389,9 +1393,12 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
       if (source) {
         if (Number.isFinite(source.w) && source.w > 0) targetProject.w = source.w;
         if (Number.isFinite(source.h) && source.h > 0) targetProject.h = source.h;
-        if (Number.isFinite(source.fps) && source.fps > 0) {
-          targetProject.fps = source.fps;
-          targetProject.exportDefaults = { ...readExportDefaults(), fps: source.fps };
+        // Media rates are nominal rates (the single frame-rate validator).
+        const rate = Number.isFinite(source.fps) && source.fps > 0 ? validateFrameRate(source.fps, 'media') : null;
+        if (rate?.ok) {
+          targetProject.fps = rate.fps;
+          targetProject.fpsRational = rate.fpsRational;
+          targetProject.exportDefaults = { ...readExportDefaults(), fps: rate.fps };
         }
         if (Number.isFinite(source.dur) && source.dur > 0) {
           targetProject.dur = source.dur;

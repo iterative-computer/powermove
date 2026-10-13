@@ -12,15 +12,16 @@
  * the open comp's `layers` is recorded as `['comps', <compId>, 'layers', …]`
  * and translated back to whichever comp is open when it is undone. Switching
  * compositions is therefore never an undo step, just as in AE. */
+import { applyFrameRate, coerceFrameRate } from '../../../../shared/frame-rate';
 import type { PMRegistry } from '../registry';
 import type { Patch, PathPart } from '../../../../shared/patch';
 
 /** Fields that belong to a composition rather than to the project. */
-export const COMP_FIELDS = ['w', 'h', 'fps', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter', 'audioGain', 'render3d'] as const;
+export const COMP_FIELDS = ['w', 'h', 'fps', 'fpsRational', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter', 'audioGain', 'render3d'] as const;
 /** Composition fields that may be absent (absent = default). When the open
  * composition changes they must be cleared rather than inherited, or one
  * composition's value would leak into the next. */
-const OPTIONAL_COMP_FIELDS: ReadonlySet<string> = new Set(['audioGain', 'render3d']);
+const OPTIONAL_COMP_FIELDS: ReadonlySet<string> = new Set(['fpsRational', 'audioGain', 'render3d']);
 /** Top-level project key → key on a stored composition. */
 const ROOT_TO_COMP: Record<string, string> = {
   compId: 'id', compName: 'name',
@@ -321,7 +322,7 @@ export function install(PM: PMRegistry): void {
     }
     if (patch.w != null) target.w = Math.max(16, Math.round(Number(patch.w)));
     if (patch.h != null) target.h = Math.max(16, Math.round(Number(patch.h)));
-    if (patch.fps != null) target.fps = PM.clamp(Number(patch.fps), 1, 240);
+    if (patch.fps != null) applyFrameRate(target, coerceFrameRate(patch.fps, Number(target.fps) || 30));
     if (patch.dur != null) {
       target.dur = Math.max(1 / (target.fps || 30), Number(patch.dur));
       const work = Array.isArray(target.work) ? target.work : [0, target.dur];
