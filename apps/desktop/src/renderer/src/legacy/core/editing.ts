@@ -13,6 +13,7 @@ import { validateSceneLayer } from '../../core/scene3d/operations';
 import { sceneProperties,parseScene,validateSceneChannel,SCENE3D_DEFINITION } from '../../core/scene3d/schema';
 /* Ported from js/core/editing.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { applyPatch, type Patch } from '../../../../shared/patch';
 
 export function install(PM: PMRegistry): void {
 const validate3DChannel=(layer:any,path:string,prop:any)=>layer3DRole(layer)?validateLayer3DChannel(layer,path,prop):validateSceneChannel(path,prop);
@@ -112,6 +113,43 @@ function commandScopes(command: any): any[][] {
 function trackCommands(list: any[]) {
   PM.hist.track([['revision'], ['edits']]);
   for (const command of list) PM.hist.track(commandScopes(command));
+}
+
+function liveCheckpoint(list: any[]): Patch[] {
+  const native = list.map(command => {
+    if (command.type !== 'set_property') return null;
+    const channel = channelPath(command.path || command.channel);
+    const layer = findLayer(command.target || command.layer || command.targetId);
+    const path = layerPath(layer);
+    return path && Object.hasOwn(PM.CH || {}, channel) && Object.hasOwn(layer.p || {}, channel)
+      ? { path, channel } : null;
+  });
+  const scopes = native.every(Boolean) ? native.flatMap(target => [
+    [...target!.path, 'p', target!.channel], [...target!.path, 'locked_intent'],
+    [...target!.path, 'd', 'fontAnchorBounds'], [...target!.path, 'd', 'sizeAnchorBounds'],
+  ]) : list.flatMap(commandScopes);
+  const paths = [['revision'], ['edits'], ...scopes];
+  const captionUpdates = list.every(command => command.type === 'edit_captions' && ['update', 'style'].includes(command.op));
+  // Restore this call's affected source without ending the enclosing gesture
+  // or replaying its earlier commands. Parent paths cover their descendants.
+  return paths.filter((path, index) => !paths.some((parent, other) =>
+    (parent.length < path.length || parent.length === path.length && other < index)
+    && parent.every((part: any, at: number) => part === path[at]))).map(path => {
+      if (!path.length) return { path, exists: true, value: clone(PM.proj) };
+      let parent = PM.proj;
+      for (const part of path.slice(0, -1)) parent = parent?.[part];
+      const key = path.at(-1)!;
+      const exists = parent != null && Object.hasOwn(parent, key);
+      if (!exists) return { path, exists };
+      const source = parent[key];
+      // Caption update/style commands replace cue arrays and never mutate
+      // existing cues. Keep that immutable list instead of copying every word
+      // on each drag frame; mixed batches retain the full defensive copy.
+      const sharedCues = captionUpdates && source?.type === 'captions' && Array.isArray(source.d?.cues);
+      const value = clone(sharedCues ? { ...source, d: { ...source.d, cues: [] } } : source);
+      if (sharedCues) value.d.cues = source.d.cues;
+      return { path, exists, value };
+    });
 }
 const channelPath: any = (path: any) => String(path || '')
   .replace(/^properties\./, '')
@@ -1191,7 +1229,10 @@ const Edit: any = {
       return fail(`Project changed: expected revision ${meta.baseRevision}, found ${PM.proj.revision || 0}`);
     }
     if (live) {
+      const transaction = live, pendingCommands = [...live.commands], selection = clone(PM.sel);
+      let checkpoint: Patch[] | null = null;
       try {
+        checkpoint = liveCheckpoint(list);
         trackCommands(list);
         const executed: any = runCommands(list, meta);
         const results: any = executed.map(({ command, data }: any) => ({ command: clone(command), data }));
@@ -1199,7 +1240,11 @@ const Edit: any = {
         changed(false);
         const notices: any = executed.map((item: any) => item.message).filter(Boolean);
         return pass(['Source updated', ...notices].join('. '), { results, revision: PM.proj.revision || 0 });
-      } catch (error: any) { return fail(String(error.message || error)); }
+      } catch (error: any) {
+        transaction.commands = pendingCommands;
+        if (checkpoint) PM.replaceProject(applyPatch(PM.proj, checkpoint), { selection });
+        return fail(String(error.message || error));
+      }
     }
     const selection: any = clone(PM.sel);
     PM.hist.beginScoped(meta.label || 'Edit source', meta.historyGroup || null, meta.origin || 'interface');
