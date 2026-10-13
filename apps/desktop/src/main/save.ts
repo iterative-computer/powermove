@@ -413,6 +413,7 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     const gone = () => { rendererGone = true; };
     const checkRenderer = () => { if (rendererGone || isRendererUnavailable(event.sender)) throw new Error('Save cancelled'); };
     event.sender.once('render-process-gone', gone);
+    let saveFailed = false;
     try {
       checkRenderer();
       const window = BrowserWindow.fromWebContents(event.sender);
@@ -439,11 +440,16 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
       if (destination && !destination.directory) rememberExport(event.sender.id, selectedPath!);
       return { ok: true, path: selectedPath! };
     } catch (error: any) {
+      saveFailed = true;
       return { ok: false, cancelled: false, error: error.message || 'Save failed. Check disk space and folder permissions.' };
     } finally {
       event.sender.removeListener('render-process-gone', gone);
       releasePending(event.sender, marker);
-      if (typeof payload.uploadId === 'string') await discardUpload(event.sender, payload.uploadId);
+      if (typeof payload.uploadId === 'string') {
+        const cleanup = discardUpload(event.sender, payload.uploadId);
+        if (saveFailed) await cleanup.catch(() => undefined);
+        else await cleanup;
+      }
     }
   });
   ipcMain.handle(IPC.projectOpen, async (event): Promise<ProjectOpenResult> => {
