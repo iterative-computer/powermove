@@ -28,6 +28,9 @@ type Legacy = Record<string, any>;
 /** A native answer: the value, a throw to rethrow, or a reason to ask the legacy code. */
 type Native<T> = { value: T } | { threw: Error } | { fallback: string };
 
+/** A fast-path miss (the slow path answers). */
+const MISS = Symbol('miss');
+
 /** Finds `target` inside `root` by identity; its path, or null. */
 export function findPath(root: any, target: any, limit = 12): PathPart[] | null {
   const path: PathPart[] = [];
@@ -93,9 +96,9 @@ export interface NativeStats {
 export class NativeApi {
   readonly stats: NativeStats = { calls: {}, repairs: 0, fallbacks: {}, fastPath: 0, interned: 0 };
   /** Live channel object → interned id (validated on every use). */
-  private props = new WeakMap<object, { layer: object; path: PathPart[]; comp: string; id: number }>();
-  /** Live layer → its interned transform channels. */
-  private channels = new WeakMap<object, { comp: string; ids: Map<string, number> }>();
+  private props = new WeakMap<object, { layer: object; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; cur: unknown }>();
+  /** Live layer → its interned transform channels (valid at `revision` with `cur` as `PM.curComp()`). */
+  private channels = new WeakMap<object, { comp: string; ids: Map<string, number>; revision: number; cur: unknown }>();
   private refs = new Map<number, number>();
   private finalizer = typeof FinalizationRegistry === 'function'
     ? new FinalizationRegistry<number>(id => this.unref(id)) : null;
@@ -283,7 +286,41 @@ export class NativeApi {
 
   // ── anim ──────────────────────────────────────────────────────────────
 
+  /** The fast path's validity stamp: the mirror revision and `PM.curComp()`. */
+  private stamp(): { revision: number; cur: unknown } | null {
+    const barrier = this.barrier();
+    if (!barrier) return null;
+    if (barrier.pending) barrier.flush();
+    return { revision: barrier.revision, cur: this.PM.scope?.length ? this.unwrap(this.PM.curComp()) : null };
+  }
+
+  /** `pm_ev` for an id validated at this revision; MISS when it must take the slow path. */
+  private fastValue(id: number, T: number, prop: any): unknown {
+    const wasm = this.wasm();
+    if (!wasm || wasm.dead) return MISS;
+    let n: number;
+    try { n = wasm.x.pm_ev(id, T); } catch { wasm.dead = true; return MISS; }
+    if (n !== n && wasm.x.pm_kind() !== 0) return MISS; // not a number, or a throw: ask the slow path
+    this.stats.fastPath += 1;
+    const raw = prop && typeof prop === 'object' ? this.unwrap(prop) : null;
+    if (raw) {
+      if (raw.expr) { const m = wasm.expressionError(id); if (m == null) this.errors.delete(raw); else this.errors.set(raw, m); }
+      else this.errors.delete(raw);
+    }
+    return n;
+  }
+
   ev(L: any, key: any, T: any): any {
+    if (!this.dual && typeof key === 'string' && typeof T === 'number' && L && typeof L === 'object') {
+      const raw = this.unwrap(L);
+      const entry = this.channels.get(raw);
+      const stamp = entry && this.stamp();
+      const id = stamp && entry.revision === stamp.revision && entry.cur === stamp.cur ? entry.ids.get(key) : undefined;
+      if (id !== undefined) {
+        const value = this.fastValue(id, T, raw.p?.[key]);
+        if (value !== MISS) { this.stats.calls.ev = (this.stats.calls.ev ?? 0) + 1; return value; }
+      }
+    }
     return this.answer('ev', () => {
       const wasm = this.ready();
       if (!wasm) return { fallback: 'unavailable' };
@@ -292,8 +329,11 @@ export class NativeApi {
       if (typeof key !== 'string' || typeof T !== 'number' || !ctx.first || typeof ctx.layer !== 'number') {
         return this.query('ev', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, key: String(key), t: T });
       }
+      const stamp = this.stamp()!;
       let entry = this.channels.get(ctx.raw);
-      if (!entry || entry.comp !== ctx.comp) { entry = { comp: ctx.comp, ids: new Map() }; this.channels.set(ctx.raw, entry); }
+      if (!entry || entry.comp !== ctx.comp) { entry = { comp: ctx.comp, ids: new Map(), revision: stamp.revision, cur: stamp.cur }; this.channels.set(ctx.raw, entry); }
+      entry.revision = stamp.revision;
+      entry.cur = stamp.cur;
       let id = entry.ids.get(key);
       if (id === undefined) {
         id = this.intern(wasm, { comp: ctx.comp, layer: ctx.raw.id, key, via: 'channel' }, ctx.raw);
@@ -308,14 +348,24 @@ export class NativeApi {
 
   evP(L: any, prop: any, T: any, key: any): any {
     if (!prop || typeof prop !== 'object') return this.legacy.evP(L, prop, T, key);
+    if (!this.dual && typeof T === 'number') {
+      const rawProp = this.unwrap(prop);
+      const entry = this.props.get(rawProp);
+      const stamp = entry && this.stamp();
+      if (stamp && entry.revision === stamp.revision && entry.cur === stamp.cur && entry.key === key && entry.layer === this.unwrap(L)) {
+        const value = this.fastValue(entry.id, T, rawProp);
+        if (value !== MISS) { this.stats.calls.evP = (this.stats.calls.evP ?? 0) + 1; return value; }
+      }
+    }
     return this.answer('evP', () => {
       const wasm = this.ready();
       if (!wasm) return { fallback: 'unavailable' };
       const ctx = this.context(L);
       if (!ctx) return { fallback: 'context' };
       const rawProp = this.unwrap(prop);
+      const stamp = this.stamp()!;
       let entry = this.props.get(rawProp);
-      const valid = entry && entry.layer === ctx.raw && entry.comp === ctx.comp && at(ctx.raw, entry.path) === rawProp;
+      const valid = entry && entry.layer === ctx.raw && entry.comp === ctx.comp && entry.key === key && at(ctx.raw, entry.path) === rawProp;
       if (!valid) {
         const path = findPath(ctx.raw, rawProp);
         if (!path || !ctx.first || typeof ctx.layer !== 'number' || typeof key !== 'string' || typeof T !== 'number') {
@@ -326,9 +376,11 @@ export class NativeApi {
         }
         const id = this.intern(wasm, { comp: ctx.comp, layer: ctx.raw.id, key, via: path }, rawProp);
         if (id < 0) return this.query('evP', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, path, key, t: T });
-        entry = { layer: ctx.raw, path, comp: ctx.comp, id };
+        entry = { layer: ctx.raw, path, comp: ctx.comp, id, key, revision: stamp.revision, cur: stamp.cur };
         this.props.set(rawProp, entry);
       }
+      entry!.revision = stamp.revision;
+      entry!.cur = stamp.cur;
       const got = this.evById(wasm, entry!.id, T);
       this.noteError(rawProp, wasm, entry!.id);
       return got;

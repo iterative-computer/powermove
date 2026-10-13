@@ -225,6 +225,8 @@ export function install(PM: PMRegistry): void {
     },
     pendingSnapshot: () => pending?.before || null,
     busy: () => !!pending,
+    /** A scoped transaction is open: every write it makes is tracked first. */
+    scoped: () => !!pending?.scoped,
     /** Wrap a legacy direct mutation. PM.Edit uses the same compact patch entry. */
     do(label: any, fn: any, origin: any = 'interface') {
       H.begin(label, null, origin);

@@ -20,8 +20,14 @@ export function temporalKeys(keys: any[], version?:number): any[] {
   if(version !== undefined) prepared.set(keys,{version,length:keys.length,first:keys[0],last:keys.at(-1),curves:[]});
   if (keys.some(k => typeof k.v !== 'number')) return keys;
   if (!keys.length) return keys;
-  if (evaluationWrite && rewritesKeys(keys)) evaluationWrite();
-  if (keys.every(key=>owners.get(key)===keys)) { refreshAutoBezier(keys); return keys; }
+  // Only a rewrite the JSON can see is a document write (auto-bezier keys
+  // are refreshed on every version and usually come out the same).
+  const before = evaluationWrite && rewritesKeys(keys) ? JSON.stringify(keys) : null;
+  if (keys.every(key=>owners.get(key)===keys)) {
+    refreshAutoBezier(keys);
+    if (before !== null && JSON.stringify(keys) !== before) evaluationWrite!();
+    return keys;
+  }
   adoptTemporalEase(keys);
   for (const key of keys) {
     // Existing accessors already resolve their neighbours from this array.
@@ -51,6 +57,7 @@ export function temporalKeys(keys: any[], version?:number): any[] {
     }});
     Object.defineProperty(key,'bezierMode',{configurable:true,enumerable:false,get:()=>key.continuous?'continuous':'split',set:(v)=>{key.continuous=v==='continuous';}});
   }
+  if (before !== null && JSON.stringify(keys) !== before) evaluationWrite!();
   return keys;
 }
 export function temporalValue(keys: any[], left: number, time: number, state = prepared.get(keys)): number {
@@ -78,8 +85,9 @@ export function temporalEvaluate(keys:any[],time:number,version:number,spring:(t
   let state=prepared.get(keys);
   if(!state||state.version!==version||state.length!==keys.length||state.first!==keys[0]||state.last!==keys[keys.length-1]){
     // Evaluation needs native timing data, not a legacy UI accessor on every key.
-    if (evaluationWrite && rewritesKeys(keys)) evaluationWrite();
+    const before = evaluationWrite && rewritesKeys(keys) ? JSON.stringify(keys) : null;
     adoptTemporalEase(keys);
+    if (before !== null && JSON.stringify(keys) !== before) evaluationWrite!();
     state={version,length:keys.length,first:keys[0],last:keys[keys.length-1],curves:[]};prepared.set(keys,state);
   }
   if (state.evaluatedTime === time && state.evaluatedSpring === spring) return state.evaluatedValue!;

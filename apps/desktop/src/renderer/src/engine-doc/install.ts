@@ -165,7 +165,8 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const legacyTouch = PM.touch;
   PM.touch = (paths?: PathPart[][], canonical?: boolean) => {
     if (Array.isArray(paths)) record(paths, { canonical });
-    else if (barrier && !tracker && coveredDepth === 0) barrier.touchAll();
+    // A scoped transaction declared its paths with track() before writing.
+    else if (barrier && !tracker && coveredDepth === 0 && !PM.hist?.scoped?.()) barrier.touchAll();
     return legacyTouch?.();
   };
   // Legacy evaluation adopts old keyframe handles into the live document
