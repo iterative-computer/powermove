@@ -236,11 +236,48 @@ impl PoolPlane {
     }
 }
 
+/// An IOSurface-backed CVPixelBuffer. A buffer from a decoder the frame
+/// pool serves carries a hold that counts its bytes in the pool's
+/// [`PoolStats`](crate::pool::PoolStats) while any clone lives. It
+/// dereferences to the buffer.
+#[derive(Clone)]
+pub struct CvBuffer {
+    buf: Cf,
+    hold: Option<Arc<crate::pool::ExternalHold>>,
+}
+
+impl CvBuffer {
+    /// A buffer no pool accounts for.
+    pub fn untracked(buf: Cf) -> CvBuffer {
+        CvBuffer { buf, hold: None }
+    }
+
+    /// Counts the buffer in `pool` from now until the last clone drops
+    /// (once: a buffer already held keeps its hold).
+    pub fn track(&mut self, pool: &crate::pool::FramePool) {
+        if self.hold.is_none() {
+            let bytes = unsafe { CVPixelBufferGetDataSize(self.buf.as_mut_ptr()) };
+            self.hold = Some(pool.hold_external(bytes));
+        }
+    }
+
+    pub fn is_tracked(&self) -> bool {
+        self.hold.is_some()
+    }
+}
+
+impl std::ops::Deref for CvBuffer {
+    type Target = Cf;
+    fn deref(&self) -> &Cf {
+        &self.buf
+    }
+}
+
 /// The memory behind a decoded frame.
 #[derive(Clone)]
 pub enum Pixels {
     /// An IOSurface-backed CVPixelBuffer from VideoToolbox (or ImageIO).
-    CoreVideo(Cf),
+    CoreVideo(CvBuffer),
     /// Planes in pool memory (FFmpeg, dav1d, image readers).
     Pool(Arc<PoolFrame>),
 }

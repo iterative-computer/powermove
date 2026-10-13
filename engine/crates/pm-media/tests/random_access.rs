@@ -59,9 +59,9 @@ fn s6_corpus() {
 #[ignore]
 fn prores_in_mxf_and_matroska() {
     let files = videos(&corpus_dir(), &|n| {
-        n == "prores-hq.mxf" || n == "prores-422.mkv"
+        n == "prores-hq.mxf" || n == "prores-hq-2997.mxf" || n == "prores-422.mkv"
     });
-    assert_eq!(files.len(), 2);
+    assert_eq!(files.len(), 3);
     for f in &files {
         let r = run_file(f, None, DecodePurpose::Display);
         eprintln!("{}", summary(&r));
