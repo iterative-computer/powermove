@@ -231,6 +231,7 @@ export function installLayerGroups(PM: PMRegistry): void {
     if (!groups.length) throw new Error('Select a group to ungroup');
     if (groups.some((group: any) => group.lock || ancestors(group, PM.proj.layers).some(parent => parent.lock))) throw new Error('Unlock the group first');
     if (PM.proj.layers.some((layer: any) => layer.lock && ancestors(layer,PM.proj.layers).some(group => ids.includes(group.id)))) throw new Error('Unlock the group contents before ungrouping');
+    if (groups.some((group: any) => group.solo)) throw new Error('Turn off Solo before ungrouping this group.');
     const styled = groups.find(hasVisualStyle);
     if (styled) throw new Error(`Remove visual compositing from “${styled.name}” before ungrouping`);
     if (groups.some((group: any) => !constantProperty(group.on, true) && !constantProperty(group.on, false))) {

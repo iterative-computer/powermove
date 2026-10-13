@@ -27,9 +27,9 @@ function alpha(PM: any, time: number, parent: string | null = null): number {
 }
 function state(PM: any) { return JSON.stringify({ source: PM.serialize(), selection: PM.sel, history: PM.hist.list() }); }
 function apply(PM: any, ids: string[]) { return PM.Edit.apply({ type: 'ungroup_layers', targets: ids }, { origin: 'agent', label: 'Ungroup layers' }); }
-function rejected(PM: any, ids: string[]) {
+function rejected(PM: any, ids: string[], message = 'Pre-compose this group') {
   const before = state(PM), result = apply(PM, ids);
-  expect(result.ok).toBe(false); expect(result.message).toContain('Pre-compose this group');
+  expect(result.ok).toBe(false); expect(result.message).toContain(message);
   expect(state(PM)).toBe(before); expect(PM.hist.undo()).toBe(false);
 }
 const times = [.5, 1.5, 2.5];
@@ -100,7 +100,7 @@ describe('ungroup shared opacity safety', () => {
       if (mode === '3D') leaf.threeD = true;
       if (mode === 'animated group visibility') group.on = PM.P(true, { expr: 'time > 1' });
       if (mode === 'solo group') group.solo = true;
-      PM.touch(); rejected(PM, [group.id]);
+      PM.touch(); rejected(PM, [group.id], mode === 'solo group' ? 'Turn off Solo before ungrouping this group' : 'Pre-compose this group');
     });
 
   it.each([200, -50])('clamps the removed group opacity %s before transferring it to a plain child', value => {
