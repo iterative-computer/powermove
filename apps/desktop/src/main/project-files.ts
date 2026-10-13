@@ -8,6 +8,12 @@ import { checkVersion, changedFile, copySnapshot, fileVersion, hashHandle, publi
 import { isIncrementalProject, readIncrementalIndex, type SaveMedia } from '../shared/project-incremental';
 import { nativeHash, ProjectSave, validateSaveMedia } from './project-save';
 import { NEWER_PROJECT_MESSAGE, needsNewerReader } from '../shared/reader-version';
+import { validateProjectDocument, type ProjectDocumentValidator } from './project-document';
+
+export interface ProjectFilesOptions {
+  /** Checks a saved document before it is published; defaults to this thread. */
+  validateDocument?: ProjectDocumentValidator;
+}
 
 /** Replace only after every byte has reached disk; a failed write preserves the original. */
 export async function atomicWrite(filePath: string, data: Uint8Array | Iterable<Uint8Array> | AsyncIterable<Uint8Array>): Promise<void> {
@@ -32,7 +38,9 @@ export class ProjectFiles {
   private ready: Promise<void>;
   private queue: Promise<unknown> = Promise.resolve();
   private saving = new Set<string>();
-  constructor(private readonly registryPath: string, private readonly backupDirectory: string) {
+  private readonly validateDocument: ProjectDocumentValidator;
+  constructor(private readonly registryPath: string, private readonly backupDirectory: string, options: ProjectFilesOptions = {}) {
+    this.validateDocument = options.validateDocument ?? validateProjectDocument;
     this.ready = this.load();
   }
   private async load(): Promise<void> {
@@ -167,7 +175,7 @@ export class ProjectFiles {
       try {
         return await ProjectSave.create(destination, previous, media, documentBytes,
           (temporary, hash) => this.serial(() => this.commit(id, destination, temporary, hash, previous)),
-          () => { this.saving.delete(destination); }, !selectedPath);
+          () => { this.saving.delete(destination); }, !selectedPath, this.validateDocument);
       } catch (error) { this.saving.delete(destination); throw error; }
     });
   }
