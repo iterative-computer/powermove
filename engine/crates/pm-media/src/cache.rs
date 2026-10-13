@@ -25,6 +25,8 @@ pub struct FrameKey {
 struct Entry {
     frame: DecodedFrame,
     bytes: usize,
+    /// The frame lives in the software decoders' pool (not a CoreVideo buffer).
+    pooled: bool,
     stamp: u64,
 }
 
@@ -33,6 +35,7 @@ struct Inner {
     map: HashMap<FrameKey, Entry>,
     lru: BTreeMap<u64, FrameKey>,
     bytes: usize,
+    pool_bytes: usize,
     budget: usize,
     clock: u64,
     hits: u64,
@@ -46,6 +49,8 @@ struct Inner {
 pub struct CacheStats {
     pub frames: usize,
     pub bytes: usize,
+    /// Of `bytes`, frames in the decode pool (the rest are CoreVideo buffers).
+    pub pool_bytes: usize,
     pub budget: usize,
     pub hits: u64,
     pub misses: u64,
@@ -85,18 +90,22 @@ impl FrameCache {
     /// is then not kept).
     pub fn insert(&self, key: FrameKey, frame: DecodedFrame) -> bool {
         let bytes = frame.bytes();
+        let pooled = matches!(frame.pixels, crate::frame::Pixels::Pool(_));
         let mut g = self.inner.lock().unwrap();
         if bytes > g.budget {
             return false;
         }
         g.clock += 1;
         let stamp = g.clock;
-        if let Some(old) = g.map.insert(key, Entry { frame, bytes, stamp }) {
+        if let Some(old) = g.map.insert(key, Entry { frame, bytes, pooled, stamp }) {
             g.lru.remove(&old.stamp);
-            g.bytes -= old.bytes;
+            Self::forget(&mut g, &old);
         }
         g.lru.insert(stamp, key);
         g.bytes += bytes;
+        if pooled {
+            g.pool_bytes += bytes;
+        }
         Self::evict(&mut g);
         true
     }
@@ -117,7 +126,7 @@ impl FrameCache {
         for k in keys {
             if let Some(e) = g.map.remove(&k) {
                 g.lru.remove(&e.stamp);
-                g.bytes -= e.bytes;
+                Self::forget(&mut g, &e);
             }
         }
     }
@@ -126,9 +135,16 @@ impl FrameCache {
         while g.bytes > g.budget {
             let Some((_, key)) = g.lru.pop_first() else { break };
             if let Some(e) = g.map.remove(&key) {
-                g.bytes -= e.bytes;
+                Self::forget(g, &e);
                 g.evictions += 1;
             }
+        }
+    }
+
+    fn forget(g: &mut Inner, e: &Entry) {
+        g.bytes -= e.bytes;
+        if e.pooled {
+            g.pool_bytes -= e.bytes;
         }
     }
 
@@ -137,6 +153,7 @@ impl FrameCache {
         CacheStats {
             frames: g.map.len(),
             bytes: g.bytes,
+            pool_bytes: g.pool_bytes,
             budget: g.budget,
             hits: g.hits,
             misses: g.misses,

@@ -127,3 +127,42 @@ fn hardware_limits_fall_back_or_use_the_software_decoder() {
     drop(s);
     assert_eq!(one.in_use().get(&HwCodec::ProRes), None, "the permit returns with the session");
 }
+
+/// The lease report counts CoreVideo frames in the cache, pool frames in the
+/// cache, and pool memory outside it (a frame a renderer still holds after
+/// eviction stays counted) without double counting.
+#[test]
+fn lease_report_counts_every_frame_once() {
+    let src = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
+    let svc = DecodeService::new(ServiceConfig { cache_bytes: 256 << 20, ..Default::default() });
+    {
+        let mut vt = svc.session_with(&src, 1, DecodePurpose::Display, Some(Backend::VideoToolbox)).unwrap();
+        assert_eq!(vt.info().backend, Backend::VideoToolbox);
+        for n in 0..5 {
+            vt.frame(n).unwrap();
+        }
+    }
+    let u = svc.usage();
+    assert!(u.frame_cache > 0 && u.cache.pool_bytes == 0, "{u:?}");
+    assert_eq!(u.decoders, u.pool.bytes);
+    let held = {
+        let mut ff = svc.session_with(&src, 2, DecodePurpose::Display, Some(Backend::Ffmpeg)).unwrap();
+        assert_eq!(ff.info().backend, Backend::Ffmpeg);
+        // Another instance: the FFmpeg session decodes its own frames.
+        for n in 5..10 {
+            ff.frame(n).unwrap();
+        }
+        ff.frame(9).unwrap()
+    };
+    let u = svc.usage();
+    assert!(u.cache.pool_bytes > 0 && u.cache.pool_bytes < u.frame_cache, "{u:?}");
+    assert_eq!(u.decoders, u.pool.bytes - u.cache.pool_bytes);
+    let c = u.lease_categories().unwrap();
+    assert_eq!(c.total().unwrap().get(), (u.frame_cache + u.decoders) as u64);
+    // Shrink to zero while a renderer holds a pool frame: the cache empties,
+    // and the held frame moves to the decoder category.
+    let after = svc.apply_lease(0, 0);
+    assert_eq!((after.frame_cache, after.cache.pool_bytes), (0, 0));
+    assert!(after.decoders >= held.bytes(), "{after:?}");
+    drop(held);
+}

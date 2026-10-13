@@ -16,6 +16,8 @@ use crate::probe::{MediaProbe, Probed};
 use crate::time::{NominalRate, select_frame};
 use crate::vt::DecodePurpose;
 use pm_protocol::color::ColorDescription;
+use pm_protocol::common::ByteSize;
+use pm_protocol::lease::LeaseCategories;
 use pm_time::{Rate, Tick};
 use std::collections::HashMap;
 use std::path::Path;
@@ -135,13 +137,28 @@ impl Default for ServiceConfig {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaUsage {
-    /// Frames in the frame cache.
+    /// Frames in the frame cache (pool and CoreVideo frames).
     pub frame_cache: usize,
-    /// Pool memory not held by the cache (decoder references, free slots).
+    /// Pool memory the cache does not hold: decoder references, frames a
+    /// renderer still uses after eviction, and free slots. VideoToolbox's
+    /// own buffer pools and session state are not visible here.
     pub decoders: usize,
     pub cache: CacheStats,
     pub pool: PoolStats,
     pub sessions: usize,
+}
+
+impl MediaUsage {
+    /// The service's share of a lease usage report (contract 8): the frame
+    /// cache and decoder categories. `None` beyond the protocol's safe
+    /// integer range.
+    pub fn lease_categories(&self) -> Option<LeaseCategories> {
+        Some(LeaseCategories {
+            frame_cache: ByteSize::new(self.frame_cache as u64).ok()?,
+            decoders: ByteSize::new(self.decoders as u64).ok()?,
+            ..LeaseCategories::default()
+        })
+    }
 }
 
 /// Playback direction for read-ahead.
@@ -360,7 +377,7 @@ impl DecodeService {
         let pool = self.pool.stats();
         MediaUsage {
             frame_cache: cache.bytes,
-            decoders: pool.bytes.saturating_sub(cache.bytes.min(pool.live_bytes)),
+            decoders: pool.bytes.saturating_sub(cache.pool_bytes),
             cache,
             pool,
             sessions: self.open_sessions.load(Ordering::Relaxed) as usize,
