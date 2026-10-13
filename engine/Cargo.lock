@@ -1769,6 +1769,8 @@ dependencies = [
  "pm-protocol",
  "pm-time",
  "png",
+ "regex",
+ "serde_json",
  "sha2",
  "thiserror",
  "wgpu",

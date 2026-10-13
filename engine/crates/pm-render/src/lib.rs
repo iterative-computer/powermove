@@ -29,6 +29,7 @@ pub mod plan;
 mod renderer;
 mod request;
 pub mod scene3d;
+pub mod three;
 
 pub use assets::{AssetResolver, MapResolver, SourcePaths};
 pub use capability::{Feature, Unsupported, unsupported, unsupported_with_media};
