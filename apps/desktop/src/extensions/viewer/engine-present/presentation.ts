@@ -81,12 +81,27 @@ export type PresentationOptions = {
   createPainter?: (canvas: HTMLCanvasElement) => Promise<FramePainter>;
   /** The DPR cap (the viewer renders at most 2x). */
   maxDpr?: number;
+  /**
+   * A size change reaches the engine once the size has held still this
+   * long (`SIZE_SETTLE_MS`); until then frames keep the pool's size and the
+   * canvas stretches. Every size is a new pool of up to 32 surfaces, so a
+   * live window resize must not replace the pool at every step. 0 applies
+   * sizes at once.
+   */
+  sizeSettleMs?: number;
+  /** Timers for the size settle (tests); the hosting window's otherwise. */
+  timers?: { set(fn: () => void, ms: number): number; clear(id: number): void };
+  /** Records per-frame timings (the S1 measurement harness). */
+  trace?: boolean;
   log?: (level: 'info' | 'warn' | 'error', message: string) => void;
 };
 
 /** Recent viewer states by sequence, so overlay geometry converts with the
  *  DPR of the state its frame shows. */
 const STATE_HISTORY = 32;
+
+/** How long a new viewer size must hold before the engine gets it. */
+export const SIZE_SETTLE_MS = 150;
 
 export class ViewerPresentation {
   readonly canvas: HTMLCanvasElement;
@@ -104,6 +119,10 @@ export class ViewerPresentation {
   private readonly offReady: () => void;
   private sessions = 0;
   private disposed = false;
+  /** The CSS size the engine last got, and the pending settle. */
+  private appliedSize: { width: number; height: number } | null = null;
+  private settleTimer = 0;
+  private settleDue = false;
 
   constructor(private readonly options: PresentationOptions) {
     const doc = options.stage.ownerDocument;
@@ -153,12 +172,13 @@ export class ViewerPresentation {
     if (!view) return;
     const rect = this.options.stage.getBoundingClientRect();
     if (rect.width < 1 || rect.height < 1) return;
+    const size = this.settledSize(view, rect.width, rect.height);
     const dpr = Math.min(view.devicePixelRatio || 1, this.options.maxDpr ?? 2);
     const { state, changed } = this.sequencer.next({
       ...params,
       composition: this.options.service.composition(),
-      cssWidth: rect.width,
-      cssHeight: rect.height,
+      cssWidth: size.width,
+      cssHeight: size.height,
       devicePixelRatio: dpr,
       edr: displayIsEdr(view),
       colorSpace: canvasColorSpace(view)
@@ -167,6 +187,40 @@ export class ViewerPresentation {
     this.states.push(state);
     if (this.states.length > STATE_HISTORY) this.states.shift();
     this.presenter?.setViewerState(state);
+  }
+
+  /** The size to send: a new size only once it held still (live resizes). */
+  private settledSize(view: Window, width: number, height: number): { width: number; height: number } {
+    const applied = this.appliedSize;
+    const settleMs = this.options.sizeSettleMs ?? SIZE_SETTLE_MS;
+    if (!applied || this.settleDue || settleMs <= 0 || (applied.width === width && applied.height === height)) {
+      this.settleDue = false;
+      if (this.settleTimer) this.clearTimer(view, this.settleTimer);
+      this.settleTimer = 0;
+      this.appliedSize = { width, height };
+      return this.appliedSize;
+    }
+    if (this.settleTimer) this.clearTimer(view, this.settleTimer);
+    const fire = (): void => {
+      this.settleTimer = 0;
+      this.settleDue = true;
+      if (this.params) this.update(this.params);
+    };
+    this.settleTimer = this.options.timers ? this.options.timers.set(fire, settleMs) : view.setTimeout(fire, settleMs);
+    return applied;
+  }
+
+  private clearTimer(view: Window, id: number): void {
+    if (this.options.timers) this.options.timers.clear(id);
+    else view.clearTimeout(id);
+  }
+
+  /** The per-frame trace of the current session (the S1 measurement harness). */
+  takeTrace(): import('./presenter').TraceRecord | null {
+    const trace = this.presenter?.trace ?? null;
+    if (!trace) return null;
+    const copy = { arrivals: trace.arrivals.splice(0), draws: trace.draws.splice(0), drops: trace.drops.splice(0), releases: trace.releases.splice(0), rafs: trace.rafs.splice(0) };
+    return copy;
   }
 
   /** The viewer state a frame shows (by its view sequence). */
@@ -243,6 +297,7 @@ export class ViewerPresentation {
       link: channel,
       source: this.options.service.source,
       painter: this.painter,
+      trace: this.options.trace,
       hostOffsetUs: this.options.service.hostOffsetUs ? () => this.options.service.hostOffsetUs!() : undefined
     });
     this.presenter = presenter;
@@ -273,6 +328,8 @@ export class ViewerPresentation {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.settleTimer && this.host) this.clearTimer(this.host, this.settleTimer);
+    this.settleTimer = 0;
     this.offReady();
     for (const off of this.mediaOffs.splice(0)) off();
     this.presenter?.dispose();

@@ -215,7 +215,7 @@ describe('ViewerPresentation', () => {
   it('follows the stage into a popout: the loop runs on its frames and its display sets the state', async () => {
     const service = new Service();
     const main = stageIn(window as unknown as Window);
-    const presentation = new ViewerPresentation({ service, stage: main.stage, before: main.overlay, createPainter: async () => new Painter() });
+    const presentation = new ViewerPresentation({ service, stage: main.stage, before: main.overlay, createPainter: async () => new Painter(), sizeSettleMs: 0 });
     await settle();
     presentation.update(PARAMS);
     const channel = service.channels[0]!;
@@ -249,6 +249,40 @@ describe('ViewerPresentation', () => {
     expect(seen).toBe(5010);
     presentation.dispose();
     await (popout as unknown as HappyWindow).happyDOM.close();
+  });
+
+  it('sends a new size only once it holds still, keeping zoom and pan changes immediate', async () => {
+    const service = new Service();
+    const { stage, overlay } = stageIn(window as unknown as Window);
+    const timers: { fn: () => void; ms: number; live: boolean }[] = [];
+    const presentation = new ViewerPresentation({
+      service,
+      stage,
+      before: overlay,
+      createPainter: async () => new Painter(),
+      timers: {
+        set: (fn, ms) => timers.push({ fn, ms, live: true }),
+        clear: (id) => (timers[id - 1]!.live = false)
+      }
+    });
+    await settle();
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    let width = 640;
+    stage.getBoundingClientRect = () => ({ x: 0, y: 0, left: 0, top: 0, right: width, bottom: 360, width, height: 360, toJSON: () => ({}) }) as DOMRect;
+    // A live resize: three steps, then a pan while it is still moving.
+    for (const w of [660, 700, 740]) {
+      width = w;
+      presentation.update(PARAMS);
+    }
+    presentation.update({ ...PARAMS, pan: [5, 0] });
+    expect(channel.states.map((s) => s.size.width)).toEqual([1280, 1280]);
+    expect(channel.states[1]!.pan).toEqual([5, 0]);
+    expect(timers.filter((t) => t.live)).toHaveLength(1);
+    expect(timers.at(-1)!.ms).toBe(150);
+    timers.find((t) => t.live)!.fn();
+    expect(channel.states.at(-1)!.size).toEqual({ width: 1480, height: 720 });
+    presentation.dispose();
   });
 
   it('does nothing without WebGPU and says why', async () => {
