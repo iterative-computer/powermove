@@ -45,9 +45,10 @@ use crate::frame::{
     PreviewResolution, Projection, Representation, Shading3d, ViewOverride, ViewerState,
 };
 use crate::host::{
-    CacheKind, CapabilityHandle, CapabilityKind, CommitOutput, HandleGrant, HardwareSessionGrant,
-    HandleAccess, HandleResolved, HardwareSessionKind, HardwareSessionRequest, MintHandle, ResolveHandle, OutputChoice, OutputCommitted,
-    OutputDestination, OutputDestinationRequest, OutputVerification, OverwritePolicy,
+    CacheKind, CapabilityHandle, CapabilityKind, CommitOutput, HandleAccess, HandleGrant,
+    HandleResolved, HardwareSessionGrant, HardwareSessionKind, HardwareSessionRequest, MintHandle,
+    OutputChoice, OutputCommitted, OutputDestination, OutputDestinationRequest, OutputVerification,
+    OverwritePolicy, ResolveHandle,
 };
 use crate::interop::{PlatformSurface, SurfaceDescriptor, SurfaceFormat, SurfacePool};
 use crate::lease::{Lease, LeaseCategories, LeaseReason, LeaseRequest, LeaseUsage};

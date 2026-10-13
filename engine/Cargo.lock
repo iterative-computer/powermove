@@ -492,6 +492,11 @@ version = "0.1.0"
 [[package]]
 name = "pm-host"
 version = "0.1.0"
+dependencies = [
+ "pm-protocol",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "pm-media"

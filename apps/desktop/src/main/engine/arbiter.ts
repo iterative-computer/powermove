@@ -27,11 +27,11 @@ export function globalBudget(physicalBytes: number): number {
   return Math.max(budget, 1 * GiB);
 }
 
-export type Split = { interactive: number; job: number };
 
-/** Fractions of the global budget. */
-export const IDLE_SPLIT = { interactive: 0.6, job: 0.4 } as const;
-export const PLAYBACK_SPLIT = { interactive: 0.85, job: 0.15 } as const;
+/** Shares of the global budget in per-mille (integers, so main and the
+ *  CLI host, pm-host, compute identical byte counts). */
+export const IDLE_SPLIT = { interactive: 600, job: 400 } as const;
+export const PLAYBACK_SPLIT = { interactive: 850, job: 150 } as const;
 export const ACK_DEADLINE_MS = 500;
 
 type LeaseState = {
@@ -60,8 +60,8 @@ export class MemoryArbiter {
   constructor(readonly global: number, private readonly now: () => number = () => Date.now()) {}
 
   private target(process: EngineProcess, playing = this.playing): number {
-    const split = playing ? PLAYBACK_SPLIT : IDLE_SPLIT;
-    return Math.floor(this.global * split[process]);
+    const share = (playing ? PLAYBACK_SPLIT : IDLE_SPLIT)[process];
+    return Math.floor(this.global / 1000) * share + Math.floor(((this.global % 1000) * share) / 1000);
   }
 
   private other(process: EngineProcess): EngineProcess {

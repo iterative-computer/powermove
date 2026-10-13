@@ -414,6 +414,31 @@ impl HandleTable {
         Ok(kind)
     }
 
+    /// Drops one handle (an output committed or removed).
+    pub fn revoke(&mut self, handle: &CapabilityHandle) -> bool {
+        self.entries.remove(handle).is_some()
+    }
+
+    /// Drops every handle bound to a port (the engine launch ended).
+    pub fn revoke_port(&mut self, port: PortId) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|_, (_, _, p)| *p != port);
+        before - self.entries.len()
+    }
+
+    /// Drops every handle of a session on a port (the session closed).
+    pub fn revoke_session_on(&mut self, session: SessionId, port: PortId) -> usize {
+        let before = self.entries.len();
+        self.entries
+            .retain(|_, (_, s, p)| !(*s == session && *p == port));
+        before - self.entries.len()
+    }
+
+    /// Whether a handle is bound.
+    pub fn contains(&self, handle: &CapabilityHandle) -> bool {
+        self.entries.contains_key(handle)
+    }
+
     /// Drops every handle of a session (session closed or engine restarted).
     pub fn revoke_session(&mut self, session: SessionId) -> usize {
         let before = self.entries.len();
@@ -473,7 +498,11 @@ impl Validate for HandleResolved {
                 && self.path.len() <= MAX_RESOLVED_PATH_BYTES
                 && !self.path.contains('\0'),
             C,
-            || format!("a resolved path is absolute, at most {MAX_RESOLVED_PATH_BYTES} bytes, without NUL"),
+            || {
+                format!(
+                    "a resolved path is absolute, at most {MAX_RESOLVED_PATH_BYTES} bytes, without NUL"
+                )
+            },
         )
     }
 }
@@ -524,6 +553,11 @@ mod tests {
             table.check(&other, session, PortId(3)),
             Err(HandleRejection::Unknown)
         );
+        let second = CapabilityHandle::from_random_bytes([9; 16]);
+        assert!(table.bind(second.clone(), kind.clone(), session, PortId(5)));
+        assert_eq!(table.revoke_port(PortId(5)), 1);
+        assert!(!table.contains(&second));
+        assert_eq!(table.revoke_session_on(session, PortId(4)), 0);
         assert_eq!(table.revoke_session(session), 1);
         assert_eq!(
             table.check(&handle, session, PortId(3)),

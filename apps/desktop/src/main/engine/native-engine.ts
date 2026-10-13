@@ -21,8 +21,6 @@ import { mkdir, open, rm, unlink } from 'node:fs/promises';
 import path from 'node:path';
 
 import type {
-  CacheKind,
-  CapabilityKind,
   ContentHash,
   CrashReport,
   DeadlineSignal,
@@ -34,14 +32,15 @@ import type {
   Response,
   SlicingPolicy
 } from '../../shared/engine-protocol';
-import { globalBudget, HardwareArbiter, MemoryArbiter, type LeaseGrant } from './arbiter';
+import type { HardwareArbiter, LeaseGrant, MemoryArbiter } from './arbiter';
 import type { HostHandler, Log } from './connection';
 import { CrashLedger, isAttributable } from './crash';
 import { DefinitionRelay } from './definitions';
-import { HandleRejected, HandleTable } from './handles';
-import { OutputDestinations, OutputError } from './outputs';
+import type { HandleTable } from './handles';
+import type { OutputDestinations } from './outputs';
 import type { ChannelFactory, ClientPortInfo, PortLike, SpawnEngine } from './ports';
-import { isHandle, isId, isRecord, isSafeUint, ProtocolError } from './protocol';
+import { isRecord, isSafeUint, ProtocolError } from './protocol';
+import { CACHE_DIRS, HostServicesCore } from './services';
 import { EngineSupervisor, type Launch, type SupervisorState } from './supervisor';
 
 export const DEFAULT_SLICING_POLICY: SlicingPolicy = {
@@ -51,19 +50,6 @@ export const DEFAULT_SLICING_POLICY: SlicingPolicy = {
   alignGuardUs: 1000,
   yieldAfterMissUs: 100_000,
   blender: { kind: 'pause' }
-};
-
-const CACHE_KINDS: readonly CacheKind[] = ['mediaIndex', 'thumbnails', 'generatedMedia', 'renderCache', 'blenderSurfaces', 'shaderCache', 'fontSubsets', 'largeStillMips', 'scratch'];
-const CACHE_DIRS: Readonly<Record<CacheKind, string>> = {
-  mediaIndex: 'Media Index',
-  thumbnails: 'Thumbnails',
-  generatedMedia: 'Generated Media',
-  renderCache: 'Render Cache',
-  blenderSurfaces: 'Blender Surfaces',
-  shaderCache: 'Shader Cache',
-  fontSubsets: 'Font Subsets',
-  largeStillMips: 'Large Still Mips',
-  scratch: 'Scratch'
 };
 
 /** Staged resync documents kept per engine launch before the oldest goes. */
@@ -108,10 +94,7 @@ function validInFlight(value: unknown): value is InFlight {
 }
 
 export class NativeEngine {
-  readonly handles = new HandleTable();
-  readonly outputs: OutputDestinations;
-  readonly memory: MemoryArbiter;
-  readonly hardware = new HardwareArbiter();
+  readonly services: HostServicesCore;
   readonly definitions = new DefinitionRelay();
   readonly ledger = new CrashLedger();
   private readonly supervisors: Record<EngineProcess, EngineSupervisor>;
@@ -122,9 +105,30 @@ export class NativeEngine {
   private lastPlaybackStarted: DeadlineSignal | null = null;
   private staged = new Map<number, string[]>();
 
+  get handles(): HandleTable {
+    return this.services.handles;
+  }
+
+  get outputs(): OutputDestinations {
+    return this.services.outputs;
+  }
+
+  get memory(): MemoryArbiter {
+    return this.services.memory;
+  }
+
+  get hardware(): HardwareArbiter {
+    return this.services.hardware;
+  }
+
   constructor(private readonly options: NativeEngineOptions) {
-    this.outputs = new OutputDestinations({ handles: this.handles, automaticDirectory: options.automaticOutputDirectory });
-    this.memory = new MemoryArbiter(globalBudget(options.physicalMemory), options.now);
+    this.services = new HostServicesCore({
+      cacheDirectory: options.cacheDirectory,
+      automaticOutputDirectory: options.automaticOutputDirectory,
+      physicalMemory: options.physicalMemory,
+      ...(options.resolveAsset ? { resolveAsset: options.resolveAsset } : {}),
+      ...(options.now ? { now: options.now } : {})
+    });
     const make = (process: EngineProcess): EngineSupervisor => {
       const supervisor = new EngineSupervisor({
         process,
@@ -299,13 +303,11 @@ export class NativeEngine {
 
   private onEnded(launch: Launch, report: CrashReport | null): void {
     const { process } = launch;
-    this.handles.revokePort(launch.hostPort);
-    void this.outputs.abandonPort(launch.hostPort).then((n) => {
+    void this.services.endLaunch(process, launch.hostPort).then((n) => {
       if (n) this.options.log('info', `removed ${n} unfinished output(s) of the ${process} engine`);
     });
     for (const file of this.staged.get(launch.hostPort) ?? []) void unlink(file).catch(() => {});
     this.staged.delete(launch.hostPort);
-    this.hardware.releaseAll(process);
     const wasPlaying = this.memory.isPlaying;
     this.sendGrants(this.memory.exited(process));
     if (process === 'interactive' && wasPlaying) {
@@ -372,87 +374,10 @@ export class NativeEngine {
       request: (body, session) => {
         const current = launch();
         if (!current) return Promise.reject(new ProtocolError('internal', 'the engine launch ended'));
-        return this.serve(process, current, body, session);
+        return this.services.serve(process, current.hostPort, body, session);
       },
       event: (body, session) => this.onEvent(process, body, session)
     };
-  }
-
-  private async serve(process: EngineProcess, launch: Launch, body: Request, session: number | null): Promise<Response> {
-    switch (body.type) {
-      case 'mintHandle': {
-        if (!isSafeUint(body.session)) throw new ProtocolError('invalidMessage', 'a handle is minted for a session');
-        const { path: file, contentHash } = await this.pathFor(body.kind);
-        const handle = this.handles.mint({ kind: body.kind, session: body.session, port: launch.hostPort, path: file });
-        return { type: 'handle', handle, kind: body.kind, contentHash };
-      }
-      case 'resolveHandle': {
-        if (!isHandle(body.handle) || !isSafeUint(body.session)) throw new ProtocolError('invalidMessage', 'resolveHandle needs a handle and a session');
-        try {
-          return { type: 'handleResolved', ...this.handles.resolve(body.handle, body.session, launch.hostPort) };
-        } catch (error) {
-          if (error instanceof HandleRejected) throw new ProtocolError('capabilityRejected', error.message);
-          throw error;
-        }
-      }
-      case 'outputDestination': {
-        if (process !== 'job') throw new ProtocolError('capabilityRejected', 'Only the job engine writes outputs.');
-        try {
-          return { type: 'outputDestination', ...await this.outputs.destination(body, session ?? 0, launch.hostPort) };
-        } catch (error) {
-          throw outputFailure(error);
-        }
-      }
-      case 'commitOutput': {
-        if (process !== 'job') throw new ProtocolError('capabilityRejected', 'Only the job engine writes outputs.');
-        if (!isHandle(body.temporary) || !isId(body.job)) throw new ProtocolError('invalidMessage', 'commitOutput needs a job and a handle');
-        try {
-          return { type: 'outputCommitted', ...await this.outputs.commit(body, session ?? 0, launch.hostPort) };
-        } catch (error) {
-          throw outputFailure(error);
-        }
-      }
-      case 'requestLease': {
-        if (body.process !== process || !isSafeUint(body.wanted)) throw new ProtocolError('invalidMessage', 'a lease request names its own process and a byte count');
-        const grant = this.memory.request(body);
-        return { type: 'lease', ...grant.lease };
-      }
-      case 'hardwareSessions': {
-        try {
-          return { type: 'hardwareSessions', ...this.hardware.request(process, body) };
-        } catch (error) {
-          throw new ProtocolError('invalidMessage', error instanceof Error ? error.message : String(error));
-        }
-      }
-      case 'blenderStatus':
-      case 'blenderRender':
-      case 'blenderModel':
-        throw new ProtocolError('unsupported', 'Blender jobs from the new engine are not connected yet; the current engine runs Blender.');
-      default:
-        throw new ProtocolError('invalidMessage', `Engines do not send ${body.type} to the host.`);
-    }
-  }
-
-  private async pathFor(kind: CapabilityKind): Promise<{ path: string; contentHash: ContentHash | null }> {
-    switch (kind.kind) {
-      case 'cache': {
-        if (!CACHE_KINDS.includes(kind.cache)) throw new ProtocolError('invalidMessage', 'unknown cache kind');
-        const directory = path.join(this.options.cacheDirectory, CACHE_DIRS[kind.cache]);
-        await mkdir(directory, { recursive: true, mode: 0o700 });
-        return { path: directory, contentHash: null };
-      }
-      case 'mediaRead': {
-        if (!isId(kind.asset)) throw new ProtocolError('invalidMessage', 'invalid asset id');
-        const resolved = await this.options.resolveAsset?.(kind.asset);
-        if (!resolved) throw new ProtocolError('mediaOffline', 'The asset\'s file is not available.');
-        return resolved;
-      }
-      case 'outputWrite':
-        throw new ProtocolError('capabilityRejected', 'Output handles come from outputDestination.');
-      case 'projectStore':
-      case 'extensionBundle':
-        throw new ProtocolError('unsupported', 'Document host handles are served by the document host (Phase 3c).');
-    }
   }
 
   private onEvent(process: EngineProcess, body: Event, _session: number | null): void {
@@ -492,11 +417,4 @@ export class NativeEngine {
       for (const l of this.listeners) l.playback?.(false);
     }
   }
-}
-
-function outputFailure(error: unknown): Error {
-  if (error instanceof OutputError) return new ProtocolError(error.code, error.message);
-  if (error instanceof ProtocolError) return error;
-  const code = (error as NodeJS.ErrnoException)?.code;
-  return new ProtocolError('exportFailed', `The output could not be written${code ? ` (${code})` : ''}.`);
 }

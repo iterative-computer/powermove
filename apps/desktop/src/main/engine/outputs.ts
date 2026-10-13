@@ -55,7 +55,8 @@ export function candidateName(base: string, extension: string, attempt: number):
   const suffix = attempt ? ` (${attempt + 1})` : '';
   const tail = `${suffix}${extension ? `.${extension}` : ''}`;
   let trimmed = base;
-  while (Buffer.byteLength(trimmed) + Buffer.byteLength(tail) > NAME_MAX) trimmed = trimmed.slice(0, -1);
+  // Trim whole code points, never half of a surrogate pair.
+  while (Buffer.byteLength(trimmed) + Buffer.byteLength(tail) > NAME_MAX) trimmed = Array.from(trimmed).slice(0, -1).join('');
   return `${trimmed}${tail}`;
 }
 
