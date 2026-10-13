@@ -552,13 +552,25 @@ impl AudioDecoder {
     /// Positions the decoder so the next [`Self::read`] starts at program
     /// sample `index`.
     pub fn seek(&mut self, index: u64) -> Result<()> {
+        self.seek_with(index, false)
+    }
+
+    /// [`Self::seek`] that never continues the running decode: the samples
+    /// that follow depend only on the file and `index` (for lossless codecs
+    /// both are the same). Block caches use it so a block decodes the same
+    /// way whichever block was decoded before it.
+    pub fn seek_anchored(&mut self, index: u64) -> Result<()> {
+        self.seek_with(index, self.info.preroll > 0)
+    }
+
+    fn seek_with(&mut self, index: u64, anchored: bool) -> Result<()> {
         let index = index.min(i64::MAX as u64 / 4) as i64;
-        if index == self.position {
+        if index == self.position && !anchored {
             return Ok(());
         }
         let rate = self.info.sample_rate as i64;
         // Close ahead: decode forward, which keeps the sequential decode.
-        if index > self.position && index - self.position <= rate * 2 {
+        if !anchored && index > self.position && index - self.position <= rate * 2 {
             self.target = index;
             return self.skip_to_target();
         }
