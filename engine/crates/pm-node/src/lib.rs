@@ -21,6 +21,8 @@ mod node;
 #[cfg(target_os = "macos")]
 pub mod present;
 
+pub mod fonts;
+
 /// Parses `"interactive"` or `"job"`.
 pub fn parse_process(text: &str) -> Result<EngineProcess, String> {
     match text {
@@ -29,6 +31,11 @@ pub fn parse_process(text: &str) -> Result<EngineProcess, String> {
         other => Err(format!("unknown engine process {other:?}")),
     }
 }
+
+/// The peer kind of main's font port to the interactive engine. It is not a
+/// protocol peer: its messages go to [`fonts::FontService`], never to the
+/// engine's protocol state machine.
+pub const FONTS_PEER: &str = "fonts";
 
 /// Parses `"host"`, `"renderer"`, or `"peer"`.
 pub fn parse_peer(text: &str) -> Result<PeerKind, String> {
@@ -56,6 +63,10 @@ type PresenterStats = ();
 pub struct EngineHost {
     engine: Engine,
     presenter: Option<PresenterStats>,
+    process: EngineProcess,
+    /// The font service, created when main first attaches a font port.
+    fonts: Option<fonts::FontService>,
+    font_ports: std::collections::BTreeSet<u32>,
 }
 
 impl EngineHost {
@@ -85,7 +96,13 @@ impl EngineHost {
         }
         #[cfg(not(target_os = "macos"))]
         let _ = (sink, env);
-        Ok(Self { engine, presenter })
+        Ok(Self {
+            engine,
+            presenter,
+            process,
+            fonts: None,
+            font_ports: Default::default(),
+        })
     }
 
     /// The presenter's per-frame trace as JSON (S1 harness), emptied.
@@ -99,16 +116,53 @@ impl EngineHost {
     }
 
     pub fn attach(&mut self, port: u32, peer: &str) -> Result<Vec<Action>, String> {
+        if peer == FONTS_PEER {
+            return self.attach_fonts(port);
+        }
         Ok(self.engine.attach(PortId(port), parse_peer(peer)?))
     }
 
+    /// Main's font port: only the interactive engine hosts the registry.
+    /// The service is created on the first attach (on this thread, the
+    /// process's main thread) and kept for the launch, so a reconnecting
+    /// main keeps its project fonts and face ids.
+    fn attach_fonts(&mut self, port: u32) -> Result<Vec<Action>, String> {
+        if self.process != EngineProcess::Interactive {
+            return Err("only the interactive engine serves fonts".into());
+        }
+        if self.fonts.is_none() {
+            self.fonts = Some(fonts::FontService::new()?);
+        }
+        self.font_ports.insert(port);
+        Ok(Vec::new())
+    }
+
     pub fn detach(&mut self, port: u32) -> Vec<Action> {
+        if self.font_ports.remove(&port) {
+            return Vec::new();
+        }
         self.engine.detach(PortId(port))
     }
 
     pub fn receive(&mut self, port: u32, bytes: &[u8]) -> Vec<Action> {
+        if self.font_ports.contains(&port) {
+            let reply = match self.fonts.as_mut() {
+                Some(service) => service.handle(bytes),
+                None => return Vec::new(),
+            };
+            return vec![Action::Send {
+                port: PortId(port),
+                bytes: reply,
+            }];
+        }
         self.engine
             .receive(PortId(port), bytes, pm_engine::clock::host_now())
+    }
+
+    /// The font service, once main has attached a font port: the engine's
+    /// own text rendering lays text out and reads outlines through it.
+    pub fn fonts(&mut self) -> Option<&mut fonts::FontService> {
+        self.fonts.as_mut()
     }
 
     pub fn tick(&mut self) -> Vec<Action> {
@@ -125,6 +179,7 @@ impl EngineHost {
         let mut value = serde_json::to_value(self.status()).unwrap_or_default();
         if let Some(object) = value.as_object_mut() {
             object.insert("qos".into(), current_qos().into());
+            object.insert("fontPorts".into(), self.font_ports.len().into());
             #[cfg(target_os = "macos")]
             if let Some(stats) = &self.presenter {
                 let stats = stats.lock().unwrap_or_else(|e| e.into_inner());
