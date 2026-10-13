@@ -123,8 +123,10 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   let replacing = false;
   let current: any = PM.proj;
   let pendingReplace: 'resync' | 'diff' | null = null;
-  /** Whether this synchronous run already diffed inside a plain transaction. */
-  let diffedThisRun = false;
+  /** No transaction diff has run yet in this synchronous run. */
+  let runFresh = true;
+  /** A plain transaction announced a write without paths since its last diff. */
+  let transactionDirty = false;
 
   // ── tracking Proxy (development and test) ─────────────────────────────
   const tracker: Tracker | null = mode.proxy ? createTracker({
@@ -192,16 +194,35 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   PM.doc = doc;
   const held = new Map<string, PathPart[]>();
 
-  /** A write without a path: inside a scoped transaction its held paths, otherwise a structural diff.
-   *  The tracking Proxy does not replace it: writers announce writes made
-   *  through references the Proxy never handed out (a new layer from
-   *  `PM.mkLayer`, edited after insertion). */
+  /** A write without a path: inside a scoped transaction its held paths;
+   *  inside a plain one, nothing until a query (the commit hands over every
+   *  path it changed); otherwise a structural diff. The tracking Proxy does
+   *  not replace it: writers announce writes made through references the
+   *  Proxy never handed out (a new layer from `PM.mkLayer`, edited after insertion). */
   const unknownWrite = () => {
     if (!barrier || coveredDepth > 0) return;
     if (PM.hist?.scoped?.()) { if (held.size) barrier.touched([...held.values()]); return; }
+    if (PM.hist?.busy?.()) { transactionDirty = true; return; }
     held.clear();
     barrier.touchAll();
   };
+  /**
+   * Before a flush inside an open transaction: its writes reach the barrier
+   * at its commit, but code inside it may ask first (the pen tool between
+   * `begin` and its first `touch()`, a split that groups and selects). The
+   * first flush of each synchronous run, and the first after an announcement
+   * without paths, diffs what the transaction may have written: a plain
+   * transaction's open composition, a scoped one's tracked paths. Later
+   * flushes in the same run cost nothing (a drag asks many times per event).
+   */
+  function transactionWrites(): void {
+    if (!barrier || coveredDepth > 0 || !PM.hist?.busy?.()) return;
+    if (!runFresh && !transactionDirty) return;
+    transactionDirty = false;
+    if (runFresh) { runFresh = false; queueMicrotask(() => { runFresh = true; }); }
+    if (PM.hist?.scoped?.()) { if (held.size) barrier.touched([...held.values()]); }
+    else barrier.touchAll();
+  }
   const legacyTouch = PM.touch;
   PM.touch = (paths?: PathPart[][], canonical?: boolean) => {
     if (Array.isArray(paths)) {
@@ -289,15 +310,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       wasm = await instantiate(await loadModule());
       barrier = new DocumentBarrier(wasm, () => current, {
         onMismatch, revision: barrier?.revision ?? 0,
-        // A plain transaction's writes reach the barrier at its commit (or at a
-        // touch()); the first query of each synchronous run inside it diffs the
-        // open composition (once per run: a drag's many queries per event stay cheap).
-        unannounced: () => {
-          if (diffedThisRun || !PM.hist?.busy?.() || PM.hist?.scoped?.() || coveredDepth > 0) return false;
-          diffedThisRun = true;
-          queueMicrotask(() => { diffedThisRun = false; });
-          return true;
-        },
+        beforeFlush: transactionWrites,
       });
       barrier.subscribe(batch => subscribers.forEach(fn => { try { fn(batch); } catch (error) { console.error(error); } }));
       api.reset();

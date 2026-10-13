@@ -63,11 +63,20 @@ it.skipIf(!process.env.PM_WASM_BENCH || !existsSync(MODULE))('S5 targets through
     }
     structural[kind] = { apply: stats(applies), flush: stats(flushes) };
   }
+  // A structural diff that finds nothing (what a touch() without paths, or a
+  // query inside a plain transaction, costs on this project).
+  flushes.length = 0;
+  for (let i = 0; i < 50; i++) { barrier.touchAll(); flush(); }
+  const emptyStructuralDiff = stats(flushes);
+  // evP inside a plain transaction (one structural diff per synchronous run).
+  PM.hist.begin('Bench');
+  const inTransactionNs = timeEvP(animated, 20);
+  PM.hist.cancel();
   const check = doc.check('bench')!;
   const heap = wasm.heap();
   console.log(JSON.stringify({
     layers: layers.length, channels: channels.length, animated: animated.length, loadMs,
-    evP: { allCachedNs: evPAllNs, animatedCachedNs: evPAnimatedNs }, property, structural,
+    evP: { allCachedNs: evPAllNs, animatedCachedNs: evPAnimatedNs, inPlainTransactionNs: inTransactionNs }, property, structural, emptyStructuralDiff,
     consistency: { ok: check.ok, ms: check.ms }, memory: { heapLiveMB: heap.live / 1e6, heapPeakMB: heap.peak / 1e6, linearMB: heap.memory / 1e6 },
   }, null, 2));
   expect(check.ok).toBe(true);

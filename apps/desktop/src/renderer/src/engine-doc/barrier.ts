@@ -151,20 +151,20 @@ export class DocumentBarrier {
   /** Set while a flush runs, so reads of the document during it are not writes. */
   flushing = false;
   /**
-   * Whether writes may be waiting that nobody announced yet: a plain history
-   * transaction is open (its commit hands the paths over, but code inside it
-   * may query before that). A flush then diffs the open composition too.
+   * Called as a flush starts, before it looks at what is dirty: the owner
+   * marks writes that may be waiting unannounced (an open history
+   * transaction's, which its commit hands over only at the end).
    */
-  private unannounced: () => boolean;
+  private beforeFlush: () => void;
 
   constructor(
     public wasm: PmWasm,
     /** The live document (raw, never the tracking Proxy). */
     private project: () => any,
-    options: { onMismatch?: (result: ConsistencyResult) => void; revision?: number; unannounced?: () => boolean } = {},
+    options: { onMismatch?: (result: ConsistencyResult) => void; revision?: number; beforeFlush?: () => void } = {},
   ) {
     this.onMismatch = options.onMismatch ?? (() => {});
-    this.unannounced = options.unannounced ?? (() => false);
+    this.beforeFlush = options.beforeFlush ?? (() => {});
     // A replacement instance (after a trap) continues the revisions, so the
     // stream's receivers never see them move backward (contract 5, invariant 1).
     this.revision = Math.max(0, Math.floor(options.revision ?? 0));
@@ -255,7 +255,7 @@ export class DocumentBarrier {
   /** Flushes dirty paths into pm-wasm (section 6, item 2: before every query). */
   flush(): void {
     if (this.flushing) return;
-    if (!this.structural && !this.resyncPending && this.shadow !== undefined && this.unannounced()) this.touchAll();
+    if (this.shadow !== undefined) this.beforeFlush();
     if (!this.pending) return;
     this.flushing = true;
     const started = performance.now();
