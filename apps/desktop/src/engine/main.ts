@@ -8,6 +8,8 @@
  * Panel and capture tools need pixels and a real UI; the host routes those
  * to a live tab and this engine never sees them.
  */
+import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { Window } from 'happy-dom';
 import { WebSocket } from 'ws';
 
@@ -58,6 +60,30 @@ function memoryStore(): Record<string, unknown> {
   };
 }
 
+/** Where the headless host finds pm-wasm: POWERMOVE_PM_WASM, else the
+ *  renderer build next to this bundle (out/renderer/engine/pm_wasm.wasm). */
+export function pmWasmPath(): string {
+  return process.env['POWERMOVE_PM_WASM'] ?? fileURLToPath(new URL('../renderer/engine/pm_wasm.wasm', import.meta.url));
+}
+
+/** Installs the document mirror and native evaluator for the headless host. */
+export async function installHeadlessEngineDoc(PM: Record<string, any>, log: (line: string) => void): Promise<{ ready: boolean; mode: string }> {
+  const { installEngineDoc } = await import('../renderer/src/engine-doc/install');
+  const { parseMode } = await import('../renderer/src/engine-doc/flags');
+  const mode = parseMode(process.env['POWERMOVE_NATIVE_EVALUATOR'] ?? 'on');
+  const path = pmWasmPath();
+  if (mode.evaluator && !existsSync(path)) log(`[engine] pm-wasm not found at ${path}; the legacy evaluator answers`);
+  const doc = installEngineDoc(PM, {
+    mode: mode.evaluator && existsSync(path) ? mode : parseMode('off'),
+    loadModule: () => WebAssembly.compile(readFileSync(path)),
+    sink: (line) => log(`[engine] ${line}`),
+    headless: true,
+  });
+  const ready = await doc.whenReady;
+  log(`[engine] document mirror: ${ready ? `pm-wasm (${mode.name})` : 'legacy evaluator'}`);
+  return { ready, mode: mode.name };
+}
+
 export async function startEngine(options: EngineOptions): Promise<{ close(): void }> {
   const log = options.log ?? ((line: string) => console.log(line));
   installDom();
@@ -83,7 +109,12 @@ export async function startEngine(options: EngineOptions): Promise<{ close(): vo
   diag.install(PM as never); util.install(PM as never);
   PM['store'] = memoryStore();
   void kernel.installKernel(PM as never);
-  for (const step of [uiState, memory, fonts, easing, model, selection, anim, history, library, projects, editing, capabilities, workspace, harness]) step.install(PM as never);
+  for (const step of [uiState, memory, fonts, easing, model, selection, anim, history]) step.install(PM as never);
+  /* The document on pm-wasm (docs/rust-engine.md, section 26, Phase 1): the
+     mirror, the write barrier, and the native evaluator, on by default here.
+     With no renderer, 2D bounds and picks come from pm-wasm alone. */
+  await installHeadlessEngineDoc(PM, log);
+  for (const step of [library, projects, editing, capabilities, workspace, harness]) step.install(PM as never);
   if (!onRequest) throw new Error('engine: the agent tool harness did not register');
   PM['proj'] = PM['mkProject']({ name: 'Untitled' });
   PM['isHomeProject'] = () => !PM['proj']?.id;

@@ -44,6 +44,9 @@ export interface EngineDocOptions {
   sink?: Sink;
   /** Audit interval in ms (test modes). */
   auditMs?: number;
+  /** The headless document host: no renderer, so 2D bounds and picks
+   *  (`PM.GL`) come from pm-wasm alone. */
+  headless?: boolean;
 }
 
 export interface DocApi {
@@ -172,6 +175,13 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   // ── the native evaluator ──────────────────────────────────────────────
   const dual = mode.dual ? new DualAnswers(m => reporter.emit({ type: 'dual', ...m })) : null;
   const legacy = legacyImplementations(PM);
+  if (options.headless && !PM.GL?.bounds) {
+    // Nothing renders here: pm-wasm answers, and what it cannot (3D, fonts
+    // the host never served) is null, as an unrenderable layer is.
+    PM.GL = { ...(PM.GL || {}), headless: true,
+      bounds: (L: any, T: any) => api.bounds(L, T),
+      pick: (x: number, y: number, T: number, o?: any) => api.pick(x, y, T, o) };
+  }
   const api = new NativeApi(PM, () => (state.ready ? wasm : null), () => barrier, unwrap, legacy, dual);
   const auditor = mode.audit ? new ShadowAuditor(() => (state.ready ? barrier : null), f => reporter.emit({ type: 'audit', kind: f.kind, revision: f.revision, paths: f.paths, detail: f.detail })) : null;
 
@@ -295,9 +305,9 @@ function legacyImplementations(PM: PMRegistry): Record<string, any> {
     groupSpan: (...a: any[]) => PM.groupSpan(...a),
     expandGroups: (...a: any[]) => PM.expandGroups(...a),
     transformRoots: (...a: any[]) => PM.transformRoots(...a),
-    bounds: (...a: any[]) => PM.GL.bounds(...a),
-    pick: (...a: any[]) => PM.GL.pick(...a),
-    textLayout: (...a: any[]) => PM.textCaretLayout(...a),
+    bounds: (...a: any[]) => (PM.GL?.headless ? null : PM.GL.bounds(...a)),
+    pick: (...a: any[]) => (PM.GL?.headless ? null : PM.GL.pick(...a)),
+    textLayout: (...a: any[]) => (PM.textCaretLayout ? PM.textCaretLayout(...a) : null),
     local3D: (L: any, T: number) => local3D(PM, L, T),
     parent3D: (L: any, T: number, ...rest: any[]) => (parent3D as any)(PM, L, T, ...rest),
     world3D: (L: any, T: number, positioning?: boolean) => world3D(PM, L, T, positioning),
