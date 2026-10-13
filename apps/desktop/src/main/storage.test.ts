@@ -13,8 +13,10 @@ import {
   installQuitFlush,
   registerStoreIpc,
   type Store,
+  type StoreChannel,
   type StoreFileSystem
 } from './storage';
+import type { StoreReply } from './store-engine';
 
 const temporaryDirectories: string[] = [];
 
@@ -101,6 +103,51 @@ describe('file store', () => {
     await store.flushAll();
     const reopened = createStore(directory); await reopened.load();
     expect(reopened.snapshot()['projectState.demo']).toEqual({ history, time: 3 });
+  });
+
+  it('answers a read right after a metadata-only session write on this thread', async () => {
+    const directory = await temporaryDirectory();
+    const history = { version: 1, index: 0, entries: [{ label: 'Edit', forward: [], backward: [] }] };
+    await fs.writeFile(path.join(directory, 'projectState.stored.json'), JSON.stringify({ history, time: 1 }));
+    const store = createStore(directory);
+    await store.load();
+    // The `powermove serve` host reads synchronously in the same turn as the
+    // write; the stored history must already be known, not read from disk.
+    store.set('projectState.stored', { time: 2 });
+    expect(JSON.parse(store.getSerialized!('projectState.stored')!)).toEqual({ history, time: 2 });
+    store.set('projectState.fresh', { ok: true });
+    expect(JSON.parse(store.getSerialized!('projectState.fresh')!)).toEqual({ ok: true });
+    await store.flushAll();
+    const reopened = createStore(directory); await reopened.load();
+    expect(reopened.get!('projectState.stored')).toEqual({ history, time: 2 });
+    expect(reopened.get!('projectState.fresh')).toEqual({ ok: true });
+  });
+
+  it('refuses a read it cannot answer on this thread instead of returning an older value', async () => {
+    const directory = await temporaryDirectory();
+    const history = { version: 1, index: 0, entries: [{ label: 'Edit', forward: [], backward: [] }] };
+    await fs.writeFile(path.join(directory, 'projectState.stored.json'), JSON.stringify({ history, time: 1 }));
+    let failRead = true;
+    const readFile = (async (...args: Parameters<typeof fs.readFile>) => {
+      if (failRead && String(args[0]).endsWith('projectState.stored.json')) {
+        failRead = false;
+        throw Object.assign(new Error('Busy'), { code: 'EBUSY' });
+      }
+      return fs.readFile(...args);
+    }) as StoreFileSystem['readFile'];
+    const store = createStore(directory, { fs: fileSystemWith({ readFile }) });
+    const errors: string[] = [];
+    store.onError(event => errors.push(event.error));
+    await store.load();
+    expect(errors.some(error => error.includes('could not be read'))).toBe(true);
+    // The session was not read at load, so its history must come from disk
+    // before the write can be published; a read in the meantime is refused.
+    const written = store.set('projectState.stored', { time: 2 });
+    expect(() => store.getSerialized!('projectState.stored')).toThrow(/pending write/);
+    await written;
+    expect(JSON.parse(store.getSerialized!('projectState.stored')!)).toEqual({ history, time: 2 });
+    await store.flushAll();
+    expect(JSON.parse(await fs.readFile(path.join(directory, 'projectState.stored.json'), 'utf8')).time).toBe(2);
   });
 
   it('round-trips set, snapshot, delete, and load without sharing references', async () => {
@@ -289,10 +336,72 @@ describe('file store', () => {
     const directory = await temporaryDirectory();
     const store = createStore(directory);
     await store.load();
+    const errors: Array<{ key: string; error: string }> = [];
+    store.onError(event => errors.push(event));
     const tooLarge = 'x'.repeat(LIMITS.storeValueBytes);
 
-    expect(() => store.set('theme', tooLarge)).toThrow(IpcValidationError);
+    const refused = store.set('theme', tooLarge);
+    // A synchronous read never shows the refused value, even before the engine answers.
     expect(store.snapshot()).toEqual({});
+    await expect(refused).rejects.toThrow(IpcValidationError);
+    // Fewer characters than the limit, more UTF-8 bytes: only the engine can tell.
+    await expect(store.setSerialized!('theme', JSON.stringify('é'.repeat(LIMITS.storeValueBytes / 2)))).rejects.toThrow('serialized value exceeds its size limit');
+    expect(() => store.setSerialized!('theme', 'x'.repeat(LIMITS.storeValueBytes + 1))).toThrow(IpcValidationError);
+    await expect(store.setSerialized!('theme', '{"truncated":')).rejects.toThrow('invalid JSON');
+    expect(store.snapshot()).toEqual({});
+    expect(errors.map(event => event.key)).toEqual(['theme', 'theme', 'theme']);
+    await store.flushAll();
+    await expect(fs.stat(path.join(directory, 'theme.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('refuses values JSON cannot represent before they leave the calling thread', async () => {
+    const store = createStore(await temporaryDirectory());
+    await store.load();
+    expect(() => store.set('theme', { render: () => 1 })).toThrow(IpcValidationError);
+    await expect(store.set('theme', undefined)).rejects.toThrow('value is not JSON-serialisable');
+    expect(store.snapshot()).toEqual({});
+  });
+
+  it('reports writes as failed, without throwing, once the storage worker is gone', async () => {
+    let alive = true;
+    let deliver!: (reply: StoreReply) => void;
+    const channel: StoreChannel = {
+      post(request) {
+        if (!alive) throw new Error('The persistence worker stopped.');
+        const reply = request.op === 'init' ? { type: 'ready', id: request.id }
+          : request.op === 'load' ? { type: 'loaded', id: request.id, entries: [] } : { type: 'flushed', id: request.id };
+        queueMicrotask(() => deliver(reply as StoreReply));
+      },
+      onReply(listener) { deliver = listener; },
+      waitSync: () => true
+    };
+    const store = createStore(await temporaryDirectory(), { thread: { storeChannel: () => channel } });
+    await store.load();
+    alive = false;
+    const errors: Array<{ key: string; error: string }> = [];
+    store.onError(event => errors.push(event));
+    await expect(store.set('theme', 'dark')).rejects.toThrow('stopped');
+    await expect(store.delete('theme')).rejects.toThrow('stopped');
+    await expect(store.flushAll()).rejects.toThrow('stopped');
+    expect(errors).toEqual([{ key: 'theme', error: 'The persistence worker stopped.' }, { key: 'theme', error: 'The persistence worker stopped.' }]);
+    expect(store.snapshot()).toEqual({});
+  });
+
+  it('answers synchronous reads with the newest accepted value while writes are pending', async () => {
+    const directory = await temporaryDirectory();
+    const store = createStore(directory, { writeDelayMs: 10_000 });
+    await store.load();
+    void store.set('projects', [{ id: 'one' }]);
+    void store.setSerialized!('project.one', JSON.stringify({ v: '1', proj: { id: 'one', layers: [] } }));
+    void store.delete('theme');
+    expect(store.getSerialized!('projects')).toBe('[{"id":"one"}]');
+    expect(JSON.parse(store.getEncodedSerialized!('project.one')!)).toEqual({ v: '1', proj: { id: 'one', layers: [] } });
+    expect(JSON.parse(store.bootstrapSerialized!().__powermoveLazyKeys!)).toEqual(['project.one']);
+    void store.delete('project.one');
+    expect(JSON.parse(store.bootstrapSerialized!().__powermoveLazyKeys!)).toEqual([]);
+    expect(store.getEncodedSerialized!('project.one')).toBeNull();
+    await store.flushAll();
+    expect(await fs.readdir(directory)).toEqual(['projects.json']);
   });
 
   it('round-trips the 59351487-byte project reported by the editor', async () => {
@@ -488,7 +597,7 @@ describe('store IPC and quit integration', () => {
     listeners.get(IPC.storeSet)?.(event, { key: 'project.P1', value: {} });
     listeners.get(IPC.storeDelete)?.(event, { key: 'projectJournal.P1' });
     expect(broadcastChange).not.toHaveBeenCalled();
-    await Promise.resolve();
+    await nextTurn();
     expect(broadcastChange).toHaveBeenCalledTimes(1);
     expect(broadcastChange).toHaveBeenCalledWith(
       ['projects', 'project.P1', 'projectJournal.P1'],
@@ -497,7 +606,7 @@ describe('store IPC and quit integration', () => {
 
     // An untrusted write is not applied, so nothing is announced either.
     listeners.get(IPC.storeSet)?.({ trusted: false, sender }, { key: 'projects', value: [] });
-    await Promise.resolve();
+    await nextTurn();
     expect(broadcastChange).toHaveBeenCalledTimes(1);
 
     // Refilling one invalidated key, and nothing at all for an untrusted asker.
@@ -508,6 +617,32 @@ describe('store IPC and quit integration', () => {
     const untrusted = { trusted: false, sender, returnValue: undefined as unknown };
     listeners.get(IPC.storeGetSync)?.(untrusted, { key: 'projects' });
     expect(untrusted.returnValue).toBeNull();
+  });
+
+  it('announces a write only once it is encoded, and reports a refused one to its sender', async () => {
+    const listeners = new Map<string, (...args: any[]) => unknown>();
+    const handlers = new Map<string, (...args: any[]) => unknown>();
+    const ipcMain = {
+      handle: (channel: string, handler: (...args: any[]) => unknown) => handlers.set(channel, handler),
+      on: (channel: string, listener: (...args: any[]) => unknown) => { listeners.set(channel, listener); return ipcMain; }
+    };
+    let accept!: () => void;
+    const set = vi.fn((key: string) => key === 'theme'
+      ? Promise.reject(new IpcValidationError(IPC.storeSet, 'serialised value is too large'))
+      : new Promise<void>(resolve => { accept = resolve; }));
+    const broadcastChange = vi.fn();
+    registerStoreIpc(ipcMain as unknown as Pick<IpcMain, 'handle' | 'on'>, storeStub({ set, setSerialized: set }), { isTrustedSender: () => true, broadcastChange });
+    const sender = { send: vi.fn(), isDestroyed: () => false };
+    listeners.get(IPC.storeSet)?.({ sender }, { key: 'projects', value: [] });
+    listeners.get(IPC.storeSet)?.({ sender }, { key: 'theme', value: 'x' });
+    await nextTurn();
+    expect(broadcastChange).not.toHaveBeenCalled();
+    expect(sender.send).toHaveBeenCalledWith(IPC.storeError, { key: 'theme', error: `${IPC.storeSet}: serialised value is too large` });
+    accept();
+    await nextTurn();
+    expect(broadcastChange).toHaveBeenCalledWith(['projects'], sender);
+    await expect(handlers.get(IPC.storeSetSerialized)?.({ sender }, { key: 'theme', serialized: '"x"' })).rejects.toThrow('serialised value is too large');
+    expect(broadcastChange).toHaveBeenCalledTimes(1);
   });
 
   it('prevents the first quit until flushing completes, then quits once more', async () => {
@@ -538,6 +673,12 @@ describe('store IPC and quit integration', () => {
     prepared();await vi.waitFor(()=>expect(app.quit).toHaveBeenCalledOnce());expect(flushAll).toHaveBeenCalledOnce();expect(barrier.isPrepared()).toBe(true);
   });
 });
+
+/** Promise callbacks, then the coalesced announcement (setImmediate). */
+async function nextTurn(): Promise<void> {
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+}
 
 function fileSystemWith(overrides: Partial<StoreFileSystem>): StoreFileSystem {
   return { ...fs, ...overrides } as StoreFileSystem;

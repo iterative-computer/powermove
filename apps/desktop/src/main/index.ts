@@ -80,6 +80,7 @@ import { CONTENT_SECURITY_POLICY, SANDBOX_CONTENT_SECURITY_POLICY, extensionSand
 import { SANDBOX_DOCUMENT, isSandboxHost, sandboxDocumentId, sandboxHost } from '../shared/sandbox-origin';
 import { EXTENSION_ID } from '../shared/extensions';
 import { createStore, installQuitFlush, registerStoreIpc, type Store } from './storage';
+import { PersistenceThread } from './persistence-thread';
 import { registerThemeIpc } from './theme';
 import { backgroundTesting, backgroundWindowOptions } from './background-testing';
 import { EditorWindows, restorableSessions, windowUnderTabDrop } from './windows';
@@ -901,7 +902,12 @@ if (!hasSingleInstanceLock) {
     // Boot barrier: the legacy renderer reads PM.store synchronously while its
     // scripts load, so the store must be in memory before the window exists.
     configureRuntimeUpdates({ root: path.join(app.getPath('userData'), 'runtimes'), appVersion: app.getVersion() });
-    const store = createStore(path.join(app.getPath('userData'), 'store'));
+    // Autosave and Save serialization run on this worker thread, so encoding a
+    // large project or undo history never stalls input and IPC on main.
+    const persistence = new PersistenceThread(path.join(__dirname, 'persistence-worker.js'), {
+      onFault: (detail) => console.error(detail)
+    });
+    const store = createStore(path.join(app.getPath('userData'), 'store'), { thread: persistence });
     await store.load();
     registerStoreIpc(ipcMain, store, {
       isTrustedSender,
@@ -1042,7 +1048,9 @@ if (!hasSingleInstanceLock) {
     }
 
     const ctx = { isTrustedSender, isTrustedSenderContents };
-    projects = new ProjectFiles(path.join(app.getPath('userData'), 'project-files.json'), path.join(app.getPath('userData'), 'backups'));
+    projects = new ProjectFiles(path.join(app.getPath('userData'), 'project-files.json'), path.join(app.getPath('userData'), 'backups'), {
+      validateDocument: persistence.validateProjectDocument
+    });
     registerSaveIpc(ipcMain, { ...ctx, projects });
     registerProjectOpenPathIpc(ipcMain, { ...ctx, projects });
     registerCaptureIpc(ipcMain, ctx);

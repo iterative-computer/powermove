@@ -3,6 +3,7 @@ import { chmod, open, unlink, type FileHandle } from 'node:fs/promises';
 import { INCREMENTAL_MAGIC, isIncrementalProject, projectFooter, readIncrementalIndex, type IncrementalMedia, type ProjectIndex, type ProjectRecord, type SaveMedia } from '../shared/project-incremental';
 import { checkVersion, copySnapshot, hashHandle, readExactly, syncFile, temporarySibling, type FileVersion } from './durable-file';
 import { FILE_CHUNK_BYTES } from './file-upload';
+import { validateProjectDocument, type ProjectDocumentValidator } from './project-document';
 
 type Incoming = { id: string | null; length: number; received: number; offset: number; digest: Hash; source?: SaveMedia };
 export const nativeHash = async (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
@@ -32,14 +33,17 @@ export class ProjectSave {
   private ended = false;
   private failed = false;
   private readonly temporary: string;
-  private constructor(readonly destination: string, private commit: (temporary: string, hash: string) => Promise<string>, private release: () => void) {
+  private constructor(readonly destination: string, private commit: (temporary: string, hash: string) => Promise<string>, private release: () => void,
+    private readonly validate: ProjectDocumentValidator) {
     this.temporary = temporarySibling(destination);
   }
+  /** `validate` checks the received document; the desktop runs it on the persistence worker thread. */
   static async create(destination: string, previous: FileVersion | undefined, media: SaveMedia[], documentBytes: number,
-    commit: (temporary: string, hash: string) => Promise<string>, release: () => void, reusePrevious = true): Promise<ProjectSave> {
+    commit: (temporary: string, hash: string) => Promise<string>, release: () => void, reusePrevious = true,
+    validate: ProjectDocumentValidator = validateProjectDocument): Promise<ProjectSave> {
     validateSaveMedia(media);
     if (!Number.isSafeInteger(documentBytes) || documentBytes < 2 || documentBytes > 0xffffffff) throw new Error('Invalid project document size');
-    const save = new ProjectSave(destination, commit, release);
+    const save = new ProjectSave(destination, commit, release, validate);
     let source: FileHandle | undefined;
     try {
       let index: ProjectIndex | undefined;
@@ -123,9 +127,9 @@ export class ProjectSave {
     this.finishRecords();
     if (this.incoming.length || !this.document) throw new Error('The project save is incomplete.');
     const work = (async () => {
-      const document = JSON.parse((await readExactly(this.handle, this.document!.offset, this.document!.length)).toString('utf8'));
-      const project = document?.proj || document;
-      if (!project || !Array.isArray(project.layers) || !Number.isFinite(project.w) || !Number.isFinite(project.h)) throw new Error('This is not a Powermove project.');
+      // Parsing the document (and its undo history) is the expensive part of a
+      // save; it reads the transaction file's bytes back off this thread.
+      await this.validate(this.temporary, this.document!.offset, this.document!.length);
       const index: ProjectIndex = { version: 4, document: this.document!, media: this.records };
       const bytes = Buffer.from(JSON.stringify(index));
       const footer = projectFooter(this.offset, bytes.length, await nativeHash(bytes));
