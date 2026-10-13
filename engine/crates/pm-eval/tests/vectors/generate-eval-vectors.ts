@@ -16,6 +16,8 @@
  *
  * Larger local runs: PM_EVAL_SCALE=10 PM_EVAL_OUT=/tmp/eval.json, then
  * PM_EVAL_VECTORS=/tmp/eval.json cargo test -p pm-eval --test ts_parity.
+ * PM_EVAL_SEED=<integer> draws another set of random cases (the default seed
+ * writes the checked-in file).
  *
  * Channel addresses are written as `address` (a member named `key` with a
  * dotted value trips the secret scanner's generic-api-key rule).
@@ -40,7 +42,7 @@ const SCALE = Number(process.env.PM_EVAL_SCALE ?? 1);
 const OUT = process.env.PM_EVAL_OUT ?? new URL('./eval-vectors.json', import.meta.url).pathname;
 
 /* ── deterministic randomness ───────────────────────────────────────────── */
-let seed = 0x5eed1234;
+let seed = Number(process.env.PM_EVAL_SEED ?? 0x5eed1234);
 function rand(): number {
   seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
   let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
