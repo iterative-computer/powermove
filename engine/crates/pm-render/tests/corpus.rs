@@ -10,7 +10,8 @@
 //! interpreted as it was encoded (BT.709 coefficients, straight alpha; see
 //! below).
 //!
-//! `PM_ENGINE_CORPUS` picks a capture (default: the newest `v1-*`);
+//! `PM_ENGINE_CORPUS` picks captures (comma-separated; default: the newest
+//! `v1-*` and the newest `render-*`);
 //! `PM_RENDER_ONLY` limits to project names with a prefix;
 //! `PM_RENDER_DIFFS=<dir>` writes engine and reference PNGs of failures there.
 
@@ -23,10 +24,11 @@ use support::*;
 
 #[test]
 fn corpus_render_parity() {
-    let Some(capture) = corpus_dir() else {
+    let captures = corpus_dirs();
+    if captures.is_empty() {
         eprintln!("no parity corpus capture found; set PM_ENGINE_CORPUS to run this comparison");
         return;
-    };
+    }
     let only = std::env::var("PM_RENDER_ONLY").ok();
     let diffs = std::env::var("PM_RENDER_DIFFS")
         .ok()
@@ -35,7 +37,10 @@ fn corpus_render_parity() {
     let mut compared = 0;
     let mut failed = Vec::new();
     let mut skipped = Vec::new();
-    for dir in projects(&capture) {
+    for (capture, dir) in captures
+        .iter()
+        .flat_map(|c| projects(c).into_iter().map(move |d| (c.clone(), d)))
+    {
         let p = load_project(&capture, &dir);
         if only.as_deref().is_some_and(|o| !p.name.starts_with(o)) {
             continue;
@@ -159,6 +164,33 @@ fn corpus_render_parity() {
                     }
                 }
                 continue;
+            }
+            // Transparent captures (`renderToPixels(…, {transparent: true})`):
+            // premultiplied float values, section 25's alpha class (within
+            // 1 CV of the reference).
+            if let Some(float) = &s.float {
+                let mut request = request;
+                request.background = false;
+                let frame = renderer
+                    .render(
+                        &p.document,
+                        &p.composition,
+                        ticks(s.time),
+                        &request,
+                        &p.resolver,
+                    )
+                    .expect("transparent render");
+                let ours = renderer.read_rgba(&frame).unwrap();
+                let reference = read_float(float);
+                let max = float_max_cv(&ours, &reference);
+                let line = format!(
+                    "{:<40} t={:<6} transparent float  max {max:.4} CV",
+                    p.name, s.time
+                );
+                eprintln!("{line}");
+                if max > 1.0 {
+                    failed.push(line);
+                }
             }
             let d = Diff::of(&ours, &reference);
             compared += 1;

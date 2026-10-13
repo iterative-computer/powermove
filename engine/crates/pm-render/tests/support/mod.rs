@@ -16,11 +16,8 @@ pub fn repo_root() -> PathBuf {
         .unwrap()
 }
 
-/// The newest `v1-*` capture, or `PM_ENGINE_CORPUS`.
-pub fn corpus_dir() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("PM_ENGINE_CORPUS") {
-        return Some(PathBuf::from(p));
-    }
+/// The newest capture whose id starts with `prefix`.
+pub fn newest_capture(prefix: &str) -> Option<PathBuf> {
     let base = dirs_home()?.join("Library/Application Support/Powermove Engine Corpus");
     let mut caps: Vec<PathBuf> = std::fs::read_dir(&base)
         .ok()?
@@ -28,11 +25,24 @@ pub fn corpus_dir() -> Option<PathBuf> {
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("v1-"))
+                .is_some_and(|n| n.starts_with(prefix))
         })
         .collect();
     caps.sort();
     caps.pop()
+}
+
+/// The captures to compare against: `PM_ENGINE_CORPUS` (comma-separated),
+/// or the newest `v1-*` corpus capture and the newest `render-*` capture
+/// (the render parity cases, `engine/corpus/src/projects/render.ts`).
+pub fn corpus_dirs() -> Vec<PathBuf> {
+    if let Ok(p) = std::env::var("PM_ENGINE_CORPUS") {
+        return p.split(',').map(PathBuf::from).collect();
+    }
+    ["v1-", "render-"]
+        .iter()
+        .filter_map(|p| newest_capture(p))
+        .collect()
 }
 
 fn dirs_home() -> Option<PathBuf> {
@@ -130,8 +140,12 @@ pub fn load_project(capture: &Path, dir: &Path) -> Project {
                 width: number(member(s, "width")).unwrap() as u32,
                 height: number(member(s, "height")).unwrap() as u32,
                 png: capture.join(png),
-                float: string(member(s, "float").and_then(|p| member(p, "file")))
-                    .map(|f| capture.join(f)),
+                float: string(
+                    member(s, "float")
+                        .and_then(|p| member(p, "data"))
+                        .and_then(|p| member(p, "file")),
+                )
+                .map(|f| capture.join(f)),
             });
         }
     }
@@ -289,4 +303,22 @@ pub fn masked_max(a: &[u8], b: &[u8], mask: &[bool]) -> (u8, usize) {
         }
     }
     (max, n)
+}
+
+/// A capture's float frame (`.rgba32f`, little-endian f32 RGBA, top-down).
+pub fn read_float(path: &Path) -> Vec<f32> {
+    let bytes = std::fs::read(path).unwrap();
+    bytes
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect()
+}
+
+/// The largest difference between two float frames, in 8-bit code values.
+pub fn float_max_cv(a: &[f32], b: &[f32]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (f64::from(*x) - f64::from(*y)).abs() * 255.0)
+        .fold(0.0, f64::max)
 }
