@@ -5,6 +5,8 @@
 //! - [`device`]: the engine's Metal device and its features;
 //! - [`target`]: working render targets (`rgba16float`, `rgba32float`) and
 //!   their pool;
+//! - `glsl` (feature `glsl`): the GLSL ES pipeline to naga IR (three.js
+//!   programs, amendment 11);
 //! - [`readback`]: texture readback for tests, captures, and the CPU
 //!   encoder-input reference.
 //!
@@ -20,6 +22,8 @@
 pub mod decode_in;
 
 pub mod device;
+#[cfg(feature = "glsl")]
+pub mod glsl;
 pub mod readback;
 pub mod target;
 
