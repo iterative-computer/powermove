@@ -392,7 +392,11 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     if (payload.uploadId !== undefined) {
       const upload = uploads.get(event.sender);
       if (!upload || upload.disposing || payload.uploadId !== upload.id) throw new Error('The save upload is incomplete.');
-      stream = (await upload.ready).claim();
+      const staged = await upload.ready;
+      // A busy response must leave the upload retryable and its idle cleanup
+      // running. Claiming it first consumes the spool and cancels that timer.
+      if (pending.has(event.sender)) return { ok: false, cancelled: false, error: 'A save is already in progress.' };
+      stream = staged.claim();
       clearTimeout(upload.timer);
     }
     if (!stream && !(data instanceof Uint8Array)) {
