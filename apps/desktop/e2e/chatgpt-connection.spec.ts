@@ -97,7 +97,7 @@ test('large images and files cross the real renderer-to-main agent boundary', as
     const result = await session.page.evaluate(async () => {
       const image = new Uint8Array(4 * 1024 * 1024 + 1);
       image.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-      return await (window as any).powermove.codex.run({
+      return await (window as any).__powermoveTestBridge.codex.run({
         id: 'large-attachment-run',
         mode: 'autonomous',
         prompt: 'Use the attached references.',
@@ -149,7 +149,7 @@ test('Claude subscription status and structured runs cross the real hidden app b
     await expect(page.locator('.agent-modelbar select[aria-label="Model"]')).toHaveValue('sonnet');
     await expect(page.locator('[data-agent-panel] [aria-label="Message composer"]')).toBeVisible();
 
-    const result = await page.evaluate(async () => await (window as any).powermove.codex.run({
+    const result = await page.evaluate(async () => await (window as any).__powermoveTestBridge.codex.run({
       id: 'claude-hidden-run',
       provider: 'claude',
       mode: 'editor',

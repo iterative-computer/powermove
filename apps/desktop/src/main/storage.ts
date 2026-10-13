@@ -6,20 +6,22 @@ import type { App, IpcMain, IpcMainEvent, IpcMainInvokeEvent } from 'electron';
 import { IpcValidationError, isRecord } from '../shared/guards';
 import {
   IPC,
-  LIMITS,
   type StoreDeleteRequest,
   type StoreErrorEvent,
   type StoreSetRequest,
   type StoreSnapshot
 } from '../shared/ipc';
 import { parseStoreKey, storeFileName } from '../shared/store-keys';
-import { HistoryRecords, isHistoryDictionary, packStoredHistory, unpackStoredHistory } from '../shared/history-memory';
+import { unpackStoredHistory } from '../shared/history-memory';
+import { StoreEngine, storeByteLimit, type StoreEngineOptions, type StoreReply, type StoreRequest } from './store-engine';
 
 const WRITE_DELAY_MS = 150;
 const QUIT_FLUSH_CEILING_MS = 5_000;
-// Takes retain up to 24 complete editable snapshots; large tracked projects
-// can exceed the ordinary settings limit without being corrupt.
-const MAX_TAKES_BYTES = 24 * LIMITS.storeValueBytes;
+/* A synchronous read of a key whose newest value is still being encoded waits
+   for that one answer. Renderers are told about a write only after it is
+   encoded, so this wait is rare; the ceiling bounds it if the worker hangs. */
+const SYNC_READ_CEILING_MS = 5_000;
+const LAZY_KEY = /^(project|projectHistory|projectState|projectJournal|agentThreads|agentAttachment)\./;
 
 export type StoreFileSystem = Pick<
   typeof nodeFs,
@@ -34,196 +36,177 @@ export interface Store {
   getEncodedSerialized?(key: string): string | null;
   bootstrapSerialized?(): Record<string, string>;
   snapshotSerialized?(): Record<string, string>;
-  set(key: string, value: unknown): void;
-  setSerialized?(key: string, serialized: string): void;
-  delete(key: string): void;
+  /** Throws for an unknown key; the promise rejects if the value is refused. */
+  set(key: string, value: unknown): void | Promise<void>;
+  setSerialized?(key: string, serialized: string): void | Promise<void>;
+  delete(key: string): void | Promise<void>;
   flushAll(): Promise<void>;
   onError(cb: (event: StoreErrorEvent) => void): () => void;
 }
 
+/** How the store reaches its engine: the persistence worker thread, or this thread. */
+export interface StoreChannel {
+  /** Throws synchronously if the request cannot be copied or the thread is gone. */
+  post(request: StoreRequest, transfer?: ArrayBuffer[]): void;
+  onReply(listener: (reply: StoreReply) => void): void;
+  /** A replacement engine started; it knows nothing until the store re-initialises it. */
+  onRestart?(listener: () => void): void;
+  /**
+   * Delivers replies synchronously until `done()`; false if the deadline
+   * passed first. Throws if the answer can never arrive while this thread
+   * waits, so a read is refused instead of answered with an older value.
+   */
+  waitSync(done: () => boolean, timeoutMs: number): boolean;
+}
+
 /** Test seams are optional; normal callers only pass the store directory. */
 export interface StoreOptions {
-  fs?: StoreFileSystem;
+  /** Run encoding and writes on this persistence thread (persistence-thread.ts). */
+  thread?: { storeChannel(): StoreChannel };
   writeDelayMs?: number;
+  /* The remaining seams apply to an engine on this thread only. */
+  fs?: StoreFileSystem;
   now?: () => number;
   randomSuffix?: () => string;
 }
 
-type PendingOperation =
-  | { kind: 'set'; serialized: string }
-  | { kind: 'delete' };
+/**
+ * The engine on the calling thread, for hosts without the persistence worker
+ * (the `powermove serve` host) and for tests that substitute the filesystem.
+ * Requests are copied as they would be for a worker, and encoding finishes
+ * before `post` returns, except while the engine waits on the disk (loading,
+ * or reading back a stored session before it has loaded). Nothing on this
+ * thread can finish that wait, so a synchronous read behind it is refused.
+ */
+export class InlineStoreChannel implements StoreChannel {
+  private readonly engine: StoreEngine;
+  private readonly queue: StoreReply[] = [];
+  private listener?: (reply: StoreReply) => void;
+  private scheduled = false;
 
+  constructor(options: StoreEngineOptions) {
+    this.engine = new StoreEngine(options, reply => this.enqueue(reply));
+  }
+
+  post(request: StoreRequest): void {
+    this.engine.handle(structuredClone(request));
+  }
+
+  onReply(listener: (reply: StoreReply) => void): void { this.listener = listener; }
+
+  waitSync(done: () => boolean): boolean {
+    while (!done() && this.queue.length) this.listener?.(this.queue.shift()!);
+    if (done()) return true;
+    throw new Error('The store cannot answer this read until a pending write finishes reading from disk.');
+  }
+
+  private enqueue(reply: StoreReply): void {
+    this.queue.push(reply);
+    if (this.scheduled) return;
+    this.scheduled = true;
+    queueMicrotask(() => {
+      this.scheduled = false;
+      while (this.queue.length) this.listener?.(this.queue.shift()!);
+    });
+  }
+}
+
+type Waiter = { resolve: (value: unknown) => void; reject: (error: unknown) => void };
+
+/**
+ * Main's side of the store. It holds each key's encoded JSON exactly as the
+ * engine published it and answers the renderers' synchronous reads from
+ * those bytes. Parsing, history packing, serialization, and file writes all
+ * happen in the engine.
+ */
 class FileStore implements Store {
-  private readonly historyRecords = new HistoryRecords();
-  private readonly values = new Map<string, unknown>();
+  private readonly committed = new Map<string, Buffer>();
+  /** Keys whose newest set or delete the engine has not answered yet. */
+  private readonly unsettled = new Map<string, { id: number; present: boolean }>();
+  /** Keys whose newest committed value has not reached disk yet. */
+  private readonly unwritten = new Map<string, number>();
+  private readonly waiters = new Map<number, Waiter>();
   private readonly listeners = new Set<(event: StoreErrorEvent) => void>();
-  private readonly pending = new Map<string, PendingOperation>();
-  private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
-  private readonly queues = new Map<string, Promise<void>>();
+  private nextId = 1;
 
   constructor(
     private readonly directory: string,
-    private readonly fs: StoreFileSystem,
-    private readonly writeDelayMs: number,
-    private readonly now: () => number,
-    private readonly randomSuffix: () => string
-  ) {}
+    private readonly channel: StoreChannel,
+    private readonly writeDelayMs: number
+  ) {
+    channel.onReply(reply => this.receive(reply));
+    channel.onRestart?.(() => this.restarted());
+    void this.request(id => ({ op: 'init', id, directory, writeDelayMs })).catch(() => undefined);
+  }
 
   async load(): Promise<void> {
-    await this.fs.mkdir(this.directory, { recursive: true });
-    await this.removeStaleTemporaryFiles();
-
-    const names = await this.fs.readdir(this.directory);
-    const loadedProjectIds = new Set<string>();
-    this.values.clear();
-    this.historyRecords.clear();
-
-    for (const name of names) {
-      if (!name.endsWith('.json')) continue;
-
-      const candidateKey = name.slice(0, -'.json'.length);
-      const parsedKey = parseStoreKey(candidateKey);
-      // Reconstructing the name prevents aliases and unchecked filenames from
-      // ever reaching a filesystem path.
-      if (parsedKey === null || storeFileName(parsedKey) !== name) continue;
-
-      const filePath = path.join(this.directory, name);
-      let serialized: string;
-      try {
-        serialized = await this.fs.readFile(filePath, 'utf8');
-      } catch (error) {
-        this.emitError(candidateKey, `store file could not be read: ${errorText(error)}`);
-        continue;
-      }
-
-      try {
-        const value: unknown = JSON.parse(serialized);
-        const packed = packStoredHistory(candidateKey, value, this.historyRecords);
-        this.values.set(candidateKey, packed);
-        const before = candidateKey.startsWith('projectState.') && isRecord(value) ? value.history : value;
-        const after = candidateKey.startsWith('projectState.') && isRecord(packed) ? packed.history : packed;
-        // Finish lossless migration through the normal atomic writer. Otherwise
-        // inactive legacy histories re-create the same huge parse peak each boot.
-        if (isHistoryDictionary(after) && !isHistoryDictionary(before)) {
-          this.schedule(candidateKey, { kind: 'set', serialized: JSON.stringify(packed) });
-        }
-        if (parsedKey.kind === 'dynamic' && parsedKey.prefix === 'project') {
-          loadedProjectIds.add(parsedKey.id);
-        }
-      } catch (error) {
-        await this.quarantine(name, candidateKey, error);
-      }
-    }
-
-    this.reportProjectReconciliation(loadedProjectIds);
+    await this.request(id => ({ op: 'load', id }));
   }
 
   snapshot(): StoreSnapshot {
-    const owned = structuredClone(Object.fromEntries(this.values));
-    return Object.fromEntries(Object.entries(owned).map(([key, value]) => [key, unpackStoredHistory(key, value)]));
+    this.settle();
+    return Object.fromEntries([...this.committed].map(([key, bytes]) => [key, unpackStoredHistory(key, JSON.parse(bytes.toString('utf8')))]));
   }
 
   get(key: string): unknown {
     if (!parseStoreKey(key)) return undefined;
-    return unpackStoredHistory(key, structuredClone(this.values.get(key)));
+    const encoded = this.encoded(key);
+    return encoded === null ? undefined : unpackStoredHistory(key, JSON.parse(encoded));
   }
 
   getSerialized(key: string): string | null {
     if (!parseStoreKey(key)) return null;
-    const value = unpackStoredHistory(key, this.values.get(key));
-    return value === undefined ? null : JSON.stringify(value);
+    return this.serialized(key);
   }
 
   snapshotSerialized(): Record<string, string> {
-    // Strings are immutable: serializing the owned values needs no clone of
-    // every project and undo stack before crossing the bootstrap IPC bridge.
-    return Object.fromEntries([...this.values].map(([key, value]) => [key, JSON.stringify(unpackStoredHistory(key, value))]));
+    this.settle();
+    return Object.fromEntries([...this.committed.keys()].map(key => [key, this.serialized(key)!]));
   }
 
   getEncodedSerialized(key: string): string | null {
     if (!parseStoreKey(key)) return null;
-    const value = this.values.get(key);
-    return value === undefined ? null : JSON.stringify(value);
+    return this.encoded(key);
   }
 
   bootstrapSerialized(): Record<string, string> {
+    // Lazy keys are listed by name only, so only the others must be settled.
+    this.settle(key => !LAZY_KEY.test(key));
+    const keys = new Set(this.committed.keys());
+    for (const [key, { present }] of this.unsettled) {
+      if (present) keys.add(key); else keys.delete(key);
+    }
     const lazy: string[] = [], snapshot: Record<string, string> = {};
-    for (const [key, value] of this.values) {
-      if (/^(project|projectHistory|projectState|projectJournal|agentThreads|agentAttachment)\./.test(key)) lazy.push(key);
-      else snapshot[key] = JSON.stringify(value);
+    for (const key of keys) {
+      if (LAZY_KEY.test(key)) { lazy.push(key); continue; }
+      // Only an engine that missed the read ceiling leaves a key unanswered here.
+      const bytes = this.committed.get(key);
+      if (bytes) snapshot[key] = bytes.toString('utf8');
     }
     snapshot.__powermoveLazyKeys = JSON.stringify(lazy);
     return snapshot;
   }
 
-  set(key: string, value: unknown): void {
+  set(key: string, value: unknown): Promise<void> {
     this.fileNameFor(key, IPC.storeSet);
-
-    // Old renderers send session metadata without history. Such a partial
-    // update must never erase the last recoverable undo stack.
-    const previous = this.values.get(key);
-    if (key.startsWith('projectState.') && isRecord(value) && !Object.hasOwn(value, 'history') && isRecord(previous) && previous.history !== undefined) {
-      value = { ...value, history: previous.history };
-    }
-    let cloned: unknown;
-    let serialized: string | undefined;
-    try {
-      cloned = packStoredHistory(key, structuredClone(value), this.historyRecords);
-      serialized = JSON.stringify(cloned);
-    } catch (error) {
-      throw new IpcValidationError(IPC.storeSet, `value is not JSON-serialisable: ${errorText(error)}`);
-    }
-
-    if (serialized === undefined) {
-      throw new IpcValidationError(IPC.storeSet, 'value is not JSON-serialisable');
-    }
-    const byteLength = Buffer.byteLength(serialized, 'utf8');
-    const parsedKey = parseStoreKey(key);
-    // Project snapshots and sessions (including undo/redo history) must support
-    // the same size as project files, including during autosave and save completion.
-    const isProject = parsedKey?.kind === 'dynamic'
-      && (parsedKey.prefix === 'project' || parsedKey.prefix === 'projectState' || parsedKey.prefix === 'projectHistory');
-    const byteLimit = key === 'takes' ? MAX_TAKES_BYTES
-      : isProject ? LIMITS.fileSaveBytes : LIMITS.storeValueBytes;
-    if (byteLength > byteLimit) {
-      throw new IpcValidationError(
-        IPC.storeSet,
-        `serialised value is ${byteLength} bytes (maximum ${byteLimit})`
-      );
-    }
-
-    this.values.set(key, cloned);
-    this.schedule(key, { kind: 'set', serialized });
+    return this.mutate(key, true, IPC.storeSet, id => ({ op: 'set', id, key, value }));
   }
 
-  setSerialized(key: string, serialized: string): void {
+  setSerialized(key: string, serialized: string): Promise<void> {
     this.fileNameFor(key, IPC.storeSetSerialized);
-    const parsed = parseStoreKey(key);
-    const large = parsed?.kind === 'dynamic' && ['project', 'projectState', 'projectHistory'].includes(parsed.prefix);
-    const limit = key === 'takes' ? MAX_TAKES_BYTES : large ? LIMITS.fileSaveBytes : LIMITS.storeValueBytes;
-    if (typeof serialized !== 'string' || Buffer.byteLength(serialized) > limit) throw new IpcValidationError(IPC.storeSetSerialized, 'serialized value exceeds its size limit');
-    let value: unknown;
-    try { value = JSON.parse(serialized); }
-    catch { throw new IpcValidationError(IPC.storeSetSerialized, 'invalid JSON'); }
-    if (key.startsWith('projectState.')) { this.set(key, value); return; }
-    const packed = packStoredHistory(key, value, this.historyRecords);
-    this.values.set(key, packed);
-    this.schedule(key, { kind: 'set', serialized: packed === value ? serialized : JSON.stringify(packed) });
+    // A string has at least as many UTF-8 bytes as characters; the engine checks
+    // the exact byte length without scanning the string on this thread.
+    if (typeof serialized !== 'string' || serialized.length > storeByteLimit(key)) throw new IpcValidationError(IPC.storeSetSerialized, 'serialized value exceeds its size limit');
+    return this.mutate(key, true, IPC.storeSetSerialized, id => ({ op: 'setSerialized', id, key, serialized }));
   }
 
-  delete(key: string): void {
+  delete(key: string): Promise<void> {
     this.fileNameFor(key, IPC.storeDelete);
-    this.values.delete(key);
-    this.schedule(key, { kind: 'delete' });
+    return this.mutate(key, false, IPC.storeDelete, id => ({ op: 'delete', id, key }));
   }
 
   async flushAll(): Promise<void> {
-    // Scheduling a pending operation appends it to that key's existing chain.
-    for (const key of [...this.pending.keys()]) this.enqueuePending(key);
-
-    // Writes can finish while this array is assembled, but every promise here
-    // represents the tail of its key's queue at the flush boundary.
-    await Promise.all([...this.queues.values()]);
+    await this.request(id => ({ op: 'flush', id }));
   }
 
   onError(cb: (event: StoreErrorEvent) => void): () => void {
@@ -231,120 +214,119 @@ class FileStore implements Store {
     return () => this.listeners.delete(cb);
   }
 
-  private schedule(key: string, operation: PendingOperation): void {
-    this.pending.set(key, operation);
-    const previousTimer = this.timers.get(key);
-    if (previousTimer !== undefined) clearTimeout(previousTimer);
-    this.timers.set(
-      key,
-      setTimeout(() => this.enqueuePending(key), this.writeDelayMs)
-    );
-  }
-
-  private enqueuePending(key: string): void {
-    const timer = this.timers.get(key);
-    if (timer !== undefined) clearTimeout(timer);
-    this.timers.delete(key);
-
-    const operation = this.pending.get(key);
-    if (operation === undefined) return;
-    this.pending.delete(key);
-
-    const previous = this.queues.get(key) ?? Promise.resolve();
-    const current = previous
-      .then(() => this.persist(key, operation))
-      .catch((error: unknown) => {
-        this.emitError(key, errorText(error));
-      });
-    this.queues.set(key, current);
-    void current.finally(() => {
-      if (this.queues.get(key) === current) this.queues.delete(key);
-    });
-  }
-
-  private async persist(key: string, operation: PendingOperation): Promise<void> {
-    const finalPath = path.join(this.directory, this.fileNameFor(key, 'store:write'));
-    if (operation.kind === 'delete') {
-      try {
-        await this.fs.unlink(finalPath);
-      } catch (error) {
-        if (!isErrorCode(error, 'ENOENT')) throw error;
-      }
-      return;
-    }
-
-    const temporaryPath = `${finalPath}.tmp-${this.randomSuffix()}`;
+  private mutate(key: string, present: boolean, channel: string, build: (id: number) => StoreRequest): Promise<void> {
+    let posted: { id: number; settled: Promise<unknown> };
     try {
-      // Atomic replacement sequence: write a sibling temporary file, open and
-      // fsync that file, close it, then rename it over the destination.
-      await this.fs.writeFile(temporaryPath, operation.serialized, { encoding: 'utf8', flag: 'wx' });
-      const handle = await this.fs.open(temporaryPath, 'r');
-      try {
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-      await this.fs.rename(temporaryPath, finalPath);
+      posted = this.post(build);
     } catch (error) {
-      try {
-        await this.fs.unlink(temporaryPath);
-      } catch (cleanupError) {
-        if (!isErrorCode(cleanupError, 'ENOENT')) {
-          this.emitError(key, `temporary-file cleanup failed: ${errorText(cleanupError)}`);
-        }
-      }
+      // Values reach the engine as a structured clone, which refuses what
+      // JSON cannot represent either (functions, symbols, host objects).
+      if (error instanceof Error && error.name === 'DataCloneError') throw new IpcValidationError(channel, `value is not JSON-serialisable: ${error.message}`);
+      // The storage worker is gone for good; report it like a failed write.
+      this.emitError(key, errorText(error));
+      const failed = Promise.reject(error);
+      failed.catch(() => undefined);
+      return failed;
+    }
+    this.unsettled.set(key, { id: posted.id, present });
+    const done = posted.settled.then(() => undefined);
+    // Fire-and-forget callers rely on onError; awaiting callers get the rejection.
+    done.catch(() => undefined);
+    return done;
+  }
+
+  private request(build: (id: number) => StoreRequest): Promise<unknown> {
+    return this.post(build).settled;
+  }
+
+  private post(build: (id: number) => StoreRequest): { id: number; settled: Promise<unknown> } {
+    const id = this.nextId++;
+    const settled = new Promise<unknown>((resolve, reject) => this.waiters.set(id, { resolve, reject }));
+    try {
+      this.channel.post(build(id));
+    } catch (error) {
+      this.waiters.delete(id);
       throw error;
     }
+    return { id, settled };
   }
 
-  private async removeStaleTemporaryFiles(): Promise<void> {
-    const names = await this.fs.readdir(this.directory);
-    await Promise.all(
-      names
-        .filter((name) => name.includes('.tmp-'))
-        .map(async (name) => {
-          try {
-            await this.fs.unlink(path.join(this.directory, name));
-          } catch (error) {
-            if (!isErrorCode(error, 'ENOENT')) {
-              this.emitError(name, `stale temporary-file cleanup failed: ${errorText(error)}`);
-            }
-          }
-        })
-    );
+  private receive(reply: StoreReply): void {
+    if (reply.type === 'error') { this.emitError(reply.key, reply.error); return; }
+    if (reply.type === 'written') {
+      if (this.unwritten.get(reply.key) === reply.id) this.unwritten.delete(reply.key);
+      return;
+    }
+    const waiter = this.waiters.get(reply.id);
+    this.waiters.delete(reply.id);
+    switch (reply.type) {
+      case 'loaded':
+        this.committed.clear();
+        for (const [key, bytes] of reply.entries) this.committed.set(key, asBuffer(bytes));
+        waiter?.resolve(undefined);
+        return;
+      case 'committed':
+        if (reply.bytes) this.committed.set(reply.key, asBuffer(reply.bytes));
+        else this.committed.delete(reply.key);
+        this.unwritten.set(reply.key, reply.id);
+        if (this.unsettled.get(reply.key)?.id === reply.id) this.unsettled.delete(reply.key);
+        waiter?.resolve(undefined);
+        return;
+      case 'rejected': {
+        if (this.unsettled.get(reply.key)?.id === reply.id) this.unsettled.delete(reply.key);
+        const error = new IpcValidationError(reply.channel, reply.detail);
+        this.emitError(reply.key, error.message);
+        waiter?.reject(error);
+        return;
+      }
+      case 'failed':
+        waiter?.reject(new Error(reply.error));
+        return;
+      case 'ready':
+      case 'flushed':
+        waiter?.resolve(undefined);
+        return;
+    }
   }
 
-  private async quarantine(name: string, key: string, cause: unknown): Promise<void> {
-    const source = path.join(this.directory, name);
-    const destination = path.join(this.directory, `${name}.corrupt-${this.now()}`);
-    let detail = `invalid store file quarantined as ${path.basename(destination)}: ${errorText(cause)}`;
+  /** A replacement engine: everything not yet on disk is written again. */
+  private restarted(): void {
+    const stopped = new Error('The storage worker stopped before this change was saved.');
+    for (const [key] of this.unsettled) this.emitError(key, stopped.message);
+    for (const waiter of this.waiters.values()) waiter.reject(stopped);
+    this.waiters.clear();
+    this.unsettled.clear();
     try {
-      await this.fs.rename(source, destination);
+      void this.request(id => ({ op: 'init', id, directory: this.directory, writeDelayMs: this.writeDelayMs })).catch(() => undefined);
+      for (const key of [...this.unwritten.keys()]) {
+        const id = this.nextId++;
+        const bytes = this.committed.get(key);
+        this.channel.post({ op: 'restore', id, key, bytes: bytes ? new Uint8Array(bytes) : null });
+        this.unwritten.set(key, id);
+      }
     } catch (error) {
-      detail = `invalid store file could not be quarantined: ${errorText(cause)}; ${errorText(error)}`;
+      for (const key of this.unwritten.keys()) this.emitError(key, `not saved: ${errorText(error)}`);
     }
-    this.emitError(key, detail);
   }
 
-  private reportProjectReconciliation(projectFileIds: ReadonlySet<string>): void {
-    const registry = this.values.get('projects');
-    const registryIds = new Set<string>();
-    if (Array.isArray(registry)) {
-      for (const entry of registry) {
-        if (isRecord(entry) && typeof entry['id'] === 'string') registryIds.add(entry['id']);
-      }
+  private settle(pending: (key: string) => boolean = () => true): void {
+    const waiting = () => [...this.unsettled.keys()].some(pending);
+    if (!waiting()) return;
+    if (!this.channel.waitSync(() => !waiting(), SYNC_READ_CEILING_MS)) {
+      console.warn('A store read used the last saved values: the storage worker did not answer in time.');
     }
+  }
 
-    for (const id of registryIds) {
-      if (!projectFileIds.has(id)) {
-        this.emitError(`project.${id}`, 'project registry entry has no corresponding project file');
-      }
-    }
-    for (const id of projectFileIds) {
-      if (!registryIds.has(id)) {
-        this.emitError(`project.${id}`, 'project file has no corresponding registry entry');
-      }
-    }
+  private encoded(key: string): string | null {
+    this.settle(candidate => candidate === key);
+    return this.committed.get(key)?.toString('utf8') ?? null;
+  }
+
+  /** The value as the renderer stores it, with undo history unpacked. */
+  private serialized(key: string): string | null {
+    const encoded = this.encoded(key);
+    if (encoded === null || !/^project(History|State)\./.test(key)) return encoded;
+    return JSON.stringify(unpackStoredHistory(key, JSON.parse(encoded)));
   }
 
   private fileNameFor(key: string, channel: string): string {
@@ -367,13 +349,19 @@ class FileStore implements Store {
 }
 
 export function createStore(dir: string, options: StoreOptions = {}): Store {
-  return new FileStore(
-    path.resolve(dir),
-    options.fs ?? nodeFs,
-    options.writeDelayMs ?? WRITE_DELAY_MS,
-    options.now ?? Date.now,
-    options.randomSuffix ?? (() => `${process.pid}-${randomBytes(8).toString('hex')}`)
-  );
+  if (options.thread && (options.fs || options.now || options.randomSuffix)) {
+    throw new Error('Filesystem seams apply only to a store engine on this thread.');
+  }
+  const channel = options.thread?.storeChannel() ?? new InlineStoreChannel({
+    fs: options.fs ?? nodeFs,
+    now: options.now ?? Date.now,
+    randomSuffix: options.randomSuffix ?? (() => `${process.pid}-${randomBytes(8).toString('hex')}`)
+  });
+  return new FileStore(path.resolve(dir), channel, options.writeDelayMs ?? WRITE_DELAY_MS);
+}
+
+function asBuffer(bytes: Uint8Array): Buffer {
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 }
 
 type StoreIpcEvent = IpcMainEvent | IpcMainInvokeEvent;
@@ -398,7 +386,9 @@ export function registerStoreIpc(
     if (!ctx.isTrustedSender(event)) throw new IpcValidationError(channel, 'untrusted sender');
   };
   /* Writes arrive in bursts (a rename touches the registry and the slot), so
-     the keys are coalesced into one message per turn of the event loop. */
+     the keys are coalesced into one message per turn of the event loop. A key
+     is announced once its value is encoded, so a sibling's refill reads it
+     without waiting on the storage worker. */
   const pendingChanges = new Map<unknown, Set<string>>();
   const announce = (key: string, sender: unknown): void => {
     if (!ctx.broadcastChange) return;
@@ -408,11 +398,19 @@ export function registerStoreIpc(
       return;
     }
     pendingChanges.set(sender, new Set([key]));
-    queueMicrotask(() => {
+    setImmediate(() => {
       const keys = pendingChanges.get(sender);
       pendingChanges.delete(sender);
       if (keys?.size) ctx.broadcastChange?.([...keys], sender);
     });
+  };
+  /* Fire-and-forget writes learn about a refused value the way they always
+     have: a storeError message to the window that sent it. */
+  const settleWrite = (event: IpcMainEvent, payload: unknown, key: string, written: void | Promise<void>): void => {
+    void Promise.resolve(written).then(
+      () => announce(key, event.sender),
+      (error: unknown) => sendStoreError(event, payload, error)
+    );
   };
 
   ipcMain.handle(IPC.storeSnapshot, (event) => {
@@ -420,11 +418,11 @@ export function registerStoreIpc(
     return { ...store.snapshot(), __powermoveAsyncStore: true };
   });
 
-  ipcMain.handle(IPC.storeSetSerialized, (event, payload: unknown) => {
+  ipcMain.handle(IPC.storeSetSerialized, async (event, payload: unknown) => {
     requireTrusted(event, IPC.storeSetSerialized);
     if (!isRecord(payload) || typeof payload.key !== 'string' || typeof payload.serialized !== 'string') throw new IpcValidationError(IPC.storeSetSerialized, 'expected key and serialized JSON');
-    if (store.setSerialized) store.setSerialized(payload.key, payload.serialized);
-    else store.set(payload.key, JSON.parse(payload.serialized));
+    if (store.setSerialized) await store.setSerialized(payload.key, payload.serialized);
+    else await store.set(payload.key, JSON.parse(payload.serialized));
     announce(payload.key, event.sender);
   });
 
@@ -465,14 +463,13 @@ export function registerStoreIpc(
         throw new IpcValidationError(IPC.storeSet, 'expected { key, value }');
       }
       const request = payload as unknown as StoreSetRequest;
-      store.set(request.key, request.value);
-      announce(request.key, event.sender);
+      settleWrite(event, payload, request.key, store.set(request.key, request.value));
     } catch (error) {
       if (error instanceof IpcValidationError) {
         sendValidationError(event, payload, error);
         return;
       }
-      throw error;
+      sendStoreError(event, payload, error);
     }
   });
 
@@ -483,14 +480,13 @@ export function registerStoreIpc(
         throw new IpcValidationError(IPC.storeDelete, 'expected { key }');
       }
       const request = payload as unknown as StoreDeleteRequest;
-      store.delete(request.key);
-      announce(request.key, event.sender);
+      settleWrite(event, payload, request.key, store.delete(request.key));
     } catch (error) {
       if (error instanceof IpcValidationError) {
         sendValidationError(event, payload, error);
         return;
       }
-      throw error;
+      sendStoreError(event, payload, error);
     }
   });
 
@@ -519,8 +515,14 @@ function sendValidationError(
   payload: unknown,
   error: IpcValidationError
 ): void {
+  sendStoreError(event, payload, error);
+}
+
+function sendStoreError(event: IpcMainEvent, payload: unknown, error: unknown): void {
+  // The window may have closed while its value was being encoded.
+  if ((event.sender as { isDestroyed?: () => boolean }).isDestroyed?.()) return;
   const key = isRecord(payload) && typeof payload['key'] === 'string' ? payload['key'] : '';
-  event.sender.send(IPC.storeError, { key, error: error.message } satisfies StoreErrorEvent);
+  event.sender.send(IPC.storeError, { key, error: errorText(error) } satisfies StoreErrorEvent);
 }
 
 /**
@@ -564,8 +566,4 @@ async function withCeiling(operation: Promise<void>, milliseconds: number): Prom
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function isErrorCode(error: unknown, code: string): boolean {
-  return isRecord(error) && error['code'] === code;
 }

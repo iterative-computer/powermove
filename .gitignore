@@ -34,6 +34,9 @@ DEPLOYMENT-*.md
 apps/desktop/dist-local-*/
 apps/desktop/test-results/
 
+# Powermove's FFmpeg build staged for packaging (engine/third_party/ffmpeg/package.sh)
+apps/desktop/vendor/ffmpeg/
+
 # serve host build (npm package payload)
 packages/cli/dist/
 

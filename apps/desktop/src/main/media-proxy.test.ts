@@ -8,6 +8,7 @@ import type { IpcMain, IpcMainInvokeEvent } from 'electron';
 import { IPC } from '../shared/ipc';
 import { MAX_SEQUENCE_FRAMES } from '../shared/animated-image';
 import { MAX_PROXY_CHUNK_BYTES, MediaProxyService, imageSequenceConverter, registerMediaProxyIpc, sequenceProgressReader } from './media-proxy';
+import { resolveFfmpeg } from './ffmpeg-binary';
 
 const roots: string[] = [];
 
@@ -90,7 +91,7 @@ describe('native image sequence conversion', () => {
     const source = path.resolve('e2e/fixtures/still-red.png');
     const files = [path.join(root, 'frame-001.png'), path.join(root, 'frame-002.png')];
     await Promise.all(files.map(file => copyFile(source, file)));
-    const service = new MediaProxyService(root, async () => {}, imageSequenceConverter(path.resolve('node_modules/ffmpeg-static/ffmpeg')));
+    const service = new MediaProxyService(root, async () => {}, imageSequenceConverter(resolveFfmpeg({ packaged: false, resourcesPath: '', appPath: path.resolve(__dirname, '../..') }).ffmpeg));
     const result = await service.createSequence(files, 24);
     expect(result.size).toBeGreaterThan(100);
     await service.release(result.token);

@@ -112,6 +112,30 @@ describe('incremental project transactions', () => {
     expect((await readdir(directory)).some(name => name.endsWith('.tmp'))).toBe(false);
     await save('retry');
   });
+  it('checks the received document through the configured validator before publishing', async () => {
+    await save('first', [clip()], undefined, destination);
+    const before = await readFile(destination);
+    const checked: string[] = [];
+    files = new ProjectFiles(registry, path.join(directory, 'backups'), {
+      validateDocument: async (file, offset, length) => {
+        const handle = await open(file, 'r');
+        try { checked.push((await readExactly(handle, offset, length)).toString('utf8')); } finally { await handle.close(); }
+        throw new Error('This is not a Powermove project.');
+      }
+    });
+    const json = document('refused'), upload = await files.beginIncremental('one', [clip()], json.length);
+    await upload.write(null, json);
+    await expect(upload.finish()).rejects.toThrow('This is not a Powermove project.');
+    expect(checked).toEqual([json.toString('utf8')]);
+    expect(await readFile(destination)).toEqual(before);
+    expect((await readdir(directory)).some(name => name.endsWith('.tmp'))).toBe(false);
+    files = new ProjectFiles(registry, path.join(directory, 'backups'));
+    const malformed = Buffer.from(JSON.stringify({ proj: { name: 'no layers', w: 1, h: 1 } }));
+    const retry = await files.beginIncremental('one', [clip()], malformed.length);
+    await retry.write(null, malformed);
+    await expect(retry.finish()).rejects.toThrow('This is not a Powermove project.');
+    expect(await readFile(destination)).toEqual(before);
+  });
   it('detects external changes during transfer and blocks stale copies', async () => {
     await save('first', [clip()], undefined, destination);
     const old = await files.open(destination); await files.close(old.token);

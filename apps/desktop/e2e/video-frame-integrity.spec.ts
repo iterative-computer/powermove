@@ -1,12 +1,13 @@
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { expect, test, repoRoot } from './helpers/app';
+import { expect, test } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 
 async function setup(session: any) {
   await session.openEditor();
   const source = path.join(session.userData, 'frame-ramp.webm');
   const raw = Buffer.concat(Array.from({ length: 30 }, (_, i) => Buffer.alloc(64 * 64 * 3, 20 + i * 7)));
-  execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'), [
+  execFileSync(ffmpegBinary, [
     '-v', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '64x64', '-r', '10', '-i', 'pipe:0',
     '-c:v', 'libvpx-vp9', '-lossless', '1', '-g', '1', source,
   ], { input: raw });

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use pm_eval::address::{self, NoDefinitions};
 use pm_eval::easing::{self, SpringConfig, SpringTables};
 use pm_eval::keyframes::{self, PreparedTrack};
-use pm_eval::node::Got;
+use pm_eval::node::{self, Got};
 use pm_eval::temporal::{self, EaseKeyframe, Interp, Side, TemporalEase};
 use pm_eval::{
     Comp, CompiledExpression, Evaluator, ExprContext, ExprError, ExpressionEngine, JsResult,
@@ -540,21 +540,46 @@ fn run_comp(doc: &Document, case_list: &[Value], stats: &mut Stats, form: &str) 
             "ev" | "evP" => {
                 let key = JsString::from(s(case.get("address").unwrap()));
                 let t = f(case.get("T").unwrap());
+                // The channel object the call reads (`L.p[key]` for ev, the
+                // found property for evP); the generator reports
+                // `PM.expressionErrors.get(prop)` only when it is an object.
+                let read: Option<&pm_model::Node> = if op == "ev" {
+                    match node::get(layer, b"p") {
+                        Got::Node(p) => node::get(p, key.as_bytes()).node(),
+                        _ => None,
+                    }
+                } else {
+                    address::find_prop(layer, &key)
+                        .expect("generator skipped throwing finds")
+                        .node()
+                };
                 let got = if op == "ev" {
                     ev.ev(&cx, Some(layer), &key, t)
                 } else {
-                    let prop =
-                        address::find_prop(layer, &key).expect("generator skipped throwing finds");
-                    ev.ev_p(&cx, Some(layer), prop.node(), t, &key)
+                    ev.ev_p(&cx, Some(layer), read, t, &key)
                 };
                 stats.js(
                     &what(&format!("{} at {t}", key.to_string_lossy())),
                     &got,
                     want,
                 );
-                let err = ev
-                    .expression_error("C", &layer_id, &key.to_string_lossy())
-                    .map(str::to_owned);
+                let reaches_object = read.is_some_and(|p| {
+                    node::truthy(Some(p))
+                        && matches!(
+                            p.kind(),
+                            pm_model::NodeKind::Object(_) | pm_model::NodeKind::Array(_)
+                        )
+                });
+                // Errors are kept per (composition, layer id, key), not per
+                // channel object (allowed difference 7): a call that reads no
+                // channel object leaves whatever another object under the
+                // same key recorded, where JavaScript has none to look up.
+                let err = if reaches_object {
+                    ev.expression_error("C", &layer_id, &key.to_string_lossy())
+                        .map(str::to_owned)
+                } else {
+                    None
+                };
                 let want_err = case.get("err").unwrap().as_str().map(str::to_owned);
                 if err != want_err {
                     stats.fail(what(&format!(

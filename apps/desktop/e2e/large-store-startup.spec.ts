@@ -19,7 +19,7 @@ test('opens with a large recovery tree and preserves every record', async () => 
     const restored = await session.page.evaluate(() => {
       const PM = (window as any).PM;
       const records = PM.store.get('projectHistory.bulk').records;
-      return { count: records.length, last: records.at(-1), serialized: typeof (window as any).powermove.store.snapshotSerializedSync };
+      return { count: records.length, last: records.at(-1), serialized: typeof (window as any).__powermoveTestBridge.store.snapshotSerializedSync };
     });
     expect(restored).toEqual({ count: records.length, last: records.at(-1), serialized: 'function' });
     expect(session.diagnostics.pageErrors).toEqual([]);

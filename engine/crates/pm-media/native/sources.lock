@@ -1,0 +1,17 @@
+# Pinned native sources for pm-media (read by build.sh).
+#
+# One source per line, whitespace separated:
+#   name  version  sha256  archive-top-dir  license(SPDX)  url
+#
+# dav1d and meson are the same archives as engine/third_party/ffmpeg/sources.lock
+# (checksums identical). OpenEXR, Imath, and libdeflate checksums were computed
+# on 2026-10-12 from the release archives below.
+#
+# Linked statically into pm-media:
+dav1d      1.5.4   686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5  dav1d-1.5.4       BSD-2-Clause        https://downloads.videolan.org/pub/videolan/dav1d/1.5.4/dav1d-1.5.4.tar.xz
+openexr    3.5.2   e5750af57bbed556b462cbf0c39550d9063b2028c0184ec65fe42fdae458cdea  openexr-3.5.2     BSD-3-Clause        https://github.com/AcademySoftwareFoundation/openexr/releases/download/v3.5.2/openexr-3.5.2.tar.gz
+#
+# Build inputs only (OpenEXR's configure step requires Imath; OpenEXRCore, the C
+# library pm-media links, does not use it):
+imath      3.2.3   e10c12b3f21f45bf08e09d4215d9c7691368d747beebd840de0b6fefed2df9f8  Imath-3.2.3       BSD-3-Clause        https://github.com/AcademySoftwareFoundation/Imath/archive/refs/tags/v3.2.3.tar.gz
+meson      1.12.1  ab0a6ca09f8ef70c564c8241fb5a23957886a0b53fb58412b5e07eaf07dba743  meson-1.12.1      Apache-2.0          https://github.com/mesonbuild/meson/releases/download/1.12.1/meson-1.12.1.tar.gz

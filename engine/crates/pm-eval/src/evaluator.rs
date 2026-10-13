@@ -9,8 +9,10 @@
 //!   signatures over [`Node`] references. Nodes may belong to the document or
 //!   be detached (`api.model.mkLayer(type)` evaluated ad hoc). These calls keep
 //!   no per-node state: each prepares the track it reads (microseconds for
-//!   ordinary tracks). Only content-keyed caches apply (spring tables,
-//!   compiled expressions).
+//!   ordinary tracks). Content-keyed caches apply (spring tables, compiled
+//!   expressions), and `active` reads group ancestry through the
+//!   composition's layer index, which is cached per `layers` node the way the
+//!   legacy code caches it per `layers` array object (see "Invalidation").
 //! * **By id** ([`Evaluator::intern`], [`Evaluator::ev_id`],
 //!   [`Evaluator::ev_batch`]): a [`PropAddress`] (composition id, layer id,
 //!   key, and how the key is read) interned to a [`PropId`]. Each id keeps its
@@ -25,18 +27,32 @@
 //! `pm_model` node revisions), and time; a patch moves the revisions of what
 //! it touched, so applying patches invalidates exactly the affected ids
 //! without any notification. An id's prepared work is kept across a revision
-//! when its layer is the same logical layer (its `id` is unique in the
-//! composition and its `id` member did not change) and either the whole layer
-//! is unchanged or, for object-only paths ([`Via::Channel`], [`Via::Member`]),
-//! the addressed property node is unchanged. A node's revision only moves
-//! forward, and object members never move between keys, so an unchanged
-//! revision proves unchanged content. Ids whose answer runs an expression keep
-//! their last answer only while the document is unchanged, since an
-//! expression may read anything in its composition.
+//! when its layer is the same logical layer (the composition resolved to the
+//! same node path, see [`Comp::at_root`]; the layer's `id` is unique in the
+//! composition; and its `id` member did not change) and either the whole
+//! layer is unchanged or, for object-only paths ([`Via::Channel`],
+//! [`Via::Member`]), the addressed property node is unchanged. A node's
+//! revision only moves forward, object members never move between keys, and
+//! array elements only move within their array, so an unchanged revision at
+//! the same path proves unchanged content. The path matters: the stored
+//! form's open composition lives at the document root, and opening another
+//! composition makes the same id resolve to its older copy in `comps`, whose
+//! nodes are unchanged but are other nodes. Ids whose answer runs an
+//! expression keep their last answer only while the document is unchanged,
+//! since an expression may read anything in its composition.
 //!
-//! An evaluator follows one document. Seeing a lower revision than before
-//! resets it; use [`Evaluator::reset`] when switching documents at the same
-//! revision.
+//! A composition's layer index (layer positions by id) is reused only for the
+//! same `layers` node: the same document root and path, the same node
+//! address, and no newer revision. The interned path also checks that the
+//! layer found has the addressed id before using it
+//! ([`CacheStats::stale_indexes`] counts repairs; zero unless the contract
+//! below is broken).
+//!
+//! An evaluator follows one document's history: a revision names one state
+//! of that document. The by-id calls reset the per-document caches when they
+//! see a lower revision or another root node (another document, or the same
+//! one moved in memory). Use [`Evaluator::reset`] after replacing a document
+//! in place with an unrelated one at the same revision.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -217,8 +233,15 @@ pub struct CacheStats {
     pub plans: u64,
     /// Plans kept across a document revision.
     pub reused: u64,
-    /// Answers served from the last answer at the same revision and time.
+    /// Answers served from an id's last answer at the same time (at the same
+    /// revision, or kept across a revision that provably did not change it).
     pub memo_hits: u64,
+    /// Layer indexes built.
+    pub indexes: u64,
+    /// Index lookups that found a layer without the addressed id and rebuilt
+    /// the index. Zero unless the caller broke the one-document contract
+    /// (see the module documentation).
+    pub stale_indexes: u64,
 }
 
 /// Where expression errors are kept (`PM.expressionErrors`, keyed by the
@@ -279,6 +302,9 @@ struct SlotState {
     validated: u64,
     /// Whether the layer's id was unique in the composition when validated.
     unique: bool,
+    /// [`Comp::at_root`] when validated: a layer under another path is
+    /// another node, whatever its revision.
+    at_root: bool,
     plan: Plan,
     from: f64,
     memo: Option<(u64, JsResult<JsValue>)>,
@@ -291,10 +317,24 @@ struct Slot {
     live: bool,
 }
 
+/// A composition's layer index and what it was built from. It is reused only
+/// for the same `layers` node: the same document root (by address), the same
+/// resolution path ([`Comp::at_root`]), the same `layers` node address, and a
+/// `layers` revision no newer than the revision it was validated at.
 struct IndexEntry {
     validated: u64,
     len: usize,
+    /// The address of the document root it was built in.
+    root: usize,
+    /// Whether the composition was the document root.
+    at_root: bool,
+    /// The address of the `layers` node (0 when there was none).
+    layers: usize,
     index: Arc<LayerIndex>,
+}
+
+fn address_of(node: Option<&Node>) -> usize {
+    node.map_or(0, |n| n as *const Node as usize)
 }
 
 /// Compositions resolved during one call (a batch shares them).
@@ -315,6 +355,8 @@ pub struct Evaluator {
     free: Vec<u32>,
     indexes: HashMap<JsString, IndexEntry>,
     last_revision: u64,
+    /// The address of the root of the document last seen by id.
+    last_root: usize,
     stats: CacheStats,
 }
 
@@ -375,6 +417,7 @@ impl Evaluator {
             free: Vec::new(),
             indexes: HashMap::new(),
             last_revision: 0,
+            last_root: 0,
             stats: CacheStats::default(),
         }
     }
@@ -400,13 +443,20 @@ impl Evaluator {
         self.indexes.clear();
         self.errors.clear();
         self.last_revision = 0;
+        self.last_root = 0;
     }
 
-    fn observe(&mut self, revision: u64) {
-        if revision < self.last_revision {
+    /// Follows the document the by-id API is called with: a lower revision or
+    /// another root node (a different document, or the same one moved in
+    /// memory) drops the per-document caches.
+    fn observe(&mut self, doc: &Document) {
+        let revision = doc.revision();
+        let root = address_of(doc.root());
+        if revision < self.last_revision || (self.last_root != 0 && root != self.last_root) {
             self.reset();
         }
         self.last_revision = revision;
+        self.last_root = root;
     }
 
     /// The interned-id cache counters.
@@ -605,22 +655,38 @@ impl Evaluator {
         }
     }
 
+    /// The composition's layer index, reused while its `layers` node provably
+    /// did not change (see [`IndexEntry`]).
     fn layer_index(&mut self, cx: &Comp<'_>) -> Arc<LayerIndex> {
-        let layers_rev = cx.layers_node().map_or(0, Node::rev);
+        let layers_node = cx.layers_node();
+        let layers_rev = layers_node.map_or(0, Node::rev);
         let len = cx.layers().len();
+        let root = address_of(Some(cx.root()));
+        let layers = address_of(layers_node);
         if let Some(entry) = self.indexes.get(cx.id())
+            && entry.root == root
+            && entry.at_root == cx.at_root()
+            && entry.layers == layers
             && layers_rev <= entry.validated
             && entry.validated <= cx.revision()
             && entry.len == len
         {
             return entry.index.clone();
         }
+        self.build_layer_index(cx)
+    }
+
+    fn build_layer_index(&mut self, cx: &Comp<'_>) -> Arc<LayerIndex> {
         let index = Arc::new(LayerIndex::build(cx.layers()));
+        self.stats.indexes += 1;
         self.indexes.insert(
             cx.id().clone(),
             IndexEntry {
                 validated: cx.revision(),
-                len,
+                len: cx.layers().len(),
+                root: address_of(Some(cx.root())),
+                at_root: cx.at_root(),
+                layers: address_of(cx.layers_node()),
                 index: index.clone(),
             },
         );
@@ -793,7 +859,7 @@ impl Evaluator {
         time: f64,
         resolved: &mut Resolved<'d>,
     ) -> JsResult<JsValue> {
-        self.observe(doc.revision());
+        self.observe(doc);
         let revision = doc.revision();
         let index = id.0 as usize;
         let Some(slot) = self.slots.get(index).filter(|s| s.live) else {
@@ -911,12 +977,37 @@ impl Evaluator {
             self.slots[index].state = None;
             return Ok(JsValue::Undefined);
         };
-        let Some(&(pos, duplicated)) = layer_index.strings.get(&address.layer) else {
+        let mut found = layer_index.strings.get(&address.layer).copied();
+        let mut layers = cx.layers();
+        // The layer's `id` node, read once: checked here and reused below.
+        let mut id_node = found.and_then(|(pos, _)| node::member(layers.get(pos), "id"));
+        // The index belongs to this `layers` node (see `layer_index`), so the
+        // layer at `pos` has the addressed id. Check anyway: a caller that
+        // breaks the one-document contract gets a rebuilt index, not another
+        // layer's answer.
+        if found.is_some() && node::string(id_node).is_none_or(|s| *s != address.layer) {
+            self.stats.stale_indexes += 1;
+            let rebuilt = self.build_layer_index(cx);
+            found = rebuilt.strings.get(&address.layer).copied();
+            if let Some((_, slot_index)) = resolved.0[entry].1.as_mut() {
+                *slot_index = rebuilt;
+            }
+            let Some((cx, _)) = &resolved.0[entry].1 else {
+                unreachable!("resolved above");
+            };
+            layers = cx.layers();
+            id_node = found.and_then(|(pos, _)| node::member(layers.get(pos), "id"));
+        }
+        let Some((cx, _)) = &resolved.0[entry].1 else {
+            unreachable!("resolved above");
+        };
+        let Some((pos, duplicated)) = found else {
             self.slots[index].state = None;
             return Ok(JsValue::Undefined);
         };
-        let layer = &cx.layers()[pos];
+        let layer = &layers[pos];
         let unique = !duplicated;
+        let at_root = cx.at_root();
 
         // Keep the previous plan when the inputs provably did not change.
         let keep = match &self.slots[index].state {
@@ -925,7 +1016,8 @@ impl Evaluator {
                 // documentation).
                 let same_layer = unique
                     && state.unique
-                    && node::member(Some(layer), "id").is_some_and(|n| n.rev() <= state.validated);
+                    && state.at_root == at_root
+                    && id_node.is_some_and(|n| n.rev() <= state.validated);
                 let unchanged = same_layer
                     && (layer.rev() <= state.validated
                         || match &address.via {
@@ -970,6 +1062,7 @@ impl Evaluator {
                 self.slots[index].state = Some(SlotState {
                     validated: revision,
                     unique,
+                    at_root,
                     plan,
                     from,
                     memo: None,
@@ -980,6 +1073,7 @@ impl Evaluator {
         if let Some((t, value)) = &state.memo
             && *t == time.to_bits()
         {
+            self.stats.memo_hits += 1;
             return value.clone();
         }
         match &state.plan {

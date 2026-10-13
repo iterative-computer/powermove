@@ -367,6 +367,21 @@ GL.dropPrograms = (prefix: string) => {
   for (const key of new Set([...GL.progs.keys(), ...pendingPrograms.keys()])) if (String(key).startsWith(prefix)) GL.dropProgram(key);
 };
 
+/* A shader layer's @param definitions, parsed from its code. The Inspector
+   also parses them into UI state, but only for a layer it has shown, so a
+   render must not depend on it: without the definition a vec3 colour was
+   bound with uniform1f (GL_INVALID_OPERATION, the colour left at zero). */
+const shaderUniformDefs = new Map<string, any[]>();
+function uniformDefsFor(codeKey: string, code: string): any[] {
+  let defs = shaderUniformDefs.get(codeKey);
+  if (!defs) {
+    defs = PM.parseUniforms?.(code || '') || [];
+    shaderUniformDefs.set(codeKey, defs!);
+    if (shaderUniformDefs.size > 256) shaderUniformDefs.delete(shaderUniformDefs.keys().next().value!);
+  }
+  return defs!;
+}
+
 function uloc(p: any, name: any) {
   let l = p.u.get(name);
   if (l === undefined) { l = GL.gl.getUniformLocation(p.pr, name); p.u.set(name, l); }
@@ -1021,8 +1036,9 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) 
     setU(p, 'iProgress', [PM.clamp((T - L.from) / Math.max(L.dur, 1e-4), 0, 1)]);
     setI(p, 'iFrame', Math.round(T * PM.proj.fps));
     setU(p, 'iMouse', [0, 0]);
+    const defs = uniformDefsFor(codeKey, d.code);
     for (const un in d.uniforms) {
-      const def = PM.UIState.getShaderMeta(L).udefs.find((u: any) => u.name === un);
+      const def = defs.find((u: any) => u.name === un);
       const val = PM.evP(L, d.uniforms[un], T, un);
       if (def && def.control === 'color') setU(p, un, PM.hex2rgb(String(val)));
       else if (def && def.control === 'toggle') setI(p, un, val ? 1 : 0);

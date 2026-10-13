@@ -8,14 +8,14 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+pm-media = { path = "../pm-media" }
 pm-protocol = { path = "../pm-protocol", default-features = false }
 thiserror.workspace = true
-
-[target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
 wgpu-hal = { version = "30", features = ["metal"] }
 objc2 = "0.6"
 objc2-metal = { version = "0.3", features = ["objc2-io-surface"] }
+# The viewer's surfaces (bridge_out) and its device helper.
 objc2-io-surface = "0.3.2"
 objc2-core-foundation = "0.3.2"
 pollster = "0.4"

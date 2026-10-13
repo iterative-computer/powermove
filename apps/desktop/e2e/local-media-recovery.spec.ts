@@ -14,7 +14,7 @@ test(`restores ${fixture} from its local source when cached bytes are missing`, 
     const PM = (window as any).PM;
     const meta = Object.values(PM.proj.assets).find((asset: any) => asset.name === name) as any;
     const layers = JSON.stringify(PM.proj.layers);
-    const sourceState = await (window as any).powermove.media.cloudStatus([meta.sourcePath]);
+    const sourceState = await (window as any).__powermoveTestBridge.media.cloudStatus([meta.sourcePath]);
     await PM.MediaStore.remove(meta);
     PM.assets.clear();
     const restored = await PM.assets.restoreProject(PM.proj);

@@ -2,7 +2,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { expect, test, repoRoot } from './helpers/app';
+import { expect, test } from './helpers/app';
+import { ffmpegBinary } from './helpers/ffmpeg';
 
 test.beforeEach(async ({ session }) => { await session.openEditor(); });
 
@@ -17,9 +18,9 @@ test('imports ProRes 4444 with transparency and restores playable media', async 
         frame[(y * 64 + x) * 4] = 255;
         frame[(y * 64 + x) * 4 + 3] = 255;
       }
-      execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'), [
+      execFileSync(ffmpegBinary, [
         '-v', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', '64x64', '-r', '30', '-i', 'pipe:0',
-        '-c:v', 'prores_ks', '-profile:v', '4', '-pix_fmt', 'yuva444p10le', fixture
+        '-c:v', 'prores_videotoolbox', '-allow_sw', '1', '-profile:v', '4444', '-pix_fmt', 'ayuv64le', fixture
       ], { input: Buffer.concat(Array.from({ length: 60 }, () => frame)) });
     }
     await session.page.evaluate(() => {
@@ -48,7 +49,7 @@ test('imports ProRes 4444 with transparency and restores playable media', async 
     expect(imported.min).toBe(0);
     expect(imported.max).toBe(255);
     const previewAlpha = await session.page.evaluate(async id => {
-      const PM = (window as any).PM, media = (window as any).powermove.media;
+      const PM = (window as any).PM, media = (window as any).__powermoveTestBridge.media;
       const original = await PM.MediaStore.get(PM.proj.assets[id]);
       const token = await media.beginPreview(original.size);
       try {

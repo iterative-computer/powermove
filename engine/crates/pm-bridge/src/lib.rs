@@ -16,8 +16,13 @@
 //!   because it runs in main.
 //! - [`host`]: main's receive loop and the surfaces main holds.
 //! - `node` (feature `node`): the addon Electron main loads.
+//! - `fonts` (feature `node`): the font registry (section 12). Before
+//!   Phase 2 the native font registry runs in main through this addon,
+//!   answering `pm-wasm`'s registry queries and serving metrics-and-shaping
+//!   subsets. From Phase 2 the engine owns it and main only forwards.
 //!
-//! Engines link this crate as an rlib for [`rendezvous::Client`].
+//! Engines link this crate as an rlib (without `node`) for
+//! [`rendezvous::Client`].
 
 #[cfg(target_os = "macos")]
 pub mod audit;
@@ -34,6 +39,9 @@ pub mod wire;
 #[cfg(all(target_os = "macos", feature = "node"))]
 #[cfg_attr(test, allow(dead_code))]
 mod node;
+
+#[cfg(all(target_os = "macos", feature = "node"))]
+mod fonts;
 
 /// Microseconds on `CLOCK_UPTIME_RAW` (`mach_absolute_time`), the host
 /// clock every engine and Chromium timestamp on macOS uses (contract 13).

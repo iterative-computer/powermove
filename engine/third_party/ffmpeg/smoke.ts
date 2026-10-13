@@ -6,12 +6,12 @@
  * Runs today's real FFmpeg call sites against the built binary: the argument
  * builders are imported from the desktop app (media-ffmpeg.ts, media-proxy.ts,
  * transcription/audio.ts, render-encoder.ts), not copied, and their outputs are
- * decoded and checked. Call sites that depend on excluded components
- * (libx264, prores_ks) must fail with "Unknown encoder"; the VideoToolbox
- * replacements Phase 2 can move them to are exercised next to them.
+ * decoded and checked. The app runs this build (apps/desktop/src/main/ffmpeg-binary.ts);
+ * render-encoder.ts encodes through h264_videotoolbox and prores_videotoolbox, since
+ * the build excludes libx264 and prores_ks.
  *
- * Nothing is wired into the app. Fixtures are generated into a temporary
- * directory that is removed afterwards. Exits non-zero when any check fails.
+ * Fixtures are generated into a temporary directory that is removed afterwards.
+ * Exits non-zero when any check fails.
  */
 
 import { spawn } from 'node:child_process';
@@ -296,36 +296,20 @@ try {
     return bytes;
   };
 
-  for (const format of ['mp4', 'prores'] as const) {
-    const missing = format === 'mp4' ? 'libx264' : 'prores_ks';
-    await check(`render-encoder encoderArgs (${format}) fails as expected: ${missing} is excluded`, async () => {
-      const output = path.join(dir, `export-today.${format === 'mp4' ? 'mp4' : 'mov'}`);
-      const args = encoder.encoderArgs({ width: 64, height: 64, fps: 30, format, alpha: format === 'prores', name: 'Smoke' }, output);
-      expect(args.includes(missing), `encoderArgs no longer uses ${missing}`);
-      const result = await run(ffmpeg, args, frameRgba(64, 64, 3));
-      // The ProRes arguments fail at option parsing: -alpha_bits is a prores_ks private option.
-      const reason = format === 'mp4' ? /Unknown encoder 'libx264'/ : /Unknown encoder 'prores_ks'|Unrecognized option 'alpha_bits'/;
-      expect(result.code !== 0 && reason.test(result.stderr), `expected a ${missing} failure, got code ${result.code}: ${result.stderr}`);
-      return result.stderr.trim().split('\n').find((line) => reason.test(line))!.replace(/^\[[^\]]*\] /, '');
-    });
-  }
+  await check('render-encoder encoderArgs: no excluded encoder (libx264, prores_ks)', async () => {
+    for (const format of ['mp4', 'prores'] as const) {
+      const args = encoder.encoderArgs({ width: 64, height: 64, fps: 30, format, alpha: format === 'prores', name: 'Smoke' }, 'out');
+      expect(!args.some((arg: string) => /libx264|prores_ks|alpha_bits/.test(arg)), `encoderArgs (${format}) still uses an excluded encoder: ${args.join(' ')}`);
+    }
+    return 'h264_videotoolbox, prores_videotoolbox';
+  });
 
-  const swap = (args: string[], from: string[], to: string[]) => {
-    const at = args.indexOf(from[0]!, args.indexOf('-c:v'));
-    expect(at > 0, `cannot find ${from[0]} in ${args.join(' ')}`);
-    return [...args.slice(0, at - 1), ...to, ...args.slice(at - 1 + from.length + 1)];
-  };
-
-  await check('Phase 2 candidate: encoderArgs mp4 with h264_videotoolbox in place of libx264 (tags, range, faststart)', async () => {
+  await check('render-encoder encoderArgs mp4: h264_videotoolbox (tags, range, faststart)', async () => {
     const output = path.join(dir, 'export-vt.mp4');
-    const today = encoder.encoderArgs({ width: 64, height: 64, fps: 30000 / 1001, format: 'mp4', alpha: false, name: 'Smoke', bitrateMbps: 16 }, output);
-    const from = today.slice(today.indexOf('-c:v') + 1, today.indexOf('-b:v'));
-    const args = swap(today, from, ['-c:v', 'h264_videotoolbox', '-pix_fmt', 'yuv420p']);
     // VideoToolbox takes primaries and transfer from the frames' attachments: the
     // output-level -color_primaries/-color_trc alone leave both unspecified in the
-    // H.264 VUI, so the frames are tagged with setparams.
-    const vf = args.indexOf('-vf') + 1;
-    args[vf] = `${args[vf]},setparams=color_primaries=bt709:color_trc=iec61966-2-1:colorspace=bt709:range=tv`;
+    // H.264 VUI, so encoderArgs tags the frames with setparams.
+    const args = encoder.encoderArgs({ width: 64, height: 64, fps: 30000 / 1001, format: 'mp4', alpha: false, name: 'Smoke', bitrateMbps: 16 }, output);
     await ok(args, frameRgba(64, 64, 30));
     const [video] = await probe(output, true);
     expect(video?.codec_name === 'h264' && video.nb_read_frames === '30', JSON.stringify(video));
@@ -337,18 +321,13 @@ try {
     return `30 frames, avc1, ${video.color_primaries}/${video.color_transfer}/${video.color_space}/${video.color_range}, pixel ${red.slice(0, 3)}`;
   });
 
-  await check('Phase 2 candidate: encoderArgs prores with prores_videotoolbox 4444 in place of prores_ks (alpha kept)', async () => {
+  await check('render-encoder encoderArgs prores: prores_videotoolbox 4444 (alpha kept)', async () => {
     const output = path.join(dir, 'export-vt.mov');
-    const today = encoder.encoderArgs({ width: 64, height: 64, fps: 24000 / 1001, format: 'prores', alpha: true, name: 'Smoke' }, output);
-    const start = today.indexOf('-c:v'), end = today.indexOf('-alpha_bits') + 2;
-    // Today's scale filter (Rec.709 matrix, limited range) stays; its output is handed to
-    // VideoToolbox as 16-bit 4:4:4:4 Y'CbCr. Handing VideoToolbox BGRA instead makes it
-    // convert with the Rec.709 matrix while the stream is tagged smpte170m, ignoring
-    // -colorspace: decoders then show 255,0,0 as 234,0,3.
-    // Primaries and transfer come from frame attachments, as for H.264 above.
-    const args = [...today.slice(0, start), '-c:v', 'prores_videotoolbox', '-profile:v', '4444', '-pix_fmt', 'ayuv64le', ...today.slice(end)];
-    const vf = args.indexOf('-vf') + 1;
-    args[vf] = `${args[vf]},setparams=color_primaries=bt709:color_trc=iec61966-2-1:colorspace=bt709:range=tv`;
+    // Today's scale filter (Rec.709 matrix, limited range) hands VideoToolbox 16-bit
+    // 4:4:4:4 Y'CbCr. Handing VideoToolbox BGRA instead makes it convert with the
+    // Rec.709 matrix while the stream is tagged smpte170m, ignoring -colorspace:
+    // decoders then show 255,0,0 as 234,0,3.
+    const args = encoder.encoderArgs({ width: 64, height: 64, fps: 24000 / 1001, format: 'prores', alpha: true, name: 'Smoke' }, output);
     await ok(args, frameRgba(64, 64, 3));
     const [video] = await probe(output, true);
     expect(video?.codec_name === 'prores' && /^yuva444p/.test(video.pix_fmt ?? '') && video.nb_read_frames === '3', JSON.stringify(video));

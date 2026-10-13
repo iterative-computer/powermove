@@ -146,6 +146,9 @@
   const pageVisible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden';
   function syncVisibility(): void {
     const shown = intersecting && !root?.closest('#pm-panel-pool');
+    // Colours read while the panel sat outside the rendered page come back
+    // empty; read them again whenever it is shown.
+    if (shown) resolvePalette();
     loop.setVisible(shown && pageVisible());
     // Solo is a listening aid; it never outlives the panel being closed or
     // hidden. A minimised or covered window keeps it: playback carries on.

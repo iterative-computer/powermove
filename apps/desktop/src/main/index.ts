@@ -6,6 +6,7 @@ import { installWhatsNew, whatsNewOptions } from './whats-new';
 import { installTextContextMenu } from './text-context-menu';
 import { installPermissionHandlers } from './permissions';
 import { registerRenderEncoder } from './render-encoder';
+import { ffmpegMissingMessage, resolveFfmpeg } from './ffmpeg-binary';
 import { registerExportSidecar } from './export-sidecar';
 import { registerBlenderIpc } from './blender-ipc';
 import {
@@ -79,6 +80,7 @@ import { CONTENT_SECURITY_POLICY, SANDBOX_CONTENT_SECURITY_POLICY, extensionSand
 import { SANDBOX_DOCUMENT, isSandboxHost, sandboxDocumentId, sandboxHost } from '../shared/sandbox-origin';
 import { EXTENSION_ID } from '../shared/extensions';
 import { createStore, installQuitFlush, registerStoreIpc, type Store } from './storage';
+import { PersistenceThread } from './persistence-thread';
 import { registerThemeIpc } from './theme';
 import { backgroundTesting, backgroundWindowOptions } from './background-testing';
 import { EditorWindows, restorableSessions, windowUnderTabDrop } from './windows';
@@ -183,11 +185,15 @@ function drainPendingOpenFiles(): void {
     });
   }
 }
-async function prepareEditorClose(window: BrowserWindow): Promise<void> {
+/** Asks the window's editor to close its projects. `quitting` tells it the
+ *  window session is restored at the next launch, so a Don't Save answer keeps
+ *  the local project instead of discarding a never-saved one. */
+async function prepareEditorClose(window: BrowserWindow, { quitting = false }: { quitting?: boolean } = {}): Promise<void> {
   if (window.isDestroyed() || window.webContents.isDestroyed()
     || !isAllowedNavigation(window.webContents.getURL(), devRendererUrl)) return;
   // User decisions and large file saves must not be cut off by the recovery-flush timeout.
-  const allowed = await window.webContents.executeJavaScript('window.PM?.prepareToClose?.() ?? true');
+  const allowed = await window.webContents.executeJavaScript(
+    `window.PM?.prepareToClose?.(${JSON.stringify({ quitting })}) ?? true`);
   if (!allowed) throw new Error('Close cancelled');
   await flushEditor(window);
 }
@@ -886,9 +892,9 @@ if (!hasSingleInstanceLock) {
         console.info(`[Powermove MCP] Claude desktop connection: ${registration}`);
       }
     }
-    const proxyEncoder = app.isPackaged
-      ? path.join(process.resourcesPath, 'encoder', 'ffmpeg')
-      : path.join(app.getAppPath(), 'node_modules', 'ffmpeg-static', 'ffmpeg');
+    const ffmpegTools = resolveFfmpeg({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() });
+    if (!app.isPackaged && !existsSync(ffmpegTools.ffmpeg)) console.warn(`[ffmpeg] ${ffmpegMissingMessage(ffmpegTools)}`);
+    const proxyEncoder = ffmpegTools.ffmpeg;
     const mediaProxies = new MediaProxyService(app.getPath('temp'), playbackConverter(proxyEncoder), imageSequenceConverter(proxyEncoder), previewConverter(proxyEncoder), stillImageConverter(proxyEncoder));
     registerAppProtocol();
     installPermissionHandlers(session.defaultSession, isAppMainFrame);
@@ -896,7 +902,12 @@ if (!hasSingleInstanceLock) {
     // Boot barrier: the legacy renderer reads PM.store synchronously while its
     // scripts load, so the store must be in memory before the window exists.
     configureRuntimeUpdates({ root: path.join(app.getPath('userData'), 'runtimes'), appVersion: app.getVersion() });
-    const store = createStore(path.join(app.getPath('userData'), 'store'));
+    // Autosave and Save serialization run on this worker thread, so encoding a
+    // large project or undo history never stalls input and IPC on main.
+    const persistence = new PersistenceThread(path.join(__dirname, 'persistence-worker.js'), {
+      onFault: (detail) => console.error(detail)
+    });
+    const store = createStore(path.join(app.getPath('userData'), 'store'), { thread: persistence });
     await store.load();
     registerStoreIpc(ipcMain, store, {
       isTrustedSender,
@@ -940,7 +951,7 @@ if (!hasSingleInstanceLock) {
     if (isBackgroundTest) (globalThis as { __powermoveNativeEngine?: unknown }).__powermoveNativeEngine = nativeEngine;
     app.once('will-quit', () => { void nativeEngine.dispose(); });
     const quitBarrier = installQuitFlush(app, store, async () => {
-      for (const window of BrowserWindow.getAllWindows()) await prepareEditorClose(window);
+      for (const window of BrowserWindow.getAllWindows()) await prepareEditorClose(window, { quitting: true });
     });
     quitPrepared = quitBarrier.isPrepared;
 
@@ -1037,7 +1048,9 @@ if (!hasSingleInstanceLock) {
     }
 
     const ctx = { isTrustedSender, isTrustedSenderContents };
-    projects = new ProjectFiles(path.join(app.getPath('userData'), 'project-files.json'), path.join(app.getPath('userData'), 'backups'));
+    projects = new ProjectFiles(path.join(app.getPath('userData'), 'project-files.json'), path.join(app.getPath('userData'), 'backups'), {
+      validateDocument: persistence.validateProjectDocument
+    });
     registerSaveIpc(ipcMain, { ...ctx, projects });
     registerProjectOpenPathIpc(ipcMain, { ...ctx, projects });
     registerCaptureIpc(ipcMain, ctx);
@@ -1063,7 +1076,7 @@ if (!hasSingleInstanceLock) {
     });
     registerMediaPathIpc(ipcMain, mediaPaths, ctx);
     app.once('will-quit', () => { void mediaPaths.dispose(); });
-    registerRenderEncoder(ipcMain,ctx);
+    registerRenderEncoder(ipcMain,{...ctx,ffmpeg:proxyEncoder});
     /* ── transcription: models download on request into userData; inference
        runs in a utility process so neither main nor a window ever blocks. ── */
     const transcription = installTranscription({

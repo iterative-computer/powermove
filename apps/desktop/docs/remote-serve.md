@@ -45,7 +45,7 @@ bun run --cwd packages/cli build     # electron-vite build + esbuild server → 
 node packages/cli/bin/powermove.mjs serve --host 127.0.0.1
 ```
 
-`packages/cli` is the `powermove-cli` npm package (`npx powermove-cli@latest serve`). Its `prepack` runs the same build; `dist/` is not committed. The package depends on `esbuild`, `svelte` (extension compiler), `ffmpeg-static`, `ws`, and the two agent runtimes whose optional dependencies pull the right platform binary.
+`packages/cli` is the `powermove-cli` npm package (`npx powermove-cli@latest serve`). Its `prepack` runs the same build; `dist/` is not committed. The package depends on `esbuild`, `svelte` (extension compiler), `ws`, and the two agent runtimes whose optional dependencies pull the right platform binary. It bundles no FFmpeg: the host runs `$POWERMOVE_FFMPEG`, a Powermove FFmpeg build (`engine/third_party/ffmpeg`), or `ffmpeg` from PATH (`hostFfmpeg` in `src/server/cli.ts`). Video export encodes through VideoToolbox, so it works on macOS only.
 
 ## Development
 

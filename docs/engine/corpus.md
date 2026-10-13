@@ -35,9 +35,9 @@ Capture options:
 
 | Option | Meaning |
 |---|---|
-| `--id <id>` | Capture directory name (default `v0-<UTC stamp>-<commit>`); an existing directory is never reused |
+| `--id <id>` | Capture directory name (default `<label>-<UTC stamp>-<commit>`); an existing directory is never reused |
 | `--root <dir>` | Parent directory (default the Application Support path above) |
-| `--label <text>` | Recorded in the manifest (default `v0`) |
+| `--label <text>` | Recorded in the manifest and used in the default id (default `v0`; corpus v1 uses `--label v1`) |
 | `--only <prefix,...>` | Only synthetic projects whose id starts with a prefix |
 | `--skip-synthetic`, `--skip-scenarios`, `--skip-real` | Leave out a part |
 | `--real <file.pmv>` | Real project (default `~/Documents/Powermove ad.pmv`) |
@@ -172,6 +172,19 @@ with the project's `blender` settings if it names any, and for each sample:
   labels each with its composition, time, and size.
 - `preview`: `scene3d.renderFrame()` (the paused rendered preview) at t, labelled by the
   same walk `renderBlenderPreview` does; `view` records the viewport mode.
+- `export`: `PM.prepareFrame(t, {width, height, mblur: true, mbSamples: 16})`, the
+  exporter's options for an opaque export at the sample's size, labelled by
+  `blenderFrameRequests` with the same options. `options` records them.
+- `exportAlpha` (transparent projects only): the same with `mbSamples: 20`, the
+  exporter's alpha sample count.
+
+Both export passes always use `mblur: true`. The exporter passes the export's own
+motion-blur setting, which can be false, so v1's export snapshots cover only the
+motion-blur path; each snapshot's `options` records what was used.
+
+`export` and `exportAlpha` exist from corpus v1: `PM.prepareFrame` forwards the
+exporter's options since then. On an older build the pass records an error instead of
+snapshots.
 
 Each snapshot is `renderSnapshot`'s output as Blender would receive it, with typed arrays
 written as JSON arrays and asset bytes stored content-addressed under `blender/assets/`.
@@ -249,13 +262,62 @@ Recorded as captured, not worked around; candidates for appendix A review.
 - **Effect parameter keyframe ids** are reassigned on every open (all effect projects);
   `loaded.json` has the ids the app settled on.
 
+## Legacy fixes before corpus v1
+
+Plan section 26, amendment 14 (details in `docs/engine/e2e-ledger.md`, "Amendment 14
+rerun"). Two of them change what v1 records compared with v0:
+
+- **Unlit glTF materials.** `renderSnapshot` reads source materials through
+  `sourceMaterialSnapshot` (`core/scene3d/rendering.ts`). Standard and physical
+  materials are written exactly as before. `MeshBasicMaterial` (KHR_materials_unlit)
+  becomes a black, fully rough base with its colour, or its colour map, as emission at
+  strength 1; other material types get the worker defaults (roughness 1, metalness 0,
+  emissive black, emissive intensity 1) for fields they lack. `3d/gltf-materials` now
+  records Blender snapshots instead of the error.
+- **Shader `vec3` colour `@param`s** are bound with `uniform3f` from definitions parsed
+  from the layer's code, so the four presets with colour parameters render their
+  colours and raise no GL error. **Known legacy behaviour kept:** `int` `@param`s are
+  bound with `uniform1f`, and `vec2` and `vec4` `@param`s receive a scalar; all three
+  stay 0 and raise GL_INVALID_OPERATION (1282), so `layers/shader-binding-quirks`
+  still records `glErrors`. The native engine must reproduce the zeros (parity), and
+  any fix is an appendix A decision.
+
+The others (restart restore, pre-compose parenting, history compaction) do not
+change any captured frame.
+
+## Corpus v1
+
+Captured 2026-10-12 after the amendment 14 fixes:
+`v1-20261012-230504-ae47a3b3` under the capture root (commit `ae47a3b3` on
+`feat/ne-legacy2`, clean tree, build hash `abaec8ba…`), 214 s, 637 MB.
+`verify.ts`: 1,603 files checked, 0 problems, 0 unlisted files.
+
+| | v0 | v1 |
+|---|---|---|
+| Projects | 132 (131 synthetic, the real project) | 132 |
+| Frames, float frames, evaluation dumps | 422, 99, 422 | 422, 99, 422 |
+| Failed samples | 0 | 0 |
+| Blender dumps | 32 | 32 |
+| Blender snapshots, final and preview | 80 | 84 (`3d/gltf-materials` now records its 4) |
+| Blender snapshots, export and exportAlpha | none | 74 |
+| Projects with Blender problems | `3d/gltf-materials` | none |
+| Projects with GL errors | the four colour shader presets and `layers/shader-binding-quirks` | `layers/shader-binding-quirks` (the `int`, `vec2`, `vec4` binding above) |
+| Shader presets match `PM.SHADER_PRESETS` | yes | yes |
+| Real project | 45 of 45 samples | 45 of 45 samples |
+
+Effect projects still reassign effect keyframe ids on open (17 projects, recorded
+in `loaded.json`). The real project's original was not written (its hash is checked
+before and after).
+
+`perf/` under the same root holds the copies of Jude's project used for
+`PM_PERF_PROJECT`, `PM_PERF_FILE`, and `PM_PLAYBACK_PROJECT` (see the e2e ledger);
+it is not a capture.
+
 ## Not covered yet
 
 - Blender-rendered surfaces, recipes (Rocket, Staircase, 3D Text, mesh recipes with
   modifiers), Blender shader graphs, and EEVEE or Cycles output: these need Blender and
   a pinned build (plan section 25).
-- Final Blender snapshots use `PM.prepareFrame`'s defaults; export-path snapshots (export
-  size, 16 or 20 shutter samples) need the exporter's own `prepareFrame` call.
 - Variable-frame-rate MP4, coarse-timebase sources, and embedded fonts: no e2e fixture
   provides them.
 - Audio is not rendered; evaluation dumps record the audio channels.

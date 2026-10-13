@@ -15,7 +15,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSyn
 import os from 'node:os';
 import path from 'node:path';
 import { launchLegacyApp, type LegacyApp } from './app';
-import { installBlenderRecorder, pairSnapshots, takeBlenderJobs, BLENDER_FORMAT } from './blender';
+import { installBlenderRecorder, pairSnapshots, takeBlenderJobs, BLENDER_FORMAT, type SnapshotPass } from './blender';
 import { desktopRoot, EXTENSION_EFFECTS, parseRender3D, repoRoot, scene3d, shaderPresets } from './catalog';
 import { generateCorpus, stableJson, type GeneratedProject } from './generate';
 import { MISSING_MEDIA, resolveMedia, type MediaSource } from './media';
@@ -37,7 +37,7 @@ interface Options {
 interface SampleRecord {
   time: number; width: number; height: number;
   png?: FileRecord; alphaPng?: FileRecord; float?: { data: FileRecord; header: FileRecord }; eval?: FileRecord;
-  blender?: FileRecord; blenderSnapshots?: { final: number; preview: number }; blenderError?: string;
+  blender?: FileRecord; blenderSnapshots?: { final: number; preview: number; export?: number; exportAlpha?: number }; blenderError?: string;
   glErrors: string[]; warnings: string[]; prepareError?: string; error?: string; ms: number;
 }
 
@@ -158,7 +158,7 @@ async function captureSamples(session: Session, out: string, dir: string, sample
  * output (every nested composition and shutter sample) and the paused rendered
  * preview. Runs after the frames, since it turns Blender output on in memory.
  */
-async function captureBlender(session: Session, out: string, dir: string, project: CorpusProject, record: ProjectRecord): Promise<void> {
+async function captureBlender(session: Session, out: string, dir: string, project: CorpusProject, record: ProjectRecord, alpha: boolean): Promise<void> {
   const settings = parseRender3D({ ...(project.blender ?? {}), enabled: true });
   const objectDefinition = scene3d.definitions.object;
   const problems: string[] = [];
@@ -171,19 +171,30 @@ async function captureBlender(session: Session, out: string, dir: string, projec
       if (stray.length) problems.push(`${stray.length} Blender jobs before the ${sample.time}s pass`);
       const final = await session.legacy.evaluate(t => (window as any).__corpus.blenderFinal(t), sample.time);
       const finalJobs = await takeBlenderJobs(session.legacy);
+      const exportPasses: Record<string, SnapshotPass & { options: unknown }> = {};
+      for (const [kind, mbSamples] of [['export', 16], ...(alpha ? [['exportAlpha', 20]] : [])] as Array<[string, number]>) {
+        const pass = await session.legacy.evaluate(args => (window as any).__corpus.blenderExport(args),
+          { time: sample.time, width: sample.width, height: sample.height, mbSamples });
+        const jobs = await takeBlenderJobs(session.legacy);
+        exportPasses[kind] = { options: pass.options, ...pairSnapshots(out, dir, pass.requests, jobs, written, pass.error ? { error: pass.error } : {}) };
+      }
       const preview = await session.legacy.evaluate(args => (window as any).__corpus.blenderPreview(args), { time: sample.time, objectDefinition });
       const previewJobs = await takeBlenderJobs(session.legacy);
       const document = {
         format: BLENDER_FORMAT, version: 1, project: project.id, time: sample.time, settings, compositions,
         final: pairSnapshots(out, dir, final.requests, finalJobs, written, final.error ? { error: final.error } : {}),
         preview: pairSnapshots(out, dir, preview.requests, previewJobs, written, { view: preview.view, ...(preview.error ? { error: preview.error } : {}) }),
+        ...exportPasses,
       };
-      for (const [kind, pass] of [['final', document.final], ['preview', document.preview]] as const) {
+      for (const [kind, pass] of [['final', document.final], ['preview', document.preview], ...Object.entries(exportPasses)] as Array<[string, SnapshotPass]>) {
         if (pass.mismatch) problems.push(`${kind} @ ${sample.time}s: ${pass.mismatch}`);
         if (pass.error) problems.push(`${kind} @ ${sample.time}s: ${pass.error}`);
       }
       sample.blender = writeFile(out, `${dir}/blender/${timeLabel(sample.time)}.json`, JSON.stringify(document) + '\n');
-      sample.blenderSnapshots = { final: document.final.snapshots.length, preview: document.preview.snapshots.length };
+      sample.blenderSnapshots = {
+        final: document.final.snapshots.length, preview: document.preview.snapshots.length,
+        ...Object.fromEntries(Object.entries(exportPasses).map(([kind, pass]) => [kind, pass.snapshots.length])),
+      };
     } catch (error) {
       sample.blenderError = (error as Error).message.split('\n')[0]!;
       problems.push(`@ ${sample.time}s: ${sample.blenderError}`);
@@ -257,7 +268,7 @@ async function captureSynthetic(session: Session, out: string, project: CorpusPr
     await captureSamples(session, out, dir, project.samples, described.size, described.alpha, evaluate, record, project.id);
     const stray = await takeBlenderJobs(session.legacy);
     if (stray.length) record.hydrateIssues.push({ path: 'blender', message: `${stray.length} Blender jobs while capturing frames` });
-    if (hasObjects(described)) await captureBlender(session, out, dir, project, record);
+    if (hasObjects(described)) await captureBlender(session, out, dir, project, record, described.alpha);
   } catch (error) {
     record.error = (error as Error).message.split('\n')[0]!;
   }
@@ -343,7 +354,7 @@ export async function capture(options: Options): Promise<string> {
   const head = git('rev-parse', 'HEAD');
   const dirty = git('status', '--porcelain', '--untracked-files=no').length > 0;
   const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-');
-  const id = options.id ?? `v0-${stamp}-${head.slice(0, 8)}`;
+  const id = options.id ?? `${options.label.replace(/[^A-Za-z0-9._-]+/g, "-")}-${stamp}-${head.slice(0, 8)}`;
   const out = path.join(options.root, id);
   if (path.resolve(out).startsWith(repoRoot + path.sep)) throw new Error('Refusing to write captured data inside the repository');
   if (existsSync(out)) throw new Error(`${out} already exists; choose another --id`);
@@ -414,7 +425,7 @@ export async function capture(options: Options): Promise<string> {
         opaque: 'PM.GL.renderToPixels(t, w, h, {mblur: true, mbSamples: 16, shutter, opaque: true, topDownOpaque: true}) after PM.prepareFrame(t), PM.quality = 1',
         transparent: 'PM.GL.renderToPixels(t, w, h, {transparent: true, mblur: true, mbSamples: 20, shutter}); float readback captured, plus the exporter alphaFrame straight-alpha conversion',
         evaluation: 'every channel from PM.allProps through PM.ev / PM.evP, resolved content, local and world matrices, world opacity, planeMatrix for 3D layers, GL.bounds, text layout, caption bounds, path values, precomp source times (recursive), scene3d.describe()',
-        blender: `after the frames, render3d {enabled: true, ...project settings} on every composition with 3D objects; final snapshots from PM.prepareFrame(t) (default options: composition size, 10 shutter samples when motion blur is on) labelled by blenderFrameRequests; preview snapshots from scene3d.renderFrame() at t; ${'the main-process blender:run handler records jobs and returns an empty render, so Blender never runs'}`,
+        blender: `after the frames, render3d {enabled: true, ...project settings} on every composition with 3D objects; final snapshots from PM.prepareFrame(t) (default options: composition size, 10 shutter samples when motion blur is on) labelled by blenderFrameRequests; export snapshots from PM.prepareFrame(t, {width, height, mblur: true, mbSamples: 16}) and, for transparent projects, exportAlpha with mbSamples 20, labelled the same way; preview snapshots from scene3d.renderFrame() at t; ${'the main-process blender:run handler records jobs and returns an empty render, so Blender never runs'}`,
       },
       shaderPresetCheck,
       generated: { dir: 'generated', projects: corpus.projects.length, media: corpus.media },
@@ -425,6 +436,7 @@ export async function capture(options: Options): Promise<string> {
         evalDumps: all.reduce((sum, record) => sum + record.samples.filter(sample => sample.eval).length, 0),
         blenderDumps: all.reduce((sum, record) => sum + record.samples.filter(sample => sample.blender).length, 0),
         blenderSnapshots: all.reduce((sum, record) => sum + record.samples.reduce((n, sample) => n + (sample.blenderSnapshots ? sample.blenderSnapshots.final + sample.blenderSnapshots.preview : 0), 0), 0),
+        blenderExportSnapshots: all.reduce((sum, record) => sum + record.samples.reduce((n, sample) => n + (sample.blenderSnapshots?.export ?? 0) + (sample.blenderSnapshots?.exportAlpha ?? 0), 0), 0),
         projectsWithBlenderProblems: all.filter(record => record.blender?.problems.length).map(record => record.id),
         failedSamples: all.reduce((sum, record) => sum + record.samples.filter(sample => sample.error).length, 0),
         failedProjects: all.filter(record => record.error).map(record => ({ id: record.id, error: record.error })),

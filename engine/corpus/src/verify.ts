@@ -87,7 +87,7 @@ export function verifyCapture(dir: string): VerifyResult {
           try {
             const parsed = JSON.parse(dump.toString('utf8'));
             if (parsed.format !== 'powermove-corpus-blender' || parsed.time !== sample.time) problems.push(`${at}: Blender dump has format ${parsed.format} at ${parsed.time}`);
-            for (const pass of [parsed.final, parsed.preview]) for (const snapshot of pass?.snapshots ?? []) for (const asset of snapshot.assets ?? []) {
+            for (const pass of [parsed.final, parsed.preview, parsed.export, parsed.exportAlpha]) for (const snapshot of pass?.snapshots ?? []) for (const asset of snapshot.assets ?? []) {
               if (!(project.blender?.assets ?? []).some((record: FileRecord) => record.file === asset.file && record.sha256 === asset.sha256)) problems.push(`${at}: Blender asset ${asset.file} is not in the project's asset list`);
             }
           } catch (error) { problems.push(`${at}: Blender dump is not JSON: ${(error as Error).message}`); }

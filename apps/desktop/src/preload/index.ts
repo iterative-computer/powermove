@@ -28,6 +28,7 @@ import {
   type WindowInitialProject,
   type WindowOpenResult
 } from '../shared/ipc';
+import { publishTestBridge } from '../shared/test-bridge';
 import {
   EXT_IPC,
   type ExtensionRecord,
@@ -554,3 +555,7 @@ contextBridge.executeInMainWorld({
   },
   args: [bridge]
 });
+
+// Hidden e2e launches only (shared/test-bridge.ts): main adds the switch to
+// the window's arguments when POWERMOVE_BACKGROUND_TEST=1.
+publishTestBridge(process.argv, (key, value) => contextBridge.exposeInMainWorld(key, value), bridge);
