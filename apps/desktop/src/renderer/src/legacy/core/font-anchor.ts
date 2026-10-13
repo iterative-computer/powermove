@@ -14,8 +14,18 @@ export function captureFontAnchor(PM: any, layer: any, command: any) {
   const fields = command.type === 'set_content' ? Object.keys(command.patch || {})
     : ['set_property', 'replace_keyframes', 'set_expression'].includes(command.type)
       ? [String(command.path || command.channel || '').replace(/^c\./, '')] : [];
-  // Alignment moves the text's origin, so the pivot follows it (left edge for left, middle for center).
-  if (fields.includes('align')) { delete layer.d.fontAnchorBounds; return; }
+  // Changed alignment moves the origin. Repeating a static alignment must
+  // retain typography anchoring, including patches that also change size.
+  if (fields.includes('align')) {
+    const alignment = layer.d.align;
+    const current = typeof alignment === 'string' ? alignment
+      : alignment && !alignment.kf?.length && !alignment.expr ? alignment.v : undefined;
+    const next = command.type === 'set_content' ? command.patch.align : command.value;
+    const unchanged = ['set_property', 'set_content'].includes(command.type)
+      && command.mode !== 'keyframe'
+      && typeof next === 'string' && current === next;
+    if (!unchanged) { delete layer.d.fontAnchorBounds; return; }
+  }
   if (layer.d.fontAnchorBounds) return;
   if (!fields.some(key => ['font', 'weight', 'size', 'tracking', 'leading', 'italic', 'boxWidth', 'boxHeight'].includes(key) || key.startsWith('fontAxis.'))) return;
   const measuredLayer = layer.d.animators?.length ? { ...layer, d: { ...layer.d, animators: [] } } : layer;
