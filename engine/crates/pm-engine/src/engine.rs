@@ -41,6 +41,7 @@ use serde::Serialize;
 
 use crate::inflight::{FailedItems, InFlightTracker, WorkToken};
 use crate::lease::{Evict, LeaseBudget, NoEviction};
+use crate::present::{FramePresenter, PresentContext};
 use crate::slicing::JobSlicer;
 
 /// What a port leads to. Assigned by the host when it hands the engine a
@@ -234,6 +235,7 @@ pub struct Engine {
     next_token: u64,
     minted: Vec<MintOutcome>,
     patch_decoder: Option<Box<dyn PatchBodyDecoder>>,
+    presenter: Option<Box<dyn FramePresenter>>,
     logged_once: BTreeSet<String>,
     overdue_logged: Option<u64>,
 }
@@ -340,6 +342,7 @@ impl Engine {
             next_token: 1,
             minted: Vec::new(),
             patch_decoder: None,
+            presenter: None,
             logged_once: BTreeSet::new(),
             overdue_logged: None,
         }
@@ -352,6 +355,32 @@ impl Engine {
     /// Installs the canonical patch body decoder (RFC 05).
     pub fn set_patch_decoder(&mut self, decoder: Box<dyn PatchBodyDecoder>) {
         self.patch_decoder = Some(decoder);
+    }
+
+    /// Installs the viewer presenter (the frame bridge, section 18). Only the
+    /// interactive engine presents.
+    pub fn set_presenter(&mut self, presenter: Box<dyn FramePresenter>) {
+        self.presenter = Some(presenter);
+    }
+
+    pub fn has_presenter(&self) -> bool {
+        self.presenter.is_some()
+    }
+
+    /// Runs `f` with the presenter and a context over the lease; its log
+    /// lines join `out`.
+    fn with_presenter<R>(
+        &mut self,
+        out: &mut Out,
+        f: impl FnOnce(&mut dyn FramePresenter, &mut PresentContext<'_>) -> R,
+    ) -> Option<R> {
+        let presenter = self.presenter.as_mut()?;
+        let mut ctx = PresentContext::new(&mut self.lease, self.evict.as_mut());
+        let result = f(presenter.as_mut(), &mut ctx);
+        for (level, message) in ctx.take_logs() {
+            out.log(level, message);
+        }
+        Some(result)
     }
 
     /// Installs what frees memory when a lease shrinks (the caches).
@@ -464,6 +493,7 @@ impl Engine {
         for id in &closed {
             self.sessions.remove(id);
         }
+        self.with_presenter(out, |p, ctx| p.port_closed(ctx, port));
         if !closed.is_empty() {
             out.log(
                 LogLevel::Info,
@@ -688,7 +718,7 @@ impl Engine {
             Message::Response { .. } | Message::Error { .. } => {
                 self.on_answer(port, envelope.message, now, out)
             }
-            Message::Event { body } => self.on_event(port, kind, body, session, now, out),
+            Message::Event { body } => self.on_event(port, kind, body, session, revision, now, out),
             Message::Cancel { id } => self.on_cancel(port, id, out),
         }
     }
@@ -701,10 +731,11 @@ impl Engine {
         id: RequestId,
         body: Request,
         session: Option<SessionId>,
-        // Read-your-writes (contract 9): the requests that wait for a
-        // revision (frames, evaluation, agent frames) are not served by this
-        // engine yet, and the served ones carry their revision in the body.
-        _revision: Option<Revision>,
+        // Read-your-writes (contract 9): viewer frames go to the presenter
+        // with their minimum revision; evaluation and agent frames are not
+        // served by this engine yet, and the other served requests carry
+        // their revision in the body.
+        revision: Option<Revision>,
         now: HostMicros,
         out: &mut Out,
     ) {
@@ -724,6 +755,7 @@ impl Engine {
                     return;
                 };
                 self.sessions.remove(&sid);
+                self.with_presenter(out, |p, ctx| p.session_closed(ctx, port, sid));
                 self.respond(port, id, Response::Ack, Some(sid), None, out);
             }
             Request::Resync(resync) => self.resync(port, id, session, resync, out),
@@ -780,6 +812,27 @@ impl Engine {
                             request_error(id, ErrorCode::InvalidMessage, &error.to_string());
                         self.send_error(port, id, error, out)
                     }
+                }
+            }
+            Request::RenderFrame(request)
+                if self.presenter.is_some()
+                    && kind == PeerKind::Renderer
+                    && matches!(
+                        request.purpose,
+                        pm_protocol::frame::FramePurpose::Viewer
+                            | pm_protocol::frame::FramePurpose::Scrub
+                    ) =>
+            {
+                let Some(sid) = self.owned_session(port, id, session, out) else {
+                    return;
+                };
+                let result = self
+                    .with_presenter(out, |p, ctx| {
+                        p.render(ctx, port, sid, id, request, revision)
+                    })
+                    .unwrap_or(Ok(()));
+                if let Err(error) = result {
+                    self.send_error(port, id, *error, out);
                 }
             }
             Request::RenderFrame(_)
@@ -1055,12 +1108,14 @@ impl Engine {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn on_event(
         &mut self,
         port: PortId,
         kind: PeerKind,
         body: Event,
         session: Option<SessionId>,
+        revision: Option<Revision>,
         now: HostMicros,
         out: &mut Out,
     ) {
@@ -1077,6 +1132,26 @@ impl Engine {
                 self.on_deadline(&signal, now, out)
             }
             (Event::Crash(report), PeerKind::Host) => self.on_crash_report(&report, out),
+            (
+                event @ (Event::ReleaseFrame(_) | Event::Viewer(_) | Event::Transport(_)),
+                PeerKind::Renderer,
+            ) if self.presenter.is_some() => {
+                let Some(sid) =
+                    session.filter(|sid| self.sessions.get(sid).is_some_and(|s| s.port == port))
+                else {
+                    out.log(
+                        LogLevel::Warn,
+                        format!("{name} for an unknown session on port {}", port.0),
+                    );
+                    return;
+                };
+                self.with_presenter(out, |p, ctx| match event {
+                    Event::Viewer(state) => p.viewer(ctx, port, sid, state, revision),
+                    Event::ReleaseFrame(release) => p.release(port, sid, release),
+                    Event::Transport(command) => p.transport(ctx, port, sid, command),
+                    _ => {}
+                });
+            }
             (
                 Event::ReleaseFrame(_) | Event::Viewer(_) | Event::Transport(_),
                 PeerKind::Renderer,

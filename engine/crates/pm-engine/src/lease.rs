@@ -245,6 +245,14 @@ impl LeaseBudget {
         self.try_charge(category, bytes)
     }
 
+    /// Charges `bytes` to `category` even past the lease. Only for memory the
+    /// engine cannot do without (the viewer's surface pool); the next usage
+    /// report shows the overage and the host's arbiter reacts.
+    pub fn charge_over(&mut self, category: Category, bytes: u64) {
+        let slot = &mut self.used[category.index()];
+        *slot = slot.saturating_add(bytes);
+    }
+
     /// Releases bytes an owner freed. Releasing more than was charged is a bug
     /// in the owner; the category floors at zero.
     pub fn release(&mut self, category: Category, bytes: u64) {
