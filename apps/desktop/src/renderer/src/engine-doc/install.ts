@@ -173,6 +173,11 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     else if (barrier && !tracker && coveredDepth === 0 && !PM.hist?.scoped?.()) barrier.touchAll();
     return legacyTouch?.();
   };
+  // Writers that skip touch() still announce on the bus (PM.addLayer,
+  // PM.removeLayers, settings, asset changes): diff what they may have written.
+  for (const event of ['layers', 'project', 'assets', 'comps']) {
+    PM.bus?.on?.(event, () => { if (barrier && !tracker && coveredDepth === 0) barrier.touchAll(); });
+  }
   // Legacy evaluation adopts old keyframe handles into the live document
   // (temporal-bridge.ts): a write without a path.
   setEvaluationWriteHook(() => { if (barrier && !tracker) barrier.touchAll(); });
