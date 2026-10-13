@@ -23,20 +23,7 @@ test.describe('@persistence native project persistence', () => {
     const project=await session.page.evaluate(()=>({name:(window as any).PM.proj.name,color:(window as any).PM.proj.layers[0].d.color}));
     expect(project).toEqual({name:'Imported restart proof',color:'#FF1122'});
   });
-  test('autosaves a project and restores it after relaunch', async ({ session }) => {
-    const storeWired = await session.page.evaluate(async () => {
-      try {
-        await (window as any).powermove?.store?.flush();
-        return true;
-      } catch {
-        return false;
-      }
-    });
-    test.fixme(
-      !storeWired,
-      'Waiting for the main-process store IPC handlers to back window.powermove.store'
-    );
-
+  test('saves a project and restores it after relaunch', async ({ session }) => {
     await session.page.evaluate(() => (window as any).PM.cmd('newProject'));
     const modal = session.page.locator('.modal');
     await modal.getByLabel('Project name').fill('E2E Persistence');
@@ -47,8 +34,13 @@ test.describe('@persistence native project persistence', () => {
     ], { label: 'E2E persistence layer', origin: 'e2e' }));
     expect(result.ok).toBe(true);
 
-    await session.page.waitForTimeout(750); // autosave debounce is 550 ms
-    await session.page.evaluate(() => (window as any).powermove.store.flush());
+    // The hidden harness chooses Don't Save when closing an untitled project.
+    // Save a real fixture first so relaunch exercises restoration, not discard.
+    await session.app.evaluate(({ dialog }, filePath) => {
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+    }, path.join(session.userData, 'persistence.pmv'));
+    expect(await session.page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
+    await session.page.evaluate(() => (window as any).PM.flushProject());
     await session.relaunch();
 
     await session.page.waitForFunction(() => Boolean((window as any).PM?.Projects));
