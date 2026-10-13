@@ -1,0 +1,26 @@
+[package]
+name = "pm-expr"
+description = "Project expression language: bounded parser and interpreter, V8-identical Math (sections 3, 5, 7)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+pm-model = { path = "../pm-model" }
+# Correctly rounded sin, cos, tan, asin, acos, atan2, exp, log (CORE-MATH and
+# LLVM libc algorithms); see src/jsmath/mod.rs. BSD-3-Clause OR Apache-2.0.
+pxfm = "=0.1.30"
+
+[features]
+# wasm32 only: compute `Math.pow` and `**` with the embedding JavaScript's
+# `Math.pow`, imported as `pm_expr.pow`, so results equal the editor's V8 (the
+# native build calls the platform `pow`, as V8 does). Without it, wasm32 uses a
+# correctly rounded `pow`.
+js-pow = []
+
+# wasm32 parity driver for parity/wasm.ts (see the example's docs).
+[[example]]
+name = "wasm_parity"
+crate-type = ["cdylib"]

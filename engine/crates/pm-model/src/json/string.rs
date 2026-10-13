@@ -115,6 +115,55 @@ impl JsString {
         self.utf16_units().cmp(other.utf16_units())
     }
 
+    /// Reads WTF-8 bytes (UTF-8 generalized to unpaired surrogates, as
+    /// [`JsString::as_bytes`] writes them). Returns `None` for anything else:
+    /// invalid or overlong sequences, code points past U+10FFFF, and a high
+    /// surrogate directly followed by a low one (a pair must be written as one
+    /// four-byte sequence), so every string has exactly one byte form.
+    pub fn from_wtf8(bytes: &[u8]) -> Option<JsString> {
+        if let Ok(s) = core::str::from_utf8(bytes) {
+            return Some(JsString(Repr::Utf8(s.to_owned())));
+        }
+        let cont = |i: usize| bytes.get(i).copied().filter(|b| b & 0xc0 == 0x80);
+        let mut i = 0;
+        let mut previous_high = false;
+        while i < bytes.len() {
+            let b0 = bytes[i];
+            let (cp, len) = match b0 {
+                0x00..=0x7f => (b0 as u32, 1),
+                0xc2..=0xdf => (((b0 as u32) & 0x1f) << 6 | (cont(i + 1)? as u32 & 0x3f), 2),
+                0xe0..=0xef => {
+                    let (b1, b2) = (cont(i + 1)?, cont(i + 2)?);
+                    if b0 == 0xe0 && b1 < 0xa0 {
+                        return None; // overlong
+                    }
+                    let cp =
+                        ((b0 as u32) & 0x0f) << 12 | (b1 as u32 & 0x3f) << 6 | (b2 as u32 & 0x3f);
+                    (cp, 3)
+                }
+                0xf0..=0xf4 => {
+                    let (b1, b2, b3) = (cont(i + 1)?, cont(i + 2)?, cont(i + 3)?);
+                    if (b0 == 0xf0 && b1 < 0x90) || (b0 == 0xf4 && b1 > 0x8f) {
+                        return None; // overlong or past U+10FFFF
+                    }
+                    let cp = ((b0 as u32) & 0x07) << 18
+                        | (b1 as u32 & 0x3f) << 12
+                        | (b2 as u32 & 0x3f) << 6
+                        | (b3 as u32 & 0x3f);
+                    (cp, 4)
+                }
+                _ => return None,
+            };
+            if previous_high && (0xdc00..=0xdfff).contains(&cp) {
+                return None;
+            }
+            previous_high = (0xd800..=0xdbff).contains(&cp);
+            i += len;
+        }
+        // Not UTF-8 yet well-formed WTF-8: at least one unpaired surrogate.
+        Some(JsString(Repr::Wtf8(bytes.into())))
+    }
+
     /// Builds a string from UTF-16 code units, pairing surrogates where possible.
     pub fn from_utf16_units(units: &[u16]) -> JsString {
         let mut b = Wtf8Builder::new();
@@ -400,5 +449,37 @@ mod tests {
             vec![0xd83d]
         );
         assert!(s.unit_at(3).is_none());
+    }
+
+    #[test]
+    fn wtf8_reads_back_every_form_and_rejects_the_rest() {
+        for units in [
+            vec![],
+            vec![0x61, 0x62],
+            vec![0xd83d, 0xde00],
+            vec![0xd800],
+            vec![0xdc00, 0xd800],
+            vec![0x61, 0xdbff, 0x62, 0xdfff],
+            vec![0xe000, 0xffff, 0x7ff, 0x80],
+        ] {
+            let s = JsString::from_utf16_units(&units);
+            assert_eq!(
+                JsString::from_wtf8(s.as_bytes()).as_ref(),
+                Some(&s),
+                "{units:x?}"
+            );
+        }
+        for bad in [
+            &[0x80][..],
+            &[0xc0, 0x80],                         // overlong
+            &[0xe0, 0x80, 0x80],                   // overlong
+            &[0xf0, 0x80, 0x80, 0x80],             // overlong
+            &[0xf4, 0x90, 0x80, 0x80],             // past U+10FFFF
+            &[0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80], // a pair written as two surrogates
+            &[0xe2, 0x82],                         // truncated
+            &[0xff],
+        ] {
+            assert_eq!(JsString::from_wtf8(bad), None, "{bad:x?}");
+        }
     }
 }

@@ -247,6 +247,11 @@ pub enum PatchErrorKind {
     RangeError,
     /// Beyond [`MAX_ARRAY_LENGTH`].
     Limit,
+    /// An id-keyed operation ([`crate::ops`]) whose target does not match the
+    /// document: the path is not an id-keyed array, or an id is unknown,
+    /// duplicated, or already present. The mirror has diverged from the
+    /// renderer and must resynchronize.
+    Mismatch,
 }
 
 impl fmt::Display for PatchError {
@@ -265,7 +270,7 @@ fn type_error(index: usize, message: String) -> PatchError {
     }
 }
 
-fn limit(index: usize) -> PatchError {
+pub(crate) fn limit(index: usize) -> PatchError {
     PatchError {
         index,
         kind: PatchErrorKind::Limit,
@@ -301,6 +306,8 @@ pub(crate) trait Tree: Sized {
     fn assign(&mut self, value: Value, rev: u64) -> bool;
     /// Records that something below this node changed at `rev`.
     fn touch(&mut self, rev: u64);
+    /// The string `id` member when this node is an object that has one.
+    fn record_id(&self) -> Option<&JsString>;
 }
 
 impl Tree for Value {
@@ -326,6 +333,10 @@ impl Tree for Value {
     }
 
     fn touch(&mut self, _rev: u64) {}
+
+    fn record_id(&self) -> Option<&JsString> {
+        record_id(self)
+    }
 }
 
 /// A primitive reached during navigation (a string's code unit, an array's or
@@ -670,7 +681,7 @@ pub fn diff_patches(before: Option<&Value>, after: Option<&Value>) -> (Vec<Patch
 }
 
 /// `Object.is` for JSON values; distinct arrays and objects are never the same.
-fn object_is(a: Option<&Value>, b: Option<&Value>) -> bool {
+pub(crate) fn object_is(a: Option<&Value>, b: Option<&Value>) -> bool {
     match (a, b) {
         (None, None) => true,
         (Some(Value::Null), Some(Value::Null)) => true,
@@ -683,7 +694,7 @@ fn object_is(a: Option<&Value>, b: Option<&Value>) -> bool {
     }
 }
 
-fn record_id(v: &Value) -> Option<&JsString> {
+pub(crate) fn record_id(v: &Value) -> Option<&JsString> {
     match v.as_object()?.get("id") {
         Some(Value::String(s)) => Some(s),
         _ => None,

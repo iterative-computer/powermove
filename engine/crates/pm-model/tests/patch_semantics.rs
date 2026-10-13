@@ -28,6 +28,7 @@ fn kind_name(kind: PatchErrorKind) -> &'static str {
         PatchErrorKind::TypeError => "TypeError",
         PatchErrorKind::RangeError => "RangeError",
         PatchErrorKind::Limit => "Limit",
+        PatchErrorKind::Mismatch => "Mismatch",
     }
 }
 
