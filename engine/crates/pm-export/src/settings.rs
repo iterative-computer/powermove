@@ -259,6 +259,13 @@ impl ExportSpec {
             }
         }
         if let Some(tc) = &self.timecode {
+            // AVAssetWriter refuses a timecode track in MPEG-4 (measured on macOS 27).
+            if self.container != Container::Mov {
+                return invalid("timecode tracks are written to MOV only");
+            }
+            if tc.format.base() != TimecodeFormat::non_drop(self.rate).base() {
+                return invalid("timecode must count the export's own frame rate");
+            }
             if tc.start_frame < 0 || tc.start_frame >= tc.format.frames_per_day() {
                 return invalid("start timecode must lie within one day");
             }
@@ -393,10 +400,20 @@ mod tests {
         });
         assert!(s.validate().is_ok());
         s.timecode = Some(TimecodeSpec {
-            start_frame: -1,
+            start_frame: 0,
             format: TimecodeFormat::for_rate(s.rate),
             reel: None,
         });
+        assert!(s.validate().is_err(), "timecode in MP4");
+        s.container = Container::Mov;
+        assert!(s.validate().is_ok());
+        s.timecode.as_mut().unwrap().start_frame = -1;
         assert!(s.validate().is_err(), "negative timecode");
+        s.timecode.as_mut().unwrap().start_frame = 0;
+        s.timecode.as_mut().unwrap().format = TimecodeFormat::for_rate(Rate::FPS_29_97);
+        assert!(
+            s.validate().is_err(),
+            "timecode counting 30 labels on a 23.976 export"
+        );
     }
 }
