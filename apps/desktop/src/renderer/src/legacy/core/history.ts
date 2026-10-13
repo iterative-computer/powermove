@@ -92,12 +92,15 @@ export function install(PM: PMRegistry): void {
   /* Entries hold composition-independent paths (see core/compositions);
      translate them onto whichever composition is open when they replay. */
   const realize = (patches: Patch[]) => PM.Comps?.realize ? PM.Comps.realize(patches) : patches;
+  /* The native engine's write barrier (engine-doc): a writer scope with the
+     paths it writes. Without the barrier the callback simply runs. */
+  const writeAt = (paths: PathPart[][], fn: () => void, options?: { canonical?: boolean; origin?: 'undo' | 'redo' }) =>
+    PM.doc?.write ? PM.doc.write(paths, fn, options) : fn();
   const restorePatches = (patches: Patch[], origin: 'undo' | 'redo' = 'undo') => {
     PM.Comps?.prepareUndo?.(patches);
     const selection = clone(PM.sel);
-    // The native engine's write barrier: entries hold canonical paths.
-    const write = PM.doc?.write ?? ((_paths: any, fn: () => any) => fn());
-    write(patches.map(patch => patch.path), () => {
+    // History entries hold canonical paths.
+    writeAt(patches.map(patch => patch.path), () => {
       const next = applyPatch(PM.proj, realize(patches));
       PM.replaceProject(next, { selection });
     }, { canonical: true, origin });
@@ -211,8 +214,7 @@ export function install(PM: PMRegistry): void {
       pending = null;
       if (current.scoped) {
         const patches: Patch[] = [...current.scopes.values()].map((item: any) => ({ path: item.path, ...item.before }));
-        const write = PM.doc?.write ?? ((_paths: any, fn: () => any) => fn());
-        write(patches.map(patch => patch.path), () => {
+        writeAt(patches.map(patch => patch.path), () => {
           const next = applyPatch(PM.proj, patches);
           PM.replaceProject(next, selection ? { selection } : {});
         });
