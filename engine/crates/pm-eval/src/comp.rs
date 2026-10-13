@@ -111,6 +111,15 @@ impl<'d> Comp<'d> {
         self.root
     }
 
+    /// Whether the composition object is the document root (the stored
+    /// form's open composition) rather than `comps[id]`. The same id can
+    /// resolve to either over a document's history (opening another
+    /// composition moves the stored form's open one back to its `comps`
+    /// copy), so caches keyed by composition id also key on this.
+    pub fn at_root(&self) -> bool {
+        std::ptr::eq(self.node, self.root)
+    }
+
     /// The document revision this composition was resolved at.
     pub fn revision(&self) -> u64 {
         self.revision

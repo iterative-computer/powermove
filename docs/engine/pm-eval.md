@@ -30,7 +30,9 @@ deliberately differs from the TypeScript.
 legacy signatures over node references; `cx` is a `Comp` (`Comp::resolve(&doc, "compId")`).
 Nodes may be detached (`Node::from_value` of `api.model.mkLayer(type)`), so these calls keep
 no per-node state: each prepares the track it reads (about 1 µs for a four-key bezier
-track). Results are `JsResult<JsValue>`: `Err` wherever the legacy code throws.
+track). The one revision-keyed cache they read is the composition's layer index (group
+ancestry in `active`), reused only for the same `layers` node (see below). Results are
+`JsResult<JsValue>`: `Err` wherever the legacy code throws.
 
 ### By id (the JS fast path and renderers)
 
@@ -86,21 +88,34 @@ patches invalidates exactly the affected ids with no notification.
 
 - **Plans.** Each id keeps a plan: a constant, a prepared temporal track, or "read the
   nodes" (mixed tracks, expressions, throwing reads). At a new document revision a plan is
-  kept when the layer is provably the same logical layer (its id is unique in the
-  composition now and when last validated, and its `id` member did not change) and either
-  the whole layer is unchanged or, for `Channel` and `Member` (object-only paths), the
-  addressed property node is unchanged. A node's revision only moves forward and object
-  members never move between keys, so an unchanged revision proves unchanged content.
+  kept when the layer is provably the same logical layer (the composition resolved to the
+  same node path, `Comp::at_root`; the layer's id is unique in the composition now and
+  when last validated; and its `id` member did not change) and either the whole layer is
+  unchanged or, for `Channel` and `Member` (object-only paths), the addressed property node
+  is unchanged. A node's revision only moves forward, object members never move between
+  keys, and array elements only move within their array, so an unchanged revision at the
+  same path proves unchanged content. The path check matters for the stored form: its open
+  composition lives at the document root, and opening another composition makes the same
+  id resolve to the older copy in `comps`, whose nodes are unchanged but are other nodes.
   `Find` paths cross arrays (effects, masks, paths by id) and are kept only when the whole
   layer is unchanged.
 - **Last answer.** Each id keeps its last (time, answer) at the current revision. Across
   revisions it survives for non-expression plans when the plan and `layer.from` are
   unchanged; for expression plans only while the document root is unchanged.
-- **Layer indexes** are rebuilt when a composition's `layers` array changes.
+- **Layer indexes** (positions by id, used by interned ids and by `active`'s group
+  ancestry) are reused only for the same `layers` node: the same document root (address),
+  the same path (`Comp::at_root`), the same `layers` node address, and a `layers` revision
+  no newer than the one it was built at. The interned path also checks that the layer at
+  the indexed position has the addressed id; a mismatch rebuilds the index and counts in
+  `CacheStats::stale_indexes`, which stays zero unless the contract below is broken.
 - **Content-keyed caches** (spring tables, compiled expressions) never go stale.
 
-An evaluator follows one document: a lower revision than before resets it, and
-`Evaluator::reset` is for switching documents at the same revision.
+An evaluator follows one document's history; a revision names one state of that document.
+The by-id calls reset the per-document caches when they see a lower revision or another root
+node (another document, or the same document moved in memory, which only costs a replan).
+By-node calls on two live documents never share an index (their roots differ).
+`Evaluator::reset` is for replacing a document in place with an unrelated one at the same
+revision, the one case the evaluator cannot detect.
 
 Measured (native, M4 Max, release, load average 7 to 9 from other lanes; synthetic
 884-layer composition with 7,956 transform channels, 414 animated;
@@ -140,11 +155,20 @@ freshly loaded project does:
    coerced numbers.
 5. **Object member order.** `pm-model` stores object members sorted, so `allProps` lists
    non-integer member names inside one object in code point order where JavaScript uses
-   insertion order. Lookups never depend on it.
+   insertion order. Lookups never depend on it. The parity generator deep-sorts every key
+   object before evaluation, so this difference is excluded from the vectors rather than
+   measured; the dual-answer harness must compare `allProps` listings as sets per object
+   (or pm-model must keep insertion order) until it is resolved.
 6. **Prototype members.** Keys such as `constructor` read as `undefined`; JavaScript finds
    `Object.prototype`'s functions.
 7. **Expression error identity.** `PM.expressionErrors` is keyed by the channel object; the
-   engine keys by (composition, layer id, key), so two layers sharing an id share errors.
+   engine keys by (composition, layer id, key). Every channel object reached through the
+   same key of layers with the same id shares one entry: two layers sharing an id, and also
+   different objects under one key of one layer (for example `PM.active` evaluating
+   `L.on` records an error under `l.on`, and a later `evP(L, findProp(L, 'l.on'))` that
+   finds no object, where JavaScript looks up nothing, still reports it). Errors are only
+   meaningful after a call that reached a channel object; the parity test compares them
+   only then.
 8. **`comp.comps`.** For the open composition the legacy object's `comps` omits the open
    composition; the canonical document's includes it.
 
@@ -163,16 +187,28 @@ Section 25's evaluation tolerance (`1e-9 + 1e-9·|b|`) applies to transcendental
   The checked-in set compares 58,337 numbers, all bit-identical, plus about 45,000
   strings, booleans, `null`s, JSON values, and throws. `PM_EVAL_SCALE=10` gives a 32 MB set
   (552,697 numbers, about 395,000 other values) that also passes bit for bit. The generator bundled for Node (V8) writes
-  byte-identical vectors to bun (JavaScriptCore).
+  byte-identical vectors to bun (JavaScriptCore). `PM_EVAL_SEED` draws other random cases;
+  seeds 987654, 15869, and 31337 at `PM_EVAL_SCALE=2` also pass bit for bit.
 - `tests/js_sem_v8.rs` replays `tests/vectors/js-sem-vectors.json` from Node: every
   operator over 44 values pairwise, `Math.round`, `%`, `toString(radix)`, `parseInt`.
   V8's `parseInt` for radices other than 10 and powers of two skips leading zeros and folds
   32-bit parts with a fused multiply-add on arm64; the port reproduces that (an x64 V8
   rounds twice and can differ in the last bit above 2^53).
 - `tests/invalidation.rs`: plans follow patches (edits, reorders, duplicate ids, deletes,
-  renames, releases), and a random patch stream checks every cached answer against a fresh
-  evaluation (25,000 rounds and about 41,000 patches across five seeds locally, 400 rounds
-  in CI).
+  renames, releases).
+- `tests/index_identity.rs`: the stored form's open composition switching between the root
+  and its stale `comps` copy, and by-node `active` on two documents at one revision.
+- `tests/shadow.rs`: a random patch stream on the stored and the canonical form checks
+  every interned id at three times per round, and the by-node `active` of every layer,
+  against a fresh evaluator with the same mock expression engine. Batches include leaf and
+  keyframe edits, expression edits, layer inserts, deletes, and reorders in every `layers`
+  array, switching the open composition, replacing or deleting whole compositions, adding
+  and removing the stored form's top-level `layers`, and parameter edits; times repeat and
+  some rounds apply nothing or an empty batch, so the last-answer memo is exercised at one
+  revision and across revisions. `PM_EVAL_SHADOW=seed:rounds` runs one longer seed. Locally:
+  ten seeds, 225,000 rounds per form, about 268,000 patches per form, no differences and no
+  stale-index repairs. Disabling the path checks (with the id check), the last-answer rule for
+  expressions, or the `layer.from` rule each makes the default seeds fail.
 - Native and WASM: `examples/wasm_identity.rs` and `examples/identity_native.rs` digest the
   vector evaluation plus a 220,000-call `libm` sweep; both give `74dd9610e4ebff84` over
   243,703 values (and agree on the 10× set).
