@@ -55,12 +55,14 @@ function ipc(service: MediaProxyService) {
   const handlers = new Map<string, (...args: any[]) => any>();
   registerMediaProxyIpc({ handle: (channel: string, fn: (...args: any[]) => any) => handlers.set(channel, fn) } as unknown as IpcMain,
     service, { isTrustedSender: () => true });
-  let destroyed = false;
-  const sender = Object.assign(new EventEmitter(), { isDestroyed: () => destroyed, send: vi.fn() });
+  let destroyed = false, crashed = false;
+  const sender = Object.assign(new EventEmitter(), { isDestroyed: () => destroyed, isCrashed: () => crashed, send: vi.fn() });
   return {
     sender,
     call: (channel: string, value: unknown, from = sender) => handlers.get(channel)!({ sender: from } as unknown as IpcMainInvokeEvent, value),
     destroy: () => { destroyed = true; sender.emit('destroyed'); },
+    crash: () => { crashed = true; sender.emit('render-process-gone'); },
+    recover: () => { crashed = false; },
   };
 }
 
@@ -268,23 +270,90 @@ it('releases cached readers and partial writers when their window is destroyed',
   expect(await readdir(root)).toEqual(['clip.mov']);
 });
 
+it('releases media files and descriptors on renderer crash while allowing the recovered window to import again', async () => {
+  const { root, source, service } = await fixture(async () => {});
+  const bridge = ipc(service);
+  const proxy = await bridge.call(IPC.mediaProxyCreate, { sourcePath: source, name: 'clip.mov' });
+  await bridge.call(IPC.mediaProxyRead, { token: proxy.token, offset: 0, length: 3 });
+  const upload = await bridge.call(IPC.mediaPreviewBegin, 4);
+  await bridge.call(IPC.mediaPreviewChunk, { token: upload, offset: 0, data: new Uint8Array([1, 2]) });
+  bridge.crash();
+  expect(bridge.sender.isDestroyed()).toBe(false);
+  expect(service.has(proxy.token)).toBe(false);
+  expect(service.has(upload)).toBe(false);
+  await vi.waitFor(async () => {
+    expect(io.handles.every(item => item.handle.fd === -1)).toBe(true);
+    expect(await readdir(root)).toEqual(['clip.mov']);
+  });
+  expect(bridge.sender.listenerCount('destroyed')).toBe(0);
+  expect(bridge.sender.listenerCount('render-process-gone')).toBe(0);
+  bridge.recover();
+  const next = await bridge.call(IPC.mediaPreviewBegin, 4);
+  await bridge.call(IPC.mediaPreviewChunk, { token: next, offset: 0, data: new Uint8Array([3, 4]) });
+  expect(service.has(next)).toBe(true);
+  await bridge.call(IPC.mediaProxyRelease, next);
+});
+
+it('does not adopt an old renderer conversion that finishes after the same window recovers', async () => {
+  const { root, source } = await fixture();
+  const gate = deferred(), started = deferred();
+  const service = new MediaProxyService(root, async (input, output) => {
+    started.resolve(); await gate.promise; await copyFile(input, output);
+  });
+  services.push(service);
+  const bridge = ipc(service);
+  const creating = bridge.call(IPC.mediaProxyCreate, { sourcePath: source, name: 'clip.mov' });
+  await started.promise;
+  bridge.crash(); bridge.recover();
+  gate.resolve();
+  expect(await creating).toMatchObject({ ok: false, error: expect.stringContaining('renderer') });
+  expect(await readdir(root)).toEqual(['clip.mov']);
+  expect(bridge.sender.listenerCount('destroyed')).toBe(0);
+  expect(bridge.sender.listenerCount('render-process-gone')).toBe(0);
+  const next = await bridge.call(IPC.mediaProxyCreate, { sourcePath: source, name: 'clip.mov' });
+  expect(next).toMatchObject({ ok: true });
+  await bridge.call(IPC.mediaProxyRelease, next.token);
+});
+
+it('does not send cancelled animation progress into the replacement renderer', async () => {
+  const { root } = await fixture();
+  const gate = deferred(), started = deferred();
+  const service = new MediaProxyService(root, copyFile, async (_pattern, _fps, _count, output, onProgress) => {
+    onProgress?.(0); started.resolve(); await gate.promise;
+    onProgress?.(1); await writeFile(output, 'animation');
+  });
+  services.push(service);
+  const bridge = ipc(service);
+  const token = await bridge.call(IPC.mediaAnimationBegin, { fps: 30, repeats: [1] });
+  await bridge.call(IPC.mediaAnimationFrame, { token, index: 0, offset: 0, data: new Uint8Array([1]) });
+  const finishing = bridge.call(IPC.mediaAnimationFinish, { token, requestId: 'animation-old' });
+  await started.promise;
+  expect(bridge.sender.send).toHaveBeenCalledExactlyOnceWith(IPC.mediaAnimationProgress, { requestId: 'animation-old', completed: 0 });
+  bridge.crash(); bridge.recover(); gate.resolve();
+  expect(await finishing).toMatchObject({ ok: false });
+  expect(bridge.sender.send).toHaveBeenCalledOnce();
+  expect(await readdir(root)).toEqual(['clip.mov']);
+});
+
 it('detaches the window listener on explicit release and failed conversion', async () => {
   const { source, service } = await fixture(async () => { throw new Error('decode failed'); });
   const bridge = ipc(service);
   const proxy = await bridge.call(IPC.mediaProxyCreate, { sourcePath: source, name: 'clip.mov' });
   await bridge.call(IPC.mediaProxyRelease, proxy.token);
   expect(bridge.sender.listenerCount('destroyed')).toBe(0);
+  expect(bridge.sender.listenerCount('render-process-gone')).toBe(0);
   const upload = await bridge.call(IPC.mediaPreviewBegin, 1);
   await bridge.call(IPC.mediaPreviewChunk, { token: upload, offset: 0, data: new Uint8Array([1]) });
   await expect(bridge.call(IPC.mediaPreviewFinish, upload)).rejects.toThrow('decode failed');
   expect(bridge.sender.listenerCount('destroyed')).toBe(0);
+  expect(bridge.sender.listenerCount('render-process-gone')).toBe(0);
   expect(io.handles.every(item => item.handle.fd === -1)).toBe(true);
 });
 
 it('preserves capability reads and release from another trusted window', async () => {
   const { source, service } = await fixture();
   const bridge = ipc(service);
-  const another = Object.assign(new EventEmitter(), { isDestroyed: () => false, send: vi.fn() });
+  const another = Object.assign(new EventEmitter(), { isDestroyed: () => false, isCrashed: () => false, send: vi.fn() });
   const proxy = await bridge.call(IPC.mediaProxyCreate, { sourcePath: source, name: 'clip.mov' });
   expect([...await bridge.call(IPC.mediaProxyRead, { token: proxy.token, offset: 5, length: 2 }, another)]).toEqual([6, 7]);
   await bridge.call(IPC.mediaProxyRelease, proxy.token, another);

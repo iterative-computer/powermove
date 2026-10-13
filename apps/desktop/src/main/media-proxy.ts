@@ -19,6 +19,7 @@ import { orderedSequence, validSequenceFps } from '../shared/image-sequence';
 import { MAX_SEQUENCE_FRAMES } from '../shared/animated-image';
 import { CONVERTED_VIDEO_EXTENSIONS, NATIVE_VIDEO_EXTENSIONS, mediaExtension, needsImageConversion } from '../shared/media-formats';
 import { spawnWithRetry } from './spawn-retry';
+import { isRendererUnavailable } from './renderer-recovery';
 
 const execFileAsync = promisify(execFile);
 const STILL_TIMEOUT_MS = 2 * 60 * 1000;
@@ -479,15 +480,16 @@ export function registerMediaProxyIpc(
     tokens.delete(token); owner.tokens.delete(token);
     if (owner.tokens.size === 0) {
       owner.sender.removeListener('destroyed', owner.destroyed);
+      owner.sender.removeListener('render-process-gone', owner.destroyed);
       owners.delete(owner.sender);
     }
   };
   service.onRelease(forget);
   const own = async (event: IpcMainInvokeEvent, token: string): Promise<string> => {
     if (!service.has(token)) throw new Error('The playback proxy has expired');
-    if (event.sender.isDestroyed()) {
+    if (isRendererUnavailable(event.sender)) {
       await service.release(token);
-      throw new Error('The media window has closed');
+      throw new Error('The media renderer has closed or crashed');
     }
     let owner = owners.get(event.sender);
     if (!owner) {
@@ -496,13 +498,32 @@ export function registerMediaProxyIpc(
       } };
       owners.set(event.sender, owner);
       event.sender.once('destroyed', owner.destroyed);
+      event.sender.once('render-process-gone', owner.destroyed);
     }
     owner.tokens.add(token); tokens.set(token, owner);
     return token;
   };
+  const createOwned = async <T extends { token: string }>(event: IpcMainInvokeEvent,
+    create: (isCurrent: () => boolean) => Promise<T>): Promise<T> => {
+    // A recovered WebContents is the same object, but its old request cannot
+    // deliver tokens or progress to the replacement renderer.
+    let rendererGone = false;
+    const gone = () => { rendererGone = true; };
+    const isCurrent = () => !rendererGone && !isRendererUnavailable(event.sender);
+    event.sender.once('render-process-gone', gone);
+    try {
+      const result = await create(isCurrent);
+      if (!isCurrent()) {
+        await service.release(result.token);
+        throw new Error('The media renderer has closed or crashed');
+      }
+      await own(event, result.token);
+      return result;
+    } finally { event.sender.removeListener('render-process-gone', gone); }
+  };
   ipcMain.handle(IPC.mediaPreviewBegin, async (event, size: number) => {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
-    return own(event, await service.beginPreview(size));
+    return (await createOwned(event, async () => ({ token: await service.beginPreview(size) }))).token;
   });
   ipcMain.handle(IPC.mediaPreviewChunk, async (event, value: unknown) => {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
@@ -518,8 +539,7 @@ export function registerMediaProxyIpc(
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     const request = proxyRequest(value);
     try {
-      const proxy = await service.create(request.sourcePath);
-      await own(event, proxy.token);
+      const proxy = await createOwned(event, () => service.create(request.sourcePath));
       return {
         ok: true,
         token: proxy.token,
@@ -544,10 +564,9 @@ export function registerMediaProxyIpc(
       throw new IpcValidationError(IPC.mediaSequenceCreate, 'invalid request id');
     }
     try {
-      const proxy = await service.createSequence(sourcePaths, fps, completed => {
-        if (requestId && !event.sender.isDestroyed()) event.sender.send(IPC.mediaSequenceProgress, { requestId, completed });
-      });
-      await own(event, proxy.token);
+      const proxy = await createOwned(event, isCurrent => service.createSequence(sourcePaths, fps, completed => {
+        if (requestId && isCurrent()) event.sender.send(IPC.mediaSequenceProgress, { requestId, completed });
+      }));
       return { ok: true, ...proxy, type: 'video/webm' };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : 'Could not import image sequence' };
@@ -558,7 +577,7 @@ export function registerMediaProxyIpc(
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     if (!value || typeof value !== 'object') throw new IpcValidationError(IPC.mediaAnimationBegin, 'expected an object');
     const { fps, repeats } = value as { fps: number; repeats: number[] };
-    return own(event, await service.beginAnimation(fps, repeats));
+    return (await createOwned(event, async () => ({ token: await service.beginAnimation(fps, repeats) }))).token;
   });
 
   ipcMain.handle(IPC.mediaAnimationFrame, async (event, value: unknown) => {
@@ -583,7 +602,7 @@ export function registerMediaProxyIpc(
     }
     try {
       const proxy = await service.finishAnimation(token, completed => {
-        if (requestId && !event.sender.isDestroyed()) event.sender.send(IPC.mediaAnimationProgress, { requestId, completed });
+        if (requestId && service.has(token) && !isRendererUnavailable(event.sender)) event.sender.send(IPC.mediaAnimationProgress, { requestId, completed });
       });
       return { ok: true, ...proxy, type: 'video/webm' };
     } catch (error) {
@@ -597,8 +616,7 @@ export function registerMediaProxyIpc(
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     const request = proxyRequest(value, IPC.mediaImageCreate);
     try {
-      const proxy = await service.createStillImage(request.sourcePath);
-      await own(event, proxy.token);
+      const proxy = await createOwned(event, () => service.createStillImage(request.sourcePath));
       return { ok: true, ...proxy, type: 'image/png' };
     } catch (error) {
       return { ok: false, error: error instanceof Error && error.message
