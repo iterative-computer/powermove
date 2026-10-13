@@ -611,3 +611,48 @@ fn mp4_cannot_carry_timecode() {
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Audio may arrive before the first frame or after the last; the muxer queues it.
+#[test]
+fn audio_before_and_after_video_still_interleaves() {
+    let dir = scratch("audio-order");
+    for (i, audio_first) in [true, false].into_iter().enumerate() {
+        let mut s = spec(
+            &dir,
+            &format!("Order{i}"),
+            Codec::ProRes(ProResProfile::Proxy),
+            Container::Mov,
+        );
+        s.rate = Rate::FPS_24;
+        s.frames = 48;
+        s.audio = Some(AudioSpec {
+            sample_rate: 48_000,
+            channels: 1,
+        });
+        let mut job = export(s.clone()).unwrap();
+        let audio = tone(96_000, 1, 0, 48_000.0);
+        if audio_first {
+            job.push_audio(&audio).unwrap();
+        }
+        for f in 0..48 {
+            let px = picture(s.width, s.height, f, false);
+            job.push_frame(&WorkingFrame {
+                width: s.width,
+                height: s.height,
+                rgba: &px,
+            })
+            .unwrap();
+        }
+        if !audio_first {
+            job.push_audio(&audio).unwrap();
+        }
+        let r = job.finish().unwrap().report;
+        let a = r.audio.unwrap();
+        assert_eq!(
+            (a.channels, a.samples),
+            (1, 96_000),
+            "audio first: {audio_first}"
+        );
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
