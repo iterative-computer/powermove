@@ -78,12 +78,15 @@ function statusMessage(enabled: boolean, status: NativeEngineStatus | null): Eng
   return { enabled, processes: { interactive: one('interactive'), job: one('job') } };
 }
 
+/** Largest staged resync document (the largest corpus history is 60 MB). */
+const MAX_STAGED_BYTES = 256 * 1024 ** 2;
+
 function validStageRequest(value: unknown): value is StageDocumentRequest {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
   return (v['process'] === 'interactive' || v['process'] === 'job') &&
     typeof v['session'] === 'number' && Number.isSafeInteger(v['session']) && (v['session'] as number) >= 0 &&
-    v['bytes'] instanceof Uint8Array && v['bytes'].byteLength > 0 && v['bytes'].byteLength <= 1024 ** 3;
+    v['bytes'] instanceof Uint8Array && v['bytes'].byteLength > 0 && v['bytes'].byteLength <= MAX_STAGED_BYTES;
 }
 
 export function installNativeEngine(options: InstallNativeEngineOptions): InstalledNativeEngine {

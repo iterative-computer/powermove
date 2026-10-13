@@ -146,10 +146,16 @@ export class EngineSupervisor {
       }
     };
     this.launch = launch;
+    let fatal: string | null = null;
     child.on('message', (notice: unknown) => {
       if (!isEngineNotice(notice)) return;
       if (notice.type === 'log') this.options.log(notice.level, `[${process} engine] ${notice.message}`);
-      else if (notice.type === 'fatal') this.options.log('error', `[${process} engine] ${notice.message}`);
+      else if (notice.type === 'fatal') {
+        // The engine cannot run in this installation (the addon is missing
+        // or does not load): restarting would only repeat it.
+        fatal = notice.message;
+        this.options.log('error', `[${process} engine] ${notice.message}`);
+      }
       else if (notice.type === 'started') {
         // The engine stamped `clock` just before posting; main reads its
         // own host clock on arrival. A large or negative difference means
@@ -159,7 +165,7 @@ export class EngineSupervisor {
         this.options.log('info', `the ${process} engine started (pid ${notice.pid}, ${notice.build}${skew === null ? '' : `, clock delivered after ${skew} µs`})`);
       }
     });
-    child.on('exit', (code: number) => this.onExit(launch, code));
+    child.on('exit', (code: number) => this.onExit(launch, code, fatal));
     child.postMessage({ type: 'connect', port: hostPort, peer: 'host' } satisfies EngineControl, [port1]);
     connection.open().then(
       async () => {
@@ -183,7 +189,7 @@ export class EngineSupervisor {
     );
   }
 
-  private onExit(launch: Launch | null, code: number): void {
+  private onExit(launch: Launch | null, code: number, fatal: string | null = null): void {
     if (launch && this.launch !== launch) return;
     const process = this.options.process;
     this.child = null;
@@ -193,6 +199,13 @@ export class EngineSupervisor {
       if (launch) for (const l of this.listeners) l.ended?.(launch, null);
       this.setState('stopped');
       this.resolveStopped?.();
+      return;
+    }
+    if (fatal !== null) {
+      const report = crashReport(process, this.restart.attempts, `${describeExit(code < 0 ? null : code)}: ${fatal}`, [], [], 0);
+      this.options.log('error', `the ${process} engine cannot run here and stays stopped: ${fatal}`);
+      if (launch) for (const l of this.listeners) l.ended?.(launch, report);
+      this.setState('stopped');
       return;
     }
     const { attempt, delayMs } = this.restart.crashed();

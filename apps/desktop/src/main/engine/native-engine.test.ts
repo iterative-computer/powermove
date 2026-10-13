@@ -66,13 +66,20 @@ class FakeEngine implements ChildLike {
   ports = new Map<number, { port: FakePort; peer: string }>();
   received: Envelope[] = [];
   private exitListeners: Array<(code: number) => void> = [];
+  private messageListeners: Array<(message: unknown) => void> = [];
   dead = false;
 
   constructor(readonly process: EngineProcess) {}
 
   on(event: string, listener: never): this {
     if (event === 'exit') this.exitListeners.push(listener);
+    if (event === 'message') this.messageListeners.push(listener);
     return this;
+  }
+
+  /** A notice from the engine process to main (over its parent port). */
+  notify(notice: unknown): void {
+    for (const l of this.messageListeners) l(notice);
   }
 
   postMessage(message: unknown, transfer?: PortLike[]): void {
@@ -332,6 +339,19 @@ describe('NativeEngine with fake engines', () => {
     expect(ok.message.kind === 'response' && ok.message.body.type === 'handleResolved' && ok.message.body.access).toBe('readWrite');
     const otherEngine = await live('job').ask({ type: 'resolveHandle', handle: staged.handle, session: 3 });
     expect(otherEngine.message.kind).toBe('error');
+  });
+
+  it('does not restart an engine that cannot load', async () => {
+    const reports: CrashReport[] = [];
+    host.listen({ crash: (r) => reports.push(r) });
+    const engine = live('job');
+    engine.notify({ type: 'fatal', message: 'could not load the engine: image not found' });
+    engine.exit(70);
+    await settle();
+    expect(host.status().job.state).toBe('stopped');
+    expect(timers).toHaveLength(0);
+    expect(reports[0]).toMatchObject({ process: 'job', restartInMs: 0 });
+    expect(reports[0]!.exit).toContain('image not found');
   });
 
   it('stops without restarting', async () => {
