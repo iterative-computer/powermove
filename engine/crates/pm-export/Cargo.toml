@@ -16,5 +16,20 @@ pm-time = { path = "../pm-time" }
 thiserror.workspace = true
 libm.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# exception: AVFoundation reports misuse by raising Objective-C exceptions; they become errors.
+objc2 = { version = "0.6.5", features = ["exception"] }
+block2 = "0.6.2"
+objc2-foundation = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-core-video = { version = "0.3.2", features = ["objc2-io-surface"] }
+# Enables the IOSurfaceRef CF type objc2-core-video needs.
+objc2-io-surface = "0.3.2"
+objc2-core-media = "0.3.2"
+objc2-core-audio-types = "0.3.2"
+objc2-avf-audio = { version = "0.3.2", default-features = false, features = ["std", "AVAudioSettings"] }
+objc2-video-toolbox = { version = "0.3.2", features = ["objc2-core-media", "objc2-core-video", "objc2-foundation"] }
+objc2-av-foundation = { version = "0.3.2", features = ["objc2-core-media", "objc2-core-video", "objc2-core-foundation"] }
+
 [dev-dependencies]
 sha2.workspace = true

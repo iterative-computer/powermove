@@ -20,12 +20,18 @@ pub mod settings;
 pub mod timescale;
 pub mod verify;
 
+#[cfg(target_os = "macos")]
+pub mod mac;
+
 use std::path::PathBuf;
 
 pub use convert::{EncoderInput, WorkingFrame};
 pub use pipeline::{Pipeline, Sink};
 pub use settings::*;
 pub use verify::VerifyReport;
+
+#[cfg(target_os = "macos")]
+pub use mac::{Delivered, Export, export};
 
 /// Export errors.
 #[derive(Debug, thiserror::Error)]
