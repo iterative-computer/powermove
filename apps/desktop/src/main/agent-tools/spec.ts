@@ -49,7 +49,7 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   },
   {
     name: 'get_project_state',
-    description: 'Read live composition, selection, layers, properties, keyframes and revision. For large projects use indexOnly=true for compact layer metadata, follow pagination.nextLayerOffset until null, or use layerSearch (case-insensitive name/ID). Then read layerId, nextPropertyOffset and keyframeOffset/keyframeLimit for full target details. Omitted entries are not unavailable capabilities. Refresh after edits/revision conflicts before retrying commands.',
+    description: 'Honor the project memory index (goal, rules, open items and latest decisions); use project_memory for details. Read live composition, selection, layers, properties, keyframes and revision. For large projects use indexOnly=true for compact layer metadata, follow pagination.nextLayerOffset until null, or use layerSearch (case-insensitive name/ID). Then read layerId, nextPropertyOffset and keyframeOffset/keyframeLimit for full target details. Omitted entries are not unavailable capabilities. Refresh after edits/revision conflicts before retrying commands.',
     inputSchema: closedObject({ indexOnly: { type: 'boolean' }, layerSearch: { type: 'string', maxLength: 200 }, layerOffset: { type: 'integer', minimum: 0 }, layerLimit: { type: 'integer', minimum: 1 }, keyframeOffset: { type: 'integer', minimum: 0 }, layerId: { type: 'string' }, propertyOffset: { type: 'integer', minimum: 0 }, propertyLimit: { type: 'integer', minimum: 1 }, keyframeLimit: { type: 'integer', minimum: 0 }, cueOffset: { type: 'integer', minimum: 0 }, cueLimit: { type: 'integer', minimum: 0 } })
   },
   {
@@ -71,6 +71,19 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
     name: 'manage_media',
     description: 'Manage project media with normal editor Undo: rename one asset, move assetIds to folderId (null = root), delete assets, create_folder/rename_folder/delete_folder, or move_folder with folderId and parentId (null = root). Deleting a folder keeps its contents. Deleting referenced media requires removeReferenced: true and the user request to remove its referencing layers; locked references always block deletion. Read list_media first. No files on disk are deleted. Media actions cannot be snapshot-rolled back; use editor Undo.',
     inputSchema: closedObject({ operation: { type: 'string', enum: ['rename', 'move', 'delete', 'create_folder', 'rename_folder', 'move_folder', 'delete_folder'] }, assetIds: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 100, uniqueItems: true }, name: { type: 'string', minLength: 1, maxLength: 160 }, folderId: { type: ['string', 'null'] }, parentId: { type: ['string', 'null'] }, removeReferenced: { type: 'boolean' } }, ['operation'])
+  },
+  {
+    name: 'project_memory',
+    description: 'Read or write this project\'s memory: the goal, standing rules, decisions and rejected ideas that explain why the video looks as it does. get_project_state shows the current index; use list for older entries. Write only what a later agent could not see from the project itself: a lasting rule or preference from the user (constraint), a real choice with its reason (decision), an idea you tried and backed out (rejected), what the user asked for or disliked (feedback), unfinished work (open), or a change to what the video is for (goal; there is one, so adding it edits the current goal). Do not log routine edits, and update an entry instead of adding a contradicting one.',
+    inputSchema: closedObject({
+      operation: { type: 'string', enum: ['list', 'add', 'update', 'remove'] },
+      id: { type: 'string', maxLength: 80 },
+      kind: { type: 'string', enum: ['goal', 'constraint', 'decision', 'rejected', 'feedback', 'open'] },
+      text: { type: 'string', maxLength: 600 },
+      why: { type: 'string', maxLength: 600 },
+      resolved: { type: 'boolean' },
+      limit: { type: 'integer', minimum: 1, maximum: 100 }
+    }, ['operation'])
   },
   {
     name: 'select_layers',

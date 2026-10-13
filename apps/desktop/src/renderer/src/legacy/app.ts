@@ -11,6 +11,7 @@ import { canAnimateContent, isProperty } from './core/content-properties';
 import { normalizeExportDefaults, type ExportDefaults } from '../core/export-defaults';
 import { compactEditLog } from '../core/edit-log';
 import { normalizeCaptionsContent } from '../captions/model';
+import { sanitizeMemory } from '../core/memory';
 import type { PMRegistry } from './registry';
 import { packProjectFileBlob, readProjectFileDocument, saveIncrementalProject, restoreProjectFileMedia, restoreProjectFileStream, unpackProjectFileBlob, unpackProjectFile } from './core/project-file';
 import { projectFingerprint } from './core/project-fingerprint';
@@ -179,6 +180,7 @@ function hydrate(p: any) {
   const base = PM.mkProject({ name: p.name, w: p.w, h: p.h, fps: p.fps, dur: p.dur, bg: p.bg });
   Object.assign(base, p);
   base.edits = compactEditLog(Array.isArray(p.edits) ? p.edits : []);
+  if (Array.isArray(p.memory)) base.memory = sanitizeMemory(p.memory);
   base.backgroundFill = PM.normalizeFill(p.backgroundFill, p.bg || '#000000');
   base.bg = base.backgroundFill.stops[0].color;
   base.layers = Array.isArray(p.layers) ? p.layers : [];

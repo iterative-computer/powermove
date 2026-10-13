@@ -5,13 +5,15 @@
   import { createCompatibleSettingsControl } from '../legacy/ui/compatible-settings';
   import { createExtensionSettingsControl } from '../legacy/ui/extension-settings';
   import { createProjectSettingsControl, type ProjectSettingsBridge } from '../legacy/ui/project-settings';
+  import { memoryEnabled } from '../core/memory';
+  import { MEMORY_KINDS, type MemoryEntry, type MemoryKind } from '../core/types/project';
   import { mountSquircles } from './squircle';
   import { clearSettingsSearch, searchSettings } from './search';
   import Avatar from '../cloud/Avatar.svelte';
   import { applyAccount, cloudBridge, openSignIn, signOut, subscribeAccount, type CloudUser } from '../cloud/account';
   import TranscriptionSettings from '../transcription/TranscriptionSettings.svelte';
 
-  export type SettingsPage = 'general' | 'accounts' | 'transcription' | 'extensions' | 'project';
+  export type SettingsPage = 'general' | 'accounts' | 'transcription' | 'extensions' | 'project' | 'memory';
 
   let { PM, projectBridge }: {
     PM: Record<string, any>;
@@ -26,7 +28,8 @@
     {
       title: 'Project',
       items: [
-        { id: 'project', label: 'Project', icon: 'frame' }
+        { id: 'project', label: 'Project', icon: 'frame' },
+        { id: 'memory', label: 'Memory', icon: 'list' }
       ]
     },
     {
@@ -39,6 +42,18 @@
       ]
     }
   ];
+
+  /* Pages that edit the open project, so they only exist inside the editor. */
+  const PROJECT_PAGES: SettingsPage[] = ['project', 'memory'];
+
+  const MEMORY_SECTIONS: Record<MemoryKind, { title: string }> = {
+    goal: { title: 'Goal' },
+    constraint: { title: 'Rules' },
+    open: { title: 'Open items' },
+    decision: { title: 'Decisions' },
+    rejected: { title: 'Rejected ideas' },
+    feedback: { title: 'Feedback' }
+  };
 
   const APPEARANCE: Array<[value: string, label: string]> = [
     ['system', 'Match system'],
@@ -74,6 +89,15 @@
   let matchCount = $state(0);
   let lastFocus: HTMLElement | null = null;
   let account = $state<CloudUser | null>(null);
+  let memoryOn = $state(true);
+  let memoryEntries = $state.raw<MemoryEntry[]>([]);
+  const memorySections = $derived(MEMORY_KINDS
+    .map((kind) => ({
+      kind,
+      title: MEMORY_SECTIONS[kind].title,
+      entries: memoryEntries.filter((entry) => entry.kind === kind).sort((a, b) => b.updatedAt - a.updatedAt)
+    }))
+    .filter((section) => section.entries.length > 0));
   let rememberInstalls = $state(true);
   let accountBusy = $state(false);
   let workspaceImportBusy = $state(false);
@@ -87,12 +111,28 @@
     .map((group) => ({
       ...group,
       items: group.items.filter((item) =>
-        (item.id !== 'project' || hasProject)
+        (!PROJECT_PAGES.includes(item.id) || hasProject)
         && (!query || matchedPages.includes(item.id)))
     }))
     .filter((group) => group.items.length > 0));
   const visibleItems = $derived(groups.flatMap((group) => group.items));
-  const pages = $derived(NAV.flatMap((group) => group.items).filter((item) => item.id !== 'project' || hasProject));
+  const pages = $derived(NAV.flatMap((group) => group.items).filter((item) => !PROJECT_PAGES.includes(item.id) || hasProject));
+
+  function readMemory(): void {
+    memoryOn = memoryEnabled(PM.proj);
+    memoryEntries = [...(PM.proj?.memory ?? [])];
+  }
+
+  function toggleMemory(): void {
+    if (!PM.proj) return;
+    memoryOn = !memoryOn;
+    /* A project setting, not a video edit: it takes no revision or Undo step. */
+    if (memoryOn) delete PM.proj.memoryEnabled; else PM.proj.memoryEnabled = false;
+    PM.autosave?.();
+  }
+
+  const memoryDate = (time: number): string =>
+    new Date(time).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 
   function buildProject(): void {
     if (!controls) return;
@@ -229,6 +269,14 @@
       if (page === 'project' && !controls?.project) page = 'general';
     };
     const offs = ['project', 'projects:screen'].map((event) => PM.bus?.on?.(event, rebuild));
+    return () => offs.forEach((off) => off?.());
+  });
+
+  /* The notes change while the screen is open: an agent run adds them. */
+  $effect(() => {
+    if (!shown) return;
+    readMemory();
+    const offs = ['project', 'memory', 'projects:screen'].map((event) => PM.bus?.on?.(event, readMemory));
     return () => offs.forEach((off) => off?.());
   });
 
@@ -591,6 +639,52 @@
                 <p>Composition size and timing, and the export settings this project starts from.</p>
               </header>
               <div class="sg-sections" use:host={controls?.project?.element}></div>
+            {:else if item.id === 'memory'}
+              <header class="sg-heading">
+                <h2>Memory</h2>
+                <p>Notes agents keep about this project: what the video is for, and why it looks the way it does.</p>
+              </header>
+              <section class="sg-section">
+                <h3 class="sg-section-title">Project memory</h3>
+                <div class="sg-group">
+                  <div class="settings-row">
+                    <div class="settings-copy">
+                      <b>Use project memory</b>
+                      <span>Agents read these notes before they edit, and add to them as they work. Turning it off keeps the notes but hides them from agents.</span>
+                    </div>
+                    <button class="toggle" class:on={memoryOn} type="button" aria-pressed={memoryOn} aria-label="Use project memory"
+                      onclick={toggleMemory}
+                    ><i aria-hidden="true"></i></button>
+                  </div>
+                </div>
+              </section>
+              {#each memorySections as section (section.kind)}
+                <section class="sg-section" class:is-dim={!memoryOn}>
+                  <h3 class="sg-section-title">{section.title}</h3>
+                  <div class="sg-group">
+                    {#each section.entries as entry (entry.id)}
+                      <div class="settings-row memory-entry" class:is-resolved={entry.resolved}>
+                        <div class="settings-copy">
+                          <b>{entry.text}</b>
+                          {#if entry.why}<span>{entry.why}</span>{/if}
+                          <span class="memory-meta">{entry.author === 'user' ? 'You' : 'Agent'} · {memoryDate(entry.updatedAt)}{entry.resolved ? ' · Resolved' : ''}</span>
+                        </div>
+                      </div>
+                    {/each}
+                  </div>
+                </section>
+              {:else}
+                <section class="sg-section">
+                  <div class="sg-group">
+                    <div class="settings-row">
+                      <div class="settings-copy">
+                        <b>No notes yet</b>
+                        <span>When an agent records a goal, rule or decision for this project, it will show up here.</span>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              {/each}
             {/if}
           </div>
         {/each}

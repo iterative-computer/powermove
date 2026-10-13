@@ -122,6 +122,46 @@ describe('agent harness oracle', () => {
     expect(JSON.stringify(PM.proj)).toBe(before);
   });
 
+  it('writes project memory without a revision bump, then shows it in project state', async () => {
+    const PM = harnessEditor();
+    PM.autosave = vi.fn();
+    const revision = PM.proj.revision;
+    const call = (args: Record<string, unknown>) => PM.AgentHarness.test.handleLiveAgentTool({
+      runId: 'memory', callId: 'memory', tool: 'project_memory', arguments: args, baseRevision: 0
+    });
+    const parse = (response: any) => JSON.parse(response.content[0].text);
+    const goal = parse(await call({ operation: 'add', kind: 'goal', text: '30s teaser' }));
+    parse(await call({ operation: 'add', kind: 'rejected', text: 'Zoom transition', why: 'looked wrong' }));
+    expect(goal.entry).toMatchObject({ kind: 'goal', author: 'agent' });
+    expect(PM.proj.revision).toBe(revision);
+    expect(PM.autosave).toHaveBeenCalledTimes(2);
+
+    const state = parse(await PM.AgentHarness.test.handleLiveAgentTool({
+      runId: 'memory', callId: 'state', tool: 'get_project_state', arguments: {}, baseRevision: 0
+    }));
+    expect(state.memory.goal.text).toBe('30s teaser');
+    expect(state.memory.recent.map((entry: any) => entry.text)).toEqual(['Zoom transition']);
+    expect(parse(await call({ operation: 'list', kind: 'rejected' })).memory).toHaveLength(1);
+    await expect(call({ operation: 'update', id: 'missing', text: 'x' })).rejects.toThrow('No memory entry');
+  });
+
+  it('hides project memory from agents while it is turned off, and keeps the notes', async () => {
+    const PM = harnessEditor();
+    PM.autosave = vi.fn();
+    const call = (tool: string, args: Record<string, unknown>) => PM.AgentHarness.test.handleLiveAgentTool({
+      runId: 'memory-off', callId: tool, tool, arguments: args, baseRevision: 0
+    });
+    await call('project_memory', { operation: 'add', kind: 'constraint', text: 'Brand blue only' });
+    PM.proj.memoryEnabled = false;
+    const state = JSON.parse((await call('get_project_state', {})).content[0].text);
+    expect(state.memory).toEqual({ enabled: false });
+    await expect(call('project_memory', { operation: 'list' })).rejects.toThrow('turned off');
+    await expect(call('project_memory', { operation: 'add', kind: 'decision', text: 'x' })).rejects.toThrow('turned off');
+    expect(PM.proj.memory).toHaveLength(1);
+    delete PM.proj.memoryEnabled;
+    expect(JSON.parse((await call('get_project_state', {})).content[0].text).memory.constraints).toHaveLength(1);
+  });
+
   it('observes source without capturing frames unless the agent requests times', async () => {
     const PM = harnessEditor();
     const snapshot = vi.fn(PM.Export.snapshot);

@@ -416,6 +416,23 @@ export interface EditLogEntry {
   payloadOmitted?: boolean;
 }
 
+export const MEMORY_KINDS = ['goal', 'constraint', 'decision', 'rejected', 'feedback', 'open'] as const;
+export type MemoryKind = typeof MEMORY_KINDS[number];
+
+/** One note in a project's memory: what the video is for, and why it looks as it does. */
+export interface MemoryEntry {
+  id: string;
+  kind: MemoryKind;
+  text: string;
+  /** The reason behind a decision, or what was wrong with a rejected idea. */
+  why?: string;
+  author: 'agent' | 'user';
+  createdAt: number;
+  updatedAt: number;
+  /** Open items and feedback stay listed until resolved. */
+  resolved?: boolean;
+}
+
 /**
  * A nested composition is created with mkProject too. It consequently carries
  * the same serializable fields as the root project, including its own `comps`
@@ -451,6 +468,10 @@ export interface Comp {
   library?: Record<string, unknown>;
   /** Free-form project notes are persisted by the demo and user projects. */
   notes?: string;
+  /** Typed intent and decisions that let a later agent see where the video is heading. */
+  memory?: MemoryEntry[];
+  /** Project memory is on unless this is false; the entries are kept while it is off. */
+  memoryEnabled?: boolean;
 }
 
 export interface Project extends Comp {

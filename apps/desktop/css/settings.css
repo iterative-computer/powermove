@@ -203,3 +203,7 @@ body:has(#settings-screen.on) #body,body:has(#settings-screen.on) #status,body:h
 @media (prefers-reduced-motion:reduce){}
 
 .sg-column .settings-background-control>.color-field{width:100%;height:30px;padding:0 10px 0 6px;border:0;border-radius:var(--sg-control-radius);background:var(--bg-float);box-shadow:none}
+.sg-section.is-dim{opacity:.45;transition:opacity var(--dur-1)}
+.sg-column .memory-entry{user-select:text;-webkit-user-select:text}
+.memory-entry.is-resolved>.settings-copy>b{color:var(--tx-3);text-decoration:line-through}
+.memory-entry .memory-meta{margin-top:2px;font-size:var(--fs-xs,11px);color:var(--tx-4,var(--tx-3))}

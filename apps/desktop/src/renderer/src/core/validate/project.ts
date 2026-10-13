@@ -3,6 +3,7 @@ import { normalizeColorDepth } from '../color-depth';
 import { canAnimateContent, isProperty } from '../../legacy/core/content-properties';
 import { adoptTemporalEase } from '../anim/temporal-ease';
 import { compactEditLog } from '../edit-log';
+import { sanitizeMemory } from '../memory';
 import { normalizeCompositions } from '../../legacy/core/compositions';
 import { normalizeCaptionsContent } from '../../captions/model';
 import {
@@ -683,7 +684,9 @@ export function sanitizeProject(raw: unknown): Project {
     edits: sanitizeEdits(source.edits),
     created: finite(source.created, Date.now()),
     shutter: source.shutter == null ? 0.5 : finite(source.shutter, 0.5),
-    ...(source.audioGain != null ? { audioGain: clamp(finite(source.audioGain, 1), 0, 4) } : {})
+    ...(source.audioGain != null ? { audioGain: clamp(finite(source.audioGain, 1), 0, 4) } : {}),
+    ...(Array.isArray(source.memory) ? { memory: sanitizeMemory(source.memory) } : {}),
+    ...(source.memoryEnabled === false ? { memoryEnabled: false } : {})
   };
   if (isRecord(source.comps)) {
     for (const [id, value] of Object.entries(source.comps)) {

@@ -12,6 +12,7 @@ import { editScene } from '../../core/scene3d/operations';
 import { compositionScene,layer3DRole } from '../../core/scene3d/layers';
 import { SCENE3D_DEFINITION, sceneProperties,parseScene } from '../../core/scene3d/schema';
 import { validateEffect } from '../../kernel/glsl';
+import { applyMemoryOperation, listMemory, memoryEnabled, memoryIndex, MEMORY_DISABLED_MESSAGE, type MemoryOperation } from '../../core/memory';
 import { COMMAND_JSON_LIMIT } from '../../../../shared/edit-limits';
 import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
 import { TRANSCRIPTION_MODEL_MISSING } from '../../../../shared/transcription';
@@ -145,6 +146,7 @@ function projectState(options: any = {}) {
     threeDEditingTool:'edit_3d',
     modelAssets:options.indexOnly ? [] : Object.values<any>(p.assets || {}).filter(a=>a.kind==='model'||a.kind==='image').map(a=>({id:a.id,name:a.name,kind:a.kind,format:a.format})),
     selection: clone(PM.sel),
+    memory: memoryEnabled(p) ? memoryIndex(p.memory) : { enabled: false },
     layers: page.map((layer: any) => ({
       index: p.layers.indexOf(layer), id: layer.id, name: layer.name, type: layer.type, from: layer.from,
       duration: layer.dur, visible: layer.on, locked: layer.lock, parent: layer.parent, group: layer.group || null,
@@ -557,9 +559,13 @@ async function rollBackLiveTransaction(transaction: LiveToolTransaction): Promis
   if (revision !== transaction.revision) {
     throw new Error('The project changed after the agent edit, so Powermove left both the user work and the agent transaction intact instead of restoring an older snapshot.');
   }
+  // Memory is not video content: what the run learned or rejected outlives its rollback.
+  const { memory, memoryEnabled: memoryOn } = PM.proj;
   if (!PM.hist.restoreSnapshot(transaction.snapshot, 'Roll back agent changes', 'agent')) {
     throw new Error('Powermove could not restore the pre-agent project snapshot.');
   }
+  if (memory) PM.proj.memory = memory;
+  if (memoryOn === false) PM.proj.memoryEnabled = false;
   transaction.baseRevision = currentRevision();
   transaction.revision = transaction.baseRevision;
   transaction.historyMark = PM.hist.mark?.() ?? null;
@@ -595,6 +601,22 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     if (observed) assertTransactionProject(observed);
     PM.selectLayers([...new Set(ids)], request.arguments.add === true);
     return { ok: true, content: [toolText({ selection: clone(PM.sel) })], revision: currentRevision() };
+  }
+  if (request.tool === 'project_memory') {
+    const pinned = liveToolTransactions.get(request.runId) || liveToolObservations.get(request.runId);
+    if (pinned) assertTransactionProject(pinned);
+    const args = request.arguments as any;
+    if (!memoryEnabled(PM.proj)) throw new Error(MEMORY_DISABLED_MESSAGE);
+    if (args.operation === 'list') {
+      return { ok: true, content: [toolText({ memory: listMemory(PM.proj.memory, { kind: args.kind, limit: args.limit }), total: (PM.proj.memory || []).length })], revision: currentRevision() };
+    }
+    if (!['add', 'update', 'remove'].includes(args.operation)) throw new Error('operation must be list, add, update or remove.');
+    const result = applyMemoryOperation(PM.proj.memory || [], args as MemoryOperation, { now: Date.now(), uid: () => PM.uid('mem'), author: 'agent' });
+    // Notes are not video edits: no revision bump, no Undo entry, no conflict with the run's baseline.
+    PM.proj.memory = result.entries;
+    PM.autosave?.();
+    PM.bus.emit('memory');
+    return { ok: true, content: [toolText({ ok: true, entry: result.entry, total: result.entries.length })], revision: currentRevision() };
   }
   if (request.tool === 'validate_effect') {
     const definition = validateEffect(request.arguments.definition as Parameters<typeof validateEffect>[0]);
