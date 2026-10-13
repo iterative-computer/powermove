@@ -148,3 +148,33 @@ Proxy and at most 0.24 CV for every other flavor.
   VideoToolbox and through `-allow_sw 1`) is unverified (decision 11).
 - The legacy H.264 export now uses VideoToolbox rate control instead of x264; section
   17's VMAF comparison against x264 decides whether a software encoder is offered.
+
+## Test run (2026-10-12, after merging `feat/native-engine` at fe3a8302)
+
+Run serially, one Electron at a time, against the shared LGPL build:
+
+- `cargo test -p pm-export --all-features`: 32 unit and 11 VideoToolbox tests pass;
+  clippy `-D warnings` and rustfmt clean.
+- Vitest, every suite that spawns FFmpeg (`render-encoder`, `ffmpeg-binary`,
+  `media-proxy`, `agent-tools/*` including `media-tools` and `media-ffmpeg`,
+  `transcription/*`, `host-ffmpeg`, `reconnect.integration`): 225 tests pass.
+- `smoke.ts`: 28 of 28 against the shared build and against the staged
+  `apps/desktop/vendor/ffmpeg`.
+- Playwright: `export-mp4` (2), `export-video-frames` (9), `video-scrubbing` (2),
+  `native-export-performance.spec.ts:55`, `ae-audit-implementation.spec.ts:95`,
+  `media-intelligence` (4, plus the real-model caption test with
+  `POWERMOVE_E2E_PARAKEET_DIR`), `composited-video-sync`, `video-frame-integrity` (3)
+  pass. `scripts/test-mcp.mjs` passes.
+- Three failures are not this lane's: each fails the same way on `feat/native-engine`
+  with `ffmpeg-static` (checked in a scratch worktree).
+  `import-prores-alpha.spec.ts:10` passes the import, proxy and alpha checks, then
+  reads `window.powermove`, which the preload no longer exposes (amendment 14's test
+  seam). `agent-media-tools.spec.ts:42` gets every media tool result right but sees 8
+  images in the last request instead of 4, and
+  `media-intelligence.spec.ts:259` (real model) transcribes correctly but finds 4
+  caption layers instead of 1; both point at the agent loop repeating work, not at FFmpeg.
+- `electron-builder --mac --dir` (unsigned) puts `bin/`, the seven dylibs,
+  `NOTICE.txt`, `share/licenses` and `manifest.json` under
+  `Contents/Resources/ffmpeg`; the bundled `ffmpeg -L` reports the LGPL and lists the
+  three VideoToolbox encoders; nothing from `ffmpeg-static` or `Resources/encoder`
+  remains. Team ID signing was not exercised (no release identity used locally).
