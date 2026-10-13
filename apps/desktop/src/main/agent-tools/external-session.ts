@@ -67,7 +67,12 @@ export class ExternalAgentSession {
       // A short-lived inspection session authenticates main-to-renderer control.
       const session = await this.options.bridge.openSession({ runId: `mcp-${randomUUID()}`, owner, baseRevision: 0 });
       let failed = false;
-      try { return await this.renderer(session, `__mcp_${name}`, args); }
+      try {
+        // Authorization can finish after this external client disconnects.
+        // Do not dispatch a new project action from that abandoned request.
+        if (this.disconnected) throw new Error('This MCP connection is closed.');
+        return await this.renderer(session, `__mcp_${name}`, args);
+      }
       catch (error) { failed = true; throw error; }
       finally {
         if (failed) await session.finish(false).catch(error => console.error('[MCP] rollback failed after tool error', error));
