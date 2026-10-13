@@ -35,9 +35,13 @@ pub fn required_features() -> wgpu::Features {
     wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
 }
 
-/// Features the render graph uses when present.
+/// Features the render graph uses when present: `rgba32float` filtering
+/// and blending (32-bit precision), and passthrough shaders (Metal's safe
+/// math mode for color-critical programs, `crate::msl`).
 pub fn optional_features() -> wgpu::Features {
-    wgpu::Features::FLOAT32_FILTERABLE | wgpu::Features::FLOAT32_BLENDABLE
+    wgpu::Features::FLOAT32_FILTERABLE
+        | wgpu::Features::FLOAT32_BLENDABLE
+        | wgpu::Features::PASSTHROUGH_SHADERS
 }
 
 impl Gpu {

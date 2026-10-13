@@ -7,6 +7,8 @@
 //!   their pool;
 //! - `glsl` (feature `glsl`): the GLSL ES pipeline to naga IR (three.js
 //!   programs, amendment 11);
+//! - `msl` (feature `glsl`): naga modules as passthrough MSL with an
+//!   explicit Metal math mode (safe math for the 3D programs);
 //! - [`readback`]: texture readback for tests, captures, and the CPU
 //!   encoder-input reference.
 //!
@@ -24,6 +26,8 @@ pub mod decode_in;
 pub mod device;
 #[cfg(feature = "glsl")]
 pub mod glsl;
+#[cfg(feature = "glsl")]
+pub mod msl;
 pub mod readback;
 pub mod target;
 

@@ -27,6 +27,7 @@ use pm_eval::parenting::Role3d;
 use pm_eval::{JsResult, Scope};
 use pm_geom3d::{Geometry, Parameters, Primitive};
 use pm_gpu::glsl::{self, ScalarKind};
+pub use pm_gpu::msl::MathMode;
 use pm_gpu::{Target, TargetPool};
 use pm_model::json::{Map, Value};
 use pm_model::{JsString, Node, NodeKind};
@@ -607,6 +608,11 @@ struct Compiled {
     program: glsl::Program,
     vertex: wgpu::ShaderModule,
     fragment: wgpu::ShaderModule,
+    /// Entry points of passthrough MSL modules (`None`: naga modules).
+    vertex_entry: Option<String>,
+    fragment_entry: Option<String>,
+    /// The Metal math mode the program compiled with.
+    math: MathMode,
     layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
 }
@@ -620,6 +626,7 @@ struct Mesh {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct PipelineKey {
     program: u64,
+    math: MathMode,
     samples: u32,
     color: bool,
     depth_write: bool,
@@ -676,6 +683,8 @@ pub struct Scene3dRenderer {
     /// classification (section 25: MSAA edges are the pixels that change
     /// without multisampling).
     samples: u32,
+    /// The Metal math mode for the 3D programs (amendment 11: safe).
+    math: MathMode,
     programs: HashMap<u64, Arc<Compiled>>,
     pipelines: HashMap<PipelineKey, wgpu::RenderPipeline>,
     meshes: HashMap<u64, Arc<Mesh>>,
@@ -687,6 +696,7 @@ impl Default for Scene3dRenderer {
     fn default() -> Self {
         Scene3dRenderer {
             samples: SAMPLES,
+            math: MathMode::Safe,
             programs: HashMap::new(),
             pipelines: HashMap::new(),
             meshes: HashMap::new(),
@@ -748,6 +758,22 @@ fn write_uniform(program: &glsl::Program, block: &mut [u8], name: &str, values: 
 }
 
 impl Scene3dRenderer {
+    /// Sets the Metal math mode of the 3D programs (safe by default,
+    /// amendment 11; fast only for comparisons).
+    pub fn set_math_mode(&mut self, math: MathMode) {
+        self.math = math;
+    }
+
+    /// The math mode the programs compile with on `device` (fast when the
+    /// device has no passthrough shaders).
+    pub fn math_mode(&self, device: &wgpu::Device) -> MathMode {
+        if self.math != MathMode::Fast && pm_gpu::msl::supported(device) {
+            self.math
+        } else {
+            MathMode::Fast
+        }
+    }
+
     /// Sets the MSAA sample count (4 as today's canvas; 1 only to classify
     /// MSAA edges for parity).
     pub fn set_samples(&mut self, samples: u32) {
@@ -761,7 +787,8 @@ impl Scene3dRenderer {
         params: &ProgramParameters,
     ) -> Result<(u64, Arc<Compiled>), String> {
         let (vs, fs) = sources(params)?;
-        let key = hash_of(&[vs.as_bytes(), fs.as_bytes()]);
+        let mode = format!("{:?}", self.math);
+        let key = hash_of(&[vs.as_bytes(), fs.as_bytes(), mode.as_bytes()]);
         if let Some(c) = self.programs.get(&key) {
             return Ok((key, c.clone()));
         }
@@ -769,14 +796,58 @@ impl Scene3dRenderer {
         if !program.textures.is_empty() {
             return Err("3D program samples textures this pass does not bind".to_owned());
         }
-        let module = |m: &glsl::naga::Module, label: &str| {
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(label),
-                source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(m.clone())),
-            })
-        };
-        let vertex = module(&program.vertex, "three vs");
-        let fragment = module(&program.fragment, "three fs");
+        // Amendment 11: Metal's safe math mode, through passthrough MSL
+        // (wgpu compiles naga modules with fast math). Devices without
+        // passthrough shaders get wgpu's own compile and report fast math.
+        let (vertex, fragment, vertex_entry, fragment_entry, math) =
+            if self.math != MathMode::Fast && pm_gpu::msl::supported(device) {
+                let slots = [pm_gpu::msl::Slot {
+                    group: 0,
+                    binding: glsl::DEFAULT_BLOCK_BINDING,
+                    buffer: Some(0),
+                    texture: None,
+                    sampler: None,
+                }];
+                let vs = pm_gpu::msl::module(
+                    device,
+                    "three vs",
+                    &program.vertex,
+                    &program.vertex_info,
+                    glsl::naga::ShaderStage::Vertex,
+                    &slots,
+                    self.math,
+                )?;
+                let fs = pm_gpu::msl::module(
+                    device,
+                    "three fs",
+                    &program.fragment,
+                    &program.fragment_info,
+                    glsl::naga::ShaderStage::Fragment,
+                    &slots,
+                    self.math,
+                )?;
+                (
+                    vs.module,
+                    fs.module,
+                    Some(vs.entry_point),
+                    Some(fs.entry_point),
+                    self.math,
+                )
+            } else {
+                let module = |m: &glsl::naga::Module, label: &str| {
+                    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some(label),
+                        source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(m.clone())),
+                    })
+                };
+                (
+                    module(&program.vertex, "three vs"),
+                    module(&program.fragment, "three fs"),
+                    None,
+                    None,
+                    MathMode::Fast,
+                )
+            };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("three program"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -799,6 +870,9 @@ impl Scene3dRenderer {
             program,
             vertex,
             fragment,
+            vertex_entry,
+            fragment_entry,
+            math,
             layout,
             pipeline_layout,
         });
@@ -936,7 +1010,7 @@ impl Scene3dRenderer {
             layout: Some(&compiled.pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &compiled.vertex,
-                entry_point: None,
+                entry_point: compiled.vertex_entry.as_deref(),
                 compilation_options: Default::default(),
                 buffers: &layouts,
             },
@@ -963,7 +1037,7 @@ impl Scene3dRenderer {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &compiled.fragment,
-                entry_point: None,
+                entry_point: compiled.fragment_entry.as_deref(),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba8Unorm,
@@ -1098,8 +1172,10 @@ impl Scene3dRenderer {
         };
         let front_face_cw = math::determinant(&plan.model) < 0.0;
         let samples = self.samples;
+        let math = compiled.math;
         let key = |color: bool, depth_write: bool| PipelineKey {
             program: program_key,
+            math,
             samples,
             color,
             depth_write,

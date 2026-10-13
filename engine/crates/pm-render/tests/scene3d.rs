@@ -12,7 +12,9 @@ mod support;
 
 use pm_geom3d::{Parameters, Primitive};
 use pm_render::parity::{bar_3d, msaa_edges};
-use pm_render::scene3d::{Camera3d, Material3d, Object3dPlan, Scene3dRenderer, Sun, uniforms};
+use pm_render::scene3d::{
+    Camera3d, MathMode, Material3d, Object3dPlan, Scene3dRenderer, Sun, uniforms,
+};
 use pm_render::three::math;
 use serde_json::Value;
 
@@ -169,9 +171,27 @@ fn primitives_within_the_3d_bar() {
         eprintln!("no three.js reference capture; run tools/three-ref/run.ts");
         return;
     };
-    let diffs = std::env::var_os("PM_RENDER_DIFFS").map(std::path::PathBuf::from);
     let gpu = pm_gpu::Gpu::new("pm-render 3d test").expect("a Metal device");
+    // Amendment 11: safe math is the product; fast math is reported for
+    // comparison only (wgpu's own compile).
+    let safe = run_cases(&gpu, &dir, MathMode::Safe);
+    let fast = run_cases(&gpu, &dir, MathMode::Fast);
+    if !fast.is_empty() {
+        eprintln!("fast math outside the bar (not a product path):\n{}", fast.join("\n"));
+    }
+    assert!(safe.is_empty(), "outside the 3D bar (safe math):\n{}", safe.join("\n"));
+}
+
+/// Renders every case with `math`; the failing lines.
+fn run_cases(gpu: &pm_gpu::Gpu, dir: &std::path::Path, math: MathMode) -> Vec<String> {
+    let diffs = std::env::var_os("PM_RENDER_DIFFS").map(std::path::PathBuf::from);
     let mut scene = Scene3dRenderer::default();
+    scene.set_math_mode(math);
+    let used = scene.math_mode(&gpu.device);
+    eprintln!("math mode {math:?} (compiled as {used:?})");
+    if math == MathMode::Safe {
+        assert_eq!(used, MathMode::Safe, "the engine device compiles 3D programs with safe math");
+    }
     let mut pool = pm_gpu::TargetPool::new();
     let mut failed = Vec::new();
     for c in cases() {
@@ -218,7 +238,7 @@ fn primitives_within_the_3d_bar() {
             failed.push(line);
             if let Some(d) = &diffs {
                 std::fs::create_dir_all(d).unwrap();
-                support::write_png(&d.join(format!("{id}-engine.png")), w as u32, h as u32, &ours);
+                support::write_png(&d.join(format!("{id}-{math:?}-engine.png")), w as u32, h as u32, &ours);
                 support::write_png(&d.join(format!("{id}-three.png")), w as u32, h as u32, &reference);
             }
         }
@@ -227,5 +247,5 @@ fn primitives_within_the_3d_bar() {
             pool.give(d);
         }
     }
-    assert!(failed.is_empty(), "outside the 3D bar:\n{}", failed.join("\n"));
+    failed
 }
