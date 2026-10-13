@@ -71,6 +71,20 @@ const firstAppFrame = (stack: string | undefined): string => {
   return lines.some(line => harness.test(line)) ? `page.evaluate via ${where}` : where;
 };
 
+/**
+ * Where a query that met a stale mirror was asked from (test modes): the
+ * first frames outside the native evaluator, and whether a test evaluated
+ * the code in the page. The writer that skipped the barrier ran before it.
+ */
+export function querySite(stack: string | undefined = new Error().stack, frames = 4): string {
+  const lines = (stack || '').split('\n').slice(1).map(line => line.trim());
+  const own = /NativeApi\.|DualAnswers\.|onStale|querySite|\((native|<anonymous>)\)$/;
+  const harness = /eval at evaluate|__playwright|UtilityScript/;
+  const app = lines.filter(line => !own.test(line)).slice(0, frames)
+    .map(line => line.replace(/^at\s+/, '').replace(/\?[^:)]*/, '').replace(/\(app:\/\/powermove\/host\//, '(').slice(0, 120));
+  return `${lines.some(line => harness.test(line)) ? 'page.evaluate: ' : ''}${app.join(' < ')}`;
+}
+
 export function createTracker(options: {
   /** Called with the path (relative to the root) of every write. */
   onWrite(path: PathPart[]): void;

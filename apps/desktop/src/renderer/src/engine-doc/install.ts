@@ -26,7 +26,7 @@ import { ShadowAuditor } from './auditor';
 import { DualAnswers } from './dual';
 import { OFF, rendererMode, type EngineDocMode } from './flags';
 import { NativeApi } from './native';
-import { createTracker, patchCloning, type Tracker } from './proxy';
+import { createTracker, patchCloning, querySite, type Tracker } from './proxy';
 import { hostSink, Reporter, type Sink } from './report';
 import { compileFrom, instantiate, MODULE_PATH, type PmWasm } from './wasm';
 import { FontLoader, type FontProvider } from './fonts';
@@ -241,7 +241,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const fontProvider = options.fonts !== undefined ? options.fonts : editorFonts();
   if (fontProvider) api.fonts = new FontLoader(fontProvider);
   api.onStale = (op, paths) => {
-    reporter.emit({ type: 'audit', kind: 'stale-answer', revision: barrier?.revision ?? -1, paths: paths.slice(0, 20), detail: op });
+    reporter.emit({ type: 'audit', kind: 'stale-answer', revision: barrier?.revision ?? -1, paths: paths.slice(0, 20), detail: op, site: querySite() });
     if (auditor) { auditor.stats.missedWrites += 1; auditor.stats.failures += 1; }
   };
   const auditor = mode.audit ? new ShadowAuditor(() => (state.ready ? barrier : null), f => reporter.emit({ type: 'audit', kind: f.kind, revision: f.revision, paths: f.paths, detail: f.detail })) : null;
@@ -285,7 +285,12 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const start = async (): Promise<boolean> => {
     try {
       wasm = await instantiate(await loadModule());
-      barrier = new DocumentBarrier(wasm, () => current, { onMismatch, revision: barrier?.revision ?? 0 });
+      barrier = new DocumentBarrier(wasm, () => current, {
+        onMismatch, revision: barrier?.revision ?? 0,
+        // A plain transaction's writes reach the barrier at its commit (or at a
+        // touch()); queries made inside it before then diff the open composition.
+        unannounced: () => !!PM.hist?.busy?.() && !PM.hist?.scoped?.() && coveredDepth === 0,
+      });
       barrier.subscribe(batch => subscribers.forEach(fn => { try { fn(batch); } catch (error) { console.error(error); } }));
       api.reset();
       state.wasm = wasm;

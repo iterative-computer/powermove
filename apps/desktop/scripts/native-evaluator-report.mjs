@@ -3,7 +3,7 @@
    (docs/engine/write-path.md, "Dual answers, the auditor, and the
    consistency check").
 
-     node scripts/native-evaluator-report.mjs <report.jsonl> [--results playwright.json] [--json]
+     node scripts/native-evaluator-report.mjs <report.jsonl> [--results playwright.json] [--json] [--all]
 
    The file is what main appends when POWERMOVE_NATIVE_REPORT_FILE is set:
    one JSON event per line (engine-doc/report.ts). Each launch's last summary
@@ -19,6 +19,7 @@ if (!file) {
   process.exit(2);
 }
 const asJson = rest.includes('--json');
+const all = rest.includes('--all');
 const resultsFile = rest.includes('--results') ? rest[rest.indexOf('--results') + 1] : null;
 
 /** Test runs from Playwright's JSON reporter: [start, end, title, status]. */
@@ -120,7 +121,14 @@ if (asJson) {
   for (const e of events.audit) (byKind[e.kind] ??= []).push(e);
   for (const [kind, list] of Object.entries(byKind)) {
     console.log(`\naudit ${kind}: ${list.length}`);
-    for (const e of list.slice(0, 5)) console.log(`  ${e.detail} ${JSON.stringify(e.paths?.slice(0, 5))}${e.test ? ` [${e.test}]` : ''}`);
+    // Distinct events: the same query site and paths shape once, with a count.
+    const distinct = new Map();
+    for (const e of list) {
+      const shape = JSON.stringify((e.paths ?? []).slice(0, 5).map(p => String(p).replace(/^comps\.[^.]+/, 'comps.C').replace(/\.\d+/g, '.N')));
+      const key = `${e.detail} ${shape}${e.site ? ` at ${e.site}` : ''}${e.test ? ` [${e.test}]` : ''}`;
+      distinct.set(key, (distinct.get(key) ?? 0) + 1);
+    }
+    for (const [key, n] of [...distinct].sort((a, b) => b[1] - a[1]).slice(0, all ? Infinity : 8)) console.log(`  ${n}× ${key}`);
     if (resultsFile) {
       const tests = {};
       for (const e of list) tests[e.test ?? '(unattributed)'] = (tests[e.test ?? '(unattributed)'] ?? 0) + 1;

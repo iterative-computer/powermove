@@ -150,14 +150,21 @@ export class DocumentBarrier {
   readonly stats: BarrierStats = { flushes: 0, batches: 0, ops: 0, bytes: 0, resyncs: 0, structuralDiffs: 0, refused: 0, flushMs: 0, maxFlushMs: 0, checks: 0, checkMismatches: 0 };
   /** Set while a flush runs, so reads of the document during it are not writes. */
   flushing = false;
+  /**
+   * Whether writes may be waiting that nobody announced yet: a plain history
+   * transaction is open (its commit hands the paths over, but code inside it
+   * may query before that). A flush then diffs the open composition too.
+   */
+  private unannounced: () => boolean;
 
   constructor(
     public wasm: PmWasm,
     /** The live document (raw, never the tracking Proxy). */
     private project: () => any,
-    options: { onMismatch?: (result: ConsistencyResult) => void; revision?: number } = {},
+    options: { onMismatch?: (result: ConsistencyResult) => void; revision?: number; unannounced?: () => boolean } = {},
   ) {
     this.onMismatch = options.onMismatch ?? (() => {});
+    this.unannounced = options.unannounced ?? (() => false);
     // A replacement instance (after a trap) continues the revisions, so the
     // stream's receivers never see them move backward (contract 5, invariant 1).
     this.revision = Math.max(0, Math.floor(options.revision ?? 0));
@@ -211,15 +218,20 @@ export class DocumentBarrier {
     this.emit({ baseRevision: this.revision - 1, revision: this.revision, origin: 'load', count: 1, body: encodePatchOps([{ path: [], exists: json !== undefined, value: this.shadow }]) });
   }
 
-  /** The paths a structural diff covers: the open composition and every project member but `comps`. */
+  /** The paths a structural diff covers: the open composition, compositions added or removed, and every project member but `comps`. */
   private structuralPaths(live: any): PathPart[][] {
     if (!isRecord(live)) return [[]];
     const paths: PathPart[][] = [];
     const keys = new Set([...Object.keys(live), ...(isRecord(this.shadow) ? Object.keys(this.shadow) : [])]);
     for (const key of keys) if (key !== 'comps') paths.push([key]);
     const open = live.compId;
-    if (typeof open === 'string' && isRecord(live.comps)) paths.push(['comps', open]);
-    else paths.push(['comps']);
+    if (typeof open === 'string' && isRecord(live.comps)) {
+      paths.push(['comps', open]);
+      // Compositions added or removed (a precompose, an import that nests).
+      const before = isRecord(this.shadow) && isRecord(this.shadow.comps) ? this.shadow.comps : {};
+      for (const id of Object.keys(live.comps)) if (!Object.prototype.hasOwnProperty.call(before, id)) paths.push(['comps', id]);
+      for (const id of Object.keys(before)) if (!Object.prototype.hasOwnProperty.call(live.comps, id)) paths.push(['comps', id]);
+    } else paths.push(['comps']);
     return paths;
   }
 
@@ -242,7 +254,9 @@ export class DocumentBarrier {
 
   /** Flushes dirty paths into pm-wasm (section 6, item 2: before every query). */
   flush(): void {
-    if (!this.pending || this.flushing) return;
+    if (this.flushing) return;
+    if (!this.structural && !this.resyncPending && this.shadow !== undefined && this.unannounced()) this.touchAll();
+    if (!this.pending) return;
     this.flushing = true;
     const started = performance.now();
     try {

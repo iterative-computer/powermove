@@ -7,7 +7,7 @@
  */
 export type ReportEvent =
   | { type: 'dual'; op: string; path: string; where: Record<string, unknown>; native: string; legacy: string }
-  | { type: 'audit'; kind: string; revision: number; paths: string[]; detail: string }
+  | { type: 'audit'; kind: string; revision: number; paths: string[]; detail: string; site?: string }
   | { type: 'consistency'; reason: string; revision: number; missed: string[]; ms: number }
   | { type: 'violation'; path: string; site: string; count: number }
   | { type: 'summary'; [key: string]: unknown }

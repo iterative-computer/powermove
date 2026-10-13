@@ -303,6 +303,34 @@ describe.skipIf(!built)('writes inside open transactions', () => {
     PM.hist.commit('Move');
     expect(doc.check('test')!.ok).toBe(true);
   });
+
+  it('answers a query inside a plain transaction from writes nobody announced yet', async () => {
+    const { PM, doc } = await editor('on');
+    PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid')));
+    const L = PM.proj.layers[0];
+    const added = PM.mkLayer('solid');
+    doc.barrier!.flush();
+    // The pen tool: begin, insert, then ask before any touch().
+    PM.hist.begin('Draw');
+    L.p['position.x'].v = 41;
+    PM.proj.layers.unshift(added);
+    expect(doc.api!.ev(L, 'position.x', 0)).toBe(41);
+    expect(doc.api!.ev(added, 'position.x', 0)).toBe(PM.ev(added, 'position.x', 0));
+    expect(doc.api!.stats.repairs).toBe(0);
+    PM.hist.commit('Draw');
+    expect(doc.check('test')!.ok).toBe(true);
+  });
+
+  it('diffs compositions added outside the open one on a structural diff', async () => {
+    const { PM, doc } = await editor('on');
+    doc.barrier!.flush();
+    const id = 'Cadded01';
+    PM.proj.comps = { ...(PM.proj.comps || {}), [id]: { id, name: 'Nested', w: 100, h: 100, fps: 30, dur: 2, bg: '#000000', layers: [] } };
+    PM.touch();
+    doc.barrier!.flush();
+    expect(doc.barrier!.shadowMatches().ok).toBe(true);
+    expect(doc.check('test')!.ok).toBe(true);
+  });
 });
 
 describe('dual answers: allowed differences (amendment 20)', () => {
