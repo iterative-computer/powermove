@@ -264,7 +264,11 @@ export function installLayerGroups(PM: PMRegistry): void {
           PM.touch();
         }
       } else {rebase(members, poses);for(const layer of members)preserveWorldAim(PM,layer,aims.get(layer.id) || null,PM.time);}
-      PM.proj.layers = PM.proj.layers.filter((layer: any) => layer.id !== group.id);
+      // Outside layers can use this group as a transform parent. Keep that
+      // coordinate space and its keys while removing the grouping boundary.
+      if (PM.proj.layers.some((layer: any) => layer.parent === group.id)) {
+        group.type = 'null'; group.solo = false;
+      } else PM.proj.layers = PM.proj.layers.filter((layer: any) => layer.id !== group.id);
     }
     changed(); PM.selectLayers(children.filter(id => PM.L(id))); return { ids: children };
   };
