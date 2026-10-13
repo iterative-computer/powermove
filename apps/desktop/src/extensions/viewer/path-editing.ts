@@ -53,7 +53,7 @@ export function drawEditablePaths(api:PowermoveAPI,c:CanvasRenderingContext2D,sc
 }
 
 export function startPathEdit(api:PowermoveAPI,state:PathEditingState,event:any,pointer:(e:any)=>any,beginDrag:any,scale:number) {
-  let layer=api.selection.first();if(layer?.lock)return;
+  let layer=api.selection.first();if(layer && (layer.lock || api.groups.ancestors(layer).some(group=>group.lock)))return;
   if(!layer || !['shape','text','solid','image','video','precomp','shader'].includes(layer.type)){
     const result=api.edit.apply({type:'add_layer',layerType:'shape',name:'Path',content:{paths:[]},properties:{'position.x':0,'position.y':0},select:true},{label:'New path layer',origin:'canvas'});
     layer=result.ok?(result.data as {results?:Array<{data?:{layer?:Layer}}> }|undefined)?.results?.[0]?.data?.layer??null:null;if(!layer)return;
