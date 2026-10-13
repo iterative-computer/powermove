@@ -73,9 +73,11 @@ How writes reach the barrier:
 | History commits | `PM.touch(canonicalPaths, true)` after the commit's patches |
 | Scoped transactions (gestures, `Edit.apply`) | `hist.track(paths)` hands its paths over before the writes |
 | Undo, redo, scoped rollback | `PM.doc.write(paths, fn)` around the restore |
-| `touch()` without paths | a structural diff of the open composition, compositions added or removed, and every project member except `comps` (in every mode, the tracking ones included: writers announce writes made through references the Proxy never handed out) |
-| Queries inside a plain (unscoped) history transaction | every flush adds the structural diff: the transaction's writes reach the barrier at its commit, and code inside it (the pen tool between `begin` and its first `touch()`) may ask before then |
-| Legacy key adoption during evaluation (`temporal-bridge.ts`) | runs inside a barrier writer scope (`setEvaluationWriter`); a rewrite the JSON can see asks for a structural diff |
+| `touch()` without paths | a structural diff of the open composition, the composition the editor has entered (`PM.curComp()`), compositions added or removed, and every project member except `comps` (in every mode, the tracking ones included: writers announce writes made through references the Proxy never handed out) |
+| Queries inside an open history transaction | the transaction's writes reach the barrier at its commit, and code inside it may ask before then (the pen tool between `begin` and its first `touch()`, a split that groups and selects). The first flush of each synchronous run, and the first after an announcement without paths, diffs what the transaction may have written: a plain transaction's open composition (as `touch()` does), a scoped one's tracked paths. Announcements without paths inside a plain transaction wait for that flush or the commit, whose paths replace the structural diff. A write after a query in the same run, with no announcement before the next query, is the one case left to the auditor |
+| Legacy key adoption | the adopted keys' path, found by identity anywhere in the document (`PM.doc.wroteObject`); keys outside the document are not a document write |
+| Compatibility accessors (`ui-state.ts` `defineCompat`) that take a stored member out of the JSON (an effect's `open`) | `PM.doc.wroteObject(object)` |
+| Legacy key adoption during evaluation (`temporal-bridge.ts`) | runs inside a barrier writer scope (`setEvaluationWriter`); a rewrite the JSON can see names the keys (below) |
 | `PM.proj = another project` | resync at the next flush |
 | `PM.proj = another version of this project` | a whole-document diff |
 | Writers that know their paths | `PM.doc.write(paths, fn)` / `PM.doc.touched(paths)` |
