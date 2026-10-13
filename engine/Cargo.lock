@@ -955,6 +955,7 @@ dependencies = [
  "libm",
  "pm-expr",
  "pm-model",
+ "pm-text",
  "pm-time",
 ]
 

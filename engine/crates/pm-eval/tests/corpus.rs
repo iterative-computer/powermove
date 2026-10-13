@@ -21,6 +21,7 @@ use pm_eval::retime::Retiming;
 use pm_eval::{Comp, Evaluator, JsValue, Scope};
 use pm_model::json::{Map, Value, parse};
 use pm_model::{Document, JsString, Node};
+use pm_text::compat::{GlyphLayout, Unit};
 
 use support::pm_expr_engine::PmExprEngine;
 
@@ -327,6 +328,9 @@ fn compare_comp(
             let got = scope.plane_matrix(layer, time, false).map(|m| numbers(&m)).map_err(|e| e.to_string());
             cx.check("planeMatrix", &at("planeMatrix"), got, member(l, "planeMatrix"), layer_error(l, "planeMatrix"), NUM);
         }
+        if let Some(want) = member(l, "textAnimation") {
+            compare_text_animation(cx, &mut scope, layer, time, l, want, &at("textAnimation"));
+        }
         if matches!(ty.as_str(), "video" | "precomp" | "audio") {
             let got = scope
                 .source_time_with(layer, time, Retiming::Legacy, None)
@@ -351,6 +355,108 @@ fn compare_comp(
             compare_comp(cx, ev, doc, &sub, project, sub_state, &format!("{path}>{comp_id}"));
         }
     }
+}
+
+fn unit_of(v: &Value) -> Unit {
+    let n = |k: &str| member(v, k).and_then(dumped_number);
+    Unit {
+        text: member(v, "text").and_then(|t| t.as_js_string()).map(|s| s.to_string_lossy()).unwrap_or_default(),
+        x: n("x").unwrap(),
+        y: n("y").unwrap(),
+        w: n("w").unwrap(),
+        line: n("line").unwrap() as usize,
+        source_start: n("sourceStart").unwrap() as usize,
+        index: n("index").unwrap() as usize,
+        line_unit: n("lineUnit").map(|x| x as usize),
+        word: n("word").map(|x| x as usize),
+    }
+}
+
+fn layout_of(v: &Value) -> GlyphLayout {
+    let list = |k: &str| match member(v, k) {
+        Some(Value::Array(items)) => items.iter().map(unit_of).collect(),
+        _ => Vec::new(),
+    };
+    GlyphLayout { characters: list("characters"), words: list("words"), lines: list("lines") }
+}
+
+fn content_value(c: &pm_eval::evaluator::Content) -> Value {
+    Value::Object(c.iter().filter(|(_, v)| !matches!(v, JsValue::Undefined)).map(|(k, v)| (k.clone(), js_to_value(v))).collect::<Map>())
+}
+
+/// Animator weights, range styles, and posed glyphs, from the dumped layout
+/// (layout itself is pm-text's comparison).
+fn compare_text_animation<'d>(cx: &mut Ctx<'_>, scope: &mut Scope<'_, 'd>, layer: &'d Node, time: f64, l: &Value, want: &Value, what: &str) {
+    let Some(layout) = member(l, "textLayout") else { return };
+    let layout = layout_of(layout);
+    let threw = layer_error(l, "textAnimation");
+    let result = scope.resolved_text_content(layer, time).and_then(|d| {
+        let state = scope.text_animation_state(layer, time, &layout)?;
+        let glyphs = scope.animated_glyphs(&d, &layout, &state);
+        Ok((state, glyphs))
+    });
+    let (state, glyphs) = match result {
+        Ok(x) => x,
+        Err(e) => {
+            cx.check("textAnimation", what, Err(e.to_string()), Some(want), threw, NUM);
+            return;
+        }
+    };
+    let animators = Value::Array(
+        state
+            .animators
+            .iter()
+            .map(|a| {
+                let mut m = Map::new();
+                m.insert("id", js_to_value(&a.id));
+                m.insert("mode", Value::String(JsString::from(a.mode.name())));
+                m.insert("unit", Value::String(JsString::from(a.unit.name())));
+                m.insert("values", content_value(&a.values));
+                m.insert("weights", numbers(&a.weights));
+                Value::Object(m)
+            })
+            .collect(),
+    );
+    cx.check("textAnimators", &format!("{what} animators"), Ok(animators), member(want, "animators"), threw, NUM);
+    let styles = Value::Array(state.styles.iter().map(|s| content_value(&s.item)).collect());
+    cx.check("textStyles", &format!("{what} styles"), Ok(styles), member(want, "styles"), threw, NUM);
+    let mut keys: Vec<JsString> = ["font", "weight", "size", "color", "italic", "tracking"].iter().map(|k| JsString::from(*k)).collect();
+    for s in &state.styles {
+        for k in s.p.keys() {
+            if !keys.contains(k) {
+                keys.push(k.clone());
+            }
+        }
+    }
+    let glyphs = Value::Array(
+        glyphs
+            .iter()
+            .map(|g| {
+                let mut m = Map::new();
+                let u = &g.unit;
+                m.insert("index", Value::Number(u.index as f64));
+                m.insert("text", Value::String(JsString::from(u.text.as_str())));
+                m.insert("line", Value::Number(u.line as f64));
+                m.insert("word", u.word.map_or(Value::Null, |w| Value::Number(w as f64)));
+                m.insert("x", Value::Number(u.x));
+                m.insert("y", Value::Number(u.y));
+                m.insert("w", Value::Number(u.w));
+                m.insert("matrix", numbers(&g.matrix));
+                m.insert("opacity", Value::Number(g.opacity));
+                m.insert("blur", Value::Number(g.blur));
+                m.insert("color", g.color.clone().map_or(Value::Null, Value::String));
+                m.insert("tracking", Value::Number(g.tracking));
+                m.insert("trackingShift", Value::Number(g.tracking_shift));
+                let mut style = Map::new();
+                for k in &keys {
+                    style.insert(k.clone(), g.style.get(k).map_or(Value::Null, js_to_value));
+                }
+                m.insert("style", Value::Object(style));
+                Value::Object(m)
+            })
+            .collect(),
+    );
+    cx.check("textGlyphs", &format!("{what} glyphs"), Ok(glyphs), member(want, "glyphs"), threw, NUM);
 }
 
 fn node_has(layer: &Node, member: &str, key: &JsString) -> bool {

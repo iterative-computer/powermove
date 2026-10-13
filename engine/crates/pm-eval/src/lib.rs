@@ -53,6 +53,7 @@ pub mod retime;
 pub mod scope;
 pub mod space3d;
 pub mod temporal;
+pub mod text_anim;
 pub mod transform;
 
 pub use comp::{Comp, CompError};

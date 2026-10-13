@@ -10,6 +10,9 @@ publish.workspace = true
 [dependencies]
 pm-model = { path = "../pm-model" }
 pm-time = { path = "../pm-time" }
+# Level 1 text layout (units for text animators, text bounds) without the
+# platform registry, so the same code runs in pm-wasm.
+pm-text = { path = "../pm-text", default-features = false }
 libm.workspace = true
 
 [[example]]
