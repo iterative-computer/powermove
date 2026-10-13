@@ -574,12 +574,13 @@ const T: any = previous || {
   drop: null as null | { at: number; rowIdx: number; index: number; name: string; kind: string; dur?: number },
   style: { clipRadius: 5, keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact' },
 };
+let refreshMarquee: (() => void) | null = null;
 /* Built-in extensions activate after project hydration. Restore the current
    project session here, matching the former app bootstrap path that ran after
    the legacy timeline installer. */
 const sessionTimeline = previous ?? api.storage.get<{ pps?: number; scrollT?: number; scrollY?: number; graph?: boolean; graphCombined?: boolean }>(`session:${api.project.get().id}`);
 if (sessionTimeline) {
-  T.pps = Number.isFinite(sessionTimeline.pps) ? sessionTimeline.pps : T.pps;
+  T.pps = Number.isFinite(sessionTimeline.pps) && sessionTimeline.pps! > 0 ? clamp(sessionTimeline.pps, 4, 4000) : 90;
   T.scrollT = Number.isFinite(sessionTimeline.scrollT) ? sessionTimeline.scrollT : T.scrollT;
   T.scrollY = Number.isFinite(sessionTimeline.scrollY) ? sessionTimeline.scrollY : T.scrollY;
   T.graph = !!sessionTimeline.graph;
@@ -1243,6 +1244,7 @@ const trackView = createTrackView({
   rowSelected: (row) => api.selection.layers().includes(row.L.id) && trackSelected(row, api.selection.chan() ?? ''),
   keyDown: (e, row, x, y) => keyDown(e, row, x, y, -1),
   keyMarquee: (e) => marquee(e, { additive: e.shiftKey || e.metaKey }),
+  setMarqueeRefresh: (refresh) => { refreshMarquee = refresh; },
   editKeyAt: (row, x) => editKeyAt(row, x),
   focusRow: (row) => {
     api.selection.set({ chan: row.key });
@@ -1504,8 +1506,11 @@ function drawInner(preview?: TimelinePreviewTarget, timeOnly = false) {
     try { (window as any).webkit.messageHandlers.pmLog.postMessage(msg); } catch (e) { }
     console.log(msg);
   }
+  if (!preview) refreshMarquee?.();
   if (T.marquee) {
     c.save(); c.strokeStyle = theme.accent; c.fillStyle = rgba(theme.accent, .14); c.lineWidth = 1;
+    c.beginPath();
+    c.rect(T.gut, T.ruler, W - T.gut, H - T.ruler); c.clip();
     const m = T.marquee;
     c.fillRect(m.x0, m.y0, m.x1 - m.x0, m.y1 - m.y0);
     c.strokeRect(m.x0 + .5, m.y0 + .5, m.x1 - m.x0 - 1, m.y1 - m.y0 - 1); c.restore();
@@ -2817,14 +2822,24 @@ function bind(cv: any, wrap: any) {
   }, undefined, canvasCleanups);
   listen(cv, 'wheel', (e: any) => {
     e.preventDefault();
+    // A non-finite delta poisons the viewport, then the next ruler scrub
+    // passes that invalid position to the transport and blanks the preview.
+    if (!Number.isFinite(e.deltaX) || !Number.isFinite(e.deltaY)) return;
     if (e.ctrlKey || e.metaKey) {
-      const tAt = x2t(e.offsetX);
+      if (!Number.isFinite(e.offsetX)) return;
+      // Recover an invalid saved/live zoom before dividing by its scale.
+      const pps = Number.isFinite(T.pps) && T.pps > 0 ? clamp(T.pps, 4, 4000) : 90;
+      const scrollT = Number.isFinite(T.scrollT) ? T.scrollT : 0;
+      const tAt = (e.offsetX - T.gut) / pps + scrollT;
       const pixels = e.deltaY * (e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? Math.max(100, T.hgt) : 1);
       // Match composition navigation. Exponential scaling makes reversing a
       // pinch restore the original scale instead of gradually zooming out.
       const factor = clamp(Math.exp(-pixels * .006), .5, 2);
-      T.pps = clamp(T.pps * factor, 4, 4000);
-      T.scrollT = tAt - (e.offsetX - T.gut) / T.pps;
+      const nextPps = clamp(pps * factor, 4, 4000);
+      const nextScroll = tAt - (e.offsetX - T.gut) / nextPps;
+      if (!Number.isFinite(nextPps) || !Number.isFinite(nextScroll)) return;
+      T.pps = nextPps;
+      T.scrollT = nextScroll;
     } else if (e.shiftKey) {
       T.scrollT += e.deltaY / T.pps;
     } else {
@@ -4079,32 +4094,56 @@ function layersForKeys(keys: any) {
 function marquee(e: any, opt: any = {}) {
   const r = T.cv.getBoundingClientRect();
   const x0 = e.clientX - r.left, y0 = e.clientY - r.top;
+  // The start belongs to the timeline; the other corner follows the pointer.
+  // Reproject on every paint so wheel scrolling works without a mousemove.
+  const originTime = x2t(x0);
+  const scrollY = () => tracksMode() ? T.trackScrollY : T.scrollY;
+  const originY = opt.graph ? T._graph.y2v(y0) : y0 + scrollY();
+  let pointerX = x0, pointerY = y0;
   const additive = !!opt.additive;
   const baseKeys = additive ? [...api.selection.keys()] : [];
   const baseLayers = additive ? [...api.selection.layers()] : [];
   const originalKeys = [...api.selection.keys()], originalLayers = [...api.selection.layers()];
-  const graphPoints = opt.graph ? [...(T._graph?.points ?? [])] : null;
+  const graphPoints = opt.graph ? (T._graph?.points ?? []).map((point: any) => ({
+    ...point, time: x2t(point.x), value: T._graph.y2v(point.y),
+  })) : null;
   if (graphPoints) T.graphMarqueeIds = originalKeys;
   let graphPickedIds: string[] = [];
   let dragged = false;
+  refreshMarquee = () => {
+    if (!dragged) return;
+    const startX = t2x(originTime);
+    const startY = opt.graph ? T._graph.v2y(originY) : originY - scrollY();
+    T.marquee = { x0: Math.min(startX, pointerX), y0: Math.min(startY, pointerY), x1: Math.max(startX, pointerX), y1: Math.max(startY, pointerY) };
+    const m = T.marquee;
+    const picked = graphPoints
+      ? graphPoints.filter((point: any) => {
+        const x = t2x(point.time), y = T._graph.v2y(point.value);
+        return x >= m.x0 && x <= m.x1 && y >= m.y0 && y <= m.y1;
+      }).map((point: any) => point.key)
+      : keysInMarquee(m);
+    const pickedIds = uniqueKeyIds(picked);
+    graphPickedIds = pickedIds;
+    // Keep the graph selection visible until the box is complete.
+    const nextKeys = graphPoints && !additive
+      ? [...new Set([...originalKeys, ...pickedIds])]
+      : selectionAfterMarquee(baseKeys, pickedIds, additive);
+    const nextLayers = [...new Set([...baseLayers, ...layersForKeys(nextKeys)])];
+    T.keySelectionActive = true;
+    const same = (a: any[], b: any[]) => a.length === b.length && a.every((id: any, i: number) => id === b[i]);
+    if (!same(nextKeys, api.selection.keys()) || !same(nextLayers, api.selection.layers())) setSelectedKeys(nextKeys, nextLayers);
+  };
   beginDrag(e, {
     move: (dx: any, dy: any) => {
       if (!dragged && Math.hypot(dx, dy) < 3) return;
       dragged = true;
-      T.marquee = { x0: Math.min(x0, x0 + dx), y0: Math.min(y0, y0 + dy), x1: Math.max(x0, x0 + dx), y1: Math.max(y0, y0 + dy) };
-      const picked = graphPoints
-        ? graphPoints.filter((point: any) => point.x >= T.marquee.x0 && point.x <= T.marquee.x1 && point.y >= T.marquee.y0 && point.y <= T.marquee.y1).map((point: any) => point.key)
-        : keysInMarquee(T.marquee);
-      const pickedIds = uniqueKeyIds(picked);
-      graphPickedIds = pickedIds;
-      // Keep the graph selection visible until the box is complete.
-      const nextKeys = graphPoints && !additive
-        ? [...new Set([...originalKeys, ...pickedIds])]
-        : selectionAfterMarquee(baseKeys, pickedIds, additive);
-      setSelectedKeys(nextKeys, [...baseLayers, ...layersForKeys(nextKeys)]);
+      pointerX = x0 + dx; pointerY = y0 + dy;
+      refreshMarquee?.();
       invalidate('timeline');
     },
     up: () => {
+      refreshMarquee?.();
+      refreshMarquee = null;
       if (!dragged) {
         // Empty track space selects; only the ruler scrubs the playhead.
         if (!additive) clearTimelineSelection();
@@ -4127,6 +4166,7 @@ function marquee(e: any, opt: any = {}) {
       T.graphMarqueeIds = null; T.marquee = null; invalidate('timeline');
     },
     cancel: () => {
+      refreshMarquee = null;
       if (graphPoints) { T.graphMarqueeIds = null; setSelectedKeys(originalKeys, originalLayers); }
       T.marquee = null; invalidate('timeline');
     },

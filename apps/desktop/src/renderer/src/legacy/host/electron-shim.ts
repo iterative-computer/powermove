@@ -1,6 +1,8 @@
 /* Ported from host/electron-shim.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { stringifyAsync } from '../core/serialize-async';
+import { parseAsync } from '../core/parse-async';
+import { yieldTask } from '../core/yield-task';
 import { HistoryRecords, packStoredHistory, unpackStoredHistory } from '../../../../shared/history-memory';
 import { bridge as hostBridge } from '../../kernel/bridge';
 
@@ -374,6 +376,25 @@ export function install(PM: PMRegistry): void {
         return unpackStoredHistory(serviceKey(key), cloneValue(value));
       } catch { return fallback; }
     },
+    async getAsync(key: string, fallback: any) {
+      const service = serviceKey(key);
+      await asyncWrites.get(service);
+      if (stale.has(service) || lazy.has(service)) {
+        if (!bridge.store.getEncoded) return PM.store.get(key, fallback);
+        const version = writeVersions.get(service) || 0;
+        const serialized = await bridge.store.getEncoded(service);
+        // A write made during the read is more recent than the native reply.
+        if ((writeVersions.get(service) || 0) !== version) return PM.store.getAsync(key, fallback);
+        cached.delete(legacyKey(service));
+        if (serialized === null) encoded.delete(service);
+        else encoded.set(service, serialized);
+        stale.delete(service); lazy.delete(service);
+      }
+      const serialized = encoded.get(service)
+        ?? (cached.has(legacyKey(service)) ? await stringifyAsync(cached.get(legacyKey(service))) : null);
+      if (serialized === null) return fallback;
+      return unpackStoredHistory(service, await parseAsync(serialized));
+    },
     /** A mutable live document is valid only while the caller's generation
      * stays current. Check at every yield and discard superseded snapshots. */
     setSnapshotAsync(key: string, value: any, isCurrent: () => boolean) {
@@ -383,7 +404,7 @@ export function install(PM: PMRegistry): void {
       const current = () => writeVersions.get(service) === version && isCurrent();
       const superseded = new Error('Snapshot superseded');
       const write = stringifyAsync(value, async () => {
-        await new Promise<void>(resolve => setTimeout(resolve, 0));
+        await yieldTask();
         if (!current()) throw superseded;
       }).then(async serialized => {
         if (!current()) return false;
@@ -411,7 +432,7 @@ export function install(PM: PMRegistry): void {
       const packed = packStoredHistory(service, value, historyRecords);
       cached.set(legacyKey(service), packed);
       const write = stringifyAsync(packed, async () => {
-        await new Promise<void>(resolve => setTimeout(resolve, 0));
+        await yieldTask();
         if (writeVersions.get(service) !== version) throw new Error('Snapshot superseded');
       }).then(async serialized => {
         if (writeVersions.get(service) !== version) return;
@@ -523,7 +544,11 @@ export function install(PM: PMRegistry): void {
   bridge.store.onChanged?.((keys: string[]) => {
     const changed = keys.filter(key => typeof key === 'string');
     if (!changed.length) return;
-    for (const key of changed) stale.add(serviceKey(key));
+    for (const key of changed) {
+      const service = serviceKey(key);
+      stale.add(service);
+      writeVersions.set(service, (writeVersions.get(service) || 0) + 1);
+    }
     PM.bus?.emit('store:external', changed);
   });
 

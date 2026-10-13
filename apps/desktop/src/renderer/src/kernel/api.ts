@@ -209,7 +209,7 @@ export interface EffectDefinition {
   id: string;
   label: string;
   group: string;
-  /** At most 32 params; keys must be unique and match /^[a-z][a-zA-Z0-9]*$/. */
+  /** Parameter keys must be unique and match /^[a-z][a-zA-Z0-9]*$/. */
   params: EffectParamDefinition[];
   /** Visual controls bind existing keys; project data and animation paths stay the same. */
   ui?: ParameterWidget[];

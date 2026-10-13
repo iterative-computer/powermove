@@ -5,6 +5,7 @@ import { MenuController } from './Menu';
 import { confirm as nativeConfirm, type ConfirmOptions } from './confirm';
 import { ModalController } from './modal';
 import { PaletteController } from './palette';
+import ProjectGhost from './ProjectGhost.svelte';
 import Toasts from './Toasts.svelte';
 import type { MenuItem, MenuOptions, ModalOptions, ToastOptions } from './types';
 
@@ -17,6 +18,7 @@ type InstalledOverlays = {
   PM: PMRegistry;
   target: HTMLElement;
   toasts: ToastInstance;
+  ghost: { host: HTMLElement; component: ReturnType<typeof mount> };
   menu: MenuController;
   modal: ModalController;
   palette: PaletteController;
@@ -65,6 +67,13 @@ export function installSvelteOverlays(PM: PMRegistry): void {
   target.setAttribute('aria-atomic', 'false');
   target.style.zIndex = '402';
   const toasts = mount(Toasts, { target, props: { PM } }) as ToastInstance;
+  /* The project-loading ghost lives outside #app so its status line is still
+     announced while #body (and, under a modal, #app) is inert. */
+  const ghostHost = document.createElement('div');
+  ghostHost.id = 'project-ghost-host';
+  ghostHost.style.display = 'contents';
+  document.body.append(ghostHost);
+  const ghost = { host: ghostHost, component: mount(ProjectGhost, { target: ghostHost, props: { PM } }) };
   const menu = new MenuController(PM);
   const modal = new ModalController(PM);
   const palette = new PaletteController(PM);
@@ -80,7 +89,7 @@ export function installSvelteOverlays(PM: PMRegistry): void {
     palette: openPalette,
     paletteCommand: openPalette
   };
-  installed = { PM, target, toasts, menu, modal, palette, previous, members, attributes };
+  installed = { PM, target, toasts, ghost, menu, modal, palette, previous, members, attributes };
   PM.toast = members.toast;
   /* Keyed notices (fork updates) need to retract without counting as a user dismissal. */
   PM.dismissToast = (key: string): void => toasts.dismissKey(key);
@@ -111,7 +120,8 @@ async function dispose(current: InstalledOverlays): Promise<void> {
   if (current.PM.commands?.palette?.run === current.members.paletteCommand) {
     current.PM.commands.palette.run = current.previous.paletteCommand;
   }
-  await unmount(current.toasts);
+  await Promise.all([unmount(current.toasts), unmount(current.ghost.component)]);
+  current.ghost.host.remove();
 }
 
 function restoreAttribute(target: HTMLElement, name: string, value: string | null): void {

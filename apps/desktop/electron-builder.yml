@@ -28,6 +28,9 @@ files:
   # electron-builder auto-pack a second copy of either platform executable.
   - '!node_modules/@openai/codex-darwin-arm64/**'
   - '!node_modules/@anthropic-ai/claude-code-darwin-arm64/**'
+  # The SDK carries the same Claude executable as its optional platform
+  # package. Model discovery always receives the runtime copied below.
+  - '!**/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/**'
   - '!node_modules/@anthropic-ai/claude-code/bin/claude.exe'
   # esbuild/lib/main.js resolves the @esbuild platform package at runtime. The
   # install-time bin copy is the same executable and is not used by Powermove.

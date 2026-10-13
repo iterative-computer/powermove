@@ -153,8 +153,7 @@ export function mountSquircles(root: HTMLElement, selector = SQUIRCLE_SELECTOR):
   const sweep = () => {
     for (const el of root.querySelectorAll<HTMLElement>(selector)) attach(el);
   };
-  sweep();
-  const observer = new MutationObserver((records) => {
+  const detachRemoved = (records: MutationRecord[]) => {
     for (const record of records) {
       for (const node of record.removedNodes) {
         if (!(node instanceof HTMLElement)) continue;
@@ -162,10 +161,18 @@ export function mountSquircles(root: HTMLElement, selector = SQUIRCLE_SELECTOR):
         for (const el of node.querySelectorAll<HTMLElement>('[data-squircle]')) detach(el);
       }
     }
+  };
+  sweep();
+  const observer = new MutationObserver((records) => {
+    detachRemoved(records);
     sweep();
   });
   observer.observe(root, { childList: true, subtree: true });
   return () => {
+    // Removed controls may no longer be under root when teardown runs in the
+    // same turn. Disconnect discards their pending records, but live retains
+    // their resize/focus/effect ownership until they are explicitly detached.
+    detachRemoved(observer.takeRecords());
     observer.disconnect();
     for (const el of root.querySelectorAll<HTMLElement>('[data-squircle]')) detach(el);
   };

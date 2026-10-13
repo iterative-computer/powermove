@@ -20,6 +20,7 @@ const transform = {
   sx: [num(-10000, 10000), 1], sy: [num(-10000, 10000), 1], sz: [num(-10000, 10000), 1],
   visible: [z.boolean(), true]
 } satisfies Record<string, [z.ZodType, unknown]>;
+const objectTransform = p(transform);
 const points2 = z.array(z.tuple([num(), num()])).min(2).max(1024);
 const primitiveParams = z.object({
   width: num(.0001, 10000).optional(), height: num(.0001, 10000).optional(), depth: num(.0001, 10000).optional(),
@@ -52,7 +53,7 @@ export const materialSchema = z.object({
 }).strict();
 export const objectSchema = z.object({
   id, name: z.string().min(1).max(160).default('Object'), parent: id.nullable().default(null),
-  source: sourceSchema, p: p(transform).default({} as any), material: materialSchema.default({} as any),
+  source: sourceSchema, p: objectTransform.default({} as any), material: materialSchema.default({} as any),
   useSourceMaterials: z.boolean().default(false),
   castShadow: z.boolean().default(true), receiveShadow: z.boolean().default(true)
 }).strict();
@@ -88,7 +89,7 @@ export function parseScene(raw: unknown): Scene3D {
   if ((JSON.stringify(raw)?.length ?? 0) > 8_000_000) throw new Error('3D scene exceeds the 8 MB geometry budget');
   const scene = schema.parse(raw);
   // Zod's default bypasses transforms; parse nested defaults explicitly.
-  scene.objects = scene.objects.map(o => ({...o,p:p(transform).parse(o.p || {}),material:materialSchema.parse({ ...o.material,p:materialSchema.shape.p.parse(o.material?.p || {}) })}));
+  scene.objects = scene.objects.map(o => ({...o,p:objectTransform.parse(o.p || {}),material:materialSchema.parse({ ...o.material,p:materialSchema.shape.p.parse(o.material?.p || {}) })}));
   scene.camera = cameraSchema.parse({...scene.camera,p:cameraSchema.shape.p.parse(scene.camera.p || {})});
   scene.environment = environmentSchema.parse({...scene.environment,p:environmentSchema.shape.p.parse(scene.environment.p || {})});
   scene.lights = scene.lights.map(l => lightSchema.parse({...l,p:lightSchema.shape.p.parse(l.p || {})}));

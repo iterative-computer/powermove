@@ -1,5 +1,6 @@
 import { decodeProjectContainer, encodeProjectContainerBlob, encodeTextChunks, isProjectContainer, projectContainerIndex, type ProjectMediaRange } from '../../../../shared/project-container';
 import { stringifyAsync } from './serialize-async';
+import { parseAsync } from './parse-async';
 import { bridge as hostBridge } from '../../kernel/bridge';
 import { isIncrementalProject, readIncrementalIndex, type ProjectRecord, type SaveMedia } from '../../../../shared/project-incremental';
 import { Sha256, sha256HexOf } from '../../../../shared/sha256';
@@ -140,15 +141,15 @@ export async function unpackProjectFileBlob(file: Blob): Promise<any> {
     const index = await readIncrementalIndex(file.size, async (offset, length) => new Uint8Array(await file.slice(offset, offset + length).arrayBuffer()));
     const bytes = new Uint8Array(await file.slice(index.document.offset, index.document.offset + index.document.length).arrayBuffer());
     if (await sha256HexOf(bytes) !== index.document.sha256) throw new Error('The project document checksum does not match.');
-    const document = JSON.parse(new TextDecoder().decode(bytes));
+    const document = await parseAsync(new TextDecoder().decode(bytes));
     document.containerMedia = index.media.map(item => ({ ...item, data: file.slice(item.offset, item.offset + item.length, item.type) }));
     return document;
   }
-  if (!isProjectContainer(prefix)) return JSON.parse(await file.text());
+  if (!isProjectContainer(prefix)) return parseAsync(await file.text());
   if (prefix.length < 9) throw new Error('The project container is truncated.');
   const headerLength = new DataView(prefix.buffer).getUint32(5, true);
   if (headerLength < 2 || headerLength > file.size - 9) throw new Error('The project container header is invalid.');
-  const index = projectContainerIndex(JSON.parse(await file.slice(9, 9 + headerLength).text()), 9 + headerLength, file.size);
+  const index = projectContainerIndex(await parseAsync(await file.slice(9, 9 + headerLength).text()), 9 + headerLength, file.size);
   index.document.containerMedia = index.media.map(item => ({ ...item, data: file.slice(item.offset, item.offset + item.length, item.type) }));
   return index.document;
 }
@@ -173,7 +174,7 @@ export async function readProjectFileDocument(range: ProjectRecord, size: number
   }
   parts.push(decoder.decode());
   if (digest.digest() !== range.sha256) throw new Error('The project document checksum does not match.');
-  return JSON.parse(parts.join(''));
+  return parseAsync(parts.join(''));
 }
 
 /** Stage native ranges on disk, then commit file-backed Blobs to the media store. */

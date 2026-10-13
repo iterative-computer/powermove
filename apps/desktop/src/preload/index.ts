@@ -297,6 +297,7 @@ const bridge: PowermoveBridge = {
     snapshotSerializedSync: () => ipcRenderer.sendSync(IPC.storeSnapshotSerializedSync) as Record<string, string>,
     bootstrapSerializedSync: () => ipcRenderer.sendSync(IPC.storeBootstrapSync) as Record<string, string>,
     getEncodedSync: (key) => ipcRenderer.sendSync(IPC.storeGetEncodedSync, { key }) as string | null,
+    getEncoded: (key) => ipcRenderer.invoke(IPC.storeGetEncoded, { key }) as Promise<string | null>,
     snapshot: () => ipcRenderer.invoke(IPC.storeSnapshot) as Promise<StoreSnapshot>,
     set: (key, value) => {
       ipcRenderer.send(IPC.storeSet, { key, value });

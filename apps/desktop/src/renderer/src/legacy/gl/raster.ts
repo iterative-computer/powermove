@@ -1205,7 +1205,11 @@ PM.assets = {
   },
   /** Lets go of parked media that will never be resumed. */
   discard(parked: any) {
-    for (const asset of parked?.map?.values?.() || []) disposeAsset(asset);
+    for (const asset of parked?.map?.values?.() || []) {
+      // Media can be evicted while its tab's Undo stack stays live. A media
+      // replacement keeps these runtimes until that history releases them.
+      if (!historyAssetRetains.get(asset)) disposeAsset(asset);
+    }
     for (const url of parked?.posters?.values?.() || []) {
       try { window.URL?.revokeObjectURL?.(url); } catch (error) { }
     }
@@ -1366,10 +1370,19 @@ PM.assets = {
 /* SVG source remains in the durable asset store and in the live <img>. This
    cache is only the final GPU sampling boundary, rebuilt in resolution buckets
    chosen by the compositor from the layer's current display transform. */
+const svgSources = new WeakMap<object, string>();
+function svgSourceId(asset: any) {
+  if (!asset || typeof asset !== 'object') return 'missing';
+  let id = svgSources.get(asset);
+  if (!id) { id = crypto.randomUUID(); svgSources.set(asset, id); }
+  return id;
+}
 PM.rasterSvgAsset = (asset: any, requestedWidth: any, requestedHeight: any) => {
   const width = Math.max(1, Math.round(Number(requestedWidth) || 1));
   const height = Math.max(1, Math.round(Number(requestedHeight) || 1));
-  const key = `svg:${asset?.id || 'missing'}:${width}x${height}`;
+  // Duplicated projects and media replacement can share an asset id. The live
+  // source identity keeps their pixels separate while warm tabs reuse theirs.
+  const key = `svg:${asset?.id || 'missing'}:${svgSourceId(asset)}:${width}x${height}`;
   let entry = cache.get(key);
   if (entry) { entry.used = ++tick; return entry; }
   const cv = getCanvas(width, height);

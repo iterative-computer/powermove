@@ -57,6 +57,7 @@ import { createVarsService } from './env/service';
 import { createRemoveValuesPrompt, registerVarsIpc } from './env/ipc';
 import { startExtensionWatcher } from './extensions/watcher';
 import { registerLogIpc } from './log';
+import { installRendererRecovery } from './renderer-recovery';
 import { MIME_TYPES } from './mime';
 import { registerHapticsIpc } from './haptics';
 import { registerContextMenuIpc } from './context-menu';
@@ -80,7 +81,7 @@ import { EXTENSION_ID } from '../shared/extensions';
 import { createStore, installQuitFlush, registerStoreIpc, type Store } from './storage';
 import { registerThemeIpc } from './theme';
 import { backgroundTesting, backgroundWindowOptions } from './background-testing';
-import { EditorWindows, restorableSessions, windowUnderTabDrop } from './windows';
+import { EditorWindows, lastActiveSession, restorableSessions, windowUnderTabDrop } from './windows';
 import { isPanelPopoutRequest } from './panel-popout';
 import { OnboardingFlow, onboardingCompleted, onboardingEnabled } from './onboarding';
 /* ── transcription (on-device speech models) ── */
@@ -180,6 +181,7 @@ function drainPendingOpenFiles(): void {
 }
 async function prepareEditorClose(window: BrowserWindow): Promise<void> {
   if (window.isDestroyed() || window.webContents.isDestroyed()
+    || window.webContents.isCrashed()
     || !isAllowedNavigation(window.webContents.getURL(), devRendererUrl)) return;
   // User decisions and large file saves must not be cut off by the recovery-flush timeout.
   const allowed = await window.webContents.executeJavaScript('window.PM?.prepareToClose?.() ?? true');
@@ -188,6 +190,7 @@ async function prepareEditorClose(window: BrowserWindow): Promise<void> {
 }
 async function flushEditor(window: BrowserWindow): Promise<void> {
   if (window.isDestroyed() || window.webContents.isDestroyed()
+    || window.webContents.isCrashed()
     || !isAllowedNavigation(window.webContents.getURL(),devRendererUrl)) return;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -498,8 +501,9 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
   });
 
   editors.add(window, projectId, tabs);
+  installRendererRecovery(window, dialog);
   persistOpenWindows();
-  window.on('focus', () => editors.touch(window));
+  window.on('focus', () => { editors.touch(window); persistOpenWindows(); });
   // Drained once the page has both loaded and subscribed, in either order.
   window.webContents.on('did-finish-load', drainPendingOpenFiles);
   // A reload or navigation replaces the page that was listening.
@@ -530,7 +534,7 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
 
   let closing = false, closePrepared = false;
   window.on('close', event => {
-    if (closePrepared || quitPrepared() || window.webContents.isDestroyed()) return;
+    if (closePrepared || quitPrepared() || window.webContents.isDestroyed() || window.webContents.isCrashed()) return;
     event.preventDefault();
     if (closing) return;
     closing = true;
@@ -747,11 +751,10 @@ function registerWindowIpc(): void {
   });
 }
 
-/** Reopens last session's windows and their tabs, or opens one window when the
- *  preference is off, nothing was open, or those projects are gone. */
+/** Reopens only the last active project in one window. */
 function restoreWindows(store: Store): void {
   const snapshot = store.get
-    ? Object.fromEntries(['restoreWindows', 'projects', 'windowTabs', 'openWindows', 'openTabs'].map(key => [key, store.get!(key)]))
+    ? Object.fromEntries(['restoreWindows', 'projects', 'windowTabs', 'openWindows', 'openTabs', 'lastActiveProject'].map(key => [key, store.get!(key)]))
     : store.snapshot();
   if (snapshot['restoreWindows'] === false) {
     createWindow();
@@ -761,12 +764,32 @@ function restoreWindows(store: Store): void {
   const known = new Set(
     metas.map((meta) => (meta as { id?: unknown } | null)?.id).filter((id): id is string => typeof id === 'string')
   );
+  // Pre-registry profiles kept only one autosave. Register that document so
+  // migration still restores one project instead of making it disappear.
+  if (!known.size && snapshot['lastActiveProject'] === undefined) {
+    let legacy = store.get?.('autosave') ?? snapshot['autosave'];
+    try { if (typeof legacy === 'string') legacy = JSON.parse(legacy); } catch { legacy = null; }
+    const record = legacy as { proj?: unknown } | null;
+    const project = (record?.proj || legacy) as { id?: unknown; name?: string; layers?: unknown; w?: unknown; h?: unknown } | null;
+    const trash = store.get?.('projectTrash') ?? snapshot['projectTrash'];
+    if (typeof project?.id === 'string' && PROJECT_ID.test(project.id) && Array.isArray(project.layers)
+        && Number.isFinite(project.w) && Number.isFinite(project.h)
+        && !(Array.isArray(trash) && trash.some(meta => meta?.id === project.id))) {
+      store.set('projects', [{ id: project.id, name: project.name || 'Untitled', at: Date.now(), w: project.w, h: project.h }]);
+      createWindow({ projectId: project.id, tabs: [project.id] });
+      return;
+    }
+  }
   const sessions = restorableSessions(snapshot['windowTabs'], snapshot['openWindows'], snapshot['openTabs'], (id) => known.has(id));
-  if (!sessions.length) {
+  const session = lastActiveSession(snapshot['lastActiveProject'], sessions, id => known.has(id), id => {
+    const metadata = store.get?.(`projectMeta.${id}`) ?? store.get?.(`projectState.${id}`);
+    return Number((metadata as { lastActiveAt?: unknown } | null)?.lastActiveAt) || 0;
+  });
+  if (!session) {
     createWindow();
     return;
   }
-  for (const { tabs, active } of sessions) createWindow({ projectId: active, tabs });
+  createWindow({ projectId: session.active, tabs: session.tabs });
 }
 
 if (!hasSingleInstanceLock) {
@@ -913,6 +936,8 @@ if (!hasSingleInstanceLock) {
       // the per-window tabs are only for putting the windows back at launch.
       store.set('openWindows', editors.openProjectIds());
       store.set('windowTabs', editors.openSessions());
+      const recent = editors.mostRecent();
+      if (recent) store.set('lastActiveProject', editors.projectOf(recent));
     };
     registerWindowIpc();
     const quitBarrier = installQuitFlush(app, store, async () => {
@@ -1356,7 +1381,7 @@ if (!hasSingleInstanceLock) {
         onboardingFlow.focus();
         return;
       }
-      if (editors.size === 0) createWindow();
+      if (editors.size === 0) restoreWindows(store);
     });
   });
 }

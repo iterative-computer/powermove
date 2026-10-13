@@ -70,28 +70,82 @@ type Target = {
   orientation:THREE.Vector3;order:THREE.EulerOrder;
 };
 
+function createGizmoRenderer(canvas:HTMLCanvasElement):THREE.WebGLRenderer {
+  // Three registers context listeners before its constructor can fail. Keep
+  // those failed instances from remaining attached to our reusable canvas.
+  const descriptor=Object.getOwnPropertyDescriptor(canvas,'addEventListener');
+  const add=canvas.addEventListener,registrations:Parameters<HTMLCanvasElement['addEventListener']>[]=[];
+  canvas.addEventListener=function(...args:Parameters<HTMLCanvasElement['addEventListener']>) {
+    registrations.push(args);add.apply(this,args);
+  };
+  try {return new THREE.WebGLRenderer({canvas,alpha:true,antialias:true});}
+  catch(error){for(const args of registrations)canvas.removeEventListener(...args);throw error;}
+  finally {if(descriptor)Object.defineProperty(canvas,'addEventListener',descriptor);else delete (canvas as any).addEventListener;}
+}
+
 export function createSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:number)=>SceneRuntime|null):SceneGizmo {
-  const renderer=new THREE.WebGLRenderer({alpha:true,antialias:true});
+  // A 2D viewer still owns the same hidden canvas/controller, but needs no
+  // second GPU context or TransformControls geometry. The first 3D selection
+  // initializes synchronously, before that update returns.
+  const canvas=document.createElement('canvas');
+  canvas.setAttribute('aria-hidden','true');canvas.dataset.sceneGizmo='';
+  canvas.style.cssText='position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:4';
+  canvas.hidden=true;stage.append(canvas);
+  let live:SceneGizmo|null=null,renderer:THREE.WebGLRenderer|null=null,disposed=false;
+  let selection:string[]=[];
+  const roleOf=(id:string)=>{const layer=PM.L?.(id);return layer3DRole(layer) || isModelGroup(PM,layer);};
+  return {
+    update(rect,ids) {
+      if(disposed)return;
+      if(live){live.update(rect,ids);return;}
+      if(ids)selection=ids.length && ids.every(roleOf)?[...ids]:[];
+      if(!selection.length)return;
+      renderer ??= createGizmoRenderer(canvas);
+      try { live=createInitializedSceneGizmo(PM,stage,runtime,renderer); }
+      // A lost WebGL context cannot be synchronously recreated on this same
+      // canvas. Retain it for retry; disposing the facade still releases it.
+      catch(error){canvas.hidden=true;throw error;}
+      live.update(rect,selection);
+    },
+    hover:(x,y)=>live?.hover(x,y) ?? false,
+    pointerDown:event=>live?.pointerDown(event) ?? false,
+    active:()=>live?.active() ?? false,
+    covers:ids=>ids.length>0 && ids.every(roleOf),
+    cancel:()=>live?.cancel(),
+    dispose() {
+      if(disposed)return;disposed=true;
+      if(live)live.dispose();else {renderer?.dispose();renderer?.forceContextLoss();canvas.remove();}
+      live=null;renderer=null;selection=[];
+    }
+  };
+}
+
+function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:number)=>SceneRuntime|null,renderer:THREE.WebGLRenderer):SceneGizmo {
   renderer.setPixelRatio(Math.min(2,window.devicePixelRatio || 1));
   const canvas=renderer.domElement;
   canvas.setAttribute('aria-hidden','true');canvas.dataset.sceneGizmo='';
   canvas.style.cssText='position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:4';
-  stage.append(canvas);
+  canvas.hidden=true;
   const scene=new THREE.Scene();
   const pivot=new THREE.Object3D();scene.add(pivot);
   let camera:THREE.Camera=new THREE.PerspectiveCamera();
-  const controls=new TransformControls(camera as THREE.PerspectiveCamera,canvas);
+  // The viewer drives pointer methods itself. Construct without DOM listeners
+  // so even a failed control constructor leaves no callbacks on the canvas.
+  const controls=new TransformControls(camera as THREE.PerspectiveCamera);
+  controls.domElement=canvas;
+  const outlines=new Map<string,THREE.BoxHelper>();
+  const cleanup:(()=>void)[]=[];
+  let offState=()=>{},frame=0;
+  try {
   // The canvas ignores pointers, so TransformControls' own listeners never fire;
   // the viewer drives pointerHover/pointerDown/pointerMove/pointerUp directly.
   controls.disconnect();
   scene.add(controls.getHelper());
-  const outlines=new Map<string,THREE.BoxHelper>();
   let accent=themeColor(stage,'--accent',0xff7a33);
   let rect:GizmoRect={x:0,y:0,width:1,height:1},ids:string[]=[],targets:Target[]=[];
-  let frame=0,disposed=false,gesture:{label:string;start:Target[];pivotInverse:THREE.Matrix4;pivotStart:THREE.Matrix4;mode:GizmoMode}|null=null;
+  let disposed=false,gesture:{label:string;start:Target[];pivotInverse:THREE.Matrix4;pivotStart:THREE.Matrix4;mode:GizmoMode}|null=null;
   let fine=false,alt=false,snapping=false;
   let suppressContextUntil=0;
-  const cleanup:(()=>void)[]=[];
   const listen=(target:any,event:string,callback:any,options?:any)=>{target.addEventListener(event,callback,options);cleanup.push(()=>target.removeEventListener(event,callback,options));};
 
   const layer=(id:string)=>PM.L?.(id);
@@ -261,6 +315,18 @@ export function createSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:number)=
   /* ── public controller ───────────────────────────────── */
   function refresh() {
     if(disposed)return;
+    // Playback refreshes the viewer overlay on every display tick. Without a
+    // 3D selection there is nothing to draw: avoid rebuilding a scene/camera,
+    // forcing theme layout, or clearing a second full-size WebGL canvas.
+    if(!gesture&&!ids.length){
+      targets=[];
+      if(!canvas.hidden){
+        canvas.hidden=true;controls.detach();syncOutlines(null);
+        cancelAnimationFrame(frame);frame=0;
+      }
+      return;
+    }
+    if(canvas.hidden)canvas.hidden=false;
     const world=runtime(PM.time);
     if(!syncCamera(world)){controls.detach();syncOutlines(null);request();return;}
     accent=themeColor(stage,'--accent',0xff7a33);
@@ -273,7 +339,7 @@ export function createSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:number)=
     }
     request();
   }
-  const offState=onGizmoState(()=>refresh());
+  offState=onGizmoState(()=>refresh());
   listen(window,'keydown',(event:KeyboardEvent)=>{
     if(!gesture)return;
     if(event.key==='Escape'){event.preventDefault();event.stopImmediatePropagation();cancel();return;}
@@ -345,4 +411,10 @@ export function createSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:number)=
       controls.detach();controls.dispose();renderer.dispose();renderer.forceContextLoss();canvas.remove();
     }
   };
+  } catch(error) {
+    cancelAnimationFrame(frame);offState();
+    for(const off of cleanup.splice(0))off();
+    for(const outline of outlines.values())outline.dispose();
+    controls.dispose();throw error;
+  }
 }

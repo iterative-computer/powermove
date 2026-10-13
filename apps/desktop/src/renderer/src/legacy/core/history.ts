@@ -2,6 +2,9 @@
 import type { PMRegistry } from '../registry';
 import { timelineService } from './services';
 import { HistoryRecords, unpackHistory } from '../../../../shared/history-memory';
+import { stringifyAsync } from './serialize-async';
+import { yieldTask } from './yield-task';
+import { canonicalizePatches } from './compositions';
 
 import { applyPatch, clonePatchValue, diffPatches as diff, type Patch, type PathPart } from '../../../../shared/patch';
 
@@ -51,6 +54,12 @@ export function install(PM: PMRegistry): void {
   let pending: any = null;
   let depth = 0;
   let totalBytes = 0;
+  const preparedHistories = new WeakMap<object, { saved: any; bytes: number[]; records: HistoryRecords }>();
+  const validPatches = (patches: any) => Array.isArray(patches) && patches.every(patch =>
+    patch && Array.isArray(patch.path) && typeof patch.exists === 'boolean'
+    && patch.path.every((part: any) => typeof part === 'string'
+      ? !['__proto__', 'prototype', 'constructor'].includes(part)
+      : Number.isSafeInteger(part) && part >= 0));
 
   const snap = () => JSON.stringify(PM.proj);
   const restore = (json: string, selection?: any) => {
@@ -59,6 +68,7 @@ export function install(PM: PMRegistry): void {
   const publish = () => {
     PM.bus.emit('history');
     PM.invalidate('status');
+    PM.Memory?.maintain?.('history');
   };
   const trim = () => {
     while (stack.length > MAX_ENTRIES || totalBytes > maxBytes && stack.length > 1) {
@@ -311,29 +321,27 @@ export function install(PM: PMRegistry): void {
       // read them without cloning the entire undo history before every save.
       return options.copy === false ? saved : clone(saved);
     },
-    import(saved: any) {
+    import(saved: any, token?: object) {
+      const prepared = token ? preparedHistories.get(token) : undefined;
       H.clear();
-      try { saved = unpackHistory(structuredClone(saved)); }
+      try { saved = prepared ? prepared.saved : unpackHistory(structuredClone(saved)); }
       catch { return false; }
-      const validPatches = (patches: any) => Array.isArray(patches) && patches.every(patch =>
-        patch && Array.isArray(patch.path) && typeof patch.exists === 'boolean'
-        && patch.path.every((part: any) => typeof part === 'string'
-          ? !['__proto__', 'prototype', 'constructor'].includes(part)
-          : Number.isSafeInteger(part) && part >= 0));
       if (saved?.version !== 1 || !Array.isArray(saved.entries) || saved.entries.length > MAX_ENTRIES
           || !Number.isInteger(saved.index) || saved.index < -1 || saved.index >= saved.entries.length
           || !saved.entries.every((entry: any) => typeof entry?.label === 'string'
             && validPatches(entry.forward) && validPatches(entry.backward))) return false;
       /* Histories saved before compositions were root-relative, and such a
          file can only have been saved with its main composition open. */
-      if (saved.paths !== 'composition' && PM.Comps?.canonicalize) {
+      if (!prepared && saved.paths !== 'composition' && PM.Comps?.canonicalize) {
         saved.entries = saved.entries.map((entry: any) => ({ ...entry, ...PM.Comps.canonicalize(entry.forward, entry.backward) }));
       }
-      records.share(saved);
+      if (prepared) { records = prepared.records; preparedHistories.delete(token!); }
+      else records.share(saved);
+      let entryIndex = 0;
       for (const source of saved.entries) {
         const { label, forward, backward } = source;
         stack.push({ id: PM.uid('history'), label, project: true, forward, backward,
-          bytes: encodedBytes(forward) + encodedBytes(backward),
+          bytes: prepared ? prepared.bytes[entryIndex++]! : encodedBytes(forward) + encodedBytes(backward),
           undo: () => restorePatches(backward), redo: () => restorePatches(forward) });
       }
       idx = saved.index;
@@ -344,6 +352,45 @@ export function install(PM: PMRegistry): void {
       idx = Math.max(-1, idx);
       publish();
       return true;
+    },
+    /** Prepare freshly parsed, owned history without changing the current tab.
+     * Interning records and measuring the byte budget both allow input to run. */
+    async prepareImport(saved: any, isCurrent = () => true, rootId = PM.proj?.compId) {
+      try { saved = unpackHistory(saved); } catch { return undefined; }
+      if (saved?.version !== 1 || !Array.isArray(saved.entries) || saved.entries.length > MAX_ENTRIES
+          || !Number.isInteger(saved.index) || saved.index < -1 || saved.index >= saved.entries.length) return undefined;
+      const shared = new HistoryRecords(), bytes: number[] = [];
+      let deadline = performance.now() + 4;
+      const breathe = async () => {
+        if (!isCurrent()) throw new Error('Project opening superseded');
+        await yieldTask();
+        deadline = performance.now() + 4;
+      };
+      for (let index = 0; index < saved.entries.length; index++) {
+        let entry = saved.entries[index];
+        if (typeof entry?.label !== 'string' || !validPatches(entry.forward) || !validPatches(entry.backward)) return undefined;
+        if (saved.paths !== 'composition' && PM.Comps?.canonicalize) {
+          entry = saved.entries[index] = { ...entry, ...canonicalizePatches(entry.forward, entry.backward, rootId) };
+        }
+        for (const patches of [entry.forward, entry.backward]) {
+          for (const patch of patches) {
+            if (patch.exists && patch.path.length === 1 && ['layers', 'edits'].includes(patch.path[0]) && Array.isArray(patch.value)) {
+              for (let i = 0; i < patch.value.length; i++) {
+                patch.value[i] = shared.intern(patch.value[i]);
+                if (performance.now() >= deadline) await breathe();
+              }
+            }
+          }
+        }
+        const forward = await stringifyAsync(entry.forward, breathe);
+        const backward = await stringifyAsync(entry.backward, breathe);
+        bytes.push(new TextEncoder().encode(forward).byteLength + new TextEncoder().encode(backward).byteLength);
+        if (performance.now() >= deadline) await breathe();
+      }
+      if (!isCurrent()) return undefined;
+      const token = {};
+      preparedHistories.set(token, { saved, bytes, records: shared });
+      return token;
     },
     clear() {
       stack.forEach(entry => entry.cleanup?.());
@@ -388,15 +435,31 @@ export function install(PM: PMRegistry): void {
     stats: () => ({ entries: stack.length, bytes: totalBytes, maxBytes, estimated: false, byteKind: 'serialized' }),
   };
   PM.hist = H;
+  const parked = () => (PM.parkedHistories?.() || []).filter((saved: any) => Array.isArray(saved?.stack));
+  const parkedBytes = () => parked().reduce((sum: number, saved: any) => sum + (saved.totalBytes || 0), 0);
   PM.Memory?.register?.('history', {
-    bytes: () => totalBytes,
-    entries: () => stack.length,
+    bytes: () => totalBytes + parkedBytes(),
+    entries: () => stack.length + parked().reduce((sum: number, saved: any) => sum + saved.stack.length, 0),
     // Undo is durable document data, not a reconstructible render cache.
     // Release the optional lookup index without discarding any saved actions.
-    pressure: () => records.clear(),
+    pressure: () => { records.clear(); for (const saved of parked()) saved.records?.clear?.(); },
     trim: (target: number) => {
       maxBytes = Math.max(0, target);
-      while (totalBytes > target && stack.length > 1) {
+      let retained = parkedBytes();
+      // Oldest background Undo/Redo tails share the same budget as the active
+      // stack. Keep their documents and latest edit ready throughout.
+      for (const saved of parked()) {
+        while (totalBytes + retained > target && saved.stack.length > 1) {
+          const redo = saved.stack.length > saved.idx + 1;
+          const removed = redo ? saved.stack.pop() : saved.stack.shift();
+          saved.totalBytes -= removed.bytes;
+          retained -= removed.bytes;
+          removed.cleanup?.();
+          if (!redo) saved.idx--;
+        }
+        saved.idx = Math.max(-1, Math.min(saved.idx, saved.stack.length - 1));
+      }
+      while (totalBytes + retained > target && stack.length > 1) {
         // Redo patches depend on every preceding step. Discard the distant
         // redo tail before removing applied entries from the undo head.
         if (stack.length > idx + 1) {

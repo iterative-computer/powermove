@@ -389,6 +389,12 @@ describe('timeline runtime', () => {
     expect(timeline).toMatchObject({ pps: 144, scrollT: 2.5, scrollY: 64, graph: true });
   });
 
+  it.each([0, -1, NaN, Infinity])('restores a usable zoom when the saved scale is %s', pps => {
+    const harness = fakePowermoveAPI(vi);
+    harness.api.storage.set('session:project-1', { pps });
+    expect(createTimelineRuntime(harness.api).pps).toBe(90);
+  });
+
   it('reuses the mounted runtime when the kernel activates with a fresh API facade', () => {
     /* A second runtime over the same canvas kept its own pps/scrollT and both
        painted #tl-canvas, so the track area flashed an older zoom/scroll for a

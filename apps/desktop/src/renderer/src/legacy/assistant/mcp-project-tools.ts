@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { PMRegistry } from '../registry';
 import { readLocalMediaSource } from '../core/cloud-media';
+import { agentProjectSnapshot } from '../../../../shared/agent-project-snapshot';
 
 const empty = z.object({}).strict();
 const creation = z.object({ name: z.string().trim().min(1).max(120), width: z.number().int().min(2).max(8192).default(1920), height: z.number().int().min(2).max(8192).default(1080), fps: z.number().finite().min(1).max(120).default(30), duration: z.number().finite().min(0.1).max(36000).default(10) }).strict();
@@ -11,7 +12,7 @@ const video = z.object({ name: z.string().min(1).max(120).optional(), format: z.
 export async function mcpProjectTool(PM: PMRegistry, tool: string, args: Record<string, unknown>): Promise<unknown> {
   if (tool === '__mcp_context') {
     empty.parse(args);
-    return { projectId: PM.proj.id, projectName: PM.proj.name, projectJSON: JSON.stringify(PM.proj), home: PM.isHomeProject?.() === true };
+    return { projectId: PM.proj.id, projectName: PM.proj.name, projectJSON: agentProjectSnapshot(PM.proj), home: PM.isHomeProject?.() === true };
   }
   if (tool === '__mcp_list_projects') {
     empty.parse(args); return { currentProjectId: PM.isHomeProject?.() ? null : PM.proj.id, projects: PM.Projects.list() };

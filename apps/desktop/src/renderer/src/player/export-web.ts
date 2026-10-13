@@ -1,4 +1,3 @@
-import playerSource from 'virtual:powermove-player';
 import { validateScene, type WebScene } from './scene';
 import { zipFiles } from './archive';
 import { agentHandoff } from './agent-handoff';
@@ -158,6 +157,10 @@ export async function buildWebExport(PM: any) {
     if (!packaged) scene.warnings.push(`Font “${family}” is not bundled. Supply this font in your app to preserve text layout.`);
   }
   put('scene.json', utf8(JSON.stringify(scene, null, 2)));
+  // The standalone runtime is only needed when packaging a web export. Keep
+  // its source out of the editor's startup bundle; the snapshot above remains
+  // fixed while this chunk loads, just as it does while media/fonts load.
+  const { default: playerSource } = await import('virtual:powermove-player');
   put('player.js', utf8(playerSource));
   put('player.d.ts', utf8(playerTypes));
   put('index.html', utf8(previewHTML(project.name)));

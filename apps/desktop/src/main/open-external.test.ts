@@ -34,7 +34,19 @@ describe('external project open', () => {
     expect(result).toEqual({ ok: true, path: opened.path, projectId: opened.projectId, token: opened.token,
       size: opened.size, media: [], documentRange });
     expect(opened.document).toBe(document);
+    expect(projects.open).toHaveBeenCalledWith(opened.path, { allowDocumentRange: true });
     owner.destroy();
+  });
+
+  it('passes a worker-validated range-only result through the bridge without inventing a document', async () => {
+    const opened = { path: '/tmp/worker.pmv', projectId: 'worker-project', token: 'worker-reader', size: 64 * 1024 * 1024 + 100,
+      media: [], documentRange: { offset: 5, length: 64 * 1024 * 1024, sha256: 'a'.repeat(64) } };
+    const projects = { open: vi.fn(async () => opened), close: vi.fn(async () => undefined) }, owner = sender();
+    const result = await openProjectForWindow({ projects: projects as any }, owner as any, opened.path);
+    expect(result).toEqual({ ok: true, ...opened });
+    expect(result).not.toHaveProperty('document');
+    owner.destroy();
+    await vi.waitFor(() => expect(projects.close).toHaveBeenCalledWith(opened.token, false));
   });
 
   it.each(['small PMV4', 'PMV3 or legacy'])('preserves the %s document in the bridge response', async format => {

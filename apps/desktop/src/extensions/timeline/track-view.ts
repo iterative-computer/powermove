@@ -91,6 +91,7 @@ export interface TrackViewHost {
   /** Layer-timeline key gesture: select, drag, Alt-stretch, or a key marquee. */
   keyDown(event: PointerEvent, row: any, x: number, y: number): void;
   keyMarquee(event: PointerEvent): void;
+  setMarqueeRefresh(refresh: (() => void) | null): void;
   editKeyAt(row: any, x: number): boolean;
   focusRow(row: any): void;
   toggleAnimation(row: any): void;
@@ -920,6 +921,8 @@ export function createTrackView(host: TrackViewHost) {
   function marquee(event: PointerEvent) {
     const rect = T.cv.getBoundingClientRect();
     const x0 = event.clientX - rect.left, y0 = event.clientY - rect.top;
+    const originTime = host.x2t(x0), originY = y0 + scroll();
+    let pointerX = x0, pointerY = y0;
     const additive = event.shiftKey || event.metaKey || event.ctrlKey;
     const base = additive ? [...api.selection.layers()] : [];
     let dragged = false;
@@ -931,19 +934,29 @@ export function createTrackView(host: TrackViewHost) {
         return b > m.x0 && a < m.x1 && y + rowH() > m.y0 && y < m.y1;
       }).map(item => item.id);
     };
+    const refresh = () => {
+      if (!dragged) return;
+      const startX = host.t2x(originTime), startY = originY - scroll();
+      T.marquee = { x0: Math.min(startX, pointerX), y0: Math.min(startY, pointerY), x1: Math.max(startX, pointerX), y1: Math.max(startY, pointerY) };
+      const ids = [...new Set([...base, ...pick()])];
+      const current = api.selection.layers();
+      if (api.selection.keys().length || ids.length !== current.length || ids.some((id, i) => id !== current[i])) api.selection.select(ids);
+    };
+    host.setMarqueeRefresh(refresh);
     host.beginDrag(event, {
       move: (dx: number, dy: number) => {
         if (!dragged && Math.hypot(dx, dy) < 3) return;
         dragged = true;
-        T.marquee = { x0: Math.min(x0, x0 + dx), y0: Math.min(y0, y0 + dy), x1: Math.max(x0, x0 + dx), y1: Math.max(y0, y0 + dy) };
-        api.selection.select([...new Set([...base, ...pick()])]);
+        pointerX = x0 + dx; pointerY = y0 + dy;
+        refresh();
         host.invalidate('timeline');
       },
       up: () => {
+        refresh(); host.setMarqueeRefresh(null);
         if (!dragged && !additive) api.selection.set({ chan: null, keys: [], layers: [] });
         T.marquee = null; host.invalidate('timeline');
       },
-      cancel: () => { T.marquee = null; host.invalidate('timeline'); },
+      cancel: () => { host.setMarqueeRefresh(null); T.marquee = null; host.invalidate('timeline'); },
     });
   }
 

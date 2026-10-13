@@ -75,7 +75,7 @@
   let searchText = $state('');
   const query = $derived(searchText.trim().toLowerCase());
   let themeMode = $state<string>('system');
-  /* Reopening last session's windows is the default; the store only ever holds
+  /* Reopening the last active project is the default; the store only ever holds
      the opt-out, so an untouched profile needs no migration. */
   let restoreWindows = $state(true);
   let autoDownloadCloudMedia = $state(false);
@@ -507,7 +507,7 @@
                   <div class="settings-row">
                     <div class="settings-copy">
                       <b>Preview memory limit</b>
-                      <span>Remember played sections for smoother replay. A higher limit remembers more in this window.</span>
+                      <span>Keep nearby sections ready for smoother playback. A higher limit remembers more in this window.</span>
                     </div>
                     <select class="settings-select" aria-label="Preview memory limit" value={previewMemoryMiB}
                       onchange={(event) => {
@@ -545,15 +545,15 @@
                   <div class="sg-group">
                     <div class="settings-row">
                       <div class="settings-copy">
-                        <b>Reopen windows on launch</b>
-                        <span>Start Powermove with the projects that had a window when you quit. Off, it opens one window.</span>
+                        <b>Reopen last project on launch</b>
+                        <span>Open only the project you were last working on.</span>
                       </div>
                       <button
                         class="toggle"
                         class:on={restoreWindows}
                         type="button"
                         aria-pressed={restoreWindows}
-                        aria-label="Reopen windows on launch"
+                        aria-label="Reopen last project on launch"
                         onclick={toggleRestoreWindows}
                       ><i aria-hidden="true"></i></button>
                     </div>

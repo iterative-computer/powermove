@@ -4,6 +4,34 @@ import { preserveWorldPose, worldPoseValues,worldAim3D,preserveWorldAim,aimPrope
 import { isModelGroup } from '../../core/scene3d/layers';
 import { modelGroupBounds } from '../../core/scene3d/service';
 
+const nativeArrayFind = Array.prototype.find;
+// Custom find methods can retain their predicate. Keep its current binding
+// alive, including the result assigned after the method returns.
+function customTransformParent(layers: any[], find: typeof nativeArrayFind, current: any): any {
+  current = Reflect.apply(find,layers,[(item: any) => item.id === current.parent]);
+  return current;
+}
+function transformParent(layers: any[], current: any): any {
+  const find = layers.find;
+  if (find !== nativeArrayFind) return customTransformParent(layers,find,current);
+  // Match native find's length snapshot and live property reads, without
+  // allocating a predicate and its captured loop binding for every parent.
+  const size = +layers.length;
+  if (size <= 0xffffffff) {
+    for (let index = 0, length = size > 0 ? size >>> 0 : 0; index < length; index++) {
+      const item = layers[index];
+      if (item.id === current.parent) return item;
+    }
+    return;
+  }
+  // Native find also supports array-like receivers with longer lengths.
+  const length = size > 0 ? size < 9007199254740991 ? size - size % 1 : 9007199254740991 : 0;
+  for (let index = 0; index < length; index++) {
+    const item = layers[index];
+    if (item.id === current.parent) return item;
+  }
+}
+
 /** Membership supplies a transform space without changing parent links or layer time. */
 export function groupAncestors(layer: any, layers: any[], byId?: Map<string, any>): any[] {
   if (!layer?.group) return [];
@@ -45,17 +73,29 @@ export function installLayerGroups(PM: PMRegistry): void {
     const m = PM.worldMatrix(group, time), det = m[0]*m[3]-m[1]*m[2];
     if (Math.abs(det) < 1e-10) return null;
     const inv = [m[3]/det,-m[1]/det,-m[2]/det,m[0]/det,(m[2]*m[5]-m[3]*m[4])/det,(m[1]*m[4]-m[0]*m[5])/det];
-    const points: {x:number;y:number}[] = [];
+    let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity,hasPoint=false;
+    // Keep extrema local: a callback capturing fractional values boxes them
+    // on every corner. Math extrema also preserve NaN and signed zero.
     for (const child of PM.curComp().layers) {
       if (child.type === 'group' || !ancestors(child, PM.curComp().layers).some(item => item.id === group.id) || !PM.active(child,time)) continue;
       const bounds = PM.GL?.bounds?.(child,time);
       const world = PM.worldMatrix(child,time), local = PM.mul(inv,world);
-      if (bounds) for (const x of [bounds.x0,bounds.x1]) for (const y of [bounds.y0,bounds.y1]) points.push({x:local[0]*x+local[2]*y+local[4],y:local[1]*x+local[3]*y+local[5]});
-      else if (child.type !== 'audio') points.push({x:local[4],y:local[5]});
+      if (bounds) {
+        const left=bounds.x0,right=bounds.x1;
+        for(let side=0;side<2;side++) {
+          const x=side?right:left,top=bounds.y0,bottom=bounds.y1;
+          for(let edge=0;edge<2;edge++) {
+            const y=edge?bottom:top,px=local[0]*x+local[2]*y+local[4],py=local[1]*x+local[3]*y+local[5];
+            x0=Math.min(x0,px);x1=Math.max(x1,px);y0=Math.min(y0,py);y1=Math.max(y1,py);
+          }
+        }
+        hasPoint=true;
+      } else if (child.type !== 'audio') {
+        const x=local[4],y=local[5];
+        x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);hasPoint=true;
+      }
     }
-    if (!points.length) return null;
-    const x0=Math.min(...points.map(p=>p.x)), x1=Math.max(...points.map(p=>p.x));
-    const y0=Math.min(...points.map(p=>p.y)), y1=Math.max(...points.map(p=>p.y));
+    if (!hasPoint) return null;
     return {x0,y0,x1,y1,w:x1-x0,h:y1-y0,ax:0,ay:0};
   };
   PM.groupAncestors = (layer: any, layers = PM.curComp().layers) => ancestors(layer, layers);
@@ -65,7 +105,7 @@ export function installLayerGroups(PM: PMRegistry): void {
     const selectedIds = new Set(selected.map((layer: any) => layer.id));
     return selected.filter((layer: any) => {
       const seen = new Set<string>();
-      for (let current = layer; current && !seen.has(current.id); current = layers.find((item: any) => item.id === current.parent)) {
+      for (let current = layer; current && !seen.has(current.id); current = transformParent(layers,current)) {
         seen.add(current.id);
         if (current !== layer && selectedIds.has(current.id) || ancestors(current,layers).some(group => selectedIds.has(group.id))) return false;
       }
@@ -76,18 +116,39 @@ export function installLayerGroups(PM: PMRegistry): void {
     const index = indexFor(PM.proj.layers);
     if (index.spans.has(group.id)) return index.spans.get(group.id);
     const ids = new Set(PM.expandGroups([group.id]));
-    const children = PM.proj.layers.filter((layer: any) => ids.has(layer.id) && layer.type !== 'group');
-    const from = children.length ? Math.min(...children.map((layer: any) => layer.from)) : 0;
-    const end = children.length ? Math.max(...children.map((layer: any) => layer.from + layer.dur)) : PM.proj.dur;
+    // Snapshot membership before reading times, then keep the original from
+    // and end phases. Numeric getters may change other members while read.
+    const children=PM.proj.layers.filter((layer:any)=>ids.has(layer.id)&&layer.type!=='group');
+    let from=children.length?Infinity:0,end=children.length?-Infinity:PM.proj.dur;
+    for(let i=0,length=children.length;i<length;i++)from=Math.min(from,children[i].from);
+    for(let i=0,length=children.length;i<length;i++) {
+      const layer=children[i];end=Math.max(end,layer.from+layer.dur);
+    }
     const span = { from, dur: end - from }; index.spans.set(group.id, span); return span;
   };
-  PM.expandGroups = (ids: string[]) => PM.proj.layers.filter((layer: any) => ids.includes(layer.id)
-    || ancestors(layer, PM.proj.layers).some(group => ids.includes(group.id))).map((layer: any) => layer.id);
+  PM.expandGroups = (ids: string[]) => {
+    // Single-group queries are common; larger selections otherwise rescan the
+    // selected ID list for every layer and ancestor in the composition.
+    if(ids.length<8)return PM.proj.layers.filter((layer:any) => ids.includes(layer.id)
+      || ancestors(layer,PM.proj.layers).some(group => ids.includes(group.id))).map((layer:any)=>layer.id);
+    const selected=new Set(ids);
+    return PM.proj.layers.filter((layer:any) => selected.has(layer.id)
+      || ancestors(layer,PM.proj.layers).some(group => selected.has(group.id))).map((layer:any)=>layer.id);
+  };
   PM.normalizeGroupStack = () => {
     const layers = PM.proj.layers, ordered: any[] = [], seen = new Set<string>();
+    // Keep each parent's original stack order without scanning the whole
+    // composition again for every group encountered during traversal.
+    const children = new Map<string | null, any[]>();
+    for (const layer of layers) {
+      const parent = layer.group || null;
+      let members = children.get(parent);
+      if (!members) children.set(parent, members = []);
+      members.push(layer);
+    }
     const visit = (parent: string | null) => {
-      for (const layer of layers) {
-        if ((layer.group || null) !== parent || seen.has(layer.id)) continue;
+      for (const layer of children.get(parent) || []) {
+        if (seen.has(layer.id)) continue;
         seen.add(layer.id); ordered.push(layer);
         if (layer.type === 'group') visit(layer.id);
       }

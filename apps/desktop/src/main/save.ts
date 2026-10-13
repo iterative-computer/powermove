@@ -88,7 +88,7 @@ export async function openProjectForWindow(
   filePath: string
 ): Promise<ProjectOpenResult> {
   try {
-    const opened = await ctx.projects.open(filePath);
+    const opened = await ctx.projects.open(filePath, { allowDocumentRange: true });
     if (webContents.isDestroyed()) {
       await ctx.projects.close(opened.token, false);
       throw new Error('Project window is unavailable');

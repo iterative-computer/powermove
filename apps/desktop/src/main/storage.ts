@@ -450,6 +450,13 @@ export function registerStoreIpc(
     event.returnValue = store.getEncodedSerialized?.(payload.key) ?? store.getSerialized?.(payload.key) ?? null;
   });
 
+  ipcMain.handle(IPC.storeGetEncoded, (event, payload: unknown) => {
+    if (!ctx.isTrustedSender(event) || !isRecord(payload) || typeof payload.key !== 'string') {
+      throw new IpcValidationError(IPC.storeGetEncoded, 'expected a trusted store key');
+    }
+    return store.getEncodedSerialized?.(payload.key) ?? store.getSerialized?.(payload.key) ?? null;
+  });
+
   ipcMain.on(IPC.storeSnapshotSync, (event) => {
     if (!ctx.isTrustedSender(event)) {
       event.returnValue = {};

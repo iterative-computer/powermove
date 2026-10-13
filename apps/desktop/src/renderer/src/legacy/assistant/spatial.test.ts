@@ -1,10 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
 import { install } from './spatial';
+import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
+import { AGENT_MODELS } from '../../../../shared/agent-models';
 
-function spatialRegistry(): PMRegistry {
+function spatialRegistry(provider = 'chatgpt', stored: Record<string, unknown> = {}): PMRegistry {
   const PM: PMRegistry = {
+    store: { get: (key: string, fallback: any) => key === 'agentProvider' ? provider : Object.hasOwn(stored, key) ? stored[key] : fallback, set: vi.fn() },
     h() {},
     uid: () => 'id',
     clamp: (value: any, min: any, max: any) => Math.max(min, Math.min(max, value)),
@@ -45,6 +48,129 @@ function spatialRegistry(): PMRegistry {
 }
 
 describe('legacy spatial assistant install', () => {
+  it.each(['chatgpt', 'claude', 'compatible'])('discovers only the active provider at startup (%s), then refreshes on switching', async provider => {
+    const models = { chatgpt: vi.fn(async () => []), claude: vi.fn(async () => []) };
+    const changed: Record<string, (status: any) => void> = {};
+    installBridgeForTests({
+      chatgpt: { models: models.chatgpt, onChanged: (callback: any) => { changed.chatgpt = callback; } },
+      claude: { models: models.claude, onChanged: (callback: any) => { changed.claude = callback; } },
+    } as any);
+    try {
+      const PM = spatialRegistry(provider);
+      expect(models.chatgpt).toHaveBeenCalledTimes(provider === 'chatgpt' ? 1 : 0);
+      expect(models.claude).toHaveBeenCalledTimes(provider === 'claude' ? 1 : 0);
+      const next = provider === 'claude' ? 'chatgpt' : 'claude';
+      changed[next]!({ state: 'connected' });
+      expect(models[next]).not.toHaveBeenCalled();
+      PM.AgentUI.setProvider(next);
+      expect(models[next]).toHaveBeenCalledTimes(1);
+      changed[next]!({ state: 'connected' });
+      expect(models[next]).toHaveBeenCalledTimes(2);
+      changed[next]!({ state: 'disconnected' });
+      expect(models[next]).toHaveBeenCalledTimes(2);
+      await Promise.resolve();
+    } finally { resetBridgeForTests(); }
+  });
+  it.each([['claude', 'chatgpt'], ['chatgpt', 'claude']])('discovers the saved active thread provider %s → %s exactly once at startup', async (storedProvider, threadProvider) => {
+    const models = { chatgpt: vi.fn(async () => []), claude: vi.fn(async () => []) };
+    const threadModel = threadProvider === 'chatgpt' ? 'saved-startup/Codex' : 'sonnet';
+    const previousModels = [...AGENT_MODELS.chatgpt];
+    installBridgeForTests({ chatgpt: { models: models.chatgpt }, claude: { models: models.claude } } as any);
+    let PM: PMRegistry | undefined;
+    try {
+      PM = spatialRegistry(storedProvider, {
+        'agentThreads.': { version: 1, activeId: 'saved', threads: [
+          { id: 'saved', conversation: [], composerDraft: '', provider: threadProvider, model: threadModel }
+        ] }
+      });
+      expect(PM.AgentUI.state.provider).toBe(threadProvider);
+      expect(PM.AgentUI.state.model).toBe(threadModel);
+      expect(models.chatgpt).toHaveBeenCalledTimes(threadProvider === 'chatgpt' ? 1 : 0);
+      expect(models.claude).toHaveBeenCalledTimes(threadProvider === 'claude' ? 1 : 0);
+      await Promise.resolve();
+    } finally {
+      PM?.AgentUI.flushThreads();
+      AGENT_MODELS.chatgpt = previousModels;
+      resetBridgeForTests();
+    }
+  });
+  it.each(['claude', 'compatible'])('restores a saved custom Codex thread before discovery from %s', async provider => {
+    const customModel = `saved-${provider}/Codex:fast`;
+    let resolveModels!: (models: any[]) => void;
+    const models = vi.fn(() => new Promise<any[]>(resolve => { resolveModels = resolve; }));
+    const previousModels = [...AGENT_MODELS.chatgpt];
+    installBridgeForTests({ chatgpt: { models }, claude: { models: async () => [] } } as any);
+    let PM: PMRegistry | undefined;
+    try {
+      PM = spatialRegistry(provider, {
+        'agentThreads.': { version: 1, activeId: 'active', threads: [
+          { id: 'active', conversation: [], composerDraft: '', provider, model: provider === 'claude' ? 'sonnet' : 'configured' },
+          { id: 'saved-codex', conversation: [], composerDraft: '', provider: 'chatgpt', model: customModel, reasoningEffort: 'high' }
+        ] }
+      });
+      expect(models).not.toHaveBeenCalled();
+      PM.AgentUI.switchThread('saved-codex');
+      expect(PM.AgentUI.state.provider).toBe('chatgpt');
+      expect(PM.AgentUI.state.model).toBe(customModel);
+      expect(models).toHaveBeenCalledOnce();
+      resolveModels([{ id: customModel, label: 'Saved custom Codex', reasoningEfforts: ['high'] }]);
+      await Promise.resolve();
+      expect(PM.AgentUI.state.provider).toBe('chatgpt');
+      expect(PM.AgentUI.state.model).toBe(customModel);
+    } finally {
+      PM?.AgentUI.flushThreads();
+      AGENT_MODELS.chatgpt = previousModels;
+      resetBridgeForTests();
+    }
+  });
+
+  it('keeps a newer selected Codex model when saved-thread discovery resolves later', async () => {
+    const customModel = 'saved/delayed-codex';
+    let resolveModels!: (models: any[]) => void;
+    const previousModels = [...AGENT_MODELS.chatgpt];
+    installBridgeForTests({ chatgpt: { models: () => new Promise<any[]>(resolve => { resolveModels = resolve; }) } } as any);
+    let PM: PMRegistry | undefined;
+    try {
+      PM = spatialRegistry('compatible', {
+        'agentThreads.': { version: 1, activeId: 'active', threads: [
+          { id: 'active', conversation: [], composerDraft: '', provider: 'compatible', model: 'configured' },
+          { id: 'saved-codex', conversation: [], composerDraft: '', provider: 'chatgpt', model: customModel }
+        ] }
+      });
+      PM.AgentUI.switchThread('saved-codex');
+      expect(PM.AgentUI.state.model).toBe(customModel);
+      PM.AgentUI.setModel('gpt-6-luna', 'high');
+      resolveModels([{ id: customModel, label: 'Saved custom Codex', reasoningEfforts: ['high'] }]);
+      await Promise.resolve();
+      expect(PM.AgentUI.state.model).toBe('gpt-6-luna');
+    } finally {
+      PM?.AgentUI.flushThreads();
+      AGENT_MODELS.chatgpt = previousModels;
+      resetBridgeForTests();
+    }
+  });
+  it.each(['bad model', 'x'.repeat(129)])('does not restore an invalid saved Codex model (%s)', async model => {
+    const models = vi.fn(async () => []), previousModels = [...AGENT_MODELS.chatgpt];
+    installBridgeForTests({ chatgpt: { models } } as any);
+    let PM: PMRegistry | undefined;
+    try {
+      PM = spatialRegistry('compatible', {
+        'agentThreads.': { version: 1, activeId: 'active', threads: [
+          { id: 'active', conversation: [], composerDraft: '', provider: 'compatible', model: 'configured' },
+          { id: 'invalid-codex', conversation: [], composerDraft: '', provider: 'chatgpt', model }
+        ] }
+      });
+      PM.AgentUI.switchThread('invalid-codex');
+      expect(PM.AgentUI.state.provider).toBe('compatible');
+      expect(PM.AgentUI.state.model).toBe('configured');
+      expect(models).not.toHaveBeenCalled();
+      expect(AGENT_MODELS.chatgpt.some(item => item.id === model)).toBe(false);
+    } finally {
+      PM?.AgentUI.flushThreads();
+      AGENT_MODELS.chatgpt = previousModels;
+      resetBridgeForTests();
+    }
+  });
   it('resolves rectangular selections in either direction', () => {
     const math = spatialRegistry().SpatialAssistant.math;
 

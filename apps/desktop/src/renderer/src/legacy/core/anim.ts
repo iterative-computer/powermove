@@ -19,13 +19,13 @@ PM.touch = () => {
   version++;
   PM.ProjectIndex?.invalidateKeyframes?.();
   /* hierarchy memos must never outlive an edit */
-  woMemo.clear(); wmMemo.clear(); lmMemo.clear(); memoT = null;
+  woMemo.clear(); wmMemo.clear(); lmMemo.clear(); groupSpaceMemo.clear(); memoT = null;
   parentIndexes = new WeakMap();
   staticTransforms = new WeakMap();
 };
 PM.animVersion = () => version;
 let memoT: any = null;
-const woMemo = new Map(), wmMemo = new Map(), lmMemo = new Map();
+const woMemo = new Map(), wmMemo = new Map(), lmMemo = new Map(), groupSpaceMemo = new Map();
 
 /* ── keyframe evaluation ───────────────────────────────── */
 function evalKfs(kf: any, t: any, interpolateColor = false) {
@@ -296,7 +296,7 @@ const indexOfLayer = (comp: any, layer: any) => {
 
 /** Start a fresh evaluation window (called by the compositor per frame). */
 PM.beginEval = (T: any) => {
-  if (!Object.is(memoT, T)) { woMemo.clear(); wmMemo.clear(); lmMemo.clear(); }
+  if (!Object.is(memoT, T)) { woMemo.clear(); wmMemo.clear(); lmMemo.clear(); groupSpaceMemo.clear(); }
   memoT = T;
 };
 
@@ -331,6 +331,26 @@ PM.worldMatrix = (L: any, T: any) => {
     const matrix = PM.localMatrix(L, T);
     if (Object.is(memoT, T)) wmMemo.set(L, matrix);
     return matrix;
+  }
+  if (!L.parent && L.group && Object.is(memoT, T)) {
+    const groups = PM.groupAncestors?.(L) || [];
+    // Ordinary nested groups share one surrounding space across all siblings.
+    // Parent rigs and incomplete/cyclic memberships retain the general path.
+    if (groups.length && !groups[groups.length - 1].group && groups.every((group: any) => !group.parent)) {
+      let space: number[] | undefined, start = groups.length - 1;
+      for (let i = 0; i < groups.length; i++) {
+        const cached = groupSpaceMemo.get(groups[i]);
+        if (cached) { space = cached; start = i - 1; break; }
+      }
+      space ||= [1,0,0,1,0,0];
+      for (let i = start; i >= 0; i--) {
+        space = mul(space, PM.localMatrix(groups[i], T));
+        groupSpaceMemo.set(groups[i], space);
+      }
+      const matrix = mul(space, PM.localMatrix(L, T));
+      wmMemo.set(L, matrix);
+      return matrix;
+    }
   }
   const chain: any[] = [];
   let cur = L, hit = false;

@@ -2,6 +2,41 @@ import { adoptTemporalEase, easeFromUnitHandle, unitHandleFromEase, valueAtTime,
 const owners = new WeakMap<object,any[]>();
 type PreparedTrack = {version:number; length:number; first:any; last:any; curves:any[]; times?:Float64Array; values?:Float64Array; evaluatedTime?:number; evaluatedValue?:number; evaluatedSpring?:(time:number,config:any)=>number};
 const prepared = new WeakMap<any[], PreparedTrack>();
+// Share the compatibility accessors across every key. Dense projects can have
+// millions of keys; eight closures per key consume hundreds of megabytes.
+const legacyDescriptors: PropertyDescriptorMap = {};
+for (const [legacy, side] of [['eo', 'out'], ['ei', 'in']] as const) {
+  legacyDescriptors[legacy] = {
+    configurable: true, enumerable: false,
+    get(this: any) {
+      const keys = owners.get(this)!;
+      const i = keys.indexOf(this), other = keys[i + (side === 'out' ? 1 : -1)] || keys[i + (side === 'out' ? -1 : 1)];
+      if (!other || this[side + 'Interp'] !== 'bezier') return side === 'out' ? [0, 0] : [1, 1];
+      return unitHandleFromEase(this[side + 'Ease'], Math.abs(other.t - this.t), (other.v - this.v) * Math.sign(other.t - this.t), side)?.map(v => Number(v.toPrecision(15))) ?? null;
+    },
+    set(this: any, handle: any) {
+      const keys = owners.get(this)!;
+      prepared.delete(keys);
+      const i = keys.indexOf(this), other = keys[i + (side === 'out' ? 1 : -1)] || keys[i + (side === 'out' ? -1 : 1)];
+      this[side + 'Interp'] = 'bezier'; this.autoBezier = false;
+      this[side + 'Ease'] = easeFromUnitHandle(handle, other ? Math.abs(other.t - this.t) : 1, other ? (other.v - this.v) * Math.sign(other.t - this.t) : 1, side);
+    },
+  };
+}
+legacyDescriptors.hold = {
+  configurable: true, enumerable: false,
+  get(this: any) { return this.outInterp === 'hold'; },
+  set(this: any, value: any) {
+    prepared.delete(owners.get(this)!);
+    if (value) this.outInterp = 'hold';
+    else if (this.outInterp === 'hold') this.outInterp = 'linear';
+  },
+};
+legacyDescriptors.bezierMode = {
+  configurable: true, enumerable: false,
+  get(this: any) { return this.continuous ? 'continuous' : 'split'; },
+  set(this: any, value: any) { this.continuous = value === 'continuous'; },
+};
 /** Legacy controls are views of native speed/influence, never persisted copies. */
 export function temporalKeys(keys: any[], version?:number): any[] {
   const cached=prepared.get(keys);
@@ -14,30 +49,12 @@ export function temporalKeys(keys: any[], version?:number): any[] {
   for (const key of keys) {
     // Existing accessors already resolve their neighbours from this array.
     // Appending a key must not redefine every accessor in the track.
-    if (owners.get(key) === keys) continue;
+    const previousOwner = owners.get(key);
+    if (previousOwner === keys) continue;
     owners.set(key,keys);
-    for (const [legacy,side] of [['eo','out'],['ei','in']] as const) {
-      Object.defineProperty(key,legacy,{ configurable:true,enumerable:false,
-        get() {
-          const i = keys.indexOf(key), other = keys[i+(side==='out'?1:-1)] || keys[i+(side==='out'?-1:1)];
-          if (!other) return side==='out'?[0,0]:[1,1];
-          if (key[side+'Interp'] !== 'bezier') return side==='out'?[0,0]:[1,1];
-          return unitHandleFromEase(key[side+'Ease'],Math.abs(other.t-key.t),(other.v-key.v)*Math.sign(other.t-key.t),side)?.map(v=>Number(v.toPrecision(15))) ?? null;
-        },
-        set(handle) {
-          prepared.delete(keys);
-          const i=keys.indexOf(key), other=keys[i+(side==='out'?1:-1)] || keys[i+(side==='out'?-1:1)];
-          key[side+'Interp']='bezier'; key.autoBezier=false;
-          key[side+'Ease']=easeFromUnitHandle(handle,other?Math.abs(other.t-key.t):1,other?(other.v-key.v)*Math.sign(other.t-key.t):1,side);
-        }
-      });
-    }
-    Object.defineProperty(key,'hold',{configurable:true,enumerable:false,get:()=>key.outInterp==='hold',set:(v)=>{
-      prepared.delete(keys);
-      if (v) key.outInterp='hold';
-      else if (key.outInterp==='hold') key.outInterp='linear';
-    }});
-    Object.defineProperty(key,'bezierMode',{configurable:true,enumerable:false,get:()=>key.continuous?'continuous':'split',set:(v)=>{key.continuous=v==='continuous';}});
+    if (previousOwner) prepared.delete(previousOwner);
+    // Moving keys updates their weak owner; the shared accessors need no rebinding.
+    if (!previousOwner) Object.defineProperties(key, legacyDescriptors);
   }
   return keys;
 }

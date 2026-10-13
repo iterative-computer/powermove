@@ -1,5 +1,6 @@
+import { yieldTask as yieldToBrowser } from './yield-task';
 /** Serialize plain project data in bounded slices, allowing input and paint between slices. */
-export async function stringifyAsync(value: unknown, yieldTask = () => new Promise<void>(resolve => setTimeout(resolve, 0))): Promise<string> {
+export async function stringifyAsync(value: unknown, yieldTask = yieldToBrowser): Promise<string> {
   type Task = { value: any } | { text: string } | { leave: object } | { string: string; offset: number };
   const tasks: Task[] = [{ value }], ancestors = new Set<object>(), chunks: string[] = [], parts: string[] = [];
   let deadline = performance.now() + 4, steps = 0;

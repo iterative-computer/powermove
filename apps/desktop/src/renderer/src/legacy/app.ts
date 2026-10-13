@@ -16,6 +16,7 @@ import type { PMRegistry } from './registry';
 import { packProjectFileBlob, readProjectFileDocument, saveIncrementalProject, restoreProjectFileMedia, restoreProjectFileStream, unpackProjectFileBlob, unpackProjectFile } from './core/project-file';
 import { projectFingerprint } from './core/project-fingerprint';
 import { stringifyAsync } from './core/serialize-async';
+import { yieldTask } from './core/yield-task';
 import { createNewProjectForm } from './ui/project-settings';
 import { inspectorService, shaderHooks, timelineService, viewerService } from './core/services';
 import { bridge as hostBridge } from '../kernel/bridge';
@@ -29,6 +30,30 @@ const fileStates = new Map<string, FileState>();
 const comparisonVersions = new Map<string, number>();
 const pendingDiscards = new Set<string>();
 const discardedProjects = new Set<string>();
+let loadGeneration = 0;
+const yieldLoad = yieldTask;
+const paintProject = () => new Promise<void>(resolve => {
+  // Hidden or background windows may suspend animation frames.
+  const fallback = setTimeout(resolve, 100);
+  window.requestAnimationFrame(() => { clearTimeout(fallback); setTimeout(resolve, 0); });
+});
+function beginProjectLoading(id: string | null, name: string) {
+  const generation = ++loadGeneration;
+  PM.projectLoading = { id, name, generation };
+  PM.pause?.();
+  window.clearTimeout(APP.saveTimer);
+  PM.bus.emit('project:loading');
+  return generation;
+}
+function finishProjectLoading(generation: number) {
+  if (loadGeneration !== generation) return;
+  PM.projectLoading = null;
+  document.getElementById('boot-ghost')?.remove();
+  PM.bus.emit('project:loading');
+  // A failed or cancelled open must not strand edits whose recovery timer
+  // was paused while the outgoing editor was inert.
+  if (APP.dirty && PM.proj?.id !== homeProjectId) PM.autosave?.();
+}
 function discardUnsavedProject(id: string) {
   if (!pendingDiscards.delete(id)) return;
   discardedProjects.add(id);
@@ -158,6 +183,7 @@ PM.isHomeProject = () => !!homeProjectId && PM.proj?.id === homeProjectId;
 /* This window's project tabs in strip order. The placeholder composition is
    never a tab. Main mirrors the list so no project is a tab in two windows. */
 let tabIds: string[] = [];
+let pendingBootId: string | null = null;
 /* A window is either told which documents it is for — a restored session, or an
    Open in New Window — or left to choose, skipping whatever the other windows
    already have open. */
@@ -165,18 +191,20 @@ function loadBootProject() {
   const request = PM.windows?.initialProject?.() ?? { projectId: null, tabs: [], taken: [] };
   tabIds = [...new Set((Array.isArray(request.tabs) ? request.tabs : []).filter((id: any) => typeof id === 'string'))] as string[];
   if (request.projectId) {
+    if (PM.store.getAsync) { pendingBootId = request.projectId; return emptyHomeProject(); }
     const requested = PM.Projects.get(request.projectId);
     if (requested) {
       try { return hydrate(requested); }
       catch (e) { console.warn('Saved project could not be loaded', request.projectId, e); return emptyHomeProject(); }
     }
   }
+  if (PM.windows?.supported) return emptyHomeProject();
   const raw = PM.Projects.pickBoot({ legacy: PM.store.get('autosave', null), taken: request.taken });
   if (!raw) return emptyHomeProject();
   try { return hydrate(raw); }
   catch (e) { console.warn('Saved project could not be loaded', raw.id, e); return emptyHomeProject(); }
 }
-function hydrate(p: any) {
+function* hydrateSteps(p: any): Generator<void, any> {
   const base = PM.mkProject({ name: p.name, w: p.w, h: p.h, fps: p.fps, dur: p.dur, bg: p.bg });
   Object.assign(base, p);
   base.edits = compactEditLog(Array.isArray(p.edits) ? p.edits : []);
@@ -286,10 +314,10 @@ function hydrate(p: any) {
     });
     return transition;
   };
-  const sanitizeLayers = (layers: any, container: any) => {
+  function* sanitizeLayers(layers: any[], container: any): Generator<void> {
     // Moving a strip before zero must preserve all of its layer-local keys.
     const minKeyTime = -Infinity;
-    layers.forEach((L: any, li: any) => {
+    for (const [li, L] of layers.entries()) {
       L.id = typeof L.id === 'string' && L.id ? L.id : PM.uid('L');
       if (!L.name || typeof L.name !== 'string') L.name = 'Layer ' + (li + 1);
       L.from = num(L.from, 0);
@@ -359,11 +387,12 @@ function hydrate(p: any) {
         L.d.data = sanitizeJson(L.d.data) || {};
       }
       if (L.type === 'captions') L.d = normalizeCaptionsContent(L.d);
-    });
-  };
+      yield;
+    }
+  }
   base.comps = p.comps && typeof p.comps === 'object' ? p.comps : {};
-  (Object.entries(base.comps) as any).forEach(([cid, c]: any) => {
-    if (!c || typeof c !== 'object') { delete base.comps[cid]; return; }
+  for (const [cid, c] of Object.entries(base.comps) as [string, any][]) {
+    if (!c || typeof c !== 'object') { delete base.comps[cid]; continue; }
     c.id = cid;
     c.name = typeof c.name === 'string' && c.name ? c.name : 'Precomp';
     c.w = Math.max(2, num(c.w, base.w)); c.h = Math.max(2, num(c.h, base.h));
@@ -372,9 +401,9 @@ function hydrate(p: any) {
     c.params = sanitizeParams(c.params);
     c.layers = Array.isArray(c.layers) ? c.layers : [];
     c.edits = compactEditLog(Array.isArray(c.edits) ? c.edits : []);
-    sanitizeLayers(c.layers, c);
-  });
-  sanitizeLayers(base.layers, base);
+    yield* sanitizeLayers(c.layers, c);
+  }
+  yield* sanitizeLayers(base.layers, base);
   /* precomp layers whose referenced comp failed to load degrade to empty layers */
   PM.Comps?.normalize(base);
   /* precomp layers whose referenced comp failed to load degrade to empty layers */
@@ -384,11 +413,34 @@ function hydrate(p: any) {
   }
   return base;
 }
+function hydrate(p: any) {
+  const steps = hydrateSteps(p);
+  let result = steps.next();
+  while (!result.done) result = steps.next();
+  return result.value;
+}
+async function hydrateAsync(p: any, isCurrent = () => true) {
+  const steps = hydrateSteps(p);
+  let deadline = performance.now() + 4, result = steps.next();
+  while (!result.done) {
+    if (performance.now() >= deadline) {
+      await yieldLoad();
+      if (!isCurrent()) return null;
+      deadline = performance.now() + 4;
+    }
+    result = steps.next();
+  }
+  return isCurrent() ? result.value : null;
+}
+PM.hydrateProjectAsync = hydrateAsync;
 /* Shared project boundary for import/open flows and deterministic regression tests. */
 PM.hydrateProject = hydrate;
 /* Boot hygiene: repeated launches can leave several untouched "Untitled" projects
    in the registry. Keep at most one, and none at all while real projects exist. */
 (function pruneEmptyUntitled() {
+  // Modern windows have a non-persistent home placeholder. Never scan every
+  // saved document at boot or delete a deliberately empty draft.
+  if (PM.store.getAsync) return;
   const metas = PM.Projects.list();
   const empties = metas.filter((m: any) => m.name === 'Untitled');
   if (!empties.length) return;
@@ -609,10 +661,10 @@ function persistCurrent(withThumb: any) {
   } catch (e) { APP.dirty = true; console.warn('Project save failed', e); return false; }
 }
 
-function captureProjectSession() {
+function captureProjectSession(persist = true) {
   if (!PM.proj?.id || PM.proj.id === homeProjectId || discardedProjects.has(PM.proj.id)) return true;
   PM.bus.emit('project:flush-edits');
-  const saved = persistCurrent(false);
+  const saved = persist ? persistCurrent(false) : true;
   const timeline = timelineService(PM);
   PM.Projects.putState(PM.proj.id, {
     ...PM.Projects.getState(PM.proj.id, { history: false }),
@@ -625,6 +677,18 @@ function captureProjectSession() {
       : undefined,
   });
   return saved;
+}
+
+async function captureProjectSessionAsync(isCurrent: () => boolean) {
+  if (!PM.store.setSnapshotAsync) return captureProjectSession();
+  const project = PM.proj;
+  if (!project?.id || project.id === homeProjectId || discardedProjects.has(project.id)) return true;
+  PM.bus.emit('project:flush-edits');
+  if (!await PM.store.setSnapshotAsync(`project.${project.id}`, { v: PM.version, proj: project }, isCurrent)) return false;
+  if (!isCurrent() || PM.proj !== project) return false;
+  PM.store.del(`projectJournal.${project.id}`);
+  PM.Projects.upsertMeta({ id: project.id, name: project.name, at: Date.now(), w: project.w, h: project.h });
+  return captureProjectSession(false);
 }
 
 // Native close/quit calls this while the document and its IPC channel are
@@ -819,7 +883,10 @@ hostBridge()?.onProjectOpenExternal?.(async result => {
 async function openProjectFile(file: any, association?: { path: string; projectId: string }) {
   const opening = createImportProgress('Opening project', PM);
   opening.update({ label: file.name });
+  const generation = beginProjectLoading(association?.projectId || null, file.name || 'project');
+  const current = () => loadGeneration === generation;
   try {
+    await yieldLoad();
     let o: any, mediaRestored = false;
     if (file.native && 'token' in file.native) {
       const bridge = hostBridge()!.projectRead!;
@@ -840,7 +907,8 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     const source = o.proj || o;
     if (!source || !Array.isArray(source.layers) || !Number.isFinite(source.w) || !Number.isFinite(source.h)) throw new Error('This is not a Powermove project.');
     source.id = association?.projectId || PM.uid('project');
-    const project = hydrate(source);
+    const project = await hydrateAsync(source, current);
+    if (!project || !current()) { opening.close(); return false; }
     if (!mediaRestored) await restoreProjectFileMedia(o, PM.MediaStore);
     // File opens receive a fresh document ID to keep independent copies safe.
     // Recover the most recent layout for this file, rather than reverting to
@@ -868,22 +936,34 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     if (archive && PM.store.set(`agentThreads.${project.id}`, archive) === false) {
       throw new Error('Could not restore agent threads: project storage is unavailable or full');
     }
-    switchProject(project, o.history || { version: 1, index: -1, entries: [] });
+    if (!await captureProjectSessionAsync(current) || !current()) { opening.close(); return false; }
+    const historyToken = await PM.hist.prepareImport?.(o.history, current, project.compId);
+    if (!current()) { opening.close(); return false; }
+    if (PM.Projects.recoverAsync) await PM.Projects.recoverAsync(project, undefined, current);
+    else PM.Projects.put(project);
+    if (!current()) { opening.close(); return false; }
+    switchProject(project, o.history || { version: 1, index: -1, entries: [] }, undefined, { session: null, captured: true, stored: true, historyToken });
     const state = fileState(project.id);
     state.path = association?.path;
-    state.savedHash = association ? await projectFingerprint(JSON.stringify(PM.proj)) : undefined;
+    state.savedHash = association ? await projectFingerprint(await stringifyAsync(project)) : undefined;
+    if (!current()) { opening.close(); return false; }
     rememberFile(project.id, state);
-    await refreshFileDirty();
+    await refreshFileDirty(project, current);
+    if (!current()) { opening.close(); return false; }
     const workspace = rememberedWorkspace || o.ws;
     if (workspace?.layout?.docks) PM.WS.restoreSnapshot(workspace);
-    captureProjectSession();
+    await captureProjectSessionAsync(current);
+    await paintProject();
+    if (!current()) { opening.close(); return false; }
     opening.finish('Opened ' + file.name, 2200);
     PM.ProjectsScreen?.hide?.();
     return true;
   } catch (e: any) {
     opening.close();
-    PM.toast('Could not open project: ' + e.message, 4500);
+    if (current()) PM.toast('Could not open project: ' + e.message, 4500);
     return false;
+  } finally {
+    finishProjectLoading(generation);
   }
 }
 const PROJECT_FILE = /\.(pmv|json)$/i;
@@ -973,14 +1053,12 @@ function claimForThisWindow(id: string | null): void {
 }
 
 /* ── live tabs ──────────────────────────────────────────── */
-/* A tab left for another keeps its document, undo stack and loaded media in
-   memory, so going back to it is instant: nothing is re-read from storage and
-   no media is decoded again. Only the most recently used few stay live, to
-   bound memory; an older one has already been written out and comes back from
-   storage the ordinary way. */
-const LIVE_TABS = 4;
+/* Every open tab keeps its document and Undo state. Only decoded media has a
+   recency limit; evicting those resources never unloads the tab itself. */
+const WARM_MEDIA_TABS = 3;
 type ParkedTab = { project: any; history: any; media: any };
 const parkedTabs = new Map<string, ParkedTab>();
+PM.parkedHistories = () => [...parkedTabs.values()].map(tab => tab.history);
 function discardParked(id: string) {
   const tab = parkedTabs.get(id);
   if (!tab) return;
@@ -990,8 +1068,12 @@ function discardParked(id: string) {
 }
 function park(project: any) {
   parkedTabs.set(project.id, { project, history: PM.hist.suspend(), media: PM.assets.suspend() });
-  // Oldest first in insertion order; the one on screen is the fourth live tab.
-  while (parkedTabs.size > LIVE_TABS - 1) discardParked(parkedTabs.keys().next().value!);
+  const media = [...parkedTabs.values()].filter(tab => tab.media?.map?.size);
+  for (const tab of media.slice(0, Math.max(0, media.length - WARM_MEDIA_TABS))) {
+    PM.assets.discard?.(tab.media);
+    tab.media = null;
+  }
+  PM.Memory?.maintain?.('history');
 }
 /** Brings a tab to the front, resumed from memory while it is still live. */
 function showTab(id: string): boolean {
@@ -1012,12 +1094,14 @@ function showTab(id: string): boolean {
  * its own live state as `live`. Anything else — a file just opened, a new
  * composition — is authoritative, so a parked copy of the same id is dropped.
  */
-function switchProject(p: any, history?: any, live?: ParkedTab) {
+function switchProject(p: any, history?: any, live?: ParkedTab, prepared?: { session: any; captured: boolean; stored: boolean; historyToken?: object }) {
+  if (PM.projectLoading && !prepared) { finishProjectLoading(loadGeneration); loadGeneration++; }
   const previous = PM.proj;
   PM.pause();
   const leaving = !!previous?.id && previous.id !== p.id;
   const trashed = leaving && PM.Projects.trashList?.().some((item: any) => item.id === previous.id);
-  if (leaving && !trashed) captureProjectSession();
+  const saveInBackground = live && PM.store.setSnapshotAsync && leaving && !trashed;
+  if (leaving && !trashed && !prepared?.captured) captureProjectSession(!saveInBackground);
   closeProjectTransients();
   if (!live) discardParked(p.id);
   // A tab still in the strip keeps running in the background; a closed or
@@ -1025,7 +1109,7 @@ function switchProject(p: any, history?: any, live?: ParkedTab) {
   const parkable = leaving && !trashed && previous.id !== homeProjectId && tabIds.includes(previous.id)
     && typeof PM.hist.suspend === 'function' && typeof PM.assets.suspend === 'function';
   if (parkable) park(previous);
-  PM.proj = live ? live.project : hydrate(p);
+  PM.proj = live ? live.project : prepared ? p : hydrate(p);
   if (live) {
     // Renamed from Projects while in the background: the library has the name.
     const name = PM.Projects.list().find((meta: any) => meta.id === PM.proj.id)?.name;
@@ -1035,8 +1119,9 @@ function switchProject(p: any, history?: any, live?: ParkedTab) {
   // Opening something new adds it after the other tabs; an existing tab keeps its place.
   if (isTab && !tabIds.includes(PM.proj.id)) tabIds.push(PM.proj.id);
   claimForThisWindow(isTab ? PM.proj.id : null);
-  const session = PM.Projects.getState(PM.proj.id);
-  PM.Projects.putState(PM.proj.id, { ...session, lastActiveAt: Date.now() });
+  const session = prepared ? prepared.session : PM.Projects.getState(PM.proj.id, live ? { history: false } : {});
+  const { history: savedHistory, ...metadata } = session || {};
+  PM.Projects.putState(PM.proj.id, { ...metadata, lastActiveAt: Date.now() });
   const projectWorkspace = PM.store.get(`projectWorkspace.${PM.proj.id}`, null) || session?.workspace;
   // Rebuilding the docks remounts every panel; tabs that share a layout skip it.
   if (projectWorkspace) {
@@ -1046,8 +1131,8 @@ function switchProject(p: any, history?: any, live?: ParkedTab) {
     PM.WS.activate(PM.WS.get(preferred) ? preferred : 'design', true);
   }
   if (live) PM.hist.resume(live.history);
-  else PM.hist.import?.(history ?? session?.history);
-  if (!live) persistCurrent(false);
+  else PM.hist.import?.(history ?? session?.history, prepared?.historyToken);
+  if (!live && !prepared?.stored) persistCurrent(false);
   PM.bus.emit('projects:open');
   PM.time = Number.isFinite(session?.time) ? PM.clamp(session.time, 0, PM.proj.dur) : 0;
   PM.sel.layers = (session?.selection?.layers || []).filter((id: any) => PM.L(id));
@@ -1061,8 +1146,11 @@ function switchProject(p: any, history?: any, live?: ParkedTab) {
     timeline.scrollY = Number.isFinite(session?.timeline?.scrollY) ? session.timeline.scrollY : 0;
     timeline.graph = !!session?.timeline?.graph;
   }
-  PM.rasterClear();
-  if (live) PM.assets.resume(live.media);
+  // Text and shape sources are keyed by their rendered content and already
+  // obey shared memory budgets. Switching projects can reuse those pixels.
+  if (!leaving) PM.rasterClear();
+  if (live?.media) PM.assets.resume(live.media);
+  else if (live) PM.assets.clear();
   else if (!parkable) PM.assets.clear();
   APP.fileHandle = null;
   APP.dirty = fileState().dirty;
@@ -1081,6 +1169,16 @@ function switchProject(p: any, history?: any, live?: ParkedTab) {
   // already was when it was set aside.
   if (live) fileUI();
   else PM.autosave();
+  if (saveInBackground) {
+    const revision = previous.revision, version = comparisonVersions.get(previous.id);
+    const current = () => !discardedProjects.has(previous.id) && previous.revision === revision
+      && comparisonVersions.get(previous.id) === version
+      && (PM.proj === previous || parkedTabs.get(previous.id)?.project === previous);
+    void PM.Projects.recoverAsync(previous, undefined, current).catch((error: any) => {
+      console.warn('Project save failed', error);
+      PM.toast('Could not save this project. Your edits are still open; try Save again.', 6000);
+    });
+  }
   // A tab left before its autosave settled still needs its unsaved dot checked.
   if (previous?.id && previous.id !== PM.proj.id && previous.id !== homeProjectId && tabIds.includes(previous.id)) {
     void refreshFileDirty(previous).catch(() => undefined);
@@ -1096,7 +1194,8 @@ PM.confirmCloseProject = async (id: string) => {
   // already running, join it and then re-check the document instead of making
   // them retry Close after the file dialog or write completes.
   if (activeSave) await activeSave;
-  const project = id === PM.proj.id ? PM.proj : PM.Projects.get(id);
+  const project = id === PM.proj.id ? PM.proj : parkedTabs.get(id)?.project
+    || await (PM.Projects.getAsync?.(id) ?? PM.Projects.get(id));
   if (!project || !await refreshFileDirty(project)) return true;
   const decision = hostBridge()?.confirmProjectClose
     ? await hostBridge()!.confirmProjectClose(project.name || 'Untitled')
@@ -1113,6 +1212,7 @@ PM.confirmCloseProject = async (id: string) => {
 /* Closing the window closes every tab, so each one with unsaved file changes
    gets its own chance to be saved. */
 PM.prepareToClose = async () => {
+  if (PM.projectLoading) { finishProjectLoading(loadGeneration); loadGeneration++; }
   const ids = [...new Set([PM.proj.id, ...tabIds])];
   for (const id of ids) {
     if (!await PM.confirmCloseProject(id)) {
@@ -1159,13 +1259,17 @@ const closingTabs = new Set<string>();
 PM.Tabs = {
   list: liveTabs,
   /** The tab on screen, or null while this window shows only Projects. */
-  get active() { return PM.proj?.id && PM.proj.id !== homeProjectId ? PM.proj.id : null; },
+  get active() { return PM.projectLoading ? PM.projectLoading.id : PM.proj?.id && PM.proj.id !== homeProjectId ? PM.proj.id : null; },
   async activate(id: string) {
     const opened = await PM.openProjectHere(id);
     if (opened) PM.ProjectsScreen?.hide?.();
     return opened;
   },
   async close(id: string) {
+    if (id && id === PM.projectLoading?.id) {
+      finishProjectLoading(loadGeneration); loadGeneration++;
+      if (!tabIds.includes(id)) return true;
+    }
     if (!id || closingTabs.has(id) || !tabIds.includes(id)) return false;
     closingTabs.add(id);
     try {
@@ -1180,6 +1284,7 @@ PM.Tabs = {
   closeCurrent() {
     const id = PM.Tabs.active;
     if (id) return PM.Tabs.close(id);
+    if (PM.projectLoading) { finishProjectLoading(loadGeneration); loadGeneration++; return true; }
     PM.closeWindow?.();
     return true;
   },
@@ -1191,6 +1296,7 @@ PM.Tabs = {
   },
   step(delta: number) {
     const tabs = liveTabs();
+    if (PM.projectLoading?.id && !tabs.includes(PM.projectLoading.id)) tabs.push(PM.projectLoading.id);
     if (!tabs.length) return false;
     const index = tabs.indexOf(PM.Tabs.active ?? '');
     const next = index < 0 ? (delta > 0 ? 0 : tabs.length - 1) : (index + delta + tabs.length) % tabs.length;
@@ -1511,6 +1617,10 @@ window.addEventListener('pm-open-project', (e: any) => {
  * has been brought forward; this window keeps what it had.
  */
 PM.openProjectHere = async (id: string) => {
+  if (PM.projectLoading && (parkedTabs.has(id) || id === PM.proj.id)) {
+    finishProjectLoading(loadGeneration); loadGeneration++;
+  }
+  if (PM.store.getAsync && !parkedTabs.has(id)) return openStoredProject(id);
   if (!id || id === PM.proj.id) return true;
   if (!parkedTabs.has(id) && !PM.Projects.list().some((meta: any) => meta.id === id)) {
     PM.toast('Could not open this project because its local data is missing.');
@@ -1527,6 +1637,54 @@ PM.openProjectHere = async (id: string) => {
   }
   return true;
 };
+
+/** Prepare an owned document while the old editor is safely inert, then
+ * publish it once. Superseded opens never overwrite the latest selection. */
+let pendingStoredOpen: { id: string; generation: number; promise: Promise<boolean> } | null = null;
+function openStoredProject(id: string) {
+  if (pendingStoredOpen?.id === id && pendingStoredOpen.generation === loadGeneration && PM.projectLoading) return pendingStoredOpen.promise;
+  const promise = performStoredOpen(id);
+  pendingStoredOpen = { id, generation: loadGeneration, promise };
+  const clear = () => { if (pendingStoredOpen?.promise === promise) pendingStoredOpen = null; };
+  void promise.then(clear, clear);
+  return promise;
+}
+async function performStoredOpen(id: string) {
+  if (!id || id === PM.proj.id && !PM.projectLoading) return true;
+  const meta = PM.Projects.list().find((item: any) => item.id === id);
+  if (!meta) { PM.toast('Could not open this project because its local data is missing.'); return false; }
+  const generation = beginProjectLoading(id, meta.name || 'Untitled');
+  const current = () => loadGeneration === generation;
+  let claimed = false;
+  try {
+    await yieldLoad();
+    const raw = await PM.Projects.getAsync(id);
+    if (!current()) return false;
+    if (!raw) throw new Error('Its local data is missing.');
+    const project = await hydrateAsync(raw, current);
+    if (!project || !current()) return false;
+    const session = await PM.Projects.getStateAsync(id);
+    if (!current()) return false;
+    const historyToken = await PM.hist.prepareImport?.(session?.history, current, project.compId);
+    if (!current()) return false;
+    await yieldLoad();
+    if (!await captureProjectSessionAsync(current) || !current()) return false;
+    const claim = await (PM.windows?.claimProject?.(id) ?? Promise.resolve({ claimed: true, focused: false }));
+    claimed = claim.claimed;
+    if (!current()) return false;
+    if (!claimed) { if (!claim.focused) PM.toast('That project is already open in another window.'); return false; }
+    switchProject(project, undefined, undefined, { session, captured: true, stored: true, historyToken });
+    PM.ProjectsScreen?.hide?.();
+    await paintProject();
+    return true;
+  } catch (error: any) {
+    if (current()) PM.toast('Could not open project: ' + error.message, 4500);
+    return false;
+  } finally {
+    if (claimed && PM.proj.id !== id && !tabIds.includes(id)) await PM.windows?.releaseProject?.(id);
+    finishProjectLoading(generation);
+  }
+}
 
 /** Opens a project in a window of its own, or raises the one that has it. A
  *  tab of this window moves across rather than opening a second copy. */
@@ -1548,10 +1706,10 @@ PM.newWindow = () => PM.windows?.create?.() ?? Promise.resolve(false);
 PM.closeWindow = () => PM.windows?.close?.();
 
 /* A fresh profile has no window state or recovery entries. */
-if (PM.proj.id === homeProjectId) {
+if (PM.proj.id === homeProjectId && !pendingBootId) {
   PM.ProjectsScreen.show('recents');
   document.title = 'Powermove';
-} else {
+} else if (!pendingBootId) {
   persistCurrent(false);
   void refreshFileDirty();
 }
@@ -1563,14 +1721,14 @@ if (PM.proj.id !== homeProjectId) {
 }
 // Restore the strip first, then check inactive tabs' files one at a time, so a
 // long strip does not clone and hash every document in the first frame.
-const restoredTabs = tabIds.filter(id => id !== PM.proj.id);
+const restoredTabs = tabIds.filter(id => id !== PM.proj.id && id !== pendingBootId);
 let restoredIndex = 0;
 async function refreshNextRestoredTab() {
   const id = restoredTabs[restoredIndex++];
   if (!id) return;
   try {
     if (!fileStates.has(id) && tabIds.includes(id)) {
-      const project = PM.Projects.get(id);
+      const project = await (PM.Projects.getAsync?.(id) ?? PM.Projects.get(id));
       if (project) await refreshFileDirty(project);
     }
   } catch (error) { console.warn('Could not check restored project', error); }
@@ -1582,6 +1740,17 @@ function scheduleRestoredTab() {
   else window.setTimeout(() => { void refreshNextRestoredTab(); }, 50);
 }
 scheduleRestoredTab();
+if (pendingBootId) {
+  const id = pendingBootId;
+  PM.projectReady = openStoredProject(id).then((opened: boolean) => {
+    if (!opened && PM.isHomeProject() && !PM.projectLoading) {
+      tabIds = [];
+      void PM.windows?.releaseProject?.(id);
+      PM.ProjectsScreen.show('recents');
+    }
+    return opened;
+  });
+}
 PM.bus.on('project:saved', () => PM.bus.emit('projects:open'));
 /* Another window renaming, trashing or saving a project changes what this one
    should be showing. Repaint on the keys that describe the shared library. */
@@ -1592,6 +1761,7 @@ PM.bus.on('store:external', (keys: string[]) => {
 
 /* first full frame after persistent panels have measured */
 window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+  if (!PM.projectLoading) document.getElementById('boot-ghost')?.remove();
   viewerService(PM)?.layout();
   timelineService(PM)?.frameView();
   PM.bus.emit('layers');

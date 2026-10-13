@@ -42,7 +42,7 @@ function multiply(a: Mat4, b: Mat4): Mat4 {
     return result;
 }
 function translation(x: number, y: number, z: number) { const m = identity(); m[12] = x; m[13] = y; m[14] = z; return m; }
-function rotation(axis: number, degrees: number) { const m = identity(), a = (axis + 1) % 3, b = (axis + 2) % 3, c = Math.cos(degrees * Math.PI / 180), s = Math.sin(degrees * Math.PI / 180); m[a * 4 + a] = c; m[b * 4 + b] = c; m[a * 4 + b] = s; m[b * 4 + a] = -s; return m; }
+const rotations = [[2, 'rotation'], [1, 'rotation.y'], [0, 'rotation.x'], [2, 'orientation.z'], [1, 'orientation.y'], [0, 'orientation.x']] as const;
 function value(PM: any, L: any, key: string, T: number, fallback = 0): number { if (L.p?.[key] == null)
     return fallback; const v = Number(PM.ev(L, key, T)); return Number.isFinite(v) ? v : fallback; }
 export function local3D(PM: any, L: any, T: number): Mat4 {
@@ -51,17 +51,31 @@ export function local3D(PM: any, L: any, T: number): Mat4 {
         const m = PM.localMatrix(L, T);
         return [m[0], m[1], 0, 0, m[2], m[3], 0, 0, 0, 0, 1, 0, m[4], m[5], 0, 1];
     }
-    let m = translation(ev('position.x'), ev('position.y'), ev('position.z'));
-    for (const [axis, key] of [[2, 'rotation'], [1, 'rotation.y'], [0, 'rotation.x'], [2, 'orientation.z'], [1, 'orientation.y'], [0, 'orientation.x']] as const) {
+    const m = translation(ev('position.x'), ev('position.y'), ev('position.z'));
+    // Right-multiplying an affine rotation changes only two linear columns.
+    // Keep the established axis order without allocating and multiplying a
+    // separate 4x4 matrix for every axis on every layer/sample.
+    for (const [axis, key] of rotations) {
         const degrees = ev(key);
-        if (degrees !== 0) m = multiply(m, rotation(axis, degrees));
+        if (degrees === 0) continue;
+        const angle = degrees * Math.PI / 180, c = Math.cos(angle), s = Math.sin(angle);
+        const a = ((axis + 1) % 3) * 4, b = ((axis + 2) % 3) * 4;
+        for (let row = 0; row < 3; row++) {
+            const first = m[a + row]!, second = m[b + row]!;
+            m[a + row] = first * c + second * s;
+            m[b + row] = first * -s + second * c;
+        }
     }
-    const scale = identity();
-    scale[0] = ev('scale.x', 100) / 100;
-    scale[5] = ev('scale.y', 100) / 100;
-    scale[10] = ev('scale.z', 100) / 100;
-    scale[4] = Math.tan(ev('skew') * Math.PI / 180) * scale[5];
-    return multiply(multiply(m, scale), translation(-ev('anchor.x'), -ev('anchor.y'), -ev('anchor.z')));
+    const sx = ev('scale.x', 100) / 100, sy = ev('scale.y', 100) / 100, sz = ev('scale.z', 100) / 100;
+    const skew = Math.tan(ev('skew') * Math.PI / 180) * sy;
+    for (let row = 0; row < 3; row++) {
+        m[4 + row] = m[row]! * skew + m[4 + row]! * sy;
+        m[row] = m[row]! * sx;
+        m[8 + row] = m[8 + row]! * sz;
+    }
+    const ax = -ev('anchor.x'), ay = -ev('anchor.y'), az = -ev('anchor.z');
+    for (let row = 0; row < 3; row++) m[12 + row] = m[row]! * ax + m[4 + row]! * ay + m[8 + row]! * az + m[12 + row]!;
+    return m;
 }
 export function parent3D(PM: any, L: any, T: number, parent = L.parent ? PM.L(L.parent) : null): Mat4 {
     const groups = new Set<string>();

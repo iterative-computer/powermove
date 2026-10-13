@@ -14,6 +14,7 @@ import path from 'node:path';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { LIMITS, type CodexRunRequest } from '../../shared/ipc';
+import { agentProjectSnapshot } from '../../shared/agent-project-snapshot';
 import {
   codexErrorFromStdout,
   CodexRunner,
@@ -84,6 +85,15 @@ it('accepts every persistable project snapshot and rejects oversized UTF-8 input
   expect(isCodexRunRequest(request({ projectJSON }))).toBe(true);
   expect(isCodexRunRequest(request({ projectJSON: projectJSON + ' ' }))).toBe(false);
   expect(isCodexRunRequest(request({ projectJSON: 'é'.repeat(LIMITS.storeValueBytes / 2 + 1) }))).toBe(false);
+});
+
+it('accepts chat requests for projects larger than the IPC snapshot limit', () => {
+  const project = { id: 'project-large', name: 'Large', revision: 9,
+    layers: [{ id: 'model', name: 'Model', type: 'scene3d', content: 'x'.repeat(LIMITS.codexProjectJsonBytes) }] };
+  expect(isCodexRunRequest(request({ projectJSON: JSON.stringify(project) }))).toBe(false);
+  const req = request({ projectJSON: agentProjectSnapshot(project) });
+  expect(isCodexRunRequest(req)).toBe(true);
+  expect(JSON.parse(req.projectJSON!).revision).toBe(9);
 });
 
 it('accepts image and file bytes above the old attachment caps', () => {

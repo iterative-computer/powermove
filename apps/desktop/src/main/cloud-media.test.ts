@@ -3,7 +3,12 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => ({ inspect: vi.fn(), show: vi.fn(), window: vi.fn() }));
+const mocks = vi.hoisted(() => ({ inspect: vi.fn(), show: vi.fn(), window: vi.fn(), open: vi.fn() }));
+vi.mock('node:fs/promises', async importOriginal => {
+  const fs = await importOriginal<typeof import('node:fs/promises')>();
+  mocks.open.mockImplementation(fs.open);
+  return { ...fs, open: mocks.open };
+});
 vi.mock('@powermove/macos-haptics', () => ({ cloudFileState: mocks.inspect }));
 vi.mock('electron', () => ({ BrowserWindow: { fromWebContents: mocks.window }, dialog: { showMessageBox: mocks.show } }));
 import { CloudMediaService, cloudPath, cloudPromptOptions, materializeFile, registerCloudMediaIpc } from './cloud-media';
@@ -62,6 +67,31 @@ it('streams only bounded chunks to the window that owns the token', async () => 
   await call(IPC.cloudRelease, result.token);
   expect(sender.listenerCount('destroyed')).toBe(0);
   await expect(call(IPC.cloudRead, { token: result.token, offset: 0, length: 1 })).rejects.toThrow('Unknown');
+});
+it('returns the owned read allocation directly, with independent bytes and exact short reads', async () => {
+  const source = await file();
+  const { call } = ipc(new CloudMediaService(vi.fn().mockResolvedValue('local'), vi.fn()));
+  const result = await call(IPC.mediaOpenLocalSource, source);
+  const handle = await mocks.open.mock.results.at(-1)!.value;
+  const read = vi.spyOn(handle, 'read');
+  const first: Uint8Array = await call(IPC.cloudRead, { token: result.token, offset: 6, length: 5 });
+  expect(new TextDecoder().decode(first)).toBe('bytes');
+  expect(first).toBe(read.mock.calls[0]![0]);
+  expect(Buffer.isBuffer(first)).toBe(false);
+  expect(first.byteOffset).toBe(0);
+  expect(first.buffer.byteLength).toBe(first.byteLength);
+  first[0] = 0;
+  expect(new TextDecoder().decode(await call(IPC.cloudRead, { token: result.token, offset: 6, length: 5 }))).toBe('bytes');
+
+  // The original size is validated when opening; a source can shrink afterward.
+  await writeFile(source, 'video by');
+  const short: Uint8Array = await call(IPC.cloudRead, { token: result.token, offset: 6, length: 5 });
+  expect([...short]).toEqual([...Buffer.from('by')]);
+  expect(short.buffer.byteLength).toBe(2);
+  const empty: Uint8Array = await call(IPC.cloudRead, { token: result.token, offset: 10, length: 1 });
+  expect(empty.byteLength).toBe(0);
+  expect(empty.buffer.byteLength).toBe(0);
+  await call(IPC.cloudRelease, result.token);
 });
 it('returns both prompt choices, including the automatic download checkbox', async () => {
   const { call } = ipc(new CloudMediaService());

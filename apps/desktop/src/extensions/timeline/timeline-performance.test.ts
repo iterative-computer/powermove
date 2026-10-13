@@ -396,6 +396,35 @@ it('reuses observed panel dimensions for paused time ticks and immediately paint
   value.timeline.disposeRuntime(); expect(disconnect).toHaveBeenCalled();
 });
 
+it('ignores invalid wheel input without poisoning scrolling or the next scrub', () => {
+  const value = harness({ collapsed: true, height: 300 });
+  const wrap = document.createElement('div');
+  value.timeline.cv.id = 'tl-canvas';
+  wrap.append(value.timeline.cv); document.body.append(wrap);
+  vi.spyOn(wrap, 'getBoundingClientRect').mockReturnValue({ width: 900, height: 300, left: 0, top: 0 } as DOMRect);
+  value.timeline.attachCanvas(wrap); value.flush(); value.flush();
+  const wheel = (deltaX: number, deltaY: number, ctrlKey = false) => {
+    const event = new WheelEvent('wheel', { deltaX, deltaY, ctrlKey, cancelable: true });
+    Object.defineProperties(event, { offsetX: { value: value.timeline.gut + 100 }, offsetY: { value: 80 } });
+    value.timeline.cv.dispatchEvent(event);
+  };
+  for (const bad of [NaN, Infinity, -Infinity]) {
+    wheel(bad, 0); wheel(0, bad); wheel(0, bad, true);
+  }
+  expect(value.timeline.scrollT).toBe(0);
+  expect(value.timeline.scrollY).toBe(0);
+  expect(value.timeline.pps).toBe(90);
+  wheel(90, 80); value.flush(); value.flush();
+  expect(value.timeline.scrollT).toBe(1);
+  expect(value.timeline.scrollY).toBe(80);
+  const x = value.timeline.gut + 90;
+  const down = new PointerEvent('pointerdown', { button: 0, clientX: x, clientY: 18 });
+  Object.defineProperties(down, { offsetX: { value: x }, offsetY: { value: 18 } });
+  value.timeline.cv.dispatchEvent(down);
+  expect(value.state.time).toBe(2);
+  expect(value.api.transport.setTime).toHaveBeenLastCalledWith(2);
+});
+
 it.each(['up', 'cancel'])('scrubs at pointer precision, selects project frames, and settles on %s', finish => {
   const value = harness({ collapsed: true, height: 300 });
   const wrap = document.createElement('div');

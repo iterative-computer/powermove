@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ProjectFiles } from './project-files';
 import { decodeProjectContainer, encodeProjectContainer } from '../shared/project-container';
-import { readIncrementalIndex, type SaveMedia } from '../shared/project-incremental';
+import { projectFooter, PROJECT_FOOTER_BYTES, readIncrementalIndex, readProjectFooter, type SaveMedia } from '../shared/project-incremental';
 import { nativeHash } from './project-save';
 import { readExactly } from './durable-file';
 import { build } from 'esbuild';
@@ -260,6 +260,19 @@ describe('incremental project transactions', () => {
     expect(() => decodeProjectContainer(corrupt)).toThrow('checksum');
     await writeFile(destination, good.subarray(0, good.length - 1));
     await expect(files.open(destination)).rejects.toThrow('commit');
+  });
+  it('rejects overlapping media ranges even when their index checksum is valid', async () => {
+    await save('overlapping', [clip(), { ...clip(), id: 'second' }], undefined, destination);
+    const good = await readFile(destination);
+    const tail = readProjectFooter(good.subarray(good.length - PROJECT_FOOTER_BYTES), good.length);
+    const value = JSON.parse(good.subarray(tail.offset, tail.offset + tail.length).toString());
+    value.media[1].offset = value.media[0].offset;
+    const index = Buffer.from(JSON.stringify(value));
+    await writeFile(destination, Buffer.concat([
+      good.subarray(0, tail.offset), index,
+      projectFooter(tail.offset, index.length, await nativeHash(index))
+    ]));
+    await expect(files.open(destination)).rejects.toThrow('overlap');
   });
   it('does not let an older pending save undo a newer Save As association on restart', async () => {
     await save('first', [clip()], undefined, destination);

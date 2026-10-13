@@ -96,6 +96,17 @@ afterEach(() => {
 });
 
 describe('legacy engine install', () => {
+  it('keeps the current frame when a seek supplies a non-finite time', () => {
+    const { PM } = engine();
+    PM.setTime(2);
+    const changed = vi.fn(); PM.bus.on('time', changed);
+    for (const time of [NaN, Infinity, -Infinity, undefined]) PM.setTime(time);
+    expect(PM.time).toBe(2);
+    expect(changed).not.toHaveBeenCalled();
+    PM.setTime(3);
+    expect(PM.time).toBe(3);
+    expect(changed).toHaveBeenCalledExactlyOnceWith(3);
+  });
   it.each(['1', '0.5', '0.25'])('keeps the selected %s preview resolution through slow playback and paused refinement', (resolution) => {
     vi.stubGlobal('cancelAnimationFrame', vi.fn());
     const { PM, runFrame } = engine();

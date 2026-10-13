@@ -20,6 +20,28 @@ function projectsRegistry(): { PM: PMRegistry; memory: Map<string, any> } {
 }
 
 describe('legacy project registry install', () => {
+  it('opens legacy string envelopes and autosaves through the asynchronous path', async () => {
+    const { PM, memory } = projectsRegistry();
+    PM.store.getAsync = async (key: string, fallback: any) => structuredClone(memory.has(key) ? memory.get(key) : fallback);
+    const project = { id: 'P1', name: 'Legacy', layers: [] };
+    memory.set('project.P1', JSON.stringify({ proj: project }));
+    expect(await PM.Projects.getAsync('P1')).toEqual(project);
+    memory.delete('project.P1');
+    memory.set('autosave', JSON.stringify({ proj: project }));
+    expect(await PM.Projects.getAsync('P1')).toEqual(project);
+  });
+
+  it('does not replay an older journal over a newer asynchronous checkpoint', async () => {
+    const { PM, memory } = projectsRegistry();
+    const keys: string[] = [];
+    PM.store.getAsync = async (key: string, fallback: any) => {
+      keys.push(key); return structuredClone(memory.has(key) ? memory.get(key) : fallback);
+    };
+    memory.set('projectJournal.P1', [{ revision: 3, patches: [{ path: ['name'], exists: true, value: 'Older' }] }]);
+    memory.set('project.P1', { proj: { id: 'P1', revision: 4, name: 'Latest', layers: [] } });
+    expect((await PM.Projects.getAsync('P1')).name).toBe('Latest');
+    expect(keys).toEqual(['projectJournal.P1', 'project.P1']);
+  });
   it('retains edits arriving while an asynchronous recovery checkpoint reaches storage', async () => {
     const { PM, memory } = projectsRegistry();
     const project = { id: 'P1', name: 'One', revision: 50, layers: [{ id: 'one' }] };

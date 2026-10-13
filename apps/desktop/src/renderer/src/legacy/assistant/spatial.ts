@@ -3,6 +3,7 @@ import { createForkUpdater } from '../../shell/update-fork';
 import { WORKSPACE_IMPORT_PROMPT, expandAgentRequest } from '../../../../shared/creative-workspace';
 import { recordAfterEffectsExtensions } from '../../library/after-effects-imports';
 import { createAgentCheckpoint } from './checkpoint';
+import { agentProjectSnapshot } from '../../../../shared/agent-project-snapshot';
 import { bridge } from '../../kernel/bridge';
 import { noticeKind, stated } from '../../errors/presentation';
 import { notifyAgentFinished, notifyAgentQuestion } from '../../panels/agent/notification-preferences';
@@ -324,6 +325,12 @@ function ensureClaudeModelChoice(model: string): void {
     AGENT_MODELS.claude.push({ id: model, label: model });
   }
 }
+function ensureCodexModelChoice(model: string): void {
+  // Match the app-server catalog's model-id validation while its live list loads.
+  if (/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(model) && !AGENT_MODELS.chatgpt.some(item => item.id === model)) {
+    AGENT_MODELS.chatgpt.push({ id: model, label: model });
+  }
+}
 if (S.provider === 'claude') ensureClaudeModelChoice(S.model);
 S.reasoningEffort = modelEffort(S.provider, selectedModelName(S.provider, S.model), S.reasoningEffort) || S.reasoningEffort;
 async function refreshCodexModels(): Promise<void> {
@@ -343,7 +350,6 @@ async function refreshCodexModels(): Promise<void> {
     // Keep the bundled catalog when the runtime is offline or too old.
   }
 }
-void refreshCodexModels();
 async function refreshClaudeModels(): Promise<void> {
   try {
     const models = await bridge()?.claude?.models?.();
@@ -358,12 +364,16 @@ async function refreshClaudeModels(): Promise<void> {
     // Keep the bundled catalog when Claude is unavailable.
   }
 }
-void refreshClaudeModels();
+function refreshProviderModels(provider: string): void {
+  if (provider === 'chatgpt') void refreshCodexModels();
+  if (provider === 'claude') void refreshClaudeModels();
+}
+let initialThreadRestored = false;
 bridge()?.chatgpt?.onChanged?.((status) => {
-  if (status.state === 'connected') void refreshCodexModels();
+  if (initialThreadRestored && status.state === 'connected' && S.provider === 'chatgpt') void refreshCodexModels();
 });
 bridge()?.claude?.onChanged?.((status) => {
-  if (status.state === 'connected') void refreshClaudeModels();
+  if (initialThreadRestored && status.state === 'connected' && S.provider === 'claude') void refreshClaudeModels();
 });
 function selectedModelName(provider: string, model: string): string {
   return provider === 'compatible' && model === 'configured' ? AGENT_MODELS.compatible[0]!.label : model;
@@ -728,11 +738,14 @@ function restoreThreadModel(thread: any): void {
   const model = provider === 'compatible' && thread.model === AGENT_MODELS.compatible[0]?.label ? 'configured' : thread.model;
   if (!AGENT_PROVIDERS.some((item: any) => item.id === provider) || typeof model !== 'string') return;
   if (provider === 'claude') ensureClaudeModelChoice(model);
+  if (provider === 'chatgpt') ensureCodexModelChoice(model);
   if (!AGENT_MODELS[provider as keyof typeof AGENT_MODELS]?.some(item => item.id === model)) return;
+  const changedProvider = S.provider !== provider;
   S.provider = provider;
   S.model = model;
   const effort = REASONING_EFFORTS.includes(thread.reasoningEffort) ? thread.reasoningEffort : S.reasoningEffort;
   S.reasoningEffort = modelEffort(provider, selectedModelName(provider, model), effort) || effort;
+  if (changedProvider && initialThreadRestored) refreshProviderModels(provider);
 }
 
 function restoreThread() {
@@ -850,6 +863,8 @@ function switchThread(id?: string) {
 }
 
 restoreThread();
+initialThreadRestored = true;
+refreshProviderModels(S.provider);
 PM.bus?.on?.('project', () => { ensureThreadProject(); PM.AgentUI?.update({ flush: true }); });
 PM.bus?.on?.('projects:open', releaseClosedProjectRuns);
 PM.bus?.on?.('storage:error', (event: any) => {
@@ -992,8 +1007,7 @@ registerAgentPanel(PM, {
     S.reasoningEffort = modelEffort(provider, selectedModelName(provider, S.model), S.reasoningEffort) || S.reasoningEffort;
     PM.store.set('agentProvider', provider);
     PM.AgentUI?.update({ focusComposer: true });
-    if (provider === 'chatgpt') void refreshCodexModels();
-    if (provider === 'claude') void refreshClaudeModels();
+    refreshProviderModels(provider);
   },
   retry: (messageIndex?: number) => {
     if (S.activeRequest) return;
@@ -2167,7 +2181,7 @@ async function runAutonomousRequest({ session, request, token, controller, acces
   const baseRevision: any = Number(PM.proj.revision) || 0;
   const checkpointLabel: any = `Before autonomous agent · ${request.slice(0, 42)}`;
   const checkpoint = createAgentCheckpoint(PM, checkpointLabel);
-  const projectJSON = JSON.stringify(PM.proj);
+  const projectJSON = agentProjectSnapshot(PM.proj);
   const placementInstructions = uiPlacementInstructions(PM.WS?.current);
   const observationPromise: any = PM.AgentHarness ? PM.AgentHarness.observeVisual() : Promise.resolve({ state: {}, times: [], images: [] });
   let [observation]: any = await Promise.all([

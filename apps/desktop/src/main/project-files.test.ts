@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { atomicWrite, ProjectFiles } from './project-files';
+import * as projectHash from './project-file-hash';
 
 let directory: string;
 let registry: string;
@@ -138,6 +139,20 @@ describe('real project files', () => {
     await writeFile(destination, bytes('after and larger'));
     await expect(files.close(opened.token)).rejects.toThrow('changed while opening');
     await expect(files.read(opened.token, 0, 1)).rejects.toThrow('range');
+  });
+  it('rejects a file changed during opening before granting a project association', async () => {
+    const destination = path.join(directory, 'changing-open.pmv');
+    await writeFile(destination, bytes('before'));
+    const originalHash = projectHash.hashProjectFile;
+    const hashing = vi.spyOn(projectHash, 'hashProjectFile').mockImplementation(async (...args) => {
+      const hash = await originalHash(...args);
+      await writeFile(destination, bytes('changed by another writer'));
+      return hash;
+    });
+    try {
+      await expect(files.open(destination)).rejects.toThrow('changed while opening');
+      await expect(readFile(registry)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally { hashing.mockRestore(); }
   });
   it('keeps the original intact if the backup cannot be written', async () => {
     const destination = path.join(directory, 'a.pmv');

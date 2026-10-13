@@ -170,7 +170,7 @@ export function install(PM: PMRegistry): void {
   const layersOf = (id: string): any[] => isRoot(id) ? PM.proj.layers : comps()[id]?.layers || [];
   const allIds = () => PM.proj ? [PM.proj.compId, ...Object.keys(comps())] : [];
 
-  const naturalCompare = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+  const naturalCompare = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare;
 
   const uniqueName = (base: string, except?: string) => {
     const taken = new Set(allIds().filter(id => id !== except).map(id => String(get(id)?.name || '')));
@@ -211,13 +211,25 @@ export function install(PM: PMRegistry): void {
     return out;
   };
 
-  const list = () => allIds().map(id => {
-    const comp = get(id);
-    return {
-      id, name: String(comp.name || 'Comp'), w: comp.w, h: comp.h, fps: comp.fps, dur: comp.dur, bg: comp.bg,
-      open: isRoot(id), layers: (comp.layers || []).length, uses: users(id).length,
-    };
-  }).sort((a, b) => naturalCompare(a.name, b.name));
+  const list = () => {
+    const ids = allIds(), uses = new Map<string, number>(ids.map(id => [id, 0]));
+    // Count every precomp instance in one pass. Re-scanning all project layers
+    // for each card also repeated that work for every background thumbnail.
+    // Rebuild on every list call so in-place edits and comp switches stay live.
+    for (const id of ids) for (const layer of layersOf(id)) {
+      if (layer.type !== 'precomp') continue;
+      const target = layer.d?.comp;
+      const count = uses.get(target);
+      if (count !== undefined) uses.set(target, count + 1);
+    }
+    return ids.map(id => {
+      const comp = get(id);
+      return {
+        id, name: String(comp.name || 'Comp'), w: comp.w, h: comp.h, fps: comp.fps, dur: comp.dur, bg: comp.bg,
+        open: isRoot(id), layers: (comp.layers || []).length, uses: uses.get(id) || 0,
+      };
+    }).sort((a, b) => naturalCompare(a.name, b.name));
+  };
 
   const openTabs = (): string[] => {
     if (!PM.proj) return [];

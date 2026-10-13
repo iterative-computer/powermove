@@ -475,7 +475,8 @@ describe('store IPC and quit integration', () => {
       }
     };
     const broadcastChange = vi.fn();
-    const store = storeStub({ snapshot: () => ({ projects: [{ id: 'P1' }] }) });
+    const store = storeStub({ snapshot: () => ({ projects: [{ id: 'P1' }] }),
+      getEncodedSerialized: key => key === 'project.P1' ? '{"proj":{"id":"P1"}}' : null });
     registerStoreIpc(ipcMain as unknown as Pick<IpcMain, 'handle' | 'on'>, store, {
       isTrustedSender: (event) => Boolean((event as unknown as { trusted?: boolean }).trusted),
       broadcastChange
@@ -508,6 +509,10 @@ describe('store IPC and quit integration', () => {
     const untrusted = { trusted: false, sender, returnValue: undefined as unknown };
     listeners.get(IPC.storeGetSync)?.(untrusted, { key: 'projects' });
     expect(untrusted.returnValue).toBeNull();
+    expect(handlers.get(IPC.storeGetEncoded)?.(event, { key: 'project.P1' })).toBe('{"proj":{"id":"P1"}}');
+    expect(handlers.get(IPC.storeGetEncoded)?.(event, { key: 'project.missing' })).toBeNull();
+    expect(() => handlers.get(IPC.storeGetEncoded)?.(untrusted, { key: 'project.P1' })).toThrow(IpcValidationError);
+    expect(() => handlers.get(IPC.storeGetEncoded)?.(event, {})).toThrow(IpcValidationError);
   });
 
   it('prevents the first quit until flushing completes, then quits once more', async () => {

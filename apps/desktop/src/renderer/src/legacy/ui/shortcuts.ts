@@ -35,6 +35,7 @@ const kernel = ensureKernel(PM);
    or `PM.commands.palette.run = …` from overlays/install.ts) replaces rather
    than stacking, so the legacy layer never buries its own entries. */
 const owned = new Map<string, { dispose(): void }>();
+const loadingNavigation = new Set(['settings', 'projects', 'newProject', 'open', 'closeTab', 'nextTab', 'previousTab']);
 const put = (definition: CommandDefinition): void => {
   owned.get(definition.id)?.dispose();
   owned.set(definition.id, kernel.commands.register(LEGACY_OWNER, definition));
@@ -47,6 +48,7 @@ const def: any = (id?: any, label?: any, kb?: any, run?: any, cat: any = 'Genera
        skips preventDefault. Legacy always prevented the default, so a command
        that happens to return false must not change that. */
     run: (...a: any[]) => {
+      if (PM.projectLoading && !loadingNavigation.has(id)) return undefined;
       const result = run(...a);
       return opts.preserveFalse ? result : result === false ? undefined : result;
     },

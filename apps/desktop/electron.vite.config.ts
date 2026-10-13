@@ -49,9 +49,13 @@ export default defineConfig({
         writeFileSync(path.join(target, 'ext-sandbox.html'), readFileSync(source, 'utf8').replaceAll('../host/', './'));
       }
     }],
+    // Shrink production code while preserving reflected function/class names.
+    // Vite keeps development transforms unminified.
+    esbuild: { keepNames: true },
     resolve: { alias: { powermove: path.resolve(__dirname, 'src/renderer/src/kernel/api.ts') } },
     build: {
       outDir: 'out/renderer',
+      minify: 'esbuild',
       // Live editor windows can still request lazy chunks from the previous build.
       emptyOutDir: false,
       rollupOptions: {

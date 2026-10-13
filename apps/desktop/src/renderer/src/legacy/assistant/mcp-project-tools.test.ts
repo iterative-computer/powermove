@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { mcpProjectTool } from './mcp-project-tools';
+import { LIMITS } from '../../../../shared/ipc';
 
 const readLocal = vi.hoisted(() => vi.fn());
 vi.mock('../core/cloud-media', () => ({ readLocalMediaSource: readLocal }));
@@ -13,6 +14,18 @@ function editor(path?: string) {
     saveProject: vi.fn(async () => true),
   };
 }
+
+describe('MCP project context', () => {
+  it('provides bounded context for external agents without modifying the project', async () => {
+    const PM = { proj: { id: 'P1', name: 'Large', revision: 4,
+      layers: [{ id: 'model', type: 'scene3d', content: 'x'.repeat(LIMITS.codexProjectJsonBytes) }] } };
+    const context = await mcpProjectTool(PM as never, '__mcp_context', {}) as { projectJSON: string; projectId: string };
+    expect(context.projectId).toBe('P1');
+    expect(Buffer.byteLength(context.projectJSON)).toBeLessThan(LIMITS.codexProjectJsonBytes);
+    expect(JSON.parse(context.projectJSON)).toMatchObject({ revision: 4, agentSnapshot: { complete: false } });
+    expect(PM.proj.layers[0]!.content.length).toBe(LIMITS.codexProjectJsonBytes);
+  });
+});
 
 describe('MCP save_project', () => {
   it('saves a project with a file in place, like Command-S', async () => {

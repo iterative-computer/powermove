@@ -266,7 +266,7 @@ describe('save IPC', () => {
       const documentRange = { offset: 5, length: FILE_CHUNK_BYTES * 3, sha256: 'a'.repeat(64) };
       const projects = {
         open: vi.fn(async () => ({ token: 'stream-token', path: '/chosen.pmv', projectId: 'project-1',
-          document: { proj: {} }, documentRange, media: [], size: documentRange.length + 100 })),
+          documentRange, media: [], size: documentRange.length + 100 })),
         read: vi.fn(async (_token: string, _offset: number, length: number) => new Uint8Array(length)),
         close: vi.fn(async () => undefined)
       };
@@ -302,7 +302,7 @@ describe('save IPC', () => {
     registerProjectOpenPathIpc(ipcMain, { isTrustedSender: () => true, projects: projects as any });
     const call = (payload: unknown) => invokes.get(IPC.projectOpenPath)!(invokeEvent(sender), payload);
     expect(await call('/chosen.pmv')).toMatchObject({ ok: true, token: 'read-token' });
-    expect(projects.open).toHaveBeenCalledWith('/chosen.pmv');
+    expect(projects.open).toHaveBeenCalledWith('/chosen.pmv', { allowDocumentRange: true });
     await expect(call('relative.pmv')).rejects.toThrow('invalid project path');
     await expect(call('/etc/passwd')).rejects.toThrow('invalid project path');
     await expect(call(42)).rejects.toThrow('invalid project path');

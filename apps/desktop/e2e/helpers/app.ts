@@ -141,6 +141,8 @@ async function startElectron(
   instrument(page);
   await page.waitForLoadState('domcontentloaded');
   await page.waitForFunction(() => Boolean((window as any).PM));
+  await page.waitForFunction(() => Boolean((window as any).PM?.app));
+  await page.evaluate(async () => { await (window as any).PM.projectReady; });
   return { app, page };
 }
 

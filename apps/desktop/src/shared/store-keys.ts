@@ -13,6 +13,7 @@ export const STATIC_KEYS = [
   // profile can still be read once.
   'openWindows',
   'windowTabs',
+  'lastActiveProject',
   'openTabs',
   'restoreWindows',
   'autoDownloadCloudMedia',

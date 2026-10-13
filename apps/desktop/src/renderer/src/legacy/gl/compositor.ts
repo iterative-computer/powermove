@@ -203,13 +203,42 @@ let previewLayers: any = null;
 let previewHasMotionBlur = false;
 let scenePreviewPlan: ReturnType<typeof previewPlan> | null = null;
 let rememberingPreview = false;
+let idleVideoFrames: Map<string, ImageBitmap> | null = null;
+let cancelPreviewPreparation: (() => void) | undefined;
+GL.previewPreparationBytes = 0;
+GL.cancelPreviewPreparation = () => cancelPreviewPreparation?.();
 for (const event of ['project', 'layers', 'assets', 'quality', 'fonts']) PM.bus?.on?.(event, () => {
+  GL.cancelPreviewPreparation();
   previewFrames.clear(); previewSignature = ''; scenePreviewPlan = null;
 });
 const previewStateKey = () => JSON.stringify([PM.animVersion?.(), sourceGeneration, GL.canvas?.width, GL.canvas?.height,
   GL.previewViewport, PM.quality, PM.previewResolution, PM.previewFps, PM.proj.fps, PM.proj.layers.length,viewportRevision(PM), normalizeColorDepth(PM.proj.colorDepth)]);
 const canCachePreview = (opt: any) => opt.previewReuse !== false && !opt.exporting && !PM.Export?.busy && !PM.agentFrameCapture
   && !PM.Preview?.preparing && !PM.Preview?.active && !PM.preparedVideoFrames && !PM.assets?.loading?.size;
+GL.previewPreparationKey = previewStateKey;
+GL.reservePreviewPreparation = (bytes: number) => {
+  const budget = Math.max(0, (PM.Memory?.budget?.('preview') ?? 256 * 1024 * 1024) - (PM.Preview?.bytes || 0));
+  if (!Number.isFinite(bytes) || bytes <= 0 || !budget) return;
+  // A new work area replaces older LRU pictures, but the current displayed
+  // texture remains available for immediate resize/navigation presentation.
+  previewFrames.trim(Math.max(0, budget - Math.min(bytes, budget * .9)), new Set([presentedFrame]));
+};
+for (const event of ['extensions:changed', 'theme:changed']) PM.Kernel?.events?.on?.(event, () => {
+  GL.cancelPreviewPreparation(); sourceGeneration++;
+  previewFrames.clear(); previewSignature = ''; scenePreviewPlan = null;
+});
+function refreshPreviewState() {
+  const signature = previewStateKey();
+  if (previewProject !== PM.proj || previewLayers !== PM.proj.layers || previewSignature !== signature) {
+    previewFrames.clear(); previewProject = PM.proj; previewLayers = PM.proj.layers; previewSignature = signature;
+    previewHasMotionBlur = (PM.ProjectIndex?.allLayers?.() || PM.proj.layers).some((layer: any) => layer.mblur || layer.type === 'comp');
+    scenePreviewPlan = previewPlan(PM.proj, (effect: any) => {
+      const definition = PM.FX[effect.type], linked = GL.progs.get('fx:' + effect.type);
+      return !!definition && !!linked && !definition.backdrop
+        && uloc(linked, 'u_time') === null && uloc(linked, 'u_prog') === null;
+    });
+  }
+}
 function previewFrameKey(T: number, opt: any, key?: string | number): string {
   const blur = previewHasMotionBlur && opt.mblur !== false;
   const normalized = { ...opt, mblur: blur, mbSamples: blur ? opt.mbSamples || 10 : 0, shutter: blur ? opt.shutter || .5 : 0 };
@@ -276,6 +305,10 @@ let viewportPathVersion = 0;
 let useVideoPreviews = false;
 let videoPath = '';
 let previewVideoTimes = new Map<string, number>();
+let isolatedVideoTexturePrefix: string | null = null;
+let isolatedVideoTextureGeneration = 0;
+let isolatedCaptureNoMotionBlur = false;
+class MissingCaptureVideoFrame extends Error {}
 
 function videoTextureVersion(el: any): number {
   let state = presentedVideoFrames.get(el);
@@ -314,7 +347,7 @@ function program(key: any, frag: any, vert?: any) {
   // round values while reading the preceding pass, including raw extensions.
   frag = frag.replace(/^(#version[^\n]*\n)/, '$1precision highp sampler2D;\n');
   if (allowParallelCompile && parallelShaderCompile && /^(sh:|extension:|fx:|tr:)/.test(key)) {
-    if (compileSubmitMs >= 4 || pendingPrograms.size >= 8) { pollCompiles(); return null; }
+    if (compileSubmitMs >= 4 || pendingPrograms.size >= 8) { frameFailed = true; pollCompiles(); return null; }
     const started = performance.now();
     const v = gl.createShader(gl.VERTEX_SHADER), f = gl.createShader(gl.FRAGMENT_SHADER), pr = gl.createProgram();
     if (!v || !f || !pr) {
@@ -355,6 +388,8 @@ function program(key: any, frag: any, vert?: any) {
 }
 GL.compileError = (key: any) => GL.errors.get(key) || null;
 GL.dropProgram = (key: any) => {
+  GL.cancelPreviewPreparation(); sourceGeneration++;
+  previewSignature = ''; scenePreviewPlan = null;
   previewFrames.clear();
   const pending = pendingPrograms.get(key);
   if (pending) {
@@ -420,9 +455,8 @@ function workingColorDepth() {
   GL.colorDepth = actual;
   return actual;
 }
-function grab(w: any, h: any, depth = false) {
+function grab(w: any, h: any, depth = false, colorDepth = workingColorDepth()) {
   const gl = GL.gl;
-  const colorDepth = workingColorDepth();
   for (let i = 0; i < GL.pool.length; i++) {
     const f = GL.pool[i];
     if (!f.busy && f.w === w && f.h === h && !!f.depth === depth && f.colorDepth === colorDepth) { f.busy = true; f.used = ++resourceTick; return f; }
@@ -606,7 +640,9 @@ function texFor(key: any, source: any, opts: any = {}) {
   const bytes = Math.max(0, width * height * 4);
   textureBytes += bytes - (t.bytes || 0);
   t.bytes = bytes;
-  PM.Memory?.maintain?.('textures', GL.texes.size > MAX_TEXTURE_ENTRIES);
+  // Private uploads are removed immediately after their layer draw. Scheduling
+  // forced idle trimming for them would later evict retained viewer textures.
+  if (!isolatedVideoTexturePrefix || !key.startsWith(isolatedVideoTexturePrefix)) PM.Memory?.maintain?.('textures', GL.texes.size > MAX_TEXTURE_ENTRIES);
   return t.tex;
 }
 function trimTextures(targetBytes: number = MAX_TEXTURE_BYTES, protectedKeys?: ReadonlySet<string>) {
@@ -631,7 +667,16 @@ function dropTextures(prefix: string) {
     GL.texes.delete(key);
   }
 }
+function dropIsolatedVideoTexture(key: string) {
+  const entry = GL.texes.get(key);
+  if (!entry) return;
+  for (let unit = 0; unit < boundTex.length; unit++) if (boundTex[unit] === entry.tex) bindTex(unit, null);
+  GL.gl?.deleteTexture?.(entry.tex);
+  textureBytes = Math.max(0, textureBytes - (entry.bytes || 0));
+  GL.texes.delete(key);
+}
 GL.dropTextures = (prefix = '') => {
+  GL.cancelPreviewPreparation();
   previewFrames.clear();
   sourceGeneration++;
   dropTextures(prefix);
@@ -751,6 +796,7 @@ void main(){
 
 /* ── init ──────────────────────────────────────────────── */
 GL.init = (canvas: any, options: { alpha?: boolean; quiet?: boolean } = {}) => {
+  GL.cancelPreviewPreparation();
   previewFrames.clear();
   GL.canvas = canvas;
   const gl = canvas.getContext('webgl2', {
@@ -767,6 +813,7 @@ GL.init = (canvas: any, options: { alpha?: boolean; quiet?: boolean } = {}) => {
     watchedCanvases.add(canvas);
     canvas.addEventListener('webglcontextlost', (event: Event) => {
       event.preventDefault();
+      GL.cancelPreviewPreparation();
       previewFrames.clear();
       clearTimeout(compilePollTimer); compilePollTimer = undefined;
       pendingPrograms.clear(); GL.compiling = 0;
@@ -795,6 +842,7 @@ GL.init = (canvas: any, options: { alpha?: boolean; quiet?: boolean } = {}) => {
 };
 
 GL.resize = (w: any, h: any, previewViewport: any = null) => {
+  GL.cancelPreviewPreparation();
   GL.previewViewport = previewViewport;
   if (GL.canvas.width === w && GL.canvas.height === h) return false;
   const previous = presentedFrame;
@@ -1012,8 +1060,10 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
   if (L.type === 'image' || L.type === 'video') {
     const a = PM.assets.get(d.asset);
     if (!a) return null;
-    const liveVideo = L.type === 'video' && useVideoPreviews ? layerVideoElement(PM, a, videoPath + L.id) : a.el;
-    const preparedVideo = PM.preparedVideoFrames?.get(L.id+'@'+T);
+    const preparedVideo = idleVideoFrames?.get(videoPath + L.id + '@' + T)
+      || PM.preparedVideoFrames?.get((isolatedVideoTexturePrefix ? videoPath : '') + L.id+'@'+T);
+    const liveVideo = L.type === 'video' && useVideoPreviews && !preparedVideo ? layerVideoElement(PM, a, videoPath + L.id) : a.el;
+    if (L.type === 'video' && isolatedVideoTexturePrefix && !preparedVideo) throw new MissingCaptureVideoFrame('Composition thumbnail is missing a prepared video frame');
     const playbackFrame = PM.playing && useVideoPreviews && !preparedVideo
       ? PM.playbackVideoFrame?.frames.get(videoPath + L.id) : undefined;
     let captured: ReturnType<typeof previewSeekFrame>;
@@ -1034,12 +1084,16 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
         } catch { frameVideoExact = false; }
       }
       if (!PM.playing && el === liveVideo) seekPreviewVideo(el, vt, .0005);
-      sw = el.videoWidth || sw; sh = el.videoHeight || sh;
+      // A seek canvas and an idle bitmap have the decoded source's dimensions,
+      // including proxy rounding. Original metadata must not change their crop.
+      sw = el.videoWidth || el.displayWidth || (preparedVideo || captured ? el.width : 0) || sw;
+      sh = el.videoHeight || el.displayHeight || (preparedVideo || captured ? el.height : 0) || sh;
     }
     const bw = d.w || W, bh = d.h || H;
     let textureSource = decoded || el;
     let textureKey = 'a:' + a.id + (el===liveVideo?(el===a.el?'':':preview'):':'+L.id+'@'+T);
     if (L.type === 'video' && !preparedVideo) textureKey = videoInstanceTextureKey(liveVideo);
+    if (L.type === 'video' && isolatedVideoTexturePrefix) textureKey = isolatedVideoTexturePrefix + videoPath + L.id + '@' + T;
     if (L.type === 'image' && a.format === 'svg' && PM.rasterSvgAsset) {
       const dimensions = svgRasterDimensions(sw, sh, bw, bh, scaledWorld(L, T, W, H));
       const raster = PM.rasterSvgAsset(a, dimensions.width, dimensions.height);
@@ -1202,7 +1256,8 @@ function nativeContentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow, 
     videoPath += L.id + '/';
     pmScopePush(sub);
     try {
-      const inner = GL.renderProject(sub, sourceTime(PM,L,T), targetW, targetH, { transparent: true });
+      const inner = GL.renderProject(sub, sourceTime(PM,L,T), targetW, targetH,
+        isolatedCaptureNoMotionBlur ? { transparent: true, mblur: false } : { transparent: true });
       /* blit the nested result into our FBO so ownership stays with this level */
       bind(f);
       const p = program('copyA', PM.FRAG_DRAW);
@@ -1270,8 +1325,14 @@ function drawContent(L: any, T: any, W: any, H: any, alpha: any, clip?: RasterWi
   if (c.sourceWindow) g.u('u_sourceWindow', ...c.sourceWindow);
   g.u('u_alpha', alpha);
   setI(p, 'u_fromFbo', c.fromFbo ? 1 : 0);
-  drawSample(additive);
-  free(c.tmp);
+  try { drawSample(additive); }
+  finally {
+    // Layers draw immediately into the composition buffer. Releasing each
+    // private video upload here keeps even a many-video thumbnail from
+    // retaining a full RGBA texture for every prepared native frame.
+    if (L.type === 'video' && isolatedVideoTexturePrefix) dropIsolatedVideoTexture(isolatedVideoTexturePrefix + videoPath + L.id + '@' + T);
+    free(c.tmp);
+  }
   return true;
 }
 
@@ -1549,6 +1610,55 @@ function compositingPass(layers: any[], parentGroup: string | null, T: any, opt:
   return compositingLayers(layers, parentGroup, layer => groupCreatesCompositingBoundary(layer, T, opt));
 }
 
+/** Plan thumbnail source frames with the same passes, eligibility and scope
+ * seen by renderProject. This visits no GPU resources or decoder state. */
+GL.thumbnailVideoRequests = (comp: any, time: number) => {
+  const requests: Array<{ key: string; asset: any; at: number }> = [];
+  const visit = (proj: any, T: number, opt: any, depth: number, path: string) => {
+    const orderedLayers = proj.layers || [];
+    const layers = opt.explicitLayers ? orderedLayers : compositingPass(orderedLayers, opt.groupParent || null, T, opt);
+    const solo = orderedLayers.some((layer: any) => layer.solo);
+    const matteSources = new Set(orderedLayers.map((layer: any) => layer.matteSource));
+    for (let index = layers.length - 1; index >= 0; index--) {
+      const L = layers[index];
+      if (!opt.mattePass && matteSources.has(L.id)) continue;
+      const ancestors = PM.groupAncestors?.(L, proj.layers) || [];
+      if (solo && !L.solo && !ancestors.some((group: any) => group.solo)
+          && !groupContainsSolo(L, orderedLayers, (layer: any) => PM.groupAncestors?.(layer, proj.layers) || []) && !opt.mattePass) continue;
+      if (L.type !== 'group' && PM.TYPE_META?.[L.type]?.visual === false) continue;
+      if (!PM.active(L, T)) continue;
+      const alpha = PM.clamp(PM.ev(L, 'opacity', T) / 100, 0, 1);
+      if (alpha <= .001) continue;
+      if (L.type === 'group') {
+        visit(proj, T, { ...opt, transparent: true, groupParent: L.id, mblur: false, matteProject: opt.matteProject || proj }, depth, path);
+      } else if (L.type === 'video') {
+        const asset = PM.assets.get(resolveContent(PM, L, T).asset);
+        if (asset?.el) requests.push({ key: path + L.id + '@' + T, asset, at: videoPlaybackTime(asset, sourceTime(PM, L, T)) });
+      } else if (L.type === 'precomp' && depth < PC_MAX_DEPTH) {
+        const sub = PM.compOf(L);
+        if (sub) {
+          // contentQuad pushes the nested scope before evaluating retiming.
+          PM.scope.push(sub);
+          try { visit(sub, sourceTime(PM, L, T), { transparent: true, mblur: false }, depth + 1, path + L.id + '/'); }
+          finally { PM.scope.pop(); }
+        }
+      }
+      if (L.matteSource && (opt.matteDepth || 0) < 8) {
+        const matteProject = opt.matteProject || proj;
+        const source = matteProject.layers.find((layer: any) => layer.id === L.matteSource);
+        // applyTrackMatte intentionally retains the current PM scope while
+        // rendering its forced-on, one-layer project record.
+        if (source) visit({ ...matteProject, layers: [{ ...source, on: true }] }, T,
+          { ...opt, transparent: true, mattePass: true, explicitLayers: true, matteDepth: (opt.matteDepth || 0) + 1, matteProject }, depth, path);
+      }
+    }
+  };
+  PM.beginEval?.(time); PM.scope.push(comp);
+  try { visit(comp, time, { mblur: false }, 0, ''); }
+  finally { PM.scope.pop(); }
+  return requests;
+};
+
 function runTransition(L: any, T: any, activeTr: any, before: any, withLayer: any, W: any, H: any) {
   const key = 'tr:' + activeTr.transition.type;
   const p = program(key, activeTr.def.frag);
@@ -1783,7 +1893,10 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
       }
       if (res !== lf) free(res);
       free(lf);
-    } catch (error) { reportLayerFailure(L, error); }
+    } catch (error) {
+      if (error instanceof MissingCaptureVideoFrame) throw error;
+      reportLayerFailure(L, error);
+    }
   }
   return acc;
   }finally{PM._renderComposition3D=previous3DComposition;PM._renderComposition3DPass=previous3DPass;PM._renderCamera3D=previous3DCamera;}
@@ -1824,19 +1937,7 @@ GL.render = (T: any, opt: any = {}) => {
   framePrograms.clear(); compileSubmitMs = 0;
   const gl = GL.gl; if (!gl) return;
   const W = GL.canvas.width, H = GL.canvas.height;
-  const signature = previewStateKey();
-  if (previewProject !== PM.proj || previewLayers !== PM.proj.layers || previewSignature !== signature) {
-    previewFrames.clear(); previewProject = PM.proj; previewLayers = PM.proj.layers; previewSignature = signature;
-    previewHasMotionBlur = (PM.ProjectIndex?.allLayers?.() || PM.proj.layers).some((layer: any) => layer.mblur || layer.type === 'comp');
-    scenePreviewPlan = previewPlan(PM.proj, (effect: any) => {
-      // The linked program is the authority on temporal shader inputs. A
-      // declared but unused clock is optimized away; unknown/uncompiled
-      // shaders retain their ordinary per-frame path.
-      const definition = PM.FX[effect.type], linked = GL.progs.get('fx:' + effect.type);
-      return !!definition && !!linked && !definition.backdrop
-        && uloc(linked, 'u_time') === null && uloc(linked, 'u_prog') === null;
-    });
-  }
+  refreshPreviewState();
   const cacheable = canCachePreview(opt);
   const frameKey = previewFrameKey(T, opt);
   const cached = cacheable ? previewFrames.get(frameKey) : undefined;
@@ -1920,12 +2021,119 @@ GL.render = (T: any, opt: any = {}) => {
   if (!opt.exporting) PM.bus?.emit?.('preview:presented', { viewport: GL.previewViewport, time: T, version: PM.animVersion?.(), project: PM.proj, quality: PM.quality });
 };
 
+/** Prepare a finished display image without drawing to the visible canvas.
+ * Working passes retain the project's color precision. Only the final picture
+ * uses RGBA8, exactly like the viewer, so 32-bit artwork does not require a
+ * 16-byte-per-pixel preview cache. No pixels are read back or written to disk. */
+GL.preparePreviewFrame = async (T: number, opt: any, frames: Map<string, ImageBitmap>, valid: () => boolean): Promise<boolean> => {
+  const gl = GL.gl, W = GL.canvas?.width, H = GL.canvas?.height;
+  if (!gl || !W || !H || cancelPreviewPreparation || !valid() || !canCachePreview(opt)) return false;
+  refreshPreviewState();
+  const key = previewFrameKey(T, opt), signature = previewStateKey();
+  if (previewFrames.has(key)) return true;
+  const prior = {
+    stats: { ...GL.stats }, visible: [...visibleTextures], programs: [...framePrograms],
+    previews: useVideoPreviews, clipping: previewSourceClipping, viewport: previewViewportActive,
+    videoFrames: idleVideoFrames, videoTimes: previewVideoTimes, path: videoPath,
+    prefix: isolatedVideoTexturePrefix, noBlur: isolatedCaptureNoMotionBlur,
+    failed: frameFailed, exact: frameVideoExact, parallel: allowParallelCompile, fbo: boundFbo,
+    compileMs: compileSubmitMs, busy: new Set(GL.pool.filter((f: any) => f.busy)),
+  };
+  const prefix = 'idle-video:' + ++isolatedVideoTextureGeneration + ':';
+  let acc: any, image: any, retained = false;
+  try {
+    visibleTextures.clear(); framePrograms.clear();
+    frameFailed = false; frameVideoExact = true; compileSubmitMs = 0;
+    idleVideoFrames = frames; isolatedVideoTexturePrefix = prefix;
+    isolatedCaptureNoMotionBlur = opt.mblur === false;
+    videoPath = ''; previewVideoTimes = new Map();
+    useVideoPreviews = true; previewSourceClipping = opt.sourceClipping !== false;
+    previewViewportActive = !!GL.previewViewport; allowParallelCompile = true;
+    PM.beginEval(T); PM.scope.push(PM.proj);
+    try { acc = GL.renderProject(PM.proj, T, W, H, { ...opt, editorViewport: true }); }
+    finally { PM.scope.pop(); }
+    if (!valid() || frameFailed || !frameVideoExact || pendingPrograms.size || GL.errors.size
+        || document.fonts?.status === 'loading') return false;
+    image = grab(W, H, false, 8);
+    bind(image);
+    const p = program('present', PM.FRAG_COPY), g = use(p);
+    bindTex(0, acc.tex); setI(p, 'u_tex', 0);
+    g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
+    gl.disable(gl.BLEND); draw(); gl.enable(gl.BLEND);
+    image.programKeys = [...framePrograms];
+    // Detach while the GPU finishes: normal playback must never recycle this
+    // still-pending image as one of its working render targets.
+    const index = GL.pool.indexOf(image);
+    if (index >= 0) { GL.pool.splice(index, 1); poolBytes -= image.bytes; }
+    GL.previewPreparationBytes = image.bytes;
+    retained = true;
+  } catch {
+    return false; // Normal foreground rendering remains responsible for errors.
+  } finally {
+    if (acc) free(acc);
+    if (image && !retained) free(image);
+    useVideoPreviews = prior.previews; previewSourceClipping = prior.clipping;
+    previewViewportActive = prior.viewport; idleVideoFrames = prior.videoFrames;
+    previewVideoTimes = prior.videoTimes; videoPath = prior.path;
+    isolatedVideoTexturePrefix = prior.prefix; isolatedCaptureNoMotionBlur = prior.noBlur;
+    frameFailed = prior.failed; frameVideoExact = prior.exact; allowParallelCompile = prior.parallel;
+    compileSubmitMs = prior.compileMs;
+    // Capture uploads are private and must not evict or replace live decoders.
+    dropTextures(prefix);
+    visibleTextures.clear(); for (const key of prior.visible) visibleTextures.add(key);
+    framePrograms.clear(); for (const key of prior.programs) framePrograms.add(key);
+    Object.assign(GL.stats, prior.stats);
+    PM.beginEval(PM.time);
+    bind(prior.fbo);
+    for (const frame of GL.pool) frame.busy = prior.busy.has(frame) || frame === presentedFrame;
+    trimPool(); trimTextures(MAX_TEXTURE_BYTES, visibleTextures);
+  }
+  if (!image || !retained) return false;
+  // A zero-timeout fence poll avoids synchronous GPU waits and caps the queue
+  // at one prepared frame. Input can cancel the poll and discard the result.
+  return new Promise(resolve => {
+    const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    let timer: ReturnType<typeof setTimeout> | undefined, done = false;
+    const started = performance.now();
+    const finish = (keep: boolean) => {
+      if (done) return; done = true;
+      clearTimeout(timer);
+      if (sync) gl.deleteSync(sync);
+      cancelPreviewPreparation = undefined; GL.previewPreparationBytes = 0;
+      const budget = Math.max(0, (PM.Memory?.budget?.('preview') ?? 256 * 1024 * 1024) - (PM.Preview?.bytes || 0));
+      if (keep && previewFrames.bytes + image.bytes <= budget && previewFrames.put(key, image, budget)) {
+        image.previewCached = true; resolve(true);
+      } else {
+        for (let unit = 0; unit < boundTex.length; unit++) if (boundTex[unit] === image.tex) bindTex(unit, null);
+        gl.deleteFramebuffer(image.fb); gl.deleteTexture(image.tex); resolve(false);
+      }
+    };
+    cancelPreviewPreparation = () => finish(false);
+    const poll = () => {
+      if (done) return;
+      if (GL.gl !== gl || gl.isContextLost() || !valid() || previewStateKey() !== signature
+          || performance.now() - started > 5000) { finish(false); return; }
+      const status = sync ? gl.clientWaitSync(sync, 0, 0) : gl.WAIT_FAILED;
+      if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) finish(true);
+      else if (status === gl.WAIT_FAILED) finish(false);
+      else timer = setTimeout(poll, 16);
+    };
+    gl.flush(); poll();
+  });
+};
+
 /** Render one frame and read back raw RGBA pixels (bottom-up, premultiplied).
     Opaque callers can request topDownOpaque for directly consumable image data.
     `opt.comp` renders another composition record instead of the open one. */
 GL.renderToPixels = (T: any, W: any, H: any, opt: any = {}) => {
   const gl = GL.gl; if (!gl) return null;
   const previousPreviews = useVideoPreviews; useVideoPreviews = false;
+  const previousTexturePrefix = isolatedVideoTexturePrefix, previousNoMotionBlur = isolatedCaptureNoMotionBlur;
+  const previousVideoPath = videoPath;
+  const ownedTexturePrefix = opt.isolatedVideoFrames ? 'capture-video:' + ++isolatedVideoTextureGeneration + ':' : null;
+  isolatedVideoTexturePrefix = ownedTexturePrefix;
+  isolatedCaptureNoMotionBlur = !!ownedTexturePrefix && opt.mblur === false;
+  if (ownedTexturePrefix) videoPath = '';
   const comp = opt.comp || PM.proj;
   PM.beginEval(T);
   let acc;
@@ -1965,6 +2173,17 @@ GL.renderToPixels = (T: any, W: any, H: any, opt: any = {}) => {
     return px;
   } finally {
     useVideoPreviews = previousPreviews;
+    isolatedVideoTexturePrefix = previousTexturePrefix;
+    isolatedCaptureNoMotionBlur = previousNoMotionBlur;
+    if (ownedTexturePrefix) videoPath = previousVideoPath;
+    // Private prepared frames and their uploads belong only to this capture.
+    // Drop them before budget trimming so they cannot evict viewer textures.
+    if (ownedTexturePrefix) {
+      for (const [key, entry] of GL.texes) if (key.startsWith(ownedTexturePrefix)) {
+        for (let unit = 0; unit < boundTex.length; unit++) if (boundTex[unit] === entry.tex) bindTex(unit, null);
+      }
+      dropTextures(ownedTexturePrefix);
+    }
     if (acc) free(acc);
     GL.pool.forEach((f: any) => f.busy = f === presentedFrame);
     trimPool();
@@ -2018,7 +2237,11 @@ GL.bounds = (L: any, T: any) => {
     ax: bounds.ax - offset.x, ay: bounds.ay - offset.y };
 };
 function nativeBounds(L: any, T: any) {
-  if(layer3DRole(L))return layer3DRole(L)==='object'?compositionRuntime(PM,T).bounds(PM.proj.w,PM.proj.h,[L.id],viewportCamera(PM,compositionRuntime(PM,T).camera)):null;
+  if(layer3DRole(L)){
+    if(layer3DRole(L)!=='object')return null;
+    const runtime=compositionRuntime(PM,T);
+    return runtime.bounds(PM.proj.w,PM.proj.h,[L.id],viewportCamera(PM,runtime.camera));
+  }
   if (L.type === 'group') return PM.groupBounds(L, T);
   if(L.type==='extension') {
     const runtime=sceneRuntime(PM,L,T);

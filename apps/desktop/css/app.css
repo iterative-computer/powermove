@@ -183,6 +183,12 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .project-doc.renaming{box-shadow:0 0 0 2px var(--accent-dim)}
 .project-doc-input{min-width:0;width:100%;height:20px;color:var(--tx);font:inherit;line-height:20px;background:transparent}
 @media (prefers-reduced-motion:reduce){.project-doc,.project-doc-close,.project-doc-close svg{transition:none}}
+/* A project still opening is selected at once; past the ghost's delay its name
+   breathes with the body's placeholders. The cold-boot chip only names it. */
+.project-doc.pending .project-doc-label{animation:project-ghost-breathe 3.6s var(--ease-io) 150ms infinite}
+.project-doc.pending:not([data-tab-id]){pointer-events:none}
+.tb-project-controls{display:contents}
+@media (prefers-reduced-motion:reduce){.project-doc.pending .project-doc-label{animation:project-ghost-dim 1ms linear 150ms forwards}}
 
 .tb-right{display:flex;align-items:center;gap:2px;margin-left:auto;position:relative;-webkit-app-region:no-drag}
 /* Export is the app's terminal action: the one labelled, filled control in the
@@ -656,6 +662,39 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .codebar{display:flex;align-items:center;gap:6px;height:36px;padding:0 8px 0 12px;border-top:1px solid var(--line);
   font-size:var(--fs-xs);color:var(--tx-3);flex:none}
 .codebar .ok{color:var(--success)}.codebar .bad{color:var(--danger)}
+
+/* ── project loading ghost ─────────────────────────────── */
+/* While a project opens, quiet stand-ins for its panels cover #body (sized to
+   it by ProjectGhost.svelte), under the titlebar and full-screen views. They
+   appear only once a load outlasts 150ms (GHOST_DELAY_MS). index.html carries
+   the cold-boot copy, #boot-ghost, which has to paint before this sheet. */
+.project-ghost{position:fixed;z-index:34;pointer-events:none;opacity:0;animation:project-ghost-in var(--dur-3) var(--ease) 150ms forwards}
+.project-ghost.generic{display:grid;grid-template:"left center right" minmax(0,1fr) "bottom bottom right" min(300px,40%) / 250px minmax(0,1fr) 300px;gap:var(--gap);padding:0 var(--pad) 4px}
+body:has(#projects-screen.on) :is(.project-ghost,#boot-ghost),body:has(#settings-screen.on) :is(.project-ghost,#boot-ghost){visibility:hidden}
+.pg-tile{position:absolute;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;background:var(--bg-panel);border-radius:var(--r-lg);corner-shape:var(--ui-corner-smoothing);box-shadow:var(--shadow-panel)}
+.project-ghost.generic .pg-tile{position:relative}
+.pg-head{flex:none;height:var(--hdr-h);display:flex;align-items:center;padding:0 14px}
+.pg-head::before{content:'';width:64px;height:8px;border-radius:var(--r-pill);background:var(--ink-2)}
+.pg-rows{display:flex;flex-direction:column;gap:22px;padding:6px 14px;animation:project-ghost-breathe 3.6s var(--ease-io) infinite}
+.pg-row{flex:none;height:8px;width:62%;border-radius:var(--r-pill);background:var(--ink-1)}
+.pg-row:nth-child(4n+2){width:44%}
+.pg-row:nth-child(4n+3){width:71%}
+.pg-row:nth-child(4n){width:53%}
+/* Timeline rows read as clips on tracks rather than lines of text. */
+.pg-timeline .pg-rows{gap:10px}
+.pg-timeline .pg-row{height:16px;border-radius:var(--r-sm);margin-left:12%;width:46%}
+.pg-timeline .pg-row:nth-child(4n+2){margin-left:4%;width:58%}
+.pg-timeline .pg-row:nth-child(4n+3){margin-left:28%;width:34%}
+.pg-timeline .pg-row:nth-child(4n){margin-left:18%;width:50%}
+.pg-stage{flex:1 1 auto;min-height:0;margin:4px 24px 24px;border-radius:var(--r-md);background:var(--ink-1);animation:project-ghost-breathe 3.6s var(--ease-io) infinite}
+.project-loading-status{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
+@keyframes project-ghost-in{to{opacity:1}}
+@keyframes project-ghost-breathe{50%{opacity:.55}}
+@keyframes project-ghost-dim{to{opacity:.6}}
+@media (prefers-reduced-motion:reduce){
+  .project-ghost{animation:project-ghost-in 1ms linear 150ms forwards}
+  .pg-rows,.pg-stage{animation:none}
+}
 
 /* ── modal / palette ───────────────────────────────────── */
 #scrim{position:fixed;inset:0;background:rgb(var(--ink-rgb) / .32);backdrop-filter:blur(3px);z-index:400;display:none}

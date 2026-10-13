@@ -24,9 +24,10 @@ export class PreviewFrames<T extends { bytes: number }> {
     return true;
   }
 
-  trim(target: number): void {
+  trim(target: number, protectedFrames?: ReadonlySet<T>): void {
     for (const [key, frame] of this.frames) {
       if (this.usedBytes <= Math.max(0, target)) break;
+      if (protectedFrames?.has(frame)) continue;
       this.remove(key, frame);
     }
   }

@@ -27,6 +27,8 @@ describe('portable web export', () => {
     expect(PM.serialize()).toBe(before);
     expect(new TextDecoder().decode(result.files.get('index.html'))).not.toContain('<script>bad()');
     expect(result.files.get('player.js')!.length).toBeGreaterThan(10000);
+    const { default: playerSource } = await import('virtual:powermove-player');
+    expect(result.files.get('player.js')).toEqual(new TextEncoder().encode(playerSource));
     expect(result.files.has('PowermoveAnimation.jsx')).toBe(true);
     const handoff = JSON.parse(new TextDecoder().decode(result.files.get('handoff.json')));
     expect(handoff.composition.durationSeconds).toBe(2);
@@ -35,6 +37,20 @@ describe('portable web export', () => {
     expect(result.files.has(handoff.entrypoint)).toBe(true);
     expect(result.files.has('HANDOFF_PROMPT.txt')).toBe(true);
     expect(new DataView(result.bytes.buffer).getUint32(0, true)).toBe(0x04034b50);
+  });
+
+  it('keeps the captured export fixed while the runtime chunk loads', async () => {
+    const PM = fixture();
+    const initialName = PM.proj.name;
+    const exporting = buildWebExport(PM);
+    PM.proj.name = 'Edited during export';
+    PM.proj.layers[0].p['position.x'].kf[0].v = 999;
+    const result = await exporting;
+    expect(result.scene.project.name).toBe(initialName);
+    expect((result.scene.project.layers[0] as any).p['position.x'].kf[0].v).toBe(10);
+    expect(JSON.parse(new TextDecoder().decode(result.files.get('scene.json'))).project).toEqual(result.scene.project);
+    expect(PM.proj.name).toBe('Edited during export');
+    expect(PM.proj.layers[0].p['position.x'].kf[0].v).toBe(999);
   });
 
   it('keeps the selected working precision in portable web scenes', async () => {

@@ -43,6 +43,17 @@ afterEach(() => {
 });
 
 describe('legacy raster install', () => {
+  it('keeps SVG sources with the same asset id separate across warm projects', () => {
+    const PM = rasterRegistry();
+    const context = (window as any).document.createElement('canvas').getContext('2d');
+    context.clearRect = vi.fn(); context.drawImage = vi.fn();
+    const first = { id: 'shared-svg', el: {} }, second = { id: 'shared-svg', el: {} };
+    const a = PM.rasterSvgAsset(first, 64, 32), b = PM.rasterSvgAsset(second, 64, 32);
+    expect(a.key).not.toBe(b.key);
+    expect(PM.rasterSvgAsset(first, 64, 32)).toBe(a);
+    expect(PM.rasterSvgAsset(second, 64, 32)).toBe(b);
+    expect(context.drawImage).toHaveBeenCalledTimes(2);
+  });
   it('releases obsolete GPU assets when a project closes', () => {
     const dropTextures = vi.fn(), dropMesh = vi.fn();
     const PM = rasterRegistry({ GL: { dropTextures, dropMesh } });

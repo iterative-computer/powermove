@@ -11,6 +11,7 @@ import { sourceTime } from './retiming';
 import { viewerService } from './services';
 import { createPreviewQualityMonitor } from './preview-quality';
 import { installPreviewResolution } from './preview-resolution';
+import { installAutomaticPreview } from './automatic-preview-install';
 /* Ported from js/core/engine.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
@@ -277,6 +278,8 @@ for (const event of ['layers', 'project', 'assets']) PM.bus.on(event, () => {
 
 /* ── transport ─────────────────────────────────────────── */
 PM.setTime = (t: any, opt: any = {}) => {
+  // Invalid gesture/plugin input must never replace the current valid frame.
+  if (!Number.isFinite(t)) return;
   const p = PM.proj;
   t = PM.clamp(t, 0, p.dur);
   if (!opt.raw) t = PM.snapF(t, p.fps);
@@ -357,6 +360,7 @@ let interactionUntil = 0, refinePending = false, lastQualityChange = -Infinity;
 let inputUntil = 0;
 PM.interactionActive = () => window.performance.now() < Math.max(inputUntil, interactionUntil);
 for (const event of ['pointerdown', 'pointermove', 'wheel', 'keydown']) window.document?.addEventListener?.(event, () => { inputUntil = window.performance.now() + 500; }, { passive: true });
+const automaticPreview = installAutomaticPreview(PM);
 PM.bus.on('time', () => { if (!PM.playing) { interactionUntil = window.performance.now() + 150; refinePending = true; } });
 for (const event of ['layers', 'project', 'assets', 'quality']) PM.bus.on(event, () => {
   contentGeneration++;
@@ -367,6 +371,7 @@ PM.bus.on('draw', () => { needsDraw = true; });
 
 function frame(now: any) {
   window.requestAnimationFrame(frame);
+  automaticPreview.request();
   const cadenceSlow = previewQuality.tick(now, PM.playing, drawnFps());
   E.budget = previewQuality.budget(drawnFps());
   // Offline renderers own the shared video decoders and canvas until done.

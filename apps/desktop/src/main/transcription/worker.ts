@@ -233,7 +233,9 @@ function handle(message: unknown): void {
     return;
   }
   if (request.type === 'warm') {
-    void load(request.model, request.threads, request.runtime).catch(() => undefined);
+    void load(request.model, request.threads, request.runtime).catch(() => {
+      send({ type: 'warm-error', id: request.id, file: request.model.file });
+    });
     return;
   }
   if (request.type !== 'transcribe') return;

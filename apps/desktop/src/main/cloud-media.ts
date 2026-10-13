@@ -152,9 +152,9 @@ export function registerCloudMediaIpc(ipc: Pick<IpcMain, 'handle'>, ctx: {
     const { offset, length } = input;
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 1 || length > CHUNK_BYTES || offset + length > file.size) throw new Error('Invalid media read');
     file.timer.refresh();
-    const buffer = Buffer.allocUnsafe(length);
+    const buffer = new Uint8Array(length);
     const { bytesRead } = await file.handle.read(buffer, 0, length, offset);
-    return new Uint8Array(buffer.subarray(0, bytesRead));
+    return bytesRead === length ? buffer : buffer.slice(0, bytesRead);
   });
   ipc.handle(IPC.cloudRelease, async (event, token: string) => {
     trusted(event);

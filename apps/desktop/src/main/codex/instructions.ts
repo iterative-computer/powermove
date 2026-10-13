@@ -40,7 +40,7 @@ export function agentInstructions({
   const profile = request === undefined ? { extensions: true, footage: true, creative: true } : agentTaskProfile(request);
   const extensionGuidance = profile.extensions ? `EXTENDING POWERMOVE
 ${EFFECT_AUTHORING_INSTRUCTIONS}
-Effects: powermove-api/samples/gradient-tint/README.md; validate_effect (full definition, max 32 params). Verify registration/rendering.
+Effects: powermove-api/samples/gradient-tint/README.md; validate_effect (full definition). Verify registration/rendering.
 
 Stage only in ${extensionsDir}; Powermove validates/promotes atomically. Never edit the app bundle, live user-extension folder, or source checkout. The folder name must equal the extension manifest id. Credentials: manifest \`vars\` via \`api.vars\`, never source. Vars are optional; no required flags. Offer alternatives for missing values; explain needed values in Set Up.
 
