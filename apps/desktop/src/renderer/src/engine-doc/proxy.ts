@@ -49,7 +49,12 @@ const isTrackable = (v: unknown): v is object => {
 
 const firstAppFrame = (stack: string | undefined): string => {
   const lines = (stack || '').split('\n').slice(1);
-  const frame = lines.find(line => !/engine-doc\/proxy|engine-doc\/barrier|<anonymous>/.test(line)) || lines[0] || '';
+  const own = /engine-doc\/proxy|engine-doc\/barrier|\bat (Object\.)?(set|deleteProperty|defineProperty) \[as /;
+  const first = lines.find(line => !own.test(line)) ?? '';
+  // Code a test harness evaluates in the page (Playwright's page.evaluate),
+  // not one of the app's writers.
+  if (/eval at evaluate|__playwright|UtilityScript|<anonymous>:\d+:\d+\)?$/.test(first)) return `page.evaluate ${first.trim().replace(/^at\s+/, '').slice(0, 160)}`;
+  const frame = lines.find(line => !own.test(line) && !/<anonymous>/.test(line)) || lines[0] || '';
   return frame.trim().replace(/^at\s+/, '').replace(/\?[^:)]*/, '').slice(0, 200);
 };
 
