@@ -163,6 +163,12 @@ impl SourceCache {
         }
     }
 
+    /// Whether background decode workers run (without them, playback
+    /// decodes on its render thread).
+    pub fn has_workers(&self) -> bool {
+        !lock(&self.workers).is_empty()
+    }
+
     pub fn stats(&self) -> CacheStats {
         CacheStats {
             decoded_blocks: self.decoded.load(Ordering::Relaxed),

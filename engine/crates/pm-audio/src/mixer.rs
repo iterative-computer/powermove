@@ -175,6 +175,10 @@ impl Mixer {
         &self.format
     }
 
+    pub fn cache(&self) -> &Arc<SourceCache> {
+        &self.cache
+    }
+
     pub fn graph(&self) -> &Arc<MixGraph> {
         &self.graph
     }

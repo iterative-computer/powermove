@@ -463,7 +463,7 @@ impl RenderThread {
         }
         self.publish_stopped();
         let mut need_preroll = false;
-        let mut last_prefetch = i64::MIN;
+        let mut last_prefetch: Option<i64> = None;
         loop {
             // Controls.
             let wait = if self.transport.is_running() {
@@ -499,17 +499,17 @@ impl RenderThread {
             if need_preroll {
                 need_preroll = false;
                 self.preroll();
-                last_prefetch = i64::MIN;
+                last_prefetch = None;
             }
             // Keep the sources decoding ahead of the playhead.
             let position = self.transport.position();
             let rate = self.transport.rate() as i64;
-            if (position - last_prefetch).abs() > rate / 4 {
+            if last_prefetch.is_none_or(|last| (position - last).abs() > rate / 4) {
                 self.mixer.prefetch(
                     position,
                     (self.config.lookahead_ms as i64 * rate / 1000) as usize,
                 );
-                last_prefetch = position;
+                last_prefetch = Some(position);
             }
             self.fill();
         }
@@ -641,7 +641,7 @@ impl RenderThread {
                 return;
             };
             let options = RenderOptions {
-                wait: false,
+                wait: !self.mixer.cache().has_workers(),
                 monitor_solo: self.solo.clone(),
                 meters: true,
             };
