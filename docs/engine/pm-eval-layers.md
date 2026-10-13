@@ -107,18 +107,25 @@ for enums with the legacy fallbacks).
 | `tests/layers_unit.rs` | picks (locked groups, 3D depth, host objects), the compositing boundary, transition edges, `Retiming::Engine`, camera aims through the parent space | 9 tests |
 | `examples/support/check-wasm-identity.ts` | native and wasm32 digests of the evaluation, layer, and caption replays | identical: 243,703 / 148,721 / 91,003 numbers; also on 10x seeds |
 
-Corpus categories compared on v0 (all 0 mismatched): active 41,414;
-channels 773,554; content 41,414; localMatrix and worldMatrix 41,269 each
-(max relative error 6.9e-17 and 2.5e-16); worldOpacity 41,269; planeMatrix
-238; sourceTime 258; bounds 33,222; group bounds 514; text bounds 672; text
-layouts 852; text rasters 672; variable-font bounds and rasters 180 each
-(ink within 2e-4 px: CoreText instances outlines with its own variation
-arithmetic); text animators, glyphs, and styles 57 each; paths 49; 3D scenes
-32. Not compared, with the reason printed by the test: 107 bounds the host
-answers (3D objects, model groups, extension scenes without a background); 6,570 bounds and 5,310 text layouts of
-the real project that `pm-text` lays out differently from the capture; 4
-caption bounds whose shrunk size is off Blink's font-size grid (next
-section).
+Corpus categories compared on v0 (all 0 mismatched; v1 likewise), measured
+2026-10-13 after the pm-text follow-ups (`docs/engine/text.md`, "Blink's font
+sizes"): active 41,414; channels 773,554; content 41,414; localMatrix and
+worldMatrix 41,269 each (max relative error 6.9e-17 and 2.5e-16);
+worldOpacity 41,269; planeMatrix 238; sourceTime 258; bounds 33,226; group
+bounds 559; text bounds 2,157; text layouts 6,162; text rasters 2,157;
+variable-font bounds 5,220 and rasters 4,005 (`system-ui` is SF's variable
+font; ink within 2e-4 px, max 6.5e-5: CoreText instances outlines with its
+own variation arithmetic); text animators, glyphs, and styles 57 each; paths
+49; 3D scenes 32. Not compared: 107 bounds the host answers (3D objects,
+model groups, extension scenes without a background). Text layouts pm-text
+lays out differently from the capture are pinned per font
+(`PINNED_TEXT_DIFFERENCES`, empty) and the test fails if any font grows.
+
+The test models the capture's renderer: its UI had laid `system-ui` DOM
+text out at 12 and 13 px on a 2x display, which fixes `opsz` for the
+renderer's 24 and 26 px `system-ui` fonts (`capture_font_cache_seeds`;
+`PM_CORPUS_FRESH_FONT_CACHE=1` measures as a fresh renderer instead, and
+then 1,260 `system-ui` layouts differ and the pin fails).
 
 **Fragile cases.** A bounds or pick case is fragile when its TypeScript
 answer changes under a 1e-12 change of time, a 1e-7 move of the point, a
@@ -140,35 +147,27 @@ PM_LAYER_SCALE=10 PM_LAYER_SEED=2 PM_LAYER_OUT=/tmp/lv.json.gz bun engine/crates
 PM_LAYER_VECTORS=/tmp/lv.json.gz cargo test -p pm-eval --release --test layer_parity -- --nocapture
 ```
 
-## Findings for pm-text
+## Findings for pm-text (resolved 2026-10-13)
 
-1. **Blink measures at `EffectiveFontSize`.** In Blink,
-   `FontDescription::EffectiveFontSize` is `floorf(size * FontCacheKey::PrecisionMultiplier())
-   / PrecisionMultiplier()` with a multiplier of 100, in `float`: Chrome lays
-   text out at the size floored to 1/100 px. `pm_text::compat::canvas_font`
-   uses the size as given. Evidence: the corpus caption
-   `captions/middle-lines` shrinks to 15.9048 px; Chrome's line is
-   255.30812072753906 px wide, which is exactly `pm-text`'s width at 15.9 px
-   (255.385 at 15.9048). The real project's Menlo text at 9.3245 px and
-   10.1722 px matches 9.32 and 10.17. With the floor applied in
-   `canvas_font` (tried locally, not committed: pm-text is another lane's),
-   the corpus compares 2,337 text layouts with 0 mismatches (up from 852),
-   all Menlo, Geist, and Geist Width layouts match, and all 28 caption
-   bounds match; 135 newly compared Geist text bounds then differ from the
-   capture by up to about 4e-6 px (ink boxes at fractional sizes, beyond the
-   1e-6 px bounds tolerance). It must be applied in exactly one place: the
-   floor is not idempotent in `float`.
-2. **`system-ui` at 24 to 26 px in the real project** (3,825 layouts)
-   measures about 3.7% narrower than the capture (`1` at 24 px: 10.805 vs
-   11.203; capture advances are multiples of 1/64 px). The S4 fixture's
-   `system-ui` cases at 11, 17, 32, 96, and 240 px pass. Not explained yet.
+1. **Blink measures at `EffectiveFontSize`** (amendment 19). Applied once in
+   `pm_text::compat::canvas_font`; HarfBuzz's `trak` lookup and `opsz` keep
+   the specified size, as in Blink. All 28 caption bounds and every Menlo,
+   Geist, and Geist Width layout match.
+2. **Text-bound ink differences around 4e-6 px** at fractional sizes: Blink's
+   ink box arithmetic (`SkFont::getPath` bounds at the 64 px canonical size
+   scaled in `float`, `gfx::BoundingRect`, `GlyphBoundsAccumulator` from an
+   `InlineLayoutUnit` pen, `RectF::Union`'s next-float growth, the alignment
+   offset in `float`), ported in `text_measure.rs` and `text_geom.rs`. Text
+   bounds and rasters at fractional sizes match bit for bit; no tolerance.
+3. **`system-ui` at 24 to 26 px** in the real project: the capture
+   renderer's font cache (above), plus HarfBuzz's truncating advance scaling
+   and the specified size for `trak` at fractional sizes. See
+   `docs/engine/text.md`.
 
 ## Left to later lanes
 
 - `pm-geom3d`: 3D object bounds and picks, model-group bounds, recipe parts
   (`animatedPart`), `parseScene`'s geometry budget checks.
-- `pm-text`: the two findings above; then the 4 off-grid caption bounds and
-  the real project's text geometry join the comparison.
 - `pm-wasm`: the editor-helper shims over these functions
   (`validMatteSource`, the space-3d math, `countTextUnits`, ...).
 - `pm-edit`: the parenting and grouping edits that write what
