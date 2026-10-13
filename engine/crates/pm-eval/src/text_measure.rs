@@ -308,15 +308,8 @@ impl<R: FontResolver> CompatMeasure<R> {
                         && let Some((b, upem)) = self.glyph_box(run.face, g.glyph, &run.coords)
                     {
                         let [l, t, r, bt] = skia_glyph_rect(b, upem, run.size);
-                        let offset = (
-                            fixed_to_float(g.x_offset),
-                            -fixed_to_float(g.y_offset),
-                        );
-                        bounds.unite(
-                            RectF::from_sk(l, t, r, bt),
-                            origin as f32 / 65536.0,
-                            offset,
-                        );
+                        let offset = (fixed_to_float(g.x_offset), -fixed_to_float(g.y_offset));
+                        bounds.unite(RectF::from_sk(l, t, r, bt), origin as f32 / 65536.0, offset);
                     }
                     origin += i64::from(g.advance);
                 }
