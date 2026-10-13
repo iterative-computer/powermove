@@ -45,6 +45,8 @@ type Config = {
   /** The C′ prototype presents playback (POWERMOVE_BRIDGE_REMOTE_LAYER=1);
    *  main hosts its remote layer over the page. */
   remoteLayer?: boolean;
+  /** Where the window sits: off every screen (default) or invisible on screen. */
+  placement?: 'offscreen' | 'transparent';
   /** Latency: input modes to run, each for `durationMs`. */
   inputModes?: ('drag' | 'orbit' | 'walk' | 'baseline')[];
   out: string;
@@ -85,6 +87,21 @@ async function waitFor<T>(label: string, poll: () => Promise<T | null | undefine
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
     await sleep(25);
   }
+}
+
+/**
+ * `transparent` placement (C′ runs): Core Animation never shows, and so
+ * never frees, the drawables of a layer in a window that is on no display,
+ * so the remote layer needs a window on screen. This one is on the primary
+ * display but invisible: opacity 0, ignoring the mouse, never activated,
+ * above other windows so they do not occlude it.
+ */
+function placeTransparent(win: BrowserWindow, width: number, height: number): void {
+  const area = screen.getPrimaryDisplay().workArea;
+  win.setOpacity(0);
+  win.setIgnoreMouseEvents(true);
+  win.setAlwaysOnTop(true, 'floating');
+  win.setBounds({ x: area.x, y: area.y, width, height });
 }
 
 function offscreen(width: number, height: number): Electron.Rectangle {
@@ -160,8 +177,14 @@ async function main(): Promise<void> {
     win.webContents.on('console-message', (event) => log(`page ${event.level}: ${event.message}`));
     installed.attachWindow(win);
     await win.loadFile(path.join(outDir, 'measure.html'), { query: { hz: String(hz), edr: cfg.edr ?? 'auto', raw: cfg.rawInput ? '1' : '0' } });
-    win.showInactive();
-    win.setBounds(offscreen(1920, 1080));
+    if (cfg.placement === 'transparent') {
+      placeTransparent(win, 1920, 1080);
+      win.showInactive();
+    } else {
+      win.showInactive();
+      win.setBounds(offscreen(1920, 1080));
+    }
+    result['placement'] = { kind: cfg.placement ?? 'offscreen', bounds: win.getBounds(), opacity: win.getOpacity() };
     const page = win;
     const call = <T>(expression: string): Promise<T> => page.webContents.executeJavaScript(expression) as Promise<T>;
     await call(`window.__measure.start(${JSON.stringify(cfg.mode)})`);

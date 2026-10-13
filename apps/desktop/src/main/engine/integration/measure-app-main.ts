@@ -46,6 +46,8 @@ type AppConfig = {
   /** The C′ prototype presents playback (POWERMOVE_BRIDGE_REMOTE_LAYER=1);
    *  main hosts its remote layer over the viewer's stage. */
   remoteLayer?: boolean;
+  /** Where the window sits: off every screen (default) or invisible on screen. */
+  placement?: 'offscreen' | 'transparent';
   pageScript: string;
   out: string;
   trace: string;
@@ -75,6 +77,21 @@ async function waitFor<T>(label: string, poll: () => Promise<T | null | undefine
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
     await sleep(50);
   }
+}
+
+/**
+ * `transparent` placement (C′ runs): Core Animation never shows, and so
+ * never frees, the drawables of a layer in a window that is on no display,
+ * so the remote layer needs a window on screen. This one is on the primary
+ * display but invisible: opacity 0, ignoring the mouse, never activated,
+ * above other windows so they do not occlude it.
+ */
+function placeTransparent(win: BrowserWindow, width: number, height: number): void {
+  const area = screen.getPrimaryDisplay().workArea;
+  win.setOpacity(0);
+  win.setIgnoreMouseEvents(true);
+  win.setAlwaysOnTop(true, 'floating');
+  win.setBounds({ x: area.x, y: area.y, width, height });
 }
 
 function offscreen(width: number, height: number): Electron.Rectangle {
@@ -129,16 +146,24 @@ async function run(config: AppConfig): Promise<void> {
     // Off every screen, never activated; refuse to run if it would show
     // anywhere. AppKit pulls titled windows onto a screen when they are
     // shown, so the harness addon lets this one stay off.
-    result['windowClass'] = harness.allowOffscreenWindow(win.getNativeWindowHandle());
-    win.setBounds(offscreen(1920, 1080));
-    if (visibleOnAnyDisplay(win.getBounds())) throw new Error(`the measurement window would be on screen at ${JSON.stringify(win.getBounds())}`);
-    win.showInactive();
-    await sleep(300);
-    const bounds = win.getBounds();
-    result['window'] = { bounds, content: win.getContentBounds() };
-    if (visibleOnAnyDisplay(bounds)) {
-      win.hide();
-      throw new Error(`the measurement window moved on screen at ${JSON.stringify(bounds)}`);
+    if (config.placement === 'transparent') {
+      placeTransparent(win, 1920, 1080);
+      if (win.getOpacity() !== 0) throw new Error('the measurement window would be visible');
+      win.showInactive();
+      await sleep(300);
+      result['window'] = { placement: 'transparent', bounds: win.getBounds(), content: win.getContentBounds(), opacity: win.getOpacity() };
+    } else {
+      result['windowClass'] = harness.allowOffscreenWindow(win.getNativeWindowHandle());
+      win.setBounds(offscreen(1920, 1080));
+      if (visibleOnAnyDisplay(win.getBounds())) throw new Error(`the measurement window would be on screen at ${JSON.stringify(win.getBounds())}`);
+      win.showInactive();
+      await sleep(300);
+      const bounds = win.getBounds();
+      result['window'] = { placement: 'offscreen', bounds, content: win.getContentBounds() };
+      if (visibleOnAnyDisplay(bounds)) {
+        win.hide();
+        throw new Error(`the measurement window moved on screen at ${JSON.stringify(bounds)}`);
+      }
     }
 
     // Open the corpus project the way a user does (Open Project), from a copy.
