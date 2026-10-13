@@ -38,6 +38,7 @@
 
 pub mod address;
 pub mod anchor;
+pub mod bounds;
 pub mod comp;
 pub mod easing;
 pub mod evaluator;
@@ -54,6 +55,8 @@ pub mod scope;
 pub mod space3d;
 pub mod temporal;
 pub mod text_anim;
+pub mod text_geom;
+pub mod text_measure;
 pub mod transform;
 
 pub use comp::{Comp, CompError};

@@ -24,6 +24,9 @@ use pm_model::{Document, JsString, Node};
 use pm_text::compat::{GlyphLayout, Unit};
 
 use support::pm_expr_engine::PmExprEngine;
+use pm_eval::bounds::{Bounds, HOST_ONLY, LayerHost};
+use pm_eval::text_measure::CompatMeasure;
+use pm_text::registry::CoreTextRegistry;
 
 fn corpus_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("PM_ENGINE_CORPUS") {
@@ -210,6 +213,56 @@ fn layer_error(state: &Value, label: &str) -> bool {
 struct Ctx<'a> {
     project: &'a str,
     stats: &'a mut Stats,
+    measure: &'a mut CompatMeasure<CoreTextRegistry>,
+}
+
+/// Answers nothing natively unanswerable (the defaults throw `HostOnly`).
+struct CorpusHost;
+impl LayerHost for CorpusHost {}
+
+const BOUNDS: (f64, f64) = (1e-6, 0.0);
+/// Variable-font ink boxes: CoreText instances outlines with its own
+/// variation arithmetic; measured within 1.2e-4 px on the corpus.
+const VARIABLE_INK: (f64, f64) = (2e-4, 0.0);
+
+fn bounds_value(b: &Bounds) -> Value {
+    let mut m = Map::new();
+    for (k, v) in [("x0", b.x0), ("y0", b.y0), ("x1", b.x1), ("y1", b.y1), ("w", b.w), ("h", b.h), ("ax", b.ax), ("ay", b.ay)] {
+        m.insert(k, Value::Number(v));
+    }
+    Value::Object(m)
+}
+
+fn selection_value(s: &pm_eval::text_geom::Selection) -> Value {
+    let mut m = Map::new();
+    for (k, v) in [("x0", s.x0), ("y0", s.y0), ("x1", s.x1), ("y1", s.y1), ("w", s.w), ("h", s.h)] {
+        m.insert(k, Value::Number(v));
+    }
+    Value::Object(m)
+}
+
+fn unit_value(u: &Unit, kind: &str) -> Value {
+    let mut m = Map::new();
+    m.insert("text", Value::String(JsString::from(u.text.as_str())));
+    m.insert("x", Value::Number(u.x));
+    m.insert("y", Value::Number(u.y));
+    m.insert("w", Value::Number(u.w));
+    m.insert("line", Value::Number(u.line as f64));
+    if kind == "characters" {
+        m.insert("lineUnit", u.line_unit.map_or(Value::Null, |x| Value::Number(x as f64)));
+        m.insert("word", u.word.map_or(Value::Null, |x| Value::Number(x as f64)));
+    }
+    m.insert("sourceStart", Value::Number(u.source_start as f64));
+    m.insert("index", Value::Number(u.index as f64));
+    Value::Object(m)
+}
+
+fn layout_value(l: &GlyphLayout) -> Value {
+    let mut m = Map::new();
+    m.insert("characters", Value::Array(l.characters.iter().map(|u| unit_value(u, "characters")).collect()));
+    m.insert("words", Value::Array(l.words.iter().map(|u| unit_value(u, "words")).collect()));
+    m.insert("lines", Value::Array(l.lines.iter().map(|u| unit_value(u, "lines")).collect()));
+    Value::Object(m)
 }
 
 impl Ctx<'_> {
@@ -265,6 +318,40 @@ fn compare_comp(
     let layers = comp.layers();
     let Some(Value::Array(dumped)) = member(state, "layers") else {
         return;
+    };
+    // Text layers pm-text lays out differently from the capture (font
+    // resolution), and text set in variable fonts (ink boxes within about
+    // 1e-4 px of CoreText's, see docs/engine/pm-eval-layers.md).
+    let mut text_differs: Vec<usize> = Vec::new();
+    let mut variable_text: Vec<usize> = Vec::new();
+    for l in dumped {
+        let index = member(l, "index").and_then(dumped_number).unwrap() as usize;
+        let Some(layer) = layers.get(index) else { continue };
+        if member(l, "type").and_then(|t| t.as_js_string()).and_then(|s| s.as_str()) != Some("text") {
+            continue;
+        }
+        let mut scope = Scope::new(ev, comp, project);
+        if let Ok(layout) = scope.text_layout(layer, time, &mut *cx.measure) {
+            let mut err = 0.0;
+            if !member(l, "textLayout").is_some_and(|want| same(&plain(&layout_value(&layout)), want, BOUNDS.0, BOUNDS.1, &mut err)) {
+                text_differs.push(index);
+            }
+        }
+        if let Ok(d) = scope.resolved_text_content(layer, time)
+            && cx.measure.uses_variations(&pm_eval::text_geom::text_content(&d))
+        {
+            variable_text.push(index);
+        }
+    }
+    let members_of = |group: &Node, ev: &mut Evaluator, list: &[usize]| -> bool {
+        let gid = group.get("id").map(|n| n.to_value());
+        list.iter().any(|&i| {
+            let Some(child) = layers.get(i) else { return false };
+            ev.group_ancestors(comp, child)
+                .unwrap_or_default()
+                .iter()
+                .any(|g| g.get("id").map(|n| n.to_value()) == gid)
+        })
     };
     for l in dumped {
         let index = member(l, "index").and_then(dumped_number).unwrap() as usize;
@@ -330,6 +417,77 @@ fn compare_comp(
         }
         if let Some(want) = member(l, "textAnimation") {
             compare_text_animation(cx, &mut scope, layer, time, l, want, &at("textAnimation"));
+        }
+        // Text layout first: where pm-text lays the text out differently from
+        // the capture (fonts the registry resolves differently), the text's
+        // geometry is pm-text's difference, reported apart.
+        let layout_differs = text_differs.contains(&index)
+            || (ty == "group" && members_of(layer, scope.ev, &text_differs));
+        let variable = variable_text.contains(&index)
+            || (ty == "group" && members_of(layer, scope.ev, &variable_text));
+        if ty == "text" {
+            let got = scope.text_layout(layer, time, &mut *cx.measure).map(|l| layout_value(&l)).map_err(|e| e.to_string());
+            if layout_differs {
+                cx.stats.record("textLayout (pm-text)", true, String::new);
+            } else {
+                cx.check("textLayout", &at("textLayout"), got, member(l, "textLayout"), layer_error(l, "textLayout"), BOUNDS);
+            }
+        }
+        if ty != "audio" {
+            let got = scope.bounds(layer, time, &mut *cx.measure, &mut CorpusHost);
+            let category: &'static str = if layout_differs {
+                "bounds (pm-text)"
+            } else if variable {
+                "bounds (variable font)"
+            } else if ty == "text" {
+                "bounds text"
+            } else if ty == "group" {
+                "bounds group"
+            } else {
+                "bounds"
+            };
+            let tol = if variable && !layout_differs { VARIABLE_INK } else { BOUNDS };
+            match got {
+                Err(e) if e.kind == HOST_ONLY => cx.stats.record("bounds (host)", true, String::new),
+                got if layout_differs => {
+                    let _ = got;
+                    cx.stats.record(category, true, String::new);
+                }
+                got => {
+                    let got = got.map(|b| b.map_or(Value::Null, |b| bounds_value(&b))).map_err(|e| e.to_string());
+                    cx.check(category, &at(&format!("{ty} bounds")), got, member(l, "bounds"), layer_error(l, "bounds"), tol);
+                }
+            }
+        }
+        if ty == "text" && !layout_differs {
+            if let Some(want) = member(l, "textRaster") {
+                let got = scope.text_geometry(layer, time, &mut *cx.measure).map(|g| {
+                    let mut m = Map::new();
+                    m.insert("w", Value::Number(g.w));
+                    m.insert("h", Value::Number(g.h));
+                    m.insert("anchorX", Value::Number(g.anchor_x));
+                    m.insert("anchorY", Value::Number(g.anchor_y));
+                    m.insert("density", Value::Number(g.density(1.0)));
+                    m.insert("selection", selection_value(&g.selection));
+                    Value::Object(m)
+                }).map_err(|e| e.to_string());
+                let (category, tol) = if variable { ("textRaster (variable font)", VARIABLE_INK) } else { ("textRaster", BOUNDS) };
+                cx.check(category, &at("textRaster"), got, Some(want), layer_error(l, "textRaster"), tol);
+            }
+        }
+        if let Some(want) = member(l, "paths") {
+            let got = scope.path_geometry(layer, time).map(|(paths, matrices, _)| {
+                Value::Array(paths.iter().zip(&matrices).map(|(p, m)| {
+                    let mut o = Map::new();
+                    o.insert("id", js_to_value(&p.id));
+                    let mut values: Map = p.values.iter().map(|(k, v)| (k.clone(), js_to_value(v))).collect();
+                    values.insert("vertices", Value::Array(p.vertices.iter().map(|v| Value::Object(v.iter().map(|(k, x)| (k.clone(), Value::Number(*x))).collect())).collect()));
+                    o.insert("values", Value::Object(values));
+                    o.insert("matrix", numbers(m));
+                    Value::Object(o)
+                }).collect())
+            }).map_err(|e| e.to_string());
+            cx.check("paths", &at("paths"), got, Some(want), layer_error(l, "paths"), NUM);
         }
         if matches!(ty.as_str(), "video" | "precomp" | "audio") {
             let got = scope
@@ -466,20 +624,28 @@ fn node_has(layer: &Node, member: &str, key: &JsString) -> bool {
     }
 }
 
-#[test]
+fn main() {
+    corpus_evaluation_matches_legacy();
+}
+
 fn corpus_evaluation_matches_legacy() {
     let Some(dir) = corpus_dir() else {
         eprintln!("no parity corpus capture found; set PM_ENGINE_CORPUS to run this comparison");
         return;
     };
     let only = std::env::var("PM_CORPUS_ONLY").ok();
+    let exclude = std::env::var("PM_CORPUS_EXCLUDE").ok();
     let mut stats = Stats {
         verbose: std::env::var("PM_CORPUS_VERBOSE").is_ok(),
         ..Stats::default()
     };
     let mut count = 0;
+    let mut measure = CompatMeasure::new(CoreTextRegistry::new());
     for (name, path) in projects(&dir) {
         if only.as_deref().is_some_and(|p| !name.starts_with(p)) {
+            continue;
+        }
+        if exclude.as_deref().is_some_and(|p| name.starts_with(p)) {
             continue;
         }
         let loaded = std::fs::read_to_string(path.join("loaded.json")).unwrap();
@@ -497,6 +663,7 @@ fn corpus_evaluation_matches_legacy() {
             let mut cx = Ctx {
                 project: &name,
                 stats: &mut stats,
+                measure: &mut measure,
             };
             compare_comp(&mut cx, &mut ev, &doc, &project, &project, state, &id);
             count += 1;

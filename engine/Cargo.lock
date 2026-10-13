@@ -957,6 +957,9 @@ dependencies = [
  "pm-model",
  "pm-text",
  "pm-time",
+ "pm-vector",
+ "serde_json",
+ "skrifa",
 ]
 
 [[package]]
