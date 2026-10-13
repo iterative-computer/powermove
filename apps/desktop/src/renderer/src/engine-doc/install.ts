@@ -144,7 +144,9 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       return wrappedProxy;
     },
     set(next: any) {
-      const raw = unwrap(next);
+      // A new document is often built from reads of the current one
+      // (`rotateProject({ ...PM.proj })`): its members may be proxies.
+      const raw = tracker ? tracker.unwrapDeep(next) : next;
       const previous = current;
       current = raw;
       if (previous === raw) return;

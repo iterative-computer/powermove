@@ -12,8 +12,14 @@
  *
  * Writes to an object obtained without going through `PM.proj` (a layer
  * created by a factory, then inserted and edited through the original
- * reference) are invisible to the Proxy. The shadow-replay auditor is the net
- * for those.
+ * reference) are invisible to the Proxy. Writers announce them (`touch()`,
+ * history), and the shadow-replay auditor is the net for the rest.
+ *
+ * Identity: an object that enters the document through a proxy is still held
+ * raw by the code that inserted it, which often compares it with what it reads
+ * back (`layer.masks.find(m => m.path === path)` right after pushing a new
+ * mask). Until the current task ends, reads of such a fresh object return it
+ * raw, so those comparisons hold; later tasks read it through the Proxy.
  */
 import type { PathPart } from '../../../shared/patch';
 
@@ -37,6 +43,8 @@ export interface Tracker {
   unwrap<T>(value: T): T;
   /** Deep-unwraps proxies inside a new value about to enter the document. */
   unwrapDeep<T>(value: T): T;
+  /** Ends the current task's fresh objects (reads return proxies again). */
+  settle(): void;
   violations(): Violation[];
   clearViolations(): void;
 }
@@ -93,7 +101,16 @@ export function createTracker(options: {
 
   const unwrap = <T>(value: T): T => (value && typeof value === 'object' ? (targets.get(value as any) as any) ?? value : value);
 
-  const unwrapDeep = <T>(value: T): T => {
+  /** Objects that entered the document raw during the current task. */
+  let fresh = new WeakSet<object>();
+  let settling = false;
+  const settle = () => { fresh = new WeakSet(); settling = false; };
+  const markFresh = (v: object) => {
+    fresh.add(v);
+    if (!settling) { settling = true; setTimeout(settle, 0); }
+  };
+
+  const unwrapDeep = <T>(value: T, admit = false): T => {
     const seen = new Set<object>();
     const visit = (v: any): any => {
       if (!v || typeof v !== 'object') return v;
@@ -101,6 +118,7 @@ export function createTracker(options: {
       if (raw) return raw; // raw trees never hold proxies
       if (seen.has(v) || !isTrackable(v)) return v;
       seen.add(v);
+      if (admit) markFresh(v);
       if (Array.isArray(v)) {
         for (let i = 0; i < v.length; i++) { const u = visit(v[i]); if (u !== v[i]) v[i] = u; }
       } else {
@@ -166,8 +184,17 @@ export function createTracker(options: {
         const method = (Array.prototype as any)[prop];
         return (search: unknown, from?: number) => method.call(target, unwrap(search), from);
       }
-      const value = Reflect.get(target, prop, receiver);
-      if (typeof prop === 'symbol' || !isTrackable(value)) return value;
+      let value = Reflect.get(target, prop, receiver);
+      if (typeof prop === 'symbol' || !value || typeof value !== 'object') return value;
+      // A proxy stored through a raw reference: the document holds the raw object.
+      const stored = targets.get(value);
+      if (stored) {
+        const desc = Object.getOwnPropertyDescriptor(target, prop);
+        if (desc && 'value' in desc && desc.writable) target[prop] = stored;
+        value = stored;
+      }
+      if (!isTrackable(value)) return value;
+      if (fresh.has(value)) return value;
       const key = keyOf(target, prop);
       if (key === null) return value;
       // Accessor-backed members are views, not document objects.
@@ -178,7 +205,7 @@ export function createTracker(options: {
       return proxyOf(value);
     },
     set(target, prop, value, receiver) {
-      const raw = unwrapDeep(value);
+      const raw = unwrapDeep(value, true);
       const key = keyOf(target, prop);
       if (key !== null) record(target, key, handler.set!);
       return Reflect.set(target, prop, raw, receiver === proxies.get(target) ? target : receiver);
@@ -193,7 +220,7 @@ export function createTracker(options: {
       // Non-enumerable accessors (temporalKeys' legacy views) are not JSON.
       const visible = descriptor.enumerable !== false || Object.prototype.propertyIsEnumerable.call(target, prop);
       if (key !== null && visible) record(target, key, handler.defineProperty!);
-      if ('value' in descriptor) descriptor = { ...descriptor, value: unwrapDeep(descriptor.value) };
+      if ('value' in descriptor) descriptor = { ...descriptor, value: unwrapDeep(descriptor.value, true) };
       return Reflect.defineProperty(target, prop, descriptor);
     },
   };
@@ -217,7 +244,8 @@ export function createTracker(options: {
       return proxyOf(raw);
     },
     unwrap,
-    unwrapDeep,
+    unwrapDeep: <T>(value: T) => unwrapDeep(value),
+    settle,
     violations: () => [...violations.values()].sort((a, b) => b.count - a.count),
     clearViolations: () => violations.clear(),
   };

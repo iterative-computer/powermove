@@ -55,6 +55,36 @@ describe('the write-tracking Proxy', () => {
     expect(tracker.unwrap(layer)).toBe(raw.layers[0]);
   });
 
+  it('hands out objects that entered the document in this task raw, and proxies after it', async () => {
+    const { doc, tracker, writes } = tracked('report', { on: true });
+    const mask = { id: 'm', path: { vertices: [] as unknown[] } };
+    doc.layers[0].masks = [];
+    doc.layers[0].masks.push(mask);
+    // The inserting code compares its own reference with what it reads back.
+    expect(doc.layers[0].masks.find((m: any) => m.path === mask.path)).toBe(mask);
+    expect(isTrackingProxy(doc.layers[0].masks[0])).toBe(false);
+    // Objects read through the Proxy before stay proxies.
+    expect(isTrackingProxy(doc.layers[1])).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(isTrackingProxy(doc.layers[0].masks[0])).toBe(true);
+    writes.length = 0;
+    doc.layers[0].masks[0].path.vertices.push(1);
+    expect(new Set(writes)).toEqual(new Set(['layers.0.masks.0.path.vertices']));
+    tracker.settle();
+  });
+
+  it('keeps proxies out of the raw document when they are stored through a raw reference', () => {
+    const { doc, raw, tracker } = tracked('report', { on: true });
+    const layer = doc.layers[0];
+    // Code that copies members of the document into a raw container.
+    const copy: any = { ...raw, layers: [layer] };
+    (raw as any).copy = { layers: doc.layers };
+    expect(isTrackingProxy((raw as any).copy.layers)).toBe(true);
+    expect(isTrackingProxy(doc.copy.layers)).toBe(true);
+    expect(isTrackingProxy((raw as any).copy.layers)).toBe(false);
+    expect(isTrackingProxy(tracker.unwrapDeep(copy).layers[0])).toBe(false);
+  });
+
   it('lets structuredClone and postMessage take proxies', () => {
     const { doc, tracker } = tracked();
     const scope: any = { structuredClone: globalThis.structuredClone };
@@ -82,6 +112,9 @@ describe.skipIf(!existsSync(MODULE))('tracking mode in the editor', () => {
     PM.hist.redo();
     expect(doc.tracker!.violations()).toEqual([]);
     // A direct write with no touch(): the Proxy saw it (and reports the writer).
+    // (The layer entered the document in this task: reads hand it out raw
+    // until the task ends.)
+    doc.tracker!.settle();
     PM.proj.layers[0].name = 'Direct';
     expect(doc.tracker!.violations().map(v => v.path)).toEqual(['layers.0.name']);
     doc.barrier!.flush();
