@@ -318,17 +318,6 @@ pub fn custom_coords(
         .collect()
 }
 
-/// Final coordinates for `face` at `desc`: web fonts (project fonts and
-/// variable `FontFace`s) through `custom_coords`, installed fonts through
-/// `platform_coords`.
-pub fn face_coords(info: &FaceInfo, desc: &FontDesc, settings: &[(u32, f32)]) -> Vec<(u32, f32)> {
-    if info.custom {
-        custom_coords(info, desc, desc.size, settings)
-    } else {
-        platform_coords(info, desc.size)
-    }
-}
-
 pub fn prepare(
     info: &FaceInfo,
     coords: Vec<(u32, f32)>,
