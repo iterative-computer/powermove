@@ -202,13 +202,21 @@ consumers ◀───────────── ClockSlot ◀── clock s
 - **Rates.** Phase 2 plays at 1× only; `Play` at another rate (J/K/L) is refused with
   `Unsupported` until Phase 3b.
 
-Measured with a simulated device (`tests/playback.rs`): a gain edit while playing
-ramps over 576 samples at 48 kHz with no step larger than one glide increment and no
-new epoch. The published line predicts the presented media to 0.3 µs on a nominal device; at ±150 ppm device drift the final line
-alone is off by 400 µs after 2.7 s, while the line as published (re-anchored every
-100 ms) stays within 29 µs at 300 ppm. Playback from a seek equals the offline render;
-pause, seek, loop wraps, scrub grains, a 44.1 kHz device under a 48 kHz project, and a
-device change behave.
+Measured with a simulated device (`tests/playback.rs`): a gain edit while playing ramps
+over 576 samples at 48 kHz with no step larger than one glide increment and no new epoch.
+The published line predicts the presented media to 0.3 µs on a nominal device; at ±150 ppm
+device drift the final line alone is off by 400 µs after 2.7 s, while the line as
+published (re-anchored every 100 ms) stays within 29 µs at 300 ppm. Playback from a seek
+equals the offline render; pause, seek, loop wraps, scrub grains, a 44.1 kHz device under
+a 48 kHz project, and a device change behave.
+
+Measured on the real output (`examples/device_probe`, 5 s, 2026-10-13; the default output
+was Bluetooth AirPods Pro at 48 kHz, 512-frame buffers): device plus stream latency 7,680
+frames (160 ms) folded into the clock, safety offset 0; 9.6 clock samples a second;
+consecutive samples re-anchor within 0.33 µs (p50) and 0.67 µs (max) of the previous line;
+the device clock runs +0.1 ppm against the host clock; no underruns or starved renders.
+The first playing sample presented 176.6 ms after `Play` (160 ms of it the Bluetooth
+latency). cpal's own estimate would have put the clock 10.7 ms (the I/O buffer) late.
 
 ## Export (`offline`)
 
