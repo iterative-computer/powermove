@@ -193,6 +193,12 @@ export function install(PM: PMRegistry): void {
       const live = patches.forward;
       if (PM.Comps?.canonicalize) patches = { ...PM.Comps.canonicalize(patches.forward, patches.backward), bytes: patches.bytes };
       const bytes = patches.bytes ?? encodedBytes(patches.forward) + encodedBytes(patches.backward);
+      // The native engine's write barrier gets the canonical paths before the
+      // entry is announced: listeners of `history` and `history:project-patch`
+      // ask right away (the viewer redraws the pen tool's overlay), and the
+      // transaction is no longer open to cover its writes.
+      const paths = patches.forward.map(patch => patch.path);
+      PM.doc?.touched?.(paths, { canonical: true });
       push({
         label: label || current.label,
         group: current.group,
@@ -204,8 +210,8 @@ export function install(PM: PMRegistry): void {
         redo: () => restorePatches(patches.forward, 'redo'),
       });
       publishProjectPatch(live, current.origin);
-      // Canonical paths for the native engine's write barrier (legacy ignores them).
-      PM.touch(patches.forward.map(patch => patch.path), true);
+      // Canonical paths again for writers that rely on touch() (legacy ignores them).
+      PM.touch(paths, true);
       PM.autosave?.();
       return true;
     },

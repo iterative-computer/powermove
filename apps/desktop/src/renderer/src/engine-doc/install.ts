@@ -177,6 +177,9 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   };
   const doc: DocApi = {
     write(paths, fn, options = {}) {
+      // Marked before as well as after: code inside `fn` may ask (a listener
+      // of an event the writer emits), and its flush must see these paths.
+      if (fn) record(paths, options);
       writerDepth += 1;
       coveredDepth += 1;
       try { return fn?.(); }
@@ -276,7 +279,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const fontProvider = options.fonts !== undefined ? options.fonts : editorFonts();
   if (fontProvider) api.fonts = new FontLoader(fontProvider);
   api.onStale = (op, paths) => {
-    reporter.emit({ type: 'audit', kind: 'stale-answer', revision: barrier?.revision ?? -1, paths: paths.slice(0, 20), detail: op, site: querySite() });
+    reporter.emit({ type: 'audit', kind: 'stale-answer', revision: barrier?.revision ?? -1, paths: paths.slice(0, 20), detail: op, site: querySite(undefined, 8), tx: PM.hist?.busy?.() ? (PM.hist?.scoped?.() ? 'scoped' : 'plain') : 'none' });
     if (auditor) { auditor.stats.missedWrites += 1; auditor.stats.failures += 1; }
   };
   const auditor = mode.audit ? new ShadowAuditor(() => (state.ready ? barrier : null), f => reporter.emit({ type: 'audit', kind: f.kind, revision: f.revision, paths: f.paths, detail: f.detail })) : null;

@@ -365,6 +365,32 @@ describe.skipIf(!built)('writes inside open transactions', () => {
     expect(doc.barrier!.shadowMatches().ok).toBe(true);
     expect(doc.check('test')!.ok).toBe(true);
   });
+
+  it('hands a commit\'s paths over before the commit\'s listeners ask (the pen tool\'s overlay)', async () => {
+    const { PM, doc } = await editor('audit');
+    PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid')));
+    const L = PM.proj.layers[0];
+    const masks = (L.masks ||= []);
+    PM.hist.do('Mask', () => masks.push(PM.mkMask('rect', PM.proj)));
+    doc.barrier!.flush();
+    const vertices: any[] = masks[0].path?.vertices ?? (masks[0].path = { id: 'p', vertices: [] }).vertices;
+    const answers: unknown[] = [];
+    // The viewer redraws its overlay (and so asks) as history announces the
+    // new entry, before the commit's own touch().
+    const ask = () => { for (const v of vertices) answers.push(doc.api!.evP(L, v.p.x, 0, `mp.${masks[0].id}.v.${v.id}.x`)); };
+    PM.bus.on('history', ask);
+    PM.bus.on('history:project-patch', ask);
+    for (const x of [10, 20, 30]) {
+      PM.hist.begin('Draw path vertex');
+      // Asked before the write inside the transaction, as the pen tool does.
+      ask();
+      vertices.push({ id: PM.uid('v'), p: { x: PM.P(x), y: PM.P(x) } });
+      PM.hist.commit();
+    }
+    expect(answers).toContain(30);
+    expect(doc.dual!.total().stale).toBe(0);
+    expect(doc.auditor!.audit()).toBe(true);
+  });
 });
 
 describe('dual answers: allowed differences (amendment 20)', () => {

@@ -63,7 +63,7 @@
     "touch": 52,
     "touch.paths": 1,
     "doc.write": 16,
-    "doc.touched": 4,
+    "doc.touched": 5,
     "anim.touch": 24,
     "shader-uniforms": 9,
     "host.pm": 1,
@@ -1281,31 +1281,37 @@
       "code": "PM.doc?.touched?.(paths || [])"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:208",
-      "class": "touch.paths",
+      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:201",
+      "class": "doc.touched",
       "scope": "install > commit",
-      "code": "PM.touch(patches.forward.map(patch => patch.path), true)"
+      "code": "PM.doc?.touched?.(paths, { canonical: true })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:220",
+      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:214",
+      "class": "touch.paths",
+      "scope": "install > commit",
+      "code": "PM.touch(paths, true)"
+    },
+    {
+      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:226",
       "class": "doc.write",
       "scope": "install > rollback",
       "code": "writeAt(patches.map(patch => patch.path), () => { const next = applyPatch(PM.proj, patches); PM.replaceProject(next, selection ? { select..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:222",
+      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:228",
       "class": "project-replace",
       "scope": "install > rollback > writeAt(callback)",
       "code": "PM.replaceProject(next, selection ? { selection } : {})"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:315",
+      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:321",
       "class": "project-replace",
       "scope": "install > restoreSnapshot > H.do(callback)",
       "code": "PM.replaceProject(parsed)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:445",
+      "site": "apps/desktop/src/renderer/src/legacy/core/history.ts:451",
       "class": "hist.do",
       "scope": "install > restore",
       "code": "PM.hist.do('Restore ' + take.label, () => restore(take.json))"
