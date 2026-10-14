@@ -304,3 +304,54 @@ snapshots, two parses, `diffPatches`, and clones), so the barrier adds about 7% 
 structural edit. Skipping the comparison needs per-element write tracking that
 production writers do not provide: a plain transaction that reorders layers and
 edits one of them names only `layers`.
+
+## The e2e suite with the flag on
+
+`VITE_POWERMOVE_NATIVE_EVALUATOR=audit` (mirror, routed queries, dual answers, the
+auditor every 100 ms), `POWERMOVE_ENGINE_FONTS=1`, `POWERMOVE_NATIVE_REPORT_FILE`,
+`playwright test --workers=1 --retries=0`, one Electron at a time, 2026-10-14, at
+`feat/ne-wasm` after the wave 3 merge:
+
+| | |
+|---|---|
+| Tests | 551: 502 passed, 28 failed, 21 skipped (environment) |
+| Failures | the 27 tests in `e2e/quarantine.json`, all failing as they do with the flag off, and `export-dialog.spec.ts:5` (below) |
+| Launches | 583 pages, 601 mirrors ready |
+| Dual answers | 752,940 compared, **0 mismatched**; allowed differences 0; 1 fragile case, 0 differed |
+| Consistency checks | 288 before saves, exports, and on idle, **0 mismatched** |
+| pm-wasm | 0 refused batches, 0 traps; 7,272 flushes, 1,940 batches, 28,012 operations |
+| Auditor | 7,007 audits, 0 mirror mismatches; 9 missed writes and 3 stale answers, every one a test writing `PM.proj` directly with no writer and no announcement (below) |
+
+Missed writes and stale answers, by the spec line that writes:
+
+| Spec | Write |
+|---|---|
+| `agent-canvas-capture.spec.ts:59` | `PM.proj.backgroundFill = …` |
+| `agent-path-mask.spec.ts:18`, `:28`, `:30` | `clip.masks = …` |
+| `export-dialog.spec.ts:12` | `PM.proj.w = 1080; PM.proj.h = 1920` |
+| `export-video-frames.spec.ts:37` (4 cases) | `layer.from = 0; layer.dur = …` after import |
+| `import-svg.spec.ts:21` | `delete asset.format` |
+| `video-frame-integrity.spec.ts:26`, `:69`, `:107` | layers, `from`, `dur`, `trim`, `w` |
+| `media-replacement.spec.ts:178` (stale `active` in the overlay) | `layer.from = 2; layer.dur = 1; layer.d.trim = .25` |
+| `transparent-sequence-scrubbing.spec.ts:38` (stale `resolveContent`, 2 cases) | `layer.d.w = layer.d.h = 128` |
+
+The same kind of write appears in other runs depending on timing (an audit has to
+land between the write and the test's next announcement):
+`project-close-unchanged.spec.ts:44`, `:66`, `:85` (`PM.proj.name`),
+`split-text.spec.ts:76`, `:83` (`lock`, `d.text`), `viewer-tools.spec.ts:121`
+(`PM.proj.layers = …`). Production code has no such writer: the writer inventory
+classifies every app site, and app-writer violations under the tracking Proxy are 0.
+These specs need a `PM.touch()` (or a history transaction) after the write, as the
+write-barrier contract asks of any code that edits the document; the spec files
+belong to the Parity and QA lane. Earlier runs on this branch had 105 stale answers
+(run of 2026-10-13 22:58) and 24 auditor failures (2026-10-14 00:20); bus
+announcements marked before listeners and `ProjectIndex.invalidate()` as an
+announcement removed every one that app code caused.
+
+`export-dialog.spec.ts:5` reads the select's `clip-path` as soon as
+`data-squircle` appears, but `settings/squircle.ts` paints it only once the element
+has a layout size (from its `ResizeObserver`). It failed 2 of 10 runs in `audit`,
+where dual answers and the auditor load the main thread, and 0 of 12 with the flag
+`on` or `off`; the spec should poll for the clip path. `export-code.spec.ts:9`
+(the web player's `stopped` flag) failed once under the same load and passed the
+other 4 runs.
