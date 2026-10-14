@@ -447,6 +447,52 @@ test('opening a project file on another Mac copies its media into the store in m
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
 
+test('with Use New Engine off, Desktop Save embeds each shared-fingerprint asset\'s own bytes', async () => {
+  test.setTimeout(120_000);
+  const userData = await mkdtemp(path.join(os.tmpdir(), 'powermove-e2e-'));
+  const destination = path.join(footage, 'Room tone (off).pmv');
+  try {
+    // On: two files that share a storage key; the key ends up naming the second.
+    let session = await launchApp({ userData, env: ON });
+    let projectId = '';
+    let expected: Record<string, string> = {};
+    try {
+      await session.openEditor();
+      const { page } = session;
+      const first = path.join(footage, 'room tone A.wav');
+      const second = path.join(footage, 'room tone B.wav');
+      await writeFile(first, roomToneWav(1));
+      await writeFile(second, roomToneWav(2));
+      const firstId = await importFile(page, first);
+      const secondId = await importFile(page, second);
+      const [a, b] = [await meta(page, firstId), await meta(page, secondId)];
+      expect(b.storageKey).toBe(a.storageKey);
+      expected = { [firstId]: await hashOf(first), [secondId]: await hashOf(second) };
+      expect({ [firstId]: a.contentHash, [secondId]: b.contentHash }).toEqual(expected);
+      expect((await storeRecords(session)).find((record: any) => record.key === a.storageKey)?.hash).toBe(b.contentHash);
+      projectId = await page.evaluate(() => (window as any).PM.proj.id);
+      await page.evaluate(() => (window as any).PM.Projects.put((window as any).PM.proj));
+    } finally { await session.close(); }
+
+    // Off: IndexedDB holds neither; Save reads each asset by its content hash.
+    session = await launchApp({ userData, env: OFF });
+    try {
+      const { page } = session;
+      await page.waitForFunction(() => Boolean((window as any).PM?.openProjectHere));
+      expect(await page.evaluate(() => (window as any).PM.HostMedia.enabled)).toBe(false);
+      if (await page.evaluate(() => (window as any).PM.proj.id) !== projectId) expect(await openProject(page, projectId)).toBe(true);
+      await page.waitForFunction((ids) => ids.every((id) => (window as any).PM.assets.get(id)), Object.keys(expected), { timeout: 30_000 });
+      await session.app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, destination);
+      expect(await page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
+      const bytes = await readFile(destination);
+      const index = await readIncrementalIndex(bytes.length, async (offset, length) => new Uint8Array(bytes.subarray(offset, offset + length)));
+      const saved = Object.fromEntries(index.media.map((item) => [item.id, blake3Hex(new Uint8Array(bytes.subarray(item.offset, item.offset + item.length)))]));
+      expect(saved).toEqual(expected);
+      expect(session.diagnostics.pageErrors).toEqual([]);
+    } finally { await session.close(); }
+  } finally { await rm(userData, { recursive: true, force: true }); }
+});
+
 test('IndexedDB media is copied to the store, verified by hash, and never deleted', async () => {
   test.setTimeout(120_000);
   const userData = await mkdtemp(path.join(os.tmpdir(), 'powermove-e2e-'));
