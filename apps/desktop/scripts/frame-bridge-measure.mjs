@@ -97,6 +97,12 @@ const RUNS = [
   { name: 'app-playback-engine-load-phaseoff', ...playback, app: true, mode: 'engine', load: true, loadProfile: 'no-autosave', env: { POWERMOVE_BRIDGE_PHASE: 'off' } },
   { name: 'app-playback-engine-idle', ...playback, app: true, mode: 'engine', load: false },
   { name: 'app-playback-engine-load', ...playback, app: true, mode: 'engine', load: true, loadProfile: 'no-autosave' },
+  // The engine path drawn on the page's main thread (before the
+  // presentation worker), for comparison.
+  { name: 'app-playback-engine-idle-main', ...playback, app: true, mode: 'engine', load: false, offMainThread: false },
+  { name: 'app-playback-engine-load-main', ...playback, app: true, mode: 'engine', load: true, loadProfile: 'no-autosave', offMainThread: false },
+  { name: 'app-latency-engine-idle-main', ...latency, app: true, mode: 'engine', load: false, offMainThread: false, inputModes: ['pan'] },
+  { name: 'app-latency-engine-load-main', ...latency, app: true, mode: 'engine', load: true, loadProfile: 'no-autosave', offMainThread: false, inputModes: ['pan'] },
   { name: 'app-playback-engine-load-phase250', ...playback, app: true, mode: 'engine', load: true, loadProfile: 'no-autosave', env: { POWERMOVE_BRIDGE_PHASE: '250' } },
   { name: 'app-playback-engine-load-phase750', ...playback, app: true, mode: 'engine', load: true, loadProfile: 'no-autosave', env: { POWERMOVE_BRIDGE_PHASE: '750' } },
   // The C′ prototype in the real app: playback through the remote layer
@@ -202,7 +208,73 @@ function traceContext(tracePath, pingOffsetUs) {
     }
     return best;
   };
-  return { frames: frames.length, toTrace, hostToTrace, frameAt };
+  // viz's side (Graphics.Pipeline, recorded since the worker canvas runs):
+  // compositor frames received per frame sink, and display frames from
+  // DrawAndSwap's begin to its end (presentation feedback, the same time
+  // PipelineReporter ends at for a page's own frames).
+  const receives = new Map();
+  for (const e of events) {
+    const a = e.name === 'Graphics.Pipeline' && e.ph === 'X' ? e.args?.chrome_graphics_pipeline : null;
+    if (a?.step !== 'STEP_RECEIVE_COMPOSITOR_FRAME' || !a.frame_sink_id) continue;
+    const k = `${a.frame_sink_id.frame_sink_client_id}:${a.frame_sink_id.frame_sink_id}`;
+    if (!receives.has(k)) receives.set(k, []);
+    receives.get(k).push(e.ts);
+  }
+  for (const list of receives.values()) list.sort((a, b) => a - b);
+  const swaps = [];
+  const openSwaps = new Map();
+  for (const e of events.filter((x) => x.name === 'Graphics.Pipeline.DrawAndSwap' && (x.ph === 'b' || x.ph === 'e')).sort((a, b) => a.ts - b.ts)) {
+    const k = `${e.pid}:${e.id2?.local ?? e.id}`;
+    if (e.ph === 'b') {
+      const swap = { begin: e.ts, end: null };
+      openSwaps.set(k, swap);
+      swaps.push(swap);
+    } else if (openSwaps.has(k)) {
+      openSwaps.get(k).end = e.ts;
+      openSwaps.delete(k);
+    }
+  }
+  const firstAtOrAfter = (xs, t, key = (x) => x) => {
+    let lo = 0;
+    let hi = xs.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (key(xs[mid]) < t) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  /** The frame sink whose compositor frames follow these submits (ms, page clock) most closely. */
+  const sinkFor = (submitsMs) => {
+    let best = null;
+    for (const [k, list] of receives) {
+      let n = 0;
+      for (const ms of submitsMs) {
+        const t = toTrace(ms);
+        const i = firstAtOrAfter(list, t);
+        if (i < list.length && list[i] - t <= 12_000) n++;
+      }
+      if (!best || n > best.n) best = { k, n };
+    }
+    return best?.k ?? null;
+  };
+  /**
+   * A worker canvas's frame submitted at `submitMs`: received by viz on
+   * `sink`, then shown by the first display frame drawn after it unless a
+   * newer frame of the same sink was received before that draw.
+   */
+  const vizFrame = (sink, rafMs, submitMs) => {
+    const list = receives.get(sink) ?? [];
+    const t = toTrace(submitMs);
+    const i = firstAtOrAfter(list, t);
+    if (i >= list.length || list[i] - t > 50_000) return { begin: toTrace(rafMs), end: null, state: 'VIZ_NOT_RECEIVED' };
+    const received = list[i];
+    const swap = swaps[firstAtOrAfter(swaps, received, (s) => s.begin)];
+    if (!swap?.end) return { begin: toTrace(rafMs), end: null, state: 'VIZ_NOT_DRAWN' };
+    if (i + 1 < list.length && list[i + 1] <= swap.begin) return { begin: toTrace(rafMs), end: null, state: 'VIZ_SUPERSEDED' };
+    return { begin: toTrace(rafMs), end: swap.end, state: 'STATE_PRESENTED_ALL' };
+  };
+  return { frames: frames.length, toTrace, hostToTrace, frameAt, sinkFor, vizFrame };
 }
 
 /**
@@ -253,13 +325,20 @@ function contentFrames(raw, fps) {
   const m0 = mediaAt(line, host(rec.startMs));
   const m1 = mediaAt(line, host(rec.endMs));
   // Draws of timed content frames: [rafMs, pts].
-  const draws = page.mode === 'engine' ? page.engineTrace.draws.filter((d) => d[7] === 1).map((d) => [d[0], d[3]]) : page.today.draws.map((d) => [d[0], d[2]]);
+  const draws = page.mode === 'engine' ? page.engineTrace.draws.filter((d) => d[7] === 1).map((d) => [d[0], d[3], d[5]]) : page.today.draws.map((d) => [d[0], d[2], null]);
   const byPts = new Map();
-  for (const [rafMs, pts] of draws) if (!byPts.has(Math.round(pts / frameTicks))) byPts.set(Math.round(pts / frameTicks), rafMs);
+  const submits = new Map();
+  for (const [rafMs, pts, submitMs] of draws) {
+    const k = Math.round(pts / frameTicks);
+    if (byPts.has(k)) continue;
+    byPts.set(k, rafMs);
+    submits.set(k, submitMs);
+  }
   return {
     kFirst: Math.ceil((m0 + 0.1 * TICKS) / frameTicks),
     kLast: Math.floor((m1 - 0.1 * TICKS) / frameTicks) - 1,
     rafOf: (k) => byPts.get(k),
+    submitOf: (k) => submits.get(k),
     dueHostUs: (k) => hostOfMedia(line, k * frameTicks),
     line
   };
@@ -271,8 +350,14 @@ function analyzePlayback(raw) {
   const page = raw.page;
   const fps = page.fps ?? FPS;
   const rec = raw.recordWindow ?? raw.window;
-  const { kFirst, kLast, rafOf, dueHostUs, line } = contentFrames(raw, fps);
+  const { kFirst, kLast, rafOf, submitOf, dueHostUs, line } = contentFrames(raw, fps);
   const byPts = { get: rafOf };
+  // A presentation worker's canvas has no PipelineReporter: its frames are
+  // timed on viz's side (traceContext.vizFrame).
+  const offMain = page.mode === 'engine' && !!page.presenter?.offMainThread;
+  const sink = offMain ? ctx.sinkFor(page.engineTrace.draws.map((d) => d[5])) : null;
+  if (offMain && !sink) throw new Error('no viz frame sink matches the worker canvas (was graphics.pipeline traced?)');
+  const presentedFrame = (k, rafMs) => (offMain ? ctx.vizFrame(sink, rafMs, submitOf(k)) : ctx.frameAt(rafMs));
   const hostOfK = dueHostUs;
   const per = [];
   const counts = { expected: 0, notDrawn: 0, notPresented: 0 };
@@ -284,7 +369,7 @@ function analyzePlayback(raw) {
       per.push(null);
       continue;
     }
-    const pf = ctx.frameAt(rafMs);
+    const pf = presentedFrame(k, rafMs);
     if (!pf || !PRESENTED.has(pf.state)) {
       counts.notPresented++;
       per.push(null);
@@ -296,7 +381,7 @@ function analyzePlayback(raw) {
   for (let k = kFirst, i = 0; k <= kLast; k++, i++) {
     if (per[i]) continue;
     const rafMs = byPts.get(k);
-    const state = rafMs == null ? 'not-drawn' : (ctx.frameAt(rafMs)?.state ?? 'no-reporter');
+    const state = rafMs == null ? 'not-drawn' : (presentedFrame(k, rafMs)?.state ?? 'no-reporter');
     missing.push({ k, state, near: nearLoad(raw, hostOfK(k)) });
   }
   const presented = per.filter(Boolean);
@@ -312,6 +397,26 @@ function analyzePlayback(raw) {
   }
   return {
     window: { seconds: +((rec.endMs - rec.startMs) / 1000).toFixed(2), displayHz: raw.display.hz, contentFps: fps, reporterFrames: ctx.frames },
+    presentation: offMain
+      ? { thread: 'worker', timing: 'viz', sink }
+      : {
+          thread: 'main',
+          timing: 'PipelineReporter',
+          // The viz timing applied to the page's own frames, against
+          // PipelineReporter: how far apart the two put the same frame.
+          vizCheck: page.mode === 'engine' ? (() => {
+            const pageSink = ctx.sinkFor(page.engineTrace.draws.map((d) => d[5]));
+            const diffs = [];
+            for (let k = kFirst; k <= kLast; k++) {
+              const rafMs = rafOf(k);
+              if (rafMs == null) continue;
+              const a = ctx.frameAt(rafMs);
+              const b = pageSink ? ctx.vizFrame(pageSink, rafMs, submitOf(k)) : null;
+              if (a && b?.end && PRESENTED.has(a.state)) diffs.push((b.end - a.end) / 1000);
+            }
+            return { sink: pageSink, vizMinusReporterMs: dist(diffs, 2) };
+          })() : undefined
+        },
     ...(page.real ? { app: { project: page.project, stage: page.stage, quality: page.quality, line: page.mode === 'today' ? line : undefined, qualityDuringRun: page.mode === 'today' ? dist(page.today.draws.map((d) => d[6]), 2) : undefined } } : {}),
     frames: { ...counts, drops: counts.notDrawn + counts.notPresented, presented: presented.length, offSlot: jitterMs.filter((j) => Math.abs(j) > periodUs / 2000).length },
     jitterAbsMs: dist(jitterMs.map(Math.abs), 3),
@@ -321,8 +426,9 @@ function analyzePlayback(raw) {
     ...(page.mode === 'engine'
       ? (() => {
           const t = page.engineTrace;
-          // Renderer main-thread time of each draw (rAF to submit), and how
-          // far ahead of its due time each timed frame arrived.
+          // Renderer time of each draw (rAF to submit), and when each timed
+          // frame arrived relative to its due time (negative: early; the
+          // key says "lead" but the value is arrival minus due).
           const drawMs = t.draws.map((d) => d[5] - d[0]);
           const leadMs = t.arrivals.filter((a) => a[4] === 1).map((a) => (hostOfMedia(line, a[1]) - raw.clock.offsetUs) / 1000 - a[2]);
           const gaps = [];
@@ -444,7 +550,9 @@ function analyzeLatency(raw) {
     const page = run.page;
     const revOf = new Map();
     for (const [rev, seqs] of page.inputs) for (const s of seqs) if (!revOf.has(s)) revOf.set(s, rev);
-    const draws = (page.mode === 'engine' ? page.engineTrace.draws.map((d) => ({ rafMs: d[0], rev: d[6] })) : page.today.draws.map((d) => ({ rafMs: d[0], rev: d[3] }))).sort((a, b) => a.rafMs - b.rafMs);
+    const draws = (page.mode === 'engine' ? page.engineTrace.draws.map((d) => ({ rafMs: d[0], rev: d[6], submitMs: d[5] })) : page.today.draws.map((d) => ({ rafMs: d[0], rev: d[3], submitMs: null }))).sort((a, b) => a.rafMs - b.rafMs);
+    const offMain = page.mode === 'engine' && !!page.presenter?.offMainThread;
+    const sink = offMain ? ctx.sinkFor(draws.map((d) => d.submitMs)) : null;
     const lat = [];
     let unmatched = 0;
     let unpresented = 0;
@@ -455,14 +563,14 @@ function analyzeLatency(raw) {
         unmatched++;
         continue;
       }
-      const pf = ctx.frameAt(d.rafMs);
+      const pf = offMain ? ctx.vizFrame(sink, d.rafMs, d.submitMs) : ctx.frameAt(d.rafMs);
       if (!pf || !PRESENTED.has(pf.state)) {
         unpresented++;
         continue;
       }
       lat.push((pf.end - ctx.hostToTrace(tsUs)) / 1000);
     }
-    out[mode] = { events: run.generated.length, dispatches: page.inputs.length, draws: draws.length, unmatched, unpresented, pointerToPixelMs: dist(lat, 2) };
+    out[mode] = { events: run.generated.length, dispatches: page.inputs.length, draws: draws.length, unmatched, unpresented, presentation: offMain ? { thread: 'worker', timing: 'viz', sink } : { thread: 'main', timing: 'PipelineReporter' }, pointerToPixelMs: dist(lat, 2) };
   }
   return out;
 }
@@ -529,7 +637,7 @@ try {
     try {
       summary = {
         run: name,
-        config: { scenario: run.scenario, app: !!run.app, remoteLayer: !!run.remoteLayer, placement: run.placement ?? 'offscreen', env: run.env, mode: run.mode, load: run.load, loadProfile: run.load ? (run.loadProfile ?? 'gate') : null, edr: run.edr ?? 'auto', rawInput: !!run.rawInput, rawGestures: run.app && run.mode === 'engine' ? run.rawGestures !== false : undefined, fps: run.fps ?? (run.app ? 30 : 60), lead: run.lead ?? 4, durationMs: run.durationMs, inputModes: run.inputModes },
+        config: { scenario: run.scenario, app: !!run.app, remoteLayer: !!run.remoteLayer, placement: run.placement ?? 'offscreen', env: run.env, mode: run.mode, load: run.load, loadProfile: run.load ? (run.loadProfile ?? 'gate') : null, edr: run.edr ?? 'auto', rawInput: !!run.rawInput, rawGestures: run.app && run.mode === 'engine' ? run.rawGestures !== false : undefined, offMainThread: run.app && run.mode === 'engine' ? run.offMainThread !== false : undefined, fps: run.fps ?? (run.app ? 30 : 60), lead: run.lead ?? 4, durationMs: run.durationMs, inputModes: run.inputModes },
         versions: raw.versions,
         display: raw.display,
         machineLoad: raw.machineLoad,
