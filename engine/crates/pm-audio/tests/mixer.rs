@@ -7,6 +7,8 @@
 mod common;
 
 use common::*;
+use std::sync::Arc;
+
 use pm_audio::MixFormat;
 use pm_audio::layout::FOLD;
 use pm_audio::offline::sample_range;
@@ -549,4 +551,137 @@ fn animated_clips_start_on_their_sample() {
     let out = rig.render(&mut m, 0, 9_600, 1024);
     assert_eq!(out[0][4804], 0.0);
     assert!((out[0][4805] - 0.5).abs() < 1e-7, "{}", out[0][4805]);
+}
+
+/// A live edit during playback glides into the new mix over 12 ms
+/// (`RETUNE_GLIDE` today): a level change ramps linearly, overlapping edits
+/// (a fader dragged at 60 Hz) stay continuous, a monitor solo crossfades, and
+/// after the glide the mix equals the new document's render exactly.
+#[test]
+fn live_edits_glide_without_clicks() {
+    use pm_audio::{RETUNE_GLIDE_MS, RenderOptions};
+    let dir = temp_dir("retune");
+    let dc = dir.join("dc.wav");
+    let t = dir.join("tone.wav");
+    write_wav(&dc, SR, &[vec![0.5; SR as usize * 2]]);
+    write_wav(&t, SR, &[tone(SR, 2.0, 440.0, 0.5)]);
+    let doc_at = |gain: f64| {
+        project(
+            30.0,
+            2.0,
+            &[
+                audio("A", "dc", 0.0, 2.0, &format!(r#","gain":{gain}"#), ""),
+                audio("B", "t", 0.0, 2.0, r#","gain":0"#, ""),
+            ],
+            &[],
+            "",
+        )
+    };
+    let rig = Rig::new(&[("dc", &dc), ("t", &t)]);
+    let glide = (SR * RETUNE_GLIDE_MS / 1000) as usize;
+    let options = RenderOptions {
+        wait: true,
+        ..Default::default()
+    };
+    let block = 256usize;
+    let mut out = vec![Vec::new(), Vec::new()];
+
+    // Level 1 → 0.5 at sample 1000: the DC ramps 0.5 → 0.25 over the glide.
+    let mut m = rig.mixer(doc_at(1.0), "C", MixFormat::stereo(SR));
+    let mut heard = Vec::new();
+    let mut pos = 0i64;
+    while pos < 4000 {
+        if pos == 1024 {
+            let d = doc_at(0.5);
+            let g = Arc::new(rig.graph(&d, "C"));
+            m.glide_to(Arc::new(d), g, None);
+            assert!(m.is_gliding());
+        }
+        m.render(pos, block, &mut out, &options).unwrap();
+        heard.extend_from_slice(&out[0]);
+        pos += block as i64;
+    }
+    assert!(!m.is_gliding(), "the glide ends after {glide} samples");
+    for (i, v) in heard.iter().enumerate() {
+        let w = ((i as f64 - 1024.0) / glide as f64).clamp(0.0, 1.0);
+        let want = 0.5 * (1.0 - 0.5 * w);
+        assert!((*v as f64 - want).abs() < 1e-6, "sample {i}: {v} vs {want}");
+    }
+
+    // A fader dragged fast: a new edit about every 400 samples, so glides
+    // overlap. Each glide fades the blend so far into the next mix, so with
+    // two in flight the DC moves by at most three glide increments a sample
+    // (w0'·(1 − w1) + w1'·(2 − w0)): continuous, never a step.
+    let mut m = rig.mixer(doc_at(1.0), "C", MixFormat::stereo(SR));
+    let mut heard = Vec::new();
+    let mut pos = 0i64;
+    let mut level = 1.0;
+    let mut next_edit = 400i64;
+    while pos < 12_000 {
+        if pos >= next_edit && next_edit < 8_000 {
+            level -= 0.04;
+            let d = doc_at(level);
+            let g = Arc::new(rig.graph(&d, "C"));
+            m.glide_to(Arc::new(d), g, None);
+            next_edit += 400;
+        }
+        m.render(pos, 160, &mut out, &options).unwrap();
+        heard.extend_from_slice(&out[0]);
+        pos += 160;
+    }
+    let max_step = heard
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0f32, f32::max);
+    let increment = 0.5 * 0.04 / glide as f32;
+    assert!(
+        max_step <= increment * 3.0 + 1e-6,
+        "largest step {max_step}, one glide increment {increment}"
+    );
+    let final_level = (0.5 * level) as f32;
+    assert!((heard[heard.len() - 1] - final_level).abs() < 1e-6);
+
+    // A monitor solo crossfades too; after it, the mix is the solo's.
+    let mut m = rig.mixer(doc_at(1.0), "C", MixFormat::stereo(SR));
+    m.render(0, block, &mut out, &options).unwrap();
+    let (d, g) = (m.document().clone(), m.graph().clone());
+    m.glide_to(d, g, None);
+    let solo = RenderOptions {
+        wait: true,
+        monitor_solo: Some(["B".to_string()].into_iter().collect()),
+        meters: false,
+    };
+    m.render(256, 1024, &mut out, &solo).unwrap();
+    assert!((out[0][0] - 0.5).abs() < 1e-6, "starts on the old mix");
+    let mid = out[0][glide / 2];
+    assert!((mid - 0.25).abs() < 1e-6, "halfway {mid}");
+    assert!(
+        out[0][glide + 10].abs() < 1e-6,
+        "the soloed strip is silent: {}",
+        out[0][glide + 10]
+    );
+    assert!(!m.is_gliding());
+
+    // After any glide the mix equals the offline render of the new document.
+    let mut m = rig.mixer(doc_at(1.0), "C", MixFormat::stereo(SR));
+    let d = doc_at(0.3);
+    let g = Arc::new(rig.graph(&d, "C"));
+    m.render(0, block, &mut out, &options).unwrap();
+    m.glide_to(Arc::new(d), g, None);
+    for p in 1..8 {
+        m.render(p * block as i64, block, &mut out, &options)
+            .unwrap();
+    }
+    m.render(4096, 1024, &mut out, &options).unwrap();
+    let mut fresh = rig.mixer(doc_at(0.3), "C", MixFormat::stereo(SR));
+    let reference = rig.render(&mut fresh, 4096, 5120, 1024);
+    assert_eq!(out[0], reference[0]);
+    assert_eq!(out[1], reference[1]);
+
+    // An immediate swap (paused, an export) never glides.
+    m.glide_to(m.document().clone(), m.graph().clone(), None);
+    let d = doc_at(1.0);
+    let g = Arc::new(rig.graph(&d, "C"));
+    m.set_graph(Arc::new(d), g);
+    assert!(!m.is_gliding());
 }

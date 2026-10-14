@@ -615,11 +615,21 @@ impl RenderThread {
                 restart
             }
             Control::Project(doc, graph, rate, end) => {
-                self.mixer.set_graph(doc, graph);
+                // A live edit glides into the new mix (a retune); paused, the
+                // next run starts on it.
+                if self.transport.is_running() {
+                    self.mixer.glide_to(doc, graph, self.solo.clone());
+                } else {
+                    self.mixer.set_graph(doc, graph);
+                }
                 self.transport.set_composition(rate, end);
                 false
             }
             Control::Solo(s) => {
+                if self.transport.is_running() && s != self.solo {
+                    let (doc, graph) = (self.mixer.document().clone(), self.mixer.graph().clone());
+                    self.mixer.glide_to(doc, graph, self.solo.clone());
+                }
                 self.solo = s;
                 false
             }
@@ -692,6 +702,8 @@ impl RenderThread {
 
     /// Decodes what the first moments of playback need before queueing.
     fn preroll(&mut self) {
+        // A seek or a new run starts on the current mix.
+        self.mixer.end_glides();
         let position = self.transport.position();
         let rate = self.transport.rate() as i64;
         let frames = (self.config.preroll_ms as i64 * rate / 1000) as usize;

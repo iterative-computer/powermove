@@ -511,3 +511,62 @@ fn a_device_change_re_anchors() {
         "{predicted} vs {actual}"
     );
 }
+
+/// A live edit while playing (a fader move) is heard as a 12 ms glide, not a
+/// step, and playback keeps its place: no restart, no new epoch.
+#[test]
+fn a_live_edit_glides() {
+    let dir = temp_dir("retune");
+    let file = ramp_file(&dir, 4);
+    let (playback, mut dev, rig) = setup(&file, 4.0, SR, 0.0);
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    dev.run(40);
+    let epoch = playback.clock().unwrap().epoch;
+    let doc = project(
+        30.0,
+        4.0,
+        &[audio("A", "s", 0.0, 4.0, r#","gain":0.5"#, "")],
+        &[],
+        "",
+    );
+    let media = rig.media.clone();
+    let resolver = move |id: &str| media.get(id).cloned();
+    playback.set_project(Arc::new(doc), "C", &resolver).unwrap();
+    dev.run(60);
+    assert_eq!(
+        playback.clock().unwrap().epoch,
+        epoch,
+        "an edit does not restart"
+    );
+    // The marker channel, as heard.
+    let marker: Vec<f32> = dev
+        .log
+        .iter()
+        .flat_map(|(_, b)| b.chunks(2).map(|f| f[1]).collect::<Vec<_>>())
+        .collect();
+    let first = marker
+        .iter()
+        .position(|v| *v == 0.5)
+        .expect("playback started");
+    let heard = &marker[first..];
+    assert_eq!(*heard.last().unwrap(), 0.25, "the new level is heard");
+    let glide = (SR * pm_audio::RETUNE_GLIDE_MS / 1000) as f32;
+    let largest = heard
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0f32, f32::max);
+    assert!(
+        largest <= 0.25 / glide * 1.001,
+        "largest step {largest}, a glide step {}",
+        0.25 / glide
+    );
+    let gliding = heard.iter().filter(|v| **v < 0.5 && **v > 0.25).count();
+    assert!(
+        (gliding as f32 - glide).abs() <= 1.0,
+        "{gliding} samples between the levels"
+    );
+}

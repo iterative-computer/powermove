@@ -168,11 +168,22 @@ consumers ◀───────────── ClockSlot ◀── clock s
   once a second; a host that owns the device passes its own watch.
 - **Device rate.** When the device does not run at the project rate, rubato converts the
   master; chunk tags count device frames, so the clock stays exact in ticks.
+- **Live edits (retune).** A new document revision or monitor solo while playing glides
+  from what played into the new mix over 12 ms (today's `RETUNE_GLIDE`), counted in
+  rendered samples so a loop wrap inside the glide continues it. The mixer renders the
+  outgoing mix next to the new one and fades linearly, so a level change ramps exactly
+  as today's `linearRampToValueAtTime` glide and a structural change (a clip added,
+  moved, muted) crossfades instead of clicking. Overlapping glides (a fast fader drag)
+  chain, at most four; the DC slope stays within three glide increments a sample. A
+  seek or a new run ends glides; paused edits and exports swap at once. An edit is
+  heard once the queued audio has played: at most `ahead_ms` (80 ms) plus the device
+  latency.
 - **Rates.** Phase 2 plays at 1× only; `Play` at another rate (J/K/L) is refused with
   `Unsupported` until Phase 3b.
 
-Measured with a simulated device (`tests/playback.rs`): the published line predicts the
-presented media to 0.3 µs on a nominal device; at ±150 ppm device drift the final line
+Measured with a simulated device (`tests/playback.rs`): a gain edit while playing
+ramps over 576 samples at 48 kHz with no step larger than one glide increment and no
+new epoch. The published line predicts the presented media to 0.3 µs on a nominal device; at ±150 ppm device drift the final line
 alone is off by 400 µs after 2.7 s, while the line as published (re-anchored every
 100 ms) stays within 29 µs at 300 ppm. Playback from a seek equals the offline render;
 pause, seek, loop wraps, scrub grains, a 44.1 kHz device under a 48 kHz project, and a

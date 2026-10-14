@@ -35,6 +35,16 @@ use crate::source::SourceCache;
 /// Samples between automation control points (3 kHz at 48 kHz).
 pub const CONTROL: i64 = 16;
 
+/// A live edit during playback (a fader drag, a mute, a monitor solo) glides
+/// from what played into the new mix over this long instead of stepping, as
+/// today's engine does (`RETUNE_GLIDE` in `legacy/core/audio.ts`): hard steps
+/// on a sustained sound are audible as clicks and zipper noise.
+pub const RETUNE_GLIDE_MS: u32 = 12;
+
+/// Retune glides kept at once; an older one is cut short (a fader dragged at
+/// 60 Hz starts a glide every 16.7 ms, so two overlap at most).
+const MAX_GLIDES: usize = 4;
+
 /// The mix bus.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MixFormat {
@@ -111,6 +121,19 @@ struct Voice {
     strip: usize,
 }
 
+/// A mix being left by a retune glide: the state it played with and how far
+/// the glide into the next state has come.
+struct Outgoing {
+    doc: Arc<Document>,
+    graph: Arc<MixGraph>,
+    voices: Vec<Voice>,
+    master_gain: f32,
+    retime: RetimeCache,
+    solo: Option<HashSet<String>>,
+    /// Samples rendered since the glide began.
+    done: usize,
+}
+
 /// Mixes one composition.
 pub struct Mixer {
     format: MixFormat,
@@ -134,6 +157,12 @@ pub struct Mixer {
     strips: Vec<Vec<Vec<f32>>>,
     kernel: Vec<f32>,
     points: Vec<Point>,
+    /// Retune glides in progress, oldest first; each fades into the next
+    /// (the last into the current state).
+    outgoing: Vec<Outgoing>,
+    glide_len: usize,
+    glide_acc: Vec<Vec<f32>>,
+    glide_tmp: Vec<Vec<f32>>,
 }
 
 impl Mixer {
@@ -166,7 +195,12 @@ impl Mixer {
             strips: vec![],
             kernel: vec![],
             points: vec![],
+            outgoing: vec![],
+            glide_len: 0,
+            glide_acc: vec![],
+            glide_tmp: vec![],
         };
+        m.glide_len = (m.format.sample_rate as usize * RETUNE_GLIDE_MS as usize / 1000).max(1);
         m.set_graph(m.doc.clone(), graph);
         m
     }
@@ -189,8 +223,58 @@ impl Mixer {
         &self.graph
     }
 
-    /// Swaps in a new document revision and its graph (between renders).
+    pub fn document(&self) -> &Arc<Document> {
+        &self.doc
+    }
+
+    /// Swaps in a new document revision and its graph (between renders),
+    /// at once: what renders next is the new mix (an export, a seek, a
+    /// paused edit). Ends any retune glide.
     pub fn set_graph(&mut self, doc: Arc<Document>, graph: Arc<MixGraph>) {
+        self.outgoing.clear();
+        self.install(doc, graph);
+    }
+
+    /// A live edit during playback: the renders that follow fade from the
+    /// current mix (heard with `solo_before` as its monitor solo) into
+    /// `doc` and `graph` over [`RETUNE_GLIDE_MS`], counted in rendered
+    /// samples (so a loop wrap inside the glide continues it). The fade is
+    /// linear, as today's `linearRampToValueAtTime` glide: a level change
+    /// glides exactly as today's gain ramp does, and a structural change
+    /// (a clip added, moved, muted) crossfades instead of clicking.
+    pub fn glide_to(
+        &mut self,
+        doc: Arc<Document>,
+        graph: Arc<MixGraph>,
+        solo_before: Option<HashSet<String>>,
+    ) {
+        if self.outgoing.len() >= MAX_GLIDES {
+            self.outgoing.remove(0);
+        }
+        self.outgoing.push(Outgoing {
+            doc: self.doc.clone(),
+            graph: self.graph.clone(),
+            voices: std::mem::take(&mut self.voices),
+            master_gain: self.master_gain,
+            retime: std::mem::take(&mut self.retime),
+            solo: solo_before,
+            done: 0,
+        });
+        self.install(doc, graph);
+    }
+
+    /// Ends retune glides at once (a seek or a new run starts on the
+    /// current mix).
+    pub fn end_glides(&mut self) {
+        self.outgoing.clear();
+    }
+
+    /// Whether a retune glide is in progress.
+    pub fn is_gliding(&self) -> bool {
+        !self.outgoing.is_empty()
+    }
+
+    fn install(&mut self, doc: Arc<Document>, graph: Arc<MixGraph>) {
         let p = self.format.sample_rate;
         self.voices = graph
             .voices
@@ -243,6 +327,98 @@ impl Mixer {
         out: &mut [Vec<f32>],
         options: &RenderOptions,
     ) -> Result<RenderReport> {
+        let report = self.render_current(
+            start,
+            frames,
+            out,
+            options,
+            options.monitor_solo.as_ref(),
+            options.meters,
+        )?;
+        if !self.outgoing.is_empty() && frames > 0 {
+            self.render_glides(start, frames, out, options);
+        }
+        if options.meters {
+            self.master_tap.push(out, frames);
+        }
+        Ok(report)
+    }
+
+    /// Blends the outgoing mixes of the retune glides under `out` (the
+    /// current mix): oldest first, each faded into the next.
+    fn render_glides(
+        &mut self,
+        start: i64,
+        frames: usize,
+        out: &mut [Vec<f32>],
+        options: &RenderOptions,
+    ) {
+        let channels = self.format.channels();
+        let len = self.glide_len as f32;
+        let mut acc = std::mem::take(&mut self.glide_acc);
+        let mut tmp = std::mem::take(&mut self.glide_tmp);
+        acc.resize_with(channels, Vec::new);
+        tmp.resize_with(channels, Vec::new);
+        let mut outgoing = std::mem::take(&mut self.outgoing);
+        let n = outgoing.len();
+        for j in 0..n {
+            let target = if j == 0 { &mut acc } else { &mut tmp };
+            self.swap_state(&mut outgoing[j]);
+            let solo = outgoing[j].solo.clone();
+            // An outgoing mix that fails renders silence under the fade.
+            if self
+                .render_current(start, frames, target, options, solo.as_ref(), false)
+                .is_err()
+            {
+                for c in target.iter_mut() {
+                    c.clear();
+                    c.resize(frames, 0.0);
+                }
+            }
+            self.swap_state(&mut outgoing[j]);
+            if j > 0 {
+                let done = outgoing[j - 1].done;
+                blend(&mut acc, &tmp, done, len);
+            }
+        }
+        // The newest glide fades `acc` into the current mix: out = acc·(1 − w) + out·w.
+        let done = outgoing[n - 1].done;
+        for (o, a) in out.iter_mut().zip(&acc) {
+            for (i, (v, x)) in o.iter_mut().zip(a).enumerate() {
+                let w = ((done + i) as f32 / len).min(1.0);
+                *v = *x + (*v - *x) * w;
+            }
+        }
+        for g in &mut outgoing {
+            g.done += frames;
+        }
+        // A finished glide leaves the mixes before it unheard.
+        if let Some(last) = outgoing.iter().rposition(|g| g.done >= self.glide_len) {
+            outgoing.drain(..=last);
+        }
+        self.outgoing = outgoing;
+        self.glide_acc = acc;
+        self.glide_tmp = tmp;
+    }
+
+    fn swap_state(&mut self, g: &mut Outgoing) {
+        std::mem::swap(&mut self.doc, &mut g.doc);
+        std::mem::swap(&mut self.graph, &mut g.graph);
+        std::mem::swap(&mut self.voices, &mut g.voices);
+        std::mem::swap(&mut self.master_gain, &mut g.master_gain);
+        std::mem::swap(&mut self.retime, &mut g.retime);
+    }
+
+    /// Mixes the current state (no glides, no master tap).
+    fn render_current(
+        &mut self,
+        start: i64,
+        frames: usize,
+        out: &mut [Vec<f32>],
+        options: &RenderOptions,
+        monitor_solo: Option<&HashSet<String>>,
+        meters: bool,
+    ) -> Result<RenderReport> {
         let channels = self.format.channels();
         assert_eq!(out.len(), channels, "one output vector per bus channel");
         for c in out.iter_mut() {
@@ -276,9 +452,9 @@ impl Mixer {
                 Err(e) => report.errors.push((plan.id.clone(), e.to_string())),
             }
         }
-        let solo = options.monitor_solo.as_ref().filter(|s| !s.is_empty());
+        let solo = monitor_solo.filter(|s| !s.is_empty());
         for (si, strip) in self.strips.iter().enumerate() {
-            if options.meters {
+            if meters {
                 self.taps[si].push(strip, frames);
             }
             if solo.is_some_and(|s| !s.contains(&graph.strips[si])) {
@@ -297,9 +473,6 @@ impl Mixer {
                     *v *= master;
                 }
             }
-        }
-        if options.meters {
-            self.master_tap.push(out, frames);
         }
         Ok(report)
     }
@@ -566,6 +739,16 @@ impl Mixer {
             let s1 = ((b as f64 / p - o) * rate).ceil() as i64 + kernel::TAPS as i64;
             self.cache.is_ready(&plan.source, s0, (s1 - s0) as usize)
         })
+    }
+}
+
+/// `acc = acc·(1 − w) + next·w`, w ramping from `done` over `len` samples.
+fn blend(acc: &mut [Vec<f32>], next: &[Vec<f32>], done: usize, len: f32) {
+    for (a, b) in acc.iter_mut().zip(next) {
+        for (i, (x, y)) in a.iter_mut().zip(b).enumerate() {
+            let w = ((done + i) as f32 / len).min(1.0);
+            *x += (*y - *x) * w;
+        }
     }
 }
 
