@@ -765,6 +765,12 @@ const canRetainNavigation = (now: number) => {
     && visibleRegion.bottom <= presentedViewport.y + presentedViewport.height;
 };
 const commitPendingResize = () => {
+  /* While the engine presents, the WebGL compositor draws nothing: resizing
+     its canvas (and copying its retained frame into the new buffer) is
+     wasted main-thread work, all of it inside live resizes (3.3 s of a
+     60 s profiled run with the corpus project). The size waits here and is
+     committed once the engine stops presenting. */
+  if (enginePresentation?.presenting) return;
   const pending = pendingResize; pendingResize = null;
   if (pending) api.render.gl.resize(pending.width, pending.height, pending.viewport);
 };
@@ -792,6 +798,8 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
     // The service went away (engine off) or was replaced: detach; the
     // current engine's canvas underneath shows until a new one presents.
     enginePresentation.dispose(); enginePresentation = null; V.enginePresentation = null; engineFrameTag = '';
+    // The WebGL canvas takes the size it skipped while the engine presented.
+    commitPendingResize();
   }
   engineService = service;
   if (!enginePresentation) {
