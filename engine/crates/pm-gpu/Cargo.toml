@@ -24,6 +24,7 @@ objc2-quartz-core = { version = "0.3.2", features = ["objc2-metal", "objc2-core-
 objc2-core-graphics = "0.3.2"
 objc2-foundation = "0.3.2"
 block2 = "0.6"
+libc = "0.2"
 pollster = "0.4"
 # The GLSL ES pipeline (feature `glsl`): glslang to SPIR-V, rewrites, naga IR.
 glslang = { version = "0.8.1", optional = true }

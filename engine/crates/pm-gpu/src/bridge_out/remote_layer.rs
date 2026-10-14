@@ -41,10 +41,20 @@ use pm_protocol::interop::SurfaceFormat;
 
 use super::surface::SharedIoSurface;
 
-unsafe extern "C" {
-    /// The process's main WindowServer connection (SkyLight, re-exported by
-    /// CoreGraphics). Private.
-    fn CGSMainConnectionID() -> u32;
+/// The process's main WindowServer connection (`CGSMainConnectionID`,
+/// SkyLight, re-exported by CoreGraphics). Private, so it is looked up at
+/// run time when a C′ layer is made rather than linked: builds that never
+/// run the prototype import no private symbol.
+fn main_connection_id() -> Option<u32> {
+    // SAFETY: dlsym with RTLD_DEFAULT and a NUL-terminated name; the symbol,
+    // when present, is `uint32_t CGSMainConnectionID(void)`.
+    let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"CGSMainConnectionID".as_ptr()) };
+    if symbol.is_null() {
+        return None;
+    }
+    // SAFETY: see above; a plain C function with no arguments.
+    let f: unsafe extern "C" fn() -> u32 = unsafe { std::mem::transmute(symbol) };
+    Some(unsafe { f() })
 }
 
 #[link(name = "QuartzCore", kind = "framework")]
@@ -349,8 +359,8 @@ impl RemoteLayer {
     ) -> Result<Self, RemoteLayerError> {
         let pixel_format =
             metal_format(format).ok_or(RemoteLayerError::Metal("not a viewer format"))?;
-        // SAFETY: a plain C function with no arguments.
-        let connection = unsafe { CGSMainConnectionID() };
+        let connection =
+            main_connection_id().ok_or(RemoteLayerError::Missing("CGSMainConnectionID"))?;
         if connection == 0 {
             return Err(RemoteLayerError::NoWindowServer);
         }
@@ -567,6 +577,12 @@ mod tests {
     use super::*;
     use crate::bridge_out::surface::ExportedSurface;
     use pm_protocol::interop::SurfaceRequest;
+
+    #[test]
+    fn the_window_server_connection_is_looked_up_at_run_time() {
+        // Linked builds import no private symbol; the lookup still finds it.
+        assert!(main_connection_id().is_some());
+    }
 
     /// The S1 smoke run's pattern: 14.3 ms latency, then one stall puts
     /// every later frame a content frame (16.7 ms) later.

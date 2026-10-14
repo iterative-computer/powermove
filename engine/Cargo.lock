@@ -1674,6 +1674,7 @@ dependencies = [
  "block2",
  "glslang",
  "glslang-sys",
+ "libc",
  "naga",
  "objc2",
  "objc2-core-foundation",
