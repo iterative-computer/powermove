@@ -88,25 +88,50 @@ MiB/s (three 256 MiB runs).
   imports unless the call passes `storage: "link"`.
 - **Originals kept.** The import never moves, renames, or writes the user's
   file. With the new engine, a video Chromium cannot play (ProRes, MKV and
-  the rest) keeps its original as the asset's bytes; the VP9 playback proxy
-  the legacy viewer needs is generated media under `<key>:rendition`, reused
-  on the next open instead of converting again, and never stored in a
-  project file. Such assets have `playbackProxy: false` and `rendition:
-  true`. Assets imported earlier, whose stored bytes are the conversion,
-  show "Using a converted copy · Relink to the original for full quality"
-  with Locate Original… in the Media panel.
+  the rest) and a TIFF or HEIF still keep their original as the asset's
+  bytes (stored, or linked when the project links files); the VP9 playback
+  proxy or PNG the page's viewer needs is generated media under
+  `<key>:rendition`, reused on the next open instead of converting again,
+  and never stored in a project file. Such assets have `rendition: true`
+  (videos also `playbackProxy: false`). When a still's rendition is gone
+  (another Mac, a cleared store), main converts the kept original again
+  (`media-store:convert-still`: the stored object or the verified link,
+  read through a temporary link that names its format, since objects are
+  named by hash). The legacy viewer reads the same renditions with the flag
+  off. The web export (`player/export-web.ts`) takes the rendition, or the
+  bytes the live asset shows, never an original a browser cannot play.
+  Animated images are still stored as their conversion (an image
+  sequence). Assets imported earlier, whose stored bytes are the
+  conversion, show "Using a converted copy · Relink to the original for
+  full quality" with Locate Original… in the Media panel.
 - **Content hashes** are recorded on every imported asset (`contentHash`)
   and used by the engine's handles and by relinking. The sampled
-  fingerprint stays the storage key and the duplicate finder; only the full
-  hash decides identity.
+  fingerprint (three 64 KiB samples and the size) stays the storage key
+  and the duplicate finder; only the full hash decides identity:
+  - reads, Desktop Save, and IndexedDB migration go by the asset's own
+    content hash, and a key that now names other content is never read in
+    its place (two room-tone recordings can share a fingerprint, and so a
+    key; the later import repoints the key, the earlier asset keeps its
+    content);
+  - an import whose content hash differs from a fingerprint match becomes a
+    new asset (`MediaImport.match`); conversions, whose hash is of the
+    converted bytes (`originalContentHash` is null for them), still match
+    by fingerprint, so re-importing an original upgrades its converted copy;
+  - agent `import_media` confirms a fingerprint match by the full hash
+    before answering `already_imported` (section 20, "deduplicated on the
+    content hash").
+  Posters stay keyed by the storage key, so two assets that share a
+  fingerprint share a poster thumbnail until one is re-imported.
 - The import summary says "Copied 12 clips · Linked 3" when anything was
   linked.
 
 ## Relinking
 
 Automatic relink is by content hash only (`main/media-store/relink.ts`).
-Opening a linked asset checks the recorded file: unchanged size and
-modification time are enough; anything else is hashed. A missing or
+Opening a linked asset checks the recorded file: the same file (volume
+and file number) with an unchanged size and modification time is enough;
+anything else, including another file copied over the path with its
+dates kept, is hashed. A missing or
 changed file starts a search for candidates of exactly the recorded size:
 a bounded walk (4,000 folders, 4 levels) of the recorded folder, its parent
 and grandparent, folders other linked media of the window now live in, and
@@ -136,8 +161,27 @@ project) reads the stored copy: content identity, not location, names it.
   (`storage` and `link` removed, `contentHash` and `sourcePath` kept) and
   the engine stamp is recomputed, so the file is self-contained and opens
   in either engine. An original that cannot be read stays linked.
-- **Opening** restores embedded media through `PM.MediaStore.put`, which
-  with the new engine streams it into the store, verified.
+- **Opening** a project file with the new engine: main copies each
+  embedded range from the file the window opened straight into the store
+  (`media-store:put-project-range`, 64 MiB per call so the opening
+  progress moves; reads go through that window's own project reader,
+  `save.ts readProjectRangeFor`). The object is committed only when the
+  bytes main read, and the copy read back from disk, match the SHA-256
+  the PMV4 index records (PMV3 ranges, which record none, are compared
+  with the bytes main read), and it is named by its BLAKE3. Records say
+  `source: "project"`. A range main cannot copy falls back to the page
+  (`PM.MediaStore.put`, streamed and verified by BLAKE3); a checksum
+  mismatch fails the open. Measured on the M4 Max (`MediaStore` driven
+  from Node in vitest with the built hash worker, 1 GiB of random bytes,
+  three runs): 1.43 to 1.50 s per GiB including verification (682 to
+  716 MiB/s); the longest synchronous step on main's thread per 1 MiB
+  chunk was 0.44 to 0.59 ms. The page path it replaces was not measured.
+  The page path (also the legacy engine's) now builds each range into a
+  Blob from its bytes, folded every 64 MiB. It used to stage in OPFS, and
+  Chromium keeps an IndexedDB blob from an OPFS file as a reference to
+  that file, which was removed right after: the asset was re-imported
+  from its source path with a new revision, so the next metadata-only
+  save uploaded it again (the ledger's `project-file-media.spec.ts:9`).
 
 ## Switching engines safely
 
@@ -188,10 +232,12 @@ contained, and they have no access to this IPC.
 | What | Command |
 |---|---|
 | BLAKE3 vectors, splits, subtrees | `vitest run src/shared/blake3.test.ts` |
-| Hashing, store, classification, relink, service, handles, IPC | `vitest run src/main/media-store` |
+| Hashing, store, classification, relink, service, handles, IPC, project ranges, still conversion | `vitest run src/main/media-store` |
 | PMV4 stored and linked records | `vitest run src/main/project-save.test.ts` |
-| Renderer store, decisions, bindings | `vitest run src/renderer/src/media/host-media-store.test.ts` |
-| Save, export embedding | `vitest run src/renderer/src/legacy/core/project-file.test.ts` |
+| Renderer store, decisions, bindings, content identity | `vitest run src/renderer/src/media/host-media-store.test.ts` |
+| Identity matching (fingerprint vs content hash) | `vitest run src/renderer/src/legacy/core/media.test.ts` |
+| Save, export embedding, opening ranges | `vitest run src/renderer/src/legacy/core/project-file.test.ts` |
+| Web export takes renditions | `vitest run src/renderer/src/player/export-web.test.ts` |
 | Stamp and refusal | `vitest run src/shared/engine-stamp.test.ts` |
 | Settings row | `vitest run src/renderer/src/legacy/ui/project-settings.test.ts` |
 | The gate scenarios in the app | `playwright test e2e/media-store.spec.ts --workers=1` |
@@ -208,6 +254,20 @@ media specs (`import-prores`, `import-mp4`, `project-file-media`,
 `menu-save`, `media-replacement`, `local-media-recovery`,
 `agent-media-management`, `media-deletion-project`), 28 tests, pass.
 
+Re-measured on 2026-10-14 after merging the wave 3 audio and wasm lanes
+and the follow-up work above (content identity, main-side project range
+copies, kept still originals, the OPFS staging fix; same machine, release
+addons rebuilt in the worktree, hidden Electron under the machine lock,
+`--workers=1`): `e2e/media-store.spec.ts`, 11 of 11, and with it
+`agent-media-management`, `export-code`, `import-converted-formats`,
+`import-mp4`, `import-prores`, `local-media-recovery`,
+`media-deletion-project`, `media-replacement`, `menu-save`, and
+`project-file-media`: 43 of 43 in 1.7 min. That includes the ledger's
+`project-file-media.spec.ts:9`, which failed at the merge base
+(`c9883147`) and passed 5 of 5 after the fix. Unit tests over the media
+store, project files, save, agent tools, the engine host, the renderer's
+media, legacy core, assistant, and player suites: 1,010 pass, 1 skipped.
+
 ## Not done here
 
 - Section 14.8 and the appendix D "Offline media and Blender at export"
@@ -217,10 +277,13 @@ media specs (`import-prores`, `import-mp4`, `project-file-media`,
   timeline extension to learn an asset's availability through the kernel
   API; the Media panel already shows "Media offline" with the missing path.
 
-- A host-side copy of PMV4 media ranges into the store on open: today the
-  renderer reads the ranges and streams them back to main.
-- Image conversions (HEIC, AVIF, animated images) still store the
-  converted bytes; only video playback proxies keep the original.
+- Animated images (GIF, APNG, animated WebP) still store their conversion
+  (an image sequence); the engine has no reader for their originals' timing
+  yet.
+- A linked asset whose file was verified by hashing (its dates moved) is
+  hashed again on every open until it is relinked; the recorded size, dates,
+  and file number are not refreshed, because that would be a document write
+  for every touch of the file.
 - Bookmark-based tracking of moved files (security-scoped bookmarks) and a
   Relink sheet for name, timecode, or duration proposals (4b).
 - Garbage collection of unreferenced store objects (4b Storage).
