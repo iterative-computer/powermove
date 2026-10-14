@@ -83,7 +83,12 @@ export async function importMedia(PM: PMRegistry, args: Record<string, unknown>,
   if (args.expectedFingerprint !== undefined && args.expectedFingerprint !== fingerprint) throw new Error('The chosen file does not match expectedFingerprint; no media was changed.');
   if (!replace) {
     const existing = Object.values<any>(project.assets || {}).find(item => item.fingerprint === fingerprint && PM.assets.get(item.id) && item.persisted);
-    if (existing) return { status: 'already_imported', assetId: existing.id, persisted: true };
+    /* Deduplicated on the content hash (section 20): the fingerprint only
+       samples a file, so with the media store a match is confirmed by the
+       full hash before the import is skipped. */
+    const known = existing && PM.HostMedia?.enabled ? PM.MediaImport.originalContentHash?.(existing) : null;
+    if (existing && (!known || await PM.HostMedia.hash(file) === known)) return { status: 'already_imported', assetId: existing.id, persisted: true };
+    assertCurrent();
   }
   if (args.storage !== undefined && args.storage !== 'copy' && args.storage !== 'link') throw new Error('storage is "copy" or "link".');
   /* Agent imports are copied unless the call asks to link (section 21). */

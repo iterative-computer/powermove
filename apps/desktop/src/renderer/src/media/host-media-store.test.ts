@@ -175,6 +175,35 @@ describe('host media store (new engine on)', () => {
   });
 });
 
+describe('content identity', () => {
+  it('reads, saves, and binds each asset by its content hash when two files share a storage key', async () => {
+    const { host, keys } = fakeHost();
+    const store = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
+    // Two different files whose sampled fingerprints (and so storage keys) agree.
+    await store.put('a1', new Blob([data(64, 1)]), { storageKey: 'media:v2:same' });
+    const first = { id: 'a1', storageKey: 'media:v2:same', contentHash: store.recordFor('media:v2:same')!.hash };
+    await store.put('a2', new Blob([data(64, 2)]), { storageKey: 'media:v2:same' });
+    const second = { id: 'a2', storageKey: 'media:v2:same', contentHash: store.recordFor('media:v2:same')!.hash };
+    expect(keys.get('media:v2:same')!.hash).toBe(blake3Hex(data(64, 2)));
+    expect(await bytesOf(await store.get(first))).toEqual(data(64, 1));
+    expect(await bytesOf(await store.get(second))).toEqual(data(64, 2));
+    expect(await store.saveSource(first)).toMatchObject({ hash: blake3Hex(data(64, 1)), size: 64, revision: blake3Hex(data(64, 1)) });
+    expect(await store.saveSource(second)).toMatchObject({ hash: blake3Hex(data(64, 2)), size: 64 });
+    expect(await bytesOf((await store.getForSave(first))!.blob)).toEqual(data(64, 1));
+    expect(bindingsFor({ assets: { a1: first } }, () => null)).toEqual({ a1: { key: 'media:v2:same', hash: blake3Hex(data(64, 1)) } });
+    // Forgetting the key (deleting either asset) leaves the other's content readable.
+    await store.remove(second);
+    expect(await bytesOf(await store.get(first))).toEqual(data(64, 1));
+  });
+
+  it('never reads another file through a shared key when its own content is gone', async () => {
+    const { host } = fakeHost();
+    const store = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
+    await store.put('a2', new Blob([data(64, 2)]), { storageKey: 'media:v2:same' });
+    expect(await store.get({ id: 'a1', storageKey: 'media:v2:same', contentHash: blake3Hex(data(64, 1)) })).toBeNull();
+  });
+});
+
 describe('opening a project file', () => {
   it('has main copy embedded ranges into the store, checked against the recorded checksum', async () => {
     const { host, keys, calls, projectFiles } = fakeHost();

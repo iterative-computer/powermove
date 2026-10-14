@@ -48,6 +48,9 @@ const storageKeyOf = (value: any): string | null => {
   return value || null;
 };
 
+const contentHashOf = (value: any): string | null =>
+  value && typeof value === 'object' && typeof value.contentHash === 'string' && /^[a-f0-9]{64}$/.test(value.contentHash) ? value.contentHash : null;
+
 export const isLinked = (meta: any): boolean => meta?.storage === 'linked' && !!meta?.link && typeof meta.link.path === 'string';
 
 /** BLAKE3 of a Blob, read in slices with yields. */
@@ -148,9 +151,11 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
   const migrations = new Map<string, Promise<boolean>>();
   const warn = options.warn ?? ((message, error) => console.warn(`[media-store] ${message}`, error));
 
-  const readKey = async (key: string, fallbackType: string): Promise<Blob | null> => {
+  /** Reads what a key names; with `hash`, only when the key names that content. */
+  const readKey = async (key: string, fallbackType: string, hash?: string | null): Promise<Blob | null> => {
     const opened = await host.open({ key });
     if (!opened.ok) return null;
+    if (hash && opened.hash !== hash) { await host.close(opened.token).catch(() => undefined); return null; }
     return readOpened(host, opened, opened.type || fallbackType);
   };
   const readHash = async (hash: string, type: string): Promise<Blob | null> => {
@@ -172,15 +177,18 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
 
   /** Copies one IndexedDB blob into the store and verifies it by hash.
    *  IndexedDB is never written or deleted here. */
-  const migrateBlob = (key: string, blob: Blob, revision: string | null): Promise<boolean> => {
+  const migrateBlob = (key: string, blob: Blob, revision: string | null, hash: string | null = null): Promise<boolean> => {
     let job = migrations.get(key);
     if (!job) {
       job = (async () => {
         const existing = await host.record(key);
-        if (existing && existing.size === blob.size) { remember(existing); return true; }
-        const record = await streamToStore(host, key, blob, { type: blob.type, revision, origin: 'indexeddb' });
-        remember(record);
-        return true;
+        if (existing && existing.size === blob.size && (!hash || existing.hash === hash)) { remember(existing); return true; }
+        /* The key already names other content that shares the sampled
+           fingerprint: keep this asset's bytes by content alone. */
+        const keep = existing && hash && existing.hash !== hash ? null : key;
+        const record = await streamToStore(host, keep, blob, { type: blob.type, revision, origin: 'indexeddb' });
+        if (keep) remember(record);
+        return !hash || record.hash === hash;
       })().catch((error) => { warn(`could not copy ${key} from IndexedDB`, error); return false; })
         .finally(() => migrations.delete(key));
       migrations.set(key, job);
@@ -188,15 +196,32 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
     return job;
   };
 
+  /* Content identity names an asset's bytes (section 21). The storage key
+     comes from a sampled fingerprint, so two different files can share one;
+     an asset that knows its content hash reads exactly that content. */
   const storeGet = async (value: any): Promise<Blob | null> => {
     if (isLinked(value)) return readLink(value);
     const key = storageKeyOf(value);
-    if (!key) return null;
     const type = (value && typeof value === 'object' && (value.type || mimeOf(value.name))) || '';
-    let blob = await readKey(key, type);
-    if (!blob && value && typeof value === 'object' && value.id && value.id !== key) blob = await readKey(value.id, type);
-    if (!blob && value && typeof value === 'object' && typeof value.contentHash === 'string') blob = await readHash(value.contentHash, type);
+    const hash = contentHashOf(value);
+    let blob = hash ? await readHash(hash, type) : null;
+    if (!blob && key) blob = await readKey(key, type, hash);
+    if (!blob && value && typeof value === 'object' && value.id && value.id !== key) blob = await readKey(value.id, type, hash);
     return blob;
+  };
+
+  /* The store record holding an asset's own content: its content hash when
+     it has one (the key's record may name other content that shares the
+     fingerprint), else whatever its key names. */
+  const recordOf = async (value: any): Promise<MediaStoreRecord | null> => {
+    const key = storageKeyOf(value);
+    const hash = contentHashOf(value);
+    const record = key ? await host.record(key) : null;
+    if (!hash || record?.hash === hash) return record;
+    const opened = await host.open({ hash });
+    if (!opened.ok) return null;
+    await host.close(opened.token).catch(() => undefined);
+    return { key: key ?? `blake3:${hash}`, hash, size: opened.size, type: (value && typeof value === 'object' && value.type) || record?.type || '', revision: hash, at: 0 };
   };
 
   const store: HostMediaStore = {
@@ -239,7 +264,7 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
       if (old) {
         const key = storageKeyOf(value);
         const saved = await legacy.getForSave?.(value).catch(() => null);
-        if (key) void migrateBlob(key, old, saved?.revision ?? null);
+        if (key) void migrateBlob(key, old, saved?.revision ?? null, contentHashOf(value));
       }
       return old;
     },
@@ -257,13 +282,13 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
       // Linked originals are not stored in the desktop project file.
       if (isLinked(value)) return null;
       const key = storageKeyOf(value);
-      const record = key ? await host.record(key) : null;
+      const record = await recordOf(value);
       if (record) {
-        const blob = await readKey(record.key, record.type);
+        const blob = await readHash(record.hash, record.type);
         return blob ? { blob, revision: record.revision } : null;
       }
       const saved = await legacy.getForSave?.(value);
-      if (saved && key) await migrateBlob(key, saved.blob, saved.revision);
+      if (saved && key) await migrateBlob(key, saved.blob, saved.revision, contentHashOf(value));
       return saved ?? null;
     },
 
@@ -278,11 +303,11 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
     async saveSource(asset) {
       if (!enabled || isLinked(asset)) return null;
       const key = storageKeyOf(asset);
-      if (!key) return null;
-      let record = await host.record(key);
-      if (!record) {
+      if (!key && !contentHashOf(asset)) return null;
+      let record = await recordOf(asset);
+      if (!record && key) {
         const saved = await legacy.getForSave?.(asset).catch(() => null);
-        if (saved && await migrateBlob(key, saved.blob, saved.revision)) record = await host.record(key);
+        if (saved && await migrateBlob(key, saved.blob, saved.revision, contentHashOf(asset))) record = await recordOf(asset);
       }
       return record ? { hash: record.hash, size: record.size, type: record.type, revision: record.revision } : null;
     },
@@ -327,11 +352,11 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
         if (!asset || isLinked(asset)) continue;
         const key = storageKeyOf(asset);
         if (!key) continue;
-        if (await host.record(key).catch(() => null)) { counts.present++; continue; }
+        if (await recordOf(asset).catch(() => null)) { counts.present++; continue; }
         const saved = await legacy.getForSave?.(asset).catch(() => null);
         const blob = saved?.blob ?? await legacy.get(asset).catch(() => null);
         if (!blob) { counts.missing++; continue; }
-        if (await migrateBlob(key, blob, saved?.revision ?? null)) counts.copied++;
+        if (await migrateBlob(key, blob, saved?.revision ?? null, contentHashOf(asset))) counts.copied++;
         else counts.failed++;
       }
       return counts;
@@ -423,6 +448,8 @@ export function installHostMediaStore(PM: Registry, bridge: { mediaStore?: Media
     enabled,
     store,
     decide: (input: Parameters<typeof decideImport>[1]) => decideImport(host, { ...input, enabled }),
+    /** BLAKE3 of a Blob (the same digest as the store's and pm-media's). */
+    hash: (blob: Blob) => hashBlob(blob),
     projectStorage: (): 'copy' | 'link' => PM.proj?.media?.whenImporting === 'link' ? 'link' : 'copy',
     setProjectStorage(value: 'copy' | 'link') {
       if (!PM.proj) return;
