@@ -25,6 +25,7 @@ import { install as installModel } from './core/model';
 import { install as installSelection } from './core/selection';
 import { install as installAnim } from './core/anim';
 import { install as installHistory } from './core/history';
+import { installEngineDoc } from '../engine-doc/install';
 import { install as installLibrary } from './core/library';
 import { install as installProjects } from './core/projects';
 import { install as installEditing } from './core/editing';
@@ -84,6 +85,10 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['core/selection', installSelection],
   ['core/anim', installAnim],
   ['core/history', installHistory],
+  /* The native evaluator's document mirror and write barrier (behind the
+     "native evaluator" flag; only `PM.doc` no-ops when it is off). It wraps
+     PM.touch and PM.proj, so it follows anim and history. */
+  ['engine-doc', (PM) => void installEngineDoc(PM)],
   ['core/library', installLibrary],
   ['core/projects', installProjects],
   ['core/editing', installEditing],

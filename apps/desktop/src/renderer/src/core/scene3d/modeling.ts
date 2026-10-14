@@ -11,6 +11,7 @@ import { sceneCommands } from "./operations";
 import { importedMaterial } from "./materials";
 import { layer3DRole } from "./layers";
 import type { EditMeta, EditResult } from "../types/commands";
+import { writeDocument } from "../../engine-doc/write";
 const clone = (v: any) => JSON.parse(JSON.stringify(v));
 export const MODEL_RECIPES = [
   {
@@ -364,7 +365,7 @@ async function saveSource(
   };
   if (!(await PM.MediaStore.put(id, blob, asset)))
     throw new Error("Could not save the Blender source");
-  PM.proj.assets[id] = asset;
+  writeDocument(PM, [["assets", id]], () => { PM.proj.assets[id] = asset; });
   PM.assets?.map?.set(id, { ...asset, blob });
   return id;
 }
@@ -498,7 +499,9 @@ export async function editModel(
     }
   } catch (error) {
     if (sourceId) {
-      delete project.assets[sourceId];
+      const retired = sourceId;
+      if (project === PM.proj) writeDocument(PM, [["assets", retired]], () => { delete project.assets[retired]; });
+      else delete project.assets[sourceId];
       PM.assets?.map?.delete(sourceId);
     }
     return {

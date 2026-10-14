@@ -374,6 +374,10 @@ const bridge: PowermoveBridge = {
   log: (level, text) => {
     ipcRenderer.send(IPC.log, { level, text });
   },
+  engineFonts: {
+    answer: (queries) => ipcRenderer.invoke(IPC.engineFontsAnswer, queries),
+    subset: (blob, index) => ipcRenderer.invoke(IPC.engineFontsSubset, blob, index)
+  },
   openExternal: (url) => ipcRenderer.invoke(IPC.openExternal, url) as Promise<void>,
   extensionOpenExternal: (url) => ipcRenderer.invoke(IPC.extensionOpenExternal, url) as Promise<void>,
   remoteMedia: {

@@ -9,6 +9,7 @@ import type { PMRegistry } from '../legacy/registry';
 import { viewerService } from '../legacy/core/services';
 import type { CompositionPatch, ProjectSettingsBridge } from '../legacy/ui/project-settings';
 import SettingsScreen, { type SettingsPage } from './SettingsScreen.svelte';
+import { writeDocument } from '../engine-doc/write';
 
 function projectSettingsBridge(PM: PMRegistry): ProjectSettingsBridge {
   return {
@@ -38,10 +39,10 @@ function projectSettingsBridge(PM: PMRegistry): ProjectSettingsBridge {
     applyExportDefaults: (patch) => PM.exportDefaults.write(patch),
     backgroundField: () => PM.fillField(
       () => PM.normalizeFill(PM.proj.backgroundFill, PM.proj.bg),
-      (value: any) => {
+      (value: any) => writeDocument(PM, [['backgroundFill'], ['bg']], () => {
         PM.proj.backgroundFill = PM.normalizeFill(value, PM.proj.bg);
         PM.proj.bg = PM.proj.backgroundFill.stops[0].color;
-      },
+      }),
       { label: 'Background', command: (value: any) => ({ type: 'set_composition', patch: { backgroundFill: value } }) }
     )
   };

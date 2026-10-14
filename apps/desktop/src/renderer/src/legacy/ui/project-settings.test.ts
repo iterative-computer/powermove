@@ -178,13 +178,20 @@ describe('project settings control', () => {
     control.destroy();
   });
 
-  it('accepts any frame rate, clamped to a renderable range', () => {
+  it('accepts rates the engine can time exactly, clamped to a renderable range', () => {
     const host = bridge();
     const control = createProjectSettingsControl(host.api);
     const frameRate = field(control, 'Frame rate');
+    frameRate.value = '12';
+    change(frameRate);
+    expect(host.applyComposition).toHaveBeenCalledWith({ fps: 12 });
+    frameRate.value = '29.97';
+    change(frameRate);
+    expect(host.applyComposition).toHaveBeenLastCalledWith({ fps: 30000 / 1001 });
+    // 23 fps is not a whole number of engine ticks: the nominal rate replaces it.
     frameRate.value = '23';
     change(frameRate);
-    expect(host.applyComposition).toHaveBeenCalledWith({ fps: 23 });
+    expect(host.applyComposition).toHaveBeenLastCalledWith({ fps: 24000 / 1001 });
     frameRate.value = '900';
     change(frameRate);
     expect(host.applyComposition).toHaveBeenLastCalledWith({ fps: 240 });
