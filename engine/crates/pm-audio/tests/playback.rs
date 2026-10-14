@@ -1063,7 +1063,10 @@ fn a_run_from_before_the_loop_is_on_the_clock() {
             .iter()
             .filter(|s| s.state == TransportState::Playing)
             .collect();
-        assert!(before > 60 && inside > 60, "{before} before, {inside} inside");
+        assert!(
+            before > 60 && inside > 60,
+            "{before} before, {inside} inside"
+        );
         assert!(playing.iter().all(|s| s.epoch == playing[0].epoch));
         let entered = playing
             .iter()
