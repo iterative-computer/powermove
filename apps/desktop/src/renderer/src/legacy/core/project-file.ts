@@ -233,56 +233,40 @@ export async function restoreProjectFileStream(document: any, media: ProjectMedi
     if (!remaining.length) return;
     sources = remaining;
   }
-  /* A browser served by `powermove serve` stages in memory: OPFS needs a secure
-     context, and current Chromium keeps IndexedDB blobs as references to the
-     staged file, which is gone once staging is cleaned up. */
-  if ((typeof window !== 'undefined' && (hostBridge() as any)?.remote) || typeof navigator.storage?.getDirectory !== 'function') {
-    for (const source of sources) {
-      const chunks: Uint8Array[] = [];
-      const digest = source.sha256 ? new Sha256() : null;
-      for (let offset = 0; offset < source.length;) {
-        const length = Math.min(1024 * 1024, source.length - offset);
-        const chunk = await read(source.offset + offset, length);
-        if (!(chunk instanceof Uint8Array) || !chunk.length || chunk.length > length) throw new Error('The project media is truncated.');
-        chunks.push(chunk);
-        digest?.update(chunk);
-        offset += chunk.length;
-        advance(chunk.length);
-      }
-      if (digest && digest.digest() !== source.sha256) throw new Error('The project media checksum does not match.');
-      if (!await store.put(source.id, new Blob(chunks as BlobPart[], { type: source.type }), assets[source.id], source.revision)) {
-        throw new Error(`Could not restore ${assets[source.id].name || source.id}. Check available disk space.`);
+  /* Each range becomes a Blob built from its bytes. Staging in OPFS does not
+     work: Chromium keeps an IndexedDB blob that came from an OPFS file as a
+     reference to that file, so removing the staging file broke the media
+     just stored (the asset was then re-imported from its source path with a
+     new revision, or went missing). Parts are folded into a Blob every
+     64 MiB, so the page never holds a large file as one array; the browser
+     owns the folded Blob's bytes. */
+  for (const source of sources) {
+    const digest = source.sha256 ? new Sha256() : null;
+    let folded = new Blob([], { type: source.type });
+    let parts: Uint8Array[] = [];
+    let partBytes = 0;
+    for (let offset = 0; offset < source.length;) {
+      const length = Math.min(1024 * 1024, source.length - offset);
+      const chunk = await read(source.offset + offset, length);
+      if (!(chunk instanceof Uint8Array) || !chunk.length || chunk.length > length) throw new Error('The project media is truncated.');
+      parts.push(chunk);
+      partBytes += chunk.length;
+      digest?.update(chunk);
+      offset += chunk.length;
+      advance(chunk.length);
+      if (partBytes >= RESTORE_FOLD_BYTES) {
+        folded = new Blob([folded, ...parts as BlobPart[]], { type: source.type });
+        parts = [];
+        partBytes = 0;
       }
     }
-    return;
-  }
-  const root = await navigator.storage.getDirectory();
-  for (const source of sources) {
-    // crypto.randomUUID needs a secure context; the served app is plain http.
-    const name = 'project-import-' + (crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
-    const file = await root.getFileHandle(name, { create: true });
-    let writer: FileSystemWritableFileStream | undefined;
-    const digest = source.sha256 ? new Sha256() : null;
-    try {
-      writer = await file.createWritable();
-      for (let offset = 0; offset < source.length;) {
-        const length = Math.min(1024 * 1024, source.length - offset);
-        const chunk = await read(source.offset + offset, length);
-        if (!(chunk instanceof Uint8Array) || !chunk.length || chunk.length > length) throw new Error('The project media is truncated.');
-        await writer.write(new Uint8Array(chunk));
-        digest?.update(chunk);
-        offset += chunk.length;
-        advance(chunk.length);
-      }
-      await writer.close(); writer = undefined;
-      if (digest && digest.digest() !== source.sha256) throw new Error('The project media checksum does not match.');
-      const blob = (await file.getFile()).slice(0, source.length, source.type);
-      if (!await store.put(source.id, blob, assets[source.id], source.revision)) {
-        throw new Error(`Could not restore ${assets[source.id].name || source.id}. Check available disk space.`);
-      }
-    } finally {
-      await writer?.abort().catch(() => undefined);
-      await root.removeEntry(name);
+    if (digest && digest.digest() !== source.sha256) throw new Error('The project media checksum does not match.');
+    const blob = new Blob([folded, ...parts as BlobPart[]], { type: source.type });
+    if (!await store.put(source.id, blob, assets[source.id], source.revision)) {
+      throw new Error(`Could not restore ${assets[source.id].name || source.id}. Check available disk space.`);
     }
   }
 }
+
+/** Bytes of restored media the page holds before folding them into a Blob. */
+const RESTORE_FOLD_BYTES = 64 * 1024 * 1024;

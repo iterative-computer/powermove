@@ -142,19 +142,29 @@ describe('portable project media', () => {
     expect(wholeRead).not.toHaveBeenCalled();
   });
 
-  it('aborts and removes import staging files when a native media read fails', async () => {
-    const writer = { write: vi.fn(), abort: vi.fn(async () => undefined) };
-    const root = { getFileHandle: vi.fn(async () => ({ createWritable: async () => writer })), removeEntry: vi.fn(async () => undefined) };
-    vi.stubGlobal('navigator', { storage: { getDirectory: async () => root } });
+  it('stores nothing when a native media read fails', async () => {
     const put = vi.fn(async () => true);
+    await expect(restoreProjectFileStream({ proj: { assets: { video: { id: 'video' } } } },
+      [{ id: 'video', type: 'video/webm', offset: 9, length: 10 }], { get: async () => null, put },
+      async () => { throw new Error('read failed'); })).rejects.toThrow('read failed');
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it('restores ranges as Blobs that own their bytes, with the saved revision', async () => {
+    const getDirectory = vi.fn();
+    vi.stubGlobal('navigator', { storage: { getDirectory } });
+    const bytes = Uint8Array.from({ length: 3 * 1024 * 1024 + 5 }, (_, i) => (i * 7) & 255);
+    const stored: Array<{ id: string; blob: Blob; revision?: string }> = [];
     try {
-      await expect(restoreProjectFileStream({ proj: { assets: { video: { id: 'video' } } } },
-        [{ id: 'video', type: 'video/webm', offset: 9, length: 10 }], { get: async () => null, put },
-        async () => { throw new Error('read failed'); })).rejects.toThrow('read failed');
-      expect(writer.abort).toHaveBeenCalledOnce();
-      expect(root.removeEntry).toHaveBeenCalledOnce();
-      expect(put).not.toHaveBeenCalled();
+      await restoreProjectFileStream({ proj: { assets: { clip: { id: 'clip', storageKey: 'media:v2:c' } } } },
+        [{ id: 'clip', type: 'video/mp4', offset: 0, length: bytes.length, sha256: sha256Hex(bytes), revision: 'saved-rev' }],
+        { get: async () => null, put: async (id, blob, _meta, revision) => { stored.push({ id, blob, ...(revision ? { revision } : {}) }); return true; } },
+        async (offset, length) => bytes.slice(offset, offset + length));
     } finally { vi.unstubAllGlobals(); }
+    // No staging file: nothing the stored Blob could depend on is removed afterwards.
+    expect(getDirectory).not.toHaveBeenCalled();
+    expect(stored.map(item => [item.id, item.revision, item.blob.type])).toEqual([['clip', 'saved-rev', 'video/mp4']]);
+    expect(new Uint8Array(await stored[0]!.blob.arrayBuffer())).toEqual(bytes);
   });
 
   it('keeps legacy project files compatible', async () => {
