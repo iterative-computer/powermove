@@ -89,6 +89,18 @@ describe('pro shortcut helper contracts', () => {
     expect(PM.hist.list()).toEqual([]);
   });
 
+  it('leaves Ctrl+V to the browser when the host cannot paste into a field', () => {
+    const PM = runtime();
+    const nativeEdit = vi.fn((_action: string): boolean | void => false);
+    vi.stubGlobal('powermove', { nativeEdit });
+    vi.stubGlobal('document', { activeElement: { tagName: 'DIV', isContentEditable: true } });
+
+    expect(PM.cmd('contextPaste')).toBe(false);
+    expect(nativeEdit).toHaveBeenCalledExactlyOnceWith('paste');
+    nativeEdit.mockReturnValue(undefined);
+    expect(PM.cmd('contextPaste')).toBe(true);
+  });
+
   it('routes Edit-menu Copy to a selected document transcript', () => {
     const PM = runtime();
     const execCommand = vi.fn((_action: string) => true);

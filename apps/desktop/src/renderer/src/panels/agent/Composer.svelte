@@ -104,7 +104,8 @@
   }
 
   function keydown(event: KeyboardEvent): void {
-    // The field-aware keymap dispatches Electron's native clipboard paste.
+    /* The field-aware keymap dispatches Electron's native clipboard paste. The
+       Windows host declines it, so WebView2's own paste event reaches `paste`. */
     if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'v') return;
     event.stopPropagation();
     if (editor?.keydown(event)) return;

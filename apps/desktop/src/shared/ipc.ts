@@ -914,7 +914,8 @@ export interface PowermoveBridge {
     read(token: string, offset: number, length: number): Promise<Uint8Array>;
     release(token: string): Promise<void>;
   };
-  nativeEdit(action: NativeEditAction): void;
+  /** Returns false when the host cannot perform the action, so the keystroke keeps its browser default. */
+  nativeEdit(action: NativeEditAction): boolean | void;
   onMenuCommand(cb: (cmd: MenuCommand) => void): () => void;
 
   updates: {

@@ -180,6 +180,9 @@ export interface WebHello {
   platform: string;
   /** Where dialog-chosen saves land on the host, relative to the home dir. */
   exportsDir: string;
+  /** Set by the Windows app's Rust host: the page runs in a local app window,
+   *  so dialogs are native and saved files stay where the user chose. */
+  desktop?: boolean;
 }
 
 export const WEB_UPLOAD_CHUNK_BYTES = 1024 * 1024;
