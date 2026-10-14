@@ -794,16 +794,24 @@ fn exec_time_unsupported_media_leaves_the_target_untouched() {
         wgpu::TextureFormat::Rgba16Float,
         pm_gpu::target::working_usage(),
     );
-    r.render_into(
-        &doc,
-        "Ptest-root",
-        ticks(0.4),
-        &request,
-        &resolver,
-        &target,
-        None,
-    )
-    .unwrap();
+    let rendered = r
+        .render_into(
+            &doc,
+            "Ptest-root",
+            ticks(0.4),
+            &request,
+            &resolver,
+            &target,
+            None,
+        )
+        .unwrap();
+    // The good frame draws every layer, the still included (the e2e
+    // fixtures must be present), so the comparison below is not vacuous.
+    assert!(
+        rendered.failures.is_empty(),
+        "the first frame draws: {:?}",
+        rendered.failures
+    );
     let before = pm_gpu::readback::read_raw(r.device(), r.queue(), &target.texture).unwrap();
     // The document records a PNG; the file is a BMP: only the media probe
     // at exec time can tell.
