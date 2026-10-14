@@ -303,9 +303,11 @@ export class NativeApi {
    * Native answer (or legacy fallback), compared with the legacy answer in
    * dual mode. `perturbed` (bounds and picks) gives the legacy answers under
    * a 1e-12 s or 1e-7 px perturbation: when one of them differs from the
-   * legacy answer, the case is fragile (amendment 20).
+   * legacy answer, the case is fragile (amendment 20). `fragileWhen` names
+   * the cases fragile by construction, which no nudge shows: a point on a
+   * layer's edge, a group matrix whose condition exceeds 1e5.
    */
-  private answer<T>(op: string, native: () => Native<T>, legacy: () => T, describe: () => Record<string, unknown>, perturbed?: Array<() => T>): T {
+  private answer<T>(op: string, native: () => Native<T>, legacy: () => T, describe: () => Record<string, unknown>, perturbed?: Array<() => T>, fragileWhen?: () => boolean): T {
     this.count(op);
     const run = (): Native<T> => {
       try { return native(); } catch (error) { console.warn(`[engine-doc] ${op} failed natively`, error); return { fallback: 'exception' }; }
@@ -335,8 +337,10 @@ export class NativeApi {
         }
       }
       let fragile = false;
-      if (perturbed?.length && !('threw' in expected)) {
-        fragile = perturbed.some(other => {
+      if ((perturbed?.length || fragileWhen) && !('threw' in expected)) {
+        let structural = false;
+        try { structural = fragileWhen?.() === true; } catch { structural = false; }
+        fragile = structural || !!perturbed?.some(other => {
           let value: { value?: T; threw?: unknown };
           try { value = { value: other() }; } catch (error) { value = { threw: error }; }
           return dual.classify(op, value, expected, this.unwrap).path !== null;
@@ -593,7 +597,8 @@ export class NativeApi {
   groupBounds(group: any, time: number): any {
     return this.answer('groups.bounds', () => this.layerQuery('groupBounds', group, { t: time }),
       () => this.legacy.groupBounds(group, time), () => ({ layer: group?.id, t: time }),
-      this.dual ? timePerturbations(time, t => this.legacy.groupBounds(group, t)) : undefined);
+      this.dual ? timePerturbations(time, t => this.legacy.groupBounds(group, t)) : undefined,
+      this.dual ? () => this.illConditioned(group, time) : undefined);
   }
 
   groupAncestors(L: any, layers?: any[]): any[] {
@@ -680,7 +685,40 @@ export class NativeApi {
 
   bounds(L: any, T: any): any {
     return this.answer('gl.bounds', () => this.layerQuery('bounds', L, { t: T }), () => this.legacy.bounds(L, T), () => ({ layer: L?.id, t: T }),
-      this.dual ? timePerturbations(T, t => this.legacy.bounds(L, t)) : undefined);
+      this.dual ? timePerturbations(T, t => this.legacy.bounds(L, t)) : undefined,
+      this.dual ? () => this.illConditioned(L, T) : undefined);
+  }
+
+  /**
+   * Amendment 20's ill-conditioned class: a group whose world matrix has a
+   * condition above 1e5 maps its members through a near-singular inverse,
+   * which amplifies last-bit differences (as the layer vectors class it).
+   */
+  private illConditioned(L: any, T: unknown): boolean {
+    if (this.unwrap(L)?.type !== 'group' || typeof T !== 'number') return false;
+    const [a, b, c, d] = this.legacy.worldMatrix(L, T) as number[];
+    return (a! * a! + b! * b! + c! * c! + d! * d!) / Math.abs(a! * d! - b! * c!) > 1e5;
+  }
+
+  /**
+   * Amendment 20's edge class: the point lies on some layer's edge in that
+   * layer's plane (within 1e-6 relative), where a zero-width layer is hit
+   * only exactly on its line and no nudge of the point shows it.
+   */
+  private onLayerEdge(x: number, y: number, T: number): boolean {
+    const layers: any[] = this.PM.proj?.layers ?? [];
+    const e = (v: number) => 1e-6 * (1 + Math.abs(v));
+    const inside = (v: number, lo: number, hi: number) => v >= lo - e(v) && v <= hi + e(v);
+    const near = (v: number, lo: number, hi: number) => inside(v, lo, hi) && (Math.abs(v - lo) <= e(v) || Math.abs(v - hi) <= e(v));
+    return layers.some(layer => {
+      try {
+        const b = this.legacy.bounds(layer, T);
+        const inv = b && this.legacy.inversePlane(this.legacy.planeMatrix(layer, T));
+        if (!inv) return false;
+        const q = this.legacy.projectPoint(inv, { x, y });
+        return (near(q.x, b.x0, b.x1) && inside(q.y, b.y0, b.y1)) || (near(q.y, b.y0, b.y1) && inside(q.x, b.x0, b.x1));
+      } catch { return false; }
+    });
   }
 
   pick(x: number, y: number, T: number, options: { includeLocked?: boolean } = {}): any {
@@ -698,7 +736,8 @@ export class NativeApi {
       this.dual ? [
         ...timePerturbations(T, t => this.legacy.pick(x, y, t, options)),
         ...[[1e-7, 0], [-1e-7, 0], [0, 1e-7], [0, -1e-7]].map(([dx, dy]) => () => this.legacy.pick(x + dx!, y + dy!, T, options)),
-      ] : undefined);
+      ] : undefined,
+      this.dual ? () => this.onLayerEdge(x, y, T) : undefined);
   }
 
   textLayout(L: any, T: number): any {

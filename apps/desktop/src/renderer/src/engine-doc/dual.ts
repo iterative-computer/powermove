@@ -22,7 +22,9 @@
  * - `atan2`: a number that is 180 on one side and −180 on the other (a
  *   rotation exactly 360° apart at the `atan2` branch cut);
  * - `fragile`: a bounds or pick case whose legacy answer itself changes under
- *   a 1e-12 s time or 1e-7 px point perturbation. Every bounds and pick
+ *   a 1e-12 s time or 1e-7 px point perturbation, a pick whose point lies on
+ *   a layer's edge, or the bounds of a group whose world matrix has a
+ *   condition above 1e5 (as the layer vectors class them). Every bounds and pick
  *   comparison is classified, so `fragile` counts the population and
  *   `allowed['<op>:fragile']` the fragile cases that differ; the gate allows
  *   at most 5% of fragile cases to differ (`fragileBudget()`);

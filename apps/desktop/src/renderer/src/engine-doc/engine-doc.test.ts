@@ -576,6 +576,53 @@ describe('dual answers: allowed differences (amendment 20)', () => {
     expect(doc.dual!.fragileBudget()).toEqual({ fragile: 1, differed: 1, ok: false });
     legacy.bounds = original;
   });
+
+  it('classes a pick on a layer\'s edge as fragile, though no nudge of the point moves the answer', async () => {
+    const { PM, doc } = await editor();
+    const solid = PM.mkLayer('solid');
+    PM.hist.do('Add', () => PM.addLayer(solid));
+    const L = PM.proj.layers[0];
+    const b = PM.GL.bounds(L, 0);
+    const legacy = (doc.api as any).legacy;
+    const original = legacy.pick;
+    // A legacy pick that never moves under a nudge but differs from the native answer.
+    legacy.pick = () => null;
+    const plane = legacy.planeMatrix(L, 0);
+    const at = (u: number, v: number) => legacy.projectPoint(plane, { x: u, y: v });
+    const edge = at(b.x0, (b.y0 + b.y1) / 2);
+    doc.api!.pick(edge.x, edge.y, 0);
+    expect(doc.dual!.stats.fragile['gl.pick']).toBe(1);
+    expect(doc.dual!.stats.allowed['gl.pick:fragile']).toBe(1);
+    expect(doc.dual!.stats.mismatched['gl.pick'] ?? 0).toBe(0);
+    // The middle of the layer is no edge: the same difference is a mismatch.
+    const middle = at((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2);
+    doc.api!.pick(middle.x, middle.y, 0);
+    expect(doc.dual!.stats.mismatched['gl.pick']).toBe(1);
+    legacy.pick = original;
+  });
+
+  it('classes the bounds of a group with an ill-conditioned matrix as fragile', async () => {
+    const { PM, doc } = await editor();
+    PM.hist.do('Add', () => { PM.addLayer(PM.mkLayer('solid', { name: 'A' })); PM.addLayer(PM.mkLayer('solid', { name: 'B' })); });
+    PM.groupLayers(PM.proj.layers.map((l: any) => l.id), 'Group');
+    PM.touch();
+    const group = PM.proj.layers.find((l: any) => l.type === 'group');
+    expect(group).toBeTruthy();
+    const legacy = (doc.api as any).legacy;
+    const original = { bounds: legacy.bounds, worldMatrix: legacy.worldMatrix };
+    legacy.bounds = (layer: any, t: number) => { const r = original.bounds(layer, t); return r && { ...r, x0: r.x0 + 1 }; };
+    // Well conditioned: a mismatch.
+    doc.api!.bounds(group, 0);
+    expect(doc.dual!.stats.mismatched['gl.bounds']).toBe(1);
+    expect(doc.dual!.stats.fragile['gl.bounds'] ?? 0).toBe(0);
+    // Squashed to 1e-6 on one axis (condition about 1e6): fragile.
+    legacy.worldMatrix = () => [1, 0, 0, 1e-6, 0, 0];
+    doc.api!.bounds(group, 0);
+    expect(doc.dual!.stats.fragile['gl.bounds']).toBe(1);
+    expect(doc.dual!.stats.allowed['gl.bounds:fragile']).toBe(1);
+    expect(doc.dual!.stats.mismatched['gl.bounds']).toBe(1);
+    Object.assign(legacy, original);
+  });
 });
 
 describe('deepKeyOrder', () => {
