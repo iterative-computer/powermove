@@ -10,6 +10,7 @@
     "dev:local": "POWERMOVE_REGISTRY_URL=http://localhost:8787 POWERMOVE_DEV_PROTOCOL=1 electron-vite dev",
     "build": "electron-vite build",
     "build:engine": "node scripts/build-engine-addon.mjs",
+    "build:wasm": "node ../../engine/crates/pm-wasm/scripts/build.mjs",
     "test:engine-host": "node scripts/engine-host-integration.mjs",
     "test:frame-bridge": "node scripts/frame-bridge-integration.mjs",
     "preview": "electron-vite preview",
