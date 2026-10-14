@@ -196,7 +196,23 @@ contained, and they have no access to this IPC.
 | Settings row | `vitest run src/renderer/src/legacy/ui/project-settings.test.ts` |
 | The gate scenarios in the app | `playwright test e2e/media-store.spec.ts --workers=1` |
 
+Measured on 2026-10-13 (M4 Max, release `pm_node.node` and
+`pm_bridge.node` built in the worktree, hidden Electron under the machine
+lock, `--workers=1`): the unit files above, 133 tests, pass;
+`e2e/media-store.spec.ts`, 8 of 8, passes in 31 s. With the flag off
+(default), the existing import, recovery, replacement, save, and agent
+media specs (`import-prores`, `import-mp4`, `project-file-media`,
+`menu-save`, `media-replacement`, `local-media-recovery`,
+`agent-media-management`, `media-deletion-project`), 28 tests, pass.
+
 ## Not done here
+
+- Section 14.8 and the appendix D "Offline media and Blender at export"
+  message are Phase 4a (offline handling, section 14.2). Linked media that
+  is offline at export renders as missing media does today.
+- The timeline label "Offline" (appendix D, Import and relink) needs the
+  timeline extension to learn an asset's availability through the kernel
+  API; the Media panel already shows "Media offline" with the missing path.
 
 - A host-side copy of PMV4 media ranges into the store on open: today the
   renderer reads the ranges and streams them back to main.
