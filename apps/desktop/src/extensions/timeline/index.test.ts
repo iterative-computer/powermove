@@ -407,7 +407,7 @@ describe('timeline extension', () => {
     timeline.rows = area === 'below' ? [] : [{ kind: area === 'prop' ? 'prop' : 'layer', L: layer, key: 'opacity', prop }];
     timeline.graph = area === 'graph';
     timeline._graph = { target: { L: layer, prop }, series: [{ prop }], points: [] };
-    for (const modifier of ['none', 'shiftKey', 'metaKey'] as const) {
+    for (const modifier of ['none', 'shiftKey', 'metaKey', 'ctrlKey'] as const) {
       value.state.selection.layers = [layer.id];
       value.state.selection.keys = ['key-1'];
       vi.mocked(value.api.transport.setTime).mockClear();

@@ -10,6 +10,7 @@ import { adjacentKeyframe } from './keyframe-navigation';
 import { draggedPropertyValue, propertyMetadata } from './property-values';
 import { element, iconNode, normalizeTimelineChrome, selectedLayers } from './api-helpers';
 import { createTrackView, normalizeTimelineMode, TIMELINE_MODES, TRACK_GUTTER, type TimelineMode } from './track-view';
+import { anchoredOffset, normalizeRowZoom, rowHeight, wheelRowZoom } from './row-height';
 import { createCaptionTrack } from './caption-track';
 /* Ported from js/ui/timeline.js — behavior-preserving. */
 import { expandScaleKeyIds, keyMembers, timelineProperties, trackChannels, trackSelected } from './property-tracks';
@@ -551,7 +552,7 @@ else if (previous?.dispose) previous.dispose();
 const h = element, clamp = api.util.clamp;
 
 const T: any = previous || {
-  gut: 224, row: 40, ruler: 28, pps: 90, scrollT: 0, scrollY: 0,
+  gut: 224, row: 40, rowBase: 40, rowZoom: 1, ruler: 28, pps: 90, scrollT: 0, scrollY: 0,
   graph: false, rows: [], cv: null, ctx: null, w: 0, hgt: 0, dpr: 1,
   hover: null, marquee: null, dropRow: null as number | null,
   reorder: null as ReturnType<typeof layerDrop>,
@@ -562,9 +563,10 @@ const T: any = previous || {
 /* Built-in extensions activate after project hydration. Restore the current
    project session here, matching the former app bootstrap path that ran after
    the legacy timeline installer. */
-const sessionTimeline = previous ?? api.storage.get<{ pps?: number; scrollT?: number; scrollY?: number; graph?: boolean; graphCombined?: boolean }>(`session:${api.project.get().id}`);
+const sessionTimeline = previous ?? api.storage.get<{ pps?: number; scrollT?: number; scrollY?: number; graph?: boolean; graphCombined?: boolean; rowZoom?: number }>(`session:${api.project.get().id}`);
 if (sessionTimeline) {
   T.pps = Number.isFinite(sessionTimeline.pps) ? sessionTimeline.pps : T.pps;
+  T.rowZoom = normalizeRowZoom(sessionTimeline.rowZoom);
   T.scrollT = Number.isFinite(sessionTimeline.scrollT) ? sessionTimeline.scrollT : T.scrollT;
   T.scrollY = Number.isFinite(sessionTimeline.scrollY) ? sessionTimeline.scrollY : T.scrollY;
   T.graph = !!sessionTimeline.graph;
@@ -709,7 +711,7 @@ function disposeRuntime() {
   resizeObserver?.disconnect(); resizeObserver = null;
   frameIds.forEach((id) => window.cancelAnimationFrame?.(id)); frameIds.clear();
   timerIds.forEach((id) => window.clearTimeout?.(id)); timerIds.clear();
-  api.storage.set(`session:${api.project.get().id}`, { pps: T.pps, scrollT: T.scrollT, scrollY: T.scrollY, graph: T.graph, graphCombined: T.graphCombined });
+  api.storage.set(`session:${api.project.get().id}`, { pps: T.pps, scrollT: T.scrollT, scrollY: T.scrollY, graph: T.graph, graphCombined: T.graphCombined, rowZoom: T.rowZoom });
   if (T.__timelineRuntimeToken === TIMELINE_RUNTIME_TOKEN) {
     T.__timelineRuntimeDisposed = true;
     T.__timelineRuntimeToken = null;
@@ -940,7 +942,8 @@ function refreshTimelineManifest() {
   syncGraphControls();
   const raw = api.workspace.current()?.chrome?.timeline;
   const config = normalizeTimelineChrome(api, raw);
-  T.row = config.rowHeight; T.gut = config.gutterWidth; T.ruler = config.rulerHeight;
+  T.rowBase = config.rowHeight; T.gut = config.gutterWidth; T.ruler = config.rulerHeight;
+  T.row = rowHeight(T.rowBase, T.rowZoom, 'layers');
   T.style = config;
   const head = document.querySelector<HTMLElement>('#tl-head');
   if (head) {
@@ -1205,7 +1208,7 @@ const trackView = createTrackView({
   keySelected: (key) => keySelected(key),
   rowSelected: (row) => api.selection.layers().includes(row.L.id) && trackSelected(row, api.selection.chan() ?? ''),
   keyDown: (e, row, x, y) => keyDown(e, row, x, y, -1),
-  keyMarquee: (e) => marquee(e, { additive: e.shiftKey || e.metaKey }),
+  keyMarquee: (e) => marquee(e, { additive: e.shiftKey || e.metaKey || e.ctrlKey }),
   editKeyAt: (row, x) => editKeyAt(row, x),
   focusRow: (row) => {
     api.selection.set({ chan: row.key });
@@ -2731,7 +2734,9 @@ function bind(cv: any, wrap: any) {
   }, undefined, canvasCleanups);
   listen(cv, 'wheel', (e: any) => {
     e.preventDefault();
-    if (e.ctrlKey || e.metaKey) {
+    if (e.altKey && !e.ctrlKey && !e.metaKey && !inGraph(e.offsetX, e.offsetY)) {
+      zoomRows(e);
+    } else if (e.ctrlKey || e.metaKey) {
       const tAt = x2t(e.offsetX);
       const pixels = e.deltaY * (e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? Math.max(100, T.hgt) : 1);
       // Match composition navigation. Exponential scaling makes reversing a
@@ -2754,6 +2759,30 @@ function bind(cv: any, wrap: any) {
     T.scrollT = Math.max(-.4, T.scrollT);
     invalidate('timeline');
   }, { passive: false }, canvasCleanups);
+}
+
+/* Alt + wheel scales every row; the row under the pointer stays under it. */
+function zoomRows(e: WheelEvent & { offsetY: number }) {
+  const tracks = tracksMode();
+  const base = Number.isFinite(T.rowBase) ? T.rowBase : T.row;
+  const zoom = wheelRowZoom(T.rowZoom, e, { base, mode: tracks ? 'tracks' : 'layers', page: T.hgt });
+  if (zoom === T.rowZoom) return;
+  const apply = () => { T.rowBase = base; T.rowZoom = zoom; T.row = rowHeight(base, zoom, 'layers'); };
+  const bottom = T.graph && T.graphCombined ? graphTop() : T.hgt;
+  const y = clamp(e.offsetY, T.ruler, Math.max(T.ruler, bottom - 1));
+  if (tracks) {
+    const lane = trackView.laneAt(y), before = trackView.rowHeight();
+    const content = y - T.ruler + (Number(T.trackScrollY) || 0);
+    apply();
+    const after = trackView.rowHeight();
+    T.trackScrollY = Math.max(0, lane
+      ? T.trackScrollY + trackView.laneY(lane.area, lane.lane) + anchoredOffset(y - lane.y, before, after) - y
+      : content * after / before - (y - T.ruler));
+  } else {
+    const before = T.row;
+    apply();
+    T.scrollY = Math.max(0, (y - T.ruler + T.scrollY) * T.row / before - (y - T.ruler));
+  }
 }
 
 function setHoverRow(index: number | null) {
@@ -2877,14 +2906,14 @@ function onDown(e: any) {
   }
   if (inGraph(x, y)) return graphDown(e, x, y);
   const hr = hitRow(y);
-  if (!hr) return marquee(e, { additive: e.shiftKey || e.metaKey });
+  if (!hr) return marquee(e, { additive: e.shiftKey || e.metaKey || e.ctrlKey });
   const r = hr.row;
   if (r.kind === 'prop') return keyDown(e, r, x, y, hr.i);
   const L = r.L;
   const span = L.type === 'group' ? api.groups.span(L) : L;
   const x0 = t2x(span.from), x1 = t2x(span.from + span.dur);
   const onClip = x >= x0 - 5 && x <= x1 + 5;
-  if (!onClip) return marquee(e, { additive: e.shiftKey || e.metaKey });
+  if (!onClip) return marquee(e, { additive: e.shiftKey || e.metaKey || e.ctrlKey });
   if (quickOffsetModifiers(e) && api.selection.layers().includes(L.id) && quickOffsetLayerGroups().length > 1) {
     if (L.lock) return;
     return quickOffsetLayers(e);
@@ -3224,9 +3253,11 @@ function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0) {
   const options = typeof values[0] === 'boolean' ? ['true', 'false'] : choices[row.key]
     ?? (/^m\..+\.shape$/.test(row.key) ? ['rect', 'ellipse'] : /^m\..+\.mode$/.test(row.key) ? ['add', 'subtract'] : null);
   const isColor = !options && typeof values[0] === 'string' && /^#[0-9a-f]{6}$/i.test(values[0]);
+  // A one-line field; tall rows center it instead of stretching it.
+  const fieldHeight = Math.min(T.row - 6, 42);
   const input = h(options ? 'select' : 'input', { value: values.join(', '), 'aria-label': scale ? `Scale ${scaleIndex === 0 ? 'X' : 'Y'}` : row.label,
-    style: { position: 'absolute', left: `${column?.left ?? T.propertyValueX}px`, top: `${rowY(rowIndex) + 3}px`,
-      width: `${column?.width ?? T.gut - T.propertyValueX - 6}px`, height: `${T.row - 6}px`, background: 'var(--bg-row)',
+    style: { position: 'absolute', left: `${column?.left ?? T.propertyValueX}px`, top: `${rowY(rowIndex) + (T.row - fieldHeight) / 2}px`,
+      width: `${column?.width ?? T.gut - T.propertyValueX - 6}px`, height: `${fieldHeight}px`, background: 'var(--bg-row)',
       border: '1px solid var(--accent)', color: 'var(--tx)', padding: isColor ? '1px' : '0 4px', zIndex: 9 } });
   if (options) { options.forEach(value => input.appendChild(h('option', { value }, value))); input.value = String(values[0]); }
   else if (isColor) { input.type = 'color'; input.value = String(values[0]).toLowerCase(); }
@@ -3278,7 +3309,7 @@ function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0) {
 
 function gutterDown(e: any, x: any, y: any) {
   const hr = hitRow(y);
-  if (!hr) { if (!e.shiftKey && !e.metaKey) clearTimelineSelection(); return; }
+  if (!hr) { if (!e.shiftKey && !e.metaKey && !e.ctrlKey) clearTimelineSelection(); return; }
   const r = hr.row;
   if (r.kind !== 'layer') {
     api.selection.set({ chan: r.key });
@@ -3591,7 +3622,7 @@ function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
     (k: any) => Math.abs(t2x(r.L.from + k.t) - x), 6,
   );
   const quickModifier = quickOffsetModifiers(e);
-  const additive = !quickModifier && (e.shiftKey || e.metaKey);
+  const additive = !quickModifier && (e.shiftKey || e.metaKey || e.ctrlKey);
   if (!hit) return marquee(e, { additive });
   api.selection.set({ chan: r.key });
   T.focusGraph(r.L, r.key);
@@ -3686,10 +3717,10 @@ function graphDown(e: any, x: any, y: any) {
   if (pointDistance >= GRAPH_POINT_HIT && pointInGraphSelection(g.selectionBounds, x, y)) {
     return dragGraphSelection(e, g, L);
   }
-  if (!pointHit || pointDistance >= GRAPH_POINT_HIT) return marquee(e, { additive: e.shiftKey || e.metaKey, graph: true });
+  if (!pointHit || pointDistance >= GRAPH_POINT_HIT) return marquee(e, { additive: e.shiftKey || e.metaKey || e.ctrlKey, graph: true });
   L = pointHit.axis.L;
   const hit = pointHit.key;
-  const additive = e.shiftKey || e.metaKey;
+  const additive = e.shiftKey || e.metaKey || e.ctrlKey;
   const wasSelected = keySelected(hit);
   if (additive) api.selection.select(L.id, true);
   else if (!api.selection.layers().includes(L.id)) api.selection.select(L.id);

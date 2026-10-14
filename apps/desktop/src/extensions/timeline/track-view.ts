@@ -19,6 +19,7 @@ import {
 import type { EdgeSnapProbe } from './timeline';
 import { trackChannels } from './property-tracks';
 import type { CaptionTrack } from './caption-track';
+import { rowHeight } from './row-height';
 
 export type TimelineMode = 'layers' | 'tracks';
 export const TIMELINE_MODES: ReadonlyArray<{ id: TimelineMode; label: string; icon: string; title: string }> = [
@@ -98,7 +99,7 @@ interface DrawerHit { lane: Lane; index: number; key: string; label: string; cy:
 
 export function createTrackView(host: TrackViewHost) {
   const { api, T } = host;
-  const rowH = () => Math.max(34, Math.round(T.row) + 6);
+  const rowH = () => rowHeight(Number.isFinite(T.rowBase) ? T.rowBase : T.row, T.rowZoom, 'tracks');
   const scroll = () => Number(T.trackScrollY) || 0;
 
   /* ── layout ─────────────────────────────────────────────── */
