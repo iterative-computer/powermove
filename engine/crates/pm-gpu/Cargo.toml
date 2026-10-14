@@ -25,6 +25,11 @@ objc2-core-graphics = "0.3.2"
 objc2-foundation = "0.3.2"
 block2 = "0.6"
 pollster = "0.4"
+# The GLSL ES pipeline (feature `glsl`): glslang to SPIR-V, rewrites, naga IR.
+glslang = { version = "0.8.1", optional = true }
+glslang-sys = { version = "0.8.1", optional = true }
+rspirv = { version = "0.13.0", optional = true }
+naga = { version = "30.0.1", optional = true, features = ["spv-in", "msl-out"] }
 
 [features]
 default = ["decode-in"]
@@ -32,6 +37,8 @@ default = ["decode-in"]
 # interactive engine's viewer presenter today) build without it, so they do
 # not link FFmpeg until media reaches the engine.
 decode-in = ["dep:pm-media"]
+# three.js and user GLSL to naga IR (`glsl`).
+glsl = ["dep:glslang", "dep:glslang-sys", "dep:rspirv", "dep:naga", "wgpu/naga-ir"]
 
 [[test]]
 name = "decode_import"
