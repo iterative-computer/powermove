@@ -297,6 +297,12 @@ type Pending = {
   tail: Uint8Array | undefined;
   /** The open and the replay: sent again by every new port, never requeued. */
   internal: boolean;
+  /** The project font change this request makes; it joins the replay when
+   *  the request goes out on a port (`send`), not before. */
+  change: ProjectChange | undefined;
+  /** The caller already got its answer (it timed out after the request went
+   *  out): a late reply only keeps the replay in step with the engine. */
+  settled: boolean;
   resolve: (reply: { status: number; payload: Uint8Array }) => void;
   reject: (error: Error) => void;
   timer: { cancel(): void } | null;
@@ -319,9 +325,17 @@ const MUTATING = new Set<FontOp>([FONT_OP.addProjectFont, FONT_OP.setFontSource,
  * base above every generation main has seen, then gets the project fonts
  * replayed, so a restarted engine never reuses an earlier launch's
  * generations: the renderer sees a new generation and starts its answers
- * again. Read-only requests in flight when a port goes away are sent again
- * on the next one; project font changes in flight are already in the
- * replay and settle with the replay's generation.
+ * again. Then the waiting requests go out in order.
+ *
+ * The replay holds exactly the project font changes that went out on a
+ * port: a change joins it when it is sent, and a clear empties it when it
+ * is sent, so a change made while the engine is down reaches the engine
+ * once (with the waiting requests, after the replay). Read-only requests in
+ * flight when a port goes away are sent again on the next one; project font
+ * changes in flight are already in the replay and settle with the replay's
+ * generation. A change leaves the replay only when the engine refuses it,
+ * even after its caller timed out, since the engine may still apply a
+ * request that went out.
  */
 export class EngineFontClient implements FontsProvider {
   private port: PortLike | null = null;
@@ -424,7 +438,6 @@ export class EngineFontClient implements FontsProvider {
   }
 
   clearProjectFonts(): Promise<number> {
-    this.project = [];
     return this.call(FONT_OP.clearProjectFonts, '{}').then((r) => this.generationOf(r));
   }
 
@@ -436,14 +449,7 @@ export class EngineFontClient implements FontsProvider {
    *  while it is in flight replays it) and leaves it if the engine refuses
    *  it (data that is not a font, invalid descriptors). */
   private change(change: ProjectChange): Promise<number> {
-    this.project.push(change);
-    return this.call(change.op, change.json, change.bytes).then(
-      (r) => this.generationOf(r),
-      (error: unknown) => {
-        this.project = this.project.filter((c) => c !== change);
-        throw error;
-      }
-    );
+    return this.call(change.op, change.json, change.bytes, change).then((r) => this.generationOf(r));
   }
 
   private json(reply: { status: number; payload: Uint8Array }): string {
@@ -480,11 +486,13 @@ export class EngineFontClient implements FontsProvider {
         }
       },
       reject: () => {},
+      change: undefined,
+      settled: false,
       timer: null
     };
   }
 
-  private call(op: FontOp, json: string, tail?: Uint8Array): Promise<{ status: number; payload: Uint8Array }> {
+  private call(op: FontOp, json: string, tail?: Uint8Array, change?: ProjectChange): Promise<{ status: number; payload: Uint8Array }> {
     return new Promise((resolve, reject) => {
       const p: Pending = {
         op,
@@ -492,15 +500,24 @@ export class EngineFontClient implements FontsProvider {
         tail,
         internal: false,
         resolve: (reply) => {
-          if (reply.status === FONT_STATUS.error) reject(new Error(fromUtf8.decode(reply.payload)));
-          else resolve(reply);
+          if (reply.status === FONT_STATUS.error) {
+            // The engine did not apply it: a restart must not replay it.
+            if (p.change) this.project = this.project.filter((c) => c !== p.change);
+            if (!p.settled) reject(new Error(fromUtf8.decode(reply.payload)));
+          } else if (p.settled) {
+            if (reply.status === FONT_STATUS.json) this.noteGeneration(reply);
+          } else resolve(reply);
         },
         reject,
+        change,
+        settled: false,
         timer: null
       };
       p.timer = this.schedule(() => {
+        p.settled = true;
+        // Not sent yet: it never will be. Sent: it stays in flight, so a
+        // late reply still tells whether the engine applied it.
         this.queue = this.queue.filter((q) => q !== p);
-        for (const [id, q] of this.pending) if (q === p) this.pending.delete(id);
         reject(new Error(`the font service did not answer within ${this.timeoutMs} ms`));
       }, this.timeoutMs);
       if (this.port) this.send(p);
@@ -508,7 +525,21 @@ export class EngineFontClient implements FontsProvider {
     });
   }
 
+  /** The generation a reply carries, for replies nobody waits for. */
+  private noteGeneration(reply: { status: number; payload: Uint8Array }): void {
+    try {
+      this.generationOf(reply);
+    } catch {
+      // Not a generation reply (a read-only request that timed out).
+    }
+  }
+
   private send(p: Pending): void {
+    if (!p.internal) {
+      // The replay follows what went out, in order.
+      if (p.change) this.project.push(p.change);
+      else if (p.op === FONT_OP.clearProjectFonts) this.project = [];
+    }
     const id = this.nextId++;
     if (this.nextId > 0xffff_ffff) this.nextId = 1;
     this.pending.set(id, p);
@@ -536,12 +567,14 @@ export class EngineFontClient implements FontsProvider {
   private requeueInFlight(): void {
     const inFlight = [...this.pending.values()];
     this.pending.clear();
-    const again = inFlight.filter((p) => !p.internal);
+    // Settled requests have no caller left; their changes stay in the replay.
+    const again = inFlight.filter((p) => !p.internal && !p.settled);
     for (const p of again) {
       if (!MUTATING.has(p.op)) continue;
       p.op = FONT_OP.generation;
       p.json = '{}';
       p.tail = undefined;
+      p.change = undefined;
     }
     this.queue = [...again, ...this.queue];
   }

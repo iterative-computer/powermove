@@ -127,13 +127,24 @@ below are unchanged. Main relays them:
   fonts and subsets travel as raw bytes.
 - The service is created on the first font port, on the utility process's
   JavaScript thread (the process main thread, which AppKit's font manager
-  needs), and lives for the launch.
+  needs), and lives for the launch. Requests run synchronously on that
+  thread, the one that also runs the engine protocol, so a slow request
+  holds the engine's message handling: the first fallback manifest takes
+  about 0.6 s. Only CoreText matching needs AppKit's thread; moving the
+  manifest and subsetting off it is open work.
 - Restarts: every new port opens with a generation base above every
   generation main has seen, then main replays the project fonts and
   variable sources in order. A renderer therefore always sees a new
   generation after a restart and starts its answers again. Read-only
   requests in flight when a port dies are sent again on the next one;
-  requests made while the engine is down wait for it (30 s).
+  requests made while the engine is down wait for it (30 s) and go out
+  after the replay, in order.
+- The replay is exactly the project font changes that went out on a port:
+  a change joins it when it is sent and a clear empties it when it is sent,
+  so a font added while the engine starts reaches it once. A change leaves
+  the replay only when the engine refuses it, also after its caller timed
+  out (the engine may still apply a request that went out; its late reply
+  decides).
 - A renderer that asks under an older generation (`known`) gets the queries
   it can still ask answered and the new generation, never an error for face
   ids from an earlier launch.

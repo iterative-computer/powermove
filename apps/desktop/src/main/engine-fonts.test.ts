@@ -351,6 +351,82 @@ describe('the engine font client', () => {
     expect(await added).toBe(3);
   });
 
+  it('sends a project font made while the engine is down once, after the replay', async () => {
+    const client = new EngineFontClient();
+    const engine = { generation: 0 };
+    const first = new FakeFontPort();
+    client.connect(first);
+    first.serve(engine);
+    const before = client.addProjectFont('Old', new Uint8Array([1]), {}, undefined);
+    first.serve(engine);
+    expect(await before).toBe(2);
+    first.goAway();
+    // The engine is restarting: one font added, then the project's fonts
+    // cleared and another added, all before the new port connects.
+    const added = client.addProjectFont('Brand', new Uint8Array([2]), {}, undefined);
+    const source = client.setFontSource('Brand', new Uint8Array([3]));
+    const second = new FakeFontPort();
+    client.connect(second);
+    expect(second.sent.map(r => [r.op, r.json])).toEqual([
+      [FONT_OP.open, '{"generationBase":3}'],
+      [FONT_OP.addProjectFont, '{"family":"Old"}'],
+      [FONT_OP.addProjectFont, '{"family":"Brand"}'],
+      [FONT_OP.setFontSource, '{"family":"Brand"}']
+    ]);
+    second.serve(engine);
+    expect(await added).toBe(5);
+    expect(await source).toBe(6);
+    second.goAway();
+    const cleared = client.clearProjectFonts();
+    const after = client.addProjectFont('New', new Uint8Array([4]), {}, undefined);
+    const third = new FakeFontPort();
+    client.connect(third);
+    expect(third.sent.map(r => [r.op, r.json])).toEqual([
+      [FONT_OP.open, '{"generationBase":7}'],
+      [FONT_OP.addProjectFont, '{"family":"Old"}'],
+      [FONT_OP.addProjectFont, '{"family":"Brand"}'],
+      [FONT_OP.setFontSource, '{"family":"Brand"}'],
+      [FONT_OP.clearProjectFonts, '{}'],
+      [FONT_OP.addProjectFont, '{"family":"New"}']
+    ]);
+    third.serve(engine);
+    expect(await cleared).toBe(11);
+    expect(await after).toBe(12);
+    // The replay now holds only what followed the clear.
+    third.goAway();
+    const fourth = new FakeFontPort();
+    client.connect(fourth);
+    expect(fourth.sent.map(r => [r.op, r.json])).toEqual([
+      [FONT_OP.open, '{"generationBase":13}'],
+      [FONT_OP.addProjectFont, '{"family":"New"}']
+    ]);
+  });
+
+  it('keeps a change that timed out after it went out in the replay unless the engine refuses it', async () => {
+    const timers = manualSchedule();
+    const client = new EngineFontClient({ timeoutMs: 50, schedule: timers.schedule });
+    const port = new FakeFontPort();
+    client.connect(port);
+    port.serve({ generation: 0 });
+    const slow = client.addProjectFont('Slow', new Uint8Array([1]), {}, undefined);
+    const refused = client.addProjectFont('Bad', new Uint8Array([2]), {}, undefined);
+    const [slowReq, badReq] = port.sent.splice(0);
+    timers.fire();
+    await expect(slow).rejects.toThrow(/did not answer within 50 ms/);
+    await expect(refused).rejects.toThrow(/did not answer within 50 ms/);
+    // The engine gets to them late: it applies one and refuses the other.
+    port.reply(slowReq!.id, FONT_STATUS.json, '{"generation":2}');
+    port.reply(badReq!.id, FONT_STATUS.error, 'not a font');
+    expect(client.generationSeen).toBe(2);
+    port.goAway();
+    const next = new FakeFontPort();
+    client.connect(next);
+    expect(next.sent.map(r => [r.op, r.json])).toEqual([
+      [FONT_OP.open, '{"generationBase":3}'],
+      [FONT_OP.addProjectFont, '{"family":"Slow"}']
+    ]);
+  });
+
   it('drops a refused change from the replay and reports the engine\'s error', async () => {
     const log = vi.fn();
     const client = new EngineFontClient({ log });
