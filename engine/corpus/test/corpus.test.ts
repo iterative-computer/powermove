@@ -217,7 +217,12 @@ describe('generation', () => {
   });
 
   test('generated media are listed', () => {
-    expect(Object.keys(GENERATED_MEDIA).sort()).toEqual(['corpus-art.svg', 'corpus-gem.obj', 'corpus-materials.glb', 'corpus-model.glb']);
+    expect(Object.keys(GENERATED_MEDIA).sort()).toEqual([
+      'corpus-16bit.png', 'corpus-art.svg', 'corpus-gem.obj', 'corpus-gray-alpha.png', 'corpus-indexed.png', 'corpus-materials.glb', 'corpus-model.glb',
+      'corpus-p3.heic', 'corpus-p3.jpg', 'corpus-p3.png', 'corpus-photo-420.jpg', 'corpus-photo-422-tall-mcu.jpg', 'corpus-photo-422.jpg', 'corpus-photo-444-tall-mcu.jpg', 'corpus-photo-444.jpg',
+      'corpus-photo-alpha.webp', 'corpus-photo-gray.jpg', 'corpus-photo-lossless.webp', 'corpus-photo-lossy.webp', 'corpus-photo-orientation-6.jpg',
+      'corpus-photo-progressive.jpg', 'corpus-photo.avif', 'corpus-photo.heic',
+    ]);
   });
 });
 
