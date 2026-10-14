@@ -342,6 +342,8 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
 
     async putProjectRange(readToken, source, meta, onBytes) {
       if (!enabled || !host.putProjectRange || !readToken) return false;
+      // An empty range has no bytes for main to read; the page sends it with its hash.
+      if (!(source.length > 0)) return false;
       const key = meta?.storageKey || source.id;
       if (!key) return false;
       const token = await host.beginPut({ key, type: source.type || meta?.type || '', size: source.length, revision: source.revision ?? null, origin: 'project' });

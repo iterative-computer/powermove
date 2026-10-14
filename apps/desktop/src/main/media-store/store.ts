@@ -54,8 +54,10 @@ type Stream = {
   received: number;
   queue: Promise<void>;
   sha256: ReturnType<typeof createHash>;
-  /** Every chunk so far was read by main itself (a project file range). */
-  readByMain: boolean;
+  /** Main itself read at least one chunk (a range of a project file). */
+  mainChunks: boolean;
+  /** The page sent at least one chunk. */
+  pageChunks: boolean;
 };
 
 export type MediaStoreOptions = {
@@ -204,7 +206,7 @@ export class MediaStore {
     const token = randomUUID().replaceAll('-', '');
     this.streams.set(token, {
       owner, key: request.key, type: request.type, size: request.size, revision: request.revision ?? null,
-      source: request.origin ?? 'stream', handle, file, received: 0, queue: Promise.resolve(), sha256: createHash('sha256'), readByMain: true
+      source: request.origin ?? 'stream', handle, file, received: 0, queue: Promise.resolve(), sha256: createHash('sha256'), mainChunks: false, pageChunks: false
     });
     return token;
   }
@@ -217,7 +219,7 @@ export class MediaStore {
     if (!(data instanceof Uint8Array) || data.byteLength < 1 || data.byteLength > STREAM_CHUNK_BYTES || offset !== stream.received || offset + data.byteLength > stream.size) {
       throw new MediaStoreError('Invalid media upload chunk.');
     }
-    if (from !== 'main') stream.readByMain = false;
+    if (from === 'main') stream.mainChunks = true; else stream.pageChunks = true;
     stream.received += data.byteLength;
     stream.sha256.update(data);
     stream.queue = stream.queue.then(async () => {
@@ -256,7 +258,10 @@ export class MediaStore {
       const sha256 = expected?.sha256;
       const byBlake3 = typeof blake3 === 'string' && HASH_HEX.test(blake3);
       const bySha256 = typeof sha256 === 'string' && HASH_HEX.test(sha256);
-      if (!byBlake3 && !bySha256 && !stream.readByMain) throw new MediaStoreError('A media upload names its BLAKE3 hash or its SHA-256 checksum.');
+      /* Only bytes main read itself may go unnamed, and only when it read
+         them all: an upload with no chunk at all names its hash too. */
+      const readByMain = stream.mainChunks && !stream.pageChunks;
+      if (!byBlake3 && !bySha256 && !readByMain) throw new MediaStoreError('A media upload names its BLAKE3 hash or its SHA-256 checksum.');
       const received = stream.sha256.digest('hex');
       if (bySha256 && received !== sha256) throw new MediaStoreError('The project media checksum does not match.', 'mismatch');
       if (!byBlake3 && await sha256OfFile(stream.file) !== received) {

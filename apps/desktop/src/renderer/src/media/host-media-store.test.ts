@@ -268,6 +268,9 @@ describe('opening a project file', () => {
     const { putProjectRange: _omit, ...older } = host;
     const on = createHostMediaStore({ host: older as MediaStoreBridge, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
     expect(await on.putProjectRange('reader-1', { id: 'a', type: '', offset: 0, length: 1 }, { id: 'a' })).toBe(false);
+    // An empty range has nothing for main to read: the page sends it, hash named.
+    const full = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
+    expect(await full.putProjectRange('reader-1', { id: 'a', type: '', offset: 0, length: 0 }, { id: 'a' })).toBe(false);
   });
 });
 

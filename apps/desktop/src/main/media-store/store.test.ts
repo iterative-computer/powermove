@@ -164,6 +164,17 @@ describe('MediaStore', () => {
     await store.chunk(3, fromPage, 0, data);
     await expect(store.finishStream(3, fromPage, {})).rejects.toThrow(/BLAKE3/);
     expect(await store.record('media:n')).toBeNull();
+    // Mixed: one page chunk is enough to need a hash.
+    const mixed = await store.beginStream(3, { key: 'media:o', type: '', size: data.length });
+    await store.chunk(3, mixed, 0, data.subarray(0, 1000), 'main');
+    await store.chunk(3, mixed, 1000, data.subarray(1000));
+    await expect(store.finishStream(3, mixed, {})).rejects.toThrow(/BLAKE3/);
+    // An empty upload has no bytes main read, so it names its hash too.
+    const empty = await store.beginStream(3, { key: 'media:e', type: '', size: 0 });
+    await expect(store.finishStream(3, empty, {})).rejects.toThrow(/BLAKE3/);
+    expect(await store.record('media:e')).toBeNull();
+    const named = await store.beginStream(3, { key: 'media:e', type: '', size: 0 });
+    expect(await store.finishStream(3, named, { blake3: blake3Hex(new Uint8Array(0)) })).toMatchObject({ key: 'media:e', size: 0 });
   });
 
   it('refuses out-of-order chunks, other owners, and incomplete uploads', async () => {
