@@ -63,17 +63,34 @@ pub unsafe extern "C" fn pm_add_font(key: *mut u8, key_len: usize, data: *mut u8
 /// # Safety
 /// Both buffers must come from `pm_alloc` with these lengths.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pm_run(answers: *mut u8, answers_len: usize, corpus_json: *mut u8, corpus_len: usize) -> u32 {
+pub unsafe extern "C" fn pm_run(
+    answers: *mut u8,
+    answers_len: usize,
+    corpus_json: *mut u8,
+    corpus_len: usize,
+) -> u32 {
     let answers = unsafe { take(answers, answers_len) };
     let corpus_json = unsafe { take(corpus_json, corpus_len) };
-    let Ok(answers) = serde_json::from_slice::<Answers>(&answers) else { return 2 };
-    let Ok(corpus_json) = String::from_utf8(corpus_json) else { return 2 };
+    let Ok(answers) = serde_json::from_slice::<Answers>(&answers) else {
+        return 2;
+    };
+    let Ok(corpus_json) = String::from_utf8(corpus_json) else {
+        return 2;
+    };
     let fonts = FONTS.with(|f| f.borrow().clone());
-    if answers.sources().iter().any(|(b, i)| !fonts.contains_key(&subset_key(b, *i))) {
+    if answers
+        .sources()
+        .iter()
+        .any(|(b, i)| !fonts.contains_key(&subset_key(b, *i)))
+    {
         return 1;
     }
     let cases = corpus::load_corpus(&corpus_json);
-    let (outputs, misses, pending) = corpus::run_replay(&answers, |b, i| (fonts[&subset_key(b, i)].clone(), 0), &cases);
+    let (outputs, misses, pending) = corpus::run_replay(
+        &answers,
+        |b, i| (fonts[&subset_key(b, i)].clone(), 0),
+        &cases,
+    );
     REPORT.with(|r| *r.borrow_mut() = (misses, pending));
     let json = serde_json::to_vec(&outputs).expect("layout output serializes");
     OUT.with(|o| *o.borrow_mut() = json);
@@ -86,14 +103,25 @@ pub unsafe extern "C" fn pm_run(answers: *mut u8, answers_len: usize, corpus_jso
 /// # Safety
 /// Both buffers must come from `pm_alloc` with these lengths.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pm_run_level2(inputs: *mut u8, inputs_len: usize, corpus_json: *mut u8, corpus_len: usize) -> u32 {
+pub unsafe extern "C" fn pm_run_level2(
+    inputs: *mut u8,
+    inputs_len: usize,
+    corpus_json: *mut u8,
+    corpus_len: usize,
+) -> u32 {
     let inputs = unsafe { take(inputs, inputs_len) };
     let corpus_json = unsafe { take(corpus_json, corpus_len) };
-    let Ok(inputs) = serde_json::from_slice::<corpus::Level2Inputs>(&inputs) else { return 2 };
-    let Ok(corpus_json) = String::from_utf8(corpus_json) else { return 2 };
+    let Ok(inputs) = serde_json::from_slice::<corpus::Level2Inputs>(&inputs) else {
+        return 2;
+    };
+    let Ok(corpus_json) = String::from_utf8(corpus_json) else {
+        return 2;
+    };
     let fonts = FONTS.with(|f| f.borrow().clone());
     let cases = corpus::load_corpus(&corpus_json);
-    let Ok(outputs) = corpus::run_level2(&inputs, |k| fonts.get(k).cloned(), &cases) else { return 1 };
+    let Ok(outputs) = corpus::run_level2(&inputs, |k| fonts.get(k).cloned(), &cases) else {
+        return 1;
+    };
     let json = serde_json::to_vec(&outputs).expect("layout output serializes");
     OUT.with(|o| *o.borrow_mut() = json);
     0

@@ -155,9 +155,8 @@ impl FontRegistry {
     pub fn answer(&mut self, queries: String) -> Result<String> {
         let queries: Vec<Query> = serde_json::from_str(&queries).map_err(err)?;
         let answers = self.inner.answer(&queries).map_err(err)?;
-        let mut v = serde_json::to_value(&answers).map_err(err)?;
-        v["generation"] = self.inner.generation().into();
-        json(&v)
+        // The generation goes last: main reads it off the end.
+        answers.reply_json(self.inner.generation()).map_err(err)
     }
 
     /// The metrics-and-shaping subset of face `index` of blob `blob` (a

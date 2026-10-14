@@ -263,6 +263,29 @@ describe('NativeEngine with fake engines', () => {
     expect([...live('job').ports.values()].filter((p) => p.peer === 'renderer')).toHaveLength(0);
   });
 
+  it('gives main\'s font client one font port to each interactive launch, and none to the job engine', async () => {
+    const delivered: ClientPortInfo[] = [];
+    host.addClient(-1, (info) => delivered.push(info), { peer: 'fonts', processes: ['interactive'] });
+    await settle();
+    expect(delivered.map((d) => [d.process, d.generation])).toEqual([['interactive', 1]]);
+    expect([...live('interactive').ports.values()].filter((p) => p.peer === 'fonts')).toHaveLength(1);
+    expect([...live('job').ports.values()].filter((p) => p.peer === 'fonts')).toHaveLength(0);
+    // A restarted interactive engine gets a new font port; a restarted job engine none.
+    live('interactive').exit(139);
+    await settle();
+    timers.at(-1)!.fn();
+    await settle();
+    live('job').exit(139);
+    await settle();
+    timers.at(-1)!.fn();
+    await settle();
+    expect(delivered.map((d) => [d.process, d.generation])).toEqual([['interactive', 1], ['interactive', 2]]);
+    expect([...live('interactive').ports.values()].filter((p) => p.peer === 'fonts')).toHaveLength(1);
+    host.removeClient(-1);
+    await settle();
+    expect([...live('interactive').ports.values()].filter((p) => p.peer === 'fonts')).toHaveLength(0);
+  });
+
   it('posts to a utility process only once, and sends nothing to an engine after shutdown', async () => {
     host.addClient(1, () => {});
     await settle();

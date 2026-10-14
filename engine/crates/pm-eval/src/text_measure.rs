@@ -127,8 +127,9 @@ fn outline_box(data: &[u8], index: u32, glyph: u32, coords: &[(u32, f32)]) -> Gl
     pen.any.then_some((pen.b, upem))
 }
 
-/// `gfx::RectF`: origin and size in `float`; edges are recomputed
-/// (`right() = x + width`), which Blink's ink bounds inherit.
+/// `gfx::RectF`: origin and size in `float`. Edges are recomputed
+/// (`right() = x + width`), and `gfx::SizeF` clamps a width or height of at
+/// most `8 × f32::EPSILON` to 0 (an empty rectangle).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct RectF {
     x: f32,
@@ -137,15 +138,62 @@ struct RectF {
     h: f32,
 }
 
+/// `gfx::SizeF::kTrivial`.
+const SIZE_TRIVIAL: f32 = 8.0 * f32::EPSILON;
+
+/// `gfx::SizeF::clamp`.
+fn size_clamp(v: f32) -> f32 {
+    if v > SIZE_TRIVIAL { v } else { 0.0 }
+}
+
+/// `gfx::SizeF::next`: the next `float` up, from at least `kTrivial`.
+fn size_next(v: f32) -> f32 {
+    next_up(v.max(SIZE_TRIVIAL))
+}
+
+/// `std::nextafter(v, +infinity)`, saturating at `f32::MAX` as
+/// `gfx::BoundingRect` does.
+fn next_up(v: f32) -> f32 {
+    if v.is_nan() || v >= f32::MAX {
+        return v.min(f32::MAX);
+    }
+    let bits = v.to_bits();
+    f32::from_bits(if v == 0.0 {
+        1
+    } else if v > 0.0 {
+        bits + 1
+    } else {
+        bits - 1
+    })
+}
+
 impl RectF {
-    /// `gfx::SkRectToRectF`.
-    fn from_sk(l: f32, t: f32, r: f32, b: f32) -> RectF {
+    /// `gfx::RectF(x, y, width, height)`.
+    fn new(x: f32, y: f32, w: f32, h: f32) -> RectF {
         RectF {
-            x: l,
-            y: t,
-            w: (r - l).max(0.0),
-            h: (b - t).max(0.0),
+            x,
+            y,
+            w: size_clamp(w),
+            h: size_clamp(h),
         }
+    }
+
+    /// `gfx::SkRectToRectF`, which is `gfx::BoundingRect(left_top,
+    /// right_bottom)`: when `left + (right - left)` is not exactly `right`,
+    /// the width grows to the next `float` (likewise the height), whichever
+    /// way the sum rounded.
+    fn from_sk(l: f32, t: f32, r: f32, b: f32) -> RectF {
+        let (left, right) = (l.min(r), l.max(r));
+        let (top, bottom) = (t.min(b), t.max(b));
+        let mut w = right - left;
+        if left + w != right {
+            w = next_up(w);
+        }
+        let mut h = bottom - top;
+        if top + h != bottom {
+            h = next_up(h);
+        }
+        RectF::new(left, top, w, h)
     }
 
     fn is_empty(&self) -> bool {
@@ -165,7 +213,9 @@ impl RectF {
         self.y += dy;
     }
 
-    /// `RectF::Union`.
+    /// `RectF::Union` (`UnionEvenIfEmpty` for two non-empty rectangles): when
+    /// `x + (r - x)` rounds below `r`, the width grows to the next `float`
+    /// (likewise the height), so the union contains both rectangles.
     fn union(&mut self, o: &RectF) {
         if self.is_empty() {
             *self = *o;
@@ -174,27 +224,72 @@ impl RectF {
         if o.is_empty() {
             return;
         }
-        let l = self.x.min(o.x);
-        let t = self.y.min(o.y);
-        let r = self.right().max(o.right());
-        let b = self.bottom().max(o.bottom());
-        *self = RectF {
-            x: l,
-            y: t,
-            w: (r - l).max(0.0),
-            h: (b - t).max(0.0),
-        };
+        let rx = self.x.min(o.x);
+        let ry = self.y.min(o.y);
+        let rr = self.right().max(o.right());
+        let rb = self.bottom().max(o.bottom());
+        *self = RectF::new(rx, ry, rr - rx, rb - ry);
+        if self.right() < rr && self.w < f32::MAX {
+            self.w = size_next(self.w);
+        }
+        if self.bottom() < rb && self.h < f32::MAX {
+            self.h = size_next(self.h);
+        }
+    }
+}
+
+/// Blink's `GlyphBoundsAccumulator` for a horizontal run: edges kept as
+/// `float` minima and maxima (the first non-empty glyph initializes them).
+#[derive(Default)]
+struct GlyphBounds {
+    min_x: f32,
+    max_x: f32,
+    min_y: f32,
+    max_y: f32,
+}
+
+impl GlyphBounds {
+    /// `Unite(bounds_for_glyph, origin, glyph_offset)`.
+    fn unite(&mut self, mut glyph: RectF, origin: f32, offset: (f32, f32)) {
+        if glyph.is_empty() {
+            return;
+        }
+        glyph.x += origin;
+        glyph.offset(offset.0, offset.1);
+        if self.min_x == 0.0 && self.max_x == 0.0 {
+            self.min_x = glyph.x;
+            self.max_x = glyph.right();
+            self.min_y = glyph.y;
+            self.max_y = glyph.bottom();
+        } else {
+            self.min_x = self.min_x.min(glyph.x);
+            self.max_x = self.max_x.max(glyph.right());
+            self.min_y = self.min_y.min(glyph.y);
+            self.max_y = self.max_y.max(glyph.bottom());
+        }
+    }
+
+    /// `BuildBounds`.
+    fn build(&self) -> RectF {
+        RectF::new(
+            self.min_x,
+            self.min_y,
+            self.max_x - self.min_x,
+            self.max_y - self.min_y,
+        )
     }
 }
 
 impl<R: FontResolver> CompatMeasure<R> {
-    /// Blink's `glyph_bounds` for a measured string (`CachingWordShaper::
-    /// Width` over `ShapeResult::ComputeInkBounds`): every glyph's box
-    /// offset by its pen position, accumulated in `float` per word and run,
-    /// with advances and offsets in 16.16 fixed point.
+    /// Blink's `glyph_bounds` for a measured string (`TextMetrics::
+    /// MeasureRuns`): per item, `ShapeResult::ComputeInkBounds` offset by the
+    /// item's x and united in `float`. Within a run, each glyph's box is
+    /// placed at its pen origin, an `InlineLayoutUnit` (16.16 fixed point)
+    /// starting at the run's advance rounded up and advanced by the glyph
+    /// advances exactly, converted to `float` per glyph.
     fn ink(&mut self, measured: &pm_text::blink::measure::Measured) -> RectF {
         let mut ink = RectF::default();
-        let mut width = 0.0f32;
+        let mut xpos = 0.0f32;
         for item in &measured.items {
             let mut item_ink = RectF::default();
             let mut run_advance = 0.0f32;
@@ -205,53 +300,56 @@ impl<R: FontResolver> CompatMeasure<R> {
                 item.runs.iter().collect()
             };
             for run in runs {
-                let mut run_ink = RectF::default();
-                let mut origin = run_advance;
+                let mut bounds = GlyphBounds::default();
+                // `InlineLayoutUnit::FromFloatCeil(run_advance)`.
+                let mut origin = (run_advance * 65536.0).ceil() as i64;
                 for g in &run.glyphs {
-                    let advance = g.advance as f32 / 65536.0;
                     if g.glyph != UNMATCHED_VS_GLYPH
                         && let Some((b, upem)) = self.glyph_box(run.face, g.glyph, &run.coords)
                     {
-                        let scale = f64::from(run.size) / f64::from(upem);
-                        let [l, t, r, bt] = skia_glyph_rect(b, scale);
-                        let mut rect = RectF::from_sk(l, t, r, bt);
-                        if !rect.is_empty() {
-                            rect.offset(
-                                origin + g.x_offset as f32 / 65536.0,
-                                -(g.y_offset as f32 / 65536.0),
-                            );
-                            run_ink.union(&rect);
-                        }
+                        let [l, t, r, bt] = skia_glyph_rect(b, upem, run.size);
+                        let offset = (fixed_to_float(g.x_offset), -fixed_to_float(g.y_offset));
+                        bounds.unite(RectF::from_sk(l, t, r, bt), origin as f32 / 65536.0, offset);
                     }
-                    origin += advance;
+                    origin += i64::from(g.advance);
                 }
-                item_ink.union(&run_ink);
+                item_ink.union(&bounds.build());
                 run_advance += run.width;
             }
-            item_ink.offset(width, 0.0);
+            item_ink.offset(xpos, 0.0);
             ink.union(&item_ink);
-            width += item.width;
+            xpos += item.width;
         }
         ink
     }
 }
 
-/// A glyph's bounds as Skia reports them on macOS: CoreText's bounding
-/// rectangle (origin and size in `CGFloat`, y up) converted with
-/// `SkRect::MakeXYWH(x, -y - h, w, h)` in `float`.
-fn skia_glyph_rect(b: [f32; 4], scale: f64) -> [f32; 4] {
-    // CoreText scales outline points by a `float` factor and reports the
-    // box as a `CGRect` (`double`): origin and size.
-    let s = scale as f32;
-    let (x0, y0, x1, y1) = (b[0] * s, b[1] * s, b[2] * s, b[3] * s);
-    let x = f64::from(x0);
-    let y = f64::from(y0);
-    let w = f64::from(x1) - x;
-    let h = f64::from(y1) - y;
-    // `SkRect::MakeXYWH(x, -y - h, w, h)` with `float` members.
-    let left = x as f32;
-    let top = (-y - h) as f32;
-    [left, top, left + w as f32, top + h as f32]
+/// `HarfBuzzPositionToFloat` (`SkFixedToFloat`).
+fn fixed_to_float(v: i32) -> f32 {
+    v as f32 / 65536.0
+}
+
+/// A glyph's ink box as Blink reports it on macOS
+/// (`SkFontGetBoundsForGlyph`): the bounds of the glyph's path,
+/// `SkFont::getPath(glyph).getBounds()`, in `float`, y down.
+///
+/// `SkFont::getPath` asks the strike at Skia's canonical path size
+/// (`SkFontPriv::kCanonicalTextSizeForPaths`, 64 px) and scales the path by
+/// `size / 64` in `float` (`SkFont::setupForAsPaths`). At 64 px CoreText
+/// builds the path in `CGFloat` (`CTFontCreatePathForGlyph`), which
+/// `SkScalerContext_Mac::generatePath` converts to `float` points (the 4x
+/// unhinting scale in x and the y flip are exact). The path's bounds are the
+/// bounds of its points, control points included: the outline's control box.
+///
+/// So each edge is `f32(f32(v × 64 / upem) × (size / 64))`. Scaling by the
+/// size directly differs in the last bit at fractional sizes.
+fn skia_glyph_rect(b: [f32; 4], upem: f32, size: f32) -> [f32; 4] {
+    const CANONICAL: f32 = 64.0;
+    let at_canonical = |v: f32| (f64::from(v) * f64::from(CANONICAL) / f64::from(upem)) as f32;
+    let scale = size / CANONICAL;
+    let map = |v: f32| at_canonical(v) * scale;
+    // Font units are y up; the path is y down.
+    [map(b[0]), -map(b[3]), map(b[2]), -map(b[1])]
 }
 
 /// HarfBuzz's glyph for an unmatched variation selector, which Blink drops.

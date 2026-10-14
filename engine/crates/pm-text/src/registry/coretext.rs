@@ -1,25 +1,27 @@
+use super::{
+    FaceSource, FallbackManifest, FamilyInfo, MANIFEST_SAMPLES, ManifestFace, ProjectDescriptors,
+    ProjectStyle, ScriptFallback, StyleInfo, content_key, select_face, source_key, web_synthesis,
+};
+use crate::font::{FaceFacts, FaceId, FaceInfo, FontBytes, FontDesc, FontResolver, WebDescriptors};
+use crate::sfnt::build_sfnt;
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::{NSFont, NSFontManager};
 use objc2_core_foundation::{
-    CFArray, CFCharacterSet, CFData, CFDictionary, CFNumber, CFRange, CFRetained, CFString, CFType, CFURL,
+    CFArray, CFCharacterSet, CFData, CFDictionary, CFNumber, CFRange, CFRetained, CFString, CFType,
+    CFURL,
 };
 use objc2_core_text::{
     CTFont, CTFontCollection, CTFontDescriptor, CTFontManagerCopyAvailableFontFamilyNames,
-    CTFontManagerCreateFontDescriptorFromData, CTFontSymbolicTraits, CTFontTableOptions, CTFontUIFontType,
-    kCTFontCascadeListAttribute, kCTFontDisplayNameAttribute, kCTFontFamilyNameAttribute, kCTFontFamilyNameKey,
-    kCTFontNameAttribute, kCTFontStyleNameAttribute, kCTFontStyleNameKey, kCTFontSymbolicTrait,
-    kCTFontTraitsAttribute, kCTFontURLAttribute, kCTFontVariationAttribute, kCTFontVariationAxesAttribute,
-    kCTFontVariationAxisIdentifierKey, kCTFontVariationAxisMaximumValueKey, kCTFontVariationAxisMinimumValueKey,
-    kCTFontWeightTrait,
+    CTFontManagerCreateFontDescriptorFromData, CTFontSymbolicTraits, CTFontTableOptions,
+    CTFontUIFontType, kCTFontCascadeListAttribute, kCTFontDisplayNameAttribute,
+    kCTFontFamilyNameAttribute, kCTFontFamilyNameKey, kCTFontNameAttribute,
+    kCTFontStyleNameAttribute, kCTFontStyleNameKey, kCTFontSymbolicTrait, kCTFontTraitsAttribute,
+    kCTFontURLAttribute, kCTFontVariationAttribute, kCTFontVariationAxesAttribute,
+    kCTFontVariationAxisIdentifierKey, kCTFontVariationAxisMaximumValueKey,
+    kCTFontVariationAxisMinimumValueKey, kCTFontWeightTrait,
 };
 use objc2_foundation::{NSArray, NSNumber, NSString};
-use super::{
-    FaceSource, FallbackManifest, FamilyInfo, ManifestFace, MANIFEST_SAMPLES, ProjectDescriptors, ProjectStyle, ScriptFallback, StyleInfo,
-    content_key, select_face, source_key, web_synthesis,
-};
-use crate::font::{FaceFacts, FaceId, FaceInfo, FontBytes, FontDesc, FontResolver, WebDescriptors};
-use crate::sfnt::build_sfnt;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -68,7 +70,11 @@ fn appkit_to_css_weight(w: i32) -> i32 {
     if w < 0 {
         return NORMAL_WEIGHT;
     }
-    if w < 7 { ((w - 1) * 100).max(100) } else { ((w - 2) * 100).min(900) }
+    if w < 7 {
+        ((w - 1) * 100).max(100)
+    } else {
+        ((w - 2) * 100).min(900)
+    }
 }
 
 fn better_weight_match(desired: i32, chosen: i32, candidate: i32, lower: i32, upper: i32) -> bool {
@@ -103,7 +109,14 @@ fn better_weight_match(desired: i32, chosen: i32, candidate: i32, lower: i32, up
 }
 
 /// `BetterChoiceCT`.
-fn better_choice_ct(desired_traits: u32, desired_weight: i32, chosen_traits: u32, chosen_weight: i32, cand_traits: u32, cand_weight: i32) -> bool {
+fn better_choice_ct(
+    desired_traits: u32,
+    desired_weight: i32,
+    chosen_traits: u32,
+    chosen_weight: i32,
+    cand_traits: u32,
+    cand_weight: i32,
+) -> bool {
     for mask in [TRAIT_CONDENSED, TRAIT_EXPANDED, TRAIT_ITALIC] {
         let desired = desired_traits & mask != 0;
         let chosen_unwanted = desired != (chosen_traits & mask != 0);
@@ -123,7 +136,9 @@ fn cfstr(s: &str) -> CFRetained<CFString> {
 }
 
 fn num_f32(v: &CFType) -> Option<f32> {
-    v.downcast_ref::<CFNumber>().and_then(|n| n.as_f64()).map(|f| f as f32)
+    v.downcast_ref::<CFNumber>()
+        .and_then(|n| n.as_f64())
+        .map(|f| f as f32)
 }
 
 fn num_i64(v: &CFType) -> Option<i64> {
@@ -134,13 +149,20 @@ fn num_i64(v: &CFType) -> Option<i64> {
 fn traits_of(dict: &CFDictionary) -> (Option<u32>, Option<f32>) {
     // SAFETY: the traits dictionary maps CFString keys to CFNumber values.
     let dict: &CFDictionary<CFString, CFType> = unsafe { dict.cast_unchecked() };
-    let sym = dict.get(unsafe { kCTFontSymbolicTrait }).and_then(|v| num_i64(&v)).map(|v| v as u32);
-    let weight = dict.get(unsafe { kCTFontWeightTrait }).and_then(|v| num_f32(&v));
+    let sym = dict
+        .get(unsafe { kCTFontSymbolicTrait })
+        .and_then(|v| num_i64(&v))
+        .map(|v| v as u32);
+    let weight = dict
+        .get(unsafe { kCTFontWeightTrait })
+        .and_then(|v| num_f32(&v));
     (sym, weight)
 }
 
 fn descriptor_traits(d: &CTFontDescriptor) -> (Option<u32>, Option<f32>) {
-    let Some(t) = (unsafe { d.attribute(kCTFontTraitsAttribute) }) else { return (None, None) };
+    let Some(t) = (unsafe { d.attribute(kCTFontTraitsAttribute) }) else {
+        return (None, None);
+    };
     match t.downcast::<CFDictionary>() {
         Ok(dict) => traits_of(&dict),
         Err(_) => (None, None),
@@ -182,7 +204,11 @@ pub enum RegistryError {
     #[error("unknown font blob {0}")]
     UnknownBlob(String),
     #[error("font blob {blob} has no face {index}: {source}")]
-    Subset { blob: String, index: u32, source: read_fonts::ReadError },
+    Subset {
+        blob: String,
+        index: u32,
+        source: read_fonts::ReadError,
+    },
 }
 
 pub struct CoreTextRegistry {
@@ -239,13 +265,20 @@ impl CoreTextRegistry {
 
     /// Installed font files read so far, with their sizes.
     pub fn files_read(&self) -> Vec<(PathBuf, u64)> {
-        let mut out: Vec<(PathBuf, u64)> = self.files.iter().map(|(p, (d, _))| (p.clone(), d.as_slice().len() as u64)).collect();
+        let mut out: Vec<(PathBuf, u64)> = self
+            .files
+            .iter()
+            .map(|(p, (d, _))| (p.clone(), d.as_slice().len() as u64))
+            .collect();
         out.sort();
         out
     }
 
     pub fn faces(&self) -> impl Iterator<Item = (FaceId, &FaceInfo)> {
-        self.faces.iter().enumerate().map(|(i, f)| (i as FaceId, &f.info))
+        self.faces
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (i as FaceId, &f.info))
     }
 
     /// Increments whenever project fonts or sources change. Answers given
@@ -261,11 +294,24 @@ impl CoreTextRegistry {
     /// data, descriptors)` added to the document). Project families take
     /// precedence over installed families of the same name, and the face is
     /// the family's variable-font source (`PM.fontSource`) as in player.ts.
-    pub fn add_project_font(&mut self, family: &str, data: &[u8], index: u32, descriptors: ProjectDescriptors) -> Result<(), RegistryError> {
+    pub fn add_project_font(
+        &mut self,
+        family: &str,
+        data: &[u8],
+        index: u32,
+        descriptors: ProjectDescriptors,
+    ) -> Result<(), RegistryError> {
         let (data, blob, ct) = sanitized_web_font(data, index)?;
-        self.sources.insert(family.to_string(), (data.clone(), blob.clone()));
+        self.sources
+            .insert(family.to_string(), (data.clone(), blob.clone()));
         self.blobs.insert(blob.clone(), data.clone());
-        self.project.push(ProjectFace { family: family.to_string(), descriptors, data, blob, ct });
+        self.project.push(ProjectFace {
+            family: family.to_string(),
+            descriptors,
+            data,
+            blob,
+            ct,
+        });
         self.changed();
         Ok(())
     }
@@ -294,18 +340,39 @@ impl CoreTextRegistry {
 
     /// `FontFaceCache::Get`: the project face for `family` at `desc`.
     fn project_face(&mut self, family: &str, desc: &FontDesc) -> Option<FaceId> {
-        let candidates: Vec<usize> = (0..self.project.len()).filter(|&i| self.project[i].family.eq_ignore_ascii_case(family)).collect();
+        let candidates: Vec<usize> = (0..self.project.len())
+            .filter(|&i| self.project[i].family.eq_ignore_ascii_case(family))
+            .collect();
         if candidates.is_empty() {
             return None;
         }
         // Later faces with equal capabilities shadow earlier ones (the last
         // added face of a segmented face is tried first).
-        let descriptors: Vec<ProjectDescriptors> = candidates.iter().rev().map(|&i| self.project[i].descriptors).collect();
+        let descriptors: Vec<ProjectDescriptors> = candidates
+            .iter()
+            .rev()
+            .map(|&i| self.project[i].descriptors)
+            .collect();
         let chosen = candidates[candidates.len() - 1 - select_face(&descriptors, desc)?];
         let (bold, italic) = web_synthesis(&self.project[chosen].descriptors, desc);
         let p = &self.project[chosen];
-        let (ct, data, blob, web) = (p.ct.clone(), p.data.clone(), p.blob.clone(), p.descriptors.web());
-        Some(self.intern(ct, bold, italic, Some(Custom { data, index: 0, blob, web: Some(web) })))
+        let (ct, data, blob, web) = (
+            p.ct.clone(),
+            p.data.clone(),
+            p.blob.clone(),
+            p.descriptors.web(),
+        );
+        Some(self.intern(
+            ct,
+            bold,
+            italic,
+            Some(Custom {
+                data,
+                index: 0,
+                blob,
+                web: Some(web),
+            }),
+        ))
     }
 
     // ------------------------------------------------------------ enumeration
@@ -315,7 +382,8 @@ impl CoreTextRegistry {
     pub fn family_names(&self) -> Vec<String> {
         let families = unsafe { CTFontManagerCopyAvailableFontFamilyNames() };
         // SAFETY: the array holds CFStrings.
-        let families: CFRetained<CFArray<CFString>> = unsafe { CFRetained::cast_unchecked(families) };
+        let families: CFRetained<CFArray<CFString>> =
+            unsafe { CFRetained::cast_unchecked(families) };
         let mut out: Vec<String> = families.iter().map(|s| s.to_string()).collect();
         let mut seen: HashSet<String> = out.iter().map(|s| s.to_lowercase()).collect();
         for p in &self.project {
@@ -333,25 +401,42 @@ impl CoreTextRegistry {
             .iter()
             .filter(|p| p.family.eq_ignore_ascii_case(family))
             .map(|p| StyleInfo {
-                name: unsafe { p.ct.name(kCTFontStyleNameKey) }.map(|s| s.to_string()).unwrap_or_default(),
+                name: unsafe { p.ct.name(kCTFontStyleNameKey) }
+                    .map(|s| s.to_string())
+                    .unwrap_or_default(),
                 postscript_name: unsafe { p.ct.post_script_name() }.to_string(),
                 weight: p.descriptors.weight.0,
                 italic: p.descriptors.style != ProjectStyle::Normal,
             })
             .collect();
         if !project.is_empty() {
-            let variable = self.project.iter().filter(|p| p.family.eq_ignore_ascii_case(family)).any(|p| !crate::font::axes(p.data.as_slice(), 0).is_empty());
-            return Some(FamilyInfo { name: family.to_string(), styles: project, variable, project: true });
+            let variable = self
+                .project
+                .iter()
+                .filter(|p| p.family.eq_ignore_ascii_case(family))
+                .any(|p| !crate::font::axes(p.data.as_slice(), 0).is_empty());
+            return Some(FamilyInfo {
+                name: family.to_string(),
+                styles: project,
+                variable,
+                project: true,
+            });
         }
         let all = unsafe { CTFontCollection::from_available_fonts(None) };
         let list = unsafe { all.matching_font_descriptors_for_family(&cfstr(family), None) }?;
         // SAFETY: the array holds CTFontDescriptors.
-        let list: CFRetained<CFArray<CTFontDescriptor>> = unsafe { CFRetained::cast_unchecked(list) };
+        let list: CFRetained<CFArray<CTFontDescriptor>> =
+            unsafe { CFRetained::cast_unchecked(list) };
         let mut styles = Vec::new();
         let mut variable = false;
         for desc in list.iter() {
             let (sym, weight) = descriptor_traits(&desc);
-            let string = |key: &CFString| unsafe { desc.attribute(key) }.and_then(|v| v.downcast::<CFString>().ok()).map(|s| s.to_string()).unwrap_or_default();
+            let string = |key: &CFString| {
+                unsafe { desc.attribute(key) }
+                    .and_then(|v| v.downcast::<CFString>().ok())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            };
             styles.push(StyleInfo {
                 name: string(unsafe { kCTFontStyleNameAttribute }),
                 postscript_name: string(unsafe { kCTFontNameAttribute }),
@@ -363,7 +448,12 @@ impl CoreTextRegistry {
             }
         }
         styles.sort_by(|a, b| a.weight.total_cmp(&b.weight).then(a.italic.cmp(&b.italic)));
-        Some(FamilyInfo { name: family.to_string(), styles, variable, project: false })
+        Some(FamilyInfo {
+            name: family.to_string(),
+            styles,
+            variable,
+            project: false,
+        })
     }
 
     /// The faces of `family` as font sources, for level 2 layout: a project
@@ -375,30 +465,55 @@ impl CoreTextRegistry {
             .project
             .iter()
             .filter(|p| p.family.eq_ignore_ascii_case(family))
-            .map(|p| FaceSource { blob: p.blob.clone(), index: 0, postscript_name: unsafe { p.ct.post_script_name() }.to_string() })
+            .map(|p| FaceSource {
+                blob: p.blob.clone(),
+                index: 0,
+                postscript_name: unsafe { p.ct.post_script_name() }.to_string(),
+            })
             .collect();
         if !project.is_empty() {
             return project;
         }
         let mut fonts: Vec<CFRetained<CTFont>> = Vec::new();
         let all = unsafe { CTFontCollection::from_available_fonts(None) };
-        if let Some(list) = unsafe { all.matching_font_descriptors_for_family(&cfstr(family), None) } {
+        if let Some(list) =
+            unsafe { all.matching_font_descriptors_for_family(&cfstr(family), None) }
+        {
             // SAFETY: the array holds CTFontDescriptors.
-            let list: CFRetained<CFArray<CTFontDescriptor>> = unsafe { CFRetained::cast_unchecked(list) };
-            fonts.extend(list.iter().map(|d| unsafe { CTFont::with_font_descriptor(&d, 16.0, std::ptr::null()) }));
+            let list: CFRetained<CFArray<CTFontDescriptor>> =
+                unsafe { CFRetained::cast_unchecked(list) };
+            fonts.extend(
+                list.iter()
+                    .map(|d| unsafe { CTFont::with_font_descriptor(&d, 16.0, std::ptr::null()) }),
+            );
         }
         if fonts.is_empty() {
             for italic in [false, true] {
-                let desc = FontDesc { weight: 400.0, italic, size: 16.0 };
-                let found = if family == "system-ui" { self.match_system_ui(&desc) } else { self.match_font_family(family, &desc) };
+                let desc = FontDesc {
+                    weight: 400.0,
+                    italic,
+                    size: 16.0,
+                };
+                let found = if family == "system-ui" {
+                    self.match_system_ui(&desc)
+                } else {
+                    self.match_font_family(family, &desc)
+                };
                 fonts.extend(found);
             }
         }
         let mut out: Vec<FaceSource> = Vec::new();
         for ct in fonts {
             let (_, index, blob) = self.font_bytes(&ct);
-            let source = FaceSource { blob, index, postscript_name: unsafe { ct.post_script_name() }.to_string() };
-            if !out.iter().any(|f| f.blob == source.blob && f.index == source.index) {
+            let source = FaceSource {
+                blob,
+                index,
+                postscript_name: unsafe { ct.post_script_name() }.to_string(),
+            };
+            if !out
+                .iter()
+                .any(|f| f.blob == source.blob && f.index == source.index)
+            {
                 out.push(source);
             }
         }
@@ -417,27 +532,48 @@ impl CoreTextRegistry {
             return m.clone();
         }
         let manifest = self.build_fallback_manifest(base_family);
-        self.manifests.insert(base_family.to_string(), manifest.clone());
+        self.manifests
+            .insert(base_family.to_string(), manifest.clone());
         manifest
     }
 
     fn build_fallback_manifest(&mut self, base_family: &str) -> FallbackManifest {
-        let mut manifest = FallbackManifest { base_family: base_family.to_string(), ..Default::default() };
+        let mut manifest = FallbackManifest {
+            base_family: base_family.to_string(),
+            ..Default::default()
+        };
         // Regular and bold bases, so the manifest carries both weights of
         // each substitute.
         let mut bases = Vec::new();
         for weight in [400.0, 700.0] {
-            let desc = FontDesc { weight, italic: false, size: 16.0 };
-            let base = if base_family == "system-ui" { self.match_system_ui(&desc) } else { self.match_font_family(base_family, &desc) };
+            let desc = FontDesc {
+                weight,
+                italic: false,
+                size: 16.0,
+            };
+            let base = if base_family == "system-ui" {
+                self.match_system_ui(&desc)
+            } else {
+                self.match_font_family(base_family, &desc)
+            };
             bases.extend(base);
         }
-        let Some(first) = bases.first().cloned() else { return manifest };
+        let Some(first) = bases.first().cloned() else {
+            return manifest;
+        };
         let base_name = unsafe { first.family_name() }.to_string();
         let mut faces: Vec<ManifestFace> = Vec::new();
         let mut add_face = |reg: &mut Self, family: &str, ct: &CTFont| {
             let (_, index, blob) = reg.font_bytes(ct);
-            let source = FaceSource { blob, index, postscript_name: unsafe { ct.post_script_name() }.to_string() };
-            let face = ManifestFace { family: family.to_string(), source };
+            let source = FaceSource {
+                blob,
+                index,
+                postscript_name: unsafe { ct.post_script_name() }.to_string(),
+            };
+            let face = ManifestFace {
+                family: family.to_string(),
+                source,
+            };
             if !faces.contains(&face) {
                 faces.push(face);
             }
@@ -447,13 +583,19 @@ impl CoreTextRegistry {
         }
         for (script, language, sample) in MANIFEST_SAMPLES {
             let string = cfstr(sample);
-            let range = CFRange { location: 0, length: string.length() };
+            let range = CFRange {
+                location: 0,
+                length: string.length(),
+            };
             let lang = language.map(cfstr);
             let mut entry: Option<ScriptFallback> = None;
             for base in &bases {
-                let font = unsafe { base.for_string_with_language(&string, range, lang.as_deref()) };
+                let font =
+                    unsafe { base.for_string_with_language(&string, range, lang.as_deref()) };
                 let mut family = unsafe { font.family_name() }.to_string();
-                if family.is_empty() || unsafe { font.post_script_name() }.to_string() == "LastResort" {
+                if family.is_empty()
+                    || unsafe { font.post_script_name() }.to_string() == "LastResort"
+                {
                     continue;
                 }
                 // The base covers the script itself: name it as the caller
@@ -463,7 +605,11 @@ impl CoreTextRegistry {
                 } else {
                     add_face(self, &family, &font);
                 }
-                entry.get_or_insert_with(|| ScriptFallback { script: script.to_string(), language: language.map(str::to_string), families: Vec::new() });
+                entry.get_or_insert_with(|| ScriptFallback {
+                    script: script.to_string(),
+                    language: language.map(str::to_string),
+                    families: Vec::new(),
+                });
                 let e = entry.as_mut().expect("entry");
                 if !e.families.contains(&family) {
                     e.families.push(family);
@@ -474,14 +620,27 @@ impl CoreTextRegistry {
             }
         }
         for weight in [400.0, 700.0] {
-            let desc = FontDesc { weight, italic: false, size: 16.0 };
+            let desc = FontDesc {
+                weight,
+                italic: false,
+                size: 16.0,
+            };
             if let Some(f) = self.match_font_family("Apple Color Emoji", &desc) {
                 let family = unsafe { f.family_name() }.to_string();
                 add_face(self, &family, &f);
                 manifest.emoji = Some(family);
             }
         }
-        manifest.last_resort = self.match_font_family("Times", &FontDesc { weight: 400.0, italic: false, size: 16.0 }).map(|f| unsafe { f.family_name() }.to_string());
+        manifest.last_resort = self
+            .match_font_family(
+                "Times",
+                &FontDesc {
+                    weight: 400.0,
+                    italic: false,
+                    size: 16.0,
+                },
+            )
+            .map(|f| unsafe { f.family_name() }.to_string());
         manifest.faces = faces;
         manifest
     }
@@ -492,7 +651,10 @@ impl CoreTextRegistry {
     /// families a document names on open) with the records of every face
     /// they name. Queries naming a face this registry never handed out are
     /// refused: face ids are only meaningful to the registry that made them.
-    pub fn answer(&mut self, queries: &[crate::answers::Query]) -> Result<crate::answers::Answers, RegistryError> {
+    pub fn answer(
+        &mut self,
+        queries: &[crate::answers::Query],
+    ) -> Result<crate::answers::Answers, RegistryError> {
         use crate::answers::Query;
         for q in queries {
             if let Query::Fallback { primary: id, .. } | Query::EmAdvance { face: id, .. } = q
@@ -516,8 +678,18 @@ impl CoreTextRegistry {
         if let Some(s) = self.subsets.get(&(key.to_string(), index)) {
             return Ok(s.clone());
         }
-        let data = self.blobs.get(key).ok_or_else(|| RegistryError::UnknownBlob(key.to_string()))?;
-        let (bytes, _) = crate::subset::metrics_subset(data.as_slice(), index).map_err(|source| RegistryError::Subset { blob: key.to_string(), index, source })?;
+        let data = self
+            .blobs
+            .get(key)
+            .ok_or_else(|| RegistryError::UnknownBlob(key.to_string()))?;
+        let (bytes, _) =
+            crate::subset::metrics_subset(data.as_slice(), index).map_err(|source| {
+                RegistryError::Subset {
+                    blob: key.to_string(),
+                    index,
+                    source,
+                }
+            })?;
         let bytes = Arc::new(bytes);
         self.subsets.insert((key.to_string(), index), bytes.clone());
         Ok(bytes)
@@ -530,7 +702,12 @@ impl CoreTextRegistry {
             return Some(f.clone());
         }
         let meta = std::fs::metadata(path).ok()?;
-        let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0);
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
         let key = source_key(&path.to_string_lossy(), meta.len(), modified);
         // System fonts live on the sealed system volume and are mapped;
         // other files are read, so a font replaced on disk cannot fault a
@@ -544,20 +721,26 @@ impl CoreTextRegistry {
             FontBytes::new(std::fs::read(path).ok()?)
         };
         self.blobs.insert(key.clone(), data.clone());
-        self.files.insert(path.to_path_buf(), (data.clone(), key.clone()));
+        self.files
+            .insert(path.to_path_buf(), (data.clone(), key.clone()));
         Some((data, key))
     }
 
     fn font_bytes(&mut self, ct: &CTFont) -> (FontBytes, u32, String) {
         let ps = unsafe { ct.post_script_name() }.to_string();
         let cg_ps = unsafe { ct.graphics_font(std::ptr::null_mut()) };
-        let cg_ps = objc2_core_graphics::CGFont::post_script_name(Some(&cg_ps)).map(|s| s.to_string()).unwrap_or_default();
-        let url = unsafe { ct.attribute(kCTFontURLAttribute) }.and_then(|u| u.downcast::<CFURL>().ok()).and_then(|u| u.to_file_path());
+        let cg_ps = objc2_core_graphics::CGFont::post_script_name(Some(&cg_ps))
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let url = unsafe { ct.attribute(kCTFontURLAttribute) }
+            .and_then(|u| u.downcast::<CFURL>().ok())
+            .and_then(|u| u.to_file_path());
         if let Some(path) = url
             && let Some((data, key)) = self.file_bytes(&path)
-                && let Some(index) = face_index(data.as_slice(), &[&ps, &cg_ps]) {
-                    return (data, index, key);
-                }
+            && let Some(index) = face_index(data.as_slice(), &[&ps, &cg_ps])
+        {
+            return (data, index, key);
+        }
         // No file (or no matching face in it): rebuild an sfnt from the
         // tables CoreText serves, as Skia does for HarfBuzz on macOS.
         if let Some((d, key)) = self.table_fonts.get(&ps) {
@@ -571,11 +754,18 @@ impl CoreTextRegistry {
         (d, 0, key)
     }
 
-    fn intern(&mut self, ct: CFRetained<CTFont>, synthetic_bold: bool, synthetic_italic: bool, custom: Option<Custom>) -> FaceId {
+    fn intern(
+        &mut self,
+        ct: CFRetained<CTFont>,
+        synthetic_bold: bool,
+        synthetic_italic: bool,
+        custom: Option<Custom>,
+    ) -> FaceId {
         let ps = unsafe { ct.post_script_name() }.to_string();
         let mut coords: Vec<(u32, f32)> = Vec::new();
         if let Some(var) = unsafe { ct.variation() } {
-            let var: CFRetained<CFDictionary<CFNumber, CFNumber>> = unsafe { CFRetained::cast_unchecked(var) };
+            let var: CFRetained<CFDictionary<CFNumber, CFNumber>> =
+                unsafe { CFRetained::cast_unchecked(var) };
             let (keys, values) = var.to_vecs();
             for (k, v) in keys.iter().zip(values.iter()) {
                 if let (Some(k), Some(v)) = (k.as_i64(), v.as_f64()) {
@@ -584,7 +774,10 @@ impl CoreTextRegistry {
             }
             coords.sort_by_key(|c| c.0);
         }
-        let custom_key = custom.as_ref().map(|c| format!("custom:{}:{}:{:?}", c.blob, c.index, c.web)).unwrap_or_default();
+        let custom_key = custom
+            .as_ref()
+            .map(|c| format!("custom:{}:{}:{:?}", c.blob, c.index, c.web))
+            .unwrap_or_default();
         let typeface_key = format!("{ps}|{coords:?}{custom_key}");
         let key = format!("{typeface_key}|{synthetic_bold}|{synthetic_italic}");
         if let Some(&id) = self.by_key.get(&key) {
@@ -598,7 +791,10 @@ impl CoreTextRegistry {
                 (d, i, b, None)
             }
         };
-        let synthesized_hyphens = [hyphen_glyph(&ct, data.as_slice(), index, 0x2010), hyphen_glyph(&ct, data.as_slice(), index, 0x2011)];
+        let synthesized_hyphens = [
+            hyphen_glyph(&ct, data.as_slice(), index, 0x2010),
+            hyphen_glyph(&ct, data.as_slice(), index, 0x2011),
+        ];
         let fallback_key = fallback_identifier(&ct);
         let facts = FaceFacts::of(data.as_slice(), index);
         let info = FaceInfo {
@@ -627,7 +823,11 @@ impl CoreTextRegistry {
         if family.starts_with('.') {
             return None;
         }
-        let ct = if family == "system-ui" { self.match_system_ui(desc) } else { self.match_font_family(family, desc) }?;
+        let ct = if family == "system-ui" {
+            self.match_system_ui(desc)
+        } else {
+            self.match_font_family(family, desc)
+        }?;
         let traits = symbolic(&ct);
         let synthetic_bold = desc.weight > 500.0 && traits & TRAIT_BOLD == 0;
         let synthetic_italic = desc.italic && traits & TRAIT_ITALIC == 0;
@@ -635,21 +835,34 @@ impl CoreTextRegistry {
     }
 
     /// `FontPlatformDataCache::GetOrCreateFontPlatformData` with alternates.
-    fn get_font_data(&mut self, family: &str, desc: &FontDesc, allow_alternate: bool) -> Option<FaceId> {
-        let key = (family.to_string(), desc.weight.to_bits(), desc.italic, desc.size.to_bits());
+    fn get_font_data(
+        &mut self,
+        family: &str,
+        desc: &FontDesc,
+        allow_alternate: bool,
+    ) -> Option<FaceId> {
+        let key = (
+            family.to_string(),
+            desc.weight.to_bits(),
+            desc.italic,
+            desc.size.to_bits(),
+        );
         if let Some(r) = self.family_cache.get(&key)
-            && (r.is_some() || !allow_alternate) {
-                return *r;
-            }
+            && (r.is_some() || !allow_alternate)
+        {
+            return *r;
+        }
         let mut result = self.create_platform_data(family, desc);
         self.family_cache.insert(key.clone(), result);
-        if result.is_none() && allow_alternate
-            && let Some(alt) = alternate_family(family) {
-                result = self.get_font_data(alt, desc, false);
-                if result.is_some() {
-                    self.family_cache.insert(key, result);
-                }
+        if result.is_none()
+            && allow_alternate
+            && let Some(alt) = alternate_family(family)
+        {
+            result = self.get_font_data(alt, desc, false);
+            if result.is_some() {
+                self.family_cache.insert(key, result);
             }
+        }
         result
     }
 
@@ -658,8 +871,15 @@ impl CoreTextRegistry {
     /// `family` (trimmed, unquoted, case-insensitive), in PostScript-name
     /// order with "Regular" faces first; the first whose file has an `fvar`
     /// table. The whole file is the `FontFace` source (face 0 of a collection).
-    fn installed_variable_source(&mut self, family: &str) -> Option<(FontBytes, String, CFRetained<CTFont>)> {
-        let normalize = |s: &str| s.trim().trim_matches(|c| c == '"' || c == '\'').to_lowercase();
+    fn installed_variable_source(
+        &mut self,
+        family: &str,
+    ) -> Option<(FontBytes, String, CFRetained<CTFont>)> {
+        let normalize = |s: &str| {
+            s.trim()
+                .trim_matches(|c| c == '"' || c == '\'')
+                .to_lowercase()
+        };
         let key = normalize(family);
         if key.is_empty() {
             return None;
@@ -667,32 +887,55 @@ impl CoreTextRegistry {
         let all = unsafe { CTFontCollection::from_available_fonts(None) };
         let list = unsafe { all.matching_font_descriptors() }?;
         // SAFETY: the array holds CTFontDescriptors.
-        let list: CFRetained<CFArray<CTFontDescriptor>> = unsafe { CFRetained::cast_unchecked(list) };
+        let list: CFRetained<CFArray<CTFontDescriptor>> =
+            unsafe { CFRetained::cast_unchecked(list) };
         let mut candidates: Vec<(String, bool, PathBuf)> = Vec::new();
         for desc in list.iter() {
-            let string = |k: &CFString| unsafe { desc.attribute(k) }.and_then(|v| v.downcast::<CFString>().ok()).map(|s| s.to_string());
+            let string = |k: &CFString| {
+                unsafe { desc.attribute(k) }
+                    .and_then(|v| v.downcast::<CFString>().ok())
+                    .map(|s| s.to_string())
+            };
             let ps = string(unsafe { kCTFontNameAttribute }).unwrap_or_default();
-            let names = [string(unsafe { kCTFontFamilyNameAttribute }), string(unsafe { kCTFontDisplayNameAttribute }), Some(ps.clone())];
+            let names = [
+                string(unsafe { kCTFontFamilyNameAttribute }),
+                string(unsafe { kCTFontDisplayNameAttribute }),
+                Some(ps.clone()),
+            ];
             if !names.iter().flatten().any(|n| normalize(n) == key) {
                 continue;
             }
-            let style = string(unsafe { kCTFontStyleNameAttribute }).or_else(|| string(unsafe { kCTFontDisplayNameAttribute })).unwrap_or_default();
-            let Some(path) = unsafe { desc.attribute(kCTFontURLAttribute) }.and_then(|u| u.downcast::<CFURL>().ok()).and_then(|u| u.to_file_path()) else { continue };
+            let style = string(unsafe { kCTFontStyleNameAttribute })
+                .or_else(|| string(unsafe { kCTFontDisplayNameAttribute }))
+                .unwrap_or_default();
+            let Some(path) = unsafe { desc.attribute(kCTFontURLAttribute) }
+                .and_then(|u| u.downcast::<CFURL>().ok())
+                .and_then(|u| u.to_file_path())
+            else {
+                continue;
+            };
             candidates.push((ps, style.to_lowercase().contains("regular"), path));
         }
         candidates.sort_by(|a, b| a.0.cmp(&b.0));
         candidates.sort_by_key(|c| !c.1);
         for (_, _, path) in candidates {
-            let Some((data, _)) = self.file_bytes(&path) else { continue };
+            let Some((data, _)) = self.file_bytes(&path) else {
+                continue;
+            };
             let file = match read_fonts::FileRef::new(data.as_slice()) {
                 Ok(f) => f,
                 Err(_) => continue,
             };
-            let variable = file.fonts().enumerate().any(|(i, _)| !crate::font::axes(data.as_slice(), i as u32).is_empty());
+            let variable = file
+                .fonts()
+                .enumerate()
+                .any(|(i, _)| !crate::font::axes(data.as_slice(), i as u32).is_empty());
             if !variable {
                 continue;
             }
-            let Ok((data, blob, ct)) = sanitized_web_font(data.as_slice(), 0) else { continue };
+            let Ok((data, blob, ct)) = sanitized_web_font(data.as_slice(), 0) else {
+                continue;
+            };
             return Some((data, blob, ct));
         }
         None
@@ -701,8 +944,16 @@ impl CoreTextRegistry {
     // ------------------------------------------------------------ matching
 
     /// `BestStyleMatchForFamilyNS`.
-    fn best_style_match_ns(&self, family: &str, desired_traits: u32, desired_weight: i32, size: f64) -> Option<CFRetained<CTFont>> {
-        let fonts: Option<Retained<NSArray<NSArray>>> = self.fm.availableMembersOfFontFamily(&NSString::from_str(family));
+    fn best_style_match_ns(
+        &self,
+        family: &str,
+        desired_traits: u32,
+        desired_weight: i32,
+        size: f64,
+    ) -> Option<CFRetained<CTFont>> {
+        let fonts: Option<Retained<NSArray<NSArray>>> = self
+            .fm
+            .availableMembersOfFontFamily(&NSString::from_str(family));
         let fonts = match fonts {
             Some(f) if f.count() > 0 => f,
             _ => return self.best_style_match_ct(family, desired_traits, desired_weight, size),
@@ -711,7 +962,9 @@ impl CoreTextRegistry {
         let mut chosen_traits = 0u32;
         let mut chosen_weight = 0i32;
         for info in fonts.iter() {
-            let Some(name) = info.objectAtIndex(0).downcast::<NSString>().ok() else { continue };
+            let Some(name) = info.objectAtIndex(0).downcast::<NSString>().ok() else {
+                continue;
+            };
             let name = name.to_string();
             let mut cand_weight = NORMAL_WEIGHT;
             let mut cand_traits = 0u32;
@@ -733,11 +986,22 @@ impl CoreTextRegistry {
                     cand_traits = (t.intValue() as u32) & IMPORTANT_TRAITS;
                 }
             }
-            if matched.is_none() || better_choice_ct(desired_traits, desired_weight, chosen_traits, chosen_weight, cand_traits, cand_weight) {
+            if matched.is_none()
+                || better_choice_ct(
+                    desired_traits,
+                    desired_weight,
+                    chosen_traits,
+                    chosen_weight,
+                    cand_traits,
+                    cand_weight,
+                )
+            {
                 matched = Some(name);
                 chosen_traits = cand_traits;
                 chosen_weight = cand_weight;
-                if chosen_weight == desired_weight && (chosen_traits & IMPORTANT_TRAITS) == (desired_traits & IMPORTANT_TRAITS) {
+                if chosen_weight == desired_weight
+                    && (chosen_traits & IMPORTANT_TRAITS) == (desired_traits & IMPORTANT_TRAITS)
+                {
                     break;
                 }
             }
@@ -747,11 +1011,18 @@ impl CoreTextRegistry {
     }
 
     /// `BestStyleMatchForFamily` (CoreText collection path).
-    fn best_style_match_ct(&self, family: &str, desired_traits: u32, desired_weight: i32, size: f64) -> Option<CFRetained<CTFont>> {
+    fn best_style_match_ct(
+        &self,
+        family: &str,
+        desired_traits: u32,
+        desired_weight: i32,
+        size: f64,
+    ) -> Option<CFRetained<CTFont>> {
         let all = unsafe { CTFontCollection::from_available_fonts(None) };
         let list = unsafe { all.matching_font_descriptors_for_family(&cfstr(family), None) }?;
         // SAFETY: the array holds CTFontDescriptors.
-        let list: CFRetained<CFArray<CTFontDescriptor>> = unsafe { CFRetained::cast_unchecked(list) };
+        let list: CFRetained<CFArray<CTFontDescriptor>> =
+            unsafe { CFRetained::cast_unchecked(list) };
         if list.is_empty() {
             return None;
         }
@@ -761,11 +1032,23 @@ impl CoreTextRegistry {
             let (sym, weight) = descriptor_traits(&desc);
             let cand_traits = sym.unwrap_or(0);
             let cand_weight = weight.map(to_css_weight).unwrap_or(NORMAL_WEIGHT);
-            if matched.is_none() || better_choice_ct(desired_traits, desired_weight, chosen_traits, chosen_weight, cand_traits, cand_weight) {
-                matched = Some(unsafe { CTFont::with_font_descriptor(&desc, size, std::ptr::null()) });
+            if matched.is_none()
+                || better_choice_ct(
+                    desired_traits,
+                    desired_weight,
+                    chosen_traits,
+                    chosen_weight,
+                    cand_traits,
+                    cand_weight,
+                )
+            {
+                matched =
+                    Some(unsafe { CTFont::with_font_descriptor(&desc, size, std::ptr::null()) });
                 chosen_traits = cand_traits;
                 chosen_weight = cand_weight;
-                if chosen_weight == desired_weight && (chosen_traits & IMPORTANT_TRAITS) == (desired_traits & IMPORTANT_TRAITS) {
+                if chosen_weight == desired_weight
+                    && (chosen_traits & IMPORTANT_TRAITS) == (desired_traits & IMPORTANT_TRAITS)
+                {
                     return matched;
                 }
             }
@@ -809,17 +1092,20 @@ impl CoreTextRegistry {
         let desired_weight = desc.weight as i32;
         let mut found = self.best_style_match_ns(family, desired_traits, desired_weight, size);
         if found.is_none()
-            && let Some(ps) = self.match_by_postscript_ns(family, size) {
-                // NSFontTraitMask: italic 1, bold 2 (same bits as CoreText for these).
-                let desired_ns = desired_traits & (TRAIT_ITALIC | TRAIT_BOLD);
-                let traits = self.fm.traitsOfFont(&ps).0 as u32;
-                if traits & desired_ns == desired_ns {
-                    let converted = self.fm.convertFont_toHaveTrait(&ps, objc2_app_kit::NSFontTraitMask(desired_ns as _));
-                    return Some(nsfont_to_ct(&converted));
-                }
-                let fam = ps.familyName().map(|s| s.to_string()).unwrap_or_default();
-                return self.best_style_match_ns(&fam, desired_traits, desired_weight, size);
+            && let Some(ps) = self.match_by_postscript_ns(family, size)
+        {
+            // NSFontTraitMask: italic 1, bold 2 (same bits as CoreText for these).
+            let desired_ns = desired_traits & (TRAIT_ITALIC | TRAIT_BOLD);
+            let traits = self.fm.traitsOfFont(&ps).0 as u32;
+            if traits & desired_ns == desired_ns {
+                let converted = self
+                    .fm
+                    .convertFont_toHaveTrait(&ps, objc2_app_kit::NSFontTraitMask(desired_ns as _));
+                return Some(nsfont_to_ct(&converted));
             }
+            let fam = ps.familyName().map(|s| s.to_string()).unwrap_or_default();
+            return self.best_style_match_ns(&fam, desired_traits, desired_weight, size);
+        }
         if found.is_none() {
             self.unavailable.insert(family.to_string());
         }
@@ -829,7 +1115,8 @@ impl CoreTextRegistry {
     /// `MatchSystemUIFont`.
     fn match_system_ui(&self, desc: &FontDesc) -> Option<CFRetained<CTFont>> {
         let size = desc.size as f64;
-        let mut font = unsafe { CTFont::new_ui_font_for_language(CTFontUIFontType::System, size, None) }?;
+        let mut font =
+            unsafe { CTFont::new_ui_font_for_language(CTFontUIFontType::System, size, None) }?;
         let mut traits = 0u32;
         if desc.italic {
             traits |= TRAIT_ITALIC;
@@ -838,31 +1125,50 @@ impl CoreTextRegistry {
             traits |= TRAIT_BOLD;
         }
         if traits != 0
-            && let Some(f) = unsafe { font.copy_with_symbolic_traits(size, std::ptr::null(), CTFontSymbolicTraits(traits), CTFontSymbolicTraits(traits)) } {
-                font = f;
+            && let Some(f) = unsafe {
+                font.copy_with_symbolic_traits(
+                    size,
+                    std::ptr::null(),
+                    CTFontSymbolicTraits(traits),
+                    CTFontSymbolicTraits(traits),
+                )
             }
+        {
+            font = f;
+        }
         let mut weight = desc.weight;
         if weight == NORMAL_WEIGHT as f32 {
             return Some(font);
         }
         // ClampVariationValuesToFontAcceptableRange (weight only; width is normal).
         if let Some(axes) = unsafe { font.variation_axes() } {
-            let axes: CFRetained<CFArray<CFDictionary<CFString, CFType>>> = unsafe { CFRetained::cast_unchecked(axes) };
+            let axes: CFRetained<CFArray<CFDictionary<CFString, CFType>>> =
+                unsafe { CFRetained::cast_unchecked(axes) };
             for axis in axes.iter() {
-                let id = axis.get(unsafe { kCTFontVariationAxisIdentifierKey }).and_then(|v| num_i64(&v));
-                let min = axis.get(unsafe { kCTFontVariationAxisMinimumValueKey }).and_then(|v| num_f32(&v));
-                let max = axis.get(unsafe { kCTFontVariationAxisMaximumValueKey }).and_then(|v| num_f32(&v));
+                let id = axis
+                    .get(unsafe { kCTFontVariationAxisIdentifierKey })
+                    .and_then(|v| num_i64(&v));
+                let min = axis
+                    .get(unsafe { kCTFontVariationAxisMinimumValueKey })
+                    .and_then(|v| num_f32(&v));
+                let max = axis
+                    .get(unsafe { kCTFontVariationAxisMaximumValueKey })
+                    .and_then(|v| num_f32(&v));
                 if let (Some(id), Some(min), Some(max)) = (id, min, max)
-                    && id as u32 == u32::from_be_bytes(*b"wght") {
-                        weight = weight.clamp(min, max);
-                    }
+                    && id as u32 == u32::from_be_bytes(*b"wght")
+                {
+                    weight = weight.clamp(min, max);
+                }
             }
         }
         let wght = CFNumber::new_i64(u32::from_be_bytes(*b"wght") as i64);
         let value = CFNumber::new_f32(weight);
-        let variations: CFRetained<CFDictionary<CFNumber, CFNumber>> = CFDictionary::from_slices(&[&*wght], &[&*value]);
-        let attrs: CFRetained<CFDictionary<CFString, CFType>> =
-            CFDictionary::from_slices(&[unsafe { kCTFontVariationAttribute }], &[variations.as_ref() as &CFType]);
+        let variations: CFRetained<CFDictionary<CFNumber, CFNumber>> =
+            CFDictionary::from_slices(&[&*wght], &[&*value]);
+        let attrs: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(
+            &[unsafe { kCTFontVariationAttribute }],
+            &[variations.as_ref() as &CFType],
+        );
         let var_desc = unsafe { CTFontDescriptor::with_attributes(attrs.as_opaque()) };
         Some(unsafe { font.copy_with_attributes(size, std::ptr::null(), Some(&var_desc)) })
     }
@@ -880,23 +1186,35 @@ impl CoreTextRegistry {
         let base_info = &self.faces[primary as usize].info;
         let (base_bold, base_italic) = (base_info.synthetic_bold, base_info.synthetic_italic);
         let string = char_string(ch);
-        let range = CFRange { location: 0, length: string.length() };
+        let range = CFRange {
+            location: 0,
+            length: string.length(),
+        };
         let mut substitute = unsafe { base.for_string(&string, range) };
         if unsafe { substitute.post_script_name() }.to_string() == "LastResort" {
             return None;
         }
-        let fam = unsafe { substitute.name(kCTFontFamilyNameKey) }.map(|s| s.to_string()).unwrap_or_default();
-        let is_color_emoji = fam.eq_ignore_ascii_case("Apple Color Emoji") || fam.eq_ignore_ascii_case(".Apple Color Emoji UI");
+        let fam = unsafe { substitute.name(kCTFontFamilyNameKey) }
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let is_color_emoji = fam.eq_ignore_ascii_case("Apple Color Emoji")
+            || fam.eq_ignore_ascii_case(".Apple Color Emoji UI");
         if is_color_emoji && crate::blink::chars::is_emoji(ch) {
-            let langs: CFRetained<CFArray<CFString>> = CFArray::from_retained_objects(&[cfstr("en")]);
-            if let Some(cascade) = unsafe { substitute.default_cascade_list_for_languages(Some(langs.as_opaque())) } {
+            let langs: CFRetained<CFArray<CFString>> =
+                CFArray::from_retained_objects(&[cfstr("en")]);
+            if let Some(cascade) =
+                unsafe { substitute.default_cascade_list_for_languages(Some(langs.as_opaque())) }
+            {
                 let name = cfstr("Apple Symbols");
                 let attrs: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(
-                    &[unsafe { kCTFontNameAttribute }, unsafe { kCTFontCascadeListAttribute }],
+                    &[unsafe { kCTFontNameAttribute }, unsafe {
+                        kCTFontCascadeListAttribute
+                    }],
                     &[name.as_ref() as &CFType, cascade.as_ref() as &CFType],
                 );
                 let mono_desc = unsafe { CTFontDescriptor::with_attributes(attrs.as_opaque()) };
-                let mono = unsafe { CTFont::with_font_descriptor(&mono_desc, size, std::ptr::null()) };
+                let mono =
+                    unsafe { CTFont::with_font_descriptor(&mono_desc, size, std::ptr::null()) };
                 substitute = unsafe { mono.for_string(&string, range) };
             }
         }
@@ -912,15 +1230,18 @@ impl CoreTextRegistry {
         let sub_weight = ct_font_weight(&substitute);
         let mask = IMPORTANT_TRAITS;
         if ((traits & mask) != (sub_traits & mask) || weight != sub_weight)
-            && let Some(best) = copy_with_traits_and_weight(&substitute, traits, weight, size) {
-                let best_traits = symbolic(&best);
-                let best_weight = ct_font_weight(&best);
-                let charset: CFRetained<CFCharacterSet> = unsafe { best.character_set() };
-                if (best_traits != sub_traits || best_weight != sub_weight) && charset.is_long_character_member(ch) {
-                    substitute = best;
-                    sub_traits = symbolic(&substitute);
-                }
+            && let Some(best) = copy_with_traits_and_weight(&substitute, traits, weight, size)
+        {
+            let best_traits = symbolic(&best);
+            let best_weight = ct_font_weight(&best);
+            let charset: CFRetained<CFCharacterSet> = unsafe { best.character_set() };
+            if (best_traits != sub_traits || best_weight != sub_weight)
+                && charset.is_long_character_member(ch)
+            {
+                substitute = best;
+                sub_traits = symbolic(&substitute);
             }
+        }
         let synthetic_bold = traits & TRAIT_BOLD != 0 && sub_traits & TRAIT_BOLD == 0;
         let synthetic_italic = traits & TRAIT_ITALIC != 0 && sub_traits & TRAIT_ITALIC == 0;
         Some(self.intern(substitute, synthetic_bold, synthetic_italic, None))
@@ -946,10 +1267,14 @@ impl AsRef<[u8]> for MappedFont {
 
 /// Sanitizes web font data as Blink does (OTS table selection), and creates
 /// the CTFont Blink's platform data would hold for it.
-fn sanitized_web_font(data: &[u8], index: u32) -> Result<(FontBytes, String, CFRetained<CTFont>), RegistryError> {
+fn sanitized_web_font(
+    data: &[u8],
+    index: u32,
+) -> Result<(FontBytes, String, CFRetained<CTFont>), RegistryError> {
     let clean = crate::sanitize::sanitize(data, index).ok_or(RegistryError::NotAFont)?;
     let cfdata = CFData::from_bytes(&clean);
-    let desc = unsafe { CTFontManagerCreateFontDescriptorFromData(&cfdata) }.ok_or(RegistryError::NotAFont)?;
+    let desc = unsafe { CTFontManagerCreateFontDescriptorFromData(&cfdata) }
+        .ok_or(RegistryError::NotAFont)?;
     let ct = unsafe { CTFont::with_font_descriptor(&desc, 16.0, std::ptr::null()) };
     let blob = content_key(&clean);
     Ok((FontBytes::new(clean), blob, ct))
@@ -978,7 +1303,13 @@ impl FontResolver for CoreTextRegistry {
         self.get_font_data("Times", desc, true)
     }
 
-    fn fallback_for_char(&mut self, desc: &FontDesc, ch: u32, primary: FaceId, emoji_presentation: bool) -> Option<FaceId> {
+    fn fallback_for_char(
+        &mut self,
+        desc: &FontDesc,
+        ch: u32,
+        primary: FaceId,
+        emoji_presentation: bool,
+    ) -> Option<FaceId> {
         if emoji_presentation {
             match self.get_font_data("Apple Color Emoji", desc, true) {
                 Some(f) => Some(f),
@@ -990,7 +1321,8 @@ impl FontResolver for CoreTextRegistry {
     }
 
     fn last_resort(&mut self, desc: &FontDesc) -> Option<FaceId> {
-        self.get_font_data("Times", desc, true).or_else(|| self.get_font_data("Lucida Grande", desc, true))
+        self.get_font_data("Times", desc, true)
+            .or_else(|| self.get_font_data("Lucida Grande", desc, true))
     }
 
     fn variable_face(&mut self, family: &str) -> Option<FaceId> {
@@ -1001,14 +1333,27 @@ impl FontResolver for CoreTextRegistry {
             Some((data, blob)) => {
                 let (data, blob) = (data.clone(), blob.clone());
                 let cfdata = CFData::from_bytes(data.as_slice());
-                unsafe { CTFontManagerCreateFontDescriptorFromData(&cfdata) }
-                    .map(|desc| (data, blob, unsafe { CTFont::with_font_descriptor(&desc, 16.0, std::ptr::null()) }))
+                unsafe { CTFontManagerCreateFontDescriptorFromData(&cfdata) }.map(|desc| {
+                    (data, blob, unsafe {
+                        CTFont::with_font_descriptor(&desc, 16.0, std::ptr::null())
+                    })
+                })
             }
             None => self.installed_variable_source(family),
         };
         let face = source.map(|(data, blob, ct)| {
             self.blobs.insert(blob.clone(), data.clone());
-            self.intern(ct, false, false, Some(Custom { data, index: 0, blob, web: None }))
+            self.intern(
+                ct,
+                false,
+                false,
+                Some(Custom {
+                    data,
+                    index: 0,
+                    blob,
+                    web: None,
+                }),
+            )
         });
         self.variable.insert(family.to_string(), face);
         face
@@ -1038,8 +1383,16 @@ fn fallback_identifier(ct: &CTFont) -> Option<String> {
     let desc = unsafe { ct.font_descriptor() };
     let attrs = unsafe { desc.attributes() };
     let attrs: &CFDictionary<CFString, CFType> = unsafe { attrs.cast_unchecked() };
-    let usage = attrs.get(&cfstr("NSCTFontUIUsageAttribute"))?.downcast::<CFString>().ok()?.to_string();
-    let lang = attrs.get(&cfstr("CTFontDescriptorLanguageAttribute"))?.downcast::<CFString>().ok()?.to_string();
+    let usage = attrs
+        .get(&cfstr("NSCTFontUIUsageAttribute"))?
+        .downcast::<CFString>()
+        .ok()?
+        .to_string();
+    let lang = attrs
+        .get(&cfstr("CTFontDescriptorLanguageAttribute"))?
+        .downcast::<CFString>()
+        .ok()?
+        .to_string();
     Some(format!("UIFONTUSAGE:{usage}-LANG:{lang}"))
 }
 
@@ -1053,18 +1406,25 @@ fn sbix_em_advance(ct: &CTFont, data: &[u8], index: u32, size: f32) -> Option<f3
     let hmtx = font.hmtx().ok()?;
     // A glyph whose advance is exactly one em.
     let n = font.maxp().ok()?.num_glyphs();
-    let glyph = (0..n).find(|&g| hmtx.advance(read_fonts::types::GlyphId::new(g as u32)) == Some(upem))?;
+    let glyph =
+        (0..n).find(|&g| hmtx.advance(read_fonts::types::GlyphId::new(g as u32)) == Some(upem))?;
     let base = unsafe { ct.copy_with_attributes(size as f64, std::ptr::null(), None) };
     let opsz = CFNumber::new_f64(size as f64);
     let zero = CFNumber::new_i32(0);
     let attrs: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(
-        &[&*cfstr("NSCTFontOpticalSizeAttribute"), &*cfstr("NSCTFontUnscaledTrackingAttribute")],
+        &[
+            &*cfstr("NSCTFontOpticalSizeAttribute"),
+            &*cfstr("NSCTFontUnscaledTrackingAttribute"),
+        ],
         &[opsz.as_ref() as &CFType, zero.as_ref() as &CFType],
     );
     let desc = unsafe { CTFontDescriptor::with_attributes(attrs.as_opaque()) };
     let exact = unsafe { base.copy_with_attributes(size as f64, std::ptr::null(), Some(&desc)) };
     let glyphs = [glyph];
-    let mut adv = [objc2_core_foundation::CGSize { width: 0.0, height: 0.0 }];
+    let mut adv = [objc2_core_foundation::CGSize {
+        width: 0.0,
+        height: 0.0,
+    }];
     unsafe {
         exact.advances_for_glyphs(
             objc2_core_text::CTFontOrientation::Horizontal,
@@ -1097,22 +1457,35 @@ fn alternate_family(family: &str) -> Option<&'static str> {
 }
 
 fn char_string(ch: u32) -> CFRetained<CFString> {
-    let s = char::from_u32(ch).map(|c| c.to_string()).unwrap_or_else(|| "\u{FFFD}".to_string());
+    let s = char::from_u32(ch)
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "\u{FFFD}".to_string());
     cfstr(&s)
 }
 
 /// `CreateCopyWithTraitsAndWeightFromFont`.
-fn copy_with_traits_and_weight(font: &CTFont, traits: u32, weight: f32, size: f64) -> Option<CFRetained<CTFont>> {
+fn copy_with_traits_and_weight(
+    font: &CTFont,
+    traits: u32,
+    weight: f32,
+    size: f64,
+) -> Option<CFRetained<CTFont>> {
     let family = unsafe { font.family_name() };
     if family.length() == 0 {
         return None;
     }
     let sym = CFNumber::new_i64(traits as i64);
     let w = CFNumber::new_f32(weight);
-    let traits_dict: CFRetained<CFDictionary<CFString, CFType>> =
-        CFDictionary::from_slices(&[unsafe { kCTFontSymbolicTrait }, unsafe { kCTFontWeightTrait }], &[sym.as_ref() as &CFType, w.as_ref() as &CFType]);
+    let traits_dict: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(
+        &[unsafe { kCTFontSymbolicTrait }, unsafe {
+            kCTFontWeightTrait
+        }],
+        &[sym.as_ref() as &CFType, w.as_ref() as &CFType],
+    );
     let attrs: CFRetained<CFDictionary<CFString, CFType>> = CFDictionary::from_slices(
-        &[unsafe { kCTFontFamilyNameAttribute }, unsafe { kCTFontTraitsAttribute }],
+        &[unsafe { kCTFontFamilyNameAttribute }, unsafe {
+            kCTFontTraitsAttribute
+        }],
         &[family.as_ref() as &CFType, traits_dict.as_ref() as &CFType],
     );
     let desc = unsafe { CTFontDescriptor::with_attributes(attrs.as_opaque()) };
@@ -1147,13 +1520,28 @@ fn face_index(data: &[u8], names: &[&str]) -> Option<u32> {
 fn hyphen_glyph(ct: &CTFont, data: &[u8], index: u32, ch: u32) -> Option<u16> {
     use read_fonts::{FontRef, TableProvider};
     let font = FontRef::from_index(data, index).ok()?;
-    if font.cmap().ok().and_then(|c| c.map_codepoint(ch)).is_some_and(|g| g.to_u32() != 0) {
+    if font
+        .cmap()
+        .ok()
+        .and_then(|c| c.map_codepoint(ch))
+        .is_some_and(|g| g.to_u32() != 0)
+    {
         return None;
     }
     let units = [ch as u16];
     let mut glyph = [0u16; 1];
-    let ok = unsafe { ct.glyphs_for_characters(std::ptr::NonNull::new(units.as_ptr() as *mut u16).unwrap(), std::ptr::NonNull::new(glyph.as_mut_ptr()).unwrap(), 1) };
-    if ok && glyph[0] != 0 { Some(glyph[0]) } else { None }
+    let ok = unsafe {
+        ct.glyphs_for_characters(
+            std::ptr::NonNull::new(units.as_ptr() as *mut u16).unwrap(),
+            std::ptr::NonNull::new(glyph.as_mut_ptr()).unwrap(),
+            1,
+        )
+    };
+    if ok && glyph[0] != 0 {
+        Some(glyph[0])
+    } else {
+        None
+    }
 }
 
 /// Builds an sfnt from `CTFontCopyTable` for every available table.

@@ -104,13 +104,19 @@ impl TextContent {
 
     /// `Math.max(1, Number(d.size) || 16)`.
     pub fn size(&self) -> f64 {
-        let s = self.size.filter(|s| *s != 0.0 && !s.is_nan()).unwrap_or(16.0);
+        let s = self
+            .size
+            .filter(|s| *s != 0.0 && !s.is_nan())
+            .unwrap_or(16.0);
         s.max(1.0)
     }
 
     /// `size * (d.leading || 1.15)`.
     pub fn line_height(&self) -> f64 {
-        let l = self.leading.filter(|l| *l != 0.0 && !l.is_nan()).unwrap_or(1.15);
+        let l = self
+            .leading
+            .filter(|l| *l != 0.0 && !l.is_nan())
+            .unwrap_or(1.15);
         self.size() * l
     }
 
@@ -160,8 +166,14 @@ mod tests {
         assert_eq!(d.text, "Hi");
         assert_eq!(d.size(), 16.0);
         assert_eq!(d.italic, Some(true));
-        assert_eq!(d.axes, vec![("GRAD".to_string(), 10.0), ("wght".to_string(), 650.0)]);
+        assert_eq!(
+            d.axes,
+            vec![("GRAD".to_string(), 10.0), ("wght".to_string(), 650.0)]
+        );
         assert_eq!(TextContent::from_json(&json!({"text": 42})).text, "42");
-        assert_eq!(TextContent::from_json(&json!({})).line_height(), 16.0 * 1.15);
+        assert_eq!(
+            TextContent::from_json(&json!({})).line_height(),
+            16.0 * 1.15
+        );
     }
 }
