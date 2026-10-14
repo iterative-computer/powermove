@@ -26,7 +26,8 @@
 //!
 //! The class is decided from the decoded [`StillImage`] facts plus a header
 //! parse of the container for what the decoder does not report (JPEG frame
-//! type and components, PNG color chunks, WebP chunk layout).
+//! type and components, PNG color chunks, WebP chunk layout, TIFF image
+//! structure and ICC profile tag, EXIF and HEIF transforms).
 
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
@@ -105,8 +106,12 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
             if still.color.alpha != AlphaMode::Opaque {
                 return unsupported("TIFF stills with alpha");
             }
+            // pm-media's TIFF decoder reports no profile today; the header
+            // parse routes tag 34675 whatever the decoder reports.
             if icc.is_some() {
-                return unsupported("TIFF stills with an ICC profile");
+                return unsupported(
+                    "TIFF stills with an ICC profile (not compared with the legacy renderer)",
+                );
             }
         }
         ImageFormat::Avif => return unsupported("AVIF stills"),
@@ -151,6 +156,26 @@ pub fn static_format(format: &str, name: &str) -> Result<(), Feature> {
         "" => unsupported("an image of unrecorded format"),
         other => unsupported(format!("{other} stills")),
     }
+}
+
+/// The geometric transform a still's container asks for (EXIF orientation
+/// other than 1, HEIF `irot`/`imir`/`clap`) from the header parse alone,
+/// whatever the decoder reports; [`check`] routes on either. `Err` when the
+/// container is malformed, not one [`check`] parses, or (without a
+/// transform) outside the drawn structure.
+pub fn container_transform(path: &Path, format: ImageFormat) -> Result<Option<String>, Feature> {
+    if !matches!(
+        format,
+        ImageFormat::Png
+            | ImageFormat::Jpeg
+            | ImageFormat::WebP
+            | ImageFormat::Tiff
+            | ImageFormat::Heif
+    ) {
+        return Err(feature(format!("no header parse for {format:?} stills")));
+    }
+    let file = File::open(path).map_err(|e| feature(format!("{}: {e}", path.display())))?;
+    Ok(parse(&mut BufReader::new(file), format)?.transform)
 }
 
 fn orientation_message(what: &str) -> String {
@@ -212,10 +237,22 @@ fn array_or_eof<const N: usize, R: Read>(r: &mut R) -> io::Result<Option<[u8; N]
     Ok((got == N).then_some(b))
 }
 
-/// The scalar entries (count 1, SHORT or LONG) of a TIFF structure's first
-/// IFD (a TIFF file or an EXIF payload), as (tag, value). Entries with
-/// several values or of other types are listed with `None`.
-fn ifd0<R: Read + Seek>(r: &mut R) -> io::Result<Vec<(u16, Option<u32>)>> {
+/// SHORT or LONG entries with at most this many values have their values
+/// read; longer arrays (strip offsets and the like) are listed without.
+const IFD_VALUES: u32 = 16;
+
+/// One entry of a TIFF structure's first IFD: its tag and, for SHORT or
+/// LONG entries of at most [`IFD_VALUES`] values, the values (empty for
+/// other types and longer arrays).
+#[derive(Debug)]
+struct IfdEntry {
+    tag: u16,
+    values: Vec<u32>,
+}
+
+/// The entries of a TIFF structure's first IFD (a TIFF file or an EXIF
+/// payload; offsets are relative to the reader's start).
+fn ifd0<R: Read + Seek>(r: &mut R) -> io::Result<Vec<IfdEntry>> {
     let head: [u8; 8] = array(r)?;
     let le = match &head[..4] {
         b"II*\0" => true,
@@ -240,28 +277,70 @@ fn ifd0<R: Read + Seek>(r: &mut R) -> io::Result<Vec<(u16, Option<u32>)>> {
     let ifd = u32_(head[4..8].try_into().unwrap());
     r.seek(SeekFrom::Start(ifd as u64))?;
     let count = u16_(array(r)?);
-    let entries = read_vec(r, count as u64 * 12)?;
-    Ok(entries
-        .chunks_exact(12)
-        .map(|e| {
-            let tag = u16_([e[0], e[1]]);
-            let value = match (u16_([e[2], e[3]]), u32_(e[4..8].try_into().unwrap())) {
-                (3, 1) => Some(u16_([e[8], e[9]]) as u32),
-                (4, 1) => Some(u32_(e[8..12].try_into().unwrap())),
-                _ => None,
+    let raw = read_vec(r, count as u64 * 12)?;
+    let mut entries = Vec::with_capacity(count as usize);
+    for e in raw.chunks_exact(12) {
+        let tag = u16_([e[0], e[1]]);
+        let n = u32_(e[4..8].try_into().unwrap());
+        let width = match u16_([e[2], e[3]]) {
+            3 => 2,
+            4 => 4,
+            _ => 0,
+        };
+        let mut values = Vec::new();
+        if width != 0 && (1..=IFD_VALUES).contains(&n) {
+            let len = n as usize * width;
+            let bytes = if len <= 4 {
+                e[8..8 + len].to_vec()
+            } else {
+                r.seek(SeekFrom::Start(u32_(e[8..12].try_into().unwrap()) as u64))?;
+                read_vec(r, len as u64)?
             };
-            (tag, value)
-        })
-        .collect())
+            values = bytes
+                .chunks_exact(width)
+                .map(|v| match width {
+                    2 => u16_([v[0], v[1]]) as u32,
+                    _ => u32_(v.try_into().unwrap()),
+                })
+                .collect();
+        }
+        entries.push(IfdEntry { tag, values });
+    }
+    Ok(entries)
+}
+
+fn ifd_entry(entries: &[IfdEntry], tag: u16) -> Option<&IfdEntry> {
+    entries.iter().find(|e| e.tag == tag)
+}
+
+/// A scalar tag: its value, `default` when absent, `Err` when it holds
+/// several values or another type.
+fn ifd_scalar(entries: &[IfdEntry], tag: u16, default: u32) -> Result<u32, ()> {
+    match ifd_entry(entries, tag).map(|e| e.values.as_slice()) {
+        None => Ok(default),
+        Some(&[v]) => Ok(v),
+        Some(_) => Err(()),
+    }
+}
+
+/// A per-sample tag (BitsPerSample, SampleFormat): the value every sample
+/// shares, `default` when absent, `Err` when the samples differ or the
+/// entry is of another type.
+fn ifd_per_sample(entries: &[IfdEntry], tag: u16, default: u32) -> Result<u32, ()> {
+    match ifd_entry(entries, tag).map(|e| e.values.as_slice()) {
+        None => Ok(default),
+        Some([v, rest @ ..]) if rest.iter().all(|r| r == v) => Ok(*v),
+        Some(_) => Err(()),
+    }
 }
 
 /// The orientation tag (274) of a TIFF structure's first IFD; `None` when
 /// absent.
-fn ifd0_orientation(entries: &[(u16, Option<u32>)]) -> io::Result<Option<u16>> {
-    match entries.iter().find(|(tag, _)| *tag == 274) {
+fn ifd0_orientation(entries: &[IfdEntry]) -> io::Result<Option<u16>> {
+    match ifd_entry(entries, 274).map(|e| e.values.as_slice()) {
         None => Ok(None),
-        Some((_, Some(v))) => Ok(Some((*v).min(u16::MAX as u32) as u16)),
-        Some((_, None)) => Err(malformed("orientation tag of an unexpected type")),
+        Some(&[v]) => Ok(Some(v.min(u16::MAX as u32) as u16)),
+        Some(_) => Err(malformed("orientation tag of an unexpected type")),
     }
 }
 
@@ -321,17 +400,18 @@ fn png<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
     Ok(Ok(header))
 }
 
-/// JPEG: baseline or progressive Huffman, 8-bit, one (gray) component;
-/// the orientation of an `Exif` APP1 segment. Y'CbCr is unsupported (see
-/// the module notes), as are RGB, CMYK, arithmetic, lossless, and 12-bit
-/// JPEG.
+/// JPEG: baseline Huffman, 8-bit, one (gray) component (the class
+/// compared as `render/still-photo-gray-jpg`); the orientation of an `Exif`
+/// APP1 segment. Y'CbCr is unsupported (see the module notes), as are
+/// progressive gray (not compared), RGB, CMYK, arithmetic, lossless, and
+/// 12-bit JPEG.
 fn jpeg<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
     if array::<2, _>(r)? != [0xFF, 0xD8] {
         return Err(malformed("no start of image"));
     }
     let mut header = Header::default();
     let mut adobe_transform: Option<u8> = None;
-    let mut sof: Option<Vec<u8>> = None;
+    let mut sof: Option<(u8, Vec<u8>)> = None;
     loop {
         if array::<1, _>(r)?[0] != 0xFF {
             return Err(malformed("marker expected"));
@@ -360,7 +440,7 @@ fn jpeg<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
                     0xE1 if body.starts_with(b"Exif\0\0") => {
                         header.exif(exif_orientation(&body)?);
                     }
-                    0xC0 | 0xC2 => sof = Some(body),
+                    0xC0 | 0xC2 => sof = Some((marker, body)),
                     _ => {}
                 }
             }
@@ -373,11 +453,12 @@ fn jpeg<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
             _ => r.seek_relative(body_len as i64)?,
         }
     }
-    let sof = sof.ok_or_else(|| malformed("no frame header"))?;
-    Ok(jpeg_frame(&sof, adobe_transform).map(|_| header))
+    let (marker, sof) = sof.ok_or_else(|| malformed("no frame header"))?;
+    Ok(jpeg_frame(marker, &sof, adobe_transform).map(|_| header))
 }
 
-fn jpeg_frame(sof: &[u8], adobe_transform: Option<u8>) -> Result<(), Feature> {
+/// The class of a JPEG frame header (`marker` SOF0 or SOF2).
+fn jpeg_frame(marker: u8, sof: &[u8], adobe_transform: Option<u8>) -> Result<(), Feature> {
     if sof.len() < 6 {
         return unsupported("malformed JPEG headers");
     }
@@ -390,6 +471,9 @@ fn jpeg_frame(sof: &[u8], adobe_transform: Option<u8>) -> Result<(), Feature> {
         return unsupported("malformed JPEG headers");
     }
     match n {
+        1 if marker == 0xC2 => {
+            unsupported("progressive gray JPEG stills (not compared with the legacy renderer)")
+        }
         1 => Ok(()),
         3 if adobe_transform == Some(0) || comps.iter().map(|c| c[0]).eq(*b"RGB") => {
             unsupported("RGB-encoded JPEG stills")
@@ -430,26 +514,39 @@ fn webp<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
 }
 
 /// TIFF, first IFD (the image FFmpeg converts for the legacy renderer and
-/// pm-media decodes): chunky RGB, three samples, no predictor other than
-/// horizontal differencing, compressed without loss by a scheme whose
-/// decode was shown identical to the uncompressed file
-/// (`tests/stills.rs`, `tiff_compressions_decode_alike`): none, LZW,
-/// Deflate, PackBits. Depth, alpha, and ICC are decided from the decoded
-/// still; the orientation tag (274) other than 1 is a transform.
+/// pm-media decodes), in the structure compared with the legacy renderer
+/// (`render/still-photo-tiff`, uncompressed, as FFmpeg writes it): chunky
+/// RGB in strips, three samples of 8-bit unsigned integers, fill order 1,
+/// no predictor other than horizontal differencing, compressed without
+/// loss by a scheme whose decode was shown identical to the uncompressed
+/// file (`tests/stills.rs`, `tiff_compressions_decode_alike`): none, LZW,
+/// Deflate (8 and 32946), PackBits. No ICC profile (tag 34675; pm-media's
+/// TIFF decoder does not report one, so the header decides) and no
+/// colorimetry tags (TransferFunction, WhitePoint, PrimaryChromaticities):
+/// tagged TIFF was not compared. Depth and alpha are also decided from the
+/// decoded still; the orientation tag (274) other than 1 is a transform.
 fn tiff<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
     let entries = ifd0(r)?;
     let mut header = Header::default();
     header.exif(ifd0_orientation(&entries)?);
     // A tag of the image structure: present and scalar, or absent (the
     // TIFF default); several values (or another type) is outside the class.
-    let scalar = |tag: u16, default: u32| -> Result<u32, ()> {
-        match entries.iter().find(|(t, _)| *t == tag) {
-            None => Ok(default),
-            Some((_, Some(v))) => Ok(*v),
-            Some((_, None)) => Err(()),
-        }
-    };
+    let scalar = |tag: u16, default: u32| ifd_scalar(&entries, tag, default);
     let class = (|| -> Result<(), String> {
+        if ifd_entry(&entries, 34675).is_some() {
+            return Err(
+                "TIFF stills with an ICC profile (not compared with the legacy renderer)".into(),
+            );
+        }
+        if let Some(e) = [301, 318, 319]
+            .into_iter()
+            .find_map(|t| ifd_entry(&entries, t))
+        {
+            return Err(format!(
+                "TIFF stills with colorimetry tags (tag {}; not compared with the legacy renderer)",
+                e.tag
+            ));
+        }
         let compression = scalar(259, 1).map_err(|_| "TIFF compression tag".to_string())?;
         if !matches!(compression, 1 | 5 | 8 | 32946 | 32773) {
             return Err(format!("TIFF stills with compression {compression}"));
@@ -470,8 +567,23 @@ fn tiff<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
         if scalar(277, 1) != Ok(3) {
             return Err("TIFF stills with other than three samples per pixel".into());
         }
+        if ifd_per_sample(&entries, 258, 1) != Ok(8) {
+            return Err("TIFF stills with other than 8 bits in every sample".into());
+        }
+        if ifd_per_sample(&entries, 339, 1) != Ok(1) {
+            return Err("TIFF stills with samples other than unsigned integers".into());
+        }
         if scalar(284, 1) != Ok(1) {
             return Err("planar TIFF stills".into());
+        }
+        if scalar(266, 1) != Ok(1) {
+            return Err("TIFF stills with fill order other than 1".into());
+        }
+        if [322, 323, 324, 325]
+            .into_iter()
+            .any(|t| ifd_entry(&entries, t).is_some())
+        {
+            return Err("tiled TIFF stills".into());
         }
         let predictor = scalar(317, 1).map_err(|_| "TIFF predictor tag".to_string())?;
         if !matches!(predictor, 1 | 2) {
@@ -570,6 +682,15 @@ mod tests {
 
     /// A TIFF structure with one IFD holding `entries` (tag, type, value).
     fn tiff_ifd(le: bool, entries: &[(u16, u16, u32)]) -> Vec<u8> {
+        let e: Vec<(u16, u16, Vec<u32>)> =
+            entries.iter().map(|&(t, ty, v)| (t, ty, vec![v])).collect();
+        tiff_ifd_values(le, &e)
+    }
+
+    /// A TIFF structure with one IFD holding `entries` (tag, type, values);
+    /// SHORT and LONG values longer than four bytes are stored after the
+    /// IFD, other types hold their first value as the raw offset field.
+    fn tiff_ifd_values(le: bool, entries: &[(u16, u16, Vec<u32>)]) -> Vec<u8> {
         let u16b = |v: u16| if le { v.to_le_bytes() } else { v.to_be_bytes() };
         let u32b = |v: u32| if le { v.to_le_bytes() } else { v.to_be_bytes() };
         let mut b = if le {
@@ -579,18 +700,32 @@ mod tests {
         };
         b.extend_from_slice(&u32b(8));
         b.extend_from_slice(&u16b(entries.len() as u16));
-        for &(tag, ty, v) in entries {
-            b.extend_from_slice(&u16b(tag));
-            b.extend_from_slice(&u16b(ty));
-            b.extend_from_slice(&u32b(1));
-            if ty == 3 {
-                b.extend_from_slice(&u16b(v as u16));
-                b.extend_from_slice(&[0, 0]);
+        let mut out_of_line = Vec::new();
+        let data_at = 8 + 2 + entries.len() * 12 + 4;
+        for (tag, ty, v) in entries {
+            b.extend_from_slice(&u16b(*tag));
+            b.extend_from_slice(&u16b(*ty));
+            b.extend_from_slice(&u32b(v.len() as u32));
+            let mut bytes = Vec::new();
+            for &x in v {
+                match ty {
+                    3 => bytes.extend_from_slice(&u16b(x as u16)),
+                    _ => bytes.extend_from_slice(&u32b(x)),
+                }
+            }
+            if !matches!(ty, 3 | 4) {
+                bytes.truncate(4);
+            }
+            if bytes.len() <= 4 {
+                bytes.resize(4, 0);
+                b.extend_from_slice(&bytes);
             } else {
-                b.extend_from_slice(&u32b(v));
+                b.extend_from_slice(&u32b((data_at + out_of_line.len()) as u32));
+                out_of_line.extend_from_slice(&bytes);
             }
         }
         b.extend_from_slice(&[0; 4]);
+        b.extend_from_slice(&out_of_line);
         b
     }
 
@@ -725,7 +860,9 @@ mod tests {
         let jpeg = |b: Vec<u8>| run(ImageFormat::Jpeg, &b);
         let gray = [(1, 0x11)];
         assert!(jpeg(jpeg_with(0xC0, 8, &gray, None)).is_ok());
-        assert!(jpeg(jpeg_with(0xC2, 8, &gray, None)).is_ok());
+        // Progressive gray was not compared with the legacy renderer.
+        let e = jpeg(jpeg_with(0xC2, 8, &gray, None)).unwrap_err();
+        assert!(e.to_string().contains("progressive gray"), "{e}");
         let ycc = |y: u8| [(1, y), (2, 0x11), (3, 0x11)];
         for y in [0x11, 0x21, 0x22] {
             let e = jpeg(jpeg_with(0xC0, 8, &ycc(y), None)).unwrap_err();
@@ -798,7 +935,7 @@ mod tests {
 
     /// The tags of a baseline RGB TIFF plus `extra`.
     fn rgb_tiff(le: bool, extra: &[(u16, u16, u32)]) -> Vec<u8> {
-        let mut e = vec![(256, 3, 4), (262, 3, 2), (277, 3, 3)];
+        let mut e = vec![(256, 3, 4), (258, 3, 8), (262, 3, 2), (277, 3, 3)];
         e.extend_from_slice(extra);
         e.sort_by_key(|t| t.0);
         tiff_ifd(le, &e)
@@ -867,9 +1004,75 @@ mod tests {
             run(ImageFormat::Tiff, &one).is_err(),
             "SamplesPerPixel defaults to 1"
         );
+        // The structure FFmpeg and ImageIO write: per-sample arrays stored
+        // after the IFD, in either byte order.
+        for le in [true, false] {
+            let b = tiff_ifd_values(
+                le,
+                &[
+                    (256, 3, vec![4]),
+                    (258, 3, vec![8, 8, 8]),
+                    (259, 3, vec![5]),
+                    (262, 3, vec![2]),
+                    (266, 3, vec![1]),
+                    (277, 3, vec![3]),
+                    (284, 3, vec![1]),
+                    (317, 3, vec![2]),
+                    (339, 3, vec![1, 1, 1]),
+                ],
+            );
+            assert!(run(ImageFormat::Tiff, &b).is_ok(), "{le}");
+        }
+        let arrays = |extra: (u16, u16, Vec<u32>)| {
+            let mut e = vec![(256, 3, vec![4]), (262, 3, vec![2]), (277, 3, vec![3])];
+            if extra.0 != 258 {
+                e.push((258, 3, vec![8, 8, 8]));
+            }
+            e.push(extra);
+            e.sort_by_key(|t| t.0);
+            run(ImageFormat::Tiff, &tiff_ifd_values(true, &e))
+        };
+        for (entry, want) in [
+            ((258, 3, vec![16, 16, 16]), "8 bits"),
+            ((258, 3, vec![8, 8, 4]), "8 bits"),
+            (
+                (
+                    258,
+                    4,
+                    vec![8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8],
+                ),
+                "8 bits",
+            ),
+            ((339, 3, vec![3, 3, 3]), "unsigned"),
+            ((339, 3, vec![2, 2, 2]), "unsigned"),
+            ((339, 3, vec![1, 1, 3]), "unsigned"),
+            ((266, 3, vec![2]), "fill order"),
+            ((322, 3, vec![16]), "tiled"),
+            ((323, 4, vec![16]), "tiled"),
+            ((324, 4, vec![8, 8]), "tiled"),
+            ((34675, 7, vec![0]), "ICC profile"),
+            ((301, 3, vec![0; 3]), "colorimetry"),
+            ((318, 5, vec![0]), "colorimetry"),
+            ((319, 5, vec![0]), "colorimetry"),
+        ] {
+            let tag = entry.0;
+            let e = arrays(entry).unwrap_err().to_string();
+            assert!(e.contains(want), "tag {tag}: {e}");
+        }
+        assert!(arrays((258, 3, vec![8, 8, 8])).is_ok());
+        assert!(arrays((339, 3, vec![1, 1, 1])).is_ok());
+        assert!(arrays((266, 3, vec![1])).is_ok());
+        // An ICC profile is routed in either byte order, and the
+        // orientation still takes precedence in the message.
+        for le in [true, false] {
+            let b = rgb_tiff(le, &[(34675, 7, 0)]);
+            assert!(run(ImageFormat::Tiff, &b).is_err(), "{le}");
+            let oriented = rgb_tiff(le, &[(274, 3, 6), (34675, 7, 0)]);
+            assert!(transform(ImageFormat::Tiff, &oriented).is_some(), "{le}");
+        }
         // A structure tag with several values is outside the class.
         let mut multi = rgb_tiff(true, &[]);
-        let at = 8 + 2 + 12; // the second entry, photometric
+        let at = 8 + 2 + 2 * 12; // the third entry, photometric
         multi[at + 4..at + 8].copy_from_slice(&2u32.to_le_bytes());
         assert!(run(ImageFormat::Tiff, &multi).is_err());
     }

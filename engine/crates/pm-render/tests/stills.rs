@@ -216,35 +216,123 @@ fn webp_with_exif(simple: &[u8], orientation: u16) -> Vec<u8> {
     out
 }
 
-/// Re-encodes `src` with ImageIO (`uti`, e.g. `public.heic`) and the given
-/// orientation property, as a camera or Photos export does. ImageIO writes
-/// HEIF orientation as an `irot`/`imir` property and TIFF orientation as
-/// tag 274.
-fn imageio_with_orientation(src: &Path, out: &Path, uti: &str, orientation: u16) {
+/// How [`imageio_write`] encodes.
+#[derive(Default)]
+struct ImageIo<'a> {
+    /// EXIF orientation property (1 when `None`).
+    orientation: Option<u16>,
+    /// Color space the image is tagged with before encoding: `device`
+    /// (ImageIO embeds no profile), `srgb`, `p3`, `adobe`; the source's
+    /// when `None` (ImageIO embeds sRGB for an untagged PNG).
+    color_space: Option<&'a str>,
+    /// TIFF compression tag value.
+    tiff_compression: Option<u16>,
+    /// TIFF tile width and height.
+    tiff_tile: Option<u16>,
+    /// Progressive JPEG.
+    progressive: bool,
+}
+
+/// Re-encodes `src` with ImageIO (`uti`, e.g. `public.heic`), as Preview,
+/// Photos, or a camera export does. ImageIO writes HEIF orientation as an
+/// `irot`/`imir` property and TIFF orientation as tag 274.
+fn imageio_write(src: &Path, out: &Path, uti: &str, o: &ImageIo) {
     let script = out.with_extension("swift");
     std::fs::write(
         &script,
         r#"import Foundation
 import ImageIO
+import CoreGraphics
 let a = CommandLine.arguments
 let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: a[1]) as CFURL, nil)!
-let img = CGImageSourceCreateImageAtIndex(src, 0, nil)!
+var img = CGImageSourceCreateImageAtIndex(src, 0, nil)!
+let spaces: [String: CGColorSpace] = [
+  "device": CGColorSpaceCreateDeviceRGB(),
+  "srgb": CGColorSpace(name: CGColorSpace.sRGB)!,
+  "p3": CGColorSpace(name: CGColorSpace.displayP3)!,
+  "adobe": CGColorSpace(name: CGColorSpace.adobeRGB1998)!,
+]
+if a[4] != "-" { img = img.copy(colorSpace: spaces[a[4]]!)! }
+var props: [CFString: Any] = [kCGImagePropertyOrientation: Int(a[5])!]
+var tiff: [CFString: Any] = [:]
+if a[6] != "-" { tiff[kCGImagePropertyTIFFCompression] = Int(a[6])! }
+if a[7] != "-" {
+  tiff[kCGImagePropertyTIFFTileWidth] = Int(a[7])!
+  tiff[kCGImagePropertyTIFFTileLength] = Int(a[7])!
+}
+if !tiff.isEmpty { props[kCGImagePropertyTIFFDictionary] = tiff }
+if a[8] == "1" { props[kCGImagePropertyJFIFDictionary] = [kCGImagePropertyJFIFIsProgressive: true] }
 let dst = CGImageDestinationCreateWithURL(URL(fileURLWithPath: a[2]) as CFURL, a[3] as CFString, 1, nil)!
-CGImageDestinationAddImage(dst, img, [kCGImagePropertyOrientation: Int(a[4])!] as CFDictionary)
+CGImageDestinationAddImage(dst, img, props as CFDictionary)
 exit(CGImageDestinationFinalize(dst) ? 0 : 1)
 "#,
     )
     .unwrap();
+    let opt = |v: Option<String>| v.unwrap_or_else(|| "-".into());
     let ok = Command::new("/usr/bin/swift")
         .arg(&script)
         .arg(src)
         .arg(out)
         .arg(uti)
-        .arg(orientation.to_string())
+        .arg(o.color_space.unwrap_or("-"))
+        .arg(o.orientation.unwrap_or(1).to_string())
+        .arg(opt(o.tiff_compression.map(|c| c.to_string())))
+        .arg(opt(o.tiff_tile.map(|t| t.to_string())))
+        .arg(if o.progressive { "1" } else { "0" })
         .status()
         .expect("/usr/bin/swift (Xcode command line tools) writes the ImageIO cases")
         .success();
-    assert!(ok, "ImageIO {uti} orientation {orientation}");
+    assert!(ok, "ImageIO {uti} -> {}", out.display());
+}
+
+fn imageio_with_orientation(src: &Path, out: &Path, uti: &str, orientation: u16) {
+    imageio_write(
+        src,
+        out,
+        uti,
+        &ImageIo {
+            orientation: Some(orientation),
+            ..Default::default()
+        },
+    );
+}
+
+/// The first IFD's entries of a TIFF file, as (byte offset of the entry,
+/// tag), for patching test files.
+fn tiff_entries(b: &[u8]) -> Vec<(usize, u16)> {
+    let le = &b[..2] == b"II";
+    let u16_ = |at: usize| {
+        let v = [b[at], b[at + 1]];
+        if le {
+            u16::from_le_bytes(v)
+        } else {
+            u16::from_be_bytes(v)
+        }
+    };
+    let v = [b[4], b[5], b[6], b[7]];
+    let ifd = if le {
+        u32::from_le_bytes(v)
+    } else {
+        u32::from_be_bytes(v)
+    } as usize;
+    (0..u16_(ifd) as usize)
+        .map(|i| (ifd + 2 + 12 * i, u16_(ifd + 2 + 12 * i)))
+        .collect()
+}
+
+/// Sets a SHORT scalar entry of the first IFD in place.
+fn tiff_set_short(b: &mut [u8], tag: u16, value: u16) {
+    let le = &b[..2] == b"II";
+    let (at, _) = tiff_entries(b)
+        .into_iter()
+        .find(|e| e.1 == tag)
+        .unwrap_or_else(|| panic!("tag {tag}"));
+    let v = if le {
+        value.to_le_bytes()
+    } else {
+        value.to_be_bytes()
+    };
+    b[at + 8..at + 10].copy_from_slice(&v);
 }
 
 fn decoded_orientation(path: &Path) -> u8 {
@@ -310,16 +398,53 @@ fn oriented_stills_are_unsupported() {
     );
     cases.push(write("exif6.webp", &webp_with_exif(&webp, 6)));
 
-    // 8-bit opaque TIFF and HEIC written by ImageIO.
-    for (ext, uti) in [("tiff", "public.tiff"), ("heic", "public.heic")] {
-        let control = d.join(format!("o1.{ext}"));
-        imageio_with_orientation(&plain, &control, uti, 1);
-        assert_eq!(probe_image(&control), Ok(()), "{ext} orientation 1");
-        for o in [3, 6, 7] {
+    // 8-bit opaque TIFF and HEIC written by ImageIO. The TIFF is an
+    // untagged device RGB image (ImageIO embeds a profile otherwise, which
+    // routes the file for another reason; see `tagged_tiff_is_unsupported`).
+    for (ext, uti, color_space) in [
+        ("tiff", "public.tiff", Some("device")),
+        ("heic", "public.heic", None),
+    ] {
+        for o in [1, 3, 6, 7] {
             let p = d.join(format!("o{o}.{ext}"));
-            imageio_with_orientation(&plain, &p, uti, o);
-            cases.push(p);
+            let opts = ImageIo {
+                orientation: Some(o),
+                color_space,
+                ..Default::default()
+            };
+            imageio_write(&plain, &p, uti, &opts);
+            if o == 1 {
+                assert_eq!(probe_image(&p), Ok(()), "{ext} orientation 1");
+            } else {
+                cases.push(p);
+            }
         }
+    }
+
+    // The container header parse finds every transform on its own, also
+    // where the decoder reports the orientation first (ImageIO's HEIC and
+    // TIFF, PNG eXIf before the image data).
+    for p in &cases {
+        let format = match p.extension().unwrap().to_str().unwrap() {
+            "png" => pm_media::image::ImageFormat::Png,
+            "jpg" => pm_media::image::ImageFormat::Jpeg,
+            "webp" => pm_media::image::ImageFormat::WebP,
+            "tiff" => pm_media::image::ImageFormat::Tiff,
+            _ => pm_media::image::ImageFormat::Heif,
+        };
+        let t = pm_render::stills::container_transform(p, format);
+        assert!(
+            matches!(t, Ok(Some(_))),
+            "{}: header parse found {t:?}",
+            p.display()
+        );
+    }
+    for o in [1, 3, 6, 7] {
+        let heic = d.join(format!("o{o}.heic"));
+        let t = pm_render::stills::container_transform(&heic, pm_media::image::ImageFormat::Heif)
+            .unwrap();
+        eprintln!("o{o}.heic header transform: {t:?}");
+        assert_eq!(t.is_some(), o != 1, "o{o}.heic: {t:?}");
     }
 
     for p in &cases {
@@ -359,12 +484,13 @@ fn decoded_rgba8(path: &Path) -> Vec<u8> {
 
 /// The TIFF class pm-render draws was compared with the legacy renderer on
 /// an uncompressed file (`render/still-photo-tiff`). The lossless
-/// compressions it also accepts decode, in pm-media, to the same pixels as
-/// the uncompressed file (and FFmpeg, the legacy converter, decodes them
-/// losslessly by definition), so they are the same class. Gray files
-/// written by FFmpeg are routed (palette, Y'CbCr, and planar TIFF are
-/// covered by `stills::tests::tiff_classes`; pm-media cannot read FFmpeg's
-/// palette or Y'CbCr TIFF at all).
+/// compressions it also accepts (LZW with and without predictor 2, both
+/// Deflate tags, PackBits) decode, in pm-media, to the same pixels as the
+/// uncompressed file (and FFmpeg, the legacy converter, decodes them
+/// losslessly by definition), so they are the same class. Tiled and gray
+/// files are routed (palette, Y'CbCr, planar, fill order, sample format,
+/// and colorimetry tags are covered by `stills::tests::tiff_classes`;
+/// pm-media cannot read FFmpeg's palette or Y'CbCr TIFF at all).
 #[test]
 fn tiff_compressions_decode_alike() {
     let d = dir().join("tiff");
@@ -379,48 +505,138 @@ fn tiff_compressions_decode_alike() {
         assert_eq!(probe_image(&p), Ok(()), "{algo}");
         assert!(decoded_rgba8(&p) == reference, "{algo} decodes differently");
     }
-    // ImageIO's LZW with horizontal differencing (predictor 2), as Preview
-    // and Photos write it.
+    // Adobe Deflate (compression 8) carries the same zlib stream as the
+    // Deflate FFmpeg writes (32946); only the tag differs.
+    let mut adobe = std::fs::read(d.join("deflate.tiff")).unwrap();
+    tiff_set_short(&mut adobe, 259, 8);
+    let adobe_deflate = d.join("adobe-deflate.tiff");
+    std::fs::write(&adobe_deflate, adobe).unwrap();
+    assert_eq!(probe_image(&adobe_deflate), Ok(()));
+    assert!(
+        decoded_rgba8(&adobe_deflate) == reference,
+        "Adobe Deflate decodes differently"
+    );
+    // ImageIO's LZW with horizontal differencing (predictor 2) and
+    // per-sample arrays, as Preview and Photos write it; untagged (an
+    // uncalibrated device RGB image), so in the class.
     let imageio = d.join("imageio-lzw.tiff");
-    let script = d.join("lzw.swift");
-    std::fs::write(
-        &script,
-        r#"import Foundation
-import ImageIO
-let a = CommandLine.arguments
-let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: a[1]) as CFURL, nil)!
-let img = CGImageSourceCreateImageAtIndex(src, 0, nil)!
-let dst = CGImageDestinationCreateWithURL(URL(fileURLWithPath: a[2]) as CFURL, "public.tiff" as CFString, 1, nil)!
-let tiff: [CFString: Any] = [kCGImagePropertyTIFFCompression: 5]
-CGImageDestinationAddImage(dst, img, [kCGImagePropertyTIFFDictionary: tiff] as CFDictionary)
-exit(CGImageDestinationFinalize(dst) ? 0 : 1)
-"#,
-    )
-    .unwrap();
-    let ok = Command::new("/usr/bin/swift")
-        .arg(&script)
-        .arg(&raw)
-        .arg(&imageio)
-        .status()
-        .expect("/usr/bin/swift (Xcode command line tools)")
-        .success();
-    assert!(ok, "ImageIO LZW TIFF");
-    match probe_image(&imageio) {
-        // ImageIO may attach a profile or an alpha channel; then the file
-        // is routed and there is nothing to compare.
-        Ok(()) => {
-            assert!(
-                decoded_rgba8(&imageio) == reference,
-                "ImageIO LZW decodes differently"
-            );
-            eprintln!("ImageIO LZW TIFF drawn, decodes like the uncompressed file");
-        }
-        Err(e) => eprintln!("ImageIO LZW TIFF routed: {e:?}"),
-    }
+    let lzw = ImageIo {
+        color_space: Some("device"),
+        tiff_compression: Some(5),
+        ..Default::default()
+    };
+    imageio_write(&raw, &imageio, "public.tiff", &lzw);
+    let tags: Vec<u16> = tiff_entries(&std::fs::read(&imageio).unwrap())
+        .into_iter()
+        .map(|e| e.1)
+        .collect();
+    assert!(tags.contains(&317) && !tags.contains(&34675), "{tags:?}");
+    assert_eq!(probe_image(&imageio), Ok(()));
+    assert!(
+        decoded_rgba8(&imageio) == reference,
+        "ImageIO LZW decodes differently"
+    );
+    eprintln!(
+        "ImageIO LZW TIFF (predictor 2, no profile) drawn, decodes like the uncompressed file"
+    );
+    // Tiled TIFF was not compared with the legacy renderer.
+    let tiled = d.join("imageio-tiled.tiff");
+    imageio_write(
+        &raw,
+        &tiled,
+        "public.tiff",
+        &ImageIo {
+            color_space: Some("device"),
+            tiff_compression: Some(1),
+            tiff_tile: Some(16),
+            ..Default::default()
+        },
+    );
+    let got = unsupported(&tiled);
+    assert!(got.contains("tiled"), "{got}");
+    eprintln!("imageio-tiled.tiff unsupported: {got}");
     let gray = d.join("gray.tiff");
     ffmpeg(&gray, &["-pix_fmt", "gray"]);
     let got = unsupported(&gray);
     assert!(got.contains("photometric interpretation 1"), "{got}");
     eprintln!("gray.tiff    unsupported: {got}");
+    std::fs::remove_dir_all(&d).ok();
+}
+
+/// A TIFF with an ICC profile (tag 34675) is unsupported whatever the
+/// profile: pm-media's TIFF decoder does not report it (so a wide-gamut
+/// TIFF would otherwise be drawn as untagged sRGB), and no tagged TIFF was
+/// compared with the legacy renderer. ImageIO embeds a profile in every
+/// TIFF of a tagged image, including sRGB for an untagged source.
+#[test]
+fn tagged_tiff_is_unsupported() {
+    let d = dir().join("tagged-tiff");
+    std::fs::create_dir_all(&d).unwrap();
+    let plain = d.join("plain.png");
+    ffmpeg(&plain, &["-pix_fmt", "rgb24"]);
+    for (space, compression) in [
+        (Some("adobe"), 5),
+        (Some("p3"), 5),
+        (Some("srgb"), 5),
+        (Some("p3"), 1),
+        (None, 1),
+    ] {
+        let name = format!("{}-{compression}.tiff", space.unwrap_or("source"));
+        let p = d.join(&name);
+        imageio_write(
+            &plain,
+            &p,
+            "public.tiff",
+            &ImageIo {
+                color_space: space,
+                tiff_compression: Some(compression),
+                ..Default::default()
+            },
+        );
+        let tags: Vec<u16> = tiff_entries(&std::fs::read(&p).unwrap())
+            .into_iter()
+            .map(|e| e.1)
+            .collect();
+        assert!(
+            tags.contains(&34675),
+            "{name}: ImageIO wrote no profile: {tags:?}"
+        );
+        let got = unsupported(&p);
+        assert!(got.contains("ICC profile"), "{name}: {got}");
+        eprintln!("{name:<16} unsupported: {got}");
+    }
+    std::fs::remove_dir_all(&d).ok();
+}
+
+/// Gray JPEG is drawn only as baseline, the structure compared with the
+/// legacy renderer (`render/still-photo-gray-jpg`); progressive gray is
+/// routed.
+#[test]
+fn progressive_gray_jpeg_is_unsupported() {
+    let d = dir().join("gray-jpeg");
+    std::fs::create_dir_all(&d).unwrap();
+    let gray_png = d.join("gray.png");
+    ffmpeg(&gray_png, &["-pix_fmt", "gray"]);
+    let baseline = d.join("baseline.jpg");
+    imageio_write(&gray_png, &baseline, "public.jpeg", &ImageIo::default());
+    assert_eq!(probe_image(&baseline), Ok(()));
+    let progressive = d.join("progressive.jpg");
+    imageio_write(
+        &gray_png,
+        &progressive,
+        "public.jpeg",
+        &ImageIo {
+            progressive: true,
+            ..Default::default()
+        },
+    );
+    let bytes = std::fs::read(&progressive).unwrap();
+    assert!(
+        bytes.windows(2).any(|w| w == [0xFF, 0xC2]),
+        "ImageIO wrote no progressive frame header"
+    );
+    let got = unsupported(&progressive);
+    assert!(got.contains("progressive gray"), "{got}");
+    eprintln!("progressive gray JPEG unsupported: {got}");
     std::fs::remove_dir_all(&d).ok();
 }
