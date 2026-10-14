@@ -1,0 +1,296 @@
+# pm-render: design notes
+
+The Phase 2 renderer and color pipeline (plan sections 8, 9, 10, 25, and 26
+Phase 2; amendments 7, 8, 11; contracts 1 to 4). Crates:
+`engine/crates/pm-render` (render graph, 3D scene pass, capability check,
+headless API), `engine/crates/pm-color` (display encoding E, Standard
+invariants, chroma, alpha, dither, CICP, cache keys), `engine/crates/pm-geom3d`
+(three.js primitive geometry), and the device, target, GLSL, and MSL parts of
+`engine/crates/pm-gpu`. This file records what the renderer draws, how it
+matches today's look, and what it routes to the legacy engine. The plan stays
+the authority.
+
+## What it draws
+
+| Feature | Status | Parity evidence |
+|---|---|---|
+| Solid layers (`d.radius` ignored, as level 1) | Supported | Corpus `layers/solid`, `render/*`: exact |
+| Image layers (PNG, JPEG, WebP, AVIF, HEIC, TIFF, OpenEXR stills; sRGB and Display P3 profiles) | Supported | Corpus `media/still-*`: exact; transparent float frames 0 CV |
+| Video layers (pm-media decode service, zero-copy decode-in) | Supported for progressive, square-pixel, unrotated, SDR sources with Rec.709 or BT.601 primaries | Corpus `media/*`, `retiming/video`, `render/video`: within 1 CV on patch interiors (video class) |
+| Transforms (position, anchor, scale, rotation, skew, parenting, size anchors), opacity | Supported, today's sampling (no mipmaps, bilinear, hard UV edges), shared quad edges | Corpus `render/transforms`: ≤ 1 CV, 100% within 1 |
+| Normal blending (premultiplied source-over) | Supported | All of the above |
+| Precomps (own size, retiming, `PC_MAX_DEPTH` 6, the open composition not nested) | Supported | Corpus `render/precomps`, `render/scaled-capture` |
+| Groups: transform-only flattened, opacity boundaries composited | Supported | Corpus `render/groups` |
+| Solo, hidden layers and groups, in and out points, matte sources skipped | Supported | Corpus `render/solo`, `render/groups` |
+| Composition backgrounds (none, solid with alpha, linear, radial) | Supported | Corpus `render/background-*` |
+| One `layer3d` object per composition: box, sphere, plane, cylinder, cone, torus with `MeshStandardMaterial` values, lit by suns without shadows and the hemisphere ambient | Supported | 12 three.js reference scenes and 7 corpus documents within the 3D bar, at most 1 CV anywhere (below) |
+| Region of interest, output scale, 16- and 32-bit precision | Supported | Regions equal the full frame bit for bit |
+| Depth and object-id surface (contract 2) | Supported for top-level layers | `tests/headless.rs` |
+| Everything else | Routed by `unsupported` | `tests/headless.rs` capability test |
+
+## API
+
+`Renderer` is the headless API both engines use (deliverable 5):
+
+- `Renderer::headless()` or `Renderer::new(device, queue)`: one per engine. It
+  keeps compiled pipelines, the target pool, media caches, the 3D programs,
+  and the evaluator's caches across frames.
+- `render(document, composition, tick, &RenderRequest, &dyn AssetResolver) ->
+  Frame`: a new texture with premultiplied working values (Standard: E-encoded,
+  Rec.709 primaries) at the request's precision and the region's size, the
+  depth and id surface when asked, the legend (top-level layer ids by id
+  index), and per-layer failures (section 8 isolation: a failing layer draws
+  nothing and is reported).
+- `render_into(…, &Target, Option<&Target>)`: into a caller's working texture
+  (`Target::wrap` over the bridge presenter's `WorkingTexture` or an export
+  buffer; tested to give the same bytes).
+- `read_rgba`, `read_depth_id`: readback for tests, captures, and the CPU
+  encoder-input reference.
+- `plan(…)`: the frame's render graph as data (tests, `pm-cli parity`).
+- `pass_through(…)`: section 9's pass-through candidate (a single video drawn
+  1:1 over the whole output) with the frame facts
+  `pm_color::chroma::pass_through` needs; the exporter compares formats and
+  copies Y′CbCr planes when they match.
+- `interpret(path, Option<ColorDescription>)`, `video_color(path)`: Interpret
+  Footage per file.
+- `set_program_cache_dir(dir)`: the disk cache of translated 3D programs
+  (amendment 11). The host passes its cache directory.
+- `set_3d_msaa(false)`: parity-only, to classify MSAA edge pixels.
+
+`RenderRequest::from_frame_request` maps contract 2's `FrameRequest`:
+`output_size`, `region`, `scale`, `precision`, `depth_id`, and `purpose`
+(export decodes ProRes 422 as `v216`, amendment 6). A view override is
+refused (editor looks are not drawn here). `color` is not applied by the
+renderer: frames are working values, and the presenter's display transform or
+the exporter's encoder input applies the output (sections 9 and 17).
+`resolution` and `media` are honored as full resolution and originals (no
+proxies exist yet); `motion_blur` has no effect because layers with motion blur
+are unsupported.
+
+## Render graph
+
+`plan::build` walks a composition as `renderProject` does: the compositing
+pass (non-boundary groups flattened), bottom to top, today's skip rules, and
+each layer's content quad (`contentQuad`) with its world matrix scaled to
+output pixels, every number in the TypeScript expression order. The plan is
+pure data; `exec` resolves sources (stills, video frames, nested targets, 3D
+passes) and draws each target in one render pass with fixed-function
+premultiplied source-over.
+
+- Targets keep GL's row order, as today's framebuffers; the finished frame is
+  flipped once, exactly, into the top-down output.
+- A region of interest renders the full frame's geometry through a viewport
+  placed so the region lands at the target's origin. Moving the matrices
+  instead changed f32 rounding at hard edges (5 pixels of a rotated image);
+  with the viewport every region equals the full frame bit for bit, for color
+  and for the depth and id surface. A group boundary renders only the region.
+- 3D layers render at the full output size and are drawn as screen-space
+  quads; their pass does not shrink to a region yet.
+
+## Color
+
+Standard color (decision 1): intermediates are premultiplied E-encoded values
+with Rec.709 primaries; a hex code's value is the working value
+(`pm_color::standard::parse_hex`, the legacy parser); sources tagged E pass
+through; clipping happens only at output.
+
+- `pm_color::transfer`: E (the sRGB piecewise curve extended odd-symmetric
+  below 0 and as a power above 1), BT.1886, scene-referred BT.709, gamma 2.2,
+  in f64 and the f32 forms the shaders use.
+- `pm_color::standard`: the hex reading and section 2 invariant (2) as
+  functions.
+- `pm_color::linear`: linear-light helpers for linear blending (Phase 3a): E
+  conversions of premultiplied values, the nine blend modes in both domains,
+  HDR-safe screen, overlay, and soft light.
+- `pm_color::chroma`: siting origins, the section 9 upsamplers (horizontal
+  linear for 4:2:2; Catmull-Rom horizontally and linear vertically for 4:2:0;
+  co-sited samples exact), decimation, and pass-through.
+  **Declared 4:2:0 filter.** Section 9 leaves the 4:2:0 encoder-input filter
+  to a declaration. A two-row average blurred chroma by `[1, 6, 1] / 8`
+  against the linear upsampler (35 CV on an H.264 round trip, failing
+  invariant (1)). `VERTICAL_420` is `[−1, 3, 3, −1] / 4` on rows 2y − 1 to
+  2y + 2, the exact inverse of linear upsampling, also at clamped edges.
+  `pm-export`'s `420v` conversion uses it (a minimal change in that lane's
+  `convert.rs`).
+- `pm_color::alpha`: section 9's premultiplication rules (identity inputs use
+  premultiplied sources as they are; other inputs unpremultiply guarded below
+  α = 1/4096, transform, re-premultiply; additive pixels are never
+  unpremultiplied; premultiplied-with-color mattes).
+- `pm_color::dither`: the deterministic blue-noise tile and RPDF offsets of
+  sections 9 and 17.
+- `pm_color::cicp`: output tags with amendment 7 ("Rec.709 (QuickTime and
+  Safari)" is 1-13-1, limited) and code point readings.
+- `pm_color::key`: the color components of cache keys (contract 4
+  `ColorKey`, a positional source key) and amendment 8's export precision
+  default.
+- `pm_color::primaries`: primaries conversion in linear light (Display P3
+  stills).
+
+The source pass (`shaders/source.wgsl`) converts normalized planes (decode-in)
+to working values in f32: chroma upsampling, matrix, transfer and primaries,
+alpha. BT.601 primaries read as Rec.709 in Standard (today's Chromium does
+not convert them).
+
+**Recorded deviations in the corpus comparison** (`tests/corpus.rs`):
+`hevc-alpha.mov` is encoded with straight alpha but its probe reports Apple's
+premultiplied default, so the test interprets it as straight, as Chromium
+reads it; Chromium reads untagged VP9 and AV1 with BT.709 coefficients where
+section 9's rule reads untagged SD as BT.601 (H.264, HEVC, and VP8 read BT.601
+in both), so the test interprets those two fixtures as BT.709. Both are
+Interpret Footage settings, not renderer changes.
+
+## The 3D scene pass
+
+`scene3d` draws a 3D object layer as `compositor.ts` does (amendment 11's
+native port of the three.js r180 path):
+
+- **Scene.** `pm-eval`'s `compositionScene` gives the object, its material
+  values, the lights, the topmost active camera and environment, and the
+  studio defaults; the object sits at its `world3D` matrix; the camera at its
+  world pose aimed at its target with the layer's world Y as up; light layers
+  at their world positions aimed through their parent space.
+- **Geometry.** `pm_geom3d::Primitive` builds three.js's `BoxGeometry`,
+  `SphereGeometry`, `PlaneGeometry`, `CylinderGeometry`, `ConeGeometry`, and
+  `TorusGeometry` as `primitiveGeometry` calls them, bit-identical to
+  three.js's buffers (18 parameter sets, hashes from three.js itself,
+  `pm-geom3d/tools/three-primitives.ts`).
+- **Programs.** r180's shipped `ShaderChunk` is vendored
+  (`src/three/r180/`, MIT, from the built module the app bundles; comments and
+  blank lines are already stripped there) and `WebGLProgram`'s prefix,
+  defines, includes, light counts, loop unrolling, and output encoding are
+  ported (`three/program.rs`). Sources equal what WebGL receives byte for
+  byte, including the `-0.0000` entries three.js prints for its Rec.709 round
+  trip matrix (`tests/three_programs.rs`, 12 recorded programs).
+- **Uniforms.** three.js's camera, light, and material uniforms through a port
+  of its math (`Matrix4.lookAt`, quaternion and `compose`, `invert`,
+  `makePerspective`, `makeOrthographic`, `getNormalMatrix`,
+  `transformDirection`, `Color.setHex` with r180's sRGB constants): 858
+  recorded values equal ours in f32.
+- **Passes.** The shared depth prepass (no color writes; depth writes only for
+  layer opacity ≥ 0.999), then the color pass (`LessEqual`, no depth writes),
+  4× MSAA into RGBA8 and resolve, as the WebGL canvas. Opaque materials draw
+  without blending; double-sided materials do not cull; single-sided ones cull
+  back faces, with the front face flipped for mirrored objects (negative
+  determinant). The bottom layer of the set clears to the environment
+  background (`setClearColor` in sRGB, opaque); others clear to transparent.
+  The resolved, premultiplied 8-bit output is drawn as a screen-space quad with
+  the layer's opacity, as today's canvas upload. The canvas is clamped to
+  1 to 8192 pixels a side and the camera's aspect comes from the clamped
+  size, as `renderPass` and `resizeCamera` do.
+- **Metal safe math.** wgpu 30 compiles every module with fast math and has no
+  option for `MTLCompileOptions.mathMode`. `pm_gpu::msl` writes the naga
+  modules as MSL in wgpu-hal's slot conventions, puts MSL 3.2's
+  `#pragma METAL fp math_mode(safe)` first, and hands them to wgpu as
+  passthrough modules (`Features::PASSTHROUGH_SHADERS`, requested by the
+  engine device). No wgpu patch is needed. A GPU test shows the mode is real
+  (`isnan(0 / 0)` is kept in safe mode and folded away in fast mode). With safe
+  math every reference scene is within 1 CV everywhere; with fast math one box
+  had MSAA coverage differences up to 33 CV (47 in a corpus frame), still
+  inside the bar's edge exclusion. Devices without passthrough shaders fall
+  back to wgpu's compile and report fast math (`Scene3dRenderer::math_mode`).
+- **Program cache.** Translated MSL and the pass's reflection are cached on
+  disk per program (SHA-256 of sources, math mode, translation revision),
+  written atomically; a damaged or mismatched entry is a miss. A cached
+  program's first frame took 2.5 ms against 137 ms to translate (debug
+  build, on a loaded machine).
+- **Depth surface.** With the depth and id surface requested, a single-sample
+  pass writes linear view depth (`r32float`, +inf where nothing drew) in GL
+  row order; the id pass reads it for the 3D layer.
+
+Not drawn yet (routed): shadows (any casting light with environment shadows
+on; the studio sun casts and the studio environment has shadows on when no
+light or camera layer is active for the whole composition), point, spot, and
+area lights, more than one object per composition (shared depth sets and
+ordering), transparent materials, texture maps, node materials, slots, source
+materials, imported models, mesh, lathe, and extrude sources, capsule and
+icosahedron primitives, recipe parts, legacy `scene3d`, OBJ, and Studio Cube
+layers, Blender surfaces, editor looks.
+
+## Depth and id surface
+
+`rgba16float`, top-down, the frame's size: r is the view depth of the visible
+3D surface in world units (+inf where the top layer is 2D or nothing), g and b
+the low and high 11 bits of the top layer's legend index, a is 1 where a layer
+covers the pixel (its own alpha at least 0.5/255). Precomps report their
+precomp layer and +inf depth; 3D inside a precomp has no depth here yet.
+
+## Capability routing
+
+`unsupported(document, composition)` lists every feature of a composition and
+everything it nests that this renderer does not draw; `unsupported_with_media`
+also opens media headers (animated images, color profiles, interlaced,
+rotated, non-square, HDR, or wide-gamut video). The answer is static and
+conservative, so one routing decision per document revision holds at every
+frame: anything animatable that could need an unsupported path at some time is
+listed (an animated blend mode, a material opacity channel that is not a
+constant 1, shadows whenever defaults could apply). Listed features: layer
+types other than solid, image, video, precomp, group, null, audio, and the 3D
+roles; extension definitions; effects; masks; track mattes and matte sources;
+transitions; blend modes other than normal; motion blur; 2.5D layers and 3D
+groups; adjustment layers with effects; `compat` level 2; non-default project
+color; `requiresEngine`; Blender rendering; SVG images; animated images and
+sequences; unreadable media; the 3D limits above; request options (view
+override, 32-bit precision on a device without `rgba32float` filtering and
+blending). A render that still meets something unsupported fails with
+`RenderError::Unsupported` rather than drawing it wrong.
+
+## Tests and measurements
+
+Measured on an Apple M4 Max (macOS 27), wgpu 30.0.1 on Metal, Chromium 151
+(ANGLE on Metal) for references, 2026-10-13.
+
+| Test | What | Result |
+|---|---|---|
+| `tests/corpus.rs` | Every supported project of the newest `v1-*` and `render-*` captures, Standard class (≤ 1 CV for 99.9%, ≤ 4 max), video class (≤ 2 CV on patch interiors), alpha class (transparent float frames within 1 CV), 3D class on 3D pixels | 64 frames, 0 failures; every 3D frame within 1 CV everywhere |
+| `tests/scene3d.rs` | 12 scenes against three.js renders through the production `SceneRuntime` (`tools/three-ref`), section 2 3D bar | All pass: 100% within 2 CV, max 1 CV, SSIM ≥ 0.99998 (safe math) |
+| `tests/scene3d.rs` | Uniform values against the recorded draws | 858 values equal in f32 |
+| `tests/three_programs.rs` | Generated program sources against WebGL's | 12 of 12 byte-identical |
+| `pm-geom3d` | Primitive buffers against three.js | 18 of 18 bit-identical |
+| `tests/color.rs` | Invariant (2): 512 solids at 16- and 32-bit | sRGB PNG exact; 10/16-bit RGB 0 CV; 8-bit limited Y′CbCr ≤ 2 CV, greys neutral; 10- and 12-bit Y′CbCr ≤ 1 CV |
+| `tests/color.rs` | Pipeline transparency (amendment 8): ProRes 4444 XQ → `y416`, ProRes 422 HQ → `v216`, 32-bit, against VideoToolbox clipped to the codable range | 688,500 and 345,600 samples, 0 differ (color under α = 0 not compared) |
+| `tests/color.rs` | Invariant (1), 4:2:0: H.264 → `420v` | 259,200 samples: luma and chroma exact |
+| `tests/headless.rs` | Determinism: every supported feature in one composition, 3 times, 16- and 32-bit, two renderers | Byte-identical |
+| `tests/headless.rs` | Regions, depth and id surface, capability list, pass-through, `render_into`, contract 2 | Pass |
+| `pm-gpu/tests/msl_math.rs` | Safe math is in effect | Pass |
+| `frame_time_at_1080p` (ignored) | The everything composition at 1920 × 1080, release | 3.06 ms (16-bit, p95 4.69), 2.48 ms (32-bit, p95 2.76) median per frame, plan and GPU |
+
+The ProRes and H.264 sources come from the media corpus
+(`~/Library/Caches/powermove-engine/media-corpus`, `PM_MEDIA_CORPUS`); the
+corpus, render, and three.js captures from `~/Library/Application Support/Powermove
+Engine Corpus/` (`PM_ENGINE_CORPUS`, `PM_THREE_REF`). Without them those tests
+report and pass vacuously. The corpus ProRes files are tagged BT.601
+(`smpte170m`); the transparency test reads them as BT.709 so source and Rec.709
+output share the matrix.
+
+## Tools
+
+- `bun engine/crates/pm-render/tools/vendor-three.ts`: re-vendors r180's chunks.
+- `pm-electron-lock bun engine/crates/pm-render/tools/three-ref/run.ts`: renders
+  the scenes of `tests/fixtures/three-scenes.json` with the production
+  `SceneRuntime` in headless Chromium (with and without MSAA), records program
+  sources and per-draw uniforms outside the repository, and rewrites
+  `tests/fixtures/three-programs.json`.
+- `bun engine/crates/pm-geom3d/tools/three-primitives.ts`: primitive hashes.
+- `engine/corpus/src/projects/render.ts`: the render corpus cases (`--only
+  render/ --label render`), including 3D in a precomp, a parented rig with an
+  orthographic rolled camera, the studio sun with a background and a faded
+  layer, and a scaled 3D capture.
+
+## Gaps
+
+- 3D layers render at the full output size even for a region of interest.
+- The depth and id surface carries no depth for 3D inside precomps.
+- 3D output stays 8-bit (as today's canvas) at 32-bit precision.
+- The video class's FFmpeg plus zimg reference (section 25) is not compared
+  here; video parity is against Chromium only.
+- No render cache: content keys for layer and precomp outputs (section 8) are
+  not computed yet beyond `pm_color::key`.
+- The GPU encoder-input pass of the export lane must adopt `VERTICAL_420`
+  where it decimates 4:2:0 (the CPU reference already does).
+
+## Changes outside the lane
+
+- `engine/crates/pm-export/src/convert.rs`: the CPU `420v` reference
+  decimates with `VERTICAL_420` (above); its tests pass.
+- `engine/corpus/src/projects/render.ts` (new) and `index.ts`: the render
+  corpus cases.
