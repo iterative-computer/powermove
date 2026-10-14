@@ -31,6 +31,10 @@ function projectSettingsBridge(PM: PMRegistry): ProjectSettingsBridge {
       viewerService(PM)?.layout();
       PM.invalidate('all');
     },
+    ...(PM.HostMedia?.enabled ? {
+      mediaImport: () => PM.HostMedia.projectStorage(),
+      applyMediaImport: (mode: 'copy' | 'link') => PM.HostMedia.setProjectStorage(mode)
+    } : {}),
     exportDefaults: () => PM.exportDefaults.read(),
     applyExportDefaults: (patch) => PM.exportDefaults.write(patch),
     backgroundField: () => PM.fillField(

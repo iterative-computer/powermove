@@ -288,6 +288,8 @@ export const SIDECAR_SUFFIX_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
 export interface ProjectSaveRequest {
   name: string; projectId: string; saveAs?: boolean; documentBytes: number;
   media: import('./project-incremental').SaveMedia[];
+  /** Linked assets: records without bytes (section 21). */
+  linked?: import('./project-incremental').LinkedRecord[];
 }
 export type ProjectSaveBeginResult = { ok: true; token: string; required: string[] } | { ok: false; cancelled: boolean; error?: string };
 export type ProjectOpenResult = {
@@ -963,6 +965,8 @@ export interface PowermoveBridge {
   nativeEngine?: import('./engine-ipc').EngineBridge;
   /** The frame bridge's receiver (behind "Use New Engine"). */
   frameBridge?: import('./frame-bridge').FrameBridgeApi;
+  /** The host media store (section 21; source of media bytes behind "Use New Engine"). */
+  mediaStore?: import('./media-store').MediaStoreBridge;
 }
 
 export interface SandboxInputKey {

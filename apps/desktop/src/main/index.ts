@@ -64,6 +64,7 @@ import { registerHapticsIpc } from './haptics';
 import { registerContextMenuIpc } from './context-menu';
 import { registerCloudMediaIpc } from './cloud-media';
 import { MediaPathCache, registerMediaPathIpc } from './media-path-cache';
+import { installMediaStore } from './media-store';
 import { cloudFileState } from '@powermove/macos-haptics';
 import { registerConfirmIpc } from './native-confirm';
 import { registerClipboardIpc } from './clipboard';
@@ -935,8 +936,21 @@ if (!hasSingleInstanceLock) {
     registerWindowIpc();
     /* The native engine starts only with "Use New Engine" on (read once at
        launch; flipping it takes a relaunch). Off, nothing below runs. */
+    const useNewEngine = newEngineEnabled(process.env, store.get?.(NEW_ENGINE_STORE_KEY));
+    /* The host media store (section 21): the source of project media bytes
+       with the new engine on; read-only fallback for its media with it off. */
+    const mediaStore = installMediaStore({
+      ipc: ipcMain,
+      isTrustedSender,
+      userData: app.getPath('userData'),
+      mainDirectory: __dirname,
+      enabled: useNewEngine
+    });
+    if (isBackgroundTest) (globalThis as { __powermoveMediaStore?: unknown }).__powermoveMediaStore = mediaStore.service;
+    app.once('will-quit', () => { void mediaStore.dispose(); });
     const nativeEngine = installNativeEngine({
-      enabled: newEngineEnabled(process.env, store.get?.(NEW_ENGINE_STORE_KEY)),
+      enabled: useNewEngine,
+      resolveAsset: (asset) => mediaStore.service.resolveAsset(asset),
       ipc: ipcMain,
       isTrustedSender,
       userData: app.getPath('userData'),
@@ -1050,7 +1064,8 @@ if (!hasSingleInstanceLock) {
 
     const ctx = { isTrustedSender, isTrustedSenderContents };
     projects = new ProjectFiles(path.join(app.getPath('userData'), 'project-files.json'), path.join(app.getPath('userData'), 'backups'), {
-      validateDocument: persistence.validateProjectDocument
+      validateDocument: persistence.validateProjectDocument,
+      storedFile: (hash, length) => mediaStore.service.storedFile(hash, length)
     });
     registerSaveIpc(ipcMain, { ...ctx, projects });
     registerProjectOpenPathIpc(ipcMain, { ...ctx, projects });

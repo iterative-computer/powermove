@@ -1,6 +1,6 @@
 import { createHash, type Hash } from 'node:crypto';
 import { chmod, open, unlink, type FileHandle } from 'node:fs/promises';
-import { INCREMENTAL_MAGIC, isIncrementalProject, projectFooter, readIncrementalIndex, type IncrementalMedia, type ProjectIndex, type ProjectRecord, type SaveMedia } from '../shared/project-incremental';
+import { INCREMENTAL_MAGIC, isIncrementalProject, projectFooter, readIncrementalIndex, validateLinkedRecords, type IncrementalMedia, type LinkedRecord, type ProjectIndex, type ProjectRecord, type SaveMedia } from '../shared/project-incremental';
 import { checkVersion, copySnapshot, hashHandle, readExactly, syncFile, temporarySibling, type FileVersion } from './durable-file';
 import { FILE_CHUNK_BYTES } from './file-upload';
 import { validateProjectDocument, type ProjectDocumentValidator } from './project-document';
@@ -13,15 +13,27 @@ export function validateSaveMedia(media: unknown): asserts media is SaveMedia[] 
   for (const item of media) {
     if (!item || typeof item.id !== 'string' || !item.id || item.id.length > 1000 || ids.has(item.id)
       || typeof item.revision !== 'string' || !item.revision || item.revision.length > 200
-      || typeof item.type !== 'string' || item.type.length > 1000 || !Number.isSafeInteger(item.length) || item.length < 0) throw new Error('Invalid project media');
+      || typeof item.type !== 'string' || item.type.length > 1000 || !Number.isSafeInteger(item.length) || item.length < 0
+      || (item.stored !== undefined && (typeof item.stored !== 'string' || !/^[a-f0-9]{64}$/.test(item.stored)))) throw new Error('Invalid project media');
     ids.add(item.id);
   }
+}
+
+/** Options for media the page does not upload (section 21). */
+export interface ProjectSaveSources {
+  /** The host media store's file for a `stored` hash of `length` bytes. */
+  storedFile?(hash: string, length: number): Promise<string | null>;
+  /** Linked assets: index records without bytes. */
+  linked?: LinkedRecord[];
 }
 
 /** One bounded upload writes directly into a destination-side transaction file.
  * Reused ranges come only from the main process's verified previous container. */
 export class ProjectSave {
   readonly required: string[] = [];
+  /** Media main copies from the host media store at finish. */
+  private stored: Array<{ item: SaveMedia; file: string }> = [];
+  private linked: LinkedRecord[] = [];
   private records: IncrementalMedia[] = [];
   private incoming: Incoming[] = [];
   private document?: ProjectRecord;
@@ -40,8 +52,9 @@ export class ProjectSave {
   /** `validate` checks the received document; the desktop runs it on the persistence worker thread. */
   static async create(destination: string, previous: FileVersion | undefined, media: SaveMedia[], documentBytes: number,
     commit: (temporary: string, hash: string) => Promise<string>, release: () => void, reusePrevious = true,
-    validate: ProjectDocumentValidator = validateProjectDocument): Promise<ProjectSave> {
+    validate: ProjectDocumentValidator = validateProjectDocument, sources: ProjectSaveSources = {}): Promise<ProjectSave> {
     validateSaveMedia(media);
+    if (sources.linked !== undefined) validateLinkedRecords(sources.linked);
     if (!Number.isSafeInteger(documentBytes) || documentBytes < 2 || documentBytes > 0xffffffff) throw new Error('Invalid project document size');
     const save = new ProjectSave(destination, commit, release, validate);
     let source: FileHandle | undefined;
@@ -54,9 +67,14 @@ export class ProjectSave {
         }
       }
       const available = new Map(index?.media.map(item => [item.id, item]));
+      const mediaIds = new Set(media.map(item => item.id));
+      if (sources.linked?.some(item => mediaIds.has(item.id))) throw new Error('Invalid project media');
+      save.linked = sources.linked ?? [];
       for (const item of media) {
         const saved = available.get(item.id);
-        if (saved && saved.revision === item.revision && saved.length === item.length) save.records.push({ ...saved, type: item.type });
+        if (saved && saved.revision === item.revision && saved.length === item.length) { save.records.push({ ...saved, type: item.type }); continue; }
+        const file = item.stored && sources.storedFile ? await sources.storedFile(item.stored, item.length) : null;
+        if (file) save.stored.push({ item, file });
         else save.required.push(item.id);
       }
       const liveBytes = save.records.reduce((sum, item) => sum + item.length, 0);
@@ -108,7 +126,7 @@ export class ProjectSave {
     while (this.incoming.length && this.incoming[0]!.received === this.incoming[0]!.length) {
       const item = this.incoming.shift()!;
       const record = { offset: item.length ? item.offset : this.offset, length: item.length, sha256: item.digest.digest('hex') };
-      if (item.source) this.records.push({ ...item.source, ...record });
+      if (item.source) this.records.push({ id: item.source.id, revision: item.source.revision, type: item.source.type, ...record });
       else this.document = record;
       if (this.incoming.length) this.incoming[0]!.offset = this.offset;
     }
@@ -127,10 +145,11 @@ export class ProjectSave {
     this.finishRecords();
     if (this.incoming.length || !this.document) throw new Error('The project save is incomplete.');
     const work = (async () => {
+      await this.appendStored();
       // Parsing the document (and its undo history) is the expensive part of a
       // save; it reads the transaction file's bytes back off this thread.
       await this.validate(this.temporary, this.document!.offset, this.document!.length);
-      const index: ProjectIndex = { version: 4, document: this.document!, media: this.records };
+      const index: ProjectIndex = { version: 4, document: this.document!, media: this.records, ...(this.linked.length ? { linked: this.linked } : {}) };
       const bytes = Buffer.from(JSON.stringify(index));
       const footer = projectFooter(this.offset, bytes.length, await nativeHash(bytes));
       await this.append(bytes); await this.append(footer);
@@ -140,6 +159,24 @@ export class ProjectSave {
     })();
     this.busy = work;
     return work.finally(async () => { this.busy = undefined; await this.dispose(); });
+  }
+  /** Copies media from the host media store; a store file that is not the
+   *  expected length fails the save rather than writing a wrong record. */
+  private async appendStored(): Promise<void> {
+    for (const { item, file } of this.stored) {
+      const source = await open(file, 'r');
+      try {
+        if ((await source.stat()).size !== item.length) throw new Error('Stored media changed while saving.');
+        const offset = this.offset;
+        const digest = createHash('sha256');
+        for (let at = 0; at < item.length;) {
+          const bytes = await readExactly(source, at, Math.min(FILE_CHUNK_BYTES, item.length - at));
+          digest.update(bytes); await this.append(bytes); at += bytes.length;
+        }
+        this.records.push({ id: item.id, revision: item.revision, type: item.type, offset: item.length ? offset : this.offset, length: item.length, sha256: digest.digest('hex') });
+      } finally { await source.close(); }
+    }
+    this.stored = [];
   }
   async dispose(): Promise<void> {
     if (this.ended) return;
