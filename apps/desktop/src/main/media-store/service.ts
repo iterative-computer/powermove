@@ -5,9 +5,11 @@
  * file behind an asset only through a capability handle main mints
  * (`resolveAsset`, contract 14).
  */
-import { open, type FileHandle } from 'node:fs/promises';
+import { mkdir, open, rm, symlink, type FileHandle } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
+
+import { mediaExtension, needsImageConversion } from '../../shared/media-formats';
 
 import type { ContentHash } from '../../shared/engine-protocol';
 import { HASH_HEX, validStorageKey, type ClassifyResult, type MediaBinding, type MediaLink, type MediaReadOpen } from '../../shared/media-store';
@@ -18,8 +20,15 @@ import { MediaStore, MediaStoreError, STREAM_CHUNK_BYTES } from './store';
 
 type ReadSession = { owner: number; handle: FileHandle; size: number };
 
+/** Main's still converter (`MediaProxyService.createStillImage`): a PNG the
+ *  page reads through the playback proxy reader. */
+export type ConvertStill = (sourcePath: string) => Promise<{ token: string; size: number }>;
+
 export type MediaStoreServiceOptions = {
   root: string;
+  /** Converts TIFF and HEIF stills for the page's viewer (section 21: the
+   *  original is the asset's bytes; the PNG is generated media). */
+  convertStill?: ConvertStill;
   userData: string;
   executor: HashExecutor;
   /** "Use New Engine" as read at launch. */
@@ -153,6 +162,43 @@ export class MediaStoreService {
     if (!session || session.owner !== owner) return;
     this.reads.delete(token);
     await session.handle.close().catch(() => undefined);
+  }
+
+  /**
+   * The PNG the page's viewer shows for a TIFF or HEIF original that the
+   * store keeps (or that is linked): converted from the stored object or
+   * the verified original. `name` picks the decoder by its extension; the
+   * converter reads the file through a link carrying that name, since store
+   * objects are named by hash alone.
+   */
+  async convertStill(request: { hash?: string; link?: MediaLink; name: string }): Promise<{ ok: true; token: string; size: number; type: 'image/png' } | { ok: false; error: string }> {
+    const convert = this.options.convertStill;
+    if (!convert) return { ok: false, error: 'Image conversion is unavailable' };
+    const extension = mediaExtension(request.name);
+    if (!needsImageConversion(extension)) return { ok: false, error: 'This image format does not need converting' };
+    let file: string | null = null;
+    if (request.link !== undefined) {
+      if (!validLink(request.link)) throw new MediaStoreError('Invalid media link.');
+      const located = await this.locate(request.link);
+      if ('path' in located) file = located.path;
+      else if (await this.store.hasObject(request.link.hash, request.link.size)) file = this.store.objectPath(request.link.hash);
+    } else if (request.hash !== undefined) {
+      if (!HASH_HEX.test(request.hash)) throw new MediaStoreError('Invalid content hash.');
+      if (await this.store.hasObject(request.hash)) file = this.store.objectPath(request.hash);
+    } else throw new MediaStoreError('Name a hash or a link.');
+    if (!file) return { ok: false, error: 'The original file is no longer available' };
+    await this.store.init();
+    const folder = path.join(this.store.root, 'tmp', `still-${randomBytes(8).toString('hex')}`);
+    await mkdir(folder, { recursive: true, mode: 0o700 });
+    try {
+      const named = path.join(folder, `original.${extension}`);
+      await symlink(file, named);
+      return { ok: true, ...await convert(named), type: 'image/png' };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error && error.message ? `Could not convert this image · ${error.message}` : 'Could not convert this image' };
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
   }
 
   /** Desktop Save: the store object for `hash` when it is `length` bytes. */

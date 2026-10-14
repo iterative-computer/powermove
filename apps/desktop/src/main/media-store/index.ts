@@ -11,7 +11,7 @@ import type { IpcMain, IpcMainEvent, IpcMainInvokeEvent } from 'electron';
 
 import { WorkerPool } from './hasher';
 import { registerMediaStoreIpc, type ProjectRangeReader } from './ipc';
-import { MediaStoreService } from './service';
+import { MediaStoreService, type ConvertStill } from './service';
 import { STORE_DIRECTORY } from './store';
 
 export { MediaStoreService } from './service';
@@ -26,6 +26,8 @@ export type InstallMediaStoreOptions = {
   enabled: boolean;
   /** Reads a range of a project file the sender opened (main's ProjectFiles). */
   projectRead?: ProjectRangeReader;
+  /** Main's still converter (TIFF and HEIF originals → the viewer's PNG). */
+  convertStill?: ConvertStill;
 };
 
 export function installMediaStore(options: InstallMediaStoreOptions): { service: MediaStoreService; dispose(): Promise<void> } {
@@ -34,7 +36,8 @@ export function installMediaStore(options: InstallMediaStoreOptions): { service:
     root: path.join(options.userData, STORE_DIRECTORY),
     userData: options.userData,
     executor,
-    enabled: options.enabled
+    enabled: options.enabled,
+    ...(options.convertStill ? { convertStill: options.convertStill } : {})
   });
   void service.store.init().catch((error: unknown) => console.warn('[media-store] could not prepare the media store', error));
   registerMediaStoreIpc(options.ipc, service, { isTrustedSender: options.isTrustedSender, ...(options.projectRead ? { projectRead: options.projectRead } : {}) });

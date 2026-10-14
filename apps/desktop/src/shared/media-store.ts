@@ -28,7 +28,8 @@ export const MEDIA_STORE_IPC = {
   close: 'media-store:close',
   relink: 'media-store:relink',
   bind: 'media-store:bind',
-  removeKey: 'media-store:remove-key'
+  removeKey: 'media-store:remove-key',
+  convertStill: 'media-store:convert-still'
 } as const;
 
 /** Where a store record's bytes came from. */
@@ -113,6 +114,9 @@ export interface MediaStoreBridge {
   /** The open project's media in this window, for the engine's handles. */
   bind(projectId: string, assets: Record<string, MediaBinding>): Promise<void>;
   removeKey(key: string): Promise<boolean>;
+  /** A PNG for the page's viewer from a stored (`hash`) or linked TIFF or
+   *  HEIF original; read it with `media.readPlaybackProxy`. */
+  convertStill?(request: { hash?: string; link?: MediaLink; name: string }): Promise<{ ok: true; token: string; size: number; type: 'image/png' } | { ok: false; error: string }>;
 }
 
 /** Shown when a legacy-engine build opens a project stamped for the new engine. */

@@ -195,6 +195,36 @@ describe('MediaStoreService', () => {
   });
 });
 
+describe('still renditions of kept originals', () => {
+  it('converts a stored or linked TIFF through a link that names its format, never touching the original', async () => {
+    const seen: Array<{ named: string; resolved: string }> = [];
+    const { realpath, readlink } = await import('node:fs/promises');
+    const svc = service({
+      convertStill: async (named) => {
+        seen.push({ named: path.basename(named), resolved: await realpath(named) });
+        expect(await readlink(named)).toBeTruthy();
+        return { token: 'a'.repeat(32), size: 10 };
+      }
+    });
+    const tiff = path.join(media, 'scan.tiff');
+    await settledFile(tiff, bytes(700, 3));
+    const stored = await svc.store.putFile(tiff, { key: 'media:v2:t' });
+    expect(await svc.convertStill({ hash: stored.hash, name: 'original.tiff' })).toEqual({ ok: true, token: 'a'.repeat(32), size: 10, type: 'image/png' });
+    expect(seen[0]).toEqual({ named: 'original.tiff', resolved: await realpath(svc.store.objectPath(stored.hash)) });
+    const link = await svc.link(tiff);
+    expect((await svc.convertStill({ link, name: 'original.tiff' })).ok).toBe(true);
+    expect(seen[1]!.resolved).toBe(await realpath(tiff));
+    // The temporary name is gone afterwards, and the original is untouched.
+    const { readdir } = await import('node:fs/promises');
+    expect((await readdir(path.join(svc.store.root, 'tmp'))).filter((name) => name.startsWith('still-'))).toEqual([]);
+    expect(blake3Hex(await readFile(tiff))).toBe(stored.hash);
+    // Formats the viewer decodes, and content that is nowhere, are refused.
+    expect(await svc.convertStill({ hash: stored.hash, name: 'original.png' })).toMatchObject({ ok: false, error: /does not need converting/ });
+    expect(await svc.convertStill({ hash: blake3Hex(bytes(5)), name: 'original.tiff' })).toMatchObject({ ok: false, error: /no longer available/ });
+    expect(await service().convertStill({ hash: stored.hash, name: 'original.tiff' })).toMatchObject({ ok: false, error: /unavailable/ });
+  });
+});
+
 describe('media store IPC', () => {
   it('serves trusted windows only and reports the flag synchronously', async () => {
     const handlers = new Map<string, (...args: any[]) => any>();

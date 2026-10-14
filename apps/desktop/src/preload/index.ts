@@ -553,7 +553,10 @@ const bridge: PowermoveBridge = {
     close: (token) => ipcRenderer.invoke(MEDIA_STORE_IPC.close, token),
     relink: (request) => ipcRenderer.invoke(MEDIA_STORE_IPC.relink, { link: request.link, searchRoots: request.searchRoots ?? [] }),
     bind: (projectId, assets) => ipcRenderer.invoke(MEDIA_STORE_IPC.bind, { projectId, assets }),
-    removeKey: (key) => ipcRenderer.invoke(MEDIA_STORE_IPC.removeKey, String(key))
+    removeKey: (key) => ipcRenderer.invoke(MEDIA_STORE_IPC.removeKey, String(key)),
+    convertStill: (request) => ipcRenderer.invoke(MEDIA_STORE_IPC.convertStill, {
+      name: String(request.name ?? ''), ...(request.link !== undefined ? { link: request.link } : { hash: request.hash })
+    })
   },
   ...(frameBridge ? { frameBridge } : {})
 };

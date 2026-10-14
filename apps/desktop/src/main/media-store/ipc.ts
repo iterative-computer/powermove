@@ -152,5 +152,15 @@ export function registerMediaStoreIpc(
     if (typeof input['projectId'] !== 'string' || !PROJECT.test(input['projectId']) || !input['assets'] || typeof input['assets'] !== 'object') throw new Error('Invalid media binding.');
     service.bind(id, input['projectId'], input['assets'] as Record<string, never>);
   });
+  ipcMain.handle(MEDIA_STORE_IPC.convertStill, (event, value: unknown) => {
+    owner(event);
+    const input = (value ?? {}) as Record<string, unknown>;
+    const name = typeof input['name'] === 'string' ? input['name'].slice(0, 1000) : '';
+    if (input['link'] !== undefined) {
+      if (!validLink(input['link'])) throw new Error('Invalid media link.');
+      return service.convertStill({ link: input['link'], name });
+    }
+    return service.convertStill({ hash: String(input['hash'] ?? ''), name });
+  });
   ipcMain.handle(MEDIA_STORE_IPC.removeKey, (event, value: unknown) => { owner(event); return service.store.removeKey(key(value) ?? ''); });
 }
