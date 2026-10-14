@@ -27,7 +27,8 @@ pub enum TransportState {
 }
 
 /// A clock sample. Published on every discontinuity (play, pause, seek, rate
-/// change, loop wrap, device change) and at least 4 times a second while playing.
+/// change, device change) and at least 4 times a second while playing. A loop
+/// wrap is not a discontinuity: the line wraps by `loop_range`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
@@ -44,7 +45,10 @@ pub struct ClockSample {
     pub output_latency_us: u32,
     /// The device sample rate.
     pub sample_rate: u32,
-    /// Work-area loop, when looping.
+    /// The work-area loop the line wraps by: set only while the media heard
+    /// is inside it and the run wraps at its end. A run from before the loop
+    /// start carries none until it enters the loop; a run past the loop end,
+    /// a play around, and a stopped clock carry none.
     pub loop_range: Option<TickRange>,
 }
 
