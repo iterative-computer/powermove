@@ -182,6 +182,7 @@ impl Renderer {
     /// export buffer): the region's size, a working format
     /// (`rgba16float`, `rgba32float`), drawable. `depth_id` receives the
     /// depth and id surface when given (`rgba16float`, the same size).
+    /// On [`RenderError::Unsupported`] the targets are left untouched.
     #[allow(clippy::too_many_arguments)]
     pub fn render_into(
         &mut self,
@@ -290,9 +291,16 @@ impl Renderer {
                 pm_gpu::target::working_usage(),
             );
             let resolved = exec.render_comp(&mut encoder, &plan, region, &gl_rows);
-            exec.flip(&mut encoder, &gl_rows, target);
+            // Something met at exec time is unsupported (media facts the
+            // plan could not see): the frame fails, and the caller's
+            // targets keep their previous contents. The commands still run,
+            // so media caches filled by this encoder stay valid.
+            let complete = exec.unsupported.is_empty();
+            if complete {
+                exec.flip(&mut encoder, &gl_rows, target);
+            }
             exec.taken.push(gl_rows);
-            if let Some(ids) = depth_id {
+            if let Some(ids) = depth_id.filter(|_| complete) {
                 let id_rows = exec.pool.take(
                     exec.device,
                     size.width,
