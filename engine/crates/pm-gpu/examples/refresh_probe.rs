@@ -34,7 +34,20 @@ fn main() {
         let _: bool = msg_send![app, setActivationPolicy: 2_isize];
     }
     let mut out = Vec::new();
-    for want in [None, Some(100.0), Some(120.0), Some(60.0), Some(48.0), None] {
+    // Multiples of 25 fps (100, 75, 50) and of 24 fps (120, 96, 72, 48), and
+    // 60 Hz, between two unrequested windows.
+    for want in [
+        None,
+        Some(100.0),
+        Some(75.0),
+        Some(50.0),
+        Some(120.0),
+        Some(96.0),
+        Some(72.0),
+        Some(60.0),
+        Some(48.0),
+        None,
+    ] {
         let _ = take_display_ticks();
         let link = match want {
             Some(hz) => RatePreference::request(hz),
@@ -56,18 +69,29 @@ fn main() {
                 .copied()
                 .unwrap_or(f64::NAN)
         };
-        let near = |ms: f64| intervals.iter().filter(|d| (**d - ms).abs() < 0.5).count();
+        // Intervals rounded to 0.1 ms, most frequent first.
+        let mut histogram: Vec<(i64, usize)> = Vec::new();
+        for d in &intervals {
+            let key = (d * 10.0).round() as i64;
+            match histogram.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, n)) => *n += 1,
+                None => histogram.push((key, 1)),
+            }
+        }
+        histogram.sort_by(|a, b| b.1.cmp(&a.1));
+        let histogram = histogram
+            .iter()
+            .take(4)
+            .map(|(k, n)| format!("\"{:.1}\":{n}", *k as f64 / 10.0))
+            .collect::<Vec<_>>()
+            .join(",");
         let line = format!(
-            "{{\"request\":{},\"callbacks\":{},\"intervalMs\":{{\"p05\":{:.3},\"p50\":{:.3},\"p95\":{:.3}}},\"near8.33\":{},\"near10\":{},\"near16.67\":{},\"near20.83\":{}}}",
+            "{{\"request\":{},\"callbacks\":{},\"intervalMs\":{{\"p05\":{:.3},\"p50\":{:.3},\"p95\":{:.3}}},\"histogramMs\":{{{histogram}}}}}",
             want.map_or("null".into(), |h| format!("{h}")),
             ticks.len(),
             pct(0.05),
             pct(0.5),
-            pct(0.95),
-            near(1000.0 / 120.0),
-            near(10.0),
-            near(1000.0 / 60.0),
-            near(1000.0 / 48.0)
+            pct(0.95)
         );
         println!("{line}");
         out.push(line);
