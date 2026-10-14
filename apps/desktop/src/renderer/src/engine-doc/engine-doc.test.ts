@@ -420,6 +420,24 @@ describe.skipIf(!built)('writes inside open transactions', () => {
     expect(doc.dual!.total().stale).toBe(0);
     expect(doc.auditor!.audit()).toBe(true);
   });
+
+  it('treats ProjectIndex.invalidate() as an announcement of the layer structure', async () => {
+    const { PM, doc } = await editor('audit');
+    PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid')));
+    doc.barrier!.flush();
+    expect(typeof PM.ProjectIndex?.invalidate).toBe('function');
+    // Layers replaced outside history, the index invalidated, then a
+    // selection that redraws the overlay asks before any touch().
+    const layer = PM.mkLayer('solid', { p: { 'position.x': 321 } });
+    PM.proj.layers = [layer];
+    PM.ProjectIndex.invalidate();
+    const legacy = PM.ev(layer, 'position.x', 0);
+    expect(doc.api!.ev(layer, 'position.x', 0)).toBe(legacy);
+    expect(doc.api!.groupAncestors(layer)).toEqual([]);
+    expect(doc.api!.stats.repairs).toBe(0);
+    expect(doc.dual!.total().stale).toBe(0);
+    expect(doc.auditor!.audit()).toBe(true);
+  });
 });
 
 describe('dual answers: allowed differences (amendment 20)', () => {

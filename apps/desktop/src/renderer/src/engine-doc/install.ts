@@ -264,6 +264,24 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       bus.emit = wrapped;
     }
   }
+  // `PM.ProjectIndex.invalidate()` is the registry's "the layer structure
+  // changed" signal: code that rewrites `layers` outside history must call it
+  // or the index keeps answering with the old layers, and it often runs
+  // before any bus announcement (an assignment, then a selection that
+  // redraws the overlay, then `touch()`). It announces a write without paths.
+  const index = PM.ProjectIndex;
+  if (index && typeof index.invalidate === 'function') {
+    index.__engineDocAnnounce = unknownWrite;
+    if (!index.invalidate.__engineDoc) {
+      const invalidate = index.invalidate;
+      const wrapped = function (this: unknown, ...args: unknown[]) {
+        index.__engineDocAnnounce?.();
+        return invalidate.apply(this ?? index, args);
+      };
+      (wrapped as any).__engineDoc = true;
+      index.invalidate = wrapped;
+    }
+  }
   // A canceled transaction leaves its writes in place without a commit.
   if (PM.hist && typeof PM.hist.cancel === 'function') {
     const cancel = PM.hist.cancel;
