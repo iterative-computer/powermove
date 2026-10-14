@@ -366,6 +366,35 @@ describe.skipIf(!built)('writes inside open transactions', () => {
     expect(doc.check('test')!.ok).toBe(true);
   });
 
+  it('marks an announcement before the bus listeners ask, inside a scoped transaction too', async () => {
+    const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing', 'gl/compositor');
+    // The kernel's `project:changed` bridge subscribes before the mirror is
+    // installed: the viewer asks as the bus announces.
+    let ask = () => {};
+    PM.bus.on('layers', () => ask());
+    const doc: EngineDoc = installEngineDoc(PM, { mode: parseMode('audit'), loadModule, sink: () => {}, auditMs: 1e9 });
+    PM.proj = PM.mkProject({ dur: 10 });
+    PM.time = 0;
+    expect(await doc.whenReady).toBe(true);
+    doc.auditor?.stop();
+    PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid')));
+    doc.barrier!.flush();
+    const seen: unknown[] = [];
+    ask = () => { for (const L of PM.proj.layers) seen.push(doc.api!.ev(L, 'position.x', 0)); };
+    // Edit.apply: a scoped transaction tracks `layers`, asks, inserts, announces.
+    PM.hist.beginScoped('Add layer');
+    PM.hist.track([['layers'], ['comps']]);
+    doc.api!.ev(PM.proj.layers[0], 'position.x', 0);
+    const added = PM.mkLayer('solid', { p: { 'position.x': 123 } });
+    PM.proj.layers.unshift(added);
+    PM.bus.emit('layers');
+    PM.hist.commit();
+    expect(seen).toContain(PM.ev(added, 'position.x', 0));
+    expect(doc.api!.stats.repairs).toBe(0);
+    expect(doc.dual!.total().stale).toBe(0);
+    expect(doc.auditor!.audit()).toBe(true);
+  });
+
   it('hands a commit\'s paths over before the commit\'s listeners ask (the pen tool\'s overlay)', async () => {
     const { PM, doc } = await editor('audit');
     PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid')));

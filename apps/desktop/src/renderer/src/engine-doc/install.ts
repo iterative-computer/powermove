@@ -245,7 +245,25 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   };
   // Writers that skip touch() still announce on the bus (PM.addLayer,
   // PM.removeLayers, settings, asset changes): diff what they may have written.
-  for (const event of ['layers', 'project', 'assets', 'comps']) PM.bus?.on?.(event, unknownWrite);
+  // Marked before any listener runs: the kernel turns these events into
+  // `project:changed`, and the viewer asks from there (inside an Edit's scoped
+  // transaction too, where the held paths must be marked again first).
+  const announcing = new Set(['layers', 'project', 'assets', 'comps']);
+  const bus = PM.bus;
+  if (bus && typeof bus.emit === 'function') {
+    // One wrapper per bus; a later install (a replaced registry in tests)
+    // takes the announcement over.
+    bus.__engineDocAnnounce = unknownWrite;
+    if (!bus.emit.__engineDoc) {
+      const emit = bus.emit;
+      const wrapped = function (this: unknown, event: unknown, ...args: unknown[]) {
+        if (announcing.has(event as string)) bus.__engineDocAnnounce?.();
+        return emit.call(this ?? bus, event, ...args);
+      };
+      (wrapped as any).__engineDoc = true;
+      bus.emit = wrapped;
+    }
+  }
   // A canceled transaction leaves its writes in place without a commit.
   if (PM.hist && typeof PM.hist.cancel === 'function') {
     const cancel = PM.hist.cancel;
