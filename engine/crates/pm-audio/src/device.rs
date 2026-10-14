@@ -149,14 +149,22 @@ pub mod coreaudio {
     }
 }
 
-/// The default output device's id and its presentation latency in µs at
-/// `rate` (device + stream latency), for following device changes.
+/// The default output device's id and its presentation latency in µs
+/// (device + stream latency), for following device changes. The latency is
+/// counted in the device's own frames, so it converts at that device's
+/// nominal rate; `rate` (the open stream's) stands in when the device does
+/// not report one.
 pub fn default_output_state(rate: u32) -> Option<(u32, u32)> {
     #[cfg(target_os = "macos")]
     {
         let id = coreaudio::default_output()?;
-        let (latency, _, _, _) = coreaudio::latency(id)?;
-        Some((id, (latency as u64 * 1_000_000 / rate.max(1) as u64) as u32))
+        let (latency, _, _, nominal) = coreaudio::latency(id)?;
+        let rate = if nominal.is_finite() && nominal >= 1.0 {
+            nominal
+        } else {
+            rate.max(1) as f64
+        };
+        Some((id, (latency as f64 * 1e6 / rate).round() as u32))
     }
     #[cfg(not(target_os = "macos"))]
     {

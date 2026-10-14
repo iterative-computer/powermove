@@ -266,6 +266,9 @@ impl Playback {
             ring_channels,
             stopped_published: false,
             stop_pending: false,
+            epoch_start: None,
+            mono_fold: (ring_channels == 1 && format.channels() > 1)
+                .then(|| crate::layout::matrix(&format.speakers, &crate::layout::mono()).remove(0)),
             core: ClockCore::new(device_rate, seq.clone()),
             watch: None,
             device_state: None,
@@ -728,6 +731,12 @@ struct RenderThread {
     stopped_published: bool,
     /// A run ended; publish the stopped clock once the ring has played out.
     stop_pending: bool,
+    /// The epoch of the latest restart and the media sample it starts at:
+    /// what is heard until the device presents that epoch's first buffer.
+    epoch_start: Option<(u32, i64)>,
+    /// A mono device: the bus folded to one channel by the layout rules
+    /// (a stereo bus as ½(L + R)), not its left channel alone.
+    mono_fold: Option<Vec<f32>>,
     core: ClockCore,
     watch: Option<DeviceWatch>,
     device_state: Option<(u32, u32)>,
@@ -814,9 +823,17 @@ impl RenderThread {
         }
     }
 
-    /// The media position heard now, from the published clock.
+    /// The media position heard now, from the published clock. Until the
+    /// device presents the current epoch (a seek's pre-roll), the listener
+    /// is at the epoch's start, not on the old line.
     fn heard_sample(&self) -> Option<i64> {
         let clock = self.shared.clock.latest()?;
+        if clock.epoch != self.transport.epoch() {
+            return self
+                .epoch_start
+                .filter(|(e, _)| *e == self.transport.epoch())
+                .map(|(_, at)| at);
+        }
         if clock.state == TransportState::Stopped {
             return None;
         }
@@ -846,6 +863,8 @@ impl RenderThread {
                 let result = self.transport.apply(&cmd);
                 let restart = match &result {
                     Ok(Effect::Restart) => {
+                        self.epoch_start =
+                            Some((self.transport.epoch(), self.transport.position()));
                         self.ring.set_epoch(self.transport.epoch());
                         self.stopped_published = false;
                         self.stop_pending = false;
@@ -937,6 +956,7 @@ impl RenderThread {
             })
             .is_ok()
         {
+            self.epoch_start = Some((self.transport.epoch(), self.transport.position()));
             self.ring.set_epoch(self.transport.epoch());
             self.shared.reanchor.store(true, Ordering::Relaxed);
             return true;
@@ -1026,6 +1046,12 @@ impl RenderThread {
                     for c in &mut planar {
                         c[i] *= gain;
                     }
+                }
+            }
+            if let Some(row) = &self.mono_fold {
+                for i in 0..seg.frames {
+                    let v: f32 = row.iter().zip(&planar).map(|(m, c)| m * c[i]).sum();
+                    planar[0][i] = v;
                 }
             }
             {

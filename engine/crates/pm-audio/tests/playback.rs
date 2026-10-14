@@ -926,3 +926,61 @@ fn a_run_ends_whole_at_another_device_rate() {
     // The last frame is the last whole frame before the composition's end.
     assert!(a + b * last as f64 > 2.0 * SR as f64 - 1.1);
 }
+
+/// A mono device hears the bus folded, ½(L + R), not its left channel.
+#[test]
+fn a_mono_device_hears_the_fold() {
+    let dir = temp_dir("mono-device");
+    let file = dir.join("pair.wav");
+    write_wav(
+        &file,
+        SR,
+        &[vec![0.3; SR as usize * 2], vec![0.1; SR as usize * 2]],
+    );
+    let doc = project(30.0, 2.0, &[audio("A", "s", 0.0, 2.0, "", "")], &[], "");
+    let (playback, mut dev, _rig) = setup_doc(doc, &[("s", &file)], SR, 1, 0.0);
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    dev.run(40);
+    drop(playback);
+    let heard: Vec<f32> = dev
+        .log
+        .iter()
+        .flat_map(|(_, b)| b.iter().copied())
+        .filter(|v| *v != 0.0)
+        .collect();
+    assert!(heard.len() > 10_000);
+    assert!(
+        heard.iter().all(|v| (*v - 0.2).abs() < 1e-6),
+        "{:?}",
+        &heard[..4]
+    );
+}
+
+/// A pause sent right after a seek, before the device has presented the
+/// seek's first buffer, stops at the seek target, not on the old line.
+#[test]
+fn a_pause_during_a_seek_pre_roll_stops_at_the_target() {
+    let dir = temp_dir("pause-preroll");
+    let file = ramp_file(&dir, 6);
+    let (playback, mut dev, _rig) = setup(&file, 6.0, SR, 0.0);
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    dev.run(100);
+    playback
+        .command(TransportCommand::Seek {
+            time: ticks(4.0),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    playback.command(TransportCommand::Pause).unwrap();
+    let stopped = playback.clock().unwrap();
+    assert_eq!(stopped.state, TransportState::Stopped);
+    assert_eq!(stopped.media_time, ticks(4.0), "paused at the seek target");
+}
