@@ -35,10 +35,13 @@ from the renderer are notifications; the clock samples are the answer.
    anchor (floored toward −∞), across a loop wrap, and at 1000/1001 where
    1001 s of host time is exactly 1000 s of media.
 2. **Publication.** A sample is published on every discontinuity (play,
-   pause, seek, rate change, loop wrap, device change) with a new `epoch`,
-   and at least 4 times a second while playing. Samples with the same epoch
+   pause, seek, rate change, device change) with a new `epoch`, and at
+   least 4 times a second while playing. Samples with the same epoch
    describe one continuous line; a consumer replaces its line only when the
-   epoch or `seq` advances.
+   epoch or `seq` advances. A loop wrap is not a discontinuity: the line
+   carries the loop range and invariant 1 wraps it, so one epoch spans
+   every pass of a looped run (consumers can prepare the loop start ahead
+   of the wrap). Changing the loop range publishes a new `seq`.
 3. **Latency is folded in.** `host_time` is when `media_time` reaches the
    listener, output latency included; `output_latency_us` is for logs only.
 4. **State and rate agree.** A stopped clock has rate 0 and a running clock
