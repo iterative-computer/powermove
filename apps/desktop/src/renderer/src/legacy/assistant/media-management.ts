@@ -46,7 +46,7 @@ export function listMedia(PM: PMRegistry, args: Record<string, unknown>) {
     const cloud = PM.assets?.cloud?.get?.(meta.id);
     const status = PM.assets?.loading?.has?.(meta.id) ? 'loading' : error ? 'failed' : runtime ? 'available' : cloud ? 'cloud' : 'missing';
     return { id: meta.id, name: meta.name, kind: meta.kind, size: meta.size, width: meta.w, height: meta.h, duration: meta.dur,
-      folder: validFolder(PM.proj, meta.folder), sourcePath: meta.sourcePath || meta.path || null,
+      folder: validFolder(PM.proj, meta.folder), sourcePath: meta.sourcePath || meta.path || null, storage: meta.storage === 'linked' ? 'linked' : 'copied',
       fingerprint: meta.fingerprint || null, persisted: meta.persisted === true, status, ...(error ? { error } : {}),
       referenceCount: references.length, lockedReferences: references.filter(ref => ref.locked).length,
       references: references.slice(0, 50).map(ref => ({ compositionId: ref.compositionId, layerId: ref.layer.id, locked: ref.locked })) };
@@ -85,16 +85,19 @@ export async function importMedia(PM: PMRegistry, args: Record<string, unknown>,
     const existing = Object.values<any>(project.assets || {}).find(item => item.fingerprint === fingerprint && PM.assets.get(item.id) && item.persisted);
     if (existing) return { status: 'already_imported', assetId: existing.id, persisted: true };
   }
+  if (args.storage !== undefined && args.storage !== 'copy' && args.storage !== 'link') throw new Error('storage is "copy" or "link".');
+  /* Agent imports are copied unless the call asks to link (section 21). */
+  const storage = args.storage === 'link' ? 'link' : 'copy';
   const result = replace
-    ? await PM.assets.replace(assetId, file, { assertCurrent })
-    : (await PM.assets.add(file, { assertCurrent, requirePersisted: true, newAsset: true })).importResult;
+    ? await PM.assets.replace(assetId, file, { assertCurrent, storage })
+    : (await PM.assets.add(file, { assertCurrent, requirePersisted: true, newAsset: true, storage })).importResult;
   const id = result.asset.id;
   if (!result.persisted || !PM.assets.get(id) || !project.assets?.[id]) throw new Error('Media import was not verified in durable storage and the live registry.');
   if (!replace && args.folderId) project.assets[id].folder = args.folderId;
   PM.bus.emit('assets');
   PM.invalidate?.('all');
   PM.autosave?.();
-  return { status: replace ? 'replaced' : 'imported', assetId: id, name: project.assets[id].name, persisted: true, fingerprint, revision: revision(PM) };
+  return { status: replace ? 'replaced' : 'imported', assetId: id, name: project.assets[id].name, persisted: true, fingerprint, storage: project.assets[id].storage === 'linked' ? 'linked' : 'copied', revision: revision(PM) };
 }
 
 export function manageMedia(PM: PMRegistry, args: Record<string, unknown>) {

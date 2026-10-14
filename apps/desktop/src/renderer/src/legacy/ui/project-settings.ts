@@ -40,7 +40,21 @@ export interface ProjectSettingsBridge {
   backgroundField?(): HTMLElement;
   background?(): string;
   applyBackground?(color: string): void;
+  /**
+   * Settings › Project › Media, "When importing" (section 21). Present only
+   * with the new engine, whose media store can link files.
+   */
+  mediaImport?(): MediaImportMode;
+  applyMediaImport?(mode: MediaImportMode): void;
 }
+
+/** "When importing": Copy into project (the default) or Link to files. */
+export type MediaImportMode = 'copy' | 'link';
+
+export const MEDIA_IMPORT_OPTIONS: Array<{ v: MediaImportMode; label: string }> = [
+  { v: 'copy', label: 'Copy into project' },
+  { v: 'link', label: 'Link to files' }
+];
 
 export interface ProjectSettingsControl {
   element: HTMLElement;
@@ -255,6 +269,23 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
     );
   }
 
+  let mediaImport: HTMLSelectElement | null = null;
+  const media = bridge.mediaImport && bridge.applyMediaImport ? createSettingsSection('Media') : null;
+  if (media) {
+    mediaImport = select('When importing');
+    fillOptions(mediaImport, MEDIA_IMPORT_OPTIONS);
+    media.body.append(
+      row('When importing', 'Copy files into the project, or link to them where they are.', mediaImport).element
+    );
+    mediaImport.addEventListener('change', () => {
+      bridge.applyMediaImport?.(mediaImport!.value === 'link' ? 'link' : 'copy');
+      syncMedia();
+    });
+  }
+  const syncMedia = (): void => {
+    if (mediaImport && bridge.mediaImport) mediaImport.value = bridge.mediaImport();
+  };
+
   const exports = createSettingsSection('Export');
   const format = select('Export format');
   fillOptions(format, EXPORT_FORMAT_OPTIONS);
@@ -304,7 +335,7 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
   note.textContent = 'The Export dialog opens with these settings, and remembers whatever you change there.';
   exports.element.append(note);
 
-  element.append(composition.element, exports.element);
+  element.append(composition.element, ...(media ? [media.element] : []), exports.element);
 
   const editing = (field: HTMLElement): boolean => document.activeElement === field;
 
@@ -366,7 +397,7 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
       : `${formatLabel} · ${outW}×${outH}${support.fps ? ` · ${defaults.fps} fps` : ''}`;
   };
 
-  const refresh = (): void => { syncComposition(); syncExport(); };
+  const refresh = (): void => { syncComposition(); syncMedia(); syncExport(); };
 
   name.addEventListener('change', () => {
     const next = name.value.trim();

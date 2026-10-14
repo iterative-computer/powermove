@@ -60,12 +60,12 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   {
     name: 'replace_media',
     description: 'Replace or relink one existing media asset from an absolute local file path. Preserves its asset ID, all timeline references, timing, animation and folder. Uses durable storage and normal editor Undo; never packages bytes into an extension or opens a file picker. Requires the same media kind and unlocked referencing layers. missingOnly skips available assets; expectedFingerprint verifies file identity against list_media. Returns verified persisted status; errors leave the original unchanged. Retry individual failed assets, never repeat successful replacements. Media actions use editor Undo, not rollback_changes. Local files up to 512 MiB; download cloud files first.',
-    inputSchema: closedObject({ assetId: { type: 'string' }, path: { type: 'string', minLength: 1, maxLength: 4096 }, missingOnly: { type: 'boolean' }, expectedFingerprint: { type: 'string', maxLength: 200 } }, ['assetId', 'path'])
+    inputSchema: closedObject({ assetId: { type: 'string' }, path: { type: 'string', minLength: 1, maxLength: 4096 }, missingOnly: { type: 'boolean' }, expectedFingerprint: { type: 'string', maxLength: 200 }, storage: { type: 'string', enum: ['copy', 'link'] } }, ['assetId', 'path'])
   },
   {
     name: 'import_media',
-    description: 'Import a local media file into durable project media without adding timeline layers or packaging bytes into extension code. Supply an absolute path, optional folderId and expectedFingerprint. Returns assetId and verified persisted status; already imported matching bytes are reused. Place the asset with apply_commands/edit_video. Import survives timeline Undo, like normal imports; use manage_media delete to remove it. Local files up to 512 MiB; download cloud files first.',
-    inputSchema: closedObject({ path: { type: 'string', minLength: 1, maxLength: 4096 }, folderId: { type: ['string', 'null'] }, expectedFingerprint: { type: 'string', maxLength: 200 } }, ['path'])
+    description: 'Import a local media file into durable project media without adding timeline layers or packaging bytes into extension code. Supply an absolute path, optional folderId and expectedFingerprint. Returns assetId and verified persisted status; already imported matching bytes are reused. Place the asset with apply_commands/edit_video. Import survives timeline Undo, like normal imports; use manage_media delete to remove it. Media is copied into the project; with the new engine, storage: "link" links the original file instead (files in the agent workspace and on camera cards are always copied). Local files up to 512 MiB; download cloud files first.',
+    inputSchema: closedObject({ path: { type: 'string', minLength: 1, maxLength: 4096 }, folderId: { type: ['string', 'null'] }, expectedFingerprint: { type: 'string', maxLength: 200 }, storage: { type: 'string', enum: ['copy', 'link'] } }, ['path'])
   },
   {
     name: 'manage_media',
