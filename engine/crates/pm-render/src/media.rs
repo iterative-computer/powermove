@@ -96,8 +96,8 @@ fn probe_cache() -> &'static ProbeCache {
     CACHE.get_or_init(Default::default)
 }
 
-/// Whether an image file can be drawn: readable, not animated, a color
-/// profile the engine converts.
+/// Whether an image file can be drawn: readable, not animated, in a tested
+/// still class ([`crate::stills`]), a color profile the engine converts.
 pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
     let Some((len, modified)) = stamp(path) else {
         return Err(ProbeIssue::Unreadable(format!(
@@ -118,6 +118,7 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
         let pool = FramePool::new(0);
         let still = pm_media::image::read(path, &pool)
             .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
+        crate::stills::check(path, &still).map_err(ProbeIssue::Unsupported)?;
         image_color(&still).map(|_| ())
     })();
     probe_cache().lock().unwrap().insert(key, result.clone());
@@ -379,7 +380,9 @@ pub struct MediaCache {
     service: DecodeService,
     importer: Option<DecodeImporter>,
     images: BTreeMap<ImageKey, Target>,
-    sources: BTreeMap<PathBuf, Arc<MediaSource>>,
+    /// Open video sources with the file's size and modification time when
+    /// opened: a file replaced at the same path is reopened.
+    sources: BTreeMap<PathBuf, ((u64, u128), Arc<MediaSource>)>,
     frames: BTreeMap<FrameKey, Target>,
     /// "Interpret Footage" overrides by file (section 9, per-source
     /// interpretation): the color reading replaces the probe's.
@@ -483,13 +486,23 @@ impl MediaCache {
     }
 
     fn source(&mut self, path: &Path) -> Result<Arc<MediaSource>, MediaFailure> {
-        if let Some(s) = self.sources.get(path) {
-            return Ok(s.clone());
+        let stamp = stamp(path)
+            .ok_or_else(|| MediaFailure::Failed(format!("{} is offline", path.display())))?;
+        match self.sources.get(path) {
+            Some((s, src)) if *s == stamp => return Ok(src.clone()),
+            Some(_) => {
+                // Replaced on disk: drop the stale index and frames.
+                self.sources.remove(path);
+                self.frames.retain(|k, _| k.path != path);
+                self.recount();
+            }
+            None => {}
         }
         let src = MediaSource::open(path)
             .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
         video_supported(&src).map_err(|m| MediaFailure::Unsupported(Feature::Media(m)))?;
-        self.sources.insert(path.to_path_buf(), src.clone());
+        self.sources
+            .insert(path.to_path_buf(), (stamp, src.clone()));
         Ok(src)
     }
 
