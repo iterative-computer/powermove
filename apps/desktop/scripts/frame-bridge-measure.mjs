@@ -244,17 +244,33 @@ function traceContext(tracePath, pingOffsetUs) {
     }
     return lo;
   };
-  /** The frame sink whose compositor frames follow these submits (ms, page clock) most closely. */
+  /**
+   * The frame sink that carries these submits (ms, page clock): a worker
+   * canvas's own sink receives one compositor frame per submit, shortly
+   * after it. The page's sink also receives a frame right after most of
+   * them during playback (its compositor runs on the same BeginFrames) but
+   * many more besides, so among sinks that received a frame within 12 ms
+   * of at least 90% of the submits, the one whose frame count is closest
+   * to the number of submits.
+   *
+   * A worker's `performance.timeOrigin` differs from the page's by a
+   * fraction of a millisecond beyond what the presenter corrects (measured:
+   * its frames reached viz 0.1 to 0.6 ms before their page-clock submit
+   * time), so a submit matches a receive up to `SUBMIT_SLACK_US` earlier.
+   */
+  const SUBMIT_SLACK_US = 2_000;
   const sinkFor = (submitsMs) => {
     let best = null;
     for (const [k, list] of receives) {
-      let n = 0;
+      const delays = [];
       for (const ms of submitsMs) {
-        const t = toTrace(ms);
+        const t = toTrace(ms) - SUBMIT_SLACK_US;
         const i = firstAtOrAfter(list, t);
-        if (i < list.length && list[i] - t <= 12_000) n++;
+        if (i < list.length && list[i] - t <= 12_000) delays.push(list[i] - t);
       }
-      if (!best || n > best.n) best = { k, n };
+      if (delays.length < submitsMs.length * 0.9) continue;
+      const excess = Math.abs(list.length - submitsMs.length) / submitsMs.length;
+      if (!best || excess < best.excess) best = { k, excess };
     }
     return best?.k ?? null;
   };
@@ -265,7 +281,7 @@ function traceContext(tracePath, pingOffsetUs) {
    */
   const vizFrame = (sink, rafMs, submitMs) => {
     const list = receives.get(sink) ?? [];
-    const t = toTrace(submitMs);
+    const t = toTrace(submitMs) - SUBMIT_SLACK_US;
     const i = firstAtOrAfter(list, t);
     if (i >= list.length || list[i] - t > 50_000) return { begin: toTrace(rafMs), end: null, state: 'VIZ_NOT_RECEIVED' };
     const received = list[i];
@@ -423,6 +439,9 @@ function analyzePlayback(raw) {
     intervalErrorAbsMs: dist(intervalErrMs.map(Math.abs), 3),
     irregularIntervals: intervalErrMs.filter((e) => Math.abs(e) > periodUs / 2000).length,
     rafToPresentMs: dist(presented.map((p) => p.rafToPresentUs / 1000), 2),
+    // Presentation minus due time on the clock line (the A/V offset the
+    // jitter numbers remove; section 15 keeps A/V sync within ±10 ms).
+    dueToPresentMs: dist(offsets.map((o) => o / 1000), 2),
     ...(page.mode === 'engine'
       ? (() => {
           const t = page.engineTrace;
