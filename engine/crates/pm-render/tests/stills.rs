@@ -138,16 +138,18 @@ fn untested_still_classes_are_unsupported() {
     std::fs::remove_dir_all(&d).ok();
 }
 
-/// FFmpeg's JPEG layouts are among the tested ones (untested layouts, frame
-/// types, and component counts are covered by `stills::tests::jpeg_classes`).
+/// Y'CbCr JPEG (every layout) is unsupported: pm-media's decoder differs
+/// from Chromium's libjpeg-turbo (docs/engine/pm-render.md). Gray JPEG is
+/// drawn and compared in `tests/corpus.rs` (`render/still-photo-gray-jpg`);
+/// header classes are covered by `stills::tests::jpeg_classes`.
 #[test]
-fn tested_jpeg_samplings_are_supported() {
+fn ycbcr_jpeg_is_unsupported() {
     let d = dir().join("jpeg");
     std::fs::create_dir_all(&d).unwrap();
-    for fmt in ["yuvj420p", "yuvj422p", "yuvj444p", "gray"] {
+    for fmt in ["yuvj420p", "yuvj422p", "yuvj444p"] {
         let path = d.join(format!("{fmt}.jpg"));
         ffmpeg(&path, &["-pix_fmt", fmt, "-q:v", "3"]);
-        assert_eq!(probe_image(&path), Ok(()), "{fmt}");
+        assert!(unsupported(&path).contains("Y'CbCr JPEG"), "{fmt}");
     }
     std::fs::remove_dir_all(&d).ok();
 }

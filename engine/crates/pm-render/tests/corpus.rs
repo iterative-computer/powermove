@@ -29,6 +29,29 @@ use pm_render::parity::{bar_3d, dilate, msaa_edges};
 use pm_render::{RenderRequest, Renderer, unsupported_with_media};
 use support::*;
 
+/// `render/still-*` projects and whether the renderer draws them.
+const STILL_CLASSES: &[(&str, bool)] = &[
+    ("render/still-gray-alpha-png", true),
+    ("render/still-indexed-png", true),
+    ("render/still-photo-gray-jpg", true),
+    ("render/still-photo-heic", true),
+    ("render/still-photo-lossy-webp", true),
+    ("render/still-16bit-png", false),
+    ("render/still-p3-heic", false),
+    ("render/still-p3-jpg", false),
+    ("render/still-p3-png", false),
+    ("render/still-photo-420-jpg", false),
+    ("render/still-photo-422-jpg", false),
+    ("render/still-photo-422-tall-mcu-jpg", false),
+    ("render/still-photo-444-jpg", false),
+    ("render/still-photo-444-tall-mcu-jpg", false),
+    ("render/still-photo-alpha-webp", false),
+    ("render/still-photo-avif", false),
+    ("render/still-photo-lossless-webp", false),
+    ("render/still-photo-orientation-6-jpg", false),
+    ("render/still-photo-progressive-jpg", false),
+];
+
 #[test]
 fn corpus_render_parity() {
     let captures = corpus_dirs();
@@ -44,6 +67,7 @@ fn corpus_render_parity() {
     let mut compared = 0;
     let mut failed = Vec::new();
     let mut skipped = Vec::new();
+    let mut seen = std::collections::BTreeMap::new();
     for (capture, dir) in captures
         .iter()
         .flat_map(|c| projects(c).into_iter().map(move |d| (c.clone(), d)))
@@ -60,6 +84,7 @@ fn corpus_render_parity() {
             continue;
         }
         let issues = unsupported_with_media(&p.document, &p.composition, &p.resolver);
+        seen.insert(p.name.clone(), issues.is_empty());
         if !issues.is_empty() {
             let mut reasons: Vec<String> = issues.iter().map(|u| u.feature.to_string()).collect();
             reasons.dedup();
@@ -304,6 +329,13 @@ fn corpus_render_parity() {
         eprintln!("  FAILED {f}");
     }
     assert!(compared > 0, "no supported corpus project was compared");
+    // The still classes (docs/engine/pm-render.md, "Image classes"): the
+    // ones that matched are drawn, the others routed.
+    for (name, drawn) in STILL_CLASSES {
+        if let Some(supported) = seen.get(*name) {
+            assert_eq!(supported, drawn, "{name}: routing changed");
+        }
+    }
     assert!(
         failed.is_empty(),
         "{} frames outside the render class",

@@ -3,17 +3,30 @@
 //!
 //! Capability routing must be conservative (plan section 21): a still is
 //! drawn only when its container, encoding, depth, and color tagging fall in
-//! a class compared against the legacy renderer on the parity corpus
-//! (`render/still-*` and the fixture stills). Everything else is routed to
-//! the legacy engine, even where decoding would very likely match, because
-//! the legacy pipeline (Chromium's decoders, and the PNG conversion it
-//! applies to TIFF and HEIF on import) differs from ours in ways only a
-//! comparison shows: IDCT and chroma upsampling for JPEG and lossy WebP,
-//! 16 to 8-bit reduction, gamma and chromaticity chunks, color management.
+//! a class that matched the legacy renderer on the parity corpus
+//! (`render/still-*`, generated with detailed content, and the fixture
+//! stills). Everything else is routed to the legacy engine. The comparison
+//! (2026-10-14, Chromium 152) found these classes outside section 25's
+//! Standard or alpha class, so they are unsupported until the cause is
+//! fixed or decided:
+//!
+//! - Y'CbCr JPEG: pm-media decodes with zune-jpeg; Chromium with
+//!   libjpeg-turbo (islow IDCT, fancy upsampling), which reproduces the
+//!   legacy frames exactly. 4:4:4 differs by up to 3 CV, 4:2:0 by 4, 4:2:2
+//!   by 26; only 90 to 99.7% of pixels within 1 CV.
+//! - Display P3 (PNG, JPEG, HEIF): converted values match within 1 CV on
+//!   texel centers, but section 9 keeps out-of-gamut values until output,
+//!   while Chromium clips at decode; filtered edges of out-of-gamut colors
+//!   differ by up to 83 CV.
+//! - 16-bit PNG: Chromium reduces to 8 bits before premultiplying; up to
+//!   2 CV, 99.66% within 1, transparent frames 1.99 CV.
+//! - WebP with alpha: libwebp's premultiplication rounding; transparent
+//!   frames 1.12 CV (alpha class 1 CV).
+//! - AVIF: ImageIO's and Chromium's decodes differ by up to 94 CV.
 //!
 //! The class is decided from the decoded [`StillImage`] facts plus a header
 //! parse of the container for what the decoder does not report (JPEG frame
-//! type and sampling factors, PNG color chunks, WebP chunk layout).
+//! type and components, PNG color chunks, WebP chunk layout).
 
 use std::path::Path;
 
@@ -32,22 +45,34 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
     if still.float {
         return unsupported("floating-point stills");
     }
+    let icc = still.color.icc_class;
+    if icc == Some(IccClass::DisplayP3) {
+        return unsupported(
+            "Display P3 stills (out-of-gamut handling differs from the legacy renderer)",
+        );
+    }
     let bytes =
         std::fs::read(path).map_err(|e| Feature::Media(format!("{}: {e}", path.display())))?;
-    let icc = still.color.icc_class;
     match still.format {
-        ImageFormat::Png => png(&bytes)?,
-        ImageFormat::Jpeg => jpeg(&bytes)?,
-        ImageFormat::WebP => webp(&bytes)?,
-        ImageFormat::Avif | ImageFormat::Heif => {
+        ImageFormat::Png => {
+            png(&bytes)?;
             if still.bit_depth != 8 {
-                return unsupported("AVIF and HEIF stills deeper than 8 bits");
+                return unsupported("16-bit PNG stills");
+            }
+        }
+        ImageFormat::Jpeg => jpeg(&bytes)?,
+        ImageFormat::WebP => {
+            webp(&bytes)?;
+            if still.color.alpha != AlphaMode::Opaque {
+                return unsupported("WebP stills with alpha");
+            }
+        }
+        ImageFormat::Heif => {
+            if still.bit_depth != 8 {
+                return unsupported("HEIF stills deeper than 8 bits");
             }
             if still.color.alpha != AlphaMode::Opaque {
-                return unsupported("AVIF and HEIF stills with alpha");
-            }
-            if still.format == ImageFormat::Avif && icc == Some(IccClass::DisplayP3) {
-                return unsupported("Display P3 AVIF stills");
+                return unsupported("HEIF stills with alpha");
             }
         }
         ImageFormat::Tiff => {
@@ -61,6 +86,7 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
                 return unsupported("TIFF stills with an ICC profile");
             }
         }
+        ImageFormat::Avif => return unsupported("AVIF stills"),
         ImageFormat::Bmp => return unsupported("BMP stills"),
         ImageFormat::Ico => return unsupported("ICO stills"),
         ImageFormat::Gif => return unsupported("GIF stills"),
@@ -68,21 +94,15 @@ pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
         ImageFormat::Dpx => return unsupported("DPX stills"),
         ImageFormat::Other => return unsupported("stills of an unrecognized format"),
     }
-    // Display P3 is tested in PNG, JPEG, and HEIC.
-    if icc == Some(IccClass::DisplayP3)
-        && !matches!(
-            still.format,
-            ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Heif
-        )
-    {
-        return unsupported(format!("Display P3 {:?} stills", still.format));
-    }
     Ok(())
 }
 
 /// Whether an image asset's recorded format (or file name extension) is a
 /// container this renderer may draw, for the static check that opens no
-/// media. An asset with neither is unsupported until its file is probed.
+/// media. JPEG is listed (gray JPEG is drawable, but nearly every JPEG is
+/// Y'CbCr) and so are AVIF and unknown containers; the depth, profile, and
+/// alpha facts of the other containers need [`check`]
+/// (`unsupported_with_media`).
 pub fn static_format(format: &str, name: &str) -> Result<(), Feature> {
     let ext = if format.is_empty() {
         name.rsplit_once('.')
@@ -92,8 +112,8 @@ pub fn static_format(format: &str, name: &str) -> Result<(), Feature> {
         format.to_ascii_lowercase()
     };
     match ext.as_str() {
-        "png" | "jpg" | "jpeg" | "jpe" | "jfif" | "webp" | "avif" | "heic" | "heif" | "tif"
-        | "tiff" => Ok(()),
+        "png" | "webp" | "heic" | "heif" | "tif" | "tiff" => Ok(()),
+        "jpg" | "jpeg" | "jpe" | "jfif" => unsupported("JPEG stills"),
         "" => unsupported("an image of unrecorded format"),
         other => unsupported(format!("{other} stills")),
     }
@@ -132,19 +152,9 @@ fn png(bytes: &[u8]) -> Result<(), Feature> {
     Ok(())
 }
 
-/// The Y'CbCr sampling-factor layouts compared against the legacy renderer
-/// ((luma h, v), (chroma h, v)): 4:4:4, 4:2:2, and 4:2:0 as libjpeg writes
-/// them, and 4:4:4 and 4:2:2 as FFmpeg writes them (two-block-tall MCUs).
-const TESTED_JPEG_LAYOUTS: [((u8, u8), (u8, u8)); 5] = [
-    ((1, 1), (1, 1)),
-    ((2, 1), (1, 1)),
-    ((2, 2), (1, 1)),
-    ((1, 2), (1, 2)),
-    ((2, 2), (1, 2)),
-];
-
-/// JPEG: baseline or progressive Huffman, 8-bit, gray or Y'CbCr in a tested
-/// sampling layout; not Adobe RGB-transform or CMYK.
+/// JPEG: baseline or progressive Huffman, 8-bit, one (gray) component.
+/// Y'CbCr is unsupported (see the module notes), as are RGB, CMYK,
+/// arithmetic, lossless, and 12-bit JPEG.
 fn jpeg(bytes: &[u8]) -> Result<(), Feature> {
     let mut at = 2usize;
     let mut adobe_transform: Option<u8> = None;
@@ -183,37 +193,24 @@ fn jpeg_frame(sof: &[u8], adobe_transform: Option<u8>) -> Result<(), Feature> {
         return unsupported(format!("{}-bit JPEG stills", sof[0]));
     }
     let n = sof[5] as usize;
-    let comps: Vec<(u8, u8, u8)> = sof[6..]
-        .chunks_exact(3)
-        .take(n)
-        .map(|c| (c[0], c[1] >> 4, c[1] & 15))
-        .collect();
+    let comps: Vec<&[u8]> = sof[6..].chunks_exact(3).take(n).collect();
     if comps.len() != n {
         return unsupported("malformed JPEG headers");
     }
     match n {
         1 => Ok(()),
-        3 => {
-            let ids: Vec<u8> = comps.iter().map(|c| c.0).collect();
-            if adobe_transform == Some(0) || ids == b"RGB" {
-                return unsupported("RGB-encoded JPEG stills");
-            }
-            let factors = |c: (u8, u8, u8)| (c.1, c.2);
-            let layout = (factors(comps[0]), factors(comps[1]));
-            if factors(comps[1]) != factors(comps[2]) || !TESTED_JPEG_LAYOUTS.contains(&layout) {
-                return unsupported(format!(
-                    "JPEG sampling factors {}x{}, {}x{}, {}x{} (untested layout)",
-                    comps[0].1, comps[0].2, comps[1].1, comps[1].2, comps[2].1, comps[2].2
-                ));
-            }
-            Ok(())
+        3 if adobe_transform == Some(0) || comps.iter().map(|c| c[0]).eq(*b"RGB") => {
+            unsupported("RGB-encoded JPEG stills")
         }
+        3 => unsupported(
+            "Y'CbCr JPEG stills (pm-media's decoder differs from Chromium's libjpeg-turbo)",
+        ),
         _ => unsupported("CMYK and other JPEG stills with neither 1 nor 3 components"),
     }
 }
 
-/// WebP: lossy (`VP8 `), lossless (`VP8L`), or extended with alpha; no ICC
-/// profile.
+/// WebP: lossy (`VP8 `) or lossless (`VP8L`), not animated, no ICC
+/// profile (alpha is decided from the decoded still).
 fn webp(bytes: &[u8]) -> Result<(), Feature> {
     let mut at = 12usize;
     while at + 8 <= bytes.len() {
@@ -280,30 +277,27 @@ mod tests {
 
     #[test]
     fn jpeg_classes() {
+        let gray = [(1, 0x11)];
+        assert!(jpeg(&jpeg_with(0xC0, 8, &gray, None)).is_ok());
+        assert!(jpeg(&jpeg_with(0xC2, 8, &gray, None)).is_ok());
         let ycc = |y: u8| [(1, y), (2, 0x11), (3, 0x11)];
         for y in [0x11, 0x21, 0x22] {
-            assert!(jpeg(&jpeg_with(0xC0, 8, &ycc(y), None)).is_ok(), "{y:x}");
-            assert!(jpeg(&jpeg_with(0xC2, 8, &ycc(y), None)).is_ok(), "{y:x}");
+            let e = jpeg(&jpeg_with(0xC0, 8, &ycc(y), None)).unwrap_err();
+            assert!(e.to_string().contains("Y'CbCr"), "{e}");
         }
-        assert!(jpeg(&jpeg_with(0xC0, 8, &[(1, 0x11)], None)).is_ok());
-        // FFmpeg's layouts; mismatched chroma factors.
-        let layout = |y, cb, cr| jpeg(&jpeg_with(0xC0, 8, &[(1, y), (2, cb), (3, cr)], None));
-        assert!(layout(0x12, 0x12, 0x12).is_ok());
-        assert!(layout(0x22, 0x12, 0x12).is_ok());
-        assert!(layout(0x22, 0x12, 0x11).is_err());
-        // 4:4:0, 4:1:1, 12-bit, arithmetic, lossless, CMYK, RGB.
-        assert!(jpeg(&jpeg_with(0xC0, 8, &ycc(0x12), None)).is_err());
-        assert!(jpeg(&jpeg_with(0xC0, 8, &ycc(0x41), None)).is_err());
-        assert!(jpeg(&jpeg_with(0xC1, 12, &ycc(0x11), None)).is_err());
-        assert!(jpeg(&jpeg_with(0xC0, 12, &ycc(0x11), None)).is_err());
-        assert!(jpeg(&jpeg_with(0xC9, 8, &ycc(0x11), None)).is_err());
-        assert!(jpeg(&jpeg_with(0xC3, 8, &ycc(0x11), None)).is_err());
+        assert!(jpeg(&jpeg_with(0xC0, 8, &ycc(0x11), Some(1))).is_err());
+        // 12-bit, arithmetic, lossless, CMYK, RGB, malformed.
+        assert!(jpeg(&jpeg_with(0xC1, 12, &gray, None)).is_err());
+        assert!(jpeg(&jpeg_with(0xC0, 12, &gray, None)).is_err());
+        assert!(jpeg(&jpeg_with(0xC9, 8, &gray, None)).is_err());
+        assert!(jpeg(&jpeg_with(0xC3, 8, &gray, None)).is_err());
         let cmyk = [(1, 0x11), (2, 0x11), (3, 0x11), (4, 0x11)];
         assert!(jpeg(&jpeg_with(0xC0, 8, &cmyk, Some(2))).is_err());
-        assert!(jpeg(&jpeg_with(0xC0, 8, &ycc(0x11), Some(0))).is_err());
-        assert!(jpeg(&jpeg_with(0xC0, 8, &ycc(0x11), Some(1))).is_ok());
+        let e = jpeg(&jpeg_with(0xC0, 8, &ycc(0x11), Some(0))).unwrap_err();
+        assert!(e.to_string().contains("RGB"), "{e}");
         let rgb = [(b'R', 0x11), (b'G', 0x11), (b'B', 0x11)];
-        assert!(jpeg(&jpeg_with(0xC0, 8, &rgb, None)).is_err());
+        let e = jpeg(&jpeg_with(0xC0, 8, &rgb, None)).unwrap_err();
+        assert!(e.to_string().contains("RGB"), "{e}");
         assert!(jpeg(&[0xFF, 0xD8, 0x00]).is_err());
     }
 
@@ -327,7 +321,8 @@ mod tests {
     #[test]
     fn static_formats() {
         assert!(static_format("png", "").is_ok());
-        assert!(static_format("", "photo.JPG").is_ok());
+        assert!(static_format("", "photo.JPG").is_err());
+        assert!(static_format("avif", "x.avif").is_err());
         assert!(static_format("HEIC", "x").is_ok());
         assert!(static_format("bmp", "x.bmp").is_err());
         assert!(static_format("gif", "x.gif").is_err());
