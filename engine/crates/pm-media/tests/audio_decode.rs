@@ -347,3 +347,127 @@ fn webm_opus() {
     s.read(&mut out, 1000).unwrap();
     assert_eq!(&out[0][..], &pcm[0][30_000..31_000]);
 }
+
+/// Adds `delta` (90 kHz ticks) to the PTS (and DTS) of every PES packet of
+/// an MPEG-TS file whose PTS is at least `from`, so the stream's timestamps
+/// jump forward (a gap) or back (an overlap) there. Returns the packets
+/// moved.
+fn shift_ts_timestamps(src: &Path, dst: &Path, from: i64, delta: i64) -> usize {
+    fn read(b: &[u8], o: usize) -> i64 {
+        (((b[o] >> 1) & 7) as i64) << 30
+            | (b[o + 1] as i64) << 22
+            | ((b[o + 2] >> 1) as i64) << 15
+            | (b[o + 3] as i64) << 7
+            | (b[o + 4] >> 1) as i64
+    }
+    fn write(b: &mut [u8], o: usize, v: i64) {
+        b[o] = (b[o] & 0xF1) | ((v >> 29) & 0x0E) as u8;
+        b[o + 1] = (v >> 22) as u8;
+        b[o + 2] = ((v >> 14) & 0xFE) as u8 | 1;
+        b[o + 3] = (v >> 7) as u8;
+        b[o + 4] = ((v << 1) & 0xFE) as u8 | 1;
+    }
+    let mut b = std::fs::read(src).unwrap();
+    let mut moved = 0;
+    for i in (0..b.len()).step_by(188) {
+        // Sync byte, payload unit start.
+        if b[i] != 0x47 || b[i + 1] & 0x40 == 0 {
+            continue;
+        }
+        let control = (b[i + 3] >> 4) & 3;
+        if control & 1 == 0 {
+            continue;
+        }
+        let q = i + 4 + if control & 2 != 0 { 1 + b[i + 4] as usize } else { 0 };
+        let id = b[q + 3];
+        if b[q..q + 3] != [0, 0, 1] || !(id == 0xBD || (0xC0..=0xEF).contains(&id)) {
+            continue;
+        }
+        let flags = b[q + 7] >> 6;
+        if flags & 2 == 0 {
+            continue;
+        }
+        let pts = read(&b, q + 9);
+        if pts >= from {
+            write(&mut b, q + 9, pts + delta);
+            if flags == 3 {
+                let dts = read(&b, q + 14);
+                write(&mut b, q + 14, dts + delta);
+            }
+            moved += 1;
+        }
+    }
+    std::fs::write(dst, b).unwrap();
+    moved
+}
+
+/// Timestamps that jump inside a stream with a sample-exact timebase
+/// (MPEG-TS, 90 kHz, here SMPTE 302M 24-bit PCM carrying a ramp whose value
+/// is its sample index). A jump forward is a gap: silence, then the media
+/// at its timestamp. A jump back is an overlap: the samples before what
+/// was already returned are dropped (beyond a one-sample tolerance), and
+/// the rest sits at its timestamp. Either way every sample after the jump
+/// is where its timestamp puts it, so a sequential decode and a seek into
+/// the stream after the jump agree.
+#[test]
+fn gaps_are_silence_and_overlaps_are_dropped() {
+    let ramp = generated(
+        "ramp302.ts",
+        "aevalsrc=exprs='n/8388608|n/8388608':s=48000:d=4",
+        &["-c:a", "s302m", "-strict", "-2"],
+    );
+    let dir = ramp.parent().unwrap().to_owned();
+    // The source: program sample n holds n / 2^23 (exact in 24 bits and f32).
+    let (d, pcm) = decode_all(&ramp);
+    assert!(d.info().sample_exact_timestamps);
+    let index = |v: f32| (v as f64 * 8_388_608.0).round() as i64;
+    assert!(pcm[0][..48_000].iter().enumerate().all(|(i, v)| index(*v) == i as i64));
+    // Packets are 1,024 samples (1,920 ticks); move every packet from the
+    // 51st on, which starts at program sample 51,200.
+    let start_pts = 126_000; // the muxer's default 1.4 s offset
+    let at = 50 * 1_024i64;
+    for (name, shift) in [("gap.ts", 1_000i64), ("overlap.ts", -600)] {
+        let file = dir.join(name);
+        let moved = shift_ts_timestamps(
+            &ramp,
+            &file,
+            start_pts + 50 * 1_920,
+            shift * 90_000 / 48_000,
+        );
+        assert!(moved > 100, "{name}: {moved} packets moved");
+        let (_, pcm) = decode_all(&file);
+        let got = &pcm[0];
+        // Before the jump: the source, unchanged.
+        assert!(
+            (0..at).all(|i| index(got[i as usize]) == i),
+            "{name}: before the jump"
+        );
+        // After it: sample k is source sample k − shift (a gap of silence
+        // first; an overlap's first 600 samples dropped).
+        let from = at + shift.max(0);
+        if shift > 0 {
+            assert!(
+                got[at as usize..from as usize].iter().all(|v| *v == 0.0),
+                "{name}: the gap is silence"
+            );
+        }
+        let wrong = (from..from + 100_000)
+            .filter(|&k| index(got[k as usize]) != k - shift)
+            .count();
+        assert_eq!(wrong, 0, "{name}: samples after the jump off their timestamps");
+        // A seek past the jump lands on the same sample as the sequential
+        // decode.
+        let mut s = AudioDecoder::open(&file, None).unwrap();
+        for target in [from as u64 + 5_000, 150_000] {
+            s.seek_anchored(target).unwrap();
+            let mut out = vec![Vec::new(); 2];
+            s.read(&mut out, 4_096).unwrap();
+            assert_eq!(
+                index(out[0][0]),
+                target as i64 - shift,
+                "{name}: seek to {target}"
+            );
+            assert_eq!(&out[0][..], &got[target as usize..target as usize + 4_096]);
+        }
+    }
+}

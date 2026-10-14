@@ -15,8 +15,11 @@
 //! # Positions
 //!
 //! With a timebase at least as fine as one sample, every decoded frame is
-//! placed by its timestamp, so seeks land on the exact sample and stream
-//! gaps become silence. Coarser timebases (Matroska and WebM use 1 ms) cannot
+//! placed by its timestamp, so seeks land on the exact sample, stream gaps
+//! become silence, and overlaps (a frame stamped before the end of the
+//! previous one) drop the samples the timeline already has; within one
+//! sample of the expected position, a frame continues the line (container
+//! rounding). Coarser timebases (Matroska and WebM use 1 ms) cannot
 //! place a frame to the sample; such streams are positioned by counting
 //! samples from the start, and a seek decodes forward from the start of the
 //! stream (exact, but its cost grows with the seek distance).
@@ -745,8 +748,16 @@ impl AudioDecoder {
             // A seek that landed past its target.
             return Err(MediaError::unsupported("the seek landed after its target"));
         }
-        let gap = self.expected.map_or(0, |e| (start - e).max(0));
-        self.expected = Some(start + n as i64);
+        // A gap (the frame starts after the expected sample) becomes
+        // silence; an overlap (it starts before) drops the frame's samples
+        // the timeline already has, so the rest sits at its timestamp.
+        let (gap, lead) = match self.expected {
+            Some(e) if start > e => (start - e, 0),
+            Some(e) if start < e => (0, (e - start).min(n as i64)),
+            _ => (0, 0),
+        };
+        let lead = lead as usize;
+        self.expected = Some((start + n as i64).max(self.expected.unwrap_or(i64::MIN)));
         let channels = self.info.channels();
         let frame_channels = unsafe { (*f).ch_layout.nb_channels.max(0) as usize };
         if frame_channels != channels {
@@ -761,10 +772,11 @@ impl AudioDecoder {
                 self.info.sample_rate
             )));
         }
-        // What of this frame (and of a gap before it) is at or after the target.
-        let first = start - gap;
+        // What of this frame (and of a gap before it) is at or after the
+        // target: the timeline continues at `first`.
+        let first = start - gap + lead as i64;
         let keep_from = (self.target - first).max(0) as usize;
-        let total = gap as usize + n;
+        let total = gap as usize + n - lead;
         if keep_from >= total {
             return Ok(());
         }
@@ -783,7 +795,7 @@ impl AudioDecoder {
         for (c, out) in self.pending.data.iter_mut().enumerate() {
             let silence_from = keep_from.min(gap as usize);
             out.extend(std::iter::repeat_n(0.0, gap as usize - silence_from));
-            let skip = keep_from.saturating_sub(gap as usize);
+            let skip = lead + keep_from.saturating_sub(gap as usize);
             unsafe {
                 let (base, stride) = if planar {
                     (*(*f).extended_data.add(c), bytes)
