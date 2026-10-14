@@ -6,6 +6,7 @@ import { createKernel, type Kernel } from './registries';
 const listeners: Disposable[] = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const listener of listeners.splice(0)) listener.dispose();
   document.body.replaceChildren();
 });
@@ -28,6 +29,26 @@ const press = (init: KeyboardEventInit & { key: string }, target: EventTarget = 
 };
 
 describe('installKeyListener', () => {
+  it('keeps explicit Mac Control navigation separate from Command navigation', () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    const kernel = createKernel();
+    const { runs } = install(kernel);
+    kernel.bind('timeline', { key: 'cmd+left', command: 'prevFrame' });
+    kernel.bind('timeline', { key: 'ctrl+left', command: 'prevKeyframe' });
+    press({ key: 'ArrowLeft', metaKey: true });
+    press({ key: 'ArrowLeft', ctrlKey: true });
+    expect(runs).toEqual([['prevFrame', []], ['prevKeyframe', []]]);
+  });
+  it.each(['Win32', 'Linux x86_64', 'MacIntel'])('dispatches an extension command with the primary modifier on %s', platform => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue(platform);
+    const kernel = createKernel();
+    const { runs } = install(kernel);
+    kernel.bind('extension', { key: 'cmd+shift+s', command: 'extension.saveAs' });
+    const mac = platform === 'MacIntel';
+    expect(press({ key: 's', shiftKey: true, metaKey: mac, ctrlKey: !mac })).toBe(true);
+    if (mac) expect(press({ key: 's', shiftKey: true, ctrlKey: true })).toBe(false);
+    expect(runs).toEqual([['extension.saveAs', []]]);
+  });
   it('keeps the browser default for a contextual binding that declines, and cancels it when handled', () => {
     const kernel = createKernel();
     let applies = false;

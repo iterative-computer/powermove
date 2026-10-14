@@ -81,7 +81,7 @@
     if (!entry || !layer) return;
     focusIndex = position;
     const id = entry.cue.id;
-    const extend = event && (event.metaKey || event.shiftKey);
+    const extend = event && (event.metaKey || event.ctrlKey || event.shiftKey);
     const next = extend ? (selected.has(id) ? [...selected].filter(other => other !== id) : [...selected, id]) : [id];
     PM.Captions?.select?.(layer.id, next);
     PM.setTime?.(layer.from + entry.cue.start);

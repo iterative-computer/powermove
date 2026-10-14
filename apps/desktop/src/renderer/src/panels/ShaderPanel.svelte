@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { formatShortcut } from '../kernel/keychord';
   import { fancySelect } from '../controls/select/enhance';
   import type { ShaderLayer } from '../core/types/project';
   import { EditGesture, type EditBinding } from '../controls/gesture';
@@ -77,7 +78,7 @@
             <option value={name}>{name}</option>
           {/each}
         </select>
-        <button class="chip compile-button" type="button" onclick={compile}>Compile ⌘↵</button>
+        <button class="chip compile-button" type="button" onclick={compile}>Compile {formatShortcut('⌘↵')}</button>
       </div>
     {/key}
   {:else}

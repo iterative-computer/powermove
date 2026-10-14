@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { chordMatches, chordOfEvent, isFieldTarget, normalizeChord } from './keychord';
+import { describe, expect, it, vi } from 'vitest';
+import { chordMatches, chordOfEvent, formatShortcut, isFieldTarget, normalizeChord, shortcutPlatform } from './keychord';
 
 const event = (init: Partial<KeyboardEvent> & { key: string }): KeyboardEvent => ({ code: '', ...init }) as KeyboardEvent;
 
@@ -102,10 +102,57 @@ describe('isFieldTarget', () => {
 });
 
 describe('chordMatches', () => {
+  it('maps primary command bindings to Ctrl only off macOS', () => {
+    for (const platform of ['Win32', 'Linux x86_64']) {
+      expect(chordMatches('cmd+shift+s', 'ctrl+shift+s', false, platform)).toBe(true);
+      expect(chordMatches('cmd+s', 'ctrl+shift+s', false, platform)).toBe(false);
+      expect(chordMatches('cmd+s', 'cmd+s', false, platform)).toBe(true);
+    }
+    expect(chordMatches('cmd+s', 'cmd+s', false, 'MacIntel')).toBe(true);
+    expect(chordMatches('cmd+s', 'ctrl+s', false, 'MacIntel')).toBe(false);
+    expect(chordMatches('ctrl+left', 'cmd+left', false, 'MacIntel')).toBe(false);
+    expect(chordMatches('ctrl+left', 'ctrl+left', false, 'MacIntel')).toBe(true);
+  });
   it('supports legacy subset matching and cmd/ctrl equivalence only when requested', () => {
     expect(chordMatches('cmd+k', 'cmd+ctrl+alt+k', true)).toBe(true);
     expect(chordMatches('cmd+k', 'ctrl+alt+k', true)).toBe(true);
     expect(chordMatches('cmd+k', 'cmd+alt+k')).toBe(false);
     expect(chordMatches('cmd+shift+k', 'cmd+k', true)).toBe(false);
+  });
+});
+
+describe('platform shortcut labels', () => {
+  it.each([
+    ['⌘N', 'Ctrl+N'], ['⌘⇧S', 'Ctrl+Shift+S'], ['⇧⌘C', 'Ctrl+Shift+C'],
+    ['⌥⌘K', 'Ctrl+Alt+K'], ['⌥Drag', 'Alt+Drag'], ['⌃⇧Tab', 'Ctrl+Shift+Tab'],
+    ['⌥', 'Alt'], ['⇧', 'Shift'], ['⌘⌃Z', 'Ctrl+Z'],
+    ['⌫', 'Backspace'], ['⌦', 'Delete'], ['↩', 'Enter'], ['⌘↵', 'Ctrl+Enter'], ['⎋', 'Esc'],
+    ['⌃→ / ⇧K', 'Ctrl+→ / Shift+K'], ['⇧/', 'Shift+/'],
+    ['cmd+shift+s', 'Ctrl+Shift+S'], ['alt+ArrowLeft', 'Alt+←'], ['cmd++', 'Ctrl++'],
+    ['alt+drag', 'Alt+Drag'], ['Ctrl Alt Numpad 0', 'Ctrl+Alt+Numpad 0'], ['Shift B', 'Shift+B'], ['←↑→↓', '←↑→↓'], ['PageUp', 'PageUp'], ['', '']
+  ])('formats %s on Windows and Linux', (input, expected) => {
+    expect(formatShortcut(input, 'Win32')).toBe(expected);
+    expect(formatShortcut(input, 'Linux')).toBe(expected);
+  });
+
+  it('preserves Mac glyph labels and explicit Control', () => {
+    for (const label of ['⌘⇧S', '⌥⌘N', '⇧⌘C', '⌃→ / ⇧K', '⌫', '⌘↵']) {
+      expect(formatShortcut(label, 'MacIntel')).toBe(label);
+    }
+    expect(formatShortcut('cmd+shift+s', 'macOS')).toBe('⌘⇧S');
+    expect(formatShortcut('ctrl+left', 'macOS')).toBe('⌃←');
+  });
+
+  it('prefers client hints platform and falls back to navigator.platform', () => {
+    try {
+      vi.stubGlobal('navigator', { platform: 'MacIntel', userAgentData: { platform: 'Windows' } });
+      expect(shortcutPlatform()).toBe('Windows');
+      expect(formatShortcut('⌘S')).toBe('Ctrl+S');
+      vi.stubGlobal('navigator', { platform: 'MacIntel' });
+      expect(shortcutPlatform()).toBe('MacIntel');
+      expect(formatShortcut('⌘S')).toBe('⌘S');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
