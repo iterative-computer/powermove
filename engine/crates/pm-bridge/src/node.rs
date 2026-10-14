@@ -650,6 +650,58 @@ mod harness {
         objc2::runtime::AnyClass::get(c"CATransaction").expect("CATransaction")
     }
 
+    #[napi(object)]
+    pub struct DisplayState {
+        /// The main display is asleep (`CGDisplayIsAsleep`): nothing is
+        /// scanned out, so Core Animation presents no remote layer drawable
+        /// and Chromium's presentation times are its own estimates, not
+        /// the panel's.
+        pub asleep: bool,
+        /// The login session's screen is locked (`CGSSessionScreenIsLocked`
+        /// in `CGSessionCopyCurrentDictionary`).
+        pub locked: bool,
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayIsAsleep(display: u32) -> u32;
+        fn CGSessionCopyCurrentDictionary() -> *mut objc2::runtime::AnyObject;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(cf: *const std::ffi::c_void);
+    }
+
+    /// Whether a measurement can see the panel: the main display awake and
+    /// the session unlocked (S1 harness runs record it and refuse to
+    /// measure otherwise).
+    #[napi]
+    pub fn display_state() -> DisplayState {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        // SAFETY: public CoreGraphics calls; the session dictionary is a
+        // CFDictionary (toll-free bridged to NSDictionary) we own and release.
+        unsafe {
+            let asleep = CGDisplayIsAsleep(CGMainDisplayID()) != 0;
+            let session = CGSessionCopyCurrentDictionary();
+            let locked = if session.is_null() {
+                false
+            } else {
+                let key = objc2_foundation::NSString::from_str("CGSSessionScreenIsLocked");
+                let value: *mut AnyObject = msg_send![&*session, objectForKey: &*key];
+                let locked = !value.is_null() && {
+                    let b: bool = msg_send![&*value, boolValue];
+                    b
+                };
+                CFRelease(session.cast());
+                locked
+            };
+            DisplayState { asleep, locked }
+        }
+    }
+
     /// EDR headroom per screen. Call on the main thread.
     #[napi]
     pub fn edr_headroom() -> Result<Vec<EdrHeadroom>> {

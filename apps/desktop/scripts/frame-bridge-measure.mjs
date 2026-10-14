@@ -20,6 +20,13 @@
  *   node scripts/frame-bridge-measure.mjs [--only run,run] [--seconds 60] [--skip-build] [--tag r2] [--project file.pmv] [--keep]
  *   node scripts/frame-bridge-measure.mjs --only run --tag r2 --from <dir --keep left>   (analysis only)
  *
+ * Runs need the main display awake and the session unlocked: with the
+ * display asleep nothing is scanned out, Core Animation presents no C′
+ * drawable, and Chromium's presentation times are its own estimates. A run
+ * is skipped when it starts that way (--wait-display waits up to 12 hours
+ * instead) and its summary is marked invalid when the state changed during
+ * it. --allow-display-asleep measures anyway (harness debugging only).
+ *
  * Needs native/pm_node.node (bun run build:engine). Run it under
  * pm-electron-lock: it starts Electron once per run.
  */
@@ -132,6 +139,12 @@ if (!process.argv.includes('--skip-build') && !from) {
   execFileSync('/bin/sh', ['-c', '. ./env.sh && exec nice -n 15 cargo build --release --locked -p pm-bridge --lib --features harness'], { cwd: engineDir, stdio: 'inherit' });
 }
 fs.copyFileSync(path.join(engineDir, 'target/release/libpm_bridge.dylib'), harnessAddon);
+const harness = createRequire(import.meta.url)(harnessAddon);
+const allowAsleep = process.argv.includes('--allow-display-asleep');
+const waitDisplay = process.argv.includes('--wait-display');
+/** Whether the panel shows what a run measures: display awake, session unlocked. */
+const displayUsable = (state) => !state.asleep && !state.locked;
+const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const common = { bundle: true, logLevel: 'warning', alias: { powermove: path.join(desktop, 'src/renderer/src/kernel/api.ts') } };
 await build({
   ...common,
@@ -639,10 +652,27 @@ try {
       args = ['-r', path.join(work, 'app-main.js'), desktop];
     }
     process.stdout.write(`\n== ${name}\n`);
+    let displayBefore = harness.displayState();
+    if (!from && !allowAsleep && !displayUsable(displayBefore) && waitDisplay) {
+      process.stdout.write(`   waiting for the display (asleep ${displayBefore.asleep}, locked ${displayBefore.locked})\n`);
+      const until = Date.now() + 12 * 3600_000;
+      while (!displayUsable(displayBefore) && Date.now() < until) {
+        await sleepMs(30_000);
+        displayBefore = harness.displayState();
+      }
+      // Let the panel and the compositor settle after a wake.
+      if (displayUsable(displayBefore)) await sleepMs(20_000);
+    }
+    if (!from && !allowAsleep && !displayUsable(displayBefore)) {
+      process.stdout.write(`   skipped: the main display is ${displayBefore.asleep ? 'asleep' : 'awake'} and the session ${displayBefore.locked ? 'locked' : 'unlocked'}\n`);
+      if (profile) fs.rmSync(profile, { recursive: true, force: true });
+      continue;
+    }
     const t0 = Date.now();
     const r = from
       ? { stdout: fs.existsSync(out) && !JSON.parse(fs.readFileSync(out, 'utf8')).error ? 'MEASURE DONE (kept)' : 'MEASURE FAIL (kept)', status: 0 }
       : spawnSync(electron, args, { env, encoding: 'utf8', timeout: run.durationMs * (run.inputModes?.length ?? 1) * 3 + (run.app ? 1_200_000 : 240_000) });
+    const displayAfter = from ? displayBefore : harness.displayState();
     if (profile) fs.rmSync(profile, { recursive: true, force: true });
     const verdict = (r.stdout ?? '').split('\n').find((l) => l.startsWith('MEASURE')) ?? `MEASURE FAIL exit ${r.status}`;
     process.stdout.write(`   ${verdict} after ${((Date.now() - t0) / 1000).toFixed(1)} s\n`);
@@ -659,6 +689,8 @@ try {
         config: { scenario: run.scenario, app: !!run.app, remoteLayer: !!run.remoteLayer, placement: run.placement ?? 'offscreen', env: run.env, mode: run.mode, load: run.load, loadProfile: run.load ? (run.loadProfile ?? 'gate') : null, edr: run.edr ?? 'auto', rawInput: !!run.rawInput, rawGestures: run.app && run.mode === 'engine' ? run.rawGestures !== false : undefined, offMainThread: run.app && run.mode === 'engine' ? run.offMainThread !== false : undefined, fps: run.fps ?? (run.app ? 30 : 60), lead: run.lead ?? 4, durationMs: run.durationMs, inputModes: run.inputModes },
         versions: raw.versions,
         display: raw.display,
+        ...(from ? {} : { displayState: { before: displayBefore, after: displayAfter } }),
+        ...(!from && !(displayUsable(displayBefore) && displayUsable(displayAfter)) ? { invalid: 'the main display was asleep or the session locked during the run' } : {}),
         machineLoad: raw.machineLoad,
         ...(raw.project ? { project: raw.project } : {}),
         clock: raw.clock,
