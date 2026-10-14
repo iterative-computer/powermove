@@ -199,11 +199,17 @@ describe('WorkerPresenter and the presentation worker', () => {
     // Worker times are on the page's clock: worker 10 ms is page 1010 ms.
     expect(presented.map((f) => [f.seq, f.rafMs])).toEqual([[1, 1010]]);
     expect(link.releases).toEqual([]);
+    expect(presenter.stats.released).toBe(0);
     pair.painter.finishGpu();
     await settle();
     expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
     expect(presenter.stats.drawn).toBe(1);
     expect(presenter.stats.received).toBe(1);
+    // The worker's last stats went out with the draw, before the GPU let
+    // go of the frame; the release itself still counts (the integration
+    // test's "every drawn frame released" after a pause).
+    expect(pair.fromWorker.filter((m) => m.type === 'stats' || m.type === 'presented').at(-1)).toMatchObject({ stats: { released: 0 } });
+    expect(presenter.stats.released).toBe(1);
   });
 
   it('parks a descriptor on the page until its import arrives, and releases it undrawn after the park timeout', async () => {

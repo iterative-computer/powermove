@@ -138,8 +138,14 @@ export class WorkerPresenter implements Presenter {
   private readonly unsubscribe: () => void;
   private readonly now: () => number;
   private readonly timers: Timers;
-  /** Counted here: descriptors, parking, stale pools. Drawing and dropping: the worker's last stats. */
-  private readonly local = { received: 0, parked: 0, parkTimeouts: 0, staleGeneration: 0, noImport: 0 };
+  /**
+   * Counted here: descriptors, parking, stale pools, and releases (every
+   * release reaches the engine through this page, while the worker's own
+   * count is only as new as its last stats, sent before the GPU finished
+   * with the frame it just drew). Drawing and dropping: the worker's last
+   * stats.
+   */
+  private readonly local = { received: 0, parked: 0, parkTimeouts: 0, staleGeneration: 0, noImport: 0, released: 0 };
   private remote: PresenterStats | null = null;
 
   constructor(private readonly options: WorkerPresenterOptions) {
@@ -161,7 +167,7 @@ export class WorkerPresenter implements Presenter {
       received: this.local.received,
       drawn: r?.drawn ?? 0,
       dropped,
-      released: (r?.released ?? 0) + this.local.noImport,
+      released: this.local.released,
       parked: this.local.parked,
       parkTimeouts: this.local.parkTimeouts,
       staleGeneration: this.local.staleGeneration,
@@ -257,6 +263,7 @@ export class WorkerPresenter implements Presenter {
   private releaseUndrawn(desc: FrameDescriptor): void {
     this.local.noImport++;
     if (desc.poolGeneration < this.generation) return;
+    this.local.released++;
     this.options.link.release({ poolIndex: desc.poolIndex, seq: desc.seq });
   }
 
@@ -267,6 +274,7 @@ export class WorkerPresenter implements Presenter {
         // Releases keep flowing after the page ended the session: frames the
         // worker held when it closed go back to the engine (as the main
         // thread presenter releases its queue on dispose).
+        this.local.released++;
         this.options.link.release(message.release);
         return;
       case 'presented':
