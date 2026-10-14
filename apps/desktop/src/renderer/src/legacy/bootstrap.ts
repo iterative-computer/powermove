@@ -25,11 +25,14 @@ import { install as installModel } from './core/model';
 import { install as installSelection } from './core/selection';
 import { install as installAnim } from './core/anim';
 import { install as installHistory } from './core/history';
+import { installEngineDoc } from '../engine-doc/install';
 import { install as installLibrary } from './core/library';
 import { install as installProjects } from './core/projects';
 import { install as installEditing } from './core/editing';
 import { install as installCapabilities } from './core/capabilities';
 import { install as installMedia } from './core/media';
+import { installHostMediaStore } from '../media/host-media-store';
+import { bridge as hostBridge } from '../kernel/bridge';
 import { install as installAudio } from './core/audio';
 import { install as installShaders } from './gl/shaders';
 import { install as installTransitions } from './gl/transitions';
@@ -82,11 +85,18 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['core/selection', installSelection],
   ['core/anim', installAnim],
   ['core/history', installHistory],
+  /* The native evaluator's document mirror and write barrier (behind the
+     "native evaluator" flag; only `PM.doc` no-ops when it is off). It wraps
+     PM.touch and PM.proj, so it follows anim and history. */
+  ['engine-doc', (PM) => void installEngineDoc(PM)],
   ['core/library', installLibrary],
   ['core/projects', installProjects],
   ['core/editing', installEditing],
   ['core/capabilities', installCapabilities],
   ['core/media', installMedia],
+  /* The host media store wraps PM.MediaStore before anything reads media
+     (section 21; the source of bytes with "Use New Engine" on). */
+  ['media/host-store', (PM) => installHostMediaStore(PM, hostBridge() as never)],
   ['core/audio', installAudio],
   ['gl/shaders', installShaders],
   ['gl/transitions', installTransitions],

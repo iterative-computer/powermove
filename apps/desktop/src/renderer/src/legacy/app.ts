@@ -1,3 +1,4 @@
+import { applyFrameRate, validateFrameRate } from '../../../shared/frame-rate';
 import { IMAGE_SEQUENCE_ACCEPT, sequenceCandidate } from '../../../shared/image-sequence';
 import { MEDIA_ACCEPT } from '../../../shared/media-formats';
 import { chooseSequence, convertImageSequence } from './core/image-sequence';
@@ -19,6 +20,8 @@ import { createNewProjectForm } from './ui/project-settings';
 import { inspectorService, shaderHooks, timelineService, viewerService } from './core/services';
 import { bridge as hostBridge } from '../kernel/bridge';
 import { CURRENT_READER_VERSION, NEWER_PROJECT_MESSAGE, needsNewerReader, requiredReaderVersion } from '../../../shared/reader-version';
+import { touchedDocument, writeDocument } from '../engine-doc/write';
+import { REQUIRES_NATIVE_MESSAGE, refusesProject } from '../../../shared/engine-stamp';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -106,6 +109,10 @@ PM.app = APP;
    read-only: it is never autosaved (Projects.put keeps the copy stored when it
    opened) and never saved, so nothing this build does can overwrite it. */
 const isReadOnlyProject = (project: any) => needsNewerReader(project);
+/* A project stamped `requiresEngine: "native"` uses features only the new
+   engine has (linked media); the legacy engine refuses it (section 21). */
+const refusedByEngine = (project: any) => refusesProject(project, PM.HostMedia?.enabled === true);
+PM.refusedByEngine = (id: string) => refusedByEngine(parkedTabs.get(id)?.project ?? PM.Projects.get(id));
 PM.isReadOnlyProject = (id: string = PM.proj?.id) => {
   if (!id) return false;
   if (id === PM.proj?.id) return isReadOnlyProject(PM.proj);
@@ -178,12 +185,13 @@ function loadBootProject() {
   tabIds = [...new Set((Array.isArray(request.tabs) ? request.tabs : []).filter((id: any) => typeof id === 'string'))] as string[];
   if (request.projectId) {
     const requested = PM.Projects.get(request.projectId);
-    if (requested) {
+    if (requested && !refusedByEngine(requested)) {
       try { return hydrate(requested); }
       catch (e) { console.warn('Saved project could not be loaded', request.projectId, e); return emptyHomeProject(); }
     }
   }
-  const raw = PM.Projects.pickBoot({ legacy: PM.store.get('autosave', null), taken: request.taken });
+  const raw = PM.Projects.pickBoot({ legacy: PM.store.get('autosave', null), taken: request.taken,
+    get: (id: string) => { const project = PM.Projects.get(id); return project && !refusedByEngine(project) ? project : null; } });
   if (!raw) return emptyHomeProject();
   try { return hydrate(raw); }
   catch (e) { console.warn('Saved project could not be loaded', raw.id, e); return emptyHomeProject(); }
@@ -191,6 +199,8 @@ function loadBootProject() {
 function hydrate(p: any) {
   const base = PM.mkProject({ name: p.name, w: p.w, h: p.h, fps: p.fps, dur: p.dur, bg: p.bg });
   Object.assign(base, p);
+  // Loaded rates keep their float and gain their exact rational.
+  applyFrameRate(base, base.fps, 'document');
   base.edits = compactEditLog(Array.isArray(p.edits) ? p.edits : []);
   base.backgroundFill = PM.normalizeFill(p.backgroundFill, p.bg || '#000000');
   base.bg = base.backgroundFill.stops[0].color;
@@ -377,6 +387,7 @@ function hydrate(p: any) {
     c.name = typeof c.name === 'string' && c.name ? c.name : 'Precomp';
     c.w = Math.max(2, num(c.w, base.w)); c.h = Math.max(2, num(c.h, base.h));
     c.fps = Math.max(1, num(c.fps, base.fps)); c.dur = Math.max(.04, num(c.dur, base.dur));
+    applyFrameRate(c, c.fps, 'document');
     c.bg = typeof c.bg === 'string' ? c.bg : '#000000';
     c.params = sanitizeParams(c.params);
     c.layers = Array.isArray(c.layers) ? c.layers : [];
@@ -468,6 +479,17 @@ PM.bus.emit('project');
    provider activates, and becomes safely disabled again if that provider is
    turned off. Saved parameters and keyframes remain on the same objects. */
 function revalidateContributionPlaceholders() {
+  // Every layer with effects or transitions is rewritten in place (keys are
+  // normalized even when nothing else changes): the native engine's write
+  // barrier gets their paths.
+  const paths: any[][] = [];
+  const containers: Array<[any, any[]]> = [[PM.proj, []], ...Object.entries(PM.proj?.comps || {}).map(([id, comp]) => [comp, ['comps', id]] as [any, any[]])];
+  for (const [container, base] of containers) (container?.layers || []).forEach((layer: any, index: number) => {
+    if (layer?.fx?.length || layer?.transitionIn || layer?.transitionOut) paths.push([...base, 'layers', index]);
+  });
+  writeDocument(PM, paths, revalidateContributions);
+}
+function revalidateContributions() {
   let changed = false;
   const containers = [PM.proj, ...Object.values(PM.proj?.comps || {})] as any[];
   for (const container of containers) {
@@ -670,6 +692,7 @@ PM.autosave = () => {
       // A read-only project only tracks whether it differs from its file.
       const readOnly = isReadOnlyProject(PM.proj);
       if (!readOnly) {
+        PM.EngineDoc?.beforeSave?.('autosave');
         if (!persistCurrent(true)) throw new Error('Project storage is unavailable or full');
         PM.Projects.putState(PM.proj.id, { ...PM.Projects.getState(PM.proj.id, { history: false }), history: PM.hist.export?.({ copy: false }) });
         await PM.store.flush?.();
@@ -701,6 +724,8 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
     (window.document.activeElement as HTMLElement | null)?.blur?.();
     PM.bus.emit('project:flush-edits');
     await APP.importQueue;
+    // The native engine's consistency check (docs/rust-engine.md, section 6).
+    PM.EngineDoc?.beforeSave?.('save');
     progress(0.05);
     const project = projectId === PM.proj.id ? PM.proj : PM.Projects.get(projectId);
     if (!project) throw new Error('This project is no longer available.');
@@ -841,6 +866,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
       const bridge = hostBridge()!.projectRead!;
       const { token, document, media } = file.native;
       try {
+        if (refusedByEngine(document)) throw new Error(REQUIRES_NATIVE_MESSAGE);
         await restoreProjectFileStream(document, media, PM.MediaStore, (offset, length) => bridge.read(token, offset, length),
           (completed, total) => opening.update({ label: file.name, completed, total }));
         o = document; mediaRestored = true;
@@ -849,6 +875,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     else if (file instanceof Blob) o = await unpackProjectFileBlob(file);
     else o = unpackProjectFile(file.arrayBuffer ? await file.arrayBuffer() : await file.text());
     const source = o.proj || o;
+    if (refusedByEngine(o)) throw new Error(REQUIRES_NATIVE_MESSAGE);
     const requiredReader = requiredReaderVersion(o);
     if (!source || !Array.isArray(source.layers) || !Number.isFinite(source.w) || !Number.isFinite(source.h)) {
       throw new Error(requiredReader > CURRENT_READER_VERSION ? `${NEWER_PROJECT_MESSAGE}.` : 'This is not a Powermove project.');
@@ -1019,7 +1046,7 @@ function showTab(id: string): boolean {
     return true;
   }
   const project = PM.Projects.get(id);
-  if (!project) return false;
+  if (!project || refusedByEngine(project)) return false;
   switchProject(project);
   return true;
 }
@@ -1046,7 +1073,7 @@ function switchProject(p: any, history?: any, live?: ParkedTab) {
   if (live) {
     // Renamed from Projects while in the background: the library has the name.
     const name = PM.Projects.list().find((meta: any) => meta.id === PM.proj.id)?.name;
-    if (name) PM.proj.name = name;
+    if (name && PM.proj.name !== name) writeDocument(PM, [['name']], () => { PM.proj.name = name; });
   }
   const isTab = PM.proj.id !== homeProjectId;
   // Opening something new adds it after the other tabs; an existing tab keeps its place.
@@ -1375,7 +1402,10 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
     if (target) for (const result of results) {
       const meta = result.status !== 'failed' ? targetProject.assets?.[result.asset?.id] : null;
       // Media already in the project stays where the user filed it.
-      if (meta && (result.status === 'created' || !validFolder(targetProject, meta.folder))) meta.folder = target;
+      if (meta && (result.status === 'created' || !validFolder(targetProject, meta.folder))) {
+        meta.folder = target;
+        if (targetProject === PM.proj) touchedDocument(PM, [['assets', result.asset.id, 'folder']]);
+      }
     }
     const failures = results.filter((result: any) => result.status === 'failed');
     failures.forEach((result: any) => PM.toast(result.error?.message || ('Could not import ' + result.file?.name), 5000, { error: true }));
@@ -1383,17 +1413,24 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
     assertCurrent();
     if (matchSource) {
       const source = layerResults[0]?.asset;
-      if (source) {
+      // Composition settings outside history (a new project matched to its
+      // first media): the native engine's write barrier records them.
+      if (source) writeDocument(targetProject === PM.proj ? PM : null, [['w'], ['h'], ['fps'], ['fpsRational'], ['exportDefaults'], ['dur'], ['work']], () => {
         if (Number.isFinite(source.w) && source.w > 0) targetProject.w = source.w;
         if (Number.isFinite(source.h) && source.h > 0) targetProject.h = source.h;
-        if (Number.isFinite(source.fps) && source.fps > 0) {
-          targetProject.fps = source.fps;
-          targetProject.exportDefaults = { ...readExportDefaults(), fps: source.fps };
+        // Media rates are nominal rates (the single frame-rate validator).
+        const rate = Number.isFinite(source.fps) && source.fps > 0 ? validateFrameRate(source.fps, 'media') : null;
+        if (rate?.ok) {
+          targetProject.fps = rate.fps;
+          targetProject.fpsRational = rate.fpsRational;
+          targetProject.exportDefaults = { ...readExportDefaults(), fps: rate.fps };
         }
         if (Number.isFinite(source.dur) && source.dur > 0) {
           targetProject.dur = source.dur;
           targetProject.work = [0, source.dur];
         }
+      });
+      if (source) {
         PM.bus.emit('project');
         viewerService(PM)?.layout();
         PM.invalidate('all');
@@ -1417,7 +1454,13 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
       PM.autosave();
       if (placement === null || target) PM.bus.emit('assets');
       const parts: any = [];
-      if (layerResults.length) {
+      /* With the new engine's media store, say what was copied and linked
+         (appendix D: "Copied 12 clips · Linked 3"). */
+      const linkedCount = layerResults.filter((result: any) => result.asset.storage === 'linked').length;
+      if (layerResults.length && linkedCount) {
+        const copiedCount = layerResults.length - linkedCount;
+        parts.push([copiedCount ? `Copied ${copiedCount} ${copiedCount === 1 ? 'clip' : 'clips'}` : '', `Linked ${linkedCount}`].filter(Boolean).join(' · '));
+      } else if (layerResults.length) {
         const editableSvg = layerResults.length === 1 && layerResults[0].asset.format === 'svg' && layerResults[0].asset.svg?.paths?.length;
         parts.push(layerResults.length === 1
           ? `Imported ${layerResults[0].asset.name}${editableSvg ? ' as editable paths' : ''}`
@@ -1529,7 +1572,8 @@ window.addEventListener('beforeunload', () => {
 
 window.addEventListener('pm-open-project', (e: any) => {
   const p = e.detail;
-  if (p && typeof p === 'object') switchProject(p);
+  if (p && typeof p === 'object' && !refusedByEngine(p)) switchProject(p);
+  else if (p && typeof p === 'object') PM.toast(REQUIRES_NATIVE_MESSAGE, 6000, { key: 'project-engine', error: true });
 });
 
 /**
@@ -1541,6 +1585,10 @@ PM.openProjectHere = async (id: string) => {
   if (!id || id === PM.proj.id) return true;
   if (!parkedTabs.has(id) && !PM.Projects.list().some((meta: any) => meta.id === id)) {
     PM.toast('Could not open this project because its local data is missing.');
+    return false;
+  }
+  if (PM.refusedByEngine(id)) {
+    PM.toast(REQUIRES_NATIVE_MESSAGE, 6000, { key: 'project-engine', error: true });
     return false;
   }
   const claim = await (PM.windows?.claimProject?.(id) ?? Promise.resolve({ claimed: true, focused: false }));

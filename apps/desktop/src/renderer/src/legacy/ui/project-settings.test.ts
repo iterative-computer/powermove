@@ -178,13 +178,20 @@ describe('project settings control', () => {
     control.destroy();
   });
 
-  it('accepts any frame rate, clamped to a renderable range', () => {
+  it('accepts rates the engine can time exactly, clamped to a renderable range', () => {
     const host = bridge();
     const control = createProjectSettingsControl(host.api);
     const frameRate = field(control, 'Frame rate');
+    frameRate.value = '12';
+    change(frameRate);
+    expect(host.applyComposition).toHaveBeenCalledWith({ fps: 12 });
+    frameRate.value = '29.97';
+    change(frameRate);
+    expect(host.applyComposition).toHaveBeenLastCalledWith({ fps: 30000 / 1001 });
+    // 23 fps is not a whole number of engine ticks: the nominal rate replaces it.
     frameRate.value = '23';
     change(frameRate);
-    expect(host.applyComposition).toHaveBeenCalledWith({ fps: 23 });
+    expect(host.applyComposition).toHaveBeenLastCalledWith({ fps: 24000 / 1001 });
     frameRate.value = '900';
     change(frameRate);
     expect(host.applyComposition).toHaveBeenLastCalledWith({ fps: 240 });
@@ -259,5 +266,29 @@ describe('new project form', () => {
     const name = form.element.querySelector<HTMLInputElement>('[aria-label="Project name"]')!;
     name.value = '';
     expect(form.values()).toMatchObject({ name: 'Untitled', w: 1920 });
+  });
+});
+
+describe('Settings › Project › Media (new engine)', () => {
+  it('shows "When importing" only when the media store can link, and applies the choice', () => {
+    expect([...createProjectSettingsControl(bridge().api).element.querySelectorAll('.settings-section-heading > b')].map((node) => node.textContent))
+      .toEqual(['Composition', 'Export']);
+    let mode: 'copy' | 'link' = 'copy';
+    const applyMediaImport = vi.fn((next: 'copy' | 'link') => { mode = next; });
+    const host = bridge({ mediaImport: () => mode, applyMediaImport });
+    const control = createProjectSettingsControl(host.api);
+    expect([...control.element.querySelectorAll('.settings-section-heading > b')].map((node) => node.textContent))
+      .toEqual(['Composition', 'Media', 'Export']);
+    const select = field(control, 'When importing') as HTMLSelectElement;
+    expect([...select.options].map((option) => [option.value, option.textContent])).toEqual([['copy', 'Copy into project'], ['link', 'Link to files']]);
+    expect(select.value).toBe('copy');
+    expect(select.closest('.settings-row')?.querySelector('b')?.textContent).toBe('When importing');
+    select.value = 'link';
+    change(select);
+    expect(applyMediaImport).toHaveBeenCalledWith('link');
+    mode = 'copy';
+    control.refresh();
+    expect(select.value).toBe('copy');
+    control.destroy();
   });
 });

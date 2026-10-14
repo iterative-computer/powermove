@@ -1,5 +1,6 @@
 <script lang="ts">
   import { doc } from '../state/document.svelte';
+  import { writeDocument } from '../engine-doc/write';
   import type { PanelProps } from './registerSveltePanel';
 
   let { panelId }: PanelProps = $props();
@@ -47,7 +48,7 @@
     /* Phase 4 exception: set_composition rejects `notes` in both the typed
        validator and legacy editing allowlist. Remove this direct write once
        Phase 5 gives project notes a source-edit command. */
-    if (PM.proj === project) PM.proj.notes = value;
+    if (PM.proj === project) writeDocument(PM, [['notes']], () => { PM.proj.notes = value; });
     else project.notes = value;
     if (PM.proj === project) PM.autosave?.();
     status = 'Notes saved';

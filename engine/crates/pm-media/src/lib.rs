@@ -13,8 +13,10 @@
 //!   exact random access, pooled sessions, the decode service.
 //! * [`cache`]: the decoded frame cache under a lease.
 //! * [`image`]: still image readers (ImageIO, the `image` crate, OpenEXR).
+//! * [`audio`]: streaming audio decode to program samples (section 16).
 
 pub mod apple;
+pub mod audio;
 pub mod cache;
 pub mod dav1d;
 pub mod decode;

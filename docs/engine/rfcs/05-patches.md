@@ -296,9 +296,56 @@ of the canonical project form, as 64 lowercase hex digits, and equals
 `tests/vectors/canonical-vectors.json`). The production consistency check
 (invariant 5) compares the two.
 
-Still owned by `pm-model` and not specified yet: the identity registry
-(live objects to canonical paths, section 6 item 3), which lands with
-`pm-wasm` in Phase 1.
+### The identity registry (Phase 1, `pm-wasm`)
+
+Specified by the renderer write path (`docs/engine/write-path.md`,
+`apps/desktop/src/renderer/src/engine-doc/native.ts`): a live layer is
+addressed by `PM.curComp()`'s id and its index in that composition (checked
+against the mirror's id at that index; a mismatch repairs the mirror before
+answering); a layer outside the composition is sent as JSON and evaluated
+ad hoc; a live channel object maps to its member path inside its layer and an
+interned id `(composition, layer id, key, Member(path))`, revalidated on
+every use and released through a `FinalizationRegistry`. Answers that are
+document objects come back as paths or indexes and resolve on the live
+objects.
+
+### The renderer's generator
+
+The renderer diffs its shadow (the canonical document as last sent) against
+the live document with a generator that reads the live side as
+`JSON.stringify` does (`engine-doc/json-diff.ts`): live documents hold
+non-enumerable accessors, `undefined` members, `NaN`, and `-0`, where
+`diffOps`' `Object.hasOwn` would keep members JSON does not have. On plain
+JSON it emits exactly `diffOps`' operations (tested on 2,000 random pairs),
+so bodies stay canonical. Open question 5 is resolved this way: structural
+edits leave the renderer as id-keyed operations; `pm-wasm` does not convert
+whole-array leaf sets.
+
+### The renderer's stream for engine sessions (Phase 1)
+
+`PM.EngineDoc.subscribe(fn)` (`engine-doc/install.ts`) delivers every
+`PatchBatch` pm-wasm applied, in order, with a `canonicalV1` body; the tracer
+forwards the same batches to the interactive engine (open question 2: the
+renderer produces one stream; which process fans it out to the job engine is
+still the bridge's decision). A receiver opens with
+`PM.EngineDoc.snapshot()`: the flushed canonical document as
+`canonicalJsonV1` (sorted keys), its revision, and pm-wasm's canonical hash at
+that revision, which is the `Resync` of invariant 4. Batches with origin
+`load` are resyncs (one leaf set of the whole document at the empty path) and
+apply at any revision; only a resync carries `load`. Replacing `PM.proj` with
+another version of the same project (`PM.Comps.open`, `rotateProject`) diffs
+the whole document into an incremental `structuralDiff` batch, which applies
+only at its `baseRevision` like every other incremental batch. Revisions continue across a replaced pm-wasm instance
+(invariant 1).
+
+### `fpsRational` is a composition field
+
+The frame-rate validator stores `fpsRational` beside `fps` (section 5, rule
+1). It belongs to the composition: `COMP_FIELDS` (compositions.ts,
+`CANONICAL_COMP_FIELDS`, `pm_model::canonical::COMP_FIELDS`) include it after
+`fps`, optional like `audioGain` and `render3d`, so a patch to the open
+composition's `fpsRational` addresses `comps[compId].fpsRational` and the
+value moves with its composition.
 
 ## Versioning
 

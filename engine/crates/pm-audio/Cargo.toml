@@ -8,3 +8,17 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+pm-time = { path = "../pm-time" }
+pm-protocol = { path = "../pm-protocol", default-features = false }
+pm-model = { path = "../pm-model" }
+pm-eval = { path = "../pm-eval" }
+pm-media = { path = "../pm-media" }
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rubato = "5.0.1"
+cpal = "0.18.2"
+libc = "0.2"
+
+[dev-dependencies]
+proptest.workspace = true

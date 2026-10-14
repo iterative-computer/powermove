@@ -145,6 +145,9 @@ export const IPC = {
   hapticAlignment: 'haptic:alignment',
   menuPopup: 'menu:popup',
   log: 'log',
+  /** The native font registry in main (main/engine-fonts.ts, ENGINE_FONTS_IPC). */
+  engineFontsAnswer: 'engine-fonts:answer',
+  engineFontsSubset: 'engine-fonts:subset',
   openExternal: 'shell:open-external',
   /** An extension's `ui.openExternal`, after the host's own policy: https only, re-checked here. */
   extensionOpenExternal: 'shell:open-extension-url',
@@ -285,6 +288,8 @@ export const SIDECAR_SUFFIX_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
 export interface ProjectSaveRequest {
   name: string; projectId: string; saveAs?: boolean; documentBytes: number;
   media: import('./project-incremental').SaveMedia[];
+  /** Linked assets: records without bytes (section 21). */
+  linked?: import('./project-incremental').LinkedRecord[];
 }
 export type ProjectSaveBeginResult = { ok: true; token: string; required: string[] } | { ok: false; cancelled: boolean; error?: string };
 export type ProjectOpenResult = {
@@ -905,6 +910,13 @@ export interface PowermoveBridge {
     popup(request: NativeMenuRequest): Promise<string | null>;
   };
   log(level: LogLevel, text: string): void;
+  /** pm-wasm's text layout fonts (docs/engine/text.md): registry answers and
+   *  metrics-and-shaping subsets. Main registers the channels only with
+   *  POWERMOVE_ENGINE_FONTS=1; otherwise the calls reject. */
+  engineFonts?: {
+    answer(queries: string): Promise<{ ok: true; value: string } | { ok: false; error: string } | null>;
+    subset(blob: string, index: number): Promise<{ ok: true; value: Uint8Array } | { ok: false; error: string } | null>;
+  };
   openExternal(url: string): Promise<void>;
   /** For extension URLs: main accepts only https, at most 2 KB, without credentials. */
   extensionOpenExternal?(url: string): Promise<void>;
@@ -953,6 +965,8 @@ export interface PowermoveBridge {
   nativeEngine?: import('./engine-ipc').EngineBridge;
   /** The frame bridge's receiver (behind "Use New Engine"). */
   frameBridge?: import('./frame-bridge').FrameBridgeApi;
+  /** The host media store (section 21; source of media bytes behind "Use New Engine"). */
+  mediaStore?: import('./media-store').MediaStoreBridge;
 }
 
 export interface SandboxInputKey {

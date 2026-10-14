@@ -45,3 +45,6 @@ node_modules
 
 # native engine addon (bun run build:engine)
 apps/desktop/native/
+
+# pm-wasm build output (node engine/crates/pm-wasm/scripts/build.mjs)
+apps/desktop/src/renderer/public/engine/

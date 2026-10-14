@@ -60,6 +60,8 @@ function defineCompat(object: any, key: any, get: any, set: any) {
   /* A few boundary-locked legacy modules still use these old properties.
      Accessors preserve that contract while keeping the values out of JSON. */
   Object.defineProperty(object, key, { configurable: true, enumerable: false, get, set });
+  // A stored value left the JSON: a document write for the native engine's barrier.
+  if (descriptor?.enumerable && descriptor.value !== undefined) PM.doc?.wroteObject?.(object);
 }
 
 function installKeyCompat(key: any) {

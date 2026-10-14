@@ -43,12 +43,14 @@ describe('engine writer inventory', () => {
       "PM.hist.begin('drag'); PM.hist.external('x', undo, redo); PM.replaceProject(next);", // 20
       'shaderHooks(PM)?.syncShaderUniforms(layer);', // 21
       'const meta = PM.proj.assets[id]; meta.folder = target;', // 22
+      "PM.touch([['layers', 0]], true); PM.doc.touched([['name']]);", // 23
+      "PM.doc.write([['name']], () => { PM.proj.name = 'declared'; });", // 24
     ));
     expect(summary(entries)).toEqual([
       '1 hist.do', '10 project-write', '11 project-write', '13 project-write', '14 project-write', '16 hist.do', '17 hist.do',
       '18 host.pm', '18 project-write', '19 project-write', '2 history.do', '20 history.external', '20 history.transaction',
       '20 project-replace', '21 shader-uniforms', '22 asset-metadata', '3 edit.mutate', '5 anim.touch', '5 touch', '6 project-swap',
-      '7 revision', '8 asset-metadata', '9 project-write',
+      '7 revision', '8 asset-metadata', '9 project-write', '23 touch.paths', '23 doc.touched', '24 doc.write',
     ].sort());
   });
 

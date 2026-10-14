@@ -14,5 +14,5 @@
     "baseUrl": ".",
     "paths": { "powermove": ["src/renderer/src/kernel/api.ts"] }
   },
-  "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.svelte", "src/renderer/sandbox/**/*.ts", "src/extensions/**/*.ts", "src/extensions/**/*.svelte", "src/shared/**/*.ts", "src/main/engine/integration/*-page.ts", "src/main/engine/integration/bridge-worker.ts", "src/main/engine/integration/page-engine.ts", "src/main/engine/protocol.ts", "src/main/engine/msgpack.ts"]
+  "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.svelte", "src/renderer/sandbox/**/*.ts", "src/extensions/**/*.ts", "src/extensions/**/*.svelte", "src/shared/**/*.ts", "../../engine/crates/pm-model/tests/vectors/generate-patch-binary-vectors.ts", "src/main/engine/integration/*-page.ts", "src/main/engine/integration/bridge-worker.ts", "src/main/engine/integration/page-engine.ts", "src/main/engine/protocol.ts", "src/main/engine/msgpack.ts"]
 }
