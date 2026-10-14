@@ -167,7 +167,9 @@ function onClock(sample: ClockSample, arrivedMs: number): void {
   clock = sample;
   clocks.push(sample);
   const offset = sample.hostTime - arrivedMs * 1000;
-  if (hostOffsetUs === null || offset < hostOffsetUs) hostOffsetUs = offset;
+  // Each sample bounds the offset from below; the largest is the tightest
+  // (the presenter's estimator, presenter.ts).
+  if (hostOffsetUs === null || offset > hostOffsetUs) hostOffsetUs = offset;
 }
 
 /* ── input ────────────────────────────────────────────────────────── */

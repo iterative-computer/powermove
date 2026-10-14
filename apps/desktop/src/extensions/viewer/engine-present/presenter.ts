@@ -211,11 +211,18 @@ export class EnginePresenter {
   private onClock(sample: ClockSample, arrivedMs: number): void {
     if (this.clock && sample.seq <= this.clock.seq && sample.epoch === this.clock.epoch) return;
     this.clock = sample;
-    // The sample was made at its host time and arrived here no earlier:
-    // the smallest difference bounds the clock offset (one-way latency of
-    // the engine → renderer port, about 0.1 to 0.5 ms).
+    // The sample was made at its host time and arrived here no earlier, so
+    // host = ms × 1000 + offset gives offset ≥ hostTime − arrivedMs × 1000:
+    // every sample is a lower bound and the largest is the tightest (the
+    // one-way latency of the engine → renderer port, about 0.1 to 0.5 ms,
+    // when the main thread was free). A sample that waited behind a long
+    // task bounds it loosely and must not move it: taking the smallest
+    // difference instead (as before) let one stalled sample put the
+    // presenter's clock that far behind the engine's for the rest of the
+    // session (measured in the real app: about 110 ms, so the jitter buffer
+    // held twice its render-ahead and the engine ran out of free slots).
     const offset = sample.hostTime - arrivedMs * 1000;
-    if (this.hostOffsetUs === null || offset < this.hostOffsetUs) this.hostOffsetUs = offset;
+    if (this.hostOffsetUs === null || offset > this.hostOffsetUs) this.hostOffsetUs = offset;
   }
 
   /** Host µs (the engine's clock) for a performance.now() time. */

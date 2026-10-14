@@ -186,6 +186,31 @@ describe('EnginePresenter', () => {
     expect(presenter.stats.dropped['late']).toBeGreaterThan(0);
   });
 
+  it('maps to host time with the promptest clock sample, never a stalled one', () => {
+    const { presenter } = setup();
+    // True mapping: performance.now() ms × 1000 + 900_000 = host µs.
+    const sample = (seq: number, hostTime: number): ClockSample => ({
+      seq,
+      epoch: 2,
+      state: 'playing',
+      hostTime,
+      mediaTime: 0,
+      rate: { num: 1, den: 1 },
+      outputLatencyUs: 0,
+      sampleRate: 48_000,
+      loopRange: null
+    });
+    // Made at 100 ms, delivered 0.3 ms later.
+    presenter.receive({ type: 'clock', sample: sample(1, 1_000_000) }, 100.3);
+    expect(presenter.hostUs(200)).toBe(1_099_700);
+    // Made at 350 ms, delivered after a 110 ms long task: it says nothing new.
+    presenter.receive({ type: 'clock', sample: sample(2, 1_250_000) }, 460);
+    expect(presenter.hostUs(200)).toBe(1_099_700);
+    // Made at 600 ms, delivered 0.1 ms later: a tighter bound.
+    presenter.receive({ type: 'clock', sample: sample(3, 1_500_000) }, 600.1);
+    expect(presenter.hostUs(200)).toBe(1_099_900);
+  });
+
   it('a new pool generation drops the old frames and retires the old imports', () => {
     const { source, link, presenter } = setup();
     source.arrive(1, 1);
