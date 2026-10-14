@@ -163,6 +163,8 @@ function runRequest(): CodexRunRequest {
 }
 
 describe('registerCodexIpc', () => {
+  const releaseProject = vi.fn();
+  const acquireProject = vi.fn(() => releaseProject);
   const handlers = new Map<string, (event: { sender: Sender }, request: unknown) => Promise<unknown>>();
   const ipcMain = {
     handle: vi.fn((channel: string, handler: (event: { sender: Sender }, request: unknown) => Promise<unknown>) => {
@@ -177,6 +179,7 @@ describe('registerCodexIpc', () => {
     mocks.toolFinish.mockResolvedValue({ changed: true, revision: 2, historyId: 'native-history-1' });
     registerCodexIpc(ipcMain as never, {
       getWindow: () => null,
+      acquireProject,
       userData: '/tmp/powermove-index-test',
       extensionsDir: '/tmp/powermove-user-extensions',
       builtinExtensionsDir: '/tmp/powermove-builtin-extensions',
@@ -221,6 +224,8 @@ describe('registerCodexIpc', () => {
     const owner = new Sender();
     const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
     await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
+    expect(acquireProject).toHaveBeenCalledExactlyOnceWith('ipc-project');
+    expect(releaseProject).not.toHaveBeenCalled();
     await handlers.get(IPC.artifactForget)!({ sender: owner }, 'ipc-project');
     expect(mocks.forgetWorkspace).not.toHaveBeenCalled();
     await expect(handlers.get(IPC.artifactSweep)!({ sender: owner }, ['other'])).resolves.toEqual(['orphan']);
@@ -228,6 +233,7 @@ describe('registerCodexIpc', () => {
     await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     mocks.resolve({ ok: true, text: '{}' });
     await pending;
+    expect(releaseProject).toHaveBeenCalledTimes(1);
     await vi.waitFor(() => expect(mocks.forgetWorkspace).toHaveBeenCalledWith('/tmp/powermove-index-test', 'ipc-project'));
 
     await handlers.get(IPC.artifactForget)!({ sender: owner }, 'idle-project');

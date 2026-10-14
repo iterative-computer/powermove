@@ -131,6 +131,7 @@ const currentEditor = (): BrowserWindow | null => {
 };
 /* Set once the store exists; before that a window cannot have a project yet. */
 let persistOpenWindows: () => void = () => {};
+let prefetchProject: (id: string | null) => Promise<void> = async () => {};
 let onboardingFlow: OnboardingFlow | null = null;
 let startupInitialized = false;
 let projects: ProjectFiles | null = null;
@@ -644,7 +645,7 @@ function registerWindowIpc(): void {
   // A window showing a document, as a new tab or one it already has. Refused
   // when another window has it, because two editors autosaving one slot would
   // lose edits.
-  ipcMain.handle(IPC.windowClaimProject, (event, payload: unknown): WindowClaimResult => {
+  ipcMain.handle(IPC.windowClaimProject, async (event, payload: unknown): Promise<WindowClaimResult> => {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     const window = senderWindow(event);
     if (!window) return { claimed: false, focused: false };
@@ -654,8 +655,11 @@ function registerWindowIpc(): void {
       editors.reveal(holder);
       return { claimed: false, focused: true };
     }
+    // Reserve ownership before yielding to disk I/O so another window cannot
+    // claim the same project while its cache is warming.
     editors.claim(window, projectId);
     persistOpenWindows();
+    await prefetchProject(projectId);
     return { claimed: true, focused: false };
   });
 
@@ -726,13 +730,19 @@ function registerWindowIpc(): void {
     return { placed: 'new' };
   });
 
-  ipcMain.handle(IPC.windowOpenProject, (event, payload: unknown): WindowOpenResult => {
+  ipcMain.handle(IPC.windowOpenProject, async (event, payload: unknown): Promise<WindowOpenResult> => {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     const projectId = readProjectId(payload, IPC.windowOpenProject);
     if (!projectId) return { opened: false, focused: false, error: 'A project is required' };
     const holder = editors.windowForProject(projectId);
     if (holder) {
       editors.reveal(holder);
+      return { opened: false, focused: true };
+    }
+    await prefetchProject(projectId);
+    const warmedHolder = editors.windowForProject(projectId);
+    if (warmedHolder) {
+      editors.reveal(warmedHolder);
       return { opened: false, focused: true };
     }
     createWindow({ projectId });
@@ -752,7 +762,7 @@ function registerWindowIpc(): void {
 }
 
 /** Reopens only the last active project in one window. */
-function restoreWindows(store: Store): void {
+async function restoreWindows(store: Store): Promise<void> {
   const snapshot = store.get
     ? Object.fromEntries(['restoreWindows', 'projects', 'windowTabs', 'openWindows', 'openTabs', 'lastActiveProject'].map(key => [key, store.get!(key)]))
     : store.snapshot();
@@ -776,6 +786,7 @@ function restoreWindows(store: Store): void {
         && Number.isFinite(project.w) && Number.isFinite(project.h)
         && !(Array.isArray(trash) && trash.some(meta => meta?.id === project.id))) {
       store.set('projects', [{ id: project.id, name: project.name || 'Untitled', at: Date.now(), w: project.w, h: project.h }]);
+      await prefetchProject(project.id);
       createWindow({ projectId: project.id, tabs: [project.id] });
       return;
     }
@@ -789,6 +800,7 @@ function restoreWindows(store: Store): void {
     createWindow();
     return;
   }
+  for (const id of session.tabs) await prefetchProject(id);
   createWindow({ projectId: session.active, tabs: session.tabs });
 }
 
@@ -911,10 +923,13 @@ if (!hasSingleInstanceLock) {
     installPermissionHandlers(session.defaultSession, isAppMainFrame);
 
     // Boot barrier: the legacy renderer reads PM.store synchronously while its
-    // scripts load, so the store must be in memory before the window exists.
+    // scripts load, so the settings and the active project must be ready before the window exists.
     configureRuntimeUpdates({ root: path.join(app.getPath('userData'), 'runtimes'), appVersion: app.getVersion() });
     const store = createStore(path.join(app.getPath('userData'), 'store'));
     await store.load();
+    prefetchProject = async id => { if (id) await store.preloadProject?.(id); };
+    const lastActive = store.get?.('lastActiveProject');
+    if (typeof lastActive === 'string') await prefetchProject(lastActive);
     registerStoreIpc(ipcMain, store, {
       isTrustedSender,
       // One window's write is another window's stale cache. Tell the others
@@ -1259,6 +1274,7 @@ if (!hasSingleInstanceLock) {
     };
 
     registerCodexIpc(ipcMain, {
+      acquireProject: id => store.acquireProject!(id),
       getWindow: () => currentEditor(),
       broadcast: (send) => {
         for (const window of editors.all()) {
@@ -1370,7 +1386,7 @@ if (!hasSingleInstanceLock) {
     if (onboardingEnabled(process.env, isBackgroundTest, completedOnboarding)) {
       onboardingFlow.start();
     } else {
-      restoreWindows(store);
+      await restoreWindows(store);
     }
     startupInitialized = true;
     drainPendingOpenFiles();
@@ -1381,7 +1397,7 @@ if (!hasSingleInstanceLock) {
         onboardingFlow.focus();
         return;
       }
-      if (editors.size === 0) restoreWindows(store);
+      if (editors.size === 0) void restoreWindows(store);
       else {
         const editor = currentEditor();
         if (editor && recoverRenderer(editor)) editors.reveal(editor);

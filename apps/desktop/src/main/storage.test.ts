@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs/promises';
+import * as syncFs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { App, IpcMain } from 'electron';
@@ -30,7 +31,270 @@ afterEach(async () => {
 });
 
 describe('file store', () => {
-  it('atomically migrates legacy history on load and preserves the original if the write fails', async () => {
+  it('indexes heavy filenames without reading them, and reads through every synchronous API', async () => {
+    const directory = await temporaryDirectory();
+    const prefixes = ['project', 'projectHistory', 'projectState', 'projectJournal', 'agentThreads', 'agentAttachment'];
+    for (const prefix of prefixes) await fs.writeFile(path.join(directory, `${prefix}.saved.json`), '{"saved":true}');
+    await fs.writeFile(path.join(directory, 'theme.json'), '"dark"');
+    const readFile = vi.fn(fs.readFile), readFileSync = vi.fn(syncFs.readFileSync);
+    const store = createStore(directory, { fs: fileSystemWith({ readFile: readFile as typeof fs.readFile }), syncFs: { ...syncFs, readFileSync: readFileSync as typeof syncFs.readFileSync } });
+    await store.load();
+    expect(readFile).toHaveBeenCalledTimes(1);
+    expect(readFileSync).not.toHaveBeenCalled();
+    const snapshot = store.snapshot();
+    expect(snapshot).toEqual({ theme: 'dark', __powermoveLazyKeys: prefixes.map(prefix => `${prefix}.saved`).sort() });
+    expect(store.snapshotSerialized!()).toEqual(store.bootstrapSerialized!());
+    expect(store.get!('project.saved')).toEqual({ saved: true });
+    expect(store.getSerialized!('projectHistory.saved')).toBe('{"saved":true}');
+    expect(store.getEncodedSerialized!('agentAttachment.saved')).toBe('{"saved":true}');
+    store.get!('project.saved');
+    expect(readFileSync).toHaveBeenCalledTimes(3);
+    expect(store.snapshot()).toEqual(snapshot);
+  });
+
+  it('deduplicates asynchronous preload and avoids synchronous reads, including oversized values', async () => {
+    const directory = await temporaryDirectory();
+    await fs.writeFile(path.join(directory, 'project.saved.json'), '{"saved":true}');
+    const readFile = vi.fn(fs.readFile), readFileSync = vi.fn(syncFs.readFileSync);
+    const store = createStore(directory, { fs: fileSystemWith({ readFile: readFile as typeof fs.readFile }), syncFs: { ...syncFs, readFileSync: readFileSync as typeof syncFs.readFileSync } });
+    await store.load();
+    await Promise.all([store.preload!('project.saved'), store.preloadProject!('saved')]);
+    expect(store.get!('project.saved')).toEqual({ saved: true });
+    expect(readFile).toHaveBeenCalledTimes(1);
+    expect(readFileSync).not.toHaveBeenCalled();
+    const uncached = createStore(directory, { heavyCacheBytes: 0, syncFs: { ...syncFs, readFileSync: readFileSync as typeof syncFs.readFileSync } });
+    await uncached.load();
+    expect(await uncached.getEncodedSerializedAsync!('project.saved')).toBe('{"saved":true}');
+    expect(readFileSync).not.toHaveBeenCalled();
+  });
+
+  it.each(['sync', 'async'])('retains an oversized most-recent value across every read API after %s loading', async mode => {
+    const directory = await temporaryDirectory();
+    const serialized = JSON.stringify({ text: 'large'.repeat(100) });
+    await fs.writeFile(path.join(directory, 'project.large.json'), serialized);
+    const readFile = vi.fn(fs.readFile), readFileSync = vi.fn(syncFs.readFileSync);
+    const store = createStore(directory, { heavyCacheBytes: 16,
+      fs: fileSystemWith({ readFile: readFile as typeof fs.readFile }),
+      syncFs: { ...syncFs, readFileSync: readFileSync as typeof syncFs.readFileSync } });
+    await store.load();
+    if (mode === 'async') await store.preloadProject!('large');
+    else expect(store.get!('project.large')).toEqual(JSON.parse(serialized));
+    for (let i = 0; i < 3; i++) {
+      expect(store.get!('project.large')).toEqual(JSON.parse(serialized));
+      expect(store.getSerialized!('project.large')).toBe(serialized);
+      expect(store.getEncodedSerialized!('project.large')).toBe(serialized);
+      expect(await store.getEncodedSerializedAsync!('project.large')).toBe(serialized);
+    }
+    expect(readFile).toHaveBeenCalledTimes(mode === 'async' ? 1 : 0);
+    expect(readFileSync).toHaveBeenCalledTimes(mode === 'sync' ? 1 : 0);
+  });
+
+  it('evicts the least recently read clean values and reads them back from disk', async () => {
+    const directory = await temporaryDirectory();
+    for (const id of ['a', 'b', 'c']) await fs.writeFile(path.join(directory, `project.${id}.json`), '1');
+    const readFileSync = vi.fn(syncFs.readFileSync);
+    const store = createStore(directory, { heavyCacheBytes: 4, syncFs: { ...syncFs, readFileSync: readFileSync as typeof syncFs.readFileSync } });
+    await store.load();
+    for (const key of ['a', 'b', 'a', 'c', 'a']) expect(store.get!(`project.${key}`)).toBe(1);
+    expect(readFileSync).toHaveBeenCalledTimes(3);
+    expect(store.get!('project.b')).toBe(1);
+    expect(readFileSync).toHaveBeenCalledTimes(4);
+  });
+
+  it.each([
+    ['openWindows', ['large']],
+    ['windowTabs', [{ tabs: ['large'], active: 'other' }]],
+    ['openTabs', ['large']],
+    ['lastActiveProject', 'large'],
+  ])('pins oversized open projects from %s, excludes them from the budget, and releases them on close', async (key, metadata) => {
+    const directory = await temporaryDirectory();
+    const large = { text: 'large'.repeat(100) };
+    await fs.writeFile(path.join(directory, `${key}.json`), JSON.stringify(metadata));
+    for (const prefix of ['project', 'projectHistory', 'projectState', 'projectJournal', 'agentThreads']) {
+      await fs.writeFile(path.join(directory, `${prefix}.large.json`), JSON.stringify(large));
+    }
+    for (const id of ['a', 'b', 'c']) await fs.writeFile(path.join(directory, `project.${id}.json`), '1');
+    const readFile = vi.fn(fs.readFile), readFileSync = vi.fn(syncFs.readFileSync);
+    const store = createStore(directory, { heavyCacheBytes: 4,
+      fs: fileSystemWith({ readFile: readFile as typeof fs.readFile }),
+      syncFs: { ...syncFs, readFileSync: readFileSync as typeof syncFs.readFileSync } });
+    await store.load(); readFile.mockClear();
+    await store.preloadProject!('large');
+    // The two unpinned small values still fit: pinned bytes do not count.
+    store.get!('project.a'); store.get!('project.b'); store.get!('project.a');
+    expect(readFileSync).toHaveBeenCalledTimes(2);
+    for (let i = 0; i < 3; i++) {
+      for (const prefix of ['project', 'projectHistory', 'projectState', 'projectJournal', 'agentThreads']) {
+        expect(store.get!(`${prefix}.large`)).toEqual(large);
+      }
+      store.get!('project.b');
+    }
+    expect(readFile).toHaveBeenCalledTimes(5);
+    expect(readFileSync).toHaveBeenCalledTimes(2);
+    store.set(key as string, null);
+    store.get!('project.c');
+    expect(store.get!('project.large')).toEqual(large);
+    expect(readFileSync).toHaveBeenCalledTimes(4);
+    await store.flushAll();
+  });
+
+  it('keeps project and history MRUs warm together without a session signal', async () => {
+    const directory = await temporaryDirectory();
+    for (const prefix of ['project', 'projectHistory']) await fs.writeFile(path.join(directory, `${prefix}.large.json`), '{"large":true}');
+    const readFile = vi.fn(fs.readFile), readFileSync = vi.fn(syncFs.readFileSync);
+    const store = createStore(directory, { heavyCacheBytes: 0,
+      fs: fileSystemWith({ readFile: readFile as typeof fs.readFile }),
+      syncFs: { ...syncFs, readFileSync: readFileSync as typeof syncFs.readFileSync } });
+    await store.load(); await store.preloadProject!('large');
+    for (let i = 0; i < 3; i++) {
+      expect(store.get!('project.large')).toEqual({ large: true });
+      expect(store.get!('projectHistory.large')).toEqual({ large: true });
+    }
+    expect(readFile).toHaveBeenCalledTimes(2);
+    expect(readFileSync).not.toHaveBeenCalled();
+  });
+
+  it('holds independent session leases and releases once, without resurrecting deletes', async () => {
+    const directory = await temporaryDirectory();
+    for (const id of ['held', 'other']) await fs.writeFile(path.join(directory, `project.${id}.json`), '1');
+    const readFileSync = vi.fn(syncFs.readFileSync);
+    const store = createStore(directory, { heavyCacheBytes: 0,
+      syncFs: { ...syncFs, readFileSync: readFileSync as typeof syncFs.readFileSync } });
+    await store.load();
+    const first = store.acquireProject!('held'), second = store.acquireProject!('held');
+    store.get!('project.held'); store.get!('project.other');
+    first(); first();
+    expect(store.get!('project.held')).toBe(1);
+    store.get!('project.other'); second();
+    expect(store.get!('project.held')).toBe(1);
+    expect(readFileSync).toHaveBeenCalledTimes(3);
+    const release = store.acquireProject!('held');
+    store.delete('project.held'); release();
+    expect(store.get!('project.held')).toBeUndefined();
+    await store.flushAll();
+  });
+
+  it('pins attachment payloads referenced by an open project archive', async () => {
+    const directory = await temporaryDirectory();
+    const store = createStore(directory, { heavyCacheBytes: 0 });
+    await store.load();
+    store.set('openWindows', ['active']);
+    store.set('agentThreads.active', { threads: [{ attachments: [{ id: 'draft', payloadStored: true }],
+      conversation: [{ attachments: [{ id: 'sent', payloadStored: true }] }] }] });
+    for (const id of ['draft', 'sent', 'other']) store.set(`agentAttachment.${id}`, { content: id });
+    await store.flushAll();
+    const reader = vi.fn(syncFs.readFileSync);
+    // Inspect disk accesses on reopening, after the archive identifies owners.
+    const reopened = createStore(directory, { heavyCacheBytes: 0,
+      syncFs: { ...syncFs, readFileSync: reader as typeof syncFs.readFileSync } });
+    await reopened.load(); await reopened.preloadProject!('active');
+    for (let i = 0; i < 3; i++) for (const id of ['draft', 'sent', 'other']) {
+      expect(reopened.get!(`agentAttachment.${id}`)).toEqual({ content: id });
+    }
+    expect(reader).toHaveBeenCalledTimes(3);
+    reopened.delete('openWindows');
+    reopened.get!('agentAttachment.other');
+    expect(reopened.get!('agentAttachment.draft')).toEqual({ content: 'draft' });
+    expect(reader).toHaveBeenCalledTimes(4);
+    await reopened.flushAll();
+  });
+
+  it('protects debounced and in-flight writes under cache pressure until they reach disk', async () => {
+    const directory = await temporaryDirectory();
+    let release!: () => void, started!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const writing = new Promise<void>(resolve => { started = resolve; });
+    const writeFile: typeof fs.writeFile = async (...args) => { started(); await gate; return fs.writeFile(...args); };
+    const readFileSync = vi.fn(syncFs.readFileSync);
+    const store = createStore(directory, { heavyCacheBytes: 0, writeDelayMs: 60_000,
+      fs: fileSystemWith({ writeFile }), syncFs: { ...syncFs, readFileSync: readFileSync as typeof syncFs.readFileSync } });
+    await fs.writeFile(path.join(directory, 'project.pressure.json'), '{"clean":true}');
+    await store.load();
+    const releasePressure = store.acquireProject!('pressure');
+    await store.preload!('project.pressure');
+    store.set('project.dirty', { revision: 1 });
+    store.get!('project.pressure');
+    expect(store.get!('project.dirty')).toEqual({ revision: 1 });
+    const flush = store.flushAll(); await writing;
+    store.get!('project.pressure');
+    expect(store.get!('project.dirty')).toEqual({ revision: 1 });
+    store.set('project.dirty', { revision: 2 });
+    store.get!('project.pressure');
+    expect(store.get!('project.dirty')).toEqual({ revision: 2 });
+    expect(readFileSync).not.toHaveBeenCalled();
+    store.get!('project.pressure');
+    release(); await flush; await store.flushAll();
+    expect(store.get!('project.dirty')).toEqual({ revision: 2 });
+    expect(readFileSync).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(await fs.readFile(path.join(directory, 'project.dirty.json'), 'utf8'))).toEqual({ revision: 2 });
+    releasePressure();
+  });
+
+  it('keeps the only current copy cached after a failed write', async () => {
+    const directory = await temporaryDirectory();
+    const store = createStore(directory, { heavyCacheBytes: 0, fs: fileSystemWith({ writeFile: async () => { throw new Error('disk full'); } }) });
+    await store.load(); store.set('project.dirty', { recovered: true }); await store.flushAll();
+    store.set('project.pressure', { other: true }); await store.flushAll();
+    expect(store.get!('project.dirty')).toEqual({ recovered: true });
+  });
+
+  it.each(['set', 'delete'] as const)('does not resurrect an old async disk read after %s', async operation => {
+    const directory = await temporaryDirectory(), file = path.join(directory, 'project.race.json');
+    await fs.writeFile(file, '{"old":true}');
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const readFile = (async (...args: Parameters<typeof fs.readFile>) => { const result = await fs.readFile(...args); await gate; return result; }) as typeof fs.readFile;
+    const store = createStore(directory, { fs: fileSystemWith({ readFile: readFile as typeof fs.readFile }), writeDelayMs: 60_000 });
+    await store.load(); const reading = store.preload!('project.race');
+    if (operation === 'set') store.set('project.race', { fresh: true }); else store.delete('project.race');
+    release(); await reading;
+    expect(store.get!('project.race')).toEqual(operation === 'set' ? { fresh: true } : undefined);
+    await store.flushAll();
+    expect(store.get!('project.race')).toEqual(operation === 'set' ? { fresh: true } : undefined);
+    if (operation === 'delete') expect(store.snapshot().__powermoveLazyKeys).toBeUndefined();
+  });
+
+  it.each(['sync', 'async'])('quarantines corrupt heavy values on first %s access, not startup', async mode => {
+    const directory = await temporaryDirectory(), file = path.join(directory, 'projectHistory.broken.json');
+    await fs.writeFile(file, '{"truncated":');
+    const store = createStore(directory, { now: () => 1234 }), errors: any[] = [];
+    store.onError(error => errors.push(error)); await store.load();
+    expect(errors).toEqual([]); expect(await fs.readFile(file, 'utf8')).toBe('{"truncated":');
+    if (mode === 'async') await store.preload!('projectHistory.broken'); else store.get!('projectHistory.broken');
+    expect(store.get!('projectHistory.broken')).toBeUndefined();
+    expect(errors).toHaveLength(1); expect(errors[0].error).toContain('quarantined');
+    expect(await fs.readFile(`${file}.corrupt-1234`, 'utf8')).toBe('{"truncated":');
+    expect(store.snapshot().__powermoveLazyKeys).toBeUndefined();
+  });
+
+  it('preserves history sharing and contents across independent load and eviction', async () => {
+    const directory = await temporaryDirectory();
+    const history = { version: 1, index: 0, entries: [{ label: 'Edit',
+      forward: [{ path: ['layers'], exists: true, value: [{ id: 'shared', text: 'same' }] }], backward: [] }] };
+    const writer = createStore(directory); await writer.load();
+    writer.set('projectHistory.a', history); writer.set('projectState.b', { history }); await writer.flushAll();
+    const shared = createStore(directory); await shared.load();
+    await shared.preload!('projectHistory.a'); await shared.preload!('projectState.b');
+    // Inspect owned dictionaries: public getters intentionally clone them.
+    const owned = (shared as unknown as { values: Map<string, any> }).values;
+    expect(owned.get('projectHistory.a').records[0]).toBe(owned.get('projectState.b').history.records[0]);
+    shared.delete('projectHistory.a'); await shared.flushAll();
+    shared.set('projectHistory.c', history);
+    expect(owned.get('projectHistory.c').records[0]).toBe(owned.get('projectState.b').history.records[0]);
+    await shared.flushAll();
+    // Restore A for the independent cache-eviction/re-read test below.
+    writer.set('projectHistory.a', history); await writer.flushAll();
+    const store = createStore(directory, { heavyCacheBytes: 0 }); await store.load();
+    for (let i = 0; i < 3; i++) {
+      await store.preload!('projectHistory.a');
+      expect(store.get!('projectState.b')).toEqual({ history });
+      expect(store.get!('projectHistory.a')).toEqual(history);
+    }
+    store.set('projectState.b', { time: 3 }); await store.flushAll();
+    expect(store.get!('projectState.b')).toEqual({ history, time: 3 });
+  });
+
+  it('atomically migrates legacy history on first access and preserves the original if the write fails', async () => {
     const directory = await temporaryDirectory();
     const original = JSON.stringify({ version: 1, index: -1, entries: [{ label: 'Add',
       forward: [{ path: ['layers'], exists: true, value: [{ id: 'one' }] }], backward: [],
@@ -39,11 +303,11 @@ describe('file store', () => {
     await fs.writeFile(file, original);
     const broken = createStore(directory, { fs: { ...fs, rename: async () => { throw new Error('Disk unavailable'); } } });
     const errors: any[] = []; broken.onError(error => errors.push(error));
-    await broken.load(); await broken.flushAll();
+    await broken.load(); broken.get!('projectHistory.legacy'); await broken.flushAll();
     expect(await fs.readFile(file, 'utf8')).toBe(original);
     expect(errors).toHaveLength(1);
     expect(broken.get!('projectHistory.legacy')).toEqual(JSON.parse(original));
-    const healthy = createStore(directory); await healthy.load(); await healthy.flushAll();
+    const healthy = createStore(directory); await healthy.load(); expect(await fs.readFile(file, 'utf8')).toBe(original); await healthy.preload!('projectHistory.legacy'); await healthy.flushAll();
     expect(JSON.parse(await fs.readFile(file, 'utf8')).format).toBe('powermove-history-dictionary');
     const reopened = createStore(directory); await reopened.load();
     expect(reopened.get!('projectHistory.legacy')).toEqual(JSON.parse(original));
@@ -83,7 +347,8 @@ describe('file store', () => {
     expect(store.getSerialized!('theme')).toBeNull();
     expect(store.getSerialized!('../invalid')).toBeNull();
     const snapshot = store.snapshotSerialized!();
-    expect(JSON.parse(snapshot['projectHistory.demo']!).entries).toHaveLength(1000);
+    expect(snapshot['projectHistory.demo']).toBeUndefined();
+    expect(JSON.parse(snapshot.__powermoveLazyKeys!)).toContain('projectHistory.demo');
     expect(clone).not.toHaveBeenCalled();
     snapshot.projects = '[]';
     expect(store.getSerialized!('projects')).toBe('[{"id":"demo"}]');
@@ -96,11 +361,11 @@ describe('file store', () => {
     const history = { version: 1, index: 0, entries: [{ label: 'Edit', forward: [], backward: [] }] };
     store.set('projectState.demo', { history, time: 1 });
     store.set('projectState.demo', { time: 2 });
-    expect(store.snapshot()['projectState.demo']).toEqual({ history, time: 2 });
+    expect(store.get!('projectState.demo')).toEqual({ history, time: 2 });
     store.setSerialized!('projectState.demo', JSON.stringify({ time: 3 }));
     await store.flushAll();
     const reopened = createStore(directory); await reopened.load();
-    expect(reopened.snapshot()['projectState.demo']).toEqual({ history, time: 3 });
+    expect(reopened.get!('projectState.demo')).toEqual({ history, time: 3 });
   });
 
   it('round-trips set, snapshot, delete, and load without sharing references', async () => {
@@ -306,7 +571,7 @@ describe('file store', () => {
     expect((await fs.stat(path.join(directory, 'project.large-project.json'))).size).toBe(59351487);
     const reopened = createStore(directory);
     await reopened.load();
-    expect(reopened.snapshot()['project.large-project']).toEqual(project);
+    expect(reopened.get!('project.large-project')).toEqual(project);
   }, 30_000);
 
   it('persists take history larger than the ordinary settings limit', async () => {
@@ -339,7 +604,7 @@ describe('file store', () => {
     expect((await fs.stat(path.join(directory, 'projectState.Pyckwzri.json'))).size).toBe(33792768);
     const reopened = createStore(directory);
     await reopened.load();
-    expect(reopened.snapshot()['projectState.Pyckwzri']).toEqual(state);
+    expect(reopened.get!('projectState.Pyckwzri')).toEqual(state);
   }, 30_000);
 
   it('round-trips the 168720601-byte take history reported by the editor', async () => {
@@ -411,7 +676,7 @@ describe('file store', () => {
         { key: 'project.orphan', error: 'project file has no corresponding registry entry' }
       ])
     );
-    expect(store.snapshot()).toHaveProperty('project.orphan');
+    expect(store.snapshot().__powermoveLazyKeys).toContain('project.orphan');
     await expect(fs.stat(path.join(directory, 'project.orphan.json'))).resolves.toBeDefined();
   });
 });
@@ -509,10 +774,10 @@ describe('store IPC and quit integration', () => {
     const untrusted = { trusted: false, sender, returnValue: undefined as unknown };
     listeners.get(IPC.storeGetSync)?.(untrusted, { key: 'projects' });
     expect(untrusted.returnValue).toBeNull();
-    expect(handlers.get(IPC.storeGetEncoded)?.(event, { key: 'project.P1' })).toBe('{"proj":{"id":"P1"}}');
-    expect(handlers.get(IPC.storeGetEncoded)?.(event, { key: 'project.missing' })).toBeNull();
-    expect(() => handlers.get(IPC.storeGetEncoded)?.(untrusted, { key: 'project.P1' })).toThrow(IpcValidationError);
-    expect(() => handlers.get(IPC.storeGetEncoded)?.(event, {})).toThrow(IpcValidationError);
+    expect(await handlers.get(IPC.storeGetEncoded)?.(event, { key: 'project.P1' })).toBe('{"proj":{"id":"P1"}}');
+    expect(await handlers.get(IPC.storeGetEncoded)?.(event, { key: 'project.missing' })).toBeNull();
+    await expect(handlers.get(IPC.storeGetEncoded)?.(untrusted, { key: 'project.P1' })).rejects.toThrow(IpcValidationError);
+    await expect(handlers.get(IPC.storeGetEncoded)?.(event, {})).rejects.toThrow(IpcValidationError);
   });
 
   it('prevents the first quit until flushing completes, then quits once more', async () => {
