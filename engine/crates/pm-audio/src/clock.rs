@@ -103,7 +103,10 @@ impl ClockCore {
             let on_line = HostMicros::new(presented_us).is_ok_and(|at| {
                 (last.media_time_at(at).get() - media).abs() <= TICKS_PER_SECOND / 1000
             });
-            if same_line && on_line && presented_us < last.host_time.get() + REFRESH_US {
+            // A new loop range changes how the line wraps: publish it at once.
+            let same_loop = last.loop_range == self.loop_range;
+            if same_line && same_loop && on_line && presented_us < last.host_time.get() + REFRESH_US
+            {
                 return None;
             }
         }
@@ -246,6 +249,25 @@ mod tests {
             .unwrap();
         assert_eq!(c.epoch, 2);
         assert!(c.validate_ok());
+    }
+
+    #[test]
+    fn a_new_loop_range_publishes_at_once() {
+        let mut core = ClockCore::new(48_000, Arc::default());
+        let a = core.observe(heard(0, 1, 0), 1_000_000, 5000).unwrap();
+        assert!(a.loop_range.is_none());
+        // Same line, too soon: nothing new.
+        assert!(core.observe(heard(0, 1, 100), 1_002_083, 5000).is_none());
+        // The loop range changes; the media is still on the line.
+        core.loop_range = Some(pm_protocol::common::TickRange {
+            start: Ticks::new(0).unwrap(),
+            end: Ticks::new(TICKS_PER_SECOND).unwrap(),
+        });
+        let b = core.observe(heard(0, 1, 200), 1_004_166, 5000).unwrap();
+        assert_eq!(b.epoch, a.epoch, "a loop range keeps the epoch");
+        assert!(b.seq > a.seq);
+        assert_eq!(b.loop_range, core.loop_range);
+        assert!(core.observe(heard(0, 1, 300), 1_006_250, 5000).is_none());
     }
 
     trait ValidateOk {
