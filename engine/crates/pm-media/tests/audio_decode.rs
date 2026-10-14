@@ -378,7 +378,13 @@ fn shift_ts_timestamps(src: &Path, dst: &Path, from: i64, delta: i64) -> usize {
         if control & 1 == 0 {
             continue;
         }
-        let q = i + 4 + if control & 2 != 0 { 1 + b[i + 4] as usize } else { 0 };
+        let q = i
+            + 4
+            + if control & 2 != 0 {
+                1 + b[i + 4] as usize
+            } else {
+                0
+            };
         let id = b[q + 3];
         if b[q..q + 3] != [0, 0, 1] || !(id == 0xBD || (0xC0..=0xEF).contains(&id)) {
             continue;
@@ -421,7 +427,12 @@ fn gaps_are_silence_and_overlaps_are_dropped() {
     let (d, pcm) = decode_all(&ramp);
     assert!(d.info().sample_exact_timestamps);
     let index = |v: f32| (v as f64 * 8_388_608.0).round() as i64;
-    assert!(pcm[0][..48_000].iter().enumerate().all(|(i, v)| index(*v) == i as i64));
+    assert!(
+        pcm[0][..48_000]
+            .iter()
+            .enumerate()
+            .all(|(i, v)| index(*v) == i as i64)
+    );
     // Packets are 1,024 samples (1,920 ticks); move every packet from the
     // 51st on, which starts at program sample 51,200.
     let start_pts = 126_000; // the muxer's default 1.4 s offset
@@ -454,7 +465,10 @@ fn gaps_are_silence_and_overlaps_are_dropped() {
         let wrong = (from..from + 100_000)
             .filter(|&k| index(got[k as usize]) != k - shift)
             .count();
-        assert_eq!(wrong, 0, "{name}: samples after the jump off their timestamps");
+        assert_eq!(
+            wrong, 0,
+            "{name}: samples after the jump off their timestamps"
+        );
         // A seek past the jump lands on the same sample as the sequential
         // decode.
         let mut s = AudioDecoder::open(&file, None).unwrap();
@@ -469,5 +483,136 @@ fn gaps_are_silence_and_overlaps_are_dropped() {
             );
             assert_eq!(&out[0][..], &got[target as usize..target as usize + 4_096]);
         }
+    }
+}
+
+/// Matroska and WebM (1 ms timebases) with every codec they commonly carry:
+/// a seek starts at a packet the demux-only scan placed and counts from
+/// there, so it lands on the samples of the sequential decode (exactly for
+/// lossless codecs, converged within the pre-roll for lossy ones) and costs
+/// the same wherever it lands: the packets it decodes do not grow with the
+/// seek distance. ALAC in Matroska has no parser and no fixed frame size:
+/// its seeks decode from the start, and reads in order continue the running
+/// decode (each packet decoded once).
+#[test]
+fn coarse_timebase_seeks_start_near_their_target() {
+    let source = "aevalsrc=exprs='0.3*sin(2*PI*440*t)+0.2*sin(2*PI*3001*t)|0.3*sin(2*PI*660*t)':s=48000:d=40";
+    for (name, args, lossless) in [
+        ("c-opus.webm", &["-c:a", "libopus"][..], false),
+        (
+            "c-vorbis.mkv",
+            &["-c:a", "vorbis", "-strict", "-2"][..],
+            false,
+        ),
+        ("c-aac.mkv", &["-c:a", "aac"][..], false),
+        ("c-aac44.mkv", &["-c:a", "aac", "-ar", "44100"][..], false),
+        (
+            "c-nopns-aac44.mkv",
+            &["-c:a", "aac", "-aac_pns", "0", "-ar", "44100"][..],
+            false,
+        ),
+        ("c-ac3.mkv", &["-c:a", "ac3"][..], false),
+        ("c-eac3.mkv", &["-c:a", "eac3"][..], false),
+        ("c-mp2.mkv", &["-c:a", "mp2"][..], false),
+        ("c-flac.mkv", &["-c:a", "flac"][..], true),
+        ("c-pcm.mkv", &["-c:a", "pcm_s24le"][..], true),
+        ("c-alac.mkv", &["-c:a", "alac"][..], true),
+    ] {
+        let file = generated(name, source, args);
+        let (d, pcm) = decode_all(&file);
+        assert!(!d.info().sample_exact_timestamps, "{name}");
+        let total = pcm[0].len() as u64;
+        let rate = d.info().sample_rate as u64;
+        let preroll = d.info().preroll;
+        let mut s = AudioDecoder::open(&file, None).unwrap();
+        let mut worst = 0f32;
+        let mut worst_packets = 0;
+        let mut costs = vec![];
+        let targets = [
+            30 * rate + 7,
+            preroll + 1,
+            5_000,
+            rate + 123,
+            10 * rate + 4_321,
+            total - 3_000,
+            20 * rate + 1,
+        ];
+        for &t in &targets {
+            let before = s.packets_decoded();
+            s.seek_anchored(t).unwrap();
+            let mut out = vec![Vec::new(); pcm.len()];
+            let n = s.read(&mut out, 2_048).unwrap();
+            let want = &pcm[0][t as usize..t as usize + n];
+            assert_eq!(n as u64, 2_048.min(total - t), "{name}: read at {t}");
+            let diff = out[0]
+                .iter()
+                .zip(want)
+                .fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+            if lossless {
+                assert_eq!(&out[0][..], want, "{name}: seek to {t}");
+            }
+            worst = worst.max(diff);
+            let cost = s.packets_decoded() - before;
+            costs.push(cost);
+            if t > 2 * rate {
+                worst_packets = worst_packets.max(cost);
+            }
+        }
+        // Lossy decoders converge within the pre-roll; an off-by-a-frame
+        // placement would differ by the signal's full swing (about 1). AAC's
+        // noise substitution is random by design (its generator runs across
+        // frames): up to 7.2e-3 where the tone stops at the end. The same
+        // AAC encoded without it seeks onto the sequential decode exactly.
+        let bound = if name.starts_with("c-aac") {
+            1e-2
+        } else {
+            1e-4
+        };
+        assert!(worst < bound, "{name}: seek differs by {worst}");
+        if name != "c-alac.mkv" {
+            // Pre-roll, anchor spacing, the 2,048 samples read, and the
+            // codec's frame: a few dozen packets, never the 30 s before.
+            assert!(
+                worst_packets <= 60,
+                "{name}: a seek decoded {worst_packets} packets ({costs:?})"
+            );
+            // Blocks read in order (as the source cache decodes them, each
+            // from its own anchor) cost the stream once plus a pre-roll and
+            // an anchor spacing per block: linear in the length.
+            let mut s = AudioDecoder::open(&file, None).unwrap();
+            let block = 65_536u64;
+            let blocks = total.div_ceil(block);
+            for k in 0..blocks {
+                s.seek_anchored(k * block).unwrap();
+                let mut out = vec![Vec::new(); pcm.len()];
+                s.read(&mut out, block as usize).unwrap();
+                let want = &pcm[0][(k * block) as usize..(k * block) as usize + out[0].len()];
+                let diff = out[0]
+                    .iter()
+                    .zip(want)
+                    .fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+                assert!(diff < bound, "{name}: block {k} differs by {diff}");
+            }
+            let once = d.packets_decoded();
+            let packets = s.packets_decoded();
+            assert!(
+                packets <= once + blocks * 45,
+                "{name}: {blocks} blocks in order decoded {packets} packets (the stream has {once})"
+            );
+        } else {
+            // Reads in order continue the running decode.
+            let mut s = AudioDecoder::open(&file, None).unwrap();
+            for k in 0..(total / 65_536) {
+                s.seek_anchored(k * 65_536).unwrap();
+                let mut out = vec![Vec::new(); pcm.len()];
+                s.read(&mut out, 65_536).unwrap();
+            }
+            let packets = s.packets_decoded();
+            assert!(
+                packets <= total / 4_096 + 4,
+                "{name}: in-order reads decoded {packets} packets"
+            );
+        }
+        eprintln!("{name}: seeks within {worst:e} of the sequential decode; packets {costs:?}");
     }
 }
