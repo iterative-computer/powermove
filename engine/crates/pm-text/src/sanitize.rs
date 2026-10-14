@@ -13,12 +13,12 @@ use read_fonts::{FileRef, TableProvider};
 
 const KEPT: &[&[u8; 4]] = &[
     // Sanitized by OTS.
-    b"cmap", b"head", b"hhea", b"hmtx", b"maxp", b"name", b"OS/2", b"post", b"loca", b"glyf", b"CFF ", b"cvt ",
-    b"fpgm", b"prep", b"gasp", b"hdmx", b"kern", b"LTSH", b"VDMX", b"vhea", b"vmtx", b"VORG", b"MATH", b"Silf",
-    b"Sill", b"Glat", b"Gloc", b"Feat",
+    b"cmap", b"head", b"hhea", b"hmtx", b"maxp", b"name", b"OS/2", b"post", b"loca", b"glyf",
+    b"CFF ", b"cvt ", b"fpgm", b"prep", b"gasp", b"hdmx", b"kern", b"LTSH", b"VDMX", b"vhea",
+    b"vmtx", b"VORG", b"MATH", b"Silf", b"Sill", b"Glat", b"Gloc", b"Feat",
     // Blink's pass-through list.
-    b"CBDT", b"CBLC", b"COLR", b"CPAL", b"CFF2", b"sbix", b"STAT", b"avar", b"BASE", b"cvar", b"fvar", b"gvar",
-    b"HVAR", b"MVAR", b"VVAR", b"GDEF", b"GPOS", b"GSUB",
+    b"CBDT", b"CBLC", b"COLR", b"CPAL", b"CFF2", b"sbix", b"STAT", b"avar", b"BASE", b"cvar",
+    b"fvar", b"gvar", b"HVAR", b"MVAR", b"VVAR", b"GDEF", b"GPOS", b"GSUB",
 ];
 
 /// Rebuilds face `index` of `data` with the tables OTS would keep, as a
@@ -33,7 +33,9 @@ pub fn sanitize(data: &[u8], index: u32) -> Option<Vec<u8>> {
         if !KEPT.iter().any(|t| **t == raw) {
             continue;
         }
-        let Some(bytes) = font.table_data(tag) else { continue };
+        let Some(bytes) = font.table_data(tag) else {
+            continue;
+        };
         let bytes = bytes.as_bytes();
         // OTS keeps only Microsoft `kern` (version 0).
         if &raw == b"kern" && (bytes.len() < 2 || u16::from_be_bytes([bytes[0], bytes[1]]) != 0) {

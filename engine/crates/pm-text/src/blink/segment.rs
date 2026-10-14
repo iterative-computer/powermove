@@ -76,7 +76,10 @@ fn scan(c: &[EmojiCat], p: usize) -> (usize, bool, bool) {
     if ae(p) && is(p + 1, EmojiCat::Vs15) {
         l1 = 2;
     }
-    if is(p, EmojiCat::KeycapBase) && is(p + 1, EmojiCat::Vs15) && is(p + 2, EmojiCat::CombiningEnclosingKeycap) {
+    if is(p, EmojiCat::KeycapBase)
+        && is(p + 1, EmojiCat::Vs15)
+        && is(p + 2, EmojiCat::CombiningEnclosingKeycap)
+    {
         l1 = 3;
     }
     // emoji_run_with_vs
@@ -84,7 +87,10 @@ fn scan(c: &[EmojiCat], p: usize) -> (usize, bool, bool) {
     if ae(p) && is(p + 1, EmojiCat::Vs16) {
         l2 = 2;
     }
-    if is(p, EmojiCat::KeycapBase) && is(p + 1, EmojiCat::Vs16) && is(p + 2, EmojiCat::CombiningEnclosingKeycap) {
+    if is(p, EmojiCat::KeycapBase)
+        && is(p + 1, EmojiCat::Vs16)
+        && is(p + 2, EmojiCat::CombiningEnclosingKeycap)
+    {
         l2 = 3;
     }
     // emoji_run = emoji_presentation
@@ -128,7 +134,10 @@ fn scan(c: &[EmojiCat], p: usize) -> (usize, bool, bool) {
             l3 = l3.max(q + 1 - p);
         }
     }
-    if is(p, EmojiCat::KeycapBase) && is(p + 1, EmojiCat::Vs16) && is(p + 2, EmojiCat::CombiningEnclosingKeycap) {
+    if is(p, EmojiCat::KeycapBase)
+        && is(p + 1, EmojiCat::Vs16)
+        && is(p + 2, EmojiCat::CombiningEnclosingKeycap)
+    {
         l3 = l3.max(3);
     }
     if ae(p) && is(p + 1, EmojiCat::CombiningEnclosingCircleBackslash) {
@@ -152,12 +161,25 @@ fn scan(c: &[EmojiCat], p: usize) -> (usize, bool, bool) {
         frontier = next;
     }
     // unqualified_keycap_sequence
-    let l4 = if is(p, EmojiCat::KeycapBase) && is(p + 1, EmojiCat::CombiningEnclosingKeycap) { 2 } else { 0 };
+    let l4 = if is(p, EmojiCat::KeycapBase) && is(p + 1, EmojiCat::CombiningEnclosingKeycap) {
+        2
+    } else {
+        0
+    };
 
     // Longest match wins; ties go to the token listed first in the grammar.
-    let candidates = [(l1, false, true), (l2, true, true), (l3, true, false), (l4, true, false), (1, false, false)];
+    let candidates = [
+        (l1, false, true),
+        (l2, true, true),
+        (l3, true, false),
+        (l4, true, false),
+        (1, false, false),
+    ];
     let max = candidates.iter().map(|c| c.0).max().unwrap_or(1);
-    *candidates.iter().find(|c| c.0 == max).expect("text_run always matches")
+    *candidates
+        .iter()
+        .find(|c| c.0 == max)
+        .expect("text_run always matches")
 }
 
 /// Emoji presentation segments in UTF-16 offsets, following
@@ -189,7 +211,11 @@ pub fn symbol_runs(s: &[u16]) -> Vec<(usize, FallbackPriority)> {
             }
             // UTF16RagelIterator::PeekCodepoint: the code point after the
             // iterator's position, U+FFFD past the end.
-            let peek = if it + 1 < n { next_cp(s, off[it + 1]).0 } else { 0xFFFD };
+            let peek = if it + 1 < n {
+                next_cp(s, off[it + 1]).0
+            } else {
+                0xFFFD
+            };
             if !cur_emoji && !chars::maybe_emoji_presentation(peek) {
                 it += 1;
                 next_end = it;
@@ -223,7 +249,11 @@ const MAX_BRACKETS: usize = 32;
 
 fn script_for_opentype(ch: u32) -> Script {
     let s = chars::script(ch);
-    if s == Script::Katakana || s == Script::KatakanaOrHiragana { Script::Hiragana } else { s }
+    if s == Script::Katakana || s == Script::KatakanaOrHiragana {
+        Script::Hiragana
+    } else {
+        s
+    }
 }
 
 fn is_han_script(s: Script) -> bool {
@@ -372,7 +402,10 @@ impl<'a> ScriptRunIterator<'a> {
             return;
         }
         let eaw = chars::east_asian_width(ch);
-        if eaw == EastAsianWidth::Wide || eaw == EastAsianWidth::Fullwidth || eaw == EastAsianWidth::Halfwidth {
+        if eaw == EastAsianWidth::Wide
+            || eaw == EastAsianWidth::Fullwidth
+            || eaw == EastAsianWidth::Halfwidth
+        {
             *set = self.han_extensions.clone();
         }
     }
@@ -387,7 +420,10 @@ impl<'a> ScriptRunIterator<'a> {
         let mut next = std::mem::take(&mut self.next);
         self.fix_scripts_by_east_asian_width(ch, &mut next);
         self.next = next;
-        self.brackets.push(BracketRec { ch, script: Script::Common });
+        self.brackets.push(BracketRec {
+            ch,
+            script: Script::Common,
+        });
         self.fixup_depth += 1;
     }
 
@@ -400,9 +436,10 @@ impl<'a> ScriptRunIterator<'a> {
             if self.brackets[idx].ch == target {
                 let mut script = self.brackets[idx].script;
                 if is_han_script(script)
-                    && let Some(&h) = self.current.iter().find(|&&s| is_han_script(s)) {
-                        script = h;
-                    }
+                    && let Some(&h) = self.current.iter().find(|&&s| is_han_script(s))
+                {
+                    script = h;
+                }
                 if script != Script::Common {
                     self.next = vec![script];
                 }
@@ -423,7 +460,10 @@ impl<'a> ScriptRunIterator<'a> {
         let mut priority = self.current[0];
         let rest: Vec<Script> = self.current[1..].to_vec();
         if le_inherited(self.next[0]) {
-            if self.next.len() == 2 && le_inherited(priority) && self.common_preferred == Script::Common {
+            if self.next.len() == 2
+                && le_inherited(priority)
+                && self.common_preferred == Script::Common
+            {
                 self.common_preferred = self.next[1];
             }
             return true;
@@ -484,7 +524,11 @@ impl<'a> ScriptRunIterator<'a> {
 
     fn resolve(&self) -> Script {
         let r = self.current[0];
-        if r == Script::Common { self.common_preferred } else { r }
+        if r == Script::Common {
+            self.common_preferred
+        } else {
+            r
+        }
     }
 
     fn consume(&mut self) -> Option<(usize, Script)> {
@@ -547,10 +591,21 @@ pub fn run_segments(s: &[u16]) -> Vec<Segment> {
         while yi < symbols.len() && symbols[yi].0 <= start {
             yi += 1;
         }
-        let (send, script) = scripts.get(si).copied().unwrap_or((s.len(), Script::Common));
-        let (yend, priority) = symbols.get(yi).copied().unwrap_or((s.len(), FallbackPriority::Text));
+        let (send, script) = scripts
+            .get(si)
+            .copied()
+            .unwrap_or((s.len(), Script::Common));
+        let (yend, priority) = symbols
+            .get(yi)
+            .copied()
+            .unwrap_or((s.len(), FallbackPriority::Text));
         let end = send.min(yend);
-        out.push(Segment { start, end, script, priority });
+        out.push(Segment {
+            start,
+            end,
+            script,
+            priority,
+        });
         start = end;
     }
     out
@@ -582,7 +637,14 @@ mod tests {
         let s = u("Hi 👋🏽 x");
         let runs = symbol_runs(&s);
         let kinds: Vec<_> = runs.iter().map(|r| r.1).collect();
-        assert_eq!(kinds, vec![FallbackPriority::Text, FallbackPriority::EmojiEmoji, FallbackPriority::Text]);
+        assert_eq!(
+            kinds,
+            vec![
+                FallbackPriority::Text,
+                FallbackPriority::EmojiEmoji,
+                FallbackPriority::Text
+            ]
+        );
         assert_eq!(runs[0].0, 3);
         assert_eq!(runs[1].0, 7);
     }

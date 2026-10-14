@@ -42,7 +42,12 @@ fn main() {
     ];
 
     let mut c = Compat::new(CoreTextRegistry::new());
-    let content = |size: f64| TextContent { font: Some("system-ui".into()), weight: Some(400.0), size: Some(size), ..Default::default() };
+    let content = |size: f64| TextContent {
+        font: Some("system-ui".into()),
+        weight: Some(400.0),
+        size: Some(size),
+        ..Default::default()
+    };
     let mut checks = 0;
     let mut wrong = Vec::new();
     for &(size, h, i) in FRESH {
@@ -54,14 +59,22 @@ fn main() {
             checks += 1;
         }
     }
-    assert!(wrong.is_empty(), "widths differ from Chromium:\n  {}", wrong.join("\n  "));
+    assert!(
+        wrong.is_empty(),
+        "widths differ from Chromium:\n  {}",
+        wrong.join("\n  ")
+    );
     println!("ok {checks} fresh-renderer widths equal Chromium's");
 
     // The corpus's real project: off the 1/100 px grid, HarfBuzz tracks at
     // the specified size while the font is the effective size's.
     let high = c.measure(&content(11.867549668874172), "H");
     assert_eq!(high, 8.8115234375, "H at 11.867549668874172 px");
-    assert_eq!(c.measure(&content(11.86), "H"), 8.812057495117188, "H at 11.86 px");
+    assert_eq!(
+        c.measure(&content(11.86), "H"),
+        8.812057495117188,
+        "H at 11.86 px"
+    );
     println!("ok specified size for trak, effective size for the font");
 
     // A fresh renderer measures 24 px system-ui at opsz 24 ...
@@ -70,16 +83,34 @@ fn main() {
     // ... and a renderer whose UI laid 12 and 13 px system-ui text out at a
     // device scale factor of 2 at opsz 12 and 13 (the capture).
     c.set_font_cache_seeds(vec![
-        FontCacheSeed { family: "system-ui".into(), weight: 400.0, italic: false, size: 24.0, specified: 12.0 },
-        FontCacheSeed { family: "System-UI".into(), weight: 400.0, italic: false, size: 26.0, specified: 13.0 },
+        FontCacheSeed {
+            family: "system-ui".into(),
+            weight: 400.0,
+            italic: false,
+            size: 24.0,
+            specified: 12.0,
+        },
+        FontCacheSeed {
+            family: "System-UI".into(),
+            weight: 400.0,
+            italic: false,
+            size: 26.0,
+            specified: 13.0,
+        },
     ]);
     assert_eq!(c.measure(&content(24.0), "1"), 11.203125);
     assert_eq!(c.measure(&content(24.0), "0"), 15.1875);
     assert_eq!(c.measure(&content(26.0), "T"), 16.6943359375);
     // Other keys keep their own entries: another size, weight, or style.
     assert_eq!(c.measure(&content(25.0), "f"), 7.928466796875);
-    let bold = TextContent { weight: Some(600.0), ..content(24.0) };
-    let italic = TextContent { italic: Some(true), ..content(24.0) };
+    let bold = TextContent {
+        weight: Some(600.0),
+        ..content(24.0)
+    };
+    let italic = TextContent {
+        italic: Some(true),
+        ..content(24.0)
+    };
     let mut fresh = Compat::new(CoreTextRegistry::new());
     assert_eq!(c.measure(&bold, "1"), fresh.measure(&bold, "1"));
     assert_eq!(c.measure(&italic, "1"), fresh.measure(&italic, "1"));

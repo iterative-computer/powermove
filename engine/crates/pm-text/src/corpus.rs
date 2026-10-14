@@ -42,7 +42,11 @@ pub fn sanitize_lone_surrogates(json: &str) -> String {
     let mut last = 0;
     while i < b.len() {
         if b[i] == b'\\' {
-            if i + 5 < b.len() && b[i + 1] == b'u' && (b[i + 2] == b'd' || b[i + 2] == b'D') && matches!(b[i + 3], b'8'..=b'9' | b'a'..=b'f' | b'A'..=b'F') {
+            if i + 5 < b.len()
+                && b[i + 1] == b'u'
+                && (b[i + 2] == b'd' || b[i + 2] == b'D')
+                && matches!(b[i + 3], b'8'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
+            {
                 out.push_str(&json[last..i]);
                 out.push_str("\\ufffd");
                 i += 6;
@@ -96,7 +100,10 @@ impl CorpusFile {
         Ok(CorpusFile {
             variable_sources: serde_json::from_value(v["variableSources"].clone())?,
             project_fonts: serde_json::from_value(v["projectFonts"].clone())?,
-            cases: v["cases"].as_array().map(|a| a.iter().map(parse_case).collect()).unwrap_or_default(),
+            cases: v["cases"]
+                .as_array()
+                .map(|a| a.iter().map(parse_case).collect())
+                .unwrap_or_default(),
         })
     }
 }
@@ -108,11 +115,13 @@ pub fn native_registry(corpus: &CorpusFile) -> Result<crate::registry::CoreTextR
     let mut r = crate::registry::CoreTextRegistry::new();
     for p in &corpus.project_fonts {
         let bytes = std::fs::read(&p.path).map_err(|e| format!("{}: {e}", p.path))?;
-        r.add_project_font(&p.family, &bytes, 0, p.descriptors()).map_err(|e| format!("{}: {e}", p.path))?;
+        r.add_project_font(&p.family, &bytes, 0, p.descriptors())
+            .map_err(|e| format!("{}: {e}", p.path))?;
     }
     for (family, path) in &corpus.variable_sources {
         let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-        r.set_font_source(family, &bytes).map_err(|e| format!("{path}: {e}"))?;
+        r.set_font_source(family, &bytes)
+            .map_err(|e| format!("{path}: {e}"))?;
     }
     Ok(r)
 }
@@ -152,7 +161,10 @@ pub fn run_case<R: FontResolver>(compat: &mut Compat<R>, case: &Case) -> CaseOut
     let layout = wrap::glyph_layout(&case.d, &mut m);
     CaseOutput {
         id: case.id.clone(),
-        lines: lines.iter().map(|l| (String::from_utf16_lossy(&l.text), l.start)).collect(),
+        lines: lines
+            .iter()
+            .map(|l| (String::from_utf16_lossy(&l.text), l.start))
+            .collect(),
         line_units: lines.into_iter().map(|l| l.text).collect(),
         caret,
         layout,
@@ -163,7 +175,11 @@ pub fn run_case<R: FontResolver>(compat: &mut Compat<R>, case: &Case) -> CaseOut
 /// `pm-wasm` runs). `font` returns the bytes for a face source and the face
 /// index to read them at (0 for subsets). Returns every case's layout and
 /// the queries the answers lacked.
-pub fn run_replay(answers: &Answers, mut font: impl FnMut(&str, u32) -> (FontBytes, u32), cases: &[Case]) -> (Vec<CaseOutput>, usize, usize) {
+pub fn run_replay(
+    answers: &Answers,
+    mut font: impl FnMut(&str, u32) -> (FontBytes, u32),
+    cases: &[Case],
+) -> (Vec<CaseOutput>, usize, usize) {
     let mut resolver = ReplayResolver::new(answers);
     for (blob, index) in answers.sources() {
         let (data, read_index) = font(&blob, index);
@@ -235,7 +251,13 @@ impl Expected {
                         .map(|u| {
                             let n = |k: &str| u[k].as_f64().unwrap_or(f64::NAN);
                             let i = |k: &str| u[k].as_i64().unwrap_or(-1);
-                            [fixed(n("x")), fixed(n("y")), fixed(n("w")), i("line"), i("sourceStart")]
+                            [
+                                fixed(n("x")),
+                                fixed(n("y")),
+                                fixed(n("w")),
+                                i("line"),
+                                i("sourceStart"),
+                            ]
                         })
                         .collect()
                 })
@@ -245,12 +267,30 @@ impl Expected {
             lines: r["lines"]
                 .as_array()?
                 .iter()
-                .map(|l| (l["text"].as_str().unwrap_or_default().to_string(), l["start"].as_u64().unwrap_or(u64::MAX) as usize))
+                .map(|l| {
+                    (
+                        l["text"].as_str().unwrap_or_default().to_string(),
+                        l["start"].as_u64().unwrap_or(u64::MAX) as usize,
+                    )
+                })
                 .collect(),
             caret: r["caret"]
                 .as_array()?
                 .iter()
-                .map(|line| line.as_array().map(|b| b.iter().map(|p| (p[0].as_u64().unwrap_or(u64::MAX) as usize, fixed(p[1].as_f64().unwrap_or(f64::NAN)))).collect()).unwrap_or_default())
+                .map(|line| {
+                    line.as_array()
+                        .map(|b| {
+                            b.iter()
+                                .map(|p| {
+                                    (
+                                        p[0].as_u64().unwrap_or(u64::MAX) as usize,
+                                        fixed(p[1].as_f64().unwrap_or(f64::NAN)),
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
                 .collect(),
             characters: units("characters"),
             words: units("words"),
@@ -265,17 +305,29 @@ fn js_units(s: &str) -> Vec<u16> {
 
 /// Compares a case's layout with what Canvas2D produced.
 pub fn compare(case: &Case, out: &CaseOutput, expected: &Expected) -> CaseDiff {
-    let mut diff = CaseDiff { id: case.id.clone(), group: case.group.clone(), breaks_identical: true, ..Default::default() };
+    let mut diff = CaseDiff {
+        id: case.id.clone(),
+        group: case.group.clone(),
+        breaks_identical: true,
+        ..Default::default()
+    };
     if expected.lines.len() != out.lines.len() {
         diff.breaks_identical = false;
-        diff.detail.push(format!("line count {} vs canvas {}", out.lines.len(), expected.lines.len()));
+        diff.detail.push(format!(
+            "line count {} vs canvas {}",
+            out.lines.len(),
+            expected.lines.len()
+        ));
     }
     for (i, (l, units)) in out.lines.iter().zip(out.line_units.iter()).enumerate() {
-        let Some((et, es)) = expected.lines.get(i) else { break };
+        let Some((et, es)) = expected.lines.get(i) else {
+            break;
+        };
         let ours = String::from_utf16_lossy(units);
         if js_units(et) != js_units(&ours) || *es != l.1 {
             diff.breaks_identical = false;
-            diff.detail.push(format!("line {i}: {ours:?}@{} vs canvas {et:?}@{es}", l.1));
+            diff.detail
+                .push(format!("line {i}: {ours:?}@{} vs canvas {et:?}@{es}", l.1));
         }
     }
     let mut max: f64 = 0.0;
@@ -286,24 +338,31 @@ pub fn compare(case: &Case, out: &CaseOutput, expected: &Expected) -> CaseDiff {
             *max = e;
         }
         if e > TOLERANCE_PX && diff.detail.len() < 12 {
-            diff.detail.push(format!("{what}: {a} vs canvas {b} (|d| {e:.4})"));
+            diff.detail
+                .push(format!("{what}: {a} vs canvas {b} (|d| {e:.4})"));
         }
     };
     if diff.breaks_identical {
         for (li, line) in out.caret.iter().enumerate() {
             let Some(el) = expected.caret.get(li) else {
                 diff.breaks_identical = false;
-                diff.detail.push(format!("caret line {li} missing from capture"));
+                diff.detail
+                    .push(format!("caret line {li} missing from capture"));
                 continue;
             };
             if el.len() != line.len() {
                 diff.breaks_identical = false;
-                diff.detail.push(format!("caret line {li}: {} boundaries vs canvas {}", line.len(), el.len()));
+                diff.detail.push(format!(
+                    "caret line {li}: {} boundaries vs canvas {}",
+                    line.len(),
+                    el.len()
+                ));
             }
             for (bi, ((idx, x), (eidx, ex))) in line.iter().zip(el.iter()).enumerate() {
                 if idx != eidx {
                     diff.breaks_identical = false;
-                    diff.detail.push(format!("caret {li}.{bi} index {idx} vs {eidx}"));
+                    diff.detail
+                        .push(format!("caret {li}.{bi} index {idx} vs {eidx}"));
                 }
                 note(format!("caret {li}.{bi}"), *x, px(*ex), &mut diff, &mut max);
             }
@@ -315,13 +374,20 @@ pub fn compare(case: &Case, out: &CaseOutput, expected: &Expected) -> CaseDiff {
         ] {
             if theirs.len() != ours.len() {
                 diff.breaks_identical = false;
-                diff.detail.push(format!("{kind} count {} vs canvas {}", ours.len(), theirs.len()));
+                diff.detail.push(format!(
+                    "{kind} count {} vs canvas {}",
+                    ours.len(),
+                    theirs.len()
+                ));
                 continue;
             }
             for (i, (u, e)) in ours.iter().zip(theirs.iter()).enumerate() {
                 if e[4] != u.source_start as i64 || e[3] != u.line as i64 {
                     diff.breaks_identical = false;
-                    diff.detail.push(format!("{kind} {i} source {} line {} vs canvas {} {}", u.source_start, u.line, e[4], e[3]));
+                    diff.detail.push(format!(
+                        "{kind} {i} source {} line {} vs canvas {} {}",
+                        u.source_start, u.line, e[4], e[3]
+                    ));
                 }
                 note(format!("{kind} {i} x"), u.x, px(e[0]), &mut diff, &mut max);
                 note(format!("{kind} {i} y"), u.y, px(e[1]), &mut diff, &mut max);
@@ -385,9 +451,13 @@ impl Packed {
         let mut ys: Vec<Option<i64>> = vec![None; rows];
         for u in e.characters.iter().chain(&e.words).chain(&e.line_units) {
             let row = u[3] as usize;
-            let slot = ys.get_mut(row).ok_or_else(|| format!("unit on row {row} of {rows}"))?;
+            let slot = ys
+                .get_mut(row)
+                .ok_or_else(|| format!("unit on row {row} of {rows}"))?;
             match slot {
-                Some(y) if *y != u[1] => return Err(format!("row {row} has units at y {} and {}", y, u[1])),
+                Some(y) if *y != u[1] => {
+                    return Err(format!("row {row} has units at y {} and {}", y, u[1]));
+                }
                 _ => *slot = Some(u[1]),
             }
         }
@@ -400,7 +470,16 @@ impl Packed {
         Ok(Packed {
             lines: e.lines.clone(),
             ys,
-            caret: e.caret.iter().map(|l| (deltas(l.iter().map(|p| p.0 as i64)), deltas(l.iter().map(|p| p.1)))).collect(),
+            caret: e
+                .caret
+                .iter()
+                .map(|l| {
+                    (
+                        deltas(l.iter().map(|p| p.0 as i64)),
+                        deltas(l.iter().map(|p| p.1)),
+                    )
+                })
+                .collect(),
             characters: units(&e.characters),
             words: units(&e.words),
             line_units: units(&e.line_units),
@@ -412,14 +491,29 @@ impl Packed {
             let (x, line, src) = (sums(&p.x), sums(&p.line), sums(&p.src));
             (0..p.w.len())
                 .map(|i| {
-                    let y = self.ys.get(line[i] as usize).copied().flatten().unwrap_or(i64::MIN);
+                    let y = self
+                        .ys
+                        .get(line[i] as usize)
+                        .copied()
+                        .flatten()
+                        .unwrap_or(i64::MIN);
                     [x[i], y, p.w[i], line[i], src[i]]
                 })
                 .collect()
         };
         Expected {
             lines: self.lines.clone(),
-            caret: self.caret.iter().map(|(i, x)| sums(i).into_iter().zip(sums(x)).map(|(i, x)| (i as usize, x)).collect()).collect(),
+            caret: self
+                .caret
+                .iter()
+                .map(|(i, x)| {
+                    sums(i)
+                        .into_iter()
+                        .zip(sums(x))
+                        .map(|(i, x)| (i as usize, x))
+                        .collect()
+                })
+                .collect(),
             characters: units(&self.characters),
             words: units(&self.words),
             line_units: units(&self.line_units),
@@ -463,7 +557,15 @@ impl Fixture {
         CorpusFile {
             variable_sources: self.variable_sources.clone(),
             project_fonts: self.project_fonts.clone(),
-            cases: self.cases.iter().map(|c| Case { id: c.id.clone(), group: c.group.clone(), d: TextContent::from_json(&c.d) }).collect(),
+            cases: self
+                .cases
+                .iter()
+                .map(|c| Case {
+                    id: c.id.clone(),
+                    group: c.group.clone(),
+                    d: TextContent::from_json(&c.d),
+                })
+                .collect(),
         }
     }
 
@@ -473,7 +575,12 @@ impl Fixture {
             .iter()
             .filter_map(|f| match std::fs::metadata(&f.path) {
                 Ok(m) if m.len() == f.bytes => None,
-                Ok(m) => Some(format!("{} is {} bytes, captured with {}", f.path, m.len(), f.bytes)),
+                Ok(m) => Some(format!(
+                    "{} is {} bytes, captured with {}",
+                    f.path,
+                    m.len(),
+                    f.bytes
+                )),
                 Err(e) => Some(format!("{}: {e}", f.path)),
             })
             .collect()
@@ -493,7 +600,10 @@ pub struct Summary {
 }
 
 pub fn summarize(diffs: &[CaseDiff]) -> Summary {
-    let mut s = Summary { cases: diffs.len(), ..Default::default() };
+    let mut s = Summary {
+        cases: diffs.len(),
+        ..Default::default()
+    };
     let mut errors = Vec::new();
     for d in diffs {
         let g = s.groups.entry(d.group.clone()).or_default();
@@ -511,17 +621,24 @@ pub fn summarize(diffs: &[CaseDiff]) -> Summary {
     }
     errors.sort_by(|a, b| a.total_cmp(b));
     s.max_advance_error = errors.last().copied().unwrap_or(0.0);
-    s.p99_advance_error = errors.get(((errors.len() as f64 - 1.0) * 0.99).round().max(0.0) as usize).copied().unwrap_or(0.0);
+    s.p99_advance_error = errors
+        .get(((errors.len() as f64 - 1.0) * 0.99).round().max(0.0) as usize)
+        .copied()
+        .unwrap_or(0.0);
     s
 }
 
 /// Metrics-and-shaping subsets for every face source the answers name, by
 /// `answers::subset_key`. `font` returns a source's full bytes.
-pub fn subsets_for(answers: &Answers, mut font: impl FnMut(&str) -> Option<FontBytes>) -> Result<BTreeMap<String, Vec<u8>>, String> {
+pub fn subsets_for(
+    answers: &Answers,
+    mut font: impl FnMut(&str) -> Option<FontBytes>,
+) -> Result<BTreeMap<String, Vec<u8>>, String> {
     let mut out = BTreeMap::new();
     for (blob, index) in answers.sources() {
         let data = font(&blob).ok_or_else(|| format!("no bytes for blob {blob}"))?;
-        let (bytes, _) = crate::subset::metrics_subset(data.as_slice(), index).map_err(|e| format!("{blob}.{index}: {e}"))?;
+        let (bytes, _) = crate::subset::metrics_subset(data.as_slice(), index)
+            .map_err(|e| format!("{blob}.{index}: {e}"))?;
         out.insert(crate::answers::subset_key(&blob, index), bytes);
     }
     Ok(out)
@@ -545,11 +662,20 @@ pub fn run_native(corpus: &CorpusFile) -> Result<NativeRun, String> {
     let registry = native_registry(corpus)?;
     let mut compat = Compat::new(crate::answers::Recorder::new(registry));
     let started = std::time::Instant::now();
-    let outputs = corpus.cases.iter().map(|c| run_case(&mut compat, c)).collect();
+    let outputs = corpus
+        .cases
+        .iter()
+        .map(|c| run_case(&mut compat, c))
+        .collect();
     let seconds = started.elapsed().as_secs_f64();
     let recorder = compat.into_resolver();
     let answers = recorder.answers();
-    Ok(NativeRun { outputs, answers, registry: recorder.inner, seconds })
+    Ok(NativeRun {
+        outputs,
+        answers,
+        registry: recorder.inner,
+        seconds,
+    })
 }
 
 /// What level 2 layout needs to lay the corpus out: the fallback manifest
@@ -572,11 +698,17 @@ pub struct Level2Font {
 /// Level 2 inputs for the corpus from the native registry: the manifest
 /// for the system UI font and the faces of every family the cases name.
 #[cfg(all(target_os = "macos", feature = "system", feature = "level2"))]
-pub fn level2_inputs(registry: &mut crate::registry::CoreTextRegistry, cases: &[Case]) -> Level2Inputs {
+pub fn level2_inputs(
+    registry: &mut crate::registry::CoreTextRegistry,
+    cases: &[Case],
+) -> Level2Inputs {
     let manifest = registry.fallback_manifest("system-ui");
     let mut fonts: Vec<Level2Font> = Vec::new();
     let mut push = |family: &str, blob: &str, index: u32| {
-        let f = Level2Font { key: crate::answers::subset_key(blob, index), family: family.to_string() };
+        let f = Level2Font {
+            key: crate::answers::subset_key(blob, index),
+            family: family.to_string(),
+        };
         if !fonts.contains(&f) {
             fonts.push(f);
         }
@@ -584,7 +716,16 @@ pub fn level2_inputs(registry: &mut crate::registry::CoreTextRegistry, cases: &[
     for f in &manifest.faces {
         push(&f.family, &f.source.blob, f.source.index);
     }
-    let families: std::collections::BTreeSet<String> = cases.iter().filter_map(|c| c.d.font.as_deref().map(str::trim).filter(|f| !f.is_empty()).map(str::to_string)).collect();
+    let families: std::collections::BTreeSet<String> = cases
+        .iter()
+        .filter_map(|c| {
+            c.d.font
+                .as_deref()
+                .map(str::trim)
+                .filter(|f| !f.is_empty())
+                .map(str::to_string)
+        })
+        .collect();
     for family in families {
         for source in registry.family_faces(&family) {
             push(&family, &source.blob, source.index);
@@ -596,14 +737,21 @@ pub fn level2_inputs(registry: &mut crate::registry::CoreTextRegistry, cases: &[
 /// Lays the cases out with level 2 over the inputs' fonts. `font` returns
 /// the bytes for a key (subsets in `pm-wasm` and in the identity check).
 #[cfg(feature = "level2")]
-pub fn run_level2(inputs: &Level2Inputs, mut font: impl FnMut(&str) -> Option<FontBytes>, cases: &[Case]) -> Result<Vec<(String, crate::level2::Level2Layout)>, String> {
+pub fn run_level2(
+    inputs: &Level2Inputs,
+    mut font: impl FnMut(&str) -> Option<FontBytes>,
+    cases: &[Case],
+) -> Result<Vec<(String, crate::level2::Level2Layout)>, String> {
     let mut l2 = crate::level2::Level2::new();
     for f in &inputs.fonts {
         let data = font(&f.key).ok_or_else(|| format!("no font {}", f.key))?;
         l2.add_font(&f.key, data, &f.family);
     }
     l2.set_manifest(&inputs.manifest);
-    Ok(cases.iter().map(|c| (c.id.clone(), l2.layout(&c.d))).collect())
+    Ok(cases
+        .iter()
+        .map(|c| (c.id.clone(), l2.layout(&c.d)))
+        .collect())
 }
 
 impl Fixture {
@@ -620,8 +768,16 @@ mod tests {
     fn packing_round_trips() {
         let e = Expected {
             lines: vec![("ab".into(), 0), ("".into(), 3), ("c".into(), 4)],
-            caret: vec![vec![(0, 0), (1, 1234), (2, 2468)], vec![(3, 0)], vec![(4, 0), (5, 999)]],
-            characters: vec![[0, 0, 1234, 0, 0], [1234, 0, 1234, 0, 1], [-5, 4600, 999, 2, 4]],
+            caret: vec![
+                vec![(0, 0), (1, 1234), (2, 2468)],
+                vec![(3, 0)],
+                vec![(4, 0), (5, 999)],
+            ],
+            characters: vec![
+                [0, 0, 1234, 0, 0],
+                [1234, 0, 1234, 0, 1],
+                [-5, 4600, 999, 2, 4],
+            ],
             words: vec![[0, 0, 2468, 0, 0], [-5, 4600, 999, 2, 4]],
             line_units: vec![[0, 0, 2468, 0, 0], [0, 4600, 999, 2, 4]],
         };

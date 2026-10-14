@@ -4,7 +4,9 @@
 use super::chars;
 use super::segment::{self, FallbackPriority, Segment};
 use crate::font::{FaceId, FontDesc, FontResolver, PreparedCache, PreparedFace};
-use harfrust::{Buffer, Direction, Feature, FontFuncs, GlyphId, Language, ShapeOptions, ShaperFont, Tag};
+use harfrust::{
+    Buffer, Direction, Feature, FontFuncs, GlyphId, Language, ShapeOptions, ShaperFont, Tag,
+};
 use icu_properties::PropertyNamesShort;
 use icu_properties::props::Script;
 use std::cell::Cell;
@@ -50,7 +52,10 @@ pub struct ShapeResult {
 pub enum GroupFont {
     Installed(FaceId),
     /// A web font (`FontFace`) with its variation settings descriptor.
-    Custom { face: FaceId, settings: Vec<(u32, f32)> },
+    Custom {
+        face: FaceId,
+        settings: Vec<(u32, f32)>,
+    },
 }
 
 impl GroupFont {
@@ -88,7 +93,10 @@ impl FontSetup {
     /// The size `opsz` follows for an installed face: the specified size of
     /// whoever created its platform data.
     pub fn optical_size(&self, face: FaceId) -> f32 {
-        self.seeded_opsz.iter().find(|(f, _)| *f == face).map_or(self.specified, |(_, s)| *s)
+        self.seeded_opsz
+            .iter()
+            .find(|(f, _)| *f == face)
+            .map_or(self.specified, |(_, s)| *s)
     }
 }
 
@@ -189,7 +197,10 @@ impl BlinkFuncs<'_> {
             unicode = chars::SPACE;
         }
         let mut consider_vs = false;
-        if self.vs_mode.get() != VsMode::Ignore && chars::is_unicode_variation_selector(vs) && chars::is_variation_sequence(unicode, vs) {
+        if self.vs_mode.get() != VsMode::Ignore
+            && chars::is_unicode_variation_selector(vs)
+            && chars::is_variation_sequence(unicode, vs)
+        {
             consider_vs = true;
         }
         let mut text_requested = false;
@@ -260,7 +271,12 @@ impl BlinkFuncs<'_> {
         let units = match &self.face.default_font {
             Some(default) => {
                 let base = default.glyph_metrics().h_advance(glyph) as f64;
-                let varied = self.face.font.glyph_metrics().h_advance_exact(glyph).to_f64();
+                let varied = self
+                    .face
+                    .font
+                    .glyph_metrics()
+                    .h_advance_exact(glyph)
+                    .to_f64();
                 let delta = (varied - base) as f32;
                 (base as f32 + delta.round()).max(0.0) as i64
             }
@@ -307,20 +323,35 @@ pub struct Shaper<'r> {
 }
 
 impl<'r> Shaper<'r> {
-    pub fn new(resolver: &'r mut dyn FontResolver, cache: &'r mut PreparedCache, setup: &'r FontSetup) -> Self {
-        Shaper { resolver, cache, setup, fonts: Vec::new() }
+    pub fn new(
+        resolver: &'r mut dyn FontResolver,
+        cache: &'r mut PreparedCache,
+        setup: &'r FontSetup,
+    ) -> Self {
+        Shaper {
+            resolver,
+            cache,
+            setup,
+            fonts: Vec::new(),
+        }
     }
 
     fn prepared(&mut self, font: &GroupFont) -> Option<Arc<PreparedFace>> {
         let size = self.setup.desc.size;
         let info = self.resolver.face(font.face()).clone();
         let coords = match font {
-            GroupFont::Installed(f) => crate::font::platform_coords(&info, self.setup.optical_size(*f)),
-            GroupFont::Custom { settings, .. } => crate::font::custom_coords(&info, &self.setup.desc, self.setup.specified, settings),
+            GroupFont::Installed(f) => {
+                crate::font::platform_coords(&info, self.setup.optical_size(*f))
+            }
+            GroupFont::Custom { settings, .. } => {
+                crate::font::custom_coords(&info, &self.setup.desc, self.setup.specified, settings)
+            }
         };
         let face = font.face();
         let resolver = &mut *self.resolver;
-        self.cache.get(face, &info, coords, size, || resolver.em_advance(face, size))
+        self.cache.get(face, &info, coords, size, || {
+            resolver.em_advance(face, size)
+        })
     }
 
     fn push_font(&mut self, f: GroupFont) -> usize {
@@ -328,7 +359,12 @@ impl<'r> Shaper<'r> {
         self.fonts.len() - 1
     }
 
-    fn unique_or_next(&mut self, it: &mut FallbackIter, candidate: GroupFont, hint: &[u32]) -> Option<IterFont> {
+    fn unique_or_next(
+        &mut self,
+        it: &mut FallbackIter,
+        candidate: GroupFont,
+        hint: &[u32],
+    ) -> Option<IterFont> {
         let key = self.resolver.face(candidate.face()).typeface_key.clone();
         let key = match &candidate {
             GroupFont::Custom { settings, .. } => format!("{key}|{settings:?}"),
@@ -356,7 +392,12 @@ impl<'r> Shaper<'r> {
                     None
                 } else {
                     let primary = self.setup.primary?;
-                    self.resolver.fallback_for_char(&desc, ch, primary, it.priority.is_emoji_presentation())
+                    self.resolver.fallback_for_char(
+                        &desc,
+                        ch,
+                        primary,
+                        it.priority.is_emoji_presentation(),
+                    )
                 };
                 match found {
                     Some(f) => self.unique_or_next(it, GroupFont::Installed(f), hint),
@@ -382,7 +423,11 @@ impl<'r> Shaper<'r> {
             }
             IterStage::FontGroupFonts => {
                 let Some(font) = self.setup.group.get(it.index).cloned() else {
-                    it.stage = if it.priority.is_non_text() { IterStage::FallbackPriorityFonts } else { IterStage::SystemFonts };
+                    it.stage = if it.priority.is_non_text() {
+                        IterStage::FallbackPriorityFonts
+                    } else {
+                        IterStage::SystemFonts
+                    };
                     return self.iter_next(it, hint);
                 };
                 it.index += 1;
@@ -397,9 +442,10 @@ impl<'r> Shaper<'r> {
         }
         let mut idx = 0;
         if hint.len() > 1
-            && let Some(i) = (1..hint.len()).find(|&i| chars::has_likely_script(hint[i])) {
-                idx = i;
-            }
+            && let Some(i) = (1..hint.len()).find(|&i| chars::has_likely_script(hint[i]))
+        {
+            idx = i;
+        }
         let ch = hint[idx];
         if ch == 0 || it.previously_asked.contains(&ch) {
             return None;
@@ -409,11 +455,16 @@ impl<'r> Shaper<'r> {
             return None;
         }
         let primary = self.setup.primary?;
-        self.resolver.fallback_for_char(&self.setup.desc, ch, primary, false)
+        self.resolver
+            .fallback_for_char(&self.setup.desc, ch, primary, false)
     }
 
     fn needs_hint_list(&self, it: &FallbackIter) -> bool {
-        it.stage == IterStage::FontGroupFonts && matches!(self.setup.group.get(it.index), Some(GroupFont::Custom { .. }))
+        it.stage == IterStage::FontGroupFonts
+            && matches!(
+                self.setup.group.get(it.index),
+                Some(GroupFont::Custom { .. })
+            )
     }
 
     /// `HarfBuzzShaper::Shape(font, direction)` for a whole item.
@@ -423,7 +474,12 @@ impl<'r> Shaper<'r> {
             return result;
         }
         if is_8bit {
-            let seg = Segment { start: 0, end: text.len(), script: Script::Latin, priority: FallbackPriority::Text };
+            let seg = Segment {
+                start: 0,
+                end: text.len(),
+                script: Script::Latin,
+                priority: FallbackPriority::Text,
+            };
             self.shape_segment(text, seg, rtl, &mut result);
         } else {
             for seg in segment::run_segments(text) {
@@ -433,7 +489,12 @@ impl<'r> Shaper<'r> {
         result
     }
 
-    fn collect_hint(&self, text: &[u16], queue: &VecDeque<QItem>, needs_list: bool) -> Option<Vec<u32>> {
+    fn collect_hint(
+        &self,
+        text: &[u16],
+        queue: &VecDeque<QItem>,
+        needs_list: bool,
+    ) -> Option<Vec<u32>> {
         if queue.is_empty() {
             return None;
         }
@@ -447,7 +508,11 @@ impl<'r> Shaper<'r> {
             while i < s.len() {
                 let (c, n) = segment::next_cp(s, i);
                 // UTF16TextIterator yields U+FFFD for an unpaired surrogate.
-                let c = if (0xD800..0xE000).contains(&c) { 0xFFFD } else { c };
+                let c = if (0xD800..0xE000).contains(&c) {
+                    0xFFFD
+                } else {
+                    c
+                };
                 hint.push(c);
                 if !needs_list && !chars::is_common_or_inherited_script(c) {
                     return Some(hint);
@@ -468,8 +533,16 @@ impl<'r> Shaper<'r> {
             first_candidate: None,
         };
         let mut queue: VecDeque<QItem> = VecDeque::new();
-        queue.push_back(QItem { action: QAction::NextFont, start: 0, num: 0 });
-        queue.push_back(QItem { action: QAction::Range, start: seg.start as u32, num: (seg.end - seg.start) as u32 });
+        queue.push_back(QItem {
+            action: QAction::NextFont,
+            start: 0,
+            num: 0,
+        });
+        queue.push_back(QItem {
+            action: QAction::Range,
+            start: seg.start as u32,
+            num: (seg.end - seg.start) as u32,
+        });
         let mut font_cycle_queued = false;
         let mut current: Option<usize> = None;
         let mut stage = Stage::Intermediate;
@@ -506,7 +579,15 @@ impl<'r> Shaper<'r> {
                 // A face that cannot be parsed shapes nothing; treat as all-notdef.
                 if !is_last(stage) {
                     if !font_cycle_queued {
-                        queue.push_back(QItem { action: if needs_reset(stage) { QAction::Reset } else { QAction::NextFont }, start: 0, num: 0 });
+                        queue.push_back(QItem {
+                            action: if needs_reset(stage) {
+                                QAction::Reset
+                            } else {
+                                QAction::NextFont
+                            },
+                            start: 0,
+                            num: 0,
+                        });
                         font_cycle_queued = true;
                     }
                     queue.push_back(item);
@@ -530,10 +611,24 @@ impl<'r> Shaper<'r> {
         }
     }
 
-    fn shape_range(&self, text: &[u16], item: QItem, face: &PreparedFace, script: Script, rtl: bool, vs_mode: VsMode) -> Buffer {
-        let funcs = BlinkFuncs { face, vs_mode: Cell::new(vs_mode), skia_advances: !face.has_trak || face.has_sbix };
+    fn shape_range(
+        &self,
+        text: &[u16],
+        item: QItem,
+        face: &PreparedFace,
+        script: Script,
+        rtl: bool,
+        vs_mode: VsMode,
+    ) -> Buffer {
+        let funcs = BlinkFuncs {
+            face,
+            vs_mode: Cell::new(vs_mode),
+            skia_advances: !face.has_trak || face.has_sbix,
+        };
         let scale = (face.size * 65536.0f32) as i32;
-        let shaper_font = ShaperFont::new(&face.font).with_scale(scale).with_font_funcs(Some(&funcs));
+        let shaper_font = ShaperFont::new(&face.font)
+            .with_scale(scale)
+            .with_font_funcs(Some(&funcs));
         let mut buffer = Buffer::new();
         let start = item.start as usize;
         let end = (item.start + item.num) as usize;
@@ -542,7 +637,11 @@ impl<'r> Shaper<'r> {
             let mut i = 0;
             while i < s.len() {
                 let (c, n) = segment::next_cp(s, i);
-                let c = if (0xD800..0xE000).contains(&c) { 0xFFFD } else { c };
+                let c = if (0xD800..0xE000).contains(&c) {
+                    0xFFFD
+                } else {
+                    c
+                };
                 out.push((c, i));
                 i += n;
             }
@@ -557,7 +656,11 @@ impl<'r> Shaper<'r> {
         }
         let post_head: Vec<u32> = post.iter().take(5).copied().collect();
         buffer.set_post_context_codepoints(&post_head);
-        buffer.set_direction(if rtl { Direction::RightToLeft } else { Direction::LeftToRight });
+        buffer.set_direction(if rtl {
+            Direction::RightToLeft
+        } else {
+            Direction::LeftToRight
+        });
         buffer.set_script(hb_script(script));
         buffer.set_language(Language::from_str("en-us").ok());
         let mut features = Vec::new();
@@ -567,7 +670,9 @@ impl<'r> Shaper<'r> {
             }
         }
         features.push(Feature::new(Tag::new(b"chws"), 1, ..));
-        let options = ShapeOptions::new().features(&features).point_size(Some(self.setup.specified));
+        let options = ShapeOptions::new()
+            .features(&features)
+            .point_size(Some(self.setup.specified));
         harfrust::shape(&shaper_font, &mut buffer, options).expect("direction is set");
         buffer
     }
@@ -608,7 +713,12 @@ impl<'r> Shaper<'r> {
         let range_end = item.start + item.num;
 
         let compute_slice = |old: usize, new: usize| -> Slice {
-            let mut s = Slice { start_char: 0, num_chars: 0, start_glyph: old, num_glyphs: new - old };
+            let mut s = Slice {
+                start_char: 0,
+                num_chars: 0,
+                start_glyph: old,
+                num_glyphs: new - old,
+            };
             if forward {
                 s.start_char = infos[old].cluster;
                 if new == num_glyphs {
@@ -627,13 +737,26 @@ impl<'r> Shaper<'r> {
             s
         };
 
-        let queue_chars = |queue: &mut VecDeque<QItem>, slice: &Slice, stage: Stage, queued: &mut bool| {
-            if !*queued {
-                queue.push_back(QItem { action: if needs_reset(stage) { QAction::Reset } else { QAction::NextFont }, start: 0, num: 0 });
-                *queued = true;
-            }
-            queue.push_back(QItem { action: QAction::Range, start: slice.start_char, num: slice.num_chars });
-        };
+        let queue_chars =
+            |queue: &mut VecDeque<QItem>, slice: &Slice, stage: Stage, queued: &mut bool| {
+                if !*queued {
+                    queue.push_back(QItem {
+                        action: if needs_reset(stage) {
+                            QAction::Reset
+                        } else {
+                            QAction::NextFont
+                        },
+                        start: 0,
+                        num: 0,
+                    });
+                    *queued = true;
+                }
+                queue.push_back(QItem {
+                    action: QAction::Range,
+                    start: slice.start_char,
+                    num: slice.num_chars,
+                });
+            };
 
         let commit = |result: &mut ShapeResult, slice: &Slice| {
             let positions = buf.glyph_positions();
@@ -674,7 +797,10 @@ impl<'r> Shaper<'r> {
             #[allow(clippy::if_same_then_else)]
             let glyph_result = if gid == 0 {
                 Cr::NotDef
-            } else if Some(gid) == space_glyph && !is_last(*stage) && text[current_cluster as usize] as u32 == chars::IDEOGRAPHIC_SPACE {
+            } else if Some(gid) == space_glyph
+                && !is_last(*stage)
+                && text[current_cluster as usize] as u32 == chars::IDEOGRAPHIC_SPACE
+            {
                 Cr::NotDef
             } else if gid == UNMATCHED_VS_GLYPH {
                 *stage = to_vs(*stage);
@@ -696,7 +822,9 @@ impl<'r> Shaper<'r> {
                 prev_cluster_start = glyph_index;
                 current_result = glyph_result;
             } else {
-                current_result = if glyph_result == Cr::Shaped && (current_result == Cr::Shaped || current_result == Cr::Unknown) {
+                current_result = if glyph_result == Cr::Shaped
+                    && (current_result == Cr::Shaped || current_result == Cr::Unknown)
+                {
                     Cr::Shaped
                 } else {
                     Cr::NotDef

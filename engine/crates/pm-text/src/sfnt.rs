@@ -12,11 +12,26 @@ pub fn build_sfnt(tables: &mut [(u32, Vec<u8>)]) -> Vec<u8> {
     while (1u32 << (entry_selector + 1)) <= n as u32 {
         entry_selector += 1;
     }
-    let search_range = if n == 0 { 0 } else { (1u16 << entry_selector) * 16 };
+    let search_range = if n == 0 {
+        0
+    } else {
+        (1u16 << entry_selector) * 16
+    };
     let range_shift = (n * 16).saturating_sub(search_range);
-    let is_cff = tables.iter().any(|t| t.0 == u32::from_be_bytes(*b"CFF ") || t.0 == u32::from_be_bytes(*b"CFF2"));
-    let mut out = Vec::with_capacity(12 + 16 * tables.len() + tables.iter().map(|t| t.1.len() + 3).sum::<usize>());
-    out.extend_from_slice(&(if is_cff { 0x4F54_544Fu32 } else { 0x0001_0000u32 }).to_be_bytes());
+    let is_cff = tables
+        .iter()
+        .any(|t| t.0 == u32::from_be_bytes(*b"CFF ") || t.0 == u32::from_be_bytes(*b"CFF2"));
+    let mut out = Vec::with_capacity(
+        12 + 16 * tables.len() + tables.iter().map(|t| t.1.len() + 3).sum::<usize>(),
+    );
+    out.extend_from_slice(
+        &(if is_cff {
+            0x4F54_544Fu32
+        } else {
+            0x0001_0000u32
+        })
+        .to_be_bytes(),
+    );
     out.extend_from_slice(&n.to_be_bytes());
     out.extend_from_slice(&search_range.to_be_bytes());
     out.extend_from_slice(&entry_selector.to_be_bytes());
@@ -58,11 +73,19 @@ mod tests {
         head[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
         head[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes());
         head[18..20].copy_from_slice(&1000u16.to_be_bytes());
-        let mut tables = vec![(u32::from_be_bytes(*b"zzzz"), vec![1, 2, 3]), (u32::from_be_bytes(*b"head"), head)];
+        let mut tables = vec![
+            (u32::from_be_bytes(*b"zzzz"), vec![1, 2, 3]),
+            (u32::from_be_bytes(*b"head"), head),
+        ];
         let bytes = build_sfnt(&mut tables);
         let font = FontRef::new(&bytes).unwrap();
         assert_eq!(font.head().unwrap().units_per_em(), 1000);
-        assert_eq!(font.table_data(read_fonts::types::Tag::new(b"zzzz")).unwrap().as_bytes(), &[1, 2, 3]);
+        assert_eq!(
+            font.table_data(read_fonts::types::Tag::new(b"zzzz"))
+                .unwrap()
+                .as_bytes(),
+            &[1, 2, 3]
+        );
         assert_eq!(font.table_directory().table_records().len(), 2);
     }
 }

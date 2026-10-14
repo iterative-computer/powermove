@@ -29,8 +29,9 @@ use std::collections::HashMap;
 ///   (SF Pro's tracking disappears without it);
 /// - `ankr`: anchor points for `kerx` format 4 attachment.
 pub const TABLES: &[&[u8; 4]] = &[
-    b"cmap", b"hmtx", b"hhea", b"OS/2", b"head", b"name", b"GSUB", b"GPOS", b"GDEF", b"kern", b"morx", b"kerx", b"trak",
-    b"fvar", b"avar", b"HVAR", b"MVAR", b"maxp", b"feat", b"STAT", b"ankr",
+    b"cmap", b"hmtx", b"hhea", b"OS/2", b"head", b"name", b"GSUB", b"GPOS", b"GDEF", b"kern",
+    b"morx", b"kerx", b"trak", b"fvar", b"avar", b"HVAR", b"MVAR", b"maxp", b"feat", b"STAT",
+    b"ankr",
 ];
 
 /// What a subset contains, for the report.
@@ -45,7 +46,10 @@ pub struct SubsetInfo {
 /// single-face sfnt (its index is 0).
 pub fn metrics_subset(data: &[u8], index: u32) -> Result<(Vec<u8>, SubsetInfo), ReadError> {
     let file = FileRef::new(data)?;
-    let font = file.fonts().nth(index as usize).ok_or(ReadError::OutOfBounds)??;
+    let font = file
+        .fonts()
+        .nth(index as usize)
+        .ok_or(ReadError::OutOfBounds)??;
     let mut tables: Vec<(u32, Vec<u8>)> = Vec::new();
     for record in font.table_directory().table_records() {
         let raw = record.tag().to_be_bytes();
@@ -62,16 +66,28 @@ pub fn metrics_subset(data: &[u8], index: u32) -> Result<(Vec<u8>, SubsetInfo), 
         tables.push((u32::from_be_bytes(*b"HVAR"), synthesize_hvar(&font)?));
         synthesized_hvar = true;
     }
-    let mut names: Vec<String> = tables.iter().map(|(t, _)| String::from_utf8_lossy(&t.to_be_bytes()).into_owned()).collect();
+    let mut names: Vec<String> = tables
+        .iter()
+        .map(|(t, _)| String::from_utf8_lossy(&t.to_be_bytes()).into_owned())
+        .collect();
     names.sort();
     let out = build_sfnt(&mut tables);
-    let info = SubsetInfo { bytes: out.len(), tables: names, synthesized_hvar };
+    let info = SubsetInfo {
+        bytes: out.len(),
+        tables: names,
+        synthesized_hvar,
+    };
     Ok((out, info))
 }
 
 /// The glyph whose phantom points carry `gid`'s metrics and its point count
 /// (gvar: the last `USE_MY_METRICS` component of a composite, recursively).
-fn metrics_glyph(glyf: &Glyf, loca: &Loca, gid: GlyphId, depth: usize) -> Result<(GlyphId, usize), ReadError> {
+fn metrics_glyph(
+    glyf: &Glyf,
+    loca: &Loca,
+    gid: GlyphId,
+    depth: usize,
+) -> Result<(GlyphId, usize), ReadError> {
     if depth > 64 {
         return Err(ReadError::MalformedData("composite nesting"));
     }
@@ -112,8 +128,12 @@ fn synthesize_hvar(font: &FontRef) -> Result<Vec<u8>, ReadError> {
     let mut rows: Vec<HashMap<usize, i32>> = vec![HashMap::new(); num_glyphs];
     for (gid, row) in rows.iter_mut().enumerate() {
         let gid = GlyphId::new(gid as u32);
-        let Ok((source, points)) = metrics_glyph(&glyf, &loca, gid, 0) else { continue };
-        let Some(var) = gvar.glyph_variation_data(source)? else { continue };
+        let Ok((source, points)) = metrics_glyph(&glyf, &loca, gid, 0) else {
+            continue;
+        };
+        let Some(var) = gvar.glyph_variation_data(source)? else {
+            continue;
+        };
         let (left, right) = (points, points + 1);
         for tuple in var.tuples() {
             let (mut dl, mut dr) = (0i32, 0i32);
@@ -135,7 +155,11 @@ fn synthesize_hvar(font: &FontRef) -> Result<Vec<u8>, ReadError> {
                 .map(|a| {
                     let p = peak.get(a).unwrap_or(F2Dot14::ZERO).to_bits();
                     match &inter {
-                        Some((s, e)) => (s.get(a).unwrap_or(F2Dot14::ZERO).to_bits(), p, e.get(a).unwrap_or(F2Dot14::ZERO).to_bits()),
+                        Some((s, e)) => (
+                            s.get(a).unwrap_or(F2Dot14::ZERO).to_bits(),
+                            p,
+                            e.get(a).unwrap_or(F2Dot14::ZERO).to_bits(),
+                        ),
                         None => (p.min(0), p, p.max(0)),
                     }
                 })
@@ -148,7 +172,10 @@ fn synthesize_hvar(font: &FontRef) -> Result<Vec<u8>, ReadError> {
             *row.entry(id).or_insert(0) += delta;
         }
     }
-    let long = rows.iter().flat_map(|r| r.values()).any(|d| *d < i16::MIN as i32 || *d > i16::MAX as i32);
+    let long = rows
+        .iter()
+        .flat_map(|r| r.values())
+        .any(|d| *d < i16::MIN as i32 || *d > i16::MAX as i32);
     let region_count = regions.len();
 
     let mut ivs = Vec::new();
@@ -214,16 +241,30 @@ mod tests {
     /// Skia ships with macOS and is the system's `gvar`-only variable font.
     #[test]
     fn synthesized_hvar_matches_gvar_phantom_advances() {
-        let full = std::fs::read("/System/Library/Fonts/Supplemental/Skia.ttf").expect("Skia.ttf ships with macOS");
+        let full = std::fs::read("/System/Library/Fonts/Supplemental/Skia.ttf")
+            .expect("Skia.ttf ships with macOS");
         let (sub, info) = metrics_subset(&full, 0).unwrap();
         assert!(info.synthesized_hvar);
-        assert!(sub.len() < full.len() / 2, "subset {} of {}", sub.len(), full.len());
+        assert!(
+            sub.len() < full.len() / 2,
+            "subset {} of {}",
+            sub.len(),
+            full.len()
+        );
         let (a, b) = (model(full), model(sub));
-        let n = FontRef::new(&std::fs::read("/System/Library/Fonts/Supplemental/Skia.ttf").unwrap()).unwrap().maxp().unwrap().num_glyphs() as u32;
+        let n = FontRef::new(&std::fs::read("/System/Library/Fonts/Supplemental/Skia.ttf").unwrap())
+            .unwrap()
+            .maxp()
+            .unwrap()
+            .num_glyphs() as u32;
         let mut worst = 0f64;
         for wght in [0.48f32, 0.7, 1.0, 1.3, 1.9, 2.5, 3.2] {
             for wdth in [0.62f32, 0.8, 1.0, 1.15, 1.3] {
-                let at = |f: &Font| f.instance_builder().variations([(Tag::new(b"wght"), wght), (Tag::new(b"wdth"), wdth)]).build();
+                let at = |f: &Font| {
+                    f.instance_builder()
+                        .variations([(Tag::new(b"wght"), wght), (Tag::new(b"wdth"), wdth)])
+                        .build()
+                };
                 let (fa, fb) = (at(&a), at(&b));
                 for g in 0..n {
                     let g = GlyphId::new(g);
@@ -233,6 +274,9 @@ mod tests {
                 }
             }
         }
-        assert!(worst < 1.0 / 1024.0, "worst advance difference {worst} units");
+        assert!(
+            worst < 1.0 / 1024.0,
+            "worst advance difference {worst} units"
+        );
     }
 }

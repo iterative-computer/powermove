@@ -11,7 +11,11 @@ use std::collections::HashMap;
 
 /// The canvas default font (`10px sans-serif`), which a canvas keeps when
 /// the `font` string it is given does not parse.
-const DEFAULT_DESC: FontDesc = FontDesc { weight: 400.0, italic: false, size: 10.0 };
+const DEFAULT_DESC: FontDesc = FontDesc {
+    weight: 400.0,
+    italic: false,
+    size: 10.0,
+};
 
 /// The parsed canvas font: the family list and the description.
 #[derive(Clone, Debug)]
@@ -33,11 +37,18 @@ pub struct CanvasFont {
 /// When the string does not parse (a missing or negative size, a weight
 /// outside 1..1000) the canvas keeps its default font.
 pub fn canvas_font(d: &TextContent, variable: Option<(FaceId, Vec<(u32, f32)>)>) -> CanvasFont {
-    let weight = d.weight.filter(|w| *w != 0.0 && !w.is_nan()).unwrap_or(500.0);
+    let weight = d
+        .weight
+        .filter(|w| *w != 0.0 && !w.is_nan())
+        .unwrap_or(500.0);
     let size = d.size;
     let valid = (1.0..=1000.0).contains(&weight) && size.is_some_and(|s| s.is_finite() && s >= 0.0);
     if !valid {
-        return CanvasFont { families: vec![Family::Generic("sans-serif")], desc: DEFAULT_DESC, specified: DEFAULT_DESC.size };
+        return CanvasFont {
+            families: vec![Family::Generic("sans-serif")],
+            desc: DEFAULT_DESC,
+            specified: DEFAULT_DESC.size,
+        };
     }
     let mut families = Vec::new();
     if let Some((face, settings)) = variable {
@@ -51,7 +62,15 @@ pub fn canvas_font(d: &TextContent, variable: Option<(FaceId, Vec<(u32, f32)>)>)
     families.push(Family::Named("-apple-system".into()));
     families.push(Family::Generic("sans-serif"));
     let specified = size.unwrap_or(16.0) as f32;
-    CanvasFont { families, desc: FontDesc { weight: weight as f32, italic: d.italic.unwrap_or(false), size: effective_font_size(specified) }, specified }
+    CanvasFont {
+        families,
+        desc: FontDesc {
+            weight: weight as f32,
+            italic: d.italic.unwrap_or(false),
+            size: effective_font_size(specified),
+        },
+        specified,
+    }
 }
 
 /// Blink's `FontDescription::EffectiveFontSize()`: the computed size floored
@@ -81,7 +100,10 @@ pub fn letter_spacing(d: &TextContent) -> f32 {
 /// `variationFontFamily(d)` (typography/font-renderer.ts): a `FontFace`
 /// from the family's variable source with the layer's `fontAxis.*` values,
 /// when the layer sets any and the source exists.
-pub fn variable_family(resolver: &mut dyn FontResolver, d: &TextContent) -> Option<(FaceId, Vec<(u32, f32)>)> {
+pub fn variable_family(
+    resolver: &mut dyn FontResolver,
+    d: &TextContent,
+) -> Option<(FaceId, Vec<(u32, f32)>)> {
     if d.axes.is_empty() {
         return None;
     }
@@ -104,11 +126,28 @@ pub struct CanvasMeasurer<'a> {
 }
 
 impl<'a> CanvasMeasurer<'a> {
-    pub fn new(resolver: &'a mut dyn FontResolver, cache: &'a mut PreparedCache, d: &TextContent, seeds: &[FontCacheSeed]) -> Self {
+    pub fn new(
+        resolver: &'a mut dyn FontResolver,
+        cache: &'a mut PreparedCache,
+        d: &TextContent,
+        seeds: &[FontCacheSeed],
+    ) -> Self {
         let variable = variable_family(resolver, d);
         let font = canvas_font(d, variable);
-        let setup = measure::build_setup(resolver, &font.families, font.desc, font.specified, letter_spacing(d), seeds);
-        CanvasMeasurer { resolver, cache, setup, memo: HashMap::new() }
+        let setup = measure::build_setup(
+            resolver,
+            &font.families,
+            font.desc,
+            font.specified,
+            letter_spacing(d),
+            seeds,
+        );
+        CanvasMeasurer {
+            resolver,
+            cache,
+            setup,
+            memo: HashMap::new(),
+        }
     }
 
     /// The full measurement (shaped runs and their faces), unmemoized.
@@ -134,11 +173,23 @@ mod tests {
 
     #[test]
     fn invalid_font_strings_keep_the_canvas_default() {
-        let d = TextContent { size: None, ..Default::default() };
+        let d = TextContent {
+            size: None,
+            ..Default::default()
+        };
         assert_eq!(canvas_font(&d, None).desc.size, 10.0);
-        let d = TextContent { size: Some(24.0), weight: Some(1200.0), ..Default::default() };
+        let d = TextContent {
+            size: Some(24.0),
+            weight: Some(1200.0),
+            ..Default::default()
+        };
         assert_eq!(canvas_font(&d, None).desc.weight, 400.0);
-        let d = TextContent { size: Some(24.0), weight: Some(0.0), font: Some("Avenir".into()), ..Default::default() };
+        let d = TextContent {
+            size: Some(24.0),
+            weight: Some(0.0),
+            font: Some("Avenir".into()),
+            ..Default::default()
+        };
         let f = canvas_font(&d, None);
         assert_eq!((f.desc.weight, f.desc.size), (500.0, 24.0));
         assert!(matches!(&f.families[0], Family::Named(n) if n == "Avenir"));
@@ -147,7 +198,17 @@ mod tests {
 
     #[test]
     fn sizes_are_floored_to_blinks_font_cache_precision() {
-        let at = |size: f64| canvas_font(&TextContent { size: Some(size), ..Default::default() }, None).desc.size;
+        let at = |size: f64| {
+            canvas_font(
+                &TextContent {
+                    size: Some(size),
+                    ..Default::default()
+                },
+                None,
+            )
+            .desc
+            .size
+        };
         // The corpus caption `captions/middle-lines` shrinks to 15.9048 px;
         // Chrome measures it at 15.9 px.
         assert_eq!(at(15.9048), 15.9f32);
@@ -166,10 +227,25 @@ mod tests {
 
     #[test]
     fn the_specified_size_is_kept_for_trak_and_opsz() {
-        let f = canvas_font(&TextContent { size: Some(11.867549668874172), ..Default::default() }, None);
-        assert_eq!((f.desc.size, f.specified), (11.86f32, 11.867549668874172f64 as f32));
+        let f = canvas_font(
+            &TextContent {
+                size: Some(11.867549668874172),
+                ..Default::default()
+            },
+            None,
+        );
+        assert_eq!(
+            (f.desc.size, f.specified),
+            (11.86f32, 11.867549668874172f64 as f32)
+        );
         // The canvas default font when the string does not parse.
-        let f = canvas_font(&TextContent { size: Some(-1.0), ..Default::default() }, None);
+        let f = canvas_font(
+            &TextContent {
+                size: Some(-1.0),
+                ..Default::default()
+            },
+            None,
+        );
         assert_eq!((f.desc.size, f.specified), (10.0, 10.0));
     }
 }
