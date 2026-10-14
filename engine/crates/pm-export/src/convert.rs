@@ -14,8 +14,10 @@
 //! * normalization: 16-bit Y′ = 4096 + 56064·Y′, C = 32768 + 57344·C (section 13);
 //!   8-bit Y′ = 16 + 219·Y′, C = 128 + 224·C;
 //! * chroma: 4:2:2 by point decimation at the co-sited (even) column; 4:2:0 with
-//!   siting type 0 by point decimation horizontally and a two-tap average of rows
-//!   2y and 2y + 1 vertically, on Y′CbCr;
+//!   siting type 0 by point decimation horizontally and, vertically, the declared
+//!   filter `[−1, 3, 3, −1] / 4` on rows 2y − 1 to 2y + 2 (clamped), on Y′CbCr: the
+//!   exact inverse of the renderer's linear vertical upsampling
+//!   (`pm_color::chroma::VERTICAL_420`, section 2 invariant (1));
 //! * dither (when on): `dither_offset` at the codec's LSB — 16 units of `y416`
 //!   (12-bit), 64 units of `v216` (10-bit), one 8-bit code; never on alpha;
 //! * rounding half to even (WGSL `round`), then clipping to the codable range:
@@ -311,9 +313,16 @@ pub fn convert(
             let mut chroma = Vec::with_capacity(w * h / 2);
             for cy in 0..h / 2 {
                 for cx in 0..w / 2 {
-                    let (a, _) = ycc(2 * cx, 2 * cy);
-                    let (b, _) = ycc(2 * cx, 2 * cy + 1);
-                    let (cb, cr) = ((a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5);
+                    // The declared 4:2:0 filter (`pm_color::chroma::VERTICAL_420`):
+                    // the exact inverse of the renderer's linear vertical
+                    // upsampling, so 4:2:0 sources keep their chroma.
+                    let (mut cb, mut cr) = (0.0, 0.0);
+                    for (k, w) in [(-1i64, -0.25), (0, 0.75), (1, 0.75), (2, -0.25)] {
+                        let row = (2 * cy as i64 + k).clamp(0, h as i64 - 1) as usize;
+                        let (v, _) = ycc(2 * cx, row);
+                        cb += w * v[1];
+                        cr += w * v[2];
+                    }
                     chroma.push(code(cb * 224.0 + 128.0 + d(cx, cy, 1), 1.0, 254.0) as u8);
                     chroma.push(code(cr * 224.0 + 128.0 + d(cx, cy, 2), 1.0, 254.0) as u8);
                 }
@@ -622,7 +631,8 @@ mod tests {
 
     #[test]
     fn chroma_siting_and_sampling_round_trip() {
-        // Distinct colors per pixel: 4:2:2 takes the even column; 4:2:0 averages two rows.
+        // Distinct colors per pixel: 4:2:2 takes the even column; 4:2:0 with two rows
+        // (clamped taps) averages them.
         let f = frame(4, 2, |x, y| [x as f32 / 4.0, y as f32 / 2.0, 0.25, 1.0]);
         let wf = WorkingFrame {
             width: 4,
