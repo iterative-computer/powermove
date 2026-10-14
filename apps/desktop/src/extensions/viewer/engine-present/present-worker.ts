@@ -76,6 +76,8 @@ export type ServeOptions = {
   createPainter?: (canvas: PaintTarget) => Promise<FramePainter>;
   /** Wraps the painter (the integration test reads drawn frames back). */
   wrapPainter?: (painter: FramePainter) => Promise<FramePainter> | FramePainter;
+  /** Every frame drawn, in the worker (the integration test checks its pixels). */
+  onPresented?: (frame: PresentedFrame) => void;
 };
 
 /** How often the worker sends a session's stats while frames flow. */
@@ -147,6 +149,7 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
       })
     };
     s.presenter.onPresented((frame) => {
+      options.onPresented?.(frame);
       const stats = s.presenter.stats;
       s.statsSentMs = now();
       post({ type: 'presented', session: id, frame, stats: { ...stats, dropped: { ...stats.dropped } } });

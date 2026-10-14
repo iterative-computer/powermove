@@ -152,7 +152,7 @@ const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve,
 
 
 /** A presentation worker run in this thread (messages cross on the task queue), drawing with `painter`. */
-function inProcessWorker(painter: FramePainter | null): WorkerLike & { rafs: Map<number, (t: number) => void>; terminated: boolean; canvases: unknown[] } {
+function inProcessWorker(painter: FramePainter | null): WorkerLike & { rafs: Map<number, (t: number) => void>; terminated: boolean; canvases: unknown[]; origins: number[] } {
   const toPage: ((event: MessageEvent<FromWorker>) => void)[] = [];
   const toWorker: ((event: MessageEvent<ToWorker>) => void)[] = [];
   const rafs = new Map<number, (t: number) => void>();
@@ -161,8 +161,12 @@ function inProcessWorker(painter: FramePainter | null): WorkerLike & { rafs: Map
     rafs,
     terminated: false,
     canvases: [] as unknown[],
+    origins: [] as number[],
     postMessage(message: ToWorker) {
-      if (message.type === 'init') worker.canvases.push(message.canvas);
+      if (message.type === 'init') {
+        worker.canvases.push(message.canvas);
+        worker.origins.push(message.pageTimeOrigin);
+      }
       setTimeout(() => toWorker.forEach((l) => l({ data: message } as MessageEvent<ToWorker>)), 0);
     },
     addEventListener(type: string, listener: (event: MessageEvent<FromWorker>) => void) {
@@ -467,6 +471,7 @@ describe('ViewerPresentation', () => {
     const popout = new HappyWindow() as unknown as Window;
     const target = stageIn(popout, 800, 450);
     offscreenCanvases(popout);
+    Object.defineProperty(popout, 'performance', { value: { timeOrigin: performance.timeOrigin + 5000, now: () => 0 }, configurable: true });
     Object.assign(popout, { devicePixelRatio: 1, matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) });
     popout.document.body.replaceChildren(popout.document.adoptNode(main.stage));
     main.stage.getBoundingClientRect = target.stage.getBoundingClientRect;
@@ -474,6 +479,8 @@ describe('ViewerPresentation', () => {
     await settleLong();
     expect(workers).toHaveLength(2);
     expect(workers[0]!.terminated).toBe(true);
+    // The popout's worker decides on this realm's clock, which stamps arrivals.
+    expect(workers[1]!.origins).toEqual([performance.timeOrigin]);
     expect(presentation.canvas.ownerDocument).toBe(popout.document);
     expect(presentation.offMainThread).toBe(true);
     expect(service.channels).toHaveLength(1);

@@ -355,7 +355,9 @@ export class ViewerPresentation {
         this.worker = new PresentWorker({
           worker: createWorker(),
           canvas: offscreen,
-          timeOrigin: canvas.ownerDocument.defaultView?.performance?.timeOrigin ?? performance.timeOrigin,
+          // This realm's clock: arrivals are stamped with it, and a
+          // popout's worker must decide on it too (timeOriginShift).
+          timeOrigin: performance.timeOrigin,
           onFailed: (message) => this.workerFailed(token, message)
         });
         return true;

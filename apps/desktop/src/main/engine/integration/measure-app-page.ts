@@ -41,7 +41,7 @@ import { PageEngine } from './page-engine';
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Mode = 'today' | 'engine';
 type InputMode = 'drag' | 'pan';
-type InitOptions = { mode: Mode; displayHz: number | null; rawGestures: boolean };
+type InitOptions = { mode: Mode; displayHz: number | null; rawGestures: boolean; offMainThread: boolean };
 
 const w = window as any;
 const PM = (): any => w.PM;
@@ -192,12 +192,13 @@ function onPresented(frame: { time: number }): void {
 
 /* ── the engine path in the real viewer ───────────────────────────── */
 
-function startEngine(displayHz: number | null): void {
+function startEngine(displayHz: number | null, offMainThread: boolean): void {
   engine = new PageEngine(displayHz);
   const source = engine;
   const service: EngineViewerService & { trace: boolean } = {
     source: source.source,
     trace: true,
+    offMainThread,
     composition: () => source.composition(),
     displayHz: () => source.displayHz(),
     onReady: (listener) => source.onReady(listener),
@@ -224,7 +225,7 @@ const api = {
     mode = options.mode;
     fps = Number(PM().proj.fps) || 30;
     PM().bus.on('preview:presented', onPresented);
-    if (mode === 'engine') startEngine(options.displayHz);
+    if (mode === 'engine') startEngine(options.displayHz, options.offMainThread);
     // Before step 2: the viewer's drags keep pointermove.
     if (!options.rawGestures) viewer().rawGestures = () => false;
     // How long the viewer's layout (pan steps) holds the main thread.
@@ -276,8 +277,8 @@ const api = {
     const r = viewer()?.stage?.getBoundingClientRect();
     return r ? { left: r.left, top: r.top } : null;
   },
-  reset(): void {
-    viewer()?.enginePresentation?.takeTrace();
+  async reset(): Promise<void> {
+    await viewer()?.enginePresentation?.takeTrace();
     draws = [];
     rafs.length = 0;
     inputs = [];
@@ -318,10 +319,10 @@ const api = {
     panSeq = -1;
     if (m === 'pan' && mode === 'today') panFrames();
   },
-  collect(): unknown {
+  async collect(): Promise<unknown> {
     const pm = PM();
     const presentation = viewer()?.enginePresentation ?? null;
-    const trace = presentation?.takeTrace?.() ?? null;
+    const trace = (await presentation?.takeTrace?.()) ?? null;
     return {
       mode,
       real: true,

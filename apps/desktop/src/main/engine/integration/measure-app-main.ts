@@ -43,6 +43,8 @@ type AppConfig = {
   inputModes?: ('drag' | 'pan')[];
   /** `false`: engine-path gestures keep `pointermove` (before step 2). */
   rawGestures?: boolean;
+  /** `false`: the viewer draws engine frames on the page's main thread, not in its presentation worker. */
+  offMainThread?: boolean;
   /** The C′ prototype presents playback (POWERMOVE_BRIDGE_REMOTE_LAYER=1);
    *  main hosts its remote layer over the viewer's stage. */
   remoteLayer?: boolean;
@@ -233,7 +235,7 @@ async function run(config: AppConfig): Promise<void> {
       : null;
 
     await contents.executeJavaScript(`${readFileSync(config.pageScript, 'utf8')}\n;true`);
-    await run('init', `window.__measureApp.init(${JSON.stringify({ mode: config.mode, displayHz: hz, rawGestures: config.rawGestures !== false })})`);
+    await run('init', `window.__measureApp.init(${JSON.stringify({ mode: config.mode, displayHz: hz, rawGestures: config.rawGestures !== false, offMainThread: config.offMainThread !== false })})`);
     if (config.mode === 'engine') {
       const installed = (globalThis as { __powermoveNativeEngine?: { engine?: { reconnectClient(id: number): void } } }).__powermoveNativeEngine;
       if (!installed?.engine) throw new Error('the native engine is not installed (POWERMOVE_NEW_ENGINE=1)');
@@ -255,7 +257,9 @@ async function run(config: AppConfig): Promise<void> {
     }
     result['clock'] = best;
 
-    await contentTracing.startRecording({ included_categories: ['disabled-by-default-devtools.timeline.frame', 'blink.user_timing'], excluded_categories: ['*'] });
+    // viz's Graphics.Pipeline steps time a worker canvas's frames, which
+    // have no PipelineReporter of their own (same presentation feedback).
+    await contentTracing.startRecording({ included_categories: ['disabled-by-default-devtools.timeline.frame', 'blink.user_timing', 'graphics.pipeline', 'viz'], excluded_categories: ['*'] });
     await sleep(200);
     await call(`window.__measureApp.mark('pm-origin')`);
 
