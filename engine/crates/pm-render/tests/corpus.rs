@@ -36,6 +36,8 @@ const STILL_CLASSES: &[(&str, bool)] = &[
     ("render/still-photo-gray-jpg", true),
     ("render/still-photo-heic", true),
     ("render/still-photo-lossy-webp", true),
+    ("render/still-photo-lossless-opaque-webp", true),
+    ("render/still-photo-tiff", true),
     ("render/still-16bit-png", false),
     ("render/still-p3-heic", false),
     ("render/still-p3-jpg", false),
@@ -330,10 +332,24 @@ fn corpus_render_parity() {
     }
     assert!(compared > 0, "no supported corpus project was compared");
     // The still classes (docs/engine/pm-render.md, "Image classes"): the
-    // ones that matched are drawn, the others routed.
+    // ones that matched are drawn, the others routed. A render capture must
+    // hold every `render/still-*` project, so the pin cannot pass vacuously.
+    let render_capture = captures.iter().any(|c| {
+        c.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("render-"))
+    });
     for (name, drawn) in STILL_CLASSES {
-        if let Some(supported) = seen.get(*name) {
-            assert_eq!(supported, drawn, "{name}: routing changed");
+        if only.as_deref().is_some_and(|o| !name.starts_with(o)) {
+            continue;
+        }
+        match seen.get(*name) {
+            Some(supported) => assert_eq!(supported, drawn, "{name}: routing changed"),
+            None => assert!(
+                !render_capture,
+                "{name}: not in the render capture (or its media is missing); recapture with \
+                 `bun engine/corpus/src/capture.ts --only render/ --skip-real --skip-scenarios --label render`"
+            ),
         }
     }
     assert!(
