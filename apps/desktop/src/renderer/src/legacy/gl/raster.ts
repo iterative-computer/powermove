@@ -682,7 +682,32 @@ async function playbackProxy(file: any, name: string, onStage?: (label: string) 
   if (storageKey && PM.MediaStore?.keepsOriginals) await PM.MediaStore.rendition.put(storageKey, proxy);
   return proxy;
 }
+/* A TIFF or HEIF original the media store keeps (new engine, section 21):
+   this viewer shows its PNG rendition, which is generated media. */
+const keepsStillOriginal = (kind: any, meta: any) => kind === 'image' && meta?.rendition === true && needsImageConversion(String(meta?.format || ''));
+async function stillRendition(meta: any, original: Blob, onStage?: (label: string) => void): Promise<Blob> {
+  const key = meta.storageKey;
+  const kept = key ? await PM.MediaStore?.rendition?.get?.(key).catch(() => null) : null;
+  if (kept) return kept;
+  onStage?.('Converting image');
+  const host = PM.MediaStore?.host;
+  const link = meta.storage === 'linked' && meta.link ? meta.link : null;
+  const hash = typeof meta.contentHash === 'string' ? meta.contentHash : null;
+  const result = host?.convertStill && (link || hash)
+    ? await host.convertStill({ ...(link ? { link } : { hash }), name: `original.${meta.format}` })
+    : { ok: false, error: 'Image conversion is unavailable' };
+  if (!result.ok) throw new Error(result.error);
+  const png = await readProxyFile(result, `${String(meta.name || 'image')}.png`, (original as any).lastModified);
+  if (key && PM.MediaStore?.keepsOriginals) await PM.MediaStore.rendition.put(key, png);
+  return png;
+}
 async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
+  if (keepsStillOriginal(kind, meta)) {
+    const original = blob;
+    blob = await stillRendition(meta, original, onStage);
+    const prepared = await prepareAsset({ id, name, kind, blob, meta: { ...meta, rendition: false }, onStage });
+    return Object.assign(prepared, { size: original.size || meta.size || prepared.size, rendition: true });
+  }
   const imageSequence = importedSequences.get(blob) || meta.imageSequence;
   if (kind === 'audio') return PM.Audio.prepareAsset({ id, name, blob, meta });
   if (kind === 'model') {
@@ -896,10 +921,14 @@ async function prepareImportedAsset(file: any, { id, assertCurrentProject, resol
     assertCurrentProject();
     meta = { format: extension };
   }
+  /* With the media store keeping originals (new engine), a converted still
+     stores (or links) the TIFF or HEIF itself; the PNG is this viewer's
+     rendition, kept as generated media (section 21, originals kept). */
+  const keepStillOriginal = kind === 'image' && !resolved.animated && source !== file && PM.MediaStore?.keepsOriginals === true;
   /* Copy into project or Link to files (section 21; new engine only). */
   const decision = PM.HostMedia?.enabled ? await PM.HostMedia.decide({
     kind, sourcePath, requested: storage === 'link' || storage === 'copy' ? storage : undefined,
-    projectSetting: PM.HostMedia.projectStorage(), converted: source !== file,
+    projectSetting: PM.HostMedia.projectStorage(), converted: source !== file && !keepStillOriginal,
   }) : null;
   assertCurrentProject();
   const link = decision?.storage === 'linked' ? decision.link : null;
@@ -913,7 +942,8 @@ async function prepareImportedAsset(file: any, { id, assertCurrentProject, resol
   const persist = (blob: any) => Promise.resolve().then(() => link ? true : PM.MediaStore.put(storageKey, blob, {
     storageKey, fingerprint, type: blob.type || file.type,
   })).then(value => ({ status: 'fulfilled', value }), reason => ({ status: 'rejected', reason }));
-  const eagerPersist = mayNeedPlaybackProxy ? null : persist(source);
+  const eagerPersist = mayNeedPlaybackProxy ? null : persist(keepStillOriginal ? file : source);
+  const keptRendition = keepStillOriginal && storageKey ? PM.MediaStore.rendition.put(storageKey, source) : null;
   const preparedResult: any = await Promise.resolve(preparation).then(
     value => ({ status: 'fulfilled', value }),
     reason => ({ status: 'rejected', reason })
@@ -921,6 +951,8 @@ async function prepareImportedAsset(file: any, { id, assertCurrentProject, resol
   const prepared = preparedResult.status === 'fulfilled' ? preparedResult.value : null;
   const persistBlob = prepared?.persistBlob || source;
   if (prepared) delete prepared.persistBlob;
+  if (prepared && keepStillOriginal) Object.assign(prepared, { rendition: true, size: file.size || prepared.size });
+  if (keptRendition) await keptRendition;
   if (prepared) onStage?.('Saving media');
   const persistedResult: any = await (eagerPersist || (prepared
     ? persist(persistBlob) : { status: 'fulfilled', value: false }));

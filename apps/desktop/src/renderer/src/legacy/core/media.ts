@@ -255,12 +255,13 @@ function matchesLegacy(meta: any, identity: any) {
 /**
  * The BLAKE3 of the file the person imported, when the asset's stored bytes
  * are that file (or it is linked). Conversions (playback proxies, animated
- * and converted stills) store other bytes, so their hash says nothing about
- * the source.
+ * stills, converted stills stored as PNG) store other bytes, so their hash
+ * says nothing about the source.
  */
 function originalContentHash(meta: any): string | null {
   if (!meta || typeof meta.contentHash !== 'string' || !/^[a-f0-9]{64}$/.test(meta.contentHash)) return null;
-  if (meta.playbackProxy === true || meta.imageSequence || (meta.kind === 'image' && meta.format && meta.format !== 'svg')) return null;
+  // A converted still whose original the media store keeps (`rendition`) stores the original.
+  if (meta.playbackProxy === true || meta.imageSequence || (meta.kind === 'image' && meta.format && meta.format !== 'svg' && meta.rendition !== true)) return null;
   return meta.contentHash;
 }
 

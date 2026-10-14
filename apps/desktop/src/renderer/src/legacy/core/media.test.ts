@@ -30,6 +30,7 @@ describe('legacy media install', () => {
     const converted = { assets: { y: { id: 'y', kind: 'video', name: 'a.mov', fingerprint: 'v2:20:g', contentHash: a, playbackProxy: true } }, layers: [] };
     expect(PM.MediaImport.match(converted, new Map(), { kind: 'video', name: 'a.mov', fingerprint: 'v2:20:g', contentHash: b }).canonicalId).toBe('y');
     expect(PM.MediaImport.originalContentHash({ kind: 'image', format: 'heic', contentHash: a })).toBeNull();
+    expect(PM.MediaImport.originalContentHash({ kind: 'image', format: 'heic', rendition: true, contentHash: a })).toBe(a);
     expect(PM.MediaImport.originalContentHash({ kind: 'image', format: 'svg', contentHash: a })).toBe(a);
   });
 
