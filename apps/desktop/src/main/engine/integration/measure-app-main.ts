@@ -137,7 +137,7 @@ async function run(config: AppConfig): Promise<void> {
     const contents = win.webContents;
     contents.setAudioMuted(true);
     contents.on('console-message', (event) => {
-      if (event.level === 'error' || event.level === 'warning' || event.message.includes('[bridge-page]') || event.message.includes('engine')) log(`page ${event.level}: ${event.message.slice(0, 300)}`);
+      if (event.level === 'error' || event.level === 'warning' || event.message.includes('[bridge-page]') || event.message.includes('[measure]') || event.message.includes('engine')) log(`page ${event.level}: ${event.message.slice(0, 300)}`);
     });
     const call = <T>(expression: string): Promise<T> => contents.executeJavaScript(expression) as Promise<T>;
     /** Runs an expression for its effect (its value may not be cloneable). */
@@ -180,10 +180,28 @@ async function run(config: AppConfig): Promise<void> {
     await run('editor', `(() => { const PM = window.PM; if (PM.ProjectsScreen.isOpen) { window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Measurement' }) })); PM.ProjectsScreen.hide(); } })()`);
     await waitFor('the editor', () => call<boolean>('!window.PM.ProjectsScreen.isOpen'));
     const before = await call<string>('window.PM.proj.id');
+    // Toasts (an open that failed says so in one) reach the log.
+    await run('watch toasts', `(() => { const PM = window.PM; const toast = PM.toast; PM.toast = (...args) => { console.warn('[measure] toast: ' + String(args[0]).slice(0, 200)); return toast.apply(PM, args); }; })()`);
     await run('open project', 'window.PM.openProject()');
-    // Opening the 884-layer corpus project took 66 to 95 s on a loaded
-    // machine and passed 180 s in two runs.
-    await waitFor('the project to open', () => call<boolean>(`window.PM.proj.id !== ${JSON.stringify(before)} && window.PM.proj.layers.length > 0`), 420_000);
+    log(`open returned after ${(performance.now() / 1000).toFixed(1)} s`);
+    // Opening the 884-layer corpus project (138 MB, its media restored into
+    // the fresh profile) took 66 to 95 s on a loaded machine and passed
+    // 420 s in several runs while other builds ran.
+    const openStart = performance.now();
+    let lastReport = openStart;
+    await waitFor(
+      'the project to open',
+      async () => {
+        const opened = await call<boolean>(`window.PM.proj.id !== ${JSON.stringify(before)} && window.PM.proj.layers.length > 0`);
+        if (!opened && performance.now() - lastReport > 60_000) {
+          lastReport = performance.now();
+          log(`still opening after ${((lastReport - openStart) / 1000).toFixed(0)} s (load ${os.loadavg()[0]!.toFixed(1)})`);
+        }
+        return opened;
+      },
+      900_000
+    );
+    log(`project open after ${((performance.now() - openStart) / 1000).toFixed(1)} s`);
     await run('project assets', 'window.PM.projectAssetsReady');
     // The whole project plays (its saved work area would loop after 30 s).
     result['project'] = await call(`(() => { const p = window.PM.proj; p.work = [0, p.dur]; return { name: p.name, w: p.w, h: p.h, fps: p.fps, dur: p.dur, layers: p.layers.length }; })()`);
@@ -340,6 +358,7 @@ async function run(config: AppConfig): Promise<void> {
     result['machineLoad'] = { ...(result['machineLoad'] as object), after: os.loadavg() };
   } catch (error) {
     verdict = `MEASURE FAIL ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`;
+    result['error'] = verdict;
   } finally {
     result['log'] = logs.slice(-200);
     writeFileSync(config.out, JSON.stringify(result));
