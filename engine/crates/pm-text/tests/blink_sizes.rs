@@ -7,7 +7,9 @@
 //!
 //! Expected widths were measured with `400 <size>px "system-ui"` canvas fonts
 //! in Chrome for Testing 151.0.7922.34 (headless, macOS 27.0), and in
-//! Electron 44 (Chromium 152) for the corpus values.
+//! Electron 44 (Chromium 152) for the corpus values. `scripts/blink-sizes.mjs`
+//! measures every width here again in Chromium (both renderer states) and
+//! compares it with this file.
 
 #[cfg(all(target_os = "macos", feature = "system"))]
 fn main() {

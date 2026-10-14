@@ -226,6 +226,10 @@ public name). In `pm-wasm` the bytes are subsets.
   manifest, family faces, subset tables, and the incremental protocol.
 - `tests/blink_sizes.rs`: effective and specified sizes, HarfBuzz advance
   scaling, and font cache seeds against widths measured in Chromium.
+  `scripts/blink-sizes.mjs` measures them again in Playwright's Chromium
+  (a fresh renderer, and one that laid 12 and 13 px `system-ui` DOM text out
+  under `--force-device-scale-factor=2`) and compares them with the test:
+  54 of 54 equal in Chromium 151.0.7922.34 (2026-10-14).
 - `tests/level2.rs`: level 2 breaking, baselines, alignment, fallback,
   carets, axes, and subsets laying out like full fonts.
 - `scripts/wasm-identity.mjs`: the wasm32 build of level 1 and level 2 over
