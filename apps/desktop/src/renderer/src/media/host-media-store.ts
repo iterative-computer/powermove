@@ -314,7 +314,9 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
 
     rendition: {
       async get(key) {
-        if (!enabled || !key) return null;
+        /* Also with the flag off: the legacy viewer reuses the rendition the
+           new engine kept instead of converting the original again. */
+        if (!key) return null;
         return readKey(renditionKey(key), 'video/webm').catch(() => null);
       },
       async put(key, blob) {

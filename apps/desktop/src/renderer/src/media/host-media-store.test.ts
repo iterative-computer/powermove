@@ -234,6 +234,15 @@ describe('opening a project file', () => {
 });
 
 describe('host media store (new engine off)', () => {
+  it('reuses the rendition the new engine kept', async () => {
+    const { host } = fakeHost();
+    const on = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
+    await on.rendition.put('media:v2:p', new Blob([data(12)], { type: 'video/webm' }));
+    const off = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: false, sourcePath: () => null });
+    expect(await bytesOf(await off.rendition.get('media:v2:p'))).toEqual(data(12));
+    expect(await off.rendition.put('media:v2:q', new Blob([data(3)]))).toBe(false);
+  });
+
   it('keeps IndexedDB as the source and reads the store only for its own media', async () => {
     const { host, keys } = fakeHost();
     const { legacy, puts } = fakeLegacy({ 'media:v2:old': new Blob([data(10, 1)]) });
