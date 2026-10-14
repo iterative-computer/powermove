@@ -203,13 +203,15 @@ write the same bytes). `WavWriter` writes WAVE_FORMAT_EXTENSIBLE and switches to
 
 ## Performance (`examples/mix_bench`, release, this Mac, 20 s renders)
 
-| Voices | Cost per voice-second of audio |
-|---|---|
-| 48 kHz sources (copy) | 0.27 ms |
-| 44.1 kHz sources (exact-phase sinc, NEON) | 6.0 ms |
-| Keyframed gain (control points) | 4.8 ms |
-| Variable speed (free-position sinc) | 22 ms |
-| Constant speed 1.5 | 17 ms |
+Measured 2026-10-13 with other lanes building (numbers vary about 1.5× with load):
+
+| Voices | Cost per voice-second of audio | Real time, voices as listed |
+|---|---|---|
+| 48 kHz sources (copy), 16 voices | 0.18 ms | 356× |
+| 44.1 kHz sources (exact-phase sinc, NEON), 16 voices | 3.8 ms | 16× |
+| Keyframed gain (control points), 16 voices | 3.1 ms | 20× |
+| Variable speed (free-position sinc), 4 voices | 15.4 ms | 16× |
+| Constant speed 1.5, 4 voices | 11.7 ms | 21× |
 
 ## Legacy parity
 
