@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Powermove",
+  "identifier": "com.zellzoi.powermove",
+  "build": {},
+  "app": {
+    "windows": [],
+    "security": { "capabilities": [] }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "resources": {
+      "../../apps/desktop/out/renderer/": "renderer/",
+      "../../target/powermove-resources/": "./",
+      "../../apps/desktop/src/extensions/effects-basic/manifest.json": "builtin-extensions/effects-basic/manifest.json",
+      "../../apps/desktop/src/extensions/inspector/manifest.json": "builtin-extensions/inspector/manifest.json",
+      "../../apps/desktop/src/extensions/keymap-default/manifest.json": "builtin-extensions/keymap-default/manifest.json",
+      "../../apps/desktop/src/extensions/layers-3d/manifest.json": "builtin-extensions/layers-3d/manifest.json",
+      "../../apps/desktop/src/extensions/mods/manifest.json": "builtin-extensions/mods/manifest.json",
+      "../../apps/desktop/src/extensions/theme-default/manifest.json": "builtin-extensions/theme-default/manifest.json",
+      "../../apps/desktop/src/extensions/timeline/manifest.json": "builtin-extensions/timeline/manifest.json",
+      "../../apps/desktop/src/extensions/toolbar/manifest.json": "builtin-extensions/toolbar/manifest.json",
+      "../../apps/desktop/src/extensions/transitions-basic/manifest.json": "builtin-extensions/transitions-basic/manifest.json",
+      "../../apps/desktop/src/extensions/viewer/manifest.json": "builtin-extensions/viewer/manifest.json",
+      "../../apps/desktop/node_modules/ffmpeg-static/ffmpeg.exe": "encoder/ffmpeg.exe",
+      "../../apps/desktop/node_modules/ffmpeg-static/ffmpeg.exe.LICENSE": "encoder/ffmpeg.exe.LICENSE"
+    },
+    "fileAssociations": [{ "ext": ["pmv"], "name": "Powermove Project", "description": "Powermove Project", "role": "Editor" }],
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true },
+      "nsis": { "installMode": "currentUser" }
+    }
+  }
+}
