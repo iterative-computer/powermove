@@ -202,6 +202,12 @@ consumers ◀───────────── ClockSlot ◀── clock s
 - **Rates.** Phase 2 plays at 1× only; `Play` at another rate (J/K/L) is refused with
   `Unsupported` until Phase 3b.
 
+The simulated device's timeline is synthetic (host times from its frame count), so on a
+loaded machine it waits up to 40 ms for the render thread to queue a buffer
+(`DeviceSide::queued_chunks`) instead of reading an underrun a real-time device would not
+see; an unoptimized build under four building lanes otherwise starved the ring and failed
+clock assertions with 160 ms errors that were the underrun, not the clock.
+
 Measured with a simulated device (`tests/playback.rs`): a gain edit while playing ramps
 over 576 samples at 48 kHz with no step larger than one glide increment and no new epoch.
 The published line predicts the presented media to 0.3 µs on a nominal device; at ±150 ppm

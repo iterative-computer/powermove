@@ -56,13 +56,26 @@ impl SimDevice {
     }
 
     /// Runs `buffers` callbacks paced at the device's real rate.
+    ///
+    /// The device's timeline is simulated (host times come from its frame
+    /// count), so on a loaded machine, an unoptimized build especially, it
+    /// waits up to 40 ms for the render thread to have a buffer queued
+    /// instead of reading an underrun no real-time device would see. When
+    /// nothing is queued for a reason (paused, ended) it proceeds after the
+    /// wait. The clock under test only reads the host times passed in.
     fn run(&mut self, buffers: usize) {
+        let need = BUFFER.div_ceil(pm_audio::ring::CHUNK) + 1;
         for _ in 0..buffers {
             let host = self.host_of(self.frames);
             // Pace: the callback for a buffer comes when the previous one is due.
             let now = host_now_us();
             if host > now + 2_000 {
                 std::thread::sleep(Duration::from_micros(host - now - 2_000));
+            }
+            let patience = std::time::Instant::now();
+            while self.side.queued_chunks() < need && patience.elapsed() < Duration::from_millis(40)
+            {
+                std::thread::sleep(Duration::from_micros(500));
             }
             self.side.callback(&mut self.out, self.channels, host);
             self.log.push((host, self.out.clone()));

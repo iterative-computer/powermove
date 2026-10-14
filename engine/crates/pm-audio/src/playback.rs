@@ -96,6 +96,13 @@ impl DeviceSide {
             self.pending = None;
         }
     }
+
+    /// Chunks of [`CHUNK`] frames queued for the device (a chunk being played
+    /// counts whole). For hosts that drive a device themselves, such as a
+    /// simulated device that must not outrun a starved test machine.
+    pub fn queued_chunks(&self) -> usize {
+        self.consumer.ring().queued()
+    }
 }
 
 /// Reads the output device's id and presentation latency (µs).
