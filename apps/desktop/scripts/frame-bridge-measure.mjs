@@ -17,7 +17,8 @@
  * (bun run build) and the project at --project (default: the corpus perf
  * copy of the Powermove ad project, kept outside the repository).
  *
- *   node scripts/frame-bridge-measure.mjs [--only run,run] [--seconds 60] [--skip-build] [--tag r2] [--project file.pmv]
+ *   node scripts/frame-bridge-measure.mjs [--only run,run] [--seconds 60] [--skip-build] [--tag r2] [--project file.pmv] [--keep]
+ *   node scripts/frame-bridge-measure.mjs --only run --tag r2 --from <dir --keep left>   (analysis only)
  *
  * Needs native/pm_node.node (bun run build:engine). Run it under
  * pm-electron-lock: it starts Electron once per run.
@@ -41,6 +42,9 @@ const arg = (name, fallback) => {
 const seconds = Number(arg('seconds', '60'));
 const only = arg('only', '').split(',').filter(Boolean);
 const tag = arg('tag', '');
+// Re-analyze raw results a `--keep` run left in this directory instead of
+// measuring again (the analysis changed, not the measurement).
+const from = arg('from', '') ? path.resolve(arg('from', '')) : null;
 const project = path.resolve(arg('project', path.join(os.homedir(), 'Library/Application Support/Powermove Engine Corpus/perf/Powermove ad (perf copy).pmv')));
 
 const TICKS = 705_600_000;
@@ -118,7 +122,7 @@ const selected = RUNS.filter((run) => !only.length || only.includes(run.name));
 
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'pm-bridge-measure-'));
 const harnessAddon = path.join(work, 'pm_bridge_harness.node');
-if (!process.argv.includes('--skip-build')) {
+if (!process.argv.includes('--skip-build') && !from) {
   execFileSync('/bin/sh', ['-c', '. ./env.sh && exec nice -n 15 cargo build --release --locked -p pm-bridge --lib --features harness'], { cwd: engineDir, stdio: 'inherit' });
 }
 fs.copyFileSync(path.join(engineDir, 'target/release/libpm_bridge.dylib'), harnessAddon);
@@ -201,6 +205,18 @@ function traceContext(tracePath, pingOffsetUs) {
   return { frames: frames.length, toTrace, hostToTrace, frameAt };
 }
 
+/**
+ * The main-process load events a missing frame due at host µs `due` is
+ * attributed to: those whose main-thread span started before its due time
+ * and ended no earlier than 50 ms before it (S1's attribution, which also
+ * required the start to be within 300 ms of the due time; a live resize
+ * lasts 1.3 s, so that rule called every drop in its last second "none").
+ */
+function nearLoad(raw, due) {
+  const near = (raw.load?.events ?? []).filter(([, u, d]) => u <= due && u + d * 1000 >= due - 50_000).map((e) => e[0]);
+  return near.length ? [...new Set(near)].sort().join('+') : 'none';
+}
+
 const mediaAt = (sample, hostUs) => sample.mediaTime + ((hostUs - sample.hostTime) * TICKS * sample.rate.num) / (1e6 * sample.rate.den);
 const hostOfMedia = (sample, ticks) => sample.hostTime + ((ticks - sample.mediaTime) * 1e6 * sample.rate.den) / (TICKS * sample.rate.num);
 
@@ -276,18 +292,12 @@ function analyzePlayback(raw) {
     }
     per.push({ k, presentUs: pf.end, dueUs: ctx.hostToTrace(hostOfK(k)), rafToPresentUs: pf.end - ctx.toTrace(rafMs) });
   }
-  // Every missing frame with the main-process load events whose main-thread
-  // span started up to 300 ms before its due time and ended no earlier than
-  // 50 ms before it (S1's attribution).
-  const loadEvents = raw.load?.events ?? [];
   const missing = [];
   for (let k = kFirst, i = 0; k <= kLast; k++, i++) {
     if (per[i]) continue;
-    const due = hostOfK(k);
-    const near = loadEvents.filter(([, u, d]) => u <= due && u >= due - 300_000 && u + d * 1000 >= due - 50_000).map((e) => e[0]);
     const rafMs = byPts.get(k);
     const state = rafMs == null ? 'not-drawn' : (ctx.frameAt(rafMs)?.state ?? 'no-reporter');
-    missing.push({ k, state, near: near.length ? [...new Set(near)].sort().join('+') : 'none' });
+    missing.push({ k, state, near: nearLoad(raw, hostOfK(k)) });
   }
   const presented = per.filter(Boolean);
   const offsets = presented.map((p) => p.presentUs - p.dueUs);
@@ -356,6 +366,7 @@ function analyzeRemote(raw, jsonl, ticksText = '') {
   // the run that added them on).
   const byAsked = new Map(records.map(([seq, asked, presented, committed, waitUs]) => [Math.round(asked / 100), { seq, asked, presented, committed, waitUs }]));
   const per = [];
+  const missing = [];
   const counts = { expected: 0, notAsked: 0, notPresented: 0 };
   for (let k = kFirst; k <= kLast; k++) {
     counts.expected++;
@@ -364,9 +375,11 @@ function analyzeRemote(raw, jsonl, ticksText = '') {
     if (!r) {
       counts.notAsked++;
       per.push(null);
+      missing.push({ k, state: 'not-asked', near: nearLoad(raw, due) });
     } else if (r.presented == null) {
       counts.notPresented++;
       per.push(null);
+      missing.push({ k, state: 'not-presented', near: nearLoad(raw, due) });
     } else per.push({ k, presentUs: r.presented, dueUs: due, committed: r.committed, waitUs: r.waitUs });
   }
   const presented = per.filter(Boolean);
@@ -404,6 +417,7 @@ function analyzeRemote(raw, jsonl, ticksText = '') {
       for (let i = 1; i < records.length; i++) if (records[i][0] > records[i - 1][0] + 1) n += records[i][0] - records[i - 1][0] - 1;
       return n;
     })(),
+    missing,
     remoteLayers: raw.remoteLayers ?? null,
     // With the refresh-rate request: the refresh intervals the request's
     // display link saw (ms, 0.5 ms bins), i.e. the rate the panel ran at.
@@ -461,8 +475,8 @@ const results = {};
 try {
   for (const run of selected) {
     const name = tag ? `${run.name}-${tag}` : run.name;
-    const out = path.join(work, `${name}.json`);
-    const trace = path.join(work, `${name}.trace.json`);
+    const out = path.join(from ?? work, `${name}.json`);
+    const trace = path.join(from ?? work, `${name}.trace.json`);
     const env = {
       ...process.env,
       PM_IT_DESKTOP: desktop,
@@ -475,7 +489,7 @@ try {
       ELECTRON_DISABLE_SECURITY_WARNINGS: '1'
     };
     delete env.ELECTRON_RUN_AS_NODE;
-    const remoteTrace = path.join(work, `${name}.remote.jsonl`);
+    const remoteTrace = path.join(from ?? work, `${name}.remote.jsonl`);
     if (run.fps && !run.app) env.POWERMOVE_BRIDGE_TEST_FPS = String(run.fps);
     if (run.remoteLayer) Object.assign(env, { POWERMOVE_BRIDGE_REMOTE_LAYER: '1', POWERMOVE_BRIDGE_REMOTE_TRACE: remoteTrace, POWERMOVE_BRIDGE_LEAD: String(run.lead ?? 2) });
     let args = [path.join(work, 'main.js')];
@@ -499,7 +513,9 @@ try {
     }
     process.stdout.write(`\n== ${name}\n`);
     const t0 = Date.now();
-    const r = spawnSync(electron, args, { env, encoding: 'utf8', timeout: run.durationMs * (run.inputModes?.length ?? 1) * 3 + (run.app ? 1_200_000 : 240_000) });
+    const r = from
+      ? { stdout: fs.existsSync(out) && !JSON.parse(fs.readFileSync(out, 'utf8')).error ? 'MEASURE DONE (kept)' : 'MEASURE FAIL (kept)', status: 0 }
+      : spawnSync(electron, args, { env, encoding: 'utf8', timeout: run.durationMs * (run.inputModes?.length ?? 1) * 3 + (run.app ? 1_200_000 : 240_000) });
     if (profile) fs.rmSync(profile, { recursive: true, force: true });
     const verdict = (r.stdout ?? '').split('\n').find((l) => l.startsWith('MEASURE')) ?? `MEASURE FAIL exit ${r.status}`;
     process.stdout.write(`   ${verdict} after ${((Date.now() - t0) / 1000).toFixed(1)} s\n`);
