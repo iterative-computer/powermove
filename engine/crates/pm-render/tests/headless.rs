@@ -762,3 +762,157 @@ fn frame_time_at_1080p() {
         );
     }
 }
+
+/// A 24-bit BMP of `w` × `h` (a container the renderer does not draw).
+fn bmp(w: u32, h: u32) -> Vec<u8> {
+    let row = (w * 3).div_ceil(4) * 4;
+    let size = 54 + row * h;
+    let mut b = b"BM".to_vec();
+    for v in [size, 0, 54, 40, w, h] {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&24u16.to_le_bytes());
+    for v in [0u32, row * h, 2835, 2835, 0, 0] {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    b.extend(std::iter::repeat_n(0x80u8, (row * h) as usize));
+    b
+}
+
+#[test]
+fn exec_time_unsupported_media_leaves_the_target_untouched() {
+    let (doc, resolver) = everything();
+    let doc = load(&doc);
+    let mut r = Renderer::headless().unwrap();
+    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
+    let target = pm_gpu::Target::new(
+        r.device(),
+        "caller",
+        W,
+        H,
+        wgpu::TextureFormat::Rgba16Float,
+        pm_gpu::target::working_usage(),
+    );
+    r.render_into(
+        &doc,
+        "Ptest-root",
+        ticks(0.4),
+        &request,
+        &resolver,
+        &target,
+        None,
+    )
+    .unwrap();
+    let before = pm_gpu::readback::read_raw(r.device(), r.queue(), &target.texture).unwrap();
+    // The document records a PNG; the file is a BMP: only the media probe
+    // at exec time can tell.
+    let dir = std::env::temp_dir().join(format!("pm-render-exec-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let still = dir.join("still.png");
+    std::fs::write(&still, bmp(160, 90)).unwrap();
+    let mut bad = MapResolver {
+        paths: resolver.paths.clone(),
+    };
+    bad.paths.insert("still".into(), still);
+    let err = r
+        .render_into(
+            &doc,
+            "Ptest-root",
+            ticks(0.4),
+            &request,
+            &bad,
+            &target,
+            None,
+        )
+        .err()
+        .expect("an unsupported frame");
+    assert!(
+        matches!(&err, pm_render::RenderError::Unsupported(u)
+            if u.iter().any(|u| u.feature == Feature::Media("BMP stills".into()))),
+        "{err:?}"
+    );
+    let after = pm_gpu::readback::read_raw(r.device(), r.queue(), &target.texture).unwrap();
+    assert!(after == before, "the caller's target keeps its frame");
+    // The renderer is still usable, and its caches are consistent.
+    r.render_into(
+        &doc,
+        "Ptest-root",
+        ticks(0.4),
+        &request,
+        &resolver,
+        &target,
+        None,
+    )
+    .unwrap();
+    let again = pm_gpu::readback::read_raw(r.device(), r.queue(), &target.texture).unwrap();
+    assert!(again == before);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A two-second 160 × 90 H.264 clip of one color, tagged BT.709.
+fn solid_clip(path: &std::path::Path, color: &str) {
+    let bin = std::env::var_os("PM_FFMPEG_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap())
+                .join("Library/Caches/powermove-engine/ffmpeg/out")
+        })
+        .join("bin/ffmpeg");
+    let source = format!("color=c={color}:size=160x90:rate=30:duration=2");
+    let ok = std::process::Command::new(bin)
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i", &source])
+        .args([
+            "-c:v",
+            "h264_videotoolbox",
+            "-b:v",
+            "2M",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .args(["-color_primaries", "bt709", "-color_trc", "bt709"])
+        .args(["-colorspace", "bt709"])
+        .arg(path)
+        .status()
+        .expect("ffmpeg (PM_FFMPEG_DIR)")
+        .success();
+    assert!(ok);
+}
+
+#[test]
+fn a_video_replaced_on_disk_is_reopened() {
+    let v = layer(
+        "v",
+        "video",
+        json!({ "asset": "clip", "fit": "stretch", "w": 160, "h": 90, "trim": 0, "speed": 1 }),
+        0.0,
+        0.0,
+        2.0,
+    );
+    let mut doc = project(160, 90, 2.0, no_fill(), vec![v]);
+    asset(&mut doc, "clip", "video", "mp4", 160, 90, 2.0);
+    let doc = load(&doc);
+    let dir = std::env::temp_dir().join(format!("pm-render-replace-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("clip.mp4");
+    let (blue, yellow) = (dir.join("blue.mp4"), dir.join("yellow.mp4"));
+    solid_clip(&blue, "0x2040C0");
+    solid_clip(&yellow, "0xE0C020");
+    let mut resolver = MapResolver::default();
+    resolver.paths.insert("clip".into(), path.clone());
+    let request = RenderRequest::at_scale(Size::new(160, 90), 1.0, Precision::Float16);
+    let frame = |r: &mut Renderer| render_bytes(r, &doc, 0.4, &request, &resolver).0;
+    std::fs::copy(&blue, &path).unwrap();
+    let mut r = Renderer::headless().unwrap();
+    let first = frame(&mut r);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::copy(&yellow, &path).unwrap();
+    let replaced = frame(&mut r);
+    let fresh = frame(&mut Renderer::headless().unwrap());
+    assert!(
+        replaced != first,
+        "the replaced file is read, not the stale index"
+    );
+    assert!(replaced == fresh);
+    std::fs::remove_dir_all(&dir).ok();
+}
