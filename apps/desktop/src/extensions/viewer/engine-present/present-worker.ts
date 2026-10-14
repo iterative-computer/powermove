@@ -80,6 +80,9 @@ export type ServeOptions = {
   onPresented?: (frame: PresentedFrame) => void;
 };
 
+/** Animation frame to display, in refreshes, for a worker canvas. */
+export const WORKER_LATENCY_REFRESHES = 2;
+
 /** How often the worker sends a session's stats while frames flow. */
 export const STATS_INTERVAL_MS = 250;
 
@@ -146,6 +149,11 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
         // now can reach the display frame being composed, instead of
         // waiting for the worker's next animation frame.
         drawOnArrival: true,
+        // A worker canvas's frame reaches the display two refreshes after
+        // the animation frame that drew it (measured in the real app: 2 in
+        // 80% of frames, 18.7 ms at 120 Hz), so timed frames are picked for
+        // that instant and stay on the audio clock's line.
+        latencyRefreshes: WORKER_LATENCY_REFRESHES,
         now,
         trace: message.trace,
         hostOffsetUs: () => s.hostOffsetUs,

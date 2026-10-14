@@ -252,14 +252,18 @@ describe('WorkerPresenter and the presentation worker', () => {
     // Worker frames every 8.33 ms from page 1000 ms (worker 0 ms).
     for (let i = 0; i < 8; i++) pair.frame(i * (1000 / 120));
     await settle();
-    expect(presented.map((f) => f.seq)).toEqual([10, 11, 12, 13]);
+    // Picked for two refreshes after each animation frame (a worker
+    // canvas's measured depth): frame 10 (0 to 16.7 ms) was already
+    // passing at the first one, so it is dropped as late.
+    expect(presented.map((f) => f.seq)).toEqual([11, 12, 13]);
+    expect(presenter.stats.dropped['late']).toBe(1);
     pair.painter.finishGpu();
     await settle();
     expect(link.releases.map((r) => r.seq)).toEqual([10, 11, 12, 13]);
     const trace = await presenter.takeTrace();
     expect(trace!.arrivals.map((a) => a[2])).toEqual([1000, 1000, 1000, 1000]);
     expect(trace!.rafs[0]).toBe(1000);
-    expect(trace!.draws).toHaveLength(4);
+    expect(trace!.draws).toHaveLength(3);
   });
 
   it('hands queued frames back to the engine when the session ends, and forgets the session once the worker closed it', async () => {
