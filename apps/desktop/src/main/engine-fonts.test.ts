@@ -152,6 +152,8 @@ describe.skipIf(process.platform !== 'darwin' || !existsSync(addon))('engine fon
     const reply = call(ENGINE_FONTS_IPC.answer, queries) as { ok: true; value: string };
     const answers = JSON.parse(reply.value);
     expect(answers.faces[0].postscriptName).toBe('Georgia');
+    // The real reply ends with the generation, where main reads it.
+    expect(answerGeneration(reply.value)).toBe(registry.generation);
     const subset = call(ENGINE_FONTS_IPC.subset, answers.faces[0].blob, answers.faces[0].index) as { ok: true; value: Uint8Array };
     expect(subset.ok).toBe(true);
     expect(subset.value.byteLength).toBeGreaterThan(1000);

@@ -164,8 +164,9 @@ function run<T>(fn: () => MaybePromise<T>, then?: (value: T) => void): MaybeProm
 
 const invalid = (what: string): EngineFontsResult<never> => ({ ok: false, error: `invalid ${what}` });
 
-/** The generation an answer reply carries (`"generation":N` is the last key
- *  of pm-text's serialized answers; read without parsing the whole reply). */
+/** The generation an answer reply carries, read without parsing the whole
+ *  reply: pm-text's `Answers::reply_json` (used by pm-node and pm-bridge)
+ *  writes `"generation":N` as the last key, and its test pins that. */
 export function answerGeneration(json: string): number | null {
   const match = /"generation":(\d+)\}\s*$/.exec(json.slice(-40));
   return match ? Number(match[1]) : null;

@@ -89,12 +89,16 @@ fn main() {
         family_query("system-ui", 17.0),
     ];
     let started = std::time::Instant::now();
-    let reply = main.json(
+    let (status, raw) = main.call(
         Op::Answer,
         &serde_json::json!({ "queries": queries }).to_string(),
         &[],
     );
     let answer_ms = started.elapsed().as_secs_f64() * 1e3;
+    assert_eq!(status, Status::Json);
+    // Main reads the generation off the end of the reply (`answerGeneration`).
+    assert!(raw.ends_with(br#","generation":40}"#));
+    let reply: serde_json::Value = serde_json::from_slice(&raw).unwrap();
     assert_eq!(reply["generation"], 40);
     let answers: Answers = serde_json::from_value(reply).unwrap();
     assert!(answers.faces.len() >= 3, "{:?}", answers.faces);

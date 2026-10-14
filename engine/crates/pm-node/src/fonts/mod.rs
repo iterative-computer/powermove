@@ -235,9 +235,11 @@ impl FontService {
                     .registry()
                     .answer(&queries)
                     .map_err(|e| e.to_string())?;
-                let mut value = serde_json::to_value(&answers).map_err(|e| e.to_string())?;
-                value["generation"] = generation.into();
-                Ok(Answer::Json(value.to_string()))
+                // The generation goes last: main reads it off the end.
+                answers
+                    .reply_json(generation)
+                    .map(Answer::Json)
+                    .map_err(|e| e.to_string())
             }
             Op::Subset => {
                 let args: SubsetArgs = parse(json)?;

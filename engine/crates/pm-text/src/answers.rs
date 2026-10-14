@@ -251,6 +251,25 @@ impl Answers {
         self.answers = by_query.into_values().collect();
     }
 
+    /// The registry's reply to the renderer: these answers with the registry
+    /// generation as the **last** key, `{"faces":…,"answers":…,"generation":N}`.
+    ///
+    /// Main reads the generation off the end of the reply without parsing
+    /// it (`answerGeneration` in apps/desktop/src/main/engine-fonts.ts), so
+    /// the key order is part of the format. It is written here explicitly,
+    /// not left to serde_json's map ordering (which `preserve_order` or a
+    /// new field would change).
+    pub fn reply_json(&self, generation: u64) -> Result<String, serde_json::Error> {
+        let mut json = serde_json::to_string(self)?;
+        // A struct with fields: `{…}`, never `{}`.
+        debug_assert!(json.ends_with('}') && json.len() > 2);
+        json.pop();
+        json.push_str(",\"generation\":");
+        json.push_str(&generation.to_string());
+        json.push('}');
+        Ok(json)
+    }
+
     /// The distinct (blob, index) pairs the faces read.
     pub fn sources(&self) -> BTreeSet<(String, u32)> {
         self.faces
@@ -584,6 +603,30 @@ mod tests {
             weight: 500.0,
             italic: false,
             size: 16.0,
+        }
+    }
+
+    #[test]
+    fn reply_json_ends_with_the_generation() {
+        let answers = Answers {
+            faces: vec![rec(0, "a")],
+            answers: vec![Answer {
+                query: Query::family("A", &desc()),
+                face: Some(0),
+                advance: None,
+            }],
+        };
+        for (value, generation) in [(&answers, 42), (&Answers::default(), 0)] {
+            let json = value.reply_json(generation).unwrap();
+            // Main's `answerGeneration` reads exactly this suffix.
+            assert!(
+                json.ends_with(&format!(",\"generation\":{generation}}}")),
+                "{json}"
+            );
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed["generation"], generation);
+            let back: Answers = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, value);
         }
     }
 
