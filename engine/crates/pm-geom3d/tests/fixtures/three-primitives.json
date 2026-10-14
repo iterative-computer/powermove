@@ -1,0 +1,230 @@
+{
+ "three": "0.180.0",
+ "cases": [
+  {
+   "primitive": "box",
+   "parameters": {},
+   "vertices": 24,
+   "indices": 36,
+   "position": "684624d0687cbb7ce0a1119f1588586e3d1d758cf5bee26b78af640572a1e1bd",
+   "normal": "cf38d80691f04d52b9686807b830aec77584c7ecdc0ceed56144923548dd5593",
+   "uv": "9acbda3fe508de1f96b8f061ef5888cfba15a3e6ae752467e73665e4dfe3182a",
+   "index": "4d3b1ea9826e62e6af0195fc6626bba8ddac0c6a0469c3b817c8c730e6156c1e"
+  },
+  {
+   "primitive": "box",
+   "parameters": {
+    "width": 1.4,
+    "height": 1.4,
+    "depth": 1.4
+   },
+   "vertices": 24,
+   "indices": 36,
+   "position": "086b71ae9f5a52363c6eb53c39cadda0289a0e5378163ba91e0c1689dd48e612",
+   "normal": "cf38d80691f04d52b9686807b830aec77584c7ecdc0ceed56144923548dd5593",
+   "uv": "9acbda3fe508de1f96b8f061ef5888cfba15a3e6ae752467e73665e4dfe3182a",
+   "index": "4d3b1ea9826e62e6af0195fc6626bba8ddac0c6a0469c3b817c8c730e6156c1e"
+  },
+  {
+   "primitive": "box",
+   "parameters": {
+    "width": 2.5,
+    "height": 0.3,
+    "depth": 7
+   },
+   "vertices": 24,
+   "indices": 36,
+   "position": "f877d9cd1af963707b1be1d1b06dd2afed43a2910fa8007c4a99d35a3527f084",
+   "normal": "cf38d80691f04d52b9686807b830aec77584c7ecdc0ceed56144923548dd5593",
+   "uv": "9acbda3fe508de1f96b8f061ef5888cfba15a3e6ae752467e73665e4dfe3182a",
+   "index": "4d3b1ea9826e62e6af0195fc6626bba8ddac0c6a0469c3b817c8c730e6156c1e"
+  },
+  {
+   "primitive": "sphere",
+   "parameters": {},
+   "vertices": 1225,
+   "indices": 6624,
+   "position": "8d72fcdc2b9002ba407d8c36b77d083e87cea4e974e3831ec8313015a1457b18",
+   "normal": "917bcf6005ec37397ab69e0920d907ae5c8945252bcde0ccf42e80ae2b583605",
+   "uv": "4c3dc927ba20abce412b8c23019ff13c1f54538e75b4a843374a35546bf13647",
+   "index": "f8f8c72130fc5db6da24875680830d4ecef286023ac52a214bfae1c3056f9a7f"
+  },
+  {
+   "primitive": "sphere",
+   "parameters": {
+    "radius": 1,
+    "segments": 48
+   },
+   "vertices": 1225,
+   "indices": 6624,
+   "position": "917bcf6005ec37397ab69e0920d907ae5c8945252bcde0ccf42e80ae2b583605",
+   "normal": "917bcf6005ec37397ab69e0920d907ae5c8945252bcde0ccf42e80ae2b583605",
+   "uv": "4c3dc927ba20abce412b8c23019ff13c1f54538e75b4a843374a35546bf13647",
+   "index": "f8f8c72130fc5db6da24875680830d4ecef286023ac52a214bfae1c3056f9a7f"
+  },
+  {
+   "primitive": "sphere",
+   "parameters": {
+    "radius": 0.37,
+    "segments": 7
+   },
+   "vertices": 32,
+   "indices": 84,
+   "position": "452eff9c38c5b25b3d43bec949deaaba586fa0ead3e53e591408cae52dbbae10",
+   "normal": "92a9f5b721de3bfc7232d38285e8ef2c7c9c0ff59244ad0157c66ea388a8c404",
+   "uv": "7f178e97c05dfe7a02d1dec8c2d453b4a5f852ce565bf9911bb2076d5f3c05f8",
+   "index": "e69106ac4805ce678a7c4aacba06e631c8bdd6a787797dcbbebb73700eff2b9f"
+  },
+  {
+   "primitive": "sphere",
+   "parameters": {
+    "radius": 3,
+    "segments": 128
+   },
+   "vertices": 8385,
+   "indices": 48384,
+   "position": "645e93b70db81ef91347ded204c662e9a126e67b1fa607609ffbb090c6f32bd0",
+   "normal": "d8ae7ebd644e71ebe1d2de1644108d1302c2e56d7f937e9623933d26bad3b19a",
+   "uv": "47bfbae77d218505556979ddb0970db80fbc27fe2f87871bb70c5a2f024b97a4",
+   "index": "db5edb786cced691f6504d3856af0d9cc149c1ab34a8002b8ebb75ef02aab3f4"
+  },
+  {
+   "primitive": "plane",
+   "parameters": {},
+   "vertices": 4,
+   "indices": 6,
+   "position": "b339e62b564fbc0a4d1e7bb1ee2b5cee155bd1510ccb651326c7a03939dff1df",
+   "normal": "796f0b940d4268e7d9ccbd67f52dca773c768e372dae64d3c1b1caf59e6c8247",
+   "uv": "f3a0a46301c6859e5b64beadee234c4eeec1dec8c4735dc7bf40ea09e762e189",
+   "index": "752a6e22358c492163d1de31bfafb249c23a54c303ce495a18abf04cf82e01b2"
+  },
+  {
+   "primitive": "plane",
+   "parameters": {
+    "width": 2.4,
+    "height": 1.6
+   },
+   "vertices": 4,
+   "indices": 6,
+   "position": "53f20a60a577fc02189cd4fb2e4776357ce1a869b324fba7cb0e82051bee1fbe",
+   "normal": "796f0b940d4268e7d9ccbd67f52dca773c768e372dae64d3c1b1caf59e6c8247",
+   "uv": "f3a0a46301c6859e5b64beadee234c4eeec1dec8c4735dc7bf40ea09e762e189",
+   "index": "752a6e22358c492163d1de31bfafb249c23a54c303ce495a18abf04cf82e01b2"
+  },
+  {
+   "primitive": "cylinder",
+   "parameters": {},
+   "vertices": 292,
+   "indices": 576,
+   "position": "fb48f09583aaaf46ea4f048dc7021e0e64b06a64c09e05a431b1cb7f5d384ce5",
+   "normal": "a18484a0eeca96d863790f48e5d03689262913995779eefa0057ad4f1d76db11",
+   "uv": "2e5df89325fdcdfe110a0c866e9c8e3d0f8e99225e95eb0d87043ca846973a6c",
+   "index": "eaf1d0dbb7e1565a7dafe5a4986804249173e4e29fa446e7733a4197a50efbe8"
+  },
+  {
+   "primitive": "cylinder",
+   "parameters": {
+    "radiusTop": 0.2,
+    "radiusBottom": 0.7,
+    "height": 2,
+    "segments": 17
+   },
+   "vertices": 106,
+   "indices": 204,
+   "position": "a53209dc0ef0a0c6568cd367788500ad38a1c9377ff1595ac20b3cf6ce6f987f",
+   "normal": "11c20f292cc38e643460b4fc67814dcc1b95ae92a6a971d54375efa8d3c7e6cb",
+   "uv": "371c1e64f120c01755b11a19296659676da243791b1b4a736145079f1d67eef6",
+   "index": "9813a635ff63d6b6c59ffb536f9f9edca3484b4c96b25b8ebf2aff7f8c4ed1a7"
+  },
+  {
+   "primitive": "cylinder",
+   "parameters": {
+    "radius": 1.1,
+    "height": 0.5,
+    "segments": 3
+   },
+   "vertices": 22,
+   "indices": 36,
+   "position": "c586842b70d84f346d45943ba64060b16f565e711ca3c2211208af8a9e6a0862",
+   "normal": "f77473aa750c345d25fe95c6b39dc96d0e3f2e6fb83cb9fe0a2c755ec73e8b94",
+   "uv": "9abeed6f3f33c37fc830cc225349652544f75f7737947678fc5714d434bbaf17",
+   "index": "cc3caf43f4bdc166c389d356a6d0a2f86180fdafc16d47f681a123c73d7924e4"
+  },
+  {
+   "primitive": "cylinder",
+   "parameters": {
+    "radiusTop": 0,
+    "radiusBottom": 0.5,
+    "height": 1
+   },
+   "vertices": 195,
+   "indices": 288,
+   "position": "0634efbd70b60ad5ecbfd98cd0f4d7020ebb01e7f75422834fb3b413984d3c7e",
+   "normal": "acde980e8e753d1e202db9d10403c672bf2d478fe187bf94caf0b606eb6e9377",
+   "uv": "5afb6a1cd46210f736c6cb542243d6d39400b82d5ca6bc0688a2e85231d84857",
+   "index": "f74d08a39a2e3ffe1fceaafce5c12c394d862739521d51d47dc0cfba7ab34b56"
+  },
+  {
+   "primitive": "cone",
+   "parameters": {},
+   "vertices": 195,
+   "indices": 288,
+   "position": "0634efbd70b60ad5ecbfd98cd0f4d7020ebb01e7f75422834fb3b413984d3c7e",
+   "normal": "acde980e8e753d1e202db9d10403c672bf2d478fe187bf94caf0b606eb6e9377",
+   "uv": "5afb6a1cd46210f736c6cb542243d6d39400b82d5ca6bc0688a2e85231d84857",
+   "index": "f74d08a39a2e3ffe1fceaafce5c12c394d862739521d51d47dc0cfba7ab34b56"
+  },
+  {
+   "primitive": "cone",
+   "parameters": {
+    "radius": 0.8,
+    "height": 1.7,
+    "segments": 9
+   },
+   "vertices": 39,
+   "indices": 54,
+   "position": "de1521dd7a84b2b0da54245efaf84cb47e25530cc55fa9db86b76b8e021cff19",
+   "normal": "6c3b643cf67a67b5ee01852c5dc2866538cf722ea2e7f227df9ca32a7c45269c",
+   "uv": "fc65b90bf7e4de239e21a26d3c703839dabc446a50b340fa1410c7920d3cb2d1",
+   "index": "b630af98231e6d9445357395f263a9f45e66192be1f29389a244005153e73be3"
+  },
+  {
+   "primitive": "torus",
+   "parameters": {},
+   "vertices": 1225,
+   "indices": 6912,
+   "position": "4830b51eb10a2dab487b0cabd890c68db7101d9a8a9ae7be51824eea0af7845f",
+   "normal": "33b663b3a79747e57eef7d8e3e8a7ecaf80c88b07013efc8a68940538f2f34a6",
+   "uv": "e2fd0a19ca0ddcfdf12d54e907aa9e34de86b7044a824826a2bc34334103a70d",
+   "index": "b6cb38b16e57225a221def236712e7712ef83b83dab6bd0137fd619e1d2a10fd"
+  },
+  {
+   "primitive": "torus",
+   "parameters": {
+    "radius": 1,
+    "tube": 0.4,
+    "segments": 32
+   },
+   "vertices": 561,
+   "indices": 3072,
+   "position": "6c913b60772a24a8d7a15d944bad3d35df3711b9ca95c50c85d2178c72c3f2a9",
+   "normal": "d56c7c33d26f18d14cb85bddd9fbf95e67a04278d13c42c5dea3fe515c2810ea",
+   "uv": "ae61227d20c8db4c9268445c0b56f51cc89b6b3e01d8b698d9832f13fb2d1f36",
+   "index": "025a2194f7f9dc91dfc565f15617076eed4f9e75fb2b1325d94bd8de546c03eb"
+  },
+  {
+   "primitive": "torus",
+   "parameters": {
+    "radius": 0.6,
+    "tube": 0.18,
+    "segments": 5
+   },
+   "vertices": 54,
+   "indices": 240,
+   "position": "e7f56319b59e04e026d27393de8d05c4de8c925df37ef91e1db9603cec5cafd5",
+   "normal": "5bbfad64122af8511e09801d2e22b94aa44ec35c4bb218e700cd4cb3ef10caab",
+   "uv": "e31e5d21e8598dffa1f6b32d6173382da14d0127f7d492c864f1e15246e65d6f",
+   "index": "2d01f9270cca81950605285567b14062e36387db23b9d938d4a11e31ecabf16a"
+  }
+ ]
+}

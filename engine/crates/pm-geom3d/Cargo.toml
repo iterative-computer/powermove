@@ -8,3 +8,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+libm.workspace = true
+
+[dev-dependencies]
+sha2 = { workspace = true, features = ["std"] }
+serde_json.workspace = true

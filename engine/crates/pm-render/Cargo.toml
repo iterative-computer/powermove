@@ -8,3 +8,22 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+pm-protocol = { path = "../pm-protocol", default-features = false }
+pm-model = { path = "../pm-model" }
+pm-time = { path = "../pm-time" }
+pm-eval = { path = "../pm-eval" }
+pm-expr = { path = "../pm-expr" }
+pm-color = { path = "../pm-color" }
+pm-geom3d = { path = "../pm-geom3d" }
+pm-gpu = { path = "../pm-gpu", features = ["glsl"] }
+pm-media = { path = "../pm-media" }
+wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
+thiserror.workspace = true
+libm.workspace = true
+regex = "1"
+sha2 = { workspace = true, features = ["std"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+pm-export = { path = "../pm-export", features = ["test-sinks"] }
+png = "0.18"
