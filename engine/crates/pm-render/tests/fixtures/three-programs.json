@@ -1,0 +1,173 @@
+{
+ "three": "0.180.0",
+ "programs": [
+  {
+   "case": "sphere-studio",
+   "doubleSided": true,
+   "directionalLights": 1,
+   "hemisphereLights": 1,
+   "vertex": {
+    "sha256": "923b3eba659dfd5e476e93680f066926e2fc541e033c969e4d84bd4513634a29",
+    "bytes": 19049
+   },
+   "fragment": {
+    "sha256": "0a93184a7d3e95abae50a1902451bde76138f6b8ab01b79bd657315b5978e95f",
+    "bytes": 74438
+   }
+  },
+  {
+   "case": "sphere-corpus",
+   "doubleSided": true,
+   "directionalLights": 1,
+   "hemisphereLights": 1,
+   "vertex": {
+    "sha256": "923b3eba659dfd5e476e93680f066926e2fc541e033c969e4d84bd4513634a29",
+    "bytes": 19049
+   },
+   "fragment": {
+    "sha256": "0a93184a7d3e95abae50a1902451bde76138f6b8ab01b79bd657315b5978e95f",
+    "bytes": 74438
+   }
+  },
+  {
+   "case": "box-exposure",
+   "doubleSided": true,
+   "directionalLights": 1,
+   "hemisphereLights": 1,
+   "vertex": {
+    "sha256": "923b3eba659dfd5e476e93680f066926e2fc541e033c969e4d84bd4513634a29",
+    "bytes": 19049
+   },
+   "fragment": {
+    "sha256": "0a93184a7d3e95abae50a1902451bde76138f6b8ab01b79bd657315b5978e95f",
+    "bytes": 74438
+   }
+  },
+  {
+   "case": "plane-background",
+   "doubleSided": true,
+   "directionalLights": 1,
+   "hemisphereLights": 1,
+   "vertex": {
+    "sha256": "923b3eba659dfd5e476e93680f066926e2fc541e033c969e4d84bd4513634a29",
+    "bytes": 19049
+   },
+   "fragment": {
+    "sha256": "0a93184a7d3e95abae50a1902451bde76138f6b8ab01b79bd657315b5978e95f",
+    "bytes": 74438
+   }
+  },
+  {
+   "case": "cylinder-single-sided-two-suns",
+   "doubleSided": false,
+   "directionalLights": 2,
+   "hemisphereLights": 1,
+   "vertex": {
+    "sha256": "7e8327a1ac94640844586feb3f6ce0604d1290ca1f0bc8767e1c5a9fa7109ef7",
+    "bytes": 19028
+   },
+   "fragment": {
+    "sha256": "bc5f62eca46cfb09eb385ab2b4fc5cacb016a1bbf55836d746f6de77893568e2",
+    "bytes": 75056
+   }
+  },
+  {
+   "case": "cone-metal-three-suns",
+   "doubleSided": true,
+   "directionalLights": 3,
+   "hemisphereLights": 1,
+   "vertex": {
+    "sha256": "923b3eba659dfd5e476e93680f066926e2fc541e033c969e4d84bd4513634a29",
+    "bytes": 19049
+   },
+   "fragment": {
+    "sha256": "7e8a4ad31536568b527e56798d0c73c88c5e6d558a08374464743421f6eb0614",
+    "bytes": 75716
+   }
+  },
+  {
+   "case": "torus-orthographic",
+   "doubleSided": true,
+   "directionalLights": 1,
+   "hemisphereLights": 1,
+   "vertex": {
+    "sha256": "923b3eba659dfd5e476e93680f066926e2fc541e033c969e4d84bd4513634a29",
+    "bytes": 19049
+   },
+   "fragment": {
+    "sha256": "0a93184a7d3e95abae50a1902451bde76138f6b8ab01b79bd657315b5978e95f",
+    "bytes": 74438
+   }
+  },
+  {
+   "case": "sphere-half-opacity-layer",
+   "doubleSided": true,
+   "directionalLights": 1,
+   "hemisphereLights": 1,
+   "vertex": {
+    "sha256": "923b3eba659dfd5e476e93680f066926e2fc541e033c969e4d84bd4513634a29",
+    "bytes": 19049
+   },
+   "fragment": {
+    "sha256": "0a93184a7d3e95abae50a1902451bde76138f6b8ab01b79bd657315b5978e95f",
+    "bytes": 74438
+   }
+  },
+  {
+   "case": "box-odd-size-near-clip",
+   "doubleSided": true,
+   "directionalLights": 1,
+   "hemisphereLights": 1,
+   "vertex": {
+    "sha256": "923b3eba659dfd5e476e93680f066926e2fc541e033c969e4d84bd4513634a29",
+    "bytes": 19049
+   },
+   "fragment": {
+    "sha256": "0a93184a7d3e95abae50a1902451bde76138f6b8ab01b79bd657315b5978e95f",
+    "bytes": 74438
+   }
+  },
+  {
+   "case": "sphere-nonuniform-scale-rolled-camera",
+   "doubleSided": true,
+   "directionalLights": 1,
+   "hemisphereLights": 1,
+   "vertex": {
+    "sha256": "923b3eba659dfd5e476e93680f066926e2fc541e033c969e4d84bd4513634a29",
+    "bytes": 19049
+   },
+   "fragment": {
+    "sha256": "0a93184a7d3e95abae50a1902451bde76138f6b8ab01b79bd657315b5978e95f",
+    "bytes": 74438
+   }
+  },
+  {
+   "case": "sphere-mirror-exposure",
+   "doubleSided": true,
+   "directionalLights": 1,
+   "hemisphereLights": 1,
+   "vertex": {
+    "sha256": "923b3eba659dfd5e476e93680f066926e2fc541e033c969e4d84bd4513634a29",
+    "bytes": 19049
+   },
+   "fragment": {
+    "sha256": "0a93184a7d3e95abae50a1902451bde76138f6b8ab01b79bd657315b5978e95f",
+    "bytes": 74438
+   }
+  },
+  {
+   "case": "torus-emissive-dark",
+   "doubleSided": true,
+   "directionalLights": 1,
+   "hemisphereLights": 1,
+   "vertex": {
+    "sha256": "923b3eba659dfd5e476e93680f066926e2fc541e033c969e4d84bd4513634a29",
+    "bytes": 19049
+   },
+   "fragment": {
+    "sha256": "0a93184a7d3e95abae50a1902451bde76138f6b8ab01b79bd657315b5978e95f",
+    "bytes": 74438
+   }
+  }
+ ]
+}
