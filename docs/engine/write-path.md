@@ -249,8 +249,11 @@ unavailable headlessly now answers.
 
 ## The frame-rate validator (`apps/desktop/src/shared/frame-rate.ts`)
 
-One validator for the settings UI, `set_composition`, composition settings, load and
-validation, Home's media matching, and MCP `create_project` (section 5, rule 1). It
+One validator for the settings UI, `set_composition`, composition settings, new
+compositions (New Composition, Pre-compose, a composition from an asset), load and
+validation, Home's media matching, and MCP `create_project` (section 5, rule 1). A new
+composition that inherits its rate keeps the source's `fpsRational` (validated as a
+document rate); a typed one is coerced and validated as new. It
 reproduces pm-time's `rate_from_document` (checked through pm-wasm on 3,000+ inputs).
 New rates must divide the flick and lie in 1 to 240 fps and are stored as `num / den`;
 rates already in documents keep their float. Media rates become the nominal supported

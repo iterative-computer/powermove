@@ -294,10 +294,29 @@ export function install(PM: PMRegistry): void {
       ...(settings.render3d?{render3d:structuredClone(settings.render3d)}:{}),
     };
   };
+  /**
+   * The single frame-rate validator for a new composition: a rate inherited
+   * with its `fpsRational` (precompose, a comp from an asset, no rate given)
+   * is a document rate and keeps its rational; a typed one is coerced and
+   * validated as new. Either way `fps` and `fpsRational` are stored together.
+   */
+  const compWithRate = (settings: any = {}) => {
+    const comp: any = blankComp(settings);
+    const base = PM.proj || {};
+    const inherited = settings.fps == null ? { fps: base.fps ?? 30, fpsRational: base.fpsRational }
+      : settings.fpsRational != null ? { fps: settings.fps, fpsRational: settings.fpsRational } : null;
+    let check;
+    if (inherited) {
+      comp.fpsRational = inherited.fpsRational;
+      check = applyFrameRate(comp, inherited.fps, 'document');
+    } else check = applyFrameRate(comp, coerceFrameRate(settings.fps, Number(base.fps) || 30));
+    if (!check.ok) applyFrameRate(comp, 30);
+    return comp;
+  };
 
   /** Composition ▸ New Composition. AE opens the new comp. */
   const create = (settings: any = {}, options: { open?: boolean; layers?: any[] } = {}) => {
-    const comp: any = blankComp(settings);
+    const comp: any = compWithRate(settings);
     comp.name = uniqueName(comp.name);
     if (options.layers) comp.layers = options.layers;
     transact('New Composition', () => {
@@ -467,7 +486,7 @@ export function install(PM: PMRegistry): void {
       start = Math.min(...picked.map((layer: any) => layer.from));
       dur = Math.max(1 / host.fps, Math.max(...picked.map((layer: any) => layer.from + layer.dur)) - start);
     }
-    const comp: any = blankComp({ name, w: host.w, h: host.h, fps: host.fps, dur, bg: host.bg, render3d:host.render3d });
+    const comp: any = compWithRate({ name, w: host.w, h: host.h, fps: host.fps, fpsRational: host.fpsRational, dur, bg: host.bg, render3d:host.render3d });
     comp.name = name;
     const index = host.layers.findIndex((layer: any) => pickedIds.has(layer.id));
     /* Parenting cannot cross a composition boundary, so links to layers left
@@ -521,7 +540,7 @@ export function install(PM: PMRegistry): void {
     const ax = Number(bounds?.ax) || 0, ay = Number(bounds?.ay) || 0;
     /* The new comp spans the layer; the layer's source timing (trim, speed,
        time remap) moves inside with the source, so every frame is unchanged. */
-    const comp: any = blankComp({ name, w, h, fps: PM.proj.fps, dur: layer.dur, bg: PM.proj.bg, render3d:PM.proj.render3d });
+    const comp: any = compWithRate({ name, w, h, fps: PM.proj.fps, fpsRational: PM.proj.fpsRational, dur: layer.dur, bg: PM.proj.bg, render3d:PM.proj.render3d });
     comp.name = name;
     const inner = PM.mkLayer(layer.type, { name: layer.name, d: JSON.parse(JSON.stringify(layer.d)) }, comp);
     inner.from = 0;
@@ -554,7 +573,7 @@ export function install(PM: PMRegistry): void {
     const w = Math.round(meta.w || live?.w || PM.proj.w), h = Math.round(meta.h || live?.h || PM.proj.h);
     const dur = Number(meta.dur) > 0 ? Number(meta.dur) : PM.proj.dur;
     const name = uniqueName(String(meta.name || 'Comp').replace(/\.[a-z0-9]+$/i, ''));
-    const id = create({ name, w, h, dur, fps: PM.proj.fps }, { open: true });
+    const id = create({ name, w, h, dur, fps: PM.proj.fps, fpsRational: PM.proj.fpsRational }, { open: true });
     if (PM.proj.compId === id) { PM.time = 0; PM.cmd?.('addFromAsset', assetId); }
     return id;
   };

@@ -255,4 +255,21 @@ describe('composition patch paths', () => {
     expect(Object.keys(legacy.comps).sort()).toEqual(['X', 'Y']);
     expect(legacy.comps.X.comps).toEqual({});
   });
+  it('stores fps with fpsRational on every new composition (the single frame-rate validator)', () => {
+    const PM = composer();
+    PM.proj.fps = 30000 / 1001;
+    PM.proj.fpsRational = [30000, 1001];
+    // No rate given: inherited from the open composition with its rational.
+    const inherited = PM.Comps.get(PM.Comps.create({ name: 'Inherited' }, { open: false }));
+    expect(inherited).toMatchObject({ fps: 30000 / 1001, fpsRational: [30000, 1001] });
+    // A typed rate: coerced and validated as new.
+    const typed = PM.Comps.get(PM.Comps.create({ name: 'Typed', fps: '23.976' }, { open: false }));
+    expect(typed).toMatchObject({ fps: 24000 / 1001, fpsRational: [24000, 1001] });
+    const whole = PM.Comps.get(PM.Comps.create({ name: 'Whole', fps: 1000 }, { open: false }));
+    expect(whole).toMatchObject({ fps: 240, fpsRational: [240, 1] });
+    // Pre-compose inherits the host's rate.
+    PM.proj.layers.push(PM.mkLayer('solid', { name: 'Back' }, PM.proj));
+    const nested = PM.Comps.get(PM.Comps.precompose([PM.proj.layers[0].id], { open: false }));
+    expect(nested).toMatchObject({ fps: 30000 / 1001, fpsRational: [30000, 1001] });
+  });
 });
