@@ -51,7 +51,10 @@ pub enum ProjectStyle {
     Normal,
     Italic,
     /// `oblique <lo>deg <hi>deg`.
-    Oblique { lo: f32, hi: f32 },
+    Oblique {
+        lo: f32,
+        hi: f32,
+    },
 }
 
 /// Descriptors of a project font face (`FontFace(family, data, {weight, style, stretch})`).
@@ -72,7 +75,11 @@ fn normal_stretch() -> (f32, f32) {
 
 impl Default for ProjectDescriptors {
     fn default() -> Self {
-        ProjectDescriptors { weight: (400.0, 400.0), style: ProjectStyle::Normal, stretch: normal_stretch() }
+        ProjectDescriptors {
+            weight: (400.0, 400.0),
+            style: ProjectStyle::Normal,
+            stretch: normal_stretch(),
+        }
     }
 }
 
@@ -89,9 +96,16 @@ pub struct DescriptorError {
 }
 
 /// One or two numbers (a range is ordered), each from `one`.
-fn css_range(descriptor: &'static str, value: &str, one: impl Fn(&str) -> Option<f32>) -> Result<(f32, f32), DescriptorError> {
+fn css_range(
+    descriptor: &'static str,
+    value: &str,
+    one: impl Fn(&str) -> Option<f32>,
+) -> Result<(f32, f32), DescriptorError> {
     let parts: Vec<&str> = value.split_whitespace().collect();
-    let bad = || DescriptorError { descriptor, value: value.to_string() };
+    let bad = || DescriptorError {
+        descriptor,
+        value: value.to_string(),
+    };
     match parts.as_slice() {
         [a] => one(a).map(|a| (a, a)).ok_or_else(bad),
         [a, b] => match (one(a), one(b)) {
@@ -120,17 +134,29 @@ impl ProjectDescriptors {
         let weight = match weight.to_ascii_lowercase().as_str() {
             "" | "normal" => (400.0, 400.0),
             "bold" => (700.0, 700.0),
-            w => css_range("weight", w, |v| v.parse::<f32>().ok().filter(|n| (1.0..=1000.0).contains(n)))?,
+            w => css_range("weight", w, |v| {
+                v.parse::<f32>().ok().filter(|n| (1.0..=1000.0).contains(n))
+            })?,
         };
         let lower = style.to_ascii_lowercase();
         let style = match lower.split_whitespace().collect::<Vec<_>>().as_slice() {
             [] | ["normal"] => ProjectStyle::Normal,
             ["italic"] | ["oblique"] => ProjectStyle::Italic,
             ["oblique", angles @ ..] => {
-                let (lo, hi) = css_range("style", &angles.join(" "), css_angle).map_err(|_| DescriptorError { descriptor: "style", value: style.to_string() })?;
+                let (lo, hi) = css_range("style", &angles.join(" "), css_angle).map_err(|_| {
+                    DescriptorError {
+                        descriptor: "style",
+                        value: style.to_string(),
+                    }
+                })?;
                 ProjectStyle::Oblique { lo, hi }
             }
-            _ => return Err(DescriptorError { descriptor: "style", value: style.to_string() }),
+            _ => {
+                return Err(DescriptorError {
+                    descriptor: "style",
+                    value: style.to_string(),
+                });
+            }
         };
         let keyword = |v: &str| -> Option<f32> {
             Some(match v {
@@ -143,11 +169,23 @@ impl ProjectDescriptors {
                 "expanded" => 125.0,
                 "extra-expanded" => 150.0,
                 "ultra-expanded" => 200.0,
-                _ => v.strip_suffix('%')?.parse::<f32>().ok().filter(|n| *n >= 0.0)?,
+                _ => v
+                    .strip_suffix('%')?
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|n| *n >= 0.0)?,
             })
         };
-        let stretch = if stretch.is_empty() { normal_stretch() } else { css_range("stretch", &stretch.to_ascii_lowercase(), keyword)? };
-        Ok(ProjectDescriptors { weight, style, stretch })
+        let stretch = if stretch.is_empty() {
+            normal_stretch()
+        } else {
+            css_range("stretch", &stretch.to_ascii_lowercase(), keyword)?
+        };
+        Ok(ProjectDescriptors {
+            weight,
+            style,
+            stretch,
+        })
     }
 
     /// Blink's selection capabilities for the face (slope in CSS degrees).
@@ -166,7 +204,11 @@ impl ProjectDescriptors {
             ProjectStyle::Italic => (14.0, 14.0),
             _ => self.slope(),
         };
-        WebDescriptors { weight: self.weight, stretch: self.stretch, slope: Some(slope) }
+        WebDescriptors {
+            weight: self.weight,
+            stretch: self.stretch,
+            slope: Some(slope),
+        }
     }
 }
 
@@ -193,14 +235,35 @@ pub fn select_face(faces: &[ProjectDescriptors], desc: &FontDesc) -> Option<usiz
     if faces.is_empty() {
         return None;
     }
-    let req = Request { weight: desc.weight, width: 100.0, slope: if desc.italic { ITALIC_SLOPE } else { 0.0 } };
+    let req = Request {
+        weight: desc.weight,
+        width: 100.0,
+        slope: if desc.italic { ITALIC_SLOPE } else { 0.0 },
+    };
     let caps: Vec<(Range, Range, Range)> = faces
         .iter()
-        .map(|f| (Range(f.stretch.0, f.stretch.1), Range(f.slope().0, f.slope().1), Range(f.weight.0, f.weight.1)))
+        .map(|f| {
+            (
+                Range(f.stretch.0, f.stretch.1),
+                Range(f.slope().0, f.slope().1),
+                Range(f.weight.0, f.weight.1),
+            )
+        })
         .collect();
-    let bounds = caps.iter().fold((Range(f32::MAX, f32::MIN), Range(f32::MAX, f32::MIN), Range(f32::MAX, f32::MIN)), |b, c| {
-        (Range(b.0.0.min(c.0.0), b.0.1.max(c.0.1)), Range(b.1.0.min(c.1.0), b.1.1.max(c.1.1)), Range(b.2.0.min(c.2.0), b.2.1.max(c.2.1)))
-    });
+    let bounds = caps.iter().fold(
+        (
+            Range(f32::MAX, f32::MIN),
+            Range(f32::MAX, f32::MIN),
+            Range(f32::MAX, f32::MIN),
+        ),
+        |b, c| {
+            (
+                Range(b.0.0.min(c.0.0), b.0.1.max(c.0.1)),
+                Range(b.1.0.min(c.1.0), b.1.1.max(c.1.1)),
+                Range(b.2.0.min(c.2.0), b.2.1.max(c.2.1)),
+            )
+        },
+    );
     let stretch = |w: Range| -> f32 {
         if w.includes(req.width) {
             return 0.0;
@@ -414,26 +477,70 @@ mod tests {
     fn css_descriptors_parse_as_blink_reads_them() {
         let d = |w: &str, s: &str, st: &str| ProjectDescriptors::from_css(w, s, st);
         assert_eq!(d("", "", "").unwrap(), ProjectDescriptors::default());
-        assert_eq!(d("bold", "italic", "condensed").unwrap(), ProjectDescriptors { weight: (700.0, 700.0), style: ProjectStyle::Italic, stretch: (75.0, 75.0) });
-        assert_eq!(d("900 100", "oblique 10deg 0deg", "50% 200%").unwrap(), ProjectDescriptors { weight: (100.0, 900.0), style: ProjectStyle::Oblique { lo: 0.0, hi: 10.0 }, stretch: (50.0, 200.0) });
-        assert_eq!(d("350", "oblique", "normal").unwrap().style, ProjectStyle::Italic);
-        assert_eq!(d("1 1000", "oblique -12deg", "").unwrap().style, ProjectStyle::Oblique { lo: -12.0, hi: -12.0 });
-        for (w, s, st) in [("0", "", ""), ("heavy", "", ""), ("100 200 300", "", ""), ("", "slanted", ""), ("", "oblique 91deg", ""), ("", "oblique 10", ""), ("", "", "wide"), ("", "", "-5%")] {
+        assert_eq!(
+            d("bold", "italic", "condensed").unwrap(),
+            ProjectDescriptors {
+                weight: (700.0, 700.0),
+                style: ProjectStyle::Italic,
+                stretch: (75.0, 75.0)
+            }
+        );
+        assert_eq!(
+            d("900 100", "oblique 10deg 0deg", "50% 200%").unwrap(),
+            ProjectDescriptors {
+                weight: (100.0, 900.0),
+                style: ProjectStyle::Oblique { lo: 0.0, hi: 10.0 },
+                stretch: (50.0, 200.0)
+            }
+        );
+        assert_eq!(
+            d("350", "oblique", "normal").unwrap().style,
+            ProjectStyle::Italic
+        );
+        assert_eq!(
+            d("1 1000", "oblique -12deg", "").unwrap().style,
+            ProjectStyle::Oblique {
+                lo: -12.0,
+                hi: -12.0
+            }
+        );
+        for (w, s, st) in [
+            ("0", "", ""),
+            ("heavy", "", ""),
+            ("100 200 300", "", ""),
+            ("", "slanted", ""),
+            ("", "oblique 91deg", ""),
+            ("", "oblique 10", ""),
+            ("", "", "wide"),
+            ("", "", "-5%"),
+        ] {
             assert!(d(w, s, st).is_err(), "{w:?} {s:?} {st:?}");
         }
     }
 
     fn face(lo: f32, hi: f32, style: ProjectStyle) -> ProjectDescriptors {
-        ProjectDescriptors { weight: (lo, hi), style, stretch: (100.0, 100.0) }
+        ProjectDescriptors {
+            weight: (lo, hi),
+            style,
+            stretch: (100.0, 100.0),
+        }
     }
 
     fn d(weight: f32, italic: bool) -> FontDesc {
-        FontDesc { weight, italic, size: 16.0 }
+        FontDesc {
+            weight,
+            italic,
+            size: 16.0,
+        }
     }
 
     #[test]
     fn css_weight_matching() {
-        let faces = [face(300.0, 300.0, ProjectStyle::Normal), face(400.0, 400.0, ProjectStyle::Normal), face(700.0, 700.0, ProjectStyle::Normal)];
+        let faces = [
+            face(300.0, 300.0, ProjectStyle::Normal),
+            face(400.0, 400.0, ProjectStyle::Normal),
+            face(700.0, 700.0, ProjectStyle::Normal),
+        ];
         // 400..500: the exact face, then lighter faces from 500 down.
         assert_eq!(select_face(&faces, &d(400.0, false)), Some(1));
         assert_eq!(select_face(&faces, &d(500.0, false)), Some(1));
@@ -444,13 +551,19 @@ mod tests {
         assert_eq!(select_face(&faces, &d(600.0, false)), Some(2));
         assert_eq!(select_face(&faces, &d(900.0, false)), Some(2));
         // A variable face covering the request wins outright.
-        let faces = [face(400.0, 400.0, ProjectStyle::Normal), face(100.0, 900.0, ProjectStyle::Normal)];
+        let faces = [
+            face(400.0, 400.0, ProjectStyle::Normal),
+            face(100.0, 900.0, ProjectStyle::Normal),
+        ];
         assert_eq!(select_face(&faces, &d(650.0, false)), Some(1));
     }
 
     #[test]
     fn style_before_weight_and_synthesis() {
-        let faces = [face(400.0, 400.0, ProjectStyle::Normal), face(700.0, 700.0, ProjectStyle::Italic)];
+        let faces = [
+            face(400.0, 400.0, ProjectStyle::Normal),
+            face(700.0, 700.0, ProjectStyle::Italic),
+        ];
         assert_eq!(select_face(&faces, &d(400.0, true)), Some(1));
         assert_eq!(select_face(&faces, &d(700.0, false)), Some(0));
         assert_eq!(web_synthesis(&faces[0], &d(700.0, true)), (true, true));

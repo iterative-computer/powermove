@@ -910,13 +910,6 @@ export interface PowermoveBridge {
     popup(request: NativeMenuRequest): Promise<string | null>;
   };
   log(level: LogLevel, text: string): void;
-  /** pm-wasm's text layout fonts (docs/engine/text.md): registry answers and
-   *  metrics-and-shaping subsets. Main registers the channels only with
-   *  POWERMOVE_ENGINE_FONTS=1; otherwise the calls reject. */
-  engineFonts?: {
-    answer(queries: string): Promise<{ ok: true; value: string } | { ok: false; error: string } | null>;
-    subset(blob: string, index: number): Promise<{ ok: true; value: Uint8Array } | { ok: false; error: string } | null>;
-  };
   openExternal(url: string): Promise<void>;
   /** For extension URLs: main accepts only https, at most 2 KB, without credentials. */
   extensionOpenExternal?(url: string): Promise<void>;
@@ -965,6 +958,8 @@ export interface PowermoveBridge {
   nativeEngine?: import('./engine-ipc').EngineBridge;
   /** The frame bridge's receiver (behind "Use New Engine"). */
   frameBridge?: import('./frame-bridge').FrameBridgeApi;
+  /** pm-wasm's font registry channels (desktop host). */
+  engineFonts?: import('./engine-fonts-ipc').EngineFontsBridge;
   /** The host media store (section 21; source of media bytes behind "Use New Engine"). */
   mediaStore?: import('./media-store').MediaStoreBridge;
 }

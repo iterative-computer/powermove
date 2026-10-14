@@ -6,7 +6,9 @@
 //! under `~/Library/Application Support/Powermove Engine Corpus/`, and passes
 //! with a note when there is none. `PM_CORPUS_ONLY=<prefix>` limits it to
 //! projects whose `<group>/<name>` starts with the prefix; `PM_CORPUS_VERBOSE=1`
-//! prints every mismatch.
+//! prints every mismatch; `PM_CORPUS_FRESH_FONT_CACHE=1` measures text as a
+//! fresh renderer would instead of modelling the capture's font cache
+//! (`capture_font_cache_seeds`).
 //!
 //! Tolerances (plan section 25): numbers within `1e-9 + 1e-9·|b|`, strings and
 //! booleans exact; bounds within 1e-6.
@@ -25,6 +27,7 @@ use pm_text::compat::{GlyphLayout, Unit};
 
 use pm_eval::bounds::{Bounds, HOST_ONLY, LayerHost};
 use pm_eval::text_measure::CompatMeasure;
+use pm_text::compat::FontCacheSeed;
 use pm_text::registry::CoreTextRegistry;
 use support::pm_expr_engine::PmExprEngine;
 
@@ -396,21 +399,16 @@ impl Ctx<'_> {
 
 const NUM: (f64, f64) = (1e-9, 1e-9);
 
-/// Why a caption's bounds are not compared: Blink measures at
-/// `FontDescription::EffectiveFontSize` (`floorf(size * 100) / 100` in
-/// `float`, the font cache key's precision); pm-text measures at the size
-/// given.
-const PM_TEXT_SIZE_GRID: &str = "caption size off Blink's 1/100 px font grid (pm-text)";
-
-/// Whether Blink's effective font size equals `size`.
-fn on_font_size_grid(size: f64) -> bool {
-    let s = size as f32;
-    (s * 100.0).floor() / 100.0 == s
-}
-
 /// Why a text layer's geometry is not compared: pm-text measures it
 /// differently from the capture (a pm-text difference, reported by font).
 const PM_TEXT_DIFFERS: &str = "pm-text layout differs from the capture";
+
+/// Text layouts (layer × dump) that may be left out of the comparison
+/// because pm-text lays them out differently from the capture, per font
+/// (amendment 19). The test fails when a font's count grows past its pin
+/// (fonts not listed are pinned at 0); lower a pin when pm-text improves.
+/// Empty: every text layout of the v0 and v1 captures is compared.
+const PINNED_TEXT_DIFFERENCES: &[(&str, usize)] = &[];
 
 fn compare_comp(
     cx: &mut Ctx<'_>,
@@ -658,16 +656,7 @@ fn compare_comp(
                 );
             }
         }
-        // A caption shrunk to fit its line budget is measured at a size off
-        // Blink's 1/100 px font size grid, which pm-text does not apply yet.
-        let off_grid_caption = ty == "captions"
-            && matches!(
-                scope.caption_frame(layer, time, &mut *cx.measure),
-                Ok(Some(f)) if !on_font_size_grid(f.layout.size)
-            );
-        if off_grid_caption {
-            cx.stats.skip("bounds", PM_TEXT_SIZE_GRID);
-        } else if ty != "audio" {
+        if ty != "audio" {
             let got = scope.bounds(layer, time, &mut *cx.measure, &mut CorpusHost);
             let category: &'static str = if variable {
                 "bounds (variable font)"
@@ -1000,7 +989,80 @@ fn node_has(layer: &Node, member: &str, key: &JsString) -> bool {
 }
 
 fn main() {
+    pins_fail_only_when_a_font_grows();
     corpus_evaluation_matches_legacy();
+}
+
+/// Fonts whose not-compared text layouts exceed their pins: `(font, count,
+/// pin)`. Fonts without a pin are pinned at 0.
+fn text_differences_over_pins(
+    counts: &BTreeMap<String, usize>,
+    pins: &[(&str, usize)],
+) -> Vec<(String, usize, usize)> {
+    counts
+        .iter()
+        .filter_map(|(font, &n)| {
+            let pin = pins.iter().find(|(f, _)| f == font).map_or(0, |(_, p)| *p);
+            (n > pin).then(|| (font.clone(), n, pin))
+        })
+        .collect()
+}
+
+fn pins_fail_only_when_a_font_grows() {
+    let counts: BTreeMap<String, usize> =
+        [("system-ui".to_owned(), 3), ("Menlo".to_owned(), 1)].into();
+    assert!(text_differences_over_pins(&counts, &[("system-ui", 3), ("Menlo", 1)]).is_empty());
+    assert!(text_differences_over_pins(&counts, &[("system-ui", 5), ("Menlo", 2)]).is_empty());
+    assert_eq!(
+        text_differences_over_pins(&counts, &[("system-ui", 2), ("Menlo", 1)]),
+        [("system-ui".to_owned(), 3, 2)]
+    );
+    // A font without a pin is pinned at 0.
+    assert_eq!(
+        text_differences_over_pins(&counts, &[("system-ui", 3)]),
+        [("Menlo".to_owned(), 1, 0)]
+    );
+    assert!(text_differences_over_pins(&BTreeMap::new(), &[]).is_empty());
+}
+
+/// The UI's type scale (`packages/tokens/tokens.css`: `--fs-sm`, `--fs-md`)
+/// in CSS px. The app's UI lays system-ui text out at these sizes (font
+/// previews fall back to `system-ui`, the 3D viewport chrome uses it).
+const UI_SYSTEM_UI_SIZES: [f32; 2] = [12.0, 13.0];
+
+/// The state of Blink's font cache in the renderer that captured the corpus
+/// (`pm_text::compat::FontCacheSeed`).
+///
+/// The capture ran in the app, whose UI had laid out 400-weight `system-ui`
+/// DOM text at its type scale before the canvas measured anything. At a
+/// device scale factor of 2 that text is laid out at 24 and 26 px, so the
+/// renderer's 24 and 26 px `system-ui` platform data carries `opsz` 12 and
+/// 13 (SF's axis minimum, 17), and every canvas measuring `system-ui` at 24
+/// or 26 px reuses it. Headless Chromium reproduces the capture's advances
+/// bit for bit with 12 and 13 px `system-ui` DOM text at a scale factor of
+/// 2, and pm-text's fresh-renderer advances without it or at a scale factor
+/// of 1 (docs/engine/text.md).
+fn capture_font_cache_seeds(manifest: Option<&Value>) -> Vec<FontCacheSeed> {
+    let dpr = manifest
+        .and_then(|m| member(m, "gpu"))
+        .and_then(|g| member(g, "devicePixelRatio"))
+        .and_then(dumped_number)
+        .unwrap_or(1.0) as f32;
+    if dpr == 1.0 {
+        // Entries at the CSS size: a canvas at that size would make the same
+        // ones (`opsz` at its own size).
+        return Vec::new();
+    }
+    UI_SYSTEM_UI_SIZES
+        .iter()
+        .map(|&css| FontCacheSeed {
+            family: "system-ui".into(),
+            weight: 400.0,
+            italic: false,
+            size: pm_text::compat::canvas::effective_font_size(css * dpr),
+            specified: css,
+        })
+        .collect()
 }
 
 fn corpus_evaluation_matches_legacy() {
@@ -1016,6 +1078,32 @@ fn corpus_evaluation_matches_legacy() {
     };
     let mut count = 0;
     let mut measure = CompatMeasure::new(CoreTextRegistry::new());
+    let manifest = std::fs::read_to_string(dir.join("manifest.json"))
+        .ok()
+        .and_then(|m| parse(&m).ok());
+    let seeds = if std::env::var("PM_CORPUS_FRESH_FONT_CACHE").is_ok() {
+        Vec::new()
+    } else {
+        capture_font_cache_seeds(manifest.as_ref())
+    };
+    eprintln!(
+        "renderer font cache: {}",
+        if seeds.is_empty() {
+            "fresh".to_owned()
+        } else {
+            seeds
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{} {} at {} px from {} px",
+                        s.family, s.weight, s.size, s.specified
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    );
+    measure.compat().set_font_cache_seeds(seeds);
     for (name, path) in projects(&dir) {
         if only.as_deref().is_some_and(|p| !name.starts_with(p)) {
             continue;
@@ -1093,5 +1181,21 @@ fn corpus_evaluation_matches_legacy() {
             eprintln!("    {font:<24} {n:>7}");
         }
     }
+    let grown = text_differences_over_pins(&stats.layout_fonts, PINNED_TEXT_DIFFERENCES);
+    for (font, n, pin) in &grown {
+        eprintln!("  text layouts in {font} not compared: {n}, pinned at {pin}");
+    }
+    for (font, pin) in PINNED_TEXT_DIFFERENCES {
+        let n = stats.layout_fonts.get(*font).copied().unwrap_or(0);
+        if n < *pin {
+            eprintln!(
+                "  text layouts in {font} not compared: {n}, below its pin of {pin}; lower the pin"
+            );
+        }
+    }
     assert!(!failed, "corpus mismatches (see above)");
+    assert!(
+        grown.is_empty(),
+        "text layouts left out of the comparison grew past their pins (see above)"
+    );
 }

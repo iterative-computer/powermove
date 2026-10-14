@@ -23,9 +23,12 @@ fn main() {
     /// a regression even though it passes the gate.
     const REGRESSION_SENTINEL_PX: f64 = 0.01;
 
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/canvas2d-corpus.json.gz");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/canvas2d-corpus.json.gz");
     let mut json = String::new();
-    GzDecoder::new(std::fs::File::open(&path).expect("fixture")).read_to_string(&mut json).expect("gzip fixture");
+    GzDecoder::new(std::fs::File::open(&path).expect("fixture"))
+        .read_to_string(&mut json)
+        .expect("gzip fixture");
     let fixture = Fixture::from_json(&json).expect("fixture json");
     let drift = fixture.font_drift();
     assert!(
@@ -38,32 +41,81 @@ fn main() {
 
     let corpus = fixture.corpus();
     let run = corpus::run_native(&corpus).expect("native registry");
-    let diffs: Vec<_> = corpus.cases.iter().zip(&run.outputs).zip(&fixture.cases).map(|((c, o), f)| corpus::compare(c, o, &f.expected.unpack())).collect();
+    let diffs: Vec<_> = corpus
+        .cases
+        .iter()
+        .zip(&run.outputs)
+        .zip(&fixture.cases)
+        .map(|((c, o), f)| corpus::compare(c, o, &f.expected.unpack()))
+        .collect();
     let s = corpus::summarize(&diffs);
     println!(
         "level 1 vs Canvas2D: {} cases, identical breaks {}, within {TOLERANCE_PX} px {}, max error {:.6} px (p99 {:.6}), native layout {:.2} s",
-        s.cases, s.identical_breaks, s.within_tolerance, s.max_advance_error, s.p99_advance_error, run.seconds
+        s.cases,
+        s.identical_breaks,
+        s.within_tolerance,
+        s.max_advance_error,
+        s.p99_advance_error,
+        run.seconds
     );
     for (g, (n, ident, within, max)) in &s.groups {
         println!("  {g:12} {n:5} cases  breaks {ident:5}  within {within:5}  max {max:.6}");
     }
-    let failures: Vec<String> = diffs.iter().filter(|d| !d.passes()).take(20).map(|d| format!("{} [{}]: {}", d.id, d.group, d.detail.join("; "))).collect();
-    assert!(failures.is_empty(), "{} cases fail the text gate:\n{}", diffs.iter().filter(|d| !d.passes()).count(), failures.join("\n"));
-    assert!(s.max_advance_error <= REGRESSION_SENTINEL_PX, "max error {} px passes the 0.25 px gate but regressed past {REGRESSION_SENTINEL_PX} px", s.max_advance_error);
+    let failures: Vec<String> = diffs
+        .iter()
+        .filter(|d| !d.passes())
+        .take(20)
+        .map(|d| format!("{} [{}]: {}", d.id, d.group, d.detail.join("; ")))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} cases fail the text gate:\n{}",
+        diffs.iter().filter(|d| !d.passes()).count(),
+        failures.join("\n")
+    );
+    assert!(
+        s.max_advance_error <= REGRESSION_SENTINEL_PX,
+        "max error {} px passes the 0.25 px gate but regressed past {REGRESSION_SENTINEL_PX} px",
+        s.max_advance_error
+    );
 
     // Replay over full fonts: the registry boundary loses nothing.
     let full = |blob: &str, index: u32| (run.registry.blob(blob).expect("recorded blob"), index);
     let (replayed, misses, pending) = corpus::run_replay(&run.answers, full, &corpus.cases);
     assert_eq!((misses, pending), (0, 0), "replay misses and pending faces");
-    let same = replayed.iter().zip(&run.outputs).filter(|(a, b)| a == b).count();
-    assert_eq!(same, run.outputs.len(), "replay over full fonts is bit-identical to the native run");
+    let same = replayed
+        .iter()
+        .zip(&run.outputs)
+        .filter(|(a, b)| a == b)
+        .count();
+    assert_eq!(
+        same,
+        run.outputs.len(),
+        "replay over full fonts is bit-identical to the native run"
+    );
 
     // Replay over metrics-and-shaping subsets (what main serves to pm-wasm).
     let subsets = corpus::subsets_for(&run.answers, |b| run.registry.blob(b)).expect("subsets");
-    let (replayed, misses, pending) = corpus::run_replay(&run.answers, |b, i| (FontBytes::new(subsets[&subset_key(b, i)].clone()), 0), &corpus.cases);
-    assert_eq!((misses, pending), (0, 0), "subset replay misses and pending faces");
-    let same = replayed.iter().zip(&run.outputs).filter(|(a, b)| a == b).count();
-    assert_eq!(same, run.outputs.len(), "replay over subsets is bit-identical to the native run");
+    let (replayed, misses, pending) = corpus::run_replay(
+        &run.answers,
+        |b, i| (FontBytes::new(subsets[&subset_key(b, i)].clone()), 0),
+        &corpus.cases,
+    );
+    assert_eq!(
+        (misses, pending),
+        (0, 0),
+        "subset replay misses and pending faces"
+    );
+    let same = replayed
+        .iter()
+        .zip(&run.outputs)
+        .filter(|(a, b)| a == b)
+        .count();
+    assert_eq!(
+        same,
+        run.outputs.len(),
+        "replay over subsets is bit-identical to the native run"
+    );
 
     // Subset sizes: each subset is smaller than its source, and the whole
     // set stays a few percent of the font files it came from.
@@ -72,7 +124,10 @@ fn main() {
     for (blob, index) in run.answers.sources() {
         let source = run.registry.blob(&blob).expect("blob").as_slice().len();
         let subset = subsets[&subset_key(&blob, index)].len();
-        assert!(subset < source, "subset {blob}.{index} is {subset} bytes from {source}");
+        assert!(
+            subset < source,
+            "subset {blob}.{index} is {subset} bytes from {source}"
+        );
         if seen.insert(blob) {
             full_bytes += source as u64;
         }
