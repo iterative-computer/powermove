@@ -91,7 +91,19 @@ fn setup(
     ppm: f64,
 ) -> (Playback, SimDevice, Rig) {
     let doc = project(30.0, dur, &[audio("A", "s", 0.0, dur, "", "")], &[], "");
-    let mut rig = Rig::new(&[("s", file)]);
+    setup_doc(doc, &[("s", file)], device_rate, 2, ppm)
+}
+
+/// Playback of `doc` (composition `C`) on a simulated device, decoding on
+/// two workers as the app does.
+fn setup_doc(
+    doc: pm_model::Document,
+    media: &[(&str, &std::path::Path)],
+    device_rate: u32,
+    device_channels: usize,
+    ppm: f64,
+) -> (Playback, SimDevice, Rig) {
+    let mut rig = Rig::new(media);
     rig.cache = SourceCache::new(64 << 20, 2);
     let cache: Arc<SourceCache> = rig.cache.clone();
     let (playback, side) = Playback::start_headless(
@@ -99,15 +111,19 @@ fn setup(
         cache,
         PlaybackConfig::default(),
         device_rate,
-        2,
+        device_channels,
         LATENCY_US,
     )
     .unwrap();
     let media = rig.media.clone();
     let resolver = move |id: &str| media.get(id).cloned();
     let problems = playback.set_project(Arc::new(doc), "C", &resolver).unwrap();
-    assert!(problems.is_empty());
-    (playback, SimDevice::new(side, device_rate, 2, ppm), rig)
+    assert!(problems.is_empty(), "{problems:?}");
+    (
+        playback,
+        SimDevice::new(side, device_rate, device_channels, ppm),
+        rig,
+    )
 }
 
 /// A ramp source makes every sample's media position readable from its value.
@@ -582,4 +598,98 @@ fn a_live_edit_glides() {
         (gliding as f32 - glide).abs() <= 1.0,
         "{gliding} samples between the levels"
     );
+}
+
+/// Speed-changed and time-remapped clips decode ahead like any other: the
+/// pre-roll waits for their source blocks, the look-ahead queues them, and
+/// what plays equals the offline render from the first sample (no starved
+/// render, no dropout). The source is AAC, so decoding takes real time.
+#[test]
+fn time_mapped_clips_play_as_rendered_offline() {
+    let dir = temp_dir("time-mapped");
+    let file = dir.join("tone.m4a");
+    generate(
+        &file,
+        "aevalsrc=0.125*sin(2*PI*441*t)|0.125*sin(2*PI*660*t):s=44100:d=20",
+        &["-c:a", "aac", "-b:a", "160k"],
+    );
+    let remap = keys(&[(0.0, 2.0), (6.0, 10.0)]);
+    let cases: [(&str, String, f64); 3] = [
+        (
+            "audio at speed 1.5",
+            audio("A", "s", 0.0, 12.0, r#","speed":1.5"#, ""),
+            3.0,
+        ),
+        (
+            "audio at speed 0.75",
+            audio("A", "s", 0.0, 12.0, r#","speed":0.75"#, ""),
+            1.0,
+        ),
+        (
+            "a remapped soundtrack",
+            layer(
+                "V",
+                "video",
+                0.0,
+                6.0,
+                &format!(
+                    r#"{{"asset":"s","timeRemap":true,"sourceTime":{remap},"embeddedAudio":true}}"#
+                ),
+                "",
+            ),
+            2.0,
+        ),
+    ];
+    for (name, layer, at) in cases {
+        let doc = || project(30.0, 12.0, std::slice::from_ref(&layer), &[], "");
+        let (playback, mut dev, rig) = setup_doc(doc(), &[("s", &file)], SR, 2, 0.0);
+        playback
+            .command(TransportCommand::Seek {
+                time: ticks(at),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        playback
+            .command(TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        dev.run(200);
+        let stats = playback.stats();
+        drop(playback);
+        let played: Vec<f32> = dev
+            .log
+            .iter()
+            .flat_map(|(_, b)| b.iter().step_by(2).copied())
+            .collect();
+        let start = played
+            .iter()
+            .position(|v| *v != 0.0)
+            .unwrap_or_else(|| panic!("{name}: nothing played"));
+        let n = 80_000;
+        let from = (at * SR as f64).round() as i64;
+        let mut m = rig.mixer(doc(), "C", MixFormat::stereo(SR));
+        let offline = rig.render(&mut m, from, from + n as i64, 4096);
+        let lead = offline[0].iter().position(|v| *v != 0.0).unwrap();
+        assert!(start >= lead && played.len() >= start - lead + n, "{name}");
+        let played = &played[start - lead..start - lead + n];
+        let differ = played
+            .iter()
+            .zip(&offline[0])
+            .filter(|(a, b)| a != b)
+            .count();
+        let worst = played
+            .iter()
+            .zip(&offline[0])
+            .fold(0f32, |w, (a, b)| w.max((a - b).abs()));
+        eprintln!(
+            "{name}: {} starved renders, {differ} of {n} samples differ from the offline render (worst {worst})",
+            stats.starved_renders
+        );
+        assert_eq!(stats.starved_renders, 0, "{name}: starved renders");
+        assert_eq!(
+            differ, 0,
+            "{name}: played audio differs from the offline render"
+        );
+    }
 }

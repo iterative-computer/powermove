@@ -65,6 +65,11 @@ fn run(label: &str, layers: Vec<String>, seconds: f64, media: &[(String, PathBuf
         Evaluator::new(),
         cache,
     );
+    // The playback look-ahead's read bounds (control points of time-mapped
+    // voices, evaluated once per point): their cost per second of audio.
+    let t = Instant::now();
+    let spans = mixer.source_spans(0, (seconds * 48_000.0) as usize).len();
+    let bounds_ms = t.elapsed().as_secs_f64() * 1000.0 / seconds;
     // Decode first so the timing is the mix alone.
     offline::render(
         &mut mixer,
@@ -81,7 +86,8 @@ fn run(label: &str, layers: Vec<String>, seconds: f64, media: &[(String, PathBuf
     .unwrap();
     let elapsed = t.elapsed().as_secs_f64();
     println!(
-        "{label:<40} {voices:>3} voices: {:>7.1}× real time ({:.2} ms per second of audio, {:.3} ms per voice-second)",
+        "{label:<40} {voices:>3} voices: {:>7.1}× real time ({:.2} ms per second of audio, {:.3} ms per voice-second); \
+         look-ahead read bounds {bounds_ms:.3} ms per second of audio ({spans} spans)",
         seconds / elapsed,
         elapsed * 1000.0 / seconds,
         elapsed * 1000.0 / seconds / voices as f64

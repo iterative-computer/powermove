@@ -17,7 +17,7 @@
 //! sample exactly; other maps interpolate the source position between
 //! control points.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use pm_eval::Evaluator;
@@ -30,7 +30,7 @@ use crate::graph::{MixGraph, Point, VoicePlan};
 use crate::kernel::{self, Bank};
 use crate::layout;
 use crate::meter::{Meters, Tap};
-use crate::source::SourceCache;
+use crate::source::{Source, SourceCache};
 
 /// Samples between automation control points (3 kHz at 48 kHz).
 pub const CONTROL: i64 = 16;
@@ -40,6 +40,16 @@ pub const CONTROL: i64 = 16;
 /// today's engine does (`RETUNE_GLIDE` in `legacy/core/audio.ts`): hard steps
 /// on a sustained sound are audible as clicks and zipper noise.
 pub const RETUNE_GLIDE_MS: u32 = 12;
+
+/// Control points per memoized read bound of a time-mapped voice
+/// ([`Mixer::source_spans`]): 4096 samples.
+pub const READ_GROUP: i64 = 256;
+
+/// Memoized read bounds kept before they are dropped and evaluated again.
+const MAX_READ_GROUPS: usize = 1 << 16;
+
+/// Source sample spans `[lo, hi)`.
+type Spans = Arc<[(i64, i64)]>;
 
 /// Retune glides kept at once; an older one is cut short (a fader dragged at
 /// 60 Hz starts a glide every 16.7 ms, so two overlap at most).
@@ -163,6 +173,8 @@ pub struct Mixer {
     glide_len: usize,
     glide_acc: Vec<Vec<f32>>,
     glide_tmp: Vec<Vec<f32>>,
+    /// Read bounds of time-mapped voices, per (voice, control-point group).
+    reads: HashMap<(usize, i64), Spans>,
 }
 
 impl Mixer {
@@ -199,6 +211,7 @@ impl Mixer {
             glide_len: 0,
             glide_acc: vec![],
             glide_tmp: vec![],
+            reads: HashMap::new(),
         };
         m.glide_len = (m.format.sample_rate as usize * RETUNE_GLIDE_MS as usize / 1000).max(1);
         m.set_graph(m.doc.clone(), graph);
@@ -213,6 +226,7 @@ impl Mixer {
     pub fn set_evaluator(&mut self, ev: Evaluator) {
         self.ev = ev;
         self.retime.clear();
+        self.reads.clear();
     }
 
     pub fn cache(&self) -> &Arc<SourceCache> {
@@ -292,6 +306,7 @@ impl Mixer {
         }
         self.master_gain = graph.master as f32;
         self.retime.clear();
+        self.reads.clear();
         self.doc = doc;
         self.graph = graph;
     }
@@ -693,53 +708,181 @@ impl Mixer {
         Ok(Some(!complete))
     }
 
-    /// Queues the source blocks a playback of `[start, start + frames)`
-    /// will need, for the decode workers.
-    pub fn prefetch(&mut self, start: i64, frames: usize) {
+    /// The source sample spans `[lo, hi)` a render of project samples
+    /// `[start, start + frames)` reads: linear voices first, then
+    /// time-mapped voices in time order.
+    ///
+    /// Linear voices map the range directly. Time-mapped voices (speed,
+    /// remaps, animated trims) are bounded per control interval from the
+    /// same control points [`Self::render`] evaluates, padded by the filter
+    /// the render reads with there, so the spans hold every sample the
+    /// render touches. Those bounds are kept per group of [`READ_GROUP`]
+    /// control points until the graph changes, so the look-ahead and the
+    /// pre-roll poll evaluate each point once.
+    pub fn source_spans(&mut self, start: i64, frames: usize) -> Vec<(Arc<Source>, i64, i64)> {
+        self.source_spans_within(start, frames, usize::MAX).0
+    }
+
+    /// [`Self::source_spans`], evaluating at most `budget` groups not yet
+    /// bounded (nearest first); also whether every group was bounded.
+    pub fn source_spans_within(
+        &mut self,
+        start: i64,
+        frames: usize,
+        budget: usize,
+    ) -> (Vec<(Arc<Source>, i64, i64)>, bool) {
         let p = self.format.sample_rate as f64;
         let graph = self.graph.clone();
-        for plan in &graph.voices {
+        let doc = self.doc.clone();
+        let end = start + frames as i64;
+        let mut out = Vec::new();
+        // Time-mapped voices: (index, first and last sample heard here).
+        let mut mapped: Vec<(usize, i64, i64)> = Vec::new();
+        for (vi, plan) in graph.voices.iter().enumerate() {
             let first = sample_at(plan.window.0, p);
             let last = sample_at(plan.window.1, p);
-            let (a, b) = (start.max(first), (start + frames as i64).min(last));
+            let (a, b) = (start.max(first), end.min(last));
             if b <= a {
                 continue;
             }
-            let rate = plan.source.sample_rate() as f64;
-            let span = match plan.offset {
-                Some(o) => {
-                    let s0 = ((a as f64 / p - o) * rate).floor() as i64 - kernel::TAPS as i64;
-                    let s1 = ((b as f64 / p - o) * rate).ceil() as i64 + kernel::TAPS as i64;
-                    Some((s0, s1))
-                }
-                None => None,
+            let Some(o) = plan.offset else {
+                mapped.push((vi, first, last));
+                continue;
             };
-            if let Some((s0, s1)) = span {
-                let lo = (s0.max(0) as u64) / crate::source::BLOCK as u64;
-                let hi = (s1.max(0) as u64) / crate::source::BLOCK as u64;
-                self.cache.prefetch(&plan.source, lo..=hi);
+            let rate = plan.source.sample_rate() as f64;
+            let pad = match &self.voices[vi].reader {
+                Reader::Copy { .. } => 1,
+                Reader::Grid { bank, .. } => bank.taps as i64,
+                Reader::Free => kernel::free_bank(rate / p).taps as i64,
+            };
+            let s0 = ((a as f64 / p - o) * rate).floor() as i64 - pad;
+            let s1 = ((b as f64 / p - o) * rate).ceil() as i64 + pad;
+            out.push((plan.source.clone(), s0, s1));
+        }
+        if mapped.is_empty() || frames == 0 {
+            return (out, true);
+        }
+        let Ok(comps) = graph.resolve(&doc) else {
+            return (out, true);
+        };
+        let span = CONTROL * READ_GROUP;
+        let mut left = budget;
+        let mut complete = true;
+        for g in start.div_euclid(span)..=(end - 1).div_euclid(span) {
+            let (g0, g1) = (g * span, (g + 1) * span);
+            for &(vi, first, last) in &mapped {
+                if g1 <= first || g0 >= last {
+                    continue;
+                }
+                let plan = &graph.voices[vi];
+                let spans = match self.reads.get(&(vi, g)) {
+                    Some(s) => s.clone(),
+                    None if left == 0 => {
+                        complete = false;
+                        continue;
+                    }
+                    None => {
+                        left -= 1;
+                        if self.reads.len() >= MAX_READ_GROUPS {
+                            self.reads.clear();
+                        }
+                        // A voice that fails to evaluate reads nothing (the
+                        // render reports the error).
+                        let s: Spans = group_spans(
+                            plan,
+                            &mut self.ev,
+                            &mut self.retime,
+                            &comps,
+                            g,
+                            p,
+                            (first, last),
+                        )
+                        .unwrap_or_default()
+                        .into();
+                        self.reads.insert((vi, g), s.clone());
+                        s
+                    }
+                };
+                out.extend(spans.iter().map(|&(lo, hi)| (plan.source.clone(), lo, hi)));
             }
         }
+        (out, complete)
     }
 
-    /// Whether the blocks for `[start, start + frames)` of every linear voice
-    /// are decoded (playback waits for this before it starts).
-    pub fn is_ready(&self, start: i64, frames: usize) -> bool {
-        let p = self.format.sample_rate as f64;
-        self.graph.voices.iter().all(|plan| {
-            let first = sample_at(plan.window.0, p);
-            let last = sample_at(plan.window.1, p);
-            let (a, b) = (start.max(first), (start + frames as i64).min(last));
-            if b <= a {
-                return true;
-            }
-            let Some(o) = plan.offset else { return true };
-            let rate = plan.source.sample_rate() as f64;
-            let s0 = ((a as f64 / p - o) * rate).floor() as i64 - kernel::TAPS as i64;
-            let s1 = ((b as f64 / p - o) * rate).ceil() as i64 + kernel::TAPS as i64;
-            self.cache.is_ready(&plan.source, s0, (s1 - s0) as usize)
-        })
+    /// Queues the source blocks a playback of `[start, start + frames)`
+    /// will need, for the decode workers.
+    pub fn prefetch(&mut self, start: i64, frames: usize) {
+        self.prefetch_within(start, frames, usize::MAX);
     }
+
+    /// [`Self::prefetch`] bounding at most `budget` groups of time-mapped
+    /// voices not yet bounded, so a long look-ahead spreads its evaluation
+    /// over several calls; returns whether the whole range is queued.
+    pub fn prefetch_within(&mut self, start: i64, frames: usize, budget: usize) -> bool {
+        let (spans, complete) = self.source_spans_within(start, frames, budget);
+        for (source, lo, hi) in spans {
+            self.cache.prefetch_span(&source, lo, (hi - lo) as usize);
+        }
+        complete
+    }
+
+    /// Whether the source blocks for `[start, start + frames)` of every voice
+    /// are decoded (playback waits for this before it starts).
+    pub fn is_ready(&mut self, start: i64, frames: usize) -> bool {
+        self.source_spans(start, frames)
+            .iter()
+            .all(|(source, lo, hi)| self.cache.is_ready(source, *lo, (hi - lo) as usize))
+    }
+}
+
+/// The merged source spans a time-mapped voice reads in control-point group
+/// `g` (control points `g × READ_GROUP` to `(g + 1) × READ_GROUP`), for a
+/// voice heard in project samples `[window.0, window.1)`.
+fn group_spans(
+    plan: &VoicePlan,
+    ev: &mut Evaluator,
+    retime: &mut RetimeCache,
+    comps: &[pm_eval::Comp<'_>],
+    g: i64,
+    p: f64,
+    window: (i64, i64),
+) -> Result<Vec<(i64, i64)>> {
+    let open = &comps[0];
+    let rate = plan.source.sample_rate() as f64;
+    let first = g * READ_GROUP * CONTROL;
+    // As `render_voice`: a time-mapped voice sounds where it is in its span.
+    let on = |pt: &Point| pt.active && pt.in_span && pt.gain != 0.0;
+    let mut spans: Vec<(i64, i64)> = Vec::new();
+    let mut prev: Option<Point> = None;
+    for k in 0..=READ_GROUP {
+        let c = first + k * CONTROL;
+        let r = plan.evaluate(ev, comps, open, c as f64 / p, retime)?;
+        if let Some(l) = prev
+            && (on(&l) || on(&r))
+            && c > window.0
+            && c - CONTROL < window.1
+        {
+            let (x0, x1) = (l.source_time * rate, r.source_time * rate);
+            if x0.is_finite() && x1.is_finite() {
+                // The filter `render_voice` reads this interval with.
+                let step = (r.source_time - l.source_time).abs() * rate / CONTROL as f64;
+                let bank = kernel::free_bank(step.max(1.0));
+                let lo = x0.min(x1).floor() as i64 - bank.before() as i64;
+                let hi = x0.max(x1).floor() as i64 + (bank.taps - bank.before()) as i64;
+                spans.push((lo, hi));
+            }
+        }
+        prev = Some(r);
+    }
+    spans.sort_unstable();
+    let mut merged: Vec<(i64, i64)> = Vec::with_capacity(spans.len());
+    for (lo, hi) in spans {
+        match merged.last_mut() {
+            Some(last) if lo <= last.1 => last.1 = last.1.max(hi),
+            _ => merged.push((lo, hi)),
+        }
+    }
+    Ok(merged)
 }
 
 /// `acc = acc·(1 − w) + next·w`, w ramping from `done` over `len` samples.

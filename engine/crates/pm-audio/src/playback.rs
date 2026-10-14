@@ -44,6 +44,12 @@ use crate::ring::{CHUNK, Consumer, Ring, Tag};
 use crate::source::SourceCache;
 use crate::transport::{Effect, Transport};
 
+/// Groups of control points ([`crate::mixer::READ_GROUP`]) of time-mapped
+/// voices the look-ahead bounds per turn of the render loop: about 6 ms of
+/// evaluation (0.8 ms a group, measured with `mix_bench`), well inside the
+/// ring's 80 ms.
+const LOOKAHEAD_GROUPS: usize = 8;
+
 #[derive(Clone, Debug)]
 pub struct PlaybackConfig {
     /// Audio queued ahead of the device.
@@ -502,6 +508,7 @@ impl RenderThread {
         self.publish_stopped();
         let mut need_preroll = false;
         let mut last_prefetch: Option<i64> = None;
+        let mut lookahead_pending = false;
         loop {
             // Controls.
             let wait = if self.transport.is_running() {
@@ -542,17 +549,23 @@ impl RenderThread {
                 self.preroll();
                 last_prefetch = None;
             }
-            // Keep the sources decoding ahead of the playhead.
+            self.fill();
+            // Keep the sources decoding ahead of the playhead. Bounding a
+            // time-mapped voice's reads evaluates its control points, so a
+            // long look-ahead is spread over the loop's turns (the ring stays
+            // full between them).
             let position = self.transport.position();
             let rate = self.transport.rate() as i64;
-            if last_prefetch.is_none_or(|last| (position - last).abs() > rate / 4) {
-                self.mixer.prefetch(
+            if lookahead_pending
+                || last_prefetch.is_none_or(|last| (position - last).abs() > rate / 4)
+            {
+                lookahead_pending = !self.mixer.prefetch_within(
                     position,
                     (self.config.lookahead_ms as i64 * rate / 1000) as usize,
+                    LOOKAHEAD_GROUPS,
                 );
                 last_prefetch = Some(position);
             }
-            self.fill();
         }
     }
 

@@ -331,6 +331,14 @@ impl SourceCache {
         }
     }
 
+    /// Queues the blocks covering program samples `[start, start + len)`
+    /// (clamped to the program).
+    pub fn prefetch_span(&self, source: &Arc<Source>, start: i64, len: usize) {
+        if let Some((first, last)) = block_span(source, start, len) {
+            self.prefetch(source, first..=last);
+        }
+    }
+
     /// Whether every block covering samples `[start, start + len)` is decoded.
     pub fn is_ready(&self, source: &Source, start: i64, len: usize) -> bool {
         let Some((first, last)) = block_span(source, start, len) else {

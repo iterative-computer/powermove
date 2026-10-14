@@ -17,6 +17,41 @@ pub fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
+/// Our FFmpeg build's command-line tool (`PM_FFMPEG_DIR`, see engine/env.sh).
+pub fn ffmpeg() -> PathBuf {
+    std::env::var_os("PM_FFMPEG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var("HOME").unwrap())
+                .join("Library/Caches/powermove-engine/ffmpeg/out")
+        })
+        .join("bin/ffmpeg")
+}
+
+/// Encodes a `lavfi` source (`aevalsrc=…`) into `path` with `args`, unless
+/// the file is already there.
+pub fn generate(path: &Path, source: &str, args: &[&str]) {
+    if path.exists() {
+        return;
+    }
+    let status = std::process::Command::new(ffmpeg())
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+        ])
+        .arg(source)
+        .args(args)
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "ffmpeg failed for {}", path.display());
+}
+
 /// Writes a 32-bit float WAV from planar channels.
 pub fn write_wav(path: &Path, rate: u32, planar: &[Vec<f32>]) {
     let frames = planar[0].len();

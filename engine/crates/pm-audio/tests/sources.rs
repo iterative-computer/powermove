@@ -13,16 +13,6 @@ use pm_audio::waveform::{Waveform, legacy_peaks};
 use pm_audio::{MixFormat, SourceCache};
 use pm_protocol::common::TICKS_PER_SECOND;
 
-fn ffmpeg() -> PathBuf {
-    std::env::var_os("PM_FFMPEG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var("HOME").unwrap())
-                .join("Library/Caches/powermove-engine/ffmpeg/out")
-        })
-        .join("bin/ffmpeg")
-}
-
 fn fixtures() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures")
 }
