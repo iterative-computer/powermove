@@ -8,3 +8,15 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+pm-model = { path = "../pm-model" }
+pm-time = { path = "../pm-time" }
+pm-eval = { path = "../pm-eval" }
+# Glyph layout units (split text) without the platform registry.
+pm-text = { path = "../pm-text", default-features = false }
+
+[dev-dependencies]
+# The expression engine the parity vectors evaluate expressions with (the
+# production adapter lives in pm-wasm, which depends on this crate).
+pm-expr = { path = "../pm-expr" }
+serde_json.workspace = true
+flate2 = "1.1"
