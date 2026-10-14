@@ -96,8 +96,8 @@ fn probe_cache() -> &'static ProbeCache {
     CACHE.get_or_init(Default::default)
 }
 
-/// Whether an image file can be drawn: readable, not animated, a color
-/// profile the engine converts.
+/// Whether an image file can be drawn: readable, not animated, in a tested
+/// still class ([`crate::stills`]), a color profile the engine converts.
 pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
     let Some((len, modified)) = stamp(path) else {
         return Err(ProbeIssue::Unreadable(format!(
@@ -118,6 +118,7 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
         let pool = FramePool::new(0);
         let still = pm_media::image::read(path, &pool)
             .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
+        crate::stills::check(path, &still).map_err(ProbeIssue::Unsupported)?;
         image_color(&still).map(|_| ())
     })();
     probe_cache().lock().unwrap().insert(key, result.clone());
