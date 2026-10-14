@@ -45,9 +45,9 @@ use crate::source::SourceCache;
 use crate::transport::{Effect, Transport};
 
 /// Groups of control points ([`crate::mixer::READ_GROUP`]) of time-mapped
-/// voices the look-ahead bounds per turn of the render loop: about 6 ms of
-/// evaluation (0.8 ms a group, measured with `mix_bench`), well inside the
-/// ring's 80 ms.
+/// voices the look-ahead bounds per turn of the render loop: 4 to 7 ms of
+/// evaluation (0.5 to 0.8 ms a group of a variable-speed voice, measured
+/// with `mix_bench` under load), well inside the ring's 80 ms.
 const LOOKAHEAD_GROUPS: usize = 8;
 
 #[derive(Clone, Debug)]

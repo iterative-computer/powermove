@@ -130,16 +130,20 @@ frame apart.
 7. The mix runs at `audioSampleRate` (default 48 kHz); today's export always mixes at
    48 kHz after decoding at the live AudioContext's rate.
 8. Layouts Web Audio mixes discretely fold by BS.775 (above).
-9. In-points are exact. Today's export plays each clip from a whole sample of its 48 kHz
-   decode (`AudioBufferSourceNode.start` rounds the offset), so a trim that is not a
-   whole number of samples plays up to half a sample early or late: on the real project
+9. In-points of resampled and time-mapped clips are exact (the Grid and Free readers
+   place them to the sub-sample). Sources already at the project rate are read by the
+   Copy reader, which rounds the in-point to a whole sample as today's export does.
+   Today's export plays each clip from a whole sample of its 48 kHz decode
+   (`AudioBufferSourceNode.start` rounds the offset), so a trim that is not a whole
+   number of samples plays up to half a sample early or late: on the real project
    0.4, −0.2, and −0.4 samples for its three clips, measured as a phase slope of
    0.0525 rad at 1 kHz (−26 dB residual at 1 kHz, −10 dB at 6 kHz). With the in-points
    rounded the same way the residual falls from −42.7 to −71.6 dBFS (−94 dB at 1 kHz).
 10. Switches (`on` of layers and groups) cut on their sample (through the 16-sample
     control interpolation); today's envelope samples them one composition frame apart,
-    so a switch becomes a one-frame linear ramp (`mute-groups`: −20 dBFS residual in the
-    frame after each switch, nothing elsewhere).
+    so a switch becomes a one-frame linear ramp: over the frame after a switch off and
+    the frame before a switch on (`mute-groups`: −11 to −15 dBFS residual in those
+    frames, bit-identical everywhere else, guarded by the parity test).
 11. Resampling is flat to 0.45 fs of the source and rejects images by more than 120 dB.
     Chromium's decode resampler (today's path for sources not at 48 kHz) rolls off from
     about 17 kHz and leaves images near −72 dBFS between 21 and 24 kHz on the real
@@ -147,10 +151,10 @@ frame apart.
 12. The bus stays stereo. Today's master `GainNode` takes the widest input's channel
     count, so while a 5.1 source plays, every mono source is up-mixed to the center and
     folds back to L and R at √½ (−3 dB); without one, mono plays at unity in both
-    channels. pm-audio plays mono at unity always (`layouts`: the mono tone measures
-    exactly √½ today and every other tone of the project matches to 1.0000; the `mono`
-    project confirms unity today for plain, center-masked, unmasked, 22.05 kHz WAV, AAC,
-    Opus, and FLAC mono).
+    channels. pm-audio plays mono at unity always (`layouts`: with the mono layer's
+    level times √½, as today's bus plays it, ours matches today's to −96.6 dBFS, guarded
+    by the parity test; the `mono` project confirms unity today for plain, center-masked,
+    unmasked, 22.05 kHz WAV, AAC, Opus, and FLAC mono).
 
 ## Playback (`transport`, `clock`, `ring`, `playback`, `device`)
 
@@ -176,19 +180,49 @@ consumers ◀───────────── ClockSlot ◀── clock s
   epochs, and the render thread decodes the blocks of the first 250 ms (waiting at most
   400 ms) before it queues the first chunk. What plays equals the offline render from the
   same sample, bit for bit (the mixer is a pure function of the sample range).
+- **Read-ahead.** `Mixer::source_spans` bounds the source samples a range reads, for
+  the pre-roll wait and for the 3 s look-ahead queued to the decode workers. Linear
+  voices map the range and pad by their reader's filter. Time-mapped voices (speed,
+  remaps, animated trims) are bounded per control interval from the same control points
+  the render evaluates, padded by the filter the render picks for that interval, and the
+  bounds are kept per group of 256 control points (4,096 samples) until the graph
+  changes. Evaluating them costs about as much as the render's own evaluation of those
+  points (table below), so the render loop bounds at most 8 new groups a turn (about
+  6 ms) after filling the ring and finishes a long look-ahead over the next turns.
+  (Before this, time-mapped voices were never read ahead and started silent: 4 starved
+  renders and every sample of a speed-1.5 AAC clip differing from the offline render.)
 - **Stops.** Pause stops where the listener is (the clock's position at the moment of the
-  command); the end of a run (composition end, play-around end, a scrub grain) stops once
-  the queued audio has played out.
+  command; until the device has presented a seek's first buffer, the seek target, not
+  the old line); the end of a run (composition end, play-around end, a scrub grain)
+  stops once the queued audio has played out.
 - **Loop.** Chunks end at the loop end and the next starts at the loop start: sample-exact
-  wraps; clock samples carry the loop range.
+  wraps. Clock samples carry the loop range and keep their epoch across wraps (contract 6
+  invariant 1 wraps the line; invariant 2 now says so); a changed loop range publishes
+  a new sample at once.
 - **Audio scrub** (contract 6 open question 2): rides on `Shuttling` samples. A scrub seek
   or frame step while paused, with audio scrub on, plays a grain of one composition frame
   or 60 ms, whichever is longer, with 4 ms fades.
 - **Device changes** (open question 3): playback continues on the new device with a new
   epoch, re-anchored from what is heard. The default output's id and latency are polled
-  once a second; a host that owns the device passes its own watch.
+  once a second (the latency converted at the new device's nominal rate); a host that
+  owns the device passes its own watch. This choice awaits Jude's sign-off. Known limit:
+  `cpal` opens the default output through an AUHAL that follows the system default and
+  resamples internally when the new device's rate differs from the stream's; that
+  converter's latency is not in the clock (the stream keeps its original rate).
 - **Device rate.** When the device does not run at the project rate, rubato converts the
-  master; chunk tags count device frames, so the clock stays exact in ticks.
+  master. One epoch is one continuous stream through the converter: a loop wrap continues
+  it (the device hears the band-limited concatenation of the passes, as a device at the
+  project rate hears them back to back), input reaches the filter in whole 256-frame
+  chunks (a partial chunk would insert silence), and the end of a run feeds silence until
+  the filter's tail is out, then queues every frame up to the run's end. Device frame j
+  sits at stream position (j + delay + 1) × p / d − 256 project frames (rubato's exact
+  phase: its reported delay is rounded down, so the stream starts 0.87 project samples
+  in at 48 → 44.1 kHz); chunk tags follow that rational map and split where media runs
+  change, so the clock stays exact in ticks through wraps. (Before, the converter reset
+  at every wrap and dropped its pending frames and filter delay: 297 project samples
+  missing from every pass of a 0.25 s loop, and the end of each run cut.)
+- **Channels.** A mono device hears the bus folded by the layout rules (stereo as
+  ½(L + R)); devices with more channels than the bus get the bus on their first channels.
 - **Live edits (retune).** A new document revision or monitor solo while playing glides
   from what played into the new mix over 12 ms (today's `RETUNE_GLIDE`), counted in
   rendered samples so a loop wrap inside the glide continues it. The mixer renders the
@@ -213,8 +247,15 @@ over 576 samples at 48 kHz with no step larger than one glide increment and no n
 The published line predicts the presented media to 0.3 µs on a nominal device; at ±150 ppm
 device drift the final line alone is off by 400 µs after 2.7 s, while the line as
 published (re-anchored every 100 ms) stays within 29 µs at 300 ppm. Playback from a seek
-equals the offline render; pause, seek, loop wraps, scrub grains, a 44.1 kHz device under
-a 48 kHz project, and a device change behave.
+equals the offline render, also for an AAC source at speed 1.5, at speed 0.75, and under
+a time remap (0 starved renders, 0 of 80,000 samples differing). On a 44.1 kHz device
+under a 48 kHz project, a 0.25 s loop (a ramp source whose value is its position, read
+after dividing out the converter's DC gain of +3.7 ppm): 13 passes begin 11,025 device
+frames apart within 0.0006 frames, each pass ends where the next begins within
+0.0005 project samples, and the clock line names the heard position within 0.06 samples;
+the last 0.5 s of a run lasts exactly 22,050 device frames and reaches the composition's
+end. A mono device hears ½(L + R); a pause sent during a seek's pre-roll stops on the
+seek target. Pause, seek, scrub grains, and a device change behave.
 
 Measured on the real output (`examples/device_probe`, 5 s, 2026-10-13; the default output
 was Bluetooth AirPods Pro at 48 kHz, 512-frame buffers): device plus stream latency 7,680
@@ -248,6 +289,13 @@ Measured 2026-10-13 with other lanes building (numbers vary about 1.5× with loa
 | Variable speed (free-position sinc), 4 voices | 15.4 ms | 16× |
 | Constant speed 1.5, 4 voices | 11.7 ms | 21× |
 
+Read-ahead bounds of time-mapped voices (`Mixer::source_spans` over 20 s, memo empty;
+2026-10-14, other lanes building): 25.2 ms per second of audio for the 4 variable-speed
+voices (6.3 ms per voice-second, about 0.5 ms per 4,096-sample group) and 8.4 ms for the 4
+constant-speed voices; linear voices cost nothing measurable. The same run mixed the
+variable-speed voices at 15.8 ms and the constant-speed ones at 11.6 ms per
+voice-second.
+
 ## Legacy parity
 
 `tools/legacy-mix.ts` captures `PM.Audio.renderOffline(0, dur)` (the mix every export with
@@ -255,30 +303,34 @@ audio takes; `exporter.ts` then writes it as 16-bit WAV for `render-encoder.ts` 
 PCM or AAC) from the built legacy app for the corpus audio project, audio projects built
 for this lane (clicks at 30, 29.97, and from 44.1 kHz; gain keyframes, fades, master;
 precomposition nesting; solo; mute and groups; layouts and rates; mono sources; embedded
-audio), and Jude's real project when present (its media is extracted under the corpus
-root), into `~/Library/Application Support/Powermove Engine Corpus/audio-<stamp>-<commit>/`.
+audio), and a real project given with `--real <file.pmv>` or `PM_AUDIO_REAL_PROJECT`
+(kept outside the repository; its media is extracted under the corpus root), into `~/Library/Application Support/Powermove Engine Corpus/audio-<stamp>-<commit>/`.
 `tests/legacy_parity.rs` renders the same loaded documents with pm-audio and compares
 against the float mix (before today's 16-bit step). It fails on a length other than
 round(duration × sr), a click more than one sample off its frame, or a residual above the
 project's ceiling (−85 dBFS; −75 dBFS for keyframed levels; −65 dBFS for real projects
-with in-points rounded as today's; none for projects dominated by an allowed difference).
+with in-points rounded as today's). Projects dominated by an allowed difference are
+guarded where it does not reach, at −85 dBFS: `clicks-44k` below 15 kHz (a 1,023-tap
+low-pass on both mixes), `mute-groups` outside the frames today's envelope ramps the
+switches over, and `layouts` rendered with the mono layer at today's √½ center fold.
 `PM_AUDIO_PARITY_DETAIL=1` prints the worst 100 ms windows and writes `ours.wav` next to
 `legacy.wav`.
 
-Measured 2026-10-13 (captures `audio-20261014-045249-158f1223` and the `--skip-real`
-recapture with the `mono` project; residual against the legacy float mix):
+Measured 2026-10-13, re-run 2026-10-14 after the read-ahead and converter fixes with the
+same results (captures `audio-20261014-045249-158f1223` and the `--skip-real` recapture
+with the `mono` project; residual against the legacy float mix):
 
 | Project | Samples, ours = round | Residual rms | Clicks from frame start (ours / today) | What differs |
 |---|---|---|---|---|
 | corpus-media-audio | 96,000 | −93.6 dBFS | | decoder rounding (AAC, MP3, Opus) |
 | clicks-30 | 96,000 | −240 (identical) | 0,0,0,0,0,0 / same | |
 | clicks-2997 | 105,600 (today 105,601) | −240 (identical) | 0,0,0,0 / same | 6 |
-| clicks-44k | 72,000 | −58.0 dBFS | 0,0,0 / same | 11 |
+| clicks-44k | 72,000 | −58.0 dBFS (−121.9 below 15 kHz) | 0,0,0 / same | 11 |
 | gain-fades | 144,000 | −81.9 dBFS | | 5 |
 | precomp-nesting | 144,000 | −88.0 dBFS | | 5 |
 | solo | 96,000 | −240 (identical) | | |
-| mute-groups | 96,000 | −31.6 dBFS | | 10 |
-| layouts | 120,000 | −20.1 dBFS | | 12 |
+| mute-groups | 96,000 | −31.6 dBFS (identical outside the switch frames) | | 10 |
+| layouts | 120,000 | −20.1 dBFS (−96.6 with today's mono fold) | | 12 |
 | mono (7 sources) | 168,000 | −99.7 dBFS | | |
 | embedded | 96,000 | −110.9 dBFS | | |
 | real project (87.4 s) | 4,195,200 | −42.7 dBFS; −71.6 with in-points rounded as today's | | 9, 11 |
