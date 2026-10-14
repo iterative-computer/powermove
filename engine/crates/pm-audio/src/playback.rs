@@ -33,7 +33,7 @@ use pm_protocol::common::TICKS_PER_SECOND;
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType};
 
-use crate::clock::{ClockCore, ClockSlot, host_now_us, ticks_per_frame};
+use crate::clock::{ClockCore, ClockSlot, host_now_us};
 use crate::device::OutputStream;
 use crate::error::{AudioError, Result};
 use crate::graph::{AssetResolver, MixGraph};
@@ -425,17 +425,55 @@ impl Drop for Playback {
     }
 }
 
+/// One contiguous media run of a converter stream.
+#[derive(Clone, Copy, Debug)]
+struct Run {
+    /// Stream position (project frames since the stream began) of its first
+    /// frame.
+    offset: u64,
+    frames: u64,
+    /// Media ticks of its first frame.
+    ticks: i64,
+    state: TransportState,
+}
+
 /// Project-to-device rate conversion with its media bookkeeping.
+///
+/// One epoch is one continuous stream through the filter: a loop wrap (a
+/// jump in media time inside an epoch) continues the stream, so the device
+/// hears the band-limited concatenation of the passes, exactly as a device
+/// at the project rate would hear the passes back to back, and nothing is
+/// cut at the wrap. Device frame `j` of the stream (after the filter's
+/// delay is dropped) sits at stream position
+/// `(j + delay + 1) × project / device − taps / 2` project frames, rubato's
+/// exact phase for its first output (the delay it reports is rounded down
+/// to whole frames, so the stream starts a fraction of a project frame in);
+/// the run holding that position gives its media time, and chunks are
+/// split where runs change so every ring chunk is linear in media time. A new epoch starts a new stream; the end of a run
+/// flushes the filter's tail and the partial chunk ([`Converter::flush`]).
 struct Converter {
     rs: Async<f32>,
+    project: u32,
+    device: u32,
+    /// One filter input chunk, filled across segments: the filter consumes
+    /// whole chunks (a partial one would insert silence into the stream).
     input: Vec<Vec<f32>>,
+    input_fill: usize,
     output: Vec<Vec<f32>>,
-    /// Device frames still to drop (the filter's delay) after a reset.
+    /// Device frames still to drop (the filter's delay) at a stream start.
     skip: usize,
-    /// Pending device-rate frames (planar) and the media ticks of the first.
+    /// The whole delay dropped at a stream start.
+    delay: u64,
+    /// Converted device frames not yet queued (planar).
     pending: Vec<Vec<f32>>,
-    pending_ticks: i64,
-    /// Project sample the converter continues from (contiguity check).
+    /// Stream device frame of `pending[0]`.
+    emitted: u64,
+    /// Project frames fed into the stream.
+    fed: u64,
+    runs: VecDeque<Run>,
+    /// The epoch of the stream, `None` before its first segment.
+    epoch: Option<u32>,
+    /// Project sample the last run continues from.
     next_input: Option<i64>,
 }
 
@@ -454,25 +492,225 @@ impl Converter {
         )
         .map_err(|e| AudioError::Device(e.to_string()))?;
         let out_max = rs.output_frames_max();
+        // The stream phase below follows rubato's sinc: its delay is
+        // ⌊taps × ratio / 2⌋ and its first output reads one step past
+        // −(taps − 1).
+        debug_assert_eq!(
+            rs.output_delay() as u64,
+            (kernel::TAPS as u64 * device as u64) / (2 * project as u64)
+        );
         Ok(Converter {
             skip: rs.output_delay(),
+            delay: rs.output_delay() as u64,
             rs,
+            project,
+            device,
             input: vec![vec![0.0; CHUNK]; channels],
+            input_fill: 0,
             output: vec![vec![0.0; out_max]; channels],
             pending: vec![Vec::new(); channels],
-            pending_ticks: 0,
+            emitted: 0,
+            fed: 0,
+            runs: VecDeque::new(),
+            epoch: None,
             next_input: None,
         })
     }
 
-    fn reset(&mut self, start_ticks: i64) {
+    /// Drops the stream (a new epoch): the filter starts from silence.
+    fn reset(&mut self) {
         self.rs.reset();
         self.skip = self.rs.output_delay();
         for p in &mut self.pending {
             p.clear();
         }
-        self.pending_ticks = start_ticks;
+        self.input_fill = 0;
+        self.emitted = 0;
+        self.fed = 0;
+        self.runs.clear();
+        self.epoch = None;
         self.next_input = None;
+    }
+
+    /// Stream position of stream device frame `j`, in units of 1/device of a
+    /// project frame.
+    fn position(&self, j: u64) -> i128 {
+        (j + self.delay + 1) as i128 * self.project as i128
+            - (kernel::TAPS / 2) as i128 * self.device as i128
+    }
+
+    /// The first stream device frame at or after stream position `frames`.
+    fn device_frame(&self, frames: u64) -> u64 {
+        let (p, d) = (self.project as i128, self.device as i128);
+        let at = (frames as i128 + (kernel::TAPS / 2) as i128) * d;
+        let j = (at + p - 1).div_euclid(p) - self.delay as i128 - 1;
+        j.max(0) as u64
+    }
+
+    /// Converts one segment (project samples `[start, start + frames)` at
+    /// media `ticks`) and appends the chunks it completes to `out`.
+    #[allow(clippy::too_many_arguments)]
+    fn feed(
+        &mut self,
+        planar: &[Vec<f32>],
+        start: i64,
+        frames: usize,
+        ticks: i64,
+        epoch: u32,
+        state: TransportState,
+        ring_channels: usize,
+        out: &mut Vec<(Tag, Vec<f32>)>,
+    ) {
+        if self.epoch != Some(epoch) {
+            self.reset();
+            self.epoch = Some(epoch);
+        }
+        match self.runs.back_mut() {
+            Some(run) if self.next_input == Some(start) && run.state == state => {
+                run.frames += frames as u64;
+            }
+            _ => self.runs.push_back(Run {
+                offset: self.fed,
+                frames: frames as u64,
+                ticks,
+                state,
+            }),
+        }
+        self.next_input = Some(start + frames as i64);
+        let mut done = 0;
+        while done < frames {
+            let at = self.input_fill;
+            let n = (frames - done).min(CHUNK - at);
+            for (dst, src) in self.input.iter_mut().zip(planar) {
+                dst[at..at + n].copy_from_slice(&src[done..done + n]);
+            }
+            done += n;
+            self.fed += n as u64;
+            self.input_fill += n;
+            if self.input_fill == CHUNK {
+                self.input_fill = 0;
+                self.process();
+            }
+        }
+        self.drain(false, ring_channels, out);
+    }
+
+    /// Ends the stream (the run ended): pushes the filter's tail through
+    /// and queues every frame up to the stream's end, the last chunk
+    /// partial.
+    fn flush(&mut self, ring_channels: usize, out: &mut Vec<(Tag, Vec<f32>)>) {
+        if self.epoch.is_none() || self.fed == 0 {
+            self.reset();
+            return;
+        }
+        let target = self.device_frame(self.fed);
+        // Silence follows the run's last frame through the filter until its
+        // tail is out (about half the filter; bound the loop all the same).
+        for _ in 0..64 {
+            if self.emitted + self.pending[0].len() as u64 >= target {
+                break;
+            }
+            for dst in self.input.iter_mut() {
+                dst[self.input_fill..].fill(0.0);
+            }
+            self.input_fill = 0;
+            if !self.process() {
+                break;
+            }
+        }
+        let keep = target.saturating_sub(self.emitted) as usize;
+        for p in &mut self.pending {
+            p.truncate(keep);
+        }
+        self.drain(true, ring_channels, out);
+        self.reset();
+    }
+
+    /// Runs the filter over the input chunk into `pending`.
+    fn process(&mut self) -> bool {
+        let channels = self.input.len();
+        let in_adapter = SequentialSliceOfVecs::new(&self.input, channels, CHUNK).expect("input");
+        let out_len = self.output[0].len();
+        let mut out_adapter =
+            SequentialSliceOfVecs::new_mut(&mut self.output, channels, out_len).expect("output");
+        let Ok((_, written)) = self
+            .rs
+            .process_into_buffer(&in_adapter, &mut out_adapter, None)
+        else {
+            return false;
+        };
+        let drop = self.skip.min(written);
+        self.skip -= drop;
+        for (p, o) in self.pending.iter_mut().zip(&self.output) {
+            p.extend_from_slice(&o[drop..written]);
+        }
+        true
+    }
+
+    /// Moves pending frames into ring chunks: whole chunks, split where the
+    /// media run changes; with `all`, the partial rest as well.
+    fn drain(&mut self, all: bool, ring_channels: usize, out: &mut Vec<(Tag, Vec<f32>)>) {
+        let (p, d) = (self.project as i128, self.device as i128);
+        let epoch = self.epoch.unwrap_or(0);
+        loop {
+            // Drop runs the stream has played past.
+            while let Some(run) = self.runs.front() {
+                if self.runs.len() > 1 && self.emitted >= self.device_frame(run.offset + run.frames)
+                {
+                    self.runs.pop_front();
+                } else {
+                    break;
+                }
+            }
+            let Some(&run) = self.runs.front() else { break };
+            let avail = self.pending[0].len();
+            // The last run may still grow; an earlier one ends where the next
+            // begins.
+            let to_end = if self.runs.len() > 1 || all {
+                self.device_frame(run.offset + run.frames)
+                    .saturating_sub(self.emitted) as usize
+            } else {
+                usize::MAX
+            };
+            let want = CHUNK.min(to_end);
+            let n = if avail >= want {
+                want
+            } else if all {
+                avail
+            } else {
+                break;
+            };
+            if n == 0 {
+                if self.runs.len() > 1 {
+                    self.runs.pop_front();
+                    continue;
+                }
+                break;
+            }
+            let mut inter = Vec::with_capacity(n * ring_channels);
+            for i in 0..n {
+                for ch in 0..ring_channels {
+                    inter.push(self.pending.get(ch).map_or(0.0, |q| q[i]));
+                }
+            }
+            for q in &mut self.pending {
+                q.drain(..n);
+            }
+            // Device frame j sits `position(j)/d − offset` project frames
+            // into its run.
+            let into = self.position(self.emitted) - run.offset as i128 * d;
+            let media = run.ticks as i128 + into * TICKS_PER_SECOND as i128 / (p * d);
+            out.push((
+                Tag {
+                    media_ticks: media as i64,
+                    epoch,
+                    state: run.state,
+                    frames: n as u32,
+                },
+                inter,
+            ));
+            self.emitted += n as u64;
+        }
     }
 }
 
@@ -734,7 +972,7 @@ impl RenderThread {
             std::thread::sleep(Duration::from_millis(1));
         }
         if let Some(c) = &mut self.converter {
-            c.reset(self.transport.ticks_of(position));
+            c.reset();
         }
     }
 
@@ -748,6 +986,8 @@ impl RenderThread {
         while self.ring.queued() < target {
             let Some(seg) = self.transport.next(CHUNK) else {
                 if self.transport.take_stop() == Effect::Stopped {
+                    // The converter's tail and partial chunk belong to the run.
+                    self.flush_converter();
                     // Let what is queued play out; the clock stops at the
                     // run's end position once it has.
                     self.stopped_published = false;
@@ -818,6 +1058,7 @@ impl RenderThread {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn push_converted(
         &mut self,
         planar: &[Vec<f32>],
@@ -827,59 +1068,33 @@ impl RenderThread {
         epoch: u32,
         state: TransportState,
     ) {
-        let device_rate = self.device_rate;
         let ring_channels = self.ring_channels;
+        let mut chunks = Vec::new();
         let c = self.converter.as_mut().expect("converter");
-        if c.next_input != Some(start) {
-            c.reset(ticks);
+        c.feed(
+            planar,
+            start,
+            frames,
+            ticks,
+            epoch,
+            state,
+            ring_channels,
+            &mut chunks,
+        );
+        self.push_chunks(chunks);
+    }
+
+    fn flush_converter(&mut self) {
+        let ring_channels = self.ring_channels;
+        let mut chunks = Vec::new();
+        if let Some(c) = self.converter.as_mut() {
+            c.flush(ring_channels, &mut chunks);
         }
-        c.next_input = Some(start + frames as i64);
-        let channels = planar.len();
-        let mut fed = 0;
-        let mut out_chunks: Vec<(Tag, Vec<f32>)> = Vec::new();
-        while fed < frames {
-            let n = (frames - fed).min(CHUNK);
-            for (dst, src) in c.input.iter_mut().zip(planar) {
-                dst[..n].copy_from_slice(&src[fed..fed + n]);
-                dst[n..].fill(0.0);
-            }
-            let indexing = rubato::Indexing::new().partial_len(n);
-            let in_adapter = SequentialSliceOfVecs::new(&c.input, channels, CHUNK).expect("input");
-            let out_len = c.output[0].len();
-            let mut out_adapter =
-                SequentialSliceOfVecs::new_mut(&mut c.output, channels, out_len).expect("output");
-            let Ok((_, written)) =
-                c.rs.process_into_buffer(&in_adapter, &mut out_adapter, Some(&indexing))
-            else {
-                break;
-            };
-            fed += n;
-            let drop = c.skip.min(written);
-            c.skip -= drop;
-            for (p, o) in c.pending.iter_mut().zip(&c.output) {
-                p.extend_from_slice(&o[drop..written]);
-            }
-            while c.pending[0].len() >= CHUNK {
-                let mut inter = Vec::with_capacity(CHUNK * ring_channels);
-                for i in 0..CHUNK {
-                    for ch in 0..ring_channels {
-                        inter.push(c.pending.get(ch).map_or(0.0, |p| p[i]));
-                    }
-                }
-                for p in &mut c.pending {
-                    p.drain(..CHUNK);
-                }
-                let tag = Tag {
-                    media_ticks: c.pending_ticks,
-                    epoch,
-                    state,
-                    frames: CHUNK as u32,
-                };
-                c.pending_ticks += CHUNK as i64 * ticks_per_frame(device_rate);
-                out_chunks.push((tag, inter));
-            }
-        }
-        for (tag, inter) in out_chunks {
+        self.push_chunks(chunks);
+    }
+
+    fn push_chunks(&self, chunks: Vec<(Tag, Vec<f32>)>) {
+        for (tag, inter) in chunks {
             while !self.ring.push(tag, &inter) {
                 std::thread::sleep(Duration::from_millis(1));
             }

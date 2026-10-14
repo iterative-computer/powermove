@@ -693,3 +693,236 @@ fn time_mapped_clips_play_as_rendered_offline() {
         );
     }
 }
+
+/// Straight-line fit `x ≈ a + b·j` over `(j, x)` points.
+fn fit(points: &[(f64, f64)]) -> (f64, f64, f64) {
+    let n = points.len() as f64;
+    let (mj, mx) = points
+        .iter()
+        .fold((0.0, 0.0), |(a, b), (j, x)| (a + j / n, b + x / n));
+    let (mut sjx, mut sjj) = (0.0, 0.0);
+    for (j, x) in points {
+        sjx += (j - mj) * (x - mx);
+        sjj += (j - mj) * (j - mj);
+    }
+    let b = sjx / sjj;
+    let a = mx - b * mj;
+    let worst = points
+        .iter()
+        .fold(0f64, |w, (j, x)| w.max((a + b * j - x).abs()));
+    (a, b, worst)
+}
+
+/// The DC gain of the rate converter: the marker channel (0.5) as heard,
+/// over frames away from any edge or wrap (the median frame value).
+fn dc_gain(heard: &[(f32, f32)]) -> f64 {
+    let mut m: Vec<f64> = heard
+        .iter()
+        .map(|f| f.1 as f64)
+        .filter(|v| (*v - 0.5).abs() < 0.001)
+        .collect();
+    m.sort_by(f64::total_cmp);
+    let g = m[m.len() / 2] / 0.5;
+    eprintln!("converter DC gain {:.3} ppm off unity", (g - 1.0) * 1e6);
+    g
+}
+
+/// The heard media positions of a ramp, one per device frame, from the
+/// first frame of media on.
+fn heard_ramp(dev: &SimDevice, from: usize) -> Vec<(f32, f32)> {
+    let frames: Vec<(f32, f32)> = dev.log[from..]
+        .iter()
+        .flat_map(|(_, b)| b.chunks(2).map(|f| (f[0], f[1])).collect::<Vec<_>>())
+        .collect();
+    let first = frames.iter().position(|f| f.1 > 0.1).expect("media played");
+    frames[first..].to_vec()
+}
+
+/// A loop on a device at 44.1 kHz under a 48 kHz project: every pass is
+/// heard whole (each 0.25 s pass lasts exactly 11 025 device frames and
+/// ends where the next begins: nothing is cut at the wrap), the converter
+/// runs through the wrap as one stream (no restart from silence), and the
+/// clock line, wrapping by the loop range, names what is heard.
+#[test]
+fn loops_whole_at_another_device_rate() {
+    let dir = temp_dir("loop-44k");
+    let file = ramp_file(&dir, 6);
+    let device = 44_100u32;
+    let (playback, mut dev, _rig) = setup(&file, 6.0, device, 0.0);
+    playback
+        .command(TransportCommand::SetLoop {
+            range: Some(TickRange {
+                start: ticks(1.0),
+                end: ticks(1.25),
+            }),
+        })
+        .unwrap();
+    playback
+        .command(TransportCommand::Seek {
+            time: ticks(1.0),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    dev.run(300);
+    let clock = playback.clock().unwrap();
+    let stats = playback.stats();
+    drop(playback);
+    assert!(clock.loop_range.is_some());
+    // Media positions per device frame (fractional project samples).
+    let lead = dev.log.iter().position(|(_, b)| b[1] > 0.1).unwrap();
+    let heard = heard_ramp(&dev, lead);
+    // The converter's sinc passes DC at a gain a few ppm off 1, which scales
+    // the ramp: read the gain off the constant marker channel and divide it
+    // out, so positions are exact.
+    let gain = dc_gain(&heard);
+    let x: Vec<f64> = heard
+        .iter()
+        .map(|f| f.0 as f64 * 16_777_216.0 / gain)
+        .collect();
+    let (lo, hi) = (SR as f64, SR as f64 * 1.25);
+    // Wraps: the steepest fall of each junction.
+    let mut wraps: Vec<usize> = vec![];
+    for j in 1..x.len() {
+        if x[j - 1] - x[j] > 4_000.0 {
+            match wraps.last_mut() {
+                Some(w) if j - *w < 64 => {
+                    if x[j - 1] - x[j] > x[*w - 1] - x[*w] {
+                        *w = j;
+                    }
+                }
+                _ => wraps.push(j),
+            }
+        }
+    }
+    assert!(wraps.len() >= 8, "{} wraps", wraps.len());
+    let ratio = SR as f64 / device as f64;
+    // Fit each whole pass away from the band-limited junctions (the filter
+    // reaches 256 project samples, about 235 device frames, each side).
+    let margin = 400;
+    let mut lines = vec![];
+    for w in wraps.windows(2) {
+        let pts: Vec<(f64, f64)> = (w[0] + margin..w[1] - margin)
+            .map(|j| (j as f64, x[j]))
+            .collect();
+        let (a, b, worst) = fit(&pts);
+        assert!(
+            (b - ratio).abs() < 1e-6,
+            "a pass advances {b} project samples a frame, expected {ratio}"
+        );
+        // f32 rounding in the filter: positions near 60 000 carry 2⁻⁸.
+        assert!(worst < 0.1, "a pass is off a straight line by {worst}");
+        lines.push((a, b));
+    }
+    let mut worst_gap = 0f64;
+    let mut worst_len = 0f64;
+    for k in 0..lines.len() {
+        let (a, b) = lines[k];
+        let begins = (lo - a) / b;
+        let ends = (hi - a) / b;
+        if let Some(&(a2, b2)) = lines.get(k + 1) {
+            // Where this pass reaches the loop end, the next is at its start,
+            // and passes begin 11 025 device frames apart.
+            let next = (lo - a2) / b2;
+            worst_gap = worst_gap.max((next - ends).abs() * b);
+            worst_len = worst_len.max((next - begins - 11_025.0).abs());
+        }
+    }
+    eprintln!(
+        "44.1 kHz loop: {} passes, worst pass period error {worst_len:.4} device frames, \
+         worst discontinuity at a wrap {worst_gap:.4} project samples",
+        lines.len()
+    );
+    assert!(
+        worst_len < 0.01,
+        "passes begin {worst_len} frames off 11 025 apart"
+    );
+    assert!(
+        worst_gap < 0.01,
+        "{worst_gap} project samples are missing or repeated at a wrap"
+    );
+    // The clock names what is heard, through the wraps.
+    let mut worst_clock = 0f64;
+    let mut frame = 0usize;
+    for (host, buf) in &dev.log[lead..] {
+        let at = frame;
+        frame += buf.len() / 2;
+        if at < 2 * margin || wraps.iter().any(|&w| at.abs_diff(w) < margin) {
+            continue;
+        }
+        if at >= x.len() {
+            break;
+        }
+        let predicted = clock
+            .media_time_at(HostMicros::new(host + LATENCY_US as u64).unwrap())
+            .get() as f64
+            * SR as f64
+            / TICKS_PER_SECOND as f64;
+        worst_clock = worst_clock.max((predicted - x[at]).abs());
+    }
+    eprintln!("44.1 kHz loop: worst clock error {worst_clock:.3} project samples");
+    assert!(worst_clock < 0.25, "the clock is {worst_clock} samples off");
+    assert_eq!(stats.starved_renders, 0);
+}
+
+/// The end of a run on a device at 44.1 kHz: the converter's partial chunk
+/// and filter tail are flushed, so the last 0.5 s of a 48 kHz project lasts
+/// exactly 22 050 device frames and reaches the composition's end.
+#[test]
+fn a_run_ends_whole_at_another_device_rate() {
+    let dir = temp_dir("end-44k");
+    let file = ramp_file(&dir, 2);
+    let device = 44_100u32;
+    let (playback, mut dev, _rig) = setup(&file, 2.0, device, 0.0);
+    playback
+        .command(TransportCommand::Seek {
+            time: ticks(1.5),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    dev.run(70);
+    drop(playback);
+    let lead = dev.log.iter().position(|(_, b)| b[1] > 0.1).unwrap();
+    let heard = heard_ramp(&dev, lead);
+    let last = heard.iter().rposition(|f| f.1 > 0.1).unwrap();
+    assert!(
+        heard[last + 1..].iter().all(|f| f.0 == 0.0 && f.1 == 0.0),
+        "silence after the run"
+    );
+    let gain = dc_gain(&heard[..last]);
+    let x: Vec<f64> = heard
+        .iter()
+        .map(|f| f.0 as f64 * 16_777_216.0 / gain)
+        .collect();
+    let ratio = SR as f64 / device as f64;
+    let pts: Vec<(f64, f64)> = (400..last - 400).map(|j| (j as f64, x[j])).collect();
+    let (a, b, _) = fit(&pts);
+    eprintln!(
+        "44.1 kHz run end: {} device frames heard; the last at media {:.2} (end {})",
+        last + 1,
+        a + b * last as f64,
+        2 * SR
+    );
+    assert_eq!(last + 1, 22_050, "device frames heard");
+    // The stream's first frame sits at rubato's phase, (delay + 1)·p/d − 256
+    // project samples in (delay = ⌊512·d/p / 2⌋ = 235): 0.8707.
+    let delay = (512 * device as u64 / (2 * SR as u64)) as f64;
+    let phase = (delay + 1.0) * ratio - 256.0;
+    assert!(
+        (a - 1.5 * SR as f64 - phase).abs() < 0.05,
+        "the first frame at {a}, expected {}",
+        1.5 * SR as f64 + phase
+    );
+    assert!((b - ratio).abs() < 1e-6, "{b} project samples a frame");
+    // The last frame is the last whole frame before the composition's end.
+    assert!(a + b * last as f64 > 2.0 * SR as f64 - 1.1);
+}
