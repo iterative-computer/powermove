@@ -14,7 +14,7 @@ import { MAX_LINK_PATH, type MediaStoreService, validLink } from './service';
 const ORIGINS = new Set<MediaRecordSource>(['import', 'stream', 'indexeddb', 'project', 'rendition']);
 const PROJECT = /^[A-Za-z0-9_-]{1,120}$/;
 
-interface Sender { id: number; once(event: 'destroyed', listener: () => void): unknown }
+export interface Sender { id: number; once(event: 'destroyed', listener: () => void): unknown }
 
 const filePath = (value: unknown): string => {
   if (typeof value !== 'string' || !path.isAbsolute(value) || value.length > MAX_LINK_PATH || value.includes('\0')) throw new Error('A media file path must be absolute.');
@@ -35,10 +35,18 @@ const revision = (value: unknown): string | null => {
   return value;
 };
 
+/** Bytes copied per `putProjectRange` call (the page reports progress between calls). */
+export const PROJECT_RANGE_BYTES = 64 * 1024 * 1024;
+/** Bytes per read of the open project file (`ProjectFiles.read` allows 1 MiB). */
+const PROJECT_READ_BYTES = 1024 * 1024;
+
+/** Reads a range of a project file the sender opened; rejects other senders' readers. */
+export type ProjectRangeReader = (sender: Sender, token: string, offset: number, length: number) => Promise<Uint8Array>;
+
 export function registerMediaStoreIpc(
   ipcMain: Pick<IpcMain, 'handle' | 'on'>,
   service: MediaStoreService,
-  { isTrustedSender }: { isTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): boolean }
+  { isTrustedSender, projectRead }: { isTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): boolean; projectRead?: ProjectRangeReader }
 ): void {
   const watched = new WeakSet<object>();
   const owner = (event: IpcMainInvokeEvent | IpcMainEvent): number => {
@@ -82,7 +90,35 @@ export function registerMediaStoreIpc(
   ipcMain.handle(MEDIA_STORE_IPC.finishPut, (event, value: unknown) => {
     const id = owner(event);
     const input = (value ?? {}) as Record<string, unknown>;
-    return service.store.finishStream(id, token(input['token']), { blake3: String(input['blake3'] ?? '') });
+    const expected: { blake3?: string; sha256?: string } = {};
+    if (input['blake3'] !== undefined) expected.blake3 = String(input['blake3']);
+    if (input['sha256'] !== undefined) expected.sha256 = String(input['sha256']);
+    return service.store.finishStream(id, token(input['token']), expected);
+  });
+  /* Copies a range of the project file this window opened (Open…) straight
+     into an upload, so embedded media reaches the store without passing
+     through the page (section 21, "Embedded media moves to the media
+     store"). The reader must belong to the same window. */
+  ipcMain.handle(MEDIA_STORE_IPC.putProjectRange, async (event, value: unknown) => {
+    const id = owner(event);
+    const input = (value ?? {}) as Record<string, unknown>;
+    const read = projectRead;
+    if (!read) throw new Error('Project files are unavailable.');
+    const readToken = input['readToken'];
+    const offset = input['offset'];
+    const length = input['length'];
+    const at = input['at'];
+    if (typeof readToken !== 'string' || !readToken || readToken.length > 100) throw new Error('Invalid project read token.');
+    if (!Number.isSafeInteger(offset) || (offset as number) < 0 || !Number.isSafeInteger(length) || (length as number) < 1
+      || (length as number) > PROJECT_RANGE_BYTES || !Number.isSafeInteger(at) || (at as number) < 0) throw new Error('Invalid project media range.');
+    const upload = token(input['token']);
+    for (let done = 0; done < (length as number);) {
+      const want = Math.min(PROJECT_READ_BYTES, (length as number) - done);
+      const data = await read(event.sender as unknown as Sender, readToken, (offset as number) + done, want);
+      if (!(data instanceof Uint8Array) || data.byteLength < 1 || data.byteLength > want) throw new Error('The project media is truncated.');
+      await service.store.chunk(id, upload, (at as number) + done, data, 'main');
+      done += data.byteLength;
+    }
   });
   ipcMain.handle(MEDIA_STORE_IPC.abortPut, (event, value: unknown) => service.store.abortStream(owner(event), token(value)));
   ipcMain.handle(MEDIA_STORE_IPC.link, (event, value: unknown) => { owner(event); return service.link(filePath(value)); });

@@ -21,6 +21,7 @@ export const MEDIA_STORE_IPC = {
   putChunk: 'media-store:put-chunk',
   finishPut: 'media-store:finish-put',
   abortPut: 'media-store:abort-put',
+  putProjectRange: 'media-store:put-project-range',
   link: 'media-store:link',
   open: 'media-store:open',
   read: 'media-store:read',
@@ -95,7 +96,12 @@ export interface MediaStoreBridge {
   putFile(request: { path: string; key: string | null; type?: string; revision?: string | null }): Promise<MediaStoreRecord>;
   beginPut(request: { key: string | null; type: string; size: number; revision?: string | null; origin?: MediaRecordSource }): Promise<string>;
   putChunk(token: string, offset: number, data: Uint8Array): Promise<void>;
-  finishPut(token: string, expected: { blake3: string }): Promise<MediaStoreRecord & { sha256: string }>;
+  /** Commits an upload when the bytes on disk match the sender's BLAKE3,
+   *  or (for project ranges) the file's recorded SHA-256. */
+  finishPut(token: string, expected: { blake3?: string; sha256?: string }): Promise<MediaStoreRecord & { sha256: string }>;
+  /** Main copies `length` bytes (at most 64 MiB) at `offset` of the project
+   *  file this window opened (`readToken`) into upload `token` at `at`. */
+  putProjectRange?(token: string, readToken: string, offset: number, length: number, at: number): Promise<void>;
   abortPut(token: string): Promise<void>;
   /** Hashes a file in place for Link to files. */
   link(path: string): Promise<MediaLink>;

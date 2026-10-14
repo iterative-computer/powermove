@@ -10,7 +10,7 @@ import path from 'node:path';
 import type { IpcMain, IpcMainEvent, IpcMainInvokeEvent } from 'electron';
 
 import { WorkerPool } from './hasher';
-import { registerMediaStoreIpc } from './ipc';
+import { registerMediaStoreIpc, type ProjectRangeReader } from './ipc';
 import { MediaStoreService } from './service';
 import { STORE_DIRECTORY } from './store';
 
@@ -24,6 +24,8 @@ export type InstallMediaStoreOptions = {
   /** Directory holding the built `media-hash-worker.js` (main's `__dirname`). */
   mainDirectory: string;
   enabled: boolean;
+  /** Reads a range of a project file the sender opened (main's ProjectFiles). */
+  projectRead?: ProjectRangeReader;
 };
 
 export function installMediaStore(options: InstallMediaStoreOptions): { service: MediaStoreService; dispose(): Promise<void> } {
@@ -35,6 +37,6 @@ export function installMediaStore(options: InstallMediaStoreOptions): { service:
     enabled: options.enabled
   });
   void service.store.init().catch((error: unknown) => console.warn('[media-store] could not prepare the media store', error));
-  registerMediaStoreIpc(options.ipc, service, { isTrustedSender: options.isTrustedSender });
+  registerMediaStoreIpc(options.ipc, service, { isTrustedSender: options.isTrustedSender, ...(options.projectRead ? { projectRead: options.projectRead } : {}) });
   return { service, dispose: () => executor.close() };
 }

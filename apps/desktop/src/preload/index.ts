@@ -538,7 +538,10 @@ const bridge: PowermoveBridge = {
       key: request.key, type: request.type, size: request.size, revision: request.revision ?? null, origin: request.origin ?? 'stream'
     }),
     putChunk: (token, offset, data) => ipcRenderer.invoke(MEDIA_STORE_IPC.putChunk, { token, offset, data }),
-    finishPut: (token, expected) => ipcRenderer.invoke(MEDIA_STORE_IPC.finishPut, { token, blake3: expected.blake3 }),
+    finishPut: (token, expected) => ipcRenderer.invoke(MEDIA_STORE_IPC.finishPut, {
+      token, ...(expected.blake3 !== undefined ? { blake3: expected.blake3 } : {}), ...(expected.sha256 !== undefined ? { sha256: expected.sha256 } : {})
+    }),
+    putProjectRange: (token, readToken, offset, length, at) => ipcRenderer.invoke(MEDIA_STORE_IPC.putProjectRange, { token, readToken, offset, length, at }),
     abortPut: (token) => ipcRenderer.invoke(MEDIA_STORE_IPC.abortPut, token),
     link: (path) => ipcRenderer.invoke(MEDIA_STORE_IPC.link, String(path)),
     open: (request) => ipcRenderer.invoke(MEDIA_STORE_IPC.open, {

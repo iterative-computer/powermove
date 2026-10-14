@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, rename, rm, utimes, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rename, rm, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -9,7 +10,7 @@ import { MEDIA_STORE_IPC } from '../../shared/media-store';
 import { HostServicesCore } from '../engine/services';
 import { CAMERA_CARD_MARKERS, ImportClassifier } from './classify';
 import { InProcessExecutor } from './hasher';
-import { registerMediaStoreIpc } from './ipc';
+import { PROJECT_RANGE_BYTES, registerMediaStoreIpc } from './ipc';
 import { findByContent } from './relink';
 import { MediaStoreService } from './service';
 
@@ -212,5 +213,38 @@ describe('media store IPC', () => {
     expect(await handlers.get(MEDIA_STORE_IPC.record)!(event, 'k')).toBeNull();
     await expect(Promise.resolve().then(() => handlers.get(MEDIA_STORE_IPC.putFile)!(event, { path: 'relative', key: 'k' }))).rejects.toThrow(/absolute/);
     await expect(Promise.resolve().then(() => handlers.get(MEDIA_STORE_IPC.open)!(event, { link: { path: '/x', hash: 'zz', size: 1 } }))).rejects.toThrow(/Invalid media link/);
+  });
+
+  it('copies a range of the project file the window opened straight into the store', async () => {
+    const handlers = new Map<string, (...args: any[]) => any>();
+    const ipc = { handle: (channel: string, fn: any) => handlers.set(channel, fn), on: (channel: string, fn: any) => handlers.set(channel, fn) };
+    const svc = service({ enabled: true });
+    // A project file: 100 bytes of document, then the media range.
+    const media = bytes(3 * 1024 * 1024 + 11, 9);
+    const file = new Uint8Array(100 + media.length);
+    file.set(media, 100);
+    const sender = { id: 4, once: () => undefined };
+    const other = { id: 5, once: () => undefined };
+    const reads: number[] = [];
+    registerMediaStoreIpc(ipc as never, svc, {
+      isTrustedSender: () => true,
+      projectRead: async (owner, token, offset, length) => {
+        if (owner !== sender || token !== 'reader-1') throw new Error('Unknown project read token');
+        reads.push(length);
+        return file.slice(offset, offset + length);
+      }
+    });
+    const call = (channel: string, value: unknown, from: object = sender) => Promise.resolve().then(() => handlers.get(channel)!({ sender: from }, value));
+    const token = await call(MEDIA_STORE_IPC.beginPut, { key: 'media:v2:p', type: 'video/mp4', size: media.length, revision: 'rev-p', origin: 'project' });
+    // Another window's reader, or a range past the limit, is refused.
+    await expect(call(MEDIA_STORE_IPC.putProjectRange, { token, readToken: 'reader-1', offset: 100, length: 10, at: 0 }, other)).rejects.toThrow();
+    await expect(call(MEDIA_STORE_IPC.putProjectRange, { token, readToken: 'reader-1', offset: 100, length: PROJECT_RANGE_BYTES + 1, at: 0 })).rejects.toThrow(/range/);
+    await call(MEDIA_STORE_IPC.putProjectRange, { token, readToken: 'reader-1', offset: 100, length: 2 * 1024 * 1024, at: 0 });
+    await call(MEDIA_STORE_IPC.putProjectRange, { token, readToken: 'reader-1', offset: 100 + 2 * 1024 * 1024, length: media.length - 2 * 1024 * 1024, at: 2 * 1024 * 1024 });
+    expect(Math.max(...reads)).toBeLessThanOrEqual(1024 * 1024);
+    const sha256 = createHash('sha256').update(media).digest('hex');
+    const record = await call(MEDIA_STORE_IPC.finishPut, { token, sha256 });
+    expect(record).toMatchObject({ key: 'media:v2:p', hash: blake3Hex(media), size: media.length, revision: 'rev-p', source: 'project' });
+    expect(Buffer.compare(await readFile(svc.store.objectPath(record.hash)), media)).toBe(0);
   });
 });

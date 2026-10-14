@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { chmod, copyFile, mkdtemp, readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -132,6 +133,37 @@ describe('MediaStore', () => {
     await expect(store.finishStream(7, bad, { blake3: blake3Hex(bytes(10, 2)) })).rejects.toThrow(/does not match/);
     expect(await store.record('media:y')).toBeNull();
     expect(await store.hasObject(blake3Hex(bytes(10)))).toBe(false);
+  });
+
+  it('commits bytes main read from a project file against its recorded SHA-256', async () => {
+    const store = new MediaStore({ root: path.join(root, 'store'), executor });
+    const data = bytes(5 * 1024 * 1024 + 9, 4);
+    const sha256 = createHash('sha256').update(data).digest('hex');
+    const token = await store.beginStream(3, { key: 'media:p', type: 'video/mp4', size: data.length, revision: 'r1', origin: 'project' });
+    for (let offset = 0; offset < data.length; offset += 1024 * 1024) await store.chunk(3, token, offset, data.subarray(offset, offset + 1024 * 1024), 'main');
+    const record = await store.finishStream(3, token, { sha256 });
+    expect(record).toMatchObject({ key: 'media:p', hash: blake3Hex(data), size: data.length, revision: 'r1', source: 'project', sha256 });
+    expect(Buffer.compare(await readFile(store.objectPath(record.hash)), data)).toBe(0);
+
+    // A range that is not what the file recorded is never committed.
+    const wrong = await store.beginStream(3, { key: 'media:q', type: '', size: 16, origin: 'project' });
+    await store.chunk(3, wrong, 0, bytes(16, 8), 'main');
+    await expect(store.finishStream(3, wrong, { sha256 })).rejects.toThrow(/checksum/);
+    expect(await store.record('media:q')).toBeNull();
+    expect(await store.hasObject(blake3Hex(bytes(16, 8)))).toBe(false);
+  });
+
+  it('accepts a project range without a recorded checksum only when main read every byte', async () => {
+    const store = new MediaStore({ root: path.join(root, 'store'), executor });
+    const data = bytes(3000, 6);
+    const mainRead = await store.beginStream(3, { key: 'media:m', type: '', size: data.length, origin: 'project' });
+    await store.chunk(3, mainRead, 0, data, 'main');
+    expect(await store.finishStream(3, mainRead, {})).toMatchObject({ key: 'media:m', hash: blake3Hex(data) });
+    // Bytes from the page always name their BLAKE3 (or a checksum).
+    const fromPage = await store.beginStream(3, { key: 'media:n', type: '', size: data.length });
+    await store.chunk(3, fromPage, 0, data);
+    await expect(store.finishStream(3, fromPage, {})).rejects.toThrow(/BLAKE3/);
+    expect(await store.record('media:n')).toBeNull();
   });
 
   it('refuses out-of-order chunks, other owners, and incomplete uploads', async () => {
