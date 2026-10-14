@@ -78,7 +78,18 @@ export type NativeEngineStatus = Record<EngineProcess, EngineProcessStatus>;
 
 export type ClientDeliver = (info: ClientPortInfo, port: PortLike) => void;
 
-type Client = { deliver: ClientDeliver; ports: Map<EngineProcess, { port: number; generation: number }> };
+type Client = {
+  deliver: ClientDeliver;
+  ports: Map<EngineProcess, { port: number; generation: number }>;
+  kind: ClientKind;
+};
+
+/** What a client's ports lead to in the engine: protocol ports for a
+ *  renderer window, or main's own font port to the interactive engine's
+ *  font service (engine-fonts.ts; not a protocol peer). */
+export type ClientKind = { peer: 'renderer' | 'fonts'; processes: readonly EngineProcess[] };
+
+export const RENDERER_CLIENT: ClientKind = { peer: 'renderer', processes: ['interactive', 'job'] };
 
 export interface NativeEngineListener {
   crash?(report: CrashReport): void;
@@ -194,11 +205,11 @@ export class NativeEngine {
   /* ── clients (renderer windows) ─────────────────────────────────────── */
 
   /** Connects a client to every running engine now and after every restart. */
-  addClient(id: number, deliver: ClientDeliver): void {
+  addClient(id: number, deliver: ClientDeliver, kind: ClientKind = RENDERER_CLIENT): void {
     this.removeClient(id);
-    const client: Client = { deliver, ports: new Map() };
+    const client: Client = { deliver, ports: new Map(), kind };
     this.clients.set(id, client);
-    for (const process of ['interactive', 'job'] as const) {
+    for (const process of kind.processes) {
       const launch = this.supervisors[process].current;
       if (launch) this.connectClient(client, launch);
     }
@@ -207,7 +218,7 @@ export class NativeEngine {
   /** The client's page reloaded: its ports died with it; give it new ones. */
   reconnectClient(id: number): void {
     const client = this.clients.get(id);
-    if (client) this.addClient(id, client.deliver);
+    if (client) this.addClient(id, client.deliver, client.kind);
   }
 
   removeClient(id: number): void {
@@ -229,7 +240,7 @@ export class NativeEngine {
     if (previous && previous.generation === launch.generation) launch.control({ type: 'disconnect', port: previous.port });
     const { port1, port2 } = this.options.channel();
     const port = this.nextPort++;
-    launch.control({ type: 'connect', port, peer: 'renderer' }, [port1]);
+    launch.control({ type: 'connect', port, peer: client.kind.peer }, [port1]);
     client.ports.set(launch.process, { port, generation: launch.generation });
     client.deliver({ process: launch.process, port, generation: launch.generation }, port2);
   }
@@ -316,7 +327,7 @@ export class NativeEngine {
         restartInMs: 0
       });
     }
-    for (const client of this.clients.values()) this.connectClient(client, launch);
+    for (const client of this.clients.values()) if (client.kind.processes.includes(launch.process)) this.connectClient(client, launch);
     this.connectPeer();
     this.emitStatus();
   }

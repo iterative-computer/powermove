@@ -16,7 +16,10 @@ pub enum Family {
     /// `sans-serif`, `serif`, `monospace`, `cursive`, `fantasy`.
     Generic(&'static str),
     /// A `FontFace` registered from bytes, with its `variationSettings`.
-    Custom { face: FaceId, settings: Vec<(u32, f32)> },
+    Custom {
+        face: FaceId,
+        settings: Vec<(u32, f32)>,
+    },
 }
 
 /// Chrome's default generic families on macOS (`locale_settings_mac.grd`).
@@ -30,10 +33,67 @@ pub fn generic_family(name: &str) -> &'static str {
     }
 }
 
+/// Platform data Blink's renderer-wide font cache already holds when a
+/// canvas asks for a font.
+///
+/// `FontPlatformDataCache` keys platform data by family, effective size, and
+/// selection request (weight, width, slope), but not by specified size, and
+/// `FontPlatformDataFromCTFont` sets `opsz` from the specified size of the
+/// description that created the entry. Whoever creates an entry first fixes
+/// its optical size for every later user of the key in that renderer. DOM
+/// text is laid out at its CSS size times the zoom (on macOS, the device
+/// scale factor applies as zoom), so UI text at 12 px on a 2x display
+/// creates the 24 px entry with `opsz` 12 (clamped to the axis minimum, 17,
+/// for the system font), and a canvas measuring 24 px text in the same
+/// family, weight, and style afterwards gets SF's text-size advances (about
+/// 3.7% wider than at `opsz` 24).
+///
+/// A seed declares one such entry, so level 1 can reproduce a renderer whose
+/// cache is in that state. Without seeds, every entry is the canvas's own
+/// (`opsz` at the canvas's specified size), which is what a fresh renderer
+/// measures.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FontCacheSeed {
+    /// The family name the entry was created for (`FontFaceCreationParams`,
+    /// compared ignoring ASCII case), e.g. `system-ui`.
+    pub family: String,
+    pub weight: f32,
+    pub italic: bool,
+    /// The effective size (the cache key's size).
+    pub size: f32,
+    /// The specified size of the description that created the entry.
+    pub specified: f32,
+}
+
+impl FontCacheSeed {
+    fn matches(&self, family: &str, desc: &FontDesc) -> bool {
+        self.family.eq_ignore_ascii_case(family)
+            && self.weight == desc.weight
+            && self.italic == desc.italic
+            && self.size == desc.size
+    }
+}
+
 /// Resolves the family list into Blink's `FontFallbackList` order, appending
-/// the standard font after the last family.
-pub fn build_setup(resolver: &mut dyn FontResolver, families: &[Family], desc: FontDesc, letter_spacing: f32) -> FontSetup {
+/// the standard font after the last family. `desc.size` is the effective
+/// size; `specified` is the size before the floor.
+pub fn build_setup(
+    resolver: &mut dyn FontResolver,
+    families: &[Family],
+    desc: FontDesc,
+    specified: f32,
+    letter_spacing: f32,
+    seeds: &[FontCacheSeed],
+) -> FontSetup {
     let mut group = Vec::new();
+    let mut seeded_opsz = Vec::new();
+    let mut seed = |face: FaceId, family: &str| {
+        if let Some(s) = seeds.iter().find(|s| s.matches(family, &desc))
+            && !seeded_opsz.iter().any(|(f, _)| *f == face)
+        {
+            seeded_opsz.push((face, s.specified));
+        }
+    };
     for family in families {
         match family {
             Family::Named(name) => {
@@ -42,18 +102,27 @@ pub fn build_setup(resolver: &mut dyn FontResolver, families: &[Family], desc: F
                     // it shapes with web-font coordinates and asks for the
                     // full hint list.
                     if resolver.face(f).custom {
-                        group.push(GroupFont::Custom { face: f, settings: Vec::new() });
+                        group.push(GroupFont::Custom {
+                            face: f,
+                            settings: Vec::new(),
+                        });
                     } else {
+                        seed(f, name);
                         group.push(GroupFont::Installed(f));
                     }
                 }
             }
             Family::Generic(g) => {
-                if let Some(f) = resolver.family(generic_family(g), &desc) {
+                let name = generic_family(g);
+                if let Some(f) = resolver.family(name, &desc) {
+                    seed(f, name);
                     group.push(GroupFont::Installed(f));
                 }
             }
-            Family::Custom { face, settings } => group.push(GroupFont::Custom { face: *face, settings: settings.clone() }),
+            Family::Custom { face, settings } => group.push(GroupFont::Custom {
+                face: *face,
+                settings: settings.clone(),
+            }),
         }
     }
     if let Some(f) = resolver.standard(&desc) {
@@ -65,7 +134,11 @@ pub fn build_setup(resolver: &mut dyn FontResolver, families: &[Family], desc: F
         let info = resolver.face(g.face());
         if let Ok(font) = read_fonts::FontRef::from_index(info.data.as_slice(), info.index) {
             use read_fonts::TableProvider;
-            let has_space = font.cmap().ok().and_then(|c| c.map_codepoint(0x20u32)).is_some_and(|g| g.to_u32() != 0);
+            let has_space = font
+                .cmap()
+                .ok()
+                .and_then(|c| c.map_codepoint(0x20u32))
+                .is_some_and(|g| g.to_u32() != 0);
             if has_space {
                 primary = Some(g.face());
                 break;
@@ -73,9 +146,19 @@ pub fn build_setup(resolver: &mut dyn FontResolver, families: &[Family], desc: F
         }
     }
     if primary.is_none() {
-        primary = group.first().map(|g| g.face()).or_else(|| resolver.last_resort(&desc));
+        primary = group
+            .first()
+            .map(|g| g.face())
+            .or_else(|| resolver.last_resort(&desc));
     }
-    FontSetup { group, desc, letter_spacing, primary }
+    FontSetup {
+        group,
+        desc,
+        specified,
+        seeded_opsz,
+        letter_spacing,
+        primary,
+    }
 }
 
 /// Result of measuring one string.
@@ -153,7 +236,11 @@ fn next_word_end(text: &[u16], start: usize, is_8bit: bool) -> usize {
     while end < len {
         let (ch, n) = next_cp(text, next_end);
         next_end += n;
-        if chars::is_mark_or_modifier(ch) || ch == chars::ZERO_WIDTH_JOINER || chars::is_emoji_component(ch) || chars::is_extended_pictographic(ch) {
+        if chars::is_mark_or_modifier(ch)
+            || ch == chars::ZERO_WIDTH_JOINER
+            || chars::is_emoji_component(ch)
+            || chars::is_extended_pictographic(ch)
+        {
             end = next_end;
             continue;
         }
@@ -197,19 +284,29 @@ fn bidi_runs(original: &[u16]) -> Vec<(usize, usize, bool)> {
         return vec![(0, original.len(), false)];
     }
     let info = unicode_bidi::utf16::BidiInfo::new(original, Some(unicode_bidi::Level::ltr()));
-    let Some(para) = info.paragraphs.first() else { return vec![(0, original.len(), false)] };
+    let Some(para) = info.paragraphs.first() else {
+        return vec![(0, original.len(), false)];
+    };
     let levels = &info.levels;
     if levels.iter().all(|l| l.is_ltr()) {
         return vec![(0, original.len(), false)];
     }
     let (_, runs) = info.visual_runs(para, para.range.clone());
-    runs.into_iter().map(|r| (r.start, r.end - r.start, levels[r.start].is_rtl())).collect()
+    runs.into_iter()
+        .map(|r| (r.start, r.end - r.start, levels[r.start].is_rtl()))
+        .collect()
 }
 
 fn is_cursive(script: Script) -> bool {
     matches!(
         script,
-        Script::Arabic | Script::HanifiRohingya | Script::Mandaic | Script::Mongolian | Script::Nko | Script::PhagsPa | Script::Syriac
+        Script::Arabic
+            | Script::HanifiRohingya
+            | Script::Mandaic
+            | Script::Mongolian
+            | Script::Nko
+            | Script::PhagsPa
+            | Script::Syriac
     )
 }
 
@@ -231,7 +328,8 @@ fn apply_spacing(result: &mut ShapeResult, text: &[u16], item_start: usize, lett
             }
             let index = run_start + run.glyphs[i].character_index as usize;
             let mut c = text[index] as u32;
-            let treat_as_space = chars::is_treat_as_space(c) || chars::is_normalized_canvas_space(c);
+            let treat_as_space =
+                chars::is_treat_as_space(c) || chars::is_normalized_canvas_space(c);
             if treat_as_space && c != chars::NO_BREAK_SPACE {
                 c = chars::SPACE;
             }
@@ -251,7 +349,12 @@ fn apply_spacing(result: &mut ShapeResult, text: &[u16], item_start: usize, lett
 
 /// Measures `text` (UTF-16, as JavaScript holds it) like
 /// `CanvasRenderingContext2D.measureText(text).width`.
-pub fn measure(resolver: &mut dyn FontResolver, cache: &mut PreparedCache, setup: &FontSetup, text: &[u16]) -> Measured {
+pub fn measure(
+    resolver: &mut dyn FontResolver,
+    cache: &mut PreparedCache,
+    setup: &FontSetup,
+    text: &[u16],
+) -> Measured {
     let is_8bit_source = text.iter().all(|&u| u <= 0xFF);
     let (content, changed) = normalize(text);
     let is_8bit = is_8bit_source && !changed;
@@ -262,7 +365,11 @@ pub fn measure(resolver: &mut dyn FontResolver, cache: &mut PreparedCache, setup
         let mut index = 0;
         while index < len {
             let end = next_word_end(sub, index, is_8bit);
-            let item = Item { start: start + index, len: end - index, rtl };
+            let item = Item {
+                start: start + index,
+                len: end - index,
+                rtl,
+            };
             if rtl {
                 items.insert(insertion, item);
             } else {

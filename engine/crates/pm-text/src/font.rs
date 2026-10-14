@@ -58,7 +58,9 @@ pub struct FaceFacts {
 
 impl FaceFacts {
     pub fn of(data: &[u8], index: u32) -> FaceFacts {
-        let Ok(f) = FontRef::from_index(data, index) else { return FaceFacts::default() };
+        let Ok(f) = FontRef::from_index(data, index) else {
+            return FaceFacts::default();
+        };
         let has = |t: &[u8; 4]| f.table_data(Tag::new(t)).is_some();
         let has_sbix = has(b"sbix");
         FaceFacts {
@@ -119,7 +121,13 @@ pub trait FontResolver {
     /// The user's standard font (`-webkit-standard`).
     fn standard(&mut self, desc: &FontDesc) -> Option<FaceId>;
     /// `FontCache::PlatformFallbackFontForCharacter`.
-    fn fallback_for_char(&mut self, desc: &FontDesc, ch: u32, primary: FaceId, emoji_presentation: bool) -> Option<FaceId>;
+    fn fallback_for_char(
+        &mut self,
+        desc: &FontDesc,
+        ch: u32,
+        primary: FaceId,
+        emoji_presentation: bool,
+    ) -> Option<FaceId>;
     /// `FontCache::GetLastResortFallbackFont`.
     fn last_resort(&mut self, desc: &FontDesc) -> Option<FaceId>;
     /// The variable-font source today's `typography/font-renderer.ts`
@@ -161,9 +169,15 @@ pub struct Axis {
 }
 
 pub fn axes(data: &[u8], index: u32) -> Vec<Axis> {
-    let Ok(font) = FontRef::from_index(data, index) else { return Vec::new() };
-    let Ok(fvar) = font.fvar() else { return Vec::new() };
-    let Ok(records) = fvar.axes() else { return Vec::new() };
+    let Ok(font) = FontRef::from_index(data, index) else {
+        return Vec::new();
+    };
+    let Ok(fvar) = font.fvar() else {
+        return Vec::new();
+    };
+    let Ok(records) = fvar.axes() else {
+        return Vec::new();
+    };
     records
         .iter()
         .map(|r: &VariationAxisRecord| Axis {
@@ -203,8 +217,9 @@ fn blob_source(data: &FontBytes) -> Source {
 
 /// Final coordinates for an installed face (`FontPlatformDataFromCTFont`):
 /// the typeface's own coordinates, then `opsz` set to the specified size
-/// when the font has that axis (font-optical-sizing: auto).
-pub fn platform_coords(info: &FaceInfo, size: f32) -> Vec<(u32, f32)> {
+/// (`specified`, not the effective size the face is measured at) when the
+/// font has that axis (font-optical-sizing: auto).
+pub fn platform_coords(info: &FaceInfo, specified: f32) -> Vec<(u32, f32)> {
     let axes = axes(info.data.as_slice(), info.index);
     if axes.is_empty() {
         return Vec::new();
@@ -212,14 +227,19 @@ pub fn platform_coords(info: &FaceInfo, size: f32) -> Vec<(u32, f32)> {
     let mut coords: Vec<(u32, f32)> = axes
         .iter()
         .map(|a| {
-            let v = info.coords.iter().find(|(t, _)| *t == a.tag).map(|(_, v)| *v).unwrap_or(a.default);
+            let v = info
+                .coords
+                .iter()
+                .find(|(t, _)| *t == a.tag)
+                .map(|(_, v)| *v)
+                .unwrap_or(a.default);
             (a.tag, v)
         })
         .collect();
     for (t, v) in coords.iter_mut() {
         if *t == OPSZ {
             let a = axes.iter().find(|a| a.tag == OPSZ).expect("opsz axis");
-            *v = size.clamp(a.min, a.max);
+            *v = specified.clamp(a.min, a.max);
         }
     }
     coords
@@ -238,7 +258,11 @@ pub struct WebDescriptors {
 
 /// The descriptors font-renderer.ts gives every variable `FontFace`:
 /// `weight: 1 1000`, `stretch: 1% 1000%`, style equal to the request.
-pub const VARIABLE_FACE_DESCRIPTORS: WebDescriptors = WebDescriptors { weight: (1.0, 1000.0), stretch: (1.0, 1000.0), slope: None };
+pub const VARIABLE_FACE_DESCRIPTORS: WebDescriptors = WebDescriptors {
+    weight: (1.0, 1000.0),
+    stretch: (1.0, 1000.0),
+    slope: None,
+};
 
 /// CSS slope of a request: normal 0, italic 14 degrees (the value Blink
 /// maps to `slnt` for web fonts).
@@ -249,8 +273,14 @@ pub fn requested_slope(desc: &FontDesc) -> f32 {
 /// Final coordinates for a web font (`FontCustomPlatformData::GetFontPlatformData`):
 /// the request's weight, stretch, and slope clamped to the face's descriptor
 /// ranges, then the face's `variationSettings` (`settings`; the last value for
-/// an axis wins), then `opsz` set to the size unless the settings name it.
-pub fn custom_coords(info: &FaceInfo, desc: &FontDesc, settings: &[(u32, f32)]) -> Vec<(u32, f32)> {
+/// an axis wins), then `opsz` set to the specified size
+/// (`adjusted_specified_size`) unless the settings name it.
+pub fn custom_coords(
+    info: &FaceInfo,
+    desc: &FontDesc,
+    specified: f32,
+    settings: &[(u32, f32)],
+) -> Vec<(u32, f32)> {
     let axes = axes(info.data.as_slice(), info.index);
     if axes.is_empty() {
         return Vec::new();
@@ -272,30 +302,36 @@ pub fn custom_coords(info: &FaceInfo, desc: &FontDesc, settings: &[(u32, f32)]) 
         requested.push((t, v));
     }
     if !explicit_opsz {
-        requested.push((OPSZ, desc.size));
+        requested.push((OPSZ, specified));
     }
     axes.iter()
         .map(|a| {
             // Skia: the last value given for an axis wins; values are clamped to the axis.
-            let v = requested.iter().rev().find(|(t, _)| *t == a.tag).map(|(_, v)| *v).unwrap_or(a.default);
+            let v = requested
+                .iter()
+                .rev()
+                .find(|(t, _)| *t == a.tag)
+                .map(|(_, v)| *v)
+                .unwrap_or(a.default);
             (a.tag, v.clamp(a.min, a.max))
         })
         .collect()
 }
 
-/// Final coordinates for `face` at `desc`: web fonts (project fonts and
-/// variable `FontFace`s) through `custom_coords`, installed fonts through
-/// `platform_coords`.
-pub fn face_coords(info: &FaceInfo, desc: &FontDesc, settings: &[(u32, f32)]) -> Vec<(u32, f32)> {
-    if info.custom { custom_coords(info, desc, settings) } else { platform_coords(info, desc.size) }
-}
-
-pub fn prepare(info: &FaceInfo, coords: Vec<(u32, f32)>, size: f32, em_advance: Option<f32>) -> Option<PreparedFace> {
+pub fn prepare(
+    info: &FaceInfo,
+    coords: Vec<(u32, f32)>,
+    size: f32,
+    em_advance: Option<f32>,
+) -> Option<PreparedFace> {
     let base = read_fonts::model::Font::new(blob_source(&info.data), info.index)?;
     let (font, default_font) = if coords.is_empty() {
         (base, None)
     } else {
-        let varied = base.instance_builder().variations(coords.iter().map(|&(t, v)| (Tag::from_u32(t), v))).build();
+        let varied = base
+            .instance_builder()
+            .variations(coords.iter().map(|&(t, v)| (Tag::from_u32(t), v)))
+            .build();
         (varied, Some(base))
     };
     let fref = FontRef::from_index(info.data.as_slice(), info.index).ok()?;
@@ -343,11 +379,22 @@ impl PreparedCache {
         size: f32,
         em_advance: impl FnOnce() -> Option<f32>,
     ) -> Option<Arc<PreparedFace>> {
-        let key = (id, size.to_bits(), coords.iter().map(|&(t, v)| (t, v.to_bits())).collect::<Vec<_>>());
+        let key = (
+            id,
+            size.to_bits(),
+            coords
+                .iter()
+                .map(|&(t, v)| (t, v.to_bits()))
+                .collect::<Vec<_>>(),
+        );
         if let Some(p) = self.map.get(&key) {
             return Some(p.clone());
         }
-        let em = if info.facts.has_sbix { em_advance() } else { None };
+        let em = if info.facts.has_sbix {
+            em_advance()
+        } else {
+            None
+        };
         let p = Arc::new(prepare(info, coords, size, em)?);
         self.map.insert(key, p.clone());
         Some(p)
