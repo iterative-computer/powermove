@@ -467,6 +467,34 @@ export function encodeJpeg(image: Raster, o: JpegOptions): Uint8Array {
 }
 
 // ---------------------------------------------------------------------------
+// TIFF
+
+/** A baseline TIFF: 8-bit RGB, chunky, uncompressed, one strip, no ICC
+ *  profile and no orientation tag (the TIFF class pm-render draws). */
+export function encodeTiff(image: Raster): Uint8Array {
+  if (image.channels !== 3) throw new Error('encodeTiff writes RGB');
+  const { width, height, data } = image;
+  // Header, IFD (count, 11 entries, next offset), BitsPerSample values, pixels.
+  const entries = 11, ifdAt = 8, bitsAt = ifdAt + 2 + entries * 12 + 4, pixelsAt = bitsAt + 6;
+  const out = new Uint8Array(pixelsAt + data.length), view = new DataView(out.buffer);
+  out.set([0x49, 0x49, 42, 0]);
+  view.setUint32(4, ifdAt, true);
+  view.setUint16(ifdAt, entries, true);
+  const tags: Array<[number, 3 | 4, number, number]> = [
+    [256, 4, 1, width], [257, 4, 1, height], [258, 3, 3, bitsAt], [259, 3, 1, 1], [262, 3, 1, 2],
+    [273, 4, 1, pixelsAt], [277, 3, 1, 3], [278, 4, 1, height], [279, 4, 1, data.length], [284, 3, 1, 1], [296, 3, 1, 1],
+  ];
+  tags.forEach(([tag, type, count, value], i) => {
+    const at = ifdAt + 2 + i * 12;
+    view.setUint16(at, tag, true); view.setUint16(at + 2, type, true); view.setUint32(at + 4, count, true);
+    if (type === 3 && count === 1) view.setUint16(at + 8, value, true); else view.setUint32(at + 8, value, true);
+  });
+  for (let i = 0; i < 3; i++) view.setUint16(bitsAt + 2 * i, 8, true);
+  out.set(data, pixelsAt);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // System encoders
 
 function viaTool(source: Uint8Array, extension: string, command: (input: string, output: string) => [string, string[]]): Uint8Array {
@@ -502,8 +530,10 @@ export const GENERATED_STILLS: Record<string, () => Uint8Array> = {
   'corpus-indexed.png': pngIndexed,
   'corpus-photo-lossy.webp': () => cwebp(rgbPng(photo(250, 150)), ['-q', '80']),
   'corpus-photo-lossless.webp': () => cwebp(rgbPng(photoAlpha(250, 150)), ['-lossless', '-exact']),
+  'corpus-photo-lossless-opaque.webp': () => cwebp(rgbPng(photo(250, 150)), ['-lossless']),
   'corpus-photo-alpha.webp': () => cwebp(rgbPng(photoAlpha(250, 150)), ['-q', '80', '-exact']),
   'corpus-photo.avif': () => sips(rgbPng(photo(250, 150)), 'avif'),
   'corpus-photo.heic': () => sips(rgbPng(photo(250, 150)), 'heic'),
   'corpus-p3.heic': () => sips(pngP3(), 'heic'),
+  'corpus-photo.tiff': () => encodeTiff(photo(250, 150)),
 };

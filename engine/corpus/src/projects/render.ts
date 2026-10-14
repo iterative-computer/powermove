@@ -224,6 +224,7 @@ const STILLS: Array<[string, number, number, boolean]> = [
   ['corpus-p3.jpg', 240, 135, false], ['corpus-p3.png', 240, 135, false], ['corpus-p3.heic', 240, 135, false],
   ['corpus-16bit.png', 200, 120, true], ['corpus-gray-alpha.png', 181, 103, true], ['corpus-indexed.png', 160, 100, true],
   ['corpus-photo-lossy.webp', 250, 150, false], ['corpus-photo-lossless.webp', 250, 150, true], ['corpus-photo-alpha.webp', 250, 150, true],
+  ['corpus-photo-lossless-opaque.webp', 250, 150, false], ['corpus-photo.tiff', 250, 150, false],
   ['corpus-photo.avif', 250, 150, false], ['corpus-photo.heic', 250, 150, false],
 ];
 
