@@ -81,7 +81,7 @@ export class ExternalAgentSession {
       // Assert the pinned document before host-local import.
       await this.renderer(session, 'get_project_state', { propertyLimit: 1, keyframeLimit: 0 });
       const input = name === 'import_media'
-        ? { ...z.object({ path: z.string().min(1).max(4096).refine(value => /^(\/|[A-Za-z]:[\\/])/.test(value) && !value.includes('\0')), folderId: z.string().nullable().optional(), expectedFingerprint: z.string().max(200).optional() }).strict().parse(args), assetOnly: true }
+        ? { ...z.object({ path: z.string().min(1).max(4096).refine(value => /^(\/|[A-Za-z]:[\\/])/.test(value) && !value.includes('\0')), folderId: z.string().nullable().optional(), expectedFingerprint: z.string().max(200).optional(), storage: z.enum(['copy', 'link']).optional() }).strict().parse(args), assetOnly: true }
         : z.object({ path: z.string().min(1), at: z.number().finite().min(0).optional() }).strict().parse(args);
       if (!this.options.importMedia) throw new Error('Direct timeline import requires a hidden host. Use import_media and edit_video in the desktop connection.');
       return this.options.importMedia(session.owner, { ...input, projectId: this.request?.projectId });

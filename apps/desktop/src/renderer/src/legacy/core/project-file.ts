@@ -1,12 +1,38 @@
 import { decodeProjectContainer, encodeProjectContainerBlob, encodeTextChunks, isProjectContainer, projectContainerIndex, type ProjectMediaRange } from '../../../../shared/project-container';
 import { stringifyAsync } from './serialize-async';
 import { bridge as hostBridge } from '../../kernel/bridge';
-import { isIncrementalProject, readIncrementalIndex, type SaveMedia } from '../../../../shared/project-incremental';
+import { isIncrementalProject, readIncrementalIndex, type LinkedRecord, type SaveMedia } from '../../../../shared/project-incremental';
 import { Sha256, sha256HexOf } from '../../../../shared/sha256';
 import type { PowermoveBridge, FileSaveResult } from '../../../../shared/ipc';
+import { applyEngineStamp } from '../../../../shared/engine-stamp';
 
 type MediaStore = { get(asset: any): Promise<Blob | null>; put(id: string, blob: Blob, metadata: any, revision?: string): Promise<boolean>;
-  getForSave?(asset: any): Promise<{ blob: Blob; revision: string } | null> };
+  getForSave?(asset: any): Promise<{ blob: Blob; revision: string } | null>;
+  /** Host media store (new engine): bytes main copies into the save itself. */
+  saveSource?(asset: any): Promise<{ hash: string; size: number; type: string; revision: string } | null> };
+
+const isLinkedAsset = (asset: any) => asset?.storage === 'linked' && !!asset?.link && typeof asset.link.path === 'string';
+
+/**
+ * Export › Project and agent `save_project` (section 21): every linked
+ * original is embedded, so the exported file is self-contained as before.
+ * Embedded linked assets become copied assets in the exported document and
+ * the engine stamp is recomputed, so the copy opens in either engine.
+ */
+export function embedLinkedAssets(document: any, embedded: ReadonlySet<string>): number {
+  const assets = (document?.proj || document)?.assets;
+  let changed = 0;
+  for (const [id, asset] of Object.entries<any>(assets || {})) {
+    if (!isLinkedAsset(asset) || !embedded.has(id)) continue;
+    if (!asset.contentHash && asset.link.hash) asset.contentHash = asset.link.hash;
+    if (!asset.sourcePath) asset.sourcePath = asset.link.path;
+    delete asset.storage;
+    delete asset.link;
+    changed++;
+  }
+  applyEngineStamp(document?.proj || document);
+  return changed;
+}
 
 /** Include media reachable only by undo/redo, such as a deleted image. */
 function fileAssets(document: any): Record<string, any> {
@@ -28,8 +54,20 @@ export async function saveIncrementalProject(document: any, serialized: string, 
   bridge: NonNullable<PowermoveBridge['projectSave']>, metadata: { name: string; projectId: string; saveAs: boolean },
   progress: (value: number) => void): Promise<FileSaveResult> {
   const assets = Object.entries<any>(fileAssets(document)).map(([id, asset]) => [id, { ...asset }] as const);
-  const sources = new Map<string, Blob>(), media: SaveMedia[] = [];
+  const sources = new Map<string, Blob>(), media: SaveMedia[] = [], linked: LinkedRecord[] = [];
+  const byId = new Map(assets);
   for (const [id, asset] of assets) {
+    // Linked originals stay where they are: a record without bytes.
+    if (isLinkedAsset(asset)) {
+      linked.push({ id, hash: asset.link.hash, size: asset.link.size, path: asset.link.path, type: asset.type || '' });
+      continue;
+    }
+    // Host media store: main copies the bytes from the store itself.
+    const stored = store.saveSource ? await store.saveSource(asset) : null;
+    if (stored) {
+      media.push({ id, revision: stored.revision, type: stored.type || asset.type || '', length: stored.size, stored: stored.hash });
+      continue;
+    }
     const saved = store.getForSave ? await store.getForSave(asset) : null;
     const blob = saved?.blob ?? (store.getForSave ? null : await store.get(asset));
     if (!blob) continue;
@@ -38,9 +76,17 @@ export async function saveIncrementalProject(document: any, serialized: string, 
   }
   const documentBlob = new Blob(await encodeTextChunks(serialized) as BlobPart[]);
   progress(.3);
-  const begin = await bridge.begin({ ...metadata, documentBytes: documentBlob.size, media });
+  const begin = await bridge.begin({ ...metadata, documentBytes: documentBlob.size, media, ...(linked.length ? { linked } : {}) });
   if (!begin.ok) return begin;
   try {
+    // Stored media main could not find comes from the page after all.
+    for (const id of begin.required) {
+      if (sources.has(id)) continue;
+      const saved = store.getForSave ? await store.getForSave(byId.get(id)) : await store.get(byId.get(id));
+      const blob = saved instanceof Blob ? saved : saved?.blob;
+      if (!blob || blob.size !== media.find(item => item.id === id)?.length) throw new Error('The save requested unavailable media.');
+      sources.set(id, blob);
+    }
     const total = documentBlob.size + begin.required.reduce((sum, id) => sum + (sources.get(id)?.size || 0), 0);
     let uploaded = 0;
     for (const id of [null, ...begin.required]) {
@@ -61,8 +107,6 @@ export async function packProjectFileBlob(snapshot: string | any, store: MediaSt
   const document = typeof snapshot === 'string' ? JSON.parse(snapshot) : snapshot;
   const assets = fileAssets(document);
   const media: Array<{ id: string; type: string; data: Blob }> = [];
-  const documentJSON = serialized ?? await stringifyAsync(document);
-  const documentBytes = await encodeTextChunks(documentJSON);
   const entries = Object.entries<any>(assets);
   let processed = 0;
   for (const [id, asset] of entries) {
@@ -73,6 +117,10 @@ export async function packProjectFileBlob(snapshot: string | any, store: MediaSt
     if (!blob) continue;
     media.push({ id, type: blob.type || asset.type || '', data: blob });
   }
+  // Linked originals were embedded above: the file is self-contained.
+  const embeddedLinks = embedLinkedAssets(document, new Set(media.map(item => item.id)));
+  const documentJSON = serialized !== undefined && !embeddedLinks ? serialized : await stringifyAsync(document);
+  const documentBytes = await encodeTextChunks(documentJSON);
   const packed = encodeProjectContainerBlob(documentBytes, media);
   return packed;
 }

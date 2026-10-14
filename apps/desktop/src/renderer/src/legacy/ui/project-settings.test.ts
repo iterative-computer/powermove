@@ -261,3 +261,27 @@ describe('new project form', () => {
     expect(form.values()).toMatchObject({ name: 'Untitled', w: 1920 });
   });
 });
+
+describe('Settings › Project › Media (new engine)', () => {
+  it('shows "When importing" only when the media store can link, and applies the choice', () => {
+    expect([...createProjectSettingsControl(bridge().api).element.querySelectorAll('.settings-section-heading > b')].map((node) => node.textContent))
+      .toEqual(['Composition', 'Export']);
+    let mode: 'copy' | 'link' = 'copy';
+    const applyMediaImport = vi.fn((next: 'copy' | 'link') => { mode = next; });
+    const host = bridge({ mediaImport: () => mode, applyMediaImport });
+    const control = createProjectSettingsControl(host.api);
+    expect([...control.element.querySelectorAll('.settings-section-heading > b')].map((node) => node.textContent))
+      .toEqual(['Composition', 'Media', 'Export']);
+    const select = field(control, 'When importing') as HTMLSelectElement;
+    expect([...select.options].map((option) => [option.value, option.textContent])).toEqual([['copy', 'Copy into project'], ['link', 'Link to files']]);
+    expect(select.value).toBe('copy');
+    expect(select.closest('.settings-row')?.querySelector('b')?.textContent).toBe('When importing');
+    select.value = 'link';
+    change(select);
+    expect(applyMediaImport).toHaveBeenCalledWith('link');
+    mode = 'copy';
+    control.refresh();
+    expect(select.value).toBe('copy');
+    control.destroy();
+  });
+});

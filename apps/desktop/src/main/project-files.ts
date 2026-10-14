@@ -5,7 +5,7 @@ import { PROJECT_ID } from '../shared/ipc';
 import { isProjectContainer, projectContainerIndex, type ProjectMediaRange } from '../shared/project-container';
 import { FILE_CHUNK_BYTES } from './file-upload';
 import { checkVersion, changedFile, copySnapshot, fileVersion, hashHandle, publishFile, syncDirectory, syncFile, temporarySibling, type FileVersion } from './durable-file';
-import { isIncrementalProject, readIncrementalIndex, type SaveMedia } from '../shared/project-incremental';
+import { isIncrementalProject, readIncrementalIndex, type LinkedRecord, type SaveMedia } from '../shared/project-incremental';
 import { nativeHash, ProjectSave, validateSaveMedia } from './project-save';
 import { NEWER_PROJECT_MESSAGE, needsNewerReader } from '../shared/reader-version';
 import { validateProjectDocument, type ProjectDocumentValidator } from './project-document';
@@ -13,6 +13,8 @@ import { validateProjectDocument, type ProjectDocumentValidator } from './projec
 export interface ProjectFilesOptions {
   /** Checks a saved document before it is published; defaults to this thread. */
   validateDocument?: ProjectDocumentValidator;
+  /** The host media store's file for a content hash (section 21). */
+  storedFile?(hash: string, length: number): Promise<string | null>;
 }
 
 /** Replace only after every byte has reached disk; a failed write preserves the original. */
@@ -39,8 +41,10 @@ export class ProjectFiles {
   private queue: Promise<unknown> = Promise.resolve();
   private saving = new Set<string>();
   private readonly validateDocument: ProjectDocumentValidator;
+  private readonly storedFile: ProjectFilesOptions['storedFile'];
   constructor(private readonly registryPath: string, private readonly backupDirectory: string, options: ProjectFilesOptions = {}) {
     this.validateDocument = options.validateDocument ?? validateProjectDocument;
+    this.storedFile = options.storedFile;
     this.ready = this.load();
   }
   private async load(): Promise<void> {
@@ -162,7 +166,7 @@ export class ProjectFiles {
       throw error;
     }
   }
-  beginIncremental(id: string, media: SaveMedia[], documentBytes: number, selectedPath?: string): Promise<ProjectSave> {
+  beginIncremental(id: string, media: SaveMedia[], documentBytes: number, selectedPath?: string, linked?: LinkedRecord[]): Promise<ProjectSave> {
     return this.serial(async () => {
       if (!PROJECT_ID.test(id)) throw new Error('Invalid project id');
       validateSaveMedia(media);
@@ -175,7 +179,8 @@ export class ProjectFiles {
       try {
         return await ProjectSave.create(destination, previous, media, documentBytes,
           (temporary, hash) => this.serial(() => this.commit(id, destination, temporary, hash, previous)),
-          () => { this.saving.delete(destination); }, !selectedPath, this.validateDocument);
+          () => { this.saving.delete(destination); }, !selectedPath, this.validateDocument,
+          { ...(this.storedFile ? { storedFile: this.storedFile } : {}), ...(linked ? { linked } : {}) });
       } catch (error) { this.saving.delete(destination); throw error; }
     });
   }
