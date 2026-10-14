@@ -15,8 +15,8 @@ the authority.
 | Feature | Status | Parity evidence |
 |---|---|---|
 | Solid layers (`d.radius` ignored, as level 1) | Supported | Corpus `layers/solid`, `render/*`: exact |
-| Image layers in the tested still classes (below): 8-bit PNG, gray JPEG, opaque WebP, 8-bit opaque sRGB HEIF, 8-bit opaque untagged TIFF | Supported | Corpus `render/still-*` (detailed content): ≤ 1 CV, 100% within 1, transparent frames ≤ 0.62 CV; `media/still-*` fixtures: exact |
-| Other stills (Y′CbCr JPEG, Display P3, 16-bit PNG, WebP with alpha, AVIF, GIF, BMP, ICO, OpenEXR, DPX, float or deep TIFF) | Routed | Measured differences below; `tests/stills.rs` |
+| Image layers in the tested still classes (below): 8-bit PNG, baseline gray JPEG, opaque WebP, 8-bit opaque sRGB HEIF, 8-bit opaque untagged stripped RGB TIFF | Supported | Corpus `render/still-*` (detailed content): ≤ 1 CV, 100% within 1, transparent frames ≤ 0.62 CV; `media/still-*` fixtures: exact |
+| Other stills (Y′CbCr or progressive gray JPEG, Display P3, 16-bit PNG, WebP with alpha, AVIF, GIF, BMP, ICO, OpenEXR, DPX, ICC-tagged, tiled, float, or deep TIFF) | Routed | Measured differences below; `tests/stills.rs` |
 | Video layers (pm-media decode service, zero-copy decode-in) | Supported for progressive, square-pixel, unrotated, SDR sources with Rec.709 or BT.601 primaries | Corpus `media/*`, `retiming/video`, `render/video`: within 1 CV on patch interiors (video class) |
 | Transforms (position, anchor, scale, rotation, skew, parenting, size anchors), opacity | Supported, today's sampling (no mipmaps, bilinear, hard UV edges), shared quad edges | Corpus `render/transforms`: ≤ 1 CV, 100% within 1 |
 | Normal blending (premultiplied source-over) | Supported | All of the above |
@@ -107,11 +107,11 @@ and opaque lossless WebP rows, `render-20261014-131536-ea28ddc1`):
 |---|---|---|---|
 | PNG 8-bit gray and alpha (Adam7) | 100% / 1 | 0.62 CV | Drawn |
 | PNG 8-bit indexed with `tRNS` | 100% / 1 | 0.50 CV | Drawn |
-| Gray JPEG | 100% / 1 | | Drawn |
+| Gray JPEG, baseline | 100% / 1 | | Drawn |
 | HEIC 8-bit sRGB | 100% / 1 | | Drawn |
 | WebP lossy, opaque | 100% / 1 | | Drawn |
 | WebP lossless, opaque | 100% / 1 | | Drawn |
-| TIFF 8-bit chunky RGB, no profile (uncompressed; LZW, Deflate, PackBits decode identically) | 100% / 1 | | Drawn |
+| TIFF 8-bit chunky RGB in strips, no profile (uncompressed; LZW, both Deflate tags, PackBits decode identically) | 100% / 1 | | Drawn |
 | Fixture PNG, WebP, HEIC, TIFF (flat colors) | exact | 0 CV | Drawn |
 | Y′CbCr JPEG 4:4:4 / 4:2:0 / 4:2:2 (baseline, progressive, FFmpeg layouts, EXIF orientation 6) | 99.67% / 3; 90.5% / 4; 96.4% / 26; orientation 90.4% / 24 | | Routed |
 | Display P3 PNG, JPEG, HEIC | 99.87% / 83 | | Routed |
@@ -119,6 +119,8 @@ and opaque lossless WebP rows, `render-20261014-131536-ea28ddc1`):
 | WebP lossless or lossy with alpha | 99.998–100% / 1–2 | 1.12 CV | Routed |
 | Any oriented still: EXIF orientation ≠ 1 (PNG `eXIf`, JPEG APP1, WebP `EXIF`, TIFF tag 274), HEIF `irot`/`imir`/`clap` | not compared | | Routed |
 | AVIF (ImageIO) | 68.6% / 94 | | Routed |
+| TIFF with an ICC profile (tag 34675, any profile, including sRGB), colorimetry tags, tiles, fill order 2, or other sample formats | not compared | | Routed |
+| Progressive gray JPEG | not compared | | Routed |
 
 Causes, measured:
 
@@ -153,16 +155,41 @@ FFmpeg conversion to PNG, HEIF through `sips`). So an orientation other than
 the container carries it (an `eXIf` chunk after the image data, a JPEG
 APP1 the decoder skips), routes the still, as does any HEIF transform
 property of any item. `tests/stills.rs` (`oriented_stills_are_unsupported`)
-covers PNG, gray JPEG, WebP, TIFF, and HEIC written by ImageIO and by hand.
+covers PNG, gray JPEG, WebP, TIFF, and HEIC written by ImageIO and by hand,
+and checks both paths: the routing (where pm-media's decoder reports the
+orientation first for ImageIO's TIFF and HEIC and PNG `eXIf` before the
+image data, and only the header parse catches a late `eXIf` or a JPEG APP1
+the decoder skips), and, separately, that the header parse
+(`stills::container_transform`) finds the transform in every one of the
+files on its own (ImageIO's HEIC `irot` of 90, 180, and 270 degrees
+included; `imir` and `clap` only in the synthetic `stills::tests`).
 
-**TIFF.** Drawn only as the compared structure: photometric RGB, three
-samples, chunky, 8 bits, opaque, no ICC profile, compression none, LZW,
-Deflate, or PackBits, predictor none or horizontal. The corpus case
-(`render/still-photo-tiff`, detailed content) is uncompressed;
-`tiff_compressions_decode_alike` shows FFmpeg's LZW, Deflate, and PackBits
-files and ImageIO's LZW file decode in pm-media to exactly the uncompressed
-file's pixels. Gray, palette, CMYK, Y′CbCr, planar, extra-sample, and other
-compressions are routed (`stills::tests::tiff_classes`).
+**TIFF.** Drawn only as the compared structure, decided from the first
+IFD: photometric RGB, three samples of 8-bit unsigned integers
+(BitsPerSample and SampleFormat read per sample), chunky, in strips (no
+tile tags 322 to 325), fill order 1, opaque, no ICC profile tag (34675)
+and no colorimetry tags (TransferFunction, WhitePoint,
+PrimaryChromaticities), compression none, LZW, Deflate (8 or 32946), or
+PackBits, predictor none or horizontal. The ICC check is on the header tag
+because pm-media's TIFF decoder (`image` 0.25 with `tiff` 0.11) reports no
+profile: a Display P3 or Adobe RGB TIFF would otherwise be drawn as
+untagged sRGB. Every ICC-tagged TIFF is routed, sRGB included, since none
+was compared (ImageIO embeds a profile in every TIFF of a tagged image;
+`tagged_tiff_is_unsupported` covers Adobe RGB, Display P3, and sRGB, LZW
+and uncompressed). The corpus case (`render/still-photo-tiff`, detailed
+content) is uncompressed, as FFmpeg writes it; `tiff_compressions_decode_alike`
+shows FFmpeg's LZW, Deflate (32946), and PackBits files, the Deflate file
+retagged as Adobe Deflate (8, same zlib stream), and ImageIO's untagged LZW
+file with predictor 2 decode in pm-media to exactly the uncompressed file's
+pixels, and that ImageIO's tiled file is routed. Gray, palette, CMYK,
+Y′CbCr, planar, extra-sample, fill order 2, floating-point or signed
+samples, colorimetry tags, and other compressions are routed
+(`stills::tests::tiff_classes`).
+
+**Gray JPEG.** Drawn only as baseline Huffman (SOF0), the structure of the
+compared corpus file (`corpus-photo-gray.jpg`); progressive gray (SOF2) is
+routed (`progressive_gray_jpeg_is_unsupported`, ImageIO's progressive
+encoder).
 
 Also routed, not compared: BMP, ICO, static GIF, OpenEXR, DPX, float and
 deeper-than-8-bit or alpha or ICC-tagged TIFF, deeper-than-8-bit or alpha
@@ -334,7 +361,7 @@ classes re-measured 2026-10-14 against Chromium 152.
 
 | Test | What | Result |
 |---|---|---|
-| `tests/corpus.rs` | Every supported project of the newest `v1-*` and `render-*` captures, Standard class (≤ 1 CV for 99.9%, ≤ 4 max), video class (≤ 2 CV on patch interiors), alpha class (transparent float frames within 1 CV), 3D class on 3D pixels | 70 frames, 0 failures (`v1-20261012-230504`, `render-20261014-131536`); every 3D frame within 1 CV everywhere; the routing of each `render/still-*` project is pinned, and a render capture missing one fails the test |
+| `tests/corpus.rs` | Every supported project of the newest `v1-*` and `render-*` captures, Standard class (≤ 1 CV for 99.9%, ≤ 4 max), video class (≤ 2 CV on patch interiors), alpha class (transparent float frames within 1 CV), 3D class on 3D pixels | 70 frames, 0 failures (`v1-20261012-230504`, `render-20261014-131536`); every 3D frame within 1 CV everywhere; the routing of each `render/still-*` project is pinned, and the newest `render-*` capture missing one fails the test (with no `render-*` capture at all the pin, like every corpus comparison, reports and passes vacuously) |
 | `tests/scene3d.rs` | 12 scenes against three.js renders through the production `SceneRuntime` (`tools/three-ref`), section 2 3D bar | All pass: 100% within 2 CV, max 1 CV, SSIM ≥ 0.99998 (safe math) |
 | `tests/scene3d.rs` | Uniform values against the recorded draws | 858 values equal in f32 |
 | `tests/three_programs.rs` | Generated program sources against WebGL's | 12 of 12 byte-identical |
@@ -344,7 +371,7 @@ classes re-measured 2026-10-14 against Chromium 152.
 | `tests/color.rs` | Invariant (1), 4:2:0: H.264 → `420v` | 259,200 samples: luma and chroma exact |
 | `tests/headless.rs` | Determinism: every supported feature in one composition, 3 times, 16- and 32-bit, two renderers | Byte-identical |
 | `tests/headless.rs` | Regions, depth and id surface, capability list, pass-through, `render_into`, contract 2, exec-time unsupported media leaves the target untouched, a replaced video is reopened | Pass |
-| `tests/stills.rs`, `stills::tests` | Untested still classes (BMP, GIF, ICO, EXR, DPX, 16-bit, alpha, and gray TIFF, 1-bit PNG, `gAMA`, `cICP`, Y′CbCr JPEG from FFmpeg) are unsupported; oriented PNG, gray JPEG, WebP, TIFF, and HEIC are unsupported; lossless TIFF compressions decode like the uncompressed file; header classes | Pass |
+| `tests/stills.rs`, `stills::tests` | Untested still classes (BMP, GIF, ICO, EXR, DPX, 16-bit, alpha, gray, tiled, and ICC-tagged TIFF, 1-bit PNG, `gAMA`, `cICP`, Y′CbCr JPEG from FFmpeg, progressive gray JPEG from ImageIO) are unsupported; oriented PNG, gray JPEG, WebP, TIFF, and HEIC are unsupported, and the header parse alone finds each transform; lossless TIFF compressions decode like the uncompressed file; header classes | Pass |
 | `pm-gpu/tests/msl_math.rs` | Safe math is in effect | Pass |
 | `frame_time_at_1080p` (ignored) | The everything composition at 1920 × 1080, release | 3.06 ms (16-bit, p95 4.69), 2.48 ms (32-bit, p95 2.76) median per frame, plan and GPU |
 
@@ -400,8 +427,11 @@ output share the matrix.
   tags (amendment 7); the end-to-end test belongs with the export lane.
 - Stills routed by the image classes above: Y′CbCr JPEG (needs a
   libjpeg-turbo decode in pm-media), Display P3 (needs the section 9 versus
-  legacy clipping decision), 16-bit PNG, WebP with alpha, AVIF, and every
-  oriented still (no oriented case compared yet).
+  legacy clipping decision), 16-bit PNG, WebP with alpha, AVIF, every
+  oriented still (no oriented case compared yet), ICC-tagged, tiled, and
+  other uncompared TIFF structures (an sRGB-tagged TIFF corpus case would
+  lift the most common one, which ImageIO and Photoshop write), and
+  progressive gray JPEG (needs a corpus case).
 - No consumer of the capability check exists on the integration branch yet
   (no crate depends on `pm-render`): the tracer and export lanes must call
   `unsupported_with_media` or route on `RenderError::Unsupported` when they
