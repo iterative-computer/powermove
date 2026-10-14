@@ -85,6 +85,11 @@ export type PresenterOptions = {
    * engine starts timed frames just after the compositor's GPU work.
    */
   onVsync?: (hint: VsyncHint) => void;
+  /**
+   * The pool generation the session already uses (a presenter that takes
+   * over a running session), so the next pool retires it.
+   */
+  generation?: number;
 };
 
 type Payload = { frame: VideoFrame };
@@ -111,7 +116,25 @@ export type TraceRecord = {
 
 const PARK_TIMEOUT_MS = 1000;
 
-export class EnginePresenter {
+/**
+ * What the viewer's presentation needs from a presenter: `EnginePresenter`
+ * on the page's main thread, or `WorkerPresenter` (worker-presenter.ts),
+ * which runs one in a worker.
+ */
+export interface Presenter {
+  readonly stats: PresenterStats;
+  setViewerState(state: ViewerState): void;
+  receive(message: EngineFrameMessage, arrivedMs?: number): void;
+  onPresented(listener: (frame: PresentedFrame) => void): () => void;
+  /** Moves the loop to another window's animation frames (main thread only). */
+  retarget(requestFrame: (cb: (t: number) => void) => number, cancelFrame: (id: number) => void, displayHz?: number | null): void;
+  start(): void;
+  /** The per-frame trace recorded since the last call (S1 harness), emptied. */
+  takeTrace(): Promise<TraceRecord | null>;
+  dispose(): void;
+}
+
+export class EnginePresenter implements Presenter {
   private readonly buffer = new JitterBuffer<Payload>();
   private vsync: VsyncEstimator;
   private cancelFrame: (id: number) => void = (id) => cancelAnimationFrame(id);
@@ -150,6 +173,8 @@ export class EnginePresenter {
     this.vsync = new VsyncEstimator(options.displayHz ?? null);
     this.now = options.now ?? (() => performance.now());
     this.trace = options.trace ? { arrivals: [], draws: [], drops: [], releases: [], rafs: [] } : null;
+    this.generation = options.generation ?? 0;
+    this.stats.generation = this.generation;
     this.unsubscribe = options.source.onSurface((generation, poolIndex) => this.unpark(generation, poolIndex));
   }
 
@@ -242,18 +267,41 @@ export class EnginePresenter {
   }
 
   private onFrame(desc: FrameDescriptor, arrivedMs: number): void {
-    this.stats.received++;
-    this.trace?.arrivals.push([desc.seq, desc.pts, arrivedMs, desc.viewSeq, desc.duration === null ? 0 : 1]);
-    if (desc.poolGeneration < this.generation) {
-      // The engine already replaced that pool: its ledger is gone.
-      this.stats.staleGeneration++;
-      return;
-    }
+    if (!this.accept(desc, arrivedMs)) return;
     const frame = this.options.source.videoFrame(desc.poolGeneration, desc.poolIndex);
     if (!frame) {
       // The import is still on its way from main.
       this.stats.parked++;
       this.parked.push({ desc, since: arrivedMs });
+      return;
+    }
+    this.enqueue(desc, frame, arrivedMs);
+  }
+
+  /** Counts and traces an arriving descriptor; false when its pool is gone. */
+  private accept(desc: FrameDescriptor, arrivedMs: number): boolean {
+    this.stats.received++;
+    this.trace?.arrivals.push([desc.seq, desc.pts, arrivedMs, desc.viewSeq, desc.duration === null ? 0 : 1]);
+    if (desc.poolGeneration < this.generation) {
+      // The engine already replaced that pool: its ledger is gone.
+      this.stats.staleGeneration++;
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * A descriptor whose `VideoFrame` the caller already made (the
+   * off-main-thread presenter: the page's main thread asks the preload for
+   * it and transfers it here). The presenter owns `frame` from now on.
+   */
+  present(desc: FrameDescriptor, frame: VideoFrame, arrivedMs = this.now()): void {
+    if (this.disposed) {
+      frame.close();
+      return;
+    }
+    if (!this.accept(desc, arrivedMs)) {
+      frame.close();
       return;
     }
     this.enqueue(desc, frame, arrivedMs);
@@ -290,6 +338,11 @@ export class EnginePresenter {
     const { show, drop } = this.buffer.pick(atUs ?? 0, this.clock);
     for (const { item, reason } of drop) this.dropItem(item, reason);
     if (show) this.draw(show, rafMs);
+  }
+
+  takeTrace(): Promise<TraceRecord | null> {
+    const t = this.trace;
+    return Promise.resolve(t && { arrivals: t.arrivals.splice(0), draws: t.draws.splice(0), drops: t.drops.splice(0), releases: t.releases.splice(0), rafs: t.rafs.splice(0) });
   }
 
   /** The refresh grid on the host clock, for the engine (amendment 18). */
