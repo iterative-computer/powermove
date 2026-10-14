@@ -1,4 +1,6 @@
 // @vitest-environment happy-dom
+import { createHash } from 'node:crypto';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import { blake3Hex } from '../../../shared/blake3';
@@ -12,6 +14,7 @@ function fakeHost(options: { links?: Record<string, Uint8Array>; moved?: Record<
   const uploads = new Map<string, { key: string | null; type: string; size: number; parts: Uint8Array[]; revision: string | null; origin: string }>();
   const reads = new Map<string, Uint8Array>();
   const files = new Map<string, Uint8Array>(Object.entries(options.links ?? {}));
+  const projectFiles = new Map<string, Uint8Array>();
   let next = 0;
   const calls: string[] = [];
   const commit = (key: string | null, data: Uint8Array, type: string, revision: string | null, source: string): MediaStoreRecord => {
@@ -33,8 +36,17 @@ function fakeHost(options: { links?: Record<string, Uint8Array>; moved?: Record<
       uploads.delete(token);
       const data = new Uint8Array(u.parts.reduce((s, p) => s + p.length, 0));
       let at = 0; for (const p of u.parts) { data.set(p, at); at += p.length; }
-      if (blake3Hex(data) !== expected.blake3) throw new Error('The stored copy does not match the original bytes.');
-      return { ...commit(u.key, data, u.type, u.revision, u.origin), sha256: 'x' };
+      const sha256 = createHash('sha256').update(data).digest('hex');
+      if (expected.blake3 !== undefined ? blake3Hex(data) !== expected.blake3 : expected.sha256 !== undefined && expected.sha256 !== sha256) {
+        throw new Error(expected.blake3 ? 'The stored copy does not match the original bytes.' : 'The project media checksum does not match.');
+      }
+      return { ...commit(u.key, data, u.type, u.revision, u.origin), sha256 };
+    },
+    putProjectRange: async (token, readToken, offset, length, at) => {
+      calls.push(`putProjectRange:${readToken}:${offset}:${length}:${at}`);
+      const u = uploads.get(token)!;
+      const file = projectFiles.get(readToken)!;
+      u.parts.push(file.slice(offset, offset + length));
     },
     abortPut: async (token) => { uploads.delete(token); },
     link: async (path) => ({ path, hash: blake3Hex(files.get(path)!), size: files.get(path)!.length, mtimeMs: 1 }),
@@ -65,7 +77,7 @@ function fakeHost(options: { links?: Record<string, Uint8Array>; moved?: Record<
     bind: async () => undefined,
     removeKey: async (key) => keys.delete(key)
   };
-  return { host, objects, keys, files, calls };
+  return { host, objects, keys, files, calls, projectFiles };
 }
 
 function fakeLegacy(initial: Record<string, Blob> = {}) {
@@ -160,6 +172,35 @@ describe('host media store (new engine on)', () => {
     const { host } = fakeHost();
     const store = createHostMediaStore({ host, legacy: fakeLegacy({ 'media:v2:s': new Blob([data(40)]) }).legacy, enabled: true, sourcePath: () => null });
     expect(await store.saveSource({ id: 'a', storageKey: 'media:v2:s' })).toMatchObject({ hash: blake3Hex(data(40)), size: 40, revision: 'idb-media:v2:s' });
+  });
+});
+
+describe('opening a project file', () => {
+  it('has main copy embedded ranges into the store, checked against the recorded checksum', async () => {
+    const { host, keys, calls, projectFiles } = fakeHost();
+    const store = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
+    const media = data(300, 4);
+    const file = new Uint8Array(1000); file.set(media, 200);
+    projectFiles.set('reader-1', file);
+    const sha256 = createHash('sha256').update(media).digest('hex');
+    const progress: number[] = [];
+    const source = { id: 'a1', type: 'audio/wav', offset: 200, length: 300, revision: 'rev-7', sha256 };
+    expect(await store.putProjectRange('reader-1', source, { id: 'a1', storageKey: 'media:v2:w' }, (bytes) => progress.push(bytes))).toBe(true);
+    expect(calls).toContain('putProjectRange:reader-1:200:300:0');
+    expect(keys.get('media:v2:w')).toMatchObject({ hash: blake3Hex(media), revision: 'rev-7', source: 'project' });
+    expect(progress).toEqual([300]);
+    // A range that is not what the file recorded is refused, and nothing is kept.
+    await expect(store.putProjectRange('reader-1', { ...source, offset: 201 }, { id: 'a1', storageKey: 'media:v2:x' })).rejects.toThrow(/checksum/);
+    expect(keys.has('media:v2:x')).toBe(false);
+  });
+
+  it('leaves ranges to the page with the flag off or without host support', async () => {
+    const { host } = fakeHost();
+    const off = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: false, sourcePath: () => null });
+    expect(await off.putProjectRange('reader-1', { id: 'a', type: '', offset: 0, length: 1 }, { id: 'a' })).toBe(false);
+    const { putProjectRange: _omit, ...older } = host;
+    const on = createHostMediaStore({ host: older as MediaStoreBridge, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
+    expect(await on.putProjectRange('reader-1', { id: 'a', type: '', offset: 0, length: 1 }, { id: 'a' })).toBe(false);
   });
 });
 

@@ -868,7 +868,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
       try {
         if (refusedByEngine(document)) throw new Error(REQUIRES_NATIVE_MESSAGE);
         await restoreProjectFileStream(document, media, PM.MediaStore, (offset, length) => bridge.read(token, offset, length),
-          (completed, total) => opening.update({ label: file.name, completed, total }));
+          (completed, total) => opening.update({ label: file.name, completed, total }), token);
         o = document; mediaRestored = true;
       } finally { await bridge.close(token); }
     } else if (file.native) o = unpackProjectFile(file.native.data);

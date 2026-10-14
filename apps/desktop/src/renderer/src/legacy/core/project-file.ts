@@ -9,7 +9,9 @@ import { applyEngineStamp } from '../../../../shared/engine-stamp';
 type MediaStore = { get(asset: any): Promise<Blob | null>; put(id: string, blob: Blob, metadata: any, revision?: string): Promise<boolean>;
   getForSave?(asset: any): Promise<{ blob: Blob; revision: string } | null>;
   /** Host media store (new engine): bytes main copies into the save itself. */
-  saveSource?(asset: any): Promise<{ hash: string; size: number; type: string; revision: string } | null> };
+  saveSource?(asset: any): Promise<{ hash: string; size: number; type: string; revision: string } | null>;
+  /** Host media store (new engine): main copies a range of the open project file into the store. */
+  putProjectRange?(readToken: string, source: ProjectMediaRange, asset: any, onBytes?: (bytes: number) => void): Promise<boolean> };
 
 const isLinkedAsset = (asset: any) => asset?.storage === 'linked' && !!asset?.link && typeof asset.link.path === 'string';
 
@@ -204,13 +206,33 @@ export async function unpackProjectFileBlob(file: Blob): Promise<any> {
 /** Stage native ranges on disk, then commit file-backed Blobs to the media store. */
 export async function restoreProjectFileStream(document: any, media: ProjectMediaRange[], store: MediaStore,
   read: (offset: number, length: number) => Promise<Uint8Array>,
-  onProgress?: (completed: number, total: number) => void): Promise<void> {
+  onProgress?: (completed: number, total: number) => void, readToken?: string): Promise<void> {
   const assets = fileAssets(document);
-  const sources = media.filter(source => assets[source.id]);
+  let sources = media.filter(source => assets[source.id]);
   if (!sources.length) { await restoreProjectFileMedia(document, store); return; }
   const total = sources.reduce((sum, source) => sum + source.length, 0);
   let completed = 0;
   const advance = (bytes: number) => { completed += bytes; onProgress?.(completed, total); };
+  /* New engine: main copies each range from the open file into the media
+     store itself, verified against the file's checksum, so the bytes never
+     pass through this page (section 21). */
+  if (readToken && store.putProjectRange) {
+    const remaining: ProjectMediaRange[] = [];
+    for (const source of sources) {
+      let copied = 0;
+      const stored = await store.putProjectRange(readToken, source, assets[source.id], bytes => { copied += bytes; advance(bytes); })
+        .catch((error: unknown) => {
+          // A checksum mismatch is the file's fault: the page would find the same bytes.
+          if (/checksum/i.test(String((error as Error)?.message))) throw error;
+          return false;
+        });
+      if (stored) continue;
+      completed -= copied;
+      remaining.push(source);
+    }
+    if (!remaining.length) return;
+    sources = remaining;
+  }
   /* A browser served by `powermove serve` stages in memory: OPFS needs a secure
      context, and current Chromium keeps IndexedDB blobs as references to the
      staged file, which is gone once staging is cleaned up. */

@@ -202,6 +202,39 @@ describe('linked media and the host media store (section 21)', () => {
     expect((bridge.chunk.mock.calls as unknown as Array<[string, string | null, Uint8Array]>).map(call => [call[1], new TextDecoder().decode(call[2])])).toEqual([[null, JSON.stringify(snapshot)], ['stored', 'wxyz']]);
   });
 
+  it('lets main copy embedded ranges into the store on open, and restores the rest through the page', async () => {
+    const document = { proj: { assets: { a: { id: 'a', storageKey: 'media:v2:a' }, b: { id: 'b', storageKey: 'media:v2:b' } } } };
+    const media = [{ id: 'a', type: 'video/mp4', offset: 10, length: 4, revision: 'ra', sha256: sha256Hex(new Uint8Array([1, 2, 3, 4])) },
+      { id: 'b', type: 'audio/wav', offset: 14, length: 2, revision: 'rb', sha256: sha256Hex(new Uint8Array([5, 6])) }];
+    const putProjectRange = vi.fn(async (_token: string, source: any, _asset: any, onBytes?: (bytes: number) => void) => {
+      if (source.id === 'b') throw new Error('Error invoking remote method: the store is unavailable');
+      onBytes?.(source.length);
+      return true;
+    });
+    const put = vi.fn(async () => true);
+    const file = new Uint8Array(20); file.set([1, 2, 3, 4, 5, 6], 10);
+    const read = vi.fn(async (offset: number, length: number) => file.slice(offset, offset + length));
+    const progress: Array<[number, number]> = [];
+    vi.stubGlobal('navigator', { storage: {} });
+    try {
+      await restoreProjectFileStream(document, media, { get: async () => null, put, putProjectRange }, read, (done, total) => progress.push([done, total]), 'reader-1');
+    } finally { vi.unstubAllGlobals(); }
+    expect(putProjectRange.mock.calls.map(call => [call[0], call[1].id])).toEqual([['reader-1', 'a'], ['reader-1', 'b']]);
+    // Only the range main could not copy went through the page.
+    expect(read.mock.calls.map(call => call[0])).toEqual([14]);
+    expect((put.mock.calls as unknown as Array<[string]>).map(call => call[0])).toEqual(['b']);
+    expect(progress.at(-1)).toEqual([6, 6]);
+  });
+
+  it('does not fall back to the page when main finds the file no longer matches its checksum', async () => {
+    const document = { proj: { assets: { a: { id: 'a' } } } };
+    const put = vi.fn(async () => true);
+    const putProjectRange = vi.fn(async () => { throw new Error('Error invoking remote method: MediaStoreError: The project media checksum does not match.'); });
+    await expect(restoreProjectFileStream(document, [{ id: 'a', type: '', offset: 0, length: 1, sha256: 'f'.repeat(64) }],
+      { get: async () => null, put, putProjectRange }, async () => new Uint8Array([1]), undefined, 'reader-1')).rejects.toThrow(/checksum/);
+    expect(put).not.toHaveBeenCalled();
+  });
+
   it('embeds linked originals in Export › Project and opens as a copied, unstamped project', async () => {
     const snapshot = { proj: { requiresEngine: 'native', layers: [], assets: {
       linked: { id: 'linked', name: 'A001_C003.mov', storageKey: 'media:v2:l', storage: 'linked', link },

@@ -25,6 +25,8 @@ const HASH_SLICE = 1024 * 1024;
 /** Chunks read from main are folded into a Blob every 64 MiB, so a large
  *  file is never held in the page's own memory all at once. */
 const FOLD_BYTES = 64 * 1024 * 1024;
+/** Bytes main copies per `putProjectRange` call (main's limit). */
+const PROJECT_RANGE_BYTES = 64 * 1024 * 1024;
 
 export type LegacyMediaStore = {
   put(id: string, blob: Blob, meta?: any, revision?: string): Promise<boolean>;
@@ -124,6 +126,15 @@ export type HostMediaStore = Omit<LegacyMediaStore, 'getForSave'> & {
   saveSource(asset: any): Promise<{ hash: string; size: number; type: string; revision: string } | null>;
   /** Browser renditions (playback proxies) kept as generated media. */
   rendition: { get(key: string): Promise<Blob | null>; put(key: string, blob: Blob): Promise<boolean> };
+  /**
+   * Opening a project file with the new engine: main copies an embedded
+   * media range from the open file (`readToken`) straight into the store,
+   * checked against the file's recorded SHA-256 and named by its BLAKE3.
+   * False when the host cannot (flag off, older preload); the caller then
+   * restores the range through the page as before.
+   */
+  putProjectRange(readToken: string, source: { id: string; type: string; offset: number; length: number; revision?: string; sha256?: string },
+    meta: any, onBytes?: (bytes: number) => void): Promise<boolean>;
   /** Copies IndexedDB media under these assets into the store (verified). */
   migrate(assets: any[]): Promise<{ copied: number; present: number; missing: number; failed: number }>;
   readonly host: MediaStoreBridge;
@@ -285,6 +296,28 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
         if (!enabled || !key) return false;
         try { remember(await streamToStore(host, renditionKey(key), blob, { type: blob.type || 'video/webm', origin: 'rendition' })); return true; }
         catch (error) { warn(`could not keep the rendition of ${key}`, error); return false; }
+      }
+    },
+
+    async putProjectRange(readToken, source, meta, onBytes) {
+      if (!enabled || !host.putProjectRange || !readToken) return false;
+      const key = meta?.storageKey || source.id;
+      if (!key) return false;
+      const token = await host.beginPut({ key, type: source.type || meta?.type || '', size: source.length, revision: source.revision ?? null, origin: 'project' });
+      try {
+        for (let at = 0; at < source.length;) {
+          const length = Math.min(PROJECT_RANGE_BYTES, source.length - at);
+          await host.putProjectRange(token, readToken, source.offset + at, length, at);
+          at += length;
+          onBytes?.(length);
+        }
+        /* With no recorded checksum (PMV3), main still compares the copy on
+           disk with the bytes it read. */
+        remember(await host.finishPut(token, source.sha256 ? { sha256: source.sha256 } : {}));
+        return true;
+      } catch (error) {
+        await host.abortPut(token).catch(() => undefined);
+        throw error;
       }
     },
 
