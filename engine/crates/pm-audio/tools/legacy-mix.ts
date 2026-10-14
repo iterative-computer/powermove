@@ -20,8 +20,9 @@
  *   real/media/                      audio extracted from the real project (private,
  *                                    stays under the corpus root)
  *
- * `--real <file.pmv>` (default ~/Documents/Powermove ad.pmv, when present)
- * adds Jude's real project; `--skip-real` leaves it out.
+ * `--real <file.pmv>` (or the `PM_AUDIO_REAL_PROJECT` environment variable)
+ * adds a real project kept outside the repository; `--skip-real` leaves it
+ * out. Without either, no real project is captured.
  *
  * The Rust side (`tests/legacy_parity.rs`) renders the same documents with
  * pm-audio and compares (docs/engine/pm-audio.md).
@@ -350,8 +351,8 @@ async function main() {
       manifest.projects.push(record);
       console.log(`${project.name}: ${record.error ?? `${record.legacy?.length} samples`}`);
     }
-    const real = opt('--real') ?? path.join(os.homedir(), 'Documents/Powermove ad.pmv');
-    if (!args.includes('--skip-real') && existsSync(real)) {
+    const real = opt('--real') ?? process.env.PM_AUDIO_REAL_PROJECT;
+    if (!args.includes('--skip-real') && real && existsSync(real)) {
       const record = await captureReal(legacy, out, real);
       manifest.projects.push(record);
       console.log(`${record.name}: ${record.error ?? `${record.legacy?.length} samples`}`);

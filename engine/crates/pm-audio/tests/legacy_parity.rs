@@ -84,6 +84,9 @@ struct Measured {
     signal_db: f64,
     clicks_ours: Vec<i64>,
     clicks_legacy: Vec<i64>,
+    /// The residual its ceiling guards (whole mix, masked, low band, or
+    /// adjusted; see [`ceiling`]).
+    guarded_db: f64,
 }
 
 enum Ceiling {
@@ -92,19 +95,62 @@ enum Ceiling {
     /// The mix with in-points rounded as today's export plays them
     /// (allowed difference 9).
     WholeSample(f64),
-    /// Dominated by an allowed difference; reported only.
-    Explained,
+    /// The mix outside spans (seconds) where an allowed difference sits.
+    Masked(f64, &'static [(f64, f64)]),
+    /// The mix below a frequency (Hz): an allowed difference lies above it.
+    Below(f64, f64),
+    /// Ours with a document edit that reproduces today's behavior where an
+    /// allowed difference changes it.
+    Adjusted(f64, fn(&mut Value) -> bool),
+}
+
+/// The composition frame (30 fps) today's envelope ramps a switch over,
+/// with a millisecond either side for the 16-sample control interpolation:
+/// the frame after a switch off (0.5 s, 1 s), the frame before a switch on
+/// (1.5 s).
+const SWITCH_FRAMES: &[(f64, f64)] = &[
+    (0.499, 0.5 + 1.0 / 30.0 + 0.001),
+    (0.999, 1.0 + 1.0 / 30.0 + 0.001),
+    (1.5 - 1.0 / 30.0 - 0.001, 1.501),
+];
+
+/// Today's bus while a 5.1 source plays: the mono layer folds at √½.
+fn mono_at_center_fold(doc: &mut Value) -> bool {
+    let Value::Object(root) = doc else {
+        return false;
+    };
+    let Some(Value::Array(layers)) = root.get_mut("layers") else {
+        return false;
+    };
+    let mut changed = false;
+    for layer in layers {
+        let Value::Object(l) = layer else { continue };
+        if !matches!(l.get("name"), Some(Value::String(n)) if n.to_string_lossy() == "mono22k.wav")
+        {
+            continue;
+        }
+        if let Some(Value::Object(d)) = l.get_mut("d")
+            && let Some(Value::Number(gain)) = d.get_mut("gain")
+        {
+            *gain *= std::f64::consts::FRAC_1_SQRT_2;
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Each project's residual ceiling (dBFS).
 fn ceiling(name: &str) -> Ceiling {
     match name {
-        // Single-sample clicks resampled from 44.1 kHz (difference 11).
-        "clicks-44k" => Ceiling::Explained,
+        // Single-sample clicks resampled from 44.1 kHz: Chromium's resampler
+        // rolls off from about 17 kHz (difference 11).
+        "clicks-44k" => Ceiling::Below(-85.0, 15_000.0),
         // One-frame switch ramps today (difference 10).
-        "mute-groups" => Ceiling::Explained,
-        // A 5.1 source widens today's bus, mono folds at −3 dB (difference 12).
-        "layouts" => Ceiling::Explained,
+        "mute-groups" => Ceiling::Masked(-85.0, SWITCH_FRAMES),
+        // A 5.1 source widens today's bus, mono folds at −3 dB (difference
+        // 12); the 22.05 and 44.1 kHz tones go through Chromium's resampler
+        // (difference 11).
+        "layouts" => Ceiling::Adjusted(-85.0, mono_at_center_fold),
         // Keyframed levels: straight segments one frame apart today (difference 5).
         "gain-fades" | "precomp-nesting" => Ceiling::Mix(-75.0),
         n if n.starts_with("real-") => Ceiling::WholeSample(-65.0),
@@ -246,6 +292,7 @@ fn offline_mixes_match_todays_export_audio() {
             signal_db: db(signal),
             clicks_ours: vec![],
             clicks_legacy: vec![],
+            guarded_db: 0.0,
         };
         // Clicks: each spec's frames, placed through the clip's offset.
         for spec in array(get(p, "clicks")) {
@@ -289,26 +336,47 @@ fn offline_mixes_match_todays_export_audio() {
         // Residual ceilings: what is left once the allowed differences
         // (docs/engine/pm-audio.md) are accounted for, as regression guards.
         let (residual, ceiling) = match ceiling(&name) {
-            Ceiling::Mix(db) => (Some(m.rms_diff_db), db),
-            Ceiling::WholeSample(db) => (m.whole_sample_db.or(Some(m.rms_diff_db)), db),
-            Ceiling::Explained => (None, 0.0),
+            Ceiling::Mix(db) => (m.rms_diff_db, db),
+            Ceiling::WholeSample(db) => (m.whole_sample_db.unwrap_or(m.rms_diff_db), db),
+            Ceiling::Masked(db, spans) => {
+                let masked = |i: usize| {
+                    let t = i as f64 / rate as f64;
+                    spans.iter().any(|(a, b)| t >= *a && t < *b)
+                };
+                (residual_db(&ours, &legacy, n, |i| !masked(i)), db)
+            }
+            Ceiling::Below(db, hz) => {
+                let low = |x: &[f32]| low_pass(&x[..n], hz / rate as f64);
+                let ours_low = [low(&ours[0]), low(&ours[1])];
+                let legacy_low: Vec<Vec<f32>> = legacy.iter().map(|c| low(c)).collect();
+                (residual_db(&ours_low, &legacy_low, n, |_| true), db)
+            }
+            Ceiling::Adjusted(db, edit) => {
+                let mut adjusted =
+                    parse(&std::fs::read_to_string(pdir.join("loaded.json")).unwrap()).unwrap();
+                assert!(
+                    edit(&mut adjusted),
+                    "{name}: the adjustment found nothing to edit"
+                );
+                let (adj, _) = render(adjusted, &comp, &media, rate, expected_len);
+                (residual_db(&adj, &legacy, n, |_| true), db)
+            }
         };
-        if let Some(r) = residual
-            && r > ceiling
-        {
+        m.guarded_db = residual;
+        if residual > ceiling {
             failures.push(format!(
-                "{name}: residual {r:.1} dBFS above its {ceiling:.0} dBFS ceiling"
+                "{name}: residual {residual:.1} dBFS above its {ceiling:.0} dBFS ceiling"
             ));
         }
         results.push(m);
     }
     eprintln!("capture {}", dir.display());
     eprintln!(
-        "project              | legacy n | ours n (= round) | signal dBFS | residual rms dBFS | residual peak | whole-sample in-points | clicks ours / legacy (samples from frame start)"
+        "project              | legacy n | ours n (= round) | signal dBFS | residual rms dBFS | residual peak | whole-sample in-points | guarded dBFS | clicks ours / legacy (samples from frame start)"
     );
     for m in &results {
         eprintln!(
-            "{:<20} | {:>8} | {:>8} ({:>6}) | {:>11.1} | {:>17.1} | {:>13.6} | {:>22} | {:?} / {:?}",
+            "{:<20} | {:>8} | {:>8} ({:>6}) | {:>11.1} | {:>17.1} | {:>13.6} | {:>22} | {:>12.1} | {:?} / {:?}",
             m.name,
             m.legacy_len,
             m.ours_len,
@@ -318,11 +386,65 @@ fn offline_mixes_match_todays_export_audio() {
             m.peak_diff,
             m.whole_sample_db
                 .map_or("(none fractional)".to_string(), |d| format!("{d:.1} dBFS")),
+            m.guarded_db,
             m.clicks_ours,
             m.clicks_legacy
         );
     }
     assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// The rms residual (dBFS) of the stereo mix over samples `[0, n)` where
+/// `keep` holds (a mono legacy capture counts for both channels).
+fn residual_db(
+    ours: &[Vec<f32>],
+    legacy: &[Vec<f32>],
+    n: usize,
+    keep: impl Fn(usize) -> bool,
+) -> f64 {
+    let lc = legacy.len();
+    let (mut e, mut k) = (0f64, 0usize);
+    for c in 0..2 {
+        let l = &legacy[c.min(lc - 1)];
+        for i in (0..n).filter(|&i| keep(i)) {
+            e += (ours[c][i] as f64 - l[i] as f64).powi(2);
+            k += 1;
+        }
+    }
+    db((e / k.max(1) as f64).sqrt())
+}
+
+/// A linear-phase low-pass at `cutoff` (a fraction of the sample rate):
+/// 1023 taps of a Blackman-windowed sinc, about −74 dB from 1 kHz above the
+/// cutoff at 48 kHz.
+fn low_pass(x: &[f32], cutoff: f64) -> Vec<f32> {
+    let taps = 1023usize;
+    let half = (taps / 2) as f64;
+    let h: Vec<f64> = (0..taps)
+        .map(|k| {
+            let t = k as f64 - half;
+            let sinc = if t == 0.0 {
+                2.0 * cutoff
+            } else {
+                (2.0 * std::f64::consts::PI * cutoff * t).sin() / (std::f64::consts::PI * t)
+            };
+            let w = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * k as f64 / (taps - 1) as f64).cos()
+                + 0.08 * (4.0 * std::f64::consts::PI * k as f64 / (taps - 1) as f64).cos();
+            sinc * w
+        })
+        .collect();
+    (0..x.len())
+        .map(|i| {
+            let mut acc = 0f64;
+            for (k, hk) in h.iter().enumerate() {
+                let j = i as i64 + k as i64 - half as i64;
+                if j >= 0 && (j as usize) < x.len() {
+                    acc += hk * x[j as usize] as f64;
+                }
+            }
+            acc as f32
+        })
+        .collect()
 }
 
 /// Media the graph could not open: (layer, asset, reason).
