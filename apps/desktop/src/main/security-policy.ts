@@ -4,9 +4,13 @@ import { isSandboxHost, sandboxDocumentId, sandboxHost } from '../shared/sandbox
  * Trusted extensions can use the network; project-authored scripts run in a
  * separate sandbox. `app:` frames are Store extensions, each on its own host
  * (shared/sandbox-origin.ts); the navigation guard narrows it to their documents.
+ * `'wasm-unsafe-eval'` lets the editor compile its own WebAssembly (pm-wasm,
+ * the document mirror; docs/rust-engine.md section 26, S5): it permits
+ * `WebAssembly.compile` and `instantiate` only, never string evaluation
+ * (`eval` and `new Function` stay blocked).
  */
 export const CONTENT_SECURITY_POLICY =
-  "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: http: https:; media-src 'self' blob:; font-src 'self'; connect-src 'self' blob: http: https: ws: wss:; worker-src 'self' blob:; frame-src 'self' about: blob: app:";
+  "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: http: https:; media-src 'self' blob:; font-src 'self'; connect-src 'self' blob: http: https: ws: wss:; worker-src 'self' blob:; frame-src 'self' about: blob: app:";
 
 /** Generated scripts retain eval only inside the opaque, no-network sandbox. */
 export const SANDBOX_CONTENT_SECURITY_POLICY =

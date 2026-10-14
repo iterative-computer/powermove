@@ -1,3 +1,4 @@
+import { validateFrameRate } from '../../../../shared/frame-rate';
 import { z } from 'zod';
 import type { PMRegistry } from '../registry';
 
@@ -16,7 +17,10 @@ export async function mcpProjectTool(PM: PMRegistry, tool: string, args: Record<
   }
   if (tool === '__mcp_create_project') {
     const input = creation.parse(args);
-    PM.newBlankProject({ name: input.name, w: input.width, h: input.height, fps: input.fps, dur: input.duration });
+    // The single frame-rate validator: rates that divide the engine's tick.
+    const rate = validateFrameRate(input.fps, 'new');
+    if (!rate.ok) throw new Error(rate.message);
+    PM.newBlankProject({ name: input.name, w: input.width, h: input.height, fps: rate.fps, fpsRational: rate.fpsRational, dur: input.duration });
     PM.Projects.put(PM.proj);
     return { projectId: PM.proj.id, name: PM.proj.name, width: PM.proj.w, height: PM.proj.h, fps: PM.proj.fps, duration: PM.proj.dur };
   }

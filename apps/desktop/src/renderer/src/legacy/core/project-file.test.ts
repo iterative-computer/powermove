@@ -163,3 +163,59 @@ describe('portable project media', () => {
     expect(put).not.toHaveBeenCalled();
   });
 });
+
+describe('linked media and the host media store (section 21)', () => {
+  const link = { path: '/Volumes/Footage/A001_C003.mov', hash: 'b'.repeat(64), size: 5 };
+  it('saves linked assets as records without bytes and lets main copy stored media', async () => {
+    const snapshot = { proj: { requiresEngine: 'native', assets: {
+      linked: { id: 'linked', name: 'A001_C003.mov', storage: 'linked', link, type: 'video/quicktime' },
+      stored: { id: 'stored', storageKey: 'media:v2:s' },
+      page: { id: 'page', storageKey: 'media:v2:p' }
+    } } };
+    const serialized = JSON.stringify(snapshot);
+    const begin = vi.fn(async (_request: any) => ({ ok: true as const, token: 'token', required: ['page'] }));
+    const bridge = { begin, chunk: vi.fn(async () => undefined), finish: vi.fn(async () => ({ ok: true as const, path: 'file.pmv' })), abort: vi.fn(async () => undefined) };
+    const store = {
+      get: vi.fn(), put: vi.fn(),
+      saveSource: async (asset: any) => (asset.id === 'stored' ? { hash: 'c'.repeat(64), size: 7, type: 'image/png', revision: 'c'.repeat(64) } : null),
+      getForSave: vi.fn(async (asset: any) => (asset.id === 'page' ? { blob: new Blob(['abc']), revision: 'rev-page' } : null))
+    };
+    expect(await saveIncrementalProject(snapshot, serialized, store, bridge, { name: 'file.pmv', projectId: 'one', saveAs: false }, () => {})).toMatchObject({ ok: true });
+    const request = begin.mock.calls[0]![0];
+    expect(request.linked).toEqual([{ id: 'linked', hash: link.hash, size: 5, path: link.path, type: 'video/quicktime' }]);
+    expect(request.media).toEqual([
+      { id: 'stored', revision: 'c'.repeat(64), type: 'image/png', length: 7, stored: 'c'.repeat(64) },
+      { id: 'page', revision: 'rev-page', type: '', length: 3 }
+    ]);
+    expect((bridge.chunk.mock.calls as unknown as Array<[string, string | null]>).map(call => call[1])).toEqual([null, 'page']);
+    expect(store.getForSave).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'linked' }));
+  });
+
+  it('uploads stored media from the page when main cannot find it', async () => {
+    const snapshot = { proj: { assets: { stored: { id: 'stored', storageKey: 'media:v2:s' } } } };
+    const bridge = { begin: vi.fn(async () => ({ ok: true as const, token: 'token', required: ['stored'] })), chunk: vi.fn(async () => undefined),
+      finish: vi.fn(async () => ({ ok: true as const, path: 'file.pmv' })), abort: vi.fn(async () => undefined) };
+    const store = { get: vi.fn(), put: vi.fn(),
+      saveSource: async () => ({ hash: 'c'.repeat(64), size: 4, type: '', revision: 'r' }),
+      getForSave: async () => ({ blob: new Blob(['wxyz']), revision: 'r' }) };
+    expect(await saveIncrementalProject(snapshot, JSON.stringify(snapshot), store, bridge, { name: 'f.pmv', projectId: 'one', saveAs: false }, () => {})).toMatchObject({ ok: true });
+    expect((bridge.chunk.mock.calls as unknown as Array<[string, string | null, Uint8Array]>).map(call => [call[1], new TextDecoder().decode(call[2])])).toEqual([[null, JSON.stringify(snapshot)], ['stored', 'wxyz']]);
+  });
+
+  it('embeds linked originals in Export › Project and opens as a copied, unstamped project', async () => {
+    const snapshot = { proj: { requiresEngine: 'native', layers: [], assets: {
+      linked: { id: 'linked', name: 'A001_C003.mov', storageKey: 'media:v2:l', storage: 'linked', link },
+      offline: { id: 'offline', name: 'gone.mov', storage: 'linked', link: { ...link, path: '/Gone/gone.mov' } }
+    } }, history: { entries: [], index: -1 } };
+    const store = { put: vi.fn(), get: async (asset: any) => (asset.id === 'linked' ? new Blob(['12345'], { type: 'video/quicktime' }) : null) };
+    const packed = await packProjectFileBlob(snapshot, store);
+    const reopened = unpackProjectFile(new Uint8Array(await packed.arrayBuffer()));
+    expect(reopened.proj.assets.linked).toEqual({ id: 'linked', name: 'A001_C003.mov', storageKey: 'media:v2:l', contentHash: link.hash, sourcePath: link.path });
+    // An original that could not be read stays linked, so the stamp stays.
+    expect(reopened.proj.assets.offline.storage).toBe('linked');
+    expect(reopened.proj.requiresEngine).toBe('native');
+    expect(reopened.containerMedia.map((item: any) => item.id)).toEqual(['linked']);
+    const all = await packProjectFileBlob({ ...snapshot, proj: { ...snapshot.proj, assets: { linked: snapshot.proj.assets.linked } } }, store);
+    expect(unpackProjectFile(new Uint8Array(await all.arrayBuffer())).proj.requiresEngine).toBeUndefined();
+  });
+});

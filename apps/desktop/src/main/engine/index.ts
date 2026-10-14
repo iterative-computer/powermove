@@ -90,6 +90,8 @@ export type InstallNativeEngineOptions = {
   env?: Record<string, string | undefined>;
   log?: Log;
   windows: () => BrowserWindow[];
+  /** The media store's asset resolution for `mediaRead` handles. */
+  resolveAsset?: (asset: string) => Promise<{ path: string; contentHash: import('../../shared/engine-protocol').ContentHash | null } | null>;
 };
 
 export type InstalledNativeEngine = {
@@ -186,6 +188,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     automaticOutputDirectory: path.join(options.home, 'Powermove'),
     physicalMemory: os.totalmem(),
     hostNow: hostNowUs,
+    ...(options.resolveAsset ? { resolveAsset: options.resolveAsset } : {}),
     log
   });
 

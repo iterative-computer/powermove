@@ -64,6 +64,7 @@ import { registerHapticsIpc } from './haptics';
 import { registerContextMenuIpc } from './context-menu';
 import { registerCloudMediaIpc } from './cloud-media';
 import { MediaPathCache, registerMediaPathIpc } from './media-path-cache';
+import { installMediaStore } from './media-store';
 import { cloudFileState } from '@powermove/macos-haptics';
 import { registerConfirmIpc } from './native-confirm';
 import { registerClipboardIpc } from './clipboard';
@@ -90,7 +91,7 @@ import { OnboardingFlow, onboardingCompleted, onboardingEnabled } from './onboar
 import { installTranscription, utilityWorker } from './transcription/install';
 import { TRANSCRIPTION_IPC } from '../shared/transcription';
 /* ── native engine (behind "Use New Engine") ── */
-import { installNativeEngine, newEngineEnabled, NEW_ENGINE_STORE_KEY } from './engine';
+import { bridgeAddonPath as engineBridgeAddonPath, installNativeEngine, newEngineEnabled, NEW_ENGINE_STORE_KEY } from './engine';
 import { setupEngineFonts } from './engine-fonts';
 
 const APP_ORIGIN = 'app://powermove';
@@ -935,8 +936,21 @@ if (!hasSingleInstanceLock) {
     registerWindowIpc();
     /* The native engine starts only with "Use New Engine" on (read once at
        launch; flipping it takes a relaunch). Off, nothing below runs. */
+    const useNewEngine = newEngineEnabled(process.env, store.get?.(NEW_ENGINE_STORE_KEY));
+    /* The host media store (section 21): the source of project media bytes
+       with the new engine on; read-only fallback for its media with it off. */
+    const mediaStore = installMediaStore({
+      ipc: ipcMain,
+      isTrustedSender,
+      userData: app.getPath('userData'),
+      mainDirectory: __dirname,
+      enabled: useNewEngine
+    });
+    if (isBackgroundTest) (globalThis as { __powermoveMediaStore?: unknown }).__powermoveMediaStore = mediaStore.service;
+    app.once('will-quit', () => { void mediaStore.dispose(); });
     const nativeEngine = installNativeEngine({
-      enabled: newEngineEnabled(process.env, store.get?.(NEW_ENGINE_STORE_KEY)),
+      enabled: useNewEngine,
+      resolveAsset: (asset) => mediaStore.service.resolveAsset(asset),
       ipc: ipcMain,
       isTrustedSender,
       userData: app.getPath('userData'),
@@ -948,10 +962,6 @@ if (!hasSingleInstanceLock) {
       windows: () => editors.all()
     });
     attachEngineWindow = nativeEngine.attachWindow;
-    // pm-wasm's font registry: the interactive engine serves it when "Use
-    // New Engine" is on (installNativeEngine registered the channels); with
-    // it off, main's own registry behind POWERMOVE_ENGINE_FONTS=1.
-    setupEngineFonts({ ipc: ipcMain, ctx: { isTrustedSender }, env: process.env, appPath: app.getAppPath() });
     // e2e reaches the engine host only in an isolated background test profile.
     if (isBackgroundTest) (globalThis as { __powermoveNativeEngine?: unknown }).__powermoveNativeEngine = nativeEngine;
     app.once('will-quit', () => { void nativeEngine.dispose(); });
@@ -1054,7 +1064,8 @@ if (!hasSingleInstanceLock) {
 
     const ctx = { isTrustedSender, isTrustedSenderContents };
     projects = new ProjectFiles(path.join(app.getPath('userData'), 'project-files.json'), path.join(app.getPath('userData'), 'backups'), {
-      validateDocument: persistence.validateProjectDocument
+      validateDocument: persistence.validateProjectDocument,
+      storedFile: (hash, length) => mediaStore.service.storedFile(hash, length)
     });
     registerSaveIpc(ipcMain, { ...ctx, projects });
     registerProjectOpenPathIpc(ipcMain, { ...ctx, projects });
@@ -1063,6 +1074,17 @@ if (!hasSingleInstanceLock) {
     registerThemeIpc(ipcMain, ctx);
     registerHapticsIpc(ipcMain, ctx);
     registerFontsIpc(ipcMain, ctx);
+    // pm-wasm's font registry (docs/engine/text.md): with "Use New Engine" on
+    // the interactive engine serves it (installNativeEngine registered the
+    // channels and this is a no-op); with it off, main's own registry behind
+    // POWERMOVE_ENGINE_FONTS=1, from the same pm-bridge copy the frame bridge loads.
+    setupEngineFonts({
+      ipc: ipcMain,
+      ctx,
+      env: { ...process.env, POWERMOVE_PM_BRIDGE: engineBridgeAddonPath({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath(), env: process.env }) },
+      appPath: app.getAppPath(),
+      log: (message) => console.warn(message)
+    });
     registerContextMenuIpc(ipcMain, ctx);
     registerConfirmIpc(ipcMain, ctx);
     registerClipboardIpc(ipcMain, ctx);

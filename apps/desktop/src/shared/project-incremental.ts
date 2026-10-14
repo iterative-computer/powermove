@@ -9,8 +9,12 @@ export const PROJECT_FOOTER_BYTES = 64;
 const MAX_INDEX_BYTES = 64 * 1024 * 1024;
 export interface ProjectRecord { offset: number; length: number; sha256: string }
 export interface IncrementalMedia extends ProjectRecord { id: string; revision: string; type: string }
-export interface ProjectIndex { version: 4; document: ProjectRecord; media: IncrementalMedia[] }
-export interface SaveMedia { id: string; revision: string; type: string; length: number }
+/** A linked asset (section 21): a record without bytes. The original stays
+ *  where it is; `hash` (BLAKE3) is how it is found again if it moves. */
+export interface LinkedRecord { id: string; hash: string; size: number; path: string; type?: string }
+export interface ProjectIndex { version: 4; document: ProjectRecord; media: IncrementalMedia[]; linked?: LinkedRecord[] }
+/** `stored`: the BLAKE3 hash of a host media store object main copies from. */
+export interface SaveMedia { id: string; revision: string; type: string; length: number; stored?: string }
 export const isIncrementalProject = (bytes: Uint8Array): boolean => INCREMENTAL_MAGIC.every((byte, index) => bytes[index] === byte);
 const HASH = /^[a-f0-9]{64}$/;
 
@@ -38,9 +42,21 @@ export function validateProjectIndex(value: any, indexOffset: number): ProjectIn
       || typeof item.revision !== 'string' || !item.revision || item.revision.length > 200 || typeof item.type !== 'string' || item.type.length > 1000) throw new Error('The project media index is invalid.');
     ids.add(item.id);
   }
+  if (value.linked !== undefined) validateLinkedRecords(value.linked);
   const ranges = [value.document, ...value.media].filter(r => r.length).sort((a, b) => a.offset - b.offset);
   for (let i = 1; i < ranges.length; i++) if (ranges[i]!.offset < ranges[i - 1]!.offset + ranges[i - 1]!.length) throw new Error('The project records overlap.');
   return value;
+}
+const BLAKE3 = /^[a-f0-9]{64}$/;
+export function validateLinkedRecords(value: unknown): asserts value is LinkedRecord[] {
+  if (!Array.isArray(value) || value.length > 100_000) throw new Error('The project link index is invalid.');
+  const ids = new Set<string>();
+  for (const item of value) {
+    if (!item || typeof item.id !== 'string' || !item.id || item.id.length > 1000 || ids.has(item.id) || typeof item.hash !== 'string' || !BLAKE3.test(item.hash)
+      || !Number.isSafeInteger(item.size) || item.size < 0 || typeof item.path !== 'string' || !item.path || item.path.length > 4096 || item.path.includes('\0')
+      || (item.type !== undefined && (typeof item.type !== 'string' || item.type.length > 1000))) throw new Error('The project link index is invalid.');
+    ids.add(item.id);
+  }
 }
 export async function readIncrementalIndex(size: number, read: (offset: number, length: number) => Promise<Uint8Array>, hash = sha256HexOf): Promise<ProjectIndex> {
   if (size < 5 + PROJECT_FOOTER_BYTES) throw new Error('The project commit is truncated.');

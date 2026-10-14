@@ -42,6 +42,7 @@ import { STORE_IPC, type StoreChannel, type StoreChannels } from '../shared/stor
 import { TRANSCRIPTION_IPC, type TranscribeProgress, type TranscribeResult, type TranscriptionStatus } from '../shared/transcription';
 import { ENGINE_IPC, ENGINE_WINDOW_MESSAGE, type EngineStatusMessage, type StageDocumentResult } from '../shared/engine-ipc';
 import { ENGINE_FONTS_IPC, type EngineFontsBridge, type EngineFontsResult } from '../shared/engine-fonts-ipc';
+import { MEDIA_STORE_IPC, type MediaStoreConfig } from '../shared/media-store';
 import { installFrameBridgeReceiver, type ReceiverModule } from './frame-bridge';
 
 /** One typed invoke for every `cloud:*` channel (store plan §2.7). */
@@ -546,6 +547,33 @@ const bridge: PowermoveBridge = {
   /* pm-wasm's font registry channels (docs/engine/text.md): main or the
      interactive engine answers, depending on "Use New Engine". */
   engineFonts: engineFontsBridge(),
+
+  /* ── host media store (section 21) ── */
+  mediaStore: {
+    configSync: () => ipcRenderer.sendSync(MEDIA_STORE_IPC.config) as MediaStoreConfig,
+    record: (key) => ipcRenderer.invoke(MEDIA_STORE_IPC.record, String(key)),
+    classify: (path) => ipcRenderer.invoke(MEDIA_STORE_IPC.classify, String(path)),
+    putFile: (request) => ipcRenderer.invoke(MEDIA_STORE_IPC.putFile, {
+      path: request.path, key: request.key, type: request.type ?? '', revision: request.revision ?? null
+    }),
+    beginPut: (request) => ipcRenderer.invoke(MEDIA_STORE_IPC.beginPut, {
+      key: request.key, type: request.type, size: request.size, revision: request.revision ?? null, origin: request.origin ?? 'stream'
+    }),
+    putChunk: (token, offset, data) => ipcRenderer.invoke(MEDIA_STORE_IPC.putChunk, { token, offset, data }),
+    finishPut: (token, expected) => ipcRenderer.invoke(MEDIA_STORE_IPC.finishPut, { token, blake3: expected.blake3 }),
+    abortPut: (token) => ipcRenderer.invoke(MEDIA_STORE_IPC.abortPut, token),
+    link: (path) => ipcRenderer.invoke(MEDIA_STORE_IPC.link, String(path)),
+    open: (request) => ipcRenderer.invoke(MEDIA_STORE_IPC.open, {
+      ...(request.key !== undefined ? { key: request.key } : {}),
+      ...(request.hash !== undefined ? { hash: request.hash } : {}),
+      ...(request.link !== undefined ? { link: request.link } : {})
+    }),
+    read: (token, offset, length) => ipcRenderer.invoke(MEDIA_STORE_IPC.read, { token, offset, length }),
+    close: (token) => ipcRenderer.invoke(MEDIA_STORE_IPC.close, token),
+    relink: (request) => ipcRenderer.invoke(MEDIA_STORE_IPC.relink, { link: request.link, searchRoots: request.searchRoots ?? [] }),
+    bind: (projectId, assets) => ipcRenderer.invoke(MEDIA_STORE_IPC.bind, { projectId, assets }),
+    removeKey: (key) => ipcRenderer.invoke(MEDIA_STORE_IPC.removeKey, String(key))
+  },
   ...(frameBridge ? { frameBridge } : {})
 };
 

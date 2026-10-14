@@ -421,6 +421,8 @@ let sequenceDirectory: any = null;
 
 async function run(opts: any) {
   if (X.busy) return PM.toast('Export already running');
+  // The native engine's consistency check (docs/rust-engine.md, section 6).
+  PM.EngineDoc?.beforeExport?.(opts?.reportPath ? 'agent-export' : 'export');
   X.busy = true;
   X.cancel = false;
   const bridge = (hostBridge() as any);

@@ -1,5 +1,25 @@
 import { adoptTemporalEase, easeFromUnitHandle, unitHandleFromEase, valueAtTime, refreshAutoBezier, segmentControlPoints, solveCurveParam } from '../../core/anim/temporal-ease';
 const owners = new WeakMap<object,any[]>();
+/* Adopting legacy handles and refreshing auto-bezier keys rewrite live keys
+   while evaluating: a document write without a path. The native engine's
+   write barrier is the writer (engine-doc/install.ts): adoption runs inside
+   its scope, so the tracking Proxy sees a known writer, and a rewrite the JSON
+   can see is announced for a structural diff. */
+export interface EvaluationWriter {
+  /** Runs an adoption as a known document writer. */
+  scope<T>(fn: () => T): T;
+  /** The adoption changed the JSON of these keys. */
+  wrote(keys: any[]): void;
+}
+let writer: EvaluationWriter | null = null;
+export function setEvaluationWriter(next: EvaluationWriter | null): void { writer = next; }
+const adopt = <T>(fn: () => T): T => (writer ? writer.scope(fn) : fn());
+const enumerable = (k: any, key: string) => Object.prototype.propertyIsEnumerable.call(k, key);
+/* Adoption writes speed and influence where they are missing, refreshes
+   auto-bezier keys, and turns stored eo/ei/hold/bezierMode into
+   non-enumerable views (they leave the JSON). */
+const rewritesKeys = (keys: any[]) => keys.some(k => k && typeof k === 'object' && (k.outEase === undefined || k.inEase === undefined
+  || k.autoBezier === true || enumerable(k, 'eo') || enumerable(k, 'ei') || enumerable(k, 'hold') || enumerable(k, 'bezierMode')));
 type PreparedTrack = {version:number; length:number; first:any; last:any; curves:any[]; times?:Float64Array; values?:Float64Array; evaluatedTime?:number; evaluatedValue?:number; evaluatedSpring?:(time:number,config:any)=>number};
 const prepared = new WeakMap<any[], PreparedTrack>();
 /** Legacy controls are views of native speed/influence, never persisted copies. */
@@ -9,7 +29,19 @@ export function temporalKeys(keys: any[], version?:number): any[] {
   if(version !== undefined) prepared.set(keys,{version,length:keys.length,first:keys[0],last:keys.at(-1),curves:[]});
   if (keys.some(k => typeof k.v !== 'number')) return keys;
   if (!keys.length) return keys;
-  if (keys.every(key=>owners.get(key)===keys)) { refreshAutoBezier(keys); return keys; }
+  // Only a rewrite the JSON can see is a document write (auto-bezier keys
+  // are refreshed on every version and usually come out the same).
+  const before = writer && rewritesKeys(keys) ? JSON.stringify(keys) : null;
+  if (keys.every(key=>owners.get(key)===keys)) {
+    adopt(() => refreshAutoBezier(keys));
+    if (before !== null && JSON.stringify(keys) !== before) writer?.wrote(keys);
+    return keys;
+  }
+  adopt(() => adoptAccessors(keys));
+  if (before !== null && JSON.stringify(keys) !== before) writer?.wrote(keys);
+  return keys;
+}
+function adoptAccessors(keys: any[]): void {
   adoptTemporalEase(keys);
   for (const key of keys) {
     // Existing accessors already resolve their neighbours from this array.
@@ -39,7 +71,6 @@ export function temporalKeys(keys: any[], version?:number): any[] {
     }});
     Object.defineProperty(key,'bezierMode',{configurable:true,enumerable:false,get:()=>key.continuous?'continuous':'split',set:(v)=>{key.continuous=v==='continuous';}});
   }
-  return keys;
 }
 export function temporalValue(keys: any[], left: number, time: number, state = prepared.get(keys)): number {
   if(!state) return valueAtTime(keys[left],keys[left+1],time);
@@ -66,7 +97,9 @@ export function temporalEvaluate(keys:any[],time:number,version:number,spring:(t
   let state=prepared.get(keys);
   if(!state||state.version!==version||state.length!==keys.length||state.first!==keys[0]||state.last!==keys[keys.length-1]){
     // Evaluation needs native timing data, not a legacy UI accessor on every key.
-    adoptTemporalEase(keys);
+    const before = writer && rewritesKeys(keys) ? JSON.stringify(keys) : null;
+    adopt(() => adoptTemporalEase(keys));
+    if (before !== null && JSON.stringify(keys) !== before) writer?.wrote(keys);
     state={version,length:keys.length,first:keys[0],last:keys[keys.length-1],curves:[]};prepared.set(keys,state);
   }
   if (state.evaluatedTime === time && state.evaluatedSpring === spring) return state.evaluatedValue!;

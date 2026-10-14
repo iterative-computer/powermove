@@ -1,3 +1,4 @@
+import { coerceFrameRate } from '../../../../shared/frame-rate';
 import {
   EXPORT_FORMAT_OPTIONS,
   EXPORT_QUALITY_OPTIONS,
@@ -40,7 +41,21 @@ export interface ProjectSettingsBridge {
   backgroundField?(): HTMLElement;
   background?(): string;
   applyBackground?(color: string): void;
+  /**
+   * Settings › Project › Media, "When importing" (section 21). Present only
+   * with the new engine, whose media store can link files.
+   */
+  mediaImport?(): MediaImportMode;
+  applyMediaImport?(mode: MediaImportMode): void;
 }
+
+/** "When importing": Copy into project (the default) or Link to files. */
+export type MediaImportMode = 'copy' | 'link';
+
+export const MEDIA_IMPORT_OPTIONS: Array<{ v: MediaImportMode; label: string }> = [
+  { v: 'copy', label: 'Copy into project' },
+  { v: 'link', label: 'Link to files' }
+];
 
 export interface ProjectSettingsControl {
   element: HTMLElement;
@@ -87,10 +102,10 @@ export function clampDimension(value: unknown, fallback: number): number {
   return Math.min(MAX_DIMENSION, Math.max(MIN_DIMENSION, Math.round(number)));
 }
 
+/** The single frame-rate validator (shared/frame-rate.ts): 1 to 240 fps,
+ *  NTSC rates included, every rate a whole number of engine ticks. */
 export function clampFrameRate(value: unknown, fallback: number): number {
-  const number = parsed(value);
-  if (number == null) return fallback;
-  return Math.min(MAX_FRAME_RATE, Math.max(MIN_FRAME_RATE, Math.round(number)));
+  return coerceFrameRate(value, fallback);
 }
 
 export function clampDuration(value: unknown, fallback: number): number {
@@ -220,7 +235,7 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
   times.textContent = '×';
   size.append(width, times, height);
 
-  const frameRate = numberInput('Frame rate', MIN_FRAME_RATE, MAX_FRAME_RATE, 1);
+  const frameRate = numberInput('Frame rate', MIN_FRAME_RATE, MAX_FRAME_RATE, 0.001);
   const duration = numberInput('Duration in seconds', MIN_DURATION, MAX_DURATION, 0.5);
 
   const sizeRow = row('Size', 'Width and height of every frame, in pixels.', size);
@@ -229,7 +244,7 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
     row('Name', 'Shown in the titlebar and used for exported file names.', name).element,
     row('Resolution', 'Pick a common size, or set your own pixel dimensions.', preset).element,
     sizeRow.element,
-    row('Frame rate', 'Frames rendered per second of the composition — any rate from 1 to 240.', frameRate).element,
+    row('Frame rate', 'Frames rendered per second of the composition, from 1 to 240, including 23.976, 29.97, and 59.94.', frameRate).element,
     durationRow.element
   );
 
@@ -255,6 +270,23 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
     );
   }
 
+  let mediaImport: HTMLSelectElement | null = null;
+  const media = bridge.mediaImport && bridge.applyMediaImport ? createSettingsSection('Media') : null;
+  if (media) {
+    mediaImport = select('When importing');
+    fillOptions(mediaImport, MEDIA_IMPORT_OPTIONS);
+    media.body.append(
+      row('When importing', 'Copy files into the project, or link to them where they are.', mediaImport).element
+    );
+    mediaImport.addEventListener('change', () => {
+      bridge.applyMediaImport?.(mediaImport!.value === 'link' ? 'link' : 'copy');
+      syncMedia();
+    });
+  }
+  const syncMedia = (): void => {
+    if (mediaImport && bridge.mediaImport) mediaImport.value = bridge.mediaImport();
+  };
+
   const exports = createSettingsSection('Export');
   const format = select('Export format');
   fillOptions(format, EXPORT_FORMAT_OPTIONS);
@@ -266,7 +298,7 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
   const exportTimes = document.createElement('span');
   exportTimes.textContent = '×';
   exportSize.append(exportWidth, exportTimes, exportHeight);
-  const exportFps = numberInput('Export frame rate', MIN_FRAME_RATE, MAX_FRAME_RATE, 1);
+  const exportFps = numberInput('Export frame rate', MIN_FRAME_RATE, MAX_FRAME_RATE, 0.001);
   const range = select('Export range');
   fillOptions(range, EXPORT_RANGE_OPTIONS);
   const quality = select('Export quality');
@@ -304,7 +336,7 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
   note.textContent = 'The Export dialog opens with these settings, and remembers whatever you change there.';
   exports.element.append(note);
 
-  element.append(composition.element, exports.element);
+  element.append(composition.element, ...(media ? [media.element] : []), exports.element);
 
   const editing = (field: HTMLElement): boolean => document.activeElement === field;
 
@@ -366,7 +398,7 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
       : `${formatLabel} · ${outW}×${outH}${support.fps ? ` · ${defaults.fps} fps` : ''}`;
   };
 
-  const refresh = (): void => { syncComposition(); syncExport(); };
+  const refresh = (): void => { syncComposition(); syncMedia(); syncExport(); };
 
   name.addEventListener('change', () => {
     const next = name.value.trim();
@@ -527,7 +559,7 @@ export function createNewProjectForm(
   times.textContent = '×';
   size.append(width, times, height);
 
-  const frameRate = numberInput('Frame rate', MIN_FRAME_RATE, MAX_FRAME_RATE, 1);
+  const frameRate = numberInput('Frame rate', MIN_FRAME_RATE, MAX_FRAME_RATE, 0.001);
   frameRate.value = String(seed.fps);
 
   const duration = numberInput('Duration in seconds', MIN_DURATION, MAX_DURATION, 0.5);

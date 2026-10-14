@@ -1,3 +1,4 @@
+import { validateFrameRate } from '../../../../shared/frame-rate';
 import { CHANNELS_3D } from '../../legacy/core/space-3d';
 import { canAnimateContent, isProperty } from '../../legacy/core/content-properties';
 import { adoptTemporalEase } from '../anim/temporal-ease';
@@ -605,6 +606,7 @@ function sanitizeComp(raw: unknown, id: string, root: Pick<Project, 'w' | 'h' | 
   const w = Math.max(2, finite(raw.w, root.w));
   const h = Math.max(2, finite(raw.h, root.h));
   const fps = Math.max(1, finite(raw.fps, root.fps));
+  const rate = validateFrameRate(fps, 'document', raw.fpsRational);
   const dur = Math.max(0.04, finite(raw.dur, root.dur));
   const layers = Array.isArray(raw.layers) ? raw.layers.map((layer, index) => sanitizeLayer(layer, index, { w, h, dur })) : [];
   const result = {
@@ -612,6 +614,7 @@ function sanitizeComp(raw: unknown, id: string, root: Pick<Project, 'w' | 'h' | 
     id,
     name: nonEmptyStringOr(raw.name, 'Precomp'),
     w, h, fps, dur,
+    ...(rate.ok ? { fpsRational: rate.fpsRational } : {}),
     bg: stringOr(raw.bg, '#000000'),
     backgroundFill: normalizeFill(raw.backgroundFill, stringOr(raw.bg, '#000000')),
     layers,
@@ -660,6 +663,7 @@ export function sanitizeProject(raw: unknown): Project {
   const w = finite(source.w, 1920) || 1920;
   const h = finite(source.h, 1080) || 1080;
   const fps = finite(source.fps, 30) || 30;
+  const rate = validateFrameRate(fps, 'document', source.fpsRational);
   const dur = finite(source.dur, 10) || 10;
   const fallbackBg = stringOr(source.bg, '#000000') || '#000000';
   const backgroundFill = normalizeFill(source.backgroundFill, fallbackBg);
@@ -668,6 +672,7 @@ export function sanitizeProject(raw: unknown): Project {
     id: nonEmptyStringOr(source.id, uid('P')),
     name: nonEmptyStringOr(source.name, 'Untitled'),
     w, h, fps, dur,
+    ...(rate.ok ? { fpsRational: rate.fpsRational } : {}),
     bg: backgroundFill.stops[0]!.color,
     backgroundFill,
     layers: [],

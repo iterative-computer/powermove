@@ -22,6 +22,7 @@
     format?: string;
     sourcePath?: string;
     path?: string;
+    playbackProxy?: boolean;
   }
 
   interface CompItem {
@@ -127,7 +128,14 @@
     return `${(value / (1024 * 1024)).toFixed(value < 10 * 1024 * 1024 ? 1 : 0)} MB`;
   }
 
+  /* Imported before the new engine kept originals: the stored bytes are the
+     browser conversion (section 21, migrating existing projects). */
+  function convertedCopy(asset: Asset): boolean {
+    return PM.HostMedia?.enabled === true && asset.playbackProxy === true;
+  }
+
   function mediaDetails(asset: Asset): string {
+    if (convertedCopy(asset)) return 'Using a converted copy · Relink to the original for full quality';
     const parts: string[] = [];
     if (asset.format === 'svg' || /\.svg$/i.test(asset.name)) parts.push('SVG');
     // An animated image becomes a clip, so name the container it came from.
@@ -198,7 +206,7 @@
         { label: 'Add to timeline', run: () => PM.cmd('addFromAsset', asset.id) },
         ...(asset.kind === 'audio' || asset.kind === 'model' ? [] : [{ label: 'New Comp from Selection', run: () => PM.cmd('newCompFromMedia', asset.id) }]),
       ]),
-      { label: offline ? 'Locate File…' : 'Replace File…', run: () => PM.pickFiles(false, { replaceAssetId: asset.id }) },
+      { label: offline ? 'Locate File…' : convertedCopy(asset) ? 'Locate Original…' : 'Replace File…', run: () => PM.pickFiles(false, { replaceAssetId: asset.id }) },
       ...(currentFolder ? [{ label: 'Move Out of Folder', run: () => moveInto({ assets: [asset.id] }, crumbs.at(-2)?.id ?? null) }] : []),
       ...(sourcePath ? [{ label: 'Reveal in Finder', run: () => revealAssetSource(asset) }] : []),
       '-',
