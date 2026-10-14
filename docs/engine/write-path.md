@@ -24,8 +24,11 @@ headless document host (default `on` there).
 A plain C ABI (`src/abi.rs`) over one `Engine` per instance, no generated bindings:
 the loader (`engine-doc/wasm.ts`) is small and the same module runs in Electron's
 renderer and in Node. Built by `node engine/crates/pm-wasm/scripts/build.mjs`
-(release, custom sections stripped: 2.89 MB, 0.99 MB gzipped) into
-`apps/desktop/src/renderer/public/engine/` (gitignored); the renderer fetches
+(`bun run build:wasm` in `apps/desktop`; release, custom sections stripped: 2.89 MB,
+0.99 MB gzipped) into `apps/desktop/src/renderer/public/engine/` (gitignored), which
+`electron-vite build` copies into `out/renderer/engine/`. The app build does not run
+it: a build without the module answers with the legacy evaluator (the loader reports
+the failure), and the release workflow does not build it yet; the renderer fetches
 `engine/pm_wasm.wasm`, the headless host reads `out/renderer/engine/pm_wasm.wasm` or
 `POWERMOVE_PM_WASM`. The only import is `pm_expr.pow` (`Math.pow` of the page, as
 docs/engine/expressions.md asks).
@@ -258,11 +261,46 @@ with its composition when another one opens.
 
 | Check | Command | Result |
 |---|---|---|
-| pm-wasm engine | `cargo test -p pm-wasm --release` | 6 tests |
+| pm-wasm engine | `cargo test -p pm-wasm --release` | 7 tests, including 2,000 rounds of corrupted, truncated, and random patches and queries (errors, never traps) |
 | Native vs wasm32 identity | `node engine/crates/pm-wasm/scripts/identity.mjs --seeds 20 --layers 60` | 636,463 replies (about 2.6 million numbers), 0 differ |
 | Barrier, mirror, native API vs legacy | `vitest run src/renderer/src/engine-doc` | random projects: every routed query, zero dual mismatches; mirror hash equals the live document through 60 edits, undos, redos, and structural changes |
-| JSON diff vs `diffOps` | `json-diff.test.ts` | 2,000 random pairs identical |
+| JSON diff vs `diffOps` | `json-diff.test.ts` | 2,000 random pairs identical; the allocation-free comparison of retained elements agrees with the full one on every exception (`toJSON`, wrappers, accessors, absent members) |
 | Frame rates vs pm-time | `frame-rate.test.ts` | 3,000+ inputs identical |
 | Headless host | `vitest run src/engine` | mirror and 2D geometry without a renderer |
 
-S5 targets in the app and the e2e run are recorded in the lane report.
+## S5 targets in the app
+
+`node apps/desktop/scripts/pm-wasm-bench.mjs --rounds 200`: the built editor
+(hidden, unfocusable), flag `on`, S5's 884-layer project (15,858 channels, 1.19 MB of
+JSON), edits through `PM.Edit.apply` and `PM.hist.do`, flushed through the barrier.
+Electron 44, M4 Max, 2026-10-14, other lanes building at the same time;
+`performance.now()` resolves 0.1 ms here, so per-edit p95 values are timer ticks.
+
+| Measurement | S5 target | Measured | |
+|---|---|---|---|
+| `evP` cached, all channels (identity registry) | < 1 µs | 57 ns (legacy 20 ns) | pass |
+| `evP` cached, animated channels | < 1 µs | 45 ns | pass |
+| `evP` at a new time, animated | - | 121 ns | - |
+| Fast path batch, per value | - | 6.9 ns | - |
+| Property edit: pm-wasm apply, p95 | < 0.2 ms | 0.1 ms (tick; mean 0.056) | pass |
+| Property edit through `Edit.apply`: flush (diff + encode + apply), p50 / p95 | - | 0.3 / 0.4 ms | - |
+| Property edit with its path, flush, mean of 200 back to back | < 0.2 ms | 0.0075 ms | pass |
+| Structural reorder / insert / delete: pm-wasm apply, p95 | < 2 ms | 0.5 / 0.3 / 0.3 ms | pass |
+| Structural reorder / insert / delete: flush (diff + encode + apply), p95 | - | 3.4 / 3.4 / 3.5 ms | see below |
+| Load (resync of the whole project) | - | 50 ms | - |
+| Consistency check (flush, canonical hash of `PM.proj`, compare) | - | 25 ms | - |
+| pm-wasm linear memory / heap live / heap peak | - | 39.9 / 25.8 / 27.2 MB | - |
+
+Every batch reaches pm-wasm as id-keyed operations, never as a stringified array, so
+S5's condition holds and pm-wasm's apply meets the targets. The flush adds the diff
+that finds those operations. A property edit through `Edit.apply` names `revision`,
+`edits`, and the layer, and comparing the edit log's retained entries dominates its
+0.3 ms. A structural edit names the whole `layers` array, so the diff compares each
+of the 884 retained layers with the shadow: about 1.6 ms of the 3.4 ms, after the
+allocation-free comparison took the p95 down from 6.2 ms. Read end to end, the
+structural flush misses S5's 2 ms. The history commit that produces the edit costs
+far more on the same project (a plain `PM.hist.do` reorder takes 40 ms in Node: two
+snapshots, two parses, `diffPatches`, and clones), so the barrier adds about 7% to a
+structural edit. Skipping the comparison needs per-element write tracking that
+production writers do not provide: a plain transaction that reorders layers and
+edits one of them names only `layers`.
