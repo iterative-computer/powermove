@@ -64,6 +64,27 @@ function wav(rate: number, channels: Float32Array[], mask: number): Uint8Array {
 
 const STEREO = 0x3, MONO = 0x4, SIDE51 = 0x60F;
 
+/** A plain WAVE_FORMAT_IEEE_FLOAT WAV (no channel mask), as most tools write mono. */
+function wavPlain(rate: number, channels: Float32Array[]): Uint8Array {
+  const frames = channels[0]!.length, n = channels.length;
+  const data = frames * n * 4;
+  const buf = new ArrayBuffer(44 + data);
+  const v = new DataView(buf);
+  const str = (at: number, s: string) => { for (let i = 0; i < s.length; i++) v.setUint8(at + i, s.charCodeAt(i)); };
+  str(0, 'RIFF'); v.setUint32(4, 36 + data, true); str(8, 'WAVE');
+  str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 3, true); v.setUint16(22, n, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * n * 4, true); v.setUint16(32, n * 4, true); v.setUint16(34, 32, true);
+  str(36, 'data'); v.setUint32(40, data, true);
+  for (let i = 0; i < frames; i++) for (let c = 0; c < n; c++) v.setFloat32(44 + (i * n + c) * 4, channels[c]![i]!, true);
+  return new Uint8Array(buf);
+}
+
+/** Our FFmpeg build's CLI, for compressed mono media (absent: those are skipped). */
+const FFMPEG = path.join(process.env.PM_FFMPEG_DIR ?? path.join(os.homedir(), 'Library/Caches/powermove-engine/ffmpeg/out'), 'bin/ffmpeg');
+
+/** Mono sources the mono project plays, in order, 0.5 s each. */
+const MONO_SOURCES = ['mono48-plain.wav', 'mono48-fc.wav', 'mono48-nomask.wav', 'mono22-fc.wav', 'mono-aac.m4a', 'mono-opus.ogg', 'mono-flac.flac'];
+
 function clicks(rate: number, seconds: number, at: number[], amplitude = 0.9): Float32Array {
   const x = new Float32Array(Math.round(rate * seconds));
   for (const i of at) x[i] = amplitude;
@@ -97,11 +118,24 @@ function generateMedia(dir: string): Record<string, string> {
   files['tone44k.wav'] = wav(44100, [tone(44100, 3, 1000, 0.5), tone(44100, 3, 1500, 0.5)], STEREO);
   files['mono22k.wav'] = wav(22050, [tone(22050, 3, 330, 0.6)], MONO);
   files['surround.wav'] = wav(48000, [300, 400, 500, 60, 700, 800].map(hz => tone(48000, 3, hz, 0.2)), SIDE51);
+  // Mono in the ways files carry it: plain, with a center mask, with no mask, at 22.05 kHz.
+  files['mono48-plain.wav'] = wavPlain(48000, [tone(48000, 1, 440, 0.5)]);
+  files['mono48-fc.wav'] = wav(48000, [tone(48000, 1, 440, 0.5)], MONO);
+  files['mono48-nomask.wav'] = wav(48000, [tone(48000, 1, 440, 0.5)], 0);
+  files['mono22-fc.wav'] = wav(22050, [tone(22050, 1, 440, 0.5)], MONO);
   const out: Record<string, string> = {};
   for (const [name, bytes] of Object.entries(files)) {
     const file = path.join(dir, name);
     writeFileSync(file, bytes);
     out[name] = file;
+  }
+  if (existsSync(FFMPEG)) {
+    const plain = out['mono48-plain.wav']!;
+    for (const [name, codec] of [['mono-aac.m4a', ['-c:a', 'aac', '-b:a', '128k']], ['mono-opus.ogg', ['-c:a', 'libopus', '-b:a', '96k']], ['mono-flac.flac', ['-c:a', 'flac']]] as const) {
+      const file = path.join(dir, name);
+      execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-i', plain, ...codec, '-y', file]);
+      out[name] = file;
+    }
   }
   return out;
 }
@@ -169,6 +203,10 @@ function projects(): AudioProject[] {
   b.add(audioLayer(b, 'surround.wav', { gain: 0.9 }));
   b.add(audioLayer(b, 'tone44k.wav', { gain: 0.5 }));
   out.push({ name: 'layouts', doc: b.root, notes: 'Mono 22.05 kHz, 5.1 at 48 kHz, stereo 44.1 kHz.' });
+
+  b = newProject('audio/mono', { name: 'Mono sources', fps: 30, dur: MONO_SOURCES.length * 0.5 });
+  MONO_SOURCES.forEach((name, i) => b.add(audioLayer(b, name, {}, { from: i * 0.5, dur: 0.5 })));
+  out.push({ name: 'mono', doc: b.root, notes: `Mono sources in turn, 0.5 s each: ${MONO_SOURCES.join(', ')}.` });
 
   b = newProject('audio/embedded', { name: 'Embedded audio', fps: 30, dur: 2 });
   b.add(b.layer('video', { name: 'MOV soundtrack', from: 0.2, dur: 1.6, d: { asset: ref('h264-aac.mov'), fit: 'contain', w: 320, h: 180, trim: 0.3, embeddedAudio: true, audioGain: 0.8 } }));

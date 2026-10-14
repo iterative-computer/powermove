@@ -130,6 +130,27 @@ frame apart.
 7. The mix runs at `audioSampleRate` (default 48 kHz); today's export always mixes at
    48 kHz after decoding at the live AudioContext's rate.
 8. Layouts Web Audio mixes discretely fold by BS.775 (above).
+9. In-points are exact. Today's export plays each clip from a whole sample of its 48 kHz
+   decode (`AudioBufferSourceNode.start` rounds the offset), so a trim that is not a
+   whole number of samples plays up to half a sample early or late: on the real project
+   0.4, −0.2, and −0.4 samples for its three clips, measured as a phase slope of
+   0.0525 rad at 1 kHz (−26 dB residual at 1 kHz, −10 dB at 6 kHz). With the in-points
+   rounded the same way the residual falls from −42.7 to −71.6 dBFS (−94 dB at 1 kHz).
+10. Switches (`on` of layers and groups) cut on their sample (through the 16-sample
+    control interpolation); today's envelope samples them one composition frame apart,
+    so a switch becomes a one-frame linear ramp (`mute-groups`: −20 dBFS residual in the
+    frame after each switch, nothing elsewhere).
+11. Resampling is flat to 0.45 fs of the source and rejects images by more than 120 dB.
+    Chromium's decode resampler (today's path for sources not at 48 kHz) rolls off from
+    about 17 kHz and leaves images near −72 dBFS between 21 and 24 kHz on the real
+    project; a 44.1 kHz click differs from today's in its last 3 kHz only (−58 dBFS).
+12. The bus stays stereo. Today's master `GainNode` takes the widest input's channel
+    count, so while a 5.1 source plays, every mono source is up-mixed to the center and
+    folds back to L and R at √½ (−3 dB); without one, mono plays at unity in both
+    channels. pm-audio plays mono at unity always (`layouts`: the mono tone measures
+    exactly √½ today and every other tone of the project matches to 1.0000; the `mono`
+    project confirms unity today for plain, center-masked, unmasked, 22.05 kHz WAV, AAC,
+    Opus, and FLAC mono).
 
 ## Playback (`transport`, `clock`, `ring`, `playback`, `device`)
 
@@ -215,17 +236,48 @@ Measured 2026-10-13 with other lanes building (numbers vary about 1.5× with loa
 
 ## Legacy parity
 
-`tools/legacy-mix.ts` captures `PM.Audio.renderOffline(0, dur)` (the path every export with
-audio takes) from the built legacy app for the corpus audio project and audio projects
-built for this lane (clicks at 30, 29.97, and from 44.1 kHz; gain keyframes, fades, master;
-precomposition nesting; solo; mute and groups; layouts and rates; embedded audio), into
-`~/Library/Application Support/Powermove Engine Corpus/audio-<stamp>-<commit>/`.
-`tests/legacy_parity.rs` renders the same loaded documents with pm-audio and compares.
+`tools/legacy-mix.ts` captures `PM.Audio.renderOffline(0, dur)` (the mix every export with
+audio takes; `exporter.ts` then writes it as 16-bit WAV for `render-encoder.ts` to mux as
+PCM or AAC) from the built legacy app for the corpus audio project, audio projects built
+for this lane (clicks at 30, 29.97, and from 44.1 kHz; gain keyframes, fades, master;
+precomposition nesting; solo; mute and groups; layouts and rates; mono sources; embedded
+audio), and Jude's real project when present (its media is extracted under the corpus
+root), into `~/Library/Application Support/Powermove Engine Corpus/audio-<stamp>-<commit>/`.
+`tests/legacy_parity.rs` renders the same loaded documents with pm-audio and compares
+against the float mix (before today's 16-bit step). It fails on a length other than
+round(duration × sr), a click more than one sample off its frame, or a residual above the
+project's ceiling (−85 dBFS; −75 dBFS for keyframed levels; −65 dBFS for real projects
+with in-points rounded as today's; none for projects dominated by an allowed difference).
+`PM_AUDIO_PARITY_DETAIL=1` prints the worst 100 ms windows and writes `ours.wav` next to
+`legacy.wav`.
+
+Measured 2026-10-13 (captures `audio-20261014-045249-158f1223` and the `--skip-real`
+recapture with the `mono` project; residual against the legacy float mix):
+
+| Project | Samples, ours = round | Residual rms | Clicks from frame start (ours / today) | What differs |
+|---|---|---|---|---|
+| corpus-media-audio | 96,000 | −93.6 dBFS | | decoder rounding (AAC, MP3, Opus) |
+| clicks-30 | 96,000 | −240 (identical) | 0,0,0,0,0,0 / same | |
+| clicks-2997 | 105,600 (today 105,601) | −240 (identical) | 0,0,0,0 / same | 6 |
+| clicks-44k | 72,000 | −58.0 dBFS | 0,0,0 / same | 11 |
+| gain-fades | 144,000 | −81.9 dBFS | | 5 |
+| precomp-nesting | 144,000 | −88.0 dBFS | | 5 |
+| solo | 96,000 | −240 (identical) | | |
+| mute-groups | 96,000 | −31.6 dBFS | | 10 |
+| layouts | 120,000 | −20.1 dBFS | | 12 |
+| mono (7 sources) | 168,000 | −99.7 dBFS | | |
+| embedded | 96,000 | −110.9 dBFS | | |
+| real project (87.4 s) | 4,195,200 | −42.7 dBFS; −71.6 with in-points rounded as today's | | 9, 11 |
+
+Every project passes the section 25 audio bar (clicks on their frame's sample, length
+round(duration × sr)). The real project's mix (one 44.1 kHz MP3 in three clips with a
+keyframed fade) differs only by allowed differences 9 and 11: with whole-sample in-points
+the residual is −94 dB at 1 kHz and rises only toward Chromium's roll-off above 14 kHz.
 
 ```sh
 bun install && bun run --cwd apps/desktop build
-~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-audio/tools/legacy-mix.ts
-cargo test -p pm-audio --test legacy_parity -- --nocapture
+~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-audio/tools/legacy-mix.ts [--skip-real]
+cargo test --release -p pm-audio --test legacy_parity -- --nocapture   # PM_AUDIO_PARITY=<capture dir> picks one
 ```
 
 ## Tests

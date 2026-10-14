@@ -79,9 +79,37 @@ struct Measured {
     expected_len: usize,
     peak_diff: f64,
     rms_diff_db: f64,
+    /// The residual with in-points rounded to whole samples as today's export does.
+    whole_sample_db: Option<f64>,
     signal_db: f64,
     clicks_ours: Vec<i64>,
     clicks_legacy: Vec<i64>,
+}
+
+enum Ceiling {
+    /// The whole mix.
+    Mix(f64),
+    /// The mix with in-points rounded as today's export plays them
+    /// (allowed difference 9).
+    WholeSample(f64),
+    /// Dominated by an allowed difference; reported only.
+    Explained,
+}
+
+/// Each project's residual ceiling (dBFS).
+fn ceiling(name: &str) -> Ceiling {
+    match name {
+        // Single-sample clicks resampled from 44.1 kHz (difference 11).
+        "clicks-44k" => Ceiling::Explained,
+        // One-frame switch ramps today (difference 10).
+        "mute-groups" => Ceiling::Explained,
+        // A 5.1 source widens today's bus, mono folds at −3 dB (difference 12).
+        "layouts" => Ceiling::Explained,
+        // Keyframed levels: straight segments one frame apart today (difference 5).
+        "gain-fades" | "precomp-nesting" => Ceiling::Mix(-75.0),
+        n if n.starts_with("real-") => Ceiling::WholeSample(-65.0),
+        _ => Ceiling::Mix(-85.0),
+    }
 }
 
 fn db(x: f64) -> f64 {
@@ -119,30 +147,20 @@ fn offline_mixes_match_todays_export_audio() {
                 }
             }
         }
-        let doc = Document::new(Some(loaded), 1);
-        let cache = SourceCache::new(128 << 20, 0);
-        let resolver = move |id: &str| media.get(id).cloned();
-        let graph = MixGraph::build(&doc, &comp, &mut Evaluator::new(), &cache, &resolver).unwrap();
-        if !graph.problems.is_empty() {
-            failures.push(format!("{name}: media problems {:?}", graph.problems));
-        }
         let rate = 48_000u32;
-        let mut mixer = Mixer::new(
-            MixFormat::stereo(rate),
-            Arc::new(doc),
-            Arc::new(graph),
-            Evaluator::new(),
-            cache,
-        );
         let expected_len = (dur * rate as f64).round() as usize;
-        let mut ours = [Vec::new(), Vec::new()];
-        offline::render(&mut mixer, 0, expected_len as i64, 8192, |_, inter| {
-            for (i, v) in inter.iter().enumerate() {
-                ours[i % 2].push(*v);
-            }
-            Ok(())
-        })
-        .unwrap();
+        let (ours, problems) = render(loaded.clone(), &comp, &media, rate, expected_len);
+        if !problems.is_empty() {
+            failures.push(format!("{name}: media problems {problems:?}"));
+        }
+        // Today's export starts each clip on a whole sample of the 48 kHz
+        // decode (`AudioBufferSourceNode.start` rounds the offset), so a
+        // fractional in-point plays up to half a sample early or late. The
+        // same document with in-points rounded that way isolates the rest
+        // of the chain.
+        let mut quantized = loaded;
+        let whole_sample = quantize_in_points(&mut quantized, rate as f64)
+            .then(|| render(quantized, &comp, &media, rate, expected_len).0);
         let (_, channels, legacy_rate, legacy) =
             read_wav(&std::fs::read(pdir.join("legacy.wav")).unwrap()).unwrap();
         assert_eq!(legacy_rate, rate);
@@ -161,7 +179,61 @@ fn offline_mixes_match_todays_export_audio() {
                 sig += (l[i] as f64).powi(2);
             }
         }
+        // Where the residual sits: 100 ms windows, worst first, per channel.
+        let win = rate as usize / 10;
+        let mut windows: Vec<(f64, usize, f64, f64)> = (0..n.div_ceil(win))
+            .map(|w| {
+                let (a, b) = (w * win, ((w + 1) * win).min(n));
+                let mut e = [0f64; 2];
+                let mut sg = 0f64;
+                for c in 0..2 {
+                    let l = &legacy[c.min(lc - 1)];
+                    for i in a..b {
+                        e[c] += (ours[c][i] as f64 - l[i] as f64).powi(2);
+                        sg += (l[i] as f64).powi(2);
+                    }
+                }
+                let k = (b - a) as f64;
+                (
+                    db(((e[0] + e[1]) / (2.0 * k)).sqrt()),
+                    a,
+                    db((e[0] / k).sqrt()) - db((e[1] / k).sqrt()),
+                    db((sg / (2.0 * k)).sqrt()),
+                )
+            })
+            .collect();
+        windows.sort_by(|x, y| y.0.total_cmp(&x.0));
+        if std::env::var("PM_AUDIO_PARITY_DETAIL").is_ok() {
+            for (e, a, lr, sg) in windows.iter().take(6) {
+                eprintln!(
+                    "  {name} @ {:.1} s: residual {e:.1} dBFS (L − R {lr:+.1} dB), signal {sg:.1} dBFS",
+                    *a as f64 / rate as f64
+                );
+            }
+            let mut planar = ours.clone();
+            for c in &mut planar {
+                c.truncate(n);
+            }
+            common::write_wav(&pdir.join("ours.wav"), rate, &planar);
+            if let Some(q) = &whole_sample {
+                let mut planar = q.to_vec();
+                for c in &mut planar {
+                    c.truncate(n);
+                }
+                common::write_wav(&pdir.join("ours-whole-sample.wav"), rate, &planar);
+            }
+        }
         let rms = (sq / (2 * n) as f64).sqrt();
+        let whole_sample_db = whole_sample.as_ref().map(|q| {
+            let mut e = 0f64;
+            for c in 0..2 {
+                let l = &legacy[c.min(lc - 1)];
+                for i in 0..n {
+                    e += (q[c][i] as f64 - l[i] as f64).powi(2);
+                }
+            }
+            db((e / (2 * n) as f64).sqrt())
+        });
         let signal = (sig / (2 * n) as f64).sqrt();
         let mut m = Measured {
             name: name.clone(),
@@ -170,6 +242,7 @@ fn offline_mixes_match_todays_export_audio() {
             expected_len,
             peak_diff: peak,
             rms_diff_db: db(rms),
+            whole_sample_db,
             signal_db: db(signal),
             clicks_ours: vec![],
             clicks_legacy: vec![],
@@ -213,15 +286,29 @@ fn offline_mixes_match_todays_export_audio() {
                 m.clicks_ours
             ));
         }
+        // Residual ceilings: what is left once the allowed differences
+        // (docs/engine/pm-audio.md) are accounted for, as regression guards.
+        let (residual, ceiling) = match ceiling(&name) {
+            Ceiling::Mix(db) => (Some(m.rms_diff_db), db),
+            Ceiling::WholeSample(db) => (m.whole_sample_db.or(Some(m.rms_diff_db)), db),
+            Ceiling::Explained => (None, 0.0),
+        };
+        if let Some(r) = residual
+            && r > ceiling
+        {
+            failures.push(format!(
+                "{name}: residual {r:.1} dBFS above its {ceiling:.0} dBFS ceiling"
+            ));
+        }
         results.push(m);
     }
     eprintln!("capture {}", dir.display());
     eprintln!(
-        "project              | legacy n | ours n (= round) | signal dBFS | residual rms dBFS | residual peak | clicks ours / legacy (samples from frame start)"
+        "project              | legacy n | ours n (= round) | signal dBFS | residual rms dBFS | residual peak | whole-sample in-points | clicks ours / legacy (samples from frame start)"
     );
     for m in &results {
         eprintln!(
-            "{:<20} | {:>8} | {:>8} ({:>6}) | {:>11.1} | {:>17.1} | {:>13.6} | {:?} / {:?}",
+            "{:<20} | {:>8} | {:>8} ({:>6}) | {:>11.1} | {:>17.1} | {:>13.6} | {:>22} | {:?} / {:?}",
             m.name,
             m.legacy_len,
             m.ours_len,
@@ -229,9 +316,89 @@ fn offline_mixes_match_todays_export_audio() {
             m.signal_db,
             m.rms_diff_db,
             m.peak_diff,
+            m.whole_sample_db
+                .map_or("(none fractional)".to_string(), |d| format!("{d:.1} dBFS")),
             m.clicks_ours,
             m.clicks_legacy
         );
     }
     assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Media the graph could not open: (layer, asset, reason).
+type Problems = Vec<(String, String, String)>;
+
+/// Renders a loaded document's open composition, `[0, len)`, as stereo.
+fn render(
+    loaded: Value,
+    comp: &str,
+    media: &HashMap<String, PathBuf>,
+    rate: u32,
+    len: usize,
+) -> ([Vec<f32>; 2], Problems) {
+    let doc = Document::new(Some(loaded), 1);
+    let cache = SourceCache::new(128 << 20, 0);
+    let media = media.clone();
+    let resolver = move |id: &str| media.get(id).cloned();
+    let graph = MixGraph::build(&doc, comp, &mut Evaluator::new(), &cache, &resolver).unwrap();
+    let problems = graph.problems.clone();
+    let mut mixer = Mixer::new(
+        MixFormat::stereo(rate),
+        Arc::new(doc),
+        Arc::new(graph),
+        Evaluator::new(),
+        cache,
+    );
+    let mut ours = [Vec::new(), Vec::new()];
+    offline::render(&mut mixer, 0, len as i64, 8192, |_, inter| {
+        for (i, v) in inter.iter().enumerate() {
+            ours[i % 2].push(*v);
+        }
+        Ok(())
+    })
+    .unwrap();
+    (ours, problems)
+}
+
+/// Rounds every static `trim` of a sounding layer to a whole sample at
+/// `rate`, as today's export plays it. Returns whether any changed.
+fn quantize_in_points(doc: &mut Value, rate: f64) -> bool {
+    fn layers(list: Option<&mut Value>, rate: f64) -> bool {
+        let Some(Value::Array(list)) = list else {
+            return false;
+        };
+        let mut changed = false;
+        for layer in list {
+            let Value::Object(l) = layer else { continue };
+            let sounding = match l.get("type") {
+                Some(Value::String(t)) => matches!(t.to_string_lossy().as_str(), "audio" | "video"),
+                _ => false,
+            };
+            if !sounding {
+                continue;
+            }
+            if let Some(Value::Object(d)) = l.get_mut("d")
+                && let Some(Value::Number(trim)) = d.get_mut("trim")
+            {
+                let q = (*trim * rate).round() / rate;
+                if (q - *trim).abs() * rate > 1e-6 {
+                    *trim = q;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+    let Value::Object(root) = doc else {
+        return false;
+    };
+    let mut changed = layers(root.get_mut("layers"), rate);
+    if let Some(Value::Object(comps)) = root.get_mut("comps") {
+        for (_, c) in comps.iter_mut() {
+            if let Value::Object(c) = c {
+                changed |= layers(c.get_mut("layers"), rate);
+            }
+        }
+    }
+    changed
 }
