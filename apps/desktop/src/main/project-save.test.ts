@@ -289,3 +289,52 @@ describe('incremental project transactions', () => {
     expect(await save('again', [clip('empty', 0)], Buffer.alloc(0))).toEqual([]);
   });
 });
+
+describe('host media store and linked media in PMV4 (section 21)', () => {
+  it('copies stored media from the store in main, records linked assets without bytes, and reuses both', async () => {
+    const storeFile = path.join(directory, 'object');
+    const stored = Buffer.from('stored bytes from the media store');
+    await writeFile(storeFile, stored);
+    const hash = 'a'.repeat(64);
+    const asked: Array<[string, number]> = [];
+    files = new ProjectFiles(registry, path.join(directory, 'backups'), {
+      storedFile: async (h, length) => { asked.push([h, length]); return h === hash && length === stored.length ? storeFile : null; }
+    });
+    const linked = [{ id: 'linked', hash: 'b'.repeat(64), size: 123_456, path: '/Volumes/Footage/A001_C003.mov', type: 'video/quicktime' }];
+    const media: SaveMedia[] = [{ id: 'clip', revision: hash, type: 'video/quicktime', length: stored.length, stored: hash }];
+    const json = document('stored');
+    let upload = await files.beginIncremental('one', media, json.length, destination, linked);
+    // Nothing for the page to upload: main copies the stored object itself.
+    expect(upload.required).toEqual([]);
+    await upload.write(null, json);
+    await upload.finish();
+    const first = await index();
+    expect(first.linked).toEqual(linked);
+    expect(first.media).toHaveLength(1);
+    expect(first.media[0]).toMatchObject({ id: 'clip', revision: hash, length: stored.length });
+    expect(Object.keys(first.media[0]!).sort()).toEqual(['id', 'length', 'offset', 'revision', 'sha256', 'type']);
+    const decoded = decodeProjectContainer(await readFile(destination));
+    expect(Buffer.from(decoded.media[0]!.data).toString()).toBe(stored.toString());
+
+    // The next save reuses the range: the store is not read again.
+    asked.length = 0;
+    upload = await files.beginIncremental('one', media, json.length, undefined, linked);
+    await upload.write(null, json);
+    await upload.finish();
+    expect(asked).toEqual([]);
+    expect((await index()).media).toEqual(first.media);
+
+    // A stored object main cannot find is uploaded by the page.
+    const missing: SaveMedia[] = [{ id: 'other', revision: 'c'.repeat(64), type: '', length: 3, stored: 'c'.repeat(64) }];
+    upload = await files.beginIncremental('one', missing, json.length);
+    expect(upload.required).toEqual(['other']);
+    await upload.dispose();
+  });
+
+  it('refuses malformed stored hashes and linked records', async () => {
+    const json = document('bad');
+    await expect(files.beginIncremental('one', [{ ...clip(), stored: 'not-a-hash' }], json.length, destination)).rejects.toThrow(/Invalid project media/);
+    await expect(files.beginIncremental('one', [clip()], json.length, destination, [{ id: 'x', hash: 'zz', size: 1, path: '/a' }])).rejects.toThrow(/link index/);
+    await expect(files.beginIncremental('one', [clip()], json.length, destination, [{ id: 'clip', hash: 'b'.repeat(64), size: 1, path: '/a' }])).rejects.toThrow(/Invalid project media/);
+  });
+});

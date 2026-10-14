@@ -19,6 +19,7 @@ import { createNewProjectForm } from './ui/project-settings';
 import { inspectorService, shaderHooks, timelineService, viewerService } from './core/services';
 import { bridge as hostBridge } from '../kernel/bridge';
 import { CURRENT_READER_VERSION, NEWER_PROJECT_MESSAGE, needsNewerReader, requiredReaderVersion } from '../../../shared/reader-version';
+import { REQUIRES_NATIVE_MESSAGE, refusesProject } from '../../../shared/engine-stamp';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -106,6 +107,10 @@ PM.app = APP;
    read-only: it is never autosaved (Projects.put keeps the copy stored when it
    opened) and never saved, so nothing this build does can overwrite it. */
 const isReadOnlyProject = (project: any) => needsNewerReader(project);
+/* A project stamped `requiresEngine: "native"` uses features only the new
+   engine has (linked media); the legacy engine refuses it (section 21). */
+const refusedByEngine = (project: any) => refusesProject(project, PM.HostMedia?.enabled === true);
+PM.refusedByEngine = (id: string) => refusedByEngine(parkedTabs.get(id)?.project ?? PM.Projects.get(id));
 PM.isReadOnlyProject = (id: string = PM.proj?.id) => {
   if (!id) return false;
   if (id === PM.proj?.id) return isReadOnlyProject(PM.proj);
@@ -178,12 +183,13 @@ function loadBootProject() {
   tabIds = [...new Set((Array.isArray(request.tabs) ? request.tabs : []).filter((id: any) => typeof id === 'string'))] as string[];
   if (request.projectId) {
     const requested = PM.Projects.get(request.projectId);
-    if (requested) {
+    if (requested && !refusedByEngine(requested)) {
       try { return hydrate(requested); }
       catch (e) { console.warn('Saved project could not be loaded', request.projectId, e); return emptyHomeProject(); }
     }
   }
-  const raw = PM.Projects.pickBoot({ legacy: PM.store.get('autosave', null), taken: request.taken });
+  const raw = PM.Projects.pickBoot({ legacy: PM.store.get('autosave', null), taken: request.taken,
+    get: (id: string) => { const project = PM.Projects.get(id); return project && !refusedByEngine(project) ? project : null; } });
   if (!raw) return emptyHomeProject();
   try { return hydrate(raw); }
   catch (e) { console.warn('Saved project could not be loaded', raw.id, e); return emptyHomeProject(); }
@@ -841,6 +847,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
       const bridge = hostBridge()!.projectRead!;
       const { token, document, media } = file.native;
       try {
+        if (refusedByEngine(document)) throw new Error(REQUIRES_NATIVE_MESSAGE);
         await restoreProjectFileStream(document, media, PM.MediaStore, (offset, length) => bridge.read(token, offset, length),
           (completed, total) => opening.update({ label: file.name, completed, total }));
         o = document; mediaRestored = true;
@@ -849,6 +856,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     else if (file instanceof Blob) o = await unpackProjectFileBlob(file);
     else o = unpackProjectFile(file.arrayBuffer ? await file.arrayBuffer() : await file.text());
     const source = o.proj || o;
+    if (refusedByEngine(o)) throw new Error(REQUIRES_NATIVE_MESSAGE);
     const requiredReader = requiredReaderVersion(o);
     if (!source || !Array.isArray(source.layers) || !Number.isFinite(source.w) || !Number.isFinite(source.h)) {
       throw new Error(requiredReader > CURRENT_READER_VERSION ? `${NEWER_PROJECT_MESSAGE}.` : 'This is not a Powermove project.');
@@ -1019,7 +1027,7 @@ function showTab(id: string): boolean {
     return true;
   }
   const project = PM.Projects.get(id);
-  if (!project) return false;
+  if (!project || refusedByEngine(project)) return false;
   switchProject(project);
   return true;
 }
@@ -1417,7 +1425,13 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
       PM.autosave();
       if (placement === null || target) PM.bus.emit('assets');
       const parts: any = [];
-      if (layerResults.length) {
+      /* With the new engine's media store, say what was copied and linked
+         (appendix D: "Copied 12 clips · Linked 3"). */
+      const linkedCount = layerResults.filter((result: any) => result.asset.storage === 'linked').length;
+      if (layerResults.length && linkedCount) {
+        const copiedCount = layerResults.length - linkedCount;
+        parts.push([copiedCount ? `Copied ${copiedCount} ${copiedCount === 1 ? 'clip' : 'clips'}` : '', `Linked ${linkedCount}`].filter(Boolean).join(' · '));
+      } else if (layerResults.length) {
         const editableSvg = layerResults.length === 1 && layerResults[0].asset.format === 'svg' && layerResults[0].asset.svg?.paths?.length;
         parts.push(layerResults.length === 1
           ? `Imported ${layerResults[0].asset.name}${editableSvg ? ' as editable paths' : ''}`
@@ -1529,7 +1543,8 @@ window.addEventListener('beforeunload', () => {
 
 window.addEventListener('pm-open-project', (e: any) => {
   const p = e.detail;
-  if (p && typeof p === 'object') switchProject(p);
+  if (p && typeof p === 'object' && !refusedByEngine(p)) switchProject(p);
+  else if (p && typeof p === 'object') PM.toast(REQUIRES_NATIVE_MESSAGE, 6000, { key: 'project-engine', error: true });
 });
 
 /**
@@ -1541,6 +1556,10 @@ PM.openProjectHere = async (id: string) => {
   if (!id || id === PM.proj.id) return true;
   if (!parkedTabs.has(id) && !PM.Projects.list().some((meta: any) => meta.id === id)) {
     PM.toast('Could not open this project because its local data is missing.');
+    return false;
+  }
+  if (PM.refusedByEngine(id)) {
+    PM.toast(REQUIRES_NATIVE_MESSAGE, 6000, { key: 'project-engine', error: true });
     return false;
   }
   const claim = await (PM.windows?.claimProject?.(id) ?? Promise.resolve({ claimed: true, focused: false }));

@@ -30,6 +30,8 @@ import { install as installProjects } from './core/projects';
 import { install as installEditing } from './core/editing';
 import { install as installCapabilities } from './core/capabilities';
 import { install as installMedia } from './core/media';
+import { installHostMediaStore } from '../media/host-media-store';
+import { bridge as hostBridge } from '../kernel/bridge';
 import { install as installAudio } from './core/audio';
 import { install as installShaders } from './gl/shaders';
 import { install as installTransitions } from './gl/transitions';
@@ -87,6 +89,9 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['core/editing', installEditing],
   ['core/capabilities', installCapabilities],
   ['core/media', installMedia],
+  /* The host media store wraps PM.MediaStore before anything reads media
+     (section 21; the source of bytes with "Use New Engine" on). */
+  ['media/host-store', (PM) => installHostMediaStore(PM, hostBridge() as never)],
   ['core/audio', installAudio],
   ['gl/shaders', installShaders],
   ['gl/transitions', installTransitions],
