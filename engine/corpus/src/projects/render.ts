@@ -231,8 +231,9 @@ function stills(): CorpusProject[] {
   return STILLS.map(([file, w, h, alpha]) => {
     const stem = file.replace(/^corpus-/, '').replace('.', '-');
     const b = newProject(`render/still-${stem}`, { name: `Still ${file}`, backgroundFill: DARK, w: 420, h: 280 });
-    b.add(b.layer('image', { name: '1:1', d: { asset: ref(file), fit: 'stretch', w, h }, p: { 'position.x': 8, 'position.y': 12 } }));
-    b.add(b.layer('image', { name: 'Minified and rotated', d: { asset: ref(file), fit: 'stretch', w, h }, p: { 'position.x': 300, 'position.y': 150, 'scale.x': 45, 'scale.y': 45, rotation: 13 } }));
+    // Position is the box center: the 1:1 copy's corner lands on (8, 12), texel centers on pixel centers.
+    b.add(b.layer('image', { name: '1:1', d: { asset: ref(file), fit: 'stretch', w, h }, p: { 'position.x': 8 + w / 2, 'position.y': 12 + h / 2 } }));
+    b.add(b.layer('image', { name: 'Minified and rotated', d: { asset: ref(file), fit: 'stretch', w, h }, p: { 'position.x': 345, 'position.y': 215, 'scale.x': 45, 'scale.y': 45, rotation: 13 } }));
     return project(b, { group: 'Render', title: `Still ${file}`, covers: ['image decoding', 'image color interpretation', 'image sampling'], samples: [0], alpha });
   });
 }
