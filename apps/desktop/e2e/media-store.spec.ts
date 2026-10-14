@@ -6,7 +6,7 @@
  * hash and never deleted, and Use New Engine on → off → on with no loss.
  * Hidden Electron, isolated profiles, real files and the real store.
  */
-import { copyFile, mkdir, mkdtemp, readFile, rename, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -62,6 +62,24 @@ const indexedDbRecord = (page: Page, key: string) => page.evaluate((key) => new 
     };
   };
 }), key);
+
+/**
+ * A 16-bit mono WAV, 1 MiB of samples, silent except a tone between bytes
+ * 128 KiB and 384 KiB whose pitch is `variant`. The import fingerprint
+ * samples 64 KiB at the start, the middle, and the end, so every variant
+ * shares one fingerprint (and one storage key) while its content differs.
+ */
+function roomToneWav(variant: number): Buffer {
+  const samples = 512 * 1024;
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0); header.writeUInt32LE(36 + samples * 2, 4); header.write('WAVE', 8);
+  header.write('fmt ', 12); header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20); header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(48_000, 24); header.writeUInt32LE(96_000, 28); header.writeUInt16LE(2, 32); header.writeUInt16LE(16, 34);
+  header.write('data', 36); header.writeUInt32LE(samples * 2, 40);
+  const data = Buffer.alloc(samples * 2);
+  for (let i = 64 * 1024; i < 192 * 1024; i++) data.writeInt16LE(Math.round(Math.sin(i * 0.02 * (variant + 1)) * 8000), i * 2);
+  return Buffer.concat([header, data]);
+}
 
 async function setImportMode(page: Page, mode: 'copy' | 'link'): Promise<void> {
   // Through Settings › Project › Media, as a person would.
@@ -265,6 +283,62 @@ test.describe('media store with Use New Engine on', () => {
     expect(records.find((record: any) => record.key === metas[2].storageKey)?.hash).toBe(await hashOf(workspaceFile));
   });
 
+  test('files that share a sampled fingerprint stay separate assets, each with its own bytes', async ({ session }) => {
+    test.setTimeout(90_000);
+    await session.openEditor();
+    const { page } = session;
+    const first = path.join(footage, 'room tone A.wav');
+    const second = path.join(footage, 'room tone B.wav');
+    await writeFile(first, roomToneWav(1));
+    await writeFile(second, roomToneWav(2));
+    const firstId = await importFile(page, first);
+    const secondId = await importFile(page, second);
+    expect(secondId).not.toBe(firstId);
+    const [a, b] = [await meta(page, firstId), await meta(page, secondId)];
+    // Same fingerprint and storage key; the content hash tells them apart.
+    expect(b.fingerprint).toBe(a.fingerprint);
+    expect(b.storageKey).toBe(a.storageKey);
+    expect([a.contentHash, b.contentHash]).toEqual([await hashOf(first), await hashOf(second)]);
+    const readBack = (id: string) => page.evaluate(async (id) => {
+      const PM = (window as any).PM;
+      const blob = await PM.MediaStore.get(PM.proj.assets[id]);
+      return PM.HostMedia.hash(blob);
+    }, id);
+    expect(await readBack(firstId)).toBe(a.contentHash);
+    expect(await readBack(secondId)).toBe(b.contentHash);
+    // The engine's handle names the first asset's own content, not the key's latest.
+    await expect.poll(() => engineRead(session, firstId).then((read) => read.hash).catch((error) => String(error))).toBe(a.contentHash);
+
+    // Agents: the same content is deduplicated; other content is a new asset.
+    const sameAsFirst = path.join(footage, 'copy of A.wav');
+    await copyFile(first, sameAsFirst);
+    const third = path.join(footage, 'room tone C.wav');
+    await writeFile(third, roomToneWav(3));
+    const agent = await page.evaluate(async (paths) => {
+      const PM = (window as any).PM;
+      const out = [];
+      for (const path of paths) {
+        const reply = await PM.AgentHarness.test.handleLiveAgentTool({ runId: 'fingerprint', callId: `c-${Math.random()}`, tool: 'import_media', arguments: { path }, baseRevision: PM.proj.revision });
+        out.push(JSON.parse(reply.content[0].text));
+      }
+      return out;
+    }, [sameAsFirst, third]);
+    expect(agent[0]).toMatchObject({ status: 'already_imported', assetId: firstId });
+    expect(agent[1].status).toBe('imported');
+    expect([firstId, secondId]).not.toContain(agent[1].assetId);
+    expect(await readBack(agent[1].assetId)).toBe(await hashOf(third));
+
+    // Desktop Save embeds each asset's own bytes.
+    const destination = path.join(session.userData, 'Room tone.pmv');
+    await session.app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, destination);
+    expect(await page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
+    const bytes = await readFile(destination);
+    const index = await readIncrementalIndex(bytes.length, async (offset, length) => new Uint8Array(bytes.subarray(offset, offset + length)));
+    const saved = Object.fromEntries(index.media.map((item) => [item.id, blake3Hex(new Uint8Array(bytes.subarray(item.offset, item.offset + item.length)))]));
+    expect(saved).toEqual({ [firstId]: a.contentHash, [secondId]: b.contentHash, [agent[1].assetId]: await hashOf(third) });
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
   test('deleting a project never touches its linked originals', async ({ session }) => {
     test.setTimeout(60_000);
     await session.openEditor();
@@ -286,6 +360,53 @@ test.describe('media store with Use New Engine on', () => {
     expect((await stat(png)).isFile()).toBe(true);
     expect((await storeRecords(session)).length).toBe(objectCount);
   });
+});
+
+test('opening a project file on another Mac copies its media into the store in main, verified', async () => {
+  test.setTimeout(120_000);
+  const folder = await mkdtemp(path.join(os.tmpdir(), 'pm-project-'));
+  const project = path.join(folder, 'Handoff.pmv');
+  try {
+    // Saved on one Mac (profile)…
+    let session = await launchApp({ env: ON });
+    let expected: Record<string, string> = {};
+    try {
+      await session.openEditor();
+      const { page } = session;
+      const wav = await place('tone.wav');
+      const png = await place('still-red.png');
+      await importFile(page, wav);
+      await importFile(page, png);
+      expected = { 'tone.wav': await hashOf(wav), 'still-red.png': await hashOf(png) };
+      await session.app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, project);
+      expect(await page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
+    } finally { await session.close(); }
+
+    // …opened on another, whose store is empty.
+    session = await launchApp({ env: ON });
+    try {
+      await session.openEditor();
+      const { page } = session;
+      expect(await storeRecords(session)).toEqual([]);
+      await session.app.evaluate(({ dialog }, filePath) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] }); }, project);
+      await page.evaluate(() => (window as any).PM.openProject());
+      await page.waitForFunction(() => {
+        const PM = (window as any).PM;
+        const metas = Object.values(PM.proj.assets) as any[];
+        return metas.length === 2 && metas.every((asset) => PM.assets.get(asset.id));
+      }, undefined, { timeout: 30_000 });
+      const assets = await page.evaluate(() => Object.values((window as any).PM.proj.assets).map((asset: any) => ({ name: asset.name, key: asset.storageKey })));
+      const records = await storeRecords(session);
+      for (const asset of assets) {
+        // Main copied the range from the file itself: the record says `project`.
+        expect(records.find((record: any) => record.key === asset.key)).toMatchObject({ hash: expected[asset.name], source: 'project' });
+        const object = await session.app.evaluate(async (_e, hash) => (globalThis as any).__powermoveMediaStore.store.objectPath(hash), expected[asset.name]);
+        expect(await hashOf(object)).toBe(expected[asset.name]);
+      }
+      expect(await indexedDbRecord(page, assets[0]!.key)).toBeNull();
+      expect(session.diagnostics.pageErrors).toEqual([]);
+    } finally { await session.close(); }
+  } finally { await rm(folder, { recursive: true, force: true }); }
 });
 
 test('IndexedDB media is copied to the store, verified by hash, and never deleted', async () => {
