@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdtemp, readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -170,5 +170,29 @@ describe('MediaStore', () => {
     expect(await store.verifyLink(link)).toEqual({ status: 'changed' });
     await rm(source);
     expect(await store.verifyLink(link)).toEqual({ status: 'missing' });
+  });
+
+  it('hashes again when another file with the same size and dates replaced the link', async () => {
+    const store = new MediaStore({ root: path.join(root, 'store'), executor });
+    const source = path.join(root, 'linked.mov');
+    await writeFile(source, bytes(4000, 1));
+    await old(source);
+    const identity = await store.identify(source);
+    const link = { path: source, hash: identity.hash, size: identity.size, mtimeMs: identity.mtimeMs, dev: identity.dev, ino: identity.ino };
+    // Another file, its dates set to the original's (cp -p, a sync tool).
+    const other = path.join(root, 'other.mov');
+    await writeFile(other, bytes(4000, 2));
+    const when = new Date(identity.mtimeMs);
+    await utimes(other, when, when);
+    await rename(other, source);
+    expect((await stat(source)).mtimeMs).toBe(identity.mtimeMs);
+    expect(await store.verifyLink(link)).toEqual({ status: 'changed' });
+    // The original content back under a new file number is still the original.
+    const copy = path.join(root, 'copy.mov');
+    await writeFile(copy, bytes(4000, 1));
+    await utimes(copy, when, when);
+    await copyFile(copy, source);
+    await utimes(source, when, when);
+    expect(await store.verifyLink(link)).toMatchObject({ status: 'ok', identity: { hash: identity.hash } });
   });
 });

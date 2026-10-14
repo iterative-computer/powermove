@@ -265,15 +265,17 @@ export class MediaStore {
 
   /**
    * Checks that a linked file is still the content it was linked as. The
-   * size and modification time are enough when both are unchanged; anything
-   * else is hashed again.
+   * same file (volume and file number, when recorded) with an unchanged size
+   * and modification time is enough; anything else, such as another file
+   * copied over the path with its dates kept, is hashed again.
    */
   async verifyLink(link: MediaLink): Promise<{ status: 'ok'; path: string; identity: FileIdentity | null } | { status: 'missing' | 'changed' }> {
     let info;
     try { info = await stat(link.path); } catch { return { status: 'missing' }; }
     if (!info.isFile()) return { status: 'missing' };
     if (info.size !== link.size) return { status: 'changed' };
-    if (link.mtimeMs !== undefined && info.mtimeMs === link.mtimeMs) return { status: 'ok', path: link.path, identity: null };
+    const sameFile = (link.ino === undefined || info.ino === link.ino) && (link.dev === undefined || info.dev === link.dev);
+    if (link.mtimeMs !== undefined && info.mtimeMs === link.mtimeMs && sameFile) return { status: 'ok', path: link.path, identity: null };
     try {
       const identity = await hashFile(this.options.executor, link.path, { settleMs: 0 });
       return identity.hash === link.hash ? { status: 'ok', path: link.path, identity } : { status: 'changed' };
