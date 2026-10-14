@@ -27,15 +27,29 @@ streaming decode, mixing, playback, scrubbing, and the offline render export use
   without metadata: 2112), the decoder skips the difference too.
 - **Positions.** With a timebase at least as fine as a sample (MP4, MOV, Ogg, MP3, WAV,
   FLAC, MPEG-TS) every frame is placed by its timestamp, rounded to the nearest sample;
-  gaps become silence and overlaps are dropped beyond a one-sample tolerance. Coarser
-  timebases (Matroska and WebM use 1 ms) are counted from the start, and a seek decodes
-  forward from the start.
+  gaps become silence and overlaps (a frame stamped before the end of the previous one)
+  drop the samples the timeline already has, so everything after sits on its timestamp;
+  within one sample, a frame continues the line (container rounding).
+- **Coarse timebases.** Matroska and WebM (1 ms) cannot place a frame to the sample, so
+  their samples are counted. A demux-only scan (FFmpeg's parsers, or the codec's fixed
+  frame size) counts the samples of every packet exactly as a decode from the start does
+  and keeps anchors: packets with a unique timestamp at least 4,096 samples apart, whose
+  program sample is known. A seek starts a fresh decoder exactly at the last anchor at
+  least the pre-roll before its target and counts from there, so it costs the same
+  anywhere in the file. The scan runs once per source, only as far as seeks need, and
+  the anchors are a function of the file alone. Where no packet length is known (ALAC
+  in Matroska has no parser), a seek decodes from the start, and a seek forward
+  continues the running decode, so reading in order costs the stream once.
 - **Seeks.** `seek(n)` starts a per-codec pre-roll earlier (AAC 4096, MP3 8 × 1152, Opus
-  80 ms, Vorbis 8192, AC-3 3072, lossless 0) from a freshly opened decoder and discards
+  500 ms, Vorbis 8192, AC-3 3072, lossless 0) from a freshly opened decoder and discards
   to `n`. A fresh decoder matters: FFmpeg's AAC decoder keeps its noise-substitution
   generator across a flush, so a flushed decoder answers differently depending on history.
-  `seek_anchored` never continues the running decode, so a block's samples depend on the
-  file and the block index only.
+  Opus asks for 80 ms (RFC 7845), but CELT predicts band energies from the previous frame
+  and converges slowly from a cold start (measured on tones: 0.11 off after 80 ms, 1e-3
+  after 250 ms, 3e-7 after 500 ms), and a block boundary would step by the difference.
+  `seek_anchored` continues the running decode only when it began where a fresh seek
+  would begin (the same anchor, or the start of the stream), so a block's samples depend
+  on the file and the block index only.
 - **Length.** From the container's duration (Ogg's last granule minus its pre-skip), a
   pure function of the metadata, never refined while decoding.
 
@@ -45,7 +59,32 @@ Measured (`pm-media/tests/audio_decode.rs`): every fixture (`tone.wav`, `.flac`,
 sequential decode exactly for WAV and FLAC (also 44.1 kHz), within 4.3e-5 for AAC tones,
 exactly for the MP3 and Opus fixtures, and land on the exact sample for AAC with noise
 substitution (whose noise is random by design). A 40-minute AAC renders bit-identical to
-FFmpeg's own accurate seek and decode at 39:59.
+FFmpeg's own accurate seek and decode at 39:59. Overlapping and gapped MPEG-TS timestamps
+keep every sample on its timestamp (`gaps_are_silence_and_overlaps_are_dropped`).
+
+Coarse timebases (`coarse_timebase_seeks_start_near_their_target`, 40 s in Matroska and
+WebM): seeks equal the sequential decode exactly for FLAC, PCM, ALAC, Vorbis, and AAC
+without noise substitution; within 2e-7 for Opus, 4e-5 for AC-3, E-AC-3 and MP2, and
+7.2e-3 for AAC with noise substitution (its noise generator runs across frames). A seek
+decodes 4 to 32 packets wherever it lands (ALAC: from the start), and blocks read in
+order cost the stream once plus a pre-roll per block.
+
+Long coarse sources (`pm-audio/tests/sources.rs`
+`long_coarse_timebase_sources_decode_in_linear_time`, 10 minutes, release build, the
+lane's `SourceCache`; the earlier code decoded every block from sample 0):
+
+| Source | Block 0 | Block 100 | Block 200 | Block 400 | All 440 in order | Cold block 437 |
+| --- | --- | --- | --- | --- | --- | --- |
+| WebM/Opus, before | 1.5 ms | 92 ms | 185 ms | 365 ms | | |
+| WebM/Opus, now | 3.2 ms | 3.8 ms | 4.0 ms | 3.8 ms | 1.7 s | 20 ms (96 packets) |
+| MKV/FLAC, before | | | | 206 ms | | |
+| MKV/FLAC, now | 2.1 ms | 1.9 ms | 2.0 ms | 2.1 ms | 0.9 s | 21 ms (64 packets) |
+
+The "before" rows are the review's measurement of the earlier code on the same kind of
+file (its whole-file cost grew as N²/2 blocks, about 1.5 minutes for this one). Every
+block in order now decodes 96 to 99 packets (Opus) or 64 (FLAC), the same at the end
+as at the start. A cold block near the end includes the first demux-only scan of the
+file (about 16 ms for 10 minutes); later seeks reuse the anchors.
 
 ## Resampling (`kernel`)
 
