@@ -152,13 +152,18 @@ async function main(): Promise<void> {
     installed.frameBridge?.listen((event) => {
       if (event.kind !== 'remoteLayer' || !cfg.remoteLayer || !win || win.isDestroyed()) return;
       const port = event.clientPort ?? -1;
+      // The new host goes in before the old one leaves: a new pool keeps
+      // its context (a resize), and it must not be unhosted in between.
       const old = layerHosts.get(port);
-      if (old !== undefined) harness.removeRemoteLayer(old);
       layerHosts.delete(port);
-      if (!event.contextId || !event.width || !event.height || !event.scale) return;
+      if (!event.contextId || !event.width || !event.height || !event.scale) {
+        if (old !== undefined) harness.removeRemoteLayer(old);
+        return;
+      }
       try {
         const id = harness.hostRemoteLayer(win.getNativeWindowHandle(), event.contextId, 0, 0, event.width / event.scale, event.height / event.scale);
         layerHosts.set(port, id);
+        if (old !== undefined) harness.removeRemoteLayer(old);
         remoteLayers.push({ contextId: event.contextId, width: event.width, height: event.height, scale: event.scale, hostedUs: harness.nowUs() });
         log(`hosted remote layer ${event.contextId} (${event.width}x${event.height} at ${event.scale}x)`);
       } catch (error) {

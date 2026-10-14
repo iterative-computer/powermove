@@ -421,6 +421,47 @@ impl RemoteLayer {
         })
     }
 
+    /// Moves the layer to a new pool's size, scale, format, and color
+    /// space, keeping its context: main's `CALayerHost` keeps showing it,
+    /// so a live resize (a new pool every few milliseconds) does not leave
+    /// the layer unhosted between pools, which Core Animation reports as
+    /// drawables never presented (measured in the real app: 96 of 104
+    /// drops under the gate load were inside live resizes when every pool
+    /// made a new context). Later drawables have the new size; the
+    /// textures over the old pool's surfaces are forgotten.
+    pub fn reconfigure(
+        &mut self,
+        size: Size,
+        scale: f64,
+        format: SurfaceFormat,
+        space: ViewerColorSpace,
+    ) -> Result<(), RemoteLayerError> {
+        let pixel_format =
+            metal_format(format).ok_or(RemoteLayerError::Metal("not a viewer format"))?;
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        self.layer.setPixelFormat(pixel_format);
+        self.layer
+            .setDrawableSize(CGSize::new(f64::from(size.width), f64::from(size.height)));
+        self.layer.setContentsScale(scale);
+        self.layer.setFrame(CGRect::new(
+            CGPoint::new(0.0, 0.0),
+            CGSize::new(
+                f64::from(size.width) / scale,
+                f64::from(size.height) / scale,
+            ),
+        ));
+        let extended = format == SurfaceFormat::Rgba16Float;
+        self.layer.setWantsExtendedDynamicRangeContent(extended);
+        self.layer
+            .setColorspace(color_space(space, extended).as_deref());
+        CATransaction::commit();
+        self.size = size;
+        self.format = format;
+        self.sources.clear();
+        Ok(())
+    }
+
     /// The id main's `CALayerHost` shows (`-[CAContext contextId]`).
     pub fn context_id(&self) -> u32 {
         // SAFETY: a readonly uint32 property.
@@ -688,6 +729,35 @@ mod tests {
         assert!(layer.present(&surface.iosurface, 2, now + 40_000).unwrap());
         // One Metal texture per pool surface.
         assert_eq!(layer.sources.len(), 1);
+
+        // A new pool (a live resize, an EDR change): same context, new
+        // drawables of the new size and format, copies of the new surfaces.
+        let context = layer.context_id();
+        let bigger = Size::new(96, 48);
+        layer
+            .reconfigure(
+                bigger,
+                2.0,
+                SurfaceFormat::Rgba16Float,
+                ViewerColorSpace::DisplayP3,
+            )
+            .unwrap();
+        assert_eq!(layer.context_id(), context);
+        assert_eq!(
+            (layer.size(), layer.format()),
+            (bigger, SurfaceFormat::Rgba16Float)
+        );
+        assert!(layer.sources.is_empty());
+        let surface = ExportedSurface::create(
+            &device,
+            &SurfaceRequest {
+                size: bigger,
+                format: SurfaceFormat::Rgba16Float,
+            },
+        )
+        .unwrap();
+        assert!(layer.present(&surface.iosurface, 3, now + 60_000).unwrap());
+        assert_eq!(layer.layer.drawableSize(), CGSize::new(96.0, 48.0));
     }
 
     fn pm_protocol_now_us() -> i64 {

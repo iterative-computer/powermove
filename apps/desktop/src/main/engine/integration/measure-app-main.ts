@@ -208,6 +208,9 @@ async function run(config: AppConfig): Promise<void> {
     const remoteLayers: Record<string, unknown>[] = [];
     result['remoteLayers'] = remoteLayers;
     const layerHosts = new Map<number, number>();
+    /** The latest announcement per viewer port: an older one still placing its host is dropped. */
+    const latest = new Map<number, number>();
+    let announcements = 0;
     type Installed = { frameBridge?: { listen(listener: (event: { kind: string; clientPort?: number | null; contextId?: number | null; width?: number | null; height?: number | null; scale?: number | null }) => void): () => void } | null };
     const bridgeHost = (globalThis as { __powermoveNativeEngine?: Installed }).__powermoveNativeEngine?.frameBridge ?? null;
     if (config.remoteLayer && !bridgeHost) throw new Error('the C′ prototype needs the frame bridge');
@@ -215,16 +218,24 @@ async function run(config: AppConfig): Promise<void> {
       ? bridgeHost!.listen((event) => {
           if (event.kind !== 'remoteLayer' || win.isDestroyed()) return;
           const port = event.clientPort ?? -1;
-          const old = layerHosts.get(port);
-          if (old !== undefined) harness.removeRemoteLayer(old);
-          layerHosts.delete(port);
-          if (!event.contextId || !event.width || !event.height || !event.scale) return;
+          const token = ++announcements;
+          latest.set(port, token);
+          if (!event.contextId || !event.width || !event.height || !event.scale) {
+            const old = layerHosts.get(port);
+            if (old !== undefined) harness.removeRemoteLayer(old);
+            layerHosts.delete(port);
+            return;
+          }
           const { contextId, width, height, scale } = event;
+          // A new pool keeps its context (a live resize): the old host stays
+          // until the new one, at the stage's new place, is in.
           void call<{ left: number; top: number } | null>('window.__measureApp.stageRect()').then((rect) => {
-            if (win.isDestroyed()) return;
+            if (win.isDestroyed() || latest.get(port) !== token) return;
             try {
               const id = harness.hostRemoteLayer(win.getNativeWindowHandle(), contextId, rect?.left ?? 0, rect?.top ?? 0, width / scale, height / scale);
+              const old = layerHosts.get(port);
               layerHosts.set(port, id);
+              if (old !== undefined) harness.removeRemoteLayer(old);
               remoteLayers.push({ contextId, width, height, scale, at: rect, hostedUs: harness.nowUs() });
               log(`hosted remote layer ${contextId} (${width}x${height} at ${scale}x)`);
             } catch (error) {

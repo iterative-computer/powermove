@@ -483,15 +483,21 @@ impl Thread {
         }
     }
 
-    fn retire_pool(&self, key: Key, live: Live) {
-        if live.remote.is_some()
-            && let Some(bridge) = &self.bridge
-            && let Err(error) = bridge.remote_layer(key.0.0, live.spec.generation, 0, (0, 0), 0)
+    /// Tells main to stop hosting the viewer's remote layer (C′ prototype).
+    fn withdraw_remote(&self, key: Key, generation: u32) {
+        if let Some(bridge) = &self.bridge
+            && let Err(error) = bridge.remote_layer(key.0.0, generation, 0, (0, 0), 0)
         {
             self.log(
                 LogLevel::Warn,
                 format!("frame bridge: could not withdraw the remote layer: {error}"),
             );
+        }
+    }
+
+    fn retire_pool(&self, key: Key, live: Live) {
+        if live.remote.is_some() {
+            self.withdraw_remote(key, live.spec.generation);
         }
         if let Some(bridge) = &self.bridge
             && let Err(error) = bridge.retire(key.0.0, live.spec.generation)
@@ -555,10 +561,14 @@ impl Thread {
             return;
         };
         view.retry = None;
-        if let Some(old) = self.views.get_mut(&key).and_then(|v| v.pool.take()) {
+        // The C′ prototype's layer moves to the new pool: main keeps
+        // hosting its context, so a live resize never leaves it unhosted.
+        let mut carried = None;
+        if let Some(mut old) = self.views.get_mut(&key).and_then(|v| v.pool.take()) {
+            carried = old.remote.take();
             self.retire_pool(key, old);
         }
-        self.make_pool(key, spec, 0);
+        self.make_pool(key, spec, 0, carried);
     }
 
     /// Makes and hands off a pool; on failure, schedules it again with a
@@ -566,8 +576,9 @@ impl Thread {
     /// lease for `spec` and records it as the viewer's pool, so it would
     /// never ask again for an identical viewer state: the render thread
     /// must.
-    fn make_pool(&mut self, key: Key, spec: PoolSpec, failures: u32) {
-        match self.create_pool(key, spec) {
+    fn make_pool(&mut self, key: Key, spec: PoolSpec, failures: u32, carried: Option<RemoteLayer>) {
+        let had_remote = carried.is_some();
+        match self.create_pool(key, spec, carried) {
             Ok(live) => {
                 let descriptor = live.pool.descriptor();
                 if let Some(view) = self.views.get_mut(&key) {
@@ -587,6 +598,11 @@ impl Thread {
                 self.event(key, Event::SurfacePool(descriptor), None);
             }
             Err(error) => {
+                // The carried layer went with the failed pool: main stops
+                // hosting its context.
+                if had_remote {
+                    self.withdraw_remote(key, spec.generation);
+                }
                 let failures = failures + 1;
                 self.stats().pool_failures += 1;
                 // Without a bridge nothing can succeed; do not retry.
@@ -626,10 +642,15 @@ impl Thread {
             generation: self.generations.next(),
             ..retry.spec
         };
-        self.make_pool(key, spec, retry.failures);
+        self.make_pool(key, spec, retry.failures, None);
     }
 
-    fn create_pool(&mut self, key: Key, spec: PoolSpec) -> Result<Live, String> {
+    fn create_pool(
+        &mut self,
+        key: Key,
+        spec: PoolSpec,
+        carried: Option<RemoteLayer>,
+    ) -> Result<Live, String> {
         if self.bridge.is_none() {
             return Err("the frame bridge did not check in with main".into());
         }
@@ -683,7 +704,7 @@ impl Thread {
         stats.surfaces_sent += u64::from(spec.count);
         drop(stats);
         let remote = if self.config.remote_layer {
-            self.make_remote(key, spec)
+            self.make_remote(key, spec, carried)
         } else {
             None
         };
@@ -697,31 +718,55 @@ impl Thread {
         })
     }
 
-    /// The C′ prototype: a remote layer for `spec`, announced to main.
-    fn make_remote(&mut self, key: Key, spec: PoolSpec) -> Option<RemoteLayer> {
+    /// The C′ prototype: a remote layer for `spec`, announced to main. The
+    /// previous pool's layer, when there is one, is moved to the new size
+    /// and format and keeps its context.
+    fn make_remote(
+        &mut self,
+        key: Key,
+        spec: PoolSpec,
+        carried: Option<RemoteLayer>,
+    ) -> Option<RemoteLayer> {
         let (scale, space) = self
             .views
             .get(&key)
             .map(|v| (v.state.device_pixel_ratio, v.state.color_space))?;
-        let device = self
-            .gpu
-            .as_ref()
-            .and_then(|g| raw_metal_device(&g.device))?;
-        let made = RemoteLayer::new(device, spec.size, scale, spec.format, space)
-            .map_err(|e| e.to_string())
-            .and_then(|layer| {
-                let bridge = self.bridge.as_ref().ok_or("no bridge")?;
-                bridge
-                    .remote_layer(
-                        key.0.0,
-                        spec.generation,
-                        layer.context_id(),
-                        (spec.size.width, spec.size.height),
-                        (scale * 1000.0).round() as u32,
-                    )
-                    .map_err(|e| e.to_string())?;
-                Ok(layer)
-            });
+        let reused = carried.and_then(|mut layer| {
+            match layer.reconfigure(spec.size, scale, spec.format, space) {
+                Ok(()) => Some(layer),
+                Err(error) => {
+                    self.log(
+                        LogLevel::Warn,
+                        format!("frame bridge: remote layer not reused (C′ prototype): {error}"),
+                    );
+                    None
+                }
+            }
+        });
+        let made = match reused {
+            Some(layer) => Ok(layer),
+            None => {
+                let device = self
+                    .gpu
+                    .as_ref()
+                    .and_then(|g| raw_metal_device(&g.device))?;
+                RemoteLayer::new(device, spec.size, scale, spec.format, space)
+                    .map_err(|e| e.to_string())
+            }
+        };
+        let made = made.and_then(|layer| {
+            let bridge = self.bridge.as_ref().ok_or("no bridge")?;
+            bridge
+                .remote_layer(
+                    key.0.0,
+                    spec.generation,
+                    layer.context_id(),
+                    (spec.size.width, spec.size.height),
+                    (scale * 1000.0).round() as u32,
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(layer)
+        });
         match made {
             Ok(layer) => {
                 self.log(
