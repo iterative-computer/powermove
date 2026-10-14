@@ -15,7 +15,8 @@ the authority.
 | Feature | Status | Parity evidence |
 |---|---|---|
 | Solid layers (`d.radius` ignored, as level 1) | Supported | Corpus `layers/solid`, `render/*`: exact |
-| Image layers (PNG, JPEG, WebP, AVIF, HEIC, TIFF, OpenEXR stills; sRGB and Display P3 profiles) | Supported | Corpus `media/still-*`: exact; transparent float frames 0 CV |
+| Image layers in the tested still classes (below): 8-bit PNG, gray JPEG, opaque WebP, 8-bit opaque sRGB HEIF, 8-bit opaque untagged TIFF | Supported | Corpus `render/still-*` (detailed content): ≤ 1 CV, 100% within 1, transparent frames ≤ 0.62 CV; `media/still-*` fixtures: exact |
+| Other stills (Y′CbCr JPEG, Display P3, 16-bit PNG, WebP with alpha, AVIF, GIF, BMP, ICO, OpenEXR, DPX, float or deep TIFF) | Routed | Measured differences below; `tests/stills.rs` |
 | Video layers (pm-media decode service, zero-copy decode-in) | Supported for progressive, square-pixel, unrotated, SDR sources with Rec.709 or BT.601 primaries | Corpus `media/*`, `retiming/video`, `render/video`: within 1 CV on patch interiors (video class) |
 | Transforms (position, anchor, scale, rotation, skew, parenting, size anchors), opacity | Supported, today's sampling (no mipmaps, bilinear, hard UV edges), shared quad edges | Corpus `render/transforms`: ≤ 1 CV, 100% within 1 |
 | Normal blending (premultiplied source-over) | Supported | All of the above |
@@ -86,6 +87,64 @@ premultiplied source-over.
   and for the depth and id surface. A group boundary renders only the region.
 - 3D layers render at the full output size and are drawn as screen-space
   quads; their pass does not shrink to a region yet.
+
+## Image classes
+
+`pm_render::stills` decides whether a still is drawn, from the decoded facts
+and a header parse (JPEG frame type and components, PNG color chunks, WebP
+chunks). A class is drawn only if it matched the legacy renderer on the
+`render/still-*` corpus cases: generated stills with smooth ramps, saturated
+5 × 3 checkers (chroma edges at every subsampling phase), one-pixel lines,
+and ring patterns, drawn 1:1 on texel centers and again minified and
+rotated (`engine/corpus/src/stills.ts`; WebP, AVIF, and HEIC are encoded
+with `cwebp` and `sips` from generated PNGs). Measured 2026-10-14 against
+Chromium 152 (capture `render-20261014-084744-e5791e0a`):
+
+| Class | Frame (≤ 1 CV / max) | Transparent | Routing |
+|---|---|---|---|
+| PNG 8-bit gray and alpha (Adam7) | 100% / 1 | 0.62 CV | Drawn |
+| PNG 8-bit indexed with `tRNS` | 100% / 1 | 0.50 CV | Drawn |
+| Gray JPEG | 100% / 1 | | Drawn |
+| HEIC 8-bit sRGB | 100% / 1 | | Drawn |
+| WebP lossy, opaque | 100% / 1 | | Drawn |
+| Fixture PNG, WebP, HEIC, TIFF (flat colors) | exact | 0 CV | Drawn |
+| Y′CbCr JPEG 4:4:4 / 4:2:0 / 4:2:2 (baseline, progressive, FFmpeg layouts, EXIF orientation 6) | 99.67% / 3; 90.5% / 4; 96.4% / 26; orientation 90.4% / 24 | | Routed |
+| Display P3 PNG, JPEG, HEIC | 99.87% / 83 | | Routed |
+| PNG 16-bit RGBA | 99.66% / 2 | 1.99 CV | Routed |
+| WebP lossless or lossy with alpha | 99.998–100% / 1–2 | 1.12 CV | Routed |
+| AVIF (ImageIO) | 68.6% / 94 | | Routed |
+
+Causes, measured:
+
+- **Y′CbCr JPEG.** pm-media decodes JPEG with zune-jpeg (the `image`
+  crate); Chromium uses libjpeg-turbo (islow IDCT, fancy upsampling).
+  `djpeg` from libjpeg-turbo 3.2 reproduces the legacy 1:1 regions of the
+  4:4:4, 4:2:0, and 4:2:2 cases exactly (0 CV, every pixel), and the
+  orientation-6 case after a 90° clockwise rotation, so EXIF orientation is
+  read the same way and the difference is the decoder. Gray JPEG is within
+  1 CV. Drawing Y′CbCr JPEG needs pm-media to decode JPEG with
+  libjpeg-turbo (pm-media lane).
+- **Display P3.** On texel centers the converted values are within 1 CV of
+  Chromium's (PNG, HEIC; JPEG adds the decoder difference). Section 9
+  converts "in float, relative colorimetric, no clip until output", while
+  Chromium clips to sRGB at decode, so bilinear filtering across
+  out-of-gamut colors differs by up to 83 CV on the minified copy. Matching
+  today's look needs a clip at the source pass in Standard, which section 9
+  rules out, or an appendix A entry accepting the difference: a decision for
+  the plan owner. Until then P3 stills are routed.
+- **16-bit PNG.** Chromium reduces to 8 bits and premultiplies in 8 bits;
+  the engine keeps 16 bits.
+- **WebP with alpha.** libwebp's premultiplication rounding: 1.12 CV against
+  the alpha class's 1 CV; opaque frames are within 1 CV.
+- **AVIF.** pm-media reads AVIF through ImageIO; Chromium through libavif and
+  dav1d; up to 94 CV on the chroma checker.
+
+Also routed, not compared: BMP, ICO, static GIF, OpenEXR, DPX, float and
+deeper-than-8-bit or alpha or ICC-tagged TIFF, deeper-than-8-bit or alpha
+HEIF, sub-8-bit PNG, PNG `gAMA` or `cHRM` without an `sRGB` chunk or ICC
+profile (Chromium honors them, pm-media does not), PNG `cICP`, `mDCv`,
+`cLLi`, WebP with an ICC profile, RGB, CMYK, arithmetic, lossless, and
+12-bit JPEG, ICC profiles other than sRGB, and animated images.
 
 ## Color
 
@@ -218,8 +277,13 @@ precomp layer and +inf depth; 3D inside a precomp has no depth here yet.
 
 `unsupported(document, composition)` lists every feature of a composition and
 everything it nests that this renderer does not draw; `unsupported_with_media`
-also opens media headers (animated images, color profiles, interlaced,
-rotated, non-square, HDR, or wide-gamut video). The answer is static and
+also opens media headers (the still classes above, animated images, color
+profiles, interlaced, rotated, non-square, HDR, or wide-gamut video). The
+static check knows only the recorded container (it lists JPEG, AVIF, and
+image containers outside the classes above by format or extension), so it
+cannot see a 16-bit PNG, a P3 profile, an animated GIF or WebP, or a rotated
+video: routing consumers (the tracer and export lanes) must call
+`unsupported_with_media`, or route on `RenderError::Unsupported`. The answer is static and
 conservative, so one routing decision per document revision holds at every
 frame: anything animatable that could need an unsupported path at some time is
 listed (an animated blend mode, a material opacity channel that is not a
@@ -232,16 +296,20 @@ color; `requiresEngine`; Blender rendering; SVG images; animated images and
 sequences; unreadable media; the 3D limits above; request options (view
 override, 32-bit precision on a device without `rgba32float` filtering and
 blending). A render that still meets something unsupported fails with
-`RenderError::Unsupported` rather than drawing it wrong.
+`RenderError::Unsupported` rather than drawing it wrong; `render_into` then
+leaves the caller's targets untouched (the presenter keeps its last frame).
+Media caches key video sources and stills by file size and modification
+time, so a file replaced at the same path is reopened.
 
 ## Tests and measurements
 
 Measured on an Apple M4 Max (macOS 27), wgpu 30.0.1 on Metal, Chromium 151
-(ANGLE on Metal) for references, 2026-10-13.
+(ANGLE on Metal) for references, 2026-10-13; the corpus row and the still
+classes re-measured 2026-10-14 against Chromium 152.
 
 | Test | What | Result |
 |---|---|---|
-| `tests/corpus.rs` | Every supported project of the newest `v1-*` and `render-*` captures, Standard class (≤ 1 CV for 99.9%, ≤ 4 max), video class (≤ 2 CV on patch interiors), alpha class (transparent float frames within 1 CV), 3D class on 3D pixels | 64 frames, 0 failures; every 3D frame within 1 CV everywhere |
+| `tests/corpus.rs` | Every supported project of the newest `v1-*` and `render-*` captures, Standard class (≤ 1 CV for 99.9%, ≤ 4 max), video class (≤ 2 CV on patch interiors), alpha class (transparent float frames within 1 CV), 3D class on 3D pixels | 68 frames, 0 failures (`v1-20261012-230504`, `render-20261014-084744`); every 3D frame within 1 CV everywhere; the routing of each `render/still-*` project is pinned |
 | `tests/scene3d.rs` | 12 scenes against three.js renders through the production `SceneRuntime` (`tools/three-ref`), section 2 3D bar | All pass: 100% within 2 CV, max 1 CV, SSIM ≥ 0.99998 (safe math) |
 | `tests/scene3d.rs` | Uniform values against the recorded draws | 858 values equal in f32 |
 | `tests/three_programs.rs` | Generated program sources against WebGL's | 12 of 12 byte-identical |
@@ -250,7 +318,8 @@ Measured on an Apple M4 Max (macOS 27), wgpu 30.0.1 on Metal, Chromium 151
 | `tests/color.rs` | Pipeline transparency (amendment 8): ProRes 4444 XQ → `y416`, ProRes 422 HQ → `v216`, 32-bit, against VideoToolbox clipped to the codable range | 688,500 and 345,600 samples, 0 differ (color under α = 0 not compared) |
 | `tests/color.rs` | Invariant (1), 4:2:0: H.264 → `420v` | 259,200 samples: luma and chroma exact |
 | `tests/headless.rs` | Determinism: every supported feature in one composition, 3 times, 16- and 32-bit, two renderers | Byte-identical |
-| `tests/headless.rs` | Regions, depth and id surface, capability list, pass-through, `render_into`, contract 2 | Pass |
+| `tests/headless.rs` | Regions, depth and id surface, capability list, pass-through, `render_into`, contract 2, exec-time unsupported media leaves the target untouched, a replaced video is reopened | Pass |
+| `tests/stills.rs`, `stills::tests` | Untested still classes (BMP, GIF, ICO, EXR, DPX, 16-bit and alpha TIFF, 1-bit PNG, `gAMA`, `cICP`, Y′CbCr JPEG from FFmpeg) are unsupported; header classes | Pass |
 | `pm-gpu/tests/msl_math.rs` | Safe math is in effect | Pass |
 | `frame_time_at_1080p` (ignored) | The everything composition at 1920 × 1080, release | 3.06 ms (16-bit, p95 4.69), 2.48 ms (32-bit, p95 2.76) median per frame, plan and GPU |
 
@@ -258,7 +327,12 @@ The ProRes and H.264 sources come from the media corpus
 (`~/Library/Caches/powermove-engine/media-corpus`, `PM_MEDIA_CORPUS`); the
 corpus, render, and three.js captures from `~/Library/Application Support/Powermove
 Engine Corpus/` (`PM_ENGINE_CORPUS`, `PM_THREE_REF`). Without them those tests
-report and pass vacuously. The corpus ProRes files are tagged BT.601
+report and pass vacuously.
+
+`render/3d-precomp` has 3D only inside a precomp, which the depth and id
+surface does not cover (gaps), so its object mask is empty and its SSIM
+prints NaN: every pixel there is judged by the stricter Standard class
+(max 1 CV). The corpus ProRes files are tagged BT.601
 (`smpte170m`); the transparency test reads them as BT.709 so source and Rec.709
 output share the matrix.
 
@@ -272,7 +346,8 @@ output share the matrix.
   `tests/fixtures/three-programs.json`.
 - `bun engine/crates/pm-geom3d/tools/three-primitives.ts`: primitive hashes.
 - `engine/corpus/src/projects/render.ts`: the render corpus cases (`--only
-  render/ --label render`), including 3D in a precomp, a parented rig with an
+  render/ --label render`; the still cases need `cwebp` from libwebp and
+  macOS `sips` at generation), including 3D in a precomp, a parented rig with an
   orthographic rolled camera, the studio sun with a background and a faded
   layer, and a scaled 3D capture.
 
@@ -287,6 +362,20 @@ output share the matrix.
   not computed yet beyond `pm_color::key`.
 - The GPU encoder-input pass of the export lane must adopt `VERTICAL_420`
   where it decimates 4:2:0 (the CPU reference already does).
+- Decision pending on `VERTICAL_420` for rendered frames: it is the exact
+  inverse of linear upsampling (why invariant (1) holds on the rendered
+  path), but as a decimation filter for content not upsampled from 4:2:0 its
+  gain is about 1.41 at the decimated Nyquist frequency and it undershoots a
+  hard chroma step by 25% of the step, so rendered graphics in H.264 exports
+  can ring. Alternative: a low-pass filter for rendered frames with
+  invariant (1) carried by pass-through (section 9's condition).
+- Standard invariant (3) (a "Rec.709 (QuickTime and Safari)" export played
+  through `AVPlayerItemVideoOutput` matches the viewer within ΔE2000 1.0) is
+  not tested here; only spike S2 measured it. `pm-color` writes the 1-13-1
+  tags (amendment 7); the end-to-end test belongs with the export lane.
+- Stills routed by the image classes above: Y′CbCr JPEG (needs a
+  libjpeg-turbo decode in pm-media), Display P3 (needs the section 9 versus
+  legacy clipping decision), 16-bit PNG, WebP with alpha, AVIF.
 
 ## Changes outside the lane
 
@@ -294,3 +383,7 @@ output share the matrix.
   decimates with `VERTICAL_420` (above); its tests pass.
 - `engine/corpus/src/projects/render.ts` (new) and `index.ts`: the render
   corpus cases.
+- `engine/corpus/src/stills.ts` (new), `media.ts`, and
+  `test/corpus.test.ts`: the generated stills (a dependency-free JPEG and
+  PNG encoder, a Display P3 ICC profile, and WebP, AVIF, and HEIC derived
+  with `cwebp` and `sips`).
