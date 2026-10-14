@@ -274,9 +274,11 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
         if (isLinked(value)) return null;
         const saved = await legacy.getForSave?.(value);
         if (saved) return saved;
-        const key = storageKeyOf(value);
-        const record = key ? await host.record(key).catch(() => null) : null;
-        const blob = record ? await readKey(record.key, record.type) : null;
+        /* Media the new engine imported lives only in the store. Its key may
+           name other content that shares the sampled fingerprint, so the
+           asset's own content hash picks the bytes, as with the flag on. */
+        const record = await recordOf(value).catch(() => null);
+        const blob = record ? await readHash(record.hash, record.type) : null;
         return blob && record ? { blob, revision: record.revision } : null;
       }
       // Linked originals are not stored in the desktop project file.

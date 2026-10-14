@@ -196,6 +196,26 @@ describe('content identity', () => {
     expect(await bytesOf(await store.get(first))).toEqual(data(64, 1));
   });
 
+  it('saves each asset by its content hash with the flag off too', async () => {
+    const { host, keys } = fakeHost();
+    const { legacy } = fakeLegacy();
+    // Imported with the flag on: the shared key ends up naming the second file.
+    const on = createHostMediaStore({ host, legacy, enabled: true, sourcePath: () => null });
+    const a = new Blob([data(64, 1)]), b = new Blob([data(64, 2)]);
+    await on.put('a1', a, { storageKey: 'media:v2:same' });
+    await on.put('a2', b, { storageKey: 'media:v2:same' });
+    const first = { id: 'a1', storageKey: 'media:v2:same', contentHash: blake3Hex(data(64, 1)) };
+    const second = { id: 'a2', storageKey: 'media:v2:same', contentHash: blake3Hex(data(64, 2)) };
+    expect(keys.get('media:v2:same')!.hash).toBe(second.contentHash);
+    // The flag off, IndexedDB has neither; Save must still embed each file's own bytes.
+    const off = createHostMediaStore({ host, legacy, enabled: false, sourcePath: () => null });
+    expect(await bytesOf((await off.getForSave(first))!.blob)).toEqual(data(64, 1));
+    expect(await bytesOf((await off.getForSave(second))!.blob)).toEqual(data(64, 2));
+    expect(await bytesOf(await off.get(first))).toEqual(data(64, 1));
+    // Content that is gone is not replaced by whatever the key names.
+    expect(await off.getForSave({ id: 'a3', storageKey: 'media:v2:same', contentHash: blake3Hex(data(64, 3)) })).toBeNull();
+  });
+
   it('never reads another file through a shared key when its own content is gone', async () => {
     const { host } = fakeHost();
     const store = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
