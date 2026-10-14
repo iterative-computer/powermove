@@ -1,5 +1,6 @@
 import type { PMRegistry } from '../legacy/registry';
 import { applyPanelSize, findPanel, panelMinHeight, setPanelCollapsed, type DockSpec, type PanelSpec, type Workspace } from './model';
+import { syncPanelTabs } from './tabs';
 
 export type SelectionSnapshot = {
   active: HTMLElement | null;
@@ -99,6 +100,8 @@ export type PanelSlotParams = {
   id: string;
   spec: PanelSpec;
   dock: DockSpec;
+  /** Panel ids of the slot's tabs, `id` among them; omitted for an untabbed slot. */
+  tabs?: string[];
 };
 
 export function panelSlot(node: HTMLElement, initial: PanelSlotParams) {
@@ -113,6 +116,7 @@ export function panelSlot(node: HTMLElement, initial: PanelSlotParams) {
     inst.el.style.minHeight = `${panelMinHeight(params.spec, inst.def)}px`;
     inst.el.querySelector('.ptitle')?.replaceChildren(params.spec.title || inst.def.title);
     setPanelCollapsed(params.PM, params.id, !!findPanel(params.PM.Layout.ws as Workspace, params.id)?.spec.collapsed, false);
+    syncPanelTabs(params.PM, params.id, params.tabs ?? [params.id]);
     movePreservingFocus(inst.el, node);
   };
 
@@ -127,7 +131,10 @@ export function panelSlot(node: HTMLElement, initial: PanelSlotParams) {
       if (element?.parentElement !== node) return;
       const current = params.PM.Layout.ws && findPanel(params.PM.Layout.ws as Workspace, params.id);
       if (current && current.dock.id !== params.dock.id) stagePanelMove(params.id, element);
-      else parkPanel(params.id, element);
+      else {
+        syncPanelTabs(params.PM, params.id, [params.id]);
+        parkPanel(params.id, element);
+      }
     }
   };
 }

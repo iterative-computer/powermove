@@ -886,6 +886,10 @@ export interface WorkspaceAPI {
   removePanel(id: string): void;
   hidePanel(id: string): boolean;
   restorePanel(id: string): boolean;
+  /** Stacks panel `id` as a tab in the slot holding `targetId`, before the tab `beforeId` or last, and shows it. The slot keeps its size. False for the viewer, headless panels, or a missing target. */
+  stackPanel(id: string, targetId: string, beforeId?: string): boolean;
+  /** Brings a stacked panel's tab to front in its group. False when the panel is not a background tab. */
+  showTab(id: string): boolean;
   refresh(id: string): void;
 }
 

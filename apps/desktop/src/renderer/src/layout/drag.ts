@@ -1,5 +1,6 @@
 import type { PMRegistry } from '../legacy/registry';
-import { dockLabel, insertPanel, removePanel, type DockSpec, type PanelSpec, type Workspace } from './model';
+import { dockLabel, findSlot, insertPanel, removePanel, stackPanel, type DockSpec, type PanelSpec, type Workspace } from './model';
+import { canStack, liveTabTargets, resolveTabDrop, type TabDrop, type TabDropTarget } from './tabs';
 
 type RectTarget = { id: string; el?: HTMLElement; virtual?: boolean; rect: DOMRect; panels: Array<{ el: HTMLElement; rect: DOMRect }> };
 type PreviewTarget = { key: string };
@@ -23,13 +24,17 @@ export function animatePanelLayout(previous: Map<string, DOMRect>): void {
     const dx = before.left - after.left;
     const dy = before.top - after.top;
     if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
-    node.animate(
+    const animation = node.animate(
       [
         { transform: `translate3d(${Math.round(dx)}px,${Math.round(dy)}px,0)` },
         { transform: 'translate3d(0,0,0)' }
       ],
       { duration: 180, easing: 'cubic-bezier(.22,1,.36,1)' }
     );
+    /* The dock clips panels that cross its edge (rounded-scroll), measuring
+       them mid-flight; nothing resizes when the slide ends, so ask it to
+       measure the settled panel once more. */
+    void animation?.finished?.then(() => node.closest('.dock')?.dispatchEvent(new Event('scroll')), () => {});
   });
 }
 
@@ -69,6 +74,7 @@ function placePreview(
   const dock = docks.find((item) => item.id === target.dockId);
   if (!dock) return;
   const rect = dock.rect;
+  preview.classList.remove('tab-edge');
   if (dock.virtual && dock.id === 'bottom') {
     const height = Math.min(300, Math.max(120, Math.round(rect.height * 2.5)));
     preview.classList.add('dock-edge');
@@ -99,9 +105,41 @@ function placePreview(
   }
 }
 
+function placeTabPreview(preview: HTMLElement, target: TabDropTarget, drop: TabDrop, previewTarget: PreviewTarget): void {
+  if (drop.zone === 'center') {
+    preview.classList.remove('tab-edge');
+    preview.classList.add('dock-edge');
+    preview.style.left = `${Math.round(target.body.left)}px`;
+    preview.style.top = `${Math.round(target.header.top)}px`;
+    preview.style.width = `${Math.round(target.body.right - target.body.left)}px`;
+    preview.style.height = `${Math.round(target.body.bottom - target.header.top)}px`;
+  } else {
+    preview.classList.remove('dock-edge');
+    preview.classList.add('tab-edge');
+    preview.style.left = `${Math.round(drop.x - 1)}px`;
+    preview.style.top = `${Math.round(target.header.top + 8)}px`;
+    preview.style.width = '';
+    preview.style.height = `${Math.max(8, Math.round(target.header.bottom - target.header.top - 16))}px`;
+  }
+  retargetPreview(preview, previewTarget, `tabs:${target.id}:${drop.zone}:${drop.beforeId ?? ''}`);
+}
+
 type FloatingDrag = { move(dx: number, dy: number): void; cancel(): void; dockIds: string[] };
 
-export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelSpec, dock: DockSpec, element: HTMLElement, floating?: FloatingDrag): void {
+/**
+ * Drags a panel to another dock position, or onto a panel header or the
+ * middle of a panel to join it as a tab. `onTap` runs for a press released
+ * without dragging.
+ */
+export function beginPanelDrag(
+  PM: PMRegistry,
+  event: PointerEvent,
+  spec: PanelSpec,
+  dock: DockSpec,
+  element: HTMLElement,
+  floating?: FloatingDrag,
+  onTap?: () => void
+): void {
   const ghost = document.createElement('div');
   ghost.className = 'panel-ghost';
   const card = document.createElement('div');
@@ -118,11 +156,19 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
   document.body.append(ghost, preview);
   element.classList.add('drag-src');
 
-  const fromIndex = Math.max(0, dock.panels.findIndex((panel) => panel.id === spec.id));
+  /* The source's slot position among the visible slots, which is what drop
+     indexes count. A tab leaving its group always moves, even to its own spot. */
+  const sourceSlot = PM.Layout.ws ? findSlot(PM.Layout.ws as Workspace, spec.id) : null;
+  const tabbed = (sourceSlot?.slot.length ?? 0) > 1;
+  const sourceIds = new Set((sourceSlot?.slot ?? [spec]).map((panel) => panel.id));
+  const fromIndex = Math.max(0, [...document.querySelectorAll<HTMLElement>(`#dock-${CSS.escape(dock.id)} .panel[data-panel]`)]
+    .findIndex((panel) => sourceIds.has(panel.dataset.panel!)));
+  const stacks = !floating && canStack(PM, spec.id);
   let moved = false;
   let frame = 0;
   let pending: PointerEvent | null = null;
-  let dropTarget: { dockId: string; index: number } | null = null;
+  let dropTarget: { dockId: string; index: number; beforeId: string | null } | null = null;
+  let tabDrop: TabDrop | 'same' | null = null;
   const previewTarget: PreviewTarget = { key: '' };
 
   const render = (): void => {
@@ -130,22 +176,35 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
     const next = pending;
     pending = null;
     if (!next) return;
-    const docks = liveTargets(PM).filter(target => !floating || floating.dockIds.includes(target.id));
-    dropTarget = PM.Layout.hitTestDockPlacement(docks, next.clientX, next.clientY);
+    const tabTargets = stacks ? liveTabTargets(PM) : [];
+    tabDrop = stacks ? resolveTabDrop(tabTargets, spec.id, next.clientX, next.clientY) : null;
+    const docks = tabDrop ? [] : liveTargets(PM).filter(target => !floating || floating.dockIds.includes(target.id));
+    const hit = tabDrop ? null : PM.Layout.hitTestDockPlacement(docks, next.clientX, next.clientY) as { dockId: string; index: number } | null;
+    dropTarget = hit && {
+      ...hit,
+      beforeId: docks.find((item) => item.id === hit.dockId)?.panels[hit.index]?.el.dataset.panel ?? null
+    };
     if (floating) ghost.classList.toggle('on', !!dropTarget);
-    if (!dropTarget) {
+    if (tabDrop && tabDrop !== 'same') {
+      const drop = tabDrop;
+      destination.textContent = `Tab with ${PM.PANELS[drop.targetId]?.title || 'panel'}`;
+      placeTabPreview(preview, tabTargets.find((target) => target.id === drop.targetId)!, drop, previewTarget);
+    } else if (!dropTarget) {
       preview.classList.remove('on');
       previewTarget.key = '';
-      destination.textContent = 'Not a drop zone';
+      destination.textContent = tabDrop === 'same' ? 'Already here' : 'Not a drop zone';
     } else {
       const targetDock = docks.find((item) => item.id === dropTarget!.dockId);
       const before = targetDock?.panels[dropTarget.index];
       const after = dropTarget.index > 0 ? targetDock?.panels[dropTarget.index - 1] : undefined;
-      destination.textContent = before
-        ? `Above ${PM.PANELS[before.el.dataset.panel!]?.title || 'panel'}`
-        : after
-          ? `Below ${PM.PANELS[after.el.dataset.panel!]?.title || 'panel'}`
-          : `Place in ${dockLabel(dropTarget.dockId)}`;
+      const own = [before, after].some((panel) => panel && tabbed && sourceIds.has(panel.el.dataset.panel!));
+      destination.textContent = own
+        ? 'Separate tab'
+        : before
+          ? `Above ${PM.PANELS[before.el.dataset.panel!]?.title || 'panel'}`
+          : after
+            ? `Below ${PM.PANELS[after.el.dataset.panel!]?.title || 'panel'}`
+            : `Place in ${dockLabel(dropTarget.dockId)}`;
       placePreview(PM, preview, dropTarget, docks, previewTarget);
     }
     const x = PM.clamp(next.clientX + 12, 8, window.innerWidth - ghost.offsetWidth - 8);
@@ -163,30 +222,51 @@ export function beginPanelDrag(PM: PMRegistry, event: PointerEvent, spec: PanelS
     preview.remove();
     element.classList.remove('drag-src');
     document.body.classList.remove('panel-dragging');
-    if (!moved) return;
+    if (!moved) {
+      if (!cancelled) onTap?.();
+      return;
+    }
     if (cancelled) {
       floating?.cancel();
       if (!floating) PM.toast('Move cancelled');
       return;
     }
+    const title = PM.PANELS[spec.id]?.title || spec.id;
+    if (tabDrop === 'same') return;
+    if (tabDrop) {
+      const { targetId, beforeId } = tabDrop;
+      const previous = panelRects();
+      PM.Layout.rememberPanelOpen?.(spec.id);
+      PM.WS.mutate((workspace: Workspace) => {
+        stackPanel(workspace, spec.id, targetId, beforeId, (id) => canStack(PM, id));
+      });
+      animatePanelLayout(previous);
+      return;
+    }
     if (!dropTarget) {
       if (floating) return;
-      PM.toast(`Drop on a panel or dock to move ${PM.PANELS[spec.id]?.title || spec.id}`);
+      PM.toast(`Drop on a panel or dock to move ${title}`);
       return;
     }
     const index = PM.Layout.resolveDropIndex(dock.id, fromIndex, dropTarget.dockId, dropTarget.index);
-    if (index == null) {
-      PM.toast(`${PM.PANELS[spec.id]?.title || spec.id} is already here`);
+    if (index == null && !tabbed) {
+      PM.toast(`${title} is already here`);
       return;
     }
+    const { dockId, beforeId } = dropTarget;
     const previous = panelRects();
     PM.Layout.rememberPanelOpen?.(spec.id);
     PM.WS.mutate((workspace: Workspace) => {
+      /* Drop indexes count visible slots; insert before the slot the pointer
+         was above, found by a panel that stays in it after the move. */
+      const anchor = beforeId == null ? null
+        : findSlot(workspace, beforeId)?.slot.find((panel) => panel.id !== spec.id) ?? null;
       removePanel(workspace, spec.id);
-      insertPanel(workspace, spec, dropTarget!.dockId, index);
+      const target = anchor && findSlot(workspace, anchor.id);
+      insertPanel(workspace, spec, dockId, target ? target.dock.panels.indexOf(target.slot[0]!) : undefined);
     });
     animatePanelLayout(previous);
-    PM.toast(`Moved ${PM.PANELS[spec.id]?.title || spec.id} → ${dockLabel(dropTarget.dockId)}`);
+    PM.toast(`Moved ${title} → ${dockLabel(dockId)}`);
   };
   const drag = PM.drag(event, {
     cursor: 'grabbing',

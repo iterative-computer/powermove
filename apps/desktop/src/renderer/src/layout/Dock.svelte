@@ -12,12 +12,15 @@
     PM,
     dock,
     specs,
+    slots = [],
     tick,
     oncommit
   }: {
     PM: PMRegistry;
     dock: DockSpec;
     specs: PanelSpec[];
+    /** Each slot's tabs, aligned with `specs`; a missing entry is an untabbed panel. */
+    slots?: PanelSpec[][];
     tick: number;
     oncommit: () => void;
   } = $props();
@@ -51,7 +54,7 @@
       class="panel-slot"
       data-panel-slot={spec.id}
       style="display:contents"
-      use:panelSlot={{ PM, id: spec.id, spec, dock }}
+      use:panelSlot={{ PM, id: spec.id, spec, dock, tabs: (slots[index] ?? [spec]).map((tab) => tab.id) }}
     ></div>
   {/each}
   {#if ghost && ghostSlot === specs.length}

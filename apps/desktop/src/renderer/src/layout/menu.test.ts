@@ -113,6 +113,25 @@ describe('panel context menu contributions', () => {
     ]);
   });
 
+  it('offers tab actions for a tab and stacking with neighbours for an untabbed panel', () => {
+    const { PM, open } = harness();
+    const dock = PM.Layout.ws.layout.docks[0] as DockSpec;
+    dock.panels.push({ id: 'fx' }, { id: 'effects' });
+    PM.PANELS.fx = { id: 'fx', title: 'Effects' };
+    PM.PANELS.effects = { id: 'effects', title: 'Layer Effects' };
+    const labels = (items: MenuContribution[]) => items.map((item) => item === '-' ? item : 'header' in item ? item.header : item.label);
+
+    expect(labels(open())).toEqual(['Notes', 'Pop out to window', 'Stack with Effects', 'Close panel']);
+    const stack = open().find((item) => item !== '-' && 'label' in item && item.label === 'Stack with Effects');
+    if (stack && stack !== '-' && 'run' in stack) stack.run?.();
+    expect(dock.panels.map((panel) => [panel.id, panel.group ?? '', !!panel.active])).toEqual([
+      ['fx', 'tabs-1', false], ['notes', 'tabs-1', true], ['effects', '', false]
+    ]);
+
+    openPanelMenu(PM, dock.panels[1]!, dock, document.body, { x: 0, y: 0 });
+    expect(labels(PM.menu.mock.calls.at(-1)[1])).toEqual(['Notes', 'Pop out to window', 'Next tab', 'Move tab left', 'Separate tab', 'Close tab']);
+  });
+
   it('does not offer Close panel for the viewer', () => {
     const { open } = harness('viewer');
     const items = open();

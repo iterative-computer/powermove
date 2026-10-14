@@ -465,7 +465,7 @@ in-realm API after the person installing the extension accepts the trust dialog.
 - **uiState** — layer/FX disclosure, key handles, timeline reveal state, and shader metadata via `getShaderMeta(layer)` / `setShaderMeta(layer, patch)`.
 - **ui** — API-backed controls, overlays, menus, pointer drag, parent picking, shader editor opening, edit/history-backed `gesture` construction, and `openExternal(url)` for https links.
 - **dnd** — canonical asset/FX MIME payloads, drag detection/parsing, live media drag state, and FX drop application.
-- **workspace** — active workspace mutation plus indexed panel add/move/hide/restore/refresh operations.
+- **workspace** — active workspace mutation plus indexed panel add/move/hide/restore/refresh operations. Panels can share one slot as tabs: `stackPanel(id, targetId, beforeId?)` adds `id` to the slot holding `targetId` (before that tab, or last) and shows it, keeping the slot's size; `showTab(id)` brings a background tab to front. Tabbed panels keep their own entry in `current().layout.docks[].panels`, marked with a shared `group` key and `active` on the shown one, so `hasPanel`, `hidePanel` and `removePanel` work on them by id. The viewer and headless panels cannot be tabs. `panels.open(id)` on a background tab brings it to front.
 - **util** — numeric interpolation/snapping, timecode, ids, and colour conversion.
 - **ease** — easing preset lookup and handle-name matching.
 - **space3d** — PM-bound 3D transforms, perspective planes, projection, inversion, and containment.

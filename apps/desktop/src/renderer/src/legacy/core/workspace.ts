@@ -1,6 +1,6 @@
 /* Ported from js/core/workspace.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
-import { ensureDockFill, keepPanelAtSetHeight } from '../../layout/model';
+import { ensureDockFill, keepPanelAtSetHeight, tidyTabGroups } from '../../layout/model';
 import { timelineService } from './services';
 
 export function install(PM: PMRegistry): void {
@@ -319,9 +319,12 @@ function normalizeWorkspace(workspace: any, fallback?: any) {
       if (finite(q.size)) clean.size = PM.clamp(q.size, 56, 1600);
       if (finite(q.min)) clean.min = PM.clamp(q.min, 32, 800);
       if (text(q.title)) clean.title = text(q.title);
+      if (/^[\w.:-]{1,64}$/.test(text(q.group))) clean.group = text(q.group);
+      if (clean.group && q.active === true) clean.active = true;
       keepPanelAtSetHeight(clean);
       return clean;
     }).filter(Boolean);
+    tidyTabGroups(panels, (id: string) => !PM.PANELS?.[id]?.headless);
     const out: any = { id: text(d.id, `dock-${index + 1}`), panels };
     /* Fill the dock, preferring a neighbour over the agent so a shared
        conversation panel keeps its saved height. */

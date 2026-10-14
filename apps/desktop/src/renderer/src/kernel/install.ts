@@ -99,12 +99,16 @@ import {
   writeAssetDrag
 } from '../fx/drop';
 import {
+  activateTab,
+  activeTab,
   findPanel,
+  findSlot,
   hasPanel,
   hidePanel,
   insertPanel,
   removePanel,
   restorePanel,
+  stackPanel,
   type Workspace as LayoutWorkspace
 } from '../layout/model';
 import { bridge as hostBridge } from './bridge';
@@ -447,6 +451,19 @@ function makeWorkspace(PM: LegacyPM): WorkspaceAPI {
       mutate((workspace) => { restored = restorePanel(workspace, id); });
       return restored;
     },
+    stackPanel: (id, targetId, beforeId) => {
+      let stacked = false;
+      const canStack = (panel: string) => !!PM?.PANELS?.[panel] && !PM.PANELS[panel].headless;
+      mutate((workspace) => { stacked = stackPanel(workspace, id, targetId, beforeId ?? null, canStack); });
+      return stacked;
+    },
+    showTab: (id) => {
+      const workspace = current() as unknown as LayoutWorkspace | null;
+      const found = workspace?.layout?.docks ? findSlot(workspace, id) : null;
+      if (!found || found.slot.length < 2 || activeTab(found.slot) === found.spec) return false;
+      mutate((draft) => { activateTab(draft, id); }, { inPlace: true });
+      return true;
+    },
     refresh: (id) => PM?.Layout?.refresh?.(id)
   } as WorkspaceAPI;
 }
@@ -634,6 +651,13 @@ function makePanelsBackend(PM: LegacyPM, kernel: Kernel): PanelsBackend {
             insertPanel(workspace as LayoutWorkspace, { id }, dock ?? 'center', options.index);
           } else PM?.Layout?.addPanel?.(workspace, id, dock ?? 'center');
         });
+      } else {
+        /* Opening a panel that waits behind another tab brings it to front. */
+        const workspace = current() as LayoutWorkspace | undefined;
+        const found = workspace?.layout?.docks ? findSlot(workspace, id) : null;
+        if (found && found.slot.length > 1 && activeTab(found.slot) !== found.spec) {
+          PM?.WS?.mutate?.((workspace: LayoutWorkspace) => { activateTab(workspace, id); }, { inPlace: true });
+        }
       }
       PM?.Layout?.refresh?.(id);
     },

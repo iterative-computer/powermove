@@ -10,6 +10,7 @@ import {
   visibleDockPlan
 } from './geometry';
 import {
+  activateTab,
   addPanel,
   ensureDock,
   findPanel,
@@ -20,10 +21,12 @@ import {
   removePanel,
   restorePanel,
   setPanelCollapsed,
+  stackPanel,
   type Workspace
 } from './model';
 import { installPanelPopouts } from './popout';
 import { syncPanelMoveHandle } from './panel';
+import { canStack } from './tabs';
 import { applyPanelVisibility, preferredPanelVisibility, rememberPanelVisibility } from './panel-visibility';
 
 type LayoutInstance = ReturnType<typeof mount> & {
@@ -115,7 +118,10 @@ export function installSvelteLayout(PM: PMRegistry): void {
     movePanelBy,
     ensureDock,
     hasPanel,
-    findPanel
+    findPanel,
+    stackPanel: (workspace: Workspace, id: string, targetId: string, beforeId: string | null = null) =>
+      stackPanel(workspace, id, targetId, beforeId, (panel) => canStack(PM, panel)),
+    activateTab
   };
   PM.Layout = layout;
   let applying = false;
