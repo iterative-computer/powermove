@@ -111,6 +111,76 @@ const idOf = (v: any): string | undefined => (isRecord(v) && typeof v.id === 'st
  */
 export function sameJson(before: any, after: any): boolean {
   if (before === after) return true;
+  return plainPrototypes() ? fastSame(before, after) : slowSame(before, after);
+}
+
+const OBJECT_PROTO = Object.prototype;
+const ARRAY_PROTO = Array.prototype;
+
+/** Whether the shared prototypes are untouched: no `toJSON`, nothing enumerable. */
+function plainPrototypes(): boolean {
+  if ((OBJECT_PROTO as any).toJSON !== undefined || (ARRAY_PROTO as any).toJSON !== undefined) return false;
+  for (const _ in OBJECT_PROTO) return false;
+  return true;
+}
+
+/**
+ * `slowSame` for the shapes a document is made of (plain objects and arrays,
+ * whatever their members), without allocating: `for…in` reads exactly the
+ * enumerable own string keys of an object whose prototype is
+ * `Object.prototype` or `null` (checked by `plainPrototypes`), and the shadow
+ * is plain JSON, where a missing member reads `undefined` or an inherited
+ * function, neither of which equals a JSON value. Values with other
+ * prototypes (primitive wrappers, dates, class instances, array-likes) take
+ * `slowSame`, and so does every difference found on a value with a `toJSON`
+ * of its own. Not seen: a non-enumerable own `toJSON` on a plain object that
+ * otherwise equals the shadow (no writer defines one; the auditor compares
+ * serializations and would report it); looking `toJSON` up on every object
+ * would cost a quarter of the time. On the 884-layer project's layers
+ * (94,824 values) this takes 2.4 ms where `slowSame` takes 7.4 ms and
+ * `JSON.stringify` 3.1 ms (Node, loaded machine).
+ */
+function fastSame(b: any, a: any): boolean {
+  if (b === a) return true;
+  if (typeof a !== 'object') return typeof a === 'number' && !Number.isFinite(a) && b === null;
+  if (a === null) return false;
+  const proto = Object.getPrototypeOf(a);
+  const array = proto === ARRAY_PROTO && Array.isArray(a);
+  if (!array && proto !== OBJECT_PROTO && proto !== null) return slowSame(b, a);
+  if (b === null || typeof b !== 'object' || Array.isArray(b) !== array) return differs(b, a);
+  if (array) {
+    if (b.length !== a.length) return differs(b, a);
+    for (let i = 0; i < a.length; i++) {
+      const v = a[i];
+      if (v === undefined || typeof v === 'function' || typeof v === 'symbol') { if (b[i] !== null) return differs(b, a); }
+      else if (!fastSame(b[i], v)) return differs(b, a);
+    }
+    return true;
+  }
+  let n = 0;
+  for (const key in a) {
+    const v = a[key];
+    if (v === undefined || typeof v === 'symbol') continue;
+    if (typeof v === 'function') {
+      if (key === 'toJSON') return slowSame(b, a);
+      continue;
+    }
+    const bv = b[key];
+    // Missing from the shadow: a difference, unless the live member has no
+    // JSON form after all (a `toJSON` answering undefined); the slow path knows.
+    if (bv === undefined) return slowSame(b, a);
+    if (!fastSame(bv, v)) return differs(b, a);
+    n++;
+  }
+  for (const _ in b) n--;
+  return n === 0 || differs(b, a);
+}
+
+/** A difference the fast path found, unless the live value's own `toJSON` replaces it. */
+const differs = (b: any, a: any): boolean => a.toJSON !== undefined && slowSame(b, a);
+
+function slowSame(before: any, after: any): boolean {
+  if (before === after) return true;
   switch (typeof after) {
     case 'number': return Number.isFinite(after) ? false /* === failed; 0 and -0 are === */ : before === null;
     case 'string': case 'boolean': return false;

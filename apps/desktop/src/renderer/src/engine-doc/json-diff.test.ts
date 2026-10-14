@@ -53,3 +53,40 @@ describe('diffJsonOps', () => {
     expect(sameJson({ constructor: 1 }, { valueOf: 1 })).toBe(false);
   });
 });
+
+describe('sameJson fast path', () => {
+  it('agrees with the full comparison on document shapes and on the exceptions', () => {
+    const accessor: any = { t: 0, v: 1 };
+    Object.defineProperty(accessor, 'eo', { enumerable: false, get: () => [0.3, 0] });
+    const absent = { toJSON: () => undefined };
+    const proto = Object.create({ inherited: 1 });
+    proto.own = 1;
+    const cases: Array<[any, any, boolean]> = [
+      [{ a: 1, b: [1, 2] }, { b: [1, 2], a: 1 }, true],
+      [{ a: 1 }, { a: 1, gone: absent }, true],
+      [{ a: 1, gone: null }, { a: 1, gone: absent }, false],
+      [{ a: 1 }, { a: 1, f: () => 1, s: Symbol('s'), u: undefined }, true],
+      [{ a: [null, null] }, { a: [undefined, () => 1] }, true],
+      [{ n: null, z: 0 }, { n: Infinity, z: -0 }, true],
+      [{ n: 0 }, { n: NaN }, false],
+      [{ k: accessor && { t: 0, v: 1 } }, { k: accessor }, true],
+      [{ own: 1 }, proto, true],
+      [{ d: '1970-01-01T00:00:00.000Z' }, { d: new Date(0) }, true],
+      [{ w: 3 }, { w: new Number(3) }, true],
+      [{ a: 1 }, { a: 1, toJSON: () => ({ a: 2 }) }, false],
+      [{ a: 2 }, { a: 1, toJSON: () => ({ a: 2 }) }, true],
+      [{ constructor: 1 }, { valueOf: 1 }, false],
+      [{ a: 1, b: 2 }, { a: 1 }, false],
+      [{ a: 1 }, { a: 1, b: 2 }, false],
+      [[1], { 0: 1, length: 1 }, false],
+      [{ x: 2 }, { x: 1, toJSON: () => ({ x: 2 }) }, true],
+      [[1, 2], { toJSON: () => [1, 2] }, true],
+      [{ a: [1, 3] }, { a: Object.assign([1, 2], { toJSON: () => [1, 3] }) }, true],
+      ['T', { a: 1, toJSON: () => 'T' }, true],
+    ];
+    for (const [before, after, expected] of cases) {
+      expect(sameJson(before, after), JSON.stringify(before)).toBe(expected);
+      expect(sameJson(before, after)).toBe(diffJsonOps(before, after).length === 0);
+    }
+  });
+});
