@@ -18,6 +18,9 @@ pm-engine = { path = "../pm-engine" }
 pm-protocol = { path = "../pm-protocol", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
+# The font service (plan section 12, Phase 2): the CoreText registry (macOS)
+# and subsets, on the utility process's main thread.
+pm-text = { path = "../pm-text", default-features = false, features = ["system"] }
 libc = "0.2"
 napi = { version = "3.14", default-features = false, features = ["napi9"], optional = true }
 napi-derive = { version = "3.6", optional = true }
@@ -32,6 +35,11 @@ wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] 
 
 [features]
 node = ["dep:napi", "dep:napi-derive"]
+
+[[test]]
+# Runs on the main thread (the CoreText registry uses AppKit's font manager).
+name = "fonts"
+harness = false
 
 [build-dependencies]
 napi-build = "2.6"

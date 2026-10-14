@@ -46,7 +46,7 @@ export type EngineBootstrap = { type: 'control' };
  *  port. The engine exits when the control port closes, as on
  *  `shutdown`. */
 export type EngineControl =
-  | { type: 'connect'; port: number; peer: 'host' | 'renderer' | 'peer' }
+  | { type: 'connect'; port: number; peer: 'host' | 'renderer' | 'peer' | 'fonts' }
   | { type: 'disconnect'; port: number }
   | { type: 'shutdown' };
 

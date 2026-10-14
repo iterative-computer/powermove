@@ -25,7 +25,10 @@ pub struct FallbackCached<R> {
 
 impl<R: FontResolver> FallbackCached<R> {
     pub fn new(inner: R) -> Self {
-        FallbackCached { inner, map: HashMap::new() }
+        FallbackCached {
+            inner,
+            map: HashMap::new(),
+        }
     }
 
     /// Forgets cached substitutes (Blink's cache lives for the process; a
@@ -55,20 +58,31 @@ impl<R: FontResolver> FontResolver for FallbackCached<R> {
     fn standard(&mut self, desc: &FontDesc) -> Option<FaceId> {
         self.inner.standard(desc)
     }
-    fn fallback_for_char(&mut self, desc: &FontDesc, ch: u32, primary: FaceId, emoji: bool) -> Option<FaceId> {
+    fn fallback_for_char(
+        &mut self,
+        desc: &FontDesc,
+        ch: u32,
+        primary: FaceId,
+        emoji: bool,
+    ) -> Option<FaceId> {
         if emoji {
             return self.inner.fallback_for_char(desc, ch, primary, emoji);
         }
         let key = if chars::is_ideographic(ch) {
-            self.inner.face(primary).fallback_key.clone().map(|k| (k, desc.weight.to_bits(), desc.italic, desc.size.to_bits()))
+            self.inner
+                .face(primary)
+                .fallback_key
+                .clone()
+                .map(|k| (k, desc.weight.to_bits(), desc.italic, desc.size.to_bits()))
         } else {
             None
         };
         if let Some(k) = &key
             && let Some(&cached) = self.map.get(k)
-                && has_glyph(self.inner.face(cached), ch) {
-                    return Some(cached);
-                }
+            && has_glyph(self.inner.face(cached), ch)
+        {
+            return Some(cached);
+        }
         let found = self.inner.fallback_for_char(desc, ch, primary, emoji);
         if let (Some(k), Some(f)) = (key, found) {
             // WTF::HashMap::insert keeps an existing entry.

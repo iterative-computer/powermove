@@ -2051,6 +2051,7 @@ dependencies = [
  "pm-engine",
  "pm-gpu",
  "pm-protocol",
+ "pm-text",
  "serde",
  "serde_json",
  "wgpu",

@@ -428,7 +428,17 @@ fn check_media(
     {
         add(layer, Feature::ImageSequence);
     }
-    let Some(assets) = assets else { return };
+    let Some(assets) = assets else {
+        // Without media, the recorded container decides (the tested still
+        // classes need the file; see `unsupported_with_media`).
+        if ty == "image" && format != "svg" {
+            let name = js::member_string(record, "name").unwrap_or_default();
+            if let Err(f) = crate::stills::static_format(&format, &name) {
+                add(layer, f);
+            }
+        }
+        return;
+    };
     let Some(path) = assets.path(&asset_id, Some(record)) else {
         return;
     };

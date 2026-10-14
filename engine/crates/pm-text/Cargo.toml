@@ -58,6 +58,11 @@ harness = false
 name = "registry"
 harness = false
 
+[[test]]
+# Runs on the main thread (the CoreText registry uses AppKit's font manager).
+name = "blink_sizes"
+harness = false
+
 [[example]]
 # The level 1 layout over subsets as a plain wasm32-unknown-unknown module, for
 # the native vs WASM identity check (scripts/wasm-identity.mjs).
