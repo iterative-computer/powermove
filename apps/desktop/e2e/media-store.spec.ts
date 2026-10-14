@@ -158,6 +158,44 @@ test.describe('media store with Use New Engine on', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
+  test('a converted still keeps its TIFF or HEIF original; the viewer shows a rendition', async ({ session }) => {
+    test.setTimeout(90_000);
+    await session.openEditor();
+    const { page } = session;
+    const tiff = await place('still.tiff');
+    const id = await importFile(page, tiff);
+    const asset = await meta(page, id);
+    expect(asset).toMatchObject({ kind: 'image', format: 'tiff', rendition: true, contentHash: await hashOf(tiff), size: (await stat(tiff)).size });
+    const records = await storeRecords(session);
+    expect(records.find((record: any) => record.key === asset.storageKey)).toMatchObject({ hash: await hashOf(tiff), source: 'import' });
+    expect(records.find((record: any) => record.key === `${asset.storageKey}:rendition`)).toMatchObject({ type: 'image/png', source: 'rendition' });
+    await expect.poll(() => engineRead(session, id).then((read) => read.hash).catch((error) => String(error))).toBe(await hashOf(tiff));
+
+    const restore = () => page.evaluate(async (id) => {
+      const PM = (window as any).PM;
+      PM.assets.clear();
+      const result = await PM.assets.restoreProject(PM.proj);
+      const live = PM.assets.get(id);
+      return { restored: result.restored.length, missing: result.missing.length, w: live?.w ?? 0, h: live?.h ?? 0 };
+    }, id);
+    expect(await restore()).toMatchObject({ restored: 1, missing: 0, w: asset.w, h: asset.h });
+    // Generated media can go; the next open converts the kept original again.
+    await session.app.evaluate(async (_e, key) => (globalThis as any).__powermoveMediaStore.store.removeKey(key), `${asset.storageKey}:rendition`);
+    expect(await restore()).toMatchObject({ restored: 1, missing: 0, w: asset.w, h: asset.h });
+    expect((await storeRecords(session)).find((record: any) => record.key === `${asset.storageKey}:rendition`)).toMatchObject({ type: 'image/png' });
+
+    // Linked: the HEIF stays where it is; only its rendition is generated media.
+    await setImportMode(page, 'link');
+    const heic = await place('still.heic');
+    const linkedId = await importFile(page, heic);
+    const linked = await meta(page, linkedId);
+    expect(linked).toMatchObject({ storage: 'linked', rendition: true, link: { path: heic, hash: await hashOf(heic) } });
+    const after = await storeRecords(session);
+    expect(after.some((record: any) => record.key === linked.storageKey)).toBe(false);
+    expect(after.find((record: any) => record.key === `${linked.storageKey}:rendition`)).toMatchObject({ type: 'image/png' });
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
   test('relinks a moved and renamed original by content hash', async ({ session }) => {
     test.setTimeout(60_000);
     await session.openEditor();
@@ -458,6 +496,9 @@ test('Use New Engine on → off → on loses nothing; a linked project is refuse
       const { page } = session;
       await importFile(page, fixturePath('tone.wav'));
       await importFile(page, fixturePath('h264-aac.mp4'));
+      // Originals the legacy viewer cannot show, kept with their renditions.
+      await importFile(page, fixturePath('prores422.mov'));
+      await importFile(page, fixturePath('still.tiff'));
       copiedProject = await page.evaluate(() => (window as any).PM.proj.id);
       before = await page.evaluate(() => JSON.parse(JSON.stringify({ assets: (window as any).PM.proj.assets, layers: (window as any).PM.proj.layers.length })));
       await page.evaluate(() => (window as any).PM.Projects.put((window as any).PM.proj));
