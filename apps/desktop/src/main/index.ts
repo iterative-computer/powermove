@@ -1078,8 +1078,10 @@ if (!hasSingleInstanceLock) {
     registerThemeIpc(ipcMain, ctx);
     registerHapticsIpc(ipcMain, ctx);
     registerFontsIpc(ipcMain, ctx);
-    // The native font registry for pm-wasm's text layout (POWERMOVE_ENGINE_FONTS=1,
-    // docs/engine/text.md): the same pm-bridge copy the frame bridge loads.
+    // pm-wasm's font registry (docs/engine/text.md): with "Use New Engine" on
+    // the interactive engine serves it (installNativeEngine registered the
+    // channels and this is a no-op); with it off, main's own registry behind
+    // POWERMOVE_ENGINE_FONTS=1, from the same pm-bridge copy the frame bridge loads.
     setupEngineFonts({
       ipc: ipcMain,
       ctx,

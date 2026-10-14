@@ -25,42 +25,116 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Query {
-    Family { name: String, weight: u32, italic: bool, size: u32 },
-    Standard { weight: u32, italic: bool, size: u32 },
-    Fallback { weight: u32, italic: bool, size: u32, ch: u32, primary: FaceId, emoji: bool },
-    LastResort { weight: u32, italic: bool, size: u32 },
-    Variable { family: String },
-    EmAdvance { face: FaceId, size: u32 },
+    Family {
+        name: String,
+        weight: u32,
+        italic: bool,
+        size: u32,
+    },
+    Standard {
+        weight: u32,
+        italic: bool,
+        size: u32,
+    },
+    Fallback {
+        weight: u32,
+        italic: bool,
+        size: u32,
+        ch: u32,
+        primary: FaceId,
+        emoji: bool,
+    },
+    LastResort {
+        weight: u32,
+        italic: bool,
+        size: u32,
+    },
+    Variable {
+        family: String,
+    },
+    EmAdvance {
+        face: FaceId,
+        size: u32,
+    },
 }
 
 impl Query {
     pub fn family(name: &str, d: &FontDesc) -> Self {
-        Query::Family { name: name.to_string(), weight: d.weight.to_bits(), italic: d.italic, size: d.size.to_bits() }
+        Query::Family {
+            name: name.to_string(),
+            weight: d.weight.to_bits(),
+            italic: d.italic,
+            size: d.size.to_bits(),
+        }
     }
     pub fn standard(d: &FontDesc) -> Self {
-        Query::Standard { weight: d.weight.to_bits(), italic: d.italic, size: d.size.to_bits() }
+        Query::Standard {
+            weight: d.weight.to_bits(),
+            italic: d.italic,
+            size: d.size.to_bits(),
+        }
     }
     pub fn fallback(d: &FontDesc, ch: u32, primary: FaceId, emoji: bool) -> Self {
-        Query::Fallback { weight: d.weight.to_bits(), italic: d.italic, size: d.size.to_bits(), ch, primary, emoji }
+        Query::Fallback {
+            weight: d.weight.to_bits(),
+            italic: d.italic,
+            size: d.size.to_bits(),
+            ch,
+            primary,
+            emoji,
+        }
     }
     pub fn last_resort(d: &FontDesc) -> Self {
-        Query::LastResort { weight: d.weight.to_bits(), italic: d.italic, size: d.size.to_bits() }
+        Query::LastResort {
+            weight: d.weight.to_bits(),
+            italic: d.italic,
+            size: d.size.to_bits(),
+        }
     }
     pub fn variable(family: &str) -> Self {
-        Query::Variable { family: family.to_string() }
+        Query::Variable {
+            family: family.to_string(),
+        }
     }
     pub fn em_advance(face: FaceId, size: f32) -> Self {
-        Query::EmAdvance { face, size: size.to_bits() }
+        Query::EmAdvance {
+            face,
+            size: size.to_bits(),
+        }
     }
 
     /// The font description the query was asked with, if it has one.
     pub fn desc(&self) -> Option<FontDesc> {
-        let d = |weight: u32, italic: bool, size: u32| Some(FontDesc { weight: f32::from_bits(weight), italic, size: f32::from_bits(size) });
+        let d = |weight: u32, italic: bool, size: u32| {
+            Some(FontDesc {
+                weight: f32::from_bits(weight),
+                italic,
+                size: f32::from_bits(size),
+            })
+        };
         match *self {
-            Query::Family { weight, italic, size, .. }
-            | Query::Standard { weight, italic, size }
-            | Query::Fallback { weight, italic, size, .. }
-            | Query::LastResort { weight, italic, size } => d(weight, italic, size),
+            Query::Family {
+                weight,
+                italic,
+                size,
+                ..
+            }
+            | Query::Standard {
+                weight,
+                italic,
+                size,
+            }
+            | Query::Fallback {
+                weight,
+                italic,
+                size,
+                ..
+            }
+            | Query::LastResort {
+                weight,
+                italic,
+                size,
+            } => d(weight, italic, size),
             Query::Variable { .. } | Query::EmAdvance { .. } => None,
         }
     }
@@ -158,18 +232,50 @@ impl Answers {
     /// Adds `other`'s faces and answers (an incremental reply from main).
     pub fn merge(&mut self, other: &Answers) {
         let known: BTreeSet<FaceId> = self.faces.iter().map(|f| f.id).collect();
-        self.faces.extend(other.faces.iter().filter(|f| !known.contains(&f.id)).cloned());
+        self.faces.extend(
+            other
+                .faces
+                .iter()
+                .filter(|f| !known.contains(&f.id))
+                .cloned(),
+        );
         self.faces.sort_by_key(|f| f.id);
-        let mut by_query: BTreeMap<Query, Answer> = self.answers.drain(..).map(|a| (a.query.clone(), a)).collect();
+        let mut by_query: BTreeMap<Query, Answer> = self
+            .answers
+            .drain(..)
+            .map(|a| (a.query.clone(), a))
+            .collect();
         for a in &other.answers {
             by_query.insert(a.query.clone(), a.clone());
         }
         self.answers = by_query.into_values().collect();
     }
 
+    /// The registry's reply to the renderer: these answers with the registry
+    /// generation as the **last** key, `{"faces":…,"answers":…,"generation":N}`.
+    ///
+    /// Main reads the generation off the end of the reply without parsing
+    /// it (`answerGeneration` in apps/desktop/src/main/engine-fonts.ts), so
+    /// the key order is part of the format. It is written here explicitly,
+    /// not left to serde_json's map ordering (which `preserve_order` or a
+    /// new field would change).
+    pub fn reply_json(&self, generation: u64) -> Result<String, serde_json::Error> {
+        let mut json = serde_json::to_string(self)?;
+        // A struct with fields: `{…}`, never `{}`.
+        debug_assert!(json.ends_with('}') && json.len() > 2);
+        json.pop();
+        json.push_str(",\"generation\":");
+        json.push_str(&generation.to_string());
+        json.push('}');
+        Ok(json)
+    }
+
     /// The distinct (blob, index) pairs the faces read.
     pub fn sources(&self) -> BTreeSet<(String, u32)> {
-        self.faces.iter().map(|f| (f.blob.clone(), f.index)).collect()
+        self.faces
+            .iter()
+            .map(|f| (f.blob.clone(), f.index))
+            .collect()
     }
 }
 
@@ -229,9 +335,11 @@ impl ReplayResolver {
         self.pending_blobs.remove(&key);
         for (rec, face) in self.records.iter().zip(self.faces.iter_mut()) {
             if let Some(rec) = rec
-                && rec.blob == blob && rec.index == index {
-                    *face = Some(rec.info(data.clone(), read_index));
-                }
+                && rec.blob == blob
+                && rec.index == index
+            {
+                *face = Some(rec.info(data.clone(), read_index));
+            }
         }
         self.fonts.insert(key, (data, read_index));
     }
@@ -272,7 +380,9 @@ impl ReplayResolver {
 impl FontResolver for ReplayResolver {
     fn face(&self, id: FaceId) -> &FaceInfo {
         // Only ids `usable` returned reach the layout.
-        self.faces[id as usize].as_ref().expect("face bytes are loaded")
+        self.faces[id as usize]
+            .as_ref()
+            .expect("face bytes are loaded")
     }
     fn family(&mut self, family: &str, desc: &FontDesc) -> Option<FaceId> {
         self.answer(Query::family(family, desc))
@@ -280,7 +390,13 @@ impl FontResolver for ReplayResolver {
     fn standard(&mut self, desc: &FontDesc) -> Option<FaceId> {
         self.answer(Query::standard(desc))
     }
-    fn fallback_for_char(&mut self, desc: &FontDesc, ch: u32, primary: FaceId, emoji: bool) -> Option<FaceId> {
+    fn fallback_for_char(
+        &mut self,
+        desc: &FontDesc,
+        ch: u32,
+        primary: FaceId,
+        emoji: bool,
+    ) -> Option<FaceId> {
         self.answer(Query::fallback(desc, ch, primary, emoji))
     }
     fn last_resort(&mut self, desc: &FontDesc) -> Option<FaceId> {
@@ -310,11 +426,21 @@ pub struct Recorder<R> {
 
 impl<R: FontResolver> Recorder<R> {
     pub fn new(inner: R) -> Self {
-        Recorder { inner, answers: BTreeMap::new() }
+        Recorder {
+            inner,
+            answers: BTreeMap::new(),
+        }
     }
 
     fn record(&mut self, query: Query, face: Option<FaceId>) -> Option<FaceId> {
-        self.answers.insert(query.clone(), Answer { query, face, advance: None });
+        self.answers.insert(
+            query.clone(),
+            Answer {
+                query,
+                face,
+                advance: None,
+            },
+        );
         face
     }
 
@@ -333,7 +459,10 @@ impl<R: FontResolver> Recorder<R> {
             }
         }
         Answers {
-            faces: ids.into_iter().map(|id| FaceRecord::of(id, self.inner.face(id))).collect(),
+            faces: ids
+                .into_iter()
+                .map(|id| FaceRecord::of(id, self.inner.face(id)))
+                .collect(),
             answers: self.answers.values().cloned().collect(),
         }
     }
@@ -356,7 +485,13 @@ impl<R: FontResolver> FontResolver for Recorder<R> {
         let a = self.inner.standard(desc);
         self.record(Query::standard(desc), a)
     }
-    fn fallback_for_char(&mut self, desc: &FontDesc, ch: u32, primary: FaceId, emoji: bool) -> Option<FaceId> {
+    fn fallback_for_char(
+        &mut self,
+        desc: &FontDesc,
+        ch: u32,
+        primary: FaceId,
+        emoji: bool,
+    ) -> Option<FaceId> {
         let a = self.inner.fallback_for_char(desc, ch, primary, emoji);
         self.record(Query::fallback(desc, ch, primary, emoji), a)
     }
@@ -371,7 +506,14 @@ impl<R: FontResolver> FontResolver for Recorder<R> {
     fn em_advance(&mut self, face: FaceId, size: f32) -> Option<f32> {
         let v = self.inner.em_advance(face, size);
         let query = Query::em_advance(face, size);
-        self.answers.insert(query.clone(), Answer { query, face: None, advance: v });
+        self.answers.insert(
+            query.clone(),
+            Answer {
+                query,
+                face: None,
+                advance: v,
+            },
+        );
         v
     }
 }
@@ -381,14 +523,24 @@ pub fn answer_query(resolver: &mut dyn FontResolver, q: &Query) -> Answer {
     let face = match q {
         Query::Family { name, .. } => resolver.family(name, &q.desc().expect("family query")),
         Query::Standard { .. } => resolver.standard(&q.desc().expect("standard query")),
-        Query::Fallback { ch, primary, emoji, .. } => resolver.fallback_for_char(&q.desc().expect("fallback query"), *ch, *primary, *emoji),
+        Query::Fallback {
+            ch, primary, emoji, ..
+        } => resolver.fallback_for_char(&q.desc().expect("fallback query"), *ch, *primary, *emoji),
         Query::LastResort { .. } => resolver.last_resort(&q.desc().expect("last resort query")),
         Query::Variable { family } => resolver.variable_face(family),
         Query::EmAdvance { face, size } => {
-            return Answer { query: q.clone(), face: None, advance: resolver.em_advance(*face, f32::from_bits(*size)) };
+            return Answer {
+                query: q.clone(),
+                face: None,
+                advance: resolver.em_advance(*face, f32::from_bits(*size)),
+            };
         }
     };
-    Answer { query: q.clone(), face, advance: None }
+    Answer {
+        query: q.clone(),
+        face,
+        advance: None,
+    }
 }
 
 /// Answers a batch of queries (main's reply to a replay's `misses`, or a
@@ -415,7 +567,13 @@ pub fn answer_batch(resolver: &mut dyn FontResolver, queries: &[Query]) -> Answe
             _ => {}
         }
     }
-    Answers { faces: ids.into_iter().map(|id| FaceRecord::of(id, resolver.face(id))).collect(), answers: by_query.into_values().collect() }
+    Answers {
+        faces: ids
+            .into_iter()
+            .map(|id| FaceRecord::of(id, resolver.face(id)))
+            .collect(),
+        answers: by_query.into_values().collect(),
+    }
 }
 
 #[cfg(test)]
@@ -441,14 +599,46 @@ mod tests {
     }
 
     fn desc() -> FontDesc {
-        FontDesc { weight: 500.0, italic: false, size: 16.0 }
+        FontDesc {
+            weight: 500.0,
+            italic: false,
+            size: 16.0,
+        }
+    }
+
+    #[test]
+    fn reply_json_ends_with_the_generation() {
+        let answers = Answers {
+            faces: vec![rec(0, "a")],
+            answers: vec![Answer {
+                query: Query::family("A", &desc()),
+                face: Some(0),
+                advance: None,
+            }],
+        };
+        for (value, generation) in [(&answers, 42), (&Answers::default(), 0)] {
+            let json = value.reply_json(generation).unwrap();
+            // Main's `answerGeneration` reads exactly this suffix.
+            assert!(
+                json.ends_with(&format!(",\"generation\":{generation}}}")),
+                "{json}"
+            );
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed["generation"], generation);
+            let back: Answers = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, value);
+        }
     }
 
     #[test]
     fn misses_and_pending_blobs_are_reported_then_resolved() {
         let answers = Answers {
             faces: vec![rec(0, "a")],
-            answers: vec![Answer { query: Query::family("A", &desc()), face: Some(0), advance: None }],
+            answers: vec![Answer {
+                query: Query::family("A", &desc()),
+                face: Some(0),
+                advance: None,
+            }],
         };
         let mut r = ReplayResolver::new(&answers);
         // Bytes not loaded yet: the layout must not see the face.
@@ -462,7 +652,11 @@ mod tests {
         assert!(r.pending_blobs.is_empty());
         r.add_answers(&Answers {
             faces: vec![rec(1, "a")],
-            answers: vec![Answer { query: Query::family("B", &desc()), face: Some(1), advance: None }],
+            answers: vec![Answer {
+                query: Query::family("B", &desc()),
+                face: Some(1),
+                advance: None,
+            }],
         });
         assert_eq!(r.family("B", &desc()), Some(1));
     }
@@ -480,7 +674,13 @@ mod tests {
         fn standard(&mut self, _: &FontDesc) -> Option<FaceId> {
             Some(1)
         }
-        fn fallback_for_char(&mut self, _: &FontDesc, _: u32, _: FaceId, _: bool) -> Option<FaceId> {
+        fn fallback_for_char(
+            &mut self,
+            _: &FontDesc,
+            _: u32,
+            _: FaceId,
+            _: bool,
+        ) -> Option<FaceId> {
             None
         }
         fn last_resort(&mut self, _: &FontDesc) -> Option<FaceId> {
@@ -507,8 +707,18 @@ mod tests {
         ];
         let a = answer_batch(&mut r, &queries);
         assert_eq!(a.answers.len(), 4);
-        assert_eq!(a.faces.iter().map(|f| (f.id, f.blob.as_str())).collect::<Vec<_>>(), [(0, "a"), (1, "t"), (2, "p")]);
-        let em = a.answers.iter().find(|x| matches!(x.query, Query::EmAdvance { .. })).unwrap();
+        assert_eq!(
+            a.faces
+                .iter()
+                .map(|f| (f.id, f.blob.as_str()))
+                .collect::<Vec<_>>(),
+            [(0, "a"), (1, "t"), (2, "p")]
+        );
+        let em = a
+            .answers
+            .iter()
+            .find(|x| matches!(x.query, Query::EmAdvance { .. }))
+            .unwrap();
         assert_eq!((em.face, em.advance), (None, Some(20.0)));
         // The replay takes the batch as is.
         let mut replay = ReplayResolver::new(&Answers::default());
@@ -525,8 +735,16 @@ mod tests {
         a.merge(&Answers {
             faces: vec![rec(1, "b"), rec(0, "a")],
             answers: vec![
-                Answer { query: Query::variable("Z"), face: None, advance: None },
-                Answer { query: Query::family("A", &desc()), face: Some(0), advance: None },
+                Answer {
+                    query: Query::variable("Z"),
+                    face: None,
+                    advance: None,
+                },
+                Answer {
+                    query: Query::family("A", &desc()),
+                    face: Some(0),
+                    advance: None,
+                },
             ],
         });
         assert_eq!(a.faces.iter().map(|f| f.id).collect::<Vec<_>>(), [0, 1]);

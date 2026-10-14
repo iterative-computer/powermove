@@ -61,7 +61,11 @@ fn concat(a: &[u16], b: &[u16]) -> Vec<u16> {
 }
 
 /// `textSourceLines(d, context, lineHeight)`.
-pub fn text_source_lines(d: &TextContent, m: &mut dyn Measure, line_height: f64) -> Vec<SourceLine> {
+pub fn text_source_lines(
+    d: &TextContent,
+    m: &mut dyn Measure,
+    line_height: f64,
+) -> Vec<SourceLine> {
     let text = d.utf16();
     let paragraphs: Vec<&[u16]> = text.split(|&u| u == 0x0A).collect();
     let box_width = d.box_width.unwrap_or(f64::NAN);
@@ -69,7 +73,10 @@ pub fn text_source_lines(d: &TextContent, m: &mut dyn Measure, line_height: f64)
     let mut offset = 0usize;
     if !d.paragraph.unwrap_or(false) || !box_width.is_finite() || box_width <= 0.0 {
         for p in paragraphs {
-            lines.push(SourceLine { text: p.to_vec(), start: offset });
+            lines.push(SourceLine {
+                text: p.to_vec(),
+                start: offset,
+            });
             offset += p.len() + 1;
         }
         return lines;
@@ -78,7 +85,10 @@ pub fn text_source_lines(d: &TextContent, m: &mut dyn Measure, line_height: f64)
         let paragraph_start = offset;
         offset += p.len() + 1;
         if p.is_empty() {
-            lines.push(SourceLine { text: Vec::new(), start: paragraph_start });
+            lines.push(SourceLine {
+                text: Vec::new(),
+                start: paragraph_start,
+            });
             continue;
         }
         let mut line: Vec<u16> = Vec::new();
@@ -87,7 +97,10 @@ pub fn text_source_lines(d: &TextContent, m: &mut dyn Measure, line_height: f64)
         for token in tokens(p) {
             let candidate = concat(&line, token);
             if !line.is_empty() && m.width(&candidate) > box_width {
-                lines.push(SourceLine { text: trim_end(&line).to_vec(), start: line_start });
+                lines.push(SourceLine {
+                    text: trim_end(&line).to_vec(),
+                    start: line_start,
+                });
                 line = trim_start(token).to_vec();
                 line_start = token_start + (token.len() - line.len());
             } else {
@@ -102,12 +115,18 @@ pub fn text_source_lines(d: &TextContent, m: &mut dyn Measure, line_height: f64)
                 while cut < line.len() && m.width(&line[..cut + 1]) <= box_width {
                     cut += 1;
                 }
-                lines.push(SourceLine { text: line[..cut].to_vec(), start: line_start });
+                lines.push(SourceLine {
+                    text: line[..cut].to_vec(),
+                    start: line_start,
+                });
                 line = line[cut..].to_vec();
                 line_start += cut;
             }
         }
-        lines.push(SourceLine { text: trim_end(&line).to_vec(), start: line_start });
+        lines.push(SourceLine {
+            text: trim_end(&line).to_vec(),
+            start: line_start,
+        });
     }
     let box_height = d.box_height.unwrap_or(f64::NAN);
     if !box_height.is_finite() || box_height <= 0.0 {
@@ -155,7 +174,11 @@ fn js_string(s: &[u16]) -> String {
 
 fn index_of(hay: &[u16], needle: &[u16], from: usize) -> Option<usize> {
     if from > hay.len() {
-        return if needle.is_empty() { Some(hay.len()) } else { None };
+        return if needle.is_empty() {
+            Some(hay.len())
+        } else {
+            None
+        };
     }
     if needle.is_empty() {
         return Some(from);
@@ -171,10 +194,14 @@ fn is_all_space(s: &[u16]) -> bool {
 pub fn glyph_layout(d: &TextContent, m: &mut dyn Measure) -> GlyphLayout {
     let lh = d.line_height();
     let align = d.align();
-    let lines: Vec<Vec<u16>> = text_source_lines(d, m, lh).into_iter().map(|l| l.text).collect();
+    let lines: Vec<Vec<u16>> = text_source_lines(d, m, lh)
+        .into_iter()
+        .map(|l| l.text)
+        .collect();
     let source = d.utf16();
     let mut out = GlyphLayout::default();
-    let (mut character_index, mut word_index, mut line_index, mut source_offset) = (0usize, 0usize, 0usize, 0usize);
+    let (mut character_index, mut word_index, mut line_index, mut source_offset) =
+        (0usize, 0usize, 0usize, 0usize);
     for (row, line) in lines.iter().enumerate() {
         let line_width = m.width(line);
         let start_x = match align {
@@ -185,7 +212,9 @@ pub fn glyph_layout(d: &TextContent, m: &mut dyn Measure) -> GlyphLayout {
         let y = row as f64 * lh;
         // Math.max(sourceOffset, text.indexOf(line, sourceOffset)); indexOf
         // returns -1 when absent.
-        let found = index_of(&source, line, source_offset).map(|i| i as i64).unwrap_or(-1);
+        let found = index_of(&source, line, source_offset)
+            .map(|i| i as i64)
+            .unwrap_or(-1);
         let line_source = (source_offset as i64).max(found) as usize;
         let line_unit = line_index;
         if !line.is_empty() {
@@ -292,11 +321,20 @@ mod tests {
     }
 
     fn d(text: &str, box_width: f64) -> TextContent {
-        TextContent { text: text.into(), size: Some(10.0), box_width: Some(box_width), paragraph: Some(box_width > 0.0), ..Default::default() }
+        TextContent {
+            text: text.into(),
+            size: Some(10.0),
+            box_width: Some(box_width),
+            paragraph: Some(box_width > 0.0),
+            ..Default::default()
+        }
     }
 
     fn texts(lines: &[SourceLine]) -> Vec<String> {
-        lines.iter().map(|l| String::from_utf16_lossy(&l.text)).collect()
+        lines
+            .iter()
+            .map(|l| String::from_utf16_lossy(&l.text))
+            .collect()
     }
 
     #[test]

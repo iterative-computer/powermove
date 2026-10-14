@@ -341,3 +341,33 @@ describe('transcription bridge', () => {
     expect(electronMocks.removeListener).toHaveBeenCalledWith(TRANSCRIPTION_IPC.modelRequested, expect.any(Function));
   });
 });
+
+/* ── native engine fonts ── */
+describe('engine fonts bridge', () => {
+  it('invokes each ENGINE_FONTS_IPC channel with its arguments rebuilt field by field', async () => {
+    const { ENGINE_FONTS_IPC } = await import('../shared/engine-fonts-ipc');
+    const fonts = bridge().engineFonts!;
+    const bytes = new Uint8Array([0, 1, 0, 0]);
+    electronMocks.invoke.mockClear();
+    void fonts.answer('[]');
+    void fonts.subset('0123456789abcdef0123456789abcdef', 2);
+    void fonts.manifest('system-ui');
+    void fonts.familyFaces('Helvetica');
+    void fonts.addProjectFont('Brand', bytes, { weight: '400', style: 'italic', extra: 'dropped' } as never, 1);
+    void fonts.addProjectFont('Brand', bytes);
+    void fonts.setFontSource('Brand', bytes);
+    void fonts.clearProjectFonts();
+    void fonts.generation();
+    expect(electronMocks.invoke.mock.calls).toEqual([
+      [ENGINE_FONTS_IPC.answer, '[]'],
+      [ENGINE_FONTS_IPC.subset, '0123456789abcdef0123456789abcdef', 2],
+      [ENGINE_FONTS_IPC.manifest, 'system-ui'],
+      [ENGINE_FONTS_IPC.familyFaces, 'Helvetica'],
+      [ENGINE_FONTS_IPC.addProjectFont, 'Brand', bytes, { weight: '400', style: 'italic' }, 1],
+      [ENGINE_FONTS_IPC.addProjectFont, 'Brand', bytes, undefined],
+      [ENGINE_FONTS_IPC.setFontSource, 'Brand', bytes],
+      [ENGINE_FONTS_IPC.clearProjectFonts],
+      [ENGINE_FONTS_IPC.generation]
+    ]);
+  });
+});

@@ -20,10 +20,13 @@ use crate::compat::{Align, Boundary, GlyphLayout, PlacedGlyph, TextContent, Unit
 use crate::font::{FontBytes, OPSZ, tag};
 use crate::registry::{COMMON_SCRIPT, FallbackManifest};
 use parlance::{FontVariation, Tag};
-use parley::fontique::{Blob, Collection, CollectionOptions, FallbackKey, FontInfoOverride, GenericFamily, Script};
+use parley::fontique::{
+    Blob, Collection, CollectionOptions, FallbackKey, FontInfoOverride, GenericFamily, Script,
+};
 use parley::{
-    Affinity, Cursor, FontContext, FontFamily, FontFamilyName, FontStyle, FontVariations, FontWeight, Layout, LayoutContext,
-    LineHeight, OverflowWrap, PositionedLayoutItem, StyleProperty, WhiteSpaceCollapse,
+    Affinity, Cursor, FontContext, FontFamily, FontFamilyName, FontStyle, FontVariations,
+    FontWeight, Layout, LayoutContext, LineHeight, OverflowWrap, PositionedLayoutItem,
+    StyleProperty, WhiteSpaceCollapse,
 };
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -102,8 +105,20 @@ impl Default for Level2 {
 
 impl Level2 {
     pub fn new() -> Self {
-        let collection = Collection::new(CollectionOptions { shared: false, system_fonts: false });
-        Level2 { fcx: FontContext { collection, source_cache: Default::default() }, lcx: LayoutContext::new(), keys: HashMap::new(), families: BTreeMap::new(), base_family: None }
+        let collection = Collection::new(CollectionOptions {
+            shared: false,
+            system_fonts: false,
+        });
+        Level2 {
+            fcx: FontContext {
+                collection,
+                source_cache: Default::default(),
+            },
+            lcx: LayoutContext::new(),
+            keys: HashMap::new(),
+            families: BTreeMap::new(),
+            base_family: None,
+        }
     }
 
     /// Adds every face in `data` under `family` (the registry's family name;
@@ -112,10 +127,17 @@ impl Level2 {
     pub fn add_font(&mut self, key: &str, data: FontBytes, family: &str) -> usize {
         let blob = Blob::new(data.shared());
         self.keys.insert(blob.id(), key.to_string());
-        let added = self.fcx.collection.register_fonts(blob, Some(FontInfoOverride { family_name: Some(family), ..Default::default() }));
+        let added = self.fcx.collection.register_fonts(
+            blob,
+            Some(FontInfoOverride {
+                family_name: Some(family),
+                ..Default::default()
+            }),
+        );
         let n: usize = added.iter().map(|(_, faces)| faces.len()).sum();
         if n > 0 {
-            self.families.insert(family.to_lowercase(), family.to_string());
+            self.families
+                .insert(family.to_lowercase(), family.to_string());
         }
         n
     }
@@ -136,7 +158,11 @@ impl Level2 {
         }
         // Families for common-script characters come after every script's own.
         let mut common: Vec<String> = Vec::new();
-        for s in manifest.scripts.iter().filter(|s| s.script == COMMON_SCRIPT) {
+        for s in manifest
+            .scripts
+            .iter()
+            .filter(|s| s.script == COMMON_SCRIPT)
+        {
             for f in &s.families {
                 if !common.contains(f) {
                     common.push(f.clone());
@@ -144,14 +170,25 @@ impl Level2 {
             }
         }
         let mut per_key: BTreeMap<(String, Option<String>), Vec<String>> = BTreeMap::new();
-        for s in manifest.scripts.iter().filter(|s| s.script != COMMON_SCRIPT) {
-            per_key.entry((s.script.clone(), s.language.clone())).or_default().extend(s.families.iter().cloned());
+        for s in manifest
+            .scripts
+            .iter()
+            .filter(|s| s.script != COMMON_SCRIPT)
+        {
+            per_key
+                .entry((s.script.clone(), s.language.clone()))
+                .or_default()
+                .extend(s.families.iter().cloned());
         }
         // Text without a locale uses the script's default list: the first
         // language's families, then the families listed without a language.
         let scripts: Vec<String> = per_key.keys().map(|k| k.0.clone()).collect();
         for script in scripts {
-            let first = per_key.iter().find(|(k, _)| k.0 == script && k.1.is_some()).map(|(_, v)| v.clone()).unwrap_or_default();
+            let first = per_key
+                .iter()
+                .find(|(k, _)| k.0 == script && k.1.is_some())
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
             let default = per_key.entry((script, None)).or_default();
             for (i, f) in first.into_iter().enumerate() {
                 if !default.contains(&f) {
@@ -159,7 +196,9 @@ impl Level2 {
                 }
             }
         }
-        per_key.entry((COMMON_SCRIPT.to_string(), None)).or_default();
+        per_key
+            .entry((COMMON_SCRIPT.to_string(), None))
+            .or_default();
         for ((script, language), mut families) in per_key {
             for f in &common {
                 if !families.contains(f) {
@@ -191,8 +230,15 @@ impl Level2 {
     pub fn layout(&mut self, d: &TextContent) -> Level2Layout {
         let text = d.text.clone();
         let size = d.size() as f32;
-        let leading = d.leading.filter(|l| *l != 0.0 && !l.is_nan()).unwrap_or(1.15) as f32;
-        let weight = d.weight.filter(|w| *w != 0.0 && !w.is_nan()).unwrap_or(DEFAULT_WEIGHT as f64).clamp(1.0, 1000.0) as f32;
+        let leading = d
+            .leading
+            .filter(|l| *l != 0.0 && !l.is_nan())
+            .unwrap_or(1.15) as f32;
+        let weight = d
+            .weight
+            .filter(|w| *w != 0.0 && !w.is_nan())
+            .unwrap_or(DEFAULT_WEIGHT as f64)
+            .clamp(1.0, 1000.0) as f32;
         let tracking = d.tracking.filter(|t| t.is_finite()).unwrap_or(0.0) as f32;
         let mut families: Vec<FontFamilyName<'static>> = Vec::new();
         if let Some(f) = d.font.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
@@ -205,23 +251,41 @@ impl Level2 {
         // CoreText optical sizing: `opsz` follows the size unless the layer
         // sets it.
         let axis = |t: u32, v: f32| FontVariation::new(Tag::from_bytes(t.to_be_bytes()), v);
-        let mut variations: Vec<FontVariation> = d.axes.iter().map(|(t, v)| axis(tag(t), *v as f32)).collect();
+        let mut variations: Vec<FontVariation> = d
+            .axes
+            .iter()
+            .map(|(t, v)| axis(tag(t), *v as f32))
+            .collect();
         if !d.axes.iter().any(|(t, _)| tag(t) == OPSZ) {
             variations.push(axis(OPSZ, size));
         }
 
         let mut builder = self.lcx.ranged_builder(&mut self.fcx, &text, 1.0, false);
-        builder.push_default(StyleProperty::FontFamily(FontFamily::List(Cow::Owned(families))));
+        builder.push_default(StyleProperty::FontFamily(FontFamily::List(Cow::Owned(
+            families,
+        ))));
         builder.push_default(StyleProperty::FontSize(size));
         builder.push_default(StyleProperty::FontWeight(FontWeight::new(weight)));
-        builder.push_default(StyleProperty::FontStyle(if d.italic.unwrap_or(false) { FontStyle::Italic } else { FontStyle::Normal }));
-        builder.push_default(StyleProperty::FontVariations(FontVariations::List(Cow::Owned(variations))));
+        builder.push_default(StyleProperty::FontStyle(if d.italic.unwrap_or(false) {
+            FontStyle::Italic
+        } else {
+            FontStyle::Normal
+        }));
+        builder.push_default(StyleProperty::FontVariations(FontVariations::List(
+            Cow::Owned(variations),
+        )));
         builder.push_default(StyleProperty::LetterSpacing(tracking));
-        builder.push_default(StyleProperty::LineHeight(LineHeight::FontSizeRelative(leading)));
+        builder.push_default(StyleProperty::LineHeight(LineHeight::FontSizeRelative(
+            leading,
+        )));
         builder.push_default(StyleProperty::OverflowWrap(OverflowWrap::BreakWord));
-        builder.push_default(StyleProperty::WhiteSpaceCollapse(WhiteSpaceCollapse::Preserve));
+        builder.push_default(StyleProperty::WhiteSpaceCollapse(
+            WhiteSpaceCollapse::Preserve,
+        ));
         let mut layout: Layout<u32> = builder.build(&text);
-        let box_width = d.box_width.filter(|w| w.is_finite() && *w > 0.0 && d.paragraph.unwrap_or(false));
+        let box_width = d
+            .box_width
+            .filter(|w| w.is_finite() && *w > 0.0 && d.paragraph.unwrap_or(false));
         layout.break_all_lines(box_width.map(|w| w as f32));
         self.collect(d, &text, &layout)
     }
@@ -230,7 +294,9 @@ impl Level2 {
         let utf16_at = Utf16Index::new(text);
         let align = d.align();
         let line_height_floor = d.line_height().max(1.0);
-        let box_height = d.box_height.filter(|h| h.is_finite() && *h > 0.0 && d.paragraph.unwrap_or(false));
+        let box_height = d
+            .box_height
+            .filter(|h| h.is_finite() && *h > 0.0 && d.paragraph.unwrap_or(false));
         let mut out = Level2Layout::default();
         let mut top = 0.0f64;
         let (mut char_index, mut word_index) = (0usize, 0usize);
@@ -251,29 +317,59 @@ impl Level2 {
             } - m.offset as f64;
             let range = line.text_range();
             // Content without the hard break that ends the line.
-            let content_end = text[range.clone()].trim_end_matches(['\n', '\r', '\u{2028}', '\u{2029}']).len() + range.start;
+            let content_end = text[range.clone()]
+                .trim_end_matches(['\n', '\r', '\u{2028}', '\u{2029}'])
+                .len()
+                + range.start;
             let baseline = m.baseline as f64;
-            let ascent = line.runs().map(|r| r.font_metrics().ascent as f64).fold(0.0, f64::max);
-            let descent = line.runs().map(|r| r.font_metrics().descent as f64).fold(0.0, f64::max);
+            let ascent = line
+                .runs()
+                .map(|r| r.font_metrics().ascent as f64)
+                .fold(0.0, f64::max);
+            let descent = line
+                .runs()
+                .map(|r| r.font_metrics().descent as f64)
+                .fold(0.0, f64::max);
             let (start16, end16) = (utf16_at.of(range.start), utf16_at.of(content_end));
             let line_text = &text[range.start..content_end];
-            out.lines.push(Line { text: line_text.to_string(), start: start16, end: end16, x: shift, y: top, baseline, width, height, ascent, descent });
+            out.lines.push(Line {
+                text: line_text.to_string(),
+                start: start16,
+                end: end16,
+                x: shift,
+                y: top,
+                baseline,
+                width,
+                height,
+                ascent,
+                descent,
+            });
 
             for item in line.items() {
-                let PositionedLayoutItem::GlyphRun(gr) = item else { continue };
+                let PositionedLayoutItem::GlyphRun(gr) = item else {
+                    continue;
+                };
                 let run = gr.run();
                 let font = run.font();
                 let key = self.keys.get(&font.data.id()).cloned().unwrap_or_default();
                 let synthesis = run.synthesis();
                 let mut glyphs = Vec::new();
                 for g in gr.positioned_glyphs() {
-                    glyphs.push(PlacedGlyph { id: g.id, x: g.x as f64 + shift, y: g.y as f64 });
+                    glyphs.push(PlacedGlyph {
+                        id: g.id,
+                        x: g.x as f64 + shift,
+                        y: g.y as f64,
+                    });
                 }
                 // `.notdef` for a visible character (controls, spaces, and
                 // default-ignorables draw nothing by design).
                 for cluster in run.clusters() {
                     let t = &text[cluster.text_range()];
-                    let visible = t.chars().any(|c| !c.is_whitespace() && !c.is_control() && !crate::blink::chars::is_default_ignorable(c as u32));
+                    let visible = t.chars().any(|c| {
+                        !c.is_whitespace()
+                            && !c.is_control()
+                            && !crate::blink::chars::is_default_ignorable(c as u32)
+                    });
                     if visible && cluster.glyphs().any(|g| g.id == 0) {
                         out.missing_glyphs += 1;
                     }
@@ -282,7 +378,11 @@ impl Level2 {
                     line: row,
                     font: key,
                     size: run.font_size(),
-                    coords: run.normalized_coords().iter().map(|c| c.to_bits()).collect(),
+                    coords: run
+                        .normalized_coords()
+                        .iter()
+                        .map(|c| c.to_bits())
+                        .collect(),
                     synthetic_bold: synthesis.embolden(),
                     skew: synthesis.skew().unwrap_or(0.0),
                     glyphs,
@@ -291,14 +391,28 @@ impl Level2 {
 
             // Caret boundaries at grapheme boundaries of the line's content.
             let mut caret = Vec::new();
-            let mut bounds: Vec<usize> = crate::compat::graphemes(&line_text.encode_utf16().collect::<Vec<_>>()).iter().map(|r| r.start).collect();
+            let mut bounds: Vec<usize> =
+                crate::compat::graphemes(&line_text.encode_utf16().collect::<Vec<_>>())
+                    .iter()
+                    .map(|r| r.start)
+                    .collect();
             bounds.push(end16 - start16);
             let to_byte = Utf8Index::new(line_text);
             for (i, b16) in bounds.iter().enumerate() {
                 let byte = range.start + to_byte.of(*b16);
-                let affinity = if i + 1 == bounds.len() && i > 0 { Affinity::Upstream } else { Affinity::Downstream };
-                let x = Cursor::from_byte_index(layout, byte, affinity).geometry(layout, 0.0).x0 + shift;
-                caret.push(Boundary { index: start16 + b16, x });
+                let affinity = if i + 1 == bounds.len() && i > 0 {
+                    Affinity::Upstream
+                } else {
+                    Affinity::Downstream
+                };
+                let x = Cursor::from_byte_index(layout, byte, affinity)
+                    .geometry(layout, 0.0)
+                    .x0
+                    + shift;
+                caret.push(Boundary {
+                    index: start16 + b16,
+                    x,
+                });
             }
 
             // Units in level 1's shape (x and w from caret edges, so RTL and
@@ -385,7 +499,13 @@ impl Level2 {
 /// The caret x at a UTF-16 index, or the nearest boundary before it (an
 /// index inside a grapheme, which word edges never produce).
 fn caret_x(caret: &[Boundary], index: usize) -> f64 {
-    caret.iter().rev().find(|b| b.index <= index).or(caret.first()).map(|b| b.x).unwrap_or(0.0)
+    caret
+        .iter()
+        .rev()
+        .find(|b| b.index <= index)
+        .or(caret.first())
+        .map(|b| b.x)
+        .unwrap_or(0.0)
 }
 
 /// UTF-8 byte offset to UTF-16 offset.

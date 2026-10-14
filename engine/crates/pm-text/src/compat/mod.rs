@@ -21,8 +21,11 @@ pub mod wrap;
 
 pub use canvas::CanvasMeasurer;
 pub use content::{Align, TextContent};
-pub use wrap::{GlyphLayout, Measure, SourceLine, Unit, glyph_layout, graphemes, text_source_lines};
+pub use wrap::{
+    GlyphLayout, Measure, SourceLine, Unit, glyph_layout, graphemes, text_source_lines,
+};
 
+pub use crate::blink::measure::FontCacheSeed;
 use crate::blink::shaper::UNMATCHED_VS_GLYPH;
 use crate::fallback_cache::FallbackCached;
 use crate::font::{FaceId, FontResolver, PreparedCache};
@@ -105,11 +108,27 @@ pub struct LineRuns {
 pub struct Compat<R> {
     resolver: FallbackCached<R>,
     cache: PreparedCache,
+    seeds: Vec<FontCacheSeed>,
 }
 
 impl<R: FontResolver> Compat<R> {
     pub fn new(resolver: R) -> Self {
-        Compat { resolver: FallbackCached::new(resolver), cache: PreparedCache::default() }
+        Compat {
+            resolver: FallbackCached::new(resolver),
+            cache: PreparedCache::default(),
+            seeds: Vec::new(),
+        }
+    }
+
+    /// Declares the platform data Blink's font cache already holds in the
+    /// renderer being reproduced (see [`FontCacheSeed`]). Empty by default:
+    /// a fresh renderer.
+    pub fn set_font_cache_seeds(&mut self, seeds: Vec<FontCacheSeed>) {
+        self.seeds = seeds;
+    }
+
+    pub fn font_cache_seeds(&self) -> &[FontCacheSeed] {
+        &self.seeds
     }
 
     pub fn resolver(&self) -> &R {
@@ -132,7 +151,7 @@ impl<R: FontResolver> Compat<R> {
 
     /// A measuring context configured for `d`.
     pub fn measurer(&mut self, d: &TextContent) -> CanvasMeasurer<'_> {
-        CanvasMeasurer::new(&mut self.resolver, &mut self.cache, d)
+        CanvasMeasurer::new(&mut self.resolver, &mut self.cache, d, &self.seeds)
     }
 
     /// `measureText(text).width` in `d`'s context.
@@ -164,12 +183,26 @@ impl<R: FontResolver> Compat<R> {
             .map(|(row, line)| {
                 let width = m.width(&line.text);
                 let start_x = aligned_start(align, width);
-                let mut boundaries = vec![Boundary { index: line.start, x: start_x }];
+                let mut boundaries = vec![Boundary {
+                    index: line.start,
+                    x: start_x,
+                }];
                 for r in graphemes(&line.text) {
-                    boundaries.push(Boundary { index: line.start + r.end, x: start_x + m.width(&line.text[..r.end]) });
+                    boundaries.push(Boundary {
+                        index: line.start + r.end,
+                        x: start_x + m.width(&line.text[..r.end]),
+                    });
                 }
                 let y = row as f64 * lh;
-                CaretLine { text: String::from_utf16_lossy(&line.text), start: line.start, x: start_x, y, baseline: y + size * BASELINE, width, boundaries }
+                CaretLine {
+                    text: String::from_utf16_lossy(&line.text),
+                    start: line.start,
+                    x: start_x,
+                    y,
+                    baseline: y + size * BASELINE,
+                    width,
+                    boundaries,
+                }
             })
             .collect();
         CaretLayout {
@@ -202,13 +235,21 @@ impl<R: FontResolver> Compat<R> {
             let mut runs = Vec::new();
             for item in &measured.items {
                 // Runs are in logical order; an RTL item's runs read right to left.
-                let ordered: Vec<_> = if item.runs.iter().any(|r| r.rtl) { item.runs.iter().rev().collect() } else { item.runs.iter().collect() };
+                let ordered: Vec<_> = if item.runs.iter().any(|r| r.rtl) {
+                    item.runs.iter().rev().collect()
+                } else {
+                    item.runs.iter().collect()
+                };
                 for run in ordered {
                     let info = m.resolver.face(run.face);
                     let mut glyphs = Vec::with_capacity(run.glyphs.len());
                     for g in &run.glyphs {
                         if g.glyph != UNMATCHED_VS_GLYPH {
-                            glyphs.push(PlacedGlyph { id: g.glyph, x: pen + g.x_offset as f64 / 65536.0, y: baseline - g.y_offset as f64 / 65536.0 });
+                            glyphs.push(PlacedGlyph {
+                                id: g.glyph,
+                                x: pen + g.x_offset as f64 / 65536.0,
+                                y: baseline - g.y_offset as f64 / 65536.0,
+                            });
                         }
                         pen += g.advance as f64 / 65536.0;
                     }
@@ -222,7 +263,14 @@ impl<R: FontResolver> Compat<R> {
                     });
                 }
             }
-            out.push(LineRuns { text: String::from_utf16_lossy(&line.text), start: line.start, x, baseline, width, runs });
+            out.push(LineRuns {
+                text: String::from_utf16_lossy(&line.text),
+                start: line.start,
+                x,
+                baseline,
+                width,
+                runs,
+            });
         }
         out
     }
