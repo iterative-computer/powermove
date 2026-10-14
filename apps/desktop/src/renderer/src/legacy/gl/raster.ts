@@ -701,11 +701,11 @@ async function stillRendition(meta: any, original: Blob, onStage?: (label: strin
   if (key && PM.MediaStore?.keepsOriginals) await PM.MediaStore.rendition.put(key, png);
   return png;
 }
-async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
+async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any): Promise<any> {
   if (keepsStillOriginal(kind, meta)) {
     const original = blob;
     blob = await stillRendition(meta, original, onStage);
-    const prepared = await prepareAsset({ id, name, kind, blob, meta: { ...meta, rendition: false }, onStage });
+    const prepared: any = await prepareAsset({ id, name, kind, blob, meta: { ...meta, rendition: false }, onStage });
     return Object.assign(prepared, { size: original.size || meta.size || prepared.size, rendition: true });
   }
   const imageSequence = importedSequences.get(blob) || meta.imageSequence;
