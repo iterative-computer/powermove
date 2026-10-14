@@ -45,6 +45,12 @@ pub struct Segment {
     pub epoch: u32,
     /// A scrub grain `[start, end)`: fade in and out at its edges.
     pub grain: Option<(i64, i64)>,
+    /// The loop range (sample-aligned, in ticks) when the segment starts
+    /// inside it and the run wraps at its end: the clock line of what is
+    /// heard from this segment on wraps by it (contract 6). `None` before
+    /// the loop start, past the loop end, in a play around, and in a grain,
+    /// where the line runs straight.
+    pub loop_range: Option<TickRange>,
 }
 
 /// What a command changed.
@@ -131,6 +137,16 @@ impl Transport {
     /// Media ticks of a project sample (exact for supported rates).
     pub fn ticks_of(&self, sample: i64) -> i64 {
         (sample as i128 * TICKS_PER_SECOND as i128 / self.rate as i128) as i64
+    }
+
+    /// The loop the audio wraps at, `[a, b)` in samples, as ticks: the
+    /// clock wraps where the audio does, every pass exactly as long.
+    fn loop_ticks_of(&self, a: i64, b: i64) -> TickRange {
+        use pm_protocol::common::Ticks;
+        TickRange {
+            start: Ticks::saturating_from_i128(self.ticks_of(a) as i128),
+            end: Ticks::saturating_from_i128(self.ticks_of(b) as i128),
+        }
     }
 
     fn sample_of(&self, ticks: i64) -> i64 {
@@ -300,6 +316,7 @@ impl Transport {
                     state,
                     epoch: self.epoch,
                     grain: Some((start, end)),
+                    loop_range: None,
                 };
                 self.position += n as i64;
                 Some(seg)
@@ -326,12 +343,19 @@ impl Transport {
                     return None;
                 }
                 let n = ((limit - self.position) as usize).min(max);
+                // Only a segment inside the loop wraps; one that starts
+                // before the loop start (a run from an earlier playhead) is
+                // a straight line until the next segment, inside the loop.
+                let loop_range = looping
+                    .filter(|&(a, _)| self.position >= a)
+                    .map(|(a, b)| self.loop_ticks_of(a, b));
                 let seg = Segment {
                     start: self.position,
                     frames: n,
                     state,
                     epoch: self.epoch,
                     grain: None,
+                    loop_range,
                 };
                 self.position += n as i64;
                 if let Some((a, b)) = looping
@@ -419,6 +443,58 @@ mod tests {
         );
         assert_eq!(tr.apply(&TransportCommand::Pause).unwrap(), Effect::Stopped);
         assert!(tr.next(256).is_none());
+    }
+
+    /// A run from before the loop plays straight into it, then wraps; only
+    /// the segments inside the loop carry its range. A run from past the
+    /// loop end plays straight to the end and carries none.
+    #[test]
+    fn a_run_before_the_loop_carries_the_range_only_inside_it() {
+        let mut tr = Transport::new(48_000);
+        tr.set_composition(Some(Rate::FPS_30), Some(20 * TICKS_PER_SECOND));
+        let range = TickRange {
+            start: t(10.0),
+            end: t(12.0),
+        };
+        tr.apply(&TransportCommand::SetLoop { range: Some(range) })
+            .unwrap();
+        tr.apply(&TransportCommand::Seek {
+            time: t(5.0),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+        tr.apply(&TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+        let mut expect = 5 * 48_000;
+        let mut wrapped = false;
+        for _ in 0..2_000 {
+            let s = tr.next(1_000).unwrap();
+            if s.start != expect {
+                assert_eq!((expect, s.start), (12 * 48_000, 10 * 48_000), "wrap");
+                wrapped = true;
+            }
+            if s.start >= 10 * 48_000 {
+                assert_eq!(s.loop_range, Some(range), "inside at {}", s.start);
+            } else {
+                assert_eq!(s.loop_range, None, "before the loop at {}", s.start);
+            }
+            expect = s.start + s.frames as i64;
+        }
+        assert!(wrapped);
+        // From past the loop end: straight to the composition end.
+        tr.apply(&TransportCommand::Seek {
+            time: t(15.0),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+        let mut last = 0;
+        while let Some(s) = tr.next(4_096) {
+            assert_eq!(s.loop_range, None);
+            last = s.start + s.frames as i64;
+        }
+        assert_eq!(last, 20 * 48_000);
     }
 
     #[test]

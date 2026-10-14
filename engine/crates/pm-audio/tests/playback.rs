@@ -984,3 +984,153 @@ fn a_pause_during_a_seek_pre_roll_stops_at_the_target() {
     assert_eq!(stopped.state, TransportState::Stopped);
     assert_eq!(stopped.media_time, ticks(4.0), "paused at the seek target");
 }
+
+/// A run from a playhead before the loop (the work area set, the playhead
+/// before it, play): the audio plays straight into the loop and then wraps,
+/// and every published sample names what the device presents. Samples
+/// before the loop carry no loop range (a line that wrapped by it would put
+/// the listener inside the loop); samples inside carry it. On a device at
+/// the project rate and through the converter at 44.1 kHz.
+#[test]
+fn a_run_from_before_the_loop_is_on_the_clock() {
+    let dir = temp_dir("pre-loop");
+    let file = ramp_file(&dir, 6);
+    for device in [SR, 44_100] {
+        let (playback, mut dev, _rig) = setup(&file, 6.0, device, 0.0);
+        let (lo, hi) = (2.0, 2.5);
+        playback
+            .command(TransportCommand::SetLoop {
+                range: Some(TickRange {
+                    start: ticks(lo),
+                    end: ticks(hi),
+                }),
+            })
+            .unwrap();
+        playback
+            .command(TransportCommand::Seek {
+                time: ticks(1.0),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        playback
+            .command(TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        let mut samples: Vec<ClockSample> = vec![];
+        let mut worst_s = 0f64;
+        let (mut before, mut inside) = (0, 0);
+        // About 2.3 s at 512 frames a buffer: 1 s before the loop, then
+        // more than two passes.
+        let buffers = (2.3 * device as f64 / BUFFER as f64) as usize;
+        let exact = device == SR;
+        for _ in 0..buffers {
+            dev.run(1);
+            let (host, buf) = dev.log.last().unwrap().clone();
+            if let Some(s) = playback.clock()
+                && samples.last().is_none_or(|l| l.seq != s.seq)
+            {
+                samples.push(s);
+            }
+            let marked = if exact {
+                buf[1] == 0.5
+            } else {
+                (buf[1] - 0.5).abs() < 0.01
+            };
+            let Some(s) = samples.last() else { continue };
+            if !marked || s.state != TransportState::Playing {
+                continue;
+            }
+            let actual = position_of(buf[0]) as f64 / SR as f64;
+            // Through the converter, the sinc smears each wrap over about
+            // 5 ms; and its DC gain scales the ramp by a few ppm.
+            if !exact && ((actual - lo).abs() < 0.01 || (actual - hi).abs() < 0.01) {
+                continue;
+            }
+            let predicted = s
+                .media_time_at(HostMicros::new(host + LATENCY_US as u64).unwrap())
+                .get() as f64
+                / TICKS_PER_SECOND as f64;
+            worst_s = worst_s.max((predicted - actual).abs());
+            if actual < lo {
+                before += 1;
+                assert_eq!(s.loop_range, None, "before the loop at {actual}");
+            } else {
+                inside += 1;
+            }
+        }
+        let playing: Vec<&ClockSample> = samples
+            .iter()
+            .filter(|s| s.state == TransportState::Playing)
+            .collect();
+        assert!(before > 60 && inside > 60, "{before} before, {inside} inside");
+        assert!(playing.iter().all(|s| s.epoch == playing[0].epoch));
+        let entered = playing
+            .iter()
+            .position(|s| s.loop_range.is_some())
+            .expect("the line wraps once inside the loop");
+        assert!(playing[entered..].iter().all(|s| s.loop_range.is_some()));
+        // Published at the refresh rate (about 2.3 s: ~23 refreshes plus
+        // the loop entry), not on every callback.
+        assert!(
+            playing.len() <= 30,
+            "{} samples for {buffers} buffers",
+            playing.len()
+        );
+        let bound = if exact { 60e-6 } else { 1e-3 };
+        eprintln!(
+            "device {device} Hz, loop from before: {} samples, worst |predicted − presented| {:.1} µs",
+            playing.len(),
+            worst_s * 1e6
+        );
+        assert!(worst_s < bound, "worst {:.1} µs", worst_s * 1e6);
+        drop(playback);
+    }
+}
+
+/// A pause during the run before the loop stops where the listener is, not
+/// inside the loop.
+#[test]
+fn a_pause_before_the_loop_stops_where_heard() {
+    let dir = temp_dir("pre-loop-pause");
+    let file = ramp_file(&dir, 6);
+    let (playback, mut dev, _rig) = setup(&file, 6.0, SR, 0.0);
+    playback
+        .command(TransportCommand::SetLoop {
+            range: Some(TickRange {
+                start: ticks(4.0),
+                end: ticks(4.5),
+            }),
+        })
+        .unwrap();
+    playback
+        .command(TransportCommand::Seek {
+            time: ticks(1.0),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    dev.run(60);
+    let (last_host, last_buf) = dev
+        .log
+        .iter()
+        .rev()
+        .find(|(_, b)| b[1] == 0.5)
+        .unwrap()
+        .clone();
+    playback.command(TransportCommand::Pause).unwrap();
+    let stopped = playback.clock().unwrap();
+    assert_eq!(stopped.state, TransportState::Stopped);
+    assert_eq!(stopped.loop_range, None);
+    let heard_now = position_of(last_buf[0]) as f64 / SR as f64
+        + (host_now_us() as f64 - (last_host + LATENCY_US as u64) as f64) / 1e6;
+    let paused_at = stopped.media_time.get() as f64 / TICKS_PER_SECOND as f64;
+    assert!(
+        paused_at < 4.0 && (paused_at - heard_now).abs() < 0.03,
+        "paused at {paused_at}, heard {heard_now}"
+    );
+}

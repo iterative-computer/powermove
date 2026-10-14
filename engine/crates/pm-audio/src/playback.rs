@@ -29,7 +29,7 @@ use std::time::Duration;
 use pm_eval::Evaluator;
 use pm_model::Document;
 use pm_protocol::clock::{ClockSample, TransportCommand, TransportState};
-use pm_protocol::common::TICKS_PER_SECOND;
+use pm_protocol::common::{TICKS_PER_SECOND, TickRange};
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType};
 
@@ -42,7 +42,7 @@ use crate::meter::Meters;
 use crate::mixer::{MixFormat, Mixer, RenderOptions};
 use crate::ring::{CHUNK, Consumer, Ring, Tag};
 use crate::source::SourceCache;
-use crate::transport::{Effect, Transport};
+use crate::transport::{Effect, Segment, Transport};
 
 /// Groups of control points ([`crate::mixer::READ_GROUP`]) of time-mapped
 /// voices the look-ahead bounds per turn of the render loop: 4 to 7 ms of
@@ -91,7 +91,6 @@ impl DeviceSide {
             if self.shared.reanchor.swap(false, Ordering::Relaxed) {
                 self.core.invalidate();
             }
-            self.core.loop_range = self.shared.loop_range();
             if let Some(s) = self.core.observe(h, host_us + latency as u64, latency) {
                 self.pending = Some(s);
             }
@@ -133,25 +132,10 @@ struct Shared {
     clock: ClockSlot,
     latency_us: AtomicU32,
     reanchor: AtomicBool,
-    loop_start: AtomicU64,
-    loop_end: AtomicU64,
     meters: Mutex<VecDeque<Meters>>,
     errors: Mutex<Vec<String>>,
     starved: AtomicU64,
     device_rate: u32,
-}
-
-impl Shared {
-    fn loop_range(&self) -> Option<pm_protocol::common::TickRange> {
-        let (a, b) = (
-            self.loop_start.load(Ordering::Relaxed),
-            self.loop_end.load(Ordering::Relaxed),
-        );
-        (b > a).then(|| pm_protocol::common::TickRange {
-            start: pm_protocol::common::Ticks::saturating_from_i128(a as i64 as i128),
-            end: pm_protocol::common::Ticks::saturating_from_i128(b as i64 as i128),
-        })
-    }
 }
 
 /// Playback of one composition.
@@ -229,8 +213,6 @@ impl Playback {
             clock: ClockSlot::default(),
             latency_us: AtomicU32::new(latency_us),
             reanchor: AtomicBool::new(false),
-            loop_start: AtomicU64::new(0),
-            loop_end: AtomicU64::new(0),
             meters: Mutex::new(VecDeque::new()),
             errors: Mutex::new(Vec::new()),
             starved: AtomicU64::new(0),
@@ -438,6 +420,8 @@ struct Run {
     /// Media ticks of its first frame.
     ticks: i64,
     state: TransportState,
+    /// The loop its clock line wraps by.
+    loop_range: Option<TickRange>,
 }
 
 /// Project-to-device rate conversion with its media bookkeeping.
@@ -561,6 +545,7 @@ impl Converter {
         ticks: i64,
         epoch: u32,
         state: TransportState,
+        loop_range: Option<TickRange>,
         ring_channels: usize,
         out: &mut Vec<(Tag, Vec<f32>)>,
     ) {
@@ -569,7 +554,11 @@ impl Converter {
             self.epoch = Some(epoch);
         }
         match self.runs.back_mut() {
-            Some(run) if self.next_input == Some(start) && run.state == state => {
+            Some(run)
+                if self.next_input == Some(start)
+                    && run.state == state
+                    && run.loop_range == loop_range =>
+            {
                 run.frames += frames as u64;
             }
             _ => self.runs.push_back(Run {
@@ -577,6 +566,7 @@ impl Converter {
                 frames: frames as u64,
                 ticks,
                 state,
+                loop_range,
             }),
         }
         self.next_input = Some(start + frames as i64);
@@ -709,6 +699,7 @@ impl Converter {
                     epoch,
                     state: run.state,
                     frames: n as u32,
+                    loop_range: run.loop_range,
                 },
                 inter,
             ));
@@ -879,15 +870,6 @@ impl RenderThread {
                     }
                     _ => false,
                 };
-                if let TransportCommand::SetLoop { .. } = cmd {
-                    let r = self.transport.loop_range();
-                    self.shared
-                        .loop_start
-                        .store(r.map_or(0, |r| r.start.get() as u64), Ordering::Relaxed);
-                    self.shared
-                        .loop_end
-                        .store(r.map_or(0, |r| r.end.get() as u64), Ordering::Relaxed);
-                }
                 let _ = reply.send(result.map(|_| ()));
                 restart
             }
@@ -964,13 +946,17 @@ impl RenderThread {
         false
     }
 
+    /// Publishes a stopped line at the transport's position. Every stop
+    /// (pause, seek while paused, the end of a run) has moved the transport
+    /// to a new epoch first, so a sample of the run the device callback
+    /// stores afterwards (a higher `seq` on the older epoch) never replaces
+    /// it: the slot orders by `(epoch, seq)`.
     fn publish_stopped(&mut self) {
         if self.stopped_published {
             return;
         }
         let ticks = self.transport.ticks_of(self.transport.position());
         let latency = self.shared.latency_us.load(Ordering::Relaxed);
-        self.core.loop_range = self.shared.loop_range();
         let s = self
             .core
             .stopped(self.transport.epoch(), ticks, host_now_us(), latency);
@@ -1063,7 +1049,7 @@ impl RenderThread {
             }
             let ticks = self.transport.ticks_of(seg.start);
             if self.converter.is_some() {
-                self.push_converted(&planar, seg.start, seg.frames, ticks, seg.epoch, seg.state);
+                self.push_converted(&planar, &seg, ticks);
             } else {
                 let mut inter = Vec::with_capacity(seg.frames * self.ring_channels);
                 for i in 0..seg.frames {
@@ -1076,6 +1062,7 @@ impl RenderThread {
                     epoch: seg.epoch,
                     state: seg.state,
                     frames: seg.frames as u32,
+                    loop_range: seg.loop_range,
                 };
                 while !self.ring.push(tag, &inter) {
                     std::thread::sleep(Duration::from_millis(1));
@@ -1084,26 +1071,18 @@ impl RenderThread {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn push_converted(
-        &mut self,
-        planar: &[Vec<f32>],
-        start: i64,
-        frames: usize,
-        ticks: i64,
-        epoch: u32,
-        state: TransportState,
-    ) {
+    fn push_converted(&mut self, planar: &[Vec<f32>], seg: &Segment, ticks: i64) {
         let ring_channels = self.ring_channels;
         let mut chunks = Vec::new();
         let c = self.converter.as_mut().expect("converter");
         c.feed(
             planar,
-            start,
-            frames,
+            seg.start,
+            seg.frames,
             ticks,
-            epoch,
-            state,
+            seg.epoch,
+            seg.state,
+            seg.loop_range,
             ring_channels,
             &mut chunks,
         );

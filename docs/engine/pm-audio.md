@@ -196,9 +196,20 @@ consumers ◀───────────── ClockSlot ◀── clock s
   the old line); the end of a run (composition end, play-around end, a scrub grain)
   stops once the queued audio has played out.
 - **Loop.** Chunks end at the loop end and the next starts at the loop start: sample-exact
-  wraps. Clock samples carry the loop range and keep their epoch across wraps (contract 6
-  invariant 1 wraps the line; invariant 2 now says so); a changed loop range publishes
-  a new sample at once.
+  wraps. A run from a playhead before the loop plays straight into it and then wraps (as
+  legacy `engine.ts`); a run from past the loop end plays to the composition end. The
+  loop range travels with the audio: the transport marks each segment that starts inside
+  the loop and wraps at its end, the ring chunk (and the converter's media run) carries
+  that range, and the device callback publishes the range of the chunk it hears. So a
+  clock sample carries the loop range only while its line is inside the loop; before the
+  loop, past it, and when stopped it carries none (contract 6 invariant 1 wraps any line
+  that carries a range, so a range on the run before the loop would put the listener
+  inside it). The published range is the sample-aligned one the audio wraps at. Samples
+  keep their epoch across wraps (invariant 2); entering the loop or a changed range
+  publishes a new sample at once. (Before, every sample carried the transport's range:
+  from 1.0 s with a loop [2.0, 2.5) every consumer derived a position inside the loop
+  while 1.0 s played, the line republished on every callback, and a pause stopped inside
+  the loop.)
 - **Audio scrub** (contract 6 open question 2): rides on `Shuttling` samples. A scrub seek
   or frame step while paused, with audio scrub on, plays a grain of one composition frame
   or 60 ms, whichever is longer, with 4 ms fades.
@@ -255,7 +266,11 @@ frames apart within 0.0006 frames, each pass ends where the next begins within
 0.0005 project samples, and the clock line names the heard position within 0.06 samples;
 the last 0.5 s of a run lasts exactly 22,050 device frames and reaches the composition's
 end. A mono device hears ½(L + R); a pause sent during a seek's pre-roll stops on the
-seek target. Pause, seek, scrub grains, and a device change behave.
+seek target. Pause, seek, scrub grains, and a device change behave. A run from 1.0 s
+into a loop [2.0, 2.5): every presented buffer is within 0.7 µs of the published line at
+48 kHz (19.4 µs through the 44.1 kHz converter, away from the smeared wraps), with
+23 samples in 2.3 s (refreshes plus the loop entry, not one a callback); a pause before
+the loop stops where the listener is.
 
 Measured on the real output (`examples/device_probe`, 5 s, 2026-10-13; the default output
 was Bluetooth AirPods Pro at 48 kHz, 512-frame buffers): device plus stream latency 7,680
