@@ -93,6 +93,10 @@ const RUNS = [
   { name: 'playback-cprime-25-idle', ...playback, mode: 'engine', load: false, remoteLayer: true, fps: 25, placement: 'behind' },
   { name: 'playback-cprime-25-rate-idle', ...playback, mode: 'engine', load: false, remoteLayer: true, fps: 25, placement: 'behind', env: { POWERMOVE_BRIDGE_REMOTE_RATE: '1' } },
   { name: 'playback-engine-25-idle', ...playback, mode: 'engine', load: false, fps: 25 },
+  // The Chromium path with main asking for the multiple through public API
+  // (a display link with a preferred rate; Electron has no request of its own).
+  { name: 'playback-engine-25-idle-behind', ...playback, mode: 'engine', load: false, fps: 25, placement: 'behind' },
+  { name: 'playback-engine-25-rate-idle', ...playback, mode: 'engine', load: false, fps: 25, placement: 'behind', mainRate: true },
   { name: 'playback-engine-load-noautosave-phaseoff', ...playback, mode: 'engine', load: true, loadProfile: 'no-autosave', env: { POWERMOVE_BRIDGE_PHASE: 'off' } },
   { name: 'playback-engine-idle-phaseoff', ...playback, mode: 'engine', load: false, env: { POWERMOVE_BRIDGE_PHASE: 'off' } },
   // The real app (amendment 18). Load: the gate profile without the
@@ -686,7 +690,7 @@ try {
     try {
       summary = {
         run: name,
-        config: { scenario: run.scenario, app: !!run.app, remoteLayer: !!run.remoteLayer, placement: run.placement ?? 'offscreen', env: run.env, mode: run.mode, load: run.load, loadProfile: run.load ? (run.loadProfile ?? 'gate') : null, edr: run.edr ?? 'auto', rawInput: !!run.rawInput, rawGestures: run.app && run.mode === 'engine' ? run.rawGestures !== false : undefined, offMainThread: run.app && run.mode === 'engine' ? run.offMainThread !== false : undefined, fps: run.fps ?? (run.app ? 30 : 60), lead: run.lead ?? 4, durationMs: run.durationMs, inputModes: run.inputModes },
+        config: { scenario: run.scenario, app: !!run.app, mainRate: run.mainRate || undefined, remoteLayer: !!run.remoteLayer, placement: run.placement ?? 'offscreen', env: run.env, mode: run.mode, load: run.load, loadProfile: run.load ? (run.loadProfile ?? 'gate') : null, edr: run.edr ?? 'auto', rawInput: !!run.rawInput, rawGestures: run.app && run.mode === 'engine' ? run.rawGestures !== false : undefined, offMainThread: run.app && run.mode === 'engine' ? run.offMainThread !== false : undefined, fps: run.fps ?? (run.app ? 30 : 60), lead: run.lead ?? 4, durationMs: run.durationMs, inputModes: run.inputModes },
         versions: raw.versions,
         display: raw.display,
         ...(from ? {} : { displayState: { before: displayBefore, after: displayAfter } }),
@@ -696,6 +700,7 @@ try {
         clock: raw.clock,
         load: raw.load ? { ...raw.load, events: undefined, eventCount: raw.load.events?.length } : null,
         bridge: raw.bridge,
+        ...(raw.mainRate ? { mainRate: raw.mainRate } : {}),
         ...(run.scenario === 'playback'
           ? run.remoteLayer
             ? { playback: analyzeRemote(raw, fs.existsSync(remoteTrace) ? fs.readFileSync(remoteTrace, 'utf8') : '', fs.existsSync(`${remoteTrace}.ticks`) ? fs.readFileSync(`${remoteTrace}.ticks`, 'utf8') : '') }

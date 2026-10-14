@@ -674,6 +674,105 @@ mod harness {
         fn CFRelease(cf: *const std::ffi::c_void);
     }
 
+    /// `CAFrameRateRange` (QuartzCore, macOS 12).
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct FrameRateRange {
+        minimum: f32,
+        maximum: f32,
+        preferred: f32,
+    }
+
+    // SAFETY: the layout and encoding of `CAFrameRateRange`.
+    unsafe impl objc2::Encode for FrameRateRange {
+        const ENCODING: objc2::Encoding = objc2::Encoding::Struct(
+            "CAFrameRateRange",
+            &[
+                objc2::Encoding::Float,
+                objc2::Encoding::Float,
+                objc2::Encoding::Float,
+            ],
+        );
+    }
+
+    /// Display link callbacks seen while a main-process rate request lives
+    /// (`targetTimestamp - timestamp` would be the link's own period; the
+    /// spacing of `timestamp`s is the panel's).
+    static RATE_TICKS: std::sync::Mutex<Vec<f64>> = std::sync::Mutex::new(Vec::new());
+
+    objc2::define_class!(
+        /// The main-process display link's target: records refresh times.
+        #[unsafe(super(objc2_foundation::NSObject))]
+        struct RateTicker;
+
+        impl RateTicker {
+            #[unsafe(method(tick:))]
+            fn tick(&self, link: &objc2::runtime::AnyObject) {
+                // SAFETY: CADisplayLink's timestamp property.
+                let now: f64 = unsafe { objc2::msg_send![link, timestamp] };
+                if let Ok(mut ticks) = RATE_TICKS.lock()
+                    && ticks.len() < 100_000
+                {
+                    ticks.push(now);
+                }
+            }
+        }
+    );
+
+    thread_local! {
+        /// The live main-process rate request (main thread only).
+        static RATE_LINK: std::cell::RefCell<Option<objc2::rc::Retained<objc2::runtime::AnyObject>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Section 15's ProMotion request from Electron's main process, through
+    /// public API: a display link on the main screen
+    /// (`-[NSScreen displayLinkWithTarget:selector:]`, macOS 14) whose
+    /// `preferredFrameRateRange` is exactly `hz`, on main's run loop.
+    /// Electron has no refresh-rate request for its compositor
+    /// (`webContents.setFrameRate` is offscreen rendering only), so this is
+    /// the measurement of whether an app-level request reaches the panel
+    /// while Chromium draws. `hz` 0 removes the request. Returns the refresh
+    /// times recorded since the previous call (seconds, host clock).
+    #[napi]
+    pub fn request_refresh_rate(hz: f64) -> Result<Vec<f64>> {
+        use objc2::msg_send;
+        use objc2::rc::Retained;
+        use objc2::runtime::{AnyClass, AnyObject};
+        objc2_foundation::MainThreadMarker::new().ok_or_else(|| err("not on the main thread"))?;
+        let ticks = std::mem::take(&mut *RATE_TICKS.lock().unwrap_or_else(|e| e.into_inner()));
+        RATE_LINK.with(|slot| -> Result<()> {
+            if let Some(old) = slot.borrow_mut().take() {
+                // SAFETY: a link we made on this thread.
+                let _: () = unsafe { msg_send![&*old, invalidate] };
+            }
+            if hz <= 0.0 {
+                return Ok(());
+            }
+            // SAFETY: AppKit and Core Animation on the main thread.
+            unsafe {
+                let screen: Option<Retained<AnyObject>> =
+                    msg_send![AnyClass::get(c"NSScreen").ok_or_else(|| err("no AppKit"))?, mainScreen];
+                let screen = screen.ok_or_else(|| err("no main screen"))?;
+                let target: Retained<RateTicker> = msg_send![<RateTicker as objc2::ClassType>::class(), new];
+                let link: Option<Retained<AnyObject>> = msg_send![&*screen, displayLinkWithTarget: &*target, selector: objc2::sel!(tick:)];
+                let link = link.ok_or_else(|| err("no display link"))?;
+                let range = FrameRateRange {
+                    minimum: hz as f32,
+                    maximum: hz as f32,
+                    preferred: hz as f32,
+                };
+                let _: () = msg_send![&*link, setPreferredFrameRateRange: range];
+                let run_loop: Retained<AnyObject> =
+                    msg_send![AnyClass::get(c"NSRunLoop").ok_or_else(|| err("no NSRunLoop"))?, mainRunLoop];
+                let _: () = msg_send![&*link, addToRunLoop: &*run_loop, forMode: objc2_foundation::NSRunLoopCommonModes];
+                *slot.borrow_mut() = Some(link);
+            }
+            Ok(())
+        })?;
+        Ok(ticks)
+    }
+
     /// Whether a measurement can see the panel: the main display awake and
     /// the session unlocked (S1 harness runs record it and refuse to
     /// measure otherwise).

@@ -49,6 +49,11 @@ type Config = {
   placement?: 'offscreen' | 'behind';
   /** Latency: input modes to run, each for `durationMs`. */
   inputModes?: ('drag' | 'orbit' | 'walk' | 'baseline')[];
+  /** Content rate of the engine's test source (default 60). */
+  fps?: number;
+  /** Main asks the display for a multiple of the content rate while playback
+   *  is recorded (section 15, through public API: `requestRefreshRate`). */
+  mainRate?: boolean;
   out: string;
   trace: string;
 };
@@ -58,6 +63,7 @@ type HarnessAddon = {
   placeBehindDesktop(viewHandle: Buffer): number;
   hostRemoteLayer(viewHandle: Buffer, contextId: number, x: number, y: number, width: number, height: number): number;
   removeRemoteLayer(id: number): boolean;
+  requestRefreshRate(hz: number): number[];
   InputGenerator: new (hz: number, durationMs: number, kind: number, callback: (input: { seq: number; tsUs: number; x: number; y: number }) => void) => { stop(): void };
 };
 
@@ -239,12 +245,31 @@ async function main(): Promise<void> {
     }
 
     if (cfg.scenario === 'playback') {
+      // Section 15: the largest multiple of the content rate the panel can show.
+      const panelHz = screen.getPrimaryDisplay().displayFrequency || 60;
+      const fps = cfg.fps ?? 60;
+      const rateHz = fps >= panelHz ? panelHz : Math.floor(panelHz / fps + 1e-9) * fps;
+      if (cfg.mainRate) {
+        harness.requestRefreshRate(rateHz);
+        log(`main asks the display for ${rateHz} Hz`);
+      }
       await call(`window.__measure.transport({ command: 'play', rate: { num: 1, den: 1 } })`);
       await sleep(1500);
       await call('window.__measure.reset()');
+      if (cfg.mainRate) harness.requestRefreshRate(rateHz);
       const startMs = await call<number>(`window.__measure.mark('pm-record-start')`);
       await sleep(cfg.durationMs);
       const endMs = await call<number>(`window.__measure.mark('pm-record-end')`);
+      if (cfg.mainRate) {
+        // The refresh times main's display link saw while recording.
+        const ticks = harness.requestRefreshRate(0);
+        const histogram: Record<string, number> = {};
+        for (let i = 1; i < ticks.length; i++) {
+          const ms = ((ticks[i]! - ticks[i - 1]!) * 1000).toFixed(1);
+          histogram[ms] = (histogram[ms] ?? 0) + 1;
+        }
+        result['mainRate'] = { requestedHz: rateHz, panelHz, callbacks: ticks.length, intervalsMs: histogram };
+      }
       result['window'] = { startMs, endMs };
       result['page'] = await call('window.__measure.collect()');
       await call(`window.__measure.transport({ command: 'pause' })`);
