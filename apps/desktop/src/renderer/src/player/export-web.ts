@@ -91,7 +91,9 @@ export function inspectWebExport(PM: any) {
  * takes the rendition, or the bytes the live asset shows.
  */
 async function browserRendition(PM: any, meta: any): Promise<Blob | null> {
-  const kept = meta.storageKey ? await PM.MediaStore?.rendition?.get?.(meta.storageKey).catch(() => null) : null;
+  // Renditions are named by the original's content hash (a linked original's is its link's).
+  const original = typeof meta.contentHash === 'string' ? meta.contentHash : meta.link?.hash;
+  const kept = original ? await PM.MediaStore?.rendition?.get?.(original).catch(() => null) : null;
   if (kept) return kept;
   const url = PM.assets?.get?.(meta.id)?.url;
   if (typeof url === 'string' && url.startsWith('blob:')) {

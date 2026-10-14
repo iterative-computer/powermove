@@ -77,11 +77,11 @@ describe('portable web export', () => {
 
   it('takes the browser rendition of media whose original the new engine keeps', async () => {
     const PM = fixture();
-    PM.proj.assets = { clip: { id: 'clip', kind: 'video', name: 'A001.mov', storageKey: 'media:v2:p', rendition: true, playbackProxy: false } };
+    PM.proj.assets = { clip: { id: 'clip', kind: 'video', name: 'A001.mov', storageKey: 'media:v2:p', contentHash: 'c'.repeat(64), rendition: true, playbackProxy: false } };
     PM.proj.layers.push(PM.mkLayer('video', { d: { asset: 'clip' } }, PM.proj));
     const originals: string[] = [];
     PM.MediaStore.get = async (meta: any) => { originals.push(meta.id); return new Blob(['prores'], { type: 'video/quicktime' }); };
-    (PM.MediaStore as any).rendition = { get: async (key: string) => (key === 'media:v2:p' ? new Blob(['vp9'], { type: 'video/webm' }) : null) };
+    (PM.MediaStore as any).rendition = { get: async (hash: string) => (hash === 'c'.repeat(64) ? new Blob(['vp9'], { type: 'video/webm' }) : null) };
     const result = await buildWebExport(PM);
     expect(originals).toEqual([]);
     expect(result.scene.assets.clip).toMatch(/\.webm$/);

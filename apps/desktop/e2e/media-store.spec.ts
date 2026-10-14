@@ -139,7 +139,7 @@ test.describe('media store with Use New Engine on', () => {
     expect(proresMeta).toMatchObject({ playbackProxy: false, rendition: true, contentHash: await hashOf(prores) });
     const proresRecords = await storeRecords(session);
     expect(proresRecords.find((record: any) => record.key === proresMeta.storageKey)?.hash).toBe(await hashOf(prores));
-    expect(proresRecords.find((record: any) => record.key === `${proresMeta.storageKey}:rendition`)).toMatchObject({ source: 'rendition' });
+    expect(proresRecords.find((record: any) => record.key === `rendition:${proresMeta.contentHash}`)).toMatchObject({ source: 'rendition' });
 
     // Link to files.
     await setImportMode(page, 'link');
@@ -168,7 +168,7 @@ test.describe('media store with Use New Engine on', () => {
     expect(asset).toMatchObject({ kind: 'image', format: 'tiff', rendition: true, contentHash: await hashOf(tiff), size: (await stat(tiff)).size });
     const records = await storeRecords(session);
     expect(records.find((record: any) => record.key === asset.storageKey)).toMatchObject({ hash: await hashOf(tiff), source: 'import' });
-    expect(records.find((record: any) => record.key === `${asset.storageKey}:rendition`)).toMatchObject({ type: 'image/png', source: 'rendition' });
+    expect(records.find((record: any) => record.key === `rendition:${asset.contentHash}`)).toMatchObject({ type: 'image/png', source: 'rendition' });
     await expect.poll(() => engineRead(session, id).then((read) => read.hash).catch((error) => String(error))).toBe(await hashOf(tiff));
 
     const restore = () => page.evaluate(async (id) => {
@@ -180,9 +180,9 @@ test.describe('media store with Use New Engine on', () => {
     }, id);
     expect(await restore()).toMatchObject({ restored: 1, missing: 0, w: asset.w, h: asset.h });
     // Generated media can go; the next open converts the kept original again.
-    await session.app.evaluate(async (_e, key) => (globalThis as any).__powermoveMediaStore.store.removeKey(key), `${asset.storageKey}:rendition`);
+    await session.app.evaluate(async (_e, key) => (globalThis as any).__powermoveMediaStore.store.removeKey(key), `rendition:${asset.contentHash}`);
     expect(await restore()).toMatchObject({ restored: 1, missing: 0, w: asset.w, h: asset.h });
-    expect((await storeRecords(session)).find((record: any) => record.key === `${asset.storageKey}:rendition`)).toMatchObject({ type: 'image/png' });
+    expect((await storeRecords(session)).find((record: any) => record.key === `rendition:${asset.contentHash}`)).toMatchObject({ type: 'image/png' });
 
     // Linked: the HEIF stays where it is; only its rendition is generated media.
     await setImportMode(page, 'link');
@@ -192,7 +192,7 @@ test.describe('media store with Use New Engine on', () => {
     expect(linked).toMatchObject({ storage: 'linked', rendition: true, link: { path: heic, hash: await hashOf(heic) } });
     const after = await storeRecords(session);
     expect(after.some((record: any) => record.key === linked.storageKey)).toBe(false);
-    expect(after.find((record: any) => record.key === `${linked.storageKey}:rendition`)).toMatchObject({ type: 'image/png' });
+    expect(after.find((record: any) => record.key === `rendition:${linked.link.hash}`)).toMatchObject({ type: 'image/png' });
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 

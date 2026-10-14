@@ -159,13 +159,21 @@ describe('host media store (new engine on)', () => {
     expect(await bytesOf(await store.get(offline))).toEqual(original);
   });
 
-  it('keeps browser renditions as generated media under their own key', async () => {
+  it('keeps browser renditions as generated media named by the original they render', async () => {
     const { host, keys } = fakeHost();
     const store = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
+    const a = blake3Hex(data(64, 1)), b = blake3Hex(data(64, 2));
+    expect(await store.rendition.get(a)).toBeNull();
+    expect(await store.rendition.put(a, new Blob([data(10, 1)], { type: 'video/webm' }))).toBe(true);
+    expect(await store.rendition.put(b, new Blob([data(10, 2)], { type: 'video/webm' }))).toBe(true);
+    expect(keys.get(renditionKey(a))).toMatchObject({ key: `rendition:${a}`, source: 'rendition', type: 'video/webm' });
+    // Two originals that share a storage key keep their own renditions.
+    expect(await bytesOf(await store.rendition.get(a))).toEqual(data(10, 1));
+    expect(await bytesOf(await store.rendition.get(b))).toEqual(data(10, 2));
+    // Without the original's hash there is nothing to name a rendition by.
+    expect(await store.rendition.put(null, new Blob([data(3)]))).toBe(false);
+    expect(await store.rendition.put('media:v2:p', new Blob([data(3)]))).toBe(false);
     expect(await store.rendition.get('media:v2:p')).toBeNull();
-    expect(await store.rendition.put('media:v2:p', new Blob([data(10)], { type: 'video/webm' }))).toBe(true);
-    expect(keys.get(renditionKey('media:v2:p'))).toMatchObject({ source: 'rendition', type: 'video/webm' });
-    expect(await bytesOf(await store.rendition.get('media:v2:p'))).toEqual(data(10));
   });
 
   it('names stored bytes for desktop Save, migrating IndexedDB media first', async () => {
@@ -204,8 +212,8 @@ describe('content identity', () => {
     const a = new Blob([data(64, 1)]), b = new Blob([data(64, 2)]);
     await on.put('a1', a, { storageKey: 'media:v2:same' });
     await on.put('a2', b, { storageKey: 'media:v2:same' });
-    const first = { id: 'a1', storageKey: 'media:v2:same', contentHash: blake3Hex(data(64, 1)) };
-    const second = { id: 'a2', storageKey: 'media:v2:same', contentHash: blake3Hex(data(64, 2)) };
+    const first = { id: 'a1', storageKey: 'media:v2:same', contentHash: on.storedRecord(a)!.hash };
+    const second = { id: 'a2', storageKey: 'media:v2:same', contentHash: on.storedRecord(b)!.hash };
     expect(keys.get('media:v2:same')!.hash).toBe(second.contentHash);
     // The flag off, IndexedDB has neither; Save must still embed each file's own bytes.
     const off = createHostMediaStore({ host, legacy, enabled: false, sourcePath: () => null });
@@ -214,6 +222,16 @@ describe('content identity', () => {
     expect(await bytesOf(await off.get(first))).toEqual(data(64, 1));
     // Content that is gone is not replaced by whatever the key names.
     expect(await off.getForSave({ id: 'a3', storageKey: 'media:v2:same', contentHash: blake3Hex(data(64, 3)) })).toBeNull();
+  });
+
+  it('remembers the record of each stored Blob, so concurrent puts under one key keep their own hashes', async () => {
+    const { host } = fakeHost();
+    const store = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
+    const a = new Blob([data(64, 1)]), b = new Blob([data(64, 2)]);
+    await Promise.all([store.put('a1', a, { storageKey: 'media:v2:same' }), store.put('a2', b, { storageKey: 'media:v2:same' })]);
+    expect(store.storedRecord(a)!.hash).toBe(blake3Hex(data(64, 1)));
+    expect(store.storedRecord(b)!.hash).toBe(blake3Hex(data(64, 2)));
+    expect(store.storedRecord(new Blob([data(64, 1)]))).toBeNull();
   });
 
   it('never reads another file through a shared key when its own content is gone', async () => {
@@ -257,10 +275,11 @@ describe('host media store (new engine off)', () => {
   it('reuses the rendition the new engine kept', async () => {
     const { host } = fakeHost();
     const on = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: true, sourcePath: () => null });
-    await on.rendition.put('media:v2:p', new Blob([data(12)], { type: 'video/webm' }));
+    const original = blake3Hex(data(64, 7));
+    await on.rendition.put(original, new Blob([data(12)], { type: 'video/webm' }));
     const off = createHostMediaStore({ host, legacy: fakeLegacy().legacy, enabled: false, sourcePath: () => null });
-    expect(await bytesOf(await off.rendition.get('media:v2:p'))).toEqual(data(12));
-    expect(await off.rendition.put('media:v2:q', new Blob([data(3)]))).toBe(false);
+    expect(await bytesOf(await off.rendition.get(original))).toEqual(data(12));
+    expect(await off.rendition.put(blake3Hex(data(64, 8)), new Blob([data(3)]))).toBe(false);
   });
 
   it('keeps IndexedDB as the source and reads the store only for its own media', async () => {

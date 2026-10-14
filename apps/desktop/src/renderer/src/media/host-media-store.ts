@@ -27,6 +27,8 @@ const HASH_SLICE = 1024 * 1024;
 const FOLD_BYTES = 64 * 1024 * 1024;
 /** Bytes main copies per `putProjectRange` call (main's limit). */
 const PROJECT_RANGE_BYTES = 64 * 1024 * 1024;
+/** A BLAKE3 digest in hex. */
+const HASH = /^[a-f0-9]{64}$/;
 
 export type LegacyMediaStore = {
   put(id: string, blob: Blob, meta?: any, revision?: string): Promise<boolean>;
@@ -49,7 +51,7 @@ const storageKeyOf = (value: any): string | null => {
 };
 
 const contentHashOf = (value: any): string | null =>
-  value && typeof value === 'object' && typeof value.contentHash === 'string' && /^[a-f0-9]{64}$/.test(value.contentHash) ? value.contentHash : null;
+  value && typeof value === 'object' && typeof value.contentHash === 'string' && HASH.test(value.contentHash) ? value.contentHash : null;
 
 export const isLinked = (meta: any): boolean => meta?.storage === 'linked' && !!meta?.link && typeof meta.link.path === 'string';
 
@@ -125,10 +127,17 @@ export type HostMediaStore = Omit<LegacyMediaStore, 'getForSave'> & {
   readonly keepsOriginals: boolean;
   /** The store record a key last resolved to (filled by put and get). */
   recordFor(key: string | null | undefined): MediaStoreRecord | null;
+  /** The store record `put` made of this Blob. Unlike `recordFor`, it is
+   *  not taken over by a concurrent put of other bytes under the same key. */
+  storedRecord(blob: Blob): MediaStoreRecord | null;
   /** Desktop Save: bytes main copies straight from the store. */
   saveSource(asset: any): Promise<{ hash: string; size: number; type: string; revision: string } | null>;
-  /** Browser renditions (playback proxies) kept as generated media. */
-  rendition: { get(key: string): Promise<Blob | null>; put(key: string, blob: Blob): Promise<boolean> };
+  /**
+   * Browser renditions (playback proxies, PNGs of TIFF or HEIF stills) kept
+   * as generated media, named by the BLAKE3 of the original they render. A
+   * storage key would not do: two files can share its sampled fingerprint.
+   */
+  rendition: { get(originalHash: string | null | undefined): Promise<Blob | null>; put(originalHash: string | null | undefined, blob: Blob): Promise<boolean> };
   /**
    * Opening a project file with the new engine: main copies an embedded
    * media range from the open file (`readToken`) straight into the store,
@@ -143,11 +152,13 @@ export type HostMediaStore = Omit<LegacyMediaStore, 'getForSave'> & {
   readonly host: MediaStoreBridge;
 };
 
-export const renditionKey = (key: string) => `${key}:rendition`;
+/** The store key of the rendition of the original with this BLAKE3. */
+export const renditionKey = (originalHash: string) => `rendition:${originalHash}`;
 
 export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaStore {
   const { host, legacy, enabled } = options;
   const records = new Map<string, MediaStoreRecord>();
+  const stored = new WeakMap<Blob, MediaStoreRecord>();
   const migrations = new Map<string, Promise<boolean>>();
   const warn = options.warn ?? ((message, error) => console.warn(`[media-store] ${message}`, error));
 
@@ -229,6 +240,7 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
     keepsOriginals: enabled,
     host,
     recordFor: (key) => (key ? records.get(key) ?? null : null),
+    storedRecord: (blob) => (blob ? stored.get(blob) ?? null : null),
 
     async put(id, blob, meta = {}, savedRevision) {
       if (!enabled) return legacy.put(id, blob, meta, savedRevision);
@@ -239,10 +251,10 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
         if (path) {
           try {
             const record = await host.putFile({ path, key, type: blob.type || meta?.type || '', revision: savedRevision ?? null });
-            if (record.size === blob.size) { remember(record); return true; }
+            if (record.size === blob.size) { stored.set(blob, remember(record)); return true; }
           } catch (error) { warn(`copying ${path} failed; sending its bytes instead`, error); }
         }
-        remember(await streamToStore(host, key, blob, { type: blob.type || meta?.type || '', revision: savedRevision ?? null, origin: meta?.origin ?? 'stream' }));
+        stored.set(blob, remember(await streamToStore(host, key, blob, { type: blob.type || meta?.type || '', revision: savedRevision ?? null, origin: meta?.origin ?? 'stream' })));
         return true;
       } catch (error) {
         warn(`could not store ${key}`, error);
@@ -315,16 +327,16 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
     },
 
     rendition: {
-      async get(key) {
+      async get(originalHash) {
         /* Also with the flag off: the legacy viewer reuses the rendition the
            new engine kept instead of converting the original again. */
-        if (!key) return null;
-        return readKey(renditionKey(key), 'video/webm').catch(() => null);
+        if (!originalHash || !HASH.test(originalHash)) return null;
+        return readKey(renditionKey(originalHash), 'video/webm').catch(() => null);
       },
-      async put(key, blob) {
-        if (!enabled || !key) return false;
-        try { remember(await streamToStore(host, renditionKey(key), blob, { type: blob.type || 'video/webm', origin: 'rendition' })); return true; }
-        catch (error) { warn(`could not keep the rendition of ${key}`, error); return false; }
+      async put(originalHash, blob) {
+        if (!enabled || !originalHash || !HASH.test(originalHash)) return false;
+        try { remember(await streamToStore(host, renditionKey(originalHash), blob, { type: blob.type || 'video/webm', origin: 'rendition' })); return true; }
+        catch (error) { warn(`could not keep the rendition of ${originalHash}`, error); return false; }
       }
     },
 
