@@ -158,12 +158,14 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       const previous = current;
       current = raw;
       if (previous === raw) return;
-      // Another project resyncs; another version of this one diffs whole.
+      // Another project resyncs (the only `load` batch); another version of
+      // this one diffs the whole document into an incremental batch, which
+      // applies only at its base revision (contract 5, invariant 4).
       const sameProject = previous && raw && typeof previous === 'object' && typeof raw === 'object' && previous.id === raw.id;
       pendingReplace = sameProject && pendingReplace !== 'resync' ? 'diff' : 'resync';
       if (barrier) {
         if (pendingReplace === 'resync') barrier.markResync();
-        else barrier.touchedCanonical([[]], 'load');
+        else barrier.touchedCanonical([[]], 'structuralDiff');
         pendingReplace = null;
       }
     },

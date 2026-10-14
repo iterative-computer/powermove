@@ -234,7 +234,9 @@ body. A receiver starts from `PM.EngineDoc.snapshot()` (flushed; `revision`,
 `encoding: 'canonicalJsonV1'`, the canonical JSON with sorted keys, and pm-wasm's hash
 at that revision) and applies batches whose `baseRevision` equals its revision. A
 batch with origin `load` is a resync: one leaf set of the whole document at the empty
-path, applicable at any revision. When a trapped instance is replaced, the new
+path, applicable at any revision, and only a resync (another project, a refused
+batch, a mismatch) carries it. Another version of the same project assigned to
+`PM.proj` becomes an incremental `structuralDiff` batch. When a trapped instance is replaced, the new
 barrier continues the revisions, so receivers never see them move backward. The
 tracer forwards the same batches to the interactive engine.
 

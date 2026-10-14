@@ -332,7 +332,10 @@ still the bridge's decision). A receiver opens with
 `canonicalJsonV1` (sorted keys), its revision, and pm-wasm's canonical hash at
 that revision, which is the `Resync` of invariant 4. Batches with origin
 `load` are resyncs (one leaf set of the whole document at the empty path) and
-apply at any revision. Revisions continue across a replaced pm-wasm instance
+apply at any revision; only a resync carries `load`. Replacing `PM.proj` with
+another version of the same project (`PM.Comps.open`, `rotateProject`) diffs
+the whole document into an incremental `structuralDiff` batch, which applies
+only at its `baseRevision` like every other incremental batch. Revisions continue across a replaced pm-wasm instance
 (invariant 1).
 
 ### `fpsRational` is a composition field

@@ -76,7 +76,13 @@ export interface BarrierStats {
   checkMismatches: number;
 }
 
-const ORIGIN_RANK: Record<PatchOrigin, number> = { metadata: 0, edit: 1, undo: 2, redo: 2, structuralDiff: 3, load: 4 };
+/**
+ * The origins an incremental batch can carry. `load` is not one: only
+ * `resync()` produces it, and its body is always the whole document at `[]`.
+ */
+export type IncrementalOrigin = Exclude<PatchOrigin, 'load'>;
+
+const ORIGIN_RANK: Record<IncrementalOrigin, number> = { metadata: 0, edit: 1, undo: 2, redo: 2, structuralDiff: 3 };
 
 const isRecord = (v: any): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v);
 /** Whether `k` is a JSON member of `o`: an array index in range, or an enumerable own member with a JSON value. */
@@ -144,7 +150,7 @@ export class DocumentBarrier {
   private dirty = new Map<string, PathPart[]>();
   private structural = false;
   private resyncPending = false;
-  private origin: PatchOrigin = 'metadata';
+  private origin: IncrementalOrigin = 'metadata';
   private subscribers = new Set<(batch: PatchBatch) => void>();
   private onMismatch: (result: ConsistencyResult) => void;
   readonly stats: BarrierStats = { flushes: 0, batches: 0, ops: 0, bytes: 0, resyncs: 0, structuralDiffs: 0, refused: 0, flushMs: 0, maxFlushMs: 0, checks: 0, checkMismatches: 0 };
@@ -184,18 +190,18 @@ export class DocumentBarrier {
     return () => this.subscribers.delete(fn);
   }
 
-  private bump(origin: PatchOrigin) {
+  private bump(origin: IncrementalOrigin) {
     if (ORIGIN_RANK[origin] > ORIGIN_RANK[this.origin]) this.origin = origin;
   }
 
   /** Records canonical paths as dirty. */
-  touchedCanonical(paths: readonly PathPart[][], origin: PatchOrigin = 'edit'): void {
+  touchedCanonical(paths: readonly PathPart[][], origin: IncrementalOrigin = 'edit'): void {
     for (const path of paths) this.dirty.set(pathKey(path), [...path]);
     if (paths.length) this.bump(origin);
   }
 
   /** Records paths relative to `PM.proj` (the realized form writers see). */
-  touched(paths: readonly PathPart[][], origin: PatchOrigin = 'edit'): void {
+  touched(paths: readonly PathPart[][], origin: IncrementalOrigin = 'edit'): void {
     const rootId = this.project()?.compId;
     this.touchedCanonical(paths.map(path => canonicalPath([...path], rootId)), origin);
   }
@@ -292,7 +298,7 @@ export class DocumentBarrier {
     }
   }
 
-  private send(ops: PatchOp[], origin: PatchOrigin): void {
+  private send(ops: PatchOp[], origin: IncrementalOrigin): void {
     let body: Uint8Array;
     try {
       body = encodePatchOps(ops);
@@ -330,7 +336,7 @@ export class DocumentBarrier {
    * live document over the whole document. Sends them (repairing the mirror)
    * and returns their paths.
    */
-  repair(origin: PatchOrigin = 'structuralDiff'): string[] {
+  repair(origin: IncrementalOrigin = 'structuralDiff'): string[] {
     this.flush();
     const live = canonicalProject(this.project());
     const ops = diffOps(this.shadow, live);

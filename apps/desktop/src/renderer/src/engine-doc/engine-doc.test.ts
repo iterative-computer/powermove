@@ -7,8 +7,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-import { canonicalProject, canonicalProjectHash } from '../../../shared/canonical-json';
-import { diffOps } from '../../../shared/patch-ids';
+import { canonicalProject, canonicalProjectHash, canonicalStringify } from '../../../shared/canonical-json';
+import { applyOps, diffOps } from '../../../shared/patch-ids';
 import { decodePatchOps } from '../../../shared/patch-binary';
 import { makePM } from '../legacy/__tests__/make-pm';
 import { installEngineDoc, type EngineDoc } from './install';
@@ -199,6 +199,61 @@ describe.skipIf(!built)('engine-doc with pm-wasm', () => {
     doc.barrier!.flush();
     expect(doc.barrier!.stats.resyncs).toBe(resyncs + 1);
     expect(doc.wasm!.hash()).toBe(canonicalProjectHash(PM.proj));
+  });
+
+  it('carries load only on whole-document resyncs, so a receiver following the stream rules stays equal', async () => {
+    const { PM, doc } = await editor('on');
+    populate(PM, rng(21), 6);
+    const snap = doc.snapshot()!;
+    // A receiver as contract 5 describes it: `load` applies at any revision,
+    // every other batch only at its base revision.
+    const receiver = { revision: snap.revision, doc: JSON.parse(snap.json) as any };
+    const batches: any[] = [];
+    doc.subscribe(batch => {
+      batches.push(batch);
+      const ops = decodePatchOps(batch.body);
+      if (batch.origin === 'load') {
+        expect(ops.length).toBe(1);
+        expect(ops[0]).toMatchObject({ path: [], exists: true });
+        expect('op' in ops[0]!).toBe(false);
+      } else expect(batch.baseRevision).toBe(receiver.revision);
+      receiver.doc = applyOps(receiver.doc, ops);
+      receiver.revision = batch.revision;
+    });
+    const expectReceiverEqual = () => {
+      doc.barrier!.flush();
+      expect(receiver.revision).toBe(doc.barrier!.revision);
+      expect(canonicalStringify(receiver.doc)).toBe(canonicalStringify(canonicalProject(PM.proj)));
+    };
+    // Another composition, opened: rotateProject replaces PM.proj with a new
+    // object of the same project.
+    const comp = PM.Comps.create({ name: 'Second', w: 640, h: 360, dur: 3 }, { open: false });
+    PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid')));
+    expectReceiverEqual();
+    const before = batches.length;
+    expect(PM.Comps.open(comp)).toBe(true);
+    expectReceiverEqual();
+    const rotated = batches.slice(before);
+    expect(rotated.length).toBeGreaterThan(0);
+    expect(rotated.every(b => b.origin === 'structuralDiff')).toBe(true);
+    PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('shape')));
+    PM.hist.undo();
+    PM.hist.redo();
+    expectReceiverEqual();
+    expect(PM.Comps.open(Object.keys(PM.proj.comps)[0])).toBe(true);
+    expectReceiverEqual();
+    // Another version of the same project: incremental.
+    const copy = JSON.parse(JSON.stringify(PM.proj));
+    copy.layers[0].name = 'Renamed in the copy';
+    PM.replaceProject(copy);
+    expectReceiverEqual();
+    expect(batches.at(-1).origin).toBe('structuralDiff');
+    // Another project: a resync.
+    PM.replaceProject(PM.mkProject({ name: 'Other' }));
+    expectReceiverEqual();
+    expect(batches.at(-1).origin).toBe('load');
+    const loads = batches.filter(b => b.origin === 'load');
+    expect(loads.length).toBe(doc.barrier!.stats.resyncs - 1);
   });
 
   it('the consistency check finds writes the barrier missed and resyncs', async () => {
