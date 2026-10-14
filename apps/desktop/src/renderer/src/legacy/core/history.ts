@@ -92,11 +92,18 @@ export function install(PM: PMRegistry): void {
   /* Entries hold composition-independent paths (see core/compositions);
      translate them onto whichever composition is open when they replay. */
   const realize = (patches: Patch[]) => PM.Comps?.realize ? PM.Comps.realize(patches) : patches;
-  const restorePatches = (patches: Patch[]) => {
+  /* The native engine's write barrier (engine-doc): a writer scope with the
+     paths it writes. Without the barrier the callback simply runs. */
+  const writeAt = (paths: PathPart[][], fn: () => void, options?: { canonical?: boolean; origin?: 'undo' | 'redo' }) =>
+    PM.doc?.write ? PM.doc.write(paths, fn, options) : fn();
+  const restorePatches = (patches: Patch[], origin: 'undo' | 'redo' = 'undo') => {
     PM.Comps?.prepareUndo?.(patches);
     const selection = clone(PM.sel);
-    const next = applyPatch(PM.proj, realize(patches));
-    PM.replaceProject(next, { selection });
+    // History entries hold canonical paths.
+    writeAt(patches.map(patch => patch.path), () => {
+      const next = applyPatch(PM.proj, realize(patches));
+      PM.replaceProject(next, { selection });
+    }, { canonical: true, origin });
   };
   const publishProjectPatch = (patches?: Patch[], origin: any = 'interface') => {
     if (!patches?.length || !PM.proj?.id) return;
@@ -141,6 +148,9 @@ export function install(PM: PMRegistry): void {
     },
     track(paths: PathPart[][]) {
       if (!pending?.scoped) return false;
+      // The native engine's write barrier: these paths are about to be written.
+      if (PM.doc?.track) PM.doc.track(paths || []);
+      else PM.doc?.touched?.(paths || []);
       for (const rawPath of paths || []) {
         const path = [...rawPath];
         /* A parent snapshot already covers this path. If a new parent arrives,
@@ -183,6 +193,12 @@ export function install(PM: PMRegistry): void {
       const live = patches.forward;
       if (PM.Comps?.canonicalize) patches = { ...PM.Comps.canonicalize(patches.forward, patches.backward), bytes: patches.bytes };
       const bytes = patches.bytes ?? encodedBytes(patches.forward) + encodedBytes(patches.backward);
+      // The native engine's write barrier gets the canonical paths before the
+      // entry is announced: listeners of `history` and `history:project-patch`
+      // ask right away (the viewer redraws the pen tool's overlay), and the
+      // transaction is no longer open to cover its writes.
+      const paths = patches.forward.map(patch => patch.path);
+      PM.doc?.touched?.(paths, { canonical: true });
       push({
         label: label || current.label,
         group: current.group,
@@ -190,11 +206,12 @@ export function install(PM: PMRegistry): void {
         project: true,
         forward: patches.forward,
         backward: patches.backward,
-        undo: () => restorePatches(patches.backward),
-        redo: () => restorePatches(patches.forward),
+        undo: () => restorePatches(patches.backward, 'undo'),
+        redo: () => restorePatches(patches.forward, 'redo'),
       });
       publishProjectPatch(live, current.origin);
-      PM.touch();
+      // Canonical paths again for writers that rely on touch() (legacy ignores them).
+      PM.touch(paths, true);
       PM.autosave?.();
       return true;
     },
@@ -206,13 +223,17 @@ export function install(PM: PMRegistry): void {
       pending = null;
       if (current.scoped) {
         const patches: Patch[] = [...current.scopes.values()].map((item: any) => ({ path: item.path, ...item.before }));
-        const next = applyPatch(PM.proj, patches);
-        PM.replaceProject(next, selection ? { selection } : {});
+        writeAt(patches.map(patch => patch.path), () => {
+          const next = applyPatch(PM.proj, patches);
+          PM.replaceProject(next, selection ? { selection } : {});
+        });
       } else restore(current.before, selection);
       return true;
     },
     pendingSnapshot: () => pending?.before || null,
     busy: () => !!pending,
+    /** A scoped transaction is open: every write it makes is tracked first. */
+    scoped: () => !!pending?.scoped,
     /** Wrap a legacy direct mutation. PM.Edit uses the same compact patch entry. */
     do(label: any, fn: any, origin: any = 'interface') {
       H.begin(label, null, origin);
@@ -334,7 +355,7 @@ export function install(PM: PMRegistry): void {
         const { label, forward, backward } = source;
         stack.push({ id: PM.uid('history'), label, project: true, forward, backward,
           bytes: encodedBytes(forward) + encodedBytes(backward),
-          undo: () => restorePatches(backward), redo: () => restorePatches(forward) });
+          undo: () => restorePatches(backward, 'undo'), redo: () => restorePatches(forward, 'redo') });
       }
       idx = saved.index;
       totalBytes = stack.reduce((sum, entry) => sum + entry.bytes, 0);

@@ -2,6 +2,7 @@
 import type { PMRegistry } from '../registry';
 import { bridge as hostBridge } from '../../kernel/bridge';
 import { needsNewerReader } from '../../../../shared/reader-version';
+import { writeDocument } from '../../engine-doc/write';
 
 export function install(PM: PMRegistry): void {
 const R: any = {
@@ -130,7 +131,7 @@ R.rename = (id: any, name: any) => {
     const file = PM.projectFileState?.(id);
     if (file) file.dirty = true;
   }
-  if (active) active.name = next;
+  if (active) writeDocument(PM, [['name']], () => { active.name = next; });
   PM.bus?.emit?.('projects:open');
   if (active) { PM.touch?.(); PM.bus?.emit?.('project'); }
   return next;

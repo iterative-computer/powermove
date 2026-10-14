@@ -28,7 +28,7 @@
 import { sha256Hex } from './sha256';
 
 /** Must equal COMP_FIELDS in legacy/core/compositions.ts and pm-model's list (tests check both). */
-export const CANONICAL_COMP_FIELDS = ['w', 'h', 'fps', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter', 'audioGain', 'render3d'] as const;
+export const CANONICAL_COMP_FIELDS = ['w', 'h', 'fps', 'fpsRational', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter', 'audioGain', 'render3d'] as const;
 const COMP_FIELD_SET: ReadonlySet<string> = new Set(CANONICAL_COMP_FIELDS);
 
 const hasOwn = (value: object, key: string) => Object.prototype.hasOwnProperty.call(value, key);

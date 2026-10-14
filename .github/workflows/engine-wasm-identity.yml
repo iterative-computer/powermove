@@ -1,0 +1,47 @@
+# Native and WebAssembly builds of the evaluator must answer bit-identically
+# (docs/rust-engine.md, section 7 "Determinism"; the Phase 1 gate "native and
+# WASM bit-identical"). Unit-level only: no corpus, no secrets, hosted runner
+# (section 19, decision 20).
+name: Engine wasm identity
+on:
+  pull_request:
+    paths:
+      - 'engine/Cargo.lock'
+      - 'engine/Cargo.toml'
+      - 'engine/rust-toolchain.toml'
+      - 'engine/crates/pm-eval/**'
+      - 'engine/crates/pm-expr/**'
+      - 'engine/crates/pm-model/**'
+      - 'engine/crates/pm-text/**'
+      - 'engine/crates/pm-time/**'
+      - 'engine/crates/pm-wasm/**'
+      - '.github/workflows/engine-wasm-identity.yml'
+permissions:
+  contents: read
+jobs:
+  identity:
+    # The reference architecture (aarch64-apple-darwin, section 19).
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      # engine/rust-toolchain.toml pins the toolchain and the wasm32 target;
+      # rustup installs it on first use inside engine/.
+      - name: Toolchain
+        working-directory: engine
+        run: rustup toolchain install
+      - name: pm-wasm tests
+        working-directory: engine
+        run: cargo test --release -p pm-wasm
+      - name: pm-eval native and wasm32 digests
+        run: bun engine/crates/pm-eval/examples/support/check-wasm-identity.ts
+      - name: pm-wasm native and wasm32 replies
+        run: |
+          node engine/crates/pm-wasm/scripts/build.mjs
+          node engine/crates/pm-wasm/scripts/identity.mjs --seeds 20 --layers 60

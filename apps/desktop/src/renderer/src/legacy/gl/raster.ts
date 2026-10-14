@@ -29,6 +29,7 @@ import { parseSvg } from '../core/svg-import';
 import { inspectorService, viewerService } from '../core/services';
 import { capturePoster } from '../core/poster';
 import { bridge as hostBridge } from '../../kernel/bridge';
+import { writeDocument } from '../../engine-doc/write';
 
 const posterUrls = new Map<string, string>();
 
@@ -997,7 +998,7 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
   }
   Object.assign(asset, identity, { id, persisted });
   // Re-importing media keeps the media folder it was filed in.
-  PM.proj.assets[id] = { id, ...identity, persisted, ...(existingMeta?.folder ? { folder: existingMeta.folder } : {}) };
+  writeDocument(PM, [['assets', id]], () => { PM.proj.assets[id] = { id, ...identity, persisted, ...(existingMeta?.folder ? { folder: existingMeta.folder } : {}) }; });
   if (posterBlob) setPoster(id, posterBlob);
   const relinkedLayers = PM.MediaImport.coalesce(PM.proj, id, plan.aliases);
   plan.aliases.forEach((alias: any) => {
@@ -1030,8 +1031,9 @@ async function recoverSourceAsset(meta: any, file: File, current: () => boolean)
   // Recovery keeps the asset's storage; it is not a new import.
   const imported = await prepareImportedAsset(file, { id: meta.id, assertCurrentProject, storage: meta.storage === 'linked' ? 'link' : 'copy' });
   if (!current()) { disposeAsset(imported.prepared); return; }
-  Object.assign(meta, assetIdentity(meta.id, file, imported.kind, imported.prepared,
-    imported.fingerprint, imported.storageKey, imported.sourcePath, imported.persisted, meta.layerDefinition));
+  // `meta` is the document's own record (PM.proj.assets[id]).
+  writeDocument(PM, [['assets', meta.id]], () => Object.assign(meta, assetIdentity(meta.id, file, imported.kind, imported.prepared,
+    imported.fingerprint, imported.storageKey, imported.sourcePath, imported.persisted, meta.layerDefinition)));
   Object.assign(imported.prepared, meta);
   PM.assets.map.set(meta.id, imported.prepared);
   PM.assets.errors.delete(meta.id);
@@ -1135,7 +1137,7 @@ PM.assets = {
         if (!PM.proj || PM.proj.id !== targetProjectId || !PM.proj.assets?.[id]) return;
         viewerService(PM)?.preview?.clear();
         if (kind === 'audio' || kind === 'video') PM.Audio?.pause?.();
-        PM.proj.assets[id] = JSON.parse(JSON.stringify(meta));
+        writeDocument(PM, [['assets', id]], () => { PM.proj.assets[id] = JSON.parse(JSON.stringify(meta)); });
         if (runtime) PM.assets.map.set(id, runtime);
         else PM.assets.map.delete(id);
         if (poster) setPoster(id, poster);
@@ -1383,7 +1385,7 @@ PM.assets = {
     const id = PM.uid('a');
     const a = { id, name, kind: 'image', el: cv, w: 1280, h: 720, dur: 0, size: 0 };
     PM.assets.map.set(id, a);
-    PM.proj.assets[id] = { id, name, kind: 'image', w: 1280, h: 720 };
+    writeDocument(PM, [['assets', id]], () => { PM.proj.assets[id] = { id, name, kind: 'image', w: 1280, h: 720 }; });
     return a;
   },
 };

@@ -62,7 +62,10 @@ export const CLASSES = {
   'history.transaction': 'hist.begin / history.begin: a raw transaction; writes until commit or cancel',
   'history.external': 'hist.external / history.external: an external undo entry around host-applied changes',
   'project-replace': 'replaceProject: the whole-document restore path (undo, load, rollback, remote sync)',
-  touch: 'PM.touch: a write that only announces the document changed',
+  touch: 'PM.touch: a write that only announces the document changed (the barrier diffs the open composition)',
+  'touch.paths': 'PM.touch(paths): a write that announces exactly which paths changed',
+  'doc.write': 'PM.doc.write or writeDocument (engine-doc/write.ts): a write-barrier writer scope around a mutation, with its paths',
+  'doc.touched': 'PM.doc.touched or touchedDocument (engine-doc/write.ts): a write-barrier record of paths already written',
   'anim.touch': 'api.anim.touch: the kernel form of PM.touch',
   'shader-uniforms': 'shaderHooks.syncShaderUniforms: rewrites shader layer uniforms from source',
   'host.pm': 'api.host.pm: hands the raw PM registry (and PM.proj) to extensions',
@@ -74,9 +77,23 @@ export const CLASSES = {
   'home-composition-match': "Home's Open matching the new composition to the first media source",
   'blender-source-asset': 'Blender source assets written into PM.proj.assets',
   'agent-media-folders': 'agent media import placing assets into folders',
-  'extension-layer-refresh': 'extension layers refilled with parameters when a definition registers',
+  'extension-layer-refresh': 'extension layers refilled with parameters when a definition registers (through writeDocument)',
   'material-fanout': 'shared-material channels copied to every peer layer',
   'aim-preserving': 'aim-preserving rewrites of 3D camera and light channels after reparenting',
+};
+
+/**
+ * The patch origin (contract 5, `PatchOrigin`) each class's writes reach the
+ * mirror with. `structuralDiff`: the barrier finds them by diffing (a
+ * `touch()` without paths, or the consistency check before saves and exports).
+ */
+export const ORIGINS = {
+  'hist.do': 'edit', 'history.do': 'edit', 'edit.mutate': 'edit', 'history.transaction': 'edit', 'history.external': 'edit',
+  'project-replace': 'load', touch: 'structuralDiff', 'touch.paths': 'edit', 'doc.write': 'edit', 'doc.touched': 'edit',
+  'anim.touch': 'structuralDiff', 'shader-uniforms': 'metadata', 'host.pm': 'structuralDiff', 'project-swap': 'load',
+  revision: 'metadata', 'asset-metadata': 'metadata', 'project-write': 'structuralDiff', 'render-queue-swap': 'load',
+  'home-composition-match': 'edit', 'blender-source-asset': 'edit', 'agent-media-folders': 'edit',
+  'extension-layer-refresh': 'metadata', 'material-fanout': 'edit', 'aim-preserving': 'edit',
 };
 
 /*
@@ -88,10 +105,12 @@ export const CLASSES = {
  */
 export const NAMED_SITES = [
   { class: 'render-queue-swap', file: 'renderer/src/legacy/core/render-queue.ts', from: ['project-swap'] },
-  { class: 'home-composition-match', file: 'renderer/src/legacy/app.ts', scope: /(^| > )importFiles$/, code: /^targetProject\.(w|h|fps|exportDefaults|dur|work)\b/ },
+  // The match runs inside writeDocument (a barrier writer): the call is the site.
+  { class: 'home-composition-match', file: 'renderer/src/legacy/app.ts', scope: /(^| > )importFiles$/, from: ['doc.write'], code: /^writeDocument\(targetProject === PM\.proj/ },
   { class: 'blender-source-asset', file: 'renderer/src/core/scene3d/modeling.ts', from: ['asset-metadata'] },
   { class: 'agent-media-folders', file: 'renderer/src/legacy/assistant/media-management.ts', scope: /(^| > )importMedia$/, code: /\.folder\s*=/ },
-  { class: 'extension-layer-refresh', file: 'renderer/src/kernel/install.ts', scope: /kernel\.layerTypes\.onChange\(callback\)$/, derived: true },
+  // The refresh runs inside writeDocument (a barrier writer): the call is the site.
+  { class: 'extension-layer-refresh', file: 'renderer/src/kernel/install.ts', scope: /kernel\.layerTypes\.onChange\(callback\)$/, from: ['doc.write'] },
   { class: 'material-fanout', file: 'renderer/src/legacy/core/editing.ts', scope: /(^| > )synchronizePeers$/, params: true },
   { class: 'aim-preserving', file: 'renderer/src/legacy/core/parenting.ts', scope: /(^| > )preserveWorldAim$/, params: true },
 ];
@@ -198,12 +217,14 @@ function callClass(segments) {
   if (/(^|\.)(hist|history)\.external$/.test(name)) return 'history.external';
   if (/(^|\.)replaceProject$/.test(name)) return 'project-replace';
   if (name === 'PM.touch' || /\.host\.pm\.touch$/.test(name)) return 'touch';
+  if (/(^|\.)doc\.write$/.test(name) || name === 'writeDocument') return 'doc.write';
+  if (/(^|\.)doc\.touched$/.test(name) || name === 'touchedDocument') return 'doc.touched';
   if (/(^|\.)anim\.touch$/.test(name)) return 'anim.touch';
   if (/(^|\.)syncShaderUniforms$/.test(name)) return 'shader-uniforms';
   return null;
 }
 /** Entry points whose callback arguments run inside history. */
-const HISTORY_CALLBACKS = new Set(['hist.do', 'history.do', 'edit.mutate']);
+const HISTORY_CALLBACKS = new Set(['hist.do', 'history.do', 'edit.mutate', 'doc.write']);
 
 function functionName(node) {
   if (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) || ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node)) {
@@ -436,7 +457,9 @@ function scanSourceFile(source, file, shared = { wrappers: new Map(), taint: new
       recordWrite(node, node.expression);
     } else if (ts.isCallExpression(node)) {
       const callee = normalizedChain(node.expression);
-      const cls = callClass(callee);
+      let cls = callClass(callee);
+      // `PM.touch(paths)` names what changed; a bare touch asks for a diff.
+      if (cls === 'touch' && node.arguments.length) cls = 'touch.paths';
       if (cls) record(node, cls, false);
       else {
         const wrapped = historyCall(node);
@@ -566,6 +589,7 @@ export async function collectWriters(root = SOURCE_ROOT) {
     description: 'Document writer inventory (docs/rust-engine.md section 6). Generated by scripts/engine-writers.mjs; regenerate with --write and review every new entry.',
     root: prefix,
     classes: CLASSES,
+    origins: ORIGINS,
     counts,
     writers,
   };

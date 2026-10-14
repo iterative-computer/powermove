@@ -1,3 +1,4 @@
+import { applyFrameRate, validateFrameRate } from '../../../shared/frame-rate';
 import { IMAGE_SEQUENCE_ACCEPT, sequenceCandidate } from '../../../shared/image-sequence';
 import { MEDIA_ACCEPT } from '../../../shared/media-formats';
 import { chooseSequence, convertImageSequence } from './core/image-sequence';
@@ -19,6 +20,7 @@ import { createNewProjectForm } from './ui/project-settings';
 import { inspectorService, shaderHooks, timelineService, viewerService } from './core/services';
 import { bridge as hostBridge } from '../kernel/bridge';
 import { CURRENT_READER_VERSION, NEWER_PROJECT_MESSAGE, needsNewerReader, requiredReaderVersion } from '../../../shared/reader-version';
+import { touchedDocument, writeDocument } from '../engine-doc/write';
 import { REQUIRES_NATIVE_MESSAGE, refusesProject } from '../../../shared/engine-stamp';
 
 export function install(PM: PMRegistry): void {
@@ -197,6 +199,8 @@ function loadBootProject() {
 function hydrate(p: any) {
   const base = PM.mkProject({ name: p.name, w: p.w, h: p.h, fps: p.fps, dur: p.dur, bg: p.bg });
   Object.assign(base, p);
+  // Loaded rates keep their float and gain their exact rational.
+  applyFrameRate(base, base.fps, 'document');
   base.edits = compactEditLog(Array.isArray(p.edits) ? p.edits : []);
   base.backgroundFill = PM.normalizeFill(p.backgroundFill, p.bg || '#000000');
   base.bg = base.backgroundFill.stops[0].color;
@@ -383,6 +387,7 @@ function hydrate(p: any) {
     c.name = typeof c.name === 'string' && c.name ? c.name : 'Precomp';
     c.w = Math.max(2, num(c.w, base.w)); c.h = Math.max(2, num(c.h, base.h));
     c.fps = Math.max(1, num(c.fps, base.fps)); c.dur = Math.max(.04, num(c.dur, base.dur));
+    applyFrameRate(c, c.fps, 'document');
     c.bg = typeof c.bg === 'string' ? c.bg : '#000000';
     c.params = sanitizeParams(c.params);
     c.layers = Array.isArray(c.layers) ? c.layers : [];
@@ -474,6 +479,17 @@ PM.bus.emit('project');
    provider activates, and becomes safely disabled again if that provider is
    turned off. Saved parameters and keyframes remain on the same objects. */
 function revalidateContributionPlaceholders() {
+  // Every layer with effects or transitions is rewritten in place (keys are
+  // normalized even when nothing else changes): the native engine's write
+  // barrier gets their paths.
+  const paths: any[][] = [];
+  const containers: Array<[any, any[]]> = [[PM.proj, []], ...Object.entries(PM.proj?.comps || {}).map(([id, comp]) => [comp, ['comps', id]] as [any, any[]])];
+  for (const [container, base] of containers) (container?.layers || []).forEach((layer: any, index: number) => {
+    if (layer?.fx?.length || layer?.transitionIn || layer?.transitionOut) paths.push([...base, 'layers', index]);
+  });
+  writeDocument(PM, paths, revalidateContributions);
+}
+function revalidateContributions() {
   let changed = false;
   const containers = [PM.proj, ...Object.values(PM.proj?.comps || {})] as any[];
   for (const container of containers) {
@@ -676,6 +692,7 @@ PM.autosave = () => {
       // A read-only project only tracks whether it differs from its file.
       const readOnly = isReadOnlyProject(PM.proj);
       if (!readOnly) {
+        PM.EngineDoc?.beforeSave?.('autosave');
         if (!persistCurrent(true)) throw new Error('Project storage is unavailable or full');
         PM.Projects.putState(PM.proj.id, { ...PM.Projects.getState(PM.proj.id, { history: false }), history: PM.hist.export?.({ copy: false }) });
         await PM.store.flush?.();
@@ -707,6 +724,8 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
     (window.document.activeElement as HTMLElement | null)?.blur?.();
     PM.bus.emit('project:flush-edits');
     await APP.importQueue;
+    // The native engine's consistency check (docs/rust-engine.md, section 6).
+    PM.EngineDoc?.beforeSave?.('save');
     progress(0.05);
     const project = projectId === PM.proj.id ? PM.proj : PM.Projects.get(projectId);
     if (!project) throw new Error('This project is no longer available.');
@@ -1054,7 +1073,7 @@ function switchProject(p: any, history?: any, live?: ParkedTab) {
   if (live) {
     // Renamed from Projects while in the background: the library has the name.
     const name = PM.Projects.list().find((meta: any) => meta.id === PM.proj.id)?.name;
-    if (name) PM.proj.name = name;
+    if (name && PM.proj.name !== name) writeDocument(PM, [['name']], () => { PM.proj.name = name; });
   }
   const isTab = PM.proj.id !== homeProjectId;
   // Opening something new adds it after the other tabs; an existing tab keeps its place.
@@ -1383,7 +1402,10 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
     if (target) for (const result of results) {
       const meta = result.status !== 'failed' ? targetProject.assets?.[result.asset?.id] : null;
       // Media already in the project stays where the user filed it.
-      if (meta && (result.status === 'created' || !validFolder(targetProject, meta.folder))) meta.folder = target;
+      if (meta && (result.status === 'created' || !validFolder(targetProject, meta.folder))) {
+        meta.folder = target;
+        if (targetProject === PM.proj) touchedDocument(PM, [['assets', result.asset.id, 'folder']]);
+      }
     }
     const failures = results.filter((result: any) => result.status === 'failed');
     failures.forEach((result: any) => PM.toast(result.error?.message || ('Could not import ' + result.file?.name), 5000, { error: true }));
@@ -1391,17 +1413,24 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
     assertCurrent();
     if (matchSource) {
       const source = layerResults[0]?.asset;
-      if (source) {
+      // Composition settings outside history (a new project matched to its
+      // first media): the native engine's write barrier records them.
+      if (source) writeDocument(targetProject === PM.proj ? PM : null, [['w'], ['h'], ['fps'], ['fpsRational'], ['exportDefaults'], ['dur'], ['work']], () => {
         if (Number.isFinite(source.w) && source.w > 0) targetProject.w = source.w;
         if (Number.isFinite(source.h) && source.h > 0) targetProject.h = source.h;
-        if (Number.isFinite(source.fps) && source.fps > 0) {
-          targetProject.fps = source.fps;
-          targetProject.exportDefaults = { ...readExportDefaults(), fps: source.fps };
+        // Media rates are nominal rates (the single frame-rate validator).
+        const rate = Number.isFinite(source.fps) && source.fps > 0 ? validateFrameRate(source.fps, 'media') : null;
+        if (rate?.ok) {
+          targetProject.fps = rate.fps;
+          targetProject.fpsRational = rate.fpsRational;
+          targetProject.exportDefaults = { ...readExportDefaults(), fps: rate.fps };
         }
         if (Number.isFinite(source.dur) && source.dur > 0) {
           targetProject.dur = source.dur;
           targetProject.work = [0, source.dur];
         }
+      });
+      if (source) {
         PM.bus.emit('project');
         viewerService(PM)?.layout();
         PM.invalidate('all');

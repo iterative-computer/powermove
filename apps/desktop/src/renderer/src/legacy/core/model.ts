@@ -1,3 +1,4 @@
+import { validateFrameRate } from '../../../../shared/frame-rate';
 import {sceneProperties} from '../../core/scene3d/schema';
 import { CHANNELS_3D } from './space-3d';
 /* Ported from js/core/model.js — behavior-preserving. */
@@ -8,6 +9,12 @@ import { installLayerGroups } from './layer-groups';
 import { installProjectIndex } from './project-index';
 import { timelineService } from './services';
 import { normalizeCaptionsContent, presetStyle } from '../../captions/model';
+
+/** `fpsRational` for a rate (the single frame-rate validator, shared/frame-rate.ts). */
+const frameRational = (fps: unknown, rational: unknown) => {
+  const rate = validateFrameRate(fps, 'document', rational);
+  return rate.ok ? { fpsRational: rate.fpsRational } : {};
+};
 
 export function selectLayers(PM: PMRegistry, ids: any, add = false): void {
   const before = { ...PM.sel, layers: [...PM.sel.layers], keys: [...PM.sel.keys] };
@@ -188,6 +195,8 @@ PM.mkProject = (o: any = {}) => ({
   id: uid('P'),
   name: o.name || 'Untitled',
   w: o.w || 1920, h: o.h || 1080, fps: o.fps || 30, dur: o.dur || 10,
+  /* The exact rate beside the float (docs/rust-engine.md, section 5, rule 1). */
+  ...frameRational(o.fps || 30, o.fpsRational),
   bg: o.bg || '#000000',
   backgroundFill: PM.normalizeFill(o.backgroundFill, o.bg || '#000000'),
   /* The composition open in the Timeline; the others live in `comps`. */

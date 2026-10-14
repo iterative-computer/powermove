@@ -4,6 +4,7 @@ import { clipCuesToEnd, rebaseCuesForStart } from '../../captions/model';
 /* Ported from js/core/media.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { bridge as hostBridge } from '../../kernel/bridge';
+import { writeDocument } from '../../engine-doc/write';
 
 export function install(PM: PMRegistry): void {
 const DB_NAME: any = 'powermove-media';
@@ -270,6 +271,12 @@ function match(project: any, liveAssets: any, identity: any) {
 
 function coalesce(project: any, canonicalId: any, aliases: any) {
   if (!project || !canonicalId || !aliases || !aliases.length) return 0;
+  // Relinking rewrites layers in every composition and drops asset entries.
+  if (project === PM.proj) return writeDocument(PM, [['layers'], ['comps'], ['assets']], () => relink(project, canonicalId, aliases));
+  return relink(project, canonicalId, aliases);
+}
+
+function relink(project: any, canonicalId: any, aliases: any) {
   const retired: any = new Set(aliases.filter((id: any) => id && id !== canonicalId));
   let changed: any = 0;
   layerLists(project).forEach((layers: any) => layers.forEach((layer: any) => {
