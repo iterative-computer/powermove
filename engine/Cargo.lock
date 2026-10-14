@@ -1907,6 +1907,15 @@ dependencies = [
 [[package]]
 name = "pm-edit"
 version = "0.1.0"
+dependencies = [
+ "flate2",
+ "pm-eval",
+ "pm-expr",
+ "pm-model",
+ "pm-text",
+ "pm-time",
+ "serde_json",
+]
 
 [[package]]
 name = "pm-engine"
