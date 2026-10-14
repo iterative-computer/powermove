@@ -72,10 +72,7 @@ const readingText = () => typeof document !== 'undefined' ? selectableTextRoot(d
 
 const nativeEdit = (action: string): unknown => {
   const bridge: any = typeof window === 'undefined' ? null : (hostBridge() as any);
-  if (typeof bridge?.nativeEdit === 'function') {
-    bridge.nativeEdit(action);
-    return true;
-  }
+  if (typeof bridge?.nativeEdit === 'function') return bridge.nativeEdit(action) !== false;
   if (typeof document === 'undefined' || typeof document.execCommand !== 'function') return false;
   return document.execCommand(action);
 };

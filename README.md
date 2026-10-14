@@ -31,6 +31,9 @@ packages/
   player/             @powermove/player    browser bundle of the web player and SVG player, built from the desktop sources
   macos-haptics/      @powermove/macos-haptics   native macOS alignment-haptics addon
   cli/                powermove            `npx powermove serve`: the editor host for any Linux or macOS box, used from a browser
+crates/
+  powermove-host/     Rust host for Windows: serves the renderer and answers its IPC channels
+  powermove-windows/  Tauri 2 app: WebView2 editor windows and the NSIS installer
 assets/
   brand/              powermove-light.svg, powermove-dark.svg, powermove-light.png
 docs/
@@ -38,6 +41,25 @@ docs/
 ```
 
 Each workspace has its own `package.json`; the root `package.json` only holds workspace scripts and the bun toolchain pin.
+
+## Windows
+
+The Windows 11 app keeps the same Svelte renderer and replaces Electron's main
+process with Rust. The renderer only reaches native code through the IPC
+contract in `apps/desktop/src/shared/ipc.ts`; on Windows that contract runs
+over a loopback WebSocket (`host/web-bridge.ts`, framing in `shared/wire.ts`)
+to `crates/powermove-host`, and `crates/powermove-windows` shows it in WebView2.
+See [the Windows app README](crates/powermove-windows/README.md) to run and package it.
+
+Requirements: Windows 11, Rust stable with the MSVC build tools, bun, and WebView2.
+
+```bat
+bun install
+bun run --cwd apps/desktop build
+cargo run -p powermove-windows
+```
+
+`cargo test -p powermove-host` runs the host tests. `scripts/windows/build.ps1` builds the per-user NSIS installer.
 
 ## Requirements
 

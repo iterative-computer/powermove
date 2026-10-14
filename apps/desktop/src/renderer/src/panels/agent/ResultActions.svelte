@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { formatShortcut } from '../../kernel/keychord';
   import Icon from '../Icon.svelte';
   import Markdown from './Markdown.svelte';
   import { isPreviewableImageType, openImagePreview } from './attachments';
@@ -60,7 +61,7 @@
     {#each panelRun.actions as action}
       <div class="spatial-preview-control panel-action"><Icon {PM} name="panel" /><span>{describePanelAction(PM, action)}</span></div>
     {/each}
-    <p>This is also in the normal Command-Z Undo history.</p>
+    <p>This is also in the normal {formatShortcut('cmd+z')} Undo history.</p>
     <div class="agent-card-actions">
       <button class="agent-btn" type="button" onclick={() => PM.AgentUI?.undoPanelRun()}>Undo change</button>
       <button class="agent-btn pri" type="button" onclick={() => PM.AgentUI?.keepPanelRun()}>Keep change</button>
@@ -76,7 +77,7 @@
       <div class="agent-review-markdown"><Markdown text={reviewMessage || 'The rendered change is ready.'} /></div>
     {/if}
     {#if run.review?.critique}<Markdown text={run.review.critique} />{/if}
-    {#if reversible && !run.autonomous}<p>Powermove source changes from this run are one Command-Z Undo step.</p>{/if}
+    {#if reversible && !run.autonomous}<p>Powermove source changes from this run are one {formatShortcut('cmd+z')} Undo step.</p>{/if}
     {#if run.reviewError}
       <div class="spatial-review-warning"><Markdown text={run.autonomous ? run.reviewError : `Visual review stopped: ${run.reviewError.slice(0, 130)}. You can still inspect and undo the rendered change.`} /></div>
     {/if}

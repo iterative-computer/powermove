@@ -127,6 +127,32 @@ describe('legacy workspace install', () => {
     expect(restored.layout.docks[2]).toMatchObject({ size: 280, panels: [{ id: 'timeline', flex: true }] });
   });
 
+  it('persists tab groups through save, load and project restore, and loads untabbed saves unchanged', () => {
+    const right = { id: 'right', size: 320, panels: [
+      { id: 'inspector', flex: true },
+      { id: 'fxbrowser', size: 380, group: 'tabs-1' },
+      { id: 'layer-effects', size: 380, group: 'tabs-1', active: true },
+    ] };
+    const plain = { id: 'right', size: 320, panels: [{ id: 'inspector', flex: true }, { id: 'fxbrowser', size: 380 }] };
+    const center = { id: 'center', flex: true, panels: [{ id: 'viewer', flex: true }] };
+    const saved: Record<string, any> = {
+      workspace: 'tabbed',
+      workspaces: [
+        { id: 'tabbed', name: 'Tabbed', agentDockMigration: 4, layout: { docks: [center, right] } },
+        { id: 'plain', name: 'Plain', agentDockMigration: 4, layout: { docks: [center, plain] } },
+      ],
+    };
+    const PM = workspaceModel(saved);
+    PM.WS.init();
+
+    expect(PM.WS.get('tabbed').layout.docks[1].panels).toEqual(right.panels);
+    expect(PM.WS.get('plain').layout.docks[1].panels).toEqual(plain.panels);
+    PM.WS.mutate(() => {}, { inPlace: true });
+    expect(saved.workspaces.find((ws: any) => ws.id === 'tabbed').layout.docks[1].panels).toEqual(right.panels);
+    const restored = PM.WS.restoreSnapshot(PM.WS.snapshot());
+    expect(restored.layout.docks[1].panels).toEqual(right.panels);
+  });
+
   it('keeps a shared agent panel at its set height', () => {
     const PM = workspaceModel();
     const workspace = PM.WS.normalize({

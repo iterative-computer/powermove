@@ -228,6 +228,37 @@ describe('Svelte DockLayout panel pool', () => {
     expect(PM.WS.mutate).toHaveBeenCalledTimes(4);
   });
 
+  it('shows a tab group as tabs in one header and parks the background tab', () => {
+    const builds = { alpha: register(PM, 'alpha'), beta: register(PM, 'beta') };
+    register(PM, 'viewer', { headless: true, hideMoveHandle: true });
+    installSvelteLayout(PM);
+    PM.Layout.apply(PM.WS.current);
+    const tabs = (id: string) => [...document.querySelectorAll<HTMLElement>(`#panel-${id} > header .ptab`)]
+      .map((tab) => `${tab.textContent}${tab.getAttribute('aria-selected') === 'true' ? '*' : ''}`);
+
+    PM.WS.mutate((ws: Workspace) => PM.Layout.stackPanel(ws, 'beta', 'alpha'));
+
+    expect([...document.querySelectorAll('#dock-left [data-panel-slot]')].map((slot) => (slot as HTMLElement).dataset.panelSlot)).toEqual(['beta']);
+    expect(document.querySelector('#dock-center #panel-beta')).toBeNull();
+    expect(tabs('beta')).toEqual(['Alpha', 'Beta*']);
+    expect(document.querySelector<HTMLElement>('#panel-beta > header .ptitle')!.hidden).toBe(true);
+    expect(document.querySelector('#pm-panel-pool #panel-alpha')).not.toBeNull();
+    expect(document.querySelector('#panel-alpha > header .ptabs')).toBeNull();
+
+    document.querySelector<HTMLElement>('#panel-beta > header .ptab[data-tab="alpha"]')!.click();
+    expect(document.querySelector('#dock-left #panel-alpha')).not.toBeNull();
+    expect(tabs('alpha')).toEqual(['Alpha*', 'Beta']);
+    document.querySelector('#panel-alpha > header .ptabs')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    expect(document.querySelector('#dock-left #panel-beta')).not.toBeNull();
+
+    PM.WS.mutate((ws: Workspace) => PM.Layout.closePanel(ws, 'beta'));
+    expect(document.querySelector('#dock-left #panel-alpha')).not.toBeNull();
+    expect(document.querySelector('#panel-alpha > header .ptabs')).toBeNull();
+    expect(document.querySelector<HTMLElement>('#panel-alpha > header .ptitle')!.hidden).toBe(false);
+    expect(builds.alpha).toHaveBeenCalledOnce();
+    expect(builds.beta).toHaveBeenCalledOnce();
+  });
+
   it('exposes the complete stable panel selector contract', () => {
     register(PM, 'alpha', { headless: true, moveSlot: 'input', flush: true, noscroll: true });
     register(PM, 'viewer', { headless: true, hideMoveHandle: true });

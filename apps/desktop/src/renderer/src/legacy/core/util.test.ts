@@ -105,9 +105,13 @@ it('continues scrubbing with a stationary cursor and releases pointer lock on mo
   const move = vi.fn(), up = vi.fn(), cancel = vi.fn();
   PM.drag({ clientX: 5, clientY: 5, preventDefault() {} }, { infinite: true, move, up, cancel });
   fire(listeners, 'pointermove', { clientX: 15, clientY: 5 });
-  fire(listeners, 'mousemove', { movementX: 2000, movementY: 0 });
+  for (let i = 0; i < 40; i++) fire(listeners, 'mousemove', { movementX: 50, movementY: 0 });
   expect(move).toHaveBeenLastCalledWith(2010, 0, expect.anything());
-  fire(listeners, 'mousemove', { movementX: -4000, movementY: 0 });
+  for (let i = 0; i < 80; i++) fire(listeners, 'mousemove', { movementX: -50, movementY: 0 });
+  expect(move).toHaveBeenLastCalledWith(-1990, 0, expect.anything());
+  // A spurious Chromium lock delta (about half the window) is not travel.
+  fire(listeners, 'mousemove', { movementX: 460, movementY: 0 });
+  fire(listeners, 'mousemove', { movementX: 0, movementY: -360 });
   expect(move).toHaveBeenLastCalledWith(-1990, 0, expect.anything());
   fire(listeners, 'mouseup', {});
   expect(up).toHaveBeenCalledTimes(1);

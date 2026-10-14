@@ -181,12 +181,14 @@
     const probe = document.createElement('span');
     probe.style.display = 'none';
     root.appendChild(probe);
-    const read = (value: string) => { probe.style.color = value; return getComputedStyle(probe).color; };
+    // A panel that is not rendered yet computes no colour; keep the previous one then.
+    const read = (value: string, fallback: string) => { probe.style.color = value; return getComputedStyle(probe).color || fallback; };
+    const current = loop.palette;
     const palette: MeterPalette = {
-      track: read('var(--mx-track)'),
-      nominal: read('var(--success)'),
-      warn: read('var(--warning)'),
-      hot: read('var(--danger)')
+      track: read('var(--mx-track)', current.track),
+      nominal: read('var(--success)', current.nominal),
+      warn: read('var(--warning)', current.warn),
+      hot: read('var(--danger)', current.hot)
     };
     probe.remove();
     loop.setPalette(palette);

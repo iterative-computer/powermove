@@ -396,6 +396,14 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 }
 .panel-move-handle.inline:hover,.panel-move-handle.inline:focus-visible{color:var(--tx-2);background:transparent;box-shadow:none;opacity:1}
 .panel > header .ptitle{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Tab groups (layout/tabs.ts): the titles of the panels sharing a slot, in the
+   header's title type. The shown tab is primary text, the rest secondary; no
+   fills, borders or boxes. */
+.panel > header .ptabs{display:flex;align-items:center;gap:14px;min-width:0;height:100%;overflow:hidden}
+.panel > header .ptab{flex:0 1 auto;min-width:0;height:100%;padding:0;letter-spacing:inherit;color:var(--tx-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:color var(--dur-1)}
+.panel > header .ptab:hover,.panel > header .ptab[aria-selected="true"]{color:var(--tx)}
+.panel > header .ptab:focus-visible{text-decoration:underline;text-underline-offset:4px}
+.panel > header .ptab.drag-src{opacity:.38}
 .panel-ghost{
   position:fixed;z-index:300;left:0;top:0;pointer-events:none;height:32px;will-change:transform;
 }
@@ -1150,6 +1158,8 @@ p.is-streaming::after,.agent-md-li.is-streaming p::after,.agent-md-quote.is-stre
 .panel-drop-preview.on{opacity:1;transform:scaleX(1)}
 .panel-drop-preview.dock-edge{height:auto;border:1px solid color-mix(in srgb,var(--accent) 65%,transparent);border-radius:var(--r-lg);background:var(--accent-dim);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 20%,transparent),0 0 24px color-mix(in srgb,var(--accent) 16%,transparent);transform:scale(.97);transition:left var(--dur-1) var(--ease),top var(--dur-1) var(--ease),width var(--dur-1) var(--ease),height var(--dur-1) var(--ease),opacity var(--dur-1),transform var(--dur-1) var(--ease)}
 .panel-drop-preview.dock-edge.on{transform:scale(1)}
+.panel-drop-preview.tab-edge{width:2px;transform:scaleY(.6)}
+.panel-drop-preview.tab-edge.on{transform:scaleY(1)}
 .panel.drag-src{opacity:.38;transition:opacity var(--dur-1)}
 /* ── area corners (Blender split / join / dock) ───────── */
 .panel-corner{position:absolute;z-index:26;width:11px;height:11px;cursor:crosshair;touch-action:none}

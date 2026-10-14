@@ -1,3 +1,4 @@
+import { formatShortcut } from '../../kernel/keychord';
 import * as THREE from 'three';
 import {AXIS_COLORS,type Point} from './modal';
 import type {ViewAxis} from './viewport';
@@ -153,7 +154,7 @@ export class ViewportChrome {
     if(state.modal){
       this.header.hidden=false;this.header.textContent=state.modal.header;
       this.hints.hidden=false;
-      this.hints.replaceChildren(...state.modal.hints.map(([key,label])=>{const item=document.createElement('span');const kbd=document.createElement('kbd');kbd.textContent=key;item.append(kbd,label);return item;}));
+      this.hints.replaceChildren(...state.modal.hints.map(([key,label])=>{const item=document.createElement('span');const kbd=document.createElement('kbd');kbd.textContent=formatShortcut(key);item.append(kbd,label);return item;}));
     }else{this.header.hidden=true;this.hints.hidden=true;}
     const link=state.modal?.link;
     this.link.style.display=link?'':'none';

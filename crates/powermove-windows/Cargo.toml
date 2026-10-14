@@ -1,0 +1,27 @@
+[package]
+name = "powermove-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "Powermove"
+
+[[bin]]
+name = "Powermove"
+path = "src/main.rs"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+tauri = { version = "=2.12.1", features = [] }
+powermove-host = { path = "../powermove-host" }
+tauri-plugin-single-instance = "=2.5.2"
+tauri-plugin-opener = "=2.7.0"
+dirs = "=7.0.0"
+tracing = "=0.1.44"
+tracing-appender = "=0.2.5"
+tracing-subscriber = "=0.3.23"
+anyhow = "=1.0.104"
+
+[build-dependencies]
+tauri-build = { version = "=2.7.1", features = [] }

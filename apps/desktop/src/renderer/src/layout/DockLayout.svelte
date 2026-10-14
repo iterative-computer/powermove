@@ -2,7 +2,8 @@
   import { onMount } from 'svelte';
   import type { PMRegistry } from '../legacy/registry';
   import Dock from './Dock.svelte';
-  import type { DockSpec, PanelSpec, Workspace } from './model';
+  import type { DockPlanEntry } from './geometry';
+  import type { DockSpec, Workspace } from './model';
   import PanelPool from './PanelPool.svelte';
   import Splitter from './Splitter.svelte';
   import UIPlacementGhost from '../panels/agent/UIPlacementGhost.svelte';
@@ -50,12 +51,12 @@
 
   const plan = $derived.by(() => {
     void tick;
-    if (!manifest) return [] as Array<{ dock: DockSpec; specs: PanelSpec[] }>;
+    if (!manifest) return [] as DockPlanEntry[];
     return PM.Layout.visibleDockPlan(
       manifest,
       (id: string) => PM.Popout?.isOpen?.(id) === true,
       (id: string) => !!PM.PANELS?.[id]
-    ) as Array<{ dock: DockSpec; specs: PanelSpec[] }>;
+    ) as DockPlanEntry[];
   });
   /* A bottom dock spans every column except the right one: those columns sit
      in a row above it, and the right column keeps the full height. */
@@ -64,7 +65,7 @@
   const trailing = $derived(plan.filter((entry) => entry.dock.id === 'right'));
 </script>
 
-{#snippet columns(entries: Array<{ dock: DockSpec; specs: PanelSpec[] }>, leading: DockSpec | undefined)}
+{#snippet columns(entries: DockPlanEntry[], leading: DockSpec | undefined)}
   {#each entries as entry, index (entry.dock.id)}
     {#if index > 0 || leading}
       <Splitter
@@ -76,7 +77,7 @@
         oncommit={commit}
       />
     {/if}
-    <Dock {PM} dock={entry.dock} specs={entry.specs} {tick} oncommit={commit} />
+    <Dock {PM} dock={entry.dock} specs={entry.specs} slots={entry.slots} {tick} oncommit={commit} />
   {/each}
 {/snippet}
 
@@ -88,7 +89,7 @@
         {@render columns(upper, undefined)}
       </div>
       <Splitter {PM} mode="horizontal" afterDock={bottom.dock} {tick} oncommit={commit} />
-      <Dock {PM} dock={bottom.dock} specs={bottom.specs} {tick} oncommit={commit} />
+      <Dock {PM} dock={bottom.dock} specs={bottom.specs} slots={bottom.slots} {tick} oncommit={commit} />
     </div>
     {@render columns(trailing, upper.at(-1)?.dock)}
   {:else}

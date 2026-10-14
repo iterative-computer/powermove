@@ -47,7 +47,7 @@ export class MeterLoop {
   private visible = false;
   private frame = 0;
   private last = 0;
-  private palette: MeterPalette = { track: 'rgba(128,128,128,.12)', nominal: '#3FCF8E', warn: '#F59E0B', hot: '#F36357' };
+  palette: MeterPalette = { track: 'rgba(128,128,128,.12)', nominal: '#3FCF8E', warn: '#F59E0B', hot: '#F36357' };
   private scratch = { peak: [0, 0], rms: [0, 0] };
   /** Called once per drawn frame while audio runs (faders following automation). */
   onFrame: (() => void) | null = null;

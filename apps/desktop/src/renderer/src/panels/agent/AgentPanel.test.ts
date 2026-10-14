@@ -414,6 +414,28 @@ describe('AgentPanel', () => {
     expect(PM.AgentUI.submit).toHaveBeenCalledOnce();
   });
 
+  it('attaches pasted screenshots and copied image files, and still pastes text', () => {
+    renderPanel();
+    const field = target.querySelector<HTMLDivElement>('.agent-inline-prompt')!;
+    field.focus();
+    const paste = (data: { files?: File[]; text?: string }): Event => {
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: { files: data.files ?? [], items: [], getData: (type: string) => type === 'text/plain' ? data.text ?? '' : '' }
+      });
+      field.dispatchEvent(event);
+      return event;
+    };
+
+    const screenshot = new File([new Uint8Array([137, 80, 78, 71])], 'image.png', { type: 'image/png' });
+    expect(paste({ files: [screenshot], text: '' }).defaultPrevented).toBe(true);
+    expect(PM.AgentUI.addAttachments).toHaveBeenCalledExactlyOnceWith([screenshot]);
+
+    paste({ text: 'Match this look' });
+    expect(PM.AgentUI.addAttachments).toHaveBeenCalledOnce();
+    expect(field.textContent).toBe('Match this look');
+  });
+
   it('releases composer focus before another surface consumes a pointer interaction', () => {
     renderPanel(snapshot({ composerDraft: 'Keep this draft' }));
     const textarea = target.querySelector<HTMLDivElement>('.agent-inline-prompt')!;

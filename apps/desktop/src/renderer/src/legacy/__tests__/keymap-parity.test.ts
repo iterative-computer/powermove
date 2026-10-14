@@ -313,3 +313,15 @@ describe('AE-style keymap dispatch', () => {
     expect(ran).toEqual(['ext.thing']);
   });
 });
+
+/* The Windows app reports Win32 and has no Command key. Every chord a Windows
+   keyboard can produce must reach the same command as on the Mac. */
+describe('AE-style keymap dispatch on Windows', () => {
+  beforeEach(() => { vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Win32'); });
+  afterEach(() => { vi.restoreAllMocks(); });
+  it.each(TABLE.filter(([, init]) => !init.metaKey))('%s', (_description, init, expected) => {
+    const event = press(init);
+    expect(ran).toEqual([expected]);
+    expect(event.defaultPrevented).toBe(true);
+  });
+});

@@ -3,6 +3,14 @@ import { describe, expect, it, vi } from 'vitest';
 import { acceleratorFor, canRenderNatively, iconRasterizer, planNativeMenu } from './native-menu';
 
 describe('acceleratorFor', () => {
+  it('accepts platform labels and canonical chords', () => {
+    expect(acceleratorFor('Ctrl+Shift+S')).toBe('Control+Shift+S');
+    expect(acceleratorFor('cmd+shift+s')).toBe('CommandOrControl+Shift+S');
+    expect(acceleratorFor('Alt+Enter')).toBe('Alt+Return');
+    expect(acceleratorFor('Backspace')).toBe('Backspace');
+    expect(acceleratorFor('Ctrl+→')).toBe('Control+Right');
+    expect(acceleratorFor('⌘↵')).toBe('CommandOrControl+Return');
+  });
   it('maps glyph shortcuts to Electron accelerators', () => {
     expect(acceleratorFor('⌘Z')).toBe('CommandOrControl+Z');
     expect(acceleratorFor('⌘⇧G')).toBe('CommandOrControl+Shift+G');

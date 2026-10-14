@@ -1,3 +1,4 @@
+import { formatShortcut } from '../../kernel/keychord';
 import type { ExtensionRecord, ExtensionsBridge, ExtensionsChangedEvent } from '../../../../shared/extensions';
 import { createSettingsSection } from './settings-section';
 import { bridge as hostBridge } from '../../kernel/bridge';
@@ -259,7 +260,7 @@ export function createExtensionSettingsControl(
       const entries = kernel?.[key]?.entries?.() ?? [];
       const owned = entries.filter((entry: any) => entry.ownerId === record.id);
       if (!owned.length) continue;
-      about.body.append(rowOf(label, owned.map((entry: any) => entry.item.title ?? entry.item.label ?? entry.item.key ?? entry.id).join(', ')));
+      about.body.append(rowOf(label, owned.map((entry: any) => key === 'keybindings' ? formatShortcut(entry.item.key ?? entry.item.chord ?? entry.id) : entry.item.title ?? entry.item.label ?? entry.id).join(', ')));
     }
 
     detail.append(back, head, status.element);

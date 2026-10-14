@@ -1,15 +1,33 @@
 import type { NativeMenuItem } from '../../../shared/ipc';
 import type { MenuAction, MenuItem } from './types';
+import { normalizeChord } from '../kernel/keychord';
 
 /** Menu glyph shortcuts ("⌘⇧Z") → Electron accelerators ("CommandOrControl+Shift+Z"). */
 const MODIFIERS: Record<string, string> = { '⌘': 'CommandOrControl', '⇧': 'Shift', '⌥': 'Alt', '⌃': 'Control' };
 const KEYS: Record<string, string> = {
-  '⌫': 'Backspace', '⌦': 'Delete', '↩': 'Return', '⏎': 'Return', '⎋': 'Escape', '⇥': 'Tab', '␣': 'Space',
+  '⌫': 'Backspace', '⌦': 'Delete', '↩': 'Return', '↵': 'Return', '⏎': 'Return', '⎋': 'Escape', '⇥': 'Tab', '␣': 'Space',
   '↑': 'Up', '↓': 'Down', '←': 'Left', '→': 'Right', '⇞': 'PageUp', '⇟': 'PageDown', '↖': 'Home', '↘': 'End'
 };
 
 export function acceleratorFor(kb: string | null | undefined): string | undefined {
   if (!kb) return undefined;
+  if (!/[⌘⌃⌥⇧]/.test(kb)) {
+    let chord = normalizeChord(kb);
+    const modifiers: string[] = [];
+    for (const [name, accelerator] of Object.entries({ cmd: 'CommandOrControl', ctrl: 'Control', alt: 'Alt', shift: 'Shift' })) {
+      if (chord.startsWith(`${name}+`)) {
+        modifiers.push(accelerator);
+        chord = chord.slice(name.length + 1);
+      }
+    }
+    const keys: Record<string, string> = {
+      backspace: 'Backspace', delete: 'Delete', enter: 'Return', escape: 'Escape', tab: 'Tab', space: 'Space',
+      up: 'Up', down: 'Down', left: 'Left', right: 'Right', home: 'Home', end: 'End', pageup: 'PageUp', pagedown: 'PageDown'
+    };
+    const key = keys[chord] ?? KEYS[chord];
+    if (key) return [...modifiers, key].join('+');
+    if (modifiers.length && /^(f\d{1,2}|[a-z0-9]|[-=\[\];',./`\\])$/.test(chord)) return [...modifiers, chord.toUpperCase()].join('+');
+  }
   const parts: string[] = [];
   let rest = kb.trim();
   while (rest && MODIFIERS[rest[0]!]) { parts.push(MODIFIERS[rest[0]!]!); rest = rest.slice(1); }

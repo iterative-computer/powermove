@@ -270,9 +270,16 @@ PM.drag = (e: any, { move, up, cancel, cursor, infinite = false }: any) => {
       locked = true;
     } else if (locked) pc();
   };
+  /* Chromium on Windows (WebView2) reports spurious locked movement of about
+     half the window size, right after locking and with high-polling mice
+     (crbug.com/781182). One such event would scrub a field to its limit. */
+  const spike = (x: number, y: number) =>
+    Math.abs(x) > window.innerWidth / 4 || Math.abs(y) > window.innerHeight / 4;
   const lockMove = (ev: any) => {
     if (done || !locked) return;
-    dx += ev.movementX || 0; dy += ev.movementY || 0;
+    const mx = ev.movementX || 0, my = ev.movementY || 0;
+    if (spike(mx, my)) return;
+    dx += mx; dy += my;
     move?.(dx, dy, ev);
   };
   const stop = () => {

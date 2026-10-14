@@ -1,3 +1,4 @@
+import { formatShortcut } from '../kernel/keychord';
 import { IMAGE_SEQUENCE_ACCEPT, sequenceCandidate } from '../../../shared/image-sequence';
 import { MEDIA_ACCEPT } from '../../../shared/media-formats';
 import { chooseSequence, convertImageSequence } from './core/image-sequence';
@@ -1431,7 +1432,7 @@ async function importFolders(project: any, nodes: ImportFolderNode[], { asFolder
     const files = node.files.filter(file => PM.assetKind(file));
     if (!asFolder && sequenceCandidate(files)) {
       await importFiles(files, placement, true, undefined, {
-        folder: parent, sequenceNote: 'Hold ⌥ Option while dropping a folder to import its files individually.',
+        folder: parent, sequenceNote: `Hold ${formatShortcut('⌥')} while dropping a folder to import its files individually.`,
       });
       await importFolders(project, node.folders, { asFolder, parent, placement });
       continue;

@@ -39,3 +39,4 @@ packages/cli/dist/
 
 # also match symlinks named node_modules (a worktree once committed one)
 node_modules
+target/

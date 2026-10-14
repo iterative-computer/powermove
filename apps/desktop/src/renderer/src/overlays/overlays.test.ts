@@ -40,6 +40,7 @@ function registry(): Record<string, any> {
 }
 
 beforeEach(async () => {
+  vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
   await unmountSvelteOverlays();
   document.body.innerHTML = `
     <div id="app"><button id="trigger" type="button">Open</button><div id="body"></div></div>
@@ -62,6 +63,19 @@ afterEach(async () => {
 });
 
 describe('installSvelteOverlays', () => {
+  it('formats menu and palette shortcuts on Windows', () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Win32');
+    PM.menu(document.querySelector('#trigger'), [
+      { label: 'Save as', kb: '⌘⇧S', run: vi.fn() },
+      { label: 'Delete', kb: '⌦', run: vi.fn() }
+    ]);
+    flushSync();
+    expect([...document.querySelectorAll('.drop .kb')].map(node => node.textContent)).toEqual(['Ctrl+Shift+S', 'Delete']);
+    PM.closeMenus();
+    PM.palette();
+    flushSync();
+    expect([...document.querySelectorAll('#palette .kb')].map(node => node.textContent)).toContain('Ctrl+Y');
+  });
   it('renders a keyboard-accessible easing grid with actual Bézier paths', () => {
     vi.useFakeTimers();
     const run = vi.fn();

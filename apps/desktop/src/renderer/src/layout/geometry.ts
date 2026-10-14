@@ -1,4 +1,4 @@
-import { ensureDockFill, type Workspace } from './model';
+import { activeTab, dockSlots, ensureDockFill, type DockSpec, type PanelSpec, type Workspace } from './model';
 
 type Rect = {
   left: number;
@@ -149,6 +149,14 @@ export function transferPanelHeights(
   return { before, after: total - before };
 }
 
+export type DockPlanEntry = {
+  dock: DockSpec;
+  /** The panel each visible slot shows, in order. */
+  specs: PanelSpec[];
+  /** Each visible slot's tabs, aligned with `specs`; one entry for an untabbed panel. */
+  slots: PanelSpec[][];
+};
+
 /* Every rendered side column needs one panel that absorbs the window's spare
    height. Saved workspaces from older builds, and a splitter drag that pins
    both neighbours when nothing else was fluid, can leave a dock with every
@@ -158,7 +166,7 @@ export function visibleDockPlan(
   workspace: Workspace,
   isDetached: (id: string) => boolean = () => false,
   isAvailable: (id: string) => boolean = () => true
-): Array<{ dock: Workspace['layout']['docks'][number]; specs: Workspace['layout']['docks'][number]['panels'] }> {
+): DockPlanEntry[] {
   return (workspace.layout?.docks || [])
     .map((dock) => {
       ensureDockFill(dock);
@@ -167,9 +175,10 @@ export function visibleDockPlan(
          model so it returns with its extension, but it must not take a slot:
          an empty slot has no element for the neighbouring splitters to
          measure, and if it was the column's fluid panel nothing fills. */
-      const specs = (dock.panels || []).filter((spec) => !isDetached(spec.id) && isAvailable(spec.id));
-      ensureDockFill({ ...dock, panels: specs });
-      return { dock, specs };
+      const visible = (dock.panels || []).filter((spec) => !isDetached(spec.id) && isAvailable(spec.id));
+      ensureDockFill({ ...dock, panels: visible }, false);
+      const slots = dockSlots(visible);
+      return { dock, specs: slots.map(activeTab), slots };
     })
     .filter((item) => !item.dock.hidden && item.specs.length > 0);
 }

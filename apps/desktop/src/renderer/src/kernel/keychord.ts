@@ -51,6 +51,69 @@ const KEY_ALIASES: Record<string, string> = {
 /** Keys that never form a chord on their own. */
 const BARE_MODIFIERS = new Set(['shift', 'control', 'alt', 'meta', 'altgraph', 'capslock', 'numlock', 'scrolllock', 'os', 'dead', 'unidentified', 'fn', 'fnlock']);
 
+/** Resolve at call time so labels and matching also work in embedded renderers. */
+export function shortcutPlatform(): string {
+  if (typeof navigator === 'undefined') return '';
+  const platform = 'userAgentData' in navigator ? navigator.userAgentData : undefined;
+  return (platform && typeof platform === 'object' && 'platform' in platform && typeof platform.platform === 'string'
+    ? platform.platform : navigator.platform) ?? '';
+}
+
+export function isMacPlatform(platform = shortcutPlatform()): boolean {
+  // Preserve the renderer's historical labels when no browser platform is available.
+  return !platform || /mac|darwin|iphone|ipad/i.test(platform);
+}
+
+const DISPLAY_KEYS: Record<string, string> = {
+  '⌫': 'Backspace', '⌦': 'Delete', '↩': 'Enter', '↵': 'Enter', '⏎': 'Enter', '⎋': 'Esc',
+  '⇥': 'Tab', '␣': 'Space', '⇞': 'PageUp', '⇟': 'PageDown', '↖': 'Home', '↘': 'End',
+  backspace: 'Backspace', delete: 'Delete', enter: 'Enter', escape: 'Esc', tab: 'Tab', space: 'Space',
+  pageup: 'PageUp', pagedown: 'PageDown', home: 'Home', end: 'End',
+  left: '←', up: '↑', right: '→', down: '↓', drag: 'Drag', click: 'Click'
+};
+
+/** Accept chord syntax or a legacy glyph label, including alternatives and drag hints. */
+export function formatShortcut(label: string, platform = shortcutPlatform()): string {
+  const mac = isMacPlatform(platform);
+  if (/\s\/\s/.test(label)) return label.split(/\s\/\s/).map(part => formatShortcut(part, platform)).join(' / ');
+  const glyphs = label.match(/^([⌘⌃⌥⇧]+)\s*(.*)$/);
+  if (mac && (glyphs || /[⌫⌦↩↵⏎⎋⇥␣⇞⇟↖↘]/.test(label))) return label;
+  let modifiers: string[] = [];
+  let key = label;
+  if (glyphs) {
+    const prefix = glyphs[1] ?? '';
+    modifiers = ['⌘', '⌃', '⌥', '⇧'].filter(mod => prefix.includes(mod))
+      .map(mod => ({ '⌘': 'ctrl', '⌃': 'ctrl', '⌥': 'alt', '⇧': 'shift' })[mod] ?? mod);
+    key = glyphs[2] ?? '';
+  } else if (label.includes('+') && label !== '+') {
+    let chord = normalizeChord(label);
+    for (const mod of ['cmd', 'ctrl', 'alt', 'shift']) {
+      if (chord.startsWith(`${mod}+`)) {
+        modifiers.push(mod);
+        chord = chord.slice(mod.length + 1);
+      }
+    }
+    key = chord;
+  } else {
+    // Some viewport hints use spaces between modifiers and the key.
+    let rest = label;
+    let token = rest.match(/^(cmd|command|ctrl|control|alt|option|shift)\s+/i);
+    while (token) {
+      modifiers.push(MOD_ALIASES[(token[1] ?? '').toLowerCase()] ?? '');
+      rest = rest.slice(token[0].length);
+      token = rest.match(/^(cmd|command|ctrl|control|alt|option|shift)\s+/i);
+    }
+    key = rest;
+  }
+  const names: Record<string, string> = mac
+    ? { cmd: '⌘', ctrl: '⌃', alt: '⌥', shift: '⇧' }
+    : { cmd: 'Ctrl', ctrl: 'Ctrl', alt: 'Alt', shift: 'Shift' };
+  const prefix = [...new Set(modifiers.map(mod => names[mod] ?? mod))];
+  const displayKey = DISPLAY_KEYS[key] ?? DISPLAY_KEYS[normalizeKeyName(key)]
+    ?? (/^[a-z]$|^f\d{1,2}$/i.test(key) ? key.toUpperCase() : key);
+  return [...prefix, ...(displayKey ? [displayKey] : [])].join(mac ? '' : '+');
+}
+
 function normalizeKeyName(raw: string): string {
   const key = raw.toLowerCase();
   return KEY_ALIASES[key] ?? key;
@@ -150,10 +213,13 @@ function chordParts(chord: string): ChordParts | null {
 }
 
 /** Match a pressed chord against a binding, optionally using legacy modifier semantics. */
-export function chordMatches(bindingChord: string, pressedChord: string, looseModifiers = false): boolean {
-  const binding = normalizeChord(bindingChord);
+export function chordMatches(bindingChord: string, pressedChord: string, looseModifiers = false, platform = shortcutPlatform()): boolean {
+  let binding = normalizeChord(bindingChord);
   const pressed = normalizeChord(pressedChord);
   if (!binding || !pressed) return false;
+  // Keep explicit bindings and existing Meta aliases working on every host.
+  if (binding === pressed) return true;
+  if (!isMacPlatform(platform)) binding = normalizeChord(binding.replace(/^cmd\+/, 'ctrl+'));
   if (binding === pressed) return true;
   if (!looseModifiers) return false;
 

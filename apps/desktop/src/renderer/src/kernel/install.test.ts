@@ -278,6 +278,9 @@ describe('installKernel', () => {
     expect(PM.WS.current.layout.docks.find((dock: any) => dock.id === 'right')?.panels[0]?.id).toBe('indexed');
     api.workspace.hasPanel('viewer'); api.workspace.addPanel('notes', 'right', 0); expect(api.workspace.hasPanel('notes')).toBe(true);
     expect(api.workspace.movePanel('notes', 'center', 1)).toBe(true); api.workspace.hidePanel('notes'); api.workspace.restorePanel('notes'); api.workspace.removePanel('notes'); api.workspace.refresh('viewer'); expect(PM.Layout.refresh).toHaveBeenCalledWith('viewer');
+    PM.PANELS = { notes: { title: 'Notes' }, indexed: { title: 'Indexed' } };
+    api.workspace.addPanel('notes', 'right'); expect(api.workspace.stackPanel('notes', 'indexed')).toBe(true); expect(api.workspace.stackPanel('viewer', 'indexed')).toBe(false);
+    expect(api.workspace.showTab('indexed')).toBe(true); expect(api.workspace.showTab('indexed')).toBe(false); expect(PM.WS.mutate).toHaveBeenLastCalledWith(expect.any(Function), { inPlace: true });
 
     api.util.round(1, 2); api.util.clamp(1, 0, 2); api.util.lerp(0, 2, .5); api.util.snapF(1, 30); api.util.tc(1, 30, true); api.util.parseTc('1', 30); api.util.uid('x'); api.util.hex2rgb('#fff'); api.util.rgb2hex(1, 1, 1);
     expect(PM.lerp).toHaveBeenLastCalledWith(0, 2, .5); api.ease.nameOf([0, 0], [1, 1]); expect(PM.Ease.nameOf).toHaveBeenCalledWith([0, 0], [1, 1]); expect(api.ease.PRESETS).toBe(PM.Ease.PRESETS);

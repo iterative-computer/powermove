@@ -696,6 +696,25 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
   }
 }
 
+/* Some GPU backends (WebView2 on Windows) refuse a VideoFrame made straight
+   from the WebGL canvas. The same pixels copied into a 2D canvas, read back
+   as RGBA, always make a frame; once the direct path fails, the export keeps
+   using the copy. */
+let copyCanvas: OffscreenCanvas | null = null;
+let directFramesFail = false;
+function frameFromCanvas(cv: HTMLCanvasElement | OffscreenCanvas, init: VideoFrameInit): VideoFrame {
+  if (!directFramesFail) {
+    try { return new window.VideoFrame(cv, init); } catch { directFramesFail = true; }
+  }
+  const { width, height } = cv;
+  if (!copyCanvas || copyCanvas.width !== width || copyCanvas.height !== height) copyCanvas = new OffscreenCanvas(width, height);
+  const context = copyCanvas.getContext('2d', { willReadFrequently: true })!;
+  context.clearRect(0, 0, width, height);
+  context.drawImage(cv, 0, 0);
+  const pixels = context.getImageData(0, 0, width, height).data;
+  return new window.VideoFrame(pixels, { ...init, format: 'RGBA', codedWidth: width, codedHeight: height } as VideoFrameBufferInit);
+}
+
 async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }: any) {
   const frames: any = [];
   let configured: any = false;
@@ -726,7 +745,7 @@ async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }:
     const T: any = t0 + i / opts.fps;
     await prepareFrame(PM,T,PM.proj,{width:W,height:H,mblur:opts.mblur,mbSamples:20});
     const cv: any = renderInto(T, W, H, opts.mblur);
-    const frame: any = new window.VideoFrame(cv, { timestamp: Math.round(i / opts.fps * 1e6), duration: Math.round(1e6 / opts.fps) });
+    const frame: any = frameFromCanvas(cv, { timestamp: Math.round(i / opts.fps * 1e6), duration: Math.round(1e6 / opts.fps) });
     try { if (encoderError) throw encoderError; enc.encode(frame, { keyFrame: i % Math.round(opts.fps * 2) === 0 }); } finally { frame.close(); }
     if (i % 3 === 0) {
       pctx.drawImage(cv, 0, 0, ui.prev.width, ui.prev.height);

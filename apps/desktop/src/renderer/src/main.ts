@@ -10,7 +10,7 @@ import '../../../css/vars.css';
 import '../../../css/publish.css';
 import '../../../css/transcription.css';
 import './legacy/core/image-sequence.css';
-import { installWebBridge, remoteLink } from './host/web-bridge';
+import { desktopHost, installWebBridge, remoteLink } from './host/web-bridge';
 import { installPointerFocus } from './controls/pointer-focus';
 
 installPointerFocus();
@@ -20,7 +20,8 @@ installPointerFocus();
 // synchronous boot.
 const remote = await installWebBridge();
 await import('./legacy/bootstrap');
-if (remote) {
+// The Windows app is one local host per user: there is nothing to sync with.
+if (remote && !desktopHost()) {
   // Other tabs on the same host edit the same document; keep this one in step.
   const [{ attachRemoteSync }, { attachRemoteFonts }] = await Promise.all([import('./host/remote-sync'), import('./host/remote-fonts')]);
   const link = remoteLink();

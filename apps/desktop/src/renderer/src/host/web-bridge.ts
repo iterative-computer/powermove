@@ -30,6 +30,9 @@ const storeOffline = async <T>(): Promise<StoreResult<T>> => ({ ok: false, error
 /** The live link, for modules that attach after the engines boot (remote-sync). It outlives any one socket. */
 let activeLink: ReconnectingLink | null = null;
 export function remoteLink(): ReconnectingLink | null { return activeLink; }
+/** True inside the Windows app, whose host runs on this machine for this user only. */
+let desktop = false;
+export function desktopHost(): boolean { return desktop; }
 const CONNECT_TIMEOUT_MS = 4000;
 const LINK_TOAST = 'host-link';
 
@@ -53,6 +56,8 @@ function wakeOn(retry: () => void): () => void {
 /* ── browser-side helpers ─────────────────────────────────── */
 
 function download(pathOnHost: string, name: string): void {
+  // In the Windows app the file is already where the user saved it.
+  if (desktop) return;
   const anchor = document.createElement('a');
   anchor.href = `/__powermove/download?path=${encodeURIComponent(pathOnHost)}`;
   anchor.download = name;
@@ -232,12 +237,24 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
       else notify('Powermove', 'Your agent has finished. Your result is ready.');
     },
     ping: () => link.invoke<string>(IPC.ping),
-    remote: true,
-    wrapMediaStore: (store, onChange) => attachRemoteMedia(link, store as never, onChange) as never,
-    remoteRuns: {
-      list: (projectId) => link.invoke<RemoteRunRecord[]>(WEB.runsList, projectId),
-      attach: (runId, hooks) => followRun(runId, hooks.onProgress, hooks.onTrace)
-    },
+    // The Windows app keeps media in this window's own storage, like the Mac app.
+    ...(hello.desktop ? {
+      fontFamilies: () => link.invoke<string[]>(IPC.fontFamilies),
+      // Saves go straight to the user's file, reusing unchanged media in place.
+      projectSave: {
+        begin: (request) => link.invoke(IPC.projectSaveBegin, request),
+        chunk: (token, assetId, data) => link.invoke(IPC.projectSaveChunk, { token, assetId, data }),
+        finish: (token) => link.invoke(IPC.projectSaveFinish, token),
+        abort: (token) => link.invoke(IPC.projectSaveAbort, token)
+      }
+    } : {
+      remote: true,
+      wrapMediaStore: (store, onChange) => attachRemoteMedia(link, store as never, onChange) as never,
+      remoteRuns: {
+        list: (projectId) => link.invoke<RemoteRunRecord[]>(WEB.runsList, projectId),
+        attach: (runId, hooks) => followRun(runId, hooks.onProgress, hooks.onTrace)
+      }
+    } satisfies Partial<PowermoveBridge>),
     versions: { electron: '', chrome: /Chrome\/(\S+)/.exec(navigator.userAgent)?.[1] ?? '', node: hello.node },
 
     fileUpload: {
@@ -269,6 +286,8 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
       return result;
     },
     openProjectFile: async () => {
+      // A native dialog opens the user's own file, so later saves update it.
+      if (hello.desktop) return link.invoke<ProjectOpenResult>(IPC.projectOpen);
       const [file] = await pickFile('.pmv,.json');
       if (!file) { toast('No project file was chosen.', 2500); return { ok: false, cancelled: true }; }
       try {
@@ -286,13 +305,19 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
         return { ok: false, cancelled: false, error: error instanceof Error ? error.message : 'Could not open project.' };
       }
     },
-    onProjectOpenExternal: subscribe(IPC.projectOpenExternal),
+    onProjectOpenExternal: (cb) => {
+      const off = subscribe<Parameters<typeof cb>[0]>(IPC.projectOpenExternal)(cb);
+      // Files opened from Explorer while this page loaded are held until now.
+      if (hello.desktop) link.send(IPC.projectOpenReady);
+      return off;
+    },
     projectRead: {
       read: (token, offset, length) => link.invoke(IPC.projectRead, { token, offset, length }),
       close: (token) => link.invoke(IPC.projectReadClose, token)
     },
     confirmProjectClose: (name) => link.invoke(IPC.projectConfirmClose, name),
     confirm: async (request) => {
+      if (hello.desktop) return link.invoke<boolean>(IPC.dialogConfirm, request);
       const detail = request.detail ? `\n\n${request.detail}` : '';
       return window.confirm(`${request.message}${detail}`);
     },
@@ -463,8 +488,15 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
     haptic: { alignment: () => {} },
     // No `menu`: the overlay Menu falls back to its own listbox.
     log: (level, text) => link.send(IPC.log, { level, text }),
-    openExternal: async (url) => { window.open(url, '_blank', 'noopener'); },
-    nativeEdit: (action) => { try { document.execCommand(action === 'selectAll' ? 'selectAll' : action); } catch { /* unsupported */ } },
+    openExternal: async (url) => { if (hello.desktop) await link.invoke(IPC.openExternal, url); else window.open(url, '_blank', 'noopener'); },
+    nativeEdit: (action) => {
+      let done = false;
+      try { done = document.execCommand(action); } catch { /* unsupported */ }
+      /* Page script cannot read the clipboard through execCommand('paste').
+         In the Windows app, report that so Ctrl+V keeps WebView2's own paste,
+         whose event carries pasted text, screenshots and copied files. */
+      return hello.desktop ? done : undefined;
+    },
     onMenuCommand: () => () => {},
     updates: {
       status: () => link.invoke(WEB.updateStatus),
@@ -630,6 +662,7 @@ export async function installWebBridge(): Promise<boolean> {
   });
   link.adopt(first);
   activeLink = link;
+  desktop = hello.desktop === true;
   provideBridge(createBridge(link, hello, snapshot, initialProject));
   document.documentElement.classList.add('remote-app');
   if (project) history.replaceState(null, '', location.pathname);
