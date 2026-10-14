@@ -16,6 +16,7 @@ crate-type = ["cdylib", "rlib"]
 pm-model = { path = "../pm-model" }
 pm-time = { path = "../pm-time" }
 pm-eval = { path = "../pm-eval" }
+pm-edit = { path = "../pm-edit" }
 pm-expr = { path = "../pm-expr" }
 # Level 1 text layout over registry answers and subsets from main (no
 # platform registry in WebAssembly).
