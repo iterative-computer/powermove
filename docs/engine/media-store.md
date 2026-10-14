@@ -198,8 +198,11 @@ contained, and they have no access to this IPC.
 
 Measured on 2026-10-13 (M4 Max, release `pm_node.node` and
 `pm_bridge.node` built in the worktree, hidden Electron under the machine
-lock, `--workers=1`): the unit files above, 133 tests, pass;
-`e2e/media-store.spec.ts`, 8 of 8, passes in 31 s. With the flag off
+lock, `--workers=1`): `e2e/media-store.spec.ts`, 8 of 8, passes in 31 s.
+Re-measured on 2026-10-14 after merging the wave 3 render lane: the eight
+unit files above, 99 tests, pass, as do `src/main/agent-tools` (85) and
+`src/main/engine` (63); `e2e/media-store.spec.ts`, 8 of 8, passes in
+38.7 s. With the flag off
 (default), the existing import, recovery, replacement, save, and agent
 media specs (`import-prores`, `import-mp4`, `project-file-media`,
 `menu-save`, `media-replacement`, `local-media-recovery`,
