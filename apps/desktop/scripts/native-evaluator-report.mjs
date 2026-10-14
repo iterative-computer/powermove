@@ -42,6 +42,9 @@ if (resultsFile) {
 }
 const testAt = (at) => {
   if (typeof at !== 'number') return undefined;
+  // The test running at that moment; else one that ended within 2 s (a
+  // window's last summary arrives as it closes).
+  for (const [start, end, title] of runs) if (at >= start && at <= end) return title;
   for (const [start, end, title] of runs) if (at >= start && at <= end + 2000) return title;
   return undefined;
 };
@@ -89,6 +92,11 @@ const report = {
     allowed: sum(totals.dual.allowed),
     fragile: { cases: fragile, differed: fragileDiffered, ok: fragileDiffered <= 0.05 * fragile },
     auditFailures: totals.audit.failures,
+    // Stale answers to queries a test made inside page.evaluate: the write the
+    // barrier missed is usually the test's own (it wrote PM.proj directly and
+    // called the app before announcing). Run those specs in audit-proxy to
+    // confirm: the Proxy records the test's writes and the stale answers go.
+    staleInTestEvaluate: events.audit.filter(e => e.kind === 'stale-answer' && String(e.site ?? '').startsWith('page.evaluate')).length,
     consistencyMismatches: events.consistency.length,
     violations: events.violation.length,
     // Writes from code a test evaluates in the page (directly, or an app
@@ -107,7 +115,7 @@ if (asJson) {
   const v = report.verdict;
   console.log(`launches ${totals.launches} (ready ${totals.ready}), unparsed lines ${report.unparsed}`);
   console.log(`dual: compared ${v.compared}, mismatched ${v.mismatched}, stale ${v.stale}, allowed ${v.allowed}; fragile ${v.fragile.cases}, differed ${v.fragile.differed} (${v.fragile.ok ? 'within' : 'over'} 5%)`);
-  console.log(`audit: ${totals.audit.audits} audits, ${totals.audit.failures} failures (missed writes ${totals.audit.missedWrites}, mirror ${totals.audit.mirrorMismatches})`);
+  console.log(`audit: ${totals.audit.audits} audits, ${totals.audit.failures} failures (missed writes ${totals.audit.missedWrites}, mirror ${totals.audit.mirrorMismatches}; stale answers inside page.evaluate ${v.staleInTestEvaluate})`);
   console.log(`consistency mismatches ${v.consistencyMismatches}, violations ${v.violations} (app writers ${v.appViolations}), errors ${v.errors}, dead ${v.dead}`);
   console.log(`barrier: ${JSON.stringify(totals.barrier)}`);
   console.log(`fallbacks: ${JSON.stringify(totals.native.fallbacks)}`);
