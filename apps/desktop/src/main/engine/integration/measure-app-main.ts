@@ -182,26 +182,20 @@ async function run(config: AppConfig): Promise<void> {
     const before = await call<string>('window.PM.proj.id');
     // Toasts (an open that failed says so in one) reach the log.
     await run('watch toasts', `(() => { const PM = window.PM; const toast = PM.toast; PM.toast = (...args) => { console.warn('[measure] toast: ' + String(args[0]).slice(0, 200)); return toast.apply(PM, args); }; })()`);
-    await run('open project', 'window.PM.openProject()');
-    log(`open returned after ${(performance.now() / 1000).toFixed(1)} s`);
-    // Opening the 884-layer corpus project (138 MB, its media restored into
-    // the fresh profile) took 66 to 95 s on a loaded machine and passed
-    // 420 s in several runs while other builds ran.
-    const openStart = performance.now();
-    let lastReport = openStart;
-    await waitFor(
-      'the project to open',
-      async () => {
-        const opened = await call<boolean>(`window.PM.proj.id !== ${JSON.stringify(before)} && window.PM.proj.layers.length > 0`);
-        if (!opened && performance.now() - lastReport > 60_000) {
-          lastReport = performance.now();
-          log(`still opening after ${((lastReport - openStart) / 1000).toFixed(0)} s (load ${os.loadavg()[0]!.toFixed(1)})`);
-        }
-        return opened;
-      },
-      900_000
-    );
-    log(`project open after ${((performance.now() - openStart) / 1000).toFixed(1)} s`);
+    // `PM.openProject()` resolves once the open finished or failed (a
+    // failure shows a toast, logged above). Main closes a project reader
+    // 120 s after it opened it (`save.ts`), so an open of the 138 MB corpus
+    // project that takes longer on a loaded machine fails at the end with
+    // "Unknown project read token": try once more (the media store already
+    // holds most of it), then give up.
+    const opened = (): Promise<boolean> => call<boolean>(`window.PM.proj.id !== ${JSON.stringify(before)} && window.PM.proj.layers.length > 0`);
+    for (let attempt = 1; ; attempt++) {
+      const openStart = performance.now();
+      await run('open project', 'window.PM.openProject()');
+      log(`open ${attempt} returned after ${((performance.now() - openStart) / 1000).toFixed(1)} s (load ${os.loadavg()[0]!.toFixed(1)})`);
+      if (await opened()) break;
+      if (attempt >= 2) throw new Error('the corpus project did not open (see the toasts in the log)');
+    }
     await run('project assets', 'window.PM.projectAssetsReady');
     // The whole project plays (its saved work area would loop after 30 s).
     result['project'] = await call(`(() => { const p = window.PM.proj; p.work = [0, p.dur]; return { name: p.name, w: p.w, h: p.h, fps: p.fps, dur: p.dur, layers: p.layers.length }; })()`);
