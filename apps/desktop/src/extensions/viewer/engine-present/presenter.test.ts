@@ -276,4 +276,25 @@ describe('EnginePresenter', () => {
     for (let i = 0, t = 0; i < 60; i++, t += 1000 / 120) presenter.refresh(t);
     expect(hints).toEqual([]);
   });
+  it('draws next-refresh frames on arrival when asked (a worker canvas), but timed frames only at animation frames', () => {
+    const source = new Source();
+    const painter = new Painter();
+    const link = new Link();
+    let now = 100;
+    const rafs: ((t: number) => void)[] = [];
+    const presenter = new EnginePresenter({ link, source, painter, drawOnArrival: true, now: () => now });
+    presenter.start((cb) => rafs.push(cb), () => {});
+    for (let i = 0; i < 6; i++) source.imports.add(`1:${i}`);
+    presenter.receive({ type: 'frame', frame: desc(1) }, 100);
+    expect(painter.draws).toHaveLength(1);
+    presenter.receive({ type: 'frame', frame: desc(2) }, 101);
+    expect(painter.draws.map((f) => f.id)).toEqual(['1:1', '1:2']);
+    // A timed frame waits for its refresh.
+    const clock = { epoch: 1, seq: 1, state: 'playing', hostTime: 0, mediaTime: 0, rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48_000, loopRange: null } as ClockSample;
+    presenter.receive({ type: 'clock', sample: clock }, 0);
+    now = 102;
+    presenter.receive({ type: 'frame', frame: desc(3, { pts: 0, duration: F }) }, 102);
+    expect(painter.draws).toHaveLength(2);
+    presenter.dispose();
+  });
 });

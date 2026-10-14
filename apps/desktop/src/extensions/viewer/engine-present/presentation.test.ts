@@ -401,9 +401,7 @@ describe('ViewerPresentation', () => {
     channel.handlers.message({ type: 'surfacePool', pool: { generation: 1, surfaces: [] } }, performance.now());
     channel.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
     await settleLong();
-    expect(presentation.presenting).toBe(false);
-    for (const cb of [...worker.rafs.values()]) cb(performance.now());
-    await settleLong();
+    // Drawn by the worker as it arrived (a next-refresh frame).
     expect(painter.draws).toBe(1);
     expect(mainPainter.draws).toBe(0);
     expect(presentation.presenting).toBe(true);
@@ -487,8 +485,6 @@ describe('ViewerPresentation', () => {
     expect(presentation.stats()?.generation).toBe(3);
     expect(channel.states.at(-1)).toMatchObject({ size: { width: 800, height: 450 }, devicePixelRatio: 1 });
     channel.handlers.message({ type: 'frame', frame: { ...desc(4, channel.states.at(-1)!.viewSeq), poolGeneration: 3 } }, performance.now());
-    await settleLong();
-    for (const cb of [...workers[1]!.rafs.values()]) cb(performance.now());
     await settleLong();
     expect(presentation.latest?.seq).toBe(4);
     presentation.dispose();

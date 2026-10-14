@@ -183,19 +183,19 @@ function setup(options: { failPainter?: boolean; trace?: boolean } = {}) {
 }
 
 describe('WorkerPresenter and the presentation worker', () => {
-  it('sends each frame with its VideoFrame to the worker, which draws it at its next animation frame and releases it after the GPU', async () => {
+  it('sends each frame with its VideoFrame to the worker, which draws a next-refresh frame on arrival and releases it after the GPU', async () => {
     const { pair, source, link, presenter, presented } = setup();
     source.imports.add('1:1');
     presenter.receive({ type: 'surfacePool', pool: { generation: 1, size: { width: 640, height: 360 }, format: 'bgra8Unorm', colorSpace: 'srgb', count: 8 } } as never, 0);
+    pair.workerNow = 10;
     presenter.receive({ type: 'frame', frame: desc(1) }, 5);
     await settle();
     // The frame crossed as a transfer, with the page's arrival time.
     const sent = pair.posted.find((m) => m.type === 'frame') as Extract<ToWorker, { type: 'frame' }>;
     expect(sent.arrivedMs).toBe(5);
     expect(sent.frame).toBe(source.frames[0]);
-    pair.frame(10);
+    // A worker canvas commits on its own: drawn without waiting for an animation frame.
     expect(pair.painter.draws).toHaveLength(1);
-    await settle();
     // Worker times are on the page's clock: worker 10 ms is page 1010 ms.
     expect(presented.map((f) => [f.seq, f.rafMs])).toEqual([[1, 1010]]);
     expect(link.releases).toEqual([]);

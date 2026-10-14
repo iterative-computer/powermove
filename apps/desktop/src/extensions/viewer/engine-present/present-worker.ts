@@ -142,6 +142,10 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
         painter: painter!,
         displayHz: message.displayHz,
         generation: message.generation,
+        // The worker's canvas commits on its own: a gesture frame drawn
+        // now can reach the display frame being composed, instead of
+        // waiting for the worker's next animation frame.
+        drawOnArrival: true,
         now,
         trace: message.trace,
         hostOffsetUs: () => s.hostOffsetUs,

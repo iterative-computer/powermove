@@ -90,6 +90,14 @@ export type PresenterOptions = {
    * over a running session), so the next pool retires it.
    */
   generation?: number;
+  /**
+   * Draw frames shown at the next refresh (paused, scrub, gesture) as soon
+   * as they arrive instead of at the next animation frame. Only for a
+   * canvas whose frames go to the compositor on their own (a worker's
+   * `OffscreenCanvas`): a page canvas only commits with the page's next
+   * frame anyway.
+   */
+  drawOnArrival?: boolean;
 };
 
 type Payload = { frame: VideoFrame };
@@ -323,6 +331,10 @@ export class EnginePresenter implements Presenter {
     const item: Queued<Payload> = { desc, payload: { frame }, arrivedMs };
     for (const old of this.buffer.push(item)) this.dropItem(old, 'superseded');
     this.stats.maxQueued = Math.max(this.stats.maxQueued, this.buffer.size);
+    if (desc.duration === null && this.options.drawOnArrival && this.raf) {
+      const show = this.buffer.takeImmediate();
+      if (show) this.draw(show, this.now());
+    }
   }
 
   /** One refresh: called at requestAnimationFrame with its timestamp. */
