@@ -352,3 +352,67 @@ fn helpers_without_a_document() {
     );
     assert!(ok(&mut e, r#"{"op":"frameRate","fps":-1}"#).is_null());
 }
+
+/// Every export validates its input: a panic would trap the instance in the
+/// editor. Truncated, corrupted, and random inputs must come back as errors.
+#[test]
+fn malformed_input_never_panics() {
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut e = engine();
+    let good = binary::encode(&ops::diff_ops(
+        Some(&parse(PROJECT).unwrap()),
+        Some(&parse(&PROJECT.replace("\"v\": 100", "\"v\": 101")).unwrap()),
+    ))
+    .unwrap();
+    let requests = [
+        r#"{"op":"ev","comp":"C1","layer":0,"key":"rotation","t":1}"#,
+        r#"{"op":"localMatrix","comp":"C1","layer":1,"t":0}"#,
+        r#"{"op":"countTextUnits","lines":["ab"],"unit":"words"}"#,
+    ];
+    for round in 0..2_000 {
+        // Corrupt a valid patch body: flip bytes, truncate, or append.
+        let mut body = good.clone();
+        match next() % 3 {
+            0 => {
+                for _ in 0..1 + next() % 4 {
+                    let i = (next() as usize) % body.len();
+                    body[i] = next() as u8;
+                }
+            }
+            1 => body.truncate((next() as usize) % body.len()),
+            _ => body.extend((0..next() % 16).map(|_| next() as u8)),
+        }
+        let base = e.revision();
+        if e.apply(&body, base, base + 1).is_err() {
+            e.resync(PROJECT.as_bytes(), base + 1).unwrap();
+        }
+        // Corrupted and random queries.
+        let mut request = requests[round % requests.len()].as_bytes().to_vec();
+        let i = (next() as usize) % request.len();
+        request[i] = next() as u8;
+        let _ = e.query(&request);
+        let noise: Vec<u8> = (0..next() % 64).map(|_| next() as u8).collect();
+        let _ = e.query(&noise);
+        let _ = e.apply(&noise, e.revision(), e.revision() + 1);
+        if round % 50 == 0 {
+            let mut doc = PROJECT.as_bytes().to_vec();
+            doc.truncate((next() as usize) % doc.len());
+            assert!(Engine::new().resync(&doc, 1).is_err() || doc.is_empty());
+        }
+    }
+    // Still answering after all of it.
+    e.resync(PROJECT.as_bytes(), e.revision() + 1).unwrap();
+    assert_eq!(
+        nums(&ok(
+            &mut e,
+            r#"{"op":"localMatrix","comp":"C1","layer":0,"t":0}"#
+        ))[4],
+        100.0
+    );
+}
