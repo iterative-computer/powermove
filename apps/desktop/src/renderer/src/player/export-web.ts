@@ -84,6 +84,22 @@ export function inspectWebExport(PM: any) {
   return { errors: [...errors], warnings: [...warnings], definitions, fonts, assets };
 }
 
+/**
+ * A browser plays what this viewer plays. With the new engine's media store,
+ * an asset marked `rendition` stores its original (ProRes, TIFF, HEIF) and
+ * keeps a browser rendition as generated media (section 21): the web export
+ * takes the rendition, or the bytes the live asset shows.
+ */
+async function browserRendition(PM: any, meta: any): Promise<Blob | null> {
+  const kept = meta.storageKey ? await PM.MediaStore?.rendition?.get?.(meta.storageKey).catch(() => null) : null;
+  if (kept) return kept;
+  const url = PM.assets?.get?.(meta.id)?.url;
+  if (typeof url === 'string' && url.startsWith('blob:')) {
+    try { return await (await fetch(url)).blob(); } catch { /* revoked */ }
+  }
+  throw new Error(`“${meta.name || meta.id}” has no browser-playable copy yet. Open it in the viewer, then export again.`);
+}
+
 const STORED_EXTENSIONS: Readonly<Record<string, string>> = {
   'video/webm': 'webm', 'video/mp4': 'mp4', 'video/quicktime': 'mov',
   'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif',
@@ -117,7 +133,7 @@ export async function buildWebExport(PM: any) {
   for (const id of inspection.assets) {
     const meta = findAsset(project, id);
     if (!meta) throw new Error(`Missing media metadata: ${id}`);
-    const blob = await PM.MediaStore.get(meta);
+    const blob = meta.rendition === true ? await browserRendition(PM, meta) : await PM.MediaStore.get(meta);
     if (!blob) throw new Error(`The original media for “${meta.name || id}” is missing. Reimport it before exporting.`);
     /* The stored bytes decide the extension: a converted animation or playback
        proxy keeps the name the user chose while holding WebM, and a static host
