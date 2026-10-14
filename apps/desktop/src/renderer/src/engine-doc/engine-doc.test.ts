@@ -336,6 +336,54 @@ describe.skipIf(!built)('engine-doc with pm-wasm', () => {
   });
 });
 
+describe.skipIf(!built)('the identity registry across a replaced instance', () => {
+  it('ignores ids of the trapped instance when their owners are collected', async () => {
+    // A FinalizationRegistry whose callbacks the test fires (a real one runs
+    // them only when the collector decides to).
+    const registries: Array<{ cleanup: (held: any) => void; held: any[] }> = [];
+    const Real = globalThis.FinalizationRegistry;
+    (globalThis as any).FinalizationRegistry = class {
+      private entry: { cleanup: (held: any) => void; held: any[] };
+      constructor(cleanup: (held: any) => void) { this.entry = { cleanup, held: [] }; registries.push(this.entry); }
+      register(_owner: object, held: any) { this.entry.held.push(held); }
+      unregister() { return false; }
+    };
+    let PM: any, doc: EngineDoc;
+    try { ({ PM, doc } = await editor('on')); } finally { (globalThis as any).FinalizationRegistry = Real; }
+    const animated = (name: string, from: number) => {
+      const L = PM.mkLayer('solid', { name });
+      for (const key of ['position.x', 'position.y', 'rotation', 'opacity']) L.p[key].kf = [PM.KF(0, from), PM.KF(2, from + 100, 'easeOut')];
+      return L;
+    };
+    PM.hist.do('Add', () => { PM.addLayer(animated('A', 10)); PM.addLayer(animated('B', 500)); });
+    const [A, B] = ['A', 'B'].map(name => PM.proj.layers.find((l: any) => l.name === name));
+    const keys = ['position.x', 'position.y', 'rotation', 'opacity'];
+    const ask = (L: any) => keys.flatMap(key => [doc.api!.ev(L, key, 1.25), doc.api!.evP(L, L.p[key], 1.25, key)]);
+    const expected = (L: any) => keys.flatMap(key => [PM.ev(L, key, 1.25), PM.evP(L, L.p[key], 1.25, key)]);
+    // Interned in the first instance: A's channels get the low ids.
+    expect(ask(A)).toEqual(expected(A));
+    const registry = registries.at(-1)!;
+    const before = registry.held.splice(0);
+    expect(before.length).toBeGreaterThan(0);
+    // A trap; the loader replaces the instance.
+    doc.wasm!.dead = true;
+    await new Promise(r => setTimeout(r, 1100));
+    for (let i = 0; i < 50 && !doc.ready; i++) await new Promise(r => setTimeout(r, 50));
+    expect(doc.ready).toBe(true);
+    // In the new instance B is interned first, so its ids are the ones A had.
+    expect(ask(B)).toEqual(expected(B));
+    const heldId = (h: any): number => (typeof h === 'number' ? h : h.id);
+    const reused = new Set(registry.held.map(heldId));
+    expect(before.some(h => reused.has(heldId(h)))).toBe(true);
+    // A's old owners are collected: nothing of the new instance is released.
+    for (const held of before) registry.cleanup(held);
+    expect(ask(B)).toEqual(expected(B));
+    expect(ask(A)).toEqual(expected(A));
+    expect(registry.held.every(h => h.generation === registry.held[0].generation)).toBe(true);
+    expect(before.every(h => h.generation < registry.held[0].generation)).toBe(true);
+  });
+});
+
 describe.skipIf(!built)('writes inside open transactions', () => {
   it('re-marks a scoped transaction\'s held paths on every announcement, and diffs inside a plain one', async () => {
     const { PM, doc } = await editor('on');

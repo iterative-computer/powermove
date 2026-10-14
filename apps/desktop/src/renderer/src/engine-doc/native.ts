@@ -175,8 +175,15 @@ export class NativeApi {
   /** Live layer → its interned transform channels (valid at `revision` with `cur` as `PM.curComp()`). */
   private channels = new WeakMap<object, { comp: string; ids: Map<string, number>; revision: number; cur: unknown }>();
   private refs = new Map<number, number>();
+  /**
+   * The module instance the interned ids belong to. `reset()` (a replaced
+   * instance) moves it on; a registration from an earlier instance names an
+   * id the current one may have handed to another channel, so it is ignored
+   * when its owner is collected.
+   */
+  private generation = 0;
   private finalizer = typeof FinalizationRegistry === 'function'
-    ? new FinalizationRegistry<number>(id => this.unref(id)) : null;
+    ? new FinalizationRegistry<{ id: number; generation: number }>(held => this.unref(held.id, held.generation)) : null;
   private indexed = new WeakMap<any[], Indexed>();
   /** `expressionErrors` for channels evaluated natively (live objects). */
   readonly errors = new WeakMap<object, string>();
@@ -352,14 +359,16 @@ export class NativeApi {
     const id = wasm.intern(address);
     if (id >= 0) {
       this.refs.set(id, (this.refs.get(id) ?? 0) + 1);
-      this.finalizer?.register(owner, id);
+      this.finalizer?.register(owner, { id, generation: this.generation });
       this.stats.interned += 1;
     }
     return id;
   }
 
-  private unref(id: number) {
-    const n = (this.refs.get(id) ?? 1) - 1;
+  private unref(id: number, generation: number) {
+    // An id of a replaced instance, or one this instance never counted.
+    if (generation !== this.generation || !this.refs.has(id)) return;
+    const n = this.refs.get(id)! - 1;
     if (n > 0) { this.refs.set(id, n); return; }
     this.refs.delete(id);
     const wasm = this.wasm();
@@ -368,6 +377,7 @@ export class NativeApi {
 
   /** Drops every interned id (after the module is replaced). */
   reset(): void {
+    this.generation += 1;
     this.props = new WeakMap();
     this.channels = new WeakMap();
     this.refs.clear();
