@@ -6,9 +6,11 @@ mod common;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Instant;
 
 use common::*;
 use pm_audio::offline::{self, PcmFormat, WavWriter, read_wav, sample_range};
+use pm_audio::source::BLOCK;
 use pm_audio::waveform::{Waveform, legacy_peaks};
 use pm_audio::{MixFormat, SourceCache};
 use pm_protocol::common::TICKS_PER_SECOND;
@@ -113,6 +115,83 @@ fn long_sources_stream_without_a_limit() {
         stats.bytes
     );
     eprintln!("40 min AAC: max |render − ffmpeg decode| {worst:e} at 39:59; cache {stats:?}");
+}
+
+/// Ten minutes of WebM/Opus and of Matroska/FLAC: 1 ms timebases, so the
+/// decoder positions them by counting samples rather than by timestamps.
+/// Each block costs the same wherever it sits in the file, read in order
+/// (playback, export) or cold (a seek near the end): decoding them is
+/// linear in the length, not quadratic. A cold block equals the block read
+/// in order.
+#[test]
+fn long_coarse_timebase_sources_decode_in_linear_time() {
+    let dir = temp_dir("coarse");
+    let tone = "aevalsrc=exprs='0.3*sin(2*PI*440*t)+0.1*sin(2*PI*5003*t)|0.3*sin(2*PI*660*t)':s=48000:d=600";
+    for (name, args, bound) in [
+        (
+            "long.webm",
+            &["-c:a", "libopus", "-b:a", "128k"][..],
+            1e-4f32,
+        ),
+        ("long.mkv", &["-c:a", "flac"][..], 0.0),
+    ] {
+        let file = dir.join(name);
+        generate(&file, tone, args);
+        let cache = SourceCache::new(8 << 20, 0);
+        let source = cache.open(&file, None).unwrap();
+        let blocks = (600 * 48_000u64).div_ceil(BLOCK as u64);
+        let mut packets = Vec::new();
+        let mut micros = Vec::new();
+        let mut kept = Vec::new();
+        for k in 0..blocks {
+            let before = source.packets_decoded();
+            let t = Instant::now();
+            let b = cache.block(&source, k, true).unwrap().unwrap();
+            micros.push(t.elapsed().as_micros() as u64);
+            packets.push(source.packets_decoded() - before);
+            if k == 5 || k == blocks - 3 {
+                kept.push((k, b));
+            }
+        }
+        // The first block has no pre-roll; every other costs the block, the
+        // pre-roll, and at most an anchor spacing (Opus: about 69 + 25 + 5
+        // packets), the same near the end as near the start.
+        let first = packets[1];
+        let worst = *packets[1..].iter().max().unwrap();
+        let flat = first + first / 10 + 2;
+        assert!(
+            worst <= flat,
+            "{name}: blocks in order cost {first} to {worst} packets"
+        );
+        let cold = SourceCache::new(8 << 20, 0);
+        let cold_source = cold.open(&file, None).unwrap();
+        for (k, b) in &kept {
+            let before = cold_source.packets_decoded();
+            let t = Instant::now();
+            let c = cold.block(&cold_source, *k, true).unwrap().unwrap();
+            let us = t.elapsed().as_micros();
+            let cost = cold_source.packets_decoded() - before;
+            assert!(
+                cost <= flat,
+                "{name}: cold block {k} decoded {cost} packets"
+            );
+            for (x, y) in c.channels.iter().zip(&b.channels) {
+                let diff = x.iter().zip(y).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+                assert!(diff <= bound, "{name}: cold block {k} differs by {diff}");
+            }
+            eprintln!("{name}: cold block {k} decoded {cost} packets in {us} µs");
+        }
+        let at = |k: usize| micros[k.min(micros.len() - 1)];
+        eprintln!(
+            "{name}: {blocks} blocks in order, {first} to {worst} packets each; \
+             block 0 {} µs, 100 {} µs, 200 {} µs, 400 {} µs; total {} ms",
+            at(0),
+            at(100),
+            at(200),
+            at(400),
+            micros.iter().sum::<u64>() / 1000
+        );
+    }
 }
 
 /// The export path: a tick range renders to `round(duration × sr)` frames
