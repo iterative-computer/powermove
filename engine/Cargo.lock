@@ -2045,14 +2045,18 @@ dependencies = [
 name = "pm-node"
 version = "0.1.0"
 dependencies = [
+ "image",
  "libc",
  "napi",
  "napi-build",
  "napi-derive",
  "pm-bridge",
  "pm-engine",
+ "pm-export",
  "pm-gpu",
+ "pm-model",
  "pm-protocol",
+ "pm-render",
  "pm-text",
  "serde",
  "serde_json",

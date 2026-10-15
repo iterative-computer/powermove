@@ -897,7 +897,14 @@ impl Engine {
             }
             Request::CancelJobs(cancel) if self.jobs.is_some() && kind == PeerKind::Host => {
                 let cancelled = self.jobs.as_mut().expect("checked").cancel(&cancel);
-                self.respond(port, id, Response::JobsCancelled(cancelled), None, None, out);
+                self.respond(
+                    port,
+                    id,
+                    Response::JobsCancelled(cancelled),
+                    None,
+                    None,
+                    out,
+                );
             }
             Request::AgentFrames(request) if self.jobs.is_some() && kind == PeerKind::Host => {
                 self.agent_frames(port, id, session, revision, request, now, out)
@@ -1768,11 +1775,13 @@ impl Engine {
             .expect("checked by the caller")
             .submit(port, job, document);
         match result {
-            Ok(accepted) => self.respond(port, id, Response::JobAccepted(accepted), None, None, out),
+            Ok(accepted) => {
+                self.respond(port, id, Response::JobAccepted(accepted), None, None, out)
+            }
             Err(error) => {
                 let error = EngineError {
                     scope: ErrorScope::Request { id },
-                    ..error
+                    ..*error
                 };
                 self.send_error(port, id, error, out)
             }
@@ -1833,7 +1842,7 @@ impl Engine {
                 if let Err(error) = result {
                     let error = EngineError {
                         scope: ErrorScope::Request { id: w.id },
-                        ..error
+                        ..*error
                     };
                     self.send_error(w.port, w.id, error, out);
                 }

@@ -158,7 +158,12 @@ fn settings(format: ExportFormat, alpha: WireAlpha, dur: f64) -> ExportSettings 
     }
 }
 
-fn job(doc: &Value, media: MediaPaths, settings: ExportSettings, destination: PathBuf) -> ExportJob {
+fn job(
+    doc: &Value,
+    media: MediaPaths,
+    settings: ExportSettings,
+    destination: PathBuf,
+) -> ExportJob {
     ExportJob {
         document: Arc::new(load(doc)),
         composition: "Ptest-root".into(),
@@ -224,7 +229,12 @@ fn generated_projects_export_and_verify_in_every_phase_2_format() {
     ];
     for (name, format, alpha, ext, codec, audio_codec) in cases {
         let destination = dir.join(format!("{name}.{ext}"));
-        let job = job(&doc, media.clone(), settings(format, alpha, dur), destination.clone());
+        let job = job(
+            &doc,
+            media.clone(),
+            settings(format, alpha, dur),
+            destination.clone(),
+        );
         let seen = Mutex::new(vec![]);
         let mut progress = |p: Progress| seen.lock().unwrap().push(p.frames_done);
         let delivered = run_export(
@@ -251,7 +261,10 @@ fn generated_projects_export_and_verify_in_every_phase_2_format() {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&destination).unwrap().permissions().mode();
+            let mode = std::fs::metadata(&destination)
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600, "{name}");
         }
         if let Some(ffprobe) = ffprobe() {
@@ -374,7 +387,10 @@ fn the_pipeline_matches_rendering_and_converting_each_frame() {
     assert_eq!(out.frames.len() as u64, timeline.frames);
     // 6 frames at 30 fps: 0.2 s of stereo at 48 kHz.
     assert_eq!(out.audio.len(), 9600 * 2);
-    assert!(out.audio.iter().any(|v| v.abs() > 0.01), "the tone and the clip sound");
+    assert!(
+        out.audio.iter().any(|v| v.abs() > 0.01),
+        "the tone and the clip sound"
+    );
     for n in [0u64, timeline.frames - 1] {
         let frame = render_frame(
             &mut renderer,
@@ -412,7 +428,10 @@ fn unsupported_projects_and_offline_media_are_routed_before_writing() {
     let dir = scratch("routing");
     let dur = 1.0;
     let (mut doc, media) = generated(dur);
-    doc["layers"].as_array_mut().unwrap().insert(0, text("caption", dur));
+    doc["layers"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, text("caption", dur));
     let destination = dir.join("routed.mov");
     let j = job(
         &doc,
@@ -449,7 +468,11 @@ fn unsupported_projects_and_offline_media_are_routed_before_writing() {
         &mut no_progress(),
     ) {
         Err(JobError::Unsupported(list)) => {
-            assert!(list.iter().any(|u| u.contains("offline") || u.contains("missing")), "{list:?}")
+            assert!(
+                list.iter()
+                    .any(|u| u.contains("offline") || u.contains("missing")),
+                "{list:?}"
+            )
         }
         Err(e) => panic!("expected routing, got {e}"),
         Ok(_) => panic!("expected routing, got a file"),
@@ -463,7 +486,11 @@ fn unsupported_projects_and_offline_media_are_routed_before_writing() {
         plan_export(&job(&doc, media, s, destination.clone())),
         Err(JobError::Unsupported(_))
     ));
-    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "nothing written");
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        0,
+        "nothing written"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -492,7 +519,11 @@ fn a_cancelled_export_leaves_nothing_behind() {
         }
     };
     let result = run_export(&mut renderer, &j, &Unrestricted, &cancel, &mut progress);
-    assert!(matches!(result, Err(JobError::Cancelled)), "{:?}", result.err());
+    assert!(
+        matches!(result, Err(JobError::Cancelled)),
+        "{:?}",
+        result.err()
+    );
     assert_eq!(
         std::fs::read_dir(&dir).unwrap().count(),
         0,
@@ -516,7 +547,12 @@ fn exports_replace_the_hosts_temporary_file_in_place() {
     }
     let dur = 0.5;
     let (doc, media) = generated(dur);
-    let mut j = job(&doc, media, settings(ExportFormat::H264, WireAlpha::None, dur), host.clone());
+    let mut j = job(
+        &doc,
+        media,
+        settings(ExportFormat::H264, WireAlpha::None, dur),
+        host.clone(),
+    );
     j.overwrite = Overwrite::InPlace;
     let mut renderer = Renderer::headless().unwrap();
     let delivered = run_export(
@@ -537,4 +573,48 @@ fn exports_replace_the_hosts_temporary_file_in_place() {
         .collect();
     assert_eq!(names.len(), 1, "only the host's file: {names:?}");
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Prints submission-to-completion times (diagnostic).
+#[test]
+#[ignore = "diagnostic"]
+fn gpu_times_by_band() {
+    struct Print(Mutex<Vec<(u32, f64)>>);
+    impl GpuGate for Print {
+        fn admit(&self, _: u64, units: u32, _: &AtomicBool) -> Option<u32> {
+            Some(if std::env::var_os("BANDS").is_some() {
+                1
+            } else {
+                units
+            })
+        }
+        fn finished(&self, _: u64, units: u32, us: f64) {
+            self.0.lock().unwrap().push((units, us));
+        }
+    }
+    let (doc, media) = generated(1.0);
+    let job = job(
+        &doc,
+        media,
+        settings(ExportFormat::H264, WireAlpha::None, 1.0),
+        PathBuf::from("/x.mp4"),
+    );
+    let mut r = Renderer::headless().unwrap();
+    let p = Print(Mutex::new(vec![]));
+    let req = pm_render::RenderRequest::sized(Size::new(W, H), Precision::Float16);
+    for n in 0..10 {
+        render_frame(
+            &mut r,
+            &job.document,
+            &job.composition,
+            seconds(n as f64 / 10.0),
+            &req,
+            &job.media,
+            &p,
+            1,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    }
+    eprintln!("{:?}", p.0.lock().unwrap());
 }

@@ -60,7 +60,8 @@ pub(crate) fn current_qos() -> Qos {
     // SAFETY: both out-pointers are valid for writes.
     let status =
         unsafe { libc::pthread_get_qos_class_np(libc::pthread_self(), &mut class, &mut priority) };
-    (status == 0 && class as u32 != libc::qos_class_t::QOS_CLASS_UNSPECIFIED as u32).then_some(class)
+    (status == 0 && class as u32 != libc::qos_class_t::QOS_CLASS_UNSPECIFIED as u32)
+        .then_some(class)
 }
 
 #[cfg(not(target_vendor = "apple"))]

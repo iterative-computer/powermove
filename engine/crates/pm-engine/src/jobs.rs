@@ -85,7 +85,7 @@ pub trait JobService: Send {
         host: PortId,
         job: SubmitJob,
         document: Option<JobDocument>,
-    ) -> Result<JobAccepted, EngineError>;
+    ) -> Result<JobAccepted, Box<EngineError>>;
 
     /// Cancels one job or every job of an agent run.
     fn cancel(&mut self, cancel: &CancelJobs) -> JobsCancelled;
@@ -98,7 +98,7 @@ pub trait JobService: Send {
         id: RequestId,
         document: JobDocument,
         request: AgentFrameRequest,
-    ) -> Result<(), EngineError>;
+    ) -> Result<(), Box<EngineError>>;
 
     /// A deadline signal (contract 13) after the engine's own slicer saw it.
     fn signal(&mut self, signal: &DeadlineSignal);

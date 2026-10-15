@@ -16,7 +16,9 @@ use pm_protocol::common::{
     Bytes, ContentHash, FrameRate, HostMicros, RequestId, Revision, SessionId, Size, TickRange,
     Ticks,
 };
-use pm_protocol::envelope::{Envelope, Event, Message, OpenSession, Request, Response, SessionRole};
+use pm_protocol::envelope::{
+    Envelope, Event, Message, OpenSession, Request, Response, SessionRole,
+};
 use pm_protocol::error::{EngineError, EngineProcess, ErrorCode, ErrorScope};
 use pm_protocol::host::{CacheKind, CapabilityKind, MintHandle, OutputChoice, PortId};
 use pm_protocol::patch::{DocumentEncoding, Resync, ResyncSource};
@@ -41,9 +43,12 @@ fn request(id: u64, body: Request, session: Option<SessionId>, revision: Option<
     codec::encode(&envelope).unwrap()
 }
 
+/// A submission and its snapshot (session, revision, canonical text).
+type Submitted = (SubmitJob, Option<(SessionId, u64, String)>);
+
 #[derive(Default)]
 struct Seen {
-    submitted: Vec<(SubmitJob, Option<(SessionId, u64, String)>)>,
+    submitted: Vec<Submitted>,
     frames: Vec<(PortId, RequestId, u64, AgentFrameRequest)>,
     cancels: Vec<CancelJobs>,
     signals: Vec<DeadlineSignal>,
@@ -63,7 +68,7 @@ impl JobService for Fake {
         _host: PortId,
         job: SubmitJob,
         document: Option<JobDocument>,
-    ) -> Result<JobAccepted, EngineError> {
+    ) -> Result<JobAccepted, Box<EngineError>> {
         let accepted = JobAccepted {
             job: job.job.clone(),
             state: JobState::Queued,
@@ -90,7 +95,7 @@ impl JobService for Fake {
         id: RequestId,
         document: JobDocument,
         request: AgentFrameRequest,
-    ) -> Result<(), EngineError> {
+    ) -> Result<(), Box<EngineError>> {
         self.0
             .lock()
             .unwrap()
@@ -155,7 +160,13 @@ fn code(m: &Message) -> ErrorCode {
 }
 
 /// Opens a session on `port` and resyncs it to `text` at `revision`.
-fn snapshot(engine: &mut Engine, port: PortId, role: SessionRole, text: &str, revision: u64) -> SessionId {
+fn snapshot(
+    engine: &mut Engine,
+    port: PortId,
+    role: SessionRole,
+    text: &str,
+    revision: u64,
+) -> SessionId {
     let out = engine.receive(
         port,
         &request(
@@ -197,7 +208,10 @@ fn snapshot(engine: &mut Engine, port: PortId, role: SessionRole, text: &str, re
         ),
         at(2),
     );
-    assert!(matches!(answer(&out, port), Message::Response { .. }), "{out:?}");
+    assert!(
+        matches!(answer(&out, port), Message::Response { .. }),
+        "{out:?}"
+    );
     session
 }
 
@@ -243,8 +257,18 @@ fn agent_export(session: SessionId) -> SubmitJob {
 #[test]
 fn exports_reach_the_service_with_a_frozen_snapshot() {
     let (mut engine, fake) = engine();
-    let sid = snapshot(&mut engine, HOST, SessionRole::JobSnapshot, r#"{"id":"P","n":1}"#, 7);
-    let out = engine.receive(HOST, &request(20, Request::SubmitJob(agent_export(sid)), None, None), at(3));
+    let sid = snapshot(
+        &mut engine,
+        HOST,
+        SessionRole::JobSnapshot,
+        r#"{"id":"P","n":1}"#,
+        7,
+    );
+    let out = engine.receive(
+        HOST,
+        &request(20, Request::SubmitJob(agent_export(sid)), None, None),
+        at(3),
+    );
     match answer(&out, HOST) {
         Message::Response {
             body: Response::JobAccepted(a),
@@ -265,13 +289,35 @@ fn submissions_are_checked_before_the_service_sees_them() {
     let (mut engine, fake) = engine();
     // A renderer cannot submit jobs.
     let window_session = snapshot(&mut engine, WINDOW, SessionRole::JobSnapshot, "{}", 1);
-    let out = engine.receive(WINDOW, &request(20, Request::SubmitJob(agent_export(window_session)), None, None), at(3));
+    let out = engine.receive(
+        WINDOW,
+        &request(
+            20,
+            Request::SubmitJob(agent_export(window_session)),
+            None,
+            None,
+        ),
+        at(3),
+    );
     assert_eq!(code(&answer(&out, WINDOW)), ErrorCode::Unsupported);
     // The host cannot export a session another port owns, or a live job session.
-    let out = engine.receive(HOST, &request(21, Request::SubmitJob(agent_export(window_session)), None, None), at(3));
+    let out = engine.receive(
+        HOST,
+        &request(
+            21,
+            Request::SubmitJob(agent_export(window_session)),
+            None,
+            None,
+        ),
+        at(3),
+    );
     assert_eq!(code(&answer(&out, HOST)), ErrorCode::UnknownSession);
     let live = snapshot(&mut engine, HOST, SessionRole::Job, "{}", 1);
-    let out = engine.receive(HOST, &request(22, Request::SubmitJob(agent_export(live)), None, None), at(3));
+    let out = engine.receive(
+        HOST,
+        &request(22, Request::SubmitJob(agent_export(live)), None, None),
+        at(3),
+    );
     assert_eq!(code(&answer(&out, HOST)), ErrorCode::UnknownSession);
     assert!(fake.0.lock().unwrap().submitted.is_empty());
 }
@@ -288,10 +334,18 @@ fn agent_frames_wait_for_the_agents_revision() {
         }],
     );
     // At or behind the applied revision: straight to the service.
-    engine.receive(HOST, &request(30, Request::AgentFrames(frames.clone()), Some(sid), Some(4)), at(10));
+    engine.receive(
+        HOST,
+        &request(30, Request::AgentFrames(frames.clone()), Some(sid), Some(4)),
+        at(10),
+    );
     assert_eq!(fake.0.lock().unwrap().frames.len(), 1);
     // Ahead: held until the revision arrives.
-    let out = engine.receive(HOST, &request(31, Request::AgentFrames(frames.clone()), Some(sid), Some(6)), at(11));
+    let out = engine.receive(
+        HOST,
+        &request(31, Request::AgentFrames(frames.clone()), Some(sid), Some(6)),
+        at(11),
+    );
     assert!(sent(&out, HOST).is_empty(), "{out:?}");
     assert_eq!(fake.0.lock().unwrap().frames.len(), 1);
     // The resync to revision 6 releases it.
@@ -317,15 +371,36 @@ fn agent_frames_wait_for_the_agents_revision() {
     {
         let seen = fake.0.lock().unwrap();
         assert_eq!(seen.frames.len(), 2);
-        assert_eq!((seen.frames[1].1, seen.frames[1].2), (RequestId::new(31).unwrap(), 6));
+        assert_eq!(
+            (seen.frames[1].1, seen.frames[1].2),
+            (RequestId::new(31).unwrap(), 6)
+        );
     }
     // A revision that never arrives fails with staleRevision after the bound.
-    engine.receive(HOST, &request(33, Request::AgentFrames(frames.clone()), Some(sid), Some(9)), at(20));
-    assert!(engine.tick(at(20 + AGENT_REVISION_WAIT_US / 2)).iter().all(|a| !matches!(a, Action::Send { .. })));
+    engine.receive(
+        HOST,
+        &request(33, Request::AgentFrames(frames.clone()), Some(sid), Some(9)),
+        at(20),
+    );
+    assert!(
+        engine
+            .tick(at(20 + AGENT_REVISION_WAIT_US / 2))
+            .iter()
+            .all(|a| !matches!(a, Action::Send { .. }))
+    );
     let out = engine.tick(at(21 + AGENT_REVISION_WAIT_US));
     assert_eq!(code(&answer(&out, HOST)), ErrorCode::StaleRevision);
     // Frames name a session the asking port owns.
-    let out = engine.receive(HOST, &request(34, Request::AgentFrames(frames), Some(SessionId::new(99).unwrap()), None), at(30));
+    let out = engine.receive(
+        HOST,
+        &request(
+            34,
+            Request::AgentFrames(frames),
+            Some(SessionId::new(99).unwrap()),
+            None,
+        ),
+        at(30),
+    );
     assert_eq!(code(&answer(&out, HOST)), ErrorCode::UnknownSession);
 }
 
@@ -360,7 +435,9 @@ fn host_calls_relay_by_token_and_the_outbox_drains() {
         ));
         seen.outbox.work.push(WorkNote::Started {
             token: 5,
-            scopes: vec![ErrorScope::Asset { asset: "clip".into() }],
+            scopes: vec![ErrorScope::Asset {
+                asset: "clip".into(),
+            }],
         });
     }
     let out = engine.pump();
@@ -388,7 +465,11 @@ fn host_calls_relay_by_token_and_the_outbox_drains() {
     // The host's answer reaches the service by its token.
     let reply = Envelope::new(Message::Error {
         id: call_id,
-        error: EngineError::new(ErrorCode::CapabilityRejected, ErrorScope::Request { id: call_id }, "no"),
+        error: EngineError::new(
+            ErrorCode::CapabilityRejected,
+            ErrorScope::Request { id: call_id },
+            "no",
+        ),
     });
     engine.receive(HOST, &codec::encode(&reply).unwrap(), at(40));
     let seen = fake.0.lock().unwrap();
@@ -403,7 +484,14 @@ fn cancels_signals_and_closes_reach_the_service() {
     let sid = snapshot(&mut engine, HOST, SessionRole::JobSnapshot, "{}", 1);
     let out = engine.receive(
         HOST,
-        &request(40, Request::CancelJobs(CancelJobs::Run { run: "run-1".into() }), None, None),
+        &request(
+            40,
+            Request::CancelJobs(CancelJobs::Run {
+                run: "run-1".into(),
+            }),
+            None,
+            None,
+        ),
         at(1),
     );
     assert!(matches!(
@@ -442,7 +530,12 @@ fn cancels_signals_and_closes_reach_the_service() {
     engine.receive(HOST, &codec::encode(&close).unwrap(), at(7));
     engine.detach(WINDOW);
     let seen = fake.0.lock().unwrap();
-    assert_eq!(seen.cancels, vec![CancelJobs::Run { run: "run-1".into() }]);
+    assert_eq!(
+        seen.cancels,
+        vec![CancelJobs::Run {
+            run: "run-1".into()
+        }]
+    );
     assert_eq!(seen.signals, vec![signal]);
     assert_eq!(seen.policies, 1);
     assert_eq!(seen.closed_sessions, vec![sid]);

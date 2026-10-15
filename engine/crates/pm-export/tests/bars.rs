@@ -118,7 +118,13 @@ fn settings(format: ExportFormat, alpha: WireAlpha) -> ExportSettings {
     settings_sized(format, alpha, W, H, FRAMES)
 }
 
-fn settings_sized(format: ExportFormat, alpha: WireAlpha, w: u32, h: u32, frames: u64) -> ExportSettings {
+fn settings_sized(
+    format: ExportFormat,
+    alpha: WireAlpha,
+    w: u32,
+    h: u32,
+    frames: u64,
+) -> ExportSettings {
     ExportSettings {
         format,
         alpha,
@@ -245,7 +251,11 @@ fn apple_export(src: &Path, dst: &Path, preset: &NSString, mp4: bool) {
     let _ = std::fs::remove_file(dst);
     let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&file_url(src), None) };
     let session = unsafe {
-        AVAssetExportSession::initWithAsset_presetName(AVAssetExportSession::alloc(), &asset, preset)
+        AVAssetExportSession::initWithAsset_presetName(
+            AVAssetExportSession::alloc(),
+            &asset,
+            preset,
+        )
     }
     .expect("AVAssetExportSession");
     unsafe {
@@ -309,7 +319,11 @@ fn values(input: InputFormat, s: &[u16], i: usize, premultiply: bool) -> Vec<(us
     match input {
         InputFormat::Y416 => {
             let p = &s[i * 4..i * 4 + 4];
-            let a = if premultiply { f64::from(p[0]) / 65535.0 } else { 1.0 };
+            let a = if premultiply {
+                f64::from(p[0]) / 65535.0
+            } else {
+                1.0
+            };
             vec![(0, y(p[1]) * a), (1, c(p[2]) * a), (2, c(p[3]) * a)]
         }
         _ => {
@@ -365,14 +379,14 @@ fn compare(
                 }
             }
         }
-        for i in 0..r.len() / 4 {
+        for (i, &near) in near_zero.iter().enumerate() {
             let rv = values(input, r, i, premultiply);
             let ev = values(input, e, i, premultiply);
             let av = values(input, a, i, premultiply);
             for ((&(ch, rv), &(_, ev)), &(_, av)) in rv.iter().zip(&ev).zip(&av) {
                 let d = ((ev - av) * scale(ch)).abs();
                 g.max_cv_10 = g.max_cv_10.max(d);
-                if !near_zero[i] {
+                if !near {
                     g.max_cv_10_away = g.max_cv_10_away.max(d);
                 }
                 g.engine.add(ch, (ev - rv) * scale(ch));
@@ -383,7 +397,13 @@ fn compare(
     g
 }
 
-fn generation(name: &str, profile: WireProRes, alpha: WireAlpha, preset: &NSString, input: InputFormat) {
+fn generation(
+    name: &str,
+    profile: WireProRes,
+    alpha: WireAlpha,
+    preset: &NSString,
+    input: InputFormat,
+) {
     let Some(path) = media(name) else {
         eprintln!("media corpus not found; {name} codec generation not measured");
         return;
@@ -391,10 +411,20 @@ fn generation(name: &str, profile: WireProRes, alpha: WireAlpha, preset: &NSStri
     let dir = scratch(&format!("gen-{name}"));
     let engine = dir.join("engine.mov");
     let apple = dir.join("apple.mov");
-    let job = full_frame_job(&path, settings(ExportFormat::ProRes { profile }, alpha), engine.clone());
+    let job = full_frame_job(
+        &path,
+        settings(ExportFormat::ProRes { profile }, alpha),
+        engine.clone(),
+    );
     let mut r = renderer_for(&path);
-    let delivered = run_export(&mut r, &job, &Unrestricted, &AtomicBool::new(false), &mut |_| {})
-        .unwrap();
+    let delivered = run_export(
+        &mut r,
+        &job,
+        &Unrestricted,
+        &AtomicBool::new(false),
+        &mut |_| {},
+    )
+    .unwrap();
     assert_eq!(delivered.report.frames, FRAMES);
     apple_export(&path, &apple, preset, false);
     let premultiply = alpha != WireAlpha::None;
@@ -416,7 +446,11 @@ fn generation(name: &str, profile: WireProRes, alpha: WireAlpha, preset: &NSStri
         // carries the source's color under α = 0, the premultiplied engine
         // cannot, and the 8 × 8 DCT carries the difference into visible
         // pixels of the same block. Guard everything else.
-        assert!(g.max_cv_10_away <= 1.0, "{name}: {:.3} CV away from α = 0", g.max_cv_10_away);
+        assert!(
+            g.max_cv_10_away <= 1.0,
+            "{name}: {:.3} CV away from α = 0",
+            g.max_cv_10_away
+        );
         assert!(within(pey, pay), "{name}: Y′ PSNR {pey} vs {pay}");
     } else {
         assert!(g.max_cv_10 <= 1.0, "{name}: {:.3} CV", g.max_cv_10);
@@ -477,8 +511,16 @@ fn h264_generation_psnr_at_matched_rate() {
         let mut plan = plan_export(&job).unwrap();
         plan.spec.codec = Codec::H264 { bitrate_bps: bps };
         let sink = pm_export::mac::VideoToolboxSink::new(&plan.spec).unwrap();
-        run_export_into(r, &job, plan, sink, &Unrestricted, &AtomicBool::new(false), &mut |_| {})
-            .unwrap();
+        run_export_into(
+            r,
+            &job,
+            plan,
+            sink,
+            &Unrestricted,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .unwrap();
         let bytes = std::fs::metadata(&engine).unwrap().len() as f64;
         (engine, bytes)
     };

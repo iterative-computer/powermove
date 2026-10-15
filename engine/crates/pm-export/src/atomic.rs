@@ -130,9 +130,10 @@ impl AtomicOutput {
             set_mode(&self.temp, mode)?;
         }
         match self.overwrite {
-            Overwrite::Replace | Overwrite::InPlace => fs::rename(&self.temp, &self.destination).map_err(|e| {
-                Error::Io(format!("moving into {}: {e}", self.destination.display()))
-            })?,
+            Overwrite::Replace | Overwrite::InPlace => fs::rename(&self.temp, &self.destination)
+                .map_err(|e| {
+                    Error::Io(format!("moving into {}: {e}", self.destination.display()))
+                })?,
             Overwrite::Fail => {
                 match fs::hard_link(&self.temp, &self.destination) {
                     Ok(()) => {
@@ -296,7 +297,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(&host).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(&host).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
         // A dropped in-place output leaves the host's file to the host.
         let out = AtomicOutput::in_place(&host, "mp4", None).unwrap();

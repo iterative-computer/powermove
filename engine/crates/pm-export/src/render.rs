@@ -170,9 +170,7 @@ pub struct ReadFrame {
 }
 
 fn wait_idle(renderer: &Renderer) {
-    let _ = renderer
-        .device()
-        .poll(wgpu::PollType::wait_indefinitely());
+    let _ = renderer.device().poll(wgpu::PollType::wait_indefinitely());
 }
 
 /// Renders one frame through `gate`: the whole frame at once when the gate
@@ -336,7 +334,9 @@ fn tags_of(color: OutputColor) -> Result<ColorTags, JobError> {
         OutputColor::Rec709QuickTime {
             candidate: QuickTimeTag::Cicp1_13_1,
         } => Ok(ColorTags::Rec709QuickTime),
-        other => Err(JobError::Unsupported(vec![format!("output color {other:?}")])),
+        other => Err(JobError::Unsupported(vec![format!(
+            "output color {other:?}"
+        )])),
     }
 }
 
@@ -389,10 +389,11 @@ pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
     pm_protocol::validate::Validate::validate(s).map_err(|v| JobError::Invalid(v.to_string()))?;
     let (codec, container) = codec_of(s)?;
     let tags = tags_of(s.color)?;
-    let mut problems: Vec<String> = pm_render::unsupported_with_media(doc, &job.composition, &*job.media)
-        .iter()
-        .map(ToString::to_string)
-        .collect();
+    let mut problems: Vec<String> =
+        pm_render::unsupported_with_media(doc, &job.composition, &*job.media)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
     let rate = rate_of(s)?;
     let timeline = Timeline::new(s.range.start, s.range.end, rate)?;
     let alpha = match s.alpha {
@@ -402,14 +403,9 @@ pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
     };
     let audio = if s.audio {
         let cache = pm_audio::SourceCache::new(AUDIO_CACHE_BYTES, 2);
-        let graph = pm_audio::MixGraph::build(
-            doc,
-            &job.composition,
-            &mut evaluator(),
-            &cache,
-            &*job.media,
-        )
-        .map_err(|e| JobError::Audio(e.to_string()))?;
+        let graph =
+            pm_audio::MixGraph::build(doc, &job.composition, &mut evaluator(), &cache, &*job.media)
+                .map_err(|e| JobError::Audio(e.to_string()))?;
         for (name, asset, why) in &graph.problems {
             problems.push(format!("audio of {name} ({asset}): {why}"));
         }
@@ -546,12 +542,11 @@ where
                 if let Some((mixer, rate)) = mixer.as_mut() {
                     let (first, end) = timeline.samples(n, *rate);
                     let mut block = Vec::new();
-                    let summary =
-                        pm_audio::offline::render(mixer, first, end, 8192, |_, inter| {
-                            block.extend_from_slice(inter);
-                            Ok(())
-                        })
-                        .map_err(|e| JobError::Audio(e.to_string()))?;
+                    let summary = pm_audio::offline::render(mixer, first, end, 8192, |_, inter| {
+                        block.extend_from_slice(inter);
+                        Ok(())
+                    })
+                    .map_err(|e| JobError::Audio(e.to_string()))?;
                     if let Some((voice, why)) = summary.errors.first() {
                         return Err(JobError::Audio(format!("{voice}: {why}")));
                     }
@@ -590,7 +585,9 @@ where
                     Err(JobError::Unsupported(
                         f.failures
                             .iter()
-                            .map(|l| format!("layer {} in {}: {}", l.layer, l.composition, l.message))
+                            .map(|l| {
+                                format!("layer {} in {}: {}", l.layer, l.composition, l.message)
+                            })
                             .collect(),
                     ))
                 }
@@ -659,7 +656,9 @@ pub fn composition_size(document: &Document, composition: &str) -> Result<(u32, 
         if v.is_finite() && v >= 1.0 {
             Ok(v.round() as u32)
         } else {
-            Err(JobError::Invalid(format!("composition {composition:?} has no {k}")))
+            Err(JobError::Invalid(format!(
+                "composition {composition:?} has no {k}"
+            )))
         }
     };
     Ok((dim("w")?, dim("h")?))
@@ -676,7 +675,12 @@ pub fn to_rgba8(rgba: &[f32]) -> Vec<u8> {
 /// Encodes an opaque RGBA8 image as baseline JPEG (4:2:0) at `quality` in
 /// (0, 1]; alpha is ignored (premultiplied values are already over black, as
 /// a canvas's `toDataURL('image/jpeg')` composites them).
-pub fn encode_jpeg(rgba8: &[u8], width: u32, height: u32, quality: f32) -> Result<Vec<u8>, JobError> {
+pub fn encode_jpeg(
+    rgba8: &[u8],
+    width: u32,
+    height: u32,
+    quality: f32,
+) -> Result<Vec<u8>, JobError> {
     let rgb: Vec<u8> = rgba8
         .chunks_exact(4)
         .flat_map(|p| [p[0], p[1], p[2]])
@@ -765,19 +769,24 @@ mod tests {
         assert!(Timeline::new(e, s, Rate::FPS_30).is_err());
         // Half a frame rounds up (Math.round).
         let half = Ticks::new(TICKS_PER_SECOND / 60).unwrap();
-        assert_eq!(Timeline::new(Ticks::ZERO, half, Rate::FPS_30).unwrap().frames, 1);
+        assert_eq!(
+            Timeline::new(Ticks::ZERO, half, Rate::FPS_30)
+                .unwrap()
+                .frames,
+            1
+        );
         let span = Ticks::new(TICKS_PER_SECOND / 60 * 3).unwrap();
-        assert_eq!(Timeline::new(Ticks::ZERO, span, Rate::FPS_30).unwrap().frames, 2);
+        assert_eq!(
+            Timeline::new(Ticks::ZERO, span, Rate::FPS_30)
+                .unwrap()
+                .frames,
+            2
+        );
     }
 
     #[test]
     fn frame_samples_tile_the_range_exactly() {
-        let t = Timeline::new(
-            Ticks::ZERO,
-            Ticks::from_whole_seconds(10),
-            Rate::FPS_29_97,
-        )
-        .unwrap();
+        let t = Timeline::new(Ticks::ZERO, Ticks::from_whole_seconds(10), Rate::FPS_29_97).unwrap();
         let mut at = t.samples(0, 48_000).0;
         let mut total = 0;
         for n in 0..t.frames {
@@ -795,7 +804,11 @@ mod tests {
     fn still_sizes_follow_todays_snapshot() {
         assert_eq!(still_size(1920, 1080, 720), Size::new(720, 405));
         assert_eq!(still_size(1080, 1920, 720), Size::new(405, 720));
-        assert_eq!(still_size(320, 180, 720), Size::new(320, 180), "never enlarged");
+        assert_eq!(
+            still_size(320, 180, 720),
+            Size::new(320, 180),
+            "never enlarged"
+        );
         assert_eq!(still_size(4000, 2, 720), Size::new(720, 2), "at least 2");
     }
 
@@ -815,7 +828,9 @@ mod tests {
     #[test]
     fn jpeg_and_png_encode() {
         let (w, h) = (16u32, 8u32);
-        let rgba: Vec<u8> = (0..w * h).flat_map(|i| [i as u8, 128, 255 - i as u8, 255]).collect();
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|i| [i as u8, 128, 255 - i as u8, 255])
+            .collect();
         let jpeg = encode_jpeg(&rgba, w, h, 0.74).unwrap();
         assert_eq!(&jpeg[..2], &[0xFF, 0xD8]);
         let png = encode_png(&rgba, w, h).unwrap();
