@@ -41,7 +41,7 @@ test('Don’t Save removes a never-saved project from Recents and recovery acros
   });
   const id = await session.page.evaluate(async () => {
     const PM = (window as any).PM;
-    PM.proj.name = 'Discarded new project';
+    PM.proj.name = 'Discarded new project'; PM.touch();
     PM.autosave();
     await PM.flushProject();
     return PM.proj.id;
@@ -63,7 +63,7 @@ test('Don’t Save on window close survives the final recovery flush', async ({ 
   });
   const id = await session.page.evaluate(async () => {
     const PM = (window as any).PM;
-    PM.proj.name = 'Discarded window project';
+    PM.proj.name = 'Discarded window project'; PM.touch();
     PM.autosave();
     await PM.flushProject();
     const id = PM.proj.id;
@@ -83,7 +83,7 @@ test('Don’t Save when quitting keeps a never-saved project and the next launch
   const { id, dirty } = await session.page.evaluate(async () => {
     const PM = (window as any).PM;
     PM.proj.name = 'Kept across quit';
-    PM.proj.layers.push(PM.mkLayer('shape', { name: 'Kept layer' }));
+    PM.proj.layers.push(PM.mkLayer('shape', { name: 'Kept layer' })); PM.ProjectIndex.invalidate(); PM.touch();
     PM.autosave();
     await PM.flushProject();
     return { id: PM.proj.id, dirty: PM.projectFileState(PM.proj.id).dirty };

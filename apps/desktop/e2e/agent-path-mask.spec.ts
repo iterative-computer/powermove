@@ -9,13 +9,13 @@ test('path masks preserve video RGB inside the matte across frames', async ({ se
     const PM = (window as any).PM;
     PM.pause();
     const clip = PM.proj.layers.find((l: any) => l.type === 'video');
-    PM.proj.layers = [clip]; clip.from = 0;
+    PM.proj.layers = [clip]; clip.from = 0; PM.ProjectIndex.invalidate(); PM.touch();
     const mask = PM.mkMask('rect', PM.proj);
     mask.p.x.v = 0; mask.p.y.v = 0; mask.p.feather.v = 0;
     mask.path = { id: 'test-path', name: 'Cutout', parent: null,
       p: Object.fromEntries(Object.entries({ x: 0, y: 0, rotation: 0, scaleX: 100, scaleY: 100, closed: true }).map(([k,v]) => [k,PM.P(v)])),
       vertices: [[-100,-100],[100,-100],[100,100],[-100,100]].map(([x,y], i) => ({ id: `v${i}`, p: Object.fromEntries(Object.entries({ x,y,inX:0,inY:0,outX:0,outY:0 }).map(([k,v]) => [k,PM.P(v)])) })) };
-    clip.masks = [mask];
+    clip.masks = [mask]; PM.touch();
     const result: Array<{ source: number[]; masked: number[] }> = [];
     for (const time of [0.25, 1, 1.5]) {
       const sample = async () => {
@@ -25,9 +25,9 @@ test('path masks preserve video RGB inside the matte across frames', async ({ se
       const ctx = canvas.getContext('2d')!; ctx.drawImage(img, 0, 0);
       return [...ctx.getImageData(canvas.width / 2, canvas.height / 2, 1, 1).data];
       };
-      clip.masks = [];
+      clip.masks = []; PM.touch();
       const source = await sample();
-      clip.masks = [mask];
+      clip.masks = [mask]; PM.touch();
       result.push({ source, masked: await sample() });
     }
     return result;

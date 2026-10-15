@@ -119,7 +119,7 @@ test.describe('@viewer After Effects tool behavior', () => {
         p: { 'position.x': 480, 'position.y': 180 },
       }, PM.proj);
       PM.proj.layers = [right, left];
-      PM.ProjectIndex.invalidate(); PM.invalidate(); viewer.layout();
+      PM.ProjectIndex.invalidate(); PM.touch(); PM.invalidate(); viewer.layout();
       return { left: left.id, right: right.id };
     });
 

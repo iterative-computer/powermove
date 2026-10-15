@@ -23,7 +23,7 @@ async function setup(session: any) {
     const PM = (window as any).PM;
     await PM.importFiles([(document.querySelector('#frame-source') as HTMLInputElement).files![0]]);
     const layer = PM.proj.layers.find((l: any) => l.type === 'video');
-    layer.from = 0; layer.dur = 3; layer.d.trim = PM.P(0); layer.d.speed = PM.P(1);
+    layer.from = 0; layer.dur = 3; layer.d.trim = PM.P(0); layer.d.speed = PM.P(1); PM.touch();
     PM.perf.auto = false; PM.quality = 1;
     PM.GL.previewViewport = null; PM.GL.resize(64, 64);
     PM.touch(); PM.bus.emit('layers');
@@ -104,7 +104,7 @@ test('two instances of a nested video composition keep separate playback times',
     const video = PM.proj.layers[0];
     const sub = PM.mkProject({ name: 'Nested', w: 64, h: 64, fps: 10, dur: 3 });
     sub.layers = [video]; PM.proj.comps = { [sub.id]: sub };
-    PM.proj.w = 128;
+    PM.proj.w = 128; PM.touch();
     PM.proj.layers = [0, 1].map(i => {
       const layer = PM.mkLayer('precomp', { d: { comp: sub.id, w: 64, h: 64, trim: i, speed: 1 }, p: { 'position.x': i * 64, 'position.y': 0 } });
       layer.p['position.x'].v = i * 64;

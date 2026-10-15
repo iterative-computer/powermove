@@ -18,7 +18,7 @@ test('@viewer imports SVG as durable editable Shape paths and preserves its sour
     const asset = Object.values(PM.proj.assets).find((candidate: any) => candidate.name === 'vector-card.svg') as any;
     const layer = PM.proj.layers.find((candidate: any) => candidate.d?.svgSourceAsset === asset?.id);
     if (!asset || !layer) throw new Error('SVG import did not create an editable Shape layer');
-    delete asset.format;
+    delete asset.format; PM.touch();
     PM.assets.clear();
     await PM.assets.restoreProject(PM.proj);
     layer.p['scale.x'].v = 200; layer.p['scale.y'].v = 200;
