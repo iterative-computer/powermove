@@ -445,17 +445,21 @@ impl PacketIndex {
     }
 
     /// The last anchor at or before program sample `at`.
-    fn anchor_for(&mut self, at: i64) -> Result<Option<Anchor>> {
+    fn anchor_for(&mut self, at: i64) -> Option<Anchor> {
         while self.settled() <= at {
             let Some(scan) = self.scan.as_mut() else {
                 break;
             };
             let packet = match scan.next() {
                 Ok(p) => p,
-                Err(e) => {
+                Err(_) => {
+                    // A read error ends the scan where it happened: the
+                    // anchors before it stand, this seek and every later
+                    // one resolve against them, and the decode reports the
+                    // error itself if it reaches that spot.
                     self.scan = None;
                     self.candidate = None;
-                    return Err(e);
+                    break;
                 }
             };
             let Some(p) = packet else {
@@ -486,7 +490,7 @@ impl PacketIndex {
             self.next_start += duration;
         }
         let i = self.anchors.partition_point(|a| a.start <= at);
-        Ok(i.checked_sub(1).map(|i| self.anchors[i]))
+        i.checked_sub(1).map(|i| self.anchors[i])
     }
 }
 
@@ -571,6 +575,13 @@ pub struct AudioDecoder {
     index: Option<PacketIndex>,
     /// No index can be opened for this stream.
     no_index: bool,
+    /// An anchored seek could not be placed (the anchor packet was not
+    /// found again, or the decoder's first frame did not fit it). Such
+    /// failures come from the demuxer or the codec, so they repeat for the
+    /// stream's other anchors: from then on every seek counts from the
+    /// start, and reads in order continue that decode instead of retrying
+    /// an anchor and restarting for every block.
+    anchors_failed: bool,
     /// Packets sent to the decoder (diagnostics).
     packets: u64,
 }
@@ -729,6 +740,7 @@ impl AudioDecoder {
                 first: None,
                 index: None,
                 no_index: false,
+                anchors_failed: false,
                 packets: 0,
             };
             if out.pkt.is_null() || out.frame.is_null() {
@@ -1026,8 +1038,8 @@ impl AudioDecoder {
     /// `index`, it continues: the samples are the same, decoded once.
     fn seek_counted(&mut self, index: i64) -> Result<()> {
         let from = index - self.info.preroll as i64;
-        let anchor = if from > 0 {
-            self.anchor_for(from)?
+        let anchor = if from > 0 && !self.anchors_failed {
+            self.anchor_for(from)
         } else {
             None
         };
@@ -1040,9 +1052,9 @@ impl AudioDecoder {
             match self.seek_to_anchor(a, index) {
                 Ok(()) => return Ok(()),
                 // The anchor could not be found again or did not place the
-                // first frame: decode from the start (the same for this
-                // index every time).
-                Err(MediaError::Unsupported(_)) => {}
+                // first frame: decode from the start, as every later seek
+                // will.
+                Err(MediaError::Unsupported(_)) => self.anchors_failed = true,
                 Err(e) => return Err(e),
             }
         }
@@ -1052,7 +1064,7 @@ impl AudioDecoder {
     }
 
     /// The anchor for program sample `at`, scanning as far as needed.
-    fn anchor_for(&mut self, at: i64) -> Result<Option<Anchor>> {
+    fn anchor_for(&mut self, at: i64) -> Option<Anchor> {
         if self.index.is_none() && !self.no_index {
             let probed = self.input.par(self.info.stream);
             match Scan::open(&self.info.path, self.info.stream, probed) {
@@ -1062,7 +1074,7 @@ impl AudioDecoder {
         }
         match self.index.as_mut() {
             Some(index) => index.anchor_for(at),
-            None => Ok(None),
+            None => None,
         }
     }
 
@@ -1404,6 +1416,84 @@ mod tests {
         assert_eq!(ts_to_samples(324870, (1, 14112000), 48000), 1105);
         assert_eq!(samples_to_ts(1105, (1, 14112000), 48000), 324870);
         assert_eq!(samples_to_ts(-1, (1, 1000), 48000), -1);
+    }
+
+    /// A WebM/Opus file from Powermove's FFmpeg build (`PM_FFMPEG_DIR`).
+    fn webm_opus(name: &str, seconds: u32) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pm-media-audio-unit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join(name);
+        let ffmpeg = std::env::var_os("PM_FFMPEG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var("HOME").unwrap())
+                    .join("Library/Caches/powermove-engine/ffmpeg/out")
+            })
+            .join("bin/ffmpeg");
+        let source = format!(
+            "aevalsrc=exprs='0.3*sin(2*PI*440*t)+0.2*sin(2*PI*3001*t)':s=48000:d={seconds}"
+        );
+        let status = std::process::Command::new(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .arg(source)
+            .args(["-c:a", "libopus"])
+            .arg(&out)
+            .status()
+            .expect("run ffmpeg");
+        assert!(status.success());
+        out
+    }
+
+    /// An anchored seek that cannot be placed falls back to the decode
+    /// from the start once for the stream: blocks read in order after it
+    /// continue that decode (each packet decoded once, the samples exactly
+    /// the sequential decode's) instead of retrying a new anchor and
+    /// restarting for every block.
+    #[test]
+    fn failed_anchors_fall_back_once() {
+        let file = webm_opus("failed-anchors.webm", 30);
+        let mut d = AudioDecoder::open(&file, None).unwrap();
+        let mut pcm = vec![Vec::new()];
+        while d.read(&mut pcm, 4096).unwrap() > 0 {}
+        let once = d.packets_decoded();
+
+        let mut s = AudioDecoder::open(&file, None).unwrap();
+        assert!(!s.info.sample_exact_timestamps && s.info.preroll > 0);
+        // Scan the whole file, then move every anchor off its packet (1 ms
+        // timebase, 20 ms packets): no anchor can be found again.
+        assert!(s.anchor_for(i64::MAX / 8).is_some());
+        let index = s.index.as_mut().unwrap();
+        assert!(index.anchors.len() > 100);
+        for a in &mut index.anchors {
+            a.pts += 1;
+            a.next = a.next.map(|(p, d)| (p + 1, d));
+        }
+        let block = 48_000usize;
+        let blocks = pcm[0].len().div_ceil(block);
+        for k in 0..blocks {
+            s.seek_anchored((k * block) as u64).unwrap();
+            let mut out = vec![Vec::new()];
+            s.read(&mut out, block).unwrap();
+            let want = &pcm[0][k * block..(k * block + block).min(pcm[0].len())];
+            assert_eq!(&out[0][..], want, "block {k}");
+        }
+        assert!(s.anchors_failed);
+        // The first block past the pre-roll fails and decodes from the
+        // start again (one block, 50 packets of 20 ms, twice); every later
+        // block continues it.
+        let packets = s.packets_decoded();
+        assert!(
+            packets <= once + 50 + 4,
+            "{blocks} blocks decoded {packets} packets (the stream has {once})"
+        );
     }
 
     #[test]
