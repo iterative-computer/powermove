@@ -9,10 +9,10 @@ import { mkdir, open, rm, symlink, type FileHandle } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 
-import { mediaExtension, needsImageConversion } from '../../shared/media-formats';
+import { mayNeedVideoProxy, mediaExtension, needsImageConversion } from '../../shared/media-formats';
 
 import type { ContentHash } from '../../shared/engine-protocol';
-import { HASH_HEX, validStorageKey, type ClassifyResult, type MediaBinding, type MediaLink, type MediaReadOpen } from '../../shared/media-store';
+import { HASH_HEX, validStorageKey, type ClassifyResult, type ConversionKind, type MediaBinding, type MediaConversion, type MediaLink, type MediaReadOpen } from '../../shared/media-store';
 import { ImportClassifier, type ClassifyOptions } from './classify';
 import { hashFile, type HashExecutor } from './hasher';
 import { findByContent, type RelinkOptions } from './relink';
@@ -23,12 +23,17 @@ type ReadSession = { owner: number; handle: FileHandle; size: number };
 /** Main's still converter (`MediaProxyService.createStillImage`): a PNG the
  *  page reads through the playback proxy reader. */
 export type ConvertStill = (sourcePath: string) => Promise<{ token: string; size: number }>;
+/** Main's playback proxy converter (`MediaProxyService.create`): a VP9 WebM
+ *  the page reads through the playback proxy reader. */
+export type ConvertVideo = (sourcePath: string) => Promise<{ token: string; size: number }>;
 
 export type MediaStoreServiceOptions = {
   root: string;
   /** Converts TIFF and HEIF stills for the page's viewer (section 21: the
    *  original is the asset's bytes; the PNG is generated media). */
   convertStill?: ConvertStill;
+  /** Converts kept video originals the page's viewer cannot decode. */
+  convertVideo?: ConvertVideo;
   userData: string;
   executor: HashExecutor;
   /** "Use New Engine" as read at launch. */
@@ -171,11 +176,49 @@ export class MediaStoreService {
    * converter reads the file through a link carrying that name, since store
    * objects are named by hash alone.
    */
-  async convertStill(request: { hash?: string; link?: MediaLink; name: string }): Promise<{ ok: true; token: string; size: number; type: 'image/png' } | { ok: false; error: string }> {
-    const convert = this.options.convertStill;
-    if (!convert) return { ok: false, error: 'Image conversion is unavailable' };
-    const extension = mediaExtension(request.name);
-    if (!needsImageConversion(extension)) return { ok: false, error: 'This image format does not need converting' };
+  convertStill(request: { hash?: string; link?: MediaLink; name: string }): Promise<MediaConversion> {
+    return this.convertOriginal('still', request);
+  }
+
+  /** The playback proxy the page's viewer plays for a kept video original
+   *  it cannot decode (ProRes, MKV, AVI…), from the store or a link. */
+  convertVideo(request: { hash?: string; link?: MediaLink; name: string }): Promise<MediaConversion> {
+    return this.convertOriginal('video', request);
+  }
+
+  /**
+   * Converts bytes the page uploaded (`beginStream`, then chunks) without
+   * keeping them: with Use New Engine off, a kept original the store lacks
+   * is only in IndexedDB (a project file opened on another Mac), and the
+   * legacy viewer still needs its rendition. The upload is checked against
+   * the page's BLAKE3 and removed afterwards; the store stays read-only.
+   */
+  async convertUpload(owner: number, token: string, request: { kind: ConversionKind; name: string; blake3: string }): Promise<MediaConversion> {
+    const refused = this.refuse(request.kind, request.name);
+    if (refused) { await this.store.abortStream(owner, token); return refused; }
+    try {
+      return await this.store.useStream(owner, token, request.blake3, (file) => this.convertFile(request.kind, file, mediaExtension(request.name)));
+    } catch (error) {
+      if (error instanceof MediaStoreError && error.code === 'notFound') throw error;
+      return { ok: false, error: error instanceof Error && error.message ? error.message : 'The upload could not be read' };
+    }
+  }
+
+  private refuse(kind: ConversionKind, name: string): Extract<MediaConversion, { ok: false }> | null {
+    const extension = mediaExtension(name);
+    if (kind === 'still') {
+      if (!this.options.convertStill) return { ok: false, error: 'Image conversion is unavailable' };
+      if (!needsImageConversion(extension)) return { ok: false, error: 'This image format does not need converting' };
+    } else if (kind === 'video') {
+      if (!this.options.convertVideo) return { ok: false, error: 'Video conversion is unavailable' };
+      if (!mayNeedVideoProxy(extension)) return { ok: false, error: 'This video container is not one Powermove can convert' };
+    } else return { ok: false, error: 'Unknown conversion' };
+    return null;
+  }
+
+  private async convertOriginal(kind: ConversionKind, request: { hash?: string; link?: MediaLink; name: string }): Promise<MediaConversion> {
+    const refused = this.refuse(kind, request.name);
+    if (refused) return refused;
     let file: string | null = null;
     if (request.link !== undefined) {
       if (!validLink(request.link)) throw new MediaStoreError('Invalid media link.');
@@ -186,16 +229,24 @@ export class MediaStoreService {
       if (!HASH_HEX.test(request.hash)) throw new MediaStoreError('Invalid content hash.');
       if (await this.store.hasObject(request.hash)) file = this.store.objectPath(request.hash);
     } else throw new MediaStoreError('Name a hash or a link.');
-    if (!file) return { ok: false, error: 'The original file is no longer available' };
+    if (!file) return { ok: false, error: 'The original file is no longer available', missing: true };
+    return this.convertFile(kind, file, mediaExtension(request.name));
+  }
+
+  /** Runs main's converter on `file` through a temporary name that carries
+   *  the original's extension (which picks the decoder). */
+  private async convertFile(kind: ConversionKind, file: string, extension: string): Promise<MediaConversion> {
     await this.store.init();
-    const folder = path.join(this.store.root, 'tmp', `still-${randomBytes(8).toString('hex')}`);
+    const folder = path.join(this.store.root, 'tmp', `${kind}-${randomBytes(8).toString('hex')}`);
     await mkdir(folder, { recursive: true, mode: 0o700 });
     try {
       const named = path.join(folder, `original.${extension}`);
       await symlink(file, named);
-      return { ok: true, ...await convert(named), type: 'image/png' };
+      if (kind === 'still') return { ok: true, ...await this.options.convertStill!(named), type: 'image/png' };
+      return { ok: true, ...await this.options.convertVideo!(named), type: 'video/webm' };
     } catch (error) {
-      return { ok: false, error: error instanceof Error && error.message ? `Could not convert this image · ${error.message}` : 'Could not convert this image' };
+      const failed = kind === 'still' ? 'Could not convert this image' : 'Could not optimize this video for playback';
+      return { ok: false, error: error instanceof Error && error.message ? `${failed} · ${error.message}` : failed };
     } finally {
       await rm(folder, { recursive: true, force: true });
     }

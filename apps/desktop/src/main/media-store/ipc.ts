@@ -152,15 +152,26 @@ export function registerMediaStoreIpc(
     if (typeof input['projectId'] !== 'string' || !PROJECT.test(input['projectId']) || !input['assets'] || typeof input['assets'] !== 'object') throw new Error('Invalid media binding.');
     service.bind(id, input['projectId'], input['assets'] as Record<string, never>);
   });
-  ipcMain.handle(MEDIA_STORE_IPC.convertStill, (event, value: unknown) => {
-    owner(event);
+  for (const [channel, kind] of [[MEDIA_STORE_IPC.convertStill, 'still'], [MEDIA_STORE_IPC.convertVideo, 'video']] as const) {
+    ipcMain.handle(channel, (event, value: unknown) => {
+      owner(event);
+      const input = (value ?? {}) as Record<string, unknown>;
+      const name = typeof input['name'] === 'string' ? input['name'].slice(0, 1000) : '';
+      const convert = (request: Parameters<MediaStoreService['convertStill']>[0]) => kind === 'still' ? service.convertStill(request) : service.convertVideo(request);
+      if (input['link'] !== undefined) {
+        if (!validLink(input['link'])) throw new Error('Invalid media link.');
+        return convert({ link: input['link'], name });
+      }
+      return convert({ hash: String(input['hash'] ?? ''), name });
+    });
+  }
+  ipcMain.handle(MEDIA_STORE_IPC.convertUpload, (event, value: unknown) => {
+    const id = owner(event);
     const input = (value ?? {}) as Record<string, unknown>;
+    const kind = input['kind'] === 'still' || input['kind'] === 'video' ? input['kind'] : null;
+    if (!kind) throw new Error('Invalid conversion.');
     const name = typeof input['name'] === 'string' ? input['name'].slice(0, 1000) : '';
-    if (input['link'] !== undefined) {
-      if (!validLink(input['link'])) throw new Error('Invalid media link.');
-      return service.convertStill({ link: input['link'], name });
-    }
-    return service.convertStill({ hash: String(input['hash'] ?? ''), name });
+    return service.convertUpload(id, token(input['token']), { kind, name, blake3: String(input['blake3'] ?? '') });
   });
   ipcMain.handle(MEDIA_STORE_IPC.removeKey, (event, value: unknown) => { owner(event); return service.store.removeKey(key(value) ?? ''); });
 }

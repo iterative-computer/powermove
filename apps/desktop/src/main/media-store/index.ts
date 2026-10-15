@@ -11,7 +11,7 @@ import type { IpcMain, IpcMainEvent, IpcMainInvokeEvent } from 'electron';
 
 import { WorkerPool } from './hasher';
 import { registerMediaStoreIpc, type ProjectRangeReader } from './ipc';
-import { MediaStoreService, type ConvertStill } from './service';
+import { MediaStoreService, type ConvertStill, type ConvertVideo } from './service';
 import { STORE_DIRECTORY } from './store';
 
 export { MediaStoreService } from './service';
@@ -28,6 +28,8 @@ export type InstallMediaStoreOptions = {
   projectRead?: ProjectRangeReader;
   /** Main's still converter (TIFF and HEIF originals → the viewer's PNG). */
   convertStill?: ConvertStill;
+  /** Main's playback proxy converter (kept video originals → the viewer's WebM). */
+  convertVideo?: ConvertVideo;
 };
 
 export function installMediaStore(options: InstallMediaStoreOptions): { service: MediaStoreService; dispose(): Promise<void> } {
@@ -37,7 +39,8 @@ export function installMediaStore(options: InstallMediaStoreOptions): { service:
     userData: options.userData,
     executor,
     enabled: options.enabled,
-    ...(options.convertStill ? { convertStill: options.convertStill } : {})
+    ...(options.convertStill ? { convertStill: options.convertStill } : {}),
+    ...(options.convertVideo ? { convertVideo: options.convertVideo } : {})
   });
   void service.store.init().catch((error: unknown) => console.warn('[media-store] could not prepare the media store', error));
   registerMediaStoreIpc(options.ipc, service, { isTrustedSender: options.isTrustedSender, ...(options.projectRead ? { projectRead: options.projectRead } : {}) });

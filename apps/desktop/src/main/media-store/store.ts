@@ -280,6 +280,31 @@ export class MediaStore {
     }
   }
 
+  /**
+   * Hands a finished upload to `use` as a file without committing it, then
+   * removes it. For bytes the store does not keep: with Use New Engine off
+   * the page converts an original it holds only in IndexedDB (a TIFF still,
+   * a ProRes movie) into the legacy viewer's rendition, and the store stays
+   * read-only. The copy on disk must hash to the sender's BLAKE3.
+   */
+  async useStream<T>(owner: number, token: string, blake3: string, use: (file: string) => Promise<T>): Promise<T> {
+    const stream = this.streams.get(token);
+    if (!stream || stream.owner !== owner) throw new MediaStoreError('Unknown media upload.', 'notFound');
+    this.streams.delete(token);
+    try {
+      await stream.queue;
+      if (stream.received !== stream.size) throw new MediaStoreError('The media upload is incomplete.', 'mismatch');
+      await stream.handle.close();
+      if (typeof blake3 !== 'string' || !HASH_HEX.test(blake3)) throw new MediaStoreError('A media upload names its BLAKE3 hash.');
+      const identity = await hashFile(this.options.executor, stream.file, { settleMs: 0 });
+      if (identity.hash !== blake3 || identity.size !== stream.size) throw new MediaStoreError('The uploaded copy does not match the original bytes.', 'mismatch');
+      return await use(stream.file);
+    } finally {
+      await stream.handle.close().catch(() => undefined);
+      await rm(stream.file, { force: true });
+    }
+  }
+
   async abortStream(owner: number, token: string): Promise<void> {
     const stream = this.streams.get(token);
     if (!stream || stream.owner !== owner) return;

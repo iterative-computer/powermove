@@ -578,6 +578,12 @@ const bridge: PowermoveBridge = {
     removeKey: (key) => ipcRenderer.invoke(MEDIA_STORE_IPC.removeKey, String(key)),
     convertStill: (request) => ipcRenderer.invoke(MEDIA_STORE_IPC.convertStill, {
       name: String(request.name ?? ''), ...(request.link !== undefined ? { link: request.link } : { hash: request.hash })
+    }),
+    convertVideo: (request) => ipcRenderer.invoke(MEDIA_STORE_IPC.convertVideo, {
+      name: String(request.name ?? ''), ...(request.link !== undefined ? { link: request.link } : { hash: request.hash })
+    }),
+    convertUpload: (token, request) => ipcRenderer.invoke(MEDIA_STORE_IPC.convertUpload, {
+      token: String(token), kind: request.kind, name: String(request.name ?? ''), blake3: String(request.blake3 ?? '')
     })
   },
   ...(frameBridge ? { frameBridge } : {})

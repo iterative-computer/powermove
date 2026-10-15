@@ -29,7 +29,9 @@ export const MEDIA_STORE_IPC = {
   relink: 'media-store:relink',
   bind: 'media-store:bind',
   removeKey: 'media-store:remove-key',
-  convertStill: 'media-store:convert-still'
+  convertStill: 'media-store:convert-still',
+  convertVideo: 'media-store:convert-video',
+  convertUpload: 'media-store:convert-upload'
 } as const;
 
 /** Where a store record's bytes came from. */
@@ -86,6 +88,16 @@ export type MediaReadOpen =
 
 export type MediaPutFileResult = MediaStoreRecord & { link?: MediaLink };
 
+/** What a kept original becomes for the page's viewer. */
+export type ConversionKind = 'still' | 'video';
+
+/** A rendition main made; the page reads it with `media.readPlaybackProxy`.
+ *  `missing` means main has neither the stored object nor the linked file,
+ *  so the page sends the bytes it has (`convertUpload`). */
+export type MediaConversion =
+  | { ok: true; token: string; size: number; type: 'image/png' | 'video/webm' }
+  | { ok: false; error: string; missing?: true };
+
 export type MediaBinding = { key?: string; hash?: string; link?: MediaLink };
 
 /** `window.powermove.mediaStore` (preload). */
@@ -116,7 +128,13 @@ export interface MediaStoreBridge {
   removeKey(key: string): Promise<boolean>;
   /** A PNG for the page's viewer from a stored (`hash`) or linked TIFF or
    *  HEIF original; read it with `media.readPlaybackProxy`. */
-  convertStill?(request: { hash?: string; link?: MediaLink; name: string }): Promise<{ ok: true; token: string; size: number; type: 'image/png' } | { ok: false; error: string }>;
+  convertStill?(request: { hash?: string; link?: MediaLink; name: string }): Promise<MediaConversion>;
+  /** A playback proxy (VP9 WebM) of a stored or linked video original the
+   *  viewer cannot decode. */
+  convertVideo?(request: { hash?: string; link?: MediaLink; name: string }): Promise<MediaConversion>;
+  /** Converts an upload (`beginPut` with no key, then `putChunk`) without
+   *  storing it, when main lacks the original; the upload is consumed. */
+  convertUpload?(token: string, request: { kind: ConversionKind; name: string; blake3: string }): Promise<MediaConversion>;
 }
 
 /** Shown when a legacy-engine build opens a project stamped for the new engine. */

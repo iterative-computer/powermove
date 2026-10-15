@@ -946,6 +946,7 @@ if (!hasSingleInstanceLock) {
       mainDirectory: __dirname,
       enabled: useNewEngine,
       convertStill: (sourcePath) => mediaProxies.createStillImage(sourcePath),
+      convertVideo: (sourcePath) => mediaProxies.create(sourcePath),
       projectRead: (sender, token, offset, length) => projects
         ? readProjectRangeFor(projects, sender, token, offset, length)
         : Promise.reject(new Error('Project files are unavailable.'))
