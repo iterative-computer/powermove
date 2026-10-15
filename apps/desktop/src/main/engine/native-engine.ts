@@ -293,9 +293,15 @@ export class NativeEngine {
   }
 
   /** A request main itself sends to an engine (sessions main opens for
-   *  exports and agent snapshots; tests). */
-  request(process: EngineProcess, body: Request, session: number | null = null): Promise<Response> {
-    return this.supervisors[process].request(body, session);
+   *  exports and agent snapshots; tests). `revision` is the envelope
+   *  revision (an agent frame request's read-your-writes revision). */
+  request(process: EngineProcess, body: Request, session: number | null = null, revision: number | null = null): Promise<Response> {
+    return this.supervisors[process].request(body, session, revision);
+  }
+
+  /** Whether an engine's current launch is connected and answering. */
+  isReady(process: EngineProcess): boolean {
+    return this.supervisors[process].state === 'ready';
   }
 
   /* ── engine launches ────────────────────────────────────────────────── */
