@@ -574,6 +574,25 @@ impl Drop for AudioDecoder {
     }
 }
 
+/// FFmpeg's default layout for a channel count
+/// (`av_channel_layout_default`): mono, stereo, 2.1, 4.0, 5.0, 5.1, 6.1,
+/// 7.1, and so on; positions FFmpeg leaves unspecified come back as
+/// [`Speaker::Other`].
+pub fn default_speakers(channels: usize) -> Vec<Speaker> {
+    let Ok(n) = c_int::try_from(channels) else {
+        return vec![Speaker::Other(ff::AV_CHAN_UNKNOWN); channels];
+    };
+    unsafe {
+        let mut layout: ff::AVChannelLayout = std::mem::zeroed();
+        ff::av_channel_layout_default(&mut layout, n);
+        let out = (0..channels)
+            .map(|i| Speaker::from_av(ff::av_channel_layout_channel_from_index(&layout, i as u32)))
+            .collect();
+        ff::av_channel_layout_uninit(&mut layout);
+        out
+    }
+}
+
 fn layout_speakers(layout: &ff::AVChannelLayout) -> Vec<Speaker> {
     let n = layout.nb_channels.max(0) as usize;
     unsafe {
@@ -1360,5 +1379,29 @@ mod tests {
         assert_eq!(ts_to_samples(324870, (1, 14112000), 48000), 1105);
         assert_eq!(samples_to_ts(1105, (1, 14112000), 48000), 324870);
         assert_eq!(samples_to_ts(-1, (1, 1000), 48000), -1);
+    }
+
+    #[test]
+    fn default_speakers_follow_ffmpeg() {
+        use Speaker::*;
+        assert_eq!(default_speakers(1), [FrontCenter]);
+        assert_eq!(default_speakers(2), [FrontLeft, FrontRight]);
+        assert_eq!(default_speakers(3), [FrontLeft, FrontRight, LowFrequency]);
+        assert_eq!(
+            default_speakers(5),
+            [FrontLeft, FrontRight, FrontCenter, BackLeft, BackRight]
+        );
+        assert_eq!(
+            default_speakers(6),
+            [
+                FrontLeft,
+                FrontRight,
+                FrontCenter,
+                LowFrequency,
+                BackLeft,
+                BackRight
+            ]
+        );
+        assert!(default_speakers(0).is_empty());
     }
 }
