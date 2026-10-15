@@ -560,7 +560,10 @@ const bridge: PowermoveBridge = {
       key: request.key, type: request.type, size: request.size, revision: request.revision ?? null, origin: request.origin ?? 'stream'
     }),
     putChunk: (token, offset, data) => ipcRenderer.invoke(MEDIA_STORE_IPC.putChunk, { token, offset, data }),
-    finishPut: (token, expected) => ipcRenderer.invoke(MEDIA_STORE_IPC.finishPut, { token, blake3: expected.blake3 }),
+    finishPut: (token, expected) => ipcRenderer.invoke(MEDIA_STORE_IPC.finishPut, {
+      token, ...(expected.blake3 !== undefined ? { blake3: expected.blake3 } : {}), ...(expected.sha256 !== undefined ? { sha256: expected.sha256 } : {})
+    }),
+    putProjectRange: (token, readToken, offset, length, at) => ipcRenderer.invoke(MEDIA_STORE_IPC.putProjectRange, { token, readToken, offset, length, at }),
     abortPut: (token) => ipcRenderer.invoke(MEDIA_STORE_IPC.abortPut, token),
     link: (path) => ipcRenderer.invoke(MEDIA_STORE_IPC.link, String(path)),
     open: (request) => ipcRenderer.invoke(MEDIA_STORE_IPC.open, {
@@ -572,7 +575,16 @@ const bridge: PowermoveBridge = {
     close: (token) => ipcRenderer.invoke(MEDIA_STORE_IPC.close, token),
     relink: (request) => ipcRenderer.invoke(MEDIA_STORE_IPC.relink, { link: request.link, searchRoots: request.searchRoots ?? [] }),
     bind: (projectId, assets) => ipcRenderer.invoke(MEDIA_STORE_IPC.bind, { projectId, assets }),
-    removeKey: (key) => ipcRenderer.invoke(MEDIA_STORE_IPC.removeKey, String(key))
+    removeKey: (key) => ipcRenderer.invoke(MEDIA_STORE_IPC.removeKey, String(key)),
+    convertStill: (request) => ipcRenderer.invoke(MEDIA_STORE_IPC.convertStill, {
+      name: String(request.name ?? ''), ...(request.link !== undefined ? { link: request.link } : { hash: request.hash })
+    }),
+    convertVideo: (request) => ipcRenderer.invoke(MEDIA_STORE_IPC.convertVideo, {
+      name: String(request.name ?? ''), ...(request.link !== undefined ? { link: request.link } : { hash: request.hash })
+    }),
+    convertUpload: (token, request) => ipcRenderer.invoke(MEDIA_STORE_IPC.convertUpload, {
+      token: String(token), kind: request.kind, name: String(request.name ?? ''), blake3: String(request.blake3 ?? '')
+    })
   },
   ...(frameBridge ? { frameBridge } : {})
 };

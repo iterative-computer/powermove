@@ -19,6 +19,9 @@
 pub mod display;
 mod noise;
 pub mod pool;
+// The C′ prototype: measurement builds only (feature `remote-layer`).
+#[cfg(feature = "remote-layer")]
+pub mod remote_layer;
 pub mod surface;
 pub mod test_source;
 

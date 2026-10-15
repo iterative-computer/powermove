@@ -6,6 +6,7 @@ import type { Seq } from "./Seq";
 import type { Size } from "./Size";
 import type { ViewOverride } from "./ViewOverride";
 import type { ViewerColorSpace } from "./ViewerColorSpace";
+import type { VsyncHint } from "./VsyncHint";
 
 /**
  * The viewer's state, sent whenever it changes (section 18, view override).
@@ -29,4 +30,14 @@ edr: boolean,
  * Increases whenever the viewer state changes; descriptors echo the
  * state they show.
  */
-viewSeq: Seq, };
+viewSeq: Seq, 
+/**
+ * The refresh grid of the display showing the viewer (amendment 18),
+ * so the engine can start timed frames' GPU work just after the
+ * compositor's. Absent until the viewer has fitted its animation
+ * frames. Added after `protocol-16c8e6e125019103` as an optional field
+ * (RFC 02 version notes): a peer that does not send it is decoded as
+ * `None`, and a change of the hint alone is not a new view (it keeps
+ * `view_seq`).
+ */
+vsync?: VsyncHint | null, };

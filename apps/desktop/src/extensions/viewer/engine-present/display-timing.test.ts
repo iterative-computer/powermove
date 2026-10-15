@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { nextVsync, VsyncEstimator } from './display-timing';
+import { hintChanged, nextVsync, VsyncEstimator } from './display-timing';
 
 /** rAF timestamps on a 120 Hz grid with ±0.5 ms jitter, every 7th skipped. */
 function rafs(count: number, phaseMs: number, start = 1000): number[] {
@@ -52,5 +52,14 @@ describe('VsyncEstimator', () => {
     expect(nextVsync(fit, 3)).toBe(3);
     expect(nextVsync(fit, 3.1)).toBe(13);
     expect(nextVsync(fit, -20)).toBe(-17);
+  });
+
+  it('re-sends the vsync hint only for a new period or a phase move beyond 250 µs', () => {
+    const base = { hostTime: 1_000_000, periodUs: 8333.333 };
+    expect(hintChanged(null, base)).toBe(true);
+    expect(hintChanged(base, { ...base, hostTime: base.hostTime + 8333.333 * 40 + 100 })).toBe(false);
+    expect(hintChanged(base, { ...base, hostTime: base.hostTime + 400 })).toBe(true);
+    expect(hintChanged(base, { ...base, hostTime: base.hostTime - 8333.333 + 50 })).toBe(false);
+    expect(hintChanged(base, { hostTime: base.hostTime, periodUs: 16666.667 })).toBe(true);
   });
 });

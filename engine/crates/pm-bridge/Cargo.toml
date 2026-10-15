@@ -35,13 +35,14 @@ objc2-core-foundation = "0.3.2"
 objc2-io-surface = "0.3.2"
 objc2-foundation = { version = "0.3.2", optional = true }
 objc2-app-kit = { version = "0.3.2", optional = true }
+objc2 = { version = "0.6", optional = true }
 pm-text = { path = "../pm-text", default-features = false, features = ["system"], optional = true }
 
 [features]
 node = ["dep:napi", "dep:napi-derive", "dep:serde", "dep:serde_json", "dep:pm-text"]
 # Measurement helpers for the S1 harness (synthetic input, EDR headroom).
 # Never in release builds.
-harness = ["node", "dep:objc2-foundation", "dep:objc2-app-kit"]
+harness = ["node", "dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit"]
 
 [build-dependencies]
 napi-build = "2.6"

@@ -18,6 +18,10 @@ use pm_bridge::wire::{PixelFormat, SurfaceInfo};
 use pm_engine::{Action, LogLevel};
 use pm_gpu::bridge_out::display::{DisplayParams, DisplayTransform, WorkingTexture};
 use pm_gpu::bridge_out::pool::SurfacePool;
+#[cfg(feature = "remote-layer")]
+use pm_gpu::bridge_out::remote_layer::{
+    Presented, RatePreference, RemoteLayer, preferred_refresh, raw_metal_device, take_display_ticks,
+};
 use pm_gpu::bridge_out::test_source::{TestFrame, TestSource};
 use pm_protocol::clock::TransportCommand;
 use pm_protocol::codec;
@@ -34,8 +38,13 @@ use pm_protocol::interop::SurfaceFormat;
 use serde::Serialize;
 
 use super::clock::{SAMPLE_INTERVAL_US, TransportClock};
-use super::schedule::{Next, Schedule};
+use super::schedule::{Next, Phase, Schedule};
 use super::view;
+
+/// Stand-in for the C′ prototype's layer in builds without it (feature
+/// `remote-layer`): uninhabited, so a pool never has a remote layer.
+#[cfg(not(feature = "remote-layer"))]
+enum RemoteLayer {}
 
 /// Where the engine's actions go: posted on the utility process's ports by
 /// its JavaScript (pm-node's threadsafe function), or collected by tests.
@@ -155,6 +164,18 @@ pub struct ThreadConfig {
     pub extra_passes: u32,
     /// Keep a per-frame trace for the S1 harness.
     pub trace: bool,
+    /// Fraction of a refresh after the viewer's BeginFrame at which timed
+    /// frames start rendering, once the viewer sent its vsync hint; `None`
+    /// renders at the due time.
+    pub phase: Option<f64>,
+    /// The C′ prototype: timed playback frames go to a remote Core
+    /// Animation layer instead of the viewer (docs/engine/bridge.md).
+    pub remote_layer: bool,
+    /// File the C′ prototype appends presentation records to.
+    pub remote_trace: Option<String>,
+    /// While the C′ layer plays, ask the display for a multiple of the
+    /// content rate (plan section 15, ProMotion).
+    pub remote_rate: bool,
 }
 
 /// One frame's record for the S1 harness.
@@ -199,6 +220,17 @@ pub struct Stats {
     pub gpu_us_max: i64,
     pub gpu_us_total: i64,
     pub max_held: u32,
+    /// The C′ prototype: frames given to the remote layer, and how many Core
+    /// Animation reported presented or dropped.
+    pub remote_frames: u64,
+    pub remote_presented: u64,
+    pub remote_dropped: u64,
+    /// Frames the C′ layer skipped to bring presentation back to its asked
+    /// times after a stall left it a frame late.
+    pub remote_resyncs: u64,
+    pub remote_error: Option<String>,
+    /// The refresh rate the C′ prototype asked for while playing.
+    pub remote_rate_hz: Option<f64>,
     #[serde(skip)]
     pub trace: Vec<FrameTrace>,
 }
@@ -217,6 +249,8 @@ struct Live {
     ledger: PoolLedger,
     working: WorkingTexture,
     source: TestSource,
+    /// The C′ prototype's layer for this pool's size and format.
+    remote: Option<RemoteLayer>,
 }
 
 struct View {
@@ -233,6 +267,12 @@ struct View {
     requests: VecDeque<(RequestId, FrameRequest, Option<Revision>)>,
     /// The pool to make again after a failed hand-off.
     retry: Option<PoolRetry>,
+    /// The C′ prototype's refresh-rate request while it plays, and whether
+    /// this playback already tried (a failed request is not repeated).
+    #[cfg(feature = "remote-layer")]
+    rate: Option<RatePreference>,
+    #[cfg(feature = "remote-layer")]
+    rate_tried: bool,
 }
 
 struct Thread {
@@ -451,7 +491,22 @@ impl Thread {
         }
     }
 
+    /// Tells main to stop hosting the viewer's remote layer (C′ prototype).
+    fn withdraw_remote(&self, key: Key, generation: u32) {
+        if let Some(bridge) = &self.bridge
+            && let Err(error) = bridge.remote_layer(key.0.0, generation, 0, (0, 0), 0)
+        {
+            self.log(
+                LogLevel::Warn,
+                format!("frame bridge: could not withdraw the remote layer: {error}"),
+            );
+        }
+    }
+
     fn retire_pool(&self, key: Key, live: Live) {
+        if live.remote.is_some() {
+            self.withdraw_remote(key, live.spec.generation);
+        }
         if let Some(bridge) = &self.bridge
             && let Err(error) = bridge.retire(key.0.0, live.spec.generation)
         {
@@ -489,12 +544,24 @@ impl Thread {
             dirty: true,
             requests: VecDeque::new(),
             retry: None,
+            #[cfg(feature = "remote-layer")]
+            rate: None,
+            #[cfg(feature = "remote-layer")]
+            rate_tried: false,
         });
+        // A new vsync hint alone is not a new view: nothing to redraw.
+        let hint_only = view.state.vsync != state.vsync && {
+            let mut a = view.state.clone();
+            a.vsync = state.vsync;
+            a == state
+        };
         view.state = state;
         if let Some(revision) = revision {
             view.revision = view.revision.max(revision);
         }
-        view.dirty = true;
+        if !hint_only {
+            view.dirty = true;
+        }
         let Some(spec) = pool else {
             // The same pool as before. If making it failed and the retries
             // ran out, this new viewer state tries again.
@@ -504,10 +571,14 @@ impl Thread {
             return;
         };
         view.retry = None;
-        if let Some(old) = self.views.get_mut(&key).and_then(|v| v.pool.take()) {
+        // The C′ prototype's layer moves to the new pool: main keeps
+        // hosting its context, so a live resize never leaves it unhosted.
+        let mut carried = None;
+        if let Some(mut old) = self.views.get_mut(&key).and_then(|v| v.pool.take()) {
+            carried = old.remote.take();
             self.retire_pool(key, old);
         }
-        self.make_pool(key, spec, 0);
+        self.make_pool(key, spec, 0, carried);
     }
 
     /// Makes and hands off a pool; on failure, schedules it again with a
@@ -515,8 +586,9 @@ impl Thread {
     /// lease for `spec` and records it as the viewer's pool, so it would
     /// never ask again for an identical viewer state: the render thread
     /// must.
-    fn make_pool(&mut self, key: Key, spec: PoolSpec, failures: u32) {
-        match self.create_pool(key, spec) {
+    fn make_pool(&mut self, key: Key, spec: PoolSpec, failures: u32, carried: Option<RemoteLayer>) {
+        let had_remote = carried.is_some();
+        match self.create_pool(key, spec, carried) {
             Ok(live) => {
                 let descriptor = live.pool.descriptor();
                 if let Some(view) = self.views.get_mut(&key) {
@@ -536,6 +608,11 @@ impl Thread {
                 self.event(key, Event::SurfacePool(descriptor), None);
             }
             Err(error) => {
+                // The carried layer went with the failed pool: main stops
+                // hosting its context.
+                if had_remote {
+                    self.withdraw_remote(key, spec.generation);
+                }
                 let failures = failures + 1;
                 self.stats().pool_failures += 1;
                 // Without a bridge nothing can succeed; do not retry.
@@ -575,10 +652,15 @@ impl Thread {
             generation: self.generations.next(),
             ..retry.spec
         };
-        self.make_pool(key, spec, retry.failures);
+        self.make_pool(key, spec, retry.failures, None);
     }
 
-    fn create_pool(&mut self, key: Key, spec: PoolSpec) -> Result<Live, String> {
+    fn create_pool(
+        &mut self,
+        key: Key,
+        spec: PoolSpec,
+        carried: Option<RemoteLayer>,
+    ) -> Result<Live, String> {
         if self.bridge.is_none() {
             return Err("the frame bridge did not check in with main".into());
         }
@@ -631,12 +713,229 @@ impl Thread {
         stats.pools += 1;
         stats.surfaces_sent += u64::from(spec.count);
         drop(stats);
+        let remote = if self.config.remote_layer {
+            self.make_remote(key, spec, carried)
+        } else {
+            None
+        };
         Ok(Live {
             spec,
             ledger: PoolLedger::new(pool.len()),
             pool,
             working,
             source,
+            remote,
+        })
+    }
+
+    /// The C′ prototype: a remote layer for `spec`, announced to main. The
+    /// previous pool's layer, when there is one, is moved to the new size
+    /// and format and keeps its context.
+    #[cfg(feature = "remote-layer")]
+    fn make_remote(
+        &mut self,
+        key: Key,
+        spec: PoolSpec,
+        carried: Option<RemoteLayer>,
+    ) -> Option<RemoteLayer> {
+        let (scale, space) = self
+            .views
+            .get(&key)
+            .map(|v| (v.state.device_pixel_ratio, v.state.color_space))?;
+        let reused = carried.and_then(|mut layer| {
+            match layer.reconfigure(spec.size, scale, spec.format, space) {
+                Ok(()) => Some(layer),
+                Err(error) => {
+                    self.log(
+                        LogLevel::Warn,
+                        format!("frame bridge: remote layer not reused (C′ prototype): {error}"),
+                    );
+                    None
+                }
+            }
+        });
+        let made = match reused {
+            Some(layer) => Ok(layer),
+            None => {
+                let device = self
+                    .gpu
+                    .as_ref()
+                    .and_then(|g| raw_metal_device(&g.device))?;
+                RemoteLayer::new(device, spec.size, scale, spec.format, space)
+                    .map_err(|e| e.to_string())
+            }
+        };
+        let made = made.and_then(|layer| {
+            let bridge = self.bridge.as_ref().ok_or("no bridge")?;
+            bridge
+                .remote_layer(
+                    key.0.0,
+                    spec.generation,
+                    layer.context_id(),
+                    (spec.size.width, spec.size.height),
+                    (scale * 1000.0).round() as u32,
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(layer)
+        });
+        match made {
+            Ok(layer) => {
+                self.log(
+                    LogLevel::Info,
+                    format!(
+                        "frame bridge: remote layer context {} for generation {} (C′ prototype)",
+                        layer.context_id(),
+                        spec.generation
+                    ),
+                );
+                Some(layer)
+            }
+            Err(error) => {
+                self.stats().remote_error = Some(error.clone());
+                self.log(
+                    LogLevel::Error,
+                    format!("frame bridge: no remote layer (C′ prototype): {error}"),
+                );
+                None
+            }
+        }
+    }
+
+    /// Asked for the C′ prototype in a build without it (feature
+    /// `remote-layer`): says so, and the viewer presents as usual.
+    #[cfg(not(feature = "remote-layer"))]
+    fn make_remote(
+        &mut self,
+        _key: Key,
+        _spec: PoolSpec,
+        _carried: Option<RemoteLayer>,
+    ) -> Option<RemoteLayer> {
+        let error = "this engine was built without the C′ prototype (feature remote-layer)";
+        self.stats().remote_error = Some(error.into());
+        self.log(
+            LogLevel::Error,
+            format!("frame bridge: no remote layer: {error}"),
+        );
+        None
+    }
+
+    /// The C′ prototype: hands a rendered timed frame to the remote layer
+    /// to show at host µs `shown_from`, then frees its surface.
+    #[cfg(feature = "remote-layer")]
+    fn present_remote(&mut self, key: Key, descriptor: &FrameDescriptor, shown_from: f64) {
+        let Some(view) = self.views.get_mut(&key) else {
+            return;
+        };
+        let Some(live) = view.pool.as_mut() else {
+            return;
+        };
+        let index = descriptor.pool_index;
+        let result = match (live.remote.as_mut(), live.pool.surfaces.get(index as usize)) {
+            (Some(remote), Some(surface)) => remote
+                .present(
+                    &surface.iosurface,
+                    descriptor.seq.get(),
+                    shown_from.round() as i64,
+                )
+                .map(|shown| (shown, remote.resyncs()))
+                .map_err(|e| e.to_string()),
+            _ => Err("no remote layer or surface".into()),
+        };
+        let _ = live.ledger.release(FrameRelease {
+            pool_index: index,
+            seq: descriptor.seq,
+        });
+        let mut stats = self.stats();
+        match result {
+            Ok((true, resyncs)) => {
+                stats.remote_frames += 1;
+                stats.remote_resyncs = resyncs;
+            }
+            // Skipped to drain Core Animation's queue (Pacing).
+            Ok((false, resyncs)) => stats.remote_resyncs = resyncs,
+            Err(error) => stats.remote_error = Some(error),
+        }
+    }
+
+    /// Without the C′ prototype no pool has a remote layer (the type is
+    /// uninhabited), so this is never called.
+    #[cfg(not(feature = "remote-layer"))]
+    fn present_remote(&mut self, _key: Key, _descriptor: &FrameDescriptor, _shown_from: f64) {
+        unreachable!("no remote layer exists without the remote-layer feature")
+    }
+
+    /// Collects the remote layers' presentation records into the stats and
+    /// the trace file.
+    #[cfg(feature = "remote-layer")]
+    fn collect_remote(&mut self) {
+        // The refreshes the rate request's display link saw, next to the
+        // presentation records (`<trace>.ticks`: host µs of each refresh).
+        if self.config.remote_rate
+            && let Some(path) = &self.config.remote_trace
+        {
+            let ticks = take_display_ticks();
+            if !ticks.is_empty() {
+                use std::io::Write;
+                let mut text = String::new();
+                for (at, _) in ticks {
+                    text.push_str(&format!("{}\n", (at * 1e6).round() as i64));
+                }
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(format!("{path}.ticks"))
+                {
+                    let _ = file.write_all(text.as_bytes());
+                }
+            }
+        }
+        let mut records: Vec<Presented> = Vec::new();
+        for view in self.views.values() {
+            if let Some(remote) = view.pool.as_ref().and_then(|l| l.remote.as_ref()) {
+                records.extend(remote.take_presented());
+            }
+        }
+        if records.is_empty() {
+            return;
+        }
+        let mut stats = self.stats();
+        for r in &records {
+            if r.presented_us.is_some() {
+                stats.remote_presented += 1;
+            } else {
+                stats.remote_dropped += 1;
+            }
+        }
+        drop(stats);
+        if let Some(path) = &self.config.remote_trace {
+            use std::io::Write;
+            let mut text = String::new();
+            for r in &records {
+                text.push_str(&format!(
+                    "[{},{},{},{},{}]\n",
+                    r.seq,
+                    r.asked_us,
+                    r.presented_us.map_or("null".into(), |v| v.to_string()),
+                    r.committed_us,
+                    r.drawable_wait_us
+                ));
+            }
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = file.write_all(text.as_bytes());
+            }
+        }
+    }
+
+    /// The render phase for a view: its vsync hint and the configured
+    /// fraction, when both exist.
+    fn phase(config: &ThreadConfig, state: &ViewerState) -> Option<Phase> {
+        Some(Phase {
+            hint: state.vsync?,
+            fraction: config.phase?,
         })
     }
 
@@ -655,7 +954,8 @@ impl Thread {
                 let sample_at = view.last_sample.unwrap_or(now) + SAMPLE_INTERVAL_US;
                 wake = wake.min(sample_at);
                 let mut schedule = view.schedule.clone();
-                match schedule.next(&view.clock, now, self.config.lead) {
+                let phase = Self::phase(&self.config, &view.state);
+                match schedule.next_in_phase(&view.clock, now, self.config.lead, phase) {
                     Next::WaitUntil(at) => wake = wake.min(at.ceil() as i64),
                     Next::Render { .. } | Next::Skip { .. } => {
                         // Waiting for a free slot: a release wakes us; poll
@@ -673,6 +973,55 @@ impl Thread {
         let keys: Vec<Key> = self.views.keys().copied().collect();
         for key in keys {
             self.work_view(key);
+        }
+        #[cfg(feature = "remote-layer")]
+        if self.config.remote_layer {
+            self.collect_remote();
+            if self.config.remote_rate {
+                self.request_rates();
+            }
+        }
+    }
+
+    /// Holds a refresh-rate request for each view whose C′ layer plays,
+    /// and drops it when playback stops.
+    #[cfg(feature = "remote-layer")]
+    fn request_rates(&mut self) {
+        let fps = f64::from(self.config.fps);
+        let mut asked = None;
+        let mut failed = None;
+        for view in self.views.values_mut() {
+            let playing =
+                view.clock.is_playing() && view.pool.as_ref().is_some_and(|l| l.remote.is_some());
+            if !playing {
+                view.rate = None;
+                view.rate_tried = false;
+                continue;
+            }
+            if view.rate_tried {
+                continue;
+            }
+            view.rate_tried = true;
+            let max_hz = view
+                .state
+                .vsync
+                .map_or(120.0, |h| (1e6 / h.period_us).round());
+            match RatePreference::request(preferred_refresh(fps, max_hz)) {
+                Ok(rate) => {
+                    asked = Some(rate.hz);
+                    view.rate = Some(rate);
+                }
+                Err(error) => failed = Some(error.to_string()),
+            }
+        }
+        if asked.is_some() || failed.is_some() {
+            let mut stats = self.stats();
+            if let Some(hz) = asked {
+                stats.remote_rate_hz = Some(hz);
+            }
+            if let Some(error) = failed {
+                stats.remote_error = Some(format!("refresh rate: {error}"));
+            }
         }
     }
 
@@ -729,7 +1078,8 @@ impl Thread {
                 return;
             }
             let t = now();
-            match view.schedule.next(&view.clock, t, lead) {
+            let phase = Self::phase(&self.config, &view.state);
+            match view.schedule.next_in_phase(&view.clock, t, lead, phase) {
                 Next::Render { k, shown_from } => {
                     if view
                         .pool
@@ -747,9 +1097,14 @@ impl Thread {
                         return;
                     };
                     view.schedule.rendered(&view.clock, k);
+                    let remote = view.pool.as_ref().is_some_and(|l| l.remote.is_some());
                     if let Some(descriptor) = rendered {
-                        let revision = descriptor.revision;
-                        self.event(key, Event::Frame(descriptor), Some(revision));
+                        if remote {
+                            self.present_remote(key, &descriptor, shown_from);
+                        } else {
+                            let revision = descriptor.revision;
+                            self.event(key, Event::Frame(descriptor), Some(revision));
+                        }
                     }
                 }
                 Next::Skip { .. } => {

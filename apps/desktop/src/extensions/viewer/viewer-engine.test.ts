@@ -2,8 +2,21 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { PowermoveAPI } from 'powermove';
-import { ENGINE_VIEWER_SERVICE, type EngineViewerService } from './engine-present/presentation';
+import { ENGINE_VIEWER_SERVICE, type EngineViewerHandlers, type EngineViewerService } from './engine-present/presentation';
+import type { FrameDescriptor } from './engine-present/protocol';
 import { createViewerRuntime } from './viewer';
+
+// happy-dom has no WebGPU: a test can ask for a painter that draws nothing.
+const gpu = vi.hoisted(() => ({ fake: false }));
+vi.mock('./engine-present/gpu', async (original) => {
+  const actual = await original<typeof import('./engine-present/gpu')>();
+  return {
+    ...actual,
+    createWebGpuPainter: async (canvas: never) => gpu.fake
+      ? { configure() {}, draw() {}, workDone: () => Promise.resolve(), dispose() {} }
+      : actual.createWebGpuPainter(canvas)
+  };
+});
 
 /* The viewer's hook for engine presentation (behind "Use New Engine"):
    nothing happens without the kernel's `engine.viewer` service; with it the
@@ -31,13 +44,15 @@ function viewerApi(services: Map<string, unknown>, log: (level: string, message:
   } as unknown as PowermoveAPI;
 }
 
-function mount(runtime: any): { stage: HTMLElement; overlay: HTMLCanvasElement } {
+function mount(runtime: any, size = { width: 1000, height: 700 }): { stage: HTMLElement; overlay: HTMLCanvasElement } {
   const stage = document.createElement('div');
   const inner = document.createElement('div');
   const overlay = document.createElement('canvas');
   stage.append(inner, overlay);
   document.body.append(stage);
-  stage.getBoundingClientRect = () => ({ x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: 700, width: 1000, height: 700, toJSON: () => ({}) }) as DOMRect;
+  stage.getBoundingClientRect = () => ({ x: 0, y: 0, left: 0, top: 0, right: size.width, bottom: size.height, width: size.width, height: size.height, toJSON: () => ({}) }) as DOMRect;
+  Object.defineProperty(stage, 'clientWidth', { get: () => size.width, configurable: true });
+  Object.defineProperty(stage, 'clientHeight', { get: () => size.height, configurable: true });
   runtime.el = document.createElement('canvas');
   runtime.ov = overlay;
   runtime.octx = new Proxy({}, { get: () => () => {} });
@@ -81,5 +96,67 @@ describe('viewer engine presentation hook', () => {
     expect(stage.querySelectorAll('#engine-present')).toHaveLength(1);
     runtime.dispose();
     expect(stage.querySelector('#engine-present')).toBeNull();
+  });
+
+  it('gives the WebGL canvas the size it skipped while the engine presented once the engine session ends', async () => {
+    gpu.fake = true;
+    const rafs = new Map<number, FrameRequestCallback>();
+    let nextRaf = 1;
+    const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => (rafs.set(nextRaf, cb), nextRaf++));
+    const caf = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => void rafs.delete(id));
+    const runFrames = (): void => {
+      const due = [...rafs.values()];
+      rafs.clear();
+      for (const cb of due) cb(performance.now());
+    };
+    try {
+      const services = new Map<string, unknown>();
+      let handlers: EngineViewerHandlers | null = null;
+      const service: EngineViewerService = {
+        source: { videoFrame: () => ({ codedWidth: 1000, codedHeight: 700, close() {} }) as unknown as VideoFrame, onSurface: () => () => {}, retire: () => 0 },
+        composition: () => 'comp-1',
+        offMainThread: false,
+        open: (h) => {
+          handlers = h;
+          return { sendViewerState() {}, release() {}, close() {} };
+        },
+        onReady: () => () => {}
+      };
+      services.set(ENGINE_VIEWER_SERVICE, service);
+      const api = viewerApi(services, () => {});
+      const resize = api.render.gl.resize as unknown as ReturnType<typeof vi.fn>;
+      const runtime = createViewerRuntime(api) as any;
+      const size = { width: 1000, height: 700 };
+      mount(runtime, size);
+      runtime.layout();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(handlers).not.toBeNull();
+      const desc: FrameDescriptor = {
+        poolIndex: 0, poolGeneration: 1, seq: 1, pts: 0, revision: 1, colorSpace: 'srgb', format: 'bgra8Unorm',
+        quality: { resolution: 'full', representation: 'original', draft3d: false, cached: false },
+        overlay: null, depthId: null, viewSeq: runtime.enginePresentation.state.viewSeq, duration: null
+      };
+      handlers!.message({ type: 'frame', frame: desc }, performance.now());
+      runFrames();
+      expect(runtime.enginePresentation.presenting).toBe(true);
+
+      // A live resize while the engine presents: the WebGL canvas keeps its size.
+      const before = resize.mock.calls.length;
+      size.width = 1400; size.height = 900;
+      runtime.layout();
+      expect(resize.mock.calls.length).toBe(before);
+
+      // The engine session ends: the WebGL canvas shows again at the new size.
+      handlers!.closed('the interactive engine restarted');
+      expect(runtime.enginePresentation.presenting).toBe(false);
+      expect(resize.mock.calls.length).toBe(before + 1);
+      const [width, height] = resize.mock.calls.at(-1)!;
+      expect(width / height).toBeCloseTo(1920 / 1080, 1);
+      runtime.dispose();
+    } finally {
+      gpu.fake = false;
+      raf.mockRestore();
+      caf.mockRestore();
+    }
   });
 });
