@@ -60,8 +60,12 @@ pub struct Plan {
 /// `renew(prop)`: fresh key ids (`(prop?.kf || []).forEach(kf => kf.i = PM.uid('k'))`).
 fn renew(prop: Option<&mut Value>, ids: &mut IdSource) -> JsResult<()> {
     let Some(prop) = prop else { return Ok(()) };
-    let Some(map) = prop.as_object_mut() else { return Ok(()) };
-    let Some(kf) = map.get_mut("kf") else { return Ok(()) };
+    let Some(map) = prop.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(kf) = map.get_mut("kf") else {
+        return Ok(());
+    };
     match kf {
         Value::Array(keys) => {
             for k in keys {
@@ -69,7 +73,11 @@ fn renew(prop: Option<&mut Value>, ids: &mut IdSource) -> JsResult<()> {
                     Some(k) => {
                         k.insert("i", Value::String(ids.next("k")));
                     }
-                    None => return Err(JsThrow::type_error("Cannot create property 'i' on a key that is not an object")),
+                    None => {
+                        return Err(JsThrow::type_error(
+                            "Cannot create property 'i' on a key that is not an object",
+                        ));
+                    }
                 }
             }
             Ok(())
@@ -77,7 +85,9 @@ fn renew(prop: Option<&mut Value>, ids: &mut IdSource) -> JsResult<()> {
         Value::Null | Value::Bool(false) => Ok(()),
         Value::Number(n) if *n == 0.0 || n.is_nan() => Ok(()),
         Value::String(s) if s.utf16_len() == 0 => Ok(()),
-        _ => Err(JsThrow::type_error("(prop?.kf || []).forEach is not a function")),
+        _ => Err(JsThrow::type_error(
+            "(prop?.kf || []).forEach is not a function",
+        )),
     }
 }
 
@@ -171,27 +181,57 @@ pub fn split_text(
         let layout = edit.read(|sc| sc.text_layout(&sc.layers()[s], time, &mut *measure))?;
         layouts.push(layout);
     }
+    split_layouts(edit, sources, mode, time, &layouts, &mut |edit, s| {
+        font_offset(edit, s, time, &mut *measure)
+    })
+}
+
+/// `PM.raster(source, 1, time)?.fontOffset` of the source at an index.
+pub type FontOffset<'f> = dyn FnMut(&mut Edit<'_>, usize) -> JsResult<(f64, f64)> + 'f;
+
+/// [`split_text`] over given layouts (`PM.textLayout(source, time)` of each
+/// source) and font offsets (`PM.raster(source, 1, time)?.fontOffset`, asked
+/// only for sources with pieces): the part of the split that does not
+/// measure text.
+pub fn split_layouts(
+    edit: &mut Edit<'_>,
+    sources: &[usize],
+    mode: Mode,
+    time: f64,
+    layouts: &[GlyphLayout],
+    font_offset: &mut FontOffset<'_>,
+) -> JsResult<Vec<Plan>> {
     let mut plans = Vec::new();
-    for (&s, layout) in sources.iter().zip(&layouts) {
+    for (&s, layout) in sources.iter().zip(layouts) {
         let pieces = match mode {
             Mode::Words => &layout.words,
             Mode::Characters => &layout.characters,
             Mode::Lines => &layout.lines,
         };
         if pieces.is_empty() {
-            plans.push(Plan { source: s, children: Vec::new() });
+            plans.push(Plan {
+                source: s,
+                children: Vec::new(),
+            });
             continue;
         }
         let content = edit.read(|sc| sc.ev.resolve_content(sc.comp, &sc.layers()[s], time))?;
-        let (fx, fy) = font_offset(edit, s, time, measure)?;
-        let source = edit.layer(s).ok_or_else(|| JsThrow::type_error("Layer not found"))?;
+        let (fx, fy) = font_offset(edit, s)?;
+        let source = edit
+            .layer(s)
+            .ok_or_else(|| JsThrow::type_error("Layer not found"))?;
         let source_value = source.to_value();
         let source_name = node::js_value_opt(node::member(Some(source), "name"));
         // The source's stored animators and their legacy `p.unit` channels.
-        let animators: Vec<Value> = match node::member(node::member(Some(source), "d"), "animators") {
+        let animators: Vec<Value> = match node::member(node::member(Some(source), "d"), "animators")
+        {
             Some(a) if node::truthy(Some(a)) => match node::array(Some(a)) {
                 Some(items) => items.iter().map(|n| n.to_value()).collect(),
-                None => return Err(JsThrow::type_error("(source.d.animators || []).map is not a function")),
+                None => {
+                    return Err(JsThrow::type_error(
+                        "(source.d.animators || []).map is not a function",
+                    ));
+                }
             },
             _ => Vec::new(),
         };
@@ -199,7 +239,8 @@ pub fn split_text(
         for (i, _) in animators.iter().enumerate() {
             let unit = edit.read(|sc| {
                 let l = &sc.layers()[s];
-                let a = &node::array(node::member(node::member(Some(l), "d"), "animators")).expect("listed")[i];
+                let a = &node::array(node::member(node::member(Some(l), "d"), "animators"))
+                    .expect("listed")[i];
                 let p = node::member(Some(a), "p");
                 let prop = node::member(p, "unit");
                 if !node::truthy(prop) {
@@ -211,11 +252,6 @@ pub fn split_text(
             })?;
             legacy_units.push(unit);
         }
-        let content_text = content
-            .get(&JsString::from("text"))
-            .cloned()
-            .unwrap_or(JsValue::Undefined)
-            .to_js_string();
         let mut children = Vec::with_capacity(pieces.len());
         for (index, piece) in pieces.iter().enumerate() {
             let mut child = clone_layer(&source_value, &mut edit.ids)?;
@@ -254,17 +290,22 @@ pub fn split_text(
             // playhead; transform channels, timing, effects, and stack
             // membership stay editable.
             let source_start = piece.source_start as f64;
-            let _ = &content_text;
             let piece_len = piece_text.utf16_len() as f64;
             let styles = match d.get("styles") {
                 None | Some(Value::Null) | Some(Value::Bool(false)) => Vec::new(),
                 Some(Value::Array(items)) => items.clone(),
-                Some(_) => return Err(JsThrow::type_error("(child.d.styles || []).flatMap is not a function")),
+                Some(_) => {
+                    return Err(JsThrow::type_error(
+                        "(child.d.styles || []).flatMap is not a function",
+                    ));
+                }
             };
             let mut sliced = Vec::new();
             for style in styles {
                 let Some(map) = style.as_object() else {
-                    return Err(JsThrow::type_error("Cannot read properties of null (reading 'start')"));
+                    return Err(JsThrow::type_error(
+                        "Cannot read properties of null (reading 'start')",
+                    ));
                 };
                 let read = |k: &str| map.get(k).map_or(JsValue::Undefined, JsValue::from);
                 let start = js_max(read("start").to_number(), source_start);
@@ -289,7 +330,9 @@ pub fn split_text(
             let mut next_animators = Vec::with_capacity(animators.len());
             for (a, legacy) in animators.iter().zip(&legacy_units) {
                 let Some(amap) = a.as_object() else {
-                    return Err(JsThrow::type_error("Cannot read properties of null (reading 'p')"));
+                    return Err(JsThrow::type_error(
+                        "Cannot read properties of null (reading 'p')",
+                    ));
                 };
                 let stored = amap.get("unit").map_or(JsValue::Undefined, JsValue::from);
                 let valid = |v: &JsValue| matches!(v, JsValue::String(s) if matches!(s.as_str(), Some("characters" | "words" | "lines")));
@@ -304,14 +347,18 @@ pub fn split_text(
                     _ => first.map_or(0, |g| g.index) as f64,
                 };
                 let mut clone = pm_model::patch::clone_patch_value(Some(a)).unwrap_or(Value::Null);
-                let cmap = clone.as_object_mut().expect("an object clones to an object");
+                let cmap = clone
+                    .as_object_mut()
+                    .expect("an object clones to an object");
                 match cmap.get_mut("p") {
                     Some(Value::Object(p)) => {
                         p.remove("unit");
                     }
                     Some(Value::Array(_)) => {}
                     Some(Value::Null) | None => {
-                        return Err(JsThrow::type_error("Cannot convert undefined or null to object"));
+                        return Err(JsThrow::type_error(
+                            "Cannot convert undefined or null to object",
+                        ));
                     }
                     Some(_) => {}
                 }
@@ -322,10 +369,16 @@ pub fn split_text(
                 let total = units(layout, &unit).map_or(0, |u| u.len());
                 cmap.insert("id", Value::String(edit.ids.next("ta")));
                 cmap.insert("unit", Value::String(utf16(&unit)));
-                cmap.insert("unitOffset", Value::Number(truthy_or_0("unitOffset") + local));
+                cmap.insert(
+                    "unitOffset",
+                    Value::Number(truthy_or_0("unitOffset") + local),
+                );
                 cmap.insert(
                     "unitTotal",
-                    Value::Number(js_max(truthy_or_0("unitTotal"), if total > 0 { total as f64 } else { 1.0 })),
+                    Value::Number(js_max(
+                        truthy_or_0("unitTotal"),
+                        if total > 0 { total as f64 } else { 1.0 },
+                    )),
                 );
                 next_animators.push(clone);
             }
@@ -339,7 +392,9 @@ pub fn split_text(
                     .and_then(Value::as_object_mut)
                     .and_then(|p| p.get_mut(format!("anchor.{axis}").as_str()))
                     .and_then(Value::as_object_mut)
-                    .ok_or_else(|| JsThrow::type_error("Cannot read properties of undefined (reading 'v')"))?;
+                    .ok_or_else(|| {
+                        JsThrow::type_error("Cannot read properties of undefined (reading 'v')")
+                    })?;
                 let v = p.get("v").map_or(f64::NAN, js_sem::value_to_number);
                 p.insert("v", Value::Number(v - offset));
                 if let Some(Value::Array(keys)) = p.get_mut("kf") {
@@ -352,13 +407,22 @@ pub fn split_text(
                 }
                 let expr = p.get("expr").map_or(JsValue::Undefined, JsValue::from);
                 if expr.truthy() {
-                    let text = template(&[lit("("), expr, lit(") - ("), JsValue::Number(offset), lit(")")]);
+                    let text = template(&[
+                        lit("("),
+                        expr,
+                        lit(") - ("),
+                        JsValue::Number(offset),
+                        lit(")"),
+                    ]);
                     p.insert("expr", channel::to_value(&text).unwrap_or(Value::Null));
                 }
             }
             children.push(child);
         }
-        plans.push(Plan { source: s, children });
+        plans.push(Plan {
+            source: s,
+            children,
+        });
     }
     Ok(plans)
 }

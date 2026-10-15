@@ -110,7 +110,9 @@ pub fn delta_in_parent(parent: Option<&Mat2d>, dx: f64, dy: f64) -> (f64, f64) {
         return (dx, dy);
     };
     let det = a * d - b * c;
-    if det.abs() < 1e-9 || det.is_nan() {
+    // `Math.abs(det) < 1e-9` is false for NaN: the delta becomes NaN and
+    // moves nothing.
+    if det.abs() < 1e-9 {
         return (dx, dy);
     }
     ((d * dx - c * dy) / det, (a * dy - b * dx) / det)
@@ -118,12 +120,19 @@ pub fn delta_in_parent(parent: Option<&Mat2d>, dx: f64, dy: f64) -> (f64, f64) {
 
 /// `Math.min(...xs)` / `Math.max(...xs)` (NaN wins).
 fn fold(xs: impl Iterator<Item = f64>, min: bool) -> f64 {
-    let mut out = if min { f64::INFINITY } else { f64::NEG_INFINITY };
+    let mut out = if min {
+        f64::INFINITY
+    } else {
+        f64::NEG_INFINITY
+    };
     for x in xs {
         if x.is_nan() {
             return f64::NAN;
         }
-        if (min && x < out) || (!min && x > out) || (x == out && x == 0.0 && (min == x.is_sign_negative())) {
+        if (min && x < out)
+            || (!min && x > out)
+            || (x == out && x == 0.0 && (min == x.is_sign_negative()))
+        {
             out = x;
         }
     }
@@ -306,8 +315,16 @@ pub fn distribute(
             let last = reference(&boxed[n - 1].1);
             for (k, (i, b)) in boxed.iter().enumerate() {
                 let target = first + (last - first) * k as f64 / (n - 1) as f64;
-                let d = if k == 0 || k == n - 1 { 0.0 } else { target - reference(b) };
-                deltas.push(if horizontal { (*i, d, 0.0) } else { (*i, 0.0, d) });
+                let d = if k == 0 || k == n - 1 {
+                    0.0
+                } else {
+                    target - reference(b)
+                };
+                deltas.push(if horizontal {
+                    (*i, d, 0.0)
+                } else {
+                    (*i, 0.0, d)
+                });
             }
         }
         Spread::HorizontalSpace | Spread::VerticalSpace => {
@@ -318,8 +335,16 @@ pub fn distribute(
             let gap = (span - sizes) / (n - 1) as f64;
             let mut at = lo(&boxed[0].1);
             for (k, (i, b)) in boxed.iter().enumerate() {
-                let d = if k == 0 || k == n - 1 { 0.0 } else { at - lo(b) };
-                deltas.push(if horizontal { (*i, d, 0.0) } else { (*i, 0.0, d) });
+                let d = if k == 0 || k == n - 1 {
+                    0.0
+                } else {
+                    at - lo(b)
+                };
+                deltas.push(if horizontal {
+                    (*i, d, 0.0)
+                } else {
+                    (*i, 0.0, d)
+                });
                 at += hi(b) - lo(b) + gap;
             }
         }
@@ -336,8 +361,18 @@ mod tests {
 
     #[test]
     fn deltas_match_the_strip() {
-        let b = Rect { x0: 100.0, y0: 50.0, x1: 300.0, y1: 150.0 };
-        let f = Rect { x0: 0.0, y0: 0.0, x1: 1920.0, y1: 1080.0 };
+        let b = Rect {
+            x0: 100.0,
+            y0: 50.0,
+            x1: 300.0,
+            y1: 150.0,
+        };
+        let f = Rect {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 1920.0,
+            y1: 1080.0,
+        };
         assert_eq!(align_delta(&b, &f, Mode::Left), (-100.0, 0.0));
         assert_eq!(align_delta(&b, &f, Mode::Right), (1620.0, 0.0));
         assert_eq!(align_delta(&b, &f, Mode::HCenter), (760.0, 0.0));
@@ -345,7 +380,10 @@ mod tests {
         assert_eq!(align_delta(&b, &f, Mode::Bottom), (0.0, 930.0));
         assert_eq!(align_delta(&b, &f, Mode::VCenter), (0.0, 440.0));
         assert_eq!(delta_in_parent(None, 10.0, 20.0), (10.0, 20.0));
-        assert_eq!(delta_in_parent(Some(&[2.0, 0.0, 0.0, 2.0, 500.0, 500.0]), 10.0, 20.0), (5.0, 10.0));
+        assert_eq!(
+            delta_in_parent(Some(&[2.0, 0.0, 0.0, 2.0, 500.0, 500.0]), 10.0, 20.0),
+            (5.0, 10.0)
+        );
         let (x, y) = delta_in_parent(Some(&[0.0, 1.0, -1.0, 0.0, 0.0, 0.0]), 10.0, 0.0);
         assert!((x - 0.0).abs() < 1e-12 && (y + 10.0).abs() < 1e-12);
         assert_eq!(delta_in_parent(Some(&[0.0; 6]), 3.0, 4.0), (3.0, 4.0));

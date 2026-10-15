@@ -75,10 +75,10 @@ fn visit(
     }
     // `layers.find(item => item.id === layer.parent)`.
     let parent_id = node::get(l, b"parent").to_js();
-    let parent = layers
-        .iter()
-        .copied()
-        .find(|&i| edit.layer(i).is_some_and(|p| js_sem::strict_eq(&id_of(p), &parent_id)));
+    let parent = layers.iter().copied().find(|&i| {
+        edit.layer(i)
+            .is_some_and(|p| js_sem::strict_eq(&id_of(p), &parent_id))
+    });
     let audio = is_type(l, "audio");
     if let Some(p) = parent {
         visit(edit, p, layers, poses, time, done)?;
@@ -124,7 +124,11 @@ pub fn move_to_group(
     let group_id = match target {
         Some(g) => {
             let id = id_of(layer(edit, g)?);
-            if id.truthy() { channel::to_value(&id) } else { Some(Value::Null) }
+            if id.truthy() {
+                channel::to_value(&id)
+            } else {
+                Some(Value::Null)
+            }
         }
         None => Some(Value::Null),
     };
@@ -149,8 +153,7 @@ pub fn move_to_group(
         }
         let inside_3d = edit.read(|s| {
             let l = &s.layers()[r];
-            Ok(s
-                .group_ancestors(l)?
+            Ok(s.group_ancestors(l)?
                 .iter()
                 .any(|g| node::truthy(node::member(Some(g), "threeD"))))
         })?;
@@ -173,7 +176,11 @@ fn set_property(edit: &mut Edit<'_>, index: usize, k: &str, v: Option<Value>) ->
         _ => {
             return Err(JsThrow::type_error(format!(
                 "Cannot set properties of {} (setting '{k}')",
-                if matches!(p, Got::Node(_)) { "null" } else { "undefined" }
+                if matches!(p, Got::Node(_)) {
+                    "null"
+                } else {
+                    "undefined"
+                }
             )));
         }
     }
@@ -186,9 +193,10 @@ fn set_property(edit: &mut Edit<'_>, index: usize, k: &str, v: Option<Value>) ->
 fn has_animation(l: &Node) -> JsResult<bool> {
     let p = channel::read(Some(l), "p")?;
     let props: Vec<Option<&Node>> = match &p {
-        Got::Node(p) if !node::is_nullish(Some(p)) => {
-            node::entries(p).into_iter().map(|(_, v)| v.node()).collect()
-        }
+        Got::Node(p) if !node::is_nullish(Some(p)) => node::entries(p)
+            .into_iter()
+            .map(|(_, v)| v.node())
+            .collect(),
         _ => {
             return Err(JsThrow::type_error(
                 "Cannot convert undefined or null to object",
@@ -277,9 +285,9 @@ pub fn ungroup(edit: &mut Edit<'_>, groups: &[usize], time: f64) -> JsResult<Vec
     })?;
     let mut children: Vec<JsValue> = Vec::new();
     for &original in groups {
-        let g = tracked
-            .current(original)
-            .ok_or_else(|| JsThrow::type_error("Cannot read properties of undefined (reading 'id')"))?;
+        let g = tracked.current(original).ok_or_else(|| {
+            JsThrow::type_error("Cannot read properties of undefined (reading 'id')")
+        })?;
         let group_id = id_of(layer(edit, g)?);
         let members: Vec<usize> = edit
             .layers()
@@ -295,27 +303,36 @@ pub fn ungroup(edit: &mut Edit<'_>, groups: &[usize], time: f64) -> JsResult<Vec
                 return Ok(false);
             }
             let m = s.local3d(gl, time)?;
-            Ok(m.iter().zip(IDENTITY4.iter()).any(|(v, i)| (v - i).abs() > 1e-8))
+            Ok(m.iter()
+                .zip(IDENTITY4.iter())
+                .any(|(v, i)| (v - i).abs() > 1e-8))
         })?;
         let changes_pose = changes_3d
             || edit.read(|s| {
                 let gl = &s.layers()[g];
                 let m = s.local_matrix(gl, time)?;
-                if m.iter().zip(IDENTITY.iter()).any(|(v, i)| (v - i).abs() > 1e-8) {
+                if m.iter()
+                    .zip(IDENTITY.iter())
+                    .any(|(v, i)| (v - i).abs() > 1e-8)
+                {
                     return Ok(true);
                 }
-                Ok(!js_sem::strict_eq(&s.channel(gl, "opacity", time)?, &JsValue::Number(100.0)))
+                Ok(!js_sem::strict_eq(
+                    &s.channel(gl, "opacity", time)?,
+                    &JsValue::Number(100.0),
+                ))
             })?;
-        let animated = has_animation(layer(edit, g)?)? || changes_pose && {
-            let mut any = false;
-            for l in edit.layers() {
-                if has_animation(l)? {
-                    any = true;
-                    break;
+        let animated = has_animation(layer(edit, g)?)?
+            || changes_pose && {
+                let mut any = false;
+                for l in edit.layers() {
+                    if has_animation(l)? {
+                        any = true;
+                        break;
+                    }
                 }
-            }
-            any
-        };
+                any
+            };
         let times: Vec<f64> = if animated {
             let count = (dur * fps).ceil() + 1.0;
             let mut times = vec![time];
@@ -334,14 +351,22 @@ pub fn ungroup(edit: &mut Edit<'_>, groups: &[usize], time: f64) -> JsResult<Vec
             let mut unique: Vec<f64> = Vec::with_capacity(times.len());
             let mut seen: HashSet<u64> = HashSet::new();
             for t in times {
-                let bits = if t == 0.0 { 0.0f64.to_bits() } else { t.to_bits() };
+                let bits = if t == 0.0 {
+                    0.0f64.to_bits()
+                } else {
+                    t.to_bits()
+                };
                 if seen.insert(bits) {
                     unique.push(t);
                 }
             }
             // `sort((a, b) => a - b)`: a stable sort that leaves NaN where
             // the comparator cannot order it.
-            unique.sort_by(|a, b| (a - b).partial_cmp(&0.0).unwrap_or(std::cmp::Ordering::Equal));
+            unique.sort_by(|a, b| {
+                (a - b)
+                    .partial_cmp(&0.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             unique
         } else {
             Vec::new()
@@ -361,7 +386,9 @@ pub fn ungroup(edit: &mut Edit<'_>, groups: &[usize], time: f64) -> JsResult<Vec
                     let world = s.world_pose(l, t)?;
                     let aim = s.world_aim3d(l, t)?;
                     let perspective = s.perspective_amount(l, t)?;
-                    let opacity = js_sem::mul(&s.channel(l, "opacity", t)?, &s.channel(gl, "opacity", t)?) / 100.0;
+                    let opacity =
+                        js_sem::mul(&s.channel(l, "opacity", t)?, &s.channel(gl, "opacity", t)?)
+                            / 100.0;
                     Ok(Sampled {
                         world,
                         aim,
@@ -391,15 +418,27 @@ pub fn ungroup(edit: &mut Edit<'_>, groups: &[usize], time: f64) -> JsResult<Vec
         // Membership, 2.5D conversion, and the group's opacity.
         let parent_group = {
             let v = node::get(layer(edit, g)?, b"group").to_js();
-            if v.truthy() { channel::to_value(&v) } else { Some(Value::Null) }
+            if v.truthy() {
+                channel::to_value(&v)
+            } else {
+                Some(Value::Null)
+            }
         };
         for &m in &members {
-            edit.set(join(&edit.layer_path(m), &[key("group")]), parent_group.clone())?;
+            edit.set(
+                join(&edit.layer_path(m), &[key("group")]),
+                parent_group.clone(),
+            )?;
             let k = key_of(layer(edit, m)?);
             children.push(id_of(layer(edit, m)?));
             if matches!(poses.get(&k), Some(WorldPose::Space(_))) {
                 ensure_3d_channels(edit, m)?;
-                set_property(edit, m, "perspective", perspectives.get(&k).copied().map(Value::Number))?;
+                set_property(
+                    edit,
+                    m,
+                    "perspective",
+                    perspectives.get(&k).copied().map(Value::Number),
+                )?;
             }
             let factor = edit.read(|s| {
                 let gl = &s.layers()[g];
@@ -617,7 +656,10 @@ fn bake(
             };
             channel::assignable(prop, "kf")?;
             let path = aim_path(&base, role, AIM_KEYS[i]);
-            patches.push(Patch::set(join(&path, &[key("kf")]), Value::Array(Vec::new())));
+            patches.push(Patch::set(
+                join(&path, &[key("kf")]),
+                Value::Array(Vec::new()),
+            ));
             patches.push(Patch::set(join(&path, &[key("expr")]), Value::Null));
         }
         edit.write(patches)?;
@@ -674,7 +716,7 @@ fn bake(
                 }
                 let path = join(&base, &[key("p"), key(name)]);
                 let n = keys.len();
-                let kf = channel::keyframe(t, channel::to_value(&value), "linear", &mut edit.ids);
+                let kf = channel::linear_key(t, channel::to_value(&value), &mut edit.ids);
                 patches.push(Patch::set(join(&path, &[key("kf"), at(n)]), kf));
                 patches.push(Patch {
                     path: join(&path, &[key("v")]),
@@ -700,9 +742,12 @@ fn bake(
                     let mut patches = Vec::new();
                     for (i, n) in lengths.into_iter().enumerate() {
                         let path = aim_path(&base, role, AIM_KEYS[i]);
-                        let kf = channel::keyframe(t, num(values[i]), "linear", &mut edit.ids);
+                        let kf = channel::linear_key(t, num(values[i]), &mut edit.ids);
                         patches.push(Patch::set(join(&path, &[key("kf"), at(n)]), kf));
-                        patches.push(Patch::set(join(&path, &[key("v")]), Value::Number(values[i])));
+                        patches.push(Patch::set(
+                            join(&path, &[key("v")]),
+                            Value::Number(values[i]),
+                        ));
                     }
                     edit.write(patches)?;
                 }
@@ -750,10 +795,12 @@ pub fn group_placement(
                 ));
             };
             channel::assignable(prop, "v")?;
-            patches.push(Patch::set(join(&base, &[key("p"), key(&k), key("v")]), Value::Number(value)));
+            patches.push(Patch::set(
+                join(&base, &[key("p"), key(&k), key("v")]),
+                Value::Number(value),
+            ));
         }
     }
     edit.write(patches)?;
     Ok(Some(b))
 }
-

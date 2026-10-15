@@ -262,6 +262,9 @@ fn prefixed(op: Op, prefix: &[PathPart]) -> Op {
             index,
             value,
         },
-        Op::Delete { path, id } => Op::Delete { path: join(path), id },
+        Op::Delete { path, id } => Op::Delete {
+            path: join(path),
+            id,
+        },
     }
 }

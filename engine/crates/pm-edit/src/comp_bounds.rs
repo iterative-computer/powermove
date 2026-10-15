@@ -33,7 +33,11 @@ fn size(values: [JsValue; 3]) -> f64 {
         .unwrap_or(&values[2])
         .to_number();
     let rounded = math_round(picked);
-    if rounded.is_nan() { f64::NAN } else { rounded.max(16.0) }
+    if rounded.is_nan() {
+        f64::NAN
+    } else {
+        rounded.max(16.0)
+    }
 }
 
 /// `Number(x) || 0`.
@@ -95,7 +99,10 @@ fn shift(edit: &mut Edit<'_>, layer: usize, name: &str, by: f64) -> JsResult<()>
         Value::Number(node::get(prop, b"v").to_js().to_number() + by),
     )];
     // `for (const key of prop.kf || [])`.
-    for (i, k) in node::array_or_empty(node::member(Some(prop), "kf"))?.iter().enumerate() {
+    for (i, k) in node::array_or_empty(node::member(Some(prop), "kf"))?
+        .iter()
+        .enumerate()
+    {
         patches.push(Patch::set(
             join(&base, &[key("kf"), at(i), key("v")]),
             Value::Number(node::get(k, b"v").to_js().to_number() + by),

@@ -21,7 +21,14 @@ use crate::work::Edit;
 
 /// The typography fields whose change records the font anchor.
 pub const TYPOGRAPHY: [&str; 8] = [
-    "font", "weight", "size", "tracking", "leading", "italic", "boxWidth", "boxHeight",
+    "font",
+    "weight",
+    "size",
+    "tracking",
+    "leading",
+    "italic",
+    "boxWidth",
+    "boxHeight",
 ];
 
 /// Which recorded bounds an anchor edit maintains.
@@ -63,7 +70,11 @@ fn d_member<'a>(layer: &'a Node, name: &str) -> Option<&'a Node> {
 /// The detached copy `PM.raster` measures: `{ ...layer, d: { ...layer.d, ...patch } }`.
 fn detached(layer: &Node, patch: &[(&str, Value)]) -> Node {
     let mut value = layer.to_value();
-    if let Some(d) = value.as_object_mut().and_then(|m| m.get_mut("d")).and_then(Value::as_object_mut) {
+    if let Some(d) = value
+        .as_object_mut()
+        .and_then(|m| m.get_mut("d"))
+        .and_then(Value::as_object_mut)
+    {
         for (k, v) in patch {
             d.insert(*k, v.clone());
         }
@@ -83,12 +94,18 @@ pub fn capture_size_anchor(
     if node::truthy(d_member(l, "sizeAnchorBounds")) {
         return Ok(());
     }
-    if !fields.iter().any(|f| f.as_bytes() == b"w" || f.as_bytes() == b"h") {
+    if !fields
+        .iter()
+        .any(|f| f.as_bytes() == b"w" || f.as_bytes() == b"h")
+    {
         return Ok(());
     }
     let bounds = edit.read(|s| s.size_bounds(&s.layers()[layer], time))?;
     if let Some(b) = bounds {
-        let path = join(&edit.layer_path(layer), &[key("d"), key("sizeAnchorBounds")]);
+        let path = join(
+            &edit.layer_path(layer),
+            &[key("d"), key("sizeAnchorBounds")],
+        );
         edit.set(path, Some(bounds_value(&b)))?;
     }
     Ok(())
@@ -120,7 +137,8 @@ pub fn capture_font_anchor(
         return Ok(());
     }
     let typographic = fields.iter().any(|f| {
-        TYPOGRAPHY.iter().any(|t| f.as_bytes() == t.as_bytes()) || f.as_bytes().starts_with(b"fontAxis.")
+        TYPOGRAPHY.iter().any(|t| f.as_bytes() == t.as_bytes())
+            || f.as_bytes().starts_with(b"fontAxis.")
     });
     if !typographic {
         return Ok(());
@@ -133,7 +151,9 @@ pub fn capture_font_anchor(
     } else {
         l.clone()
     };
-    let selection = edit.read_with(&measured, |s, target| Ok(s.text_raster(target, time, measure)?.selection))?;
+    let selection = edit.read_with(&measured, |s, target| {
+        Ok(s.text_raster(target, time, measure)?.selection)
+    })?;
     edit.set(
         join(&d_path, &[key("fontAnchorBounds")]),
         Some(bounds_value(&selection.rect())),
@@ -205,7 +225,10 @@ pub fn anchor_moved(
         _ => stored[3].clone(),
     };
     let mut values: Vec<(&str, JsValue)> = Vec::new();
-    for (axis, start, end, lo, hi) in [("x", "x0", "x1", bounds.x0, bounds.x1), ("y", "y0", "y1", bounds.y0, bounds.y1)] {
+    for (axis, start, end, lo, hi) in [
+        ("x", "x0", "x1", bounds.x0, bounds.x1),
+        ("y", "y0", "y1", bounds.y0, bounds.y1),
+    ] {
         let span = hi - lo;
         let reference_span = js_sem::sub(&read(end), &read(start));
         // `if (span <= 0) continue` (NaN goes on).

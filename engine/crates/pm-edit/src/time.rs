@@ -110,7 +110,10 @@ mod tests {
         let c = clock(29.97);
         let t = 0.1 + 0.2;
         assert_eq!(shifted(t, 1.5, 1.5, &c, &c), t);
-        assert_eq!(shifted(10.0 / 29.97, 2.0 / 29.97, 1.0 / 29.97, &c, &c), 11.0 / 29.97);
+        assert_eq!(
+            shifted(10.0 / 29.97, 2.0 / 29.97, 1.0 / 29.97, &c, &c),
+            11.0 / 29.97
+        );
     }
 
     #[test]

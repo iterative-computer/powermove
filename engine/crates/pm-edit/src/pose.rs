@@ -152,7 +152,11 @@ pub(crate) fn ensure_3d_channels(edit: &mut Edit<'_>, layer: usize) -> JsResult<
     let l = edit.layer(layer);
     let p = channel::read(l, "p")?;
     if p.is_nullish() {
-        let what = if matches!(p, node::Got::Node(_)) { "null" } else { "undefined" };
+        let what = if matches!(p, node::Got::Node(_)) {
+            "null"
+        } else {
+            "undefined"
+        };
         return Err(JsThrow::type_error(format!(
             "Cannot read properties of {what} (reading '{}')",
             CHANNELS_3D[0].0
@@ -174,7 +178,10 @@ pub(crate) fn ensure_3d_channels(edit: &mut Edit<'_>, layer: usize) -> JsResult<
             ));
         }
     }
-    patches.push(Patch::set(join(&base, &[key("threeD")]), pm_model::Value::Bool(true)));
+    patches.push(Patch::set(
+        join(&base, &[key("threeD")]),
+        pm_model::Value::Bool(true),
+    ));
     edit.write(patches)
 }
 
@@ -224,18 +231,25 @@ pub fn apply_pose_values(
         let mut patches = Vec::new();
         channel::assignable(prop, "v")?;
         let v = node::get(prop, b"v").to_js().to_number() * scale + offset;
-        patches.push(Patch::set(join(&prop_path, &[key("v")]), pm_model::Value::Number(v)));
+        patches.push(Patch::set(
+            join(&prop_path, &[key("v")]),
+            pm_model::Value::Number(v),
+        ));
         for (i, kf) in channel::keys_of(Some(prop))?.iter().enumerate() {
             channel::assignable(kf, "v")?;
             let kp = join(&prop_path, &[key("kf"), at(i)]);
             let kv = node::get(kf, b"v").to_js().to_number() * scale + offset;
-            patches.push(Patch::set(join(&kp, &[key("v")]), pm_model::Value::Number(kv)));
+            patches.push(Patch::set(
+                join(&kp, &[key("v")]),
+                pm_model::Value::Number(kv),
+            ));
             for ease in ["inEase", "outEase"] {
                 let e = node::get(kf, ease.as_bytes());
                 if e.truthy() {
                     let e = e.node().expect("a truthy member is a node");
                     channel::assignable(e, "speed")?;
-                    let speed = js_sem::mul(&node::get(e, b"speed").to_js(), &JsValue::Number(scale));
+                    let speed =
+                        js_sem::mul(&node::get(e, b"speed").to_js(), &JsValue::Number(scale));
                     patches.push(Patch::set(
                         join(&kp, &[key(ease), key("speed")]),
                         pm_model::Value::Number(speed),

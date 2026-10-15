@@ -43,7 +43,10 @@ struct Slot<'d> {
 
 /// `materialSlots(layer)`.
 fn material_slots(layer: &Node) -> JsResult<Vec<Slot<'_>>> {
-    let object = node::member(node::member(node::member(Some(layer), "d"), "data"), "object");
+    let object = node::member(
+        node::member(node::member(Some(layer), "d"), "data"),
+        "object",
+    );
     if !node::truthy(object) {
         return Ok(Vec::new());
     }
@@ -119,16 +122,22 @@ pub fn synchronize_peers(edit: &mut Edit<'_>, layer: usize, channel: &str) -> Js
             continue;
         };
         let Some(kf) = obj.get_mut("kf") else {
-            return Err(JsThrow::type_error("Cannot read properties of undefined (reading 'map')"));
+            return Err(JsThrow::type_error(
+                "Cannot read properties of undefined (reading 'map')",
+            ));
         };
         let Some(keys) = kf.as_array_mut() else {
             return Err(JsThrow::type_error("next.kf.map is not a function"));
         };
         for k in keys.iter_mut() {
             let Some(k) = k.as_object_mut() else {
-                return Err(JsThrow::type_error("Cannot read properties of null (reading 't')"));
+                return Err(JsThrow::type_error(
+                    "Cannot read properties of null (reading 't')",
+                ));
             };
-            let t = k.get("t").map_or(f64::NAN, pm_eval::js_sem::value_to_number);
+            let t = k
+                .get("t")
+                .map_or(f64::NAN, pm_eval::js_sem::value_to_number);
             let time = shifted(t, source.from, peer.from, &source.clock, &peer.clock);
             // `old.find(k => Math.abs(k.t - time) < 1e-8)?.i || PM.uid('k')`.
             let kept = peer
@@ -144,7 +153,10 @@ pub fn synchronize_peers(edit: &mut Edit<'_>, layer: usize, channel: &str) -> Js
         }
         // `Object.assign(peer.prop, next)`.
         for (k, v) in obj.iter() {
-            writes.push(Patch::set(join(&peer.prop, &[PathPart::Key(k.clone())]), v.clone()));
+            writes.push(Patch::set(
+                join(&peer.prop, &[PathPart::Key(k.clone())]),
+                v.clone(),
+            ));
         }
     }
     edit.write(writes)?;
@@ -178,7 +190,11 @@ fn find_peers(
         }
     }
     let comp_layers = |id: &JsString| -> &[Node] {
-        node::array(node::member(node::member(comps_node, &id.to_string_lossy()), "layers")).unwrap_or(&[])
+        node::array(node::member(
+            node::member(comps_node, &id.to_string_lossy()),
+            "layers",
+        ))
+        .unwrap_or(&[])
     };
     let clock_of = |id: &JsString| -> Clock {
         match Comp::in_root(root, &id.to_string_lossy(), revision) {
@@ -214,32 +230,51 @@ fn find_peers(
     }
     let wanted = node::get(shader.expect("truthy"), b"id").to_js();
     // The edited channel itself (`PM.findProp(layer, channel) || layer.p[channel]`).
-    let source_prop: Option<&Node> = match pm_eval::Evaluator::new().find_prop(source_layer, &JsString::from(channel))? {
-        Got::Node(n) if node::truthy(Some(n)) => Some(n),
-        _ => node::member(node::member(Some(source_layer), "p"), channel).filter(|n| node::truthy(Some(n))),
-    };
+    let source_prop: Option<&Node> =
+        match pm_eval::Evaluator::new().find_prop(source_layer, &JsString::from(channel))? {
+            Got::Node(n) if node::truthy(Some(n)) => Some(n),
+            _ => node::member(node::member(Some(source_layer), "p"), channel)
+                .filter(|n| node::truthy(Some(n))),
+        };
     let source_prop = source_prop.ok_or_else(|| JsThrow::type_error("Property not found"))?;
     let mut peers: Vec<Peer> = Vec::new();
     for id in &comp_ids {
         let clock = clock_of(id);
         for (i, candidate) in comp_layers(id).iter().enumerate() {
             for slot in material_slots(candidate)? {
-                let Some(sid) = shader_id(slot.material)? else { continue };
+                let Some(sid) = shader_id(slot.material)? else {
+                    continue;
+                };
                 if !pm_eval::js_sem::strict_eq(&sid, &wanted) {
                     continue;
                 }
-                let prop = node::member(node::member(node::member(slot.material, "shader"), "p"), param);
-                let Some(prop) = prop.filter(|p| node::truthy(Some(p))) else { continue };
+                let prop = node::member(
+                    node::member(node::member(slot.material, "shader"), "p"),
+                    param,
+                );
+                let Some(prop) = prop.filter(|p| node::truthy(Some(p))) else {
+                    continue;
+                };
                 if std::ptr::eq(prop, source_prop) {
                     continue;
                 }
-                let mut path = vec![key("comps"), PathPart::Key(id.clone()), key("layers"), PathPart::from(i)];
+                let mut path = vec![
+                    key("comps"),
+                    PathPart::Key(id.clone()),
+                    key("layers"),
+                    PathPart::from(i),
+                ];
                 path.extend(slot.path.iter().cloned());
                 path.extend([key("shader"), key("p"), key(param)]);
                 let old = node::array(node::member(Some(prop), "kf"))
                     .unwrap_or(&[])
                     .iter()
-                    .map(|k| (node::get(k, b"t").to_js().to_number(), node::get(k, b"i").to_js()))
+                    .map(|k| {
+                        (
+                            node::get(k, b"t").to_js().to_number(),
+                            node::get(k, b"i").to_js(),
+                        )
+                    })
                     .collect();
                 peers.push(Peer {
                     prop: path,
@@ -250,7 +285,8 @@ fn find_peers(
             }
         }
     }
-    let next = pm_model::patch::clone_patch_value(Some(&source_prop.to_value())).unwrap_or(Value::Null);
+    let next =
+        pm_model::patch::clone_patch_value(Some(&source_prop.to_value())).unwrap_or(Value::Null);
     let source = Source {
         next,
         from: node::get(source_layer, b"from").to_js().to_number(),
