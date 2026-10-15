@@ -618,3 +618,123 @@ fn gpu_times_by_band() {
     }
     eprintln!("{:?}", p.0.lock().unwrap());
 }
+
+/// An alpha export keeps its alpha channel when every frame is opaque.
+#[test]
+fn opaque_frames_keep_the_alpha_channel_of_an_alpha_export() {
+    let dir = scratch("opaque-alpha");
+    let doc = project(
+        W,
+        H,
+        0.5,
+        no_fill(),
+        vec![layer(
+            "bg",
+            "solid",
+            json!({ "color": "#3FCF8E", "w": W, "h": H }),
+            0.0,
+            0.0,
+            0.5,
+        )],
+    );
+    for (alpha, name) in [
+        (WireAlpha::Straight, "straight"),
+        (WireAlpha::Premultiplied, "premultiplied"),
+    ] {
+        let mut s = settings(
+            ExportFormat::ProRes {
+                profile: WireProRes::P4444,
+            },
+            alpha,
+            0.5,
+        );
+        s.audio = false;
+        let j = job(
+            &doc,
+            MediaPaths::default(),
+            s,
+            dir.join(format!("{name}.mov")),
+        );
+        let mut renderer = Renderer::headless().unwrap();
+        let delivered = run_export(
+            &mut renderer,
+            &j,
+            &Unrestricted,
+            &AtomicBool::new(false),
+            &mut no_progress(),
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(delivered.report.alpha, "{name}");
+        assert_eq!(delivered.report.pixel_format, "4:4:4:4");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// An alpha export whose first frame is opaque keeps its alpha channel, and
+/// the later transparent frames verify (alpha is in the sampled blocks).
+#[test]
+fn alpha_survives_an_opaque_first_frame() {
+    let dir = scratch("late-alpha");
+    let mut bg = layer(
+        "bg",
+        "solid",
+        json!({ "color": "#3FCF8E", "w": W, "h": H }),
+        0.0,
+        0.0,
+        0.25,
+    );
+    bg["dur"] = json!(0.25);
+    let doc = project(
+        W,
+        H,
+        0.5,
+        no_fill(),
+        vec![
+            layer(
+                "small",
+                "solid",
+                json!({ "color": "#E83A5E", "w": 40, "h": 40 }),
+                10.0,
+                10.0,
+                0.5,
+            ),
+            bg,
+        ],
+    );
+    let mut s = settings(
+        ExportFormat::ProRes {
+            profile: WireProRes::P4444,
+        },
+        WireAlpha::Straight,
+        0.5,
+    );
+    s.audio = false;
+    let j = job(&doc, MediaPaths::default(), s, dir.join("late.mov"));
+    let mut renderer = Renderer::headless().unwrap();
+    let delivered = run_export(
+        &mut renderer,
+        &j,
+        &Unrestricted,
+        &AtomicBool::new(false),
+        &mut no_progress(),
+    )
+    .unwrap();
+    assert!(delivered.report.alpha);
+    assert_eq!(delivered.report.pixel_format, "4:4:4:4");
+    if let Some(ffprobe) = ffprobe() {
+        let out = std::process::Command::new(ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=pix_fmt",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(&delivered.path)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "yuva444p12le");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

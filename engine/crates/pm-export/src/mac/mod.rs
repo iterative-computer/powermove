@@ -1,5 +1,6 @@
 //! macOS delivery: VideoToolbox encode, AVAssetWriter mux, verification, atomic move.
 
+mod alpha;
 mod cf;
 pub mod pixbuf;
 pub mod reader;
@@ -36,6 +37,8 @@ pub struct VideoToolboxSink {
     timing: VideoTiming,
     sampled: Vec<u64>,
     blocks: Vec<BlockSample>,
+    /// Alpha exports: samples re-described with depth 32 (see `alpha`).
+    alpha: Option<alpha::AlphaDescriptions>,
 }
 
 impl VideoToolboxSink {
@@ -65,11 +68,24 @@ impl VideoToolboxSink {
             output,
             sampled: verify::sampled_frames(spec.frames),
             blocks: vec![],
+            alpha: (spec.alpha != crate::settings::AlphaOutput::None)
+                .then(alpha::AlphaDescriptions::default),
         })
     }
 
     fn writer(&mut self) -> &mut writer::Writer {
         self.writer.as_mut().expect("writer lives until finish")
+    }
+
+    fn described(
+        &mut self,
+        samples: Vec<objc2_core_foundation::CFRetained<objc2_core_media::CMSampleBuffer>>,
+    ) -> Result<Vec<objc2_core_foundation::CFRetained<objc2_core_media::CMSampleBuffer>>, Error>
+    {
+        match self.alpha.as_mut() {
+            Some(a) => samples.into_iter().map(|s| a.sample(s)).collect(),
+            None => Ok(samples),
+        }
     }
 }
 
@@ -85,6 +101,7 @@ impl Sink for VideoToolboxSink {
         buffer.tag(self.spec.tags, self.spec.alpha);
         self.encoder.encode(&buffer, index)?;
         let samples = self.encoder.take()?;
+        let samples = self.described(samples)?;
         self.writer().push_video(samples)
     }
 
@@ -94,6 +111,7 @@ impl Sink for VideoToolboxSink {
 
     fn finish(mut self) -> Result<Delivered, Error> {
         let samples = self.encoder.complete()?;
+        let samples = self.described(samples)?;
         let mut writer = self.writer.take().expect("writer lives until finish");
         writer.push_video(samples)?;
         let audio_frames = writer.audio_frames();
