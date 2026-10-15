@@ -31,6 +31,7 @@ import { canonicalProject } from '../../../shared/canonical-json';
 import { adoptTemporalEase } from '../core/anim/temporal-ease';
 import { resolveFrameRate } from '../../../shared/frame-rate';
 import type { DocumentBarrier } from './barrier';
+import type { FontLoader } from './fonts';
 import { atan2BranchCut, differs, type DualAnswers } from './dual';
 import type { PmWasm } from './wasm';
 
@@ -186,6 +187,8 @@ export class NativeEdits {
     private barrier: () => DocumentBarrier | null,
     private unwrap: <T>(v: T) => T,
     private dual: DualAnswers | null,
+    /** The text layout's font loader (engine-doc/fonts.ts), as for queries. */
+    private fonts: () => FontLoader | null = () => null,
   ) {}
 
   private count(table: Record<string, number>, key: string) { table[key] = (table[key] ?? 0) + 1; }
@@ -230,8 +233,14 @@ export class NativeEdits {
     // from every id `PM.uid` makes (`prefix + random`, or a counter in tests).
     const uid = { base: `${String(this.PM.uid?.('') ?? Math.random().toString(36).slice(2, 9))}_`, start: 1 };
     let reply: any;
+    const run = () => wasm.query({ op: `edit.${name}`, comp: s.comp, open: s.open, uid, ...request });
     try {
-      reply = wasm.query({ op: `edit.${name}`, comp: s.comp, open: s.open, uid, ...request });
+      reply = run();
+      // Text layout met fonts the mirror lacks: load them (at once from a
+      // synchronous registry; in the background otherwise, and this edit
+      // runs the legacy code) and ask again.
+      const fonts = this.fonts();
+      if (reply?.fonts && fonts) reply = fonts.resolve(wasm, run, (r: any) => !!r?.fonts) ?? reply;
     } catch (error) {
       console.warn(`[engine-doc] edit.${name} failed`, error);
       return { fallback: 'trap' };

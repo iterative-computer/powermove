@@ -323,7 +323,7 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
     reporter.emit({ type: 'audit', kind: 'stale-answer', revision: barrier?.revision ?? -1, paths: paths.slice(0, 20), detail: op, site: querySite(undefined, 8), tx: PM.hist?.busy?.() ? (PM.hist?.scoped?.() ? 'scoped' : 'plain') : 'none' });
     if (auditor) { auditor.stats.missedWrites += 1; auditor.stats.failures += 1; }
   };
-  const edits = new NativeEdits(PM, () => (state.ready ? wasm : null), () => barrier, unwrap, dual);
+  const edits = new NativeEdits(PM, () => (state.ready ? wasm : null), () => barrier, unwrap, dual, () => api.fonts);
   const auditor = mode.audit ? new ShadowAuditor(() => (state.ready ? barrier : null), f => reporter.emit({ type: 'audit', kind: f.kind, revision: f.revision, paths: f.paths, detail: f.detail })) : null;
 
   const onMismatch = (result: ConsistencyResult) => {
