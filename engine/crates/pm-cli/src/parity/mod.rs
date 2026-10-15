@@ -14,6 +14,9 @@ pub mod items;
 pub mod native;
 pub mod wasm;
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;

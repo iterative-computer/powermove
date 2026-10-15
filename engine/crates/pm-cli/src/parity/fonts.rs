@@ -85,9 +85,10 @@ pub fn extract_face(data: &[u8], index: u32) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// The registry and what a project's queries needed from it.
+/// The registry (created on first use: projects without text never touch
+/// CoreText) and the face bytes served so far.
 pub struct FontService {
-    pub registry: CoreTextRegistry,
+    registry: Option<CoreTextRegistry>,
     pub subsets: bool,
     /// Bytes per (blob, face index), as pm-wasm receives them.
     cache: BTreeMap<(String, u32), Arc<Vec<u8>>>,
@@ -96,14 +97,18 @@ pub struct FontService {
 impl FontService {
     pub fn new(subsets: bool) -> FontService {
         FontService {
-            registry: CoreTextRegistry::new(),
+            registry: None,
             subsets,
             cache: BTreeMap::new(),
         }
     }
 
+    fn registry(&mut self) -> &mut CoreTextRegistry {
+        self.registry.get_or_insert_with(CoreTextRegistry::new)
+    }
+
     pub fn answer(&mut self, queries: &[Query]) -> Result<Answers, String> {
-        self.registry.answer(queries).map_err(|e| e.to_string())
+        self.registry().answer(queries).map_err(|e| e.to_string())
     }
 
     pub fn face(&mut self, blob: &str, index: u32) -> Result<Arc<Vec<u8>>, String> {
@@ -112,12 +117,12 @@ impl FontService {
             return Ok(b.clone());
         }
         let bytes = if self.subsets {
-            self.registry
+            self.registry()
                 .subset(blob, index)
                 .map_err(|e| e.to_string())?
         } else {
             let data = self
-                .registry
+                .registry()
                 .blob(blob)
                 .ok_or_else(|| format!("unknown font blob {blob}"))?;
             Arc::new(extract_face(data.as_slice(), index)?)
