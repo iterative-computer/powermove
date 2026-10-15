@@ -46,7 +46,32 @@ type Config = {
   inputModes?: ('drag' | 'orbit' | 'walk' | 'baseline')[];
   out: string;
   trace: string;
+  /** Agent snapshots during playback (plan section 25, Phase 2 row): main
+   *  sends a batch of `frames` agent frames to the job engine every
+   *  `turnMs`, through the production agent path (agent-jobs.ts), on a
+   *  `layers`-layer 4K project that changes every turn (each batch is a
+   *  new revision, so the job engine resyncs as it does after agent edits). */
+  agentSnapshots?: { turnMs: number; frames: number; width: number; layers: number };
 };
+
+/** A 3840 × 2160, 24 fps project of solid layers, one color per turn. */
+function snapshotProject(layers: number, turn: number): Record<string, unknown> {
+  const ch = (v: unknown) => ({ v, kf: [], expr: null });
+  const transform = (x: number, y: number) => Object.fromEntries([
+    ['anchor.x', 0], ['anchor.y', 0], ['position.x', x], ['position.y', y], ['scale.x', 100], ['scale.y', 100],
+    ['rotation', 0], ['opacity', 85], ['skew', 0]
+  ].map(([k, v]) => [k, ch(v)]));
+  const list = Array.from({ length: layers }, (_, i) => ({
+    id: `s${i}`, type: 'solid', name: `Solid ${i}`, from: 0, dur: 4, on: true, solo: false, blend: 'normal', mblur: false,
+    parent: null, group: null, matteSource: null, threeD: false, fx: [], masks: [], transitionIn: null, transitionOut: null,
+    p: transform((i * 157) % 3200, (i * 89) % 1800),
+    d: { color: `#${((turn * 0x1f3d5b + i * 0x2a7f13) & 0xffffff).toString(16).padStart(6, '0')}`, w: 640 + (i % 5) * 240, h: 360 + (i % 3) * 200 }
+  }));
+  return {
+    id: 'Pmeasure', name: 'measure', w: 3840, h: 2160, fps: 24, fpsRational: [24, 1], dur: 4, bg: '#101010',
+    compId: 'Pmeasure-root', compName: 'measure', markers: [], work: [0, 4], params: {}, revision: turn, layers: list, assets: {}
+  };
+}
 
 type HarnessAddon = {
   nowUs(): number;
@@ -120,6 +145,9 @@ async function main(): Promise<void> {
     });
     const engine = installed.engine!;
     await waitFor('the interactive engine', async () => engine.status().interactive.state === 'ready');
+    if (cfg.agentSnapshots) await waitFor('the job engine', async () => engine.status().job.state === 'ready');
+    const playbackSignals: Array<[number, boolean]> = [];
+    engine.listen({ playback: (playing) => playbackSignals.push([performance.now(), playing]) });
 
     win = new BrowserWindow({
       show: false,
@@ -183,11 +211,16 @@ async function main(): Promise<void> {
       await sleep(1500);
       await call('window.__measure.reset()');
       const startMs = await call<number>(`window.__measure.mark('pm-record-start')`);
+      const agentRun = cfg.agentSnapshots ? agentSnapshots(installed, cfg.agentSnapshots) : null;
       await sleep(cfg.durationMs);
       const endMs = await call<number>(`window.__measure.mark('pm-record-end')`);
+      // Counted at the end of the window; a batch still waiting then is
+      // reported, and settles after playback stops.
+      const agentStats = agentRun?.stop();
       result['window'] = { startMs, endMs };
       result['page'] = await call('window.__measure.collect()');
       await call(`window.__measure.transport({ command: 'pause' })`);
+      if (agentRun && agentStats) result['agentSnapshots'] = { ...agentStats, ...(await agentRun.settled(30_000)), playbackSignals };
     } else {
       const runs: Record<string, unknown> = {};
       for (const inputMode of cfg.inputModes ?? []) {
@@ -225,6 +258,53 @@ async function main(): Promise<void> {
     await installed?.dispose().catch(() => {});
     await rm(home, { recursive: true, force: true });
   }
+}
+
+/** Agent frame batches through AgentJobs until stopped: count, latency,
+ *  queue time, and failures. */
+function agentSnapshots(installed: InstalledNativeEngine, opts: NonNullable<Config['agentSnapshots']>) {
+  const jobs = installed.agentJobs!;
+  const stats = { batches: 0, frames: 0, routed: [] as string[], failures: [] as string[], batchMs: [] as number[], queuedMs: [] as number[], sizes: [] as string[] };
+  let stopped = false;
+  let inFlightSince: number | null = null;
+  const loop = (async () => {
+    for (let turn = 1; !stopped; turn++) {
+      const t0 = performance.now();
+      inFlightSince = t0;
+      const times = Array.from({ length: opts.frames }, (_, i) => ((turn * opts.frames + i) % 96) / 24);
+      try {
+        const r = await jobs.renderFrames(-2, 'measure-agent-run', { project: snapshotProject(opts.layers, turn), times, width: opts.width, revision: turn });
+        if (r.status === 'routed') stats.routed.push(r.reason);
+        else {
+          stats.batches++;
+          stats.frames += r.images.length;
+          stats.queuedMs.push(r.queuedMs);
+          if (stats.sizes.length < 1) stats.sizes.push(...r.images.map((i) => `${i.width}x${i.height}`));
+        }
+      } catch (error) {
+        stats.failures.push(error instanceof Error ? error.message : String(error));
+      }
+      inFlightSince = null;
+      if (!stopped) stats.batchMs.push(performance.now() - t0);
+      const wait = opts.turnMs - (performance.now() - t0);
+      if (wait > 0 && !stopped) await sleep(wait);
+    }
+  })();
+  return {
+    stop() {
+      stopped = true;
+      const pendingMs = inFlightSince === null ? null : +(performance.now() - inFlightSince).toFixed(1);
+      const sorted = [...stats.batchMs].sort((a, b) => a - b);
+      const q = (p: number) => sorted.length ? +sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))]!.toFixed(1) : null;
+      return { ...stats, batchMs: undefined, batchMsP50: q(0.5), batchMsP95: q(0.95), batchMsMax: q(1), failures: stats.failures.slice(0, 5), failureCount: stats.failures.length, routed: stats.routed.slice(0, 3), routedCount: stats.routed.length, pendingAtEndMs: pendingMs };
+    },
+    /** After playback stopped: whether the batch still waiting finished. */
+    async settled(timeoutMs: number) {
+      const t0 = performance.now();
+      const done = await Promise.race([loop.then(() => true), sleep(timeoutMs).then(() => false)]);
+      return { settledAfterStopMs: done ? +(performance.now() - t0).toFixed(1) : null };
+    }
+  };
 }
 
 process.on('uncaughtException', (error) => {
