@@ -58,8 +58,19 @@ describe('agent media management', () => {
     // Other content under the same fingerprint is a new import.
     fileHash = h3;
     expect(await alreadyImported(PM, PM.proj, 'fp', file)).toBeNull();
-    // Legacy media without a content hash still matches by fingerprint, after hash matches.
+    // Legacy media without a content hash matches only when its stored bytes are this file's.
     PM.proj.assets.legacy = { id: 'legacy', fingerprint: 'fp', persisted: true };
+    const storedBytes: Record<string, Blob> = { legacy: new Blob(['y']) };
+    PM.MediaStore = { get: vi.fn(async (item: any) => storedBytes[item.id] ?? null) };
+    hash.mockImplementation(async (blob: Blob) => (blob === file ? fileHash : `${await blob.text()}`.repeat(64)));
+    fileHash = h3;
+    expect(await alreadyImported(PM, PM.proj, 'fp', file)).toBeNull();
+    fileHash = 'x'.repeat(64);
+    storedBytes.legacy = new Blob(['x']);
+    expect((await alreadyImported(PM, PM.proj, 'fp', file))?.id).toBe('legacy');
+    // Stored bytes that are a conversion cannot be compared: the fingerprint decides.
+    storedBytes.legacy = new Blob(['proxy bytes']);
+    PM.proj.assets.legacy.playbackProxy = true;
     expect((await alreadyImported(PM, PM.proj, 'fp', file))?.id).toBe('legacy');
     fileHash = h1;
     expect((await alreadyImported(PM, PM.proj, 'fp', file))?.id).toBe('a');

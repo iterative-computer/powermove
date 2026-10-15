@@ -58,20 +58,30 @@ export function listMedia(PM: PMRegistry, args: Record<string, unknown>) {
  * The asset an agent import would duplicate (section 20: deduplicated on the
  * content hash). The fingerprint only samples a file, so several assets can
  * share it: with the media store, the one whose original has this file's full
- * hash is it. An asset without a known content hash (legacy media) still
- * matches by fingerprint, as before, but only when no asset matches by hash.
+ * hash is it. An asset without a known content hash (legacy media) is the
+ * same file only when its stored bytes hash the same; one whose stored bytes
+ * are a conversion (a playback proxy, an image sequence) cannot be checked
+ * against the file and still matches by fingerprint, as before.
  */
 export async function alreadyImported(PM: PMRegistry, project: any, fingerprint: string, file: Blob): Promise<any | null> {
   const candidates = Object.values<any>(project.assets || {}).filter(item => item.fingerprint === fingerprint && PM.assets.get(item.id) && item.persisted);
   if (!candidates.length) return null;
   if (!PM.HostMedia?.enabled) return candidates[0];
   const known = candidates.map(item => [item, PM.MediaImport.originalContentHash?.(item) ?? null] as const);
+  let fileHash: string | null = null;
+  const hashOfFile = async () => (fileHash ??= await PM.HostMedia.hash(file));
   if (known.some(([, hash]) => hash)) {
-    const hash = await PM.HostMedia.hash(file);
+    const hash = await hashOfFile();
     const same = known.find(([, original]) => original === hash);
     if (same) return same[0];
   }
-  return known.find(([, hash]) => !hash)?.[0] ?? null;
+  for (const [item, hash] of known) {
+    if (hash) continue;
+    if (item.playbackProxy === true || item.imageSequence) return item;
+    const stored: Blob | null = await Promise.resolve(PM.MediaStore?.get?.(item)).catch(() => null);
+    if (stored && stored.size === file.size && await PM.HostMedia.hash(stored) === await hashOfFile()) return item;
+  }
+  return null;
 }
 
 /** Only file bytes cross native IPC, in bounded chunks; never extension source. */
