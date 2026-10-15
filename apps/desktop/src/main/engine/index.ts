@@ -13,15 +13,17 @@ import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 
-import { MessageChannelMain, sharedTexture, utilityProcess, webContents, type BrowserWindow, type IpcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
+import { BrowserWindow, dialog, MessageChannelMain, sharedTexture, utilityProcess, webContents, type IpcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 
-import { ENGINE_IPC, type EngineStatusMessage, type StageDocumentRequest, type StageDocumentResult } from '../../shared/engine-ipc';
+import { ENGINE_IPC, type EngineExportRequest, type EngineExportStart, type EngineStatusMessage, type StageDocumentRequest, type StageDocumentResult } from '../../shared/engine-ipc';
+import { rememberExport } from '../export-sidecar';
+import { routeToCurrentExporter } from '../render-encoder';
 import type { EngineProcess } from '../../shared/engine-protocol';
 import type { Log } from './connection';
 import { BRIDGE_ADDON_FILE, FrameBridge, type BridgeAddon, type BridgeLaunch, type SharedTextureLike } from './bridge';
 import { EngineFontClient, installEngineFontService } from '../engine-fonts';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
-import { AgentJobs } from './agent-jobs';
+import { AgentJobError, AgentJobs } from './agent-jobs';
 import type { ChildLike, PortLike } from './ports';
 
 /** Main's own client id for its font port to the interactive engine (never
@@ -133,6 +135,20 @@ function validStageRequest(value: unknown): value is StageDocumentRequest {
     v['bytes'] instanceof Uint8Array && v['bytes'].byteLength > 0 && v['bytes'].byteLength <= MAX_STAGED_BYTES;
 }
 
+/** Largest project JSON an export may carry (the largest corpus history is 60 MB). */
+const MAX_EXPORT_PROJECT = 256 * 1024 ** 2;
+
+function validExportRequest(value: unknown): value is EngineExportRequest {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  const o = v['options'] as Record<string, unknown> | undefined;
+  return typeof v['project'] === 'string' && v['project'].length > 0 && v['project'].length <= MAX_EXPORT_PROJECT &&
+    typeof v['name'] === 'string' && v['name'].length <= 240 && !!o && typeof o === 'object' &&
+    (o['format'] === 'mp4' || o['format'] === 'prores') && ['draft', 'high', 'max'].includes(o['quality'] as string) &&
+    ['fps', 'scale', 'start', 'end'].every((k) => typeof o[k] === 'number' && Number.isFinite(o[k])) &&
+    ['alpha', 'audio', 'motionBlur'].every((k) => typeof o[k] === 'boolean');
+}
+
 export function installNativeEngine(options: InstallNativeEngineOptions): InstalledNativeEngine {
   const log = options.log ?? defaultLog;
   const env = options.env ?? process.env;
@@ -228,7 +244,47 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     }
   });
 
-  const agentJobs = new AgentJobs({ engine, log });
+  /* Export sheet jobs: where each writes, so a routed one can hand its file
+     to the current exporter (render-encoder.ts). */
+  const userDestinations = new Map<string, string>();
+  const agentJobs = new AgentJobs({
+    engine,
+    log,
+    onDelivered: (owner, file) => rememberExport(owner, file),
+    onUserStatus: (owner, status) => {
+      const file = userDestinations.get(status.jobId);
+      if (status.state === 'done' || status.state === 'failed' || status.state === 'cancelled') userDestinations.delete(status.jobId);
+      if (status.routed && file) routeToCurrentExporter(owner, file);
+      const contents = webContents.fromId(owner);
+      if (contents && !contents.isDestroyed()) contents.send(ENGINE_IPC.exportStatus, status);
+    }
+  });
+  options.ipc.handle(ENGINE_IPC.exportVideo, async (event, request: unknown): Promise<EngineExportStart> => {
+    if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (!validExportRequest(request)) throw new Error('An export names a project and its settings.');
+    if (!agentJobs.available) return { status: 'unavailable', reason: 'The job engine is not running.' };
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || window.isDestroyed()) throw new Error('Export window is unavailable');
+    const extension = request.options.format === 'prores' ? 'mov' : 'mp4';
+    const chosen = await dialog.showSaveDialog(window, { defaultPath: `${request.name.replace(/[\\/:]/g, '_')}.${extension}`, filters: [{ name: 'Video', extensions: [extension] }] });
+    if (chosen.canceled || !chosen.filePath || window.isDestroyed()) return { status: 'cancelled' };
+    const file = path.extname(chosen.filePath).toLowerCase() === `.${extension}` ? chosen.filePath : `${chosen.filePath}.${extension}`;
+    try {
+      const started = await agentJobs.exportUser(event.sender.id, JSON.parse(request.project), request.options, file);
+      userDestinations.set(started.jobId, file);
+      return { status: 'accepted', jobId: started.jobId, frames: started.frames, path: file };
+    } catch (error) {
+      if (!(error instanceof AgentJobError)) throw error;
+      // The current exporter writes the file the user just chose.
+      routeToCurrentExporter(event.sender.id, file);
+      return { status: 'unavailable', reason: error.message };
+    }
+  });
+  options.ipc.handle(ENGINE_IPC.cancelExport, async (event, jobId: unknown) => {
+    if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (typeof jobId !== 'string' || !jobId || jobId.length > 256) throw new Error('A cancel names a job.');
+    await agentJobs.cancelJob(event.sender.id, jobId);
+  });
 
   void engine.start().catch((error: unknown) => log('error', `the engine could not start: ${error instanceof Error ? error.message : String(error)}`));
 
@@ -275,6 +331,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     attachWindow,
     dispose: async () => {
       options.ipc.removeHandler(ENGINE_IPC.stageDocument);
+      options.ipc.removeHandler(ENGINE_IPC.exportVideo);
+      options.ipc.removeHandler(ENGINE_IPC.cancelExport);
       uninstallFonts();
       fontClient.disconnect();
       options.ipc.removeAllListeners(ENGINE_IPC.definitions);

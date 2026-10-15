@@ -8,7 +8,7 @@ const native = vi.hoisted(() => ({ showSaveDialog: vi.fn(), window: { isDestroye
 vi.mock('electron',()=>({app:{ getAppPath: () => '.', getPath: () => '/tmp', on: vi.fn() },
   BrowserWindow: { fromWebContents: () => native.window }, dialog:{ showSaveDialog: native.showSaveDialog }}));
 afterEach(() => vi.restoreAllMocks());
-import {registerRenderEncoder,RenderEncoder,validateEncoderOptions,encoderArgs} from './render-encoder';
+import {registerRenderEncoder,RenderEncoder,validateEncoderOptions,encoderArgs,routeToCurrentExporter,takeRoutedDestination} from './render-encoder';
 import {resolveFfmpeg} from './ffmpeg-binary';
 const tools=resolveFfmpeg({packaged:false,resourcesPath:'',appPath:path.resolve(__dirname,'../..')}),binary=tools.ffmpeg;
 /** ffprobe's view of the first video stream. */
@@ -90,4 +90,16 @@ it.each([false, true])('finishes real video with automatic agent delivery=%s', a
       expect(native.showSaveDialog).toHaveBeenCalledTimes(automatic ? 0 : 1);
     });
   } finally { await rm(folder, { recursive: true, force: true }); }
+});
+describe('exports the job engine routed here',()=>{
+ it('write the file the user already chose, once, with its extension, while fresh',()=>{
+  routeToCurrentExporter(7,'/Users/x/Cut.mov',1000);
+  expect(takeRoutedDestination(8,'mov',1000)).toBeUndefined();
+  expect(takeRoutedDestination(7,'mp4',1000)).toBeUndefined();
+  routeToCurrentExporter(7,'/Users/x/Cut.mov',1000);
+  expect(takeRoutedDestination(7,'mov',2000)).toBe('/Users/x/Cut.mov');
+  expect(takeRoutedDestination(7,'mov',2000)).toBeUndefined();
+  routeToCurrentExporter(7,'/Users/x/Cut.mov',0);
+  expect(takeRoutedDestination(7,'mov',11*60_000)).toBeUndefined();
+ });
 });

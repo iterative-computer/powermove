@@ -7,6 +7,16 @@ import { app, BrowserWindow, dialog, type IpcMain } from 'electron';
 import { IPC } from '../shared/ipc';
 import { rememberExport } from './export-sidecar';
 
+/* An export the job engine routed to this exporter (engine/index.ts): the
+   user already chose its file in the save panel, so the next renderStart of
+   that window writes there without asking again. */
+const ROUTED_TTL_MS=10*60_000;
+const routedDestinations=new Map<number,{file:string;at:number}>();
+export function routeToCurrentExporter(owner:number,file:string,now=Date.now()){routedDestinations.set(owner,{file,at:now});}
+export function takeRoutedDestination(owner:number,extension:string,now=Date.now()):string|undefined{
+  const routed=routedDestinations.get(owner);routedDestinations.delete(owner);
+  return routed&&now-routed.at<=ROUTED_TTL_MS&&path.extname(routed.file).slice(1).toLowerCase()===extension?routed.file:undefined;
+}
 export type EncoderOptions={width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number};
 type Job={destination?:string;dir:string;file:string;audio:string;process:ChildProcessWithoutNullStreams;done:Promise<void>;bytes:number;frameBytes:number;frames:number;options:EncoderOptions;owner:number;error:string};
 /* CICP 1-13-1, limited range: "Rec.709 (QuickTime and Safari)" (plan section 9,
@@ -59,7 +69,7 @@ export function registerRenderEncoder(ipc:IpcMain,ctx:{isTrustedSender:(event:an
     const window=BrowserWindow.fromWebContents(e.sender);
     if(!window||window.isDestroyed())throw new Error('Export window is unavailable');
     const extension=options.format==='prores'?'mov':'mp4';
-    const automatic=await agentExportDestination(e.sender,options.name+'.'+extension);
+    const automatic=takeRoutedDestination(owner,extension)??await agentExportDestination(e.sender,options.name+'.'+extension);
     const result=automatic?{canceled:false,filePath:automatic}:await dialog.showSaveDialog(window,{defaultPath:options.name.replace(/[\\/:]/g,'_')+'.'+extension,filters:[{name:'Video',extensions:[extension]}]});
     if(result.canceled||!result.filePath||window.isDestroyed())return null;
     const token=await encoder.start(options,owner);

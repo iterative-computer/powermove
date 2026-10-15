@@ -299,6 +299,15 @@ export class NativeEngine {
     return this.supervisors[process].request(body, session, revision);
   }
 
+  /** A destination the user chose for a job, as a write handle bound to the
+   *  job engine session that renders it and the current launch's host port
+   *  (contract 14: the engine never sees the path). */
+  chooseOutput(file: string, job: string, session: number): string {
+    const launch = this.supervisors.job.current;
+    if (!launch) throw new Error('the job engine is not running');
+    return this.outputs.chooseDestination(file, job, session, launch.hostPort);
+  }
+
   /** Whether an engine's current launch is connected and answering. */
   isReady(process: EngineProcess): boolean {
     return this.supervisors[process].state === 'ready';

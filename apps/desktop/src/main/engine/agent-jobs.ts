@@ -46,6 +46,8 @@ export interface AgentJobsEngine {
   stageDocument(process: EngineProcess, session: number, bytes: Uint8Array): Promise<{ handle: string; length: number }>;
   listen(listener: { jobStatus?(status: JobStatus): void; status?(status: unknown): void }): () => void;
   isReady(process: EngineProcess): boolean;
+  /** A user-chosen destination as a write handle for `job` on `session`. */
+  chooseOutput?(file: string, job: string, session: number): string;
 }
 
 /** Decision 1: Standard color, linear blending off (pm_protocol `ProjectColor::DEFAULT`). */
@@ -77,6 +79,26 @@ export type ExportVideoResult =
   | { status: 'routed'; reason: string };
 
 export type RenderStatus = { jobId: string; state: JobState; progress: number; path?: string; error?: string };
+
+/** An export from the export sheet (exporter.ts), as the renderer asks for it. */
+export type UserExportOptions = {
+  format: 'mp4' | 'prores';
+  alpha: boolean;
+  /** Export frame rate (may differ from the composition's). */
+  fps: number;
+  /** Output scale (0.01 to 16): size `round(w × scale / 2) × 2`. */
+  scale: number;
+  /** Composition seconds. */
+  start: number;
+  end: number;
+  audio: boolean;
+  motionBlur: boolean;
+  quality: 'draft' | 'high' | 'max';
+};
+
+/** A user export job's status as the window sees it; `routed` when the
+ *  engine cannot render the project and the current exporter should. */
+export type UserExportStatus = RenderStatus & { routed?: boolean };
 
 export type AgentFrameImage = { time: number; data: Uint8Array; mimeType: 'image/jpeg' | 'image/png'; width: number; height: number };
 export type AgentFramesResult =
@@ -141,6 +163,25 @@ export function exportSettingsFor(projectValue: unknown, input: ExportVideoInput
   };
 }
 
+/** The export sheet's settings: today's native exporter (exporter.ts `run`,
+ *  render-encoder.ts) at the chosen rate, scale, range, quality tier, and
+ *  alpha, with the same tags, precision, and dither rules as agent exports. */
+export function userExportSettings(projectValue: unknown, options: UserExportOptions): ExportSettings {
+  const project = asProject(projectValue);
+  const o = options;
+  const valid = (o.format === 'mp4' || o.format === 'prores') && Number.isFinite(o.fps) && o.fps > 0 && o.fps <= 240 &&
+    Number.isFinite(o.scale) && o.scale >= 0.01 && o.scale <= 16 && Number.isFinite(o.start) && Number.isFinite(o.end) &&
+    o.start >= 0 && o.end > o.start && ['draft', 'high', 'max'].includes(o.quality) &&
+    typeof o.audio === 'boolean' && typeof o.alpha === 'boolean' && typeof o.motionBlur === 'boolean';
+  if (!valid) throw new AgentJobError('Invalid export settings.');
+  const base = exportSettingsFor(project, { format: o.format, range: 'all', audio: o.audio, motionBlur: o.motionBlur, alpha: o.alpha && o.format === 'prores' });
+  const rate = resolveFrameRate(o.fps, Number(project['fps']) === o.fps ? project['fpsRational'] : undefined);
+  if (!rate) throw new AgentJobError('Invalid export frame rate.');
+  const size = { width: evenSize(Number(project['w']) * o.scale), height: evenSize(Number(project['h']) * o.scale) };
+  if (size.width > 8192 || size.height > 8192) throw new AgentJobError('The export is larger than 8192 pixels.');
+  return { ...base, quality: o.quality, size, frameRate: { num: rate.num, den: rate.den }, range: { start: toTicks(o.start), end: toTicks(o.end) } };
+}
+
 /** The file name the agent asked for, or the project's, as a bare name part. */
 export function suggestedName(project: Project, name: string | undefined): string {
   const raw = (name ?? project['name'] ?? 'Powermove').toString();
@@ -161,6 +202,8 @@ function remote(error: unknown): EngineError | null {
 
 type JobRecord = {
   jobId: string;
+  /** An export sheet job: its statuses go to the window. */
+  user?: boolean;
   owner: number;
   run: string;
   session: number;
@@ -178,6 +221,10 @@ type FrameSession = { session: number; revision: number; hash: string; generatio
 
 export type AgentJobsOptions = {
   engine: AgentJobsEngine;
+  /** Status of an export sheet job, for its window. */
+  onUserStatus?(owner: number, status: UserExportStatus): void;
+  /** A job finished with a file at `path` (export sidecars remember it). */
+  onDelivered?(owner: number, path: string): void;
   queueBoundMs?: number;
   now?: () => number;
   log?: (level: 'info' | 'warn' | 'error', message: string) => void;
@@ -314,6 +361,11 @@ export class AgentJobs {
     if (!record) return;
     if (status.state === 'running' && record.startedAt === null) record.startedAt = this.now();
     record.status = status;
+    if (status.state === 'done' && status.path) this.options.onDelivered?.(record.owner, status.path);
+    if (record.user) {
+      const routed = status.state === 'failed' && !!status.error && ROUTED_CODES.has(status.error.code);
+      this.options.onUserStatus?.(record.owner, { ...this.status(record.owner, record.jobId), ...(routed ? { routed: true } : {}) });
+    }
     if (terminal(status.state)) {
       void this.closeSession(record.session);
       this.finished.push(record.jobId);
@@ -340,6 +392,56 @@ export class AgentJobs {
         error: { code: 'crashAttributed', scope: { kind: 'job', job: record.jobId }, message: 'The job engine stopped during the export; run it again.', retry: { kind: 'never' }, detail: null }
       });
     }
+  }
+
+  /* ── export sheet ──────────────────────────────────────────────────── */
+
+  /** Starts an export the user asked for in the export sheet, to the file
+   *  they chose (replaced if it exists: the save panel confirmed that).
+   *  Statuses go to `onUserStatus`; an `unsupported` or `mediaOffline`
+   *  failure arrives as `routed`, and the window runs the current exporter
+   *  to the same file. */
+  async exportUser(owner: number, projectValue: unknown, options: UserExportOptions, destination: string): Promise<{ jobId: string; frames: number }> {
+    const project = asProject(projectValue);
+    const settings = userExportSettings(project, options);
+    if (!this.options.engine.chooseOutput) throw new AgentJobError('This host cannot write user exports.');
+    const jobId = `user-export-${randomUUID()}`;
+    const session = await this.openSnapshot(project, `user-export-${jobId}`);
+    const record: JobRecord = {
+      jobId, owner, run: '', session, user: true,
+      status: { job: jobId, class: 'userJob', state: 'queued', progress: 0, path: null, error: null },
+      queuedAt: this.now(), startedAt: null,
+      name: suggestedName(project, undefined),
+      size: settings.size,
+      fps: options.fps,
+      changed: []
+    };
+    this.jobs.set(jobId, record);
+    try {
+      const handle = this.options.engine.chooseOutput(destination, jobId, session);
+      await this.options.engine.request('job', {
+        type: 'submitJob',
+        job: jobId,
+        class: 'userJob',
+        run: null,
+        spec: { kind: 'export', session, composition: project['compId'], settings },
+        output: { kind: 'userChosen', destination: handle }
+      });
+    } catch (error) {
+      this.jobs.delete(jobId);
+      await this.closeSession(session);
+      const e = remote(error);
+      throw new AgentJobError(e?.message ?? (error instanceof Error ? error.message : String(error)), e?.code ?? 'internal');
+    }
+    const frames = Math.max(1, Math.round((options.end - options.start) * settings.frameRate.num / settings.frameRate.den));
+    return { jobId, frames };
+  }
+
+  /** Cancels one job of this window. */
+  async cancelJob(owner: number, jobId: string): Promise<void> {
+    const record = this.jobs.get(jobId);
+    if (!record || record.owner !== owner || terminal(record.status.state)) return;
+    await this.options.engine.request('job', { type: 'cancelJobs', kind: 'job', job: jobId }).catch(() => undefined);
   }
 
   /* ── render_frames ─────────────────────────────────────────────────── */

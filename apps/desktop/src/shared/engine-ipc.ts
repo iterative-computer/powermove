@@ -18,7 +18,13 @@ export const ENGINE_IPC = {
   /** renderer → main (invoke): stage a large resync document as a cache file. */
   stageDocument: 'engine:stage-document',
   /** renderer → main (send): the window's definition updates. */
-  definitions: 'engine:definitions'
+  definitions: 'engine:definitions',
+  /** renderer → main (invoke): export from the export sheet through the job engine. */
+  exportVideo: 'engine:export-video',
+  /** renderer → main (invoke): cancel one of the window's export jobs. */
+  cancelExport: 'engine:export-cancel',
+  /** main → renderer: an export job's status (`EngineExportStatus`). */
+  exportStatus: 'engine:export-status'
 } as const;
 
 /** The `window.postMessage` types the preload uses to hand things to the page. */
@@ -40,6 +46,45 @@ export type EngineStatusMessage = {
 export type EngineCrashMessage = CrashReport;
 
 export type StageDocumentRequest = { process: EngineProcess; session: number; bytes: Uint8Array };
+
+/** The export sheet's request (exporter.ts): the project as JSON and its
+ *  settings; main shows the save panel. */
+export type EngineExportRequest = {
+  project: string;
+  /** The suggested file name without extension. */
+  name: string;
+  options: {
+    format: 'mp4' | 'prores';
+    alpha: boolean;
+    fps: number;
+    scale: number;
+    start: number;
+    end: number;
+    audio: boolean;
+    motionBlur: boolean;
+    quality: 'draft' | 'high' | 'max';
+  };
+};
+
+/** `accepted`: the job runs and statuses follow; `cancelled`: the user
+ *  cancelled the save panel; `unavailable`: the job engine is not running
+ *  (use the current exporter). */
+export type EngineExportStart =
+  | { status: 'accepted'; jobId: string; frames: number; path: string }
+  | { status: 'cancelled' }
+  | { status: 'unavailable'; reason: string };
+
+/** A job status for the export progress sheet. `routed`: the new engine
+ *  cannot render this project; the current exporter writes the same file
+ *  without asking again. */
+export type EngineExportStatus = {
+  jobId: string;
+  state: 'queued' | 'running' | 'waitingForMedia' | 'done' | 'failed' | 'cancelled';
+  progress: number;
+  path?: string;
+  error?: string;
+  routed?: boolean;
+};
 export type StageDocumentResult = { handle: string; length: number };
 
 /** The renderer's view (`window.powermove.nativeEngine`, present on the
@@ -50,4 +95,8 @@ export interface EngineBridge {
   status(): Promise<EngineStatusMessage>;
   stageDocument(request: StageDocumentRequest): Promise<StageDocumentResult>;
   pushDefinitions(update: import('./engine-protocol').DefinitionsUpdate): void;
+  exportVideo(request: EngineExportRequest): Promise<EngineExportStart>;
+  cancelExport(jobId: string): Promise<void>;
+  /** Export job statuses for this window; returns an unsubscribe. */
+  onExportStatus(listener: (status: EngineExportStatus) => void): () => void;
 }

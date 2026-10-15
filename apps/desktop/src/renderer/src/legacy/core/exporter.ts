@@ -428,6 +428,13 @@ async function run(opts: any) {
   const bridge = (hostBridge() as any);
   try {
     const p = PM.proj;
+    // With Use New Engine on, ProRes and MP4 render in the job engine; a
+    // project it cannot render yet comes back here and the current exporter
+    // writes the file the user already chose (agent exports route in main).
+    if ((opts.format === 'prores' || opts.format === 'mp4') && !opts.reportPath && bridge?.nativeEngine?.exportVideo) {
+      const engine = await exportThroughEngine(opts);
+      if (engine) return engine;
+    }
     if (opts.format === 'prores' || (opts.format === 'mp4' && bridge?.render)) {
       if (!bridge?.render) throw new Error('The native encoder requires the updated desktop runtime.');
       nativeToken = await bridge.render.start({
@@ -466,6 +473,67 @@ async function run(opts: any) {
       PM.captionsHidden = false;
       X.busy = false;
     }
+  }
+}
+
+/** An export through the job engine (main/engine/agent-jobs.ts), with the
+ *  progress sheet driven by its job statuses. Resolves null when the engine
+ *  is off or routes the project to the current exporter. */
+async function exportThroughEngine(opts: any): Promise<any | null> {
+  const engine = (hostBridge() as any)?.nativeEngine;
+  const status = await engine.status().catch(() => null);
+  if (!status?.enabled || status.processes?.job?.state !== 'ready') return null;
+  const p: any = PM.proj;
+  const [t0, t1]: any = range(opts);
+  // Statuses can arrive before the start answer; keep them until the job id is known.
+  const early: any[] = [];
+  let listener: ((s: any) => void) | null = null;
+  const off = engine.onExportStatus((s: any) => { if (listener) listener(s); else early.push(s); });
+  try {
+    const started = await engine.exportVideo({
+      project: JSON.stringify(p),
+      name: opts.name || p.name || 'Powermove',
+      options: {
+        format: opts.format, alpha: opts.format === 'prores' && !!opts.alpha, fps: Number(opts.fps), scale: Number(opts.scale) || 1,
+        start: t0, end: t1, audio: opts.audio !== false, motionBlur: !!opts.mblur, quality: opts.quality ?? 'high'
+      }
+    });
+    if (started.status === 'cancelled') return { cancelled: true };
+    if (started.status !== 'accepted') return null;
+    const total = Math.max(1, started.frames);
+    const began = window.performance.now();
+    const ui = progressUI(total);
+    let final: any;
+    try {
+      final = await new Promise<any>((resolve) => {
+        const cancelPoll = window.setInterval(() => { if (X.cancel) void engine.cancelExport(started.jobId).catch(() => undefined); }, 100);
+        const on = (s: any): void => {
+          if (s.jobId !== started.jobId) return;
+          if (s.state === 'queued' || s.state === 'running' || s.state === 'waitingForMedia') {
+            ui.set(Math.min(total, Math.round(s.progress * total)), s.state === 'running' ? '' : 'Waiting');
+            return;
+          }
+          window.clearInterval(cancelPoll);
+          resolve(s);
+        };
+        listener = on;
+        for (const s of early.splice(0)) on(s);
+      });
+    } finally {
+      // Closing the sheet marks a running export cancelled; keep the outcome.
+      const cancelled = X.cancel;
+      ui.mod.close();
+      X.cancel = cancelled;
+    }
+    if (final.routed) return null;
+    if (final.state === 'cancelled') { PM.toast('Export cancelled'); return { cancelled: true }; }
+    if (final.state === 'failed') throw new Error(final.error || 'The export failed.');
+    lastOutputPath = final.path ?? started.path;
+    const sidecars = await writeCaptionSidecars(opts, t0, t1);
+    PM.toast(`Export finished in ${((window.performance.now() - began) / 1000).toFixed(1)}s${sidecars ? ` · ${sidecars} caption ${sidecars === 1 ? 'file' : 'files'}` : ''}`, 3400);
+    return { cancelled: false };
+  } finally {
+    off();
   }
 }
 

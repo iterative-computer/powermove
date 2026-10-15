@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { canonicalHash, canonicalProject } from '../../shared/canonical-json';
 import type { EngineError, EngineProcess, JobStatus, Request, Response } from '../../shared/engine-protocol';
-import { AgentJobError, AgentJobs, exportSettingsFor, suggestedName, type AgentJobsEngine } from './agent-jobs';
+import { AgentJobError, AgentJobs, exportSettingsFor, suggestedName, userExportSettings, type AgentJobsEngine, type UserExportStatus } from './agent-jobs';
 import { RemoteError } from './protocol';
 
 const project = (extra: Record<string, unknown> = {}) => ({
@@ -52,6 +52,12 @@ class FakeEngine implements AgentJobsEngine {
   }
 
   isReady(): boolean { return this.ready; }
+
+  chosen: Array<[string, string, number]> = [];
+  chooseOutput(file: string, job: string, session: number): string {
+    this.chosen.push([file, job, session]);
+    return 'c'.repeat(32);
+  }
 
   status(job: string, state: JobStatus['state'], extra: Partial<JobStatus> = {}): void {
     for (const l of this.listeners) l.jobStatus?.({ job, class: 'agentExport', state, progress: state === 'done' ? 1 : 0.5, path: null, error: null, ...extra });
@@ -236,5 +242,49 @@ describe('agent frames through the job engine', () => {
     engine.frames = () => ({ type: 'agentFrames', outcomes: [image(0)], queuedMs: 0 });
     await jobs.renderFrames(1, 'r', { project: project(), times: [0], width: 720, revision: 1 });
     expect(engine.of('openSession')).toHaveLength(2);
+  });
+});
+
+describe('export sheet jobs through the job engine', () => {
+  const options = { format: 'mp4' as const, alpha: false, fps: 60, scale: 0.5, start: 0.5, end: 2.5, audio: true, motionBlur: false, quality: 'max' as const };
+
+  it('take the sheet\'s rate, scale, range, and tier', () => {
+    expect(userExportSettings(project(), options)).toMatchObject({
+      format: { kind: 'h264' }, quality: 'max', size: { width: 640, height: 360 }, frameRate: { num: 60, den: 1 },
+      range: { start: 352_800_000, end: 5 * 352_800_000 }, dither: true, precision: 'float32'
+    });
+    // The composition's own rate keeps its exact rational.
+    expect(userExportSettings(project(), { ...options, fps: 29.97 }).frameRate).toEqual({ num: 30000, den: 1001 });
+    expect(userExportSettings(project(), { ...options, format: 'prores', alpha: true })).toMatchObject({ format: { kind: 'proRes', profile: 'p4444' }, alpha: 'straight', dither: false });
+    for (const bad of [{ scale: 0 }, { scale: 17 }, { end: 0.5 }, { fps: 0 }, { quality: 'best' }, { scale: 13 }]) {
+      expect(() => userExportSettings(project(), { ...options, ...bad } as never)).toThrow(AgentJobError);
+    }
+  });
+
+  it('submit a user job to the chosen file and send its statuses to the window', async () => {
+    const engine = new FakeEngine();
+    const statuses: Array<[number, UserExportStatus]> = [];
+    const delivered: Array<[number, string]> = [];
+    const jobs = new AgentJobs({ engine, onUserStatus: (o, s) => statuses.push([o, s]), onDelivered: (o, p) => delivered.push([o, p]) });
+    const { jobId, frames } = await jobs.exportUser(5, project(), options, '/Users/x/Cut.mp4');
+    expect(frames).toBe(120);
+    expect(engine.chosen).toEqual([['/Users/x/Cut.mp4', jobId, 10]]);
+    const body = engine.of('submitJob')[0]!.body as Extract<Request, { type: 'submitJob' }>;
+    expect(body).toMatchObject({ class: 'userJob', run: null, output: { kind: 'userChosen', destination: 'c'.repeat(32) } });
+    engine.status(jobId, 'running', { class: 'userJob', progress: 0.25 });
+    engine.status(jobId, 'done', { class: 'userJob', path: '/Users/x/Cut.mp4' });
+    expect(statuses).toEqual([
+      [5, { jobId, state: 'running', progress: 0.25 }],
+      [5, { jobId, state: 'done', progress: 1, path: '/Users/x/Cut.mp4' }]
+    ]);
+    expect(delivered).toEqual([[5, '/Users/x/Cut.mp4']]);
+    // A routed job says so; cancels are scoped to the window.
+    const second = await jobs.exportUser(5, project(), options, '/Users/x/Cut 2.mp4');
+    await jobs.cancelJob(6, second.jobId);
+    expect(engine.of('cancelJobs')).toHaveLength(0);
+    await jobs.cancelJob(5, second.jobId);
+    expect(engine.of('cancelJobs')[0]!.body).toEqual({ type: 'cancelJobs', kind: 'job', job: second.jobId });
+    engine.status(second.jobId, 'failed', { class: 'userJob', error: error('unsupported', 'text layers') });
+    expect(statuses.at(-1)).toEqual([5, { jobId: second.jobId, state: 'failed', progress: 0.5, error: 'text layers', routed: true }]);
   });
 });
