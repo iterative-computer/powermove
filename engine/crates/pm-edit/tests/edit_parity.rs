@@ -33,9 +33,6 @@ use pm_model::json::{Value, parse};
 use pm_model::{Document, JsString};
 use pm_text::compat::{GlyphLayout, TextContent};
 
-#[path = "../../pm-eval/tests/support/pm_expr_engine.rs"]
-mod pm_expr_engine;
-
 /// A decoded value (the generator's encoding, or a document value).
 #[derive(Clone, Debug, PartialEq)]
 enum V {
@@ -176,7 +173,7 @@ fn rect_v(r: &Rect) -> V {
 }
 
 fn run_case(doc: &Document, comp: &str, case: &Value) -> Outcome {
-    let expressions: Arc<dyn ExpressionEngine> = Arc::new(pm_expr_engine::PmExprEngine);
+    let expressions: Arc<dyn ExpressionEngine> = Arc::new(pm_wasm::expr::PmExpressions);
     // Created ids must not collide with the document's (the comparison
     // renames ids the input lacks).
     let mut edit = Edit::new(doc, comp, comp, Some(expressions), IdSource::new("#", 1)).unwrap();
@@ -722,6 +719,13 @@ fn edits_match_typescript() {
             let ok = match (outcome, &want) {
                 (Outcome::Skipped(why), _) => {
                     *skipped.entry(format!("{kind}:{why}")).or_default() += 1;
+                    true
+                }
+                // The generator's bun harness has no `PM.raster` (canvas):
+                // layers whose TypeScript bounds rasterize (vector paths on
+                // a shape) have no TypeScript answer there.
+                (_, V::Throw(message)) if message.starts_with("PM.raster is not a function") => {
+                    *skipped.entry(format!("{kind}:no-canvas")).or_default() += 1;
                     true
                 }
                 (Outcome::Threw(e), V::Throw(message)) => {
