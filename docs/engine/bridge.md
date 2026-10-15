@@ -501,6 +501,14 @@ the desktop picture, display awake):
 | r2 (a new context per pool) | gate load | 104 | 0.20 / 3.89 | 12.94 / 13.20 |
 | r8 (one context, reconfigured) | idle | 0 | 0.11 / 0.21 | 17.92 / 18.12 |
 | r8 (one context, reconfigured) | gate load | 25 | 0.10 / 0.21 | 11.62 / 11.82 |
+| r10 (the `remote-layer` feature build) | idle | 1 | 0.12 / 0.24 | 14.87 / 15.10 |
+
+r10 checks the measurement build after C′ moved behind the
+`remote-layer` feature (one idle run, display awake, 1-minute load
+average 4.4 to 6.0): it still presents through the remote layer with
+the same jitter. Its one drop (content frame 384, not presented, outside
+any resize or long task since the run was idle) is the first idle drop
+of a one-context C′ run; one run does not say whether it recurs.
 
 Cadence is what C′ was for: jitter p99 0.21 ms against the Chromium
 path's 8.4 to 14.3 ms, and a constant presentation offset (p99 − p50
