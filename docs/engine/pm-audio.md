@@ -51,7 +51,12 @@ streaming decode, mixing, playback, scrubbing, and the offline render export use
   would begin (the same anchor, or the start of the stream), so a block's samples depend
   on the file and the block index only.
 - **Length.** From the container's duration (Ogg's last granule minus its pre-skip), a
-  pure function of the metadata, never refined while decoding.
+  pure function of the metadata, never refined while decoding. Matroska and WebM round
+  their duration to the millisecond and count Opus's codec delay in it, so their Opus
+  length runs over the decoded length by a few hundred samples (measured: +384 at 10 s,
+  30 s, and 30.5 s; +370 at 10.0123 s; none for a live WebM, which has no duration). Past
+  the decoded end the source reads as silence, so the overrun never cuts audio; a
+  sample-exact length would need the demux-only scan of the whole file at open.
 
 Measured (`pm-media/tests/audio_decode.rs`): every fixture (`tone.wav`, `.flac`, `.m4a`,
 `.mp3`, `.opus`, `h264-aac.mp4`) starts on the first sample of its sine (priming 1024,
@@ -237,8 +242,9 @@ consumers ◀───────────── ClockSlot ◀── clock s
 - **Loop.** Chunks end at the loop end and the next starts at the loop start: sample-exact
   wraps. A run from a playhead before the loop plays straight into it and then wraps (as
   legacy `engine.ts`); a run from past the loop end plays to the composition end. The
-  loop range travels with the audio: the transport marks each segment that starts inside
-  the loop and wraps at its end, the ring chunk (and the converter's media run) carries
+  loop range travels with the audio: a segment before the loop start ends exactly at it
+  (so even a loop shorter than a chunk is entered on its first sample), the transport
+  marks each segment that starts inside the loop and wraps at its end, the ring chunk (and the converter's media run) carries
   that range, and the device callback publishes the range of the chunk it hears. So a
   clock sample carries the loop range only while its line is inside the loop; before the
   loop, past it, and when stopped it carries none (contract 6 invariant 1 wraps any line
