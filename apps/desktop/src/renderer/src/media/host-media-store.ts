@@ -13,7 +13,7 @@
  * so turning the new engine off and on again loses nothing.
  */
 import { Blake3 } from '../../../shared/blake3';
-import type { AssetStorage, ClassifyResult, MediaBinding, MediaLink, MediaReadOpen, MediaRecordSource, MediaStoreBridge, MediaStoreRecord } from '../../../shared/media-store';
+import type { AssetStorage, ClassifyResult, ConversionKind, MediaBinding, MediaConversion, MediaLink, MediaReadOpen, MediaRecordSource, MediaStoreBridge, MediaStoreRecord } from '../../../shared/media-store';
 import { compactEditLog } from '../core/edit-log';
 import { applyEngineStamp } from '../../../shared/engine-stamp';
 
@@ -25,6 +25,10 @@ const HASH_SLICE = 1024 * 1024;
 /** Chunks read from main are folded into a Blob every 64 MiB, so a large
  *  file is never held in the page's own memory all at once. */
 const FOLD_BYTES = 64 * 1024 * 1024;
+/** Bytes main copies per `putProjectRange` call (main's limit). */
+const PROJECT_RANGE_BYTES = 64 * 1024 * 1024;
+/** A BLAKE3 digest in hex. */
+const HASH = /^[a-f0-9]{64}$/;
 
 export type LegacyMediaStore = {
   put(id: string, blob: Blob, meta?: any, revision?: string): Promise<boolean>;
@@ -45,6 +49,9 @@ const storageKeyOf = (value: any): string | null => {
   if (value && typeof value === 'object') return value.storageKey || value.id || null;
   return value || null;
 };
+
+const contentHashOf = (value: any): string | null =>
+  value && typeof value === 'object' && typeof value.contentHash === 'string' && HASH.test(value.contentHash) ? value.contentHash : null;
 
 export const isLinked = (meta: any): boolean => meta?.storage === 'linked' && !!meta?.link && typeof meta.link.path === 'string';
 
@@ -120,26 +127,55 @@ export type HostMediaStore = Omit<LegacyMediaStore, 'getForSave'> & {
   readonly keepsOriginals: boolean;
   /** The store record a key last resolved to (filled by put and get). */
   recordFor(key: string | null | undefined): MediaStoreRecord | null;
+  /** The store record `put` made of this Blob. Unlike `recordFor`, it is
+   *  not taken over by a concurrent put of other bytes under the same key. */
+  storedRecord(blob: Blob): MediaStoreRecord | null;
   /** Desktop Save: bytes main copies straight from the store. */
   saveSource(asset: any): Promise<{ hash: string; size: number; type: string; revision: string } | null>;
-  /** Browser renditions (playback proxies) kept as generated media. */
-  rendition: { get(key: string): Promise<Blob | null>; put(key: string, blob: Blob): Promise<boolean> };
+  /**
+   * Browser renditions (playback proxies, PNGs of TIFF or HEIF stills) kept
+   * as generated media, named by the BLAKE3 of the original they render. A
+   * storage key would not do: two files can share its sampled fingerprint.
+   */
+  rendition: { get(originalHash: string | null | undefined): Promise<Blob | null>; put(originalHash: string | null | undefined, blob: Blob): Promise<boolean> };
+  /**
+   * Has main convert a kept original (a TIFF or HEIF still, a video the
+   * viewer cannot decode) into the viewer's rendition: from the store
+   * object or the linked file when main has one, else from `original`, the
+   * bytes this page holds (with Use New Engine off, IndexedDB's copy of a
+   * project opened on another Mac). Read the result with
+   * `media.readPlaybackProxy`.
+   */
+  convert(kind: ConversionKind, original: Blob, ref: { hash?: string | null; link?: MediaLink | null; name: string }): Promise<MediaConversion>;
+  /**
+   * Opening a project file with the new engine: main copies an embedded
+   * media range from the open file (`readToken`) straight into the store,
+   * checked against the file's recorded SHA-256 and named by its BLAKE3.
+   * False when the host cannot (flag off, older preload); the caller then
+   * restores the range through the page as before.
+   */
+  putProjectRange(readToken: string, source: { id: string; type: string; offset: number; length: number; revision?: string; sha256?: string },
+    meta: any, onBytes?: (bytes: number) => void): Promise<boolean>;
   /** Copies IndexedDB media under these assets into the store (verified). */
   migrate(assets: any[]): Promise<{ copied: number; present: number; missing: number; failed: number }>;
   readonly host: MediaStoreBridge;
 };
 
-export const renditionKey = (key: string) => `${key}:rendition`;
+/** The store key of the rendition of the original with this BLAKE3. */
+export const renditionKey = (originalHash: string) => `rendition:${originalHash}`;
 
 export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaStore {
   const { host, legacy, enabled } = options;
   const records = new Map<string, MediaStoreRecord>();
+  const stored = new WeakMap<Blob, MediaStoreRecord>();
   const migrations = new Map<string, Promise<boolean>>();
   const warn = options.warn ?? ((message, error) => console.warn(`[media-store] ${message}`, error));
 
-  const readKey = async (key: string, fallbackType: string): Promise<Blob | null> => {
+  /** Reads what a key names; with `hash`, only when the key names that content. */
+  const readKey = async (key: string, fallbackType: string, hash?: string | null): Promise<Blob | null> => {
     const opened = await host.open({ key });
     if (!opened.ok) return null;
+    if (hash && opened.hash !== hash) { await host.close(opened.token).catch(() => undefined); return null; }
     return readOpened(host, opened, opened.type || fallbackType);
   };
   const readHash = async (hash: string, type: string): Promise<Blob | null> => {
@@ -161,15 +197,18 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
 
   /** Copies one IndexedDB blob into the store and verifies it by hash.
    *  IndexedDB is never written or deleted here. */
-  const migrateBlob = (key: string, blob: Blob, revision: string | null): Promise<boolean> => {
+  const migrateBlob = (key: string, blob: Blob, revision: string | null, hash: string | null = null): Promise<boolean> => {
     let job = migrations.get(key);
     if (!job) {
       job = (async () => {
         const existing = await host.record(key);
-        if (existing && existing.size === blob.size) { remember(existing); return true; }
-        const record = await streamToStore(host, key, blob, { type: blob.type, revision, origin: 'indexeddb' });
-        remember(record);
-        return true;
+        if (existing && existing.size === blob.size && (!hash || existing.hash === hash)) { remember(existing); return true; }
+        /* The key already names other content that shares the sampled
+           fingerprint: keep this asset's bytes by content alone. */
+        const keep = existing && hash && existing.hash !== hash ? null : key;
+        const record = await streamToStore(host, keep, blob, { type: blob.type, revision, origin: 'indexeddb' });
+        if (keep) remember(record);
+        return !hash || record.hash === hash;
       })().catch((error) => { warn(`could not copy ${key} from IndexedDB`, error); return false; })
         .finally(() => migrations.delete(key));
       migrations.set(key, job);
@@ -177,15 +216,32 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
     return job;
   };
 
+  /* Content identity names an asset's bytes (section 21). The storage key
+     comes from a sampled fingerprint, so two different files can share one;
+     an asset that knows its content hash reads exactly that content. */
   const storeGet = async (value: any): Promise<Blob | null> => {
     if (isLinked(value)) return readLink(value);
     const key = storageKeyOf(value);
-    if (!key) return null;
     const type = (value && typeof value === 'object' && (value.type || mimeOf(value.name))) || '';
-    let blob = await readKey(key, type);
-    if (!blob && value && typeof value === 'object' && value.id && value.id !== key) blob = await readKey(value.id, type);
-    if (!blob && value && typeof value === 'object' && typeof value.contentHash === 'string') blob = await readHash(value.contentHash, type);
+    const hash = contentHashOf(value);
+    let blob = hash ? await readHash(hash, type) : null;
+    if (!blob && key) blob = await readKey(key, type, hash);
+    if (!blob && value && typeof value === 'object' && value.id && value.id !== key) blob = await readKey(value.id, type, hash);
     return blob;
+  };
+
+  /* The store record holding an asset's own content: its content hash when
+     it has one (the key's record may name other content that shares the
+     fingerprint), else whatever its key names. */
+  const recordOf = async (value: any): Promise<MediaStoreRecord | null> => {
+    const key = storageKeyOf(value);
+    const hash = contentHashOf(value);
+    const record = key ? await host.record(key) : null;
+    if (!hash || record?.hash === hash) return record;
+    const opened = await host.open({ hash });
+    if (!opened.ok) return null;
+    await host.close(opened.token).catch(() => undefined);
+    return { key: key ?? `blake3:${hash}`, hash, size: opened.size, type: (value && typeof value === 'object' && value.type) || record?.type || '', revision: hash, at: 0 };
   };
 
   const store: HostMediaStore = {
@@ -193,6 +249,7 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
     keepsOriginals: enabled,
     host,
     recordFor: (key) => (key ? records.get(key) ?? null : null),
+    storedRecord: (blob) => (blob ? stored.get(blob) ?? null : null),
 
     async put(id, blob, meta = {}, savedRevision) {
       if (!enabled) return legacy.put(id, blob, meta, savedRevision);
@@ -203,10 +260,10 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
         if (path) {
           try {
             const record = await host.putFile({ path, key, type: blob.type || meta?.type || '', revision: savedRevision ?? null });
-            if (record.size === blob.size) { remember(record); return true; }
+            if (record.size === blob.size) { stored.set(blob, remember(record)); return true; }
           } catch (error) { warn(`copying ${path} failed; sending its bytes instead`, error); }
         }
-        remember(await streamToStore(host, key, blob, { type: blob.type || meta?.type || '', revision: savedRevision ?? null, origin: meta?.origin ?? 'stream' }));
+        stored.set(blob, remember(await streamToStore(host, key, blob, { type: blob.type || meta?.type || '', revision: savedRevision ?? null, origin: meta?.origin ?? 'stream' })));
         return true;
       } catch (error) {
         warn(`could not store ${key}`, error);
@@ -228,7 +285,7 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
       if (old) {
         const key = storageKeyOf(value);
         const saved = await legacy.getForSave?.(value).catch(() => null);
-        if (key) void migrateBlob(key, old, saved?.revision ?? null);
+        if (key) void migrateBlob(key, old, saved?.revision ?? null, contentHashOf(value));
       }
       return old;
     },
@@ -238,21 +295,23 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
         if (isLinked(value)) return null;
         const saved = await legacy.getForSave?.(value);
         if (saved) return saved;
-        const key = storageKeyOf(value);
-        const record = key ? await host.record(key).catch(() => null) : null;
-        const blob = record ? await readKey(record.key, record.type) : null;
+        /* Media the new engine imported lives only in the store. Its key may
+           name other content that shares the sampled fingerprint, so the
+           asset's own content hash picks the bytes, as with the flag on. */
+        const record = await recordOf(value).catch(() => null);
+        const blob = record ? await readHash(record.hash, record.type) : null;
         return blob && record ? { blob, revision: record.revision } : null;
       }
       // Linked originals are not stored in the desktop project file.
       if (isLinked(value)) return null;
       const key = storageKeyOf(value);
-      const record = key ? await host.record(key) : null;
+      const record = await recordOf(value);
       if (record) {
-        const blob = await readKey(record.key, record.type);
+        const blob = await readHash(record.hash, record.type);
         return blob ? { blob, revision: record.revision } : null;
       }
       const saved = await legacy.getForSave?.(value);
-      if (saved && key) await migrateBlob(key, saved.blob, saved.revision);
+      if (saved && key) await migrateBlob(key, saved.blob, saved.revision, contentHashOf(value));
       return saved ?? null;
     },
 
@@ -267,24 +326,77 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
     async saveSource(asset) {
       if (!enabled || isLinked(asset)) return null;
       const key = storageKeyOf(asset);
-      if (!key) return null;
-      let record = await host.record(key);
-      if (!record) {
+      if (!key && !contentHashOf(asset)) return null;
+      let record = await recordOf(asset);
+      if (!record && key) {
         const saved = await legacy.getForSave?.(asset).catch(() => null);
-        if (saved && await migrateBlob(key, saved.blob, saved.revision)) record = await host.record(key);
+        if (saved && await migrateBlob(key, saved.blob, saved.revision, contentHashOf(asset))) record = await recordOf(asset);
       }
       return record ? { hash: record.hash, size: record.size, type: record.type, revision: record.revision } : null;
     },
 
     rendition: {
-      async get(key) {
-        if (!enabled || !key) return null;
-        return readKey(renditionKey(key), 'video/webm').catch(() => null);
+      async get(originalHash) {
+        /* Also with the flag off: the legacy viewer reuses the rendition the
+           new engine kept instead of converting the original again. A
+           rendition the legacy engine made (flag off) is in IndexedDB. */
+        if (!originalHash || !HASH.test(originalHash)) return null;
+        const kept = await readKey(renditionKey(originalHash), 'video/webm').catch(() => null);
+        return kept ?? await legacy.get(renditionKey(originalHash)).catch(() => null);
       },
-      async put(key, blob) {
-        if (!enabled || !key) return false;
-        try { remember(await streamToStore(host, renditionKey(key), blob, { type: blob.type || 'video/webm', origin: 'rendition' })); return true; }
-        catch (error) { warn(`could not keep the rendition of ${key}`, error); return false; }
+      async put(originalHash, blob) {
+        if (!originalHash || !HASH.test(originalHash) || !blob) return false;
+        // Flag off, the store is read-only: generated media goes where the legacy engine keeps its bytes.
+        if (!enabled) return legacy.put(renditionKey(originalHash), blob, { type: blob.type }).catch((error) => { warn(`could not keep the rendition of ${originalHash}`, error); return false; });
+        try { remember(await streamToStore(host, renditionKey(originalHash), blob, { type: blob.type || 'video/webm', origin: 'rendition' })); return true; }
+        catch (error) { warn(`could not keep the rendition of ${originalHash}`, error); return false; }
+      }
+    },
+
+    async convert(kind, original, ref) {
+      const request = ref.link ? { link: ref.link, name: ref.name } : ref.hash && HASH.test(ref.hash) ? { hash: ref.hash, name: ref.name } : null;
+      const byRef = kind === 'still' ? host.convertStill?.bind(host) : host.convertVideo?.bind(host);
+      let result: MediaConversion | null = null;
+      if (request && byRef) {
+        result = await byRef(request);
+        if (result.ok || !result.missing) return result;
+      }
+      if (!host.convertUpload || !original || !(original.size > 0)) {
+        return result ?? { ok: false, error: kind === 'still' ? 'Image conversion is unavailable' : 'Video conversion is unavailable' };
+      }
+      // Main has neither the object nor the file: it converts the bytes this page has, and keeps none of them.
+      const token = await host.beginPut({ key: null, type: original.type || '', size: original.size, origin: 'stream' });
+      let sent = false;
+      try {
+        const blake3 = await hashBlob(original, (data, offset) => host.putChunk(token, offset, data));
+        sent = true;
+        return await host.convertUpload(token, { kind, name: ref.name, blake3 });
+      } finally {
+        if (!sent) await host.abortPut(token).catch(() => undefined);
+      }
+    },
+
+    async putProjectRange(readToken, source, meta, onBytes) {
+      if (!enabled || !host.putProjectRange || !readToken) return false;
+      // An empty range has no bytes for main to read; the page sends it with its hash.
+      if (!(source.length > 0)) return false;
+      const key = meta?.storageKey || source.id;
+      if (!key) return false;
+      const token = await host.beginPut({ key, type: source.type || meta?.type || '', size: source.length, revision: source.revision ?? null, origin: 'project' });
+      try {
+        for (let at = 0; at < source.length;) {
+          const length = Math.min(PROJECT_RANGE_BYTES, source.length - at);
+          await host.putProjectRange(token, readToken, source.offset + at, length, at);
+          at += length;
+          onBytes?.(length);
+        }
+        /* With no recorded checksum (PMV3), main still compares the copy on
+           disk with the bytes it read. */
+        remember(await host.finishPut(token, source.sha256 ? { sha256: source.sha256 } : {}));
+        return true;
+      } catch (error) {
+        await host.abortPut(token).catch(() => undefined);
+        throw error;
       }
     },
 
@@ -294,11 +406,11 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
         if (!asset || isLinked(asset)) continue;
         const key = storageKeyOf(asset);
         if (!key) continue;
-        if (await host.record(key).catch(() => null)) { counts.present++; continue; }
+        if (await recordOf(asset).catch(() => null)) { counts.present++; continue; }
         const saved = await legacy.getForSave?.(asset).catch(() => null);
         const blob = saved?.blob ?? await legacy.get(asset).catch(() => null);
         if (!blob) { counts.missing++; continue; }
-        if (await migrateBlob(key, blob, saved?.revision ?? null)) counts.copied++;
+        if (await migrateBlob(key, blob, saved?.revision ?? null, contentHashOf(asset))) counts.copied++;
         else counts.failed++;
       }
       return counts;
@@ -390,6 +502,8 @@ export function installHostMediaStore(PM: Registry, bridge: { mediaStore?: Media
     enabled,
     store,
     decide: (input: Parameters<typeof decideImport>[1]) => decideImport(host, { ...input, enabled }),
+    /** BLAKE3 of a Blob (the same digest as the store's and pm-media's). */
+    hash: (blob: Blob) => hashBlob(blob),
     projectStorage: (): 'copy' | 'link' => PM.proj?.media?.whenImporting === 'link' ? 'link' : 'copy',
     setProjectStorage(value: 'copy' | 'link') {
       if (!PM.proj) return;

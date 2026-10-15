@@ -1,4 +1,5 @@
-import { chmod, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { chmod, copyFile, mkdtemp, readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -134,6 +135,48 @@ describe('MediaStore', () => {
     expect(await store.hasObject(blake3Hex(bytes(10)))).toBe(false);
   });
 
+  it('commits bytes main read from a project file against its recorded SHA-256', async () => {
+    const store = new MediaStore({ root: path.join(root, 'store'), executor });
+    const data = bytes(5 * 1024 * 1024 + 9, 4);
+    const sha256 = createHash('sha256').update(data).digest('hex');
+    const token = await store.beginStream(3, { key: 'media:p', type: 'video/mp4', size: data.length, revision: 'r1', origin: 'project' });
+    for (let offset = 0; offset < data.length; offset += 1024 * 1024) await store.chunk(3, token, offset, data.subarray(offset, offset + 1024 * 1024), 'main');
+    const record = await store.finishStream(3, token, { sha256 });
+    expect(record).toMatchObject({ key: 'media:p', hash: blake3Hex(data), size: data.length, revision: 'r1', source: 'project', sha256 });
+    expect(Buffer.compare(await readFile(store.objectPath(record.hash)), data)).toBe(0);
+
+    // A range that is not what the file recorded is never committed.
+    const wrong = await store.beginStream(3, { key: 'media:q', type: '', size: 16, origin: 'project' });
+    await store.chunk(3, wrong, 0, bytes(16, 8), 'main');
+    await expect(store.finishStream(3, wrong, { sha256 })).rejects.toThrow(/checksum/);
+    expect(await store.record('media:q')).toBeNull();
+    expect(await store.hasObject(blake3Hex(bytes(16, 8)))).toBe(false);
+  });
+
+  it('accepts a project range without a recorded checksum only when main read every byte', async () => {
+    const store = new MediaStore({ root: path.join(root, 'store'), executor });
+    const data = bytes(3000, 6);
+    const mainRead = await store.beginStream(3, { key: 'media:m', type: '', size: data.length, origin: 'project' });
+    await store.chunk(3, mainRead, 0, data, 'main');
+    expect(await store.finishStream(3, mainRead, {})).toMatchObject({ key: 'media:m', hash: blake3Hex(data) });
+    // Bytes from the page always name their BLAKE3 (or a checksum).
+    const fromPage = await store.beginStream(3, { key: 'media:n', type: '', size: data.length });
+    await store.chunk(3, fromPage, 0, data);
+    await expect(store.finishStream(3, fromPage, {})).rejects.toThrow(/BLAKE3/);
+    expect(await store.record('media:n')).toBeNull();
+    // Mixed: one page chunk is enough to need a hash.
+    const mixed = await store.beginStream(3, { key: 'media:o', type: '', size: data.length });
+    await store.chunk(3, mixed, 0, data.subarray(0, 1000), 'main');
+    await store.chunk(3, mixed, 1000, data.subarray(1000));
+    await expect(store.finishStream(3, mixed, {})).rejects.toThrow(/BLAKE3/);
+    // An empty upload has no bytes main read, so it names its hash too.
+    const empty = await store.beginStream(3, { key: 'media:e', type: '', size: 0 });
+    await expect(store.finishStream(3, empty, {})).rejects.toThrow(/BLAKE3/);
+    expect(await store.record('media:e')).toBeNull();
+    const named = await store.beginStream(3, { key: 'media:e', type: '', size: 0 });
+    expect(await store.finishStream(3, named, { blake3: blake3Hex(new Uint8Array(0)) })).toMatchObject({ key: 'media:e', size: 0 });
+  });
+
   it('refuses out-of-order chunks, other owners, and incomplete uploads', async () => {
     const store = new MediaStore({ root: path.join(root, 'store'), executor });
     const token = await store.beginStream(1, { key: 'k', type: '', size: 8 });
@@ -170,5 +213,29 @@ describe('MediaStore', () => {
     expect(await store.verifyLink(link)).toEqual({ status: 'changed' });
     await rm(source);
     expect(await store.verifyLink(link)).toEqual({ status: 'missing' });
+  });
+
+  it('hashes again when another file with the same size and dates replaced the link', async () => {
+    const store = new MediaStore({ root: path.join(root, 'store'), executor });
+    const source = path.join(root, 'linked.mov');
+    await writeFile(source, bytes(4000, 1));
+    await old(source);
+    const identity = await store.identify(source);
+    const link = { path: source, hash: identity.hash, size: identity.size, mtimeMs: identity.mtimeMs, dev: identity.dev, ino: identity.ino };
+    // Another file, its dates set to the original's (cp -p, a sync tool).
+    const other = path.join(root, 'other.mov');
+    await writeFile(other, bytes(4000, 2));
+    const when = new Date(identity.mtimeMs);
+    await utimes(other, when, when);
+    await rename(other, source);
+    expect((await stat(source)).mtimeMs).toBe(identity.mtimeMs);
+    expect(await store.verifyLink(link)).toEqual({ status: 'changed' });
+    // The original content back under a new file number is still the original.
+    const copy = path.join(root, 'copy.mov');
+    await writeFile(copy, bytes(4000, 1));
+    await utimes(copy, when, when);
+    await copyFile(copy, source);
+    await utimes(source, when, when);
+    expect(await store.verifyLink(link)).toMatchObject({ status: 'ok', identity: { hash: identity.hash } });
   });
 });

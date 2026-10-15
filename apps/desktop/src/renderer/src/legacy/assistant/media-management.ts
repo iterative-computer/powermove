@@ -54,6 +54,36 @@ export function listMedia(PM: PMRegistry, args: Record<string, unknown>) {
   return { assets: assets.slice(offset, offset + limit), total: assets.length, nextOffset: offset + limit < assets.length ? offset + limit : null, folders: folderList(PM.proj), revision: revision(PM) };
 }
 
+/**
+ * The asset an agent import would duplicate (section 20: deduplicated on the
+ * content hash). The fingerprint only samples a file, so several assets can
+ * share it: with the media store, the one whose original has this file's full
+ * hash is it. An asset without a known content hash (legacy media) is the
+ * same file only when its stored bytes hash the same; one whose stored bytes
+ * are a conversion (a playback proxy, an image sequence) cannot be checked
+ * against the file and still matches by fingerprint, as before.
+ */
+export async function alreadyImported(PM: PMRegistry, project: any, fingerprint: string, file: Blob): Promise<any | null> {
+  const candidates = Object.values<any>(project.assets || {}).filter(item => item.fingerprint === fingerprint && PM.assets.get(item.id) && item.persisted);
+  if (!candidates.length) return null;
+  if (!PM.HostMedia?.enabled) return candidates[0];
+  const known = candidates.map(item => [item, PM.MediaImport.originalContentHash?.(item) ?? null] as const);
+  let fileHash: string | null = null;
+  const hashOfFile = async () => (fileHash ??= await PM.HostMedia.hash(file));
+  if (known.some(([, hash]) => hash)) {
+    const hash = await hashOfFile();
+    const same = known.find(([, original]) => original === hash);
+    if (same) return same[0];
+  }
+  for (const [item, hash] of known) {
+    if (hash) continue;
+    if (item.playbackProxy === true || item.imageSequence) return item;
+    const stored: Blob | null = await Promise.resolve(PM.MediaStore?.get?.(item)).catch(() => null);
+    if (stored && stored.size === file.size && await PM.HostMedia.hash(stored) === await hashOfFile()) return item;
+  }
+  return null;
+}
+
 /** Only file bytes cross native IPC, in bounded chunks; never extension source. */
 export async function importMedia(PM: PMRegistry, args: Record<string, unknown>, replace: boolean, active: () => boolean = () => true) {
   const project = PM.proj, baseRevision = revision(PM);
@@ -82,8 +112,9 @@ export async function importMedia(PM: PMRegistry, args: Record<string, unknown>,
   assertCurrent();
   if (args.expectedFingerprint !== undefined && args.expectedFingerprint !== fingerprint) throw new Error('The chosen file does not match expectedFingerprint; no media was changed.');
   if (!replace) {
-    const existing = Object.values<any>(project.assets || {}).find(item => item.fingerprint === fingerprint && PM.assets.get(item.id) && item.persisted);
+    const existing = await alreadyImported(PM, project, fingerprint, file);
     if (existing) return { status: 'already_imported', assetId: existing.id, persisted: true };
+    assertCurrent();
   }
   if (args.storage !== undefined && args.storage !== 'copy' && args.storage !== 'link') throw new Error('storage is "copy" or "link".');
   /* Agent imports are copied unless the call asks to link (section 21). */

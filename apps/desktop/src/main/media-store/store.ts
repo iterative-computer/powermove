@@ -54,6 +54,10 @@ type Stream = {
   received: number;
   queue: Promise<void>;
   sha256: ReturnType<typeof createHash>;
+  /** Main itself read at least one chunk (a range of a project file). */
+  mainChunks: boolean;
+  /** The page sent at least one chunk. */
+  pageChunks: boolean;
 };
 
 export type MediaStoreOptions = {
@@ -62,6 +66,16 @@ export type MediaStoreOptions = {
   now?: () => number;
   log?: (message: string) => void;
 };
+
+/** SHA-256 of a file read back from disk (libuv reads; native hashing). */
+async function sha256OfFile(file: string): Promise<string> {
+  const digest = createHash('sha256');
+  const handle = await open(file, 'r');
+  try {
+    for await (const chunk of handle.createReadStream({ autoClose: false, highWaterMark: STREAM_CHUNK_BYTES })) digest.update(chunk as Buffer);
+  } finally { await handle.close(); }
+  return digest.digest('hex');
+}
 
 const keyFile = (key: string) => `${createHash('sha256').update(key).digest('hex')}.json`;
 
@@ -192,17 +206,20 @@ export class MediaStore {
     const token = randomUUID().replaceAll('-', '');
     this.streams.set(token, {
       owner, key: request.key, type: request.type, size: request.size, revision: request.revision ?? null,
-      source: request.origin ?? 'stream', handle, file, received: 0, queue: Promise.resolve(), sha256: createHash('sha256')
+      source: request.origin ?? 'stream', handle, file, received: 0, queue: Promise.resolve(), sha256: createHash('sha256'), mainChunks: false, pageChunks: false
     });
     return token;
   }
 
-  async chunk(owner: number, token: string, offset: number, data: Uint8Array): Promise<void> {
+  /** Appends bytes to an upload. `from` is `main` only for bytes main read
+   *  itself (a range of a project file the window opened). */
+  async chunk(owner: number, token: string, offset: number, data: Uint8Array, from: 'page' | 'main' = 'page'): Promise<void> {
     const stream = this.streams.get(token);
     if (!stream || stream.owner !== owner) throw new MediaStoreError('Unknown media upload.', 'notFound');
     if (!(data instanceof Uint8Array) || data.byteLength < 1 || data.byteLength > STREAM_CHUNK_BYTES || offset !== stream.received || offset + data.byteLength > stream.size) {
       throw new MediaStoreError('Invalid media upload chunk.');
     }
+    if (from === 'main') stream.mainChunks = true; else stream.pageChunks = true;
     stream.received += data.byteLength;
     stream.sha256.update(data);
     stream.queue = stream.queue.then(async () => {
@@ -216,11 +233,19 @@ export class MediaStore {
   }
 
   /**
-   * Finishes a streamed put. `blake3` is the sender's hash of the bytes it
-   * read from its source: the object is committed only when the bytes on
-   * disk hash to it.
+   * Finishes a streamed put. The object is committed only when the bytes on
+   * disk are the bytes that were sent:
+   *
+   *  - `blake3` is the sender's hash of the bytes it read from its source
+   *    (the renderer's uploads); the copy on disk must hash to it.
+   *  - `sha256` is the checksum a project file records for a media range
+   *    (main's own copies out of an open project, `putProjectRange`). The
+   *    bytes received, and the copy read back from disk, must both match it.
+   *  - Neither, only for bytes main read itself from a project file that
+   *    records no checksum (PMV3): the copy read back from disk must match
+   *    the bytes received.
    */
-  async finishStream(owner: number, token: string, expected: { blake3: string }): Promise<MediaStoreRecord & { sha256: string }> {
+  async finishStream(owner: number, token: string, expected: { blake3?: string; sha256?: string }): Promise<MediaStoreRecord & { sha256: string }> {
     const stream = this.streams.get(token);
     if (!stream || stream.owner !== owner) throw new MediaStoreError('Unknown media upload.', 'notFound');
     this.streams.delete(token);
@@ -229,14 +254,51 @@ export class MediaStore {
       if (stream.received !== stream.size) throw new MediaStoreError('The media upload is incomplete.', 'mismatch');
       await syncFile(stream.handle);
       await stream.handle.close();
-      if (!HASH_HEX.test(expected?.blake3 ?? '')) throw new MediaStoreError('A media upload names its BLAKE3 hash.');
+      const blake3 = expected?.blake3;
+      const sha256 = expected?.sha256;
+      const byBlake3 = typeof blake3 === 'string' && HASH_HEX.test(blake3);
+      const bySha256 = typeof sha256 === 'string' && HASH_HEX.test(sha256);
+      /* Only bytes main read itself may go unnamed, and only when it read
+         them all: an upload with no chunk at all names its hash too. */
+      const readByMain = stream.mainChunks && !stream.pageChunks;
+      if (!byBlake3 && !bySha256 && !readByMain) throw new MediaStoreError('A media upload names its BLAKE3 hash or its SHA-256 checksum.');
+      const received = stream.sha256.digest('hex');
+      if (bySha256 && received !== sha256) throw new MediaStoreError('The project media checksum does not match.', 'mismatch');
+      if (!byBlake3 && await sha256OfFile(stream.file) !== received) {
+        throw new MediaStoreError('The stored copy does not match the bytes that were read.', 'mismatch');
+      }
       const identity = await hashFile(this.options.executor, stream.file, { settleMs: 0 });
-      if (identity.hash !== expected.blake3 || identity.size !== stream.size) {
+      if ((byBlake3 && identity.hash !== blake3) || identity.size !== stream.size) {
         throw new MediaStoreError('The stored copy does not match the original bytes.', 'mismatch');
       }
       await this.commitObject(stream.file, identity.hash, identity.size);
       const record = await this.writeKey(stream.key, identity.hash, identity.size, stream.type, stream.revision, stream.source);
-      return { ...record, sha256: stream.sha256.digest('hex') };
+      return { ...record, sha256: received };
+    } finally {
+      await stream.handle.close().catch(() => undefined);
+      await rm(stream.file, { force: true });
+    }
+  }
+
+  /**
+   * Hands a finished upload to `use` as a file without committing it, then
+   * removes it. For bytes the store does not keep: with Use New Engine off
+   * the page converts an original it holds only in IndexedDB (a TIFF still,
+   * a ProRes movie) into the legacy viewer's rendition, and the store stays
+   * read-only. The copy on disk must hash to the sender's BLAKE3.
+   */
+  async useStream<T>(owner: number, token: string, blake3: string, use: (file: string) => Promise<T>): Promise<T> {
+    const stream = this.streams.get(token);
+    if (!stream || stream.owner !== owner) throw new MediaStoreError('Unknown media upload.', 'notFound');
+    this.streams.delete(token);
+    try {
+      await stream.queue;
+      if (stream.received !== stream.size) throw new MediaStoreError('The media upload is incomplete.', 'mismatch');
+      await stream.handle.close();
+      if (typeof blake3 !== 'string' || !HASH_HEX.test(blake3)) throw new MediaStoreError('A media upload names its BLAKE3 hash.');
+      const identity = await hashFile(this.options.executor, stream.file, { settleMs: 0 });
+      if (identity.hash !== blake3 || identity.size !== stream.size) throw new MediaStoreError('The uploaded copy does not match the original bytes.', 'mismatch');
+      return await use(stream.file);
     } finally {
       await stream.handle.close().catch(() => undefined);
       await rm(stream.file, { force: true });
@@ -265,15 +327,17 @@ export class MediaStore {
 
   /**
    * Checks that a linked file is still the content it was linked as. The
-   * size and modification time are enough when both are unchanged; anything
-   * else is hashed again.
+   * same file (volume and file number, when recorded) with an unchanged size
+   * and modification time is enough; anything else, such as another file
+   * copied over the path with its dates kept, is hashed again.
    */
   async verifyLink(link: MediaLink): Promise<{ status: 'ok'; path: string; identity: FileIdentity | null } | { status: 'missing' | 'changed' }> {
     let info;
     try { info = await stat(link.path); } catch { return { status: 'missing' }; }
     if (!info.isFile()) return { status: 'missing' };
     if (info.size !== link.size) return { status: 'changed' };
-    if (link.mtimeMs !== undefined && info.mtimeMs === link.mtimeMs) return { status: 'ok', path: link.path, identity: null };
+    const sameFile = (link.ino === undefined || info.ino === link.ino) && (link.dev === undefined || info.dev === link.dev);
+    if (link.mtimeMs !== undefined && info.mtimeMs === link.mtimeMs && sameFile) return { status: 'ok', path: link.path, identity: null };
     try {
       const identity = await hashFile(this.options.executor, link.path, { settleMs: 0 });
       return identity.hash === link.hash ? { status: 'ok', path: link.path, identity } : { status: 'changed' };

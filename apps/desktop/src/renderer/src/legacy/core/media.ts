@@ -252,11 +252,31 @@ function matchesLegacy(meta: any, identity: any) {
   return sameSize || sameDuration;
 }
 
+/**
+ * The BLAKE3 of the file the person imported, when the asset's stored bytes
+ * are that file (or it is linked). Conversions (playback proxies, animated
+ * stills, converted stills stored as PNG) store other bytes, so their hash
+ * says nothing about the source.
+ */
+function originalContentHash(meta: any): string | null {
+  if (!meta || typeof meta.contentHash !== 'string' || !/^[a-f0-9]{64}$/.test(meta.contentHash)) return null;
+  // A converted still whose original the media store keeps (`rendition`) stores the original.
+  if (meta.playbackProxy === true || meta.imageSequence || (meta.kind === 'image' && meta.format && meta.format !== 'svg' && meta.rendition !== true)) return null;
+  return meta.contentHash;
+}
+
 function match(project: any, liveAssets: any, identity: any) {
   const metas: any = Object.values(project && project.assets || {}).filter((meta: any) => meta && meta.id);
-  const candidates: any = metas.filter((meta: any) =>
+  /* The fingerprint samples a file; when both sides know the full content
+     hash of the file itself (media store, section 21), only that decides
+     identity. */
+  const sameContent = (meta: any) => {
+    const a = originalContentHash(identity), b = originalContentHash(meta);
+    return !a || !b || a === b;
+  };
+  const candidates: any = metas.filter((meta: any) => sameContent(meta) && (
     (identity.fingerprint && meta.fingerprint === identity.fingerprint) ||
-    (!meta.fingerprint && matchesLegacy(meta, identity)));
+    (!meta.fingerprint && matchesLegacy(meta, identity))));
   if (!candidates.length) return { canonicalId: null, aliases: [] };
   candidates.sort((a: any, b: any) => {
     const score: any = (meta: any) =>
@@ -297,6 +317,7 @@ PM.MediaImport = {
   posterKeyFor: (storageKey: string) => `${storageKey}:poster`,
   mapBounded,
   match,
+  originalContentHash,
   coalesce,
   referenceCount,
   removeAsset,
