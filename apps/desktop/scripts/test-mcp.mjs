@@ -145,13 +145,25 @@ async function desktopSmoke() {
   assert.equal(prores.streams[0].codec_name, 'prores'); assert.equal(Number(prores.streams[0].nb_frames), 24);
   const other = await rpc('tools/call', { name: 'get_render_status', arguments: { jobId: 'not-a-job' } });
   assert.equal(other.isError, true);
+  // Capability routing: text layers are not in the Phase 2 renderer, so the
+  // project goes to the current exporter and capture, and still delivers.
+  await tool('get_project_state');
+  await tool('apply_commands', { label: 'Title', commands: [JSON.stringify({ type: 'add_layer', layerType: 'text', name: 'Title', content: { text: 'Routed' }, duration: 1 })] });
+  const routedFrames = await tool('render_frames', { times: [0.25], width: 320 });
+  assert.equal(routedFrames.content.filter(item => item.type === 'image').length, 1);
+  assert.match(appLog, /render_frames routed to the current engine: .*text layers/);
+  const routed = text(await tool('export_video', { name: 'MCP desktop routed', audio: true, motionBlur: false }));
+  assert.equal(routed.jobId, undefined, 'a routed export runs in the current exporter');
+  assert.match(appLog, /export_video routed to the current engine: .*text layers/);
+  assert(routed.path.startsWith(exportsDir) && (await stat(routed.path)).size > 1000, routed.path);
+  assert(probe(routed.path, 'stream=codec_name').streams.some(item => item.codec_name === 'h264'));
   await tool('finish_session', { commit: true });
   // No temporary or empty files are left behind.
   const left = await readdir(exportsDir);
   assert.deepEqual(left.filter(name => name.startsWith('.powermove-')), []);
   for (const name of left) assert((await stat(path.join(exportsDir, name))).size > 0, name);
   await quit();
-  console.log(`MCP desktop smoke passed: render_frames and export_video (H.264 wait, ProRes async with get_render_status) through the job engine; ${left.length} verified exports.`);
+  console.log(`MCP desktop smoke passed: render_frames and export_video (H.264 wait, ProRes async with get_render_status) through the job engine, a text project routed to the current exporter; ${left.length} verified exports.`);
 }
 
 try {
