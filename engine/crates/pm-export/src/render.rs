@@ -217,11 +217,11 @@ pub fn render_frame(
         let submitted = Instant::now();
         wait_idle(renderer);
         let gpu_us = submitted.elapsed().as_secs_f64() * 1e6;
-        let read_started = Instant::now();
-        let pixels = renderer.read_rgba(&frame)?;
-        let read_us = read_started.elapsed().as_secs_f64() * 1e6;
         let units = if whole { total_units } else { admitted };
-        gate.finished(pass, units, gpu_us + read_us);
+        // The admitted command buffer's time; the readback below is its own
+        // small copy and would only add a second wait behind other clients.
+        gate.finished(pass, units, gpu_us);
+        let pixels = renderer.read_rgba(&frame)?;
         let row = w as usize * 4;
         let at = y as usize * row;
         rgba[at..at + pixels.len()].copy_from_slice(&pixels);
@@ -289,6 +289,28 @@ impl Timeline {
         let a = pm_audio::offline::sample_of_ticks(self.tick(n).get(), sample_rate);
         let b = pm_audio::offline::sample_of_ticks(self.tick(n + 1).get(), sample_rate);
         (a, b.max(a))
+    }
+}
+
+/// The `tmcd` track of a MOV export (section 17, "Muxers"): it labels the
+/// export's first frame with the composition's own timecode at the export
+/// rate (frame `start × rate`, rounded half up, so 00:00:00:00 at the
+/// composition start), drop-frame at 29.97 and 59.94 as the timeline shows
+/// it, wrapped to one day. Start timecode and reel settings arrive with
+/// Phase 3b presets (contract 12, open question 4).
+pub fn start_timecode(timeline: &Timeline) -> crate::settings::TimecodeSpec {
+    let format = pm_time::TimecodeFormat::for_rate(timeline.rate);
+    let (num, den) = (
+        i128::from(timeline.rate.num()),
+        i128::from(timeline.rate.den()),
+    );
+    let unit = den * i128::from(TICKS_PER_SECOND);
+    let first = (2 * i128::from(timeline.start.get()) * num + unit).div_euclid(2 * unit);
+    let day = i128::from(format.frames_per_day());
+    crate::settings::TimecodeSpec {
+        start_frame: first.rem_euclid(day) as i64,
+        format,
+        reel: None,
     }
 }
 
@@ -439,7 +461,7 @@ pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
             sample_rate: a.sample_rate,
             channels: 2,
         }),
-        timecode: None,
+        timecode: (container == Container::Mov).then(|| start_timecode(&timeline)),
         destination: job.destination.clone(),
         overwrite: job.overwrite,
         mode: job.mode,

@@ -37,6 +37,13 @@ pub const USER_LANE: usize = 2;
 /// Longest single wait before conditions are checked again (signals and
 /// completions notify sooner).
 const POLL: Duration = Duration::from_millis(20);
+/// While the interactive engine plays, a pass whose unit is predicted above
+/// the bound still gets one single-unit probe this often. Its cost was most
+/// likely measured under contention (a pass first met during playback is
+/// calibrated by probes that wait behind the interactive engine's frames),
+/// and probes are the only way the estimate can come down before playback
+/// stops; without them agent snapshots would wait for the user to pause.
+pub const OVERSIZE_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy)]
 struct Admission {
@@ -55,6 +62,8 @@ struct State {
     playing: bool,
     waiting: [u32; LANES],
     current: Option<Admission>,
+    /// When the last over-bound probe was admitted.
+    last_oversize_probe: Option<std::time::Instant>,
     /// Counters for status and tests.
     stats: GateStats,
 }
@@ -74,6 +83,8 @@ pub struct GateStats {
     pub waited_for_stop: u64,
     /// The last corrected unit cost that was above the bound, in µs.
     pub last_unit_too_large_us: f64,
+    /// Single-unit probes of passes predicted above the bound.
+    pub oversize_probes: u64,
 }
 
 /// The job engine's submission gate, shared by every lane.
@@ -97,6 +108,7 @@ impl Gate {
                 playing: false,
                 waiting: [0; LANES],
                 current: None,
+                last_oversize_probe: None,
                 stats: GateStats::default(),
             }),
             changed: Condvar::new(),
@@ -200,8 +212,24 @@ impl Gate {
                 }
                 Err(PlanError::UnitTooLarge { unit_us, .. }) => {
                     st.stats.last_unit_too_large_us = unit_us;
+                    let due = st.last_oversize_probe.map_or(Duration::ZERO, |at| {
+                        OVERSIZE_PROBE_INTERVAL.saturating_sub(at.elapsed())
+                    });
+                    if st.playing && due.is_zero() {
+                        // One unit re-measures the pass (see OVERSIZE_PROBE_INTERVAL).
+                        st.last_oversize_probe = Some(std::time::Instant::now());
+                        st.slicer.submitted();
+                        st.current = Some(Admission {
+                            lane,
+                            sliced: true,
+                            calibrate: true,
+                            raw_predicted_us: f64::NAN,
+                        });
+                        st.stats.oversize_probes += 1;
+                        break Some(1);
+                    }
                     waited_for_stop = true;
-                    st = self.wait(st, POLL);
+                    st = self.wait(st, POLL.min(due.max(Duration::from_millis(1))));
                 }
             }
         };
@@ -240,9 +268,13 @@ impl Gate {
         let measured = measured_us.max(1.0);
         let first = st.seen.insert(pass);
         if adm.calibrate && units > 0 && !first {
-            st.slicer
-                .model_mut()
-                .calibrate(PassKey(pass), units, measured);
+            let model = st.slicer.model_mut();
+            if adm.sliced {
+                // A probe while the interactive engine plays: contended.
+                model.calibrate_contended(PassKey(pass), units, measured);
+            } else {
+                model.calibrate(PassKey(pass), units, measured);
+            }
         }
         if adm.sliced {
             let raw = if adm.raw_predicted_us.is_nan() {
@@ -349,6 +381,42 @@ mod tests {
         gate.signal(&DeadlineSignal::PlaybackStopped { at: host_now() });
         assert_eq!(g.admit(2, 45, &no), Some(45), "whole frames again");
         g.finished(2, 45, 45.0 * 120.0);
+    }
+
+    /// A pass first measured under contention (4 ms for one unit) would wait
+    /// for playback to stop; probes once per interval bring it back.
+    #[test]
+    fn over_bound_passes_are_probed_during_playback_and_recover() {
+        let gate = Arc::new(Gate::new());
+        let g = lane(&gate, SNAPSHOT_LANE);
+        let no = AtomicBool::new(false);
+        gate.signal(&started());
+        // Cold probe, then a contended probe that measures 4 ms for a unit.
+        assert_eq!(g.admit(3, 26, &no), Some(1));
+        g.finished(3, 1, 5000.0);
+        assert_eq!(g.admit(3, 26, &no), Some(1));
+        g.finished(3, 1, 4000.0);
+        // Over the 2 ms bound: a probe at once, still contended; the next one
+        // waits for the probe interval.
+        assert_eq!(g.admit(3, 26, &no), Some(1));
+        g.finished(3, 1, 4500.0);
+        let started_at = Instant::now();
+        assert_eq!(g.admit(3, 26, &no), Some(1));
+        assert!(started_at.elapsed() >= OVERSIZE_PROBE_INTERVAL - Duration::from_millis(5));
+        assert_eq!(gate.stats().oversize_probes, 2);
+        // It measures 150 µs: the least contended sample becomes the cost.
+        g.finished(3, 1, 150.0);
+        assert_eq!(
+            gate.lock().slicer.model().raw_unit_us(PassKey(3)),
+            Some(150.0)
+        );
+        let n = g.admit(3, 26, &no).unwrap();
+        assert!(n > 1, "sliced again: {n} units");
+        g.finished(3, n, 150.0 * f64::from(n));
+        // Without playback, over-bound passes are never probed: whole frames.
+        gate.signal(&DeadlineSignal::PlaybackStopped { at: host_now() });
+        assert_eq!(g.admit(3, 26, &no), Some(26));
+        g.finished(3, 26, 26.0 * 150.0);
     }
 
     #[test]
