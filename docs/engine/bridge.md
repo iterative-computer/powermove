@@ -289,8 +289,8 @@ Today's drops under load sit inside the live resizes (202 of r8's 238,
 are its only ones in the nine worker runs (with the phase A/B below).
 Engine frames showed 10.9 to 12.4 ms after their time on the transport
 clock's line at p50 in r6 and r8 and 17.9 ms in r7 (`dueToPresentMs`;
-p99 11.4 to 26.4 ms): outside section 15's ±10 ms, about one refresh
-later than the presenter aims for (see gaps).
+p99 11.4 to 26.4 ms): outside section 15's ±10 ms, and not yet
+explained (see gaps).
 
 **Pointer-to-pixel, pan** (2,401 events a run; ms, p50 / p99):
 
@@ -664,11 +664,13 @@ outside its ownership to carry them: `pm-engine` (`engine.rs`, `present.rs`,
 - Pointer-to-pixel fails the amended gate (idle p50 and p99, load p99);
   see [Decision](#decision-before-the-phase-2-gate).
 - Engine playback frames show 10.9 to 17.9 ms after their time on the
-  transport clock's line (p50), outside section 15's ±10 ms. The worker's
-  prediction (two refreshes out) leaves about one refresh unaccounted
-  for; the clock-to-display offset needs calibrating against the measured
-  presentation, then the audio device latency added, before A/V sync can
-  be claimed.
+  transport clock's line (p50), outside section 15's ±10 ms. With frames
+  picked for two refreshes out and rAF to presentation at 18.6 to 20.3 ms,
+  a frame shown at its first chance would land 2 to 12 ms after its time
+  (about 7 ms on average); the measured p50 sits at the top of that
+  range, which is not explained. The presenter's
+  clock-to-display offset needs calibrating against measured presentation
+  (and the audio device latency added) before A/V sync can be claimed.
 - Layer drag, orbit, and walk through the engine, and playback with the
   engine drawing the document, wait for `pm-render` to draw real layers.
 - C′ is a prototype: not adopted (25 drops a minute under load). Its
