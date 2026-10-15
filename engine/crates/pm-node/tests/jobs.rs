@@ -817,8 +817,10 @@ fn agent_frames_during_playback_are_sliced_and_still_answer() {
     assert!(answered, "agent frames answer during playback");
     assert_eq!(frame_images(&host.answers[&id]).len(), 4);
     assert!(gate["maxPlaybackUs"].as_f64().unwrap() <= 2000.0, "{gate}");
-    assert!(gate["duringPlayback"].as_u64().unwrap() > 4, "{gate}");
-    assert!(gate["slicedSubmissions"].as_u64().unwrap() > 4, "{gate}");
+    // Every frame's submissions were sliced: a frame whose bands all fit the
+    // 1 ms target goes in one command buffer, others in several.
+    assert!(gate["duringPlayback"].as_u64().unwrap() >= 4, "{gate}");
+    assert!(gate["slicedSubmissions"].as_u64().unwrap() >= 4, "{gate}");
     host.send_event(Event::Deadline(DeadlineSignal::PlaybackStopped {
         at: at_now(),
     }));

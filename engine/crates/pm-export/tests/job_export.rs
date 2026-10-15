@@ -726,6 +726,8 @@ fn alpha_survives_an_opaque_first_frame() {
             .args([
                 "-v",
                 "error",
+                "-select_streams",
+                "v:0",
                 "-show_entries",
                 "stream=pix_fmt",
                 "-of",
@@ -734,7 +736,11 @@ fn alpha_survives_an_opaque_first_frame() {
             .arg(&delivered.path)
             .output()
             .unwrap();
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "yuva444p12le");
+        // ffprobe may list the stream again under its program; the first
+        // entry is the video stream's own.
+        let text = String::from_utf8_lossy(&out.stdout);
+        let first = text.lines().map(str::trim).find(|l| !l.is_empty());
+        assert_eq!(first, Some("yuva444p12le"), "{text}");
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
