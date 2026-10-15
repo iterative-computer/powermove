@@ -7,9 +7,13 @@
  * anchor's capture and its rescale after an anchor edit (`size-anchor.ts`,
  * `font-anchor.ts`), Pre-compose › Leave all attributes
  * (`compositions.ts`), material peer synchronization
- * (`scene3d/materials.ts`), and split text over given layouts
- * (`split-text.ts`). `tests/edit_parity.rs` runs pm-edit's kernels on the
- * same inputs and compares the documents they leave.
+ * (`scene3d/materials.ts`), split text over given layouts
+ * (`split-text.ts`), and the font anchor (`font-anchor.ts`: capture,
+ * reference, Pan Behind rescale) and split text measured end to end through
+ * `PM.raster` and `PM.textLayout` (`legacy/gl/raster.ts`) on a synthetic
+ * canvas (see `synthWidth` and `synthInk`; `tests/edit_parity.rs` measures
+ * with the same functions). `tests/edit_parity.rs` runs pm-edit's kernels on
+ * the same inputs and compares the documents they leave.
  *
  *   bun engine/crates/pm-edit/tests/vectors/generate-edit-vectors.ts
  *
@@ -29,7 +33,7 @@ import { install as installModel } from '../../../../../apps/desktop/src/rendere
 import * as S3 from '../../../../../apps/desktop/src/renderer/src/legacy/core/space-3d';
 import * as Parenting from '../../../../../apps/desktop/src/renderer/src/legacy/core/parenting';
 import { captureSizeAnchor, sizeAnchorReference } from '../../../../../apps/desktop/src/renderer/src/legacy/core/size-anchor';
-import { rescaleAnchorBounds } from '../../../../../apps/desktop/src/renderer/src/legacy/core/font-anchor';
+import { captureFontAnchor, fontAnchorReference, rescaleAnchorBounds } from '../../../../../apps/desktop/src/renderer/src/legacy/core/font-anchor';
 import { leaveAttributeBounds, shiftLeaveAnchor } from '../../../../../apps/desktop/src/renderer/src/legacy/core/compositions';
 import { splitTextLayers } from '../../../../../apps/desktop/src/renderer/src/legacy/core/split-text';
 import { shaderPeers, synchronizeShaderPeers } from '../../../../../apps/desktop/src/renderer/src/core/scene3d/materials';
@@ -37,6 +41,7 @@ import { alignDelta, deltaInParent, unionBox, type AlignMode } from '../../../..
 import { adoptTemporalEase } from '../../../../../apps/desktop/src/renderer/src/core/anim/temporal-ease';
 import { canonicalProject } from '../../../../../apps/desktop/src/shared/canonical-json';
 import { install as installCompositor } from '../../../../../apps/desktop/src/renderer/src/legacy/gl/compositor';
+import { install as installRaster } from '../../../../../apps/desktop/src/renderer/src/legacy/gl/raster';
 
 const SCALE = Number(process.env.PM_EDIT_SCALE ?? 1);
 const CORPUS = process.env.PM_EDIT_CORPUS ?? '';
@@ -533,6 +538,162 @@ function splitCases(doc: string, T: number, out: Case[]): void {
   } finally { PM.groupLayers = groupLayers; delete PM.textLayout; delete PM.raster; }
 }
 
+/* ── text measured on a synthetic canvas ────────────────────────────────── */
+/**
+ * `PM.raster` and `PM.textLayout` (`legacy/gl/raster.ts`) run as the app runs
+ * them, over a canvas whose `measureText` answers from the font string, the
+ * letter spacing, the alignment, and the text: the vectors check what the
+ * kernels do with measurements, not a font (pm-text's corpus tests check real
+ * measurements). `tests/edit_parity.rs` implements the same functions.
+ *
+ * Width: per code point `((cp % 13) + 4) · k` plus the letter spacing, with
+ * `k = size / 16 · (italic ? 1.05 : 1) · (1 + (weight − 400) / 4000) ·
+ * (1 + family.length / 100)` (the caption vectors' canvas). Ink (Blink's
+ * glyph bounds from the pen origin on the baseline, in `float`): none for
+ * text without a non-space character; else `x0 = ((first % 5) − 2) · k / 4`,
+ * `x1 = width − ((last % 5) − 2) · k / 4`, `y0 = −(0.72 · size + (sum % 7) ·
+ * k / 8)`, `y1 = 0.18 · size + (sum % 3) · k / 8` over the code points.
+ */
+function synthFont(font: string): { size: number; k: number } {
+  const m = /^(italic )?(\S+) (\S+)px "((?:[^"\\]|\\.)*)"/.exec(font);
+  if (!m) throw new Error(`unexpected font ${font}`);
+  const italic = !!m[1], weight = Number(m[2]), size = Number(m[3]), family = m[4]!.replace(/\\(.)/g, '$1');
+  return { size, k: size / 16 * (italic ? 1.05 : 1) * (1 + (weight - 400) / 4000) * (1 + family.length / 100) };
+}
+function synthWidth(font: string, letterSpacing: string, text: string): number {
+  const { k } = synthFont(font);
+  const ls = parseFloat(letterSpacing) || 0;
+  let w = 0, n = 0;
+  for (const ch of text) { w += ((ch.codePointAt(0)! % 13) + 4) * k; n++; }
+  return w + ls * n;
+}
+function synthInk(font: string, width: number, text: string): [number, number, number, number] {
+  if (!/\S/u.test(text)) return [0, 0, 0, 0];
+  const { size, k } = synthFont(font);
+  const cps = Array.from(text, ch => ch.codePointAt(0)!);
+  const sum = cps.reduce((a, b) => a + b, 0);
+  const f = Math.fround;
+  return [f(((cps[0]! % 5) - 2) * k / 4), f(-(0.72 * size + (sum % 7) * k / 8)), f(width - ((cps.at(-1)! % 5) - 2) * k / 4), f(0.18 * size + (sum % 3) * k / 8)];
+}
+function synthContext() {
+  return {
+    font: '10px sans-serif', letterSpacing: '0px', textAlign: 'start', textBaseline: 'alphabetic', fillStyle: '#000', globalAlpha: 1, filter: 'none',
+    measureText(text: string) {
+      const width = synthWidth(this.font, this.letterSpacing, text);
+      const [x0, y0, x1, y1] = synthInk(this.font, width, text);
+      // Blink's `TextMetrics`: ink edges from the alignment point, in `float`.
+      const dx = this.textAlign === 'center' ? width / 2 : this.textAlign === 'right' || this.textAlign === 'end' ? width : 0;
+      const f = Math.fround;
+      return { width, actualBoundingBoxLeft: f(f(-x0) + f(dx)), actualBoundingBoxRight: f(x1 - f(dx)), actualBoundingBoxAscent: -y0, actualBoundingBoxDescent: y1 };
+    },
+    scale() {}, save() {}, restore() {}, setTransform() {}, translate() {}, transform() {}, fillText() {}, drawImage() {},
+    getImageData: () => null, isContextLost: () => false,
+  };
+}
+/** Installs `legacy/gl/raster.ts` over the synthetic canvas, once, for the
+ *  cases that measure text (the others keep a registry without it). */
+let rasterFns: Record<string, unknown> | null = null;
+function withRaster<T>(fn: () => T): T {
+  const g = globalThis as any;
+  const hadWindow = 'window' in g, window = g.window;
+  g.window = { document: { createElement: () => { const context = synthContext(); return { width: 8, height: 8, getContext: () => context }; }, fonts: { check: () => true } },
+    setTimeout: () => 0, clearTimeout() {}, URL: {} };
+  if (!rasterFns) {
+    const before = new Map(Object.entries(PM));
+    installRaster(PM);
+    rasterFns = {};
+    for (const [key, value] of Object.entries(PM)) {
+      if (before.get(key) === value) continue;
+      rasterFns[key] = value;
+      if (before.has(key)) PM[key] = before.get(key); else delete PM[key];
+    }
+  }
+  const saved = new Map(Object.keys(rasterFns).map(key => [key, PM[key]]));
+  Object.assign(PM, rasterFns);
+  try { return fn(); } finally {
+    for (const [key, value] of saved) { if (value === undefined) delete PM[key]; else PM[key] = value; }
+    if (hadWindow) g.window = window; else delete g.window;
+  }
+}
+
+const FONT_TEXTS = [...TEXTS, 'Typography that wraps inside a narrow box', 'A', 'Hello\n\nworld', 'x  y'];
+function fontLayer(i: number): any {
+  const d: any = {
+    text: pick(FONT_TEXTS), size: pick([16, 30, 72, 41.5]), font: pick(['Inter', 'SF Pro Display', 'Geist Mono', '']), color: '#ffffff',
+    ...(chance(0.8) ? { weight: pick([400, 600, 700]) } : {}), ...(chance(0.3) ? { italic: true } : {}),
+    ...(chance(0.4) ? { tracking: pick([2, -1.5, 0.25]) } : {}), ...(chance(0.3) ? { leading: pick([1.4, 0.9]) } : {}),
+    ...(chance(0.85) ? { align: pick(['left', 'center', 'right']) } : {}),
+  };
+  if (chance(0.3)) { d.boxWidth = range(60, 320); if (chance(0.5)) d.boxHeight = range(20, 200); }
+  if (chance(0.5)) d.fontAnchorBounds = { x0: range(-120, 0), y0: range(-60, 0), x1: range(1, 220), y1: range(1, 90) };
+  if (chance(0.35)) d.animators = Array.from({ length: int(1, 2) }, (_, a) => ({
+    id: `a${a}`, enabled: true, ...(chance(0.6) ? { unit: pick(['characters', 'words', 'lines']) } : {}),
+    p: { opacity: channel(range(0, 100), 20, chance(0.3)), ...(chance(0.5) ? { 'position.y': channel(range(-20, 20), 10, chance(0.3)) } : {}) },
+  }));
+  if (chance(0.25)) d.styles = Array.from({ length: int(1, 2) }, (_, s) => ({ id: `s${s}`, start: int(0, 4), end: int(2, 12), p: { color: { v: '#00ff00', kf: [], expr: null } } }));
+  return { id: `T${i}`, name: `Text ${i}`, type: 'text', from: chance(0.6) ? 0 : range(-1, 1), dur: 6, on: true, lock: false, solo: false, parent: null, group: null, p: transformChannels(false), d };
+}
+function fontDoc(index: number): any {
+  const layers = Array.from({ length: int(1, 4) }, (_, i) => fontLayer(i));
+  if (chance(0.3)) layers.push({ id: 'S0', name: 'Solid', type: 'solid', from: 0, dur: 6, on: true, lock: false, solo: false, parent: null, group: null, p: transformChannels(false), d: { w: 100, h: 50, color: '#ff0000' } });
+  return { id: `F${index}`, compId: `FC${index}`, compName: 'Fonts', name: 'Fonts', w: 640, h: 360, fps: pick([24, 30, 29.97]), dur: 6, layers, comps: {}, params: {} };
+}
+
+const FONT_FIELDS = ['size', 'font', 'weight', 'tracking', 'leading', 'italic', 'boxWidth', 'boxHeight', 'fontAxis.wght', 'align', 'color', 'text'];
+const box4 = (b: any) => (b ? { x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1 } : null);
+
+/** The font anchor: capture on a typography edit, the reference before an
+ *  anchor edit, and the Pan Behind rescale after it. */
+function fontAnchorCases(doc: string, T: number, out: Case[]): void {
+  withRaster(() => {
+    const L = open(doc, T);
+    for (let li = 0; li < L.length; li++) {
+      const field = pick(FONT_FIELDS);
+      const command = chance(0.5) ? { type: 'set_content', patch: { [field]: 10 }, time: T } : { type: 'set_property', path: `c.${field}`, time: T };
+      open(doc, T);
+      const captured = run(() => { captureFontAnchor(PM, PM.proj.layers[li], command); return null; });
+      out.push({ kind: 'captureFontAnchor', t: hex(T), layer: li, fields: [field], out: captured.throw ? captured : enc(layersAfter(doc)) });
+      // `runOne` asks for the reference of a layer with recorded font
+      // bounds; text layers without them answer null on both sides.
+      const L2 = open(doc, T);
+      if (L2[li].type !== 'text') continue;
+      const reference = run(() => box4(fontAnchorReference(PM, L2[li], T)));
+      out.push({ kind: 'anchorReference', anchor: 'font', t: hex(T), layer: li, out: reference });
+      const bounds = box4(fontAnchorReference(PM, L2[li], T));
+      const axis = pick(['x', 'y']);
+      if (!bounds || !L2[li].p?.[`anchor.${axis}`]) continue;
+      L2[li].p[`anchor.${axis}`].v = Number(L2[li].p[`anchor.${axis}`].v) + range(-50, 50);
+      PM.touch();
+      const moved = JSON.stringify(settle(PM.proj));
+      const result = run(() => { rescaleAnchorBounds(PM, L2[li], 'font', T, bounds); return null; });
+      out.push({ kind: 'anchorMoved', anchor: 'font', doc: moved, t: hex(T), layer: li, bounds: [bounds.x0, bounds.y0, bounds.x1, bounds.y1].map(hex), out: result.throw ? result : enc(layersAfter(moved)) });
+    }
+  });
+}
+
+/** Split text measured end to end: `PM.textLayout` and `PM.raster`'s
+ *  `fontOffset` on the synthetic canvas. */
+function measuredSplitCases(doc: string, T: number, out: Case[]): void {
+  withRaster(() => {
+    const L = open(doc, T);
+    const texts = L.map((l, i) => [l, i] as const).filter(([l]) => l.type === 'text').map(([, i]) => i);
+    if (!texts.length) return;
+    const sources = subset(texts, 0.7);
+    if (!sources.length) sources.push(texts[0]!);
+    const mode = pick(['words', 'characters', 'lines'] as const);
+    open(doc, T);
+    const live = PM.proj.layers;
+    PM.Edit = { mutate: (_label: string, fn: () => unknown) => fn() };
+    const groupLayers = PM.groupLayers;
+    PM.groupLayers = () => ({ id: 'group' });
+    let created: any;
+    try {
+      const result = run(() => { created = splitTextLayers(PM, sources.map(i => live[i].id), mode); return null; });
+      out.push({ kind: 'splitText', measured: true, t: hex(T), sources, mode, out: result.throw ? result : enc(created === false ? [] : created) });
+    } finally { PM.groupLayers = groupLayers; }
+  });
+}
+
 /* ── documents ──────────────────────────────────────────────────────────── */
 const docs: any[] = [];
 const add = (doc: any, makeCases: (doc: string, T: number, out: Case[]) => void, times: number[]) => {
@@ -572,6 +733,21 @@ if (CORPUS) {
     }, times);
     console.log(`${file.slice(CORPUS.length)}: ${docs.at(-1)?.cases.length ?? 0} cases`);
   }
+  // The font anchor and measured split text on the corpus's text layers, in
+  // a second pass so the cases above draw the same random numbers as before.
+  for (const file of files) {
+    const project = JSON.parse(readFileSync(file, 'utf8'));
+    const doc = project.proj ?? project;
+    if (!Array.isArray(doc?.layers) || typeof doc.compId !== 'string' || !doc.layers.some((l: any) => l?.type === 'text')) continue;
+    const real = file.includes('/real/');
+    const times = real ? [Math.round(range(0, doc.dur) * doc.fps) / doc.fps] : timesFor(doc).slice(0, 2);
+    add(doc, (text, T, out) => {
+      const before = out.length;
+      fontAnchorCases(text, T, out); measuredSplitCases(text, T, out);
+      if (real) out.splice(before, out.length - before, ...out.slice(before).filter(() => chance(0.25)));
+    }, times);
+    console.log(`${file.slice(CORPUS.length)} (text): ${docs.at(-1)?.cases.length ?? 0} cases`);
+  }
 } else {
   for (let index = 0; index < 40 * SCALE; index++) {
     const doc = makeDoc(index, false);
@@ -583,6 +759,10 @@ if (CORPUS) {
   }
   for (let index = 0; index < 30 * SCALE; index++) add(materialDoc(index), materialCases, [0, range(0, 4)]);
   for (let index = 0; index < 30 * SCALE; index++) add(splitDoc(index), splitCases, [0, range(0, 3)]);
+  for (let index = 0; index < 40 * SCALE; index++) {
+    const doc = fontDoc(index);
+    add(doc, (text, T, out) => { fontAnchorCases(text, T, out); measuredSplitCases(text, T, out); }, [0, range(0, 3)]);
+  }
 }
 
 writeFileSync(OUT, gzipSync(JSON.stringify({ docs }), { level: 9 }));

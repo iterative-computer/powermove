@@ -16,9 +16,12 @@
 //! ticks. Snapping never counts as a mismatch. Ids an edit creates
 //! (`i`, `id` absent from the input) are renamed by order of first
 //! appearance on both sides. Messages of user-facing `Error`s must match;
-//! engine-internal `TypeError`s only need to throw. Cases a kernel leaves to
-//! the host (three.js bounds of 3D objects and model groups) or that measure
-//! text (the vectors carry no fonts) are counted apart.
+//! engine-internal `TypeError`s only need to throw. The font anchor's cases
+//! (`captureFontAnchor`, `anchorReference`/`anchorMoved` with `anchor:
+//! "font"`) and measured split text measure on the generator's synthetic
+//! canvas (`Synth`). Cases a kernel leaves to the host (three.js bounds of 3D
+//! objects and model groups) or that measure text without that canvas (the
+//! vectors carry no fonts) are counted apart.
 //!
 //! `PM_EDIT_VECTORS=<file>` replays another set (a `PM_EDIT_SCALE` run, or
 //! the corpus set from `PM_EDIT_CORPUS`).
@@ -37,7 +40,7 @@ use pm_eval::text_geom::{MeasuredLine, TextMeasure};
 use pm_eval::{ExpressionEngine, JsThrow, JsValue};
 use pm_model::json::{Value, parse};
 use pm_model::{Document, JsString};
-use pm_text::compat::{GlyphLayout, TextContent};
+use pm_text::compat::{GlyphLayout, Measure, TextContent, glyph_layout, text_source_lines};
 
 /// A decoded value (the generator's encoding, or a document value).
 #[derive(Clone, Debug, PartialEq)]
@@ -142,6 +145,120 @@ impl TextMeasure for NoText {
     }
 }
 
+/// The generator's synthetic canvas (`synthWidth`, `synthInk`): widths and
+/// ink boxes from the font, letter spacing, and text, over the real wrapping
+/// and glyph units (`pm_text::compat`, the port of `text-layout.ts`). The
+/// font-anchor and measured split-text cases measure with it.
+struct Synth;
+
+/// `synthFont`: the size and the per-unit width factor of `fontStr(d)`.
+fn synth_font(d: &TextContent) -> (f64, f64) {
+    // `fontStr`: `${d.weight || 500} ${d.size}px "${variable || d.font || 'SF Pro Display'}"`.
+    let family = d
+        .font
+        .clone()
+        .filter(|f| !f.is_empty())
+        .unwrap_or_else(|| "SF Pro Display".to_owned());
+    let weight = d
+        .weight
+        .filter(|w| *w != 0.0 && !w.is_nan())
+        .unwrap_or(500.0);
+    let size = d.size.expect("the vectors' text layers have a size");
+    let italic = if d.italic.unwrap_or(false) { 1.05 } else { 1.0 };
+    let k = size / 16.0
+        * italic
+        * (1.0 + (weight - 400.0) / 4000.0)
+        * (1.0 + family.encode_utf16().count() as f64 / 100.0);
+    (size, k)
+}
+
+/// JavaScript's code points of UTF-16 text (`for (const ch of text)`): lone
+/// surrogates count as themselves.
+fn code_points(text: &[u16]) -> Vec<u32> {
+    char::decode_utf16(text.iter().copied())
+        .map(|c| c.map_or_else(|e| u32::from(e.unpaired_surrogate()), u32::from))
+        .collect()
+}
+
+/// `synthWidth`, with the letter spacing `(d.tracking || 0) px` when
+/// `spaced`.
+fn synth_width(d: &TextContent, spaced: bool, text: &[u16]) -> f64 {
+    let (_, k) = synth_font(d);
+    let ls = if spaced {
+        d.tracking
+            .filter(|t| *t != 0.0 && !t.is_nan())
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    let mut w = 0.0;
+    let mut n = 0.0;
+    for cp in code_points(text) {
+        w += f64::from((cp % 13) + 4) * k;
+        n += 1.0;
+    }
+    w + ls * n
+}
+
+/// `synthInk`: the ink box from the pen origin, in `float`.
+fn synth_ink(d: &TextContent, width: f64, text: &[u16]) -> [f64; 4] {
+    let cps = code_points(text);
+    // `/\S/u`: JavaScript's white space is in the BMP.
+    if cps
+        .iter()
+        .all(|&c| c < 0x10000 && pm_text::blink::chars::is_js_space(c as u16))
+    {
+        return [0.0; 4];
+    }
+    let (size, k) = synth_font(d);
+    let sum: u64 = cps.iter().map(|&c| u64::from(c)).sum();
+    let f = |v: f64| f64::from(v as f32);
+    [
+        f((f64::from(cps[0] % 5) - 2.0) * k / 4.0),
+        f(-(0.72 * size + (sum % 7) as f64 * k / 8.0)),
+        f(width - (f64::from(cps[cps.len() - 1] % 5) - 2.0) * k / 4.0),
+        f(0.18 * size + (sum % 3) as f64 * k / 8.0),
+    ]
+}
+
+/// A measuring context configured for `d` (letter spacing when `spaced`).
+struct SynthContext<'d> {
+    d: &'d TextContent,
+    spaced: bool,
+}
+
+impl Measure for SynthContext<'_> {
+    fn width(&mut self, text: &[u16]) -> f64 {
+        synth_width(self.d, self.spaced, text)
+    }
+}
+
+impl TextMeasure for Synth {
+    fn measure_lines(&mut self, d: &TextContent) -> Vec<MeasuredLine> {
+        let mut context = SynthContext { d, spaced: true };
+        text_source_lines(d, &mut context, d.line_height())
+            .into_iter()
+            .map(|line| {
+                let width = synth_width(d, true, &line.text);
+                MeasuredLine {
+                    ink: synth_ink(d, width, &line.text),
+                    text: String::from_utf16_lossy(&line.text),
+                    width,
+                }
+            })
+            .collect()
+    }
+    fn plain_width(&mut self, d: &TextContent, text: &str) -> f64 {
+        synth_width(d, false, &text.encode_utf16().collect::<Vec<_>>())
+    }
+    fn glyph_layout(&mut self, d: &TextContent) -> GlyphLayout {
+        glyph_layout(d, &mut SynthContext { d, spaced: true })
+    }
+    fn spaced_width(&mut self, d: &TextContent, text: &str) -> f64 {
+        synth_width(d, true, &text.encode_utf16().collect::<Vec<_>>())
+    }
+}
+
 /// What a kernel run produced.
 enum Outcome {
     /// The layers by composition after the operations, and the kernel's own
@@ -188,6 +305,9 @@ fn run_case(doc: &Document, comp: &str, case: &Value) -> Outcome {
     let mut text = NoText::default();
     let mut host = NoHost;
     let layer = || usize_of(get(case, "layer").unwrap());
+    // Cases measured on the generator's synthetic canvas.
+    let font = get(case, "anchor").and_then(Value::as_str) == Some("font");
+    let measured = matches!(get(case, "measured"), Some(Value::Bool(true)));
     let result: Result<Option<V>, JsThrow> = match kind {
         "reparent" => {
             let parent = get(case, "parent")
@@ -252,6 +372,20 @@ fn run_case(doc: &Document, comp: &str, case: &Value) -> Outcome {
                 .collect();
             anchor::capture_size_anchor(&mut edit, layer(), &fields, t).map(|()| None)
         }
+        "captureFontAnchor" => {
+            let fields: Vec<JsString> = get(case, "fields")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| f.as_js_string().unwrap().clone())
+                .collect();
+            anchor::capture_font_anchor(&mut edit, layer(), &fields, t, &mut Synth).map(|()| None)
+        }
+        "anchorReference" if font => {
+            anchor::anchor_reference(&mut edit, layer(), Kind::Font, t, &mut Synth)
+                .map(|r| Some(r.as_ref().map_or(V::Z, rect_v)))
+        }
         "anchorReference" => anchor::anchor_reference(&mut edit, layer(), Kind::Size, t, &mut text)
             .map(|r| Some(r.as_ref().map_or(V::Z, rect_v))),
         "anchorMoved" => {
@@ -268,7 +402,8 @@ fn run_case(doc: &Document, comp: &str, case: &Value) -> Outcome {
                 x1: b[2],
                 y1: b[3],
             };
-            anchor::anchor_moved(&mut edit, layer(), Kind::Size, t, &bounds).map(|()| None)
+            let kind = if font { Kind::Font } else { Kind::Size };
+            anchor::anchor_moved(&mut edit, layer(), kind, t, &bounds).map(|()| None)
         }
         "leaveAttributes" => {
             comp_bounds::leave_attributes(&mut edit, layer(), t, &mut text, &mut host).map(|b| {
@@ -283,6 +418,19 @@ fn run_case(doc: &Document, comp: &str, case: &Value) -> Outcome {
         "syncPeers" => {
             let channel = get(case, "channel").unwrap().as_str().unwrap();
             materials::synchronize_peers(&mut edit, layer(), channel).map(|_| None)
+        }
+        "splitText" if measured => {
+            let mode = SplitMode::parse(get(case, "mode").unwrap().as_str().unwrap()).unwrap();
+            split_text::split_text(&mut edit, &indexes(case, "sources"), mode, t, &mut Synth).map(
+                |plans| {
+                    Some(V::A(
+                        plans
+                            .iter()
+                            .flat_map(|p| p.children.iter().map(of))
+                            .collect(),
+                    ))
+                },
+            )
         }
         "splitText" => {
             let mode = SplitMode::parse(get(case, "mode").unwrap().as_str().unwrap()).unwrap();
@@ -785,7 +933,15 @@ fn edits_match_typescript() {
                 }
                 format!("{kind} {}", pm_model::json::to_canonical_string(&c))
             };
-            *cases.entry(kind.clone()).or_default() += 1;
+            // Cases measured on the synthetic canvas count apart.
+            let label = if get(case, "anchor").and_then(Value::as_str) == Some("font") {
+                format!("{kind}(font)")
+            } else if matches!(get(case, "measured"), Some(Value::Bool(true))) {
+                format!("{kind}(measured)")
+            } else {
+                kind.clone()
+            };
+            *cases.entry(label).or_default() += 1;
             let mut known = HashSet::new();
             known_ids(canonical, &mut known);
             let (mut ours, mut theirs) = (
