@@ -34,7 +34,7 @@ test('motion-blurred video scrubs settle on the requested frame without decoder 
   await setup(session);
   const result = await session.page.evaluate(async () => {
     const PM = (window as any).PM;
-    PM.pause(); PM.proj.layers[0].mblur = true;
+    PM.pause(); PM.proj.layers[0].mblur = true; PM.touch();
     const video = PM.assets.get(PM.proj.layers[0].d.asset).el;
     let seeks = 0;
     video.addEventListener('seeking', () => seeks++);
