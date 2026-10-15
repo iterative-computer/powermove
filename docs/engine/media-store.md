@@ -26,8 +26,8 @@ Layout under `<userData>/Media Store` (owner-only, 0700):
   BLAKE3 hash. Content-addressed, so the same bytes in two projects, two
   keys, or two imports are stored once. On APFS a copy is a clone.
 - `keys/<sha256(key)>.json`: a renderer storage key (`media:v2:<size>:<sha>`,
-  its `:poster`, `:preview…`, and `:rendition` keys, or a bare asset id from
-  old projects) → `{ key, hash, size, type, revision, at, source }`.
+  its `:poster` and `:preview…` keys, `rendition:<BLAKE3 of the original>`
+  for browser renditions, or a bare asset id from old projects) → `{ key, hash, size, type, revision, at, source }`.
   `revision` is the PMV4 storage revision (the hash unless the writer named
   one), so Save reuses ranges for unchanged media. `source` says where the
   bytes came from: `import`, `stream`, `indexeddb`, `project`, `rendition`.
@@ -91,8 +91,17 @@ MiB/s (three 256 MiB runs).
   the rest) and a TIFF or HEIF still keep their original as the asset's
   bytes (stored, or linked when the project links files); the VP9 playback
   proxy or PNG the page's viewer needs is generated media under
-  `<key>:rendition`, reused on the next open instead of converting again,
-  and never stored in a project file. Such assets have `rendition: true`
+  `rendition:<BLAKE3 of the original>` (the asset's `contentHash`, which
+  for a linked original is its link's hash), reused on the next open
+  instead of converting again, and never stored in a project file. Naming
+  a rendition by its original's content, not by the storage key, keeps two
+  originals that share a sampled fingerprint from showing each other's
+  picture in the legacy viewer or the web export. While importing, the
+  hash is the one main computed for the copy it just made: the renderer
+  remembers the store record per stored Blob (`storedRecord`), so two
+  concurrent imports under one key keep their own. With the store keeping
+  originals, an import stores the video itself up front, so its hash is
+  known before the proxy is made. Such assets have `rendition: true`
   (videos also `playbackProxy: false`). When a still's rendition is gone
   (another Mac, a cleared store), main converts the kept original again
   (`media-store:convert-still`: the stored object or the verified link,
@@ -108,8 +117,9 @@ MiB/s (three 256 MiB runs).
   and used by the engine's handles and by relinking. The sampled
   fingerprint (three 64 KiB samples and the size) stays the storage key
   and the duplicate finder; only the full hash decides identity:
-  - reads, Desktop Save, and IndexedDB migration go by the asset's own
-    content hash, and a key that now names other content is never read in
+  - reads, Desktop Save (with the flag on, and with it off for media the
+    new engine imported, which lives only in the store), and IndexedDB
+    migration go by the asset's own content hash, and a key that now names other content is never read in
     its place (two room-tone recordings can share a fingerprint, and so a
     key; the later import repoints the key, the earlier asset keeps its
     content);
@@ -117,9 +127,11 @@ MiB/s (three 256 MiB runs).
     new asset (`MediaImport.match`); conversions, whose hash is of the
     converted bytes (`originalContentHash` is null for them), still match
     by fingerprint, so re-importing an original upgrades its converted copy;
-  - agent `import_media` confirms a fingerprint match by the full hash
-    before answering `already_imported` (section 20, "deduplicated on the
-    content hash").
+  - agent `import_media` checks every asset that shares the fingerprint
+    against the file's full hash (computed once) before answering
+    `already_imported` (section 20, "deduplicated on the content hash");
+    an asset without a known original hash (legacy media, conversions)
+    still matches by fingerprint when no asset matches by hash.
   Posters stay keyed by the storage key, so two assets that share a
   fingerprint share a poster thumbnail until one is re-imported.
 - The import summary says "Copied 12 clips · Linked 3" when anything was
@@ -169,13 +181,26 @@ project) reads the stored copy: content identity, not location, names it.
   bytes main read, and the copy read back from disk, match the SHA-256
   the PMV4 index records (PMV3 ranges, which record none, are compared
   with the bytes main read), and it is named by its BLAKE3. Records say
-  `source: "project"`. A range main cannot copy falls back to the page
+  `source: "project"`. An upload may finish without naming its BLAKE3 or
+  a SHA-256 only when main read at least one chunk and the page sent none;
+  an empty range has nothing for main to read and goes through the page.
+  A range main cannot copy falls back to the page
   (`PM.MediaStore.put`, streamed and verified by BLAKE3); a checksum
-  mismatch fails the open. Measured on the M4 Max (`MediaStore` driven
-  from Node in vitest with the built hash worker, 1 GiB of random bytes,
-  three runs): 1.43 to 1.50 s per GiB including verification (682 to
-  716 MiB/s); the longest synchronous step on main's thread per 1 MiB
-  chunk was 0.44 to 0.59 ms. The page path it replaces was not measured.
+  mismatch fails the open. The page path it replaces was not measured.
+  The measurement is committed as an opt-in test
+  (`src/main/media-store/project-range.measure.test.ts`): it drives the
+  real IPC handlers over a generated project file and prints seconds per
+  GiB and the longest event-loop stall in main:
+  `PM_MEDIA_STORE_MEASURE=1 npx vitest run src/main/media-store/project-range.measure.test.ts`
+  (`PM_MEDIA_STORE_MEASURE_MIB`, default 1024; `PM_MEDIA_STORE_MEASURE_RUNS`,
+  default 3). Measured with it on 2026-10-14 (M4 Max, built
+  hash worker pool, 1 GiB, three runs, `nice -n 15` while another
+  worktree's Electron and a Rust build were running): 2.07 to 2.22 s per
+  GiB including verification (461 to 496 MiB/s); the longest event-loop
+  stall in main was 3.0 to 5.0 ms. (An earlier, uncommitted harness that
+  drove `MediaStore` directly on an idle machine measured 1.43 to 1.50 s
+  per GiB; it timed the store's chunk calls rather than main's event
+  loop.)
   The page path (also the legacy engine's) now builds each range into a
   Blob from its bytes, folded every 64 MiB. It used to stage in OPFS, and
   Chromium keeps an IndexedDB blob from an OPFS file as a reference to
@@ -196,7 +221,14 @@ project) reads the stored copy: content identity, not location, names it.
   at the project root while a native-only feature is in use (today: linked
   media and interpretation overrides; lanes that add `keepFrameRate`,
   `pitch`, or project `color` add a check to `NATIVE_ONLY_CHECKS`) and
-  removes its own stamp once none is. With the flag off, boot, tabs, the
+  removes its own stamp once none is. Kept originals with renditions
+  (ProRes and other videos Chromium cannot play, TIFF and HEIF stills;
+  `rendition: true`) do not stamp the project: within this build the
+  legacy viewer shows them through the kept rendition, or converts the
+  original again when the rendition is gone. A project file saved with
+  them embeds the originals, so a release that predates renditions (and
+  has no media store to convert from) cannot display those assets; the
+  engine switch the plan requires is within one build. With the flag off, boot, tabs, the
   Projects screen, opening a file, and `pm-open-project` refuse a stamped
   project with "This project uses the new engine. Turn on Use New Engine to
   open it."
