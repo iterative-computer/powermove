@@ -870,7 +870,10 @@ async function openProjectFile(file: any, association?: { path: string; projectI
         await restoreProjectFileStream(document, media, PM.MediaStore, (offset, length) => bridge.read(token, offset, length),
           (completed, total) => opening.update({ label: file.name, completed, total }));
         o = document; mediaRestored = true;
-      } finally { await bridge.close(token); }
+      // Closing is cleanup: main closes a reader left idle for 120 s itself
+      // (every byte was read by then, while the media store was still
+      // writing), and a failed close must not fail the open or hide its error.
+      } finally { await bridge.close(token).catch(() => undefined); }
     } else if (file.native) o = unpackProjectFile(file.native.data);
     else if (file instanceof Blob) o = await unpackProjectFileBlob(file);
     else o = unpackProjectFile(file.arrayBuffer ? await file.arrayBuffer() : await file.text());
