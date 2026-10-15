@@ -102,12 +102,36 @@ MiB/s (three 256 MiB runs).
   concurrent imports under one key keep their own. With the store keeping
   originals, an import stores the video itself up front, so its hash is
   known before the proxy is made. Such assets have `rendition: true`
-  (videos also `playbackProxy: false`). When a still's rendition is gone
-  (another Mac, a cleared store), main converts the kept original again
-  (`media-store:convert-still`: the stored object or the verified link,
-  read through a temporary link that names its format, since objects are
-  named by hash). The legacy viewer reads the same renditions with the flag
-  off. The web export (`player/export-web.ts`) takes the rendition, or the
+  (videos also `playbackProxy: false`). When a rendition is gone (another
+  Mac, a cleared store), main converts the kept original again
+  (`media-store:convert-still` and `media-store:convert-video`: the stored
+  object or the verified link, read through a temporary link that names
+  its format, since objects are named by hash). When main has neither, it
+  says so (`missing: true`) and the page sends the bytes it holds
+  (`beginPut` with no key, then `media-store:convert-upload`): main checks
+  them against the page's BLAKE3, converts them, and removes them, so the
+  store keeps nothing. That is the flag-off case of a project file saved
+  with the new engine and opened on another Mac: the originals are only
+  in IndexedDB, and without this the legacy viewer could not show them.
+  The same path serves any restored video without a native path (bytes
+  read back from IndexedDB or the store), for example a playable H.264 file
+  whose first-frame probe timed out under load: before, its proxy failed
+  for want of a path and the asset was re-imported from its source path
+  with a new storage revision, so the next metadata-only Save uploaded it
+  again. The same symptom had a second cause, the one seen in
+  `project-file-media.spec.ts:9`: a boot or tab restore recovering the
+  same media from its source path could store it under the shared key
+  with a new revision just after a project file's media were restored
+  there. Opening a project file now waits for asset restores in flight
+  (`legacy/app.ts`, bounded at 60 s since a restore can wait on a cloud
+  prompt) before restoring the file's media. The
+  legacy viewer reads the same renditions with the flag off; renditions it
+  makes itself go to IndexedDB under the same `rendition:<BLAKE3>` key,
+  since the store is read-only with the flag off, and are reused there on
+  the next open. A restored asset with `rendition: true` keeps its
+  original as its bytes in either mode (the in-memory asset reports
+  `rendition: true`, `playbackProxy: false`), so a later Save embeds the
+  original, never the rendition. The web export (`player/export-web.ts`) takes the rendition, or the
   bytes the live asset shows, never an original a browser cannot play.
   Animated images are still stored as their conversion (an image
   sequence). Assets imported earlier, whose stored bytes are the
@@ -130,8 +154,11 @@ MiB/s (three 256 MiB runs).
   - agent `import_media` checks every asset that shares the fingerprint
     against the file's full hash (computed once) before answering
     `already_imported` (section 20, "deduplicated on the content hash");
-    an asset without a known original hash (legacy media, conversions)
-    still matches by fingerprint when no asset matches by hash.
+    an asset without a known original hash (legacy media) matches only
+    when its stored bytes hash the same as the file; one whose stored
+    bytes are a conversion (a playback proxy, an image sequence) cannot be
+    compared and still matches by fingerprint when no asset matches by
+    hash.
   Posters stay keyed by the storage key, so two assets that share a
   fingerprint share a poster thumbnail until one is re-imported.
 - The import summary says "Copied 12 clips · Linked 3" when anything was
@@ -224,8 +251,12 @@ project) reads the stored copy: content identity, not location, names it.
   removes its own stamp once none is. Kept originals with renditions
   (ProRes and other videos Chromium cannot play, TIFF and HEIF stills;
   `rendition: true`) do not stamp the project: within this build the
-  legacy viewer shows them through the kept rendition, or converts the
-  original again when the rendition is gone. A project file saved with
+  legacy viewer shows them through the kept rendition, or has main convert
+  the original again when the rendition is gone, from the store, the
+  link, or (flag off, fresh profile) the IndexedDB bytes the page sends.
+  `e2e/media-store.spec.ts` covers that case end to end: saved with the
+  flag on, opened with it off on a fresh profile, both shown, saved again
+  with the originals, reopened without converting again. A project file saved with
   them embeds the originals, so a release that predates renditions (and
   has no media store to convert from) cannot display those assets; the
   engine switch the plan requires is within one build. With the flag off, boot, tabs, the
@@ -264,7 +295,7 @@ contained, and they have no access to this IPC.
 | What | Command |
 |---|---|
 | BLAKE3 vectors, splits, subtrees | `vitest run src/shared/blake3.test.ts` |
-| Hashing, store, classification, relink, service, handles, IPC, project ranges, still conversion | `vitest run src/main/media-store` |
+| Hashing, store, classification, relink, service, handles, IPC, project ranges, still and video conversion, converting uploads | `vitest run src/main/media-store` |
 | PMV4 stored and linked records | `vitest run src/main/project-save.test.ts` |
 | Renderer store, decisions, bindings, content identity | `vitest run src/renderer/src/media/host-media-store.test.ts` |
 | Identity matching (fingerprint vs content hash) | `vitest run src/renderer/src/legacy/core/media.test.ts` |
@@ -299,6 +330,15 @@ addons rebuilt in the worktree, hidden Electron under the machine lock,
 (`c9883147`) and passed 5 of 5 after the fix. Unit tests over the media
 store, project files, save, agent tools, the engine host, the renderer's
 media, legacy core, assistant, and player suites: 1,010 pass, 1 skipped.
+
+Re-measured on 2026-10-14 after the review fixes for kept originals on a
+flag-off profile (same machine, hidden Electron under the machine lock,
+`--workers=1`): `e2e/media-store.spec.ts` (13), `project-file-media` (5),
+and `agent-media-management` (3), 22 of 22 in 1.2 min; then
+`project-file-media.spec.ts:9` with `--repeat-each=10`, 10 of 10 in 34 s.
+With the `raster.ts` from before the fix, the new probe test fails as
+expected: the reopened video was re-imported from its source path (no
+proxy) instead of converted from its bytes.
 
 ## Not done here
 
