@@ -115,6 +115,14 @@ export type EngineFrameMessage =
   | { type: 'surfacePool'; pool: SurfacePool }
   | { type: 'clock'; sample: ClockSample };
 
+/**
+ * What the engine connection tells the presentation besides frames: the
+ * engine routed the composition to the current (legacy) engine (capability
+ * routing, plan section 21), so its frames leave the screen until the
+ * engine draws again.
+ */
+export type EngineRouteMessage = { type: 'routed'; route: 'legacy'; reason: string };
+
 /** Whether a clock sample's line is moving. */
 export function running(sample: ClockSample | null): boolean {
   return !!sample && sample.state !== 'stopped' && sample.rate.num !== 0;

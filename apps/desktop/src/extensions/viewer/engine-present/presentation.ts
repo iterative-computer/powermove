@@ -33,7 +33,7 @@
 import { createWebGpuPainter, type FramePainter } from './gpu';
 import { EnginePresenter, type FrameLink, type FrameSource, type PresentedFrame, type Presenter, type PresenterStats, type TraceRecord } from './presenter';
 import { PresentWorker, type WorkerLike } from './worker-presenter';
-import type { EngineFrameMessage, OverlayGeometry, PathCommand, Quad, ViewerState, VsyncHint } from './protocol';
+import type { EngineFrameMessage, EngineRouteMessage, OverlayGeometry, PathCommand, Quad, ViewerState, VsyncHint } from './protocol';
 import { canvasColorSpace, displayIsEdr, ViewSequencer, type ViewInput } from './view-state';
 
 /** The service name the kernel's engine connection registers. */
@@ -59,8 +59,9 @@ export interface EngineViewerChannel extends FrameLink {
 
 export type EngineViewerHandlers = {
   /** A frame descriptor, surface pool, or clock sample for this session,
-   *  decoded, with its arrival time (performance.now()). */
-  message(message: EngineFrameMessage, arrivedMs: number): void;
+   *  decoded, with its arrival time (performance.now()); or the engine's
+   *  routing of the composition to the current engine. */
+  message(message: EngineFrameMessage | EngineRouteMessage, arrivedMs: number): void;
   /** The session ended (the engine restarted or its port closed). The
    *  viewer opens a new one after `onReady`. */
   closed(reason: string): void;
@@ -481,6 +482,13 @@ export class ViewerPresentation {
     const channel = this.options.service.open({
       message: (message, arrivedMs) => {
         if (this.channel !== opened) return;
+        if (message.type === 'routed') {
+          // The current engine draws this composition now: its canvas
+          // shows until the engine presents again.
+          this.latestFrame = null;
+          this.hide(this.canvasElement);
+          return;
+        }
         if (this.presenter) this.presenter.receive(message, arrivedMs);
         else this.hold(opened!, message, arrivedMs);
       },

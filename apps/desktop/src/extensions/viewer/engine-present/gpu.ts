@@ -65,7 +65,7 @@ struct Out { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
   return o;
 }
 @fragment fn fs(v: Out) -> @location(0) vec4f {
-  return vec4f(textureSampleBaseClampToEdge(src, samp, v.uv).rgb, 1.0);
+  return textureSampleBaseClampToEdge(src, samp, v.uv);
 }`;
 
 /** A page canvas, or the `OffscreenCanvas` it handed to the presentation worker. */
@@ -109,7 +109,10 @@ export async function createWebGpuPainter(canvas: PaintTarget, nav: NavigatorGpu
       context.configure({
         device,
         format: canvasFormat,
-        alphaMode: 'opaque',
+        // Premultiplied: around a document composition the engine's frame
+        // is transparent and the viewer's stage shows, as around today's
+        // canvas; frames are opaque wherever they draw.
+        alphaMode: 'premultiplied',
         colorSpace: colorSpace === 'displayP3' ? 'display-p3' : 'srgb',
         toneMapping: { mode: f16 ? 'extended' : 'standard' },
         usage: 0x10 | 0x01 // RENDER_ATTACHMENT | COPY_SRC
@@ -128,7 +131,7 @@ export async function createWebGpuPainter(canvas: PaintTarget, nav: NavigatorGpu
       });
       const encoder = device.createCommandEncoder();
       const pass = encoder.beginRenderPass({
-        colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }]
+        colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }]
       });
       pass.setPipeline(pipeline);
       pass.setBindGroup(0, group);

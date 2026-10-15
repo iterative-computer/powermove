@@ -798,6 +798,7 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
     // The service went away (engine off) or was replaced: detach; the
     // current engine's canvas underneath shows until a new one presents.
     enginePresentation.dispose(); enginePresentation = null; V.enginePresentation = null; engineFrameTag = '';
+    if (V.el) V.el.style.visibility = '';
     // The WebGL canvas takes the size it skipped while the engine presented.
     commitPendingResize();
   }
@@ -813,6 +814,9 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
     // Overlays redraw at each new frame tag (revision, view sequence), so
     // handles drawn from the frame's geometry never lead its pixels.
     presentation.onPresented((frame) => {
+      // Engine frames cover the composition; the WebGL canvas underneath
+      // rests (and must not show around a frame that lags a pan).
+      if (V.el && V.el.style.visibility !== 'hidden') V.el.style.visibility = 'hidden';
       const tag = `${frame.revision}:${frame.viewSeq}`;
       if (tag === engineFrameTag) return;
       engineFrameTag = tag;
@@ -821,6 +825,7 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
     // The WebGL canvas shows again (the engine session ended): it takes the
     // size it skipped while the engine presented, and draws.
     presentation.onHidden(() => {
+      if (V.el) V.el.style.visibility = '';
       commitPendingResize();
       schedulePresentation();
     });
