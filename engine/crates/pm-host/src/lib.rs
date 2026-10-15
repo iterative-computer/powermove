@@ -296,7 +296,7 @@ impl CliHost {
             .collect();
         for handle in &orphaned {
             if let Some(pending) = self.pending.remove(handle) {
-                let _ = std::fs::remove_file(&pending.temporary);
+                outputs::remove_temporary(&pending.temporary);
             }
         }
         self.table.revoke_port(port);
@@ -492,9 +492,7 @@ impl HostServices for Bound<'_> {
             .remove(&request.temporary)
             .expect("checked");
         self.host.forget(&request.temporary);
-        let discard = |p: &Path| {
-            let _ = std::fs::remove_file(p);
-        };
+        let discard = |p: &Path| outputs::remove_temporary(p);
         if !request.commit {
             discard(&pending.temporary);
             return Ok(OutputCommitted {
