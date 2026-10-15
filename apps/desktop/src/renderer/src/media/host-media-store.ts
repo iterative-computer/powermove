@@ -13,7 +13,7 @@
  * so turning the new engine off and on again loses nothing.
  */
 import { Blake3 } from '../../../shared/blake3';
-import type { AssetStorage, ClassifyResult, MediaBinding, MediaLink, MediaReadOpen, MediaRecordSource, MediaStoreBridge, MediaStoreRecord } from '../../../shared/media-store';
+import type { AssetStorage, ClassifyResult, ConversionKind, MediaBinding, MediaConversion, MediaLink, MediaReadOpen, MediaRecordSource, MediaStoreBridge, MediaStoreRecord } from '../../../shared/media-store';
 import { compactEditLog } from '../core/edit-log';
 import { applyEngineStamp } from '../../../shared/engine-stamp';
 
@@ -138,6 +138,15 @@ export type HostMediaStore = Omit<LegacyMediaStore, 'getForSave'> & {
    * storage key would not do: two files can share its sampled fingerprint.
    */
   rendition: { get(originalHash: string | null | undefined): Promise<Blob | null>; put(originalHash: string | null | undefined, blob: Blob): Promise<boolean> };
+  /**
+   * Has main convert a kept original (a TIFF or HEIF still, a video the
+   * viewer cannot decode) into the viewer's rendition: from the store
+   * object or the linked file when main has one, else from `original`, the
+   * bytes this page holds (with Use New Engine off, IndexedDB's copy of a
+   * project opened on another Mac). Read the result with
+   * `media.readPlaybackProxy`.
+   */
+  convert(kind: ConversionKind, original: Blob, ref: { hash?: string | null; link?: MediaLink | null; name: string }): Promise<MediaConversion>;
   /**
    * Opening a project file with the new engine: main copies an embedded
    * media range from the open file (`readToken`) straight into the store,
@@ -329,14 +338,41 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
     rendition: {
       async get(originalHash) {
         /* Also with the flag off: the legacy viewer reuses the rendition the
-           new engine kept instead of converting the original again. */
+           new engine kept instead of converting the original again. A
+           rendition the legacy engine made (flag off) is in IndexedDB. */
         if (!originalHash || !HASH.test(originalHash)) return null;
-        return readKey(renditionKey(originalHash), 'video/webm').catch(() => null);
+        const kept = await readKey(renditionKey(originalHash), 'video/webm').catch(() => null);
+        return kept ?? await legacy.get(renditionKey(originalHash)).catch(() => null);
       },
       async put(originalHash, blob) {
-        if (!enabled || !originalHash || !HASH.test(originalHash)) return false;
+        if (!originalHash || !HASH.test(originalHash) || !blob) return false;
+        // Flag off, the store is read-only: generated media goes where the legacy engine keeps its bytes.
+        if (!enabled) return legacy.put(renditionKey(originalHash), blob, { type: blob.type }).catch((error) => { warn(`could not keep the rendition of ${originalHash}`, error); return false; });
         try { remember(await streamToStore(host, renditionKey(originalHash), blob, { type: blob.type || 'video/webm', origin: 'rendition' })); return true; }
         catch (error) { warn(`could not keep the rendition of ${originalHash}`, error); return false; }
+      }
+    },
+
+    async convert(kind, original, ref) {
+      const request = ref.link ? { link: ref.link, name: ref.name } : ref.hash && HASH.test(ref.hash) ? { hash: ref.hash, name: ref.name } : null;
+      const byRef = kind === 'still' ? host.convertStill?.bind(host) : host.convertVideo?.bind(host);
+      let result: MediaConversion | null = null;
+      if (request && byRef) {
+        result = await byRef(request);
+        if (result.ok || !result.missing) return result;
+      }
+      if (!host.convertUpload || !original || !(original.size > 0)) {
+        return result ?? { ok: false, error: kind === 'still' ? 'Image conversion is unavailable' : 'Video conversion is unavailable' };
+      }
+      // Main has neither the object nor the file: it converts the bytes this page has, and keeps none of them.
+      const token = await host.beginPut({ key: null, type: original.type || '', size: original.size, origin: 'stream' });
+      let sent = false;
+      try {
+        const blake3 = await hashBlob(original, (data, offset) => host.putChunk(token, offset, data));
+        sent = true;
+        return await host.convertUpload(token, { kind, name: ref.name, blake3 });
+      } finally {
+        if (!sent) await host.abortPut(token).catch(() => undefined);
       }
     },
 
