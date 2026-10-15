@@ -134,7 +134,7 @@ export function exportSettingsFor(projectValue: unknown, input: ExportVideoInput
     range: { start: toTicks(Math.max(0, start)), end: toTicks(end) },
     audio: input.audio,
     motionBlur: input.motionBlur,
-    color: { kind: 'rec709QuickTime', candidate: 'cicp1131' },
+    color: { kind: 'rec709QuickTime', candidate: 'cicp1_13_1' },
     precision: 'float32',
     dither: !prores,
     draftFromProxies: false

@@ -74,7 +74,7 @@ describe('export settings', () => {
     expect(mp4).toEqual({
       format: { kind: 'h264' }, alpha: 'none', quality: 'high', size: { width: 1280, height: 720 },
       frameRate: { num: 30000, den: 1001 }, range: { start: 705_600_000, end: 3 * 705_600_000 },
-      audio: true, motionBlur: false, color: { kind: 'rec709QuickTime', candidate: 'cicp1131' }, precision: 'float32', dither: true, draftFromProxies: false
+      audio: true, motionBlur: false, color: { kind: 'rec709QuickTime', candidate: 'cicp1_13_1' }, precision: 'float32', dither: true, draftFromProxies: false
     });
     const prores = exportSettingsFor(project({ work: null }), { format: 'prores', range: 'work', audio: false, motionBlur: true, alpha: true });
     expect(prores.format).toEqual({ kind: 'proRes', profile: 'p4444' });

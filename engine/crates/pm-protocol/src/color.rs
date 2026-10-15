@@ -364,9 +364,13 @@ pub enum OutputColor {
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum QuickTimeTag {
-    /// CICP 1-13-1 (sRGB transfer).
+    /// CICP 1-13-1 (sRGB transfer). Named explicitly: ts-rs camel-cases
+    /// `Cicp1_13_1` as `cicp1131`, serde as `cicp1_13_1`, and the TypeScript
+    /// bindings must carry the wire name.
+    #[serde(rename = "cicp1_13_1")]
     Cicp1_13_1,
     /// CICP 1-2-1 with a gamma 2.2 tag.
+    #[serde(rename = "cicp1_2_1Gamma22")]
     Cicp1_2_1Gamma22,
 }
 
@@ -624,6 +628,18 @@ pub fn normalization(bits: u8, alignment: SampleAlignment, range: Range) -> Norm
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The TypeScript bindings name each tag as it travels (the desktop app
+    /// sends them in export settings).
+    #[cfg(feature = "ts")]
+    #[test]
+    fn quicktime_tags_have_the_same_names_on_the_wire_and_in_typescript() {
+        let ts = <QuickTimeTag as ts_rs::TS>::inline(&ts_rs::Config::default());
+        for tag in [QuickTimeTag::Cicp1_13_1, QuickTimeTag::Cicp1_2_1Gamma22] {
+            let wire = serde_json::to_string(&tag).unwrap();
+            assert!(ts.contains(&wire), "{wire} is not in {ts}");
+        }
+    }
 
     fn close(a: f64, b: f64, tolerance: f64) -> bool {
         (a - b).abs() <= tolerance
