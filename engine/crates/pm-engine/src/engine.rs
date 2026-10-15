@@ -39,6 +39,7 @@ use pm_protocol::version::{
 };
 use serde::Serialize;
 
+use crate::document::{DocumentUpdate, MediaAttempt, MediaTable, decode_canonical};
 use crate::inflight::{FailedItems, InFlightTracker, WorkToken};
 use crate::lease::{Evict, LeaseBudget, NoEviction};
 use crate::present::{FramePresenter, PresentContext};
@@ -150,6 +151,9 @@ struct Session {
     definitions: DefinitionSet,
     /// Patch batches could not be applied; the mirror is behind until a resync.
     stale: bool,
+    /// The document's media as the host resolved it for this session
+    /// (interactive sessions whose presenter renders documents).
+    media: MediaTable,
 }
 
 /// A call this engine made to the host, keyed by its request id on the host port.
@@ -166,6 +170,18 @@ enum HostCall {
     Lease,
     Mint {
         token: u64,
+    },
+    /// A `mediaRead` handle for one of a session's assets (document host).
+    MediaMint {
+        session: SessionId,
+        asset: String,
+        generation: u64,
+    },
+    /// Its path, through `resolveHandle`.
+    MediaResolve {
+        session: SessionId,
+        asset: String,
+        generation: u64,
     },
 }
 
@@ -236,8 +252,16 @@ pub struct Engine {
     minted: Vec<MintOutcome>,
     patch_decoder: Option<Box<dyn PatchBodyDecoder>>,
     presenter: Option<Box<dyn FramePresenter>>,
+    /// Document updates for the presenter, handed over after each input.
+    pending_updates: Vec<(SessionId, DocumentUpdate)>,
     logged_once: BTreeSet<String>,
     overdue_logged: Option<u64>,
+}
+
+/// A decoded patch body.
+enum Decoded {
+    Ops(std::sync::Arc<[pm_model::Op]>),
+    Patches(std::sync::Arc<[pm_model::Patch]>),
 }
 
 /// Collects actions while handling one input.
@@ -343,6 +367,7 @@ impl Engine {
             minted: Vec::new(),
             patch_decoder: None,
             presenter: None,
+            pending_updates: Vec::new(),
             logged_once: BTreeSet::new(),
             overdue_logged: None,
         }
@@ -562,6 +587,7 @@ impl Engine {
                 self.dispatch(port, kind, envelope, now, &mut out);
             }
         }
+        self.flush_document_updates(now, &mut out);
         out.0
     }
 
@@ -896,6 +922,7 @@ impl Engine {
                 mirror: None,
                 definitions: DefinitionSet::default(),
                 stale: false,
+                media: MediaTable::default(),
             },
         );
         self.respond(
@@ -946,6 +973,16 @@ impl Engine {
         let Some(sid) = self.owned_session(port, id, session, out) else {
             return;
         };
+        if self.sessions[&sid].document != resync.document
+            && self.sessions[&sid].role == SessionRole::Interactive
+            && resync.document.is_valid()
+        {
+            // The window opened another project: an interactive session
+            // follows its window, and a resync replaces the whole mirror.
+            let session = self.sessions.get_mut(&sid).expect("owned");
+            session.document = resync.document.clone();
+            session.media.clear();
+        }
         if self.sessions[&sid].document != resync.document {
             let error = request_error(
                 id,
@@ -1016,6 +1053,9 @@ impl Engine {
                 ));
             }
         };
+        let shared = self
+            .presents_documents()
+            .then(|| std::sync::Arc::new(value.clone()));
         let mirror = pm_model::Document::new(Some(value), resync.revision.get());
         let digest = mirror_digest(&mirror);
         if ContentHash(digest) != resync.hash {
@@ -1031,7 +1071,124 @@ impl Engine {
         session.revisions.resynced(resync);
         session.mirror = Some(mirror);
         session.stale = false;
+        if let Some(root) = shared {
+            self.pending_updates.push((
+                sid,
+                DocumentUpdate::Replace {
+                    root: Some(root),
+                    revision: resync.revision,
+                },
+            ));
+        }
         Ok(())
+    }
+
+    /// Whether the presenter renders session documents (the document host
+    /// forwards updates and resolves media only then).
+    fn presents_documents(&self) -> bool {
+        self.presenter
+            .as_ref()
+            .is_some_and(|p| p.renders_documents())
+    }
+
+    /// Hands queued document updates to the presenter and starts resolving
+    /// the media they introduced.
+    fn flush_document_updates(&mut self, now: HostMicros, out: &mut Out) {
+        if self.pending_updates.is_empty() {
+            return;
+        }
+        let updates = std::mem::take(&mut self.pending_updates);
+        for (sid, update) in updates {
+            let Some(port) = self.sessions.get(&sid).map(|s| s.port) else {
+                continue;
+            };
+            self.with_presenter(out, |p, ctx| p.document(ctx, port, sid, update));
+            self.sync_media(sid, now, out);
+        }
+    }
+
+    /// Reconciles a session's media with its mirror and asks the host for
+    /// what is new or changed.
+    fn sync_media(&mut self, sid: SessionId, now: HostMicros, out: &mut Out) {
+        let Some(session) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        let port = session.port;
+        let work = session
+            .media
+            .reconcile(session.mirror.as_ref().and_then(|m| m.root()));
+        for asset in work.removed {
+            self.with_presenter(out, |p, ctx| p.media(ctx, port, sid, &asset, None));
+        }
+        for attempt in work.start {
+            self.start_media(sid, attempt, now, out);
+        }
+    }
+
+    fn start_media(
+        &mut self,
+        sid: SessionId,
+        attempt: MediaAttempt,
+        now: HostMicros,
+        out: &mut Out,
+    ) {
+        let request = Request::MintHandle(MintHandle {
+            kind: CapabilityKind::MediaRead {
+                asset: attempt.asset.as_str().into(),
+            },
+            session: sid,
+        });
+        let called = self
+            .open_host()
+            .and_then(|host| self.call_host(host, request, Some(sid), out));
+        match called {
+            Some(id) => {
+                self.host_calls.insert(
+                    id,
+                    HostCall::MediaMint {
+                        session: sid,
+                        asset: attempt.asset,
+                        generation: attempt.generation,
+                    },
+                );
+            }
+            None => self.media_failed(sid, &attempt.asset, attempt.generation, now, out),
+        }
+    }
+
+    fn media_failed(
+        &mut self,
+        sid: SessionId,
+        asset: &str,
+        generation: u64,
+        now: HostMicros,
+        out: &mut Out,
+    ) {
+        let Some(session) = self.sessions.get_mut(&sid) else {
+            return;
+        };
+        let port = session.port;
+        if session.media.failed(asset, generation, now.get()) {
+            self.with_presenter(out, |p, ctx| p.media(ctx, port, sid, asset, None));
+        }
+    }
+
+    /// Restarts media whose retry is due.
+    fn retry_media(&mut self, now: HostMicros, out: &mut Out) {
+        let due: Vec<(SessionId, MediaAttempt)> = self
+            .sessions
+            .iter_mut()
+            .flat_map(|(sid, s)| {
+                s.media
+                    .due(now.get())
+                    .into_iter()
+                    .map(|a| (*sid, a))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (sid, attempt) in due {
+            self.start_media(sid, attempt, now, out);
+        }
     }
 
     fn finish_resync(
@@ -1234,37 +1391,48 @@ impl Engine {
                 self.report_failure(port, sid, gap.applied, error, out);
             }
             Ok(Admission::Apply) => {
+                // A host-installed decoder (tests) produces leaf patches; the
+                // built-in one decodes canonicalV1 into operations.
                 let decoded = match &self.patch_decoder {
-                    Some(decoder) => decoder.decode(batch.encoding, &batch.body.0),
-                    None => {
-                        let session = self.sessions.get_mut(&sid).expect("exists");
-                        let applied = session.revisions.applied();
-                        if !session.stale {
-                            session.stale = true;
-                            let error = EngineError::new(
-                                ErrorCode::Unsupported,
-                                ErrorScope::Session { session: sid },
-                                "The new engine cannot apply patches yet; it keeps the last resynced document.",
-                            );
-                            self.report_failure(port, sid, applied, error, out);
-                        }
-                        return;
-                    }
+                    Some(decoder) => decoder
+                        .decode(batch.encoding, &batch.body.0)
+                        .map(|patches| Decoded::Patches(patches.into())),
+                    None => decode_canonical(batch.encoding, &batch.body.0)
+                        .map(|ops| Decoded::Ops(ops.into())),
                 };
+                let forward = self.presents_documents();
                 let session = self.sessions.get_mut(&sid).expect("exists");
                 let applied = session.revisions.applied();
-                let result = match (decoded, session.mirror.as_mut()) {
-                    (Ok(patches), Some(mirror)) => mirror
-                        .apply_at(&patches, batch.revision.get())
+                let result = match (&decoded, session.mirror.as_mut()) {
+                    (Ok(Decoded::Patches(patches)), Some(mirror)) => mirror
+                        .apply_at(patches, batch.revision.get())
+                        .map(|_| ())
+                        .map_err(|e| e.to_string()),
+                    (Ok(Decoded::Ops(ops)), Some(mirror)) => mirror
+                        .apply_ops_at(ops, batch.revision.get())
                         .map(|_| ())
                         .map_err(|e| e.to_string()),
                     (Ok(_), None) => Err("no document yet; resync first".into()),
-                    (Err(e), _) => Err(e),
+                    (Err(e), _) => Err(e.clone()),
                 };
                 match result {
                     Ok(()) => {
                         session.revisions.commit(&batch);
                         session.stale = false;
+                        if forward {
+                            let update = match decoded {
+                                Ok(Decoded::Ops(ops)) => DocumentUpdate::Ops {
+                                    ops,
+                                    revision: batch.revision,
+                                },
+                                Ok(Decoded::Patches(patches)) => DocumentUpdate::Patches {
+                                    patches,
+                                    revision: batch.revision,
+                                },
+                                Err(_) => unreachable!("applied"),
+                            };
+                            self.pending_updates.push((sid, update));
+                        }
                         let applied = PatchesApplied {
                             document: batch.document.clone(),
                             revision: batch.revision,
@@ -1396,6 +1564,73 @@ impl Engine {
                 token,
                 result: Ok(grant),
             }),
+            (
+                HostCall::MediaMint {
+                    session,
+                    asset,
+                    generation,
+                },
+                Response::Handle(grant),
+            ) => {
+                let wanted = self
+                    .sessions
+                    .get_mut(&session)
+                    .is_some_and(|s| s.media.minted(&asset, generation));
+                if !wanted {
+                    return;
+                }
+                let request = Request::ResolveHandle(ResolveHandle {
+                    handle: grant.handle,
+                    session,
+                });
+                let called = self
+                    .open_host()
+                    .and_then(|host| self.call_host(host, request, Some(session), out));
+                match called {
+                    Some(id) => {
+                        self.host_calls.insert(
+                            id,
+                            HostCall::MediaResolve {
+                                session,
+                                asset,
+                                generation,
+                            },
+                        );
+                    }
+                    None => self.media_failed(session, &asset, generation, now, out),
+                }
+            }
+            (
+                HostCall::MediaResolve {
+                    session,
+                    asset,
+                    generation,
+                },
+                Response::HandleResolved(resolved),
+            ) => {
+                let readable = matches!(
+                    resolved.access,
+                    HandleAccess::Read | HandleAccess::ReadWrite
+                ) && matches!(&resolved.kind, CapabilityKind::MediaRead { asset: a } if a.as_str() == asset);
+                if !readable {
+                    out.log(
+                        LogLevel::Warn,
+                        format!("the host resolved asset {asset} to a handle of another kind"),
+                    );
+                    self.media_failed(session, &asset, generation, now, out);
+                    return;
+                }
+                let path = std::path::PathBuf::from(&resolved.path);
+                let Some(state) = self.sessions.get_mut(&session) else {
+                    return;
+                };
+                let port = state.port;
+                if state.media.resolved(&asset, generation, path.clone()) {
+                    self.with_presenter(out, |p, ctx| {
+                        p.media(ctx, port, session, &asset, Some(path))
+                    });
+                }
+            }
             (call, body) => out.log(
                 LogLevel::Error,
                 format!("host answered {call:?} with {:?}", body.kind()),
@@ -1422,6 +1657,28 @@ impl Engine {
                 token,
                 result: Err(error),
             }),
+            HostCall::MediaMint {
+                session,
+                asset,
+                generation,
+            }
+            | HostCall::MediaResolve {
+                session,
+                asset,
+                generation,
+            } => {
+                if error.code != ErrorCode::MediaOffline {
+                    self.log_once(
+                        out,
+                        format!(
+                            "media for the viewer could not be resolved: {}",
+                            error.message
+                        ),
+                    );
+                }
+                let now = crate::clock::host_now();
+                self.media_failed(session, &asset, generation, now, out);
+            }
         }
     }
 
@@ -1583,6 +1840,8 @@ impl Engine {
     /// breadcrumb. Call every 100 ms or so, and after `begin_work`.
     pub fn tick(&mut self, now: HostMicros) -> Vec<Action> {
         let mut out = Out::default();
+        self.retry_media(now, &mut out);
+        self.flush_document_updates(now, &mut out);
         self.flush_inflight(&mut out);
         let active = !self.sessions.is_empty();
         if let Some(usage) = self.lease.poll_report(now, active)

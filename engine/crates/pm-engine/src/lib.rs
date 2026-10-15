@@ -4,6 +4,7 @@
 //! See docs/rust-engine.md and docs/engine/host-processes.md.
 
 pub mod clock;
+pub mod document;
 pub mod engine;
 pub mod inflight;
 pub mod lease;
