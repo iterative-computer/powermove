@@ -144,10 +144,30 @@ describe('output destinations', () => {
   it('sweeps only its own leftover temporary files', async () => {
     const auto = path.join(dir, 'Powermove');
     await outputs.destination(agent(), 1, 1);
+    // The job engine's work file beside a temporary output (pm_export AtomicOutput::in_place).
+    await writeFile(path.join(auto, '.powermove-0123456789abcdef.part.fedcba9876543210.partial.mov'), 'x');
     await writeFile(path.join(auto, '.powermove-zz.part'), '');
+    await writeFile(path.join(auto, '.powermove-0123456789abcdef.part.notours'), '');
     await writeFile(path.join(auto, 'keep.mov'), '');
-    expect(await outputs.sweepAutomaticDirectory()).toBe(1);
-    expect((await readdir(auto)).sort()).toEqual(['.powermove-zz.part', 'keep.mov']);
+    expect(await outputs.sweepAutomaticDirectory()).toBe(2);
+    expect((await readdir(auto)).sort()).toEqual(['.powermove-0123456789abcdef.part.notours', '.powermove-zz.part', 'keep.mov']);
+  });
+
+  it('removes the job engine\'s work files with a cancelled, failed, or abandoned output', async () => {
+    const auto = path.join(dir, 'Powermove');
+    const work = (temporary: string) => `${temporary}.0123456789abcdef.partial.mp4`;
+    const cancelled = await outputs.destination(agent('A', 'mp4'), 1, 2);
+    const cancelledPath = handles.resolve(cancelled.temporary, 1, 2).path;
+    await writeFile(work(cancelledPath), 'half an export');
+    await outputs.commit({ job: 'job-1', temporary: cancelled.temporary, commit: false, verification: null }, 1, 2);
+    const crashed = await outputs.destination(agent('B', 'mp4'), 1, 2);
+    const crashedPath = handles.resolve(crashed.temporary, 1, 2).path;
+    await writeFile(work(crashedPath), 'half an export');
+    const kept = await outputs.destination(agent('C', 'mp4'), 1, 3);
+    const keptPath = handles.resolve(kept.temporary, 1, 3).path;
+    await writeFile(work(keptPath), 'running');
+    expect(await outputs.abandonPort(2)).toBe(1);
+    expect((await readdir(auto)).sort()).toEqual([path.basename(keptPath), path.basename(work(keptPath))].sort());
   });
 });
 
