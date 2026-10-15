@@ -1,0 +1,108 @@
+{
+  "run": "app-latency-today-idle-r8",
+  "config": {
+    "scenario": "latency",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "today",
+    "load": false,
+    "loadProfile": null,
+    "edr": "auto",
+    "rawInput": false,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 20000,
+    "inputModes": [
+      "pan",
+      "drag"
+    ]
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "machineLoad": {
+    "before": [
+      4.4130859375,
+      5.71142578125,
+      5.53271484375
+    ],
+    "after": [
+      4.55517578125,
+      5.330078125,
+      5.408203125
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 62,
+    "offsetUs": 226808288473.00003
+  },
+  "load": null,
+  "bridge": null,
+  "latency": {
+    "pan": {
+      "events": 2401,
+      "dispatches": 2354,
+      "draws": 2496,
+      "unmatched": 0,
+      "unpresented": 11,
+      "presentation": {
+        "thread": "main",
+        "timing": "PipelineReporter"
+      },
+      "pointerToPixelMs": {
+        "n": 2390,
+        "p50": 15.97,
+        "p95": 23.77,
+        "p99": 25.16,
+        "max": 41.71
+      },
+      "pointerToPixelWithDropsMs": {
+        "n": 2401,
+        "p50": 16.02,
+        "p95": 23.97,
+        "p99": 31.79,
+        "max": 48.02
+      }
+    },
+    "drag": {
+      "events": 2401,
+      "dispatches": 1788,
+      "draws": 1788,
+      "unmatched": 0,
+      "unpresented": 113,
+      "presentation": {
+        "thread": "main",
+        "timing": "PipelineReporter"
+      },
+      "pointerToPixelMs": {
+        "n": 2288,
+        "p50": 24.26,
+        "p95": 32.61,
+        "p99": 33.42,
+        "max": 41.23
+      },
+      "pointerToPixelWithDropsMs": {
+        "n": 2401,
+        "p50": 24.29,
+        "p95": 32.74,
+        "p99": 40.93,
+        "max": 57.59
+      }
+    }
+  }
+}

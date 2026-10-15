@@ -1,0 +1,764 @@
+{
+  "run": "app-playback-engine-load-r4",
+  "config": {
+    "scenario": "playback",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "engine",
+    "load": true,
+    "loadProfile": "no-autosave",
+    "edr": "auto",
+    "rawInput": false,
+    "rawGestures": true,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 60000
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "machineLoad": {
+    "before": [
+      3.90869140625,
+      5.98046875,
+      5.828125
+    ],
+    "after": [
+      4.98193359375,
+      5.37451171875,
+      5.58203125
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 43,
+    "offsetUs": 183963841302.5
+  },
+  "load": {
+    "documentBytes": 0,
+    "longTasks": {
+      "n": 63,
+      "ms": {
+        "n": 63,
+        "p50": 50.000499999994645,
+        "max": 50.02312499999243
+      }
+    },
+    "autosaves": {
+      "n": 0,
+      "mainThreadMs": null,
+      "totalMs": null
+    },
+    "agent": {
+      "requests": 1153,
+      "replies": 1153,
+      "replyBytes": 90731962,
+      "mainMsP50": 0.06579200000851415
+    },
+    "resizes": {
+      "n": 12,
+      "steps": 732
+    },
+    "eventCount": 75
+  },
+  "bridge": {
+    "launch": 1,
+    "policy": "unsigned-dev-bypass",
+    "name": "com.powermove.engine-bridge.9f6ccc58b645a07577bf76a7c2dd5199",
+    "accepted": {
+      "pid": 74804,
+      "pidversion": 2516487
+    },
+    "rejections": 0,
+    "surfaces": 8,
+    "imports": 8,
+    "sends": 8,
+    "sendFailures": 0,
+    "sendRetries": 0,
+    "undelivered": 0,
+    "retired": 0,
+    "allReleased": 0,
+    "reclaimed": 0,
+    "gone": false,
+    "held": {
+      "count": 8,
+      "bytes": 167731200
+    },
+    "live": 8
+  },
+  "playback": {
+    "window": {
+      "seconds": 60.01,
+      "displayHz": 120.0006103515625,
+      "contentFps": 30,
+      "reporterFrames": 14010
+    },
+    "app": {
+      "project": {
+        "name": "Powermove ad",
+        "w": 1920,
+        "h": 1080,
+        "fps": 30,
+        "layers": 884
+      },
+      "stage": {
+        "width": 1195,
+        "height": 546,
+        "dpr": 2
+      },
+      "quality": 1
+    },
+    "frames": {
+      "expected": 1793,
+      "notDrawn": 17,
+      "notPresented": 93,
+      "drops": 110,
+      "presented": 1683,
+      "offSlot": 1181
+    },
+    "jitterAbsMs": {
+      "n": 1683,
+      "p50": 8.059,
+      "p95": 17.104,
+      "p99": 25.474,
+      "max": 50.121
+    },
+    "intervalErrorAbsMs": {
+      "n": 1601,
+      "p50": 0,
+      "p95": 16.667,
+      "p99": 25,
+      "max": 33.333
+    },
+    "irregularIntervals": 553,
+    "rafToPresentMs": {
+      "n": 1683,
+      "p50": 28.15,
+      "p95": 36.63,
+      "p99": 44.89,
+      "max": 78.62
+    },
+    "drawMainThreadMs": {
+      "n": 1785,
+      "p50": 1.1,
+      "p95": 9.7,
+      "p99": 13.4,
+      "max": 26.6
+    },
+    "arrivalLeadMs": {
+      "n": 1802,
+      "p50": -130.18,
+      "p95": -105.28,
+      "p99": -93.64,
+      "max": -81.51
+    },
+    "rafGapMs": {
+      "n": 6163,
+      "p50": 8.3,
+      "p95": 25,
+      "p99": 33.4,
+      "max": 50.7
+    },
+    "rafGapsOver25Ms": 239,
+    "missing": [
+      {
+        "k": 89,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 91,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 95,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 103,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 106,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 107,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 108,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 229,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 233,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 234,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 239,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 256,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 258,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 265,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 376,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 380,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 381,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 384,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 388,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 391,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 392,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 525,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 527,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 530,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 532,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 534,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 539,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 554,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 558,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 559,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 563,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 564,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 676,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 677,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 678,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 682,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 690,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 693,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 694,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 695,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 702,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 703,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 706,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 707,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 709,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 710,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 712,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 826,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 830,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 832,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 838,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 840,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 841,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 851,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 855,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 856,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 975,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 979,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 984,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 987,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 998,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1002,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1006,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1011,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1012,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1013,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1014,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1125,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1126,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1130,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1131,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1137,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1138,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1142,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1150,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1155,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1158,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1161,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1163,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1164,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1275,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1276,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1284,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1288,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1304,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1309,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1310,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1425,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1429,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1432,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1438,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1442,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1452,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1456,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1464,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1575,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1580,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1581,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1582,
+        "state": "STATE_DROPPED",
+        "near": "longTask+resize"
+      },
+      {
+        "k": 1586,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1604,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1725,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1727,
+        "state": "STATE_NO_UPDATE_DESIRED",
+        "near": "resize"
+      },
+      {
+        "k": 1740,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1745,
+        "state": "not-drawn",
+        "near": "resize"
+      },
+      {
+        "k": 1752,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1756,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1757,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1758,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      },
+      {
+        "k": 1760,
+        "state": "STATE_DROPPED",
+        "near": "resize"
+      }
+    ],
+    "pipelineDepthRefreshes": {
+      "2": 827,
+      "3": 647,
+      "4": 184,
+      "5": 13,
+      "6": 5,
+      "7": 4,
+      "8": 1,
+      "9": 2
+    },
+    "presenter": {
+      "received": 1851,
+      "drawn": 1830,
+      "dropped": {
+        "late": 17
+      },
+      "released": 1846,
+      "parked": 0,
+      "parkTimeouts": 0,
+      "staleGeneration": 0,
+      "maxQueued": 5,
+      "generation": 1,
+      "sessions": 1,
+      "viewSeq": 412
+    },
+    "receiver": {
+      "launch": 1,
+      "held": 8,
+      "received": 8,
+      "released": 0,
+      "videoFrames": 1851,
+      "misses": 0,
+      "errors": []
+    }
+  }
+}

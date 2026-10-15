@@ -20,7 +20,7 @@
  * app; the bridge's integration test and the S1 harness do.
  */
 import { decisionOffsetUs, JitterBuffer, type Queued } from './jitter-buffer';
-import { nextVsync, VsyncEstimator, type VsyncFit } from './display-timing';
+import { HINT_INTERVAL_MS, hintChanged, nextVsync, VsyncEstimator, type VsyncFit } from './display-timing';
 import type { FramePainter } from './gpu';
 import type {
   ClockSample,
@@ -29,7 +29,8 @@ import type {
   FrameRelease,
   OverlayGeometry,
   SurfacePool,
-  ViewerState
+  ViewerState,
+  VsyncHint
 } from './protocol';
 
 /** The engine connection as the presenter uses it. */
@@ -78,6 +79,25 @@ export type PresenterOptions = {
    * presenter's video clock stamps when they are sent.
    */
   hostOffsetUs?: () => number | null;
+  /**
+   * The display's refresh grid on the host clock changed (amendment 18):
+   * the presentation re-sends its viewer state with the hint, so the
+   * engine starts timed frames just after the compositor's GPU work.
+   */
+  onVsync?: (hint: VsyncHint) => void;
+  /**
+   * The pool generation the session already uses (a presenter that takes
+   * over a running session), so the next pool retires it.
+   */
+  generation?: number;
+  /**
+   * Draw frames shown at the next refresh (paused, scrub, gesture) as soon
+   * as they arrive instead of at the next animation frame. Only for a
+   * canvas whose frames go to the compositor on their own (a worker's
+   * `OffscreenCanvas`): a page canvas only commits with the page's next
+   * frame anyway.
+   */
+  drawOnArrival?: boolean;
 };
 
 type Payload = { frame: VideoFrame };
@@ -104,7 +124,25 @@ export type TraceRecord = {
 
 const PARK_TIMEOUT_MS = 1000;
 
-export class EnginePresenter {
+/**
+ * What the viewer's presentation needs from a presenter: `EnginePresenter`
+ * on the page's main thread, or `WorkerPresenter` (worker-presenter.ts),
+ * which runs one in a worker.
+ */
+export interface Presenter {
+  readonly stats: PresenterStats;
+  setViewerState(state: ViewerState): void;
+  receive(message: EngineFrameMessage, arrivedMs?: number): void;
+  onPresented(listener: (frame: PresentedFrame) => void): () => void;
+  /** Moves the loop to another window's animation frames (main thread only). */
+  retarget(requestFrame: (cb: (t: number) => void) => number, cancelFrame: (id: number) => void, displayHz?: number | null): void;
+  start(): void;
+  /** The per-frame trace recorded since the last call (S1 harness), emptied. */
+  takeTrace(): Promise<TraceRecord | null>;
+  dispose(): void;
+}
+
+export class EnginePresenter implements Presenter {
   private readonly buffer = new JitterBuffer<Payload>();
   private vsync: VsyncEstimator;
   private cancelFrame: (id: number) => void = (id) => cancelAnimationFrame(id);
@@ -120,6 +158,8 @@ export class EnginePresenter {
   /** The last timed frame's duration (ticks), for the decision phase. */
   private lastFrameTicks: number | null = null;
   private listeners = new Set<(frame: PresentedFrame) => void>();
+  private hint: VsyncHint | null = null;
+  private hintSentMs = -Infinity;
   private raf = 0;
   private disposed = false;
   private unsubscribe: () => void;
@@ -141,6 +181,8 @@ export class EnginePresenter {
     this.vsync = new VsyncEstimator(options.displayHz ?? null);
     this.now = options.now ?? (() => performance.now());
     this.trace = options.trace ? { arrivals: [], draws: [], drops: [], releases: [], rafs: [] } : null;
+    this.generation = options.generation ?? 0;
+    this.stats.generation = this.generation;
     this.unsubscribe = options.source.onSurface((generation, poolIndex) => this.unpark(generation, poolIndex));
   }
 
@@ -175,6 +217,9 @@ export class EnginePresenter {
     this.vsync = new VsyncEstimator(displayHz);
     this.offsetKey = '';
     this.offsetUs = 0;
+    // Another display: its grid replaces the old one as soon as it is fitted.
+    this.hint = null;
+    this.hintSentMs = -Infinity;
     this.start(requestFrame, cancelFrame);
   }
 
@@ -199,11 +244,18 @@ export class EnginePresenter {
   private onClock(sample: ClockSample, arrivedMs: number): void {
     if (this.clock && sample.seq <= this.clock.seq && sample.epoch === this.clock.epoch) return;
     this.clock = sample;
-    // The sample was made at its host time and arrived here no earlier:
-    // the smallest difference bounds the clock offset (one-way latency of
-    // the engine → renderer port, about 0.1 to 0.5 ms).
+    // The sample was made at its host time and arrived here no earlier, so
+    // host = ms × 1000 + offset gives offset ≥ hostTime − arrivedMs × 1000:
+    // every sample is a lower bound and the largest is the tightest (the
+    // one-way latency of the engine → renderer port, about 0.1 to 0.5 ms,
+    // when the main thread was free). A sample that waited behind a long
+    // task bounds it loosely and must not move it: taking the smallest
+    // difference instead (as before) let one stalled sample put the
+    // presenter's clock that far behind the engine's for the rest of the
+    // session (measured in the real app: about 110 ms, so the jitter buffer
+    // held twice its render-ahead and the engine ran out of free slots).
     const offset = sample.hostTime - arrivedMs * 1000;
-    if (this.hostOffsetUs === null || offset < this.hostOffsetUs) this.hostOffsetUs = offset;
+    if (this.hostOffsetUs === null || offset > this.hostOffsetUs) this.hostOffsetUs = offset;
   }
 
   /** Host µs (the engine's clock) for a performance.now() time. */
@@ -223,18 +275,41 @@ export class EnginePresenter {
   }
 
   private onFrame(desc: FrameDescriptor, arrivedMs: number): void {
-    this.stats.received++;
-    this.trace?.arrivals.push([desc.seq, desc.pts, arrivedMs, desc.viewSeq, desc.duration === null ? 0 : 1]);
-    if (desc.poolGeneration < this.generation) {
-      // The engine already replaced that pool: its ledger is gone.
-      this.stats.staleGeneration++;
-      return;
-    }
+    if (!this.accept(desc, arrivedMs)) return;
     const frame = this.options.source.videoFrame(desc.poolGeneration, desc.poolIndex);
     if (!frame) {
       // The import is still on its way from main.
       this.stats.parked++;
       this.parked.push({ desc, since: arrivedMs });
+      return;
+    }
+    this.enqueue(desc, frame, arrivedMs);
+  }
+
+  /** Counts and traces an arriving descriptor; false when its pool is gone. */
+  private accept(desc: FrameDescriptor, arrivedMs: number): boolean {
+    this.stats.received++;
+    this.trace?.arrivals.push([desc.seq, desc.pts, arrivedMs, desc.viewSeq, desc.duration === null ? 0 : 1]);
+    if (desc.poolGeneration < this.generation) {
+      // The engine already replaced that pool: its ledger is gone.
+      this.stats.staleGeneration++;
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * A descriptor whose `VideoFrame` the caller already made (the
+   * off-main-thread presenter: the page's main thread asks the preload for
+   * it and transfers it here). The presenter owns `frame` from now on.
+   */
+  present(desc: FrameDescriptor, frame: VideoFrame, arrivedMs = this.now()): void {
+    if (this.disposed) {
+      frame.close();
+      return;
+    }
+    if (!this.accept(desc, arrivedMs)) {
+      frame.close();
       return;
     }
     this.enqueue(desc, frame, arrivedMs);
@@ -256,6 +331,10 @@ export class EnginePresenter {
     const item: Queued<Payload> = { desc, payload: { frame }, arrivedMs };
     for (const old of this.buffer.push(item)) this.dropItem(old, 'superseded');
     this.stats.maxQueued = Math.max(this.stats.maxQueued, this.buffer.size);
+    if (desc.duration === null && this.options.drawOnArrival && this.raf) {
+      const show = this.buffer.takeImmediate();
+      if (show) this.draw(show, this.now());
+    }
   }
 
   /** One refresh: called at requestAnimationFrame with its timestamp. */
@@ -263,6 +342,7 @@ export class EnginePresenter {
     if (this.disposed) return;
     this.trace?.rafs.push(rafMs);
     const fit = this.vsync.sample(rafMs);
+    this.updateHint(rafMs, fit);
     this.expireParked(rafMs);
     const decisionMs = this.decisionMs(rafMs, fit);
     const atUs = this.hostUs(decisionMs);
@@ -270,6 +350,28 @@ export class EnginePresenter {
     const { show, drop } = this.buffer.pick(atUs ?? 0, this.clock);
     for (const { item, reason } of drop) this.dropItem(item, reason);
     if (show) this.draw(show, rafMs);
+  }
+
+  takeTrace(): Promise<TraceRecord | null> {
+    const t = this.trace;
+    return Promise.resolve(t && { arrivals: t.arrivals.splice(0), draws: t.draws.splice(0), drops: t.drops.splice(0), releases: t.releases.splice(0), rafs: t.rafs.splice(0) });
+  }
+
+  /** The refresh grid on the host clock, for the engine (amendment 18). */
+  get vsyncHint(): VsyncHint | null {
+    return this.hint;
+  }
+
+  private updateHint(rafMs: number, fit: VsyncFit | null): void {
+    if (!fit || !this.options.onVsync) return;
+    const host = this.hostUs(fit.vsyncMs);
+    if (host === null) return;
+    const next: VsyncHint = { hostTime: Math.round(host), periodUs: fit.periodMs * 1000 };
+    if (!hintChanged(this.hint, next)) return;
+    if (this.hint && !fit.jumped && rafMs - this.hintSentMs < HINT_INTERVAL_MS) return;
+    this.hint = next;
+    this.hintSentMs = rafMs;
+    this.options.onVsync(next);
   }
 
   /** The predicted display time of this refresh's frame, moved so frame

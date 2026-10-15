@@ -1,0 +1,86 @@
+{
+  "run": "app-latency-today-idle-r2",
+  "config": {
+    "scenario": "latency",
+    "app": true,
+    "remoteLayer": false,
+    "placement": "offscreen",
+    "mode": "today",
+    "load": false,
+    "loadProfile": null,
+    "edr": "auto",
+    "rawInput": false,
+    "fps": 30,
+    "lead": 4,
+    "durationMs": 20000,
+    "inputModes": [
+      "pan",
+      "drag"
+    ]
+  },
+  "versions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54"
+  },
+  "display": {
+    "hz": 120.0006103515625,
+    "scaleFactor": 2,
+    "colorDepth": 30
+  },
+  "machineLoad": {
+    "before": [
+      6.580078125,
+      6.2138671875,
+      6.37255859375
+    ],
+    "after": [
+      6.62548828125,
+      6.0712890625,
+      6.275390625
+    ]
+  },
+  "project": {
+    "name": "Powermove ad",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 87.4,
+    "layers": 884
+  },
+  "clock": {
+    "rttUs": 46,
+    "offsetUs": 174354276863
+  },
+  "load": null,
+  "bridge": null,
+  "latency": {
+    "pan": {
+      "events": 2401,
+      "dispatches": 2307,
+      "draws": 2503,
+      "unmatched": 0,
+      "unpresented": 3,
+      "pointerToPixelMs": {
+        "n": 2398,
+        "p50": 19.71,
+        "p95": 28.11,
+        "p99": 28.37,
+        "max": 40.27
+      }
+    },
+    "drag": {
+      "events": 2401,
+      "dispatches": 2331,
+      "draws": 2331,
+      "unmatched": 0,
+      "unpresented": 30,
+      "pointerToPixelMs": {
+        "n": 2371,
+        "p50": 23.82,
+        "p95": 24.62,
+        "p99": 32.09,
+        "max": 49.62
+      }
+    }
+  }
+}

@@ -481,6 +481,15 @@ pub enum Event {
         client_port: u32,
         generation: u32,
     },
+    /// The C′ prototype's remote layer (see [`wire::Incoming::RemoteLayer`]).
+    RemoteLayer {
+        client_port: u32,
+        generation: u32,
+        context_id: u32,
+        width: u32,
+        height: u32,
+        scale_milli: u32,
+    },
     Goodbye,
     /// The engine's last send right is gone (it exited or crashed).
     PeerGone,
@@ -536,6 +545,21 @@ impl Connection {
             } => Event::Retire {
                 client_port,
                 generation,
+            },
+            Incoming::RemoteLayer {
+                client_port,
+                generation,
+                context_id,
+                width,
+                height,
+                scale_milli,
+            } => Event::RemoteLayer {
+                client_port,
+                generation,
+                context_id,
+                width,
+                height,
+                scale_milli,
             },
             Incoming::Goodbye => Event::Goodbye,
             other => {
@@ -648,6 +672,30 @@ impl Client {
     pub fn retire(&self, client_port: u32, generation: u32) -> Result<(), BridgeError> {
         send(
             wire::encode_retire(self.bridge.name(), client_port, generation),
+            Duration::from_millis(1000),
+        )
+    }
+
+    /// The C′ prototype: tells main which remote layer presents playback for
+    /// the viewer on `client_port` (`context_id` 0: none any more).
+    pub fn remote_layer(
+        &self,
+        client_port: u32,
+        generation: u32,
+        context_id: u32,
+        size: (u32, u32),
+        scale_milli: u32,
+    ) -> Result<(), BridgeError> {
+        send(
+            wire::encode_remote_layer(
+                self.bridge.name(),
+                client_port,
+                generation,
+                context_id,
+                size.0,
+                size.1,
+                scale_milli,
+            ),
             Duration::from_millis(1000),
         )
     }

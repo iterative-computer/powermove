@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { packProjectFile, restoreProjectFileMedia, unpackProjectFile, unpackProjectFileBlob, packProjectFileBlob, restoreProjectFileStream, saveIncrementalProject } from './project-file';
+import { packProjectFile, restoreProjectFileMedia, unpackProjectFile, unpackProjectFileBlob, packProjectFileBlob, restoreProjectFileStream, saveIncrementalProject, withProjectReader } from './project-file';
 import { sha256Hex } from '../../../../shared/sha256';
 
 describe('portable project media', () => {
@@ -260,5 +260,25 @@ describe('linked media and the host media store (section 21)', () => {
     expect(reopened.containerMedia.map((item: any) => item.id)).toEqual(['linked']);
     const all = await packProjectFileBlob({ ...snapshot, proj: { ...snapshot.proj, assets: { linked: snapshot.proj.assets.linked } } }, store);
     expect(unpackProjectFile(new Uint8Array(await all.arrayBuffer())).proj.requiresEngine).toBeUndefined();
+  });
+});
+
+describe('opening through main\'s project reader', () => {
+  it('keeps an open that read every byte when closing the reader fails', async () => {
+    // Main closed the reader itself after 120 s idle while media was still being stored.
+    const close = vi.fn(async () => { throw new Error('Unknown project read token'); });
+    await expect(withProjectReader(async () => 'restored', close)).resolves.toBe('restored');
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+  it('reports the restore\'s own error, not a failed close', async () => {
+    const close = vi.fn(async () => { throw new Error('Unknown project read token'); });
+    await expect(withProjectReader(async () => { throw new Error('checksum mismatch'); }, close)).rejects.toThrow('checksum mismatch');
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+  it('closes the reader only after the restore finished', async () => {
+    const order: string[] = [];
+    await withProjectReader(async () => { await new Promise(resolve => setTimeout(resolve, 5)); order.push('restored'); },
+      async () => { order.push('closed'); });
+    expect(order).toEqual(['restored', 'closed']);
   });
 });

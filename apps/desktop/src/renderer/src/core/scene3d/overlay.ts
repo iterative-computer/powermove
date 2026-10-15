@@ -136,7 +136,10 @@ export class ViewportOverlay {
   draw(frame:OverlayFrame):void {
     if(this.disposed)return;
     const width=Math.max(2,this.stage.clientWidth),height=Math.max(2,this.stage.clientHeight),renderer=this.renderer;
-    renderer.setSize(width,height,false);
+    // Assigning a canvas size reallocates its drawing buffer even when the
+    // value is unchanged (a GPU-process round trip on every overlay frame).
+    const ratio=renderer.getPixelRatio();
+    if(this.canvas.width!==Math.floor(width*ratio)||this.canvas.height!==Math.floor(height*ratio))renderer.setSize(width,height,false);
     renderer.setScissorTest(false);renderer.setClearColor(0,0);renderer.clear(true,true,true);
     const {rect}=frame,camera=frame.camera.clone() as THREE.PerspectiveCamera|THREE.OrthographicCamera;
     // Extend the frustum over the whole stage so handles stay visible past the composition edge.

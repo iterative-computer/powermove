@@ -109,6 +109,7 @@ mod tests {
             play_every_frame: false,
             edr: false,
             view_seq: Seq::new(1).unwrap(),
+            vsync: None,
         }
     }
 

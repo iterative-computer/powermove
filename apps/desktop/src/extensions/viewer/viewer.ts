@@ -23,6 +23,7 @@ import { beginTextEdit, type TextEditOptions, type TextEditSession } from './tex
 import { drawEditablePaths, startPathEdit } from './path-editing';
 import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, ViewerPresentation, type EngineViewerService } from './engine-present/presentation';
 import { viewParamsFor } from './engine-present/view-params';
+import { rawDragMoves, supportsRawUpdates } from './engine-present/raw-gestures';
 /* Ported from js/ui/viewer.js — behavior-preserving. */
 export const viewerPanelOptions = {
   title: 'Composition', flush: true, noscroll: true, headless: true, hideMoveHandle: false,
@@ -764,6 +765,12 @@ const canRetainNavigation = (now: number) => {
     && visibleRegion.bottom <= presentedViewport.y + presentedViewport.height;
 };
 const commitPendingResize = () => {
+  /* While the engine presents, the WebGL compositor draws nothing: resizing
+     its canvas (and copying its retained frame into the new buffer) is
+     wasted main-thread work, all of it inside live resizes (3.3 s of a
+     60 s profiled run with the corpus project). The size waits here and is
+     committed once the engine stops presenting. */
+  if (enginePresentation?.presenting) return;
   const pending = pendingResize; pendingResize = null;
   if (pending) api.render.gl.resize(pending.width, pending.height, pending.viewport);
 };
@@ -784,24 +791,37 @@ const eventOffs: Array<() => void> = [];
 let enginePresentation: ViewerPresentation | null = null;
 let engineService: EngineViewerService | null = null;
 let engineFrameTag = '';
-const syncEnginePresentation = () => {
+const syncEnginePresentation = (stage?: { width: number; height: number }) => {
   if (disposed || !V.stage || !V.ov) return;
   const service = api.services.get<EngineViewerService>(ENGINE_VIEWER_SERVICE);
   if (enginePresentation && service !== engineService) {
     // The service went away (engine off) or was replaced: detach; the
     // current engine's canvas underneath shows until a new one presents.
     enginePresentation.dispose(); enginePresentation = null; V.enginePresentation = null; engineFrameTag = '';
+    // The WebGL canvas takes the size it skipped while the engine presented.
+    commitPendingResize();
   }
   engineService = service;
   if (!enginePresentation) {
     if (!service) return;
-    const presentation = new ViewerPresentation({ service, stage: V.stage, before: V.ov, log: (level, message) => api.log(level, message) });
+    const presentation = new ViewerPresentation({
+      service, stage: V.stage, before: V.ov, trace: service.trace === true, log: (level, message) => api.log(level, message),
+      // Engine frames are drawn by a presentation worker, so playback keeps
+      // its cadence while the editor's main thread is busy (present-worker.ts).
+      createWorker: service.offMainThread === false ? undefined : () => new Worker(new URL('./engine-present/present-worker-entry.ts', import.meta.url), { type: 'module', name: 'engine-present' }),
+    });
     // Overlays redraw at each new frame tag (revision, view sequence), so
     // handles drawn from the frame's geometry never lead its pixels.
     presentation.onPresented((frame) => {
       const tag = `${frame.revision}:${frame.viewSeq}`;
       if (tag === engineFrameTag) return;
       engineFrameTag = tag;
+      schedulePresentation();
+    });
+    // The WebGL canvas shows again (the engine session ended): it takes the
+    // size it skipped while the engine presented, and draws.
+    presentation.onHidden(() => {
+      commitPendingResize();
       schedulePresentation();
     });
     enginePresentation = presentation;
@@ -811,7 +831,7 @@ const syncEnginePresentation = () => {
   enginePresentation.update(viewParamsFor({
     shown: V.shown, fit: V.fit, pan: V.pan, previewResolution: api.transport.previewResolution,
     scene3d: scene ? { hasScene: scene.hasScene, shading: scene.shading, xray: scene.xray } : null,
-  }));
+  }), stage);
 };
 /** The engine frame on screen: its tags and overlay geometry in stage CSS pixels. */
 V.engineFrame = () => {
@@ -846,15 +866,29 @@ const disposeRuntime = () => {
 V._disposeRuntime = disposeRuntime;
 V.dispose = disposeRuntime;
 
+/* While the engine presents, gestures read `pointerrawupdate` so the engine
+   hears about each move before the rAF that would carry it (amendment 18;
+   engine-present/raw-gestures.ts). The WebGL path keeps `pointermove`. */
+V.rawGestures = () => !!enginePresentation?.presenting && supportsRawUpdates(V.stage?.ownerDocument?.defaultView ?? window);
+let activeRaw: ReturnType<typeof rawDragMoves> | null = null;
+/** Whether the newest raw update waits for the move interval (the measurement harness attributes it to the next view). */
+V.rawGesturePending = () => !!activeRaw?.pending();
 const beginDrag = (event: any, options: any) => {
   activeDrag?.cancel();
   let control: any;
+  const host: Window = event?.view ?? V.stage?.ownerDocument?.defaultView ?? window;
+  const raw = options.move && !options.infinite && V.rawGestures() ? rawDragMoves(event, options.move, host) : null;
+  activeRaw = raw;
   const finish = (kind: 'up' | 'cancel', args: any[]) => {
+    // On up, a waiting raw update lands before the gesture's own up.
+    raw?.stop(kind === 'up');
+    if (activeRaw === raw) activeRaw = null;
     if (activeDrag === control) activeDrag = null;
     return options[kind]?.(...args);
   };
   control = api.ui.drag(event, {
     ...options,
+    ...(raw ? { move: raw.move } : {}),
     up: (...args: any[]) => finish('up', args),
     cancel: (...args: any[]) => finish('cancel', args),
   });
@@ -956,6 +990,10 @@ V.layout = (panOnly = false, gesture = panOnly === true) => {
   let z = V.fit ? Math.min((r.width - pad * 2) / p.w, (r.height - pad * 2) / p.h) : V.zoom;
   z = clamp(z, .02, 8);
   V.shown = z;
+  /* The engine's view first: before this layout writes styles (so the
+     presentation reads no layout) and before the WebGL bookkeeping below,
+     so a gesture's state leaves for the engine as early as it can. */
+  syncEnginePresentation(r);
   if (V.zoomControl) {
     const control = V.zoomControl as HTMLSelectElement;
     control.options[0]!.textContent = `Fit (${Math.round(z * 1000) / 10}%)`;
@@ -1023,7 +1061,6 @@ V.layout = (panOnly = false, gesture = panOnly === true) => {
   if (V.ov.height !== overlayHeight) V.ov.height = overlayHeight;
   V.ov.style.width = r.width + 'px'; V.ov.style.height = r.height + 'px';
   V.updateRecovery?.();
-  syncEnginePresentation();
   /* Geometry changes immediately during zoom/pan. Repaint handles and paths in
      the same event so they never lag or blink while the GL frame catches up. */
   drawOverlay();
