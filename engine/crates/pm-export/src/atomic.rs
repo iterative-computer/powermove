@@ -56,6 +56,11 @@ impl AtomicOutput {
         if overwrite == Overwrite::Fail && fs::symlink_metadata(destination).is_ok() {
             return Err(Error::Exists(destination.to_path_buf()));
         }
+        if overwrite == Overwrite::InPlace {
+            return Err(Error::InvalidSpec(
+                "an in-place destination is opened with AtomicOutput::in_place".into(),
+            ));
+        }
         let (stem, ext) = match name.rsplit_once('.') {
             Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), format!(".{ext}")),
             _ => (name.clone(), String::new()),
@@ -65,6 +70,41 @@ impl AtomicOutput {
             destination: destination.to_path_buf(),
             temp,
             overwrite,
+            mode,
+            committed: false,
+        })
+    }
+
+    /// A temporary file beside `host_file`, a file host services created for the
+    /// job (`Overwrite::InPlace`): the work file is `<host file>.<random>.partial.<ext>`,
+    /// so a host that removes the job's temporary file can also remove anything
+    /// named after it, and the commit renames the work file over the host's file.
+    pub fn in_place(host_file: &Path, extension: &str, mode: Option<u32>) -> Result<Self, Error> {
+        let name = host_file
+            .file_name()
+            .ok_or_else(|| Error::InvalidSpec("destination has no file name".into()))?
+            .to_string_lossy()
+            .into_owned();
+        let folder = match host_file.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        if !folder.is_dir() {
+            return Err(Error::Io(format!(
+                "destination folder {} does not exist",
+                folder.display()
+            )));
+        }
+        let ext = if extension.is_empty() {
+            String::new()
+        } else {
+            format!(".{extension}")
+        };
+        let temp = folder.join(format!("{name}.{}.partial{ext}", unique_suffix()));
+        Ok(Self {
+            destination: host_file.to_path_buf(),
+            temp,
+            overwrite: Overwrite::InPlace,
             mode,
             committed: false,
         })
@@ -90,7 +130,7 @@ impl AtomicOutput {
             set_mode(&self.temp, mode)?;
         }
         match self.overwrite {
-            Overwrite::Replace => fs::rename(&self.temp, &self.destination).map_err(|e| {
+            Overwrite::Replace | Overwrite::InPlace => fs::rename(&self.temp, &self.destination).map_err(|e| {
                 Error::Io(format!("moving into {}: {e}", self.destination.display()))
             })?,
             Overwrite::Fail => {
@@ -234,6 +274,37 @@ mod tests {
         fs::write(out.temp_path(), b"new").unwrap();
         out.commit().unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"new");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn in_place_writes_beside_the_host_file_and_renames_over_it() {
+        let dir = scratch("inplace");
+        let host = dir.join(".powermove-0123456789abcdef.part");
+        fs::write(&host, b"").unwrap();
+        let out = AtomicOutput::in_place(&host, "mov", Some(0o600)).unwrap();
+        let temp = out.temp_path().to_path_buf();
+        let name = temp.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with(".powermove-0123456789abcdef.part.") && name.ends_with(".partial.mov"),
+            "{name}"
+        );
+        fs::write(&temp, b"movie").unwrap();
+        assert_eq!(out.commit().unwrap(), host);
+        assert_eq!(fs::read(&host).unwrap(), b"movie");
+        assert!(!temp.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&host).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // A dropped in-place output leaves the host's file to the host.
+        let out = AtomicOutput::in_place(&host, "mp4", None).unwrap();
+        fs::write(out.temp_path(), b"partial").unwrap();
+        let temp = out.temp_path().to_path_buf();
+        drop(out);
+        assert!(!temp.exists() && host.exists());
+        assert!(AtomicOutput::new(&host, Overwrite::InPlace, None).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
 

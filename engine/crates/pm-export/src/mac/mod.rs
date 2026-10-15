@@ -13,7 +13,7 @@ use crate::atomic::AtomicOutput;
 use crate::convert::EncoderInput;
 use crate::mp4box::Movie;
 use crate::pipeline::{Pipeline, Sink};
-use crate::settings::ExportSpec;
+use crate::settings::{ExportSpec, Overwrite};
 use crate::timescale::VideoTiming;
 use crate::verify::{self, BlockSample, Expected, VerifyReport};
 
@@ -42,7 +42,12 @@ impl VideoToolboxSink {
     pub fn new(spec: &ExportSpec) -> Result<Self, Error> {
         spec.validate()?;
         let timing = spec.timing()?;
-        let output = AtomicOutput::new(&spec.destination, spec.overwrite, spec.mode)?;
+        let output = match spec.overwrite {
+            Overwrite::InPlace => {
+                AtomicOutput::in_place(&spec.destination, spec.container.extension(), spec.mode)?
+            }
+            _ => AtomicOutput::new(&spec.destination, spec.overwrite, spec.mode)?,
+        };
         let writer = writer::Writer::new(
             output.temp_path(),
             spec.container,

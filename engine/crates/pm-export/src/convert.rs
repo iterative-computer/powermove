@@ -220,7 +220,9 @@ fn pixel(frame: &WorkingFrame, x: usize, y: usize) -> [f32; 4] {
     ]
 }
 
-/// Converts one working frame to `format`.
+/// Converts one working frame to `format`. Rows are converted in parallel
+/// ([`crate::par`]); every sample depends only on its own inputs, so the result is
+/// the same bytes on any number of threads.
 pub fn convert(
     frame: &WorkingFrame,
     format: InputFormat,
@@ -253,22 +255,17 @@ pub fn convert(
     };
     let planes = match format {
         InputFormat::Y416 => {
-            let mut out = Vec::with_capacity(w * h * 4);
-            for y in 0..h {
+            let mut out = vec![0u16; w * h * 4];
+            crate::par::rows(&mut out, w * 4, |y, row| {
                 for x in 0..w {
                     let (v, a) = ycc(x, y);
-                    out.push(code(a * 65535.0, 0.0, 65535.0) as u16);
-                    out.push(
-                        code(v[0] * 56064.0 + 4096.0 + 16.0 * d(x, y, 0), 256.0, 65264.0) as u16,
-                    );
-                    out.push(
-                        code(v[1] * 57344.0 + 32768.0 + 16.0 * d(x, y, 1), 256.0, 65264.0) as u16,
-                    );
-                    out.push(
-                        code(v[2] * 57344.0 + 32768.0 + 16.0 * d(x, y, 2), 256.0, 65264.0) as u16,
-                    );
+                    let o = &mut row[x * 4..x * 4 + 4];
+                    o[0] = code(a * 65535.0, 0.0, 65535.0) as u16;
+                    o[1] = code(v[0] * 56064.0 + 4096.0 + 16.0 * d(x, y, 0), 256.0, 65264.0) as u16;
+                    o[2] = code(v[1] * 57344.0 + 32768.0 + 16.0 * d(x, y, 1), 256.0, 65264.0) as u16;
+                    o[3] = code(v[2] * 57344.0 + 32768.0 + 16.0 * d(x, y, 2), 256.0, 65264.0) as u16;
                 }
-            }
+            });
             vec![Plane {
                 data: PlaneData::U16(out),
                 row_samples: w * 4,
@@ -276,26 +273,19 @@ pub fn convert(
             }]
         }
         InputFormat::V216 => {
-            let mut out = Vec::with_capacity(w * h * 2);
-            for y in 0..h {
+            let mut out = vec![0u16; w * h * 2];
+            crate::par::rows(&mut out, w * 2, |y, row| {
                 for t in 0..w / 2 {
                     let (x0, x1) = (2 * t, 2 * t + 1);
                     let (a, _) = ycc(x0, y);
                     let (b, _) = ycc(x1, y);
-                    out.push(
-                        code(a[1] * 57344.0 + 32768.0 + 64.0 * d(t, y, 1), 256.0, 65216.0) as u16,
-                    );
-                    out.push(
-                        code(a[0] * 56064.0 + 4096.0 + 64.0 * d(x0, y, 0), 256.0, 65216.0) as u16,
-                    );
-                    out.push(
-                        code(a[2] * 57344.0 + 32768.0 + 64.0 * d(t, y, 2), 256.0, 65216.0) as u16,
-                    );
-                    out.push(
-                        code(b[0] * 56064.0 + 4096.0 + 64.0 * d(x1, y, 0), 256.0, 65216.0) as u16,
-                    );
+                    let o = &mut row[t * 4..t * 4 + 4];
+                    o[0] = code(a[1] * 57344.0 + 32768.0 + 64.0 * d(t, y, 1), 256.0, 65216.0) as u16;
+                    o[1] = code(a[0] * 56064.0 + 4096.0 + 64.0 * d(x0, y, 0), 256.0, 65216.0) as u16;
+                    o[2] = code(a[2] * 57344.0 + 32768.0 + 64.0 * d(t, y, 2), 256.0, 65216.0) as u16;
+                    o[3] = code(b[0] * 56064.0 + 4096.0 + 64.0 * d(x1, y, 0), 256.0, 65216.0) as u16;
                 }
-            }
+            });
             vec![Plane {
                 data: PlaneData::U16(out),
                 row_samples: w * 2,
@@ -303,15 +293,15 @@ pub fn convert(
             }]
         }
         InputFormat::V420 => {
-            let mut luma = Vec::with_capacity(w * h);
-            for y in 0..h {
-                for x in 0..w {
+            let mut luma = vec![0u8; w * h];
+            crate::par::rows(&mut luma, w, |y, row| {
+                for (x, o) in row.iter_mut().enumerate() {
                     let (v, _) = ycc(x, y);
-                    luma.push(code(v[0] * 219.0 + 16.0 + d(x, y, 0), 1.0, 254.0) as u8);
+                    *o = code(v[0] * 219.0 + 16.0 + d(x, y, 0), 1.0, 254.0) as u8;
                 }
-            }
-            let mut chroma = Vec::with_capacity(w * h / 2);
-            for cy in 0..h / 2 {
+            });
+            let mut chroma = vec![0u8; w * h / 2];
+            crate::par::rows(&mut chroma, w, |cy, row| {
                 for cx in 0..w / 2 {
                     // The declared 4:2:0 filter (`pm_color::chroma::VERTICAL_420`):
                     // the exact inverse of the renderer's linear vertical
@@ -323,10 +313,10 @@ pub fn convert(
                         cb += w * v[1];
                         cr += w * v[2];
                     }
-                    chroma.push(code(cb * 224.0 + 128.0 + d(cx, cy, 1), 1.0, 254.0) as u8);
-                    chroma.push(code(cr * 224.0 + 128.0 + d(cx, cy, 2), 1.0, 254.0) as u8);
+                    row[cx * 2] = code(cb * 224.0 + 128.0 + d(cx, cy, 1), 1.0, 254.0) as u8;
+                    row[cx * 2 + 1] = code(cr * 224.0 + 128.0 + d(cx, cy, 2), 1.0, 254.0) as u8;
                 }
-            }
+            });
             vec![
                 Plane {
                     data: PlaneData::U8(luma),

@@ -10,12 +10,17 @@
 //!   AVAssetWriter MOV/MP4 with section 17 timescales and a `tmcd` track, then
 //!   [`verify`] and an [`atomic`] move into place.
 //! * [`mp4box`]: the container reader verification uses.
+//! * [`render`]: the job engine's export and agent-still pipeline: capability
+//!   routing, pm-render frames (sliced through a [`render::GpuGate`]), pm-audio's
+//!   offline mix, and the encoder above.
 
 pub mod atomic;
 pub mod convert;
 pub mod dither;
 pub mod mp4box;
+pub(crate) mod par;
 pub mod pipeline;
+pub mod render;
 pub mod settings;
 pub mod timescale;
 pub mod verify;

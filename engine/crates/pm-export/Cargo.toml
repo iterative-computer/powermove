@@ -13,8 +13,18 @@ test-sinks = []
 
 [dependencies]
 pm-time = { path = "../pm-time" }
+pm-protocol = { path = "../pm-protocol", default-features = false }
+pm-model = { path = "../pm-model" }
+pm-eval = { path = "../pm-eval" }
+# The job engine's export pipeline: render through pm-render, mix through
+# pm-audio's offline API (section 17).
+pm-render = { path = "../pm-render" }
+pm-audio = { path = "../pm-audio" }
+wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 thiserror.workspace = true
 libm.workspace = true
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # exception: AVFoundation reports misuse by raising Objective-C exceptions; they become errors.
