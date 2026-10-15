@@ -35,7 +35,7 @@ source. The options are in [Decision](#decision-before-the-phase-2-gate).
 | Presentation worker (the presenter off the page's main thread) | `engine-present/present-worker.ts` (worker side), `worker-presenter.ts` (page side), `present-worker-entry.ts` |
 | Engine-path gestures on `pointerrawupdate` | `engine-present/raw-gestures.ts`, used by the viewer's drag helper |
 | Vsync-phase hint (contract 2 `ViewerState.vsync`) | viewer: `engine-present/display-timing.ts`, `presenter.ts`; engine: `pm-node/src/present/schedule.rs` (`next_in_phase`) |
-| C′ prototype (remote Core Animation layer, measurement only) | `engine/crates/pm-gpu/src/bridge_out/remote_layer.rs`, `pm-node/src/present/render.rs`, hosting in `pm-bridge` (`harness` feature), `pm-gpu/examples/refresh_probe.rs` |
+| C′ prototype (remote Core Animation layer, measurement builds only) | `engine/crates/pm-gpu/src/bridge_out/remote_layer.rs` and `pm-node/src/present/render.rs` (`remote-layer` feature of both), hosting in `pm-bridge` (`harness` feature), `pm-gpu/examples/refresh_probe.rs` (needs `remote-layer`) |
 | Electron integration test (run on every Electron upgrade) | `apps/desktop/scripts/frame-bridge-integration.mjs`, `src/main/engine/integration/bridge-*.ts` |
 | S1 measurement of the production path | `apps/desktop/scripts/frame-bridge-measure.mjs`, `src/main/engine/integration/measure-*.ts` (stand-in page), `measure-app-*.ts` (the real app); summaries in `docs/engine/bridge-measurements/` |
 
@@ -268,7 +268,8 @@ is 1195 × 546 CSS px at DPR 2 on the built-in 120 Hz XDR panel. Electron
   session unlocked before and after (with the display asleep nothing is
   scanned out and Chromium's presentation times are its own estimates);
   runs that saw otherwise are marked invalid. All r8 and r9 runs were
-  valid.
+  valid. Runs r5 to r7 predate the check (`caba37f5`; their summaries
+  have no `displayState`), so they were not verified this way.
 - **Machine:** shared with up to three other agents' builds; the 1-minute
   load average is in each summary (2.3 to 14.3 across these runs). The
   spread between runs of the same configuration is larger than some
@@ -340,11 +341,14 @@ the BeginFrame) and that frame's begin → presented 11.6 / 20.5 ms; under
 load 9.8 / 47.1 and 19.9 / 45.4 ms. viz's draws run on the 8.3 ms grid
 (1,781 of 2,452 draw-start intervals 8 ms in the engine idle trace) and
 take about 11 ms to presentation on both paths, so the paths differ
-before the draw: the engine's frame reached viz's draw 8.1 ms after the
-input at p50 (3.5 ms at p10, 11.9 ms at p90). No single hop holds it:
-each is at most 1.6 ms at p50, and their tails, all on threads that do
+before the draw: the engine's frame reached viz's draw about 8.1 ms
+after the input at p50. That figure is the total's p50 minus the p50 of
+viz draw → presented (19.53 − 11.37 ms), not a distribution of its own;
+the summaries keep percentiles per hop only. The per-hop p50s sum to
+4.4 ms, and medians do not add: no single hop holds the time (each is
+at most 1.6 ms at p50), and the hops' tails, all on threads that do
 other work (the page's main thread twice, the worker's commit, viz),
-add up. Rounded to whole refreshes, the engine's idle pan took one
+land on different inputs and add up per input. Rounded to whole refreshes, the engine's idle pan took one
 refresh for 0.5% of inputs, two for 73%, three for 21%, and four for 5%.
 
 **Quality lines** (absolute): pass, in the Electron integration test in
@@ -352,9 +356,21 @@ both presentation modes (see above).
 
 **Verdict: the amended gate is not met, on pointer-to-pixel.**
 
-- Playback passes, and by a wide margin under load: no drops in four of
-  five runs against 84 to 238, jitter p99 10.8 to 14.3 ms against 33 to
-  108 ms. Idle the engine path is no worse at p50 or p99 in any run.
+- Playback passes on the gate metrics, by a wide margin under load: no
+  drops in four of five runs against 84 to 238, jitter p99 10.8 to 14.3
+  ms against 33 to 108 ms. Idle the engine path is no worse at p50 or
+  p99 in any run. **This is not yet like for like:** the engine draws the
+  bridge test source, not the 884-layer document, and today's WebGL
+  compositor draws nothing while the engine presents, so the engine-side
+  cost of rendering real content is missing from both playback and
+  gestures until `pm-render` draws the document.
+- Cadence regularity is worse on the engine path idle even though jitter
+  passes: r9 idle had 843 irregular frame intervals of 1,792 against
+  today's 317 (under load 838 against 975). That is the worker canvas
+  alternating between one and two refreshes from rAF to presentation
+  (above), which the presenter cannot see without presentation feedback
+  in a worker. It is not a gate metric, but an FCP-grade cadence target
+  needs it fixed.
 - Pointer-to-pixel idle fails: in the runs with both paths (r6 to r9)
   engine p50 is 5.0 to 8.5 ms worse in three (no worse in r7), and p99
   is worse in all four (31 to 56 ms against 23 to 29 ms).
@@ -367,7 +383,12 @@ both presentation modes (see above).
   ms, r9 81.6 against 84.1 ms).
 - The gesture gap is before viz draws the frame, not after: both paths
   take about 11 ms from viz's draw to the panel idle, and the engine's
-  frame reaches that draw 8.1 ms after the input at p50 (hops above).
+  frame reaches that draw about 8.1 ms after the input at p50 (total p50
+  minus draw → presented p50; hops above).
+- The paired r9 latency runs did not share equal machine load: today's
+  idle run started at a 1-minute load average of 14.3 (7.2 at its end),
+  the engine's at 6.7 (5.4 at its end). The heavier load fell on today's
+  run, so a quiet-machine round may widen the idle gap, not close it.
 - Layer drag, orbit, and walk through the engine are not measurable until
   `pm-render` draws the document.
 
@@ -423,8 +444,8 @@ to a worker, which Electron 44 cannot.
 
 ## C′: playback through a remote Core Animation layer (prototype)
 
-**What it is.** With `POWERMOVE_BRIDGE_REMOTE_LAYER=1` the interactive
-engine makes a `CAContext` on its own WindowServer connection whose layer
+**What it is.** With `POWERMOVE_BRIDGE_REMOTE_LAYER=1`, in a pm-node
+built with its `remote-layer` feature, the interactive engine makes a `CAContext` on its own WindowServer connection whose layer
 is a `CAMetalLayer` (`pm-gpu::bridge_out::remote_layer`). Timed playback
 frames, already rendered into a pool surface, are copied into the layer's
 next drawable and presented at their display time with
@@ -452,9 +473,16 @@ late for two frames, pacing skips one frame so its queue drains
   review rejects it; Powermove ships with Developer ID and notarization,
   which do not check for private API.
 - The engine looks every private symbol up at run time (`dlsym`,
-  `AnyClass::get`) only when a remote layer is made, so a build that never
-  runs C′ imports no private symbol (`f0c4f821`); hosting is compiled
-  only into the harness build of `pm-bridge` (`harness` feature).
+  `AnyClass::get`) only when a remote layer is made (`f0c4f821`). Since
+  it was not adopted, the engine side is compiled only into measurement
+  builds: `pm-gpu`'s and `pm-node`'s `remote-layer` feature (`4fd9a56f`),
+  which also carries the QuartzCore and CoreGraphics links. The app's
+  pm-node addon (`build-engine-addon.mjs`) is built without it; asked for
+  C′ anyway, it reports `remoteError` ("built without the C′ prototype")
+  and presents through the viewer (pm-node `present` test). Hosting in
+  main is compiled only into the harness build of `pm-bridge` (`harness`
+  feature); the S1 harness builds pm-node with `remote-layer` for its C′
+  runs.
 - A missing class or symbol is an error the presenter can answer with the
   bridge, which stays complete for every kind of frame.
 - Product costs if it were adopted: during playback the frames are
@@ -521,7 +549,9 @@ the content rate on ProMotion displays.
 
 The gate reports, as measured against the real viewer after all three of
 amendment 18's steps (plus the presentation worker): playback better than
-today's viewer, idle and under load; pointer-to-pixel 5 to 9 ms worse at
+today's viewer on the gate metrics, idle and under load (with the
+engine drawing the test source, not the document, and less regular
+cadence idle); pointer-to-pixel 5 to 9 ms worse at
 p50 idle in three of four paired runs, worse at p99 idle, and worse at
 p99 under load as `pointerToPixelMs` counts it; C′ not adopted (25 drops
 a minute under load); no ProMotion request possible. Jude
@@ -704,7 +734,57 @@ outside its ownership to carry them: `pm-engine` (`engine.rs`, `present.rs`,
 - RFC 02 version note (amendment 18, additive): `ViewerState.vsync`, an
   optional `VsyncHint { hostTime, periodUs }` (serde default, TypeScript
   optional and nullable); a peer that does not send it decodes as `None`,
-  and a change of the hint alone is not a new view.
+  and a change of the hint alone is not a new view. Additive on the wire
+  only: `PROTOCOL_BUILD` still moved (`protocol-16c8e6e125019103` →
+  `protocol-4263a0f5f5f748a0`), and draft contracts interoperate only
+  between equal build ids, so the handshake refuses a peer built on the
+  old id. Every lane regenerates the ts-rs types and rebuilds its addon
+  against the new id when this branch merges; the merge needs to be
+  coordinated with the lanes merging around it.
+
+### Files outside this lane's ownership (amendment 18 work)
+
+The lane owns `pm-bridge`, `pm-node/src/present`, `pm-gpu/src/bridge_out`,
+the preload's `frame-bridge.ts`, the viewer's `engine-present` and engine
+hooks, main's `engine/bridge*.ts` and integration harness, the
+`frame-bridge-*.mjs` scripts, contract 2's types, and these docs. The
+branch also changes the files below. Two of them change the app for every
+user, flag or not, and are for their owning lanes to review:
+
+- **`apps/desktop/src/renderer/src/legacy/app.ts`, Open Project**
+  (`beeffe15`; moved into `withProjectReader` in
+  `renderer/src/legacy/core/project-file.ts` with tests in
+  `project-file.test.ts`, `827eb9ed`). Not behind the flag. A failed close
+  of main's project reader no longer fails an open: main closes a reader
+  left idle for 120 s itself, and opening the 138 MB corpus project on a
+  loaded machine read every byte, then spent over 120 s storing media
+  before the close, which threw "Unknown project read token" and failed
+  the whole open (3 of 11 real-app measurement opens, 2026-10-14). The
+  restore's own error is still reported. Owner: project open/save.
+- **`apps/desktop/src/renderer/src/core/scene3d/overlay.ts`, viewport
+  overlay** (`db44b09d`; tests in `overlay.test.ts`, `7ce605e8`). Not
+  behind the flag. `ViewportOverlay.draw` calls `renderer.setSize` only
+  when the stage's size in device pixels changed: assigning a canvas size
+  reallocates its drawing buffer even when unchanged, a GPU-process round
+  trip every overlay frame (2.7 s of the renderer's main thread a minute
+  in real-app playback under load on the WebGL path, 6.2 s with the
+  engine presenting). Both paths' r5 to r9 measurements include it.
+  Owner: the 3D viewport.
+- Generated TypeScript for the additive `ViewerState.vsync`:
+  `apps/desktop/src/shared/engine-protocol/ViewerState.ts`,
+  `VsyncHint.ts`, and `index.ts` (`PROTOCOL_BUILD`), from pm-protocol's
+  contract 2 types (`frame.rs`, `samples.rs`) and a regenerated wire
+  fixture (`pm-protocol/tests/fixtures/wire/event-viewer.msgpack`).
+- `engine/crates/pm-engine/tests/present.rs`: one line (`vsync: None`) so
+  the test builds a `ViewerState` with the new field.
+- `apps/desktop/tsconfig.node.json` and `tsconfig.web.json`: one entry
+  each, so the harness's `integration/bridge-worker.ts` type-checks as
+  renderer code.
+- `engine/crates/pm-gpu/Cargo.toml` (C′'s dependencies, optional behind
+  `remote-layer`) and `pm-gpu/examples/refresh_probe.rs` (the ProMotion
+  probe); `engine/crates/pm-node/Cargo.toml` (the `remote-layer` feature)
+  and `pm-node/tests/present.rs` (the presenter end to end, and a build
+  without C′ asked for it); `engine/Cargo.lock` (C′'s crates).
 
 ## Gaps and next steps
 

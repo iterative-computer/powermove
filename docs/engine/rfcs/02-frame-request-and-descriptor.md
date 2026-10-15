@@ -200,7 +200,12 @@ pub struct VsyncHint { pub host_time: HostMicros, pub period_us: f64 }
 - **Compatibility.** Optional on the wire: a peer built before the field
   sends no `vsync` key and decodes as `None`; the engine then renders at
   the due time as before. Old TypeScript that builds a `ViewerState`
-  without it still type-checks.
+  without it still type-checks. That covers decoding only: the build id
+  still moved (`protocol-16c8e6e125019103` → `protocol-4263a0f5f5f748a0`),
+  and draft contracts interoperate only between equal build ids, so the
+  version handshake refuses a peer built on the old id. Every lane
+  regenerates and rebuilds against the new id when this lands, and its
+  merge is coordinated with the other lanes'.
 - **Not a new view.** A hint-only change keeps `viewSeq` and does not make
   the engine redraw a paused frame. The viewer sends it when first known,
   when the period moves by more than 0.1% or the phase by more than 250 µs,

@@ -54,7 +54,8 @@ pub const TRACE_ENV: &str = "POWERMOVE_BRIDGE_TRACE";
 /// a refresh after it (`off` renders at the due time, as before the hint).
 pub const PHASE_ENV: &str = "POWERMOVE_BRIDGE_PHASE";
 /// The C′ prototype: `1` presents playback through a remote Core
-/// Animation layer main hosts in the viewer's window (measurement only).
+/// Animation layer main hosts in the viewer's window (measurement builds
+/// with the `remote-layer` feature only).
 pub const REMOTE_LAYER_ENV: &str = "POWERMOVE_BRIDGE_REMOTE_LAYER";
 /// Where the C′ prototype appends its presentation records (JSON lines).
 pub const REMOTE_TRACE_ENV: &str = "POWERMOVE_BRIDGE_REMOTE_TRACE";
