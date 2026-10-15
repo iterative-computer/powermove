@@ -109,6 +109,14 @@ export function installLayerGroups(PM: PMRegistry): void {
     layers.forEach(visit);
   };
   const changed = () => { PM.normalizeGroupStack(); PM.ProjectIndex?.invalidate(); PM.bus.emit('layers'); PM.invalidate(); };
+  /** pm-edit's kernels (engine-doc/edits.ts) when the native evaluator is on
+   *  and every layer is in the open composition. */
+  const native = (layers: any[]): { edits: any; indexes: number[] } | null => {
+    const edits = PM.EngineDoc?.edits;
+    if (!edits) return null;
+    const indexes = layers.map((layer: any) => edits.index(layer));
+    return indexes.every((i: number) => i >= 0) ? { edits, indexes } : null;
+  };
   PM.groupLayers = (ids: string[], name = 'Group') => {
     const layers = PM.proj.layers;
     const selected = layers.filter((layer: any) => ids.includes(layer.id));
@@ -127,12 +135,17 @@ export function installLayerGroups(PM: PMRegistry): void {
     if(isModelGroup(PM,group))group.threeD=true;
     PM.touch();
     changed();
-    const bounds = PM.groupBounds(group, PM.time);
-    if (bounds) {
-      group.p['position.x'].v = group.p['anchor.x'].v = (bounds.x0 + bounds.x1) / 2;
-      group.p['position.y'].v = group.p['anchor.y'].v = (bounds.y0 + bounds.y1) / 2;
-      if(group.threeD && bounds.z0!==undefined)group.p['position.z'].v=group.p['anchor.z'].v=(bounds.z0+bounds.z1)/2;
-    }
+    const place = () => {
+      const bounds = PM.groupBounds(group, PM.time);
+      if (bounds) {
+        group.p['position.x'].v = group.p['anchor.x'].v = (bounds.x0 + bounds.x1) / 2;
+        group.p['position.y'].v = group.p['anchor.y'].v = (bounds.y0 + bounds.y1) / 2;
+        if(group.threeD && bounds.z0!==undefined)group.p['position.z'].v=group.p['anchor.z'].v=(bounds.z0+bounds.z1)/2;
+      }
+    };
+    const kernel = native([group]);
+    if (kernel) kernel.edits.edit('groupPlacement', { group: kernel.indexes[0], t: PM.time }, place, () => undefined);
+    else place();
     PM.touch?.(); PM.selectLayers(group.id); return group;
   };
   PM.ungroupLayers = (ids: string[]) => {
@@ -145,66 +158,73 @@ export function installLayerGroups(PM: PMRegistry): void {
       || typeof group.blend === 'object' || group.blend && group.blend !== 'normal'
       || typeof group.mblur === 'object' || group.mblur === true);
     if (styled) throw new Error(`Remove visual compositing from “${styled.name}” before ungrouping`);
-    const children: string[] = [];
-    for (const group of groups) {
-      const members = PM.proj.layers.filter((layer: any) => layer.group === group.id);
-      // Ungrouping animation bakes editable channel keys at composition frames.
-      // Include the playhead so this operation never jumps between frames either.
-      const hasAnimation = (layer: any) => [...Object.values(layer.p),...aimProperties3D(layer).map(x=>x.prop)].some((prop: any) => prop.kf.length || prop.expr);
-      const changes3D = is3DLayer(PM,group) && local3D(PM,group,PM.time).some((value,index)=>Math.abs(value-[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1][index]!)>1e-8);
-      const changesPose = changes3D || PM.localMatrix(group,PM.time).some((value: number,index: number) => Math.abs(value-[1,0,0,1,0,0][index]!)>1e-8) || PM.ev(group,'opacity',PM.time)!==100;
-      const animated = hasAnimation(group) || changesPose && PM.proj.layers.some(hasAnimation);
-      const times = animated ? [...new Set([PM.time, ...Array.from({length:Math.ceil(PM.proj.dur*PM.proj.fps)+1}, (_,i)=>i/PM.proj.fps)])].sort((a,b)=>a-b) : [];
-      const samples = times.map(time => ({time, values:new Map<string,{world:number[];opacity:number;perspective:number;aim:number[]|null}>(members.filter((layer:any)=>layer.type!=='audio').map((layer:any)=>[layer.id,{world:worldPose(layer,time),aim:worldAim3D(PM,layer,time),perspective:perspectiveAmount(PM,layer,time),opacity:PM.ev(layer,'opacity',time)*PM.ev(group,'opacity',time)/100}]))}));
-      const poses = new Map<string,number[]>(members.filter((layer: any) => layer.type !== 'audio').map((layer: any) => [layer.id, worldPose(layer,PM.time)]));
-      const aims = new Map<string,number[]|null>(members.map((layer:any)=>[layer.id,worldAim3D(PM,layer,PM.time)]));
-      const perspectives = new Map(members.map((layer: any) => [layer.id, perspectiveAmount(PM,layer,PM.time)]));
-      for (const layer of members) {
-        layer.group = group.group || null; children.push(layer.id);
-        if (poses.get(layer.id)?.length === 16) {
-          for (const [key,fallback] of Object.entries(CHANNELS_3D)) layer.p[key] ||= PM.P(fallback);
-          layer.threeD = true;
-          layer.p.perspective = PM.P(perspectives.get(layer.id));
+    const legacyUngroup = (): string[] => {
+      const children: string[] = [];
+      for (const group of groups) {
+        const members = PM.proj.layers.filter((layer: any) => layer.group === group.id);
+        // Ungrouping animation bakes editable channel keys at composition frames.
+        // Include the playhead so this operation never jumps between frames either.
+        const hasAnimation = (layer: any) => [...Object.values(layer.p),...aimProperties3D(layer).map(x=>x.prop)].some((prop: any) => prop.kf.length || prop.expr);
+        const changes3D = is3DLayer(PM,group) && local3D(PM,group,PM.time).some((value,index)=>Math.abs(value-[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1][index]!)>1e-8);
+        const changesPose = changes3D || PM.localMatrix(group,PM.time).some((value: number,index: number) => Math.abs(value-[1,0,0,1,0,0][index]!)>1e-8) || PM.ev(group,'opacity',PM.time)!==100;
+        const animated = hasAnimation(group) || changesPose && PM.proj.layers.some(hasAnimation);
+        const times = animated ? [...new Set([PM.time, ...Array.from({length:Math.ceil(PM.proj.dur*PM.proj.fps)+1}, (_,i)=>i/PM.proj.fps)])].sort((a,b)=>a-b) : [];
+        const samples = times.map(time => ({time, values:new Map<string,{world:number[];opacity:number;perspective:number;aim:number[]|null}>(members.filter((layer:any)=>layer.type!=='audio').map((layer:any)=>[layer.id,{world:worldPose(layer,time),aim:worldAim3D(PM,layer,time),perspective:perspectiveAmount(PM,layer,time),opacity:PM.ev(layer,'opacity',time)*PM.ev(group,'opacity',time)/100}]))}));
+        const poses = new Map<string,number[]>(members.filter((layer: any) => layer.type !== 'audio').map((layer: any) => [layer.id, worldPose(layer,PM.time)]));
+        const aims = new Map<string,number[]|null>(members.map((layer:any)=>[layer.id,worldAim3D(PM,layer,PM.time)]));
+        const perspectives = new Map(members.map((layer: any) => [layer.id, perspectiveAmount(PM,layer,PM.time)]));
+        for (const layer of members) {
+          layer.group = group.group || null; children.push(layer.id);
+          if (poses.get(layer.id)?.length === 16) {
+            for (const [key,fallback] of Object.entries(CHANNELS_3D)) layer.p[key] ||= PM.P(fallback);
+            layer.threeD = true;
+            layer.p.perspective = PM.P(perspectives.get(layer.id));
+          }
+          const opacity = layer.p.opacity, factor = PM.ev(group,'opacity',PM.time) / 100;
+          if (opacity && factor !== 1) {
+            if (opacity.expr) opacity.expr = `(${opacity.expr}) * ${factor}`;
+            else { opacity.v *= factor; for (const key of opacity.kf) { key.v *= factor; if (key.inEase) key.inEase.speed *= factor; if (key.outEase) key.outEase.speed *= factor; } }
+          }
         }
-        const opacity = layer.p.opacity, factor = PM.ev(group,'opacity',PM.time) / 100;
-        if (opacity && factor !== 1) {
-          if (opacity.expr) opacity.expr = `(${opacity.expr}) * ${factor}`;
-          else { opacity.v *= factor; for (const key of opacity.kf) { key.v *= factor; if (key.inEase) key.inEase.speed *= factor; if (key.outEase) key.outEase.speed *= factor; } }
-        }
+        PM.touch();
+        if (animated) {
+          const ordered: any[] = [], seen = new Set<string>();
+          const visit = (layer:any) => {
+            if (seen.has(layer.id)) return;
+            seen.add(layer.id);
+            for (let parent=PM.L(layer.parent), guard=0; parent && guard++<256; parent=PM.L(parent.parent)) {
+              if (members.includes(parent)) visit(parent);
+              for (const ancestor of ancestors(parent,PM.proj.layers)) if (members.includes(ancestor)) visit(ancestor);
+            }
+            if (layer.type!=='audio') ordered.push(layer);
+          };
+          members.forEach(visit);
+          const channelsFor=(layer:any)=>['position.x','position.y','scale.x','scale.y','rotation','skew','opacity', ...(poses.get(layer.id)?.length===16 ? ['perspective','position.z','scale.z','rotation.x','rotation.y','orientation.x','orientation.y','orientation.z'] : [])];
+          for (const layer of ordered) for (const key of channelsFor(layer)) layer.p[key]={v:layer.p[key].v,kf:[],expr:null};
+          for(const layer of ordered)for(const {prop} of aimProperties3D(layer)){prop.kf=[];prop.expr=null;}
+          for (const sample of samples) for (const layer of ordered) {
+            const source=sample.values.get(layer.id)!;
+            const values: Record<string,number>={...worldPoseValues(PM,layer,source.world,sample.time,undefined,true),opacity:source.opacity,perspective:source.perspective};
+            for (const key of channelsFor(layer)) {
+              const prop=layer.p[key]; let value=values[key]!;
+              if ((key==='rotation' || key.startsWith('rotation.')) && prop.kf.length) value += Math.round((prop.kf[prop.kf.length-1].v-value)/360)*360;
+              prop.kf.push(PM.KF(sample.time-layer.from,value,'linear')); prop.v=value;
+            }
+            if(source.aim){
+              const aim=aimValues3D(PM,layer,source.aim,sample.time);
+              for(const {key,prop} of aimProperties3D(layer)){prop.kf.push(PM.KF(sample.time-layer.from,aim[key],'linear'));prop.v=aim[key];}
+            }
+            PM.touch();
+          }
+        } else {rebase(members, poses);for(const layer of members)preserveWorldAim(PM,layer,aims.get(layer.id) || null,PM.time);}
+        PM.proj.layers = PM.proj.layers.filter((layer: any) => layer.id !== group.id);
       }
-      PM.touch();
-      if (animated) {
-        const ordered: any[] = [], seen = new Set<string>();
-        const visit = (layer:any) => {
-          if (seen.has(layer.id)) return;
-          seen.add(layer.id);
-          for (let parent=PM.L(layer.parent), guard=0; parent && guard++<256; parent=PM.L(parent.parent)) {
-            if (members.includes(parent)) visit(parent);
-            for (const ancestor of ancestors(parent,PM.proj.layers)) if (members.includes(ancestor)) visit(ancestor);
-          }
-          if (layer.type!=='audio') ordered.push(layer);
-        };
-        members.forEach(visit);
-        const channelsFor=(layer:any)=>['position.x','position.y','scale.x','scale.y','rotation','skew','opacity', ...(poses.get(layer.id)?.length===16 ? ['perspective','position.z','scale.z','rotation.x','rotation.y','orientation.x','orientation.y','orientation.z'] : [])];
-        for (const layer of ordered) for (const key of channelsFor(layer)) layer.p[key]={v:layer.p[key].v,kf:[],expr:null};
-        for(const layer of ordered)for(const {prop} of aimProperties3D(layer)){prop.kf=[];prop.expr=null;}
-        for (const sample of samples) for (const layer of ordered) {
-          const source=sample.values.get(layer.id)!;
-          const values: Record<string,number>={...worldPoseValues(PM,layer,source.world,sample.time,undefined,true),opacity:source.opacity,perspective:source.perspective};
-          for (const key of channelsFor(layer)) {
-            const prop=layer.p[key]; let value=values[key]!;
-            if ((key==='rotation' || key.startsWith('rotation.')) && prop.kf.length) value += Math.round((prop.kf[prop.kf.length-1].v-value)/360)*360;
-            prop.kf.push(PM.KF(sample.time-layer.from,value,'linear')); prop.v=value;
-          }
-          if(source.aim){
-            const aim=aimValues3D(PM,layer,source.aim,sample.time);
-            for(const {key,prop} of aimProperties3D(layer)){prop.kf.push(PM.KF(sample.time-layer.from,aim[key],'linear'));prop.v=aim[key];}
-          }
-          PM.touch();
-        }
-      } else {rebase(members, poses);for(const layer of members)preserveWorldAim(PM,layer,aims.get(layer.id) || null,PM.time);}
-      PM.proj.layers = PM.proj.layers.filter((layer: any) => layer.id !== group.id);
-    }
+      return children;
+    };
+    const kernel = native(groups);
+    const children: string[] = kernel
+      ? kernel.edits.edit('ungroup', { groups: kernel.indexes, t: PM.time }, legacyUngroup, (reply: any) => reply.ids)
+      : legacyUngroup();
     changed(); PM.selectLayers(children.filter(id => PM.L(id))); return { ids: children };
   };
   PM.moveToGroup = (ids: string[], target: string | null) => {
@@ -215,13 +235,18 @@ export function installLayerGroups(PM: PMRegistry): void {
     if (group?.lock || group && ancestors(group, PM.proj.layers).some(parent => parent.lock) || selected.some((layer: any) => layer.lock || ancestors(layer, PM.proj.layers).some(parent => parent.lock))) throw new Error('Unlock layers before moving');
     if (group && (ids.includes(group.id) || ancestors(group, PM.proj.layers).some(item => ids.includes(item.id)))) throw new Error('Grouping would create a cycle');
     const roots = selected.filter((layer: any) => !ancestors(layer, PM.proj.layers).some(item => ids.includes(item.id)));
-    const poses = new Map<string,number[]>(roots.filter((layer: any) => layer.type !== 'audio').map((layer: any) => [layer.id, worldPose(layer,PM.time)]));
-    const perspectives = new Map(roots.map((layer: any) => [layer.id, perspectiveAmount(PM,layer,PM.time)]));
-    const aims = new Map<string,number[]|null>(roots.map((layer:any)=>[layer.id,worldAim3D(PM,layer,PM.time)]));
-    roots.forEach((layer: any) => { layer.group = group?.id || null; });
-    PM.touch(); rebase(roots, poses);
-    for(const layer of roots)preserveWorldAim(PM,layer,aims.get(layer.id) || null,PM.time);
-    for (const layer of roots) if (layer.threeD && !ancestors(layer,PM.proj.layers).some(group => group.threeD)) layer.p.perspective = PM.P(perspectives.get(layer.id));
+    const legacyMove = () => {
+      const poses = new Map<string,number[]>(roots.filter((layer: any) => layer.type !== 'audio').map((layer: any) => [layer.id, worldPose(layer,PM.time)]));
+      const perspectives = new Map(roots.map((layer: any) => [layer.id, perspectiveAmount(PM,layer,PM.time)]));
+      const aims = new Map<string,number[]|null>(roots.map((layer:any)=>[layer.id,worldAim3D(PM,layer,PM.time)]));
+      roots.forEach((layer: any) => { layer.group = group?.id || null; });
+      PM.touch(); rebase(roots, poses);
+      for(const layer of roots)preserveWorldAim(PM,layer,aims.get(layer.id) || null,PM.time);
+      for (const layer of roots) if (layer.threeD && !ancestors(layer,PM.proj.layers).some(group => group.threeD)) layer.p.perspective = PM.P(perspectives.get(layer.id));
+    };
+    const kernel = native(group ? [...roots, group] : roots);
+    if (kernel) kernel.edits.edit('moveToGroup', { roots: kernel.indexes.slice(0, roots.length), target: group ? kernel.indexes[roots.length] : null, t: PM.time }, legacyMove, () => { PM.touch(); });
+    else legacyMove();
     changed(); return { ids: selected.map((layer: any) => layer.id), group: target };
   };
 }

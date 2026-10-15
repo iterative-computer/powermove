@@ -35,6 +35,19 @@ export function preserveParentPose(PM: any, layer: any, parent: any, time: numbe
   preserveWorldAim(PM,layer,aim,time,parent3D(PM,layer,time,parent));
 }
 
+/**
+ * `preserveParentPose` through pm-edit's kernel when the native evaluator is
+ * on (engine-doc/edits.ts); the legacy code otherwise, and for layers outside
+ * the open composition.
+ */
+export function reparentPose(PM: any, layer: any, parent: any, time: number): void {
+  const edits = PM.EngineDoc?.edits;
+  const index = edits ? edits.index(layer) : -1;
+  const parentIndex = parent && edits ? edits.index(parent) : null;
+  if (!edits || index < 0 || parentIndex === -1) { preserveParentPose(PM, layer, parent, time); return; }
+  edits.edit('reparent', { layer: index, parent: parentIndex, t: time }, () => preserveParentPose(PM, layer, parent, time), () => { PM.touch(); });
+}
+
 /** Rebase editable channels into a new grouping/parent coordinate space. */
 export function preserveWorldPose(PM: any, layer: any, world: number[], time: number, parent = layer.parent ? PM.L(layer.parent) : null): void {
   if (world.length === 6 && is3DLayer(PM,layer)) {

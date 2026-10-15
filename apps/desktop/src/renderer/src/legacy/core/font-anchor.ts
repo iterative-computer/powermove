@@ -9,16 +9,67 @@ export function fontAnchorOffset(reference: any, bounds: any, ax: number, ay: nu
     y: offset(reference.y0, reference.y1, bounds.y0, bounds.y1, ay) };
 }
 
-export function captureFontAnchor(PM: any, layer: any, command: any) {
-  if (layer?.type !== 'text' || !PM.raster) return;
-  const fields = command.type === 'set_content' ? Object.keys(command.patch || {})
+/** The content fields an edit command writes (`c.` prefixes dropped). */
+export function commandFields(command: any): string[] {
+  return command.type === 'set_content' ? Object.keys(command.patch || {})
     : ['set_property', 'replace_keyframes', 'set_expression'].includes(command.type)
       ? [String(command.path || command.channel || '').replace(/^c\./, '')] : [];
+}
+
+/** pm-edit's kernels (engine-doc/edits.ts) for a layer of the open composition, or null. */
+export function anchorKernel(PM: any, layer: any): { edits: any; index: number } | null {
+  const edits = PM.EngineDoc?.edits;
+  const index = edits ? edits.index(layer) : -1;
+  return edits && index >= 0 ? { edits, index } : null;
+}
+
+export function captureFontAnchor(PM: any, layer: any, command: any) {
+  if (layer?.type !== 'text' || !PM.raster) return;
+  const fields = commandFields(command);
   // Alignment moves the text's origin, so the pivot follows it (left edge for left, middle for center).
   if (fields.includes('align')) { delete layer.d.fontAnchorBounds; return; }
   if (layer.d.fontAnchorBounds) return;
   if (!fields.some(key => ['font', 'weight', 'size', 'tracking', 'leading', 'italic', 'boxWidth', 'boxHeight'].includes(key) || key.startsWith('fontAxis.'))) return;
-  const measuredLayer = layer.d.animators?.length ? { ...layer, d: { ...layer.d, animators: [] } } : layer;
-  const bounds = PM.raster(measuredLayer, 1, command.time ?? PM.time)?.selection;
-  if (bounds) layer.d.fontAnchorBounds = { x0: bounds.x0, y0: bounds.y0, x1: bounds.x1, y1: bounds.y1 };
+  const time = command.time ?? PM.time;
+  const legacy = () => {
+    const measuredLayer = layer.d.animators?.length ? { ...layer, d: { ...layer.d, animators: [] } } : layer;
+    const bounds = PM.raster(measuredLayer, 1, time)?.selection;
+    if (bounds) layer.d.fontAnchorBounds = { x0: bounds.x0, y0: bounds.y0, x1: bounds.x1, y1: bounds.y1 };
+  };
+  const kernel = anchorKernel(PM, layer);
+  if (kernel) kernel.edits.edit('captureFontAnchor', { layer: kernel.index, fields, t: time }, legacy, () => undefined);
+  else legacy();
+}
+
+/** The raster selection of a text layer with recorded font bounds (the font
+ *  anchor applied), before an anchor edit; null when nothing is recorded. */
+export function fontAnchorReference(PM: any, layer: any, time: number): any {
+  const legacy = () => {
+    const raster = PM.raster?.(layer, 1, time);
+    return raster?.fontOffset && raster.selection ? raster.selection : null;
+  };
+  const edits = PM.EngineDoc?.edits;
+  return edits ? edits.anchorReference(layer, 'font', time, legacy) : legacy();
+}
+
+/**
+ * After an anchor edit (Pan Behind): rescale the recorded bounds (`kind`)
+ * around the new anchor so the artwork stays where `bounds` had it.
+ */
+export function rescaleAnchorBounds(PM: any, layer: any, kind: 'font' | 'size', time: number, bounds: any): void {
+  const member = kind === 'font' ? 'fontAnchorBounds' : 'sizeAnchorBounds';
+  const legacy = () => {
+    const ref = layer.d[member];
+    for (const axis of ['x', 'y'] as const) {
+      const start = `${axis}0` as const, end = `${axis}1` as const;
+      const span = bounds[end] - bounds[start], referenceSpan = ref[end] - ref[start];
+      if (span <= 0) continue;
+      const anchor = PM.ev(layer, 'anchor.' + axis, time);
+      ref[start] = anchor - (anchor - bounds[start]) / span * referenceSpan;
+      ref[end] = ref[start] + referenceSpan;
+    }
+  };
+  const kernel = anchorKernel(PM, layer);
+  if (!kernel) { legacy(); return; }
+  kernel.edits.edit('anchorMoved', { layer: kernel.index, kind, t: time, bounds: { x0: bounds.x0, y0: bounds.y0, x1: bounds.x1, y1: bounds.y1 } }, legacy, () => undefined);
 }

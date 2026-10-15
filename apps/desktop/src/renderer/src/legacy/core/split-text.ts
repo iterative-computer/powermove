@@ -9,6 +9,34 @@ export function splitTextLayers(PM: PMRegistry, ids: string[], mode: TextSplitMo
   const sources = ids.map(id => PM.L(id));
   if (!sources.length || sources.some((layer: any) => !layer || layer.type !== 'text' || layer.lock ||
     (PM.groupAncestors?.(layer) || []).some((group: any) => group.lock))) return false;
+  // pm-edit lays the pieces out in pm-wasm and builds the split layers; the
+  // structure (insertion, hiding the source, grouping) stays here.
+  const native = PM.EngineDoc?.edits?.splitText(sources, mode, PM.time, () => legacySplit(PM, sources, mode),
+    (plans: any[][]) => applySplit(PM, sources, mode, plans));
+  return native ?? legacySplit(PM, sources, mode);
+}
+
+/** Inserts the kernel's split layers before each source, hides the source, and groups them. */
+function applySplit(PM: PMRegistry, sources: any[], mode: TextSplitMode, plans: any[][]): unknown {
+  if (!plans.some(children => children.length)) return false;
+  return PM.Edit.mutate(`Split text by ${mode}`, () => {
+    const created: any[] = [], groups: any[] = [];
+    sources.forEach((source: any, i: number) => {
+      const children = plans[i] || [];
+      if (!children.length) return;
+      PM.proj.layers.splice(PM.proj.layers.indexOf(source), 0, ...children);
+      source.on = PM.P(false);
+      source.solo = false;
+      created.push(...children);
+      groups.push(PM.groupLayers([...children.map((layer: any) => layer.id), source.id], source.name));
+    });
+    PM.ProjectIndex?.invalidate();
+    PM.selectLayers(groups.map(group => group.id));
+    return created;
+  }, { origin: 'command' });
+}
+
+function legacySplit(PM: PMRegistry, sources: any[], mode: TextSplitMode): unknown {
   const plans = sources.map((source: any) => {
     const layout = PM.textLayout(source, PM.time);
     return { source, layout, pieces: layout[mode] };
