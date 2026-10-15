@@ -150,6 +150,7 @@ export class ViewerPresentation {
   private mediaOffs: (() => void)[] = [];
   private latestFrame: PresentedFrame | null = null;
   private readonly listeners = new Set<(frame: PresentedFrame) => void>();
+  private readonly hiddenListeners = new Set<() => void>();
   private readonly offReady: () => void;
   private sessions = 0;
   private disposed = false;
@@ -212,6 +213,23 @@ export class ViewerPresentation {
   onPresented(listener: (frame: PresentedFrame) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /**
+   * Engine frames left the screen without `dispose` (the session ended, or
+   * the drawing was replaced): what is under the canvas shows again, so the
+   * viewer catches up on what it skipped while the engine presented.
+   */
+  onHidden(listener: () => void): () => void {
+    this.hiddenListeners.add(listener);
+    return () => this.hiddenListeners.delete(listener);
+  }
+
+  /** Hides the canvas; tells `onHidden` listeners when it was showing. */
+  private hide(canvas: HTMLCanvasElement): void {
+    const was = canvas.style.visibility === 'visible';
+    canvas.style.visibility = 'hidden';
+    if (was && !this.disposed) for (const listener of this.hiddenListeners) listener();
   }
 
   /**
@@ -400,6 +418,7 @@ export class ViewerPresentation {
     if (old.parentNode) old.parentNode.replaceChild(next, old);
     else this.options.stage.insertBefore(next, this.options.before && this.options.before.parentElement === this.options.stage ? this.options.before : null);
     this.canvasElement = next;
+    this.hide(old);
   }
 
   /**
@@ -492,7 +511,7 @@ export class ViewerPresentation {
     this.presenter?.dispose();
     this.presenter = null;
     this.latestFrame = null;
-    this.canvasElement.style.visibility = 'hidden';
+    this.hide(this.canvasElement);
   }
 
   dispose(): void {
@@ -512,6 +531,7 @@ export class ViewerPresentation {
     this.painter?.dispose();
     this.painter = null;
     this.listeners.clear();
+    this.hiddenListeners.clear();
     this.canvasElement.remove();
   }
 }

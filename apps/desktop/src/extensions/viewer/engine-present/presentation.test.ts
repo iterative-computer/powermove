@@ -289,16 +289,22 @@ describe('ViewerPresentation', () => {
     const service = new Service();
     const { stage, overlay, rafs } = stageIn(window as unknown as Window);
     const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => new Painter() });
+    // The viewer catches up on a resize it skipped while the engine presented.
+    const hidden: boolean[] = [];
+    presentation.onHidden(() => hidden.push(presentation.presenting));
     await settle();
     presentation.update(PARAMS);
     const first = service.channels[0]!;
     first.handlers.message({ type: 'frame', frame: desc(1, 1) }, performance.now());
     runFrames(rafs, performance.now());
     expect(presentation.presenting).toBe(true);
+    expect(hidden).toEqual([]);
     service.connected = false;
     first.handlers.closed('the interactive engine restarted');
     expect(presentation.presenting).toBe(false);
     expect(presentation.latest).toBeNull();
+    // Once, after the canvas is hidden (so the viewer's resize is not held back).
+    expect(hidden).toEqual([false]);
     service.fireReady();
     await settle();
     expect(service.channels).toHaveLength(1);

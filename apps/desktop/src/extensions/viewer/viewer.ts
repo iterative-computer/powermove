@@ -818,6 +818,12 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
       engineFrameTag = tag;
       schedulePresentation();
     });
+    // The WebGL canvas shows again (the engine session ended): it takes the
+    // size it skipped while the engine presented, and draws.
+    presentation.onHidden(() => {
+      commitPendingResize();
+      schedulePresentation();
+    });
     enginePresentation = presentation;
     V.enginePresentation = presentation;
   }
