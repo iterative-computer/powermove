@@ -1894,6 +1894,13 @@ version = "0.1.0"
 [[package]]
 name = "pm-cli"
 version = "0.1.0"
+dependencies = [
+ "pm-eval",
+ "pm-model",
+ "pm-text",
+ "pm-wasm",
+ "serde_json",
+]
 
 [[package]]
 name = "pm-color"
