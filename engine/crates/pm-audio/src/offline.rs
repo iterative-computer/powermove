@@ -9,6 +9,7 @@
 
 use std::io::{Seek, SeekFrom, Write};
 
+use pm_media::audio::{Speaker, default_speakers};
 use pm_time::TICKS_PER_SECOND;
 
 use crate::error::Result;
@@ -177,12 +178,70 @@ pub fn render(
     Ok(summary)
 }
 
+/// `WAVE_FORMAT_EXTENSIBLE`'s `dwChannelMask` for channels in `speakers`
+/// order: bit `k` is FFmpeg's `AVChannel` `k` (front left 0 to top back
+/// right 17, the positions the mask names). The mask only describes
+/// channels stored in increasing bit order, one each; any other order or
+/// position is 0 (no speaker positions).
+pub fn channel_mask(speakers: &[Speaker]) -> u32 {
+    use Speaker::*;
+    const NAMED: [Speaker; 18] = [
+        FrontLeft,
+        FrontRight,
+        FrontCenter,
+        LowFrequency,
+        BackLeft,
+        BackRight,
+        FrontLeftOfCenter,
+        FrontRightOfCenter,
+        BackCenter,
+        SideLeft,
+        SideRight,
+        TopCenter,
+        TopFrontLeft,
+        TopFrontCenter,
+        TopFrontRight,
+        TopBackLeft,
+        TopBackCenter,
+        TopBackRight,
+    ];
+    let mut mask = 0u32;
+    let mut last = None;
+    for s in speakers {
+        let Some(bit) = NAMED.iter().position(|n| n == s) else {
+            return 0;
+        };
+        if last.is_some_and(|l| bit <= l) {
+            return 0;
+        }
+        last = Some(bit);
+        mask |= 1 << bit;
+    }
+    mask
+}
+
+/// FFmpeg's default layout for a channel count
+/// (`av_channel_layout_default`, through [`pm_media::audio::default_speakers`])
+/// as a WAV channel mask: mono 0x4, stereo 0x3, 2.1 0xB, 4.0 0x107, 5.0
+/// 0x37, 5.1 0x3F, 6.1 0x70F, 7.1 0x63F; 0 where that layout has a position
+/// the mask cannot name (or none at all).
+pub fn default_channel_mask(channels: u16) -> u32 {
+    if channels == 0 {
+        return 0;
+    }
+    channel_mask(&default_speakers(channels as usize))
+}
+
 /// A streaming WAV writer. Writes RIFF while the data fits in 4 GiB and
 /// turns the reserved `JUNK` chunk into RF64's `ds64` beyond that.
 pub struct WavWriter<W: Write + Seek> {
     out: W,
     format: PcmFormat,
     channels: u16,
+    mask: u32,
+    /// The largest RIFF size before the file turns into RF64 (`u32::MAX`;
+    /// tests lower it to exercise RF64 without writing 4 GiB).
+    riff_limit: u64,
     sample_rate: u32,
     data_bytes: u64,
     frames: u64,
@@ -193,13 +252,45 @@ pub struct WavWriter<W: Write + Seek> {
 const HEADER: u64 = 12 + 36 + 8 + 40 + 8;
 
 impl<W: Write + Seek> WavWriter<W> {
-    pub fn new(mut out: W, format: PcmFormat, channels: u16, sample_rate: u32) -> Result<Self> {
-        let header = Self::header(format, channels, sample_rate, 0, 0, false);
+    /// A writer for `channels` in FFmpeg's default layout for that count
+    /// ([`default_channel_mask`]).
+    pub fn new(out: W, format: PcmFormat, channels: u16, sample_rate: u32) -> Result<Self> {
+        Self::with_mask(
+            out,
+            format,
+            channels,
+            default_channel_mask(channels),
+            sample_rate,
+        )
+    }
+
+    /// A writer for a mix in `speakers` order (the mix format's layout).
+    pub fn with_speakers(
+        out: W,
+        format: PcmFormat,
+        speakers: &[Speaker],
+        sample_rate: u32,
+    ) -> Result<Self> {
+        let channels = u16::try_from(speakers.len())
+            .map_err(|_| crate::error::AudioError::Unsupported("over 65,535 channels".into()))?;
+        Self::with_mask(out, format, channels, channel_mask(speakers), sample_rate)
+    }
+
+    fn with_mask(
+        mut out: W,
+        format: PcmFormat,
+        channels: u16,
+        mask: u32,
+        sample_rate: u32,
+    ) -> Result<Self> {
+        let header = Self::header(format, channels, mask, sample_rate, 0, 0, false);
         out.write_all(&header)?;
         Ok(WavWriter {
             out,
             format,
             channels,
+            mask,
+            riff_limit: u32::MAX as u64,
             sample_rate,
             data_bytes: 0,
             frames: 0,
@@ -211,13 +302,16 @@ impl<W: Write + Seek> WavWriter<W> {
     fn header(
         format: PcmFormat,
         channels: u16,
+        mask: u32,
         rate: u32,
         data: u64,
         frames: u64,
         rf64: bool,
     ) -> Vec<u8> {
         let mut h = Vec::with_capacity(HEADER as usize);
-        let riff_size = HEADER - 8 + data;
+        // The RIFF size counts the pad byte after odd-sized data; the data
+        // chunk's size does not.
+        let riff_size = HEADER - 8 + data + (data & 1);
         h.extend_from_slice(if rf64 { b"RF64" } else { b"RIFF" });
         h.extend_from_slice(&(if rf64 { u32::MAX } else { riff_size as u32 }).to_le_bytes());
         h.extend_from_slice(b"WAVE");
@@ -246,13 +340,6 @@ impl<W: Write + Seek> WavWriter<W> {
         h.extend_from_slice(&format.bits().to_le_bytes());
         h.extend_from_slice(&22u16.to_le_bytes());
         h.extend_from_slice(&format.bits().to_le_bytes());
-        let mask: u32 = match channels {
-            1 => 0x4,
-            2 => 0x3,
-            6 => 0x60F,
-            8 => 0x63F,
-            _ => 0,
-        };
         h.extend_from_slice(&mask.to_le_bytes());
         // KSDATAFORMAT_SUBTYPE_PCM or _IEEE_FLOAT.
         let tag: u16 = if format == PcmFormat::F32 { 3 } else { 1 };
@@ -289,10 +376,11 @@ impl<W: Write + Seek> WavWriter<W> {
         if self.data_bytes % 2 == 1 {
             self.out.write_all(&[0])?;
         }
-        let rf64 = HEADER - 8 + self.data_bytes > u32::MAX as u64;
+        let rf64 = HEADER - 8 + self.data_bytes + (self.data_bytes & 1) > self.riff_limit;
         let header = Self::header(
             self.format,
             self.channels,
+            self.mask,
             self.sample_rate,
             self.data_bytes,
             self.frames,
@@ -423,6 +511,117 @@ mod tests {
         let corr: f64 = y.iter().zip(&x).map(|(a, b)| a * *b as f64).sum::<f64>();
         assert!(corr > 0.0);
         assert!(y.iter().any(|&v| v != 0.0));
+    }
+
+    /// 24-bit mono with an odd frame count: the data chunk keeps its size
+    /// and the pad byte counts in the RIFF size, so the RIFF size is the
+    /// file's length less 8.
+    #[test]
+    fn odd_data_is_padded_and_counted() {
+        let mut w =
+            WavWriter::new(std::io::Cursor::new(Vec::new()), PcmFormat::S24, 1, 48_000).unwrap();
+        w.write(0, &[0.25; 1001]).unwrap();
+        let (cur, frames, _) = w.finish().unwrap();
+        let bytes = cur.into_inner();
+        assert_eq!(frames, 1001);
+        assert_eq!(bytes.len() as u64, HEADER + 3003 + 1);
+        let riff = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert_eq!(riff as usize, bytes.len() - 8);
+        let data = u32::from_le_bytes(
+            bytes[HEADER as usize - 4..HEADER as usize]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(data, 3003);
+        let (_, ch, _, y) = read_wav(&bytes).unwrap();
+        assert_eq!((ch, y.len()), (1, 1001));
+    }
+
+    /// Past the RIFF limit the reserved `JUNK` chunk becomes `ds64` with the
+    /// 64-bit sizes, and the 32-bit sizes read `0xFFFFFFFF` (EBU Tech 3306).
+    #[test]
+    fn rf64_past_the_riff_limit() {
+        let mut w =
+            WavWriter::new(std::io::Cursor::new(Vec::new()), PcmFormat::F32, 2, 48_000).unwrap();
+        w.riff_limit = 1_000;
+        let x: Vec<f32> = (0..2_000).map(|i| (i as f32 * 0.003).sin()).collect();
+        w.write(0, &x).unwrap();
+        let (cur, frames, _) = w.finish().unwrap();
+        let bytes = cur.into_inner();
+        let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+        assert_eq!(&bytes[0..4], b"RF64");
+        assert_eq!(u32_at(4), u32::MAX);
+        assert_eq!(&bytes[12..16], b"ds64");
+        assert_eq!(u32_at(16), 28);
+        assert_eq!(u64_at(20), bytes.len() as u64 - 8, "ds64 RIFF size");
+        assert_eq!(u64_at(28), 8_000, "ds64 data size");
+        assert_eq!(u64_at(36), frames, "ds64 sample count");
+        assert_eq!(&bytes[HEADER as usize - 8..HEADER as usize - 4], b"data");
+        assert_eq!(u32_at(HEADER as usize - 4), u32::MAX);
+        let (f, ch, rate, y) = read_wav(&bytes).unwrap();
+        assert_eq!((f, ch, rate), (PcmFormat::F32, 2, 48_000));
+        assert_eq!(y, x);
+    }
+
+    #[test]
+    fn channel_masks() {
+        use Speaker::*;
+        assert_eq!(channel_mask(&[FrontCenter]), 0x4);
+        assert_eq!(channel_mask(&[FrontLeft, FrontRight]), 0x3);
+        assert_eq!(channel_mask(&[FrontLeft, FrontRight, FrontCenter]), 0x7);
+        assert_eq!(
+            channel_mask(&[FrontLeft, FrontRight, BackLeft, BackRight]),
+            0x33
+        );
+        assert_eq!(
+            channel_mask(&[FrontLeft, FrontRight, FrontCenter, SideLeft, SideRight]),
+            0x607
+        );
+        assert_eq!(
+            channel_mask(&[
+                FrontLeft,
+                FrontRight,
+                FrontCenter,
+                LowFrequency,
+                BackCenter,
+                SideLeft,
+                SideRight
+            ]),
+            0x70F
+        );
+        // Out of mask order, repeated, or a position the mask cannot name.
+        assert_eq!(channel_mask(&[FrontRight, FrontLeft]), 0);
+        assert_eq!(channel_mask(&[FrontLeft, FrontLeft]), 0);
+        assert_eq!(channel_mask(&[StereoLeft, StereoRight]), 0);
+        // What our FFmpeg build's WAV muxer writes for `ffmpeg -ac N`.
+        let ffmpeg = [0x4, 0x3, 0xB, 0x107, 0x37, 0x3F, 0x70F, 0x63F];
+        for (n, mask) in (1..=8u16).zip(ffmpeg) {
+            assert_eq!(default_channel_mask(n), mask, "{n} channels");
+        }
+        assert_eq!(default_channel_mask(0), 0);
+        let speakers = [FrontLeft, FrontRight, FrontCenter, SideLeft, SideRight];
+        let mut w = WavWriter::with_speakers(
+            std::io::Cursor::new(Vec::new()),
+            PcmFormat::F32,
+            &speakers,
+            48_000,
+        )
+        .unwrap();
+        w.write(0, &[0.0; 10]).unwrap();
+        let bytes = w.finish().unwrap().0.into_inner();
+        // dwChannelMask sits 20 bytes into the 40-byte fmt payload.
+        let fmt = 12 + 36;
+        assert_eq!(&bytes[fmt..fmt + 4], b"fmt ");
+        let mask = u32::from_le_bytes(bytes[fmt + 8 + 20..fmt + 8 + 24].try_into().unwrap());
+        assert_eq!(mask, 0x607);
+        // `new` labels a 3-channel file FFmpeg's 2.1, LFE third.
+        let mut w =
+            WavWriter::new(std::io::Cursor::new(Vec::new()), PcmFormat::F32, 3, 48_000).unwrap();
+        w.write(0, &[0.0; 9]).unwrap();
+        let bytes = w.finish().unwrap().0.into_inner();
+        let mask = u32::from_le_bytes(bytes[fmt + 8 + 20..fmt + 8 + 24].try_into().unwrap());
+        assert_eq!(mask, 0xB);
     }
 
     #[test]

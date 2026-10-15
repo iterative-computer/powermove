@@ -49,6 +49,11 @@ impl Source {
     pub fn length(&self) -> Option<u64> {
         self.info.length
     }
+    /// Packets its decoder has sent to the codec (diagnostics: what the
+    /// blocks decoded so far cost).
+    pub fn packets_decoded(&self) -> u64 {
+        lock(&self.decoder).packets_decoded()
+    }
 }
 
 /// Decoded samples `[index × BLOCK, index × BLOCK + len)`, per channel.

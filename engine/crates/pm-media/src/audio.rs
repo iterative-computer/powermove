@@ -15,11 +15,20 @@
 //! # Positions
 //!
 //! With a timebase at least as fine as one sample, every decoded frame is
-//! placed by its timestamp, so seeks land on the exact sample and stream
-//! gaps become silence. Coarser timebases (Matroska and WebM use 1 ms) cannot
+//! placed by its timestamp, so seeks land on the exact sample, stream gaps
+//! become silence, and overlaps (a frame stamped before the end of the
+//! previous one) drop the samples the timeline already has; within one
+//! sample of the expected position, a frame continues the line (container
+//! rounding). Coarser timebases (Matroska and WebM use 1 ms) cannot
 //! place a frame to the sample; such streams are positioned by counting
-//! samples from the start, and a seek decodes forward from the start of the
-//! stream (exact, but its cost grows with the seek distance).
+//! samples from the start. A demux-only scan (`PacketIndex`) counts the
+//! samples of every packet with FFmpeg's parsers (or the codec's fixed frame
+//! size), so a seek starts at a packet whose program sample is known and
+//! counts from there: its cost does not grow with the seek distance. Where
+//! no packet duration is known (ALAC in Matroska has no parser), a seek
+//! decodes forward from the start, and a seek forward continues the running
+//! decode instead of starting over, so reading a stream in order costs its
+//! length once.
 //!
 //! # Seeks
 //!
@@ -176,8 +185,13 @@ fn preroll_for(codec: ff::AVCodecID, sample_rate: u32) -> u64 {
         | ff::AV_CODEC_ID_TRUEHD
         | ff::AV_CODEC_ID_MLP => 0,
         c if (ff::AV_CODEC_ID_PCM_S16LE..ff::AV_CODEC_ID_ADPCM_IMA_QT).contains(&c) => 0,
-        // RFC 7845 section 4.6: 80 ms.
-        ff::AV_CODEC_ID_OPUS => (sample_rate as u64 * 80).div_ceil(1000),
+        // RFC 7845 section 4.6 asks for at least 80 ms, but CELT predicts
+        // each band's energy from the previous frame, so a decoder started
+        // mid-stream converges slowly: measured on tones (WebM, anchors close
+        // to the target), 0.11 off after 80 ms, 1e-3 after 250 ms, 5e-6
+        // after 420 ms, 3e-7 after 500 ms. A block boundary would step by
+        // the difference, so pre-roll 500 ms.
+        ff::AV_CODEC_ID_OPUS => (sample_rate as u64 * 500).div_ceil(1000),
         // Two frames of overlap and SBR history.
         ff::AV_CODEC_ID_AAC | ff::AV_CODEC_ID_AAC_LATM => 4096,
         // The bit reservoir reaches back up to 511 bytes, several frames at
@@ -210,6 +224,321 @@ impl Pending {
     }
 }
 
+/// Kept anchors are at least this many samples apart: a seek decodes at
+/// most this much before its pre-roll (about 85 ms at 48 kHz), and an hour
+/// of audio keeps about 42,000 anchors.
+const ANCHOR_SPACING: i64 = 4096;
+
+/// A packet a seek on a coarse-timebase stream can start at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Anchor {
+    /// The packet's timestamp, unique in the stream (stream timebase).
+    pts: i64,
+    /// Program index of the packet's first sample.
+    start: i64,
+    /// Samples the packet decodes to.
+    duration: i64,
+    /// The next packet's timestamp (when later) and duration. A fresh
+    /// decoder can hold back the anchor packet's samples, so its first
+    /// frame may be the next packet's.
+    next: Option<(i64, i64)>,
+}
+
+/// The demuxer and parser of a [`PacketIndex`] scan.
+struct Scan {
+    input: Input,
+    stream: usize,
+    /// The decoder's (probed) stream parameters: the frame size of raw
+    /// AAC is only known after probing.
+    par: *mut ff::AVCodecParameters,
+    ctx: *mut ff::AVCodecContext,
+    parser: *mut ff::AVCodecParserContext,
+    pkt: *mut ff::AVPacket,
+}
+
+// Used from one thread at a time, like the decoder that owns it.
+unsafe impl Send for Scan {}
+
+impl Drop for Scan {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.parser.is_null() {
+                ff::av_parser_close(self.parser);
+            }
+            ff::avcodec_free_context(&mut self.ctx);
+            ff::av_packet_free(&mut self.pkt);
+            ff::avcodec_parameters_free(&mut self.par);
+        }
+    }
+}
+
+/// One packet as the scan saw it.
+struct ScannedPacket {
+    pts: Option<i64>,
+    /// Samples it decodes to, when known.
+    duration: Option<i64>,
+    /// It carries `AV_PKT_DATA_SKIP_SAMPLES` (priming or end trimming).
+    skips: bool,
+}
+
+impl Scan {
+    fn open(path: &Path, stream: usize, probed: *const ff::AVCodecParameters) -> Result<Scan> {
+        let input = Input::open_raw(path)?;
+        if stream >= input.streams()
+            || input.media_type(stream) != ff::AVMEDIA_TYPE_AUDIO
+            || input.codec_id(stream) != unsafe { (*probed).codec_id }
+        {
+            return Err(MediaError::unsupported("the scan sees other streams"));
+        }
+        unsafe {
+            for i in 0..input.streams() {
+                (*input.st(i)).discard = if i == stream {
+                    ff::AVDISCARD_DEFAULT
+                } else {
+                    ff::AVDISCARD_ALL
+                };
+            }
+            let out = Scan {
+                stream,
+                par: ff::avcodec_parameters_alloc(),
+                ctx: ff::avcodec_alloc_context3(ptr::null()),
+                parser: ff::av_parser_init((*probed).codec_id),
+                pkt: ff::av_packet_alloc(),
+                input,
+            };
+            if out.par.is_null() || out.ctx.is_null() || out.pkt.is_null() {
+                return Err(MediaError::OutOfMemory(0));
+            }
+            check(
+                ff::avcodec_parameters_copy(out.par, probed),
+                "audio parameters",
+            )?;
+            check(
+                ff::avcodec_parameters_to_context(out.ctx, probed),
+                "audio parameters",
+            )?;
+            if !out.parser.is_null() {
+                // Container packets are whole frames: the parser only reads
+                // their headers (`PARSER_FLAG_COMPLETE_FRAMES`).
+                (*out.parser).flags |= 1;
+            }
+            Ok(out)
+        }
+    }
+
+    /// The next packet of the stream, `None` at the end.
+    fn next(&mut self) -> Result<Option<ScannedPacket>> {
+        unsafe {
+            loop {
+                let r = ff::av_read_frame(self.input.fmt, self.pkt);
+                if r == ff::AVERROR_EOF
+                    || r == ff::averror(libc::EIO) && ff::avio_feof((*self.input.fmt).pb) != 0
+                {
+                    return Ok(None);
+                }
+                check(r, "scan audio")?;
+                if (*self.pkt).stream_index as usize != self.stream {
+                    ff::av_packet_unref(self.pkt);
+                    continue;
+                }
+                let mut parsed = 0;
+                if !self.parser.is_null() {
+                    let mut out: *mut u8 = ptr::null_mut();
+                    let mut size: c_int = 0;
+                    ff::av_parser_parse2(
+                        self.parser,
+                        self.ctx,
+                        &mut out,
+                        &mut size,
+                        (*self.pkt).data,
+                        (*self.pkt).size,
+                        (*self.pkt).pts,
+                        (*self.pkt).dts,
+                        (*self.pkt).pos,
+                    );
+                    if size > 0 {
+                        parsed = (*self.parser).duration.max(0) as i64;
+                    }
+                }
+                // Codecs whose parser does not count (raw AAC) have a fixed
+                // frame size; PCM counts by bytes.
+                let fixed =
+                    ff::av_get_audio_frame_duration2(self.par, (*self.pkt).size).max(0) as i64;
+                let duration = if parsed > 0 {
+                    Some(parsed)
+                } else if fixed > 0 {
+                    Some(fixed)
+                } else {
+                    None
+                };
+                let mut size = 0usize;
+                let skips =
+                    !ff::av_packet_get_side_data(self.pkt, ff::AV_PKT_DATA_SKIP_SAMPLES, &mut size)
+                        .is_null();
+                let pts = (*self.pkt).pts;
+                ff::av_packet_unref(self.pkt);
+                return Ok(Some(ScannedPacket {
+                    pts: (pts != ff::AV_NOPTS_VALUE).then_some(pts),
+                    duration,
+                    skips,
+                }));
+            }
+        }
+    }
+}
+
+/// Program positions of a coarse-timebase stream's packets, from a
+/// demux-only scan of the file, read as far as seeks need. The scan counts
+/// samples exactly as a decode from the start does: the first packet's
+/// samples less the priming, then every packet's duration. The anchors kept
+/// are a function of the file alone (each is final once the packet after it
+/// is read), so a seek's anchor, and with it what the seek decodes, does
+/// not depend on what was scanned or decoded before.
+struct PacketIndex {
+    scan: Option<Scan>,
+    anchors: Vec<Anchor>,
+    /// Program index of the next packet's first sample.
+    next_start: i64,
+    /// The latest valid timestamp.
+    last_pts: Option<i64>,
+    /// The last packet, kept until the next one shows its timestamp is
+    /// unique.
+    candidate: Option<Anchor>,
+}
+
+impl PacketIndex {
+    fn new(scan: Scan, priming: i64) -> PacketIndex {
+        PacketIndex {
+            scan: Some(scan),
+            anchors: Vec::new(),
+            next_start: -priming,
+            last_pts: None,
+            candidate: None,
+        }
+    }
+
+    /// Program samples below this have every anchor they will ever have.
+    fn settled(&self) -> i64 {
+        match (&self.scan, &self.candidate) {
+            (None, _) => i64::MAX,
+            (Some(_), Some(c)) => c.start,
+            (Some(_), None) => self.next_start,
+        }
+    }
+
+    fn settle(&mut self, next_pts: Option<i64>, next_duration: Option<i64>) {
+        let Some(mut c) = self.candidate.take() else {
+            return;
+        };
+        // Two packets with one timestamp cannot be told apart.
+        if next_pts == Some(c.pts) {
+            return;
+        }
+        c.next = next_pts.zip(next_duration).filter(|&(pts, _)| pts > c.pts);
+        if self
+            .anchors
+            .last()
+            .is_none_or(|a| c.start - a.start >= ANCHOR_SPACING)
+        {
+            self.anchors.push(c);
+        }
+    }
+
+    /// The last anchor at or before program sample `at`.
+    fn anchor_for(&mut self, at: i64) -> Option<Anchor> {
+        while self.settled() <= at {
+            let Some(scan) = self.scan.as_mut() else {
+                break;
+            };
+            let packet = match scan.next() {
+                Ok(p) => p,
+                Err(_) => {
+                    // A read error ends the scan where it happened: the
+                    // anchors before it stand, this seek and every later
+                    // one resolve against them, and the decode reports the
+                    // error itself if it reaches that spot.
+                    self.scan = None;
+                    self.candidate = None;
+                    break;
+                }
+            };
+            let Some(p) = packet else {
+                self.settle(None, None);
+                self.scan = None;
+                break;
+            };
+            self.settle(p.pts, p.duration);
+            let Some(duration) = p.duration else {
+                // Positions past a packet of unknown length are unknown.
+                self.scan = None;
+                break;
+            };
+            let unique = p
+                .pts
+                .is_some_and(|t| self.last_pts.is_none_or(|last| t > last));
+            if unique && !p.skips && self.next_start >= 0 && duration > 0 {
+                self.candidate = Some(Anchor {
+                    pts: p.pts.unwrap_or_default(),
+                    start: self.next_start,
+                    duration,
+                    next: None,
+                });
+            }
+            if p.pts.is_some() {
+                self.last_pts = p.pts;
+            }
+            self.next_start += duration;
+        }
+        let i = self.anchors.partition_point(|a| a.start <= at);
+        i.checked_sub(1).map(|i| self.anchors[i])
+    }
+}
+
+/// Program index of the first sample of the first frame (`pts`, `n`
+/// samples) a fresh decoder returns after starting at anchor `a`. Fresh
+/// decoders drop their codec delay from the head of their first output
+/// (`initial_padding`, Matroska's `CodecDelay`: Opus its pre-skip, AC-3
+/// 256 samples, MP2 481, HE-AAC 4,224; LC-AAC and Vorbis nothing) and move
+/// its timestamp by as much, rounded to the timebase: a frame of the anchor
+/// packet holds the packet's last `n` samples. A decoder that holds the
+/// anchor packet back returns the next packet's first.
+///
+/// `skip` is that codec delay in samples and `skip_ts` the same span in
+/// the stream timebase. A delay as long as the anchor packet or longer
+/// (HE-AAC's over 2,048-sample packets) runs into the packets after it:
+/// the first frame then starts `skip` samples into the anchor's, and its
+/// timestamp, moved by the delay, says so.
+fn anchored_start(a: &Anchor, pts: i64, n: i64, skip: i64, skip_ts: i64) -> Option<i64> {
+    if skip >= a.duration {
+        // Packet timestamps are rounded to the timebase; a frame from a
+        // packet before or after is a whole packet away.
+        let duration_ts = a.next.map_or(0, |(p, _)| p - a.pts);
+        let off = (pts - (a.pts + skip_ts)).abs();
+        return (off <= 1 || 4 * off < duration_ts).then_some(a.start + skip);
+    }
+    let next_pts = a.next.map(|(p, _)| p);
+    let of_anchor = pts >= a.pts && next_pts.is_none_or(|p| pts < p);
+    if of_anchor && n <= a.duration {
+        return Some(a.start + a.duration - n);
+    }
+    match a.next {
+        Some((p, d)) if pts >= p && n <= d => Some(a.start + a.duration + d - n),
+        _ => None,
+    }
+}
+
+/// Where the running decode began; a seek that would begin at the same
+/// place continues it instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Run {
+    /// From the start of the stream, counting.
+    Start,
+    /// From an anchor packet (its timestamp), counting.
+    Anchor(i64),
+    /// Placed by timestamps.
+    Placed,
+}
+
 /// A streaming decoder for one audio stream.
 pub struct AudioDecoder {
     input: Input,
@@ -232,6 +561,29 @@ pub struct AudioDecoder {
     /// The decoder was sent its final flush.
     draining: bool,
     eof: bool,
+    /// Where the running decode began.
+    run: Run,
+    /// Packets are dropped until the one with this timestamp (an anchored
+    /// seek on a coarse timebase starts the decoder exactly there).
+    feed_from: Option<i64>,
+    /// The demuxer was rewound to find `feed_from`.
+    rewound: bool,
+    /// The anchor that places the first frame of an anchored seek.
+    first: Option<Anchor>,
+    /// Packet positions of a coarse-timebase stream (opened at the first
+    /// seek that needs them; `None` before and for sample-exact streams).
+    index: Option<PacketIndex>,
+    /// No index can be opened for this stream.
+    no_index: bool,
+    /// An anchored seek could not be placed (the anchor packet was not
+    /// found again, or the decoder's first frame did not fit it). Such
+    /// failures come from the demuxer or the codec, so they repeat for the
+    /// stream's other anchors: from then on every seek counts from the
+    /// start, and reads in order continue that decode instead of retrying
+    /// an anchor and restarting for every block.
+    anchors_failed: bool,
+    /// Packets sent to the decoder (diagnostics).
+    packets: u64,
 }
 
 // The FFmpeg contexts are used from one thread at a time.
@@ -244,6 +596,25 @@ impl Drop for AudioDecoder {
             ff::av_frame_free(&mut self.frame);
             ff::avcodec_free_context(&mut self.ctx);
         }
+    }
+}
+
+/// FFmpeg's default layout for a channel count
+/// (`av_channel_layout_default`): mono, stereo, 2.1, 4.0, 5.0, 5.1, 6.1,
+/// 7.1, and so on; positions FFmpeg leaves unspecified come back as
+/// [`Speaker::Other`].
+pub fn default_speakers(channels: usize) -> Vec<Speaker> {
+    let Ok(n) = c_int::try_from(channels) else {
+        return vec![Speaker::Other(ff::AV_CHAN_UNKNOWN); channels];
+    };
+    unsafe {
+        let mut layout: ff::AVChannelLayout = std::mem::zeroed();
+        ff::av_channel_layout_default(&mut layout, n);
+        let out = (0..channels)
+            .map(|i| Speaker::from_av(ff::av_channel_layout_channel_from_index(&layout, i as u32)))
+            .collect();
+        ff::av_channel_layout_uninit(&mut layout);
+        out
     }
 }
 
@@ -363,6 +734,14 @@ impl AudioDecoder {
                 position: 0,
                 draining: false,
                 eof: false,
+                run: Run::Start,
+                feed_from: None,
+                rewound: false,
+                first: None,
+                index: None,
+                no_index: false,
+                anchors_failed: false,
+                packets: 0,
             };
             if out.pkt.is_null() || out.frame.is_null() {
                 return Err(MediaError::OutOfMemory(0));
@@ -459,6 +838,12 @@ impl AudioDecoder {
         self.position.max(0) as u64
     }
 
+    /// Packets sent to the codec since the decoder opened (diagnostics:
+    /// what a seek or a read cost).
+    pub fn packets_decoded(&self) -> u64 {
+        self.packets
+    }
+
     /// The skip FFmpeg will apply at the start (`AV_PKT_DATA_SKIP_SAMPLES`
     /// of the stream's first packet), then rewinds.
     fn first_packet_skip(&mut self) -> Result<i64> {
@@ -525,8 +910,8 @@ impl AudioDecoder {
         Ok(())
     }
 
-    /// Back to the start of the stream, positioned by counting.
-    fn restart(&mut self) -> Result<()> {
+    /// Moves the demuxer to the stream's first packet.
+    fn rewind(&mut self) -> Result<()> {
         unsafe {
             // Aim well before program sample 0, so the demuxer lands on the
             // stream's first packet (an MP4 edit list's priming packet sits
@@ -553,14 +938,23 @@ impl AudioDecoder {
                     "rewind audio",
                 )?;
             }
-            self.fresh_codec()?;
         }
+        Ok(())
+    }
+
+    /// Back to the start of the stream, positioned by counting.
+    fn restart(&mut self) -> Result<()> {
+        self.rewind()?;
+        self.fresh_codec()?;
         self.pending.clear();
         self.expected = Some(-self.info.extra_priming);
         self.target = 0;
         self.position = 0;
         self.draining = false;
         self.eof = false;
+        self.run = Run::Start;
+        self.feed_from = None;
+        self.first = None;
         Ok(())
     }
 
@@ -570,10 +964,12 @@ impl AudioDecoder {
         self.seek_with(index, false)
     }
 
-    /// [`Self::seek`] that never continues the running decode: the samples
-    /// that follow depend only on the file and `index` (for lossless codecs
-    /// both are the same). Block caches use it so a block decodes the same
-    /// way whichever block was decoded before it.
+    /// [`Self::seek`] whose samples depend only on the file and `index`:
+    /// it starts a fresh decoder where it would start for `index` from any
+    /// state, and continues the running decode only when that decode began
+    /// at the same place (for lossless codecs both are the same). Block
+    /// caches use it so a block decodes the same way whichever block was
+    /// decoded before it.
     pub fn seek_anchored(&mut self, index: u64) -> Result<()> {
         self.seek_with(index, self.info.preroll > 0)
     }
@@ -589,7 +985,10 @@ impl AudioDecoder {
             self.target = index;
             return self.skip_to_target();
         }
-        if !self.info.sample_exact_timestamps || index <= self.info.preroll as i64 {
+        if !self.info.sample_exact_timestamps {
+            return self.seek_counted(index);
+        }
+        if index <= self.info.preroll as i64 {
             self.restart()?;
             self.target = index;
             return self.skip_to_target();
@@ -618,6 +1017,9 @@ impl AudioDecoder {
         self.draining = false;
         self.eof = false;
         self.position = index;
+        self.run = Run::Placed;
+        self.feed_from = None;
+        self.first = None;
         if let Err(e) = self.fill() {
             if matches!(e, MediaError::Unsupported(_)) {
                 // The demuxer landed after the target: decode from the start.
@@ -628,6 +1030,89 @@ impl AudioDecoder {
             return Err(e);
         }
         Ok(())
+    }
+
+    /// A seek on a coarse timebase: from the last anchor packet at least the
+    /// pre-roll before `index` (from the start without one), counting. When
+    /// the running decode began at that same place and has not passed
+    /// `index`, it continues: the samples are the same, decoded once.
+    fn seek_counted(&mut self, index: i64) -> Result<()> {
+        let from = index - self.info.preroll as i64;
+        let anchor = if from > 0 && !self.anchors_failed {
+            self.anchor_for(from)
+        } else {
+            None
+        };
+        let run = anchor.map_or(Run::Start, |a| Run::Anchor(a.pts));
+        if self.run == run && self.position <= index && self.feed_from.is_none() {
+            self.target = index;
+            return self.skip_to_target();
+        }
+        if let Some(a) = anchor {
+            match self.seek_to_anchor(a, index) {
+                Ok(()) => return Ok(()),
+                // The anchor could not be found again or did not place the
+                // first frame: decode from the start, as every later seek
+                // will.
+                Err(MediaError::Unsupported(_)) => self.anchors_failed = true,
+                Err(e) => return Err(e),
+            }
+        }
+        self.restart()?;
+        self.target = index;
+        self.skip_to_target()
+    }
+
+    /// The anchor for program sample `at`, scanning as far as needed.
+    fn anchor_for(&mut self, at: i64) -> Option<Anchor> {
+        if self.index.is_none() && !self.no_index {
+            let probed = self.input.par(self.info.stream);
+            match Scan::open(&self.info.path, self.info.stream, probed) {
+                Ok(scan) => self.index = Some(PacketIndex::new(scan, self.info.priming)),
+                Err(_) => self.no_index = true,
+            }
+        }
+        match self.index.as_mut() {
+            Some(index) => index.anchor_for(at),
+            None => None,
+        }
+    }
+
+    /// Starts a fresh decoder exactly at the anchor packet and discards to
+    /// `index`.
+    fn seek_to_anchor(&mut self, a: Anchor, index: i64) -> Result<()> {
+        unsafe {
+            let r = ff::avformat_seek_file(
+                self.input.fmt,
+                self.info.stream as c_int,
+                i64::MIN,
+                a.pts,
+                a.pts,
+                0,
+            );
+            self.rewound = false;
+            if r < 0 {
+                self.rewind()?;
+                self.rewound = true;
+            }
+        }
+        self.fresh_codec()?;
+        self.pending.clear();
+        self.expected = None;
+        self.target = index;
+        self.position = index;
+        self.draining = false;
+        self.eof = false;
+        self.run = Run::Anchor(a.pts);
+        self.feed_from = Some(a.pts);
+        self.first = Some(a);
+        let filled = self.fill();
+        if filled.is_err() {
+            self.feed_from = None;
+            self.first = None;
+            self.run = Run::Placed;
+        }
+        filled.map(|_| ())
     }
 
     /// Discards decoded samples up to the target.
@@ -693,6 +1178,9 @@ impl AudioDecoder {
                 if r == ff::AVERROR_EOF
                     || r == ff::averror(libc::EIO) && ff::avio_feof((*self.input.fmt).pb) != 0
                 {
+                    if self.feed_from.is_some() {
+                        return Err(MediaError::unsupported("the anchor packet was not found"));
+                    }
                     self.draining = true;
                     let s = ff::avcodec_send_packet(self.ctx, ptr::null());
                     if s < 0 && s != ff::AVERROR_EOF {
@@ -707,6 +1195,27 @@ impl AudioDecoder {
                     ff::av_packet_unref(self.pkt);
                     continue;
                 }
+                if let Some(from) = self.feed_from {
+                    let pts = (*self.pkt).pts;
+                    if pts == from {
+                        // The anchor: the decoder starts here.
+                        self.feed_from = None;
+                    } else {
+                        ff::av_packet_unref(self.pkt);
+                        if pts != ff::AV_NOPTS_VALUE && pts > from {
+                            // The demuxer landed after the anchor.
+                            if self.rewound {
+                                return Err(MediaError::unsupported(
+                                    "the anchor packet was not found",
+                                ));
+                            }
+                            self.rewind()?;
+                            self.rewound = true;
+                        }
+                        continue;
+                    }
+                }
+                self.packets += 1;
                 let s = ff::avcodec_send_packet(self.ctx, self.pkt);
                 ff::av_packet_unref(self.pkt);
                 if s < 0 && s != ff::AVERROR_INVALIDDATA && s != ff::averror(libc::EAGAIN) {
@@ -715,6 +1224,17 @@ impl AudioDecoder {
                 return Ok(());
             }
         }
+    }
+
+    /// [`anchored_start`] with this decoder's codec delay: what a fresh
+    /// decoder drops from the head of its output (`initial_padding`).
+    fn place_anchored(&self, a: &Anchor, pts: i64, n: i64) -> Option<i64> {
+        let skip = unsafe { (*self.ctx).initial_padding.max(0) as i64 };
+        // The delay in the timebase, rounded to the nearest tick.
+        let num = skip as i128 * self.tb.1 as i128;
+        let den = self.info.sample_rate as i128 * self.tb.0 as i128;
+        let skip_ts = ((2 * num + den) / (2 * den)) as i64;
+        anchored_start(a, pts, n, skip, skip_ts)
     }
 
     /// Places the decoded frame on the program timeline and appends what
@@ -729,7 +1249,16 @@ impl AudioDecoder {
             ts_to_samples(pts - self.start_pts, self.tb, self.info.sample_rate)
                 - self.info.extra_priming
         });
+        // The first frame of an anchored seek on a coarse timebase is
+        // placed by the anchor the scan counted.
+        let anchored = match (self.expected, self.first.take()) {
+            (None, Some(a)) => Some(self.place_anchored(&a, pts, n as i64).ok_or_else(|| {
+                MediaError::unsupported("the first frame after an anchor is not the anchor's")
+            })?),
+            _ => None,
+        };
         let start = match (self.expected, by_pts) {
+            _ if let Some(a) = anchored => a,
             // Sequential: timestamps only move the line for a real gap or
             // overlap, not for rounding in the container.
             (Some(e), Some(p)) if (p - e).abs() > 1 => p,
@@ -745,8 +1274,16 @@ impl AudioDecoder {
             // A seek that landed past its target.
             return Err(MediaError::unsupported("the seek landed after its target"));
         }
-        let gap = self.expected.map_or(0, |e| (start - e).max(0));
-        self.expected = Some(start + n as i64);
+        // A gap (the frame starts after the expected sample) becomes
+        // silence; an overlap (it starts before) drops the frame's samples
+        // the timeline already has, so the rest sits at its timestamp.
+        let (gap, lead) = match self.expected {
+            Some(e) if start > e => (start - e, 0),
+            Some(e) if start < e => (0, (e - start).min(n as i64)),
+            _ => (0, 0),
+        };
+        let lead = lead as usize;
+        self.expected = Some((start + n as i64).max(self.expected.unwrap_or(i64::MIN)));
         let channels = self.info.channels();
         let frame_channels = unsafe { (*f).ch_layout.nb_channels.max(0) as usize };
         if frame_channels != channels {
@@ -761,10 +1298,11 @@ impl AudioDecoder {
                 self.info.sample_rate
             )));
         }
-        // What of this frame (and of a gap before it) is at or after the target.
-        let first = start - gap;
+        // What of this frame (and of a gap before it) is at or after the
+        // target: the timeline continues at `first`.
+        let first = start - gap + lead as i64;
         let keep_from = (self.target - first).max(0) as usize;
-        let total = gap as usize + n;
+        let total = gap as usize + n - lead;
         if keep_from >= total {
             return Ok(());
         }
@@ -783,7 +1321,7 @@ impl AudioDecoder {
         for (c, out) in self.pending.data.iter_mut().enumerate() {
             let silence_from = keep_from.min(gap as usize);
             out.extend(std::iter::repeat_n(0.0, gap as usize - silence_from));
-            let skip = keep_from.saturating_sub(gap as usize);
+            let skip = lead + keep_from.saturating_sub(gap as usize);
             unsafe {
                 let (base, stride) = if planar {
                     (*(*f).extended_data.add(c), bytes)
@@ -878,5 +1416,107 @@ mod tests {
         assert_eq!(ts_to_samples(324870, (1, 14112000), 48000), 1105);
         assert_eq!(samples_to_ts(1105, (1, 14112000), 48000), 324870);
         assert_eq!(samples_to_ts(-1, (1, 1000), 48000), -1);
+    }
+
+    /// A WebM/Opus file from Powermove's FFmpeg build (`PM_FFMPEG_DIR`).
+    fn webm_opus(name: &str, seconds: u32) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pm-media-audio-unit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join(name);
+        let ffmpeg = std::env::var_os("PM_FFMPEG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var("HOME").unwrap())
+                    .join("Library/Caches/powermove-engine/ffmpeg/out")
+            })
+            .join("bin/ffmpeg");
+        let source = format!(
+            "aevalsrc=exprs='0.3*sin(2*PI*440*t)+0.2*sin(2*PI*3001*t)':s=48000:d={seconds}"
+        );
+        let status = std::process::Command::new(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .arg(source)
+            .args(["-c:a", "libopus"])
+            .arg(&out)
+            .status()
+            .expect("run ffmpeg");
+        assert!(status.success());
+        out
+    }
+
+    /// An anchored seek that cannot be placed falls back to the decode
+    /// from the start once for the stream: blocks read in order after it
+    /// continue that decode (each packet decoded once, the samples exactly
+    /// the sequential decode's) instead of retrying a new anchor and
+    /// restarting for every block.
+    #[test]
+    fn failed_anchors_fall_back_once() {
+        let file = webm_opus("failed-anchors.webm", 30);
+        let mut d = AudioDecoder::open(&file, None).unwrap();
+        let mut pcm = vec![Vec::new()];
+        while d.read(&mut pcm, 4096).unwrap() > 0 {}
+        let once = d.packets_decoded();
+
+        let mut s = AudioDecoder::open(&file, None).unwrap();
+        assert!(!s.info.sample_exact_timestamps && s.info.preroll > 0);
+        // Scan the whole file, then move every anchor off its packet (1 ms
+        // timebase, 20 ms packets): no anchor can be found again.
+        assert!(s.anchor_for(i64::MAX / 8).is_some());
+        let index = s.index.as_mut().unwrap();
+        assert!(index.anchors.len() > 100);
+        for a in &mut index.anchors {
+            a.pts += 1;
+            a.next = a.next.map(|(p, d)| (p + 1, d));
+        }
+        let block = 48_000usize;
+        let blocks = pcm[0].len().div_ceil(block);
+        for k in 0..blocks {
+            s.seek_anchored((k * block) as u64).unwrap();
+            let mut out = vec![Vec::new()];
+            s.read(&mut out, block).unwrap();
+            let want = &pcm[0][k * block..(k * block + block).min(pcm[0].len())];
+            assert_eq!(&out[0][..], want, "block {k}");
+        }
+        assert!(s.anchors_failed);
+        // The first block past the pre-roll fails and decodes from the
+        // start again (one block, 50 packets of 20 ms, twice); every later
+        // block continues it.
+        let packets = s.packets_decoded();
+        assert!(
+            packets <= once + 50 + 4,
+            "{blocks} blocks decoded {packets} packets (the stream has {once})"
+        );
+    }
+
+    #[test]
+    fn default_speakers_follow_ffmpeg() {
+        use Speaker::*;
+        assert_eq!(default_speakers(1), [FrontCenter]);
+        assert_eq!(default_speakers(2), [FrontLeft, FrontRight]);
+        assert_eq!(default_speakers(3), [FrontLeft, FrontRight, LowFrequency]);
+        assert_eq!(
+            default_speakers(5),
+            [FrontLeft, FrontRight, FrontCenter, BackLeft, BackRight]
+        );
+        assert_eq!(
+            default_speakers(6),
+            [
+                FrontLeft,
+                FrontRight,
+                FrontCenter,
+                LowFrequency,
+                BackLeft,
+                BackRight
+            ]
+        );
+        assert!(default_speakers(0).is_empty());
     }
 }
