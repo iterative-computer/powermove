@@ -8,3 +8,16 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+pm-export = { path = "../pm-export" }
+pm-render = { path = "../pm-render" }
+pm-model = { path = "../pm-model" }
+pm-eval = { path = "../pm-eval" }
+pm-protocol = { path = "../pm-protocol", default-features = false }
+pm-time = { path = "../pm-time" }
+# Direct, for its FFmpeg location (DEP_PM_MEDIA_NATIVE_FFMPEG_LIB in build.rs).
+pm-media = { path = "../pm-media" }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = { workspace = true, features = ["std"] }
+png = "0.18"
+libc = "0.2"

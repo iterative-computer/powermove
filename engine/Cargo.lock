@@ -1894,6 +1894,20 @@ version = "0.1.0"
 [[package]]
 name = "pm-cli"
 version = "0.1.0"
+dependencies = [
+ "libc",
+ "pm-eval",
+ "pm-export",
+ "pm-media",
+ "pm-model",
+ "pm-protocol",
+ "pm-render",
+ "pm-time",
+ "png",
+ "serde",
+ "serde_json",
+ "sha2",
+]
 
 [[package]]
 name = "pm-color"
@@ -2054,6 +2068,7 @@ dependencies = [
  "pm-engine",
  "pm-export",
  "pm-gpu",
+ "pm-media",
  "pm-model",
  "pm-protocol",
  "pm-render",

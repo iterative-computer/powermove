@@ -36,6 +36,8 @@ wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] 
 # pm-export. This links FFmpeg (pm-media) into the addon.
 pm-export = { path = "../pm-export" }
 pm-render = { path = "../pm-render" }
+# Direct, for its FFmpeg location (DEP_PM_MEDIA_NATIVE_FFMPEG_LIB in build.rs).
+pm-media = { path = "../pm-media" }
 
 [features]
 node = ["dep:napi", "dep:napi-derive"]

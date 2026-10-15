@@ -665,10 +665,15 @@ pub fn composition_size(document: &Document, composition: &str) -> Result<(u32, 
 }
 
 /// Premultiplied working values (Standard: E-encoded, over black when the
-/// background is transparent) to 8-bit RGBA, as a canvas stores them.
+/// background is transparent) to 8-bit RGBA as a unorm render-target write
+/// stores them (clamp, scale, round half to even; NaN is 0), which is what
+/// today's canvas readback holds.
 pub fn to_rgba8(rgba: &[f32]) -> Vec<u8> {
     rgba.iter()
-        .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+        .map(|v| {
+            let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
+            (v * 255.0).round_ties_even() as u8
+        })
         .collect()
 }
 
@@ -823,6 +828,7 @@ mod tests {
     #[test]
     fn rgba8_rounds_and_clamps() {
         assert_eq!(to_rgba8(&[-0.1, 0.0, 0.5, 1.2]), vec![0, 0, 128, 255]);
+        assert_eq!(to_rgba8(&[f32::NAN]), vec![0], "NaN is 0");
     }
 
     #[test]
