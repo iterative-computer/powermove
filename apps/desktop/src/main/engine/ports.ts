@@ -48,6 +48,9 @@ export type EngineBootstrap = { type: 'control' };
 export type EngineControl =
   | { type: 'connect'; port: number; peer: 'host' | 'renderer' | 'peer' | 'fonts' }
   | { type: 'disconnect'; port: number }
+  /** Destroy the viewer presenter's GPU device as a real loss would (the
+   *  recovery test; interactive engine). */
+  | { type: 'simulateGpuLoss' }
   | { type: 'shutdown' };
 
 /** Messages from an engine process to main (over its parent port). */

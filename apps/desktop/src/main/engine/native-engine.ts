@@ -187,6 +187,15 @@ export class NativeEngine {
     return this.supervisors[process];
   }
 
+  /** Destroys the interactive engine's viewer GPU device as a real loss
+   *  would (the recovery test). False when it is not running. */
+  simulateGpuLoss(): boolean {
+    const launch = this.supervisors.interactive.current;
+    if (!launch || launch.exiting) return false;
+    launch.control({ type: 'simulateGpuLoss' });
+    return true;
+  }
+
   status(): NativeEngineStatus {
     const one = (s: EngineSupervisor): EngineProcessStatus => ({
       state: s.state,

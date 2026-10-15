@@ -137,6 +137,9 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     return statusMessage(options.enabled, engine?.status() ?? null);
   });
+  options.ipc.on(ENGINE_IPC.enabledSync, (event) => {
+    event.returnValue = options.isTrustedSender(event) && options.enabled;
+  });
 
   if (!options.enabled) {
     return { engine: null, attachWindow: () => {}, dispose: async () => {} };
@@ -170,7 +173,16 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       const child = utilityProcess.fork(script, [], {
         serviceName: process === 'interactive' ? 'Powermove Interactive Engine' : 'Powermove Job Engine',
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...env, ...(launch?.env ?? {}), POWERMOVE_ENGINE_PROCESS: process, POWERMOVE_ENGINE_ADDON: addon }
+        // The interactive engine draws the session's document (the Phase 2
+        // tracer bullet); POWERMOVE_ENGINE_FRAME_SOURCE overrides it
+        // (`test-pattern` for the bridge harnesses).
+        env: {
+          POWERMOVE_ENGINE_FRAME_SOURCE: 'document',
+          ...env,
+          ...(launch?.env ?? {}),
+          POWERMOVE_ENGINE_PROCESS: process,
+          POWERMOVE_ENGINE_ADDON: addon
+        }
       });
       if (launch) {
         child.once('spawn', () => launch.spawned(child.pid));
@@ -209,6 +221,13 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   const uninstallFonts = installEngineFontService(options.ipc, { isTrustedSender: options.isTrustedSender }, fontClient);
   engine.addClient(FONT_CLIENT_ID, (_info, port) => fontClient.connect(port), { peer: 'fonts', processes: ['interactive'] });
 
+  // The shared host clock for the renderer's engine connection: it maps
+  // performance.now() onto the engines' host µs (clock samples, the
+  // viewer's presentation) from the round trip with the least delay.
+  options.ipc.handle(ENGINE_IPC.hostTime, (event) => {
+    if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    return hostNowUs();
+  });
   options.ipc.handle(ENGINE_IPC.stageDocument, async (event, request: unknown): Promise<StageDocumentResult> => {
     if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     if (!validStageRequest(request)) throw new Error('A staged document names an engine, a session, and its bytes.');
@@ -264,6 +283,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     attachWindow,
     dispose: async () => {
       options.ipc.removeHandler(ENGINE_IPC.stageDocument);
+      options.ipc.removeHandler(ENGINE_IPC.hostTime);
       uninstallFonts();
       fontClient.disconnect();
       options.ipc.removeAllListeners(ENGINE_IPC.definitions);
