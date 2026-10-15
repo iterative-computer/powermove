@@ -276,3 +276,46 @@ fn align_answers_moves_and_throws_are_reported() {
     );
     assert!(no_comp.as_object().unwrap().get("throw").is_some());
 }
+
+/// A text layer whose `d.animators` is not an array: the legacy split throws
+/// `(source.d.animators || []).map is not a function` after laying the text
+/// out.
+fn text_project(animators: &str) -> String {
+    let text = layer("T", "text", 0.0, "null", "null", &[]).replace(
+        r##""d":{"color":"#ff0000","w":200,"h":100,"radius":0}"##,
+        &format!(
+            r##""d":{{"text":"Hello world","size":40,"font":"Inter","weight":600,"align":"left","color":"#ffffff","animators":{animators}}}"##
+        ),
+    );
+    format!(
+        r#"{{"id":"P2","name":"Text","compId":"C1","revision":0,"assets":{{}},"params":{{}},"comps":{{"C1":{{"id":"C1","name":"Main","w":1920,"h":1080,"fps":30,"dur":2,"layers":[{text}]}}}}}}"#
+    )
+}
+
+#[test]
+fn a_throw_after_measuring_without_fonts_is_unanswered() {
+    let mut e = Engine::new();
+    e.resync(text_project("5").as_bytes(), 1).unwrap();
+    // No fonts are served: the layout misses Inter, so the kernel's throw
+    // (raised after the layout) is not reported; the renderer runs the
+    // legacy split instead.
+    let reply = q(
+        &mut e,
+        r#"{"op":"edit.splitText","comp":"C1","sources":[0],"mode":"words","t":0}"#,
+    );
+    let reply = reply.as_object().unwrap();
+    assert!(reply.get("throw").is_none(), "{reply:?}");
+    assert!(reply.get("fonts").is_some(), "{reply:?}");
+    // The font anchor capture measures too.
+    let capture = q(
+        &mut e,
+        r#"{"op":"edit.captureFontAnchor","comp":"C1","layer":0,"fields":["size"],"t":0}"#,
+    );
+    assert!(capture.as_object().unwrap().get("fonts").is_some());
+    // A throw before any measurement is still the kernel's throw.
+    let bad = q(
+        &mut e,
+        r#"{"op":"edit.splitText","comp":"C1","sources":[3],"mode":"words","t":0}"#,
+    );
+    assert!(bad.as_object().unwrap().get("throw").is_some());
+}

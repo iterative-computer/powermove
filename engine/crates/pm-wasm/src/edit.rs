@@ -280,16 +280,23 @@ pub(crate) fn dispatch(
         other => Err(JsThrow::type_error(format!("unknown edit '{other}'"))),
     })();
     let ink = probe.ink;
-    match result {
-        Err(e) if host_only(&e) => return Err(Unanswered::Host),
-        Err(e) => return Ok(Err(e)),
-        Ok(()) => {}
+    if let Err(e) = &result
+        && host_only(e)
+    {
+        return Err(Unanswered::Host);
     }
+    // A kernel that measured text without every font, or ink without
+    // outlines, did not answer, whatever it went on to do: a throw raised
+    // after such a measurement is not the legacy edit's throw, and the
+    // renderer runs the legacy edit (which throws itself if it must).
     if fonts.incomplete() {
         return Err(Unanswered::Fonts);
     }
     if ink && !outlines {
         return Err(Unanswered::Ink);
+    }
+    if let Err(e) = result {
+        return Ok(Err(e));
     }
     let next = edit.ids.peek();
     let ops = edit.finish();
