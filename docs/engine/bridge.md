@@ -5,15 +5,21 @@ section 26 amendments 4 and 5; contracts 2 and 3). It productionizes spike
 S1 (`docs/engine/spikes/S1.md`, `engine/spikes/s1-bridge/`). Everything runs
 behind "Use New Engine".
 
-**Status: flag-gated infrastructure; the amended S1 gate is not met.** The
-bridge is complete and passes its Electron integration test and the quality
-lines, but on the S1 harness the engine path drops more frames under the
-gate load and is slower from pointer to pixel at p50 than the harness's
-stand-in for today's viewer (see [Measurements](#measurements-against-the-amended-s1-gate)).
-It can land only behind the flag, presenting nothing unless the kernel
-registers `engine.viewer` and the engine has a frame source. Whether Phase 2
-proceeds on this path needs a decision before its gate; the options and what
-each is expected to change are in [Decision needed](#decision-needed-before-the-phase-2-gate).
+**Status: flag-gated; the amended S1 gate against the real WebGL viewer
+is not met, on pointer-to-pixel (amendment 18: Jude decides).** The bridge
+passes its Electron integration test in both presentation modes (frames
+drawn on the page's main thread and by the viewer's presentation worker)
+and the quality lines. Against the real viewer playing the corpus project
+in the real app, the engine path presented from the worker is better for
+playback, idle and under the gate load (0 to 5 drops a minute against 84
+to 238 under load), and worse on gestures: about a refresh slower at p50
+idle and slower at p99 idle and under load (see
+[The amended S1 gate](#the-amended-s1-gate-against-the-real-viewer)).
+Amendment 18's three steps are in and measured; the C′ prototype misses
+the zero-drop line and is not adopted; Electron offers no ProMotion
+request. Everything stays behind "Use New Engine": nothing presents
+unless the kernel registers `engine.viewer` and the engine has a frame
+source. The options are in [Decision](#decision-before-the-phase-2-gate).
 
 ## Where the code is
 
@@ -25,8 +31,12 @@ each is expected to change are in [Decision needed](#decision-needed-before-the-
 | Main: one bridge per engine launch, import once, send once per receiver | `apps/desktop/src/main/engine/bridge.ts`, wired in `main/engine/index.ts` |
 | Preload receiver | `apps/desktop/src/preload/frame-bridge.ts`, `shared/frame-bridge.ts` |
 | Viewer presentation (jitter buffer, WebGPU painter, view state, overlay tags) | `apps/desktop/src/extensions/viewer/engine-present/`, hooked into `viewer.ts` |
+| Presentation worker (the presenter off the page's main thread) | `engine-present/present-worker.ts` (worker side), `worker-presenter.ts` (page side), `present-worker-entry.ts` |
+| Engine-path gestures on `pointerrawupdate` | `engine-present/raw-gestures.ts`, used by the viewer's drag helper |
+| Vsync-phase hint (contract 2 `ViewerState.vsync`) | viewer: `engine-present/display-timing.ts`, `presenter.ts`; engine: `pm-node/src/present/schedule.rs` (`next_in_phase`) |
+| C′ prototype (remote Core Animation layer, measurement only) | `engine/crates/pm-gpu/src/bridge_out/remote_layer.rs`, `pm-node/src/present/render.rs`, hosting in `pm-bridge` (`harness` feature), `pm-gpu/examples/refresh_probe.rs` |
 | Electron integration test (run on every Electron upgrade) | `apps/desktop/scripts/frame-bridge-integration.mjs`, `src/main/engine/integration/bridge-*.ts` |
-| S1 measurement of the production path | `apps/desktop/scripts/frame-bridge-measure.mjs`, `src/main/engine/integration/measure-*.ts`; summaries in `docs/engine/bridge-measurements/` |
+| S1 measurement of the production path | `apps/desktop/scripts/frame-bridge-measure.mjs`, `src/main/engine/integration/measure-*.ts` (stand-in page), `measure-app-*.ts` (the real app); summaries in `docs/engine/bridge-measurements/` |
 
 ## How a frame gets to the screen
 
@@ -58,11 +68,16 @@ each is expected to change are in [Decision needed](#decision-needed-before-the-
    overlay geometry at that revision.
 4. **Presentation.** The viewer asks the preload for a `VideoFrame` of the
    named surface (one persistent import, a new `VideoFrame` per frame) and
-   queues it in the jitter buffer. At each animation frame it predicts when
-   that refresh reaches the display, maps it to media time on the latest
-   clock sample, and draws the frame whose interval contains it
-   (`importExternalTexture`, sampled 1:1 into a WebGPU canvas:
-   `rgba16float` with extended tone mapping for `rgbaf16` pools).
+   transfers it at once to its presentation worker, which owns the
+   viewer canvas's drawing (`OffscreenCanvas`) and queues the frame in the
+   jitter buffer. At each of the worker's animation frames it predicts
+   when that refresh reaches the display (two refreshes out for a worker
+   canvas, measured), maps it to media time on the latest clock sample,
+   and draws the frame whose interval contains it (`importExternalTexture`,
+   sampled 1:1 into a WebGPU canvas: `rgba16float` with extended tone
+   mapping for `rgbaf16` pools). Frames shown at the next refresh (paused,
+   scrub, gesture) are drawn as they arrive. Without a worker (or if it
+   cannot draw), the same presenter runs on the page's main thread.
 5. **Release.** After submitting the draw the viewer closes the
    `VideoFrame` and returns `{poolIndex, seq}` when
    `queue.onSubmittedWorkDone()` resolves. The engine never writes a slot
@@ -108,11 +123,38 @@ keeps it hidden until the engine presents a frame for the session, and:
   after it registers or disposes `engine.viewer`; an open viewer attaches
   (or detaches, when the service went away or was replaced) at once rather
   than at its next layout.
+- **Presentation worker.** `viewer.ts` starts `present-worker-entry.ts`
+  (bundled by Vite) and the canvas hands its drawing to it. The page keeps
+  what needs its main thread: the engine port, the preload's imports,
+  parking a descriptor until its import arrives, retiring replaced pools,
+  viewer state, and overlays. Every message carries its session, so a
+  release or presented frame of an ended session never reaches the next
+  one, while frames a closing presenter held still go back to the engine.
+  A worker that cannot draw (no WebGPU in workers) hands back the frames
+  sent to it and the presentation falls back to the main thread in a new
+  canvas without ending the session. A popout gets a new canvas and
+  worker, and the session and pool generation carry over. Worker times
+  are moved onto the page's clock (the realm that stamps arrivals, also
+  for a popout). `EngineViewerService.offMainThread === false` keeps
+  presentation on the main thread (the harness's comparison).
+- **Gestures on raw updates.** While the engine presents, the viewer's
+  drags take their moves from `pointerrawupdate` instead of the
+  rAF-aligned `pointermove` (`raw-gestures.ts`), so the engine hears about
+  a move before the animation frame that would carry it. The drag helper
+  keeps capture, up, cancel, and the cursor; pointer-lock drags keep
+  `pointermove`. The view state leaves before `V.layout` writes styles.
+- **Vsync hint.** The presenter fits its animation frames to a refresh
+  grid, maps it to the host clock, and the presentation re-sends the
+  current view with it (`ViewerState.vsync`, same `viewSeq`; contract 2
+  version note). The engine starts each timed frame half a refresh after
+  a BeginFrame (measured in [step 3](#closing-the-gap-step-by-step-amendment-18)).
 
 ## What the Electron integration test found
 
-`bun run test:frame-bridge` (Electron 44.0.0, Chrome 152) passes and checks,
-on the production code: one verified check-in from the spawned pid; each
+`bun run test:frame-bridge` (Electron 44.0.0, Chrome 152) passes twice,
+with frames drawn on the page's main thread and by the presentation worker
+(in worker mode `bridge-worker.ts` reads every drawn frame back inside the
+worker), and checks, on the production code: one verified check-in from the spawned pid; each
 surface imported once, sent once, received once; 3 s of playback with every
 drawn frame's code read back from its pixels (180 of 180, 180 distinct codes
 from 8 surfaces, so repeated `getVideoFrame()` calls see new contents);
@@ -125,7 +167,9 @@ that exits before it checks in (stopping its launch returns in 0.02 ms and
 the receive thread ends 53 ms later, reporting nothing); teardown with
 nothing held.
 
-Two production fixes came out of it:
+Production fixes that came out of it (the third in worker mode: a
+popout's worker took its clock from the popout and dropped every timed
+frame as late until it decided on the page's clock):
 
 1. **Reloads leaked every surface of the page's pools.** Electron sends the
    renderer's release notice from a callback that does not run once the page
@@ -172,11 +216,288 @@ Two production fixes came out of it:
   could not load the bridge, so it presented nothing and the Team ID policy
   could never run in a signed build.
 
-## Measurements against the amended S1 gate
+## The amended S1 gate against the real viewer
 
-Amendment 5: the engine path is no worse than today's viewer on the same
-harness, at p50 and p99, idle and under the load profile; the quality lines
-stay absolute.
+Amendment 5 made the gate relative: the engine path is no worse than
+today's viewer on the same harness, at p50 and p99, idle and under the
+load profile; the quality lines stay absolute. Amendment 18 made "today"
+the real WebGL viewer and fixed the order of the work: engine gestures on
+`pointerrawupdate`, then a vsync-phase hint, then the C′ prototype for
+playback, measuring after each step; if the comparison still fails, the
+gate reports it as measured and Jude decides.
+
+**Harness** (`scripts/frame-bridge-measure.mjs`, `app-*` runs;
+`measure-app-main.ts`, `measure-app-page.ts`). The real app, built, runs as
+a hidden background test launch with an isolated profile; its editor
+window is off every screen and never activated (C′ runs: on the primary
+display behind the desktop picture, where Core Animation still presents).
+It opens a copy of the corpus perf project (the Powermove ad project:
+1920 × 1080, 30 fps, 884 layers, 138 MB) through Open Project. The stage
+is 1195 × 546 CSS px at DPR 2 on the built-in 120 Hz XDR panel. Electron
+44.0.0, Chrome 152.
+
+- **Today:** the WebGL viewer plays the project; every compositor draw is
+  recorded with the animation frame it ran in and the content time it
+  drew, against the legacy playback line.
+- **Engine:** the page registers `engine.viewer` (the kernel's part), so
+  the real viewer attaches its presentation over the stage and presents
+  the interactive engine's frames from its presentation worker, while the
+  legacy transport still drives the timeline, playhead, and panels. The
+  engine draws the bridge test source, not the document: `pm-render` does
+  not draw real layers yet, so the engine-side render cost is small and
+  equal across runs.
+- **Load:** S1's gate profile without its main-thread autosave, as the app
+  runs since autosave serialization moved to a persistence worker
+  (`docs/engine/autosave-off-main.md`): a 50 ms long task every second, a
+  1.2 s live resize every 5 s, agent tool traffic 20 times a second.
+- **Timing:** Chromium's `PipelineReporter` for the page's own frames; for
+  the worker's canvas (which has no `PipelineReporter`), viz's
+  `Graphics.Pipeline` (frame received on its sink, shown by the next
+  `DrawAndSwap`; in a plain page the two agree to the microsecond).
+  Pointer-to-pixel is section 18's definition, from the input event's
+  timestamp to the presentation of the first frame whose revision (today)
+  or view sequence (engine) includes it. 60 s playback runs, 20 s pointer
+  runs at 120 events a second.
+- **Gestures:** a middle-button pan of the view is the gesture both paths
+  share (the same viewer handler; today moves its canvas with CSS, the
+  engine renders the panned view). Today also drags a layer. Layer drag,
+  orbit, and walk on the engine path need `pm-render` to draw the
+  document.
+- **Display:** every run checks that the main display is awake and the
+  session unlocked before and after (with the display asleep nothing is
+  scanned out and Chromium's presentation times are its own estimates);
+  runs that saw otherwise are marked invalid. All r8 runs were valid.
+- **Machine:** shared with up to three other agents' builds; the 1-minute
+  load average is in each summary (2.3 to 11.8 across these runs). The
+  spread between runs of the same configuration is larger than some
+  differences between paths, so every configuration has several runs.
+
+Runs r5 to r8 are the current configuration (presentation worker, raw
+gestures, vsync hint); r8 is after the last merge of `feat/native-engine`.
+
+**Playback** (1,793 expected content frames a run):
+
+| Path | Load | Runs | Drops | \|jitter\| p50 (ms) | \|jitter\| p99 (ms) | rAF → present p50 (ms) |
+|---|---|---|---|---|---|---|
+| Today (real WebGL viewer) | idle | r5, r6, r8 | 1, 1, 4 | 0.11, 8.04, 0.28 | 8.48, 16.37, 33.51 | 27.4, 27.1, 20.0 |
+| Engine (worker) | idle | r5, r6, r8 | 0, 0, 0 | 0.08, 0.08, 0.11 | 8.45, 8.45, 8.35 | 18.7, 18.7, 20.3 |
+| Today | gate load | r5, r6, r7, r8 | 84, 139, 113, 238 | 0.14, 0.10, 0.11, 8.21 | 50.04, 33.25, 33.33, 108.25 | 25.1, 10.9, 11.0, 20.8 |
+| Engine (worker) | gate load | r5, r6, r7, r8 | 5, 0, 0, 0 | 0.38, 0.09, 0.09, 0.16 | 11.02, 10.88, 10.82, 14.25 | 18.6, 18.8, 18.6, 20.0 |
+
+Today's drops under load sit inside the live resizes (202 of r8's 238,
+22 more in a long task during a resize). The engine path's 5 drops (r5)
+are its only ones in the nine worker runs (with the phase A/B below).
+Engine frames showed 10.9 to 12.4 ms after their time on the transport
+clock's line at p50 in r6 and r8 and 17.9 ms in r7 (`dueToPresentMs`;
+p99 11.4 to 26.4 ms): outside section 15's ±10 ms, about one refresh
+later than the presenter aims for (see gaps).
+
+**Pointer-to-pixel, pan** (2,401 events a run; ms, p50 / p99):
+
+| Path | Load | r5 | r6 | r7 | r8 | r8 counting inputs whose first frame dropped |
+|---|---|---|---|---|---|---|
+| Today | idle | | 16.5 / 26.0 | 19.5 / 28.5 | 16.0 / 25.2 | 16.0 / 31.8 |
+| Engine (worker) | idle | 28.3 / 36.7 | 25.0 / 33.6 | 15.3 / 31.0 | 23.3 / 56.4 | 23.3 / 56.4 |
+| Today | gate load | 25.0 / 66.7 | 22.3 / 71.7 | 24.1 / 65.4 | 27.9 / 69.9 | 27.9 / 86.4 |
+| Engine (worker) | gate load | 27.6 / 69.2 | 16.9 / 83.3 | 19.1 / 77.5 | 22.7 / 105.9 | 22.7 / 105.9 |
+
+Today's layer drag: 20.6 to 25.4 ms p50 and 33.4 to 36.8 ms p99 idle (r6
+to r8); 32.9 to 34.2 ms p50 and 76.1 to 91.8 ms p99 under load (r5 to
+r8). Today drops the first frame of up to 182 inputs a run, which
+`pointerToPixelMs` leaves out; `pointerToPixelWithDropsMs` (added for r8)
+times them to the next presented frame. The engine path dropped none in
+r6 to r8.
+
+**Quality lines** (absolute): pass, in the Electron integration test in
+both presentation modes (see above).
+
+**Verdict: the amended gate is not met, on pointer-to-pixel.**
+
+- Playback passes, and by a wide margin under load: no drops in three of
+  four runs against 84 to 238, jitter p99 10.8 to 14.3 ms against 33 to
+  108 ms. Idle the engine path is no worse at p50 or p99 in any run.
+- Pointer-to-pixel idle fails: engine p50 15.3 to 28.3 ms against today's
+  16.0 to 19.5 ms (4 to 12 ms worse in three of four runs, no worse in
+  r7), p99 31 to 56 ms against 25 to 32 ms.
+- Pointer-to-pixel under load: p50 passes (16.9 to 27.6 ms against 22.3 to
+  27.9 ms); p99 fails (69 to 106 ms against 65 to 72 ms, or 86 ms with
+  today's dropped-frame inputs counted in r8).
+- Layer drag, orbit, and walk through the engine are not measurable until
+  `pm-render` draws the document.
+
+## Closing the gap, step by step (amendment 18)
+
+1. **The real viewer as today.** The first real-viewer runs (r2 to r4,
+   engine frames drawn on the page's main thread) showed that the
+   stand-in had flattered today: the real viewer dropped 55 to 146 frames
+   a minute under load (stand-in: 0 to 9), and its jitter p99 reached 33
+   to 133 ms. They also showed main-thread costs on the engine path that
+   the stand-in page did not have, now fixed: the viewport overlay
+   resizing its WebGL canvas on every draw (6.2 s of main a minute with
+   the engine presenting, `db44b09d`), the WebGL canvas resizing during
+   live resizes while the engine presents (3.3 s a minute, `821d7f06`), a
+   forced layout per gesture step (4 ms a step, `a73eb082`), and a clock
+   estimator that took the most stalled sample (110 ms behind, `b4d040ef`).
+2. **Engine gestures on `pointerrawupdate`.** In the real app it changed
+   the pan by about 1 ms (r2, main-thread presentation: idle 31.7 → 30.7 ms
+   p50, under load 34.6 → 34.5 ms p50 and 125.7 → 118.5 ms p99), against
+   one to two refreshes in the stand-in. Kept: it never costs, and it
+   matters more once main's per-step work is small.
+3. **Vsync-phase hint** (`ViewerState.vsync`, contract 2 version note in
+   RFC 02). The engine starts timed frames half a refresh after a
+   BeginFrame. `POWERMOVE_BRIDGE_PHASE=off` A/B in the real app with the
+   worker (r8): idle 0 drops either way, jitter p99 8.35 (on) against 8.54
+   ms (off), rAF → present 20.3 against 19.2 ms; under load 0 drops either
+   way, jitter p99 14.3 against 16.5 ms, rAF → present 20.0 against 19.6
+   ms. On the main thread (r2) it changed neither the drops (105 on; 124
+   and 203 off) nor rAF → present (28.3 against 28.3 ms). The extra
+   refresh is not GPU contention at viz's deadline; the hint stays (it
+   costs nothing and keeps the engine's GPU work off the compositor's).
+4. **Presentation worker** (not in amendment 18's list; what closed the
+   playback gap). The canvas hands its drawing to an `OffscreenCanvas` in
+   a dedicated worker, so main-thread stalls no longer hold frames. Under
+   load: drops 105 to 350 (main thread, r2 to r5) → 0 to 5 (worker, r5 to
+   r8); jitter p99 25 to 84 → 11 to 14 ms; pan p99 118 to 161 → 69 to
+   106 ms.
+5. **C′ for playback**: below. Measured, not adopted.
+6. **ProMotion** (section 15): below. Not possible from Electron, and not
+   reachable on this panel through public API for 25 fps content.
+
+What is left on gestures is structural, as far as these runs show: an
+engine gesture frame needs the page's main thread twice, once to send the
+view state for the input and again to turn the frame's descriptor into a
+`VideoFrame` (the preload's shared-texture receiver runs there) before
+the worker can draw it, while today's pan needs it once. Under a main
+stall both hops wait. This is the likely cause of the p99 gap, not a
+measured one; moving the receive off main needs Electron to hand shared
+textures to a worker, which Electron 44 cannot.
+
+## C′: playback through a remote Core Animation layer (prototype)
+
+**What it is.** With `POWERMOVE_BRIDGE_REMOTE_LAYER=1` the interactive
+engine makes a `CAContext` on its own WindowServer connection whose layer
+is a `CAMetalLayer` (`pm-gpu::bridge_out::remote_layer`). Timed playback
+frames, already rendered into a pool surface, are copied into the layer's
+next drawable and presented at their display time with
+`presentDrawable:atTime:`; Core Animation's `presentedTime` reports when
+each reached the panel. The engine announces the context to main over the
+verified bridge port (`ID_REMOTE_LAYER`, a `remoteLayer` event), and main
+hosts it with a `CALayerHost` over the viewer's stage. Paused, scrub,
+gesture, and capture frames stay on the Chromium path. One context lives
+as long as the presenter; a new pool reconfigures its layer (size, scale,
+format, color space) instead of making a new context, so live resizes
+stay hosted. When Core Animation stays more than half a content frame
+late for two frames, pacing skips one frame so its queue drains
+(`remote_resyncs`).
+
+**Private API.** Three symbols are not public macOS API:
+`+[CAContext contextWithCGSConnection:options:]` (engine), `CALayerHost`
+(main), and `CGSMainConnectionID` (engine). Assessment:
+
+- They are the mechanism Chromium itself uses on macOS to move its GPU
+  process's layers into the browser process (`ui/accelerated_widget_mac`).
+  Every Electron window already depends on them, so a macOS release that
+  breaks them breaks Electron first: the risk is correlated with the
+  platform we already ship on rather than added to it.
+- Apple documents none of it and may change it without notice. App Store
+  review rejects it; Powermove ships with Developer ID and notarization,
+  which do not check for private API.
+- The engine looks every private symbol up at run time (`dlsym`,
+  `AnyClass::get`) only when a remote layer is made, so a build that never
+  runs C′ imports no private symbol (`f0c4f821`); hosting is compiled
+  only into the harness build of `pm-bridge` (`harness` feature).
+- A missing class or symbol is an error the presenter can answer with the
+  bridge, which stays complete for every kind of frame.
+- Product costs if it were adopted: during playback the frames are
+  outside Chromium's compositor, so `capturePage` does not see them
+  (section 18 item 8 would hold only for paused frames), and the hosted
+  layer sits above the page, so the DOM overlay (handles, guides) would
+  need its own layer above it or would have to hide during playback.
+  Neither is built.
+
+**Measured in the real app** (30 fps project, 120 Hz panel, window behind
+the desktop picture, display awake):
+
+| Run | Load | Drops | \|jitter\| p50 / p99 (ms) | due → present p50 / p99 (ms) |
+|---|---|---|---|---|
+| r2 (a new context per pool) | idle | 2 | 0.14 / 0.28 | 11.99 / 12.25 |
+| r2 (a new context per pool) | gate load | 104 | 0.20 / 3.89 | 12.94 / 13.20 |
+| r8 (one context, reconfigured) | idle | 0 | 0.11 / 0.21 | 17.92 / 18.12 |
+| r8 (one context, reconfigured) | gate load | 25 | 0.10 / 0.21 | 11.62 / 11.82 |
+
+Cadence is what C′ was for: jitter p99 0.21 ms against the Chromium
+path's 8.4 to 14.3 ms, and a constant presentation offset (p99 − p50
+0.2 ms) that asking earlier would remove. But the zero-drop line fails
+under load. All 25 r8 drops were committed about 60 ms before their
+time (the engine was not late): 18 fell inside the 1.2 s live resizes
+(300 to 650 ms into them, while the window itself was resizing), 2 in a
+long task during a resize, and 5 within 100 ms after a resize ended,
+when the new pool reconfigured the layer. The Chromium path presented
+every frame through the same resizes (r6 to r8).
+
+**Not adopted** (amendment 5: only if it meets the original cadence line,
+p99 jitter ≤ 4 ms *and* zero drops over 60 s under the load). The drops
+after a resize could go with a second `CAMetalLayer` in the same context
+for the new size, shown once its first drawable presents; the drops
+while the window resizes are the WindowServer's and were not explained.
+
+## ProMotion (section 15)
+
+Section 15 asks the viewer to request a refresh rate that is a multiple of
+the content rate on ProMotion displays.
+
+- **Electron has no such request** for its compositor:
+  `webContents.setFrameRate` applies to offscreen rendering only, and
+  Chromium picks the display link rate itself.
+- **Through public API the request cannot express it on this panel.** A
+  display link with an exact `preferredFrameRateRange`
+  (`pm-gpu/examples/refresh_probe.rs`, `RatePreference`), measured
+  2026-10-14 on the built-in XDR panel: requests for 100 and 96 Hz gave
+  8.33 ms callbacks (120 Hz), 75, 72, 60, 50, and 48 Hz gave 16.67 ms
+  (60 Hz). Every request snaps to a divisor of 120 Hz, and no divisor of
+  120 is a multiple of 25 fps.
+- **Main asking while Chromium plays 25 fps** (stand-in, r8): without a
+  request, 0 drops, jitter p99 4.78 ms, interval error p50 1.67 ms (each
+  40 ms frame shows for 41.7 or 33.3 ms); with main's display link
+  asking for 100 Hz, its 7,199 callbacks were all 8.3 ms apart and the
+  cadence was unchanged (0 drops, jitter p99 6.75 ms, interval error p50
+  1.67 ms). C′ asking for 100 Hz from the engine likewise saw only 8.3 ms
+  refreshes (`playback-cprime-25-rate-idle`).
+- 24, 30, and 60 fps content already divides 120 Hz; 25 and 50 fps (and
+  the 1.001 rates, by drift) play with a 4-5 refresh cadence. A fixed 50
+  or 100 Hz display mode would fix 25 fps, but switching the display mode
+  is system-wide and visible, so the viewer does not do it.
+
+## Decision before the Phase 2 gate
+
+The gate reports, as measured against the real viewer after all three of
+amendment 18's steps (plus the presentation worker): playback better than
+today's viewer, idle and under load; pointer-to-pixel about a refresh
+worse at p50 idle and worse at p99 idle and under load; C′ not adopted
+(25 drops a minute under load); no ProMotion request possible. Jude
+decides. The options as they stand:
+
+1. **Proceed on the Chromium path** with the bridge behind the flag,
+   accepting the gesture gap for now. The engine path wins where today's
+   viewer is worst (playback under load), and loses up to a refresh on
+   gestures.
+2. **Take the gesture frame off main** before the gate: it needs a way to
+   receive shared textures in a worker (an Electron change), or to keep
+   the preload's receive off the page's busy main thread. Expected to
+   address the p99 gap; unmeasured.
+3. **Finish C′ for playback** (a second layer across pool changes, the
+   overlay above the hosted layer, capture through the bridge), with its
+   private-API risk as assessed above, and accept or explain the drops
+   during live window resizes. It does not change gestures.
+4. **Measure gestures again once `pm-render` draws the document**, with
+   layer drag, orbit, and walk, before deciding; the engine's render cost
+   is the one thing these runs do not include.
+
+## Stand-in measurements (before amendment 18)
+
+Kept for history. These runs compare against the harness's synthetic
+stand-in, which amendment 18 replaced with the real viewer for the gate
+(above); the engine path here drew on the page's main thread.
 
 **Harness.** `scripts/frame-bridge-measure.mjs`, S1's method on the
 production code: 4K (3840 × 2160 at DPR 2) 60 fps content on the built-in
@@ -294,7 +615,7 @@ headroom on the panel was not re-measured: that needs a window on screen
 while Jude uses the machine; S1 measured it (1.0 to 15.7 with the 4.0
 patch).
 
-**Verdict: the amended gate is not met.** The quality lines pass. Playback
+**Verdict then: not met against the stand-in.** The quality lines pass. Playback
 jitter is no worse at p50 and borderline at p99 (the engine path sits in the
 two-refresh mode more often). Drops under load are within run-to-run spread
 in the latest runs but worse over all runs (median 7 against 4 a minute).
@@ -304,32 +625,9 @@ and the engine path presents one refresh later from rAF in every run
 not repeated in this round: nothing in it changes the input or presentation
 path.
 
-## Decision needed before the Phase 2 gate
+## Contract changes
 
-The bridge lands only as flag-gated infrastructure until one of these closes
-the gap (each measured with `scripts/frame-bridge-measure.mjs`):
-
-1. **Autosave off main** (amendment 5). Done in another lane; the
-   no-autosave profile above is its effect on this harness. It does not
-   close the gap by itself: the remaining drops sit in long tasks and live
-   resizes, and it does nothing for the extra refresh.
-2. **Engine gestures read `pointerrawupdate`.** Measured: one to two
-   refreshes off engine p50 latency (23 to 29 ms idle against 33 to 36 ms),
-   which brings it within today's spread idle but not under load. A Viewer
-   UI change.
-3. **A vsync-phase hint** (a `ViewerState` field with the viewer's rAF
-   phase) so the engine's GPU work lands just after composition. Untested;
-   it targets the one-refresh-later presentation, the largest consistent
-   difference. A contract 2 change.
-4. **C′ for playback** (amendment 5): presentation outside Chromium's
-   compositor. The only option that removes the compositor-depth question;
-   the most work.
-5. **Measure the real viewer** instead of the stand-in before deciding: the
-   stand-in is the cheapest possible renderer draw.
-
-## Contract changes (draft, version 0)
-
-These need the contract owner's sign-off before the merge. They are not
+Accepted in amendment 17 (`protocol-16c8e6e125019103`). They were not
 additive: the four new fields are required, the descriptor gained
 validation, the ts-rs types and wire fixtures were regenerated, and
 `PROTOCOL_BUILD` moved from `protocol-15e365d7043a8bfe` to
@@ -353,23 +651,37 @@ outside its ownership to carry them: `pm-engine` (`engine.rs`, `present.rs`,
   `decode_in` is behind a default `decode-in` feature so the presenter does
   not link FFmpeg until media reaches the engine. One `GpuInterop` impl
   still waits for `encoder_input` and `import_blender_surface`.
+- RFC 02 version note (amendment 18, additive): `ViewerState.vsync`, an
+  optional `VsyncHint { hostTime, periodUs }` (serde default, TypeScript
+  optional and nullable); a peer that does not send it decodes as `None`,
+  and a change of the hint alone is not a new view.
 
 ## Gaps and next steps
 
 - The kernel's engine connection (which registers `engine.viewer` and
-  decodes the viewer's port) is not in this lane. The integration test plays
-  that part (`integration/page-engine.ts`).
-- Engine-path gestures should read `pointerrawupdate`; the viewer's drag
-  code (Viewer UI) still uses `pointermove`.
+  decodes the viewer's port) is not in this lane. The integration test and
+  the real-app harness play that part (`integration/page-engine.ts`).
+- Pointer-to-pixel fails the amended gate (idle p50 and p99, load p99);
+  see [Decision](#decision-before-the-phase-2-gate).
+- Engine playback frames show 10.9 to 17.9 ms after their time on the
+  transport clock's line (p50), outside section 15's ±10 ms. The worker's
+  prediction (two refreshes out) leaves about one refresh unaccounted
+  for; the clock-to-display offset needs calibrating against the measured
+  presentation, then the audio device latency added, before A/V sync can
+  be claimed.
+- Layer drag, orbit, and walk through the engine, and playback with the
+  engine drawing the document, wait for `pm-render` to draw real layers.
+- C′ is a prototype: not adopted (25 drops a minute under load). Its
+  overlay, capture, and resize handling are not built.
+- No ProMotion request: Electron has none, and public API cannot reach a
+  multiple of 25 fps on the 120 Hz panel.
 - The pool retry after a failed hand-off is covered by unit tests of its
   policy (`PoolRetry`, `Generations`) only; making a real Mach send fail
   part-way through a pool in a test needs a fault hook in pm-bridge.
 - The editor camera of the 3D viewport is not exposed by its API, so the
   view override sends shading and X-ray without a camera.
-- The engine renders on the clock's frame grid at an arbitrary phase to the
-  display's vsync. Telling the engine the viewer's vsync phase (a
-  `ViewerState` field) so its GPU work lands right after composition is the
-  next thing to measure against the compositor depth above.
 - A signed end-to-end run (Team ID through Electron) needs the release
   signing identity; the Team ID check is covered by Rust tests against a
   real Developer ID process.
+- The measurements share the machine with other agents' builds (load
+  average 2.3 to 11.8); a quiet-machine round would tighten the spread.
