@@ -7,7 +7,7 @@
 //! (`shaders/source.wgsl`): chroma upsampling, matrix, transfer and
 //! primaries into the working encoding, and premultiplication.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -128,9 +128,30 @@ pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
 /// Whether a video file can be drawn: it opens and indexes, is progressive,
 /// unrotated, square-pixel, without a cropping clean aperture, SDR, with
 /// Rec.709 or BT.601 primaries.
+///
+/// Answers are kept per file, size, and modification time: capability
+/// routing asks at every document revision, and opening a source indexes
+/// it.
 pub fn probe_video(path: &Path) -> Result<(), String> {
-    let src = MediaSource::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    video_supported(&src)
+    type VideoProbes = Mutex<HashMap<(PathBuf, u64, u128), Result<(), String>>>;
+    static CACHE: OnceLock<VideoProbes> = OnceLock::new();
+    let key = stamp(path).map(|(len, modified)| (path.to_path_buf(), len, modified));
+    if let Some(key) = &key
+        && let Some(r) = CACHE.get_or_init(Default::default).lock().unwrap().get(key)
+    {
+        return r.clone();
+    }
+    let result = MediaSource::open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))
+        .and_then(|src| video_supported(&src));
+    if let Some(key) = key {
+        CACHE
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(key, result.clone());
+    }
+    result
 }
 
 fn video_supported(src: &MediaSource) -> Result<(), String> {

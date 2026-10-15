@@ -1,13 +1,19 @@
 //! The presenter's transport clock (contract 6).
 //!
-//! Until pm-audio drives playback from the audio device clock, the
-//! interactive engine runs this host-clock line: "at host instant H the
-//! viewer shows media time M, advancing at rate R". It publishes the same
-//! `ClockSample`s the audio clock will, so the viewer's jitter buffer and the
-//! render-ahead schedule do not change when the device clock takes over.
+//! The line "at host instant H the viewer shows media time M, advancing at
+//! rate R". With a document, pm-audio's device clock is the master (plan
+//! section 15): the presenter follows its samples ([`TransportClock::follow`])
+//! and republishes them on this line, so the viewer sees one stream of
+//! samples whatever drives it. Without an audio device (or for the bridge
+//! test source) the line runs on the host clock from the transport
+//! commands.
 //!
 //! Frames are indexed on the unwrapped timeline (`k × frame duration`); a
-//! loop range only wraps the media time a frame shows.
+//! loop range only wraps the media time a frame shows, and only once the
+//! run is inside the loop: a run from a playhead before the loop plays into
+//! it and then wraps, a run from past its end plays on (as the legacy
+//! transport and pm-audio do). A sample carries the loop range only while
+//! the line is inside it (contract 6 invariant 2).
 
 use pm_protocol::clock::{ClockSample, SeekMode, TransportCommand, TransportState};
 use pm_protocol::common::{HostMicros, PlaybackRate, Seq, TICKS_PER_SECOND, TickRange, Ticks};
@@ -32,6 +38,14 @@ pub struct TransportClock {
     loop_range: Option<TickRange>,
     /// One frame in ticks (for steps).
     frame: i64,
+    /// Unwrapped media where the current run started (play, seek, step).
+    run_start: i64,
+    /// The end of the composition, where a host-clock run stops.
+    end: Option<i64>,
+    /// The audio clock epoch this line follows.
+    followed: Option<u32>,
+    /// Output latency (µs) and sample rate of the audio device followed.
+    device: (u32, u32),
 }
 
 impl TransportClock {
@@ -45,7 +59,131 @@ impl TransportClock {
             anchor_media: 0,
             loop_range: None,
             frame: frame_ticks.max(1),
+            run_start: 0,
+            end: None,
+            followed: None,
+            device: (0, 48_000),
         }
+    }
+
+    /// A new frame grid (the composition's rate changed).
+    pub fn set_frame_ticks(&mut self, frame_ticks: i64) {
+        self.frame = frame_ticks.max(1);
+    }
+
+    /// Where host-clock runs stop (`None`: they do not).
+    pub fn set_end(&mut self, end: Option<i64>) {
+        self.end = end.filter(|e| *e > 0);
+    }
+
+    pub fn loop_range(&self) -> Option<TickRange> {
+        self.loop_range
+    }
+
+    /// Whether unwrapped media `media` of the current run is inside the loop.
+    fn in_loop(&self, media: i64) -> Option<TickRange> {
+        self.loop_range
+            .filter(|r| r.is_valid() && self.run_start < r.end.get() && media >= r.start.get())
+    }
+
+    /// Follows a sample of the audio device clock (the master clock). A
+    /// new epoch (play, seek, a device change) is a discontinuity and
+    /// returns true, as does the end of the run (a stopped sample while
+    /// this line plays); samples of the same epoch re-anchor the line.
+    pub fn follow(&mut self, sample: &ClockSample) -> bool {
+        let host = sample.host_time.get() as i64;
+        let media = sample.media_time.get();
+        if sample.state == TransportState::Stopped || sample.rate.num == 0 {
+            if !self.is_playing() || self.followed.is_none() {
+                return false;
+            }
+            self.anchor_media = media;
+            self.anchor_host = host;
+            self.rate = PlaybackRate::STOPPED;
+            self.state = TransportState::Stopped;
+            self.followed = None;
+            self.discontinuity();
+            return true;
+        }
+        let new_run = self.followed != Some(sample.epoch) || !self.is_playing();
+        let unwrapped = match sample.loop_range {
+            Some(range) if !new_run && range.is_valid() => {
+                // The same run: keep the frame timeline unwrapped across passes.
+                let length = range.end.get() - range.start.get();
+                let predicted = self.unwrapped_at(host);
+                let passes = ((predicted - media) as f64 / length as f64).round() as i64;
+                media + passes * length
+            }
+            _ => media,
+        };
+        self.anchor_host = host;
+        self.anchor_media = unwrapped;
+        self.rate = sample.rate;
+        self.state = sample.state;
+        self.device = (sample.output_latency_us, sample.sample_rate);
+        if new_run {
+            self.followed = Some(sample.epoch);
+            self.run_start = media;
+            self.discontinuity();
+        }
+        new_run
+    }
+
+    /// The device's latency and rate from the audio sample this line
+    /// follows (informational, contract 6 invariant 3).
+    fn device(&self) -> (u32, u32) {
+        self.device
+    }
+
+    /// Stops the line at `media` (unwrapped) at host µs `now`, without
+    /// snapping to a frame: a seek while playing waits here for the audio
+    /// clock's new run.
+    pub fn hold(&mut self, media: i64, now: i64) {
+        self.anchor_media = media;
+        self.anchor_host = now;
+        self.run_start = media;
+        self.rate = PlaybackRate::STOPPED;
+        self.state = TransportState::Stopped;
+        self.followed = None;
+        self.discontinuity();
+    }
+
+    /// Whether this line follows the audio clock.
+    pub fn following(&self) -> bool {
+        self.followed.is_some()
+    }
+
+    /// Stops a host-clock run that reached the composition end at host µs
+    /// `now` (not while looping). Returns true when it stopped.
+    pub fn stop_at_end(&mut self, now: i64) -> bool {
+        let Some(end) = self.end else {
+            return false;
+        };
+        if !self.is_playing() || self.followed.is_some() || self.rate.num < 0 {
+            return false;
+        }
+        let at = self.unwrapped_at(now);
+        if at < end || self.in_loop(at).is_some() {
+            return false;
+        }
+        self.anchor_media = end;
+        self.anchor_host = now;
+        self.rate = PlaybackRate::STOPPED;
+        self.state = TransportState::Stopped;
+        self.discontinuity();
+        true
+    }
+
+    /// Host µs at which a playing run enters its loop, when it will.
+    pub fn loop_entry_at(&self) -> Option<f64> {
+        let range = self.loop_range.filter(|r| r.is_valid())?;
+        if !self.is_playing() || self.run_start >= range.end.get() || self.rate.num < 0 {
+            return None;
+        }
+        if self.anchor_media >= range.start.get() {
+            return None;
+        }
+        self.host_at(range.start.get())
     }
 
     pub fn epoch(&self) -> u32 {
@@ -91,15 +229,16 @@ impl TransportClock {
         Some(self.anchor_host as f64 + ticks / TICKS_PER_SECOND as f64 * 1e6 / rate)
     }
 
-    /// Wraps unwrapped media time into the loop range.
+    /// Wraps unwrapped media time into the loop range once the run is
+    /// inside it.
     pub fn wrap(&self, media: i64) -> i64 {
-        match self.loop_range {
-            Some(range) if range.is_valid() => {
+        match self.in_loop(media) {
+            Some(range) => {
                 let start = range.start.get();
                 let length = range.end.get() - start;
                 start + (media - start).rem_euclid(length)
             }
-            _ => media,
+            None => media,
         }
     }
 
@@ -119,6 +258,8 @@ impl TransportClock {
             TransportCommand::Play { rate } if rate.num != 0 && rate.den > 0 => {
                 let media = self.media_at(now);
                 self.anchor_media = media;
+                self.run_start = media;
+                self.followed = None;
                 self.anchor_host = now + PREROLL_US;
                 self.rate = rate;
                 self.state = if rate == PlaybackRate::NORMAL {
@@ -130,6 +271,7 @@ impl TransportClock {
             TransportCommand::Play { .. } => return false,
             TransportCommand::Pause => {
                 let media = self.media_at(now);
+                self.followed = None;
                 self.anchor_media = self.snap(media);
                 self.anchor_host = now;
                 self.rate = PlaybackRate::STOPPED;
@@ -139,6 +281,7 @@ impl TransportClock {
                 self.anchor_media = match mode {
                     SeekMode::Exact | SeekMode::Scrub => time.get(),
                 };
+                self.run_start = self.anchor_media;
                 self.anchor_host = if self.is_playing() {
                     now + PREROLL_US
                 } else {
@@ -148,6 +291,8 @@ impl TransportClock {
             TransportCommand::Step { frames } => {
                 let media = self.snap(self.media_at(now));
                 self.anchor_media = self.wrap(media + i64::from(frames) * self.frame);
+                self.run_start = self.anchor_media;
+                self.followed = None;
                 self.anchor_host = now;
                 self.rate = PlaybackRate::STOPPED;
                 self.state = TransportState::Stopped;
@@ -177,8 +322,15 @@ impl TransportClock {
     /// The sample describing the line at host µs `now`.
     pub fn sample(&mut self, now: i64) -> ClockSample {
         self.seq += 1;
-        let (host, media) = if self.is_playing() {
-            (now.max(0), self.media_at(now))
+        let playing = self.is_playing();
+        let unwrapped = self.unwrapped_at(now);
+        let inside = if playing {
+            self.in_loop(unwrapped)
+        } else {
+            None
+        };
+        let (host, media) = if playing {
+            (now.max(0), self.wrap(unwrapped))
         } else {
             (now.max(0), self.anchor_media)
         };
@@ -197,9 +349,9 @@ impl TransportClock {
             } else {
                 PlaybackRate::STOPPED
             },
-            output_latency_us: 0,
-            sample_rate: 48_000,
-            loop_range: self.loop_range,
+            output_latency_us: self.device().0,
+            sample_rate: self.device().1,
+            loop_range: inside,
         }
     }
 }
@@ -319,5 +471,103 @@ mod tests {
         );
         assert_eq!(clock.media_at(PREROLL_US + 500_000), 60 * FRAME);
         assert_eq!(clock.sample(0).state, TransportState::Shuttling);
+    }
+
+    fn audio(
+        epoch: u32,
+        state: TransportState,
+        host: u64,
+        media: i64,
+        range: Option<TickRange>,
+    ) -> ClockSample {
+        ClockSample {
+            seq: Seq::new(1).unwrap(),
+            epoch,
+            state,
+            host_time: HostMicros::new(host).unwrap(),
+            media_time: Ticks::new(media).unwrap(),
+            rate: if state == TransportState::Stopped {
+                PlaybackRate::STOPPED
+            } else {
+                PlaybackRate::NORMAL
+            },
+            output_latency_us: 12_000,
+            sample_rate: 48_000,
+            loop_range: range,
+        }
+    }
+
+    #[test]
+    fn the_line_follows_the_audio_clock_across_loop_passes() {
+        let range = TickRange {
+            start: Ticks::new(60 * FRAME).unwrap(),
+            end: Ticks::new(90 * FRAME).unwrap(),
+        };
+        let mut clock = TransportClock::new(FRAME);
+        clock.apply(TransportCommand::SetLoop { range: Some(range) }, 0);
+        // The audio starts playing at 0.5 s, heard at host 2 s.
+        assert!(clock.follow(&audio(
+            5,
+            TransportState::Playing,
+            2_000_000,
+            30 * FRAME,
+            None
+        )));
+        assert!(clock.following());
+        assert_eq!(clock.media_at(2_250_000), 45 * FRAME);
+        // Before the loop the line is straight and samples carry no range.
+        assert_eq!(clock.sample(2_100_000).loop_range, None);
+        // It enters the loop (frames 60 to 90) at 1.0 s, host 2.5 s.
+        let entry = clock.loop_entry_at().unwrap();
+        assert!((entry - 2_500_000.0).abs() < 1.0, "{entry}");
+        assert_eq!(clock.media_at(3_000_000), 60 * FRAME);
+        // One pass later the audio re-anchors at the loop start (same epoch):
+        // the frame timeline stays unwrapped.
+        let k_before = clock.unwrapped_at(3_000_000);
+        assert!(!clock.follow(&audio(
+            5,
+            TransportState::Playing,
+            3_000_000,
+            60 * FRAME,
+            Some(range)
+        )));
+        assert_eq!(clock.unwrapped_at(3_000_000), k_before);
+        assert_eq!(clock.sample(3_000_000).loop_range, Some(range));
+        // The run ends: the line stops where the audio stopped.
+        assert!(clock.follow(&audio(
+            5,
+            TransportState::Stopped,
+            4_000_000,
+            75 * FRAME,
+            None
+        )));
+        assert!(!clock.is_playing());
+        assert_eq!(clock.media_at(9_000_000), 75 * FRAME);
+        assert_eq!(clock.sample(9_000_000).output_latency_us, 12_000);
+    }
+
+    #[test]
+    fn a_run_from_past_the_loop_does_not_wrap_and_host_runs_stop_at_the_end() {
+        let range = TickRange {
+            start: Ticks::ZERO,
+            end: Ticks::new(30 * FRAME).unwrap(),
+        };
+        let mut clock = TransportClock::new(FRAME);
+        clock.set_end(Some(120 * FRAME));
+        clock.apply(TransportCommand::SetLoop { range: Some(range) }, 0);
+        clock.apply(
+            TransportCommand::Seek {
+                time: Ticks::new(60 * FRAME).unwrap(),
+                mode: SeekMode::Exact,
+            },
+            0,
+        );
+        play(&mut clock, 0);
+        let t = PREROLL_US + 500_000;
+        assert_eq!(clock.media_at(t), 90 * FRAME);
+        assert_eq!(clock.sample(t).loop_range, None);
+        assert!(!clock.stop_at_end(t));
+        assert!(clock.stop_at_end(PREROLL_US + 1_000_000));
+        assert_eq!(clock.media_at(PREROLL_US + 5_000_000), 120 * FRAME);
     }
 }
