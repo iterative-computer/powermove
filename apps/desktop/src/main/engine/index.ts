@@ -70,10 +70,18 @@ function loadBridgeAddon(file: string, log: Log): BridgeAddon | null {
   }
 }
 
-/** The shared host clock in µs: libuv's hrtime reads the same
- *  `mach_absolute_time` as the engines' `CLOCK_UPTIME_RAW` (contract 13). */
+/** Main's monotonic clock in µs (libuv's hrtime). On macOS it counts the
+ *  time the Mac slept, unlike the engines' `CLOCK_UPTIME_RAW`
+ *  (`mach_absolute_time`), so after a sleep the two differ by the sleep:
+ *  use `engineHostNowUs` where a value meets an engine's clock. */
 export function hostNowUs(): number {
   return Number(process.hrtime.bigint() / 1000n);
+}
+
+/** The engines' host clock (contract 9 `HostMicros`, `CLOCK_UPTIME_RAW`)
+ *  through pm-bridge, when its addon loaded; else main's own clock. */
+export function engineClock(addon: { nowUs(): number } | null): () => number {
+  return addon && typeof addon.nowUs === 'function' ? () => addon.nowUs() : hostNowUs;
 }
 
 export type InstallNativeEngineOptions = {
@@ -167,6 +175,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       })
     : null;
 
+  const engineNowUs = engineClock(bridgeAddon);
   engine = new NativeEngine({
     spawn: (process) => {
       const launch: BridgeLaunch | null = process === 'interactive' ? (frameBridge?.prepareLaunch() ?? null) : null;
@@ -199,7 +208,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     cacheDirectory: path.join(options.userData, 'Engine Cache'),
     automaticOutputDirectory: path.join(options.home, 'Powermove'),
     physicalMemory: os.totalmem(),
-    hostNow: hostNowUs,
+    hostNow: engineNowUs,
     ...(options.resolveAsset ? { resolveAsset: options.resolveAsset } : {}),
     log
   });
@@ -224,9 +233,13 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   // The shared host clock for the renderer's engine connection: it maps
   // performance.now() onto the engines' host µs (clock samples, the
   // viewer's presentation) from the round trip with the least delay.
+  options.ipc.on(ENGINE_IPC.requestPorts, (event) => {
+    if (!options.isTrustedSender(event)) return;
+    engine!.reconnectClient(event.sender.id);
+  });
   options.ipc.handle(ENGINE_IPC.hostTime, (event) => {
     if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
-    return hostNowUs();
+    return engineNowUs();
   });
   options.ipc.handle(ENGINE_IPC.stageDocument, async (event, request: unknown): Promise<StageDocumentResult> => {
     if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
@@ -284,6 +297,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     dispose: async () => {
       options.ipc.removeHandler(ENGINE_IPC.stageDocument);
       options.ipc.removeHandler(ENGINE_IPC.hostTime);
+      options.ipc.removeAllListeners(ENGINE_IPC.requestPorts);
       uninstallFonts();
       fontClient.disconnect();
       options.ipc.removeAllListeners(ENGINE_IPC.definitions);

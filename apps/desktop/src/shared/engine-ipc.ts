@@ -18,6 +18,9 @@ export const ENGINE_IPC = {
   /** renderer → main (sendSync): whether this launch runs the new engine
    *  (the renderer decides its document mirror and transport at boot). */
   enabledSync: 'engine:enabled-sync',
+  /** renderer → main (send): the page listens now; give it fresh engine
+   *  ports (ports posted before its listener existed were lost). */
+  requestPorts: 'engine:request-ports',
   /** renderer → main (invoke): the shared host clock in µs (`HostMicros`). */
   hostTime: 'engine:host-time',
   /** renderer → main (invoke): stage a large resync document as a cache file. */
@@ -57,6 +60,8 @@ export interface EngineBridge {
   enabledSync(): boolean;
   /** The shared host clock (`mach_absolute_time` in µs). */
   hostTime(): Promise<number>;
+  /** Asks main for fresh ports to every engine (window messages follow). */
+  requestPorts(): void;
   stageDocument(request: StageDocumentRequest): Promise<StageDocumentResult>;
   pushDefinitions(update: import('./engine-protocol').DefinitionsUpdate): void;
 }

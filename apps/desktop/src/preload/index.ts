@@ -539,6 +539,7 @@ const bridge: PowermoveBridge = {
     status: () => ipcRenderer.invoke(ENGINE_IPC.getStatus) as Promise<EngineStatusMessage>,
     enabledSync: () => ipcRenderer.sendSync(ENGINE_IPC.enabledSync) === true,
     hostTime: () => ipcRenderer.invoke(ENGINE_IPC.hostTime) as Promise<number>,
+    requestPorts: () => ipcRenderer.send(ENGINE_IPC.requestPorts),
     stageDocument: (request) => ipcRenderer.invoke(ENGINE_IPC.stageDocument, {
       process: request.process,
       session: request.session,

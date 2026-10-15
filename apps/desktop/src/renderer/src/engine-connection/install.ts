@@ -138,6 +138,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     }
   };
   target.addEventListener('message', onMessage);
+  // Ports main posted before this listener existed (the window loaded
+  // before the kernel booted) were dropped: ask for fresh ones.
+  native.requestPorts?.();
 
   const service: EngineViewerService = {
     source,
