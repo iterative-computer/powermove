@@ -447,6 +447,167 @@ test('opening a project file on another Mac copies its media into the store in m
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
 
+test('a project saved with Use New Engine on opens on a flag-off Mac with its kept TIFF and ProRes originals', async () => {
+  test.setTimeout(240_000);
+  const folder = await mkdtemp(path.join(os.tmpdir(), 'pm-project-'));
+  const project = path.join(folder, 'Handoff.pmv');
+  const resaved = path.join(folder, 'Handoff again.pmv');
+  const userData = await mkdtemp(path.join(os.tmpdir(), 'powermove-e2e-'));
+  const embedded = async (file: string) => {
+    const bytes = await readFile(file);
+    const index = await readIncrementalIndex(bytes.length, async (offset, length) => new Uint8Array(bytes.subarray(offset, offset + length)));
+    return Object.fromEntries(index.media.map((item) => [item.id, blake3Hex(new Uint8Array(bytes.subarray(item.offset, item.offset + item.length)))]));
+  };
+  const live = (page: Page) => page.waitForFunction(() => {
+    const PM = (window as any).PM;
+    const metas = Object.values(PM.proj.assets) as any[];
+    return metas.length === 2 && metas.every((asset) => PM.assets.get(asset.id));
+  }, undefined, { timeout: 120_000 });
+  /* Counts main's conversions of bytes the page sent. */
+  const countUploads = (session: LaunchedApp) => session.app.evaluate(() => {
+    const service = (globalThis as any).__powermoveMediaStore;
+    const convert = service.convertUpload.bind(service);
+    (globalThis as any).__uploadConversions = [];
+    service.convertUpload = (owner: number, token: string, request: any) => { (globalThis as any).__uploadConversions.push(request.kind); return convert(owner, token, request); };
+  });
+  const uploads = (session: LaunchedApp) => session.app.evaluate(() => (globalThis as any).__uploadConversions as string[]);
+  try {
+    // Saved on a Mac with the new engine: the originals are the assets' bytes; no stamp.
+    let session = await launchApp({ env: ON });
+    let expected: Record<string, string> = {};
+    let before: any;
+    try {
+      await session.openEditor();
+      const { page } = session;
+      const tiff = await place('still.tiff');
+      const prores = await place('prores422.mov');
+      const tiffId = await importFile(page, tiff);
+      const proresId = await importFile(page, prores);
+      expected = { [tiffId]: await hashOf(tiff), [proresId]: await hashOf(prores) };
+      expect(await meta(page, tiffId)).toMatchObject({ format: 'tiff', rendition: true, contentHash: expected[tiffId] });
+      expect(await meta(page, proresId)).toMatchObject({ rendition: true, playbackProxy: false, contentHash: expected[proresId] });
+      expect(await page.evaluate(() => (window as any).PM.proj.requiresEngine ?? null)).toBeNull();
+      before = await page.evaluate(() => JSON.parse(JSON.stringify((window as any).PM.proj.assets)));
+      await session.app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, project);
+      expect(await page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
+      expect(await embedded(project)).toEqual(expected);
+    } finally { await session.close(); }
+
+    // Opened on a Mac with it off and a fresh profile: only IndexedDB has the originals.
+    session = await launchApp({ userData, env: OFF });
+    let projectId = '';
+    try {
+      await session.openEditor();
+      const { page } = session;
+      expect(await page.evaluate(() => (window as any).PM.HostMedia.enabled)).toBe(false);
+      await countUploads(session);
+      await session.app.evaluate(({ dialog }, filePath) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] }); }, project);
+      await page.evaluate(() => (window as any).PM.openProject());
+      await live(page);
+      projectId = await page.evaluate(() => (window as any).PM.proj.id);
+      // The legacy viewer shows both, from renditions main made of the bytes the page sent.
+      const shown = await page.evaluate(() => Object.fromEntries(Object.values((window as any).PM.proj.assets).map((meta: any) => {
+        const asset = (window as any).PM.assets.get(meta.id);
+        return [meta.id, { w: asset.w, h: asset.h, rendition: asset.rendition === true, playbackProxy: asset.playbackProxy === true, frame: asset.el?.videoWidth ?? asset.el?.width ?? 0 }];
+      })));
+      for (const id of Object.keys(expected)) expect(shown[id]).toMatchObject({ rendition: true, playbackProxy: false });
+      for (const id of Object.keys(expected)) expect(shown[id].w > 0 && shown[id].h > 0 && shown[id].frame > 0).toBe(true);
+      expect((await uploads(session)).sort()).toEqual(['still', 'video']);
+      expect(session.diagnostics.pageErrors).toEqual([]);
+      // The project is unchanged, its originals are IndexedDB's, and the store kept nothing.
+      const identity = (assets: Record<string, any>) => Object.fromEntries(Object.entries(assets).map(([id, asset]) => [id,
+        { name: asset.name, kind: asset.kind, format: asset.format, size: asset.size, storageKey: asset.storageKey, contentHash: asset.contentHash, rendition: asset.rendition, playbackProxy: asset.playbackProxy, storage: asset.storage }]));
+      expect(identity(await page.evaluate(() => JSON.parse(JSON.stringify((window as any).PM.proj.assets))))).toEqual(identity(before));
+      for (const [id, hash] of Object.entries(expected)) {
+        const idb = await indexedDbRecord(page, before[id].storageKey);
+        expect(blake3Hex(Uint8Array.from(idb!.bytes))).toBe(hash);
+        expect((await indexedDbRecord(page, `rendition:${hash}`))?.size).toBeGreaterThan(0);
+      }
+      expect(await storeRecords(session)).toEqual([]);
+      // Saving again embeds the originals, never the renditions.
+      await session.app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, resaved);
+      expect(await page.evaluate(() => (window as any).PM.saveProject({ saveAs: true }))).toBe(true);
+      expect(await embedded(resaved)).toEqual(expected);
+      await page.evaluate(() => (window as any).PM.Projects.put((window as any).PM.proj));
+    } finally { await session.close(); }
+
+    // Reopened on that Mac: the renditions it made are reused, nothing is converted again.
+    session = await launchApp({ userData, env: OFF });
+    try {
+      const { page } = session;
+      await countUploads(session);
+      await page.waitForFunction(() => Boolean((window as any).PM?.openProjectHere));
+      if (await page.evaluate(() => (window as any).PM.proj.id) !== projectId) expect(await openProject(page, projectId)).toBe(true);
+      await live(page);
+      expect(await uploads(session)).toEqual([]);
+      expect(session.diagnostics.pageErrors).toEqual([]);
+    } finally { await session.close(); }
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+    await rm(userData, { recursive: true, force: true });
+  }
+});
+
+test('a reopened video whose first frame probe times out is converted from its bytes and keeps its saved media', async () => {
+  /* Under load, the viewer's 1.8 s first-frame probe can miss on a video it
+     plays fine. Restored bytes have no path, so the playback proxy is made
+     from the bytes; the asset must not be re-imported from its source path
+     with a new revision (a metadata-only Save would then upload it again). */
+  test.setTimeout(180_000);
+  const userData = await mkdtemp(path.join(os.tmpdir(), 'powermove-e2e-'));
+  const destination = path.join(footage, 'Probe.pmv');
+  try {
+    let session = await launchApp({ userData, env: OFF });
+    try {
+      await session.openEditor();
+      await importFile(session.page, await place('h264-aac.mp4'));
+      await session.app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, destination);
+      expect(await session.page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
+      await session.page.evaluate(async () => {
+        const PM = (window as any).PM;
+        for (const asset of Object.values(PM.proj.assets)) await PM.MediaStore.remove(asset);
+      });
+    } finally { await session.close(); }
+
+    session = await launchApp({ userData, env: OFF });
+    try {
+      const { page } = session;
+      await page.waitForFunction(() => Boolean((window as any).PM?.openProject));
+      // The first frame probe misses once; everything after behaves normally.
+      await page.evaluate(() => {
+        const proto = HTMLVideoElement.prototype as any;
+        const request = proto.requestVideoFrameCallback;
+        let missed = false;
+        proto.requestVideoFrameCallback = function (callback: any) { if (!missed) { missed = true; return 0; } return request.call(this, callback); };
+      });
+      await session.app.evaluate(({ dialog }, filePath) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] }); }, destination);
+      await page.evaluate(() => (window as any).PM.openProject());
+      await page.waitForFunction(() => [...(window as any).PM.assets.map.values()].some((asset: any) => asset.name === 'h264-aac.mp4' && asset.el?.readyState >= 2), undefined, { timeout: 120_000 });
+      const reopened = await page.evaluate(() => {
+        const PM = (window as any).PM;
+        const meta: any = Object.values(PM.proj.assets)[0];
+        return { proxy: PM.assets.get(meta.id).playbackProxy === true, meta: { playbackProxy: meta.playbackProxy, sourcePath: meta.sourcePath ?? null } };
+      });
+      // The viewer plays a proxy; the document still names the saved original.
+      expect(reopened).toMatchObject({ proxy: true, meta: { playbackProxy: false } });
+      expect(await page.evaluate(async () => {
+        const PM = (window as any).PM, original = PM.MediaStore.getForSave;
+        PM.MediaStore.getForSave = async (asset: any) => {
+          const saved = await original(asset);
+          if (saved) Object.defineProperty(saved.blob, 'slice', { value: () => { throw new Error('Reopened media was uploaded again'); } });
+          return saved;
+        };
+        try { PM.Projects.rename(PM.proj.id, 'Reopened and saved'); return await PM.saveProject(); }
+        finally { PM.MediaStore.getForSave = original; }
+      })).toBe(true);
+      const bytes = await readFile(destination);
+      const index = await readIncrementalIndex(bytes.length, async (offset, length) => new Uint8Array(bytes.subarray(offset, offset + length)));
+      expect(index.media.map((item) => blake3Hex(new Uint8Array(bytes.subarray(item.offset, item.offset + item.length))))).toEqual([await hashOf(fixturePath('h264-aac.mp4'))]);
+      expect(session.diagnostics.pageErrors).toEqual([]);
+    } finally { await session.close(); }
+  } finally { await rm(userData, { recursive: true, force: true }); }
+});
+
 test('with Use New Engine off, Desktop Save embeds each shared-fingerprint asset\'s own bytes', async () => {
   test.setTimeout(120_000);
   const userData = await mkdtemp(path.join(os.tmpdir(), 'powermove-e2e-'));
